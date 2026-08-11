@@ -56,8 +56,14 @@
 #      A single global floor of 970 would be fully satisfied by browser-bridge
 #      (468) + dl-router (508) with browser-ext's 21 tests silently gone.
 #
+#   5. THE VERDICT LINE CARRIES THE EXIT STATUS (`RESULT: FAIL (exit=1)`), from
+#      a single writer behind an EXIT trap. Every consumer pipes this output and
+#      a pipeline reports the LAST command's status, so the truth has to be in
+#      the content. See run-tests.sh's GUARD 6 and `scripts/gate.sh`.
+#
 # Env overrides (defaults are the point — raise them, don't lower them casually):
-#   MIN_TESTS  minimum tests the WHOLE run must REPORT (default 970; 997 today)
+#   MIN_TESTS  one-off override of the GLOBAL floor, which is otherwise DERIVED
+#              as the sum of the per-suite floors in SUITES.
 #
 # Usage:
 #   scripts/run-node-tests.sh [--check-suites] [ROOT]
@@ -68,6 +74,29 @@
 # Exit non-zero if any suite fails OR any guard above trips.
 
 set -uo pipefail
+
+# --- GUARD 5: the verdict line CARRIES the exit status -------------------------
+# Identical mechanism, and identical reason, to run-tests.sh's GUARD 6 — read
+# that block for the incident. Short version: this runner's status is routinely
+# destroyed by the pipe every consumer writes around its output, so the status
+# goes in the CONTENT, on one line, from one writer that is fed `$?`. An EXIT
+# trap makes it total, so an abort or a `timeout` kill ends with a verdict
+# instead of the silence a content-parsing consumer reads as "no failures".
+VERDICT_EMITTED=0
+_emit_verdict() {
+  local rc="$1"
+  [ "$VERDICT_EMITTED" -eq 0 ] || return 0
+  VERDICT_EMITTED=1
+  if [ "$rc" -eq 0 ]; then
+    echo "RESULT: PASS (exit=0)"
+  else
+    echo "RESULT: FAIL (exit=$rc)"
+  fi
+}
+_on_exit() { _emit_verdict "$?"; }
+trap '_on_exit' EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
 
 CHECK_SUITES_ONLY=0
 ROOT=""
@@ -83,8 +112,6 @@ if [ -z "$ROOT" ]; then
   [ -n "$ROOT" ] || ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fi
 cd "$ROOT" || { echo "run-node-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
-
-MIN_TESTS="${MIN_TESTS:-970}"
 
 # --- the pinned suite table ----------------------------------------------------
 # "<dir>|<min_files>|<min_tests>". MEASURED 2026-08-03 in the nix sandbox
@@ -140,6 +167,19 @@ PINNED_DIRS=()
 for entry in "${SUITES[@]}"; do
   PINNED_DIRS+=("${entry%%|*}")
 done
+
+# The global floor is the SUM of the per-suite floors — DERIVED, never written.
+# It used to be a hand-maintained `MIN_TESTS:-970` sitting beside per-suite
+# floors that already summed to 1010, i.e. a second number saying something
+# weaker than the numbers next to it and drifting on its own schedule. That
+# duplication is the exact shape that made run-tests.sh's single total take
+# eleven values in one day; there is no reason to keep a second copy of it here.
+# MIN_TESTS survives only as a one-off env override.
+MIN_TESTS_COMPUTED=0
+for entry in "${SUITES[@]}"; do
+  MIN_TESTS_COMPUTED=$(( MIN_TESTS_COMPUTED + ${entry##*|} ))
+done
+MIN_TESTS="${MIN_TESTS:-$MIN_TESTS_COMPUTED}"
 
 pin_problems=()
 
@@ -292,9 +332,6 @@ if [ "$TOT_TESTS" -lt "$MIN_TESTS" ]; then
   fail=1
 fi
 
-if [ "$fail" -ne 0 ]; then
-  echo "RESULT: FAIL"
-else
-  echo "RESULT: PASS"
-fi
+# GUARD 5. One writer, fed the same value `exit` is about to take.
+_emit_verdict "$fail"
 exit "$fail"

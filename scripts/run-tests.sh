@@ -25,7 +25,7 @@
 # per-directory sys.path (bare `import collector` / `import extract` etc. would
 # collide if collected together under one rootdir).
 #
-# 🔴 FIVE STRUCTURAL GUARDS — each exists because a green exit code lies here.
+# 🔴 SIX STRUCTURAL GUARDS — each exists because a green exit code lies here.
 #    They mirror scripts/run-node-tests.sh (which asserts a test-count floor and
 #    parses node's TAP summary instead of reading an exit code). Read that file
 #    too before changing this one.
@@ -54,11 +54,18 @@
 #      that pinning costs nothing. Suites run with `-rs` so every skip's reason
 #      is printed, not just counted.
 #
-#   3. COLLECTED-TEST FLOORS (`MIN_TESTS`, and >=1 per directory). We parse
+#   3. COLLECTED-TEST FLOORS (`TARGET_FLOORS`, one per target). We parse
 #      pytest's summary line and count what actually ran rather than reading the
 #      exit code — a collection error, an import breakage or an empty glob can
-#      produce "0 tests" with a zero exit. A per-directory floor is checked too,
-#      so one suite collapsing to nothing cannot be absorbed by the global total.
+#      produce "0 tests" with a zero exit. There is NO hand-written total any
+#      more: it was the most conflict-prone line in the repo (eleven values in
+#      one day) because a total is base-dependent. The global floor is the SUM
+#      of the per-target floors. Read the TARGET_FLOORS header for the rule and
+#      for what the change gave up.
+#
+#      3a. THE FLOOR TABLE AND THE TARGET LIST PIN EACH OTHER, both ways, so a
+#          target cannot run unfloored and a floor cannot describe a suite that
+#          is gone. `--check-floors` validates it in milliseconds.
 #
 #   4. PARSE GUARD. If a suite's summary line cannot be parsed at all, the run
 #      FAILS — an unparseable summary means this runner cannot vouch for the run,
@@ -73,45 +80,87 @@
 #      the same indistinguishable way. Now the list is validated as a whole
 #      before any suite runs, and a bad entry is named.
 #
-# Env overrides (defaults are the point — raise them, don't lower them casually):
-#   MIN_TESTS  minimum tests the whole run must REPORT
-#              MEASURED 2026-08-02 in the nix sandbox (`nix build
-#              .#checks.x86_64-linux.pytests`) at 4eb5798+this change: 5658
-#              collected / 5657 passed / 1 skipped / 0 failed. The dev-host
-#              tier (scripts/run-tests.sh under nix-shell) reports the same
-#              5658. origin/main alone measures 4662.
-#              Floor set at 5600 — the previous 2850 had drifted to less
-#              than HALF the real total,
-#              which is a floor that can no longer detect the collapse it
-#              exists for (an entire 989-test suite could vanish under it).
-#              Raise it when suites are added; never lower it to get green.
-#              2026-08-06: +38 for scripts/tests/test_analyze_service_index_commit.py
-#              (the /analyze-service index autocommit). The suite needs no new
-#              HERMETIC_TARGETS entry — scripts/tests is already a directory
-#              target, so the file is collected by the existing one.
-#              2026-08-07: the drift noted here (a floor ~900 below the real
-#              total, the same way the 2850 had drifted) is now CLOSED — the
-#              floor is set to the measured total with no headroom. See
-#              MIN_TESTS below for the current number and how it was measured;
-#              do not restate it here, one place only.
+#   6. THE VERDICT LINE CARRIES THE EXIT STATUS (`RESULT: FAIL (exit=1)`), from
+#      a single writer behind an EXIT trap, because every consumer PIPES this
+#      runner's output and a pipeline reports the LAST command's status. Read
+#      the GUARD 6 block below for the incident, and `scripts/gate.sh` for the
+#      invocation surface that never pipes at all.
+#
+# Env overrides:
+#   MIN_TESTS  overrides the GLOBAL floor for one run. It is DERIVED by default
+#              (the sum of the selected targets' TARGET_FLOORS entries), so
+#              setting it is a one-off escape hatch, not the place to record a
+#              measurement. Raise it, don't lower it. Per-target floors have no
+#              env override on purpose — the whole point is that they are
+#              reviewed edits.
 #
 # Usage:
-#   scripts/run-tests.sh [--set hermetic|all] [--check-targets] [ROOT]
+#   scripts/run-tests.sh [--set hermetic|all] [--check-targets] [--check-floors] [ROOT]
 #     --set hermetic  (default) — targets safe to run offline in the nix sandbox.
 #     --set all                 — hermetic + any targets deferred to the dev host.
 #     --check-targets           — run GUARD 5 only (validate the target list and
 #                                 exit; no pytest, no tool precondition). Cheap
 #                                 enough to be exercised by a unit test.
+#     --check-floors            — run GUARD 3a only (validate the TARGET_FLOORS
+#                                 two-way pin, print the table and the derived
+#                                 global floor, exit). Same reason: cheap.
 #   ROOT defaults to the git repo root (or the script's parent-parent).
 #
 # Exit non-zero if ANY selected suite fails OR any guard above trips. Prints a
-# per-dir + total summary (collected / passed / skipped / failed).
+# per-dir + total summary (collected / passed / skipped / failed) and, on EVERY
+# exit path, exactly one `RESULT: PASS (exit=0)` / `RESULT: FAIL (exit=N)` line
+# — the status is in the CONTENT so it survives the pipe every caller writes.
 
 set -uo pipefail
+
+# --- GUARD 6: the verdict line CARRIES the exit status -------------------------
+# 🔴 The status of this runner is routinely destroyed before anyone reads it.
+# Not by a bug in here — `RESULT: FAIL` has only ever been printed immediately
+# before `exit "$fail"` — but by every consumer's need to PIPE the output. The
+# gate emits thousands of lines, so agents and humans alike write
+# `… 2>&1 | tail -40; echo "rc=$?"`, and a pipeline's status is the LAST
+# command's. Four agents hit this independently on 2026-08-11; the same day's
+# audit recorded `nix build … | tail` reporting `BUILD_RC=0` over a red build.
+#
+# So the fix is not "stop piping" — it is to make the status SURVIVE a pipe by
+# putting it in the CONTENT, on exactly one line, emitted from exactly one
+# place, derived from the status itself:
+#
+#     RESULT: PASS (exit=0)      RESULT: FAIL (exit=1)
+#
+# Because `_emit_verdict` is the ONLY writer and it is fed `$?`, the verdict and
+# the exit status cannot disagree — there is no code path that prints one and
+# returns the other. The EXIT trap is what makes that total: an abort, a kill,
+# a `set -u` unbound variable or any of the early `exit 2` preconditions now
+# ends with a verdict line too, where before they ended with silence that a
+# content-parsing consumer reads as "no failures found".
+#
+# `scripts/gate.sh` is the invocation surface built on this — it never pipes,
+# and it cross-checks this line against the status it actually observed.
+VERDICT_EMITTED=0
+_emit_verdict() {
+  local rc="$1"
+  [ "$VERDICT_EMITTED" -eq 0 ] || return 0
+  VERDICT_EMITTED=1
+  if [ "$rc" -eq 0 ]; then
+    echo "RESULT: PASS (exit=0)"
+  else
+    echo "RESULT: FAIL (exit=$rc)"
+  fi
+}
+_on_exit() { _emit_verdict "$?"; }
+trap '_on_exit' EXIT
+# Without these, a TERM/INT (a `timeout`, a Ctrl-C, an OOM kill) bypasses the
+# EXIT trap in bash and the run ends with no verdict at all — the truncation
+# case, which is precisely when a reader most needs to be told the run did not
+# finish.
+trap 'exit 143' TERM
+trap 'exit 130' INT
 
 SET="hermetic"
 ROOT=""
 CHECK_TARGETS_ONLY=0
+CHECK_FLOORS_ONLY=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --set) SET="${2:-hermetic}"; shift; [ $# -gt 0 ] && shift ;;
@@ -120,6 +169,9 @@ while [ $# -gt 0 ]; do
     # no tool precondition — so the guard can be exercised by a regression test
     # without paying for the whole suite. Exit 0 = every target resolves.
     --check-targets) CHECK_TARGETS_ONLY=1; shift ;;
+    # Same idea for GUARD 3's floor table: validate the two-way pin between
+    # TARGET_FLOORS and the target list, print the table, exit. No pytest.
+    --check-floors) CHECK_FLOORS_ONLY=1; shift ;;
     *) ROOT="$1"; shift ;;
   esac
 done
@@ -130,178 +182,6 @@ if [ -z "$ROOT" ]; then
 fi
 
 cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
-
-# MEASURED 2026-08-07 on `nix build .#checks.x86_64-linux.pytests` (the
-# authoritative tier, which runs `run-tests.sh --set hermetic .`):
-#   TOTAL collected=6595  passed=6594  skipped=1  failed=0
-#
-# 🔴 RE-MEASURE ON THE MERGED TREE, NOT THE BRANCH. The previous value, 6566,
-# was measured on a branch two commits behind main and was already stale when
-# written: #363 added 13 tests to test_playwright_nixos.py, and this branch adds
-# 16 more. A floor measured on a stale tree is a floor with invisible slack —
-# the same failure it exists to catch, one level up.
-#
-# 🔴 The floor tracks the measurement. It was once 5638 against a real total of
-# 6545 — 907 tests of slack, more than the entire 783-test
-# scripts/initiatives/tests suite: that whole directory could have vanished with
-# this gate still reporting green.
-#
-# `--set all` and `--set hermetic` are measured identical BY CONSTRUCTION today,
-# so this one number is valid for both: DEVHOST_TARGETS is empty (see below), so
-# `all` appends nothing to the hermetic list. If a DEVHOST target is ever added,
-# this floor stops covering `--set all` and needs splitting per set.
-#
-# Raise this whenever tests are added; LOWER it only with the new measurement
-# quoted in the commit message, never to make a red gate go green.
-#
-# MEASURED 2026-08-10 on `nix build .#checks.x86_64-linux.pytests`, post-rebase
-# onto 91aaa21 (#379), not computed. CONTROL PAIR under one tool set, same
-# command, same machine:
-#     base 91aaa21 : TOTAL collected=6745  passed=6744  failed=0  scripts/tests=1652
-#     this branch  : TOTAL collected=6960  passed=6959  failed=0  scripts/tests=1867
-#   +215, and 1867-1652 = 215 = exactly the new
-#   scripts/tests/test_subsystem_resolver.py suite.
-#   That attribution is also the positive control proving the gate RUNS the new
-#   suite: it needed no HERMETIC_TARGETS entry, because `scripts/tests` is
-#   already a directory target (same as the 2026-08-06 note above), and the
-#   delta on that directory's OWN line is what demonstrates it rather than
-#   asserting it.
-#
-# 🔴 RE-MEASURED, NOT CARRIED FORWARD, AND NOT COMPUTED. The pre-rebase value on
-# this branch was 6940 against base 5c53f38's 6743. #379 then landed and moved
-# the base, so 6940 was stale the moment it did. Arithmetic on the old numbers
-# predicted 6942; the merged tree reported 6945, because the branch had also
-# gained 3 tests from its own review fix. It then reached 6960 when an audit
-# round replaced two vacuous guards and added a live-path-shape pass. Each of
-# those numbers was MEASURED at the time it was written — none was computed from
-# the one before it, which is the whole point of this note.
-#
-# EXPECTED_SKIPS is untouched: skipped=1, the one pinned entry. The new suite
-# adds ZERO skips by construction — no external binary, no network, no path
-# outside tmp_path.
-#
-# ⚠ The comment this replaced still described the #367 measurement (6643 / base
-# fce27f2) while the value beside it had been bumped twice — to 6745 by #379.
-# A floor comment that no longer describes its own number is the "a comment is a
-# claim too" case from claude/RULES.md; rewritten rather than bumped again.
-#
-# 🔴 MERGE RESOLUTION (#376 <- origin/main). Both sides raised this floor
-# INDEPENDENTLY on different bases, so BOTH numbers are stale on the merged
-# tree — the BASE-DEPENDENT hazard above, arriving as a textual conflict:
-#     #376 feat/guard-commit-to-main  6897  (measured on base 5c53f38)
-#     origin/main via #378            6960  (measured on base 91aaa21)
-# The merged tree carries BOTH #376's guard-check suite and #378's
-# subsystem-resolver suite, so neither branch ever observed the real total.
-# Taking either side's number would have gone green on slack it never earned.
-# Re-MEASURED on the merged tree below, not computed from the two above.
-# MEASURED on the merged tree (this branch + origin/main @ 9f17cfc):
-#     TOTAL collected=7122  passed=7121  skipped=1  failed=0
-# and it reconciles exactly, so this is an accounting rather than a reading:
-#   main today                          6968  (= the 6960 floor + 7 from #380's
-#                                              test_settings_allow_junk.py and
-#                                              +1 from #386, neither of which
-#                                              raised the floor — that 8 of
-#                                              slack is exactly what a floor
-#                                              carried forward stops detecting)
-#   + this branch's guard-check suite    154  (test_guard_core.py 1156 -> 1310)
-#   = 7122
-# scripts/tests 1874 = #378's measured 1867 + #380's 7, confirming both landed.
-#
-# 2026-08-11, the opencode pipe-truncation fix: 7122 -> 7127. MEASURED in BOTH
-# tiers on this branch, not computed — dev-host `run-tests.sh --set all` and
-# `nix build .#checks.x86_64-linux.pytests` each report
-#     TOTAL collected=7127  passed=7126  skipped=1  failed=0
-# and it reconciles: +3 in scripts/tests/test_opencode_engine.py (the flush-race
-# fixture control, the behavioural pin, the call-site ledger) and +2 in
-# scripts/tests/test_run_tests_preconditions.py (the REQUIRED_TOOLS seam), so
-# scripts/tests goes 1874 -> 1879 and nothing else moves.
-#
-# 🔴 Worth saying once, because this floor could not have caught what that PR
-# fixed: the dev-host tier had 17 FAILURES on the exact tree where the sandbox
-# reported this line clean. A collected-count floor sees tests that VANISH, never
-# tests that RUN AND FAIL in only one tier. Read both tiers' output.
-#
-# 🔴 MERGE RESOLUTION AGAIN, one day later (#384 <- origin/main @ e0cf5d2), and
-# the SAME hazard for the third time on this one line. #384 measured 6984 on a
-# merge with 5a20dff; #376 then landed and moved main to 7122. Both numbers were
-# stale on the tree below, so neither side's was taken.
-# CONTROL PAIR, one tool set, same machine, both read off the summary CONTENT:
-#     main e0cf5d2 : TOTAL collected=7122  passed=7121  skipped=1  failed=0
-#                    scripts/tests=1874
-#     merged tree  : TOTAL collected=7138  passed=7137  skipped=1  failed=0
-#                    scripts/tests=1890
-# +16, and the attribution was MEASURED per file rather than assumed: exactly
-# ONE file's collected count moves, test_ship_converge.py 17 -> 33. Both of this
-# PR's commits are in that 16 — 2 for the rsync regression test and its positive
-# control, 14 for the ship.sh consumer check — because main does not carry
-# either commit. The first guess, "+16 = the consumer-check cases", was wrong by
-# 2 and would have been an unfalsifiable-looking round number in a comment.
-# That per-file delta is also the positive control proving the gate RUNS them:
-# no HERMETIC_TARGETS entry was needed because scripts/tests is already a
-# directory target, so movement on that file's own count is the only evidence
-# they execute at all.
-#
-# ⚠ #384 independently measured main-at-5a20dff as 6968, matching #376's
-# accounting above from a different branch — so the 8 of slack it names is
-# confirmed by two measurements, not one.
-#
-# 🔴 IF THIS LINE CONFLICTS AGAIN, do not resolve it by arithmetic on the two
-# numbers. Three consecutive PRs have now hit it, and every time the answer was
-# a number NEITHER side had. Re-run the gate on the merged tree and copy what it
-# reports.
-#
-# 🔴 FOURTH RESOLUTION (this branch <- origin/main @ f380936, 2026-08-11), and
-# the number above is stale AGAIN: #392 landed between this branch's measurement
-# and this merge, taking main from 7122 to 7127. So BOTH sides are wrong here —
-# this branch's 7138 was measured against main@e0cf5d2, and main's 7127 does not
-# carry this branch's tests.
-#   main f380936 (post-#392)             7127  (measured; #392 added +3 in
-#                                              test_opencode_engine.py and +2 in
-#                                              test_run_tests_preconditions.py)
-#   + this branch  test_ship_converge.py  +16  (17 -> 33)
-#   = 7143, and scripts/tests 1879 -> 1895 by the same +16 on its OWN line.
-# MEASURED on this merged tree in BOTH tiers, then reconciled against that
-# arithmetic — the arithmetic CHECKS the measurement, it never sources it.
-#
-# ⚠ RERERE HAZARD, hit for real while resolving this line. `rerere.enabled` is
-# true in this repo, so the resolution recorded on a DIFFERENT merge of this same
-# conflict was replayed here automatically and silently — it wrote 7168, the
-# total for a four-way integration tree that also carried #391 and #377, onto a
-# tree containing NEITHER. rerere replays the TEXT you last chose for a conflict
-# whose two sides hash the same; it knows nothing about which branches are in the
-# tree. On a BASE-DEPENDENT constant that is exactly wrong. Always re-read this
-# line after a "Resolved ... using previous resolution" message, and re-measure.
-#
-# 🔴 Read BOTH tiers. #392 exists because the dev-host tier had 17 failures on a
-# tree where this sandbox line was clean: a collected-count floor sees tests that
-# VANISH, never tests that RUN AND FAIL in one tier only. Counted from the
-# runner's structured summary CONTENT — never an exit code, which the wrapper's
-# trailing echo has now swallowed for three separate agents.
-#
-# EXPECTED_SKIPS untouched: skipped=1, the one pinned entry. This branch adds
-# ZERO skips — every fixture is built in tmp_path.
-#
-# 🔴 FIFTH RESOLUTION (this branch <- origin/main @ 58dd9e2, 2026-08-11). Same
-# base-dependent line, third stale number in one day. This branch measured 7147
-# against main@e0cf5d2; #392 then landed (+5) and #384 landed (+16), so main is
-# now 7143 and NEITHER side's number describes this tree.
-#   main 58dd9e2 (post-#392, post-#384)   7143  (measured, both tiers)
-#   + this branch  test_drift_check.py     +25  (135 -> 160: 24 new tests, plus
-#                                                one parametrize case on
-#                                                UNIT_PATH_REQUIREMENTS for `sort`)
-#   = 7168, and scripts/tests 1895 -> 1920 by the same +25 on its OWN line.
-# MEASURED on this merged tree in BOTH tiers, then reconciled against that
-# arithmetic — the arithmetic CHECKS the measurement, it never sources it.
-#
-# ⚠ RERERE. `rerere.enabled` is true here, and on the #384 sync it silently
-# replayed a resolution recorded on a DIFFERENT merge of this same conflict,
-# writing a four-way total onto a two-way tree. rerere replays the TEXT last
-# chosen for a conflict whose sides hash the same; it knows nothing about which
-# branches are in the tree, which on a base-dependent constant is exactly wrong.
-# After any "Resolved ... using previous resolution", re-read this line and
-# re-measure.
-MIN_TESTS="${MIN_TESTS:-7168}"
-
 # --- GUARD 1: tool precondition ------------------------------------------------
 # Every binary the suites `skipif` on. Absence must be an ERROR, never a skip.
 # Sources (grep `shutil.which` under scripts/):
@@ -339,10 +219,10 @@ missing_tools=()
 for t in "${REQUIRED_TOOLS[@]}"; do
   command -v "$t" >/dev/null 2>&1 || missing_tools+=("$t")
 done
-# --check-targets runs no tests, so the tool precondition is not its business —
-# gating it here keeps the target-resolution guard cheap and independently
-# testable instead of coupling it to a full sandbox's PATH.
-if [ "$CHECK_TARGETS_ONLY" -eq 1 ]; then
+# --check-targets / --check-floors run no tests, so the tool precondition is not
+# their business — gating it here keeps both cheap and independently testable
+# instead of coupling them to a full sandbox's PATH.
+if [ "$CHECK_TARGETS_ONLY" -eq 1 ] || [ "$CHECK_FLOORS_ONLY" -eq 1 ]; then
   missing_tools=()
 fi
 if [ "${#missing_tools[@]}" -gt 0 ]; then
@@ -373,7 +253,7 @@ fi
 # actually "pytest is not installed" — a diagnosis pointing at the wrong
 # subsystem, the shape that has repeatedly cost this repo whole sessions (#276's
 # "missing directory" read as an environment fault). One named error is the fix.
-if [ "$CHECK_TARGETS_ONLY" -eq 0 ]; then
+if [ "$CHECK_TARGETS_ONLY" -eq 0 ] && [ "$CHECK_FLOORS_ONLY" -eq 0 ]; then
   if ! python -m pytest --version >/dev/null 2>&1; then
     echo "run-tests: FATAL — \`python -m pytest\` is not runnable." >&2
     echo "  \`python\` resolves to $(command -v python 2>/dev/null || echo '(not found)') but the" >&2
@@ -442,6 +322,107 @@ if [ "$SET" = "all" ]; then
   TARGETS+=("${DEVHOST_TARGETS[@]}")
 fi
 
+# --- GUARD 3's floor table: PER-TARGET, and NOT an exact total -----------------
+# 🔴 THIS REPLACES A SINGLE LITERAL, `MIN_TESTS=<exact total>`, WHICH WAS THE
+# MOST CONFLICT-PRONE LINE IN THE REPO. On 2026-08-11 alone it took eleven
+# values across eight PRs — 6643 → 6770 → 6897 → 6960 → 6993 → 7122 → 7127 →
+# 7138 → 7143 → 7147 → 7168 — because a total is BASE-DEPENDENT: every branch
+# measured it against a base the others never saw, so every value was correct
+# when written and stale within hours. Three agents reconciled it by hand in one
+# day. Worse, `rerere.enabled` is true in this repo and it replayed a resolution
+# recorded on a DIFFERENT merge of the same conflict, silently stamping a
+# four-way total (7168) onto a two-way tree whose real total was 7143 —
+# announcing only `Resolved … using previous resolution`. rerere matches
+# conflict-hunk TEXT, not tree membership; on a base-dependent constant that is
+# not merely unhelpful, it is reliably wrong while looking like a clean
+# auto-resolve.
+#
+# THE FIX: there is no exact total anywhere any more. Each target carries its
+# OWN floor, set BELOW its measured count by a deliberate allowance, and the
+# global floor is the SUM of the selected targets' floors — COMPUTED, never
+# written. The rule, applied to a target's measured count `m`:
+#
+#     floor(m) = m - min(50, max(1, m / 20))          [integer division]
+#
+# That is a function of the CURRENT measurement alone, so a floor carries no
+# information about which branches are in the tree — which is exactly what made
+# the old total base-dependent. Resolving a conflict here means running the gate
+# and applying the rule to the number IT prints; never arithmetic on the two
+# sides. And a rerere mis-replay now lands inside a tolerance band instead of
+# writing a number that is exactly wrong in the dangerous direction (7168 over a
+# 7143 tree was a FALSE RED).
+#
+# TWO CHECKS PER TARGET, both hard failures (see `run_pytest`):
+#   * collected < floor            — the collapse this guard exists for.
+#   * collected > floor + drift    — the floor has fallen so far behind the real
+#     count that it can no longer detect that collapse; `drift` is
+#     `max(60, floor/4)`. This is the failure the single literal kept hitting
+#     SILENTLY: it once sat at 5638 against a real 6545 — 907 tests of slack,
+#     more than the entire 783-test initiatives suite, which could have vanished
+#     with the gate still reporting green. The error message prints the exact
+#     replacement number, so bumping it is mechanical rather than a measurement
+#     exercise.
+#
+# 🔴 WHAT THIS CAN NO LONGER CATCH, stated plainly rather than left to be
+# discovered: deleting up to `min(50, m/20)` tests from a SINGLE target is now
+# silent — up to 50 of scripts/tests' ~1900, 1 of the 13-test i3 suite. The old
+# exact total went red on a one-test deletion. That precision is what cost
+# eleven reconciliations in a day, and it has never once caught a real deletion;
+# the collapses it exists for — a suite emptied, renamed, dropped from
+# HERMETIC_TARGETS, or failing to import — move a target's count by far more
+# than its allowance, and are now caught on that target's OWN line instead of
+# being absorbed into a global total (5 tests vanishing from a 13-test suite was
+# invisible under a 7168 global; it is red here).
+#
+# MEASURED 2026-08-11 at 3acd041 (#388) in BOTH tiers, which agreed
+# target-for-target: dev-host `run-tests.sh --set all` and `nix build
+# .#checks.x86_64-linux.pytests` each reported TOTAL collected=7194 passed=7193
+# skipped=1 failed=0. Every floor below is that tier-agreed count put through
+# the rule above. (The floor it replaced, 7168, already had 26 of slack on main
+# — three PRs had landed without bumping it.)
+#
+# ADDING A TARGET: add it to HERMETIC_TARGETS *and* here, or the two-way pin
+# below fails naming it. Run the gate once, read that target's `collected=`, and
+# write `collected - min(50, max(1, collected/20))`.
+TARGET_FLOORS=(
+  "scripts/tests|1873"
+  "scripts/collector/tests|194"
+  "scripts/collector/keylog/tests|79"
+  "scripts/collector/claude/tests|59"
+  "scripts/collector/i3/tests|12"
+  "scripts/collector/browser-ext/tests|12"
+  "scripts/collector/opencode/tests|162"
+  "scripts/dl-router/tests|942"
+  "scripts/browser-bridge/tests|469"
+  "scripts/validation/tests|97"
+  "scripts/session-analysis/tests|362"
+  "scripts/session-analysis/session_insight/tests|55"
+  "scripts/mail-actions/tests|129"
+  "scripts/initiatives/tests|745"
+  "scripts/repo-cos/tests|315"
+  "scripts/task-spec-drafter/tests|135"
+  "scripts/claude-hooks/tests/test_guard_core.py|1260"
+)
+
+# The allowance rule, in one place, used by BOTH the drift message and anyone
+# adding a target. Keeping it here rather than restating it means the number the
+# gate SUGGESTS is by construction the number the gate would ACCEPT.
+_suggested_floor() { # $1 = observed collected count
+  local m="$1" allow
+  allow=$(( m / 20 ))
+  [ "$allow" -lt 1 ]  && allow=1
+  [ "$allow" -gt 50 ] && allow=50
+  printf '%s' $(( m - allow ))
+}
+
+_floor_for() { # $1 = target; echoes its floor, non-zero exit if unpinned
+  local t="$1" entry
+  for entry in "${TARGET_FLOORS[@]}"; do
+    if [ "${entry%%|*}" = "$t" ]; then printf '%s' "${entry##*|}"; return 0; fi
+  done
+  return 1
+}
+
 # --- GUARD 5: every target must RESOLVE, up front ------------------------------
 # The #276 failure mode: an entry was added to the list, the runner silently
 # rejected it, and the gate failed for a reason that read like an environment
@@ -496,6 +477,66 @@ if [ "$CHECK_TARGETS_ONLY" -eq 1 ]; then
   for t in "${TARGETS[@]}"; do
     if [ -d "$t" ]; then echo "  dir   $t"; else echo "  file  $t"; fi
   done
+  exit 0
+fi
+
+# --- GUARD 3a: the floor table and the target list must pin each other ---------
+# BOTH ways, the property run-node-tests.sh's SUITES established: a target with
+# no floor would run under no floor at all (the ungated-suite defect, hit four
+# times in this repo — #276/#298/#306 and the .mjs discovery gap), and a floor
+# for a target nobody runs is an accounting entry describing nothing. Checked
+# against every KNOWN target (hermetic + dev-host), not just the selected set,
+# so `--set hermetic` does not read a dev-host target's floor as orphaned.
+#
+# Deliberately AFTER GUARD 5: a bad target must be reported as a bad target, not
+# as an unpinned one. Ordering is what keeps each guard reachable for its own
+# reason.
+ALL_KNOWN_TARGETS=("${HERMETIC_TARGETS[@]}" ${DEVHOST_TARGETS[@]+"${DEVHOST_TARGETS[@]}"})
+floor_problems=()
+for t in "${ALL_KNOWN_TARGETS[@]}"; do
+  if ! _floor_for "$t" >/dev/null; then
+    floor_problems+=("$t  — a target with NO entry in TARGET_FLOORS; it would run under no floor at all")
+  fi
+done
+for entry in "${TARGET_FLOORS[@]}"; do
+  ft="${entry%%|*}"
+  fv="${entry##*|}"
+  found=0
+  for t in "${ALL_KNOWN_TARGETS[@]}"; do
+    [ "$t" = "$ft" ] && { found=1; break; }
+  done
+  if [ "$found" -eq 0 ]; then
+    floor_problems+=("$ft  — pinned in TARGET_FLOORS but in NO target list (deleted, renamed, or a typo?)")
+  fi
+  case "$fv" in
+    ''|*[!0-9]*) floor_problems+=("$ft  — floor '$fv' is not a non-negative integer") ;;
+    *) [ "$fv" -lt 1 ] && floor_problems+=("$ft  — floor $fv is not a floor; a target must be pinned above 0") ;;
+  esac
+done
+if [ "${#floor_problems[@]}" -gt 0 ]; then
+  echo "run-tests: FATAL — ${#floor_problems[@]} problem(s) in TARGET_FLOORS:" >&2
+  for b in "${floor_problems[@]}"; do echo "    $b" >&2; done
+  echo "  TARGET_FLOORS must match the target list EXACTLY, both ways." >&2
+  echo "  Do NOT delete an entry to make this pass — that is how a suite stops" >&2
+  echo "  being floored while the gate stays green." >&2
+  exit 2
+fi
+
+# The global floor is DERIVED. Nothing hand-writes a total any more; MIN_TESTS
+# survives only as an env override for a one-off (raise it, don't lower it).
+MIN_TESTS_COMPUTED=0
+for t in "${TARGETS[@]}"; do
+  MIN_TESTS_COMPUTED=$(( MIN_TESTS_COMPUTED + $(_floor_for "$t") ))
+done
+MIN_TESTS="${MIN_TESTS:-$MIN_TESTS_COMPUTED}"
+
+if [ "$CHECK_FLOORS_ONLY" -eq 1 ]; then
+  echo "run-tests: all ${#TARGET_FLOORS[@]} floor(s) pin a known target, both ways (${#ALL_KNOWN_TARGETS[@]} known: hermetic + dev-host)."
+  for entry in "${TARGET_FLOORS[@]}"; do
+    echo "  floor ${entry##*|}  ${entry%%|*}"
+  done
+  echo "  ----"
+  echo "  GLOBAL floor (sum over the $SET set) = $MIN_TESTS_COMPUTED"
   exit 0
 fi
 
@@ -603,14 +644,14 @@ run_pytest() {
     RESULTS+=("FAIL  $d (missing target)")
     fail=1
     echo
-    return
+    return 1
   fi
   if [ ! -d "$d" ] && [ ! -f "$d" ]; then
     echo "run-tests: FATAL — test target is neither a file nor a directory: $d" >&2
     RESULTS+=("FAIL  $d (not a file or directory)")
     fail=1
     echo
-    return
+    return 1
   fi
 
   local log rc
@@ -631,7 +672,7 @@ run_pytest() {
     fail=1
     rm -f "$log"
     echo
-    return
+    return 1
   fi
 
   p="$(_count_of 'passed' "$summary")"
@@ -652,25 +693,65 @@ run_pytest() {
   TOT_SKIPPED=$(( TOT_SKIPPED + s ))
   TOT_FAILED=$(( TOT_FAILED + f + e ))
 
-  # GUARD 3 (per-directory): a suite that collects nothing is a vacuous green.
+  # GUARD 3 (per-target). Three INDEPENDENT checks, not an elif chain: a suite
+  # that both collapsed AND failed used to report only whichever branch matched
+  # first, so the second finding was invisible in the summary line.
+  local floor ceiling drift bad
+  bad=0
+  floor="$(_floor_for "$d")" || floor=0
+  drift=$(( floor / 4 ))
+  [ "$drift" -lt 60 ] && drift=60
+  ceiling=$(( floor + drift ))
+
   if [ "$collected" -lt 1 ]; then
     echo "run-tests: ERROR — $d collected 0 tests (summary: $summary)." >&2
     echo "  A collection error or an import breakage, not a pass." >&2
     RESULTS+=("FAIL  $d (collected 0 tests)")
-    fail=1
-  elif [ "$rc" -ne 0 ] || [ "$f" -gt 0 ] || [ "$e" -gt 0 ]; then
+    bad=1
+  elif [ "$floor" -ge 1 ] && [ "$collected" -lt "$floor" ]; then
+    # The collapse this floor exists for. Reachable ONLY in 1..floor-1 — the
+    # `collected 0` branch above deliberately owns 0, because "the suite did not
+    # collect" and "the suite shrank" are different findings.
+    echo "run-tests: ERROR — $d collected $collected tests, its floor is $floor." >&2
+    echo "  Tests that used to run no longer do. Investigate BEFORE lowering the" >&2
+    echo "  floor: a suite emptied, renamed, or failing to import lands here." >&2
+    echo "  If the deletion is deliberate, lower it to $(_suggested_floor "$collected") and say why in" >&2
+    echo "  the commit — that visible edit IS the accounting." >&2
+    RESULTS+=("FAIL  $d  (collected=$collected below floor $floor)")
+    bad=1
+  elif [ "$floor" -ge 1 ] && [ "$collected" -gt "$ceiling" ]; then
+    # The OTHER direction, and the one the old single literal kept failing at
+    # silently: a floor so far below the real count that the collapse it exists
+    # for would fit underneath it. 5638 once stood against a real 6545.
+    echo "run-tests: ERROR — $d collected $collected tests but its floor is only $floor." >&2
+    echo "  That is more than $drift of slack: a whole suite could vanish under this" >&2
+    echo "  floor with the gate still green. Raise the TARGET_FLOORS entry to" >&2
+    echo "  \"$d|$(_suggested_floor "$collected")\" — that number is this run's own count put through" >&2
+    echo "  the documented rule, so it needs no measurement of its own." >&2
+    RESULTS+=("FAIL  $d  (collected=$collected above drift ceiling $ceiling, floor $floor)")
+    bad=1
+  fi
+
+  if [ "$rc" -ne 0 ] || [ "$f" -gt 0 ] || [ "$e" -gt 0 ]; then
     RESULTS+=("FAIL  $d  (collected=$collected passed=$p skipped=$s failed=$f errors=$e)")
-    fail=1
-  else
-    RESULTS+=("PASS  $d  (collected=$collected passed=$p skipped=$s)")
+    bad=1
+  elif [ "$bad" -eq 0 ]; then
+    RESULTS+=("PASS  $d  (collected=$collected passed=$p skipped=$s floor=$floor)")
   fi
 
   rm -f "$log"
   echo
+  [ "$bad" -eq 0 ] || fail=1
+  return "$bad"
 }
 
+# 🔴 `|| fail=1` as well as the global the function sets. `run_pytest`'s last
+# statement used to be a bare `echo`, so the function's own status was always 0
+# and the ONLY thing carrying a failure out was the global — one refactor away
+# from a silently green gate. Both mechanisms now agree, and the function ends
+# with the `return` rather than with output.
 for d in "${TARGETS[@]}"; do
-  run_pytest "$d"
+  run_pytest "$d" || fail=1
 done
 
 # The claude-hooks tests are hand-rolled scripts (asserts + sys.exit, not
@@ -707,13 +788,18 @@ done
 echo "======================== SUMMARY ($SET set) ========================"
 for r in "${RESULTS[@]}"; do echo "  $r"; done
 echo "  ----"
-echo "  TOTAL collected=$TOT_COLLECTED  passed=$TOT_PASSED  skipped=$TOT_SKIPPED  failed=$TOT_FAILED  (floor: $MIN_TESTS)"
+echo "  TOTAL collected=$TOT_COLLECTED  passed=$TOT_PASSED  skipped=$TOT_SKIPPED  failed=$TOT_FAILED  (floor: $MIN_TESTS = sum of ${#TARGETS[@]} per-target floors)"
 
 # --- GUARD 3 (global): collected-test floor ------------------------------------
+# The per-target floors above are the load-bearing check; this total is their
+# SUM, so it is mostly implied by them. It is kept because it is not ENTIRELY
+# implied — a target that is skipped altogether (not run, so it contributes no
+# per-target verdict) still moves this number.
 if [ "$TOT_COLLECTED" -lt "$MIN_TESTS" ]; then
   echo "  ERROR: only $TOT_COLLECTED tests were collected, floor is $MIN_TESTS." >&2
   echo "         Far fewer tests ran than exist — a VACUOUS GREEN, not a pass." >&2
-  echo "         Investigate before lowering MIN_TESTS." >&2
+  echo "         This total is the SUM of the per-target floors, so the per-target" >&2
+  echo "         line(s) above name which suite shrank. Fix there, not here." >&2
   fail=1
 fi
 
@@ -761,9 +847,8 @@ if [ "$TOT_SKIPPED" -ne "${#EXPECTED_SKIPS[@]}" ]; then
   fail=1
 fi
 
-if [ "$fail" -ne 0 ]; then
-  echo "RESULT: FAIL"
-else
-  echo "RESULT: PASS"
-fi
+# GUARD 6. One writer, fed the same value `exit` is about to take, so the
+# printed verdict and the process status cannot disagree — including through a
+# pipe, which is what destroys the status in practice.
+_emit_verdict "$fail"
 exit "$fail"
