@@ -158,7 +158,31 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 # under one tool set: base fce27f2 collected 6561, this branch 6643 (+82 = the
 # analyze-service-index suite exactly). The floor is BASE-DEPENDENT — re-measure
 # after any rebase rather than carrying this number forward.
-MIN_TESTS="${MIN_TESTS:-6643}"
+#
+# 6847 MEASURED 2026-08-10 on the commit-to-main guard branch (#376), not
+# computed, and as a CONTROL PAIR under one tool set — two full
+# `nix build .#checks.x86_64-linux.pytests` runs, same host, same flake.lock:
+#     base 5c53f38 (origin/main)  collected=6743  passed=6739  failed=3
+#     this branch                 collected=6847  passed=6843  failed=3
+# i.e. +104 collected and +104 passed, the guard-check suite exactly, with the
+# failure count UNCHANGED. Note the base itself already carried 100 of slack
+# against the old 6643 floor — the reason this convention says to re-measure
+# rather than carry the number forward.
+#
+# 🔴 THOSE 3 FAILURES ARE PRE-EXISTING AND ARE NOT THIS BRANCH'S. They are
+# scripts/tests' monitor-blackout cases, and they fail on UNMODIFIED main in the
+# control run above, identically (scripts/tests: collected=1650 passed=1647
+# failed=3 on BOTH sides). Cause: monitor-blackout.sh guards itself with
+#     CANONICAL="${HOME}/workspace/devrc/scripts/monitor-blackout.sh"
+# and refuses to run when $0 does not resolve to it — but this sandbox sets
+# HOME=$TMPDIR/home and runs from /build/src, so the guard can never match and
+# the script exits 1 on every invocation. So `nix build
+# .#checks.x86_64-linux.pytests` is currently RED on main for a reason unrelated
+# to any test's subject. Left unfixed here deliberately (it is its own change,
+# and picking between "teach the guard about the sandbox" and "teach the tests to
+# set HOME" is a decision, not a cleanup) — but flagged, because a permanently
+# red gate trains everyone to click through it.
+MIN_TESTS="${MIN_TESTS:-6847}"
 
 # --- GUARD 1: tool precondition ------------------------------------------------
 # Every binary the suites `skipif` on. Absence must be an ERROR, never a skip.
