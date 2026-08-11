@@ -1,6 +1,6 @@
 ---
 name: clawgate
-description: Operate clawgate — the self-hosted Claude Code permission-approval UI that replaced the Telegram flow. Status, send-a-test, push/SSE logs, build+deploy a new version, toggle the approval hook, manage credentials/QR, and the push/PWA/icon troubleshooting playbook. Use when the user mentions clawgate, remote approval, clawgate.zacx.dev, the PermissionRequest approval hook, or push notifications for Claude Code permission prompts.
+description: "Operate clawgate — the self-hosted Claude Code approval UI (plus Tasks/agents/runbooks). Status, send-a-test, push/SSE logs, build and deploy a version, toggle the approval hook, manage credentials/QR. Use for: clawgate, clawgate.zacx.dev, remote approval, the PermissionRequest approval hook, push notifications for permission prompts."
 ---
 
 # clawgate operations

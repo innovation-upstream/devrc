@@ -7,7 +7,7 @@
 # are the cluster requirements; git/gh are on PATH for the scan's git/PR reads.
 #
 # CLICKHOUSE_* ARE provisioned here now (runtime sops decrypt, NO plaintext secret at
-# rest) so the scan runs TELEMETRY-ON, exactly like the /initiatives slash command:
+# rest) so the scan runs TELEMETRY-ON, exactly like the /initiative-scan skill:
 # the activity reader password is decrypted from the homelab-talos secrets at run time
 # and exported. Every decrypt step is GUARDED — a missing age key / absent repo /
 # missing sops / empty decrypt leaves CLICKHOUSE_* unset and the scan degrades to
@@ -31,7 +31,7 @@ export KUBECONFIG="${KUBECONFIG:-${HOME}/workspace/homelab-talos/homelab-kubecon
 DAYS="${INITIATIVES_SYNC_DAYS:-5}"
 
 # --- ClickHouse reader creds — runtime sops decrypt (NO plaintext secret at rest) ---
-# Mirrors the /initiatives slash command: decrypt the activity reader password from the
+# Mirrors the /initiative-scan skill: decrypt the activity reader password from the
 # homelab-talos secrets AT RUN TIME and export CLICKHOUSE_* so the scan runs telemetry-ON.
 # Fully best-effort: any of {age key missing, repo absent, sops absent, decrypt empty}
 # leaves CLICKHOUSE_* unset → sync.py runs telemetry-off (the scan already handles that).
@@ -68,7 +68,7 @@ provision_clickhouse_creds() {
 
   # --input-type yaml is REQUIRED: the mktemp file has no .yaml extension, so sops
   # cannot auto-detect the format and would otherwise fail to unmarshal (the
-  # /initiatives slash command sidesteps this by writing to a *.yaml path).
+  # /initiative-scan skill sidesteps this by writing to a *.yaml path).
   local pw
   pw="$(SOPS_AGE_KEY_FILE="$age_key" sops -d --input-type yaml \
         --extract '["stringData"]["reader-password"]' "$enc" 2>/dev/null)" || pw=""

@@ -152,7 +152,7 @@ remaining case detectable.
 ⚠ **Flake trap: a NEW file here must be `git add`ed before switching.** Flakes
 only see git-tracked files, so an untracked new extension file is silently
 omitted from the deployed tree — a partially-updated extension with **no error
-anywhere**. (Same trap as `claude/commands/`, documented in the repo CLAUDE.md.)
+anywhere**. (Same trap as `claude/skills/`, documented in the repo CLAUDE.md.)
 
 This directory stays the **source** (edit here, `git add` if new,
 `home-manager switch`, then reload in Brave). Nothing removes it; a profile still

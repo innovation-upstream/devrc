@@ -1,13 +1,17 @@
 ---
-name: initiatives
-description: "Show the cross-repo initiative + progress ledger (initiative-scan): every ongoing initiative, its momentum (●active / ◐slowing / ○stalled), last-touched, commits/PRs, next-step, and the live tmux session hosting it — fused deterministically from handoff docs + git + activity telemetry + live tmux. Use for 'what am I working on', 'what's in flight across my projects', 'what's stalled', 'where did I leave X', 'which session is X in'."
-argument-hint: "[--days N] [--repo PATH] [--json] [--tmux] — optional; defaults to --days 4 --tmux"
+name: initiative-scan
+description: "Run the on-demand cross-repo initiative scan — every initiative with its momentum (active/slowing/stalled), last-touched, commits/PRs, next-step and the live tmux session hosting it; also snapshots/restores the tmux workspace across a reboot. Use for \"what am I working on\", \"what's in flight\", \"what's stalled\", \"where did I leave X\", \"which session is X in\". The durable board is `initiatives`."
+argument-hint: "[--days N] [--repo PATH] [--json] [--tmux] | snapshot | restore [--dry-run] | show — defaults to --days 4 --tmux"
 allowed-tools: Bash
 ---
 
-# /initiatives — durable initiative + progress ledger
+# initiative-scan — on-demand initiative + progress ledger
 
 Runs the read-only `initiative-scan` report and presents it. This is the durable, cross-session counterpart to the live **agent-ops dashboard** (`$mod+i` / tmux `prefix+A` / the ▦ bar button — `scripts/agent-ops`), which only shows sessions open right now. (The old `tmux-initiatives.sh` Alt+i HUD was removed 2026-07 — the agent-ops dashboard supersedes it.) Args: `$ARGUMENTS` (passed through to the script; default `--days 4`).
+
+For the **durable, queryable** version of this data — the Postgres store, the 15-min sync, the
+LLM recaps, the workbench viewer/board and its `/api/ask` assistant — use the **`initiatives`**
+skill instead. This skill is the ephemeral scan that feeds it.
 
 ## Session snapshot / restore (survive a reboot)
 

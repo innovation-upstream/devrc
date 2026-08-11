@@ -1,6 +1,6 @@
 ---
 name: session-audit
-description: Analyze recent Claude Code session transcripts for the current repo, then propose (and optionally implement) improvements to the project CLAUDE.md, slash commands/skills, token efficiency, and the permission allowlist. Use when the user wants to audit how Claude has been working in a repo and harden the setup for future sessions.
+description: "Analyze recent Claude Code session transcripts for this repo, then propose (and optionally implement) improvements to CLAUDE.md, the skills, token efficiency and the permission allowlist. Use when the user wants to audit how Claude has been working in a repo and harden the setup for future sessions."
 ---
 
 # /session-audit — Repo session retrospective
@@ -45,8 +45,9 @@ Read them all before forming conclusions.
   one-line-per-file layout map of the re-read dirs, and the gotchas behind the recurring
   errors. Keep it ~40–60 lines — it loads every session, so high-signal, not a dump.
 
-**C. Skills / slash commands** (`~/.claude/commands/`, `~/.claude/skills/`, `./.claude/`)
-- Command too large or drifting? Heavy commands cost tokens on every invocation.
+**C. Skills / slash commands** (`~/.claude/skills/`, `./.claude/`) — slash-commands ARE skills
+now (`~/.claude/skills/<name>/SKILL.md`, invoked as `/<name>`); there is no `commands/` dir.
+- Skill body too large or drifting? A skill costs tokens on every invocation.
 - Lore for a *different* repo embedded here → relocate it (move, don't delete — append to
   the owning repo first, leave a pointer).
 - Stale references (bindings/scripts that no longer exist)? **Verify before pruning** —

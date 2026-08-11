@@ -66,7 +66,7 @@ prune anything from a run that printed one.
   typing a trigger.
 
 Notes:
-- Edit `claude/commands/*.md` + `nix/home.nix` in the repo, NOT `~/.claude/*`
+- Edit `claude/skills/<name>/SKILL.md` + `nix/home.nix` in the repo, NOT `~/.claude/*`
   (read-only nix-store symlinks). New files must be `git add`ed before a switch.
 - `keylog.service` pins the espanso config store paths in `X-Restart-Triggers`
   (#347), so an espanso-only switch DOES restart the detector; `--verify-deploy`

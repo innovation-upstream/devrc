@@ -9,7 +9,7 @@ gracefully when telemetry is unconfigured/unreachable.
 | Tool | What it does |
 |---|---|
 | `activity-scan.py` | "where workflow time goes + what to automate" (repeated commands, bottlenecks, attention). |
-| `initiative-scan.py` | cross-repo initiative + progress ledger (handoff docs + git + telemetry). `/initiatives`. |
+| `initiative-scan.py` | cross-repo initiative + progress ledger (handoff docs + git + telemetry). `/initiative-scan`. |
 | `insights.py` | telemetry-native Claude Code insights report (successor to the built-in `/insights`). |
 | `adoption-scan.py` | which shipped "gametape" tools are actually USED + YIELDING vs DEAD (adoption + outcome-mix + drafter friction trend). `/adoption-scan`. |
 | `session_insight/` | **Layer B** qualitative-facet extractor (this dir). |

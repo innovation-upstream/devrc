@@ -1,26 +1,20 @@
 ---
 name: gpu-operator-check
-description: "Analyze NVIDIA GPU Operator helm chart integration across GPU fleet clusters and check for newer versions with breaking changes"
+description: "Check the NVIDIA GPU Operator across the GPU-fleet clusters: deployed version and per-cluster overlays, the latest upstream release, and the breaking changes between them. Use for: the GPU operator version or upgrade path, a newer GPU operator release, a pre-upgrade risk review of the GPU fleet."
+argument-hint: "[current | latest | upgrade-plan] — defaults to the full analysis"
+allowed-tools: Bash, Read, Grep, Glob
 ---
 
-# /gpu-operator-check - NVIDIA GPU Operator Version Analysis
+# gpu-operator-check — NVIDIA GPU Operator version analysis
 
-## Triggers
-- Questions about NVIDIA GPU operator version, upgrade path, or compatibility
-- Requests to check for newer GPU operator releases
-- Pre-upgrade analysis and breaking change assessment
-- GPU operator helm chart configuration review
+Action comes from `$ARGUMENTS`.
 
-## Usage
-```
-/gpu-operator-check [action]
-
-Actions:
-  (default)        Full analysis: current state + latest version + breaking changes
-  current          Show current deployed version and per-cluster configuration
-  latest           Check for latest available version only
-  upgrade-plan     Generate upgrade plan with risk assessment
-```
+| Action | Does |
+|---|---|
+| *(default)* | full analysis: current state + latest version + breaking changes |
+| `current` | deployed version and per-cluster configuration |
+| `latest` | check for the latest available version only |
+| `upgrade-plan` | upgrade plan with a risk assessment |
 
 ## Behavioral Flow
 

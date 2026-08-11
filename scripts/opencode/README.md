@@ -40,8 +40,7 @@ thing that destroys a config someone had edited.
 | `~/.config/opencode/plugin/guard.js` | `plugin/guard.js` | 🔴 the deterministic bash guard — see below |
 | `~/.config/opencode/guard_core.py` | `../claude-hooks/guard_core.py` | the shared checking core, the same file Claude Code's `bash-guard.py` imports |
 | `~/.config/opencode/agent/*.md` | `agent/` | the `nav`, `k8s` and `review` subagents |
-| `~/.config/opencode/commands/` | `../claude/commands/` | symlinked — same 17 commands Claude Code reads; opencode ignores unknown frontmatter |
-| `~/.config/opencode/skills/` | `../claude/skills/` | symlinked — same skills Claude Code reads; opencode ignores unknown frontmatter |
+| `~/.config/opencode/skills/` | `../claude/skills/` | symlinked — the same skills Claude Code reads (the 17 former slash-commands migrated in here). opencode tolerates the Claude-Code-only frontmatter keys, and `GET /command` lists skills as `"source":"skill"`, so each stays typable as `/<name>`. The old `commands/` mapping is gone with `claude/commands/` |
 
 ## 🔴 Two layers, and only one of them is a safety control
 

@@ -1,6 +1,6 @@
 ---
 name: auditloop
-description: Operate auditloop — the generic UX-audit crawler web app (auditloop.zacx.dev), spun out of ux-audit-loops. Go+chromedp PWA — crawls a site (multi-viewport screenshots + axe a11y + console/network), DETERMINISTIC signals (perf/web-vitals, layout smells, broken links), diffs runs over time + trends findings, multi-model vision-LLM UX notes, logged-in sites via encrypted login recipes, curated funnels pushed by external harnesses (naida/vetr/itself), machine read API (per-user Bearer keys) for CI/naida. Deploy (./deploy.sh + Flux image-automation), targets/runs, plugin tokens, login recipes, the read API, LLM cost tracking + Grafana dashboard/alert, the self-audit harness, secrets/kubeconfigs, the live-bug playbook. Use when the user mentions auditloop, auditloop.zacx.dev, deploying/operating it, the plugin push API, the read API, the cost dashboard, or the auditloop self-harness.
+description: "Operate auditloop — the hosted UX-audit crawler at auditloop.zacx.dev (multi-viewport crawl, axe a11y, perf/web-vitals, run diffs and trends, vision-LLM notes, login recipes). Deploy it, manage targets/runs/plugin tokens, read the cost dashboard. Use for: auditloop, auditloop.zacx.dev, deploying or operating it, the plugin push API, the read API, the auditloop self-harness."
 ---
 
 # auditloop operations

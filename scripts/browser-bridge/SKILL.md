@@ -1,6 +1,6 @@
 ---
 name: browser
-description: Drive the user's LIVE, logged-in Brave browser from Claude Code — read the active tab's HTML, run JS in it, list/navigate tabs, and screenshot the visible tab — via the local token-authenticated browser-bridge (loopback rendezvous server + MV3 extension). Use when the user asks you to look at / read / scrape / interact with a page THEY have open, act on an authenticated site they're logged into, check what's on their screen in Brave, navigate their browser, or grab a screenshot of their current tab. NOT for headless fetching of public URLs (use WebFetch) — this is specifically their real, authenticated session.
+description: Drive the user's LIVE, logged-in Brave browser — read the active tab's HTML, run JS in it, list/navigate tabs, screenshot the visible tab. Use when asked to look at / read / scrape / interact with a page THEY have open, act on a site they are logged into, check what is on their screen in Brave, navigate their browser, or screenshot their current tab. NOT for headless fetching of public URLs (use WebFetch).
 ---
 
 ## Quick start — orient FIRST

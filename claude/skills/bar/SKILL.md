@@ -1,6 +1,6 @@
 ---
 name: bar
-description: Operate the workbench/laptop i3status-rust status bar and its decoupled status-count poller. Add/edit/reorder bar blocks, tune the hide-at-zero count blocks (clawgate/mail/homelab-alerts/civitai) and their --red-above thresholds, wire block↔poller signals, run/debug the bar-status-poll timer + edge-triggered dunst toasts, and do the cutover correctly. Use when the user mentions the (status/i3/i3status) bar, a bar block/icon/threshold, the alert/mail/clawgate/civitai pills, bar-status-poll, ~/.cache/bar-status, the DND/agent-ops bar buttons, or "the bar is wrong/stale/red".
+description: "Fix or extend the i3status-rust status bar and its status-count poller — add/reorder blocks, tune the hide-at-zero count pills and their --red-above thresholds, wire block<->poller signals, debug the bar-status-poll timer and its dunst toasts. Use for: the status/i3 bar, a bar block/icon/threshold, the alert/mail/clawgate/civitai pills, bar-status-poll, ~/.cache/bar-status, the DND/agent-ops bar buttons, \"the bar is wrong/stale/red\"."
 ---
 
 # i3status-rust status bar — operations
@@ -10,9 +10,9 @@ home-manager** (PR #74). All bar config, block scripts, and the poller live in t
 and deploy via home-manager. Point-in-time history: memory `i3-bar-i3status-rust-migration` +
 `devrc/claudedocs/handoff-agent-facing-workbench-2026-07-11.md`.
 
-**AirVPN host tunnel + its pill → `airvpn.md` next to this file** (source
-`~/workspace/devrc/claude/skills/bar/airvpn.md`): the killswitch design, the 🔴 mandatory
-re-test protocol, apply/re-arm/bail procedures. Read it before touching anything AirVPN.
+**AirVPN host tunnel + its pill → `reference/airvpn.md`** (`~/.claude/skills/bar/reference/airvpn.md`,
+source `~/workspace/devrc/claude/skills/bar/reference/airvpn.md`): the killswitch design, the
+🔴 mandatory re-test protocol, apply/re-arm/bail procedures. Read it before touching anything AirVPN.
 
 ## Modernization stance (standing rule — applies whenever you touch this setup)
 When editing the bar / i3 / any NixOS or home-manager config here, **prefer the current
@@ -62,7 +62,7 @@ X — your call"). Leave the setup a little more modern than you found it; never
 | DND | `i3status-dnd` | 15 | — | dunst paused indicator; `$mod+Shift+n` toggles |
 | media | `i3status-media` | 16 | n/a | qBit-POD AirVPN pill (net_down), **state-driven**: neutral=connected, **RED**=firewalled (tunnel/port-fwd broken), soft-yellow=stale. poller `parse_media`/`fetch_media` read creds from `~/.config/bar/media.env` (0600) — the same `media.env` also feeds `deep-search`, a media release search/grab CLI on PATH (workbench) after `home-manager switch`. **left → `media-menu`**; **right → qBit WebUI** |
 | telemetry deadman | `i3status-telemetry` | 17 | n/a | `tlm N` = N activity-telemetry (host, source) pairs have STOPPED emitting into ClickHouse; `tlm ?` = the check itself has been unable to evaluate for >30 min. 🔴 **The ONE block that does NOT render an unreachable backend as empty** — its reassuring answer is a zero, so "cannot tell" must not look like "all healthy". Measures BOTH hosts from the workbench poller (it reads the shared table). Logic + the per-source budget table: `scripts/collector/deadman.py` (run it bare for the table; left-click floats it). See the `activity` skill. |
-| airvpn (host) | `i3status-airvpn` | 10 | n/a | **HOST** AirVPN WireGuard pill (net_vpn), **state-driven**, default-OFF. **left → `airvpn-menu`**; **right → `airvpn-detail` float**. 🔴 Full detail + the killswitch re-test protocol: **`airvpn.md`** |
+| airvpn (host) | `i3status-airvpn` | 10 | n/a | **HOST** AirVPN WireGuard pill (net_vpn), **state-driven**, default-OFF. **left → `airvpn-menu`**; **right → `airvpn-detail` float**. 🔴 Full detail + the killswitch re-test protocol: **`reference/airvpn.md`** |
 
 Bars differ by host (`isLaptop` in `graphical.nix`): laptop gets `batteryBlock` and **omits** GPU
 + all count blocks + poller (nebula-only, no LAN path to homelab endpoints); workbench gets GPU

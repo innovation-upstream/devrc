@@ -9,16 +9,16 @@ paths from either.
 
 🔴 THIS FILE IS THE EXECUTABLE AUTHORITY FOR THE REF-NORMALIZATION AND
 RESOLUTION RULES.
-`claude/commands/analyze-service.md` states the same rules in prose, for a reader
+`claude/skills/analyze-service/SKILL.md` states the same rules in prose, for a reader
 that is an LLM rather than an interpreter, so the predicate necessarily exists at
 two sites — and `claude/RULES.md` → "One rule, one place" says a duplicated
 predicate regenerates the same bug at both. It cannot be literally deduplicated
 (you cannot import a function into a markdown file), so it is made DETECTABLE
 instead:
 
-  * this module is named in that command as the authority;
+  * this module is named in that skill as the authority;
   * `scripts/tests/test_subsystem_resolver.py` → `TestCommandDocIsPinned` holds
-    the command's normative sentences as literal substrings AND the behaviour
+    the skill's normative sentences as literal substrings AND the behaviour
     each one asserts. Reword the prose without touching the code (or vice versa)
     and that test goes red naming the sentence that moved.
 
@@ -203,7 +203,7 @@ class AmbiguousRefError(ResolverError):
 def normalize_ref(raw: str) -> str:
     """Fold a ref/slug/alias/path-component to its canonical form.
 
-    The rule, from `claude/commands/analyze-service.md`: lowercase, `_` → `-`,
+    The rule, from `claude/skills/analyze-service/SKILL.md`: lowercase, `_` → `-`,
     any other char outside `[a-z0-9.-]` → `-`, collapsed, trimmed. Applied
     identically on read and write and to `aliases:` before comparing.
 

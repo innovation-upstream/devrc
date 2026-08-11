@@ -1,6 +1,6 @@
 ---
 name: obs-read
-description: "One-command, cluster-aware observability query tool. Collapses the hand-rebuilt chain (kubectl port-forward -> ad-hoc PromQL/LogQL -> inline python parse -> teardown) into a single deterministic call over Prometheus/Loki/Pyroscope, with a LOUD silent-zero guard so a wrong service/label can never masquerade as a real 0. Use for querying metrics/logs/profiles during an incident or perf dig, the 5xx/error-rate/latency/CPU-saturation reads, or any 'is X actually zero or did my query just miss'."
+description: "Query Prometheus/Loki/Pyroscope on a named cluster in ONE deterministic call (port-forward -> query -> teardown), with a LOUD silent-zero guard so a wrong service or label cannot look like a real 0. Use for metrics/logs/profiles during an incident or perf dig, the 5xx / error-rate / latency / CPU-saturation reads, or \"is X actually zero or did my query just miss\"."
 argument-hint: "--cluster homelab|workbench|dpprod|nebula (--preset NAME | --backend B --query 'EXPR') [--since 30m] [--json] | --list-presets"
 allowed-tools: Bash
 ---

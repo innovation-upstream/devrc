@@ -1,8 +1,15 @@
-# /prune-memory — audit & aggressively shrink the project's auto-memory index
+---
+name: prune-memory
+description: "Audit and aggressively shrink a project's auto-memory index (MEMORY.md) — it costs tokens EVERY session and silently drops content past its cap. Runs scripts/memory-audit.py, classifies every bullet, rewrites atomically, re-measures. Use when MEMORY.md is near or over its cap, or when asked to prune/shrink memory."
+argument-hint: "[MEMORY_DIR | path/to/MEMORY.md] — optional; defaults to the current project's memory dir"
+allowed-tools: Bash, Read, Write, Edit, Grep, Glob, Agent
+---
+
+# prune-memory — audit & aggressively shrink the project's auto-memory index
 
 Goal: kill the recurring "MEMORY.md hit its cap again" fire-drill. Run an on-demand audit of the current project's `MEMORY.md`, then apply the aggressive cut methodology that works — so the index stays small instead of re-bloating daily.
 
-Why this recurs: appending one line to `MEMORY.md` is lower-friction than putting a lesson in its real home, so the "🔴 Critical safety" and "Feedback" sections silently regrow with incident narratives and domain gotchas. This command is the periodic counter-pressure.
+Why this recurs: appending one line to `MEMORY.md` is lower-friction than putting a lesson in its real home, so the "🔴 Critical safety" and "Feedback" sections silently regrow with incident narratives and domain gotchas. This skill is the periodic counter-pressure.
 
 ## Budgets (the contract)
 - Index **target < 12 KB**, **hard cap ~24 KB** (content past the hard cap is silently dropped on load — every byte costs tokens every session).
@@ -45,4 +52,4 @@ python3 /home/zach/workspace/devrc/scripts/memory-audit.py   # size under target
 ```
 Confirm: under the 12 KB target, both sections under cap, all links resolve, and (if you migrated) the skill lines are actually present on trunk. Report the before/after size, what moved where, and the backup path.
 
-Pair: `/handoff` (put work-status in a doc instead of the index), the `CLAUDE.md` "Memory hygiene" section (the standing rule this command enforces).
+Pair: the `handoff` skill (put work-status in a doc instead of the index), the `CLAUDE.md` "Memory hygiene" section (the standing rule this skill enforces), and the `prune-skill` skill (the same cut one level down, on a `SKILL.md` body).

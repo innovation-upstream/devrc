@@ -1,6 +1,6 @@
 ---
 name: dl-router
-description: Operate the media download router — a loopback sidecar plus an MV3 Brave extension that files downloads into the right subject directory of a local media library using page context (not the filename), with an undo toast, a keyboard picker, dedupe warnings, a yt-dlp path for HLS/DASH, and a qBittorrent-aware backfill for pre-existing files. Status, query/tune matching, fix a wrong route, add a site rule, run the backfill, restart/debug the sidecar or the extension. Use when the user mentions the download router, dl-route, downloads landing in the wrong folder, auto-filing downloads, the library root, the subject directories, the download picker/toast, or backfilling loose files.
+description: Operate the media download router — a loopback sidecar + Brave extension that files downloads by PAGE CONTEXT, not the filename. Fix a wrong route, add a site rule, run the backfill, restart/debug the sidecar or extension. Use for: the download router, dl-route, downloads landing in the wrong folder, auto-filing downloads, the download picker/toast, backfilling loose files.
 ---
 
 # dl-router

@@ -20,7 +20,7 @@ WHY THE FIXTURES ARE HAND-AUTHORED AND NOT A SNAPSHOT OF THE REAL STORE
 -----------------------------------------------------------------------
 🔴 The real corpus MUST NOT be copied in here. `~/.claude/analyze-service-index/`
 carries client-identifying infrastructure detail; all 21 live entries lack a
-`sensitivity:` field, which `analyze-service.md` defines as fail-safe
+`sensitivity:` field, which `analyze-service/SKILL.md` defines as fail-safe
 `client-confidential`. This repo is PUBLIC, and `scripts/testlib/
 client_host_scan.py` exists precisely because six client subdomains had already
 leaked into fixtures once (devrc `60e6d9d` scrubbed them retroactively) — several
@@ -74,7 +74,12 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT / "scripts" / "lib" / "subsystem_resolver.py"
-COMMAND_DOC = ROOT / "claude" / "commands" / "analyze-service.md"
+# Formerly `claude/commands/analyze-service.md`. Upstream merged custom commands
+# INTO skills, so `claude/commands/` was retired and every command became
+# `claude/skills/<name>/SKILL.md`; this is the SAME doc at its new path, and
+# `test_the_doc_path_is_the_deployed_one` below is what pins it to the file that
+# actually ships.
+SKILL_DOC = ROOT / "claude" / "skills" / "analyze-service" / "SKILL.md"
 
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 
@@ -146,7 +151,7 @@ ENTRIES: list[dict[str, object]] = [
         "filename": "bar-status-poll.md",
     },
     # 7 + 8. THE DELIBERATE AMBIGUITY, in a different scope so it cannot
-    #    contaminate the tests above. `analyze-service.md`'s own example:
+    #    contaminate the tests above. `analyze-service/SKILL.md`'s own example:
     #    `repo-cos.md` vs `repo-cos.process.md`.
     {
         "service": "repo-cos",
@@ -177,8 +182,8 @@ def index() -> sr.SubsystemIndex:
 
 @pytest.fixture(scope="module")
 def doc() -> str:
-    """The command doc, read once — the other half of the one-predicate pair."""
-    return COMMAND_DOC.read_text(encoding="utf-8")
+    """The skill doc, read once — the other half of the one-predicate pair."""
+    return SKILL_DOC.read_text(encoding="utf-8")
 
 
 # =============================================================================
@@ -1496,7 +1501,7 @@ class TestFrontMatterParser:
 
 
 class TestCommandDocIsPinned:
-    """`claude/commands/analyze-service.md` states these rules in prose because
+    """`claude/skills/analyze-service/SKILL.md` states these rules in prose because
     its reader is an LLM. This module states them in Python. That is one
     predicate at two sites, which `claude/RULES.md` says regenerates the same bug
     at both — and here the drift is SILENT (a ref stops resolving, and the miss
@@ -1626,7 +1631,7 @@ class TestCommandDocIsPinned:
     )
     def test_sentence_still_present(self, doc: str, sentence: str, why: str) -> None:
         assert sentence in doc, (
-            f"analyze-service.md no longer contains the sentence pinning {why}.\n"
+            f"analyze-service/SKILL.md no longer contains the sentence pinning {why}.\n"
             f"  missing: {sentence!r}\n"
             f"  Either restore it, or change scripts/lib/subsystem_resolver.py in the SAME\n"
             f"  commit and update this pin. The two are one predicate at two sites; the\n"
@@ -1651,10 +1656,10 @@ class TestCommandDocIsPinned:
         begin = f"<!-- {name}:begin"
         end = f"<!-- {name}:end"
         i = doc.find(begin)
-        assert i != -1, f"marker {begin!r} is missing from analyze-service.md"
+        assert i != -1, f"marker {begin!r} is missing from analyze-service/SKILL.md"
         i = doc.index("-->", i) + len("-->")
         j = doc.find(end, i)
-        assert j != -1, f"marker {end!r} is missing from analyze-service.md"
+        assert j != -1, f"marker {end!r} is missing from analyze-service/SKILL.md"
         body = doc[i:j].strip()
         assert body, f"region {name!r} is EMPTY — the hash would guard nothing"
         return body
@@ -1669,7 +1674,7 @@ class TestCommandDocIsPinned:
     ) -> None:
         actual = hashlib.sha256(self._region(doc, name).encode("utf-8")).hexdigest()
         assert actual == expected_sha, (
-            f"\nThe `{name}` block of claude/commands/analyze-service.md CHANGED.\n"
+            f"\nThe `{name}` block of claude/skills/analyze-service/SKILL.md CHANGED.\n"
             f"  expected sha256 {expected_sha}\n"
             f"  actual   sha256 {actual}\n\n"
             f"This is not a formatting nit. That block is the PROSE HALF of a\n"
@@ -1700,7 +1705,7 @@ class TestCommandDocIsPinned:
         never silently hash the empty string."""
         with pytest.raises(AssertionError) as exc:
             self._region("no markers here at all\n", "resolver-rules")
-        assert "is missing from analyze-service.md" in str(exc.value)
+        assert "is missing from analyze-service/SKILL.md" in str(exc.value)
 
     def test_an_empty_region_fails_loudly(self) -> None:
         with pytest.raises(AssertionError) as exc:
@@ -1715,13 +1720,38 @@ class TestCommandDocIsPinned:
 
         Without this, a `in doc` check against a doc that happened to contain
         everything is indistinguishable from a check pointed at the wrong file."""
-        assert "a sentence that is deliberately not in analyze-service.md" not in doc
+        sentinel = "a sentence that is deliberately not in analyze-service/SKILL.md"
+        assert sentinel not in doc
 
     def test_the_doc_path_is_the_deployed_one(self) -> None:
-        """`claude/commands/` is the managed source symlinked to ~/.claude/commands.
-        Pinning a file that is not the one that ships would be a vacuous green."""
-        assert COMMAND_DOC.exists()
-        assert COMMAND_DOC.parent.name == "commands"
+        """Pinning a file that is not the one that SHIPS would be a vacuous green.
+
+        `claude/skills/` is the managed source symlinked to `~/.claude/skills/`.
+        The path shape alone is a tautology against the constant above, so the
+        load-bearing half is the `nix/home.nix` check: it is what makes this a
+        claim about DEPLOYMENT rather than about this file's own spelling.
+
+        This test earned its keep — it is what went red when the commands→skills
+        migration moved the doc out from under a pin written against the old
+        `claude/commands/analyze-service.md` path.
+        """
+        assert SKILL_DOC.exists(), f"the pinned doc is gone: {SKILL_DOC}"
+        assert SKILL_DOC.name == "SKILL.md"
+        assert SKILL_DOC.parent.name == "analyze-service"
+        assert SKILL_DOC.parent.parent.name == "skills"
+
+        # The non-tautological half: nix must actually deploy the directory this
+        # pin lives under. A pin under a directory home-manager does not ship is
+        # precisely the vacuous green this test exists to prevent.
+        home_nix = (ROOT / "nix" / "home.nix").read_text(encoding="utf-8")
+        assert 'home.file.".claude/skills"' in home_nix, (
+            "nix/home.nix no longer declares the ~/.claude/skills mapping, so the "
+            "doc this module pins may not ship at all."
+        )
+        assert "source = ../claude/skills;" in home_nix, (
+            "nix/home.nix's ~/.claude/skills mapping no longer sources "
+            "devrc/claude/skills, so SKILL_DOC is not the deployed file."
+        )
 
     # --- the behavioural half: what each sentence ASSERTS ---------------------
 

@@ -69,7 +69,7 @@ Do these **in order** relative to the first `home-manager switch`:
    - This **auto-seeds** `~/.config/activity-collector/env` from the committed
      `.env.example` (empty CH password = unauthed default user; the collector
      runs but ships to the default CH user until you add the authed cred).
-   - New-host caveat: if a *foreign* `~/.claude/RULES.md` / `~/.claude/commands/*`
+   - New-host caveat: if a *foreign* `~/.claude/RULES.md` / `~/.claude/skills/*`
      pre-exists, `rm` it once before the switch (HM won't clobber foreign files).
 3. **Activity telemetry** (edit the seeded file): set `ACTIVITY_HOST`
    (`workbench`/`laptop`), and on the laptop repoint `CLICKHOUSE_URL` at the

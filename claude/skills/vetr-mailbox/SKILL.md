@@ -1,6 +1,6 @@
 ---
 name: vetr-mailbox
-description: Send 1:1 personalized email AS zach@vetr.com (Vetr Google Workspace mailbox) via Workspace SMTP + an app-password — recruitment/outreach mail rides Google's sender reputation and INBOXES (unlike Omnisend's cold bulk domain, which spams). Bounded, personalized, rate-limited, dedup'd. Use for 1:1 vet-recruitment outreach to the Vetr waitlist, and any other genuinely personal founder email. NOT a bulk marketing blaster — bulk owner campaigns belong on Omnisend (see guardrails). Reuses the /mailbox skill's proven Gmail-SMTP send pattern.
+description: "Send 1:1 personalized email AS zach@vetr.com via Workspace SMTP — bounded, personalized, rate-limited, deduped, and it INBOXES (unlike Omnisend's cold bulk domain). Use for 1:1 vet-recruitment outreach to the Vetr waitlist and other genuinely personal founder email. NOT a bulk blaster — bulk owner campaigns belong on Omnisend."
 ---
 
 # vetr-mailbox — send AS zach@vetr.com (Workspace SMTP)

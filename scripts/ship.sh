@@ -417,7 +417,7 @@ verify_managed_artifacts() {
 #    short-circuits the merge entirely and would otherwise fall straight through
 #    to the switch. `home-manager switch --flake` builds from the WORKING TREE,
 #    not the commit, so conflict markers in any managed non-nix file
-#    (claude/RULES.md, claude/commands/*, hooks, scripts/*) would be DEPLOYED TO
+#    (claude/RULES.md, claude/skills/**, hooks, scripts/*) would be DEPLOYED TO
 #    BOTH HOSTS and then reported as VERIFIED. Resolving a merge is a human
 #    decision; ship never guesses at one.
 conflicted=$(git diff --name-only --diff-filter=U 2>/dev/null)
