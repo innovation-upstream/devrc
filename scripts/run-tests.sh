@@ -184,21 +184,32 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 # fce27f2) while the value beside it had been bumped twice — to 6745 by #379.
 # A floor comment that no longer describes its own number is the "a comment is a
 # claim too" case from claude/RULES.md; rewritten rather than bumped again.
-# 2026-08-11 (feat/drift-host-parity, MERGED with origin/main at 9f17cfc). The
-# same trap this note was rewritten for, hit again in the same week: this branch
-# measured 6770 against base c7059bb's 6745, then #378 and #382 landed and moved
-# the base to 6960, so 6770 was stale before it could be pushed. Arithmetic on
-# the old pair predicts 6985 — MEASURED ON THE MERGED TREE it is the number
-# below, and only that number is evidence. +25 is this branch's addition to
-# scripts/tests/test_drift_check.py (24 host-parity tests, plus one new
-# parametrize case on UNIT_PATH_REQUIREMENTS for `sort`). Counted from the
-# runner's structured summary, never from an exit code.
+# 2026-08-11 (feat/drift-host-parity). MEASURED ON THE MERGED TREE, and the
+# note above earns its keep twice over. CONTROL PAIR, same command, same
+# machine, base measured directly rather than read off the previous comment:
+#     base origin/main 9f17cfc : TOTAL collected=6968  passed=6967  failed=0
+#                                scripts/tests=1874
+#     this branch, merged      : TOTAL collected=6993  passed=6992  failed=0
+#                                scripts/tests=1899
+#   +25, and 1899-1874 = 25 = exactly the host-parity addition to
+#   scripts/tests/test_drift_check.py (24 tests + one new parametrize case on
+#   UNIT_PATH_REQUIREMENTS for `sort`). The per-directory delta is the positive
+#   control that the gate RUNS the new tests rather than merely tolerating them.
+#
+# 🔴 THREE NUMBERS IN THIS NOTE WERE WRONG BEFORE BEING MEASURED, which is the
+# point. The comment above says base is 6960; the base actually collects 6968,
+# because main moved again after that line was written. This branch first
+# measured 6770 against base c7059bb's 6745; #378 and #382 then landed and made
+# it stale before it could be pushed. Arithmetic from the stale pair predicted
+# 6985. The merged tree reports 6993. Do not carry a floor forward, do not
+# compute one, and do not trust the previous comment's base — re-measure both
+# sides. Counted from the runner's structured summary, never from an exit code.
 #
 # EXPECTED_SKIPS untouched: skipped=1, the one pinned entry. The host-parity
 # tests add ZERO skips by construction — every fixture is built in tmp_path, so
 # there is no `$HOME`-conditional skip (GUARD 2 forbids that shape by name, and
 # it is exactly the shape that would go green on the host that HAS the bug).
-MIN_TESTS="${MIN_TESTS:-6985}"
+MIN_TESTS="${MIN_TESTS:-6993}"
 
 # --- GUARD 1: tool precondition ------------------------------------------------
 # Every binary the suites `skipif` on. Absence must be an ERROR, never a skip.
