@@ -61,6 +61,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 from testlib.mockbin import write_exec  # noqa: E402
+from testlib.runner_patch import runner_with_targets  # noqa: E402
 RUN_TESTS = REPO_ROOT / "scripts" / "run-tests.sh"
 
 
@@ -80,19 +81,14 @@ def _runner_with_targets(tmp_path: Path, targets: list[str]) -> Path:
 
     Replacing the whole block (rather than injecting one entry) keeps these
     tests FAST: the copy runs only the target under test instead of the full
-    5792-test suite, which is what makes a per-target reachability proof
+    ~7,200-test suite, which is what makes a per-target reachability proof
     affordable at all.
+
+    Delegates to `testlib.runner_patch` -- it rewrites TARGET_FLOORS in the same
+    pass, which a copy MUST do or it dies at the floor pin before reaching the
+    guard under test.
     """
-    src = RUN_TESTS.read_text()
-    body = "\n".join(f"  {t}" for t in targets)
-    patched, n = re.subn(
-        r"^HERMETIC_TARGETS=\(.*?^\)", f"HERMETIC_TARGETS=(\n{body}\n)", src, count=1, flags=re.S | re.M
-    )
-    assert n == 1, "failed to replace HERMETIC_TARGETS in the copied runner"
-    assert "HERMETIC_TARGETS=(\n  " in patched, "replacement produced an empty target list"
-    dst = tmp_path / "run-tests.sh"
-    dst.write_text(patched)
-    return dst
+    return runner_with_targets(tmp_path, targets)
 
 
 # --------------------------------------------------------------------------

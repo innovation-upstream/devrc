@@ -248,10 +248,26 @@
             mkdir -p "$HOME"
             cd src
             # The runner asserts a tool precondition, a pinned expected-skip set,
-            # a global + per-directory collected-test floor, and parses pytest's
-            # summary instead of reading its exit code. Read its header before
-            # changing this line or the nativeBuildInputs above.
-            bash scripts/run-tests.sh --set hermetic .
+            # per-target collected-test floors (and a global floor derived as
+            # their sum), and parses pytest's summary instead of reading its
+            # exit code. Read its header before changing this line or the
+            # nativeBuildInputs above.
+            #
+            # 🔴 The rc is captured and branched on EXPLICITLY rather than left
+            # to `touch "$out"` being harmless. MEASURED 2026-08-11 with a
+            # throwaway `runCommandLocal` of exactly this shape — a body that
+            # runs `bash -c 'echo "RESULT: FAIL"; exit 1'` and then `touch
+            # "$out"` — the build DOES fail (`builder failed with exit code 1`),
+            # because nixpkgs' generic builder evals `buildCommand` under
+            # `set -e`. So this is not a live bug being fixed; it is a dependency
+            # on stdenv's implicit `set -e` being made explicit, in the one file
+            # where a trailing command after a test runner would be invisible.
+            rc=0
+            bash scripts/run-tests.sh --set hermetic . || rc=$?
+            if [ "$rc" -ne 0 ]; then
+              echo "checks.pytests: run-tests.sh exited $rc — failing the derivation." >&2
+              exit "$rc"
+            fi
             touch "$out"
           '';
 
@@ -309,7 +325,14 @@
             # and a TEST-COUNT floor, and refuses to degrade to `node --test <dir>`
             # (which silently yields a bogus `# tests 1 / # fail 1`). Read its
             # header before changing this line.
-            bash scripts/run-node-tests.sh .
+            #
+            # rc captured explicitly — same reason as checks.pytests above.
+            rc=0
+            bash scripts/run-node-tests.sh . || rc=$?
+            if [ "$rc" -ne 0 ]; then
+              echo "checks.nodetests: run-node-tests.sh exited $rc — failing the derivation." >&2
+              exit "$rc"
+            fi
             touch "$out"
           '';
       };
