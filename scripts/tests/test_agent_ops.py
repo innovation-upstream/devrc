@@ -740,15 +740,20 @@ def test_telemetry_freshness_excludes_machine_cadence_rows():
         ao.DEADMAN_PATH = orig_path
 
     assert out == {"zsh": 7}, out
-    # 🔴 Assert the SQL's SHAPE, not just that the clause appears somewhere in
-    # it. A substring check passes for a mangled concatenation
-    # ("INTERVAL 2 DAYAND NOT (...)") and for a clause placed after GROUP BY —
-    # both invalid ClickHouse, and both survived a suite that only checked
-    # presence.
+    # 🔴 SHAPE **AND** CONTENT, in one assertion. Each alone has a blind spot,
+    # and picking one is not a trade — it is a hole:
+    #   * presence-only (`clause in sql`) passes for a mangled concatenation
+    #     ("INTERVAL 2 DAYAND NOT (...)") or a clause placed after GROUP BY,
+    #     both invalid ClickHouse;
+    #   * shape-only (`AND NOT \(.+?\)`) accepts ANY predicate body, so a call
+    #     site excluding the WRONG pair — say zsh/cmd, which would delete real
+    #     operator activity from this panel — passes.
+    # Interpolating the helper's real output binds the emitted SQL to it.
     assert re.search(
-        r"INTERVAL 2 DAY AND NOT \(.+?\) GROUP BY source ORDER BY source$",
-        sent["sql"]), \
-        "the exclusion is missing or misplaced in the emitted SQL: %s" % sent["sql"]
+        r"INTERVAL 2 DAY " + re.escape(clause.strip())
+        + r" GROUP BY source ORDER BY source$", sent["sql"]), \
+        ("the exclusion is missing, misplaced, or excludes a different pair than "
+         "the helper produced: %s" % sent["sql"])
 
 
 def test_machine_cadence_filter_renders_multiple_pairs_with_OR():
@@ -784,8 +789,12 @@ def test_deadman_path_points_at_the_real_sibling():
     the sandbox — so a wrong path would mean a permanent error marker on the
     telemetry panel with nothing to catch it. Unlike CHQUERY_PATH, this one is
     not pre-flighted in maybe_refresh_telemetry."""
-    assert ao.DEADMAN_PATH.endswith(
-        os.path.join("scripts", "collector", "deadman.py")), ao.DEADMAN_PATH
+    # The ROOT as well as the tail: an endswith() check passes for
+    # "/nonexistent/scripts/collector/deadman.py". DEVRC_DIR is the module's own
+    # notion of the checkout, so pinning the full join catches a repoint without
+    # needing the path to exist (it does not, in the check sandbox).
+    assert ao.DEADMAN_PATH == os.path.join(
+        ao.DEVRC_DIR, "scripts", "collector", "deadman.py"), ao.DEADMAN_PATH
     assert os.path.exists(os.path.join(_HERE, "..", "collector", "deadman.py")), \
         "deadman.py is not where DEADMAN_PATH expects it relative to this repo"
 

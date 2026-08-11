@@ -652,6 +652,25 @@ def test_operator_count_expression_matches_the_cadence_table():
     assert "(source = 'a' AND kind = 'beat') OR (source = 'b' AND kind = 'tick')" in q2, q2
     assert " AND (source = 'b'" not in q2, "cadence terms joined with AND: %s" % q2
 
+    # Empty cadence degrades to the pre-heartbeat query, which is the right
+    # answer when nothing emits on a timer.
+    assert "count() AS n_op" in D.bucket_query(cadence=())
+
+    # 🔴 The live table must NOT be empty, asserted before the loop below — an
+    # emptied MACHINE_CADENCE makes that loop iterate zero times and pass, and it
+    # is exactly the edit that reinstates the bug (a mutant emptying the tuple
+    # survived this file until this assertion existed; it died only in the
+    # browser-bridge suite, which is not where a deadman reader would look).
+    #
+    # 🔴 THESE THREE ASSERTIONS BELONG TO *THIS* TEST. A later insertion once
+    # landed inside this function and carried them into the next one, so the
+    # guard above lived under a test named for something else — and deleting that
+    # other test would have silently deleted this guard.
+    assert ("browser-bridge", "heartbeat") in D.MACHINE_CADENCE, \
+        "the browser-bridge heartbeat is no longer declared machine-cadence"
+    for src, kind in D.MACHINE_CADENCE:
+        assert src in D.bucket_query() and kind in D.bucket_query()
+
 
 def test_cadence_predicate_is_exported_for_the_other_consumer():
     """`cadence_predicate_sql` is PUBLIC on purpose: scripts/agent-ops renders the
@@ -664,19 +683,10 @@ def test_cadence_predicate_is_exported_for_the_other_consumer():
     two = D.cadence_predicate_sql((("x", "beat"), ("y", "tick")))
     assert two == ("(source = 'x' AND kind = 'beat') OR "
                    "(source = 'y' AND kind = 'tick')"), two
-    # Empty cadence degrades to the pre-heartbeat query, which is the right
-    # answer when nothing emits on a timer.
-    assert "count() AS n_op" in D.bucket_query(cadence=())
-
-    # 🔴 The live table must NOT be empty, asserted before the loop below — an
-    # emptied MACHINE_CADENCE makes that loop iterate zero times and pass, and it
-    # is exactly the edit that reinstates the bug (a mutant emptying the tuple
-    # survived this file until this assertion existed; it died only in the
-    # browser-bridge suite, which is not where a deadman reader would look).
-    assert ("browser-bridge", "heartbeat") in D.MACHINE_CADENCE, \
-        "the browser-bridge heartbeat is no longer declared machine-cadence"
-    for src, kind in D.MACHINE_CADENCE:
-        assert src in D.bucket_query() and kind in D.bucket_query()
+    # The DEFAULT argument is what a future consumer will reach for, and no
+    # caller exercises it today (a mutant defaulting it to () survived).
+    assert D.cadence_predicate_sql() == D.cadence_predicate_sql(D.MACHINE_CADENCE)
+    assert D.cadence_predicate_sql() != ""
 
 
 def test_a_stopped_heartbeat_is_dead_within_the_floor():
