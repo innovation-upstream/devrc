@@ -207,6 +207,13 @@ description: Live dashboard of all active tmux sessions, Claude Code activity, a
 
 ### 2.3 Slash command: `claude/commands/sessions.md`
 
+> 🔴 **Superseded — do NOT create this file.** PR #377 (open, 56 files) migrates all 17
+> slash-commands to skills and cuts the listing budget 21%. A new `claude/commands/*.md`
+> lands on the wrong side of that migration the day it merges. The `/sessions` entry point
+> must be the **skill** in §2.2 instead, whose front-matter `description` is what the model
+> matches on. Keep the description tight — it is charged to the per-session listing budget
+> that #377 exists to reduce. The block below is retained only to show what was intended.
+
 ```yaml
 ---
 name: sessions
@@ -351,10 +358,34 @@ sample JSON, and the entire tmux-pane ↔ ClickHouse correlation the proposal is
 deliver, rest on the disqualified source.
 
 Without fuzzyclaw this degrades to "cross-host `tmux list-panes` beside an unjoined list of
-recent CH sessions" — still useful, but not the stated goal. **Resolve before building:**
-either establish a trustworthy pane→session link (e.g. have the Claude transcript tailer emit
-the tmux `window_id` it is running under, making the join a first-class column in
-`activity.events`), or scope the feature down and drop the correlation claim.
+recent CH sessions" — still useful, but not the stated goal.
+
+#### RESOLVED (2026-08-11) — use it, but only intersected with live windows
+
+Measured rather than assumed. Three findings close this:
+
+1. **The failure mode is staleness, not corruption.** Of the 400 files in `~/.tmux/tasks/`,
+   **43 point at a currently-live tmux window and 357 do not** — 89% stale. Zero were
+   unparseable and zero lacked a `window_id`. So the data is well-formed; it is simply
+   *old*. That is a filterable defect, not an unusable source.
+2. **The join is structurally sound.** `activity.events.session` for `source='claude'` is
+   36 chars in 100% of rows (1107/1107 over 2 days), and fuzzyclaw's `claude_session` is a
+   36-char UUID. `fuzzyclaw.claude_session → activity.events.session` is a valid join.
+3. **The repo already established the mitigation.** `scripts/tmux-scratch-status.sh:28-34`
+   reads the same task files and intersects them against `tmux list-windows -a -F
+   '#{window_id}'`, with a header comment saying exactly why: *"filtered against currently
+   existing tmux windows so stale entries don't trigger."*
+
+**Therefore:** consume fuzzyclaw, but *only* after intersecting `window_id` with live tmux
+windows, following the `tmux-scratch-status.sh` precedent. No new first-class column in
+`activity.events` is needed, and the correlation feature survives intact.
+
+🔴 **The intersection is a load-bearing guard, not a filter** — without it 89% of rows are
+lies. It gets a mutation test (§7 test 8): delete the intersection and a test must go red
+with *that* guard's specific failure.
+
+Note also that the field list in §2.1 source 4 is incomplete — the task files also carry
+`transcript_path`.
 
 ### 6.3 Scope
 
