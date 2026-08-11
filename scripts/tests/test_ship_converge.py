@@ -79,15 +79,19 @@ class Repo:
     """
 
     # Home-relative paths the fabricated generation "manages". Deliberately
-    # spans four different `home.file` families — a top-level file, a recursive
-    # command dir, a recursive skill dir, a hook, and an opencode mirror — so
-    # the check is exercised structurally rather than against one spelling.
+    # spans five different `home.file` families — a top-level file, a recursive
+    # skill dir, a hook, a top-level opencode mirror, and the recursive opencode
+    # skill mirror — so the check is exercised structurally rather than against
+    # one spelling. (These are fabricated under tmp_path, so nothing here has to
+    # exist in the repo; they are chosen to mirror the real families in
+    # nix/home.nix. `.claude/commands/` used to stand in for the recursive-dir
+    # shape and was dropped when that family was retired — see CLAUDE.md.)
     MANAGED = (
         ".claude/RULES.md",
-        ".claude/commands/standup.md",
         ".claude/skills/bar/SKILL.md",
         ".claude/hooks/bash-guard.py",
         ".config/opencode/AGENTS.md",
+        ".config/opencode/skills/bar/SKILL.md",
     )
 
     # The store path a cross-host copy leaves behind: a well-formed link into
@@ -803,10 +807,10 @@ def test_managed_artifact_check_reports_how_many_it_examined(repo):
 @pytest.mark.parametrize(
     "rel",
     [
-        ".claude/skills/bar/SKILL.md",     # the family that actually broke
-        ".claude/commands/standup.md",     # ...and three that have not yet
-        ".claude/hooks/bash-guard.py",
+        ".claude/skills/bar/SKILL.md",            # the family that actually broke
+        ".claude/hooks/bash-guard.py",            # ...and three that have not yet
         ".config/opencode/AGENTS.md",
+        ".config/opencode/skills/bar/SKILL.md",
     ],
 )
 def test_managed_artifact_check_fails_on_a_dangling_managed_symlink(repo, rel):
