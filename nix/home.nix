@@ -276,6 +276,53 @@ in
       fullscreen_suppress = {
         fullscreen = "suppress";
       };
+      # DEADMAN BYPASS — the ONE class of toast that must defeat do-not-disturb.
+      #
+      # WHY: `notify-failure` toasts are the only signal that an important user
+      # unit died. Measured 2026-08-10 on the workbench: dunst `is-paused=true`
+      # with 30 notifications queued behind it, and `drift-check.service` sitting
+      # in `failed` (status 10, genuine drift) — the OnFailure handler ran, sent
+      # its toast, and the toast went into the WAITING queue and was never shown.
+      # It is not even in `dunstctl history` (history only holds toasts that were
+      # DISPLAYED then dismissed/expired), so the failure was invisible in every
+      # surface a human looks at. DND is a state Zach deliberately enters via the
+      # bar's bell button, so "just unpause it" is not a fix.
+      #
+      # TWO INDEPENDENT SUPPRESSORS had to be defeated — measured, not assumed:
+      #
+      #  1. PAUSE LEVEL. `dunstctl set-paused true` (what the bar button runs)
+      #     sets pause level **100**, the maximum. dunst(5) says a notification
+      #     shows when its override_pause_level is "greater than" the pause
+      #     level, which would make 100 unbeatable. THAT IS WRONG — the
+      #     implementation compares >=. Measured on dunst 1.13.2 at pause
+      #     level 100: override_pause_level=100 -> displayed 0->1, waiting 0->0;
+      #     override_pause_level=99 -> displayed 0->0, waiting 0->1. So 100 is
+      #     both necessary and sufficient; anything less is silently swallowed.
+      #
+      #  2. FULLSCREEN SUPPRESSION. `fullscreen_suppress` above is FILTERLESS, so
+      #     it also matches this toast and routes it straight to history whenever
+      #     any fullscreen window is focused — a second, independent way for a
+      #     deadman alert to vanish (observed dropping real toasts on the laptop).
+      #     `fullscreen = "show"` opts this one rule back out.
+      #
+      # ORDERING MATTERS: home-manager renders these sections alphabetically and
+      # dunst applies rules in file order, last-write-wins. The `zz_` prefix
+      # guarantees this rule is applied AFTER `fullscreen_suppress` regardless of
+      # what rules are added later. scripts/tests/test_dunst_dnd_bypass.py pins
+      # both the values and that ordering.
+      #
+      # SCOPE: keyed on appname, which scripts/notify-failure.sh sets via
+      # `notify-send -a notify-failure`. That is ALL unit-failure toasts, not an
+      # opt-in subset — justified by the measured firing rate (7 activations in
+      # ~6 months of laptop journal, 1 in 9 days of workbench journal), which is
+      # far too low to make DND feel broken. Deliberately NOT keyed on
+      # `urgency = critical`: other tools send critical toasts, and those must
+      # still respect DND.
+      zz_notify_failure_bypass = {
+        appname = "notify-failure";
+        override_pause_level = 100;
+        fullscreen = "show";
+      };
     };
   };
 
