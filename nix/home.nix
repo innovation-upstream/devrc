@@ -1777,7 +1777,7 @@ in
   # only this host has; the laptop is nebula-only and its run would just fail noisily.
   #
   # CLICKHOUSE_* creds are provisioned by the wrapper at RUN TIME via a sops decrypt
-  # (NO plaintext secret at rest — same recipe as the /initiatives slash command), so
+  # (NO plaintext secret at rest — same recipe as the /initiative-scan skill), so
   # the scan runs TELEMETRY-ON. The decrypt is fully best-effort and degrades to
   # telemetry-off if the age key / homelab repo / sops / decrypt is unavailable, so it
   # can never fail the sync. `sops` is put on the unit PATH below for exactly this.

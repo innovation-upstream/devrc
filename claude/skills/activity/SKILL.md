@@ -246,7 +246,7 @@ All three read `CLICKHOUSE_URL/USER/PASSWORD` from env (via `validation/chquery.
   — cross-repo initiative + progress ledger (handoff docs + git + telemetry recency by
   `gitBranch` → momentum `active`/`slowing`/`stalled`, last-touched, next-step).
   **Degrades to handoff+git** when telemetry is off/unreachable.
-  Surfaced via `/initiatives` and `/standup`. Caveats: momentum = recency of touch, NOT %
+  Surfaced via `/initiative-scan` and `/standup`. Caveats: momentum = recency of touch, NOT %
   done; initiative↔commit linking is heuristic slug-matching; git worktrees collapse to
   their canonical repo. Momentum times from the last genuine USER-turn timestamp, **not the
   transcript file mtime** (Claude Code rewrites `.jsonl` in place → mtime falsely reads as

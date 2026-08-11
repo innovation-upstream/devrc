@@ -45,8 +45,9 @@ Read them all before forming conclusions.
   one-line-per-file layout map of the re-read dirs, and the gotchas behind the recurring
   errors. Keep it ~40–60 lines — it loads every session, so high-signal, not a dump.
 
-**C. Skills / slash commands** (`~/.claude/commands/`, `~/.claude/skills/`, `./.claude/`)
-- Command too large or drifting? Heavy commands cost tokens on every invocation.
+**C. Skills / slash commands** (`~/.claude/skills/`, `./.claude/`) — slash-commands ARE skills
+now (`~/.claude/skills/<name>/SKILL.md`, invoked as `/<name>`); there is no `commands/` dir.
+- Skill body too large or drifting? A skill costs tokens on every invocation.
 - Lore for a *different* repo embedded here → relocate it (move, don't delete — append to
   the owning repo first, leave a pointer).
 - Stale references (bindings/scripts that no longer exist)? **Verify before pruning** —
