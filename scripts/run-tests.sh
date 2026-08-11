@@ -184,7 +184,29 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 # fce27f2) while the value beside it had been bumped twice — to 6745 by #379.
 # A floor comment that no longer describes its own number is the "a comment is a
 # claim too" case from claude/RULES.md; rewritten rather than bumped again.
-MIN_TESTS="${MIN_TESTS:-6960}"
+#
+# 🔴 MERGE RESOLUTION (#376 <- origin/main). Both sides raised this floor
+# INDEPENDENTLY on different bases, so BOTH numbers are stale on the merged
+# tree — the BASE-DEPENDENT hazard above, arriving as a textual conflict:
+#     #376 feat/guard-commit-to-main  6897  (measured on base 5c53f38)
+#     origin/main via #378            6960  (measured on base 91aaa21)
+# The merged tree carries BOTH #376's guard-check suite and #378's
+# subsystem-resolver suite, so neither branch ever observed the real total.
+# Taking either side's number would have gone green on slack it never earned.
+# Re-MEASURED on the merged tree below, not computed from the two above.
+# MEASURED on the merged tree (this branch + origin/main @ 9f17cfc):
+#     TOTAL collected=7122  passed=7121  skipped=1  failed=0
+# and it reconciles exactly, so this is an accounting rather than a reading:
+#   main today                          6968  (= the 6960 floor + 7 from #380's
+#                                              test_settings_allow_junk.py and
+#                                              +1 from #386, neither of which
+#                                              raised the floor — that 8 of
+#                                              slack is exactly what a floor
+#                                              carried forward stops detecting)
+#   + this branch's guard-check suite    154  (test_guard_core.py 1156 -> 1310)
+#   = 7122
+# scripts/tests 1874 = #378's measured 1867 + #380's 7, confirming both landed.
+MIN_TESTS="${MIN_TESTS:-7122}"
 
 # --- GUARD 1: tool precondition ------------------------------------------------
 # Every binary the suites `skipif` on. Absence must be an ERROR, never a skip.
