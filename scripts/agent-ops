@@ -377,9 +377,15 @@ def query_telemetry_freshness(timeout=TELEM_QUERY_TIMEOUT):
     conn = Q.CHConn.from_env(env)  # raises if CLICKHOUSE_URL is absent
     conn.timeout = float(timeout)
     client = Q.CHClient(conn)
+    # Machine-generated heartbeats are excluded: browser-bridge emits one every
+    # 900s whether or not it can execute anything, so counting them would make
+    # this column read "fresh 15 min ago" for a bridge with no extension attached.
+    # Freshness here means OPERATOR-driven activity (same distinction deadman.py
+    # makes with MACHINE_CADENCE).
     sql = (
         "SELECT source, dateDiff('second', max(ts), now()) AS age_secs "
         "FROM %s WHERE ts > now() - INTERVAL 2 DAY "
+        "AND kind != 'heartbeat' "
         "GROUP BY source ORDER BY source" % conn.fq_table)
     rows = client.rows(sql)
     out = {}

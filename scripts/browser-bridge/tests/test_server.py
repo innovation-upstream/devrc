@@ -6674,8 +6674,7 @@ def test_start_heartbeat_disabled_at_zero_interval():
 def test_start_heartbeat_runs_and_stops():
     """The thread is real, is a daemon (a stuck heartbeat must never hold up
     shutdown), and stops promptly when the stop event is set."""
-    spool_before = S.HEARTBEAT_INTERVAL_S
-    t, stop = S.start_heartbeat(_FakeRegistry(), 0.01)
+    t, stop = S.start_heartbeat(_FakeRegistry(), 0.05)
     try:
         assert t is not None and t.daemon is True
         assert t.is_alive()
@@ -6683,25 +6682,106 @@ def test_start_heartbeat_runs_and_stops():
         stop.set()
         t.join(timeout=2.0)
     assert not t.is_alive(), "heartbeat thread did not stop"
-    assert S.HEARTBEAT_INTERVAL_S == spool_before
 
 
-def test_heartbeat_uses_the_real_registry_connected_definition(telemetry):
+def test_heartbeat_tracks_registry_liveness_across_the_stale_boundary(telemetry):
     """Structural: the heartbeat must read the SAME liveness definition /health
     reports (Registry.connected), not a second one that can disagree.
 
-    A live FakeExtension → connected True; after it stops and the instance goes
-    stale → False. Exercised through the real Registry, so a divergent definition
-    would have to break this test to exist.
+    Asserting only the connected=True side is a SPELLED guard, not a structural
+    one: a divergent definition that ignores staleness (e.g. `_instances or
+    connected`) satisfies it and survives. So this drives a REAL Registry across
+    the CONNECT_STALE_S boundary with an injected clock and pins BOTH sides —
+    the transition is the part a second definition cannot fake.
     """
     spool_dir = telemetry
-    srv, registry = _serve(poll_timeout=1.0)
-    ext = FakeExtension(srv, instance_id="hb-1", label="hb")
-    ext.start()
-    try:
-        assert _wait_count(srv, 1) is not None
-        S.emit_heartbeat_event(registry)
-        p = json.loads(_wait_events(spool_dir, 1)[0]["payload"])
-        assert p["connected"] is True and p["instances"] >= 1, p
-    finally:
-        ext.stop(); srv.shutdown(); srv.server_close()
+    clock = [1000.0]
+    reg = S.Registry(clock=lambda: clock[0])
+    # wait_timeout=0, NOT the usual _register_live(0.01): poll() derives its
+    # deadline from the INJECTED clock, so under a frozen clock any positive
+    # timeout spins forever. Zero registers the instance and returns immediately.
+    assert reg.poll("hb-1", "hb", 0) is None
+
+    S.emit_heartbeat_event(reg)
+    p = json.loads(_wait_events(spool_dir, 1)[0]["payload"])
+    assert p["connected"] is True and p["instances"] == 1, p
+    assert reg.connected is True, "fixture precondition"
+
+    clock[0] += S.CONNECT_STALE_S + 1        # the instance goes stale
+    assert reg.connected is False, "fixture precondition"
+    S.emit_heartbeat_event(reg)
+    p2 = json.loads(_wait_events(spool_dir, 2)[1]["payload"])
+    assert p2["connected"] is False and p2["instances"] == 0, p2
+
+
+def test_heartbeat_interval_keeps_the_deadman_budget_on_the_floor(telemetry):
+    """🔴 SEAM GUARD — the emitter's interval vs the consumer's bucket size.
+
+    HEARTBEAT_INTERVAL_S is the one load-bearing number in this feature, and
+    nothing in server.py can tell whether it is still small enough to do its job:
+    that is decided by deadman.py's BUCKET_SECONDS and FLOOR_BUCKETS, in another
+    tree. Left unpinned, `900` -> `90000` is a silent no-op — the heartbeat keeps
+    emitting, every test stays green, and the source goes back to being
+    undetectable.
+
+    So this imports the real consumer and asserts the RELATIONSHIP: the cadence
+    must be frequent enough that a live bridge's worst gap stays far under the
+    budget floor. It also pins the >0 default, because 0 disables the feature
+    entirely.
+    """
+    import importlib.util
+    dm_py = (Path(__file__).resolve().parents[2] / "collector" / "deadman.py")
+    spec = importlib.util.spec_from_file_location("deadman_seam", dm_py)
+    DM = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(DM)
+
+    assert S.HEARTBEAT_INTERVAL_S > 0, \
+        "the default must not disable the feature"
+    buckets_per_beat = S.HEARTBEAT_INTERVAL_S / DM.BUCKET_SECONDS
+    assert buckets_per_beat <= DM.FLOOR_BUCKETS / 4, (
+        f"heartbeat every {buckets_per_beat:.1f} deadman buckets is too sparse "
+        f"against a {DM.FLOOR_BUCKETS}-bucket floor — the budget will no longer "
+        "sit on the floor and the source becomes undetectable again")
+
+    # And the pair is actually declared machine-cadence downstream, or the
+    # heartbeat inflates every other source's active time (see MACHINE_CADENCE).
+    assert ("browser-bridge", "heartbeat") in DM.MACHINE_CADENCE, \
+        "deadman no longer treats the heartbeat as machine-cadence"
+
+
+def test_main_actually_starts_and_stops_the_heartbeat(monkeypatch, tmp_path):
+    """🔴 The wiring, not just the parts. Every other test here exercises
+    run_heartbeat/start_heartbeat directly, so `start_heartbeat(registry)` could
+    be deleted from main() and the whole suite stays green while the feature is
+    completely inert on both hosts.
+
+    Drives the real main() with a stub server whose serve_forever returns, and
+    asserts the thread was started with the real registry AND stopped on the way
+    out (a leaked heartbeat would keep emitting after a shutdown).
+    """
+    started, stopped = [], []
+
+    class _StubServer:
+        def serve_forever(self):
+            return None
+
+        def server_close(self):
+            return None
+
+    class _StubStop:
+        def set(self):
+            stopped.append(True)
+
+    def _fake_start(registry, interval=None):
+        started.append(registry)
+        return object(), _StubStop()
+
+    monkeypatch.setenv("BROWSER_BRIDGE_TOKEN_FILE", str(tmp_path / "token"))
+    monkeypatch.setattr(S, "build_server", lambda *a, **kw: _StubServer())
+    monkeypatch.setattr(S, "start_heartbeat", _fake_start)
+
+    assert S.main([]) == 0
+    assert len(started) == 1, "main() did not start the heartbeat"
+    assert isinstance(started[0], S.Registry), \
+        "the heartbeat was not given the server's own registry"
+    assert stopped == [True], "main() did not stop the heartbeat on shutdown"

@@ -925,20 +925,31 @@ def emit_heartbeat_event(registry) -> None:
 
     Deliberately NOT kind="cmd" — see the contract on emit_cmd_event's `kind`.
 
-    The payload carries whether an extension is currently connected, which makes
-    the row strictly more useful than a bare "the process is up": the bridge is
-    two halves, and the half that actually breaks in practice is the extension
-    end (a silent drop, an un-reloaded build). `Registry.connected` is the ONE
-    definition of live in this process, so asking it here cannot disagree with
-    what /health reports — and it drives the edge-triggered instance_lost logging
-    on a timer instead of only when traffic happens to arrive.
+    WHAT THE ROW PROVES, STATED HONESTLY. The deadman consumes only the row's
+    EXISTENCE, so what this detects is "the bridge process is running". The
+    `connected` field is DIAGNOSTIC METADATA, not an alarm: no consumer branches
+    on it today, so a bridge whose extension has silently dropped still reads
+    alive to the deadman. That gap is not a regression — nothing detected an
+    extension drop before either (the operator found out when a command failed) —
+    but do not describe this heartbeat as covering it. Wiring an alarm to
+    `connected` is a separate change with its own consumer.
+
+    It is still worth emitting: it makes a drop visible in `activity.events`
+    afterwards, and reading `Registry.connected` here drives the edge-triggered
+    instance_lost logging on a timer instead of only when traffic arrives.
+    `Registry.connected` is the ONE definition of live in this process, so this
+    cannot disagree with what /health reports.
 
     Metadata-only and best-effort like every other emit: a bool and a count, no
     URL/domain/title/content, and nothing here may raise into the caller.
     """
     try:
-        connected = bool(registry.connected)
-        live = len(registry.snapshot())
+        # ONE lock acquisition, not two: `connected` is just `bool(live)` over
+        # the same snapshot, and taking the lock twice could report a bool and a
+        # count from two different instants.
+        live_instances = registry.snapshot()
+        live = len(live_instances)
+        connected = bool(live)
     except Exception:  # noqa: BLE001 — a registry problem must not kill the thread.
         connected, live = False, 0
     emit_cmd_event(op="heartbeat", key="", outcome="ok", duration_ms=0,
@@ -2677,7 +2688,7 @@ def main(argv=None) -> int:
         ping_timeout=ping_timeout,
         heartbeat_s=HEARTBEAT_INTERVAL_S)
     _warn_poll_timeout_vs_extension_budget(poll_timeout)
-    _hb_thread, hb_stop = start_heartbeat(registry)
+    _heartbeat, hb_stop = start_heartbeat(registry)  # daemon thread; stopped below
     try:
         server.serve_forever()
     except KeyboardInterrupt:
