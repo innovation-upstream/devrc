@@ -41,11 +41,18 @@
 # Scope: home-manager (user-level) — the bulk of this repo's changes.
 # It does NOT run `sudo nixos-rebuild` (needs an interactive password);
 # system/i3 changes are surfaced as a remaining manual step, not attempted.
-# It ALSO rsyncs the per-host Claude skills (~/.claude/skills/, not in git/nix)
-# from the WORKBENCH to the laptop so the skill set does not drift. The workbench
-# is the source of truth: the rsync ONLY runs when the LOCAL host is the
-# workbench (workbench -> laptop). Run from the laptop it is SKIPPED, never
-# pushing laptop skills back onto the workbench (which would clobber the source).
+# It does NOT copy any file around by hand. ~/.claude/skills/ used to be rsynced
+# workbench -> laptop, from a time when skills were per-host and unmanaged. They
+# are now a `home.file` entry in nix/home.nix, so the per-host `home-manager
+# switch` above already deploys them — and the rsync had become actively
+# destructive: `rsync -a` implies `-l`, copying each store symlink with its link
+# text VERBATIM, so it replaced the laptop's links into its OWN home-manager
+# closure with links into the WORKBENCH's store path. That path does not exist on
+# the laptop, so all 15 ~/.claude/skills/*/SKILL.md were left DANGLING seconds
+# after the laptop's own switch had created them correctly — while ship.sh
+# printed "skills synced". Pinned by test_ship_never_rsyncs_a_home_manager_
+# managed_path in scripts/tests/test_ship_converge.py: nothing home-manager
+# manages may also be hand-copied here, in either direction.
 #
 # Verifier (cheap + automatic): each host ends ON the `main` BRANCH at
 # HEAD == origin/main AND `home-manager switch` exits 0. It is not enough for
@@ -386,25 +393,10 @@ if [ "$DO_REMOTE" = 1 ]; then
     echo "[$REMOTE_ROLE] converge exited $remrc"
   fi
 
-  # Sync per-host Claude skills (~/.claude/skills/ — NOT in git/nix; the workbench
-  # is the source of truth where they're edited). Keeps the laptop's skill set from
-  # drifting. Additive (NO --delete) so a laptop-only skill is never clobbered.
-  # DIRECTION-SAFE: only ever push workbench -> laptop. So the rsync runs ONLY when
-  # THIS host is the workbench (remote == laptop). Run FROM the laptop we SKIP it —
-  # never pushing the laptop's skills onto the workbench (would clobber the source).
-  # Auxiliary + best-effort: a failure warns but never fails the ship. Skipped on a
-  # --no-switch dry-run (it is a real file change, like the home-manager switch).
-  if [ "$SHIP_NO_SWITCH" = 1 ]; then
-    : # dry-run: no file changes
-  elif [ "$SHIP_ROLE" != workbench ]; then
-    echo "[$REMOTE_ROLE] skills sync skipped (workbench is source of truth; not pushing laptop -> workbench)"
-  elif [ -d "$HOME/.claude/skills" ]; then
-    if rsync -az -e "ssh -o ConnectTimeout=10" "$HOME/.claude/skills/" "$REMOTE_SSH:.claude/skills/" 2>/dev/null; then
-      echo "[$REMOTE_ROLE] skills synced (~/.claude/skills/)"
-    else
-      echo "[$REMOTE_ROLE] ⚠ skill sync failed (non-fatal — check rsync on both hosts)"
-    fi
-  fi
+  # NOTE: no post-switch file sync happens here, deliberately. ~/.claude/skills/
+  # is deployed by the remote `home-manager switch` above (home.file in
+  # nix/home.nix); the rsync that used to live here re-broke it every run. See
+  # the header. Do not reintroduce a copy of any home-manager-managed path.
   echo
 fi
 

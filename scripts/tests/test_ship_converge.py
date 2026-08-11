@@ -2,8 +2,8 @@
 
 Everything runs against THROWAWAY git repos built in tmp_path. Nothing here
 touches ~/workspace/devrc, the real hosts, or `home-manager switch`
-(SHIP_NO_SWITCH=1 short-circuits the switch), and `--no-remote` means no SSH
-and no skills rsync are attempted. Hermetic: git + bash only, with
+(SHIP_NO_SWITCH=1 short-circuits the switch), and `--no-remote` means no SSH is
+attempted. Hermetic: git + bash only, with
 GIT_CONFIG_GLOBAL/SYSTEM redirected so the host's real git config (which sets
 rebase.autoStash=true) cannot influence the outcome.
 
@@ -21,6 +21,7 @@ moved. `test_ship_source_never_stashes` additionally greps the script itself.
 """
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -496,3 +497,107 @@ def test_ship_source_never_stashes():
     src = SHIP.read_text()
     assert "merge --ff-only" in src
     assert "merge.autoStash=false" in src
+
+
+# --------------------------------------------------------------------------- #
+# ship.sh must never copy over a path that home-manager MANAGES
+#
+# 2026-08-10: ship.sh rsynced `$HOME/.claude/skills/` workbench -> laptop AFTER
+# the remote `home-manager switch` had already deployed those same skills. `-a`
+# implies `-l`, so every store symlink copied with its link text VERBATIM — the
+# laptop's correct links into its OWN home-manager-files closure were replaced
+# by links into the WORKBENCH's store path, which does not exist there. All 15
+# `~/.claude/skills/*/SKILL.md` on the laptop were left dangling (ENOENT) while
+# ship.sh printed "skills synced". The rsync's own rationale ("NOT in git/nix")
+# had been false since skills became a `home.file` entry.
+#
+# The invariant is structural, not a spelling: a path home-manager owns must not
+# also be pushed around by hand, in EITHER direction, because whichever writer
+# runs last wins and the two disagree about what the correct link text is.
+# --------------------------------------------------------------------------- #
+HOME_NIX = Path(__file__).resolve().parents[2] / "nix" / "home.nix"
+
+
+def home_manager_managed_paths(nix_source):
+    """Home-relative paths declared as `home.file."<path>"` in a nix module."""
+    return set(re.findall(r'home\.file\."([^"]+)"', nix_source))
+
+
+def rsync_home_paths(shell_source):
+    """Home-relative paths that an `rsync` in `shell_source` reads or writes.
+
+    Comment lines are excluded (as in test_ship_source_never_stashes) — only
+    executable lines can actually move bytes. Recognises the three shapes a
+    home path takes in this script: `$HOME/x`, `~/x`, and an ssh destination
+    `$REMOTE:x` (a relative remote path is resolved against the remote $HOME).
+    Returns {path: line} so a failure can name the offending line.
+    """
+    found = {}
+    for line in shell_source.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if not re.search(r"\brsync\b", stripped):
+            continue
+        for tok in re.findall(r'[^\s]+', stripped):
+            tok = tok.strip("\"'")
+            path = None
+            if tok.startswith("$HOME/"):
+                path = tok[len("$HOME/"):]
+            elif tok.startswith("${HOME}/"):
+                path = tok[len("${HOME}/"):]
+            elif tok.startswith("~/"):
+                path = tok[2:]
+            elif ":" in tok:
+                # ssh destination: user@host:path / $VAR:path
+                remote = tok.split(":", 1)[1]
+                if remote and not remote.startswith("/") and not remote.startswith("//"):
+                    path = remote
+            if path:
+                found.setdefault(path.rstrip("/"), stripped)
+    return found
+
+
+def _overlaps(a, b):
+    """True when home-relative paths `a` and `b` are the same file or nested."""
+    return a == b or a.startswith(b + "/") or b.startswith(a + "/")
+
+
+def test_managed_path_extractors_actually_see_something():
+    """POSITIVE CONTROL for the parsers below.
+
+    Both halves of the real assertion are `not in` checks, so each one passes
+    just as happily against a parser that is wired to nothing. These two cases
+    prove the parsers CAN return a non-empty answer before a zero from them is
+    allowed to mean anything.
+    """
+    managed = home_manager_managed_paths(HOME_NIX.read_text())
+    assert ".claude/skills" in managed, (
+        "home.nix parser found no `.claude/skills` home.file entry — either the "
+        f"regex broke or skills stopped being managed. managed={sorted(managed)[:10]}"
+    )
+
+    # The exact pre-fix line, fed through the extractor it is meant to catch.
+    pre_fix = (
+        '  # a comment mentioning rsync of $HOME/.claude/commands/ must be ignored\n'
+        '    if rsync -az -e "ssh -o ConnectTimeout=10" "$HOME/.claude/skills/"'
+        ' "$REMOTE_SSH:.claude/skills/" 2>/dev/null; then\n'
+    )
+    paths = rsync_home_paths(pre_fix)
+    assert ".claude/skills" in paths, f"rsync parser missed the source path: {paths}"
+    assert ".claude/commands" not in paths, f"rsync parser read a COMMENT: {paths}"
+
+
+def test_ship_never_rsyncs_a_home_manager_managed_path():
+    """ship.sh must not hand-copy anything `home-manager switch` already owns."""
+    managed = home_manager_managed_paths(HOME_NIX.read_text())
+    for path, line in sorted(rsync_home_paths(SHIP.read_text()).items()):
+        clash = sorted(m for m in managed if _overlaps(path, m))
+        assert not clash, (
+            f"ship.sh rsyncs ~/{path}, which home-manager MANAGES (home.file "
+            f"{clash!r} in nix/home.nix). `rsync -a` copies store symlinks with "
+            f"their link text verbatim, so this overwrites the REMOTE host's "
+            f"links into its own nix store with links into THIS host's store — "
+            f"they dangle there. `home-manager switch` already deploys this "
+            f"path on every host; delete the rsync.\n  offending line: {line}"
+        )

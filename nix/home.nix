@@ -768,8 +768,7 @@ in
   # MUTABLE repo checkout via mkOutOfStoreSymlink — the skill then always tracks the
   # working tree (editable in place; a SKILL.md/CLI edit shows up with no switch).
   # Ships to both hosts declaratively, replacing the previously HAND-MADE symlinks.
-  # Additive to ship.sh's skills rsync (no-delete; identical symlinks on both hosts
-  # are a no-op). One-time on each host: `rm ~/.claude/skills/browser/{SKILL.md,browser}`
+  # One-time on each host: `rm ~/.claude/skills/browser/{SKILL.md,browser}`
   # if the old manual symlinks exist, else the first switch reports "would be clobbered".
   home.file.".claude/skills/browser/SKILL.md".source =
     config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/browser-bridge/SKILL.md";
@@ -2238,7 +2237,8 @@ in
   # curated recon nuance the /analyze-service write-back protocol appends to
   # (claude/commands/analyze-service.md). Measured 2026-08-06 on the workbench:
   # 20 files, 56,862 bytes, actively written that same day, with NO git history,
-  # NO backup and NO host sync (ship.sh rsyncs only ~/.claude/skills/). The
+  # NO backup and NO host sync (ship.sh copies no files between hosts at all —
+  # it converges each host through git + `home-manager switch`). The
   # content is not re-derivable — it records gotchas and incident tie-ins that
   # were true at a moment in time — so one bad agent Write destroyed it silently.
   #
