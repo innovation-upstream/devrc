@@ -157,19 +157,21 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 # MEASURED 2026-08-10 on `nix build .#checks.x86_64-linux.pytests`, post-rebase
 # onto 91aaa21 (#379), not computed. CONTROL PAIR under one tool set, same
 # command, same machine:
-#     base 91aaa21 : TOTAL collected=PLACEHOLDER_BASE   scripts/tests=PLACEHOLDER_BASE_DIR
-#     this branch  : TOTAL collected=PLACEHOLDER_HEAD   scripts/tests=PLACEHOLDER_HEAD_DIR
-#   The delta is exactly the new scripts/tests/test_subsystem_resolver.py suite.
+#     base 91aaa21 : TOTAL collected=6745  passed=6744  failed=0  scripts/tests=1652
+#     this branch  : TOTAL collected=6945  passed=6944  failed=0  scripts/tests=1852
+#   +200, and 1852-1652 = 200 = exactly the new
+#   scripts/tests/test_subsystem_resolver.py suite.
 #   That attribution is also the positive control proving the gate RUNS the new
 #   suite: it needed no HERMETIC_TARGETS entry, because `scripts/tests` is
 #   already a directory target (same as the 2026-08-06 note above), and the
 #   delta on that directory's OWN line is what demonstrates it rather than
 #   asserting it.
 #
-# 🔴 RE-MEASURED, NOT CARRIED FORWARD. The pre-rebase value on this branch was
-# 6940 against base 5c53f38's 6743. #379 then landed and moved the base, so 6940
-# was stale the moment it did — the number above is what the merged tree
-# actually reports, not 6940 plus #379's delta.
+# 🔴 RE-MEASURED, NOT CARRIED FORWARD, AND NOT COMPUTED. The pre-rebase value on
+# this branch was 6940 against base 5c53f38's 6743. #379 then landed and moved
+# the base, so 6940 was stale the moment it did. Arithmetic on the old numbers
+# predicted 6942; the merged tree actually reports 6945, because this branch also
+# gained 3 tests from its own review fix. The number above is the measurement.
 #
 # EXPECTED_SKIPS is untouched: skipped=1, the one pinned entry. The new suite
 # adds ZERO skips by construction — no external binary, no network, no path
@@ -179,7 +181,7 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 # fce27f2) while the value beside it had been bumped twice — to 6745 by #379.
 # A floor comment that no longer describes its own number is the "a comment is a
 # claim too" case from claude/RULES.md; rewritten rather than bumped again.
-MIN_TESTS="${MIN_TESTS:-6745}"
+MIN_TESTS="${MIN_TESTS:-6945}"
 
 # --- GUARD 1: tool precondition ------------------------------------------------
 # Every binary the suites `skipif` on. Absence must be an ERROR, never a skip.
