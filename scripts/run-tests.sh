@@ -207,34 +207,100 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 #   = 7122
 # scripts/tests 1874 = #378's measured 1867 + #380's 7, confirming both landed.
 #
-# 🔴 SAME HAZARD, THIRD TIME IN ONE WEEK (feat/drift-host-parity, 2026-08-11).
-# This branch measured 6770 on base c7059bb; #378/#382 landed and it became
-# 6993 on base 9f17cfc; #376 then landed and it became the number below. Every
-# one of those was correct when measured and wrong within hours. The floor is
-# BASE-DEPENDENT and that is not a caveat, it is the normal case on a repo with
-# concurrent branches.
+# 2026-08-11, the opencode pipe-truncation fix: 7122 -> 7127. MEASURED in BOTH
+# tiers on this branch, not computed — dev-host `run-tests.sh --set all` and
+# `nix build .#checks.x86_64-linux.pytests` each report
+#     TOTAL collected=7127  passed=7126  skipped=1  failed=0
+# and it reconciles: +3 in scripts/tests/test_opencode_engine.py (the flush-race
+# fixture control, the behavioural pin, the call-site ledger) and +2 in
+# scripts/tests/test_run_tests_preconditions.py (the REQUIRED_TOOLS seam), so
+# scripts/tests goes 1874 -> 1879 and nothing else moves.
 #
-# MEASURED on the merged tree (this branch + origin/main @ e0cf5d2), not
-# computed from the pair above:
-#     TOTAL collected=7147  passed=7146  skipped=1  failed=0
-#     scripts/tests=1899
-# It reconciles, so this is an accounting and not just a reading:
-#   main today (post-#376)              7122
-#   + host-parity tests                   25  (test_drift_check.py 135 -> 160:
-#                                              24 new tests + one parametrize
-#                                              case on UNIT_PATH_REQUIREMENTS
-#                                              for `sort`)
-#   = 7147
-# and scripts/tests 1874 -> 1899 is the same +25 on the directory's OWN line —
-# the per-directory delta is the positive control that the gate RUNS the new
-# tests rather than merely tolerating them. Counted from the runner's structured
-# summary, never from an exit code.
+# 🔴 Worth saying once, because this floor could not have caught what that PR
+# fixed: the dev-host tier had 17 FAILURES on the exact tree where the sandbox
+# reported this line clean. A collected-count floor sees tests that VANISH, never
+# tests that RUN AND FAIL in only one tier. Read both tiers' output.
 #
-# EXPECTED_SKIPS untouched: skipped=1, the one pinned entry. The host-parity
-# tests add ZERO skips by construction — every fixture is built in tmp_path, so
-# there is no `$HOME`-conditional skip (GUARD 2 forbids that shape by name, and
-# it is exactly the shape that would go green on the host that HAS the bug).
-MIN_TESTS="${MIN_TESTS:-7147}"
+# 🔴 MERGE RESOLUTION AGAIN, one day later (#384 <- origin/main @ e0cf5d2), and
+# the SAME hazard for the third time on this one line. #384 measured 6984 on a
+# merge with 5a20dff; #376 then landed and moved main to 7122. Both numbers were
+# stale on the tree below, so neither side's was taken.
+# CONTROL PAIR, one tool set, same machine, both read off the summary CONTENT:
+#     main e0cf5d2 : TOTAL collected=7122  passed=7121  skipped=1  failed=0
+#                    scripts/tests=1874
+#     merged tree  : TOTAL collected=7138  passed=7137  skipped=1  failed=0
+#                    scripts/tests=1890
+# +16, and the attribution was MEASURED per file rather than assumed: exactly
+# ONE file's collected count moves, test_ship_converge.py 17 -> 33. Both of this
+# PR's commits are in that 16 — 2 for the rsync regression test and its positive
+# control, 14 for the ship.sh consumer check — because main does not carry
+# either commit. The first guess, "+16 = the consumer-check cases", was wrong by
+# 2 and would have been an unfalsifiable-looking round number in a comment.
+# That per-file delta is also the positive control proving the gate RUNS them:
+# no HERMETIC_TARGETS entry was needed because scripts/tests is already a
+# directory target, so movement on that file's own count is the only evidence
+# they execute at all.
+#
+# ⚠ #384 independently measured main-at-5a20dff as 6968, matching #376's
+# accounting above from a different branch — so the 8 of slack it names is
+# confirmed by two measurements, not one.
+#
+# 🔴 IF THIS LINE CONFLICTS AGAIN, do not resolve it by arithmetic on the two
+# numbers. Three consecutive PRs have now hit it, and every time the answer was
+# a number NEITHER side had. Re-run the gate on the merged tree and copy what it
+# reports.
+#
+# 🔴 FOURTH RESOLUTION (this branch <- origin/main @ f380936, 2026-08-11), and
+# the number above is stale AGAIN: #392 landed between this branch's measurement
+# and this merge, taking main from 7122 to 7127. So BOTH sides are wrong here —
+# this branch's 7138 was measured against main@e0cf5d2, and main's 7127 does not
+# carry this branch's tests.
+#   main f380936 (post-#392)             7127  (measured; #392 added +3 in
+#                                              test_opencode_engine.py and +2 in
+#                                              test_run_tests_preconditions.py)
+#   + this branch  test_ship_converge.py  +16  (17 -> 33)
+#   = 7143, and scripts/tests 1879 -> 1895 by the same +16 on its OWN line.
+# MEASURED on this merged tree in BOTH tiers, then reconciled against that
+# arithmetic — the arithmetic CHECKS the measurement, it never sources it.
+#
+# ⚠ RERERE HAZARD, hit for real while resolving this line. `rerere.enabled` is
+# true in this repo, so the resolution recorded on a DIFFERENT merge of this same
+# conflict was replayed here automatically and silently — it wrote 7168, the
+# total for a four-way integration tree that also carried #391 and #377, onto a
+# tree containing NEITHER. rerere replays the TEXT you last chose for a conflict
+# whose two sides hash the same; it knows nothing about which branches are in the
+# tree. On a BASE-DEPENDENT constant that is exactly wrong. Always re-read this
+# line after a "Resolved ... using previous resolution" message, and re-measure.
+#
+# 🔴 Read BOTH tiers. #392 exists because the dev-host tier had 17 failures on a
+# tree where this sandbox line was clean: a collected-count floor sees tests that
+# VANISH, never tests that RUN AND FAIL in one tier only. Counted from the
+# runner's structured summary CONTENT — never an exit code, which the wrapper's
+# trailing echo has now swallowed for three separate agents.
+#
+# EXPECTED_SKIPS untouched: skipped=1, the one pinned entry. This branch adds
+# ZERO skips — every fixture is built in tmp_path.
+#
+# 🔴 FIFTH RESOLUTION (this branch <- origin/main @ 58dd9e2, 2026-08-11). Same
+# base-dependent line, third stale number in one day. This branch measured 7147
+# against main@e0cf5d2; #392 then landed (+5) and #384 landed (+16), so main is
+# now 7143 and NEITHER side's number describes this tree.
+#   main 58dd9e2 (post-#392, post-#384)   7143  (measured, both tiers)
+#   + this branch  test_drift_check.py     +25  (135 -> 160: 24 new tests, plus
+#                                                one parametrize case on
+#                                                UNIT_PATH_REQUIREMENTS for `sort`)
+#   = 7168, and scripts/tests 1895 -> 1920 by the same +25 on its OWN line.
+# MEASURED on this merged tree in BOTH tiers, then reconciled against that
+# arithmetic — the arithmetic CHECKS the measurement, it never sources it.
+#
+# ⚠ RERERE. `rerere.enabled` is true here, and on the #384 sync it silently
+# replayed a resolution recorded on a DIFFERENT merge of this same conflict,
+# writing a four-way total onto a two-way tree. rerere replays the TEXT last
+# chosen for a conflict whose sides hash the same; it knows nothing about which
+# branches are in the tree, which on a base-dependent constant is exactly wrong.
+# After any "Resolved ... using previous resolution", re-read this line and
+# re-measure.
+MIN_TESTS="${MIN_TESTS:-7168}"
 
 # --- GUARD 1: tool precondition ------------------------------------------------
 # Every binary the suites `skipif` on. Absence must be an ERROR, never a skip.

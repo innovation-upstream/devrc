@@ -41,20 +41,36 @@
 # Scope: home-manager (user-level) — the bulk of this repo's changes.
 # It does NOT run `sudo nixos-rebuild` (needs an interactive password);
 # system/i3 changes are surfaced as a remaining manual step, not attempted.
-# It ALSO rsyncs the per-host Claude skills (~/.claude/skills/, not in git/nix)
-# from the WORKBENCH to the laptop so the skill set does not drift. The workbench
-# is the source of truth: the rsync ONLY runs when the LOCAL host is the
-# workbench (workbench -> laptop). Run from the laptop it is SKIPPED, never
-# pushing laptop skills back onto the workbench (which would clobber the source).
+# It does NOT copy any file around by hand. ~/.claude/skills/ used to be rsynced
+# workbench -> laptop, from a time when skills were per-host and unmanaged. They
+# are now a `home.file` entry in nix/home.nix, so the per-host `home-manager
+# switch` above already deploys them — and the rsync had become actively
+# destructive: `rsync -a` implies `-l`, copying each store symlink with its link
+# text VERBATIM, so it replaced the laptop's links into its OWN home-manager
+# closure with links into the WORKBENCH's store path. That path does not exist on
+# the laptop, so all 15 ~/.claude/skills/*/SKILL.md were left DANGLING seconds
+# after the laptop's own switch had created them correctly — while ship.sh
+# printed "skills synced". Pinned by test_ship_never_rsyncs_a_home_manager_
+# managed_path in scripts/tests/test_ship_converge.py: nothing home-manager
+# manages may also be hand-copied here, in either direction.
 #
-# Verifier (cheap + automatic): each host ends ON the `main` BRANCH at
-# HEAD == origin/main AND `home-manager switch` exits 0. It is not enough for
-# HEAD to merely equal main's commit — a feature branch whose tip is an
-# ancestor of origin/main could be fast-forwarded to that commit and pass a
-# commit-only check while leaving the host stranded on the feature branch with
-# a stale local `main`. So we explicitly `git checkout main` and land there.
-# Diverged local `main` (un-pushed commits) is reported and that host's switch
-# is skipped — never auto-rebased.
+# Verifier (cheap + automatic), in two independent halves:
+#
+#   GIT + DEPLOY — each host ends ON the `main` BRANCH at HEAD == origin/main
+#   AND `home-manager switch` exits 0. It is not enough for HEAD to merely equal
+#   main's commit — a feature branch whose tip is an ancestor of origin/main
+#   could be fast-forwarded to that commit and pass a commit-only check while
+#   leaving the host stranded on the feature branch with a stale local `main`.
+#   So we explicitly `git checkout main` and land there. Diverged local `main`
+#   (un-pushed commits) is reported and that host's switch is skipped — never
+#   auto-rebased.
+#
+#   CONSUMER — every path home-manager's own manifest says it deployed on that
+#   host must actually RESOLVE there (verify_managed_artifacts, rc 12). The half
+#   above is a claim about the DEPLOY; this one is the only claim about what the
+#   host ends up holding, and the two are independent: the laptop passed the
+#   first for months while its entire ~/.claude/skills/ dangled. Reported per
+#   host with the count of what was EXAMINED, never a bare "0 dangling".
 #
 # Skips are per-host and non-fatal to the run: if one host cannot fast-forward,
 # it is reported with the blocking files named and the OTHER host is still
@@ -73,7 +89,11 @@
 #      that nothing is ever stashed; it is repurposed, not retired.)
 #   8  SKIPPED — local main has diverged (un-pushed commits); needs a rebase
 #   9  home-manager switch failed
-#   11 post-switch verification failed
+#   11 post-switch verification failed (git state: wrong branch or wrong commit)
+#   12 post-switch CONSUMER check failed — paths home-manager deployed on that
+#      host do not resolve there (dangling/absent), or the manifest listing them
+#      could not be read, in which case NOTHING was examined and the run proves
+#      nothing about that host. Both spellings are RED on purpose.
 #
 # Usage:
 #   scripts/ship.sh              # converge local host + the other (remote) host
@@ -269,6 +289,129 @@ warn_ignored_overwrites() {
   fi
 }
 
+# --- The post-switch CONSUMER check -------------------------------------------
+# ma_manifest — path of the home-files tree of THIS host'"'"'s current
+# home-manager generation, i.e. the authoritative list of every path
+# home-manager deployed here. Two locations are probed because home-manager has
+# used both; the first that exists wins. The trailing slash on the -d test is
+# load-bearing: home-files is itself a SYMLINK into the store.
+ma_manifest() {
+  ma_state="${XDG_STATE_HOME:-$HOME/.local/state}"
+  for ma_c in "$ma_state/home-manager/gcroots/current-home/home-files" \
+              "$ma_state/nix/profiles/home-manager/home-files"; do
+    if [ -d "$ma_c/" ]; then echo "$ma_c"; return 0; fi
+  done
+  return 1
+}
+
+# verify_managed_artifacts — assert that everything home-manager says it
+# deployed on this host actually RESOLVES here. Returns 0/1; prints its own line.
+#
+# WHY: a deploy reporting success is a claim about the DEPLOY, not about the
+# CONSUMER. Since some unknown date the laptop has had a 100% broken
+# ~/.claude/skills/ — every managed symlink pointing into the WORKBENCH'"'"'s
+# /nix/store, which does not exist there (still true when this was written:
+# 46 dangling of 289 managed paths, measured 2026-08-11) — and THREE layers
+# reported healthy the whole time: ship.sh printed "skills synced" while causing
+# it (the rsync above, now removed), drift-check.sh only ever compares git refs,
+# and the rsync'"'"'s own comment asserted the opposite of the truth. Prose in
+# claude/RULES.md already carried the lesson, from a different incident, and did
+# not prevent this one. Removing the rsync stops the cause; this stops the next
+# instance of the CLASS from going unnoticed for months.
+#
+# STRUCTURAL, NOT SPELLED. The path set comes from home-manager'"'"'s own manifest,
+# never from a hardcoded "skills/" — so the same check catches the identical
+# break in commands/, hooks/, the opencode mirrors, or any home.file target
+# added tomorrow, and it needs no exclusion list for unmanaged content nested
+# inside a managed directory (~/.claude/skills/clickup/ is a standalone git
+# checkout whose node_modules is full of pnpm symlinks; the manifest simply
+# never mentions it).
+#
+# WHAT IT CANNOT SEE, so nobody reads more into a green than is there: a managed
+# path REPLACED by a real file of the same name resolves fine and is not
+# reported. This answers "does every managed path resolve", not "is every
+# managed path the store link nix intended".
+#
+# 🔴 EVERY exit from here that did not examine files is RED, never a quiet pass.
+# "0 dangling" out of 0 examined is precisely the reassuring zero that let this
+# run for months, so the success line always carries the EXAMINED count too.
+# 🔴 GNU-only find flags are banned here. MEASURED 2026-08-11: over `ssh <laptop>`
+# `find` resolves to a BusyBox applet, which has no -printf — the first draft
+# used it and reported "checked=1 dangling=0" for a host with 46 dangling links.
+# This routine is what runs over ssh on the remote host, so the remote leg is
+# exactly where a GNU-ism silently zeroes the count.
+verify_managed_artifacts() {
+  ma_hf=$(ma_manifest)
+  if [ -z "$ma_hf" ]; then
+    ma_state="${XDG_STATE_HOME:-$HOME/.local/state}"
+    echo "[$host] ❌ MANAGED ARTIFACTS NOT CHECKED — cannot locate the home-manager file manifest."
+    echo "[$host]   looked for home-files under:"
+    echo "[$host]     - $ma_state/home-manager/gcroots/current-home"
+    echo "[$host]     - $ma_state/nix/profiles/home-manager"
+    echo "[$host]   0 artifacts were examined, so this run proves NOTHING about the consumer."
+    return 1
+  fi
+
+  ma_list=$(mktemp)
+  find "$ma_hf/" -mindepth 1 ! -type d > "$ma_list" 2>/dev/null
+  ma_checked=0; ma_dangling=0; ma_absent=0; ma_unparsed=0; ma_report=""
+  while IFS= read -r ma_p; do
+    ma_rel="${ma_p#"$ma_hf/"}"
+    [ -n "$ma_rel" ] || continue
+    # A leading slash means the prefix strip failed, i.e. find changed its
+    # output shape. Counting those as OK would turn the whole walk green.
+    case "$ma_rel" in
+      /*) ma_unparsed=$((ma_unparsed + 1)); continue ;;
+    esac
+    ma_checked=$((ma_checked + 1))
+    ma_t="$HOME/$ma_rel"
+    [ -e "$ma_t" ] && continue
+    if [ -L "$ma_t" ]; then
+      ma_dangling=$((ma_dangling + 1))
+      ma_report="$ma_report$ma_rel -> $(readlink "$ma_t") (dangling)
+"
+    else
+      ma_absent=$((ma_absent + 1))
+      ma_report="$ma_report$ma_rel (absent)
+"
+    fi
+  done < "$ma_list"
+  rm -f "$ma_list"
+
+  if [ "$ma_unparsed" != 0 ]; then
+    echo "[$host] ❌ MANAGED ARTIFACTS NOT CHECKED — could not derive home-relative paths"
+    echo "[$host]   from the manifest ($ma_unparsed entries under $ma_hf did not carry that prefix)."
+    echo "[$host]   find(1) changed its output shape; the walk is unreliable, not clean."
+    return 1
+  fi
+  if [ "$ma_checked" = 0 ]; then
+    echo "[$host] ❌ MANAGED ARTIFACTS NOT CHECKED — the manifest at $ma_hf listed NO files."
+    echo "[$host]   a zero here is a broken probe, not a clean host: home-manager always"
+    echo "[$host]   deploys at least .zshenv/.profile. Check that find(1) supports"
+    echo "[$host]   -mindepth and that home-files is traversable."
+    return 1
+  fi
+
+  ma_bad=$((ma_dangling + ma_absent))
+  if [ "$ma_bad" = 0 ]; then
+    echo "[$host] ✅ managed artifacts resolve — $ma_checked checked, 0 dangling, 0 absent"
+    return 0
+  fi
+
+  # Deliberately the SAME "N checked, M dangling, K absent" shape as the success
+  # line: the examined count must be legible on both, and one parser must read
+  # either. A failure line that dropped it would hide the vacuous-zero case.
+  echo "[$host] ❌ MANAGED ARTIFACTS BROKEN — $ma_checked checked, $ma_dangling dangling, $ma_absent absent"
+  echo "[$host]   home-manager deployed these paths; on this host they do not resolve:"
+  printf "%s" "$ma_report" | head -12 | sed "s|^|[$host]     - |"
+  ma_more=$((ma_bad - 12))
+  [ "$ma_more" -gt 0 ] && echo "[$host]     ... and $ma_more more"
+  echo "[$host]   a link into ANOTHER host store path means something copied this path"
+  echo "[$host]   between hosts AFTER the switch — home-manager must be the only writer."
+  echo "[$host]   repair on that host:  home-manager switch --flake $repo --impure"
+  return 1
+}
+
 # 0) Refuse a mid-merge / conflicted tree OUTRIGHT, before anything else.
 #    This must run even when HEAD is already AT origin/main, because that path
 #    short-circuits the merge entirely and would otherwise fall straight through
@@ -348,22 +491,28 @@ else
   fi
 fi
 
-# 4) Verify: must be ON branch main AND HEAD == origin/main.
+# 4) Verify the GIT state: must be ON branch main AND HEAD == origin/main.
 now=$(git rev-parse HEAD)
 nowbranch=$(git symbolic-ref --quiet --short HEAD || echo "DETACHED")
-if [ "$now" = "$target" ] && [ "$nowbranch" = "main" ]; then
-  # Name the dirty state explicitly. Converging a dirty tree is now the NORMAL
-  # supported path, and home-manager builds from the WORKING TREE — so what got
-  # deployed is origin/main PLUS that WIP, not origin/main. Saying so is the
-  # difference between an honest verifier and a misleading one.
-  if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
-    echo "[$host] ✅ VERIFIED — on branch main at origin/main + switched"
-    echo "[$host]   NOTE: tree is DIRTY — what was built/deployed is origin/main + local WIP."
-  else
-    echo "[$host] ✅ VERIFIED — on branch main at origin/main (clean tree) + switched"
-  fi
-else
+if [ "$now" != "$target" ] || [ "$nowbranch" != "main" ]; then
   echo "[$host] ❌ VERIFY FAILED — branch=$nowbranch HEAD=$now origin/main=$target"; exit 11
+fi
+
+# 5) Verify the CONSUMER. Steps 3 and 4 together only establish that the deploy
+#    RAN and that the source it built from is the right commit — both were true
+#    on the laptop for the entire time its ~/.claude/skills/ was 100% dangling.
+#    This is the step that looks at what the host actually has.
+verify_managed_artifacts || exit 12
+
+# 6) Verdict. Name the dirty state explicitly: converging a dirty tree is the
+#    NORMAL supported path, and home-manager builds from the WORKING TREE — so
+#    what got deployed is origin/main PLUS that WIP, not origin/main. Saying so
+#    is the difference between an honest verifier and a misleading one.
+if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+  echo "[$host] ✅ VERIFIED — on branch main at origin/main + switched"
+  echo "[$host]   NOTE: tree is DIRTY — what was built/deployed is origin/main + local WIP."
+else
+  echo "[$host] ✅ VERIFIED — on branch main at origin/main (clean tree) + switched"
 fi
 '
 
@@ -386,25 +535,10 @@ if [ "$DO_REMOTE" = 1 ]; then
     echo "[$REMOTE_ROLE] converge exited $remrc"
   fi
 
-  # Sync per-host Claude skills (~/.claude/skills/ — NOT in git/nix; the workbench
-  # is the source of truth where they're edited). Keeps the laptop's skill set from
-  # drifting. Additive (NO --delete) so a laptop-only skill is never clobbered.
-  # DIRECTION-SAFE: only ever push workbench -> laptop. So the rsync runs ONLY when
-  # THIS host is the workbench (remote == laptop). Run FROM the laptop we SKIP it —
-  # never pushing the laptop's skills onto the workbench (would clobber the source).
-  # Auxiliary + best-effort: a failure warns but never fails the ship. Skipped on a
-  # --no-switch dry-run (it is a real file change, like the home-manager switch).
-  if [ "$SHIP_NO_SWITCH" = 1 ]; then
-    : # dry-run: no file changes
-  elif [ "$SHIP_ROLE" != workbench ]; then
-    echo "[$REMOTE_ROLE] skills sync skipped (workbench is source of truth; not pushing laptop -> workbench)"
-  elif [ -d "$HOME/.claude/skills" ]; then
-    if rsync -az -e "ssh -o ConnectTimeout=10" "$HOME/.claude/skills/" "$REMOTE_SSH:.claude/skills/" 2>/dev/null; then
-      echo "[$REMOTE_ROLE] skills synced (~/.claude/skills/)"
-    else
-      echo "[$REMOTE_ROLE] ⚠ skill sync failed (non-fatal — check rsync on both hosts)"
-    fi
-  fi
+  # NOTE: no post-switch file sync happens here, deliberately. ~/.claude/skills/
+  # is deployed by the remote `home-manager switch` above (home.file in
+  # nix/home.nix); the rsync that used to live here re-broke it every run. See
+  # the header. Do not reintroduce a copy of any home-manager-managed path.
   echo
 fi
 
@@ -415,6 +549,6 @@ else
   echo "  rc3=no-repo  rc4=fetch/origin-main-unavailable  rc5=skipped:conflicted-tree(merge in progress)"
   echo "  rc6=host-unidentified"
   echo "  rc7=skipped:cannot-fast-forward(local changes in the way)  rc8=skipped:diverged(needs rebase)"
-  echo "  rc9=switch-failed  rc11=verify-failed"
+  echo "  rc9=switch-failed  rc11=verify-failed(git-state)  rc12=consumer-broken(managed artifacts do not resolve)"
 fi
 exit "$rc"
