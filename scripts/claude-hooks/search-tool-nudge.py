@@ -5,10 +5,18 @@ inject context pointing at the native tool.
 
 Why this exists: measured over a 30-day window of activity telemetry, Bash is 71% of all
 Claude tool calls (workbench 31,355 / laptop 6,164) while Grep+Glob together were used
-50 times — and ZERO times on the laptop. RULES.md's "Tool Optimization" section already
-says "Grep over bash grep, Glob over find"; that prose rule demonstrably does not work.
+50 times — and ZERO times on the laptop. RULES.md's "Tool Optimization" section said
+"Grep over bash grep, Glob over find"; that prose rule demonstrably did not work.
 Per RULES.md "Deterministic Over Prose" the replacement has to be structural, so this
 fires at the moment the search-shaped command runs.
+
+🔴 As of 2026-08-10 that prose section is GONE — retired from claude/RULES.md after a
+paired revert-and-rerun audit reproduced the telemetry finding (the control arm, WITH
+the rule loaded, reached for bash `grep` in 4 of 4 runs and never once used the Grep
+tool). See `claude/RULES-ARCHIVE.md#retired-tool-optimization`. So this hook is now the
+ONLY thing carrying "prefer the native search tools" — there is no prose fallback behind
+it. Weakening or disabling the detector removes the guidance entirely rather than
+downgrading it to a written rule.
 
 Design constraints, in priority order:
   1. NEVER blocks. It is a PostToolUse nudge — it only ever adds context, and always
