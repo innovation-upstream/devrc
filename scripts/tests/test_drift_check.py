@@ -1355,9 +1355,28 @@ def test_the_timer_is_gated_by_the_master_switch_and_the_service_is_not():
     assert "lib.optionals (serverMode && enableDriftDeadman) [ \"timers.target\" ]" in timer, (
         "the timer's WantedBy is not gated by the master switch:\n" + timer
     )
-    assert "enableDriftDeadman = false;" in HOME_NIX, (
-        "the master switch must ship OFF — enabling a timer is a live change to a "
-        "host and belongs in its own supervised deploy"
+    # The "must ship OFF" assertion that stood here was a TEMPORARY gate, and #406
+    # is the supervised deploy it demanded. It is retired rather than flipped.
+    #
+    # The flag sat false from #367 until both preconditions its own comment named
+    # were measured on a real host: (1) the ssh leg reaching the laptop from a
+    # systemd-user context, which found GENUINE drift on its first hand-run; and
+    # (2) the failure toast actually DISPLAYING — which was FALSE at first, because
+    # dunst was paused with 286 notifications queued, so the toast was sent, exited
+    # 0, and was silently binned. Four audit rounds had confirmed the exit code and
+    # the OnFailure wiring; none could see the notifier's output going nowhere.
+    # A timer alerting into a paused queue is worse than no timer — it manufactures
+    # the appearance of coverage over exactly the failure it exists to catch.
+    #
+    # What still needs pinning is the WIRING, not the value. The timer's WantedBy
+    # (asserted above) consults this flag, so deleting or renaming it silently
+    # un-gates the timer; that is the live hazard. Re-pinning the value would
+    # re-freeze a decision already made with evidence, and would make this test
+    # fail every time someone legitimately toggles it.
+    assert re.search(r"^\s*enableDriftDeadman = (true|false);", HOME_NIX, re.M), (
+        "enableDriftDeadman is no longer declared as a boolean literal — the "
+        "timer's WantedBy gate asserted above consults it by name, so removing "
+        "or renaming it un-gates the timer without any other test noticing"
     )
 
 
