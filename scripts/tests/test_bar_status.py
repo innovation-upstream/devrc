@@ -47,7 +47,8 @@ telemetry_block = _load("i3status-telemetry", "i3status_telemetry")
 # a LITERAL rather than imported from deadman.py: a test expectation derived
 # from the implementation it tests proves nothing (RULES.md).
 UNKNOWN_STATES = frozenset(
-    {"no-data", "unreachable", "query-failed", "not-configured"})
+    {"no-data", "unreachable", "query-failed", "not-configured",
+     "misconfigured", "presence-stalled"})
 
 
 # --------------------------------------------------------------------------- #
@@ -948,4 +949,29 @@ def test_deadman_unknown_states_fallback_is_not_empty(monkeypatch):
     which is precisely the failure this check exists to prevent."""
     monkeypatch.setattr(poll, "DEVRC_DIR", "/no/such/repo")
     assert poll._deadman_unknown_states() == UNKNOWN_STATES
+
+
+def test_the_fallback_state_set_MATCHES_the_deadman_it_stands_in_for():
+    """🔴 SEAM GUARD. The fallback above is a hardcoded COPY of
+    deadman.UNKNOWN_STATES. A state added to the deadman and not here renders as a
+    healthy green pill whenever the import path breaks — the silent green the
+    whole telemetry block exists to prevent. This pins the RELATIONSHIP, so the
+    set GROWING or SHRINKING on either side fails.
+    """
+    dm_py = str(SCRIPTS / "collector" / "deadman.py")
+    spec = importlib.util.spec_from_file_location("_pin_deadman", dm_py)
+    DM = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(DM)
+
+    real = set(DM.UNKNOWN_STATES)
+    # The literal pinned at the top of this file is the contract; both the real
+    # module and the poller's fallback must equal it exactly.
+    assert real == set(UNKNOWN_STATES), (
+        "deadman.UNKNOWN_STATES changed without updating this file AND "
+        "bar-status-poll's fallback: %s" % sorted(real ^ set(UNKNOWN_STATES)))
+    src = (SCRIPTS / "bar-status-poll").read_text()
+    for state in sorted(real):
+        assert '"%s"' % state in src, (
+            "bar-status-poll never mentions the %r state — its fallback set "
+            "cannot contain it" % state)
 

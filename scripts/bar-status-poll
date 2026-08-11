@@ -666,12 +666,19 @@ def _load_deadman():
 
 def _deadman_unknown_states():
     """The deadman module's UNKNOWN_STATES, with a fallback so this poller does
-    not silently treat an unknown verdict as healthy if the import breaks."""
+    not silently treat an unknown verdict as healthy if the import breaks.
+
+    🔴 The fallback is a HARDCODED COPY: a state added to deadman.UNKNOWN_STATES
+    and not added here renders as a healthy green pill whenever the import path
+    is broken — the exact silent-green this block exists to prevent. Pinned
+    against the real set by scripts/tests/test_bar_status.py.
+    """
     try:
         return _load_deadman().UNKNOWN_STATES
     except Exception:
         return frozenset({"no-data", "unreachable", "query-failed",
-                          "not-configured"})
+                          "not-configured", "misconfigured",
+                          "presence-stalled"})
 
 
 def read_prev_status(name: str):

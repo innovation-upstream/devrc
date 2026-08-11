@@ -127,11 +127,19 @@ CLAWGATE_ENV = os.path.join(HOME, ".claude", "clawgate.env")
 # the Local-health telemetry-freshness query. Reuses the collector's env for the
 # endpoint/creds; never hardcodes a new one.
 CHQUERY_PATH = os.path.join(DEVRC_DIR, "scripts", "validation", "chquery.py")
-# The deadman owns the ONE definition of "which (source, kind) pairs are machine
-# generated rather than operator-driven" (MACHINE_CADENCE). This panel needs the
-# same predicate, so it IMPORTS it rather than re-spelling it — a second copy
-# would silently disagree the day a timer-driven emitter is added, and the
-# deadman's own 🔴 note tells maintainers about exactly one place to edit.
+# The deadman owns the ONE definition of "which (source, kind) pairs are
+# MACHINE-GENERATED" (MACHINE_CADENCE). This panel needs the same predicate, so
+# it IMPORTS it rather than re-spelling it — a second copy would silently
+# disagree the day a timer-driven emitter is added.
+#
+# 🔴 MACHINE_CADENCE is NOT deadman.PRESENCE_SOURCES, and this panel must never
+# be "unified" onto the latter. They answer different questions: PRESENCE_SOURCES
+# asks "does this row prove a HUMAN is at the desk?" (so `claude`/`tool` are
+# excluded — an unattended agent must not mark the night active), while this
+# panel asks "is this row machine-generated?" and DOES count `claude`/`tool` as
+# real usage, because a `tool` source that stopped emitting is exactly what its
+# freshness column is for. Repointing this at PRESENCE_SOURCES would blank the
+# freshness of every agent-driven source.
 DEADMAN_PATH = os.path.join(DEVRC_DIR, "scripts", "collector", "deadman.py")
 
 # Scratchpad codename table — THE single source of truth for session<->codename
@@ -416,8 +424,11 @@ def query_telemetry_freshness(timeout=TELEM_QUERY_TIMEOUT):
     # Machine-generated rows are excluded: browser-bridge emits a heartbeat every
     # 900s whether or not it can execute anything, so counting them would make
     # this column read "fresh 15 min ago" for a bridge with no extension attached.
-    # Freshness here means OPERATOR-driven activity — the predicate is IMPORTED
-    # from deadman.MACHINE_CADENCE, not re-spelled (see machine_cadence_sql_filter).
+    # Freshness here means "a row that something actually DID", which INCLUDES
+    # agent-driven rows (`claude`, `tool`, `opencode`) — deliberately a wider set
+    # than deadman.PRESENCE_SOURCES, which answers the different question of
+    # whether a HUMAN was present. The predicate is IMPORTED from
+    # deadman.MACHINE_CADENCE, not re-spelled (see machine_cadence_sql_filter).
     sql = (
         "SELECT source, dateDiff('second', max(ts), now()) AS age_secs "
         "FROM %s WHERE ts > now() - INTERVAL 2 DAY "

@@ -86,21 +86,67 @@ def test_budget_is_capped():
 # --------------------------------------------------------------------------- #
 # parse_buckets — strict on purpose
 # --------------------------------------------------------------------------- #
+def headered(body: str) -> str:
+    """Prepend the exact header the live query (FORMAT TSVWithNames) emits."""
+    return D.TSV_HEADER + "\n" + body
+
+
 def test_parse_buckets_happy():
-    """5 fields: the current query. The 5th is the HUMAN-PRESENCE count.
+    """Header + 5 fields: the current query. The 5th is the HUMAN-PRESENCE count.
 
     🔴 Every number here is DISTINCT on purpose. An earlier version used
     n == n_presence (3, 3), which made "carry the presence column" and "ignore it
     and reuse n" byte-identical — a mutant that dropped the 5th field survived the
     whole suite. A fixture of equal values cannot tell two implementations apart.
 
-    The 5th field is AUTHORITATIVE when present: `i3` is a presence source and it
-    still parses to 0 here, because the server computed that.
+    The 5th field is AUTHORITATIVE when the header is present: `i3` is a presence
+    source and it still parses to 0 here, because the server computed that.
     """
-    rows = D.parse_buckets("h1\tkeys\t100\t7\t5\nh1\ti3\t200\t3\t0\n")
+    rows = D.parse_buckets(headered("h1\tkeys\t100\t7\t5\nh1\ti3\t200\t3\t0\n"))
     assert rows == [("h1", "keys", 100, 7, 5), ("h1", "i3", 200, 3, 0)]
     assert rows[1][4] == 0 and rows[1][3] == 3, \
         "the presence count must survive the parse independently of the total"
+
+
+def test_parse_buckets_refuses_a_headerless_five_column_file():
+    """🔴 THE FORMAT-AMBIGUITY GUARD, and the reason the query emits a header.
+
+    The PRE-presence query was ALSO five columns wide; its 5th was `n_op`
+    (operator-driven = not machine-cadence), which is ~= `n` for every source.
+    Replaying such a capture would reinstate the overnight false-alarm bug with
+    no error and no way to notice — the widths match and the values are
+    plausible. So a headerless 5-column file must be an ERROR, not a guess.
+    """
+    with pytest.raises(ValueError) as e:
+        D.parse_buckets("h1\tkeys\t100\t3\t3\n")
+    assert "ambiguous" in str(e.value)
+
+
+def test_parse_buckets_names_the_stale_n_op_header():
+    """A capture from the one-commit window where the query emitted a header-less
+    `n_op`... does not exist (that query had no header at all), but a hand-written
+    or future `n_op` header must be refused BY NAME rather than silently accepted
+    as "some 5-column thing"."""
+    with pytest.raises(ValueError) as e:
+        D.parse_buckets("host\tsource\tb\tn\tn_op\nh1\tkeys\t100\t3\t3\n")
+    msg = str(e.value)
+    assert "n_op" in msg and "PRE-PRESENCE" in msg, msg
+
+
+def test_parse_buckets_rejects_an_unrecognised_header():
+    with pytest.raises(ValueError):
+        D.parse_buckets("host\tsource\tbucket\tn\tn_presence\nh1\tk\t1\t1\t1\n")
+
+
+def test_tsv_header_matches_the_query_column_list():
+    """The header the parser demands and the header the query produces are the
+    SAME string, single-sourced — a parser that accepts a header the server never
+    emits would reject every live response."""
+    assert D.TSV_HEADER == "host\tsource\tb\tn\tn_presence"
+    q = D.bucket_query()
+    assert "FORMAT TSVWithNames" in q, q
+    for col in D.TSV_COLUMNS:
+        assert " AS %s " % col in q or q.startswith("SELECT host, source"), col
 
 
 def test_parse_buckets_reconstructs_presence_for_a_legacy_four_field_capture():
@@ -121,31 +167,41 @@ def test_parse_buckets_reconstructs_presence_for_a_legacy_four_field_capture():
                     ("h1", "tmux", 200, 2, 2)]
 
 
-def test_presence_sources_are_the_five_human_driven_ones():
+def test_presence_sources_are_the_four_human_driven_ones():
     """🔴 The allowlist itself, pinned as a LITERAL — not derived from the module.
 
     This is the one assertion that fails when a source is added to or removed from
     the set. `claude`/`tool`/`opencode`/`browser-bridge` are agent-driven and are
     named here as explicitly EXCLUDED: they add active buckets only when the
     operator is away, which is exactly when adding them manufactures a false
-    alarm. `browser` (the operator's own browsing) is NOT `browser-bridge` (the
-    agent's driver) — that pair of names is one typo apart.
+    alarm.
+
+    🔴 `browser` is excluded too, and it is the subtle one — the operator really
+    does drive it, but the browser-bridge AGENT drives the same Brave profile the
+    activity extension instruments, so agent navigation emits `browser` rows.
+    Measured on the live table: 74 of 781 laptop `browser` buckets co-occur with
+    a browser-bridge command bucket, and `browser` was the sole presence source in
+    exactly ONE. It bought nothing and carried a contamination path.
     """
-    assert set(D.PRESENCE_SOURCES) == {"keys", "i3", "tmux", "zsh", "browser"}
-    for agent in ("claude", "tool", "opencode", "browser-bridge"):
+    assert set(D.PRESENCE_SOURCES) == {"keys", "i3", "tmux", "zsh"}
+    for agent in ("claude", "tool", "opencode", "browser-bridge", "browser"):
         assert agent not in D.PRESENCE_SOURCES, agent
 
 
 def test_parse_buckets_rejects_a_width_that_changes_mid_file():
     """Inferring per-line would be the silent-drop failure this parser exists to
     prevent: a truncated or concatenated capture would parse as 'fewer events'
-    and decay into 'no staleness'."""
+    and decay into 'no staleness'. Both directions."""
     with pytest.raises(ValueError):
-        D.parse_buckets("h1\tkeys\t100\t3\t3\nh1\ti3\t100\t1\n")
+        D.parse_buckets(headered("h1\tkeys\t100\t3\t3\nh1\ti3\t100\t1\n"))
+    with pytest.raises(ValueError):
+        D.parse_buckets("h1\tkeys\t100\t3\nh1\ti3\t100\t1\t1\n")
 
 
 def test_parse_buckets_skips_blank_lines():
-    assert D.parse_buckets("\n\nh1\tkeys\t100\t3\t3\n\n") == [("h1", "keys", 100, 3, 3)]
+    assert D.parse_buckets(headered("\n\nh1\tkeys\t100\t3\t3\n\n")) == \
+        [("h1", "keys", 100, 3, 3)]
+    assert D.parse_buckets("\n\nh1\tkeys\t100\t3\n\n") == [("h1", "keys", 100, 3, 3)]
 
 
 def test_parse_buckets_rejects_wrong_field_count():
@@ -158,15 +214,19 @@ def test_parse_buckets_rejects_wrong_field_count():
 
 
 def test_parse_buckets_rejects_non_integer():
-    with pytest.raises(ValueError):
+    """🔴 Stays a NON-INTEGER error, not a header error. The header sniff keys on
+    the first two column NAMES precisely so a junk bucket value in a data row is
+    still diagnosed as junk."""
+    with pytest.raises(ValueError) as e:
         D.parse_buckets("h1\tkeys\tnotanumber\t3\n")
+    assert "non-integer" in str(e.value), str(e.value)
 
 
 def test_bucket_query_mentions_table_and_window():
     q = D.bucket_query(days=14, database="activity", table="events")
     assert "activity.events" in q
     assert "INTERVAL 14 DAY" in q
-    assert "FORMAT TSV" in q
+    assert q.endswith("FORMAT TSVWithNames"), q
 
 
 # --------------------------------------------------------------------------- #
@@ -277,8 +337,14 @@ def test_empty_rows_is_no_data_not_ok():
 
 
 def test_all_pairs_below_baseline_is_no_data_not_ok():
-    """Rows came back but nothing was measurable — still cannot tell."""
-    rows = contiguous("h1", "x", NOW_BUCKET - 5 * B, 3)
+    """Rows came back but nothing was measurable — still cannot tell.
+
+    The source is a PRESENCE one on purpose: with an agent-only source the host
+    would have no human timeline at all and the verdict would be
+    `presence-stalled` (also an unknown state, but a different diagnosis), so
+    this fixture would stop testing the baseline path.
+    """
+    rows = contiguous("h1", "keys", NOW_BUCKET - 5 * B, 3)
     v = D.evaluate(rows, now=NOW_BUCKET)
     assert v["state"] == D.STATE_NO_DATA
     assert v["evaluated"] == 0
@@ -357,9 +423,12 @@ def test_check_ok_on_a_healthy_body(tmp_path):
 
 def test_no_unknown_state_is_ok():
     """INVARIANT GUARD (not regression coverage): `ok` is never in the set of
-    states that mean 'cannot tell'."""
+    states that mean 'cannot tell', and the set is pinned as a LITERAL so adding
+    a state is a deliberate edit here AND in bar-status-poll's fallback copy."""
     assert D.STATE_OK not in D.UNKNOWN_STATES
-    assert len(D.UNKNOWN_STATES) == 4
+    assert set(D.UNKNOWN_STATES) == {
+        "no-data", "unreachable", "query-failed", "not-configured",
+        "misconfigured", "presence-stalled"}
 
 
 # --------------------------------------------------------------------------- #
@@ -654,8 +723,9 @@ def test_the_presence_column_survives_the_WHOLE_path_tsv_to_verdict():
 
     # Serialise to the EXACT 5-column TSV the query emits, then read it back the
     # only way the live check ever does.
-    tsv = "".join("h1\t%s\t%d\t%d\t%d\n" % (r[1], r[2], r[3], 1) for r in rows)
-    tsv += "".join("h1\t%s\t%d\t%d\t%d\n" % (r[1], r[2], r[3], 0) for r in cadence)
+    tsv = headered(
+        "".join("h1\t%s\t%d\t%d\t%d\n" % (r[1], r[2], r[3], 1) for r in rows)
+        + "".join("h1\t%s\t%d\t%d\t%d\n" % (r[1], r[2], r[3], 0) for r in cadence))
 
     parsed = D.parse_buckets(tsv)
     assert any(r[1] == "browser-bridge" and r[4] == 0 for r in parsed), \
@@ -679,11 +749,12 @@ def test_the_query_check_ACTUALLY_SENDS_carries_the_presence_column():
 
     def fake_fetch(url, user, password, query, timeout):
         seen["query"] = query
-        return "h1\tkeys\t100\t3\t3\n"
+        return headered("h1\tkeys\t100\t3\t3\n")
 
-    D.check(env={"CLICKHOUSE_URL": "http://x", "CLICKHOUSE_USER": "u",
-                 "CLICKHOUSE_PASSWORD": "p"},
-            env_file="/nonexistent", fetch=fake_fetch)
+    v = D.check(env={"CLICKHOUSE_URL": "http://x", "CLICKHOUSE_USER": "u",
+                     "CLICKHOUSE_PASSWORD": "p"},
+                env_file="/nonexistent", fetch=fake_fetch)
+    assert v["state"] != D.STATE_QUERY_FAILED, v["detail"]
     q = seen.get("query", "")
     # 🔴 The countIf must be the expression aliased AS n_presence, not merely
     # PRESENT somewhere in the query. A substring check for "AS n_presence" is
@@ -693,13 +764,13 @@ def test_the_query_check_ACTUALLY_SENDS_carries_the_presence_column():
     # ANY other set (the cadence pairs, an emptied allowlist, an allowlist with
     # `claude` added) fails on THIS assertion rather than somewhere downstream.
     assert re.search(
-        r"countIf\(source IN \('browser', 'i3', 'keys', 'tmux', 'zsh'\)\) "
+        r"countIf\(source IN \('i3', 'keys', 'tmux', 'zsh'\)\) "
         r"AS n_presence(?!\w)", q), \
         ("check() did not send the human-presence filter as the n_presence "
          "column — non-presence rows would count as the operator being at the "
          "machine: %r" % q)
     # ...and the agent sources must NOT be anywhere in the presence predicate.
-    for agent in ("claude", "tool", "opencode", "browser-bridge"):
+    for agent in ("claude", "tool", "opencode", "browser-bridge", "browser"):
         assert "'%s'" % agent not in q, (agent, q)
 
 
@@ -716,19 +787,40 @@ def test_presence_count_expression_matches_the_presence_set():
     assert D.presence_predicate_sql(frozenset({"zsh", "browser", "i3"})) == \
         "source IN ('browser', 'i3', 'zsh')"
 
-    # 🔴 An EMPTY allowlist must NOT degrade to counting everything. `count()`
-    # there is the denylist behaviour this change removed, and it is the shape a
-    # careless "empty means no filter" refactor produces. It renders the constant
-    # 0 instead: nothing is presence, so nothing is active, so nothing is judged
-    # — quiet, never falsely reassuring about a live rule.
-    empty = D.bucket_query(presence=frozenset())
-    assert "0 AS n_presence" in empty, empty
-    assert "count() AS n_presence" not in empty, empty
-    assert D.presence_predicate_sql(frozenset()) == ""
-
     # The DEFAULT is what the production call site uses.
     assert D.presence_count_expr() == \
-        "countIf(source IN ('browser', 'i3', 'keys', 'tmux', 'zsh'))"
+        "countIf(source IN ('i3', 'keys', 'tmux', 'zsh'))"
+
+
+def test_an_empty_allowlist_is_LOUD_not_a_confident_green():
+    """🔴 An empty PRESENCE_SOURCES must never render valid SQL.
+
+    An earlier version degraded to `0 AS n_presence` and called that "quiet, never
+    falsely reassuring". Run live it produced `state=ok evaluated=13 count=0` — a
+    confident green with nothing judged, and `evaluated` stayed non-zero so
+    evaluate's own positive control could not catch it. There is no safe SQL for
+    "active time is undefined"; every entry point must refuse.
+    """
+    with pytest.raises(ValueError):
+        D.presence_predicate_sql(frozenset())
+    with pytest.raises(ValueError):
+        D.presence_count_expr(frozenset())
+    with pytest.raises(ValueError):
+        D.bucket_query(presence=frozenset())
+
+    # evaluate() and check() convert it into a state that is NOT ok.
+    v = D.evaluate(healthy_table(NOW_BUCKET), now=NOW_BUCKET,
+                   presence=frozenset())
+    assert v["state"] == D.STATE_MISCONFIGURED
+    assert v["state"] in D.UNKNOWN_STATES
+    assert (v["evaluated"], v["count"]) == (0, 0)
+
+    called = []
+    v2 = D.check(env={"CLICKHOUSE_URL": "http://x"}, env_file="/nonexistent",
+                 fetch=lambda *a, **kw: called.append(1) or "",
+                 presence=frozenset())
+    assert v2["state"] == D.STATE_MISCONFIGURED, v2
+    assert not called, "check() queried ClickHouse with an undefined active time"
 
 
 def test_cadence_predicate_is_exported_for_the_other_consumer():
@@ -880,38 +972,258 @@ def test_an_agent_source_that_genuinely_stops_is_still_dead():
     assert rec["dead"] is True, rec
 
 
-def test_losing_every_presence_source_at_once_goes_QUIET_not_loud():
-    """🔴 THE DOCUMENTED COST, asserted so it stays documented (module docstring,
-    'THE COST OF THE PRESENCE ALLOWLIST').
-
-    An X-session crash takes `keys` and `i3` together. After it, no presence
-    source emits, so active buckets stop accruing and every silence measures 0 —
-    the check reports 0 dead even though the agent is still emitting. That is a
-    WIDENING of the pre-existing blackout blind spot, and it is deliberate: the
-    alternative is the overnight false alarm the test above pins.
-
-    `newest_event_age_minutes` is what a human reads instead, so it is asserted
-    to be present and non-trivial rather than merely non-None.
-    """
-    rows = workday_table(NOW_BUCKET, days=6, awake_h=10)
+def _crashed_desk(days=6, awake_h=10, agent_days=4):
+    """An X-session crash: every presence source stops, an agent keeps emitting
+    for `agent_days` afterwards. Returns (rows, now)."""
+    rows = workday_table(NOW_BUCKET, days=days, awake_h=awake_h)
     lo = min(b for (_h, _s, b, *_r) in rows)
     crash = max(b for (_h, s, b, *_r) in rows if s == "keys")
-    now = crash + 3 * 86400                   # three days of agent-only rows
-    rows += all_night_rows("h1", "claude", lo, now)
+    now = crash + agent_days * 86400
+    return rows + all_night_rows("h1", "claude", lo, now), now
 
+
+def test_a_presence_blackout_is_CANNOT_TELL_not_a_silent_ok():
+    """🔴 THE COST OF THE ALLOWLIST, and the detector that keeps it observable.
+
+    After an X-session crash no presence source emits, so active buckets stop
+    accruing and EVERY source on the host measures 0 silence — including a
+    genuinely dead one. Reporting `ok, 0 dead` there is the invisible green the
+    module's "CANNOT TELL IS NOT HEALTHY" section forbids.
+
+    Measured against the live table with a seeded 96h workbench presence blackout
+    plus `workbench/claude` genuinely silent 74h: the pre-change rule reported 5
+    dead pairs; the allowlist WITHOUT this detector reported ZERO with state=ok.
+    """
+    rows, now = _crashed_desk(agent_days=4)          # 96h > PRESENCE_STALL_HOURS
     v = D.evaluate(rows, now=now + 60)
-    assert v["state"] == D.STATE_OK
-    assert _dead_pairs(v) == [], _dead_pairs(v)
-    assert v["newest_event_age_minutes"] is not None
-    assert v["newest_event_age_minutes"] < 5, v["newest_event_age_minutes"]
 
-    # ...and the CONTRAST that makes this a cost and not a bug: lose only ONE
-    # presence source and the other still carries the timeline, so it IS caught.
+    assert v["state"] == D.STATE_PRESENCE_STALLED, v["state"]
+    assert v["state"] in D.UNKNOWN_STATES
+    assert [s["host"] for s in v["presence_stalled"]] == ["h1"]
+    assert v["presence_stalled"][0]["stall_hours"] == 96.0, v["presence_stalled"]
+    # Every pair on the stalled host is marked UN-evaluated with a reason, so the
+    # per-pair table cannot print a row of confident `ok`s for a host nobody can
+    # judge.
+    for rec in v["sources"]:
+        assert rec["evaluated"] is False, rec
+        assert rec["reason"] == "presence-stalled", rec
+    assert v["count"] == 0
+
+    # 🔴 NEGATIVE CONTROL for the detector: the SAME fixture with the threshold
+    # lifted out of reach reproduces the blocker exactly — a silent green.
+    v_bad = D.evaluate(rows, now=now + 60, stall_hours=10 ** 6)
+    assert v_bad["state"] == D.STATE_OK and v_bad["count"] == 0, v_bad["state"]
+    assert v_bad["presence_stalled"] == []
+
+
+def test_newest_event_age_CANNOT_see_a_presence_blackout():
+    """🔴 The claim an earlier docstring made, pinned as FALSE.
+
+    `newest_event_age_minutes` is a max over the WHOLE result — every host and
+    every source — so surviving agent rows hold it near zero while the human
+    timeline is days stale. It is not, and never was, the mitigation.
+    """
+    rows, now = _crashed_desk(agent_days=4)
+    v = D.evaluate(rows, now=now + 60)
+    assert v["newest_event_age_minutes"] < 5, v["newest_event_age_minutes"]
+    assert v["presence_stalled"][0]["stall_hours"] > 24, \
+        "the fixture no longer has a stale human timeline to hide"
+
+
+def test_a_dead_source_on_a_stalled_host_is_unjudgeable_not_ok():
+    """The concrete harm: a source that genuinely stopped, on a host whose
+    presence timeline is frozen, must not read `ok`. It cannot read DEAD either —
+    the host has no active time in which to measure its silence — so the honest
+    answer is the third one."""
+    rows, now = _crashed_desk(agent_days=5)
+    # `claude` also stops, 24h before now, while agent-only time keeps passing —
+    # leaving a 96h presence stall, comfortably past the 72h threshold.
+    rows = [r for r in rows if not (r[1] == "claude" and r[2] > now - 86400)]
+    v = D.evaluate(rows, now=now + 60)
+    rec = _pair(v, "claude")
+    assert rec["evaluated"] is False and rec["reason"] == "presence-stalled", rec
+    assert rec["dead"] is False, rec
+    assert v["state"] == D.STATE_PRESENCE_STALLED
+    assert v["state"] not in (D.STATE_OK,)
+
+
+def test_an_ordinary_away_from_desk_stretch_does_NOT_stall():
+    """ALERT-FATIGUE GUARD for the detector. The operator being away for a day
+    while agents run is normal — measured on the live 14-day table, the worst
+    real presence stall on either host was 39.8 wall hours, with ZERO points over
+    48h. A 24h stall must stay `ok`."""
+    rows, now = _crashed_desk(agent_days=1)          # 24h < PRESENCE_STALL_HOURS
+    v = D.evaluate(rows, now=now + 60)
+    assert v["state"] == D.STATE_OK, v["state"]
+    assert v["presence_stalled"] == []
+    assert _pair(v, "keys")["evaluated"] is True
+
+
+def test_a_host_that_is_simply_SWITCHED_OFF_does_not_stall():
+    """🔴 Why the predicate compares the host's OWN two timestamps and not `now`.
+
+    A laptop that is shut emits nothing at all, so its newest row and its newest
+    presence row move together no matter how long it stays off. That is the
+    ordinary blackout blind spot, not a stall, and it must not alarm — otherwise
+    the check screams every time the laptop is closed for a weekend.
+    """
+    rows = workday_table(NOW_BUCKET, days=6, awake_h=10)
+    last = max(b for (_h, _s, b, *_r) in rows)
+    v = D.evaluate(rows, now=last + 30 * 86400)      # a month later, host off
+    assert v["presence_stalled"] == []
+    assert v["state"] == D.STATE_OK
+    assert v["newest_event_age_minutes"] > 29 * 24 * 60
+
+
+def test_a_host_with_NO_presence_rows_at_all_is_unjudgeable():
+    """The limiting case of an infinite stall: a host that has never emitted a
+    human-driven row in the whole window. Its active set is empty, so every
+    source on it measures 0 silence — the invisible green again."""
+    rows = [("h2", "claude", NOW_BUCKET - i * B, 1) for i in range(400)]
+    v = D.evaluate(rows, now=NOW_BUCKET + 60)
+    assert v["state"] == D.STATE_PRESENCE_STALLED
+    assert v["presence_stalled"] == [{
+        "host": "h2",
+        "last_presence_epoch": None,
+        "last_event_epoch": NOW_BUCKET,
+        "stall_hours": None,
+    }], v["presence_stalled"]
+    assert "NO human-driven events" in v["detail"], v["detail"]
+
+
+def test_one_host_stalling_does_not_erase_the_other_hosts_findings():
+    """A stalled host makes the STATE cannot-tell, but the dead pairs found on a
+    healthy host stay in the payload and in the detail string — the bar zeroes the
+    count for any unknown state, so the detail is the only place the operator can
+    read both facts."""
+    rows, now = _crashed_desk(agent_days=4)
+    healthy = workday_source("h2", "keys", NOW_BUCKET, days=6, awake_h=10)
+    healthy += workday_source("h2", "i3", NOW_BUCKET, days=6, awake_h=10,
+                              skip_last=1)
+    v = D.evaluate(rows + healthy, now=now + 60)
+    assert v["state"] == D.STATE_PRESENCE_STALLED
+    assert [s["host"] for s in v["presence_stalled"]] == ["h1"]
+    assert _dead_pairs(v) == ["h2/i3"], _dead_pairs(v)
+    assert "h1" in v["detail"] and "h2/i3" in v["detail"], v["detail"]
+
+
+def test_losing_only_ONE_presence_source_is_still_caught():
+    """The contrast that makes the blackout a cost and not a bug: the remaining
+    presence sources carry the timeline, so a single one dying still alarms —
+    which is the whole motivating case."""
     partial = workday_source("h1", "keys", NOW_BUCKET, days=6, awake_h=10,
                              skip_last=1)
     partial += workday_source("h1", "i3", NOW_BUCKET, days=6, awake_h=10)
-    v2 = D.evaluate(partial, now=max(b for (_h, _s, b, *_r) in partial) + 60)
-    assert _dead_pairs(v2) == ["h1/keys"], _dead_pairs(v2)
+    v = D.evaluate(partial, now=max(b for (_h, _s, b, *_r) in partial) + 60)
+    assert v["state"] == D.STATE_OK
+    assert _dead_pairs(v) == ["h1/keys"], _dead_pairs(v)
+
+
+def test_the_presence_parameter_is_wired_through_EVERY_stage():
+    """🔴 `check(presence=...)` was once a SILENT NO-OP: the query was built from
+    the module default (so the server computed the default's presence column) and
+    the parser's own copy never fired because live rows are 5-wide. A maintainer
+    previewing "what if I add this source" got an unchanged answer, no error.
+
+    So all three consumers are asserted through the ONE public entry point, using
+    a set that is NOT the default and that changes the verdict.
+    """
+    seen = {}
+    # `keys` stops FOUR days early. With the default allowlist, `i3` carries the
+    # timeline and `keys` is DEAD. With an allowlist of ONLY `keys`, nothing is
+    # active after it stops, so the host's human timeline is frozen 96h and it
+    # cannot be judged at all.
+    rows = workday_source("h1", "keys", NOW_BUCKET, days=6, awake_h=10,
+                          skip_last=4)
+    rows += workday_source("h1", "i3", NOW_BUCKET, days=6, awake_h=10)
+    body = "".join("%s\t%s\t%d\t%d\n" % r for r in rows)      # 4-wide, no header
+    now = max(b for (_h, _s, b, *_r) in rows) + 60
+
+    def fake_fetch(url, user, password, query, timeout):
+        seen.setdefault("queries", []).append(query)
+        return body
+
+    env = {"CLICKHOUSE_URL": "http://x"}
+    default = D.check(env=env, env_file="/nonexistent", fetch=fake_fetch, now=now)
+    keysonly = D.check(env=env, env_file="/nonexistent", fetch=fake_fetch,
+                       now=now, presence=frozenset({"keys"}))
+
+    # 1. the QUERY differs — the SQL is built from the argument, not the default
+    assert "countIf(source IN ('i3', 'keys', 'tmux', 'zsh'))" in seen["queries"][0]
+    assert "countIf(source IN ('keys'))" in seen["queries"][1], seen["queries"][1]
+    # 2. the PARSE differs — the 4-wide reconstruction uses the argument, so `i3`
+    #    stops contributing presence and the verdict changes
+    assert _dead_pairs(default) == ["h1/keys"], _dead_pairs(default)
+    assert _dead_pairs(keysonly) == [], _dead_pairs(keysonly)
+    # 3. and EVALUATE saw it too: with only `keys` allowed, the host's human
+    #    timeline is frozen from the moment `keys` stopped.
+    assert keysonly["state"] == D.STATE_PRESENCE_STALLED, keysonly["state"]
+
+
+def test_check_forwards_presence_to_evaluate_even_though_it_is_currently_MOOT(
+        monkeypatch):
+    """🔴 A STRUCTURAL guard, labelled as one, and here is why it has to be.
+
+    A mutant deleting `presence=presence` from check()'s evaluate() call SURVIVED
+    the whole suite, and the reason is not a missing test — it is that the mutant
+    is behaviourally EQUIVALENT through check() today. By the time evaluate runs,
+    `parse_buckets` has already applied the allowlist and every row is 5-wide, so
+    evaluate's own copy of the membership test cannot fire; and an empty allowlist
+    is refused by bucket_query before evaluate is ever reached.
+
+    The second assertion MEASURES that equivalence rather than asserting it, so
+    this test says something true today and starts failing the moment evaluate
+    grows a use of `presence` that a parsed row can reach — which is exactly when
+    a missing forward would become a real bug.
+    """
+    rows = workday_table(NOW_BUCKET, days=6, awake_h=10)
+    body = "".join("%s\t%s\t%d\t%d\n" % r for r in rows)
+    custom = frozenset({"keys", "i3", "tmux"})
+    seen = {}
+    real_evaluate = D.evaluate
+
+    def spy(rows_, **kw):
+        seen.update(kw)
+        return real_evaluate(rows_, **kw)
+
+    monkeypatch.setattr(D, "evaluate", spy)
+    D.check(env={"CLICKHOUSE_URL": "http://x"}, env_file="/nonexistent",
+            fetch=lambda *a, **kw: body, now=NOW_BUCKET + 60, presence=custom)
+    assert seen.get("presence") == custom, seen
+
+    # ...and the measured "currently moot" claim: on ALREADY-PARSED rows, the
+    # argument changes nothing, which is what makes the guard above structural.
+    parsed = D.parse_buckets(body, presence=custom)
+    a = real_evaluate(parsed, now=NOW_BUCKET + 60, presence=custom)
+    b = real_evaluate(parsed, now=NOW_BUCKET + 60,
+                      presence=frozenset({"keys", "i3", "tmux", "zsh"}))
+    assert (a["state"], a["count"], _dead_pairs(a)) == \
+           (b["state"], b["count"], _dead_pairs(b)), \
+        ("evaluate's `presence` now CHANGES a parsed-row verdict — the guard "
+         "above is no longer merely structural, and check() dropping the "
+         "forward would be a real bug. Replace this with a behavioural test.")
+
+
+def test_evaluate_and_parse_honour_a_custom_presence_set_directly():
+    """The same parameter at the two lower-level entry points, pinned with
+    literals — `check` above could pass while both of these ignored it."""
+    assert D.parse_buckets("h1\tclaude\t100\t9\n",
+                           presence=frozenset({"claude"})) == \
+        [("h1", "claude", 100, 9, 9)]
+    assert D.parse_buckets("h1\tkeys\t100\t9\n",
+                           presence=frozenset({"claude"})) == \
+        [("h1", "keys", 100, 9, 0)]
+
+    # evaluate: `claude` alone marks the night active, so the human sources blow
+    # the floor — the OLD bug, reproduced purely by widening the argument.
+    rows = workday_table(NOW_BUCKET, days=6, awake_h=10)
+    lo = min(b for (_h, _s, b, *_r) in rows)
+    last_awake = max(b for (_h, s, b, *_r) in rows if s == "keys")
+    now = last_awake + 8 * 3600
+    rows += all_night_rows("h1", "claude", lo, now)
+    wide = D.evaluate(rows, now=now + 60,
+                      presence=frozenset({"keys", "i3", "claude"}))
+    assert "h1/keys" in _dead_pairs(wide), _dead_pairs(wide)
 
 
 def test_the_presence_allowlist_survives_the_WHOLE_path_tsv_to_verdict():
@@ -938,7 +1250,7 @@ def test_the_presence_allowlist_survives_the_WHOLE_path_tsv_to_verdict():
     assert _dead_pairs(D.evaluate(parsed, now=now + 60)) == []
 
     # 5-field: the live query's width, presence computed server-side.
-    tsv5 = "".join("%s\t%s\t%d\t%d\t%d\n"
-                   % (h, s, b, n, n if s in ("keys", "i3") else 0)
-                   for (h, s, b, n) in rows)
+    tsv5 = headered("".join("%s\t%s\t%d\t%d\t%d\n"
+                            % (h, s, b, n, n if s in ("keys", "i3") else 0)
+                            for (h, s, b, n) in rows))
     assert _dead_pairs(D.evaluate(D.parse_buckets(tsv5), now=now + 60)) == []

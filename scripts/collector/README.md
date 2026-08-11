@@ -56,10 +56,14 @@ tmux focus hooks   ─┼─► emit (pure shell, hot path) ─► spool/current
   (`payload.connected`), so the source has a cadence the deadman can measure.
   🔴 It cannot mark a bucket ACTIVE, because `deadman.py` defines active time from
   an ALLOWLIST of human-presence sources (`PRESENCE_SOURCES` = `keys` `i3` `tmux`
-  `zsh` `browser`) and `browser-bridge` is not one of them. Anything machine- or
+  `zsh`) and `browser-bridge` is not one of them. Anything machine- or
   agent-driven counted as operator activity makes every idle source on the host
-  read DEAD overnight. `MACHINE_CADENCE` still exists in that module, but only for
+  read DEAD overnight. Note `browser` is not in that set either — the bridge drives
+  the same Brave profile the activity extension instruments, so agent navigation
+  emits `browser` rows. `MACHINE_CADENCE` still exists in that module, but only for
   `scripts/agent-ops`' freshness panel — it no longer touches active time.
+  The deadman's query is `FORMAT TSVWithNames`: the header is what stops a capture
+  from the previous (also 5-column, `n_op`) format replaying as a wrong answer.
   Both reuse `keylog/spool_emit.py` for the v1 line format.
 - `tests/` — pytest unit + round-trip coverage (mocks the HTTP endpoint).
 

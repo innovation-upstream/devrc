@@ -172,17 +172,25 @@ Creds come from `~/.config/activity-collector/env` (the collector's own file) un
   the ones where a **HUMAN-PRESENCE** source emitted; overnight/away time is simply not in the
   set. This is what makes a per-source budget work for `keys` (continuous) and `tool`
   (on-demand) at the same time.
-- 🔴 **Active time is an ALLOWLIST — `deadman.PRESENCE_SOURCES` = `keys` `i3` `tmux` `zsh`
-  `browser`.** Agent/machine sources (`claude`, `tool`, `opencode`, `browser-bridge`) do NOT
-  mark a bucket active. Adding a source that a human drives means adding it there; an
-  agent-driven one must stay out. It used to be a denylist (everything except a timer), and on
-  2026-08-11 an unattended overnight agent run marked the night active and made
-  `workbench/keys` + `workbench/tmux` read DEAD by morning (6/7 dead-hours in a 97-point sweep
-  → 0 under the allowlist). Budgets are counted in active buckets, so a shorter active timeline
-  moves budget *and* silence together and sensitivity shifts **both ways**: floor-pinned
-  sources get tighter (`laptop/opencode` 0 → 1 dead-hour), while an on-demand source's
-  detection can be *delayed* (a seeded `workbench/tool` death is caught at 72h by the old rule,
-  ~120h by the allowlist). Numbers in the module docstring's COST section.
+- 🔴 **Active time is an ALLOWLIST — `deadman.PRESENCE_SOURCES` = `keys` `i3` `tmux` `zsh`.**
+  Agent/machine sources (`claude`, `tool`, `opencode`, `browser-bridge`) do NOT mark a bucket
+  active, and neither does **`browser`**: the browser-bridge agent drives the same Brave
+  profile the activity extension instruments, so agent navigation emits `browser` rows (74 of
+  781 laptop `browser` buckets co-occur with a bridge command; it was the *sole* presence
+  source in 1). Adding a source a human drives means adding it there; anything an agent can
+  drive, directly or indirectly, stays out. It used to be a denylist (everything except a
+  timer), and on 2026-08-11 an unattended overnight agent run marked the night active and made
+  `workbench/keys` + `workbench/tmux` read DEAD by morning (169-point/7-day sweep:
+  `workbench/tmux` 6 → 0, `workbench/keys` 14 → **7**, and those surviving 7 are a TRUE
+  positive — `keys` silent 2.8–8.1 active hours on 08-05 while `i3`/`tmux`/`zsh` kept emitting).
+- 🔴 **The trade is FEWER FALSE ALARMS, SLOWER TRUE ONES.** Budgets are counted in active
+  buckets, so a slower-advancing timeline means a real death takes longer in wall time to
+  convict. Seeded-death latency, old → new: `workbench/keys` 6h → 12h, `workbench/tool`
+  36h → 96h, `laptop/zsh` 24h → 72h, `workbench/browser-bridge` 12h → 24h (which erodes the
+  #388 heartbeat). **No pair got faster; 10 of 17 got slower.** There is **no per-class rule** —
+  `laptop/tool` (on-demand) got *noisier* (26 → 28 dead-hours), as did `laptop/claude` and
+  `laptop/opencode`. Measure it, don't reason about it; the live table also drifts ±1–2
+  dead-hours between sweeps. Numbers in the module docstring's COST section.
 - **The budget is MEASURED per (host, source)**: `clamp(2 × p99 active-gap, 2h, 48h)`.
   Measured 2026-08-03 — `keys`/`i3`/`tmux` land on the 2h floor; `workbench/opencode` 11.5h;
   `workbench/tool` 31.1h. Nothing is hand-tuned and nothing is hand-listed.
@@ -190,15 +198,26 @@ Creds come from `~/.config/activity-collector/env` (the collector's own file) un
   14-day window, so `workbench/browser` (0 rows, correctly absent) can never alarm, while a
   source that *was* emitting and stopped keeps its baseline and does.
 - 🔴 **"Cannot tell" ≠ "healthy".** `not-configured` / `unreachable` / `query-failed` /
-  `no-data` are each their own state; `ok` is unreachable unless rows came back AND at least
-  one pair was actually measured (`evaluated > 0` is the verdict's own positive control).
+  `no-data` / `misconfigured` / `presence-stalled` are each their own state; `ok` is
+  unreachable unless rows came back AND at least one pair was actually measured
+  (`evaluated > 0` is the verdict's own positive control). All six render `tlm ?`, never a
+  green pill — `bar-status-poll` carries a hardcoded FALLBACK copy of that set, so **a new
+  state must be added there too**.
 - 🔴 **Blind spot, by design:** this is a RELATIVE check. A simultaneous outage of every
   source on every host produces zero active buckets and reads as "0 dead" — indistinguishable
-  from the operator being away. `newest_event_age_minutes` is reported for the human;
-  it is deliberately not an alarm. **The allowlist WIDENS this**: losing all five presence
-  sources at once (an X-session crash takes `keys`+`i3`, and the terminals take `tmux`+`zsh`)
-  is now enough to stop active time advancing, so the check goes quiet instead of alarming.
-  Losing only ONE presence source is still caught — the others carry the timeline.
+  from the operator being away. **The allowlist WIDENS this**: losing all four presence sources
+  at once (an X-session crash takes `keys`+`i3`, and the terminals take `tmux`+`zsh`) stops
+  active time advancing, and then *every* source on that host is unjudgeable, not just the
+  presence ones. Losing only ONE presence source is still caught — the others carry the
+  timeline.
+- 🔴 **`newest_event_age_minutes` does NOT cover that** — it is a `max` across **all hosts and
+  all sources**, so surviving agent rows pin it at ~1 min while a host's human timeline is days
+  stale. The real detector is **`presence-stalled`** (`PRESENCE_STALL_HOURS`, 72): a host still
+  emitting `PRESENCE_STALL_HOURS` after its last human-driven row is reported CANNOT-TELL with
+  its pairs marked un-evaluated. Threshold sized off the worst real stall in 14 days (workbench
+  39.8h, laptop 8.9h, zero points over 48h). A host that is simply **switched off** does not
+  stall — the predicate compares the host's own newest row to its own newest presence row, not
+  to `now`.
 - **Surface:** the workbench `bar-status-poll` (~45s) runs it as its `telemetry` source →
   `~/.cache/bar-status/telemetry.json` → the `tlm` pill (signal 17) + a rising-edge dunst
   toast. One workbench runner covers BOTH hosts because it reads the shared table. See the
