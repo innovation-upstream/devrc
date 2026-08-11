@@ -65,19 +65,12 @@ Priority legend: **🔴 CRITICAL** (security/data/prod — never compromise) · 
 - 🔴 **A permanently-red gate is worse than no gate** — it trains everyone to click through. Unbreak it or stop gating on it; never merge through a gate you have already called meaningless.
 - 🔴 **A comment is a claim too.** Audit rounds repeatedly find comments the implementation contradicts — including a safety comment whose falsity would have led a maintainer to delete the guard it described. Tests assert what you believed; only reading the code against the comment tells you it still holds. When you close a hazard, update the comment describing it as open.
 
-## Professional Honesty 🟡
-**Triggers**: assessments, reviews, recommendations, technical claims
-
-- **No marketing language** ("blazingly fast", "100% secure", "magnificent") and **no fake metrics** — never invent time estimates, percentages, or ratings without evidence.
-- **Critical assessment**: state honest trade-offs; push back on problems respectfully; say "untested"/"MVP"/"needs validation" rather than "production-ready".
-- **No sycophancy** — professional feedback over praise.
-
 ## Git Workflow 🔴
 **Triggers**: session start, before changes, risky operations
 
 These rules live HERE (managed, shipped to every host), not in `~/.claude/CLAUDE.md` — that file is per-host/mutable and does NOT ship, so a 🔴 rule placed there silently protects only one machine. `~/.claude/CLAUDE.md` is for genuinely host-specific facts (paths, OS, package manager) only.
 
-- **Status first**: `git status && git branch` before starting.
+- **Orientation: the harness already prints branch + status at session start — don't re-emit it.** No opening `git status && git branch`. When you genuinely need fresh state mid-session, one compact `git status -s && git log --oneline -3`. Orientation is not the safety check anyway — the next rule is, and it runs before every write, not once at the start.
 - 🔴 **Re-check WHICH branch you are on before ANY write in a shared checkout — `commit` included, not just `pull`/`rebase`/`checkout`.** The switcher is **another session OR your own subagent**: a docs-only or read-only agent is exactly the case where `isolation: "worktree"` gets skipped, so its `git checkout -b <branch>` lands in *your* tree. **A `commit` onto the wrong branch is the silent one** — no conflict, no error, and `git log` afterwards shows exactly what you expect, because you are reading the branch you landed on. **`git branch --show-current` immediately before a commit** removes the whole class; **`git reflog`** is the one-command diagnosis when a branch looks like it moved backwards. → archive: wrong-branch-writes
 - **`gh pr view <n> --json mergeable,mergeStateStatus` is the ONLY authority on whether a PR conflicts.** Don't infer it from a local merge trial: `git merge-tree <a> <b>` (git ≥2.38, two-arg `--write-tree`) prints only a **tree OID** on success — it emits NO `<<<<<<<` markers, so grepping for them finds nothing whether or not a conflict exists and reads as a confident "no conflicts" that is wrong. If you use it locally, **branch on the EXIT CODE** (non-zero = conflict), never on a marker grep.
 - **Never `git add -A` / `--all` / `.`** — stage explicit paths. Blind-staging leaks unrelated WIP and secrets from a dirty tree. Enforced by the `bash-guard.py` PreToolUse hook.
@@ -102,43 +95,18 @@ The stash stack is shared across ALL worktrees of a repo, so a concurrent agent 
 - 🔴 **A fresh worktree does NOT inherit the repo's dev environment — `.envrc` is gitignored, so it never comes with the checkout.** No direnv/flake shell: wrong toolchain, none of the env the flake exports — so agents dispatched there reinvent workarounds the repo already solved and propagate them as inherent traps. **Copy it in at creation:** `cp <repo>/.envrc <worktree>/ && direnv allow <worktree>`, dropping any credential lines the task doesn't need (`use flake` alone is enough for build/typecheck/test). Do both or neither: an `.envrc` that exists but was never `direnv allow`ed errors on every `cd` into it. The tell: a toolchain binary "missing" in a worktree but present in the base clone. → archive: worktree-envrc
 - **Re-sync the base clone after worktree work merges.** Because worktrees do the committing, the base clone is write-only and silently falls behind. Run `git -C <repo> fetch origin && git -C <repo> merge --ff-only origin/<main-branch>` at the end of a worktree cycle. `--ff-only` is the point: it cannot conflict or autostash — it either fast-forwards or **refuses**, your signal the base clone diverged. If it refuses, prefer upstream; the base clone's side is almost always the stale one. **Dirty ≠ WIP — hash the working copy against that file's recent commits before treating it as WIP; byte-identical to an OLDER commit proves a stale orphan, and "restoring" it silently reverts everything since.** Recipe + the drift tells → archive: base-clone-drift
 
-## Token & Tool Hygiene 🟡
-**Triggers**: writing scripts/files, editing, reading files, repeated operations
-
-- **Write tool over heredoc-to-file**: create/overwrite files with the Write tool, never `cat >file <<EOF` / `tee file <<EOF`. The heredoc body is paid for twice (the tool call AND the echoed result) and litters /tmp. A PreToolUse hook blocks large ones.
-- **Read before Edit**: a file must be Read in-session before Edit/Write or the call errors and burns a round-trip.
-- **Don't re-read what's already in context** — use context or Edit directly.
-- **Read large files surgically**: use `offset`/`limit`, or Grep/Glob to locate the symbol, instead of full-file reads.
-- **Don't Read binaries**: skip `.png`/`.jpg`/`.pdf`/etc. unless you must see the image.
-
 ## Shell & Tooling Gotchas 🟡
-**Triggers**: bash on NixOS/zsh hosts, Edit/Write, missing tools, repo orientation
+**Triggers**: bash on NixOS/zsh hosts, Edit/Write, missing tools
 
 - **zsh reserves `status`** — `status=$(...)` → `read-only variable: status`. Use `rc=`/`out=`.
 - 🔴 **zsh's unbraced `$var` is NOT bash's — three traps, all returning a confident WRONG value with no error.** (a) **No word-splitting**: `for x in $SPACE_SEPARATED` loops **once** on the whole string, so a following `${x%%:*}` silently grabs the wrong field — use a literal list, a real array, or `${=var}`. (b) **History modifiers apply**: `$var` followed by `:` plus `e`/`h`/`t`/`r`/`s` is eaten as a modifier, so git refs (`$B:path`) and `host:/path` targets expand to a well-formed but WRONG string — **brace it: `${B}`**. (c) **Mirror image in a WRAPPER**: bare `$*` interpolated into an inner shell *does* split, turning a quoted `-g "some phrase"` into filename filters — zero tests run, reported as *"No tests found"* and **exit 0**; fix with `printf ' %q'`. Generalise: **a wrapper that reports "nothing to do" instead of erroring is how a green gets believed.** For any loop that mutates prod, add a per-item identity guard before the write. → archive: zsh-unbraced-var
-- **`sleep N && <cmd>` is blocked** by the harness — use the `Monitor` tool with an until-loop, or `run_in_background`. Never prepend `sleep` to a poll.
 - **`pgrep -f` / `pkill -f` match your OWN shell.** A wait loop like `while pgrep -f 'e2e/run.sh'; do …; done` never exits — the pattern appears in the loop's own command line. Worse, `pkill -f '<pattern>'` in a background script can **kill the script itself**. **Never let a `-f` pattern reach `pkill`** — resolve PIDs first: `pgrep -f <pat>` → skip `$$` → confirm each via `/proc/<pid>/cmdline` → `kill "$p"`.
 - **NixOS: no apt/dnf** — for a missing tool (pandoc, pdftoppm/poppler, openpyxl, …) run it under `nix-shell -p <pkg> --run "..."` proactively; don't run bare, fail, then retry.
 - **Is an edit to a home-manager-managed dotfile LIVE? `readlink -f` is the arbiter — never infer it from a `diff`.** **Terminates inside `~/workspace/devrc` → live** (an `mkOutOfStoreSymlink`; the working copy IS the live file, edits apply immediately); **terminates in `/nix/store` → needs a switch** (a `home.file` copy, so editing the repo does nothing). Byte-identical files prove nothing: identity can simply mean they are **one file**. → archive: readlink-arbiter
-- **Don't re-emit git orientation** — the harness shows branch + status at session start. When you genuinely need fresh state, one compact `git status -s && git log --oneline -3`.
-- **Quote globs meant literally** — zsh aborts on unmatched globs (`no matches found`); quote patterns and kubectl `custom-columns=...[0]...` values.
 - **A `count=1` text replace on a pattern that occurs more than once is a live hazard.** Which occurrence you hit is not the one you pictured — grep the count first, and confirm by `git diff` which one moved *before* committing.
 - **`grep` can render a character invisible.** A raw U+E000 in source printed identical to the untouched line, so an edit that had landed looked like it hadn't. When output "looks unchanged", inspect bytes — `sed -n l`, `xxd`, or `grep -P '\x{E000}'`.
 - **`gh secret set` has NO `--body-file`** — omit `--body` entirely and it reads from **stdin** (`gh secret set NAME < file`). That is also the safe way: a secret in `--body` is exposed in argv/history.
 - **GitHub sudo-mode re-auth cannot be automated** — creating a PAT (or any sudo-mode action) always stops at a passkey/TOTP/password gate. Hand that step to the user with exact instructions instead of burning turns trying to drive it.
-
-## Tool Optimization 🟢
-**Triggers**: multi-step operations, search, complex tasks
-
-- **Best tool for the job** (MCP > native > basic): Grep over bash grep, Glob over find, context7 for library docs.
-- **Parallelize** independent operations in one message; batch reads/edits; sequential only for true dependencies.
-- **Delegate** complex multi-step work (>3 steps) to subagents.
-
-## Scope & Completeness 🟡
-**Triggers**: vague requirements, feature work, code generation
-
-- **Build ONLY what's asked** — MVP first, no speculative features or enterprise bloat (auth/monitoring/etc. only if requested).
-- **Finish what you start**: no partial features, no TODO comments for core functionality, no mock/stub/placeholder code. Every function works as specified.
 
 ## Files, Workspace & Safety 🟡
 **Triggers**: file creation, library use, codebase changes
@@ -157,8 +125,3 @@ The auto-loaded `MEMORY.md` index costs tokens **every session** and has a hard 
 - **`MEMORY.md` is only for cross-cutting lessons that map to NO skill** (git/shell/language/tooling tripwires).
 - **Prune before you add**: if the index is near its cap, archive/dedupe first — don't just append.
 - 🟡 **This file has the same economics, and a deterministic gate**: it loads EVERY session AND is concatenated into opencode's `AGENTS.md`, so it is paid twice. Its ceiling is enforced by `scripts/tests/test_rules_size.py`, which owns the constants and prints the eviction playbook on failure — **read the numbers there, never restate them.** Only the *imperative and its widest scope* belong here.
-
-## Temporal Awareness 🔴
-**Triggers**: date/time references, version checks, "latest" keywords
-
-- **Verify the current date** from `<env>` before any temporal claim; never default to the knowledge cutoff. State the source. Base all time math on the verified date.
