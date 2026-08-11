@@ -564,3 +564,30 @@ Four measured instances:
 The remedy is to assert a **state**, not a spelling: an `id` plus the attribute on the same
 element, an ARIA role, or an enumerated set of allowed callers. Any assertion whose subject is a
 word that another feature is free to use is a coincidence waiting to be relied on.
+
+## worktree-not-session
+*Supports: 🔴 "A worktree isolates the REPO, not the SESSION."*
+
+civitai/cli, 2026-08-10, one session, 12 subagents — every one dispatched with
+`isolation: "worktree"`, so the documented rule was followed exactly.
+
+Two of them still ran against the wrong tree. Subagents inherit ONE scratchpad path per
+session (`/tmp/claude-<uid>/<project>/<session-id>/scratchpad/`), and they pick the same
+obvious names: `mut`, `clone`, `pr370`, `battery.py`, `civitai`, `collections.go.orig`. One
+auditor's `cp -a pr370 mut` nested its copy inside a sibling agent's leftover `mut/`, so its
+**entire** first mutation battery ran against pre-PR code and reported clean. A second had its
+working copy overwritten mid-run. Both caught it by checksum and redid the work; the harness
+caught neither.
+
+**Both agents reported it as "a stale directory from a *prior session*", and that was relayed
+onward before anyone checked.** The scratchpad path is session-scoped, so it could not have
+been — the writer was a sibling agent in the same fan-out. The misattribution is the expensive
+part: it points the fix outward, at other people's sessions, instead of at your own dispatch.
+
+The branch namespace is the second unisolated surface. A finished agent's worktree was found
+still holding `fix/ux-papercuts-365` checked out at its **pre-fix** commit; a push or checkout
+from there would have silently force-reverted a credential-leak fix that had already landed on
+the branch. `git worktree list` is the check; `git checkout --detach` is the fix.
+
+Same root cause as the `refs/stash` ban: a worktree gives you a private working directory, not a
+private repo and not a private machine.
