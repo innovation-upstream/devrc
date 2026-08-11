@@ -426,6 +426,105 @@ def test_real_get_caps_the_response_body():
         stop()
 
 
+# --- 🔴 REGRESSION: the ABANDONED worker must SELF-TERMINATE ----------------- #
+def test_abandoned_worker_dies_promptly_on_a_chunk_spanning_body():
+    """A worker abandoned at the deadline must STOP — even with the body still arriving.
+
+    THE DEFECT (fixed 2026-08-11): the body was read with `resp.read(n)`, which blocks on a
+    `BufferedReader` until it has ALL n bytes or hits EOF. With `READ_CHUNK = 64 KiB` the
+    between-chunk wall-clock re-check was therefore UNREACHABLE for the whole time a chunk
+    was in flight, so `_run_with_deadline` gave up at the deadline while its daemon worker
+    kept running — one live thread + its FDs leaked per abandoned fetch, bounded only by
+    `SOCKET_TIMEOUT`. It was documented as "bounded today because the real payload is ~16 KB";
+    that bound expired: live clawgate 0.7.85 `GET /api/tasks` measured **94,428 bytes for 10
+    tasks** on 2026-08-11, i.e. two READ_CHUNKs.
+
+    This test asserts WHEN THE WORKER DIES, not what it parsed — a body that merely parses
+    correctly does not reproduce the bug. So: a body several READ_CHUNKs long, paced so that
+    assembling ONE chunk takes ~6x the deadline, and every individual send well inside the
+    socket timeout — leaving the between-chunk clock re-check as the only thing that can end
+    the read. The worker function returning is the observable: `_run_with_deadline`'s target
+    does nothing afterwards, so the thread exits with it.
+    """
+    import re
+    import threading
+    import time
+
+    piece, gap = 2048, 0.08
+    body = ("[" + ",".join(
+        json.dumps(_task(i, ["initiative:alpha"], title="t" * 240)) for i in range(1000)
+    ) + "]").encode()
+    assert len(body) > 2 * tasks.READ_CHUNK, "the body must SPAN chunks to reproduce this"
+    chunk_seconds = (tasks.READ_CHUNK / piece) * gap    # what ONE read() would block for
+    deadline = 0.4
+    assert chunk_seconds > 5 * deadline, "the pacing must dwarf the deadline"
+
+    def paced(conn, stop):
+        try:
+            conn.settimeout(2.0)                        # so teardown can't wedge this thread
+            conn.recv(4096)
+            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                         + f"Content-Length: {len(body)}\r\n\r\n".encode())
+            for off in range(0, len(body), piece):
+                if stop.is_set():
+                    return
+                try:
+                    conn.sendall(body[off:off + piece])
+                except OSError:
+                    return
+                stop.wait(gap)
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+    worker_returned = threading.Event()   # set when `_get` returns/raises — i.e. when the
+    box: dict = {}                        # abandoned thread is about to exit
+    real_get = tasks._get
+
+    def spy(url, token, **kw):
+        try:
+            return real_get(url, token, **kw)
+        except BaseException as exc:      # noqa: BLE001 - recorded, then re-raised verbatim
+            box["error"] = exc
+            raise
+        finally:
+            worker_returned.set()
+
+    url, stop = _serve(paced)
+    try:
+        creds = {"CLAWGATE_API_URL": url, "CLAWGATE_HOOK_TOKEN": "tok"}
+        t0 = time.monotonic()
+        ok, got = tasks.fetch_tasks_result(creds=creds, env={}, deadline=deadline, getter=spy)
+        caller_elapsed = time.monotonic() - t0
+        died_in_time = worker_returned.wait(1.0)
+        worker_elapsed = time.monotonic() - t0
+    finally:
+        stop()
+
+    assert (ok, got) == (False, [])                  # degrades to "no linked tasks"
+    assert caller_elapsed < deadline + 0.6           # the join bound is unaffected either way
+    assert died_in_time, (
+        f"the ABANDONED worker was still running {worker_elapsed:.2f}s in — "
+        f"{caller_elapsed:.2f}s after the {deadline}s deadline was declared blown. It is "
+        f"blocked inside ONE read() waiting for a full {tasks.READ_CHUNK}-byte chunk "
+        f"(~{chunk_seconds:.1f}s at this pace), so the wall-clock re-check never runs. "
+        f"Read the body with read1().")
+
+    # ...and it died for the RIGHT reason — its OWN between-chunk wall-clock re-check, mid
+    # body. A socket timeout, an EOF or a completed read would all be green for the wrong
+    # reason, so pin the exception AND that it had consumed only part of the body.
+    exc = box.get("error")
+    assert isinstance(exc, TimeoutError), \
+        f"expected the body-read deadline check to fire, got {exc!r}"
+    m = re.search(r"after (\d+) bytes", str(exc))
+    assert m, f"the deadline error must report the bytes read so far: {exc}"
+    read_so_far = int(m.group(1))
+    assert 0 < read_so_far < len(body), \
+        f"the worker must die MID-BODY; it had read {read_so_far} of {len(body)} bytes"
+
+
 # --- the linked-task CACHE: TTL, serve-stale, single-flight ------------------ #
 class _Clock:
     def __init__(self):
