@@ -206,7 +206,21 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 #   + this branch's guard-check suite    154  (test_guard_core.py 1156 -> 1310)
 #   = 7122
 # scripts/tests 1874 = #378's measured 1867 + #380's 7, confirming both landed.
-MIN_TESTS="${MIN_TESTS:-7122}"
+#
+# 2026-08-11, the opencode pipe-truncation fix: 7122 -> 7127. MEASURED in BOTH
+# tiers on this branch, not computed — dev-host `run-tests.sh --set all` and
+# `nix build .#checks.x86_64-linux.pytests` each report
+#     TOTAL collected=7127  passed=7126  skipped=1  failed=0
+# and it reconciles: +3 in scripts/tests/test_opencode_engine.py (the flush-race
+# fixture control, the behavioural pin, the call-site ledger) and +2 in
+# scripts/tests/test_run_tests_preconditions.py (the REQUIRED_TOOLS seam), so
+# scripts/tests goes 1874 -> 1879 and nothing else moves.
+#
+# 🔴 Worth saying once, because this floor could not have caught what that PR
+# fixed: the dev-host tier had 17 FAILURES on the exact tree where the sandbox
+# reported this line clean. A collected-count floor sees tests that VANISH, never
+# tests that RUN AND FAIL in only one tier. Read both tiers' output.
+MIN_TESTS="${MIN_TESTS:-7127}"
 
 # --- GUARD 1: tool precondition ------------------------------------------------
 # Every binary the suites `skipif` on. Absence must be an ERROR, never a skip.

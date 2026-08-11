@@ -129,6 +129,22 @@ fi
 # bare-pytest venv on PATH would ImportError and wrongly block the push.
 PY_ENV="python312.withPackages(ps: with ps; [pytest requests psycopg2 minio pyyaml])"
 
+# 🔴 Every OTHER entry in run-tests.sh's REQUIRED_TOOLS is taken from the ambient
+# PATH — which works only for tools a dev host actually carries. `logrotate` is
+# NOT one of them: nix/home.nix supplies it to the claude-log-rotate *unit* via
+# `makeBinPath`, never to `home.packages`, so it is on NO interactive PATH on
+# either host. MEASURED 2026-08-11 on the workbench: `command -v logrotate` finds
+# nothing, and this gate therefore died at GUARD 1 with
+#   run-tests: FATAL — required tool(s) missing from PATH: logrotate
+# exit 2, ZERO tests run — a pre-push tier that had stopped being a test gate at
+# all. The flake check already declares it (flake.nix checks.pytests
+# nativeBuildInputs); this is the same declaration for the other tier.
+#
+# Add any future REQUIRED_TOOLS entry that is not a normal user-PATH binary here
+# AND in flake.nix — the two tiers satisfy the same list by different means, and
+# nothing cross-checks them (see test_logrotate_is_supplied_to_the_prepush_tier).
+TOOL_ENV=(-p "$PY_ENV" -p logrotate)
+
 degrade() {
   echo "" >&2
   echo "pre-push: ⚠ skipping test gate — could not prepare the test env: $1" >&2
@@ -141,7 +157,7 @@ if ! command -v nix-shell >/dev/null 2>&1; then
 fi
 
 echo "pre-push: preparing test env (nix-shell)…" >&2
-prep_out="$(nix-shell -p "$PY_ENV" --run 'python --version' 2>&1)"
+prep_out="$(nix-shell "${TOOL_ENV[@]}" --run 'python --version' 2>&1)"
 prep_rc=$?
 if [ "$prep_rc" -ne 0 ]; then
   degrade "nix-shell env build failed (rc=$prep_rc): $(printf '%s' "$prep_out" | tail -1)"
@@ -149,7 +165,7 @@ fi
 
 # --- Run the suite (this env is now cached; a failure here is a REAL failure) -
 echo "pre-push: running devrc test suite (mode=$MODE)…" >&2
-nix-shell -p "$PY_ENV" --run "bash '$RUNNER' --set all '$REPO_ROOT'"
+nix-shell "${TOOL_ENV[@]}" --run "bash '$RUNNER' --set all '$REPO_ROOT'"
 run_rc=$?
 
 if [ "$run_rc" -eq 0 ]; then

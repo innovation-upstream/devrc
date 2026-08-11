@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -133,6 +134,92 @@ def test_python_is_a_required_tool():
     assert "python" in tools, (
         f"REQUIRED_TOOLS does not include `python`, but the runner calls "
         f"`python -m pytest`. Got: {tools}"
+    )
+
+
+def test_every_required_tool_is_reachable_by_the_prepush_tier():
+    """🔴 THE SEAM: two tiers satisfy ONE list by DIFFERENT means.
+
+    `run-tests.sh` OWNS `REQUIRED_TOOLS`. `flake.nix` satisfies it with
+    `checks.pytests.nativeBuildInputs`; `githooks/tests-on-push.sh` satisfies it
+    with a nix-shell for python PLUS the ambient PATH. Both were verified alone;
+    the RELATIONSHIP was not — so an entry could be added, declared in the flake,
+    and be unsatisfiable in the other tier forever.
+
+    That happened. `logrotate` reaches the claude-log-rotate systemd unit through
+    `makeBinPath` in nix/home.nix and is in NO `home.packages`, so it is on no
+    interactive PATH on either host. MEASURED 2026-08-11 on the workbench: the
+    dev-host tier died at GUARD 1 — "required tool(s) missing from PATH:
+    logrotate", exit 2, ZERO tests collected.
+
+    So: every REQUIRED_TOOLS entry must be either a binary the pre-push hook
+    DECLARES in its own nix-shell, or one that is genuinely present on this host's
+    PATH right now. Nothing may be required on faith.
+    """
+    tools = re.search(r"^REQUIRED_TOOLS=\((.*?)\)", RUN_TESTS.read_text(),
+                      re.M | re.S)
+    assert tools, "could not find REQUIRED_TOOLS in run-tests.sh"
+    required = tools.group(1).split()
+    assert required, "REQUIRED_TOOLS parsed as EMPTY — the regex stopped matching"
+
+    hook = (REPO_ROOT / "githooks" / "tests-on-push.sh").read_text()
+    code = [ln for ln in hook.splitlines() if not ln.lstrip().startswith("#")]
+
+    # 🔴 A DECLARATION IS NOT A CALL SITE. Reading `-p <pkg>` from anywhere in the
+    # file counts what the hook *mentions*; what matters is what the nix-shell it
+    # actually RUNS brings in. A first draft of this test read the declaration
+    # only, and stayed GREEN under a mutation that left `TOOL_ENV=` in place while
+    # reverting both invocations to the old python-only env — passing while the
+    # exact measured outage was fully reintroduced. So pin the wiring first.
+    invocations = [ln for ln in code if "nix-shell" in ln and "--run" in ln]
+    assert len(invocations) == 2, (
+        f"expected 2 `nix-shell … --run` invocations in the hook (the env probe "
+        f"and the suite run); found {len(invocations)}:\n"
+        + "\n".join(f"  {ln.strip()}" for ln in invocations)
+    )
+    for ln in invocations:
+        assert '"${TOOL_ENV[@]}"' in ln, (
+            f"this nix-shell does not use TOOL_ENV, so it does not get the "
+            f"tools declared there: {ln.strip()}"
+        )
+
+    # Only NOW is the declaration meaningful: parse `-p <pkg>` out of TOOL_ENV.
+    m = re.search(r"^TOOL_ENV=\((.*?)\)", hook, re.M | re.S)
+    assert m, "could not find the TOOL_ENV declaration in tests-on-push.sh"
+    declared = {p for p in re.findall(r'-p\s+([A-Za-z0-9_.-]+)', m.group(1))}
+    # python/python3 come from $PY_ENV, which is declared but not name-matchable.
+    assert '"$PY_ENV"' in m.group(1), "TOOL_ENV no longer includes $PY_ENV"
+    declared |= {"python", "python3"}
+
+    unsatisfied = [
+        t for t in required
+        if t not in declared and shutil.which(t) is None
+    ]
+    assert not unsatisfied, (
+        f"REQUIRED_TOOLS entries the pre-push tier cannot supply: "
+        f"{unsatisfied}.\n"
+        f"  run-tests.sh aborts at GUARD 1 with exit 2 and runs ZERO tests, so "
+        f"the gate silently stops being a gate.\n"
+        f"  Fix by adding `-p <pkg>` to TOOL_ENV in githooks/tests-on-push.sh "
+        f"(and to flake.nix checks.pytests nativeBuildInputs) — do NOT drop the "
+        f"entry from REQUIRED_TOOLS.\n"
+        f"  hook-declared={sorted(declared)}"
+    )
+
+
+def test_logrotate_is_declared_by_the_prepush_hook_specifically():
+    """The narrow pin for the measured case, so it cannot silently regress.
+
+    Kept separate from the seam test above because that one would go green again
+    the moment anything put logrotate on the ambient PATH — which is not the fix,
+    and would make the tier depend on a host's incidental state again.
+    """
+    hook = (REPO_ROOT / "githooks" / "tests-on-push.sh").read_text()
+    code = [ln for ln in hook.splitlines() if not ln.lstrip().startswith("#")]
+    assert any("-p logrotate" in ln for ln in code), (
+        "githooks/tests-on-push.sh must DECLARE logrotate in its nix-shell. It "
+        "is in run-tests.sh REQUIRED_TOOLS and on no host's interactive PATH "
+        "(nix/home.nix gives it only to the claude-log-rotate unit's makeBinPath)."
     )
 
 
