@@ -448,14 +448,24 @@ extractor skip fenced regions; recommended as a follow-up.
 
 ---
 
-## 6. Proposed on judgement, NOT applied, NOT tested
+## 6. Proposed on judgement, NOT tested
 
 Left in the file for Zach to rule on. No measurement supports any of these.
 
-1. **"Status first" (64 B) contradicts "Don't re-emit git orientation" (182 B).** One
-   says run `git status && git branch` before starting; the other says the harness
-   already shows branch + status at session start, so don't. Both are live. Worth
-   collapsing into one bullet that says *when* a fresh read is warranted.
+1. ~~**"Status first" (64 B) contradicts "Don't re-emit git orientation" (182 B).**~~
+   **APPLIED — Zach approved, collapsed into one bullet.** One said run
+   `git status && git branch` before starting; the other said the harness already shows
+   branch + status at session start, so don't. A contradiction is worse than either rule
+   alone: where two rules conflict the model picks one arbitrarily, so "Status first" was
+   licensing the very re-emission the other rule forbids. Resolution — the orientation
+   half is redundant with the harness, and the *safety* half ("before starting") was
+   already subsumed, more precisely, by the 🔴 branch-recheck rule that ran directly
+   beneath it (`git branch --show-current` immediately before a commit, i.e. before
+   EVERY write rather than once per session). So both bullets are replaced by a single
+   one in **Git Workflow** — don't re-emit at session start, use the compact form when a
+   mid-session read is genuinely warranted, and defer the actual protection to the
+   per-write recheck. `repo orientation` also dropped from the Shell & Tooling Gotchas
+   trigger list, which no longer has a rule under it.
 2. **"A `count=1` text replace…" (231 B)** — the Edit tool now requires `old_string` to
    be unique and errors otherwise, so the "which occurrence did I hit" hazard is closed
    on the primary editing path. It survives for `sed -i` / scripted replaces, which is
