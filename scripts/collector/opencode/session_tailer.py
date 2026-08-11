@@ -76,6 +76,34 @@ _FILE_TOOLS = {"edit", "write", "write_file", "create_file"}
 # The bash-equivalent tool, whose input carries the shell command.
 _COMMAND_TOOL = "bash"
 
+# ⚠ WHY `patch` PARTS DO NOT CONTRIBUTE CHANGED PATHS — decided 2026-08-11,
+# written down because it is the exclusion most likely to be re-litigated by
+# someone who finds the parts and sees free file paths sitting in them.
+#
+# opencode emits a `patch` part type alongside `tool` parts. MEASURED over the
+# live store (read-only): 414 such parts across 63 sessions, every one with the
+# key set {type, hash, files}, `files` being a list of ABSOLUTE paths. Excluding
+# the 8 bulk parts (>20 files — whole-tree git snapshots, not an edit), they
+# carry 177 file paths across 31 sessions that NEITHER summariser counts, against
+# the 289 the file-tool extractor reports for this host. Adding them would be
+# **+61%** more changed paths. It is real, un-collected data, and it stays
+# un-collected on purpose:
+#
+#   `claude/session-tailer.py` counts a changed path only when it came from
+#   `_FILE_TOOLS = {Edit, Write, NotebookEdit, MultiEdit}`. A file changed by a
+#   Bash command — `sed -i`, `git checkout`, a script, a formatter — is invisible
+#   to it, and no equivalent of `patch` exists on that side to recover it. So
+#   counting `patch` HERE and nothing there would not make the number more
+#   complete; it would make the two sources measure different things while still
+#   being rendered in one column. That is the same apples-to-oranges the
+#   line-count decision below rejects, one field over — and worse here, because
+#   `changed_paths` feeds subsystem association, where a source with a wider path
+#   set looks like a subsystem is worked on more.
+#
+# Reopen this ONLY together with a bash-driven-change extractor on the claude
+# side, so both sources widen in the same step. Until then the gap is
+# symmetric, which is the property worth more than the extra 61%.
+
 # git commit / push inside a bash command.
 _GIT_COMMIT = re.compile(r"\bgit\s+(?:-C\s+\S+\s+|-\S+\s+)*commit\b")
 _GIT_PUSH = re.compile(r"\bgit\s+(?:-C\s+\S+\s+|-\S+\s+)*push\b")
@@ -153,7 +181,13 @@ def churn(tool_name: str, inp: dict) -> tuple[int, int]:
     is camelCase (`newString`/`oldString`/`content`) where Claude's transcript
     is snake_case (`new_string`/`old_string`/`content`).
 
-    ⚠ INVESTIGATED AND REJECTED, 2026-08-11: opencode DOES carry a real unified
+    ⚠ INVESTIGATED AND REJECTED, 2026-08-11 — this paragraph is about LINE
+    COUNTS only. The separate decision to keep `patch` parts out of
+    `changed_paths` (a different field, a different reason, +61% of paths at
+    stake) is recorded beside `_FILE_TOOLS` above; do not read one as settling
+    the other.
+
+    opencode DOES carry a real unified
     diff at `state.metadata.diff` on an `edit` part, and a `patch` part type
     listing `files`. Either would give a truer line count than block churn — and
     that is exactly why neither is used. The number has to mean the same thing

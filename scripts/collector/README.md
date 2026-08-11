@@ -87,8 +87,21 @@ touched) needs the PATHS.
 | `changed_paths_total` | distinct count **before** the cap — the truncation discriminator |
 | `changed_paths_truncated` | the list is a prefix, not the whole story |
 | `changed_paths_outside_cwd` | distinct changed paths with no repo-relative form (scratchpads, other repos, temp worktrees). `total + outside_cwd == files_modified`. |
+| `unusable_file_paths` (claude) | tool blocks whose file-path argument could not be read as a path at all (non-string / blank / malformed `input`). Counted, never coerced into a path and never dropped in silence. Normally 0; a non-zero is a malformed-transcript signal, not a session measurement. |
 | `changed_paths_cap` | the bound this emitter was built with (256 — see the module docstring for the measurement) |
 | `stats_unavailable` | `[]`, or the groups that could not be observed. `"files"` covers `changed_paths*` + (on opencode) `files_modified` / `lines_added` / `lines_removed` / `languages`; `"git"` covers `git_commits` / `git_pushes`. |
+
+🔴 **SIZE YOUR EXPECTATIONS: `changed_paths` carries roughly one path in seven, not
+all of them.** Only paths under the session cwd have a repo-relative form; everything
+else is counted in `changed_paths_outside_cwd` and never listed. Measured over every
+transcript the claude tailer walks (2026-08-11, read-only): **470 of 3,290 distinct
+modified paths — 14.3%** — had one. Three independent dry runs put the ratio at
+14–16%, so treat ~1-in-7 as the planning number, not an outlier. The excluded 85% is
+dominated by the per-session agent scratchpad and by short-lived git worktrees under
+`/tmp`; the worktree bucket alone (802 paths) is **1.7x larger than the whole emitted
+set**. A consumer that reads a short list as "this session barely touched anything"
+will be wrong on most sessions — read `changed_paths_outside_cwd` beside it.
+`changed_paths.py`'s module docstring has the full classification.
 
 🔴 **A zero that means "cannot report" is indistinguishable from a real zero**, and
 that ambiguity is what this block removes. OpenCode emitted `files_modified=0`,

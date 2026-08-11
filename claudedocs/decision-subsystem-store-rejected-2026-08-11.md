@@ -103,10 +103,29 @@ supplies the evidence the `org` strain test found missing.
 
 Decisions taken:
 
-- **Association is derived, not tagged.** Map session → subsystem from what the collector
-  already emits (`kind=session-summary` carries git commits/pushes) by matching path
-  components against the entry's slug and `aliases:`. This deliberately does **not** persist
-  a location, preserving the index's rule that location is always re-derived live.
+- **Association is derived, not tagged.** Map session → subsystem by matching the path
+  components of `kind=session-summary`'s **`changed_paths`** against the entry's slug and
+  `aliases:`. This deliberately does **not** persist a location, preserving the index's rule
+  that location is always re-derived live.
+
+  🔴 **CORRECTION — the original wording of this bullet was wrong when written.** It said
+  the mapping works from "what the collector already emits (`kind=session-summary` carries
+  git commits/pushes)". `session-summary` carried integer **counts** — `git_commits`,
+  `git_pushes`, `files_modified` — and never a commit, never a path. There was nothing to
+  match path components *against*; the derivation was asserted with no data behind it, and
+  anyone building P0 against that sentence would have got to the resolver and found its
+  input did not exist. Recorded rather than quietly edited: the failure was believing a
+  field name implied a payload, which is the same mistake as reading a type declaration as
+  a code path.
+
+  The paths exist as of **PR #398**, which added the `changed_paths*` block to both sources
+  and fixed the opencode extractor. Two properties the resolver must be built against, both
+  measured, neither optional: `changed_paths` is `null` when the file set could not be
+  observed — **not** an empty list, and a `null` read as "touched nothing" reintroduces
+  exactly the silent zero #398 removed; and it carries only paths under the session cwd,
+  **~1 in 7** of the modified paths (470 of 3,290, 2026-08-11), with the remainder counted
+  in `changed_paths_outside_cwd`. So a subsystem's session count is a **lower bound**, which
+  the liveness convention has to state rather than round away.
 - **The edge lives in ClickHouse**, as a new `kind=session-subsystem` event — one row per
   `(session, subsystem)`. Do **not** extend `session-summary`: consumers dedupe it with
   `argMax(<field>, ingested_at) GROUP BY session`, and a session touches N subsystems.

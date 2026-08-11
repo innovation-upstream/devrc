@@ -459,6 +459,116 @@ def test_run_prunes_deleted_transcripts_from_state(env):
 
 
 # --------------------------------------------------------------------------- #
+# One unsummarisable transcript must not cost every other session's summary
+# --------------------------------------------------------------------------- #
+# 🔴 The abort this closes was NOT hypothetical-only: `run()` had no per-session
+# try, so any exception out of `summarize_transcript` killed the pass and stopped
+# ALL claude session-summary emission until the offending transcript changed.
+# Most shapes are now rejected at the extraction site (see
+# test_session_tailer_paths.py::TestClaudeUnusableFilePaths); a NON-STRING
+# `timestamp` is deliberately left unguarded there, so these tests exercise the
+# wrapper with a case no earlier check rejects rather than with dead code.
+_BAD_TS_TURN = {"type": "assistant", "timestamp": 12345,
+                "cwd": "/srv/checkouts/widget-repo",
+                "message": {"role": "assistant", "model": "m", "usage": {},
+                            "content": []}}
+
+
+def _summary_line(capsys) -> str:
+    out = capsys.readouterr()
+    line = [l for l in out.out.splitlines() if l.startswith("session-tailer: scanned")]
+    assert len(line) == 1, out.out
+    return line[0] + "\n<<STDERR>>\n" + out.err
+
+
+def test_a_run_with_no_bad_transcript_reports_failed_zero(env, capsys):
+    """POSITIVE CONTROL, first half. A `failed=0` from a counter wired to
+    nothing is indistinguishable from a real zero — so the pair below shows the
+    number MOVE across two runs of the same code path."""
+    for i in range(3):
+        _write(env["projects"], "-home-zach-workspace-devrc", f"ok{i}",
+               [user_typed(f"session {i}", ts=f"2026-07-11T1{i}:00:00.000Z")])
+    assert S.run() == 0
+    text = _summary_line(capsys)
+    assert "failed=0" in text
+    assert "ERROR summarising" not in text
+    assert len(_spool_events(env["spool"])) == 3
+
+
+def test_one_unsummarisable_transcript_does_not_abort_the_run(env, capsys):
+    """POSITIVE CONTROL, second half: same three good sessions, plus one bad —
+    failed moves 0 -> 1, and all three good sessions still emit."""
+    for i in range(3):
+        _write(env["projects"], "-home-zach-workspace-devrc", f"ok{i}",
+               [user_typed(f"session {i}", ts=f"2026-07-11T1{i}:00:00.000Z")])
+    _write(env["projects"], "-home-zach-workspace-devrc", "bad",
+           [user_typed("hi"), _BAD_TS_TURN])
+
+    assert S.run() == 0
+    text = _summary_line(capsys)
+    assert "failed=1" in text
+    # REPORTED, not swallowed: the offending path and the exception are named.
+    assert "ERROR summarising" in text
+    assert "bad.jsonl" in text
+    assert "TypeError" in text
+    # and the three healthy sessions were NOT collateral damage
+    assert sorted(e["session"] for e in _spool_events(env["spool"])) == \
+        ["ok0", "ok1", "ok2"]
+
+
+def test_a_skipped_transcript_is_not_marked_done_and_retries(env, capsys):
+    """The signature is recorded ONLY after a successful emit, so a skipped
+    transcript is re-evaluated next tick instead of being silently written off —
+    and it emits for real once the content becomes summarisable."""
+    p = _write(env["projects"], "-home-zach-workspace-devrc", "bad",
+               [user_typed("hi"), _BAD_TS_TURN])
+    assert S.run() == 0
+    assert "failed=1" in _summary_line(capsys)
+    assert not any(k.endswith("bad.jsonl") for k in S.load_state(env["state"]))
+
+    # still bad on the next pass → still reported, still not marked done
+    assert S.run() == 0
+    assert "failed=1" in _summary_line(capsys)
+    assert _spool_events(env["spool"]) == []
+
+    # content becomes readable → it emits, with no change to the state file
+    p.write_text(json.dumps(user_typed("hi")) + "\n", encoding="utf-8")
+    assert S.run() == 0
+    assert "failed=0" in _summary_line(capsys)
+    assert [e["session"] for e in _spool_events(env["spool"])] == ["bad"]
+
+
+def test_an_emit_failure_is_still_FATAL(env, monkeypatch):
+    """🔴 The wrapper's scope is load-bearing. `emit_event` is OUTSIDE it: a
+    broken spool/helper is systemic, and turning it into a per-session skip
+    would convert a loud outage into a quiet count — the exact silent-zero this
+    payload exists to remove. Widening the try to cover the emit turns this
+    test red."""
+    _write(env["projects"], "-home-zach-workspace-devrc", "s1", [user_typed("hi")])
+
+    def broken_emit(emit, ev):
+        raise RuntimeError("spool is unwritable")
+
+    monkeypatch.setattr(S, "emit_event", broken_emit)
+    with pytest.raises(RuntimeError, match="spool is unwritable"):
+        S.run()
+
+
+def test_the_unusable_path_counter_reaches_the_payload(env):
+    """End to end: the diagnostic is on the emitted event, not just in a rollup
+    dict, so it is queryable rather than only visible in a unit test."""
+    _write(env["projects"], "-home-zach-workspace-devrc", "s1", [
+        user_typed("hi", cwd="/srv/checkouts/widget-repo"),
+        assistant([("Write", {"file_path": "   ", "content": "x"})],
+                  cwd="/srv/checkouts/widget-repo"),
+    ])
+    assert S.run() == 0
+    payload = json.loads(_spool_events(env["spool"])[0]["payload"])
+    assert payload["unusable_file_paths"] == 1
+    assert payload["changed_paths"] == []
+
+
+# --------------------------------------------------------------------------- #
 # emit_decision — the pure settle policy (fake clock, no sleeping)
 # --------------------------------------------------------------------------- #
 def _decide(prev, sig, mtime, now, settle=SETTLE, interim=INTERIM):
