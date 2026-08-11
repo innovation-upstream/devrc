@@ -10,18 +10,52 @@ Routes registered in `internal/api/server.go` `registerNotesRoutes`, handlers in
 | op | route | notes |
 |---|---|---|
 | **create** | `POST /api/tasks` | `{directory, title, body, model, repo, branch, privileges, tags}`; `body` required (400); unknown keys silently dropped (no `DisallowUnknownFields`). ⚠ **Response is `{"id":N}` and nothing else** — not the created task; read any field back with `GET /api/tasks/{id}` |
-| **read** | `GET /api/tasks[/{id}]` · `GET /api/tasks?tag=a&tag=b` | tag filter ANDs; bogus tag → `200 []`, not an error. 🔑 **The single-task `GET` is the read for EVERYTHING** — comments, provenance and status all come back on it; there is no per-field endpoint. ⚠ **The LIST form embeds full comment bodies for every task**, so it is far heavier than it looks — filter with `jq`, don't eyeball it |
-| **edit** | `PATCH /api/tasks/{id}` | content + dispatch config + `tags` (replace) / `addTags` / `removeTags` (merge); **status/provenance/created_at immutable**; **409 if `in_progress`**; `tags`+merge together → 400 (0.7.73/0.7.75) |
+| **read** | `GET /api/tasks[/{id}]` · `?tag=a&tag=b` | tag filter ANDs; bogus tag → `200 []`. ⚠ **NO `LIMIT`, no status filter** — returns the WHOLE board, newest-`updated_at` first, and `?status=`/`?limit=` are **silently ignored** (measured 0.7.85, 2026-08-11: 10 tasks, 94 KB, ~25k tokens, 57% of it comment bodies). Filter client-side — see "Reading the board cheaply" below. 🔑 **Comments are EMBEDDED in both the list and the single GET** (`comments: [{id,noteId,author,body,createdAt}]`) — there is **no read endpoint**: `GET /api/tasks/{id}/comments` is **405** (POST-only), which reads as "wrong method, keep looking" and sends you hunting for a route that was never there. Attachments are `omitempty` metadata only; bytes come from the session route `GET /tasks/{id}/attachments/{aid}` |
+| **edit** | `PATCH /api/tasks/{id}` | content + dispatch config + `tags` (replace) / `addTags` / `removeTags` (merge); **status/provenance/created_at immutable**; `tags`+merge together → 400 (0.7.73/0.7.75). ⚠ **The `in_progress` 409 is REFINED, not blanket**: a **descriptive-tag-only** edit SUCCEEDS while in progress (a label is not a spec change). 409 fires only when a non-tag field is present, or any touched tag is a ROUTING tag — and a `tags` **replace** counts the CURRENT set as touched, so it 409s on any task that already has one |
 | **set-status** | `PATCH /api/tasks/{id}/status` | ANY status incl. `complete`; **NO `in_progress` guard**; broadcasts `task.changed` + fires the `ready_for_review` push (0.7.74) |
 | **delete** | `DELETE /api/tasks/{id}` | ⚠ shares `dismissTask`, so it **TEARS DOWN a live dispatched agent pod** (`Provisioner.Destroy`, background best-effort). **No in-progress guard — deliberately** (`TestAPITaskDeleteInProgressAllowed`). Delete a dispatched task only if you mean to kill its agent. `404` if absent — the existence probe is load-bearing, since `DELETE … WHERE id=$1` succeeds with 0 rows (0.7.76) |
 | **comment (write)** | `POST /api/tasks/{id}/comments` | `{body}` only; author from the bounded `X-Clawgate-Source` allowlist (`{extension, api, drafter, repo-cos, claude-code}`, unknown → `api`), **NEVER from the body** — `user`/`operator` are structurally unreachable. Markdown; coalesced push on the machine path only (0.7.78) |
-| **comment (read)** | ⚠ **there is no read route** — use `GET /api/tasks/{id}` | 🔴 **`GET /api/tasks/{id}/comments` returns `405`, not `404`** (measured, live 0.7.85): the route exists but is POST-only, so the obvious guess reads as "wrong method, keep looking" and sends you hunting for an endpoint that was never there. Comments are **embedded in the task GET** as `.comments[]` — `{id, noteId, author, body, createdAt}`. Recipe: `curl -sf -H "Authorization: Bearer $HOOK" $B/api/tasks/{id} \| jq -r '.comments[] \| "── \(.author) \(.createdAt)\n\(.body)\n"'` |
 | **tag vocab** | `GET /api/tags` | `[{tag,count}]` |
+| **projects** | `GET /api/projects` | ⚠ an **OBJECT**, not an array: `{"projects":[{"name","count"}]}` — and keyed `name`, unlike `/api/tags`'s `[{"tag","count"}]`. Derives from the `project:` tag namespace (0.7.81) |
+| **merge** | `POST /tasks/merge` | 🔴 **SESSION route, no `/api` counterpart, FORM-encoded** (`winner=`,`loser=`). Merge by SUPERSEDE — nothing is deleted; winner gains the tag union + a comment, loser gets a comment and `complete`. 400 self-merge/bad id · 404 unknown · 409 if EITHER task is `in_progress` or already `complete`. 200 with an EMPTY body + `HX-Trigger`. The machine gap is deliberate: the audit comments are authored `user`, which `taskCommentAuthor` structurally cannot mint (0.7.84) |
 | **push-only** | `POST /api/notify` | notify-only, no approve/deny card (0.7.68) |
 | **provenance** | headers on create | `X-Clawgate-Source` + `X-Clawgate-Session-Id` → **stored** `source_type` / `source_session_id` + a card chip (0.7.72). The two headers are **independent** — source stamps with no session id, and vice versa. See the phantom-null note below before reporting provenance as broken |
 
 Status vocabulary is exactly **`open` / `in_progress` / `ready_for_review` / `complete`**
 (`notes.ValidStatus`) — there is **no `dismissed`**; dismissing deletes.
+
+## ⚠ What each write actually returns (only `create` is the stingy one)
+`POST /api/tasks` → `{"id":N}` and nothing else. But the others hand back a full object, so a
+read-back `GET` is usually redundant:
+- `PATCH /api/tasks/{id}` and `PATCH /api/tasks/{id}/status` → the **full updated task**.
+- `POST /api/tasks/{id}/comments` → the **created comment** `{id,noteId,author,body,createdAt}`.
+- `DELETE /api/tasks/{id}` → `{"id":N,"deleted":true}`.
+
+## ⚠ Request keys ≠ response keys (the `sourceSessionId` trap, twice more)
+`POST`/`PATCH` take **`branch`** and **`privileges`**; the task reads back as **`repoBranch`**
+and **`grantProfiles`** (`notes.go`). Round-tripping a GET body into a PATCH silently drops both.
+Both are `omitempty`, so on a task that never set them the key is simply absent — which looks
+identical to "the field isn't wired". Confirm against `notes.go`, not against one task's JSON.
+
+## Reading the board cheaply
+The list GET returns everything, every time (~25k tokens today). Select before you read:
+```bash
+B=http://192.168.50.250:30302
+H="Authorization: Bearer $(grep '^CLAWGATE_HOOK_TOKEN=' ~/.claude/clawgate.env | cut -d= -f2)"
+
+# board summary — ~360 tokens instead of ~27,200
+curl -s -H "$H" "$B/api/tasks" | jq -r '.[] | "\(.id)\t\(.status)\t\(.title // .directory)\t\((.tags//[])|join(","))\t\((.comments//[])|length)c"'
+
+# one task + its comments (comments are ALREADY here — there is no /comments GET)
+curl -s -H "$H" "$B/api/tasks/161" | jq -r '"#\(.id) [\(.status)] \(.title)\n\n\(.body)\n\n--- comments ---", ((.comments//[])[] | "[\(.author) \(.createdAt[0:16])]\n\(.body)")'
+
+# open work only (the server ignores ?status=)
+curl -s -H "$H" "$B/api/tasks" | jq -r '.[] | select(.status=="open") | "\(.id)\t\(.title)"'
+```
+🔑 **A wrapper CLI was evaluated and rejected** (2026-08-11): ~99% of the saving above is the
+`jq` selection, not the client — rendering buys only 12%, and the shorter invocation saves ~105
+tokens against a ~27k payload. A binary would be a second thing to drift from the API, and a
+stale binary returns confidently wrong output where a stale doc at least 405s at you.
 
 **Route-scope distinction:** the session routes (`/tasks/...`, no `/api` prefix) are LAN/UI-only, and
 the agent route `PATCH /agent/task/status` **forbids `complete`** — the machine
@@ -83,9 +117,17 @@ and **no login QR to manage**.
   `https://login.zacx.dev` (user `zach`, already enrolled). Authelia owns auth/SSO now — manage it
   there, not in clawgate. Memory `authelia-passkey-sso`.
 - **LAN** → `http://192.168.50.250:30302` or `clawgate.workbench.lan` — open, no auth.
-- **Machine endpoints** (`/api/send`, `/api/tasks`, `/api/notify`, `/api/response/{id}`) require the
-  `CLAWGATE_HOOK_TOKEN` bearer. Secrets are NOT stored in the skill — retrieve it with
-  `grep '^CLAWGATE_HOOK_TOKEN=' ~/.claude/clawgate.env | cut -d= -f2`.
+- **Hook-token endpoints** are `/api/send`, `/api/notify`, `/api/suggest`, `/api/response/{id}`,
+  `/api/tasks*`, `/api/tags`, `/api/projects`. Secrets are NOT stored in the skill — retrieve it
+  with `grep '^CLAWGATE_HOOK_TOKEN=' ~/.claude/clawgate.env | cut -d= -f2`.
+- 🔴 **The `/api/` prefix does NOT mean "needs the token."** `/api/requests`,
+  `/api/openrouter/models`, `/api/push/*` and `/api/auto-approve*` sit behind the no-op
+  `requireSession` and are **wide open on the LAN NodePort** — and `POST /api/auto-approve` is
+  state-changing on the open side. Measured live 0.7.85, 2026-08-11: `GET /api/requests` → **200
+  with no credential**, `GET /api/tasks` → **401**. Never infer exposure from the path prefix.
+- 🔴 **`/operator/*` (11 routes) is a THIRD credential** — `requireOperatorToken` demands the
+  reserved Operator *agent's* hooks token, not the hook token, which gets
+  `401 {"error":"not the operator"}`.
 - Everything else (the UI, `/ui/*`) is OPEN — behind Authelia publicly, directly reachable on the
   LAN. The hook never has a cookie; the UI never calls `/api/response/{id}`.
 - 🔴 **"session auth" is not auth**: `requireSession` is a literal pass-through no-op since 0.7.37
