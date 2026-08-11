@@ -169,9 +169,28 @@ Creds come from `~/.config/activity-collector/env` (the collector's own file) un
 `CLICKHOUSE_URL/USER/PASSWORD` are already in the environment.
 
 - **Silence is counted in ACTIVE time, not wall time.** A host's *active* 5-min buckets are
-  the ones where any of its sources emitted; overnight/away time is simply not in the set.
-  This is what makes a per-source budget work for `keys` (continuous) and `tool` (on-demand)
-  at the same time.
+  the ones where a **HUMAN-PRESENCE** source emitted; overnight/away time is simply not in the
+  set. This is what makes a per-source budget work for `keys` (continuous) and `tool`
+  (on-demand) at the same time.
+- 🔴 **Active time is an ALLOWLIST — `deadman.PRESENCE_SOURCES` = `keys` `i3` `tmux` `zsh`.**
+  Agent/machine sources (`claude`, `tool`, `opencode`, `browser-bridge`) do NOT mark a bucket
+  active, and neither does **`browser`**: the browser-bridge agent drives the same Brave
+  profile the activity extension instruments, so agent navigation emits `browser` rows (76 of
+  777 laptop `browser` buckets co-occur with a bridge command; it was the *sole* presence
+  source in 1). Adding a source a human drives means adding it there; anything an agent can
+  drive, directly or indirectly, stays out. It used to be a denylist (everything except a
+  timer), and on 2026-08-11 an unattended overnight agent run marked the night active and made
+  `workbench/keys` + `workbench/tmux` read DEAD by morning (169-point/7-day sweep:
+  `workbench/tmux` 7 → 0, `workbench/keys` 14 → **7**, and those surviving 7 are a TRUE
+  positive — `keys` silent 2.8–8.1 active hours on 08-05 while `i3`/`tmux`/`zsh` kept emitting).
+- 🔴 **The trade is FEWER FALSE ALARMS, SLOWER TRUE ONES.** Budgets are counted in active
+  buckets, so a slower-advancing timeline means a real death takes longer in wall time to
+  convict. Seeded-death latency, old → new: `workbench/keys` 6h → 24h, `workbench/tool`
+  36h → 96h, `workbench/browser-bridge` 12h → 24h (which erodes the #388 heartbeat).
+  **No pair got faster in any run; 10 of 17 got slower.** There is **no per-class rule** —
+  `laptop/tool` (on-demand) got *noisier* (27 → 28 dead-hours). 🔴 Individual figures **drift
+  between sweeps** because the table advances; trust the direction and the count, never a
+  specific number. Numbers + the drift evidence in the module docstring's COST section.
 - **The budget is MEASURED per (host, source)**: `clamp(2 × p99 active-gap, 2h, 48h)`.
   Measured 2026-08-03 — `keys`/`i3`/`tmux` land on the 2h floor; `workbench/opencode` 11.5h;
   `workbench/tool` 31.1h. Nothing is hand-tuned and nothing is hand-listed.
@@ -179,12 +198,38 @@ Creds come from `~/.config/activity-collector/env` (the collector's own file) un
   14-day window, so `workbench/browser` (0 rows, correctly absent) can never alarm, while a
   source that *was* emitting and stopped keeps its baseline and does.
 - 🔴 **"Cannot tell" ≠ "healthy".** `not-configured` / `unreachable` / `query-failed` /
-  `no-data` are each their own state; `ok` is unreachable unless rows came back AND at least
-  one pair was actually measured (`evaluated > 0` is the verdict's own positive control).
+  `no-data` / `misconfigured` / `presence-stalled` are each their own state; `ok` is
+  unreachable unless rows came back AND at least one pair was actually measured
+  (`evaluated > 0` is the verdict's own positive control). All six render `tlm ?`, never a
+  green pill — `bar-status-poll` carries a hardcoded FALLBACK copy of that set, so **a new
+  state must be added there too**.
 - 🔴 **Blind spot, by design:** this is a RELATIVE check. A simultaneous outage of every
   source on every host produces zero active buckets and reads as "0 dead" — indistinguishable
-  from the operator being away. `newest_event_age_minutes` is reported for the human;
-  it is deliberately not an alarm.
+  from the operator being away. **The allowlist WIDENS this**: losing all four presence sources
+  at once (an X-session crash takes `keys`+`i3`, and the terminals take `tmux`+`zsh`) stops
+  active time advancing, and then *every* source on that host is unjudgeable, not just the
+  presence ones. Losing only ONE presence source is still caught — the others carry the
+  timeline.
+- 🔴 **`newest_event_age_minutes` does NOT cover that** — it is a `max` across **all hosts and
+  all sources**, so surviving agent rows pin it at ~1 min while a host's human timeline is days
+  stale. The real detector is **`presence-stalled`** (`PRESENCE_STALL_HOURS`, 72): a host still
+  emitting more than 72h after its last human-driven row is reported CANNOT-TELL with its
+  **remaining** pairs marked un-evaluated. Threshold sized off the worst real stall in 14 days
+  (workbench 39.8h, laptop 8.9h, zero points over 48h). Boundary is **exclusive** (exactly 72h
+  is not a stall).
+- 🔴 **A stall must not swallow a named death.** A pair already past its budget when the
+  timeline froze was measured against real active buckets — it stays `dead`, in `count`, and by
+  name in `detail`; only the pairs whose silence is 0-by-construction become un-evaluated. The
+  bar follows: an unknown state carrying `count > 0` renders **`tlm N` Critical with the toast
+  firing**, not `tlm ?`. A per-*host* discard here cost a measured `workbench/claude` death of
+  54.6 active hours against a 2.0h budget.
+- **Two things that deliberately do NOT stall:** a host **switched off** (both its timestamps
+  freeze, so the gap holds rather than growing — note a host powered off while *already* past
+  the threshold stays stalled for the rest of the window), and a host that has **never** emitted
+  a human-driven row (an agent pod, a container, a mis-set `ACTIVITY_HOST`). The latter is
+  `reason="no-presence-baseline"` on its pairs and raises nothing fleet-wide — merged into the
+  stall arm, one synthetic row made the whole fleet permanently cannot-tell and masked the
+  other hosts' real counts.
 - **Surface:** the workbench `bar-status-poll` (~45s) runs it as its `telemetry` source →
   `~/.cache/bar-status/telemetry.json` → the `tlm` pill (signal 17) + a rising-edge dunst
   toast. One workbench runner covers BOTH hosts because it reads the shared table. See the

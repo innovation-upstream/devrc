@@ -51,6 +51,12 @@ X — your call"). Leave the setup a little more modern than you found it; never
   (count crosses `--red-above`), latched via `~/.cache/bar-status/<src>.toast-state` so steady
   state stays silent. Thresholds are env-tunable and MUST match the block's `--red-above` (or
   they drift).
+  🔴 **A `--mock-*` run does NOT touch the latches or fire toasts unless you pass `--toast`.**
+  The latches live in the same cache dir as the status files, so a debug run with a
+  sub-threshold fixture would clear a *live* latch and make the next real poll (≤45s) re-toast
+  a steady-state condition. `telemetry` is the one source whose toast can ride an
+  **unknown** verdict: a `presence-stalled` host with a measured death renders `tlm N` and
+  toasts, not `tlm ?` — see `deadman.py`'s COST section.
 
 ## Block ↔ signal ↔ threshold map (workbench)
 | Block | Script | signal | `--red-above` | Notes |
@@ -109,7 +115,9 @@ for f in ~/.cache/bar-status/*.json; do echo "== $f"; cat "$f"; echo; done
 systemctl --user start bar-status-poll.service
 # run the poller by hand (see errors live)
 python3 ~/workspace/devrc/scripts/bar-status-poll
-# drive the write+signal path offline with fixtures (no live endpoint)
+# drive the write+signal path offline with fixtures (no live endpoint).
+# SAFE by default: writes the real cache files, but fires NO toasts and does not
+# touch the rising-edge latches. Add --toast only if you mean to exercise those.
 ~/workspace/devrc/scripts/bar-status-poll --mock-alerts alerts.json --mock-mail 3
 # unit tests for the pure parse/edge functions
 python3 -m pytest ~/workspace/devrc/scripts/tests/test_bar_status.py
