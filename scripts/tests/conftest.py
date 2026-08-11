@@ -31,8 +31,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # scripts/
 
 from testlib import nolaunch  # noqa: E402
 
-# Read by scripts/tests/test_no_real_launchers.py (and available to any test that
-# wants to assert on what a script tried to launch).
+# 🔴 Published in the ENVIRONMENT, not only as a fixture value, and genuinely
+# read: `test_no_real_launchers.py` uses it in the tests that must NOT request
+# the fixture as a parameter — otherwise turning the autouse flag below off is
+# invisible (measured: identical pass/fail across the whole directory, while the
+# mutant fired real `systemd-run` calls). An earlier revision declared this
+# constant, claimed in a comment that a test read it, and nothing did — the
+# declared-but-never-branched-on shape from claude/RULES.md.
+#
+# ⚠ The word below is a MUTATION SITE: test_autouse_is_what_protects_a_test_
+# that_never_asks asserts it occurs exactly once in this file, so do not spell
+# it again in a comment here (the first attempt did, and the pin went red on its
+# own prose).
 STUB_DIR_ENV = "DEVRC_TEST_LAUNCH_STUB_DIR"
 
 
@@ -42,7 +52,8 @@ def no_real_launchers(tmp_path_factory):
 
     Session-scoped and autouse: the protection must not depend on a test
     remembering to ask for it — a test that forgets is exactly the one that
-    fires a toast on someone's desktop.
+    fires a toast on someone's desktop. `install()` runs BEFORE the prepend
+    because the systemctl stub must resolve the REAL binary; see nolaunch.py.
     """
     stub_dir = Path(tmp_path_factory.mktemp("nolaunch"))
     nolaunch.install(stub_dir)

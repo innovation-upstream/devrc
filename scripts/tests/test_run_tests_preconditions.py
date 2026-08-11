@@ -187,6 +187,13 @@ def test_every_required_tool_is_reachable_by_the_prepush_tier():
     assert '"$PY_ENV"' in m.group(1), "TOOL_ENV no longer includes $PY_ENV"
     declared |= {"python", "python3"}
 
+    # 🔴 `shutil.which` reads THIS process's PATH, and since the
+    # no-real-launchers fixture landed (scripts/tests/conftest.py) that PATH
+    # begins with a directory of 12 stubs. None of them is a REQUIRED_TOOLS
+    # entry today, so this check is unaffected — and it stays that way because
+    # test_no_real_launchers.py::test_no_required_tool_is_satisfied_by_a_stub
+    # asserts the two sets are disjoint. If that ever fails, THIS test is the
+    # one that would have gone quietly green on a stub.
     unsatisfied = [
         t for t in required
         if t not in declared and shutil.which(t) is None
