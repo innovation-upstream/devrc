@@ -21,13 +21,17 @@ let
   # Drift-deadman master switch (scripts/drift-check.sh) — gates ONLY whether the
   # timer is wired into timers.target. The SERVICE definition is always emitted, so
   # `systemctl --user start drift-check` works by hand on either host regardless.
-  # 🔴 Deliberately OFF at merge: the deadman was built + validated against scratch
-  # clones only, and enabling a timer is a live change to a host's behaviour. Flip to
-  # true in a separate, supervised deploy after one hand-run on the workbench proves
-  # the ssh leg reaches the laptop from a systemd-user context (a user unit has no
-  # ssh-agent, so the laptop key must be usable non-interactively — the one thing
-  # scratch clones structurally cannot test).
-  enableDriftDeadman = false;
+  # ON since 2026-08-11. Both preconditions were MEASURED on the workbench, not
+  # argued — each is a thing scratch clones structurally cannot test:
+  #   1. the ssh leg reaches the laptop from a systemd-user context (no ssh-agent):
+  #      a hand-run of drift-check.service found REAL drift (laptop 1 behind), rc 10.
+  #   2. the failure toast actually DISPLAYS. It did not, at first — dunst was paused
+  #      with 286 notifications queued, so the alert was sent and silently binned.
+  #      #381 fixed that; re-measured here as displayed 0 -> 1 with waiting UNCHANGED
+  #      while paused=true, driven by a real unit failure (rc 8) on a throwaway clone.
+  # (2) is why this flag waited: a timer alerting into a paused queue is WORSE than no
+  # timer, because it manufactures the appearance of coverage.
+  enableDriftDeadman = true;
   # Graphical host = runs X/i3 (both current NixOS hosts do; only a genuinely headless
   # box would not). Approximated as isNixOS, mirroring graphical.nix — deliberately NOT
   # !serverMode, which is true on the graphical workbench.
