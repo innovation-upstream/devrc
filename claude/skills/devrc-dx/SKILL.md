@@ -43,7 +43,8 @@ Read the config sources — do NOT assume locations, discover them.
 - `nix/pkgs/` — language tooling (`lang/`) and system packages (`tools/`)
 - `nix/sessionVariables.nix` — FZF, editor, LSP, Playwright env vars
 - `nix/system/` — staged NixOS config changes + apply scripts
-- `.tmux.conf` / `.zshrc` — extra config loaded via `builtins.readFile` from the nix modules
+- `.tmux.conf` / `.zshrc` — extra config pulled in with `builtins.readFile` by
+  `nix/programs/tmux/default.nix` and `nix/programs/zsh/default.nix`
 - `scripts/` — tmux scripts (task-hook, task-resume, activity-receiver — thin wrappers over
   fuzzyclaw; scratch-picker, scratch-status, scratch-monitor, claude-counters; the `agent-ops`
   dashboard) + the i3status-rust bar scripts (`i3status-*` block scripts, `bar-status-poll`,
@@ -75,7 +76,10 @@ files; status emoji conventions (🔄 active, ⏸ paused, ✅ done, ● claude r
 **Performance** — per-pane shell commands that should run once (xset, PATH, env vars);
 status bar scripts forking per-window instead of batching; dashboard render time
 (<50ms for 50 windows); hook execution time (PreToolUse fires on *every* tool call);
-pre-caching per-cwd not per-window for JSONL extraction.
+pre-caching per-cwd not per-window for JSONL extraction; the two-pass search staying
+two-pass (instant substring over cached fields + an async batch ripgrep deep scan —
+~66ms across 1.2 GB via a single `rg -i -l --max-count=1 --glob=*.jsonl` over all cwds,
+not one invocation per window).
 
 **Correctness** — dead references (signals to a wrong process, unused packages); hardcoded
 paths that should use `config.home.homeDirectory`; duplicate config (direnv hooks, bell

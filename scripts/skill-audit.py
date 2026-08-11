@@ -437,15 +437,16 @@ def render(audits, show_all, n_sections, n_detail, out=sys.stdout):
             any_ref_issue = True
             p(f"  {a['name']}: " + "; ".join(bits))
         if a["relative_refs"] and not a["abs_ref_base"]:
-            p(f"  {a['name']}: {a['relative_refs']} RELATIVE reference path(s) and no absolute "
-              f"base stated. Usually fine: `home.file.\".claude/skills\"` maps devrc/claude/skills "
-              f"with `recursive = true`, so `reference/` DOES ship to "
-              f"~/.claude/skills/<name>/reference/ (verified on activity, clawgate, initiatives, "
-              f"mailbox, tekton, auditloop, bar, devrc-dx, i3). It does NOT for the "
-              f"mkOutOfStoreSymlink exceptions — `browser` (scripts/browser-bridge/) and "
-              f"`dl-router` (scripts/dl-router/) link only SKILL.md plus their CLI, so THOSE "
-              f"cores must use repo-absolute paths. State the absolute source alongside the "
-              f"deployed path either way, so a reader can find the file to edit.")
+            p(f"  {a['name']}: {a['relative_refs']} RELATIVE reference path(s) and "
+              "no absolute base stated. Usually FINE: nix/home.nix maps "
+              "devrc/claude/skills with `recursive = true`, so `reference/` DOES "
+              "ship to ~/.claude/skills/<name>/reference/ (verified live on "
+              "activity, clawgate, initiatives, mailbox, tekton, auditloop, bar, "
+              "devrc-dx, i3). It does NOT ship for the two mkOutOfStoreSymlink "
+              "exceptions — `browser` (scripts/browser-bridge/) and `dl-router` "
+              "(scripts/dl-router/) link only SKILL.md plus their CLI — so THOSE "
+              "cores must use repo-absolute paths. State the absolute source next "
+              "to the deployed path either way, so a reader can find it to edit.")
     if not any_ref_issue:
         n_refd = sum(len(a["refs"]) for a in audits)
         if n_refd:

@@ -110,6 +110,10 @@ Other `fuzzyclaw` subcommands: `status` (one-line output for tmux status-right),
 `search <query>` (CLI global search across conversation history),
 `export <cwd>` (markdown session export).
 
+The Go binary replaced the old bash dashboard/idle/pipe scripts: `idle-update` took
+over from `idle-update.sh`, `pipe` from `pipe-activity.sh`, and `hook stop|resume`
+from most of `task-hook.sh` / `task-resume.sh`.
+
 **Dashboard:** `fuzzyclaw dashboard` (Alt+F) is the Bubble Tea TUI — the only bound dashboard.
 Feature lists, controls, data flow, and performance targets are documented in the
 `~/workspace/tmux-fuzzyclaw` repo, not duplicated here. From the devrc side, what matters:
