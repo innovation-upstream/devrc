@@ -666,6 +666,148 @@ def test_render_telemetry_line_missing_source_shown_dim():
     assert "zsh" in line and "tmux" in line
 
 
+def test_telemetry_freshness_excludes_machine_cadence_rows():
+    """🔴 SEAM GUARD — this panel's freshness vs deadman's MACHINE_CADENCE.
+
+    browser-bridge emits a heartbeat every 900s whether or not it can execute
+    anything, so an unfiltered `max(ts)` reports a bridge with no extension
+    attached as "fresh 15 min ago". Deleting the exclusion from the SQL used to
+    survive the whole suite — nothing here ever read that query.
+
+    The predicate is IMPORTED from deadman rather than re-spelled, so this
+    asserts the relationship against the real tuple: every declared pair must
+    appear in the emitted clause, and an empty tuple must emit nothing (there is
+    then nothing to exclude).
+    """
+    # agent-ops resolves its siblings through DEVRC_DIR (HOME-based) — the right
+    # thing in production, where the deployed script must read the real checkout,
+    # and the same convention CHQUERY_PATH already uses. The nix check sandbox
+    # has no $HOME/workspace/devrc, so point it at THIS tree's copy for the test
+    # rather than changing how production resolves paths.
+    dm_py = os.path.join(_HERE, "..", "collector", "deadman.py")
+    spec = importlib.util.spec_from_file_location("_dm_seam", dm_py)
+    DM = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(DM)
+
+    orig_path = ao.DEADMAN_PATH
+    try:
+        ao.DEADMAN_PATH = dm_py
+        clause = ao.machine_cadence_sql_filter()
+    finally:
+        ao.DEADMAN_PATH = orig_path
+    assert DM.MACHINE_CADENCE, "deadman declares no machine-cadence pairs"
+    assert clause.startswith("AND NOT ("), clause
+    for src, kind in DM.MACHINE_CADENCE:
+        assert "source = '%s' AND kind = '%s'" % (src, kind) in clause, clause
+    # ... and it is genuinely derived, not a constant that happens to match.
+    assert "heartbeat" in clause
+    # EQUALITY, not containment. The loop above only proves every declared pair
+    # APPEARS — a helper that ADDS a pair deadman never declared satisfies it,
+    # and since the call-site assertion below binds the SQL to `clause`, both
+    # sides would then be wrong in the same way and stay green. Over-excluding a
+    # source drops real activity from the panel (it reads stale, not falsely
+    # fresh — fail-loud, but still wrong). This still permits the legitimate
+    # maintenance path: adding a real pair to MACHINE_CADENCE moves both sides.
+    assert clause == "AND NOT (%s) " % DM.cadence_predicate_sql(
+        DM.MACHINE_CADENCE), clause
+
+    # 🔴 AND THE CALL SITE USES IT. Asserting the helper alone is not enough:
+    # dropping `machine_cadence_sql_filter()` from the SQL survived a suite that
+    # had this test in it, because nothing here read the query the function
+    # actually builds. Drive the real function with a stubbed chquery and read
+    # the SQL it sends.
+    sent = {}
+
+    class _FakeConn:
+        fq_table = "activity.events"
+        timeout = 1.0
+
+        @staticmethod
+        def from_env(_env):
+            return _FakeConn()
+
+    class _FakeClient:
+        def __init__(self, _conn):
+            pass
+
+        @staticmethod
+        def rows(sql):
+            sent["sql"] = sql
+            return [{"source": "zsh", "age_secs": 7}]
+
+    class _FakeQ:
+        CHConn = _FakeConn
+        CHClient = _FakeClient
+
+    orig = ao._load_chquery
+    try:
+        ao._load_chquery = lambda: _FakeQ
+        ao.DEADMAN_PATH = dm_py          # same sandbox reason as above
+        out = ao.query_telemetry_freshness()
+    finally:
+        ao._load_chquery = orig
+        ao.DEADMAN_PATH = orig_path
+
+    assert out == {"zsh": 7}, out
+    # 🔴 SHAPE **AND** CONTENT, in one assertion. Each alone has a blind spot,
+    # and picking one is not a trade — it is a hole:
+    #   * presence-only (`clause in sql`) passes for a mangled concatenation
+    #     ("INTERVAL 2 DAYAND NOT (...)") or a clause placed after GROUP BY,
+    #     both invalid ClickHouse;
+    #   * shape-only (`AND NOT \(.+?\)`) accepts ANY predicate body, so a call
+    #     site excluding the WRONG pair — say zsh/cmd, which would delete real
+    #     operator activity from this panel — passes.
+    # Interpolating the helper's real output binds the emitted SQL to it.
+    assert re.search(
+        r"INTERVAL 2 DAY " + re.escape(clause.strip())
+        + r" GROUP BY source ORDER BY source$", sent["sql"]), \
+        ("the exclusion is missing, misplaced, or excludes a different pair than "
+         "the helper produced: %s" % sent["sql"])
+
+
+def test_machine_cadence_filter_renders_multiple_pairs_with_OR():
+    """🔴 `NOT (A AND B)` excludes NOTHING, so an AND-joined predicate silently
+    reverts this panel to reporting a dead bridge as fresh. Only reachable once a
+    SECOND timer-driven emitter exists — which deadman's own note invites — so it
+    must be pinned before that day, not after.
+
+    The rendering now lives in deadman.cadence_predicate_sql and is merely
+    wrapped here; this asserts the wrapper passes a multi-pair set through
+    faithfully.
+    """
+    dm_py = os.path.join(_HERE, "..", "collector", "deadman.py")
+    orig = ao.DEADMAN_PATH
+    try:
+        ao.DEADMAN_PATH = dm_py
+        two = ao.machine_cadence_sql_filter(
+            cadence=(("a", "beat"), ("b", "tick")))
+        empty = ao.machine_cadence_sql_filter(cadence=())
+    finally:
+        ao.DEADMAN_PATH = orig
+
+    assert "(source = 'a' AND kind = 'beat') OR (source = 'b' AND kind = 'tick')" in two, two
+    assert " AND (source = 'b'" not in two, "cadence terms joined with AND: %s" % two
+    # Empty set -> no clause at all, which must still leave valid SQL at the call
+    # site (this branch is otherwise unreachable while MACHINE_CADENCE is
+    # non-empty, so a mutant emitting "AND NOT () " survived without it).
+    assert empty == "", repr(empty)
+
+
+def test_deadman_path_points_at_the_real_sibling():
+    """🟢 The constant itself is never exercised — the seam tests override it for
+    the sandbox — so a wrong path would mean a permanent error marker on the
+    telemetry panel with nothing to catch it. Unlike CHQUERY_PATH, this one is
+    not pre-flighted in maybe_refresh_telemetry."""
+    # The ROOT as well as the tail: an endswith() check passes for
+    # "/nonexistent/scripts/collector/deadman.py". DEVRC_DIR is the module's own
+    # notion of the checkout, so pinning the full join catches a repoint without
+    # needing the path to exist (it does not, in the check sandbox).
+    assert ao.DEADMAN_PATH == os.path.join(
+        ao.DEVRC_DIR, "scripts", "collector", "deadman.py"), ao.DEADMAN_PATH
+    assert os.path.exists(os.path.join(_HERE, "..", "collector", "deadman.py")), \
+        "deadman.py is not where DEADMAN_PATH expects it relative to this repo"
+
+
 def test_render_telemetry_line_no_rows():
     line = plain(ao._render_telemetry_line({"sources": {}, "generated": 0}))
     assert "telemetry off" in line or "no rows" in line

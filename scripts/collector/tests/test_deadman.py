@@ -12,6 +12,7 @@ path. A harness that could only ever produce 0 would fail those tests.
 Run: pytest scripts/collector/tests/test_deadman.py
 """
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -86,12 +87,37 @@ def test_budget_is_capped():
 # parse_buckets — strict on purpose
 # --------------------------------------------------------------------------- #
 def test_parse_buckets_happy():
-    rows = D.parse_buckets("h1\tkeys\t100\t3\nh1\ti3\t100\t1\n")
-    assert rows == [("h1", "keys", 100, 3), ("h1", "i3", 100, 1)]
+    """5 fields: the current query. The 5th is the OPERATOR-driven count.
+
+    🔴 Every number here is DISTINCT on purpose. An earlier version used n == n_op
+    (3, 3), which made "carry the operator column" and "ignore it and reuse n"
+    byte-identical — a mutant that dropped the 5th field survived the whole
+    suite. A fixture of equal values cannot tell two implementations apart.
+    """
+    rows = D.parse_buckets("h1\tkeys\t100\t7\t5\nh1\ti3\t200\t3\t0\n")
+    assert rows == [("h1", "keys", 100, 7, 5), ("h1", "i3", 200, 3, 0)]
+    assert rows[1][4] == 0 and rows[1][3] == 3, \
+        "the operator count must survive the parse independently of the total"
+
+
+def test_parse_buckets_accepts_a_legacy_four_field_capture():
+    """A pre-heartbeat capture (or a hand-written fixture) has no operator column.
+    Treating it as all-operator is exactly right for a table in which nothing
+    emitted on a timer — and it keeps old captures replayable through --tsv."""
+    rows = D.parse_buckets("h1\tkeys\t100\t3\n")
+    assert rows == [("h1", "keys", 100, 3, 3)]
+
+
+def test_parse_buckets_rejects_a_width_that_changes_mid_file():
+    """Inferring per-line would be the silent-drop failure this parser exists to
+    prevent: a truncated or concatenated capture would parse as 'fewer events'
+    and decay into 'no staleness'."""
+    with pytest.raises(ValueError):
+        D.parse_buckets("h1\tkeys\t100\t3\t3\nh1\ti3\t100\t1\n")
 
 
 def test_parse_buckets_skips_blank_lines():
-    assert D.parse_buckets("\n\nh1\tkeys\t100\t3\n\n") == [("h1", "keys", 100, 3)]
+    assert D.parse_buckets("\n\nh1\tkeys\t100\t3\t3\n\n") == [("h1", "keys", 100, 3, 3)]
 
 
 def test_parse_buckets_rejects_wrong_field_count():
@@ -99,6 +125,8 @@ def test_parse_buckets_rejects_wrong_field_count():
     # decaying into "no staleness".
     with pytest.raises(ValueError):
         D.parse_buckets("h1\tkeys\t100\n")
+    with pytest.raises(ValueError):
+        D.parse_buckets("h1\tkeys\t100\t3\t3\t9\n")
 
 
 def test_parse_buckets_rejects_non_integer():
@@ -390,3 +418,291 @@ def test_cli_text_render_shows_the_table(tmp_path):
     p = _run_cli(["--tsv", str(tsv), "--now", str(NOW_BUCKET + 60)])
     assert "budget_h" in p.stdout
     assert "keys" in p.stdout
+
+
+# --------------------------------------------------------------------------- #
+# The heartbeat contract — why browser-bridge grew a cadence
+#
+# An on-demand source (browser-bridge, tool) emits only when an agent drives it,
+# so its normal silence is UNBOUNDED and no measured budget can separate "unused"
+# from "down". Measured 2026-08-11: laptop/browser-bridge was silent 30.9 ACTIVE
+# hours -- 2.2x the worst lull in its own 14-day history, and 2x what even a
+# K=4 budget would have allowed -- purely because nobody had run a browser task.
+# Raising the budget could not fix that; giving the source a CADENCE could.
+#
+# These two tests pin the before/after as DATA, so the claim "a 15-minute
+# heartbeat collapses the budget onto the 2-active-hour floor" is checked rather
+# than asserted in a commit message. The heartbeat emitter itself lives in
+# scripts/browser-bridge/server.py (run_heartbeat / HEARTBEAT_INTERVAL_S) and is
+# tested there; this is the other half of that seam.
+# --------------------------------------------------------------------------- #
+HEARTBEAT_STEP = 3  # 900s / BUCKET_SECONDS -- one heartbeat every 3 buckets
+# The interval<->bucket relationship this number encodes is pinned against the
+# emitter's real constant in scripts/browser-bridge/tests/test_server.py
+# (test_heartbeat_interval_keeps_the_deadman_budget_on_the_floor), so this stays
+# a readable fixture constant instead of a second, silently-drifting definition.
+
+
+def workday_table(now_bucket, days=6, awake_h=10):
+    """A REALISTIC host: `awake_h` hours of operator activity per day, then idle.
+
+    🔴 This fixture exists because `healthy_table` has NO idle time, and a
+    fixture with no idle time is structurally blind to every bug about what
+    counts as active time — which is precisely the bug that shipped in the first
+    version of the heartbeat (see MACHINE_CADENCE in deadman.py). Any test about
+    machine-cadence emitters must use THIS one.
+    """
+    rows = []
+    per_day = 24 * 3600 // B
+    awake = awake_h * 3600 // B
+    day0 = now_bucket - (days - 1) * per_day * B
+    for d in range(days):
+        start = day0 + d * per_day * B
+        rows += contiguous("h1", "keys", start, awake)
+        rows += contiguous("h1", "i3", start, awake)
+    return rows
+
+
+def cadence_rows(host, source, start, end, step=HEARTBEAT_STEP):
+    """A machine-cadence emitter ticking from `start` to `end` regardless of
+    whether anyone is at the desk. n=1, n_op=0 — the shape the real query emits
+    for a MACHINE_CADENCE pair."""
+    return [(host, source, b, 1, 0) for b in range(start, end + 1, step * B)]
+
+
+def _pair(verdict, source, host="h1"):
+    recs = [s for s in verdict["sources"]
+            if s["source"] == source and s["host"] == host]
+    assert recs, "pair %s/%s missing from the verdict" % (host, source)
+    return recs[0]
+
+
+def test_command_only_source_earns_an_unbounded_budget():
+    """THE BEFORE CASE (the negative control for the fix): a source that emits in
+    rare bursts gets a budget so wide it cannot mean anything.
+
+    This is the shape browser-bridge had. The test asserts the PROBLEM exists, so
+    that the after-case below is a measured contrast and not a lone green."""
+    n = 400
+    start = NOW_BUCKET - (n - 1) * B
+    rows = healthy_table(NOW_BUCKET, n)
+    # Five short bursts separated by long idle stretches. Five (not three) so the
+    # pair clears MIN_BASELINE_BUCKETS and is actually JUDGED — at 15 buckets it
+    # is skipped as insufficient-baseline and the test proves nothing.
+    for offset in (0, 90, 180, 270, 350):
+        rows += contiguous("h1", "bursty", start + offset * B, 5)
+    assert 5 * 5 >= D.MIN_BASELINE_BUCKETS, "fixture no longer clears the baseline"
+    v = D.evaluate(rows, now=NOW_BUCKET + 60)
+    rec = _pair(v, "bursty")
+    assert rec["evaluated"] is True
+    assert rec["budget_active_hours"] > 8.0, \
+        ("a burst-only source should earn a budget far above the floor — got "
+         "%r; if this ever drops, the after-case below proves nothing"
+         % rec["budget_active_hours"])
+
+
+def test_heartbeat_cadence_collapses_the_budget_to_the_floor():
+    """THE AFTER CASE: the same source emitting every 3rd bucket (900s) has a p99
+    active-gap of ~3 buckets, so its budget bottoms out on FLOOR_BUCKETS.
+
+    That is the whole point of the heartbeat: at a 2-ACTIVE-HOUR budget, silence
+    means the unit is not running, and no amount of not-using-the-browser can
+    manufacture it."""
+    n = 400
+    start = NOW_BUCKET - (n - 1) * B
+    rows = healthy_table(NOW_BUCKET, n)
+    rows += contiguous("h1", "browser-bridge", start, n // HEARTBEAT_STEP,
+                       step=HEARTBEAT_STEP)
+    v = D.evaluate(rows, now=NOW_BUCKET + 60)
+    rec = _pair(v, "browser-bridge")
+    assert rec["evaluated"] is True
+    assert rec["budget_buckets"] == D.FLOOR_BUCKETS, rec
+    assert rec["budget_active_hours"] == 2.0, rec
+    assert rec["dead"] is False, "a beating heartbeat must never read as dead"
+
+
+def test_a_machine_cadence_source_does_not_make_idle_sources_look_dead():
+    """🔴 THE REGRESSION TEST for the flaw the first version of this change had.
+
+    A 24/7 emitter must not convert the operator's night into ACTIVE time. When
+    it did, six real pairs flipped to DEAD in a sweep over live data — including
+    a 20-hour continuous false DEAD on workbench/keys across a Saturday the
+    operator was away.
+
+    Evaluated at 06:00 — eight hours into an idle stretch — which is exactly the
+    moment the 45-second bar poller would ask, and exactly the moment the broken
+    version cried wolf.
+    """
+    rows = workday_table(NOW_BUCKET, days=6, awake_h=10)
+    last_awake = max(b for (_h, s, b, *_r) in rows if s == "keys")
+    now = last_awake + 8 * 3600            # 8 idle hours later
+    rows += cadence_rows("h1", "browser-bridge",
+                         min(b for (_h, _s, b, *_r) in rows), now)
+
+    v = D.evaluate(rows, now=now + 60)
+    dead = sorted("%s/%s" % (s["host"], s["source"]) for s in v["dead"])
+    assert dead == [], (
+        "a machine-cadence emitter made idle operator sources read DEAD: %s"
+        % dead)
+
+    # ... and the negative control: the SAME table with the heartbeat counted as
+    # operator activity (n_op=1) is how the bug manifests. If this stops failing,
+    # the assertion above has stopped meaning anything.
+    as_operator = [r for r in rows if r[1] != "browser-bridge"]
+    as_operator += [(r[0], r[1], r[2], r[3], 1) for r in rows
+                    if r[1] == "browser-bridge"]
+    v_bad = D.evaluate(as_operator, now=now + 60)
+    assert v_bad["count"] > 0, \
+        ("the control did not reproduce the bug — this fixture can no longer "
+         "distinguish the fix from its absence")
+
+
+def test_a_cadence_source_is_still_judged_on_its_own_liveness():
+    """Excluding heartbeats from ACTIVE time must not exclude them from the
+    source's OWN liveness — otherwise the fix for finding #1 would silently undo
+    the fix this whole change exists for."""
+    rows = workday_table(NOW_BUCKET, days=6, awake_h=10)
+    lo = min(b for (_h, _s, b, *_r) in rows)
+    last_awake = max(b for (_h, s, b, *_r) in rows if s == "keys")
+
+    alive = rows + cadence_rows("h1", "browser-bridge", lo, last_awake)
+    rec = _pair(D.evaluate(alive, now=last_awake + 60), "browser-bridge")
+    assert rec["evaluated"] is True, rec
+    assert rec["budget_buckets"] == D.FLOOR_BUCKETS, rec
+    assert rec["dead"] is False, rec
+
+    # Stopped one full workday earlier -> more than FLOOR_BUCKETS of OPERATOR
+    # time has passed since, so it must alarm.
+    stopped = rows + cadence_rows("h1", "browser-bridge", lo,
+                                  last_awake - 6 * 3600)
+    rec2 = _pair(D.evaluate(stopped, now=last_awake + 60), "browser-bridge")
+    assert rec2["dead"] is True, rec2
+
+
+def test_the_operator_column_survives_the_WHOLE_path_tsv_to_verdict():
+    """🔴 END-TO-END across the parse boundary, because every other test in this
+    section hands `evaluate` ready-made tuples and therefore cannot see the parser
+    throwing the operator count away.
+
+    That gap was real: a mutant making parse_buckets reuse `n` for `n_op` — which
+    reinstates the original bug on live data, since the check only ever reads the
+    table through this function — survived the entire 360-test suite.
+    """
+    rows = workday_table(NOW_BUCKET, days=6, awake_h=10)
+    last_awake = max(b for (_h, s, b, *_r) in rows if s == "keys")
+    now = last_awake + 8 * 3600
+    cadence = cadence_rows("h1", "browser-bridge",
+                           min(b for (_h, _s, b, *_r) in rows), now)
+
+    # Serialise to the EXACT 5-column TSV the query emits, then read it back the
+    # only way the live check ever does.
+    tsv = "".join("h1\t%s\t%d\t%d\t%d\n" % (r[1], r[2], r[3], 1) for r in rows)
+    tsv += "".join("h1\t%s\t%d\t%d\t%d\n" % (r[1], r[2], r[3], 0) for r in cadence)
+
+    parsed = D.parse_buckets(tsv)
+    assert any(r[1] == "browser-bridge" and r[4] == 0 for r in parsed), \
+        "the parser dropped the operator column"
+
+    v = D.evaluate(parsed, now=now + 60)
+    dead = sorted("%s/%s" % (s["host"], s["source"]) for s in v["dead"])
+    assert dead == [], "idle sources read DEAD after a round-trip through the parser: %s" % dead
+    assert _pair(v, "browser-bridge")["evaluated"] is True
+
+
+def test_the_query_check_ACTUALLY_SENDS_carries_the_operator_column():
+    """🔴 The production path. Every other `check()` test injects a fake fetch
+    that IGNORES its query argument, so nothing asserted what SQL the live check
+    sends — and `bucket_query(..., cadence=())` at the call site would produce a
+    5-wide TSV with n_op == n, i.e. the original bug, on the only path
+    bar-status-poll ever uses, with the suite green.
+    """
+    seen = {}
+
+    def fake_fetch(url, user, password, query, timeout):
+        seen["query"] = query
+        return "h1\tkeys\t100\t3\t3\n"
+
+    D.check(env={"CLICKHOUSE_URL": "http://x", "CLICKHOUSE_USER": "u",
+                 "CLICKHOUSE_PASSWORD": "p"},
+            env_file="/nonexistent", fetch=fake_fetch)
+    q = seen.get("query", "")
+    # 🔴 The countIf must be the expression aliased AS n_op, not merely PRESENT
+    # somewhere in the query. A substring check for "AS n_op" is satisfied by
+    # "AS n_op_unused" — a mutant that aliased the filtered count aside and put a
+    # raw count() in the n_op position passed exactly that check.
+    assert re.search(r"countIf\(NOT \(.+?\)\) AS n_op(?!\w)", q), \
+        ("check() did not send the machine-cadence filter as the n_op column — "
+         "cadence rows would count as operator activity: %r" % q)
+    for src, kind in D.MACHINE_CADENCE:
+        assert "source = '%s' AND kind = '%s'" % (src, kind) in q, q
+
+
+def test_operator_count_expression_matches_the_cadence_table():
+    """The SQL and the Python must not drift: the query's countIf is BUILT from
+    MACHINE_CADENCE, so a pair added to the tuple appears in the SQL."""
+    q = D.bucket_query(cadence=(("browser-bridge", "heartbeat"),))
+    assert "countIf(NOT ((source = 'browser-bridge' AND kind = 'heartbeat')))" in q
+    assert "AS n_op" in q
+
+    # 🔴 TWO entries, because the module's own note tells maintainers to add
+    # them: the terms must be OR-joined. With AND, `countIf(NOT (A AND B))`
+    # excludes NOTHING (measured against the live table: 206760 of 206760 rows
+    # counted), so a second cadence emitter would silently reinstate the bug.
+    q2 = D.bucket_query(cadence=(("a", "beat"), ("b", "tick")))
+    assert "(source = 'a' AND kind = 'beat') OR (source = 'b' AND kind = 'tick')" in q2, q2
+    assert " AND (source = 'b'" not in q2, "cadence terms joined with AND: %s" % q2
+
+    # Empty cadence degrades to the pre-heartbeat query, which is the right
+    # answer when nothing emits on a timer.
+    assert "count() AS n_op" in D.bucket_query(cadence=())
+
+    # 🔴 The live table must NOT be empty, asserted before the loop below — an
+    # emptied MACHINE_CADENCE makes that loop iterate zero times and pass, and it
+    # is exactly the edit that reinstates the bug (a mutant emptying the tuple
+    # survived this file until this assertion existed; it died only in the
+    # browser-bridge suite, which is not where a deadman reader would look).
+    #
+    # 🔴 THE MOVED BLOCK (the empty-cadence assert above, plus the two below)
+    # BELONGS TO *THIS* TEST. A later insertion once
+    # landed inside this function and carried them into the next one, so the
+    # guard above lived under a test named for something else — and deleting that
+    # other test would have silently deleted this guard.
+    assert ("browser-bridge", "heartbeat") in D.MACHINE_CADENCE, \
+        "the browser-bridge heartbeat is no longer declared machine-cadence"
+    for src, kind in D.MACHINE_CADENCE:
+        assert src in D.bucket_query() and kind in D.bucket_query()
+
+
+def test_cadence_predicate_is_exported_for_the_other_consumer():
+    """`cadence_predicate_sql` is PUBLIC on purpose: scripts/agent-ops renders the
+    same predicate for its freshness panel and imports this rather than
+    re-spelling it. A local copy there was immediately wrong in the same way
+    (AND-joined), so this pins the contract that consumer depends on."""
+    assert D.cadence_predicate_sql(()) == ""
+    one = D.cadence_predicate_sql((("x", "beat"),))
+    assert one == "(source = 'x' AND kind = 'beat')", one
+    two = D.cadence_predicate_sql((("x", "beat"), ("y", "tick")))
+    assert two == ("(source = 'x' AND kind = 'beat') OR "
+                   "(source = 'y' AND kind = 'tick')"), two
+    # The DEFAULT argument is what a future consumer will reach for, and no
+    # caller exercises it today (a mutant defaulting it to () survived).
+    assert D.cadence_predicate_sql() == D.cadence_predicate_sql(D.MACHINE_CADENCE)
+    assert D.cadence_predicate_sql() != ""
+
+
+def test_a_stopped_heartbeat_is_dead_within_the_floor():
+    """The positive control for the pair above: the SAME cadenced source, stopped
+    just over the floor, must flip to DEAD through the same code path.
+
+    Without this, the green above is indistinguishable from a check that can only
+    ever say 'ok'."""
+    n = 400
+    start = NOW_BUCKET - (n - 1) * B
+    stopped_at = n - (D.FLOOR_BUCKETS + 5)   # silent for floor+5 active buckets
+    rows = healthy_table(NOW_BUCKET, n)
+    rows += contiguous("h1", "browser-bridge", start,
+                       stopped_at // HEARTBEAT_STEP, step=HEARTBEAT_STEP)
+    v = D.evaluate(rows, now=NOW_BUCKET + 60)
+    rec = _pair(v, "browser-bridge")
+    assert rec["dead"] is True, rec
+    assert v["count"] == 1 and v["state"] == D.STATE_OK, v

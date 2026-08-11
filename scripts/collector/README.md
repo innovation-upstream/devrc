@@ -47,10 +47,17 @@ tmux focus hooks   ─┼─► emit (pure shell, hot path) ─► spool/current
 - **External emitters** (write to the same spool, live outside this dir):
   `browser-ext/receiver.py` (`source=browser, kind=nav` — page nav/scroll from the
   collector's MV3 extension) and the **browser-bridge server**
-  (`scripts/browser-bridge/server.py`, `source=browser-bridge, kind=cmd` — one
-  best-effort, metadata-only event per Claude-driven browser command:
-  op/instance-key/outcome/latency + bare domain, **never** page content). Both
-  reuse `keylog/spool_emit.py` for the v1 line format.
+  (`scripts/browser-bridge/server.py`), which emits TWO kinds:
+  `kind=cmd` — one best-effort, metadata-only event per Claude-driven browser
+  command (op/instance-key/outcome/latency + bare domain, **never** page content);
+  this is the **usage** signal `session-analysis/adoption-scan.py` counts, so
+  filter on it in any adoption query.
+  `kind=heartbeat` — machine-generated every 900s by the bridge daemon
+  (`payload.connected`), so the source has a cadence the deadman can measure.
+  🔴 It is declared in `deadman.py`'s `MACHINE_CADENCE`, which keeps it OUT of the
+  host's active-time definition — a timer-driven emitter counted as operator
+  activity makes every idle source on the host read DEAD overnight.
+  Both reuse `keylog/spool_emit.py` for the v1 line format.
 - `tests/` — pytest unit + round-trip coverage (mocks the HTTP endpoint).
 
 ## Spool / emit line contract (v1)

@@ -70,6 +70,14 @@ Per-source detail that matters when querying:
   stream), `session-summary` (Layer A rollups), `session-insight` (Layer B facets).
 - `i3` — `window::focus` + `workspace::focus` → `i3-source`; captures attention even when
   NOT typing. Carries `app`=WM_CLASS + `payload.workspace`.
+- `browser-bridge` — TWO kinds, and the distinction is load-bearing. `kind=cmd` is one row
+  per agent-driven browser command — the **usage** signal `adoption-scan.py` counts.
+  `kind=heartbeat` is machine-generated every 15 min by the bridge daemon itself
+  (`payload.connected` = is an extension attached), and exists ONLY so the deadman has a
+  cadence to measure. 🔴 **Filter `kind='cmd'` in any usage/adoption query** — counting both
+  reports ~96 phantom uses/day. Before the heartbeat (< 2026-08-11) the source emitted on
+  commands only, so its silence was unbounded and it false-alarmed as DEAD whenever Zach
+  simply hadn't browsed; do not "fix" a browser-bridge DEAD verdict by raising a budget.
 
 **Browser extension is NOT fully nix-managed.** Hand-loaded unpacked in Brave (the laptop's
 daily browser) from `~/.local/share/activity-browser-ext/` — a real-file copy, since

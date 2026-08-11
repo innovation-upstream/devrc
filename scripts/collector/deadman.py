@@ -28,9 +28,13 @@ MEASURED per (host, source) rather than declared:
 
   1. Bucket every event into 5-minute buckets, per host and source
      (one GROUP BY — ~11k rows for 14 days across both hosts, measured).
-  2. A host's ACTIVE buckets = the buckets in which ANY source on that host
-     emitted. Overnight and away-from-desk time simply is not in this set, so an
-     on-demand source is not punished for the operator being asleep.
+  2. A host's ACTIVE buckets = the buckets in which any OPERATOR-DRIVEN source on
+     that host emitted. Overnight and away-from-desk time simply is not in this
+     set, so an on-demand source is not punished for the operator being asleep.
+     🔴 "Operator-driven" is not decoration: a timer-driven emitter is excluded
+     (MACHINE_CADENCE), because one source ticking 24/7 would otherwise mark the
+     whole night ACTIVE and make every idle source on the host read DEAD by
+     morning. Measured, with numbers, at MACHINE_CADENCE.
   3. For each (host, source), the historical gap between consecutive emitting
      buckets is counted IN ACTIVE BUCKETS. Its Nth percentile (default p99) is
      that source's own normal worst-case silence.
@@ -136,6 +140,33 @@ FLOOR_BUCKETS = 24
 # alarm, while still bounding a pathological budget.
 CAP_BUCKETS = 576
 
+# --------------------------------------------------------------------------- #
+# MACHINE-CADENCE EMITTERS — rows that prove a SOURCE is alive but do NOT prove
+# the OPERATOR is present.
+#
+# 🔴 This distinction is load-bearing for every OTHER source on the host, which
+# is what makes it easy to get wrong. `active_by_host` is built from any source's
+# buckets, so a source that emits around the clock marks overnight and
+# away-from-desk buckets ACTIVE for everyone — and idle sources then accrue
+# "active" silence while the operator is asleep. Measured 2026-08-11 against the
+# real 14-day table, sweeping the evaluation point hourly over 5 days with a
+# synthetic 900s heartbeat injected on the workbench: SIX pairs that never alarm
+# today go DEAD (i3 47/121 sampled hours, tmux 47, keys 45, opencode 28, zsh 22,
+# claude 19), including a 20-hour continuous false DEAD on workbench/keys across
+# a Saturday the operator was away. It does not self-correct with more history:
+# p99 sits just under the nightly gaps because there are only ~14 of them among
+# ~1300.
+#
+# So a (source, kind) listed here contributes to its OWN pair's liveness and is
+# excluded from the host's active-time definition.
+#
+# 🔴 ADDING A TIMER-DRIVEN EMITTER ANYWHERE IN THE PIPELINE MEANS ADDING IT HERE.
+# The test that would catch the omission is
+# test_a_machine_cadence_source_does_not_make_idle_sources_look_dead — it uses a
+# day/night fixture, because a fixture with no idle time is structurally blind to
+# this entire class of bug (the first version of these tests was).
+MACHINE_CADENCE = (("browser-bridge", "heartbeat"),)
+
 DEFAULT_ENV_FILE = "~/.config/activity-collector/env"
 DEFAULT_TIMEOUT = 8.0
 
@@ -156,43 +187,95 @@ UNKNOWN_STATES = frozenset(
 # --------------------------------------------------------------------------- #
 # Query
 # --------------------------------------------------------------------------- #
+def cadence_predicate_sql(cadence=MACHINE_CADENCE) -> str:
+    """A ClickHouse boolean matching any MACHINE_CADENCE pair; "" when empty.
+
+    🔴 THE ONE PLACE this predicate is RENDERED, not just the one place the pairs
+    are declared. Exported because scripts/agent-ops needs the same predicate for
+    its freshness panel: a second copy of the `" OR ".join` immediately grew the
+    same latent bug (joining with AND makes `NOT (A AND B)` exclude NOTHING),
+    which is only reachable once a second pair exists -- i.e. it would have gone
+    unnoticed until exactly the moment MACHINE_CADENCE's own note tells a
+    maintainer to add one. Single-sourcing the DATA was not enough.
+    """
+    return " OR ".join("(source = '%s' AND kind = '%s')" % (s, k)
+                       for s, k in cadence)
+
+
+def _operator_count_expr(cadence=MACHINE_CADENCE) -> str:
+    """`countIf(...)` counting only OPERATOR-driven events in the bucket.
+
+    Built from MACHINE_CADENCE so the SQL and the Python cannot drift apart. An
+    empty cadence set degrades to plain count() -- i.e. the pre-heartbeat
+    behaviour, which is the correct answer when nothing emits on a timer.
+    """
+    pred = cadence_predicate_sql(cadence)
+    if not pred:
+        return "count()"
+    return "countIf(NOT (%s))" % pred
+
+
 def bucket_query(days: int = BASELINE_DAYS, bucket_seconds: int = BUCKET_SECONDS,
-                 database: str = "activity", table: str = "events") -> str:
+                 database: str = "activity", table: str = "events",
+                 cadence=MACHINE_CADENCE) -> str:
     """The ONE query the check runs: per host/source/bucket event counts.
 
     Deliberately a plain GROUP BY rather than a window function -- all of the
     gap/percentile work happens in `evaluate`, which is pure and therefore
     testable against a fixture with no ClickHouse anywhere near it.
+
+    FIVE columns, and the fifth is the whole point: `n` counts everything the
+    pair emitted (so a heartbeat still proves ITS source alive), while `n_op`
+    counts only operator-driven events (so a heartbeat does NOT mark the bucket
+    as operator-active for every other source on the host). See MACHINE_CADENCE.
     """
     return (
         "SELECT host, source, "
         "toUnixTimestamp(toStartOfInterval(ts, INTERVAL %d SECOND)) AS b, "
-        "count() AS n "
+        "count() AS n, %s AS n_op "
         "FROM %s.%s WHERE ts > now() - INTERVAL %d DAY "
         "GROUP BY host, source, b ORDER BY host, source, b FORMAT TSV"
-        % (int(bucket_seconds), database, table, int(days))
+        % (int(bucket_seconds), _operator_count_expr(cadence), database, table,
+           int(days))
     )
 
 
 def parse_buckets(text: str):
-    """TSV -> [(host, source, bucket_epoch, n)]. Raises ValueError on junk.
+    """TSV -> [(host, source, bucket_epoch, n, n_op)]. Raises ValueError on junk.
 
-    Strict on purpose. Silently dropping unparseable lines would let a changed
-    output format read as "fewer rows" and, at the limit, as "no staleness" --
-    the exact way a parsed-output harness lies (RULES.md: a tool's output format
-    is a dependency you did not pin).
+    Accepts BOTH widths, and the width is decided by the FIRST non-empty line and
+    then enforced for the whole file:
+      5 fields  the current query (n_op = operator-driven events in the bucket)
+      4 fields  a pre-heartbeat capture or hand-written fixture -> n_op = n,
+                which is exactly right for a table in which nothing emitted on a
+                timer.
+    A file may not MIX the two: a width that changes mid-file is a format change
+    or a corrupted capture, and inferring per-line would be the silent-drop
+    failure this parser exists to avoid.
+
+    Strict on purpose otherwise. Silently dropping unparseable lines would let a
+    changed output format read as "fewer rows" and, at the limit, as "no
+    staleness" -- the exact way a parsed-output harness lies (RULES.md: a tool's
+    output format is a dependency you did not pin).
     """
     rows = []
+    width = None
     for lineno, line in enumerate(text.splitlines(), 1):
         if not line.strip():
             continue
         parts = line.split("\t")
-        if len(parts) != 4:
-            raise ValueError("line %d: expected 4 tab-separated fields, got %d"
-                             % (lineno, len(parts)))
-        host, source, b, n = parts
+        if width is None:
+            if len(parts) not in (4, 5):
+                raise ValueError("line %d: expected 4 or 5 tab-separated fields, "
+                                 "got %d" % (lineno, len(parts)))
+            width = len(parts)
+        elif len(parts) != width:
+            raise ValueError("line %d: field count changed mid-file (%d, expected "
+                             "%d) — refusing to guess" % (lineno, len(parts), width))
+        host, source, b, n = parts[:4]
+        n_op = parts[4] if width == 5 else n
         try:
-            rows.append((host, source, int(b), int(n)))
+            rows.append((host, source, int(b), int(n), int(n_op)))
         except ValueError:
             raise ValueError("line %d: non-integer bucket/count: %r" % (lineno, line))
     return rows
@@ -253,13 +336,25 @@ def evaluate(rows, now=None, *, bucket_seconds: int = BUCKET_SECONDS,
                 "newest_event_age_minutes": None,
                 "detail": "query returned no rows — cannot tell"}
 
+    # ACTIVE time is OPERATOR time. A bucket joins the host's active set only if
+    # something the operator drove landed in it -- a machine-cadence emitter
+    # (MACHINE_CADENCE) proves its own source alive and nothing more. Without
+    # this split, one 24/7 emitter makes every idle source on the host accrue
+    # active silence overnight and read DEAD; see MACHINE_CADENCE for the
+    # measurement.
+    #
+    # A 4-tuple row (no operator count) is treated as all-operator: that is the
+    # pre-heartbeat table and every hand-built fixture, where it is correct.
     active_by_host = collections.defaultdict(set)
     buckets_by_pair = collections.defaultdict(set)
-    for host, src, b, _n in rows:
-        active_by_host[host].add(b)
+    for row in rows:
+        host, src, b, n = row[0], row[1], row[2], row[3]
+        n_op = row[4] if len(row) > 4 else n
         buckets_by_pair[(host, src)].add(b)
+        if n_op > 0:
+            active_by_host[host].add(b)
 
-    newest = max(b for _h, _s, b, _n in rows)
+    newest = max(r[2] for r in rows)
 
     sources = []
     for (host, src), bset in sorted(buckets_by_pair.items()):
