@@ -88,7 +88,7 @@ touched) needs the PATHS.
 | `changed_paths_truncated` | the list is a prefix, not the whole story |
 | `changed_paths_outside_cwd` | distinct changed paths with no repo-relative form (scratchpads, other repos, temp worktrees). `total + outside_cwd == files_modified`. |
 | `changed_paths_cap` | the bound this emitter was built with (256 — see the module docstring for the measurement) |
-| `stats_unavailable` | `[]`, or the groups that could not be observed: `"files"` / `"git"` |
+| `stats_unavailable` | `[]`, or the groups that could not be observed. `"files"` covers `changed_paths*` + (on opencode) `files_modified` / `lines_added` / `lines_removed` / `languages`; `"git"` covers `git_commits` / `git_pushes`. |
 
 🔴 **A zero that means "cannot report" is indistinguishable from a real zero**, and
 that ambiguity is what this block removes. OpenCode emitted `files_modified=0`,

@@ -421,6 +421,11 @@ def build_rollup(session_data: dict, messages: list[dict], parts: list[dict],
         r["files_modified"] = None
         r["lines_added"] = None
         r["lines_removed"] = None
+        # `languages` is derived from the SAME filePath we could not read, so it
+        # belongs to this group too. Left as `{}` it would be a manufactured
+        # empty map reading as "this session touched no code" — the identical
+        # ambiguity one field over, which is the whole point of the group.
+        r["languages"] = None
         r.update(CP.unobservable())
     else:
         r.update(CP.summarize(files, directory or ""))

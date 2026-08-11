@@ -130,7 +130,7 @@ inject post-reload). Manifest **v1.4.0**. When a file is DELETED upstream (e.g. 
   `argMax(<field>, ingested_at)` grouped by `session`.
 - 🔴 **On `session-summary`, `null` ≠ `0` and `null` ≠ `[]`.** `changed_paths` (the
   repo-relative changed-file set), and on `source=opencode` also `files_modified` /
-  `lines_*` / `git_*`, are **null when the summariser could not observe them** —
+  `lines_*` / `languages` / `git_*`, are **null when the summariser could not observe them** —
   never a manufactured zero. `stats_unavailable` (`[]` / `["files","git"]`) is the
   sentinel; `changed_paths_total` + `changed_paths_truncated` say whether a list is
   the whole story, and `changed_paths_outside_cwd` counts paths with no

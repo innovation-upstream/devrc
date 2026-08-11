@@ -171,6 +171,29 @@ class TestOpenCodeAbsentVersusZero:
         assert r["changed_paths"] is None
         assert r["stats_unavailable"] == ["files"]
 
+    def test_languages_is_ABSENT_too_when_the_paths_are(self):
+        """`languages` is derived from the same `filePath`, so an empty MAP
+        carries the identical lie — "this session touched no code"."""
+        unobservable = T.build_rollup(SESSION, MSGS, [_part("edit", None)],
+                                      directory=REPO)
+        assert unobservable["languages"] is None
+        observable = T.build_rollup(
+            SESSION, MSGS,
+            [_part("edit", {"filePath": f"{REPO}/a.py", "newString": "x"})],
+            directory=REPO)
+        assert observable["languages"] == {"Python": 1}
+
+    def test_a_readable_session_with_no_recognised_extension_keeps_an_empty_MAP(self):
+        """The other arm: an observed session whose files have no known language
+        reports `{}` — a real empty, not an absent one."""
+        r = T.build_rollup(
+            SESSION, MSGS,
+            [_part("write", {"filePath": f"{REPO}/noext", "content": "x"})],
+            directory=REPO)
+        assert r["languages"] == {}
+        assert r["files_modified"] == 1
+        assert r["stats_unavailable"] == []
+
     def test_bash_present_but_no_readable_command_is_ABSENT_not_zero(self):
         parts = [_part("bash", None)]
         r = T.build_rollup(SESSION, MSGS, parts, directory=REPO)
