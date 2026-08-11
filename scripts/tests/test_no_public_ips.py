@@ -133,15 +133,6 @@ PENDING_SCRUB = {
         "change owns this file; replacing both with the 1.2.3.4 dummy already "
         "used elsewhere in it closes this and drops the entry.",
     ),
-    "scripts/airvpn-updown": (
-        1,
-        "the same Hetzner lighthouse IP, as the NEBULA_LIGHTHOUSE constant. This "
-        "file is a LIVE fail-closed killswitch on the workbench's uplink, so "
-        "moving the value to a root-owned env file is a runtime change that must "
-        "pass the `bar` skill's mandatory re-test protocol on a physically "
-        "reachable host. It is therefore split into its own PR rather than "
-        "carried here. Merging that PR deletes this entry in the same commit.",
-    ),
 }
 
 
