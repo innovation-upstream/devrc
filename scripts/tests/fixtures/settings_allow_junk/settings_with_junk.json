@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:github.com)",
+      "Bash(kubectl get:*)",
+      "Bash(mkdir:*)",
+      "Bash(git commit:*)",
+      "Bash(dig :*)",
+      "Bash(KUBECONFIG=./homelab-kubeconfig kubectl logs:*)",
+      "Bash(apiVersion: v1)",
+      "Bash(kind: Pod)",
+      "Bash(metadata:)",
+      "Bash(spec:)",
+      "Bash(hostPath:)",
+      "Bash(privileged: true)",
+      "Bash(image: busybox:latest)",
+      "Bash(kubernetes.io/hostname: node-a)",
+      "Bash(EOF)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfix: something\n\n- a bullet\nEOF\n\\)\")",
+      "Bash(curl -k -s -u fixtureuser:fixturepass https://registry.example.invalid/v2/thing/manifests/latest)",
+      "Bash('s|</Config>|  <Username>fixtureuser</Username>\\n  <Password>fixturepass</Password>\\n</Config>|' )",
+      "mcp__context7__query-docs"
+    ],
+    "deny": [],
+    "ask": [],
+    "defaultMode": "default"
+  }
+}
