@@ -77,6 +77,17 @@ one extra step -- write the message to a file and use `git commit -F <file>` --
 which RULES already prefers over heredocs. That is a better trade than a
 security guard with a rotating cast of bypasses.
 
+🔴 NEITHER IS THE HEREDOC HANDLING IN `_scan` (2026-08-11). It LIFTS a heredoc
+body out of the surrounding quote state and then parses it as commands exactly
+as before — nothing is blanked, nothing is declared inert, and `bash <<EOF` keeps
+every deny it had. It exists because the opposite of the reverted helper was also
+a bug: the scanner tracked quote state THROUGH the body, so one apostrophe in a
+commit message (`don't`) opened a quote that never closed and swallowed every
+command AFTER the heredoc. Measured on the shipped guard — `git commit`,
+`git stash`, `git clean -f`, `talosctl reset`, `mkfs`, `dd of=/dev/sdc` and
+`pkill -f` all resolved ALLOW behind one apostrophe. The change can only make
+more argv visible, never fewer.
+
 🔴 The argv-based checks below are NOT a return of that helper, and the
 distinction is load-bearing. They never BLANK bytes and never decide which parts
 of a string are inert. They tokenise, and a quoted `-m` argument is simply ONE
@@ -97,7 +108,7 @@ These are gaps in COVERAGE, not bypasses of anything the globs used to hold: the
 opencode config keeps a broad `ask` over the same families, so an uncovered
 spelling still meets friction rather than silence.
 """
-import sys, os, json, re, shlex, ipaddress, subprocess
+import sys, os, json, re, shlex, ipaddress, subprocess, collections
 
 
 # =========================================================================== #
@@ -407,17 +418,111 @@ _WRAPPER_POSITIONAL = {"timeout": 1, "chrt": 1}
 _SHELLS = {"bash", "sh", "zsh", "dash", "ksh", "ash", "busybox"}
 
 
-def split_commands(text):
-    """Split shell text into command segments, respecting quotes.
+# A scanned segment: its text, and the SUBSHELL NESTING DEPTH it sits at. The
+# depth is what lets a caller know that a `cd` inside `( … )` does not leak out
+# — see `_commands_with_cwd`. Every existing caller ignores it via
+# `split_commands`, whose contract is unchanged.
+_Seg = collections.namedtuple("_Seg", "text depth")
 
-    Also yields the BODY of every `$( … )` / backtick substitution as its own
-    text, because a substitution body really does execute. Linear scan — no
-    regex, so no backtracking to worry about on a guard that runs per call.
+# A heredoc tag as bash accepts it unquoted. Quoted tags (`<<'EOF'`, `<<"EOF"`)
+# are read by _read_heredoc_tag directly.
+_HEREDOC_TAG = re.compile(r"[A-Za-z0-9_.-]+")
+
+# Bound on re-parsing nested bodies (a heredoc inside a heredoc inside …), the
+# same bound `commands()` puts on `bash -c` recursion.
+_BODY_RECURSION_LIMIT = 3
+
+# How many times `_scan` will re-read a tail that an UNTERMINATED quote hid. One
+# pass per unbalanced quote character; the cap only exists so text engineered to
+# be full of them cannot make a per-Bash-call hook quadratic.
+_QUOTE_RECOVERY_LIMIT = 16
+
+
+def _read_heredoc_tag(text, k):
+    """`(tag, index-after-tag)` at position `k`, or `(None, k)`.
+
+    Handles `<<EOF`, `<<'EOF'`, `<<"EOF"` and `<<\\EOF` — the four spellings, all
+    of which name the same terminator line.
     """
-    segs, subs = [], []
+    n = len(text)
+    if k >= n:
+        return None, k
+    if text[k] in ("'", '"'):
+        q = text[k]
+        j = text.find(q, k + 1)
+        if j == -1:
+            return None, k
+        return text[k + 1:j], j + 1
+    if text[k] == "\\":
+        k += 1
+    m = _HEREDOC_TAG.match(text, k)
+    if not m:
+        return None, k
+    return m.group(0), m.end()
+
+
+def _consume_heredocs(text, i, pending):
+    """Read the bodies of the heredocs opened on the line that just ended.
+
+    Returns `(index-after-the-last-body, [body-text, …])`. Multiple heredocs on
+    one line (`cmd <<A <<B`) are consumed in the order they were opened, which is
+    bash's order. A body with no terminator runs to end-of-text — also bash's
+    behaviour, and the fail-CLOSED direction here, since the text is still
+    scanned as commands rather than dropped.
+    """
+    bodies, n = [], len(text)
+    for tag, strip_tabs in pending:
+        lines = []
+        while i < n:
+            j = text.find("\n", i)
+            line = text[i:j] if j != -1 else text[i:]
+            nxt = (j + 1) if j != -1 else n
+            probe = line.lstrip("\t") if strip_tabs else line
+            if probe.rstrip("\r") == tag:
+                i = nxt
+                break
+            lines.append(line)
+            i = nxt
+        bodies.append("\n".join(lines))
+    return i, bodies
+
+
+def _scan(text, _recovery=0):
+    """`([_Seg, …], [substitution-body, …], [heredoc-body, …])`.
+
+    🔴 HEREDOC BODIES ARE LIFTED OUT OF THE SCAN, and that is a BUG FIX, not a
+    tidy-up. The scanner tracks quote state character by character, and a heredoc
+    body is ordinary prose — so a single apostrophe in a commit message
+    (`don't`, `it's`) OPENED a quote that never closed, and every command after
+    the heredoc was swallowed into that quoted buffer instead of being emitted as
+    its own segment. Measured against the shipped guard, cwd on `trunk`:
+
+        DENY   cat > /tmp/m <<'EOF' / do not stage / EOF / git commit -F /tmp/m
+        ALLOW  cat > /tmp/m <<'EOF' / don't stage  / EOF / git commit -F /tmp/m
+        ALLOW  …same apostrophe body… / git stash push -m wip
+        ALLOW  …same apostrophe body… / talosctl -n 1.2.3.4 reset
+
+    i.e. one apostrophe in a message body silently disabled EVERY argv check for
+    the rest of the command line. The two cases differ only in that apostrophe,
+    which is the control that names the mechanism.
+
+    🔴 This is NOT the reverted `_strip_message_text()` helper the DESIGN NOTE
+    forbids, and the difference is the one that matters: nothing is BLANKED and
+    nothing is decided to be inert. The bodies are still returned, still parsed
+    as commands, and still checked — so `bash <<EOF` (a body that really does
+    execute) keeps exactly the coverage it has today, and a body that merely
+    QUOTES a banned command still denies via the documented escape hatch. All
+    that changes is that a body can no longer corrupt the parse of the commands
+    AROUND it. The change is strictly ADDITIVE — it can only make more argv
+    visible, never fewer — which is why it cannot loosen any check.
+    """
+    segs, subs, bodies = [], [], []
     buf = []
     i, n = 0, len(text)
     quote = None
+    quote_at = quote_depth = None
+    depth = 0
+    pending = []
     while i < n:
         c = text[i]
         if quote:
@@ -431,7 +536,8 @@ def split_commands(text):
         if c == "\\" and i + 1 < n:
             buf.append(c); buf.append(text[i + 1]); i += 2; continue
         if c in ("'", '"'):
-            quote = c; buf.append(c); i += 1; continue
+            quote = c; quote_at, quote_depth = i, depth
+            buf.append(c); i += 1; continue
         if c == "`":
             j = text.find("`", i + 1)
             if j == -1:
@@ -440,28 +546,91 @@ def split_commands(text):
             i = j + 1
             continue
         if c == "$" and i + 1 < n and text[i + 1] == "(":
-            depth, j = 1, i + 2
-            while j < n and depth:
+            sdepth, j = 1, i + 2
+            while j < n and sdepth:
                 if text[j] == "(":
-                    depth += 1
+                    sdepth += 1
                 elif text[j] == ")":
-                    depth -= 1
+                    sdepth -= 1
                 j += 1
-            subs.append(text[i + 2:j - 1 if depth == 0 else n])
+            subs.append(text[i + 2:j - 1 if sdepth == 0 else n])
             i = j
             continue
+        # A heredoc OPERATOR (`<<TAG`, `<<-TAG`, `<<'TAG'`). `<<<` is a
+        # here-STRING — it has no body and no terminator line, so it must not be
+        # treated as one.
+        if text.startswith("<<", i) and not text.startswith("<<<", i):
+            j = i + 2
+            strip_tabs = False
+            if j < n and text[j] == "-":
+                strip_tabs = True
+                j += 1
+            k = j
+            while k < n and text[k] in " \t":
+                k += 1
+            tag, after = _read_heredoc_tag(text, k)
+            if tag is not None:
+                buf.append(text[i:after])     # keep the operator in the segment
+                pending.append((tag, strip_tabs))
+                i = after
+                continue
         if c in "()":                 # subshell parens are not part of argv
-            segs.append("".join(buf)); buf = []; i += 1; continue
+            segs.append(_Seg("".join(buf), depth)); buf = []
+            depth = depth + 1 if c == "(" else max(0, depth - 1)
+            i += 1; continue
         matched = None
         for op in _SEPARATORS:
             if text.startswith(op, i):
                 matched = op
                 break
         if matched:
-            segs.append("".join(buf)); buf = []; i += len(matched); continue
+            segs.append(_Seg("".join(buf), depth)); buf = []
+            i += len(matched)
+            if matched == "\n" and pending:
+                i, opened = _consume_heredocs(text, i, pending)
+                bodies.extend(opened)
+                pending = []
+            continue
         buf.append(c); i += 1
-    segs.append("".join(buf))
-    return [s for s in segs + subs if s.strip()]
+    segs.append(_Seg("".join(buf), depth))
+    # 🔴 AN UNTERMINATED QUOTE MUST NOT BLIND THE REST OF THE SCAN. A lone
+    # apostrophe — in a heredoc body, a `-m` message, any prose the model wrote —
+    # opens a quote that never closes, and everything after it lands inside ONE
+    # quoted buffer. `_tokenise` then falls back to a whitespace split whose
+    # argv[0] is a word from the prose, so every argv check silently stops
+    # matching. Found by this change's own non-regression test, on a body that
+    # REALLY executes (`bash <<'EOF' / it's fine / git stash push -m wip / EOF`),
+    # where lifting the heredoc out was not enough because the corruption then
+    # happened INSIDE the body's own parse.
+    #
+    # An unterminated quote is a malformed command the shell itself would reject,
+    # so there is no "correct" reading to preserve. Re-scanning the tail with the
+    # offending quote treated as an ordinary character is purely ADDITIVE — it
+    # can only surface argv the first pass buried — which is the only direction a
+    # guard may err in. Each pass consumes at least the quote character, so it
+    # terminates; the limit only bounds adversarial input full of odd quotes.
+    if quote is not None and quote_at is not None and _recovery < _QUOTE_RECOVERY_LIMIT:
+        r_segs, r_subs, r_bodies = _scan(text[quote_at + 1:], _recovery + 1)
+        segs.extend(_Seg(s.text, quote_depth + s.depth) for s in r_segs)
+        subs.extend(r_subs)
+        bodies.extend(r_bodies)
+    return segs, subs, bodies
+
+
+def split_commands(text, _depth=0):
+    """Split shell text into command segments, respecting quotes.
+
+    Also yields the BODY of every `$( … )` / backtick substitution and of every
+    HEREDOC as its own text, because a substitution body really does execute and
+    a heredoc body may (`bash <<EOF`). Linear scan — no regex, so no backtracking
+    to worry about on a guard that runs per call.
+    """
+    segs, subs, bodies = _scan(text)
+    out = [s.text for s in segs] + subs
+    for body in bodies:
+        out.extend(split_commands(body, _depth + 1)
+                   if _depth < _BODY_RECURSION_LIMIT else [body])
+    return [s for s in out if s.strip()]
 
 
 def _tokenise(seg):
@@ -989,16 +1158,12 @@ def _is_dry_run_flag(flag):
             and _DRY_RUN_FULL.startswith(flag))
 
 
-# Every `cd`/`pushd` in the line, not just a leading one, and regardless of what
-# encloses it — a subshell `( … )`, a `bash -c '…'` body, or the third segment of
-# a `;` chain all carry the target as literal text. Anchored on a segment
-# boundary so `rsync --cd foo` or a path ending in "cd" cannot match.
-# The boundary class includes QUOTES: inside `bash -c 'cd <dir> && git commit'`
-# the character before `cd` is `'`, so a whitespace-only boundary missed exactly
-# the nested-shell spelling this regex exists to catch.
-_CD_ANY = re.compile(
-    r"""(?:^|[;&|(){}'"]|\s)(?:cd|pushd)\s+(?P<dir>"[^"]*"|'[^']*'|[^\s;&|()'"]+)""")
-
+# `cd`/`pushd` used to be found with a REGEX over the raw text, which could only
+# ever produce a set of "directories this line mentions" — never an answer to
+# "which one is the command standing in". That is now `_commands_with_cwd`,
+# which sees `cd` as argv[0] of a segment and tracks subshell scope, so the
+# regex (and the union it fed) is gone. `_CWD_CHANGERS` is its replacement.
+#
 # `GIT_DIR=`/`GIT_WORK_TREE=` env prefixes. The parser strips `VAR=` prefixes off
 # the argv (correctly — they are not the command), so the only place these
 # survive is the raw text.
@@ -1021,15 +1186,172 @@ def _safe_getcwd():
         return None
 
 
-def _resolve_dir(value, base):
+# A `$NAME` / `${NAME}` reference. Used to finish the job `os.path.expandvars`
+# starts: expandvars only knows the HOOK PROCESS's environment, and the variable
+# that matters here (`WT`, `REPO`, …) is set by the command line itself.
+_VAR_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
+
+# `NAME=VALUE`, the shell's assignment form.
+_ASSIGNMENT = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.S)
+
+# Words that may PRECEDE an assignment and still leave it an assignment.
+_ASSIGN_LEADERS = frozenset({"export", "declare", "typeset", "local", "readonly"})
+
+# The two spellings of "run this file's assignments in my shell".
+_SOURCE_CMDS = frozenset({".", "source"})
+
+# Bounds on reading a sourced env file. It is named by the command text, so it
+# is model-controlled input: read it defensively and never let it be large.
+_ENV_FILE_MAX_BYTES = 64 * 1024
+_ENV_FILE_MAX_LINES = 400
+
+
+def _literal_value(value):
+    """The value of an assignment, IF it is a plain literal — else None.
+
+    Anything carrying `$`, a backtick or a command substitution is not something
+    this guard can evaluate, and guessing at it is how a resolver starts naming
+    directories the command never touches.
+    """
+    if value is None:
+        return None
+    value = value.strip().strip("\"'")
+    if not value or "$" in value or "`" in value:
+        return None
+    return value
+
+
+def _subst_vars(value, cvars):
+    """Fill `$NAME`/`${NAME}` from `cvars`, leaving unknown names untouched."""
+    if not cvars or "$" not in value:
+        return value
+    return _VAR_REF.sub(lambda m: cvars.get(m.group(1) or m.group(2), m.group(0)), value)
+
+
+def _env_file_vars(raw, base, known):
+    """`NAME=VALUE` assignments from a file the command SOURCES. `{}` on anything
+    unreadable, oversized or not a plain file.
+
+    Reading it is what makes the mandated worktree recipe resolvable at all. The
+    house recipe is `WT=/tmp/wt-$$` — a value this guard can never evaluate,
+    because `$$` is the SHELL's pid — and the observed agent pattern is to write
+    the EXPANDED path into a scratchpad env file in one tool call and `. ` it in
+    the next. The file therefore holds the literal directory; the command text
+    never does.
+    """
+    path = _subst_vars(os.path.expandvars(str(raw).strip("\"'")), known)
+    path = os.path.expanduser(path)
+    if not path or "$" in path:
+        return {}
+    if not os.path.isabs(path):
+        if not base:
+            return {}
+        path = os.path.join(base, path)
+    out = {}
+    try:
+        if not os.path.isfile(path) or os.path.getsize(path) > _ENV_FILE_MAX_BYTES:
+            return {}
+        with open(path, errors="replace") as fh:
+            for lineno, line in enumerate(fh):
+                if lineno >= _ENV_FILE_MAX_LINES:
+                    break
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                head = line.split(None, 1)
+                if head and head[0] in _ASSIGN_LEADERS and len(head) > 1:
+                    line = head[1].strip()
+                m = _ASSIGNMENT.match(line)
+                if not m:
+                    continue
+                val = _literal_value(m.group(2))
+                if val is not None:
+                    out[m.group(1)] = val
+    except OSError:
+        return {}
+    return out
+
+
+def _command_vars(cmd, base):
+    """Shell variables this command line SETS, as far as they can be evaluated.
+
+    🔴 THE ROOT CAUSE OF THE FALSE POSITIVE THIS FIXES. `_resolve_dir` used only
+    `os.path.expandvars`, which reads the HOOK PROCESS's environment — and the
+    variable naming the worktree is set by the command itself, so it was never
+    there. `git -C "$WT" commit` therefore resolved to NOTHING, fell back to the
+    caller's cwd, and denied by naming the primary clone: a false positive on
+    precisely the worktree workflow the deny message goes on to RECOMMEND.
+    Measured on the shipped guard, cwd = a clone on `trunk`, `$WT` = a worktree
+    on a topic branch:
+        DENY   WT=<worktree>; git -C "$WT" commit -F <file>
+        DENY   . <env-file>; git -C "$WT" commit -F <file>
+        DENY   WT=<worktree>; (cd "$WT" && git commit -F <file>)
+    all three naming `trunk` in the primary clone, which none of them touch.
+
+    A name assigned TWICE to different literals, or once to anything with a `$`
+    or a substitution in it, is dropped rather than guessed — an unresolved name
+    then falls back to the cwd exactly as before, which is the fail-closed
+    direction this function must not weaken.
+    """
+    vals, poisoned = {}, set()
+
+    def note(name, value):
+        if name in poisoned:
+            return
+        val = _literal_value(value)
+        if val is None or (name in vals and vals[name] != val):
+            poisoned.add(name)
+            vals.pop(name, None)
+            return
+        vals[name] = val
+
+    # 🔴 TOP-LEVEL SEGMENTS ONLY — `_scan(cmd)[0]`, not `split_commands`, and the
+    # difference is a hole this change would otherwise have opened itself. A
+    # heredoc body is PROSE; if its lines could register assignments, a commit
+    # message containing the line `WT=/tmp/anything` would decide which repo the
+    # guard judges. Reading only the real command line keeps the value under the
+    # control of the command rather than of its message text, and an assignment
+    # the guard therefore cannot see just falls back to the cwd — fail closed.
+    sourced = []
+    for seg in _scan(cmd)[0]:
+        toks = _tokenise(seg.text)
+        i = 0
+        while i < len(toks):
+            m = _ASSIGNMENT.match(toks[i])
+            if m:
+                note(m.group(1), m.group(2))
+                i += 1
+                continue
+            if os.path.basename(toks[i]) in _ASSIGN_LEADERS:
+                i += 1
+                continue
+            break
+        if i < len(toks) and toks[i] in _SOURCE_CMDS and i + 1 < len(toks):
+            sourced.append(toks[i + 1])
+
+    # A sourced file is the LOWER layer: an assignment written in the command
+    # text itself is more specific and wins, and a poisoned name stays poisoned.
+    for raw in sourced:
+        for name, val in _env_file_vars(raw, base, vals).items():
+            if name not in vals and name not in poisoned:
+                vals[name] = val
+    return vals
+
+
+def _resolve_dir(value, base, cvars=None):
     """A command-supplied path -> an existing directory, or None.
 
-    Expands `$HANDLE` and `~`, resolves a relative path against `base`, and maps
-    `<repo>/.git` onto `<repo>` so a `--git-dir` is judged as its worktree.
+    Expands `$HANDLE` (from the environment first, then from `cvars` — the
+    variables the command line itself sets) and `~`, resolves a relative path
+    against `base`, and maps `<repo>/.git` onto `<repo>` so a `--git-dir` is
+    judged as its worktree.
     """
     if not value:
         return None
-    value = os.path.expanduser(os.path.expandvars(value.strip("\"'")))
+    value = os.path.expandvars(value.strip("\"'"))
+    if "$" in value:
+        value = _subst_vars(value, cvars)
+    value = os.path.expanduser(value)
     if not value:
         return None
     if not os.path.isabs(value):
@@ -1041,8 +1363,12 @@ def _resolve_dir(value, base):
     return value if os.path.isdir(value) else None
 
 
-def _dash_c_dir(argv, base):
+def _dash_c_dir(argv, base, cvars=None, unresolved=None):
     """The directory a `git` argv acts on: `base`, moved by each `-C <path>`.
+
+    `unresolved`, when given a list, collects every `-C` target that could NOT be
+    resolved — so the caller can say so in its deny message instead of silently
+    reporting on a directory the command never named.
 
     git's multiple `-C` options are CUMULATIVE and relative ones compose, so this
     walks them in order rather than taking the last. Only the SEPARATE form is
@@ -1077,7 +1403,10 @@ def _dash_c_dir(argv, base):
     while i < len(argv):
         tok = argv[i]
         if tok == "-C" and i + 1 < len(argv):
-            cur = _resolve_dir(argv[i + 1], cur) or cur
+            moved = _resolve_dir(argv[i + 1], cur, cvars)
+            if moved is None:
+                unresolved.append(argv[i + 1])
+            cur = moved or cur
             i, saw = i + 2, True
             continue
         if tok in _GIT_GLOBAL_VALUE_OPTS:
@@ -1092,15 +1421,16 @@ def _dash_c_dir(argv, base):
     return cur if cur and os.path.isdir(cur) else base
 
 
-def _argv_named_repo_dirs(argv, base):
+def _argv_named_repo_dirs(argv, base, cvars=None, unresolved=None):
     """The repos an argv NAMES for itself, via `-C` / `--git-dir` / `--work-tree`.
 
-    Empty when the argv names none — the caller then falls back to the cd-derived
-    candidate set. Keeping "named" and "inferred" apart is what lets an explicit
-    `git -C <feature-repo> commit` stay ALLOWED from a cwd that sits on main.
+    Empty when the argv names none — the caller then falls back to the directory
+    the command is actually standing in. Keeping "named" and "inferred" apart is
+    what lets an explicit `git -C <feature-repo> commit` stay ALLOWED from a cwd
+    that sits on main.
     """
     dirs = []
-    hopped = _dash_c_dir(argv, base)
+    hopped = _dash_c_dir(argv, base, cvars, unresolved)
     if hopped:
         dirs.append(hopped)
     for i, tok in enumerate(argv[1:], 1):
@@ -1110,23 +1440,94 @@ def _argv_named_repo_dirs(argv, base):
                 val = argv[i + 1]
             elif tok.startswith(opt + "="):
                 val = tok.split("=", 1)[1]
-            resolved = _resolve_dir(val, base)
+            resolved = _resolve_dir(val, base, cvars)
             if resolved:
                 dirs.append(resolved)
     return list(dict.fromkeys(dirs))
 
 
-def _candidate_dirs(cmd, base):
-    """Every directory a BARE `git commit` in this line could run in: the caller's
-    cwd, plus every `cd`/`pushd` target and `GIT_DIR=`/`GIT_WORK_TREE=` prefix
-    anywhere in the text (subshells and `bash -c` bodies included)."""
-    out = [base] if base else []
-    for rx in (_CD_ANY, _GIT_DIR_ENV):
-        for m in rx.finditer(cmd):
-            resolved = _resolve_dir(m.group("dir"), base)
-            if resolved:
-                out.append(resolved)
+def _git_dir_env_targets(cmd, base, cvars=None):
+    """Repos named by a `GIT_DIR=` / `GIT_WORK_TREE=` env assignment anywhere in
+    the text.
+
+    Kept as a WHOLE-TEXT scan rather than folded into the per-segment walk, and
+    deliberately: these two variables OVERRIDE the working directory, so an
+    `export GIT_DIR=…` earlier in the line still governs a later bare `git
+    commit`. Judging them IN ADDITION to the effective cwd is the fail-closed
+    direction, and it is what keeps the audit-found
+    `GIT_DIR=<main>/.git … git commit` hop denied.
+    """
+    out = []
+    for m in _GIT_DIR_ENV.finditer(cmd):
+        resolved = _resolve_dir(m.group("dir"), base, cvars)
+        if resolved:
+            out.append(resolved)
     return list(dict.fromkeys(out))
+
+
+_CWD_CHANGERS = frozenset({"cd", "pushd"})
+
+
+def _commands_with_cwd(text, base, cvars=None, _depth=0):
+    """`[(argv, cwd-in-effect), …]` — every real argv, paired with the directory
+    the shell is standing in WHEN IT RUNS.
+
+    🔴 THE SECOND HALF OF THE FALSE POSITIVE. The previous design could not
+    answer "where does this command run?", so for a bare `git commit` it judged
+    the UNION of the caller's cwd and every `cd` target anywhere in the text, and
+    denied if ANY of them was a blocked repo. That over-approximation denied the
+    mandated worktree spellings outright:
+        DENY   (cd <worktree-on-a-topic-branch> && git commit -F <file>)
+        DENY   bash -c 'cd <worktree-on-a-topic-branch> && git commit …'
+    from a cwd that merely HAPPENED to sit on trunk — the commit does not touch
+    that repo at all. The union was chosen because "the guard cannot know which
+    `cd` won"; it can, if it tracks position and scope, which is what this does.
+
+    Scope is the part that must not be lost. A `cd` inside `( … )` does NOT leak
+    to the commands after the subshell, so `_scan`'s per-segment depth drives a
+    stack: entering a subshell pushes the current directory, leaving it pops.
+    That keeps the negative control denying:
+        DENY   (cd <worktree>; ls); git commit        <- the cd did not survive
+
+    A `cd` whose target does not resolve leaves the directory UNCHANGED, which
+    keeps the caller's cwd in play — the fail-closed direction, and the same
+    direction an unresolvable `-C` takes.
+
+    KNOWN LIMIT, stated rather than papered over: this walks positions, not
+    control flow, so a `cd` that would be SKIPPED at runtime (`false && cd <x>;
+    git commit`) is still treated as having happened. That direction can only
+    mis-attribute a bare commit to a directory the line explicitly names, and the
+    ordinary `cd <path> && git …` shape stays blocked by `check_cd_then_git`
+    regardless.
+    """
+    out = []
+    segs, subs, bodies = _scan(text)
+    cwd, stack, cur_depth = base, [], 0
+    for seg in segs:
+        while cur_depth < seg.depth:
+            stack.append(cwd)
+            cur_depth += 1
+        while cur_depth > seg.depth and stack:
+            cwd = stack.pop()
+            cur_depth -= 1
+        variants = _peel_variants(_tokenise(seg.text))
+        for argv in variants:
+            out.append((argv, cwd))
+            if _depth < 3:
+                for nested in _nested_shell_text(argv):
+                    out.extend(_commands_with_cwd(nested, cwd, cvars, _depth + 1))
+        primary = variants[0] if variants else None
+        if primary and os.path.basename(primary[0]) in _CWD_CHANGERS and len(primary) > 1:
+            moved = _resolve_dir(primary[1], cwd, cvars)
+            if moved:
+                cwd = moved
+    # Substitution and heredoc bodies run in their own scope and have no position
+    # in this walk, so they are judged against `base` — the same directory they
+    # were judged against before, and the fail-closed choice.
+    if _depth < _BODY_RECURSION_LIMIT:
+        for isolated in subs + bodies:
+            out.extend(_commands_with_cwd(isolated, base, cvars, _depth + 1))
+    return out
 
 
 def _remote_slug(url):
@@ -1263,16 +1664,15 @@ def check_git_commit_to_main(cmd, cwd=None):
         on THAT repo alone. The command said where it acts, so the caller's cwd is
         irrelevant, and folding it in would deny the documented `git -C $WT commit`
         spelling whenever the cwd happened to sit on main.
-        🔴 UNLESS no named target is a git worktree at all — then the named repo
-        answers nothing, and judging "on that repo alone" would mean judging on
+        🔴 UNLESS some named target is not a git worktree at all — then the named
+        repo answers nothing, and judging "on that repo alone" would mean judging on
         nothing. That case falls back to the cwd candidates and blocks; see the
         comment on `targets` below.
-      * a BARE `git commit` is judged against every directory the line could have
-        left the shell in: the caller's cwd plus every `cd`/`pushd` target anywhere
-        in the text — including inside `bash -c '…'` and `( … )`, because the
-        target is literal text there too. Any one of them being a blocked repo
-        denies. That over-approximates, on purpose: for a bare commit the guard
-        cannot know which `cd` won, and a guard that guesses should guess CLOSED.
+      * a BARE `git commit` is judged against the directory the shell is STANDING
+        IN when it runs — the caller's cwd, moved by each `cd`/`pushd` that
+        precedes it in the line, with subshell scope respected (`_commands_with_cwd`)
+        — plus any `GIT_DIR=`/`GIT_WORK_TREE=` target, which overrides a directory
+        rather than being one.
 
     🔴 The second rule exists because the guard was TEACHING ITS OWN BYPASS. An
     adversarial audit measured, against the real adapter, that `cd <main> && git
@@ -1283,10 +1683,34 @@ def check_git_commit_to_main(cmd, cwd=None):
         ALLOW  ls; cd <main>; git commit -m x          <- a non-leading cd
         ALLOW  git --git-dir=<main>/.git --work-tree=<main> commit -m x
     A deny whose adjacent re-spelling succeeds is worse than no deny: it launders
-    the action into one the guard has blessed.
+    the action into one the guard has blessed. All four still deny.
+
+    🔴 2026-08-11: that second rule used to be a UNION — the cwd AND every `cd`
+    target anywhere in the text, denying if ANY was blocked — and the union was
+    wrong in BOTH directions, which is the part worth remembering. It denied the
+    mandated worktree spellings from any session whose cwd merely happened to sit
+    on a main branch (a primary clone's normal state):
+        DENY   git -C "$WT" commit -F <file>         <- named the primary clone
+        DENY   . <env-file>; git -C "$WT" commit …      it does not touch
+        DENY   (cd <worktree-on-a-topic-branch> && git commit …)
+    and, from a cwd that was fine, it silently ALLOWED the mirror image:
+        ALLOW  REPO=<repo-on-trunk>; git -C "$REPO" commit -m x
+    because an unresolvable `-C` fell back to a cwd that was innocent. Both are
+    the same root cause: the guard could not evaluate a shell variable and could
+    not say where a command stands. `_command_vars` and `_commands_with_cwd` are
+    the two answers; the fallbacks they cannot answer with are unchanged.
     """
+    # 🔴 THE HOT-PATH GATE. Resolving variables can READ A SOURCED ENV FILE, and
+    # this hook fires on every Bash call in every session — so nothing below runs
+    # until a cheap, pure-text pass has established that a real `git … commit`
+    # is present at all. `commands()` here is the same parse the other argv
+    # checks already do.
+    if not _has_real_git_commit(cmd):
+        return None
     base = cwd or _safe_getcwd()
-    for argv in commands(cmd):
+    cvars = _command_vars(cmd, base)
+    env_named = _git_dir_env_targets(cmd, base, cvars)
+    for argv, eff_cwd in _commands_with_cwd(cmd, base, cvars):
         if os.path.basename(argv[0]) != "git":
             continue
         flags, operands = _flags_and_operands(_git_strip_global_opts(argv))
@@ -1294,7 +1718,8 @@ def check_git_commit_to_main(cmd, cwd=None):
             continue
         if any(_is_dry_run_flag(f) for f in flags):
             continue
-        named = _argv_named_repo_dirs(argv, base)
+        unresolved = []
+        named = _argv_named_repo_dirs(argv, eff_cwd, cvars, unresolved)
         # 🔴 A NAMED TARGET THAT IS NOT A GIT WORKTREE MUST NOT SUPPRESS THE CWD
         # CHECK. Naming a repo hands the whole verdict to that repo, so if the
         # named directory turns out not to be one, the branch check evaluates
@@ -1305,27 +1730,64 @@ def check_git_commit_to_main(cmd, cwd=None):
         # The directory existing is what made it look answered: `_resolve_dir`
         # returns any real directory, and `_commit_to_main_reason` then fails open
         # on "no branch". So unless EVERY named target resolves to a worktree, fall
-        # back to the cwd-derived candidates and judge those instead — the guard's
-        # documented posture for an unresolvable target ("treat it as the cwd repo
-        # and block"), the same direction `_dash_c_dir` already takes for a path
-        # that does not resolve at all.
+        # back to the cwd the command actually stands in and judge that instead —
+        # the guard's documented posture for an unresolvable target ("treat it as
+        # the cwd repo and block"), the same direction an unresolvable `-C` already
+        # takes via `unresolved`.
         #
-        # Deliberately `not all(...)`, not `not any(...)`. They differ only on a
-        # MIXED named set — one real worktree plus one junk target, reachable by
-        # combining `-C` with `--git-dir`/`--work-tree`:
+        # 🔴 This is a DIFFERENT failure from `unresolved`, and neither one covers
+        # the other: `unresolved` is a path the guard could not turn into a
+        # directory at all (a shell variable it cannot read), whereas this is a
+        # path that resolved perfectly well and simply is not a repo. The first
+        # already fell back; the second did not, and that gap was the fail-open.
+        #
+        # Deliberately "any target is not a worktree", not "no target is". They
+        # differ only on a MIXED named set — one real worktree plus one junk
+        # target, reachable by combining `-C` with `--git-dir`/`--work-tree`:
         #     git -C <feature-repo> --git-dir=<an-ordinary-directory> commit
         # Which repo that lands in is genuinely ambiguous (and `--git-dir` here
         # resolves against the CWD, not against the `-C` hop), so it is exactly the
-        # "unparseable -> treat it as the cwd repo and block" case. `any` would let
-        # one resolvable `-C` vouch for a junk sibling and allow it through.
-        targets = named
-        if named and not all(_is_git_worktree(d) for d in named):
-            targets = _candidate_dirs(cmd, base)
-        for repo_dir in (targets or _candidate_dirs(cmd, base)):
+        # "unparseable -> treat it as the cwd repo and block" case. Requiring only
+        # ONE to be a worktree would let a resolvable `-C` vouch for a junk sibling
+        # and allow it through.
+        not_worktrees = [d for d in named if not _is_git_worktree(d)]
+        targets = [] if not_worktrees else named
+        candidates = targets or ([eff_cwd] if eff_cwd else []) + env_named
+        for repo_dir in candidates:
             reason = _commit_to_main_reason(repo_dir)
             if reason:
+                if unresolved and repo_dir == eff_cwd:
+                    reason += (
+                        f"\n(The `-C {unresolved[0]}` in this command names a path this guard "
+                        f"could not resolve — it is a shell variable whose value the command "
+                        f"text does not carry — so the caller's own directory was judged "
+                        f"instead. If that is the wrong repo, pass `-C` an ABSOLUTE path, or "
+                        f"assign the variable in this same command so the value is visible.)")
+                elif not_worktrees and repo_dir == eff_cwd:
+                    reason += (
+                        f"\n(This command names `{not_worktrees[0]}` as its repo, but that path "
+                        f"is not a git worktree, so it answers nothing about which branch the "
+                        f"commit would land on — the caller's own directory was judged instead. "
+                        f"Point `-C`/`--git-dir`/`--work-tree` at a real worktree if that is the "
+                        f"wrong repo.)")
                 return reason
     return None
+
+
+def _has_real_git_commit(cmd):
+    """True when this line contains a `git … commit` that would CREATE a commit.
+
+    Pure text, zero subprocesses, zero file reads — the cheap precondition that
+    keeps `check_git_commit_to_main` off the hot path for the ~everything else.
+    """
+    for argv in commands(cmd):
+        if os.path.basename(argv[0]) != "git":
+            continue
+        flags, operands = _flags_and_operands(_git_strip_global_opts(argv))
+        if operands and operands[0] == "commit" and not any(
+                _is_dry_run_flag(f) for f in flags):
+            return True
+    return False
 
 
 def check_pkill_full_pattern(cmd):

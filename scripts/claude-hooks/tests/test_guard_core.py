@@ -2251,26 +2251,61 @@ def test_the_same_hops_into_a_feature_branch_stay_allowed(tmp_path, template):
     assert gc.check_git_commit_to_main(cmd, str(neutral)) is None, cmd
 
 
-def test_the_cwd_REMAINS_a_candidate_even_when_the_line_cds_elsewhere(tmp_path):
-    """🔴 A deliberate fail-CLOSED over-approximation, pinned so it is a decision
-    rather than a surprise.
+def test_a_cd_MOVES_the_judged_directory_rather_than_adding_a_candidate(tmp_path):
+    """🔴 A DELIBERATE BEHAVIOUR CHANGE (2026-08-11), replacing the earlier
+    `test_the_cwd_REMAINS_a_candidate_even_when_the_line_cds_elsewhere`.
 
-    For a bare `git commit` the guard cannot know which `cd` actually won — the
-    line may be conditional (`cd x && …`), the `cd` may fail, or it may sit in a
-    subshell that does not affect the caller. So every directory the line could
-    have ended in is judged, the caller's cwd included, and ANY of them being a
-    blocked repo denies.
+    That test pinned a fail-CLOSED over-approximation: for a bare `git commit`
+    the guard judged the UNION of the caller's cwd and every `cd` target in the
+    line, on the argument that it "cannot know which `cd` won". It can, if it
+    tracks position and subshell scope — and the over-approximation was not free.
+    It denied the mandated worktree spellings
+        (cd <worktree-on-a-topic-branch> && git commit …)
+        bash -c 'cd <worktree-on-a-topic-branch> && git commit …'
+    from any session whose cwd merely HAPPENED to sit on a main branch, which is
+    the normal state of a primary clone. A guard that fires on the workflow its
+    own deny message RECOMMENDS is the failure mode `_IRREVERSIBLE_CHECKS`
+    documents: it trains its subject to route around it.
 
-    The cost is this case: a cwd on `main` plus a hop into a feature repo denies,
-    naming the cwd. Accepted because the precise spelling — `git -C <repo> commit`,
-    the one this repo's CLAUDE.md mandates — is judged on its named repo ALONE and
-    is unaffected (test_an_explicit_named_repo_beats_the_cwd_and_the_cd_candidates).
+    The cwd is no longer a candidate once the line has moved somewhere else. The
+    directions that must NOT change are the next three tests: a cd INTO a blocked
+    repo still denies, a cd that does not survive its subshell does not move
+    anything, and an UNRESOLVABLE cd leaves the cwd in play.
     """
     on_main = _mkrepo(tmp_path / "main-repo", branch="main")
     on_feat = _mkrepo(tmp_path / "feat-repo", branch="feat/x")
-    reason = gc.check_git_commit_to_main(f"cd {on_feat} && git commit -m x", str(on_main))
+    assert gc.check_git_commit_to_main(
+        f"cd {on_feat} && git commit -m x", str(on_main)) is None
+    # …and the POLICY outcome for this exact spelling is unchanged: `cd <path> &&
+    # git …` is still denied end-to-end, by check_cd_then_git, which is what the
+    # caller actually experiences. Asserted so "this loosened the guard" and "this
+    # moved which check reports it" cannot be confused.
+    assert gc.evaluate(f"cd {on_feat} && git commit -m x", "claude-code",
+                       str(on_main)) is not None
+
+
+def test_an_unresolvable_cd_leaves_the_callers_cwd_in_play(tmp_path):
+    """The fail-CLOSED half of the change above. A `cd` the guard cannot resolve
+    did not necessarily happen, so it must not move the judged directory — the
+    commit may well land in the caller's own repo."""
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    assert gc.check_git_commit_to_main(
+        "cd /definitely/not/here && git commit -m x", str(on_main)) is not None
+
+
+def test_a_cd_inside_a_subshell_does_not_leak_out_of_it(tmp_path):
+    """🔴 The scope half, and the reason positional tracking needs `_scan`'s depth
+    rather than a regex. `( cd <feat>; ls )` does NOT move the caller, so the
+    `git commit` after it still runs — and is still judged — in the cwd."""
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    on_feat = _mkrepo(tmp_path / "feat-repo", branch="feat/x")
+    reason = gc.check_git_commit_to_main(
+        f"(cd {on_feat}; ls); git commit -m x", str(on_main))
     assert reason is not None
     assert str(on_main) in reason, "the deny must name the directory it actually judged"
+    # The mirror image: INSIDE the subshell the cd does apply.
+    assert gc.check_git_commit_to_main(
+        f"(cd {on_feat} && git commit -m x)", str(on_main)) is None
 
 
 def test_an_explicit_named_repo_beats_the_cwd_and_the_cd_candidates(tmp_path):
@@ -2501,6 +2536,26 @@ def test_S6b_a_junk_named_target_cannot_be_vouched_for_by_a_real_one(tmp_path):
         f"git -C {feat} --git-dir={plain} commit -m x", str(cwd)) is not None
 
 
+def test_S6d_the_deny_explains_WHY_it_judged_the_cwd_instead(tmp_path):
+    """Falling back to the cwd produces a deny naming a repo the user never wrote
+    in the command — unreadable unless it says why. The two fallbacks have
+    DIFFERENT causes and must not share one message: `unresolved` is a path the
+    guard could not turn into a directory (a shell variable), this one is a path
+    that resolved fine and simply is not a repo. Asserted on the STATE (the named
+    path appears, and the not-a-worktree wording) rather than on any single word
+    another branch could also spell.
+    """
+    cwd = _mkrepo(tmp_path / "cwd-trunk", branch="trunk")
+    plain = tmp_path / "just-a-directory"
+    plain.mkdir()
+    reason = gc.check_git_commit_to_main(f"git -C {plain} commit -m x", str(cwd))
+    assert reason is not None
+    assert str(plain) in reason
+    assert "not a git worktree" in reason
+    # …and it must NOT claim the path was unresolvable — that is the other cause.
+    assert "could not resolve" not in reason
+
+
 def test_S6c_failing_closed_does_not_block_a_harmless_cwd(tmp_path):
     """The other side of S6: falling back to the cwd is a FALLBACK, not a blanket
     deny. From a feature-branch cwd the same unjudgeable `-C` stays allowed —
@@ -2532,3 +2587,311 @@ def test_is_git_worktree_can_return_both_verdicts(tmp_path):
     assert gc._is_git_worktree(str(plain)) is False
     assert gc._is_git_worktree(str(tmp_path / "absent")) is False
     assert gc._is_git_worktree(None) is False
+
+# --- 9. 🔴 WHICH TREE, AND THE HEREDOC SWALLOW (2026-08-11) ----------------- #
+#
+# Two defects, found by replaying real session transcripts rather than by
+# reading the code:
+#
+#   1. The guard resolved the branch from the AMBIENT repo. `git -C "$WT"
+#      commit` — the spelling both this repo's and datapacket-talos's CLAUDE.md
+#      MANDATE — carries the worktree in a shell variable the hook process has
+#      never heard of, so `_resolve_dir` returned None, the guard fell back to
+#      the caller's cwd, and denied a commit into a topic-branch worktree by
+#      naming a primary clone the command does not touch. Same for the `cd`
+#      spellings, which were judged as a UNION with the cwd.
+#
+#   2. A heredoc body is prose, and the scanner tracked quote state through it.
+#      One apostrophe (`don't`, `it's`) opened a quote that never closed, and
+#      EVERY command after the heredoc was swallowed into the quoted buffer
+#      instead of being parsed — silently disabling every argv check for the
+#      rest of the line, not just this one.
+#
+# Every test below was watched RED against the pre-change guard_core.py and
+# GREEN at HEAD; the matrix is in the PR body.
+# =========================================================================== #
+
+def _mkworktree(repo, path, branch):
+    """A real linked worktree of `repo` at `path`, checked out on `branch`."""
+    subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", branch,
+                    str(path)], capture_output=True, text=True, check=True)
+    return path
+
+
+def _trunk_and_worktree(tmp_path):
+    """A clone on `trunk` + a linked worktree on a topic branch. The shape the
+    whole worktree workflow is made of, and the one the guard got wrong."""
+    repo = _mkrepo(tmp_path / "clone", branch="trunk", commit=True)
+    wt = _mkworktree(repo, tmp_path / "wt-topic", "zach/topic")
+    return repo, wt
+
+
+# --- 9a. NEGATIVE CONTROLS — these must still BLOCK -------------------------- #
+# 🔴 Read this section before the next one. A "fix" for a false positive is only
+# as good as the denies it leaves standing, and the dangerous direction here is
+# permissiveness. Each of these was verified to DENY both before and after.
+
+@pytest.mark.parametrize("branch", ["main", "master", "trunk"])
+def test_control_1_commit_in_a_clone_on_a_main_branch_still_blocks(tmp_path, branch):
+    """Control 1: the base case the whole check exists for, re-asserted through
+    the new resolution path."""
+    repo = _mkrepo(tmp_path / "r", branch=branch)
+    assert gc.evaluate(f"git commit -m x", "claude-code", str(repo)) is not None
+
+
+@pytest.mark.parametrize("branch", ["main", "master", "trunk"])
+def test_control_2_a_heredoc_message_body_does_not_hide_the_commit(tmp_path, branch):
+    """Control 2: the same commit with its message in a heredoc. `-F -` plus a
+    body must be exactly as blocked as `-F <file>` — the two spellings differ
+    only in where the bytes come from."""
+    repo = _mkrepo(tmp_path / "r", branch=branch)
+    cmd = "git commit -q -F - <<'MSG'\ndocs: a message\n\nwith a body\nMSG"
+    assert gc.evaluate(cmd, "claude-code", str(repo)) is not None
+    # …and with an apostrophe in it, which is what broke the scanner.
+    apostrophe = "git commit -q -F - <<'MSG'\ndocs: don't lose this\nMSG"
+    assert gc.evaluate(apostrophe, "claude-code", str(repo)) is not None
+
+
+def test_control_3_dash_c_resolution_is_not_a_bypass_vector(tmp_path):
+    """Control 3: honouring `-C` must not become a way OUT. A `-C` that names a
+    repo on a main branch denies, from any cwd — including a topic-branch
+    worktree, which is the cwd an evader would pick."""
+    repo, wt = _trunk_and_worktree(tmp_path)
+    for cmd in [
+        f"git -C {repo} commit -m x",
+        f"git -C {repo} commit -q -F - <<'MSG'\nit's a message\nMSG",
+        f"REPO={repo}\ngit -C \"$REPO\" commit -m x",
+        f"cd {repo} && git commit -m x",
+        f"(cd {repo} && git commit -m x)",
+        f"bash -c 'cd {repo} && git commit -m x'",
+        f"GIT_DIR={repo}/.git GIT_WORK_TREE={repo} git commit -m x",
+    ]:
+        assert gc.evaluate(cmd, "claude-code", str(wt)) is not None, cmd
+
+
+def test_variable_resolution_never_turns_a_blocked_repo_into_an_allowed_one(tmp_path):
+    """The generalisation of control 3: resolving `$VAR` is only ever ALLOWED to
+    change WHICH repo is judged, never whether the verdict is read at all."""
+    repo, wt = _trunk_and_worktree(tmp_path)
+    env = tmp_path / "bad.env"
+    env.write_text(f"WT={repo}\n")
+    assert gc.check_git_commit_to_main(
+        f". {env}\ngit -C \"$WT\" commit -m x", str(wt)) is not None
+
+
+def test_a_variable_assigned_twice_is_not_guessed(tmp_path):
+    """Ambiguity falls back to the cwd rather than picking a winner. Two
+    different literals for one name means the guard does not know the value, and
+    a guard that does not know must not pretend it does."""
+    repo, wt = _trunk_and_worktree(tmp_path)
+    cmd = f"WT={wt}\nWT={repo}\ngit -C \"$WT\" commit -m x"
+    assert gc.check_git_commit_to_main(cmd, str(repo)) is not None
+
+
+def test_a_heredoc_BODY_cannot_inject_a_variable(tmp_path):
+    """🔴 A hole this change would have opened in itself, closed before it
+    shipped. Variable resolution reads the real command line only — if a heredoc
+    body's lines could register assignments, the COMMIT MESSAGE would get to
+    decide which repository the guard judges. Here the body claims `WT` points at
+    a harmless worktree; the deny must stand, because the message text does not
+    get a vote."""
+    repo, wt = _trunk_and_worktree(tmp_path)
+    cmd = (f"git commit -q -F - <<'MSG'\n"
+           f"docs: a message that happens to contain WT={wt}\nMSG")
+    assert gc.check_git_commit_to_main(cmd, str(repo)) is not None
+    # …and the same via `-C "$WT"`, where the injected value would be USED.
+    cmd2 = (f"git -C \"$WT\" commit -q -F - <<'MSG'\n"
+            f"WT={wt}\nMSG")
+    assert gc.check_git_commit_to_main(cmd2, str(repo)) is not None
+
+
+def test_an_unresolvable_dash_c_says_so_in_the_deny(tmp_path, monkeypatch):
+    """The fallback still fires, and now EXPLAINS itself — a deny naming a repo
+    the command never mentioned is what made the original false positive so hard
+    to read."""
+    monkeypatch.delenv(_UNSET_HANDLE, raising=False)
+    repo = _mkrepo(tmp_path / "r", branch="trunk")
+    reason = gc.check_git_commit_to_main(
+        f"git -C ${_UNSET_HANDLE} commit -m x", str(repo))
+    assert reason is not None
+    assert "could not resolve" in reason
+    assert _UNSET_HANDLE in reason
+
+
+# --- 9b. 🔴 THE HEREDOC SWALLOW --------------------------------------------- #
+
+@pytest.mark.parametrize("victim", [
+    "git commit -m x",                      # this check
+    "git stash push -m wip",                # …and every other argv check
+    "git -C /tmp reset --hard origin/main",
+    "git clean -fd",
+    "talosctl -n 1.2.3.4 reset",
+    "mkfs.ext4 /dev/sdc",
+    "dd if=/dev/zero of=/dev/sdc",
+    "pkill -f e2e/run.sh",
+])
+def test_a_heredoc_body_cannot_swallow_the_command_after_it(tmp_path, victim):
+    """🔴 THE REGRESSION. Measured ALLOW on the shipped guard for every victim
+    below — one apostrophe in a message body disabled the ENTIRE argv half of the
+    guard for the rest of the command line.
+
+    Parametrised over checks from different families on purpose: the bug was in
+    the SHARED scanner, so a single-check test would have understated it as a
+    commit-to-main quirk.
+    """
+    repo = _mkrepo(tmp_path / "r", branch="trunk")
+    cmd = f"cat > /tmp/m.txt <<'EOF'\nfix: don't blindly stage\nEOF\n{victim}"
+    assert gc.evaluate(cmd, "claude-code", str(repo)) is not None, cmd
+
+
+def test_the_apostrophe_is_the_discriminator_not_the_heredoc(tmp_path):
+    """🔴 The control that NAMES the mechanism. The two commands differ by one
+    character. Without this pair, "heredocs break the guard" and "an unbalanced
+    quote breaks the guard" are indistinguishable — and only the second is true,
+    which is why the fix is in the scanner rather than in a heredoc special case.
+    """
+    repo = _mkrepo(tmp_path / "r", branch="trunk")
+    balanced = "cat > /tmp/m <<'EOF'\ndo not stage\nEOF\ngit commit -m x"
+    unbalanced = "cat > /tmp/m <<'EOF'\ndon't stage\nEOF\ngit commit -m x"
+    assert gc.evaluate(balanced, "claude-code", str(repo)) is not None
+    assert gc.evaluate(unbalanced, "claude-code", str(repo)) is not None
+    # And at the parser, which is where the difference actually lived:
+    assert any(s.strip() == "git commit -m x"
+               for s in gc.split_commands(unbalanced)), gc.split_commands(unbalanced)
+
+
+def test_a_heredoc_body_that_really_EXECUTES_is_still_checked(tmp_path):
+    """🔴 NON-REGRESSION, and the line separating this fix from the reverted
+    `_strip_message_text()` helper the module docstring forbids. That helper
+    BLANKED bodies, so `bash <<EOF` stopped being checked. Nothing is blanked
+    here: the body is lifted out of the surrounding quote state and then parsed
+    as commands exactly as before, so a body that really runs still denies.
+    """
+    repo = _mkrepo(tmp_path / "r", branch="trunk")
+    for cmd in ["bash <<'EOF'\ngit stash push -m wip\nEOF",
+                "bash <<'EOF'\ntalosctl -n 1.2.3.4 reset\nEOF",
+                "bash <<'EOF'\nit's fine\ngit stash push -m wip\nEOF"]:
+        assert gc.evaluate(cmd, "claude-code", str(repo)) is not None, cmd
+
+
+@pytest.mark.parametrize("cmd,expect_body", [
+    ("cat <<'EOF'\nbody line\nEOF", "body line"),
+    ('cat <<"EOF"\nbody line\nEOF', "body line"),
+    ("cat <<EOF\nbody line\nEOF", "body line"),
+    ("cat <<-EOF\n\tbody line\n\tEOF", "\tbody line"),
+    ("cat <<EOF\nbody line", "body line"),            # unterminated -> runs to EOF
+])
+def test_scan_lifts_every_heredoc_spelling_out_as_a_body(cmd, expect_body):
+    """The tag parser, per spelling. `<<-` strips leading TABS from the
+    terminator only — the body text itself is preserved, because the guard reads
+    it as commands and must not invent whitespace changes."""
+    _segs, _subs, bodies = gc._scan(cmd)
+    assert bodies == [expect_body], (cmd, bodies)
+
+
+def test_a_here_STRING_is_not_a_heredoc():
+    """`<<<` has no body and no terminator. Reading it as one would consume the
+    rest of the line as inert text — the exact failure this change fixes, in a
+    new place."""
+    segs, _subs, bodies = gc._scan("cat <<< \"x\"; git stash push -m wip")
+    assert bodies == []
+    assert any("git stash" in s.text for s in segs)
+
+
+def test_two_heredocs_on_one_line_are_consumed_in_order():
+    """bash reads the bodies in the order the operators appear. Getting this
+    wrong would leave the second body's text in the command stream — additive,
+    but it would also mis-attribute the first."""
+    segs, _subs, bodies = gc._scan("diff <<A <<B\nfirst\nA\nsecond\nB\ngit stash")
+    assert bodies == ["first", "second"]
+    assert any("git stash" in s.text for s in segs)
+
+
+# --- 9c. THE WORKTREE POSITIVES — these must now be ALLOWED ----------------- #
+
+def test_control_4_dash_c_into_a_worktree_on_a_topic_branch_is_allowed(tmp_path):
+    """Control 4. The literal-path spelling, from a clone sitting on trunk."""
+    repo, wt = _trunk_and_worktree(tmp_path)
+    assert gc.evaluate(f"git -C {wt} commit -m x", "claude-code", str(repo)) is None
+
+
+def test_control_5_a_cd_into_a_worktree_on_a_topic_branch_is_allowed(tmp_path):
+    """Control 5. The subshell spelling — `(cd <wt> && git commit …)` — which
+    was denied outright, naming a repo it never touches."""
+    repo, wt = _trunk_and_worktree(tmp_path)
+    assert gc.evaluate(f"(cd {wt} && git commit -m x)", "claude-code", str(repo)) is None
+
+
+@pytest.mark.parametrize("template", [
+    'git -C "$WT" commit -m x',
+    'git -C "$WT" commit -q -F -',
+    '(cd "$WT" && git commit -m x)',
+    'bash -c \'cd "$WT" && git commit -m x\'',
+    'git -C ${WT} commit -m x',
+])
+def test_a_variable_naming_the_worktree_resolves_from_the_command_text(tmp_path, template):
+    """🔴 THE ORIGINAL FALSE POSITIVE. `WT=…` is set by the command itself, so
+    the hook process's environment can never carry it — `expandvars` alone was
+    structurally unable to answer, and the fallback then named the wrong repo.
+    """
+    repo, wt = _trunk_and_worktree(tmp_path)
+    cmd = f"WT={wt}\n{template}"
+    assert gc.check_git_commit_to_main(cmd, str(repo)) is None, cmd
+
+
+def test_a_sourced_env_file_supplies_the_worktree_path(tmp_path):
+    """🔴 THE EXACT INCIDENT SHAPE. The mandated recipe is `WT=/tmp/wt-$$`, whose
+    value depends on the SHELL's pid and can never be read from the text — so the
+    observed pattern is to write the expanded path into a scratchpad env file and
+    `. ` it in later calls. Reading that file is the only way the guard can know
+    which tree the commit lands in."""
+    repo, wt = _trunk_and_worktree(tmp_path)
+    env = tmp_path / "wt.env"
+    env.write_text(f"WT={wt}\n")
+    cmd = f". {env}\ngit -C \"$WT\" commit -q -F - <<'MSG'\ndocs: a message\nMSG"
+    assert gc.check_git_commit_to_main(cmd, str(repo)) is None
+
+
+@pytest.mark.parametrize("body", [
+    "",                                  # empty file
+    "# just a comment\n",
+    "WT=$SOMETHING_ELSE\n",              # unresolvable value -> not a guess
+    "WT=" + "x" * (70 * 1024) + "\n",    # over the size cap
+])
+def test_an_unusable_env_file_falls_back_rather_than_guessing(tmp_path, body):
+    """Every way an env file can fail to answer must land on the cwd fallback,
+    which for a clone on trunk means the deny stands."""
+    repo = _mkrepo(tmp_path / "clone", branch="trunk", commit=True)
+    env = tmp_path / "wt.env"
+    env.write_text(body)
+    assert gc.check_git_commit_to_main(
+        f". {env}\ngit -C \"$WT\" commit -m x", str(repo)) is not None
+
+
+def test_a_missing_env_file_does_not_raise(tmp_path):
+    repo = _mkrepo(tmp_path / "clone", branch="trunk", commit=True)
+    assert gc.check_git_commit_to_main(
+        f". {tmp_path}/nope.env\ngit -C \"$WT\" commit -m x", str(repo)) is not None
+
+
+def test_the_hot_path_reads_no_files_and_execs_no_git(tmp_path, monkeypatch):
+    """🔴 THE HOT-PATH PROMISE, re-asserted for the NEW cost. Variable resolution
+    can open a sourced env file, and this hook runs on EVERY Bash call — so the
+    file read must sit behind the same "is there a real `git … commit` here at
+    all?" gate the git subprocesses do. Pinned as a count of opens, because a
+    refactor that hoists `_command_vars` above the gate is invisible otherwise.
+    """
+    repo = _mkrepo(tmp_path / "r", branch="trunk")
+    env = tmp_path / "wt.env"
+    env.write_text("WT=/tmp/whatever\n")
+    opened = []
+    real_open = gc.open if hasattr(gc, "open") else open
+    monkeypatch.setattr("builtins.open",
+                        lambda f, *a, **k: (opened.append(str(f)), real_open(f, *a, **k))[1])
+    for cmd in ["ls -la", f". {env}; ls", "git status", "git add x",
+                f". {env}\ngit commit --dry-run", "kubectl get pods"]:
+        gc.evaluate(cmd, "claude-code", str(repo))
+    assert not [o for o in opened if str(env) in o], opened
+    # …and the positive control: with a REAL commit present, it IS read.
+    gc.evaluate(f". {env}\ngit -C \"$WT\" commit -m x", "claude-code", str(repo))
+    assert [o for o in opened if str(env) in o], "the env file was never read at all"
