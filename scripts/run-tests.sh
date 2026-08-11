@@ -306,28 +306,37 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 # via `nix build .#checks.x86_64-linux.pytests`:
 #     base 3acd041 (origin/main) : TOTAL collected=7194  passed=7193  skipped=1
 #                                  failed=0   scripts/tests=1923
-#     this branch                : TOTAL collected=7351  passed=7350  skipped=1
-#                                  failed=0   scripts/tests=2080
-# +157, and 2080-1923 = 157 = exactly the new
+#     this branch                : TOTAL collected=7423  passed=7422  skipped=1
+#                                  failed=0   scripts/tests=2152
+# +229, and 2152-1923 = 229 = exactly the new
 # scripts/tests/test_session_manager.py suite. That per-directory attribution is
 # also the POSITIVE CONTROL proving this gate actually RUNS the new suite: it
 # needed no HERMETIC_TARGETS entry because scripts/tests is already a directory
 # target, so movement on that directory's OWN line is what demonstrates
 # execution rather than asserting it.
 #
-# ⚠ RE-MEASURED, NOT CARRIED FORWARD. An intermediate reading on this same
-# branch was 7350/2079; a review round then added one test (the CH-factory
-# late-binding guard) and that number was stale the moment it did. 7351 is what
-# the gate reported on the tree this line ships with.
+# ⚠ RE-MEASURED EVERY ROUND, NOT CARRIED FORWARD — twice now. An intermediate
+# reading on this branch was 7350/2079; a review round added one test and it was
+# stale immediately. Then an ADVERSARIAL AUDIT round rewrote the fuzzyclaw guard
+# (window_id -> window_id AND slot), made the live-window set measured-or-None,
+# and added 72 tests: 7351/2080 -> 7423/2152. A fix round resets this number
+# exactly as it resets the verification gate.
 #
 # ⚠ The base was ALREADY 26 above this floor before this branch existed (7194 vs
 # 7168) — slack accumulated by PRs that added tests without raising it, exactly
 # the drift the notes above keep describing.
 #
-# 🔴 BOTH TIERS READ, and they DISAGREE BY ONE — deliberately recorded rather
-# than smoothed over. Dev-host `run-tests.sh --set all` reports
-#     TOTAL collected=7351  passed=7350  skipped=1  failed=0   scripts/tests=2080
-# which matches the sandbox exactly. The dev-host tier is only meaningful with
+# 🔴 BOTH TIERS READ, AND THEY AGREE EXACTLY. Dev-host
+# `run-tests.sh --set all` reports
+#     TOTAL collected=7423  passed=7422  skipped=1  failed=0   scripts/tests=2152
+# — the same four numbers as the sandbox above, on every line.
+#   (An earlier revision of this comment claimed the two tiers "DISAGREE BY ONE
+#   — deliberately recorded rather than smoothed over" and then printed
+#   IDENTICAL numbers and the words "which matches the sandbox exactly". It was
+#   a leftover from an intermediate reading, contradicted by the data three
+#   lines below it. A comment is a claim: it gets re-read against the numbers it
+#   sits next to, not carried forward.)
+# The dev-host tier is only meaningful with
 # the flake's OWN python package set; running it under an ad-hoc
 # `nix-shell -p python3Packages.pytest` collects 5138 (mail-actions collects 0
 # on a missing psycopg2) and `-p opencode` shadows the host's pinned 1.18.4 with
@@ -341,7 +350,7 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 # EXPECTED_SKIPS untouched: skipped=1, the one pinned entry. The new suite adds
 # ZERO skips by construction — it mocks tmux, SSH, ClickHouse and the
 # filesystem, so it has no external binary, no network and no host dependency.
-MIN_TESTS="${MIN_TESTS:-7351}"
+MIN_TESTS="${MIN_TESTS:-7423}"
 
 # --- GUARD 1: tool precondition ------------------------------------------------
 # Every binary the suites `skipif` on. Absence must be an ERROR, never a skip.

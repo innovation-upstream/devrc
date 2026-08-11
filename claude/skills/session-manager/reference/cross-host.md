@@ -31,7 +31,14 @@ ssh -o BatchMode=yes -o ConnectTimeout=4 -o StrictHostKeyChecking=accept-new \
   string contains `{`, `}`, `#` and `|` and must arrive quoted or the remote `tmux` receives
   a mangled `-F`.
 - Two calls per host: `tmux list-panes -a -F <8-field format>` and
-  `tmux list-windows -a -F '#{window_id}'`.
+  `tmux list-windows -a -F '#{window_id}|#{window_index}|#{session_name}'`.
+
+🔴 **Those two calls are two INDEPENDENT measurements, and each publishes its own verdict.**
+`reachable` / `error` describe **list-panes**; `windows_measured` / `windows_error` describe
+**list-windows**. Reading one off the other is how a failed `list-windows` became invisible:
+`live_window_ids` published as a measured `[]`, every fuzzyclaw task dropped,
+`claude_session_id` went null and the run still said `status: "ok"`, exit `0`. When
+`list-windows` did not answer, `live_window_ids` is `null` — never `[]`.
 
 ## Failure taxonomy — three outcomes, never two
 
@@ -41,9 +48,19 @@ ssh -o BatchMode=yes -o ConnectTimeout=4 -o StrictHostKeyChecking=accept-new \
 | `tmux` exits non-zero saying *"no server running"* | `true` | `null` | a **real** zero |
 | ssh/tmux failed, timed out, or refused | `false` | the stderr | `UNREACHABLE` + *"this is NOT zero windows"* |
 
+And for the window list, independently:
+
+| what happened | `windows_measured` | `live_window_ids` | rendered as |
+|---|---|---|---|
+| the window list returned | `true` | the ids | (nothing special) |
+| `list-windows` failed while `list-panes` succeeded | `false` | `null` | `WINDOW LIST UNMEASURED` + *"this is NOT zero live windows"* |
+
 A host that fails is **visible in both output modes** and the scan still exits `0` with the
 other host's data — partial data is reported as partial, not silently dropped. A run where
 *no* host answered exits `4`, never `0` and never `3`.
+
+`tail` has a **fourth** outcome the scan does not: the host answered and there is no such
+window. That is `reachable: true, found: false`, exit `2` — not `4`. See the SKILL body.
 
 ## What does NOT cross the wire
 

@@ -34,23 +34,46 @@ them the same trains its reader to believe the wrong one. So:
     `query_error` / `skipped` / `unavailable`) beside its rows, so an empty
     `rows` is only ever believed when `status == "ok"`;
   * fuzzyclaw reports `files_seen` / `files_live` / `files_unparseable`, so
-    "no live tasks" is distinguishable from "no task files at all";
+    "no live tasks" is distinguishable from "no task files at all" — AND a
+    `status` of its own, so "0 live" is distinguishable from "the live-window
+    set was never measured, so nothing could be intersected" (see below);
+  * every host carries `windows_measured` + `windows_error` for the SECOND tmux
+    call (`list-windows`) separately from `reachable`/`error`, which describe
+    the FIRST (`list-panes`). One call succeeding says nothing about the other;
   * `tmux` exiting non-zero with "no server running" is a REACHABLE host with
     zero windows, not an unreachable host — the two get different exit codes;
   * the process exit code separates "ran, found nothing" (EXIT_EMPTY) from
     "could not run" (EXIT_UNAVAILABLE). A caller must never read success off a
     truncated run.
 
-🔴 FUZZYCLAW IS ONLY USABLE INTERSECTED WITH LIVE WINDOWS
----------------------------------------------------------
+🔴 FUZZYCLAW IS ONLY USABLE INTERSECTED WITH LIVE WINDOWS — AND THE
+   INTERSECTION MUST PIN THE RELATIONSHIP, NOT TWO INDEPENDENT FACTS
+--------------------------------------------------------------------
 `CLAUDE.md` marks `~/.tmux/tasks/*.json` UNTRUSTED. Measured on the workbench
 2026-08-11: 400 files, 44 live tmux windows, **43 intersect and 357 do not** —
 89% stale, 0 unparseable. So the defect is staleness, not corruption, and it is
 filterable. `filter_live_tasks()` performs that intersection and it is a
 LOAD-BEARING GUARD, not a cosmetic filter: without it 89% of the rows are lies.
-It carries a mutation test (`test_session_manager.py`). The precedent is
-`scripts/tmux-scratch-status.sh:28-34`, which already does exactly this and says
-why in its own comment.
+The precedent is `scripts/tmux-scratch-status.sh:28-34`, which already does
+exactly this and says why in its own comment.
+
+🔴 An earlier revision checked liveness on `window_id` and then joined the task
+onto a pane row by `(tmux_session, window_index)` — two different keys, and it
+called that split "deliberate". It was a defect, measured on this host: of the
+43 files that survived the `window_id` guard, only 32 had a `window_id` that
+still resolved to the `(session, index)` the file recorded; 7 named a slot now
+occupied by a DIFFERENT live window, and 5 slots were claimed by more than one
+surviving file (silently last-wins). Two rendered rows therefore carried another
+window's `claude_session_id` — the one carrier of the session id into
+ClickHouse, so a `detail` would have pulled a stranger's prompt history.
+`renumber-windows` is `on` here, so indexes shift under a live window all day.
+
+The guard now pins the RELATIONSHIP: `tmux list-windows` reports
+`window_id|window_index|session_name`, and a task survives only when its
+`window_id` is live AND that live window's real `(session, index)` equals the
+one the file recorded. `index_tasks_by_window()` then DROPS a slot two files
+both claim rather than letting the last one win, and reports the conflict.
+Both halves carry mutation tests (`test_session_manager.py`).
 
 HONEST LIMITS (stated, not implied away)
 ----------------------------------------
@@ -126,7 +149,14 @@ PANE_FORMAT = ("#{pane_id}|#{pane_pid}|#{session_name}|#{window_index}|"
                "#{window_name}|#{pane_current_path}|#{pane_current_command}|"
                "#{pane_title}")
 TMUX_PANES_ARGV = ("tmux", "list-panes", "-a", "-F", PANE_FORMAT)
-TMUX_WINDOWS_ARGV = ("tmux", "list-windows", "-a", "-F", "#{window_id}")
+
+# 🔴 `list-windows` reports the SLOT alongside the id, because the guard has to
+# pin a RELATIONSHIP (this window_id currently occupies this session:index), not
+# just the existence of an id. session_name is LAST for the same reason
+# pane_title is last above: it is the field that can itself contain '|', so a
+# bounded maxsplit lets it absorb the remainder.
+WINDOW_FORMAT = "#{window_id}|#{window_index}|#{session_name}"
+TMUX_WINDOWS_ARGV = ("tmux", "list-windows", "-a", "-F", WINDOW_FORMAT)
 
 FUZZYCLAW_DIR = os.path.join(HOME, ".tmux", "tasks")
 SCRATCH_SLOTS_DEPLOYED = os.path.join(HOME, ".config", "tmux", "scratch-slots.sh")
@@ -177,7 +207,13 @@ SQL_RECENT_SESSIONS = (
 
 
 def sql_session_history(session_id: str, limit: int = 10) -> str:
-    """Per-session prompt history. The id is quoted by chquery's ONE quoter."""
+    """Per-session prompt history. The id is quoted by chquery's ONE quoter.
+
+    Consumed by `detail_history()`, which `main()` calls for the `detail`
+    subcommand. (It was defined-and-never-called in the first revision while
+    `reference/clickhouse-queries.md` documented it as implemented — a doc
+    describing behaviour that did not exist.)
+    """
     if _chq is None:
         raise RuntimeError("chquery unavailable: %s" % CH_IMPORT_ERROR)
     return (
@@ -219,9 +255,45 @@ def parse_panes(raw: str) -> list:
     return panes
 
 
+def parse_windows(raw: str) -> dict:
+    """`list-windows -a -F WINDOW_FORMAT` -> {window_id: (session, index)}.
+
+    🔴 The VALUE is the point. A bare set of live ids cannot answer "is the task
+    file that names @41 talking about the same window that is sitting in
+    scratch7:3 right now?", and that is the question the join actually asks.
+
+    session_name is the last field and may contain '|', so maxsplit=2 lets it
+    absorb the remainder. A line that does not carry all three fields, or whose
+    id is not a tmux `@n`, is dropped — a half-parsed window is not a window we
+    can pin a relationship against.
+    """
+    out = {}
+    for line in (raw or "").splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("|", 2)
+        if len(parts) < 3:
+            continue
+        wid, idx, sess = parts[0].strip(), parts[1].strip(), parts[2].strip()
+        if not wid.startswith("@") or not idx:
+            continue
+        out[wid] = (sess, idx)
+    return out
+
+
 def parse_window_ids(raw: str) -> set:
-    """`tmux list-windows -a -F '#{window_id}'` output -> {'@1', '@5', ...}."""
-    return {ln.strip() for ln in (raw or "").splitlines() if ln.strip()}
+    """Just the live ids. DERIVED from parse_windows so there is one parser."""
+    return set(parse_windows(raw))
+
+
+def slots_to_window_ids(live_windows) -> dict:
+    """Invert {window_id: (session, index)} -> {(session, index): window_id}.
+
+    A tmux slot holds exactly one window, so this is injective in practice; if
+    tmux ever said otherwise the last one wins here and the disagreement shows
+    up as a dropped slot conflict downstream rather than as a silent wrong row.
+    """
+    return {slot: wid for wid, slot in (live_windows or {}).items()}
 
 
 def load_scratch_codenames(paths=None, reader=None) -> dict:
@@ -352,23 +424,65 @@ def task_from_file_obj(obj) -> dict:
     }
 
 
-def filter_live_tasks(raw_texts, live_window_ids) -> dict:
-    """Parse fuzzyclaw task-file bodies, keeping ONLY live tmux windows.
+def filter_live_tasks(raw_texts, live_windows, unmeasured_reason=None) -> dict:
+    """Parse fuzzyclaw task-file bodies, keeping ONLY live, CONSISTENT windows.
 
     `raw_texts` is an iterable of file bodies (str) — the caller owns the I/O.
+    `live_windows` is `{window_id: (session, index)}` as returned by
+    `parse_windows`, or **None meaning THE LIVE SET WAS NEVER MEASURED**.
 
-    🔴 THE INTERSECTION IS A LOAD-BEARING GUARD, NOT A FILTER. 89% of the task
+    🔴 THE GUARD IS LOAD-BEARING, AND IT PINS A RELATIONSHIP. 89% of the task
     files on the workbench point at windows that no longer exist (measured:
-    357/400). Without this check the great majority of every row this script
-    emits would be a lie about a window that is gone. Precedent + rationale:
-    `scripts/tmux-scratch-status.sh:28-34`. It has a mutation test.
+    357/400), so the existence check alone already removes most of the lies. But
+    existence is not enough: a file whose `window_id` is still alive can still
+    record a `(tmux_session, window_index)` that some OTHER window now occupies,
+    because `renumber-windows` shifts indexes under live windows. Measured here:
+    7 of the 43 survivors named a slot held by a different live window. So a
+    task survives only when BOTH hold:
 
-    Returns a counted result, never a bare list, so "0 live tasks" is
-    distinguishable from "0 task files":
-        {"tasks": [...], "files_seen": N, "files_live": M, "files_unparseable": K}
+        window_id is live   AND   live_windows[window_id] == (session, index)
+
+    Rejections are counted separately — `files_stale` (id gone) vs
+    `files_mismatched` (id alive, slot moved) — because they are different
+    facts about the source and collapsing them hides a renumber storm.
+
+    🔴 `live_windows is None` is NOT an empty set. An unmeasured live set can
+    only produce `status: "unmeasured"` with `files_live: None`; it must never
+    render as a measured `files_live: 0`, which is the exact silent zero this
+    whole script exists to refuse. `files_seen`/`files_unparseable` are still
+    real measurements about the files and are still reported.
+
+    A bare set/iterable of ids is REJECTED with a TypeError rather than quietly
+    degrading to the weaker existence-only check that used to live here.
     """
-    live = set(live_window_ids or ())
-    tasks, seen, bad = [], 0, 0
+    if live_windows is None:
+        seen, bad = 0, 0
+        for text in (raw_texts or ()):
+            seen += 1
+            try:
+                obj = json.loads(text)
+            except Exception:  # noqa: BLE001
+                bad += 1
+                continue
+            if not isinstance(obj, dict):
+                bad += 1
+        return {
+            "status": "unmeasured",
+            "error": (unmeasured_reason
+                      or "the live tmux window set was never measured, so the "
+                         "task files could not be intersected"),
+            "tasks": [], "files_seen": seen, "files_live": None,
+            "files_unparseable": bad, "files_stale": None,
+            "files_mismatched": None, "slot_conflicts": [],
+        }
+    if not isinstance(live_windows, dict):
+        raise TypeError(
+            "live_windows must be {window_id: (session, index)} from "
+            "parse_windows(), or None for UNMEASURED — a bare set of ids "
+            "cannot pin the slot relationship this guard exists to check "
+            f"(got {type(live_windows).__name__})")
+
+    tasks, seen, bad, stale, mismatched = [], 0, 0, 0, 0
     for text in (raw_texts or ()):
         seen += 1
         try:
@@ -380,44 +494,82 @@ def filter_live_tasks(raw_texts, live_window_ids) -> dict:
             bad += 1
             continue
         # ---- the guard ----------------------------------------------------
-        if obj.get("window_id") not in live:
+        slot = live_windows.get(obj.get("window_id"))
+        if slot is None:                       # the window itself is gone
+            stale += 1
+            continue
+        if slot != (str(obj.get("tmux_session")), str(obj.get("window_index"))):
+            mismatched += 1                    # alive, but somewhere else now
             continue
         # -------------------------------------------------------------------
         tasks.append(task_from_file_obj(obj))
-    return {"tasks": tasks, "files_seen": seen,
-            "files_live": len(tasks), "files_unparseable": bad}
+    return {"status": "ok", "error": None, "tasks": tasks, "files_seen": seen,
+            "files_live": len(tasks), "files_unparseable": bad,
+            "files_stale": stale, "files_mismatched": mismatched,
+            "slot_conflicts": []}
 
 
 def index_tasks_by_window(tasks) -> dict:
-    """{(tmux_session, window_index_as_str): task}.
+    """Index tasks for the pane<->task join, DROPPING contested slots.
 
-    The pane format carries no `window_id`, so the pane<->task join runs on
-    (session, window_index) while the STALENESS guard runs on window_id. Two
-    different keys doing two different jobs, deliberately.
+    Returns `{"index": {(session, index): task}, "conflicts": [...]}` — never a
+    bare mapping, because "no task for this slot" and "two files disagreed about
+    this slot, so we refuse to guess" are different facts.
+
+    🔴 This used to be `out[key] = t`, a silent last-wins. Measured on this
+    host, 5 slots were claimed by more than one surviving task file, so
+    last-wins was picking an arbitrary one of two contradictory records and
+    attaching its `claude_session_id` — the only carrier of the session id into
+    ClickHouse — to a rendered row. Attaching nothing is recoverable; attaching
+    a stranger's session id is not, because it reads as measured data.
+
+    The keys are the SLOT `(tmux_session, window_index)` because that is all the
+    pane format carries. `filter_live_tasks` has already proven, per task, that
+    the slot is the one its live `window_id` actually occupies — so this join is
+    a lookup of an already-verified relationship, not a second guess at it.
     """
-    out = {}
+    out, contested = {}, {}
     for t in (tasks or ()):
         sess = t.get("tmux_session")
         idx = t.get("window_index")
         if sess is None or idx is None:
             continue
-        out[(str(sess), str(idx))] = t
-    return out
+        key = (str(sess), str(idx))
+        if key in out or key in contested:
+            contested.setdefault(key, [out.pop(key)] if key in out else [])
+            contested[key].append(t)
+            continue
+        out[key] = t
+    conflicts = [{"session": k[0], "window_index": k[1],
+                  "claimants": len(v),
+                  "window_ids": sorted({str(x.get("window_id")) for x in v})}
+                 for k, v in sorted(contested.items())]
+    return {"index": out, "conflicts": conflicts}
 
 
 # =========================================================================== #
 # PURE — folding panes into window rows
 # =========================================================================== #
 def fold_windows(panes, host, codenames=None, task_index=None,
-                 threshold=DEFAULT_STALE_THRESHOLD, now=None) -> list:
+                 threshold=DEFAULT_STALE_THRESHOLD, now=None,
+                 slot_window_ids=None) -> list:
     """Collapse panes into one row per (session, window_index).
 
     A window is `claude` if ANY of its panes is; the row's task/busy/pane_id
     come from the first Claude pane when there is one, else the first pane.
+
+    `slot_window_ids` is `{(session, index): window_id}` from the SAME host's
+    `list-windows` call. It puts the tmux window id on the row, so the join is
+    auditable in the output instead of only inside this function: for a row that
+    carries a task, `row["window_id"] == row["fuzzyclaw"]["window_id"]` is an
+    invariant `filter_live_tasks` has already established, and a test pins it
+    end-to-end. `None` when that host's window list was not measured — an
+    unknown id is null, never a guess.
     """
     now = time.time() if now is None else now
     codenames = codenames or {}
     task_index = task_index or {}
+    slot_window_ids = slot_window_ids or {}
     order, groups = [], {}
     for p in (panes or ()):
         key = (p.get("session"), p.get("window_index"))
@@ -442,6 +594,7 @@ def fold_windows(panes, host, codenames=None, task_index=None,
             "host": host,
             "session": session,
             "window_index": widx,
+            "window_id": slot_window_ids.get((str(session), str(widx))),
             "window_name": lead.get("window_name", ""),
             "codename": codenames.get(session),
             "pane_id": lead.get("pane_id"),
@@ -475,7 +628,16 @@ def summarize(report) -> dict:
                                   if v["reachable"]),
         "hosts_unreachable": sorted(k for k, v in report["hosts"].items()
                                     if not v["reachable"]),
-        "fuzzyclaw_live": report["fuzzyclaw"]["files_live"],
+        # 🔴 The count NEVER travels without its discriminant. `fuzzyclaw_live`
+        # is None when the live-window set was not measured, and the status says
+        # which of skipped / unmeasured / ok produced it.
+        "fuzzyclaw_live": report["fuzzyclaw"].get("files_live"),
+        "fuzzyclaw_status": report["fuzzyclaw"].get("status"),
+        # Hosts whose `list-windows` did not answer even though `list-panes`
+        # did. Their rows carry no window_id and, if local, no fuzzyclaw join.
+        "windows_unmeasured": sorted(
+            k for k, v in report["hosts"].items()
+            if not v.get("windows_measured")),
     }
 
 
@@ -664,33 +826,62 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
         "hosts": {},
         "clickhouse": {"status": "skipped", "rows": [], "error": None,
                        "code": None, "sql": ch_sql if use_ch else None},
-        "fuzzyclaw": {"status": "skipped", "tasks": [], "files_seen": 0,
-                      "files_live": 0, "files_unparseable": 0},
+        "fuzzyclaw": {"status": "skipped", "error": None, "tasks": [],
+                      "files_seen": 0, "files_live": 0, "files_unparseable": 0,
+                      "files_stale": 0, "files_mismatched": 0,
+                      "slot_conflicts": []},
         "summary": {},
     }
 
     # --- per host: ONE tmux call each for panes and for live window ids ------
-    local_live_windows = set()
-    raw_panes = {}
+    # 🔴 `None`, not `set()`. An empty set is a MEASURED "this host has no
+    # windows"; None is "we never asked, or the answer never came back". The two
+    # produced identical output in an earlier revision, so `--host laptop` (the
+    # local host never entering this loop) and a failed `list-windows` both
+    # published `files_live: 0, status: "ok"` — a fabricated measurement.
+    local_live_windows = None
+    local_windows_error = None
+    raw_panes, slot_ids = {}, {}
     for host in hosts:
         panes_res = run_tmux(TMUX_PANES_ARGV, host, local_host, runner=runner)
         wins_res = run_tmux(TMUX_WINDOWS_ARGV, host, local_host, runner=runner)
         raw_panes[host] = panes_res["stdout"]
+        # 🔴 The two calls are INDEPENDENT measurements. `reachable`/`error`
+        # describe list-panes; `windows_measured`/`windows_error` describe
+        # list-windows. Reading one off the other is how a failed list-windows
+        # became invisible.
+        windows_measured = bool(wins_res["reachable"])
+        live = parse_windows(wins_res["stdout"]) if windows_measured else None
+        slot_ids[host] = slots_to_window_ids(live) if live is not None else None
         report["hosts"][host] = {
             "reachable": bool(panes_res["reachable"]),
             "error": panes_res["error"],
             "ssh_target": None if host == local_host else LAPTOP_SSH_TARGET,
             "windows": [],
-            "live_window_ids": sorted(parse_window_ids(wins_res["stdout"])),
+            "windows_measured": windows_measured,
+            "windows_error": wins_res["error"],
+            "live_window_ids": (sorted(live) if live is not None else None),
         }
         if host == local_host:
-            local_live_windows = parse_window_ids(wins_res["stdout"])
+            local_live_windows = live
+            local_windows_error = wins_res["error"]
 
     # --- 🔴 the intersection guard, then the pane<->task join ----------------
     if use_fuzzyclaw:
-        report["fuzzyclaw"] = {"status": "ok",
-                               **filter_live_tasks(texts, local_live_windows)}
-    task_index = index_tasks_by_window(report["fuzzyclaw"]["tasks"])
+        if local_live_windows is not None:
+            reason = None
+        elif local_host not in hosts:
+            reason = (f"the local host {local_host!r} was not scanned, so its "
+                      "live tmux windows were never measured — fuzzyclaw task "
+                      "files are local state and cannot be intersected")
+        else:
+            reason = ("`tmux list-windows` did not answer on "
+                      f"{local_host}: {local_windows_error or 'unknown error'}")
+        report["fuzzyclaw"] = filter_live_tasks(
+            texts, local_live_windows, unmeasured_reason=reason)
+    idx_res = index_tasks_by_window(report["fuzzyclaw"]["tasks"])
+    task_index = idx_res["index"]
+    report["fuzzyclaw"]["slot_conflicts"] = idx_res["conflicts"]
 
     for host in hosts:
         entry = report["hosts"][host]
@@ -701,7 +892,8 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
             # fuzzyclaw is LOCAL-only: a remote row gets no task, no session id
             # and no age. Stated, not implied away.
             task_index=(task_index if host == local_host else {}),
-            threshold=threshold, now=now)
+            threshold=threshold, now=now,
+            slot_window_ids=slot_ids.get(host))
 
     # --- ClickHouse ----------------------------------------------------------
     if use_ch:
@@ -766,6 +958,13 @@ def render_table(report) -> str:
                        f"{_trunc(h.get('error') or 'unknown error', 90)}")
             out.append("  (no window data; this is NOT zero windows)")
             out.append("")
+        elif h.get("windows_measured") is False:
+            # list-panes answered, list-windows did not. Partial, and said so.
+            out.append(f"▸ {name.upper()}: WINDOW LIST UNMEASURED — "
+                       f"{_trunc(h.get('windows_error') or 'unknown error', 90)}")
+            out.append("  (panes were read; window ids were NOT. This is NOT "
+                       "zero live windows)")
+            out.append("")
 
     rows = [r for name in sorted(hosts) for r in hosts[name].get("windows", [])]
     out.append(f"▸ TMUX WINDOWS ({len(rows)})")
@@ -810,19 +1009,37 @@ def render_table(report) -> str:
     out.append("")
 
     fz = report.get("fuzzyclaw") or {}
-    if fz.get("status") == "skipped":
+    fz_st = fz.get("status")
+    if fz_st == "skipped":
         out.append("▸ FUZZYCLAW TASKS (skipped: --no-fuzzyclaw)")
+    elif fz_st == "unmeasured":
+        # 🔴 The third zero. `files_live` is None, not 0, and must read as
+        # "not measured" rather than as "measured and empty".
+        out.append("▸ FUZZYCLAW TASKS — LIVE COUNT UNMEASURED "
+                   f"({fz.get('files_seen', 0)} files seen)")
+        out.append(f"  {_trunc(fz.get('error') or 'unknown reason', 110)}")
+        out.append("  (this is NOT zero live tasks; the intersection never ran)")
     else:
+        rejected = []
+        if fz.get("files_stale"):
+            rejected.append(f"{fz['files_stale']} stale")
+        if fz.get("files_mismatched"):
+            rejected.append(f"{fz['files_mismatched']} slot-mismatched")
+        if fz.get("files_unparseable"):
+            rejected.append(f"{fz['files_unparseable']} unparseable")
         out.append(
-            "▸ FUZZYCLAW TASKS ({live} live of {seen} files"
-            "{bad})".format(live=fz.get("files_live", 0),
-                            seen=fz.get("files_seen", 0),
-                            bad=(f", {fz['files_unparseable']} unparseable"
-                                 if fz.get("files_unparseable") else "")))
+            "▸ FUZZYCLAW TASKS ({live} live of {seen} files{bad})".format(
+                live=fz.get("files_live", 0), seen=fz.get("files_seen", 0),
+                bad=(", " + ", ".join(rejected)) if rejected else ""))
         for t in fz.get("tasks", []):
             out.append("  {:<6}  {:<12}  {:<34}  {}".format(
                 _trunc(t.get("window_id"), 6), _trunc(t.get("tmux_session"), 12),
                 _trunc(t.get("task"), 34), _trunc(t.get("status"), 10)))
+    for c in (fz.get("slot_conflicts") or []):
+        out.append("  ⚠ SLOT CONFLICT {}:{} claimed by {} task files ({}) — "
+                   "ALL DROPPED, none is trusted".format(
+                       c.get("session"), c.get("window_index"),
+                       c.get("claimants"), ", ".join(c.get("window_ids") or [])))
     out.append("")
     out.append("  summary: {total} windows  claude={claude}  busy={busy}  "
                "idle={idle}  stale={stale}  unknown={unknown}".format(
@@ -833,6 +1050,31 @@ def render_table(report) -> str:
     if summ.get("hosts_unreachable"):
         out.append("  UNREACHABLE HOSTS: " +
                    ", ".join(summ["hosts_unreachable"]))
+    if summ.get("windows_unmeasured"):
+        out.append("  WINDOW LIST UNMEASURED ON: " +
+                   ", ".join(summ["windows_unmeasured"]))
+    return "\n".join(out)
+
+
+def render_session_history(hist) -> str:
+    """The `detail` prompt-history block. Status-discriminated like every other
+    section: an empty `rows` is a measured zero ONLY when status == "ok"."""
+    out = ["", "▸ SESSION PROMPT HISTORY (ClickHouse, last 24h)"]
+    st = (hist or {}).get("status")
+    if st == "skipped":
+        out.append(f"  (skipped: {hist.get('reason') or 'unknown reason'})")
+    elif st != "ok":
+        out.append(f"  QUERY FAILED [{st}] — {_trunc(hist.get('error'), 120)}")
+        out.append("  (this is NOT zero prompts; the query did not answer)")
+    elif not hist.get("rows"):
+        out.append(f"  (0 rows for session {hist.get('session')} — the query "
+                   "ran and returned nothing)")
+    else:
+        out.append(f"  session {hist.get('session')}")
+        for r in hist["rows"]:
+            out.append("  {:<19}  {:<8}  {}".format(
+                _trunc(r.get("ts"), 19), _trunc(r.get("kind"), 8),
+                _trunc(r.get("snippet"), 76)))
     return "\n".join(out)
 
 
@@ -861,11 +1103,36 @@ def tail_argv(target, lines=DEFAULT_TAIL_LINES):
             "-p", "-e", "-S", f"-{int(lines)}"]
 
 
+# 🔴 `tmux` says this when the HOST answered fine and the TARGET does not exist.
+# Collapsing it into "unreachable" states a false fact about the host — the scan
+# reached it, asked a question, and got a definite answer: no such window. The
+# two conditions get different messages and different exit codes.
+_NO_SUCH_TARGET_RE = re.compile(
+    r"can't find (?:window|pane|session)|no such (?:window|pane|session)|"
+    r"session not found|window not found|can't find target",
+    re.IGNORECASE)
+
+
 def tail_window(target, host, local_host, runner=None,
                 lines=DEFAULT_TAIL_LINES) -> dict:
+    """Capture one window's scrollback.
+
+    THREE outcomes, never two: `reachable=False` (the host said nothing),
+    `reachable=True, found=False` (the host answered: that window does not
+    exist), and success. `found` is None when the host never answered, because
+    an unreached host has told us nothing about whether the target exists.
+    """
     res = run_tmux(tail_argv(target, lines), host, local_host, runner=runner)
-    return {"host": host, "target": target, "reachable": res["reachable"],
-            "error": res["error"], "text": res["stdout"]}
+    if res["reachable"]:
+        return {"host": host, "target": target, "reachable": True,
+                "found": True, "error": res["error"], "text": res["stdout"]}
+    if _NO_SUCH_TARGET_RE.search(res["error"] or ""):
+        # The host DID answer — `run_tmux` just cannot make this distinction,
+        # because "no such window" is only meaningful for a targeted command.
+        return {"host": host, "target": target, "reachable": True,
+                "found": False, "error": res["error"], "text": ""}
+    return {"host": host, "target": target, "reachable": False,
+            "found": None, "error": res["error"], "text": res["stdout"]}
 
 
 # =========================================================================== #
@@ -906,11 +1173,31 @@ def main(argv=None):
         except ValueError as e:
             print(str(e), file=sys.stderr)
             return EXIT_USAGE
-        host = args.host if args.host in HOST_NAMES else local
+        # `--host all` is meaningless for a command that targets ONE window, so
+        # it resolves to the local host. That default is RECORDED rather than
+        # silent: the JSON carries `host_defaulted` and the not-found message
+        # names the host actually searched plus how to search the other one.
+        host_defaulted = args.host not in HOST_NAMES
+        host = local if host_defaulted else args.host
         res = tail_window(args.target, host, local, lines=args.lines)
+        res["host_defaulted"] = host_defaulted
         if not res["reachable"]:
-            print(f"tail: {host} unreachable — {res['error']}", file=sys.stderr)
+            # The host said nothing at all. This is the unmeasured case.
+            print(f"tail: host {host} unreachable — {res['error']}",
+                  file=sys.stderr)
             return EXIT_UNAVAILABLE
+        if res["found"] is False:
+            # 🔴 The host ANSWERED. Reporting this as "unreachable" states a
+            # false fact about the host and sends the reader debugging SSH.
+            hint = ""
+            if host_defaulted:
+                other = [h for h in HOST_NAMES if h != host]
+                hint = (f" (searched {host}: --host defaulted to the local "
+                        f"host; pass --host {other[0]} to search there)"
+                        if other else "")
+            print(f"tail: no such window {args.target!r} on {host}{hint} — "
+                  f"{res['error']}", file=sys.stderr)
+            return EXIT_USAGE
         if args.json:
             print(json.dumps(res, indent=2))
         else:
@@ -932,12 +1219,62 @@ def main(argv=None):
             print(str(e), file=sys.stderr)
             return EXIT_USAGE
         report = filter_report(report, sess, widx)
+        report["session_history"] = detail_history(report,
+                                                   use_ch=not args.no_ch)
 
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True, default=str))
     else:
         print(render_table(report))
+        if "session_history" in report:
+            print(render_session_history(report["session_history"]))
     return exit_code_for(report)
+
+
+DEFAULT_HISTORY_LIMIT = 10
+
+
+def detail_history(report, use_ch=True, ch_client_factory=None,
+                   limit=DEFAULT_HISTORY_LIMIT) -> dict:
+    """Prompt history for the ONE session a `detail` narrowed to.
+
+    This is the consumer of `sql_session_history` and the code behind
+    `reference/clickhouse-queries.md` §"Query 2" / §"The join to tmux".
+    `fuzzyclaw.claude_session` -> `activity.events.session` is the only carrier
+    of the session id from a tmux pane to ClickHouse, and that id only reaches a
+    row after `filter_live_tasks` has proven the task file describes the window
+    the row is about — so this join rides on that guard.
+
+    Status-discriminated exactly like `ch_query`, and `skipped` carries a
+    `reason`, because "CH was off", "this window has no session id" and "the
+    query ran and found nothing" are three different facts that would otherwise
+    all render as an empty history.
+
+    🔴 `ch_client_factory` is resolved AT CALL TIME (same reason as `gather` —
+    a def-time default captures the original function and defeats the suite's
+    no-real-network guard on the one path with no injection point).
+    """
+    rows = [r for h in (report.get("hosts") or {}).values()
+            for r in h.get("windows", [])]
+    sid = next((r.get("claude_session_id") for r in rows
+                if r.get("claude_session_id")), None)
+    base = {"status": "skipped", "rows": [], "error": None, "code": None,
+            "sql": None, "session": None, "reason": None}
+    if not use_ch:
+        return dict(base, reason="--no-ch")
+    if not sid:
+        return dict(base, reason="this window carries no claude_session_id "
+                                 "(no live fuzzyclaw task file joined to it)")
+    factory = ch_client_factory or make_ch_client   # resolved AT CALL TIME
+    try:
+        client = factory()
+    except Exception as e:  # noqa: BLE001
+        return dict(base, status="unavailable", session=sid,
+                    error=f"{type(e).__name__}: {e}")
+    sql = sql_session_history(sid, limit)
+    res = ch_query(client, sql)
+    res.update({"sql": sql, "session": sid, "reason": None})
+    return res
 
 
 def filter_report(report, session, window_index) -> dict:

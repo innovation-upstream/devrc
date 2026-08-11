@@ -51,8 +51,25 @@ WHERE session = '<quoted>' AND ts > now() - INTERVAL 1 DAY
 ORDER BY ts DESC LIMIT 10
 ```
 
+**Consumer: `detail_history()`, called by `main()` for the `detail` subcommand.** It runs
+for the `claude_session_id` of the window `detail` narrowed to, and attaches the result as
+`session_history`. (In the first revision this function was defined and called from
+*nowhere*, while this section documented it as implemented — a doc describing behaviour that
+did not exist. `test_sql_session_history_IS_reachable_from_main` now names the caller.)
+
+`session_history` is status-discriminated like `ch_query`, and its `skipped` carries a
+`reason`, because three different facts would otherwise all render as "no history":
+
+| status | reason | means |
+|---|---|---|
+| `skipped` | `--no-ch` | the query was never run |
+| `skipped` | `this window carries no claude_session_id …` | no live fuzzyclaw task joined to this window |
+| `ok`, `rows: []` | — | the query ran and this session has no prompts in 24h |
+| `unreachable` / `query_error` / `unavailable` | — | the query did not answer |
+
 The session id goes through `chquery.sql_quote()` — the repo's one quoter. Do not build a
-second one, and do not f-string a raw id into SQL.
+second one, and do not f-string a raw id into SQL. The id comes from a source `CLAUDE.md`
+marks UNTRUSTED and it reaches SQL, so a hostile-id test pins the escaping.
 
 ## 🔴 Reading the result
 
@@ -73,9 +90,25 @@ as "telemetry unavailable" with exit 0.
 
 ## The join to tmux
 
-`fuzzyclaw.claude_session` → `activity.events.session` is the only carrier of the session id
-from a tmux pane to ClickHouse; `agent-ops` detects *that* Claude runs in a pane but never
-learns *which* session. Measured 2026-08-11: `activity.events.session` is 36 chars in 100%
-of `source='claude'` rows (1107/1107 over 2 days) and fuzzyclaw's `claude_session` is a
-36-char UUID, so the join is structurally sound — **provided** the task file survived the
-live-window intersection. See the SKILL body.
+Two joins, in sequence. Only the second one touches ClickHouse.
+
+**1. pane row ← fuzzyclaw task.** `filter_live_tasks()` keeps a task file only when its
+`window_id` is live *and* that live window's real `(session, index)` equals the one the file
+records; `index_tasks_by_window()` then looks the task up by that already-verified slot and
+**drops any slot two files both claim**. So the task attached to a row is one whose window
+identity has been checked, not assumed. `row.window_id == row.fuzzyclaw.window_id` holds for
+every joined row and is asserted end-to-end.
+
+🔴 This is the join that was wrong. The guard checked `window_id` while the lookup keyed on
+`(session, index)`, so a file could pass the guard and then attach to whatever window had
+since taken its slot — measured: 7 of 43 survivors, plus 5 contested slots resolved by
+silent last-wins.
+
+**2. task → ClickHouse.** `fuzzyclaw.claude_session` → `activity.events.session` is the only
+carrier of the session id from a tmux pane to ClickHouse; `agent-ops` detects *that* Claude
+runs in a pane but never learns *which* session. Measured 2026-08-11:
+`activity.events.session` is 36 chars in 100% of `source='claude'` rows (1107/1107 over 2
+days) and fuzzyclaw's `claude_session` is a 36-char UUID, so the join is structurally sound
+— **provided** the task file survived join 1. That proviso is load-bearing: a wrong
+`claude_session_id` here pulls a *different session's* prompt history and renders it as this
+window's. See the SKILL body.

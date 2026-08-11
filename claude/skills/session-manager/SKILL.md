@@ -16,9 +16,14 @@ python3 $DEVRC/scripts/session-manager                       # table, both hosts
 python3 $DEVRC/scripts/session-manager --json                # agent-readable
 python3 $DEVRC/scripts/session-manager --host workbench --no-ch   # fast + offline
 python3 $DEVRC/scripts/session-manager list                  # tmux only, no ClickHouse
-python3 $DEVRC/scripts/session-manager detail scratch7:3     # one window
-python3 $DEVRC/scripts/session-manager tail scratch7:3 --lines 200
+python3 $DEVRC/scripts/session-manager detail scratch7:3     # one window + its prompt history
+python3 $DEVRC/scripts/session-manager tail scratch7:3 --lines 200   # --host defaults to LOCAL
 ```
+
+`detail` additionally runs the per-session prompt-history query for that window's
+`claude_session_id` and attaches it as `session_history` (skipped, with a stated reason,
+under `--no-ch` or when the window carries no session id). See
+`reference/clickhouse-queries.md`.
 
 | flag | effect |
 |---|---|
@@ -34,9 +39,19 @@ python3 $DEVRC/scripts/session-manager tail scratch7:3 --lines 200
 | code | meaning |
 |---|---|
 | `0` | ran, found windows (**including** a partial scan where one host was unreachable) |
-| `2` | usage / malformed `<session>:<window>` target |
-| `3` | every requested host answered and the answer is a **real zero** |
+| `2` | usage / malformed `<session>:<window>` target / **`tail`: the host answered and there is no such window** |
+| `3` | every requested host answered and the answer is a **real zero** (for `tail`: the window exists and its scrollback is empty) |
 | `4` | **no** host could be reached — the zero is unmeasured, not measured |
+
+🔴 For `tail`, "no such window" is **exit 2**, not 4. The host answered; calling it
+unreachable states a false fact and sends you to debug SSH over a typo. `tail`'s JSON
+carries `reachable` *and* `found` — `found: null` means the host never answered, so it has
+said nothing about whether the target exists.
+
+`--host` defaults to `all`, which is meaningless for a command targeting one window, so
+`tail` resolves it to the **local** host. That default is recorded, not silent:
+`host_defaulted: true` in the JSON, and the not-found message names the host searched and
+how to search the other one.
 
 Same discipline inside the payload. `hosts.<name>.reachable` + `.error` are always present;
 `clickhouse.status` is one of `ok` / `unreachable` / `query_error` / `unavailable` /
@@ -57,25 +72,64 @@ from "no task files". Never read a bare count without its status.
 
 Details: `reference/clickhouse-queries.md`, `reference/cross-host.md`.
 
-## 🔴 fuzzyclaw is only usable intersected with LIVE windows
+## 🔴 fuzzyclaw is only usable intersected with LIVE windows — and the guard pins a RELATIONSHIP
 
 `CLAUDE.md` marks `~/.tmux/tasks/*.json` UNTRUSTED. Measured on the workbench 2026-08-11:
-**400 files, 44 live windows, 43 intersect, 357 stale (89%), 0 unparseable.** The failure
-mode is staleness, not corruption — so it is filterable, and `filter_live_tasks()` does the
-filtering against `tmux list-windows -a -F '#{window_id}'`.
+**400 files, 44 live windows, 357 stale (89%), 11 slot-mismatched, 32 live, 0 unparseable.**
+The failure mode is staleness, not corruption — so it is filterable, and
+`filter_live_tasks()` does the filtering against
+`tmux list-windows -a -F '#{window_id}|#{window_index}|#{session_name}'`.
 
-That intersection is a **load-bearing guard, not a cosmetic filter**: without it 89% of the
-rows would describe windows that no longer exist. Deleting it turns
-`test_task_file_pointing_at_a_DEAD_window_is_excluded` red with `['@41','@997'] == ['@41']`
-— watched, not assumed — and
-`test_the_intersection_is_REACHABLE_and_is_the_only_thing_excluding_it` pins in-suite that
-no earlier check would have rejected the fixture anyway. Same precedent and rationale as
-`scripts/tmux-scratch-status.sh:28-34`. If you add a second consumer of these files,
-intersect there too — do not copy the fields out raw.
+A task file survives only when **both** hold:
+
+```
+window_id is live   AND   that live window's real (session, index) == the file's
+```
+
+🔴 **Existence alone is not enough, and checking only existence was a real defect here.** An
+earlier revision keyed the guard on `window_id` but joined the task onto a pane row by
+`(tmux_session, window_index)` — two independent facts, never checked against each other.
+`renumber-windows` is `on`, so indexes shift under live windows: of the 43 files that passed
+the id-only guard, only **32** still sat in the slot they recorded, **7** named a slot now
+held by a *different* live window, and **5** slots were claimed by more than one survivor
+(silently last-wins). Two rendered rows carried another window's `claude_session_id` — the
+one carrier of the session id into ClickHouse — so a `detail` would have pulled a stranger's
+prompt history.
+
+Consequences, all pinned by tests:
+
+- rejections are counted **separately**: `files_stale` (the window is gone) vs
+  `files_mismatched` (alive, but somewhere else now). Collapsing them hides a renumber storm.
+- a slot two files both claim resolves to **nothing**. `index_tasks_by_window()` drops it and
+  reports it under `fuzzyclaw.slot_conflicts`; attaching an arbitrary one of two
+  contradictory records is worse than attaching none, because it reads as measured data.
+- every row carries `window_id`, so the join is auditable in the output:
+  `row.window_id == row.fuzzyclaw.window_id` is an invariant for every joined row.
+- `filter_live_tasks()` **rejects a bare set of ids with a `TypeError`** rather than
+  degrading to the old existence-only check.
+
+Same precedent and rationale as `scripts/tmux-scratch-status.sh:28-34`. If you add a second
+consumer of these files, intersect there too — do not copy the fields out raw.
 
 The task-file key set consumed is pinned as a **field ledger** (`FUZZYCLAW_FIELDS`, 11 keys
 including `transcript_path`, which the original spec omitted). It fails the suite when the
 set grows *or* shrinks.
+
+## 🔴 The third zero: `fuzzyclaw.status`
+
+The live-window set is **measured or `None`**, never a fabricated empty set. When it was not
+measured, `fuzzyclaw.status` is `"unmeasured"` and `files_live` is `null` — *not* `0`, and
+never `"ok"`. Two ways to get there, both of which used to report
+`files_seen: 400, files_live: 0, status: "ok"`:
+
+| cause | what you see |
+|---|---|
+| `--host laptop` — the local host is never scanned, so its windows are never listed | `fuzzyclaw.error` names the unscanned local host |
+| `list-panes` succeeded but `list-windows` failed | `hosts.<n>.windows_measured: false` + `windows_error`; `live_window_ids: null` |
+
+`hosts.<n>.reachable`/`.error` describe the **`list-panes`** call; `.windows_measured`/
+`.windows_error` describe the **`list-windows`** call. They are independent measurements —
+one succeeding says nothing about the other.
 
 ## Honest limits — do not describe these as working
 
