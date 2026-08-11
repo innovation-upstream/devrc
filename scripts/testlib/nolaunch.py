@@ -18,10 +18,13 @@ PATH, those two files fired **15 real launches** in 29 passing tests:
 
 i.e. running the test suite created REAL transient systemd timers with a FIXED
 unit name, scheduled 2-8 hours into the future, fired REAL desktop toasts, and
-drove the chassis RGB. Worse in the base clone than in a worktree: from
-`~/workspace/devrc` (where githooks/pre-push runs the suite) monitor-blackout's
-canonical-path guard ACCEPTS, so `ddcutil` also reaches the real panel and
-`setvcp 10 0` blacks out the operator's monitor for real.
+drove the chassis RGB. Worse in the base clone than in a worktree, MEASURED
+separately at 22 launches: from `~/workspace/devrc` (where githooks/pre-push
+runs the suite) monitor-blackout's canonical-path guard ACCEPTS, so seven
+`ddcutil detect --brief` calls reach the real DDC/CI panel too. That reach is
+the measurement; `setvcp 10 0` after it is what the script does next, NOT
+something observed — the panel was never actually driven, because the
+measurement's own ddcutil stub answered first.
 
 🔴 WHY NO GATE SAW IT
 ---------------------
