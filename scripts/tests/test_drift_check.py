@@ -1345,6 +1345,22 @@ def test_the_timer_is_gated_by_the_master_switch_and_the_service_is_not():
     If it gated the service too, `systemctl --user start drift-check` — the
     supervised hand-run that is supposed to validate the ssh leg before the timer
     is ever armed — would not exist on an un-enabled host.
+
+    🔴 This test used to also assert `enableDriftDeadman = false;` — "the master
+    switch must ship OFF, enabling a timer is a live change to a host and belongs
+    in its own supervised deploy". #406 IS that supervised deploy: it measured
+    both preconditions rather than arguing them, and set the switch to `true`.
+    It changed `nix/home.nix` and nothing else, so the assertion outlived its own
+    premise and left `main` RED — `collected=7785 passed=7783 failed=1`, the only
+    failure in either tier.
+
+    A process rule ("do the enabling in its own deploy") is not a property a unit
+    test can hold, and the one that tried became a gate everybody would have to
+    merge through. What IS testable, and is what the gating actually depends on,
+    is that the switch is still declared EXPLICITLY — if it were deleted or left
+    to a default, `lib.optionals (serverMode && enableDriftDeadman)` would either
+    fail to evaluate or silently stop meaning anything, and the structural
+    assertion above would keep passing while gating nothing.
     """
     block = _drift_service_block()
     assert "mkIf" not in block, (
@@ -1355,9 +1371,11 @@ def test_the_timer_is_gated_by_the_master_switch_and_the_service_is_not():
     assert "lib.optionals (serverMode && enableDriftDeadman) [ \"timers.target\" ]" in timer, (
         "the timer's WantedBy is not gated by the master switch:\n" + timer
     )
-    assert "enableDriftDeadman = false;" in HOME_NIX, (
-        "the master switch must ship OFF — enabling a timer is a live change to a "
-        "host and belongs in its own supervised deploy"
+    declared = re.findall(r"^\s*enableDriftDeadman = (true|false);", HOME_NIX, re.M)
+    assert len(declared) == 1, (
+        "the master switch must be declared exactly once, explicitly true or false — "
+        f"found {len(declared)}: {declared}. Gating on a name that is absent, defaulted "
+        "or set twice makes the WantedBy assertion above pass while gating nothing."
     )
 
 
