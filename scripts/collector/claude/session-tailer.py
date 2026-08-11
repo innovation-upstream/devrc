@@ -97,12 +97,19 @@ from pathlib import Path
 # summariser. It resolves in both layouts: in the repo it is
 # scripts/collector/, and when deployed it is ~/.config/activity-collector/
 # (home-manager lands `claude/` as a real dir of per-file symlinks beside it).
-# 🔴 Do NOT `.resolve()` — a nix-store symlink resolves INTO the store and loses
-# the ~/.config/activity-collector/ prefix (the same trap documented in
-# opencode/_shared.py's spool bridge). `__file__` is absolute in Python 3.
+# 🔴 Do NOT `.resolve()`. Resolving walks INTO /nix/store and anchors the import
+# to the store path rather than the deployed tree — the trap that broke the
+# browser receiver's spool_emit import and is documented at
+# opencode/_shared.py's spool bridge. Stated honestly: for THIS import the two
+# happen to coincide today, because the store dir mirrors the deployed one; the
+# ban is upheld because the coincidence is not a property anyone maintains.
+# `__file__` is absolute in Python 3, so plain parent traversal is enough.
+# APPENDED, not inserted at 0: the collector root also holds `collector.py`,
+# `deadman.py`, `invocation.py` and `ch_regrowth.py`, and putting it ahead of
+# this file's own directory would let any of those shadow a sibling module.
 _COLLECTOR_ROOT = str(Path(__file__).parent.parent)
 if _COLLECTOR_ROOT not in sys.path:
-    sys.path.insert(0, _COLLECTOR_ROOT)
+    sys.path.append(_COLLECTOR_ROOT)
 
 import changed_paths as CP  # noqa: E402
 

@@ -35,9 +35,12 @@ if _dir not in sys.path:
 # with the Claude summariser so the `changed_paths*` block has ONE definition.
 # 🔴 Do NOT `.resolve()` — a nix-store symlink resolves INTO the store and loses
 # the ~/.config/activity-collector/ prefix (see _shared.spool_emit's note).
+# APPENDED, not inserted at 0: the collector root also holds `collector.py`,
+# `deadman.py` and friends, and putting it ahead of this file's own directory
+# would let one of those shadow a sibling module (`_shared` in particular).
 _root = str(Path(__file__).parent.parent)
 if _root not in sys.path:
-    sys.path.insert(0, _root)
+    sys.path.append(_root)
 
 import _shared as S  # noqa: E402
 import changed_paths as CP  # noqa: E402

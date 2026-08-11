@@ -88,6 +88,89 @@ def test_the_declared_source_path_exists(module):
     assert (COLLECTOR / f"{module}.py").is_file()
 
 
+def test_the_import_works_in_the_DEPLOYED_symlink_layout(tmp_path):
+    """🔴 THE SEAM. Every other test in this repo imports the tailers from the
+    REPO layout, where `scripts/collector/` is a plain directory. What actually
+    runs on a host is `~/.config/activity-collector/`: a real directory holding
+    per-file SYMLINKS into /nix/store, with `claude/` and `opencode/` as real
+    subdirectories of more symlinks. Nothing exercised that arrangement, and it
+    is the one where the sibling import can fail.
+
+    Reproduces it: a fake "store" holding the real files, and a fake deployed
+    tree of symlinks pointing at them. The module must import THROUGH the
+    symlink.
+
+    ⚠ SCOPE, stated rather than implied: this fixture does NOT distinguish
+    `.resolve()` from plain parent traversal, because the store mirror also
+    holds `changed_paths.py`, so both land somewhere it exists. What it DOES
+    catch is the sibling-path setup being wrong or absent — verified by
+    mutation: deleting the `sys.path.append` in either tailer turns this red
+    and leaves every other test in the repo green.
+    """
+    store = tmp_path / "store"
+    dep = tmp_path / "deployed"
+    (store / "claude").mkdir(parents=True)
+    (store / "opencode").mkdir(parents=True)
+    (dep / "claude").mkdir(parents=True)
+    (dep / "opencode").mkdir(parents=True)
+
+    def place(rel: str):
+        src = COLLECTOR / rel
+        dst_store = store / rel
+        dst_store.write_bytes(src.read_bytes())
+        (dep / rel).symlink_to(dst_store)
+
+    for rel in ("changed_paths.py",
+                "claude/session-tailer.py", "claude/_shared.py", "claude/tailer.py",
+                "opencode/session_tailer.py", "opencode/_shared.py"):
+        place(rel)
+
+    import subprocess
+    import sys
+    import textwrap
+
+    # 🔴 ONE SUBPROCESS PER SOURCE, and this is not tidiness. Loading both in a
+    # single interpreter made the opencode half VACUOUS: the claude tailer runs
+    # first and appends the collector root to `sys.path`, so opencode's own
+    # sibling-path setup could be deleted entirely and the import still
+    # succeeded. Verified by mutation — with both in one process, removing
+    # opencode's `sys.path.append` left this test green.
+    # A subprocess is also what keeps the repo-layout copies already imported by
+    # this pytest run from satisfying the import.
+    programs = {
+        "claude": """
+            import importlib.util, sys
+            dep = sys.argv[1]
+            sys.path.insert(0, dep + "/claude")
+            spec = importlib.util.spec_from_file_location(
+                "st", dep + "/claude/session-tailer.py")
+            m = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(m)
+            assert m.CP.CHANGED_PATHS_CAP > 0
+            assert m.build_rollup([])["changed_paths"] is None
+            print("OK")
+        """,
+        "opencode": """
+            import sys
+            dep = sys.argv[1]
+            sys.path.insert(0, dep + "/opencode")
+            import session_tailer as o
+            assert o.CP.CHANGED_PATHS_CAP > 0
+            assert o.build_rollup({}, [], [], directory="")["changed_paths"] == []
+            print("OK")
+        """,
+    }
+    for source, prog in programs.items():
+        r = subprocess.run([sys.executable, "-c", textwrap.dedent(prog), str(dep)],
+                           capture_output=True, text=True)
+        assert r.returncode == 0 and "OK" in r.stdout, (
+            f"the {source} session summariser cannot import changed_paths.py "
+            "through the deployed symlink layout — this is the failure that "
+            "takes that source down at the next timer tick.\n"
+            f"stdout: {r.stdout}\nstderr: {r.stderr}"
+        )
+
+
 def test_the_tailers_do_not_resolve_symlinks_when_locating_the_root():
     """🔴 `Path(__file__).resolve()` walks INTO /nix/store and loses the
     ~/.config/activity-collector/ prefix, so the sibling import would resolve
