@@ -651,6 +651,19 @@ def test_operator_count_expression_matches_the_cadence_table():
     q2 = D.bucket_query(cadence=(("a", "beat"), ("b", "tick")))
     assert "(source = 'a' AND kind = 'beat') OR (source = 'b' AND kind = 'tick')" in q2, q2
     assert " AND (source = 'b'" not in q2, "cadence terms joined with AND: %s" % q2
+
+
+def test_cadence_predicate_is_exported_for_the_other_consumer():
+    """`cadence_predicate_sql` is PUBLIC on purpose: scripts/agent-ops renders the
+    same predicate for its freshness panel and imports this rather than
+    re-spelling it. A local copy there was immediately wrong in the same way
+    (AND-joined), so this pins the contract that consumer depends on."""
+    assert D.cadence_predicate_sql(()) == ""
+    one = D.cadence_predicate_sql((("x", "beat"),))
+    assert one == "(source = 'x' AND kind = 'beat')", one
+    two = D.cadence_predicate_sql((("x", "beat"), ("y", "tick")))
+    assert two == ("(source = 'x' AND kind = 'beat') OR "
+                   "(source = 'y' AND kind = 'tick')"), two
     # Empty cadence degrades to the pre-heartbeat query, which is the right
     # answer when nothing emits on a timer.
     assert "count() AS n_op" in D.bucket_query(cadence=())

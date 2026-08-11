@@ -350,30 +350,34 @@ def _load_chquery():
     return mod
 
 
-def machine_cadence_sql_filter():
+def machine_cadence_sql_filter(cadence=None):
     """`AND NOT (...)` excluding every MACHINE_CADENCE pair the deadman declares.
 
-    Returns "" when the set is empty (nothing emits on a timer -> nothing to
-    exclude). Raises if deadman.py cannot be imported; the caller turns that into
-    the panel's error marker, which is the honest outcome — silently falling back
-    to an unfiltered query would put a "fresh 15 min ago" next to a bridge that
-    cannot execute anything.
+    🔴 BOTH the pairs AND the predicate's RENDERING come from deadman — this
+    function only wraps them. An earlier version imported the pairs but re-spelled
+    the `" OR ".join` here, and that copy was immediately wrong in the same way
+    the original was (joining with AND makes `NOT (A AND B)` exclude nothing),
+    reachable the day a second timer-driven emitter is added. Single-sourcing the
+    data is not enough; the expression has to be single-sourced too.
 
-    That raise adds NO new failure mode: the only caller already loads
-    validation/chquery.py from the same DEVRC_DIR one line earlier, so a checkout
-    that cannot satisfy this import could not have satisfied that one either.
+    Returns "" when the set is empty (nothing emits on a timer -> nothing to
+    exclude), which still yields valid SQL at the call site. `cadence` overrides
+    the imported set for tests.
+
+    Raises if deadman.py cannot be imported; the caller turns that into the
+    panel's error marker, which is the honest outcome — silently falling back to
+    an unfiltered query would put a "fresh 15 min ago" next to a bridge that
+    cannot execute anything. Note the asymmetry with chquery, whose absence is a
+    silent no-refresh: this one is LOUD.
     """
     import importlib.util
     spec = importlib.util.spec_from_file_location("_ao_deadman", DEADMAN_PATH)
     mod = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
-    pairs = tuple(mod.MACHINE_CADENCE)
-    if not pairs:
-        return ""
-    terms = " OR ".join("(source = '%s' AND kind = '%s')" % (s, k)
-                        for s, k in pairs)
-    return "AND NOT (%s) " % terms
+    pairs = tuple(mod.MACHINE_CADENCE) if cadence is None else tuple(cadence)
+    pred = mod.cadence_predicate_sql(pairs)
+    return "AND NOT (%s) " % pred if pred else ""
 
 
 def read_env_file(path):

@@ -187,6 +187,21 @@ UNKNOWN_STATES = frozenset(
 # --------------------------------------------------------------------------- #
 # Query
 # --------------------------------------------------------------------------- #
+def cadence_predicate_sql(cadence=MACHINE_CADENCE) -> str:
+    """A ClickHouse boolean matching any MACHINE_CADENCE pair; "" when empty.
+
+    🔴 THE ONE PLACE this predicate is RENDERED, not just the one place the pairs
+    are declared. Exported because scripts/agent-ops needs the same predicate for
+    its freshness panel: a second copy of the `" OR ".join` immediately grew the
+    same latent bug (joining with AND makes `NOT (A AND B)` exclude NOTHING),
+    which is only reachable once a second pair exists -- i.e. it would have gone
+    unnoticed until exactly the moment MACHINE_CADENCE's own note tells a
+    maintainer to add one. Single-sourcing the DATA was not enough.
+    """
+    return " OR ".join("(source = '%s' AND kind = '%s')" % (s, k)
+                       for s, k in cadence)
+
+
 def _operator_count_expr(cadence=MACHINE_CADENCE) -> str:
     """`countIf(...)` counting only OPERATOR-driven events in the bucket.
 
@@ -194,11 +209,10 @@ def _operator_count_expr(cadence=MACHINE_CADENCE) -> str:
     empty cadence set degrades to plain count() -- i.e. the pre-heartbeat
     behaviour, which is the correct answer when nothing emits on a timer.
     """
-    if not cadence:
+    pred = cadence_predicate_sql(cadence)
+    if not pred:
         return "count()"
-    terms = " OR ".join("(source = '%s' AND kind = '%s')" % (s, k)
-                        for s, k in cadence)
-    return "countIf(NOT (%s))" % terms
+    return "countIf(NOT (%s))" % pred
 
 
 def bucket_query(days: int = BASELINE_DAYS, bucket_seconds: int = BUCKET_SECONDS,

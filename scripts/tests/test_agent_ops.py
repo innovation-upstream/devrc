@@ -740,9 +740,54 @@ def test_telemetry_freshness_excludes_machine_cadence_rows():
         ao.DEADMAN_PATH = orig_path
 
     assert out == {"zsh": 7}, out
-    assert clause.strip() and clause.strip() in sent["sql"], (
-        "query_telemetry_freshness dropped the machine-cadence exclusion: %s"
-        % sent["sql"])
+    # 🔴 Assert the SQL's SHAPE, not just that the clause appears somewhere in
+    # it. A substring check passes for a mangled concatenation
+    # ("INTERVAL 2 DAYAND NOT (...)") and for a clause placed after GROUP BY —
+    # both invalid ClickHouse, and both survived a suite that only checked
+    # presence.
+    assert re.search(
+        r"INTERVAL 2 DAY AND NOT \(.+?\) GROUP BY source ORDER BY source$",
+        sent["sql"]), \
+        "the exclusion is missing or misplaced in the emitted SQL: %s" % sent["sql"]
+
+
+def test_machine_cadence_filter_renders_multiple_pairs_with_OR():
+    """🔴 `NOT (A AND B)` excludes NOTHING, so an AND-joined predicate silently
+    reverts this panel to reporting a dead bridge as fresh. Only reachable once a
+    SECOND timer-driven emitter exists — which deadman's own note invites — so it
+    must be pinned before that day, not after.
+
+    The rendering now lives in deadman.cadence_predicate_sql and is merely
+    wrapped here; this asserts the wrapper passes a multi-pair set through
+    faithfully.
+    """
+    dm_py = os.path.join(_HERE, "..", "collector", "deadman.py")
+    orig = ao.DEADMAN_PATH
+    try:
+        ao.DEADMAN_PATH = dm_py
+        two = ao.machine_cadence_sql_filter(
+            cadence=(("a", "beat"), ("b", "tick")))
+        empty = ao.machine_cadence_sql_filter(cadence=())
+    finally:
+        ao.DEADMAN_PATH = orig
+
+    assert "(source = 'a' AND kind = 'beat') OR (source = 'b' AND kind = 'tick')" in two, two
+    assert " AND (source = 'b'" not in two, "cadence terms joined with AND: %s" % two
+    # Empty set -> no clause at all, which must still leave valid SQL at the call
+    # site (this branch is otherwise unreachable while MACHINE_CADENCE is
+    # non-empty, so a mutant emitting "AND NOT () " survived without it).
+    assert empty == "", repr(empty)
+
+
+def test_deadman_path_points_at_the_real_sibling():
+    """🟢 The constant itself is never exercised — the seam tests override it for
+    the sandbox — so a wrong path would mean a permanent error marker on the
+    telemetry panel with nothing to catch it. Unlike CHQUERY_PATH, this one is
+    not pre-flighted in maybe_refresh_telemetry."""
+    assert ao.DEADMAN_PATH.endswith(
+        os.path.join("scripts", "collector", "deadman.py")), ao.DEADMAN_PATH
+    assert os.path.exists(os.path.join(_HERE, "..", "collector", "deadman.py")), \
+        "deadman.py is not where DEADMAN_PATH expects it relative to this repo"
 
 
 def test_render_telemetry_line_no_rows():
