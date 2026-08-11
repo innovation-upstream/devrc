@@ -69,6 +69,12 @@ other host's data — partial data is reported as partial, not silently dropped.
 | the host answered: **no tmux server at all** | `true` | `false` | `true` | `5` |
 | the host said nothing | `false` | `null` | `false` | `4` |
 
+🔴 **Every row of that table is printable.** `tail --json` writes the payload to stdout on
+all five outcomes — it used to print on the success rows only, so exits 2, 4 and 5 documented
+a payload nothing could emit and a machine consumer got a bare exit code. The English
+sentence stays on stderr, so stdout is still pure JSON (and, without `--json`, still pure
+scrollback).
+
 🔴 Row 4 is why `no_server` exists. The table above says *"no server running"* is a
 **reachable** host — right for a scan, where it means a live host with zero windows. But
 `tail` took the success branch on it and published `found: true, text: ""` → exit `3`,

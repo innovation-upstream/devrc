@@ -29,11 +29,13 @@ under `--no-ch` or when the window carries no session id). See
 single hardcoded reason used to answer every no-session-id case, so one `detail --json`
 could print `LIVE COUNT UNMEASURED` and then assert a *measured* absence over that same
 unmeasured set. The reason now branches on what was actually measured: `--no-ch`,
-`--no-fuzzyclaw` (the files were never read), the window is on a **remote** host (fuzzyclaw
-is local-only, so no task file was ever searched for it), the intersection **never ran**,
-the slot was **contested and all claimants dropped**, or — the one genuine measured
-absence — *"no live fuzzyclaw task file joined to it"*. Every other reason says **"this is
-NOT a measured absence"** in so many words.
+`--no-fuzzyclaw` (the files were never read), **any** matched window is on a **remote** host
+(fuzzyclaw is local-only — and with the default `--host all` a `session:index` that exists on
+both machines yields a row from each, so this fires on a *mixed* row set too), the
+intersection **never ran**, the slot was **contested and all claimants dropped**, an
+**unrecognised** `fuzzyclaw.status`, or — the one genuine measured absence — *"no live
+fuzzyclaw task file joined to it"*, which is reached only when the status is `ok`. Every
+other reason says **"this is NOT a measured absence"** in so many words.
 
 | flag | effect |
 |---|---|
@@ -57,7 +59,9 @@ NOT a measured absence"** in so many words.
 🔴 For `tail`, "no such window" is **exit 2**, not 4. The host answered; calling it
 unreachable states a false fact and sends you to debug SSH over a typo. `tail`'s JSON
 carries `reachable` *and* `found` — `found: null` means the host never answered, so it has
-said nothing about whether the target exists.
+said nothing about whether the target exists. `--json` prints that payload on **every** exit
+path, 0/2/3/4/5, not only on success — the failure exits are precisely where the
+discriminants are worth reading. The human sentence goes to stderr, so stdout stays parseable.
 
 🔴 **Exit 5 exists because 3 was carrying two facts.** `tmux` saying *"no server running"*
 is a **reachable** host, so `tail` used to take the success branch and publish
@@ -126,16 +130,18 @@ Consequences, all pinned by tests:
 - a slot two files both claim resolves to **nothing**. `index_tasks_by_window()` drops it and
   reports it under `fuzzyclaw.slot_conflicts`; attaching an arbitrary one of two
   contradictory records is worse than attaching none, because it reads as measured data.
-  🔴 **`slot_conflicts` is a defensive invariant that should never fire — not a live class.**
-  The "5 contested slots" above were an artefact of the *old id-only* guard. Re-measured
-  2026-08-11: the 400 task files carry **400 distinct `window_id`s**, one file per window,
-  and the relationship guard admits a file only for the slot its live id actually holds — so
-  two survivors could only collide if two distinct live window ids occupied one slot, which
-  real tmux cannot produce. It is kept because it costs a dict lookup and the failure it
-  prevents is unrecoverable. **If it ever fires, that is news**, not routine. Note also that
-  `claimants` counts *files* while `window_ids` is deduplicated, so `claimants: 2,
-  window_ids: ["@41"]` means duplicate files for one window, not contention — the rendered
-  line states both numbers so it cannot be misread.
+  🔴 **What that drop still catches is narrower than the "5 contested slots" above — but it
+  is not empty.** Gone for good: two *distinct* live window ids contending for one slot (a
+  slot belongs to exactly one window, so `list-windows` cannot report it) — that was the
+  shape produced by the *old id-only* guard. **Still reachable: two task files carrying the
+  same `window_id`.** The files are `<index>.json`, not `<window_id>.json`, so nothing
+  enforces one file per window, and `CLAUDE.md` marks the directory UNTRUSTED — the
+  400-files/400-distinct-ids reading of 2026-08-11 is a snapshot of that writer, not an
+  invariant. Both duplicates pass the relationship guard and collide, and the conflict
+  renders; a test drives that case through `gather()`. Note that `claimants` counts *files*
+  while `window_ids` is deduplicated, so `claimants: 2, window_ids: ["@41"]` is exactly this
+  case — duplicate files for one window, not contention — and the rendered line states both
+  numbers so it cannot be misread.
 - every row carries `window_id`, so the join is auditable in the output:
   `row.window_id == row.fuzzyclaw.window_id` for every joined row. 🔴 That holds **by
   construction, not by luck** — both sides derive from the same `list-windows` snapshot — so

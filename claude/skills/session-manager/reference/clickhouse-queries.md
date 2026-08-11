@@ -58,16 +58,17 @@ for the `claude_session_id` of the window `detail` narrowed to, and attaches the
 did not exist. `test_sql_session_history_IS_reachable_from_main` now names the caller.)
 
 `session_history` is status-discriminated like `ch_query`, and its `skipped` carries a
-`reason`, because three different facts would otherwise all render as "no history":
+`reason`, because facts as different as these would otherwise all render as "no history":
 
 | status | reason | means |
 |---|---|---|
 | `skipped` | `--no-ch` | the query was never run |
 | `skipped` | `fuzzyclaw was skipped (--no-fuzzyclaw) …` | the task files were never read — **not** a measured absence |
-| `skipped` | `fuzzyclaw is read on the LOCAL host only …` | the window is **remote**; no task file was ever searched for it — **not** a measured absence |
+| `skipped` | `fuzzyclaw is read on the LOCAL host only …` | **any** matched window is remote — fuzzyclaw is local-only, so no task file was searched for it. Fires on a mixed local+remote row set too: with the default `--host all`, one `session:index` living on both machines yields a row from each, and the shared half must not be reported as a measured absence — **not** a measured absence |
 | `skipped` | `the fuzzyclaw intersection never ran …` | the live-window set was never measured — **not** a measured absence |
 | `skipped` | `this window's slot was claimed by N task files and ALL were dropped …` | contested slot; no id is trusted — **not** a measured absence |
 | `skipped` | `no window in this report matched the requested target …` | nothing to carry an id — **not** a measured absence |
+| `skipped` | `fuzzyclaw reported status '<x>' …` | a status this reader does not recognise — the measured absence below is GATED on `ok` rather than reached by fallthrough, so a status added later cannot silently become one — **not** a measured absence |
 | `skipped` | `this window carries no claude_session_id (no live fuzzyclaw task file joined to it)` | **the one genuine measured absence**: fuzzyclaw ran, this local window simply has no task |
 | `ok`, `rows: []` | — | the query ran and this session has no prompts in 24h |
 | `unreachable` / `query_error` / `unavailable` | — | the query did not answer |

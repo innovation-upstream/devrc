@@ -75,15 +75,24 @@ one the file recorded. `index_tasks_by_window()` then DROPS a slot two files
 both claim rather than letting the last one win, and reports the conflict.
 Both halves carry mutation tests (`test_session_manager.py`).
 
-🔴 …and the slot-conflict half is now a DEFENSIVE INVARIANT THAT SHOULD NEVER
-FIRE, not a live class — stated here because the paragraph above reads like a
-standing hazard. The 5 contested slots were produced by the OLD id-only guard.
-Re-measured on the workbench 2026-08-11: the 400 task files carry 400 DISTINCT
-`window_id`s, one file per window, and the relationship guard admits a file only
-for the slot its live id actually holds — so two survivors could only collide if
-two distinct live window ids occupied one slot, which real tmux cannot produce.
-It is kept because it costs a dict lookup and prevents an unrecoverable failure.
-If it ever fires, that is news about tmux or about the task writer, not routine.
+🔴 …and the slot-conflict half now catches a NARROWER class than the paragraph
+above implies — but not an empty one. State only what is guaranteed:
+
+  * GUARANTEED GONE: two DISTINCT live window ids contending for one slot. A
+    slot is `(session, index)` and tmux gives it to exactly one window, so
+    `parse_windows` cannot report two ids in one slot. The 5 contested slots
+    that motivated the guard were this shape, under the OLD id-only guard.
+  * NOT GUARANTEED, and reachable today: TWO TASK FILES CARRYING THE SAME
+    `window_id`. The files are `<index>.json`, not `<window_id>.json`, so
+    nothing on disk enforces one file per window, and `CLAUDE.md` marks the
+    directory UNTRUSTED. Both duplicates pass the relationship guard (each
+    resolves to the one slot their shared id really holds), collide at the
+    index, and the conflict is dropped and rendered — `claimants: 2,
+    window_ids: ["@41"]`, which is exactly the duplicate-files shape the
+    renderer spells out. Pinned end-to-end through `gather()`.
+
+The workbench's 400 files did carry 400 distinct ids on 2026-08-11, but that is
+a SNAPSHOT of an untrusted writer, not an invariant — do not read it forward.
 
 HONEST LIMITS (stated, not implied away)
 ----------------------------------------
@@ -539,16 +548,19 @@ def index_tasks_by_window(tasks) -> dict:
     bare mapping, because "no task for this slot" and "two files disagreed about
     this slot, so we refuse to guess" are different facts.
 
-    🔴 THIS IS A DEFENSIVE INVARIANT THAT SHOULD NEVER FIRE — say so, do not
-    sell it as a live class. The "5 contested slots" that motivated it were an
-    artefact of the OLD id-only guard. Re-measured on the workbench 2026-08-11:
-    400 task files carry 400 DISTINCT `window_id`s (one file per window), and
-    the relationship guard in `filter_live_tasks` now admits a file only when
-    its `window_id` is live AND holds the exact slot the file records. Two
-    survivors can therefore only collide if two DISTINCT live window ids occupy
-    one slot — which real tmux output cannot produce. So `slot_conflicts` is
-    UNREACHABLE in production today. It is kept because the cost is a dict
-    lookup and the failure it prevents is unrecoverable, not because it fires.
+    🔴 WHAT THE RELATIONSHIP GUARD UPSTREAM DOES AND DOES NOT REMOVE — say only
+    what is guaranteed. It removes contention between two DISTINCT live window
+    ids: a slot belongs to exactly one window, so `parse_windows` cannot report
+    two ids holding one, and the "5 contested slots" that motivated this drop
+    (all that shape, under the OLD id-only guard) cannot recur.
+
+    It does NOT remove TWO TASK FILES CARRYING THE SAME `window_id`, which is
+    reachable today. The files are named `<index>.json`, not
+    `<window_id>.json`, so nothing enforces one file per window, and `CLAUDE.md`
+    marks the directory UNTRUSTED — the workbench's 400-distinct-ids reading of
+    2026-08-11 is a snapshot of that writer, not an invariant. Two duplicates
+    both pass the guard (each resolves to the single slot their shared id really
+    holds) and collide here, so this drop fires and renders. Pinned end-to-end.
 
     It used to be `out[key] = t`, a silent last-wins: an arbitrary one of two
     contradictory records won and its `claude_session_id` — the only carrier of
@@ -611,8 +623,11 @@ def fold_windows(panes, host, codenames=None, task_index=None,
     that same map inverted). So it is an internal-consistency property, and a
     RUNTIME re-check of it would be an unreachable guard — it cannot fail unless
     `slots_to_window_ids` collapsed two ids into one slot, which real tmux
-    output cannot produce. It is pinned by a test as documentation of the join,
-    NOT counted as a defence.
+    output cannot produce. That is a claim about `list-windows`, NOT about the
+    task files: two files naming the same `window_id` IS reachable (see
+    `index_tasks_by_window`), but it costs that slot its task entirely, so a row
+    carrying a task is unaffected. It is pinned by a test as documentation of
+    the join, NOT counted as a defence.
 
     It therefore does NOT detect the one skew that is genuinely reachable:
     `list-panes` and `list-windows` are two non-atomic calls (gather:846-847),
@@ -1280,10 +1295,26 @@ def main(argv=None):
         host = local if host_defaulted else args.host
         res = tail_window(args.target, host, local, lines=args.lines)
         res["host_defaulted"] = host_defaulted
+
+        def _tail_json():
+            """🔴 `--json` must print on the FAILURE paths too.
+
+            It used to print only on success, so exits 2, 4 and 5 wrote nothing
+            to stdout — while the docs documented their payload (`reachable` +
+            `found`, where `found: null` means the host never answered). A
+            machine consumer therefore got an empty stdout on exactly the three
+            outcomes the discriminants exist to tell apart, and could only
+            re-derive them by parsing English off stderr. The human message
+            stays on stderr, so a JSON reader is unaffected either way.
+            """
+            if args.json:
+                print(json.dumps(res, indent=2))
+
         if not res["reachable"]:
             # The host said nothing at all. This is the unmeasured case.
             print(f"tail: host {host} unreachable — {res['error']}",
                   file=sys.stderr)
+            _tail_json()
             return EXIT_UNAVAILABLE
         hint = ""
         if host_defaulted:
@@ -1298,12 +1329,14 @@ def main(argv=None):
             print(f"tail: no tmux server on {host}, so no window "
                   f"{args.target!r} exists{hint} — {res['error']}",
                   file=sys.stderr)
+            _tail_json()
             return EXIT_NO_SERVER
         if res["found"] is False:
             # 🔴 The host ANSWERED. Reporting this as "unreachable" states a
             # false fact about the host and sends the reader debugging SSH.
             print(f"tail: no such window {args.target!r} on {host}{hint} — "
                   f"{res['error']}", file=sys.stderr)
+            _tail_json()
             return EXIT_USAGE
         if args.json:
             print(json.dumps(res, indent=2))
@@ -1376,11 +1409,22 @@ def no_session_reason(report) -> str:
         return ("fuzzyclaw was skipped (--no-fuzzyclaw), so no task file was "
                 "read and no claude_session_id could be joined — this is NOT a "
                 "measured absence")
-    if all(r.get("host") != local for r in rows):
-        where = ", ".join(sorted({str(r.get("host")) for r in rows}))
+    # 🔴 ANY remote row is enough. This was `all(...)`, and the difference is
+    # reachable on the DEFAULT `--host all`: a `session:index` that exists on
+    # both machines yields one row per host, `all(...)` was then False, and the
+    # function fell through to the measured-absence sentence — which covers a
+    # remote row nothing ever searched. Measured 2026-08-11: 13 of the laptop's
+    # 20 windows shared a `session:index` with a workbench window (`0:1`, `0:2`,
+    # `scratch:1`, …), so this is the common case for scratch sessions, not an
+    # edge. A measured absence may be claimed only when EVERY row it covers was
+    # actually searched — and fuzzyclaw searches the local host alone.
+    remote = sorted({str(r.get("host")) for r in rows
+                     if r.get("host") != local})
+    if remote:
         return (f"fuzzyclaw is read on the LOCAL host only ({local}) and this "
-                f"window is on {where}, so no task file was ever searched for "
-                "it — this is NOT a measured absence")
+                f"target matches a window on {', '.join(remote)}, so no task "
+                "file was ever searched for it — this is NOT a measured "
+                "absence")
     if st == "unmeasured":
         return ("the fuzzyclaw intersection never ran, so no claude_session_id "
                 "could be measured for this window — this is NOT a measured "
@@ -1393,6 +1437,15 @@ def no_session_reason(report) -> str:
             return (f"this window's slot was claimed by {c.get('claimants')} "
                     "task files and ALL were dropped, so no claude_session_id "
                     "is trusted for it — this is NOT a measured absence")
+    # 🔴 The measured absence is GATED on `ok`, not reached by fallthrough. The
+    # branches above enumerate today's non-ok statuses ("skipped",
+    # "unmeasured"), so a fallthrough would silently promote any status added
+    # later — the exact shape of "a zero nobody measured" this whole function
+    # exists to refuse. Unknown status => no claim.
+    if st != "ok":
+        return (f"fuzzyclaw reported status {st!r}, which this reader does not "
+                "recognise, so nothing can be concluded about a "
+                "claude_session_id — this is NOT a measured absence")
     return ("this window carries no claude_session_id (no live fuzzyclaw task "
             "file joined to it)")
 
@@ -1412,9 +1465,10 @@ def detail_history(report, use_ch=True, ch_client_factory=None,
     `reason`, because "CH was off", "this window has no session id" and "the
     query ran and found nothing" are three different facts that would otherwise
     all render as an empty history. The no-session-id `reason` is chosen by
-    `no_session_reason()`, which distinguishes a MEASURED absence from the four
-    ways nothing was measured — a single hardcoded string there stated a
-    measured negative over an unmeasured set.
+    `no_session_reason()`, which distinguishes the ONE measured absence from
+    every way nothing was measured (no count here on purpose — the branch list
+    has grown twice) — a single hardcoded string there stated a measured
+    negative over an unmeasured set.
 
     🔴 `ch_client_factory` is resolved AT CALL TIME (same reason as `gather` —
     a def-time default captures the original function and defeats the suite's

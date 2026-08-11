@@ -1909,6 +1909,61 @@ def test_main_tail_json_mode_carries_the_full_discriminated_result(
     assert rc == sm.EXIT_OK
 
 
+@pytest.mark.parametrize("host,stderr,exit_name,reachable,found,no_server", [
+    ("laptop",    "ssh: No route to host",     "EXIT_UNAVAILABLE",
+     False, None,  False),
+    ("workbench", "no server running on /tmp/x", "EXIT_NO_SERVER",
+     True,  False, True),
+    ("workbench", "can't find window: nope",   "EXIT_USAGE",
+     True,  False, False),
+])
+def test_main_tail_json_prints_the_payload_on_the_FAILURE_exits(
+        monkeypatch, capsys, host, stderr, exit_name, reachable, found,
+        no_server):
+    """🔴 `--json` returned BEFORE the print on exits 2, 4 and 5.
+
+    So the three outcomes whose whole point is discrimination
+    (`reachable`/`found`/`no_server`) printed NOTHING on stdout, while SKILL.md
+    documented `found: null` as "the host never answered" and
+    `reference/cross-host.md` documented a payload for each row of its 5-row
+    table. A machine consumer got an empty stdout and an exit code — the exit
+    code alone cannot distinguish "wrong spelling" from "server down" without
+    re-parsing English off stderr.
+
+    The exit codes and the stderr sentences are unchanged; only stdout gains.
+    """
+    monkeypatch.setattr(sm, "local_host_label", lambda *a, **k: "workbench")
+    monkeypatch.setattr(sm, "_default_runner", lambda argv, t: (1, "", stderr))
+    rc = sm.main(["tail", "nope:9", "--host", host, "--json"])
+    cap = capsys.readouterr()
+    blob = json.loads(cap.out)          # would raise on the old empty stdout
+    assert rc == getattr(sm, exit_name)
+    assert blob["reachable"] is reachable
+    assert blob["found"] is found
+    assert blob["no_server"] is no_server
+    assert blob["host"] == host and blob["target"] == "nope:9"
+    assert stderr in (blob["error"] or ""), "the payload carries the real error"
+    assert cap.err, "the human sentence still goes to stderr"
+
+
+@pytest.mark.parametrize("host,stderr", [
+    ("laptop", "ssh: No route to host"),
+    ("workbench", "no server running on /tmp/x"),
+    ("workbench", "can't find window: nope"),
+])
+def test_main_tail_WITHOUT_json_keeps_stdout_empty_on_those_exits(
+        monkeypatch, capsys, host, stderr):
+    """NEGATIVE CONTROL for the test above: the payload is printed because
+    `--json` was asked for, not unconditionally. A plain `tail` that dumped JSON
+    into a pipe expecting scrollback would be a new defect."""
+    monkeypatch.setattr(sm, "local_host_label", lambda *a, **k: "workbench")
+    monkeypatch.setattr(sm, "_default_runner", lambda argv, t: (1, "", stderr))
+    sm.main(["tail", "nope:9", "--host", host])
+    cap = capsys.readouterr()
+    assert cap.out == ""
+    assert cap.err
+
+
 def test_main_tail_lines_flag_reaches_the_capture_argv(monkeypatch, capsys):
     """--lines must not be inert: the scrollback depth is the point of tail."""
     seen = []
@@ -2323,12 +2378,12 @@ def test_summarize_counts_every_status_bucket():
 # is a claim, not evidence.
 # =========================================================================== #
 
-# 🔴 A second live window id sharing @41's slot. This is the ONLY way to reach
-# `slot_conflicts` under the relationship guard, and it is precisely why that
-# guard is DEFENSIVE rather than live: real tmux cannot put two windows in one
-# slot, and the 400 task files on this host carry 400 DISTINCT window ids. The
-# fixture constructs the impossible on purpose, because a guard nothing can
-# reach is a guard nothing has tested.
+# 🔴 A second live window id sharing @41's slot. This is the shape real tmux
+# CANNOT produce — a slot belongs to exactly one window — so this fixture builds
+# the impossible on purpose to exercise the drop from both directions. The shape
+# that IS reachable (two task FILES carrying one `window_id`) has its own
+# fixture and its own gather-level test further down; do not read this one as
+# proof that `slot_conflicts` is unreachable in production.
 #
 # Every value is pairwise distinct from TASK_LIVE's EXCEPT the slot itself —
 # the one field that must collide for the conflict to exist.
@@ -2479,6 +2534,13 @@ def test_the_down_server_and_empty_window_zeroes_get_DIFFERENT_EXIT_CODES(
     assert "no tmux server" in err_down
     assert "no such window" not in err_down, (
         "sending the operator to re-check spelling is the wrong repair")
+    # 🔴 KILLS: `{res['error']}` -> any constant in the CLI's no-server line.
+    # `tail_window` pins the stderr it CARRIES, but the operator-facing message
+    # was pinned only on the words "no tmux server", which a constant satisfies
+    # — so the line could quote the wrong error with the suite green. The socket
+    # path is the diagnosis (wrong TMUX_TMPDIR vs a genuinely dead server).
+    assert "no server running on /tmp/x" in err_down, (
+        "the REAL tmux line must reach the operator, not a generic sentence")
 
 
 def test_run_tmux_carries_the_no_server_discriminant_without_changing_scan():
@@ -2568,14 +2630,89 @@ def test_the_unmeasured_reason_carries_WHY_the_intersection_never_ran():
     assert "reason unrecorded" not in reason
 
 
-def test_the_unmeasured_reason_names_an_UNSCANNED_local_host_distinctly():
-    """The OTHER way to reach `unmeasured`, so the branch is not pinned to one
-    cause: `--host laptop` never scans the local host at all."""
+def test_a_scan_that_never_touched_the_local_host_lands_on_the_REMOTE_branch():
+    """RENAMED, because the old name claimed a branch it never exercised.
+
+    It was `..._names_an_UNSCANNED_local_host_distinctly` and was presented as
+    the second way to reach the `unmeasured` branch. Its fixture cannot reach
+    that branch: `--host laptop` produces laptop-only rows, and the REMOTE
+    branch is checked first, so the reason names fuzzyclaw's local-only limit.
+    The cause the old name advertised is in fact structurally unreachable here —
+    no local scan means no local row, so the remote branch always wins. Renamed
+    rather than rewritten: the ORDERING it actually pins is worth keeping.
+
+    🔴 KILLS: deleting the remote branch (the reason then reads "the fuzzyclaw
+    intersection never ran"), and moving it below the `unmeasured` branch.
+    """
     report = base_gather(hosts=("laptop",))
+    assert report["fuzzyclaw"]["status"] == "unmeasured", (
+        "fixture sanity: the local host was never scanned, so the intersection "
+        "genuinely did not run — and the remote branch still answers first")
     narrowed = sm.filter_report(report, "naida-dev", "1")
     reason = sm.no_session_reason(narrowed)
+    assert "LOCAL host only" in reason and "laptop" in reason
+    assert "intersection never ran" not in reason
     assert "NOT a measured absence" in reason
     assert _MEASURED_ABSENCE not in reason
+
+
+# 🔴 One `session:index` present on BOTH hosts — the DEFAULT `--host all` shape,
+# and the common one: measured on the live hosts 2026-08-11, 13 of the laptop's
+# 20 windows shared a `session:index` with a workbench window (`0:1`, `0:2`,
+# `0:3`, `scratch:1`, `scratch2:1`, `scratch3:1`, …). Scratch sessions collide
+# by construction, so this is not an edge case.
+_SHARED_SLOT_LOCAL = (
+    f"%31|3001|scratch|1|win-shared|/home/zach/workspace/repo-alpha|claude"
+    f"|{BRAILLE} workbench side of a shared slot")
+_SHARED_SLOT_REMOTE = (
+    f"%32|3002|scratch|1|win-shared|/home/zach/workspace/repo-alpha|claude"
+    f"|{SPARKLE} laptop side of the SAME session:index")
+
+
+def test_a_slot_present_on_BOTH_hosts_is_never_a_measured_absence():
+    """🔴 KILLS: `if remote:` -> `if all(r.host != local for r in rows)`.
+
+    The predicate used to be `all(...)`. With rows from both hosts it was False,
+    so the function fell through to the measured-absence sentence — a MEASURED
+    negative covering a laptop row that fuzzyclaw never searched, since the task
+    files are local state. `any` remote row is enough to forbid the claim.
+    """
+    report = base_gather(
+        runner=make_runner(local_panes=_SHARED_SLOT_LOCAL,
+                           remote_panes=_SHARED_SLOT_REMOTE),
+        fuzzyclaw_texts=[])
+    narrowed = sm.filter_report(report, "scratch", "1")
+    rows = [r for h in narrowed["hosts"].values() for r in h["windows"]]
+    assert sorted(r["host"] for r in rows) == ["laptop", "workbench"], (
+        "fixture sanity: this is the MIXED row set, not an all-remote one")
+    assert narrowed["fuzzyclaw"]["status"] == "ok", (
+        "fixture sanity: the local host WAS searched — so an `all()` predicate "
+        "reaches the measured-absence branch, which is the defect")
+    reason = sm.no_session_reason(narrowed)
+    assert "LOCAL host only" in reason and "laptop" in reason
+    assert "NOT a measured absence" in reason
+    assert _MEASURED_ABSENCE not in reason
+
+
+def test_an_UNRECOGNISED_fuzzyclaw_status_cannot_become_a_measured_absence():
+    """🔴 KILLS: dropping the `st != "ok"` gate before the measured absence.
+
+    The measured absence used to be a FALLTHROUGH: every status the branches
+    above do not name became a measured negative by default, so a status added
+    later would silently start asserting one. Positive control below: the SAME
+    report with `ok` still reaches the measured absence, so this is a gate, not
+    a blanket refusal.
+    """
+    report = base_gather(fuzzyclaw_texts=[])
+    report["fuzzyclaw"]["status"] = "partial"        # a status invented later
+    reason = sm.no_session_reason(sm.filter_report(report, "misc", "5"))
+    assert "partial" in reason
+    assert "NOT a measured absence" in reason
+    assert _MEASURED_ABSENCE not in reason
+
+    report["fuzzyclaw"]["status"] = "ok"
+    assert _MEASURED_ABSENCE in sm.no_session_reason(
+        sm.filter_report(report, "misc", "5"))
 
 
 def test_no_session_reason_for_a_REMOTE_window_names_the_local_only_limit():
@@ -2793,6 +2930,34 @@ def test_the_per_host_banner_is_ABSENT_when_the_window_list_WAS_measured():
     assert "panes were read; window ids were NOT" not in text
 
 
+def test_the_unmeasured_FUZZYCLAW_BANNER_quotes_the_REAL_reason():
+    """🔴 KILLS: `fz.get('error') or 'unknown reason'` -> the literal
+    `'unknown reason'` in render_table's unmeasured branch.
+
+    The underlying `fuzzyclaw.error` and the per-host WINDOW LIST banner were
+    both pinned, but the line an operator actually reads when `list-windows`
+    dies was asserted only to EXIST. Replacing it with the fallback left the
+    suite green while the screen stopped naming the cause — and "the
+    intersection never ran" without the cause is half a fact.
+
+    Both halves: the real reason must render, and the fallback must still be
+    reachable when there genuinely is no reason recorded.
+    """
+    report = base_gather(runner=make_runner(
+        local_windows_rc=1, local_windows_err="WINDOWS-STDERR-5d17"))
+    assert report["fuzzyclaw"]["status"] == "unmeasured", "fixture sanity"
+    text = sm.render_table(report)
+    assert "LIVE COUNT UNMEASURED" in text
+    assert "WINDOWS-STDERR-5d17" in text, (
+        "the operator's line must quote the cause, not a placeholder")
+    assert "unknown reason" not in text
+
+    # POSITIVE CONTROL for the fallback itself: it is reachable, so the
+    # assertion above is about the CHOICE, not about a dead branch.
+    report["fuzzyclaw"]["error"] = None
+    assert "unknown reason" in sm.render_table(report)
+
+
 def test_slot_conflicts_reach_the_REPORT_through_gather():
     """🔴 KILLS: `report["fuzzyclaw"]["slot_conflicts"] = []` (gather:884).
 
@@ -2862,6 +3027,58 @@ def test_the_conflict_line_distinguishes_DUPLICATE_FILES_from_CONTENTION():
 def test_no_slot_conflict_line_when_there_are_none():
     """POSITIVE CONTROL: the loop must be able to render nothing."""
     assert "SLOT CONFLICT" not in sm.render_table(base_gather())
+
+
+# 🔴 The REACHABLE conflict shape: a SECOND FILE for the SAME window. Identical
+# `window_id` and slot to TASK_LIVE, everything else distinct. Nothing on disk
+# forbids it — the files are `<index>.json`, not `<window_id>.json`, and
+# CLAUDE.md marks the directory UNTRUSTED — so the docs may not call
+# `slot_conflicts` unreachable.
+_TASK_LIVE_DUPLICATE_FILE = dict(
+    TASK_LIVE,
+    task="task-duplicate-file-text",
+    claude_session="44444444-3333-4222-8111-000000000000",
+    summary="summary-duplicate-file",
+    transcript_path="/home/zach/.claude/projects/proj-dup/dup.jsonl",
+)
+
+
+def test_TWO_FILES_NAMING_ONE_WINDOW_reach_slot_conflicts_through_gather():
+    """🔴 The conflict the relationship guard does NOT remove, driven end to end.
+
+    An earlier round documented `slot_conflicts` as "UNREACHABLE in production
+    today", reasoning only about two DISTINCT live window ids in one slot. Two
+    task files carrying ONE `window_id` is a different shape and is reachable:
+    both resolve to the single slot @41 really holds, both survive
+    `filter_live_tasks`, and they collide at the index.
+
+    So this is the evidence behind the corrected claim in the module docstring,
+    `index_tasks_by_window`'s docstring and SKILL.md. It also pins the
+    behavioural half: neither duplicate's `claude_session` may reach a row.
+    """
+    report = base_gather(fuzzyclaw_texts=[json.dumps(TASK_LIVE),
+                                          json.dumps(_TASK_LIVE_DUPLICATE_FILE)])
+    fz = report["fuzzyclaw"]
+    assert fz["status"] == "ok"
+    assert (fz["files_live"], fz["files_stale"], fz["files_mismatched"]) \
+        == (2, 0, 0), "both files must SURVIVE the guard; the drop is at the index"
+    assert fz["slot_conflicts"] == [{
+        "session": "scratch7", "window_index": "3",
+        "claimants": 2, "window_ids": ["@41"],
+    }], "2 FILES, 1 window id — the duplicate-files shape, not contention"
+
+    row = next(r for r in report["hosts"]["workbench"]["windows"]
+               if (r["session"], r["window_index"]) == ("scratch7", "3"))
+    assert row["fuzzyclaw"] is None and row["claude_session_id"] is None
+    ids = {r["claude_session_id"]
+           for r in report["hosts"]["workbench"]["windows"]}
+    assert TASK_LIVE["claude_session"] not in ids
+    assert _TASK_LIVE_DUPLICATE_FILE["claude_session"] not in ids
+
+    line = next(ln for ln in sm.render_table(report).splitlines()
+                if "SLOT CONFLICT" in ln)
+    assert "scratch7:3" in line and "2 task files" in line
+    assert "1 distinct window id" in line and "ALL DROPPED" in line
 
 
 # --------------------------------------------------------------------------- #
