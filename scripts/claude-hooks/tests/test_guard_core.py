@@ -2422,6 +2422,172 @@ def test_resolve_dir_is_the_single_path_resolver(tmp_path, monkeypatch):
 
 
 # =========================================================================== #
+# 8x. 🔴 WHICH REPO GETS JUDGED — the named-target fail-OPEN (2026-08-11)
+#
+# THE REPORTED SYMPTOM was a false POSITIVE: with cwd on `trunk`,
+#     git -C /home/zach/workspace/civit/spine-wan-peer-metric commit -F <msg>
+# was denied naming the CWD's repo, even though the `-C` target sat on a feature
+# branch. That direction is ALREADY FIXED — `_argv_named_repo_dirs` landed with
+# #376 and the probe below is green on `origin/main`. These tests pin it so it
+# stays fixed, and are labelled INVARIANT GUARDS, not regression coverage:
+# `test_S2_*`, `test_S3_*`, `test_S4_*`, `test_S5_*` are all green at
+# `origin/main`. Per claude/RULES.md, a guard pinning an invariant the bug never
+# violated does not get counted as regression coverage.
+#
+# 🔴 WHAT WAS ACTUALLY BROKEN — found by probing the LIVE hook rather than by
+# reading the report — is the fail-OPEN sibling of that same resolution step:
+#     ALLOW  git -C <an-ordinary-directory> commit -m x      (cwd on trunk)
+# Naming a repo hands the entire verdict to that repo. When the named directory
+# EXISTS but is not a git worktree, `_resolve_dir` accepts it (it only asks
+# `isdir`) and `_commit_to_main_reason` then fails open on "no branch" — so the
+# cwd, which really was on trunk, is never evaluated at all. One `-C` at a
+# harmless-looking path disables the check for the whole command. That is the
+# fail-open the guard exists to prevent, and `test_S6_*` is REGRESSION coverage:
+# it is RED at `origin/main` and green at HEAD.
+# --------------------------------------------------------------------------- #
+
+_FEATURE = "feat/wan-peer-availability-metric"     # the branch from the report
+_TALOS = "git@github.com:ZacxDev/homelab-infra.git"  # the ONE allowlisted repo
+
+
+def test_S1_bare_commit_from_a_trunk_cwd_is_still_blocked(tmp_path):
+    """Scenario 1 — the core guarantee. Everything else here is a refinement of
+    WHICH repo gets judged; if this ever goes green-allow the guard is inert."""
+    repo = _mkrepo(tmp_path / "cwd-trunk", branch="trunk")
+    assert gc.check_git_commit_to_main("git commit -m x", str(repo)) is not None
+
+
+def test_S2_dash_C_to_a_feature_repo_from_a_trunk_cwd_is_allowed(tmp_path):
+    """Scenario 2 — the reported false positive. INVARIANT GUARD (green at
+    origin/main). The command said where it acts; the cwd's branch is not the
+    question being asked."""
+    cwd = _mkrepo(tmp_path / "cwd-trunk", branch="trunk")
+    target = _mkrepo(tmp_path / "target-feat", branch=_FEATURE)
+    assert gc.check_git_commit_to_main(
+        f"git -C {target} commit -m x", str(cwd)) is None
+    # …and with the exact `-F <msgfile>` spelling from the incident report.
+    assert gc.check_git_commit_to_main(
+        f"git -C {target} commit -F /tmp/msg.txt", str(cwd)) is None
+
+
+def test_S3_dash_C_to_a_trunk_repo_from_a_feature_cwd_is_blocked(tmp_path):
+    """Scenario 3 — the bidirectional half, and the one that would be a real
+    hole. INVARIANT GUARD (green at origin/main). A feature-branch cwd must not
+    vouch for a `-C` target sitting on trunk."""
+    cwd = _mkrepo(tmp_path / "cwd-feat", branch=_FEATURE)
+    target = _mkrepo(tmp_path / "target-trunk", branch="trunk")
+    reason = gc.check_git_commit_to_main(f"git -C {target} commit -m x", str(cwd))
+    assert reason is not None
+    # The message must name the repo it JUDGED, not the cwd — the misattribution
+    # in the report ("repo: …/civitai-gpu-fleet") is what made it unreadable.
+    assert str(target) in reason and str(cwd) not in reason
+
+
+def test_S4_dash_C_to_the_allowlisted_trunk_deploy_repo_is_allowed(tmp_path):
+    """Scenario 4 — the allowlist must survive the `-C` hop. INVARIANT GUARD.
+    Judging the cwd instead would deny a commit that IS the correct workflow."""
+    cwd = _mkrepo(tmp_path / "cwd-trunk", branch="trunk")
+    talos = _mkrepo(tmp_path / "homelab-talos", branch="trunk", remote=_TALOS)
+    assert gc.check_git_commit_to_main(f"git -C {talos} commit -m deploy", str(cwd)) is None
+
+
+def test_S5_dash_C_after_the_subcommand_is_not_a_repo_selector(tmp_path):
+    """Scenario 5 — `git commit -C HEAD~1` is "reuse that commit's message", a
+    completely different flag. Reading it as a repo path is the permissive
+    misparse: it would hop the verdict away from the cwd. INVARIANT GUARD."""
+    repo = _mkrepo(tmp_path / "cwd-trunk", branch="trunk")
+    for cmd in ["git commit -C HEAD~1", "git commit -C HEAD", "git commit --reuse-message=HEAD~1"]:
+        assert gc.check_git_commit_to_main(cmd, str(repo)) is not None, cmd
+    # The collision made concrete: a real feature repo named AFTER the subcommand
+    # must not launder the commit either — post-subcommand `-C` is not a path.
+    feat = _mkrepo(tmp_path / "feat", branch=_FEATURE)
+    assert gc.check_git_commit_to_main(f"git commit -C {feat}", str(repo)) is not None
+
+
+def test_S6_a_named_target_that_is_not_a_repo_fails_CLOSED(tmp_path):
+    """🔴 Scenario 6 — REGRESSION coverage. RED at origin/main, green at HEAD.
+
+    An existing-but-not-a-git directory passed to `-C` used to suppress the check
+    entirely (`_resolve_dir` accepts any real dir; `_commit_to_main_reason` then
+    fails open on "no branch"), so the trunk cwd was never judged. The verdict
+    must fall back to the cwd and BLOCK.
+    """
+    cwd = _mkrepo(tmp_path / "cwd-trunk", branch="trunk")
+    plain = tmp_path / "just-a-directory"
+    plain.mkdir()
+    assert gc._git_read(str(plain), "rev-parse", "--show-toplevel") is None  # precondition
+    assert gc.check_git_commit_to_main(f"git -C {plain} commit -m x", str(cwd)) is not None
+    # …the same hole through git's other repo-selecting globals.
+    assert gc.check_git_commit_to_main(
+        f"git --git-dir={plain} commit -m x", str(cwd)) is not None
+    assert gc.check_git_commit_to_main(
+        f"git --work-tree {plain} commit -m x", str(cwd)) is not None
+
+
+def test_S6b_a_junk_named_target_cannot_be_vouched_for_by_a_real_one(tmp_path):
+    """The MIXED named set — one resolvable repo plus one junk target. Ambiguous
+    about where the commit lands, so it fails closed onto the cwd. This is the
+    test that distinguishes `not all(...)` from `not any(...)`."""
+    cwd = _mkrepo(tmp_path / "cwd-trunk", branch="trunk")
+    feat = _mkrepo(tmp_path / "feat", branch=_FEATURE)
+    plain = tmp_path / "just-a-directory"
+    plain.mkdir()
+    assert gc.check_git_commit_to_main(
+        f"git -C {feat} --git-dir={plain} commit -m x", str(cwd)) is not None
+
+
+def test_S6d_the_deny_explains_WHY_it_judged_the_cwd_instead(tmp_path):
+    """Falling back to the cwd produces a deny naming a repo the user never wrote
+    in the command — unreadable unless it says why. The two fallbacks have
+    DIFFERENT causes and must not share one message: `unresolved` is a path the
+    guard could not turn into a directory (a shell variable), this one is a path
+    that resolved fine and simply is not a repo. Asserted on the STATE (the named
+    path appears, and the not-a-worktree wording) rather than on any single word
+    another branch could also spell.
+    """
+    cwd = _mkrepo(tmp_path / "cwd-trunk", branch="trunk")
+    plain = tmp_path / "just-a-directory"
+    plain.mkdir()
+    reason = gc.check_git_commit_to_main(f"git -C {plain} commit -m x", str(cwd))
+    assert reason is not None
+    assert str(plain) in reason
+    assert "not a git worktree" in reason
+    # …and it must NOT claim the path was unresolvable — that is the other cause.
+    assert "could not resolve" not in reason
+
+
+def test_S6c_failing_closed_does_not_block_a_harmless_cwd(tmp_path):
+    """The other side of S6: falling back to the cwd is a FALLBACK, not a blanket
+    deny. From a feature-branch cwd the same unjudgeable `-C` stays allowed —
+    otherwise the fix would be indistinguishable from "always block"."""
+    cwd = _mkrepo(tmp_path / "cwd-feat", branch=_FEATURE)
+    plain = tmp_path / "just-a-directory"
+    plain.mkdir()
+    assert gc.check_git_commit_to_main(f"git -C {plain} commit -m x", str(cwd)) is None
+
+
+@pytest.mark.parametrize("branch", ["main", "master", "trunk"])
+def test_S7_every_main_branch_name_blocks_through_the_dash_C_hop(tmp_path, branch):
+    """Scenario 7 — all three names, judged through `-C` rather than the cwd, so
+    this pins the branch set on the RESOLVED repo and not just on the cwd path."""
+    cwd = _mkrepo(tmp_path / "cwd-feat", branch=_FEATURE)
+    target = _mkrepo(tmp_path / f"target-{branch.replace('/', '-')}", branch=branch)
+    assert gc.check_git_commit_to_main(
+        f"git -C {target} commit -m x", str(cwd)) is not None, branch
+
+
+def test_is_git_worktree_can_return_both_verdicts(tmp_path):
+    """Positive + negative control on the new helper itself. A helper stubbed to
+    a constant would make S6 pass for the wrong reason in one direction and S2 in
+    the other, so both are asserted here rather than inferred."""
+    repo = _mkrepo(tmp_path / "r", branch="main")
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert gc._is_git_worktree(str(repo)) is True
+    assert gc._is_git_worktree(str(plain)) is False
+    assert gc._is_git_worktree(str(tmp_path / "absent")) is False
+    assert gc._is_git_worktree(None) is False
+
 # --- 9. 🔴 WHICH TREE, AND THE HEREDOC SWALLOW (2026-08-11) ----------------- #
 #
 # Two defects, found by replaying real session transcripts rather than by

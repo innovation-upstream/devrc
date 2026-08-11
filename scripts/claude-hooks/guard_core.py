@@ -1569,6 +1569,18 @@ def _remote_slugs(repo_dir):
     return slugs
 
 
+def _is_git_worktree(repo_dir):
+    """Is `repo_dir` inside a git worktree at all?
+
+    The one question `_commit_to_main_reason` cannot answer for its caller: that
+    function FAILS OPEN on "no branch", and BOTH "not a git repo" and "detached
+    HEAD" arrive at that same `None`. An EMPTY RESULT cannot distinguish two
+    mechanisms, so the caller has to ask this separately rather than read it out
+    of a `None` that means several things at once.
+    """
+    return _git_read(repo_dir, "rev-parse", "--show-toplevel") is not None
+
+
 def _commit_to_main_reason(repo_dir):
     """The deny reason for committing in `repo_dir`, or None to allow.
 
@@ -1652,6 +1664,10 @@ def check_git_commit_to_main(cmd, cwd=None):
         on THAT repo alone. The command said where it acts, so the caller's cwd is
         irrelevant, and folding it in would deny the documented `git -C $WT commit`
         spelling whenever the cwd happened to sit on main.
+        🔴 UNLESS some named target is not a git worktree at all — then the named
+        repo answers nothing, and judging "on that repo alone" would mean judging on
+        nothing. That case falls back to the cwd candidates and blocks; see the
+        comment on `targets` below.
       * a BARE `git commit` is judged against the directory the shell is STANDING
         IN when it runs — the caller's cwd, moved by each `cd`/`pushd` that
         precedes it in the line, with subshell scope respected (`_commands_with_cwd`)
@@ -1704,7 +1720,39 @@ def check_git_commit_to_main(cmd, cwd=None):
             continue
         unresolved = []
         named = _argv_named_repo_dirs(argv, eff_cwd, cvars, unresolved)
-        candidates = named or ([eff_cwd] if eff_cwd else []) + env_named
+        # 🔴 A NAMED TARGET THAT IS NOT A GIT WORKTREE MUST NOT SUPPRESS THE CWD
+        # CHECK. Naming a repo hands the whole verdict to that repo, so if the
+        # named directory turns out not to be one, the branch check evaluates
+        # NOTHING and the command is allowed unchecked — a fail-OPEN, in the one
+        # check whose job is the silent failure. Measured against the live hook
+        # before this landed, cwd on `trunk`:
+        #     ALLOW  git -C <an-ordinary-directory> commit -m x
+        # The directory existing is what made it look answered: `_resolve_dir`
+        # returns any real directory, and `_commit_to_main_reason` then fails open
+        # on "no branch". So unless EVERY named target resolves to a worktree, fall
+        # back to the cwd the command actually stands in and judge that instead —
+        # the guard's documented posture for an unresolvable target ("treat it as
+        # the cwd repo and block"), the same direction an unresolvable `-C` already
+        # takes via `unresolved`.
+        #
+        # 🔴 This is a DIFFERENT failure from `unresolved`, and neither one covers
+        # the other: `unresolved` is a path the guard could not turn into a
+        # directory at all (a shell variable it cannot read), whereas this is a
+        # path that resolved perfectly well and simply is not a repo. The first
+        # already fell back; the second did not, and that gap was the fail-open.
+        #
+        # Deliberately "any target is not a worktree", not "no target is". They
+        # differ only on a MIXED named set — one real worktree plus one junk
+        # target, reachable by combining `-C` with `--git-dir`/`--work-tree`:
+        #     git -C <feature-repo> --git-dir=<an-ordinary-directory> commit
+        # Which repo that lands in is genuinely ambiguous (and `--git-dir` here
+        # resolves against the CWD, not against the `-C` hop), so it is exactly the
+        # "unparseable -> treat it as the cwd repo and block" case. Requiring only
+        # ONE to be a worktree would let a resolvable `-C` vouch for a junk sibling
+        # and allow it through.
+        not_worktrees = [d for d in named if not _is_git_worktree(d)]
+        targets = [] if not_worktrees else named
+        candidates = targets or ([eff_cwd] if eff_cwd else []) + env_named
         for repo_dir in candidates:
             reason = _commit_to_main_reason(repo_dir)
             if reason:
@@ -1715,6 +1763,13 @@ def check_git_commit_to_main(cmd, cwd=None):
                         f"text does not carry — so the caller's own directory was judged "
                         f"instead. If that is the wrong repo, pass `-C` an ABSOLUTE path, or "
                         f"assign the variable in this same command so the value is visible.)")
+                elif not_worktrees and repo_dir == eff_cwd:
+                    reason += (
+                        f"\n(This command names `{not_worktrees[0]}` as its repo, but that path "
+                        f"is not a git worktree, so it answers nothing about which branch the "
+                        f"commit would land on — the caller's own directory was judged instead. "
+                        f"Point `-C`/`--git-dir`/`--work-tree` at a real worktree if that is the "
+                        f"wrong repo.)")
                 return reason
     return None
 
