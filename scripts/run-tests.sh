@@ -184,32 +184,57 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 # fce27f2) while the value beside it had been bumped twice — to 6745 by #379.
 # A floor comment that no longer describes its own number is the "a comment is a
 # claim too" case from claude/RULES.md; rewritten rather than bumped again.
-# 2026-08-11 (feat/drift-host-parity). MEASURED ON THE MERGED TREE, and the
-# note above earns its keep twice over. CONTROL PAIR, same command, same
-# machine, base measured directly rather than read off the previous comment:
-#     base origin/main 9f17cfc : TOTAL collected=6968  passed=6967  failed=0
-#                                scripts/tests=1874
-#     this branch, merged      : TOTAL collected=6993  passed=6992  failed=0
-#                                scripts/tests=1899
-#   +25, and 1899-1874 = 25 = exactly the host-parity addition to
-#   scripts/tests/test_drift_check.py (24 tests + one new parametrize case on
-#   UNIT_PATH_REQUIREMENTS for `sort`). The per-directory delta is the positive
-#   control that the gate RUNS the new tests rather than merely tolerating them.
 #
-# 🔴 THREE NUMBERS IN THIS NOTE WERE WRONG BEFORE BEING MEASURED, which is the
-# point. The comment above says base is 6960; the base actually collects 6968,
-# because main moved again after that line was written. This branch first
-# measured 6770 against base c7059bb's 6745; #378 and #382 then landed and made
-# it stale before it could be pushed. Arithmetic from the stale pair predicted
-# 6985. The merged tree reports 6993. Do not carry a floor forward, do not
-# compute one, and do not trust the previous comment's base — re-measure both
-# sides. Counted from the runner's structured summary, never from an exit code.
+# 🔴 MERGE RESOLUTION (#376 <- origin/main). Both sides raised this floor
+# INDEPENDENTLY on different bases, so BOTH numbers are stale on the merged
+# tree — the BASE-DEPENDENT hazard above, arriving as a textual conflict:
+#     #376 feat/guard-commit-to-main  6897  (measured on base 5c53f38)
+#     origin/main via #378            6960  (measured on base 91aaa21)
+# The merged tree carries BOTH #376's guard-check suite and #378's
+# subsystem-resolver suite, so neither branch ever observed the real total.
+# Taking either side's number would have gone green on slack it never earned.
+# Re-MEASURED on the merged tree below, not computed from the two above.
+# MEASURED on the merged tree (this branch + origin/main @ 9f17cfc):
+#     TOTAL collected=7122  passed=7121  skipped=1  failed=0
+# and it reconciles exactly, so this is an accounting rather than a reading:
+#   main today                          6968  (= the 6960 floor + 7 from #380's
+#                                              test_settings_allow_junk.py and
+#                                              +1 from #386, neither of which
+#                                              raised the floor — that 8 of
+#                                              slack is exactly what a floor
+#                                              carried forward stops detecting)
+#   + this branch's guard-check suite    154  (test_guard_core.py 1156 -> 1310)
+#   = 7122
+# scripts/tests 1874 = #378's measured 1867 + #380's 7, confirming both landed.
+#
+# 🔴 SAME HAZARD, THIRD TIME IN ONE WEEK (feat/drift-host-parity, 2026-08-11).
+# This branch measured 6770 on base c7059bb; #378/#382 landed and it became
+# 6993 on base 9f17cfc; #376 then landed and it became the number below. Every
+# one of those was correct when measured and wrong within hours. The floor is
+# BASE-DEPENDENT and that is not a caveat, it is the normal case on a repo with
+# concurrent branches.
+#
+# MEASURED on the merged tree (this branch + origin/main @ e0cf5d2), not
+# computed from the pair above:
+#     TOTAL collected=7147  passed=7146  skipped=1  failed=0
+#     scripts/tests=1899
+# It reconciles, so this is an accounting and not just a reading:
+#   main today (post-#376)              7122
+#   + host-parity tests                   25  (test_drift_check.py 135 -> 160:
+#                                              24 new tests + one parametrize
+#                                              case on UNIT_PATH_REQUIREMENTS
+#                                              for `sort`)
+#   = 7147
+# and scripts/tests 1874 -> 1899 is the same +25 on the directory's OWN line —
+# the per-directory delta is the positive control that the gate RUNS the new
+# tests rather than merely tolerating them. Counted from the runner's structured
+# summary, never from an exit code.
 #
 # EXPECTED_SKIPS untouched: skipped=1, the one pinned entry. The host-parity
 # tests add ZERO skips by construction — every fixture is built in tmp_path, so
 # there is no `$HOME`-conditional skip (GUARD 2 forbids that shape by name, and
 # it is exactly the shape that would go green on the host that HAS the bug).
-MIN_TESTS="${MIN_TESTS:-6993}"
+MIN_TESTS="${MIN_TESTS:-7147}"
 
 # --- GUARD 1: tool precondition ------------------------------------------------
 # Every binary the suites `skipif` on. Absence must be an ERROR, never a skip.

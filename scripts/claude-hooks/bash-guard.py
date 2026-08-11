@@ -23,6 +23,13 @@ operator decision. The list today:
     PROGRAM name, so naming it in an argument is not a command.
   - dd of=/dev/<block-dev>   -> overwrites a disk in place (2026-08-02).
     `of=/dev/null` and the other pseudo sinks, and file-to-file dd, stay allowed.
+  - git commit on main/master/trunk -> feature branches only (2026-08-10; RULES 🔴 in
+    THREE files, and violated twice anyway — 2026-08-06 and 2026-08-09/PR #366).
+    Resolves the branch by shelling out to git, so it is the one check that reads
+    the world; `git commit --dry-run`, a detached HEAD, a repo with no remotes, and
+    the allowlisted homelab-talos (commit = live deploy) all stay allowed.
+  - pkill -f <pattern>       -> matches the caller's OWN command line (2026-08-10;
+    RULES 🔴). `pgrep -f` and `pkill <name>` without `-f` stay allowed.
   - large heredoc -> file    -> use the Write tool (token waste; audit-driven)
   - cd <path> && git ...     -> use git -C <path> (audit: #1 command shape, 1482x)
   - private key in a command -> reference the key file instead (never inline)
@@ -48,6 +55,7 @@ I/O contract (unchanged): reads PreToolUse JSON on stdin (`tool_name`,
 with a reason, exits 0.
 """
 import sys, os, json
+from typing import NoReturn
 
 POLICY = "claude-code"
 
@@ -59,7 +67,18 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
-def _deny(reason):
+def _deny(reason) -> NoReturn:
+    """Emit the deny verdict and EXIT. Never returns.
+
+    The `NoReturn` annotation is load-bearing documentation, not decoration: every
+    caller below relies on control not coming back, so `guard_core` and `reason`
+    can never be read unbound. Without it a type checker reports both as
+    "possibly unbound" — which reads exactly like a fail-open bug in a guard whose
+    whole contract is failing CLOSED. Measured before annotating, by forcing both
+    paths for real: a missing guard_core.py and an evaluate() that raises each
+    produced `rc=0` with a `"deny"` verdict, never a traceback. The annotation
+    makes the checker agree with the measurement instead of contradicting it.
+    """
     print(json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
@@ -81,22 +100,45 @@ def main():
     if not cmd:
         sys.exit(0)
 
+    # The PreToolUse payload carries the session's working directory. Pass it
+    # through: check_git_commit_to_main resolves WHICH REPO a `git commit` acts on,
+    # and a command with no `-C` hop is answerable only from the cwd. Falling back
+    # to the hook process's own cwd would usually agree, but "usually" is how a
+    # guard ends up reporting on the wrong repo. `.get` with no default, so an
+    # older/other harness that omits the key still gets a verdict.
+    cwd = data.get("cwd")
+    if not isinstance(cwd, str) or not cwd:
+        cwd = None
+
     # 🔴 FAIL CLOSED, LOUDLY. If the core cannot be imported (a partial
     # home-manager switch, a deleted file) the guard must not silently pass
     # every command — that is the failure mode where the operator believes they
     # are protected and are not. Denying with an actionable reason is the only
     # honest option, and the reason names the fix.
+    # 🔴 BaseException, not Exception. `except Exception` leaves a MEASURED
+    # fail-open: a BaseException out of the checker (KeyboardInterrupt, or a
+    # SystemExit from anything the core imports) escapes, the hook dies on a
+    # traceback with rc=-2, and for a PreToolUse hook that is NOT a block — only
+    # exit code 2 blocks, so every other non-zero status lets the command RUN.
+    # Measured on this file before the widening:
+    #     guard_core.py missing        -> rc=0, deny   (fails closed)
+    #     evaluate() raises Exception  -> rc=0, deny   (fails closed)
+    #     evaluate() raises BaseExc.   -> rc=-2, ALLOW (🔴 failed OPEN)
+    # A guard whose docstring promises "FAIL CLOSED, LOUDLY" must not have a
+    # third path that fails open. Swallowing KeyboardInterrupt is the correct
+    # trade here: this is a one-shot process per Bash call, and denying on an
+    # interrupt is the safe direction.
     try:
         import guard_core
-    except Exception as exc:
+    except BaseException as exc:
         _deny(f"bash-guard could not load guard_core.py ({exc}). The Bash guard is "
               f"NOT running, so this call is denied rather than passed through "
               f"unchecked. Fix: ensure guard_core.py sits next to bash-guard.py "
               f"(~/.claude/hooks/guard_core.py) — re-run `home-manager switch`.")
 
     try:
-        reason = guard_core.evaluate(cmd, POLICY)
-    except Exception as exc:
+        reason = guard_core.evaluate(cmd, POLICY, cwd)
+    except BaseException as exc:
         _deny(f"bash-guard crashed while checking this command ({exc}). Denying rather "
               f"than passing it through unchecked. Report this — the command text is "
               f"what reproduces it.")
