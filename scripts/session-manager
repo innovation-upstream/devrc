@@ -1,0 +1,959 @@
+#!/usr/bin/env python3
+"""session-manager — cross-host tmux + agent-activity view (workbench + laptop).
+
+WHAT IT ANSWERS
+---------------
+"Show me every tmux window on both hosts, which ones have Claude Code running,
+what they are doing, and what ClickHouse says about recent agent sessions."
+Today that requires stitching `agent-ops` (local-only popup, no JSON API),
+`tmux list-panes -a` per host, a manual `curl` at ClickHouse, and the fuzzyclaw
+task files.
+
+RELATIONSHIP TO agent-ops
+-------------------------
+`agent-ops` is the always-on tmux popup. This is its queryable/programmatic
+counterpart: one-shot, `--json`-first, and cross-host. It deliberately does NOT
+share agent-ops' `/proc` BFS — see "HONEST LIMITS" below.
+
+ARCHITECTURE
+------------
+Every fact-producing function is either PURE or takes an injected runner /
+client / clock, so the whole test suite is hermetic: it never runs tmux, never
+opens a socket, and never touches a real window. The impure edge is exactly
+three seams — `_default_runner` (subprocess), `make_ch_client` (HTTP), and
+`_read_text` (filesystem).
+
+🔴 SILENT-ZERO DISCIPLINE (the reason for most of the shape here)
+-----------------------------------------------------------------
+A zero that means "measured, and it is genuinely zero" and a zero that means
+"the measurement never happened" are DIFFERENT FACTS, and a tool that renders
+them the same trains its reader to believe the wrong one. So:
+
+  * every host carries `reachable` + `error`, never just an empty list;
+  * ClickHouse returns a `status` discriminant (`ok` / `unreachable` /
+    `query_error` / `skipped` / `unavailable`) beside its rows, so an empty
+    `rows` is only ever believed when `status == "ok"`;
+  * fuzzyclaw reports `files_seen` / `files_live` / `files_unparseable`, so
+    "no live tasks" is distinguishable from "no task files at all";
+  * `tmux` exiting non-zero with "no server running" is a REACHABLE host with
+    zero windows, not an unreachable host — the two get different exit codes;
+  * the process exit code separates "ran, found nothing" (EXIT_EMPTY) from
+    "could not run" (EXIT_UNAVAILABLE). A caller must never read success off a
+    truncated run.
+
+🔴 FUZZYCLAW IS ONLY USABLE INTERSECTED WITH LIVE WINDOWS
+---------------------------------------------------------
+`CLAUDE.md` marks `~/.tmux/tasks/*.json` UNTRUSTED. Measured on the workbench
+2026-08-11: 400 files, 44 live tmux windows, **43 intersect and 357 do not** —
+89% stale, 0 unparseable. So the defect is staleness, not corruption, and it is
+filterable. `filter_live_tasks()` performs that intersection and it is a
+LOAD-BEARING GUARD, not a cosmetic filter: without it 89% of the rows are lies.
+It carries a mutation test (`test_session_manager.py`). The precedent is
+`scripts/tmux-scratch-status.sh:28-34`, which already does exactly this and says
+why in its own comment.
+
+HONEST LIMITS (stated, not implied away)
+----------------------------------------
+  * Claude detection is `pane_current_command =~ /claude/`, which is SHALLOWER
+    than agent-ops' `/proc` descendant walk. It sees `claude` running as the
+    pane's foreground command (the live shape on both hosts today) and MISSES a
+    `claude` buried under a wrapper shell. It is used because `/proc` is not
+    reachable over SSH, so a deeper local check would make the two hosts report
+    by different rules — a worse defect than a shallow one applied uniformly.
+  * fuzzyclaw is read on the LOCAL host only; the task files are local state.
+    A remote window therefore has `fuzzyclaw: null` and `claude_session_id:
+    null`, and its `age_secs` is null (age is derived from the task file's
+    `last_activity`). Remote rows are still classified busy/idle from the pane
+    title glyph.
+  * `tail --stream` is NOT implemented. Only the one-shot `capture-pane` dump.
+  * `signal` / `kill` are NOT implemented — deliberately deferred.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+HOME = os.path.expanduser("~")
+
+# --------------------------------------------------------------------------- #
+# Shared ClickHouse client. `scripts/validation/chquery.py` is a LIBRARY
+# (CHClient / CHConn, no __main__), so it is imported by a sys.path insert
+# resolved relative to THIS file — not to $DEVRC_DIR, which is wrong inside a
+# worktree and absent in the nix build sandbox.
+# --------------------------------------------------------------------------- #
+sys.path.insert(0, os.path.join(_HERE, "validation"))
+try:
+    import chquery as _chq  # noqa: E402
+    CH_IMPORT_ERROR = None
+except Exception as _e:  # noqa: BLE001 — degrade, never crash the whole scan
+    _chq = None
+    CH_IMPORT_ERROR = f"{type(_e).__name__}: {_e}"
+
+# ClickHouse creds: the collector's own env file on this host. NEVER a hardcoded
+# endpoint and never a hardcoded password.
+ACTIVITY_ENV = os.path.join(HOME, ".config", "activity-collector", "env")
+
+# --------------------------------------------------------------------------- #
+# 🔴 The laptop's SSH target. `10.42.0.100` is the LAPTOP on nebula;
+# `10.42.0.10` is the homelab GATEWAY. Getting this wrong does not fail loudly —
+# SSH succeeds against a real host and reports the gateway's tmux state as the
+# laptop's. Matches `claude/skills/standup/standup.sh:26`, the repo's only
+# existing precedent. The LAN address is same-network-only, so a LAN-first probe
+# buys a timeout on every scan of a laptop that usually is not on this network.
+# Pinned by a test.
+# --------------------------------------------------------------------------- #
+LAPTOP_SSH_TARGET = "zach@10.42.0.100"
+SSH_OPTS = ("-o", "BatchMode=yes", "-o", "ConnectTimeout=4",
+            "-o", "StrictHostKeyChecking=accept-new")
+SSH_TIMEOUT = 12.0
+LOCAL_TIMEOUT = 5.0
+
+HOST_NAMES = ("workbench", "laptop")
+DEFAULT_LOCAL_HOST = "workbench"
+
+# The 8-field pipe format, IDENTICAL to agent-ops' (`list_tmux_panes_raw`).
+# pane_title is LAST because it carries the agent's task and may itself contain
+# '|' — parse_panes absorbs trailing pipes into it via a bounded maxsplit.
+PANE_FORMAT = ("#{pane_id}|#{pane_pid}|#{session_name}|#{window_index}|"
+               "#{window_name}|#{pane_current_path}|#{pane_current_command}|"
+               "#{pane_title}")
+TMUX_PANES_ARGV = ("tmux", "list-panes", "-a", "-F", PANE_FORMAT)
+TMUX_WINDOWS_ARGV = ("tmux", "list-windows", "-a", "-F", "#{window_id}")
+
+FUZZYCLAW_DIR = os.path.join(HOME, ".tmux", "tasks")
+SCRATCH_SLOTS_DEPLOYED = os.path.join(HOME, ".config", "tmux", "scratch-slots.sh")
+SCRATCH_SLOTS_REPO = os.path.join(_HERE, "tmux-scratch-slots.sh")
+# A SCRATCH_SLOTS entry is "scratch4:V:#83a598:Vapor" (session:key:color:name).
+# Same regex as agent-ops / initiative-scan — one table, one parser.
+_SLOT_RE = re.compile(r'"([^":]+):([^":]+):(#[0-9a-fA-F]{6}):([^":]+)"')
+
+DEFAULT_STALE_THRESHOLD = 3600      # 1h
+DEFAULT_TAIL_LINES = 100
+
+CLAUDE_RE = re.compile(r"claude", re.IGNORECASE)
+
+# Claude Code renders a leading status glyph in the pane_title: a BRAILLE
+# spinner while working, a "sparkle" at rest. Same taxonomy as agent-ops.
+_BRAILLE_LO, _BRAILLE_HI = 0x2800, 0x28FF
+_SPARKLE_GLYPHS = frozenset("✳✻✽✶✷✢✺❋✱*")
+
+# `tmux` says this on stderr and exits non-zero when no server is running. That
+# is a REACHABLE host with zero windows — collapsing it into "unreachable" is
+# the silent-zero failure in its most literal form.
+_NO_SERVER_RE = re.compile(r"no server running|error connecting to", re.IGNORECASE)
+
+# --------------------------------------------------------------------------- #
+# Exit contract. "Ran, found nothing" and "could not run" MUST be distinct — a
+# caller reading success off a truncated run is the whole hazard.
+# --------------------------------------------------------------------------- #
+EXIT_OK = 0            # the scan ran and produced at least one window row
+EXIT_USAGE = 2         # bad arguments / bad target
+EXIT_EMPTY = 3         # every requested host answered; the answer is a real 0
+EXIT_UNAVAILABLE = 4   # NO requested host could be reached — the 0 is unmeasured
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE ClickHouse CONTRACT. Verified against the live table 2026-08-11.
+# There is NO `first_message` column (13 columns, none named that) — the earlier
+# draft's query fails outright with `Code: 47 … UNKNOWN_IDENTIFIER`. The first
+# prompt is RECONSTRUCTED with argMinIf(text, ts, kind = 'prompt'), which is
+# populated for both `claude` and `opencode`.
+# Pinned verbatim by a contract test that types its own copy of this string.
+# --------------------------------------------------------------------------- #
+SQL_RECENT_SESSIONS = (
+    "SELECT session, argMax(project, ingested_at) AS project, "
+    "argMinIf(text, ts, kind = 'prompt') AS first_msg, max(ts) AS last_seen "
+    "FROM activity.events "
+    "WHERE source IN ('claude','opencode') AND ts > now() - INTERVAL 1 DAY "
+    "GROUP BY session ORDER BY last_seen DESC LIMIT 20"
+)
+
+
+def sql_session_history(session_id: str, limit: int = 10) -> str:
+    """Per-session prompt history. The id is quoted by chquery's ONE quoter."""
+    if _chq is None:
+        raise RuntimeError("chquery unavailable: %s" % CH_IMPORT_ERROR)
+    return (
+        "SELECT ts, kind, left(text, 200) AS snippet FROM activity.events "
+        f"WHERE session = {_chq.sql_quote(session_id)} "
+        f"AND ts > now() - INTERVAL 1 DAY ORDER BY ts DESC LIMIT {int(limit)}"
+    )
+
+
+# =========================================================================== #
+# PURE — parsing
+# =========================================================================== #
+def parse_panes(raw: str) -> list:
+    """Split raw `tmux list-panes -a` output into pane dicts. Tolerates junk.
+
+    pane_title is the LAST field and may itself contain '|', so the split uses
+    maxsplit=7 and any trailing pipes land inside the title. A 7-field line (no
+    title at all) degrades to an empty title rather than being dropped; a line
+    whose pane_pid is not a number is junk and is dropped.
+    """
+    panes = []
+    for line in (raw or "").splitlines():
+        parts = line.split("|", 7)
+        if len(parts) < 7:
+            continue
+        pid = parts[1]
+        if not pid.isdigit():
+            continue
+        panes.append({
+            "pane_id": parts[0],
+            "pane_pid": int(pid),
+            "session": parts[2],
+            "window_index": parts[3],
+            "window_name": parts[4].rstrip(" ●").strip(),
+            "path": parts[5],
+            "command": parts[6],
+            "title": (parts[7].strip() if len(parts) >= 8 else ""),
+        })
+    return panes
+
+
+def parse_window_ids(raw: str) -> set:
+    """`tmux list-windows -a -F '#{window_id}'` output -> {'@1', '@5', ...}."""
+    return {ln.strip() for ln in (raw or "").splitlines() if ln.strip()}
+
+
+def load_scratch_codenames(paths=None, reader=None) -> dict:
+    """`{session: codename}` from the SCRATCH_SLOTS table.
+
+    Tries each path in order (deployed first, then in-repo) and returns the
+    first non-empty mapping. {} on any failure — codenames are a display nicety,
+    never a hard dependency.
+    """
+    reader = reader or _read_text
+    for p in (paths if paths is not None
+              else (SCRATCH_SLOTS_DEPLOYED, SCRATCH_SLOTS_REPO)):
+        text = reader(p)
+        if text is None:
+            continue
+        mapping = {session: name
+                   for session, _key, _color, name in _SLOT_RE.findall(text)}
+        if mapping:
+            return mapping
+    return {}
+
+
+def _is_braille(ch: str) -> bool:
+    return bool(ch) and _BRAILLE_LO <= ord(ch[0]) <= _BRAILLE_HI
+
+
+def strip_status_glyph(title: str) -> str:
+    """Drop a leading Claude status glyph (spinner / sparkle) + whitespace."""
+    t = (title or "").replace("\n", " ").strip()
+    if not t:
+        return ""
+    if _is_braille(t[0]) or t[0] in _SPARKLE_GLYPHS:
+        return t[1:].strip()
+    return t
+
+
+def busy_from_title(title: str):
+    """Busy tri-state from the leading glyph: spinner -> True, sparkle ->
+    False, neither -> None (unknown). Same taxonomy as agent-ops."""
+    t = (title or "").strip()
+    if not t:
+        return None
+    if _is_braille(t[0]):
+        return True
+    if t[0] in _SPARKLE_GLYPHS:
+        return False
+    return None
+
+
+def pane_is_claude(pane) -> bool:
+    """Shallow, UNIFORM Claude detection — see HONEST LIMITS in the header."""
+    return bool(CLAUDE_RE.search((pane or {}).get("command", "") or ""))
+
+
+def classify_status(busy, age_secs, threshold) -> str:
+    """busy / idle / stale / unknown.
+
+    `stale` WINS over busy/idle: a window whose last recorded activity is older
+    than the threshold is stale whatever glyph its title still shows, because
+    the glyph is a snapshot of a possibly-abandoned process.
+
+    The boundary is INCLUSIVE (`age >= threshold` is stale) — pinned by tests
+    measured at the boundary AND well inside/outside it, because one point is
+    not a claim about a threshold.
+    """
+    if age_secs is not None and threshold is not None and age_secs >= threshold:
+        return "stale"
+    if busy is True:
+        return "busy"
+    if busy is False:
+        return "idle"
+    return "unknown"
+
+
+def parse_iso_epoch(value):
+    """ISO-8601 (with or without offset, `Z` accepted) -> epoch secs, else None."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    s = value.strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+# =========================================================================== #
+# PURE — fuzzyclaw
+# =========================================================================== #
+# 🔴 THE FIELD LEDGER. This is the EXACT set of task-file keys this script
+# consumes. It is asserted by a test that fails when the set GROWS *or* SHRINKS,
+# because both directions are silent breakage: a key that vanishes upstream
+# turns a real field into a permanent null, and a key added here without being
+# accounted for widens the trust surface of a source CLAUDE.md marks UNTRUSTED.
+# Measured on 400 live files 2026-08-11: 396 carry all 11 keys, 4 predate
+# `transcript_path` and carry 10. The spec's field list omitted transcript_path.
+FUZZYCLAW_FIELDS = frozenset({
+    "task", "window_id", "tmux_session", "window_index", "status",
+    "cwd", "claude_session", "started", "last_activity", "summary",
+    "transcript_path",
+})
+
+
+def task_from_file_obj(obj) -> dict:
+    """Project ONE parsed task file onto the field ledger.
+
+    Reads each ledger key exactly once via `.get()` and nothing else — no
+    `**obj`, no iteration over obj's keys — so a test can hand it a key-tracking
+    mapping and observe the consumed set BEHAVIOURALLY rather than trusting the
+    constant above.
+    """
+    return {
+        "task": obj.get("task"),
+        "window_id": obj.get("window_id"),
+        "tmux_session": obj.get("tmux_session"),
+        "window_index": obj.get("window_index"),
+        "status": obj.get("status"),
+        "cwd": obj.get("cwd"),
+        "claude_session": obj.get("claude_session"),
+        "started": obj.get("started"),
+        "last_activity": obj.get("last_activity"),
+        "summary": obj.get("summary"),
+        "transcript_path": obj.get("transcript_path"),
+    }
+
+
+def filter_live_tasks(raw_texts, live_window_ids) -> dict:
+    """Parse fuzzyclaw task-file bodies, keeping ONLY live tmux windows.
+
+    `raw_texts` is an iterable of file bodies (str) — the caller owns the I/O.
+
+    🔴 THE INTERSECTION IS A LOAD-BEARING GUARD, NOT A FILTER. 89% of the task
+    files on the workbench point at windows that no longer exist (measured:
+    357/400). Without this check the great majority of every row this script
+    emits would be a lie about a window that is gone. Precedent + rationale:
+    `scripts/tmux-scratch-status.sh:28-34`. It has a mutation test.
+
+    Returns a counted result, never a bare list, so "0 live tasks" is
+    distinguishable from "0 task files":
+        {"tasks": [...], "files_seen": N, "files_live": M, "files_unparseable": K}
+    """
+    live = set(live_window_ids or ())
+    tasks, seen, bad = [], 0, 0
+    for text in (raw_texts or ()):
+        seen += 1
+        try:
+            obj = json.loads(text)
+        except Exception:  # noqa: BLE001 — unparseable is SKIPPED, never fatal
+            bad += 1
+            continue
+        if not isinstance(obj, dict):
+            bad += 1
+            continue
+        # ---- the guard ----------------------------------------------------
+        if obj.get("window_id") not in live:
+            continue
+        # -------------------------------------------------------------------
+        tasks.append(task_from_file_obj(obj))
+    return {"tasks": tasks, "files_seen": seen,
+            "files_live": len(tasks), "files_unparseable": bad}
+
+
+def index_tasks_by_window(tasks) -> dict:
+    """{(tmux_session, window_index_as_str): task}.
+
+    The pane format carries no `window_id`, so the pane<->task join runs on
+    (session, window_index) while the STALENESS guard runs on window_id. Two
+    different keys doing two different jobs, deliberately.
+    """
+    out = {}
+    for t in (tasks or ()):
+        sess = t.get("tmux_session")
+        idx = t.get("window_index")
+        if sess is None or idx is None:
+            continue
+        out[(str(sess), str(idx))] = t
+    return out
+
+
+# =========================================================================== #
+# PURE — folding panes into window rows
+# =========================================================================== #
+def fold_windows(panes, host, codenames=None, task_index=None,
+                 threshold=DEFAULT_STALE_THRESHOLD, now=None) -> list:
+    """Collapse panes into one row per (session, window_index).
+
+    A window is `claude` if ANY of its panes is; the row's task/busy/pane_id
+    come from the first Claude pane when there is one, else the first pane.
+    """
+    now = time.time() if now is None else now
+    codenames = codenames or {}
+    task_index = task_index or {}
+    order, groups = [], {}
+    for p in (panes or ()):
+        key = (p.get("session"), p.get("window_index"))
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(p)
+
+    rows = []
+    for key in order:
+        members = groups[key]
+        lead = next((p for p in members if pane_is_claude(p)), members[0])
+        session, widx = key
+        task = task_index.get((str(session), str(widx)))
+        age = None
+        if task is not None:
+            last = parse_iso_epoch(task.get("last_activity"))
+            if last is not None:
+                age = max(0.0, now - last)
+        busy = busy_from_title(lead.get("title", ""))
+        rows.append({
+            "host": host,
+            "session": session,
+            "window_index": widx,
+            "window_name": lead.get("window_name", ""),
+            "codename": codenames.get(session),
+            "pane_id": lead.get("pane_id"),
+            "path": lead.get("path", ""),
+            "command": lead.get("command", ""),
+            "task": strip_status_glyph(lead.get("title", "")),
+            "claude": any(pane_is_claude(p) for p in members),
+            "busy": busy,
+            "age_secs": age,
+            "status": classify_status(busy, age, threshold),
+            "claude_session_id": (task or {}).get("claude_session"),
+            "fuzzyclaw": task,
+            "panes": len(members),
+        })
+    return rows
+
+
+def summarize(report) -> dict:
+    rows = [r for h in report["hosts"].values() for r in h["windows"]]
+    counts = {"busy": 0, "idle": 0, "stale": 0, "unknown": 0}
+    for r in rows:
+        counts[r["status"]] = counts.get(r["status"], 0) + 1
+    return {
+        "total_sessions": len(rows),
+        "claude": sum(1 for r in rows if r["claude"]),
+        "busy": counts["busy"],
+        "idle": counts["idle"],
+        "stale": counts["stale"],
+        "unknown": counts["unknown"],
+        "hosts_reachable": sorted(k for k, v in report["hosts"].items()
+                                  if v["reachable"]),
+        "hosts_unreachable": sorted(k for k, v in report["hosts"].items()
+                                    if not v["reachable"]),
+        "fuzzyclaw_live": report["fuzzyclaw"]["files_live"],
+    }
+
+
+def exit_code_for(report) -> int:
+    """🔴 The exit contract. See EXIT_* above."""
+    hosts = report.get("hosts") or {}
+    if not hosts or not any(h.get("reachable") for h in hosts.values()):
+        return EXIT_UNAVAILABLE
+    return EXIT_OK if report["summary"]["total_sessions"] else EXIT_EMPTY
+
+
+# =========================================================================== #
+# IMPURE EDGE — three seams, all injectable
+# =========================================================================== #
+def _read_text(path):
+    """File body, or None. Never raises."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
+def _default_runner(argv, timeout):
+    """(returncode, stdout, stderr). argv is a LIST — never a shell string."""
+    p = subprocess.run(list(argv), capture_output=True, text=True,
+                       timeout=timeout)
+    return p.returncode, p.stdout, p.stderr
+
+
+def ssh_wrap(argv, target=LAPTOP_SSH_TARGET):
+    """Wrap an argv for remote execution over SSH.
+
+    `shlex.join` is load-bearing: the remote side runs a SHELL, so the tmux
+    format string (which contains `{`, `}`, `#` and `|`) must arrive quoted.
+    """
+    return ["ssh", *SSH_OPTS, target, shlex.join(list(argv))]
+
+
+def read_fuzzyclaw_texts(directory=FUZZYCLAW_DIR, lister=None, reader=None):
+    """Bodies of every `*.json` under the task dir. [] when the dir is absent."""
+    reader = reader or _read_text
+    if lister is None:
+        try:
+            names = sorted(n for n in os.listdir(directory)
+                           if n.endswith(".json"))
+        except OSError:
+            return []
+        paths = [os.path.join(directory, n) for n in names]
+    else:
+        paths = list(lister(directory))
+    out = []
+    for p in paths:
+        text = reader(p)
+        if text is not None:
+            out.append(text)
+    return out
+
+
+def run_tmux(argv, host, local_host, runner=None, timeout=None):
+    """Run a tmux argv on `host`, locally or over SSH.
+
+    Returns {"reachable", "error", "stdout"}. A non-zero exit whose stderr says
+    "no server running" is REACHABLE with empty output — see the silent-zero
+    note in the header.
+    """
+    runner = runner or _default_runner
+    if host == local_host:
+        cmd, tmo = list(argv), (timeout or LOCAL_TIMEOUT)
+    else:
+        cmd, tmo = ssh_wrap(argv), (timeout or SSH_TIMEOUT)
+    try:
+        rc, out, err = runner(cmd, tmo)
+    except Exception as e:  # noqa: BLE001 — timeout / OSError / anything
+        return {"reachable": False, "stdout": "",
+                "error": f"{type(e).__name__}: {e}"}
+    if rc != 0:
+        if _NO_SERVER_RE.search(err or ""):
+            return {"reachable": True, "stdout": "", "error": None}
+        return {"reachable": False, "stdout": "",
+                "error": ((err or "").strip() or f"exit {rc}")}
+    return {"reachable": True, "stdout": out, "error": None}
+
+
+def local_host_label(env=None, env_file=None) -> str:
+    """This machine's ACTIVITY_HOST label. `hostname` is "nixos" on BOTH hosts,
+    so the collector's env file is the source of truth. Defaults to workbench."""
+    e = os.environ if env is None else env
+    v = (e.get("ACTIVITY_HOST") or "").strip().lower()
+    if v in HOST_NAMES:
+        return v
+    text = _read_text(env_file or ACTIVITY_ENV)
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if line.startswith("ACTIVITY_HOST="):
+            val = line[len("ACTIVITY_HOST="):].strip()
+            if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+                val = val[1:-1]
+            val = val.strip().lower()
+            if val in HOST_NAMES:
+                return val
+    return DEFAULT_LOCAL_HOST
+
+
+def make_ch_client(env_file=ACTIVITY_ENV, opener=None):
+    """Build a CHClient from the collector's env file. Raises on failure.
+
+    🔴 WORKBENCH ENDPOINT ONLY, and it is READ from that file rather than
+    hardcoded — both hosts ship to the same homelab ClickHouse pod, so one
+    endpoint holds the full dataset, and the password must never live in source.
+    """
+    if _chq is None:
+        raise RuntimeError("chquery unavailable: %s" % CH_IMPORT_ERROR)
+    # Process env WINS, the file fills gaps — so an operator can override the
+    # endpoint for one invocation without editing a chmod-600 credentials file.
+    env = dict(os.environ)
+    for line in (_read_text(env_file) or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k, v = k.strip(), v.strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+            v = v[1:-1]
+        env.setdefault(k, v)
+    return _chq.CHClient(_chq.CHConn.from_env(env), opener=opener)
+
+
+def ch_query(client, sql) -> dict:
+    """Run one query, returning a STATUS-DISCRIMINATED result.
+
+    🔴 The whole point: `rows == []` is only believable when status == "ok".
+    A failed or unreachable query NEVER collapses into an empty list.
+    """
+    if client is None:
+        return {"status": "skipped", "rows": [], "error": None, "code": None}
+    try:
+        rows = client.rows(sql)
+    except Exception as e:  # noqa: BLE001
+        code = getattr(e, "code", None)
+        if _chq is not None and isinstance(e, _chq.CHUnreachable):
+            kind = "unreachable"
+        elif _chq is not None and isinstance(e, _chq.CHQueryError):
+            kind = "query_error"
+        else:
+            kind = "error"
+        return {"status": kind, "rows": [], "error": f"{type(e).__name__}: {e}",
+                "code": code}
+    return {"status": "ok", "rows": rows, "error": None, "code": None}
+
+
+# =========================================================================== #
+# GATHER — the one assembly point
+# =========================================================================== #
+def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
+           use_fuzzyclaw=True, threshold=DEFAULT_STALE_THRESHOLD, now=None,
+           ch_client_factory=None, fuzzyclaw_texts=None,
+           codenames=None, ch_sql=SQL_RECENT_SESSIONS) -> dict:
+    """Build the whole report. Every source is injectable, so this is the
+    function the hermetic suite exercises end-to-end.
+
+    🔴 `ch_client_factory` defaults to None and is resolved to `make_ch_client`
+    AT CALL TIME, not bound as a default argument. A default of
+    `ch_client_factory=make_ch_client` captures the ORIGINAL function object at
+    def time, so patching the module attribute would not be honoured here — the
+    test suite's "no real network" guard would have been silently bypassed on
+    exactly the path (`main()` -> `gather()`) that has no injection point.
+    """
+    now = time.time() if now is None else now
+    local_host = local_host or local_host_label()
+    hosts = [h for h in hosts if h in HOST_NAMES]
+    codenames = load_scratch_codenames() if codenames is None else codenames
+
+    # --- fuzzyclaw (LOCAL host only — the task files are local state) --------
+    if use_fuzzyclaw:
+        texts = (read_fuzzyclaw_texts() if fuzzyclaw_texts is None
+                 else list(fuzzyclaw_texts))
+    else:
+        texts = []
+
+    report = {
+        "ts": datetime.fromtimestamp(now, timezone.utc)
+              .strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "local_host": local_host,
+        "stale_threshold_secs": threshold,
+        "hosts": {},
+        "clickhouse": {"status": "skipped", "rows": [], "error": None,
+                       "code": None, "sql": ch_sql if use_ch else None},
+        "fuzzyclaw": {"status": "skipped", "tasks": [], "files_seen": 0,
+                      "files_live": 0, "files_unparseable": 0},
+        "summary": {},
+    }
+
+    # --- per host: ONE tmux call each for panes and for live window ids ------
+    local_live_windows = set()
+    raw_panes = {}
+    for host in hosts:
+        panes_res = run_tmux(TMUX_PANES_ARGV, host, local_host, runner=runner)
+        wins_res = run_tmux(TMUX_WINDOWS_ARGV, host, local_host, runner=runner)
+        raw_panes[host] = panes_res["stdout"]
+        report["hosts"][host] = {
+            "reachable": bool(panes_res["reachable"]),
+            "error": panes_res["error"],
+            "ssh_target": None if host == local_host else LAPTOP_SSH_TARGET,
+            "windows": [],
+            "live_window_ids": sorted(parse_window_ids(wins_res["stdout"])),
+        }
+        if host == local_host:
+            local_live_windows = parse_window_ids(wins_res["stdout"])
+
+    # --- 🔴 the intersection guard, then the pane<->task join ----------------
+    if use_fuzzyclaw:
+        report["fuzzyclaw"] = {"status": "ok",
+                               **filter_live_tasks(texts, local_live_windows)}
+    task_index = index_tasks_by_window(report["fuzzyclaw"]["tasks"])
+
+    for host in hosts:
+        entry = report["hosts"][host]
+        if not entry["reachable"]:
+            continue
+        entry["windows"] = fold_windows(
+            parse_panes(raw_panes.get(host, "")), host, codenames=codenames,
+            # fuzzyclaw is LOCAL-only: a remote row gets no task, no session id
+            # and no age. Stated, not implied away.
+            task_index=(task_index if host == local_host else {}),
+            threshold=threshold, now=now)
+
+    # --- ClickHouse ----------------------------------------------------------
+    if use_ch:
+        client = None
+        factory = ch_client_factory or make_ch_client   # resolved AT CALL TIME
+        try:
+            client = factory()
+        except Exception as e:  # noqa: BLE001
+            report["clickhouse"] = {"status": "unavailable", "rows": [],
+                                    "error": f"{type(e).__name__}: {e}",
+                                    "code": None, "sql": ch_sql}
+        if client is not None:
+            res = ch_query(client, ch_sql)
+            res["sql"] = ch_sql
+            report["clickhouse"] = res
+
+    report["summary"] = summarize(report)
+    return report
+
+
+# =========================================================================== #
+# RENDER
+# =========================================================================== #
+def _fmt_age(secs):
+    if secs is None:
+        return "—"
+    s = int(secs)
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m"
+    if s < 86400:
+        return f"{s // 3600}h"
+    return f"{s // 86400}d"
+
+
+_STATUS_GLYPH = {"busy": "▶ busy", "idle": "● idle",
+                 "stale": "· stale", "unknown": "? unk"}
+
+
+def _trunc(s, n):
+    s = "" if s is None else str(s)
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def render_table(report) -> str:
+    """Human-readable frame. MUST survive zero sessions and an unreachable host
+    (pinned by a test) and MUST show a failed ClickHouse query as a failure
+    rather than as an empty section."""
+    out = []
+    hosts = report.get("hosts") or {}
+    summ = report.get("summary") or {}
+    out.append(f"CROSS-HOST SESSION MANAGER    local={report.get('local_host')}"
+               f"    {report.get('ts')}")
+    out.append("")
+
+    for name in sorted(hosts):
+        h = hosts[name]
+        if not h.get("reachable"):
+            tgt = h.get("ssh_target") or "local"
+            out.append(f"▸ {name.upper()}: UNREACHABLE ({tgt}) — "
+                       f"{_trunc(h.get('error') or 'unknown error', 90)}")
+            out.append("  (no window data; this is NOT zero windows)")
+            out.append("")
+
+    rows = [r for name in sorted(hosts) for r in hosts[name].get("windows", [])]
+    out.append(f"▸ TMUX WINDOWS ({len(rows)})")
+    if not rows:
+        reach = summ.get("hosts_reachable") or []
+        out.append("  (none)" if reach
+                   else "  (no host answered — nothing was measured)")
+    else:
+        out.append("  HOST       SESSION       WIN  CODENAME   TASK"
+                   "                              STATUS    AGE")
+        out.append("  " + "─" * 100)
+        for r in rows:
+            out.append(
+                "  {:<9}  {:<12}  {:<3}  {:<9}  {:<34}  {:<8}  {:<4}".format(
+                    _trunc(r.get("host"), 9), _trunc(r.get("session"), 12),
+                    _trunc(r.get("window_index"), 3),
+                    _trunc(r.get("codename") or "—", 9),
+                    _trunc(r.get("task") or "—", 34),
+                    _STATUS_GLYPH.get(r.get("status"), "?"),
+                    _fmt_age(r.get("age_secs"))))
+    out.append("")
+
+    ch = report.get("clickhouse") or {}
+    st = ch.get("status")
+    out.append("▸ RECENT AGENT ACTIVITY (ClickHouse, last 24h)")
+    if st == "skipped":
+        out.append("  (skipped: --no-ch)")
+    elif st != "ok":
+        # 🔴 A failed query must NEVER read as an empty result.
+        out.append(f"  QUERY FAILED [{st}] — {_trunc(ch.get('error'), 120)}")
+        out.append("  (this is NOT zero sessions; the query did not answer)")
+    elif not ch.get("rows"):
+        out.append("  (0 rows — the query ran and returned nothing)")
+    else:
+        out.append("  SESSION                               PROJECT"
+                   "         LAST SEEN            PROMPT")
+        out.append("  " + "─" * 100)
+        for r in ch["rows"]:
+            out.append("  {:<36}  {:<14}  {:<19}  {}".format(
+                _trunc(r.get("session"), 36), _trunc(r.get("project"), 14),
+                _trunc(r.get("last_seen"), 19), _trunc(r.get("first_msg"), 40)))
+    out.append("")
+
+    fz = report.get("fuzzyclaw") or {}
+    if fz.get("status") == "skipped":
+        out.append("▸ FUZZYCLAW TASKS (skipped: --no-fuzzyclaw)")
+    else:
+        out.append(
+            "▸ FUZZYCLAW TASKS ({live} live of {seen} files"
+            "{bad})".format(live=fz.get("files_live", 0),
+                            seen=fz.get("files_seen", 0),
+                            bad=(f", {fz['files_unparseable']} unparseable"
+                                 if fz.get("files_unparseable") else "")))
+        for t in fz.get("tasks", []):
+            out.append("  {:<6}  {:<12}  {:<34}  {}".format(
+                _trunc(t.get("window_id"), 6), _trunc(t.get("tmux_session"), 12),
+                _trunc(t.get("task"), 34), _trunc(t.get("status"), 10)))
+    out.append("")
+    out.append("  summary: {total} windows  claude={claude}  busy={busy}  "
+               "idle={idle}  stale={stale}  unknown={unknown}".format(
+                   total=summ.get("total_sessions", 0),
+                   claude=summ.get("claude", 0), busy=summ.get("busy", 0),
+                   idle=summ.get("idle", 0), stale=summ.get("stale", 0),
+                   unknown=summ.get("unknown", 0)))
+    if summ.get("hosts_unreachable"):
+        out.append("  UNREACHABLE HOSTS: " +
+                   ", ".join(summ["hosts_unreachable"]))
+    return "\n".join(out)
+
+
+# =========================================================================== #
+# tail
+# =========================================================================== #
+_TARGET_RE = re.compile(r"^[A-Za-z0-9_.%@-]+:[A-Za-z0-9_.%@-]+$")
+
+
+def validate_target(target: str) -> str:
+    """`<session>:<window>`, conservatively charactered.
+
+    Everything is passed as argv, and the SSH path is `shlex.join`ed, so this is
+    belt-and-braces rather than the only defence — but a target is operator
+    input reaching a remote shell, so it gets a whitelist anyway.
+    """
+    t = (target or "").strip()
+    if not _TARGET_RE.match(t):
+        raise ValueError(
+            f"target must look like <session>:<window> (got {target!r})")
+    return t
+
+
+def tail_argv(target, lines=DEFAULT_TAIL_LINES):
+    return ["tmux", "capture-pane", "-t", validate_target(target),
+            "-p", "-e", "-S", f"-{int(lines)}"]
+
+
+def tail_window(target, host, local_host, runner=None,
+                lines=DEFAULT_TAIL_LINES) -> dict:
+    res = run_tmux(tail_argv(target, lines), host, local_host, runner=runner)
+    return {"host": host, "target": target, "reachable": res["reachable"],
+            "error": res["error"], "text": res["stdout"]}
+
+
+# =========================================================================== #
+# CLI
+# =========================================================================== #
+def build_parser():
+    p = argparse.ArgumentParser(
+        prog="session-manager",
+        description="Cross-host tmux + agent-activity view (workbench+laptop).")
+    p.add_argument("subcommand", nargs="?", default="scan",
+                   choices=("scan", "list", "detail", "tail"))
+    p.add_argument("target", nargs="?", default=None,
+                   help="<session>:<window> for detail / tail")
+    p.add_argument("--json", action="store_true", help="JSON output")
+    p.add_argument("--host", default="all", choices=("all", *HOST_NAMES))
+    p.add_argument("--stale-threshold", type=int,
+                   default=DEFAULT_STALE_THRESHOLD)
+    p.add_argument("--no-ch", action="store_true",
+                   help="skip ClickHouse entirely (the client is never built)")
+    p.add_argument("--no-fuzzyclaw", action="store_true")
+    p.add_argument("--lines", type=int, default=DEFAULT_TAIL_LINES,
+                   help="tail: scrollback lines")
+    return p
+
+
+def main(argv=None):
+    args = build_parser().parse_args(
+        sys.argv[1:] if argv is None else list(argv))
+    hosts = HOST_NAMES if args.host == "all" else (args.host,)
+    local = local_host_label()
+
+    if args.subcommand == "tail":
+        if not args.target:
+            print("tail requires <session>:<window>", file=sys.stderr)
+            return EXIT_USAGE
+        try:
+            validate_target(args.target)
+        except ValueError as e:
+            print(str(e), file=sys.stderr)
+            return EXIT_USAGE
+        host = args.host if args.host in HOST_NAMES else local
+        res = tail_window(args.target, host, local, lines=args.lines)
+        if not res["reachable"]:
+            print(f"tail: {host} unreachable — {res['error']}", file=sys.stderr)
+            return EXIT_UNAVAILABLE
+        if args.json:
+            print(json.dumps(res, indent=2))
+        else:
+            sys.stdout.write(res["text"])
+        return EXIT_OK if res["text"].strip() else EXIT_EMPTY
+
+    report = gather(hosts=hosts, local_host=local,
+                    use_ch=(not args.no_ch and args.subcommand != "list"),
+                    use_fuzzyclaw=not args.no_fuzzyclaw,
+                    threshold=args.stale_threshold)
+
+    if args.subcommand == "detail":
+        if not args.target:
+            print("detail requires <session>:<window>", file=sys.stderr)
+            return EXIT_USAGE
+        try:
+            sess, widx = validate_target(args.target).split(":", 1)
+        except ValueError as e:
+            print(str(e), file=sys.stderr)
+            return EXIT_USAGE
+        report = filter_report(report, sess, widx)
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True, default=str))
+    else:
+        print(render_table(report))
+    return exit_code_for(report)
+
+
+def filter_report(report, session, window_index) -> dict:
+    """Narrow a report to ONE window. Hosts keep their reachability facts —
+    dropping them would turn "unreachable" into "not found"."""
+    out = dict(report)
+    out["hosts"] = {}
+    for name, h in report["hosts"].items():
+        h2 = dict(h)
+        h2["windows"] = [r for r in h.get("windows", [])
+                         if str(r.get("session")) == str(session)
+                         and str(r.get("window_index")) == str(window_index)]
+        out["hosts"][name] = h2
+    out["summary"] = summarize(out)
+    return out
+
+
+if __name__ == "__main__":
+    sys.exit(main())
