@@ -37,6 +37,7 @@ are not the happy path — they are:
      happens to agree today.
 """
 
+import json
 import os
 import re
 import shutil
@@ -219,7 +220,7 @@ def test_ahead_unpushed_commits_is_rc8(fleet):
     fleet.add_local_commit("commit the workbench never pushed")
     rc, out = fleet.check("--no-remote")
     assert rc == 8, f"expected rc8, got {rc}\n{out}"
-    assert "AHEAD by 1 un-pushed commit" in out, out
+    assert "un-pushed commit(s)" in out, out
     # The un-pushed commits must be NAMED — the report has to be actionable
     # without a second trip to the host.
     assert "commit the workbench never pushed" in out, out
@@ -1386,6 +1387,12 @@ UNIT_PATH_REQUIREMENTS = {
     "readlink": "pkgs.coreutils",
     "mkdir": "pkgs.coreutils",
     "cat": "pkgs.coreutils",
+    # Added by the host-parity payload, and only VISIBLE to the reverse guard
+    # because that payload deliberately splits `sed … | sort | tr …` across two
+    # lines. Written as the obvious one-liner the tokenizer collapses the whole
+    # pipeline into a single `sed` segment, `sort` is never seen, and the guard
+    # goes green having accounted for nothing. Measured both ways.
+    "sort": "pkgs.coreutils",
     # Found only by the REVERSE guard below, never by review: `dirname` builds
     # the path to lib/host-role.sh, and `bash` is what the local leg and the
     # remote payload are both handed to.
@@ -1627,3 +1634,413 @@ def test_home_nix_documents_that_an_unreachable_remote_does_not_toast():
     assert "serverMode" in block, "the block never states the timer is workbench-only"
     assert "DRIFT_UNREACHABLE_ESCALATE" in block, block
     assert "still exits 8" in block, block
+
+
+# --------------------------------------------------------------------------- #
+# 10. HOST PARITY — the drift git is structurally blind to
+#
+# 🔴 WHY THIS SECTION EXISTS. Everything above answers "is this host still
+# receiving commits?", and for the whole period in which EVERY skill on the
+# laptop was a dangling symlink into a garbage-collected /nix/store path, the
+# honest answer was YES. `git log` matched origin/main, the tree was clean, and
+# ~/.claude/skills/*/SKILL.md resolved to nothing. Git parity is not host parity,
+# and a deadman that reports "clean" for that host has moved the failure, not
+# removed it.
+#
+# Every fixture here is built in tmp_path — NOT read from the operator's real
+# $HOME. A test that skipped itself when ~/.claude was absent would be green on
+# exactly the machine that has the bug (`run-tests.sh` GUARD 2 forbids that by
+# name), and a test that READ the real ~/.claude would pass or fail for reasons
+# having nothing to do with this code.
+# --------------------------------------------------------------------------- #
+
+# The tail of the store path the laptop's links actually pointed into. Used as
+# the fixture's dead-generation marker so the negative control is built to the
+# real shape rather than an invented one.
+DEAD_STORE = "-home-manager-files"
+
+
+def _mkhome(root, *, healthy=0, dangling=0, store=None,
+            settings_keys=None, enabled=None, installed=None,
+            minified=False, extra_links=()):
+    """Build a fixture $HOME reproducing the REAL deployment shape.
+
+    `healthy`/`dangling` are counts of MANAGED symlinks (targets under `store`);
+    the dangling ones point at a path that is never created, which is exactly the
+    laptop's state — a live symlink into a store path that had been GC'd.
+    """
+    store = store or (root.parent / "fakestore")
+    claude = root / ".claude"
+    (claude / "skills" / "activity" / "reference").mkdir(parents=True)
+    (root / ".config" / "opencode" / "skills").mkdir(parents=True)
+
+    live = store / "gen-live" / ".claude" / "skills"
+    live.mkdir(parents=True, exist_ok=True)
+    for i in range(healthy):
+        tgt = live / ("ok-%d.md" % i)
+        tgt.write_text("deployed\n")
+        (claude / "skills" / "activity" / ("ok-%d.md" % i)).symlink_to(tgt)
+    for i in range(dangling):
+        dead = (store / ("1gfc1d16rii1pknsc2mcg29ia5f25hrg" + DEAD_STORE)
+                / ".claude" / "skills" / "activity" / ("SKILL-%d.md" % i))
+        (claude / "skills" / "activity" / ("SKILL-%d.md" % i)).symlink_to(dead)
+    for name, target in extra_links:
+        p = claude / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.symlink_to(target)
+
+    if settings_keys is not None:
+        body = {k: {"nested": "SECRET-VALUE-%s" % k} for k in settings_keys}
+        if enabled is not None:
+            body["enabledPlugins"] = {p: True for p in enabled}
+        text = (json.dumps(body, separators=(",", ":")) if minified
+                else json.dumps(body, indent=2))
+        (claude / "settings.json").write_text(text + "\n")
+
+    if installed is not None:
+        (claude / "plugins").mkdir(parents=True, exist_ok=True)
+        (claude / "plugins" / "installed_plugins.json").write_text(
+            json.dumps({"version": 2,
+                        "plugins": {p: [{"scope": "user"}] for p in installed}},
+                       indent=2) + "\n")
+    return store
+
+
+def _parity(fleet, *args, store=None, **env):
+    """Run the checker with the parity scan pointed at the fixture store."""
+    e = {"DRIFT_MANAGED_PREFIX": str(store) + "/"} if store else {}
+    e.update(env)
+    return fleet.check(*args, **e)
+
+
+def _examined(out):
+    m = re.search(r"managed symlinks: examined=(\d+) dangling=(\d+)", out)
+    assert m, "no examined/dangling PAIR in the output — the pair IS the claim:\n" + out
+    return int(m.group(1)), int(m.group(2))
+
+
+def _payload_literal(name):
+    """The text of a `NAME='…'` payload, with the quote-dance resolved."""
+    src = DRIFT.read_text()
+    i = src.index("\n%s='" % name) + len(name) + 3
+    j = src.index("\n'\n", i)
+    return src[i:j + 1].replace("'\"'\"'", "'")
+
+
+def _remote_running_the_real_payload(fleet, home, store):
+    """A stub `ssh` that RUNS the payload it is handed, against a second fixture
+    home. Faithful in the way that matters: the remote leg executes the SAME
+    payload text the local leg does, so a bug in it cannot hide on one side."""
+    write_exec(fleet.bin / "ssh", (
+        "export HOME=%s\n"
+        "export DRIFT_MANAGED_PREFIX=%s/\n"
+        "exec bash -s\n" % (home, store)
+    ))
+
+
+# --- the negative control, in the real failure shape ------------------------ #
+def test_dangling_managed_symlink_is_rc14(fleet):
+    """🔴 NEGATIVE CONTROL, built to the shape that actually bit us: a live
+    symlink whose target is a /nix/store/…-home-manager-files/… path that does
+    not exist, while git is perfectly in sync."""
+    fleet.catch_up()
+    store = _mkhome(fleet.home, healthy=2, dangling=3)
+    rc, out = _parity(fleet, "--no-remote", store=store)
+    assert rc == 14, f"a host whose deployment resolves to nothing must be rc 14, got {rc}\n{out}"
+    assert "3 of 5 managed symlink(s) point at a path that does not exist" in out, out
+    assert DEAD_STORE in out, "the dead store path is not named, so nobody can diagnose it\n" + out
+    assert "home-manager switch" in out, "no fix is offered\n" + out
+    assert "✅ clean — on branch main" in out, (
+        "the git check must be UNCHANGED and must still run — the parity scan is "
+        "additional evidence, not a replacement\n" + out
+    )
+
+
+def test_the_examined_count_is_reported_beside_the_dangling_count(fleet):
+    """🔴 POSITIVE CONTROL FOR THE SCANNER ITSELF. `dangling=0` from a walk that
+    examined 0 links is indistinguishable from a healthy host — the exact vacuity
+    this subsystem exists to refuse. So the scanner must be SHOWN to produce a
+    non-zero examined count, and the pair must always be printed."""
+    fleet.catch_up()
+    store = _mkhome(fleet.home, healthy=7, dangling=0)
+    rc, out = _parity(fleet, "--no-remote", store=store)
+    examined, dangling = _examined(out)
+    assert examined == 7, f"the scanner did not see the 7 links it was given: {examined}\n{out}"
+    assert dangling == 0, out
+    assert rc == 0, out
+
+
+def test_a_scan_with_no_roots_says_so_instead_of_reporting_zero(fleet):
+    """The other half of the same trap: with nothing to walk the answer is NOT
+    EVALUATED, never `dangling=0`."""
+    fleet.catch_up()
+    rc, out = _parity(fleet, "--no-remote", DRIFT_PARITY_ROOTS="no/such/dir")
+    assert "managed symlinks: NOT EVALUATED" in out, out
+    assert "dangling=0" not in out, "a scan that walked nothing reported a clean count\n" + out
+
+
+def test_a_symlink_outside_the_managed_prefix_is_not_drift(fleet):
+    """~/.claude/debug/latest points at a SIBLING transcript and is routinely
+    stale — Claude Code runtime state, not a deployment. Counting it would train
+    the operator to ignore rc 14, which is worse than not having it."""
+    fleet.catch_up()
+    store = _mkhome(fleet.home, healthy=1, dangling=0,
+                    extra_links=(("debug/latest", "./gone-2026-08-11.txt"),))
+    rc, out = _parity(fleet, "--no-remote", store=store)
+    assert _examined(out) == (1, 0), "an unmanaged dangling link was counted\n" + out
+    assert rc == 0, out
+
+
+def test_a_nested_git_checkout_is_neither_walked_nor_flagged(fleet):
+    """~/.claude/skills/clickup/ is a standalone repo with a large pnpm
+    node_modules. Flagging it would be a permanent false positive; walking it
+    would make the deadman slow for nothing.
+
+    The fixture puts a DANGLING managed link inside it, so this cannot pass by
+    the directory merely being empty."""
+    fleet.catch_up()
+    store = _mkhome(fleet.home, healthy=1, dangling=0)
+    clickup = fleet.home / ".claude" / "skills" / "clickup"
+    (clickup / ".git").mkdir(parents=True)
+    (clickup / "node_modules" / ".pnpm").mkdir(parents=True)
+    (clickup / "SKILL.md").symlink_to(store / ("deadbeef" + DEAD_STORE) / "SKILL.md")
+    (clickup / "node_modules" / "unified").symlink_to(".pnpm/unified@11.0.5")
+
+    rc, out = _parity(fleet, "--no-remote", store=store)
+    assert _examined(out) == (1, 0), (
+        "the nested checkout was walked — a legitimately unmanaged repo is being "
+        "reported as fleet drift\n" + out
+    )
+    assert rc == 0, out
+
+
+def test_node_modules_is_pruned_even_without_a_git_dir(fleet):
+    """The two prune rules are independent; a vendored node_modules with no .git
+    beside it must still not be walked."""
+    fleet.catch_up()
+    store = _mkhome(fleet.home, healthy=1, dangling=0)
+    nm = fleet.home / ".claude" / "skills" / "activity" / "node_modules"
+    nm.mkdir(parents=True)
+    (nm / "x.md").symlink_to(store / ("cafe" + DEAD_STORE) / "x.md")
+    _, out = _parity(fleet, "--no-remote", store=store)
+    assert _examined(out) == (1, 0), out
+
+
+# --- settings.json key-set divergence (needs a fact set from EACH host) ----- #
+def test_settings_key_set_divergence_is_rc15_and_leaks_no_values(fleet):
+    """🔴 NEGATIVE CONTROL for the key-set check, plus the confidentiality claim
+    asserted rather than intended: settings.json holds tokens, hook command lines
+    and permission rules, and this output goes to a systemd journal. Only NAMES
+    may appear."""
+    fleet.catch_up()
+    lstore = _mkhome(fleet.home, healthy=1,
+                     settings_keys=["hooks", "permissions", "theme"],
+                     enabled=["gopls-lsp@m"], installed=["gopls-lsp@m"])
+    rhome = fleet.root / "remote-home"
+    rhome.mkdir()
+    rstore = _mkhome(rhome, healthy=1, store=fleet.root / "remote-store",
+                     settings_keys=["hooks", "effortLevel", "voice"],
+                     enabled=["gopls-lsp@m"], installed=["gopls-lsp@m"])
+    _remote_running_the_real_payload(fleet, rhome, rstore)
+
+    rc, out = _parity(fleet, store=lstore, REMOTE_SSH="stub@example.invalid")
+    assert rc == 15, f"diverging key sets must be rc 15, got {rc}\n{out}"
+    assert "settings.json top-level KEY SETS differ" in out, out
+    assert "only on workbench: permissions theme" in out, out
+    assert "only on laptop: effortLevel voice" in out, out
+    assert "SECRET-VALUE" not in out, (
+        "🔴 a settings.json VALUE reached the output — this goes to the journal\n" + out
+    )
+
+
+def test_identical_key_sets_agree(fleet):
+    """POSITIVE CONTROL for the comparator: it must be able to say AGREE, or the
+    rc 15 above proves only that it always fires."""
+    fleet.catch_up()
+    keys = ["hooks", "permissions", "theme"]
+    lstore = _mkhome(fleet.home, healthy=1, settings_keys=keys,
+                     enabled=["gopls-lsp@m"], installed=["gopls-lsp@m"])
+    rhome = fleet.root / "remote-home"
+    rhome.mkdir()
+    rstore = _mkhome(rhome, healthy=1, store=fleet.root / "remote-store",
+                     settings_keys=keys,
+                     enabled=["gopls-lsp@m"], installed=["gopls-lsp@m"])
+    _remote_running_the_real_payload(fleet, rhome, rstore)
+    rc, out = _parity(fleet, store=lstore, REMOTE_SSH="stub@example.invalid")
+    # 4, not 3: `enabledPlugins` is itself a top-level key and must be counted
+    # like any other — the comparator has no special case for it.
+    assert "key sets AGREE (4 key names on each host)" in out, out
+    assert "enabledPlugins AGREE" in out, out
+    assert rc == 0, out
+
+
+def test_enabled_plugin_divergence_is_rc15(fleet):
+    """The exact shape the laptop was in before pyright-lsp was installed there:
+    both hosts internally consistent, disagreeing with each other."""
+    fleet.catch_up()
+    lstore = _mkhome(fleet.home, healthy=1, settings_keys=["hooks"],
+                     enabled=["gopls-lsp@m", "pyright-lsp@m"],
+                     installed=["gopls-lsp@m", "pyright-lsp@m"])
+    rhome = fleet.root / "remote-home"
+    rhome.mkdir()
+    rstore = _mkhome(rhome, healthy=1, store=fleet.root / "remote-store",
+                     settings_keys=["hooks"], enabled=["gopls-lsp@m"],
+                     installed=["gopls-lsp@m"])
+    _remote_running_the_real_payload(fleet, rhome, rstore)
+    rc, out = _parity(fleet, store=lstore, REMOTE_SSH="stub@example.invalid")
+    assert rc == 15, f"{rc}\n{out}"
+    assert "enabledPlugins differ" in out, out
+    assert "enabled only on workbench: pyright-lsp@m" in out, out
+
+
+def test_enabled_but_not_installed_is_rc15(fleet):
+    """🔴 NEGATIVE CONTROL for the third case — a plugin switched ON in
+    settings.json that is not in the plugin cache. It needs only ONE host, so it
+    is decided per-host rather than in the cross-host block."""
+    fleet.catch_up()
+    store = _mkhome(fleet.home, healthy=1, settings_keys=["hooks"],
+                    enabled=["gopls-lsp@m", "pyright-lsp@m"],
+                    installed=["gopls-lsp@m"])
+    rc, out = _parity(fleet, "--no-remote", store=store)
+    assert rc == 15, f"{rc}\n{out}"
+    assert "ENABLED in settings.json but NOT installed: pyright-lsp@m" in out, out
+
+
+def test_a_minified_settings_json_is_unevaluated_not_agreed(fleet):
+    """🔴 THE EXTRACTOR'S FORMAT DEPENDENCY, MADE TO FAIL LOUD.
+
+    Keys are read as 2-space-indented lines. A minified file yields NOTHING — and
+    an empty key set compared against another empty key set is a diff that finds
+    no difference, i.e. it would print AGREE. That reassuring output would mean
+    the check had stopped working, so the empty case must be UNEVALUATED."""
+    fleet.catch_up()
+    store = _mkhome(fleet.home, healthy=1, settings_keys=["hooks", "theme"],
+                    minified=True)
+    _, out = _parity(fleet, "--no-remote", store=store)
+    assert "settings.json: NOT EVALUATED" in out, out
+    assert "FACT settings-keys UNEVALUATED" in out, out
+    assert "AGREE" not in out, "an unparseable settings.json reported agreement\n" + out
+
+
+def test_a_missing_settings_json_is_unevaluated(fleet):
+    fleet.catch_up()
+    store = _mkhome(fleet.home, healthy=1)
+    _, out = _parity(fleet, "--no-remote", store=store)
+    assert "settings.json: NOT EVALUATED" in out and "missing or unreadable" in out, out
+
+
+# --- unreachable is still not drift, and still not a pass ------------------- #
+def test_an_unreachable_remote_leaves_parity_uncompared_not_agreed(fleet):
+    """🔴 An ssh timeout must not read as a clean parity result. `only_in` over an
+    EMPTY remote set finds nothing missing — a diff that found nothing, not
+    agreement. The two must never print the same way."""
+    fleet.catch_up()
+    store = _mkhome(fleet.home, healthy=1, settings_keys=["hooks", "theme"])
+    fleet.stub_ssh(255)
+    rc, out = _parity(fleet, store=store, REMOTE_SSH="stub@example.invalid")
+    assert "[parity] NOT COMPARED" in out, out
+    assert "AGREE" not in out, "an unreachable host produced an agreement verdict\n" + out
+    assert "UNREACHABLE" in out, out
+    # Unchanged policy: below the threshold this does NOT fail the unit.
+    assert rc == 0, f"an unreachable laptop became drift, got {rc}\n{out}"
+
+
+def test_a_no_remote_run_does_not_claim_parity_was_compared(fleet):
+    fleet.catch_up()
+    store = _mkhome(fleet.home, healthy=1, settings_keys=["hooks"])
+    rc, out = _parity(fleet, "--no-remote", store=store)
+    assert "[parity] NOT COMPARED" in out, out
+    assert rc == 0, out
+
+
+# --- interaction with the (unchanged) git verdict --------------------------- #
+def test_the_parity_scan_still_runs_when_the_git_leg_exits_early(fleet):
+    """🔴 THE SEAM. The git payload `exit`s on its first finding, so a naive
+    concatenation would silently skip the parity scan on exactly the hosts that
+    are already unhealthy. The subshell is what keeps both running."""
+    fleet.add_local_commit()          # rc 8 territory
+    store = _mkhome(fleet.home, healthy=2, dangling=1)
+    rc, out = _parity(fleet, "--no-remote", store=store)
+    assert "un-pushed commit(s)" in out, out
+    assert "examined=3 dangling=1" in out, (
+        "the parity scan did not run on a host the git check had already failed\n" + out
+    )
+    assert rc == 8, f"rc 8 must still outrank rc 14, got {rc}\n{out}"
+
+
+def test_dangling_links_outrank_a_merely_behind_host(fleet):
+    """Severity asserted rather than assumed: a broken deployment is worse than a
+    host that just needs a ship, and the single number handed to systemd must be
+    the worst thing found."""
+    store = _mkhome(fleet.home, healthy=1, dangling=1)
+    rc, out = _parity(fleet, "--no-remote", store=store)   # `work` starts BEHIND
+    assert "is BEHIND origin/main" in out, out
+    assert rc == 14, f"rc 14 must outrank rc 10, got {rc}\n{out}"
+
+
+def test_parity_findings_never_rewrite_the_dangerous_rc8(fleet):
+    fleet.add_local_commit()
+    store = _mkhome(fleet.home, healthy=1, settings_keys=["hooks"],
+                    enabled=["ghost@m"], installed=[])
+    rc, out = _parity(fleet, "--no-remote", store=store)
+    assert "NOT installed: ghost@m" in out, out
+    assert rc == 8, f"a parity finding masked the un-pushed-commits verdict: {rc}\n{out}"
+
+
+# --- structural pins -------------------------------------------------------- #
+def test_the_managed_prefix_defaults_to_the_nix_store():
+    """DRIFT_MANAGED_PREFIX exists so the suite can build a fixture tree. If its
+    DEFAULT ever moves, every test above keeps passing against the fake store
+    while production examines nothing — the vacuous zero, one level down."""
+    assert 'mprefix="${DRIFT_MANAGED_PREFIX:-/nix/store/}"' in DRIFT.read_text()
+
+
+def test_the_parity_payload_does_not_use_find():
+    """🔴 The laptop resolves `find` to BUSYBOX, which does not implement
+    `-xtype`: it prints usage to stderr and EXITS 0. `find -xtype l | wc -l`
+    therefore yields a confident `0 dangling` on that host forever. Measured
+    2026-08-11. The walk must stay on bash builtins + readlink."""
+    assert not re.search(r"(?<![\w.-])find(?![\w.-])", _payload_literal("PARITY")), (
+        "the parity payload calls `find`; busybox find makes its answer vacuous"
+    )
+
+
+@pytest.mark.parametrize("name", ["CHECK", "PARITY"])
+def test_the_embedded_payloads_are_valid_bash(name):
+    """🔴 `bash -n scripts/drift-check.sh` does NOT check these.
+
+    They are single-quoted STRINGS to the outer parser, so a syntax error inside
+    one is invisible to it and surfaces only when a host runs it. Worse, a stray
+    apostrophe in a payload COMMENT silently ENDS the string early — the outer
+    file still parses and the payload quietly loses everything after it. That
+    happened while writing this section."""
+    proc = subprocess.run(["bash", "-n"], input=_payload_literal(name),
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, f"{name} payload is not valid bash:\n{proc.stderr}"
+
+
+def test_the_payloads_are_not_silently_truncated():
+    """The other half: valid bash that STOPS EARLY is still valid bash. Pin the
+    last line of each payload so an apostrophe that ends the string prematurely
+    fails here instead of shipping half a payload to both hosts."""
+    assert _payload_literal("CHECK").rstrip().endswith("exit 0")
+    assert _payload_literal("PARITY").rstrip().endswith('echo "[$label] PARITY-RC=$p_rc"')
+
+
+def test_the_parity_scan_writes_nothing_into_the_home_it_walks(fleet):
+    """PASSIVITY, behaviourally — the parity scan reads a host's whole config
+    tree, so "it only reads" is worth measuring rather than asserting."""
+    fleet.catch_up()
+    store = _mkhome(fleet.home, healthy=3, dangling=2, settings_keys=["hooks"],
+                    enabled=["gopls-lsp@m"], installed=["gopls-lsp@m"])
+
+    def snapshot():
+        return sorted(
+            (str(p.relative_to(fleet.home)), p.is_symlink(),
+             None if p.is_symlink() or p.is_dir() else p.read_bytes())
+            for p in fleet.home.rglob("*")
+        )
+
+    before = snapshot()
+    _parity(fleet, "--no-remote", store=store)
+    assert snapshot() == before, "the parity scan modified the tree it was reading"
