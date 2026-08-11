@@ -674,10 +674,59 @@ class TestAssociateGuards:
             sr.associate_paths(self.GOOD, index, "not-a-scope")
         assert "unknown scope" in str(exc.value)
 
-    def test_empty_path_set(self, index: sr.SubsystemIndex) -> None:
-        with pytest.raises(sr.EmptyPathSetError) as exc:
-            sr.associate_paths([], index, SCOPE_A)
-        assert "empty path set" in str(exc.value)
+    def test_empty_path_set_is_an_ORDINARY_input_not_an_error(
+        self, index: sr.SubsystemIndex
+    ) -> None:
+        """A session with no git activity is common, not exceptional.
+
+        This raised `EmptyPathSetError` until review. Making the common case an
+        exception forces every P1 caller to wrap the call, and a wrapped call is
+        how a caller ends up swallowing the genuine errors too."""
+        result = sr.associate_paths([], index, SCOPE_A)
+        assert result.matched == ()
+        assert result.below_threshold == ()
+        assert result.ambiguous == ()
+        assert result.considered_paths == ()
+        assert result.unmatched_paths == ()
+        assert result.scope == SCOPE_A
+        assert result.min_paths == sr.DEFAULT_MIN_PATHS
+
+    def test_the_TWO_KINDS_OF_ZERO_stay_distinguishable(
+        self, index: sr.SubsystemIndex
+    ) -> None:
+        """🔴 The property the removed exception was protecting, kept
+        structurally.
+
+        Dropping the guard is only safe if a consumer can still tell "we were
+        given nothing to look at" from "we looked and found nothing" — otherwise
+        the zero really does become manufactured. `considered_paths` is that
+        discriminator, and nothing else in the result is."""
+        nothing_given = sr.associate_paths([], index, SCOPE_A)
+        looked_and_missed = sr.associate_paths(
+            ["clusters/homelab/apps/unlisted-widget/values.yaml"], index, SCOPE_A
+        )
+
+        # Identical on the field a naive consumer reads …
+        assert nothing_given.matched == looked_and_missed.matched == ()
+        # … and DIFFERENT on the field that accounts for the input.
+        assert nothing_given.considered_paths == ()
+        assert looked_and_missed.considered_paths == (
+            "clusters/homelab/apps/unlisted-widget/values.yaml",
+        )
+        assert nothing_given.unmatched_paths == ()
+        assert looked_and_missed.unmatched_paths == (
+            "clusters/homelab/apps/unlisted-widget/values.yaml",
+        )
+
+    def test_an_unknown_scope_still_raises_even_with_no_paths(
+        self, index: sr.SubsystemIndex
+    ) -> None:
+        """Relaxing the empty-set case must NOT relax the scope case: a typo'd
+        scope with no paths is the one combination that could quietly become a
+        well-formed empty result."""
+        with pytest.raises(sr.UnknownScopeError) as exc:
+            sr.associate_paths([], index, "not-a-scope")
+        assert "unknown scope" in str(exc.value)
 
     def test_absolute_path(self, index: sr.SubsystemIndex) -> None:
         with pytest.raises(sr.InvalidPathError) as exc:
@@ -768,19 +817,19 @@ class TestReachability:
     Each case below repairs ONLY the element the guard rejects and asserts the
     call then succeeds. That is the proof no earlier guard was the real gate."""
 
-    def test_empty_path_set_is_reached_past_the_scope_guard(
+    def test_scope_guard_is_reached_with_a_path_set_that_is_otherwise_fine(
         self, index: sr.SubsystemIndex
     ) -> None:
-        # Same scope, same index: with one path it succeeds, so the scope guard
-        # is NOT what rejects the empty case.
+        # Same paths, same min_paths: only the scope differs, so nothing earlier
+        # can be the real gate.
         assert sr.associate_paths(["a/b"], index, SCOPE_A) is not None
-        with pytest.raises(sr.EmptyPathSetError):
-            sr.associate_paths([], index, SCOPE_A)
+        with pytest.raises(sr.UnknownScopeError):
+            sr.associate_paths(["a/b"], index, "not-a-scope")
 
-    def test_invalid_path_is_reached_past_scope_and_emptiness(
+    def test_invalid_path_is_reached_past_the_scope_guard(
         self, index: sr.SubsystemIndex
     ) -> None:
-        # Non-empty and a known scope, so only the path check can be firing.
+        # A known scope, so only the path check can be firing.
         assert sr.associate_paths(["x/pghero/y.yaml"], index, SCOPE_A) is not None
         with pytest.raises(sr.InvalidPathError):
             sr.associate_paths(["/x/pghero/y.yaml"], index, SCOPE_A)
@@ -1497,13 +1546,40 @@ class TestMutationKillMatrix:
         assert shadowed is not None
         assert shadowed.filename == "image-ingestion.md"  # WRONG entry — guard dead
 
-    def test_kills_empty_path_set_guard(self, tmp_path: Path) -> None:
-        mod = _load_mutant(tmp_path, "m_empty", [("    if not ordered:", "    if False:")])
+    def test_kills_the_two_kinds_of_zero_discriminator(self, tmp_path: Path) -> None:
+        """`considered_paths` is what replaced `EmptyPathSetError`. If it stops
+        accounting for the input, an empty path set and a path set that matched
+        nothing become byte-identical results — which is the manufactured zero
+        the exception used to prevent, arrived at by a different route."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_considered",
+            [("        considered_paths=tuple(ordered),", "        considered_paths=(),")],
+        )
         idx = _mutant_index(mod)
-        result = mod.associate_paths([], idx, SCOPE_A)
-        # The exact silent zero: a well-formed, entirely empty "result".
-        assert result.matched == ()
-        assert result.considered_paths == ()
+        nothing_given = mod.associate_paths([], idx, SCOPE_A)
+        looked_and_missed = mod.associate_paths(
+            ["clusters/homelab/apps/unlisted-widget/values.yaml"], idx, SCOPE_A
+        )
+        assert nothing_given.considered_paths == looked_and_missed.considered_paths == ()
+
+    def test_kills_the_unmatched_paths_accounting(self, tmp_path: Path) -> None:
+        mod = _load_mutant(
+            tmp_path,
+            "m_unmatched",
+            [
+                (
+                    "        unmatched_paths=tuple(p for p in ordered if p not in matched_paths),",
+                    "        unmatched_paths=(),",
+                )
+            ],
+        )
+        idx = _mutant_index(mod)
+        result = mod.associate_paths(
+            ["clusters/homelab/apps/unlisted-widget/values.yaml"], idx, SCOPE_A
+        )
+        # A zero that no longer says what it failed to match.
+        assert result.matched == () and result.unmatched_paths == ()
 
     def test_kills_absolute_path_guard(self, tmp_path: Path) -> None:
         mod = _load_mutant(
@@ -1656,5 +1732,6 @@ class TestMutationKillMatrix:
         assert mod.resolve_ref("blob-upload", idx, SCOPE_A).filename == "blob-upload.md"
         with pytest.raises(mod.AmbiguousRefError):
             mod.resolve_ref("repo-cos", idx, SCOPE_B)
-        with pytest.raises(mod.EmptyPathSetError):
-            mod.associate_paths([], idx, SCOPE_A)
+        with pytest.raises(mod.UnknownScopeError):
+            mod.associate_paths(["a/b"], idx, "not-a-scope")
+        assert mod.associate_paths([], idx, SCOPE_A).considered_paths == ()

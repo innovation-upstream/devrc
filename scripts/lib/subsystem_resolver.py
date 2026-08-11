@@ -49,7 +49,7 @@ CONTRACT SUMMARY
                                         (raises UnknownScopeError, AmbiguousRefError)
     associate_paths(paths, index, scope, *, min_paths=DEFAULT_MIN_PATHS)
                                       -> Association
-                                        (raises UnknownScopeError, EmptyPathSetError,
+                                        (raises UnknownScopeError,
                                          InvalidPathError, ValueError)
     load_index(root)                  -> SubsystemIndex (the thin disk loader)
 
@@ -59,8 +59,11 @@ can tell WHICH guard fired, not merely that something did:
     "malformed index entry"        MalformedEntryError
     "unknown scope"                UnknownScopeError
     "ambiguous ref"                AmbiguousRefError
-    "empty path set"               EmptyPathSetError
     "invalid repo-relative path"   InvalidPathError
+
+An EMPTY PATH SET is not among them — it returns an empty, accounted result, and
+`Association.considered_paths` is what keeps that zero distinguishable from
+"we looked and matched nothing". See `associate_paths`.
 
 A guard whose test passes because a NEIGHBOUR's error fired is green for the
 wrong reason and stays green with the guard deleted (`claude/RULES.md` →
@@ -82,7 +85,6 @@ __all__ = [
     "MalformedEntryError",
     "UnknownScopeError",
     "AmbiguousRefError",
-    "EmptyPathSetError",
     "InvalidPathError",
     "SubsystemEntry",
     "SubsystemIndex",
@@ -154,15 +156,10 @@ class UnknownScopeError(ResolverError):
     """The requested scope is not in the index. Sentinel: 'unknown scope'."""
 
 
-class EmptyPathSetError(ResolverError):
-    """No paths were supplied. Sentinel: 'empty path set'.
-
-    Deliberately an ERROR rather than an empty result. A session with no changed
-    paths has no association to compute, and that is a CALLER-side branch: an
-    empty `Association` returned from here is indistinguishable, downstream, from
-    "we looked and this subsystem was not touched". Making the caller branch
-    explicitly is the difference between a real zero and a manufactured one.
-    """
+# ⚠ There is deliberately NO EmptyPathSetError. An empty path set returns an
+# empty, accounted `Association`; see `associate_paths`' docstring for why, and
+# for the `considered_paths` property that keeps the two kinds of zero apart
+# without an exception. Do not reintroduce it without re-reading that.
 
 
 class InvalidPathError(ResolverError):
@@ -610,17 +607,36 @@ def associate_paths(
     Guard order — each is reachable by an input no earlier guard rejects:
       1. `min_paths` sanity            → ValueError
       2. scope known                   → UnknownScopeError
-      3. at least one path             → EmptyPathSetError
-      4. each path repo-relative       → InvalidPathError
+      3. each path repo-relative       → InvalidPathError
     An ambiguous ref does NOT raise here: one undecidable ref must not blind the
     whole session. It is recorded in `.ambiguous`, contributes to no subsystem,
     and a caller that ignores that field is discarding a known unknown.
+
+    🔴 AN EMPTY PATH SET IS NOT AN ERROR. It returns a fully empty, fully
+    accounted `Association`. This raised `EmptyPathSetError` until review: the
+    argument for raising was that a manufactured zero is indistinguishable from
+    a real one, but in P1's per-session call pattern a session with no git
+    activity is an ORDINARY input, not an exceptional one. Making the common
+    case an exception forces every caller to wrap the call, and a wrapped call
+    is how a caller ends up swallowing the genuine errors too.
+
+    The property the exception was protecting is kept STRUCTURALLY instead:
+    `considered_paths` distinguishes the two zeros without any exception.
+
+        no paths supplied      → considered_paths == ()   unmatched_paths == ()
+        paths, none matched    → considered_paths != ()   unmatched_paths != ()
+
+    So a consumer can still tell "we were given nothing to look at" from "we
+    looked and found nothing", which is the whole reason the guard existed.
+    Genuine programmer errors — a malformed entry, an unknown scope, a path that
+    is not repo-relative — still raise.
     """
     if not isinstance(min_paths, int) or isinstance(min_paths, bool) or min_paths < 1:
         raise ValueError(f"min_paths must be an int >= 1, got {min_paths!r}")
 
     # Scope guard, before a single path is counted: an unknown scope must not be
-    # able to produce a well-formed empty result.
+    # able to produce a well-formed empty result. (An empty path set may — see
+    # the docstring; a typo'd scope may not.)
     index.entries(scope)
 
     ordered: list[str] = []
@@ -628,12 +644,6 @@ def associate_paths(
         p = _validate_path(raw)
         if p not in ordered:
             ordered.append(p)
-    if not ordered:
-        raise EmptyPathSetError(
-            f"empty path set for scope {scope!r}: a session with no changed paths has no "
-            f"association to compute — branch on that in the caller rather than reading a "
-            f"zero out of this function"
-        )
 
     paths_by_entry: dict[str, list[str]] = {}
     evidence_by_entry: dict[str, list[Evidence]] = {}
