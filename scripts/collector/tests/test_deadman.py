@@ -12,6 +12,7 @@ path. A harness that could only ever produce 0 would fail those tests.
 Run: pytest scripts/collector/tests/test_deadman.py
 """
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -608,12 +609,48 @@ def test_the_operator_column_survives_the_WHOLE_path_tsv_to_verdict():
     assert _pair(v, "browser-bridge")["evaluated"] is True
 
 
+def test_the_query_check_ACTUALLY_SENDS_carries_the_operator_column():
+    """🔴 The production path. Every other `check()` test injects a fake fetch
+    that IGNORES its query argument, so nothing asserted what SQL the live check
+    sends — and `bucket_query(..., cadence=())` at the call site would produce a
+    5-wide TSV with n_op == n, i.e. the original bug, on the only path
+    bar-status-poll ever uses, with the suite green.
+    """
+    seen = {}
+
+    def fake_fetch(url, user, password, query, timeout):
+        seen["query"] = query
+        return "h1\tkeys\t100\t3\t3\n"
+
+    D.check(env={"CLICKHOUSE_URL": "http://x", "CLICKHOUSE_USER": "u",
+                 "CLICKHOUSE_PASSWORD": "p"},
+            env_file="/nonexistent", fetch=fake_fetch)
+    q = seen.get("query", "")
+    # 🔴 The countIf must be the expression aliased AS n_op, not merely PRESENT
+    # somewhere in the query. A substring check for "AS n_op" is satisfied by
+    # "AS n_op_unused" — a mutant that aliased the filtered count aside and put a
+    # raw count() in the n_op position passed exactly that check.
+    assert re.search(r"countIf\(NOT \(.+?\)\) AS n_op(?!\w)", q), \
+        ("check() did not send the machine-cadence filter as the n_op column — "
+         "cadence rows would count as operator activity: %r" % q)
+    for src, kind in D.MACHINE_CADENCE:
+        assert "source = '%s' AND kind = '%s'" % (src, kind) in q, q
+
+
 def test_operator_count_expression_matches_the_cadence_table():
     """The SQL and the Python must not drift: the query's countIf is BUILT from
     MACHINE_CADENCE, so a pair added to the tuple appears in the SQL."""
     q = D.bucket_query(cadence=(("browser-bridge", "heartbeat"),))
     assert "countIf(NOT ((source = 'browser-bridge' AND kind = 'heartbeat')))" in q
     assert "AS n_op" in q
+
+    # 🔴 TWO entries, because the module's own note tells maintainers to add
+    # them: the terms must be OR-joined. With AND, `countIf(NOT (A AND B))`
+    # excludes NOTHING (measured against the live table: 206760 of 206760 rows
+    # counted), so a second cadence emitter would silently reinstate the bug.
+    q2 = D.bucket_query(cadence=(("a", "beat"), ("b", "tick")))
+    assert "(source = 'a' AND kind = 'beat') OR (source = 'b' AND kind = 'tick')" in q2, q2
+    assert " AND (source = 'b'" not in q2, "cadence terms joined with AND: %s" % q2
     # Empty cadence degrades to the pre-heartbeat query, which is the right
     # answer when nothing emits on a timer.
     assert "count() AS n_op" in D.bucket_query(cadence=())

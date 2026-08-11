@@ -6759,7 +6759,7 @@ def test_main_actually_starts_and_stops_the_heartbeat(monkeypatch, tmp_path):
     asserts the thread was started with the real registry AND stopped on the way
     out (a leaked heartbeat would keep emitting after a shutdown).
     """
-    started, stopped = [], []
+    started, stopped, served = [], [], []
 
     class _StubServer:
         def serve_forever(self):
@@ -6772,16 +6772,23 @@ def test_main_actually_starts_and_stops_the_heartbeat(monkeypatch, tmp_path):
         def set(self):
             stopped.append(True)
 
+    def _fake_build(host, port, registry, *a, **kw):
+        served.append(registry)      # capture WHICH registry the server got
+        return _StubServer()
+
     def _fake_start(registry, interval=None):
         started.append(registry)
         return object(), _StubStop()
 
     monkeypatch.setenv("BROWSER_BRIDGE_TOKEN_FILE", str(tmp_path / "token"))
-    monkeypatch.setattr(S, "build_server", lambda *a, **kw: _StubServer())
+    monkeypatch.setattr(S, "build_server", _fake_build)
     monkeypatch.setattr(S, "start_heartbeat", _fake_start)
 
     assert S.main([]) == 0
     assert len(started) == 1, "main() did not start the heartbeat"
-    assert isinstance(started[0], S.Registry), \
-        "the heartbeat was not given the server's own registry"
+    # IDENTITY, not isinstance: `start_heartbeat(Registry())` — a fresh registry
+    # instead of the server's — passes a type check while making the heartbeat
+    # report connected=False / instances=0 forever.
+    assert started[0] is served[0], \
+        "the heartbeat was given a different Registry than the server's"
     assert stopped == [True], "main() did not stop the heartbeat on shutdown"

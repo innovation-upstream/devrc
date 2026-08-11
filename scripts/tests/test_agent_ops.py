@@ -666,6 +666,85 @@ def test_render_telemetry_line_missing_source_shown_dim():
     assert "zsh" in line and "tmux" in line
 
 
+def test_telemetry_freshness_excludes_machine_cadence_rows():
+    """🔴 SEAM GUARD — this panel's freshness vs deadman's MACHINE_CADENCE.
+
+    browser-bridge emits a heartbeat every 900s whether or not it can execute
+    anything, so an unfiltered `max(ts)` reports a bridge with no extension
+    attached as "fresh 15 min ago". Deleting the exclusion from the SQL used to
+    survive the whole suite — nothing here ever read that query.
+
+    The predicate is IMPORTED from deadman rather than re-spelled, so this
+    asserts the relationship against the real tuple: every declared pair must
+    appear in the emitted clause, and an empty tuple must emit nothing (there is
+    then nothing to exclude).
+    """
+    # agent-ops resolves its siblings through DEVRC_DIR (HOME-based) — the right
+    # thing in production, where the deployed script must read the real checkout,
+    # and the same convention CHQUERY_PATH already uses. The nix check sandbox
+    # has no $HOME/workspace/devrc, so point it at THIS tree's copy for the test
+    # rather than changing how production resolves paths.
+    dm_py = os.path.join(_HERE, "..", "collector", "deadman.py")
+    spec = importlib.util.spec_from_file_location("_dm_seam", dm_py)
+    DM = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(DM)
+
+    orig_path = ao.DEADMAN_PATH
+    try:
+        ao.DEADMAN_PATH = dm_py
+        clause = ao.machine_cadence_sql_filter()
+    finally:
+        ao.DEADMAN_PATH = orig_path
+    assert DM.MACHINE_CADENCE, "deadman declares no machine-cadence pairs"
+    assert clause.startswith("AND NOT ("), clause
+    for src, kind in DM.MACHINE_CADENCE:
+        assert "source = '%s' AND kind = '%s'" % (src, kind) in clause, clause
+    # ... and it is genuinely derived, not a constant that happens to match.
+    assert "heartbeat" in clause
+
+    # 🔴 AND THE CALL SITE USES IT. Asserting the helper alone is not enough:
+    # dropping `machine_cadence_sql_filter()` from the SQL survived a suite that
+    # had this test in it, because nothing here read the query the function
+    # actually builds. Drive the real function with a stubbed chquery and read
+    # the SQL it sends.
+    sent = {}
+
+    class _FakeConn:
+        fq_table = "activity.events"
+        timeout = 1.0
+
+        @staticmethod
+        def from_env(_env):
+            return _FakeConn()
+
+    class _FakeClient:
+        def __init__(self, _conn):
+            pass
+
+        @staticmethod
+        def rows(sql):
+            sent["sql"] = sql
+            return [{"source": "zsh", "age_secs": 7}]
+
+    class _FakeQ:
+        CHConn = _FakeConn
+        CHClient = _FakeClient
+
+    orig = ao._load_chquery
+    try:
+        ao._load_chquery = lambda: _FakeQ
+        ao.DEADMAN_PATH = dm_py          # same sandbox reason as above
+        out = ao.query_telemetry_freshness()
+    finally:
+        ao._load_chquery = orig
+        ao.DEADMAN_PATH = orig_path
+
+    assert out == {"zsh": 7}, out
+    assert clause.strip() and clause.strip() in sent["sql"], (
+        "query_telemetry_freshness dropped the machine-cadence exclusion: %s"
+        % sent["sql"])
+
+
 def test_render_telemetry_line_no_rows():
     line = plain(ao._render_telemetry_line({"sources": {}, "generated": 0}))
     assert "telemetry off" in line or "no rows" in line
