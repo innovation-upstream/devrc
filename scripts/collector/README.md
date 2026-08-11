@@ -65,7 +65,44 @@ tmux focus hooks   ─┼─► emit (pure shell, hot path) ─► spool/current
   The deadman's query is `FORMAT TSVWithNames`: the header is what stops a capture
   from the previous (also 5-column, `n_op`) format replaying as a wrong answer.
   Both reuse `keylog/spool_emit.py` for the v1 line format.
+- `changed_paths.py` — **shared by BOTH session summarisers** (`claude/session-tailer.py`
+  and `opencode/session_tailer.py`), and the one definition of the `changed_paths*`
+  payload block. Lives at the collector ROOT, so each tailer puts its own grandparent
+  dir on `sys.path` to import it; that resolves identically in the repo and at
+  `~/.config/activity-collector/`. 🔴 It needs its OWN `home.file` entry in
+  `nix/home.nix` — `claude/` and `opencode/` are `recursive = true` dir sources, so a
+  file added *inside* either ships automatically and a file added *beside* them does
+  not. `scripts/tests/test_collector_deploy_declares.py` pins that.
 - `tests/` — pytest unit + round-trip coverage (mocks the HTTP endpoint).
+
+## `session-summary` payload — changed paths, and absent vs zero
+Both summarisers emit the same additive block. It exists because
+`files_modified` is only a COUNT, and the downstream consumer
+(`scripts/lib/subsystem_resolver.py`, which maps a session onto the subsystems it
+touched) needs the PATHS.
+
+| field | meaning |
+|---|---|
+| `changed_paths` | repo-relative, deduped, sorted, capped. **`null` = we could not observe the file set**; `[]` = we looked and nothing changed. Those mean opposite things downstream. |
+| `changed_paths_total` | distinct count **before** the cap — the truncation discriminator |
+| `changed_paths_truncated` | the list is a prefix, not the whole story |
+| `changed_paths_outside_cwd` | distinct changed paths with no repo-relative form (scratchpads, other repos, temp worktrees). `total + outside_cwd == files_modified`. |
+| `changed_paths_cap` | the bound this emitter was built with (256 — see the module docstring for the measurement) |
+| `stats_unavailable` | `[]`, or the groups that could not be observed. `"files"` covers `changed_paths*` + (on opencode) `files_modified` / `lines_added` / `lines_removed` / `languages`; `"git"` covers `git_commits` / `git_pushes`. |
+
+🔴 **A zero that means "cannot report" is indistinguishable from a real zero**, and
+that ambiguity is what this block removes. OpenCode emitted `files_modified=0`,
+`lines_added=0` and `git_commits=0` for **every** session for months because its
+extractor read the tool arguments from the wrong place — and nothing could tell
+that apart from a quiet week. The summariser now counts what it COULD read beside
+what it saw, and reports the group as absent when the two disagree.
+
+The two sources differ in ONE respect, deliberately: opencode emits `null` for the
+unavailable integer counters, while claude keeps them ints. `session-summary` is
+consumed live for `source='claude'` (`session-analysis/insights.py`,
+`validation/invariants.py`), where changing a field's TYPE is not an additive change;
+nothing reads opencode's, and its values were a constant 0 that was never true.
+`stats_unavailable` is the uniform sentinel for both.
 
 ## Spool / emit line contract (v1)
 One event per line in `current.log`. TAB-separated `key=value` tokens, first
