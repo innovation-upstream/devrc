@@ -662,7 +662,8 @@ def test_operator_count_expression_matches_the_cadence_table():
     # survived this file until this assertion existed; it died only in the
     # browser-bridge suite, which is not where a deadman reader would look).
     #
-    # 🔴 THESE THREE ASSERTIONS BELONG TO *THIS* TEST. A later insertion once
+    # 🔴 THE MOVED BLOCK (the empty-cadence assert above, plus the two below)
+    # BELONGS TO *THIS* TEST. A later insertion once
     # landed inside this function and carried them into the next one, so the
     # guard above lived under a test named for something else — and deleting that
     # other test would have silently deleted this guard.

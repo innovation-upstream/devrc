@@ -701,6 +701,15 @@ def test_telemetry_freshness_excludes_machine_cadence_rows():
         assert "source = '%s' AND kind = '%s'" % (src, kind) in clause, clause
     # ... and it is genuinely derived, not a constant that happens to match.
     assert "heartbeat" in clause
+    # EQUALITY, not containment. The loop above only proves every declared pair
+    # APPEARS — a helper that ADDS a pair deadman never declared satisfies it,
+    # and since the call-site assertion below binds the SQL to `clause`, both
+    # sides would then be wrong in the same way and stay green. Over-excluding a
+    # source drops real activity from the panel (it reads stale, not falsely
+    # fresh — fail-loud, but still wrong). This still permits the legitimate
+    # maintenance path: adding a real pair to MACHINE_CADENCE moves both sides.
+    assert clause == "AND NOT (%s) " % DM.cadence_predicate_sql(
+        DM.MACHINE_CADENCE), clause
 
     # 🔴 AND THE CALL SITE USES IT. Asserting the helper alone is not enough:
     # dropping `machine_cadence_sql_filter()` from the SQL survived a suite that
