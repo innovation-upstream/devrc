@@ -1,0 +1,36 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Read(//home/zach/workspace/example-repo/**)",
+      "Bash(kubectl get:*)",
+      "Bash(kubectl:*)",
+      "Bash(mkdir:*)",
+      "Bash(git commit:*)",
+      "Bash(git add:*)",
+      "Bash(dig :*)",
+      "Bash(host:*)",
+      "Bash(curl:*)",
+      "Bash(ssh:*)",
+      "Bash(python3:*)",
+      "Bash(KUBECONFIG=./homelab-kubeconfig kubectl logs:*)",
+      "Bash(KUBECONFIG=/home/zach/workspace/homelab-talos/homelab-kubeconfig kubectl get:*)",
+      "Bash(TALOSCONFIG=./talosconfig talosctl:*)",
+      "Bash(SOPS_AGE_KEY_FILE=.secrets/age.key sops:*)",
+      "Bash(export KUBECONFIG=./homelab-kubeconfig)",
+      "Bash(k3s kubectl get pod:*)",
+      "Bash(./node_modules/.bin/task-master:*)",
+      "Bash(git -C /home/zach/workspace/example-repo config:*)",
+      "Bash(flux --kubeconfig=homelab-kubeconfig reconcile helmrelease loki -n monitoring)",
+      "Bash(helm show values:*)",
+      "Bash(docker run -u 1000:1000 alpine:*)",
+      "Bash(docker run --user 1000:1000 alpine:*)",
+      "mcp__context7__query-docs",
+      "WebSearch"
+    ],
+    "deny": [],
+    "ask": [],
+    "defaultMode": "default"
+  }
+}
