@@ -185,28 +185,51 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 # A floor comment that no longer describes its own number is the "a comment is a
 # claim too" case from claude/RULES.md; rewritten rather than bumped again.
 #
-# 6984 MEASURED 2026-08-11 on the MERGED tree (this branch merged with
-# origin/main at 5a20dff), not computed — and the distinction paid for itself
-# here. This branch measured 6761 against its own base 91aaa21 while #378
-# concurrently moved main; the two edits collided on this very line. Arithmetic
-# on the two branch deltas predicts 6976. The gate reports 6984.
+# 🔴 MERGE RESOLUTION (#376 <- origin/main). Both sides raised this floor
+# INDEPENDENTLY on different bases, so BOTH numbers are stale on the merged
+# tree — the BASE-DEPENDENT hazard above, arriving as a textual conflict:
+#     #376 feat/guard-commit-to-main  6897  (measured on base 5c53f38)
+#     origin/main via #378            6960  (measured on base 91aaa21)
+# The merged tree carries BOTH #376's guard-check suite and #378's
+# subsystem-resolver suite, so neither branch ever observed the real total.
+# Taking either side's number would have gone green on slack it never earned.
+# Re-MEASURED on the merged tree below, not computed from the two above.
+# MEASURED on the merged tree (this branch + origin/main @ 9f17cfc):
+#     TOTAL collected=7122  passed=7121  skipped=1  failed=0
+# and it reconciles exactly, so this is an accounting rather than a reading:
+#   main today                          6968  (= the 6960 floor + 7 from #380's
+#                                              test_settings_allow_junk.py and
+#                                              +1 from #386, neither of which
+#                                              raised the floor — that 8 of
+#                                              slack is exactly what a floor
+#                                              carried forward stops detecting)
+#   + this branch's guard-check suite    154  (test_guard_core.py 1156 -> 1310)
+#   = 7122
+# scripts/tests 1874 = #378's measured 1867 + #380's 7, confirming both landed.
 #
-# CONTROL PAIR, one tool set, same machine, `nix build
-# .#checks.x86_64-linux.pytests`, both read off the summary CONTENT:
-#     base 5a20dff : TOTAL collected=6968  passed=6967  skipped=1  failed=0
-#                    scripts/tests=1874
-#     merged tree  : TOTAL collected=6984  passed=6983  skipped=1  failed=0
-#                    scripts/tests=1890
-#   +16, and 1890-1874 = 16 = exactly the ship.sh consumer-check cases added to
-#   scripts/tests/test_ship_converge.py. That per-directory delta is also the
-#   positive control proving the gate RUNS them: no HERMETIC_TARGETS entry was
-#   needed because scripts/tests is already a directory target, so the only
-#   evidence they execute is the movement on that directory's own line.
+# 🔴 MERGE RESOLUTION AGAIN, one day later (#384 <- origin/main @ e0cf5d2), and
+# the SAME hazard for the third time on this one line. #384 measured 6984 on a
+# merge with 5a20dff; #376 then landed and moved main to 7122. Both numbers were
+# stale on the tree below, so neither side's was taken.
+# MEASURED on the merged tree, read off the summary CONTENT:
+#     TOTAL collected=7138  passed=7137  skipped=1  failed=0
+#     scripts/tests=1890
+# and it reconciles: main today 7122 + 16 = 7138, where the 16 are exactly the
+# ship.sh consumer-check cases in scripts/tests/test_ship_converge.py
+# (scripts/tests 1874 -> 1890). That per-directory delta is also the positive
+# control proving the gate RUNS them: no HERMETIC_TARGETS entry was needed
+# because scripts/tests is already a directory target, so movement on that
+# directory's own line is the only evidence they execute at all.
 #
-# ⚠ The 6960 above was itself 8 low against what main actually collects (6968) —
-# tests landed after it was measured, exactly the drift this note keeps warning
-# about. Re-measured rather than carried forward.
-MIN_TESTS="${MIN_TESTS:-6984}"
+# ⚠ #384 independently measured main-at-5a20dff as 6968, matching #376's
+# accounting above from a different branch — so the 8 of slack it names is
+# confirmed by two measurements, not one.
+#
+# 🔴 IF THIS LINE CONFLICTS AGAIN, do not resolve it by arithmetic on the two
+# numbers. Three consecutive PRs have now hit it, and every time the answer was
+# a number NEITHER side had. Re-run the gate on the merged tree and copy what it
+# reports.
+MIN_TESTS="${MIN_TESTS:-7138}"
 
 # --- GUARD 1: tool precondition ------------------------------------------------
 # Every binary the suites `skipif` on. Absence must be an ERROR, never a skip.
