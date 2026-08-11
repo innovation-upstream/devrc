@@ -944,9 +944,23 @@ def _git_read(repo_dir, *args):
 # `homelab-trunk`, matching neither entry by path — is still allowlisted via its
 # remote. That worktree is the spelling homelab-talos's CLAUDE.md actively tells
 # agents to use, so remote-matching is not a nicety here.
+# 🔴 A remote entry is OWNER/REPO, never a bare repo name. An adversarial probe
+# during review showed why: with bare-name matching, `_repo_names` allowlisted a
+# FORK (`someoneelse/homelab-infra`) and even `git@evil.example:x/homelab-infra`,
+# because "the last path component" is not an identity. Qualifying by owner makes
+# the entry name one repository. Measured after the change — see
+# test_allowlist_rejects_a_fork_or_a_lookalike_host.
+# 🔴 REMOTE SLUGS ONLY — no directory names. Matching a DIRECTORY name meant any
+# repo sitting in a folder called `homelab-talos` inherited the exemption
+# regardless of its remote (measured during audit: a checkout with devrc's own
+# remote, in a directory of that name, resolved ALLOW). A directory name is
+# chosen by whoever made the directory; a remote slug identifies the repository.
+# Dropping the directory entry costs nothing — the real homelab-talos checkout
+# AND the `homelab-trunk` linked worktree its CLAUDE.md prescribes both carry
+# this remote, and a hypothetical remote-less copy is already allowed by the
+# no-remotes carve-out.
 _TRUNK_DEPLOY_REPOS = frozenset({
-    "homelab-talos",   # the working-tree directory name
-    "homelab-infra",   # the GitHub repo name behind that directory (they DIFFER)
+    "ZacxDev/homelab-infra",    # homelab-talos: its CLAUDE.md declares commit = live deploy
 })
 
 # The branch names RULES.md means by "main/master". `trunk` is included because it
@@ -957,15 +971,74 @@ _MAIN_BRANCH_NAMES = frozenset({"main", "master", "trunk"})
 
 # `git commit` spellings that do not CREATE a commit. `--dry-run` is the whole
 # list: it is git's documented "show what would be committed" mode and is a read.
+#
 # 🔴 `-n` is NOT here — for `git commit` that is `--no-verify`, which commits
 # while SKIPPING hooks. Reading it as a dry run would have opened a bypass that
 # looks like a typo.
-_COMMIT_DRY_RUN_FLAGS = frozenset({"--dry-run"})
+#
+# Matched as an ABBREVIATION, not an exact string, because git accepts any
+# unambiguous prefix of a long option: `git commit --dry` really is a dry run
+# (verified: rc=0, "Changes to be committed", no commit created). An exact-set
+# test denied it — a false positive on a READ, found by audit.
+_DRY_RUN_MIN = "--dry"
+_DRY_RUN_FULL = "--dry-run"
 
-# `cd <path> && git …` — the same anchor check_cd_then_git uses. That check denies
-# this shape anyway, but it runs AFTER this one, so without this the compound
-# would be resolved against the wrong directory.
-_LEADING_CD = re.compile(r"^\s*cd\s+(\S+)\s*(?:&&|;)")
+
+def _is_dry_run_flag(flag):
+    return (flag.startswith(_DRY_RUN_MIN)
+            and _DRY_RUN_FULL.startswith(flag))
+
+
+# Every `cd`/`pushd` in the line, not just a leading one, and regardless of what
+# encloses it — a subshell `( … )`, a `bash -c '…'` body, or the third segment of
+# a `;` chain all carry the target as literal text. Anchored on a segment
+# boundary so `rsync --cd foo` or a path ending in "cd" cannot match.
+# The boundary class includes QUOTES: inside `bash -c 'cd <dir> && git commit'`
+# the character before `cd` is `'`, so a whitespace-only boundary missed exactly
+# the nested-shell spelling this regex exists to catch.
+_CD_ANY = re.compile(
+    r"""(?:^|[;&|(){}'"]|\s)(?:cd|pushd)\s+(?P<dir>"[^"]*"|'[^']*'|[^\s;&|()'"]+)""")
+
+# `GIT_DIR=`/`GIT_WORK_TREE=` env prefixes. The parser strips `VAR=` prefixes off
+# the argv (correctly — they are not the command), so the only place these
+# survive is the raw text.
+_GIT_DIR_ENV = re.compile(r"\bGIT_(?:DIR|WORK_TREE)=(?P<dir>\"[^\"]*\"|'[^']*'|\S+)")
+
+# git's own "act on this repo" global options, the `-C` siblings.
+_GIT_REPO_OPTS = ("--git-dir", "--work-tree")
+
+
+def _safe_getcwd():
+    """🔴 `os.getcwd()` RAISES when the process's cwd has been deleted, and this
+    runs on every Bash call. An escaped exception is not a missed deny — it is a
+    BLANKET one: bash-guard.py denies on exception, and the opencode plugin fails
+    closed on the CLI's rc=2, so every command in the session would be refused
+    until the directory came back. Realistic trigger: a session whose cwd was a
+    worktree another session removed. Found by audit; returns None instead."""
+    try:
+        return os.getcwd()
+    except OSError:
+        return None
+
+
+def _resolve_dir(value, base):
+    """A command-supplied path -> an existing directory, or None.
+
+    Expands `$HANDLE` and `~`, resolves a relative path against `base`, and maps
+    `<repo>/.git` onto `<repo>` so a `--git-dir` is judged as its worktree.
+    """
+    if not value:
+        return None
+    value = os.path.expanduser(os.path.expandvars(value.strip("\"'")))
+    if not value:
+        return None
+    if not os.path.isabs(value):
+        if not base:
+            return None
+        value = os.path.join(base, value)
+    if os.path.basename(value) == ".git" and os.path.isdir(value):
+        value = os.path.dirname(value) or value
+    return value if os.path.isdir(value) else None
 
 
 def _dash_c_dir(argv, base):
@@ -994,13 +1067,18 @@ def _dash_c_dir(argv, base):
     deny message names the repo it judged, so it is self-diagnosing, and the way
     past it is an absolute `-C` path, which resolves.
     """
-    cur, i = base, 1
+    # Path resolution goes through _resolve_dir — ONE place. It used to be
+    # open-coded here as well, and a mutation sweep caught the consequence: the
+    # duplicate meant _resolve_dir's `expandvars` was never exercised by any test
+    # (the only handle test went through this copy), so that mutant SURVIVED. A
+    # predicate duplicated across call sites is wrong at N-1 of them eventually;
+    # here it was merely untested, which is how it starts.
+    cur, i, saw = base, 1, False
     while i < len(argv):
         tok = argv[i]
         if tok == "-C" and i + 1 < len(argv):
-            val = os.path.expanduser(os.path.expandvars(argv[i + 1]))
-            cur = val if os.path.isabs(val) else os.path.join(cur, val)
-            i += 2
+            cur = _resolve_dir(argv[i + 1], cur) or cur
+            i, saw = i + 2, True
             continue
         if tok in _GIT_GLOBAL_VALUE_OPTS:
             i += 2
@@ -1009,26 +1087,85 @@ def _dash_c_dir(argv, base):
             i += 1
             continue
         break
-    return cur if os.path.isdir(cur) else base
+    if not saw:
+        return None
+    return cur if cur and os.path.isdir(cur) else base
 
 
-def _repo_names(repo_dir):
-    """Every name this repo answers to: the toplevel basename plus each remote's
-    repo name. Returns () when `repo_dir` is not a git repo."""
-    top = _git_read(repo_dir, "rev-parse", "--show-toplevel")
-    if not top:
-        return ()
-    names = {os.path.basename(top)}
+def _argv_named_repo_dirs(argv, base):
+    """The repos an argv NAMES for itself, via `-C` / `--git-dir` / `--work-tree`.
+
+    Empty when the argv names none — the caller then falls back to the cd-derived
+    candidate set. Keeping "named" and "inferred" apart is what lets an explicit
+    `git -C <feature-repo> commit` stay ALLOWED from a cwd that sits on main.
+    """
+    dirs = []
+    hopped = _dash_c_dir(argv, base)
+    if hopped:
+        dirs.append(hopped)
+    for i, tok in enumerate(argv[1:], 1):
+        for opt in _GIT_REPO_OPTS:
+            val = None
+            if tok == opt and i + 1 < len(argv):
+                val = argv[i + 1]
+            elif tok.startswith(opt + "="):
+                val = tok.split("=", 1)[1]
+            resolved = _resolve_dir(val, base)
+            if resolved:
+                dirs.append(resolved)
+    return list(dict.fromkeys(dirs))
+
+
+def _candidate_dirs(cmd, base):
+    """Every directory a BARE `git commit` in this line could run in: the caller's
+    cwd, plus every `cd`/`pushd` target and `GIT_DIR=`/`GIT_WORK_TREE=` prefix
+    anywhere in the text (subshells and `bash -c` bodies included)."""
+    out = [base] if base else []
+    for rx in (_CD_ANY, _GIT_DIR_ENV):
+        for m in rx.finditer(cmd):
+            resolved = _resolve_dir(m.group("dir"), base)
+            if resolved:
+                out.append(resolved)
+    return list(dict.fromkeys(out))
+
+
+def _remote_slug(url):
+    """`owner/repo` for a remote URL, or None.
+
+    Handles the three spellings that name the same repository — scp-style
+    (`git@github.com:Owner/repo.git`), https (`https://host/Owner/repo[.git]`)
+    and `ssh://git@host/Owner/repo.git` — by stripping any scheme/host prefix and
+    taking the LAST TWO path segments.
+
+    🔴 Two segments, not one. Matching the bare repo name allowlisted a FORK
+    (`someoneelse/homelab-infra`) and `git@evil.example:x/homelab-infra` — found
+    by an adversarial probe, not by a test that was looking for it.
+    """
+    if not url:
+        return None
+    path = url.rstrip("/")
+    if "://" in path:                      # ssh://, https://, git://
+        path = path.split("://", 1)[1]
+        path = path.split("/", 1)[1] if "/" in path else ""
+    elif ":" in path:                      # scp-style git@host:owner/repo
+        path = path.split(":", 1)[1]
+    if path.endswith(".git"):
+        path = path[:-4]
+    parts = [p for p in path.split("/") if p]
+    return "/".join(parts[-2:]) if len(parts) >= 2 else None
+
+
+def _remote_slugs(repo_dir):
+    """The `owner/repo` slug of every remote. Empty when the repo has none —
+    which is itself the signal the no-remotes carve-out reads, so this is called
+    ONCE and its emptiness reused rather than re-running `git remote` (the deny
+    path used to exec it twice; found by audit)."""
+    slugs = []
     for remote in (_git_read(repo_dir, "remote") or "").split():
-        url = _git_read(repo_dir, "remote", "get-url", remote)
-        if not url:
-            continue
-        tail = url.rstrip("/").rsplit("/", 1)[-1].rsplit(":", 1)[-1]
-        if tail.endswith(".git"):
-            tail = tail[:-4]
-        if tail:
-            names.add(tail)
-    return tuple(names)
+        slug = _remote_slug(_git_read(repo_dir, "remote", "get-url", remote))
+        if slug:
+            slugs.append(slug)
+    return slugs
 
 
 def _commit_to_main_reason(repo_dir):
@@ -1059,12 +1196,12 @@ def _commit_to_main_reason(repo_dir):
     branch = _git_read(repo_dir, "branch", "--show-current")
     if not branch or branch not in _MAIN_BRANCH_NAMES:
         return None
-    names = _repo_names(repo_dir)
-    if not names:
-        return None
-    if any(n in _TRUNK_DEPLOY_REPOS for n in names):
-        return None
-    if not (_git_read(repo_dir, "remote") or "").strip():
+    if _git_read(repo_dir, "rev-parse", "--show-toplevel") is None:
+        return None                       # not a git repo at all
+    slugs = _remote_slugs(repo_dir)
+    if not slugs:
+        return None                       # the scratch-repo carve-out, argued above
+    if any(s in _TRUNK_DEPLOY_REPOS for s in slugs):
         return None
     return (
         f"`git commit` on branch `{branch}` is blocked by your RULES — feature branches only, "
@@ -1108,28 +1245,44 @@ def check_git_commit_to_main(cmd, cwd=None):
         ALLOW  git -C /home/zach/workspace/devrc commit -m "wip"
         ALLOW  git commit -F /tmp/msg.txt
 
-    The repo is resolved from the command's own `-C` hop when it has one, then from
-    a leading `cd <path> &&`, and only then from the caller's cwd — so the three
-    spellings that actually appear in transcripts all resolve to the repo they will
-    really act on, not to wherever the hook happens to be running.
+    WHICH DIRECTORY GETS JUDGED — two rules, and the split is deliberate:
+
+      * an argv that names its own repo (`-C`, `--git-dir`, `--work-tree`) is judged
+        on THAT repo alone. The command said where it acts, so the caller's cwd is
+        irrelevant, and folding it in would deny the documented `git -C $WT commit`
+        spelling whenever the cwd happened to sit on main.
+      * a BARE `git commit` is judged against every directory the line could have
+        left the shell in: the caller's cwd plus every `cd`/`pushd` target anywhere
+        in the text — including inside `bash -c '…'` and `( … )`, because the
+        target is literal text there too. Any one of them being a blocked repo
+        denies. That over-approximates, on purpose: for a bare commit the guard
+        cannot know which `cd` won, and a guard that guesses should guess CLOSED.
+
+    🔴 The second rule exists because the guard was TEACHING ITS OWN BYPASS. An
+    adversarial audit measured, against the real adapter, that `cd <main> && git
+    commit` denied (via check_cd_then_git) while the model's two obvious retries
+    both ALLOWED:
+        ALLOW  (cd <main> && git commit -m x)          <- a subshell
+        ALLOW  bash -c 'cd <main> && git commit -m x'
+        ALLOW  ls; cd <main>; git commit -m x          <- a non-leading cd
+        ALLOW  git --git-dir=<main>/.git --work-tree=<main> commit -m x
+    A deny whose adjacent re-spelling succeeds is worse than no deny: it launders
+    the action into one the guard has blessed.
     """
-    base = cwd or os.getcwd()
-    m = _LEADING_CD.match(cmd)
-    if m:
-        cd_target = os.path.expanduser(m.group(1).strip("\"'"))
-        if os.path.isdir(cd_target):
-            base = cd_target
+    base = cwd or _safe_getcwd()
     for argv in commands(cmd):
         if os.path.basename(argv[0]) != "git":
             continue
         flags, operands = _flags_and_operands(_git_strip_global_opts(argv))
         if not operands or operands[0] != "commit":
             continue
-        if flags & _COMMIT_DRY_RUN_FLAGS:
+        if any(_is_dry_run_flag(f) for f in flags):
             continue
-        reason = _commit_to_main_reason(_dash_c_dir(argv, base))
-        if reason:
-            return reason
+        named = _argv_named_repo_dirs(argv, base)
+        for repo_dir in (named or _candidate_dirs(cmd, base)):
+            reason = _commit_to_main_reason(repo_dir)
+            if reason:
+                return reason
     return None
 
 

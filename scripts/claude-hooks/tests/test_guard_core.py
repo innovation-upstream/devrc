@@ -1803,18 +1803,30 @@ def test_nonexistent_cwd_is_allowed_and_does_not_raise(tmp_path):
 def test_allowlist_is_pinned_by_name(tmp_path):
     """🔴 Pinned against a literal, like the policy list itself: an allowlist that
     can grow silently is a deny that can be switched off silently."""
-    assert gc._TRUNK_DEPLOY_REPOS == frozenset({"homelab-talos", "homelab-infra"}), (
+    assert gc._TRUNK_DEPLOY_REPOS == frozenset({"ZacxDev/homelab-infra"}), (
         f"the trunk-deploy allowlist is {sorted(gc._TRUNK_DEPLOY_REPOS)}. Adding a repo "
         f"here disables a 🔴 deny for it and must be an explicit, reported decision — "
         f"it requires the target repo's OWN CLAUDE.md to state that committing to its "
-        f"main branch IS deploying."
+        f"main branch IS deploying. Entries are `owner/repo` REMOTE SLUGS; a directory "
+        f"name is not an identity and must never appear here."
     )
 
 
-def test_allowlisted_repo_may_commit_to_trunk_by_directory_name(tmp_path):
+def test_allowlisted_repo_may_commit_to_trunk(tmp_path):
     repo = _mkrepo(tmp_path / "homelab-talos", branch="trunk",
                    remote="git@github.com:ZacxDev/homelab-infra.git")
     assert gc.check_git_commit_to_main("git commit -m deploy", str(repo)) is None
+
+
+def test_a_directory_NAMED_like_the_allowlisted_repo_is_not_exempt(tmp_path):
+    """🔴 Found by audit. The allowlist used to match the toplevel DIRECTORY name,
+    so any checkout sitting in a folder called `homelab-talos` inherited the
+    exemption regardless of its remote — including devrc itself. A directory name
+    is chosen by whoever made the directory; only the remote identifies the repo.
+    """
+    impostor = _mkrepo(tmp_path / "homelab-talos", branch="main",
+                       remote="git@github.com:innovation-upstream/devrc.git")
+    assert gc.check_git_commit_to_main("git commit -m x", str(impostor)) is not None
 
 
 def test_allowlisted_repo_is_matched_by_its_REMOTE_when_the_directory_differs(tmp_path):
@@ -2095,3 +2107,280 @@ def test_expandvars_resolves_a_handle_that_IS_in_the_environment(tmp_path, monke
     monkeypatch.setenv("SOME_REPO_HANDLE", str(on_main))
     assert gc.check_git_commit_to_main(
         "git -C $SOME_REPO_HANDLE commit -m x", str(on_feat)) is not None
+
+
+# --- 8d(ii). 🔴 the allowlist is OWNER-qualified ----------------------------- #
+# Found by an adversarial probe during review, not by a test looking for it:
+# matching a remote on its BARE repo name allowlisted a FORK
+# (`someoneelse/homelab-infra`) and `git@evil.example:x/homelab-infra`, because
+# "the last path component" is not an identity. Entries are `owner/repo` now.
+
+@pytest.mark.parametrize("label,url", [
+    ("a fork under a different owner", "git@github.com:someoneelse/homelab-infra.git"),
+    ("a lookalike host",               "git@evil.example:x/homelab-infra.git"),
+    ("owner named like the repo",      "git@github.com:homelab-infra/other.git"),
+    ("suffixed repo",                  "git@github.com:ZacxDev/homelab-infra-staging.git"),
+    ("prefixed repo",                  "git@github.com:ZacxDev/my-homelab-infra.git"),
+])
+def test_allowlist_rejects_a_fork_or_a_lookalike_host(tmp_path, label, url):
+    """None of these is the repo whose CLAUDE.md declares commit = live deploy,
+    so none of them may inherit its exemption."""
+    repo = _mkrepo(tmp_path / label.replace(" ", "_"), branch="trunk", remote=url)
+    assert gc.check_git_commit_to_main("git commit -m x", str(repo)) is not None, url
+
+
+def test_the_real_owner_repo_is_still_allowlisted(tmp_path):
+    """The other half — tightening must not break the case it exists to allow."""
+    repo = _mkrepo(tmp_path / "homelab-trunk", branch="trunk",
+                   remote="git@github.com:ZacxDev/homelab-infra.git")
+    assert gc.check_git_commit_to_main("git commit -m deploy", str(repo)) is None
+
+
+@pytest.mark.parametrize("url,slug", [
+    ("git@github.com:ZacxDev/homelab-infra.git",        "ZacxDev/homelab-infra"),
+    ("https://github.com/ZacxDev/homelab-infra.git",    "ZacxDev/homelab-infra"),
+    ("https://github.com/ZacxDev/homelab-infra",        "ZacxDev/homelab-infra"),
+    ("ssh://git@github.com/ZacxDev/homelab-infra.git",  "ZacxDev/homelab-infra"),
+    ("git://github.com/ZacxDev/homelab-infra.git",      "ZacxDev/homelab-infra"),
+    ("https://github.com/ZacxDev/homelab-infra/",       "ZacxDev/homelab-infra"),
+    ("git@github.com:someoneelse/homelab-infra.git",    "someoneelse/homelab-infra"),
+    ("/srv/mirrors/deep/path/owner/repo.git",           "owner/repo"),
+    ("just-a-name",                                     None),
+    ("",                                                None),
+    (None,                                              None),
+])
+def test_remote_slug_parses_every_url_spelling(url, slug):
+    """Pinned against literal expected values rather than derived from the parser
+    — a slug helper that agreed with itself would prove nothing."""
+    assert gc._remote_slug(url) == slug
+
+
+# --------------------------------------------------------------------------- #
+# 10. 🔴 REGRESSIONS FOR THE ADVERSARIAL AUDIT OF #376
+#
+# Every case here was measured ALLOW (or a crash) against the first version of
+# this guard. None was found by the tests above — they were found by an audit
+# that went looking for the re-spelling a blocked model would try next. That is
+# the point of the section: a deny whose adjacent re-spelling succeeds is worse
+# than no deny, because it launders the action into one the guard has blessed.
+# --------------------------------------------------------------------------- #
+
+def test_a_deleted_cwd_does_not_crash_the_guard(tmp_path, monkeypatch):
+    """🔴 HIGHEST-severity finding: `os.getcwd()` RAISES when the process's cwd
+    has been deleted, and it ran on EVERY command. The exception escaped
+    `evaluate`, and both callers fail CLOSED on an exception — bash-guard.py
+    denies, and the opencode plugin denies on the CLI's rc=2. So a stale cwd (a
+    worktree another session removed) would have refused EVERY bash call in the
+    session, for every command, until the directory came back.
+
+    Reproduced by actually deleting the process's cwd, not by mocking getcwd —
+    a mock would have asserted the fix against my own idea of the failure.
+    """
+    doomed = tmp_path / "doomed"
+    doomed.mkdir()
+    original = os.getcwd()
+    try:
+        os.chdir(doomed)
+        doomed.rmdir()
+        with pytest.raises(OSError):          # the hazard is real, not theoretical
+            os.getcwd()
+        for policy in ("claude-code", "opencode"):
+            assert gc.evaluate("ls -la", policy) is None
+            assert gc.evaluate("git commit -m x", policy) is None
+            assert gc.evaluate("git stash", policy) is not None   # unrelated denies survive
+    finally:
+        os.chdir(original)
+
+
+def test_safe_getcwd_returns_none_rather_than_raising(tmp_path):
+    doomed = tmp_path / "doomed2"
+    doomed.mkdir()
+    original = os.getcwd()
+    try:
+        os.chdir(doomed)
+        doomed.rmdir()
+        assert gc._safe_getcwd() is None
+    finally:
+        os.chdir(original)
+
+
+@pytest.mark.parametrize("template", [
+    "(cd {main} && git commit -m x)",                  # a subshell
+    "ls; cd {main}; git commit -m x",                  # a NON-leading cd
+    "git status && cd {main} && git commit -m x",
+    "bash -c 'cd {main} && git commit -m x'",          # inside a nested shell
+    "pushd {main} && git commit -m x",
+    "cd {main} && ls && git commit -m x",
+    "sh -c \"cd {main}; git commit -m x\"",
+    "GIT_DIR={main}/.git GIT_WORK_TREE={main} git commit -m x",
+    "git --git-dir={main}/.git --work-tree={main} commit -m x",
+    "git --git-dir {main}/.git commit -m x",
+])
+def test_directory_hops_other_than_a_leading_cd_are_caught(tmp_path, template):
+    """🔴 The guard was TEACHING ITS OWN BYPASS: `cd <main> && git commit` denied
+    (via check_cd_then_git), while a subshell, a `bash -c`, a non-leading `cd`
+    and the `--git-dir` hop all ALLOWED — measured end-to-end against the real
+    adapter during audit. The cwd here is a FEATURE-branch repo, so a deny can
+    only come from the hop being resolved."""
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    on_feat = _mkrepo(tmp_path / "feat-repo", branch="feat/x")
+    cmd = template.format(main=on_main)
+    assert gc.check_git_commit_to_main(cmd, str(on_feat)) is not None, cmd
+
+
+@pytest.mark.parametrize("template", [
+    "(cd {feat} && git commit -m x)",
+    "ls; cd {feat}; git commit -m x",
+    "bash -c 'cd {feat} && git commit -m x'",
+    "GIT_DIR={feat}/.git GIT_WORK_TREE={feat} git commit -m x",
+    "git --git-dir={feat}/.git --work-tree={feat} commit -m x",
+])
+def test_the_same_hops_into_a_feature_branch_stay_allowed(tmp_path, template):
+    """The other half — the hop must be RESOLVED, not merely treated as suspicious.
+    Without this, "the guard got stricter" and "the guard now denies every commit
+    that mentions a directory" look identical from the green side.
+
+    The cwd is a NON-REPO here on purpose, to isolate the hop: the caller's cwd is
+    always a candidate too (see the next test), so judging this from a cwd that
+    sits on `main` would measure that rule instead of this one.
+    """
+    neutral = tmp_path / "neutral"
+    neutral.mkdir()
+    on_feat = _mkrepo(tmp_path / "feat-repo", branch="feat/x")
+    cmd = template.format(feat=on_feat)
+    assert gc.check_git_commit_to_main(cmd, str(neutral)) is None, cmd
+
+
+def test_the_cwd_REMAINS_a_candidate_even_when_the_line_cds_elsewhere(tmp_path):
+    """🔴 A deliberate fail-CLOSED over-approximation, pinned so it is a decision
+    rather than a surprise.
+
+    For a bare `git commit` the guard cannot know which `cd` actually won — the
+    line may be conditional (`cd x && …`), the `cd` may fail, or it may sit in a
+    subshell that does not affect the caller. So every directory the line could
+    have ended in is judged, the caller's cwd included, and ANY of them being a
+    blocked repo denies.
+
+    The cost is this case: a cwd on `main` plus a hop into a feature repo denies,
+    naming the cwd. Accepted because the precise spelling — `git -C <repo> commit`,
+    the one this repo's CLAUDE.md mandates — is judged on its named repo ALONE and
+    is unaffected (test_an_explicit_named_repo_beats_the_cwd_and_the_cd_candidates).
+    """
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    on_feat = _mkrepo(tmp_path / "feat-repo", branch="feat/x")
+    reason = gc.check_git_commit_to_main(f"cd {on_feat} && git commit -m x", str(on_main))
+    assert reason is not None
+    assert str(on_main) in reason, "the deny must name the directory it actually judged"
+
+
+def test_an_explicit_named_repo_beats_the_cwd_and_the_cd_candidates(tmp_path):
+    """The split between NAMED and INFERRED directories. `git -C <feat>` says
+    where it acts, so neither the cwd nor a stray `cd` may override it — that is
+    what keeps the documented `git -C $WT commit` spelling usable from a checkout
+    sitting on main."""
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    on_feat = _mkrepo(tmp_path / "feat-repo", branch="feat/x")
+    assert gc.check_git_commit_to_main(
+        f"cd {on_main} && git -C {on_feat} commit -m x", str(on_main)) is None
+
+
+def test_cd_to_a_RELATIVE_path_resolves_against_the_payload_cwd(tmp_path):
+    """🔴 Audit finding: the leading-cd branch called `os.path.isdir()` on the raw
+    relative target, so it resolved against the GUARD PROCESS's cwd — naming a
+    repo the command never touches. Now joined to the payload cwd, like `-C`."""
+    _mkrepo(tmp_path / "nested" / "repo", branch="main")
+    outer = tmp_path / "nested"
+    assert gc.check_git_commit_to_main("cd repo && git commit -m x", str(outer)) is not None
+
+
+@pytest.mark.parametrize("flag,is_dry", [
+    ("--dry-run", True),
+    ("--dry-ru", True),
+    ("--dry-r", True),
+    ("--dry", True),          # git accepts any unambiguous long-option prefix
+    ("--dr", False),          # ambiguous-ish / not a prefix we honour
+    ("-n", False),            # 🔴 --no-verify: COMMITS, skipping hooks
+    ("--no-verify", False),
+    ("--dry-run-nonsense", False),
+])
+def test_dry_run_abbreviations(tmp_path, flag, is_dry):
+    """git accepts `--dry` as `--dry-run` (verified: rc=0, no commit created), so
+    an exact-string test denied a READ. `-n` must NEVER be read as a dry run."""
+    repo = _mkrepo(tmp_path / "r", branch="main")
+    denied = gc.check_git_commit_to_main(f"git commit {flag}", str(repo)) is not None
+    assert denied == (not is_dry), f"{flag} -> denied={denied}"
+
+
+def test_the_deny_path_does_not_exec_git_twice_for_the_same_question(tmp_path, monkeypatch):
+    """Audit finding: `git remote` was executed twice on every deny — once inside
+    the name lookup and once for the no-remotes carve-out. Pinned as a COUNT, so
+    a future refactor that reintroduces the duplicate is visible."""
+    repo = _mkrepo(tmp_path / "r", branch="main")
+    seen = []
+    real = gc.subprocess.run
+
+    def counting(argv, *a, **k):
+        if isinstance(argv, (list, tuple)) and argv and argv[0] == "git":
+            seen.append(tuple(argv[3:]))    # ['git', '-C', <dir>, <subcommand>, …]
+        return real(argv, *a, **k)
+
+    monkeypatch.setattr(gc.subprocess, "run", counting)
+    assert gc.check_git_commit_to_main("git commit -m x", str(repo)) is not None
+    # `("remote",)` is the LIST call; `("remote", "get-url", <name>)` is a
+    # different question and is expected once per remote. Counting the bare tuple
+    # keeps the two apart — an earlier version of this assertion conflated them
+    # and reported a duplicate that was not one.
+    listings = seen.count(("remote",))
+    assert listings == 1, f"`git remote` (list) exec'd {listings}x: {seen}"
+
+
+def test_ordinary_commands_never_exec_git(tmp_path, monkeypatch):
+    """🔴 The hot-path promise, asserted rather than claimed: this hook runs on
+    EVERY Bash call, so a non-commit command must pay zero subprocesses."""
+    repo = _mkrepo(tmp_path / "r", branch="main")
+    execs = []
+    real = gc.subprocess.run
+
+    def counting(argv, *a, **k):
+        if isinstance(argv, (list, tuple)) and argv and argv[0] == "git":
+            execs.append(argv)
+        return real(argv, *a, **k)
+
+    monkeypatch.setattr(gc.subprocess, "run", counting)
+    for cmd in ["ls -la", "rg foo src/", "kubectl get pods", "npm run build",
+                "git status", "git log --oneline -3", "git add scripts/x.py",
+                "git commit --dry-run", "pkill -f x"]:
+        gc.evaluate(cmd, "claude-code", str(repo))
+    assert execs == [], f"{len(execs)} git exec(s) on non-commit commands: {execs[:3]}"
+
+
+def test_expandvars_applies_to_cd_targets_too_not_only_to_dash_C(tmp_path, monkeypatch):
+    """🔴 Added because a mutation sweep found a SURVIVING mutant: removing
+    `expandvars` from `_resolve_dir` broke nothing, since the only handle test
+    went through `_dash_c_dir`'s own duplicate copy of that logic. The duplicate
+    is now consolidated, and this pins the path the duplicate was hiding —
+    `cd $HANDLE && git commit`, which is how the handle actually gets used.
+    """
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    neutral = tmp_path / "neutral"
+    neutral.mkdir()
+    monkeypatch.setenv("GUARD_TEST_MAIN_REPO", str(on_main))
+    assert gc.check_git_commit_to_main(
+        "cd $GUARD_TEST_MAIN_REPO && git commit -m x", str(neutral)) is not None
+    assert gc.check_git_commit_to_main(
+        "bash -c 'cd $GUARD_TEST_MAIN_REPO && git commit -m x'", str(neutral)) is not None
+
+
+def test_resolve_dir_is_the_single_path_resolver(tmp_path, monkeypatch):
+    """The consolidation itself, asserted at the unit: `-C` and `cd` must agree,
+    because they are now the same code. A future re-duplication makes them
+    diverge and this goes red."""
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    monkeypatch.setenv("GUARD_TEST_MAIN_REPO", str(on_main))
+    neutral = tmp_path / "neutral2"
+    neutral.mkdir()
+    assert gc._resolve_dir("$GUARD_TEST_MAIN_REPO", str(neutral)) == str(on_main)
+    assert gc._resolve_dir("main-repo", str(tmp_path)) == str(on_main)
+    assert gc._resolve_dir(str(on_main / ".git"), None) == str(on_main)
+    assert gc._resolve_dir("/definitely/not/here", None) is None
+    assert gc._resolve_dir(None, None) is None
