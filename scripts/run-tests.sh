@@ -322,13 +322,21 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 # and added 72 tests: 7351/2080 -> 7423/2152. A fix round resets this number
 # exactly as it resets the verification gate.
 #
+# ⚠ THIRD re-measurement, same branch, same reason. A SECOND fix round (delta
+# re-audit of the first) fixed `tail` against a down tmux server, made
+# `detail_history` stop asserting a MEASURED absence over an UNMEASURED set,
+# covered four render/gather seams that an independently-built mutation sweep
+# had found unpinned, and replaced one vacuous test: 7423/2152 -> 7456/2185
+# (+33; test_session_manager.py 229 -> 262). Measured in the nix sandbox, not
+# carried forward.
+#
 # ⚠ The base was ALREADY 26 above this floor before this branch existed (7194 vs
 # 7168) — slack accumulated by PRs that added tests without raising it, exactly
 # the drift the notes above keep describing.
 #
 # 🔴 BOTH TIERS READ, AND THEY AGREE EXACTLY. Dev-host
 # `run-tests.sh --set all` reports
-#     TOTAL collected=7423  passed=7422  skipped=1  failed=0   scripts/tests=2152
+#     TOTAL collected=7456  passed=7455  skipped=1  failed=0   scripts/tests=2185
 # — the same four numbers as the sandbox above, on every line.
 #   (An earlier revision of this comment claimed the two tiers "DISAGREE BY ONE
 #   — deliberately recorded rather than smoothed over" and then printed
@@ -350,7 +358,7 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 # EXPECTED_SKIPS untouched: skipped=1, the one pinned entry. The new suite adds
 # ZERO skips by construction — it mocks tmux, SSH, ClickHouse and the
 # filesystem, so it has no external binary, no network and no host dependency.
-MIN_TESTS="${MIN_TESTS:-7423}"
+MIN_TESTS="${MIN_TESTS:-7456}"
 
 # --- GUARD 1: tool precondition ------------------------------------------------
 # Every binary the suites `skipif` on. Absence must be an ERROR, never a skip.

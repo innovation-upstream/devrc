@@ -63,9 +63,21 @@ did not exist. `test_sql_session_history_IS_reachable_from_main` now names the c
 | status | reason | means |
 |---|---|---|
 | `skipped` | `--no-ch` | the query was never run |
-| `skipped` | `this window carries no claude_session_id …` | no live fuzzyclaw task joined to this window |
+| `skipped` | `fuzzyclaw was skipped (--no-fuzzyclaw) …` | the task files were never read — **not** a measured absence |
+| `skipped` | `fuzzyclaw is read on the LOCAL host only …` | the window is **remote**; no task file was ever searched for it — **not** a measured absence |
+| `skipped` | `the fuzzyclaw intersection never ran …` | the live-window set was never measured — **not** a measured absence |
+| `skipped` | `this window's slot was claimed by N task files and ALL were dropped …` | contested slot; no id is trusted — **not** a measured absence |
+| `skipped` | `no window in this report matched the requested target …` | nothing to carry an id — **not** a measured absence |
+| `skipped` | `this window carries no claude_session_id (no live fuzzyclaw task file joined to it)` | **the one genuine measured absence**: fuzzyclaw ran, this local window simply has no task |
 | `ok`, `rows: []` | — | the query ran and this session has no prompts in 24h |
 | `unreachable` / `query_error` / `unavailable` | — | the query did not answer |
+
+🔴 **Only the last `skipped` row is a measured negative.** A single hardcoded reason used to
+answer *all* of them, so one `detail --json` could print `LIVE COUNT UNMEASURED` and then
+assert a measured absence over that same unmeasured set a few lines later. Every
+non-measured reason now ends with **"this is NOT a measured absence"**, and
+`no_session_reason()` — pure, unit-tested, branching only on facts the report already
+carries — chooses between them.
 
 The session id goes through `chquery.sql_quote()` — the repo's one quoter. Do not build a
 second one, and do not f-string a raw id into SQL. The id comes from a source `CLAUDE.md`

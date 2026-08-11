@@ -25,6 +25,16 @@ python3 $DEVRC/scripts/session-manager tail scratch7:3 --lines 200   # --host de
 under `--no-ch` or when the window carries no session id). See
 `reference/clickhouse-queries.md`.
 
+🔴 **Read `session_history.reason` — only one of its answers is a measured absence.** A
+single hardcoded reason used to answer every no-session-id case, so one `detail --json`
+could print `LIVE COUNT UNMEASURED` and then assert a *measured* absence over that same
+unmeasured set. The reason now branches on what was actually measured: `--no-ch`,
+`--no-fuzzyclaw` (the files were never read), the window is on a **remote** host (fuzzyclaw
+is local-only, so no task file was ever searched for it), the intersection **never ran**,
+the slot was **contested and all claimants dropped**, or — the one genuine measured
+absence — *"no live fuzzyclaw task file joined to it"*. Every other reason says **"this is
+NOT a measured absence"** in so many words.
+
 | flag | effect |
 |---|---|
 | `--json` | JSON (default is a table) |
@@ -42,11 +52,20 @@ under `--no-ch` or when the window carries no session id). See
 | `2` | usage / malformed `<session>:<window>` target / **`tail`: the host answered and there is no such window** |
 | `3` | every requested host answered and the answer is a **real zero** (for `tail`: the window exists and its scrollback is empty) |
 | `4` | **no** host could be reached — the zero is unmeasured, not measured |
+| `5` | **`tail` only**: the host answered and there is **no tmux server** on it, so no window exists there |
 
 🔴 For `tail`, "no such window" is **exit 2**, not 4. The host answered; calling it
 unreachable states a false fact and sends you to debug SSH over a typo. `tail`'s JSON
 carries `reachable` *and* `found` — `found: null` means the host never answered, so it has
 said nothing about whether the target exists.
+
+🔴 **Exit 5 exists because 3 was carrying two facts.** `tmux` saying *"no server running"*
+is a **reachable** host, so `tail` used to take the success branch and publish
+`found: true, text: ""` → exit 3 — identical to a window that exists with an empty
+scrollback, which is the only thing exit 3 is documented to mean. A down server now gets
+`found: false, no_server: true` and its own code. It is deliberately **not** exit 2 (the
+target may be spelled perfectly — the repair is starting tmux, not fixing a typo) and not
+exit 4 (the host *did* answer).
 
 `--host` defaults to `all`, which is meaningless for a command targeting one window, so
 `tail` resolves it to the **local** host. That default is recorded, not silent:
@@ -58,6 +77,10 @@ Same discipline inside the payload. `hosts.<name>.reachable` + `.error` are alwa
 `skipped`, so `rows: []` is only believable when it is `ok`; `fuzzyclaw` reports
 `files_seen` / `files_live` / `files_unparseable`, so "no live tasks" is distinguishable
 from "no task files". Never read a bare count without its status.
+
+Under `--no-fuzzyclaw` **every one of those counts is `null`, not `0`** — the directory is
+never opened, so a `0` would be a fabricated measurement. `status: "skipped"` discriminates
+it, but a discriminated lie is still a lie in the count.
 
 ## Where everything lives
 
@@ -103,8 +126,25 @@ Consequences, all pinned by tests:
 - a slot two files both claim resolves to **nothing**. `index_tasks_by_window()` drops it and
   reports it under `fuzzyclaw.slot_conflicts`; attaching an arbitrary one of two
   contradictory records is worse than attaching none, because it reads as measured data.
+  🔴 **`slot_conflicts` is a defensive invariant that should never fire — not a live class.**
+  The "5 contested slots" above were an artefact of the *old id-only* guard. Re-measured
+  2026-08-11: the 400 task files carry **400 distinct `window_id`s**, one file per window,
+  and the relationship guard admits a file only for the slot its live id actually holds — so
+  two survivors could only collide if two distinct live window ids occupied one slot, which
+  real tmux cannot produce. It is kept because it costs a dict lookup and the failure it
+  prevents is unrecoverable. **If it ever fires, that is news**, not routine. Note also that
+  `claimants` counts *files* while `window_ids` is deduplicated, so `claimants: 2,
+  window_ids: ["@41"]` means duplicate files for one window, not contention — the rendered
+  line states both numbers so it cannot be misread.
 - every row carries `window_id`, so the join is auditable in the output:
-  `row.window_id == row.fuzzyclaw.window_id` is an invariant for every joined row.
+  `row.window_id == row.fuzzyclaw.window_id` for every joined row. 🔴 That holds **by
+  construction, not by luck** — both sides derive from the same `list-windows` snapshot — so
+  it is documentation of the join, **not a defence**, and re-checking it at runtime would be
+  an unreachable guard. It does **not** cover the one skew that is genuinely reachable:
+  `list-panes` and `list-windows` are two non-atomic calls, so with `renumber-windows on` a
+  window can move between them and a row can pair one snapshot's pane data with the other's
+  window id. The pane format carries no `window_id`, so nothing catches that. **Unguarded,
+  and named rather than implied away.**
 - `filter_live_tasks()` **rejects a bare set of ids with a `TypeError`** rather than
   degrading to the old existence-only check.
 

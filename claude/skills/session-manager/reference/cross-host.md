@@ -59,8 +59,22 @@ A host that fails is **visible in both output modes** and the scan still exits `
 other host's data — partial data is reported as partial, not silently dropped. A run where
 *no* host answered exits `4`, never `0` and never `3`.
 
-`tail` has a **fourth** outcome the scan does not: the host answered and there is no such
-window. That is `reachable: true, found: false`, exit `2` — not `4`. See the SKILL body.
+`tail` has outcomes the scan does not, because it targets ONE window:
+
+| what happened | `reachable` | `found` | `no_server` | exit |
+|---|---|---|---|---|
+| the capture came back with text | `true` | `true` | `false` | `0` |
+| the window exists, scrollback empty | `true` | `true` | `false` | `3` |
+| the host answered: no such window | `true` | `false` | `false` | `2` |
+| the host answered: **no tmux server at all** | `true` | `false` | `true` | `5` |
+| the host said nothing | `false` | `null` | `false` | `4` |
+
+🔴 Row 4 is why `no_server` exists. The table above says *"no server running"* is a
+**reachable** host — right for a scan, where it means a live host with zero windows. But
+`tail` took the success branch on it and published `found: true, text: ""` → exit `3`,
+indistinguishable from row 2, which is the only thing exit `3` is documented to mean. So
+`run_tmux` now carries a `no_server` discriminant and `tail_window` branches on it **before**
+the reachable return.
 
 ## What does NOT cross the wire
 
