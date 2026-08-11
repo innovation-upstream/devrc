@@ -829,6 +829,57 @@ def test_parse_telemetry_dead_source_is_critical_and_visible():
     assert blk["state"] == "Critical"
 
 
+def test_a_MEASURED_death_outranks_an_unknown_state_at_the_pill():
+    """🔴 REGRESSION TEST. `presence-stalled` is the one unknown state that can
+    carry real dead pairs: the host's human timeline is frozen so its REMAINING
+    sources are unjudgeable, but a source already past its budget when the freeze
+    began was measured against real active buckets and is genuinely dead.
+
+    Folding that into `tlm ?` with the count zeroed turned an actionable, named
+    `tlm 1` into an unactionable `tlm ?` — the check got QUIETER in exactly the
+    outage the stall detector was written to catch.
+    """
+    v = _verdict(state="presence-stalled", count=1,
+                 detail="h1/claude silent 54.6h active (budget 2.0h) — AND "
+                        "CANNOT TELL: presence stalled (h1: ...)")
+    out = poll.parse_telemetry(v, now=1000, unknown_states=UNKNOWN_STATES)
+    assert out["count"] == 1, out
+    assert out["state"] == "Critical", out
+    assert out["unknown"] is False, out
+    # 🔴 `unknown_since` MUST be None: the main loop skips the rising-edge toast
+    # for any payload carrying one, so a non-None here silently re-suppresses
+    # the toast even with the count restored.
+    assert out["unknown_since"] is None, out
+    assert "h1/claude" in out["detail"] and "UNKNOWN" in out["detail"], out
+    blk = telemetry_block.render(out)
+    assert (blk["text"], blk["state"]) == ("tlm 1", "Critical"), blk
+
+    # NEGATIVE CONTROL, same state, nothing measured dead -> the `tlm ?` path is
+    # untouched. Without this the branch above could be swallowing every stall.
+    quiet = poll.parse_telemetry(_verdict(state="presence-stalled", count=0,
+                                          detail="nothing measurable"),
+                                 now=1000, unknown_states=UNKNOWN_STATES)
+    assert quiet["count"] == 0 and quiet["unknown_since"] == 1000, quiet
+    assert quiet["state"] == "Warning", quiet
+
+
+def test_the_toast_still_FIRES_for_a_death_carried_by_an_unknown_state():
+    """The other half of the regression: the pill is not the only consumer. The
+    rising-edge dunst toast is what names the dead source to a human who is not
+    looking at the bar, and it was suppressed too."""
+    out = poll.parse_telemetry(
+        _verdict(state="presence-stalled", count=1, detail="h1/claude silent"),
+        now=1000, unknown_states=UNKNOWN_STATES)
+    fired = []
+    res = poll.evaluate_edge_toast(
+        "telemetry", out, poll._toast_specs()["telemetry"],
+        fire=lambda *a, **kw: fired.append((a, kw)) or True,
+        read=lambda _n: False, write=lambda _n, _l: None)
+    assert res == (True, True), res
+    assert len(fired) == 1, fired
+    assert "h1/claude" in fired[0][0][2], fired[0]
+
+
 @pytest.mark.parametrize("state", sorted(UNKNOWN_STATES))
 def test_parse_telemetry_unknown_is_not_reported_as_healthy(state):
     """Each non-evaluable state must be carried through as UNKNOWN, never

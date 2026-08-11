@@ -335,11 +335,29 @@ def parse_telemetry(verdict, prev=None, now=None,
                     unknown_states=None) -> dict:
     """Map a deadman verdict -> bar status dict. PURE (given `now`).
 
-    Three outcomes, and the third is the one that matters:
-      state=ok, count=0   -> Idle, invisible pill.        "measured, all fresh"
-      state=ok, count>0   -> Critical `tlm N`.            "N sources are dead"
-      unknown state       -> `unknown` once it has PERSISTED past `grace`,
-                             rendering a visible `tlm ?`. "cannot tell"
+    Four outcomes, and the last two are the ones that matter:
+      state=ok, count=0      -> Idle, invisible pill.     "measured, all fresh"
+      state=ok, count>0      -> Critical `tlm N`.         "N sources are dead"
+      unknown, count=0       -> `unknown` once it has PERSISTED past `grace`,
+                                rendering a visible `tlm ?`. "cannot tell"
+      unknown, count>0       -> Critical `tlm N`, NOT `tlm ?`.
+
+    🔴 THE FOURTH CASE EXISTS BECAUSE A CONFIRMED DEATH OUTRANKS AN UNCERTAINTY.
+    `presence-stalled` is the one unknown state that can carry real dead pairs:
+    the host's human timeline is frozen, so its REMAINING sources are
+    unjudgeable, but a source that had already blown its budget before the freeze
+    was measured against real active buckets and is genuinely dead. Folding that
+    into `tlm ?` with the count zeroed — which is what this function did — turned
+    an actionable, named `tlm 1` plus a dunst toast into an unactionable `tlm ?`
+    with the toast suppressed, i.e. the check got QUIETER in exactly the outage
+    the stall detector was written to catch. The deadman's `detail` names both
+    facts, so nothing is lost by leading with the death.
+
+    Setting `unknown_since=None` in that case is deliberate and load-bearing: the
+    main loop skips the rising-edge toast for any payload carrying an
+    `unknown_since`, so leaving it set would keep the toast suppressed. Every
+    other unknown state forces count=0 upstream, so this branch is reachable only
+    with a measured death.
 
     "Cannot tell" must be distinguishable from "all healthy" — a check whose
     reassuring answer is a zero is exactly the shape that can be wired to
@@ -363,6 +381,17 @@ def parse_telemetry(verdict, prev=None, now=None,
         "rows": int(v.get("rows") or 0),
         "newest_event_age_minutes": v.get("newest_event_age_minutes"),
     }
+    if tstate in unknown_states and int(v.get("count") or 0) > 0:
+        count = int(v["count"])
+        out.update({
+            "count": count,
+            "state": "Critical",
+            "unknown": False,
+            "unknown_since": None,
+            "detail": "%d dead source(s) AND telemetry health partly UNKNOWN "
+                      "(%s): %s" % (count, tstate, detail),
+        })
+        return out
     if tstate in unknown_states:
         prev_since = None
         if isinstance(prev, dict) and prev.get("telemetry_state") in unknown_states:

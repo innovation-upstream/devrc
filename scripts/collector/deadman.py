@@ -88,8 +88,11 @@ every source — so surviving agent rows pin it at ~1 minute while a host's huma
 timeline is days stale. It cannot see a per-host presence blackout at all.
 The real mitigation is STATE_PRESENCE_STALLED (see PRESENCE_STALL_HOURS): a host
 that is still emitting while its presence timeline has been frozen past any
-plausible away-from-desk period is reported as CANNOT-TELL, with its pairs marked
-un-evaluated, rather than as a silent `ok`.
+plausible away-from-desk period is reported as CANNOT-TELL, with its remaining
+pairs marked un-evaluated, rather than as a silent `ok`. A pair that had ALREADY
+blown its budget before the stall began keeps its DEAD verdict — that silence was
+measured against real active buckets, so "cannot tell about the host" must not
+erase "this source is dead".
 Losing ONE presence source is still caught: the others keep the timeline
 advancing, which is the whole motivating case (workbench/keys, below).
 
@@ -97,17 +100,21 @@ advancing, which is the whole motivating case (workbench/keys, below).
 a slower-advancing active timeline means a real death takes LONGER in wall time
 to convict. MEASURED 2026-08-11 over the live 14-day table -- the smallest seeded
 drop at which each pair reads DEAD, old rule -> allowlist:
-  workbench/keys 6h->12h · workbench/i3 6h->12h · workbench/tmux 6h->12h ·
-  workbench/zsh 12h->24h · laptop/keys 12h->24h · laptop/i3 12h->24h ·
-  laptop/browser 12h->24h · laptop/zsh 24h->72h · workbench/tool 36h->96h ·
+  workbench/keys 6h->24h · workbench/i3 6h->24h · workbench/tmux 6h->24h ·
+  workbench/zsh 12h->24h · workbench/claude 12h->24h · laptop/keys 12h->24h ·
+  laptop/i3 12h->24h · laptop/browser 12h->24h · workbench/tool 36h->96h ·
   workbench/browser-bridge 12h->24h -- which ERODES the 15-minute heartbeat #388
   added one commit earlier specifically to make that source detectable.
-NO pair got faster. Ten of seventeen got slower; the rest were unchanged.
+NO pair got faster, in any run. Ten of seventeen got slower; the rest were
+unchanged. The individual pair figures DRIFT between sweeps (an earlier run of
+the same probe measured workbench/keys 6h->12h and laptop/zsh 24h->72h) because
+the table advances -- the robust claim is the DIRECTION and the count, not any
+one number.
 🔴 There is NO clean per-class rule here, and an earlier version of this
 paragraph asserted one ("floor-pinned sources tighten, on-demand sources
 loosen"). Both directions were wrong: the FLOOR is a fixed 24 active buckets, so
 it spans MORE wall hours once active time advances more slowly, and the on-demand
-laptop/tool got NOISIER in the sweep (26 -> 28 dead-hours), not quieter. Silence
+laptop/tool got NOISIER in the sweep (27 -> 28 dead-hours), not quieter. Silence
 and budget both shrink; which shrinks faster depends on where a pair's own gaps
 sit relative to the removed agent-only buckets, which is a property of the pair,
 not of its class. Measure it; do not reason about it.
@@ -128,10 +135,19 @@ gets its OWN state and none of them is `ok`:
   misconfigured   PRESENCE_SOURCES is empty, so "active time" has no definition
                   and nothing can be judged (see presence_count_expr)
   presence-stalled a host is still emitting while its HUMAN timeline is frozen
-                  past PRESENCE_STALL_HOURS -- that host's sources cannot be
-                  judged, and reading `ok` there would be the invisible green
-                  this whole section exists to prevent
+                  past PRESENCE_STALL_HOURS -- that host's remaining sources
+                  cannot be judged, and reading `ok` there would be the invisible
+                  green this whole section exists to prevent. It does NOT
+                  suppress a pair that was already past its budget when the
+                  stall began: that death is measured, and it stays in `dead`,
+                  in `count` and by NAME in `detail`.
   ok              the table was read and at least one pair was evaluated
+
+A host that has emitted NO human-driven row in the whole window is a different
+case and gets no state of its own: there is no normal to compare against, so its
+pairs are marked un-evaluated (`reason="no-presence-baseline"`) exactly like an
+insufficient baseline, and the fleet verdict is unaffected. See the split in
+`evaluate` for why merging the two made a permanently-red gate.
 
 `ok` therefore carries its own positive control: it is unreachable unless rows
 came back AND at least one pair was actually measured. `evaluated` is in the
@@ -218,12 +234,17 @@ CAP_BUCKETS = 576
 # (dead-hours per pair). 🔴 The table ADVANCES between runs, so repeated sweeps
 # differ by 1-2 dead-hours per pair; these are the final run against the code as
 # it stands, not a stable constant:
-#   workbench/tmux            6 -> 0      workbench/keys           14 -> 7
-#   workbench/browser-bridge 19 -> 8      laptop/browser-bridge   105 -> 92
-#   laptop/tmux               3 -> 3
-#   laptop/tool              26 -> 28  }  all three NOISIER -- the allowlist is
-#   laptop/claude            49 -> 50  }  NOT uniformly quieter and there is no
-#   laptop/opencode           0 -> 1   }  per-class rule; see the docstring COST
+#   workbench/tmux            7 -> 0      workbench/keys           14 -> 7
+#   workbench/browser-bridge 18 -> 8      laptop/browser-bridge   106 -> 91
+#   laptop/tmux               3 -> 3      laptop/claude            50 -> 50
+#   laptop/tool              27 -> 28  <- NOISIER: the allowlist is NOT uniformly
+#                                         quieter and there is no per-class rule
+# 🔴 `laptop/tool` is the ONLY noisier pair that REPRODUCES. Earlier revisions of
+# this comment also named laptop/claude and laptop/opencode as noisier; across
+# four independent sweeps (three mine, one an auditor's) laptop/claude measured
+# 50->50, 49->50, 50->50 and 53->52 (quieter), and laptop/opencode was absent
+# from three of the four. They were drift, not signal, and are dropped. Trust the
+# DIRECTION-plus-example, never a specific dead-hour count.
 # 🔴 workbench/keys does NOT go to zero, and an earlier version of this comment
 # said it did off a 4-day window. Its surviving 7 dead-hours are a TRUE POSITIVE:
 # 2026-08-05 15:00-21:00, `keys` silent 2.8-8.1 ACTIVE hours against a 2.0h
@@ -237,8 +258,8 @@ CAP_BUCKETS = 576
 # 🔴 WHY `browser` IS NOT HERE, though the operator drives it. The browser-bridge
 # agent drives the SAME Brave profile the activity extension instruments, so
 # agent navigation emits `browser` rows -- the one remaining path by which the
-# incident above could recur. MEASURED 2026-08-11 on the live table: of 781
-# laptop `browser` buckets, 74 co-occur with a `browser-bridge` command bucket,
+# incident above could recur. MEASURED 2026-08-11 on the live table: of 777
+# laptop `browser` buckets, 76 co-occur with a `browser-bridge` command bucket,
 # and `browser` is the SOLE presence source in exactly ONE. Dropping it changed
 # the 169-point sweep for ZERO pairs and improved one seeded-death latency
 # (laptop/zsh). It bought nothing and carried a contamination path, so it is out.
@@ -264,10 +285,19 @@ PRESENCE_SOURCES = frozenset({"keys", "i3", "tmux", "zsh"})
 # state instead.
 #
 # The predicate is `last_event - last_presence_event > PRESENCE_STALL_SECONDS`,
-# per host. Deliberately NOT `now - last_presence`: a laptop that is simply shut
-# emits nothing, so its two timestamps move together and it stays silent rather
-# than alarming — which is right, because an off host is the ordinary blackout
-# blind spot, not a stall.
+# per host, and it is deliberately NOT `now - last_presence`.
+#
+# 🔴 The mechanism is FREEZE, not "the two timestamps move together" — an earlier
+# comment said the latter and it is not what the data does. Both timestamps stop
+# advancing at power-off, so the gap holds whatever value it had at that instant.
+# Measured on the live table: the workbench froze at a 38.75h gap and held that
+# exact value for the 4.6h it stayed down. That is still the right behaviour for
+# the common case (a laptop shut at the desk has a small gap, so it stays quiet
+# instead of screaming every weekend, which `now - last_presence` would do), but
+# the honest consequence is: a host powered off while ALREADY past the threshold
+# stays `presence-stalled` for the rest of the 14-day window. That is not a false
+# positive — it really was unjudgeable when it went down, and it still is — but
+# it does mean the condition can outlive the machine.
 #
 # MEASURED 2026-08-11 over the full live 14-day window, hourly, restricted to
 # points where the host was still emitting: the laptop's worst presence stall was
@@ -601,25 +631,51 @@ def evaluate(rows, now=None, *, bucket_seconds: int = BUCKET_SECONDS,
     newest = max(r[2] for r in rows)
 
     # PRESENCE-STALL: a host that kept emitting for longer than `stall_hours`
-    # after its last human-driven event cannot be judged — its active set stopped
-    # growing, so EVERY source on it measures 0 silence and reads not-dead. See
-    # PRESENCE_STALL_HOURS for the threshold's measurement and for why the
-    # predicate compares the host's own two timestamps rather than `now` (a host
-    # that is simply switched off must stay silent, not alarm).
+    # after its last human-driven event cannot be FULLY judged — its active set
+    # stopped growing at `last_presence`, so no pair on it can accrue any further
+    # active silence. See PRESENCE_STALL_HOURS for the threshold's measurement
+    # and for why the predicate compares the host's own two timestamps.
+    #
+    # 🔴 TWO DIFFERENT CONDITIONS, deliberately NOT merged (they were once, and
+    # the merged version was a permanently-red gate — see below):
+    #
+    #   stalled            the host HAD a human timeline in this window and lost
+    #                      it. That is a CHANGE, which is exactly what a deadman
+    #                      detects, so it raises the host-level cannot-tell.
+    #   no-presence-       the host has NEVER emitted a human-driven row in the
+    #   baseline           window at all. That is not a change and there is no
+    #                      normal to compare against, so it follows the module's
+    #                      existing doctrine for "expected-present is MEASURED,
+    #                      not declared": the pairs are marked un-evaluated (never
+    #                      silently `ok`) and the host raises NOTHING.
+    #
+    # 🔴 Why the split is load-bearing. Merged, the `None` arm had no threshold
+    # and no minimum-evidence requirement, so ONE row from any host that emits
+    # agent traffic but never presence traffic — an agent pod, a container, a
+    # mis-set ACTIVITY_HOST, a single manual `emit` — flipped the WHOLE fleet
+    # verdict to cannot-tell and zeroed the other hosts' real dead count, for the
+    # full 14 days until that row rolled out of the window. Measured: one
+    # synthetic ("agentpod", "claude") row added to the otherwise-real table took
+    # the fleet from `state=ok count=1` to `state=presence-stalled count=1`, and
+    # through the bar from `tlm 1` Critical to `tlm ?` Warning with the toast
+    # suppressed. A permanently-red gate is worse than no gate.
     stall_seconds = float(stall_hours) * 3600.0
     stalled = []
+    no_presence_hosts = set()
+    last_presence_by_host = {}
     for host, last_event in sorted(last_event_by_host.items()):
         act = active_by_host.get(host)
-        last_presence = max(act) if act else None
-        gap = (last_event - last_presence) if last_presence is not None else None
-        if last_presence is None or gap > stall_seconds:
+        if not act:
+            no_presence_hosts.add(host)
+            continue
+        last_presence = max(act)
+        last_presence_by_host[host] = last_presence
+        if last_event - last_presence > stall_seconds:
             stalled.append({
                 "host": host,
                 "last_presence_epoch": last_presence,
                 "last_event_epoch": last_event,
-                # None when the host has NEVER emitted a presence row in the
-                # window — an unbounded stall, not a zero one.
-                "stall_hours": None if gap is None else round(gap / 3600.0, 2),
+                "stall_hours": round((last_event - last_presence) / 3600.0, 2),
             })
     stalled_hosts = {s["host"] for s in stalled}
 
@@ -641,12 +697,12 @@ def evaluate(rows, now=None, *, bucket_seconds: int = BUCKET_SECONDS,
             "silent_active_buckets": silent,
             "silent_active_hours": round(silent * bucket_seconds / 3600.0, 2),
         }
-        if host in stalled_hosts:
-            # 🔴 The host's active set stopped growing, so `silent` is 0 for
-            # EVERY pair on it by construction — including a genuinely dead one.
-            # Marking these un-evaluated is what stops the per-pair table from
-            # printing a row of confident `ok`s for a host nobody can judge.
-            rec.update({"evaluated": False, "reason": "presence-stalled",
+        if host in no_presence_hosts:
+            # No human timeline on this host in the whole window, so its active
+            # set is empty and every pair measures 0 silence. Same shape as
+            # insufficient-baseline: not judged, never alarmed, and VISIBLE in
+            # the table rather than a confident `ok`.
+            rec.update({"evaluated": False, "reason": "no-presence-baseline",
                         "gap_p": None, "budget_buckets": None,
                         "budget_active_hours": None, "dead": False})
             sources.append(rec)
@@ -675,6 +731,26 @@ def evaluate(rows, now=None, *, bucket_seconds: int = BUCKET_SECONDS,
             "budget_active_hours": round(budget * bucket_seconds / 3600.0, 2),
             "dead": silent > budget,
         })
+        if host in stalled_hosts and not rec["dead"]:
+            # 🔴 PER-PAIR, not per-host. An earlier version dropped EVERY pair on
+            # a stalled host, on the false premise that "silence is 0 by
+            # construction for all of them". That holds only for a pair whose
+            # last event lands at or after the host's last presence bucket. A
+            # pair that died BEFORE the stall began accrued its silence against
+            # REAL active buckets, and that measurement is genuine and already
+            # complete — measured on the live table (96h blackout,
+            # workbench/claude dead 200h): 54.58 silent ACTIVE hours against a
+            # 2.0h budget, 27x over, discarded. That is the very scenario this
+            # detector was written for, and dropping it made the check QUIETER
+            # than before the detector existed.
+            #
+            # So a pair already past its budget stays DEAD and stays named. A
+            # pair still under budget becomes un-evaluated instead of `ok`,
+            # because its silence can never grow while the timeline is frozen:
+            # "not dead" is the claim we genuinely cannot make, and "dead" is the
+            # one we already made.
+            rec.update({"evaluated": False, "reason": "presence-stalled",
+                        "dead": False})
         sources.append(rec)
 
     evaluated = [s for s in sources if s["evaluated"]]
@@ -710,22 +786,22 @@ def evaluate(rows, now=None, *, bucket_seconds: int = BUCKET_SECONDS,
 def describe_stalled(stalled, dead, evaluated: int) -> str:
     """One-line summary for a presence-stalled verdict.
 
-    Names the stalled host(s) AND anything still found dead elsewhere — the state
-    already suppresses the count on the bar, so the detail string is the only
-    place the operator can see both facts.
+    🔴 A MEASURED DEATH LEADS. A stalled host does not suppress a pair that was
+    already past its budget when the stall began, and the operator must be able
+    to read the source's NAME here — an earlier version buried the whole verdict
+    behind "N other pair(s) still measured" and the dead source's identity
+    appeared nowhere at all.
     """
-    parts = []
-    for s in stalled:
-        if s["stall_hours"] is None:
-            parts.append("%s: NO human-driven events in the window at all"
-                         % s["host"])
-        else:
-            parts.append("%s: human timeline frozen %.1fh before its newest row"
-                         % (s["host"], s["stall_hours"]))
-    tail = ("; %d other pair(s) still measured, %s"
-            % (evaluated, describe(dead, evaluated))) if evaluated else ""
-    return ("CANNOT TELL — presence stalled (%s); those hosts' sources are "
-            "unjudgeable%s" % ("; ".join(parts), tail))
+    hosts = "; ".join(
+        "%s: human timeline frozen %.1fh before its newest row"
+        % (s["host"], s["stall_hours"]) for s in stalled)
+    stall_note = ("presence stalled (%s) — those hosts' remaining sources are "
+                  "unjudgeable" % hosts)
+    if dead:
+        return "%s — AND CANNOT TELL: %s" % (describe(dead, evaluated),
+                                             stall_note)
+    tail = "; %d other pair(s) fresh" % evaluated if evaluated else ""
+    return "CANNOT TELL — %s%s" % (stall_note, tail)
 
 
 def describe(dead, evaluated: int) -> str:

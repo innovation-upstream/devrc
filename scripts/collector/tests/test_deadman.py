@@ -179,7 +179,7 @@ def test_presence_sources_are_the_four_human_driven_ones():
     🔴 `browser` is excluded too, and it is the subtle one — the operator really
     does drive it, but the browser-bridge AGENT drives the same Brave profile the
     activity extension instruments, so agent navigation emits `browser` rows.
-    Measured on the live table: 74 of 781 laptop `browser` buckets co-occur with
+    Measured on the live table: 76 of 777 laptop `browser` buckets co-occur with
     a browser-bridge command bucket, and `browser` was the sole presence source in
     exactly ONE. It bought nothing and carried a contamination path.
     """
@@ -1030,21 +1030,84 @@ def test_newest_event_age_CANNOT_see_a_presence_blackout():
         "the fixture no longer has a stale human timeline to hide"
 
 
-def test_a_dead_source_on_a_stalled_host_is_unjudgeable_not_ok():
-    """The concrete harm: a source that genuinely stopped, on a host whose
-    presence timeline is frozen, must not read `ok`. It cannot read DEAD either —
-    the host has no active time in which to measure its silence — so the honest
-    answer is the third one."""
+def test_a_source_that_stops_DURING_a_stall_is_unjudgeable_not_ok():
+    """A source that stopped AFTER the presence timeline froze has silence of 0
+    BY CONSTRUCTION — no active buckets have accrued since. It must not read
+    `ok`, and it cannot honestly read DEAD either, so it is un-evaluated."""
     rows, now = _crashed_desk(agent_days=5)
-    # `claude` also stops, 24h before now, while agent-only time keeps passing —
-    # leaving a 96h presence stall, comfortably past the 72h threshold.
+    # `claude` stops 24h before now, i.e. 96h AFTER the crash — well inside the
+    # stall, so nothing real was ever measured against it.
     rows = [r for r in rows if not (r[1] == "claude" and r[2] > now - 86400)]
     v = D.evaluate(rows, now=now + 60)
     rec = _pair(v, "claude")
     assert rec["evaluated"] is False and rec["reason"] == "presence-stalled", rec
     assert rec["dead"] is False, rec
+    assert rec["silent_active_buckets"] == 0, \
+        "the fixture no longer exercises the 0-by-construction case"
     assert v["state"] == D.STATE_PRESENCE_STALLED
-    assert v["state"] not in (D.STATE_OK,)
+
+
+def test_a_death_that_PREDATES_the_stall_is_still_reported_by_name():
+    """🔴 REGRESSION TEST. A per-HOST discriminator discarded this death.
+
+    A pair that stopped BEFORE the presence timeline froze accrued its silence
+    against REAL active buckets. That measurement is genuine and already
+    complete, so "cannot tell about the host" must not erase "this source is
+    dead". Measured on the live table (96h blackout, workbench/claude dead 200h)
+    the discarded verdict was 54.58 silent ACTIVE hours against a 2.0h budget —
+    27x over — dropped from `dead` entirely, taking `tlm 1` + a dunst toast down
+    to `tlm ?` with the source's name nowhere in the payload.
+    """
+    rows = workday_table(NOW_BUCKET, days=6, awake_h=10)      # keys + i3
+    lo = min(b for (_h, _s, b, *_r) in rows)
+    crash = max(b for (_h, s, b, *_r) in rows if s == "keys")
+    # `claude` emits from the start but STOPS two workdays before the crash, so
+    # it is silent for ~20 real active hours by the time the desk dies.
+    rows += all_night_rows("h1", "claude", lo, crash - 2 * 86400)
+    now = crash + 4 * 86400                                   # 96h stall
+    rows += all_night_rows("h1", "tool", lo, now)             # keeps the host up
+
+    v = D.evaluate(rows, now=now + 60)
+    assert v["state"] == D.STATE_PRESENCE_STALLED, v["state"]
+    assert [s["host"] for s in v["presence_stalled"]] == ["h1"]
+
+    rec = _pair(v, "claude")
+    assert rec["evaluated"] is True, rec
+    assert rec["dead"] is True, rec
+    assert rec["silent_active_buckets"] > 0, \
+        "the death must have been measured against REAL active buckets"
+    # ...and it survives into the payload the consumers read.
+    assert _dead_pairs(v) == ["h1/claude"], _dead_pairs(v)
+    assert v["count"] == 1
+    assert "h1/claude" in v["detail"], v["detail"]
+
+    # The pairs that are genuinely unjudgeable still are — the fix is per-PAIR,
+    # not "stop marking anything".
+    assert _pair(v, "tool")["reason"] == "presence-stalled", _pair(v, "tool")
+    assert _pair(v, "keys")["reason"] == "presence-stalled", _pair(v, "keys")
+
+
+def test_the_stall_threshold_boundary_is_EXCLUSIVE():
+    """A gap of exactly PRESENCE_STALL_HOURS is not a stall; one bucket more is.
+
+    72h is an exact multiple of the 300s bucket, so `gap == stall_seconds` is a
+    REACHABLE state, not a theoretical one — a `>` vs `>=` mutant survived until
+    this existed.
+    """
+    rows = workday_table(NOW_BUCKET, days=6, awake_h=10)
+    lo = min(b for (_h, _s, b, *_r) in rows)
+    crash = max(b for (_h, s, b, *_r) in rows if s == "keys")
+
+    exact = rows + all_night_rows("h1", "claude", lo,
+                                  crash + int(D.PRESENCE_STALL_HOURS * 3600))
+    v_exact = D.evaluate(exact, now=crash + 10 ** 6)
+    assert v_exact["presence_stalled"] == [], v_exact["presence_stalled"]
+    assert v_exact["state"] == D.STATE_OK
+
+    over = rows + all_night_rows("h1", "claude", lo,
+                                 crash + int(D.PRESENCE_STALL_HOURS * 3600) + B)
+    v_over = D.evaluate(over, now=crash + 10 ** 6)
+    assert [s["host"] for s in v_over["presence_stalled"]] == ["h1"]
 
 
 def test_an_ordinary_away_from_desk_stretch_does_NOT_stall():
@@ -1075,20 +1138,55 @@ def test_a_host_that_is_simply_SWITCHED_OFF_does_not_stall():
     assert v["newest_event_age_minutes"] > 29 * 24 * 60
 
 
-def test_a_host_with_NO_presence_rows_at_all_is_unjudgeable():
-    """The limiting case of an infinite stall: a host that has never emitted a
-    human-driven row in the whole window. Its active set is empty, so every
-    source on it measures 0 silence — the invisible green again."""
+def test_a_host_with_NO_presence_rows_is_skipped_not_alarmed():
+    """🔴 REGRESSION TEST for a permanently-red gate.
+
+    A host that has NEVER emitted a human-driven row in the window has no normal
+    to compare against — it is the "expected-present is MEASURED, not declared"
+    case, not a change. It must be marked un-evaluated (never a silent `ok`) and
+    must raise NOTHING at the fleet level.
+
+    It used to be folded into `presence-stalled` with no threshold and no
+    minimum-evidence requirement, so ONE row from an agent pod, a container or a
+    mis-set ACTIVITY_HOST flipped the whole fleet to cannot-tell and zeroed the
+    other hosts' real dead count, for the full 14 days until it rolled out of the
+    window. Measured on the live table: a single synthetic ("agentpod","claude")
+    row took the fleet from `state=ok count=1` to `state=presence-stalled
+    count=1`, and through the bar from `tlm 1` to `tlm ?` with the toast
+    suppressed.
+    """
+    # A healthy host, a real death on it, and an agent-only host alongside.
+    rows = workday_source("h1", "keys", NOW_BUCKET, days=6, awake_h=10,
+                          skip_last=1)
+    rows += workday_source("h1", "i3", NOW_BUCKET, days=6, awake_h=10)
+    now = max(b for (_h, _s, b, *_r) in rows) + 60
+    rows += [("agentpod", "claude", NOW_BUCKET - 600, 5)]
+
+    v = D.evaluate(rows, now=now)
+    assert v["presence_stalled"] == [], v["presence_stalled"]
+    assert v["state"] == D.STATE_OK, v["state"]
+    # The healthy host's real death survives untouched — this is the masking.
+    assert _dead_pairs(v) == ["h1/keys"], _dead_pairs(v)
+    assert v["count"] == 1
+    # ...and the agent-only host is VISIBLE as unjudged, never a confident ok.
+    rec = _pair(v, "claude", host="agentpod")
+    assert rec["evaluated"] is False, rec
+    assert rec["reason"] == "no-presence-baseline", rec
+    assert rec["dead"] is False, rec
+
+
+def test_a_host_with_NO_presence_rows_ALONE_is_still_cannot_tell():
+    """The other half: when the agent-only host is the ONLY one, nothing was
+    measurable at all, so the verdict must be an unknown state — `no-data`, the
+    module's existing "we cannot prove we measured anything" answer — never
+    `ok`."""
     rows = [("h2", "claude", NOW_BUCKET - i * B, 1) for i in range(400)]
     v = D.evaluate(rows, now=NOW_BUCKET + 60)
-    assert v["state"] == D.STATE_PRESENCE_STALLED
-    assert v["presence_stalled"] == [{
-        "host": "h2",
-        "last_presence_epoch": None,
-        "last_event_epoch": NOW_BUCKET,
-        "stall_hours": None,
-    }], v["presence_stalled"]
-    assert "NO human-driven events" in v["detail"], v["detail"]
+    assert v["state"] == D.STATE_NO_DATA, v["state"]
+    assert v["state"] in D.UNKNOWN_STATES
+    assert v["evaluated"] == 0
+    assert all(s["reason"] == "no-presence-baseline" for s in v["sources"]), \
+        v["sources"]
 
 
 def test_one_host_stalling_does_not_erase_the_other_hosts_findings():
