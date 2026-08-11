@@ -300,7 +300,24 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 # branches are in the tree, which on a base-dependent constant is exactly wrong.
 # After any "Resolved ... using previous resolution", re-read this line and
 # re-measure.
-MIN_TESTS="${MIN_TESTS:-7168}"
+# 2026-08-11, the no-real-launchers fix. CONTROL PAIR, same machine, same
+# command, both read off the runner's summary CONTENT:
+#     main a67f795 : TOTAL collected=7238  passed=7237  skipped=1  failed=0
+#     this branch  : TOTAL collected=7261  passed=7260  skipped=1  failed=0
+# +23, and the attribution was MEASURED per directory rather than assumed:
+# scripts/tests 1941 -> 1964 and NOTHING else moves — the 23 are exactly
+# scripts/tests/test_no_real_launchers.py. That per-directory delta is also the
+# positive control proving the gate RUNS them: the new file needed no
+# HERMETIC_TARGETS entry (scripts/tests is already a directory target), so
+# movement on that directory's own line is the only evidence they execute.
+# Measured in BOTH tiers. EXPECTED_SKIPS untouched: skipped=1, the one pinned
+# entry — the new suite adds ZERO skips (no external binary is required; the
+# stub dir it asserts on is built in a pytest tmp dir).
+#
+# ⚠ The 7168 this replaces had already drifted 70 below the real total (7238):
+# nothing between raised it. That slack is exactly what a floor carried forward
+# stops detecting, so it is set to the measurement with no headroom again.
+MIN_TESTS="${MIN_TESTS:-7261}"
 
 # --- GUARD 1: tool precondition ------------------------------------------------
 # Every binary the suites `skipif` on. Absence must be an ERROR, never a skip.
