@@ -154,18 +154,59 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 # Raise this whenever tests are added; LOWER it only with the new measurement
 # quoted in the commit message, never to make a red gate go green.
 #
-# 6643 MEASURED post-rebase onto fce27f2 (#367/#368), not computed. Control pair
-# under one tool set: base fce27f2 collected 6561, this branch 6643 (+82 = the
-# analyze-service-index suite exactly). The floor is BASE-DEPENDENT — re-measure
-# after any rebase rather than carrying this number forward.
+# MEASURED 2026-08-10 on `nix build .#checks.x86_64-linux.pytests`, post-rebase
+# onto 91aaa21 (#379), not computed. CONTROL PAIR under one tool set, same
+# command, same machine:
+#     base 91aaa21 : TOTAL collected=6745  passed=6744  failed=0  scripts/tests=1652
+#     this branch  : TOTAL collected=6960  passed=6959  failed=0  scripts/tests=1867
+#   +215, and 1867-1652 = 215 = exactly the new
+#   scripts/tests/test_subsystem_resolver.py suite.
+#   That attribution is also the positive control proving the gate RUNS the new
+#   suite: it needed no HERMETIC_TARGETS entry, because `scripts/tests` is
+#   already a directory target (same as the 2026-08-06 note above), and the
+#   delta on that directory's OWN line is what demonstrates it rather than
+#   asserting it.
 #
-# 6761 MEASURED 2026-08-11 on `nix build .#checks.x86_64-linux.pytests` at
-# e97c032 + the ship.sh consumer check: TOTAL collected=6761 passed=6760
-# skipped=1 failed=0, read off the summary CONTENT (the +14 are the consumer
-# check's cases in scripts/tests/test_ship_converge.py). The previous 6745 was
-# already 2 low against this branch's 6747 before those were added — slack that
-# would have hidden two whole tests vanishing.
-MIN_TESTS="${MIN_TESTS:-6761}"
+# 🔴 RE-MEASURED, NOT CARRIED FORWARD, AND NOT COMPUTED. The pre-rebase value on
+# this branch was 6940 against base 5c53f38's 6743. #379 then landed and moved
+# the base, so 6940 was stale the moment it did. Arithmetic on the old numbers
+# predicted 6942; the merged tree reported 6945, because the branch had also
+# gained 3 tests from its own review fix. It then reached 6960 when an audit
+# round replaced two vacuous guards and added a live-path-shape pass. Each of
+# those numbers was MEASURED at the time it was written — none was computed from
+# the one before it, which is the whole point of this note.
+#
+# EXPECTED_SKIPS is untouched: skipped=1, the one pinned entry. The new suite
+# adds ZERO skips by construction — no external binary, no network, no path
+# outside tmp_path.
+#
+# ⚠ The comment this replaced still described the #367 measurement (6643 / base
+# fce27f2) while the value beside it had been bumped twice — to 6745 by #379.
+# A floor comment that no longer describes its own number is the "a comment is a
+# claim too" case from claude/RULES.md; rewritten rather than bumped again.
+#
+# 6984 MEASURED 2026-08-11 on the MERGED tree (this branch merged with
+# origin/main at 5a20dff), not computed — and the distinction paid for itself
+# here. This branch measured 6761 against its own base 91aaa21 while #378
+# concurrently moved main; the two edits collided on this very line. Arithmetic
+# on the two branch deltas predicts 6976. The gate reports 6984.
+#
+# CONTROL PAIR, one tool set, same machine, `nix build
+# .#checks.x86_64-linux.pytests`, both read off the summary CONTENT:
+#     base 5a20dff : TOTAL collected=6968  passed=6967  skipped=1  failed=0
+#                    scripts/tests=1874
+#     merged tree  : TOTAL collected=6984  passed=6983  skipped=1  failed=0
+#                    scripts/tests=1890
+#   +16, and 1890-1874 = 16 = exactly the ship.sh consumer-check cases added to
+#   scripts/tests/test_ship_converge.py. That per-directory delta is also the
+#   positive control proving the gate RUNS them: no HERMETIC_TARGETS entry was
+#   needed because scripts/tests is already a directory target, so the only
+#   evidence they execute is the movement on that directory's own line.
+#
+# ⚠ The 6960 above was itself 8 low against what main actually collects (6968) —
+# tests landed after it was measured, exactly the drift this note keeps warning
+# about. Re-measured rather than carried forward.
+MIN_TESTS="${MIN_TESTS:-6984}"
 
 # --- GUARD 1: tool precondition ------------------------------------------------
 # Every binary the suites `skipif` on. Absence must be an ERROR, never a skip.

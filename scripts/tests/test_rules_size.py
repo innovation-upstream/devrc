@@ -69,7 +69,26 @@ ARCHIVE_MD = REPO_ROOT / "claude" / "RULES-ARCHIVE.md"
 # and the note on MIN_HEADROOM_BYTES. Ratcheting it DOWN as rules consolidate is
 # welcome and is the intended direction of travel. Ratcheting it UP requires
 # saying in the commit message which rule could not be expressed in the budget.
-MAX_BYTES = 34_500
+#
+# 2026-08-11: 34,500 -> 35,200 (+700 B). The rule that would not fit is
+# "A worktree isolates the REPO, not the SESSION" (Git Workflow), 674 B. It
+# clears the hard ceiling and trips only MIN_HEADROOM_BYTES.
+#
+# Carving the 635 B instead was measured and rejected, not skipped: at the time
+# of the bump RULES.md held 87 bullets / 28,628 B of bullet text in 33,561 B, and
+# exactly ONE untagged bullet exceeded 600 B -- the worktree bullet this rule
+# extends. Every other large bullet already carries a `→ archive:` tag, i.e. its
+# evidence has already been evicted; the 1,951 B "Validate the INSTRUMENT" bullet
+# is four rules with four separate tags. The remaining 600 B candidates
+# (squash-ancestry, `gh pr view` authority) are ~590 B of pure imperative plus
+# the procedure needed to comply. Reclaiming from any of them means narrowing a
+# rule, which the playbook below forbids in bold and which the `git stash` ban
+# already had to be re-broadened once to undo.
+#
+# The honest reading: eviction has been run to completion, so the next real rule
+# costs ceiling. If that recurs, the answer is consolidation (the four scattered
+# worktree bullets are the obvious candidate), not another bump.
+MAX_BYTES = 35_200
 
 # Required working margin below the ceiling.
 #
