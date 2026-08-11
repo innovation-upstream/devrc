@@ -51,6 +51,30 @@ UNKNOWN_STATES = frozenset(
      "misconfigured", "presence-stalled"})
 
 
+@pytest.fixture(autouse=True)
+def _never_reach_the_desktop(monkeypatch):
+    """🔴 AUTOUSE, whole file: no test may launch a REAL desktop notification.
+
+    This is not hypothetical hygiene. When the `--mock-*` path started
+    dispatching toasts, two long-standing tests here that patched `signal_bar`
+    but not `fire_toast` began firing real notifications on the graphical host —
+    three launches per suite run, one of them a STICKY CRITICAL
+    "🔴 Telemetry source DEAD / laptop/keys silent 9h" naming a host and source
+    that exist only in a FIXTURE. `fire_toast` borrows DISPLAY/DBUS from i3's
+    environ, so a non-graphical runner is no protection, and the nix-sandbox tier
+    cannot see it at all (no systemd-run, no session bus) — the gate stayed green
+    while the desktop got spammed with a false alarm about the very pill this
+    work exists to make trustworthy.
+
+    Patching the LAUNCHER rather than `fire_toast` keeps `fire_toast` itself real
+    and testable (see the test_fire_toast_* group, which exercises it directly),
+    while making a real launch structurally unreachable from this file.
+    """
+    launches = []
+    monkeypatch.setattr(poll, "_toast_runner", lambda argv: launches.append(argv))
+    return launches
+
+
 # --------------------------------------------------------------------------- #
 # poller parse: clawgate
 # --------------------------------------------------------------------------- #
@@ -932,6 +956,22 @@ def test_a_junk_count_DEGRADES_it_does_not_raise():
     ok_junk = poll.parse_telemetry(_verdict(state="ok", count="abc"), now=1000,
                                    unknown_states=UNKNOWN_STATES)
     assert ok_junk["count"] == 0 and ok_junk["state"] == "Idle", ok_junk
+
+    # 🔴 `int(float("inf"))` raises OverflowError, NOT ValueError, and json.load
+    # accepts a bare `Infinity` — so this reaches the parser through a supported
+    # entry point and reproduced the exact symptom this test exists for.
+    for edge in (float("inf"), float("-inf"), float("nan")):
+        out = poll.parse_telemetry(_verdict(state="presence-stalled", count=edge),
+                                   now=1000, unknown_states=UNKNOWN_STATES)
+        assert out["count"] == 0 and out["state"] == "Warning", (edge, out)
+
+    # A NEGATIVE count is the worst shape: truthy, so the payload said
+    # "Critical", while the block renders only count>0 — Critical with an
+    # INVISIBLE pill. Clamped, as parse_mail already does.
+    neg = poll.parse_telemetry(_verdict(state="ok", count=-5), now=1000,
+                               unknown_states=UNKNOWN_STATES)
+    assert neg["count"] == 0 and neg["state"] == "Idle", neg
+    assert telemetry_block.render(neg)["text"] == "", neg
     # And `evaluated`/`rows` are on the same footing — they are ints in the
     # payload contract and a junk verdict must not crash the poll.
     weird = poll.parse_telemetry({"state": "ok", "count": 0, "evaluated": "x",
@@ -1030,7 +1070,7 @@ def test_the_toast_FIRES_end_to_end_through_the_REAL_cli_path(tmp_path,
                               "newest_event_age_minutes": 2,
                               "detail": "h1/claude silent 54.6h active"}))
 
-    assert poll.main(["--mock-telemetry", str(vf)]) == 0
+    assert poll.main(["--mock-telemetry", str(vf), "--toast"]) == 0
     assert len(fired) == 1, fired
     assert "h1/claude" in fired[0][2], fired[0]
     payload = json.loads((tmp_path / "telemetry.json").read_text())
@@ -1041,10 +1081,104 @@ def test_the_toast_FIRES_end_to_end_through_the_REAL_cli_path(tmp_path,
     fired.clear()
     vf.write_text(json.dumps({"state": "presence-stalled", "count": 0,
                               "detail": "nothing measurable"}))
-    assert poll.main(["--mock-telemetry", str(vf)]) == 0
+    assert poll.main(["--mock-telemetry", str(vf), "--toast"]) == 0
     assert fired == [], fired
     assert poll.read_latch("telemetry") is True, \
         "a blackout zero cleared the rising-edge latch"
+
+
+def test_a_mock_run_does_NOT_toast_or_move_the_live_latch(tmp_path, monkeypatch,
+                                                          _never_reach_the_desktop):
+    """🔴 REGRESSION TEST. The documented debug recipe must be inert.
+
+    `cache_dir()` falls back to ~/.cache/bar-status when BAR_STATUS_DIR is unset,
+    and the documented command (`bar-status-poll --mock-alerts a.json
+    --mock-mail 3`) does not set it — so once the mock path started dispatching,
+    a sub-threshold fixture CLEARED a live rising-edge latch and the next real
+    poll (<=45s later) re-toasted a steady-state alert condition. "A blackout
+    must never move the latch", reintroduced through the debug path.
+
+    So dispatch is opt-in via `--toast`. Here the latch starts LATCHED and a mock
+    run with a sub-threshold fixture must leave it exactly as found.
+    """
+    monkeypatch.setenv("BAR_STATUS_DIR", str(tmp_path))
+    monkeypatch.setattr(poll, "signal_bar", lambda _n: None)
+    poll.write_latch("alerts", True)
+
+    af = tmp_path / "alerts.json"
+    af.write_text(json.dumps([]))          # zero firing alerts: sub-threshold
+    assert poll.main(["--mock-alerts", str(af), "--mock-mail", "3"]) == 0
+
+    assert poll.read_latch("alerts") is True, \
+        "a --mock-* run cleared a LIVE rising-edge latch"
+    assert _never_reach_the_desktop == [], _never_reach_the_desktop
+    # ...and it still did its actual job: the cache file is written.
+    assert json.loads((tmp_path / "alerts.json").read_text())["count"] == 0
+
+    # OPT-IN control: with --toast the same run DOES dispatch, so the seam stays
+    # reachable from a test rather than being switched off for everyone.
+    fired = []
+    monkeypatch.setattr(poll, "fire_toast", lambda *a, **kw: fired.append(a) or True)
+    poll.write_latch("alerts", False)      # clear, so a crossing is possible
+    mf = tmp_path / "many.json"
+    mf.write_text(json.dumps(
+        [_alert("KubeJobFailed%d" % i, "critical") for i in range(40)]))
+    assert poll.main(["--mock-alerts", str(mf), "--toast"]) == 0
+    assert len(fired) == 1, fired
+    assert poll.read_latch("alerts") is True, "the opt-in run did not latch"
+
+
+def test_fire_toast_ROUTES_THROUGH_the_patchable_launcher(monkeypatch,
+                                                          _never_reach_the_desktop):
+    """🔴 THE POSITIVE CONTROL FOR THE AUTOUSE FIXTURE ITSELF.
+
+    Every "no real toast" assertion in this file rests on the fixture patching
+    `poll._toast_runner`. That is worth exactly nothing unless `fire_toast`
+    actually CALLS it — and a mutant re-inlining the old `subprocess.run` lambda
+    left the whole suite green while silently restoring the ability to spam the
+    desktop: the fixture still patched an attribute that existed, it was just no
+    longer on the path. A patched seam nobody routes through is a harness wired
+    to nothing.
+
+    So this drives `fire_toast` for real (with the session-bus check satisfied,
+    or it short-circuits before the launcher and the zero means nothing) and
+    asserts the recorder SAW the launch.
+    """
+    monkeypatch.setattr(poll, "_borrow_desktop_env",
+                        lambda env: {**env,
+                                     "DBUS_SESSION_BUS_ADDRESS": "unix:path=/dev/null",
+                                     "DISPLAY": ":0"})
+    assert poll.fire_toast("critical", "sum", "body") is True
+    assert len(_never_reach_the_desktop) == 1, \
+        ("fire_toast did not go through poll._toast_runner — the whole file's "
+         "no-real-toast guarantee is void: %r" % _never_reach_the_desktop)
+    argv = _never_reach_the_desktop[0]
+    assert argv[0] == "systemd-run", argv
+    assert "sum" in argv and "body" in argv, argv
+
+
+def test_dispatch_edge_toast_NEVER_raises(_never_reach_the_desktop):
+    """🔴 `dispatch_edge_toast` is now the SOLE fail-safe boundary for both the
+    live poll and the mock path, and its "never raises" was unasserted — deleting
+    the `contextlib.suppress` left the whole suite green.
+
+    It is load-bearing: `evaluate_edge_toast` genuinely does raise (a fire that
+    throws propagates; see test_eval_is_failsafe_when_fire_raises) and the caller
+    is what swallows it. A poller that dies here loses the remaining sources.
+    """
+    def boom(_n, _p, _s):
+        raise RuntimeError("dunstify exploded")
+
+    assert poll.dispatch_edge_toast("clawgate", {"count": 3},
+                                    poll._toast_specs(), evaluate=boom) is None
+
+    # ...and the LIVE loop keeps going: a raising source must not stop the ones
+    # after it from being polled and dispatched.
+    seen = []
+    assert poll._dispatch_all([("clawgate", {"count": 3}),
+                              ("mail", {"count": 2})]) == 0
+    poll._dispatch_all([])   # empty is a no-op, not an error
+    assert seen == []
 
 
 def test_the_SOURCES_table_is_a_LEDGER_of_every_polled_source():

@@ -45,6 +45,15 @@ Parse is deliberately separated from fetch so the parse_* functions are unit
 tested against mock inputs (scripts/tests/test_bar_status.py). Drive the whole
 write+signal path against fixtures without any live endpoint:
     bar-status-poll --mock-clawgate tasks.json --mock-alerts alerts.json --mock-mail 3
+
+🔴 A `--mock-*` run writes the REAL cache files (that is the point — the bar
+renders them), but it does NOT fire desktop toasts and does NOT touch the
+rising-edge latches unless you add `--toast`. That default is deliberate: the
+latches live in the same cache dir, so a mock run with a sub-threshold fixture
+would clear a LIVE latch and make the next real poll (<=45s later) re-toast a
+steady-state alert condition — "a blackout must never move the latch",
+reintroduced through the debug path. `--toast` exists so the dispatch seam is
+still reachable from a test.
 """
 from __future__ import annotations
 
@@ -331,29 +340,36 @@ def parse_airvpn(probe) -> dict:
 
 
 def _safe_int(value, default: int = 0) -> int:
-    """`int(value)` with junk mapped to `default`. NEVER raises."""
-    if value is None or isinstance(value, bool):
-        return int(value) if isinstance(value, bool) else default
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
+    """`int(value)` with junk mapped to `default`, clamped at 0. Never raises.
 
+    🔴 RAISING HERE IS NOT THE SAFE OPTION, which is why this exists.
+    `source()` converts an exception into a `stale` payload, the block renders
+    `stale` as an EMPTY pill, and because the exception is swallowed the unit's
+    OnFailure toast does not fire either -- so a malformed field would look
+    exactly like "all healthy". Measured: `count="abc"` and `count={}` on an
+    unknown verdict went from a visible `tlm ?` to an invisible block that way.
 
-def _verdict_count(v) -> int:
-    """A verdict's `count` as an int; anything unparseable -> 0. Never raises.
+    🔴 OverflowError is in the list because `int(float("inf"))` raises
+    THAT, not ValueError, and `json.load` accepts a bare `Infinity` -- so a
+    `--mock-telemetry` fixture with `"count": Infinity` reproduced exactly the
+    symptom above through a supported entry point. `float("nan")` raises
+    ValueError and is covered too.
 
-    🔴 RAISING HERE IS NOT THE SAFE OPTION, which is why this exists. `source()`
-    converts an exception into a `stale` payload, and the block renders `stale`
-    as an EMPTY pill — so a malformed count would look exactly like "all
-    healthy", and because the exception is swallowed the unit's OnFailure toast
-    does not fire either. Measured: `count="abc"` and `count={}` on an unknown
-    verdict went from a visible `tlm ?` to an invisible block that way.
-    Degrading to 0 keeps an unknown verdict on its visible `tlm ?` path.
+    Clamped at 0 because every field this parses (count, rows, evaluated) is
+    non-negative by contract, and a negative count is the worst shape of all: it
+    is truthy, so the payload says "Critical", while the block renders only
+    `count > 0` -- a Critical state with an INVISIBLE pill. `parse_mail` already
+    clamps for the same reason.
+
+    Deliberately NO special case for None or bool. `int(None)` raises TypeError
+    straight into the default and `int(True)` is 1 either way; both branches were
+    written here and both were INERT -- removing them and inverting them each
+    left the suite green, which is the tell for a guard that guards nothing.
     """
-    if not isinstance(v, dict):
-        return 0
-    return _safe_int(v.get("count"))
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError, OverflowError):
+        return default
 
 
 def parse_telemetry(verdict, prev=None, now=None,
@@ -411,7 +427,7 @@ def parse_telemetry(verdict, prev=None, now=None,
     v = verdict if isinstance(verdict, dict) else {}
     tstate = v.get("state") or "query-failed"
     detail = str(v.get("detail") or "")
-    count = _verdict_count(v)
+    count = _safe_int(v.get("count"))
     out = {
         "telemetry_state": tstate,
         "evaluated": _safe_int(v.get("evaluated")),
@@ -593,6 +609,25 @@ def _borrow_desktop_env(env: dict) -> dict:
     return env
 
 
+def _toast_runner(argv):
+    """THE one place a toast actually reaches the desktop.
+
+    🔴 A module-level seam on purpose. It used to be an inline lambda inside
+    `fire_toast`, which meant a test could only avoid launching a real
+    notification by patching `fire_toast` itself — and once the `--mock-*` path
+    started dispatching, two long-standing tests that patched `signal_bar` but
+    not `fire_toast` began firing REAL desktop notifications, one of them a
+    sticky critical "🔴 Telemetry source DEAD" naming a host/source from a
+    FIXTURE. `_borrow_desktop_env` reaches i3's environ, so a non-graphical test
+    runner is no protection, and the nix-sandbox tier cannot see it at all (no
+    systemd-run, no bus) — so the gate stayed green while the desktop got
+    spammed. Patching THIS leaves `fire_toast` itself real and testable while
+    making a real launch structurally unreachable from the suite.
+    """
+    return subprocess.run(argv, stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL, timeout=6)
+
+
 def fire_toast(urgency, summary, body, action_cmd=None, runner=None) -> bool:
     """Best-effort edge toast. Launches dunstify inside a DETACHED transient
     --user service (systemd-run) so it OUTLIVES this oneshot poller's cgroup
@@ -618,8 +653,7 @@ def fire_toast(urgency, summary, body, action_cmd=None, runner=None) -> bool:
         argv += ["bash", "-c", script, "bar-status", urgency, summary, body]
         if action_cmd:
             argv.append(action_cmd)
-        run = runner or (lambda a: subprocess.run(
-            a, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=6))
+        run = runner or _toast_runner
         run(argv)
         return True
     except Exception:
@@ -1182,6 +1216,12 @@ def main(argv=None) -> int:
     ap.add_argument("--mock-telemetry", metavar="FILE",
                     help="parse this JSON file as a deadman verdict (see "
                          "scripts/collector/deadman.py --json)")
+    ap.add_argument("--toast", action="store_true",
+                    help="with --mock-*: also run the rising-edge toast gate. "
+                         "OFF by default because it MOVES THE LIVE LATCHES in "
+                         "~/.cache/bar-status and can fire real notifications; a "
+                         "sub-threshold fixture would clear a live latch and make "
+                         "the next real poll re-toast a steady-state condition")
     args = ap.parse_args(argv)
 
     mocking = any(x is not None for x in
@@ -1221,12 +1261,15 @@ def main(argv=None) -> int:
             mocked.append(("telemetry", run_source(
                 "telemetry", lambda: parse_telemetry(verdict, prev=prev))))
         # 🔴 The mock path finishes through the SAME function the live poll
-        # does. It used to `return 0` before the toast step, which left the whole
-        # suppression seam unreachable from any test — three mutants in it
-        # survived the full suite, one of them silencing the telemetry toast
-        # entirely. A mock path that skips a decision the real path makes is a
-        # harness that cannot see that decision's bugs.
-        return _dispatch_all(mocked)
+        # does, so the suppression seam is reachable from a test — it used to
+        # `return 0` before the toast step and three mutants in that seam
+        # survived the whole suite, one of them silencing the telemetry toast
+        # entirely. But it is OPT-IN (`--toast`), because dispatching also writes
+        # the rising-edge latches, which live in the real cache dir: a documented
+        # debug run with a sub-threshold fixture would clear a LIVE latch and
+        # make the next real poll re-toast a steady-state condition. Reachable
+        # for tests, inert for a human previewing the bar.
+        return _dispatch_all(mocked if args.toast else [])
 
     # Live poll: each source is independent + fail-safe. Each source's status is
     # written, then the SAME dispatch the mock path uses evaluates a RISING-EDGE
