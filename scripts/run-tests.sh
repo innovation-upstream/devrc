@@ -194,7 +194,19 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 # subsystem-resolver suite, so neither branch ever observed the real total.
 # Taking either side's number would have gone green on slack it never earned.
 # Re-MEASURED on the merged tree below, not computed from the two above.
-MIN_TESTS="${MIN_TESTS:-6960}"  # PENDING re-measure
+# MEASURED on the merged tree (this branch + origin/main @ 9f17cfc):
+#     TOTAL collected=7122  passed=7121  skipped=1  failed=0
+# and it reconciles exactly, so this is an accounting rather than a reading:
+#   main today                          6968  (= the 6960 floor + 7 from #380's
+#                                              test_settings_allow_junk.py and
+#                                              +1 from #386, neither of which
+#                                              raised the floor — that 8 of
+#                                              slack is exactly what a floor
+#                                              carried forward stops detecting)
+#   + this branch's guard-check suite    154  (test_guard_core.py 1156 -> 1310)
+#   = 7122
+# scripts/tests 1874 = #378's measured 1867 + #380's 7, confirming both landed.
+MIN_TESTS="${MIN_TESTS:-7122}"
 
 # --- GUARD 1: tool precondition ------------------------------------------------
 # Every binary the suites `skipif` on. Absence must be an ERROR, never a skip.
