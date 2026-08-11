@@ -2109,6 +2109,214 @@ def test_expandvars_resolves_a_handle_that_IS_in_the_environment(tmp_path, monke
         "git -C $SOME_REPO_HANDLE commit -m x", str(on_feat)) is not None
 
 
+# --- 8d(i-b). 🔴 a variable ASSIGNED IN THE SAME COMMAND LINE ---------------- #
+# The fallback above is correct but incomplete, and the gap cost a real session
+# (2026-08-11, datapacket-talos): the documented worktree recipe in that repo's
+# CLAUDE.md is literally
+#     WT=/tmp/wt-$$
+#     git -C $DATAPACKET worktree add --detach "$WT" origin/trunk
+#     git -C "$WT" commit -m "…"
+# `$WT` is set by the SAME line the guard is judging, so it is not in the hook's
+# environment and `expandvars` cannot see it. The `-C` fell back to the cwd — the
+# primary clone, sitting on `trunk` — and DENIED a commit that was going into a
+# detached worktree. Three re-spellings in a row were denied for the same hidden
+# reason, because the message never mentioned that a `-C` had been discarded.
+#
+# Two independent fixes, tested separately below:
+#   (1) resolve LITERAL assignments from the command text, so the recipe works;
+#   (2) when a repo-naming token could NOT be resolved and the deny landed on the
+#       cwd instead, SAY SO — the docstring already claimed the deny was
+#       "self-diagnosing", and it was not.
+#
+# 🔴 Fix (1) only ever resolves MORE paths; it never fails open. The resolved
+# directory is judged exactly like an absolute `-C`, so an assignment pointing at
+# a main-branch repo still denies — pinned in both directions below.
+
+def test_literal_assignment_in_the_same_line_resolves_the_dash_c_target(tmp_path):
+    """🔴 Both directions, and they are opposite — this is the fail-open guard.
+
+    cwd on main + `-C` to a feature repo -> ALLOW (the session that broke).
+    cwd on a feature branch + `-C` to a main repo -> DENY (resolving more must
+    not become resolving-then-forgiving).
+    """
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    on_feat = _mkrepo(tmp_path / "feat-repo", branch="feat/x")
+    assert gc.check_git_commit_to_main(
+        f'WT={on_feat}; git -C "$WT" commit -m x', str(on_main)) is None
+    assert gc.check_git_commit_to_main(
+        f'WT={on_main}; git -C "$WT" commit -m x', str(on_feat)) is not None
+
+
+def test_the_real_datapacket_worktree_recipe_is_allowed(tmp_path):
+    """The exact multi-command shape from datapacket-talos CLAUDE.md rule #10,
+    with the cwd on the primary clone's `trunk` — the case measured in the
+    incident. Uses `&&` and a quoted handle, as the recipe does."""
+    primary = _mkrepo(tmp_path / "primary", branch="trunk")
+    wt = _mkrepo(tmp_path / "wt-1234", branch="zach/topic")
+    cmd = (f'WT={wt}\n'
+           f'git -C {primary} fetch origin trunk\n'
+           f'git -C "$WT" add claudedocs/x.md && git -C "$WT" commit -F /tmp/m.txt')
+    assert gc.check_git_commit_to_main(cmd, str(primary)) is None
+
+
+@pytest.mark.parametrize("spelling", ['"$WT"', "$WT", "${WT}", '"${WT}"', "'$WT'"])
+def test_every_handle_spelling_of_a_line_local_assignment_resolves(tmp_path, spelling):
+    """Braced, quoted and bare all name the same variable. A fix that handled only
+    `$WT` would leave `${WT}` — the form RULES.md MANDATES for zsh, where an
+    unbraced `$var:` eats a history modifier — still falling back to the cwd."""
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    on_feat = _mkrepo(tmp_path / "feat-repo", branch="feat/x")
+    assert gc.check_git_commit_to_main(
+        f'WT={on_feat}; git -C {spelling} commit -m x', str(on_main)) is None
+
+
+def test_a_line_local_assignment_resolves_a_cd_target_for_a_bare_commit(tmp_path):
+    """The same blindness on the OTHER branch of the check. A bare `git commit`
+    is judged against every `cd` target in the text; an unresolvable one silently
+    contributed nothing, so `(cd "$WT" && git commit)` was judged on the cwd
+    alone. Deny half: the assignment must be able to ADD a blocked directory."""
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    on_feat = _mkrepo(tmp_path / "feat-repo", branch="feat/x")
+    assert gc.check_git_commit_to_main(
+        f'WT={on_main}; (cd "$WT" && git commit -m x)', str(on_feat)) is not None
+
+
+def test_a_line_local_assignment_beats_an_ambient_handle_of_the_same_name(tmp_path,
+                                                                          monkeypatch):
+    """A real shell would use the line's own assignment. If the ambient value won,
+    a stale exported handle would decide the verdict for a path the command
+    plainly re-pointed."""
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    on_feat = _mkrepo(tmp_path / "feat-repo", branch="feat/x")
+    monkeypatch.setenv("WT", str(on_main))
+    assert gc.check_git_commit_to_main(
+        f'WT={on_feat}; git -C "$WT" commit -m x', str(on_main)) is None
+
+
+def test_parsing_an_assignment_does_not_mutate_the_hook_process_environment(tmp_path):
+    """🔴 The guard runs in-process on EVERY Bash call. Leaking a parsed
+    assignment into `os.environ` would let one command's text change how a later,
+    unrelated command resolves — a stateful guard is a guard nobody can reason
+    about."""
+    on_feat = _mkrepo(tmp_path / "feat-repo", branch="feat/x")
+    before = dict(os.environ)
+    gc.check_git_commit_to_main(
+        f'GUARD_LEAK_PROBE={on_feat}; git -C "$GUARD_LEAK_PROBE" commit -m x',
+        str(on_feat))
+    assert "GUARD_LEAK_PROBE" not in os.environ
+    assert dict(os.environ) == before
+
+
+@pytest.mark.parametrize("assignment", [
+    'WT=$(mktemp -d)',                 # command substitution — not knowable
+    'WT=`mktemp -d`',                  # the backtick spelling of the same
+    'WT=/tmp/wt-$$',                   # a PID the guard cannot know
+    'WT=$(cut -d= -f2 /tmp/path.txt)',  # the exact shape from the incident
+])
+def test_a_DYNAMIC_assignment_still_falls_back_and_is_not_invented(tmp_path,
+                                                                   assignment):
+    """🔴 The negative control on fix (1). A value the guard cannot know must NOT
+    be guessed at — it falls back to the cwd exactly as before, and denies. The
+    fix resolves what is written down, never what would have to be executed."""
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    assert gc.check_git_commit_to_main(
+        f'{assignment}; git -C "$WT" commit -m x', str(on_main)) is not None
+
+
+# --- 8d(i-c). the deny must DISCLOSE that it judged the cwd ------------------ #
+# The docstring on `_dash_c_dir` already argued the mis-attribution was
+# acceptable "because the deny message names the repo it judged, so it is
+# self-diagnosing". It named the repo but never said a `-C` had been DISCARDED,
+# so the message read as "you are on trunk" — true of the cwd, false of the
+# commit — and the obvious retries (a subshell `cd`, then a feature branch in the
+# worktree) were denied for the same invisible reason. A comment is a claim too.
+
+def test_fallback_deny_says_the_dash_c_target_did_not_resolve(tmp_path, monkeypatch):
+    """Names the unresolved TOKEN as written, says the cwd was judged instead,
+    and gives the way out (an absolute path). Asserting the token specifically —
+    a generic 'something did not resolve' would not tell you WHICH."""
+    monkeypatch.delenv(_UNSET_HANDLE, raising=False)
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    reason = gc.check_git_commit_to_main(
+        f"git -C ${_UNSET_HANDLE} commit -m x", str(on_main))
+    assert reason is not None
+    assert f"${_UNSET_HANDLE}" in reason, "the unresolved token must be quoted back"
+    assert "absolute" in reason.lower()
+    assert str(on_main) in reason, "and the directory it judged INSTEAD"
+
+
+def test_dynamic_assignment_deny_discloses_the_fallback_too(tmp_path):
+    """The incident's own shape must carry the diagnostic, not just the
+    unexported-handle shape."""
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    reason = gc.check_git_commit_to_main(
+        'WT=$(mktemp -d); git -C "$WT" commit -m x', str(on_main))
+    assert reason is not None
+    assert "$WT" in reason
+    assert "absolute" in reason.lower()
+
+
+def test_a_literal_spelling_that_HAPPENS_to_exist_is_still_not_resolved(tmp_path):
+    """🔴 The fail-open this guard's `_UNKNOWABLE_VALUE` clause actually prevents,
+    found by a SURVIVING mutant rather than by writing the test first.
+
+    `WT=/tmp/wt-$$` names a different directory every run. But a directory whose
+    literal name contains `$$` CAN exist, and if it does, resolving the spelling
+    verbatim would judge a repo the command will never touch — allowing a commit
+    on the strength of a coincidence. The runtime value is unknowable, so the
+    only safe answer is to not resolve it at all and take the cwd fallback.
+
+    Deliberately constructed so removing the clause CHANGES THE VERDICT: the
+    literal directory is a real repo on a feature branch (would ALLOW), the cwd
+    is on main (must DENY).
+    """
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    literal = _mkrepo(tmp_path / "wt-$$", branch="feat/x")
+    assert literal.is_dir(), "positive control: the $$-named directory must exist"
+    assert gc.check_git_commit_to_main(
+        f'WT={literal}; git -C "$WT" commit -m x', str(on_main)) is not None
+
+
+def test_the_note_is_not_added_when_the_deny_is_about_a_RESOLVED_repo(tmp_path,
+                                                                      monkeypatch):
+    """🔴 The other surviving mutant: `stray and repo_dir == base` must need BOTH
+    halves. Here one repo token resolves and another does not, and the resolved
+    one is what got judged — so the deny is a true statement about that repo and
+    must not be prefixed with 'I judged your cwd instead'. A note that is
+    sometimes false is worse than no note; it was the false framing that cost the
+    session this whole change came from.
+    """
+    monkeypatch.delenv(_UNSET_HANDLE, raising=False)
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    on_feat = _mkrepo(tmp_path / "feat-repo", branch="feat/x")
+    reason = gc.check_git_commit_to_main(
+        f"git -C {on_main} -C ${_UNSET_HANDLE} commit -m x", str(on_feat))
+    assert reason is not None, "the resolved -C still points at a main-branch repo"
+    assert str(on_main) in reason
+    assert "did not resolve" not in reason.lower()
+
+
+def test_a_plain_deny_does_NOT_carry_the_fallback_diagnostic(tmp_path):
+    """🔴 The negative control on fix (2). If the note were unconditional it would
+    be noise on every deny and would stop being read — and it would be a false
+    claim, since a bare `git commit` on main discarded nothing."""
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    reason = gc.check_git_commit_to_main("git commit -m x", str(on_main))
+    assert reason is not None
+    assert "did not resolve" not in reason.lower()
+
+
+def test_a_RESOLVED_dash_c_deny_does_NOT_carry_the_fallback_diagnostic(tmp_path):
+    """The other half: when `-C` resolved and the repo it named is on main, the
+    deny is about that repo and nothing was discarded."""
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    on_feat = _mkrepo(tmp_path / "feat-repo", branch="feat/x")
+    reason = gc.check_git_commit_to_main(
+        f"git -C {on_main} commit -m x", str(on_feat))
+    assert reason is not None
+    assert "did not resolve" not in reason.lower()
+
+
 # --- 8d(ii). 🔴 the allowlist is OWNER-qualified ----------------------------- #
 # Found by an adversarial probe during review, not by a test looking for it:
 # matching a remote on its BARE repo name allowlisted a FORK

@@ -1021,15 +1021,77 @@ def _safe_getcwd():
         return None
 
 
-def _resolve_dir(value, base):
+# A LITERAL `NAME=<value>` assignment in the command text. Deliberately refuses
+# any value the guard would have to EXECUTE to know: `$(…)`, backticks and `$$`
+# are excluded at the callsite, not guessed at. Stops at the shell metacharacters
+# that end a word, so `WT=/tmp/x; git …` and `WT=/tmp/x && git …` both yield the
+# path alone.
+_ASSIGNMENT = re.compile(
+    r"""(?:^|[;&|(){}]|\s)(?P<name>[A-Za-z_][A-Za-z0-9_]*)="""
+    r"""(?P<value>"[^"]*"|'[^']*'|[^\s;&|()'"]*)""")
+
+# The values that mean "you would have to run this to find out".
+_UNKNOWABLE_VALUE = re.compile(r"\$\(|`|\$\$")
+
+
+def _line_local_assignments(cmd):
+    """`{NAME: value}` for every LITERAL assignment in the command text.
+
+    🔴 This exists because the guard parses TEXT while the shell parses a
+    PROGRAM, and the documented worktree recipes set the path in the very line
+    being judged:
+
+        WT=/tmp/wt-topic
+        git -C "$WT" commit -m "…"
+
+    `$WT` is not in the hook's environment — it does not exist yet anywhere but
+    this string — so `expandvars` left it unexpanded, the `-C` fell back to the
+    cwd, and a commit into a worktree was judged against the primary clone. That
+    denied real work in datapacket-talos on 2026-08-11, three re-spellings
+    running, because the deny message never said a `-C` had been discarded.
+
+    Only what is WRITTEN DOWN is resolved. `WT=$(mktemp -d)` and `WT=/tmp/wt-$$`
+    are skipped, so they still take the cwd fallback — the fix must not invent a
+    path it cannot know. Nothing here touches `os.environ`: the returned mapping
+    is passed down explicitly, so one command's text can never change how a later
+    command resolves.
+    """
+    out = {}
+    for m in _ASSIGNMENT.finditer(cmd):
+        value = m.group("value")
+        if not value or _UNKNOWABLE_VALUE.search(value):
+            continue
+        out[m.group("name")] = value
+    return out
+
+
+def _expand_line_local(value, env):
+    """Substitute `$NAME` / `${NAME}` for the line's own assignments, first.
+
+    Before `expandvars`, so a value the command plainly re-pointed wins over a
+    stale exported handle of the same name — which is what the shell would do.
+    """
+    if not env:
+        return value
+    for name, replacement in env.items():
+        for spelling in ("${%s}" % name, "$%s" % name):
+            if spelling in value:
+                value = value.replace(spelling, replacement.strip("\"'"))
+    return value
+
+
+def _resolve_dir(value, base, env=None):
     """A command-supplied path -> an existing directory, or None.
 
     Expands `$HANDLE` and `~`, resolves a relative path against `base`, and maps
     `<repo>/.git` onto `<repo>` so a `--git-dir` is judged as its worktree.
+
+    `env` carries `_line_local_assignments` and is applied BEFORE `expandvars`.
     """
     if not value:
         return None
-    value = os.path.expanduser(os.path.expandvars(value.strip("\"'")))
+    value = _expand_line_local(value.strip("\"'"), env)
+    value = os.path.expanduser(os.path.expandvars(value))
     if not value:
         return None
     if not os.path.isabs(value):
@@ -1041,7 +1103,7 @@ def _resolve_dir(value, base):
     return value if os.path.isdir(value) else None
 
 
-def _dash_c_dir(argv, base):
+def _dash_c_dir(argv, base, env=None):
     """The directory a `git` argv acts on: `base`, moved by each `-C <path>`.
 
     git's multiple `-C` options are CUMULATIVE and relative ones compose, so this
@@ -1063,9 +1125,19 @@ def _dash_c_dir(argv, base):
     inherit the handle), and only an unresolved path falls back to the cwd.
 
     The fallback can mis-attribute: cwd on main + a `-C` to a feature-branch repo
-    whose path did not resolve now denies. That direction is the safe one — the
-    deny message names the repo it judged, so it is self-diagnosing, and the way
-    past it is an absolute `-C` path, which resolves.
+    whose path did not resolve now denies. That direction is the safe one, and
+    the way past it is an absolute `-C` path, which resolves.
+
+    🔴 THIS DOCSTRING USED TO CALL THAT DENY "self-diagnosing" BECAUSE IT NAMES
+    THE REPO IT JUDGED. It was not, and the claim cost a session (2026-08-11,
+    datapacket-talos): naming the cwd does not tell you a `-C` was DISCARDED, so
+    the message read as a plain "you are on trunk" and the three obvious retries
+    were all denied for a reason that never appeared on screen. Two things
+    changed rather than the prose being restated: `_line_local_assignments` now
+    resolves a handle the command sets itself, which is the whole documented
+    worktree recipe; and `_unresolved_repo_tokens` feeds an explicit note into
+    the deny. A comment is a claim too — this one is now checked by
+    `test_fallback_deny_says_the_dash_c_target_did_not_resolve`.
     """
     # Path resolution goes through _resolve_dir — ONE place. It used to be
     # open-coded here as well, and a mutation sweep caught the consequence: the
@@ -1077,7 +1149,7 @@ def _dash_c_dir(argv, base):
     while i < len(argv):
         tok = argv[i]
         if tok == "-C" and i + 1 < len(argv):
-            cur = _resolve_dir(argv[i + 1], cur) or cur
+            cur = _resolve_dir(argv[i + 1], cur, env) or cur
             i, saw = i + 2, True
             continue
         if tok in _GIT_GLOBAL_VALUE_OPTS:
@@ -1092,7 +1164,55 @@ def _dash_c_dir(argv, base):
     return cur if cur and os.path.isdir(cur) else base
 
 
-def _argv_named_repo_dirs(argv, base):
+def _repo_naming_tokens(argv):
+    """Every raw token an argv offers as "act on THIS repo": the value of each
+    `-C`, `--git-dir` and `--work-tree`, exactly as written.
+
+    Raw on purpose — the diagnostic quotes the token back at the caller, and
+    `$WT` is what they typed and will recognise.
+    """
+    vals, i = [], 1
+    while i < len(argv):
+        tok = argv[i]
+        if tok == "-C" and i + 1 < len(argv):
+            vals.append(argv[i + 1])
+            i += 2
+            continue
+        matched = False
+        for opt in _GIT_REPO_OPTS:
+            if tok == opt and i + 1 < len(argv):
+                vals.append(argv[i + 1])
+                i += 2
+                matched = True
+                break
+            if tok.startswith(opt + "="):
+                vals.append(tok.split("=", 1)[1])
+                i += 1
+                matched = True
+                break
+        if matched:
+            continue
+        if tok in _GIT_GLOBAL_VALUE_OPTS:
+            i += 2
+            continue
+        if tok.startswith("-"):
+            i += 1
+            continue
+        break
+    return vals
+
+
+def _unresolved_repo_tokens(argv, base, env=None):
+    """The repo-naming tokens that name no directory on this machine.
+
+    Their existence is the difference between "you are committing on main" and
+    "I could not tell where you were committing, so I judged your cwd" — two very
+    different messages, and only the first one was ever printed.
+    """
+    return [t for t in _repo_naming_tokens(argv) if not _resolve_dir(t, base, env)]
+
+
+def _argv_named_repo_dirs(argv, base, env=None):
     """The repos an argv NAMES for itself, via `-C` / `--git-dir` / `--work-tree`.
 
     Empty when the argv names none — the caller then falls back to the cd-derived
@@ -1100,7 +1220,7 @@ def _argv_named_repo_dirs(argv, base):
     `git -C <feature-repo> commit` stay ALLOWED from a cwd that sits on main.
     """
     dirs = []
-    hopped = _dash_c_dir(argv, base)
+    hopped = _dash_c_dir(argv, base, env)
     if hopped:
         dirs.append(hopped)
     for i, tok in enumerate(argv[1:], 1):
@@ -1110,20 +1230,20 @@ def _argv_named_repo_dirs(argv, base):
                 val = argv[i + 1]
             elif tok.startswith(opt + "="):
                 val = tok.split("=", 1)[1]
-            resolved = _resolve_dir(val, base)
+            resolved = _resolve_dir(val, base, env)
             if resolved:
                 dirs.append(resolved)
     return list(dict.fromkeys(dirs))
 
 
-def _candidate_dirs(cmd, base):
+def _candidate_dirs(cmd, base, env=None):
     """Every directory a BARE `git commit` in this line could run in: the caller's
     cwd, plus every `cd`/`pushd` target and `GIT_DIR=`/`GIT_WORK_TREE=` prefix
     anywhere in the text (subshells and `bash -c` bodies included)."""
     out = [base] if base else []
     for rx in (_CD_ANY, _GIT_DIR_ENV):
         for m in rx.finditer(cmd):
-            resolved = _resolve_dir(m.group("dir"), base)
+            resolved = _resolve_dir(m.group("dir"), base, env)
             if resolved:
                 out.append(resolved)
     return list(dict.fromkeys(out))
@@ -1166,6 +1286,28 @@ def _remote_slugs(repo_dir):
         if slug:
             slugs.append(slug)
     return slugs
+
+
+def _fallback_note(tokens, judged_dir):
+    """Prepended to a deny that judged the CWD because a `-C` did not resolve.
+
+    Leads, rather than trails, because the wall of deny text below it explains a
+    rule the caller did not break — and a note nobody reaches is the same as no
+    note. Quotes the token EXACTLY as written so it is recognisable, and names
+    the one spelling that always works.
+    """
+    listed = ", ".join("`%s`" % t for t in tokens)
+    return (
+        f"⚠️  FIRST: {listed} did not resolve to a directory, so this was judged "
+        f"against your CWD ({judged_dir}) instead of the repo you named. The "
+        f"guard parses TEXT — a variable set by this same command line, or one "
+        f"built with `$(…)`/`$$`, does not exist in the hook's environment.\n"
+        f"If you meant to commit in a worktree, re-run with an ABSOLUTE `-C` "
+        f"path (`git -C /tmp/wt-topic commit …`) and this deny will not apply. "
+        f"A literal `WT=/abs/path` assigned earlier in the same command IS "
+        f"resolved; a computed one cannot be.\n"
+        f"The rule below is about the CWD, and may well not be your situation:\n"
+    )
 
 
 def _commit_to_main_reason(repo_dir):
@@ -1270,6 +1412,7 @@ def check_git_commit_to_main(cmd, cwd=None):
     the action into one the guard has blessed.
     """
     base = cwd or _safe_getcwd()
+    env = _line_local_assignments(cmd)
     for argv in commands(cmd):
         if os.path.basename(argv[0]) != "git":
             continue
@@ -1278,10 +1421,18 @@ def check_git_commit_to_main(cmd, cwd=None):
             continue
         if any(_is_dry_run_flag(f) for f in flags):
             continue
-        named = _argv_named_repo_dirs(argv, base)
-        for repo_dir in (named or _candidate_dirs(cmd, base)):
+        named = _argv_named_repo_dirs(argv, base, env)
+        for repo_dir in (named or _candidate_dirs(cmd, base, env)):
             reason = _commit_to_main_reason(repo_dir)
             if reason:
+                # Only when the deny landed on the CWD despite the command having
+                # named a repo — i.e. this is the fallback, not a real verdict
+                # about the directory the caller meant. A note on every deny
+                # would be noise, and false: a bare `git commit` discarded
+                # nothing. Pinned both ways by the 8d(i-c) tests.
+                stray = _unresolved_repo_tokens(argv, base, env)
+                if stray and repo_dir == base:
+                    return _fallback_note(stray, repo_dir) + reason
                 return reason
     return None
 
