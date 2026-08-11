@@ -42,8 +42,15 @@ NOT execute anything.
 run-tests.sh's REQUIRED_TOOLS, so its absence is a NAMED PRECONDITION FAILURE up
 front, not a silent skip deep in the run. `_opencode_bin()` below calls
 pytest.fail(), never pytest.skip() — the same choice, for the same reason, as
-`nix_eval()` in test_opencode_config.py. This file adds 19 tests and 0 skips
-(MEASURED, `pytest -q`: "19 passed", ~10 s).
+`nix_eval()` in test_opencode_config.py. This file adds 22 tests and 0 skips
+(MEASURED 2026-08-11, `pytest -q`: "22 passed", ~7 s, in BOTH tiers — the
+dev-host nix-shell and `nix build .#checks.x86_64-linux.pytests`).
+
+🔴 STDOUT IS READ FROM A FILE, NEVER A PIPE. opencode loses the tail of a large
+stdout write when stdout is a pipe, silently and with exit 0. That cost this file
+17 failures on every dev host while the nix check stayed green. The full
+measurement, the ruled-out rival mechanisms and the pins are at `_run_opencode`
+below — read that before touching any subprocess call here.
 
 🔴 WHAT THIS FILE CANNOT SEE. Its conformance tests compare the ENGINE against
 the MODEL, and both read the same config — so a bad CONFIG makes them agree and
@@ -54,6 +61,7 @@ green here as "the config is fine".
     run:  python -m pytest scripts/tests/test_opencode_engine.py -q
 """
 
+import ast
 import json
 import os
 import shutil
@@ -66,6 +74,11 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+# One place owns the shebang of every runtime-written stub — see its docstring
+# for the two-tier trap that made this a shared helper.
+from testlib.mockbin import write_exec  # noqa: E402
 
 # The resolver MODEL and the command matrix live in one place — the sibling
 # file. Re-declaring either here would give us two copies to drift apart, and
@@ -138,8 +151,111 @@ def _seed_config_dir(tmp: Path, mutate=None) -> Path:
     return cfg
 
 
-def _run_debug_agent(name: str, mutate=None) -> dict:
-    exe = _opencode_bin()
+# 🔴 THE ONE PLACE THIS FILE READS opencode's STDOUT.
+#
+# CAPTURE TO A FILE — NEVER A PIPE. opencode (a Bun single-file binary) does not
+# reliably drain stdout before exiting when stdout is a PIPE, so a
+# `capture_output=True` / `subprocess.PIPE` read returns a TRUNCATED PREFIX with
+# **returncode 0 and an EMPTY stderr** — every signal that would let you notice
+# says the run succeeded. The only symptom is a JSONDecodeError halfway through
+# the document, which reads as "opencode's output format changed".
+#
+# MEASURED 2026-08-11 on the workbench, opencode 1.18.4
+# (/nix/store/64n428w29sra24db9d6h6clzdh0vy9hk-opencode-1.18.4 — the SAME store
+# path the nix check uses), for all 7 agents this file resolves:
+#     stdout=PIPE  -> exactly 8192 B every time, rc=0, stderr 0 B, BAD JSON
+#     stdout=FILE  -> 9214 / 11733 / 12927 / 16960 / 11475 / 9912 / 10086 B,
+#                     rc=0, stderr 0 B, VALID JSON
+# 20/20 consecutive piped runs of `debug agent build` returned exactly 8192 B.
+# It is the WRITER, not the reader: a shell `… | wc -c` truncates identically,
+# and a raw `os.read()` loop truncates identically, while a SOCKETPAIR (also not
+# a tty, also not seekable) delivers all 9214 B — and so does the same command
+# slowed down under strace. Not pipe capacity either: the default pipe holds
+# 65536 B, eight times what arrives.
+#
+# This is the SAME defect scripts/browser-bridge/browser-agent already fixed for
+# its tool-set gate (see its "CAPTURE TO A FILE — NEVER `$(...)`" block, and
+# scripts/browser-bridge/tests/test_browser_agent.py::
+# test_gate_reads_from_a_file_not_a_pipe). That guard reads only that ONE
+# wrapper's source, so it was structurally unable to see this file reintroduce
+# the identical bug through Python's `subprocess.PIPE` — the seam nobody owned.
+# The pin here is behavioural (see test_debug_dump_survives_a_pipe_truncating_
+# opencode below) plus the call-site ledger, so it cannot be satisfied by
+# spelling.
+#
+# 🔴 WHY THE MERGE GATE COULD NOT SEE IT. Inside the nix sandbox the same store
+# path delivers the whole document through a pipe (5/5, MEASURED via a
+# runCommand probe). So `nix build .#checks.x86_64-linux.pytests` was GREEN on
+# the exact tree where the dev-host tier had 17 failures. Do not "fix" a repeat
+# of this by re-measuring in the sandbox — the sandbox is the tier that is blind
+# to it.
+def _run_opencode(exe: str, args: list, tmp: Path, env=None, cwd=None):
+    """🔴 THE ONLY `subprocess.run` IN THIS MODULE. Returns (rc, stdout, stderr).
+
+    stdout AND stderr go to real FILES. Pinned by
+    test_this_file_never_pipe_captures_opencode below, which asserts this is the
+    single call site — so the rule lives in one place and a second reader cannot
+    quietly reintroduce the race.
+    """
+    out_path = tmp / "oc-stdout"
+    err_path = tmp / "oc-stderr"
+    with open(out_path, "wb") as fout, open(err_path, "wb") as ferr:
+        p = subprocess.run([exe, *args], stdout=fout, stderr=ferr, env=env,
+                           cwd=cwd, timeout=180)
+    return (p.returncode,
+            out_path.read_text(errors="replace"),
+            err_path.read_text(errors="replace"))
+
+
+def _capture_debug_agent(exe: str, name: str, cfg: Path, proj: Path,
+                         home: Path, tmp: Path) -> dict:
+    """Run `opencode debug agent <name> --pure`, capturing stdout to a FILE."""
+    # A MINIMAL env, not os.environ: the operator's real ~/.config/opencode,
+    # their OPENCODE_* overrides and their credentials must not be able to
+    # change this verdict. Verified to work under exactly this env.
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(home),
+        "TMPDIR": str(tmp),
+        "OPENCODE_CONFIG_DIR": str(cfg),
+        "OPENCODE_DISABLE_AUTOUPDATE": "true",
+        "OPENCODE_DISABLE_MODELS_FETCH": "true",
+    }
+    rc, out, err = _run_opencode(
+        exe, ["debug", "agent", name, "--pure"], tmp, env=env, cwd=str(proj))
+
+    assert rc == 0, (
+        f"`opencode debug agent {name} --pure` exited {rc}\n"
+        f"STDERR:\n{err[:2000]}"
+    )
+    assert out.strip(), (
+        f"`opencode debug agent {name}` produced NO stdout. Do not read this "
+        f"as 'nothing to check' — the output format is a dependency this "
+        f"test did not pin, and an empty parse is indistinguishable from a "
+        f"changed CLI. STDERR:\n{err[:2000]}"
+    )
+    try:
+        return json.loads(out)
+    except json.JSONDecodeError as exc:
+        # Never let a raw JSONDecodeError out of here: for two tiers running it
+        # meant "opencode's output format changed" when it meant "the document
+        # was cut short". Say which, and say what was NOT the cause.
+        raise AssertionError(
+            f"`opencode debug agent {name} --pure` returned {len(out)} bytes "
+            f"that do not parse as JSON ({exc}).\n"
+            f"  returncode={rc}, stderr={len(err)} bytes — so the process was "
+            f"NOT killed and wrote nothing to stderr.\n"
+            f"  FIRST rule out the flush race documented above: this harness is "
+            f"supposed to capture stdout to a real FILE, and "
+            f"test_this_file_never_pipe_captures_opencode is what proves it "
+            f"still does. If that test is ALSO red, believe it and fix the "
+            f"capture — the format did not change, the document was cut short.\n"
+            f"  Tail of what arrived:\n{out[-400:]!r}"
+        ) from None
+
+
+def _run_debug_agent(name: str, mutate=None, exe: str | None = None) -> dict:
+    exe = exe or _opencode_bin()
     tmp = Path(tempfile.mkdtemp(prefix="oc-engine-test-"))
     try:
         cfg = _seed_config_dir(tmp, mutate)
@@ -147,32 +263,7 @@ def _run_debug_agent(name: str, mutate=None) -> dict:
         proj.mkdir()
         home = tmp / "home"
         home.mkdir()
-        # A MINIMAL env, not os.environ: the operator's real ~/.config/opencode,
-        # their OPENCODE_* overrides and their credentials must not be able to
-        # change this verdict. Verified to work under exactly this env.
-        env = {
-            "PATH": os.environ.get("PATH", ""),
-            "HOME": str(home),
-            "TMPDIR": str(tmp),
-            "OPENCODE_CONFIG_DIR": str(cfg),
-            "OPENCODE_DISABLE_AUTOUPDATE": "true",
-            "OPENCODE_DISABLE_MODELS_FETCH": "true",
-        }
-        p = subprocess.run(
-            [exe, "debug", "agent", name, "--pure"],
-            capture_output=True, text=True, env=env, cwd=str(proj), timeout=180,
-        )
-        assert p.returncode == 0, (
-            f"`opencode debug agent {name} --pure` exited {p.returncode}\n"
-            f"STDERR:\n{p.stderr[:2000]}"
-        )
-        assert p.stdout.strip(), (
-            f"`opencode debug agent {name}` produced NO stdout. Do not read this "
-            f"as 'nothing to check' — the output format is a dependency this "
-            f"test did not pin, and an empty parse is indistinguishable from a "
-            f"changed CLI. STDERR:\n{p.stderr[:2000]}"
-        )
-        return json.loads(p.stdout)
+        return _capture_debug_agent(exe, name, cfg, proj, home, tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -284,6 +375,181 @@ def test_harness_reaches_the_engine_and_not_the_deployed_config():
 
 
 # --------------------------------------------------------------------------- #
+# 🔴 the flush-race pin — a PIPE-truncating opencode must not be able to make
+# this harness read a partial document
+#
+# The fixture below reproduces the measured defect EXACTLY: full document to a
+# regular file, truncated prefix to a pipe, rc 0 and empty stderr in BOTH cases.
+# It is built from THIS REPO's real bash permission block, not a textbook blob,
+# so the cut lands mid-structure the way the real one does.
+# --------------------------------------------------------------------------- #
+PIPE_CUT = 8192   # the prefix the real binary delivered on 20/20 piped runs
+
+
+def _realistic_debug_dump() -> str:
+    """The REAL `debug agent build --pure` document, re-indented as the CLI emits it.
+
+    Not a hand-written blob: a scanner or a fixture built from a tidy synthetic
+    example is exactly what sails past its own canonical case. This is the
+    engine's own output for the agent these tests actually resolve, so the
+    PIPE_CUT lands mid-structure the way the measured one did (the real cut fell
+    inside a `"pattern"` string, producing "Unterminated string").
+    """
+    return json.dumps(json.loads(engine_agent("build")), indent=2)
+
+
+def _pipe_truncating_opencode(tmp: Path) -> str:
+    """Write a stand-in `opencode` that mimics the flush race, return its path.
+
+    🔴 The executable is written by `testlib.mockbin.write_exec`, which owns the
+    shebang, and the logic sits in a plain .py file it execs. A hand-written
+    `#!/usr/bin/env …` (or any runtime-written shebang) is dead in the nix
+    sandbox — the repo-wide scanner in test_runtime_shebangs.py caught exactly
+    that in the first draft of this fixture, in the tier a per-file dev-host run
+    cannot see.
+    """
+    doc_path = tmp / "dump.json"
+    doc = _realistic_debug_dump()
+    # If the repo's bash block ever shrinks below the cut the fixture would stop
+    # reproducing anything and every assertion below would pass vacuously.
+    assert len(doc.encode()) > PIPE_CUT + 512, (
+        f"the fixture document is only {len(doc.encode())} bytes, which a "
+        f"{PIPE_CUT}-byte cut barely truncates — this fixture can no longer "
+        f"reproduce the race it exists for. Pad it, do not lower PIPE_CUT."
+    )
+    doc_path.write_text(doc)
+
+    # The behaviour, as a plain module — no shebang, never executed directly.
+    logic = tmp / "fake_opencode_logic.py"
+    logic.write_text(
+        "import os, stat, sys\n"
+        f"payload = open({str(doc_path)!r}, 'rb').read()\n"
+        "# The real binary loses the tail only when fd 1 is a FIFO; to a regular\n"
+        "# file it writes everything. Exit 0 and say nothing on stderr either\n"
+        "# way — that silence is the whole reason the bug was hard to see.\n"
+        "if stat.S_ISFIFO(os.fstat(1).st_mode):\n"
+        f"    payload = payload[:{PIPE_CUT}]\n"
+        "os.write(1, payload)\n"
+        "sys.exit(0)\n"
+    )
+    fake = write_exec(tmp / "fake-opencode",
+                      f'exec {sys.executable} {logic} "$@"\n')
+    return str(fake)
+
+
+def test_the_pipe_truncating_fixture_really_truncates():
+    """🔴 NEGATIVE CONTROL on the fixture, reported as a PAIR.
+
+    Before believing the regression pin below, watch the fixture produce the bad
+    case — and confirm it carries the real defect's full signature, because that
+    signature is why nothing upstream catches it: rc 0, empty stderr, non-empty
+    stdout, unparseable JSON. A fixture that failed loudly instead would make the
+    pin below green for the wrong reason.
+    """
+    with tempfile.TemporaryDirectory(prefix="oc-fixture-") as td:
+        tmp = Path(td)
+        fake = _pipe_truncating_opencode(tmp)
+        full = (tmp / "dump.json").read_bytes()
+
+        piped = subprocess.run([fake], capture_output=True, timeout=60)
+        to_file = tmp / "viafile"
+        with open(to_file, "wb") as fh:
+            filed = subprocess.run([fake], stdout=fh, stderr=subprocess.DEVNULL,
+                                   timeout=60)
+        via_file = to_file.read_bytes()
+
+    assert (piped.returncode, len(piped.stderr)) == (0, 0), (
+        "the fixture must reproduce the SILENT shape of the defect — a non-zero "
+        "exit or a stderr message would be caught by the harness's existing "
+        f"asserts, got rc={piped.returncode} stderr={piped.stderr[:200]!r}"
+    )
+    assert len(piped.stdout) == PIPE_CUT < len(full), (
+        f"piped capture returned {len(piped.stdout)} B of a {len(full)} B "
+        f"document; expected exactly {PIPE_CUT}"
+    )
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(piped.stdout)
+    # …and the same fixture through a FILE is whole. Report the pair, never the
+    # truncation alone: "it truncated" and "a file gets everything" are two
+    # claims, and the fix rests on the second.
+    assert filed.returncode == 0 and via_file == full, (
+        f"the fixture must deliver the WHOLE {len(full)} B document to a regular "
+        f"file (got {len(via_file)} B, rc={filed.returncode}) — otherwise it is "
+        f"not modelling the defect, it is just broken."
+    )
+
+
+def test_debug_dump_survives_a_pipe_truncating_opencode():
+    """🔴 THE REGRESSION PIN for the 17 dev-host failures.
+
+    RED before this change (`capture_output=True` -> JSONDecodeError on every
+    call), GREEN after. This exercises the REAL harness function the 19 engine
+    tests go through, so it cannot be satisfied by a comment or a spelling.
+    """
+    with tempfile.TemporaryDirectory(prefix="oc-pin-") as td:
+        tmp = Path(td)
+        fake = _pipe_truncating_opencode(tmp)
+        expected = json.loads((tmp / "dump.json").read_text())
+        got = _run_debug_agent("build", exe=fake)
+
+    assert got == expected, (
+        "the harness did not read the WHOLE document from an opencode that "
+        "truncates on a pipe. That is the flush race: capture stdout to a real "
+        "file, never `capture_output=True` / `subprocess.PIPE`."
+    )
+
+
+def test_this_file_never_pipe_captures_opencode():
+    """The CALL-SITE LEDGER — fails when the set of readers grows OR shrinks.
+
+    The behavioural pin above covers the one helper it calls. This covers the
+    shape that pin structurally cannot see: a SECOND reader added later that
+    pipes. `scripts/browser-bridge/tests/test_browser_agent.py::
+    test_gate_source_has_no_command_substitution_capture` is the same ledger for
+    the browser-agent wrapper — the repo's other `opencode debug` consumer, and
+    the only one that existed when this defect was first diagnosed.
+    """
+    # Parsed with `ast`, NOT grepped. A textual check is satisfied or defeated by
+    # spelling: it counts its own error messages, misses a `capture_output=True`
+    # that sits on a continuation line (which is exactly where the real one was),
+    # and cannot tell code from a docstring.
+    tree = ast.parse(Path(__file__).read_text())
+    calls = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Attribute) and n.func.attr == "run"
+             and isinstance(n.func.value, ast.Name) and n.func.value.id == "subprocess"]
+
+    # Three, and the ledger fails if that GROWS or SHRINKS: `_run_opencode`
+    # (files), plus the fixture's two deliberate calls against the FAKE binary —
+    # one of which pipes on purpose, to prove the fixture reproduces the defect.
+    described = [f"line {n.lineno}: {ast.unparse(n)[:90]}" for n in calls]
+    assert len(calls) == 3, (
+        f"expected exactly 3 `subprocess.run` calls in this file; found "
+        f"{len(calls)}:\n" + "\n".join(f"  {d}" for d in described)
+        + "\n  A new reader of the REAL binary must go through `_run_opencode`, "
+          "which captures to a FILE — see the flush-race block above."
+    )
+
+    for n in calls:
+        kwargs = {kw.arg for kw in n.keywords}
+        target = ast.unparse(n.args[0]) if n.args else ""
+        against_fake = "fake" in target
+        piped = "capture_output" in kwargs or any(
+            ast.unparse(kw.value) == "subprocess.PIPE" for kw in n.keywords)
+        if against_fake:
+            continue          # the fixture may pipe; that IS the negative control
+        assert not piped, (
+            f"line {n.lineno} pipe-captures the REAL opencode "
+            f"({ast.unparse(n)[:120]}). That is the flush race: rc 0, empty "
+            f"stderr, a truncated prefix. Capture to a file via `_run_opencode`."
+        )
+        assert "stdout" in kwargs, (
+            f"line {n.lineno} runs the real opencode without redirecting stdout "
+            f"to a file: {ast.unparse(n)[:120]}"
+        )
+
+
+# --------------------------------------------------------------------------- #
 # 1. 🔴 the version pin
 # --------------------------------------------------------------------------- #
 def test_engine_is_the_version_every_measurement_is_keyed_to():
@@ -300,10 +566,14 @@ def test_engine_is_the_version_every_measurement_is_keyed_to():
         nix profile remove opencode   # then home-manager switch / ship.sh
     """
     exe = _opencode_bin()
-    p = subprocess.run([exe, "--version"], capture_output=True, text=True,
-                       timeout=120)
-    assert p.returncode == 0, f"`opencode --version` exited {p.returncode}"
-    got = p.stdout.strip()
+    # Through `_run_opencode` like everything else. `--version` is ~7 bytes and
+    # would survive a pipe today — but "small enough to be safe" is a claim about
+    # the CURRENT output, and routing it here means this module has exactly ONE
+    # rule about reading opencode's stdout instead of one rule and an exception.
+    with tempfile.TemporaryDirectory(prefix="oc-version-") as td:
+        rc, out, _err = _run_opencode(exe, ["--version"], Path(td))
+    assert rc == 0, f"`opencode --version` exited {rc}"
+    got = out.strip()
     assert got == PINNED_VERSION, (
         f"opencode on PATH is {got!r}, but every 'measured on v{PINNED_VERSION}' "
         f"claim in scripts/opencode/opencode.jsonc, scripts/opencode/README.md "
