@@ -846,10 +846,11 @@ def test_a_MEASURED_death_outranks_an_unknown_state_at_the_pill():
     assert out["count"] == 1, out
     assert out["state"] == "Critical", out
     assert out["unknown"] is False, out
-    # 🔴 `unknown_since` MUST be None: the main loop skips the rising-edge toast
-    # for any payload carrying one, so a non-None here silently re-suppresses
-    # the toast even with the count restored.
-    assert out["unknown_since"] is None, out
+    # 🔴 Suppression is its OWN flag. `unknown_since` is the grace clock and
+    # STAYS SET here (see the clock test below); keying suppression off it is
+    # what forced the first fix to clear the clock.
+    assert out["suppress_toast"] is False, out
+    assert out["unknown_since"] == 1000, out
     assert "h1/claude" in out["detail"] and "UNKNOWN" in out["detail"], out
     blk = telemetry_block.render(out)
     assert (blk["text"], blk["state"]) == ("tlm 1", "Critical"), blk
@@ -861,23 +862,256 @@ def test_a_MEASURED_death_outranks_an_unknown_state_at_the_pill():
                                  now=1000, unknown_states=UNKNOWN_STATES)
     assert quiet["count"] == 0 and quiet["unknown_since"] == 1000, quiet
     assert quiet["state"] == "Warning", quiet
+    assert quiet["suppress_toast"] is True, quiet
 
 
-def test_the_toast_still_FIRES_for_a_death_carried_by_an_unknown_state():
-    """The other half of the regression: the pill is not the only consumer. The
-    rising-edge dunst toast is what names the dead source to a human who is not
-    looking at the bar, and it was suppressed too."""
-    out = poll.parse_telemetry(
-        _verdict(state="presence-stalled", count=1, detail="h1/claude silent"),
+def test_a_count_excursion_does_NOT_restart_the_cannot_tell_grace_clock():
+    """🔴 REGRESSION TEST. `unknown_since` was overloaded as BOTH the grace clock
+    and the toast-suppression flag, and the first version of the count>0 branch
+    resolved that conflict by clearing it — silently RESETTING the clock and
+    re-creating an invisible-green window on a host that had been continuously
+    unjudgeable.
+
+    Measured on one continuous `presence-stalled` episode: with count always 0
+    the `tlm ?` pill appears at t=1800; a single poll carrying count=1 at t=900
+    pushed it out to t=3000, and with the count flapping 1/0/1/0 it was never
+    reached at all. Reachable, not hypothetical — a dead pair's baseline erodes
+    out of the 14-day window mid-stall, so the count really does fall 1 -> 0.
+    """
+    kw = dict(grace=1800, unknown_states=UNKNOWN_STATES)
+    stalled_0 = _verdict(state="presence-stalled", count=0, detail="x")
+    stalled_1 = _verdict(state="presence-stalled", count=1, detail="h1/claude")
+
+    # BASELINE: an uninterrupted episode goes visible exactly at the grace point.
+    p = poll.parse_telemetry(stalled_0, now=0, **kw)
+    assert p["unknown"] is False
+    assert poll.parse_telemetry(stalled_0, prev=p, now=1800, **kw)["unknown"] is True
+
+    # THE EXCURSION: one poll at t=900 carries a measured death, then the count
+    # falls back. The clock must still have started at t=0.
+    p0 = poll.parse_telemetry(stalled_0, now=0, **kw)
+    p900 = poll.parse_telemetry(stalled_1, prev=p0, now=900, **kw)
+    assert p900["unknown_since"] == 0, p900
+    p1800 = poll.parse_telemetry(stalled_0, prev=p900, now=1800, **kw)
+    assert p1800["unknown_since"] == 0, p1800
+    assert p1800["unknown"] is True, \
+        "a count excursion pushed the `tlm ?` pill past its grace point"
+    assert telemetry_block.render(p1800)["text"] == "tlm ?"
+
+    # FLAPPING 1/0/1/0 across the whole grace window must still arrive visible.
+    prev = poll.parse_telemetry(stalled_0, now=0, **kw)
+    for t, verdict in ((450, stalled_1), (900, stalled_0), (1350, stalled_1)):
+        prev = poll.parse_telemetry(verdict, prev=prev, now=t, **kw)
+    final = poll.parse_telemetry(stalled_0, prev=prev, now=1800, **kw)
+    assert final["unknown_since"] == 0 and final["unknown"] is True, final
+
+
+def test_a_junk_count_DEGRADES_it_does_not_raise():
+    """🔴 Raising here is not the safe option: `source()` turns the exception into
+    a `stale` payload, the block renders `stale` as an EMPTY pill, and the
+    swallowed exception means the unit's OnFailure toast does not fire either —
+    so malformed input would look exactly like "all healthy".
+
+    Measured regression: `count="abc"` and `count={}` on an unknown verdict went
+    from a visible `tlm ?` to an invisible block.
+    """
+    for junk in ("abc", {}, [], None, object()):
+        out = poll.parse_telemetry(
+            _verdict(state="presence-stalled", count=junk, detail="x"),
+            now=1000, unknown_states=UNKNOWN_STATES)
+        assert out["count"] == 0, (junk, out)
+        assert out["state"] == "Warning", (junk, out)
+        assert out["suppress_toast"] is True, (junk, out)
+        # ...and the visible pill is still reachable for this episode.
+        later = poll.parse_telemetry(
+            _verdict(state="presence-stalled", count=junk, detail="x"),
+            prev=out, now=1000 + 1800, grace=1800, unknown_states=UNKNOWN_STATES)
+        assert telemetry_block.render(later)["text"] == "tlm ?", (junk, later)
+
+    # The clean branch degrades too, rather than raising into a `stale` marker.
+    ok_junk = poll.parse_telemetry(_verdict(state="ok", count="abc"), now=1000,
+                                   unknown_states=UNKNOWN_STATES)
+    assert ok_junk["count"] == 0 and ok_junk["state"] == "Idle", ok_junk
+    # And `evaluated`/`rows` are on the same footing — they are ints in the
+    # payload contract and a junk verdict must not crash the poll.
+    weird = poll.parse_telemetry({"state": "ok", "count": 0, "evaluated": "x",
+                                  "rows": None}, now=1000,
+                                 unknown_states=UNKNOWN_STATES)
+    assert weird["evaluated"] == 0 and weird["rows"] == 0, weird
+
+
+@pytest.mark.parametrize("state,count,gate_runs,want_toast", [
+    ("ok", 1, True, True),                  # the ordinary dead-source toast
+    ("ok", 0, True, False),                 # gate runs, decides not to fire
+    ("presence-stalled", 1, True, True),    # a MEASURED death, however uncertain
+    ("presence-stalled", 0, False, False),  # SUPPRESSED: must not move the latch
+    ("unreachable", 0, False, False),       # SUPPRESSED
+])
+def test_the_toast_SUPPRESSION_SEAM_decides_correctly(state, count, gate_runs,
+                                                      want_toast):
+    """🔴 THE SEAM ITSELF, not a helper called around it.
+
+    This decision used to be three inline lines in `main()` that NO test reached:
+    `--mock-*` returned before the toast loop and the only test called
+    `evaluate_edge_toast` DIRECTLY, bypassing the gate. Three mutants survived
+    the whole suite there — skip unconditionally, never skip, key the skip on the
+    wrong field — and the first silenced the telemetry toast in EVERY scenario,
+    including a plain `ok` with dead sources, with the suite green.
+
+    So the rule now lives in `toast_suppressed`/`dispatch_edge_toast` and is
+    exercised through `dispatch_edge_toast` for every quadrant.
+
+    🔴 TWO distinct observations, because they are not the same fact and a single
+    one cannot tell the mutants apart: whether the GATE was reached (that is the
+    suppression decision) and whether a TOAST fired (that is the gate's own
+    rising-edge rule). `ok`+count=0 reaches the gate and fires nothing — asserting
+    only "no toast" there would make "skip unconditionally" look correct.
+    """
+    payload = poll.parse_telemetry(
+        _verdict(state=state, count=count, detail="h1/claude silent"),
         now=1000, unknown_states=UNKNOWN_STATES)
+    reached, fired = [], []
+
+    def gate(n, p, s):
+        reached.append(n)
+        return poll.evaluate_edge_toast(
+            n, p, s, fire=lambda *a, **kw: fired.append(a) or True,
+            read=lambda _n: False, write=lambda _n, _l: None)
+
+    poll.dispatch_edge_toast("telemetry", payload, poll._toast_specs(),
+                             evaluate=gate)
+    assert bool(reached) is gate_runs, (payload, reached)
+    assert bool(fired) is want_toast, (payload, fired)
+
+
+def test_a_non_telemetry_source_is_never_suppressed():
+    """The skip is telemetry-specific. A mutant dropping the name check would
+    silence clawgate/mail/alerts too — and their payloads have no
+    `suppress_toast` key at all, so the bug would be invisible in this file
+    unless a non-telemetry source is exercised through the same seam."""
+    assert poll.toast_suppressed("clawgate", {"suppress_toast": True}) is False
+    seen = []
+    poll.dispatch_edge_toast("clawgate", {"count": 3}, poll._toast_specs(),
+                             evaluate=lambda *a: seen.append(a) or (True, True))
+    assert len(seen) == 1, seen
+    # media deliberately has NO spec (its alarm is in-pill) -> nothing dispatched.
+    assert poll.dispatch_edge_toast("media", {"count": 9}, poll._toast_specs(),
+                                    evaluate=lambda *a: 1 / 0) is None
+
+
+def test_the_toast_FIRES_end_to_end_through_the_REAL_cli_path(tmp_path,
+                                                              monkeypatch):
+    """🔴 END-TO-END through `main()`, because every assertion above still stops
+    at a function boundary. `--mock-telemetry` used to `return 0` BEFORE the
+    toast step, so no test could observe the dispatch the live poll performs;
+    the mock path now runs the same dispatch.
+
+    Verdict carries a measured death on an unknown state — the exact payload the
+    regression was about — and the toast must actually fire.
+
+    🔴 `DEVRC_DIR` is pinned at THIS checkout. It defaults to `~/workspace/devrc`,
+    so without this the CLI path resolves `UNKNOWN_STATES` from the BASE CLONE's
+    deadman — a different commit — and `presence-stalled` silently is not an
+    unknown state at all, which sends the whole test down the plain-`ok` branch
+    and makes it pass for the wrong reason. It did exactly that when first
+    written. The assertion below fails loudly if the resolution ever slips again.
+    """
+    monkeypatch.setenv("BAR_STATUS_DIR", str(tmp_path))
+    monkeypatch.setattr(poll, "DEVRC_DIR", str(SCRIPTS.parent))
+    assert "presence-stalled" in poll._deadman_unknown_states(), \
+        "the CLI path is resolving UNKNOWN_STATES from the wrong deadman"
+    monkeypatch.setattr(poll, "signal_bar", lambda _n: None)
     fired = []
-    res = poll.evaluate_edge_toast(
-        "telemetry", out, poll._toast_specs()["telemetry"],
-        fire=lambda *a, **kw: fired.append((a, kw)) or True,
-        read=lambda _n: False, write=lambda _n, _l: None)
-    assert res == (True, True), res
+    monkeypatch.setattr(poll, "fire_toast",
+                        lambda *a, **kw: fired.append(a) or True)
+    vf = tmp_path / "verdict.json"
+    vf.write_text(json.dumps({"state": "presence-stalled", "count": 1,
+                              "evaluated": 9, "rows": 100,
+                              "newest_event_age_minutes": 2,
+                              "detail": "h1/claude silent 54.6h active"}))
+
+    assert poll.main(["--mock-telemetry", str(vf)]) == 0
     assert len(fired) == 1, fired
-    assert "h1/claude" in fired[0][0][2], fired[0]
+    assert "h1/claude" in fired[0][2], fired[0]
+    payload = json.loads((tmp_path / "telemetry.json").read_text())
+    assert (payload["count"], payload["state"]) == (1, "Critical"), payload
+
+    # NEGATIVE CONTROL through the SAME path: an unknown verdict with nothing
+    # measured dead must NOT toast, and must not clear the latch either.
+    fired.clear()
+    vf.write_text(json.dumps({"state": "presence-stalled", "count": 0,
+                              "detail": "nothing measurable"}))
+    assert poll.main(["--mock-telemetry", str(vf)]) == 0
+    assert fired == [], fired
+    assert poll.read_latch("telemetry") is True, \
+        "a blackout zero cleared the rising-edge latch"
+
+
+def test_the_SOURCES_table_is_a_LEDGER_of_every_polled_source():
+    """🔴 A ledger, pinned as a LITERAL, failing when the set GROWS or SHRINKS.
+
+    Hoisting the source table out of `main()` made it testable and also made it
+    deletable: a mutant dropping `telemetry` from it survived the whole suite,
+    and its effect is that the poller silently stops polling telemetry — the pill
+    freezes on its last cache file forever, which is indistinguishable from
+    "nothing has changed".
+
+    The relationships are what make this more than a spelling check: every polled
+    source needs a bar SIGNAL to refresh its block, and every toast spec needs a
+    source to produce the payload it gates on.
+    """
+    names = [n for n, _fn in poll.SOURCES]
+    assert names == ["clawgate", "mail", "alerts", "civitai", "media", "airvpn",
+                     "telemetry"], names
+    assert len(names) == len(set(names)), "a source is polled twice: %s" % names
+    for _n, fn in poll.SOURCES:
+        assert callable(fn)
+    # Every polled source has a refresh signal, and every signal has a poller.
+    assert set(names) == set(poll.SIGNALS), \
+        sorted(set(names) ^ set(poll.SIGNALS))
+    # Every toast spec belongs to something actually polled.
+    assert set(poll._toast_specs()) <= set(names), \
+        sorted(set(poll._toast_specs()) - set(names))
+
+
+def test_the_LIVE_poll_path_dispatches_toasts_too(tmp_path, monkeypatch):
+    """🔴 The live loop is what runs on the workbench every 45s, and it was the
+    one dispatch site no test reached: a mutant deleting its toast dispatch
+    SURVIVED the full suite while the mock path's identical mutant died.
+
+    Both paths now funnel through `_dispatch_all`, and this drives the LIVE one
+    with substituted fetchers so the coverage is not merely inherited.
+    """
+    monkeypatch.setenv("BAR_STATUS_DIR", str(tmp_path))
+    monkeypatch.setattr(poll, "signal_bar", lambda _n: None)
+    fired = []
+    monkeypatch.setattr(poll, "fire_toast",
+                        lambda *a, **kw: fired.append(a) or True)
+    monkeypatch.setattr(poll, "SOURCES", (
+        ("clawgate", lambda: {"count": 2, "state": "Warning",
+                              "detail": "2 task(s) awaiting"}),
+        ("telemetry", lambda: poll.parse_telemetry(
+            {"state": "presence-stalled", "count": 1,
+             "detail": "h1/claude silent"},
+            now=1000, unknown_states=frozenset(UNKNOWN_STATES))),
+    ))
+
+    assert poll.main([]) == 0
+    summaries = sorted(a[1] for a in fired)
+    assert len(fired) == 2, fired
+    assert any("Telemetry" in s for s in summaries), summaries
+    assert any("clawgate" in s for s in summaries), summaries
+
+    # NEGATIVE CONTROL on the same path: a suppressed telemetry payload toasts
+    # nothing, while the unrelated source still does.
+    fired.clear()
+    monkeypatch.setattr(poll, "SOURCES", (
+        ("telemetry", lambda: poll.parse_telemetry(
+            {"state": "unreachable", "count": 0, "detail": "down"},
+            now=1000, unknown_states=frozenset(UNKNOWN_STATES))),
+    ))
+    assert poll.main([]) == 0
+    assert fired == [], fired
 
 
 @pytest.mark.parametrize("state", sorted(UNKNOWN_STATES))

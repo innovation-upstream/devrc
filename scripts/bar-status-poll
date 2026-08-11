@@ -330,6 +330,32 @@ def parse_airvpn(probe) -> dict:
     }
 
 
+def _safe_int(value, default: int = 0) -> int:
+    """`int(value)` with junk mapped to `default`. NEVER raises."""
+    if value is None or isinstance(value, bool):
+        return int(value) if isinstance(value, bool) else default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _verdict_count(v) -> int:
+    """A verdict's `count` as an int; anything unparseable -> 0. Never raises.
+
+    🔴 RAISING HERE IS NOT THE SAFE OPTION, which is why this exists. `source()`
+    converts an exception into a `stale` payload, and the block renders `stale`
+    as an EMPTY pill — so a malformed count would look exactly like "all
+    healthy", and because the exception is swallowed the unit's OnFailure toast
+    does not fire either. Measured: `count="abc"` and `count={}` on an unknown
+    verdict went from a visible `tlm ?` to an invisible block that way.
+    Degrading to 0 keeps an unknown verdict on its visible `tlm ?` path.
+    """
+    if not isinstance(v, dict):
+        return 0
+    return _safe_int(v.get("count"))
+
+
 def parse_telemetry(verdict, prev=None, now=None,
                     grace: int = TELEMETRY_UNKNOWN_GRACE,
                     unknown_states=None) -> dict:
@@ -347,17 +373,27 @@ def parse_telemetry(verdict, prev=None, now=None,
     the host's human timeline is frozen, so its REMAINING sources are
     unjudgeable, but a source that had already blown its budget before the freeze
     was measured against real active buckets and is genuinely dead. Folding that
-    into `tlm ?` with the count zeroed — which is what this function did — turned
-    an actionable, named `tlm 1` plus a dunst toast into an unactionable `tlm ?`
-    with the toast suppressed, i.e. the check got QUIETER in exactly the outage
-    the stall detector was written to catch. The deadman's `detail` names both
-    facts, so nothing is lost by leading with the death.
+    into `tlm ?` with the count zeroed turned an actionable, named `tlm 1` plus a
+    dunst toast into an unactionable `tlm ?` with the toast suppressed, i.e. the
+    check got QUIETER in exactly the outage the stall detector was written to
+    catch. The deadman's `detail` names both facts, so nothing is lost by leading
+    with the death.
 
-    Setting `unknown_since=None` in that case is deliberate and load-bearing: the
-    main loop skips the rising-edge toast for any payload carrying an
-    `unknown_since`, so leaving it set would keep the toast suppressed. Every
-    other unknown state forces count=0 upstream, so this branch is reachable only
-    with a measured death.
+    🔴 THE GRACE CLOCK AND THE TOAST-SUPPRESSION FLAG ARE TWO DIFFERENT FACTS.
+    They were once one field: `unknown_since` was both "when did this cannot-tell
+    episode start" and "should the main loop skip the toast", and the first
+    version of the fourth case resolved that conflict by clearing it — which
+    silently RESET the grace clock. Measured over one continuous
+    `presence-stalled` episode: with count always 0 the `tlm ?` pill appears at
+    t=1800s, but a single poll carrying count=1 at t=900 pushed it out to t=3000
+    — a fresh 30 minutes of EMPTY pill on a host that had been continuously
+    unjudgeable — and with the count flapping 1/0/1/0 the pill was never reached
+    at all. That is reachable, not hypothetical: a dead pair's baseline erodes
+    out of the 14-day window while the stall continues, so the count really does
+    fall 1 -> 0 mid-episode.
+    So `unknown_since` is now set for EVERY unknown verdict regardless of count
+    (the clock runs continuously through a count excursion), and suppression is
+    carried by its own boolean, `suppress_toast`. See `toast_suppressed`.
 
     "Cannot tell" must be distinguishable from "all healthy" — a check whose
     reassuring answer is a zero is exactly the shape that can be wired to
@@ -375,24 +411,18 @@ def parse_telemetry(verdict, prev=None, now=None,
     v = verdict if isinstance(verdict, dict) else {}
     tstate = v.get("state") or "query-failed"
     detail = str(v.get("detail") or "")
+    count = _verdict_count(v)
     out = {
         "telemetry_state": tstate,
-        "evaluated": int(v.get("evaluated") or 0),
-        "rows": int(v.get("rows") or 0),
+        "evaluated": _safe_int(v.get("evaluated")),
+        "rows": _safe_int(v.get("rows")),
         "newest_event_age_minutes": v.get("newest_event_age_minutes"),
+        # Explicit on EVERY path so a consumer never has to distinguish "not
+        # suppressed" from "this poller predates the field".
+        "suppress_toast": False,
     }
-    if tstate in unknown_states and int(v.get("count") or 0) > 0:
-        count = int(v["count"])
-        out.update({
-            "count": count,
-            "state": "Critical",
-            "unknown": False,
-            "unknown_since": None,
-            "detail": "%d dead source(s) AND telemetry health partly UNKNOWN "
-                      "(%s): %s" % (count, tstate, detail),
-        })
-        return out
     if tstate in unknown_states:
+        # The grace clock runs for the whole episode, count excursions included.
         prev_since = None
         if isinstance(prev, dict) and prev.get("telemetry_state") in unknown_states:
             try:
@@ -400,15 +430,27 @@ def parse_telemetry(verdict, prev=None, now=None,
             except (TypeError, ValueError):
                 prev_since = None
         since = prev_since if prev_since is not None else now
-        out.update({
-            "count": 0,
-            "state": "Warning",
-            "unknown": (now - since) >= grace,
-            "unknown_since": since,
-            "detail": "telemetry health UNKNOWN (%s): %s" % (tstate, detail),
-        })
+        if count > 0:
+            out.update({
+                "count": count,
+                "state": "Critical",
+                "unknown": False,
+                "unknown_since": since,
+                "detail": "%d dead source(s) AND telemetry health partly UNKNOWN "
+                          "(%s): %s" % (count, tstate, detail),
+            })
+        else:
+            out.update({
+                "count": 0,
+                "state": "Warning",
+                "unknown": (now - since) >= grace,
+                "unknown_since": since,
+                # A zero that came from a blackout must not clear the latch and
+                # re-toast a still-dead source when the backend returns.
+                "suppress_toast": True,
+                "detail": "telemetry health UNKNOWN (%s): %s" % (tstate, detail),
+            })
         return out
-    count = int(v.get("count") or 0)
     out.update({
         "count": count,
         "state": "Critical" if count else "Idle",
@@ -417,6 +459,46 @@ def parse_telemetry(verdict, prev=None, now=None,
         "detail": detail or ("%d dead source(s)" % count),
     })
     return out
+
+
+def toast_suppressed(name, payload) -> bool:
+    """Should the rising-edge toast be SKIPPED for this source's payload?
+
+    🔴 THE ONE PLACE this rule lives, and it lives in a named function purely so
+    it can be tested. It used to be three inline lines in `main()`, on a path no
+    test reached — `--mock-*` returned before the loop, and the only test called
+    `evaluate_edge_toast` DIRECTLY, bypassing the gate entirely. Three mutants
+    survived the whole suite there, and one of them (skip unconditionally)
+    silenced the telemetry toast in EVERY scenario including a plain `ok` with
+    dead sources, with the suite still green.
+
+    The rule: an unknown telemetry verdict with nothing measured dead carries
+    `suppress_toast`, because its count=0 would clear the rising-edge latch and
+    re-toast a still-dead source when the backend came back. A verdict that DOES
+    carry a measured death is not suppressed, however uncertain the host is.
+    Keyed on `suppress_toast`, never on `unknown_since` — the latter is the grace
+    clock and is now set for both, so keying on it would re-suppress the death.
+    """
+    if name != "telemetry" or not isinstance(payload, dict):
+        return False
+    return bool(payload.get("suppress_toast"))
+
+
+def dispatch_edge_toast(name, payload, specs, evaluate=None):
+    """Spec lookup + suppression + the rising-edge gate, for ONE source.
+
+    The single entry point the live poll and the `--mock-*` path both use, so the
+    mock path exercises the same decision the real one does instead of returning
+    before it. Returns the gate's result, or None when nothing was dispatched.
+    Never raises: a desktop-notify failure must not break or slow the poll.
+    """
+    evaluate = evaluate or evaluate_edge_toast
+    spec = specs.get(name)   # media has no edge-toast spec (alarm is in-pill)
+    if spec is None or toast_suppressed(name, payload):
+        return None
+    with contextlib.suppress(Exception):
+        return evaluate(name, payload, spec)
+    return None
 
 
 def stale(reason: str, err=None) -> dict:
@@ -1060,6 +1142,29 @@ def run_source(name: str, fn) -> dict:
     return payload
 
 
+# The source table, hoisted so it is ONE list rather than a literal buried in
+# `main()` — and so a test can substitute trivial fetchers and drive the LIVE
+# path. A mutant deleting the live loop's toast dispatch survived the entire
+# suite while it was inline and unreachable.
+SOURCES = (("clawgate", fetch_clawgate), ("mail", fetch_mail),
+           ("alerts", fetch_alerts), ("civitai", fetch_civitai),
+           ("media", fetch_media), ("airvpn", fetch_airvpn),
+           ("telemetry", fetch_telemetry))
+
+
+def _dispatch_all(payloads) -> int:
+    """Run the rising-edge toast gate over `(name, payload)` pairs. Returns 0.
+
+    🔴 THE ONE dispatch site. The live poll and every `--mock-*` run funnel
+    through here, so the decision cannot be right in one and wrong in the other,
+    and a single test that drives either one covers both.
+    """
+    specs = _toast_specs()
+    for name, payload in payloads:
+        dispatch_edge_toast(name, payload, specs)
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="i3status-rust bar-status poller")
     ap.add_argument("--mock-clawgate", metavar="FILE",
@@ -1085,52 +1190,49 @@ def main(argv=None) -> int:
                    args.mock_telemetry))
 
     if mocking:
+        mocked = []
         if args.mock_clawgate is not None:
             with open(args.mock_clawgate) as f:
-                run_source("clawgate", lambda: parse_clawgate(json.load(f)))
+                mocked.append(("clawgate", run_source(
+                    "clawgate", lambda: parse_clawgate(json.load(f)))))
         if args.mock_mail is not None:
-            run_source("mail", lambda: parse_mail(args.mock_mail))
+            mocked.append(("mail", run_source(
+                "mail", lambda: parse_mail(args.mock_mail))))
         if args.mock_alerts is not None:
             with open(args.mock_alerts) as f:
-                run_source("alerts", lambda: parse_alerts(json.load(f)))
+                mocked.append(("alerts", run_source(
+                    "alerts", lambda: parse_alerts(json.load(f)))))
         if args.mock_civitai is not None:
             with open(args.mock_civitai) as f:
-                run_source("civitai", lambda: parse_alerts(json.load(f)))
+                mocked.append(("civitai", run_source(
+                    "civitai", lambda: parse_alerts(json.load(f)))))
         if args.mock_media is not None:
             with open(args.mock_media) as f:
-                run_source("media", lambda: parse_media(json.load(f)))
+                mocked.append(("media", run_source(
+                    "media", lambda: parse_media(json.load(f)))))
         if args.mock_airvpn is not None:
             with open(args.mock_airvpn) as f:
-                run_source("airvpn", lambda: parse_airvpn(json.load(f)))
+                mocked.append(("airvpn", run_source(
+                    "airvpn", lambda: parse_airvpn(json.load(f)))))
         if args.mock_telemetry is not None:
             with open(args.mock_telemetry) as f:
                 verdict = json.load(f)
             prev = read_prev_status("telemetry")
-            run_source("telemetry", lambda: parse_telemetry(verdict, prev=prev))
-        return 0
+            mocked.append(("telemetry", run_source(
+                "telemetry", lambda: parse_telemetry(verdict, prev=prev))))
+        # 🔴 The mock path finishes through the SAME function the live poll
+        # does. It used to `return 0` before the toast step, which left the whole
+        # suppression seam unreachable from any test — three mutants in it
+        # survived the full suite, one of them silencing the telemetry toast
+        # entirely. A mock path that skips a decision the real path makes is a
+        # harness that cannot see that decision's bugs.
+        return _dispatch_all(mocked)
 
-    # Live poll: each source is independent + fail-safe. After writing each
-    # source's status the poller evaluates a RISING-EDGE toast (fires once when a
-    # source crosses its baseline; steady state stays silent). The toast step is
-    # wrapped so a desktop-notify failure can never break or slow the poll.
-    specs = _toast_specs()
-    for name, fn in (("clawgate", fetch_clawgate), ("mail", fetch_mail),
-                     ("alerts", fetch_alerts), ("civitai", fetch_civitai),
-                     ("media", fetch_media), ("airvpn", fetch_airvpn),
-                     ("telemetry", fetch_telemetry)):
-        payload = run_source(name, fn)
-        spec = specs.get(name)   # media has no edge-toast spec (alarm is in-pill)
-        # An UNKNOWN telemetry verdict carries count=0, which would clear the
-        # rising-edge latch and re-toast a still-dead source when ClickHouse came
-        # back. Skip it, exactly as evaluate_edge_toast already skips stale
-        # payloads for the other sources: a blackout must never move the latch.
-        if name == "telemetry" and isinstance(payload, dict) \
-                and payload.get("unknown_since") is not None:
-            spec = None
-        if spec is not None:
-            with contextlib.suppress(Exception):
-                evaluate_edge_toast(name, payload, spec)
-    return 0
+    # Live poll: each source is independent + fail-safe. Each source's status is
+    # written, then the SAME dispatch the mock path uses evaluates a RISING-EDGE
+    # toast (fires once when a source crosses its baseline; steady state stays
+    # silent).
+    return _dispatch_all([(name, run_source(name, fn)) for name, fn in SOURCES])
 
 
 if __name__ == "__main__":

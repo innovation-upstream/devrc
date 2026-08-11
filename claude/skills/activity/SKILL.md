@@ -222,7 +222,7 @@ Creds come from `~/.config/activity-collector/env` (the collector's own file) un
   name in `detail`; only the pairs whose silence is 0-by-construction become un-evaluated. The
   bar follows: an unknown state carrying `count > 0` renders **`tlm N` Critical with the toast
   firing**, not `tlm ?`. A per-*host* discard here cost a measured `workbench/claude` death of
-  54.8 active hours against a 2.0h budget.
+  54.6 active hours against a 2.0h budget.
 - **Two things that deliberately do NOT stall:** a host **switched off** (both its timestamps
   freeze, so the gap holds rather than growing — note a host powered off while *already* past
   the threshold stays stalled for the rest of the window), and a host that has **never** emitted

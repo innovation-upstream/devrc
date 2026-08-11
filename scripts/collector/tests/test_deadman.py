@@ -261,6 +261,38 @@ def test_control_pair_same_path_zero_and_nonzero():
     assert (positive["count"], clean["count"]) == (1, 0)
 
 
+def test_the_DEATH_boundary_is_exclusive_spending_the_budget_is_not_dying():
+    """🔴 The module's CORE predicate, `silent > budget`, pinned at its boundary.
+
+    This was unpinned: a `>` -> `>=` mutant survived the whole suite at every
+    commit on this branch, and it is not equivalent — it converts "has spent
+    exactly its whole measured budget" into a death, which on a floor-pinned
+    source is a routine two-hour lull. Flagged as pre-existing during review and
+    taken here because it is one assertion and it guards the verdict everything
+    else in this file is about.
+    """
+    # healthy_table fills every bucket, so p99 gap is 0 and the budget is the
+    # floor: 24 active buckets. Spend exactly that.
+    exact = [r for r in healthy_table(NOW_BUCKET)
+             if not (r[1] == "keys" and r[2] > NOW_BUCKET - D.FLOOR_BUCKETS * B)]
+    v = D.evaluate(exact, now=NOW_BUCKET + 60)
+    rec = _pair(v, "keys")
+    assert rec["budget_buckets"] == D.FLOOR_BUCKETS, rec
+    assert rec["silent_active_buckets"] == D.FLOOR_BUCKETS, rec
+    assert rec["dead"] is False, "spending exactly the budget is not dying"
+    assert v["count"] == 0
+
+    # One bucket more IS a death — the pair that proves the boundary is reachable
+    # rather than merely asserted.
+    over = [r for r in healthy_table(NOW_BUCKET)
+            if not (r[1] == "keys"
+                    and r[2] > NOW_BUCKET - (D.FLOOR_BUCKETS + 1) * B)]
+    v2 = D.evaluate(over, now=NOW_BUCKET + 60)
+    assert _pair(v2, "keys")["silent_active_buckets"] == D.FLOOR_BUCKETS + 1
+    assert _pair(v2, "keys")["dead"] is True
+    assert v2["count"] == 1
+
+
 def test_a_brief_lull_under_the_floor_is_not_dead():
     """ALERT-FATIGUE GUARD: 10 active buckets (50 min) of silence on a
     continuous source must stay quiet — the floor is 24."""
@@ -1125,10 +1157,13 @@ def test_an_ordinary_away_from_desk_stretch_does_NOT_stall():
 def test_a_host_that_is_simply_SWITCHED_OFF_does_not_stall():
     """🔴 Why the predicate compares the host's OWN two timestamps and not `now`.
 
-    A laptop that is shut emits nothing at all, so its newest row and its newest
-    presence row move together no matter how long it stays off. That is the
-    ordinary blackout blind spot, not a stall, and it must not alarm — otherwise
-    the check screams every time the laptop is closed for a weekend.
+    A laptop that is shut emits nothing at all, so BOTH timestamps stop advancing
+    and the gap FREEZES at whatever it was at power-off — it does not keep
+    growing. (Not "the two timestamps move together": that phrasing was wrong and
+    is retracted; measured on the live table, the workbench froze at a 38.75h gap
+    and held that exact value for the 4.6h it stayed down.) Here the gap froze
+    small, so the host stays quiet however long it is off, which is the point —
+    `now - last_presence` would scream every weekend.
     """
     rows = workday_table(NOW_BUCKET, days=6, awake_h=10)
     last = max(b for (_h, _s, b, *_r) in rows)
@@ -1136,6 +1171,30 @@ def test_a_host_that_is_simply_SWITCHED_OFF_does_not_stall():
     assert v["presence_stalled"] == []
     assert v["state"] == D.STATE_OK
     assert v["newest_event_age_minutes"] > 29 * 24 * 60
+
+
+def test_a_host_powered_off_ALREADY_past_the_threshold_stays_stalled():
+    """The other side of the freeze, and the honest cost of it: a host that goes
+    down while its gap is ALREADY over the threshold keeps that gap forever, so
+    it stays `presence-stalled` for the rest of the window rather than ageing
+    out. That is not a false positive — it really was unjudgeable when it went
+    down, and nothing since has made it judgeable — but it does mean the
+    condition can outlive the machine, and the docstring says so.
+
+    🔴 CHARACTERISATION, not regression coverage: this passes at the previous
+    commit too. It exists because the consequence was newly *stated* and an
+    unasserted claim in a docstring is the thing this repo keeps being bitten by,
+    not because the behaviour changed.
+    """
+    rows, now = _crashed_desk(agent_days=4)          # 96h gap at power-off
+    v_at_death = D.evaluate(rows, now=now + 60)
+    assert v_at_death["presence_stalled"][0]["stall_hours"] == 96.0
+
+    # 30 days later, not one further row from the host.
+    v_later = D.evaluate(rows, now=now + 30 * 86400)
+    assert v_later["state"] == D.STATE_PRESENCE_STALLED
+    assert v_later["presence_stalled"][0]["stall_hours"] == 96.0, \
+        "the frozen gap drifted — the predicate is reading a clock again"
 
 
 def test_a_host_with_NO_presence_rows_is_skipped_not_alarmed():

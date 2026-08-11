@@ -662,14 +662,12 @@ def evaluate(rows, now=None, *, bucket_seconds: int = BUCKET_SECONDS,
     stall_seconds = float(stall_hours) * 3600.0
     stalled = []
     no_presence_hosts = set()
-    last_presence_by_host = {}
     for host, last_event in sorted(last_event_by_host.items()):
         act = active_by_host.get(host)
         if not act:
             no_presence_hosts.add(host)
             continue
         last_presence = max(act)
-        last_presence_by_host[host] = last_presence
         if last_event - last_presence > stall_seconds:
             stalled.append({
                 "host": host,
@@ -765,15 +763,20 @@ def evaluate(rows, now=None, *, bucket_seconds: int = BUCKET_SECONDS,
         "newest_event_age_minutes": max(0, (now - newest) // 60),
     }
     if stalled:
-        # 🔴 A stalled host WINS over both `ok` and `no-data`, and it wins even
-        # when another host has a real dead pair. `dead`/`count` stay populated
-        # and the detail names both, but the STATE says "cannot tell" — because
-        # the alternative is a verdict that reads healthy for a host whose every
-        # source is unjudgeable. That does cost specificity: the bar renders any
-        # unknown state as `tlm ?` rather than `tlm N`, so a stall on one host
-        # masks the other host's count on the pill. Measured on 14 days of real
-        # data this predicate fires ZERO times (see PRESENCE_STALL_HOURS), so the
-        # masking is a rare-case trade, taken deliberately.
+        # 🔴 A stalled host WINS over both `ok` and `no-data` for the STATE, and
+        # it wins even when a real dead pair is present — because the alternative
+        # is a verdict that reads healthy for a host whose remaining sources are
+        # unjudgeable. It does NOT win over the death itself: `dead` and `count`
+        # stay populated and `describe_stalled` puts the dead pair's NAME first.
+        #
+        # The bar follows suit rather than flattening this: an unknown state
+        # carrying count>0 renders `tlm N` Critical with the toast firing, and
+        # only a count of 0 renders `tlm ?` (bar-status-poll: parse_telemetry,
+        # toast_suppressed). An earlier version of this comment claimed the bar
+        # masked the count here — it did, and that was the regression this
+        # sentence now documents as CLOSED. Do not "re-fix" the trade.
+        # Measured on 14 days of real data this predicate fires ZERO times (see
+        # PRESENCE_STALL_HOURS).
         return dict(base, state=STATE_PRESENCE_STALLED,
                     detail=describe_stalled(stalled, dead, len(evaluated)))
     if not evaluated:
