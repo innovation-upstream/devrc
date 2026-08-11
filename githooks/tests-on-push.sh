@@ -164,6 +164,12 @@ if [ "$prep_rc" -ne 0 ]; then
 fi
 
 # --- Run the suite (this env is now cached; a failure here is a REAL failure) -
+# 🔴 NOTHING may run between this command and `run_rc=$?`. Not an echo, not a
+# `| tail`, not a `tee` — a trailing command's status replaces the runner's, and
+# that is the exact mechanism that had four agents reporting `exit 0` over
+# `RESULT: FAIL` on 2026-08-11. The runner also prints its own status in its
+# verdict line now (`RESULT: FAIL (exit=1)`), so a reader who only has the
+# output still gets the truth; see scripts/gate.sh.
 echo "pre-push: running devrc test suite (mode=$MODE)…" >&2
 nix-shell "${TOOL_ENV[@]}" --run "bash '$RUNNER' --set all '$REPO_ROOT'"
 run_rc=$?
