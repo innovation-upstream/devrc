@@ -18,6 +18,7 @@
       "Bash(EOF)",
       "Bash(git commit -m \"$\\(cat <<''EOF''\nfix: something\n\n- a bullet\nEOF\n\\)\")",
       "Bash(curl -k -s -u fixtureuser:fixturepass https://registry.example.invalid/v2/thing/manifests/latest)",
+      "Bash(curl -sSu fixtureuser:fixturepass https://registry.example.invalid/v2/_catalog)",
       "Bash('s|</Config>|  <Username>fixtureuser</Username>\\n  <Password>fixturepass</Password>\\n</Config>|' )",
       "mcp__context7__query-docs"
     ],

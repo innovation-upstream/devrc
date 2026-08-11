@@ -81,10 +81,44 @@ YAML_KEY = re.compile(r"^Bash\([A-Za-z_][A-Za-z0-9_./-]*:(\s+[^)]*)?\)$")
 
 # A credential captured inline. Two shapes seen in the wild: curl's `-u user:pass`
 # and a config-file password element carried through a `sed` expression.
-CREDENTIAL = re.compile(
-    r"-u\s+[^\s:)]+:[^\s)]+"
-    r"|<[Pp]assword>[^<]*</[Pp]assword>"
+#
+# 🔴 THE FLAG IS NOT ALWAYS SPELLED `-u`. An earlier version of this pattern
+# required a literal `-u` followed by whitespace, and therefore MISSED
+# `curl -su admin:… `, `curl -sSu admin:… ` and `curl --user admin:… ` -- all
+# ordinary curl, and all exactly what a permission prompt for a real command
+# would show. Bundling short options is the common form, so the miss was in the
+# most likely shape, in the one class where a miss actually costs something.
+# Hence `-{1,2}[A-Za-z]*u(?:ser)?`: any short-flag bundle ending in `u`, or the
+# long `--user`.
+_CREDENTIAL_FLAG = re.compile(
+    r"""(?<![\w-])              # start of a real token, not mid-word
+        -{1,2}[A-Za-z]*u(?:ser)?  # -u | -su | -sSu | -Lu | --user
+        [=\s]+['"]?
+        (?P<cred>[^\s):'"]+:[^\s)'"]+)
+    """,
+    re.VERBOSE,
 )
+
+# ...but `-u <uid>:<gid>` is NOT a credential. `docker run -u 1000:1000` is a
+# perfectly ordinary rule, and flagging it would be the expensive kind of false
+# positive: it deletes a working permission. A purely numeric pair is the only
+# carve-out -- `-u admin:1234` still counts, because the USER half is what makes
+# it a login.
+_UID_GID = re.compile(r"^\d+:\d+$")
+
+# A password carried through a config-file edit (seen via a `sed` expression).
+_PASSWORD_ELEMENT = re.compile(r"<[Pp]assword>[^<]*</[Pp]assword>")
+
+
+def _credential_matches(entry: str) -> list[re.Match]:
+    """Every inline-credential match in `entry`, minus the uid:gid carve-out."""
+    out = [m for m in _PASSWORD_ELEMENT.finditer(entry)]
+    out += [
+        m
+        for m in _CREDENTIAL_FLAG.finditer(entry)
+        if not _UID_GID.match(m.group("cred"))
+    ]
+    return out
 
 # A heredoc terminator that got its own rule. Matched as an exact literal rather
 # than a pattern: `EOF` is a plausible substring of a real command, so anything
@@ -101,7 +135,7 @@ def classify(entry: str) -> str | None:
     """
     if "\n" in entry or "\r" in entry:
         return "multi-line entry (a captured heredoc/command body)"
-    if CREDENTIAL.search(entry):
+    if _credential_matches(entry):
         return "credential-bearing entry"
     if YAML_KEY.match(entry):
         return "YAML manifest fragment"
@@ -125,8 +159,14 @@ def _findings(entries) -> list[tuple[str, str]]:
 
 
 def _redact(entry: str) -> str:
-    """Never echo a captured secret into test output or CI logs."""
-    entry = CREDENTIAL.sub("<REDACTED-CREDENTIAL>", entry)
+    """Never echo a captured secret into test output or CI logs.
+
+    Redacts by SPAN rather than by re-running a `sub` with the same pattern, so
+    the uid:gid carve-out cannot cause a real credential to be printed: whatever
+    `_credential_matches` decided was a credential is exactly what gets masked.
+    """
+    for m in sorted(_credential_matches(entry), key=lambda m: m.start(), reverse=True):
+        entry = entry[: m.start()] + "<REDACTED-CREDENTIAL>" + entry[m.end() :]
     entry = entry.replace("\n", "\\n").replace("\r", "\\r")
     return entry[:120] + ("..." if len(entry) > 120 else "")
 
@@ -192,9 +232,9 @@ def test_detects_every_junk_class_in_the_fixture():
         "YAML manifest fragment",
         "heredoc terminator",
     }, f"detector did not report every junk class; got {sorted(classes)}"
-    # 8 YAML keys + 1 terminator + 1 multi-line + 2 credential-bearing.
-    assert len(findings) == 12, (
-        f"expected 12 junk entries in the fixture, got {len(findings)}: "
+    # 8 YAML keys + 1 terminator + 1 multi-line + 3 credential-bearing.
+    assert len(findings) == 13, (
+        f"expected 13 junk entries in the fixture, got {len(findings)}: "
         f"{[_redact(e) for _, e in findings]}"
     )
 
@@ -208,17 +248,83 @@ def test_accepts_the_real_shapes_of_a_legitimate_allow_list():
     permissions, which is far worse than leaving noise in place.
     """
     findings = _findings(_allow_entries(FIXTURES / "settings_clean.json"))
-    assert not findings, (
+    # Redacted before the assert, for the same reason as the live check below.
+    redacted = [f"[{cls}] {_redact(e)}" for cls, e in findings]
+    assert not redacted, (
         "FALSE POSITIVE -- these are legitimate permission rules:\n"
-        + "\n".join(f"  [{cls}] {_redact(e)}" for cls, e in findings)
+        + "\n".join("  " + r for r in redacted)
     )
 
 
+def test_credential_detected_across_curl_flag_spellings():
+    """REGRESSION. The credential class must not be keyed to one spelling of `-u`.
+
+    Found by an independent mutation sweep built differently from the fixtures
+    above: the original pattern required a literal `-u` + whitespace, so every
+    BUNDLED short-flag form walked straight past it. `curl -sSu user:pass` is not
+    an exotic invocation -- it is the form most people actually type.
+
+    Expectations are literal, written from what curl accepts, NOT derived from
+    the regex they test.
+    """
+    for cmd in (
+        "curl -u admin:s3cret https://registry.example.invalid/v2/",
+        "curl -su admin:s3cret https://registry.example.invalid/v2/",
+        "curl -sSu admin:s3cret https://registry.example.invalid/v2/",
+        "curl -k -s -u admin:s3cret https://registry.example.invalid/v2/",
+        "curl --user admin:s3cret https://registry.example.invalid/v2/",
+        'curl -u "admin:s3cret" https://registry.example.invalid/v2/',
+    ):
+        entry = f"Bash({cmd})"
+        assert classify(entry) == "credential-bearing entry", (
+            f"MISSED an inline credential: {cmd}"
+        )
+        assert "s3cret" not in _redact(entry), f"secret leaked into output: {cmd}"
+
+
+def test_uid_gid_pair_is_not_treated_as_a_credential():
+    """The other direction, and the more expensive one to get wrong.
+
+    `docker run -u 1000:1000` is a real rule. Flagging it would tell a maintainer
+    to delete a working permission and rotate a credential that does not exist.
+    A purely numeric pair is the carve-out; a named user is still a credential.
+    """
+    for cmd in (
+        "docker run -u 1000:1000 alpine:*",
+        "docker run --user 1000:1000 alpine:*",
+        "podman run -u 0:0 alpine:*",
+    ):
+        assert classify(f"Bash({cmd})") is None, f"FALSE POSITIVE on a uid:gid: {cmd}"
+    # ...but the carve-out must not become a bypass.
+    assert classify("Bash(curl -u admin:1234 https://x.example.invalid/)") == (
+        "credential-bearing entry"
+    ), "a named user with a numeric password is still a credential"
+
+
 def test_credential_findings_are_redacted_in_output():
-    """The failure message must not republish the secret it is complaining about."""
+    """The failure message must not republish the secret it is complaining about.
+
+    REGRESSION, and it covers BOTH output surfaces, because a sweep found the
+    second one leaking while the first was clean:
+
+      1. `_playbook(...)` -- the human-readable message.
+      2. the value the ASSERTION binds. pytest prints the repr of an assert's
+         operand, so `assert not findings` would dump the raw entry (secret and
+         all) into the CI log directly underneath a playbook line that says
+         `<REDACTED-CREDENTIAL>`. Both call sites bind a redacted list instead.
+    """
     entry = "Bash(curl -s -u someuser:somesecret https://example.invalid/v2/)"
     assert classify(entry) == "credential-bearing entry"
-    assert "somesecret" not in _playbook([(classify(entry), entry)])
+
+    findings = [(classify(entry), entry)]
+    assert "somesecret" not in _playbook(findings)
+
+    # the exact expression each assert binds
+    redacted = [f"[{cls}] {_redact(e)}" for cls, e in findings]
+    assert "somesecret" not in repr(redacted), (
+        "the assertion operand would leak the credential into pytest's output"
+    )
+    assert "<REDACTED-CREDENTIAL>" in repr(redacted)
 
 
 # --- the live check ----------------------------------------------------------
@@ -246,7 +352,20 @@ def test_live_settings_allow_has_no_captured_junk():
         ) from None
 
     findings = _findings(entries)
-    assert not findings, (
+    # 🔴 Assert on the REDACTED list, never on `findings` itself.
+    #
+    # pytest rewrites `assert not findings` and prints the repr of the operand --
+    # so asserting on the raw list republishes the very credential this module
+    # redacts, right past `_playbook`, into the CI log. MEASURED: a sweep with a
+    # bundled-flag credential mutant found the plaintext password in pytest's
+    # output while the playbook line above it read `<REDACTED-CREDENTIAL>`.
+    # Binding the redacted strings first makes the introspected operand safe.
+    #
+    # NB: deliberately no example password in this comment -- a literal here
+    # shows up in pytest's echoed source and defeats any leak check grepping
+    # the run output.
+    redacted = [f"[{cls}] {_redact(e)}" for cls, e in findings]
+    assert not redacted, (
         f"\n\n{LIVE_SETTINGS} has captured junk in permissions.allow.\n"
         f"  entries: {len(entries)}\n"
         f"{_playbook(findings)}"
