@@ -1,6 +1,6 @@
 ---
 name: activity
-description: Operate the personal activity-telemetry pipeline — 9 sources (zsh, tmux, X11 keylogger, browser, Claude Code sessions, i3 window/workspace focus, opencode, browser-bridge, tool invocations) → per-host collector → homelab ClickHouse (activity.events) → Grafana "Activity & Productivity" dashboard + validation harness + a per-host/per-source deadman check. Status, query the data, troubleshoot a stalled source, find out whether a source has silently DIED, deploy a change, run validation. Use when the user mentions activity tracking, the keylogger, "where my time goes", the activity dashboard, activity.events, the collector, a dead/stale telemetry source, the `tlm` bar pill, or productivity mining of their own behaviour.
+description: "Operate the personal activity-telemetry pipeline: 9 sources -> per-host collector -> homelab ClickHouse activity.events -> Grafana + a per-source deadman. Query the data, revive a stalled or silently DEAD source, deploy, validate. Use for: activity tracking, the keylogger, \"where my time goes\", the activity dashboard, activity.events, the collector, a stale telemetry source, the `tlm` bar pill."
 ---
 
 # activity-telemetry operations

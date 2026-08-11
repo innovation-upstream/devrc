@@ -1,6 +1,6 @@
 ---
 name: adoption-scan
-description: "Show which shipped 'gametape' productivity tools are actually USED and YIELDING results vs sitting idle/DEAD — deterministic adoption + impact report over activity.events (tool-invocation events + opt-in slash commands + the drafter friction trend). Use for 'is anyone using X', 'which tools are dead', 'did the tool catch anything', or auditing whether a shipped tool stuck."
+description: "Report which shipped productivity tools are actually USED and YIELDING results versus idle or DEAD — a deterministic adoption + impact report over activity.events. Use for \"is anyone using X\", \"which tools are dead\", \"did the tool catch anything\", or auditing whether a shipped tool stuck."
 argument-hint: "[--days N] [--insight-days N] [--dead-days N] [--host H] [--json] — optional; defaults to --days 14 --insight-days 30"
 allowed-tools: Bash
 ---

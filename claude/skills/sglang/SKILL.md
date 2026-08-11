@@ -1,29 +1,23 @@
 ---
 name: sglang
-description: "Manage SGLang inference server on workbench cluster: swap models, check status, port-forward, scale, view logs"
+description: "Manage the SGLang inference server on the workbench cluster (ns promptver): swap the served model, check pod/model/GPU health, port-forward, scale up/down, read logs, diagnose OOM or GPU contention with ComfyUI. Use for: SGLang, sglang-server, changing the served model, the workbench inference server, GPU contention on the workbench node."
+argument-hint: "[status | model <hf-model> | port-forward | logs [--tail N] | restart | up | down | gpu] — defaults to status"
+allowed-tools: Bash, Read, Edit
 ---
 
-# /sglang - SGLang Server Management
+# sglang — SGLang server management
 
-## Triggers
-- Changing the served model on SGLang
-- Checking SGLang server status or health
-- Setting up port-forward for local access
-- Viewing server logs or GPU utilization
-- Scaling SGLang up/down (GPU contention with ComfyUI/Ollama)
-- Troubleshooting OOM or scheduling issues
+Action comes from `$ARGUMENTS` (default `status`).
 
-## Usage
-```
-/sglang                           Show status (pod, model, GPU, health)
-/sglang model <model>             Change served model (e.g. hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4)
-/sglang port-forward              Start port-forward (localhost:30000 -> svc:80)
-/sglang logs [--tail N]           View server logs
-/sglang restart                   Restart the pod (re-downloads model if changed)
-/sglang up                        Scale to 1 replica (frees GPU from ComfyUI if needed)
-/sglang down                      Scale to 0 replicas
-/sglang gpu                       Show GPU allocation across workbench cluster
-```
+| Action | Does |
+|---|---|
+| `status` | pod, served model, GPU, health |
+| `model <model>` | change the served model (e.g. `hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4`) and apply |
+| `port-forward` | localhost:30000 → svc:80 |
+| `logs [--tail N]` | server logs |
+| `restart` | restart the pod (re-downloads the model if changed) |
+| `up` / `down` | scale to 1 / 0 replicas (frees the GPU for ComfyUI) |
+| `gpu` | GPU allocation across the workbench cluster |
 
 ## Infrastructure
 
@@ -195,24 +189,13 @@ nvidia-smi
 ## Multi-Cluster (Homelab as Second Backend)
 
 The homelab cluster has its own SGLang server at `sglang.homelab.lan` (exposed via Traefik IngressRoute).
-It normally serves `Qwen/Qwen3-1.7B` for promptver, but can be toggled to match the workbench model for simulation load balancing.
+It normally serves `Qwen/Qwen3-1.7B` for promptver, and can be pointed at the workbench model to load-balance simulation traffic across both backends.
 
-### Toggle Script
-```bash
-# In wth-is-happening repo
-./scripts/toggle-homelab-sglang.sh sim        # Switch homelab to match workbench model
-./scripts/toggle-homelab-sglang.sh promptver   # Restore to Qwen3-1.7B
-./scripts/toggle-homelab-sglang.sh status      # Show current state
-```
-
-### Running with Both Backends
-```bash
-# Set SGLANG_API_BASE_2 to enable round-robin across both SGLang servers
-DSPY_MODEL=openai/<model> SGLANG_API_BASE_2=http://sglang.homelab.lan \
-  .venv/bin/python simulation.py -s office_worker
-```
-
-When `SGLANG_API_BASE_2` is set, simulation.py wraps both endpoints in a `RoundRobinLM` that cycles requests across them. When unset, behavior is identical to single-backend.
+⚠ **There is no toggle script.** Earlier revisions of this doc pointed at
+`./scripts/toggle-homelab-sglang.sh` in a `wth-is-happening` repo — neither the script nor
+the repo exists on this host or in `homelab-talos` (checked 2026-08-10). To change the
+homelab model, edit the deployment below (or `kubectl patch` it) the same way you would the
+workbench one, and remember Flux **does** reconcile the homelab copy.
 
 ### Homelab Infrastructure
 - **Kubeconfig**: `/home/zach/workspace/homelab-talos/homelab-kubeconfig`
@@ -222,9 +205,9 @@ When `SGLANG_API_BASE_2` is set, simulation.py wraps both endpoints in a `RoundR
 - **Health**: `curl http://sglang.homelab.lan/health`
 
 ### Important
-- `sim` mode is ephemeral (kubectl patch, not committed). Flux reconcile restores promptver model automatically.
+- A `kubectl patch` on the homelab deployment is **ephemeral** — Flux reconciles it back to the
+  committed promptver model. Commit the change in `homelab-talos` if it should stick.
 - Both servers must serve the **same model** for round-robin to produce consistent results.
-- The toggle script reads the workbench deployment to determine which model to mirror.
 
 ## Boundaries
 

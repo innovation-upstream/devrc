@@ -4,7 +4,7 @@
 # WHY THIS EXISTS
 # ---------------
 # `~/.claude/analyze-service-index/` is the write-back store of the
-# `/analyze-service` slash command (claude/commands/analyze-service.md). It holds
+# `/analyze-service` skill (claude/skills/analyze-service/SKILL.md). It holds
 # curated, hand-confirmed recon nuance — gotchas, incident tie-ins, pointers —
 # one file per service under a per-repo scope directory. Measured 2026-08-06 on
 # the workbench: 20 files, 56,862 bytes, mtimes running through that day. It had
@@ -16,7 +16,7 @@
 # The store is written by an agent's Write tool mid-recon, so no git operation
 # happens naturally. The obvious alternative — appending "then commit" to the
 # write-back protocol — is the exact mechanism MEASURED to fail here: see
-# claude/skills/close-the-loop/STATE.md, where opt-in prose steps did not stick
+# claudedocs/close-the-loop/STATE.md, where opt-in prose steps did not stick
 # and the response was to move to autonomous loops. A backup that depends on an
 # agent remembering is not a backup. PRINCIPLES.md: prefer the deterministic fix.
 #

@@ -1,6 +1,6 @@
 ---
 name: tekton
-description: Operate the homelab Tekton CI/CD platform. Tekton Operator + Pipelines/Triggers/Dashboard on the homelab cluster, the public GitHub webhook (tekton-webhook.zacx.dev → el-github-listener), the naida-ux-audit auto-detection pipeline (push→main → walk → push to auditloop → regression gate → commit status), the **clawgate-ci** pipeline (the repo's real pre-merge gate now that GitHub Actions is billing-blocked), the read-only Dashboard, adding a new pipeline/repo. Use when the user mentions Tekton, the homelab CI platform, the ux-audit auto-detection pipeline, clawgate-ci, the Tekton webhook/dashboard/EventListener, adding a Tekton pipeline, a trigger that did not fire, or the hostNetwork gateway host-port collision. Cross-refs the auditloop + ux-audit-loops skills.
+description: "Operate the homelab Tekton CI/CD platform — Pipelines/Triggers/Dashboard, the GitHub webhook (tekton-webhook.zacx.dev), the naida-ux-audit pipeline, and clawgate-ci (the real pre-merge gate). Use for: Tekton, the homelab CI platform, clawgate-ci, the Tekton webhook/dashboard/EventListener, adding a pipeline, a trigger that did not fire, the hostNetwork host-port collision."
 ---
 
 # Tekton — homelab CI/CD platform

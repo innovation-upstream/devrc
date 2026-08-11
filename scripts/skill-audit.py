@@ -438,8 +438,14 @@ def render(audits, show_all, n_sections, n_detail, out=sys.stdout):
             p(f"  {a['name']}: " + "; ".join(bits))
         if a["relative_refs"] and not a["abs_ref_base"]:
             p(f"  {a['name']}: {a['relative_refs']} RELATIVE reference path(s) and no absolute "
-              f"base stated — fine for a repo-local skill, but a devrc skill symlinked into "
-              f"~/.claude/skills/ gets only SKILL.md, so relative paths do not resolve there.")
+              f"base stated. Usually fine: `home.file.\".claude/skills\"` maps devrc/claude/skills "
+              f"with `recursive = true`, so `reference/` DOES ship to "
+              f"~/.claude/skills/<name>/reference/ (verified on activity, clawgate, initiatives, "
+              f"mailbox, tekton, auditloop, bar, devrc-dx, i3). It does NOT for the "
+              f"mkOutOfStoreSymlink exceptions — `browser` (scripts/browser-bridge/) and "
+              f"`dl-router` (scripts/dl-router/) link only SKILL.md plus their CLI, so THOSE "
+              f"cores must use repo-absolute paths. State the absolute source alongside the "
+              f"deployed path either way, so a reader can find the file to edit.")
     if not any_ref_issue:
         n_refd = sum(len(a["refs"]) for a in audits)
         if n_refd:

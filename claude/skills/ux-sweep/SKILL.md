@@ -1,11 +1,11 @@
 ---
-name: ux-audit
-description: "Dispatch a subagent to click through an app/flow with Playwright, screenshot every view, and evaluate the UX from a non-technical, easily-deterred user's perspective (broken/missing, friction, confusion, overwhelm, can-it-be-simpler). Use to sanity-check a UI before shipping or after a change."
+name: ux-sweep
+description: "One-off first-impression UX sweep of ANY app or flow: a subagent clicks through it with Playwright, screenshots every view at 5 breakpoints, and judges it as a non-technical, easily-deterred user would. Use to sanity-check a UI before shipping or after a change, or for \"click through X and evaluate the UX\". Re-runnable naida/vetr harnesses -> `ux-audit-loops`."
 argument-hint: "<app/flow> [url] — e.g. 'the vet signup and onboarding flow', 'the admin dashboard http://localhost:3000'"
 allowed-tools: Bash, Read, Agent
 ---
 
-# /ux-audit — first-impression UX sweep
+# ux-sweep — first-impression UX sweep
 
 Goal: kill the repeatedly hand-typed "dispatch a subagent to use playwright to click through … and evaluate" ritual. The lens is a **non-technical, easily-deterred user** — not a developer.
 
@@ -46,4 +46,6 @@ A prioritized report (worst-first), each finding with the **view/screenshot**, w
 
 End with the **top 3 changes** that would most improve a non-technical user's first run. No marketing language; report what you actually saw, and flag anything you couldn't reach.
 
-Pair: `/verify` (does a specific fix work), `/audit-pr` (code-level review before merge).
+Pair: the `verify-agent` skill (is an agent's "done" real), the `audit-pr` skill (code-level review
+before merge), `ux-audit-loops` (the re-runnable naida/vetr harnesses) and `auditloop` (the hosted
+crawler that trends findings over time).

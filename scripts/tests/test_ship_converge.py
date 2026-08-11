@@ -433,7 +433,7 @@ def test_refuses_conflicted_mid_merge_tree_at_target(repo):
     short-circuited and nothing in the merge path runs — yet MERGE_HEAD and
     unmerged entries are present. `home-manager switch --flake` builds from the
     WORKING TREE, not the commit, so conflict markers in any managed non-nix
-    file (claude/RULES.md, claude/commands/*, hooks, scripts/*) would be
+    file (claude/RULES.md, claude/skills/**, hooks, scripts/*) would be
     DEPLOYED TO BOTH HOSTS and then reported as VERIFIED.
     """
     # Land at origin/main, then create a conflicting side branch and merge it.

@@ -1,6 +1,6 @@
 ---
 name: close-the-loop
-description: Find and SHIP the next high-leverage *closed* agentic loop for Zach's systems — elicit the real value, score candidates on verifier-cost × revenue/time-proximity, enforce the bounded-work + cheap-automatic-verifier gate, ship + validate over real runs, and capture the decision so it compounds. Use when deciding what to automate next, when an agentic effort feels like "more harness but no value," when asked to close/validate a loop, or to run the loop-closing exercise. The harness (clawgate — dispatch/runbooks/checkpoints/privilege) is already built — this skill is about pointing it at something that creates value and CLOSES. Reads + updates STATE.md (the living ledger) every run.
+description: "Decide what to automate next and SHIP it as a closed loop — score candidates on verifier-cost x revenue proximity, enforce the bounded-work + cheap-automatic-verifier gate, validate over real runs. Reads and updates its STATE.md ledger every run. Use when deciding what to automate next, when an agentic effort feels like \"more harness but no value\", or when asked to close or validate a loop."
 argument-hint: "<action> — run (full pass, default) | aim (just pick the next loop) | validate (drive an in-flight loop to closed) | capture (write a lesson/decision back to STATE.md)"
 allowed-tools: Bash, Read, Edit, Write, Grep, Glob, Agent, AskUserQuestion, WebSearch, WebFetch
 ---
@@ -15,6 +15,22 @@ existing harness at it, drive it to *closed + validated* on real work, capture w
 validated lessons (do not relearn them), harness inventory, loop ledger (shipped / closing /
 next / demoted). **Always update `STATE.md` at the end** of a run (new lesson, ledger row,
 decision). It is the compound-engineering memory; skipping the write-back is the cardinal sin.
+
+🔴 **The write-back only works because `STATE.md` and `ARCHIVE.md` are the DELIBERATE
+mkOutOfStoreSymlink exception in this skill dir.** Every other file here is a read-only
+/nix/store symlink; until 2026-08-10 these two were as well, so the "update it last" contract
+had been silently **inert** — writes could not land. They now point at the live checkout:
+
+| deployed (write here) | real file (the source of truth) |
+|---|---|
+| `~/.claude/skills/close-the-loop/STATE.md` | `~/workspace/devrc/claudedocs/close-the-loop/STATE.md` |
+| `~/.claude/skills/close-the-loop/ARCHIVE.md` | `~/workspace/devrc/claudedocs/close-the-loop/ARCHIVE.md` |
+
+Two consequences. **(1)** A write applies immediately — no `home-manager switch` needed.
+**(2)** It leaves an UNCOMMITTED change in the devrc working tree: **commit it in the same
+session** (RULES.md → "Docs/notes written into a working tree are UNSAVED WORK"), on a branch,
+never on `main`. If a write is ever refused as read-only, the symlink has regressed to a store
+path — check `readlink -f`, do not work around it by writing somewhere else.
 
 ---
 
@@ -99,7 +115,8 @@ Rules that override naive scoring:
    0011 drops the table** — it captured per-turn self-approvals, not judgments. Do NOT go looking
    for it. What exists today is **`clawgate_permission_decisions_total{outcome}`** (+
    `clawgate_permission_decision_latency_seconds`) in Prometheus and the Faro **`permission.action`**
-   event in Loki — see the `/clawgate` skill's `reference/telemetry.md`.
+   event in Loki — see `~/.claude/skills/clawgate/reference/telemetry.md` (source
+   `~/workspace/devrc/claude/skills/clawgate/reference/telemetry.md`).
    ⚠ Those measure a **~4k/day, ~97% auto-approved firehose**, so treat them as a *usage* signal,
    NOT as an acceptance-rate that can retire a checkpoint. The graduated-autonomy signal the old
    loop was supposed to provide **does not currently exist** — per the validated lesson in STATE.md
@@ -130,7 +147,9 @@ Rules that override naive scoring:
   couldn't see). Never route a suspicion as a decision.
 
 ## Pointers
-- `STATE.md` (this dir) — the living ledger; read first, update last.
+- `STATE.md` (this dir, writable — source `devrc/claudedocs/close-the-loop/STATE.md`) — the
+  living ledger; read first, update last.
+- `ARCHIVE.md` (same) — shipped narrative and superseded decisions; **not** read on every run.
 - `/clawgate` skill — operate the harness (status, deploy, runbooks, logs).
 - Memories: `clawgate-loop-validation` (the perf-deep-dive failure + the gate),
   `clawgate-phase3` / `clawgate-runbooks` (harness capability).

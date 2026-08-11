@@ -41,7 +41,7 @@ ME="ZacxDev"   # only PRs authored by you are surfaced as actions
 # alertnames that are known/expected noise on dp-1 (filtered from criticals)
 NOISE_RE='TargetDown|KubeHpaMaxedOut'
 # initiative ledger (the cross-session "what's in flight" view, telemetry-OFF for
-# speed/no-creds; the full telemetry view is the /initiatives command).
+# speed/no-creds; the full telemetry view is the /initiative-scan command).
 ISCAN="/home/zach/workspace/devrc/scripts/session-analysis/initiative-scan.py"
 IDAYS=14
 
@@ -189,7 +189,7 @@ scan_state(){
 
 # Cross-repo initiative ledger: momentum counts, owed/held items (→ ACTIONS),
 # initiative-tied open PRs, and the most-stalled. Runs initiative-scan telemetry-OFF
-# (fast, no creds); the full telemetry view is `/initiatives`. Skips gracefully if
+# (fast, no creds); the full telemetry view is `/initiative-scan`. Skips gracefully if
 # the script / python3 / jq aren't available.
 scan_initiatives(){
   [ -f "$ISCAN" ] || { echo "  (initiative-scan not present — skipped)"; return; }
@@ -218,7 +218,7 @@ scan_initiatives(){
   read -r INIT_ACTIVE INIT_SLOW INIT_STALL < <(printf '%s' "$json" | jq -r '
     [.by_repo[]?[]?] as $a
     | "\([$a[]|select(.momentum=="active")]|length) \([$a[]|select(.momentum=="slowing")]|length) \([$a[]|select(.momentum=="stalled")]|length)"')
-  echo "  in-flight: ${INIT_ACTIVE:-0} active · ${INIT_SLOW:-0} slowing · ${INIT_STALL:-0} stalled  (telemetry off — full: /initiatives)"
+  echo "  in-flight: ${INIT_ACTIVE:-0} active · ${INIT_SLOW:-0} slowing · ${INIT_STALL:-0} stalled  (telemetry off — full: /initiative-scan)"
 
   # owed/held next-steps → both the section AND the ACTIONS block (they need you)
   local owed
@@ -230,7 +230,7 @@ scan_initiatives(){
     while IFS=$'\t' read -r slug ns; do
       [ -z "$slug" ] && continue
       echo "    - $slug: $ns"
-      ACT+=("initiative $slug owed/held → /initiatives")
+      ACT+=("initiative $slug owed/held → /initiative-scan")
     done <<< "$owed"
   fi
 

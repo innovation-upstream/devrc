@@ -329,7 +329,7 @@ in
   # has not been `git add`ed is silently omitted from ${../scripts/browser-bridge/extension}
   # and therefore from the deployed tree — a partially-updated extension with NO
   # error anywhere. `git add` a new extension file BEFORE switching. (Same trap
-  # already documented for claude/commands/ in CLAUDE.md.)
+  # already documented for claude/skills/ in CLAUDE.md.)
   #
   # The copy is built beside the target and swapped in with an ATOMIC directory
   # exchange, so neither a half-written tree nor a MISSING directory is ever
@@ -699,11 +699,9 @@ in
   # Global Claude Code behavioural config — single source of truth for both
   # hosts (these were drifting when edited per-host). Synced via scripts/ship.sh.
   # NOTE: now read-only symlinks into the nix store → edit `devrc/claude/*.md`
-  # (or devrc/claude/commands/*.md) then `home-manager switch` (or ship.sh),
-  # NOT `~/.claude/*.md` directly.
-  # CLAUDE.md stays per-host/mutable (host-specific). skills/ are now MANAGED like
-  # commands/ (read-only store symlinks, below) so they ship to all hosts — edit in
-  # devrc/claude/skills/ then `home-manager switch` (or ship.sh), NOT ~/.claude/skills/.
+  # (or devrc/claude/skills/<name>/SKILL.md) then `home-manager switch` (or
+  # ship.sh), NOT `~/.claude/*` directly.
+  # CLAUDE.md stays per-host/mutable (host-specific).
   home.file.".claude/RULES.md" = {
     source = ../claude/RULES.md;
     force = true;  # overwrite the pre-existing unmanaged file on first switch
@@ -712,23 +710,42 @@ in
     source = ../claude/PRINCIPLES.md;
     force = true;
   };
-  # Slash-commands — recursively symlinked so each command lands individually at
-  # ~/.claude/commands/<name>.md as a read-only store symlink.
-  # Edit in devrc/claude/commands/ then switch; both hosts stay in lockstep.
-  home.file.".claude/commands" = {
-    source = ../claude/commands;
-    recursive = true;
-    force = true;
-  };
-  # Skills — same pattern as commands: each file under devrc/claude/skills/<name>/
+  # Skills — the SINGLE surface now. Upstream merged custom commands INTO skills
+  # (a `.claude/commands/deploy.md` and a `.claude/skills/deploy/SKILL.md` both
+  # produce `/deploy`), so `claude/commands/` was retired and all 17 commands were
+  # migrated to `claude/skills/<name>/SKILL.md`. A command was effectively a skill
+  # with null frontmatter: no bundled-file directory, no progressive disclosure,
+  # and — the actual loss — no model invocation, so it only ever fired when a human
+  # typed it. Every file under devrc/claude/skills/<name>/ (including `reference/`)
   # lands as a read-only store symlink at ~/.claude/skills/<name>/, so skills ship
-  # to all hosts in lockstep. Edit in devrc/claude/skills/ then switch. (Previously
-  # per-host/mutable, which meant a skill edited on one host never reached the other.)
+  # to all hosts in lockstep. Edit in devrc/claude/skills/ then switch.
   home.file.".claude/skills" = {
     source = ../claude/skills;
     recursive = true;
     force = true;
   };
+  # 🔴 close-the-loop's LEDGER — a deliberate mkOutOfStoreSymlink exception, for
+  # CORRECTNESS, not convenience. The skill's contract is "read STATE.md first,
+  # UPDATE it last, every run" and its `allowed-tools` grants Write/Edit — but while
+  # the two files lived under `claude/skills/close-the-loop/` the `recursive = true`
+  # mapping above landed them as read-only /nix/store symlinks, so every write
+  # silently failed and the skill's central mechanism was INERT (measured 2026-08-10:
+  # `test -w ~/.claude/skills/close-the-loop/STATE.md` -> false).
+  #
+  # The SOURCE therefore moved OUT of the skill tree to `claudedocs/close-the-loop/`
+  # — it has to, because a path cannot be both a recursive store symlink and an
+  # out-of-store one; the two `home.file` entries would collide. From there these
+  # two links put them back at the deployed path the skill expects, pointing at the
+  # live checkout, so a write lands in the working tree where it is version
+  # controlled and applies with no switch. Side benefit: 116 KB of ledger (35 KB
+  # STATE + 81 KB ARCHIVE) no longer enters the nix store on every switch.
+  #
+  # ⚠ A write here is UNCOMMITTED WORK in devrc — commit it in the SAME session
+  # (RULES.md -> "Docs/notes written into a working tree are UNSAVED WORK").
+  home.file.".claude/skills/close-the-loop/STATE.md".source =
+    config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/claudedocs/close-the-loop/STATE.md";
+  home.file.".claude/skills/close-the-loop/ARCHIVE.md".source =
+    config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/claudedocs/close-the-loop/ARCHIVE.md";
   # bash-guard — MANAGED (was per-host/unmanaged, so the deterministic
   # enforcement of the 🔴 Git Workflow rules in RULES.md DRIFTED between hosts:
   # workbench had 6 checks, the laptop a Jun-23 copy with 4). Edit
@@ -996,22 +1013,38 @@ in
     recursive = true;
   };
 
-  # opencode commands + skills — symlink the same Claude Code sources so both
-  # tools share a single source of truth. opencode reads commands from
-  # ~/.config/opencode/commands/ and skills from ~/.config/opencode/skills/;
-  # it ignores unknown frontmatter keys (name/argument-hint/allowed-tools are
-  # skipped; only description/agent/model are consumed). Edit in devrc/claude/
-  # then switch — both hosts + both tools stay in lockstep.
-  home.file.".config/opencode/commands" = {
-    source = ../claude/commands;
-    recursive = true;
-    force = true;
-  };
+  # opencode skills — symlink the same Claude Code source so both tools share one
+  # source of truth. Edit in devrc/claude/skills/ then switch; both hosts + both
+  # tools stay in lockstep.
+  #
+  # The former `~/.config/opencode/commands` mapping (← claude/commands/) is GONE
+  # with that directory. MEASURED on opencode 1.18.4 before removing it, against a
+  # live `opencode serve` + `opencode debug skill`:
+  #   * it reads ~/.config/opencode/skills/<name>/SKILL.md — all 16 devrc skills
+  #     enumerated with the right description and location;
+  #   * `GET /command` lists SKILLS alongside commands (`"source":"skill"`), so a
+  #     migrated skill stays typable as `/<name>` in the TUI;
+  #   * it TOLERATES the Claude-Code-only frontmatter keys the migration adds
+  #     (when_to_use, argument-hint, allowed-tools, disable-model-invocation,
+  #     user-invocable) — a probe skill carrying all five loaded fine;
+  #   * the skill BODY becomes the command template, `$ARGUMENTS` included.
+  # Negative control (so the above is a fact about the code, not the tool): a
+  # SKILL.md with NO frontmatter is DROPPED from the listing — 19 entries -> 18.
+  # Not verified: whether opencode substitutes `$ARGUMENTS` at invocation for a
+  # skill-sourced command. Its `hints` array is empty for skills and populated for
+  # commands, which is at least a TUI autocomplete difference; proving substitution
+  # needs a live model call. See the PR for the full matrix.
   home.file.".config/opencode/skills" = {
     source = ../claude/skills;
     recursive = true;
     force = true;
   };
+  # Same close-the-loop ledger exception as ~/.claude/skills/ above — the two files
+  # are sourced from claudedocs/close-the-loop/ and must be WRITABLE.
+  home.file.".config/opencode/skills/close-the-loop/STATE.md".source =
+    config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/claudedocs/close-the-loop/STATE.md";
+  home.file.".config/opencode/skills/close-the-loop/ARCHIVE.md".source =
+    config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/claudedocs/close-the-loop/ARCHIVE.md";
 
   # direnvrc — deploy the managed direnv config with layout opencode.
   home.file.".config/direnv/direnvrc" = {
@@ -2235,7 +2268,7 @@ in
   #
   # WHAT IT PROTECTS: ~/.claude/analyze-service-index/<scope>/<service>.md — the
   # curated recon nuance the /analyze-service write-back protocol appends to
-  # (claude/commands/analyze-service.md). Measured 2026-08-06 on the workbench:
+  # (claude/skills/analyze-service/SKILL.md). Measured 2026-08-06 on the workbench:
   # 20 files, 56,862 bytes, actively written that same day, with NO git history,
   # NO backup and NO host sync (ship.sh copies no files between hosts at all —
   # it converges each host through git + `home-manager switch`). The

@@ -1,11 +1,11 @@
 ---
 name: initiatives
-description: Operate the initiatives subsystem — a durable, cross-repo initiative ledger built on session-analysis/initiative-scan.py, with a live web viewer, a signal→initiative router, and a read-only Q&A assistant. Store is the `initiatives` schema in the homelab mailbox Postgres; a 15-min sync writes snapshots + LLM recaps; a workbench viewer serves it at 192.168.50.250:8899 with an /api/ask chat sidebar. Status, query the store, run/trigger the sync, restart/debug the viewer, tune recaps, operate the router/assistant, do a schema migration. Use when the user mentions the initiatives viewer/board, initiatives.current/latest, the initiative store/sync, initiative recaps, the vllm-recap model, the routing of a signal to an initiative, the initiatives assistant/chat, or "what's on my board / what's blocked on me" as a durable page (vs the ephemeral /initiatives scan or agent-ops TUI).
+description: "Operate the DURABLE initiatives board — the Postgres store, the 15-min sync, LLM recaps, the workbench viewer at 192.168.50.250:8899, the signal->initiative router and the read-only /api/ask assistant. Use for: the initiatives viewer/board, initiatives.current/latest, the initiative store/sync, initiative recaps, the vllm-recap model, the initiatives assistant/chat, \"what's on my board\" as a durable page. The one-off scan is `initiative-scan`."
 ---
 
 # initiatives subsystem operations
 
-The **durable, queryable counterpart** to the on-demand `/initiatives` scan and the ephemeral
+The **durable, queryable counterpart** to the on-demand `/initiative-scan` scan and the ephemeral
 agent-ops TUI. Four layers **store → sync → viewer → recaps** + a **router** (signal→initiative)
 + a **read-only assistant**. Code: `~/workspace/devrc/scripts/initiatives/` (sync.py, viewer.py,
 route.py, assistant.py, recap.py, run-sync.sh, run-viewer.sh); engine =
