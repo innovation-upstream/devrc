@@ -211,15 +211,21 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 # the SAME hazard for the third time on this one line. #384 measured 6984 on a
 # merge with 5a20dff; #376 then landed and moved main to 7122. Both numbers were
 # stale on the tree below, so neither side's was taken.
-# MEASURED on the merged tree, read off the summary CONTENT:
-#     TOTAL collected=7138  passed=7137  skipped=1  failed=0
-#     scripts/tests=1890
-# and it reconciles: main today 7122 + 16 = 7138, where the 16 are exactly the
-# ship.sh consumer-check cases in scripts/tests/test_ship_converge.py
-# (scripts/tests 1874 -> 1890). That per-directory delta is also the positive
-# control proving the gate RUNS them: no HERMETIC_TARGETS entry was needed
-# because scripts/tests is already a directory target, so movement on that
-# directory's own line is the only evidence they execute at all.
+# CONTROL PAIR, one tool set, same machine, both read off the summary CONTENT:
+#     main e0cf5d2 : TOTAL collected=7122  passed=7121  skipped=1  failed=0
+#                    scripts/tests=1874
+#     merged tree  : TOTAL collected=7138  passed=7137  skipped=1  failed=0
+#                    scripts/tests=1890
+# +16, and the attribution was MEASURED per file rather than assumed: exactly
+# ONE file's collected count moves, test_ship_converge.py 17 -> 33. Both of this
+# PR's commits are in that 16 — 2 for the rsync regression test and its positive
+# control, 14 for the ship.sh consumer check — because main does not carry
+# either commit. The first guess, "+16 = the consumer-check cases", was wrong by
+# 2 and would have been an unfalsifiable-looking round number in a comment.
+# That per-file delta is also the positive control proving the gate RUNS them:
+# no HERMETIC_TARGETS entry was needed because scripts/tests is already a
+# directory target, so movement on that file's own count is the only evidence
+# they execute at all.
 #
 # ⚠ #384 independently measured main-at-5a20dff as 6968, matching #376's
 # accounting above from a different branch — so the 8 of slack it names is
