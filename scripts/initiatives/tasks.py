@@ -209,12 +209,27 @@ def _run_with_deadline(fn, deadline: float, *, label: str = "clawgate fetch"):
 
     The worker is a DAEMON thread, so an abandoned one can never hold up interpreter exit;
     `_get` re-checks the clock between chunks — using `read1`, which returns whatever is
-    already buffered rather than blocking for a full `READ_CHUNK` — so it also terminates
-    itself shortly after being abandoned. "Shortly" is bounded by ONE `read1`, i.e. by
-    `SOCKET_TIMEOUT` in the worst case (a peer that sends nothing at all); it is NOT bounded
-    by how long the peer takes to deliver 64 KiB, which is what `read` made it and what
-    leaked live workers once the real payload crossed `READ_CHUNK`. The single-flight guard
-    in `LinkedTaskCache` means at most one such thread exists at a time."""
+    already buffered rather than blocking for a full `READ_CHUNK` — so once it reaches the
+    BODY it terminates promptly after being abandoned. That is the whole of what `read1`
+    buys, and it is real: `read` made termination depend on how long the peer took to
+    deliver 64 KiB, which leaked live workers once the payload crossed `READ_CHUNK`.
+
+    🔴 It does NOT make termination bounded, and do not read it as such. `read1` covers the
+    body phase only; DNS + connect + HEADERS are still a blocking `urlopen`, and
+    `SOCKET_TIMEOUT` is per-OPERATION, so a peer that dribbles the response HEADER one byte
+    at a time — every send inside the timeout, so no per-op timeout ever fires — holds the
+    worker open indefinitely. That is the same `_slow_drip` shape recorded two paragraphs
+    above at +130s, and it is unchanged by this module's `read1`. Measured 2026-08-11 by
+    adversarial audit: >60s past a 2.0s deadline AT PRODUCTION CONSTANTS, identical before
+    and after `read1`. The blackhole peer that sends nothing at all is the BEST case
+    (~0.00s), not the worst — `SOCKET_TIMEOUT` fires promptly there.
+
+    ⚠ `LinkedTaskCache`'s single-flight guard does NOT hold this to one thread: it releases
+    `_refresh_lock` when `loader()` RETURNS — i.e. at the deadline — not when the worker
+    dies, so any worker outliving the TTL lets the next refresh start another. Measured
+    2026-08-11: 7 concurrent `initiatives-clawgate-fetch` threads. Bounding the connect and
+    header phases is the open work; this docstring previously claimed both bounds and both
+    claims were false."""
     box: dict = {}
 
     def target():

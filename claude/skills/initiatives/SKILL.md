@@ -17,7 +17,7 @@ Arc: `devrc/claudedocs/handoff-initiatives-nextstep-dispatch-shipped-2026-07-26.
 **Reference files** (`~/.claude/skills/initiatives/reference/`, source
 `~/workspace/devrc/claude/skills/initiatives/reference/`) — read on demand:
 - `viewer-board.md` — board layout, states/chips/search, per-card actions, archive lifecycle. Read when changing the viewer UI or debugging a card's lane/state.
-- `clawgate-tasks.md` — the `initiative:<slug>` tag join, dispatch guard, fetch shape + a known thread/FD leak. Read when a dispatched task doesn't link, or when touching tagging.
+- `clawgate-tasks.md` — the `initiative:<slug>` tag join, dispatch guard, fetch shape + the fetch worker's termination bounds (body phase fixed 2026-08-11; connect/headers still unbounded, and the single-flight guard does NOT hold it to one thread). Read when a dispatched task doesn't link, when touching tagging, or before claiming that fetch cannot leak threads.
 - `agent-devpod.md` — devpod deploy, kubeclaw 0.7.x hardening values, image `2026.6.11-py` + web-search-off, identity pin, least-priv DB role. Read when deploying/bumping the agent pod or debugging a crash-loop.
 
 ## How a card comes to exist (discovery model)
@@ -116,7 +116,7 @@ curl -s -X POST http://192.168.50.250:8899/api/dispatch -H 'Content-Type: applic
   -d '{"repo":"<repo full path OR repo_name>","slug":"<slug>"}'   # 200 {ok,task_id} / 400 / 404 / 502
 # dispatch.py mirrors repo-cos/clawgate.py: POST clawgate /api/tasks {directory(=label),body,repo?,tags} —
 #   model OMITTED → clawgate default deepseek. Confirm the card: GET {CLAWGATE_API_URL}/api/tasks (Bearer).
-# Linked-task join, dispatch guard, fetch shape + the known leak → reference/clawgate-tasks.md
+# Linked-task join, dispatch guard, fetch shape + what still leaks → reference/clawgate-tasks.md
 ```
 
 **Grounded next step (nextstep.py, read-only):** every card carries one — documented cards
