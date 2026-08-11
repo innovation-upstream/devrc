@@ -97,7 +97,7 @@ These are gaps in COVERAGE, not bypasses of anything the globs used to hold: the
 opencode config keeps a broad `ask` over the same families, so an uncovered
 spelling still meets friction rather than silence.
 """
-import sys, os, json, re, shlex, ipaddress
+import sys, os, json, re, shlex, ipaddress, subprocess
 
 
 # =========================================================================== #
@@ -872,6 +872,306 @@ def _git_strip_global_opts(argv):
 
 
 # =========================================================================== #
+# STATE-AWARE CHECKS — the first checks in this file that READ THE WORLD.
+#
+# Every check above is a pure function of the command TEXT. `check_git_commit_to_main`
+# is not: "is this a commit to main?" is unanswerable from the text alone, because
+# the branch lives in the repo, not in the command. So it shells out to `git`.
+# Three properties keep that honest:
+#
+#   * It runs git ONLY after the parser has already established that this argv is a
+#     real `git … commit`. Every other Bash call pays zero subprocesses, so the hot
+#     path — which is EVERY Bash call in EVERY session — is unchanged.
+#   * Every git call is READ-ONLY (`rev-parse`, `branch --show-current`, `remote`),
+#     argv-list form (never a shell), and timeout-bounded. A guard must not be able
+#     to hang the tool it guards.
+#   * It FAILS OPEN on any resolution failure (not a repo, git missing, detached
+#     HEAD, timeout). See the fail-open note on `_commit_to_main_reason` — this is
+#     the one place in this file that does not fail closed, and the reasoning is
+#     recorded there rather than left implicit.
+#
+# A check that needs the caller's working directory is marked with `@_wants_cwd`;
+# `evaluate` passes cwd to exactly those. That is deliberately an explicit marker
+# rather than signature introspection or a module-level "current cwd" global: the
+# guard runs in a one-shot process per call, but a mutable global would still be a
+# lie waiting to be read by the next test in the same interpreter.
+# =========================================================================== #
+
+def _wants_cwd(fn):
+    """Mark a check as taking `(cmd, cwd)` rather than `(cmd)`."""
+    fn.wants_cwd = True
+    return fn
+
+
+def _git_read(repo_dir, *args):
+    """A read-only `git -C <repo_dir> <args>`; None on ANY failure.
+
+    argv-list form (no shell), 5s timeout, stderr swallowed. `repo_dir` comes from
+    model-authored command text, so it is never interpolated into a shell string.
+    """
+    if not repo_dir or not os.path.isdir(repo_dir):
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "-C", repo_dir, *args],
+            capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip()
+
+
+# 🔴 THE ALLOWLIST. Adding to it is a deliberate edit, and it is pinned by
+# test_guard_core.py so it cannot grow silently.
+#
+# RULES.md carves out exactly one exception to "feature branches only": a repo
+# whose OWN CLAUDE.md states that committing to the main branch IS deploying.
+# Today that is homelab-talos — `trunk` there is reconciled by Flux, so its
+# CLAUDE.md line 7 reads "Commit = live deploy". Committing to trunk is the
+# documented workflow, not a mistake, and a guard that blocked it would fire on
+# routine correct work — the failure mode `_IRREVERSIBLE_CHECKS` documents for
+# `rm -rf` (a guard routed around is worse than no guard, because it still
+# reports safety).
+#
+# 🔴 BOTH NAMES BELOW ARE THE SAME REPO, and that is the whole reason this
+# allowlist is a SET rather than a path. The working-tree directory is
+# `homelab-talos`; the GitHub repo behind it is `ZacxDev/homelab-infra`. A
+# path-keyed allowlist and a remote-keyed allowlist would each have been
+# silently half-right. `_repo_names` returns both the toplevel basename and every
+# remote's repo name, so a LINKED WORKTREE of that repo — whose directory is
+# `homelab-trunk`, matching neither entry by path — is still allowlisted via its
+# remote. That worktree is the spelling homelab-talos's CLAUDE.md actively tells
+# agents to use, so remote-matching is not a nicety here.
+_TRUNK_DEPLOY_REPOS = frozenset({
+    "homelab-talos",   # the working-tree directory name
+    "homelab-infra",   # the GitHub repo name behind that directory (they DIFFER)
+})
+
+# The branch names RULES.md means by "main/master". `trunk` is included because it
+# is a main branch NAME, not because homelab-talos uses it: an un-allowlisted repo
+# that happens to name its main branch `trunk` should be blocked too. The
+# allowlist, not the branch name, is what makes homelab-talos legal.
+_MAIN_BRANCH_NAMES = frozenset({"main", "master", "trunk"})
+
+# `git commit` spellings that do not CREATE a commit. `--dry-run` is the whole
+# list: it is git's documented "show what would be committed" mode and is a read.
+# 🔴 `-n` is NOT here — for `git commit` that is `--no-verify`, which commits
+# while SKIPPING hooks. Reading it as a dry run would have opened a bypass that
+# looks like a typo.
+_COMMIT_DRY_RUN_FLAGS = frozenset({"--dry-run"})
+
+# `cd <path> && git …` — the same anchor check_cd_then_git uses. That check denies
+# this shape anyway, but it runs AFTER this one, so without this the compound
+# would be resolved against the wrong directory.
+_LEADING_CD = re.compile(r"^\s*cd\s+(\S+)\s*(?:&&|;)")
+
+
+def _dash_c_dir(argv, base):
+    """The directory a `git` argv acts on: `base`, moved by each `-C <path>`.
+
+    git's multiple `-C` options are CUMULATIVE and relative ones compose, so this
+    walks them in order rather than taking the last. Only the SEPARATE form is
+    handled, because git itself rejects the attached one (measured:
+    `git -C/tmp rev-parse` -> "unknown option: -C/tmp").
+
+    🔴 AN UNRESOLVABLE `-C` TARGET FALLS BACK TO `base` RATHER THAN FAILING OPEN,
+    and that is not a nicety here. This repo's own CLAUDE.md tells agents to use
+    pre-exported handles — `git -C $DEVRC commit` — and the guard parses TEXT, so
+    `$DEVRC` arrives unexpanded and names no directory. Measured before this
+    fallback existed, with cwd on `main`:
+        DENY   git commit -m x
+        ALLOW  git -C $DEVRC commit -m x        <- the house-style spelling
+        ALLOW  git -C "$WT" commit -m x
+    i.e. the guard was blind to precisely the spelling the docs push agents
+    toward — the same class of miss that made `check_git_reset_hard` blind to
+    `git -C <path> reset --hard`. `expandvars` is tried first (the hook may
+    inherit the handle), and only an unresolved path falls back to the cwd.
+
+    The fallback can mis-attribute: cwd on main + a `-C` to a feature-branch repo
+    whose path did not resolve now denies. That direction is the safe one — the
+    deny message names the repo it judged, so it is self-diagnosing, and the way
+    past it is an absolute `-C` path, which resolves.
+    """
+    cur, i = base, 1
+    while i < len(argv):
+        tok = argv[i]
+        if tok == "-C" and i + 1 < len(argv):
+            val = os.path.expanduser(os.path.expandvars(argv[i + 1]))
+            cur = val if os.path.isabs(val) else os.path.join(cur, val)
+            i += 2
+            continue
+        if tok in _GIT_GLOBAL_VALUE_OPTS:
+            i += 2
+            continue
+        if tok.startswith("-"):
+            i += 1
+            continue
+        break
+    return cur if os.path.isdir(cur) else base
+
+
+def _repo_names(repo_dir):
+    """Every name this repo answers to: the toplevel basename plus each remote's
+    repo name. Returns () when `repo_dir` is not a git repo."""
+    top = _git_read(repo_dir, "rev-parse", "--show-toplevel")
+    if not top:
+        return ()
+    names = {os.path.basename(top)}
+    for remote in (_git_read(repo_dir, "remote") or "").split():
+        url = _git_read(repo_dir, "remote", "get-url", remote)
+        if not url:
+            continue
+        tail = url.rstrip("/").rsplit("/", 1)[-1].rsplit(":", 1)[-1]
+        if tail.endswith(".git"):
+            tail = tail[:-4]
+        if tail:
+            names.add(tail)
+    return tuple(names)
+
+
+def _commit_to_main_reason(repo_dir):
+    """The deny reason for committing in `repo_dir`, or None to allow.
+
+    🔴 FAILS OPEN, unlike everything else in this file, in exactly three cases —
+    each because the alternative blocks work that is not the hazard:
+
+      * `repo_dir` is not a git repo, or git is unavailable -> there is no branch
+        to be wrong about.
+      * detached HEAD -> `branch --show-current` is empty; a detached commit is
+        not a commit to main.
+      * THE REPO HAS NO REMOTES -> a purely local repo cannot be a shared deploy
+        target, and this is the false-positive class that would otherwise dominate.
+        `git init` defaults its first branch to `main` or `master`, so WITHOUT this
+        carve-out every scratch repo an agent builds under /tmp (including this
+        guard's own test fixtures) would trip a 🔴 deny during routine work — the
+        "guard fires on normal work, subject learns to route around it" failure
+        `_IRREVERSIBLE_CHECKS` documents. It is not a practical bypass: reaching it
+        from a real repo means deleting the remote first, which is a louder act
+        than the commit it would hide.
+
+    Failing open here is safe in a way it would not be for a destruction check:
+    the cost of a miss is a commit on the wrong branch, which is RECOVERABLE
+    (`git branch <topic> HEAD` + `git reset --keep origin/main`, the recipe
+    devrc's CLAUDE.md already carries) — not a wiped disk.
+    """
+    branch = _git_read(repo_dir, "branch", "--show-current")
+    if not branch or branch not in _MAIN_BRANCH_NAMES:
+        return None
+    names = _repo_names(repo_dir)
+    if not names:
+        return None
+    if any(n in _TRUNK_DEPLOY_REPOS for n in names):
+        return None
+    if not (_git_read(repo_dir, "remote") or "").strip():
+        return None
+    return (
+        f"`git commit` on branch `{branch}` is blocked by your RULES — feature branches only, "
+        f"never main/master/trunk. (repo: {repo_dir})\n"
+        f"This rule is 🔴 in three separate files and has still been violated twice: 2026-08-06 "
+        f"(two un-pushed commits on the workbench blocked `ship.sh` for hours) and 2026-08-09 "
+        f"(three more, rescued as PR #366). A commit onto the wrong branch is the SILENT failure "
+        f"— no conflict, no error, and `git log` afterwards shows exactly what you expect, because "
+        f"you are reading the branch you landed on. In a devrc checkout it also stops that host "
+        f"receiving every future change, because `ship.sh` converges with `merge --ff-only` and "
+        f"SKIPS a diverged host while still looking healthy.\n"
+        f"Do this instead: `git checkout -b <topic>` (or `git worktree add ../<repo>-<topic> "
+        f"-b <topic> origin/{branch}`), commit there, and open a PR.\n"
+        f"If you have ALREADY committed to `{branch}` here, do not reset first — preserve it: "
+        f"`git branch <topic> HEAD && git push -u origin <topic>`, confirm the shas are on origin, "
+        f"then `git reset --keep origin/{branch}`.\n"
+        f"The ONE repo where committing to the main branch is the correct workflow is "
+        f"homelab-talos, whose own CLAUDE.md declares that commit = live deploy (Flux reconciles "
+        f"`trunk`). It is allowlisted by name. Adding a repo to that allowlist is a deliberate "
+        f"edit to `_TRUNK_DEPLOY_REPOS` in guard_core.py and a decision for the operator, not "
+        f"something to do to get past this message."
+        + _QUOTING_ESCAPE_HATCH
+    )
+
+
+@_wants_cwd
+def check_git_commit_to_main(cmd, cwd=None):
+    """🔴 Never commit to main/master/trunk — the rule prose demonstrably failed to hold.
+
+    RULES.md ("Feature branches only", "Re-check WHICH branch you are on before ANY
+    write") and devrc's CLAUDE.md ("Never commit to `main` in EITHER host checkout")
+    both carry this at 🔴, in three files total, and it was still violated twice in
+    four days (2026-08-06, 2026-08-09/PR #366). Prose cannot re-assert itself inside
+    a long session; a PreToolUse hook fires on every call.
+
+    Measured ALLOW against the live ~/.claude/hooks/bash-guard.py before this
+    landed, with `git add --all` and `git stash` as DENY positive controls in the
+    same sweep:
+        ALLOW  git commit -m "wip"                       (cwd = devrc, on main)
+        ALLOW  git commit --amend --no-edit
+        ALLOW  git -C /home/zach/workspace/devrc commit -m "wip"
+        ALLOW  git commit -F /tmp/msg.txt
+
+    The repo is resolved from the command's own `-C` hop when it has one, then from
+    a leading `cd <path> &&`, and only then from the caller's cwd — so the three
+    spellings that actually appear in transcripts all resolve to the repo they will
+    really act on, not to wherever the hook happens to be running.
+    """
+    base = cwd or os.getcwd()
+    m = _LEADING_CD.match(cmd)
+    if m:
+        cd_target = os.path.expanduser(m.group(1).strip("\"'"))
+        if os.path.isdir(cd_target):
+            base = cd_target
+    for argv in commands(cmd):
+        if os.path.basename(argv[0]) != "git":
+            continue
+        flags, operands = _flags_and_operands(_git_strip_global_opts(argv))
+        if not operands or operands[0] != "commit":
+            continue
+        if flags & _COMMIT_DRY_RUN_FLAGS:
+            continue
+        reason = _commit_to_main_reason(_dash_c_dir(argv, base))
+        if reason:
+            return reason
+    return None
+
+
+def check_pkill_full_pattern(cmd):
+    """`pkill -f <pattern>` matches the guard's own caller — and has killed it.
+
+    RULES.md 🔴: "Never let a `-f` pattern reach `pkill`". `-f` matches against the
+    FULL command line of every process, so the pattern text matches the very shell
+    that is running the `pkill`, and a background script that pkills "its own job"
+    kills ITSELF. The documented replacement is to resolve PIDs first: `pgrep -f
+    <pat>` -> skip `$$` -> confirm each via `/proc/<pid>/cmdline` -> `kill "$p"`.
+
+    Measured ALLOW against the live hook before this landed (same sweep as above):
+        ALLOW  pkill -f e2e/run.sh
+        ALLOW  pkill -f "opencode run"
+
+    Deliberately narrow, so the replacement recipe stays usable: `pgrep -f` is a
+    READ and is untouched (denying it would leave the deny message pointing at a
+    blocked command), and `pkill <name>` without `-f` matches process NAMES only,
+    which cannot match the caller's command line and is not what RULES bans.
+    Bundled short flags are caught (`pkill -9f`, `pkill -ef`) — the guard tests the
+    flag's CHARACTERS, not the token. `-F <pidfile>` is a different, uppercase
+    option and does not match.
+    """
+    for argv in commands(cmd):
+        if os.path.basename(argv[0]) != "pkill":
+            continue
+        flags, _ = _flags_and_operands(argv)
+        if not any(f == "--full" or (not f.startswith("--") and "f" in f[1:]) for f in flags):
+            continue
+        return ("`pkill -f <pattern>` is blocked by your RULES. `-f` matches the FULL command "
+                "line of every process — including the shell running this very command — so the "
+                "pattern matches your own caller and a background script that pkills 'its own job' "
+                "kills ITSELF. Resolve PIDs first, then kill them by number: `pgrep -f <pat>` -> "
+                "skip `$$` -> confirm each via `/proc/<pid>/cmdline` -> `kill \"$p\"`. `pgrep -f` "
+                "is a read and stays allowed, as does `pkill <name>` without `-f` (that matches "
+                "process names, which cannot match your own command line)."
+                + _QUOTING_ESCAPE_HATCH)
+    return None
+
+
+# =========================================================================== #
 # POLICIES
 # =========================================================================== #
 
@@ -947,6 +1247,36 @@ def _git_strip_global_opts(argv):
 #
 # 🔴 `check_rm_rf_critical` was deliberately NOT moved with them. See
 # _IRREVERSIBLE_CHECKS below for why, and do not "finish the job".
+#
+# 🔴 `check_git_commit_to_main` and `check_pkill_full_pattern` are the THIRTEENTH
+# and FOURTEENTH, added 2026-08-10 by the same kind of explicit operator decision,
+# and for the same reason the others were: both are 🔴 in RULES.md and both were
+# measured ALLOW against the live ~/.claude/hooks/bash-guard.py before the move,
+# with `git add --all` and `git stash` as DENY positive controls in the same sweep:
+#     ALLOW  git commit -m "wip"                        (cwd = devrc, on `main`)
+#     ALLOW  git commit --amend --no-edit
+#     ALLOW  git -C /home/zach/workspace/devrc commit -m "wip"
+#     ALLOW  pkill -f e2e/run.sh
+# commit-to-main is the clearest case in the whole rulebook where PROSE HAS
+# DEMONSTRABLY FAILED: it is 🔴 in three separate files and was violated twice in
+# four days anyway (2026-08-06, two un-pushed commits blocked `ship.sh` for hours;
+# 2026-08-09, three more, rescued as PR #366). Neither incident was a
+# misunderstanding of the rule — compliance decays inside a long session and prose
+# cannot re-assert itself, while a PreToolUse hook fires on every call.
+#
+# They sit AFTER the three device/cluster-destruction checks and BEFORE
+# check_heredoc_to_file / check_cd_then_git, which is the same "report the more
+# serious problem" ordering the checks above use. Both directions matter:
+# `talosctl -n <ip> reset && git commit -m done` still reports the NODE WIPE, and
+# `cd /repo && git commit -m x` reports the wrong-BRANCH problem rather than the
+# use-`git -C` one. That second ordering is also why check_git_commit_to_main
+# resolves a leading `cd <path>` itself — running first means it cannot rely on
+# check_cd_then_git having rejected the shape.
+#
+# 🔴 check_git_commit_to_main is the first check in this file that READS THE WORLD
+# (it shells out to `git` to resolve the branch) and the first that FAILS OPEN.
+# Both properties are argued at the definition; do not "make it consistent" with
+# the pure fail-closed checks without reading that.
 _CLAUDE_CODE_CHECKS = [
     check_git_add_all,
     check_git_reset_hard,
@@ -956,6 +1286,8 @@ _CLAUDE_CODE_CHECKS = [
     check_talosctl_reset,
     check_mkfs,
     check_dd_to_block_device,
+    check_git_commit_to_main,
+    check_pkill_full_pattern,
     check_heredoc_to_file,
     check_cd_then_git,
     check_private_key,
@@ -997,13 +1329,22 @@ POLICIES = {
 }
 
 
-def evaluate(cmd, policy="claude-code"):
+def evaluate(cmd, policy="claude-code", cwd=None):
     """Return a deny reason, or None to allow. Unknown policy raises — a typo
-    must not silently degrade to "no checks"."""
+    must not silently degrade to "no checks".
+
+    `cwd` is the directory the command will run in. Only checks marked
+    `@_wants_cwd` receive it; the rest keep the pure `f(cmd)` signature, so this
+    is additive and no existing check changed. When the caller does not supply
+    one, a cwd-taking check falls back to the guard process's own cwd — which is
+    a good default (the hook runs in the session's directory) but not a
+    guarantee, which is why bash-guard.py passes the PreToolUse payload's `cwd`
+    explicitly rather than relying on it.
+    """
     if policy not in POLICIES:
         raise KeyError(f"unknown guard policy {policy!r}; known: {sorted(POLICIES)}")
     for chk in POLICIES[policy]:
-        reason = chk(cmd)
+        reason = chk(cmd, cwd) if getattr(chk, "wants_cwd", False) else chk(cmd)
         if reason:
             return reason
     return None
@@ -1012,9 +1353,15 @@ def evaluate(cmd, policy="claude-code"):
 # =========================================================================== #
 # CLI — the seam the opencode plugin calls.
 #
-# stdin : {"command": "<shell text>"}
+# stdin : {"command": "<shell text>", "cwd": "<dir>"}   ("cwd" optional)
 # stdout: {"decision": "deny", "reason": "…"}  |  {"decision": "allow"}
 # exit  : 0 on a verdict, 2 on bad input (the caller must fail CLOSED on 2).
+#
+# `cwd` was added 2026-08-10 for check_git_commit_to_main and is OPTIONAL — an
+# older caller that omits it (the opencode plugin, until it is taught to send one)
+# still gets a verdict, with the guard process's own cwd as the fallback. A
+# missing cwd must never turn into an error: this seam is the one opencode fails
+# CLOSED on, so a schema tightening here would deny every bash call in opencode.
 # =========================================================================== #
 def _cli(argv):
     policy = "claude-code"
@@ -1023,14 +1370,17 @@ def _cli(argv):
     try:
         data = json.load(sys.stdin)
         cmd = data.get("command") or ""
+        cwd = data.get("cwd") or None
     except Exception as exc:
         print(json.dumps({"decision": "error", "reason": f"unreadable input: {exc}"}))
         return 2
     if not isinstance(cmd, str):
         print(json.dumps({"decision": "error", "reason": "command is not a string"}))
         return 2
+    if cwd is not None and not isinstance(cwd, str):
+        cwd = None
     try:
-        reason = evaluate(cmd, policy)
+        reason = evaluate(cmd, policy, cwd)
     except Exception as exc:
         print(json.dumps({"decision": "error", "reason": f"guard failed: {exc}"}))
         return 2

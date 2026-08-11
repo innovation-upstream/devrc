@@ -111,6 +111,23 @@ CLAUDE_CODE_EXPECTED = [
     "check_talosctl_reset",
     "check_mkfs",
     "check_dd_to_block_device",
+    # 🔴 Added 2026-08-10 by explicit operator decision — the THIRTEENTH and
+    # FOURTEENTH. Both are 🔴 in RULES.md and both were measured ALLOW against the
+    # live ~/.claude/hooks/bash-guard.py before the move, with `git add --all` and
+    # `git stash` as DENY positive controls in the same sweep:
+    #   ALLOW  git commit -m "wip"                       (cwd = devrc, on `main`)
+    #   ALLOW  git commit --amend --no-edit
+    #   ALLOW  git -C /home/zach/workspace/devrc commit -m "wip"
+    #   ALLOW  pkill -f e2e/run.sh
+    # commit-to-main is the clearest case in the rulebook where PROSE FAILED: 🔴 in
+    # three separate files, violated twice in four days anyway (2026-08-06, two
+    # un-pushed commits blocked `ship.sh` for hours; 2026-08-09, three more,
+    # rescued as PR #366).
+    # They sit AFTER the device-destruction checks and BEFORE check_heredoc_to_file
+    # / check_cd_then_git — see test_commit_to_main_outranks_the_cd_reason and
+    # test_node_wipe_still_outranks_the_commit_reason, which pin BOTH directions.
+    "check_git_commit_to_main",
+    "check_pkill_full_pattern",
     "check_heredoc_to_file",
     "check_cd_then_git",
     "check_private_key",
@@ -1530,3 +1547,551 @@ def test_time_alone_is_not_a_crash():
     """A wrapper with nothing after it peels to an empty argv."""
     assert gc.evaluate("time", "opencode") is None
     assert gc.evaluate("/usr/bin/time -v", "opencode") is None
+
+
+# --------------------------------------------------------------------------- #
+# 8. 🔴 check_git_commit_to_main — the commit-to-main deny (2026-08-10)
+#
+# WHY THIS EXISTS AT ALL. "Never commit to main" is 🔴 in THREE separate files
+# (claude/RULES.md "Git Workflow", devrc's own CLAUDE.md "Git discipline",
+# ~/.claude/CLAUDE.md) and was violated TWICE in four days regardless:
+#   2026-08-06  two un-pushed commits on the workbench blocked `ship.sh` for hours
+#   2026-08-09  three more, rescued as PR #366
+# Neither was a misunderstanding of the rule. Prose cannot re-assert itself inside
+# a long session; a PreToolUse hook fires on every call. Measured ALLOW against the
+# live hook before this landed — see CLAUDE_CODE_EXPECTED above for the sweep.
+#
+# 🔴 THIS SECTION USES REAL GIT REPOS, NOT MOCKS, AND THAT IS THE POINT.
+# The check's whole job is to answer a question about the WORLD ("what branch is
+# this repo on?"). A fixture that stubbed `_git_read` would be testing the branch
+# names this file made up, i.e. it would pass with the implementation stubbed to a
+# no-op — the exact vacuous-green shape RULES.md names ("Never derive a test's
+# expectation from the implementation it tests"). Each fixture below is a real
+# `git init` under tmp_path, and the branch really is what the test claims.
+# --------------------------------------------------------------------------- #
+import os
+import subprocess
+
+
+def _mkrepo(path, branch="main", remote="git@github.com:someone/some-repo.git",
+            commit=False):
+    """A REAL git repo at `path`, on `branch`, with `remote` as origin.
+
+    `git branch --show-current` reports the initial branch on a repo with no
+    commits at all, so most fixtures skip committing — but `commit=True` is
+    available for the detached-HEAD case, which needs a rev to detach onto.
+    """
+    path.mkdir(parents=True, exist_ok=True)
+    run = lambda *a: subprocess.run(["git", "-C", str(path), *a],
+                                    capture_output=True, text=True, check=True)
+    subprocess.run(["git", "init", "-b", branch, str(path)],
+                   capture_output=True, text=True, check=True)
+    run("config", "user.email", "test@example.invalid")
+    run("config", "user.name", "guard test")
+    if remote:
+        run("remote", "add", "origin", remote)
+    if commit:
+        (path / "f.txt").write_text("x\n")
+        run("add", "f.txt")
+        run("commit", "-m", "init")
+    return path
+
+
+# --- 8a. harness self-validation (negative + positive control on the FIXTURE) - #
+# 🔴 Before any assertion below is worth reading, the fixture itself has to be
+# real. If `_mkrepo` silently produced a non-repo, every ALLOW assertion in this
+# section would pass for the wrong reason — a repo that does not exist fails open.
+
+def test_fixture_really_builds_a_git_repo_on_the_named_branch(tmp_path):
+    """Positive control on the FIXTURE: git itself must agree about the branch."""
+    repo = _mkrepo(tmp_path / "r", branch="main")
+    out = subprocess.run(["git", "-C", str(repo), "branch", "--show-current"],
+                         capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "main"
+    assert gc._git_read(str(repo), "branch", "--show-current") == "main"
+    assert gc._git_read(str(repo), "rev-parse", "--show-toplevel")
+
+
+def test_git_read_returns_none_outside_a_repo(tmp_path):
+    """Negative control on the read helper: a non-repo yields None, not a crash
+    and not a stale value from the guard's own cwd."""
+    plain = tmp_path / "not-a-repo"
+    plain.mkdir()
+    assert gc._git_read(str(plain), "rev-parse", "--show-toplevel") is None
+    assert gc._git_read(str(tmp_path / "does-not-exist"), "branch", "--show-current") is None
+
+
+def test_check_can_return_both_verdicts(tmp_path):
+    """🔴 The blunt negative/positive control on the CHECK ITSELF. A checker that
+    always returns None (the measured 84% base rate for generated enforcement
+    rules) would pass every ALLOW test in this file. Both directions, one test."""
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    on_feat = _mkrepo(tmp_path / "feat-repo", branch="feat/x")
+    assert gc.check_git_commit_to_main('git commit -m "x"', str(on_main)) is not None
+    assert gc.check_git_commit_to_main('git commit -m "x"', str(on_feat)) is None
+
+
+# --- 8b. the DENY half ------------------------------------------------------- #
+
+@pytest.mark.parametrize("branch", ["main", "master", "trunk"])
+def test_commit_on_a_main_branch_is_denied(tmp_path, branch):
+    """All three main-branch names. `trunk` is denied HERE because this repo is
+    not allowlisted — the branch name is never what makes a commit legal."""
+    repo = _mkrepo(tmp_path / f"r-{branch}", branch=branch)
+    reason = gc.check_git_commit_to_main('git commit -m "wip"', str(repo))
+    assert reason is not None, f"a commit on {branch!r} must be denied"
+    assert f"`{branch}`" in reason
+
+
+@pytest.mark.parametrize("command", [
+    'git commit -m "wip"',
+    "git commit",
+    "git commit --amend --no-edit",
+    "git commit -am wip",
+    "git commit -F /tmp/msg.txt",
+    "git commit --no-verify -m wip",          # -n is --no-verify, NOT a dry run
+    "git commit -n -m wip",
+    "sudo git commit -m wip",
+    "FOO=bar git commit -m wip",
+    "env GIT_AUTHOR_NAME=x git commit -m wip",
+    "timeout 60 git commit -m wip",
+    "/usr/bin/git commit -m wip",
+    "ls && git commit -m wip",
+    "ls; git commit -m wip",
+    "ls || git commit -m wip",
+    "ls | tee /dev/null && git commit -m wip",
+    "bash -c 'git commit -m wip'",
+    "git commit -m 'a message mentioning a feature branch'",
+])
+def test_commit_deny_across_spellings(tmp_path, command):
+    """The multi-spelling matrix. The glob era pinned ONE spelling per rule and was
+    blind to every other; this pins the wrapper-peeled, separator-split and
+    nested-shell forms the parser is supposed to reach."""
+    repo = _mkrepo(tmp_path / "r", branch="main")
+    assert gc.check_git_commit_to_main(command, str(repo)) is not None, command
+
+
+def test_dash_c_targets_the_repo_named_in_the_command_not_the_cwd(tmp_path):
+    """🔴 `git -C <path> commit` — the spelling this repo's CLAUDE.md MANDATES.
+
+    Both halves matter, and they are opposite: cwd is on a feature branch, the
+    `-C` target is on main. A guard that read only the cwd would report ALLOW on
+    the first and DENY on the second, i.e. exactly backwards.
+    """
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    on_feat = _mkrepo(tmp_path / "feat-repo", branch="feat/x")
+    assert gc.check_git_commit_to_main(
+        f'git -C {on_main} commit -m wip', str(on_feat)) is not None
+    assert gc.check_git_commit_to_main(
+        f'git -C {on_feat} commit -m wip', str(on_main)) is None
+
+
+def test_dash_c_relative_path_resolves_against_the_cwd(tmp_path):
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    assert gc.check_git_commit_to_main(
+        "git -C ../main-repo commit -m wip", str(outside)) is not None
+
+
+def test_multiple_dash_c_options_compose_like_git_does(tmp_path):
+    """git's `-C` options are cumulative, not last-wins."""
+    on_main = _mkrepo(tmp_path / "nest" / "main-repo", branch="main")
+    assert gc.check_git_commit_to_main(
+        f"git -C {tmp_path / 'nest'} -C main-repo commit -m wip", str(tmp_path)) is not None
+
+
+def test_leading_cd_resolves_to_the_cd_target(tmp_path):
+    """`cd <repo> && git commit` must be judged against <repo>, not the cwd.
+
+    check_cd_then_git denies this shape too, but it runs LATER — so without this
+    the compound would be resolved against the wrong directory on the way past.
+    """
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    on_feat = _mkrepo(tmp_path / "feat-repo", branch="feat/x")
+    assert gc.check_git_commit_to_main(
+        f"cd {on_main} && git commit -m wip", str(on_feat)) is not None
+
+
+# --- 8c. the ALLOW half ------------------------------------------------------ #
+# 🔴 Built from independent fixtures, not by negating the deny list. This half is
+# what decides whether a 🔴 deny on the operator's PRIMARY TOOL is safe to live
+# with — a guard that fires during correct routine work trains its subject to
+# route around it, which is worse than no guard because it still reports safety.
+
+@pytest.mark.parametrize("branch", ["feat/x", "fix-369", "wip", "mainline",
+                                    "main-ish", "release/main", "trunkish"])
+def test_commit_on_a_non_main_branch_is_allowed(tmp_path, branch):
+    """Includes the near-miss names. `mainline`, `main-ish`, `release/main` and
+    `trunkish` all CONTAIN a main-branch name — a substring check would block
+    them. The guard compares the whole branch name."""
+    repo = _mkrepo(tmp_path / "r", branch=branch)
+    assert gc.check_git_commit_to_main('git commit -m "wip"', str(repo)) is None, branch
+
+
+@pytest.mark.parametrize("command", [
+    "git commit --dry-run",
+    "git commit --dry-run --short",
+    "git status",
+    "git log --oneline -3",
+    "git branch --show-current",
+    "git diff HEAD",
+    "git add scripts/foo.py",
+    "git push origin HEAD",
+    "git switch -c feat/x",
+    "git show HEAD",
+    "git rev-parse --show-toplevel",
+    "git config user.email",
+    "echo 'never git commit on main'",
+    "rg 'git commit' scripts/",
+])
+def test_non_committing_commands_stay_allowed_even_on_main(tmp_path, command):
+    """The near-miss set. `--dry-run` is a READ and must not be collateral;
+    neither may any other git subcommand, nor merely NAMING the command."""
+    repo = _mkrepo(tmp_path / "r", branch="main")
+    assert gc.check_git_commit_to_main(command, str(repo)) is None, command
+
+
+def test_repo_with_no_remotes_is_allowed_on_main(tmp_path):
+    """🔴 The documented fail-open carve-out, asserted rather than assumed.
+
+    `git init` defaults its first branch to main/master, so without this every
+    scratch repo an agent builds under /tmp — INCLUDING this file's own fixtures —
+    would trip a 🔴 deny during routine work. A repo with no remote cannot be a
+    shared deploy target, which is the hazard the rule is about.
+    """
+    repo = _mkrepo(tmp_path / "scratch", branch="main", remote=None)
+    assert gc.check_git_commit_to_main('git commit -m "x"', str(repo)) is None
+
+
+def test_adding_a_remote_turns_the_same_repo_into_a_deny(tmp_path):
+    """The carve-out above is about the REMOTE, not about /tmp or the repo name —
+    proved by moving only that one variable and watching the verdict flip."""
+    repo = _mkrepo(tmp_path / "scratch", branch="main", remote=None)
+    assert gc.check_git_commit_to_main("git commit -m x", str(repo)) is None
+    subprocess.run(["git", "-C", str(repo), "remote", "add", "origin",
+                    "git@github.com:someone/some-repo.git"],
+                   capture_output=True, check=True)
+    assert gc.check_git_commit_to_main("git commit -m x", str(repo)) is not None
+
+
+def test_detached_head_is_allowed(tmp_path):
+    """`branch --show-current` is empty when detached; a detached commit is not a
+    commit to main."""
+    repo = _mkrepo(tmp_path / "r", branch="main", commit=True)
+    subprocess.run(["git", "-C", str(repo), "checkout", "--detach", "HEAD"],
+                   capture_output=True, check=True)
+    assert gc.check_git_commit_to_main("git commit -m x", str(repo)) is None
+
+
+def test_not_a_git_repo_is_allowed(tmp_path):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert gc.check_git_commit_to_main("git commit -m x", str(plain)) is None
+
+
+def test_nonexistent_cwd_is_allowed_and_does_not_raise(tmp_path):
+    assert gc.check_git_commit_to_main("git commit -m x", str(tmp_path / "nope")) is None
+
+
+# --- 8d. 🔴 the ALLOWLIST ---------------------------------------------------- #
+# RULES.md carves out exactly one exception to "feature branches only": a repo
+# whose OWN CLAUDE.md states that committing to the main branch IS deploying.
+# Today that is homelab-talos, where `trunk` is Flux-reconciled and its CLAUDE.md
+# line 7 reads "Commit = live deploy".
+
+def test_allowlist_is_pinned_by_name(tmp_path):
+    """🔴 Pinned against a literal, like the policy list itself: an allowlist that
+    can grow silently is a deny that can be switched off silently."""
+    assert gc._TRUNK_DEPLOY_REPOS == frozenset({"homelab-talos", "homelab-infra"}), (
+        f"the trunk-deploy allowlist is {sorted(gc._TRUNK_DEPLOY_REPOS)}. Adding a repo "
+        f"here disables a 🔴 deny for it and must be an explicit, reported decision — "
+        f"it requires the target repo's OWN CLAUDE.md to state that committing to its "
+        f"main branch IS deploying."
+    )
+
+
+def test_allowlisted_repo_may_commit_to_trunk_by_directory_name(tmp_path):
+    repo = _mkrepo(tmp_path / "homelab-talos", branch="trunk",
+                   remote="git@github.com:ZacxDev/homelab-infra.git")
+    assert gc.check_git_commit_to_main("git commit -m deploy", str(repo)) is None
+
+
+def test_allowlisted_repo_is_matched_by_its_REMOTE_when_the_directory_differs(tmp_path):
+    """🔴 THE CASE A PATH-KEYED ALLOWLIST WOULD HAVE MISSED.
+
+    The working-tree directory is `homelab-talos`; the GitHub repo behind it is
+    `ZacxDev/homelab-infra`. THE TWO NAMES DIFFER — verified against the real
+    checkout's .git/config while building this guard. And homelab-talos's own
+    CLAUDE.md tells agents to do commit-to-trunk work in a LINKED WORKTREE named
+    `homelab-trunk`, which matches neither allowlist entry by directory. Without
+    remote-matching, the guard would block the exact workflow that repo mandates.
+    """
+    wt = _mkrepo(tmp_path / "homelab-trunk", branch="trunk",
+                 remote="git@github.com:ZacxDev/homelab-infra.git")
+    assert gc.check_git_commit_to_main("git commit -m deploy", str(wt)) is None
+
+
+@pytest.mark.parametrize("url", [
+    "git@github.com:ZacxDev/homelab-infra.git",
+    "https://github.com/ZacxDev/homelab-infra.git",
+    "https://github.com/ZacxDev/homelab-infra",
+    "ssh://git@github.com/ZacxDev/homelab-infra.git",
+])
+def test_allowlist_remote_matching_survives_every_url_form(tmp_path, url):
+    """scp-style, https, and ssh:// URLs all name the same repo. A parser that
+    handled only one form would allowlist by accident of how the remote was added."""
+    repo = _mkrepo(tmp_path / "some-dir", branch="trunk", remote=url)
+    assert gc.check_git_commit_to_main("git commit -m deploy", str(repo)) is None, url
+
+
+def test_a_lookalike_repo_name_is_NOT_allowlisted(tmp_path):
+    """The allowlist is exact-match. `homelab-infra-staging` is a different repo."""
+    repo = _mkrepo(tmp_path / "homelab-infra-staging", branch="trunk",
+                   remote="git@github.com:ZacxDev/homelab-infra-staging.git")
+    assert gc.check_git_commit_to_main("git commit -m deploy", str(repo)) is not None
+
+
+def test_an_unallowlisted_repo_on_trunk_is_still_denied(tmp_path):
+    repo = _mkrepo(tmp_path / "other", branch="trunk",
+                   remote="git@github.com:someone/other.git")
+    assert gc.check_git_commit_to_main("git commit -m x", str(repo)) is not None
+
+
+def test_devrc_itself_is_not_allowlisted(tmp_path):
+    """The repo the rule was written FOR. If devrc ever landed in the allowlist,
+    the guard would be inert for the only two incidents that motivated it."""
+    repo = _mkrepo(tmp_path / "devrc", branch="main",
+                   remote="git@github.com:innovation-upstream/devrc.git")
+    assert gc.check_git_commit_to_main('git commit -m "wip"', str(repo)) is not None
+
+
+# --- 8e. 🔴 REACHABILITY + ordering ------------------------------------------ #
+# A guard that is never reached is green for the wrong reason: a mutation test
+# still passes when an EARLIER check always wins, because a different check's
+# error kills the test. These pin that check_git_commit_to_main is the check that
+# actually fires, and that the two intended ordering trade-offs hold.
+
+def test_commit_to_main_is_the_ONLY_check_that_fires_on_a_plain_commit(tmp_path):
+    """🔴 Reachability. On the shape this guard exists for, no earlier check in
+    the claude-code policy short-circuits — so the deny is attributable to THIS
+    guard's specific message, not to a neighbour's."""
+    repo = _mkrepo(tmp_path / "r", branch="main")
+    cmd = 'git commit -m "wip"'
+    matching = [c.__name__ for c in gc.POLICIES["claude-code"]
+                if (c(cmd, str(repo)) if getattr(c, "wants_cwd", False) else c(cmd))]
+    assert matching == ["check_git_commit_to_main"], matching
+    assert gc.evaluate(cmd, "claude-code", str(repo)) == \
+        gc.check_git_commit_to_main(cmd, str(repo))
+
+
+def test_commit_to_main_outranks_the_cd_reason(tmp_path):
+    """`cd <repo> && git commit` trips check_cd_then_git too. Ordering makes the
+    reported reason the WRONG-BRANCH one — the more serious of the two."""
+    repo = _mkrepo(tmp_path / "r", branch="main")
+    cmd = f"cd {repo} && git commit -m wip"
+    reason = gc.evaluate(cmd, "claude-code", str(repo))
+    assert reason == gc.check_git_commit_to_main(cmd, str(repo))
+    assert "feature branches only" in reason
+    assert gc.check_cd_then_git(cmd) is not None   # the other check really does match
+
+
+def test_node_wipe_still_outranks_the_commit_reason(tmp_path):
+    """The other direction of the same ordering decision: a command that both
+    wipes a Talos node and commits must report the NODE WIPE."""
+    repo = _mkrepo(tmp_path / "r", branch="main")
+    cmd = "talosctl -n 10.0.0.1 reset && git commit -m done"
+    assert gc.evaluate(cmd, "claude-code", str(repo)) == gc.check_talosctl_reset(cmd)
+
+
+def test_commit_to_main_is_inherited_by_the_opencode_policy(tmp_path):
+    repo = _mkrepo(tmp_path / "r", branch="main")
+    assert gc.evaluate('git commit -m "x"', "opencode", str(repo)) is not None
+
+
+# --- 8f. the cwd seam -------------------------------------------------------- #
+
+def test_evaluate_passes_cwd_only_to_checks_that_want_it(tmp_path):
+    """The dispatch is the seam between `evaluate` and a world-reading check. If
+    it silently stopped passing cwd, the guard would fall back to the hook
+    process's own directory and quietly report on the wrong repo."""
+    assert gc.check_git_commit_to_main.wants_cwd is True
+    others = [c for c in gc.POLICIES["opencode"] if c is not gc.check_git_commit_to_main]
+    assert not any(getattr(c, "wants_cwd", False) for c in others)
+
+
+def test_evaluate_without_cwd_falls_back_and_does_not_raise():
+    """Backwards compatibility: the old two-argument call must still work."""
+    assert gc.evaluate("ls -la", "claude-code") is None
+    assert gc.evaluate("git stash", "claude-code") is not None
+
+
+def test_cli_accepts_and_honours_a_cwd_field(tmp_path):
+    """The opencode seam end-to-end, through a real subprocess."""
+    import json as _json
+    repo = _mkrepo(tmp_path / "r", branch="main")
+    core = str(Path(__file__).resolve().parents[1] / "guard_core.py")
+    proc = subprocess.run(
+        [sys.executable, core, "--policy", "claude-code"],
+        input=_json.dumps({"command": 'git commit -m "x"', "cwd": str(repo)}),
+        capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert _json.loads(proc.stdout)["decision"] == "deny"
+
+
+def test_cli_still_works_when_cwd_is_omitted(tmp_path):
+    """🔴 An older caller (today's opencode plugin sends only `command`) must still
+    get a VERDICT. This seam is the one opencode fails CLOSED on, so tightening
+    the schema here would deny every bash call in opencode."""
+    import json as _json
+    core = str(Path(__file__).resolve().parents[1] / "guard_core.py")
+    proc = subprocess.run(
+        [sys.executable, core, "--policy", "opencode"],
+        input=_json.dumps({"command": "ls -la"}),
+        capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert _json.loads(proc.stdout)["decision"] == "allow"
+
+
+# --- 8g. the deny message ---------------------------------------------------- #
+
+def test_deny_message_names_the_branch_the_repo_and_the_way_out(tmp_path):
+    """A deny the model cannot act on becomes a deny it routes around."""
+    repo = _mkrepo(tmp_path / "r", branch="main")
+    reason = gc.check_git_commit_to_main("git commit -m x", str(repo))
+    assert "`main`" in reason
+    assert str(repo) in reason
+    assert "git checkout -b" in reason        # the forward path
+    assert "git reset --keep" in reason       # the recovery path, if already committed
+    assert "--hard" not in reason             # 🔴 must never suggest the destructive one
+    assert gc._QUOTING_ESCAPE_HATCH in reason
+
+
+# --------------------------------------------------------------------------- #
+# 9. 🔴 check_pkill_full_pattern — `pkill -f` matches the caller's OWN process
+#
+# RULES.md 🔴: "Never let a `-f` pattern reach `pkill`". `-f` matches the FULL
+# command line of every process, so the pattern matches the very shell running the
+# pkill — a background script that pkills "its own job" kills ITSELF. Measured
+# ALLOW against the live hook before this landed.
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("command", [
+    "pkill -f e2e/run.sh",
+    'pkill -f "opencode run"',
+    "pkill --full e2e/run.sh",
+    "pkill -9f e2e/run.sh",                 # bundled short flags
+    "pkill -ef e2e/run.sh",
+    "pkill -fu zach e2e/run.sh",
+    "pkill -u zach -f e2e/run.sh",
+    "sudo pkill -f e2e/run.sh",
+    "FOO=1 pkill -f e2e/run.sh",
+    "timeout 5 pkill -f e2e/run.sh",
+    "/usr/bin/pkill -f e2e/run.sh",
+    "ls && pkill -f e2e/run.sh",
+    "ls; pkill -f e2e/run.sh",
+    "bash -c 'pkill -f e2e/run.sh'",
+    "pkill --signal TERM -f e2e/run.sh",
+])
+def test_pkill_full_pattern_is_denied(command):
+    assert gc.check_pkill_full_pattern(command) is not None, command
+    assert gc.evaluate(command, "claude-code") is not None, command
+
+
+@pytest.mark.parametrize("command", [
+    "pgrep -f e2e/run.sh",                  # the READ the deny message points at
+    "pgrep -af opencode",
+    "pkill firefox",                        # name match, cannot hit our own cmdline
+    "pkill -u zach chromium",
+    "pkill -F /var/run/thing.pid",          # uppercase -F is a pidfile, not --full
+    "kill 12345",
+    "kill -9 12345",
+    "ps -ef | grep opencode",
+    "echo 'never let a -f pattern reach pkill'",
+])
+def test_pkill_near_misses_stay_allowed(command):
+    """The replacement recipe RULES prescribes runs THROUGH `pgrep -f`, so denying
+    it would leave the deny message pointing at a blocked command."""
+    assert gc.check_pkill_full_pattern(command) is None, command
+
+
+def test_pkill_check_can_return_both_verdicts():
+    """Negative + positive control on the check itself."""
+    assert gc.check_pkill_full_pattern("pkill -f foo") is not None
+    assert gc.check_pkill_full_pattern("pkill foo") is None
+
+
+def test_pkill_is_the_only_check_that_fires_on_a_bare_pkill_dash_f():
+    """🔴 Reachability: attributable to THIS guard, not to a neighbour."""
+    cmd = "pkill -f e2e/run.sh"
+    matching = [c.__name__ for c in gc.POLICIES["claude-code"]
+                if (c(cmd, None) if getattr(c, "wants_cwd", False) else c(cmd))]
+    assert matching == ["check_pkill_full_pattern"], matching
+
+
+def test_pkill_deny_message_names_the_replacement_recipe():
+    reason = gc.check_pkill_full_pattern("pkill -f e2e/run.sh")
+    assert "pgrep -f" in reason
+    assert "/proc/" in reason
+    assert gc._QUOTING_ESCAPE_HATCH in reason
+
+
+# 🔴 The handle these two tests use must be one that CANNOT resolve on any host.
+# Written first as `$DEVRC` — the real house-style handle — which FAILED here for
+# an instructive reason: `$DEVRC` IS exported on this workbench, so expandvars
+# resolved it to the real devrc checkout (on `main`) and the test was measuring
+# ambient host state instead of the fallback. It would have passed on a host
+# without the handle and failed on one with it. `monkeypatch.delenv` below makes
+# the unresolvable case unresolvable BY CONSTRUCTION.
+_UNSET_HANDLE = "GUARD_TEST_HANDLE_THAT_IS_NEVER_SET"
+
+
+def test_unresolvable_dash_c_falls_back_to_the_cwd(tmp_path, monkeypatch):
+    """🔴 The house-style `git -C $DEVRC commit` spelling.
+
+    The guard parses TEXT, so an unexported handle arrives unexpanded and names
+    no directory. Measured before the fallback existed, with cwd on `main`:
+        DENY   git commit -m x
+        ALLOW  git -C $DEVRC commit -m x
+    — blind to exactly the spelling this repo's CLAUDE.md pushes agents toward.
+    An unresolvable `-C` now judges the cwd instead of learning nothing.
+    """
+    monkeypatch.delenv(_UNSET_HANDLE, raising=False)
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    assert gc.check_git_commit_to_main(
+        f"git -C ${_UNSET_HANDLE} commit -m x", str(on_main)) is not None
+    assert gc.check_git_commit_to_main(
+        "git -C /nonexistent/path commit -m x", str(on_main)) is not None
+
+
+def test_unresolvable_dash_c_fallback_does_not_invent_a_deny(tmp_path, monkeypatch):
+    """The other half: falling back to the cwd must not manufacture a deny when
+    the cwd is itself fine. Without this, the fallback could read as 'deny more'
+    rather than 'judge the best directory available'."""
+    monkeypatch.delenv(_UNSET_HANDLE, raising=False)
+    on_feat = _mkrepo(tmp_path / "feat-repo", branch="feat/x")
+    assert gc.check_git_commit_to_main(
+        f"git -C ${_UNSET_HANDLE} commit -m x", str(on_feat)) is None
+
+
+def test_a_resolvable_dash_c_still_wins_over_the_cwd(tmp_path):
+    """The fallback must not shadow the normal path: when `-C` DOES resolve, it
+    is what gets judged."""
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    on_feat = _mkrepo(tmp_path / "feat-repo", branch="feat/x")
+    assert gc.check_git_commit_to_main(
+        f"git -C {on_feat} commit -m x", str(on_main)) is None
+    assert gc.check_git_commit_to_main(
+        f"git -C {on_main} commit -m x", str(on_feat)) is not None
+
+
+def test_expandvars_resolves_a_handle_that_IS_in_the_environment(tmp_path, monkeypatch):
+    """`expandvars` is tried before the fallback, so a handle the hook really does
+    inherit resolves to the repo it names rather than to the cwd."""
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    on_feat = _mkrepo(tmp_path / "feat-repo", branch="feat/x")
+    monkeypatch.setenv("SOME_REPO_HANDLE", str(on_main))
+    assert gc.check_git_commit_to_main(
+        "git -C $SOME_REPO_HANDLE commit -m x", str(on_feat)) is not None

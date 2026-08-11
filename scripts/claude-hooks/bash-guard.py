@@ -23,6 +23,13 @@ operator decision. The list today:
     PROGRAM name, so naming it in an argument is not a command.
   - dd of=/dev/<block-dev>   -> overwrites a disk in place (2026-08-02).
     `of=/dev/null` and the other pseudo sinks, and file-to-file dd, stay allowed.
+  - git commit on main/master/trunk -> feature branches only (2026-08-10; RULES 🔴 in
+    THREE files, and violated twice anyway — 2026-08-06 and 2026-08-09/PR #366).
+    Resolves the branch by shelling out to git, so it is the one check that reads
+    the world; `git commit --dry-run`, a detached HEAD, a repo with no remotes, and
+    the allowlisted homelab-talos (commit = live deploy) all stay allowed.
+  - pkill -f <pattern>       -> matches the caller's OWN command line (2026-08-10;
+    RULES 🔴). `pgrep -f` and `pkill <name>` without `-f` stay allowed.
   - large heredoc -> file    -> use the Write tool (token waste; audit-driven)
   - cd <path> && git ...     -> use git -C <path> (audit: #1 command shape, 1482x)
   - private key in a command -> reference the key file instead (never inline)
@@ -81,6 +88,16 @@ def main():
     if not cmd:
         sys.exit(0)
 
+    # The PreToolUse payload carries the session's working directory. Pass it
+    # through: check_git_commit_to_main resolves WHICH REPO a `git commit` acts on,
+    # and a command with no `-C` hop is answerable only from the cwd. Falling back
+    # to the hook process's own cwd would usually agree, but "usually" is how a
+    # guard ends up reporting on the wrong repo. `.get` with no default, so an
+    # older/other harness that omits the key still gets a verdict.
+    cwd = data.get("cwd")
+    if not isinstance(cwd, str) or not cwd:
+        cwd = None
+
     # 🔴 FAIL CLOSED, LOUDLY. If the core cannot be imported (a partial
     # home-manager switch, a deleted file) the guard must not silently pass
     # every command — that is the failure mode where the operator believes they
@@ -95,7 +112,7 @@ def main():
               f"(~/.claude/hooks/guard_core.py) — re-run `home-manager switch`.")
 
     try:
-        reason = guard_core.evaluate(cmd, POLICY)
+        reason = guard_core.evaluate(cmd, POLICY, cwd)
     except Exception as exc:
         _deny(f"bash-guard crashed while checking this command ({exc}). Denying rather "
               f"than passing it through unchecked. Report this — the command text is "

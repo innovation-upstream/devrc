@@ -19,10 +19,35 @@ Run directly (hand-rolled asserts, not pytest-collectable -- the guard calls
 main() at import time, so it is only ever driven via subprocess):
     python3 scripts/claude-hooks/tests/test_bash_guard.py
 """
-import json, os, subprocess, sys, time
+import json, os, shutil, subprocess, sys, tempfile, time
 
 GUARD = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bash-guard.py")
 GUARD = os.path.normpath(GUARD)
+
+# 🔴 EVERY CASE BELOW IS PINNED TO A NEUTRAL, NON-REPO cwd — do not remove this.
+#
+# The PreToolUse payload carries a `cwd`, and since 2026-08-10 one check
+# (check_git_commit_to_main) READS IT: it resolves the branch of the repo the
+# command would act on. That made this suite's verdicts depend on WHERE it was
+# run from, and the two tiers disagreed — measured, not predicted:
+#     cwd=/tmp (not a repo)              -> PASS   ← the nix sandbox's shape
+#     cwd=<devrc checkout, on `main`>    -> FAIL   ← a dev host's shape, because
+#                                                    run-tests.sh cd's to the git
+#                                                    toplevel before running
+#     cwd=<a worktree, on a feature br.> -> PASS
+# The `plain commit` case at the bottom asserts `git commit -F …` is ALLOWED, and
+# on a checkout sitting on `main` it is now correctly DENIED. So the suite would
+# have gone red on the operator's own host while the CI sandbox stayed green —
+# the exact two-tier blindness claude/RULES.md warns about, where greening one
+# tier moves the bug instead of removing it.
+#
+# Pinning the cwd is the fix rather than editing that expectation, because the
+# expectation is about the PARSER ("`git commit -F <file>` is not a blind-stage"),
+# not about branch state. A test whose verdict depends on the checkout's current
+# branch is a test that passes by accident of the environment.
+# The new check has its OWN adapter-level cases, with their own controlled repos,
+# at the bottom of this file.
+NEUTRAL_CWD = tempfile.mkdtemp(prefix="bash-guard-neutral-")
 
 # Dangerous substrings are built piecewise so this file can never trip a live
 # guard that is inspecting the command used to run it.
@@ -35,11 +60,18 @@ ADDA = "git a" + "dd -A ever"
 HARD = "git re" + "set --hard HEAD"
 
 
-def run(cmd):
-    """Return (blocked, error). `error` is non-empty if the guard misbehaved."""
+def run(cmd, cwd=None):
+    """Return (blocked, error). `error` is non-empty if the guard misbehaved.
+
+    `cwd` is the PreToolUse payload's cwd, NOT the subprocess's — it defaults to a
+    neutral non-repo directory so a case's verdict cannot depend on which branch
+    the checkout running the suite happens to be on. Pass it explicitly to
+    exercise check_git_commit_to_main.
+    """
     try:
         p = subprocess.run([sys.executable, GUARD],
                            input=json.dumps({"tool_name": "Bash",
+                                             "cwd": cwd or NEUTRAL_CWD,
                                              "tool_input": {"command": cmd}}),
                            capture_output=True, text=True, timeout=30)
     except subprocess.TimeoutExpired:
@@ -260,6 +292,82 @@ for label, probe in [
     ok = elapsed < 2.0 and not err
     fail += not ok
     print(f"{'PASS' if ok else 'FAIL'}  no catastrophic backtracking: {label} ({elapsed:.2f}s)")
+
+# --- check_git_commit_to_main, END TO END THROUGH THE ADAPTER ---------------
+# 🔴 The other cases in this file are pure text shapes. This one is not: the check
+# answers a question about the WORLD (what branch is this repo on?), so its
+# adapter-level coverage has to build real repos and drive the real PreToolUse
+# `cwd` field. Verified separately that the CHECK is reachable — no earlier check
+# in the claude-code policy fires on a plain `git commit` (test_guard_core.py::
+# test_commit_to_main_is_the_ONLY_check_that_fires_on_a_plain_commit), so a DENY
+# here is attributable to this check and not to a neighbour.
+_repo_root = tempfile.mkdtemp(prefix="bash-guard-repos-")
+
+
+def _mkrepo(name, branch, remote="git@github.com:someone/thing.git"):
+    path = os.path.join(_repo_root, name)
+    subprocess.run(["git", "init", "-q", "-b", branch, path],
+                   capture_output=True, check=True)
+    for k, v in (("user.email", "t@example.invalid"), ("user.name", "t")):
+        subprocess.run(["git", "-C", path, "config", k, v], capture_output=True, check=True)
+    if remote:
+        subprocess.run(["git", "-C", path, "remote", "add", "origin", remote],
+                       capture_output=True, check=True)
+    return path
+
+
+if shutil.which("git"):
+    ON_MAIN = _mkrepo("on-main", "main")
+    ON_FEAT = _mkrepo("on-feat", "feat/x")
+    ON_TRUNK_OK = _mkrepo("homelab-trunk", "trunk",
+                          "git@github.com:ZacxDev/homelab-infra.git")
+    SCRATCH = _mkrepo("scratch", "main", remote=None)
+
+    BRANCH_CASES = [
+        # (name, cmd, payload cwd, want_blocked)
+        ("commit on main is denied",       'git commit -m "wip"',   ON_MAIN,     True),
+        ("commit --amend on main denied",  "git commit --amend",    ON_MAIN,     True),
+        ("commit on a feature branch ok",  'git commit -m "wip"',   ON_FEAT,     False),
+        ("commit --dry-run on main ok",    "git commit --dry-run",  ON_MAIN,     False),
+        # the allowlist, matched by REMOTE — the directory here is `homelab-trunk`,
+        # which is in NO allowlist entry; only `homelab-infra` (its remote) is.
+        ("allowlisted trunk deploy ok",    'git commit -m "deploy"', ON_TRUNK_OK, False),
+        ("no-remote scratch repo ok",      'git commit -m "x"',     SCRATCH,     False),
+        # the -C hop must beat the payload cwd in BOTH directions
+        ("-C into main from a feat cwd",   f"git -C {ON_MAIN} commit -m x", ON_FEAT, True),
+        ("-C into feat from a main cwd",   f"git -C {ON_FEAT} commit -m x", ON_MAIN, False),
+        ("git status on main untouched",   "git status",            ON_MAIN,     False),
+    ]
+    for name, cmd, cwd, want in BRANCH_CASES:
+        blocked, err = run(cmd, cwd=cwd)
+        if err:
+            print(f"ERROR block={blocked!s:<5} want={want!s:<5}  {name}\n       {err}")
+            fail += 1
+            continue
+        ok = blocked == want
+        fail += not ok
+        print(f"{'PASS' if ok else 'FAIL'}  block={blocked!s:<5} want={want!s:<5}  {name}")
+else:
+    # 🔴 FAIL, not skip. This suite's whole job is to be the adapter's regression
+    # net; silently dropping nine cases because a binary is missing is how a gate
+    # reports safety it does not have. run-tests.sh asserts `git` is on PATH.
+    print("FAIL  git is not on PATH — the commit-to-main cases could not run")
+    fail += 1
+
+# `pkill -f` through the adapter (pure text, no repo needed).
+for name, cmd, want in [
+    ("pkill -f is denied",       "pkill -f e2e/run.sh", True),
+    ("pkill -9f bundled denied",  "pkill -9f e2e/run.sh", True),
+    ("pgrep -f stays allowed",   "pgrep -f e2e/run.sh", False),
+    ("pkill by name allowed",    "pkill firefox", False),
+]:
+    blocked, err = run(cmd)
+    ok = blocked == want and not err
+    fail += not ok
+    print(f"{'PASS' if ok else 'FAIL'}  block={blocked!s:<5} want={want!s:<5}  {name}")
+
+shutil.rmtree(NEUTRAL_CWD, ignore_errors=True)
+shutil.rmtree(_repo_root, ignore_errors=True)
 
 print("\nRESULT:", "all good" if not fail else f"{fail} failure(s)")
 sys.exit(1 if fail else 0)
