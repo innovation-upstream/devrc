@@ -1168,6 +1168,18 @@ def _remote_slugs(repo_dir):
     return slugs
 
 
+def _is_git_worktree(repo_dir):
+    """Is `repo_dir` inside a git worktree at all?
+
+    The one question `_commit_to_main_reason` cannot answer for its caller: that
+    function FAILS OPEN on "no branch", and BOTH "not a git repo" and "detached
+    HEAD" arrive at that same `None`. An EMPTY RESULT cannot distinguish two
+    mechanisms, so the caller has to ask this separately rather than read it out
+    of a `None` that means several things at once.
+    """
+    return _git_read(repo_dir, "rev-parse", "--show-toplevel") is not None
+
+
 def _commit_to_main_reason(repo_dir):
     """The deny reason for committing in `repo_dir`, or None to allow.
 
@@ -1251,6 +1263,10 @@ def check_git_commit_to_main(cmd, cwd=None):
         on THAT repo alone. The command said where it acts, so the caller's cwd is
         irrelevant, and folding it in would deny the documented `git -C $WT commit`
         spelling whenever the cwd happened to sit on main.
+        🔴 UNLESS no named target is a git worktree at all — then the named repo
+        answers nothing, and judging "on that repo alone" would mean judging on
+        nothing. That case falls back to the cwd candidates and blocks; see the
+        comment on `targets` below.
       * a BARE `git commit` is judged against every directory the line could have
         left the shell in: the caller's cwd plus every `cd`/`pushd` target anywhere
         in the text — including inside `bash -c '…'` and `( … )`, because the
@@ -1279,7 +1295,33 @@ def check_git_commit_to_main(cmd, cwd=None):
         if any(_is_dry_run_flag(f) for f in flags):
             continue
         named = _argv_named_repo_dirs(argv, base)
-        for repo_dir in (named or _candidate_dirs(cmd, base)):
+        # 🔴 A NAMED TARGET THAT IS NOT A GIT WORKTREE MUST NOT SUPPRESS THE CWD
+        # CHECK. Naming a repo hands the whole verdict to that repo, so if the
+        # named directory turns out not to be one, the branch check evaluates
+        # NOTHING and the command is allowed unchecked — a fail-OPEN, in the one
+        # check whose job is the silent failure. Measured against the live hook
+        # before this landed, cwd on `trunk`:
+        #     ALLOW  git -C <an-ordinary-directory> commit -m x
+        # The directory existing is what made it look answered: `_resolve_dir`
+        # returns any real directory, and `_commit_to_main_reason` then fails open
+        # on "no branch". So unless EVERY named target resolves to a worktree, fall
+        # back to the cwd-derived candidates and judge those instead — the guard's
+        # documented posture for an unresolvable target ("treat it as the cwd repo
+        # and block"), the same direction `_dash_c_dir` already takes for a path
+        # that does not resolve at all.
+        #
+        # Deliberately `not all(...)`, not `not any(...)`. They differ only on a
+        # MIXED named set — one real worktree plus one junk target, reachable by
+        # combining `-C` with `--git-dir`/`--work-tree`:
+        #     git -C <feature-repo> --git-dir=<an-ordinary-directory> commit
+        # Which repo that lands in is genuinely ambiguous (and `--git-dir` here
+        # resolves against the CWD, not against the `-C` hop), so it is exactly the
+        # "unparseable -> treat it as the cwd repo and block" case. `any` would let
+        # one resolvable `-C` vouch for a junk sibling and allow it through.
+        targets = named
+        if named and not all(_is_git_worktree(d) for d in named):
+            targets = _candidate_dirs(cmd, base)
+        for repo_dir in (targets or _candidate_dirs(cmd, base)):
             reason = _commit_to_main_reason(repo_dir)
             if reason:
                 return reason
