@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import textwrap
 from pathlib import Path
 
@@ -35,13 +36,33 @@ if _BASH is None:  # pragma: no cover — both tiers ship bash
     raise RuntimeError("bash not found on PATH; this suite cannot run hermetically")
 
 
+# 🔴 The canonical-path guard (monitor-blackout.sh, "refusing to run from") accepts
+# ONLY "${HOME}/workspace/devrc/scripts/monitor-blackout.sh". The nix build sandbox —
+# the AUTHORITATIVE tier — checks out to /build/src with HOME=/build/home, so the
+# repo's own copy can never satisfy it and every test that executes the script fails
+# there while passing on the dev host. That is the worse tier direction: green where
+# it is observed, red where it gates. Rather than weaken the guard, build the shape it
+# demands once and run THAT copy. `_CANON_MB` is a byte copy of the tree's script, so
+# behaviour under test is unchanged; only its path and HOME differ.
+_CANON_HOME = Path(tempfile.mkdtemp(prefix="mb-canonical-home-"))
+_CANON_MB = _CANON_HOME / "workspace" / "devrc" / "scripts" / "monitor-blackout.sh"
+_CANON_MB.parent.mkdir(parents=True, exist_ok=True)
+shutil.copy2(MB, _CANON_MB)
+
+
 def _run(*args, env=None):
-    """Run monitor-blackout.sh as a subprocess."""
+    """Run monitor-blackout.sh as a subprocess, from the canonical-shaped path.
+
+    HOME is set before the caller's env is applied, so a test that needs its own
+    HOME can still override it (and will then hit the guard — which is the point
+    of test_the_canonical_path_guard_refuses_a_non_canonical_copy).
+    """
     full_env = dict(os.environ)
+    full_env["HOME"] = str(_CANON_HOME)
     if env:
         full_env.update(env)
     return subprocess.run(
-        [_BASH, str(MB), *args],
+        [_BASH, str(_CANON_MB), *args],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         timeout=30, env=full_env,
     )
@@ -273,3 +294,60 @@ def test_restore_with_corrupt_state(tmp_path):
     if ddc_log.exists():
         log = ddc_log.read_text()
         assert "setvcp 10 60" in log
+
+
+# --------------------------------------------------------------------------- #
+# The canonical-path guard (added in #374) — it shipped with NO test at all,
+# which is how it reached `main` red on the authoritative tier. Both controls,
+# so a green here is distinguishable from a check wired to nothing.
+# --------------------------------------------------------------------------- #
+
+def test_the_canonical_path_guard_refuses_a_non_canonical_copy(tmp_path):
+    """🔴 NEGATIVE CONTROL. A copy anywhere but "${HOME}/workspace/devrc/scripts/"
+    must refuse with THIS guard's own message and exit 1 — not merely fail.
+
+    This is the behaviour the guard exists for: a Claude scratchpad copy, a
+    worktree, or a mutation-test copy must never create timers or drive
+    brightness on the live rig.
+    """
+    stray = tmp_path / "monitor-blackout.sh"
+    shutil.copy2(MB, stray)
+
+    env = dict(os.environ)
+    env["HOME"] = str(tmp_path / "some-other-home")
+
+    p = subprocess.run(
+        [_BASH, str(stray)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        timeout=30, env=env,
+    )
+
+    assert p.returncode == 1, f"a stray copy was allowed to run: {p.stdout}{p.stderr}"
+    assert "refusing to run from" in p.stderr, p.stderr
+    assert str(stray) in p.stderr, "the refusal must name the offending path"
+
+
+def test_the_canonical_copy_passes_the_guard_and_reaches_a_later_check(tmp_path):
+    """🔴 POSITIVE CONTROL. Refusing is only meaningful if accepting also happens.
+
+    Proving the guard did NOT fire requires reaching work that lives AFTER it —
+    here, `get-brightness` returning the stub's value. A test asserting only
+    "no refusal in stderr" would pass just as well against a script whose guard
+    had been deleted entirely, and equally against one that died on the very
+    next line.
+
+    Do NOT narrow PATH to only the stub dir to force a later failure: the guard
+    itself shells out to `readlink`, so a PATH without coreutils kills the script
+    at line 23 — before the guard can accept OR refuse. That failure mode looks
+    like a guard problem and is not one.
+    """
+    _make_ddcutil_stub(tmp_path, "75")
+    path = str(tmp_path) + ":" + os.environ.get("PATH", "")
+
+    p = _run("get-brightness", env={"PATH": path, "XDG_RUNTIME_DIR": str(tmp_path)})
+
+    assert "refusing to run from" not in p.stderr, (
+        f"the canonical-shaped copy was refused: {p.stderr}")
+    assert p.returncode == 0, f"{p.stdout}{p.stderr}"
+    assert "75" in p.stdout, (
+        f"expected to reach the body and read the stub's brightness; got: {p.stdout!r}")
