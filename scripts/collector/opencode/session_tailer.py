@@ -31,7 +31,16 @@ _dir = str(Path(__file__).parent)
 if _dir not in sys.path:
     sys.path.insert(0, _dir)
 
+# The collector ROOT (this file's grandparent) holds `changed_paths.py`, shared
+# with the Claude summariser so the `changed_paths*` block has ONE definition.
+# 🔴 Do NOT `.resolve()` — a nix-store symlink resolves INTO the store and loses
+# the ~/.config/activity-collector/ prefix (see _shared.spool_emit's note).
+_root = str(Path(__file__).parent.parent)
+if _root not in sys.path:
+    sys.path.insert(0, _root)
+
 import _shared as S  # noqa: E402
+import changed_paths as CP  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
@@ -56,7 +65,13 @@ EXT_LANG = {
 _SPECIAL_NAMES = {"dockerfile": "Dockerfile", "makefile": "Makefile"}
 
 # Tools that create/modify a file → contribute to languages / files / churn.
+# MEASURED 2026-08-11 over the live store (7,982 tool parts): only `edit` (474)
+# and `write` (160) occur. `write_file` / `create_file` have never appeared and
+# are kept only so a rename of the same concept still counts — they cost
+# nothing, and unlike an over-broad INPUT key they cannot manufacture a match.
 _FILE_TOOLS = {"edit", "write", "write_file", "create_file"}
+# The bash-equivalent tool, whose input carries the shell command.
+_COMMAND_TOOL = "bash"
 
 # git commit / push inside a bash command.
 _GIT_COMMIT = re.compile(r"\bgit\s+(?:-C\s+\S+\s+|-\S+\s+)*commit\b")
@@ -113,17 +128,121 @@ def _float(v) -> float:
         return 0.0
 
 
+def count_lines(s) -> int:
+    """Line count of a text block (0 for empty/None). Used for edit CHURN.
+
+    Byte-identical semantics to `claude/session-tailer.py:count_lines`, on
+    purpose: the two sources' `lines_added`/`lines_removed` are meant to be
+    COMPARABLE, and a churn measure that counted differently per source would be
+    a silent apples-to-oranges in every cross-source report.
+    """
+    if not s or not isinstance(s, str):
+        return 0
+    return s.count("\n") + 1
+
+
+def churn(tool_name: str, inp: dict) -> tuple[int, int]:
+    """(lines_added, lines_removed) from an opencode edit/write tool INPUT.
+
+    Same EDIT-BLOCK CHURN measure the Claude summariser documents — the size of
+    the text blocks the tool wrote/replaced, NOT git's line diff, because we
+    cannot see the real file. Only the key names differ: opencode's tool input
+    is camelCase (`newString`/`oldString`/`content`) where Claude's transcript
+    is snake_case (`new_string`/`old_string`/`content`).
+
+    ⚠ INVESTIGATED AND REJECTED, 2026-08-11: opencode DOES carry a real unified
+    diff at `state.metadata.diff` on an `edit` part, and a `patch` part type
+    listing `files`. Either would give a truer line count than block churn — and
+    that is exactly why neither is used. The number has to mean the same thing
+    as the Claude number to be worth emitting beside it; mixing a real diff into
+    one source and block churn into the other produces two columns that look
+    comparable and are not. Also rejected: the `session.summary_additions` /
+    `summary_deletions` / `summary_files` columns — MEASURED 2026-08-11, all
+    three are 0 for all 233 sessions in the live store, i.e. opencode does not
+    populate them.
+    """
+    if tool_name in ("write", "write_file", "create_file"):
+        return (count_lines(inp.get("content")), 0)
+    if tool_name == "edit":
+        return (count_lines(inp.get("newString")), count_lines(inp.get("oldString")))
+    return (0, 0)
+
+
+def tool_input(data: dict) -> dict | None:
+    """The tool INPUT dict from a raw opencode `part.data` blob, or None.
+
+    🔴 THIS IS THE WHOLE OF GAP B. The previous code read `data["command"]` and
+    `data["file_path"]` from the part's TOP LEVEL. opencode has never put them
+    there: the real shape, MEASURED 2026-08-11 over 7,982 live tool parts, is
+
+        {"type": "tool", "tool": "edit", "callID": "...",
+         "state": {"status": "completed",
+                   "input": {"filePath": ..., "newString": ..., "oldString": ...},
+                   "output": ..., "metadata": {...}}}
+
+    — nested under `state.input`, and camelCase. Every top-level lookup returned
+    None, so `files_modified`, `lines_added`, `lines_removed`, `git_commits` and
+    `git_pushes` were structurally pinned at 0 for every opencode session ever
+    summarised, while `tool_counts` (which reads the genuinely top-level `tool`
+    key) stayed correct — which is why the rollups looked populated.
+
+    The unit tests did not catch it because their fixtures were written in the
+    same wrong shape as the extractor, so they asserted the implementation back
+    to itself. Those fixtures are now built from this measured shape.
+
+    Returns None — never `{}` — when there is no readable input, so a caller can
+    COUNT the misses and decide the statistic is unobservable rather than zero.
+    """
+    state = data.get("state")
+    if not isinstance(state, dict):
+        return None
+    inp = state.get("input")
+    return inp if isinstance(inp, dict) else None
+
+
 # --------------------------------------------------------------------------- #
 # Rollup
 # --------------------------------------------------------------------------- #
-def build_rollup(session_data: dict, messages: list[dict], parts: list[dict]) -> dict:
+def build_rollup(session_data: dict, messages: list[dict], parts: list[dict],
+                 *, directory: str = "") -> dict:
     """Deterministic per-session rollup from session dict, messages, and parts.
 
     `session_data` is the dict from iter_sessions().
     `messages` is a list of dicts from iter_messages().
     `parts` is a flat list of ALL part dicts from iter_parts() for ALL messages.
+    `directory` is the session cwd — needed to make changed paths repo-relative.
 
     Returns a rollup dict with tool counts, tokens, languages, git activity, etc.
+
+    🔴 ABSENT IS NOT ZERO. The file group (`files_modified`, `lines_added`,
+    `lines_removed`, `changed_paths*`) and the git group (`git_commits`,
+    `git_pushes`) are emitted as **None** — not 0 — when this function can show
+    it was unable to observe them, and the group name is listed in
+    `stats_unavailable`. The three unobservable conditions are each MEASURED,
+    not imagined:
+
+      * the store read yielded no parts at all for a session that has assistant
+        messages. `_shared.iter_parts` swallows `sqlite3.OperationalError` and
+        yields nothing, so a `part`-table schema change is indistinguishable
+        from "this session ran no tools" at the call site. MEASURED 2026-08-11:
+        233 of 233 live sessions with assistant messages have >= 1 part, so this
+        condition fires on nothing today and fires loudly on that drift.
+        (Deliberately a SESSION-level test: per-MESSAGE it would be wrong —
+        10 of 5,576 assistant messages legitimately have no parts.)
+      * file-tool parts were present but not one yielded a `filePath`;
+      * `bash` parts were present but not one yielded a `command`.
+
+    The last two are the direct regression guards for gap B: had they existed,
+    the shape drift that pinned every one of these fields at 0 would have shown
+    up as `stats_unavailable: ["files","git"]` on every session instead of as a
+    plausible-looking zero nobody could distinguish from a quiet day.
+
+    Unlike the Claude summariser — whose integer counters keep their type
+    because live consumers read them — these are nulled outright. Nothing reads
+    opencode `session-summary` payload fields today (`insights.py`,
+    `session_insight/selection.py` and `validation/invariants.py` all filter
+    `source='claude'`), and the values they would preserve are a constant 0 that
+    was never true.
     """
     r: dict = {
         "tool_counts": {},
@@ -152,6 +271,10 @@ def build_rollup(session_data: dict, messages: list[dict], parts: list[dict]) ->
         "end_ts": None,
         "unreadable": False,
         "cost": 0.0,
+        # See the docstring: [] means every group was observed, so its zeros are
+        # real; "files" / "git" mean the matching fields are None because we
+        # could not read them.
+        "stats_unavailable": [],
     }
 
     tool_counts: dict = r["tool_counts"]
@@ -159,6 +282,16 @@ def build_rollup(session_data: dict, messages: list[dict], parts: list[dict]) ->
     err_cats: dict = r["tool_error_categories"]
     files: set[str] = set()
     models: set[str] = set()
+
+    # --- Observability accounting (the positive control, in the emitter) ------
+    # Counting the parts we COULD read beside the parts we SAW is what makes a
+    # zero falsifiable. Without it, "0 files modified" is emitted identically by
+    # a quiet session and by a broken extractor — which is exactly how gap B
+    # survived in production for months.
+    file_tool_parts = 0
+    file_paths_seen = 0
+    command_parts = 0
+    commands_seen = 0
 
     # --- Session-level aggregates ---
     r["cost"] = _float(session_data.get("cost"))
@@ -207,18 +340,26 @@ def build_rollup(session_data: dict, messages: list[dict], parts: list[dict]) ->
             if tool_name:
                 tool_counts[tool_name] = tool_counts.get(tool_name, 0) + 1
 
-            # Extract tool arguments from the parsed data blob.
-            # OpenCode stores tool-specific fields (command, file_path, etc.)
-            # in the part's JSON data column, not as top-level part fields.
-            # _shared.iter_parts includes the raw parsed dict as "_data".
-            _data = part.get("_data") or {}
+            # Extract tool arguments from the parsed data blob. OpenCode nests
+            # them under `state.input` with camelCase keys — see tool_input()
+            # for the measured shape and for what reading them from the top
+            # level cost. `_shared.iter_parts` includes the raw dict as "_data".
+            _data = part.get("_data")
+            inp = tool_input(_data) if isinstance(_data, dict) else None
             args_str = ""
             fp = ""
-            if isinstance(_data, dict):
-                args_str = str(_data.get("command") or _data.get("input") or "")
-                fp = str(_data.get("file_path") or _data.get("path") or "")
+            if inp is not None:
+                args_str = str(inp.get("command") or "")
+                # ONLY `filePath`. Widening this to also accept `path` would
+                # make the extractor match `grep`/`glob` inputs and would blunt
+                # the drift detector below: a rename would keep resolving via
+                # the alternate key and go back to being invisible.
+                fp = str(inp.get("filePath") or "")
 
-            if tool_name == "bash":
+            if tool_name == _COMMAND_TOOL:
+                command_parts += 1
+                if args_str:
+                    commands_seen += 1
                 if is_git_commit(args_str):
                     r["git_commits"] += 1
                 if is_git_push(args_str):
@@ -232,12 +373,19 @@ def build_rollup(session_data: dict, messages: list[dict], parts: list[dict]) ->
             elif tool_name == "webfetch":
                 r["uses_web_fetch"] = True
 
-            # File tools → language detection + files modified
-            if tool_name in _FILE_TOOLS and fp:
-                files.add(fp)
-                lang = lang_for_path(fp)
-                if lang:
-                    languages[lang] = languages.get(lang, 0) + 1
+            # File tools → language detection + files modified + churn
+            if tool_name in _FILE_TOOLS:
+                file_tool_parts += 1
+                if fp:
+                    file_paths_seen += 1
+                    files.add(fp)
+                    lang = lang_for_path(fp)
+                    if lang:
+                        languages[lang] = languages.get(lang, 0) + 1
+                if inp is not None:
+                    add, rem = churn(tool_name, inp)
+                    r["lines_added"] += add
+                    r["lines_removed"] += rem
 
             # Tool errors
             state = part.get("state") or {}
@@ -251,6 +399,33 @@ def build_rollup(session_data: dict, messages: list[dict], parts: list[dict]) ->
     r["models"] = sorted(models)
     r["unreadable"] = (r["user_message_count"] == 0
                        and r["assistant_message_count"] == 0)
+
+    # --- The observability verdict -------------------------------------------
+    # A session with assistant messages ALWAYS produced parts in the live store
+    # (233/233, measured), so zero parts here means the part read failed, not
+    # that the session was quiet. `iter_parts` returns an empty iterator on
+    # sqlite3.OperationalError, so this is the only place that difference is
+    # still visible.
+    store_unreadable = (r["assistant_message_count"] > 0 and not parts)
+    files_unobservable = store_unreadable or (
+        file_tool_parts > 0 and file_paths_seen == 0)
+    git_unobservable = store_unreadable or (
+        command_parts > 0 and commands_seen == 0)
+
+    unavailable: list[str] = []
+    if files_unobservable:
+        unavailable.append("files")
+        r["files_modified"] = None
+        r["lines_added"] = None
+        r["lines_removed"] = None
+        r.update(CP.unobservable())
+    else:
+        r.update(CP.summarize(files, directory or ""))
+    if git_unobservable:
+        unavailable.append("git")
+        r["git_commits"] = None
+        r["git_pushes"] = None
+    r["stats_unavailable"] = unavailable
     return r
 
 
@@ -343,7 +518,8 @@ def run(db_path: Path | None = None) -> int:
             for msg in messages:
                 all_parts.extend(S.iter_parts(db, msg["id"]))
 
-            rollup = build_rollup(session, messages, all_parts)
+            rollup = build_rollup(session, messages, all_parts,
+                                  directory=directory)
             ev = build_event(sid, directory, rollup)
             S.spool_emit(ev)
             new_sigs[sid] = sig

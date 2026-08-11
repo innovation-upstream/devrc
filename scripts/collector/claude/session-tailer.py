@@ -88,8 +88,23 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
 from pathlib import Path
+
+# The collector ROOT (this file's grandparent) holds `changed_paths.py`, the one
+# definition of the `changed_paths*` payload block, shared with the opencode
+# summariser. It resolves in both layouts: in the repo it is
+# scripts/collector/, and when deployed it is ~/.config/activity-collector/
+# (home-manager lands `claude/` as a real dir of per-file symlinks beside it).
+# 🔴 Do NOT `.resolve()` — a nix-store symlink resolves INTO the store and loses
+# the ~/.config/activity-collector/ prefix (the same trap documented in
+# opencode/_shared.py's spool bridge). `__file__` is absolute in Python 3.
+_COLLECTOR_ROOT = str(Path(__file__).parent.parent)
+if _COLLECTOR_ROOT not in sys.path:
+    sys.path.insert(0, _COLLECTOR_ROOT)
+
+import changed_paths as CP  # noqa: E402
 
 from _shared import (
     ch_ts_to_epoch,
@@ -227,7 +242,16 @@ def _int(v) -> int:
 # Rollup
 # --------------------------------------------------------------------------- #
 def _empty_rollup() -> dict:
-    return {
+    """The zero rollup.
+
+    🔴 Its `changed_paths*` block is the UNOBSERVABLE one (all None), not an
+    empty list. This function is returned verbatim for a transcript that could
+    not be opened or held no parseable JSON, and for that session "no paths" is
+    a statement about our reading, not about the session. `files_modified` etc.
+    stay ints at 0 — see `stats_unavailable` below for why the legacy counters
+    keep their type.
+    """
+    r = {
         "tool_counts": {},
         "input_tokens": 0,
         "output_tokens": 0,
@@ -254,7 +278,43 @@ def _empty_rollup() -> dict:
         "end_ts": None,
         "cwd": "",
         "unreadable": False,
+        # Which of the derived statistic GROUPS this rollup could not observe.
+        # Sentinels: "files" (files_modified / lines_added / lines_removed /
+        # changed_paths) and "git" (git_commits / git_pushes). Empty list = every
+        # group was observed, so its zeros are real zeros.
+        #
+        # 🔴 The legacy integer counters deliberately KEEP their int type here
+        # even when a group is unavailable, because they are read live by
+        # scripts/session-analysis/insights.py and pinned by
+        # scripts/validation/invariants.py, and the brief for this change is
+        # additive-only: adding a field is safe, changing a field's TYPE is not.
+        # So on the claude side `stats_unavailable` is the authority on whether a
+        # 0 means anything, and `changed_paths` (a NEW field, with no existing
+        # consumer to break) carries the distinction structurally as None.
+        # The opencode summariser, whose counters have no consumer at all and
+        # were a constant 0 lie, nulls them outright — see its build_rollup.
+        "stats_unavailable": [],
     }
+    # The zero rollup is returned VERBATIM for a transcript that could not be
+    # opened or parsed, so it must start out unobservable rather than
+    # observably-empty. build_rollup() overwrites both halves once it knows.
+    return _mark_unobservable(r)
+
+
+def _mark_unobservable(r: dict) -> dict:
+    """Set BOTH halves of the unobservable verdict, together.
+
+    🔴 One rule, one place — and here the two halves are a matched pair that a
+    reader will treat as contradictory if they ever disagree: a `changed_paths`
+    of None beside `stats_unavailable == []` says "unknown" and "everything was
+    observed" in the same payload. That exact disagreement was shipped and
+    caught by `test_an_unopenable_file_reports_ABSENT`, because
+    `summarize_transcript` returns `_empty_rollup()` directly on OSError and so
+    never reached build_rollup's branch.
+    """
+    r.update(CP.unobservable())
+    r["stats_unavailable"] = ["files", "git"]
+    return r
 
 
 def build_rollup(objects: list[dict]) -> dict:
@@ -372,6 +432,17 @@ def build_rollup(objects: list[dict]) -> dict:
         r["duration_minutes"] = round((e - s) / 60)
     r["unreadable"] = (r["user_message_count"] == 0
                        and r["assistant_message_count"] == 0)
+    # 🔴 THE OBSERVABILITY BRANCH. `unreadable` already means "this transcript
+    # yielded no messages at all", i.e. we never got far enough to see a single
+    # tool_use block — so the file set is UNKNOWN, not empty, and the paths must
+    # come back None rather than []. Emitting [] here would recreate the exact
+    # defect this PR fixes one source over: a manufactured empty list that a
+    # downstream associator reads as "this session touched nothing".
+    if r["unreadable"]:
+        _mark_unobservable(r)
+    else:
+        r.update(CP.summarize(files, cwd))
+        r["stats_unavailable"] = []
     return r
 
 

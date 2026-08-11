@@ -159,15 +159,30 @@ def sample_db(tmp_path):
             json.dumps({"type": "text", "text": "Hello, please help me."}),
         ),
     )
+    # 🔴 EVERY tool part below is built in the shape MEASURED on the live
+    # OpenCode store (2026-08-11, 7,982 tool parts): the tool's arguments live
+    # under `state.input` with camelCase keys — NOT at the part's top level.
+    #
+    # These fixtures previously carried `"command"` and `"file_path"` at the top
+    # level, a shape OpenCode has never emitted. That made this suite assert the
+    # extractor's own (wrong) assumption back to itself: 700+ tests green while
+    # production emitted `files_modified=0`, `lines_added=0`, `git_commits=0` for
+    # every OpenCode session for months. `claude/RULES.md` → "Never derive a
+    # test's expectation from the implementation it tests".
+    #
     # Bash tool part (git commit)
     conn.execute(
         "INSERT INTO part VALUES (?,?,?,?,?,?)",
         (
             "part_002", "msg_002", "ses_001", 1700000002000, 1700000003000,
             json.dumps({
-                "type": "tool", "tool": "bash",
-                "state": {"status": "completed"},
-                "command": "git commit -m 'feat: add feature'",
+                "type": "tool", "tool": "bash", "callID": "call_002",
+                "state": {
+                    "status": "completed",
+                    "input": {"command": "git commit -m 'feat: add feature'",
+                              "description": "Commit the feature"},
+                    "output": "[main abc1234] feat: add feature",
+                },
             }),
         ),
     )
@@ -177,44 +192,65 @@ def sample_db(tmp_path):
         (
             "part_003", "msg_002", "ses_001", 1700000002100, 1700000003000,
             json.dumps({
-                "type": "tool", "tool": "bash",
-                "state": {"status": "completed"},
-                "command": "git push origin main",
+                "type": "tool", "tool": "bash", "callID": "call_003",
+                "state": {
+                    "status": "completed",
+                    "input": {"command": "git push origin main"},
+                    "output": "Everything up-to-date",
+                },
             }),
         ),
     )
-    # Edit tool part (Python file)
+    # Edit tool part (Python file) — 3 lines in, 1 line out.
     conn.execute(
         "INSERT INTO part VALUES (?,?,?,?,?,?)",
         (
             "part_004", "msg_002", "ses_001", 1700000002200, 1700000003000,
             json.dumps({
-                "type": "tool", "tool": "edit",
-                "state": {"status": "completed"},
-                "file_path": "/home/zach/workspace/my-repo/src/main.py",
+                "type": "tool", "tool": "edit", "callID": "call_004",
+                "state": {
+                    "status": "completed",
+                    "input": {
+                        "filePath": "/home/zach/workspace/my-repo/src/main.py",
+                        "oldString": "print('a')",
+                        "newString": "print('a')\nprint('b')\nprint('c')",
+                    },
+                    "output": "Edit applied successfully.",
+                },
             }),
         ),
     )
-    # Edit tool part (TypeScript file)
+    # Edit tool part (TypeScript file) — 2 lines in, 2 lines out.
     conn.execute(
         "INSERT INTO part VALUES (?,?,?,?,?,?)",
         (
             "part_005", "msg_002", "ses_001", 1700000002300, 1700000003000,
             json.dumps({
-                "type": "tool", "tool": "edit",
-                "state": {"status": "completed"},
-                "file_path": "/home/zach/workspace/my-repo/src/app.ts",
+                "type": "tool", "tool": "edit", "callID": "call_005",
+                "state": {
+                    "status": "completed",
+                    "input": {
+                        "filePath": "/home/zach/workspace/my-repo/src/app.ts",
+                        "oldString": "const a = 1;\nconst b = 2;",
+                        "newString": "const a = 1;\nconst c = 3;",
+                    },
+                    "output": "Edit applied successfully.",
+                },
             }),
         ),
     )
-    # Bash tool part with error
+    # Bash tool part with error. MEASURED: an errored part still carries its
+    # `input` (7,982 of 7,982 tool parts do, including all 152 errored ones), so
+    # a fixture that omitted it would make the "we could not read the input"
+    # branch look like ordinary traffic.
     conn.execute(
         "INSERT INTO part VALUES (?,?,?,?,?,?)",
         (
             "part_006", "msg_002", "ses_001", 1700000002400, 1700000003000,
             json.dumps({
-                "type": "tool", "tool": "bash",
-                "state": {"status": "error", "error": "command not found: xyz"},
+                "type": "tool", "tool": "bash", "callID": "call_006",
+                "state": {"status": "error", "error": "command not found: xyz",
+                          "input": {"command": "xyz --help"}},
             }),
         ),
     )
@@ -225,7 +261,9 @@ def sample_db(tmp_path):
             "part_007", "msg_002", "ses_001", 1700000002500, 1700000003000,
             json.dumps({
                 "type": "tool", "tool": "mcp__github__list_issues",
-                "state": {"status": "completed"},
+                "callID": "call_007",
+                "state": {"status": "completed", "input": {"repo": "org/repo"},
+                          "output": "[]"},
             }),
         ),
     )
@@ -592,6 +630,20 @@ class TestFullRoundtrip:
         assert payload1["files_modified"] == 2
         assert payload1["unreadable"] is False
         assert payload1["duration_minutes"] == 1.0
+        # 🔴 THE SEAM. Everything above this line is also asserted by a unit
+        # test on build_rollup; only the full DB → rollup → spool → collector
+        # path can show that `run()` actually hands the session DIRECTORY to the
+        # summariser. Without it, the changed paths are computed against an
+        # empty cwd, every path lands "outside", and the emitted list is empty —
+        # a silent, plausible, completely wrong result that every unit test in
+        # this repo would still pass. (A mutation that dropped `directory=`
+        # from run()'s call survived until this assertion existed.)
+        assert payload1["changed_paths"] == ["src/app.ts", "src/main.py"]
+        assert payload1["changed_paths_total"] == 2
+        assert payload1["changed_paths_outside_cwd"] == 0
+        assert payload1["changed_paths_truncated"] is False
+        assert payload1["stats_unavailable"] == []
+        assert payload1["lines_added"] == 5 and payload1["lines_removed"] == 3
 
         # Parse second event (ses_002 — empty session)
         ev2 = C.parse_line(lines[1])

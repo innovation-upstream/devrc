@@ -128,6 +128,19 @@ inject post-reload). Manifest **v1.4.0**. When a file is DELETED upstream (e.g. 
   time before re-opening this.
 - **`session-summary` / `session-insight` rows are APPEND-ONLY** — dedupe on read with
   `argMax(<field>, ingested_at)` grouped by `session`.
+- 🔴 **On `session-summary`, `null` ≠ `0` and `null` ≠ `[]`.** `changed_paths` (the
+  repo-relative changed-file set), and on `source=opencode` also `files_modified` /
+  `lines_*` / `git_*`, are **null when the summariser could not observe them** —
+  never a manufactured zero. `stats_unavailable` (`[]` / `["files","git"]`) is the
+  sentinel; `changed_paths_total` + `changed_paths_truncated` say whether a list is
+  the whole story, and `changed_paths_outside_cwd` counts paths with no
+  repo-relative form (scratchpads, other repos, temp worktrees). **A query that
+  `SUM()`s these silently coerces null to 0 — filter `stats_unavailable = '[]'` or
+  report the two populations separately.** Before 2026-08-11 opencode reported a
+  hard 0 for all five on every session (its extractor read the tool args from the
+  part's top level; they live under `state.input`, camelCase) — so **any opencode
+  file/git aggregate over rows older than that is a floor of zero, not a reading.**
+  Full contract: `scripts/collector/README.md`.
 
 ## status
 ```bash

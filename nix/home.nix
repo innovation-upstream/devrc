@@ -645,6 +645,16 @@ in
     source = ../scripts/collector/collector.py;
     executable = true;
   };
+  # Shared by BOTH session summarisers (claude/session-tailer.py and
+  # opencode/session_tailer.py) — the one definition of the `changed_paths*`
+  # payload block. It must land at the collector ROOT, beside collector.py,
+  # because each tailer puts its own grandparent dir on sys.path to import it;
+  # that resolves identically in the repo (scripts/collector/) and here.
+  # 🔴 Without this entry the switch succeeds and the tailers die on ImportError
+  # at the next timer tick. scripts/tests/test_collector_deploy_declares.py
+  # pins it for exactly that reason.
+  home.file.".config/activity-collector/changed_paths.py".source =
+    ../scripts/collector/changed_paths.py;
 
   # Claude Code activity source (5th source): a periodic tailer that scans the
   # ~/.claude transcripts and emits NEW user-typed messages / slash-commands as
