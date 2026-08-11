@@ -27,7 +27,16 @@ leaked into fixtures once (devrc `60e6d9d` scrubbed them retroactively) — seve
 live aliases are exactly that shape.
 
 So the fixtures below reproduce the SHAPES measured in the live store on
-2026-08-10 (read-only probe, nothing written), with synthetic names:
+2026-08-10 (read-only probe, nothing written), with synthetic names.
+
+⚠ The list that follows describes the LIVE CORPUS, not `ENTRIES` below.
+`ENTRIES` is 9 entries across 3 scopes — deliberately smaller and deliberately
+NOT proportioned like the real store, because its job is to carry one clean
+instance of each SHAPE (and two constructed ones the live store does not contain
+at all: the ambiguity pair and a cross-entry alias clash). Read the counts here
+as "what the store looks like", never as "what the fixture asserts".
+
+Measured live, 2026-08-10:
 
   * 21 entries, 1 scope, 0 `kind:` fields, 0 `sensitivity:` fields;
   * every entry still spells the scope `repo:`, not `scope:` — the loader must
@@ -56,6 +65,7 @@ from a copy of the source and watching the specific expectation die.
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import sys
 from pathlib import Path
@@ -718,6 +728,22 @@ class TestAssociateGuards:
             "clusters/homelab/apps/unlisted-widget/values.yaml",
         )
 
+        # The named affordance over that same discriminator.
+        assert nothing_given.looked_at_nothing is True
+        assert looked_and_missed.looked_at_nothing is False
+
+    def test_looked_at_nothing_tracks_considered_paths_only(
+        self, index: sr.SubsystemIndex
+    ) -> None:
+        """It must key on whether we LOOKED, never on whether we FOUND — a
+        successful match and a total miss are both `looked_at_nothing is False`."""
+        matched = sr.associate_paths(
+            ["x/pghero/a.yaml", "x/pghero/b.yaml"], index, SCOPE_A, min_paths=2
+        )
+        assert matched.subsystem_refs == ("pghero",)
+        assert matched.looked_at_nothing is False
+        assert sr.associate_paths([], index, SCOPE_A).looked_at_nothing is True
+
     def test_an_unknown_scope_still_raises_even_with_no_paths(
         self, index: sr.SubsystemIndex
     ) -> None:
@@ -920,15 +946,50 @@ class TestPrecisionThreshold:
         assert result.subsystem_refs == ("pghero",)
 
     def test_distinct_paths_not_component_hits(self, index: sr.SubsystemIndex) -> None:
-        """One path whose components hit the same entry TWICE is still one path.
+        """One path whose components hit the same entry TWICE is still ONE path.
 
-        Otherwise `pghero/pghero.yaml` would clear a threshold of 2 on its own,
-        and the threshold would measure repetition rather than breadth."""
-        result = sr.associate_paths(
-            ["clusters/homelab/apps/pghero/pghero.yaml"], index, SCOPE_A, min_paths=2
-        )
+        🔴 This test used to feed `.../pghero/pghero.yaml` and was VACUOUS.
+        `path_refs` keys on `(raw_component, ref)`, so the directory and the
+        filename stem there collapse to a single pair INSIDE `path_refs` — the
+        bucket dedupe in `associate_paths` was never reached, and deleting it
+        left the suite green.
+
+        The shape that actually reaches the dedupe is TWO DISTINCT components on
+        one path resolving to ONE entry, which is the ordinary live layout
+        (an alias directory above a slug directory). Here `ingestion` is
+        image-ingestion's alias and `image-ingestion` is its slug: two different
+        components, two different refs, one entry.
+
+        Without the dedupe, this single grazed file counts as 2 and clears
+        `min_paths=2` on its own — the threshold would measure how many ways a
+        path spells a subsystem rather than how much of it the session touched,
+        which is precisely the distinction P1's signal quality rests on.
+        """
+        path = "apps/ingestion/image-ingestion/values.yaml"
+        result = sr.associate_paths([path], index, SCOPE_A, min_paths=2)
+
         assert result.matched == ()
-        assert result.below_threshold[0].path_count == 1
+        assert len(result.below_threshold) == 1
+        below = result.below_threshold[0]
+        assert below.entry.filename == "image-ingestion.md"
+        assert below.path_count == 1
+        assert below.paths == (path,)
+
+        # Both components WERE seen — this is the two-component shape, not the
+        # collapsed one the old fixture accidentally produced.
+        assert [e.component for e in below.evidence] == ["ingestion", "image-ingestion"]
+        assert [e.tier for e in below.evidence] == ["alias", "filename"]
+
+    def test_path_refs_collapses_a_directory_that_repeats_as_the_stem(self) -> None:
+        """The behaviour the old vacuous test was really exercising, asserted at
+        the level it actually happens: `path_refs`, not `associate_paths`."""
+        assert sr.path_refs("clusters/homelab/apps/pghero/pghero.yaml") == (
+            ("clusters", "clusters"),
+            ("homelab", "homelab"),
+            ("apps", "apps"),
+            ("pghero", "pghero"),
+            ("pghero.yaml", "pghero.yaml"),
+        )
 
 
 # =============================================================================
@@ -1081,6 +1142,145 @@ class TestEvidence:
 
 
 # =============================================================================
+# Live-corpus path shapes that no other fixture in this file could produce.
+# =============================================================================
+
+
+class TestLiveCorpusPathShapes:
+    """🔴 Written from ONE question, after an audit found two vacuous guards that
+    shared a blind spot: **which path shapes present in the live store can no
+    fixture in this file physically produce?**
+
+    Both the 133-mutant sweep and the hand-written matrix missed those guards
+    because both were built from the MODULE's vocabulary — they asked "what can
+    I break in the code?", never "what can the corpus feed it?". A mutation
+    sweep cannot find a case the fixtures cannot express; it can only find code
+    the fixtures already reach.
+
+    Shapes below were measured against the live store on 2026-08-11 (read-only):
+    2 aliases contain a SPACE, 2 contain a DOT, 9 carry 2+ hyphens, and the
+    dominant layout is a per-service directory under a deep prefix — but a flat
+    `<slug>.yaml` beside its siblings is also common, and NO test above ever
+    matched on a filename stem alone.
+    """
+
+    def test_match_from_the_FILENAME_STEM_alone(self, index: sr.SubsystemIndex) -> None:
+        """`clusters/production/apps/<slug>.yaml` — a flat per-service manifest
+        with no directory named for the subsystem. Every association test above
+        matched on a DIRECTORY component; this one cannot."""
+        result = sr.associate_paths(
+            [
+                "clusters/production/apps/object-store.yaml",
+                "clusters/staging/apps/object-store.yaml",
+            ],
+            index,
+            SCOPE_A,
+            min_paths=2,
+        )
+        assert result.subsystem_refs == ("object-store",)
+        (match,) = result.matched
+        assert [e.component for e in match.evidence] == ["object-store", "object-store"]
+        assert {e.tier for e in match.evidence} == {"filename"}
+
+    def test_KNOWN_LIMITATION_a_multi_dot_filename_does_not_match_its_first_segment(
+        self, index: sr.SubsystemIndex
+    ) -> None:
+        """🔴 FOUND BY THIS PASS, and pinned as a limitation rather than fixed.
+
+        `object-store.secret.yaml` — a SOPS secret beside its manifest, an
+        entirely ordinary GitOps filename — does NOT associate with
+        `object-store`. `path_refs` strips exactly one extension, so the stem is
+        `object-store.secret`, and `secret` is not in the kind enum, so the whole
+        token stays the ref and misses.
+
+        Deliberately NOT changed. Stripping extensions greedily would let any
+        dotted filename impersonate a short slug (`redis.bak.old` → `redis`,
+        `db.dump.sql` → `db`), and this module's whole precision stance is exact
+        component equality. The failure direction here is UNDER-counting, which
+        can only demote a subsystem below `min_paths` — never falsely tag one.
+        Under-counting is the safe side of a threshold.
+
+        The cost is real and belongs in P1's evaluation: a session editing
+        `minio.yaml` and `minio.secret.yaml` scores 1, not 2. If P1 measures that
+        this loses material signal, the fix is a kind-enum-style allowlist of
+        known infix segments (`secret`, `values`, `patch`), NOT greedy stripping.
+        """
+        result = sr.associate_paths(
+            ["clusters/production/apps/object-store.secret.yaml"],
+            index,
+            SCOPE_A,
+            min_paths=1,
+        )
+        assert result.subsystem_refs == ()
+        assert result.unmatched_paths == (
+            "clusters/production/apps/object-store.secret.yaml",
+        )
+        # The mechanism, pinned at the level it happens.
+        assert sr.path_refs("apps/object-store.secret.yaml")[-1] == (
+            "object-store.secret",
+            "object-store.secret",
+        )
+
+    def test_a_SPACE_alias_is_reachable_from_a_path_only_after_normalization(
+        self, index: sr.SubsystemIndex
+    ) -> None:
+        """Two live aliases contain a space (a human wrote them as a phrase).
+        A path can never contain one, so such an alias is reachable ONLY because
+        normalization folds the space to `-`. `image scan` is the fixture's."""
+        result = sr.associate_paths(
+            ["services/image-scan/worker.py", "services/image-scan/queue.py"],
+            index,
+            SCOPE_A,
+            min_paths=2,
+        )
+        assert result.subsystem_refs == ("image-ingestion",)
+        ev = result.matched[0].evidence[0]
+        assert ev.component == "image-scan"
+        assert ev.ref == "image-scan"
+        assert ev.tier == "alias"
+        assert ev.matched_alias == "image scan"  # as WRITTEN, spaces intact
+
+    def test_a_DOTTED_alias_survives_kind_splitting_and_still_matches(
+        self, index: sr.SubsystemIndex
+    ) -> None:
+        """Two live aliases are dotted. The trailing segment is not in the kind
+        enum, so the whole token must stay the ref — if `split_kind` were greedy
+        the alias would be unreachable."""
+        result = sr.associate_paths(["infra/s3.local/config.yaml"], index, SCOPE_A, min_paths=1)
+        assert result.subsystem_refs == ("object-store",)
+        assert result.matched[0].evidence[0].matched_alias == "s3.local"
+
+    def test_a_SINGLE_COMPONENT_path_at_the_repo_root(
+        self, index: sr.SubsystemIndex
+    ) -> None:
+        """A top-level file with no directory above it. `path_refs` has to cope
+        with a one-element split; nothing above exercised that at association
+        level."""
+        result = sr.associate_paths(["bar-status-poll"], index, SCOPE_A, min_paths=1)
+        assert result.subsystem_refs == ("bar-status-poll",)
+        assert result.unmatched_paths == ()
+
+    def test_two_paths_spelling_one_subsystem_DIFFERENTLY_both_count(
+        self, index: sr.SubsystemIndex
+    ) -> None:
+        """The complement of `test_distinct_paths_not_component_hits`: two ways
+        of spelling one subsystem on the SAME path collapse to one, but on
+        DIFFERENT paths they are two genuinely distinct files and must both
+        count toward the threshold. Aliases exist precisely so a subsystem can
+        be spelled more than one way in a tree."""
+        result = sr.associate_paths(
+            ["apps/ingestion/worker.py", "apps/image-ingestion/values.yaml"],
+            index,
+            SCOPE_A,
+            min_paths=2,
+        )
+        assert result.subsystem_refs == ("image-ingestion",)
+        (match,) = result.matched
+        assert match.path_count == 2
+        assert [e.tier for e in match.evidence] == ["alias", "filename"]
+
+
+# =============================================================================
 # The thin disk loader.
 # =============================================================================
 
@@ -1126,14 +1326,31 @@ class TestLoader:
         with pytest.raises(sr.UnknownScopeError):
             sr.resolve_ref("flux", loaded, "nope")
 
-    def test_directory_name_beats_a_stale_scope_field(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("key", ["scope", "repo"])
+    def test_directory_name_beats_a_stale_scope_field(self, tmp_path: Path, key: str) -> None:
+        """🔴 This test only wrote `repo:` and was VACUOUS for the `scope:` case.
+
+        The loader pops `repo:` before `from_mapping` ever sees it, so a stale
+        `repo:` proves nothing about the override — changing
+        `fm["scope"] = dirname` to `fm.setdefault(...)` left the suite green.
+        Only `scope:`, the key the #362 migration will start writing, exercises
+        it. Harmless today (0 of 21 live entries spell `scope:`) and a live
+        defect the moment that changes, which is exactly when nobody would be
+        looking at this test.
+
+        With `setdefault`, the entry lands in scope `some-old-name` while
+        `homelab-talos` is registered empty — so the file is unreachable under
+        the scope it actually lives in.
+        """
         _write_entry(
             tmp_path / "homelab-talos",
             "flux.md",
-            "---\nservice: flux\nrepo: some-old-name\n---\n",
+            f"---\nservice: flux\n{key}: some-old-name\n---\n",
         )
         loaded = sr.load_index(tmp_path)
         assert loaded.scopes == ("homelab-talos",)
+        assert "some-old-name" not in loaded.scopes
+        assert sr.resolve_ref("flux", loaded, "homelab-talos").filename == "flux.md"
 
     def test_kind_qualified_filename_on_disk(self, tmp_path: Path) -> None:
         scope = tmp_path / "devrc"
@@ -1286,15 +1503,33 @@ class TestCommandDocIsPinned:
     reads as "no index yet").
 
     It cannot be deduplicated: you cannot import a function into markdown. So it
-    is made DETECTABLE. Each row is (the doc's normative sentence, verbatim). If
-    the prose is reworded without touching the code, the substring vanishes and
-    this test names the sentence that moved. If the code is changed without
-    touching the prose, the behavioural assertions below go red.
+    is made DETECTABLE, in TWO layers, because the first layer alone has a blind
+    spot that an audit demonstrated:
 
-    🔴 This is a DRIFT DETECTOR, not a proof of agreement. It cannot tell you the
-    prose and the code MEAN the same thing — only that neither moved without the
-    other. That is the honest limit of what is achievable across the boundary,
-    and it is stated here so nobody later reads a green as more than it is.
+      1. SUBSTRING PINS (`DOC_SENTENCES`) — each row is a normative sentence,
+         verbatim. Reword or delete a PINNED sentence and the row names it.
+      2. REGION HASHES (`HASHED_REGIONS`) — sha256 over the marked blocks in the
+         doc. This catches what layer 1 structurally cannot: an ADDITION, or the
+         deletion of a clause nobody thought to pin.
+
+    🔴 WHY LAYER 2 EXISTS. An audit fed this class six semantic doc mutations;
+    all fourteen substring pins stayed intact and ALL SIX SURVIVED — including
+    deleting the `repo:`→`scope` back-compat clause outright, which was not in
+    `DOC_SENTENCES` at all. Addition is also the LIKELIER drift direction here,
+    because the doc's editor is an LLM and an LLM appends. A pin can only ever
+    see the sentences someone already thought of; a hash sees the block.
+
+    🔴 THIS IS STILL A DRIFT DETECTOR, NOT A PROOF OF AGREEMENT — and weaker
+    than "neither moved without the other", which is what this docstring used to
+    claim and which was itself too strong. What is actually guaranteed:
+
+      * a change INSIDE a hashed region cannot land silently;
+      * a pinned sentence cannot be reworded or removed silently.
+
+    What is NOT guaranteed: prose OUTSIDE the hashed regions can still move
+    materially and stay green, and nothing here can tell you the prose and the
+    code MEAN the same thing. Read a green as "nothing moved unnoticed in the
+    regions we watch", never as "they agree".
     """
 
     DOC_SENTENCES: list[tuple[str, str]] = [
@@ -1360,6 +1595,30 @@ class TestCommandDocIsPinned:
             "scripts/tests/test_subsystem_resolver.py",
             "the pointer naming this test as the drift detector",
         ),
+        # 🔴 ADDED after an audit deleted this clause and all 14 other pins
+        # stayed green. `load_index` + `SubsystemEntry.from_mapping` read `repo:`
+        # as `scope:` SOLELY because of this sentence, and 21 of 21 live entries
+        # still spell it that way — dropping the clause would make the loader's
+        # back-compat read look like unexplained legacy cruft to the next editor.
+        (
+            "**replaces `repo:`**, which older files still carry and reads as `scope`",
+            "the repo:->scope back-compat the loader implements",
+        ),
+    ]
+
+    # (marker name, the code that implements the block) — the doc carries
+    # `<!-- <name>:begin -->` / `<!-- <name>:end -->` around each.
+    HASHED_REGIONS: list[tuple[str, str, str]] = [
+        (
+            "resolver-rules",
+            "52a56d94431ba4de3c6d696fa35b3ed4e443de612ec17a8f33a049174762e279",
+            "normalize_ref / split_kind / resolve_ref_tiered",
+        ),
+        (
+            "entry-schema",
+            "f318b88f1712615c1711f411b34ff9d0672bee734cac62c2edcadd04e5f96f57",
+            "SubsystemEntry.from_mapping / load_index",
+        ),
     ]
 
     @pytest.mark.parametrize(
@@ -1374,6 +1633,82 @@ class TestCommandDocIsPinned:
             f"  drift between them is SILENT (associations stop matching and the zero\n"
             f"  reads as 'this subsystem had no sessions')."
         )
+
+    # --- layer 2: region hashes ----------------------------------------------
+
+    @staticmethod
+    def _region(doc: str, name: str) -> str:
+        """Bytes between `<!-- <name>:begin -->` and `<!-- <name>:end -->`.
+
+        Raises rather than returning "" on a miss — an empty region would hash
+        to a constant and the guard would pass forever against nothing, which is
+        the silent-zero shape this whole module exists to avoid.
+        """
+        # Matched on the marker PREFIX, not the whole comment: both markers carry
+        # explanatory prose after the name, and that prose is documentation for
+        # the next editor — it must be editable without silently changing which
+        # bytes are hashed.
+        begin = f"<!-- {name}:begin"
+        end = f"<!-- {name}:end"
+        i = doc.find(begin)
+        assert i != -1, f"marker {begin!r} is missing from analyze-service.md"
+        i = doc.index("-->", i) + len("-->")
+        j = doc.find(end, i)
+        assert j != -1, f"marker {end!r} is missing from analyze-service.md"
+        body = doc[i:j].strip()
+        assert body, f"region {name!r} is EMPTY — the hash would guard nothing"
+        return body
+
+    @pytest.mark.parametrize(
+        "name,expected_sha,implemented_by",
+        HASHED_REGIONS,
+        ids=[n for n, _, _ in HASHED_REGIONS],
+    )
+    def test_region_hash(
+        self, doc: str, name: str, expected_sha: str, implemented_by: str
+    ) -> None:
+        actual = hashlib.sha256(self._region(doc, name).encode("utf-8")).hexdigest()
+        assert actual == expected_sha, (
+            f"\nThe `{name}` block of claude/commands/analyze-service.md CHANGED.\n"
+            f"  expected sha256 {expected_sha}\n"
+            f"  actual   sha256 {actual}\n\n"
+            f"This is not a formatting nit. That block is the PROSE HALF of a\n"
+            f"predicate whose code half is {implemented_by} in\n"
+            f"scripts/lib/subsystem_resolver.py. A substring pin cannot see a\n"
+            f"sentence being ADDED, or an unpinned clause being deleted — this\n"
+            f"hash is what does.\n\n"
+            f"So: re-read the block against the code, make them agree, then paste\n"
+            f"the actual sha above into HASHED_REGIONS in the SAME commit.\n"
+            f"Updating the hash WITHOUT reading the code is the one way to make\n"
+            f"this guard worthless."
+        )
+
+    def test_the_region_extractor_can_observe_a_change(self, doc: str) -> None:
+        """🔴 Positive control on layer 2. A hash comparison that always passes
+        is indistinguishable from one wired to a constant, so prove the hash
+        MOVES when the region does — by hashing a deliberately altered copy."""
+        for name, expected_sha, _ in self.HASHED_REGIONS:
+            body = self._region(doc, name)
+            mutated = body.replace("normalized", "NORMALISED", 1) + "\n- an added bullet"
+            assert mutated != body
+            assert (
+                hashlib.sha256(mutated.encode("utf-8")).hexdigest() != expected_sha
+            ), f"region {name!r}: the hash did not move for a changed body"
+
+    def test_a_missing_marker_fails_loudly(self) -> None:
+        """Negative control on the extractor: a region it cannot find must raise,
+        never silently hash the empty string."""
+        with pytest.raises(AssertionError) as exc:
+            self._region("no markers here at all\n", "resolver-rules")
+        assert "is missing from analyze-service.md" in str(exc.value)
+
+    def test_an_empty_region_fails_loudly(self) -> None:
+        with pytest.raises(AssertionError) as exc:
+            self._region(
+                "<!-- resolver-rules:begin -->\n\n<!-- resolver-rules:end -->\n",
+                "resolver-rules",
+            )
+        assert "is EMPTY — the hash would guard nothing" in str(exc.value)
 
     def test_the_pin_can_fail(self, doc: str) -> None:
         """Negative control on the pin itself: it must be able to report absence.

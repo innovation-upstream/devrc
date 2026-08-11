@@ -158,8 +158,8 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 # onto 91aaa21 (#379), not computed. CONTROL PAIR under one tool set, same
 # command, same machine:
 #     base 91aaa21 : TOTAL collected=6745  passed=6744  failed=0  scripts/tests=1652
-#     this branch  : TOTAL collected=6945  passed=6944  failed=0  scripts/tests=1852
-#   +200, and 1852-1652 = 200 = exactly the new
+#     this branch  : TOTAL collected=6960  passed=6959  failed=0  scripts/tests=1867
+#   +215, and 1867-1652 = 215 = exactly the new
 #   scripts/tests/test_subsystem_resolver.py suite.
 #   That attribution is also the positive control proving the gate RUNS the new
 #   suite: it needed no HERMETIC_TARGETS entry, because `scripts/tests` is
@@ -170,8 +170,11 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 # 🔴 RE-MEASURED, NOT CARRIED FORWARD, AND NOT COMPUTED. The pre-rebase value on
 # this branch was 6940 against base 5c53f38's 6743. #379 then landed and moved
 # the base, so 6940 was stale the moment it did. Arithmetic on the old numbers
-# predicted 6942; the merged tree actually reports 6945, because this branch also
-# gained 3 tests from its own review fix. The number above is the measurement.
+# predicted 6942; the merged tree reported 6945, because the branch had also
+# gained 3 tests from its own review fix. It then reached 6960 when an audit
+# round replaced two vacuous guards and added a live-path-shape pass. Each of
+# those numbers was MEASURED at the time it was written — none was computed from
+# the one before it, which is the whole point of this note.
 #
 # EXPECTED_SKIPS is untouched: skipped=1, the one pinned entry. The new suite
 # adds ZERO skips by construction — no external binary, no network, no path
@@ -181,7 +184,7 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 # fce27f2) while the value beside it had been bumped twice — to 6745 by #379.
 # A floor comment that no longer describes its own number is the "a comment is a
 # claim too" case from claude/RULES.md; rewritten rather than bumped again.
-MIN_TESTS="${MIN_TESTS:-6945}"
+MIN_TESTS="${MIN_TESTS:-6960}"
 
 # --- GUARD 1: tool precondition ------------------------------------------------
 # Every binary the suites `skipif` on. Absence must be an ERROR, never a skip.

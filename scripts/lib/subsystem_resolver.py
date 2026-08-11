@@ -138,6 +138,10 @@ DEFAULT_MIN_PATHS = 2
 _NON_SLUG = re.compile(r"[^a-z0-9.-]")
 _DASH_RUN = re.compile(r"-{2,}")
 
+# ⚠ The `\A` is REDUNDANT-BUT-KEPT (labelled, so a sweep does not re-derive it):
+# this pattern is only ever used with `.match()`, which already anchors at
+# position 0. It stays because it makes "front matter must be at the TOP of the
+# file" readable at the pattern rather than at the call site.
 _FRONT_MATTER = re.compile(r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|\Z)", re.S)
 
 
@@ -481,6 +485,10 @@ def resolve_ref_tiered(
     """
     entries = index.entries(scope)
     nref = normalize_ref(ref)
+    # ⚠ REDUNDANT-BUT-KEPT, and labelled so the next mutation sweep does not
+    # re-derive it: no entry can have an empty slug (`from_mapping` rejects one),
+    # so an empty ref would miss both tiers anyway. This is a cheap short-circuit
+    # that states the intent, not a guard — mutating it away changes nothing.
     if not nref:
         return None, None
 
@@ -559,11 +567,38 @@ class Association:
 
     scope: str
     min_paths: int
+
     matched: tuple[SubsystemMatch, ...]
+    """Subsystems that cleared `min_paths`, in canonical ref order.
+
+    🔴 `if not assoc.matched:` CONFLATES THE TWO ZEROS. It is empty both when no
+    paths were supplied and when paths were supplied and matched nothing — and
+    downstream those mean opposite things ("we have no reading" vs "this
+    subsystem was genuinely not touched"). Use `looked_at_nothing` to separate
+    them; `considered_paths` is the underlying evidence.
+    """
+
     below_threshold: tuple[SubsystemMatch, ...]
     ambiguous: tuple[AmbiguousRef, ...]
     unmatched_paths: tuple[str, ...]
     considered_paths: tuple[str, ...]
+    """Every path actually examined, deduped, in input order. The discriminator."""
+
+    @property
+    def looked_at_nothing(self) -> bool:
+        """True when NO paths were supplied — as distinct from "matched nothing".
+
+        The discriminator is `considered_paths`; this names it, so a consumer
+        does not have to know which field carries the distinction or re-derive
+        `len(considered_paths) == 0` at every call site (one rule, one place).
+
+        🔴 It is an AFFORDANCE, not a gate. Nothing can force a consumer to
+        consult it — that was the one thing raising an exception did buy, and it
+        was traded away deliberately because it made the ordinary case
+        exceptional. In particular `if not assoc.matched:` still conflates the
+        two zeros; see the note on `matched`.
+        """
+        return not self.considered_paths
 
     @property
     def subsystem_refs(self) -> tuple[str, ...]:
@@ -776,6 +811,21 @@ def load_index(root: Path) -> SubsystemIndex:
     A scope dir with no entries is REGISTERED, not dropped: "Lazy — a scope dir
     or service file may not exist yet". An existing empty scope must resolve to
     an honest empty result, while a scope that does not exist stays an error.
+
+    🔴 FAIL-CLOSED, AND P1 MUST DECIDE WHETHER THAT IS STILL RIGHT. One malformed
+    entry aborts the WHOLE index. That is correct for the interactive caller this
+    was written for — a human running `/analyze-service` should be told the store
+    is broken, loudly, rather than handed a silently short index. It is likely
+    WRONG for P1's 5-minute timer, where the same raise means every session in
+    that window gets no association at all, and downstream that is indistinguishable
+    from "these subsystems had no sessions" — the exact silent zero this module
+    exists to prevent, reintroduced one layer up.
+
+    Deliberately NOT changed here: the alternative (skip the bad entry, report it)
+    needs somewhere for the report to GO, and that is P1's design decision, not
+    something to guess at now. When P1 lands, either give it a skip-and-report
+    mode or have the timer treat this raise as a hard alert — but do not let it
+    log-and-continue.
     """
     mappings: list[Mapping[str, object]] = []
     scopes: list[str] = []
@@ -795,6 +845,12 @@ def load_index(root: Path) -> SubsystemIndex:
             # actually lives. A `scope:`/`repo:` field that disagrees is stale
             # front matter, not a relocation.
             fm["scope"] = scope_dir.name
+            # ⚠ REDUNDANT-BUT-KEPT, labelled: `from_mapping` reads `scope` in
+            # preference to `repo`, and `scope` was just set unconditionally on
+            # the line above, so the pop cannot change any outcome. It stays to
+            # keep the mapping honest — leaving a contradicted `repo:` in a dict
+            # that is also the malformed-entry error's source label would put a
+            # stale value in front of whoever reads that error.
             fm.pop("repo", None)
             mappings.append(fm)
     return build_index(mappings, extra_scopes=scopes)
