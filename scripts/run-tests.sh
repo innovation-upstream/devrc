@@ -403,7 +403,13 @@ TARGET_FLOORS=(
   # gate runs the new file at all.
   "scripts/collector/tests|260"
   "scripts/collector/keylog/tests|79"
-  "scripts/collector/claude/tests|59"
+  # 2026-08-11, the malformed-`file_path` abort fix: +18 tests here (the
+  # extraction-site guard and run()'s per-session skip-and-report). The gate
+  # printed `collected=105 … floor=59` for this target, so 59 was ALSO already
+  # 46 behind — inside the drift band (max(60, 59/4)) and therefore silent, the
+  # same slack the line above was just re-pinned for. Rule applied to this run's
+  # own count: 105 - min(50, max(1, 105/20)) = 105 - 5 = 100.
+  "scripts/collector/claude/tests|100"
   "scripts/collector/i3/tests|12"
   "scripts/collector/browser-ext/tests|12"
   "scripts/collector/opencode/tests|162"
