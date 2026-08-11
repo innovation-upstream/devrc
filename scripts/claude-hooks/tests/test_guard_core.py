@@ -2679,6 +2679,64 @@ def test_variable_resolution_never_turns_a_blocked_repo_into_an_allowed_one(tmp_
         f". {env}\ngit -C \"$WT\" commit -m x", str(wt)) is not None
 
 
+def test_the_commands_own_assignment_beats_an_AMBIENT_export_of_that_name(
+        tmp_path, monkeypatch):
+    """🔴 Both directions of a precedence bug, and one of them FAILS OPEN.
+
+    `expandvars` reads the hook process's own environment, and this host exports
+    handles (`$DEVRC`, `$DATAPACKET`, …) that a command can perfectly well
+    reassign. Resolving the ambient value first meant the guard and the shell
+    disagreed about which repo was being committed in. Measured against that
+    order, with `WT` exported AND reassigned in the command:
+
+        ambient=<feature>, command re-points at <main>  -> ALLOW  (fail-open:
+            the commit really does land on main)
+        ambient=<main>, command re-points at <feature>  -> DENY   (false
+            positive on work that was never on main)
+
+    A shell uses the assignment it just executed. The fail-open half is the one
+    that matters: it is a silent commit onto a main branch, which is the entire
+    hazard this check exists for.
+    """
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    on_feat = _mkrepo(tmp_path / "feat-repo", branch="feat/x")
+    innocent = _mkrepo(tmp_path / "cwd-repo", branch="feat/cwd")
+
+    monkeypatch.setenv("WT", str(on_feat))          # ambient says "harmless"
+    assert gc.check_git_commit_to_main(             # …command says otherwise
+        f'WT={on_main}; git -C "$WT" commit -m x', str(innocent)) is not None
+
+    monkeypatch.setenv("WT", str(on_main))          # ambient says "blocked"
+    assert gc.check_git_commit_to_main(             # …command says otherwise
+        f'WT={on_feat}; git -C "$WT" commit -m x', str(innocent)) is None
+
+
+def test_an_ambient_handle_still_resolves_when_the_command_sets_nothing(
+        tmp_path, monkeypatch):
+    """The non-regression half: preferring `cvars` must not stop reading the
+    environment at all. A handle the hook really does inherit, and that the
+    command never reassigns, still resolves to the repo it names."""
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    on_feat = _mkrepo(tmp_path / "feat-repo", branch="feat/x")
+    monkeypatch.setenv("SOME_REPO_HANDLE", str(on_main))
+    assert gc.check_git_commit_to_main(
+        'git -C "$SOME_REPO_HANDLE" commit -m x', str(on_feat)) is not None
+
+
+def test_an_ambiguous_name_does_not_fall_through_to_the_ambient_value(
+        tmp_path, monkeypatch):
+    """🔴 The interaction between this precedence and `cvars`' own fail-closed
+    rule. A name assigned TWICE is deliberately dropped from `cvars` — it must
+    then take the cwd fallback, NOT quietly resolve to an ambient export of the
+    same name, which would reintroduce exactly the disagreement above by the
+    back door."""
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    on_feat = _mkrepo(tmp_path / "feat-repo", branch="feat/x")
+    monkeypatch.setenv("WT", str(on_feat))          # ambient looks harmless
+    cmd = f'WT={on_main}\nWT={on_feat}\ngit -C "$WT" commit -m x'
+    assert gc.check_git_commit_to_main(cmd, str(on_main)) is not None
+
+
 def test_a_variable_assigned_twice_is_not_guessed(tmp_path):
     """Ambiguity falls back to the cwd rather than picking a winner. Two
     different literals for one name means the guard does not know the value, and
