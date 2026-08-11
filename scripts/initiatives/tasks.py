@@ -19,9 +19,9 @@ Contract — mirrors `dispatch.py`'s (the sibling that WRITES tasks) exactly:
   * credential loading is REUSED from `dispatch.py` (`load_creds` → ~/.claude/clawgate.env),
     not reimplemented — one parser, one behaviour across the writer and the reader.
 
-ONE fetch per render, not one per card: `GET /api/tasks` returns the whole queue (~5 tasks),
-which is then grouped into a `slug -> [task view]` map. There is deliberately NO per-card
-HTTP call (the board carries ~140 cards).
+ONE fetch per render, not one per card: `GET /api/tasks` returns the whole queue (10 tasks /
+94,428 bytes when measured 2026-08-11), which is then grouped into a `slug -> [task view]`
+map. There is deliberately NO per-card HTTP call (the board carries ~140 cards).
 
 🔴 WHY A WALL-CLOCK DEADLINE AND NOT `urlopen(timeout=)` (the audit finding that got this
 rewritten). `urlopen(timeout=N)` is a PER-SOCKET-OPERATION timeout, not a deadline on the
@@ -35,10 +35,15 @@ so a dribbling clawgate stalled the board without bound. The fix is three-layere
   1. `_run_with_deadline` runs the whole fetch (DNS + connect + headers + body) in a DAEMON
      thread and joins for at most `FETCH_DEADLINE` wall-clock seconds. That is a real deadline
      covering every phase, whatever the socket does — including an injected getter;
-  2. `_get` additionally re-checks the wall clock between body chunks and caps the response at
-     `MAX_RESPONSE_BYTES`, so an abandoned worker thread TERMINATES itself instead of leaking
-     while it dribbles (`Notes.List` has no `LIMIT` and rows carry full task bodies — 16 KB for
-     6 tasks today, and it grows with retained history);
+  2. `_get` additionally re-checks the wall clock between body chunks — reading with `read1`,
+     which returns whatever is already available instead of blocking for a full `READ_CHUNK`
+     — and caps the response at `MAX_RESPONSE_BYTES`, so an abandoned worker thread
+     TERMINATES itself instead of leaking while it dribbles. This used to be `read`, which
+     made the re-check unreachable for any body ≥`READ_CHUNK` (64 KiB) and leaked a live
+     thread + its FDs per abandoned fetch; that was excused as "the payload is only ~16 KB"
+     until the payload was re-measured at 94,428 bytes for 10 tasks on 2026-08-11. `Notes.List`
+     has no `LIMIT` and rows carry full task bodies, so it grows with retained history — the
+     excuse was always going to expire, the guard is what has to hold;
   3. `LinkedTaskCache` (below) means the deadline is paid at most once per `CACHE_TTL_SECONDS`,
      not on every cold render — and a failed refresh keeps serving the LAST GOOD map.
 
@@ -96,12 +101,21 @@ FETCH_DEADLINE = 2.0  # seconds, wall clock, for the WHOLE fetch
 # is); it exists so an abandoned worker eventually dies instead of holding a socket forever.
 SOCKET_TIMEOUT = 2.0  # seconds
 
-# Response size cap. `Notes.List` has no `LIMIT` and each row carries the task's full body
-# (~16 KB for today's 6 tasks), so the queue grows with retained history. 1 MiB is ~60x
-# today's payload — generous headroom, but bounded: an unbounded `resp.read()` on the render
+# Response size cap. `Notes.List` has no `LIMIT` and each row carries the task's full body, so
+# the payload grows with retained history — it only ever goes up.
+#
+# MEASURED 2026-08-11 against clawgate 0.7.85: `GET /api/tasks` = 94,428 bytes for 10 tasks.
+# That is a dated MEASUREMENT, not a standing property — write it that way, because the
+# previous note here ("~16 KB for today's 6 tasks", "1 MiB is ~60x today's payload") rotted
+# into a false safety argument: it was cited as the reason the read loop below could not
+# leak an abandoned worker, and by the time it was re-measured the real body had crossed
+# READ_CHUNK and the leak was live. On that date 1 MiB was ~11x the payload, and 94,428 B
+# already spans two READ_CHUNKs.
+#
+# The cap itself stands regardless of the number: an unbounded `resp.read()` on the render
 # path is a memory/latency amplifier we don't need.
 MAX_RESPONSE_BYTES = 1 << 20  # 1 MiB
-READ_CHUNK = 64 * 1024        # bytes per read() — the wall clock is re-checked between chunks
+READ_CHUNK = 64 * 1024        # max bytes per read1() — the wall clock is re-checked per chunk
 
 # The linked-task cache's OWN TTL — deliberately LONGER than the board's 5s `CACHE_TTL_SECONDS`
 # so a hung clawgate costs `FETCH_DEADLINE` at most once per 30s rather than every cold render,
@@ -194,9 +208,13 @@ def _run_with_deadline(fn, deadline: float, *, label: str = "clawgate fetch"):
     regardless of what the peer does, and applies to an injected getter too.
 
     The worker is a DAEMON thread, so an abandoned one can never hold up interpreter exit;
-    `_get` re-checks the clock between chunks so it also terminates itself shortly after
-    being abandoned, and the single-flight guard in `LinkedTaskCache` means at most one such
-    thread exists at a time."""
+    `_get` re-checks the clock between chunks — using `read1`, which returns whatever is
+    already buffered rather than blocking for a full `READ_CHUNK` — so it also terminates
+    itself shortly after being abandoned. "Shortly" is bounded by ONE `read1`, i.e. by
+    `SOCKET_TIMEOUT` in the worst case (a peer that sends nothing at all); it is NOT bounded
+    by how long the peer takes to deliver 64 KiB, which is what `read` made it and what
+    leaked live workers once the real payload crossed `READ_CHUNK`. The single-flight guard
+    in `LinkedTaskCache` means at most one such thread exists at a time."""
     box: dict = {}
 
     def target():
@@ -221,9 +239,10 @@ def _get(url: str, token: str, *, deadline: float = FETCH_DEADLINE,
 
     Runs INSIDE the deadline thread, so its own guards are belt-and-braces for cleanup rather
     than the deadline itself: a per-operation `SOCKET_TIMEOUT`, a wall-clock re-check between
-    body chunks (so an abandoned worker stops dribbling), and a `max_bytes` cap — the queue
-    endpoint has no server-side `LIMIT` and rows carry full task bodies, so an unbounded
-    `resp.read()` on the render path is an amplifier we decline."""
+    body chunks (so an abandoned worker stops dribbling — this is why the body is read with
+    `read1`, see the loop), and a `max_bytes` cap — the queue endpoint has no server-side
+    `LIMIT` and rows carry full task bodies, so an unbounded `resp.read()` on the render path
+    is an amplifier we decline."""
     started = time.monotonic()
     req = urllib.request.Request(
         url, method="GET",
@@ -240,7 +259,19 @@ def _get(url: str, token: str, *, deadline: float = FETCH_DEADLINE,
                 raise TimeoutError(
                     f"body read exceeded the {deadline}s wall-clock deadline "
                     f"after {total} bytes")
-            chunk = resp.read(min(READ_CHUNK, (max_bytes + 1) - total))
+            # `read1`, NOT `read`. `read(n)` on a BufferedReader blocks until it has ALL n
+            # bytes or hits EOF, so the wall-clock re-check above is unreachable for as long
+            # as one whole `READ_CHUNK` is in flight — for any body ≥64 KiB an abandoned
+            # worker outlived its deadline by however long the peer took to deliver the
+            # chunk. `read1(n)` returns as soon as SOME data is available, so the loop comes
+            # back to the clock promptly.
+            #
+            # The size argument is UNCHANGED and is deliberately an over-read BY ONE:
+            # `(max_bytes + 1) - total` lets `total` reach `max_bytes + 1`, which is what
+            # makes the check below DETECT an oversized body instead of silently truncating
+            # it at the cap. `read1` returns *at most* that many bytes, never more, so the
+            # cap semantics are identical.
+            chunk = resp.read1(min(READ_CHUNK, (max_bytes + 1) - total))
             if not chunk:
                 break
             chunks.append(chunk)
