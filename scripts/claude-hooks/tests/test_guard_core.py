@@ -2384,3 +2384,273 @@ def test_resolve_dir_is_the_single_path_resolver(tmp_path, monkeypatch):
     assert gc._resolve_dir(str(on_main / ".git"), None) == str(on_main)
     assert gc._resolve_dir("/definitely/not/here", None) is None
     assert gc._resolve_dir(None, None) is None
+
+
+# =========================================================================== #
+# --- 9. 🔴 ONE APOSTROPHE IN A HEREDOC BODY DISABLED EVERY ARGV CHECK ------- #
+#
+# A heredoc body is PROSE, and the scanner tracked quote state through it. A
+# lone apostrophe (`don't`, `it's`) opened a quote that never closed, so every
+# command AFTER the heredoc was swallowed into that quoted buffer and never
+# parsed as its own segment. `_tokenise` then fell back to a whitespace split
+# whose argv[0] is a word from the message, and every argv check silently
+# stopped matching — not just the commit one. Measured on the shipped guard,
+# eight families, all ALLOW; all DENY with the apostrophe removed.
+#
+# Every test in this section was watched RED against the pre-change
+# guard_core.py and GREEN after. The fix is in `_scan`: heredoc bodies are
+# LIFTED out of the surrounding quote state (and then parsed as commands exactly
+# as before — nothing is blanked), and an unterminated quote from ANY source
+# re-scans its own tail.
+# =========================================================================== #
+
+@pytest.mark.parametrize("victim", [
+    "git commit -m x",                      # commit-to-main
+    "git stash push -m wip",                # …and every other argv check
+    "git -C /tmp reset --hard origin/main",
+    "git clean -fd",
+    "talosctl -n 1.2.3.4 reset",
+    "mkfs.ext4 /dev/sdc",
+    "dd if=/dev/zero of=/dev/sdc",
+    "pkill -f e2e/run.sh",
+])
+def test_a_heredoc_body_cannot_swallow_the_command_after_it(tmp_path, victim):
+    """🔴 THE REGRESSION. Measured ALLOW on the shipped guard for every victim
+    below — one apostrophe in a message body disabled the ENTIRE argv half of
+    the guard for the rest of the command line, including three
+    irreversible-action families.
+
+    Parametrised across families on purpose: the bug was in the SHARED scanner,
+    so a single-check test would have understated it as a commit-to-main quirk.
+    """
+    repo = _mkrepo(tmp_path / "r", branch="main")
+    cmd = f"cat > /tmp/m.txt <<EOF\nfix: don't blindly stage\nEOF\n{victim}"
+    assert gc.evaluate(cmd, "claude-code", str(repo)) is not None, cmd
+
+
+def test_the_apostrophe_is_the_discriminator_not_the_heredoc(tmp_path):
+    """🔴 The control that NAMES the mechanism. The two commands differ by ONE
+    character. Without this pair, "heredocs break the guard" and "an unbalanced
+    quote breaks the guard" are indistinguishable — and it is the second that is
+    true, which is why the fix is in the scanner rather than a heredoc special
+    case. The balanced arm is the one that DENIED before the change: if it ever
+    starts allowing, this test has stopped discriminating anything.
+    """
+    repo = _mkrepo(tmp_path / "r", branch="main")
+    balanced = "cat > /tmp/m <<EOF\ndo not stage\nEOF\ngit commit -m x"
+    unbalanced = "cat > /tmp/m <<EOF\ndon't stage\nEOF\ngit commit -m x"
+    assert gc.evaluate(balanced, "claude-code", str(repo)) is not None
+    assert gc.evaluate(unbalanced, "claude-code", str(repo)) is not None
+    # …and at the parser, which is where the difference actually lived: the
+    # victim must come back as its OWN segment, not glued into a prose blob.
+    assert any(s.strip() == "git commit -m x"
+               for s in gc.split_commands(unbalanced)), gc.split_commands(unbalanced)
+
+
+def test_a_heredoc_body_that_really_EXECUTES_is_still_checked(tmp_path):
+    """🔴 NON-REGRESSION, and the line separating this fix from the reverted
+    `_strip_message_text()` helper the module docstring forbids. That helper
+    BLANKED bodies, so `bash <<EOF` stopped being checked at all. Nothing is
+    blanked here: the body is lifted out of the surrounding quote state and then
+    parsed as commands exactly as before, so a body that really runs still
+    denies — including one whose own prose carries the apostrophe, which is the
+    case that proved lifting alone was not enough (the corruption then happened
+    INSIDE the body's own parse).
+    """
+    repo = _mkrepo(tmp_path / "r", branch="main")
+    for cmd in ["bash <<EOF\ngit stash push -m wip\nEOF",
+                "bash <<EOF\ntalosctl -n 1.2.3.4 reset\nEOF",
+                "bash <<EOF\nit's fine\ngit stash push -m wip\nEOF"]:
+        assert gc.evaluate(cmd, "claude-code", str(repo)) is not None, cmd
+
+
+def test_a_body_documenting_a_ban_still_denies_via_the_escape_hatch(tmp_path):
+    """The deliberate false positive the DESIGN NOTE accepts, re-asserted
+    through the new path. Lifting a body must not turn it into inert text — a
+    body LINE that IS a banned command is still parsed as that command and
+    denied, whether or not it would ever execute, and the deny still carries the
+    documented way out.
+
+    The `never run …` arm is the boundary, and it is ALLOW on the shipped guard
+    too: the checks key on argv[0], so prose that merely MENTIONS a command is
+    not one. Asserted rather than assumed, because "a body is still checked" and
+    "any body containing the word is denied" are different claims and only the
+    first is true.
+    """
+    repo = _mkrepo(tmp_path / "r", branch="main")
+    reason = gc.evaluate("cat > /tmp/doc.md <<EOF\ngit stash\nEOF",
+                         "claude-code", str(repo))
+    assert reason is not None
+    assert "Only QUOTING this command" in reason
+    assert gc.evaluate("cat > /tmp/doc.md <<EOF\nnever run git stash here\nEOF",
+                       "claude-code", str(repo)) is None
+
+
+@pytest.mark.parametrize("cmd,expect_body", [
+    ("cat <<'EOF'\nbody line\nEOF", "body line"),
+    ('cat <<"EOF"\nbody line\nEOF', "body line"),
+    ("cat <<EOF\nbody line\nEOF", "body line"),
+    ("cat <<\\EOF\nbody line\nEOF", "body line"),
+    ("cat <<-EOF\n\tbody line\n\tEOF", "\tbody line"),
+    ("cat <<EOF\nbody line", "body line"),            # unterminated -> runs to EOF
+])
+def test_scan_lifts_every_heredoc_spelling_out_as_a_body(cmd, expect_body):
+    """The tag parser, per spelling — all five name the same terminator. `<<-`
+    strips leading TABS from the terminator LINE only; the body text itself is
+    preserved, because the guard reads it as commands and must not invent
+    whitespace changes."""
+    _segs, _subs, bodies = gc._scan(cmd)
+    assert bodies == [expect_body], (cmd, bodies)
+
+
+@pytest.mark.parametrize("cmd", [
+    'cat <<< "x"; git stash push -m wip',
+    'cat <<< "x"\ngit stash push -m wip',
+    "cat <<<x\ngit stash push -m wip",
+    "cat <<<EOF\ngit stash push -m wip",
+    "grep foo <<<$VAR\ntalosctl -n 1.2.3.4 reset",
+])
+def test_a_here_STRING_is_not_a_heredoc(cmd):
+    """🔴 `<<<` has no body and no terminator line. Reading it as one consumes
+    the rest of the text as an unterminated body — the exact failure this change
+    fixes, reintroduced in a new place.
+
+    The three bare-word arms are the ones that matter, and they are why the
+    here-string is skipped WHOLE rather than excluded inside the heredoc branch:
+    a `not startswith("<<<")` test only protects the FIRST `<`, and the scan
+    visits the second one too, where `<<<x` reads as `<<` + tag `x`. Measured
+    on the first draft of this change — and on PR #396 — as a body swallowing
+    everything after it.
+    """
+    segs, _subs, bodies = gc._scan(cmd)
+    assert bodies == [], (cmd, bodies)
+    assert any(s.strip().startswith(("git stash", "talosctl")) for s in segs), segs
+
+
+def test_two_heredocs_on_one_line_are_consumed_in_order():
+    """bash reads the bodies in the order the operators appear. Swapping them
+    would mis-attribute the first while still looking additive."""
+    segs, _subs, bodies = gc._scan("diff <<A <<B\nfirst\nA\nsecond\nB\ngit stash")
+    assert bodies == ["first", "second"]
+    assert any("git stash" in s for s in segs)
+
+
+def test_an_unterminated_quote_does_not_blind_the_tail(tmp_path):
+    """The second half of the fix, with NO heredoc in sight — the swallow needs
+    only an ODD number of quote characters. Both arms below were measured ALLOW
+    on the shipped guard.
+
+    Note the near-miss third arm, which was ALREADY denied and is here as the
+    control: `isn't … done` closes its own quote by accident, so the tail was
+    never buried. An unpaired quote is the trigger, not an apostrophe.
+    """
+    repo = _mkrepo(tmp_path / "r", branch="main")
+    assert gc.evaluate("echo 'oops; talosctl -n 1.2.3.4 reset",
+                       "claude-code", str(repo)) is not None
+    assert gc.evaluate('echo "half open; talosctl -n 1.2.3.4 reset',
+                       "claude-code", str(repo)) is not None
+    assert gc.evaluate("echo 'it isn't done; talosctl -n 1.2.3.4 reset",
+                       "claude-code", str(repo)) is not None
+
+
+# --- 9a. 🔴 THE UNION — why the shipped parse is KEPT, not replaced --------- #
+
+def test_the_shipped_parse_is_kept_so_a_lift_cannot_lose_a_deny(tmp_path):
+    """🔴 THE MUTATION TARGET OF THIS WHOLE CHANGE, and the reason
+    `_scan(_lift=False)` exists.
+
+    Lifting a heredoc body out CHANGES THE QUOTE STATE of everything after it.
+    The old scanner's runaway quote sometimes left a `$( )`/backtick
+    substitution UNQUOTED — and therefore visible — where the clean parse leaves
+    the same bytes inside a quote that now balances. Neither reading is "right"
+    about text bash itself rejects; a guard simply must not lose the deny.
+
+    These four inputs were found by a 20,000-input verdict fuzz and are the ONLY
+    four it found. Their red/green baselines are NOT origin/main — they DENY
+    there, which is the whole point — they are RED against a scanner that lifts
+    heredocs WITHOUT keeping the shipped parse (measured: all four ALLOW). They
+    are green here because `split_commands` unions the shipped parse back in.
+    Delete that union, or make legacy mode lift heredocs, and these go red.
+    """
+    repo = _mkrepo(tmp_path / "r", branch="main")
+    for cmd in [
+        "'stash' | <<-EOF\nadd\n-f\nit's\nEOF\n | of=/dev/sdc & $(cat); "
+        "<<< it's && 'mkfs.ext4' && FOO=1 || e2e/run.sh || pkill | ",
+
+        "'origin/main'; `e2e/run.sh` | <<-EOF\npkill\n-f\ngit\ndon't\nEOF\n; "
+        "( x won't ) || ( env clean cat ) | <<-EOF\n\nEOF\n\n\"mkfs.ext4\" | "
+        "<<-EOF\n\nEOF\n | '-fd' ",
+
+        "'-m' || <<-EOF\nit's\nEOF\n\n\"won't && clean; bash `mkfs.ext4`\n"
+        "'cat'; $(won't -f mkfs.ext4)\n",
+
+        "'-fd'; <<\"MSG\"\ncommit\nMSG\n && <<< mkfs.ext4 || <<-EOF\nbash\n"
+        "--all\n--all\nmkfs.ext4\nEOF\n & \"/tmp/m\" && \"-m\"\n'-C' & <<MSG\n"
+        "bash\nhi\nif=/dev/zero\nls\nMSG\n\n'commit'; ",
+    ]:
+        assert gc.evaluate(cmd, "opencode", str(repo)) is not None, cmd
+
+
+def test_legacy_scan_mode_is_the_shipped_scanner(tmp_path):
+    """`_lift=False` must stay the OLD behaviour, or the union above stops being
+    a union of anything. Pinned by the two properties that define it: it emits
+    NO heredoc bodies, and it does not recover from an unterminated quote — so
+    the tail really is buried in one segment, exactly as it ships today."""
+    cmd = "cat <<EOF\ndon't stage\nEOF\ngit commit -m x"
+    l_segs, _l_subs, l_bodies = gc._scan(cmd, _lift=False)
+    assert l_bodies == [], "legacy mode must not lift heredoc bodies"
+    assert not any(s.strip() == "git commit -m x" for s in l_segs), \
+        "legacy mode must still bury the tail — that IS the bug being fixed"
+    # …and the lifted mode, on the same input, must differ. Without this the
+    # assertions above could both hold on a scanner that does nothing at all.
+    segs, _subs, bodies = gc._scan(cmd)
+    assert bodies == ["don't stage"]
+    assert any(s.strip() == "git commit -m x" for s in segs)
+
+
+@pytest.mark.parametrize("cmd,expect", [
+    ("git status", False),
+    ("echo 'a && b'; ls", False),
+    ("cat <<< \"x\"; git stash", False),        # a here-string is not a heredoc
+    ("cat <<EOF\nx\nEOF", True),                 # a heredoc operator
+    ("echo 'oops; talosctl reset", True),        # an unterminated quote
+    ('"\'" \'x', True),                          # …with an EVEN count of them
+])
+def test_diverged_is_true_whenever_the_two_parses_differ(cmd, expect):
+    """🔴 `diverged is False` is what `split_commands` skips the second scan on,
+    so a False negative there silently removes the union — the whole safety
+    property — with every test still green. Pinned against the real comparison.
+
+    The last case is why this is COMPUTED and not a textual heuristic: `"'" 'x`
+    leaves an unterminated `'` while containing an EVEN number of them, so a
+    guard keyed on quote parity would score it "balanced" and skip the union on
+    exactly the shape it exists for.
+    """
+    segs, subs, bodies, diverged = gc._scan_raw(cmd)
+    lsegs, lsubs, lbodies, _ = gc._scan_raw(cmd, _lift=False)
+    really = (segs, subs, bodies) != (lsegs, lsubs, lbodies)
+    assert really is expect, (cmd, segs, lsegs)
+    assert diverged is expect, (cmd, diverged)
+
+
+def test_split_commands_still_returns_the_shipped_segments(tmp_path):
+    """The union is a SUPERSET, asserted at the seam rather than argued in a
+    docstring: everything the legacy scan produces is in the output."""
+    for cmd in ["cat <<EOF\ndon't stage\nEOF\ngit commit -m x",
+                "echo 'a && b'",
+                "ls; talosctl reset",
+                "git commit -m 'unterminated"]:
+        legacy_segs, legacy_subs, _ = gc._scan(cmd, _lift=False)
+        out = gc.split_commands(cmd)
+        for s in legacy_segs + legacy_subs:
+            if s.strip():
+                assert s in out, (cmd, s, out)
+
+
+def test_body_recursion_and_quote_recovery_are_bounded():
+    """A nesting bomb must not spin a hook that fires on every Bash call."""
+    text = "x"
+    for _ in range(12):
+        text = f"bash <<EOF\n{text}\nEOF"
+    gc.split_commands(text)          # must return
+    gc.split_commands("'" * 4000)    # …and so must pathological quoting

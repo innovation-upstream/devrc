@@ -77,6 +77,16 @@ one extra step -- write the message to a file and use `git commit -F <file>` --
 which RULES already prefers over heredocs. That is a better trade than a
 security guard with a rotating cast of bypasses.
 
+🔴 NEITHER IS THE HEREDOC HANDLING IN `_scan` (2026-08-11). It LIFTS a heredoc
+body out of the surrounding quote state and then parses it as commands exactly
+as before — nothing is blanked, nothing is declared inert, and `bash <<EOF` keeps
+every deny it had. It exists because the opposite of the reverted helper was also
+a bug: the scanner tracked quote state THROUGH the body, so one apostrophe in a
+commit message (`don't`) opened a quote that never closed and swallowed every
+command AFTER the heredoc. Measured on the shipped guard — `git commit`,
+`git stash`, `git reset --hard`, `git clean -fd`, `talosctl reset`, `mkfs`,
+`dd of=/dev/sdc` and `pkill -f` all resolved ALLOW behind one apostrophe.
+
 🔴 The argv-based checks below are NOT a return of that helper, and the
 distinction is load-bearing. They never BLANK bytes and never decide which parts
 of a string are inert. They tokenise, and a quoted `-m` argument is simply ONE
@@ -407,17 +417,130 @@ _WRAPPER_POSITIONAL = {"timeout": 1, "chrt": 1}
 _SHELLS = {"bash", "sh", "zsh", "dash", "ksh", "ash", "busybox"}
 
 
-def split_commands(text):
-    """Split shell text into command segments, respecting quotes.
+# A heredoc tag as bash accepts it unquoted. Quoted tags (`<<'EOF'`, `<<"EOF"`)
+# are read by _read_heredoc_tag directly.
+_HEREDOC_TAG = re.compile(r"[A-Za-z0-9_.-]+")
 
-    Also yields the BODY of every `$( … )` / backtick substitution as its own
-    text, because a substitution body really does execute. Linear scan — no
-    regex, so no backtracking to worry about on a guard that runs per call.
+# Bound on re-parsing nested bodies (a heredoc inside a heredoc inside …), the
+# same bound `commands()` puts on `bash -c` recursion.
+_BODY_RECURSION_LIMIT = 3
+
+# How many times `_scan` will re-read a tail that an UNTERMINATED quote hid. One
+# pass per unbalanced quote character; the cap only exists so text engineered to
+# be full of them cannot make a per-Bash-call hook quadratic.
+_QUOTE_RECOVERY_LIMIT = 16
+
+
+def _read_heredoc_tag(text, k):
+    """`(tag, index-after-tag)` at position `k`, or `(None, k)`.
+
+    Handles `<<EOF`, `<<'EOF'`, `<<"EOF"` and `<<\\EOF` — the four spellings, all
+    of which name the same terminator line.
     """
-    segs, subs = [], []
+    n = len(text)
+    if k >= n:
+        return None, k
+    if text[k] in ("'", '"'):
+        q = text[k]
+        j = text.find(q, k + 1)
+        if j == -1:
+            return None, k
+        return text[k + 1:j], j + 1
+    if text[k] == "\\":
+        k += 1
+    m = _HEREDOC_TAG.match(text, k)
+    if not m:
+        return None, k
+    return m.group(0), m.end()
+
+
+def _consume_heredocs(text, i, pending):
+    """Read the bodies of the heredocs opened on the line that just ended.
+
+    Returns `(index-after-the-last-body, [body-text, …])`. Multiple heredocs on
+    one line (`cmd <<A <<B`) are consumed in the order they were opened, which is
+    bash's order. A body with no terminator runs to end-of-text — also bash's
+    behaviour, and the fail-CLOSED direction here, since the text is still
+    scanned as commands rather than dropped.
+    """
+    bodies, n = [], len(text)
+    for tag, strip_tabs in pending:
+        lines = []
+        while i < n:
+            j = text.find("\n", i)
+            line = text[i:j] if j != -1 else text[i:]
+            nxt = (j + 1) if j != -1 else n
+            probe = line.lstrip("\t") if strip_tabs else line
+            if probe.rstrip("\r") == tag:
+                i = nxt
+                break
+            lines.append(line)
+            i = nxt
+        bodies.append("\n".join(lines))
+    return i, bodies
+
+
+def _scan(text, _lift=True, _recovery=0):
+    """`([segment-text, …], [substitution-body, …], [heredoc-body, …])`.
+
+    (`_scan_raw` is the same walk returning a fourth element, `diverged` — see
+    there. This wrapper is what tests and readers should use.)
+
+    🔴 `_lift=False` REPRODUCES THE SHIPPED SCANNER EXACTLY — heredoc operators
+    are ordinary characters and an unterminated quote is not recovered from. It
+    is not vestigial and it is not dead code: `split_commands` runs BOTH modes
+    and unions the results, which is what makes this change additive by
+    CONSTRUCTION instead of by assertion. Read the argument there before removing
+    it; a 20,000-input fuzz found four inputs where lifting ALONE lost a deny.
+
+    🔴 HEREDOC BODIES ARE LIFTED OUT OF THE SCAN, and that is a BUG FIX, not a
+    tidy-up. The scanner tracks quote state character by character, and a heredoc
+    body is ordinary prose — so a single apostrophe in a commit message
+    (`don't`, `it's`) OPENED a quote that never closed, and every command after
+    the heredoc was swallowed into that quoted buffer instead of being emitted as
+    its own segment. Measured against the shipped guard, cwd on `main`:
+
+        DENY   cat > /tmp/m <<EOF / do not stage / EOF / git commit -m x
+        ALLOW  cat > /tmp/m <<EOF / don't stage  / EOF / git commit -m x
+        ALLOW  …same apostrophe body… / git stash push -m wip
+        ALLOW  …same apostrophe body… / talosctl -n 1.2.3.4 reset
+
+    i.e. one apostrophe in a message body silently disabled EVERY argv check for
+    the rest of the command line. The two cases differ only in that apostrophe,
+    which is the control that names the mechanism.
+
+    🔴 This is NOT the reverted `_strip_message_text()` helper the DESIGN NOTE
+    forbids, and the difference is the one that matters: nothing is BLANKED and
+    nothing is decided to be inert. The bodies are still returned, still parsed
+    as commands, and still checked — so `bash <<EOF` (a body that really does
+    execute) keeps exactly the coverage it has today, and a body that merely
+    QUOTES a banned command still denies via the documented escape hatch. All
+    that changes is that a body can no longer corrupt the parse of the commands
+    AROUND it.
+    """
+    return _scan_raw(text, _lift, _recovery)[:3]
+
+
+def _scan_raw(text, _lift=True, _recovery=0):
+    """`_scan` plus `diverged` — True when this walk did something the SHIPPED
+    scanner would not have: consumed a heredoc operator, or re-read a tail an
+    unterminated quote hid.
+
+    `diverged is False` is a PROOF that `_lift=True` and `_lift=False` produced
+    the same segments, which is what lets `split_commands` skip the second scan
+    for the ~everything that contains neither a heredoc nor an odd quote. It is
+    computed rather than guessed for a reason: a textual precondition like
+    "`<<` in text or an odd quote count" is UNSOUND — `"'" 'x` leaves an
+    unterminated `'` with an EVEN count of them, so a guard keyed on parity
+    would silently skip the union on exactly the shape it exists for.
+    """
+    segs, subs, bodies = [], [], []
+    diverged = False
     buf = []
     i, n = 0, len(text)
     quote = None
+    quote_at = None
+    pending = []
     while i < n:
         c = text[i]
         if quote:
@@ -431,7 +554,8 @@ def split_commands(text):
         if c == "\\" and i + 1 < n:
             buf.append(c); buf.append(text[i + 1]); i += 2; continue
         if c in ("'", '"'):
-            quote = c; buf.append(c); i += 1; continue
+            quote = c; quote_at = i
+            buf.append(c); i += 1; continue
         if c == "`":
             j = text.find("`", i + 1)
             if j == -1:
@@ -440,16 +564,43 @@ def split_commands(text):
             i = j + 1
             continue
         if c == "$" and i + 1 < n and text[i + 1] == "(":
-            depth, j = 1, i + 2
-            while j < n and depth:
+            sdepth, j = 1, i + 2
+            while j < n and sdepth:
                 if text[j] == "(":
-                    depth += 1
+                    sdepth += 1
                 elif text[j] == ")":
-                    depth -= 1
+                    sdepth -= 1
                 j += 1
-            subs.append(text[i + 2:j - 1 if depth == 0 else n])
+            subs.append(text[i + 2:j - 1 if sdepth == 0 else n])
             i = j
             continue
+        # 🔴 A here-STRING (`<<<`) has no body and no terminator line, so it is
+        # consumed WHOLE. Testing `not startswith("<<<")` inside the heredoc
+        # branch is not enough and was measured wrong: the scan also visits the
+        # SECOND `<`, where `<<<x` reads as `<<` + tag `x` and the entire rest of
+        # the text is swallowed as an unterminated body. Skipping all three
+        # characters is the only place that cannot be re-entered. (No quote,
+        # paren or separator character is skipped, so legacy mode is unaffected —
+        # asserted by the legacy-equivalence fuzz.)
+        if text.startswith("<<<", i):
+            buf.append("<<<"); i += 3; continue
+        # A heredoc OPERATOR (`<<TAG`, `<<-TAG`, `<<'TAG'`, `<<\TAG`).
+        if _lift and text.startswith("<<", i):
+            j = i + 2
+            strip_tabs = False
+            if j < n and text[j] == "-":
+                strip_tabs = True
+                j += 1
+            k = j
+            while k < n and text[k] in " \t":
+                k += 1
+            tag, after = _read_heredoc_tag(text, k)
+            if tag is not None:
+                buf.append(text[i:after])     # keep the operator in the segment
+                pending.append((tag, strip_tabs))
+                diverged = True
+                i = after
+                continue
         if c in "()":                 # subshell parens are not part of argv
             segs.append("".join(buf)); buf = []; i += 1; continue
         matched = None
@@ -458,10 +609,95 @@ def split_commands(text):
                 matched = op
                 break
         if matched:
-            segs.append("".join(buf)); buf = []; i += len(matched); continue
+            segs.append("".join(buf)); buf = []
+            i += len(matched)
+            if matched == "\n" and pending:
+                i, opened = _consume_heredocs(text, i, pending)
+                bodies.extend(opened)
+                pending = []
+            continue
         buf.append(c); i += 1
     segs.append("".join(buf))
-    return [s for s in segs + subs if s.strip()]
+    # 🔴 AN UNTERMINATED QUOTE MUST NOT BLIND THE REST OF THE SCAN. A lone
+    # apostrophe — in a heredoc body, a `-m` message, any prose the model wrote —
+    # opens a quote that never closes, and everything after it lands inside ONE
+    # quoted buffer. `_tokenise` then falls back to a whitespace split whose
+    # argv[0] is a word from the prose, so every argv check silently stops
+    # matching. Found by this change's own non-regression test, on a body that
+    # REALLY executes (`bash <<'EOF' / it's fine / git stash push -m wip / EOF`),
+    # where lifting the heredoc out was not enough because the corruption then
+    # happened INSIDE the body's own parse.
+    #
+    # An unterminated quote is a malformed command the shell itself would reject,
+    # so there is no "correct" reading to preserve. Re-scanning the tail with the
+    # offending quote treated as an ordinary character is purely ADDITIVE — it
+    # can only surface argv the first pass buried — which is the only direction a
+    # guard may err in. Each pass consumes at least the quote character, so it
+    # terminates; the limit only bounds adversarial input full of odd quotes.
+    if _lift and quote is not None and quote_at is not None:
+        # The quote was never closed, so the segments after it are a fact about
+        # the corruption, not about the command — `diverged` regardless of
+        # whether the recovery budget is left to act on it.
+        diverged = True
+        if _recovery < _QUOTE_RECOVERY_LIMIT:
+            r_segs, r_subs, r_bodies, _ = _scan_raw(
+                text[quote_at + 1:], _lift, _recovery + 1)
+            segs.extend(r_segs)
+            subs.extend(r_subs)
+            bodies.extend(r_bodies)
+    return segs, subs, bodies, diverged
+
+
+def split_commands(text, _depth=0):
+    """Split shell text into command segments, respecting quotes.
+
+    Also yields the BODY of every `$( … )` / backtick substitution and of every
+    HEREDOC as its own text, because a substitution body really does execute and
+    a heredoc body may (`bash <<EOF`). Linear scan — no regex, so no backtracking
+    to worry about on a guard that runs per call.
+
+    🔴 THE SHIPPED PARSE IS KEPT, NOT REPLACED — `_scan(text, _lift=False)` is
+    the byte-for-byte old scanner, and its segments are unioned in. This is the
+    load-bearing line of the whole change, and it is here because ASSERTING
+    additivity was not enough:
+
+    Lifting a heredoc body out CHANGES THE QUOTE STATE of everything after it,
+    and the old parse's corrupt state sometimes exposed argv the clean parse
+    hides behind a quote that now balances differently. Measured, 20,000 random
+    inputs, verdicts from the full 15-check policy: lifting alone turned FOUR
+    DENYs into ALLOWs. One of them —
+
+        '-m' || <<-EOF / it's / EOF / "won't && clean; bash `mkfs.ext4` …
+
+    — denied on the shipped guard because its runaway quote happened to leave
+    the backtick substitution unquoted, and allowed on the lift-only scanner
+    because the same bytes now sit inside a balanced-looking quote. Neither
+    parse is "right" about text bash itself rejects as unterminated; a guard
+    must simply not lose the deny. Taking the union makes "this can only make
+    more argv visible, never fewer" TRUE BY CONSTRUCTION rather than by
+    argument, so no future fuzz seed can find a fifth case.
+
+    The second scan is SKIPPED when the first one reports `diverged is False` —
+    a proof, not a heuristic, that the two modes produced identical segments
+    (see `_scan_raw`). So an ordinary command line, which is ~every call this
+    hook sees, pays one scan exactly as it does today; only text carrying a
+    heredoc or an unterminated quote pays for both.
+    """
+    segs, subs, bodies, diverged = _scan_raw(text)
+    out = segs + subs
+    for body in bodies:
+        out.extend(split_commands(body, _depth + 1)
+                   if _depth < _BODY_RECURSION_LIMIT else [body])
+    if diverged:
+        legacy_segs, legacy_subs, _, _ = _scan_raw(text, _lift=False)
+        out.extend(legacy_segs)
+        out.extend(legacy_subs)
+    seen, kept = set(), []
+    for s in out:
+        if s.strip() and s not in seen:
+            seen.add(s)
+            kept.append(s)
+    return kept
 
 
 def _tokenise(seg):
