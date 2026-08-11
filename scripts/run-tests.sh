@@ -158,7 +158,13 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 # under one tool set: base fce27f2 collected 6561, this branch 6643 (+82 = the
 # analyze-service-index suite exactly). The floor is BASE-DEPENDENT — re-measure
 # after any rebase rather than carrying this number forward.
-MIN_TESTS="${MIN_TESTS:-6745}"
+# 6770 MEASURED 2026-08-11 via `nix build .#checks.x86_64-linux.pytests` on
+# feat/drift-host-parity: collected=6770 passed=6769 skipped=1 failed=0. The
+# delta from 6745 is +25, which is exactly this branch's addition to
+# scripts/tests/test_drift_check.py (24 host-parity tests + one new parametrize
+# case on the unit-PATH table). Counted from the runner's structured summary,
+# not from an exit code.
+MIN_TESTS="${MIN_TESTS:-6770}"
 
 # --- GUARD 1: tool precondition ------------------------------------------------
 # Every binary the suites `skipif` on. Absence must be an ERROR, never a skip.

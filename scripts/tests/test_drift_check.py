@@ -1690,7 +1690,13 @@ def _mkhome(root, *, healthy=0, dangling=0, store=None,
         p.symlink_to(target)
 
     if settings_keys is not None:
-        body = {k: {"nested": "SECRET-VALUE-%s" % k} for k in settings_keys}
+        # 🔴 SCALAR values, on the SAME LINE as their key. An earlier version used
+        # nested objects, which `json.dumps(indent=2)` puts on FOLLOWING lines —
+        # so a mutant that widened the extractor to capture the value could not
+        # put a secret anywhere the assertion would see, and the leak guard
+        # passed while being structurally unable to fail. Measured: with nested
+        # values that mutant was killed only by the unrelated AGREE test.
+        body = {k: "SECRET-VALUE-%s" % k for k in settings_keys}
         if enabled is not None:
             body["enabledPlugins"] = {p: True for p in enabled}
         text = (json.dumps(body, separators=(",", ":")) if minified
@@ -1827,11 +1833,41 @@ def test_node_modules_is_pruned_even_without_a_git_dir(fleet):
 
 
 # --- settings.json key-set divergence (needs a fact set from EACH host) ----- #
-def test_settings_key_set_divergence_is_rc15_and_leaks_no_values(fleet):
-    """🔴 NEGATIVE CONTROL for the key-set check, plus the confidentiality claim
-    asserted rather than intended: settings.json holds tokens, hook command lines
-    and permission rules, and this output goes to a systemd journal. Only NAMES
-    may appear."""
+def test_settings_values_never_reach_the_output(fleet):
+    """🔴 THE CONFIDENTIALITY CLAIM, IN ITS OWN TEST.
+
+    settings.json holds tokens, hook command lines and permission rules, and this
+    output goes to a systemd journal. Only key NAMES may appear.
+
+    It is a separate test on purpose. Folded in beside the divergence assertions
+    it was UNREACHABLE: a mutant that widened the extractor to capture values
+    also changed the key names, so an earlier assertion failed first and this one
+    never ran — the guard was killed for the wrong reason and would have stayed
+    green with itself deleted. Measured, then split.
+    """
+    fleet.catch_up()
+    lstore = _mkhome(fleet.home, healthy=1,
+                     settings_keys=["hooks", "permissions", "theme"],
+                     enabled=["gopls-lsp@m"], installed=["gopls-lsp@m"])
+    _, out = _parity(fleet, "--no-remote", store=lstore)
+    # Positive control first — and deliberately ORTHOGONAL to the leak: it
+    # asserts only that the extractor produced SOMETHING, never which names. An
+    # earlier version pinned the exact key list, and a mutant that leaked values
+    # changed that list too, so the positive control failed first and the leak
+    # assertion never ran. A guard shadowed by its own control is not a guard.
+    m = re.search(r"FACT settings-keys (.+)", out)
+    assert m and m.group(1).strip() != "UNEVALUATED", (
+        "the extractor produced no key names, so the no-leak assertion below "
+        "would be vacuous\n" + out
+    )
+    assert "SECRET-VALUE" not in out, (
+        "🔴 a settings.json VALUE reached the output — this goes to the journal\n" + out
+    )
+
+
+def test_settings_key_set_divergence_is_rc15(fleet):
+    """🔴 NEGATIVE CONTROL for the key-set check: a key present on one host and
+    absent on the other, watched red with this code's own message."""
     fleet.catch_up()
     lstore = _mkhome(fleet.home, healthy=1,
                      settings_keys=["hooks", "permissions", "theme"],
@@ -1848,9 +1884,6 @@ def test_settings_key_set_divergence_is_rc15_and_leaks_no_values(fleet):
     assert "settings.json top-level KEY SETS differ" in out, out
     assert "only on workbench: permissions theme" in out, out
     assert "only on laptop: effortLevel voice" in out, out
-    assert "SECRET-VALUE" not in out, (
-        "🔴 a settings.json VALUE reached the output — this goes to the journal\n" + out
-    )
 
 
 def test_identical_key_sets_agree(fleet):
@@ -2013,7 +2046,12 @@ def test_the_embedded_payloads_are_valid_bash(name):
     one is invisible to it and surfaces only when a host runs it. Worse, a stray
     apostrophe in a payload COMMENT silently ENDS the string early — the outer
     file still parses and the payload quietly loses everything after it. That
-    happened while writing this section."""
+    happened while writing this section.
+
+    RED/GREEN: the PARITY case is regression coverage (red before this change,
+    because there was no PARITY payload). The CHECK case is an INVARIANT GUARD —
+    CHECK was already valid and this pins that it stays so; it is not evidence
+    that anything was broken."""
     proc = subprocess.run(["bash", "-n"], input=_payload_literal(name),
                           capture_output=True, text=True)
     assert proc.returncode == 0, f"{name} payload is not valid bash:\n{proc.stderr}"
@@ -2029,7 +2067,13 @@ def test_the_payloads_are_not_silently_truncated():
 
 def test_the_parity_scan_writes_nothing_into_the_home_it_walks(fleet):
     """PASSIVITY, behaviourally — the parity scan reads a host's whole config
-    tree, so "it only reads" is worth measuring rather than asserting."""
+    tree, so "it only reads" is worth measuring rather than asserting.
+
+    RED/GREEN: this does NOT go red on pre-change code — with no scan there is
+    nothing to write, so it passes vacuously there. It is not regression
+    coverage for a bug that existed; it is a guard on the new scan. Proved
+    REACHABLE by mutation: injecting `echo scanned > "$HOME/.claude/.scan-marker"`
+    into the payload fails it with this test's own message."""
     fleet.catch_up()
     store = _mkhome(fleet.home, healthy=3, dangling=2, settings_keys=["hooks"],
                     enabled=["gopls-lsp@m"], installed=["gopls-lsp@m"])

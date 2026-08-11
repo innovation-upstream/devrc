@@ -1,8 +1,16 @@
 #!/usr/bin/env bash
 # drift-check — PASSIVE deadman for the devrc two-host fleet.
 #
-# Answers ONE question, unattended, on a timer: "is either host silently no
+# Answers one question, unattended, on a timer: "is either host silently no
 # longer receiving changes?" It REPORTS. It never fixes.
+#
+# 🔴 THAT QUESTION HAS TWO HALVES, and for a long time this file only asked the
+# first. GIT PARITY (is the checkout still tracking origin/main?) and HOST PARITY
+# (is what the checkout describes actually DEPLOYED and the same on both
+# machines?) are independent. Every skill on the laptop was a dangling symlink
+# into a garbage-collected /nix/store path while `git log` matched origin/main
+# exactly — perfect git parity, zero host parity, and this script said clean.
+# See "the per-host HOST-PARITY routine" below and exit codes 14 and 15.
 #
 # ── WHY THIS EXISTS ───────────────────────────────────────────────────────────
 # `scripts/ship.sh` converges both hosts and is correct: a host it cannot
@@ -142,6 +150,10 @@
 #   DRIFT_DANGLING_MAX   max dangling symlinks listed per host (default 10, integer)
 #   DRIFT_PARITY_ROOTS   space-separated dirs, relative to $HOME, scanned for
 #                        dangling MANAGED symlinks (default ".claude .config/opencode")
+#   DRIFT_MANAGED_PREFIX what counts as a MANAGED symlink target (default
+#                        "/nix/store/"). Exists so the test suite can build a
+#                        fixture tree; the default is the only correct value on
+#                        a real host, and is NOT forwarded over ssh.
 #   DRIFT_UNREACHABLE_ESCALATE  consecutive unreachable runs before rc 13 (default 4)
 #   DRIFT_STATE_DIR  where the unreachable streak is persisted
 #                    (default ${XDG_STATE_HOME:-$HOME/.local/state}/drift-check)

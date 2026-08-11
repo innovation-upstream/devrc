@@ -31,6 +31,15 @@ there. Only what's specific to this repo, where a working tree is also a **deplo
   detector was a human shipping something unrelated. `scripts/drift-check.sh` is the passive
   deadman for exactly this: READ-ONLY (fetch + report, never fixes), same rc vocabulary as
   `ship.sh`, run it any time by hand or via the `drift-check` systemd-user timer.
+- 🔴 **Git parity is not host parity — `drift-check.sh` reports both.** A host can be
+  byte-identical to `origin/main` while nothing home-manager deploys actually resolves: on
+  2026-08-11 every skill on the laptop was a dangling symlink into a GC'd `/nix/store` path
+  (46 of 139 managed links) with a perfectly clean checkout. So the checker also reports
+  **dangling managed symlinks** (rc 14) and **host divergence** in `settings.json`
+  top-level key names + `enabledPlugins` (rc 15). It always prints links EXAMINED beside
+  links dangling — a bare "0 dangling" from a scan that walked nothing is the failure, not
+  the all-clear — and the cross-host comparison says NOT COMPARED unless it got facts from
+  both machines.
 - **Recovering a diverged host** — preserve, verify, *then* move the pointer:
   `git branch <topic> HEAD && git push -u origin <topic>` on that host → confirm the shas are
   on origin **from a different host** → `git reset --keep origin/main` (`--keep` refuses
