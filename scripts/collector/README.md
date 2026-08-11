@@ -54,9 +54,12 @@ tmux focus hooks   ─┼─► emit (pure shell, hot path) ─► spool/current
   filter on it in any adoption query.
   `kind=heartbeat` — machine-generated every 900s by the bridge daemon
   (`payload.connected`), so the source has a cadence the deadman can measure.
-  🔴 It is declared in `deadman.py`'s `MACHINE_CADENCE`, which keeps it OUT of the
-  host's active-time definition — a timer-driven emitter counted as operator
-  activity makes every idle source on the host read DEAD overnight.
+  🔴 It cannot mark a bucket ACTIVE, because `deadman.py` defines active time from
+  an ALLOWLIST of human-presence sources (`PRESENCE_SOURCES` = `keys` `i3` `tmux`
+  `zsh` `browser`) and `browser-bridge` is not one of them. Anything machine- or
+  agent-driven counted as operator activity makes every idle source on the host
+  read DEAD overnight. `MACHINE_CADENCE` still exists in that module, but only for
+  `scripts/agent-ops`' freshness panel — it no longer touches active time.
   Both reuse `keylog/spool_emit.py` for the v1 line format.
 - `tests/` — pytest unit + round-trip coverage (mocks the HTTP endpoint).
 

@@ -28,13 +28,16 @@ MEASURED per (host, source) rather than declared:
 
   1. Bucket every event into 5-minute buckets, per host and source
      (one GROUP BY — ~11k rows for 14 days across both hosts, measured).
-  2. A host's ACTIVE buckets = the buckets in which any OPERATOR-DRIVEN source on
-     that host emitted. Overnight and away-from-desk time simply is not in this
-     set, so an on-demand source is not punished for the operator being asleep.
-     🔴 "Operator-driven" is not decoration: a timer-driven emitter is excluded
-     (MACHINE_CADENCE), because one source ticking 24/7 would otherwise mark the
-     whole night ACTIVE and make every idle source on the host read DEAD by
-     morning. Measured, with numbers, at MACHINE_CADENCE.
+  2. A host's ACTIVE buckets = the buckets in which a HUMAN-PRESENCE source on
+     that host emitted (PRESENCE_SOURCES). Overnight and away-from-desk time
+     simply is not in this set, so an on-demand source is not punished for the
+     operator being asleep.
+     🔴 This is an ALLOWLIST, and that is the load-bearing part. It used to be a
+     denylist ("anything that is not a timer") which defaulted every source —
+     including every AGENT-driven one — to "counts as the operator being
+     present", so an unattended overnight agent run marked the night ACTIVE and
+     the operator's own sources read DEAD by morning. Measured, with numbers, at
+     PRESENCE_SOURCES.
   3. For each (host, source), the historical gap between consecutive emitting
      buckets is counted IN ACTIVE BUCKETS. Its Nth percentile (default p99) is
      that source's own normal worst-case silence.
@@ -68,6 +71,34 @@ not pretend to distinguish them; `newest_event_age_minutes` is reported so the
 operator can see it, and it is deliberately NOT an alarm.
 The motivating outage IS in scope: opencode died on both hosts while zsh/tmux/
 keys/i3/claude kept emitting.
+
+🔴 THE COST OF THE PRESENCE ALLOWLIST — the blind spot is WIDER than it was.
+Active time now advances only while a PRESENCE_SOURCES member emits, so the
+blackout above no longer needs every source to die: losing ALL FIVE presence
+sources at once is enough. An X-session crash is the realistic shape (it takes
+`keys` and `i3` together, and `tmux`/`zsh` with the terminals) — after it, active
+buckets stop accruing, every silence measures 0, and the check goes QUIET instead
+of alarming. Under the old any-source rule an agent still emitting would have
+kept the timeline moving and the presence sources would have alarmed. That trade
+is deliberate: the alarms it removes were false (the operator was asleep), and
+the alarm it gives up is one that only fires when the operator's whole desk is
+gone — which `newest_event_age_minutes` shows.
+Losing ONE presence source is still caught: the other four keep the timeline
+advancing, which is the whole motivating case (workbench/keys, below).
+Budgets are DENOMINATED in active buckets, so a shorter active timeline moves
+BOTH the budget and the measured silence, and the net goes in different
+directions for different sources. MEASURED 2026-08-11, both directions:
+  MORE sensitive, for a source pinned on FLOOR_BUCKETS -- the floor is a fixed
+  24 active buckets, so it now spans fewer WALL hours. laptop/opencode gained a
+  dead-hour in the 97-point sweep for exactly this reason (0 -> 1).
+  LESS sensitive, for an on-demand source whose budget scales with the same
+  shrinking timeline. Seeding a 72h death on workbench/tool: the old rule
+  measured 23.6 silent active hours against a 21.7h budget (DEAD); the allowlist
+  measures 18.2 against 19.4 (not yet). Silence shrank faster than the budget
+  because the buckets removed were disproportionately the overnight agent-only
+  ones. It is a DELAY, not a blind spot -- the same seeded death at 120h is
+  caught by both rules. Every other pair tested agreed at both 24h and 72h.
+Baselines re-form over the 14-day window.
 
 🔴 "CANNOT TELL" IS NOT "HEALTHY"
 ---------------------------------
@@ -141,30 +172,72 @@ FLOOR_BUCKETS = 24
 CAP_BUCKETS = 576
 
 # --------------------------------------------------------------------------- #
+# HUMAN-PRESENCE SOURCES — the ALLOWLIST that defines ACTIVE time.
+#
+# A bucket joins its host's ACTIVE set iff one of THESE emitted in it. Everything
+# else (`claude`, `tool`, `opencode`, `browser-bridge`, and anything added later)
+# proves only that a MACHINE was doing something.
+#
+# 🔴 WHY AN ALLOWLIST AND NOT A DENYLIST. This used to be `NOT MACHINE_CADENCE`
+# — exclude the timer-driven emitters, count everything else as the operator
+# being present. A denylist defaults every NEW source to "the human is here",
+# and the agent sources are exactly the ones where that is false. The asymmetry
+# is total: when the operator really is at the machine, `keys`/`tmux`/`i3` have
+# already marked those buckets active, so an agent row adds nothing; agent rows
+# add buckets ONLY when the operator is away, which is precisely when adding
+# them manufactures a false alarm.
+#
+# THE MOTIVATING INCIDENT (2026-08-11): an unattended overnight agent session
+# emitted `claude`/`tool` rows for hours while the human slept. That marked the
+# night ACTIVE, so `workbench/keys` and `workbench/tmux` blew their 2-ACTIVE-HOUR
+# floor and read DEAD — the same failure shape the heartbeat denylist was added
+# to fix, from a source nobody thought to deny.
+#
+# MEASURED 2026-08-11, sweeping the evaluation point hourly over 97 points across
+# the live 14-day table, denylist rule vs this allowlist (dead-hours per pair):
+#   workbench/keys            6 -> 0      workbench/tmux            7 -> 0
+#   workbench/browser-bridge 15 -> 2      laptop/browser-bridge    91 -> 88
+#   laptop/claude            50 -> 50     laptop/tmux               3 -> 3
+#   laptop/opencode           0 -> 1   (see the docstring's cost section: the
+#                                       allowlist is not uniformly quieter)
+# Positive control, same run: seeding a real death by dropping a pair's last 24h
+# is still caught under the allowlist for all seven pairs tested, with no
+# disagreement against the denylist rule. At a 72h drop one pair disagrees
+# (workbench/tool: caught by the denylist, delayed until ~120h by the
+# allowlist) -- quantified in the docstring's COST section.
+#
+# 🔴 ADDING A SOURCE THAT A HUMAN DRIVES DIRECTLY MEANS ADDING IT HERE — and
+# adding an agent-driven one means NOT adding it. The cost of getting the first
+# case wrong is quiet (the timeline just advances more slowly); the cost of the
+# second is the overnight false alarm above. The test that catches an agent
+# source sneaking in is
+# test_an_unattended_agent_at_night_does_not_make_human_sources_look_dead — it
+# uses a day/night fixture, because a fixture with no idle time is structurally
+# blind to this entire class of bug.
+PRESENCE_SOURCES = frozenset({"keys", "i3", "tmux", "zsh", "browser"})
+
+# --------------------------------------------------------------------------- #
 # MACHINE-CADENCE EMITTERS — rows that prove a SOURCE is alive but do NOT prove
-# the OPERATOR is present.
+# the OPERATOR is present: `browser-bridge` emits a `heartbeat` every 900s so its
+# own liveness is measurable (see the heartbeat contract in the tests).
 #
-# 🔴 This distinction is load-bearing for every OTHER source on the host, which
-# is what makes it easy to get wrong. `active_by_host` is built from any source's
-# buckets, so a source that emits around the clock marks overnight and
-# away-from-desk buckets ACTIVE for everyone — and idle sources then accrue
-# "active" silence while the operator is asleep. Measured 2026-08-11 against the
-# real 14-day table, sweeping the evaluation point hourly over 5 days with a
-# synthetic 900s heartbeat injected on the workbench: SIX pairs that never alarm
-# today go DEAD (i3 47/121 sampled hours, tmux 47, keys 45, opencode 28, zsh 22,
-# claude 19), including a 20-hour continuous false DEAD on workbench/keys across
-# a Saturday the operator was away. It does not self-correct with more history:
-# p99 sits just under the nightly gaps because there are only ~14 of them among
-# ~1300.
+# 🔴 THIS IS NO LONGER USED FOR ACTIVE TIME, AND IT IS STILL HERE ON PURPOSE.
+# PRESENCE_SOURCES subsumes it for this module — `browser-bridge` is not a
+# presence source, so its heartbeat cannot mark a bucket active no matter what
+# `kind` it carries — and the two are deliberately NOT both applied to the active
+# set, because layering a denylist under an allowlist gives two places to edit
+# for one rule.
+# It stays exported because scripts/agent-ops imports BOTH this tuple and
+# `cadence_predicate_sql` for its telemetry-freshness panel, where the concept is
+# genuinely different: that panel wants to exclude MACHINE-GENERATED rows while
+# still counting `claude`/`tool` as real USAGE of those sources. "Is this row
+# machine-generated?" and "does this row prove a human is at the desk?" are
+# different questions, and only the second one defines active time.
+# Seam tests: scripts/tests/test_agent_ops.py.
 #
-# So a (source, kind) listed here contributes to its OWN pair's liveness and is
-# excluded from the host's active-time definition.
-#
-# 🔴 ADDING A TIMER-DRIVEN EMITTER ANYWHERE IN THE PIPELINE MEANS ADDING IT HERE.
-# The test that would catch the omission is
-# test_a_machine_cadence_source_does_not_make_idle_sources_look_dead — it uses a
-# day/night fixture, because a fixture with no idle time is structurally blind to
-# this entire class of bug (the first version of these tests was).
+# 🔴 ADDING A TIMER-DRIVEN EMITTER ANYWHERE IN THE PIPELINE MEANS ADDING IT HERE
+# (for agent-ops' freshness panel) — and, separately, keeping it OUT of
+# PRESENCE_SOURCES.
 MACHINE_CADENCE = (("browser-bridge", "heartbeat"),)
 
 DEFAULT_ENV_FILE = "~/.config/activity-collector/env"
@@ -202,22 +275,35 @@ def cadence_predicate_sql(cadence=MACHINE_CADENCE) -> str:
                        for s, k in cadence)
 
 
-def _operator_count_expr(cadence=MACHINE_CADENCE) -> str:
-    """`countIf(...)` counting only OPERATOR-driven events in the bucket.
+def presence_predicate_sql(presence=PRESENCE_SOURCES) -> str:
+    """A ClickHouse boolean matching any PRESENCE_SOURCES member; "" when empty.
 
-    Built from MACHINE_CADENCE so the SQL and the Python cannot drift apart. An
-    empty cadence set degrades to plain count() -- i.e. the pre-heartbeat
-    behaviour, which is the correct answer when nothing emits on a timer.
+    Sorted so the rendered SQL is stable (PRESENCE_SOURCES is a set) and so a
+    test can pin the literal string.
     """
-    pred = cadence_predicate_sql(cadence)
+    if not presence:
+        return ""
+    return "source IN (%s)" % ", ".join("'%s'" % s for s in sorted(presence))
+
+
+def presence_count_expr(presence=PRESENCE_SOURCES) -> str:
+    """`countIf(...)` counting only HUMAN-PRESENCE events in the bucket.
+
+    Built from PRESENCE_SOURCES so the SQL and the Python cannot drift apart.
+    An empty allowlist renders the constant 0 -- nothing is presence, so no
+    bucket is active. That is the QUIET degradation (nothing can ever be judged
+    dead), never the loud one: an empty allowlist must not silently fall back to
+    counting everything, which is the denylist behaviour this replaced.
+    """
+    pred = presence_predicate_sql(presence)
     if not pred:
-        return "count()"
-    return "countIf(NOT (%s))" % pred
+        return "0"
+    return "countIf(%s)" % pred
 
 
 def bucket_query(days: int = BASELINE_DAYS, bucket_seconds: int = BUCKET_SECONDS,
                  database: str = "activity", table: str = "events",
-                 cadence=MACHINE_CADENCE) -> str:
+                 presence=PRESENCE_SOURCES) -> str:
     """The ONE query the check runs: per host/source/bucket event counts.
 
     Deliberately a plain GROUP BY rather than a window function -- all of the
@@ -225,32 +311,46 @@ def bucket_query(days: int = BASELINE_DAYS, bucket_seconds: int = BUCKET_SECONDS
     testable against a fixture with no ClickHouse anywhere near it.
 
     FIVE columns, and the fifth is the whole point: `n` counts everything the
-    pair emitted (so a heartbeat still proves ITS source alive), while `n_op`
-    counts only operator-driven events (so a heartbeat does NOT mark the bucket
-    as operator-active for every other source on the host). See MACHINE_CADENCE.
+    pair emitted (so an agent-driven row, or a heartbeat, still proves ITS source
+    alive), while `n_presence` counts only human-presence events (so neither a
+    heartbeat nor an overnight agent run marks the bucket ACTIVE for every other
+    source on the host). See PRESENCE_SOURCES.
     """
     return (
         "SELECT host, source, "
         "toUnixTimestamp(toStartOfInterval(ts, INTERVAL %d SECOND)) AS b, "
-        "count() AS n, %s AS n_op "
+        "count() AS n, %s AS n_presence "
         "FROM %s.%s WHERE ts > now() - INTERVAL %d DAY "
         "GROUP BY host, source, b ORDER BY host, source, b FORMAT TSV"
-        % (int(bucket_seconds), _operator_count_expr(cadence), database, table,
+        % (int(bucket_seconds), presence_count_expr(presence), database, table,
            int(days))
     )
 
 
-def parse_buckets(text: str):
-    """TSV -> [(host, source, bucket_epoch, n, n_op)]. Raises ValueError on junk.
+def parse_buckets(text: str, presence=PRESENCE_SOURCES):
+    """TSV -> [(host, source, bucket_epoch, n, n_presence)]. ValueError on junk.
 
     Accepts BOTH widths, and the width is decided by the FIRST non-empty line and
     then enforced for the whole file:
-      5 fields  the current query (n_op = operator-driven events in the bucket)
-      4 fields  a pre-heartbeat capture or hand-written fixture -> n_op = n,
-                which is exactly right for a table in which nothing emitted on a
-                timer.
-    A file may not MIX the two: a width that changes mid-file is a format change
-    or a corrupted capture, and inferring per-line would be the silent-drop
+      5 fields  the current query (n_presence = human-presence events in the
+                bucket, computed server-side from PRESENCE_SOURCES).
+      4 fields  a legacy capture or a hand-written fixture, which carries no
+                presence column -> it is RECONSTRUCTED here as
+                `n if source in PRESENCE_SOURCES else 0`.
+
+    🔴 That reconstruction is exact, not a guess, and that is why it is the
+    default. Presence is a property of the SOURCE alone, and the source column is
+    present in a 4-field row — unlike the previous machine-cadence rule, which
+    also needed `kind` and therefore genuinely could not be recovered. The two
+    alternatives are both wrong: carrying `n` across (the old behaviour) reinstates
+    "every agent row means the human is here" on every replayed capture, i.e. the
+    exact bug this module was changed to remove; hard-zeroing the column would
+    make a replayed capture unable to judge anything at all and report a
+    reassuring "0 dead". Deriving from the source name fails safe in both
+    directions because it reproduces what the live query would have computed.
+
+    A file may not MIX the two widths: a width that changes mid-file is a format
+    change or a corrupted capture, and inferring per-line would be the silent-drop
     failure this parser exists to avoid.
 
     Strict on purpose otherwise. Silently dropping unparseable lines would let a
@@ -273,9 +373,12 @@ def parse_buckets(text: str):
             raise ValueError("line %d: field count changed mid-file (%d, expected "
                              "%d) — refusing to guess" % (lineno, len(parts), width))
         host, source, b, n = parts[:4]
-        n_op = parts[4] if width == 5 else n
+        if width == 5:
+            n_presence = parts[4]
+        else:
+            n_presence = n if source in presence else "0"
         try:
-            rows.append((host, source, int(b), int(n), int(n_op)))
+            rows.append((host, source, int(b), int(n), int(n_presence)))
         except ValueError:
             raise ValueError("line %d: non-integer bucket/count: %r" % (lineno, line))
     return rows
@@ -321,7 +424,8 @@ def budget_for(gap_p: float, k: float = BUDGET_K, floor: int = FLOOR_BUCKETS,
 def evaluate(rows, now=None, *, bucket_seconds: int = BUCKET_SECONDS,
              min_baseline: int = MIN_BASELINE_BUCKETS,
              quantile: float = GAP_QUANTILE, k: float = BUDGET_K,
-             floor: int = FLOOR_BUCKETS, cap: int = CAP_BUCKETS) -> dict:
+             floor: int = FLOOR_BUCKETS, cap: int = CAP_BUCKETS,
+             presence=PRESENCE_SOURCES) -> dict:
     """Pure: bucket rows -> verdict dict. No I/O, no clock unless `now` is None.
 
     Returns {"state", "rows", "evaluated", "dead", "count", "sources",
@@ -336,22 +440,26 @@ def evaluate(rows, now=None, *, bucket_seconds: int = BUCKET_SECONDS,
                 "newest_event_age_minutes": None,
                 "detail": "query returned no rows — cannot tell"}
 
-    # ACTIVE time is OPERATOR time. A bucket joins the host's active set only if
-    # something the operator drove landed in it -- a machine-cadence emitter
-    # (MACHINE_CADENCE) proves its own source alive and nothing more. Without
-    # this split, one 24/7 emitter makes every idle source on the host accrue
-    # active silence overnight and read DEAD; see MACHINE_CADENCE for the
-    # measurement.
+    # ACTIVE time is HUMAN-PRESENCE time. A bucket joins the host's active set
+    # only if a PRESENCE_SOURCES member emitted in it -- an agent-driven source
+    # (or a timer-driven one) proves its own source alive and nothing more.
+    # Without this, an unattended overnight agent run makes every idle source on
+    # the host accrue active silence while the operator sleeps and read DEAD by
+    # morning; see PRESENCE_SOURCES for the measurement.
     #
-    # A 4-tuple row (no operator count) is treated as all-operator: that is the
-    # pre-heartbeat table and every hand-built fixture, where it is correct.
+    # The presence count arrives in the row: the live query computes it (a 5-wide
+    # TSV). A 4-tuple -- a hand-built fixture that never went through
+    # `parse_buckets` -- gets the SAME reconstruction the parser applies, so a
+    # 4-wide row means one thing regardless of which door it came in by. A test
+    # that wants an agent source to count as presence (the negative control that
+    # reproduces the old rule) must say so with an explicit 5th field.
     active_by_host = collections.defaultdict(set)
     buckets_by_pair = collections.defaultdict(set)
     for row in rows:
         host, src, b, n = row[0], row[1], row[2], row[3]
-        n_op = row[4] if len(row) > 4 else n
+        n_presence = row[4] if len(row) > 4 else (n if src in presence else 0)
         buckets_by_pair[(host, src)].add(b)
-        if n_op > 0:
+        if n_presence > 0:
             active_by_host[host].add(b)
 
     newest = max(r[2] for r in rows)

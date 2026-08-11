@@ -87,25 +87,53 @@ def test_budget_is_capped():
 # parse_buckets — strict on purpose
 # --------------------------------------------------------------------------- #
 def test_parse_buckets_happy():
-    """5 fields: the current query. The 5th is the OPERATOR-driven count.
+    """5 fields: the current query. The 5th is the HUMAN-PRESENCE count.
 
-    🔴 Every number here is DISTINCT on purpose. An earlier version used n == n_op
-    (3, 3), which made "carry the operator column" and "ignore it and reuse n"
-    byte-identical — a mutant that dropped the 5th field survived the whole
-    suite. A fixture of equal values cannot tell two implementations apart.
+    🔴 Every number here is DISTINCT on purpose. An earlier version used
+    n == n_presence (3, 3), which made "carry the presence column" and "ignore it
+    and reuse n" byte-identical — a mutant that dropped the 5th field survived the
+    whole suite. A fixture of equal values cannot tell two implementations apart.
+
+    The 5th field is AUTHORITATIVE when present: `i3` is a presence source and it
+    still parses to 0 here, because the server computed that.
     """
     rows = D.parse_buckets("h1\tkeys\t100\t7\t5\nh1\ti3\t200\t3\t0\n")
     assert rows == [("h1", "keys", 100, 7, 5), ("h1", "i3", 200, 3, 0)]
     assert rows[1][4] == 0 and rows[1][3] == 3, \
-        "the operator count must survive the parse independently of the total"
+        "the presence count must survive the parse independently of the total"
 
 
-def test_parse_buckets_accepts_a_legacy_four_field_capture():
-    """A pre-heartbeat capture (or a hand-written fixture) has no operator column.
-    Treating it as all-operator is exactly right for a table in which nothing
-    emitted on a timer — and it keeps old captures replayable through --tsv."""
-    rows = D.parse_buckets("h1\tkeys\t100\t3\n")
-    assert rows == [("h1", "keys", 100, 3, 3)]
+def test_parse_buckets_reconstructs_presence_for_a_legacy_four_field_capture():
+    """A legacy capture has no presence column, so the parser rebuilds it from the
+    SOURCE NAME — which is exact, because presence is a property of the source
+    alone and the source column is right there.
+
+    🔴 Both directions are pinned with LITERAL sources and LITERAL counts. Reusing
+    `n` for every row (the old behaviour) reinstates "an agent row means the human
+    is here" on every replayed capture; hard-zeroing makes a replayed capture
+    unable to judge anything and report a reassuring 0.
+    """
+    rows = D.parse_buckets("h1\tkeys\t100\t3\nh1\tclaude\t100\t9\n"
+                           "h1\ttool\t200\t4\nh1\ttmux\t200\t2\n")
+    assert rows == [("h1", "keys", 100, 3, 3),
+                    ("h1", "claude", 100, 9, 0),
+                    ("h1", "tool", 200, 4, 0),
+                    ("h1", "tmux", 200, 2, 2)]
+
+
+def test_presence_sources_are_the_five_human_driven_ones():
+    """🔴 The allowlist itself, pinned as a LITERAL — not derived from the module.
+
+    This is the one assertion that fails when a source is added to or removed from
+    the set. `claude`/`tool`/`opencode`/`browser-bridge` are agent-driven and are
+    named here as explicitly EXCLUDED: they add active buckets only when the
+    operator is away, which is exactly when adding them manufactures a false
+    alarm. `browser` (the operator's own browsing) is NOT `browser-bridge` (the
+    agent's driver) — that pair of names is one typo apart.
+    """
+    assert set(D.PRESENCE_SOURCES) == {"keys", "i3", "tmux", "zsh", "browser"}
+    for agent in ("claude", "tool", "opencode", "browser-bridge"):
+        assert agent not in D.PRESENCE_SOURCES, agent
 
 
 def test_parse_buckets_rejects_a_width_that_changes_mid_file():
@@ -443,31 +471,60 @@ HEARTBEAT_STEP = 3  # 900s / BUCKET_SECONDS -- one heartbeat every 3 buckets
 # a readable fixture constant instead of a second, silently-drifting definition.
 
 
+def workday_source(host, source, now_bucket, days=6, awake_h=10, skip_last=0):
+    """One source emitting `awake_h` hours a day for `days` days, then nothing.
+
+    `skip_last` drops that many trailing days — how a source is made to STOP
+    while the rest of the host carries on.
+    """
+    rows = []
+    per_day = 24 * 3600 // B
+    awake = awake_h * 3600 // B
+    day0 = now_bucket - (days - 1) * per_day * B
+    for d in range(days - skip_last):
+        rows += contiguous(host, source, day0 + d * per_day * B, awake)
+    return rows
+
+
 def workday_table(now_bucket, days=6, awake_h=10):
     """A REALISTIC host: `awake_h` hours of operator activity per day, then idle.
 
     🔴 This fixture exists because `healthy_table` has NO idle time, and a
     fixture with no idle time is structurally blind to every bug about what
     counts as active time — which is precisely the bug that shipped in the first
-    version of the heartbeat (see MACHINE_CADENCE in deadman.py). Any test about
-    machine-cadence emitters must use THIS one.
+    version of the heartbeat, and again in the denylist active-time rule (see
+    PRESENCE_SOURCES in deadman.py). Any test about what marks a bucket ACTIVE
+    must use THIS one.
+
+    Both sources here (`keys`, `i3`) are HUMAN-PRESENCE sources, so this table
+    defines the operator's timeline all by itself.
     """
-    rows = []
-    per_day = 24 * 3600 // B
-    awake = awake_h * 3600 // B
-    day0 = now_bucket - (days - 1) * per_day * B
-    for d in range(days):
-        start = day0 + d * per_day * B
-        rows += contiguous("h1", "keys", start, awake)
-        rows += contiguous("h1", "i3", start, awake)
-    return rows
+    return (workday_source("h1", "keys", now_bucket, days, awake_h)
+            + workday_source("h1", "i3", now_bucket, days, awake_h))
 
 
 def cadence_rows(host, source, start, end, step=HEARTBEAT_STEP):
     """A machine-cadence emitter ticking from `start` to `end` regardless of
-    whether anyone is at the desk. n=1, n_op=0 — the shape the real query emits
-    for a MACHINE_CADENCE pair."""
+    whether anyone is at the desk. n=1, n_presence=0 — the shape the real query
+    emits for any source that is not in PRESENCE_SOURCES."""
     return [(host, source, b, 1, 0) for b in range(start, end + 1, step * B)]
+
+
+def all_night_rows(host, source, start, end):
+    """An AGENT source emitting in EVERY bucket from `start` to `end`, straight
+    through the night. 4-tuples on purpose: the presence column is reconstructed
+    from the source name, exactly as `parse_buckets` does for a legacy capture."""
+    return [(host, source, b, 1) for b in range(start, end + 1, B)]
+
+
+def _dead_pairs(verdict):
+    return sorted("%s/%s" % (s["host"], s["source"]) for s in verdict["dead"])
+
+
+def _as_any_source_active(rows):
+    """The OLD active-time rule, re-expressed as data: every row's own count is
+    its presence count, i.e. ANY source emitting marks the bucket ACTIVE."""
+    return [(r[0], r[1], r[2], r[3], r[3]) for r in rows]
 
 
 def _pair(verdict, source, host="h1"):
@@ -546,12 +603,12 @@ def test_a_machine_cadence_source_does_not_make_idle_sources_look_dead():
         % dead)
 
     # ... and the negative control: the SAME table with the heartbeat counted as
-    # operator activity (n_op=1) is how the bug manifests. If this stops failing,
+    # presence (n_presence=1) is how the bug manifests. If this stops failing,
     # the assertion above has stopped meaning anything.
-    as_operator = [r for r in rows if r[1] != "browser-bridge"]
-    as_operator += [(r[0], r[1], r[2], r[3], 1) for r in rows
-                    if r[1] == "browser-bridge"]
-    v_bad = D.evaluate(as_operator, now=now + 60)
+    as_present = [r for r in rows if r[1] != "browser-bridge"]
+    as_present += [(r[0], r[1], r[2], r[3], 1) for r in rows
+                   if r[1] == "browser-bridge"]
+    v_bad = D.evaluate(as_present, now=now + 60)
     assert v_bad["count"] > 0, \
         ("the control did not reproduce the bug — this fixture can no longer "
          "distinguish the fix from its absence")
@@ -579,14 +636,15 @@ def test_a_cadence_source_is_still_judged_on_its_own_liveness():
     assert rec2["dead"] is True, rec2
 
 
-def test_the_operator_column_survives_the_WHOLE_path_tsv_to_verdict():
+def test_the_presence_column_survives_the_WHOLE_path_tsv_to_verdict():
     """🔴 END-TO-END across the parse boundary, because every other test in this
     section hands `evaluate` ready-made tuples and therefore cannot see the parser
-    throwing the operator count away.
+    throwing the presence count away.
 
-    That gap was real: a mutant making parse_buckets reuse `n` for `n_op` — which
-    reinstates the original bug on live data, since the check only ever reads the
-    table through this function — survived the entire 360-test suite.
+    That gap was real: a mutant making parse_buckets reuse `n` for the presence
+    column — which reinstates the original bug on live data, since the check only
+    ever reads the table through this function — survived the entire 360-test
+    suite.
     """
     rows = workday_table(NOW_BUCKET, days=6, awake_h=10)
     last_awake = max(b for (_h, s, b, *_r) in rows if s == "keys")
@@ -601,7 +659,7 @@ def test_the_operator_column_survives_the_WHOLE_path_tsv_to_verdict():
 
     parsed = D.parse_buckets(tsv)
     assert any(r[1] == "browser-bridge" and r[4] == 0 for r in parsed), \
-        "the parser dropped the operator column"
+        "the parser dropped the presence column"
 
     v = D.evaluate(parsed, now=now + 60)
     dead = sorted("%s/%s" % (s["host"], s["source"]) for s in v["dead"])
@@ -609,12 +667,13 @@ def test_the_operator_column_survives_the_WHOLE_path_tsv_to_verdict():
     assert _pair(v, "browser-bridge")["evaluated"] is True
 
 
-def test_the_query_check_ACTUALLY_SENDS_carries_the_operator_column():
+def test_the_query_check_ACTUALLY_SENDS_carries_the_presence_column():
     """🔴 The production path. Every other `check()` test injects a fake fetch
-    that IGNORES its query argument, so nothing asserted what SQL the live check
-    sends — and `bucket_query(..., cadence=())` at the call site would produce a
-    5-wide TSV with n_op == n, i.e. the original bug, on the only path
-    bar-status-poll ever uses, with the suite green.
+    that IGNORES its query argument, so nothing asserts what SQL the live check
+    sends — and `bucket_query(..., presence=<anything else>)` at the call site
+    would produce a 5-wide TSV whose n_presence means something other than
+    "a human was here", on the only path bar-status-poll ever uses, with the
+    suite green.
     """
     seen = {}
 
@@ -626,68 +685,89 @@ def test_the_query_check_ACTUALLY_SENDS_carries_the_operator_column():
                  "CLICKHOUSE_PASSWORD": "p"},
             env_file="/nonexistent", fetch=fake_fetch)
     q = seen.get("query", "")
-    # 🔴 The countIf must be the expression aliased AS n_op, not merely PRESENT
-    # somewhere in the query. A substring check for "AS n_op" is satisfied by
-    # "AS n_op_unused" — a mutant that aliased the filtered count aside and put a
-    # raw count() in the n_op position passed exactly that check.
-    assert re.search(r"countIf\(NOT \(.+?\)\) AS n_op(?!\w)", q), \
-        ("check() did not send the machine-cadence filter as the n_op column — "
-         "cadence rows would count as operator activity: %r" % q)
-    for src, kind in D.MACHINE_CADENCE:
-        assert "source = '%s' AND kind = '%s'" % (src, kind) in q, q
+    # 🔴 The countIf must be the expression aliased AS n_presence, not merely
+    # PRESENT somewhere in the query. A substring check for "AS n_presence" is
+    # satisfied by "AS n_presence_unused" — a mutant that aliased the filtered
+    # count aside and put a raw count() in the n_presence position passes exactly
+    # that check. The literal IN-list is spelled out here, so a query built from
+    # ANY other set (the cadence pairs, an emptied allowlist, an allowlist with
+    # `claude` added) fails on THIS assertion rather than somewhere downstream.
+    assert re.search(
+        r"countIf\(source IN \('browser', 'i3', 'keys', 'tmux', 'zsh'\)\) "
+        r"AS n_presence(?!\w)", q), \
+        ("check() did not send the human-presence filter as the n_presence "
+         "column — non-presence rows would count as the operator being at the "
+         "machine: %r" % q)
+    # ...and the agent sources must NOT be anywhere in the presence predicate.
+    for agent in ("claude", "tool", "opencode", "browser-bridge"):
+        assert "'%s'" % agent not in q, (agent, q)
 
 
-def test_operator_count_expression_matches_the_cadence_table():
+def test_presence_count_expression_matches_the_presence_set():
     """The SQL and the Python must not drift: the query's countIf is BUILT from
-    MACHINE_CADENCE, so a pair added to the tuple appears in the SQL."""
-    q = D.bucket_query(cadence=(("browser-bridge", "heartbeat"),))
-    assert "countIf(NOT ((source = 'browser-bridge' AND kind = 'heartbeat')))" in q
-    assert "AS n_op" in q
+    PRESENCE_SOURCES, so a source added to the set appears in the SQL."""
+    q = D.bucket_query(presence=frozenset({"keys", "tmux"}))
+    assert "countIf(source IN ('keys', 'tmux')) AS n_presence" in q, q
 
-    # 🔴 TWO entries, because the module's own note tells maintainers to add
-    # them: the terms must be OR-joined. With AND, `countIf(NOT (A AND B))`
-    # excludes NOTHING (measured against the live table: 206760 of 206760 rows
-    # counted), so a second cadence emitter would silently reinstate the bug.
-    q2 = D.bucket_query(cadence=(("a", "beat"), ("b", "tick")))
-    assert "(source = 'a' AND kind = 'beat') OR (source = 'b' AND kind = 'tick')" in q2, q2
-    assert " AND (source = 'b'" not in q2, "cadence terms joined with AND: %s" % q2
+    # Rendering is SORTED, so the SQL is stable across runs even though
+    # PRESENCE_SOURCES is a set (a set literal's iteration order is not a
+    # contract, and an unstable query string defeats every substring assertion
+    # here as well as any query-log diffing).
+    assert D.presence_predicate_sql(frozenset({"zsh", "browser", "i3"})) == \
+        "source IN ('browser', 'i3', 'zsh')"
 
-    # Empty cadence degrades to the pre-heartbeat query, which is the right
-    # answer when nothing emits on a timer.
-    assert "count() AS n_op" in D.bucket_query(cadence=())
+    # 🔴 An EMPTY allowlist must NOT degrade to counting everything. `count()`
+    # there is the denylist behaviour this change removed, and it is the shape a
+    # careless "empty means no filter" refactor produces. It renders the constant
+    # 0 instead: nothing is presence, so nothing is active, so nothing is judged
+    # — quiet, never falsely reassuring about a live rule.
+    empty = D.bucket_query(presence=frozenset())
+    assert "0 AS n_presence" in empty, empty
+    assert "count() AS n_presence" not in empty, empty
+    assert D.presence_predicate_sql(frozenset()) == ""
 
-    # 🔴 The live table must NOT be empty, asserted before the loop below — an
-    # emptied MACHINE_CADENCE makes that loop iterate zero times and pass, and it
-    # is exactly the edit that reinstates the bug (a mutant emptying the tuple
-    # survived this file until this assertion existed; it died only in the
-    # browser-bridge suite, which is not where a deadman reader would look).
-    #
-    # 🔴 THE MOVED BLOCK (the empty-cadence assert above, plus the two below)
-    # BELONGS TO *THIS* TEST. A later insertion once
-    # landed inside this function and carried them into the next one, so the
-    # guard above lived under a test named for something else — and deleting that
-    # other test would have silently deleted this guard.
-    assert ("browser-bridge", "heartbeat") in D.MACHINE_CADENCE, \
-        "the browser-bridge heartbeat is no longer declared machine-cadence"
-    for src, kind in D.MACHINE_CADENCE:
-        assert src in D.bucket_query() and kind in D.bucket_query()
+    # The DEFAULT is what the production call site uses.
+    assert D.presence_count_expr() == \
+        "countIf(source IN ('browser', 'i3', 'keys', 'tmux', 'zsh'))"
 
 
 def test_cadence_predicate_is_exported_for_the_other_consumer():
-    """`cadence_predicate_sql` is PUBLIC on purpose: scripts/agent-ops renders the
-    same predicate for its freshness panel and imports this rather than
-    re-spelling it. A local copy there was immediately wrong in the same way
-    (AND-joined), so this pins the contract that consumer depends on."""
+    """`cadence_predicate_sql` + `MACHINE_CADENCE` are PUBLIC on purpose, and are
+    NO LONGER USED BY THIS MODULE'S OWN QUERY — active time is defined by
+    PRESENCE_SOURCES, which subsumes them (`browser-bridge` is not a presence
+    source). They survive because scripts/agent-ops imports both for its
+    telemetry-freshness panel, where the question is "is this row machine
+    generated?" rather than "does this row prove a human is at the desk?" — that
+    panel still counts `claude`/`tool` as real usage.
+
+    A local copy of the rendering there was immediately wrong in the same way
+    (AND-joined), so this pins the contract that consumer depends on. Its seam
+    tests live in scripts/tests/test_agent_ops.py.
+    """
     assert D.cadence_predicate_sql(()) == ""
     one = D.cadence_predicate_sql((("x", "beat"),))
     assert one == "(source = 'x' AND kind = 'beat')", one
+    # 🔴 TWO entries: the terms must be OR-joined. With AND, the consumer's
+    # `AND NOT (A AND B)` excludes NOTHING (measured against the live table:
+    # 206760 of 206760 rows counted), so a second cadence emitter would silently
+    # reinstate that panel's bug.
     two = D.cadence_predicate_sql((("x", "beat"), ("y", "tick")))
     assert two == ("(source = 'x' AND kind = 'beat') OR "
                    "(source = 'y' AND kind = 'tick')"), two
-    # The DEFAULT argument is what a future consumer will reach for, and no
-    # caller exercises it today (a mutant defaulting it to () survived).
+    assert " AND (source = 'y'" not in two, "cadence terms joined with AND: %s" % two
+    # The DEFAULT argument is what the consumer reaches for (a mutant defaulting
+    # it to () survived until this was asserted), and the tuple must be non-empty
+    # — an emptied MACHINE_CADENCE makes agent-ops' filter vanish silently.
     assert D.cadence_predicate_sql() == D.cadence_predicate_sql(D.MACHINE_CADENCE)
     assert D.cadence_predicate_sql() != ""
+    assert ("browser-bridge", "heartbeat") in D.MACHINE_CADENCE, \
+        "the browser-bridge heartbeat is no longer declared machine-cadence"
+
+    # 🔴 And the cadence predicate must NOT have leaked back into this module's
+    # own query: two rules for one active-time definition is the shape that
+    # regenerates the bug at whichever site gets edited second.
+    assert "kind = 'heartbeat'" not in D.bucket_query(), \
+        "the bucket query is filtering on machine cadence again"
 
 
 def test_a_stopped_heartbeat_is_dead_within_the_floor():
@@ -706,3 +786,159 @@ def test_a_stopped_heartbeat_is_dead_within_the_floor():
     rec = _pair(v, "browser-bridge")
     assert rec["dead"] is True, rec
     assert v["count"] == 1 and v["state"] == D.STATE_OK, v
+
+
+# --------------------------------------------------------------------------- #
+# THE PRESENCE ALLOWLIST — active time is HUMAN time, not machine time
+#
+# The rule active time used to run on was a DENYLIST ("anything that is not a
+# timer-driven emitter counts as the operator being present"), which defaulted
+# every agent-driven source to "the human is here". On 2026-08-11 an unattended
+# overnight agent session emitted `claude`/`tool` rows for hours while the human
+# slept; that marked the night ACTIVE, and workbench/keys and workbench/tmux blew
+# their 2-ACTIVE-HOUR floor and read DEAD by morning.
+#
+# 🔴 EVERY test below uses a day/night fixture. `healthy_table` fills every
+# bucket, so it has NO idle time and is structurally blind to this entire class
+# of bug — a suite built on it stays green through both the denylist rule and the
+# allowlist rule and can therefore certify neither.
+# --------------------------------------------------------------------------- #
+def test_an_unattended_agent_at_night_does_not_make_human_sources_look_dead():
+    """🔴 THE REGRESSION TEST. A workday host where an agent source keeps emitting
+    all night must not convert the operator's night into ACTIVE time.
+
+    Evaluated 8 hours into the idle stretch — the moment the 45-second bar poller
+    would ask, and the moment the denylist rule cried wolf.
+    """
+    rows = workday_table(NOW_BUCKET, days=6, awake_h=10)      # keys + i3
+    lo = min(b for (_h, _s, b, *_r) in rows)
+    last_awake = max(b for (_h, s, b, *_r) in rows if s == "keys")
+    now = last_awake + 8 * 3600
+    agent = all_night_rows("h1", "claude", lo, now)
+
+    v = D.evaluate(rows + agent, now=now + 60)
+    assert _dead_pairs(v) == [], (
+        "an unattended agent made the operator's own sources read DEAD: %s"
+        % _dead_pairs(v))
+    # The human sources must have been JUDGED, not skipped — a verdict of "not
+    # dead" is worthless if the pair fell out of the evaluated set.
+    for src in ("keys", "i3"):
+        rec = _pair(v, src)
+        assert rec["evaluated"] is True, rec
+        # Nothing the operator drove has happened since they stopped, so the
+        # silence in ACTIVE time is exactly zero.
+        assert rec["silent_active_buckets"] == 0, rec
+    # The agent source itself is still measured on its own liveness.
+    assert _pair(v, "claude")["evaluated"] is True
+
+    # 🔴 NEGATIVE CONTROL, same fixture, same code path: under the OLD rule (any
+    # source's rows mark the bucket active) the night IS active, so the human
+    # sources blow the floor. If this stops failing, the fixture no longer
+    # reproduces the bug and the green above has stopped meaning anything.
+    v_bad = D.evaluate(_as_any_source_active(rows + agent), now=now + 60)
+    bad = _dead_pairs(v_bad)
+    assert "h1/keys" in bad and "h1/i3" in bad, (
+        "the control did not reproduce the bug — this fixture can no longer "
+        "distinguish the allowlist from its absence: %s" % bad)
+
+
+def test_a_human_source_that_genuinely_stops_is_still_dead():
+    """🔴 POSITIVE CONTROL for the allowlist: narrowing what counts as active must
+    not blind the check to a real death.
+
+    `tmux` stops a full day before the others; `keys`/`i3` keep the operator's
+    timeline advancing, so its silence is measured in real active buckets and it
+    must alarm. Without this, the test above is indistinguishable from a check
+    that can only ever say "ok".
+    """
+    rows = workday_table(NOW_BUCKET, days=6, awake_h=10)
+    rows += workday_source("h1", "tmux", NOW_BUCKET, days=6, awake_h=10,
+                           skip_last=1)
+    last_awake = max(b for (_h, s, b, *_r) in rows if s == "keys")
+    v = D.evaluate(rows, now=last_awake + 60)
+    assert _dead_pairs(v) == ["h1/tmux"], _dead_pairs(v)
+    rec = _pair(v, "tmux")
+    # One whole 10-hour workday of the OTHER sources' activity has passed:
+    # 10h / 5min = 120 active buckets, against the 24-bucket floor budget.
+    assert rec["silent_active_buckets"] == 120, rec
+    assert rec["budget_buckets"] == D.FLOOR_BUCKETS, rec
+
+
+def test_an_agent_source_that_genuinely_stops_is_still_dead():
+    """The allowlist changes what marks a bucket ACTIVE — it must not change
+    whether a NON-presence source is judged at all. `claude` runs every night for
+    five days and then stops; the operator's next workday supplies the active
+    buckets that convict it."""
+    rows = workday_table(NOW_BUCKET, days=6, awake_h=10)
+    lo = min(b for (_h, _s, b, *_r) in rows)
+    last_awake = max(b for (_h, s, b, *_r) in rows if s == "keys")
+    stopped = last_awake - 24 * 3600          # a full day earlier
+    rows += all_night_rows("h1", "claude", lo, stopped)
+    v = D.evaluate(rows, now=last_awake + 60)
+    rec = _pair(v, "claude")
+    assert rec["evaluated"] is True, rec
+    assert rec["dead"] is True, rec
+
+
+def test_losing_every_presence_source_at_once_goes_QUIET_not_loud():
+    """🔴 THE DOCUMENTED COST, asserted so it stays documented (module docstring,
+    'THE COST OF THE PRESENCE ALLOWLIST').
+
+    An X-session crash takes `keys` and `i3` together. After it, no presence
+    source emits, so active buckets stop accruing and every silence measures 0 —
+    the check reports 0 dead even though the agent is still emitting. That is a
+    WIDENING of the pre-existing blackout blind spot, and it is deliberate: the
+    alternative is the overnight false alarm the test above pins.
+
+    `newest_event_age_minutes` is what a human reads instead, so it is asserted
+    to be present and non-trivial rather than merely non-None.
+    """
+    rows = workday_table(NOW_BUCKET, days=6, awake_h=10)
+    lo = min(b for (_h, _s, b, *_r) in rows)
+    crash = max(b for (_h, s, b, *_r) in rows if s == "keys")
+    now = crash + 3 * 86400                   # three days of agent-only rows
+    rows += all_night_rows("h1", "claude", lo, now)
+
+    v = D.evaluate(rows, now=now + 60)
+    assert v["state"] == D.STATE_OK
+    assert _dead_pairs(v) == [], _dead_pairs(v)
+    assert v["newest_event_age_minutes"] is not None
+    assert v["newest_event_age_minutes"] < 5, v["newest_event_age_minutes"]
+
+    # ...and the CONTRAST that makes this a cost and not a bug: lose only ONE
+    # presence source and the other still carries the timeline, so it IS caught.
+    partial = workday_source("h1", "keys", NOW_BUCKET, days=6, awake_h=10,
+                             skip_last=1)
+    partial += workday_source("h1", "i3", NOW_BUCKET, days=6, awake_h=10)
+    v2 = D.evaluate(partial, now=max(b for (_h, _s, b, *_r) in partial) + 60)
+    assert _dead_pairs(v2) == ["h1/keys"], _dead_pairs(v2)
+
+
+def test_the_presence_allowlist_survives_the_WHOLE_path_tsv_to_verdict():
+    """🔴 END-TO-END through `parse_buckets`, the only door the live check uses.
+
+    The 4-field legacy width is the interesting one: the presence column is
+    RECONSTRUCTED from the source name there, so a mutant that reuses `n` (the
+    old meaning) reinstates the overnight false alarm on every replayed capture
+    while every `evaluate`-level test above stays green.
+    """
+    rows = workday_table(NOW_BUCKET, days=6, awake_h=10)
+    lo = min(b for (_h, _s, b, *_r) in rows)
+    last_awake = max(b for (_h, s, b, *_r) in rows if s == "keys")
+    now = last_awake + 8 * 3600
+    rows += all_night_rows("h1", "claude", lo, now)
+
+    # 4-field: exactly what a pre-change capture or `--tsv` replay looks like.
+    tsv = "".join("%s\t%s\t%d\t%d\n" % (h, s, b, n) for (h, s, b, n) in rows)
+    parsed = D.parse_buckets(tsv)
+    assert any(r[1] == "claude" and r[4] == 0 for r in parsed), \
+        "the parser did not reconstruct the presence column from the source name"
+    assert any(r[1] == "keys" and r[4] > 0 for r in parsed), \
+        "the parser zeroed a HUMAN source's presence count"
+    assert _dead_pairs(D.evaluate(parsed, now=now + 60)) == []
+
+    # 5-field: the live query's width, presence computed server-side.
+    tsv5 = "".join("%s\t%s\t%d\t%d\t%d\n"
+                   % (h, s, b, n, n if s in ("keys", "i3") else 0)
+                   for (h, s, b, n) in rows)
+    assert _dead_pairs(D.evaluate(D.parse_buckets(tsv5), now=now + 60)) == []

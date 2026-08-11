@@ -169,9 +169,20 @@ Creds come from `~/.config/activity-collector/env` (the collector's own file) un
 `CLICKHOUSE_URL/USER/PASSWORD` are already in the environment.
 
 - **Silence is counted in ACTIVE time, not wall time.** A host's *active* 5-min buckets are
-  the ones where any of its sources emitted; overnight/away time is simply not in the set.
-  This is what makes a per-source budget work for `keys` (continuous) and `tool` (on-demand)
-  at the same time.
+  the ones where a **HUMAN-PRESENCE** source emitted; overnight/away time is simply not in the
+  set. This is what makes a per-source budget work for `keys` (continuous) and `tool`
+  (on-demand) at the same time.
+- 🔴 **Active time is an ALLOWLIST — `deadman.PRESENCE_SOURCES` = `keys` `i3` `tmux` `zsh`
+  `browser`.** Agent/machine sources (`claude`, `tool`, `opencode`, `browser-bridge`) do NOT
+  mark a bucket active. Adding a source that a human drives means adding it there; an
+  agent-driven one must stay out. It used to be a denylist (everything except a timer), and on
+  2026-08-11 an unattended overnight agent run marked the night active and made
+  `workbench/keys` + `workbench/tmux` read DEAD by morning (6/7 dead-hours in a 97-point sweep
+  → 0 under the allowlist). Budgets are counted in active buckets, so a shorter active timeline
+  moves budget *and* silence together and sensitivity shifts **both ways**: floor-pinned
+  sources get tighter (`laptop/opencode` 0 → 1 dead-hour), while an on-demand source's
+  detection can be *delayed* (a seeded `workbench/tool` death is caught at 72h by the old rule,
+  ~120h by the allowlist). Numbers in the module docstring's COST section.
 - **The budget is MEASURED per (host, source)**: `clamp(2 × p99 active-gap, 2h, 48h)`.
   Measured 2026-08-03 — `keys`/`i3`/`tmux` land on the 2h floor; `workbench/opencode` 11.5h;
   `workbench/tool` 31.1h. Nothing is hand-tuned and nothing is hand-listed.
@@ -184,7 +195,10 @@ Creds come from `~/.config/activity-collector/env` (the collector's own file) un
 - 🔴 **Blind spot, by design:** this is a RELATIVE check. A simultaneous outage of every
   source on every host produces zero active buckets and reads as "0 dead" — indistinguishable
   from the operator being away. `newest_event_age_minutes` is reported for the human;
-  it is deliberately not an alarm.
+  it is deliberately not an alarm. **The allowlist WIDENS this**: losing all five presence
+  sources at once (an X-session crash takes `keys`+`i3`, and the terminals take `tmux`+`zsh`)
+  is now enough to stop active time advancing, so the check goes quiet instead of alarming.
+  Losing only ONE presence source is still caught — the others carry the timeline.
 - **Surface:** the workbench `bar-status-poll` (~45s) runs it as its `telemetry` source →
   `~/.cache/bar-status/telemetry.json` → the `tlm` pill (signal 17) + a rising-edge dunst
   toast. One workbench runner covers BOTH hosts because it reads the shared table. See the
