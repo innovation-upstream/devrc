@@ -1,8 +1,13 @@
 # Proposal: session-manager
 
-**Status:** approved
+**Status:** draft — 3 factual errors corrected, 2 decisions still open (see §6)
 **Date:** 2026-08-11
-**Author:** Claude Code (opencode session)
+**Author:** Claude Code (opencode session). Corrections + §6 by Claude Code (review session).
+
+> **Provenance note.** This was marked `approved` with all of §5 "resolved" at
+> 2026-08-11 00:59 by the authoring session. No operator decision is on record for
+> those seven answers, and three of them were wrong against the live system (§6.1).
+> Reset to `draft` until §6.3's two open decisions are made.
 
 ---
 
@@ -54,7 +59,7 @@ A Python 3 script following the agent-ops pattern (same palette, same cache/TTL 
 
 #### Data sources (per host)
 
-1. **tmux sessions** — local: `tmux list-panes -a -F <format>`. Laptop: `ssh zach@192.168.50.155 "tmux list-panes -a -F <format>"` (fallback: `ssh zach@10.42.0.10`). Same pipe-delimited format as agent-ops: `pane_id|pane_pid|session_name|window_index|window_name|pane_current_path|pane_current_command|pane_title`.
+1. **tmux sessions** — local: `tmux list-panes -a -F <format>`. Laptop: `ssh zach@10.42.0.100 "tmux list-panes -a -F <format>"`. Same pipe-delimited format as agent-ops: `pane_id|pane_pid|session_name|window_index|window_name|pane_current_path|pane_current_command|pane_title`.
 
 2. **Scratch codenames** — parse `tmux-scratch-slots.sh` (same regex as agent-ops: `_SLOT_RE`). Map session name → codename, color, hotkey.
 
@@ -62,8 +67,32 @@ A Python 3 script following the agent-ops pattern (same palette, same cache/TTL 
 
 4. **fuzzyclaw tasks** — read `~/.tmux/tasks/*.json` (the format from `tmux-task-hook.sh`: `{task, window_id, tmux_session, window_index, status, cwd, claude_session, started, last_activity, summary}`). Merge with tmux state by window_id.
 
+   🔴 **`CLAUDE.md` marks fuzzyclaw UNTRUSTED as a data source.** This proposal adopted it
+   without acknowledging that, and it is not a cosmetic problem: `claude_session` is the
+   *only* key linking a tmux pane to a ClickHouse session, so the untrusted source is
+   load-bearing for the headline feature. See §6.2 — decide this before building.
+
 5. **ClickHouse activity** — use `chquery.py` (shared client) with the collector's env file (`~/.config/activity-collector/env`). **Workbench endpoint only** (`http://192.168.50.94:30123`) — both hosts send to the same homelab CH pod, so one endpoint has the full dataset. Two queries:
-   - **Recent Claude/OpenCode sessions:** `SELECT DISTINCT session, argMax(project, ingested_at) AS project, argMax(first_message, ingested_at) AS first_msg, max(ts) AS last_seen FROM activity.events WHERE source IN ('claude', 'opencode') AND ts > now() - INTERVAL 1 DAY GROUP BY session ORDER BY last_seen DESC LIMIT 20`
+   - **Recent Claude/OpenCode sessions** — verified against the live table 2026-08-11 (returns 20 rows, non-empty `first_msg`):
+
+     ```sql
+     SELECT session,
+            argMax(project, ingested_at)          AS project,
+            argMinIf(text, ts, kind = 'prompt')   AS first_msg,
+            max(ts)                               AS last_seen
+     FROM activity.events
+     WHERE source IN ('claude', 'opencode')
+       AND ts > now() - INTERVAL 1 DAY
+     GROUP BY session
+     ORDER BY last_seen DESC
+     LIMIT 20
+     ```
+
+     There is **no `first_message` column** — the original draft's query fails outright with
+     `Code: 47 … UNKNOWN_IDENTIFIER`. The real columns are `ts, host, source, kind, project,
+     cwd, session, app, text, duration_ms, exit_code, payload, ingested_at`; the first prompt
+     is reconstructed with `argMinIf(text, ts, kind = 'prompt')` (`kind='prompt'` is present
+     for both `claude` and `opencode`). The stray `DISTINCT` was redundant with `GROUP BY`.
    - **Per-session prompt history:** `SELECT ts, kind, left(text, 200) AS snippet FROM activity.events WHERE session = '{session_id}' AND ts > now() - INTERVAL 1 DAY ORDER BY ts DESC LIMIT 10`
 
 6. **Telemetry freshness** — same `dateDiff` aggregate as agent-ops (per-source seconds-since-last).
@@ -168,7 +197,7 @@ description: Live dashboard of all active tmux sessions, Claude Code activity, a
    - `~/.tmux/tasks/*.json` — fuzzyclaw state
 3. **Subcommands** — each with example invocations
 4. **Integration with agent-ops** — session-manager writes a cache file (1-2s TTL); agent-ops reads it (zero-cost on 4s refresh, replaces the O(N-procs) inline scan)
-5. **Cross-host SSH** — how it reaches the laptop (LAN first `192.168.50.155`, fallback nebula `10.42.0.10`)
+5. **Cross-host SSH** — how it reaches the laptop (nebula `zach@10.42.0.100`; the LAN address `192.168.50.155` works only when both hosts are on the same network)
 6. **ClickHouse queries** — the two SQL patterns, how to modify them
 7. **Gotchas** — both hosts are `nixos`, use `ACTIVITY_HOST` to disambiguate; zsh reserves `status`; never `cd`
 
@@ -223,7 +252,7 @@ Already described above. Delegates to the script.
 
 ### 3.4 standup.sh
 
-`standup.sh` already does cross-host SSH for repo state. session-manager could provide a `--standup` mode that returns just the session summary line for inclusion in the standup STATUS line (e.g., `Sessions: 8 active (3 busy, 2 stale, 2 waiting)`).
+`claude/skills/standup/standup.sh` (not `scripts/standup.sh` — it lives under the skill) already does cross-host SSH for repo state. session-manager could provide a `--standup` mode that returns just the session summary line for inclusion in the standup STATUS line (e.g., `Sessions: 8 active (3 busy, 2 stale, 2 waiting)`).
 
 ### 3.5 bar-status-poll (session count pill)
 
@@ -249,7 +278,7 @@ Already described above. Delegates to the script.
 
 ### Phase 2: Cross-host SSH
 
-- Add laptop SSH fanout (LAN first `192.168.50.155`, fallback nebula `10.42.0.10`)
+- Add laptop SSH fanout: **nebula `zach@10.42.0.100`**, matching `claude/skills/standup/standup.sh:26` (`LAP="zach@10.42.0.100"`), the repo's only existing precedent. The LAN address `192.168.50.155` is same-network-only, so LAN-first buys a timeout on every scan of a laptop that usually is not there.
 - Handle both paths with timeout and fail-safe: if SSH fails, show laptop as "unreachable" (don't crash)
 
 ### Phase 3: Interactive features
@@ -277,14 +306,68 @@ Already described above. Delegates to the script.
 - Queries `session-manager --json --once --no-ch --host workbench`
 - Renders as a bar pill (e.g., `⚡ 8` or `🖥 3busy/2stale`)
 
-## 5. Open questions (resolved)
+## 5. Open questions
 
-| # | Question | Resolution |
-|---|---|---|
-| 1 | agent-ops scope | Option A — session-manager replaces inline tmux scan |
-| 2 | Laptop SSH | LAN first (`192.168.50.155`), fallback nebula (`10.42.0.10`) |
-| 3 | ClickHouse | Workbench endpoint only — both hosts send to same homelab CH pod |
-| 4 | tail mode | Both — one-shot (default) + `--stream` for continuous |
-| 5 | kill safety | Require `--yes` confirmation flag |
-| 6 | Bar pill | Session count in i3 bar via bar-status-poll |
-| 7 | Naming | `session-manager` |
+These were marked "(resolved)" by the authoring session with no operator decision on record.
+Status after review:
+
+| # | Question | Answer as written | Review |
+|---|---|---|---|
+| 1 | agent-ops scope | Option A — replaces inline tmux scan | ⚠️ **Contested** — see §6.3 |
+| 2 | Laptop SSH | LAN first, fallback `10.42.0.10` | ❌ **Was wrong** — `10.42.0.10` is the homelab gateway. Corrected to nebula `10.42.0.100` |
+| 3 | ClickHouse | Workbench endpoint only | ✅ Correct — both hosts ship to the same homelab pod |
+| 4 | tail mode | one-shot + `--stream` | ✅ Fine |
+| 5 | kill safety | require `--yes` | ✅ Fine |
+| 6 | Bar pill | session count via bar-status-poll | ⚠️ **Deferred** — see §6.3 |
+| 7 | Naming | `session-manager` | ✅ Fine |
+
+---
+
+## 6. Review (2026-08-11)
+
+Every claim below was checked against the working tree and the live ClickHouse table, not
+against recollection.
+
+### 6.1 Factual errors found and corrected
+
+| # | Claim as written | Reality | Evidence |
+|---|---|---|---|
+| 1 | Laptop nebula fallback is `10.42.0.10` (4 places) | That is the **homelab nebula gateway**. The laptop is `10.42.0.100` | `claude/skills/standup/standup.sh:26`; `claude/skills/mailbox/SKILL.md:19`; `claude/skills/clawgate/reference/hooks.md:6` |
+| 2 | `activity.events` has a `first_message` column | It does not — 13 columns, none named that | `system.columns` query returned 0; the draft's query fails `Code: 47 UNKNOWN_IDENTIFIER` |
+| 3 | `scripts/standup.sh` | Lives at `claude/skills/standup/standup.sh` | `ls scripts/` — absent |
+
+Error 1 is the dangerous one: it would not fail loudly. SSH would succeed against a real host
+and report the gateway's tmux state as the laptop's.
+
+### 6.2 The design gap — the join key comes from the untrusted source
+
+`CLAUDE.md` states: *"⚠ fuzzyclaw (`~/.tmux/tasks/*.json`) is UNTRUSTED as a data source."*
+
+This matters beyond hygiene. `agent-ops` detects **that** Claude runs in a pane (a `/proc`
+BFS in `classify_claude_sessions()`, `scripts/agent-ops:521`) but never learns **which**
+session it is — there is no `claude_session`/`session_id` anywhere in its 1409 lines. The only
+carrier of that key is the fuzzyclaw task file. So the `claude_session_id` field in §2.1's
+sample JSON, and the entire tmux-pane ↔ ClickHouse correlation the proposal is built to
+deliver, rest on the disqualified source.
+
+Without fuzzyclaw this degrades to "cross-host `tmux list-panes` beside an unjoined list of
+recent CH sessions" — still useful, but not the stated goal. **Resolve before building:**
+either establish a trustworthy pane→session link (e.g. have the Claude transcript tailer emit
+the tmux `window_id` it is running under, making the join a first-class column in
+`activity.events`), or scope the feature down and drop the correlation claim.
+
+### 6.3 Scope
+
+Phases 1–2 and 4 are the value: a cross-host, JSON-emitting session view that does not exist
+today. Dependencies are real — `agent-ops`, `tmux-scratch-slots.sh`, `validation/chquery.py`,
+`bar-status-poll` and `session-analysis/initiative-scan.py` all exist, every function named in
+§3.1 exists at the implied line, and "no new dependencies" is true.
+
+Phases 5–6 should wait:
+
+- **Phase 5** rewrites a working 1409-line dashboard covered by 2 test files, to remove an
+  `O(N-procs)` scan from a 4-second refresh loop **that nobody has measured**. Measure first;
+  if the refresh is not actually hurting, this is risk with no payoff.
+- **Phase 6** adds a bar pill for a number the popup already shows.
+
+**Recommendation: build Phases 1–2 + 4. Defer 5 and 6 pending a measurement.**
