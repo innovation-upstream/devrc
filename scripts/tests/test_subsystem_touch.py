@@ -1196,6 +1196,36 @@ class TestSkillDocsArePinned:
             "the **first-entry case, not a failure**",
             "scope-absent is the reason this step exists, not an error",
         ),
+        # 🔴 The `already there` display is inert unless the step tells the agent
+        # to READ it. Showing prior bullets and leaving "is this notable?" as a
+        # feeling is the state this change started from, moved one layer up: the
+        # instruction has to name the comparison, or the display is decoration.
+        (
+            "check your proposed bullet against them — this is a comparison, not a feeling",
+            "the judgement call is a check against what is on screen",
+        ),
+        (
+            "A bullet that adds nothing to what is on screen ⇒ propose nothing",
+            "declining is the named, normal outcome",
+        ),
+        (
+            "the heading has to be created as part of the append",
+            "an entry with no work-history section has no `Edit` anchor yet",
+        ),
+        # 🔴 Measured twice on two new scopes (2026-08-12): the store's hourly
+        # timer `git init`s, seeds an identity and commits a brand-new scope dir,
+        # with no remote. Without the second half an agent that finds no `.git`
+        # cannot tell "waiting for the timer" from "silently not backed up" —
+        # which is the reading one session actually reached, at the cost of a
+        # round trip.
+        (
+            "do not create the repository yourself",
+            "the no-git rule covers a brand-new scope directory too",
+        ),
+        (
+            "unversioned for up to an hour",
+            "the normal window, so an absent `.git` is not read as a lost entry",
+        ),
         # 🔴 The session source. The module is inert unless the step passes the
         # token, and there is no environment variable for it — so if these
         # sentences go, the tool silently reverts to the git window that
@@ -3347,6 +3377,10 @@ class TestPrNegativeControls:
         # base sentinels
         "store": "store root not found",
         "git": "git command failed",
+        # ⚠ Shares no spelling with "transcript unreadable" — checked by
+        # `test_no_two_sentinels_share_a_spelling`, which is what keeps `_only`
+        # from passing on a neighbour's error.
+        "entry": "index entry unreadable",
         # PR-source sentinels
         "remote": "repo has no usable github remote",
         "gh-missing": "gh cli not found",
@@ -3390,6 +3424,12 @@ class TestPrNegativeControls:
             "StoreMissingError", "GitError", "ExtractorMissingError",
             "TranscriptMissingError", "TranscriptAmbiguousError", "TranscriptStaleError",
             "TranscriptUnreadableError", "TranscriptCwdMismatchError",
+            # Re-exported from `subsystem_resolver`, not declared here — it is
+            # the SAME class `subsystem_recall` raises for the same condition.
+            # It is in `__all__`, so it is in scope for this map by the same rule
+            # as everything else: a caller catching it does not care which module
+            # the `class` statement is in.
+            "EntryUnreadableError",
         }
         assert declared == covered, (
             "subsystem_touch declares an error class this sentinel map does not "
@@ -4438,3 +4478,606 @@ class TestPrMutationKillMatrix:
         assert mod.main(argv) == 0
         assert st.main(argv) == 2
         assert "cannot be combined" in capsys.readouterr().err
+
+
+# =============================================================================
+# WHAT THE ENTRY ALREADY SAYS — the `already there` block.
+#
+# 🔴 THE MEASURED DEFECT. `KNOWN ENTRIES` printed the append SHAPE and the
+# insertion point and nothing else, so the agent deciding whether to append could
+# not see the bullet it was about to duplicate. The only guard was prose in
+# `handoff/SKILL.md`, asking an agent to judge notability right after work it
+# feels good about, with the prior bullet invisible.
+#
+# 🔴 SHAPES ARE MEASURED, CONTENT IS INVENTED. From a read-only pass over the
+# live corpus on 2026-08-12: 26 entries, 110 top-level bullets (all at indent 0),
+# 250 continuation lines (all at indent 2), 62 dated and 48 not, longest bullet
+# 19 lines, median 4 bullets per entry — and one entry ALREADY carrying 6 bullets
+# that share a single date, with 12 of 26 carrying at least 2. The accumulation
+# this block exists to stop is not hypothetical. Nothing below reproduces a real
+# entry name, path or sentence: this repo is PUBLIC.
+# =============================================================================
+
+# Wrapped multi-line prose, mixed dated/undated — the shape the corpus has.
+# Two bullets share TODAY, which is the repeat-handoff case.
+BUSY_NUANCE = (
+    f"- {TODAY}: the batch retry budget is per-batch and not per-item, so one\n"
+    "  poison record burns the whole budget and the rest of the batch is never\n"
+    "  attempted.\n"
+    f"- {TODAY}: a second line the earlier run of the day already wrote.\n"
+    "- an undated note, of the kind 48 of the corpus's 110 bullets are.\n"
+    "- 2026-07-02: the flush interval is a floor, not a schedule.\n"
+    "- 2026-06-30: the oldest one.\n"
+)
+
+
+def _journal_entry(service: str, scope: str, *, nuance: str | None, created_by=None) -> str:
+    """An entry whose `## Nuance / work-history` is under the test's control.
+
+    `nuance=None` omits the heading entirely — the `section-absent` case that an
+    `/analyze-service`-written entry really can have.
+    """
+    lines = ["---", f"service: {service}", f"scope: {scope}"]
+    if created_by:
+        lines.append(f"created_by: {created_by}")
+    lines += ["---", "", "## What it is", f"The {service} thing.", "", "## Pointers", "- x — y", ""]
+    if nuance is not None:
+        lines += ["## Nuance / work-history", nuance]
+    return "\n".join(lines)
+
+
+def _journal_store(root: Path) -> Path:
+    """One scope, four entries — one per journal state, so a single render is the
+    positive control AND its pair."""
+    store = root / "journal-store"
+    d = store / SCOPE
+    d.mkdir(parents=True)
+    (d / "batcher.md").write_text(
+        _journal_entry("batcher", SCOPE, nuance=BUSY_NUANCE, created_by="handoff"),
+        encoding="utf-8",
+    )
+    (d / "quiet-thing.md").write_text(
+        _journal_entry("quiet-thing", SCOPE, nuance=""), encoding="utf-8"
+    )
+    (d / "headless-thing.md").write_text(
+        _journal_entry("headless-thing", SCOPE, nuance=None, created_by="analyze-service"),
+        encoding="utf-8",
+    )
+    (d / "prosy-thing.md").write_text(
+        _journal_entry("prosy-thing", SCOPE, nuance="a paragraph, with no bullet at all.\n"),
+        encoding="utf-8",
+    )
+    return store
+
+
+def _journal_paths(*services: str) -> list[str]:
+    """Two paths per service — enough to clear `min_paths`."""
+    return [f"src/{s}/{f}.py" for s in services for f in ("one", "two")]
+
+
+def _journal_render(store: Path, *services: str, today: str = TODAY) -> str:
+    rep = st.build_report(
+        st.caller_supplied(_journal_paths(*services)), store, SCOPE, today=today
+    )
+    return st.render_text(rep)
+
+
+class TestJournalPositiveControlAndItsPair:
+    """🔴 ONE RUN, BOTH READINGS. An entry that surfaces nothing is only
+    informative next to an entry that surfaces something through the SAME code
+    path — otherwise an empty display is indistinguishable from a display wired
+    to nothing, which is the class this toolchain keeps hitting."""
+
+    def test_POSITIVE_CONTROL_an_entry_with_bullets_SURFACES_them(self, tmp_path) -> None:
+        text = _journal_render(_journal_store(tmp_path), "batcher")
+        assert "already there — READ THESE BEFORE PROPOSING" in text
+        assert "| - " in text, "no existing bullet reached the display"
+        assert "poison record burns the whole budget" in text
+
+    def test_ITS_PAIR_an_entry_with_an_EMPTY_section_surfaces_none(self, tmp_path) -> None:
+        """Reported WITH the positive control: bullets shown for `batcher`, none
+        for `quiet-thing`, from one render of one store."""
+        text = _journal_render(_journal_store(tmp_path), "batcher", "quiet-thing")
+        assert "| - " in text, "the positive half of the pair did not fire"
+        quiet = text.split("- quiet-thing")[1].split("\n  - ")[0]
+        assert "present and EMPTY" in quiet
+        assert "| " not in quiet, "an empty section rendered bullets from somewhere"
+
+    def test_the_shape_alone_is_no_longer_the_whole_block(self, tmp_path) -> None:
+        """The regression this exists for: before the change the block was the
+        append shape plus the insertion point, and NOTHING about the entry."""
+        text = _journal_render(_journal_store(tmp_path), "batcher")
+        assert "append shape:" in text          # still there
+        assert "COMPARE what you write against" in text
+        assert text.index("already there") < text.index("append shape:"), (
+            "the existing bullets must be read BEFORE the shape to fill in"
+        )
+
+
+class TestJournalRecencySignal:
+    def test_the_newest_date_is_the_MAX_not_the_first_bullets_position(self, tmp_path) -> None:
+        """🔴 Newest-first is the store's CONVENTION, not an invariant. Reading
+        position as recency reports the oldest bullet as the newest the moment a
+        past appender put its line at the bottom."""
+        store = tmp_path / "s"
+        (store / SCOPE).mkdir(parents=True)
+        (store / SCOPE / "batcher.md").write_text(
+            _journal_entry(
+                "batcher", SCOPE, nuance="- 2026-01-01: written first\n- 2026-08-09: newer\n"
+            ),
+            encoding="utf-8",
+        )
+        text = _journal_render(store, "batcher")
+        assert "newest dated 2026-08-09" in text
+        assert "2 days ago" in text
+
+    def test_a_bullet_dated_TODAY_is_called_out_LOUDLY_with_its_count(self, tmp_path) -> None:
+        """The measured failure: a second or third `/handoff` in one day adding
+        another same-dated bullet with the existing ones invisible."""
+        text = _journal_render(_journal_store(tmp_path), "batcher")
+        assert f"2 bullets on this entry are ALREADY dated {TODAY}" in text
+        assert "accumulation this block exists to prevent" in text
+
+    def test_an_entry_with_NO_dated_bullet_says_recency_is_UNKNOWN(self, tmp_path) -> None:
+        """~44% of real bullets carry no date. Inventing a recency for them would
+        be worse than saying there is none."""
+        store = tmp_path / "s"
+        (store / SCOPE).mkdir(parents=True)
+        (store / SCOPE / "batcher.md").write_text(
+            _journal_entry("batcher", SCOPE, nuance="- no date anywhere\n- nor here\n"),
+            encoding="utf-8",
+        )
+        text = _journal_render(store, "batcher")
+        assert "NONE dated — recency is UNKNOWN" in text
+        assert "mtime is deliberately not used" in text
+
+    def test_MTIME_IS_NOT_THE_SOURCE(self, tmp_path) -> None:
+        """🔴 The structural version of the claim, not the prose one. The store is
+        a git working tree under an hourly autocommit that other sessions also
+        write to, so mtime moves for a checkout or an edit to another section —
+        every one of which would report an append that never happened."""
+        store = _journal_store(tmp_path)
+        before = _journal_render(store, "batcher")
+        os.utime(store / SCOPE / "batcher.md", (0, 0))
+        assert _journal_render(store, "batcher") == before
+        os.utime(store / SCOPE / "batcher.md", (2_000_000_000, 2_000_000_000))
+        assert _journal_render(store, "batcher") == before
+
+    def test_created_by_attributes_the_ENTRY_and_says_so(self, tmp_path) -> None:
+        """There is no per-bullet writer in the schema. Presenting `created_by`
+        as the newest bullet's author would be a claim the store cannot make."""
+        text = _journal_render(_journal_store(tmp_path), "batcher")
+        assert "entry created_by=handoff" in text
+        assert "records no per-bullet writer" in text
+
+    def test_an_entry_predating_the_stamp_says_so_rather_than_guessing(self, tmp_path) -> None:
+        text = _journal_render(_journal_store(tmp_path), "quiet-thing")
+        assert "created_by not recorded (predates the stamp)" in text
+
+    def test_a_FUTURE_dated_bullet_is_reported_as_future_not_as_negative_days(
+        self, tmp_path
+    ) -> None:
+        store = tmp_path / "s"
+        (store / SCOPE).mkdir(parents=True)
+        (store / SCOPE / "batcher.md").write_text(
+            _journal_entry("batcher", SCOPE, nuance="- 2027-01-01: from the future\n"),
+            encoding="utf-8",
+        )
+        assert "in the FUTURE relative to" in _journal_render(store, "batcher")
+
+    def test_an_UNPARSEABLE_today_degrades_to_not_computable_not_to_a_wrong_number(
+        self, tmp_path
+    ) -> None:
+        text = _journal_render(_journal_store(tmp_path), "batcher", today="not-a-date")
+        assert "age not computable" in text
+        assert "days ago" not in text
+
+
+class TestJournalCoversTheSHAPESTheCorpusHas:
+    def test_a_WRAPPED_bullet_is_shown_whole_not_clipped_to_its_first_line(
+        self, tmp_path
+    ) -> None:
+        """110 bullets carry 250 continuation lines. A one-line-per-bullet
+        display would truncate most real entries."""
+        text = _journal_render(_journal_store(tmp_path), "batcher")
+        assert "|   poison record burns the whole budget and the rest of the batch is never" in text
+        assert "|   attempted." in text
+
+    def test_an_UNDATED_bullet_is_shown_like_any_other(self, tmp_path) -> None:
+        text = _journal_render(_journal_store(tmp_path), "batcher")
+        assert "| - an undated note" in text
+
+    def test_the_bullet_cap_PRINTS_what_it_hid(self, tmp_path) -> None:
+        """The corpus's longest bullet is 19 lines. Clipping is fine; clipping
+        silently is how an agent fails to recognize its own line from an hour
+        ago."""
+        long_bullet = f"- {TODAY}: line one\n" + "".join(
+            f"  continuation {i}\n" for i in range(2, 12)
+        )
+        store = tmp_path / "s"
+        (store / SCOPE).mkdir(parents=True)
+        (store / SCOPE / "batcher.md").write_text(
+            _journal_entry("batcher", SCOPE, nuance=long_bullet), encoding="utf-8"
+        )
+        text = _journal_render(store, "batcher")
+        assert f"… +{11 - st.JOURNAL_BULLET_MAX_LINES} more lines of this bullet" in text
+
+    def test_the_entry_cap_PRINTS_what_it_hid(self, tmp_path) -> None:
+        text = _journal_render(_journal_store(tmp_path), "batcher")
+        shown = st.JOURNAL_BULLETS_SHOWN
+        assert f"top {shown} of 5 in stored order" in text
+        assert f"… {5 - shown} further bullets not shown" in text
+
+    def test_a_SHORT_history_is_labelled_ALL_not_TOP_N(self, tmp_path) -> None:
+        """11 of the 26 real entries hold 3 bullets or fewer; calling those a
+        'top 3 of 3' would imply a hidden remainder that does not exist."""
+        store = tmp_path / "s"
+        (store / SCOPE).mkdir(parents=True)
+        (store / SCOPE / "batcher.md").write_text(
+            _journal_entry("batcher", SCOPE, nuance="- 2026-05-05: only one\n"), encoding="utf-8"
+        )
+        text = _journal_render(store, "batcher")
+        assert "(all 1):" in text
+        assert "not shown" not in text
+
+    def test_existing_bullets_are_PREFIXED_and_the_proposal_is_not(self, tmp_path) -> None:
+        """The one thing that must never blur: which lines the entry already has,
+        and which line the agent is about to invent."""
+        text = _journal_render(_journal_store(tmp_path), "batcher")
+        for line in text.splitlines():
+            if "poison record" in line:
+                assert line.lstrip().startswith("| ")
+        assert not st.journal_line_shape(TODAY).startswith("|")
+
+
+class TestJournalNegativeControls:
+    """Each with its OWN named error or named state, each proven reachable by an
+    input no earlier guard rejects."""
+
+    def test_a_MALFORMED_entry_raises_the_resolvers_own_error(self, tmp_path) -> None:
+        """Not caught and not reworded: the loader is fail-closed on purpose, and
+        an interactive caller must be told the store is broken rather than handed
+        a silently short index."""
+        store = _journal_store(tmp_path)
+        (store / SCOPE / "nameless.md").write_text("---\nscope: x\n---\n", encoding="utf-8")
+        with pytest.raises(sr.MalformedEntryError) as exc:
+            _journal_render(store, "batcher")
+        assert "malformed index entry" in str(exc.value)
+        assert "index entry unreadable" not in str(exc.value)
+
+    def test_an_UNREADABLE_entry_raises_the_named_error_from_build_report(
+        self, tmp_path
+    ) -> None:
+        """Reachable through the whole flow: the loader reads every `*.md`, so a
+        directory sitting where one is expected fails there — with a NAME, not as
+        a bare `IsADirectoryError`."""
+        store = _journal_store(tmp_path)
+        (store / SCOPE / "half-written.md").mkdir()
+        with pytest.raises(st.EntryUnreadableError) as exc:
+            _journal_render(store, "batcher")
+        assert "index entry unreadable" in str(exc.value)
+        assert "malformed index entry" not in str(exc.value)
+
+    def test_an_UNREADABLE_entry_raises_the_named_error_from_read_entry_journal(
+        self, tmp_path
+    ) -> None:
+        """The second wrap, reached by direct call. In `build_report`'s flow the
+        loader's read wins; this one covers the case it cannot — the file
+        becoming unreadable BETWEEN the two reads — and `read_entry_journal` is a
+        public entry point in its own right."""
+        store = _journal_store(tmp_path)
+        (store / SCOPE / "vanished.md").mkdir()
+        entry = sr.SubsystemEntry.from_mapping(
+            {"service": "vanished", "scope": SCOPE, "filename": "vanished.md"}
+        )
+        with pytest.raises(st.EntryUnreadableError) as exc:
+            st.read_entry_journal(store, entry)
+        assert "index entry unreadable" in str(exc.value)
+        assert "propose no append" in str(exc.value)
+
+    def test_a_MISSING_section_is_a_named_STATE_not_an_exception(self, tmp_path) -> None:
+        """🔴 Deliberately not an error, and this is the pushback worth recording.
+        An entry with no `## Nuance / work-history` is ordinary — nothing has been
+        journalled against it yet, which is exactly the case the append exists to
+        serve — so raising would abort the whole `/handoff` step on the ordinary
+        first append. It is LOUD instead, and it says the thing the agent
+        actually needs: the skill anchors its `Edit` on that heading, so the
+        heading has to be created as part of the write."""
+        text = _journal_render(_journal_store(tmp_path), "headless-thing")
+        assert "NO `## Nuance / work-history` SECTION" in text
+        assert "`Edit` anchor does not exist yet" in text
+
+    def test_an_UNBULLETED_section_is_its_own_state_not_an_empty_history(
+        self, tmp_path
+    ) -> None:
+        """Prose with no `- ` bullet: a schema violation the agent should see,
+        never a blank that reads as 'nothing recorded'."""
+        text = _journal_render(_journal_store(tmp_path), "prosy-thing")
+        assert "has content but NO top-level `- ` bullet" in text
+        assert "| " not in text.split("- prosy-thing")[1]
+
+    def test_the_FOUR_states_share_no_spelling(self, tmp_path) -> None:
+        """The premise of every assertion above: four mechanisms produce 'no
+        bullets on screen', and collapsing any two would make one of them
+        unobservable."""
+        text = _journal_render(
+            _journal_store(tmp_path), "batcher", "quiet-thing", "headless-thing", "prosy-thing"
+        )
+        for phrase in (
+            "newest dated",
+            "present and EMPTY",
+            "NO `## Nuance / work-history` SECTION",
+            "has content but NO top-level",
+        ):
+            assert text.count(phrase) == 1, f"{phrase!r} did not fire exactly once"
+
+
+class TestJournalIsReadOnly:
+    def test_reading_the_journals_writes_NOTHING(self, tmp_path) -> None:
+        """🔴 The property that lets this be pointed at a curated,
+        client-confidential, unbacked-up store. Hashed either side, over every
+        journal state at once."""
+        store = _journal_store(tmp_path)
+        before = _tree_hash(store)
+        _journal_render(store, "batcher", "quiet-thing", "headless-thing", "prosy-thing")
+        st.report_json(
+            st.build_report(
+                st.caller_supplied(_journal_paths("batcher")), store, SCOPE, today=TODAY
+            )
+        )
+        assert _tree_hash(store) == before
+
+    def test_a_journal_is_read_ONLY_for_entries_a_bullet_is_proposed_against(
+        self, tmp_path
+    ) -> None:
+        """Below-threshold and ambiguous entries get none: no append is proposed
+        for them, so there is nothing to compare against, and reading them would
+        put more of a confidential store on screen than the decision needs."""
+        store = _journal_store(tmp_path)
+        rep = st.build_report(
+            st.caller_supplied(["src/batcher/one.py", "src/batcher/two.py", "src/quiet-thing/a.py"]),
+            store,
+            SCOPE,
+            today=TODAY,
+        )
+        assert set(rep.journals) == {"batcher"}
+        assert [m.entry.ref for m in rep.below_threshold] == ["quiet-thing"]
+
+
+class TestJournalJson:
+    def test_json_carries_the_WHOLE_history_uncapped(self, tmp_path) -> None:
+        """The text caps are a display bound. A consumer diffing a proposed line
+        against the full history must not have to re-read the store to get it."""
+        rep = st.build_report(
+            st.caller_supplied(_journal_paths("batcher")),
+            _journal_store(tmp_path),
+            SCOPE,
+            today=TODAY,
+        )
+        j = st.report_json(rep)["known"][0]["journal"]
+        assert j["state"] == "journalled"
+        assert j["bullet_count"] == 5 and len(j["bullets"]) == 5
+        assert j["dated_count"] == 4
+        assert j["dated_today"] == 2
+        assert j["newest_date"] == TODAY and j["days_since_newest"] == 0
+        assert j["recency_source"] == "newest bullet date (NOT file mtime)"
+
+    def test_json_is_serializable_and_names_the_empty_states(self, tmp_path) -> None:
+        rep = st.build_report(
+            st.caller_supplied(_journal_paths("headless-thing", "quiet-thing")),
+            _journal_store(tmp_path),
+            SCOPE,
+            today=TODAY,
+        )
+        states = {k["ref"]: k["journal"]["state"] for k in json.loads(json.dumps(st.report_json(rep)))["known"]}
+        assert states == {"headless-thing": "section-absent", "quiet-thing": "section-empty"}
+
+
+class TestJournalMutationKillMatrix:
+    """One kill per new guard, each dying to its own test. The confound handled
+    throughout: a display guard removed usually leaves the SURROUNDING text
+    intact, so every assertion below names the specific line that must vanish
+    rather than checking that the block got shorter."""
+
+    def test_the_journal_mutant_harness_WORKS(self, tmp_path) -> None:
+        """Positive control on this class's loader: an unmutated copy must still
+        surface bullets, or every kill below is vacuous."""
+        mod = _load_mutant(
+            tmp_path, "mj_noop", [("JOURNAL_BULLETS_SHOWN = 3", "JOURNAL_BULLETS_SHOWN = 3  # noop")]
+        )
+        store = _journal_store(tmp_path)
+        rep = mod.build_report(
+            mod.caller_supplied(_journal_paths("batcher")), store, SCOPE, today=TODAY
+        )
+        assert "poison record" in mod.render_text(rep)
+
+    def test_kills_the_JOURNAL_POPULATION(self, tmp_path) -> None:
+        """🔴 The one that matters. Without it the block is back to a shape and an
+        insertion point — and the `NOT READ` line is what keeps that from being
+        SILENT."""
+        mod = _load_mutant(
+            tmp_path,
+            "mj_pop",
+            [("        journals={m.entry.ref: read_entry_journal(store, m.entry) "
+              "for m in assoc.matched},",
+              "        journals={},")],
+        )
+        store = _journal_store(tmp_path)
+        text = mod.render_text(
+            mod.build_report(
+                mod.caller_supplied(_journal_paths("batcher")), store, SCOPE, today=TODAY
+            )
+        )
+        assert "poison record" not in text
+        assert "journal: NOT READ" in text, "the loss of the journal was SILENT"
+
+    def test_kills_the_NOT_READ_fallback_leaving_it_silent(self, tmp_path) -> None:
+        """Proves the fallback is load-bearing rather than decorative: with the
+        journals gone AND the fallback neutered, a matched entry renders exactly
+        like one with an empty history."""
+        mod = _load_mutant(
+            tmp_path,
+            "mj_notread",
+            [
+                ("        journals={m.entry.ref: read_entry_journal(store, m.entry) "
+                 "for m in assoc.matched},",
+                 "        journals={},"),
+                ('                    "      journal: NOT READ — this entry matched but its '
+                 'existing "',
+                 '                    "      "'),
+            ],
+        )
+        store = _journal_store(tmp_path)
+        text = mod.render_text(
+            mod.build_report(
+                mod.caller_supplied(_journal_paths("batcher")), store, SCOPE, today=TODAY
+            )
+        )
+        assert "NOT READ" not in text and "poison record" not in text
+
+    def test_kills_the_SAME_DAY_warning(self, tmp_path) -> None:
+        """Without it the repeat-handoff case renders identically to a first
+        append — the exact defect this change exists for."""
+        mod = _load_mutant(tmp_path, "mj_repeat", [("    if repeats:", "    if False:")])
+        store = _journal_store(tmp_path)
+        text = mod.render_text(
+            mod.build_report(
+                mod.caller_supplied(_journal_paths("batcher")), store, SCOPE, today=TODAY
+            )
+        )
+        assert "ALREADY dated" not in text
+
+    def test_kills_the_MAX_date_rule(self, tmp_path) -> None:
+        """Without it recency is read from POSITION, and an entry whose bullets
+        were appended bottom-first reports its oldest line as its newest."""
+        mod = _load_mutant(
+            tmp_path,
+            "mj_max",
+            [("        return max(self.dated) if self.dated else None",
+              "        return self.dated[0] if self.dated else None")],
+        )
+        store = tmp_path / "s"
+        (store / SCOPE).mkdir(parents=True)
+        (store / SCOPE / "batcher.md").write_text(
+            _journal_entry(
+                "batcher", SCOPE, nuance="- 2026-01-01: written first\n- 2026-08-09: newer\n"
+            ),
+            encoding="utf-8",
+        )
+        text = mod.render_text(
+            mod.build_report(
+                mod.caller_supplied(_journal_paths("batcher")), store, SCOPE, today=TODAY
+            )
+        )
+        assert "newest dated 2026-01-01" in text, "position was not what produced the date"
+
+    def test_kills_the_PER_BULLET_clip_notice(self, tmp_path) -> None:
+        """Without it a long bullet is cut off mid-sentence with nothing saying
+        so — a bullet an agent then fails to recognize as its own."""
+        mod = _load_mutant(tmp_path, "mj_clip", [("        if clipped:", "        if False:")])
+        store = tmp_path / "s"
+        (store / SCOPE).mkdir(parents=True)
+        (store / SCOPE / "batcher.md").write_text(
+            _journal_entry(
+                "batcher",
+                SCOPE,
+                nuance=f"- {TODAY}: line one\n"
+                + "".join(f"  continuation {i}\n" for i in range(2, 12)),
+            ),
+            encoding="utf-8",
+        )
+        text = mod.render_text(
+            mod.build_report(
+                mod.caller_supplied(_journal_paths("batcher")), store, SCOPE, today=TODAY
+            )
+        )
+        assert "more lines of this bullet" not in text
+        assert "continuation 2" in text, "the clip itself stopped happening, not just its notice"
+
+    def test_kills_the_ENTRY_cap_notice(self, tmp_path) -> None:
+        """Without it bullets vanish at the display cap silently — a filter
+        wearing a cap's clothes."""
+        mod = _load_mutant(
+            tmp_path, "mj_cap", [("    if total > len(shown):", "    if False:")]
+        )
+        store = _journal_store(tmp_path)
+        text = mod.render_text(
+            mod.build_report(
+                mod.caller_supplied(_journal_paths("batcher")), store, SCOPE, today=TODAY
+            )
+        )
+        assert "further bullet" not in text
+        assert "top 3 of 5" in text, "the cap stopped applying, so this is not the notice's kill"
+
+    def test_kills_the_UNREADABLE_wrap_in_build_report(self, tmp_path) -> None:
+        """Without it an `IsADirectoryError` escapes with nothing saying the
+        SUBSYSTEM STORE was what failed."""
+        mod = _load_mutant(
+            tmp_path,
+            "mj_unreadable",
+            [('        raise EntryUnreadableError(\n            f"index entry unreadable: '
+              'under {store} ',
+              '        raise RuntimeError(\n            f"neutered: under {store} ')],
+        )
+        store = _journal_store(tmp_path)
+        (store / SCOPE / "half-written.md").mkdir()
+        with pytest.raises(Exception) as exc:
+            mod.build_report(
+                mod.caller_supplied(_journal_paths("batcher")), store, SCOPE, today=TODAY
+            )
+        assert not isinstance(exc.value, st.EntryUnreadableError)
+        assert "index entry unreadable" not in str(exc.value)
+
+    def test_the_MALFORMED_reraise_is_UNKILLABLE_and_that_is_the_finding(
+        self, tmp_path
+    ) -> None:
+        """🔴 NOT a kill — the OPPOSITE, recorded so nobody re-derives it.
+
+        `build_report`'s `except MalformedEntryError: raise` before the
+        `except OSError` is a NO-OP: `MalformedEntryError` is a `ResolverError`,
+        so the `OSError` clause could never have caught it. A mutation aimed at
+        the clause is what proved this, by refusing to change anything. The same
+        redundancy is in `subsystem_recall`.
+
+        `claude/RULES.md` — a guard that cannot be reached is not coverage. So
+        this test asserts the redundancy directly (the mutant behaves IDENTICALLY
+        to the real module) rather than dressing an unkillable clause up as a
+        green kill. The clause stays, labelled, because it documents intent and
+        because deleting it from one of the two store-readers and not the other
+        is how the two start to drift.
+        """
+        mod = _load_mutant(
+            tmp_path,
+            "mj_malformed",
+            [("    except MalformedEntryError:\n        raise",
+              "    except ZeroDivisionError:\n        raise")],
+        )
+        store = _journal_store(tmp_path)
+        (store / SCOPE / "nameless.md").write_text("---\nscope: x\n---\n", encoding="utf-8")
+        for module in (mod, st):
+            with pytest.raises(sr.MalformedEntryError) as exc:
+                module.build_report(
+                    module.caller_supplied(_journal_paths("batcher")), store, SCOPE, today=TODAY
+                )
+            assert "malformed index entry" in str(exc.value)
+        assert not issubclass(sr.MalformedEntryError, OSError), (
+            "the premise: if MalformedEntryError were an OSError the clause WOULD matter"
+        )
+
+    def test_kills_the_COMPARE_instruction(self, tmp_path) -> None:
+        """The bullets on screen with nothing telling the agent to read them is
+        the state this change started from, one layer up."""
+        mod = _load_mutant(
+            tmp_path,
+            "mj_compare",
+            [('            "  🔴 COMPARE what you write against the `already there` lines '
+              'above. Restating "',
+              '            "  "')],
+        )
+        store = _journal_store(tmp_path)
+        text = mod.render_text(
+            mod.build_report(
+                mod.caller_supplied(_journal_paths("batcher")), store, SCOPE, today=TODAY
+            )
+        )
+        assert "COMPARE what you write" not in text

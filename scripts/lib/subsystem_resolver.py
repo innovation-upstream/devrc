@@ -75,17 +75,24 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence as _AbcSequence
 from dataclasses import dataclass
+from datetime import date as _date
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
 __all__ = [
     "KINDS",
     "DEFAULT_MIN_PATHS",
+    "POINTERS_HEADING",
+    "NUANCE_HEADING",
     "ResolverError",
     "MalformedEntryError",
     "UnknownScopeError",
     "AmbiguousRefError",
     "InvalidPathError",
+    "EntryUnreadableError",
+    "JournalBullet",
+    "extract_sections",
+    "parse_journal_bullets",
     "SubsystemEntry",
     "SubsystemIndex",
     "Evidence",
@@ -195,6 +202,29 @@ class AmbiguousRefError(ResolverError):
             f"in the {tier} tier ({', '.join(self.candidates)}). The resolver never picks — "
             f"disambiguate the ref or the index."
         )
+
+
+class EntryUnreadableError(ResolverError):
+    """An entry file cannot be read. Sentinel: 'index entry unreadable'.
+
+    🔴 It exists because the alternative is an unnamed `OSError` escaping from
+    inside `load_index`. The store is a plain directory of hand-curated files on
+    a machine that also runs an hourly autocommit: a file can be mid-rename, a
+    directory can be sitting where a `.md` is expected, a mode can be wrong. Any
+    of those would otherwise reach the caller as `IsADirectoryError` or
+    `PermissionError` with no indication that the SUBSYSTEM STORE was the thing
+    that failed.
+
+    🔴 IT LIVES HERE, IN THE MODULE BOTH READERS IMPORT, RATHER THAN IN EITHER OF
+    THEM. `subsystem_recall` raises it when a `/resume` read fails and
+    `subsystem_touch` raises it when a `/handoff` read fails — the SAME condition
+    on the SAME files. Two classes spelling one condition is how a caller ends up
+    catching the reader's and missing the writer's; the precedent is
+    `StoreMissingError`, which `subsystem_recall` imports from `subsystem_touch`
+    for exactly this reason rather than declaring a second one. It cannot live in
+    either of those two modules, because `subsystem_recall` already imports
+    `subsystem_touch` and the reverse edge would close a cycle.
+    """
 
 
 # --- The shared predicate ------------------------------------------------------
@@ -752,6 +782,186 @@ def associate_paths(
         unmatched_paths=tuple(p for p in ordered if p not in matched_paths),
         considered_paths=tuple(ordered),
     )
+
+
+# --- Entry markdown shape ------------------------------------------------------
+#
+# 🔴 ONE PARSER, TWO CONSUMERS. `subsystem_recall` (the `/resume` reader) and
+# `subsystem_touch` (the `/handoff` writer) both have to read an entry's prose:
+# the reader to surface it, the writer to show what is ALREADY THERE before it
+# proposes an append. These functions started in `subsystem_recall`, where they
+# were verified against the real 23-entry corpus, and moved DOWN here unchanged
+# when the writer needed them — because `subsystem_recall` already imports
+# `subsystem_touch`, so the writer cannot import the reader without closing a
+# cycle, and a copy in the writer would be a second parser free to drift from the
+# one the corpus was measured against.
+#
+# They are pure and touch no filesystem, which is why they sit above the disk
+# loader with the rest of the pure functions.
+
+
+POINTERS_HEADING = "## Pointers"
+NUANCE_HEADING = "## Nuance / work-history"
+
+# A top-level journal bullet starts at COLUMN 0. Measured over the whole live
+# corpus on 2026-08-12 (26 entries, 110 top-level bullets): every bullet line is
+# at indent 0 and every one of the 250 continuation lines is at indent 2. So an
+# indented `-` is a CONTINUATION (a nested list, or prose that happens to start
+# with a dash), never a new bullet — folding the two together would split one
+# bullet into several and report a history longer than the entry has.
+_JOURNAL_BULLET = re.compile(r"^[-*][ \t]+")
+
+# `- YYYY-MM-DD: …` — the dated form. The date is OPTIONAL: 62 of those 110
+# bullets carry one and 48 do not, so a parser that required a date would drop
+# 44% of the real corpus on the floor and call the result a complete read.
+_JOURNAL_DATE = re.compile(r"^[-*][ \t]+(\d{4}-\d{2}-\d{2})(?=[:,)\]\s]|$)")
+
+
+def _is_fence(line: str) -> bool:
+    s = line.lstrip()
+    return s.startswith("```") or s.startswith("~~~")
+
+
+def extract_sections(text: str, headings: Sequence[str]) -> dict[str, str]:
+    """Return `{heading: body}` for each requested heading found in `text`.
+
+    Bodies are VERBATIM — the store is markdown precisely so prose survives a
+    read unmangled — with surrounding blank lines trimmed. A heading that is
+    absent is simply not a key; the caller reports it by name rather than
+    printing an empty block (an absent section and an empty one are different
+    facts about a curated entry).
+
+    A section runs from its heading to the next ATX heading of any level, or to
+    end of file.
+
+    🔴 FENCED BLOCKS ARE SKIPPED. A `#` line inside a code fence is not a
+    heading, and treating it as one would END the section early — surfacing
+    HALF an entry's nuance while looking exactly like a complete read. That is a
+    silent under-report, the failure class this whole module is built against,
+    so it is handled rather than left to "entries probably don't contain
+    fences".
+
+    Matching is on the EXACT heading string, not a normalized one: these are
+    schema headings from `analyze-service/SKILL.md`, not user refs. Normalizing
+    them would fold `## Pointers` and `## pointers!` together and quietly widen
+    what the store is allowed to look like.
+    """
+    wanted: dict[str, list[str]] = {h: [] for h in headings}
+    # 🔴 PRESENCE IS TRACKED SEPARATELY FROM CONTENT. A heading that appears with
+    # nothing under it must be reported as PRESENT-AND-EMPTY, not as absent —
+    # "the section was never started" and "the section is there and unfilled"
+    # are different facts about a curated entry, and only one of them is a
+    # reason to go look somewhere else. Deriving presence from a non-empty body
+    # collapses them, and it did: an empty section followed by another heading
+    # read as absent while the same empty section at end-of-file read as
+    # present, purely because of what came after it.
+    seen: set[str] = set()
+    current: str | None = None
+    in_fence = False
+    for line in text.splitlines():
+        if _is_fence(line):
+            in_fence = not in_fence
+            if current is not None:
+                wanted[current].append(line)
+            continue
+        if not in_fence and line.startswith("#"):
+            stripped = line.rstrip()
+            current = stripped if stripped in wanted else None
+            if current is not None:
+                seen.add(current)
+            continue
+        if current is not None:
+            wanted[current].append(line)
+    return {h: "\n".join(wanted[h]).strip("\n") for h in headings if h in seen}
+
+
+@dataclass(frozen=True)
+class JournalBullet:
+    """One top-level bullet of a `## Nuance / work-history` section, VERBATIM.
+
+    🔴 `lines` IS A TUPLE, NOT A STRING, because a real bullet is WRAPPED PROSE.
+    Measured over the live corpus on 2026-08-12: 110 top-level bullets carry 250
+    continuation lines between them — a median bullet is 3 lines and the longest
+    is 19. Any model that assumed one line per bullet would silently truncate
+    most of the corpus, and a truncated bullet is exactly the thing an agent
+    would fail to recognize as a near-duplicate of the line it is about to write.
+    """
+
+    lines: tuple[str, ...]
+    date: str | None
+    """The ISO date the bullet is dated with, or None. ~44% of the real corpus
+    carries no date; `None` is an ordinary reading, not a parse failure."""
+
+    @property
+    def first_line(self) -> str:
+        return self.lines[0] if self.lines else ""
+
+    @property
+    def text(self) -> str:
+        return "\n".join(self.lines)
+
+
+def parse_journal_bullets(body: str) -> tuple[JournalBullet, ...]:
+    """Group a `## Nuance / work-history` body into top-level bullets.
+
+    Order is preserved exactly as stored — this function makes NO claim about
+    which bullet is newest. The store's convention is newest-first, but that is a
+    convention a writer can break, so recency is derived from the DATES (see
+    `subsystem_touch.EntryJournal.newest_date`) rather than from position.
+
+    Rules, each measured against the corpus rather than assumed:
+
+      * A bullet starts at column 0 (`_JOURNAL_BULLET`). Every other non-blank
+        line attaches to the bullet above it, indented or not.
+      * Text BEFORE the first bullet is dropped from the bullet list. The caller
+        must not read an empty tuple as "the section is empty" — a non-empty body
+        that yields no bullets is its own state, and `subsystem_touch` reports it
+        as one rather than showing a blank.
+      * 🔴 FENCED BLOCKS ARE SKIPPED, for the same reason `extract_sections`
+        skips them: a `- ` line inside a fence is sample text, and promoting it
+        to a bullet invents history the entry does not have. No fence appears in
+        the corpus today (measured: 0 fence lines across all 26 nuance sections)
+        — this is here because the sibling parser one screen up already had to
+        learn it, and a fence is one pasted snippet away.
+      * Trailing blank lines are stripped from each bullet so a blank separator
+        cannot inflate a bullet's line count.
+    """
+    bullets: list[list[str]] = []
+    in_fence = False
+    for line in body.splitlines():
+        if _is_fence(line):
+            in_fence = not in_fence
+            if bullets:
+                bullets[-1].append(line)
+            continue
+        if not in_fence and _JOURNAL_BULLET.match(line):
+            bullets.append([line])
+            continue
+        if bullets:
+            bullets[-1].append(line)
+    out: list[JournalBullet] = []
+    for group in bullets:
+        while group and not group[-1].strip():
+            group.pop()
+        out.append(JournalBullet(lines=tuple(group), date=_bullet_date(group[0])))
+    return tuple(out)
+
+
+def _bullet_date(first_line: str) -> str | None:
+    """The bullet's ISO date, or None — VALIDATED, not just shaped.
+
+    `2026-13-45` matches the shape and is not a date; returning it would put a
+    nonexistent day into a recency claim and into any arithmetic done on it.
+    `fromisoformat` is the check, so what comes back is always a real date.
+    """
+    m = _JOURNAL_DATE.match(first_line)
+    if not m:
+        return None
+    try:
+        _date.fromisoformat(m.group(1))
+    except ValueError:
+        return None
+    return m.group(1)
 
 
 # --- The thin disk loader ------------------------------------------------------
