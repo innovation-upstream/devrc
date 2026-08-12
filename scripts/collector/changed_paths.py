@@ -63,25 +63,43 @@ Raise it only with a new measurement quoted. Lowering it below the measured p999
 
 WHAT `changed_paths_outside_cwd` ACTUALLY COUNTS — MEASURED, NOT ASSUMED
 ------------------------------------------------------------------------
-A dry run over 700 real Claude transcripts (2026-08-11, read-only, nothing
-emitted) found 3,384 distinct modified paths, of which 525 (16%) were under the
-session cwd and 2,859 (84%) were not. Classified by prefix, the excluded set is
-dominated by:
+A dry run over every transcript this tailer walks — 600 of them, i.e. after
+`iter_transcripts` drops the `subagents/` and `wf_*` dirs — found (2026-08-11,
+read-only, nothing emitted) 3,290 distinct modified paths, of which 470 (14.3%)
+were under the session cwd and 2,820 (85.7%) were not. Classified by prefix, the
+excluded set breaks down as:
 
-    ~1,280  the per-session agent scratchpad under /tmp
-      ~700  elsewhere under the user's home (other repos, ~/.claude, dotfiles)
-     ~150+  short-lived git worktrees under /tmp, spread over ~30 directories
+    1,225  the per-session agent scratchpad under /tmp
+      802  short-lived git worktrees under /tmp — across 487 distinct `wt-*`
+           worktree roots (645 distinct leaf directories)
+      626  elsewhere under the user's home (other repos, ~/.claude, dotfiles)
+      167  other /tmp paths
 
-The first two are exactly what MUST be excluded — a scratchpad file or a file in
-a different repo has no repo-relative form here, and inventing one would hand
-the resolver components (`tmp`, `home`, a foreign repo's name) that manufacture
-associations. The third is a genuine loss: a temp worktree IS repo content, but
-nothing in a transcript maps a worktree back to its repo, and the resolver's
-design forbids persisting a location to find out. So it is COUNTED rather than
-guessed at, and a consumer comparing `changed_paths_total` against
-`changed_paths_outside_cwd` can see how much of a session it is not being told
-about. `total + outside_cwd == files_modified` holds by construction and is
-pinned by a test.
+The scratchpad and other-repo buckets are exactly what MUST be excluded — a
+scratchpad file or a file in a different repo has no repo-relative form here, and
+inventing one would hand the resolver components (`tmp`, `home`, a foreign repo's
+name) that manufacture associations. The worktree bucket is a genuine loss: a
+temp worktree IS repo content, but nothing in a transcript maps a worktree back
+to its repo, and the resolver's design forbids persisting a location to find out.
+So it is COUNTED rather than guessed at, and a consumer comparing
+`changed_paths_total` against `changed_paths_outside_cwd` can see how much of a
+session it is not being told about. `total + outside_cwd == files_modified` holds
+by construction and is pinned by a test.
+
+🔴 CORRECTED 2026-08-11 (same day, before the numbers could be quoted anywhere
+else): the worktree bucket previously read "~150+ … spread over ~30 directories".
+Re-measured it is **802 paths over 487 worktree roots** — understated ~5.3x on
+paths and ~16x on directories. The conclusion is unchanged, and the corrected
+figure is what makes it worth stating: the counted-but-dropped worktree set alone
+is **1.7x larger than the entire emitted path set** (802 vs 470), so a consumer
+that reads `changed_paths` as the session's file list, rather than as a subset
+sized by `changed_paths_outside_cwd`, is wrong by more than the data it has.
+
+Every count above is a measurement, not an estimate: the four buckets sum
+exactly to the 2,820 excluded, and the in/out headline reproduces across three
+independent runs (14.3% / 15.2% / 16%). What the superseded figures lacked was a
+measurement of the SUB-classification — the split was approximated while the
+headline was counted, which is why only it was wrong.
 
 ⚠ TRUNCATION BIAS, STATED RATHER THAN LEFT TO BE DISCOVERED: the list is sorted
 lexicographically, so a truncated list is a lexicographic PREFIX and can

@@ -285,6 +285,14 @@ def _empty_rollup() -> dict:
         "end_ts": None,
         "cwd": "",
         "unreadable": False,
+        # Count of tool_use blocks whose file-path argument could not be read as
+        # a path at all (a non-string, or whitespace-only). COUNTED, never
+        # dropped silently and never coerced into a path — see the guard in
+        # build_rollup. It is a diagnostic about the TRANSCRIPT, not a
+        # measurement of the session: 0 means "no malformed entry was seen",
+        # including on a transcript we could not read at all (where
+        # `unreadable` / `stats_unavailable` already carry the verdict).
+        "unusable_file_paths": 0,
         # Which of the derived statistic GROUPS this rollup could not observe.
         # Sentinels: "files" (files_modified / lines_added / lines_removed /
         # changed_paths) and "git" (git_commits / git_pushes). Empty list = every
@@ -403,7 +411,16 @@ def build_rollup(objects: list[dict]) -> dict:
                         continue
                     name = block.get("name") or ""
                     tool_counts[name] = tool_counts.get(name, 0) + 1
-                    inp = block.get("input") or {}
+                    inp = block.get("input")
+                    # 🔴 A tool_use `input` that is not a dict is a MALFORMED
+                    # TRANSCRIPT, not a caller bug — `or {}` kept a truthy list
+                    # here and the next `.get` raised AttributeError, killing the
+                    # whole 5-minute pass for every OTHER session too. Count it
+                    # and carry on; `tool_counts` above is still honest.
+                    if not isinstance(inp, dict):
+                        if inp is not None:
+                            r["unusable_file_paths"] += 1
+                        inp = {}
                     if name in ("Task", "Agent"):
                         r["uses_task_agent"] = True
                     if name.startswith("mcp__"):
@@ -420,11 +437,31 @@ def build_rollup(objects: list[dict]) -> dict:
                             r["git_pushes"] += 1
                     if name in _FILE_TOOLS:
                         fp = inp.get("file_path") or inp.get("notebook_path") or ""
-                        if fp:
+                        # 🔴 VALIDATE, DO NOT COERCE. `changed_paths.summarize`
+                        # RAISES on a non-string or blank entry, and this run()
+                        # had no per-session try — so ONE malformed `file_path`
+                        # anywhere in ~/.claude/projects aborted the pass and
+                        # stopped ALL claude session-summary emission. Measured
+                        # reachability is 0 across the 600 transcripts the tailer
+                        # walks (2026-08-11), but that is a property of today's
+                        # data, not of this code, and it is live on both hosts.
+                        #
+                        # Rejected: `str(fp)` — the coercion the opencode side
+                        # does. It turns `["a.py"]` into the string "['a.py']",
+                        # which `to_repo_relative` accepts as a plain relative
+                        # path and EMITS: a manufactured path, in the one module
+                        # whose whole contract is that nothing is invented. A
+                        # value we cannot read is counted (`unusable_file_paths`)
+                        # and excluded — never guessed at, never dropped in
+                        # silence. Note `files` would also raise TypeError on an
+                        # unhashable list/dict before ever reaching summarize().
+                        if isinstance(fp, str) and fp.strip():
                             files.add(fp)
                             lang = lang_for_path(fp)
                             if lang:
                                 languages[lang] = languages.get(lang, 0) + 1
+                        elif fp:
+                            r["unusable_file_paths"] += 1
                         add, rem = churn(name, inp)
                         r["lines_added"] += add
                         r["lines_removed"] += rem
@@ -732,6 +769,7 @@ def run(now: float | None = None) -> int:
     reasons: dict = {}
     emitted = 0
     scanned = 0
+    failed = 0
     since_checkpoint = 0
     for path, session in iter_transcripts(roots):
         st = _stat(path)
@@ -751,8 +789,45 @@ def run(now: float | None = None) -> int:
             if path in prev:
                 new_state[path] = prev[path]
             continue
-        rollup = summarize_transcript(path)
-        emit_event(emit, build_event(session, rollup))
+        # 🔴 ONE BAD TRANSCRIPT MUST NOT COST EVERY OTHER SESSION'S SUMMARY.
+        # Summarising is pure parsing over data we do not control, and every
+        # exception it can raise is a statement about THAT file. Before this
+        # wrap a single malformed value aborted the pass — measured on
+        # 2026-08-11, six distinct shapes did it (a non-string or blank
+        # `file_path`; a `tool_use.input` that is not a dict; a non-string
+        # `timestamp`, which mixes int and str under `<`), and the loop had no
+        # per-session try, so all claude session-summary emission stopped.
+        #
+        # SKIP AND REPORT, not log-and-continue: the failure is named on stderr
+        # with the path and the exception, and counted into the run's own
+        # summary line, because a swallowed exception here would recreate the
+        # silent-zero class this whole payload exists to remove.
+        #
+        # THE SPLIT IS PER-SESSION-DATA vs SYSTEMIC, not "the summarise call":
+        #   * inside  — everything derived from THIS transcript's bytes.
+        #     `build_event` belongs here and was a 7th fatal shape until it moved
+        #     (found by review, PRE-EXISTING — it raises identically on the tree
+        #     before this whole change): it calls `project_basename(cwd)` ->
+        #     `cwd.rstrip("/")`, reachable whenever a transcript has ZERO
+        #     messages and a non-str `cwd`. Zero messages routes through
+        #     `_mark_unobservable`, which skips `CP.summarize` — the only guard
+        #     that would have rejected that cwd — so the rollup comes back clean
+        #     and the raise lands one line later, outside the try.
+        #   * outside — `emit_event`. A spool/helper failure is broken for EVERY
+        #     session, and turning it into a per-session skip would convert a
+        #     loud systemic outage into a quiet count.
+        # The signature is NOT recorded on failure, so the transcript is
+        # re-evaluated next tick rather than marked done.
+        try:
+            rollup = summarize_transcript(path)
+            ev = build_event(session, rollup)
+        except Exception as exc:  # noqa: BLE001 — deliberately broad; see above
+            failed += 1
+            print(f"session-tailer: ERROR summarising {path}: "
+                  f"{type(exc).__name__}: {exc} — session SKIPPED, not emitted",
+                  file=sys.stderr)
+            continue
+        emit_event(emit, ev)
         new_state[path] = {"sig": sig, "emitted_at": now}  # ONLY after a successful emit
         emitted += 1
         since_checkpoint += 1
@@ -765,9 +840,64 @@ def run(now: float | None = None) -> int:
     new_state = {p: s for p, s in new_state.items() if p in seen}
     save_state(sp, new_state)
     breakdown = " ".join(f"{k}={v}" for k, v in sorted(reasons.items()))
-    print(f"session-tailer: scanned={scanned} emitted={emitted} "
+    # `failed` is printed UNCONDITIONALLY, including as 0. A counter that only
+    # appears when it is non-zero is one nobody can tell apart from a build that
+    # never had the counter — the zero is the reading that makes the non-zero
+    # legible.
+    print(f"session-tailer: scanned={scanned} emitted={emitted} failed={failed} "
           f"[{breakdown}] settle={settle_s / 60:g}m interim={interim_s / 3600:g}h "
           f"state={sp}")
+
+    # 🔴 A COUNT NOBODY READS IS THE SAME SILENT ZERO, ONE LEVEL UP.
+    # Skipping a bad transcript keeps the pass alive, but if a skip can never
+    # fail the UNIT then a SYSTEMIC breakage — `changed_paths` throwing for every
+    # session, a bad deploy, an import resolving differently under the timer —
+    # shows up as every session failing while the process still exits 0. systemd
+    # records success, `OnFailure = notify-failure@%n.service` never fires, and
+    # the only trace is a stderr line in journald nobody is tailing. That is
+    # precisely the class this payload exists to remove, so the counter has to
+    # reach the exit status. (`claude-activity-source` is Type=oneshot and this
+    # script is its SECOND ExecStart, so a non-zero return does fail the unit.)
+    #
+    # ANY failure fails the run. A ratio rule (`failed >= emitted`, "escalate
+    # only the systemic shape") was written first and REJECTED — on the merits
+    # below, NOT on the workload argument that was tried first and does not hold.
+    # MEASURED over 2,781 real ticks from this unit's own journal (60 days):
+    # emitted=0 on 55.0%, and the two rules agree on 81.0% of ticks at failed=1.
+    # So they ARE distinguishable, on roughly one tick in five — an earlier draft
+    # of this comment claimed "the overwhelming majority" and that the two could
+    # not be told apart in practice, which the numbers do not support.
+    #
+    # The rejection stands on this instead. A transcript that
+    # cannot be summarised does not degrade a number — that session's summary is
+    # MISSING, and stays missing while the condition holds, because the signature
+    # is deliberately not recorded (a code fix must be able to heal the corpus
+    # without the file changing). Ongoing data loss is what should keep alerting,
+    # so "it would toast every 5 minutes until someone fixes it" is the feature.
+    # The usual objection — a permanently-red gate trains people to click
+    # through — is about a gate standing between someone and a merge, not about
+    # a deadman reporting that data is STILL being dropped.
+    #
+    # ⚠ WHAT `failed` DOES NOT COVER — stated rather than left to be found,
+    # because a bare "any failure fails the run" reads as a completeness this
+    # code does not have:
+    #   * a breakage that makes summaries WRONG rather than raising. Nothing
+    #     here inspects a rollup's contents; `failed` counts exceptions only.
+    #   * anything raised OUTSIDE the per-session try — `emit_event`,
+    #     `iter_transcripts`, `save_state`. Those still abort the pass with a
+    #     traceback and are never counted, BY DESIGN (they are systemic, not
+    #     per-transcript). The pass exits non-zero either way, so the unit still
+    #     fails; what differs is that `failed=N` will not name them.
+    #   * a failure in the unit's FIRST ExecStart (`claude/tailer.py`), which
+    #     stops this script from running at all. Pre-existing and out of scope
+    #     here; a systemd oneshot runs its ExecStart list sequentially and stops
+    #     at the first non-zero.
+    if failed:
+        print(f"session-tailer: FAILING the run — {failed} session(s) could not "
+              f"be summarised and their summaries are MISSING, not degraded "
+              f"(emitted={emitted}); see the ERROR line(s) above for each path",
+              file=sys.stderr)
+        return 1
     return 0
 
 

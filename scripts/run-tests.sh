@@ -412,7 +412,15 @@ TARGET_FLOORS=(
   # gate runs the new file at all.
   "scripts/collector/tests|260"
   "scripts/collector/keylog/tests|79"
-  "scripts/collector/claude/tests|59"
+  # 2026-08-11, the malformed-`file_path` abort fix: +28 tests here (the
+  # extraction-site guard, run()'s per-session skip-and-report, the exit-status
+  # contract that makes `failed=N` reach systemd, and the audit round that moved
+  # `build_event` inside the try). The gate printed `collected=115 … floor=105`
+  # on the run that set this; the 59 it started from was ALSO already 46 behind
+  # — inside the drift band (max(60, 59/4)) and therefore silent, the same slack
+  # the line above was re-pinned for. Rule applied to the gate's own count:
+  # 115 - min(50, max(1, 115/20)) = 115 - 5 = 110.
+  "scripts/collector/claude/tests|110"
   "scripts/collector/i3/tests|12"
   "scripts/collector/browser-ext/tests|12"
   "scripts/collector/opencode/tests|162"
