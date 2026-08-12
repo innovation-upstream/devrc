@@ -836,6 +836,45 @@ def run(now: float | None = None) -> int:
     print(f"session-tailer: scanned={scanned} emitted={emitted} failed={failed} "
           f"[{breakdown}] settle={settle_s / 60:g}m interim={interim_s / 3600:g}h "
           f"state={sp}")
+
+    # 🔴 A COUNT NOBODY READS IS THE SAME SILENT ZERO, ONE LEVEL UP.
+    # Skipping a bad transcript keeps the pass alive, but if a skip can never
+    # fail the UNIT then a SYSTEMIC breakage — `changed_paths` throwing for every
+    # session, a bad deploy, an import resolving differently under the timer —
+    # shows up as every session failing while the process still exits 0. systemd
+    # records success, `OnFailure = notify-failure@%n.service` never fires, and
+    # the only trace is a stderr line in journald nobody is tailing. That is
+    # precisely the class this payload exists to remove, so the counter has to
+    # reach the exit status. (`claude-activity-source` is Type=oneshot and this
+    # script is its SECOND ExecStart, so a non-zero return does fail the unit.)
+    #
+    # ANY failure fails the run. A ratio rule (`failed >= emitted`, "escalate
+    # only the systemic shape") was written first and REJECTED on the workload:
+    # this timer scans every transcript but emits only CHANGED ones, so the
+    # overwhelming majority of real ticks have emitted=0 — which makes
+    # `failed >= emitted` identical to `failed > 0` in almost every pass, while
+    # adding a boundary nobody can predict from the summary line. The two cannot
+    # be told apart in practice, so the simpler rule wins.
+    #
+    # It is also the RIGHT answer, not merely the cheap one. A transcript that
+    # cannot be summarised does not degrade a number — that session's summary is
+    # MISSING, and stays missing while the condition holds, because the signature
+    # is deliberately not recorded (a code fix must be able to heal the corpus
+    # without the file changing). Ongoing data loss is what should keep alerting,
+    # so "it would toast every 5 minutes until someone fixes it" is the feature.
+    # The usual objection — a permanently-red gate trains people to click
+    # through — is about a gate standing between someone and a merge, not about
+    # a deadman reporting that data is STILL being dropped.
+    #
+    # ⚠ WHAT THIS STILL CANNOT CATCH, stated rather than left to be found: a
+    # breakage that makes summaries WRONG rather than raising. Nothing here
+    # inspects a rollup's contents; `failed` counts exceptions only.
+    if failed:
+        print(f"session-tailer: FAILING the run — {failed} session(s) could not "
+              f"be summarised and their summaries are MISSING, not degraded "
+              f"(emitted={emitted}); see the ERROR line(s) above for each path",
+              file=sys.stderr)
+        return 1
     return 0
 
 

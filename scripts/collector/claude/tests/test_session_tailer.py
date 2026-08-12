@@ -504,7 +504,9 @@ def test_one_unsummarisable_transcript_does_not_abort_the_run(env, capsys):
     _write(env["projects"], "-home-zach-workspace-devrc", "bad",
            [user_typed("hi"), _BAD_TS_TURN])
 
-    assert S.run() == 0
+    # non-zero: the point of the wrapper is that the OTHER sessions survive, NOT
+    # that the failure is forgiven. See the exit-status contract below.
+    assert S.run() == 1
     text = _summary_line(capsys)
     assert "failed=1" in text
     # REPORTED, not swallowed: the offending path and the exception are named.
@@ -522,12 +524,14 @@ def test_a_skipped_transcript_is_not_marked_done_and_retries(env, capsys):
     and it emits for real once the content becomes summarisable."""
     p = _write(env["projects"], "-home-zach-workspace-devrc", "bad",
                [user_typed("hi"), _BAD_TS_TURN])
-    assert S.run() == 0
+    # nothing else was due this tick, so emitted=0 → the run FAILS (see the
+    # exit-status contract below); the point under test here is the STATE.
+    assert S.run() == 1
     assert "failed=1" in _summary_line(capsys)
     assert not any(k.endswith("bad.jsonl") for k in S.load_state(env["state"]))
 
     # still bad on the next pass → still reported, still not marked done
-    assert S.run() == 0
+    assert S.run() == 1
     assert "failed=1" in _summary_line(capsys)
     assert _spool_events(env["spool"]) == []
 
@@ -536,6 +540,78 @@ def test_a_skipped_transcript_is_not_marked_done_and_retries(env, capsys):
     assert S.run() == 0
     assert "failed=0" in _summary_line(capsys)
     assert [e["session"] for e in _spool_events(env["spool"])] == ["bad"]
+
+
+# --------------------------------------------------------------------------- #
+# `failed` must reach the EXIT STATUS, or it is the same silent zero one level up
+# --------------------------------------------------------------------------- #
+# 🔴 `claude-activity-source` is `Type=oneshot` with `OnFailure =
+# notify-failure@%n.service`, and session-tailer.py is its SECOND ExecStart — so
+# a non-zero return is the ONLY thing that reaches a toast. A run that counts
+# every session as failed and still exits 0 is systemd-invisible: unit success,
+# no OnFailure, and one stderr line in journald nobody is tailing.
+def test_a_systemic_failure_FAILS_the_run(env, capsys):
+    """Every session unsummarisable — the shape a broken deploy or a broken
+    `changed_paths` produces. This MUST be non-zero."""
+    for i in range(4):
+        _write(env["projects"], "-home-zach-workspace-devrc", f"bad{i}",
+               [user_typed("hi"), _BAD_TS_TURN])
+    assert S.run() == 1
+    text = _summary_line(capsys)
+    assert "emitted=0 failed=4" in text
+    assert "FAILING the run" in text
+
+
+def test_ONE_bad_transcript_among_healthy_ones_still_fails_the_run(env, capsys):
+    """A single failure is not "degraded data" — that session's summary is
+    MISSING, and stays missing while the condition holds, so it must keep
+    alerting. The healthy sessions still emit; the run still reports non-zero.
+
+    ⚠ A ratio rule (`failed >= emitted`) was written first and rejected: this
+    timer emits only CHANGED transcripts, so nearly every real tick has
+    emitted=0 and the ratio collapses to `failed > 0` anyway."""
+    for i in range(4):
+        _write(env["projects"], "-home-zach-workspace-devrc", f"ok{i}",
+               [user_typed(f"s{i}", ts=f"2026-07-11T1{i}:00:00.000Z")])
+    _write(env["projects"], "-home-zach-workspace-devrc", "bad",
+           [user_typed("hi"), _BAD_TS_TURN])
+    assert S.run() == 1
+    text = _summary_line(capsys)
+    assert "emitted=4 failed=1" in text          # the good work still happened
+    assert "FAILING the run" in text
+    assert sorted(e["session"] for e in _spool_events(env["spool"])) == \
+        ["ok0", "ok1", "ok2", "ok3"]
+
+
+def test_the_exit_status_is_driven_by_failed_not_by_emitted(env):
+    """Measured at BOTH ends of the emitted axis, not just one point: the
+    verdict must not depend on how much healthy work happened alongside."""
+    def _run_with(n_ok):
+        for f in (env["projects"] / "-home-zach-workspace-devrc").glob("*.jsonl"):
+            f.unlink()
+        env["state"].unlink(missing_ok=True)
+        for i in range(n_ok):
+            _write(env["projects"], "-home-zach-workspace-devrc", f"ok{i}",
+                   [user_typed(f"s{i}", ts=f"2026-07-11T1{i}:00:00.000Z")])
+        _write(env["projects"], "-home-zach-workspace-devrc", "bad",
+               [user_typed("hi"), _BAD_TS_TURN])
+        return S.run()
+
+    assert _run_with(0) == 1    # failed=1 emitted=0
+    assert _run_with(9) == 1    # failed=1 emitted=9 — same verdict
+
+
+def test_a_clean_run_exits_zero(env):
+    """The arm that keeps every assertion above from passing on a build that
+    simply always returns 1."""
+    _write(env["projects"], "-home-zach-workspace-devrc", "s1", [user_typed("hi")])
+    assert S.run() == 0
+
+
+def test_a_run_with_nothing_to_do_exits_zero(env):
+    """No transcripts at all: emitted=0 and failed=0. `failed and …` guards the
+    turnover, so an idle tick is not a failure."""
+    assert S.run() == 0
 
 
 def test_an_emit_failure_is_still_FATAL(env, monkeypatch):
