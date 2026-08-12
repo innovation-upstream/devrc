@@ -392,7 +392,16 @@ TARGET_FLOORS=(
   # author would then have to reconcile. 2251 - min(50, max(1, 2251/20)) = 2201,
   # the gate's own printed count put through the rule above (and through
   # `_suggested_floor` in BOTH its shell and python spellings, which agree).
-  "scripts/tests|2201"
+  #
+  # 2026-08-11, re-pinned again for the agent-ops per-window-age fix (+14 tests
+  # across test_agent_ops.py and test_agent_ops_count.py). 2201 was measured
+  # against a 2251-test suite; the suite is 2335 at this commit, so it carried
+  # 134 of slack — nearly three times the 50 the rule allows. Measured by the
+  # authoritative gate on THIS branch (`nix build .#checks.x86_64-linux.pytests`
+  # → `collected=2335`), against 2321 at the base it is rebased onto (ab99245),
+  # and put through the rule: 2335 - min(50, max(1, 2335/20 = 116)) = 2285.
+  # Both spellings of `_suggested_floor` agree on 2285.
+  "scripts/tests|2285"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
