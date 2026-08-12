@@ -125,8 +125,15 @@ def test_the_stubbed_launcher_set_is_pinned():
 ACKNOWLEDGED_UNSTUBBED = {
     "systemctl": (
         {"agent-ops", "airvpn-menu", "keylog-spin-capture.sh",
-         "monitor-blackout.sh"},
-        "verb-split rather than record-only — see the systemctl tests below"),
+         "monitor-blackout.sh", "sync-claude-permissions.py"},
+        "verb-split rather than record-only — see the systemctl tests below. "
+        "sync-claude-permissions.py is a DIFFERENT case from the other four and "
+        "is re-justified rather than absorbed: its only occurrence of the name "
+        "is the literal string `Bash(systemctl status:*)` inside its CURATED "
+        "table of permission RULES, and the script spawns no subprocess at all — "
+        "it imports none of subprocess / os.system / os.exec* / os.popen, which "
+        "test_sync_claude_permissions.py asserts STRUCTURALLY so this "
+        "justification cannot rot into a claim about a file that has changed"),
     "home-manager": (
         {"bar-status-poll", "drift-check.sh", "keylog-spin-capture.sh",
          "notify-failure.sh", "playwright-nixos", "ship.sh",
