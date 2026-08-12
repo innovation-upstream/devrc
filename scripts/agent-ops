@@ -22,7 +22,22 @@ Sections (priority order) and their sources
                      "Investigate 500s") + its scratch codename + a busy marker
                      derived from the title's leading glyph (braille spinner ⇒
                      running, ✳ ⇒ idle). The dashboard's own pane is excluded.
-                     NOT fuzzyclaw's ~/.tmux/tasks/*.json (stale).
+                     The TASK/busy signals come from tmux, never from fuzzyclaw.
+                     The AGE is NOT "since anything happened" — tmux answers that
+                     itself (`#{window_activity}`, any output at all). What tmux
+                     cannot answer is when the AGENT LAST FINISHED A TURN, and
+                     that is what this column means, so it — and ONLY it — is
+                     joined from fuzzyclaw's ~/.tmux/tasks/*.json `last_activity`
+                     (written by the Claude Stop hook, scripts/tmux-task-hook.sh),
+                     per WINDOW, on tmux's `window_id`, bounded to the CURRENT
+                     tmux server's era (`#{start_time}`) and confirmed against the
+                     file's own (tmux_session, window_index). Any disagreement,
+                     duplicate claim, previous-era record or missing file yields
+                     NO age ("—") rather than a guess: fuzzyclaw is an UNTRUSTED
+                     writer (89% of its files name windows that no longer exist),
+                     so every use of it here fails closed. A long turn therefore
+                     legitimately shows "▶ … 2h": running now, last COMPLETED turn
+                     two hours ago. See `window_activity_age`.
   3. In flight PRs   REAL open PRs fetched DIRECTLY via `gh pr list` per workspace
                      repo (NOT initiative-scan, whose per-initiative open_prs are
                      fingerprint-matched and mostly empty). TTL-cached to
@@ -44,6 +59,7 @@ functions are unit-tested against mock inputs (scripts/tests/test_agent_ops.py).
 """
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import re
@@ -75,7 +91,40 @@ def fg(hex_color: str) -> str:
     return "\033[38;2;%d;%d;%dm" % (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
 
 
+# True when this process renders exactly ONE frame and exits (`--once`, or a
+# non-tty stdout). Set by main(). Anything that promises "…and the next frame
+# will show X" is a lie in that mode — see initiatives_freshness.
+ONE_SHOT = False
+
+# None = not yet decided; decided once, on first use, from the environment.
+_COLOR = None
+
+
+def color_enabled() -> bool:
+    """Whether to emit ANSI at all.
+
+    Colour is for a HUMAN at a terminal. `--once` — the mode agents and
+    capture-pane use — is piped, and there a truecolor escape on every token
+    (`\\033[38;2;235;219;178m`) is pure cost for zero information: the dashboard
+    is ~90 painted tokens a frame. So paint only when stdout IS a terminal, and
+    never when NO_COLOR is set (https://no-color.org).
+
+    Decided once and cached: `paint` is called ~100x per frame and the frame
+    re-renders every few seconds.
+    """
+    global _COLOR
+    if _COLOR is None:
+        try:
+            tty = sys.stdout.isatty()
+        except Exception:
+            tty = False
+        _COLOR = tty and not os.environ.get("NO_COLOR")
+    return _COLOR
+
+
 def paint(text: str, color: str, bold: bool = False) -> str:
+    if not color_enabled():
+        return text
     return "%s%s%s%s" % (BOLD if bold else "", fg(color), text, RESET)
 
 
@@ -84,6 +133,11 @@ def paint(text: str, color: str, bold: bool = False) -> str:
 # ---------------------------------------------------------------------------
 HOME = os.path.expanduser("~")
 BAR_STATUS_DIR = os.path.join(HOME, ".cache", "bar-status")
+# fuzzyclaw's per-window task files — the ONLY source of a per-window
+# last-activity timestamp on this host. Read for `last_activity` and nothing
+# else; see `window_activity_age` for the guards that make an untrusted writer
+# safe to read.
+FUZZYCLAW_TASKS_DIR = os.path.join(HOME, ".tmux", "tasks")
 CACHE_DIR = os.path.join(HOME, ".cache", "agent-ops")
 ISCAN_CACHE = os.path.join(CACHE_DIR, "initiative-scan.json")
 ISCAN_LOCK = os.path.join(CACHE_DIR, "refresh.lock")
@@ -176,20 +230,68 @@ def file_age_secs(path: str, now: float | None = None):
         return None
 
 
+# The `tmux list-panes -a` format and `parse_panes` are ONE contract in two
+# places — the format names the fields, the parser assigns them by POSITION, and
+# nothing about a wrong pairing is loud: drop `#{window_id}` here and every row
+# silently loses its age instead of erroring. Hoisted to a constant so a test can
+# pin the two together (test_pane_format_and_parser_agree_field_for_field).
+#
+# pane_title is LAST — it carries the agent's actual task (`✳ Investigate 500s`)
+# and may itself contain '|', so parse_panes splits with a bounded maxsplit.
+# `window_id` comes from THIS call rather than a second `list-windows` sweep:
+# two non-atomic tmux calls can disagree about which window an index names
+# (`renumber-windows on` moves them), and the age join keys on window_id.
+#
+# `start_time` is the SERVER's start time (identical on every pane — tmux has no
+# per-window equivalent). It rides along here rather than in a second
+# `display-message` call for the same non-atomicity reason, and because one call
+# means a pane can never be paired with a start time from a different server.
+# `window_activity_age` uses it as the age join's ERA BOUND — see there.
+PANE_FORMAT = ("#{pane_id}|#{pane_pid}|#{session_name}|#{window_index}|"
+               "#{window_id}|#{window_name}|#{pane_current_path}|"
+               "#{pane_current_command}|#{start_time}|#{pane_title}")
+
+# What parse_panes calls each of PANE_FORMAT's fields, in the SAME order. The
+# pairing is the contract; the test walks it rather than trusting this comment.
+# EXTEND this tuple when you extend the format — appending to one only shifts
+# every field after the insertion point into the wrong name, silently.
+PANE_FIELDS = ("pane_id", "pane_pid", "session", "window_index", "window_id",
+               "window_name", "path", "command", "server_start", "title")
+
+
 def list_tmux_panes_raw() -> str:
     """Raw `tmux list-panes -a` output (pipe-delimited). '' on any failure."""
-    # pane_title is LAST — it carries the agent's actual task (`✳ Investigate 500s`)
-    # and may itself contain '|', so parse_panes splits with a bounded maxsplit.
-    fmt = ("#{pane_id}|#{pane_pid}|#{session_name}|#{window_index}|"
-           "#{window_name}|#{pane_current_path}|#{pane_current_command}|"
-           "#{pane_title}")
     try:
         out = subprocess.run(
-            ["tmux", "list-panes", "-a", "-F", fmt],
+            ["tmux", "list-panes", "-a", "-F", PANE_FORMAT],
             capture_output=True, text=True, timeout=3)
         return out.stdout if out.returncode == 0 else ""
     except Exception:
         return ""
+
+
+def read_fuzzyclaw_task_texts(dirpath: str | None = None) -> list:
+    """Read every `~/.tmux/tasks/*.json` body (fuzzyclaw's per-window state).
+
+    Returns raw file bodies — parsing is the pure `index_window_activity`'s job.
+    [] on ANY failure (directory absent, unreadable file, foreign junk): a
+    missing age renders "—", it never degrades the dashboard.
+    """
+    dirpath = FUZZYCLAW_TASKS_DIR if dirpath is None else dirpath
+    out = []
+    try:
+        names = sorted(os.listdir(dirpath))
+    except Exception:
+        return out
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(dirpath, name), "r") as fh:
+                out.append(fh.read())
+        except Exception:
+            continue
+    return out
 
 
 def _read_proc(pid: int):
@@ -467,14 +569,19 @@ def clawgate_pending_titles(tasks, pending=_PENDING_STATES) -> list:
 def parse_panes(raw: str) -> list:
     """Split raw `tmux list-panes -a` output into pane dicts. Tolerates junk.
 
-    pane_title is the LAST field (may contain '|'), so split with maxsplit=7 and
-    absorb any trailing pipes into the title. A 7-field line (no title) degrades
-    to an empty title rather than being dropped.
+    pane_title is the LAST field (may contain '|'), so split with a maxsplit of
+    `len(PANE_FIELDS) - 1` and absorb any trailing pipes into the title. A line
+    one field short (no title) degrades to an empty title rather than being
+    dropped. The maxsplit is DERIVED from PANE_FIELDS so extending the format
+    cannot leave a stale literal behind — the positional indices below are still
+    spelled out, and `test_pane_format_and_parser_agree_field_for_field` walks
+    them against the format rather than trusting this docstring.
     """
+    title_idx = len(PANE_FIELDS) - 1
     panes = []
     for line in raw.splitlines():
-        parts = line.split("|", 7)
-        if len(parts) < 7:
+        parts = line.split("|", title_idx)
+        if len(parts) < title_idx:
             continue
         pid = parts[1]
         if not pid.isdigit():
@@ -484,12 +591,147 @@ def parse_panes(raw: str) -> list:
             "pane_pid": int(pid),
             "session": parts[2],
             "window_index": parts[3],
-            "window_name": parts[4].rstrip(" ●").strip(),
-            "path": parts[5],
-            "command": parts[6],
-            "title": (parts[7].strip() if len(parts) >= 8 else ""),
+            "window_id": parts[4],
+            "window_name": parts[5].rstrip(" ●").strip(),
+            "path": parts[6],
+            "command": parts[7],
+            "server_start": parts[8],
+            "title": (parts[title_idx].strip() if len(parts) > title_idx else ""),
         })
     return panes
+
+
+def _iso_epoch(value):
+    """ISO-8601 string → epoch seconds; None on anything unparseable.
+
+    fuzzyclaw writes local time WITH an offset (`2026-08-11T19:08:55-05:00`), but
+    a naive value is accepted too and read as local time — the same host wrote it.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return None
+
+
+def _epoch_num(value):
+    """tmux `#{start_time}` (epoch seconds, rendered as a string) → float.
+
+    None for absent / blank / non-numeric / non-positive, all of which mean "this
+    server's era is UNPROVEN". `window_activity_age` treats that as fail-closed:
+    a tmux too old to know `start_time` renders "—" rather than an unbounded age.
+    """
+    try:
+        num = float(str(value).strip())
+    except Exception:
+        return None
+    return num if num > 0 else None
+
+
+# How far into the FUTURE a `last_activity` may sit before it is rejected rather
+# than clamped. Real clock skew between two writes on ONE host is sub-second;
+# this is generous headroom for an NTP step, not a repair budget. Beyond it the
+# file is corrupt or the clock is badly wrong, and clamping would render "0s" —
+# "active right now" — which is the single most misleading thing this column can
+# say about a window that is in fact dead. Fail closed like everything else here.
+FUTURE_SKEW_TOLERANCE = 120.0
+
+
+def index_window_activity(raw_texts) -> dict:
+    """Index fuzzyclaw task-file bodies by tmux `window_id`.
+
+    → `{window_id: {"session", "window_index", "last_activity"}}`. Junk (bad
+    JSON, non-dict, missing/blank window_id) is skipped, never fatal.
+
+    🔴 A window_id claimed by two DISAGREEING files maps to **None** — ambiguous,
+    so no row gets an age from it. fuzzyclaw is an untrusted writer whose files
+    outlive their windows (measured 2026-08-11: 357 of 400 name dead windows);
+    two live claimants means we cannot tell which is this window's, and the
+    wrong age is exactly the defect this join exists to remove. Byte-identical
+    duplicates are NOT a conflict — they carry the same answer.
+    """
+    index: dict = {}
+    for text in (raw_texts or ()):
+        try:
+            obj = json.loads(text)
+        except Exception:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        wid = obj.get("window_id")
+        if not isinstance(wid, str) or not wid:
+            continue
+        rec = {"session": obj.get("tmux_session"),
+               "window_index": obj.get("window_index"),
+               "last_activity": obj.get("last_activity")}
+        if wid in index and index[wid] != rec:
+            index[wid] = None          # two disagreeing claimants → fail closed
+            continue
+        index[wid] = rec
+    return index
+
+
+def window_activity_age(pane, activity_index, now=None):
+    """Seconds since the pane's WINDOW last saw agent activity — or None.
+
+    🔴 This is PER-WINDOW and it is not the Claude process's uptime. The two are
+    different numbers and the dashboard used to print the second one: a window
+    whose agent replied minutes ago, inside a `claude` that has been up for days,
+    rendered as `▶ … 4d` — busy and four days abandoned at the same time. Every
+    window of a session launched in one burst then shows one identical age,
+    which is what makes the wrong number look like a per-session bug.
+
+    The join keys on tmux's `window_id` (unique, never reused while the server
+    lives) and is then bounded and confirmed:
+
+      * ERA BOUND (`#{start_time}`). Window ids restart at @0 when the tmux
+        server does, so a file left by a PREVIOUS server can name an id a
+        different window now holds. MEASURED on this host 2026-08-11 (server up
+        6.48d): 9 of 39 live window ids carried task files written BEFORE it
+        started, the oldest from 2026-04-19. A `last_activity` earlier than the
+        server's own start time cannot describe any window this server created,
+        whatever else agrees, so it is rejected. This closes id reuse BY
+        CONSTRUCTION rather than by coincidence.
+      * CONFIRMATION against the task file's own (tmux_session, window_index).
+        Within one era `window_id` is already unique, so this is a cross-check on
+        an untrusted writer, NOT the id-reuse defence — it was doing that job
+        only by coincidence, and only until a restart reproduced a matching
+        session/index pair. In the same measurement 4 of those 9 differed in
+        just ONE component (three only in session name, one only in index), so
+        the coincidence was one layout change from failing. It is kept because a
+        fuzzyclaw file that disagrees about which window it describes is not one
+        to read a timestamp out of.
+
+    Adding the era bound changed NOTHING on that live sample — the same 28 of 39
+    rows resolved, to the same ages, before and after — because the confirmation
+    happened to catch all 9 that day. The bound's value is structural, not a
+    behaviour delta; do not expect to see it in a before/after render.
+
+    Anything unproven (unknown id, ambiguous claim, mismatch, previous-era
+    record, unprovable era, unparseable timestamp, or a timestamp further into
+    the future than FUTURE_SKEW_TOLERANCE) returns None and the row shows "—":
+    a missing age is honest, a wrong one is not.
+    """
+    if not activity_index:
+        return None
+    rec = activity_index.get(pane.get("window_id"))
+    if not isinstance(rec, dict):
+        return None                    # unknown window, or ambiguous claim
+    if str(rec.get("session")) != str(pane.get("session")):
+        return None
+    if str(rec.get("window_index")) != str(pane.get("window_index")):
+        return None
+    ts = _iso_epoch(rec.get("last_activity"))
+    if ts is None:
+        return None
+    server_start = _epoch_num(pane.get("server_start"))
+    if server_start is None or ts < server_start:
+        return None                    # unprovable era, or a previous server's
+    delta = (time.time() if now is None else now) - ts
+    if delta < -FUTURE_SKEW_TOLERANCE:
+        return None                    # corrupt / badly skewed — not "0s"
+    return max(0.0, delta)
 
 
 def _descendants(pid: int, proc_index: dict) -> list:
@@ -572,7 +814,8 @@ def busy_from_title(title: str):
 
 
 def classify_claude_sessions(panes, proc_index, own_pids=frozenset(),
-                             root_resolver=default_git_root) -> list:
+                             root_resolver=default_git_root,
+                             activity_index=None, now=None) -> list:
     """Return the live Claude-Code sessions among `panes`.
 
     A pane is a Claude session if its foreground command matches /claude/ OR any
@@ -581,6 +824,17 @@ def classify_claude_sessions(panes, proc_index, own_pids=frozenset(),
     excluded. Each row carries the pane's TASK (pane_title, status-glyph stripped)
     and a busy flag derived from the title glyph, falling back to /proc R-state
     when the title has no glyph. Pure given an injected `proc_index` + `root_resolver`.
+
+    Two ages, deliberately named apart because conflating them WAS the bug:
+      * `age_secs`      — time since that WINDOW's last agent activity, joined
+                          per-window from `activity_index` (see
+                          `window_activity_age`). None when unproven. THIS is
+                          what the dashboard renders.
+      * `proc_age_secs` — the Claude process's uptime from /proc. Kept because
+                          it is a real (and free) fact, but it answers "how long
+                          has this been running", NOT "how long since anything
+                          happened", and it is identical across every window of
+                          a session started in one burst.
     """
     sessions = []
     for pane in panes:
@@ -607,10 +861,12 @@ def classify_claude_sessions(panes, proc_index, own_pids=frozenset(),
             "repo": _basename_repo(pane["path"], root_resolver),
             "session": pane["session"],
             "window_index": pane["window_index"],
+            "window_id": pane.get("window_id", ""),
             "window_name": pane.get("window_name", ""),
             "task": strip_status_glyph(title),
             "busy": busy,
-            "age_secs": info.get("age_secs"),
+            "age_secs": window_activity_age(pane, activity_index, now),
+            "proc_age_secs": info.get("age_secs"),
         })
     # Group ordering: by repo, then session, then window.
     sessions.sort(key=lambda s: (s["repo"], s["session"],
@@ -866,8 +1122,13 @@ def render_blocked(clawgate, mail, titles=None) -> list:
 
 
 def render_active_runs(sessions, codenames=None) -> list:
+    # The subtitle names the age's ACTUAL semantic. It is not "since anything
+    # happened" (tmux's own `#{window_activity}`, which is usually far fresher):
+    # `last_activity` is written by the Claude Stop hook, so it marks the end of
+    # the last COMPLETED turn. A row mid-turn therefore reads "▶ … 2h" correctly.
     lines = [_header("Active agent runs", AQUA,
-                     "%d live Claude session(s) in tmux" % len(sessions))]
+                     "%d live Claude session(s) in tmux · age = since agent's "
+                     "last completed turn" % len(sessions))]
     if not sessions:
         lines.append("   " + paint("— no live Claude sessions detected", DIMMER))
         return lines
@@ -881,7 +1142,9 @@ def render_active_runs(sessions, codenames=None) -> list:
         label = _session_label(s["session"], codenames)
         # task = the pane_title's actual work; fall back to window name, then idle.
         task = s.get("task") or s.get("window_name") or "—"
-        age = rel_age(s["age_secs"]) if s["age_secs"] is not None else ""
+        # No proven last-activity → "—". NOT the process uptime: that reads as an
+        # idle time and is not one (see window_activity_age).
+        age = rel_age(s["age_secs"]) if s.get("age_secs") is not None else "—"
         lines.append("   %s  %s  %s  %s" % (
             paint(glyph, gcol),
             paint("%-10s" % _truncate(label, 10), PURPLE, bold=True),
@@ -1063,7 +1326,20 @@ def render_done(initiatives, freshness="", limit=6) -> list:
 # ===========================================================================
 # initiative-scan cache + background refresh
 # ===========================================================================
-def initiatives_freshness(now=None, cache=ISCAN_CACHE, lock=ISCAN_LOCK) -> str:
+def initiatives_freshness(now=None, cache=ISCAN_CACHE, lock=ISCAN_LOCK,
+                          one_shot=None) -> str:
+    """Freshness note for a TTL-cached section: how old the rendered data is,
+    plus whether a refresh is in flight.
+
+    🔴 "refreshing…" is a promise only the INTERACTIVE loop can keep. The frame
+    that kicks a background refresh cannot show its result — the worker finishes
+    seconds later — and in `--once` there is no second frame, so the reader is
+    looking at the old copy while a fresh one lands on disk behind them. That
+    read as `updated 7d ago · refreshing…` beside cache files 20 seconds old,
+    and an agent came within one `stat` of reporting week-old PR data as
+    current. In one-shot mode the note says what is actually true instead.
+    """
+    one_shot = ONE_SHOT if one_shot is None else one_shot
     age = file_age_secs(cache, now)
     if age is None:
         note = "no cache yet"
@@ -1071,7 +1347,8 @@ def initiatives_freshness(now=None, cache=ISCAN_CACHE, lock=ISCAN_LOCK) -> str:
         note = "updated %s ago" % rel_age(age)
     lock_age = file_age_secs(lock, now)
     if lock_age is not None and lock_age < ISCAN_LOCK_TTL:
-        note += " · refreshing…"
+        note += (" · stale; refresh kicked, re-run for current data"
+                 if one_shot else " · refreshing…")
     return note
 
 
@@ -1261,7 +1538,9 @@ def build_body_lines(width: int) -> list:
 
     panes = parse_panes(list_tmux_panes_raw())
     proc_index = build_proc_index()
-    sessions = classify_claude_sessions(panes, proc_index, own_pids=own_pid_chain())
+    activity_index = index_window_activity(read_fuzzyclaw_task_texts())
+    sessions = classify_claude_sessions(panes, proc_index, own_pids=own_pid_chain(),
+                                        activity_index=activity_index)
     codenames = load_scratch_codenames()
 
     maybe_refresh_initiatives()
@@ -1447,11 +1726,13 @@ def main(argv=None):
         # maybe_refresh_telemetry).
         refresh_telemetry_cache()
         return 0
-    if "--once" in argv:
-        # Non-interactive single frame — handy for capture-pane / debugging.
-        print(build_frame(shutil.get_terminal_size((100, 40)).columns))
-        return 0
-    if not sys.stdout.isatty():
+    if "--once" in argv or not sys.stdout.isatty():
+        # ONE frame, then exit: `--once` (capture-pane / an agent reading the
+        # dashboard) and any piped stdout. Both are announced, because a section
+        # rendered from a TTL cache cannot show the refresh this frame kicks —
+        # there is no next frame to show it in.
+        global ONE_SHOT
+        ONE_SHOT = True
         print(build_frame(shutil.get_terminal_size((100, 40)).columns))
         return 0
     _run_interactive()

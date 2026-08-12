@@ -29,11 +29,16 @@ ao = _load("agent-ops", "agent_ops_for_count")
 
 
 # A raw `tmux list-panes -a` dump matching agent-ops's pipe format:
-#   pane_id|pane_pid|session|window_index|window_name|path|command|title
+#   pane_id|pane_pid|session|window_index|window_id|window_name|path|command|
+#   server_start|title
+# Pinned against the real PANE_FIELDS by
+# test_the_fixture_dump_matches_agent_ops_current_pane_format — these lines are a
+# hand-written copy of a format that lives in another file, and nothing else here
+# reads `title`, so drift is otherwise silent.
 _RAW_PANES = "\n".join([
-    "%0|16060|main|1|devrc ●|/home/zach/workspace/devrc|zsh|⠐ Ship the block",
-    "%1|16095|dp|2|dp|/home/zach/ws/dp|zsh|",              # plain zsh → not claude
-    "%9|500|main|9|self|/home/zach/workspace/devrc|python3|agent-ops",  # own pane
+    "%0|16060|main|1|@1|devrc ●|/home/zach/workspace/devrc|zsh|1700000000|⠐ Ship the block",
+    "%1|16095|svc|2|@2|svc-b|/home/zach/ws/svc-b|zsh|1700000000|",  # plain zsh → not claude
+    "%9|500|main|9|@9|self|/home/zach/workspace/devrc|python3|1700000000|agent-ops",  # own pane
 ])
 
 # Mock /proc tree: two claude panes + a plain zsh + the block's own tree.
@@ -66,8 +71,26 @@ def test_count_uses_real_detector_excludes_plain_and_own():
     assert n == 1
 
 
+def test_the_fixture_dump_matches_agent_ops_current_pane_format():
+    """🔴 SEAM. These fixtures hand-copy a format defined in agent-ops, and every
+    assertion in this file counts SESSIONS — none reads `title`. So a format
+    change shifts every field one place left and the counts stay green.
+
+    MEASURED: adding `#{start_time}` did exactly that. The 9-field lines still
+    parsed, every pane_title landed in `server_start`, `title` went empty, and
+    all eight tests here passed. Pin the field COUNT against the real
+    PANE_FIELDS and pin the parse, so the next format change is loud here.
+    """
+    for line in _RAW_PANES.splitlines():
+        assert len(line.split("|")) == len(ao.PANE_FIELDS), line
+    panes = ao.parse_panes(_RAW_PANES)
+    assert [p["title"] for p in panes] == ["⠐ Ship the block", "", "agent-ops"]
+    assert [p["server_start"] for p in panes] == ["1700000000"] * 3
+    assert [p["command"] for p in panes] == ["zsh", "zsh", "python3"]
+
+
 def test_count_zero_when_no_claude_panes():
-    raw = "%1|16095|dp|2|dp|/home/zach/ws/dp|zsh|"
+    raw = "%1|16095|svc|2|@2|svc-b|/home/zach/ws/svc-b|zsh|1700000000|"
     n = iao.count_live_sessions(
         ao, list_panes=lambda: raw, build_index=lambda: _PROC,
         own_chain=lambda: set())
@@ -76,8 +99,8 @@ def test_count_zero_when_no_claude_panes():
 
 def test_count_two_live_claude_sessions():
     raw = "\n".join([
-        "%0|16060|main|1|a|/r1|claude|⠐ one",
-        "%1|16095|main|2|b|/r2|claude|✳ two",
+        "%0|16060|main|1|@1|a|/r1|claude|1700000000|⠐ one",
+        "%1|16095|main|2|@2|b|/r2|claude|1700000000|✳ two",
     ])
     n = iao.count_live_sessions(
         ao, list_panes=lambda: raw, build_index=lambda: {},
