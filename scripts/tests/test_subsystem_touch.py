@@ -12,8 +12,10 @@ no paths were collected; the store is absent; the repo has no scope dir yet; the
 paths matched nothing; the paths matched something too weakly. All five render
 as an empty proposal list. `claude/RULES.md` → "An EMPTY RESULT cannot
 distinguish two mechanisms — go find the step that differs": `TouchReport.status`
-is that step, and `TestStatusIsTheDiscriminator` proves all five are reachable
-and that no two of them are spelled the same.
+is that step for four of them, `StoreMissingError` is the fifth (a broken
+environment, not a reading), and `TestStatusIsTheDiscriminator` proves every
+declared status is actually EMITTED — not merely declared — and that no two of
+them are spelled the same.
 
 🔴 THE STORE IS NEVER WRITTEN, AND THAT IS TESTED BEHAVIOURALLY, NOT BY GREP.
 `~/.claude/analyze-service-index/` is curated, client-confidential and has no
@@ -327,6 +329,58 @@ class TestGitPathWindow:
         src = st.collect_git_paths(repo)
         assert "apps/two words/x.yaml" in src.paths
 
+    def test_called_with_a_SUBDIRECTORY_the_paths_stay_in_ONE_frame(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 An audit finding, and a silent one. The three git commands do NOT
+        share a path frame: `diff --name-only` is always repo-root-relative,
+        `ls-files --others` is cwd-relative AND cwd-scoped. Called with a
+        subdirectory the two disagree — an untracked `scripts/tests/x.py` comes
+        back as `x.py` (a manufactured root-level component) while untracked
+        files elsewhere vanish entirely."""
+        repo = _init_repo(tmp_path)
+        _write(repo, "scripts/tests/untracked_here.py")
+        _write(repo, "apps/roster/untracked_elsewhere.yaml")
+        _write(repo, "README.md", "changed\n")
+
+        from_root = st.collect_git_paths(repo)
+        from_subdir = st.collect_git_paths(repo / "scripts" / "tests")
+
+        # Same answer from either directory — one frame, rooted at the toplevel.
+        assert set(from_subdir.paths) == set(from_root.paths)
+        assert "scripts/tests/untracked_here.py" in from_subdir.paths
+        # the manufactured root-level component the old code produced
+        assert "untracked_here.py" not in from_subdir.paths
+        # the file outside the cwd that cwd-scoping would have dropped
+        assert "apps/roster/untracked_elsewhere.yaml" in from_subdir.paths
+
+    def test_excluded_paths_are_dropped_AND_counted(self, tmp_path: Path) -> None:
+        """🔴 `/handoff` writes its doc in step 2 and asks what changed in step
+        4, so without this the handoff doc is untracked in its own window and
+        `claudedocs` is a nomination on every single run — the ritual nominating
+        its own artifact. Exclusions are ACCOUNTED, never silently dropped: a
+        path that vanishes with no note is a smaller number with no reason."""
+        repo = _init_repo(tmp_path)
+        _write(repo, "claudedocs/handoff-topic.md")
+        _write(repo, "apps/roster/a.yaml")
+
+        without = st.collect_git_paths(repo)
+        assert "claudedocs/handoff-topic.md" in without.paths  # positive control
+
+        with_ = st.collect_git_paths(repo, exclude=["claudedocs/handoff-topic.md"])
+        assert "claudedocs/handoff-topic.md" not in with_.paths
+        assert "apps/roster/a.yaml" in with_.paths
+        assert any("excluded 1 caller-named path" in n for n in with_.notes)
+
+    def test_excluding_a_path_that_is_not_there_is_silent(self, tmp_path: Path) -> None:
+        """No note when nothing was dropped — an accounting line for a
+        non-event trains the reader to skip the ones that matter."""
+        repo = _init_repo(tmp_path)
+        _write(repo, "apps/roster/a.yaml")
+        src = st.collect_git_paths(repo, exclude=["claudedocs/handoff-nope.md"])
+        assert src.paths == ("apps/roster/a.yaml",)
+        assert not any("excluded" in n for n in src.notes)
+
     def test_a_failed_git_RAISES_rather_than_returning_zero_paths(self, tmp_path: Path) -> None:
         not_a_repo = tmp_path / "plain-dir"
         not_a_repo.mkdir()
@@ -417,7 +471,10 @@ class TestPositiveControl:
 
 
 class TestStatusIsTheDiscriminator:
-    """Five mechanisms produce an empty proposal list. `status` names which."""
+    """Several mechanisms produce an empty proposal list; `status` names which.
+
+    Four of them are statuses. A missing store is the fifth mechanism and is
+    deliberately NOT a status — see `test_a_missing_store_RAISES_and_is_not_a_status`."""
 
     def test_looked_at_nothing(self, store: Path) -> None:
         rep = _report([], store)
@@ -425,10 +482,28 @@ class TestStatusIsTheDiscriminator:
         assert rep.association is None
         assert not rep.writes_proposed
 
-    def test_no_store(self, tmp_path: Path) -> None:
+    def test_a_missing_store_RAISES_and_is_not_a_status(self, tmp_path: Path) -> None:
+        """🔴 There is no `no-store` status. An absent store root is a broken
+        environment, not a reading — and a status constant nothing could emit
+        would make `STATUS_PRECEDENCE` read as N reachable outcomes when one of
+        them is a phantom. That is the "a declaration is not a code path" shape
+        this module argues against elsewhere; it was one here until an audit
+        pointed at it."""
         with pytest.raises(st.StoreMissingError) as exc:
             _report(["a/b.yaml", "a/c.yaml"], tmp_path / "absent")
         assert "store root not found" in str(exc.value)
+        assert "no-store" not in st.STATUS_PRECEDENCE
+
+    def test_EVERY_declared_status_is_actually_emitted(self, store: Path, tmp_path: Path) -> None:
+        """The pin that keeps the tuple honest: each value must come back from a
+        real `build_report` call, so no member can rot into a phantom."""
+        emitted = {
+            _report([], store).status,
+            _report(["apps/roster/a.yaml", "apps/roster/b.yaml"], store, scope="brand-new").status,
+            _report(["src/collector/a.py", "src/collector/b.py"], store).status,
+            _report(["docs/a.md", "notes/b.md"], store).status,
+        }
+        assert emitted == set(st.STATUS_PRECEDENCE)
 
     def test_scope_absent_is_NOT_an_error(self, store: Path) -> None:
         """🔴 The most load-bearing decision in the module. Under the old writer
@@ -447,9 +522,9 @@ class TestStatusIsTheDiscriminator:
         rep = _report(["docs/a.md", "notes/b.md"], store)
         assert rep.status == "no-match"
 
-    def test_the_five_spellings_are_pairwise_distinct(self) -> None:
+    def test_the_spellings_are_pairwise_distinct(self) -> None:
         """A discriminator whose values collide discriminates nothing."""
-        assert len(set(st.STATUS_PRECEDENCE)) == len(st.STATUS_PRECEDENCE) == 5
+        assert len(set(st.STATUS_PRECEDENCE)) == len(st.STATUS_PRECEDENCE) == 4
 
     def test_looked_at_nothing_OUTRANKS_a_missing_store(self, tmp_path: Path) -> None:
         """Precedence, asserted rather than left to call order: with no paths,
@@ -527,29 +602,60 @@ class TestNominations:
     def test_the_deeper_component_outranks_the_umbrella_on_the_SAME_paths(
         self, store: Path
     ) -> None:
-        """When two components cover exactly the same paths, the deeper one is
-        the more specific name for that set. `apps` is not a subsystem.
+        """When several components cover exactly the same paths, the deeper one
+        is the more specific name for that set.
 
-        ⚠ The fixture is chosen so ALPHABETICAL order DISAGREES with depth order
-        (`apps` < `ingest`). An earlier version used `src/roster/…`, where
-        `roster` < `src` — so it passed identically with the depth key deleted,
-        and the mutation test for that key was unkillable. That is the
-        "green for the wrong reason" shape, caught by trying to kill it."""
-        rep = _report(["apps/ingest/a.yaml", "apps/ingest/b.yaml"], store)
-        assert [n.ref for n in rep.nominations] == ["ingest", "apps"]
-        assert rep.nominations[0].depth > rep.nominations[1].depth
+        ⚠ The fixture nests THREE deep on purpose. At two levels the fan-out key
+        already separates `apps` from `ingest`, so the depth key would decide
+        nothing and its mutation test would be unkillable. Here `apps` and
+        `ingest` both fan out into exactly one child, so DEPTH is the only thing
+        left to order them — and alphabetical order disagrees with it
+        (`apps` < `ingest`), which is what gives the assertion its bite."""
+        paths = ["apps/ingest/svc/a.yaml", "apps/ingest/svc/b.yaml"]
+        rep = _report(paths, store)
+        assert [n.ref for n in rep.nominations] == ["svc", "ingest", "apps"]
+        assert [n.depth for n in rep.nominations] == [2, 1, 0]
         assert sorted(["ingest", "apps"]) == ["apps", "ingest"], "the fixture lost its bite"
 
-    def test_a_broader_component_ranks_by_count_first(self, store: Path) -> None:
-        """Honest, not clever: when the only thing four paths share is `src`,
-        `src` really is the only candidate covering them all."""
+    def test_the_TOP_LEVEL_UMBRELLA_does_not_win_on_count(self, store: Path) -> None:
+        """🔴 The second half of replacing a stoplist, and an audit finding:
+        coherence fixed the recurring-filename case and left its mirror open. A
+        top-level directory covers everything beneath it, so it wins on count
+        every time — on this module's own PR diff the top five were all
+        `scripts`/`skills`/`claude`-shaped, and none is a thing anyone journals
+        against.
+
+        `src` here covers FOUR paths to `roster`/`paging`'s two, and still loses:
+        it fans out into two subdirectories, so it is an index of subsystems
+        rather than one."""
         rep = _report(
             ["src/roster/a.py", "src/roster/b.py", "src/paging/c.py", "src/paging/d.py"],
             store,
         )
-        assert rep.nominations[0].ref == "src"
-        assert rep.nominations[0].path_count == 4
-        assert {"roster", "paging"} <= {n.ref for n in rep.nominations}
+        refs = [n.ref for n in rep.nominations]
+        by_ref = {n.ref: n for n in rep.nominations}
+
+        # positive control: `src` IS a candidate with the higher count, so its
+        # position is a ranking decision and not a dropped path.
+        assert by_ref["src"].path_count == 4
+        assert by_ref["src"].fans_out is True
+        assert by_ref["roster"].path_count == 2
+        assert by_ref["roster"].fans_out is False
+
+        assert refs.index("roster") < refs.index("src")
+        assert refs.index("paging") < refs.index("src")
+
+    def test_a_LEAF_directory_is_not_penalised_for_holding_several_files(
+        self, store: Path
+    ) -> None:
+        """Fan-out counts SUBDIRECTORIES, not files. Counting files would
+        penalise every leaf directory for being a directory — the exact
+        opposite of the intent."""
+        rep = _report(["apps/roster/a.yaml", "apps/roster/b.yaml", "apps/roster/c.yaml"], store)
+        by_ref = {n.ref: n for n in rep.nominations}
+        assert by_ref["roster"].fans_out is False
+        assert by_ref["roster"].path_count == 3
+        assert [n.ref for n in rep.nominations][0] == "roster"
 
     def test_ranking_is_deterministic_across_input_order(self, store: Path) -> None:
         """A re-run over the same session must produce the same proposal."""
@@ -588,6 +694,45 @@ class TestNominations:
         assert "paging" in [n.ref for n in rep.nominations]
         assert rep.nominations[0].ref == "paging"
         assert rep.nominations[0].coherent is False  # spread across directories
+
+    def test_the_TOP_NONCOHERENT_ref_is_never_CUT_by_the_limit(self, store: Path) -> None:
+        """🔴 `Nomination.coherent` promises non-coherent refs are "ranked below,
+        not dropped". As a PRIMARY sort key it dropped them — an audit measured a
+        real cross-directory subsystem landing 11th against a limit of 5, i.e.
+        the docstring was false about its own code.
+
+        Fixed by reserving the last slot, not by demoting coherence: demoting it
+        re-opens the recurring-filename case it exists to close."""
+        # Five coherent directory clusters, plus ONE subsystem spread across
+        # `lib/` and `tests/` — the shape the promise is about.
+        paths = [f"c{i}/a{i}.py" for i in range(5)] + [f"c{i}/b{i}.py" for i in range(5)]
+        paths += ["lib/paging.py", "tests/paging.py"]
+        rep = _report(paths, store)
+        refs = [n.ref for n in rep.nominations]
+
+        assert len(refs) == st.DEFAULT_NOMINATION_LIMIT
+        # Straight truncation WOULD have cut it: it sorts behind every coherent
+        # ref, and there are more coherent refs than slots. That is the control
+        # proving the reservation did something.
+        straight = [n.ref for n in st.nominate(
+            rep.association, sr.load_index(store), min_paths=2, limit=99
+        )][: st.DEFAULT_NOMINATION_LIMIT]
+        assert "paging" not in straight
+        assert "paging" in refs
+        assert refs[-1] == "paging"
+
+    def test_the_reservation_is_a_NO_OP_when_nothing_was_cut(self, store: Path) -> None:
+        """The ordinary case must be untouched — a reservation that always fires
+        would silently displace a legitimate fifth candidate."""
+        rep = _report(["apps/roster/a.yaml", "apps/roster/b.yaml"], store)
+        assert len(rep.nominations) < st.DEFAULT_NOMINATION_LIMIT
+        assert [n.ref for n in rep.nominations] == ["roster", "apps"]
+
+    def test_the_reservation_is_a_NO_OP_when_a_noncoherent_ref_already_made_the_cut(
+        self, store: Path
+    ) -> None:
+        rep = _report(["lib/paging.py", "tests/paging.py"], store)
+        assert [n.ref for n in rep.nominations] == ["paging", "paging.py"]
 
     def test_a_RECURRING_GENERIC_FILENAME_does_not_outrank_a_real_directory(
         self, store: Path
@@ -748,6 +893,33 @@ class TestProposalShapes:
         assert "## Config" not in t
         assert "depends_on" not in t
         assert "type:" not in t
+
+    def test_the_template_offers_the_test_stem_ALIAS(self) -> None:
+        """🔴 Matching is exact normalized-component equality, so a test file
+        `test_<slug>.py` has the stem `test-<slug>` and does NOT reach `<slug>`.
+        "The module plus its test" — the most common two-file change there is —
+        therefore counts ONE path and stays under `min_paths` forever.
+
+        The per-entry fix is an alias, and an alias nobody is told about is no
+        fix at all: this writer creates every one of its entries from this
+        template, so the affordance has to be IN it. Prefix-stripping in
+        `path_refs` was the other option and stays rejected — it is the shared
+        predicate inside the doc's hashed region and `/analyze-service` consumes
+        it too."""
+        t = st.new_entry_template("roster-sync", SCOPE, today=TODAY)
+        assert "# aliases: [roster_sync, test_roster_sync]" in t
+        # COMMENTED, so it is an affordance and not a wrong claim: an alias
+        # asserted before anyone checked it is a live mis-address.
+        assert "\naliases:" not in t
+
+    def test_the_commented_alias_line_does_not_become_a_real_field(self) -> None:
+        """The parser must skip it — a `#` line read as data would give every
+        entry two aliases nobody wrote."""
+        fm = sr.parse_front_matter(st.new_entry_template("roster-sync", SCOPE, today=TODAY))
+        assert "aliases" not in fm
+        assert fm["service"] == "roster-sync"
+        # positive control: the parser IS reading this front matter at all
+        assert fm["created_by"] == "handoff"
 
     def test_the_template_slug_is_normalized_by_the_shared_predicate(self) -> None:
         assert "service: my-new-thing\n" in st.new_entry_template(
@@ -973,7 +1145,80 @@ class TestSkillDocsArePinned:
             "the empty window is never reported as a matching failure",
         ),
         ("created_by: handoff", "the falsifiability stamp reaches the written file"),
+        # 🔴 Added after an audit: the step told the agent WHAT to write and
+        # never WHERE. The absolute target appeared nowhere in this file — the
+        # agent saw it only on the tool's `store:` line, and `--template` prints
+        # the body and nothing else. An agent inferring "next to the handoff
+        # doc" puts client-confidential content into a PUBLIC repo.
+        (
+            "`~/.claude/analyze-service-index/<scope>/<slug>.md`",
+            "the absolute write target, outside every repo",
+        ),
+        (
+            "Never anywhere in the working tree",
+            "the negative half of the target — devrc is PUBLIC",
+        ),
+        (
+            "Read `~/.claude/analyze-service-index/<scope>/README.md` before writing there",
+            "the per-scope policy sheet analyze-service requires be read first",
+        ),
+        (
+            "Any non-zero exit ⇒ print the stderr line verbatim and write NOTHING",
+            "a broken instrument is not a reading",
+        ),
+        (
+            "Do **not** fall back to recollection",
+            "the failure mode a non-zero exit invites",
+        ),
+        (
+            "if a `NO ENTRY` block is printed",
+            "nominations are keyed on the BLOCK, not on one status",
+        ),
+        (
+            "It appears alongside `resolved` too",
+            "why: entries must still accrue when something already matches",
+        ),
+        ("on decline, discard", "the analyze-service clause that was dropped"),
+        (
+            "use `Edit` anchored on `## Nuance / work-history`, not `Write`",
+            "no whole-file retype of a curated unbacked-up entry",
+        ),
+        (
+            "Emit this BEFORE step 4's confirm gate, unconditionally",
+            "the kickoff block is the deliverable and must not sit behind a y/N",
+        ),
+        ("--exclude claudedocs/handoff-", "the ritual does not nominate its own artifact"),
+        (
+            "in particular the `test_<slug>` stem",
+            "the alias that makes module-plus-its-test reach the entry",
+        ),
+        (
+            "the **first-entry case, not a failure**",
+            "scope-absent is the reason this step exists, not an error",
+        ),
     ]
+
+    def test_EVERY_emitted_status_has_a_bullet_in_the_skill(self) -> None:
+        """🔴 A status the tool prints and the skill never mentions leaves the
+        agent to improvise at exactly the moment it is about to write into a
+        client-confidential store. Derived from `STATUS_PRECEDENCE` rather than
+        hand-listed, so a status added later cannot quietly go uncovered."""
+        doc = HANDOFF_DOC.read_text(encoding="utf-8")
+        for status in st.STATUS_PRECEDENCE:
+            assert f"`{status}`" in doc, (
+                f"claude/skills/handoff/SKILL.md never mentions the `{status}` status, "
+                f"which subsystem_touch.build_report can emit."
+            )
+
+    def test_the_kickoff_block_precedes_the_confirm_gate(self) -> None:
+        """Structural, not a phrase: a user who walks away from the y/N must
+        still have the deliverable. Asserted on ORDER in the file, because the
+        pin above only proves the sentence exists somewhere."""
+        doc = HANDOFF_DOC.read_text(encoding="utf-8")
+        kickoff = doc.index("**Output a kickoff block**")
+        index_step = doc.index("**Record what this session touched")
+        gate = doc.index("append this to the index? (y/N)")
+        assert kickoff < index_step < gate
 
     @pytest.mark.parametrize(
         "sentence,why", HANDOFF_SENTENCES, ids=[w for _, w in HANDOFF_SENTENCES]
@@ -1205,7 +1450,7 @@ class TestMutationKillMatrix:
 
     def test_kills_nomination_cap(self, tmp_path: Path) -> None:
         mod = _load_mutant(
-            tmp_path, "m_nom_cap", [("    return tuple(out[:limit])", "    return tuple(out)")]
+            tmp_path, "m_nom_cap", [("    return _reserve_slot_for_top_noncoherent(out, limit)", "    return tuple(out)")]
         )
         store = _make_store(tmp_path / "s")
         paths = [f"d{i}/sub{i}/x.py" for i in range(20)] + [f"d{i}/sub{i}/y.py" for i in range(20)]
@@ -1220,8 +1465,8 @@ class TestMutationKillMatrix:
             "m_depth",
             [
                 (
-                    "    out.sort(key=lambda n: (not n.coherent, -n.path_count, -n.depth, n.ref))",
-                    "    out.sort(key=lambda n: (not n.coherent, -n.path_count, n.ref))",
+                    "    out.sort(key=lambda n: (not n.coherent, n.fans_out, -n.path_count, -n.depth, n.ref))",
+                    "    out.sort(key=lambda n: (not n.coherent, n.fans_out, -n.path_count, n.ref))",
                 )
             ],
         )
@@ -1242,8 +1487,8 @@ class TestMutationKillMatrix:
             "m_coherent",
             [
                 (
-                    "    out.sort(key=lambda n: (not n.coherent, -n.path_count, -n.depth, n.ref))",
-                    "    out.sort(key=lambda n: (-n.path_count, -n.depth, n.ref))",
+                    "    out.sort(key=lambda n: (not n.coherent, n.fans_out, -n.path_count, -n.depth, n.ref))",
+                    "    out.sort(key=lambda n: (n.fans_out, -n.path_count, -n.depth, n.ref))",
                 )
             ],
         )
@@ -1281,16 +1526,29 @@ class TestMutationKillMatrix:
         )
         assert rep.nominations[0].coherent is True  # the real module says False
 
-    def test_kills_git_failure_guard(self, tmp_path: Path) -> None:
+    def test_kills_git_failure_guard(self, tmp_path: Path, monkeypatch) -> None:
         """Without it a failed git returns an empty stdout and the report says
-        "0 paths" — a broken instrument reading as a real zero."""
+        "0 paths" — a broken instrument reading as a real zero.
+
+        ⚠ `monkeypatch.chdir` is load-bearing, not tidiness. With the guard gone
+        the toplevel lookup also returns "", so `git -C ""` falls through to the
+        CWD — and when the suite runs inside this repo the mutant reported SIX
+        real paths from devrc itself. That is worse than the zero it is supposed
+        to demonstrate, and it made the assertion depend on where pytest was
+        launched from. Pinning the cwd to a non-repo fixes the dimension."""
         mod = _load_mutant(
             tmp_path, "m_git", [("    if proc.returncode != 0:", "    if False:")]
         )
         plain = tmp_path / "plain-dir"
         plain.mkdir()
-        src = mod.collect_git_paths(plain)
-        assert src.paths == ()  # the silent zero the real guard prevents
+        monkeypatch.chdir(plain)
+
+        # the pair, on the same input: the real module NAMES the failure...
+        with pytest.raises(st.GitError) as exc:
+            st.collect_git_paths(plain)
+        assert "git command failed" in str(exc.value)
+        # ...the mutant does not raise at all.
+        assert mod.collect_git_paths(plain).paths == ()
 
     def test_kills_branch_window(self, tmp_path: Path) -> None:
         mod = _load_mutant(
@@ -1375,6 +1633,132 @@ class TestMutationKillMatrix:
         )
         capsys.readouterr()
         assert rc != 2
+
+    def test_kills_fanout_sort_key(self, tmp_path: Path) -> None:
+        """The KEY's position in the sort, separately from the flag's value.
+
+        ⚠ Added because an independent sweep showed this mutation dying only to
+        behavioural tests while every other sort key had a named one — so the
+        matrix looked complete and had a hole exactly where symmetry suggested
+        it did not."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_fanout_key",
+            [
+                (
+                    "    out.sort(key=lambda n: (not n.coherent, n.fans_out, -n.path_count, "
+                    "-n.depth, n.ref))",
+                    "    out.sort(key=lambda n: (not n.coherent, -n.path_count, -n.depth, n.ref))",
+                )
+            ],
+        )
+        store = _make_store(tmp_path / "s")
+        rep = mod.build_report(
+            mod.caller_supplied(
+                ["src/roster/a.py", "src/roster/b.py", "src/paging/c.py", "src/paging/d.py"]
+            ),
+            store,
+            SCOPE,
+            today=TODAY,
+        )
+        assert [n.ref for n in rep.nominations][0] == "src"
+
+    def test_kills_fanout_computation(self, tmp_path: Path) -> None:
+        """Pinned FALSE, the top-level umbrella wins on count again — which is
+        the state the audit measured on this module's own PR diff."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_fanout",
+            [
+                (
+                    "                fans_out=len(children_by_ref.get(ref, ())) >= 2,",
+                    "                fans_out=False,",
+                )
+            ],
+        )
+        store = _make_store(tmp_path / "s")
+        rep = mod.build_report(
+            mod.caller_supplied(
+                ["src/roster/a.py", "src/roster/b.py", "src/paging/c.py", "src/paging/d.py"]
+            ),
+            store,
+            SCOPE,
+            today=TODAY,
+        )
+        assert [n.ref for n in rep.nominations][0] == "src"
+
+    def test_kills_fanout_counts_only_SUBDIRECTORIES(self, tmp_path: Path) -> None:
+        """Counting terminal children too penalises every leaf directory for
+        holding more than one file — the opposite of the intent, and green
+        against the umbrella test above, so it needs its own mutant."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_fanout_terminal",
+            [("            if depth + 1 < len(parts) - 1:", "            if depth + 1 < len(parts):")],
+        )
+        store = _make_store(tmp_path / "s")
+        rep = mod.build_report(
+            mod.caller_supplied(
+                ["apps/roster/a.yaml", "apps/roster/b.yaml", "apps/roster/c.yaml"]
+            ),
+            store,
+            SCOPE,
+            today=TODAY,
+        )
+        assert {n.ref: n.fans_out for n in rep.nominations}["roster"] is True
+
+    def test_kills_the_reserved_slot(self, tmp_path: Path) -> None:
+        """Without it the coherence key DELETES the only sensible candidate for
+        a cross-directory subsystem, and `Nomination.coherent`'s docstring
+        becomes false about its own code."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_reserve",
+            [
+                (
+                    "    return _reserve_slot_for_top_noncoherent(out, limit)",
+                    "    return tuple(out[:limit])",
+                )
+            ],
+        )
+        store = _make_store(tmp_path / "s")
+        paths = [f"c{i}/a{i}.py" for i in range(5)] + [f"c{i}/b{i}.py" for i in range(5)]
+        paths += ["lib/paging.py", "tests/paging.py"]
+        rep = mod.build_report(mod.caller_supplied(paths), store, SCOPE, today=TODAY)
+        assert "paging" not in [n.ref for n in rep.nominations]
+
+    def test_kills_the_toplevel_path_frame(self, tmp_path: Path) -> None:
+        """Without it `ls-files --others` runs cwd-relative and cwd-scoped while
+        `diff --name-only` stays root-relative — two frames in one path set."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_frame",
+            [
+                (
+                    '    toplevel = _git(Path(repo), ["rev-parse", "--show-toplevel"]).strip()\n'
+                    "    repo = Path(toplevel)",
+                    "    repo = Path(repo)",
+                )
+            ],
+        )
+        repo = _init_repo(tmp_path)
+        _write(repo, "scripts/tests/untracked_here.py")
+        _write(repo, "apps/roster/untracked_elsewhere.yaml")
+        src = mod.collect_git_paths(repo / "scripts" / "tests")
+        # the manufactured root-level component, and the file that vanished
+        assert "untracked_here.py" in src.paths
+        assert "apps/roster/untracked_elsewhere.yaml" not in src.paths
+
+    def test_kills_the_exclusion_accounting(self, tmp_path: Path) -> None:
+        """A path that vanishes with no note is a smaller number with no reason."""
+        mod = _load_mutant(
+            tmp_path, "m_excl_note", [("    if dropped:", "    if False:")]
+        )
+        repo = _init_repo(tmp_path)
+        _write(repo, "claudedocs/handoff-topic.md")
+        src = mod.collect_git_paths(repo, exclude=["claudedocs/handoff-topic.md"])
+        assert "claudedocs/handoff-topic.md" not in src.paths
+        assert not any("excluded" in n for n in src.notes)
 
     def test_the_mutant_loader_refuses_an_ambiguous_anchor(self, tmp_path: Path) -> None:
         """Negative control on the mutation harness itself: an anchor that is

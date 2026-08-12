@@ -107,11 +107,15 @@ mutation test — can tell WHICH guard fired rather than merely that one did:
     "git command failed"         GitError
 
 🔴 THE FAILURE MODE IS A CONFIDENT ZERO. "Nothing to record" is the observable
-that the most causes share: no paths, no store, an unknown scope, a matcher
-wired to nothing, and a genuinely untouched index all render as an empty list.
-`TouchReport.status` is a single field that names WHICH, and no two of them
-share a spelling — `claude/RULES.md` → "An EMPTY RESULT cannot distinguish two
-mechanisms".
+that the most causes share: no paths, an unknown scope, a matcher wired to
+nothing, entries reached but below threshold, and a genuinely untouched index
+all render as an empty proposal list. `TouchReport.status` names WHICH, in four
+values that share no spelling, and the below-threshold case is called out
+separately by the renderer — `claude/RULES.md` → "An EMPTY RESULT cannot
+distinguish two mechanisms". A missing store root is deliberately NOT one of
+those values: it raises, because it is a broken environment rather than a
+reading, and a status nothing could emit would be a declaration with no code
+path behind it.
 """
 
 from __future__ import annotations
@@ -315,7 +319,10 @@ def _nul_list(out: str) -> list[str]:
 
 
 def collect_git_paths(
-    repo: str | Path, *, base_ref_candidates: Sequence[str] = BASE_REF_CANDIDATES
+    repo: str | Path,
+    *,
+    base_ref_candidates: Sequence[str] = BASE_REF_CANDIDATES,
+    exclude: Iterable[str] = (),
 ) -> PathSource:
     """The branch-bounded path window described in the module docstring.
 
@@ -330,14 +337,36 @@ def collect_git_paths(
     (3) is skipped, and `window` degrades to `worktree`, when no base ref exists
     or the merge-base IS HEAD. Both are reported in `notes` rather than showing
     up as a smaller number with no explanation.
+
+    🔴 EVERY INVOCATION RUNS AGAINST THE TOPLEVEL, NOT THE CALLER'S DIRECTORY.
+    The three commands do not share a path frame: `diff --name-only` is always
+    repo-root-relative, while `ls-files --others` is **cwd-relative AND
+    cwd-scoped**. Called with a subdirectory, the two would return paths in
+    different frames — untracked paths stripped of their prefix, and untracked
+    files elsewhere in the repo missing entirely — so components would be both
+    manufactured (`tests/x.py` read as if at the root) and lost. Resolving to
+    the toplevel FIRST makes one frame for all three; it is not a convenience.
+
+    `exclude` drops repo-relative paths from the window after collection, for a
+    caller that knows a path is an artifact of the ritual doing the collecting
+    (`/handoff` writes its own doc, then asks what changed). Exclusions are
+    COUNTED into `notes`, never silently dropped.
     """
-    repo = Path(repo)
+    # 🔴 One frame for every command below. See the docstring.
+    toplevel = _git(Path(repo), ["rev-parse", "--show-toplevel"]).strip()
+    repo = Path(toplevel)
+    excluded = {e.strip() for e in exclude if e.strip()}
     commands: list[tuple[str, ...]] = []
     notes: list[str] = []
     paths: list[str] = []
+    dropped: list[str] = []
 
     def add(new: Iterable[str]) -> None:
         for p in new:
+            if p in excluded:
+                if p not in dropped:
+                    dropped.append(p)
+                continue
             if p not in paths:
                 paths.append(p)
 
@@ -379,6 +408,12 @@ def collect_git_paths(
             add(_nul_list(_git(repo, branch_args)))
             window = "branch"
 
+    if dropped:
+        notes.append(
+            f"excluded {len(dropped)} caller-named path(s) from the window: "
+            f"{', '.join(dropped)}"
+        )
+
     return PathSource(
         kind="git",
         window=window,
@@ -417,9 +452,29 @@ class Nomination:
     is a place in the tree, so a candidate for one is a ref whose covered paths
     agree on where that place is.
 
-    Non-coherent refs are RANKED BELOW, not dropped: a code subsystem genuinely
-    spread across `lib/<name>.py` and `tests/<name>.py` is non-coherent and is
-    still the only sensible candidate for those two paths.
+    Non-coherent refs are RANKED BELOW, and the top one is never DROPPED: a code
+    subsystem genuinely spread across `lib/<name>.py` and `tests/<name>.py` is
+    non-coherent and is still the only sensible candidate for those two paths.
+    🔴 That sentence used to be false. Coherence is a PRIMARY sort key, so with
+    enough coherent refs above it the best non-coherent one fell past
+    `limit` and was cut — measured landing 11th against a limit of 5. `nominate`
+    now reserves the last slot for it; see `_reserve_slot_for_top_noncoherent`.
+    """
+
+    fans_out: bool
+    """True when this ref's covered paths branch into ≥2 distinct SUBDIRECTORIES.
+
+    🔴 The umbrella discriminator, and the second half of replacing a stoplist.
+    Coherence alone fixed the recurring-filename case and left the opposite one
+    open: a top-level directory covers everything beneath it, so it wins on
+    count every time — on this module's own PR diff the top five were all
+    `scripts`/`skills`/`claude`-shaped, and none of them is a thing anyone would
+    journal against.
+
+    Counted over NON-TERMINAL children only: for `apps/ingest/a.yaml`, `apps`
+    has the child `ingest` (a directory) while `ingest`'s children are files.
+    That is what keeps the leaf directory — the actual subsystem — unpenalised
+    while its parent is penalised for spanning several.
     """
 
     @property
@@ -444,12 +499,21 @@ def nominate(
     from the first, and `claude/RULES.md` says to prefer the structural fix and
     to declare the heuristic if you reach for one. There is no stoplist.
 
-    Ranking: COHERENT first (see `Nomination.coherent` — the structural stand-in
-    for a stoplist), then distinct-path count desc, then DEPTH desc, then ref
-    asc. Depth is the specificity tiebreak — when two components cover exactly
-    the same paths (`scripts/` and `scripts/collector/` over two files under the
-    latter), the deeper one is the more specific name for that set, and the
-    shallower one is an umbrella nobody would journal against.
+    Ranking, in order — the two structural keys stand in for the stoplist of
+    "generic" names that a heuristic would have needed:
+
+      1. COHERENT first          (`Nomination.coherent` — kills the recurring
+                                  filename that covers unrelated directories)
+      2. NON-FANNING-OUT first   (`Nomination.fans_out` — kills the top-level
+                                  umbrella that covers everything beneath it)
+      3. distinct-path count desc
+      4. DEPTH desc              (specificity: when two components cover exactly
+                                  the same paths, the deeper one is the more
+                                  specific name for that set)
+      5. ref asc                 (determinism)
+
+    Then `_reserve_slot_for_top_noncoherent` runs, so key 1 can never silently
+    DELETE the only sensible candidate for a cross-directory subsystem.
 
     🔴 A ref that ALREADY resolves — or that is AMBIGUOUS — is never nominated.
     `unmatched_paths` almost guarantees the first (a path lands there only if no
@@ -462,6 +526,7 @@ def nominate(
     by_ref: dict[str, list[str]] = {}
     depth_by_ref: dict[str, int] = {}
     prefixes_by_ref: dict[str, set[tuple[str, ...]]] = {}
+    children_by_ref: dict[str, set[str]] = {}
     for path in assoc.unmatched_paths:
         parts = [p for p in path.split("/") if p not in ("", ".")]
         for component, ref in path_refs(path):
@@ -480,6 +545,13 @@ def nominate(
                 depth = len(parts) - 1
             depth_by_ref[ref] = max(depth_by_ref.get(ref, 0), depth)
             prefixes_by_ref.setdefault(ref, set()).add(tuple(parts[: depth + 1]))
+            # A child is NON-TERMINAL — a directory — when it is not the last
+            # part of the path. Counting terminal children (files) would
+            # penalise every leaf directory for holding more than one file,
+            # which is the opposite of the intent.
+            kids = children_by_ref.setdefault(ref, set())
+            if depth + 1 < len(parts) - 1:
+                kids.add(parts[depth + 1])
 
     out: list[Nomination] = []
     for ref, paths in by_ref.items():
@@ -504,11 +576,43 @@ def nominate(
                 paths=tuple(paths),
                 depth=depth_by_ref[ref],
                 coherent=len(prefixes_by_ref[ref]) == 1,
+                fans_out=len(children_by_ref.get(ref, ())) >= 2,
             )
         )
 
-    out.sort(key=lambda n: (not n.coherent, -n.path_count, -n.depth, n.ref))
-    return tuple(out[:limit])
+    out.sort(key=lambda n: (not n.coherent, n.fans_out, -n.path_count, -n.depth, n.ref))
+    return _reserve_slot_for_top_noncoherent(out, limit)
+
+
+def _reserve_slot_for_top_noncoherent(
+    ranked: Sequence[Nomination], limit: int
+) -> tuple[Nomination, ...]:
+    """Truncate to `limit`, but never let the coherence key DELETE a candidate.
+
+    🔴 `Nomination.coherent` promises non-coherent refs are "ranked below, not
+    dropped". As a primary sort key it did drop them: with enough coherent refs
+    ahead, the best non-coherent one — a code subsystem spread across
+    `lib/<name>.py` and `tests/<name>.py`, often the ONLY sensible candidate —
+    fell past `limit` and vanished. Measured at rank 11 against a limit of 5.
+
+    So the last slot is reserved for the top non-coherent ref whenever the
+    straight truncation would have excluded every one of them. The alternative
+    considered and rejected was demoting coherence to a secondary key, which
+    re-opens the recurring-filename case it was added to close: a `values` ref
+    covering six paths would again outrank the three real directories under it.
+
+    A no-op when the cut already contains a non-coherent ref, when there are
+    none, or when nothing was truncated — so the ordinary case is untouched.
+    """
+    head = list(ranked[:limit])
+    if limit < 1 or len(ranked) <= limit:
+        return tuple(head)
+    if any(not n.coherent for n in head):
+        return tuple(head)
+    promoted = next((n for n in ranked[limit:] if not n.coherent), None)
+    if promoted is None:
+        return tuple(head)
+    return tuple(head[: limit - 1] + [promoted])
 
 
 # --- The report ----------------------------------------------------------------
@@ -524,7 +628,15 @@ class TouchReport:
     """
 
     status: str
-    """`looked-at-nothing` | `no-store` | `scope-absent` | `resolved` | `no-match`."""
+    """`looked-at-nothing` | `scope-absent` | `resolved` | `no-match`.
+
+    ⚠ There is deliberately NO `no-store` value. An absent store root RAISES
+    `StoreMissingError` — it is a broken environment, not a reading — and a
+    status constant no code path could ever emit would make `STATUS_PRECEDENCE`
+    read as four reachable outcomes plus one phantom, which is exactly the
+    "a declaration is not a code path" shape this module argues against
+    elsewhere. `TestStatusIsTheDiscriminator` reaches all four.
+    """
 
     scope: str
     store_root: str
@@ -557,16 +669,19 @@ class TouchReport:
 # read the SAME rule rather than three expressions of it.
 #
 #   1. looked-at-nothing — no paths at all. Nothing the store's state could
-#      change about this answer, so it outranks every store condition.
-#   2. no-store          — the store root itself is absent.
-#   3. scope-absent      — the store exists, this repo has no scope dir yet.
+#      change about this answer, so it outranks every store condition (an absent
+#      store then never even gets consulted, and so can never be reported as a
+#      matching failure).
+#   2. scope-absent      — the store exists, this repo has no scope dir yet.
 #                          NOT an error and not a miss: it is the first-entry
 #                          case this whole change exists to make reachable.
-#   4. resolved          — at least one entry cleared the threshold.
-#   5. no-match          — paths were examined; nothing in the index matched.
+#   3. resolved          — at least one entry cleared the threshold.
+#   4. no-match          — paths were examined; nothing in the index matched.
+#
+# An absent store root is NOT in this tuple: it raises `StoreMissingError`.
+# Every member here is emitted by `build_report` and reached by a test.
 STATUS_PRECEDENCE: tuple[str, ...] = (
     "looked-at-nothing",
-    "no-store",
     "scope-absent",
     "resolved",
     "no-match",
@@ -671,6 +786,19 @@ def new_entry_template(slug: str, scope: str, *, today: str) -> str:
     schema already reads an absent field that way: `public` is "a deliberate
     operator claim a recon run may never infer", and a field that is present and
     wrong is easier to notice than one that is absent and assumed.
+
+    🔴 `aliases:` ships COMMENTED, with the `test_<slug>` case named. Matching is
+    exact normalized-component equality, so a test file named `test_<slug>.py`
+    has the stem `test-<slug>` and does NOT reach `<slug>` — meaning "the module
+    plus its test", the most common two-file change there is, counts ONE path
+    and falls under `min_paths` forever. Prefix-stripping would have been the
+    other fix and was rejected: `path_refs` is the shared predicate inside the
+    doc's hashed region and `/analyze-service` consumes it too, so widening it
+    here would change matching for a consumer that never asked. An alias is the
+    per-entry answer, and it is useless if the writer never mentions it — which
+    is why this line exists rather than a sentence in the skill alone.
+    `parse_front_matter` skips `#` lines, so the commented line costs nothing
+    until someone uncomments it.
     """
     return (
         "---\n"
@@ -678,6 +806,8 @@ def new_entry_template(slug: str, scope: str, *, today: str) -> str:
         f"scope: {scope}\n"
         f"sensitivity: {_SENSITIVITY_FAIL_SAFE}\n"
         f"created_by: {WRITER_ID}\n"
+        f"# aliases: [{slug.replace('-', '_')}, test_{slug.replace('-', '_')}]"
+        "  # uncomment + trim: other spellings, and the test-file stem\n"
         "---\n"
         "\n"
         "## What it is\n"
@@ -762,6 +892,8 @@ def render_text(report: TouchReport) -> str:
         out.append("NO ENTRY (propose a MINIMAL new entry, confirm-gated — pick at most one):")
         for n in report.nominations:
             shape = "one place in the tree" if n.coherent else "spread across directories"
+            if n.fans_out:
+                shape += ", umbrella over several"
             out.append(f"  - {n.ref}  ({n.path_count} paths, depth {n.depth}, {shape})")
             for p in n.paths[:3]:
                 out.append(f"      {p}")
@@ -860,6 +992,7 @@ def report_json(report: TouchReport) -> dict:
                 "path_count": n.path_count,
                 "depth": n.depth,
                 "coherent": n.coherent,
+                "fans_out": n.fans_out,
                 "paths": list(n.paths),
             }
             for n in report.nominations
@@ -967,6 +1100,17 @@ def _build_parser() -> argparse.ArgumentParser:
         default="git",
         help="`git` (default) or `-` to read repo-relative paths from stdin, one per line",
     )
+    p.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        metavar="REPO_REL_PATH",
+        help=(
+            "repo-relative path to drop from the git window (repeatable). For the "
+            "ritual's own artifact: /handoff writes its doc, then asks what changed, "
+            "so without this the doc's own directory is a nomination on every run."
+        ),
+    )
     p.add_argument("--min-paths", type=int, default=DEFAULT_MIN_PATHS)
     p.add_argument("--limit", type=int, default=DEFAULT_NOMINATION_LIMIT)
     p.add_argument("--today", default=None, help="YYYY-MM-DD for the journal shape")
@@ -1009,7 +1153,7 @@ def main(argv: Sequence[str] | None = None, *, today: str | None = None) -> int:
             return 0
 
         if args.paths_from == "git":
-            source = collect_git_paths(repo)
+            source = collect_git_paths(repo, exclude=args.exclude)
         elif args.paths_from == "-":
             source = caller_supplied(sys.stdin.read().splitlines())
         else:
