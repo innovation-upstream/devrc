@@ -93,9 +93,13 @@ paths and ~16x on directories. The conclusion is unchanged, and the corrected
 figure is what makes it worth stating: the counted-but-dropped worktree set alone
 is **1.7x larger than the entire emitted path set** (802 vs 470), so a consumer
 that reads `changed_paths` as the session's file list, rather than as a subset
-sized by `changed_paths_outside_cwd`, is wrong by more than the data it has. The
-in/out headline reproduces across three independent runs (14.3% / 15.2% / 16%) —
-that ratio is stable, the sub-classification was not measured, only estimated.
+sized by `changed_paths_outside_cwd`, is wrong by more than the data it has.
+
+Every count above is a measurement, not an estimate: the four buckets sum
+exactly to the 2,820 excluded, and the in/out headline reproduces across three
+independent runs (14.3% / 15.2% / 16%). What the superseded figures lacked was a
+measurement of the SUB-classification — the split was approximated while the
+headline was counted, which is why only it was wrong.
 
 ⚠ TRUNCATION BIAS, STATED RATHER THAN LEFT TO BE DISCOVERED: the list is sorted
 lexicographically, so a truncated list is a lexicographic PREFIX and can

@@ -601,6 +601,41 @@ def test_the_exit_status_is_driven_by_failed_not_by_emitted(env):
     assert _run_with(9) == 1    # failed=1 emitted=9 — same verdict
 
 
+def test_a_zero_message_transcript_with_a_bad_cwd_is_skipped_not_fatal(env, capsys):
+    """🔴 THE 7th FATAL SHAPE — `build_event`, not `summarize_transcript`.
+
+    PRE-EXISTING: this raises identically on the tree before this whole change,
+    so it is neither introduced nor (until now) closed by it. Reachable when a
+    transcript has ZERO messages *and* a non-str `cwd`: zero messages routes
+    through `_mark_unobservable`, which SKIPS `CP.summarize` — the only guard
+    that would reject that cwd — so the rollup comes back clean and
+    `build_event` -> `project_basename(cwd)` -> `cwd.rstrip("/")` raises one
+    line later, historically OUTSIDE the try.
+
+    The cost was not just the abort: `run()` died before `save_state`, so every
+    session that had already emitted this pass re-emitted next tick, forever.
+    This test therefore pins the STATE as well as the survival.
+    """
+    _write(env["projects"], "-home-zach-workspace-devrc", "aaa-good",
+           [user_typed("hi", ts="2026-07-11T09:00:00.000Z")])
+    # no `user`/`assistant` turn → zero messages → unreadable; cwd is a list
+    _write(env["projects"], "-home-zach-workspace-devrc", "zeromsg",
+           [{"type": "system", "timestamp": "2026-07-11T10:00:00.000Z",
+             "cwd": ["/srv/checkouts/widget-repo"]}])
+
+    assert S.run() == 1
+    text = _summary_line(capsys)
+    assert "emitted=1 failed=1" in text
+    assert "zeromsg.jsonl" in text and "AttributeError" in text
+    # the healthy neighbour emitted …
+    assert [e["session"] for e in _spool_events(env["spool"])] == ["aaa-good"]
+    # … AND its signature was persisted, so it does not re-emit next tick
+    assert any(k.endswith("aaa-good.jsonl") for k in S.load_state(env["state"]))
+    assert len(_spool_events(env["spool"])) == 1
+    S.run()
+    assert len(_spool_events(env["spool"])) == 1
+
+
 def test_a_clean_run_exits_zero(env):
     """The arm that keeps every assertion above from passing on a build that
     simply always returns 1."""

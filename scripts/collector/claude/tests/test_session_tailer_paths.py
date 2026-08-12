@@ -346,6 +346,28 @@ class TestClaudeUnusableFilePaths:
         assert r["unusable_file_paths"] == 0
         assert r["changed_paths"] == []
 
+    @pytest.mark.parametrize("falsy", [[], "", 0])
+    def test_a_FALSY_non_dict_input_is_still_counted(self, falsy):
+        """The branch `or {}` cannot see. A falsy non-dict `input` ([] / "" / 0)
+        is malformed exactly like a truthy one, but `block.get("input") or {}`
+        silently converts it to an empty dict and counts nothing — a surviving
+        mutant found by review, on the diagnostic itself rather than on
+        fatality (neither spelling raises)."""
+        r = S.build_rollup([_user(), _assistant([("Write", falsy)])])
+        assert r["unusable_file_paths"] == 1
+        assert r["changed_paths"] == []
+
+    def test_an_ABSENT_input_is_not_counted(self):
+        """The other arm, and the reason the guard tests `is not None` rather
+        than truthiness: a tool_use block with no `input` key at all is absent,
+        not malformed."""
+        objs = [_user(), {"type": "assistant", "timestamp": "2026-07-11T10:01:00.000Z",
+                          "cwd": REPO,
+                          "message": {"role": "assistant", "model": "m", "usage": {},
+                                      "content": [{"type": "tool_use", "name": "Write"}]}}]
+        r = S.build_rollup(objs)
+        assert r["unusable_file_paths"] == 0
+
     def test_a_good_path_beside_a_bad_one_still_lands(self):
         r = _rollup([("Write", {"file_path": f"{REPO}/good.py", "content": "x"}),
                      ("Write", {"file_path": ["bad.py"], "content": "x"})])

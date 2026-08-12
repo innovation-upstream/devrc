@@ -803,20 +803,31 @@ def run(now: float | None = None) -> int:
         # summary line, because a swallowed exception here would recreate the
         # silent-zero class this whole payload exists to remove.
         #
-        # Scope is deliberately ONLY the summarise call. `emit_event` stays
-        # OUTSIDE it: an emit failure means the spool/helper is broken for every
-        # session, and turning that into a per-session skip would convert a loud
-        # systemic outage into a quiet count. The signature is NOT recorded, so
-        # the transcript is re-evaluated next tick rather than marked done.
+        # THE SPLIT IS PER-SESSION-DATA vs SYSTEMIC, not "the summarise call":
+        #   * inside  — everything derived from THIS transcript's bytes.
+        #     `build_event` belongs here and was a 7th fatal shape until it moved
+        #     (found by review, PRE-EXISTING — it raises identically on the tree
+        #     before this whole change): it calls `project_basename(cwd)` ->
+        #     `cwd.rstrip("/")`, reachable whenever a transcript has ZERO
+        #     messages and a non-str `cwd`. Zero messages routes through
+        #     `_mark_unobservable`, which skips `CP.summarize` — the only guard
+        #     that would have rejected that cwd — so the rollup comes back clean
+        #     and the raise lands one line later, outside the try.
+        #   * outside — `emit_event`. A spool/helper failure is broken for EVERY
+        #     session, and turning it into a per-session skip would convert a
+        #     loud systemic outage into a quiet count.
+        # The signature is NOT recorded on failure, so the transcript is
+        # re-evaluated next tick rather than marked done.
         try:
             rollup = summarize_transcript(path)
+            ev = build_event(session, rollup)
         except Exception as exc:  # noqa: BLE001 — deliberately broad; see above
             failed += 1
             print(f"session-tailer: ERROR summarising {path}: "
                   f"{type(exc).__name__}: {exc} — session SKIPPED, not emitted",
                   file=sys.stderr)
             continue
-        emit_event(emit, build_event(session, rollup))
+        emit_event(emit, ev)
         new_state[path] = {"sig": sig, "emitted_at": now}  # ONLY after a successful emit
         emitted += 1
         since_checkpoint += 1
@@ -849,14 +860,15 @@ def run(now: float | None = None) -> int:
     # script is its SECOND ExecStart, so a non-zero return does fail the unit.)
     #
     # ANY failure fails the run. A ratio rule (`failed >= emitted`, "escalate
-    # only the systemic shape") was written first and REJECTED on the workload:
-    # this timer scans every transcript but emits only CHANGED ones, so the
-    # overwhelming majority of real ticks have emitted=0 — which makes
-    # `failed >= emitted` identical to `failed > 0` in almost every pass, while
-    # adding a boundary nobody can predict from the summary line. The two cannot
-    # be told apart in practice, so the simpler rule wins.
+    # only the systemic shape") was written first and REJECTED — on the merits
+    # below, NOT on the workload argument that was tried first and does not hold.
+    # MEASURED over 2,781 real ticks from this unit's own journal (60 days):
+    # emitted=0 on 55.0%, and the two rules agree on 81.0% of ticks at failed=1.
+    # So they ARE distinguishable, on roughly one tick in five — an earlier draft
+    # of this comment claimed "the overwhelming majority" and that the two could
+    # not be told apart in practice, which the numbers do not support.
     #
-    # It is also the RIGHT answer, not merely the cheap one. A transcript that
+    # The rejection stands on this instead. A transcript that
     # cannot be summarised does not degrade a number — that session's summary is
     # MISSING, and stays missing while the condition holds, because the signature
     # is deliberately not recorded (a code fix must be able to heal the corpus
@@ -866,9 +878,20 @@ def run(now: float | None = None) -> int:
     # through — is about a gate standing between someone and a merge, not about
     # a deadman reporting that data is STILL being dropped.
     #
-    # ⚠ WHAT THIS STILL CANNOT CATCH, stated rather than left to be found: a
-    # breakage that makes summaries WRONG rather than raising. Nothing here
-    # inspects a rollup's contents; `failed` counts exceptions only.
+    # ⚠ WHAT `failed` DOES NOT COVER — stated rather than left to be found,
+    # because a bare "any failure fails the run" reads as a completeness this
+    # code does not have:
+    #   * a breakage that makes summaries WRONG rather than raising. Nothing
+    #     here inspects a rollup's contents; `failed` counts exceptions only.
+    #   * anything raised OUTSIDE the per-session try — `emit_event`,
+    #     `iter_transcripts`, `save_state`. Those still abort the pass with a
+    #     traceback and are never counted, BY DESIGN (they are systemic, not
+    #     per-transcript). The pass exits non-zero either way, so the unit still
+    #     fails; what differs is that `failed=N` will not name them.
+    #   * a failure in the unit's FIRST ExecStart (`claude/tailer.py`), which
+    #     stops this script from running at all. Pre-existing and out of scope
+    #     here; a systemd oneshot runs its ExecStart list sequentially and stops
+    #     at the first non-zero.
     if failed:
         print(f"session-tailer: FAILING the run — {failed} session(s) could not "
               f"be summarised and their summaries are MISSING, not degraded "
