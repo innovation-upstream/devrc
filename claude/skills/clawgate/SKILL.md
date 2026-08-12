@@ -175,7 +175,14 @@ absent toolchain, the `curl` form): `reference/agent-dispatch.md`.
   `make e2e` locally and **count** the results: `tasks.spec.ts` `test.skip`s the whole file without
   Docker, so a "green" run can mean 17 tests never executed.
 - 🔴 **The browser extension does NOT ship via Flux — merging to `trunk` deploys NOTHING.** Brave
-  loads it unpacked from a flat copy at `~/clawgate-extension` **on the workbench**, and does not
-  hot-reload it. **A missing `.synced-from` stamp means someone hand-copied it out of band** — that
-  is how a build that never passed CI ran live for ~11 hours while `trunk` looked clean. Check the
-  stamp before trusting any claim about which build is loaded → `reference/extension.md`.
+  loads it unpacked **in place from a git worktree**, at the same path on **BOTH hosts** (workbench +
+  laptop `zach@192.168.50.155`): `~/workspace/clawgate-extension/containers/clawgate/extension`
+  (branch `clawgate-ext-local`). Deploy = `merge --ff-only origin/trunk` on both + reload Brave (no
+  hot-reload). 🔴 **Brave has MULTIPLE PROFILES that load extensions independently and can point at
+  DIFFERENT paths** — one profile was left a version behind exactly this way; checking the profile in
+  front of you proves nothing, and agents can't read `brave://`, so use the `Preferences`-JSON sweep
+  in `reference/extension.md` — which also verifies the HOTKEYS, since a reload silently left
+  `Ctrl+Shift+E` unbound in two profiles. 🔴 **Never `git restore --source=<ref> --worktree` a
+  subtree to "freshen" a stale checkout** — identical content still BLOCKS an `--ff-only` merge that
+  touches that path, and any later checkout silently reverts it. `~/clawgate-extension` is deleted;
+  `sync-clawgate-extension.sh` still exists in homelab-talos but is NOT the delivery path.
