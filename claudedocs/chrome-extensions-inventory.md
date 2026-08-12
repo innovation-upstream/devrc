@@ -20,19 +20,23 @@ projects). All are Manifest V3.
 | **Structured Downloader** `1.0` | `~/workspace/gogram/gogram-extension` | nested in `gogram` repo | Structured downloader (downloads/storage/clipboard/scripting) for gogram | standalone load-unpacked | active |
 | **Structured Downloader (old)** `1.0` | `~/workspace/gogram/gogram-extension-old` | nested in `gogram` repo | Prior version of the above | none | **cruft — superseded** (see below) |
 | **Stock Chat Assistant** `1.0` | `~/workspace/portfolio-chat-fe/browser-extension` | nested in `portfolio-chat-fe` repo | Analyze stock tickers from any website | standalone load-unpacked | unknown (project side-extension) |
-| **clawgate task capture** `1.5.0` | `~/workspace/clawgate-extension/containers/clawgate/extension` | worktree of `homelab-talos` (`clawgate-ext-local`) | Hotkey → capture overlay → durable clawgate Task card | **load-unpacked from that worktree, on BOTH hosts and in EVERY Brave profile** — NOT shipped by Flux or the clawgate container; see the `clawgate` skill's `reference/extension.md` | active |
+| **clawgate task capture** `1.5.0` | `~/workspace/clawgate-extension/containers/clawgate/extension` | worktree of `homelab-talos` (`clawgate-ext-local`) | Hotkey → capture overlay → durable clawgate Task card | **load-unpacked from that worktree, on BOTH hosts** — NOT shipped by Flux or the clawgate container. Loaded in a SUBSET of profiles (2 of 5 on workbench, 2 of 6 on laptop as of 2026-08-12) and each must be reloaded separately; enumerate them with the sweep in the `clawgate` skill's `reference/extension.md` rather than assuming | active |
 
 ## Notes / non-extensions
 - **`~/workspace/scrape-video/manifest.json` is NOT a browser extension.** It's a
   `url_to_file` data map for a Go video-scraper CLI (`main.go`/`scrape.go`/`go.mod`
   in the same dir). Excluded from the table; noted so it isn't mistaken for one.
-- **The `clawgate task capture` extension is tracked in the `homelab-talos` repo**
-  and therefore appears in THREE checked-out git worktrees of that repo with
-  identical content — they are the SAME project, not three projects:
-  - `~/workspace/clawgate-extension/containers/clawgate/extension` (branch `clawgate-ext-local`) — the one listed above
-  - `~/workspace/clawgate-deploy/containers/clawgate/extension` (branch `clawgate-0.7.77`) — deploy worktree
-  - `~/workspace/homelab-trunk/containers/clawgate/extension` (branch `clawgate-ext-capture`) — see cleanup candidates
-  Confirmed via `git -C ~/workspace/homelab-talos worktree list`.
+- **The `clawgate task capture` extension is tracked in the `homelab-talos` repo**, so it appears
+  under every checked-out worktree of that repo with identical content — those are the SAME project,
+  not several projects. Only one of them is the load path:
+  - `~/workspace/clawgate-extension/containers/clawgate/extension` (branch `clawgate-ext-local`) —
+    **the load path**, the one listed above
+  - ⚠ **Re-verified 2026-08-12:** the `~/workspace/clawgate-deploy` (`clawgate-0.7.77`) and
+    `~/workspace/homelab-trunk` (`clawgate-ext-capture`) worktrees previously listed here **no longer
+    exist** — absent from disk and from `git worktree list`. The cleanup-candidate entry below that
+    hands you a `worktree remove ~/workspace/homelab-trunk` will fail; it is already done.
+  Re-check with `git -C ~/workspace/homelab-talos worktree list` rather than trusting this list —
+  it went stale once already.
 
 ## Cleanup candidates (FLAGGED — NOT deleted)
 Nothing was deleted. Each below is a candidate with the reason + a suggested SAFE

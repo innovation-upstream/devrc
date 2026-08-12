@@ -181,6 +181,8 @@ absent toolchain, the `curl` form): `reference/agent-dispatch.md`.
   hot-reload). 🔴 **Brave has MULTIPLE PROFILES that load extensions independently and can point at
   DIFFERENT paths** — one profile was left a version behind exactly this way; checking the profile in
   front of you proves nothing, and agents can't read `brave://`, so use the `Preferences`-JSON sweep
-  in `reference/extension.md`. 🔴 **Never `git restore --source=<ref> --worktree` a subtree to
-  "freshen" a stale checkout** — identical content still BLOCKS `merge --ff-only`, and any later
-  checkout silently reverts it. `~/clawgate-extension` + `sync-clawgate-extension.sh` are RETIRED.
+  in `reference/extension.md` — which also verifies the HOTKEYS, since a reload silently left
+  `Ctrl+Shift+E` unbound in two profiles. 🔴 **Never `git restore --source=<ref> --worktree` a
+  subtree to "freshen" a stale checkout** — identical content still BLOCKS an `--ff-only` merge that
+  touches that path, and any later checkout silently reverts it. `~/clawgate-extension` is deleted;
+  `sync-clawgate-extension.sh` still exists in homelab-talos but is NOT the delivery path.
