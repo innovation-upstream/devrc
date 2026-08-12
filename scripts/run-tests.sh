@@ -414,17 +414,17 @@ TARGET_FLOORS=(
   # measurement of the MERGED tree, not arithmetic across the conflict:
   #   _suggested_floor 2535 = 2535 - min(50, max(1, 126)) = 2485.
   #
-  # 2026-08-12, the session-manager `waiting` signal + blocked-on-me: 2535 ->
-  # 2613 collected (+78, all in scripts/tests/test_session_manager.py: 293 ->
-  # 371). Same method as every line above — the AUTHORITATIVE gate's own
-  # printed count (`nix build .#checks.x86_64-linux.pytests`:
-  # `scripts/tests collected=2613`) put through the gate's own function:
-  #   _suggested_floor 2613 = 2613 - min(50, max(1, 130)) = 2613 - 50 = 2563.
-  # 🔴 A sibling branch also adds tests here, so this line WILL conflict and
-  # `rerere` has mis-replayed exactly it before. Resolve by re-running the gate
-  # on the MERGED tree and copying the number it prints — never by arithmetic
-  # across the two sides.
-  "scripts/tests|2563"
+  # 2026-08-12, the standup fleet-scope fix: 2535 -> 2551 collected, +16 for
+  # scripts/tests/test_standup_pr_sweep.py. Same method as every line above —
+  # the AUTHORITATIVE gate's own printed count (`nix build
+  # .#checks.x86_64-linux.pytests` -> `collected=2551`) put through the gate's
+  # own function, NOT arithmetic across a conflict:
+  #   _suggested_floor 2551 = 2551 - min(50, max(1, 127)) = 2551 - 50 = 2501.
+  # ⚠ The new file must be `git add`ed before that measurement means anything:
+  # the first gate run here reported the OLD 2535 because an untracked test is
+  # silently absent from the flake source. If this line conflicts with another
+  # branch, re-run the gate on the MERGED tree and copy what it prints.
+  "scripts/tests|2501"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
@@ -450,7 +450,11 @@ TARGET_FLOORS=(
   "scripts/dl-router/tests|942"
   "scripts/browser-bridge/tests|469"
   "scripts/validation/tests|97"
-  "scripts/session-analysis/tests|362"
+  # 2026-08-12, initiative-scan's `gh_available` honesty flag: 381 -> 386
+  # collected, +5 for the flag's probe/report/render cases in
+  # test_initiative_scan.py. Gate's own count through the gate's own rule:
+  #   _suggested_floor 386 = 386 - min(50, max(1, 19)) = 386 - 19 = 367.
+  "scripts/session-analysis/tests|367"
   "scripts/session-analysis/session_insight/tests|55"
   "scripts/mail-actions/tests|129"
   "scripts/initiatives/tests|745"

@@ -698,9 +698,13 @@ def test_build_report_end_to_end_no_telemetry(tmp_path, monkeypatch):
     monkeypatch.setattr(isc, "collect_session_records", lambda root, d, n=5: [sess])
 
     now = 2_000.0  # last_commit at 1000 -> age 1000s -> active
-    report = isc.build_report(2, repos=[str(repo)], client=None, now=now)
+    # gh_ok is stated, not probed: the PR figures below come from the stub, so the
+    # report's honesty flag must not depend on whether the HOST running the test
+    # happens to have an authenticated `gh`.
+    report = isc.build_report(2, repos=[str(repo)], client=None, now=now, gh_ok=True)
 
     assert report["telemetry_available"] is False
+    assert report["gh_available"] is True
     inis = report["by_repo"][str(repo)]
     assert len(inis) == 1
     ini = inis[0]
@@ -733,11 +737,81 @@ def test_render_emits_trunk_catchall(monkeypatch, tmp_path):
         def rows(self, sql):
             return [{"branch": "main", "cwd": str(repo), "n": 99, "last_ts": "2026-06-30 10:00:00"}]
 
-    report = isc.build_report(14, repos=[str(repo)], client=FakeClient(), now=2_000_000_000.0)
+    report = isc.build_report(14, repos=[str(repo)], client=FakeClient(),
+                              now=2_000_000_000.0, gh_ok=True)
     assert report["telemetry_available"] is True
     txt = isc.render(report, now=2_000_000_000.0)
     assert "unsegmented trunk/main work" in txt
     assert "ev:99" in txt
+
+
+# --------------------------------------------------------------------------- #
+# `gh_available` — telling a MEASURED zero apart from a missing measurement.
+#
+# `gh_open_prs` returns [] on any failure, so `open_prs: []` on a host without an
+# authenticated `gh` is byte-identical to "this initiative genuinely has no open
+# PRs". A blind dogfood run read `open_prs: []` + `commits: 0` across ~33 "active"
+# initiatives and had nothing in the output telling it which of those zeroes were
+# real. The flag does not fix the ambiguity — it REPORTS it.
+# --------------------------------------------------------------------------- #
+def _tiny_report(monkeypatch, tmp_path, **kw):
+    repo = tmp_path / "ghflag"
+    (repo / "claudedocs").mkdir(parents=True)
+    (repo / "claudedocs" / "handoff-thing.md").write_text(
+        "# Handoff: thing\n## Next steps\n1. go\n")
+    monkeypatch.setattr(isc, "git_branches", lambda r: ["main"])
+    monkeypatch.setattr(isc, "git_default_branch", lambda r: "main")
+    monkeypatch.setattr(isc, "gh_open_prs", lambda r: [])
+    monkeypatch.setattr(isc, "gh_merged_prs", lambda r, d: [])
+    monkeypatch.setattr(isc, "collect_session_records", lambda root, d, n=5: [])
+    return isc.build_report(14, repos=[str(repo)], client=None,
+                            now=2_000_000_000.0, **kw)
+
+
+def test_report_carries_gh_available_true(monkeypatch, tmp_path):
+    """POSITIVE side of the pair — the flag must be able to read True."""
+    report = _tiny_report(monkeypatch, tmp_path, gh_ok=True)
+    assert report["gh_available"] is True
+    assert "gh UNAVAILABLE" not in isc.render(report, now=2_000_000_000.0)
+
+
+def test_report_carries_gh_available_false_and_says_so(monkeypatch, tmp_path):
+    """NEGATIVE side — and the rendered report must SAY the PR figures are not
+    measurements, or the flag only helps a reader who already knew to look."""
+    report = _tiny_report(monkeypatch, tmp_path, gh_ok=False)
+    assert report["gh_available"] is False
+    txt = isc.render(report, now=2_000_000_000.0)
+    assert "gh UNAVAILABLE" in txt
+    assert "NOT MEASURED, not zero" in txt
+
+
+def test_gh_available_probe_is_false_without_gh_on_path(monkeypatch):
+    """The default (unstubbed) probe must be able to answer False for real."""
+    monkeypatch.setattr(isc.shutil, "which", lambda name: None)
+    assert isc.gh_available() is False
+
+
+def test_gh_available_probe_is_false_when_auth_fails(monkeypatch):
+    """`gh` present but unauthenticated is exactly the case that produced the
+    ambiguous `[]` — it must not read as available."""
+    monkeypatch.setattr(isc.shutil, "which", lambda name: "/usr/bin/gh")
+
+    class R:
+        returncode = 1
+
+    monkeypatch.setattr(isc.subprocess, "run", lambda *a, **k: R())
+    assert isc.gh_available() is False
+
+
+def test_gh_available_probe_is_true_when_authed(monkeypatch):
+    """Positive control for the probe itself: it can also return True."""
+    monkeypatch.setattr(isc.shutil, "which", lambda name: "/usr/bin/gh")
+
+    class R:
+        returncode = 0
+
+    monkeypatch.setattr(isc.subprocess, "run", lambda *a, **k: R())
+    assert isc.gh_available() is True
 
 
 # --------------------------------------------------------------------------- #
