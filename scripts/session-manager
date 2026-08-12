@@ -94,8 +94,24 @@ above implies — but not an empty one. State only what is guaranteed:
 The workbench's 400 files did carry 400 distinct ids on 2026-08-11, but that is
 a SNAPSHOT of an untrusted writer, not an invariant — do not read it forward.
 
-HONEST LIMITS (stated, not implied away)
-----------------------------------------
+🔴 A MIXED COUNT IS NEVER PUBLISHED AS A BARE NUMBER
+----------------------------------------------------
+The headline question is "is anything waiting on me", and `idle` answered it
+with 12 agent windows and 5 bare shells added together — rendered identically
+as `● idle`, with nothing on the row saying which was which. The row data was
+already right (every row carries `claude`); only the roll-up and the table
+conflated. So every status bucket now splits `{claude, shell, total}` in the
+summary, and the table carries a KIND column. See `summarize` for why all four
+buckets split rather than just `idle`, and for the deliberate removal of the
+flat `summary["idle"]` integer.
+
+`--claude-only` drops the shells outright; the summary then describes the
+FILTERED set and carries `excluded_non_claude` so an empty table cannot read as
+an empty host.
+
+HONEST LIMITS (stated, not implied away — AND CARRIED IN THE OUTPUT as
+`report["caveats"]` plus two footer lines; see CAVEATS)
+----------------------------------------------------------------------
   * Claude detection is `pane_current_command =~ /claude/`, which is SHALLOWER
     than agent-ops' `/proc` descendant walk. It sees `claude` running as the
     pane's foreground command (the live shape on both hosts today) and MISSES a
@@ -188,6 +204,41 @@ DEFAULT_STALE_THRESHOLD = 3600      # 1h
 DEFAULT_TAIL_LINES = 100
 
 CLAUDE_RE = re.compile(r"claude", re.IGNORECASE)
+
+# The four status buckets, in one place. Every roll-up iterates THIS tuple, so a
+# bucket cannot exist in `classify_status` and be missing from the summary.
+STATUS_BUCKETS = ("busy", "idle", "stale", "unknown")
+
+# 🔴 THE TWO LIMITS THAT CHANGE WHAT THE OUTPUT MEANS, CARRIED IN THE OUTPUT.
+# Both were documented in the skill body only. An agent that runs this script
+# cold never reads the skill, and the failure mode of each is silent: a `claude`
+# under a wrapper shell is counted as a shell, and a REMOTE row's missing
+# task/session/age reads as "measured and absent" rather than "never measured
+# here". A caveat that lives only in the docs protects only the readers who
+# already knew. Structured, so `--json` consumers branch instead of parse prose;
+# `null_fields_on_remote_rows` is a FIELD LEDGER pinned by a test against a real
+# remote row, so it cannot drift away from what the code actually nulls.
+CAVEATS = {
+    "claude_detection": {
+        "method": "pane_current_command_regex",
+        "pattern": CLAUDE_RE.pattern,
+        "note": ("`claude` must be the pane's FOREGROUND command; a claude "
+                 "under a wrapper shell is reported as a shell. Shallower than "
+                 "agent-ops' /proc descendant walk, which is not reachable "
+                 "over SSH and so would make the two hosts report by different "
+                 "rules."),
+    },
+    "fuzzyclaw_scope": {
+        "scope": "local_host_only",
+        "null_fields_on_remote_rows": ["fuzzyclaw", "claude_session_id",
+                                       "age_secs"],
+        "note": ("fuzzyclaw task files are LOCAL state, so a row from the "
+                 "remote host carries no task, no claude_session_id and no "
+                 "age, and is NEVER labelled `stale` — it is classified from "
+                 "the title glyph alone. Do not read a remote row's absent "
+                 "task as a measured absence."),
+    },
+}
 
 # Claude Code renders a leading status glyph in the pane_title: a BRAILLE
 # spinner while working, a "sparkle" at rest. Same taxonomy as agent-ops.
@@ -683,17 +734,54 @@ def fold_windows(panes, host, codenames=None, task_index=None,
 
 
 def summarize(report) -> dict:
+    """🔴 EVERY status bucket is split claude/shell. A MIXED count is never
+    published as a bare integer.
+
+    The tool's headline question is "is anything waiting on me", and the bucket
+    that answers it was contaminated: measured on this host 2026-08-11, 61
+    windows produced `idle: 17` = 12 agent windows + 5 bare shells, rendered
+    identically as `● idle`. The row data was already right — every row carries
+    `claude` — so nothing about detection changes here; only the roll-up and the
+    table stopped conflating.
+
+    The split is applied to ALL FOUR buckets, not just `idle`. `unknown` was
+    15/15 non-claude in that same measurement, which is a SNAPSHOT, not an
+    invariant: `classify_status` returns `unknown` for any row with no glyph and
+    no age, and a REMOTE claude window has no age by construction (see
+    CAVEATS["fuzzyclaw_scope"]), so a claude row lands there as soon as its
+    title carries no glyph. Splitting one bucket fixes one instance; splitting
+    the tuple kills the class.
+
+    🔴 BACKWARD COMPATIBILITY, chosen deliberately in the LOUD direction. The
+    flat `summary["busy"|"idle"|"stale"|"unknown"]` integers are GONE, replaced
+    by `summary["status"][bucket]` -> `{"claude", "shell", "total"}`. Keeping
+    the flat ints would have left every existing reader silently reading the
+    mixed number as an agent count — the exact defect — while the fix sat in
+    keys they never learned about. A KeyError is a worse morning and a better
+    outcome; `["status"]["idle"]["total"]` is the same number, and you have to
+    type `total` to get it.
+    """
     rows = [r for h in report["hosts"].values() for r in h["windows"]]
-    counts = {"busy": 0, "idle": 0, "stale": 0, "unknown": 0}
+    counts = {b: {"claude": 0, "shell": 0} for b in STATUS_BUCKETS}
     for r in rows:
-        counts[r["status"]] = counts.get(r["status"], 0) + 1
+        bucket = counts.setdefault(r["status"], {"claude": 0, "shell": 0})
+        bucket["claude" if r.get("claude") else "shell"] += 1
+    for b in counts.values():
+        b["total"] = b["claude"] + b["shell"]
+    filters = report.get("filters") or {}
     return {
         "total_sessions": len(rows),
         "claude": sum(1 for r in rows if r["claude"]),
-        "busy": counts["busy"],
-        "idle": counts["idle"],
-        "stale": counts["stale"],
-        "unknown": counts["unknown"],
+        "shell": sum(1 for r in rows if not r["claude"]),
+        "status": counts,
+        # 🔴 The filter travels WITH the counts it changed. Under
+        # `--claude-only` every number above describes the FILTERED set (see
+        # `gather`), so a reader that does not know the filter ran would read a
+        # real "0 agent windows" and a "0 because the shells were dropped"
+        # identically. `excluded_non_claude` is None — not 0 — when the filter
+        # never ran: nothing was excluded because nothing was ever counted.
+        "claude_only": bool(filters.get("claude_only")),
+        "excluded_non_claude": filters.get("excluded_non_claude"),
         "hosts_reachable": sorted(k for k, v in report["hosts"].items()
                                   if v["reachable"]),
         "hosts_unreachable": sorted(k for k, v in report["hosts"].items()
@@ -877,7 +965,8 @@ def ch_query(client, sql) -> dict:
 def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
            use_fuzzyclaw=True, threshold=DEFAULT_STALE_THRESHOLD, now=None,
            ch_client_factory=None, fuzzyclaw_texts=None,
-           codenames=None, ch_sql=SQL_RECENT_SESSIONS) -> dict:
+           codenames=None, ch_sql=SQL_RECENT_SESSIONS,
+           claude_only=False) -> dict:
     """Build the whole report. Every source is injectable, so this is the
     function the hermetic suite exercises end-to-end.
 
@@ -917,6 +1006,14 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
                       "files_seen": None, "files_live": None,
                       "files_unparseable": None, "files_stale": None,
                       "files_mismatched": None, "slot_conflicts": []},
+        # The row set this report describes, and how it was narrowed. Present
+        # on EVERY report, filtered or not, so a consumer branches on a field
+        # rather than on whether a key exists.
+        "filters": {"claude_only": bool(claude_only),
+                    "excluded_non_claude": None},
+        # 🔴 The two limits that change what these rows MEAN, carried in the
+        # payload rather than left in the skill body. See CAVEATS.
+        "caveats": CAVEATS,
         "summary": {},
     }
 
@@ -981,6 +1078,22 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
             task_index=(task_index if host == local_host else {}),
             threshold=threshold, now=now,
             slot_window_ids=slot_ids.get(host))
+
+    # --- 🔴 --claude-only: drop the shells, and COUNT what was dropped -------
+    # The summary then describes the RENDERED set, which is the safe direction:
+    # counting the unfiltered set would publish `total_sessions: 20` beside zero
+    # printed rows and an EXIT_OK, i.e. "ran, found windows" over an empty
+    # table. Counting the filtered set makes that same run a real measured zero
+    # (EXIT_EMPTY) — true, because zero AGENT windows is what was asked. The
+    # dropped count keeps it from reading as "the host had nothing at all".
+    if claude_only:
+        excluded = 0
+        for host in hosts:
+            entry = report["hosts"][host]
+            kept = [r for r in entry["windows"] if r.get("claude")]
+            excluded += len(entry["windows"]) - len(kept)
+            entry["windows"] = kept
+        report["filters"]["excluded_non_claude"] = excluded
 
     # --- ClickHouse ----------------------------------------------------------
     if use_ch:
@@ -1060,16 +1173,25 @@ def render_table(report) -> str:
         out.append("  (none)" if reach
                    else "  (no host answered — nothing was measured)")
     else:
+        # 🔴 KIND is its own column, read straight off the row's `claude`
+        # boolean. It is deliberately NOT spelled into the STATUS word: a
+        # status cell of "idle·sh" can be satisfied by anything that happens to
+        # contain those characters, while a column whose only two values are
+        # `claude` and `shell` states which one the row IS. `● idle` on an
+        # agent and `● idle` on a bare zsh prompt were the same six characters
+        # before this.
         out.append("  HOST       SESSION       WIN  CODENAME   TASK"
-                   "                              STATUS    AGE")
-        out.append("  " + "─" * 100)
+                   "                          KIND    STATUS    AGE")
+        out.append("  " + "─" * 104)
         for r in rows:
             out.append(
-                "  {:<9}  {:<12}  {:<3}  {:<9}  {:<34}  {:<8}  {:<4}".format(
+                "  {:<9}  {:<12}  {:<3}  {:<9}  {:<30}  {:<6}  {:<8}  "
+                "{:<4}".format(
                     _trunc(r.get("host"), 9), _trunc(r.get("session"), 12),
                     _trunc(r.get("window_index"), 3),
                     _trunc(r.get("codename") or "—", 9),
-                    _trunc(r.get("task") or "—", 34),
+                    _trunc(r.get("task") or "—", 30),
+                    "claude" if r.get("claude") else "shell",
                     _STATUS_GLYPH.get(r.get("status"), "?"),
                     _fmt_age(r.get("age_secs"))))
     out.append("")
@@ -1134,19 +1256,61 @@ def render_table(report) -> str:
                        c.get("session"), c.get("window_index"),
                        c.get("claimants"), len(ids), ", ".join(ids)))
     out.append("")
-    out.append("  summary: {total} windows  claude={claude}  busy={busy}  "
-               "idle={idle}  stale={stale}  unknown={unknown}".format(
-                   total=summ.get("total_sessions", 0),
-                   claude=summ.get("claude", 0), busy=summ.get("busy", 0),
-                   idle=summ.get("idle", 0), stale=summ.get("stale", 0),
-                   unknown=summ.get("unknown", 0)))
+    out.append("  summary: {total} windows  claude={claude}  shell={shell}"
+               .format(total=summ.get("total_sessions", 0),
+                       claude=summ.get("claude", 0),
+                       shell=summ.get("shell", 0)))
+    # 🔴 Every bucket prints as `claude+shell`, never as one number. The legend
+    # is on the same line, so no reader has to remember which half is which —
+    # and there is no rendering of `idle` that a reader can mistake for a count
+    # of waiting AGENTS.
+    st = summ.get("status") or {}
+    out.append("  by status (claude+shell): " + "  ".join(
+        "{}={}+{}".format(b, (st.get(b) or {}).get("claude", 0),
+                          (st.get(b) or {}).get("shell", 0))
+        for b in STATUS_BUCKETS))
+    if summ.get("claude_only"):
+        # The filter is stated where the counts are, because it changed them.
+        out.append("  FILTER --claude-only: {} non-claude window(s) excluded "
+                   "from every count above".format(
+                       summ.get("excluded_non_claude")
+                       if summ.get("excluded_non_claude") is not None
+                       else "an unmeasured number of"))
     if summ.get("hosts_unreachable"):
         out.append("  UNREACHABLE HOSTS: " +
                    ", ".join(summ["hosts_unreachable"]))
     if summ.get("windows_unmeasured"):
         out.append("  WINDOW LIST UNMEASURED ON: " +
                    ", ".join(summ["windows_unmeasured"]))
+    out.extend(render_caveats(report))
     return "\n".join(out)
+
+
+def render_caveats(report) -> list:
+    """🔴 The two limits, in the OUTPUT, unconditionally.
+
+    They were documented in the skill body only, and a dogfooding agent credited
+    reading that body with not mixing two different session populations — which
+    is exactly the protection an agent running the script cold does not get.
+    Printed always, not "when relevant": a caveat that appears only sometimes is
+    one a reader learns not to expect, and both apply to every scan (the
+    detection rule to every row, the fuzzyclaw scope to every remote row —
+    including the case where the remote host answered with zero rows).
+
+    Two lines, after the summary, so the per-row table is untouched.
+    """
+    cav = (report or {}).get("caveats") or CAVEATS
+    det = cav.get("claude_detection") or {}
+    fz = cav.get("fuzzyclaw_scope") or {}
+    return [
+        "  caveat[claude_detection]: KIND is `pane_current_command =~ /{}/` — "
+        "shallower than agent-ops' /proc walk; a claude under a wrapper shell "
+        "reads as `shell`".format(det.get("pattern", "claude")),
+        "  caveat[fuzzyclaw_scope]: fuzzyclaw is {} — REMOTE rows carry null "
+        "{} and are never `stale`".format(
+            fz.get("scope", "local_host_only"),
+            "/".join(fz.get("null_fields_on_remote_rows") or [])),
+    ]
 
 
 def render_session_history(hist) -> str:
@@ -1267,6 +1431,11 @@ def build_parser():
     p.add_argument("--no-ch", action="store_true",
                    help="skip ClickHouse entirely (the client is never built)")
     p.add_argument("--no-fuzzyclaw", action="store_true")
+    p.add_argument("--claude-only", action="store_true",
+                   help="scan/list/detail: drop non-Claude windows. Every "
+                        "summary count then describes the FILTERED set, and "
+                        "summary.excluded_non_claude says how many were "
+                        "dropped. No effect on `tail`.")
     p.add_argument("--lines", type=int, default=DEFAULT_TAIL_LINES,
                    help="tail: scrollback lines")
     return p
@@ -1279,6 +1448,11 @@ def main(argv=None):
     local = local_host_label()
 
     if args.subcommand == "tail":
+        # `tail` targets ONE window by name, so there is nothing to filter. A
+        # silently ignored flag is how a caller concludes it was honoured.
+        if args.claude_only:
+            print("(--claude-only has no effect on `tail`: it targets one "
+                  "named window)", file=sys.stderr)
         if not args.target:
             print("tail requires <session>:<window>", file=sys.stderr)
             return EXIT_USAGE
@@ -1354,7 +1528,8 @@ def main(argv=None):
     report = gather(hosts=hosts, local_host=local,
                     use_ch=(not args.no_ch and args.subcommand != "list"),
                     use_fuzzyclaw=not args.no_fuzzyclaw,
-                    threshold=args.stale_threshold)
+                    threshold=args.stale_threshold,
+                    claude_only=args.claude_only)
 
     if args.subcommand == "detail":
         if not args.target:
