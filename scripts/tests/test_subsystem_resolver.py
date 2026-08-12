@@ -1621,8 +1621,16 @@ class TestCommandDocIsPinned:
         ),
         (
             "entry-schema",
-            "f318b88f1712615c1711f411b34ff9d0672bee734cac62c2edcadd04e5f96f57",
-            "SubsystemEntry.from_mapping / load_index",
+            # Re-pinned when `created_by:` was added to the front-matter schema
+            # (the `/handoff` writer). Read against the code before updating, as
+            # the failure message demands: `from_mapping` does not read the new
+            # field and must not — it is PROVENANCE, not identity, and an entry
+            # is addressable without it. `parse_front_matter` preserves it (it
+            # preserves unknown keys), `from_mapping` ignores it, and
+            # `subsystem_touch.census` is what reads it. The behavioural half of
+            # that claim is `test_subsystem_touch.py::TestEntrySchemaAgreement`.
+            "66ff2115bf38226e8419abee5dc77d6dd8ff9903e0834f869e6c52e7c54f783c",
+            "SubsystemEntry.from_mapping / load_index (+ subsystem_touch.census for created_by)",
         ),
     ]
 

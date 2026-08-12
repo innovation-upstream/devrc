@@ -392,7 +392,16 @@ TARGET_FLOORS=(
   # author would then have to reconcile. 2251 - min(50, max(1, 2251/20)) = 2201,
   # the gate's own printed count put through the rule above (and through
   # `_suggested_floor` in BOTH its shell and python spellings, which agree).
-  "scripts/tests|2201"
+  #
+  # 2026-08-11, the `/handoff` subsystem-index writer: 2251 -> 2426 collected,
+  # +105 for scripts/tests/test_subsystem_touch.py and +70 that arrived with
+  # main since the line above was written. Re-measured, not computed: the number
+  # is `_suggested_floor 2426` — the gate's OWN function, so what it suggests is
+  # by construction what it accepts. The suite needed no HERMETIC_TARGETS entry
+  # (scripts/tests is already a directory target) and adds ZERO skips, so
+  # EXPECTED_SKIPS is untouched; movement on THIS line is the evidence the gate
+  # runs the new file at all.
+  "scripts/tests|2376"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —

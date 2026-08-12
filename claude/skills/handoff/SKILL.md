@@ -53,7 +53,22 @@ Topic argument (optional): `$ARGUMENTS`. If empty, infer a short kebab-case topi
    Exact command(s) / click-path that prove the work is correct.
    ```
 
-3. **Output a kickoff block** (fenced, ready to copy-paste into the next session) of the form:
+3. **Record what this session touched in the subsystem index** (read-only probe, then an opt-in write). The index is the terse *pointer sheet* that outlives this handoff doc; `/analyze-service` was its only writer, so entries existed for infra services in one scope while work spans ~12 repos. This step is the other writer. Run:
+
+   ```
+   python3 /home/zach/workspace/devrc/scripts/lib/subsystem_touch.py --repo <repo>
+   ```
+
+   It **never writes** — it resolves the changed paths against the store and reports. Scope is derived from the repo you are in (worktree-stable), so entries accrue where the work happened. Read its `status=` and act on exactly that case:
+
+   - **`resolved`** — for each entry listed, propose appending **one dated bullet** in the existing style (`- YYYY-MM-DD: …`, ≤2 lines) as the **FIRST** bullet under `## Nuance / work-history`. Write a *durable lesson* — a gotcha, a decision, why it was touched — never routine status, never a config value, never a copy of what the handoff doc already says. Nothing notable ⇒ propose nothing and say `index unchanged`.
+   - **`no-match` / `scope-absent`** — the tool lists **nominations** (candidate names, ranked). Pick **at most one** that is a real durable subsystem, or none. Propose a **minimal** new entry: `--template <slug>` prints it (identity front matter incl. `scope`, `sensitivity: client-confidential`, `created_by: handoff`, plus `## What it is` and `## Pointers`). **Do not demand the full schema** — a thin entry that exists beats a rich one that doesn't. Nominations are candidates, not answers; rejecting all of them is a normal outcome.
+   - **`ambiguous` listed** — report the candidates and **write nothing** for that ref. The resolver refuses to pick; so do you.
+   - **`looked-at-nothing`** — say so plainly and write nothing. This is *not* "nothing touched an entry": no path was examined at all. Never report the two as the same result.
+
+   🔴 **Write only on explicit confirm, diff first, exactly as `analyze-service`'s write-back specifies** — show one compact unified diff, ask a single *"append this to the index? (y/N)"*, and on confirm **re-read the file and re-apply to current bytes** so a concurrent append isn't clobbered. Never silent-mutate. Carry its invariants: **pointers, not copies**; **never persist live status** (no counts, no Ready/NotReady, no current version) — for anything with no live probe, persist the *derivation method and what a stale reading looks like*, never the reading. 🔴 **Write the file and run no git command** — the store is client-sensitive, has no backup, and is versioned by its own out-of-band autocommit. Never add a remote, never copy a line of it into a public repo.
+
+4. **Output a kickoff block** (fenced, ready to copy-paste into the next session) of the form:
    ```
    Continue the <topic> work. Canonical handoff (read first):
      <repo>/claudedocs/handoff-<topic>.md
