@@ -59,23 +59,32 @@ def test_clawgate_titles_failsafe_on_junk():
 # parse_panes
 # ---------------------------------------------------------------------------
 def test_parse_panes_wellformed_and_junk():
+    # Paths here are SYNTHETIC — this repo is PUBLIC and a checkout path names a
+    # client as surely as a hostname does (CLAUDE.md).
     raw = "\n".join([
-        "%0|16060|main|1|@4|devrc ●|/home/zach/workspace/devrc|claude",
-        "%1|16095|main|2|@16|dp|/home/zach/workspace/civit/datapacket-talos|zsh",
+        "%0|16060|main|1|@4|devrc ●|/home/zach/workspace/devrc|claude|1700000000",
+        "%1|16095|main|2|@16|svc-b|/home/zach/workspace/svc-b|zsh|1700000000",
         "garbage line without pipes",
-        "%2|notanint|x|1|@7|w|/p|zsh",    # bad pid → dropped
-        "%3|17000|s|1|w|/p|zsh",          # 7 fields (pre-window_id shape) → dropped
+        "%2|notanint|x|1|@7|w|/p|zsh|1700000000",   # bad pid → dropped
+        # The PREVIOUS 9-field shape, before `#{start_time}` joined the format.
+        # It must be DROPPED, not parsed with every field after `command`
+        # shifted one place left — which is the silent way a format change goes
+        # wrong (a title would land in `server_start` and bound nothing).
+        "%3|17000|s|1|@9|w|/p|zsh",
     ])
     panes = ao.parse_panes(raw)
     assert len(panes) == 2
     assert panes[0]["pane_pid"] == 16060
     assert panes[0]["window_id"] == "@4"        # the per-window age join's key
     assert panes[0]["window_name"] == "devrc"   # trailing ' ●' stripped
+    assert panes[0]["server_start"] == "1700000000"   # the age join's era bound
+    assert panes[0]["title"] == ""              # no title field → empty, not dropped
     assert panes[1]["window_id"] == "@16"
     assert panes[1]["command"] == "zsh"
     # title stays LAST and absorbs any trailing pipes it contains
-    titled = ao.parse_panes("%9|1|s|3|@9|w|/p|claude|✳ do|the|thing")
+    titled = ao.parse_panes("%9|1|s|3|@9|w|/p|claude|1700000000|✳ do|the|thing")
     assert titled[0]["title"] == "✳ do|the|thing"
+    assert titled[0]["server_start"] == "1700000000"
 
 
 def test_parse_panes_empty():
@@ -133,7 +142,7 @@ def test_build_frame_emits_no_ansi_when_not_a_terminal(monkeypatch):
     assert "\033" not in frame
     # POSITIVE CONTROL: the same frame with colour ON is full of escapes, so the
     # clean result above is a fact about the switch, not about an empty render.
-    assert "ACTIVE AGENT RUNS" in frame and "review-bombing" in frame
+    assert "ACTIVE AGENT RUNS" in frame and "widget-rollup" in frame
     monkeypatch.setattr(ao, "_COLOR", True)
     assert frame.count("\033") == 0 < ao.build_frame(100).count("\033")
 
@@ -160,9 +169,28 @@ def test_pane_format_and_parser_agree_field_for_field():
         want = 1234 if var == "pane_pid" else "V%d-%s" % (i, var)
         assert pane[key] == want, (
             "format field #%d %r landed in %r as %r" % (i, var, key, pane[key]))
-    # …and the pairing is the one the age join needs, spelled out.
-    assert dict(zip(ao.PANE_FIELDS, fields))["window_id"] == "window_id"
-    assert dict(zip(ao.PANE_FIELDS, fields))["session"] == "session_name"
+    # 🔴 The loop above CANNOT catch a reordering of the format, because it
+    # derives the expected sentinel from the same position it reads back — swap
+    # two `#{...}` and it stays self-consistent and green. MEASURED: a mutant
+    # swapping `#{start_time}` and `#{pane_title}` survived everything else in
+    # this file. So pin the NAME pairing in full, not two of its entries.
+    assert dict(zip(ao.PANE_FIELDS, fields)) == {
+        "pane_id": "pane_id",
+        "pane_pid": "pane_pid",
+        "session": "session_name",
+        "window_index": "window_index",
+        "window_id": "window_id",
+        "window_name": "window_name",
+        "path": "pane_current_path",
+        "command": "pane_current_command",
+        "server_start": "start_time",       # the age join's era bound
+        "title": "pane_title",
+    }, dict(zip(ao.PANE_FIELDS, fields))
+    # …and pane_title stays LAST for a reason that outlives the mapping above:
+    # a title may contain '|', so ANY field placed after it is swallowed by the
+    # title and silently reads empty — which for `start_time` means an
+    # unprovable era and a blank age column on every row.
+    assert fields[-1] == "pane_title", fields
 
 
 # ---------------------------------------------------------------------------
@@ -294,15 +322,29 @@ def test_classify_empty_and_ordering():
 # reproduces those exact numbers: the two proc uptimes are DISTINCT yet both
 # round to "4d", so an implementation that reuses them cannot pass by accident.
 # ---------------------------------------------------------------------------
+# 🔴 The task strings below are SYNTHETIC and must stay that way. This repo is
+# PUBLIC (CLAUDE.md), and the first draft of this fixture was pasted from the
+# operator's real panes — it carried three client project codenames into a public
+# tree, which neither `test_no_client_hostnames.py` nor `test_no_public_ips.py`
+# can see (they match hostnames and IPs; a codename has no structural form).
+# The tests need these values DISTINGUISHABLE and pairwise distinct, not real.
+#
+# `server_start` is tmux's `#{start_time}`, the age join's era bound. It is set
+# LONG before every `last_activity` in this module so these cases exercise what
+# they were written for rather than tripping the bound; the bound itself is
+# driven by test_window_activity_age_rejects_a_previous_servers_record.
+_SERVER_START = "1700000000"        # 2023-11-14 — predates every fixture stamp
 _SCRATCH12_PANES = [
     {"pane_id": "%4", "pane_pid": 4083112, "session": "scratch12",
-     "window_index": "1", "window_id": "@4", "window_name": "dp",
-     "path": "/home/zach/ws/dp", "command": "zsh",
-     "title": "⠐ Continue review-bombing and co-cry work"},      # braille → busy
+     "window_index": "1", "window_id": "@4", "window_name": "svc-a",
+     "path": "/home/zach/ws/svc-a", "command": "zsh",
+     "server_start": _SERVER_START,
+     "title": "⠐ Continue widget-rollup and cache-warm work"},   # braille → busy
     {"pane_id": "%16", "pane_pid": 653899, "session": "scratch12",
-     "window_index": "2", "window_id": "@16", "window_name": "probe",
-     "path": "/home/zach/ws/probe", "command": "zsh",
-     "title": "✳ Run bitdex probe on ImageTechnique"},           # sparkle → idle
+     "window_index": "2", "window_id": "@16", "window_name": "svc-b",
+     "path": "/home/zach/ws/svc-b", "command": "zsh",
+     "server_start": _SERVER_START,
+     "title": "✳ Run index-probe on sample-corpus"},             # sparkle → idle
 ]
 
 _SCRATCH12_PROC = {
@@ -360,12 +402,14 @@ def test_classify_ages_are_per_window_not_process_uptime():
 
 
 def _scratch12_raw():
-    """The same two panes as a raw `tmux list-panes -a` dump."""
-    return "\n".join(
-        "|".join([p["pane_id"], str(p["pane_pid"]), p["session"],
-                  p["window_index"], p["window_id"], p["window_name"],
-                  p["path"], p["command"], p["title"]])
-        for p in _SCRATCH12_PANES)
+    """The same two panes as a raw `tmux list-panes -a` dump.
+
+    Field ORDER is taken from `ao.PANE_FIELDS` rather than re-spelled, so a
+    fixture cannot drift out of the format/parser contract the way a hand-written
+    list did — it would have kept passing while emitting the wrong column count.
+    """
+    return "\n".join("|".join(str(p[k]) for k in ao.PANE_FIELDS)
+                     for p in _SCRATCH12_PANES)
 
 
 def test_build_frame_renders_per_window_ages_end_to_end(monkeypatch):
@@ -394,8 +438,8 @@ def test_build_frame_renders_per_window_ages_end_to_end(monkeypatch):
     monkeypatch.setattr(ao, "read_uptime", lambda *a, **k: None)
 
     body = plain(ao.build_frame(100)).splitlines()
-    busy = next(ln for ln in body if "review-bombing" in ln)
-    idle = next(ln for ln in body if "bitdex" in ln)
+    busy = next(ln for ln in body if "widget-rollup" in ln)
+    idle = next(ln for ln in body if "index-probe" in ln)
     assert busy.split()[-1] == "45m", busy   # ← "4d" before the fix
     assert idle.split()[-1] == "4d", idle
     assert busy.split()[-1] != idle.split()[-1]
@@ -438,7 +482,8 @@ def test_window_activity_age_requires_session_and_index_to_agree():
     idx = ao.index_window_activity([json.dumps(
         {"window_id": "@4", "tmux_session": "scratch12", "window_index": 1,
          "last_activity": ts})])
-    ok = {"window_id": "@4", "session": "scratch12", "window_index": "1"}
+    ok = {"window_id": "@4", "session": "scratch12", "window_index": "1",
+          "server_start": _SERVER_START}
     assert round(ao.window_activity_age(ok, idx, now=now)) == 600
 
     # Each guard is reached on its OWN: the session check with a MATCHING index,
@@ -453,20 +498,232 @@ def test_window_activity_age_requires_session_and_index_to_agree():
     assert ao.window_activity_age(ok, None, now=now) is None
 
 
+def _one_record_index(now, offset, session="s", window_index=1, window_id="@4"):
+    """A one-file activity index whose `last_activity` is `now - offset`."""
+    ts = datetime.datetime.fromtimestamp(now - offset).astimezone().isoformat()
+    return ao.index_window_activity([json.dumps(
+        {"window_id": window_id, "tmux_session": session,
+         "window_index": window_index, "last_activity": ts})])
+
+
 def test_window_activity_age_unparseable_and_future_timestamps():
     now = 1_786_499_288.0
-    pane = {"window_id": "@4", "session": "s", "window_index": "1"}
+    pane = {"window_id": "@4", "session": "s", "window_index": "1",
+            "server_start": _SERVER_START}
     for bad in ("", "yesterday", None, 17864, "2026-13-45T99:99:99"):
         idx = ao.index_window_activity([json.dumps(
             {"window_id": "@4", "tmux_session": "s", "window_index": 1,
              "last_activity": bad})])
         assert ao.window_activity_age(pane, idx, now=now) is None
-    # A clock-skewed FUTURE timestamp clamps to 0, never a negative age.
-    future = datetime.datetime.fromtimestamp(now + 900).astimezone().isoformat()
+
+    # A SMALL forward skew (one NTP step, well inside FUTURE_SKEW_TOLERANCE)
+    # still clamps to 0 rather than going negative — the benign case.
+    assert ao.window_activity_age(
+        pane, _one_record_index(now, -30), now=now) == 0.0
+    # …and the boundary itself is inclusive-ish: exactly at the tolerance, clamp.
+    assert ao.window_activity_age(
+        pane, _one_record_index(now, -ao.FUTURE_SKEW_TOLERANCE), now=now) == 0.0
+
+
+def test_window_activity_age_rejects_a_timestamp_far_in_the_future():
+    """🔴 A future stamp beyond tolerance is REJECTED, not repaired.
+
+    Clamping an untrusted value to `now` renders `rel_age(0.0)` == "0s" — the
+    strongest "this window is alive right now" the column can print — from a
+    corrupt file or a badly wrong clock. Every other unproven case here fails
+    closed to "—"; this one used to fail OPEN, into the most misleading output.
+
+    A quarter-hour is not NTP drift on a host writing both stamps; it is a
+    broken clock. The benign-skew case above pins that small skews still clamp,
+    so this rejection cannot be satisfied by simply refusing all future stamps.
+    """
+    now = 1_786_499_288.0
+    pane = {"window_id": "@4", "session": "s", "window_index": "1",
+            "server_start": _SERVER_START}
+    # Stated as a LITERAL quarter-hour first, so this fails at the base commit on
+    # the BEHAVIOUR (it returned 0.0) rather than on a missing constant.
+    assert ao.window_activity_age(
+        pane, _one_record_index(now, -900), now=now) is None
+    # The defect as OUTPUT, not as a return value: "0s" is what the operator saw.
+    assert ao.rel_age(0.0) == "0s"          # the string this guard prevents
+    rows = [{"pane_id": "%0", "repo": "r", "session": "s", "window_index": "1",
+             "window_id": "@4", "window_name": "w", "task": "T", "busy": True,
+             "age_secs": ao.window_activity_age(
+                 pane, _one_record_index(now, -900), now=now),
+             "proc_age_secs": None}]
+    body = "\n".join(plain(ao.render_active_runs(rows)))
+    assert "0s" not in body and "—" in body
+    # The boundary is where the constant says it is, not where a literal says.
+    just_over = ao.FUTURE_SKEW_TOLERANCE + 1
+    assert ao.window_activity_age(
+        pane, _one_record_index(now, -just_over), now=now) is None
+
+
+def test_window_activity_age_rejects_a_previous_servers_record():
+    """🔴 THE id-reuse case the (session, window_index) confirmation passed by
+    COINCIDENCE — red before the era bound, and it is not a hypothetical.
+
+    Measured on this host 2026-08-11: 8 of 40 live window ids carried fuzzyclaw
+    task files written BEFORE the current tmux server started (server up 6.44d,
+    files back to 2026-07-07). The confirmation caught all 8 that day, but three
+    differed ONLY in session name and one ONLY in window index — so a restart
+    that recreates the same layout reproduces a matching pair and the record
+    sails through. This fixture IS that pair: same id, same session, same index,
+    written 60 days before a server that started 3 days ago.
+
+    Without the bound the row renders `60d` on a window this server created 3
+    days ago — a live window reported as two months abandoned, which is exactly
+    the class of wrong answer this whole join was rewritten to stop making.
+    """
+    now = 1_786_499_288.0
+    server_start = now - 3 * 86400              # this tmux server booted 3d ago
+    pane = {"window_id": "@0", "session": "scratch2", "window_index": "1",
+            "server_start": str(int(server_start))}
+    idx = _one_record_index(now, 60 * 86400, session="scratch2",
+                            window_index=1, window_id="@0")
+    # Every confirmation AGREES — id, session and index all match.
+    rec = idx["@0"]
+    assert rec["session"] == pane["session"]
+    assert str(rec["window_index"]) == pane["window_index"]
+    # …and the record is still rejected, on the era bound alone.
+    assert ao.window_activity_age(pane, idx, now=now) is None
+    # Stated as the output the operator would have seen: pre-change, "60d".
+    assert ao.rel_age(60 * 86400) == "60d"
+
+    # POSITIVE CONTROL: the SAME keys with a record written after the server
+    # started resolve normally, so the rejection above is about the ERA and not
+    # about this fixture being unjoinable for some other reason.
+    fresh = _one_record_index(now, 3600, session="scratch2",
+                              window_index=1, window_id="@0")
+    assert round(ao.window_activity_age(pane, fresh, now=now)) == 3600
+    # The boundary: a record written exactly AT server start is in-era.
+    at_start = _one_record_index(now, 3 * 86400, session="scratch2",
+                                 window_index=1, window_id="@0")
+    assert ao.window_activity_age(pane, at_start, now=now) is not None
+
+
+def test_window_activity_age_fails_closed_when_the_server_era_is_unprovable():
+    """No usable `#{start_time}` → the era cannot be proven → no age.
+
+    A tmux that does not know `start_time` renders the field empty (or leaves it
+    literal), and a pane dict built by an older caller has no key at all. Every
+    such shape must degrade to "—" rather than to an UNBOUNDED join, which is
+    the pre-change behaviour this bound replaces.
+    """
+    now = 1_786_499_288.0
+    idx = _one_record_index(now, 600)
+    base = {"window_id": "@4", "session": "s", "window_index": "1"}
+    # Proven era first, so the rest is a fact about server_start and nothing else.
+    assert round(ao.window_activity_age(
+        dict(base, server_start=_SERVER_START), idx, now=now)) == 600
+    for missing in (None, "", "   ", "#{start_time}", "not-a-number", "0", "-1"):
+        pane = dict(base) if missing is None else dict(base, server_start=missing)
+        assert ao.window_activity_age(pane, idx, now=now) is None, missing
+
+
+def test_classify_passes_the_server_era_through_to_every_row():
+    """🔴 SEAM. The bound lives in `window_activity_age`, but the value reaches it
+    only if `classify_claude_sessions` hands over the pane dict carrying
+    `server_start` — a wiring that no unit test of either half can see.
+
+    Drive the real classifier with a real previous-era record and require the
+    rendered row to blank. Read through `build_frame`'s own path (parse_panes →
+    classify) so the field survives the FORMAT/PARSER seam too.
+    """
+    now = 1_786_499_288.0
+    started = str(int(now - 3 * 86400))
+    panes = [dict(p, server_start=started) for p in _SCRATCH12_PANES]
+    raw = "\n".join("|".join(str(p[k]) for k in ao.PANE_FIELDS) for p in panes)
+    parsed = ao.parse_panes(raw)
+    assert [p["server_start"] for p in parsed] == [started, started], parsed
+
+    stale = _one_record_index(now, 60 * 86400, session="scratch12",
+                              window_index=1, window_id="@4")
+    rows = ao.classify_claude_sessions(
+        parsed, _SCRATCH12_PROC, root_resolver=lambda p: p,
+        activity_index=stale, now=now)
+    by_win = {r["window_id"]: r for r in rows}
+    assert by_win["@4"]["age_secs"] is None, "the era bound never reached the row"
+    body = "\n".join(plain(ao.render_active_runs(rows)))
+    assert "60d" not in body and "—" in body
+
+
+def test_iso_epoch_reads_a_naive_timestamp_as_LOCAL_time():
+    """`_iso_epoch`'s documented contract, pinned rather than described.
+
+    MEASURED COVERAGE GAP: switching this to UTC survived the whole suite,
+    because every other fixture writes an offset-carrying stamp. On a non-UTC
+    host the mutant shifts EVERY naive-stamped age by the UTC offset silently.
+
+    TZ is forced rather than inherited: the CI sandbox runs UTC, where the two
+    readings coincide and the assertion would pass vacuously — a config-blind
+    suite pinning the very dimension the bug lives on.
+
+    It is forced with a POSIX TZ STRING ("XXX5" = 5h west, no DST) rather than a
+    zone NAME: the nix check sandbox ships no tzdata, so `America/Chicago`
+    silently resolves to UTC there and the test goes vacuous in exactly the
+    environment that gates the merge. glibc parses the POSIX form with no files
+    at all. The `local != utc` assertion below is that guard, kept in place — it
+    is what caught the zone-name version on the first authoritative run.
+    """
+    old_tz = os.environ.get("TZ")
+    try:
+        os.environ["TZ"] = "XXX5"
+        time.tzset()
+        naive = "2026-08-11T19:08:55"
+        local = datetime.datetime(2026, 8, 11, 19, 8, 55).timestamp()
+        utc = datetime.datetime(2026, 8, 11, 19, 8, 55,
+                                tzinfo=datetime.timezone.utc).timestamp()
+        assert local != utc, "TZ did not take — this test would be vacuous"
+        assert ao._iso_epoch(naive) == local
+        # The offset-carrying form fuzzyclaw actually writes is unaffected.
+        assert ao._iso_epoch("2026-08-11T19:08:55+00:00") == utc
+    finally:
+        if old_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = old_tz
+        time.tzset()
+
+
+def test_window_activity_age_compares_session_and_index_ACROSS_types():
+    """fuzzyclaw writes JSON; tmux hands us strings — so both sides of both
+    confirmations can differ in TYPE while agreeing in value.
+
+    MEASURED COVERAGE GAP: removing the `str()` around `session` survived the
+    whole suite, because every fixture was string-on-both-sides. A numeric
+    session name (`tmux new -s 12`) is what makes it int-in-file, and the
+    failure is silent — that session simply never shows an age.
+    """
+    now = 1_786_499_288.0
+    ts = datetime.datetime.fromtimestamp(now - 600).astimezone().isoformat()
     idx = ao.index_window_activity([json.dumps(
-        {"window_id": "@4", "tmux_session": "s", "window_index": 1,
-         "last_activity": future})])
-    assert ao.window_activity_age(pane, idx, now=now) == 0.0
+        {"window_id": "@4", "tmux_session": 12, "window_index": 1,
+         "last_activity": ts})])
+    assert idx["@4"]["session"] == 12          # int in the file …
+    pane = {"window_id": "@4", "session": "12", "window_index": "1",
+            "server_start": _SERVER_START}     # … str from tmux
+    assert round(ao.window_activity_age(pane, idx, now=now)) == 600
+    # The complement: a genuine disagreement is still caught across types.
+    assert ao.window_activity_age(
+        dict(pane, session="13"), idx, now=now) is None
+    assert ao.window_activity_age(
+        dict(pane, window_index="2"), idx, now=now) is None
+
+
+def test_active_runs_header_names_the_ages_real_semantic():
+    """The header is a CLAIM about the column and it was wrong.
+
+    `last_activity` is written by the Claude Stop hook, so the age is time since
+    the last COMPLETED TURN — not "since last activity", which is tmux's own
+    `#{window_activity}` and is usually far fresher (measured live: a row
+    rendering 5h against a 30s window_activity). Under the old wording a
+    long-running turn reads `▶ … 5h` as a stalled window. Unpinned by any test
+    until now, which is how it survived the round that introduced it.
+    """
+    head = plain("\n".join(ao.render_active_runs([])))
+    assert "last completed turn" in head, head
+    assert "since last activity" not in head, head
 
 
 def test_render_active_runs_unknown_age_is_a_dash_not_a_number():

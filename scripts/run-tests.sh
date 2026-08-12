@@ -401,7 +401,19 @@ TARGET_FLOORS=(
   # → `collected=2335`), against 2321 at the base it is rebased onto (ab99245),
   # and put through the rule: 2335 - min(50, max(1, 2335/20 = 116)) = 2285.
   # Both spellings of `_suggested_floor` agree on 2285.
-  "scripts/tests|2285"
+  #
+  # 2026-08-11, re-pinned again after this branch merged main and took its audit
+  # fixes (+8 tests: the tmux-server ERA bound on the age join, the bounded
+  # future-skew rejection, three measured mutation-coverage gaps, and the
+  # fixture-format seam guard in test_agent_ops_count.py). 2285 was measured
+  # against a 2335-test suite; the suite is 2343 here. Measured by the
+  # authoritative gate on the merged tree (`nix build
+  # .#checks.x86_64-linux.pytests` → `PASS scripts/tests (collected=2343
+  # passed=2343 skipped=0)`) and put through the rule:
+  #   2343 - min(50, max(1, 2343/20 = 117)) = 2343 - 50 = 2293.
+  # Confirmed by sourcing `_suggested_floor` OUT OF THIS FILE and by the python
+  # spelling in test_run_tests_floors.py — both return 2293.
+  "scripts/tests|2293"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —

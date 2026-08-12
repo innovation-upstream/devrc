@@ -23,15 +23,21 @@ Sections (priority order) and their sources
                      derived from the title's leading glyph (braille spinner ⇒
                      running, ✳ ⇒ idle). The dashboard's own pane is excluded.
                      The TASK/busy signals come from tmux, never from fuzzyclaw.
-                     The AGE is the one thing tmux cannot answer, so it — and
-                     ONLY it — is joined from fuzzyclaw's ~/.tmux/tasks/*.json
-                     `last_activity`, per WINDOW, on tmux's never-reused
-                     `window_id` and confirmed against the file's own
-                     (tmux_session, window_index). Any disagreement, duplicate
-                     claim or missing file yields NO age ("—") rather than a
-                     guess: fuzzyclaw is an UNTRUSTED writer (89% of its files
-                     name windows that no longer exist), so every use of it here
-                     fails closed. See `window_activity_age`.
+                     The AGE is NOT "since anything happened" — tmux answers that
+                     itself (`#{window_activity}`, any output at all). What tmux
+                     cannot answer is when the AGENT LAST FINISHED A TURN, and
+                     that is what this column means, so it — and ONLY it — is
+                     joined from fuzzyclaw's ~/.tmux/tasks/*.json `last_activity`
+                     (written by the Claude Stop hook, scripts/tmux-task-hook.sh),
+                     per WINDOW, on tmux's `window_id`, bounded to the CURRENT
+                     tmux server's era (`#{start_time}`) and confirmed against the
+                     file's own (tmux_session, window_index). Any disagreement,
+                     duplicate claim, previous-era record or missing file yields
+                     NO age ("—") rather than a guess: fuzzyclaw is an UNTRUSTED
+                     writer (89% of its files name windows that no longer exist),
+                     so every use of it here fails closed. A long turn therefore
+                     legitimately shows "▶ … 2h": running now, last COMPLETED turn
+                     two hours ago. See `window_activity_age`.
   3. In flight PRs   REAL open PRs fetched DIRECTLY via `gh pr list` per workspace
                      repo (NOT initiative-scan, whose per-initiative open_prs are
                      fingerprint-matched and mostly empty). TTL-cached to
@@ -235,14 +241,22 @@ def file_age_secs(path: str, now: float | None = None):
 # `window_id` comes from THIS call rather than a second `list-windows` sweep:
 # two non-atomic tmux calls can disagree about which window an index names
 # (`renumber-windows on` moves them), and the age join keys on window_id.
+#
+# `start_time` is the SERVER's start time (identical on every pane — tmux has no
+# per-window equivalent). It rides along here rather than in a second
+# `display-message` call for the same non-atomicity reason, and because one call
+# means a pane can never be paired with a start time from a different server.
+# `window_activity_age` uses it as the age join's ERA BOUND — see there.
 PANE_FORMAT = ("#{pane_id}|#{pane_pid}|#{session_name}|#{window_index}|"
                "#{window_id}|#{window_name}|#{pane_current_path}|"
-               "#{pane_current_command}|#{pane_title}")
+               "#{pane_current_command}|#{start_time}|#{pane_title}")
 
 # What parse_panes calls each of PANE_FORMAT's fields, in the SAME order. The
 # pairing is the contract; the test walks it rather than trusting this comment.
+# EXTEND this tuple when you extend the format — appending to one only shifts
+# every field after the insertion point into the wrong name, silently.
 PANE_FIELDS = ("pane_id", "pane_pid", "session", "window_index", "window_id",
-               "window_name", "path", "command", "title")
+               "window_name", "path", "command", "server_start", "title")
 
 
 def list_tmux_panes_raw() -> str:
@@ -555,14 +569,19 @@ def clawgate_pending_titles(tasks, pending=_PENDING_STATES) -> list:
 def parse_panes(raw: str) -> list:
     """Split raw `tmux list-panes -a` output into pane dicts. Tolerates junk.
 
-    pane_title is the LAST field (may contain '|'), so split with maxsplit=8 and
-    absorb any trailing pipes into the title. An 8-field line (no title) degrades
-    to an empty title rather than being dropped.
+    pane_title is the LAST field (may contain '|'), so split with a maxsplit of
+    `len(PANE_FIELDS) - 1` and absorb any trailing pipes into the title. A line
+    one field short (no title) degrades to an empty title rather than being
+    dropped. The maxsplit is DERIVED from PANE_FIELDS so extending the format
+    cannot leave a stale literal behind — the positional indices below are still
+    spelled out, and `test_pane_format_and_parser_agree_field_for_field` walks
+    them against the format rather than trusting this docstring.
     """
+    title_idx = len(PANE_FIELDS) - 1
     panes = []
     for line in raw.splitlines():
-        parts = line.split("|", 8)
-        if len(parts) < 8:
+        parts = line.split("|", title_idx)
+        if len(parts) < title_idx:
             continue
         pid = parts[1]
         if not pid.isdigit():
@@ -576,7 +595,8 @@ def parse_panes(raw: str) -> list:
             "window_name": parts[5].rstrip(" ●").strip(),
             "path": parts[6],
             "command": parts[7],
-            "title": (parts[8].strip() if len(parts) >= 9 else ""),
+            "server_start": parts[8],
+            "title": (parts[title_idx].strip() if len(parts) > title_idx else ""),
         })
     return panes
 
@@ -593,6 +613,29 @@ def _iso_epoch(value):
         return datetime.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
     except Exception:
         return None
+
+
+def _epoch_num(value):
+    """tmux `#{start_time}` (epoch seconds, rendered as a string) → float.
+
+    None for absent / blank / non-numeric / non-positive, all of which mean "this
+    server's era is UNPROVEN". `window_activity_age` treats that as fail-closed:
+    a tmux too old to know `start_time` renders "—" rather than an unbounded age.
+    """
+    try:
+        num = float(str(value).strip())
+    except Exception:
+        return None
+    return num if num > 0 else None
+
+
+# How far into the FUTURE a `last_activity` may sit before it is rejected rather
+# than clamped. Real clock skew between two writes on ONE host is sub-second;
+# this is generous headroom for an NTP step, not a repair budget. Beyond it the
+# file is corrupt or the clock is badly wrong, and clamping would render "0s" —
+# "active right now" — which is the single most misleading thing this column can
+# say about a window that is in fact dead. Fail closed like everything else here.
+FUTURE_SKEW_TOLERANCE = 120.0
 
 
 def index_window_activity(raw_texts) -> dict:
@@ -640,12 +683,35 @@ def window_activity_age(pane, activity_index, now=None):
     which is what makes the wrong number look like a per-session bug.
 
     The join keys on tmux's `window_id` (unique, never reused while the server
-    lives) and is then CONFIRMED against the task file's own (tmux_session,
-    window_index). Both must agree. Window ids restart at @0 when the tmux
-    server does, so a file left by a previous server can name an id a DIFFERENT
-    window now holds — the confirmation is what catches that. Anything unproven
-    (unknown id, ambiguous claim, mismatch, unparseable timestamp) returns None
-    and the row shows "—": a missing age is honest, a wrong one is not.
+    lives) and is then bounded and confirmed:
+
+      * ERA BOUND (`#{start_time}`). Window ids restart at @0 when the tmux
+        server does, so a file left by a PREVIOUS server can name an id a
+        different window now holds. MEASURED on this host 2026-08-11 (server up
+        6.48d): 9 of 39 live window ids carried task files written BEFORE it
+        started, the oldest from 2026-04-19. A `last_activity` earlier than the
+        server's own start time cannot describe any window this server created,
+        whatever else agrees, so it is rejected. This closes id reuse BY
+        CONSTRUCTION rather than by coincidence.
+      * CONFIRMATION against the task file's own (tmux_session, window_index).
+        Within one era `window_id` is already unique, so this is a cross-check on
+        an untrusted writer, NOT the id-reuse defence — it was doing that job
+        only by coincidence, and only until a restart reproduced a matching
+        session/index pair. In the same measurement 4 of those 9 differed in
+        just ONE component (three only in session name, one only in index), so
+        the coincidence was one layout change from failing. It is kept because a
+        fuzzyclaw file that disagrees about which window it describes is not one
+        to read a timestamp out of.
+
+    Adding the era bound changed NOTHING on that live sample — the same 28 of 39
+    rows resolved, to the same ages, before and after — because the confirmation
+    happened to catch all 9 that day. The bound's value is structural, not a
+    behaviour delta; do not expect to see it in a before/after render.
+
+    Anything unproven (unknown id, ambiguous claim, mismatch, previous-era
+    record, unprovable era, unparseable timestamp, or a timestamp further into
+    the future than FUTURE_SKEW_TOLERANCE) returns None and the row shows "—":
+    a missing age is honest, a wrong one is not.
     """
     if not activity_index:
         return None
@@ -659,7 +725,13 @@ def window_activity_age(pane, activity_index, now=None):
     ts = _iso_epoch(rec.get("last_activity"))
     if ts is None:
         return None
-    return max(0.0, (time.time() if now is None else now) - ts)
+    server_start = _epoch_num(pane.get("server_start"))
+    if server_start is None or ts < server_start:
+        return None                    # unprovable era, or a previous server's
+    delta = (time.time() if now is None else now) - ts
+    if delta < -FUTURE_SKEW_TOLERANCE:
+        return None                    # corrupt / badly skewed — not "0s"
+    return max(0.0, delta)
 
 
 def _descendants(pid: int, proc_index: dict) -> list:
@@ -1050,9 +1122,13 @@ def render_blocked(clawgate, mail, titles=None) -> list:
 
 
 def render_active_runs(sessions, codenames=None) -> list:
+    # The subtitle names the age's ACTUAL semantic. It is not "since anything
+    # happened" (tmux's own `#{window_activity}`, which is usually far fresher):
+    # `last_activity` is written by the Claude Stop hook, so it marks the end of
+    # the last COMPLETED turn. A row mid-turn therefore reads "▶ … 2h" correctly.
     lines = [_header("Active agent runs", AQUA,
-                     "%d live Claude session(s) in tmux · age = since last activity"
-                     % len(sessions))]
+                     "%d live Claude session(s) in tmux · age = since agent's "
+                     "last completed turn" % len(sessions))]
     if not sessions:
         lines.append("   " + paint("— no live Claude sessions detected", DIMMER))
         return lines
