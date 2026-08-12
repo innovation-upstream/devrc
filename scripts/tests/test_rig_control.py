@@ -1,7 +1,15 @@
 """Unit tests for rig-control.sh — the sleep/wake toggle panel.
 
-All OFFLINE: no openrgb, no yad, no ddcutil, no notify-send. Tests exercise
-the script via subprocess with stubbed external commands.
+🔴 "All OFFLINE" was FALSE here for as long as this file existed, and the
+docstring saying otherwise is why nobody looked: only the binaries each test
+ASSERTS on were stubbed, so `openrgb`, `notify-send` and (from the base clone)
+`ddcutil` and mutating `systemctl` reached the operator's real machine —
+measured at 15 launches from this file plus test_monitor_blackout.py, with 29
+tests green. It is offline NOW because `scripts/tests/conftest.py` installs a
+record-only stub dir first on PATH for the whole suite; nothing in THIS file
+provides that, and removing it puts the launches back.
+
+Tests exercise the script via subprocess with stubbed external commands.
 
     run:  pytest scripts/tests/test_rig_control.py
 """
@@ -131,9 +139,12 @@ def test_wake_writes_state_file(tmp_path):
 # CLI: backward-compat aliases
 # --------------------------------------------------------------------------- #
 def test_rgb_on_subcommand(tmp_path):
-    """rgb-on should be accepted (exit 0 or openrgb failure, not usage error)."""
+    """rgb-on should be accepted (not a usage error), whatever openrgb does."""
     r = _run("rgb-on", env={"XDG_CACHE_HOME": str(tmp_path)})
-    # openrgb not found → exit 1, but NOT usage error
+    # The old comment here said "openrgb not found → exit 1". That stopped being
+    # true when conftest.py started stubbing openrgb: it now RESOLVES, records
+    # the call and exits 0. The assertion never depended on either, and the
+    # comment was the only thing claiming it did.
     assert "usage:" not in r.stderr.lower()
 
 
