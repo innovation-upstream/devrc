@@ -85,7 +85,35 @@ def fg(hex_color: str) -> str:
     return "\033[38;2;%d;%d;%dm" % (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
 
 
+# None = not yet decided; decided once, on first use, from the environment.
+_COLOR = None
+
+
+def color_enabled() -> bool:
+    """Whether to emit ANSI at all.
+
+    Colour is for a HUMAN at a terminal. `--once` — the mode agents and
+    capture-pane use — is piped, and there a truecolor escape on every token
+    (`\\033[38;2;235;219;178m`) is pure cost for zero information: the dashboard
+    is ~90 painted tokens a frame. So paint only when stdout IS a terminal, and
+    never when NO_COLOR is set (https://no-color.org).
+
+    Decided once and cached: `paint` is called ~100x per frame and the frame
+    re-renders every few seconds.
+    """
+    global _COLOR
+    if _COLOR is None:
+        try:
+            tty = sys.stdout.isatty()
+        except Exception:
+            tty = False
+        _COLOR = tty and not os.environ.get("NO_COLOR")
+    return _COLOR
+
+
 def paint(text: str, color: str, bold: bool = False) -> str:
+    if not color_enabled():
+        return text
     return "%s%s%s%s" % (BOLD if bold else "", fg(color), text, RESET)
 
 

@@ -82,6 +82,62 @@ def test_parse_panes_empty():
     assert ao.parse_panes("") == []
 
 
+def test_color_only_when_stdout_is_a_terminal(monkeypatch):
+    """`--once` is piped, and a truecolor escape per token costs its reader a
+    lot for nothing. Colour follows isatty, and NO_COLOR always wins."""
+    class _Out:
+        def __init__(self, tty):
+            self._tty = tty
+
+        def isatty(self):
+            return self._tty
+
+    for tty, novar, want in ((True, None, True), (False, None, False),
+                             (True, "1", False), (False, "1", False)):
+        monkeypatch.setattr(ao, "_COLOR", None)
+        monkeypatch.setattr(ao.sys, "stdout", _Out(tty))
+        if novar is None:
+            monkeypatch.delenv("NO_COLOR", raising=False)
+        else:
+            monkeypatch.setenv("NO_COLOR", novar)
+        assert ao.color_enabled() is want, (tty, novar)
+        painted = ao.paint("hello", ao.GREEN, bold=True)
+        assert ("\033[" in painted) is want
+        assert "hello" in painted
+
+    # A stdout with no isatty() at all must not crash the dashboard.
+    monkeypatch.setattr(ao, "_COLOR", None)
+    monkeypatch.setattr(ao.sys, "stdout", object())
+    assert ao.color_enabled() is False
+
+
+def test_build_frame_emits_no_ansi_when_not_a_terminal(monkeypatch):
+    """The whole frame, not just one token — the claim `--once` actually makes."""
+    monkeypatch.setattr(ao, "_COLOR", False)
+    monkeypatch.setattr(ao, "read_json", lambda p: None)
+    monkeypatch.setattr(ao, "list_tmux_panes_raw", _scratch12_raw)
+    monkeypatch.setattr(ao, "build_proc_index", lambda: _SCRATCH12_PROC)
+    monkeypatch.setattr(ao, "own_pid_chain", lambda: set())
+    monkeypatch.setattr(ao, "load_scratch_codenames", lambda *a, **k: {})
+    monkeypatch.setattr(ao, "read_fuzzyclaw_task_texts",
+                        lambda *a, **k: _scratch12_activity(time.time()))
+    monkeypatch.setattr(ao, "maybe_refresh_initiatives", lambda *a, **k: None)
+    monkeypatch.setattr(ao, "maybe_refresh_prs", lambda *a, **k: None)
+    monkeypatch.setattr(ao, "maybe_refresh_telemetry", lambda *a, **k: None)
+    monkeypatch.setattr(ao, "enrich_clawgate_titles", lambda *a, **k: [])
+    monkeypatch.setattr(ao, "fetch_failed_user_units", lambda *a, **k: None)
+    monkeypatch.setattr(ao, "fetch_unit_show", lambda *a, **k: None)
+    monkeypatch.setattr(ao, "read_uptime", lambda *a, **k: None)
+
+    frame = ao.build_frame(100)
+    assert "\033" not in frame
+    # POSITIVE CONTROL: the same frame with colour ON is full of escapes, so the
+    # clean result above is a fact about the switch, not about an empty render.
+    assert "ACTIVE AGENT RUNS" in frame and "review-bombing" in frame
+    monkeypatch.setattr(ao, "_COLOR", True)
+    assert frame.count("\033") == 0 < ao.build_frame(100).count("\033")
+
+
 def test_pane_format_and_parser_agree_field_for_field():
     """🔴 SEAM. The tmux `-F` format and `parse_panes` are one contract split in
     two, joined only by POSITION, and every way of breaking it is SILENT: drop
