@@ -28,9 +28,14 @@ for the wrong reason.
 """
 import os
 import re
+import sys
 import subprocess
+from pathlib import Path
 
 import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # scripts/
+from testlib import mockbin  # noqa: E402
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SCRIPT = os.path.join(_HERE, "..", "cpu-monitor.sh")
@@ -49,12 +54,12 @@ def _run(body, env=None, tmp_path=None):
     stub_log = tmp_path / "toasts.log"
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
-    stub = bindir / "notify-send"
-    stub.write_text('#!/bin/sh\nline="notify-send"\nfor a in "$@"; do '
-                    'line="$line [$a]"; done\n'
-                    'printf \'%%s\\n\' "$line" | tr \'\\n\' \' \' >> "%s"\n'
-                    'printf \'\\n\' >> "%s"\nexit 0\n' % (stub_log, stub_log))
-    stub.chmod(0o755)
+    # mockbin owns the shebang — a hand-written one ENOENTs in the nix sandbox.
+    mockbin.write_exec(
+        bindir / "notify-send",
+        'line="notify-send"\nfor a in "$@"; do line="$line [$a]"; done\n'
+        'printf \'%%s\\n\' "$line" | tr \'\\n\' \' \' >> "%s"\n'
+        'printf \'\\n\' >> "%s"\nexit 0\n' % (stub_log, stub_log))
 
     script = tmp_path / "harness.sh"
     script.write_text(_prelude() + "\n" + body + "\n")
@@ -171,16 +176,19 @@ def test_counters_reset_when_the_day_rolls(tmp_path):
     permanently after one busy day — a far worse failure than the noise."""
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
-    datestub = bindir / "date"
-    # A `date` whose +%F answer changes once a marker file exists.
-    datestub.write_text(
-        '#!/bin/sh\n'
+    # A `date` whose +%F answer changes once a marker file exists. Anything other
+    # than `+%F` is an error rather than a pass-through: `roll_alert_day` is the
+    # only caller reached from here, so a fall-through would mean the harness had
+    # drifted from the code and should say so loudly. (A pass-through would also
+    # need an absolute path — `/usr/bin/env` does not exist in the nix sandbox.)
+    mockbin.write_exec(
+        bindir / "date",
         'if [ "$1" = "+%%F" ]; then\n'
         '  if [ -f "%s/day2" ]; then echo 2026-01-02; else echo 2026-01-01; fi\n'
         '  exit 0\n'
         'fi\n'
-        'exec /usr/bin/env date "$@"\n' % tmp_path)
-    datestub.chmod(0o755)
+        'echo "date stub: unexpected args: $*" >&2\n'
+        'exit 64\n' % tmp_path)
     p = _run('for i in $(seq 1 4); do alert_capped load_alerts_today critical "L" "d1-$i"; done\n'
              'touch "%s/day2"\n'
              'for i in $(seq 1 4); do alert_capped load_alerts_today critical "L" "d2-$i"; done'

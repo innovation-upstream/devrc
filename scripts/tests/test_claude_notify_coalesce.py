@@ -35,14 +35,18 @@ WHAT THESE TESTS PIN, and why each is not enough alone:
     the counter that produced it, and two counters built for adjacent work in
     this repo were themselves dead.
 """
-import io
 import os
+import sys
 import json
 import time
 import importlib.util
 import subprocess
+from pathlib import Path
 
 import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # scripts/
+from testlib import mockbin  # noqa: E402
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _HOOK = os.path.join(_HERE, "..", "claude-hooks", "claude-notify.py")
@@ -248,20 +252,23 @@ def _env(tmp_path):
     bindir.mkdir()
     stub_log = tmp_path / "stub.log"
     for name in ("dunstify", "notify-send", "curl"):
-        p = bindir / name
         # One invocation == one line. Embedded newlines in an argument (the toast
         # BODY is multi-line once a coalesce suffix is appended) are folded to
         # spaces, otherwise the suffix lands on a line the assertions never read
         # and "the toast does not mention it" becomes indistinguishable from
         # "the stub truncated it".
-        p.write_text(
-            '#!/bin/sh\n'
+        #
+        # mockbin.write_exec owns the shebang: a hand-written `#!/usr/bin/env sh`
+        # execs on this NixOS host and ENOENTs in the nix build sandbox, which is
+        # the authoritative tier. (This file's first revision did exactly that
+        # and only the sandbox caught it.)
+        mockbin.write_exec(
+            bindir / name,
             'line="%s"\n'
             'for a in "$@"; do line="$line [$a]"; done\n'
             'printf \'%%s\\n\' "$line" | tr \'\\n\' \' \' >> "%s"\n'
             'printf \'\\n\' >> "%s"\n'
             'exit 0\n' % (name, stub_log, stub_log))
-        p.chmod(0o755)
     (home / ".claude" / "clawgate.env").write_text(
         "CLAWGATE_API_URL=http://127.0.0.1:1/stub\nCLAWGATE_HOOK_TOKEN=stub-token\n")
     env = dict(os.environ)
