@@ -408,7 +408,12 @@ TARGET_FLOORS=(
   # is a churn magnet (every branch that adds a test re-pins it, so every open
   # PR conflicts here) and `rerere` has previously replayed a stale resolution
   # onto it. `_suggested_floor 2513` = 2513 - min(50, max(1, 125)) = 2463.
-  "scripts/tests|2463"
+  #
+  # 2026-08-12, the agent-ops per-window age fix: 2513 -> 2535 collected on
+  # main (now carrying the line above) + this branch. Same method — the gate's
+  # measurement of the MERGED tree, not arithmetic across the conflict:
+  #   _suggested_floor 2535 = 2535 - min(50, max(1, 126)) = 2485.
+  "scripts/tests|2485"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
