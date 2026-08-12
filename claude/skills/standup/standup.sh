@@ -11,6 +11,10 @@ set -uo pipefail
 SCOPE="${1:-all}"
 KT="--request-timeout=12s"
 
+# Local checkouts that seed the PR sweep. This is a SEED, not the scope: the
+# sweep also discovers every other repo you have an open PR in (see PR_SEARCH_*),
+# because STATUS makes a fleet claim and must only make one it measured.
+# Overridable (colon-separated) so the tests can drive a throwaway repo set.
 REPOS=(
   /home/zach/workspace/homelab-talos
   /home/zach/workspace/civit/civitai
@@ -22,6 +26,7 @@ REPOS=(
   /home/zach/workspace/promptver
   /home/zach/workspace/baseball-manitoba-pitch
 )
+[ -n "${STANDUP_REPOS:-}" ] && IFS=: read -r -a REPOS <<< "$STANDUP_REPOS"
 # laptop-only repos (reached over ssh for the # state section)
 LAP="zach@10.42.0.100"
 LAPTOP_REPOS=(
@@ -38,6 +43,17 @@ CL_KC=(
 )
 HL_PROM="http://192.168.50.94:30909"
 ME="ZacxDev"   # only PRs authored by you are surfaced as actions
+# --- fleet widening for the PR sweep -----------------------------------------
+# The repo set is DISCOVERED from your open PRs rather than hard-coded, because
+# the skill's own description promises a fleet sweep and a hard-coded list
+# silently under-reports every repo not on it. One search call, then one
+# `gh pr list` per repo (run concurrently, bounded by PR_JOBS).
+PR_SEARCH_LIMIT="${STANDUP_PR_SEARCH_LIMIT:-300}"
+PR_JOBS="${STANDUP_PR_JOBS:-6}"
+# Release-bot repos: high PR volume, no human signal. An explicitly enumerated
+# list (NOT a pattern) — an unknown repo is in scope by default. Printed on the
+# Filtered: line so an excluded repo is never a silent omission.
+PR_REPO_EXCLUDE=(ZacxDev/homebrew-tap)
 # alertnames that are known/expected noise on dp-1 (filtered from criticals)
 NOISE_RE='TargetDown|KubeHpaMaxedOut'
 # initiative ledger (the cross-session "what's in flight" view, telemetry-OFF for
@@ -46,7 +62,8 @@ ISCAN="/home/zach/workspace/devrc/scripts/session-analysis/initiative-scan.py"
 IDAYS=14
 
 ACT=()        # action lines (need a human)
-PR_OPEN=0 PR_READY=0 PR_RED=0
+PR_OPEN=0 PR_READY=0 PR_RED=0 PR_CONFLICT=0
+PR_REPOS=0 PR_ERR=0 PR_SCOPE="not scanned" PR_DISCOVERY="not scanned" PR_TRUNC=0
 DEP_WAVE=0 DEP_STUCK=0
 INIT_ACTIVE=0 INIT_SLOW=0 INIT_STALL=0
 declare -A CRIT          # cluster -> "name,name"
@@ -54,33 +71,129 @@ declare -A FIRING        # cluster -> count
 
 have(){ command -v "$1" >/dev/null 2>&1; }
 
-scan_prs(){
-  have gh && gh auth status >/dev/null 2>&1 || { echo "  (gh not authed — PRs skipped)"; return; }
+# Records are separated by US (0x1f), NOT tab. Tab is an IFS *whitespace*
+# character, so `IFS=$'\t' read` COLLAPSES a run of tabs — an empty
+# `reviewDecision` (the normal state of a PR nobody has reviewed) shifted every
+# later field left by one, leaving `author` empty, so the `author == $ME` test
+# dropped EVERY such PR. That is what printed "0 ready, 0 red" while a single
+# in-scope repo held 8 flagged PRs. 0x1f is not IFS whitespace: empty fields
+# survive. Do not "simplify" this back to \t.
+US=$'\x1f'
+
+# One `gh pr list` per repo. Emits US-separated records on stdout:
+#   COUNT<US><n-open-non-draft>
+#   FLAG<US><num><US><ci><US><mergeable><US><reviewDecision><US><author>
+#   ERR                                  (repo unreadable — never silently 0)
+_pr_scan_repo(){
+  gh pr list -R "$1" --state open --limit 100 \
+    --json number,mergeable,reviewDecision,statusCheckRollup,isDraft,author \
+    --jq '[.[] | select(.isDraft|not)] as $p
+          | "COUNT\u001f\($p|length)",
+            ($p[]
+             | {n:.number, m:(.mergeable//""), r:(.reviewDecision//""), a:(.author.login//""),
+                # statusCheckRollup mixes two node types: a CheckRun carries
+                # `conclusion`, a StatusContext carries `state` and has
+                # conclusion=null. Reading only `.conclusion` made every
+                # StatusContext FAILURE invisible — 5 genuinely-red PRs in one
+                # repo read as "pending". Normalise both into one verdict.
+                ci:([.statusCheckRollup[]? | (.conclusion // .state // "")]
+                    | if any(.=="FAILURE" or .=="ERROR") then "red"
+                      elif length>0 and all(.=="SUCCESS") then "green" else "pending" end)}
+             | select(.ci=="red" or (.r=="APPROVED" and .m=="MERGEABLE") or .m=="CONFLICTING")
+             | "FLAG\u001f\(.n)\u001f\(.ci)\u001f\(.m)\u001f\(.r)\u001f\(.a)")' \
+    2>/dev/null || echo ERR
+}
+
+# Discover every repo with an open PR of yours, minus the enumerated release-bot
+# repos, unioned with the local checkouts. First line is
+# `META<US><ok|failed><US><0|1 truncated>`; every later line is a slug.
+# The metadata rides stdout because the caller reads this through a process
+# substitution — a variable set here would be set in a SUBSHELL and lost, which
+# is exactly how a degraded scan would come back looking like a fleet sweep.
+_pr_repo_set(){
+  local -a local_slugs=()
+  local d url slug
   for d in "${REPOS[@]}"; do
     [ -d "$d/.git" ] || continue
     url=$(git -C "$d" remote get-url origin 2>/dev/null) || continue
     slug=$(printf '%s' "$url" | sed -E 's#(git@github.com:|https://github.com/)##; s#\.git$##')
-    flagged=$(gh pr list -R "$slug" --state open --json number,mergeable,reviewDecision,statusCheckRollup,isDraft,author \
-      --jq '.[] | select(.isDraft|not)
-            | {n:.number, m:.mergeable, r:.reviewDecision, a:.author.login,
-               ci:([.statusCheckRollup[]?.conclusion]
-                   | if any(.=="FAILURE" or .=="ERROR") then "red"
-                     elif length>0 and all(.=="SUCCESS") then "green" else "pending" end)}
-            | select(.ci=="red" or (.r=="APPROVED" and .m=="MERGEABLE") or .m=="CONFLICTING")
-            | "\(.n)\t\(.ci)\t\(.m)\t\(.r)\t\(.a)"' 2>/dev/null) || { echo "  $slug: skipped (gh err)"; continue; }
-    n=$(gh pr list -R "$slug" --state open --json number --jq 'length' 2>/dev/null || echo 0)
-    PR_OPEN=$((PR_OPEN+n))
-    [ -z "$flagged" ] && continue
-    while IFS=$'\t' read -r num ci m r author; do
-      [ -z "$num" ] && continue
-      [ "$author" = "$ME" ] || continue   # only YOUR PRs count + action (others aren't your concern)
-      [ "$ci" = "red" ] && PR_RED=$((PR_RED+1))
-      { [ "$r" = "APPROVED" ] && [ "$m" = "MERGEABLE" ]; } && PR_READY=$((PR_READY+1))
-      if [ "$r" = "APPROVED" ] && [ "$m" = "MERGEABLE" ]; then ACT+=("$slug PR #$num approved+mergeable → merge"); fi
-      if [ "$ci" = "red" ]; then ACT+=("$slug PR #$num red CI → fix (civitai report-only previews are known-noise)"); fi
-      if [ "$m" = "CONFLICTING" ]; then ACT+=("$slug PR #$num conflicting → rebase"); fi
-    done <<< "$flagged"
+    [ -n "$slug" ] && local_slugs+=("$slug")
   done
+  local found rc disc=ok trunc=0
+  found=$(gh search prs --author=@me --state=open --limit "$PR_SEARCH_LIMIT" \
+            --json repository --jq '.[].repository.nameWithOwner' 2>/dev/null); rc=$?
+  if [ "$rc" -ne 0 ]; then
+    disc=failed; found=""
+  elif [ "$(printf '%s\n' "$found" | grep -c .)" -ge "$PR_SEARCH_LIMIT" ]; then
+    trunc=1
+  fi
+  printf 'META%s%s%s%s\n' "$US" "$disc" "$US" "$trunc"
+  { printf '%s\n' "${local_slugs[@]}"; printf '%s\n' "$found"; } | grep . | sort -u \
+    | while read -r slug; do
+        local skip=0 x
+        for x in "${PR_REPO_EXCLUDE[@]}"; do [ "$slug" = "$x" ] && skip=1; done
+        [ "$skip" = 0 ] && printf '%s\n' "$slug"
+      done
+}
+
+scan_prs(){
+  have gh && gh auth status >/dev/null 2>&1 || { echo "  (gh not authed — PRs skipped)"; PR_SCOPE="gh unavailable"; return; }
+  local -a slugs=()
+  local f1 f2 f3
+  PR_DISCOVERY=failed PR_TRUNC=0
+  while IFS="$US" read -r f1 f2 f3; do
+    if [ "$f1" = META ]; then PR_DISCOVERY="$f2"; PR_TRUNC="${f3:-0}"; continue; fi
+    [ -n "$f1" ] && slugs+=("$f1")
+  done < <(_pr_repo_set)
+  PR_REPOS=${#slugs[@]}
+  [ "$PR_REPOS" = 0 ] && { echo "  (no repos resolved — PRs skipped)"; PR_SCOPE="no repos resolved"; return; }
+
+  # fan out, bounded — one gh call per repo, results to per-repo files so the
+  # parent (not a subshell) does the accumulating.
+  local tmpd; tmpd=$(mktemp -d) || return
+  local -a pids=()
+  local i
+  for i in "${!slugs[@]}"; do
+    _pr_scan_repo "${slugs[$i]}" > "$tmpd/$i.out" &
+    pids+=($!)
+    if [ "${#pids[@]}" -ge "$PR_JOBS" ]; then wait "${pids[0]}" 2>/dev/null; pids=("${pids[@]:1}"); fi
+  done
+  wait
+
+  local kind num ci m r author
+  for i in "${!slugs[@]}"; do
+    slug="${slugs[$i]}"
+    [ -f "$tmpd/$i.out" ] || continue
+    while IFS="$US" read -r kind num ci m r author; do
+      case "$kind" in
+        COUNT) PR_OPEN=$((PR_OPEN + num)) ;;
+        ERR)   echo "  $slug: skipped (gh err)"; PR_ERR=$((PR_ERR+1)) ;;
+        FLAG)
+          [ "$author" = "$ME" ] || continue   # only YOUR PRs count + action (others aren't your concern)
+          if [ "$ci" = "red" ]; then
+            PR_RED=$((PR_RED+1))
+            ACT+=("$slug PR #$num red CI → fix (civitai report-only previews are known-noise)")
+          fi
+          if [ "$r" = "APPROVED" ] && [ "$m" = "MERGEABLE" ]; then
+            PR_READY=$((PR_READY+1))
+            ACT+=("$slug PR #$num approved+mergeable → merge")
+          fi
+          if [ "$m" = "CONFLICTING" ]; then
+            PR_CONFLICT=$((PR_CONFLICT+1))
+            ACT+=("$slug PR #$num conflicting → rebase")
+          fi
+          ;;
+      esac
+    done < "$tmpd/$i.out"
+  done
+  rm -rf "$tmpd"
+
+  # Scope string for STATUS — it must describe what was ACTUALLY measured.
+  PR_SCOPE="$PR_REPOS repos"
+  [ "$PR_TRUNC" = 1 ] && PR_SCOPE="≥$PR_REPOS repos (search capped at $PR_SEARCH_LIMIT — counts are a floor)"
+  [ "$PR_DISCOVERY" = failed ] && PR_SCOPE="$PR_REPOS LOCAL repos only — fleet discovery FAILED"
+  [ "$PR_ERR" -gt 0 ] && PR_SCOPE="$PR_SCOPE, $PR_ERR unreadable"
+  echo "  scanned $PR_REPOS repos ($PR_OPEN open PRs; ${PR_RED} red / ${PR_READY} ready / ${PR_CONFLICT} conflicting are yours)"
 }
 
 scan_deploys(){
@@ -278,11 +391,19 @@ fi
 echo
 INIT_STATUS=""
 { [ "$SCOPE" = all ] || [ "$SCOPE" = initiatives ]; } && INIT_STATUS=" · Initiatives ${INIT_ACTIVE}a/${INIT_SLOW}s/${INIT_STALL}st"
-echo "STATUS: PRs ${PR_OPEN} open (${PR_READY} ready, ${PR_RED} red) · Deploys ${DEP_WAVE} mid-wave/${DEP_STUCK} stuck · Alerts ${ALERT_LINE:-n/a}${INIT_STATUS}"
+PR_STATUS="PRs ${PR_OPEN} open across ${PR_SCOPE} (${PR_READY} ready, ${PR_RED} red, ${PR_CONFLICT} conflicting — yours)"
+{ [ "$SCOPE" = all ] || [ "$SCOPE" = repos ]; } || PR_STATUS="PRs not scanned"
+echo "STATUS: ${PR_STATUS} · Deploys ${DEP_WAVE} mid-wave/${DEP_STUCK} stuck · Alerts ${ALERT_LINE:-n/a}${INIT_STATUS}"
 if [ "${#ACT[@]}" -gt 0 ]; then
   echo "ACTIONS"
   printf '  - %s\n' "${ACT[@]}"
+elif [ "$PR_ERR" -gt 0 ] || [ "$PR_DISCOVERY" = failed ]; then
+  # Never print an unqualified all-clear off a scan that could not see everything.
+  echo "Nothing flagged IN WHAT WAS SCANNED — coverage was degraded (${PR_SCOPE})."
 else
-  echo "All clear — nothing needs you."
+  # ONE branch, and it always names the scope: a `standup.sh alerts` run that
+  # printed a bare "All clear" would be claiming something about the four
+  # sections it never looked at. One path so the phrase is testable.
+  echo "All clear in scope '$SCOPE' — nothing needs you."
 fi
-echo "Filtered: dp-1 fan-in split by cluster · known-noise (${NOISE_RE//|/, }) · KubeJobFailed=accumulated history · submodel-GPU disk = not prod"
+echo "Filtered: dp-1 fan-in split by cluster · known-noise (${NOISE_RE//|/, }) · release-bot repos (${PR_REPO_EXCLUDE[*]}) · KubeJobFailed=accumulated history · submodel-GPU disk = not prod"
