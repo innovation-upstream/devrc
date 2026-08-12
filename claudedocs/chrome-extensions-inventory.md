@@ -20,7 +20,7 @@ projects). All are Manifest V3.
 | **Structured Downloader** `1.0` | `~/workspace/gogram/gogram-extension` | nested in `gogram` repo | Structured downloader (downloads/storage/clipboard/scripting) for gogram | standalone load-unpacked | active |
 | **Structured Downloader (old)** `1.0` | `~/workspace/gogram/gogram-extension-old` | nested in `gogram` repo | Prior version of the above | none | **cruft — superseded** (see below) |
 | **Stock Chat Assistant** `1.0` | `~/workspace/portfolio-chat-fe/browser-extension` | nested in `portfolio-chat-fe` repo | Analyze stock tickers from any website | standalone load-unpacked | unknown (project side-extension) |
-| **clawgate task capture** `1.1.0` | `~/workspace/clawgate-extension/containers/clawgate/extension` | worktree of `homelab-talos` (`clawgate-ext-local`) | Hotkey → capture overlay → durable clawgate Task card | packaged/deployed via the clawgate container | active |
+| **clawgate task capture** `1.5.0` | `~/workspace/clawgate-extension/containers/clawgate/extension` | worktree of `homelab-talos` (`clawgate-ext-local`) | Hotkey → capture overlay → durable clawgate Task card | **load-unpacked from that worktree, on BOTH hosts and in EVERY Brave profile** — NOT shipped by Flux or the clawgate container; see the `clawgate` skill's `reference/extension.md` | active |
 
 ## Notes / non-extensions
 - **`~/workspace/scrape-video/manifest.json` is NOT a browser extension.** It's a
