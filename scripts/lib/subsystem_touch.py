@@ -655,6 +655,14 @@ def _session_tailer():
     # puts its own PARENT on sys.path, because it is normally run as a script
     # from its own directory. Loaded from here, that directory is not on the path
     # and those imports would fail — so both go on explicitly.
+    #
+    # 🔴 THE ORDER IS THE TAILER'S, NOT A CONVENIENCE. Inserting the collector
+    # root first and the tailer's own directory second leaves the DIRECTORY
+    # AHEAD of the root — which is exactly the constraint the tailer states for
+    # itself ("APPENDED, not inserted at 0: the collector root also holds
+    # `collector.py`, `deadman.py`, `invocation.py` and `ch_regrowth.py`, and
+    # putting it ahead of this file's own directory would let any of those shadow
+    # a sibling module"). Reverse this loop and a sibling can be shadowed.
     for d in (str(mod_path.parent.parent), str(mod_path.parent)):
         if d not in sys.path:
             sys.path.insert(0, d)
