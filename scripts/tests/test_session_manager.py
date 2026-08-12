@@ -63,8 +63,39 @@ def _no_real_socket(monkeypatch):
     monkeypatch.setattr(sm, "make_ch_client", _boom)
 
 
+@pytest.fixture(autouse=True)
+def _no_real_blocked_cache(monkeypatch):
+    """🔴 THE THIRD GUARD, added because it caught a live breach.
+
+    `gather()` reads the clawgate bar-status cache, and with no guard the
+    golden-schema test silently picked up the OPERATOR'S REAL pending count
+    (12) off `~/.cache/bar-status/clawgate.json` mid-run. That is two defects
+    at once: a suite that reaches the machine it runs on, and an assertion
+    whose expected value changes whenever the operator approves something.
+
+    It is a SEPARATE seam from `_read_text` on purpose — three tests below
+    legitimately read real tmp files through `_read_text`, so forbidding that
+    function wholesale would have forced them to be weakened instead.
+    """
+    def _boom(path):
+        raise _Forbidden(f"test tried to read the real blocked cache: {path!r}")
+    monkeypatch.setattr(sm, "_read_blocked_text", _boom)
+
+
+@pytest.fixture
+def absent_blocked_cache(monkeypatch):
+    """Opt-in fake for the `main()` -> `gather()` path, which has NO injection
+    point for the clawgate cache.
+
+    Requested by name rather than made autouse, so the raiser above stays the
+    default: a new end-to-end test that forgets this fails loudly instead of
+    quietly reading `~/.cache` on whatever machine the suite runs on.
+    """
+    monkeypatch.setattr(sm, "_read_blocked_text", lambda path: None)
+
+
 def test_hermeticity_fixture_is_actually_installed():
-    """POSITIVE CONTROL on the two autouse guards above.
+    """POSITIVE CONTROL on the three autouse guards above.
 
     Without this, a fixture that stopped applying would disarm every safety
     claim in this file's docstring while the suite stayed green.
@@ -73,6 +104,26 @@ def test_hermeticity_fixture_is_actually_installed():
         sm._default_runner(["tmux", "kill-server"], 1)
     with pytest.raises(_Forbidden):
         sm.make_ch_client()
+    with pytest.raises(_Forbidden):
+        sm._read_blocked_text(sm.BLOCKED_CACHE)
+
+
+def test_the_blocked_cache_seam_is_separate_from_the_general_file_reader():
+    """🔴 The guard above is only real if the two seams are actually distinct.
+
+    If `read_blocked_on_me` were changed to call `_read_text` directly, the
+    autouse raiser would stop covering it and every later test would be free to
+    read the live machine again — with the suite still green, because the
+    positive control above only proves the raiser is INSTALLED, not that the
+    code path goes through it. So prove the path: with the seam patched and no
+    reader injected, the read must raise.
+    """
+    with pytest.raises(_Forbidden):
+        sm.read_blocked_on_me()
+    # ...and an INJECTED reader must bypass the seam entirely, or every test
+    # below is testing the raiser rather than the parser.
+    got = sm.read_blocked_on_me(path="/nope", reader=lambda p: None)
+    assert got["status"] == "absent"
 
 
 def test_the_default_ch_factory_is_resolved_at_CALL_time_not_bound_as_a_default():
@@ -276,6 +327,9 @@ def base_gather(**kw):
         now=NOW,
         fuzzyclaw_texts=[json.dumps(TASK_LIVE), json.dumps(TASK_STALE)],
         codenames={"scratch7": "Grove", "scratch2": "Vapor"},
+        # The clawgate cache: absent by default, so no test inherits a value
+        # that depends on the operator's real queue. Override per test.
+        blocked_reader=lambda p: None,
     )
     defaults.update(kw)
     return _REAL_GATHER(**defaults)
@@ -1382,7 +1436,14 @@ def test_the_measured_and_unmeasured_fuzzyclaw_zeroes_are_DIFFERENT_OUTPUT():
 
     a, b = sm.render_table(unmeasured), sm.render_table(measured_zero)
     assert a != b
-    assert "UNMEASURED" in a and "UNMEASURED" not in b
+    # 🔴 Anchored on the FUZZYCLAW banner, not the bare word. "UNMEASURED" is
+    # now also how the `waiting` roll-up spells its own unmeasured case, so a
+    # substring test on the word alone stopped discriminating the two sections
+    # it was written to discriminate — it would have passed on a report whose
+    # fuzzyclaw zero was silently fabricated, as long as `waiting` said
+    # UNMEASURED somewhere else on the page.
+    assert "LIVE COUNT UNMEASURED" in a
+    assert "LIVE COUNT UNMEASURED" not in b
 
 
 def test_scanning_ONLY_the_remote_host_never_fabricates_a_fuzzyclaw_zero():
@@ -1440,12 +1501,13 @@ def test_json_golden_schema_and_values():
     assert blob["stale_threshold_secs"] == 3600
     assert set(blob) == {"ts", "local_host", "stale_threshold_secs", "hosts",
                          "clickhouse", "fuzzyclaw", "filters", "caveats",
-                         "summary"}
+                         "summary", "blocked_on_me"}
     assert set(blob["hosts"]) == {"workbench", "laptop"}
 
     wb = blob["hosts"]["workbench"]
     assert set(wb) == {"reachable", "error", "ssh_target", "windows",
-                       "live_window_ids", "windows_measured", "windows_error"}
+                       "live_window_ids", "windows_measured", "windows_error",
+                       "captures_measured", "captures_status", "captures_seen"}
     assert wb["ssh_target"] is None
     assert wb["live_window_ids"] == ["@41", "@52", "@63"]
     assert wb["windows_measured"] is True
@@ -1467,6 +1529,13 @@ def test_json_golden_schema_and_values():
         "busy": True,
         "age_secs": 1800.0,
         "status": "busy",
+        # 🔴 The capture batch RAN (make_runner answers it) but its output
+        # carries no markers, so this pane is `uncaptured` — measured absence
+        # of THIS pane's text, not a measured "nothing is waiting". Both the
+        # boolean and the signal list are None, never False/[].
+        "waiting_probable": None,
+        "waiting_signals": None,
+        "waiting_status": "uncaptured",
         "claude_session_id": "11111111-2222-4333-8444-555555555555",
         "fuzzyclaw": {
             "task": "task-alpha-text",
@@ -1519,6 +1588,20 @@ def test_json_golden_schema_and_values():
         "fuzzyclaw_live": 1,
         "fuzzyclaw_status": "ok",
         "windows_unmeasured": [],
+        # 🔴 LITERAL, and it is the unmeasured shape: the capture batch ran but
+        # returned no markers, so 0 of 3 rows were scraped. `probable` is None
+        # and `per_signal` is None — a `0` on either would be this report
+        # answering "is anything waiting on me" with a look nobody took.
+        # `unmeasured_reasons` says WHICH rows and why, so the None is
+        # actionable rather than merely honest.
+        "waiting": {
+            "probable": None, "measured": 0, "unmeasured": 3,
+            "per_signal": None,
+            "unmeasured_reasons": {"uncaptured": 2, "not_claude": 1},
+        },
+        # The clawgate queue was never read (no reader injected in this
+        # fixture's environment), so the count is None with its discriminant.
+        "blocked_on_me": {"count": None, "status": "absent"},
     }
 
 
@@ -1638,7 +1721,12 @@ def test_no_fuzzyclaw_flag_skips_the_source_and_says_so():
     assert report["summary"]["fuzzyclaw_status"] == "skipped"
     row = report["hosts"]["workbench"]["windows"][0]
     assert row["fuzzyclaw"] is None and row["claude_session_id"] is None
-    assert "skipped: --no-fuzzyclaw" in sm.render_table(report)
+    # The banner names the flag that turns the source ON, because OFF is now
+    # the default: telling a reader "--no-fuzzyclaw" blamed a flag they never
+    # passed for an absence they did not ask for.
+    rendered = sm.render_table(report)
+    assert "opt in with --fuzzyclaw" in rendered
+    assert "--no-fuzzyclaw" not in rendered
 
 
 def test_the_skipped_and_measured_fuzzyclaw_zeroes_are_DIFFERENT_FACTS():
@@ -2821,7 +2909,7 @@ def test_detail_history_no_ch_still_wins_over_the_reason_selection():
 
 
 def test_a_detail_json_never_claims_a_measured_absence_it_did_not_measure(
-        monkeypatch, capsys):
+        monkeypatch, capsys, absent_blocked_cache):
     """🔴 END-TO-END, the exact contradiction the auditor read in ONE payload:
     `LIVE COUNT UNMEASURED` in the report and a measured absence beside it."""
     monkeypatch.setattr(sm, "local_host_label", lambda *a, **k: "workbench")
@@ -2831,8 +2919,11 @@ def test_a_detail_json_never_claims_a_measured_absence_it_did_not_measure(
     monkeypatch.setattr(sm, "read_fuzzyclaw_texts",
                         lambda *a, **k: [json.dumps(TASK_LIVE)])
     monkeypatch.setattr(sm, "load_scratch_codenames", lambda *a, **k: {})
+    # 🔴 `--fuzzyclaw` is now REQUIRED to reach this code path at all: the join
+    # is opt-in, so without it the status would be `skipped` and this test
+    # would pass vacuously against a source that was never read.
     sm.main(["detail", "scratch7:3", "--host", "workbench", "--json",
-             "--no-ch"])
+             "--no-ch", "--fuzzyclaw"])
     blob = json.loads(capsys.readouterr().out)
     assert blob["fuzzyclaw"]["status"] == "unmeasured"
     assert blob["fuzzyclaw"]["files_live"] is None
@@ -3457,7 +3548,7 @@ def test_cli_claude_only_flag_reaches_gather_and_defaults_off(monkeypatch):
 
 
 def test_main_json_end_to_end_carries_the_split_and_the_filter(
-        monkeypatch, capsys):
+        monkeypatch, capsys, absent_blocked_cache):
     """END-TO-END through main(), because every test above injects gather()."""
     monkeypatch.setattr(sm, "local_host_label", lambda *a, **k: "workbench")
     monkeypatch.setattr(sm, "_default_runner",
@@ -3510,7 +3601,8 @@ def test_the_caveats_are_in_the_json_as_structured_fields_not_prose():
     """🔴 KILLS: dropping `caveats` from the report, or reducing it to a
     string a consumer would have to parse."""
     cav = mix_gather()["caveats"]
-    assert set(cav) == {"claude_detection", "fuzzyclaw_scope"}
+    assert set(cav) == {"claude_detection", "fuzzyclaw_scope",
+                        "waiting_signal"}
     det = cav["claude_detection"]
     assert det["method"] == "pane_current_command_regex"
     assert det["pattern"] == sm.CLAUDE_RE.pattern == "claude"
@@ -3547,8 +3639,8 @@ def test_the_remote_null_field_LEDGER_is_true_of_a_real_remote_row():
     assert remote["status"] != "stale"
 
 
-def test_the_caveats_are_printed_in_the_table_UNCONDITIONALLY(monkeypatch,
-                                                              capsys):
+def test_the_caveats_are_printed_in_the_table_UNCONDITIONALLY(
+        monkeypatch, capsys, absent_blocked_cache):
     """🔴 KILLS: printing them only when a remote host is scanned, and dropping
     the footer. An agent that runs this cold gets no skill body."""
     for report in (mix_gather(),                    # local-only scan
@@ -3575,9 +3667,1064 @@ def test_the_caveats_are_printed_in_the_table_UNCONDITIONALLY(monkeypatch,
 
 def test_the_caveat_footer_is_two_lines_and_does_not_touch_the_row_table():
     """Compactness is part of the requirement — a caveat that bloats the table
-    gets deleted by the next person."""
-    assert len(sm.render_caveats(mix_gather())) == 2
+    gets deleted by the next person.
+
+    🔴 ONE LINE PER CAVEAT, derived from CAVEATS rather than pinned to a
+    literal count: a hardcoded `== 2` is a number the next caveat has to edit,
+    and editing it is indistinguishable from silencing a caveat that stopped
+    rendering. The relationship — every structured caveat gets exactly one
+    footer line — is what actually needs pinning, and it fails when the set
+    GROWS *or* SHRINKS.
+    """
+    assert len(sm.render_caveats(mix_gather())) == len(sm.CAVEATS)
+    for key in sm.CAVEATS:
+        assert any(f"caveat[{key}]:" in ln
+                   for ln in sm.render_caveats(mix_gather())), key
     with_cav = sm.render_table(mix_gather()).splitlines()
     row_lines = [ln for ln in with_cav if "hollow" in ln or "ridge" in ln]
     assert len(row_lines) == 2, "one line per window, still"
     assert not any("caveat[" in ln for ln in row_lines)
+
+
+# =========================================================================== #
+# §A — THE `waiting` SIGNAL
+#
+# 🔴 THE FIXTURES BELOW ARE REALISTIC, NOT TOY, AND THAT IS LOAD-BEARING.
+# They reproduce the structure captured off 40 live panes on 2026-08-12: a `❯`
+# echo of the SUBMITTED user prompt in the scrollback, `●`-led assistant turns,
+# a `✻ Baked for …` / `※ recap:` status line, the input box drawn between two
+# box-drawing rules, and a `ctx: NN%` + `⏸ manual mode on` footer. A detector
+# can pass on a textbook three-line fixture and miss every one of those,
+# because the whole difficulty is telling the agent's last SENTENCE from the
+# five kinds of chrome that surround it.
+#
+# 🔴 EVERY STRING IS SYNTHETIC. This repo is PUBLIC and the real panes hold
+# client work; the SHAPES are copied, the words are invented, and the values
+# are pairwise distinct so a test cannot pass by matching the wrong row.
+# =========================================================================== #
+_RULE = "─" * 60
+CAP_NONCE = "deadbeefcafe1234"
+
+
+def _pane(*body):
+    return "\n".join(body)
+
+
+# Genuinely idle: finished cleanly, awaiting instruction. THE NEGATIVE CONTROL.
+# Two traps are built in on purpose:
+#   * the user's own submitted prompt, echoed in the scrollback, ENDS IN `?`
+#   * the footer contains a `?` (`new task? /clear …`) — a real live footer
+# Neither is the agent asking anything, and neither may flag.
+PANE_IDLE = _pane(
+    "❯ can you double-check the fixture ordering?",
+    "",
+    "● Checked. The ordering is stable and the two helpers agree.",
+    "",
+    "  I pushed the change and the branch is green.",
+    "",
+    "✻ Baked for 4m 02s",
+    "",
+    "※ recap: Goal was stabilising fixture order. Done and pushed. "
+    "(disable recaps in /config)",
+    "",
+    _RULE,
+    "❯ ",
+    _RULE,
+    "  ctx: 34%                          new task? /clear to save 120.0k tokens",
+    "  ⏸ manual mode on · ← 2 agents",
+)
+
+# Asked a direct question. Same chrome, one different sentence.
+PANE_QUESTION = _pane(
+    "❯ deploy it",
+    "",
+    "● Deployed. The rollout finished and both replicas are ready.",
+    "",
+    "  Want me to run the post-deploy check before I close this out?",
+    "",
+    "✻ Baked for 1m 18s",
+    "",
+    _RULE,
+    "❯ ",
+    _RULE,
+    "  ctx: 52%",
+    "  ⏸ manual mode on",
+)
+
+# Hard-blocked on a modal. The modal REPLACES the input box, so there is only
+# ONE rule line and the options sit below it — which is why the chrome cut
+# cannot assume a pair.
+PANE_MENU = _pane(
+    "● I can take either route here.",
+    "",
+    "✻ Baked for 9m 41s",
+    "",
+    _RULE,
+    "  This session is 12h 06m old and 88.4k tokens.",
+    "",
+    "  Resuming the full session will consume a large share of your limits.",
+    "",
+    "  ❯ 1. Resume from summary (recommended)",
+    "    2. Resume the full session as-is",
+    "    3. Do not ask me again",
+    "",
+    "  Enter to confirm · Esc to cancel",
+)
+
+# Out of context. NOTHING else about the pane says so — only the footer does,
+# and the agent's last sentence is a perfectly ordinary statement.
+PANE_CTX_ZERO = _pane(
+    "❯ keep going",
+    "",
+    "● Continuing with the migration notes.",
+    "",
+    "  The remaining items are listed in the tracking file.",
+    "",
+    "✻ Baked for 22m 07s",
+    "",
+    _RULE,
+    "❯ ",
+    _RULE,
+    "  ctx: 0%                           new task? /clear to save 610.0k tokens",
+    "  ⏸ manual mode on · ← 3 agents",
+)
+
+# 🔴 THE EXCLUDED CASE — text sitting at the `❯` prompt inside the input box.
+# See CAVEATS["waiting_signal"]["excluded"] and reference/waiting-signal.md.
+# This fixture is mid-turn (live spinner), which is precisely the state where a
+# detector keying on box text would invent a `waiting` row for a window that is
+# working fine.
+PANE_TYPED_AT_PROMPT = _pane(
+    "❯ start the refactor",
+    "",
+    "● Working through the call sites now.",
+    "",
+    "  Three of nine done.",
+    "",
+    "* Calculating… (31s · ↓ 2.1k tokens · esc to interrupt)",
+    "",
+    _RULE,
+    "❯ then open the PR",
+    _RULE,
+    "  ctx: 61%",
+    "  ⏸ manual mode on",
+)
+
+# A bare shell. Its last line ends in `?`, which is exactly why a Claude-shaped
+# detector must never be pointed at one.
+PANE_SHELL = _pane(
+    "$ git status -s",
+    "$ gh pr list",
+    "no open pull requests. run `gh pr create`?",
+)
+
+
+def cap_runner(captures_by_pane, **kw):
+    """A `make_runner` whose capture batch answers with REAL marker framing.
+
+    🔴 This is the instrument for every end-to-end §A test, so it is validated
+    by `test_cap_runner_frames_captures_the_way_the_parser_expects` before any
+    verdict is read off it. A framer that did not frame its output the way
+    `parse_captures` expects would make every pane read `uncaptured`, and a
+    suite asserting "nothing is waiting" against it would be green, unanimous
+    and about nothing.
+    """
+    nonce = kw.pop("nonce", CAP_NONCE)
+    body = "".join(
+        "%s%s%s%s\n%s\n" % (sm.CAPTURE_MARK_PREFIX, nonce, pid,
+                            sm.CAPTURE_MARK_PREFIX, text)
+        for pid, text in captures_by_pane.items())
+    kw.setdefault("local_capture", body)
+    return make_runner(**kw)
+
+
+def test_cap_runner_frames_captures_the_way_the_parser_expects():
+    """POSITIVE CONTROL on the §A instrument, read before any of its verdicts.
+
+    Prove the fake capture output ROUND-TRIPS through the real parser, and that
+    the parser can also come back EMPTY — an instrument that always parsed, or
+    never did, certifies nothing in either direction.
+    """
+    r = cap_runner({"%11": PANE_QUESTION, "%13": PANE_IDLE})
+    raw = r(sm.capture_argv(["%11", "%13"], CAP_NONCE), 5)[1]
+    got = sm.parse_captures(raw, CAP_NONCE)
+    assert set(got) == {"%11", "%13"}
+    assert got["%11"] == PANE_QUESTION
+    assert got["%13"] == PANE_IDLE
+    # ...and the negative control on the parser: a DIFFERENT nonce must find
+    # nothing, or the nonce is decoration and a pane could forge a marker.
+    assert sm.parse_captures(raw, "0000ffff0000ffff") == {}
+
+
+# --------------------------------------------------------------------------- #
+# §A.1 — the capture protocol (ONE tmux call per host, marker-delimited)
+# --------------------------------------------------------------------------- #
+def test_the_marker_never_interpolates_a_pane_id_into_a_tmux_format():
+    """🔴 THE BUG THIS PINS IS SILENT AND WAS MEASURED ON LIVE TMUX.
+
+    A tmux format string is strftime-expanded, so a literal `%68` in it is NOT
+    the pane id — it is `%B` (full month name) padded to width 68. Verified
+    2026-08-12: `tmux display-message -p 'A%68B'` prints `A`, 62 spaces, then
+    `August`. The marker therefore carries the id via `#{pane_id}` and `-t`,
+    never by our own interpolation, and this fails the moment someone
+    "simplifies" it back.
+    """
+    mark = sm.capture_mark("abc123")
+    assert "#{pane_id}" in mark
+    assert "%" not in mark, "a literal % in a tmux format is strftime, not an id"
+    argv = sm.capture_argv(["%68"], "abc123")
+    fmt = argv[argv.index("-t") + 2]
+    assert fmt == mark and "%68" not in fmt
+    # the id travels as a `-t` TARGET, which is not format-expanded
+    assert "%68" in argv
+
+
+def test_capture_argv_is_empty_for_no_panes_rather_than_a_bare_tmux():
+    """🔴 A bare `["tmux"]` is not a no-op — it runs tmux's default command.
+
+    This script is read-only BY CONSTRUCTION, and "the pane list came back
+    empty" is exactly the path where an argv degenerates unnoticed.
+    """
+    assert sm.capture_argv([], "n1") == []
+    assert sm.capture_argv(None, "n1") == []
+    assert sm.capture_argv(["", None], "n1") == []
+
+
+def test_the_capture_argv_contains_only_READ_ONLY_tmux_subcommands():
+    """🔴 THE SAFETY INVARIANT, as an ALLOWLIST rather than a denylist.
+
+    A denylist ("no send-keys") passes for every mutating subcommand nobody
+    thought to name. This enumerates what MAY appear, so a new verb fails
+    closed. `session-manager` gets pointed at a live machine holding 40+
+    windows of the operator's real work; that is only safe while this holds.
+    """
+    argv = sm.capture_argv(["%1", "%2", "%3"], "n2")
+    verbs = {argv[0]}
+    for i, tok in enumerate(argv):
+        if tok == ";":
+            verbs.add(argv[i + 1])
+    assert verbs == {"tmux", "display-message", "capture-pane"}
+    assert argv[1] == "display-message"
+
+
+def test_one_tmux_invocation_covers_every_pane():
+    """The whole reason for the marker protocol: 40 panes over SSH must not be
+    40 round trips."""
+    argv = sm.capture_argv(["%1", "%2", "%3", "%4"], "n3")
+    assert argv.count("capture-pane") == 4
+    assert argv[0] == "tmux" and argv.count("tmux") == 1
+
+
+def test_the_capture_argv_survives_the_ssh_quoting_it_must_pass_through():
+    """The remote side runs a SHELL. The format contains `#`, `{` and `}`, and
+    the command separator is a bare `;` — all of which a shell would eat
+    unquoted. Same hazard and same test shape as the window-format contract."""
+    import shlex
+    argv = sm.capture_argv(["%9"], "n4")
+    assert shlex.split(shlex.join(argv)) == argv
+    wrapped = sm.ssh_wrap(argv)
+    assert wrapped[0] == "ssh" and wrapped[-2] == sm.LAPTOP_SSH_TARGET
+    assert shlex.split(wrapped[-1]) == argv
+
+
+def test_parse_captures_discards_text_before_the_first_marker():
+    """Output belonging to no pane is DROPPED, never attributed to one — tmux
+    can emit a warning ahead of the first command's output."""
+    raw = ("some preamble tmux wrote first\n"
+           f"{sm.CAPTURE_MARK_PREFIX}n5%7{sm.CAPTURE_MARK_PREFIX}\n"
+           "real pane text\n")
+    assert sm.parse_captures(raw, "n5") == {"%7": "real pane text"}
+
+
+def test_parse_captures_is_empty_on_empty_or_unmarked_input():
+    assert sm.parse_captures("", "n6") == {}
+    assert sm.parse_captures(None, "n6") == {}
+    assert sm.parse_captures("no markers at all\njust text\n", "n6") == {}
+
+
+# --------------------------------------------------------------------------- #
+# §A.2 — detect_waiting: three signals, each reachable and each isolated
+# --------------------------------------------------------------------------- #
+def _sigs(text):
+    return {s["signal"] for s in sm.detect_waiting(text)["signals"]}
+
+
+def test_POSITIVE_CONTROL_the_detector_produces_a_NON_ZERO_count():
+    """🔴 MANDATORY. A classifier returning 0 is indistinguishable from one
+    wired to nothing, so the number has to be watched to MOVE.
+
+    Quote this as a PAIR wherever it is reported: N on the positive control,
+    M under test. Here N = 3 flagged of 6 realistic panes.
+    """
+    panes = [PANE_IDLE, PANE_QUESTION, PANE_MENU, PANE_CTX_ZERO,
+             PANE_TYPED_AT_PROMPT]
+    flagged = [p for p in panes if sm.detect_waiting(p)["probable"]]
+    assert len(flagged) == 3, "positive control must be NON-ZERO and exact"
+    assert PANE_QUESTION in flagged
+    assert PANE_MENU in flagged
+    assert PANE_CTX_ZERO in flagged
+
+
+def test_NEGATIVE_CONTROL_a_genuinely_idle_window_is_not_flagged():
+    """🔴 The other half. `PANE_IDLE` carries TWO `?` traps — the user's own
+    submitted prompt echoed into the scrollback, and the live `new task?`
+    footer — and a detector firing on either is worse than none, because it
+    manufactures work at the moment the operator most trusts the output."""
+    got = sm.detect_waiting(PANE_IDLE)
+    assert got["probable"] is False
+    assert got["signals"] == []
+
+
+def test_the_EXCLUDED_case_text_typed_at_the_prompt_never_flags():
+    """🔴 THE OPEN DECISION, settled and pinned.
+
+    A dogfood run read four windows' prompt text as "unsent instructions one
+    Enter away" and could not rule out placeholder chrome. Investigated
+    2026-08-12: it IS distinguishable, by POSITION rather than dimness — a
+    placeholder cannot coexist with typed text, and a queued message renders
+    above the box rather than in it. Both facts are read off a MINIFIED bundle
+    at one version, and the queued case was never observed live (0 hits across
+    29 panes), so the signal would rest on an unobserved negative whose failure
+    mode is a false `waiting` row on a window that is working fine — note this
+    fixture is mid-turn, with a live spinner.
+
+    EXCLUDED. This test fails if anyone adds it back without the observation.
+    """
+    got = sm.detect_waiting(PANE_TYPED_AT_PROMPT)
+    assert got["probable"] is False, "text at the ❯ prompt is not a signal"
+    assert got["signals"] == []
+
+
+def test_signal_trailing_question_fires_ALONE_on_its_own_pane():
+    """Isolation matters: if this pane also matched another signal, a mutation
+    that broke THIS one could still be masked by the other going green."""
+    assert _sigs(PANE_QUESTION) == {"trailing_question"}
+    line = sm.detect_waiting(PANE_QUESTION)["signals"][0]["line"]
+    assert line == "Want me to run the post-deploy check before I close this out?"
+
+
+def test_signal_selection_menu_fires_ALONE_on_its_own_pane():
+    assert _sigs(PANE_MENU) == {"selection_menu"}
+    line = sm.detect_waiting(PANE_MENU)["signals"][0]["line"]
+    assert line == "❯ 1. Resume from summary (recommended)"
+
+
+def test_signal_context_exhausted_fires_ALONE_on_its_own_pane():
+    assert _sigs(PANE_CTX_ZERO) == {"context_exhausted"}
+    line = sm.detect_waiting(PANE_CTX_ZERO)["signals"][0]["line"]
+    assert line.startswith("ctx: 0%")
+
+
+def test_the_signals_are_INDEPENDENT_not_short_circuited():
+    """🔴 REACHABILITY. An early `return` on the first hit would leave the later
+    signals unreachable — and every isolated test above would STILL pass,
+    because each fires first on its own fixture.
+
+    The evaluation order is menu -> ctx -> question, so TWO REALISTIC PAIRS
+    give complete coverage of that class: a return after `menu` kills both of
+    the others (caught by pair 1), and a return after `ctx` kills `question`
+    (caught by pair 2). A return after `question` is a no-op — it is last.
+
+    Pairs, not a triple, because a triple is not a shape live tmux produces: a
+    modal REPLACES the input box, so a pane showing `❯ 1.` has no `ctx: NN%`
+    footer at all. Verified against the live modals on this host 2026-08-12. A
+    fixture asserting an impossible layout would pin the detector against a
+    screen it will never see.
+    """
+    # pair 1 — the agent asks, then puts up the modal. Live shape (a real pane
+    # this run had "…Want me to?" above a resume prompt).
+    menu_and_question = _pane(
+        "● I can take either route here.",
+        "",
+        "  Worth a second pair of eyes before I merge. Want me to?",
+        "",
+        "✻ Baked for 6m 12s",
+        "",
+        _RULE,
+        "  Resuming the full session will consume a large share of your limits.",
+        "",
+        "  ❯ 1. Resume from summary (recommended)",
+        "    2. Resume the full session as-is",
+        "",
+        "  Enter to confirm · Esc to cancel",
+    )
+    assert _sigs(menu_and_question) == {"selection_menu", "trailing_question"}
+
+    # pair 2 — out of context AND asking. Ordinary idle chrome.
+    ctx_and_question = _pane(
+        "● I have run out of room to keep going.",
+        "",
+        "  Do you want me to write the handoff before you clear this?",
+        "",
+        "✻ Baked for 41m 09s",
+        "",
+        _RULE,
+        "❯ ",
+        _RULE,
+        "  ctx: 0%                        new task? /clear to save 610.0k tokens",
+        "  ⏸ manual mode on",
+    )
+    assert _sigs(ctx_and_question) == {"context_exhausted", "trailing_question"}
+
+    # ...and together the two pairs cover every declared signal, so this is not
+    # two tests that happen to exercise the same one.
+    assert (_sigs(menu_and_question) | _sigs(ctx_and_question)
+            == set(sm.WAITING_SIGNALS))
+
+
+def test_every_declared_signal_is_actually_reachable():
+    """🔴 THE LEDGER, both directions. A name in WAITING_SIGNALS no input can
+    produce reads `0` forever and gets mistaken for a measurement; a signal the
+    detector emits but the tuple omits vanishes from every roll-up. Neither is
+    visible from a per-signal test."""
+    produced = set()
+    for pane in (PANE_QUESTION, PANE_MENU, PANE_CTX_ZERO):
+        produced |= _sigs(pane)
+    assert produced == set(sm.WAITING_SIGNALS)
+
+
+@pytest.mark.parametrize("footer,expect", [
+    ("  ctx: 0%", True),
+    ("  ctx: 0%   new task? /clear to save 610.0k tokens", True),
+    ("  ctx: 10%", False),
+    ("  ctx: 20%", False),
+    ("  ctx: 100%", False),
+    ("  ctx: 0.4%", False),
+])
+def test_context_exhausted_matches_ZERO_and_not_its_neighbours(footer, expect):
+    """🔴 Measured AT the boundary and on BOTH sides of it. `ctx: 10%` contains
+    the characters `0%`, so a substring test would fire on every window whose
+    context happens to end in a zero — 10%, 20%, 100%. That is a `/clear`
+    recommendation for a window with plenty of room left."""
+    text = _pane("● done.", "", _RULE, "❯ ", _RULE, footer)
+    assert ("context_exhausted" in _sigs(text)) is expect
+
+
+def test_a_lone_numbered_line_in_prose_is_not_a_modal():
+    """🔴 A SECOND OPTION IS REQUIRED, and this is why. Agents quote menus back
+    at the operator in ordinary prose all day; a live modal always has at least
+    two choices. Without this the signal fires on any transcript containing
+    `❯ 1. …`."""
+    prose = _pane(
+        "● I would have picked the first option:",
+        "",
+        "  ❯ 1. Retitle and post the nudge",
+        "",
+        "  ...but I did not, because you asked me to hold.",
+        "",
+        _RULE, "❯ ", _RULE, "  ctx: 40%",
+    )
+    assert "selection_menu" not in _sigs(prose)
+
+
+def test_a_two_option_modal_IS_a_modal_the_mirror_of_the_test_above():
+    """The positive half — otherwise the test above also passes for a detector
+    that never fires at all."""
+    modal = _pane(
+        "● Proceed?",
+        "",
+        "  ❯ 1. Yes",
+        "    2. No",
+        "",
+        "  Enter to confirm · Esc to cancel",
+    )
+    assert "selection_menu" in _sigs(modal)
+
+
+def test_last_assistant_line_cuts_the_input_box_STRUCTURALLY():
+    """🔴 The chrome is found by the RULES that draw it, not by the words it
+    contains. A keyword cut (`ctx:`, `⏸`, `❯`) breaks the moment upstream
+    restyles a footer — and upstream restyles footers."""
+    assert sm.last_assistant_line(PANE_IDLE) == (
+        "  I pushed the change and the branch is green.")
+    assert sm.last_assistant_line(PANE_QUESTION) == (
+        "  Want me to run the post-deploy check before I close this out?")
+
+
+def test_last_assistant_line_strips_the_between_turn_STATUS_lines():
+    """`✻ Baked for …`, `* Calculating…`, `※ recap:` and the braille spinner sit
+    BELOW the last thing the agent said. Left in place each becomes "the last
+    line", and the question-mark test then reads a status line."""
+    for status in ("✻ Baked for 3m 01s", "* Calculating… (12s · ↓ 900 tokens)",
+                   "※ recap: something happened. (disable recaps in /config)",
+                   "⠙ Thinking…"):
+        text = _pane("● The answer is yes.", "", status, "",
+                     _RULE, "❯ ", _RULE, "  ctx: 44%")
+        assert sm.last_assistant_line(text) == "● The answer is yes.", status
+
+
+def test_last_assistant_line_is_None_when_there_is_no_prose_at_all():
+    assert sm.last_assistant_line("") is None
+    assert sm.last_assistant_line(None) is None
+    assert sm.last_assistant_line(_pane(_RULE, "❯ ", _RULE, "  ctx: 9%")) is None
+
+
+def test_the_detector_alone_CAN_be_fooled_by_a_shell_which_is_why_it_is_gated():
+    """🔴 Stated rather than implied away. `detect_waiting` is shape-matching
+    and a shell whose last line ends in `?` DOES fool it — which is exactly why
+    `gather` never points it at one, and why a non-Claude row is `not_claude`
+    rather than `False`. The guard that matters is the gate, pinned in §A.3;
+    this pins that the gate is load-bearing rather than decorative."""
+    assert sm.detect_waiting(PANE_SHELL)["probable"] is True
+
+
+# --------------------------------------------------------------------------- #
+# §A.3 — the TRI-STATE end to end. `waiting_probable` is True / False / None,
+# and every None carries a `waiting_status` naming which of the four reasons.
+# This is the half that stops a `no` from being manufactured out of a pane
+# nobody looked at.
+# --------------------------------------------------------------------------- #
+def _framed(captures, nonce=CAP_NONCE):
+    return "".join(
+        "%s%s%s%s\n%s\n" % (sm.CAPTURE_MARK_PREFIX, nonce, pid,
+                            sm.CAPTURE_MARK_PREFIX, text)
+        for pid, text in captures.items())
+
+
+def waiting_gather(local=None, remote=None, **kw):
+    """base_gather with BOTH hosts' capture batches really framed.
+
+    %11 is the local Claude pane (scratch7:3) and %21 the remote one
+    (naida-dev:1) in the shared fixtures at the top of this file.
+    """
+    runner = make_runner(
+        local_capture=_framed(local if local is not None else {}),
+        remote_capture=_framed(remote if remote is not None else {}))
+    kw.setdefault("runner", runner)
+    kw.setdefault("capture_nonce", CAP_NONCE)
+    return base_gather(**kw)
+
+
+def _row(report, host, session, widx):
+    for r in report["hosts"][host]["windows"]:
+        if r["session"] == session and r["window_index"] == widx:
+            return r
+    raise AssertionError(f"no row {host} {session}:{widx}")
+
+
+def test_a_waiting_row_carries_the_flag_the_signals_AND_the_matched_line():
+    """END-TO-END: a real pane shape goes in, a judgeable row comes out.
+
+    The MATCHED LINE is the point. `waiting_probable: true` alone is a verdict
+    this cannot honestly issue about a TUI upstream restyles at will — the row
+    ships the evidence so a consumer can disagree with it.
+    """
+    rep = waiting_gather(local={"%11": PANE_QUESTION})
+    row = _row(rep, "workbench", "scratch7", "3")
+    assert row["waiting_probable"] is True
+    assert row["waiting_status"] == "ok"
+    assert [s["signal"] for s in row["waiting_signals"]] == ["trailing_question"]
+    assert row["waiting_signals"][0]["line"].endswith("close this out?")
+
+
+def test_a_scraped_idle_row_is_FALSE_which_is_a_measurement():
+    """The other side of the same coin: `False` is only ever published for a
+    pane that was actually captured and read."""
+    rep = waiting_gather(local={"%11": PANE_IDLE})
+    row = _row(rep, "workbench", "scratch7", "3")
+    assert row["waiting_probable"] is False
+    assert row["waiting_status"] == "ok"
+    assert row["waiting_signals"] == []
+
+
+def test_a_NON_CLAUDE_row_is_never_False_it_is_not_claude():
+    """🔴 A bare zsh is never scraped, so `False` would be a verdict about a
+    pane nobody looked at. `misc:5` is the shell window in the shared fixture.
+
+    The discriminating control is right beside it: the CLAUDE row in the same
+    report, from the same runner, IS measured. If the gate were inverted or
+    absent, one of these two assertions breaks.
+    """
+    rep = waiting_gather(local={"%11": PANE_IDLE})
+    shell = _row(rep, "workbench", "misc", "5")
+    assert shell["claude"] is False
+    assert shell["waiting_probable"] is None
+    assert shell["waiting_signals"] is None
+    assert shell["waiting_status"] == "not_claude"
+    assert _row(rep, "workbench", "scratch7", "3")["waiting_status"] == "ok"
+
+
+def test_a_claude_row_missing_from_a_batch_that_RAN_is_uncaptured():
+    """🔴 `{}` vs `None`. The batch ran and answered; this pane simply is not in
+    it. That is a fact about the PANE, and it must not be reported as the
+    host's failure nor as a measured `no`."""
+    rep = waiting_gather(local={"%99": PANE_QUESTION})   # a different pane
+    row = _row(rep, "workbench", "scratch7", "3")
+    assert row["waiting_probable"] is None
+    assert row["waiting_status"] == "uncaptured"
+    assert rep["hosts"]["workbench"]["captures_measured"] is True
+
+
+def test_no_capture_makes_every_row_None_and_NEVER_False():
+    """🔴 `--no-capture`. Nothing was scraped, so nothing may be reported as
+    scraped — the status is `skipped`, not a quiet `no` on every row."""
+    rep = base_gather(use_capture=False)
+    rows = [r for h in rep["hosts"].values() for r in h["windows"]]
+    assert rows, "fixture must produce rows or this passes vacuously"
+    for r in rows:
+        assert r["waiting_probable"] is None
+        assert r["waiting_signals"] is None
+    claude_rows = [r for r in rows if r["claude"]]
+    assert claude_rows and all(r["waiting_status"] == "skipped"
+                               for r in claude_rows)
+    for host in rep["hosts"].values():
+        assert host["captures_measured"] is False
+        assert host["captures_status"] == "skipped"
+        assert host["captures_seen"] is None
+
+
+def test_a_FAILED_capture_batch_is_error_not_skipped_and_not_a_zero():
+    """🔴 The two unmeasured reasons are DIFFERENT FACTS. `skipped` means the
+    operator asked not to look; `error` means we looked and the host did not
+    answer. Rendering them the same tells an operator their `--no-capture` is
+    responsible for an SSH failure."""
+    runner = make_runner(local_capture_rc=1, local_capture_err="capture died")
+    rep = base_gather(runner=runner, capture_nonce=CAP_NONCE)
+    assert rep["hosts"]["workbench"]["captures_status"] == "error"
+    assert rep["hosts"]["workbench"]["captures_measured"] is False
+    assert rep["hosts"]["workbench"]["captures_seen"] is None
+    row = _row(rep, "workbench", "scratch7", "3")
+    assert row["waiting_probable"] is None and row["waiting_status"] == "error"
+    # ...and the OTHER host's batch, which did answer, is unaffected: one call
+    # failing says nothing about the other.
+    assert rep["hosts"]["laptop"]["captures_status"] == "ok"
+
+
+def test_a_host_with_no_claude_panes_is_a_MEASURED_empty_capture_set():
+    """`{}` with `status: ok` — we know every pane on that host and none of
+    them is Claude. Distinct from `None`, and no tmux capture call is made."""
+    calls = []
+    runner = make_runner(local_panes=(
+        "%13|1003|misc|5|win-charlie|/home/zach/tmp|zsh|plain title"),
+        calls=calls)
+    rep = base_gather(runner=runner, hosts=("workbench",),
+                      capture_nonce=CAP_NONCE)
+    wb = rep["hosts"]["workbench"]
+    assert wb["captures_measured"] is True
+    assert wb["captures_status"] == "ok"
+    assert wb["captures_seen"] == 0
+    assert not any("capture-pane" in " ".join(c) for c in calls), (
+        "no Claude panes means no capture call at all")
+
+
+def test_only_CLAUDE_pane_ids_are_ever_sent_to_the_capture_batch():
+    """🔴 The gate, pinned on the ARGV rather than on the output. A detector
+    that never sees a shell pane cannot invent a signal from one — and reading
+    this off the row alone would not distinguish "not scraped" from "scraped
+    and suppressed"."""
+    calls = []
+    base_gather(runner=make_runner(calls=calls, local_capture=_framed({})),
+                hosts=("workbench",), capture_nonce=CAP_NONCE)
+    cap = [c for c in calls if "capture-pane" in " ".join(c)]
+    assert len(cap) == 1, "one batched call per host"
+    argv = cap[0]
+    assert "%11" in argv, "the claude pane must be captured"
+    assert "%12" not in argv and "%13" not in argv, "shells must not be"
+
+
+# --------------------------------------------------------------------------- #
+# §A.4 — the roll-up. `probable` is None when nothing was scraped.
+# --------------------------------------------------------------------------- #
+def test_the_summary_waiting_count_MOVES_positive_control_and_under_test():
+    """🔴 THE PAIR, in one test, so neither number can be quoted alone.
+
+    A `waiting: 0` from a classifier wired to nothing is indistinguishable from
+    a real 0 — so the same fixture is run twice, once with a pane that MUST
+    flag and once with a pane that must not, and both numbers are asserted.
+    """
+    positive = waiting_gather(local={"%11": PANE_MENU})
+    under_test = waiting_gather(local={"%11": PANE_IDLE})
+    assert positive["summary"]["waiting"]["probable"] == 1     # N
+    assert under_test["summary"]["waiting"]["probable"] == 0   # M
+    # both scraped the same number of panes, so the difference is the SIGNAL
+    # and not the sample.
+    assert (positive["summary"]["waiting"]["measured"]
+            == under_test["summary"]["waiting"]["measured"] == 1)
+
+
+def test_the_summary_waiting_is_None_not_0_when_nothing_was_scraped():
+    """🔴 The sentence this tool must never emit is "nothing is waiting on you"
+    off a look that never happened. `--no-capture` scrapes nothing, so the
+    headline number is None and the renderer says UNMEASURED."""
+    rep = base_gather(use_capture=False)
+    w = rep["summary"]["waiting"]
+    assert w["probable"] is None
+    assert w["per_signal"] is None
+    assert w["measured"] == 0
+    assert w["unmeasured"] == 3
+    assert w["unmeasured_reasons"] == {"skipped": 2, "not_claude": 1}
+
+
+def test_the_per_signal_breakdown_is_derived_from_the_declared_ledger():
+    """🔴 The tuple and the roll-up pin each other. A signal `detect_waiting`
+    emits but WAITING_SIGNALS omits would be counted per-row and invisible in
+    every total; one declared but never emitted reads 0 forever and gets taken
+    for a measurement."""
+    rep = waiting_gather(local={"%11": PANE_CTX_ZERO})
+    per = rep["summary"]["waiting"]["per_signal"]
+    assert set(per) == set(sm.WAITING_SIGNALS)
+    assert per["context_exhausted"] == 1
+    assert per["trailing_question"] == 0 and per["selection_menu"] == 0
+
+
+def test_unmeasured_reasons_distinguishes_the_four_ways_a_row_goes_None():
+    """The None is only actionable if it says WHY. Three reasons in one report:
+    a shell (`not_claude`), a claude pane absent from the batch
+    (`uncaptured`), and a remote host whose batch also answered."""
+    rep = waiting_gather(local={"%99": PANE_IDLE}, remote={"%21": PANE_MENU})
+    reasons = rep["summary"]["waiting"]["unmeasured_reasons"]
+    assert reasons == {"not_claude": 1, "uncaptured": 1}
+    assert rep["summary"]["waiting"]["measured"] == 1     # the remote row
+    assert rep["summary"]["waiting"]["probable"] == 1
+
+
+def test_the_renderer_says_UNMEASURED_rather_than_printing_a_zero():
+    """🔴 The plain-text reader gets the same discipline as the JSON one. A
+    `waiting: 0` line under `--no-capture` is the whole failure in one line of
+    output."""
+    text = sm.render_table(base_gather(use_capture=False))
+    assert "waiting: UNMEASURED" in text
+    assert "waiting: 0 probable" not in text
+    # ...and the measured case really does print a number, or the assertion
+    # above passes for a renderer that never prints the line at all.
+    measured = sm.render_table(waiting_gather(local={"%11": PANE_IDLE}))
+    assert "waiting: 0 probable of 1 scraped" in measured
+
+
+def test_the_renderer_prints_the_matched_line_for_every_flagged_row():
+    """The evidence has to reach the human, not only the `--json` consumer —
+    the four states a `waiting` row can be in need four different actions, and
+    only the matched line says which."""
+    text = sm.render_table(waiting_gather(local={"%11": PANE_MENU}))
+    assert "⚠ WAITING" in text
+    assert "[selection_menu]" in text
+    assert "❯ 1. Resume from summary (recommended)" in text
+    # and an unflagged report must not print the block at all
+    assert "⚠ WAITING" not in sm.render_table(
+        waiting_gather(local={"%11": PANE_IDLE}))
+
+
+def test_the_WAIT_column_never_spells_an_unmeasured_row_as_no():
+    """🔴 `?uncaptured` and `no` are six characters apart and mean opposite
+    things. The cell for an unscraped pane must not be readable as a
+    measurement."""
+    text = sm.render_table(waiting_gather(local={"%99": PANE_IDLE}))
+    row = [ln for ln in text.splitlines() if "scratch7" in ln][0]
+    assert "?uncaptured" in row
+    assert not row.endswith(" no")
+
+
+def test_the_caveat_footer_names_the_three_signals_and_the_exclusion():
+    """The enumeration is what turns `WAIT: no` from "nothing needed here" into
+    "none of these three matched" — which is all it ever meant."""
+    line = [ln for ln in sm.render_caveats(base_gather())
+            if "waiting_signal" in ln][0]
+    for sig in sm.WAITING_SIGNALS:
+        assert sig in line
+    assert "EXCLUDED" in line
+
+
+def test_the_waiting_caveat_is_structured_for_json_consumers_not_prose():
+    cav = base_gather()["caveats"]["waiting_signal"]
+    assert cav["signals"] == list(sm.WAITING_SIGNALS)
+    assert cav["scope"] == "claude_rows_only"
+    assert "prompt_buffer_text" in cav["excluded"]
+    # the exclusion states its REASON, so nobody re-litigates it from scratch
+    assert "never observed" in cav["excluded"]["prompt_buffer_text"]
+
+
+# =========================================================================== #
+# §B — BLOCKED ON ME (the clawgate approval queue)
+#
+# 🔴 The failure this closes was MEASURED, not imagined: a dogfood agent read
+# an accurate line saying `agent-ops` has no JSON API, correctly preferred this
+# script, never opened agent-ops, and so missed 11 pending approvals — four of
+# them credential-exposure or cross-user-data-leak.
+# =========================================================================== #
+def _cache(**kw):
+    body = {"count": 12, "state": "Warning", "ts": NOW - 30,
+            "detail": "12 task(s) awaiting: #172, #171, #170, #169, #168, #160",
+            "source": "clawgate"}
+    body.update(kw)
+    return lambda path: json.dumps(body)
+
+
+def test_a_fresh_cache_is_ok_and_carries_the_count():
+    got = sm.read_blocked_on_me(reader=_cache(), now=NOW)
+    assert got["status"] == "ok"
+    assert got["count"] == 12
+    assert got["cache_age_secs"] == 30
+
+
+def test_an_ABSENT_cache_is_None_and_NEVER_zero():
+    """🔴 THE TOOL'S ENTIRE THESIS, applied to its newest source. A missing file
+    rendering as "nothing is blocked on you" is the exact substitution every
+    other section of this script exists to refuse."""
+    got = sm.read_blocked_on_me(reader=lambda p: None, now=NOW)
+    assert got["status"] == "absent"
+    assert got["count"] is None, "an unread queue is not an empty queue"
+    assert got["error"] and "not measured" in got["error"].lower()
+
+
+def test_an_UNPARSEABLE_cache_is_None_and_says_so():
+    for body in ("{not json", "", "null", "[]", '{"state":"Warning"}',
+                 '{"count":"12"}', '{"count":true}'):
+        got = sm.read_blocked_on_me(reader=lambda p, b=body: b, now=NOW)
+        assert got["status"] == "unparseable", body
+        assert got["count"] is None, body
+
+
+@pytest.mark.parametrize("age,status", [
+    (0, "ok"),
+    (299, "ok"),
+    (300, "ok"),          # the boundary is EXCLUSIVE: 300 is not yet stale
+    (301, "stale"),
+    (4200, "stale"),
+])
+def test_the_staleness_boundary_is_measured_at_more_than_one_point(age, status):
+    """🔴 One measurement is not a claim about a threshold. Measured AT the
+    boundary, one second either side, and well outside it — a comparison that
+    is off by one is invisible from a single point."""
+    got = sm.read_blocked_on_me(reader=_cache(ts=NOW - age), now=NOW)
+    assert got["status"] == status
+    assert got["cache_age_secs"] == age
+
+
+def test_a_STALE_cache_still_carries_its_number_but_never_calls_it_current():
+    """The count is real, just possibly old — dropping it would lose signal,
+    and publishing it as `ok` would fabricate freshness. Both, labelled."""
+    got = sm.read_blocked_on_me(reader=_cache(ts=NOW - 9999), now=NOW)
+    assert got["status"] == "stale"
+    assert got["count"] == 12
+    assert "out of date" in got["error"]
+
+
+@pytest.mark.parametrize("ts", [None, "1786556281", True, [], {}])
+def test_a_cache_whose_AGE_cannot_be_established_is_stale_not_ok(ts):
+    """🔴 The conservative direction. A count whose freshness is unknowable is
+    not a fresh count; calling it `ok` is a guess about the writer."""
+    got = sm.read_blocked_on_me(reader=_cache(ts=ts), now=NOW)
+    assert got["status"] == "stale"
+    assert got["cache_age_secs"] is None
+    assert "freshness" in got["error"]
+
+
+def test_the_detail_string_is_NEVER_parsed_for_a_count():
+    """🔴 THE TRUNCATION TRAP, pinned. The cached `detail` names ~6 ids however
+    many are pending, and the ids it drops have included `ready_for_review`
+    items — finished work awaiting review. So the fixture deliberately
+    DISAGREES with itself: 11 pending, 6 named. Anything deriving the number
+    from the string reports 6 and loses five tasks silently.
+    """
+    reader = _cache(count=11,
+                    detail="11 task(s) awaiting: #171, #170, #169, #168, "
+                           "#160, #165")
+    got = sm.read_blocked_on_me(reader=reader, now=NOW)
+    assert got["count"] == 11, "the count is the measurement, not the string"
+    assert got["detail"].count("#") == 6, "fixture must actually be truncated"
+    assert got["detail_truncated"] is True
+    assert "TRUNCATE" in got["detail_note"].upper()
+
+
+def test_a_real_measured_zero_is_distinguishable_from_an_absent_cache():
+    """🔴 THE DISCRIMINATING CONTROL. Both are "no pending approvals" to a
+    careless reader; only one of them is a measurement, and the renderer must
+    not spell them the same."""
+    zero = sm.read_blocked_on_me(reader=_cache(count=0, detail=None), now=NOW)
+    absent = sm.read_blocked_on_me(reader=lambda p: None, now=NOW)
+    assert zero["status"] == "ok" and zero["count"] == 0
+    assert absent["status"] == "absent" and absent["count"] is None
+    a = "\n".join(sm.render_blocked_on_me(zero))
+    b = "\n".join(sm.render_blocked_on_me(absent))
+    assert a != b
+    assert "a measured zero" in a and "UNMEASURED" not in a
+    assert "UNMEASURED" in b and "NOT zero pending" in b
+
+
+def test_the_blocked_section_is_rendered_in_EVERY_state():
+    """Printed unconditionally, because the failure being closed is a reader
+    who never learned the queue exists. A section that appears only sometimes
+    is one nobody learns to look for."""
+    for reader in (_cache(), _cache(count=0), _cache(ts=NOW - 9999),
+                   lambda p: None, lambda p: "{broken"):
+        rep = base_gather(blocked_reader=reader, now=NOW)
+        text = sm.render_table(rep)
+        assert "▸ BLOCKED ON ME" in text
+
+
+def test_the_rendered_queue_points_the_reader_AT_agent_ops_for_the_full_list():
+    """🔴 Unit B's other half. This script has the COUNT; agent-ops has the
+    enumerated queue with titles. The cross-reference now sends a reader
+    toward it instead of away."""
+    text = sm.render_table(base_gather(blocked_reader=_cache(), now=NOW))
+    assert "12 clawgate task(s) pending" in text
+    assert "agent-ops" in text
+    # and the same is true when the count could NOT be read — that is exactly
+    # when a reader most needs somewhere else to look
+    absent = sm.render_table(base_gather(blocked_reader=lambda p: None))
+    assert "agent-ops" in absent
+
+
+def test_the_summary_carries_the_count_WITH_its_discriminant():
+    """The count never travels alone, in the roll-up any consumer reads first."""
+    ok = base_gather(blocked_reader=_cache(), now=NOW)
+    assert ok["summary"]["blocked_on_me"] == {"count": 12, "status": "ok"}
+    gone = base_gather(blocked_reader=lambda p: None, now=NOW)
+    assert gone["summary"]["blocked_on_me"] == {"count": None,
+                                                "status": "absent"}
+
+
+def test_the_blocked_reader_is_resolved_at_CALL_time_not_bound_as_a_default():
+    """🔴 The same hole `ch_client_factory` had, on a new seam. A default of
+    `blocked_reader=_read_blocked_text` would capture the ORIGINAL function at
+    def time, so the autouse hermeticity raiser would NOT be honoured on the
+    one path with no injection point — `main()` -> `gather()` — and the suite
+    would quietly read the operator's live queue while staying green."""
+    import inspect
+    params = inspect.signature(sm.gather).parameters
+    assert params["blocked_reader"].default is None
+    assert params["blocked_path"].default is None
+    with pytest.raises(_Forbidden):
+        base_gather(blocked_reader=None)
+
+
+def test_the_cache_path_is_the_bar_pollers_and_is_not_hardcoded_elsewhere():
+    """One constant, so the poller and the reader cannot drift apart."""
+    assert sm.BLOCKED_CACHE.endswith("/.cache/bar-status/clawgate.json")
+    seen = {}
+    sm.read_blocked_on_me(reader=lambda p: seen.setdefault("path", p) and None,
+                          now=NOW)
+    assert seen["path"] == sm.BLOCKED_CACHE
+
+
+# =========================================================================== #
+# §D — the four small ones
+# =========================================================================== #
+def test_tail_plain_drops_the_ANSI_flag_at_the_SOURCE():
+    """🔴 `--plain` removes tmux's `-e`, it does not post-process. Every
+    consumer was re-inventing the same `sed 's/\\x1b\\[[0-9;]*m//g'`, which
+    silently leaves behind every escape that is not an SGR. Not emitting them
+    is the fix; stripping them is the workaround."""
+    assert "-e" in sm.tail_argv("scratch7:3")
+    assert "-e" not in sm.tail_argv("scratch7:3", plain=True)
+    # everything else about the call is unchanged, so the default caller's
+    # bytes do not move under them
+    plain = sm.tail_argv("scratch7:3", lines=42, plain=True)
+    assert plain == ["tmux", "capture-pane", "-t", "scratch7:3", "-p",
+                     "-S", "-42"]
+
+
+def test_tail_plain_reaches_the_subprocess_and_is_recorded_in_the_json(
+        monkeypatch, capsys, absent_blocked_cache):
+    """END-TO-END through main(): the flag must change the ARGV, and the JSON
+    must say which mode produced `text` — a consumer cannot tell an ANSI-free
+    pane from a stripped one by looking at it."""
+    calls = []
+    monkeypatch.setattr(sm, "local_host_label", lambda *a, **k: "workbench")
+    monkeypatch.setattr(sm, "_default_runner",
+                        make_runner(calls=calls, local_capture="clean text\n"))
+    assert sm.main(["tail", "scratch7:3", "--host", "workbench", "--plain",
+                    "--json"]) == sm.EXIT_OK
+    blob = json.loads(capsys.readouterr().out)
+    assert blob["plain"] is True
+    assert "-e" not in calls[-1]
+
+    calls.clear()
+    assert sm.main(["tail", "scratch7:3", "--host", "workbench",
+                    "--json"]) == sm.EXIT_OK
+    blob = json.loads(capsys.readouterr().out)
+    assert blob["plain"] is False
+    assert "-e" in calls[-1]
+
+
+def test_fuzzyclaw_is_OFF_by_default_and_publishes_None_not_zero():
+    """🔴 Measured 2026-08-12: 29 live of 401 files, 363 stale, 9
+    slot-mismatched, and every live row reading `paused` — including a window
+    demonstrably running an agent. 29 rows, zero contribution, from a source
+    `CLAUDE.md` marks UNTRUSTED. Off by default; the counts stay None so the
+    absence is never a measured zero."""
+    import inspect
+    assert inspect.signature(sm.gather).parameters["use_fuzzyclaw"].default \
+        is False
+    rep = _REAL_GATHER(hosts=("workbench",), local_host="workbench",
+                       runner=make_runner(), use_ch=False, now=NOW,
+                       codenames={}, blocked_reader=lambda p: None)
+    assert rep["fuzzyclaw"]["status"] == "skipped"
+    assert rep["fuzzyclaw"]["files_seen"] is None
+    assert rep["summary"]["fuzzyclaw_live"] is None
+
+
+@pytest.mark.parametrize("argv,expect_on", [
+    ([], False),
+    (["--fuzzyclaw"], True),
+    (["--no-fuzzyclaw"], False),
+    (["--fuzzyclaw", "--no-fuzzyclaw"], False),
+    (["--no-fuzzyclaw", "--fuzzyclaw"], False),
+])
+def test_the_fuzzyclaw_flags_compose_with_explicit_OFF_winning(
+        monkeypatch, capsys, absent_blocked_cache, argv, expect_on):
+    """🔴 `--no-fuzzyclaw` KEEPS WORKING — it now names the default rather than
+    changing it, so every existing invocation behaves identically. Passing both
+    is not an error; OFF wins and `main` says so, because a silently ignored
+    flag is how a caller concludes it was honoured."""
+    seen = {}
+    monkeypatch.setattr(sm, "local_host_label", lambda *a, **k: "workbench")
+
+    def fake_gather(**kw):
+        seen.update(kw)
+        return _REAL_GATHER(**dict(kw, runner=make_runner(),
+                                   fuzzyclaw_texts=[], codenames={},
+                                   blocked_reader=lambda p: None, now=NOW))
+    monkeypatch.setattr(sm, "gather", fake_gather)
+    sm.main(["scan", "--host", "workbench", "--no-ch", *argv])
+    assert seen["use_fuzzyclaw"] is expect_on
+    err = capsys.readouterr().err
+    assert ("OFF wins" in err) is ("--fuzzyclaw" in argv
+                                   and "--no-fuzzyclaw" in argv)
+
+
+def test_no_capture_flag_reaches_gather(monkeypatch, absent_blocked_cache):
+    seen = {}
+    monkeypatch.setattr(sm, "local_host_label", lambda *a, **k: "workbench")
+
+    def fake_gather(**kw):
+        seen.update(kw)
+        return _REAL_GATHER(**dict(kw, runner=make_runner(), codenames={},
+                                   blocked_reader=lambda p: None, now=NOW))
+    monkeypatch.setattr(sm, "gather", fake_gather)
+    sm.main(["scan", "--host", "workbench", "--no-ch", "--no-capture"])
+    assert seen["use_capture"] is False
+    sm.main(["scan", "--host", "workbench", "--no-ch"])
+    assert seen["use_capture"] is True
+
+
+def test_the_documented_JSON_ROW_PATH_is_where_the_rows_actually_are():
+    """🔴 Unit D.3, pinned rather than merely written down. The skill body
+    detailed `summary` and never said rows live at `hosts.<host>.windows`,
+    which cost a dogfood agent a wasted call. A doc line drifts; an assertion
+    does not.
+    """
+    rep = base_gather()
+    for host in ("workbench", "laptop"):
+        assert isinstance(rep["hosts"][host]["windows"], list)
+    assert rep["hosts"]["workbench"]["windows"], "path must be non-empty here"
+    # the path is stated in the module docstring, so the doc and the code are
+    # checked against each other and not just against a reader's memory
+    assert 'report["hosts"][<"workbench"|"laptop">]["windows"]' in sm.__doc__
+
+
+def test_the_row_FIELD_LEDGER_fails_when_it_grows_or_shrinks():
+    """🔴 Both directions. A field that disappears turns a consumer's read into
+    a permanent None; one that appears undocumented is a contract nobody
+    reviewed. The docstring enumerates them, so it is the docstring that is
+    checked."""
+    row = base_gather()["hosts"]["workbench"]["windows"][0]
+    expected = {
+        "host", "session", "window_index", "window_id", "window_name",
+        "codename", "pane_id", "path", "command", "task", "claude", "busy",
+        "age_secs", "status", "waiting_probable", "waiting_signals",
+        "waiting_status", "claude_session_id", "fuzzyclaw", "panes",
+    }
+    assert set(row) == expected
+    for field in expected:
+        assert field in sm.__doc__, f"{field} is undocumented in the header"

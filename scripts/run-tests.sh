@@ -424,7 +424,12 @@ TARGET_FLOORS=(
   # the first gate run here reported the OLD 2535 because an untracked test is
   # silently absent from the flake source. If this line conflicts with another
   # branch, re-run the gate on the MERGED tree and copy what it prints.
-  "scripts/tests|2501"
+  #
+  # 2026-08-12, the waiting-signal branch, doing exactly what the line above
+  # says: 2551 -> 2629 collected on main + this branch, measured by the gate on
+  # the MERGED tree rather than computed from either side of the conflict.
+  #   _suggested_floor 2629 = 2629 - min(50, max(1, 131)) = 2629 - 50 = 2579.
+  "scripts/tests|2579"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
