@@ -1,6 +1,14 @@
 """Unit tests for the merged notifications pill + notification center.
 
-All OFFLINE: dunstctl/rofi are never touched. The rofi/dunstctl side-effects
+All OFFLINE — but only since `scripts/tests/conftest.py` began stubbing them.
+🔴 Until then this claim was measurably false: the `--dump` and standalone-pill
+subprocess tests below pass no `env=`, so they inherited the operator's session
+and ran the REAL `dunstctl history` / `is-paused` (3 launches, measured). Those
+verbs only read — but they read the operator's actual notification history, so
+the test meant one thing on a dev host and another in the sandbox, and
+`notif-center` is one branch away from `set-paused` / `history-clear`.
+
+The rofi/dunstctl side-effects
 aren't unit-testable, so the LOGIC is factored into pure functions and tested:
   - dunstctl-history JSON parse (unwrap the {type,data} field wrappers),
   - unseen-count vs the seen-marker (incl. marker-absent -> ALL unseen),

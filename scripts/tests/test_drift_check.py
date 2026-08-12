@@ -1348,19 +1348,38 @@ def test_the_timer_is_gated_by_the_master_switch_and_the_service_is_not():
 
     🔴 This test used to also assert `enableDriftDeadman = false;` — "the master
     switch must ship OFF, enabling a timer is a live change to a host and belongs
-    in its own supervised deploy". #406 IS that supervised deploy: it measured
-    both preconditions rather than arguing them, and set the switch to `true`.
-    It changed `nix/home.nix` and nothing else, so the assertion outlived its own
-    premise and left `main` RED — `collected=7785 passed=7783 failed=1`, the only
-    failure in either tier.
+    in its own supervised deploy". #406 IS that supervised deploy. It changed
+    `nix/home.nix` and nothing else, so the assertion outlived its own premise and
+    left `main` RED — `collected=7785 passed=7783 failed=1`, the only failure in
+    either tier.
+
+    WHAT #406 MEASURED, because it is the part worth keeping. The switch had sat
+    false since #367 behind two preconditions a scratch clone structurally cannot
+    test:
+
+      1. the ssh leg reaches the laptop from a systemd-user context (a user unit
+         has no ssh-agent) — a hand-run did it for real and found GENUINE drift
+         on its first run: the laptop 1 commit behind origin/main, rc 10;
+      2. the failure toast actually DISPLAYS — and this one was **FALSE** at
+         first. dunst was paused with 286 notifications queued, so the toast was
+         sent, exited 0, and was silently binned. Four rounds of auditing had
+         confirmed the script hands systemd the right exit code and that
+         OnFailure was wired; none of them could see that the notifier's output
+         went nowhere.
+
+    (2) is why the flag waited, and it is the reason to distrust a green here: a
+    timer alerting into a paused queue manufactures the appearance of coverage
+    over exactly the failure it exists to catch.
 
     A process rule ("do the enabling in its own deploy") is not a property a unit
     test can hold, and the one that tried became a gate everybody would have to
     merge through. What IS testable, and is what the gating actually depends on,
-    is that the switch is still declared EXPLICITLY — if it were deleted or left
-    to a default, `lib.optionals (serverMode && enableDriftDeadman)` would either
-    fail to evaluate or silently stop meaning anything, and the structural
-    assertion above would keep passing while gating nothing.
+    is that the switch is still declared EXPLICITLY and exactly once — deleted,
+    defaulted, or bound twice, `lib.optionals (serverMode && enableDriftDeadman)`
+    either fails to evaluate or quietly stops meaning anything while the
+    structural assertion above keeps passing and gates nothing. Deliberately
+    agnostic about the VALUE: pinning that again would re-break the gate the next
+    time someone legitimately changes it.
     """
     block = _drift_service_block()
     assert "mkIf" not in block, (
@@ -1883,25 +1902,204 @@ def test_settings_values_never_reach_the_output(fleet):
     )
 
 
-def test_settings_key_set_divergence_is_rc15(fleet):
-    """🔴 NEGATIVE CONTROL for the key-set check: a key present on one host and
-    absent on the other, watched red with this code's own message."""
+def _two_host_parity(fleet, local_keys, remote_keys, **env):
+    """Run the checker across two fixture homes differing only in settings keys.
+
+    Both sides carry the same plugin state, so the ONLY thing that can move the
+    verdict is the top-level key set — otherwise a green here could come from a
+    plugin agreement rather than from the key comparison under test.
+    """
     fleet.catch_up()
-    lstore = _mkhome(fleet.home, healthy=1,
-                     settings_keys=["hooks", "permissions", "theme"],
+    lstore = _mkhome(fleet.home, healthy=1, settings_keys=local_keys,
                      enabled=["gopls-lsp@m"], installed=["gopls-lsp@m"])
     rhome = fleet.root / "remote-home"
     rhome.mkdir()
     rstore = _mkhome(rhome, healthy=1, store=fleet.root / "remote-store",
-                     settings_keys=["hooks", "effortLevel", "voice"],
+                     settings_keys=remote_keys,
                      enabled=["gopls-lsp@m"], installed=["gopls-lsp@m"])
     _remote_running_the_real_payload(fleet, rhome, rstore)
+    return _parity(fleet, store=lstore, REMOTE_SSH="stub@example.invalid", **env)
 
-    rc, out = _parity(fleet, store=lstore, REMOTE_SSH="stub@example.invalid")
+
+def test_settings_key_set_divergence_is_rc15(fleet):
+    """🔴 NEGATIVE CONTROL for the key-set check: a key present on one host and
+    absent on the other, watched red with this code's own message.
+
+    🔴 The keys here are deliberately NOT the ones on the per-host allowlist
+    (`theme`/`voice`/`effortLevel`). This test previously used exactly those, so
+    scoping the comparison would have turned the subsystem's primary negative
+    control green while looking like a test that still fired. `statusLine` and
+    `hooks` are the right shape: a host quietly losing either is the failure this
+    check exists for, and neither is anybody's preference.
+    """
+    rc, out = _two_host_parity(
+        fleet,
+        ["hooks", "permissions", "statusLine"],
+        ["hooks", "env", "model"],
+    )
     assert rc == 15, f"diverging key sets must be rc 15, got {rc}\n{out}"
     assert "settings.json top-level KEY SETS differ" in out, out
-    assert "only on workbench: permissions theme" in out, out
-    assert "only on laptop: effortLevel voice" in out, out
+    assert "only on workbench: permissions statusLine" in out, out
+    assert "only on laptop: env model" in out, out
+
+
+# --- the per-host allowlist ------------------------------------------------- #
+#
+# 🔴 WHAT THIS SECTION IS DEFENDING. `~/.claude/settings.json` is per-host and
+# unmanaged by design, so a handful of keys can NEVER agree across the fleet and
+# the deadman was red on them from its first autonomous run. The fix is a scoped
+# comparison — and the way a scoped comparison fails is by scoping away
+# EVERYTHING, which leaves a green deadman wired to nothing. So every test below
+# is paired: one asserting the allowlisted keys go quiet, one asserting that a
+# key beside them still fires.
+ALLOWLISTED = ("effortLevel", "theme", "voice")
+
+
+def _perhost_reason(key):
+    """Call the script's own `perhost_reason` for `key`, in isolation.
+
+    Extracted and executed rather than re-implemented: a second copy of the
+    enumeration in the test file would agree with itself forever while the script
+    drifted, which is the shape of guard this repo keeps finding.
+    """
+    src = DRIFT.read_text()
+    i = src.index("perhost_reason() {")
+    j = src.index("\n}\n", i) + 3
+    proc = subprocess.run(
+        ["bash", "-c", src[i:j] + '\nperhost_reason "$1"\n', "_", key],
+        capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout.strip()
+
+
+def test_the_measured_live_divergence_is_no_longer_drift(fleet):
+    """🔴 THE RED THIS CHANGE EXISTS TO FIX, in the shape measured on 2026-08-11.
+
+    Four keys differed on the live fleet: `theme` (workbench only), `voice` and
+    `effortLevel` (laptop only) — all per-host preference — and `permissions`,
+    which is a real gap and is NOT allowlisted. With `permissions` present on
+    both hosts (the state `scripts/sync-claude-permissions.sh` produces on the
+    laptop), the remaining three must produce rc 0.
+    """
+    rc, out = _two_host_parity(
+        fleet,
+        ["hooks", "permissions", "theme"],
+        ["hooks", "permissions", "effortLevel", "voice"],
+    )
+    assert rc == 0, f"the per-host preference keys still fail the deadman: {rc}\n{out}"
+    assert "AGREE apart from the per-host keys below" in out, out
+    # 🔴 SILENCED IS NOT HIDDEN. Each exempted key is named with its reason, in
+    # the same block as the verdict — a tolerated difference and a difference
+    # nobody looked at must never print the same way.
+    assert "IGNORED (allowlisted in drift-check.sh, not drift)" in out, out
+    for key in ALLOWLISTED:
+        assert key in out, f"exempted key {key} vanished from the report\n{out}"
+    assert "per-host by design: terminal colour theme" in out, out
+    assert "per-host by design: TTS voice" in out, out
+    assert "per-host by design: reasoning-effort" in out, out
+
+
+def test_the_measured_live_divergence_still_fires_on_permissions(fleet):
+    """The OTHER half of the pair, in the same measured shape: before the laptop
+    gets a permissions block, the check must still be red — and red naming ONLY
+    `permissions`, not the three preference keys it now tolerates.
+
+    This is what makes the rc 0 above a measurement rather than a silencing.
+    """
+    rc, out = _two_host_parity(
+        fleet,
+        ["hooks", "permissions", "theme"],
+        ["hooks", "effortLevel", "voice"],
+    )
+    assert rc == 15, f"the real permissions gap was swallowed by the allowlist: {rc}\n{out}"
+    assert "only on workbench: permissions" in out, out
+    drift_lines = [ln for ln in out.splitlines()
+                   if ln.startswith("[parity]   only on")
+                   and "per-host by design" not in ln]
+    assert drift_lines == ["[parity]   only on workbench: permissions"], (
+        "the DRIFT verdict named a key the allowlist covers\n" + "\n".join(drift_lines)
+    )
+
+
+@pytest.mark.parametrize("unknown", ["autoCompactWindow", "zzSomeFutureKey"])
+def test_an_unknown_key_beside_allowlisted_ones_still_fires(fleet, unknown):
+    """🔴 FAILS CLOSED. The allowlist is an enumeration, so a key nobody has
+    argued about — an upstream addition, a rename, a typo — is drift by default
+    EVEN WHEN it arrives alongside keys that are legitimately exempt.
+
+    Parameterised over a real Claude Code key and an invented one: a guard that
+    only rejects made-up names would be spelled rather than structural.
+    """
+    rc, out = _two_host_parity(
+        fleet,
+        ["hooks", "theme", unknown],
+        ["hooks", "voice", "effortLevel"],
+    )
+    assert rc == 15, f"an unknown key was silently exempted: {rc}\n{out}"
+    assert "only on workbench: %s" % unknown in out, out
+    assert "theme" not in out.split("IGNORED")[0].split("KEY SETS differ")[-1], (
+        "an allowlisted key was reported as drift\n" + out
+    )
+
+
+def test_the_allowlist_is_not_a_wildcard():
+    """🔴 THE MUTANT THAT DISARMS THE DEADMAN, pinned directly.
+
+    `perhost_reason` returning a reason for everything makes every future
+    divergence invisible while every behavioural test above still passes on its
+    happy path. So assert the enumeration BOTH ways: each listed key has a
+    reason, and keys that are not listed have none.
+    """
+    for key in ALLOWLISTED:
+        why = _perhost_reason(key)
+        assert why, f"allowlisted key {key} carries no reason"
+        assert len(why) > 20, f"the reason for {key} is not a reason: {why!r}"
+    for key in ("permissions", "hooks", "statusLine", "enabledPlugins", "env",
+                "model", "alwaysThinkingEnabled", "", "*", "zzSomeFutureKey"):
+        assert _perhost_reason(key) == "", (
+            f"{key!r} is exempt from the parity check and nobody decided that"
+        )
+
+
+def test_the_allowlist_cannot_be_widened_from_the_environment(fleet):
+    """🔴 Every other tunable in this file is an env override. This one must not
+    be: a stray export in a unit file or a shell profile could otherwise widen it
+    to everything, and the resulting green would be indistinguishable from a real
+    pass. Both halves are asserted — no such variable is READ by the script, and
+    setting the plausible names changes nothing.
+    """
+    src = "\n".join(ln for ln in DRIFT.read_text().splitlines()
+                    if not ln.strip().startswith("#"))
+    assert not re.search(r"DRIFT_(PERHOST|ALLOW|IGNORE|EXEMPT)", src), (
+        "the per-host allowlist reads an environment variable — it must be "
+        "reviewable source, not runtime input"
+    )
+    rc, out = _two_host_parity(
+        fleet,
+        ["hooks", "permissions"],
+        ["hooks"],
+        DRIFT_PERHOST_KEYS="permissions",
+        DRIFT_ALLOW_KEYS="permissions",
+        DRIFT_IGNORE_KEYS="permissions",
+        DRIFT_EXEMPT_KEYS="permissions",
+    )
+    assert rc == 15, f"an env var widened the allowlist: {rc}\n{out}"
+    assert "only on workbench: permissions" in out, out
+
+
+def test_an_allowlisted_key_present_on_BOTH_hosts_is_not_reported(fleet):
+    """The allowlist scopes the DIFFERENCE, not the key. A key both hosts have is
+    not a difference at all, so it must not appear in the IGNORED block — that
+    block is a record of decisions actually applied, and padding it with keys
+    that never diverged would make it noise nobody reads."""
+    keys = ["hooks", "theme", "voice"]
+    rc, out = _two_host_parity(fleet, keys, keys)
+    assert rc == 0, out
+    assert "key sets AGREE (4 key names on each host)" in out, out
+    assert "IGNORED" not in out, (
+        "keys that agree were listed as allowlisted exemptions\n" + out
+    )
 
 
 def test_identical_key_sets_agree(fleet):

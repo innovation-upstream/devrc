@@ -385,18 +385,23 @@ fi
 # below fails naming it. Run the gate once, read that target's `collected=`, and
 # write `collected - min(50, max(1, collected/20))`.
 TARGET_FLOORS=(
-  # 2026-08-11, the session-manager agent/shell split (+21 tests). MEASURED with
-  # the authoritative gate at BOTH ends rather than added to the previous
-  # comment's number: `nix build .#checks.x86_64-linux.pytests` printed
-  # `collected=2255` at the base commit 7d86237 and `collected=2276` on this
-  # branch — +21, exactly the tests this change adds, and nothing else on this
-  # target moved. 2276 - min(50, max(1, 2276/20)) = 2276 - 50 = 2226, from
-  # `_suggested_floor` itself, not from arithmetic anyone did by hand.
+  # 2026-08-11, re-pinned after the session-manager branch merged main: 1873 was
+  # measured against a ~1923-test suite and the suite is now 2251, so it carried
+  # 378 tests of SLACK — more than this branch's entire suite could vanish with
+  # the gate still green, and only ~100 short of the drift error an unrelated
+  # author would then have to reconcile. 2251 - min(50, max(1, 2251/20)) = 2201,
+  # the gate's own printed count put through the rule above (and through
+  # `_suggested_floor` in BOTH its shell and python spellings, which agree).
   #
-  # (The 2251/2201 pair this replaces was measured on an older tree; the base
-  # here is 2255. That is why the floor is re-pinned from a fresh measurement
-  # instead of nudged — a floor is a function of the CURRENT count.)
-  "scripts/tests|2226"
+  # 2026-08-11, the `/handoff` subsystem-index writer: 2251 -> 2455 collected,
+  # +134 for scripts/tests/test_subsystem_touch.py and +70 that arrived with
+  # main since the line above was written. Re-measured, not computed: the number
+  # is `_suggested_floor 2455` — the gate's OWN function, so what it suggests is
+  # by construction what it accepts. The suite needed no HERMETIC_TARGETS entry
+  # (scripts/tests is already a directory target) and adds ZERO skips, so
+  # EXPECTED_SKIPS is untouched; movement on THIS line is the evidence the gate
+  # runs the new file at all.
+  "scripts/tests|2405"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
@@ -407,7 +412,15 @@ TARGET_FLOORS=(
   # gate runs the new file at all.
   "scripts/collector/tests|260"
   "scripts/collector/keylog/tests|79"
-  "scripts/collector/claude/tests|59"
+  # 2026-08-11, the malformed-`file_path` abort fix: +28 tests here (the
+  # extraction-site guard, run()'s per-session skip-and-report, the exit-status
+  # contract that makes `failed=N` reach systemd, and the audit round that moved
+  # `build_event` inside the try). The gate printed `collected=115 … floor=105`
+  # on the run that set this; the 59 it started from was ALSO already 46 behind
+  # — inside the drift band (max(60, 59/4)) and therefore silent, the same slack
+  # the line above was re-pinned for. Rule applied to the gate's own count:
+  # 115 - min(50, max(1, 115/20)) = 115 - 5 = 110.
+  "scripts/collector/claude/tests|110"
   "scripts/collector/i3/tests|12"
   "scripts/collector/browser-ext/tests|12"
   "scripts/collector/opencode/tests|162"

@@ -1,7 +1,13 @@
 """Unit tests for monitor-blackout.sh — DDC-CI backlight control with fade.
 
-All OFFLINE: no ddcutil, no systemctl. The script is tested via subprocess with
-mocked ddcutil and systemctl commands.
+🔴 "All OFFLINE" was FALSE: every test here stubbed `ddcutil` and `systemctl`
+and NONE stubbed `systemd-run`, so `schedule_restore` created REAL transient
+timers — `--unit=monitor-blackout-restore-v2 --on-active=8h`, four of them per
+run, on the operator's live session, with the suite green. It is offline NOW
+because `scripts/tests/conftest.py` installs a record-only stub dir first on
+PATH for the whole suite; nothing in THIS file provides that.
+
+The script is tested via subprocess with mocked ddcutil and systemctl commands.
 
     run:  pytest scripts/tests/test_monitor_blackout.py
 """
