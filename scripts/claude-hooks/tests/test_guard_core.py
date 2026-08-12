@@ -2422,6 +2422,172 @@ def test_resolve_dir_is_the_single_path_resolver(tmp_path, monkeypatch):
 
 
 # =========================================================================== #
+# 8x. 🔴 WHICH REPO GETS JUDGED — the named-target fail-OPEN (2026-08-11)
+#
+# THE REPORTED SYMPTOM was a false POSITIVE: with cwd on `trunk`,
+#     git -C /home/zach/workspace/civit/spine-wan-peer-metric commit -F <msg>
+# was denied naming the CWD's repo, even though the `-C` target sat on a feature
+# branch. That direction is ALREADY FIXED — `_argv_named_repo_dirs` landed with
+# #376 and the probe below is green on `origin/main`. These tests pin it so it
+# stays fixed, and are labelled INVARIANT GUARDS, not regression coverage:
+# `test_S2_*`, `test_S3_*`, `test_S4_*`, `test_S5_*` are all green at
+# `origin/main`. Per claude/RULES.md, a guard pinning an invariant the bug never
+# violated does not get counted as regression coverage.
+#
+# 🔴 WHAT WAS ACTUALLY BROKEN — found by probing the LIVE hook rather than by
+# reading the report — is the fail-OPEN sibling of that same resolution step:
+#     ALLOW  git -C <an-ordinary-directory> commit -m x      (cwd on trunk)
+# Naming a repo hands the entire verdict to that repo. When the named directory
+# EXISTS but is not a git worktree, `_resolve_dir` accepts it (it only asks
+# `isdir`) and `_commit_to_main_reason` then fails open on "no branch" — so the
+# cwd, which really was on trunk, is never evaluated at all. One `-C` at a
+# harmless-looking path disables the check for the whole command. That is the
+# fail-open the guard exists to prevent, and `test_S6_*` is REGRESSION coverage:
+# it is RED at `origin/main` and green at HEAD.
+# --------------------------------------------------------------------------- #
+
+_FEATURE = "feat/wan-peer-availability-metric"     # the branch from the report
+_TALOS = "git@github.com:ZacxDev/homelab-infra.git"  # the ONE allowlisted repo
+
+
+def test_S1_bare_commit_from_a_trunk_cwd_is_still_blocked(tmp_path):
+    """Scenario 1 — the core guarantee. Everything else here is a refinement of
+    WHICH repo gets judged; if this ever goes green-allow the guard is inert."""
+    repo = _mkrepo(tmp_path / "cwd-trunk", branch="trunk")
+    assert gc.check_git_commit_to_main("git commit -m x", str(repo)) is not None
+
+
+def test_S2_dash_C_to_a_feature_repo_from_a_trunk_cwd_is_allowed(tmp_path):
+    """Scenario 2 — the reported false positive. INVARIANT GUARD (green at
+    origin/main). The command said where it acts; the cwd's branch is not the
+    question being asked."""
+    cwd = _mkrepo(tmp_path / "cwd-trunk", branch="trunk")
+    target = _mkrepo(tmp_path / "target-feat", branch=_FEATURE)
+    assert gc.check_git_commit_to_main(
+        f"git -C {target} commit -m x", str(cwd)) is None
+    # …and with the exact `-F <msgfile>` spelling from the incident report.
+    assert gc.check_git_commit_to_main(
+        f"git -C {target} commit -F /tmp/msg.txt", str(cwd)) is None
+
+
+def test_S3_dash_C_to_a_trunk_repo_from_a_feature_cwd_is_blocked(tmp_path):
+    """Scenario 3 — the bidirectional half, and the one that would be a real
+    hole. INVARIANT GUARD (green at origin/main). A feature-branch cwd must not
+    vouch for a `-C` target sitting on trunk."""
+    cwd = _mkrepo(tmp_path / "cwd-feat", branch=_FEATURE)
+    target = _mkrepo(tmp_path / "target-trunk", branch="trunk")
+    reason = gc.check_git_commit_to_main(f"git -C {target} commit -m x", str(cwd))
+    assert reason is not None
+    # The message must name the repo it JUDGED, not the cwd — the misattribution
+    # in the report ("repo: …/civitai-gpu-fleet") is what made it unreadable.
+    assert str(target) in reason and str(cwd) not in reason
+
+
+def test_S4_dash_C_to_the_allowlisted_trunk_deploy_repo_is_allowed(tmp_path):
+    """Scenario 4 — the allowlist must survive the `-C` hop. INVARIANT GUARD.
+    Judging the cwd instead would deny a commit that IS the correct workflow."""
+    cwd = _mkrepo(tmp_path / "cwd-trunk", branch="trunk")
+    talos = _mkrepo(tmp_path / "homelab-talos", branch="trunk", remote=_TALOS)
+    assert gc.check_git_commit_to_main(f"git -C {talos} commit -m deploy", str(cwd)) is None
+
+
+def test_S5_dash_C_after_the_subcommand_is_not_a_repo_selector(tmp_path):
+    """Scenario 5 — `git commit -C HEAD~1` is "reuse that commit's message", a
+    completely different flag. Reading it as a repo path is the permissive
+    misparse: it would hop the verdict away from the cwd. INVARIANT GUARD."""
+    repo = _mkrepo(tmp_path / "cwd-trunk", branch="trunk")
+    for cmd in ["git commit -C HEAD~1", "git commit -C HEAD", "git commit --reuse-message=HEAD~1"]:
+        assert gc.check_git_commit_to_main(cmd, str(repo)) is not None, cmd
+    # The collision made concrete: a real feature repo named AFTER the subcommand
+    # must not launder the commit either — post-subcommand `-C` is not a path.
+    feat = _mkrepo(tmp_path / "feat", branch=_FEATURE)
+    assert gc.check_git_commit_to_main(f"git commit -C {feat}", str(repo)) is not None
+
+
+def test_S6_a_named_target_that_is_not_a_repo_fails_CLOSED(tmp_path):
+    """🔴 Scenario 6 — REGRESSION coverage. RED at origin/main, green at HEAD.
+
+    An existing-but-not-a-git directory passed to `-C` used to suppress the check
+    entirely (`_resolve_dir` accepts any real dir; `_commit_to_main_reason` then
+    fails open on "no branch"), so the trunk cwd was never judged. The verdict
+    must fall back to the cwd and BLOCK.
+    """
+    cwd = _mkrepo(tmp_path / "cwd-trunk", branch="trunk")
+    plain = tmp_path / "just-a-directory"
+    plain.mkdir()
+    assert gc._git_read(str(plain), "rev-parse", "--show-toplevel") is None  # precondition
+    assert gc.check_git_commit_to_main(f"git -C {plain} commit -m x", str(cwd)) is not None
+    # …the same hole through git's other repo-selecting globals.
+    assert gc.check_git_commit_to_main(
+        f"git --git-dir={plain} commit -m x", str(cwd)) is not None
+    assert gc.check_git_commit_to_main(
+        f"git --work-tree {plain} commit -m x", str(cwd)) is not None
+
+
+def test_S6b_a_junk_named_target_cannot_be_vouched_for_by_a_real_one(tmp_path):
+    """The MIXED named set — one resolvable repo plus one junk target. Ambiguous
+    about where the commit lands, so it fails closed onto the cwd. This is the
+    test that distinguishes `not all(...)` from `not any(...)`."""
+    cwd = _mkrepo(tmp_path / "cwd-trunk", branch="trunk")
+    feat = _mkrepo(tmp_path / "feat", branch=_FEATURE)
+    plain = tmp_path / "just-a-directory"
+    plain.mkdir()
+    assert gc.check_git_commit_to_main(
+        f"git -C {feat} --git-dir={plain} commit -m x", str(cwd)) is not None
+
+
+def test_S6d_the_deny_explains_WHY_it_judged_the_cwd_instead(tmp_path):
+    """Falling back to the cwd produces a deny naming a repo the user never wrote
+    in the command — unreadable unless it says why. The two fallbacks have
+    DIFFERENT causes and must not share one message: `unresolved` is a path the
+    guard could not turn into a directory (a shell variable), this one is a path
+    that resolved fine and simply is not a repo. Asserted on the STATE (the named
+    path appears, and the not-a-worktree wording) rather than on any single word
+    another branch could also spell.
+    """
+    cwd = _mkrepo(tmp_path / "cwd-trunk", branch="trunk")
+    plain = tmp_path / "just-a-directory"
+    plain.mkdir()
+    reason = gc.check_git_commit_to_main(f"git -C {plain} commit -m x", str(cwd))
+    assert reason is not None
+    assert str(plain) in reason
+    assert "not a git worktree" in reason
+    # …and it must NOT claim the path was unresolvable — that is the other cause.
+    assert "could not resolve" not in reason
+
+
+def test_S6c_failing_closed_does_not_block_a_harmless_cwd(tmp_path):
+    """The other side of S6: falling back to the cwd is a FALLBACK, not a blanket
+    deny. From a feature-branch cwd the same unjudgeable `-C` stays allowed —
+    otherwise the fix would be indistinguishable from "always block"."""
+    cwd = _mkrepo(tmp_path / "cwd-feat", branch=_FEATURE)
+    plain = tmp_path / "just-a-directory"
+    plain.mkdir()
+    assert gc.check_git_commit_to_main(f"git -C {plain} commit -m x", str(cwd)) is None
+
+
+@pytest.mark.parametrize("branch", ["main", "master", "trunk"])
+def test_S7_every_main_branch_name_blocks_through_the_dash_C_hop(tmp_path, branch):
+    """Scenario 7 — all three names, judged through `-C` rather than the cwd, so
+    this pins the branch set on the RESOLVED repo and not just on the cwd path."""
+    cwd = _mkrepo(tmp_path / "cwd-feat", branch=_FEATURE)
+    target = _mkrepo(tmp_path / f"target-{branch.replace('/', '-')}", branch=branch)
+    assert gc.check_git_commit_to_main(
+        f"git -C {target} commit -m x", str(cwd)) is not None, branch
+
+
+def test_is_git_worktree_can_return_both_verdicts(tmp_path):
+    """Positive + negative control on the new helper itself. A helper stubbed to
+    a constant would make S6 pass for the wrong reason in one direction and S2 in
+    the other, so both are asserted here rather than inferred."""
+    repo = _mkrepo(tmp_path / "r", branch="main")
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert gc._is_git_worktree(str(repo)) is True
+    assert gc._is_git_worktree(str(plain)) is False
+    assert gc._is_git_worktree(str(tmp_path / "absent")) is False
+    assert gc._is_git_worktree(None) is False
+
 # --- 9. 🔴 WHICH TREE, AND THE HEREDOC SWALLOW (2026-08-11) ----------------- #
 #
 # Two defects, found by replaying real session transcripts rather than by
@@ -2513,13 +2679,62 @@ def test_variable_resolution_never_turns_a_blocked_repo_into_an_allowed_one(tmp_
         f". {env}\ngit -C \"$WT\" commit -m x", str(wt)) is not None
 
 
-def test_a_variable_assigned_twice_is_not_guessed(tmp_path):
-    """Ambiguity falls back to the cwd rather than picking a winner. Two
-    different literals for one name means the guard does not know the value, and
-    a guard that does not know must not pretend it does."""
-    repo, wt = _trunk_and_worktree(tmp_path)
-    cmd = f"WT={wt}\nWT={repo}\ngit -C \"$WT\" commit -m x"
-    assert gc.check_git_commit_to_main(cmd, str(repo)) is not None
+def test_the_commands_own_assignment_beats_an_AMBIENT_export_of_that_name(
+        tmp_path, monkeypatch):
+    """🔴 Both directions of a precedence bug, and one of them FAILS OPEN.
+
+    `expandvars` reads the hook process's own environment, and this host exports
+    handles (`$DEVRC`, `$DATAPACKET`, …) that a command can perfectly well
+    reassign. Resolving the ambient value first meant the guard and the shell
+    disagreed about which repo was being committed in. Measured against that
+    order, with `WT` exported AND reassigned in the command:
+
+        ambient=<feature>, command re-points at <main>  -> ALLOW  (fail-open:
+            the commit really does land on main)
+        ambient=<main>, command re-points at <feature>  -> DENY   (false
+            positive on work that was never on main)
+
+    A shell uses the assignment it just executed. The fail-open half is the one
+    that matters: it is a silent commit onto a main branch, which is the entire
+    hazard this check exists for.
+    """
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    on_feat = _mkrepo(tmp_path / "feat-repo", branch="feat/x")
+    innocent = _mkrepo(tmp_path / "cwd-repo", branch="feat/cwd")
+
+    monkeypatch.setenv("WT", str(on_feat))          # ambient says "harmless"
+    assert gc.check_git_commit_to_main(             # …command says otherwise
+        f'WT={on_main}; git -C "$WT" commit -m x', str(innocent)) is not None
+
+    monkeypatch.setenv("WT", str(on_main))          # ambient says "blocked"
+    assert gc.check_git_commit_to_main(             # …command says otherwise
+        f'WT={on_feat}; git -C "$WT" commit -m x', str(innocent)) is None
+
+
+def test_an_ambient_handle_still_resolves_when_the_command_sets_nothing(
+        tmp_path, monkeypatch):
+    """The non-regression half: preferring `cvars` must not stop reading the
+    environment at all. A handle the hook really does inherit, and that the
+    command never reassigns, still resolves to the repo it names."""
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    on_feat = _mkrepo(tmp_path / "feat-repo", branch="feat/x")
+    monkeypatch.setenv("SOME_REPO_HANDLE", str(on_main))
+    assert gc.check_git_commit_to_main(
+        'git -C "$SOME_REPO_HANDLE" commit -m x', str(on_feat)) is not None
+
+
+def test_an_ambiguous_name_does_not_fall_through_to_the_ambient_value(
+        tmp_path, monkeypatch):
+    """🔴 The interaction between this precedence and `cvars`' own fail-closed
+    rule. A name assigned TWICE is deliberately dropped from `cvars` — it must
+    then take the cwd fallback, NOT quietly resolve to an ambient export of the
+    same name, which would reintroduce exactly the disagreement above by the
+    back door."""
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    on_feat = _mkrepo(tmp_path / "feat-repo", branch="feat/x")
+    monkeypatch.setenv("WT", str(on_feat))          # ambient looks harmless
+    cmd = f'WT={on_main}\nWT={on_feat}\ngit -C "$WT" commit -m x'
+    assert gc.check_git_commit_to_main(cmd, str(on_main)) is not None
 
 
 def test_a_heredoc_BODY_cannot_inject_a_variable(tmp_path):
@@ -2729,3 +2944,801 @@ def test_the_hot_path_reads_no_files_and_execs_no_git(tmp_path, monkeypatch):
     # …and the positive control: with a REAL commit present, it IS read.
     gc.evaluate(f". {env}\ngit -C \"$WT\" commit -m x", "claude-code", str(repo))
     assert [o for o in opened if str(env) in o], "the env file was never read at all"
+# =========================================================================== #
+# --- 9. 🔴 ONE APOSTROPHE IN A HEREDOC BODY DISABLED EVERY ARGV CHECK ------- #
+#
+# A heredoc body is PROSE, and the scanner tracked quote state through it. A
+# lone apostrophe (`don't`, `it's`) opened a quote that never closed, so every
+# command AFTER the heredoc was swallowed into that quoted buffer and never
+# parsed as its own segment. `_tokenise` then fell back to a whitespace split
+# whose argv[0] is a word from the message, and every argv check silently
+# stopped matching — not just the commit one. Measured on the shipped guard,
+# eight families, all ALLOW; all DENY with the apostrophe removed.
+#
+# Every test in this section was watched RED against the pre-change
+# guard_core.py and GREEN after. The fix is in `_scan`: heredoc bodies are
+# LIFTED out of the surrounding quote state (and then parsed as commands exactly
+# as before — nothing is blanked), and an unterminated quote from ANY source
+# re-scans its own tail.
+# =========================================================================== #
+
+def test_a_body_documenting_a_ban_still_denies_via_the_escape_hatch(tmp_path):
+    """The deliberate false positive the DESIGN NOTE accepts, re-asserted
+    through the new path. Lifting a body must not turn it into inert text — a
+    body LINE that IS a banned command is still parsed as that command and
+    denied, whether or not it would ever execute, and the deny still carries the
+    documented way out.
+
+    The `never run …` arm is the boundary, and it is ALLOW on the shipped guard
+    too: the checks key on argv[0], so prose that merely MENTIONS a command is
+    not one. Asserted rather than assumed, because "a body is still checked" and
+    "any body containing the word is denied" are different claims and only the
+    first is true.
+    """
+    repo = _mkrepo(tmp_path / "r", branch="main")
+    reason = gc.evaluate("cat > /tmp/doc.md <<EOF\ngit stash\nEOF",
+                         "claude-code", str(repo))
+    assert reason is not None
+    assert "Only QUOTING this command" in reason
+    assert gc.evaluate("cat > /tmp/doc.md <<EOF\nnever run git stash here\nEOF",
+                       "claude-code", str(repo)) is None
+
+
+@pytest.mark.parametrize("cmd,expect_body", [
+    ("cat <<'EOF'\nbody line\nEOF", "body line"),
+    ('cat <<"EOF"\nbody line\nEOF', "body line"),
+    ("cat <<EOF\nbody line\nEOF", "body line"),
+    ("cat <<\\EOF\nbody line\nEOF", "body line"),
+    ("cat <<-EOF\n\tbody line\n\tEOF", "\tbody line"),
+    ("cat <<EOF\nbody line", "body line"),            # unterminated -> runs to EOF
+])
+def test_scan_lifts_every_heredoc_spelling_INCLUDING_backslash(cmd, expect_body):
+    """The tag parser, per spelling — all five name the same terminator. `<<-`
+    strips leading TABS from the terminator LINE only; the body text itself is
+    preserved, because the guard reads it as commands and must not invent
+    whitespace changes."""
+    _segs, _subs, bodies = gc._scan(cmd)
+    assert bodies == [expect_body], (cmd, bodies)
+
+
+@pytest.mark.parametrize("cmd", [
+    'cat <<< "x"; git stash push -m wip',
+    'cat <<< "x"\ngit stash push -m wip',
+    "cat <<<x\ngit stash push -m wip",
+    "cat <<<EOF\ngit stash push -m wip",
+    "grep foo <<<$VAR\ntalosctl -n 1.2.3.4 reset",
+])
+def test_a_here_STRING_is_not_a_heredoc_at_ANY_position(cmd):
+    """🔴 `<<<` has no body and no terminator line. Reading it as one consumes
+    the rest of the text as an unterminated body — the exact failure this change
+    fixes, reintroduced in a new place.
+
+    The three bare-word arms are the ones that matter, and they are why the
+    here-string is skipped WHOLE rather than excluded inside the heredoc branch:
+    a `not startswith("<<<")` test only protects the FIRST `<`, and the scan
+    visits the second one too, where `<<<x` reads as `<<` + tag `x`. Measured
+    on the first draft of this change — and on PR #396 — as a body swallowing
+    everything after it.
+    """
+    segs, _subs, bodies = gc._scan(cmd)
+    assert bodies == [], (cmd, bodies)
+    assert any(s.text.strip().startswith(("git stash", "talosctl"))
+               for s in segs), segs
+
+
+def test_an_unterminated_quote_does_not_blind_the_tail(tmp_path):
+    """The second half of the fix, with NO heredoc in sight — the swallow needs
+    only an ODD number of quote characters. Both arms below were measured ALLOW
+    on the shipped guard.
+
+    Note the near-miss third arm, which was ALREADY denied and is here as the
+    control: `isn't … done` closes its own quote by accident, so the tail was
+    never buried. An unpaired quote is the trigger, not an apostrophe.
+    """
+    repo = _mkrepo(tmp_path / "r", branch="main")
+    assert gc.evaluate("echo 'oops; talosctl -n 1.2.3.4 reset",
+                       "claude-code", str(repo)) is not None
+    assert gc.evaluate('echo "half open; talosctl -n 1.2.3.4 reset',
+                       "claude-code", str(repo)) is not None
+    assert gc.evaluate("echo 'it isn't done; talosctl -n 1.2.3.4 reset",
+                       "claude-code", str(repo)) is not None
+
+
+# --- 9a. 🔴 THE UNION — why the shipped parse is KEPT, not replaced --------- #
+
+def test_the_shipped_parse_is_kept_so_a_lift_cannot_lose_a_deny(tmp_path):
+    """🔴 THE MUTATION TARGET OF THIS WHOLE CHANGE, and the reason
+    `_scan(_lift=False)` exists.
+
+    Lifting a heredoc body out CHANGES THE QUOTE STATE of everything after it.
+    The old scanner's runaway quote sometimes left a `$( )`/backtick
+    substitution UNQUOTED — and therefore visible — where the clean parse leaves
+    the same bytes inside a quote that now balances. Neither reading is "right"
+    about text bash itself rejects; a guard simply must not lose the deny.
+
+    These four inputs were found by a 20,000-input verdict fuzz and are the ONLY
+    four it found. Their red/green baselines are NOT origin/main — they DENY
+    there, which is the whole point — they are RED against a scanner that lifts
+    heredocs WITHOUT keeping the shipped parse (measured: all four ALLOW). They
+    are green here because `split_commands` unions the shipped parse back in.
+    Delete that union, or make legacy mode lift heredocs, and these go red.
+    """
+    repo = _mkrepo(tmp_path / "r", branch="main")
+    for cmd in [
+        "'stash' | <<-EOF\nadd\n-f\nit's\nEOF\n | of=/dev/sdc & $(cat); "
+        "<<< it's && 'mkfs.ext4' && FOO=1 || e2e/run.sh || pkill | ",
+
+        "'origin/main'; `e2e/run.sh` | <<-EOF\npkill\n-f\ngit\ndon't\nEOF\n; "
+        "( x won't ) || ( env clean cat ) | <<-EOF\n\nEOF\n\n\"mkfs.ext4\" | "
+        "<<-EOF\n\nEOF\n | '-fd' ",
+
+        "'-m' || <<-EOF\nit's\nEOF\n\n\"won't && clean; bash `mkfs.ext4`\n"
+        "'cat'; $(won't -f mkfs.ext4)\n",
+
+        "'-fd'; <<\"MSG\"\ncommit\nMSG\n && <<< mkfs.ext4 || <<-EOF\nbash\n"
+        "--all\n--all\nmkfs.ext4\nEOF\n & \"/tmp/m\" && \"-m\"\n'-C' & <<MSG\n"
+        "bash\nhi\nif=/dev/zero\nls\nMSG\n\n'commit'; ",
+    ]:
+        assert gc.evaluate(cmd, "opencode", str(repo)) is not None, cmd
+
+
+def test_legacy_scan_mode_is_the_shipped_scanner(tmp_path):
+    """`_lift=False` must stay the OLD behaviour, or the union above stops being
+    a union of anything. Pinned by the two properties that define it: it emits
+    NO heredoc bodies, and it does not recover from an unterminated quote — so
+    the tail really is buried in one segment, exactly as it ships today."""
+    cmd = "cat <<EOF\ndon't stage\nEOF\ngit commit -m x"
+    l_segs, _l_subs, l_bodies = gc._scan(cmd, _lift=False, _herestring=False)
+    assert l_bodies == [], "legacy mode must not lift heredoc bodies"
+    assert not any(s.text.strip() == "git commit -m x" for s in l_segs), \
+        "legacy mode must still bury the tail — that IS the bug being fixed"
+    # …and the lifted mode, on the same input, must differ. Without this the
+    # assertions above could both hold on a scanner that does nothing at all.
+    segs, _subs, bodies = gc._scan(cmd)
+    assert bodies == ["don't stage"]
+    assert any(s.text.strip() == "git commit -m x" for s in segs)
+    # 🔴 The THIRD reading — what `main` does today — must also be reachable:
+    # it lifts heredocs but reads `<<<x` as `<<` + tag `x`. That reading is what
+    # the union relies on to keep the seven here-string denies.
+    m_segs, _m_subs, m_bodies = gc._scan("cat <<<x\n'\ngit stash push -m wip\nx\n'",
+                                         _lift=True, _herestring=False)
+    assert m_bodies, "main's reading must still produce a heredoc body here"
+    assert not gc._scan("cat <<<x\n'\ngit stash push -m wip\nx\n'")[2], \
+        "…and the CORRECT reading must not"
+
+
+@pytest.mark.parametrize("cmd,expect", [
+    ("git status", False),
+    ("echo 'a && b'; ls", False),
+    ("cat <<< \"x\"; git stash", True),          # a here-string IS a divergence
+    ("cat <<EOF\nx\nEOF", True),                 # a heredoc operator
+    ("echo 'oops; talosctl reset", True),        # an unterminated quote
+    ('"\'" \'x', True),                          # …with an EVEN count of them
+])
+def test_diverged_is_true_whenever_ANY_reading_differs(cmd, expect):
+    """🔴 `diverged is False` is what `split_commands` skips the OTHER readings
+    on, so a false negative there silently removes the union — the whole safety
+    property — with every test still green. Pinned against the real comparison
+    over both alternative readings, not just one.
+
+    The last case is why this is COMPUTED and not a textual heuristic: `"'" 'x`
+    leaves an unterminated `'` while containing an EVEN number of them, so a
+    guard keyed on quote parity would score it "balanced" and skip the union on
+    exactly the shape it exists for.
+    """
+    mine = gc._scan_raw(cmd)
+    really = any(gc._scan_raw(cmd, lift, hs)[:3] != mine[:3]
+                 for lift, hs in ((True, False), (False, False)))
+    assert mine[3] is expect, (cmd, mine[3])
+    # The direction that matters is ONE-WAY: `diverged` must never be False
+    # while a reading really differs. It MAY be True when they happen to agree
+    # (`cat <<< "x"; git stash` has no newline, so no body is consumed and all
+    # three readings coincide) — that costs two extra scans, never a deny.
+    assert not (really and not mine[3]), (cmd, "diverged=False but readings differ")
+
+
+@pytest.mark.parametrize("cmd", [
+    "cat <<<x\n'\ngit stash push -m wip\nx\n'",
+    "cat <<<x\n'\nmkfs.ext4 /dev/sdc\nx\n'",
+    "cat <<<x\n'\npkill -f e2e/run.sh\nx\n'",
+    "cat <<<x\n'\ndd if=/dev/zero of=/dev/sdc\nx\n'",
+    "cat <<<x\n'\ntalosctl -n 1.2.3.4 reset\nx\n'",
+    'cat <<<x\n"\ngit clean -fd\nx\n"',
+    "cat <<<EOF\n'\ngit stash push -m wip\nEOF\n'",
+])
+def test_fixing_the_here_STRING_does_not_lose_the_denies_it_accidentally_bought(
+        tmp_path, cmd):
+    """🔴 THE REASON THE UNION HAS A THIRD ARM, and the hardest lesson in this
+    change: BEING RIGHT ABOUT BASH IS NOT A LICENCE TO LOSE A DENY.
+
+    `main` reads the SECOND `<` of `<<<x` as `<<` + tag `x`, which lifts
+    everything after it into a heredoc BODY — and a body is reparsed with fresh
+    quote state, so argv that the correct reading leaves buried inside a
+    balanced quote is accidentally exposed. All seven inputs below DENY on
+    `main` and ALLOWed on a scanner that merely fixed the here-string. Six argv
+    families, three of them irreversible-action.
+
+    They are green here because `split_commands` also unions in `main`'s reading
+    — segments AND BODIES. Dropping the bodies was measured to lose all seven
+    with the flag and the arm both correct, which is why this test exists rather
+    than a structural assertion about the union.
+    """
+    repo = _mkrepo(tmp_path / "r", branch="main")
+    assert gc.evaluate(cmd, "opencode", str(repo)) is not None, cmd
+
+
+def test_split_commands_still_returns_the_shipped_segments(tmp_path):
+    """The union is a SUPERSET, asserted at the seam rather than argued in a
+    docstring: everything the legacy scan produces is in the output."""
+    for cmd in ["cat <<EOF\ndon't stage\nEOF\ngit commit -m x",
+                "echo 'a && b'",
+                "ls; talosctl reset",
+                "cat <<<x\n'\ngit stash push -m wip\nx\n'",
+                "git commit -m 'unterminated"]:
+        out = gc.split_commands(cmd)
+        for lift, herestring in ((True, False), (False, False)):
+            segs, subs, _ = gc._scan(cmd, lift, herestring)
+            for s in [x.text for x in segs] + list(subs):
+                if s.strip():
+                    assert s in out, (cmd, lift, herestring, s, out)
+
+
+def test_body_recursion_and_quote_recovery_are_bounded():
+    """A nesting bomb must not spin a hook that fires on every Bash call."""
+    text = "x"
+    for _ in range(12):
+        text = f"bash <<EOF\n{text}\nEOF"
+    gc.split_commands(text)          # must return
+    gc.split_commands("'" * 4000)    # …and so must pathological quoting
+
+
+# =========================================================================== #
+# --- 10. 🔴 WHICH TREE DOES THE COMMAND ACT ON? ---------------------------- #
+#
+# The guard resolved the branch from the AMBIENT repo. `git -C "$WT" commit` —
+# the spelling both this repo's and datapacket-talos's CLAUDE.md MANDATE —
+# carries the worktree in a shell variable the hook process has never heard of,
+# so `_resolve_dir` returned None, the guard fell back to the caller's cwd and
+# denied a commit into a topic-branch worktree by naming a primary clone the
+# command never touches.
+#
+# 🔴 EVERY MODEL DECISION BELOW WAS MEASURED IN REAL BASH (5.3.15), NOT REASONED.
+# The measurements, all via `printf '%s' "$PWD"` / `"${WT-<unset>}"`:
+#
+#   WT=a; . f   (f sets WT=b)  -> b     the SOURCED FILE WINS (it is read later)
+#   . f; WT=a                  -> a     last write wins, by POSITION
+#   WT=x true                  -> unset a command-PREFIX assignment does NOT persist
+#   WT=x  /  export WT=x       -> x     a bare assignment does
+#   (WT=x)                     -> unset a subshell does not leak
+#   { WT=x; }                  -> x     a BRACE GROUP does
+#   cd /; (cd /tmp); pwd       -> /     `( … )` is the only cwd scope
+#   cd /; { cd /tmp; }; pwd    -> /tmp  a brace group is NOT
+#   cd /; if true; then cd /tmp; fi     -> /tmp
+#   cd /; for i in 1; do cd /tmp; done  -> /tmp
+#   cd /; ! cd /tmp                     -> /tmp
+#   cd /tmp; bash <<'EOF' … pwd … EOF   -> /tmp   a body runs at the CURRENT cwd
+#   cd /tmp; $(pwd)                     -> /tmp
+#   WT=x; bash <<'EOF' … $WT … EOF      -> unset (not exported -> not visible)
+#
+# An earlier attempt at this (PR #396) got four of those backwards, and an
+# adversarial audit measured all four as DENY->ALLOW regressions on commands
+# that really commit to `main`. Each is a test below, and each was watched RED
+# against that attempt's head and GREEN here.
+# =========================================================================== #
+
+def _mkworktree(repo, path, branch):
+    """A real linked worktree of `repo` at `path`, checked out on `branch`."""
+    subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", branch,
+                    str(path)], capture_output=True, text=True, check=True)
+    return path
+
+
+def _trunk_and_worktree(tmp_path):
+    """A clone on `trunk` + a linked worktree on a topic branch. The shape the
+    whole worktree workflow is made of, and the one the guard got wrong."""
+    repo = _mkrepo(tmp_path / "clone", branch="trunk", commit=True)
+    wt = _mkworktree(repo, tmp_path / "wt-topic", "zach/topic")
+    return repo, wt
+
+
+# --- 10a. 🔴 THE FOUR MEASURED REGRESSIONS ---------------------------------- #
+
+def test_a_sourced_file_the_command_ITSELF_WRITES_is_not_trusted(tmp_path):
+    """🔴 REGRESSION 1 — TOCTOU. The guard reads an env file the command is
+    ABOUT TO OVERWRITE, and then judges on its stale contents.
+
+        printf 'WT=<main-repo>\\n' > /tmp/wt.env && . /tmp/wt.env \\
+          && git -C "$WT" commit -m x
+
+    A previous call left a safe worktree path in that file. Reading it NOW
+    resolves `$WT` to the safe worktree and ALLOWS, while the command commits
+    into `<main-repo>`. Measured: shipped guard DENY (unresolvable `-C`, cwd
+    fallback), PR #396 head ALLOW.
+
+    The cure is not to enumerate ways a shell can write a file — that
+    enumeration fails OPEN on the first spelling it misses — but to refuse any
+    path the line mentions twice.
+    """
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    safe = _mkrepo(tmp_path / "safe-repo", branch="feat/x")
+    env = tmp_path / "wt.env"
+    env.write_text(f"WT={safe}\n")      # what a PREVIOUS call left there
+    for cmd in [
+        f"printf 'WT={on_main}\\n' > {env} && . {env} && git -C \"$WT\" commit -m x",
+        f"echo 'WT={on_main}' | tee {env} && . {env} && git -C \"$WT\" commit -m x",
+        f"cat > {env} <<EOF\nWT={on_main}\nEOF\n. {env}\ngit -C \"$WT\" commit -m x",
+    ]:
+        assert gc.check_git_commit_to_main(cmd, str(on_main)) is not None, cmd
+    # …and the CONTROL that makes this a discriminator rather than a blanket
+    # refusal to read env files: the same source, with nothing writing it, still
+    # resolves and still allows.
+    assert gc.check_git_commit_to_main(
+        f". {env}\ngit -C \"$WT\" commit -m x", str(on_main)) is None
+
+
+def test_a_name_the_line_sets_TWICE_is_dropped_in_either_order(tmp_path):
+    """🔴 REGRESSION 2 — the precedence between a sourced file and the command
+    text was inverted. MEASURED in bash: `WT=a; . f` (f sets `WT=b`) leaves
+    **b** — the file is read LATER, so it wins — and `. f; WT=a` leaves **a**.
+    PR #396 made the command text win unconditionally, so
+
+        WT=<safe-worktree>
+        . <file naming main>
+        git -C "$WT" commit -m x
+
+    resolved to the safe worktree and ALLOWED while bash committed into main.
+
+    The fix is NOT to invert the precedence. Whichever source is later, a name
+    the line gives two different literals is one the guard would have to GUESS
+    about — bash's answer depends on control flow this walk cannot see — so it is
+    dropped and the cwd fallback applies, in BOTH orders. That is never more
+    permissive than the shipped guard, which could not resolve the name at all.
+
+    The fixture makes the three hypotheses give three different verdicts: the
+    cwd is a repo on `main`, and the two candidate values are on `feat/a` and
+    `feat/b`. Only "dropped -> judge the cwd" denies.
+    """
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    safe = _mkrepo(tmp_path / "safe-repo", branch="feat/a")
+    other = _mkrepo(tmp_path / "other-repo", branch="feat/b")
+    env_a = tmp_path / "a.env"
+    env_a.write_text(f"WT={other}\n")
+    for cmd in [
+        f'WT={safe}\n. {env_a}\ngit -C "$WT" commit -m x',   # text then file
+        f'. {env_a}\nWT={safe}\ngit -C "$WT" commit -m x',   # file then text
+        f'WT={safe}\nWT={other}\ngit -C "$WT" commit -m x',  # text then text
+    ]:
+        reason = gc.check_git_commit_to_main(cmd, str(on_main))
+        assert reason is not None, cmd
+        assert str(on_main) in reason, cmd
+    # …and the CONTROL: one consistent value, from either source, still resolves.
+    env_same = tmp_path / "same.env"
+    env_same.write_text(f"WT={safe}\n")
+    assert gc.check_git_commit_to_main(
+        f'WT={safe}\n. {env_same}\ngit -C "$WT" commit -m x', str(on_main)) is None
+    assert gc.check_git_commit_to_main(
+        f'. {env_same}\ngit -C "$WT" commit -m x', str(on_main)) is None
+
+
+def test_a_command_PREFIX_assignment_does_not_persist(tmp_path):
+    """🔴 REGRESSION 3 — a prefix assignment was recorded as persistent.
+    MEASURED: `WT=x true; printf '%s' "${WT-<unset>}"` prints `<unset>`, so
+
+        WT=<safe-worktree> true
+        git -C "$WT" commit -m x
+
+    leaves `$WT` EMPTY in a real shell — the guard must not resolve it to the
+    safe worktree. It falls back to the cwd instead, which denies.
+    """
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    safe = _mkrepo(tmp_path / "safe-repo", branch="feat/x")
+    assert gc.check_git_commit_to_main(
+        f'WT={safe} true\ngit -C "$WT" commit -m x', str(on_main)) is not None
+    # …while the forms that DO persist still resolve. Measured: a bare
+    # assignment, `export`, and a BRACE GROUP all survive; `( … )` does not.
+    assert gc.check_git_commit_to_main(
+        f'WT={safe}\ngit -C "$WT" commit -m x', str(on_main)) is None
+    assert gc.check_git_commit_to_main(
+        f'export WT={safe}\ngit -C "$WT" commit -m x', str(on_main)) is None
+
+
+@pytest.mark.parametrize("template", [
+    "cd {main}\nbash <<'EOF'\ngit commit -m x\nEOF",
+    "cd {main}\n$(git commit -m x)",
+    "cd {main}\n`git commit -m x`",
+    "cd {main}; bash <<'EOF'\ngit commit -m x\nEOF",
+])
+def test_a_body_is_judged_at_the_cwd_it_actually_RUNS_IN(tmp_path, template):
+    """🔴 REGRESSION 4 — heredoc / `$( )` / backtick bodies discarded the tracked
+    cwd and were judged at the caller's. MEASURED: `cd /tmp; bash <<'EOF' … pwd
+    … EOF` prints `/tmp`, and so does `$(pwd)`. So
+
+        cd <main-repo>
+        bash <<'EOF'
+        git commit -m x
+        EOF
+
+    really does commit into `<main-repo>`; PR #396 judged it at the caller's cwd
+    and ALLOWED it.
+    """
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    innocent = _mkrepo(tmp_path / "innocent", branch="feat/x")
+    cmd = template.format(main=on_main)
+    assert gc.check_git_commit_to_main(cmd, str(innocent)) is not None, cmd
+
+
+def test_a_body_is_judged_where_it_SITS_not_at_the_lines_final_cwd(tmp_path):
+    """The other direction of the same rule, and the reason bodies carry the
+    index of the segment that opened them. A body BEFORE a `cd` must not be
+    judged at the directory that `cd` reaches — otherwise the fix trades a miss
+    for a false positive.
+    """
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    safe = _mkrepo(tmp_path / "safe-repo", branch="feat/x")
+    assert gc.check_git_commit_to_main(
+        f"cd {safe}\nbash <<'EOF'\ngit commit -m x\nEOF\ncd {on_main}\nls",
+        str(on_main)) is None
+
+
+def test_a_heredoc_body_sees_EXPORTED_variables_and_only_those(tmp_path):
+    """🔴 REGRESSION 4b, found by the bash-oracle fuzz rather than by reading.
+    A heredoc body feeds a NEW process. MEASURED:
+
+        WT=x;        bash <<'EOF' … "${WT-<unset>}" … EOF   ->  <unset>
+        export WT=x; bash <<'EOF' … "${WT-<unset>}" … EOF   ->  x
+
+    Both directions are permissive if modelled wrong, which is why the pair is
+    asserted rather than one arm:
+
+      * passing a NON-exported name in lets
+        `WT=<safe>; bash <<EOF / git -C "$WT" commit / EOF` resolve to the safe
+        worktree, when bash resolves `$WT` to nothing and the body runs in the
+        cwd — here a repo on `main`.
+      * withholding an EXPORTED one loses a real deny:
+        `export WT=<main> && cd <safe> && bash <<EOF / git -C "$WT" commit / EOF`
+        commits into `<main>` while the body's own cwd is innocent. That exact
+        shape was a MISS until this was modelled.
+    """
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    safe = _mkrepo(tmp_path / "safe-repo", branch="feat/x")
+    body = "bash <<'EOF'\ngit -C \"$WT\" commit -m x\nEOF"
+    # not exported -> the body cannot see it -> judged at the body's cwd (main)
+    assert gc.check_git_commit_to_main(
+        f"WT={safe}\n{body}", str(on_main)) is not None
+    # exported -> the body CAN see it -> judged on the repo it names
+    assert gc.check_git_commit_to_main(
+        f"export WT={safe}\n{body}", str(on_main)) is None
+    assert gc.check_git_commit_to_main(
+        f"export WT={on_main}\ncd {safe}\n{body}", str(safe)) is not None
+    # …and a `$( )` substitution IS the same shell, so it sees both.
+    assert gc.check_git_commit_to_main(
+        f'WT={on_main}\n$(git -C "$WT" commit -m x)', str(safe)) is not None
+
+
+def test_every_value_an_AMBIGUOUS_name_was_given_is_judged(tmp_path):
+    """🔴 The other half of "a name set twice is dropped". Dropping alone falls
+    back to the cwd, and the bash-oracle fuzz found the miss that leaves: from an
+    INNOCENT cwd, `WT=<safe>; WT=<main>; git -C "$WT" commit` commits into
+    `<main>` (bash is last-write-wins) while a guard that only knows "ambiguous"
+    judges the innocent cwd and allows it.
+
+    So every literal the name was ever given is judged as well. The control
+    below is what keeps that from being a blanket refusal: two SAFE values still
+    allow, and an ambiguous name the argv does not reference is not dragged in.
+    """
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    safe_a = _mkrepo(tmp_path / "a", branch="feat/a")
+    safe_b = _mkrepo(tmp_path / "b", branch="feat/b")
+    assert gc.check_git_commit_to_main(
+        f'WT={safe_a}\nWT={on_main}\ngit -C "$WT" commit -m x',
+        str(safe_b)) is not None
+    assert gc.check_git_commit_to_main(
+        f'WT={on_main}\nWT={safe_a}\ngit -C "$WT" commit -m x',
+        str(safe_b)) is not None
+    # CONTROL 1: two safe values -> still allowed.
+    assert gc.check_git_commit_to_main(
+        f'WT={safe_a}\nWT={safe_b}\ngit -C "$WT" commit -m x',
+        str(safe_b)) is None
+    # CONTROL 2: the ambiguous name is not referenced by this argv, so its
+    # values must not be judged.
+    assert gc.check_git_commit_to_main(
+        f'OTHER={safe_a}\nOTHER={on_main}\ngit -C {safe_b} commit -m x',
+        str(safe_b)) is None
+
+
+@pytest.mark.parametrize("template", [
+    "{{ cd {main}; git commit -m x; }}",
+    "{{ cd {main}; }}; git commit -m x",
+    "! cd {main}; git commit -m x",
+    "if true; then cd {main}; git commit -m x; fi",
+    "for i in 1; do cd {main}; git commit -m x; done",
+    "while true; do cd {main}; git commit -m x; done",
+    "until false; do cd {main}; git commit -m x; done",
+    "cd {main} || true; git commit -m x",
+])
+def test_a_cd_behind_a_brace_group_or_a_keyword_still_moves_the_cwd(tmp_path,
+                                                                    template):
+    """🔴 REGRESSION 5 — `cd` was recognised only as argv[0]. The regex it
+    replaced matched a `cd` after any of `[;&|(){}'"]`, which covered brace
+    groups and reserved words; a walk keyed on argv[0] does not.
+
+    MEASURED in bash 5.3.15: the cwd really does move in every shape below —
+    `{ cd /tmp; }`, `if/then`, `for/do`, `until/do` and `! cd` all leave `$PWD`
+    at `/tmp`. Only `( … )` contains it.
+    """
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    innocent = _mkrepo(tmp_path / "innocent", branch="feat/x")
+    cmd = template.format(main=on_main)
+    assert gc.check_git_commit_to_main(cmd, str(innocent)) is not None, cmd
+
+
+def test_a_commit_inside_a_brace_group_is_seen_at_all(tmp_path):
+    """The same token-skipping, on the COMMAND rather than on the `cd`. A
+    segment whose first token is `{` or a reserved word used to have that token
+    as argv[0], so the commit inside was invisible. Green here, RED on both the
+    shipped guard and PR #396."""
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    for cmd in ["{ git commit -m x; }", "if true; then git commit -m x; fi",
+                "! git commit -m x"]:
+        assert gc.check_git_commit_to_main(cmd, str(on_main)) is not None, cmd
+
+
+# --- 10b. THE SECONDARY FINDINGS ------------------------------------------- #
+
+def test_four_levels_of_heredoc_nesting_do_not_lose_the_commit(tmp_path):
+    """One `_depth` budget used to be spent on BOTH the body recursion and the
+    nested-shell recursion, so a fourth level exhausted it and the commit inside
+    was never parsed. Measured: shipped guard DENY, PR #396 head ALLOW. The
+    budgets are now independent."""
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    cmd = ("bash <<'A'\nbash <<'B'\nbash <<'C'\nbash <<'D'\n"
+           "git commit -m x\nD\nC\nB\nA")
+    assert gc.check_git_commit_to_main(cmd, str(on_main)) is not None
+
+
+def test_a_GIT_DIR_target_is_judged_IN_ADDITION_to_a_resolving_dash_C(tmp_path):
+    """🔴 A COMMENT IS A CLAIM TOO. Two docstrings said `GIT_DIR=` is judged *in
+    addition to* `-C`; the code dropped it the moment a `-C` resolved. Measured
+    on BOTH the shipped guard and PR #396:
+
+        ALLOW  GIT_DIR=<main>/.git GIT_WORK_TREE=<main> git -C <safe> commit -m x
+
+    even though `GIT_DIR` OVERRIDES the working directory, so that command
+    commits into `<main>`. The docstring was right and the code was wrong; the
+    CODE moved. (Fixing the comment instead would have left a real hop open.)
+    """
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    safe = _mkrepo(tmp_path / "safe-repo", branch="feat/x")
+    assert gc.check_git_commit_to_main(
+        f"GIT_DIR={on_main}/.git GIT_WORK_TREE={on_main} git -C {safe} commit -m x",
+        str(safe)) is not None
+    # …and the plain hop, which already denied, still does.
+    assert gc.check_git_commit_to_main(
+        f"GIT_DIR={on_main}/.git GIT_WORK_TREE={on_main} git commit -m x",
+        str(safe)) is not None
+
+
+def test_dash_c_dir_does_not_need_an_unresolved_list(tmp_path):
+    """`unresolved` defaulted to None and was appended to unconditionally — a
+    latent AttributeError on the first caller that omitted it. On a check whose
+    exceptions become a BLANKET deny of every command in the session, that is
+    not a cosmetic bug."""
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    assert gc._dash_c_dir(["git", "-C", "/definitely/not/here", "commit"],
+                          str(on_main)) == str(on_main)
+
+
+def test_the_hot_path_gate_is_the_same_walk_it_guards(tmp_path, monkeypatch):
+    """🔴 THE GATE AND THE LOOP MUST SCAN ONE POPULATION. Variable resolution can
+    open a sourced env file, and this hook runs on EVERY Bash call — so the read
+    sits behind an "is there a real `git … commit` here at all?" gate. That gate
+    is the SAME function with `_novars=True`, not a second parse: a gate built
+    from a different parse can admit work the loop does not need and, worse, can
+    miss a commit the loop would have judged.
+
+    Pinned as a count of `open()` calls WITH A POSITIVE CONTROL, so a zero cannot
+    be a probe wired to nothing.
+    """
+    repo = _mkrepo(tmp_path / "r", branch="trunk")
+    env = tmp_path / "wt.env"
+    env.write_text("WT=/tmp/whatever\n")
+    opened = []
+    real_open = open
+    monkeypatch.setattr(
+        "builtins.open",
+        lambda f, *a, **k: (opened.append(str(f)), real_open(f, *a, **k))[1])
+    for cmd in ["ls -la", f". {env}; ls", "git status", "git add x",
+                f". {env}\ngit commit --dry-run", "kubectl get pods"]:
+        gc.evaluate(cmd, "claude-code", str(repo))
+    assert not [o for o in opened if str(env) in o], opened
+    # …the positive control: with a REAL commit present, it IS read.
+    gc.evaluate(f". {env}\ngit -C \"$WT\" commit -m x", "claude-code", str(repo))
+    assert [o for o in opened if str(env) in o], "the env file was never read at all"
+    # …and the gate agrees with the loop about what a commit IS: a body-nested
+    # commit must open the gate too, or the loop below it never runs.
+    walked = gc._commands_with_cwd("bash <<'EOF'\ngit commit -m x\nEOF",
+                                   str(repo), _novars=True)
+    assert any(gc._is_real_git_commit(a) for a, *_ in walked)
+
+
+# --- 10c. THE MUTATION TARGETS --------------------------------------------- #
+
+def test_literal_value_refuses_anything_carrying_a_dollar(tmp_path):
+    """M10. Accepting `$` would let a HALF-resolved value name a directory: with
+    `HOME` unknown to the guard, `$HOME/../devrc` is a guess, and a resolver that
+    guesses is how this check started naming repos the command never touches."""
+    assert gc._literal_value("/tmp/wt-1") == "/tmp/wt-1"
+    assert gc._literal_value("'/tmp/wt-1'") == "/tmp/wt-1"
+    assert gc._literal_value("/tmp/wt-$$") is None
+    assert gc._literal_value("$HOME/x") is None
+    assert gc._literal_value("`pwd`") is None
+    assert gc._literal_value("") is None
+    assert gc._literal_value(None) is None
+
+
+def test_an_oversized_env_file_is_not_read(tmp_path):
+    """M20. The path is model-controlled input; the size cap is what stops the
+    guard slurping an arbitrary file on every Bash call. Both arms asserted, so
+    removing the cap goes red rather than merely getting slower."""
+    repo = _mkrepo(tmp_path / "clone", branch="trunk", commit=True)
+    safe = _mkrepo(tmp_path / "safe", branch="feat/x")
+    small = tmp_path / "small.env"
+    small.write_text(f"WT={safe}\n")
+    assert gc._env_file_vars(str(small), None, {}) == {"WT": str(safe)}
+    big = tmp_path / "big.env"
+    big.write_text(f"WT={safe}\n" + "#" + "x" * (gc._ENV_FILE_MAX_BYTES + 10) + "\n")
+    assert gc._env_file_vars(str(big), None, {}) == {}
+    assert gc.check_git_commit_to_main(
+        f'. {big}\ngit -C "$WT" commit -m x', str(repo)) is not None
+
+
+def test_dash_dash_strips_tabs_only_for_the_dash_form(tmp_path):
+    """M3. `<<-` strips leading tabs from the terminator; plain `<<` does not.
+    Always stripping would let an INDENTED line close a plain heredoc early,
+    re-partitioning everything after it."""
+    _s, _u, bodies = gc._scan("cat <<EOF\n\tEOF\nreal body\nEOF")
+    assert bodies == ["\tEOF\nreal body"], bodies
+    _s, _u, bodies = gc._scan("cat <<-EOF\n\tEOF\nnot in the body")
+    assert bodies == [""], bodies
+
+
+def test_a_cd_target_is_the_FIRST_operand_not_the_last(tmp_path):
+    """M14. Taking the last operand `cd`s to a redirection target or to `--`.
+    Both shapes below really do change directory to `<main>` in bash."""
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    innocent = _mkrepo(tmp_path / "innocent", branch="feat/x")
+    log = tmp_path / "log"
+    log.mkdir()
+    assert gc.check_git_commit_to_main(
+        f"cd {on_main} > {log}/out; git commit -m x", str(innocent)) is not None
+    assert gc.check_git_commit_to_main(
+        f"pushd {on_main} > {log}/out; git commit -m x", str(innocent)) is not None
+
+
+def test_a_variable_assigned_twice_is_not_guessed(tmp_path):
+    """Ambiguity falls back to the cwd rather than picking a winner.
+
+    🔴 THE FIXTURE IS THE TEST. An earlier version assigned the variable a safe
+    worktree and then the cwd's own repo, so "poisoned -> cwd fallback" and
+    "last assignment wins" produced the SAME verdict and the test discriminated
+    nothing. Here the two values and the cwd are three DIFFERENT repos on three
+    different branches, so each hypothesis gives a different answer:
+        poisoned  -> judged at the cwd (on `main`)      -> DENY   <- required
+        first wins  -> judged at safe_a (feat/a)        -> allow
+        last wins   -> judged at safe_b (feat/b)        -> allow
+    """
+    on_main = _mkrepo(tmp_path / "main-repo", branch="main")
+    safe_a = _mkrepo(tmp_path / "a", branch="feat/a")
+    safe_b = _mkrepo(tmp_path / "b", branch="feat/b")
+    reason = gc.check_git_commit_to_main(
+        f'WT={safe_a}\nWT={safe_b}\ngit -C "$WT" commit -m x', str(on_main))
+    assert reason is not None
+    assert str(on_main) in reason, reason
+    assert str(safe_a) not in reason and str(safe_b) not in reason
+
+
+# --- 10d. THE CONTROLS ------------------------------------------------------ #
+# 🔴 Read this section before believing any of the above. A fix for a false
+# positive is only as good as the denies it leaves standing.
+
+@pytest.mark.parametrize("branch", ["main", "master", "trunk"])
+def test_control_commit_in_a_clone_on_a_main_branch_still_blocks(tmp_path, branch):
+    repo = _mkrepo(tmp_path / "r", branch=branch)
+    assert gc.evaluate("git commit -m x", "claude-code", str(repo)) is not None
+
+
+def test_control_dash_c_resolution_is_not_a_bypass_vector(tmp_path):
+    """Honouring `-C` must not become a way OUT. A `-C` that names a repo on a
+    main branch denies, from any cwd — including a topic-branch worktree, which
+    is the cwd an evader would pick."""
+    repo, wt = _trunk_and_worktree(tmp_path)
+    for cmd in [
+        f"git -C {repo} commit -m x",
+        f"git -C {repo} commit -q -F - <<'MSG'\nit's a message\nMSG",
+        f'REPO={repo}\ngit -C "$REPO" commit -m x',
+        f"cd {repo} && git commit -m x",
+        f"(cd {repo} && git commit -m x)",
+        f"bash -c 'cd {repo} && git commit -m x'",
+        f"GIT_DIR={repo}/.git GIT_WORK_TREE={repo} git commit -m x",
+    ]:
+        assert gc.evaluate(cmd, "claude-code", str(wt)) is not None, cmd
+
+
+def test_control_variable_resolution_never_unblocks_a_blocked_repo(tmp_path):
+    """The generalisation: resolving `$VAR` may only change WHICH repo is
+    judged, never whether the verdict is read at all."""
+    repo, wt = _trunk_and_worktree(tmp_path)
+    env = tmp_path / "bad.env"
+    env.write_text(f"WT={repo}\n")
+    assert gc.check_git_commit_to_main(
+        f'. {env}\ngit -C "$WT" commit -m x', str(wt)) is not None
+    assert gc.check_git_commit_to_main(
+        f'WT={repo}\ngit -C "$WT" commit -m x', str(wt)) is not None
+
+
+def test_control_a_heredoc_BODY_cannot_inject_a_variable(tmp_path):
+    """🔴 A hole this change could open in itself. Variable resolution reads the
+    real command line only — if a heredoc body's lines registered assignments,
+    the COMMIT MESSAGE would decide which repository the guard judges."""
+    repo, wt = _trunk_and_worktree(tmp_path)
+    assert gc.check_git_commit_to_main(
+        f"git commit -q -F - <<'MSG'\ndocs: a message containing WT={wt}\nMSG",
+        str(repo)) is not None
+    assert gc.check_git_commit_to_main(
+        f'git -C "$WT" commit -q -F - <<\'MSG\'\nWT={wt}\nMSG',
+        str(repo)) is not None
+
+
+def test_control_an_unresolvable_dash_c_says_so_in_the_deny(tmp_path, monkeypatch):
+    """The fallback still fires, and now EXPLAINS itself — a deny naming a repo
+    the command never mentioned is what made the original false positive so hard
+    to read."""
+    monkeypatch.delenv(_UNSET_HANDLE, raising=False)
+    repo = _mkrepo(tmp_path / "r", branch="trunk")
+    reason = gc.check_git_commit_to_main(
+        f"git -C ${_UNSET_HANDLE} commit -m x", str(repo))
+    assert reason is not None
+    assert "could not resolve" in reason
+    assert _UNSET_HANDLE in reason
+
+
+# --- 10e. THE POSITIVES — the workflow this change exists to enable --------- #
+
+def test_positive_dash_c_into_a_worktree_on_a_topic_branch(tmp_path):
+    repo, wt = _trunk_and_worktree(tmp_path)
+    assert gc.evaluate(f"git -C {wt} commit -m x", "claude-code", str(repo)) is None
+
+
+def test_positive_a_subshell_cd_into_that_worktree(tmp_path):
+    repo, wt = _trunk_and_worktree(tmp_path)
+    assert gc.evaluate(f"(cd {wt} && git commit -m x)", "claude-code",
+                       str(repo)) is None
+
+
+@pytest.mark.parametrize("template", [
+    'git -C "$WT" commit -m x',
+    'git -C "$WT" commit -q -F -',
+    '(cd "$WT" && git commit -m x)',
+    'bash -c \'cd "$WT" && git commit -m x\'',
+    'git -C ${WT} commit -m x',
+])
+def test_positive_a_variable_naming_the_worktree_resolves(tmp_path, template):
+    """🔴 THE ORIGINAL FALSE POSITIVE. `WT=…` is set by the command itself, so
+    the hook process's environment can never carry it — `expandvars` alone was
+    structurally unable to answer, and the fallback then named the wrong repo."""
+    repo, wt = _trunk_and_worktree(tmp_path)
+    cmd = f"WT={wt}\n{template}"
+    assert gc.check_git_commit_to_main(cmd, str(repo)) is None, cmd
+
+
+def test_positive_a_sourced_env_file_supplies_the_worktree_path(tmp_path):
+    """🔴 THE EXACT INCIDENT SHAPE. The mandated recipe is `WT=/tmp/wt-$$`, whose
+    value depends on the SHELL's pid and can never be read from the text — so the
+    observed pattern is to write the expanded path into a scratchpad env file and
+    `. ` it in later calls."""
+    repo, wt = _trunk_and_worktree(tmp_path)
+    env = tmp_path / "wt.env"
+    env.write_text(f"WT={wt}\n")
+    assert gc.check_git_commit_to_main(
+        f'. {env}\ngit -C "$WT" commit -q -F - <<\'MSG\'\ndocs: a message\nMSG',
+        str(repo)) is None

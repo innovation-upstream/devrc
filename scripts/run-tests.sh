@@ -385,8 +385,23 @@ fi
 # below fails naming it. Run the gate once, read that target's `collected=`, and
 # write `collected - min(50, max(1, collected/20))`.
 TARGET_FLOORS=(
-  "scripts/tests|1873"
-  "scripts/collector/tests|194"
+  # 2026-08-11, re-pinned after the session-manager branch merged main: 1873 was
+  # measured against a ~1923-test suite and the suite is now 2251, so it carried
+  # 378 tests of SLACK — more than this branch's entire suite could vanish with
+  # the gate still green, and only ~100 short of the drift error an unrelated
+  # author would then have to reconcile. 2251 - min(50, max(1, 2251/20)) = 2201,
+  # the gate's own printed count put through the rule above (and through
+  # `_suggested_floor` in BOTH its shell and python spellings, which agree).
+  "scripts/tests|2201"
+  # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
+  # +43 for scripts/collector/tests/test_changed_paths.py (the shared
+  # `changed_paths*` module). The gate printed this replacement itself —
+  # 273 - min(50, max(1, 273/20)) = 273 - 13 = 260 — so it is that run's own
+  # count put through the documented rule, not a number anyone computed.
+  # The suite needed no HERMETIC_TARGETS entry: scripts/collector/tests is
+  # already a directory target, and movement on THIS line is the evidence the
+  # gate runs the new file at all.
+  "scripts/collector/tests|260"
   "scripts/collector/keylog/tests|79"
   "scripts/collector/claude/tests|59"
   "scripts/collector/i3/tests|12"

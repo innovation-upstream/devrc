@@ -6,17 +6,25 @@ current upstream mechanics and 2026 evidence, then ship it to both hosts. Second
 in impact: the audit exposed a live deploy bug that had been silently breaking the laptop.
 
 ## State now
-- **Branch:** `main` @ `e1219d4`, clean except 4 pre-existing untracked items
+- **Branch:** `main` @ `d4429e6`, clean except 4 pre-existing untracked items
   (`.envrc`, `.opencode/`, `claudedocs/proposed-rules-cut/`, `nix/system/apply-nebula-443.sh.LOCAL-preserved-2026-08-02`).
+- **The commit-to-main guard's fail-open is CLOSED, deployed, and verified at the
+  consumer on both hosts** (2026-08-11 20:4xZ). See "The guard fail-open" below —
+  that investigation is finished, not open.
 - **Deploy: DONE and verified at the consumer**, not just merged. `scripts/ship.sh` reports
-  `[workbench] 338 checked, 0 dangling` / `[laptop] 301 checked, 0 dangling`, both
-  `✅ VERIFIED … + switched`. Independently confirmed: `~/.claude/commands/` gone on both hosts,
-  33 skill dirs resolving, `~/.claude/skills/close-the-loop/STATE.md` writable,
+  `[workbench] 341 checked, 0 dangling, 0 absent` / `[laptop] 304 checked, 0 dangling, 0 absent`,
+  both `✅ VERIFIED … + switched`. Independently confirmed: `~/.claude/commands/` gone on both
+  hosts, 33 skill dirs resolving, `~/.claude/skills/close-the-loop/STATE.md` writable,
   `guard_core.py` carries `check_git_commit_to_main` on both.
-- **Gate green on main**, read from content: `collected=7271 passed=7270 skipped=1 failed=0
-  (floor: 6900 = sum of 17 per-target floors)`; nodetests `1024/1024`. 0 timeout panics.
+- **Gate green on main**, read from content: `collected=7434 passed=7433 skipped=1 failed=0
+  (floor: 6966 = sum of 17 per-target floors)`; nodetests `1024/1024`. 0 timeout panics.
+  Measured on `d4429e6` — i.e. on the tree that has #395 + #396 + #398 together, not on any
+  single PR branch.
+- **`drift-check.sh` rc=15**, unchanged and expected: both hosts clean, on `main`, at
+  `d4429e66`, `dangling=0` (workbench 156 examined, laptop 151). The only drift is the
+  `settings.json` key-set parity item still open below.
 
-### Merged this session (9)
+### Merged this session (11)
 | PR | sha | What |
 |---|---|---|
 | #376 | `e0cf5d2` | blocking guards: commit-to-main (trunk allowlist), `pkill -f` |
@@ -28,6 +36,12 @@ in impact: the audit exposed a live deploy bug that had been silently breaking t
 | #391 | `52fd995` | `drift-check.sh`: git parity ≠ host parity (rc14 dangling, rc15 divergence) |
 | #392 | `f380936` | dev-host tier repaired (Bun 8192B pipe truncation + `logrotate` PATH) |
 | #397 | `e1219d4` | truthful gate exit status + per-target floors replacing the literal |
+| #396 | `3a5e32c` | guard: judge the tree the command acts on; heredoc body no longer blinds the scanner |
+| #395 | `d4429e6` | guard: a `-C` target that is not a repo must not suppress the commit-to-main check |
+
+(#398 `f6ef634`, collector changed-paths, also landed on `main` mid-session from another
+session. It is not part of this initiative, but it IS in the tree the gate numbers above
+were measured on.)
 
 ### Host-level changes (NOT in git — `~/.claude/` is per-host)
 - `settings.json` `permissions.allow` **248 → 210** on workbench (32 YAML fragments, a heredoc
@@ -39,30 +53,77 @@ in impact: the audit exposed a live deploy bug that had been silently breaking t
 - Backups left in place: `~/.claude/settings.json.pre-cleanup` (workbench),
   `~/.claude/settings.json.bak.1786422732` + `*.bak-pyright-20260811-001956` (laptop).
 
+## CLOSED: the commit-to-main guard fail-open (#395 + #396)
+
+Both PRs landed and are deployed. Recording it here because the *shape* of the defect and of
+the near-miss is the reusable part.
+
+- **The fail-open, measured — three cases, not one.** Built an independent 13-case probe
+  (deliberately NOT the PRs' own matrices) with real `git init` fixtures **carrying remotes**,
+  because `_commit_to_main_reason` fails open on a repo with no remotes and a fixture without
+  one makes the entire matrix vacuously green. `origin/main` and the then-deployed hook both
+  scored **10/13**, failing the same three, all with cwd on a blocked branch:
+  ```
+  ALLOW  git -C <an-ordinary-directory> commit -m x                     (cwd on trunk)
+  ALLOW  git -C <feature-repo> --git-dir=<an-ordinary-directory> commit  (mixed named set)
+  ALLOW  git -C <an-ordinary-directory> commit -m x                     (cwd on main)
+  ```
+  Mechanism: naming a repo hands the whole verdict to that repo; `_resolve_dir` accepts any
+  directory that merely *exists*, and `_commit_to_main_reason` then fails open on "no branch",
+  so the real cwd was never evaluated. Now **13/13** on `main` and at the consumer on both hosts.
+- 🔴 **A `-C` target that DOESN'T EXIST was never the bug — and the original repro said it was.**
+  An unresolvable path already fell back to the cwd and blocked. The handoff's own suggested
+  probe used `cwd:"/tmp"`, and `/tmp` is not a repo, so it returned ALLOW **for a second,
+  unrelated reason**: nothing was on a blocked branch to begin with. A probe whose cwd cannot
+  produce a deny cannot distinguish "fail-open" from "correctly allowed" — the empty-result
+  trap, hit inside the very investigation aimed at it. The real defect is a path that resolves
+  *fine* and simply is not a repo.
+- 🔴 **Two PRs, each `mergeable=CLEAN` against main, conflicted with each other in two hunks.**
+  #396 rewrote the exact line #395 patches and deleted `_candidate_dirs` outright, and the
+  common tail referenced `unresolved`, a symbol only #396 defines — so taking either side alone
+  was a `NameError` or a silent re-open. GitHub judged each PR against a main the other had not
+  landed on. The integration-branch test-merge is what surfaced it; nothing in either PR's own
+  review could have.
+- 🔴 **Neither PR subsumed the other.** After #396 merged (by ZacxDev, mid-session, while
+  verification was running), the probe against the new `main` still scored **10/13 — the same
+  three**. #396's fix is for `unresolved` (a path the guard cannot turn into a directory at all,
+  e.g. a shell variable); #395's is for `not_worktrees` (a path that resolves and is not a repo).
+  They are different causes and the resolution keeps them apart, including in the deny message,
+  so a deny naming a repo the user never typed now says which of the two fallbacks fired.
+- **Verification actually performed** (not the PR bodies' claims — re-derived): red-at-base
+  matrix in one tree with only `guard_core.py` swapped, giving a delta of exactly 3
+  (`S6`, `S6b`, `test_is_git_worktree_can_return_both_verdicts`); 6 further reds in that scratch
+  tree failed with **both** cores and were artefacts of a partial copy, not regressions. Three
+  mutations, each `assert`ed to have applied: restoring the fail-open kills S6/S6b/S6d;
+  `any` for `all` kills S6b alone; deleting the deny-message branch kills S6d alone. Consumer
+  probe on both hosts through the real `bash-guard.py` adapter, reading **stdout JSON**, with a
+  blind-stage positive control and a `git status` negative control so the probe is shown to move
+  in both directions.
+- 🔴 **The guard blocked this very session's merge commit — a genuine false positive of the
+  class #396 fixes.** `git -C "$WT" commit` from a shell whose cwd was `~/workspace/devrc` (on
+  `main`) denied, naming a repo the command never touched. Worked around with an absolute path
+  and `-F <file>`. #396 fixes this for assignments visible in the same command text; a variable
+  set in an *earlier* tool call is still unreadable by design. **Use absolute paths with
+  `git -C` when committing from an agent shell.**
+
 ## Open investigations — live diagnosis state
 
-### The commit-to-main guard (#376) has two known defects, both with open PRs from other sessions
-- **Symptom + exact repro:** unknown to me in detail — these were opened by concurrent sessions
-  after #376 merged. Titles state the failures precisely:
-  - **#395** `fix/guard-named-repo-fail-closed` — "a `-C` target that is not a repo must not
-    suppress the commit-to-main check". i.e. `git -C /not/a/repo commit` currently **fails OPEN**.
-  - **#396** `fix/guard-branch-resolution-and-heredoc` — "judge the tree the command acts on, and
-    stop a heredoc body blinding the scanner".
-- **Observed (values):** my own independent verification of #376 covered 9 controls and all
-  behaved correctly — DENY on `main` via both the `-C` hop and cwd, ALLOW on feature branch,
-  ALLOW on allowlisted `homelab-talos` trunk, ALLOW on `--dry-run`/reads. **None of my controls
-  used a non-repo `-C` target or a heredoc body**, which is exactly the gap those PRs name.
-- **Ruled out:** not a regression from #397 — both PRs predate it (#395 17:30Z, #396 18:53Z vs
-  #397 merged later).
-- **Leading hypothesis:** #376 shipped with real edge-case fail-opens that its own test matrix
-  did not cover. The guard is deployed live on both hosts right now.
-- **Next probe:** `gh pr view 395 --json body,files` and `gh pr view 396 --json body,files`, then
-  verify each against the DEPLOYED guard:
-  ```
-  printf '{"hook_event_name":"PreToolUse","tool_name":"Bash","cwd":"/tmp","tool_input":{"command":"git -C /tmp/not-a-repo commit -m x"}}' \
-    | python3 ~/.claude/hooks/bash-guard.py
-  ```
-  🔴 Read the **stdout JSON** (`permissionDecision`), NOT the exit code — this hook always exits 0.
+### Three tests pass or fail depending on the AMBIENT cwd's branch — NEW, unfixed
+- **Observed (values):** running `pytest scripts/claude-hooks/tests/test_guard_core.py` from a
+  shell sitting in `~/workspace/devrc` (which is on `main`) gives **3 failed, 1364 passed**;
+  from a cwd on a feature branch, **1367 passed**. Same tree, same commit.
+- **Mechanism:** those three call `gc.evaluate(cmd)` with **no `cwd` argument**, so the guard
+  falls back to `_safe_getcwd()` — the process's own directory — and correctly denies a
+  `git commit …` case the test expects to be allowed. The tests are asserting a property of
+  whatever directory the runner happens to stand in.
+- **Ruled out:** not caused by #395/#396 — reproduced identically with `origin/main`'s core and
+  with the fixed core. Invisible in CI because the nix build sandbox's cwd is not a git repo.
+- **Why it matters:** this is the config-blind-suite class from RULES.md. The suite is
+  structurally blind to cwd-dependent bugs, and the failure mode is a test that goes red for an
+  environmental reason a reader will attribute to their own change.
+- **Next probe:** the three are `test_the_one_real_quoting_false_positive_is_a_heredoc_body` and
+  the two `…neighbours_stay_allowed_under_claude_code[git commit -m 'document why …']` params.
+  Fix by passing an explicit `cwd=` (a tmp_path non-repo) rather than by widening the harness.
 
 ### Host `settings.json` key sets still diverge (drift-check rc=15)
 - **Observed (values), live today:**
@@ -94,16 +155,16 @@ in impact: the audit exposed a live deploy bug that had been silently breaking t
   and check whether the rendered prompt contains the literal string `$ARGUMENTS`.
 
 ## Next steps (ranked)
-1. **Review and land #395 and #396** — the deployed guard currently fails open on a non-repo
-   `-C` target. Verify each against the deployed hook per the probe above; re-verify rather
-   than trusting the PR body (an audit fix resets the verification gate).
+1. **Fix the three cwd-dependent tests** (investigation above). Small, and it removes a red that
+   will otherwise be misattributed to somebody's change.
 2. **Run `/doctor` in a session.** The only authoritative read of the skill-listing budget.
-   My direct measurement of the deployed set: **33 entries, 10,881 chars (−19.7% from 13,554)**,
+   Direct measurement of the deployed set: **33 entries, 10,881 chars (−19.7% from 13,554)**,
    largest entry 451 vs the 1,536 per-entry cap, none over.
-3. **Reclaim stale worktrees** — `git worktree list` shows **44, of which 36 are `agent-*`**.
-   Several hold branches at superseded commits (`feat/commands-to-skills` is still locked at
-   `7ba46b5` vs origin `191a336`). Prune with `git worktree prune` + explicit removal; check
-   each for uncommitted work first.
+3. **Reclaim stale worktrees** — `git worktree list` shows **48, of which 36 are `agent-*`**
+   (up 4 since the last count; this session added and removed 2 of its own). Several hold
+   branches at superseded commits (`feat/commands-to-skills` is still locked at `7ba46b5` vs
+   origin `191a336`). Prune with `git worktree prune` + explicit removal; check each for
+   uncommitted work first.
 4. **Optional: bump Claude Code 2.1.220 → 2.1.226** via the flake input. Auto-update is correctly
    disabled (`DISABLE_AUTOUPDATER`). Missing: subagent text streaming (2.1.224), workspace-trust
    prompt (2.1.226).
@@ -156,7 +217,7 @@ in impact: the audit exposed a live deploy bug that had been silently breaking t
 # 1. Gate on main — read CONTENT, never the exit code
 cd ~/workspace/devrc
 nix build .#checks.x86_64-linux.pytests --no-link -L 2>&1 | grep -E 'RESULT:|TOTAL'
-# expect: TOTAL collected=7271 passed=7270 skipped=1 failed=0 ... RESULT: PASS (exit=0)
+# expect: TOTAL collected=7434 passed=7433 skipped=1 failed=0 ... RESULT: PASS (exit=0)
 
 # 2. Hosts converged + artifacts actually resolve (consumer, not deploy)
 bash scripts/drift-check.sh          # rc=15 expected (settings key parity only); dangling MUST be 0
@@ -170,4 +231,13 @@ ssh zach@10.42.0.100 'head -c1 ~/.claude/skills/standup/SKILL.md >/dev/null && e
 # 4. The guard is live (READ STDOUT JSON — this hook always exits 0)
 printf '{"hook_event_name":"PreToolUse","tool_name":"Bash","cwd":"%s","tool_input":{"command":"git commit -m x"}}' ~/workspace/devrc \
   | python3 ~/.claude/hooks/bash-guard.py     # expect permissionDecision:"deny"
+
+# 5. The fail-open is CLOSED. 🔴 The cwd MUST be a repo on a blocked branch, or an
+#    ALLOW proves nothing — that is what made the original repro unreadable.
+mkdir -p /tmp/plain-dir
+printf '{"hook_event_name":"PreToolUse","tool_name":"Bash","cwd":"%s","tool_input":{"command":"git -C /tmp/plain-dir commit -m x"}}' ~/workspace/devrc \
+  | python3 ~/.claude/hooks/bash-guard.py     # expect deny, naming /tmp/plain-dir as "not a git worktree"
+# negative control — same command from a cwd that is not a repo must ALLOW:
+printf '{"hook_event_name":"PreToolUse","tool_name":"Bash","cwd":"/tmp","tool_input":{"command":"git -C /tmp/plain-dir commit -m x"}}' \
+  | python3 ~/.claude/hooks/bash-guard.py     # expect no output at all
 ```

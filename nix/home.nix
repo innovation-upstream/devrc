@@ -21,13 +21,17 @@ let
   # Drift-deadman master switch (scripts/drift-check.sh) — gates ONLY whether the
   # timer is wired into timers.target. The SERVICE definition is always emitted, so
   # `systemctl --user start drift-check` works by hand on either host regardless.
-  # 🔴 Deliberately OFF at merge: the deadman was built + validated against scratch
-  # clones only, and enabling a timer is a live change to a host's behaviour. Flip to
-  # true in a separate, supervised deploy after one hand-run on the workbench proves
-  # the ssh leg reaches the laptop from a systemd-user context (a user unit has no
-  # ssh-agent, so the laptop key must be usable non-interactively — the one thing
-  # scratch clones structurally cannot test).
-  enableDriftDeadman = false;
+  # ON since 2026-08-11. Both preconditions were MEASURED on the workbench, not
+  # argued — each is a thing scratch clones structurally cannot test:
+  #   1. the ssh leg reaches the laptop from a systemd-user context (no ssh-agent):
+  #      a hand-run of drift-check.service found REAL drift (laptop 1 behind), rc 10.
+  #   2. the failure toast actually DISPLAYS. It did not, at first — dunst was paused
+  #      with 286 notifications queued, so the alert was sent and silently binned.
+  #      #381 fixed that; re-measured here as displayed 0 -> 1 with waiting UNCHANGED
+  #      while paused=true, driven by a real unit failure (rc 8) on a throwaway clone.
+  # (2) is why this flag waited: a timer alerting into a paused queue is WORSE than no
+  # timer, because it manufactures the appearance of coverage.
+  enableDriftDeadman = true;
   # Graphical host = runs X/i3 (both current NixOS hosts do; only a genuinely headless
   # box would not). Approximated as isNixOS, mirroring graphical.nix — deliberately NOT
   # !serverMode, which is true on the graphical workbench.
@@ -238,7 +242,29 @@ in
         width = "(0, 420)";
         # Cap the visible stack + keep a recall buffer (dunstctl history-pop).
         notification_limit = 4;
-        history_length = 40;
+        # RECALL BUFFER sized against the MEASURED notification rate, not a guess.
+        # Audited 2026-08-11 on the workbench: ~330 notifications/day reach dunst
+        # (claude-notify ~193/day from its own log; cpu-monitor + earlyoom ~137/day
+        # combined, split by cross-checking `journalctl --user -u systembus-notify`
+        # against dunst's per-notification icon warning). At the previous value of
+        # 40 the buffer therefore held under THREE HOURS of traffic.
+        #
+        # That is the recall path for anything DND swallowed, and it is the only
+        # one: a paused notification sits in the `waiting` queue, which dunst 1.13.2
+        # exposes only as a COUNT (`dunstctl count waiting`) — its contents cannot
+        # be enumerated or recovered. History is what `$mod+n` (history-pop) and
+        # scripts/notif-center read.
+        #
+        # Measured consequence of 40: on the workbench the history was 38/40
+        # `system-notify` (earlyoom OOM-kill toasts, which arrive in bursts of 100+
+        # during a single kill episode), having evicted everything else — including
+        # the `notify-failure` deadman toasts that PR #381 exists to protect. One
+        # OOM burst was enough to flush the entire recall buffer.
+        #
+        # This does NOT suppress or reduce anything; it only widens the window in
+        # which a swallowed notification can still be recovered. Cost is a few
+        # hundred structs in dunst's memory. Reverting is this one line.
+        history_length = 300;
         stack_duplicates = true;      # collapse repeats into one with a counter
         show_indicators = false;      # no "(x more)" / action hints — calmer
         # Mouse: left dismisses the current toast, middle fires its action then
@@ -275,6 +301,53 @@ in
       # Urgent agent approvals still reach the phone via clawgate push.
       fullscreen_suppress = {
         fullscreen = "suppress";
+      };
+      # DEADMAN BYPASS — the ONE class of toast that must defeat do-not-disturb.
+      #
+      # WHY: `notify-failure` toasts are the only signal that an important user
+      # unit died. Measured 2026-08-10 on the workbench: dunst `is-paused=true`
+      # with 30 notifications queued behind it, and `drift-check.service` sitting
+      # in `failed` (status 10, genuine drift) — the OnFailure handler ran, sent
+      # its toast, and the toast went into the WAITING queue and was never shown.
+      # It is not even in `dunstctl history` (history only holds toasts that were
+      # DISPLAYED then dismissed/expired), so the failure was invisible in every
+      # surface a human looks at. DND is a state Zach deliberately enters via the
+      # bar's bell button, so "just unpause it" is not a fix.
+      #
+      # TWO INDEPENDENT SUPPRESSORS had to be defeated — measured, not assumed:
+      #
+      #  1. PAUSE LEVEL. `dunstctl set-paused true` (what the bar button runs)
+      #     sets pause level **100**, the maximum. dunst(5) says a notification
+      #     shows when its override_pause_level is "greater than" the pause
+      #     level, which would make 100 unbeatable. THAT IS WRONG — the
+      #     implementation compares >=. Measured on dunst 1.13.2 at pause
+      #     level 100: override_pause_level=100 -> displayed 0->1, waiting 0->0;
+      #     override_pause_level=99 -> displayed 0->0, waiting 0->1. So 100 is
+      #     both necessary and sufficient; anything less is silently swallowed.
+      #
+      #  2. FULLSCREEN SUPPRESSION. `fullscreen_suppress` above is FILTERLESS, so
+      #     it also matches this toast and routes it straight to history whenever
+      #     any fullscreen window is focused — a second, independent way for a
+      #     deadman alert to vanish (observed dropping real toasts on the laptop).
+      #     `fullscreen = "show"` opts this one rule back out.
+      #
+      # ORDERING MATTERS: home-manager renders these sections alphabetically and
+      # dunst applies rules in file order, last-write-wins. The `zz_` prefix
+      # guarantees this rule is applied AFTER `fullscreen_suppress` regardless of
+      # what rules are added later. scripts/tests/test_dunst_dnd_bypass.py pins
+      # both the values and that ordering.
+      #
+      # SCOPE: keyed on appname, which scripts/notify-failure.sh sets via
+      # `notify-send -a notify-failure`. That is ALL unit-failure toasts, not an
+      # opt-in subset — justified by the measured firing rate (7 activations in
+      # ~6 months of laptop journal, 1 in 9 days of workbench journal), which is
+      # far too low to make DND feel broken. Deliberately NOT keyed on
+      # `urgency = critical`: other tools send critical toasts, and those must
+      # still respect DND.
+      zz_notify_failure_bypass = {
+        appname = "notify-failure";
+        override_pause_level = 100;
+        fullscreen = "show";
       };
     };
   };
@@ -645,6 +718,16 @@ in
     source = ../scripts/collector/collector.py;
     executable = true;
   };
+  # Shared by BOTH session summarisers (claude/session-tailer.py and
+  # opencode/session_tailer.py) — the one definition of the `changed_paths*`
+  # payload block. It must land at the collector ROOT, beside collector.py,
+  # because each tailer puts its own grandparent dir on sys.path to import it;
+  # that resolves identically in the repo (scripts/collector/) and here.
+  # 🔴 Without this entry the switch succeeds and the tailers die on ImportError
+  # at the next timer tick. scripts/tests/test_collector_deploy_declares.py
+  # pins it for exactly that reason.
+  home.file.".config/activity-collector/changed_paths.py".source =
+    ../scripts/collector/changed_paths.py;
 
   # Claude Code activity source (5th source): a periodic tailer that scans the
   # ~/.claude transcripts and emits NEW user-typed messages / slash-commands as
