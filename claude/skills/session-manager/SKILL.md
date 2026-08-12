@@ -1,148 +1,120 @@
 ---
 name: session-manager
-description: "Live cross-host view of every tmux window on workbench + laptop — which have Claude Code running, what each is doing, how stale it is, plus recent agent sessions from ClickHouse. JSON-first, read-only. Use for: active sessions, what's running where, tmux state across both hosts, cross-host session status, tail a tmux window, which windows are stale/idle/busy."
+description: "Live cross-host view of every tmux window on workbench + laptop — which have Claude Code running, what each is doing, which ones are WAITING ON A HUMAN (asked a question / blocked on a modal / out of context), how stale it is, plus the clawgate approval queue and recent agent sessions from ClickHouse. JSON-first, read-only. Use for: is anything waiting on me, active sessions, what's running where, tmux state across both hosts, cross-host session status, tail a tmux window, which windows are stale/idle/busy/blocked."
 ---
 
 # session-manager — cross-host tmux + agent activity
 
-`scripts/session-manager`. One-shot, read-only, `--json`-first. It is the **queryable
-counterpart to `agent-ops`**, which is the always-on local tmux popup with no JSON API and
-no cross-host reach.
-
-## Run it
+`scripts/session-manager`. One-shot, **read-only**, `--json`-first, both hosts.
 
 ```bash
-python3 $DEVRC/scripts/session-manager                       # table, both hosts
-python3 $DEVRC/scripts/session-manager --json                # agent-readable
-python3 $DEVRC/scripts/session-manager --host workbench --no-ch   # fast + offline
-python3 $DEVRC/scripts/session-manager list                  # tmux only, no ClickHouse
-python3 $DEVRC/scripts/session-manager detail scratch7:3     # one window + its prompt history
-python3 $DEVRC/scripts/session-manager tail scratch7:3 --lines 200   # --host defaults to LOCAL
+python3 $DEVRC/scripts/session-manager --json                      # everything
+python3 $DEVRC/scripts/session-manager --host workbench --no-ch    # fast + offline
+python3 $DEVRC/scripts/session-manager detail scratch7:3           # one window + prompts
+python3 $DEVRC/scripts/session-manager tail scratch7:3 --plain     # scrollback, no ANSI
 ```
 
-`detail` additionally runs the per-session prompt-history query for that window's
-`claude_session_id` and attaches it as `session_history` (skipped, with a stated reason,
-under `--no-ch` or when the window carries no session id). See
-`reference/clickhouse-queries.md`.
-
-🔴 **Read `session_history.reason` — only one of its answers is a measured absence.** A
-single hardcoded reason used to answer every no-session-id case, so one `detail --json`
-could print `LIVE COUNT UNMEASURED` and then assert a *measured* absence over that same
-unmeasured set. The reason now branches on what was actually measured: `--no-ch`,
-`--no-fuzzyclaw` (the files were never read), **any** matched window is on a **remote** host
-(fuzzyclaw is local-only — and with the default `--host all` a `session:index` that exists on
-both machines yields a row from each, so this fires on a *mixed* row set too), the
-intersection **never ran**, the slot was **contested and all claimants dropped**, an
-**unrecognised** `fuzzyclaw.status`, or — the one genuine measured absence — *"no live
-fuzzyclaw task file joined to it"*, which is reached only when the status is `ok`. Every
-other reason says **"this is NOT a measured absence"** in so many words.
+🔴 **Rows are at `report["hosts"][<"workbench"|"laptop">]["windows"]`** — not at the top
+level. Roll-ups: `summary.waiting`, `summary.status[bucket]` (`{claude, shell, total}`),
+`blocked_on_me`.
 
 | flag | effect |
 |---|---|
 | `--json` | JSON (default is a table) |
-| `--host workbench\|laptop\|all` | default `all` |
-| `--claude-only` | drop non-Claude windows (see below); no effect on `tail`, which says so on stderr |
+| `--host workbench\|laptop\|all` | default `all`; `tail` resolves `all` to LOCAL |
+| `--claude-only` | drop non-Claude rows; every count then describes the FILTERED set, and `summary.excluded_non_claude` says how many went |
+| `--no-ch` | skip ClickHouse — the client is never constructed |
+| `--no-capture` | skip the pane scrape; **every** `waiting_probable` becomes `null` |
+| `--fuzzyclaw` / `--no-fuzzyclaw` | the task-file join is **OFF by default** (see below) |
+| `--plain` | `tail` only: strip ANSI at the source instead of `sed`-ing it out |
 | `--stale-threshold <secs>` | default 3600; `age >= threshold` is stale |
-| `--no-ch` | skip ClickHouse — the client is never even constructed |
-| `--no-fuzzyclaw` | skip the task files |
 | `--lines N` | `tail` scrollback depth (default 100) |
 
-## 🔴 A MIXED count is never published as a bare number
+## 🔴 `waiting_probable` — is anything waiting on a HUMAN
 
-The headline question is *"is anything waiting on me"*, and `idle` answered it
-with agents and bare shells added together: measured 2026-08-11, 61 windows gave
-`idle: 17` = **12 agent windows + 5 bare shells**, both rendered `● idle`. The
-row data was always right (every row carries `claude`); the roll-up and the
-table conflated. So:
+`status: idle` merges four states that need four different actions. Each Claude pane is
+scraped (one batched `capture-pane` per host) for three signals, and every row carries the
+**matched line** so you can disagree with it:
 
-```json
-"summary": {
-  "total_sessions": 61, "claude": 41, "shell": 20,
-  "status": {"idle": {"claude": 12, "shell": 5, "total": 17}, "busy": {…},
-             "stale": {…}, "unknown": {…}}
-}
-```
+| signal | means | do |
+|---|---|---|
+| `trailing_question` | the agent's last sentence ends in `?` | answer it |
+| `selection_menu` | `❯ 1./2./3.` modal is up | press a key |
+| `context_exhausted` | `ctx: 0%` | `/clear` it |
 
-🔴 **The flat `summary["idle"|"busy"|"stale"|"unknown"]` integers are GONE** —
-a deliberate break, in the loud direction. Keeping them would have left every
-reader on the mixed number while the fix sat in keys they never learned about;
-`summary["status"]["idle"]["total"]` is the same number and you have to type
-`total` to get it. The table gained a **KIND** column (`claude`/`shell`, read off
-the boolean, not spelled into the status word) and a
-`by status (claude+shell): idle=12+5 …` footer.
+🔴 **`waiting_probable: false` means "these three were looked for and none matched" — NOT
+"this window needs nothing."** Recall is partial by construction: measured on 40 live panes
+2026-08-12, a window parked on `Press Enter to continue…` matches none of them, and text
+typed at the `❯` prompt is deliberately **excluded** (a window one Enter away reads `no` —
+see `reference/waiting-signal.md` for the evidence and what would justify turning it on).
 
-All four buckets split, not just `idle`. `unknown` was 15/15 non-claude in that
-measurement, which is a snapshot: a claude row lands in `unknown` as soon as its
-title carries no glyph — which every REMOTE claude window does whenever the
-glyph is absent, since it has no age either.
+🔴 **`waiting_probable: null` is not `false`.** Read `waiting_status`: `ok` (scraped),
+`not_claude` (never scraped — the signals are Claude-TUI shapes and a shell's last line
+ending in `?` would be a false positive), `uncaptured` (the batch ran, this pane was not in
+it), `skipped` / `error`. `summary.waiting.probable` is likewise **`null`, never `0`**, when
+nothing was scraped — the one sentence this tool must never emit is "nothing is waiting on
+you" off a look that never happened.
 
-## `--claude-only`
+## 🔴 `blocked_on_me` — the clawgate approval queue
 
-Drops non-Claude rows on **every** host. 20 of 61 rows were shells the operator
-never asked about, so this is a straight token cut for the agent path.
+Read from the bar poller's cache. It is here because an accurate cross-reference once cost
+real signal: a dogfooding agent read that `agent-ops` has no JSON API, correctly preferred
+this script, never opened agent-ops, and **missed 11 pending approvals — four of them
+credential-exposure or cross-user-data-leak.**
 
-🔴 **Every summary count then describes the FILTERED set** — `total_sessions`,
-`claude`, `shell`, `status.*` — and `summary.excluded_non_claude` says how many
-rows were dropped (it is `null`, not `0`, when the filter never ran). That
-direction is the safe one: counting the unfiltered set would publish
-`total_sessions: 20` beside an empty table and **exit 0**. Counting the filtered
-set makes "no agent windows here" a real measured zero — **exit 3** — with the
-dropped count proving the host was not empty.
+- **`count` is the measurement; `detail` is not.** The cached detail string truncates
+  (names ~6 ids however many are pending) and has dropped `ready_for_review` items —
+  finished work awaiting review. Nothing here parses it.
+- Four states: `ok` / `stale` (cache older than 300s — the poller writes every 45s) /
+  `absent` / `unparseable`. The last three publish **`count: null`, never `0`**.
+- **For WHICH tasks, open `agent-ops`** (`$mod+i`, tmux `prefix+A`, or the ▦ bar button). It
+  has the enumerated queue with titles, open PRs, and a `/proc` walk that finds a `claude`
+  buried under a wrapper shell. This script has the count; that one has the list. They are
+  complements, not substitutes.
 
-## The two caveats are in the OUTPUT, not just in this file
+## The caveats are in the OUTPUT, not just in this file
 
-`report["caveats"]` (structured) + two footer lines in the table, printed
-unconditionally:
+`report["caveats"]` (structured) + three footer lines in the table, printed
+unconditionally — an agent that runs the script cold never reads this file:
 
-- `claude_detection` — `pane_current_command =~ /claude/`; a claude under a
-  wrapper shell reads as `shell`.
-- `fuzzyclaw_scope` — `local_host_only`; the `null_fields_on_remote_rows` ledger
-  (`fuzzyclaw`, `claude_session_id`, `age_secs`) is pinned by a test against a
-  real remote row **and** against the equivalent local row, so it cannot drift
-  into naming fields that are always null.
-
-An agent that runs the script cold never reads this file; a caveat that lives
-only here protects only the readers who already knew.
+- `claude_detection` — `pane_current_command =~ /claude/`; a claude under a wrapper shell
+  reads as `shell` (shallower than agent-ops' `/proc` walk, which is not reachable over SSH).
+- `fuzzyclaw_scope` — `local_host_only`; a REMOTE row carries null `fuzzyclaw` /
+  `claude_session_id` / `age_secs` and is never labelled `stale`.
+- `waiting_signal` — the enumerated signal set, the claude-rows-only scope, and the
+  prompt-text exclusion with its reason.
 
 ## 🔴 Read the exit code — the two zeroes are different facts
 
 | code | meaning |
 |---|---|
 | `0` | ran, found windows (**including** a partial scan where one host was unreachable) |
-| `2` | usage / malformed `<session>:<window>` target / **`tail`: the host answered and there is no such window** |
-| `3` | every requested host answered and the answer is a **real zero** (for `tail`: the window exists and its scrollback is empty; under `--claude-only`: zero **agent** windows — read `summary.excluded_non_claude` before concluding the host is idle) |
+| `2` | usage / bad `<session>:<window>` / **`tail`: the host answered, no such window** |
+| `3` | every requested host answered and the answer is a **real zero** |
 | `4` | **no** host could be reached — the zero is unmeasured, not measured |
-| `5` | **`tail` only**: the host answered and there is **no tmux server** on it, so no window exists there |
+| `5` | **`tail` only**: the host answered and there is **no tmux server** on it |
 
-🔴 For `tail`, "no such window" is **exit 2**, not 4. The host answered; calling it
-unreachable states a false fact and sends you to debug SSH over a typo. `tail`'s JSON
-carries `reachable` *and* `found` — `found: null` means the host never answered, so it has
-said nothing about whether the target exists. `--json` prints that payload on **every** exit
-path, 0/2/3/4/5, not only on success — the failure exits are precisely where the
-discriminants are worth reading. The human sentence goes to stderr, so stdout stays parseable.
+Rationale, and why 5 had to be split out of 3: `reference/exit-codes.md`.
 
-🔴 **Exit 5 exists because 3 was carrying two facts.** `tmux` saying *"no server running"*
-is a **reachable** host, so `tail` used to take the success branch and publish
-`found: true, text: ""` → exit 3 — identical to a window that exists with an empty
-scrollback, which is the only thing exit 3 is documented to mean. A down server now gets
-`found: false, no_server: true` and its own code. It is deliberately **not** exit 2 (the
-target may be spelled perfectly — the repair is starting tmux, not fixing a typo) and not
-exit 4 (the host *did* answer).
+Same discipline inside the payload: `hosts.<n>.reachable`/`.error` describe the
+**`list-panes`** call, `.windows_measured`/`.windows_error` the **`list-windows`** call, and
+`.captures_measured`/`.captures_status` the **capture batch** — three independent
+measurements, and one succeeding says nothing about the others. `clickhouse.status` must be
+`ok` before `rows: []` is believable. **Never read a bare count without its status.**
 
-`--host` defaults to `all`, which is meaningless for a command targeting one window, so
-`tail` resolves it to the **local** host. That default is recorded, not silent:
-`host_defaulted: true` in the JSON, and the not-found message names the host searched and
-how to search the other one.
+## fuzzyclaw is OFF by default
 
-Same discipline inside the payload. `hosts.<name>.reachable` + `.error` are always present;
-`clickhouse.status` is one of `ok` / `unreachable` / `query_error` / `unavailable` /
-`skipped`, so `rows: []` is only believable when it is `ok`; `fuzzyclaw` reports
-`files_seen` / `files_live` / `files_unparseable`, so "no live tasks" is distinguishable
-from "no task files". Never read a bare count without its status.
+Measured 2026-08-12: **29 live of 401 files, 363 stale, 9 slot-mismatched — and every one of
+the 29 live rows read `paused`**, including a window demonstrably running an agent. 29 table
+rows, zero contribution, from a source `CLAUDE.md` marks UNTRUSTED. Opt in with
+`--fuzzyclaw`; `--no-fuzzyclaw` still works and now names the default. Off, every count is
+`null` rather than `0`.
 
-Under `--no-fuzzyclaw` **every one of those counts is `null`, not `0`** — the directory is
-never opened, so a `0` would be a fabricated measurement. `status: "skipped"` discriminates
-it, but a discriminated lie is still a lie in the count.
+The intersection guard is unchanged and still runs when you opt in — a task file survives
+only when its `window_id` is live **and** that live window's real `(session, index)` equals
+the one the file recorded. Why that relationship (not mere existence) is the guard, what the
+slot-conflict drop does and does not still catch, and the field ledger:
+`reference/fuzzyclaw-guard.md`.
 
 ## Where everything lives
 
@@ -150,112 +122,24 @@ it, but a discriminated lie is still a lie in the count.
 |---|---|
 | `scripts/session-manager` | the script |
 | `scripts/tests/test_session_manager.py` | the hermetic suite (mocks tmux, SSH, CH, FS) |
-| `scripts/tmux-scratch-slots.sh` | codename table (`~/.config/tmux/scratch-slots.sh` deployed) |
-| `scripts/validation/chquery.py` | shared CH client — a LIBRARY, imported by `sys.path` insert |
+| `scripts/tmux-scratch-slots.sh` | codename table |
+| `scripts/validation/chquery.py` | shared CH client — a LIBRARY, `sys.path`-inserted |
 | `~/.config/activity-collector/env` | CH endpoint + creds (never hardcoded) |
-| `~/.tmux/tasks/*.json` | fuzzyclaw task files |
+| `~/.cache/bar-status/clawgate.json` | the blocked-on-me cache (`scripts/bar-status-poll`) |
+| `~/.tmux/tasks/*.json` | fuzzyclaw task files (UNTRUSTED) |
 
-Details: `reference/clickhouse-queries.md`, `reference/cross-host.md`.
-
-## 🔴 fuzzyclaw is only usable intersected with LIVE windows — and the guard pins a RELATIONSHIP
-
-`CLAUDE.md` marks `~/.tmux/tasks/*.json` UNTRUSTED. Measured on the workbench 2026-08-11:
-**400 files, 44 live windows, 357 stale (89%), 11 slot-mismatched, 32 live, 0 unparseable.**
-The failure mode is staleness, not corruption — so it is filterable, and
-`filter_live_tasks()` does the filtering against
-`tmux list-windows -a -F '#{window_id}|#{window_index}|#{session_name}'`.
-
-A task file survives only when **both** hold:
-
-```
-window_id is live   AND   that live window's real (session, index) == the file's
-```
-
-🔴 **Existence alone is not enough, and checking only existence was a real defect here.** An
-earlier revision keyed the guard on `window_id` but joined the task onto a pane row by
-`(tmux_session, window_index)` — two independent facts, never checked against each other.
-`renumber-windows` is `on`, so indexes shift under live windows: of the 43 files that passed
-the id-only guard, only **32** still sat in the slot they recorded, **7** named a slot now
-held by a *different* live window, and **5** slots were claimed by more than one survivor
-(silently last-wins). Two rendered rows carried another window's `claude_session_id` — the
-one carrier of the session id into ClickHouse — so a `detail` would have pulled a stranger's
-prompt history.
-
-Consequences, all pinned by tests:
-
-- rejections are counted **separately**: `files_stale` (the window is gone) vs
-  `files_mismatched` (alive, but somewhere else now). Collapsing them hides a renumber storm.
-- a slot two files both claim resolves to **nothing**. `index_tasks_by_window()` drops it and
-  reports it under `fuzzyclaw.slot_conflicts`; attaching an arbitrary one of two
-  contradictory records is worse than attaching none, because it reads as measured data.
-  🔴 **What that drop still catches is narrower than the "5 contested slots" above — but it
-  is not empty.** Gone for good: two *distinct* live window ids contending for one slot (a
-  slot belongs to exactly one window, so `list-windows` cannot report it) — that was the
-  shape produced by the *old id-only* guard. **Still reachable: two task files carrying the
-  same `window_id`.** The files are `<index>.json`, not `<window_id>.json`, so nothing
-  enforces one file per window, and `CLAUDE.md` marks the directory UNTRUSTED — the
-  400-files/400-distinct-ids reading of 2026-08-11 is a snapshot of that writer, not an
-  invariant. Both duplicates pass the relationship guard and collide, and the conflict
-  renders; a test drives that case through `gather()`. Note that `claimants` counts *files*
-  while `window_ids` is deduplicated, so `claimants: 2, window_ids: ["@41"]` is exactly this
-  case — duplicate files for one window, not contention — and the rendered line states both
-  numbers so it cannot be misread.
-- every row carries `window_id`, so the join is auditable in the output:
-  `row.window_id == row.fuzzyclaw.window_id` for every joined row. 🔴 That holds **by
-  construction, not by luck** — both sides derive from the same `list-windows` snapshot — so
-  it is documentation of the join, **not a defence**, and re-checking it at runtime would be
-  an unreachable guard. It does **not** cover the one skew that is genuinely reachable:
-  `list-panes` and `list-windows` are two non-atomic calls, so with `renumber-windows on` a
-  window can move between them and a row can pair one snapshot's pane data with the other's
-  window id. The pane format carries no `window_id`, so nothing catches that. **Unguarded,
-  and named rather than implied away.**
-- `filter_live_tasks()` **rejects a bare set of ids with a `TypeError`** rather than
-  degrading to the old existence-only check.
-
-Same precedent and rationale as `scripts/tmux-scratch-status.sh:28-34`. If you add a second
-consumer of these files, intersect there too — do not copy the fields out raw.
-
-The task-file key set consumed is pinned as a **field ledger** (`FUZZYCLAW_FIELDS`, 11 keys
-including `transcript_path`, which the original spec omitted). It fails the suite when the
-set grows *or* shrinks.
-
-## 🔴 The third zero: `fuzzyclaw.status`
-
-The live-window set is **measured or `None`**, never a fabricated empty set. When it was not
-measured, `fuzzyclaw.status` is `"unmeasured"` and `files_live` is `null` — *not* `0`, and
-never `"ok"`. Two ways to get there, both of which used to report
-`files_seen: 400, files_live: 0, status: "ok"`:
-
-| cause | what you see |
-|---|---|
-| `--host laptop` — the local host is never scanned, so its windows are never listed | `fuzzyclaw.error` names the unscanned local host |
-| `list-panes` succeeded but `list-windows` failed | `hosts.<n>.windows_measured: false` + `windows_error`; `live_window_ids: null` |
-
-`hosts.<n>.reachable`/`.error` describe the **`list-panes`** call; `.windows_measured`/
-`.windows_error` describe the **`list-windows`** call. They are independent measurements —
-one succeeding says nothing about the other.
-
-## Honest limits — do not describe these as working
-
-(The first two are now also carried in the output — see "The two caveats" above.)
-
-- Claude detection is `pane_current_command =~ /claude/`, **shallower** than agent-ops'
-  `/proc` descendant walk. `/proc` is not reachable over SSH, so a deeper local check would
-  make the two hosts report by different rules.
-- fuzzyclaw is read on the **local host only** (the files are local state). A remote row
-  therefore has `fuzzyclaw: null`, `claude_session_id: null` and `age_secs: null`, and is
-  classified busy/idle from the title glyph alone — it is never labelled `stale`, because
-  no age was measured.
-- `tail --stream` is **not implemented** — one-shot `capture-pane` only.
-- `signal` / `kill` are **not implemented**, deliberately. This tool never writes to,
-  signals, or kills a window. Adding a destructive verb needs its own PR and its own guards.
+Reference: `waiting-signal.md`, `exit-codes.md`, `fuzzyclaw-guard.md`,
+`clickhouse-queries.md`, `cross-host.md`.
 
 ## Gotchas
 
-- Both hosts report `hostname` as `nixos`. The local host label comes from `ACTIVITY_HOST`
-  (env, then the collector env file), defaulting to `workbench`.
-- `tmux` exiting non-zero with *"no server running"* is a **reachable** host with zero
-  windows, not an unreachable one. The script already separates them; keep it that way.
-- zsh reserves `status` — use `rc=`/`out=`. Use `git -C <path>`, never `cd <repo> &&`.
-- Merged ≠ deployed: this file only reaches `~/.claude/skills/` on a `home-manager switch`
-  / `ship.sh`. The script itself runs straight from the repo checkout.
+- Both hosts report `hostname` as `nixos`. The local label comes from `ACTIVITY_HOST` (env,
+  then the collector env file), defaulting to `workbench`.
+- `tmux` saying *"no server running"* is a **reachable** host with zero windows, not an
+  unreachable one. Keep the two separate.
+- `signal` / `kill` are **not implemented, deliberately.** This tool never writes to,
+  signals or kills a window — which is the only reason it is safe to point at a live machine
+  holding 40+ windows of real work. A `waiting` flag is a read; acting on it is not. A
+  destructive verb needs its own PR and its own guards.
+- Merged ≠ deployed: this file only reaches `~/.claude/skills/` on a `home-manager switch` /
+  `ship.sh`. The script itself runs straight from the repo checkout.

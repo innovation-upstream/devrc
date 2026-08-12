@@ -9,19 +9,38 @@ Today that requires stitching `agent-ops` (local-only popup, no JSON API),
 `tmux list-panes -a` per host, a manual `curl` at ClickHouse, and the fuzzyclaw
 task files.
 
-RELATIONSHIP TO agent-ops
--------------------------
+RELATIONSHIP TO agent-ops — READ BOTH, THEY ARE NOT SUBSTITUTES
+---------------------------------------------------------------
 `agent-ops` is the always-on tmux popup. This is its queryable/programmatic
 counterpart: one-shot, `--json`-first, and cross-host. It deliberately does NOT
 share agent-ops' `/proc` BFS — see "HONEST LIMITS" below.
+
+🔴 That description used to end there, and its MEASURED EFFECT was losing
+signal. A dogfooding agent read "agent-ops has no JSON API and no cross-host
+reach", correctly concluded this script was the better tool, never opened
+agent-ops — and so missed the ELEVEN pending clawgate approvals only agent-ops
+showed, four of them credential-exposure or cross-user-data-leak. An accurate
+cross-reference steered a reader away from the highest-stakes signal on the
+machine. Two fixes, both applied:
+
+  * the pending count is now read HERE (`report["blocked_on_me"]`, and a
+    `▸ BLOCKED ON ME` section printed in every state including unmeasured), so
+    the headline question does not depend on remembering another tool;
+  * agent-ops remains the place to see WHICH tasks, and is pointed AT rather
+    than away from. It has what this cannot: the enumerated queue with titles,
+    open PRs, and the /proc walk that finds a `claude` under a wrapper shell.
 
 ARCHITECTURE
 ------------
 Every fact-producing function is either PURE or takes an injected runner /
 client / clock, so the whole test suite is hermetic: it never runs tmux, never
 opens a socket, and never touches a real window. The impure edge is exactly
-three seams — `_default_runner` (subprocess), `make_ch_client` (HTTP), and
-`_read_text` (filesystem).
+FOUR seams — `_default_runner` (subprocess), `make_ch_client` (HTTP),
+`_read_text` (filesystem), and `_read_blocked_text` (the clawgate bar cache).
+The last is deliberately its OWN name rather than a `_read_text` call: the
+suite forbids each edge by replacing it with a raiser, and an edge that shares
+a function with a legitimate one cannot be forbidden without breaking the
+other. See `_read_blocked_text`.
 
 🔴 SILENT-ZERO DISCIPLINE (the reason for most of the shape here)
 -----------------------------------------------------------------
@@ -124,7 +143,33 @@ HONEST LIMITS (stated, not implied away — AND CARRIED IN THE OUTPUT as
     `last_activity`). Remote rows are still classified busy/idle from the pane
     title glyph.
   * `tail --stream` is NOT implemented. Only the one-shot `capture-pane` dump.
-  * `signal` / `kill` are NOT implemented — deliberately deferred.
+  * `signal` / `kill` are NOT implemented — deliberately deferred. This script
+    is READ-ONLY BY CONSTRUCTION, which is the only reason it is safe to point
+    at a live machine holding 40+ windows of real work. `waiting_probable` is a
+    READ; acting on it is not, and does not belong here.
+  * `waiting_probable` scrapes THREE enumerated signals off a TUI upstream can
+    restyle at will, on claude rows only. `false` means "these three did not
+    match", never "this window needs nothing" — measured 2026-08-12, a window
+    parked on `Press Enter to continue…` matches none of them. See
+    CAVEATS["waiting_signal"], carried in the output.
+
+🔴 THE JSON SHAPE, because a consumer that has to guess it wastes a call
+--------------------------------------------------------------------------
+Window rows are NOT at the top level. They live at:
+
+    report["hosts"][<"workbench"|"laptop">]["windows"]  -> [row, ...]
+
+and the roll-ups a caller usually wants are:
+
+    report["summary"]["waiting"]        {"probable", "measured", "unmeasured",
+                                         "per_signal", "unmeasured_reasons"}
+    report["summary"]["status"][b]      {"claude", "shell", "total"} per bucket
+    report["blocked_on_me"]             {"status", "count", ...}
+
+Each row carries: host, session, window_index, window_id, window_name,
+codename, pane_id, path, command, task, claude, busy, age_secs, status,
+waiting_probable, waiting_signals, waiting_status, claude_session_id,
+fuzzyclaw, panes. The row ledger is pinned by a test.
 """
 from __future__ import annotations
 
@@ -136,6 +181,7 @@ import shlex
 import subprocess
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -205,6 +251,103 @@ DEFAULT_TAIL_LINES = 100
 
 CLAUDE_RE = re.compile(r"claude", re.IGNORECASE)
 
+# --------------------------------------------------------------------------- #
+# 🔴 BLOCKED-ON-ME (the clawgate approval queue), read from the bar poller's
+# cache. `agent-ops` is the only other surface that shows this, and a dogfood
+# agent that (correctly) rejected agent-ops for having no JSON API therefore
+# missed 11 pending approvals, four of them credential-exposure or
+# cross-user-data-leak. So the count lives here too.
+#
+# 🔴 `count` IS THE MEASUREMENT; `detail` IS NOT. The cached detail string
+# truncates — "11 task(s) awaiting: #171, #170, #169, #168, #160, #165" names
+# SIX of eleven — and the dropped tail has included `ready_for_review` items,
+# i.e. finished work awaiting review. Nothing here ever parses `detail` for a
+# count; it is carried verbatim and labelled truncated.
+#
+# The cache is written by `scripts/bar-status-poll` every 45s. Anything older
+# than MAX_AGE cannot be called a current measurement, so it is published with
+# `status: "stale"` rather than as a fresh number — and an ABSENT cache is
+# `count: None`, never 0. A missing file rendering as a measured zero is the
+# exact failure this whole script exists to refuse.
+# --------------------------------------------------------------------------- #
+BLOCKED_CACHE = os.path.join(HOME, ".cache", "bar-status", "clawgate.json")
+BLOCKED_CACHE_MAX_AGE = 300         # 5x the 45s poll interval
+BLOCKED_DETAIL_NOTE = ("`detail` TRUNCATES (it names ~6 ids however many are "
+                       "pending) and has dropped ready_for_review items — read "
+                       "`count`, or `agent-ops` / the clawgate API for the "
+                       "full queue")
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE `waiting` SIGNAL. `status: idle` merges four states that need four
+# different actions: finished-and-awaiting-instruction, asked-a-direct-question,
+# hard-blocked-on-a-modal, and out-of-context. Only the first is idle in any
+# useful sense; a dogfood agent had to `tail` 13 of 40 windows and read English
+# prose to tell them apart, which is a sample, not a sweep.
+#
+# 🔴 IT IS `waiting_PROBABLE`, AND IT SHIPS THE MATCHED LINE. These are screen-
+# scrapes of a TUI that upstream can restyle at any time, so the row carries the
+# evidence and a consumer judges it. A bare boolean would be a verdict this
+# cannot honestly issue.
+#
+# 🔴 THE SIGNAL SET IS ENUMERATED AND CLOSED. `waiting_probable: False` means
+# "these three were looked for and none matched" — NOT "this window needs
+# nothing". Measured on 40 live panes 2026-08-12, two windows sat on `Login
+# successful. Press Enter to continue…`, a real hard block that NONE of these
+# three signals catches. Recall is deliberately partial; the enumeration is
+# published in `caveats` so a consumer knows exactly what was looked for.
+#
+# 🔴 TEXT AT THE `❯` PROMPT IS DELIBERATELY *NOT* A SIGNAL, AND THE REASON IS
+# NOT "we could not tell" — investigated 2026-08-12, and the honest answer is
+# more specific than that. Recorded here because the next person WILL want to
+# add it, and the case against is evidential, not a shrug.
+#
+#   * DIMNESS IS THE WRONG QUESTION. What separates the readings is POSITION,
+#     not colour, and `capture-pane` reports position perfectly well.
+#   * A placeholder hint CANNOT coexist with typed text — the renderer returns
+#     early on a non-empty buffer (`if(e!=="")return`). So "placeholder vs
+#     draft" is not a real ambiguity.
+#   * A QUEUED message is not in the box either: the submit handler clears the
+#     buffer on enqueue and queued messages render as their own indented block
+#     ABOVE the top border.
+#
+# 🔴 SO WHY STILL EXCLUDED? Both invariants above are read off a MINIFIED
+# bundle at ONE version (claude-code 2.1.220), and the case they rule out —
+# a live queued message — was NEVER OBSERVED: zero hits across 29 Claude panes
+# and ~250k lines of scrollback. Keying a signal on an unobserved negative
+# means its failure mode is a FALSE `waiting` row, arriving exactly when the
+# operator most trusts the output. And under that same source read, typing
+# while an agent works has THREE outcomes, not one (queue / interrupt the turn
+# / drop as `mode_not_queueable`), so "text in the box" is not even a
+# single-meaning observation.
+#
+# Excluding costs RECALL, which is the safe direction and is stated in the
+# caveat. `reference/waiting-signal.md` carries the full evidence and the exact
+# observation that would justify turning it on.
+# --------------------------------------------------------------------------- #
+# A horizontal rule. Claude Code draws the input box with box-drawing rules, so
+# this is how the CHROME at the bottom of a pane is found structurally instead
+# of by matching the words it happens to contain.
+_RULE_RE = re.compile(r"^\s*[─-╿]{20,}\s*$")   # box-drawing block
+# `❯ 1. Retitle + post nudge (Recommended)` — the SELECTED option of a modal.
+_MENU_SELECTED_RE = re.compile(r"^\s*❯\s*\d+\.\s+\S")
+# Any option line, selected or not. Requiring a SECOND one is what keeps a lone
+# `❯ 1.` in ordinary scrollback prose from reading as a live modal.
+_MENU_OPTION_RE = re.compile(r"^\s*(?:❯\s*)?\d+\.\s+\S")
+# `ctx: 0%` in the footer. Anchored on the literal 0 followed by `%`, so
+# `ctx: 10%` and `ctx: 0.4%` do not match.
+_CTX_ZERO_RE = re.compile(r"\bctx:\s*0%")
+WAITING_SIGNALS = ("selection_menu", "context_exhausted", "trailing_question")
+
+# 🔴 The per-pane capture batch. ONE tmux invocation per host captures every
+# Claude pane's visible screen, with a `display-message` marker between them —
+# 40 separate `capture-pane` calls over SSH would be 40 round trips.
+#
+# The marker carries a per-run NONCE because `#{pane_id}` alone is content a
+# pane could print. `%` is NOT safe in a tmux format string (it is strftime: a
+# literal `%68` expands to a width-68 month name), which is why the id arrives
+# via `#{pane_id}` and `-t`, never interpolated by us.
+CAPTURE_MARK_PREFIX = "SMCAP"
+
 # The four status buckets, in one place. Every roll-up iterates THIS tuple, so a
 # bucket cannot exist in `classify_status` and be missing from the summary.
 STATUS_BUCKETS = ("busy", "idle", "stale", "unknown")
@@ -238,12 +381,47 @@ CAVEATS = {
                  "the title glyph alone. Do not read a remote row's absent "
                  "task as a measured absence."),
     },
+    # 🔴 The third limit, and the one most likely to be over-read: `waiting`
+    # is a SCREEN SCRAPE of a TUI, and its signal set is CLOSED. Carried in the
+    # payload so a `--json` consumer can enumerate what was looked for instead
+    # of inferring it from a boolean.
+    "waiting_signal": {
+        "method": "capture_pane_regex",
+        "signals": list(WAITING_SIGNALS),
+        "scope": "claude_rows_only",
+        "excluded": {
+            "prompt_buffer_text": (
+                "Text at the `❯` input prompt is NOT a signal. It is "
+                "distinguishable in principle — by POSITION, not by dimness: "
+                "a placeholder cannot coexist with typed text, and a queued "
+                "message renders above the input box rather than in it. But "
+                "both invariants are read off a minified bundle at ONE version "
+                "(claude-code 2.1.220) and the queued case was never observed "
+                "live (0 hits across 29 panes), so keying on it would trust an "
+                "unobserved negative whose failure mode is a FALSE `waiting` "
+                "row. Excluded; costs recall, not precision."),
+        },
+        "note": ("`waiting_probable: false` means these signals were looked "
+                 "for and none matched — NOT that the window needs nothing. "
+                 "Recall is partial by construction: measured on 40 live panes "
+                 "2026-08-12, a window parked on `Press Enter to continue…` "
+                 "matches none of them. `waiting_probable: null` means the "
+                 "pane was never captured; read `waiting_status` for which."),
+    },
 }
 
 # Claude Code renders a leading status glyph in the pane_title: a BRAILLE
 # spinner while working, a "sparkle" at rest. Same taxonomy as agent-ops.
 _BRAILLE_LO, _BRAILLE_HI = 0x2800, 0x28FF
 _SPARKLE_GLYPHS = frozenset("✳✻✽✶✷✢✺❋✱*")
+
+# Lines Claude Code prints BELOW the last assistant text and above the input
+# box: `✻ Baked for 13m 17s`, `* Calculating… (47s · …)`, `※ recap: …`, and the
+# braille spinner. They are stripped before "the last assistant line" is taken,
+# or the trailing-question test reads a status line instead of the answer. The
+# spinner/sparkle half is the SAME taxonomy `busy_from_title` uses — one table,
+# so a glyph cannot be a spinner to one function and prose to the other.
+_STATUS_PREFIXES = _SPARKLE_GLYPHS | frozenset("※")
 
 # `tmux` says this on stderr and exits non-zero when no server is running. That
 # is a REACHABLE host with zero windows — collapsing it into "unreachable" is
@@ -429,6 +607,211 @@ def busy_from_title(title: str):
 def pane_is_claude(pane) -> bool:
     """Shallow, UNIFORM Claude detection — see HONEST LIMITS in the header."""
     return bool(CLAUDE_RE.search((pane or {}).get("command", "") or ""))
+
+
+# =========================================================================== #
+# PURE — the `waiting` signal (pane screen-scrape)
+# =========================================================================== #
+def capture_mark(nonce: str) -> str:
+    """The per-run marker FORMAT handed to `tmux display-message`.
+
+    🔴 `#{pane_id}` — never our own interpolation of the id. A tmux format
+    string is strftime-expanded, so a literal `%68` becomes a width-68 month
+    name ("August", right-padded to 68 columns), and the marker silently loses
+    the id it exists to carry. Verified against live tmux 2026-08-12.
+    """
+    return "%s%s#{pane_id}%s" % (CAPTURE_MARK_PREFIX, nonce, CAPTURE_MARK_PREFIX)
+
+
+def capture_mark_re(nonce: str):
+    """The matching parser for `capture_mark`. Derived from the SAME nonce and
+    prefix, so the writer and the reader cannot drift apart."""
+    p = re.escape(CAPTURE_MARK_PREFIX)
+    return re.compile(r"^%s%s(%%\d+)%s$" % (p, re.escape(nonce), p))
+
+
+def capture_argv(pane_ids, nonce) -> list:
+    """ONE tmux argv that captures EVERY given pane, marker-delimited.
+
+    40 panes over SSH is 40 round trips if each gets its own call; tmux takes a
+    `;`-separated command list in a single invocation, and `display-message -p`
+    writes to the same stdout, so the whole host costs one subprocess.
+
+    `[]` for an empty pane list — an argv of a bare `tmux` would run tmux's
+    default command, which is emphatically not a read.
+
+    The NONCE is why a pane cannot forge a marker: its own scrollback would have
+    to contain a hex string generated after it was drawn.
+    """
+    ids = [p for p in (pane_ids or ()) if p]
+    if not ids:
+        return []
+    mark = capture_mark(nonce)
+    argv = ["tmux"]
+    for i, pid in enumerate(ids):
+        if i:
+            argv.append(";")
+        argv += ["display-message", "-p", "-t", pid, mark,
+                 ";", "capture-pane", "-p", "-t", pid]
+    return argv
+
+
+def parse_captures(raw, nonce) -> dict:
+    """Split a marker-delimited capture batch into {pane_id: text}.
+
+    Text appearing BEFORE the first marker is discarded: it belongs to no pane,
+    and attributing it to one would be a guess.
+    """
+    rx = capture_mark_re(nonce)
+    out, cur = {}, None
+    for line in (raw or "").splitlines():
+        m = rx.match(line)
+        if m:
+            cur = m.group(1)
+            out.setdefault(cur, [])
+        elif cur is not None:
+            out[cur].append(line)
+    return {k: "\n".join(v) for k, v in out.items()}
+
+
+def _is_status_line(line) -> bool:
+    """A blank line, or one of Claude Code's between-turn status lines."""
+    t = (line or "").strip()
+    if not t:
+        return True
+    return t[0] in _STATUS_PREFIXES or _is_braille(t[0])
+
+
+def last_assistant_line(text):
+    """The last line of ASSISTANT PROSE in a captured pane, or None.
+
+    🔴 STRUCTURAL, not keyword-matched. Claude Code draws its input box between
+    two box-drawing rules, so everything from that box down is chrome —
+    including the `❯` input line itself, the `ctx: NN%` footer, and
+    `⏸ manual mode on`. Finding the chrome by the WORDS it contains would break
+    the moment upstream restyles a footer, and would also let a footer that
+    happens to end in `?` (`new task? /clear to save 342.1k tokens` is on screen
+    right now) read as a question the agent asked.
+
+    So: cut at the rules, then strip the between-turn status lines
+    (`✻ Baked for 13m 17s`, `* Calculating…`, `※ recap:`) off the bottom. What
+    is left is what the agent last SAID.
+
+    A pane with no rule at all (a modal replaces the input box, and a bare shell
+    never draws one) keeps its whole body — for a modal the menu signal is the
+    one that fires anyway.
+    """
+    lines = (text or "").splitlines()
+    rules = [i for i, l in enumerate(lines) if _RULE_RE.match(l)]
+    if rules:
+        cut = rules[-1]
+        # Two rules a line or three apart are the input box, and the input line
+        # between them is chrome. A lone trailing rule is something else (a
+        # modal's separator), so only that last line is cut.
+        if len(rules) >= 2 and rules[-1] - rules[-2] <= 3:
+            cut = rules[-2]
+        lines = lines[:cut]
+    while lines and _is_status_line(lines[-1]):
+        lines.pop()
+    return lines[-1] if lines else None
+
+
+def detect_waiting(text) -> dict:
+    """Screen-scrape ONE captured pane for the three `waiting` signals.
+
+    Returns `{"probable": bool, "signals": [{"signal", "line"}, ...]}`. Every
+    hit ships THE MATCHED LINE, because the caller has to be able to disagree.
+
+    The three are INDEPENDENT — each is evaluated on the full capture and none
+    short-circuits another, so a pane can (and a real one did) match a menu and
+    a question at once. An early `return` on the first hit would have made the
+    other two unreachable and their tests vacuous.
+    """
+    lines = (text or "").splitlines()
+    signals = []
+
+    # 1. HARD BLOCK ON A MODAL. `❯ 1. …` plus a second numbered option. The
+    #    second option is load-bearing: a lone `❯ 1.` occurs in ordinary prose
+    #    (an agent quoting a menu back at you), a two-option list does not.
+    selected = next((l for l in lines if _MENU_SELECTED_RE.match(l)), None)
+    if selected is not None:
+        if sum(1 for l in lines if _MENU_OPTION_RE.match(l)) >= 2:
+            signals.append({"signal": "selection_menu",
+                            "line": selected.strip()})
+
+    # 2. OUT OF CONTEXT. `ctx: 0%` — the window cannot make progress until it is
+    #    `/clear`ed, whatever its spinner says.
+    ctx = next((l for l in lines if _CTX_ZERO_RE.search(l)), None)
+    if ctx is not None:
+        signals.append({"signal": "context_exhausted", "line": ctx.strip()})
+
+    # 3. ASKED A DIRECT QUESTION. The last thing the agent SAID ends in `?`.
+    last = last_assistant_line(text)
+    if last is not None and last.rstrip().endswith("?"):
+        signals.append({"signal": "trailing_question", "line": last.strip()})
+
+    return {"probable": bool(signals), "signals": signals}
+
+
+def read_blocked_on_me(path=None, reader=None, now=None,
+                       max_age=BLOCKED_CACHE_MAX_AGE) -> dict:
+    """The clawgate approval queue's pending COUNT, status-discriminated.
+
+    🔴 FOUR outcomes, never two. `absent` / `unparseable` publish `count: None`,
+    because a queue nobody measured is not an empty queue — and this tool exists
+    to refuse exactly that substitution. `stale` publishes the number it found
+    AND says it cannot be called current: the bar poller writes every 45s, so a
+    cache older than `max_age` describes a queue that may since have changed.
+
+    🔴 `detail` IS NEVER PARSED. It truncates to ~6 ids however many are
+    pending, and the ids it drops have included `ready_for_review` work. It is
+    carried verbatim, labelled `detail_truncated: True`, and `count` is the
+    only number anything reads.
+    """
+    now = time.time() if now is None else now
+    path = BLOCKED_CACHE if path is None else path
+    reader = reader or _read_blocked_text
+    base = {"source": "bar_status_cache", "path": path, "count": None,
+            "detail": None, "detail_truncated": True,
+            "detail_note": BLOCKED_DETAIL_NOTE, "cache_age_secs": None,
+            "max_age_secs": max_age, "error": None}
+    text = reader(path)
+    if text is None:
+        base["status"] = "absent"
+        base["error"] = ("no bar-status cache at this path — the clawgate queue "
+                         "was NOT measured; this is not zero pending")
+        return base
+    try:
+        obj = json.loads(text)
+    except (ValueError, TypeError) as e:
+        base["status"] = "unparseable"
+        base["error"] = f"{type(e).__name__}: {e}"
+        return base
+    if not isinstance(obj, dict) or not isinstance(obj.get("count"), int) \
+            or isinstance(obj.get("count"), bool):
+        base["status"] = "unparseable"
+        base["error"] = ("cache carries no integer `count` — nothing here is a "
+                         "measurement of the queue")
+        return base
+    base["count"] = obj["count"]
+    base["detail"] = obj.get("detail")
+    ts = obj.get("ts")
+    if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+        # A count whose age cannot be established is not a fresh count. Saying
+        # so is the conservative direction; calling it `ok` is a guess.
+        base["status"] = "stale"
+        base["error"] = ("cache carries no numeric `ts`, so its freshness "
+                         "cannot be established")
+        return base
+    age = max(0.0, now - float(ts))
+    base["cache_age_secs"] = age
+    if age > max_age:
+        base["status"] = "stale"
+        base["error"] = (f"cache is {int(age)}s old (> {max_age}s); the poller "
+                         "writes every 45s, so this count may be out of date")
+        return base
+    base["status"] = "ok"
+    return base
 
 
 def classify_status(busy, age_secs, threshold) -> str:
@@ -654,7 +1037,8 @@ def index_tasks_by_window(tasks) -> dict:
 # =========================================================================== #
 def fold_windows(panes, host, codenames=None, task_index=None,
                  threshold=DEFAULT_STALE_THRESHOLD, now=None,
-                 slot_window_ids=None) -> list:
+                 slot_window_ids=None, captures=None,
+                 capture_status="skipped") -> list:
     """Collapse panes into one row per (session, window_index).
 
     A window is `claude` if ANY of its panes is; the row's task/busy/pane_id
@@ -686,6 +1070,14 @@ def fold_windows(panes, host, codenames=None, task_index=None,
     pair one snapshot's pane data with the other's window id. The pane format
     carries no `window_id`, so nothing here can catch that. UNGUARDED, and
     named so no one reads the invariant above as covering it.
+
+    🔴 `captures` IS `None`-VS-`{}`, and the difference is the whole point.
+    `None` means no capture batch ran on this host, so every row's
+    `waiting_probable` is `None` carrying `capture_status` (`skipped`/`error`).
+    `{}` means the batch RAN, so a row missing from it is `uncaptured` — its own
+    fact, not the host's. A non-Claude row is `not_claude`: only Claude panes are
+    captured, so `waiting_probable: False` on a bare zsh would be a verdict
+    about a pane nobody looked at.
     """
     now = time.time() if now is None else now
     codenames = codenames or {}
@@ -711,6 +1103,20 @@ def fold_windows(panes, host, codenames=None, task_index=None,
             if last is not None:
                 age = max(0.0, now - last)
         busy = busy_from_title(lead.get("title", ""))
+        is_claude = any(pane_is_claude(p) for p in members)
+        # 🔴 The waiting fields, resolved through the None-vs-{} distinction
+        # above. `probable` is None on every path where nothing was scraped.
+        if not is_claude:
+            w_status, w_probable, w_signals = "not_claude", None, None
+        elif captures is None:
+            w_status, w_probable, w_signals = capture_status, None, None
+        elif lead.get("pane_id") not in captures:
+            w_status, w_probable, w_signals = "uncaptured", None, None
+        else:
+            det = detect_waiting(captures[lead.get("pane_id")])
+            w_status = "ok"
+            w_probable = det["probable"]
+            w_signals = det["signals"]
         rows.append({
             "host": host,
             "session": session,
@@ -722,15 +1128,61 @@ def fold_windows(panes, host, codenames=None, task_index=None,
             "path": lead.get("path", ""),
             "command": lead.get("command", ""),
             "task": strip_status_glyph(lead.get("title", "")),
-            "claude": any(pane_is_claude(p) for p in members),
+            "claude": is_claude,
             "busy": busy,
             "age_secs": age,
             "status": classify_status(busy, age, threshold),
+            # 🔴 `waiting_probable` is a TRI-STATE. True/False are measurements;
+            # None means this pane was not scraped, and `waiting_status` says
+            # which of the four reasons. `waiting_signals` is None (not []) on
+            # those same paths — an empty list is "looked, found nothing".
+            "waiting_probable": w_probable,
+            "waiting_signals": w_signals,
+            "waiting_status": w_status,
             "claude_session_id": (task or {}).get("claude_session"),
             "fuzzyclaw": task,
             "panes": len(members),
         })
     return rows
+
+
+def _waiting_rollup(rows) -> dict:
+    """The `waiting` roll-up. Kept beside `summarize` and derived from
+    WAITING_SIGNALS so a new signal cannot be counted per-row and invisible in
+    the total.
+
+    🔴 `probable` is None when NOTHING was measured. `--no-capture`, a failed
+    capture batch, or a host of nothing but bare shells all produce zero
+    scraped panes, and publishing `probable: 0` for those says "I looked at
+    every window and none needs you" about a look that never happened. That is
+    the one sentence this tool must never emit.
+    """
+    measured = [r for r in rows if r.get("waiting_status") == "ok"]
+    per_signal = {s: 0 for s in WAITING_SIGNALS}
+    for r in measured:
+        for sig in (r.get("waiting_signals") or ()):
+            name = sig.get("signal")
+            per_signal[name] = per_signal.get(name, 0) + 1
+    return {
+        "probable": (sum(1 for r in measured if r.get("waiting_probable"))
+                     if measured else None),
+        "measured": len(measured),
+        "unmeasured": sum(1 for r in rows
+                          if r.get("waiting_probable") is None),
+        "per_signal": per_signal if measured else None,
+        # WHY a row went unmeasured, so "0 waiting" can be read against what
+        # was skipped rather than against the row total.
+        "unmeasured_reasons": _count_by(
+            r.get("waiting_status") for r in rows
+            if r.get("waiting_probable") is None),
+    }
+
+
+def _count_by(values) -> dict:
+    out = {}
+    for v in values:
+        out[v] = out.get(v, 0) + 1
+    return out
 
 
 def summarize(report) -> dict:
@@ -791,6 +1243,18 @@ def summarize(report) -> dict:
         # which of skipped / unmeasured / ok produced it.
         "fuzzyclaw_live": report["fuzzyclaw"].get("files_live"),
         "fuzzyclaw_status": report["fuzzyclaw"].get("status"),
+        # 🔴 The headline roll-up, under the SAME rule as every count above:
+        # `probable` is None when `measured` is 0, because "0 windows are
+        # waiting" and "0 windows were scraped" are different facts and the
+        # first is the one an operator will act on. `per_signal` is derived from
+        # the WAITING_SIGNALS tuple, so a signal cannot exist in
+        # `detect_waiting` and be missing from the summary.
+        "waiting": _waiting_rollup(rows),
+        # The clawgate approval queue, count + discriminant, never one alone.
+        "blocked_on_me": {
+            "count": (report.get("blocked_on_me") or {}).get("count"),
+            "status": (report.get("blocked_on_me") or {}).get("status"),
+        },
         # Hosts whose `list-windows` did not answer even though `list-panes`
         # did. Their rows carry no window_id and, if local, no fuzzyclaw join.
         "windows_unmeasured": sorted(
@@ -817,6 +1281,22 @@ def _read_text(path):
             return fh.read()
     except OSError:
         return None
+
+
+def _read_blocked_text(path):
+    """🔴 A SEAM OF ITS OWN, not a call to `_read_text`, and that is the point.
+
+    The hermetic suite forbids each impure edge by replacing it with a raiser,
+    so an edge that shares a function with a legitimate one cannot be forbidden
+    without breaking the other. `_read_text` is used by `local_host_label` on
+    real tmp files inside tests; the blocked-cache read is the one that would
+    reach `~/.cache` on a live workbench. It was doing exactly that — a golden
+    test picked up the operator's real pending count (12) mid-run, which is a
+    non-hermetic read AND a value that changes under the suite's feet.
+
+    Separate name, separately raisable, one line of indirection.
+    """
+    return _read_text(path)
 
 
 def _default_runner(argv, timeout):
@@ -963,10 +1443,11 @@ def ch_query(client, sql) -> dict:
 # GATHER — the one assembly point
 # =========================================================================== #
 def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
-           use_fuzzyclaw=True, threshold=DEFAULT_STALE_THRESHOLD, now=None,
+           use_fuzzyclaw=False, threshold=DEFAULT_STALE_THRESHOLD, now=None,
            ch_client_factory=None, fuzzyclaw_texts=None,
            codenames=None, ch_sql=SQL_RECENT_SESSIONS,
-           claude_only=False) -> dict:
+           claude_only=False, use_capture=True, capture_nonce=None,
+           blocked_reader=None, blocked_path=None) -> dict:
     """Build the whole report. Every source is injectable, so this is the
     function the hermetic suite exercises end-to-end.
 
@@ -976,11 +1457,25 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
     def time, so patching the module attribute would not be honoured here — the
     test suite's "no real network" guard would have been silently bypassed on
     exactly the path (`main()` -> `gather()`) that has no injection point.
+
+    🔴 `use_fuzzyclaw` DEFAULTS TO FALSE. Measured on this host 2026-08-12: 29
+    live of 401 files, 363 stale, 9 slot-mismatched — and every one of those 29
+    live rows read `paused`, including a window demonstrably running an agent.
+    29 table rows, zero contribution to any answer, from a source `CLAUDE.md`
+    marks UNTRUSTED. Opt in with `--fuzzyclaw`; the intersection guard and all
+    of its tests are untouched and still run when you do. Off, the section's
+    status is `skipped` and every count is None, so the absence is never
+    rendered as a measured zero.
     """
     now = time.time() if now is None else now
     local_host = local_host or local_host_label()
     hosts = [h for h in hosts if h in HOST_NAMES]
     codenames = load_scratch_codenames() if codenames is None else codenames
+    # A fresh hex nonce per run: a pane cannot print a marker built from a
+    # string that did not exist when it was drawn. Injectable so the suite is
+    # deterministic.
+    capture_nonce = (uuid.uuid4().hex if capture_nonce is None
+                     else str(capture_nonce))
 
     # --- fuzzyclaw (LOCAL host only — the task files are local state) --------
     if use_fuzzyclaw:
@@ -1011,6 +1506,10 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
         # rather than on whether a key exists.
         "filters": {"claude_only": bool(claude_only),
                     "excluded_non_claude": None},
+        # 🔴 The clawgate approval queue. Filled in below; the skeleton carries
+        # a `status` from the first byte so no code path can publish a bare
+        # count. See `read_blocked_on_me` for the four outcomes.
+        "blocked_on_me": {"status": "skipped", "count": None},
         # 🔴 The two limits that change what these rows MEAN, carried in the
         # payload rather than left in the skill body. See CAVEATS.
         "caveats": CAVEATS,
@@ -1026,10 +1525,41 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
     local_live_windows = None
     local_windows_error = None
     raw_panes, slot_ids = {}, {}
+    captures, capture_status = {}, {}
     for host in hosts:
         panes_res = run_tmux(TMUX_PANES_ARGV, host, local_host, runner=runner)
         wins_res = run_tmux(TMUX_WINDOWS_ARGV, host, local_host, runner=runner)
         raw_panes[host] = panes_res["stdout"]
+
+        # --- 🔴 the capture batch: ONE tmux call per host, CLAUDE PANES ONLY --
+        # The signals are Claude Code TUI shapes, so scraping a bare zsh would
+        # only invent false positives out of whatever its scrollback happens to
+        # contain. Those rows are reported `not_claude`, never `False`.
+        #
+        # `captures[host] is None` means the batch did not run or did not
+        # answer; `{}` means it ran and this host had no Claude panes. The two
+        # are different facts and `fold_windows` renders them differently.
+        host_panes = parse_panes(panes_res["stdout"])
+        claude_ids = [p["pane_id"] for p in host_panes
+                      if pane_is_claude(p) and p.get("pane_id")]
+        if not use_capture:
+            captures[host], capture_status[host] = None, "skipped"
+        elif not panes_res["reachable"]:
+            # Nothing to capture and nothing measured — the host said nothing.
+            captures[host], capture_status[host] = None, "error"
+        elif not claude_ids:
+            # MEASURED and genuinely empty: we know every pane on this host and
+            # none of them is Claude. `{}`, not None.
+            captures[host], capture_status[host] = {}, "ok"
+        else:
+            cap_res = run_tmux(capture_argv(claude_ids, capture_nonce),
+                               host, local_host, runner=runner)
+            if cap_res["reachable"]:
+                captures[host] = parse_captures(cap_res["stdout"],
+                                                capture_nonce)
+                capture_status[host] = "ok"
+            else:
+                captures[host], capture_status[host] = None, "error"
         # 🔴 The two calls are INDEPENDENT measurements. `reachable`/`error`
         # describe list-panes; `windows_measured`/`windows_error` describe
         # list-windows. Reading one off the other is how a failed list-windows
@@ -1045,6 +1575,14 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
             "windows_measured": windows_measured,
             "windows_error": wins_res["error"],
             "live_window_ids": (sorted(live) if live is not None else None),
+            # A THIRD independent measurement, reported separately from the
+            # other two for the same reason they are separate from each other:
+            # `list-panes` succeeding says nothing about whether the capture
+            # batch answered.
+            "captures_measured": captures[host] is not None,
+            "captures_status": capture_status[host],
+            "captures_seen": (len(captures[host])
+                              if captures[host] is not None else None),
         }
         if host == local_host:
             local_live_windows = live
@@ -1077,7 +1615,9 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
             # and no age. Stated, not implied away.
             task_index=(task_index if host == local_host else {}),
             threshold=threshold, now=now,
-            slot_window_ids=slot_ids.get(host))
+            slot_window_ids=slot_ids.get(host),
+            captures=captures.get(host),
+            capture_status=capture_status.get(host, "skipped"))
 
     # --- 🔴 --claude-only: drop the shells, and COUNT what was dropped -------
     # The summary then describes the RENDERED set, which is the safe direction:
@@ -1094,6 +1634,14 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
             excluded += len(entry["windows"]) - len(kept)
             entry["windows"] = kept
         report["filters"]["excluded_non_claude"] = excluded
+
+    # --- 🔴 blocked-on-me: the clawgate approval queue ------------------------
+    # A local file read, so it costs nothing and runs unconditionally. The
+    # reader is resolved AT CALL TIME (same reason as `ch_client_factory`
+    # above): binding `_read_text` as a default would make the seam unpatchable
+    # on the one path — `main()` -> `gather()` — with no injection point.
+    report["blocked_on_me"] = read_blocked_on_me(
+        path=blocked_path, reader=blocked_reader, now=now)
 
     # --- ClickHouse ----------------------------------------------------------
     if use_ch:
@@ -1139,6 +1687,56 @@ def _trunc(s, n):
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
+def _fmt_waiting(row) -> str:
+    """The WAIT cell. `?` is NOT `no` — an unscraped pane must not read as a
+    measured "nothing needed here"."""
+    p = row.get("waiting_probable")
+    if p is None:
+        return "?%s" % (row.get("waiting_status") or "unmeasured")
+    if not p:
+        return "no"
+    return "YES " + ",".join(s.get("signal", "?")
+                             for s in (row.get("waiting_signals") or ()))
+
+
+def render_blocked_on_me(blocked) -> list:
+    """🔴 The clawgate queue, with the count and its discriminant on one line.
+
+    Printed unconditionally and in every state, because the failure this closes
+    is a reader who never learned the queue exists. An `absent` cache prints
+    LOUDER than a real zero, not quieter: a missing file rendering as "nothing
+    is blocked on you" is the exact substitution this script refuses everywhere
+    else.
+    """
+    b = blocked or {}
+    st = b.get("status")
+    count, out = b.get("count"), []
+    if st == "ok":
+        if count:
+            out.append(f"▸ BLOCKED ON ME: {count} clawgate task(s) pending "
+                       f"approval/review")
+            out.append("  ⚠ this is a COUNT. " + BLOCKED_DETAIL_NOTE)
+            if b.get("detail"):
+                out.append(f"  cached detail (TRUNCATED): "
+                           f"{_trunc(b.get('detail'), 100)}")
+        else:
+            out.append("▸ BLOCKED ON ME: 0 clawgate tasks pending "
+                       f"(cache {int(b.get('cache_age_secs') or 0)}s old — "
+                       "a measured zero)")
+    elif st == "stale":
+        out.append(f"▸ BLOCKED ON ME: UNMEASURED (stale cache) — last known "
+                   f"count {count}")
+        out.append(f"  {_trunc(b.get('error'), 110)}")
+        out.append("  (this is NOT a current count; check agent-ops or the "
+                   "clawgate API)")
+    else:
+        out.append(f"▸ BLOCKED ON ME: UNMEASURED [{st}]")
+        out.append(f"  {_trunc(b.get('error') or 'unknown reason', 110)}")
+        out.append("  (this is NOT zero pending approvals — the queue was "
+                   "never read. `agent-ops` shows it live)")
+    return out
+
+
 def render_table(report) -> str:
     """Human-readable frame. MUST survive zero sessions and an unreachable host
     (pinned by a test) and MUST show a failed ClickHouse query as a failure
@@ -1181,19 +1779,44 @@ def render_table(report) -> str:
         # agent and `● idle` on a bare zsh prompt were the same six characters
         # before this.
         out.append("  HOST       SESSION       WIN  CODENAME   TASK"
-                   "                          KIND    STATUS    AGE")
-        out.append("  " + "─" * 104)
+                   "                          KIND    STATUS    AGE   WAIT")
+        out.append("  " + "─" * 112)
         for r in rows:
             out.append(
                 "  {:<9}  {:<12}  {:<3}  {:<9}  {:<30}  {:<6}  {:<8}  "
-                "{:<4}".format(
+                "{:<4}  {}".format(
                     _trunc(r.get("host"), 9), _trunc(r.get("session"), 12),
                     _trunc(r.get("window_index"), 3),
                     _trunc(r.get("codename") or "—", 9),
                     _trunc(r.get("task") or "—", 30),
                     "claude" if r.get("claude") else "shell",
                     _STATUS_GLYPH.get(r.get("status"), "?"),
-                    _fmt_age(r.get("age_secs"))))
+                    _fmt_age(r.get("age_secs")),
+                    _fmt_waiting(r)))
+        # 🔴 The matched line, printed under the table for every flagged row.
+        # A boolean column tells an operator a window needs them; only the
+        # EVIDENCE tells them whether to believe it, and which of the four very
+        # different actions (answer / press a key / `/clear` / give it work) is
+        # the right one. Suppressing it would leave the plain-text reader with
+        # strictly less than the `--json` reader for no saving.
+        flagged = [r for r in rows if r.get("waiting_probable")]
+        if flagged:
+            out.append("")
+            out.append("  ⚠ WAITING — the matched line, so you can disagree "
+                       "with it:")
+            for r in flagged:
+                for sig in (r.get("waiting_signals") or ()):
+                    out.append("    {}:{}:{}  [{}]  {}".format(
+                        r.get("host"), r.get("session"),
+                        r.get("window_index"), sig.get("signal"),
+                        _trunc(sig.get("line"), 90)))
+    out.append("")
+
+    # 🔴 BLOCKED ON ME — printed ALWAYS, including when it was not measured.
+    # This section exists because a dogfood agent, correctly reading that
+    # `agent-ops` has no JSON API, never opened it and so missed 11 pending
+    # approvals — four of them credential-exposure or cross-user-data-leak.
+    out.extend(render_blocked_on_me(report.get("blocked_on_me")))
     out.append("")
 
     ch = report.get("clickhouse") or {}
@@ -1220,7 +1843,11 @@ def render_table(report) -> str:
     fz = report.get("fuzzyclaw") or {}
     fz_st = fz.get("status")
     if fz_st == "skipped":
-        out.append("▸ FUZZYCLAW TASKS (skipped: --no-fuzzyclaw)")
+        # The default is now OFF, so the message names the flag that turns it
+        # ON. Saying "--no-fuzzyclaw" here told a reader a flag they never
+        # passed was responsible.
+        out.append("▸ FUZZYCLAW TASKS (skipped — opt in with --fuzzyclaw; "
+                   "every count is null, not 0)")
     elif fz_st == "unmeasured":
         # 🔴 The third zero. `files_live` is None, not 0, and must read as
         # "not measured" rather than as "measured and empty".
@@ -1269,6 +1896,26 @@ def render_table(report) -> str:
         "{}={}+{}".format(b, (st.get(b) or {}).get("claude", 0),
                           (st.get(b) or {}).get("shell", 0))
         for b in STATUS_BUCKETS))
+    # 🔴 The headline number, and it is allowed to be "unmeasured". `probable`
+    # is None whenever no pane was scraped, and printing `waiting=0` there would
+    # answer the question this tool exists for with a measurement nobody took.
+    w = summ.get("waiting") or {}
+    if w.get("probable") is None:
+        out.append("  waiting: UNMEASURED — 0 of {} window(s) scraped ({})"
+                   .format(w.get("measured", 0) + w.get("unmeasured", 0),
+                           ", ".join("{}={}".format(k, v) for k, v in
+                                     sorted((w.get("unmeasured_reasons")
+                                             or {}).items())) or "no reason"))
+    else:
+        out.append("  waiting: {} probable of {} scraped ({} unscraped: {})"
+                   .format(w["probable"], w.get("measured", 0),
+                           w.get("unmeasured", 0),
+                           ", ".join("{}={}".format(k, v) for k, v in
+                                     sorted((w.get("unmeasured_reasons")
+                                             or {}).items())) or "none"))
+        out.append("  by signal: " + "  ".join(
+            "{}={}".format(s, (w.get("per_signal") or {}).get(s, 0))
+            for s in WAITING_SIGNALS))
     if summ.get("claude_only"):
         # The filter is stated where the counts are, because it changed them.
         out.append("  FILTER --claude-only: {} non-claude window(s) excluded "
@@ -1302,7 +1949,18 @@ def render_caveats(report) -> list:
     cav = (report or {}).get("caveats") or CAVEATS
     det = cav.get("claude_detection") or {}
     fz = cav.get("fuzzyclaw_scope") or {}
+    wt = cav.get("waiting_signal") or {}
     return [
+        # 🔴 The signal set is ENUMERATED in the footer, because `WAIT: no` is
+        # the cell a reader will over-trust. Naming the three things that were
+        # looked for is what turns it from "nothing needed here" into "none of
+        # these three matched", which is all it ever meant.
+        "  caveat[waiting_signal]: `waiting_probable` is a screen-scrape for "
+        "{} ONLY, on claude rows only — `false` means none matched, NOT that "
+        "the window needs nothing; text typed at the `❯` prompt is "
+        "deliberately EXCLUDED, so a window one Enter away reads `no` "
+        "(reference/waiting-signal.md)".format(
+            "/".join(wt.get("signals") or WAITING_SIGNALS)),
         "  caveat[claude_detection]: KIND is `pane_current_command =~ /{}/` — "
         "shallower than agent-ops' /proc walk; a claude under a wrapper shell "
         "reads as `shell`".format(det.get("pattern", "claude")),
@@ -1355,9 +2013,23 @@ def validate_target(target: str) -> str:
     return t
 
 
-def tail_argv(target, lines=DEFAULT_TAIL_LINES):
-    return ["tmux", "capture-pane", "-t", validate_target(target),
-            "-p", "-e", "-S", f"-{int(lines)}"]
+def tail_argv(target, lines=DEFAULT_TAIL_LINES, plain=False):
+    """🔴 `-e` (keep ANSI) is what `--plain` drops, at the SOURCE.
+
+    Every consumer of `tail` was piping the output through the same
+    `sed 's/\\x1b\\[[0-9;]*m//g'` — a strip that is easy to get subtly wrong
+    (OSC and CSI sequences that are not SGR survive that pattern) and that
+    every caller re-invented. `tmux capture-pane` without `-e` never emits the
+    escapes in the first place, so there is nothing to strip. Same defect class
+    fixed in `agent-ops` in #413; the fix did not generalise to this sibling
+    because the two do not share a capture path.
+
+    The default stays `-e` so an existing caller's bytes do not change under it.
+    """
+    argv = ["tmux", "capture-pane", "-t", validate_target(target), "-p"]
+    if not plain:
+        argv.append("-e")
+    return argv + ["-S", f"-{int(lines)}"]
 
 
 # 🔴 `tmux` says this when the HOST answered fine and the TARGET does not exist.
@@ -1371,7 +2043,7 @@ _NO_SUCH_TARGET_RE = re.compile(
 
 
 def tail_window(target, host, local_host, runner=None,
-                lines=DEFAULT_TAIL_LINES) -> dict:
+                lines=DEFAULT_TAIL_LINES, plain=False) -> dict:
     """Capture one window's scrollback.
 
     FOUR outcomes, never two: `reachable=False` (the host said nothing),
@@ -1389,7 +2061,8 @@ def tail_window(target, host, local_host, runner=None,
     exists and its scrollback is empty", the one thing that code is documented
     to mean. Two different facts, one exit code, and the doc matched neither.
     """
-    res = run_tmux(tail_argv(target, lines), host, local_host, runner=runner)
+    res = run_tmux(tail_argv(target, lines, plain=plain), host, local_host,
+                   runner=runner)
     if res.get("no_server"):
         # The host answered. There is no tmux server, so there is no such
         # window — but the reason is not a bad target, and saying so keeps the
@@ -1430,7 +2103,25 @@ def build_parser():
                    default=DEFAULT_STALE_THRESHOLD)
     p.add_argument("--no-ch", action="store_true",
                    help="skip ClickHouse entirely (the client is never built)")
-    p.add_argument("--no-fuzzyclaw", action="store_true")
+    # 🔴 fuzzyclaw is OPT-IN. See `gather`'s docstring for the measurement.
+    # `--no-fuzzyclaw` is KEPT and still means off — it is now the default, so
+    # every existing invocation keeps its exact behaviour. Passing both is not
+    # an error: the explicit "off" wins and `main` says so on stderr, because a
+    # silently-ignored flag is how a caller concludes it was honoured.
+    p.add_argument("--fuzzyclaw", action="store_true",
+                   help="opt IN to the fuzzyclaw task join (default off: "
+                        "measured 29 live of 401 files, all 29 reading "
+                        "`paused`, on a source CLAUDE.md marks UNTRUSTED)")
+    p.add_argument("--no-fuzzyclaw", action="store_true",
+                   help="explicitly off — now the DEFAULT; kept so existing "
+                        "callers keep working. Wins over --fuzzyclaw.")
+    p.add_argument("--no-capture", action="store_true",
+                   help="skip the per-host pane capture. Every row's "
+                        "waiting_probable is then null (never false) and "
+                        "summary.waiting.probable is null, never 0.")
+    p.add_argument("--plain", action="store_true",
+                   help="tail: strip ANSI at the source (drops tmux's -e) "
+                        "instead of making every caller sed it out")
     p.add_argument("--claude-only", action="store_true",
                    help="scan/list/detail: drop non-Claude windows. Every "
                         "summary count then describes the FILTERED set, and "
@@ -1446,6 +2137,13 @@ def main(argv=None):
         sys.argv[1:] if argv is None else list(argv))
     hosts = HOST_NAMES if args.host == "all" else (args.host,)
     local = local_host_label()
+    # Explicit-off WINS, and the collision is reported rather than resolved in
+    # silence — the caller asked for two incompatible things and gets told
+    # which one ran.
+    if args.fuzzyclaw and args.no_fuzzyclaw:
+        print("(--no-fuzzyclaw and --fuzzyclaw both given: OFF wins)",
+              file=sys.stderr)
+    use_fuzzyclaw = bool(args.fuzzyclaw) and not args.no_fuzzyclaw
 
     if args.subcommand == "tail":
         # `tail` targets ONE window by name, so there is nothing to filter. A
@@ -1467,8 +2165,12 @@ def main(argv=None):
         # names the host actually searched plus how to search the other one.
         host_defaulted = args.host not in HOST_NAMES
         host = local if host_defaulted else args.host
-        res = tail_window(args.target, host, local, lines=args.lines)
+        res = tail_window(args.target, host, local, lines=args.lines,
+                          plain=args.plain)
         res["host_defaulted"] = host_defaulted
+        # The consumer has to know whether `text` carries escapes; a JSON
+        # reader cannot tell an ANSI-free pane from a stripped one.
+        res["plain"] = bool(args.plain)
 
         def _tail_json():
             """🔴 `--json` must print on the FAILURE paths too.
@@ -1525,9 +2227,12 @@ def main(argv=None):
                       file=sys.stderr)
         return EXIT_OK if res["text"].strip() else EXIT_EMPTY
 
+    if args.plain:
+        print("(--plain applies to `tail` only)", file=sys.stderr)
     report = gather(hosts=hosts, local_host=local,
                     use_ch=(not args.no_ch and args.subcommand != "list"),
-                    use_fuzzyclaw=not args.no_fuzzyclaw,
+                    use_fuzzyclaw=use_fuzzyclaw,
+                    use_capture=not args.no_capture,
                     threshold=args.stale_threshold,
                     claude_only=args.claude_only)
 

@@ -413,7 +413,18 @@ TARGET_FLOORS=(
   # main (now carrying the line above) + this branch. Same method — the gate's
   # measurement of the MERGED tree, not arithmetic across the conflict:
   #   _suggested_floor 2535 = 2535 - min(50, max(1, 126)) = 2485.
-  "scripts/tests|2485"
+  #
+  # 2026-08-12, the session-manager `waiting` signal + blocked-on-me: 2535 ->
+  # 2613 collected (+78, all in scripts/tests/test_session_manager.py: 293 ->
+  # 371). Same method as every line above — the AUTHORITATIVE gate's own
+  # printed count (`nix build .#checks.x86_64-linux.pytests`:
+  # `scripts/tests collected=2613`) put through the gate's own function:
+  #   _suggested_floor 2613 = 2613 - min(50, max(1, 130)) = 2613 - 50 = 2563.
+  # 🔴 A sibling branch also adds tests here, so this line WILL conflict and
+  # `rerere` has mis-replayed exactly it before. Resolve by re-running the gate
+  # on the MERGED tree and copying the number it prints — never by arithmetic
+  # across the two sides.
+  "scripts/tests|2563"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
