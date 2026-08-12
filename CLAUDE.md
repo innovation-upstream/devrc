@@ -39,7 +39,14 @@ there. Only what's specific to this repo, where a working tree is also a **deplo
   top-level key names + `enabledPlugins` (rc 15). It always prints links EXAMINED beside
   links dangling — a bare "0 dangling" from a scan that walked nothing is the failure, not
   the all-clear — and the cross-host comparison says NOT COMPARED unless it got facts from
-  both machines.
+  both machines. 🔴 **`settings.json` is per-host and unmanaged by design**, so the key-set
+  half carries an **explicitly enumerated** allowlist — `theme`, `voice`, `effortLevel`,
+  each with its reason in the source — printed as `IGNORED`, not counted as drift. It is an
+  enumeration and not a pattern: an unknown key is drift by default, and the list is not
+  env-overridable. `permissions` is deliberately NOT on it — a host without a `permissions`
+  block prompts for what the other allows, which is a real gap. Close it with
+  `scripts/sync-claude-permissions.py` (idempotent, additive, **curated** — never copy the
+  other host's block wholesale; #380 exists because that file accretes junk).
 - **Recovering a diverged host** — preserve, verify, *then* move the pointer:
   `git branch <topic> HEAD && git push -u origin <topic>` on that host → confirm the shas are
   on origin **from a different host** → `git reset --keep origin/main` (`--keep` refuses

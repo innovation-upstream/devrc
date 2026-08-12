@@ -393,37 +393,22 @@ TARGET_FLOORS=(
   # the gate's own printed count put through the rule above (and through
   # `_suggested_floor` in BOTH its shell and python spellings, which agree).
   #
-  # 2026-08-11, re-pinned again for the agent-ops per-window-age fix (+14 tests
-  # across test_agent_ops.py and test_agent_ops_count.py). 2201 was measured
-  # against a 2251-test suite; the suite is 2335 at this commit, so it carried
-  # 134 of slack — nearly three times the 50 the rule allows. Measured by the
-  # authoritative gate on THIS branch (`nix build .#checks.x86_64-linux.pytests`
-  # → `collected=2335`), against 2321 at the base it is rebased onto (ab99245),
-  # and put through the rule: 2335 - min(50, max(1, 2335/20 = 116)) = 2285.
-  # Both spellings of `_suggested_floor` agree on 2285.
+  # 2026-08-11, the `/handoff` subsystem-index writer: 2251 -> 2455 collected,
+  # +134 for scripts/tests/test_subsystem_touch.py and +70 that arrived with
+  # main since the line above was written. Re-measured, not computed: the number
+  # is `_suggested_floor 2455` — the gate's OWN function, so what it suggests is
+  # by construction what it accepts. The suite needed no HERMETIC_TARGETS entry
+  # (scripts/tests is already a directory target) and adds ZERO skips, so
+  # EXPECTED_SKIPS is untouched; movement on THIS line is the evidence the gate
+  # runs the new file at all.
   #
-  # 2026-08-11, re-pinned again after this branch merged main and took its audit
-  # fixes (+8 tests: the tmux-server ERA bound on the age join, the bounded
-  # future-skew rejection, three measured mutation-coverage gaps, and the
-  # fixture-format seam guard in test_agent_ops_count.py). 2285 was measured
-  # against a 2335-test suite; the suite is 2343 here. Measured by the
-  # authoritative gate on the merged tree (`nix build
-  # .#checks.x86_64-linux.pytests` → `PASS scripts/tests (collected=2343
-  # passed=2343 skipped=0)`) and put through the rule:
-  #   2343 - min(50, max(1, 2343/20 = 117)) = 2343 - 50 = 2293.
-  # Confirmed by sourcing `_suggested_floor` OUT OF THIS FILE and by the python
-  # spelling in test_run_tests_floors.py — both return 2293.
-  #
-  # 🔴 PINNED FOR THE MERGED TREE, NOT THIS BRANCH ALONE. This branch and the
-  # sibling session-manager branch (#412) each add tests to scripts/tests, so
-  # whichever lands second leaves the floor short by the other's contribution.
-  # Measured on main + #412 + #413 by the authoritative gate:
-  #   PASS scripts/tests (collected=2364 passed=2364 skipped=0)
-  #   2364 - min(50, max(1, 2364/20 = 118)) = 2364 - 50 = 2314.
-  # 2314 is a valid floor for this branch alone too (2343 collected, 29 slack),
-  # so it cannot go red before the sibling merges — it simply stops carrying
-  # 71 of invisible slack afterwards. Re-measure if #412 lands changed.
-  "scripts/tests|2314"
+  # 2026-08-12, the idle-bucket split (agents vs bare shells): 2455 -> 2513
+  # collected on main + this branch. Re-measured by the authoritative gate on
+  # the MERGED tree, not computed from either side of the conflict — this line
+  # is a churn magnet (every branch that adds a test re-pins it, so every open
+  # PR conflicts here) and `rerere` has previously replayed a stale resolution
+  # onto it. `_suggested_floor 2513` = 2513 - min(50, max(1, 125)) = 2463.
+  "scripts/tests|2463"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —

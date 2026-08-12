@@ -98,7 +98,9 @@
 #       to origin/main. Git parity is not host parity.
 #   15  DRIFT — HOST PARITY: the two hosts' settings.json top-level KEY SETS or
 #       their enabledPlugins differ, or a host has a plugin enabled that is not
-#       installed there.
+#       installed there. A short, EXPLICITLY ENUMERATED set of settings.json keys
+#       is exempt from the key-set half — see "PER-HOST settings.json KEYS"
+#       below. Nothing else is, and an unknown key is never exempt.
 #
 # ── UNREACHABLE IS NOT DRIFT (the alerting policy) ────────────────────────────
 # 🔴 The timer runs on the WORKBENCH ONLY (gated on the ~/.server-mode marker in
@@ -672,6 +674,82 @@ only_in() { # only_in <set-a> <set-b> -> members of a absent from b
   printf '%s' "$OUT"
 }
 
+# ── PER-HOST settings.json KEYS ───────────────────────────────────────────────
+# 🔴 WHY THIS EXISTS, AND WHY IT IS DELIBERATELY TINY. `~/.claude/settings.json`
+# is per-host and UNMANAGED BY DESIGN — nix/home.nix says so twice, in the
+# comments beside the dropStaleClaudeHooks block and beside the mutable-exception
+# list ("settings.json is per-host/unmanaged"). A check that demands identical
+# top-level key sets across two machines therefore has a small set of keys it can
+# NEVER go green on, and the deadman's first autonomous run (2026-08-11, six
+# hours after #406 armed the timer) failed on exactly those. A permanently-red
+# gate is worse than no gate: it teaches the operator to click through the one
+# alert that has to keep its meaning. Scoping the comparison is what protects it.
+#
+# 🔴 IT IS AN ENUMERATION, NOT A PATTERN, AND IT FAILS CLOSED. Every exempt key
+# is a literal `case` arm carrying its own reason. A key nobody has thought about
+# falls to the `*)` arm, gets NO reason, and is therefore NOT exempt — so a
+# future key, or a key renamed by an upstream Claude Code release, is drift by
+# default and has to be argued onto this list by a human. A prefix rule, a glob,
+# or "anything the operator set by hand" would each silently swallow the next
+# real divergence, which is the one failure mode that disarms the deadman
+# completely (`test_the_allowlist_is_not_a_wildcard`).
+#
+# 🔴 NOT ENV-OVERRIDABLE, unlike every other tunable in this file. An
+# `DRIFT_PERHOST_KEYS` variable would let a unit file, a shell profile or a
+# stray export widen this to everything from outside review, and the resulting
+# green would be indistinguishable from a real pass. The suite pins the absence
+# (`test_the_allowlist_cannot_be_widened_from_the_environment`).
+#
+# 🔴 EXEMPT IS NOT INVISIBLE. Whichever branch the comparison takes, every key
+# silenced here is PRINTED with its reason. A difference that is tolerated and a
+# difference that was never looked at must not read the same way, one level down
+# from the NOT COMPARED rule above.
+#
+# WHAT IS NOT ON THIS LIST, ON PURPOSE:
+#   * `permissions` — NOT preference. The laptop having no permissions block at
+#     all means it prompts for operations the workbench allows; that is a real
+#     gap with a real fix (scripts/sync-claude-permissions.sh), not a per-host
+#     taste. It stays in the comparison, and the check stays red until the fix is
+#     applied on the laptop — which is a deadman working, not a deadman stuck.
+#   * `hooks`, `statusLine`, `enabledPlugins`, `env`, `model` — behaviour, not
+#     preference. A host quietly losing a hook is precisely what this check is
+#     for.
+#
+# Written as `if [ "$1" = <key> ]` rather than a `case` because the suite's
+# reverse PATH tokenizer reads a lowercase `case` ARM LABEL as a command word —
+# that is why `workbench` and `laptop` already sit in its prose ledger. Putting
+# each key in ARGUMENT position keeps the guard's accounting honest instead of
+# widening its ledger to fit new prose.
+perhost_reason() { # perhost_reason <key> -> why it may differ, or "" if it may NOT
+  if [ "$1" = effortLevel ]; then
+    echo "reasoning-effort preference; set per machine and never shipped by nix"
+  elif [ "$1" = theme ]; then
+    echo "terminal colour theme; the two hosts run different displays/terminals"
+  elif [ "$1" = voice ]; then
+    echo "TTS voice id for voice mode; a per-machine audio preference"
+  else
+    echo ""
+  fi
+}
+
+perhost_split() { # perhost_split <KEEP|DROP> <key-list> -> the allowlisted / the rest
+  local K WHY OUT=""
+  for K in $2; do
+    WHY="$(perhost_reason "$K")"
+    if [ "$1" = KEEP ] && [ -n "$WHY" ]; then OUT="$OUT $K"; fi
+    if [ "$1" = DROP ] && [ -z "$WHY" ]; then OUT="$OUT $K"; fi
+  done
+  printf '%s' "$OUT"
+}
+
+say_perhost() { # say_perhost <role> <key-list> — name each exempt key AND its reason
+  local K WHY
+  for K in $2; do
+    WHY="$(perhost_reason "$K")"
+    echo "[parity]   only on $1: $K — per-host by design: $WHY"
+  done
+}
+
 # --- Consecutive-unreachable streak (see "UNREACHABLE IS NOT DRIFT" above) -----
 # The ONLY file this script writes, and it lives outside every repo.
 #
@@ -824,17 +902,36 @@ else
   # KEY NAMES ONLY, never values — this output reaches the journal.
   l_only="$(only_in "$L_KEYS" "$R_KEYS")"
   r_only="$(only_in "$R_KEYS" "$L_KEYS")"
-  if [ -n "$l_only" ] || [ -n "$r_only" ]; then
+  # Split each side into the keys that MAY differ (enumerated above, each with a
+  # reason) and the keys that may not. The verdict is decided by the second list
+  # ONLY; the first is reported either way, never hidden.
+  l_drift="$(perhost_split DROP "$l_only")"
+  r_drift="$(perhost_split DROP "$r_only")"
+  l_keep="$(perhost_split KEEP "$l_only")"
+  r_keep="$(perhost_split KEEP "$r_only")"
+  if [ -n "$l_drift" ] || [ -n "$r_drift" ]; then
     echo "[parity] DRIFT — settings.json top-level KEY SETS differ (names only; no values shown):"
-    [ -n "$l_only" ] && echo "[parity]   only on $LOCAL_ROLE:$l_only"
-    [ -n "$r_only" ] && echo "[parity]   only on $REMOTE_ROLE:$r_only"
+    [ -n "$l_drift" ] && echo "[parity]   only on $LOCAL_ROLE:$l_drift"
+    [ -n "$r_drift" ] && echo "[parity]   only on $REMOTE_ROLE:$r_drift"
     note_rc 15
+  elif [ -n "$l_keep" ] || [ -n "$r_keep" ]; then
+    # Everything that differs is on the enumerated per-host list. That is not
+    # drift — but it is also not "identical", and it must not print as if it
+    # were, or the next key added to that list disappears from the record.
+    echo "[parity] settings.json top-level key sets AGREE apart from the per-host keys below."
   else
     # Counted into a variable first, not interpolated as `$( … | wc -w )` inside
     # the message: a command substitution ENDS the printer segment, leaving the
     # rest of the sentence looking like a command line to the suite's tokenizer.
     N_KEYS="$(printf '%s' "$L_KEYS" | wc -w)"
     echo "[parity] settings.json top-level key sets AGREE ($N_KEYS key names on each host)."
+  fi
+  # Printed in BOTH the drift and the agree branch: a key exempted here has been
+  # decided about, and the decision belongs in the journal beside the verdict.
+  if [ -n "$l_keep" ] || [ -n "$r_keep" ]; then
+    echo "[parity] IGNORED (allowlisted in drift-check.sh, not drift):"
+    say_perhost "$LOCAL_ROLE" "$l_keep"
+    say_perhost "$REMOTE_ROLE" "$r_keep"
   fi
 
   if [ "$L_EPLUG" = UNEVALUATED ] || [ "$R_EPLUG" = UNEVALUATED ]; then

@@ -1439,7 +1439,8 @@ def test_json_golden_schema_and_values():
     assert blob["local_host"] == "workbench"
     assert blob["stale_threshold_secs"] == 3600
     assert set(blob) == {"ts", "local_host", "stale_threshold_secs", "hosts",
-                         "clickhouse", "fuzzyclaw", "summary"}
+                         "clickhouse", "fuzzyclaw", "filters", "caveats",
+                         "summary"}
     assert set(blob["hosts"]) == {"workbench", "laptop"}
 
     wb = blob["hosts"]["workbench"]
@@ -1500,8 +1501,19 @@ def test_json_golden_schema_and_values():
         "files_stale": 1, "files_mismatched": 0, "slot_conflicts": [],
     }
     assert blob["summary"] == {
-        "total_sessions": 3, "claude": 2, "busy": 1, "idle": 1, "stale": 0,
-        "unknown": 1,
+        "total_sessions": 3, "claude": 2, "shell": 1,
+        # 🔴 LITERAL, and the whole point: this fixture's 3 windows are one busy
+        # claude, one idle claude and one unknown SHELL. No bucket publishes a
+        # bare number, and no flat `idle` key exists to be read as an agent
+        # count. `claude_only` false -> `excluded_non_claude` is None, not 0.
+        "status": {
+            "busy": {"claude": 1, "shell": 0, "total": 1},
+            "idle": {"claude": 1, "shell": 0, "total": 1},
+            "stale": {"claude": 0, "shell": 0, "total": 0},
+            "unknown": {"claude": 0, "shell": 1, "total": 1},
+        },
+        "claude_only": False,
+        "excluded_non_claude": None,
         "hosts_reachable": ["laptop", "workbench"],
         "hosts_unreachable": [],
         "fuzzyclaw_live": 1,
@@ -1650,8 +1662,11 @@ def test_stale_threshold_flows_from_the_argument_into_the_rows():
     stale = base_gather(threshold=1800)
     assert fresh["hosts"]["workbench"]["windows"][0]["status"] == "busy"
     assert stale["hosts"]["workbench"]["windows"][0]["status"] == "stale"
-    assert fresh["summary"]["stale"] == 0
-    assert stale["summary"]["stale"] == 1
+    assert fresh["summary"]["status"]["stale"]["total"] == 0
+    assert stale["summary"]["status"]["stale"]["total"] == 1
+    # the row that moved is a CLAUDE row, so it moved on the claude half
+    assert stale["summary"]["status"]["stale"] == {"claude": 1, "shell": 0,
+                                                  "total": 1}
 
 
 # =========================================================================== #
@@ -2367,7 +2382,14 @@ def test_read_fuzzyclaw_texts_reads_only_json_files(tmp_path):
 def test_summarize_counts_every_status_bucket():
     report = base_gather()
     s = sm.summarize(report)
-    assert s["busy"] + s["idle"] + s["stale"] + s["unknown"] == s["total_sessions"]
+    assert sum(s["status"][b]["total"] for b in sm.STATUS_BUCKETS) \
+        == s["total_sessions"]
+    # ...and each bucket's halves account for its own total, so a row cannot be
+    # counted in a bucket without also being counted as claude or as shell.
+    for b in sm.STATUS_BUCKETS:
+        cell = s["status"][b]
+        assert cell["claude"] + cell["shell"] == cell["total"]
+    assert s["claude"] + s["shell"] == s["total_sessions"]
 
 
 # =========================================================================== #
@@ -3121,3 +3143,441 @@ def test_session_history_sql_limit_never_reaches_the_string_uncoerced():
     except (ValueError, TypeError):
         sql = ""
     assert "UNION" not in sql and "secrets" not in sql
+
+
+# =========================================================================== #
+# §5 — THE AGENT/SHELL SPLIT, --claude-only, AND THE CAVEATS IN THE OUTPUT
+#
+# Measured blind-dogfooding 2026-08-11: 61 windows = 41 claude + 20 non-claude,
+# and `summary.idle = 17` was 12 agent windows + 5 bare shells rendered
+# identically as `● idle`. The row data was already correct — every row carries
+# `claude` — so everything below is about the ROLL-UP and the RENDERER, and
+# nothing here touches detection.
+#
+# The fixture is built so a claude<->shell SWAP is visible (2 vs 1, never 1 vs
+# 1) and so claude-ness is DECORRELATED from every other field a wrong
+# predicate might key on: the claude panes' titles never contain "claude", one
+# SHELL pane's title does, and claude rows land in two different status
+# buckets.
+# =========================================================================== #
+BRAILLE2 = "⠹"    # a second spinner, distinct from BRAILLE
+SPARKLE2 = "✻"    # a second sparkle, distinct from SPARKLE
+
+IDLE_MIX_PANES = "\n".join([
+    # 1. idle CLAUDE — the row the headline question is actually about
+    f"%31|3001|hollow|2|win-echo|/home/zach/workspace/repo-echo|claude"
+    f"|{SPARKLE} Awaiting review",
+    # 2. a SECOND idle claude, so idle is 2 claude + 1 shell: a swapped split
+    #    reads 1+2 and is caught. 1+1 would be swap-invisible.
+    f"%32|3002|quarry|9|win-foxtrot|/home/zach/workspace/repo-foxtrot|claude"
+    f"|{SPARKLE2} Rebase finished",
+    # 3. idle BARE SHELL — and its TITLE contains "claude" while its command
+    #    does not, so a predicate reading the title instead of the command
+    #    keeps this row and is caught.
+    "%33|3003|ridge|4|win-golf|/home/zach/tmp/golf|zsh|* tail -f claude.log",
+    # 4. BUSY shell — proves the split is not hardcoded to the idle bucket.
+    f"%34|3004|thicket|7|win-hotel|/home/zach/tmp/hotel|bash"
+    f"|{BRAILLE2} nix build",
+    # 5. UNKNOWN claude (no glyph, no age) — the bucket that measured 15/15
+    #    non-claude on the live host. A claude row lands here as soon as its
+    #    title carries no glyph, so that measurement was a snapshot.
+    "%35|3005|hedge|6|win-india|/home/zach/workspace/repo-india|claude"
+    "|plain india title",
+])
+IDLE_MIX_WINDOWS = "@71|2|hollow\n@72|9|quarry\n@73|4|ridge\n@74|7|thicket\n" \
+                   "@75|6|hedge\n"
+
+SHELLS_ONLY_PANES = (
+    "%41|4001|copse|1|win-juliet|/home/zach/tmp/juliet|zsh|* juliet prompt")
+SHELLS_ONLY_WINDOWS = "@81|1|copse\n"
+
+# 🔴 The REMOTE host needs a shell of its own, or "filter the local host only"
+# is a mutation no fixture can see: the stock laptop fixture is 100% claude.
+LAPTOP_MIX_PANES = "\n".join([
+    LAPTOP_PANES,
+    "%22|2002|thistle|4|win-kilo|/home/zach/tmp/kilo|zsh|* kilo prompt",
+])
+LAPTOP_MIX_WINDOWS = "@7|1|naida-dev\n@8|4|thistle\n"
+
+
+def mix_gather(**kw):
+    """A LOCAL-only scan of IDLE_MIX_PANES, with no fuzzyclaw texts so every
+    row's age is None and the status comes from the glyph alone."""
+    defaults = dict(hosts=("workbench",), local_host="workbench",
+                    runner=make_runner(local_panes=IDLE_MIX_PANES,
+                                       local_windows=IDLE_MIX_WINDOWS),
+                    fuzzyclaw_texts=[], codenames={})
+    defaults.update(kw)
+    return base_gather(**defaults)
+
+
+def test_the_mix_fixture_is_what_it_claims_and_its_fields_are_distinct():
+    """INSTRUMENT CHECK before any verdict is read off this fixture.
+
+    Every assertion below depends on this fixture really containing an idle
+    agent AND an idle bare shell. A fixture that quietly produced two claude
+    rows would make the split tests pass for the wrong reason.
+    """
+    rows = mix_gather()["hosts"]["workbench"]["windows"]
+    got = {(r["session"], r["claude"], r["status"]) for r in rows}
+    assert got == {
+        ("hollow", True, "idle"),      # agent, waiting
+        ("quarry", True, "idle"),      # agent, waiting
+        ("ridge", False, "idle"),      # BARE SHELL at a prompt
+        ("thicket", False, "busy"),
+        ("hedge", True, "unknown"),
+    }
+    # claude-ness is decorrelated from the title text...
+    ridge = next(r for r in rows if r["session"] == "ridge")
+    assert "claude" in ridge["task"] and ridge["claude"] is False
+    assert all("claude" not in r["task"]
+               for r in rows if r["claude"] is True)
+    # ...and every pane field value is pairwise distinct across the fixture.
+    for field in ("pane_id", "session", "window_index", "window_name", "path",
+                  "task"):
+        vals = [r[field] for r in rows]
+        assert len(set(vals)) == len(vals), f"{field} repeats: {vals}"
+
+
+# --------------------------------------------------------------------------- #
+# §5.1 — the split itself
+# --------------------------------------------------------------------------- #
+def test_an_idle_AGENT_and_an_idle_SHELL_are_never_merged_into_one_count():
+    """🔴 THE HEADLINE DEFECT. KILLS: collapsing the split back to one bucket
+    (`counts[status] += 1`), and swapping the claude/shell halves.
+
+    `idle` here is 2 agents + 1 shell. There is no key anywhere in the summary
+    whose value is the mixed 3 without the word `total` on it.
+    """
+    s = mix_gather()["summary"]
+    assert s["status"]["idle"] == {"claude": 2, "shell": 1, "total": 3}
+    assert s["status"]["idle"]["claude"] == 2, (
+        "the agent count must NOT absorb the bare shell")
+    # the mixed number exists only where it is spelled `total`
+    assert s["status"]["idle"]["total"] == 3
+    # 🔴 STRUCTURAL: every integer at the TOP level of the summary is either a
+    # whole-set total or already kind-qualified by its own name. A new mixed
+    # per-status integer cannot appear here without failing this.
+    int_keys = {k for k, v in s.items()
+                if isinstance(v, int) and not isinstance(v, bool)}
+    assert int_keys == {"total_sessions", "claude", "shell",
+                        "fuzzyclaw_live"}   # a FILE count, not a window count
+
+
+def test_the_flat_mixed_status_INTEGERS_are_gone_not_kept_alongside():
+    """🔴 KILLS: re-adding `"idle": counts["idle"]` "for compatibility".
+
+    Keeping the flat ints would leave every existing reader on the mixed
+    number — the defect — while the fix sat in keys they never learned. The
+    break is deliberate and must stay loud: a KeyError, not a wrong integer.
+    """
+    s = mix_gather()["summary"]
+    for bucket in sm.STATUS_BUCKETS:
+        assert bucket not in s, (
+            f"summary[{bucket!r}] is back, and it is a MIXED count")
+        assert isinstance(s["status"][bucket], dict)
+    with pytest.raises(KeyError):
+        s["idle"]
+
+
+def test_EVERY_bucket_splits_not_only_idle():
+    """🔴 KILLS: splitting `idle` alone and leaving the other three mixed.
+
+    `unknown` measured 15/15 non-claude on the live host, which is a SNAPSHOT:
+    this fixture puts a claude row in `unknown` and a shell row in `busy`.
+    """
+    s = mix_gather()["summary"]
+    assert s["status"]["busy"] == {"claude": 0, "shell": 1, "total": 1}
+    assert s["status"]["unknown"] == {"claude": 1, "shell": 0, "total": 1}
+    assert s["status"]["stale"] == {"claude": 0, "shell": 0, "total": 0}
+    assert set(s["status"]) == set(sm.STATUS_BUCKETS)
+    assert s["claude"] == 3 and s["shell"] == 2 and s["total_sessions"] == 5
+
+
+def test_the_bucket_tuple_and_the_classifier_cannot_drift_apart():
+    """A bucket `classify_status` can return but `STATUS_BUCKETS` omits would
+    be counted into a bucket the renderer never prints — invisible."""
+    produced = {sm.classify_status(b, age, 3600)
+                for b in (True, False, None) for age in (None, 10, 99999)}
+    assert produced == set(sm.STATUS_BUCKETS)
+
+
+def test_the_table_distinguishes_an_idle_AGENT_from_an_idle_SHELL():
+    """🔴 KILLS: dropping the KIND column, or deriving it from the wrong field.
+
+    Both rows render `● idle`; the row must still say which one it is, and the
+    footer must never print a bare `idle=3`.
+    """
+    text = sm.render_table(mix_gather())
+    lines = text.splitlines()
+    agent = next(ln for ln in lines if "hollow" in ln)
+    shell = next(ln for ln in lines if "ridge" in ln)
+    assert "● idle" in agent and "● idle" in shell, "both are idle rows"
+    assert "claude" in agent.split("● idle")[0]
+    assert "shell" in shell.split("● idle")[0]
+    assert "KIND" in text
+    # the footer carries both halves, labelled, and never the mixed integer
+    assert "by status (claude+shell):" in text
+    assert "idle=2+1" in text
+    assert "idle=3" not in text
+    assert "claude=3" in text and "shell=2" in text
+
+
+def test_a_table_row_KIND_is_read_off_the_claude_boolean_not_the_command():
+    """🔴 STRUCTURAL, not spelled. KILLS: `"claude" in row["command"]` or
+    `"claude" in row["task"]` in the renderer.
+
+    The shell row whose TITLE says "claude" must still render `shell`.
+    """
+    text = sm.render_table(mix_gather())
+    shell = next(ln for ln in text.splitlines() if "ridge" in ln)
+    assert "claude.log" in shell, "the title text is still shown"
+    kind_cell = shell.split("* tail -f claude.log")[-1]
+    assert " shell " in kind_cell and " claude " not in kind_cell
+
+
+# --------------------------------------------------------------------------- #
+# §5.2 — --claude-only
+# --------------------------------------------------------------------------- #
+def test_claude_only_drops_the_shells_on_EVERY_host_and_keeps_the_agents():
+    """🔴 KILLS: filtering only the LOCAL host, and inverting the predicate.
+
+    Both hosts carry a shell here. The stock laptop fixture is 100% claude, so
+    against it "filter the local host only" is a mutant no assertion can see.
+    """
+    runner = make_runner(remote_panes=LAPTOP_MIX_PANES,
+                         remote_windows=LAPTOP_MIX_WINDOWS)
+    report = base_gather(claude_only=True, runner=runner)
+    wb = report["hosts"]["workbench"]["windows"]
+    lt = report["hosts"]["laptop"]["windows"]
+    assert [r["session"] for r in wb] == ["scratch7"], "misc:5 is a zsh window"
+    assert [r["session"] for r in lt] == ["naida-dev"], "thistle:4 is a shell"
+    assert all(r["claude"] is True for r in wb + lt)
+    assert report["summary"]["excluded_non_claude"] == 2, "one PER HOST"
+    # ...and the unfiltered scan still carries both shells, so the drop is
+    # caused by the flag and by nothing else (positive control on the filter).
+    unfiltered = base_gather(runner=make_runner(
+        remote_panes=LAPTOP_MIX_PANES, remote_windows=LAPTOP_MIX_WINDOWS))
+    assert len(unfiltered["hosts"]["workbench"]["windows"]) == 2
+    assert len(unfiltered["hosts"]["laptop"]["windows"]) == 2
+
+
+def test_claude_only_filters_on_the_claude_BOOLEAN_not_a_lookalike_field():
+    """🔴 KILLS: filtering on the title, the command string, or the status.
+
+    The shell whose title contains "claude" must be dropped; the claude window
+    whose title does NOT contain it must be kept; and the claude row sitting in
+    `unknown` must survive a status-shaped predicate.
+    """
+    rows = mix_gather(claude_only=True)["hosts"]["workbench"]["windows"]
+    kept = {r["session"] for r in rows}
+    assert kept == {"hollow", "quarry", "hedge"}
+    assert "ridge" not in kept, "a title containing 'claude' is not an agent"
+    assert "hedge" in kept, "an `unknown` claude row is still an agent"
+
+
+def test_claude_only_summary_counts_the_FILTERED_set_and_says_what_it_dropped():
+    """🔴 KILLS: summarizing the UNFILTERED set (the silent trap), and
+    reporting `excluded_non_claude` as 0 when the filter never ran.
+
+    Counting the unfiltered set would publish `total_sessions: 5` beside 3
+    printed rows. The dropped count is what keeps the filtered zero from
+    reading as "the host had nothing".
+    """
+    s = mix_gather(claude_only=True)["summary"]
+    assert s["total_sessions"] == 3, "the summary describes what is rendered"
+    assert s["claude"] == 3 and s["shell"] == 0
+    assert s["status"]["idle"] == {"claude": 2, "shell": 0, "total": 2}
+    assert s["status"]["busy"]["total"] == 0, "the busy SHELL is gone"
+    assert s["claude_only"] is True
+    assert s["excluded_non_claude"] == 2
+
+    off = mix_gather()["summary"]
+    assert off["claude_only"] is False
+    assert off["excluded_non_claude"] is None, (
+        "nothing was excluded because nothing was ever counted — not 0")
+
+
+def test_claude_only_composes_with_host_and_counts_only_the_scanned_host():
+    report = base_gather(claude_only=True, hosts=("laptop",),
+                         local_host="workbench")
+    assert [r["host"] for r in report["hosts"]["laptop"]["windows"]] \
+        == ["laptop"]
+    assert report["summary"]["excluded_non_claude"] == 0, (
+        "the laptop fixture has no shell window — a MEASURED zero")
+    assert report["summary"]["total_sessions"] == 1
+    # the workbench's zsh window was never scanned, so it is not in the count
+    assert "workbench" not in report["hosts"]
+
+
+def test_claude_only_over_a_shell_only_host_is_a_MEASURED_zero_not_a_success():
+    """🔴 The silent-zero direction, pinned at the exit code.
+
+    Zero AGENT windows is a real zero and must exit EXIT_EMPTY. Had the summary
+    counted the unfiltered set, this same run would exit 0 — "ran, found
+    windows" — over an empty table.
+    """
+    report = mix_gather(
+        claude_only=True,
+        runner=make_runner(local_panes=SHELLS_ONLY_PANES,
+                           local_windows=SHELLS_ONLY_WINDOWS))
+    assert report["summary"]["total_sessions"] == 0
+    assert sm.exit_code_for(report) == sm.EXIT_EMPTY == 3
+    assert sm.exit_code_for(report) != sm.EXIT_OK
+    assert report["summary"]["excluded_non_claude"] == 1, (
+        "and the zero says the host was NOT empty — 1 shell was dropped")
+    # unfiltered, the very same scan is a non-empty EXIT_OK
+    unfiltered = mix_gather(
+        runner=make_runner(local_panes=SHELLS_ONLY_PANES,
+                           local_windows=SHELLS_ONLY_WINDOWS))
+    assert sm.exit_code_for(unfiltered) == sm.EXIT_OK
+
+
+def test_claude_only_is_STATED_in_the_table_beside_the_counts_it_changed():
+    text = sm.render_table(mix_gather(claude_only=True))
+    assert "FILTER --claude-only" in text
+    assert "2 non-claude window(s) excluded" in text
+    assert "FILTER --claude-only" not in sm.render_table(mix_gather())
+
+
+def test_cli_claude_only_flag_reaches_gather_and_defaults_off(monkeypatch):
+    seen = {}
+
+    def fake_gather(**kw):
+        seen.update(kw)
+        return base_gather()
+
+    monkeypatch.setattr(sm, "gather", fake_gather)
+    monkeypatch.setattr(sm, "local_host_label", lambda *a, **k: "workbench")
+    sm.main(["scan", "--json", "--no-ch", "--claude-only"])
+    assert seen["claude_only"] is True
+    seen.clear()
+    sm.main(["scan", "--json", "--no-ch"])
+    assert seen["claude_only"] is False
+
+
+def test_main_json_end_to_end_carries_the_split_and_the_filter(
+        monkeypatch, capsys):
+    """END-TO-END through main(), because every test above injects gather()."""
+    monkeypatch.setattr(sm, "local_host_label", lambda *a, **k: "workbench")
+    monkeypatch.setattr(sm, "_default_runner",
+                        make_runner(local_panes=IDLE_MIX_PANES,
+                                    local_windows=IDLE_MIX_WINDOWS))
+    monkeypatch.setattr(sm, "read_fuzzyclaw_texts", lambda *a, **k: [])
+    rc = sm.main(["scan", "--json", "--no-ch", "--host", "workbench",
+                  "--claude-only"])
+    blob = json.loads(capsys.readouterr().out)
+    assert rc == sm.EXIT_OK
+    assert blob["summary"]["status"]["idle"] == {"claude": 2, "shell": 0,
+                                                 "total": 2}
+    assert blob["summary"]["excluded_non_claude"] == 2
+    assert blob["filters"] == {"claude_only": True, "excluded_non_claude": 2}
+
+
+def test_detail_under_claude_only_explains_its_own_emptiness(monkeypatch):
+    """A `detail` on a SHELL window under --claude-only finds nothing. The
+    reason must be in the payload, not left to be inferred from an empty list.
+    """
+    report = mix_gather(claude_only=True)
+    narrowed = sm.filter_report(report, "ridge", "4")
+    rows = [r for h in narrowed["hosts"].values() for r in h["windows"]]
+    assert rows == []
+    assert narrowed["summary"]["claude_only"] is True
+    assert narrowed["summary"]["excluded_non_claude"] == 2
+    assert "NOT a measured absence" in sm.no_session_reason(narrowed)
+
+
+def test_claude_only_says_it_does_nothing_for_tail_rather_than_ignoring_it(
+        monkeypatch, capsys):
+    """A silently ignored flag is how a caller concludes it was honoured."""
+    monkeypatch.setattr(sm, "local_host_label", lambda *a, **k: "workbench")
+    monkeypatch.setattr(sm, "_default_runner",
+                        make_runner(local_capture="scrollback\n"))
+    rc = sm.main(["tail", "scratch7:3", "--host", "workbench", "--claude-only"])
+    cap = capsys.readouterr()
+    assert rc == sm.EXIT_OK
+    assert cap.out == "scrollback\n", "stdout stays the capture, verbatim"
+    assert "--claude-only has no effect on `tail`" in cap.err
+    # ...and it is NOT printed when the flag was not passed
+    sm.main(["tail", "scratch7:3", "--host", "workbench"])
+    assert "--claude-only" not in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
+# §5.3 — the two caveats, in the OUTPUT
+# --------------------------------------------------------------------------- #
+def test_the_caveats_are_in_the_json_as_structured_fields_not_prose():
+    """🔴 KILLS: dropping `caveats` from the report, or reducing it to a
+    string a consumer would have to parse."""
+    cav = mix_gather()["caveats"]
+    assert set(cav) == {"claude_detection", "fuzzyclaw_scope"}
+    det = cav["claude_detection"]
+    assert det["method"] == "pane_current_command_regex"
+    assert det["pattern"] == sm.CLAUDE_RE.pattern == "claude"
+    fz = cav["fuzzyclaw_scope"]
+    assert fz["scope"] == "local_host_only"
+    assert fz["null_fields_on_remote_rows"] == ["fuzzyclaw",
+                                                "claude_session_id",
+                                                "age_secs"]
+    for entry in cav.values():
+        assert entry["note"] and isinstance(entry["note"], str)
+
+
+def test_the_remote_null_field_LEDGER_is_true_of_a_real_remote_row():
+    """🔴 A RELATIONSHIP guard, not a spelling one: the ledger is checked
+    against what the code actually nulls, in both directions.
+
+    The claimed fields must be null on a REMOTE row (or the caveat overstates)
+    and non-null on the equivalent LOCAL row (or the caveat names fields that
+    are always null and the remote-vs-local distinction it exists to draw is
+    vacuous — the positive control).
+    """
+    report = base_gather()
+    ledger = report["caveats"]["fuzzyclaw_scope"]["null_fields_on_remote_rows"]
+    remote = report["hosts"]["laptop"]["windows"][0]
+    assert remote["host"] == "laptop"
+    for field in ledger:
+        assert remote[field] is None, f"{field} is not null on a remote row"
+    local = next(r for r in report["hosts"]["workbench"]["windows"]
+                 if r["session"] == "scratch7")
+    for field in ledger:
+        assert local[field] is not None, (
+            f"{field} is null LOCALLY too — the ledger draws no distinction")
+    # and the classification consequence the caveat states is real
+    assert remote["status"] != "stale"
+
+
+def test_the_caveats_are_printed_in_the_table_UNCONDITIONALLY(monkeypatch,
+                                                              capsys):
+    """🔴 KILLS: printing them only when a remote host is scanned, and dropping
+    the footer. An agent that runs this cold gets no skill body."""
+    for report in (mix_gather(),                    # local-only scan
+                   base_gather(),                   # both hosts
+                   mix_gather(claude_only=True)):   # filtered
+        text = sm.render_table(report)
+        assert "caveat[claude_detection]:" in text
+        assert "pane_current_command =~ /claude/" in text
+        assert "wrapper shell" in text
+        assert "caveat[fuzzyclaw_scope]:" in text
+        assert "local_host_only" in text
+        assert "never `stale`" in text
+    # ...including the degenerate reports the renderer must survive
+    empty = {"hosts": {}, "summary": {}, "clickhouse": {}, "fuzzyclaw": {}}
+    assert "caveat[claude_detection]:" in sm.render_table(empty)
+
+    # and END-TO-END, on the path a cold caller actually takes
+    monkeypatch.setattr(sm, "local_host_label", lambda *a, **k: "workbench")
+    monkeypatch.setattr(sm, "_default_runner", make_runner())
+    monkeypatch.setattr(sm, "read_fuzzyclaw_texts", lambda *a, **k: [])
+    sm.main(["scan", "--no-ch", "--host", "workbench"])
+    assert "caveat[fuzzyclaw_scope]:" in capsys.readouterr().out
+
+
+def test_the_caveat_footer_is_two_lines_and_does_not_touch_the_row_table():
+    """Compactness is part of the requirement — a caveat that bloats the table
+    gets deleted by the next person."""
+    assert len(sm.render_caveats(mix_gather())) == 2
+    with_cav = sm.render_table(mix_gather()).splitlines()
+    row_lines = [ln for ln in with_cav if "hollow" in ln or "ridge" in ln]
+    assert len(row_lines) == 2, "one line per window, still"
+    assert not any("caveat[" in ln for ln in row_lines)
