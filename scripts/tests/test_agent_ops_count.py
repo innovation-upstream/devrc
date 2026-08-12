@@ -29,11 +29,11 @@ ao = _load("agent-ops", "agent_ops_for_count")
 
 
 # A raw `tmux list-panes -a` dump matching agent-ops's pipe format:
-#   pane_id|pane_pid|session|window_index|window_name|path|command|title
+#   pane_id|pane_pid|session|window_index|window_id|window_name|path|command|title
 _RAW_PANES = "\n".join([
-    "%0|16060|main|1|devrc ●|/home/zach/workspace/devrc|zsh|⠐ Ship the block",
-    "%1|16095|dp|2|dp|/home/zach/ws/dp|zsh|",              # plain zsh → not claude
-    "%9|500|main|9|self|/home/zach/workspace/devrc|python3|agent-ops",  # own pane
+    "%0|16060|main|1|@1|devrc ●|/home/zach/workspace/devrc|zsh|⠐ Ship the block",
+    "%1|16095|dp|2|@2|dp|/home/zach/ws/dp|zsh|",           # plain zsh → not claude
+    "%9|500|main|9|@9|self|/home/zach/workspace/devrc|python3|agent-ops",  # own pane
 ])
 
 # Mock /proc tree: two claude panes + a plain zsh + the block's own tree.
@@ -67,7 +67,7 @@ def test_count_uses_real_detector_excludes_plain_and_own():
 
 
 def test_count_zero_when_no_claude_panes():
-    raw = "%1|16095|dp|2|dp|/home/zach/ws/dp|zsh|"
+    raw = "%1|16095|dp|2|@2|dp|/home/zach/ws/dp|zsh|"
     n = iao.count_live_sessions(
         ao, list_panes=lambda: raw, build_index=lambda: _PROC,
         own_chain=lambda: set())
@@ -76,8 +76,8 @@ def test_count_zero_when_no_claude_panes():
 
 def test_count_two_live_claude_sessions():
     raw = "\n".join([
-        "%0|16060|main|1|a|/r1|claude|⠐ one",
-        "%1|16095|main|2|b|/r2|claude|✳ two",
+        "%0|16060|main|1|@1|a|/r1|claude|⠐ one",
+        "%1|16095|main|2|@2|b|/r2|claude|✳ two",
     ])
     n = iao.count_live_sessions(
         ao, list_panes=lambda: raw, build_index=lambda: {},

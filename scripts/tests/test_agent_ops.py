@@ -7,9 +7,12 @@ the network, or the filesystem sources. Also asserts fail-safe: missing /
 malformed / empty inputs degrade to a graceful "—"/"n/a" line, never an
 exception.
 """
+import datetime
 import importlib.util
+import json
 import os
 import re
+import time
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SCRIPT = os.path.join(_HERE, "..", "agent-ops")
@@ -57,20 +60,53 @@ def test_clawgate_titles_failsafe_on_junk():
 # ---------------------------------------------------------------------------
 def test_parse_panes_wellformed_and_junk():
     raw = "\n".join([
-        "%0|16060|main|1|devrc ●|/home/zach/workspace/devrc|claude",
-        "%1|16095|main|2|dp|/home/zach/workspace/civit/datapacket-talos|zsh",
+        "%0|16060|main|1|@4|devrc ●|/home/zach/workspace/devrc|claude",
+        "%1|16095|main|2|@16|dp|/home/zach/workspace/civit/datapacket-talos|zsh",
         "garbage line without pipes",
-        "%2|notanint|x|1|w|/p|zsh",       # bad pid → dropped
+        "%2|notanint|x|1|@7|w|/p|zsh",    # bad pid → dropped
+        "%3|17000|s|1|w|/p|zsh",          # 7 fields (pre-window_id shape) → dropped
     ])
     panes = ao.parse_panes(raw)
     assert len(panes) == 2
     assert panes[0]["pane_pid"] == 16060
+    assert panes[0]["window_id"] == "@4"        # the per-window age join's key
     assert panes[0]["window_name"] == "devrc"   # trailing ' ●' stripped
+    assert panes[1]["window_id"] == "@16"
     assert panes[1]["command"] == "zsh"
+    # title stays LAST and absorbs any trailing pipes it contains
+    titled = ao.parse_panes("%9|1|s|3|@9|w|/p|claude|✳ do|the|thing")
+    assert titled[0]["title"] == "✳ do|the|thing"
 
 
 def test_parse_panes_empty():
     assert ao.parse_panes("") == []
+
+
+def test_pane_format_and_parser_agree_field_for_field():
+    """🔴 SEAM. The tmux `-F` format and `parse_panes` are one contract split in
+    two, joined only by POSITION, and every way of breaking it is SILENT: drop
+    `#{window_id}` from the format and the parser reads window_name into
+    `window_id`, the age join misses on every row, and the column degrades to
+    "—" with nothing red anywhere. So drive the real format through the real
+    parser: substitute a DISTINCT sentinel per tmux variable, then assert each
+    parsed key holds the sentinel of the variable it is supposed to carry.
+    """
+    fields = re.findall(r"#\{([a-z_]+)\}", ao.PANE_FORMAT)
+    assert len(fields) == len(ao.PANE_FIELDS)
+    assert "window_id" in fields                 # the age join's key
+
+    line = ao.PANE_FORMAT
+    for i, var in enumerate(fields):
+        line = line.replace("#{%s}" % var, "1234" if var == "pane_pid"
+                            else "V%d-%s" % (i, var))
+    pane = ao.parse_panes(line)[0]
+    for i, (var, key) in enumerate(zip(fields, ao.PANE_FIELDS)):
+        want = 1234 if var == "pane_pid" else "V%d-%s" % (i, var)
+        assert pane[key] == want, (
+            "format field #%d %r landed in %r as %r" % (i, var, key, pane[key]))
+    # …and the pairing is the one the age join needs, spelled out.
+    assert dict(zip(ao.PANE_FIELDS, fields))["window_id"] == "window_id"
+    assert dict(zip(ao.PANE_FIELDS, fields))["session"] == "session_name"
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +156,11 @@ def test_classify_includes_claude_excludes_plain_and_own():
     assert s["repo"] == "devrc"
     assert s["session"] == "main" and s["window_index"] == "1"
     assert s["busy"] is True          # .claude-wrapped state == R
-    assert s["age_secs"] == 90
+    # The /proc number is still carried — under its TRUE name, process uptime.
+    assert s["proc_age_secs"] == 90
+    # …and it is NOT the age column: with no activity index there is no proven
+    # last-activity, so the row has none. (Rendering it as an idle time was the bug.)
+    assert s["age_secs"] is None
 
 
 def test_classify_detects_via_foreground_command_when_tree_missing():
@@ -178,6 +218,219 @@ def test_classify_empty_and_ordering():
     ]
     sessions = ao.classify_claude_sessions(panes, {}, root_resolver=lambda p: p)
     assert [s["repo"] for s in sessions] == ["a", "b"]
+
+
+# ---------------------------------------------------------------------------
+# PER-WINDOW AGE — index_window_activity / window_activity_age / classify
+#
+# 🔴 REGRESSION. The age column used to render the Claude PROCESS's uptime
+# (/proc starttime). Measured on the workbench 2026-08-11, session `scratch12`:
+#
+#   window  window_id  claude proc uptime   real last_activity   rendered
+#   ------  ---------  ------------------   -----------------    --------
+#   :1 ▶    @4         4.97d                ~45m ago             4d  ❌
+#   :2 ●    @16        4.87d                ~4.79d ago           4d  ✅
+#
+# Two windows of one session launched in the same burst have near-identical
+# process uptimes, so BOTH rows printed one age — and the busy row read as "▶ …
+# 4d", simultaneously running and four days abandoned. A dogfooding agent read
+# that and told the operator to treat a live window as dead. The fixture below
+# reproduces those exact numbers: the two proc uptimes are DISTINCT yet both
+# round to "4d", so an implementation that reuses them cannot pass by accident.
+# ---------------------------------------------------------------------------
+_SCRATCH12_PANES = [
+    {"pane_id": "%4", "pane_pid": 4083112, "session": "scratch12",
+     "window_index": "1", "window_id": "@4", "window_name": "dp",
+     "path": "/home/zach/ws/dp", "command": "zsh",
+     "title": "⠐ Continue review-bombing and co-cry work"},      # braille → busy
+    {"pane_id": "%16", "pane_pid": 653899, "session": "scratch12",
+     "window_index": "2", "window_id": "@16", "window_name": "probe",
+     "path": "/home/zach/ws/probe", "command": "zsh",
+     "title": "✳ Run bitdex probe on ImageTechnique"},           # sparkle → idle
+]
+
+_SCRATCH12_PROC = {
+    4083112: {"comm": "zsh", "ppid": 1, "state": "S", "age_secs": 429500,
+              "children": [3173016]},
+    3173016: {"comm": ".claude-wrapped", "ppid": 4083112, "state": "S",
+              "age_secs": 429408, "children": []},               # 4.97d → "4d"
+    653899: {"comm": "zsh", "ppid": 1, "state": "S", "age_secs": 420900,
+             "children": [2888458]},
+    2888458: {"comm": ".claude-wrapped", "ppid": 653899, "state": "S",
+              "age_secs": 420768, "children": []},               # 4.87d → "4d"
+}
+
+_BUSY_AGE, _IDLE_AGE = 2730.0, 413912.0        # 45m ago vs 4.79d ago
+
+
+def _scratch12_activity(now):
+    """The two fuzzyclaw task files backing scratch12:1 and :2, as raw bodies."""
+    def iso(delta):
+        return (datetime.datetime.fromtimestamp(now - delta)
+                .astimezone().isoformat())
+    return [
+        json.dumps({"window_id": "@4", "tmux_session": "scratch12",
+                    "window_index": 1, "last_activity": iso(_BUSY_AGE),
+                    "task": "dp", "status": "paused"}),
+        json.dumps({"window_id": "@16", "tmux_session": "scratch12",
+                    "window_index": 2, "last_activity": iso(_IDLE_AGE),
+                    "task": "probe", "status": "paused"}),
+    ]
+
+
+def test_classify_ages_are_per_window_not_process_uptime():
+    now = 1_786_499_288.0
+    index = ao.index_window_activity(_scratch12_activity(now))
+    rows = ao.classify_claude_sessions(
+        _SCRATCH12_PANES, _SCRATCH12_PROC, root_resolver=lambda p: p,
+        activity_index=index, now=now)
+    by_win = {r["window_id"]: r for r in rows}
+    assert set(by_win) == {"@4", "@16"}
+    # Each window carries ITS OWN last-activity, to the second.
+    assert round(by_win["@4"]["age_secs"]) == 2730
+    assert round(by_win["@16"]["age_secs"]) == 413912
+    assert by_win["@4"]["age_secs"] != by_win["@16"]["age_secs"]
+    # …and they render as visibly different ages — the whole point.
+    assert ao.rel_age(by_win["@4"]["age_secs"]) == "45m"
+    assert ao.rel_age(by_win["@16"]["age_secs"]) == "4d"
+    # The busy row is no longer self-contradictory: running AND minutes fresh.
+    assert by_win["@4"]["busy"] is True
+    # The process uptimes are still there, under their true name — DISTINCT
+    # values that both collapse to "4d", which is what made the bug look
+    # per-session rather than per-quantity.
+    assert by_win["@4"]["proc_age_secs"] == 429408
+    assert by_win["@16"]["proc_age_secs"] == 420768
+    assert ao.rel_age(429408) == ao.rel_age(420768) == "4d"
+
+
+def _scratch12_raw():
+    """The same two panes as a raw `tmux list-panes -a` dump."""
+    return "\n".join(
+        "|".join([p["pane_id"], str(p["pane_pid"]), p["session"],
+                  p["window_index"], p["window_id"], p["window_name"],
+                  p["path"], p["command"], p["title"]])
+        for p in _SCRATCH12_PANES)
+
+
+def test_build_frame_renders_per_window_ages_end_to_end(monkeypatch):
+    """🔴 THE regression test, driven through `build_frame` — the whole render.
+
+    It injects ONLY seams that predate the fix (`list_tmux_panes_raw`,
+    `build_proc_index`, `own_pid_chain`), so pre-change code runs end-to-end and
+    prints its own answer: the process uptimes, i.e. "4d" on BOTH rows,
+    including the busy one. That is the reported defect verbatim, and it is what
+    this assertion fails on at the base commit.
+    """
+    now = time.time()
+    monkeypatch.setattr(ao, "read_json", lambda p: None)
+    monkeypatch.setattr(ao, "list_tmux_panes_raw", _scratch12_raw)
+    monkeypatch.setattr(ao, "build_proc_index", lambda: _SCRATCH12_PROC)
+    monkeypatch.setattr(ao, "own_pid_chain", lambda: set())
+    monkeypatch.setattr(ao, "load_scratch_codenames", lambda *a, **k: {})
+    monkeypatch.setattr(ao, "read_fuzzyclaw_task_texts",
+                        lambda *a, **k: _scratch12_activity(now), raising=False)
+    monkeypatch.setattr(ao, "maybe_refresh_initiatives", lambda *a, **k: None)
+    monkeypatch.setattr(ao, "maybe_refresh_prs", lambda *a, **k: None)
+    monkeypatch.setattr(ao, "maybe_refresh_telemetry", lambda *a, **k: None)
+    monkeypatch.setattr(ao, "enrich_clawgate_titles", lambda *a, **k: [])
+    monkeypatch.setattr(ao, "fetch_failed_user_units", lambda *a, **k: None)
+    monkeypatch.setattr(ao, "fetch_unit_show", lambda *a, **k: None)
+    monkeypatch.setattr(ao, "read_uptime", lambda *a, **k: None)
+
+    body = plain(ao.build_frame(100)).splitlines()
+    busy = next(ln for ln in body if "review-bombing" in ln)
+    idle = next(ln for ln in body if "bitdex" in ln)
+    assert busy.split()[-1] == "45m", busy   # ← "4d" before the fix
+    assert idle.split()[-1] == "4d", idle
+    assert busy.split()[-1] != idle.split()[-1]
+
+
+def test_index_window_activity_keys_by_window_id_and_tolerates_junk():
+    idx = ao.index_window_activity([
+        json.dumps({"window_id": "@4", "tmux_session": "s", "window_index": 1,
+                    "last_activity": "2026-08-11T19:08:55-05:00"}),
+        "{not json",                       # unparseable → skipped
+        json.dumps([1, 2, 3]),             # not a dict → skipped
+        json.dumps({"tmux_session": "s"}),  # no window_id → skipped
+        json.dumps({"window_id": "", "tmux_session": "s"}),   # blank → skipped
+    ])
+    assert set(idx) == {"@4"}
+    assert idx["@4"]["session"] == "s" and idx["@4"]["window_index"] == 1
+    assert ao.index_window_activity([]) == {}
+    assert ao.index_window_activity(None) == {}
+
+
+def test_index_window_activity_ambiguous_claim_fails_closed():
+    same = {"window_id": "@4", "tmux_session": "s", "window_index": 1,
+            "last_activity": "2026-08-11T19:08:55-05:00"}
+    other = dict(same, last_activity="2026-08-01T00:00:00-05:00")
+    # A byte-identical duplicate carries the same answer — not a conflict.
+    assert ao.index_window_activity([json.dumps(same),
+                                     json.dumps(same)])["@4"] == {
+        "session": "s", "window_index": 1,
+        "last_activity": "2026-08-11T19:08:55-05:00"}
+    # Two files DISAGREEING about one window id → ambiguous → no age at all.
+    idx = ao.index_window_activity([json.dumps(same), json.dumps(other)])
+    assert idx["@4"] is None
+    pane = {"window_id": "@4", "session": "s", "window_index": "1"}
+    assert ao.window_activity_age(pane, idx, now=1_786_499_288.0) is None
+
+
+def test_window_activity_age_requires_session_and_index_to_agree():
+    now = 1_786_499_288.0
+    ts = datetime.datetime.fromtimestamp(now - 600).astimezone().isoformat()
+    idx = ao.index_window_activity([json.dumps(
+        {"window_id": "@4", "tmux_session": "scratch12", "window_index": 1,
+         "last_activity": ts})])
+    ok = {"window_id": "@4", "session": "scratch12", "window_index": "1"}
+    assert round(ao.window_activity_age(ok, idx, now=now)) == 600
+
+    # Each guard is reached on its OWN: the session check with a MATCHING index,
+    # the index check with a MATCHING session — neither can shadow the other.
+    wrong_session = dict(ok, session="scratch9")      # index still 1
+    assert ao.window_activity_age(wrong_session, idx, now=now) is None
+    wrong_index = dict(ok, window_index="2")          # session still scratch12
+    assert ao.window_activity_age(wrong_index, idx, now=now) is None
+    # An id nobody claims, and an empty/absent index.
+    assert ao.window_activity_age(dict(ok, window_id="@99"), idx, now=now) is None
+    assert ao.window_activity_age(ok, {}, now=now) is None
+    assert ao.window_activity_age(ok, None, now=now) is None
+
+
+def test_window_activity_age_unparseable_and_future_timestamps():
+    now = 1_786_499_288.0
+    pane = {"window_id": "@4", "session": "s", "window_index": "1"}
+    for bad in ("", "yesterday", None, 17864, "2026-13-45T99:99:99"):
+        idx = ao.index_window_activity([json.dumps(
+            {"window_id": "@4", "tmux_session": "s", "window_index": 1,
+             "last_activity": bad})])
+        assert ao.window_activity_age(pane, idx, now=now) is None
+    # A clock-skewed FUTURE timestamp clamps to 0, never a negative age.
+    future = datetime.datetime.fromtimestamp(now + 900).astimezone().isoformat()
+    idx = ao.index_window_activity([json.dumps(
+        {"window_id": "@4", "tmux_session": "s", "window_index": 1,
+         "last_activity": future})])
+    assert ao.window_activity_age(pane, idx, now=now) == 0.0
+
+
+def test_render_active_runs_unknown_age_is_a_dash_not_a_number():
+    rows = [{"pane_id": "%0", "repo": "devrc", "session": "main",
+             "window_index": "1", "window_id": "@1", "window_name": "devrc",
+             "task": "Ship it", "busy": True, "age_secs": None,
+             "proc_age_secs": 429408}]
+    body = "\n".join(plain(ao.render_active_runs(rows)))
+    assert "Ship it" in body
+    assert "—" in body
+    # the process uptime must NOT leak into the column as if it were an idle time
+    assert "4d" not in body
+
+
+def test_read_fuzzyclaw_task_texts_reads_json_only_and_failsafe(tmp_path):
+    (tmp_path / "4.json").write_text('{"window_id": "@4"}')
+    (tmp_path / "notes.txt").write_text("ignore me")
+    got = ao.read_fuzzyclaw_task_texts(str(tmp_path))
+    assert got == ['{"window_id": "@4"}']
+    assert ao.read_fuzzyclaw_task_texts(str(tmp_path / "nope")) == []
 
 
 # ---------------------------------------------------------------------------
@@ -526,6 +779,7 @@ def test_build_frame_failsafe(monkeypatch):
     monkeypatch.setattr(ao, "list_tmux_panes_raw", lambda: "")
     monkeypatch.setattr(ao, "build_proc_index", lambda: {})
     monkeypatch.setattr(ao, "own_pid_chain", lambda: set())
+    monkeypatch.setattr(ao, "read_fuzzyclaw_task_texts", lambda *a, **k: [])
     monkeypatch.setattr(ao, "maybe_refresh_initiatives", lambda *a, **k: None)
     monkeypatch.setattr(ao, "maybe_refresh_prs", lambda *a, **k: None)
     monkeypatch.setattr(ao, "maybe_refresh_telemetry", lambda *a, **k: None)
