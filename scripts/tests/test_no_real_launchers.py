@@ -28,8 +28,15 @@ What is asserted, and why each is not enough alone:
     made that deletion invisible.
   * THE SEAM    — the real hazard paths (monitor-blackout's `systemd-run`
     scheduling and its `cancel_timer` systemctl storm, rig-control's `openrgb` +
-    `notify-send`) land in the stub log. A component-scoped check would pass
-    with the fixture deleted as long as some stub file existed somewhere.
+    `notify-send`, and bar-status-poll's `fire_toast`) land in the stub log. A
+    component-scoped check would pass with the fixture deleted as long as some
+    stub file existed somewhere.
+  * THE TOAST   — `fire_toast` is driven FOR REAL, in a subprocess, with its
+    seam UNPATCHED. That is the launch that escaped to the operator's desktop
+    on 2026-08-11, and it escaped precisely because the file that owns it
+    protects itself with a monkeypatch on the seam the test exists to bypass.
+    The set of test files that LOAD the poller is pinned alongside it: each gets
+    its own module object, so a per-file patch covers exactly one of them.
   * THE LEDGER  — pinned against the TREE (`testlib.launcher_scan`), not only
     against itself. `dunstctl`, `rofi` and `yad` were all reachable while the
     self-pinned list said the set was complete.
@@ -694,6 +701,129 @@ def test_rig_control_notify_and_rgb_reach_the_stub(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# The bar-status TOAST seam — the third real hazard path, and the one a
+# per-file fixture structurally cannot hold
+# --------------------------------------------------------------------------- #
+# Loads `scripts/bar-status-poll` the way the suite's own tests do and calls
+# `fire_toast` FOR REAL: no `runner=` injection, no patched `_toast_runner`, and
+# the session-bus precondition satisfied so the call cannot short-circuit before
+# reaching the launcher. Run as a SUBPROCESS on purpose — an in-process probe
+# could be credited to some other test's monkeypatch, and the property under
+# test is the one that survives a fresh interpreter: the PATH.
+_TOAST_PROBE = '''\
+import importlib.machinery, importlib.util, sys
+loader = importlib.machinery.SourceFileLoader("_poll_toast_seam", sys.argv[1])
+spec = importlib.util.spec_from_loader("_poll_toast_seam", loader)
+mod = importlib.util.module_from_spec(spec)
+loader.exec_module(mod)
+print("DISPATCHED=%s" % mod.fire_toast("critical", "SEAMPROBESUMMARY",
+                                       "SEAMPROBEBODY"))
+'''
+
+
+def test_the_bar_status_toast_reaches_the_stub_not_the_desktop(tmp_path):
+    """🔴 THE POSITIVE CONTROL: a test that genuinely TRIES to toast the operator.
+
+    This is the launch that actually escaped. MEASURED on the workbench, in the
+    user journal at 2026-08-11 13:14:58:
+
+        Started [systemd-run] …/bash -c "a=$(dunstify -a bar-status -u \\"$1\\"
+        \\"$2\\" \\"$3\\")" bar-status critical sum body
+
+    — the literal fixture arguments of `test_bar_status.py`'s seam test, on a
+    real desktop. It escaped because that file's protection is a monkeypatch of
+    `poll._toast_runner`, and the whole point of the seam test is to run
+    `fire_toast` in a state where it may NOT route through that attribute. A
+    patch on a seam cannot stop a launch that bypasses the seam; only something
+    below the process boundary can, which is what the PATH fixture is.
+
+    So this test does the forbidden thing deliberately and asserts the stub
+    caught it. `DISPATCHED=True` is load-bearing as its own positive control: if
+    `fire_toast` returned False it skipped at the session-bus check and never
+    reached a launcher, and an empty log would prove nothing at all.
+
+    Fails in BOTH tiers without the fixture: on the dev host the real
+    `systemd-run` takes the call and the log stays empty; in the sandbox there
+    is no `systemd-run`, `fire_toast` swallows the OSError, `DISPATCHED=False`
+    and the assertion below names that instead.
+    """
+    stub_dir = _stub_dir_from_env()
+    poller = SCRIPTS / "bar-status-poll"
+    before = len(nolaunch.recorded(stub_dir))
+
+    env = dict(os.environ)
+    # Satisfy `_borrow_desktop_env` so it returns immediately and the bus check
+    # passes — otherwise the toast is skipped and this test measures nothing.
+    env["DISPLAY"] = ":0"
+    env["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=/dev/null"
+    env["XAUTHORITY"] = str(tmp_path / "xauth")
+    env["DEVRC_DIR"] = str(SCRIPTS.parent)
+    env["HOME"] = str(tmp_path)
+    p = subprocess.run([sys.executable, "-B", "-c", _TOAST_PROBE, str(poller)],
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                       text=True, timeout=60, env=env)
+    assert p.returncode == 0, p.stdout
+    assert "DISPATCHED=True" in p.stdout, (
+        "fire_toast did not reach a launcher at all, so an empty stub log would "
+        f"be meaningless — it returned early:\n{p.stdout}")
+
+    new = nolaunch.recorded(stub_dir)[before:]
+    launched = [ln for ln in new if ln.startswith("systemd-run ")]
+    assert len(launched) == 1, (
+        "bar-status-poll's fire_toast did not land in the stub — it reached a "
+        f"REAL systemd-run and put a toast on someone's screen. recorded: {new}")
+    assert "dunstify -a bar-status" in launched[0], launched[0]
+    assert "SEAMPROBESUMMARY" in launched[0] and "SEAMPROBEBODY" in launched[0], \
+        launched[0]
+
+
+# 🔴 A RELATIONSHIP, not a component. `test_bar_status.py`'s autouse fixture
+# patches the `_toast_runner` of the module object THAT FILE loaded; a different
+# file loading the same script gets its own module object with a live launcher
+# and inherits nothing. Two such files exist and neither patches the seam — the
+# PATH fixture is their ONLY protection, which is exactly why this set has to be
+# pinned in both directions rather than left to whoever adds the next one.
+POLLER_LOADING_TESTS = {
+    "test_bar_status.py":  "patches poll._toast_runner (autouse, whole file) AND "
+                           "is covered by the PATH fixture",
+    "test_airvpn_menu.py": "loads the poller for its airvpn parsers only; does "
+                           "NOT patch the toast seam — PATH fixture only",
+    "test_bar_url.py":     "loads the poller for _bar_url_action; does NOT patch "
+                           "the toast seam — PATH fixture only",
+}
+
+
+def test_every_test_file_that_loads_the_poller_is_pinned():
+    """A NEW file loading `bar-status-poll` is a new unprotected toast reacher.
+
+    Grows-or-shrinks, for the reason `ACKNOWLEDGED_UNSTUBBED` is bound to a file
+    set: a ledger that only says "these names are fine" absorbs the next reacher
+    silently. The fix when this goes red is to read the new file and decide
+    whether the PATH fixture is enough for it — not to append a line.
+    """
+    found = launcher_scan.module_loaders(SCRIPTS / "tests", "bar-status-poll")
+    assert set(found) == set(POLLER_LOADING_TESTS), (
+        "the set of test files that LOAD scripts/bar-status-poll changed.\n"
+        f"  pinned: {sorted(POLLER_LOADING_TESTS)}\n"
+        f"  tree:   {sorted(found)}\n"
+        "Each one gets its own module object, so test_bar_status.py's autouse "
+        "_toast_runner patch does NOT cover it; the PATH fixture is what does.")
+
+
+def test_the_module_loader_scan_can_actually_find_something(tmp_path):
+    """Positive control for the scan itself — a zero from a scan wired to
+    nothing is indistinguishable from a zero that means "no loaders"."""
+    (tmp_path / "test_decoy.py").write_text(
+        '_load("bar-status-poll", "x")\n', encoding="utf-8")
+    (tmp_path / "test_mentions_only.py").write_text(
+        'DATA = {"service": "bar-status-poll"}\n', encoding="utf-8")
+    found = launcher_scan.module_loaders(tmp_path, "bar-status-poll")
+    assert set(found) == {"test_decoy.py"}, (
+        f"the scan sees a loader but not a bare mention; got {found}")
+    assert launcher_scan.module_loaders(tmp_path, "no-such-script") == {}
+
+
+# --------------------------------------------------------------------------- #
 # The PATH-clobber sites the fixture CANNOT cover
 # --------------------------------------------------------------------------- #
 # (file, lineno-independent needle, why it is safe today)
@@ -947,3 +1077,76 @@ def test_the_seam_assertion_is_what_makes_the_seam_test_red(tmp_path):
         "with the seam assertion neutered the test is STILL red, so it is red "
         f"for some other reason and proves nothing about this assertion.\n"
         f"{mutant.stdout}")
+
+
+# --------------------------------------------------------------------------- #
+# MUTATION: the poller ledger must not be relaxable into exempting everything
+# --------------------------------------------------------------------------- #
+_LEDGER_TEST = "test_every_test_file_that_loads_the_poller_is_pinned"
+# Self-match, assembled: spelled whole, `src.count()` below would be 2.
+_LEDGER_NEEDLE = "assert set(found) == set(POLLER_LOADING_TESTS)" + ", ("
+
+# Minimal files carrying the LOADER SHAPE the scan looks for — enough for
+# `module_loaders` to report them, without dragging in the real suites.
+_FAKE_LOADER = '_load("bar-status-poll", "m")\n'
+
+
+def _ledger_harness(tmp_path, source: str) -> Path:
+    """A tests dir holding the three pinned loaders PLUS one new reacher.
+
+    The extra file is the event the ledger exists to notice: a new test file
+    that loads the poller, and therefore does NOT inherit `test_bar_status.py`'s
+    per-file `_toast_runner` patch.
+    """
+    root = tmp_path / "scripts"
+    tests = root / "tests"
+    tests.mkdir(parents=True)
+    (root / "testlib").symlink_to(SCRIPTS / "testlib")
+    (tests / "conftest.py").write_text(_HARNESS_CONFTEST, encoding="utf-8")
+    for name in (*POLLER_LOADING_TESTS, "test_a_brand_new_reacher.py"):
+        (tests / name).write_text(_FAKE_LOADER, encoding="utf-8")
+    target = tests / "test_no_real_launchers.py"
+    target.write_text(source, encoding="utf-8")
+    return target
+
+
+def test_the_ledger_equality_is_what_makes_a_new_reacher_red(tmp_path):
+    """🔴 A ledger relaxed to a SUBSET absorbs the next reacher in silence.
+
+    MEASURED as a surviving mutant before this test existed: changing the
+    ledger's `==` to `>=` and adding a new poller-loading test file left the
+    whole guard file green — the exact "acknowledgement absorbs a new reacher"
+    failure that `ACKNOWLEDGED_UNSTUBBED` was already bound to file sets for.
+
+    Run as a PAIR, because "the mutant went green" means nothing without a
+    control that went red for the RIGHT reason:
+
+      control : `==` + an extra reacher in the tree -> RED, naming the ledger
+      mutant  : `>=` + the same tree               -> GREEN
+
+    Nothing can launch in either half: the harness conftest still puts a working
+    stub dir first on PATH, and these nested files only parse source.
+    """
+    src = Path(__file__).read_text(encoding="utf-8")
+    assert src.count(_LEDGER_NEEDLE) == 1, (
+        f"expected exactly one ledger assertion to mutate, found "
+        f"{src.count(_LEDGER_NEEDLE)} — the mutation would not land where intended")
+
+    def run(where, source):
+        target = _ledger_harness(tmp_path / where, source)
+        return _run_nested(f"{target}::{_LEDGER_TEST}",
+                           tmp_path / where / "basetemp")
+
+    control = run("control", src)
+    assert control.returncode != 0 and "1 failed" in control.stdout, (
+        "the CONTROL half did not go red, so the mutant going green would prove "
+        f"nothing.\n{control.stdout}")
+    assert "test_a_brand_new_reacher.py" in control.stdout, (
+        "the control went red without naming the new reacher, so it is red for "
+        f"some other reason.\n{control.stdout}")
+
+    mutant = run("mutant", src.replace(
+        _LEDGER_NEEDLE, "assert set(found) >= set(POLLER_LOADING_TESTS)" + ", ("))
+    assert mutant.returncode == 0, (
+        "with the ledger relaxed to a subset the test is STILL red, so it is "
+        f"red for some other reason and proves nothing.\n{mutant.stdout}")
