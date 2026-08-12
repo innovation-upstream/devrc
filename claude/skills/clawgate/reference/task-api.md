@@ -123,7 +123,24 @@ and **no login QR to manage**.
 - 🔴 **The `/api/` prefix does NOT mean "needs the token."** `/api/requests`,
   `/api/openrouter/models`, `/api/push/*` and `/api/auto-approve*` sit behind the no-op
   `requireSession` and are **wide open on the LAN NodePort** — and `POST /api/auto-approve` is
-  state-changing on the open side. Measured live 0.7.85, 2026-08-11: `GET /api/requests` → **200
+  state-changing on the open side.
+- 🔴🔴 **`POST /api/auto-approve-all` is the most consequential switch in the app, and it is
+  unauthenticated on the LAN** (`internal/api/server.go:325`, wrapped in the no-op `requireSession`;
+  handler at `:1105`). It accepts **either** a form body or JSON — `enabled` (`true`/`1`/`on`) plus
+  `duration` (the UI offers 1h / 8h / 24h). Enabling it does **two** things, and the second is the
+  one people miss:
+  1. arms a **single global window** that auto-approves every *future* request **in every project**
+     (not per-project — the server logs it as `auto-approve-ALL enabled … (FIREHOSE — every project)`);
+  2. immediately **sweeps the existing pending queue**, approving everything already waiting.
+
+  Runbook **checkpoints** (`store.TypeCheckpoint`) are skipped in the sweep — an approval gate stays
+  a human decision. Disable with `enabled=false`, which clears the window and falls back to the
+  per-project rules. e2e coverage: `e2e/tests/auto-approve-all.spec.ts` (2 tests, **not** Docker-gated).
+- 🔴 **The idle-task reaper is a second unattended destroyer.** `defaultTaskReapAfter = 7d`
+  (`internal/api/server.go:1229`); the daily retention sweep calls `reapIdleTasks` (`:1303`) which
+  calls the **same `dismissTask`** as `DELETE /api/tasks/{id}` (`:1318`) — so an idle task's linked
+  agent pod is torn down too. `CLAWGATE_TASK_TTL` is **unset in the live deployment** (verified
+  2026-08-12), so the 7d default is what is running; `off` or `0` disables the reaper. Measured live 0.7.85, 2026-08-11: `GET /api/requests` → **200
   with no credential**, `GET /api/tasks` → **401**. Never infer exposure from the path prefix.
 - 🔴 **`/operator/*` (11 routes) is a THIRD credential** — `requireOperatorToken` demands the
   reserved Operator *agent's* hooks token, not the hook token, which gets

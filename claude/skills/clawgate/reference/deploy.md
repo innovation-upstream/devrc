@@ -55,7 +55,7 @@ make e2e   # 83 pass / 2 skip; a fresh worktree npm-installs e2e/node_modules fi
 
 # 2. build (Dockerfile builds Tailwind CSS then the static Go binary, embeds assets) + smoke + push
 docker build --build-arg VERSION=$VER -t harbor.homelab.lan/library/clawgate:$VER -t harbor.homelab.lan/library/clawgate:latest .
-docker run -d --name cg-smoke -p 8219:8104 -e CLAWGATE_INSECURE_COOKIES=1 harbor.homelab.lan/library/clawgate:$VER && sleep 3
+docker run -d --name cg-smoke -p 8219:8104 harbor.homelab.lan/library/clawgate:$VER && sleep 3   # CLAWGATE_INSECURE_COOKIES is dead — no Go code reads it
 curl -sf http://localhost:8219/health && echo OK; docker rm -f cg-smoke
 docker push harbor.homelab.lan/library/clawgate:$VER && docker push harbor.homelab.lan/library/clawgate:latest
 

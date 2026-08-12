@@ -16,10 +16,32 @@ Fully remove the home-screen icon → clear the site's data in the browser → r
 shortcut carrying the browser icon).
 Verify: `curl -s .../static/icons/icon-192.png | file -` should say 8-bit.
 
+## `kubectl --kubeconfig …` fails: no such file (the workbench kubeconfig path)
+**The path is PER-HOST — a missing file means "wrong host", not "wrong doc".** Measured on both
+hosts 2026-08-12:
+
+| host | the file that EXISTS | the other path |
+|---|---|---|
+| workbench `192.168.50.250` | `~/workspace/homelab-talos/workbench-kubeconfig` | absent |
+| laptop `192.168.50.155` | `~/workspace/homelab-infra/workbench-kubeconfig` | absent |
+
+The names differ because the **origin repo** was renamed `homelab-talos` → `homelab-infra` while the
+**local checkout dir** was not renamed on every host — repo checkout name ≠ kubeconfig dir. Both
+hosts report hostname `nixos`, so disambiguate by IP (`ip -4 addr`) or `browser whoami`.
+
+⚠ **`$KC_WORKBENCH` is exported on the workbench only** — it is empty on the laptop even in a login
+shell, so a doc that says "just use `$KC_WORKBENCH`" breaks there. Select the file instead
+(verified verbatim in bash and zsh on both hosts):
+```bash
+KC=$(ls /home/zach/workspace/homelab-{talos,infra}/workbench-kubeconfig 2>/dev/null | head -1)
+```
+
 ## A UI feature "looks broken" for a user but works in incognito/fresh
 **Stale service-worker cache — suspect the SW first.** `app.css` used to be cache-first under a
 never-bumped cache, so returning users kept old CSS missing new classes. Fixed in 0.3.6: `app.css`
-is network-first, cache `clawgate-shell-v2`. A normal reload picks up fresh CSS post-deploy.
+is network-first. **The cache name is bumped per shell change — read it, don't quote it:** it is
+`clawgate-shell-v4` as of 2026-08-12 (`web/static/sw.js:20`), not the `v2` this entry used to name.
+A normal reload picks up fresh CSS post-deploy.
 
 ## Card not removed when resolved in Claude Code
 `DELETE /api/response/{id}` must broadcast resolved (fixed in 0.2.0). The hook DELETEs its request
@@ -27,8 +49,10 @@ on decision/timeout. Card actions are optimistic (removed instantly, POST queued
 a `↻ N` header indicator); SSE reconciles the badge.
 
 ## Stale request cards pile up
-The hook DELETEs on ANY exit (trap) and the server TTL is short (`CLAWGATE_REQUEST_TTL=5m`; the
-hook poll deadline is 170s so nothing legitimate pends longer). Orphans auto-evict within ~5 min.
+The hook DELETEs on ANY exit (trap) and the server TTL is short. ⚠ **`CLAWGATE_REQUEST_TTL=5m` is a
+DEPLOYMENT value, not inherent** — the code default is **1h** (`main.go:68`, `defaultRequestTTL =
+time.Hour`), so a locally-run clawgate evicts after an hour, not five minutes. The hook poll deadline
+is 170s, so nothing legitimate pends longer. On the cluster, orphans auto-evict within ~5 min.
 
 ## `fetch ... URL that includes credentials`
 The page was opened with basic-auth creds in the URL (`https://user:pass@host`). Client fetches

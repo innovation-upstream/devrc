@@ -5,6 +5,10 @@ is, or whether a behaviour you're seeing is a deliberate old decision. **Not nee
 routine operation** — the core SKILL.md carries everything you need to deploy, drive the
 machine API, or debug.
 
+⚠ **This file stops at 0.7.79 and the product runs ahead of it** (live was **0.7.85** on
+2026-08-12). An absence here is NOT evidence a feature doesn't exist — for anything newer than
+0.7.79, read `containers/clawgate/HANDOFF.md` or `git log` instead.
+
 🔑 **Never derive the next release number from this file** — always from the LIVE
 deployment pin (see the core's deploy section).
 
