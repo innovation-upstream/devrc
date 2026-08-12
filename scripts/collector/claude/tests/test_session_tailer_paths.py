@@ -17,6 +17,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 _CLAUDE_DIR = Path(__file__).resolve().parent.parent
 _COLLECTOR_DIR = _CLAUDE_DIR.parent
 sys.path.insert(0, str(_CLAUDE_DIR))
@@ -284,3 +286,115 @@ class TestClaudeChangedPathsInteractions:
     def test_a_relative_file_path_is_kept_as_written(self):
         r = _rollup([("Write", {"file_path": "src/app.py", "content": "x"})])
         assert r["changed_paths"] == ["src/app.py"]
+
+
+# --------------------------------------------------------------------------- #
+# A malformed file-path value is COUNTED, not fatal and not invented
+# --------------------------------------------------------------------------- #
+class TestClaudeUnusableFilePaths:
+    """🔴 NEGATIVE CONTROL FIRST — every case below RAISED before this guard,
+    and `run()` had no per-session try, so ONE of them anywhere under
+    `~/.claude/projects` aborted the pass and stopped ALL claude
+    session-summary emission. Measured on the pre-change tree, the six shapes
+    that did it were: a blank `file_path` (ValueError from
+    `changed_paths.to_repo_relative`), a list or dict one (TypeError,
+    unhashable, before summarize() was ever reached), an int one (TypeError in
+    `lang_for_path`), a `tool_use.input` that is not a dict (AttributeError),
+    and a non-string `timestamp` (TypeError under `<`). The last is deliberately
+    NOT closed here — it is what keeps run()'s wrapper reachable rather than
+    dead code; see test_session_tailer.py.
+
+    The value is never coerced into a path: `str(["a.py"])` is `"['a.py']"`,
+    which `to_repo_relative` would happily accept as a relative path and EMIT.
+    """
+
+    def test_the_counter_is_zero_when_every_path_is_usable(self):
+        """POSITIVE CONTROL. Without this arm, a guard that counted EVERY path
+        would satisfy every assertion below."""
+        r = _rollup([("Write", {"file_path": f"{REPO}/a.py", "content": "x"})])
+        assert r["unusable_file_paths"] == 0
+        assert r["changed_paths"] == ["a.py"]
+
+    def test_a_blank_file_path_is_counted_not_fatal(self):
+        r = _rollup([("Write", {"file_path": "   ", "content": "x"})])
+        assert r["unusable_file_paths"] == 1
+        assert r["changed_paths"] == []
+        assert r["files_modified"] == 0
+
+    @pytest.mark.parametrize("bad", [["a.py"], {"p": "a.py"}, 7, 3.5, True])
+    def test_a_non_string_file_path_is_counted_not_emitted(self, bad):
+        r = _rollup([("Write", {"file_path": bad, "content": "x"})])
+        assert r["unusable_file_paths"] == 1
+        assert r["changed_paths"] == []
+
+    def test_a_non_dict_tool_input_is_counted_not_fatal(self):
+        """`inp = block.get("input") or {}` kept a truthy LIST, and the next
+        `.get` raised. This one is not path-specific — it killed the pass for a
+        Bash block too."""
+        r = S.build_rollup([_user(), _assistant([("Write", ["file_path", "a.py"])])])
+        assert r["unusable_file_paths"] == 1
+        assert r["changed_paths"] == []
+        # the tool was still counted — the block's shape is malformed, its
+        # existence is not in doubt
+        assert r["tool_counts"]["Write"] == 1
+
+    def test_a_missing_file_path_is_not_counted_as_unusable(self):
+        """Absent is not malformed. A file tool with no path argument at all
+        contributes nothing and must not inflate the diagnostic."""
+        r = _rollup([("Write", {"content": "x"}),
+                     ("Edit", {"file_path": "", "new_string": "x"})])
+        assert r["unusable_file_paths"] == 0
+        assert r["changed_paths"] == []
+
+    @pytest.mark.parametrize("falsy", [[], "", 0])
+    def test_a_FALSY_non_dict_input_is_still_counted(self, falsy):
+        """The branch `or {}` cannot see. A falsy non-dict `input` ([] / "" / 0)
+        is malformed exactly like a truthy one, but `block.get("input") or {}`
+        silently converts it to an empty dict and counts nothing — a surviving
+        mutant found by review, on the diagnostic itself rather than on
+        fatality (neither spelling raises)."""
+        r = S.build_rollup([_user(), _assistant([("Write", falsy)])])
+        assert r["unusable_file_paths"] == 1
+        assert r["changed_paths"] == []
+
+    def test_an_ABSENT_input_is_not_counted(self):
+        """The other arm, and the reason the guard tests `is not None` rather
+        than truthiness: a tool_use block with no `input` key at all is absent,
+        not malformed."""
+        objs = [_user(), {"type": "assistant", "timestamp": "2026-07-11T10:01:00.000Z",
+                          "cwd": REPO,
+                          "message": {"role": "assistant", "model": "m", "usage": {},
+                                      "content": [{"type": "tool_use", "name": "Write"}]}}]
+        r = S.build_rollup(objs)
+        assert r["unusable_file_paths"] == 0
+
+    def test_a_good_path_beside_a_bad_one_still_lands(self):
+        r = _rollup([("Write", {"file_path": f"{REPO}/good.py", "content": "x"}),
+                     ("Write", {"file_path": ["bad.py"], "content": "x"})])
+        assert r["changed_paths"] == ["good.py"]
+        assert r["unusable_file_paths"] == 1
+
+    def test_the_accounting_invariant_survives_a_malformed_entry(self):
+        """`total + outside_cwd == files_modified` is the field consumers read
+        to size what they are NOT being told. An entry excluded from
+        `files_modified` must be excluded from both sides, or the invariant
+        turns into a silent off-by-N."""
+        r = _rollup([("Write", {"file_path": f"{REPO}/a.py", "content": "x"}),
+                     ("Write", {"file_path": "/var/tmp/b.py", "content": "x"}),
+                     ("Write", {"file_path": "  ", "content": "x"})])
+        assert (r["changed_paths_total"] + r["changed_paths_outside_cwd"]
+                == r["files_modified"])
+        assert r["unusable_file_paths"] == 1
+
+    def test_an_unusable_value_never_reaches_the_payload(self):
+        """It is COUNTED, never carried. A malformed `file_path` is attacker- or
+        bug-supplied free text, and the block is documented as paths only."""
+        r = _rollup([("Write", {"file_path": {"leak": "SUPERSECRET"},
+                                "content": "x"})])
+        assert r["unusable_file_paths"] == 1
+        assert "SUPERSECRET" not in json.dumps(r)
+
+    def test_the_counter_is_present_on_an_unobservable_rollup(self):
+        """A key that is sometimes absent is indistinguishable from a consumer
+        reading the wrong name — the rule the whole payload block is built on."""
+        assert S.build_rollup([])["unusable_file_paths"] == 0
