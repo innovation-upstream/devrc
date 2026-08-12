@@ -1348,19 +1348,38 @@ def test_the_timer_is_gated_by_the_master_switch_and_the_service_is_not():
 
     🔴 This test used to also assert `enableDriftDeadman = false;` — "the master
     switch must ship OFF, enabling a timer is a live change to a host and belongs
-    in its own supervised deploy". #406 IS that supervised deploy: it measured
-    both preconditions rather than arguing them, and set the switch to `true`.
-    It changed `nix/home.nix` and nothing else, so the assertion outlived its own
-    premise and left `main` RED — `collected=7785 passed=7783 failed=1`, the only
-    failure in either tier.
+    in its own supervised deploy". #406 IS that supervised deploy. It changed
+    `nix/home.nix` and nothing else, so the assertion outlived its own premise and
+    left `main` RED — `collected=7785 passed=7783 failed=1`, the only failure in
+    either tier.
+
+    WHAT #406 MEASURED, because it is the part worth keeping. The switch had sat
+    false since #367 behind two preconditions a scratch clone structurally cannot
+    test:
+
+      1. the ssh leg reaches the laptop from a systemd-user context (a user unit
+         has no ssh-agent) — a hand-run did it for real and found GENUINE drift
+         on its first run: the laptop 1 commit behind origin/main, rc 10;
+      2. the failure toast actually DISPLAYS — and this one was **FALSE** at
+         first. dunst was paused with 286 notifications queued, so the toast was
+         sent, exited 0, and was silently binned. Four rounds of auditing had
+         confirmed the script hands systemd the right exit code and that
+         OnFailure was wired; none of them could see that the notifier's output
+         went nowhere.
+
+    (2) is why the flag waited, and it is the reason to distrust a green here: a
+    timer alerting into a paused queue manufactures the appearance of coverage
+    over exactly the failure it exists to catch.
 
     A process rule ("do the enabling in its own deploy") is not a property a unit
     test can hold, and the one that tried became a gate everybody would have to
     merge through. What IS testable, and is what the gating actually depends on,
-    is that the switch is still declared EXPLICITLY — if it were deleted or left
-    to a default, `lib.optionals (serverMode && enableDriftDeadman)` would either
-    fail to evaluate or silently stop meaning anything, and the structural
-    assertion above would keep passing while gating nothing.
+    is that the switch is still declared EXPLICITLY and exactly once — deleted,
+    defaulted, or bound twice, `lib.optionals (serverMode && enableDriftDeadman)`
+    either fails to evaluate or quietly stops meaning anything while the
+    structural assertion above keeps passing and gates nothing. Deliberately
+    agnostic about the VALUE: pinning that again would re-break the gate the next
+    time someone legitimately changes it.
     """
     block = _drift_service_block()
     assert "mkIf" not in block, (
