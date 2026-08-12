@@ -31,6 +31,7 @@ suites with their own conftests and are deliberately out of scope; see the
 """
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -46,23 +47,11 @@ HAZARD_VOCABULARY = (
     "home-manager", "nixos-rebuild",
 )
 
-# A PATH value that mentions any of these is DERIVED from the ambient PATH, so
-# the stub dir travels with it. Anything else replaces PATH wholesale.
-_INHERITS = (
-    "os.environ", "environ[", "PATH_ENV", "$PATH", "getenv",
-    # `env["PATH"] = f"{d}:{env['PATH']}"` — the ambient value is carried by a
-    # dict copied from os.environ earlier, so the RHS naming PATH at all means
-    # the child keeps whatever the parent had, stub dir included.
-    '"PATH"', "'PATH'",
-)
-
-# Both shapes that occur: a dict entry (`{"PATH": …}`) and a subscript
-# assignment (`env["PATH"] = …`). The optional `]` is what makes the second one
-# visible — without it the scan silently missed test_claude_log_rotate.py.
-_PATH_ASSIGN = re.compile(r"""["']PATH["']\s*\]?\s*[:=]\s*(?P<value>.+)$""")
-# The value as written, up to the end of that dict entry / statement.
-_VALUE_HEAD = re.compile(r"^\s*(?P<expr>[^,}]+)")
-_BARE_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# NOTE: the PATH-clobber scan is AST-based (see `path_clobbers`). It used to be
+# a line regex, and every false negative a review found came from that: a line
+# has a TAIL, so `{"PATH": "/usr/bin/false", "HOME": os.environ["HOME"]}` and
+# even a trailing `# os.environ` comment read as "inherits". A syntax tree has
+# neither tails nor comments.
 
 
 def top_level_scripts(scripts_root: Path) -> list[Path]:
@@ -88,48 +77,118 @@ def hazard_hits(scripts_root: Path) -> dict[str, list[str]]:
     return hits
 
 
+def _inherits(node: ast.AST, module: ast.Module, depth: int = 0) -> bool:
+    """True when this PATH value carries the AMBIENT PATH along with it.
+
+    Direct signals, read from the SYNTAX TREE rather than the line text:
+      * the expression mentions `os.environ` / `getenv` anywhere in its subtree;
+      * it mentions the string "PATH" (i.e. `env["PATH"]`, `env.get("PATH")`),
+        which means it is building on whatever the parent had.
+
+    Plus TWO levels of indirection, because both occur in this suite and both
+    would otherwise be reported as clobbers they are not:
+      * a VARIABLE — `env={"PATH": path}` with `path` assigned from os.environ;
+      * a LOCAL FUNCTION's return — `_run(store, PATH=_shim(tmp_path))`, where
+        the helper returns `f"{bindir}:{os.environ['PATH']}"`.
+    A deeper or cross-module chain is NOT resolved: it reports, and the pin
+    table is where someone says why it is safe. Erring toward reporting is the
+    right direction for a scan whose failure mode is a missed clobber.
+    """
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Attribute) and sub.attr in ("environ", "getenv"):
+            return True
+        if isinstance(sub, ast.Name) and sub.id in ("environ", "getenv"):
+            return True
+        if isinstance(sub, ast.Constant) and sub.value == "PATH":
+            return True
+    if depth >= 2:
+        return False
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Name):
+            for other in ast.walk(module):
+                if isinstance(other, ast.Assign) and any(
+                        isinstance(t, ast.Name) and t.id == sub.id
+                        for t in other.targets):
+                    if _inherits(other.value, module, depth + 1):
+                        return True
+        if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name):
+            for other in ast.walk(module):
+                if (isinstance(other, ast.FunctionDef)
+                        and other.name == sub.func.id):
+                    for ret in ast.walk(other):
+                        if (isinstance(ret, ast.Return) and ret.value is not None
+                                and _inherits(ret.value, module, depth + 1)):
+                            return True
+    return False
+
+
+def _path_values(module: ast.Module):
+    """Every expression assigned to a PATH key, in any of the shapes that occur.
+
+    🔴 The line-based version this replaces missed FOUR shapes a review measured,
+    all of which drop the ambient PATH silently:
+        {"PATH": "/usr/bin/false", "HOME": os.environ["HOME"]}   (later key)
+        env["PATH"] = "/x"  # os.environ is fine here            (a COMMENT)
+        env=dict(PATH="/x")                                      (kwarg)
+        env.setdefault("PATH", "/x") / env.update(PATH="/x")     (method)
+    The first two defeated it because it tested the whole line TAIL for an
+    inheritance token. An AST has no line tails.
+    """
+    for node in ast.walk(module):
+        # env["PATH"] = <value>
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if (isinstance(target, ast.Subscript)
+                        and isinstance(target.slice, ast.Constant)
+                        and target.slice.value == "PATH"):
+                    yield node, node.value
+        # {"PATH": <value>}
+        elif isinstance(node, ast.Dict):
+            for key, value in zip(node.keys, node.values):
+                if isinstance(key, ast.Constant) and key.value == "PATH":
+                    yield node, value
+        elif isinstance(node, ast.Call):
+            # dict(PATH=…) / env.update(PATH=…) / anything(PATH=…)
+            for kw in node.keywords:
+                if kw.arg == "PATH":
+                    yield node, kw.value
+            # env.setdefault("PATH", <value>)
+            func = node.func
+            if (isinstance(func, ast.Attribute) and func.attr == "setdefault"
+                    and len(node.args) == 2
+                    and isinstance(node.args[0], ast.Constant)
+                    and node.args[0].value == "PATH"):
+                yield node, node.args[1]
+
+
 def path_clobbers(tests_dir: Path) -> list[tuple[str, int, str]]:
-    """`(file, lineno, line)` for every PATH assignment that DROPS the ambient PATH.
+    """`(file, lineno, source)` for every PATH assignment that DROPS the ambient PATH.
 
     These are the sites the fixture cannot reach, so each one must be pinned by
     the guard test with a reason it is safe.
+
+    Scope: `test_*.py` AND `conftest.py` — the latter was outside the old glob,
+    which is where the fixture that does the protecting actually lives.
     """
     out = []
-    for py in sorted(Path(tests_dir).glob("test_*.py")):
+    files = sorted(Path(tests_dir).glob("test_*.py"))
+    conftest = Path(tests_dir) / "conftest.py"
+    if conftest.exists():
+        files.append(conftest)
+    for py in files:
         text = py.read_text(encoding="utf-8")
-        lines = text.splitlines()
-        for lineno, line in enumerate(lines, 1):
-            m = _PATH_ASSIGN.search(line)
-            if not m:
+        try:
+            module = ast.parse(text)
+        except SyntaxError:  # pragma: no cover — a broken test file fails elsewhere
+            continue
+        seen = set()
+        for node, value in _path_values(module):
+            if _inherits(value, module):
                 continue
-            value = m.group("value")
-            # A RHS can continue onto the next lines — `clean_env["PATH"] = (\n
-            # os.pathsep.join(…os.environ…))`. Reading only the first line calls
-            # that a clobber (it happened, in this repo's own guard file). Keep
-            # taking lines while brackets are unbalanced, bounded so a syntax
-            # error cannot make this walk the file.
-            depth = value.count("(") + value.count("[") + value.count("{") \
-                - value.count(")") - value.count("]") - value.count("}")
-            look = lineno
-            while depth > 0 and look < len(lines) and look - lineno < 10:
-                nxt = lines[look]
-                value += " " + nxt
-                depth += nxt.count("(") + nxt.count("[") + nxt.count("{") \
-                    - nxt.count(")") - nxt.count("]") - nxt.count("}")
-                look += 1
-            if any(tok in value for tok in _INHERITS):
+            lineno = getattr(value, "lineno", getattr(node, "lineno", 0))
+            if lineno in seen:
                 continue
-            # `env={"PATH": path, …}` where `path` was built from os.environ two
-            # lines up is NOT a clobber. Resolve that one indirection — it is the
-            # dominant shape in this suite (12 of 14 raw hits), and reporting it
-            # would drown the two real ones.
-            head = _VALUE_HEAD.match(value)
-            expr = head.group("expr").strip() if head else value.strip()
-            if _BARE_NAME.match(expr):
-                assign = re.compile(
-                    r"^\s*" + re.escape(expr) + r"\s*=\s*(?P<rhs>.+)$", re.M)
-                if any(tok in mm.group("rhs")
-                       for mm in assign.finditer(text) for tok in _INHERITS):
-                    continue
-            out.append((py.name, lineno, line.strip()))
-    return out
+            seen.add(lineno)
+            src = ast.get_source_segment(text, node) or ""
+            out.append((py.name, lineno, " ".join(src.split())[:160]))
+    return sorted(out)

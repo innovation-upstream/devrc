@@ -114,33 +114,66 @@ def test_the_stubbed_launcher_set_is_pinned():
 # Every HAZARD_VOCABULARY name the top-level scripts reach that is NOT stubbed,
 # with the reason it is safe. 🔴 This table is the acknowledgement, not a
 # silencer: an entry here is a claim that nothing in scripts/tests can reach it.
+#
+# 🔴 THE FILE SET IS THE ACKNOWLEDGEMENT, NOT THE NAME. Pinning the name alone
+# re-opened this PR's founding failure mode one entry at a time — MEASURED:
+# adding `home-manager switch …` to `scripts/rig-control.sh`, a script this
+# suite EXECUTES, produced a real `home-manager` launch with all 54 guard tests
+# green, because the name was already acknowledged for other files. The reasons
+# were wrong too: this entry used to say "ship.sh/drift-check.sh only" while
+# seven scripts named it.
 ACKNOWLEDGED_UNSTUBBED = {
-    "systemctl": "verb-split rather than stubbed — see the systemctl tests below",
+    "systemctl": (
+        {"agent-ops", "airvpn-menu", "keylog-spin-capture.sh",
+         "monitor-blackout.sh"},
+        "verb-split rather than record-only — see the systemctl tests below"),
     "home-manager": (
-        "ship.sh/drift-check.sh only; MEASURED unreachable — a whole-tier run "
-        "under a recording interceptor logged zero calls"),
+        {"bar-status-poll", "drift-check.sh", "keylog-spin-capture.sh",
+         "notify-failure.sh", "playwright-nixos", "ship.sh",
+         "tmux-post-save.sh"},
+        "MEASURED unreachable: a whole-tier run under a recording interceptor "
+        "logged ZERO calls. Of these only notify-failure.sh is executed by "
+        "scripts/tests, and it names home-manager in a journal hint"),
     "nixos-rebuild": (
-        "ship.sh/airvpn-sudo only, both behind sudo; MEASURED unreachable in "
-        "the same whole-tier run"),
+        {"airvpn-sudo", "ship.sh"},
+        "MEASURED unreachable in the same whole-tier run; both call sites are "
+        "behind sudo and neither script is executed by scripts/tests"),
 }
 
 
 def test_every_hazardous_binary_the_scripts_reach_is_stubbed_or_acknowledged():
     """🔴 The ledger, pinned against the TREE instead of against itself.
 
-    The previous revision asserted only that HOST_LAUNCHERS contained what it
+    An earlier revision asserted only that HOST_LAUNCHERS contained what it
     contained. `dunstctl` (notif-center, i3status-notifs, bar-status-poll),
     `rofi` (five scripts) and `yad` (rig-control's panel) were all invoked by
     scripts this suite executes, none was listed, and nothing went red.
+
+    TWO directions now, because a name-only pin let an acknowledgement absorb a
+    NEW reacher silently:
+      * an unknown name is a failure;
+      * a known-but-unstubbed name whose FILE SET changed is a failure — in
+        either direction, so the table cannot rot into describing a tree that
+        no longer exists.
     """
     hits = launcher_scan.hazard_hits(SCRIPTS)
-    known = set(nolaunch.HOST_LAUNCHERS) | set(ACKNOWLEDGED_UNSTUBBED)
-    unknown = {name: files for name, files in hits.items() if name not in known}
+    stubbed = set(nolaunch.HOST_LAUNCHERS)
+
+    unknown = {name: files for name, files in hits.items()
+               if name not in stubbed and name not in ACKNOWLEDGED_UNSTUBBED}
     assert not unknown, (
         "these host-affecting binaries are reached by scripts/ but are neither "
         f"stubbed nor acknowledged: {unknown}. Add them to "
-        "nolaunch.HOST_LAUNCHERS, or to ACKNOWLEDGED_UNSTUBBED with the reason "
-        "nothing in scripts/tests can reach them.")
+        "nolaunch.HOST_LAUNCHERS, or to ACKNOWLEDGED_UNSTUBBED with the exact "
+        "file set and the reason nothing in scripts/tests can reach them.")
+
+    for name, (pinned_files, _why) in ACKNOWLEDGED_UNSTUBBED.items():
+        found = set(hits.get(name, []))
+        assert found == pinned_files, (
+            f"the acknowledgement for {name!r} names {sorted(pinned_files)} but "
+            f"the tree now says {sorted(found)}. A NEW file reaching an "
+            "acknowledged binary is exactly what the acknowledgement does NOT "
+            "cover — stub it, or re-justify it for the new file set.")
 
 
 def test_the_hazard_scan_can_actually_find_something(tmp_path):
@@ -262,18 +295,6 @@ def test_autouse_is_what_protects_a_test_that_never_asks(tmp_path):
         f"expected exactly one autouse declaration to mutate, found "
         f"{conftest_src.count(needle)}")
 
-    # 🔴 The child must start from the UNPATCHED environment, or it inherits this
-    # session's already-prepended stub dir and both halves pass — which is
-    # exactly what happened on the first attempt: the mutant went green on the
-    # PARENT's protection. Strip the stub dir back out of PATH and drop the
-    # published env var, so the child's own conftest is the only thing that can
-    # provide either.
-    stub_dir = str(_stub_dir_from_env())
-    clean_env = {k: v for k, v in os.environ.items() if k != STUB_DIR_ENV}
-    clean_env["PATH"] = os.pathsep.join(
-        p for p in os.environ["PATH"].split(os.pathsep) if p != stub_dir)
-    clean_env["PYTHONDONTWRITEBYTECODE"] = "1"
-
     def _probe_session(where: Path, conftest_text: str):
         root = where / "scripts"
         (root / "tests").mkdir(parents=True)
@@ -281,11 +302,11 @@ def test_autouse_is_what_protects_a_test_that_never_asks(tmp_path):
         (root / "tests" / "conftest.py").write_text(conftest_text, encoding="utf-8")
         probe = root / "tests" / "test_probe.py"
         probe.write_text(_PROBE_TEST, encoding="utf-8")
-        return subprocess.run(
-            [sys.executable, "-B", "-m", "pytest", str(probe), "-q",
-             "-p", "no:cacheprovider"],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-            timeout=300, env=clean_env)
+        # `_run_nested` strips this session's stub dir from PATH — without that
+        # the child is already protected by the PARENT and both halves pass,
+        # which is exactly how the first version of this pin went green on its
+        # own mutant.
+        return _run_nested(str(probe), where / "basetemp")
 
     control = _probe_session(tmp_path / "control", conftest_src)
     assert control.returncode == 0, (
@@ -348,11 +369,16 @@ def test_a_stub_does_nothing_but_record(launcher, no_real_launchers):
     """🔴 Pins the stub's ENTIRE body against a literal written here.
 
     Every behavioural assertion above is satisfied by a stub that records
-    correctly and ALSO does something else — MEASURED: a stub with an extra side
-    effect kept 52/52 green while performing 36 of them. The only way to pin
-    "records and nothing more" is to pin the whole text, and to write the
-    expectation HERE rather than derive it from `nolaunch.launcher_body`, which
-    the mutation would change too.
+    correctly and ALSO does something else: MEASURED, a stub given an extra side
+    effect (`: > "<log>.sideeffect"`) left the suite green before this test
+    existed. The only way to pin "records and nothing more" is to pin the whole
+    text, and to write the expectation HERE rather than derive it from
+    `nolaunch.launcher_body`, which the mutation would change too.
+
+    ⚠ An earlier version of this docstring said "kept 52/52 green while
+    performing 36 of them". Neither number was reproducible — 52 was never a
+    collected count of anything here, and 36 is the base-clone systemctl figure
+    from a DIFFERENT experiment. Retracted rather than re-derived.
     """
     log = nolaunch.log_path(no_real_launchers)
     # 🔴 The shebang is spelled in TWO PIECES on purpose. Written whole it is a
@@ -419,8 +445,90 @@ def test_a_mutating_systemctl_verb_is_recorded_and_swallowed(no_real_launchers):
     assert p.stderr == "", (
         f"the real systemctl appears to have run: {p.stderr!r}")
     blocked = nolaunch.blocked_systemctl(no_real_launchers)
+    # ⚠ EXACT count, which is sound only because pytest runs this suite
+    # sequentially in one process and the stub log is shared. Under xdist this
+    # would race; the fix then is a per-worker stub dir, not a looser assertion.
     assert len(blocked) == before + 1, blocked[before:]
     assert unit in blocked[-1] and "stop" in blocked[-1], blocked[-1]
+
+
+# 🔴 Each of these reached the REAL binary under the first implementation, which
+# scanned every argument instead of classifying the verb: a UNIT NAMED after a
+# read verb promoted a mutation to a passthrough. Nothing in this tree is named
+# that way, so there was no live reach — but the guard's value is that it does
+# not depend on what units happen to be called.
+@pytest.mark.parametrize("argv", [
+    "--user stop status",
+    "--user restart cat",
+    "--user kill status",
+    "--user stop show",
+    "--user poweroff",
+    "--user isolate rescue.target",
+    "--user daemon-reload",
+    "--user mask devrc-guard-probe.service",
+    "-M somehost is-active devrc-guard-probe.service",
+    "FOO=cat stop devrc-guard-probe.service",
+])
+def test_an_argument_that_spells_a_read_verb_does_not_promote_a_mutation(
+        argv, no_real_launchers):
+    """The verb is the FIRST NON-FLAG token, exactly as systemd parses it."""
+    if _real_binary("systemctl") is None:
+        assert shutil.which("systemctl") is None
+        return
+
+    before = len(nolaunch.blocked_systemctl(no_real_launchers))
+    p = subprocess.run(
+        [_SH, "-c", f"systemctl {argv}"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        timeout=15, env=dict(os.environ))
+    assert p.returncode == 0 and p.stderr == "", (
+        f"`systemctl {argv}` reached the real binary: rc={p.returncode} "
+        f"stderr={p.stderr!r}")
+    blocked = nolaunch.blocked_systemctl(no_real_launchers)
+    assert len(blocked) == before + 1, (
+        f"`systemctl {argv}` was not recorded as blocked: {blocked[before:]}")
+
+
+def test_the_read_passthrough_forwards_stdout_stderr_and_status_faithfully(
+        no_real_launchers):
+    """🔴 FIDELITY, compared against the REAL binary rather than asserted.
+
+    A passthrough that dropped stderr, or normalised the exit status, would keep
+    every other test here green while quietly changing what the scripts under
+    test observe. So run the same read verb twice — once through the stub, once
+    through the real binary resolved off the ambient PATH — and require all
+    three channels to match.
+    """
+    real = _real_binary("systemctl")
+    if real is None:
+        assert shutil.which("systemctl") is None
+        return
+
+    args = ["--user", "cat", "devrc-guard-probe-never-exists.service"]
+    through_stub = subprocess.run(
+        [shutil.which("systemctl"), *args],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        timeout=15, env=dict(os.environ))
+    through_real = subprocess.run(
+        [real, *args],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        timeout=15, env=dict(os.environ))
+
+    got = (through_stub.returncode, through_stub.stdout, through_stub.stderr)
+    want = (through_real.returncode, through_real.stdout, through_real.stderr)
+    # 🔴 POSITIVE CONTROL, inside the comparison. Two empty answers are equal,
+    # so without this the test passes when the reference is itself a silent
+    # stub — MEASURED: under a recording harness whose systemctl answered every
+    # read with exit 0 and no output, the "passthrough drops stderr" mutant
+    # SURVIVED this very assertion. A comparison must have content to compare.
+    assert want[0] != 0 or want[1] or want[2], (
+        "the reference systemctl produced nothing at all (rc=0, no output), so "
+        f"comparing against it proves nothing: {real}")
+    assert got == want, (
+        f"the stub does not forward the real binary's answer faithfully: "
+        f"stub={got!r} real={want!r}")
+    assert any(ln.startswith("systemctl(read)") for ln in
+               nolaunch.recorded(no_real_launchers))
 
 
 def test_a_read_only_systemctl_verb_still_reaches_the_real_binary(no_real_launchers):
@@ -518,10 +626,10 @@ def test_monitor_blackout_restore_cannot_stop_a_real_timer(tmp_path):
     ddcutil call — so the ddcutil stub does NOT close this path.
 
     MEASURED at the revision that claimed it did: `restore` reached 12 mutating
-    systemctl calls (stop/kill/reset-failed x 2 units x 2 rounds), and from the
-    base clone `test_rig_control.py` reached 36 of them with 52/52 green. When a
-    blackout is pending, that is a `git push` that kills the auto-restore timer
-    and leaves the panel dark.
+    systemctl calls (stop/kill/reset-failed x 2 units x 2 rounds), and in the
+    base-clone condition `test_rig_control.py` (16 tests, all green) reached 36
+    of them. When a blackout is pending, that is a `git push` that kills the
+    auto-restore timer and leaves the panel dark.
     """
     stub_dir = _stub_dir_from_env()
     home, canon = _canonical_copy(tmp_path, "monitor-blackout.sh")
@@ -624,23 +732,66 @@ def test_every_path_clobbering_site_is_pinned():
             f"{by_file[name]}")
 
 
-def test_the_clobber_scan_can_actually_find_something(tmp_path):
-    """POSITIVE CONTROL for the scan above, and a NEGATIVE one beside it:
-    a PATH built FROM os.environ must not be reported, or the pin would drown."""
-    d = tmp_path / "tests"
-    d.mkdir()
-    (d / "test_clobber.py").write_text(
-        'env = {"PATH"' + ': "/somewhere/else"}\n', encoding="utf-8")  # split: self-match
-    (d / "test_inherits.py").write_text(
-        'env = {"PATH": str(tmp) + ":" + os.environ["PATH"]}\n', encoding="utf-8")
-    # The MULTI-LINE inheriting shape — reading only the first line reports it
-    # as a clobber, which is what this guard file's own code did.
-    (d / "test_inherits_across_lines.py").write_text(
+# 🔴 Every one of these was MISSED by the line-based scan this replaced, and each
+# is a way to drop the ambient PATH — including two that are one refactor away
+# from an existing pinned site (moving the PATH key before another, or adding a
+# trailing comment). `PATH` is split across a `+` in the sources for the
+# self-match reason above.
+_CLOBBER_SHAPES = {
+    "test_dict_literal.py":
+        'env = {"PATH"' + ': "/somewhere/else"}\n',
+    "test_later_key_inherits.py":
+        'env = {"PATH"' + ': "/usr/bin/false", "HOME": os.environ["HOME"]}\n',
+    "test_trailing_comment.py":
+        'env["PATH"]' + ' = "/x"  # rebuilt from os.environ elsewhere\n',
+    "test_dict_kwarg.py":
+        'p = run(env=dict(PATH="/x"))\n',
+    "test_setdefault.py":
+        'env.setdefault("PATH"' + ', "/x")\n',
+    "test_update_kwarg.py":
+        'env.update(PATH="/x")\n',
+}
+_INHERITING_SHAPES = {
+    "test_inherits.py":
+        'env = {"PATH": str(tmp) + ":" + os.environ["PATH"]}\n',
+    # MULTI-LINE — reading only the first line reports it as a clobber, which is
+    # what this guard file's own code did.
+    "test_inherits_across_lines.py":
         'env["PATH"] = os.pathsep.join(\n'
         '    p for p in os.environ["PATH"].split(os.pathsep) if p)\n',
-        encoding="utf-8")
-    hits = launcher_scan.path_clobbers(d)
-    assert [h[0] for h in hits] == ["test_clobber.py"], hits
+    # Via a LOCAL HELPER's return value — the shape used six times in
+    # test_analyze_service_index_commit.py.
+    "test_inherits_via_helper.py":
+        'def _shim(d):\n'
+        '    return f"{d}:{os.environ[\'PATH\']}"\n'
+        '\n'
+        'p = run(store, PATH=_shim(tmp))\n',
+}
+
+
+def test_the_clobber_scan_can_actually_find_something(tmp_path):
+    """POSITIVE CONTROLS for every shape a review measured as MISSED, and
+    NEGATIVE controls beside them — a scan that reports the inheriting shapes
+    too would drown the two real pins in noise and get itself deleted."""
+    d = tmp_path / "tests"
+    d.mkdir()
+    for name, src in {**_CLOBBER_SHAPES, **_INHERITING_SHAPES}.items():
+        (d / name).write_text(src, encoding="utf-8")
+
+    reported = {h[0] for h in launcher_scan.path_clobbers(d)}
+    assert reported == set(_CLOBBER_SHAPES), (
+        f"missed: {set(_CLOBBER_SHAPES) - reported}; "
+        f"false positives: {reported - set(_CLOBBER_SHAPES)}")
+
+
+def test_the_clobber_scan_reads_conftest_too(tmp_path):
+    """`conftest.py` is where the fixture that does the protecting LIVES, and it
+    was outside the old `test_*.py` glob."""
+    d = tmp_path / "tests"
+    d.mkdir()
+    (d / "conftest.py").write_text(
+        'env = {"PATH"' + ': "/somewhere/else"}\n', encoding="utf-8")
+    assert [h[0] for h in launcher_scan.path_clobbers(d)] == ["conftest.py"]
 
 
 # --------------------------------------------------------------------------- #
@@ -713,12 +864,42 @@ def _harness_tree(tmp_path, source: str) -> Path:
     return target
 
 
-def _run_seam(target: Path) -> subprocess.CompletedProcess:
+def _nested_env() -> dict:
+    """The environment a nested pytest session must start from: UNPATCHED.
+
+    🔴 Two reasons, both measured. (1) A child that inherits this session's
+    prepended stub dir is already protected, so a mutant can pass on the
+    PARENT's protection — that is how the first autouse pin went green on its
+    own mutant. (2) The child's `install()` then resolves "the real systemctl"
+    to the parent's STUB and chains its log into the parent's, which is
+    harmless but makes two sessions share one file.
+    """
+    stub_dir = str(_stub_dir_from_env())
+    env = {k: v for k, v in os.environ.items() if k != STUB_DIR_ENV}
+    env["PATH"] = os.pathsep.join(
+        p for p in os.environ["PATH"].split(os.pathsep) if p != stub_dir)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    return env
+
+
+def _run_nested(target: str, basetemp: Path) -> subprocess.CompletedProcess:
+    """Run one nested pytest session.
+
+    `--basetemp` is not cosmetic: without it each nested session pays pytest's
+    temp-root housekeeping over an accumulating `/tmp/pytest-of-<user>` tree.
+    MEASURED on the dev host with four nested sessions and a 108 MB temp root:
+    22.3s without, 2.7s with.
+    """
     return subprocess.run(
-        [sys.executable, "-B", "-m", "pytest", f"{target}::{_SEAM_TEST}",
-         "-q", "-p", "no:cacheprovider"],
+        [sys.executable, "-B", "-m", "pytest", target, "-q",
+         "-p", "no:cacheprovider", "--basetemp", str(basetemp)],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=300,
-        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+        env=_nested_env())
+
+
+def _run_seam(target: Path) -> subprocess.CompletedProcess:
+    return _run_nested(f"{target}::{_SEAM_TEST}",
+                       target.parent.parent.parent / "basetemp")
 
 
 def test_the_seam_assertion_is_what_makes_the_seam_test_red(tmp_path):

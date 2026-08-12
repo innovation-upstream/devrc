@@ -57,25 +57,48 @@ ddcutil call. In the state this fixture creates:
     monitor-blackout.sh status         ->  1, read-only
 
 and from the BASE CLONE, where the canonical-path guard accepts and
-`rig-control.sh` delegates `restore` to it, `test_rig_control.py` alone reached
-**36 real mutating `systemctl --user` calls with 52/52 tests green**: `stop`,
-`kill` and `reset-failed` against `monitor-blackout-restore-v2` and its legacy
-twin. A no-op when nothing is pending — and, when the operator HAS blacked out
-their monitor, a `git push` that silently kills the auto-restore timer and
-leaves the panel dark.
+`rig-control.sh` delegates `restore` to it, **36 real mutating `systemctl --user`
+calls** — `stop`, `kill` and `reset-failed` against `monitor-blackout-restore-v2`
+and its legacy twin. A no-op when nothing is pending — and, when the operator HAS
+blacked out their monitor, a `git push` that silently kills the auto-restore
+timer and leaves the panel dark.
+
+⚠ An earlier revision of this paragraph said "with 52/52 tests green". That
+number was NOT reproducible and is retracted: `test_rig_control.py` collects 16
+and produces those 36 calls on its own; rig + monitor-blackout is 29. The 36
+reproduces exactly in both places, the 52 came from nowhere. Numbers in this file
+are measurements or they are deleted.
 
 So `systemctl` is stubbed, but not record-only: its exit status and stdout are
 things both scripts and tests BRANCH on, and fabricating them would trade one
-lie for another. The split is FAIL-CLOSED — only the verbs in
-`SYSTEMCTL_READ_VERBS` are passed through to the real binary; everything else,
-including a verb this list has never heard of, is recorded and swallowed.
+lie for another. The split is FAIL-CLOSED and keys on the VERB — the first
+non-flag token, exactly as systemd parses it — so an ARGUMENT that happens to
+spell a read verb cannot promote a mutation (`systemctl --user stop status` is
+`stop`). Anything else, including a verb this list has never heard of, is
+recorded and swallowed.
 
-🔴 And it is installed ONLY when a real `systemctl` exists to shadow. In the nix
-sandbox there is none, so installing one would make `command -v systemctl`
-start succeeding and change which branch every script under test takes — a
-behaviour change in the authoritative tier bought for zero protection, since
-there is nothing there to protect against. The guard test pins that invariant in
-both directions rather than skipping on one of them.
+🔴 WHY `systemctl` IS THE ONLY CONDITIONAL STUB (and the record-only ones are not)
+---------------------------------------------------------------------------------
+The principle is NOT "never install a stub where no real binary exists" — it is
+**never fabricate an answer**. The two kinds of stub differ on exactly that:
+
+  * a record-only launcher is FIRE-AND-FORGET. Its callers use `notify-send …
+    || true`, discard its output, and branch on nothing it says. Exit 0 with no
+    output is the truthful outcome of "nothing was launched", so installing one
+    everywhere costs no honesty — and it BUYS tier parity: the same branch runs
+    in the sandbox and on the dev host, instead of the sandbox silently
+    exercising the "binary absent" path the operator's machine never takes.
+  * `systemctl` is asked QUESTIONS. `is-active` returning 3, `list-timers`
+    printing rows — scripts and tests branch on those. Where no real binary
+    exists there is nothing to forward to, so a stub could only make an answer
+    up. That is why it is installed only when a real one exists to shadow, and
+    why the guard test pins the invariant in BOTH directions rather than
+    skipping on one of them.
+
+⚠ Consequence, stated because nothing in the repo hits it: a bare `systemctl`
+(or one with only flags) has no verb, so it is recorded and swallowed with exit
+0 and no output, where the real binary would list units. Every call site in
+this tree passes a verb.
 """
 from __future__ import annotations
 
@@ -114,8 +137,11 @@ SYSTEMCTL_READ_VERBS = (
     "show", "show-environment", "status", "cat",
     "list-units", "list-unit-files", "list-timers", "list-sockets",
     "list-jobs", "list-dependencies", "get-default",
-    "--version", "--help",
 )
+
+# Flags that read and exit whatever else is on the line, so they are safe in ANY
+# position (unlike a verb, which is positional).
+SYSTEMCTL_READ_FLAGS = ("--version", "--help", "-h")
 
 LOG_NAME = "launches.log"
 
@@ -148,16 +174,53 @@ def systemctl_body(real: str, log: Path) -> str:
     inactive unit, which tests and scripts branch on); everything else is
     recorded and swallowed with exit 0 — the same fire-and-forget contract as
     the record-only stubs, and for the same `set -e` reason.
+
+    🔴 IT CLASSIFIES THE VERB, NOT THE ARGV. The first version scanned EVERY
+    argument against the read list, which is not what systemd does and is not
+    what this module's own docstring claimed. Measured on that version, all four
+    of these reached the real binary:
+
+        systemctl --user stop status      systemctl --user restart cat
+        systemctl --user kill status      systemctl --user stop show
+
+    i.e. a UNIT NAMED after a read verb promoted a mutation to a passthrough.
+    Nothing in this tree is named that way (`monitor-blackout-restore*`,
+    `keylog.service`), so there was no live reach — but the guard's whole value
+    is that it does not depend on what units happen to be called.
+
+    The rule now matches systemd's own parse: skip leading options (`--user`,
+    `-M host`, `--type=timer`), take the FIRST non-flag token as the verb, and
+    decide on that alone. `--version`/`--help` are handled separately because
+    they read and exit regardless of position.
     """
     verbs = "|".join(SYSTEMCTL_READ_VERBS)
+    flags = "|".join(SYSTEMCTL_READ_FLAGS)
     return (
+        # Position-independent read flags first: they print and exit whatever
+        # else is on the line.
         'for a in "$@"; do\n'
         '  case "$a" in\n'
-        f'    {verbs})\n'
+        f'    {flags})\n'
         f'      printf \'%s %s\\n\' "systemctl(read)" "$*" >> "{log}"\n'
         f'      exec "{real}" "$@" ;;\n'
         '  esac\n'
         'done\n'
+        # The VERB: the first token that is not an option. `-M host` leaves
+        # `host` as the first non-flag token, which is not a read verb, so it
+        # blocks — fail-closed, the direction this must err in.
+        'verb=""\n'
+        'for a in "$@"; do\n'
+        '  case "$a" in\n'
+        '    -*) continue ;;\n'
+        '  esac\n'
+        '  verb="$a"\n'
+        '  break\n'
+        'done\n'
+        'case "$verb" in\n'
+        f'  {verbs})\n'
+        f'    printf \'%s %s\\n\' "systemctl(read)" "$*" >> "{log}"\n'
+        f'    exec "{real}" "$@" ;;\n'
+        'esac\n'
         f'printf \'%s %s\\n\' "systemctl(blocked)" "$*" >> "{log}"\n'
         'exit 0\n'
     )
