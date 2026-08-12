@@ -166,11 +166,11 @@ Delivery used to be an rsync into a flat copy at `~/clawgate-extension` via
 `homelab-talos/scripts/sync-clawgate-extension.sh`.
 
 - The **flat copy is deleted** (2026-08-12, both hosts). Nothing recreates it.
-- The **script still exists** at `homelab-talos/scripts/sync-clawgate-extension.sh` and is still
-  documented as live in `scripts/README.md`, `containers/clawgate/extension/README.md` and
-  `claudedocs/handoff-clawgate-ext-2026-07-30.md` (plus a 12 KB test). **Retiring it is a pending
-  follow-up in that repo** — until then, treat every one of those references as stale and **do not
-  run it**: with its destination gone it would either fail or recreate a directory no profile loads.
+- The **script is deleted too** — removed from `trunk` in `a39ed0c5` along with its test
+  (`scripts/tests/test-sync-clawgate-extension.sh`). Retiring it is **DONE, not pending**.
+  `scripts/README.md` and `containers/clawgate/extension/README.md` now describe the removal
+  correctly; the only reference that still reads as live is the historical
+  `claudedocs/handoff-clawgate-ext-2026-07-30.md`, which is a dated record — don't run its commands.
 
 The failure worth remembering: the script's `--check` kept reporting a confident
 `in sync — matches origin/trunk` about a directory **no profile loaded**, so a green check coexisted

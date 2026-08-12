@@ -83,6 +83,16 @@ blows `ARG_MAX`) and `curl --data-binary @file`.
 - It has **NO reason/context channel** — an approver comment is **record-only**. Only `PreToolUse`
   can steer the model, via `additionalContext`. Do not design a feature that relies on feeding an
   approver's words back into the session through this hook.
-- Any non-approve/reject decision (e.g. an `ignore`/dismiss) → the hook **defers to the terminal**.
-- Any error / timeout / unreachable server → **defer** (fail-safe: behaves as if the hook were
-  absent). This is why an outage of clawgate never blocks Claude Code.
+### Every path that DEFERS (this list is exhaustive; verified against `hook/clawgate-hook.sh` 2026-08-12)
+Two of these defer **before any network call**, so a missing card is not evidence clawgate is down:
+
+| # | condition | contacts the server? |
+|---|---|---|
+| 1 | `permission_mode` is `bypassPermissions` or `plan` (`clawgate-hook.sh:67`) — the user already chose to bypass, so don't intercept | **no** |
+| 2 | tool is `AskUserQuestion` (`:79`) — an interactive "pick an option" prompt, not allow/deny-routable | **no** |
+| 3 | any non-approve/reject decision (e.g. an `ignore`/dismiss) | yes |
+| 4 | any error / timeout / unreachable server — fail-safe, behaves as if the hook were absent; this is why a clawgate outage never blocks Claude Code | attempted |
+
+🔴 **Debugging "no card appeared"? Rule out 1 and 2 first** — they produce exactly the same
+observable as an outage, and `log`-lines in the hook (`permission_mode=…; deferring` /
+`is an interactive question prompt`) are the only thing that distinguishes them.

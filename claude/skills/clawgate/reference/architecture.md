@@ -47,8 +47,9 @@ with Phase 2 disabled.
     clawgate-provisioned agents until you `make sync-chart` + rebuild + redeploy clawgate.**
     Already-running agents are unaffected — their release was rendered from whatever chart was
     vendored then.
-  - ⚠ **Vendored is at 0.7.0 but kubeclaw is now 0.7.1 → a re-sync+rebuild is PENDING** to pick up
-    0.7.1's networkPolicy fail-loud guards (empty-allowlist protection).
+  - ✅ The re-sync is **DONE**: the vendored `internal/agents/chart/kubeclaw/Chart.yaml` reads
+    `version: 0.7.1` (shipped in clawgate 0.7.82), so 0.7.1's networkPolicy fail-loud guards
+    (empty-allowlist protection) are in the embedded chart. Re-check `Chart.yaml`, not this line.
   - Cards show live status (start/stop/delete) + recent logs; the detail view streams pod logs
     (SSE, collapsed by default) + a chat box (WebSocket → agent gateway
     `:18789 /v1/chat/completions`).
@@ -142,7 +143,9 @@ Plain envs: `CLAWGATE_AGENT_IMAGE_REPO`; `CLAWGATE_AGENT_IMAGE_TAG` (**`2026.5.7
 `openrouter/anthropic/claude-haiku-4.5`); `CLAWGATE_AGENT_CALLBACK_URL` (in-cluster clawgate URL
 for agent self-service; empty → default svc); `CLAWGATE_PUBLIC_URL`; `CLAWGATE_REQUEST_TTL` (5m);
 `CLAWGATE_TASK_TTL` (idle-task reaper, `off`/`0` disables); `CLAWGATE_TAG_AUTODISPATCH` (off);
-`CLAWGATE_FAKE_PROVISIONER` (e2e only); `CLAWGATE_INSECURE_COOKIES` (docker smoke).
+`CLAWGATE_FAKE_PROVISIONER` (e2e only). ⚠ `CLAWGATE_INSECURE_COOKIES` is a **dead env var** — no Go
+code reads it (verified 2026-08-12); it survives only in `README.md` and `HANDOFF.md`, left over from
+the pre-0.7.37 session-cookie model. Setting it does nothing.
 
 **Editing SOPS**: `SOPS_AGE_KEY_FILE=.secrets/age.key sops -e -i <file>` works — `.sops.yaml` was
 reconciled (a `clusters/workbench/apps/clawgate/.*.enc.yaml$` rule exists), so the old
