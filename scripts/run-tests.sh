@@ -455,7 +455,32 @@ TARGET_FLOORS=(
   # fixture, a colliding parametrize id, or a module that stops importing.
   #
   # See the commit message for the gate line this number was copied from.
-  "scripts/tests|2647"
+  #
+  # 2026-08-12, the subsystem-touch PR path source: 2697 -> 2825 collected,
+  # +128 in test_subsystem_touch.py (204 -> 332 tests: the PR source's
+  # positive-control pair, its ten named negative controls including the
+  # measured `gh` file-list truncation, the gh-failure classifier pinned against
+  # captured stderr, the repo-slug derivation, the caveat's session-vs-branch
+  # wording, the do-not-compose refusals, and one mutation kill per new guard).
+  # The AUTHORITATIVE gate's own line, `nix build .#checks.x86_64-linux.pytests`:
+  #   PASS  scripts/tests  (collected=2825 passed=2825 skipped=0)
+  # put through the gate's OWN function rather than arithmetic:
+  #   _suggested_floor 2825 = 2825 - min(50, max(1, 141)) = 2825 - 50 = 2775.
+  #
+  # ⚠ The recorded delta and the measured one AGREE this time (+128 both ways),
+  # which the line above says not to count on: the check is that 2697 + 128 =
+  # 2825 exactly, i.e. nothing else moved the base since #421 landed. That is a
+  # reading, not an assumption — if this line conflicts with another branch,
+  # re-run the gate on the MERGED tree and copy what it prints. Do not reconcile
+  # the two sides by hand.
+  #
+  # ⚠ ZERO new skips, and no HERMETIC_TARGETS entry needed (scripts/tests is
+  # already a directory target). The new source shells out to `gh`, which is in
+  # NEITHER `REQUIRED_TOOLS` below NOR flake.nix's `nativeBuildInputs` — so its
+  # fetch is injectable and every test drives a fixture. `no_live_gh` in
+  # test_subsystem_touch.py fails any test that reaches the real binary, which
+  # is what keeps this line's `skipped=0` true rather than lucky.
+  "scripts/tests|2775"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —

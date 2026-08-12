@@ -1229,6 +1229,47 @@ class TestSkillDocsArePinned:
             "does **not** include what a **subagent** edited",
             "the session window's largest measured blind spot",
         ),
+        # 🔴 The PR source. The module is inert unless the step passes the
+        # numbers, and — unlike a session uuid — nothing on the machine knows
+        # them; only the agent that opened the PRs does. If these sentences go,
+        # the one source that can see a subagent's work is never invoked.
+        (
+            "--pr <n>[,<n>...]",
+            "the step actually passes the PRs it landed",
+        ),
+        (
+            "you know exactly which ones, and nothing else in the toolchain does",
+            "WHERE the numbers come from — the fact only the agent has",
+        ),
+        (
+            "only** source that sees a **subagent's** work",
+            "why the PR run exists at all",
+        ),
+        (
+            "A PR's file list is what the BRANCH LANDED, not what this session "
+            "touched — never describe it as this session's work",
+            "🔴 the crux: a PR-derived set must never be given session attribution",
+        ),
+        (
+            "attribute it to the branch or the PR, not to \"this session\"",
+            "the attribution rule stated as an instruction, not a caveat to read",
+        ),
+        (
+            "Run it twice; never merge the two path sets",
+            "the compose decision, stated to the executor",
+        ),
+        (
+            "one caveat that is wrong about half its members",
+            "WHY they do not compose — the reason, not just the rule",
+        ),
+        (
+            "none of them ever returns an empty path set",
+            "the network surface can fail, but never into a silent zero",
+        ),
+        (
+            "Closed-unmerged PRs are refused by name",
+            "which PR states are acceptable input",
+        ),
     ]
 
     def test_EVERY_emitted_status_has_a_bullet_in_the_skill(self) -> None:
@@ -2435,7 +2476,14 @@ class TestMutationKillMatrix:
         to demonstrate, and it made the assertion depend on where pytest was
         launched from. Pinning the cwd to a non-repo fixes the dimension."""
         mod = _load_mutant(
-            tmp_path, "m_git", [("    if proc.returncode != 0:", "    if False:")]
+            tmp_path,
+            "m_git",
+            # 🔴 Anchored on the RAISE as well as the condition. `if
+            # proc.returncode != 0:` alone became AMBIGUOUS when the PR source
+            # added a second subprocess wrapper, and the loader's uniqueness
+            # assert caught it rather than letting the mutation land on the
+            # wrong occurrence.
+            [("    if proc.returncode != 0:\n        raise GitError(", "    if False:\n        raise GitError(")],
         )
         plain = tmp_path / "plain-dir"
         plain.mkdir()
@@ -2454,7 +2502,7 @@ class TestMutationKillMatrix:
             "m_branch",
             [
                 (
-                    "            commands.append(tuple(branch_args))\n"
+                    '            commands.append(("git", *branch_args))\n'
                     "            add(_nul_list(_git(repo, branch_args)))\n"
                     '            window = "branch"',
                     "            pass",
@@ -2984,7 +3032,7 @@ class TestSessionMutationKillMatrix:
         mod = _session_mutant(
             tmp_path,
             "ms_conflict",
-            [('        if wants_session and args.paths_from != "git":',
+            [('        if (wants_session or wants_pr) and args.paths_from != "git":',
               "        if False:")],
             tailer,
         )
@@ -3016,3 +3064,1377 @@ class TestSessionMutationKillMatrix:
             mod._session_tailer()
         assert not isinstance(exc.value, st.ExtractorMissingError)
         assert "session path extractor not found" not in str(exc.value)
+
+
+# =============================================================================
+# THE PR SOURCE — the window that sees a SUBAGENT's work, and only a branch's.
+# =============================================================================
+#
+# 🔴 WHY IT EXISTS, IN ONE MEASUREMENT: the standing default in this environment
+# is to DELEGATE non-trivial work to a subagent, and a subagent's turns live in a
+# SEPARATE transcript that the session source excludes by construction (196 of
+# 733 file-tool calls across the 40 most recent transcripts). So on exactly the
+# sessions worth recording, `--session` reports the docs the parent wrote and
+# none of the implementation. A PR's file list does not care which agent, which
+# session or which tool wrote the bytes.
+#
+# 🔴 AND IT IS BLIND IN THE OPPOSITE DIRECTION, which is what most of the
+# assertions below are spent on: a PR's file list is the UNION of everything on
+# the branch, including another session's commits.
+# `TestPrCaveatAnswersTheRightQuestion` pins the wording that says so, because a
+# set described as a session's is worse than no set at all — it would put another
+# session's work into a dated work-history bullet in a curated,
+# client-confidential store.
+#
+# 🔴 NO TEST BELOW RUNS `gh`, AND NONE CAN. `gh` is NOT in `REQUIRED_TOOLS` in
+# scripts/run-tests.sh and NOT in `nativeBuildInputs` for flake.nix's
+# `checks.pytests` — so the hermetic tier has no `gh` binary, and a test that
+# shelled out would SKIP there, which the gate fails on purpose (EXPECTED_SKIPS
+# is pinned exactly). `no_live_gh` is the structural guard: it intercepts any
+# `gh` argv and fails loudly, so a test that forgot to inject a fetcher cannot
+# quietly become a network test. Real `git` still runs — the repository identity
+# is derived from a real remote on a real repo, and a mock would test the mock.
+#
+# 🔴 EVERY FIXTURE IS SYNTHETIC. `synthetic-org` is not a real GitHub owner and
+# no real PR number, title or body appears here; this repo is PUBLIC.
+
+PR_HOST = "github.com"
+PR_OWNER = "synthetic-org"
+PR_SLUG = f"{PR_HOST}/{PR_OWNER}/{SCOPE}"
+PR_REMOTE = f"git@{PR_HOST}:{PR_OWNER}/{SCOPE}.git"
+
+_UNSET = object()
+
+
+@pytest.fixture(autouse=True)
+def no_live_gh(monkeypatch):
+    """🔴 Structural: a `gh` invocation from ANY test in this file is a failure.
+
+    Autouse over the whole module rather than one class, because the hazard is a
+    test that FORGOT to inject a fetcher — and such a test would by definition
+    not be in the class that remembered. Real `git` passes through untouched.
+    """
+    real = subprocess.run
+
+    def guard(argv, *a, **kw):
+        prog = str(argv[0]) if isinstance(argv, (list, tuple)) and argv else ""
+        assert Path(prog).name != "gh", (
+            f"a test reached the LIVE `gh` binary: {argv!r}. Inject a fetcher — "
+            f"`gh` is absent in the hermetic tier, so this would SKIP there and "
+            f"each tier would be testing a different thing."
+        )
+        return real(argv, *a, **kw)
+
+    monkeypatch.setattr(st.subprocess, "run", guard)
+
+
+def test_the_no_live_gh_guard_can_actually_fire() -> None:
+    """🔴 Positive control on the guard above. A guard nobody has watched fire is
+    indistinguishable from one wired to nothing — and this one's whole job is to
+    be silent."""
+    with pytest.raises(AssertionError) as exc:
+        st.subprocess.run(["gh", "--version"], capture_output=True, text=True)
+    assert "reached the LIVE `gh` binary" in str(exc.value)
+
+
+def test_the_no_live_gh_guard_lets_real_git_through(tmp_path: Path) -> None:
+    """The other half of the pair: a guard that blocked everything would make
+    every git-backed test below fail for the wrong reason."""
+    proc = st.subprocess.run(["git", "--version"], capture_output=True, text=True)
+    assert proc.returncode == 0 and "git version" in proc.stdout
+
+
+def _init_pr_repo(tmp_path: Path, *, remote: str | None = PR_REMOTE) -> Path:
+    """A real git repo whose `origin` names a synthetic GitHub project."""
+    repo = _init_repo(tmp_path, SCOPE)
+    if remote is not None:
+        _run_git(repo, "remote", "add", "origin", remote, home=tmp_path)
+    return repo
+
+
+def _pr_payload(
+    number: int,
+    files,
+    *,
+    slug: str = PR_SLUG,
+    state: str = "MERGED",
+    changed: int | None = None,
+    url: object = _UNSET,
+) -> dict:
+    """A payload in the SHAPE `gh pr view --json` really returns.
+
+    Verified against the live API 2026-08-12: `files` entries carry `path`,
+    `additions`, `deletions` and `changeType`, and `changedFiles` is a sibling
+    integer — which is the only signal that `files` was truncated.
+    """
+    return {
+        "number": number,
+        "url": f"https://{slug}/pull/{number}" if url is _UNSET else url,
+        "state": state,
+        "changedFiles": len(files) if changed is None else changed,
+        "files": [
+            {"path": p, "additions": 1, "deletions": 0, "changeType": "MODIFIED"}
+            for p in files
+        ],
+    }
+
+
+def _fetch(mapping):
+    """An injected fetcher over `{number: payload}`; an Exception value raises."""
+
+    def fetcher(slug, number):
+        got = mapping[number]
+        if isinstance(got, BaseException):
+            raise got
+        return got
+
+    return fetcher
+
+
+def _pr_source(repo: Path, mapping, numbers=None, **kw):
+    return st.collect_pr_paths(
+        repo,
+        numbers if numbers is not None else list(mapping),
+        fetch=_fetch(mapping),
+        **kw,
+    )
+
+
+class TestPrPositiveControl:
+    """🔴 `claude/RULES.md` → "Positive control — can it ever observe the thing?"
+
+    A reassuring empty path set is indistinguishable from a fetcher wired to
+    nothing, and this source has MORE ways to reach an honest-looking zero than
+    any other here — ten of them raise. So the pair is reported: a payload that
+    MUST yield paths against one that MUST yield none, on the same code path,
+    through the same fetcher, in the same shape.
+    """
+
+    UNDER_TEST = ["src/collector/a.py", "src/collector/b.py", "src/collector/c.py"]
+
+    def test_THE_PAIR_nonzero_under_test_zero_on_the_control(self, tmp_path: Path) -> None:
+        repo = _init_pr_repo(tmp_path)
+        pos = _pr_source(repo, {421: _pr_payload(421, self.UNDER_TEST)})
+        # CONTROL: a real, well-formed, MERGED pull request that GitHub says
+        # changed nothing. Identical machinery; the honest answer is zero, and it
+        # must be zero for THAT reason rather than because nothing was read.
+        neg = _pr_source(repo, {350: _pr_payload(350, [])})
+
+        assert len(pos.paths) == 3, "positive control yielded nothing — wired to nothing"
+        assert sorted(pos.paths) == sorted(self.UNDER_TEST)
+        assert len(neg.paths) == 0
+
+    def test_the_control_zero_is_ACCOUNTED_for_not_merely_empty(self, tmp_path: Path) -> None:
+        """An empty list beside `0 file(s) reported by the API` is a reading; an
+        empty list with no count is the silent zero."""
+        repo = _init_pr_repo(tmp_path)
+        src = _pr_source(repo, {350: _pr_payload(350, [])})
+        assert src.paths == ()
+        assert any(
+            "#350 (MERGED): 0 file(s) reported by the API, 0 read" in n for n in src.notes
+        ), src.notes
+        assert any("0 distinct path(s) across 1 pull request(s)" in n for n in src.notes)
+
+    def test_the_per_pr_count_is_emitted_AT_NONZERO_too(self, tmp_path: Path) -> None:
+        """The other half of the pair: a counter that only ever prints 0 is
+        indistinguishable from one wired to a constant."""
+        repo = _init_pr_repo(tmp_path)
+        src = _pr_source(repo, {421: _pr_payload(421, self.UNDER_TEST)})
+        assert any(
+            "#421 (MERGED): 3 file(s) reported by the API, 3 read" in n for n in src.notes
+        ), src.notes
+        assert any("3 distinct path(s) across 1 pull request(s)" in n for n in src.notes)
+
+    def test_the_pair_survives_all_the_way_to_a_REPORT(self, tmp_path: Path) -> None:
+        """The fetcher and the matcher are two places a zero can come from; both
+        ends are pinned so one being wired to nothing cannot hide behind the
+        other."""
+        repo = _init_pr_repo(tmp_path)
+        store = _make_store(tmp_path / "s")
+        pos = _pr_source(repo, {421: _pr_payload(421, self.UNDER_TEST)})
+        # Same count, same depth, same store — only the subsystem directory
+        # differs, and it names nothing.
+        neg = _pr_source(
+            repo,
+            {
+                350: _pr_payload(
+                    350, [f"src/unlisted-widget/{Path(p).name}" for p in self.UNDER_TEST]
+                )
+            },
+        )
+        pos_rep = st.build_report(pos, store, SCOPE, today=TODAY)
+        neg_rep = st.build_report(neg, store, SCOPE, today=TODAY)
+
+        assert pos_rep.status == "resolved"
+        assert [m.entry.ref for m in pos_rep.known] == ["collector"]
+        assert neg_rep.status == "no-match"
+        # …and the negative control is NOT an empty window, which would make the
+        # zero uninformative.
+        assert len(neg_rep.source.paths) == 3
+
+    def test_SEVERAL_prs_union_in_first_seen_order(self, tmp_path: Path) -> None:
+        repo = _init_pr_repo(tmp_path)
+        src = _pr_source(
+            repo,
+            {421: _pr_payload(421, ["a.py", "b.py"]), 350: _pr_payload(350, ["b.py", "c.py"])},
+            numbers=[421, 350],
+        )
+        assert src.paths == ("a.py", "b.py", "c.py")
+        assert src.prs == (421, 350)
+
+    def test_a_repeated_number_is_read_ONCE_and_SAID(self, tmp_path: Path) -> None:
+        repo = _init_pr_repo(tmp_path)
+        src = _pr_source(repo, {421: _pr_payload(421, ["a.py"])}, numbers=[421, 421])
+        assert src.prs == (421,)
+        assert any("named more than once" in n for n in src.notes)
+
+    def test_the_MEASURED_shape_of_a_real_response_is_what_the_fixture_uses(self) -> None:
+        """🔴 A harness fed a textbook fixture proves nothing about live data
+        (`claude/RULES.md`: build the bad case from REALISTIC data). These are the
+        exact keys `gh pr view --json` returned for a real PR on 2026-08-12; if
+        the fixture drifts from them, every control above tests a shape that does
+        not exist."""
+        payload = _pr_payload(1, ["x.py"])
+        assert set(payload) == {"number", "url", "state", "changedFiles", "files"}
+        assert set(payload["files"][0]) == {"path", "additions", "deletions", "changeType"}
+        assert set(st.PR_JSON_FIELDS.split(",")) == set(payload)
+
+    def test_excluded_paths_are_dropped_AND_counted(self, tmp_path: Path) -> None:
+        """The SHARED exclusion predicate, not a third copy of it."""
+        repo = _init_pr_repo(tmp_path)
+        doc = "claudedocs/handoff-topic.md"
+        src = _pr_source(
+            repo, {421: _pr_payload(421, [doc, "src/collector/a.py"])}, exclude=[doc]
+        )
+        assert doc not in src.paths
+        assert "src/collector/a.py" in src.paths
+        assert any("excluded 1 caller-named path(s)" in n for n in src.notes)
+
+    def test_the_store_is_never_written(self, tmp_path: Path) -> None:
+        """The module's central invariant, exercised through the NEW source."""
+        repo = _init_pr_repo(tmp_path)
+        store = _make_store(tmp_path / "s")
+        before = _tree_hash(store)
+        rep = st.build_report(
+            _pr_source(repo, {421: _pr_payload(421, self.UNDER_TEST)}),
+            store,
+            SCOPE,
+            today=TODAY,
+        )
+        st.render_text(rep)
+        json.dumps(st.report_json(rep))
+        assert _tree_hash(store) == before
+
+
+class TestPrNegativeControls:
+    """Each guard fails with ITS OWN sentinel, reached by an input no EARLIER
+    guard rejects — otherwise a control passes because a neighbour fired and
+    stays green with the guard it claims to test deleted.
+
+    🔴 THE SENTINEL MAP SPANS BOTH FAMILIES. A PR sentinel colliding with a
+    session one would make BOTH families' `_only` assertions vacuous, so the
+    premise test runs over the union, not over the PR half alone.
+    """
+
+    SENTINELS = {
+        # session-source sentinels, so a cross-family collision is caught
+        "t-missing": "transcript not found",
+        "t-ambiguous": "transcript id is ambiguous",
+        "t-stale": "transcript is stale",
+        "t-unreadable": "transcript unreadable",
+        "t-cwd": "transcript cwd does not match",
+        "extractor": "session path extractor not found",
+        # base sentinels
+        "store": "store root not found",
+        "git": "git command failed",
+        # PR-source sentinels
+        "remote": "repo has no usable github remote",
+        "gh-missing": "gh cli not found",
+        "gh-auth": "gh is not authenticated",
+        "rate": "github api rate limit",
+        "api": "github api call failed",
+        "notfound": "pull request not found",
+        "mismatch": "pull request belongs to another repository",
+        "closed": "pull request is closed unmerged",
+        "malformed": "pull request response is malformed",
+        "truncated": "pull request file list is truncated",
+    }
+
+    def _only(self, exc: Exception, key: str) -> None:
+        text = str(exc)
+        assert self.SENTINELS[key] in text, f"expected the {key} sentinel, got: {text}"
+        for other, phrase in self.SENTINELS.items():
+            if other != key:
+                assert phrase not in text, f"the {other} sentinel also fired: {text}"
+
+    def test_no_two_sentinels_share_a_spelling(self) -> None:
+        """The premise of `_only`. Two guards spelled alike would make every
+        assertion in this class — and in `TestSessionNegativeControls` — vacuous."""
+        for a, pa in self.SENTINELS.items():
+            for b, pb in self.SENTINELS.items():
+                if a != b:
+                    assert pa not in pb, f"{a} sentinel is a substring of {b}"
+
+    def test_the_sentinel_map_COVERS_every_declared_error(self) -> None:
+        """🔴 A hand-maintained map goes stale silently: a new error class with no
+        entry here would never be asserted ABSENT, and every `_only` above would
+        quietly stop being a measurement for it. Derived from the module's own
+        `__all__` rather than trusted."""
+        declared = {
+            name for name in st.__all__ if name.endswith("Error") and name != "TouchError"
+        }
+        covered = {
+            "RepoRemoteError", "GhMissingError", "GhAuthError", "GhRateLimitError",
+            "GhApiError", "PrNotFoundError", "PrRepoMismatchError", "PrNotLandedError",
+            "PrResponseMalformedError", "PrFileListTruncatedError",
+            "StoreMissingError", "GitError", "ExtractorMissingError",
+            "TranscriptMissingError", "TranscriptAmbiguousError", "TranscriptStaleError",
+            "TranscriptUnreadableError", "TranscriptCwdMismatchError",
+        }
+        assert declared == covered, (
+            "subsystem_touch declares an error class this sentinel map does not "
+            "account for; add it here AND give it its own sentinel entry."
+        )
+        assert len(self.SENTINELS) == len(covered)
+
+    # --- the local guard, before anything leaves the machine ---------------------
+
+    def test_a_repo_with_NO_remote_is_REMOTE(self, tmp_path: Path) -> None:
+        """Reached first of all: a PR number cannot be interpreted without a
+        repository, so nothing is fetched at all."""
+        repo = _init_pr_repo(tmp_path, remote=None)
+        with pytest.raises(st.RepoRemoteError) as exc:
+            _pr_source(repo, {421: _pr_payload(421, ["a.py"])})
+        self._only(exc.value, "remote")
+
+    def test_a_remote_that_names_no_project_is_REMOTE(self, tmp_path: Path) -> None:
+        """Reachable past the no-remote guard: a remote EXISTS, it simply does not
+        name a host/owner/name."""
+        repo = _init_pr_repo(tmp_path, remote="/srv/local-mirror")
+        with pytest.raises(st.RepoRemoteError) as exc:
+            _pr_source(repo, {421: _pr_payload(421, ["a.py"])})
+        self._only(exc.value, "remote")
+
+    def test_the_remote_error_QUOTES_git_without_carrying_gits_SENTINEL(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 Found by `_only` on this suite's first run, and it is the general
+        lesson: a wrapping error that interpolates the exception it wraps carries
+        TWO sentinels, and "which guard fired" stops being a measurement. So
+        `GitError` exposes `stderr` as an attribute and the wrapper quotes THAT.
+        Both halves are asserted — the diagnostic survives, the sentinel does
+        not."""
+        repo = _init_pr_repo(tmp_path, remote=None)
+        with pytest.raises(st.RepoRemoteError) as exc:
+            _pr_source(repo, {421: _pr_payload(421, ["a.py"])})
+        assert "git command failed" not in str(exc.value)
+        assert "No such remote" in str(exc.value), "git's own diagnostic was lost"
+        assert isinstance(exc.value.__cause__, st.GitError)
+        assert exc.value.__cause__.stderr, "GitError.stderr is empty — nothing to quote"
+
+    def test_the_remote_guard_is_reached_by_a_repo_that_ALSO_works(self, tmp_path: Path) -> None:
+        """🔴 The reachability proof as a measurement: the same fixture with a
+        usable remote produces a working source, so the two above fired on the
+        remote and not on some incidental defect."""
+        repo = _init_pr_repo(tmp_path)
+        assert _pr_source(repo, {421: _pr_payload(421, ["a.py"])}).paths == ("a.py",)
+
+    # --- the argument guard ------------------------------------------------------
+
+    @pytest.mark.parametrize("token", ["abc", "", "-3", "0", "4.2", "١٢"])
+    def test_a_token_that_is_not_a_pr_NUMBER_is_NOTFOUND(self, tmp_path: Path, token) -> None:
+        """Never searched for. Note the last one: `str.isdigit()` is True for
+        Arabic-Indic digits and `int()` accepts them, so an `isdigit()`-only check
+        would silently accept a number nobody typed."""
+        repo = _init_pr_repo(tmp_path)
+        with pytest.raises(st.PrNotFoundError) as exc:
+            st.collect_pr_paths(repo, [token], fetch=_fetch({}))
+        self._only(exc.value, "notfound")
+
+    def test_NO_pr_numbers_at_all_is_NOTFOUND_not_an_empty_report(self, tmp_path: Path) -> None:
+        """🔴 Otherwise: a perfectly well-formed report over ZERO pull requests —
+        the confident zero, arriving through argument parsing."""
+        repo = _init_pr_repo(tmp_path)
+        with pytest.raises(st.PrNotFoundError) as exc:
+            st.collect_pr_paths(repo, [], fetch=_fetch({}))
+        self._only(exc.value, "notfound")
+        assert "no pull request number was given" in str(exc.value)
+
+    # --- the response guards, in reachability order ------------------------------
+
+    def test_a_NON_OBJECT_response_is_MALFORMED(self, tmp_path: Path) -> None:
+        repo = _init_pr_repo(tmp_path)
+        with pytest.raises(st.PrResponseMalformedError) as exc:
+            _pr_source(repo, {421: ["not", "an", "object"]})
+        self._only(exc.value, "malformed")
+
+    def test_a_response_for_ANOTHER_pr_is_MALFORMED(self, tmp_path: Path) -> None:
+        """Reachable past the object guard: a well-formed payload that simply is
+        not the pull request that was asked for."""
+        repo = _init_pr_repo(tmp_path)
+        with pytest.raises(st.PrResponseMalformedError) as exc:
+            _pr_source(repo, {421: _pr_payload(999, ["a.py"])}, numbers=[421])
+        self._only(exc.value, "malformed")
+
+    def test_a_response_with_NO_url_is_MALFORMED(self, tmp_path: Path) -> None:
+        """Reachable past both: right number, everything else intact — the
+        repository simply cannot be checked, and an unchecked repository is what
+        makes a bare number dangerous."""
+        repo = _init_pr_repo(tmp_path)
+        with pytest.raises(st.PrResponseMalformedError) as exc:
+            _pr_source(repo, {421: _pr_payload(421, ["a.py"], url=None)})
+        self._only(exc.value, "malformed")
+
+    def test_ANOTHER_REPOSITORY_is_MISMATCH_not_malformed(self, tmp_path: Path) -> None:
+        """🔴 Reachable past every guard above: the response is well-formed, has
+        the right number and a perfectly good url — it just describes a different
+        project. Every repository has a #1."""
+        repo = _init_pr_repo(tmp_path)
+        with pytest.raises(st.PrRepoMismatchError) as exc:
+            _pr_source(
+                repo,
+                {
+                    421: _pr_payload(
+                        421, ["src/collector/a.py"], slug=f"{PR_HOST}/other-org/other-repo"
+                    )
+                },
+            )
+        self._only(exc.value, "mismatch")
+
+    def test_the_SAME_owner_and_name_on_ANOTHER_HOST_is_MISMATCH(self, tmp_path: Path) -> None:
+        """🔴 The host is part of the identity. A repo mirrored on another forge
+        can share `owner/name` with an unrelated GitHub project, and an
+        owner/name-only comparison would call that a match and read its files."""
+        repo = _init_pr_repo(tmp_path, remote=f"git@git.example.invalid:{PR_OWNER}/{SCOPE}.git")
+        with pytest.raises(st.PrRepoMismatchError) as exc:
+            _pr_source(repo, {421: _pr_payload(421, ["src/collector/a.py"])})
+        self._only(exc.value, "mismatch")
+
+    def test_a_CLOSED_unmerged_pr_is_NOT_LANDED(self, tmp_path: Path) -> None:
+        """Reachable past the repository guard: right repo, right number — the
+        branch was proposed and REJECTED, so its files exist in no tree."""
+        repo = _init_pr_repo(tmp_path)
+        with pytest.raises(st.PrNotLandedError) as exc:
+            _pr_source(repo, {421: _pr_payload(421, ["a.py"], state="CLOSED")})
+        self._only(exc.value, "closed")
+
+    @pytest.mark.parametrize("state", ["MERGED", "OPEN"])
+    def test_MERGED_and_OPEN_are_BOTH_accepted(self, tmp_path: Path, state) -> None:
+        """🔴 Measured at both accepted points, not one. OPEN is the ordinary case
+        at `/handoff` time — CI still running, review not done — and refusing it
+        would make the source useless exactly when it is invoked."""
+        repo = _init_pr_repo(tmp_path)
+        src = _pr_source(repo, {421: _pr_payload(421, ["a.py"], state=state)})
+        assert src.paths == ("a.py",)
+        assert any(f"#421 ({state})" in n for n in src.notes)
+
+    def test_an_UNKNOWN_state_is_MALFORMED_not_silently_accepted(self, tmp_path: Path) -> None:
+        repo = _init_pr_repo(tmp_path)
+        with pytest.raises(st.PrResponseMalformedError) as exc:
+            _pr_source(repo, {421: _pr_payload(421, ["a.py"], state="DRAFTED")})
+        self._only(exc.value, "malformed")
+
+    def test_an_ABSENT_files_key_is_MALFORMED_not_an_empty_pr(self, tmp_path: Path) -> None:
+        """🔴 The distinction this module is built on, at the other end of the
+        pipe: an ABSENT list means the changed files are UNKNOWN, `[]` means
+        GitHub says nothing changed. Reporting the second for the first is the
+        silent zero."""
+        repo = _init_pr_repo(tmp_path)
+        payload = _pr_payload(421, [])
+        del payload["files"]
+        with pytest.raises(st.PrResponseMalformedError) as exc:
+            _pr_source(repo, {421: payload})
+        self._only(exc.value, "malformed")
+
+    def test_an_EMPTY_files_list_is_a_READING_not_an_error(self, tmp_path: Path) -> None:
+        """The other side of the pair above — without it the guard is merely a ban
+        on empty PRs and the distinction it claims to draw is untested."""
+        repo = _init_pr_repo(tmp_path)
+        src = _pr_source(repo, {421: _pr_payload(421, [])})
+        assert src.paths == ()
+        assert src.prs == (421,)
+
+    def test_a_file_entry_with_NO_path_is_MALFORMED(self, tmp_path: Path) -> None:
+        """Reachable past the list guard: `files` is present and IS a list — one
+        entry in it is unreadable, and a list with an unreadable entry is not a
+        shorter list."""
+        repo = _init_pr_repo(tmp_path)
+        payload = _pr_payload(421, ["a.py", "b.py"])
+        payload["files"][1] = {"additions": 1}
+        with pytest.raises(st.PrResponseMalformedError) as exc:
+            _pr_source(repo, {421: payload})
+        self._only(exc.value, "malformed")
+
+    def test_a_missing_changedFiles_is_MALFORMED(self, tmp_path: Path) -> None:
+        """Reachable past every guard above: without the count, truncation is
+        UNDETECTABLE — and an undetectable truncation is a silently short set."""
+        repo = _init_pr_repo(tmp_path)
+        payload = _pr_payload(421, ["a.py"])
+        del payload["changedFiles"]
+        with pytest.raises(st.PrResponseMalformedError) as exc:
+            _pr_source(repo, {421: payload})
+        self._only(exc.value, "malformed")
+
+    def test_a_TRUNCATED_file_list_REFUSES(self, tmp_path: Path) -> None:
+        """🔴 THE MEASURED HAZARD. `gh pr view --json files` caps at 100 while
+        `changedFiles` reports the truth — measured live at 411/100 and 301/100 on
+        2026-08-12, and 39/39 under the cap. Reported as a prefix it would be a
+        plausible, silently wrong answer."""
+        repo = _init_pr_repo(tmp_path)
+        with pytest.raises(st.PrFileListTruncatedError) as exc:
+            _pr_source(
+                repo, {421: _pr_payload(421, [f"f{i}.py" for i in range(100)], changed=411)}
+            )
+        self._only(exc.value, "truncated")
+        assert "changed 411 files but the API returned only 100" in str(exc.value)
+
+    def test_the_truncation_guard_is_a_BOUNDARY_not_a_slope(self, tmp_path: Path) -> None:
+        """🔴 Measured at TWO points, not one: a guard asserted only from beyond
+        the boundary is equally consistent with one that rejects everything. The
+        equal case is the live 39/39 reading."""
+        repo = _init_pr_repo(tmp_path)
+        equal = _pr_source(repo, {421: _pr_payload(421, ["a.py", "b.py"], changed=2)})
+        assert equal.paths == ("a.py", "b.py")
+        with pytest.raises(st.PrFileListTruncatedError):
+            _pr_source(repo, {350: _pr_payload(350, ["a.py", "b.py"], changed=3)})
+
+    def test_MORE_files_than_changedFiles_is_NOT_an_error(self, tmp_path: Path) -> None:
+        """The guard is one-sided on purpose: it detects a SHORT list. A list
+        LONGER than the count is not a truncation, and inventing an error for it
+        would refuse a reading nothing is wrong with."""
+        repo = _init_pr_repo(tmp_path)
+        src = _pr_source(repo, {421: _pr_payload(421, ["a.py", "b.py"], changed=1)})
+        assert src.paths == ("a.py", "b.py")
+
+    # --- the environment guards, through the fetcher -----------------------------
+
+    @pytest.mark.parametrize(
+        "factory,key",
+        [
+            (lambda: st.GhMissingError("gh cli not found: no `gh` on PATH"), "gh-missing"),
+            (lambda: st.GhAuthError("gh is not authenticated: HTTP 401"), "gh-auth"),
+            (lambda: st.GhRateLimitError("github api rate limit: HTTP 403"), "rate"),
+            (lambda: st.GhApiError("github api call failed: error connecting"), "api"),
+            (lambda: st.PrNotFoundError("pull request not found: no such PR"), "notfound"),
+        ],
+        ids=["gh-missing", "gh-auth", "rate-limit", "api-error", "not-found"],
+    )
+    def test_a_fetcher_failure_PROPAGATES_and_never_becomes_an_empty_set(
+        self, tmp_path: Path, factory, key
+    ) -> None:
+        """🔴 THE CENTRAL PROPERTY OF THE NETWORK SURFACE. Every environmental
+        failure reaches the caller as ITS OWN named error — an empty path set
+        would be indistinguishable from "this PR changed nothing"."""
+        repo = _init_pr_repo(tmp_path)
+        with pytest.raises(st.TouchError) as exc:
+            _pr_source(repo, {421: factory()})
+        self._only(exc.value, key)
+
+    def test_EVERY_pr_failure_is_a_TouchError_so_the_CLI_exits_nonzero(self) -> None:
+        """🔴 `/handoff` step 4 keys on the exit code alone, and its contract is
+        that the stderr line is printable verbatim. A traceback is not that."""
+        for cls in (
+            st.RepoRemoteError, st.GhMissingError, st.GhAuthError, st.GhRateLimitError,
+            st.GhApiError, st.PrNotFoundError, st.PrRepoMismatchError, st.PrNotLandedError,
+            st.PrResponseMalformedError, st.PrFileListTruncatedError,
+        ):
+            assert issubclass(cls, st.TouchError), cls
+
+
+class TestGhFetcherClassification:
+    """The one thing a fixture payload cannot reach: `_gh_fetch_pr` reading `gh`'s
+    OWN exit code and stderr.
+
+    🔴 PINNED AGAINST MEASURED STRINGS, NOT INVENTED ONES (`claude/RULES.md`:
+    "build the bad case from REALISTIC data, not a textbook fixture"). Every
+    stderr below was captured from gh 2.96.0 on 2026-08-12 by provoking the real
+    failure; the classifier is then exercised against those bytes with the
+    subprocess seam replaced, so it runs in a tier that has no `gh` at all.
+    """
+
+    MEASURED = [
+        ("no-credentials", 4,
+         "To get started with GitHub CLI, please run:  gh auth login\n"
+         "Alternatively, populate the GH_TOKEN environment variable with a GitHub "
+         "API authentication token.", "GhAuthError"),
+        ("bad-token", 1,
+         "HTTP 401: Bad credentials (https://api.github.com/graphql)\n"
+         "Try authenticating with:  gh auth login", "GhAuthError"),
+        ("unreachable-host", 1,
+         "error connecting to nonexistent.invalid\n"
+         "check your internet connection or https://githubstatus.com", "GhApiError"),
+        ("nonexistent-pr", 1,
+         "GraphQL: Could not resolve to a PullRequest with the number of 999999. "
+         "(repository.pullRequest)", "PrNotFoundError"),
+    ]
+
+    @pytest.mark.parametrize(
+        "label,rc,stderr,expected", MEASURED, ids=[m[0] for m in MEASURED]
+    )
+    def test_the_measured_failures_classify(self, label, rc, stderr, expected) -> None:
+        got = st._classify_gh_failure(rc, stderr, PR_SLUG, 421)
+        assert type(got) is getattr(st, expected), (
+            f"{label} classified as {type(got).__name__}, expected {expected}"
+        )
+        assert stderr.splitlines()[0] in str(got), "gh's own words are not carried through"
+
+    def test_a_RATE_LIMIT_is_not_read_as_an_auth_failure(self) -> None:
+        """🔴 THE ORDERING TRAP, as a test. A 403 rate-limit body ALSO carries
+        gh's "gh auth login" hint, so an auth-first classifier reports a permanent
+        failure for a temporary one and the caller stops retrying."""
+        stderr = (
+            "HTTP 403: API rate limit exceeded for user ID 1. "
+            "(https://api.github.com/graphql)\nTry authenticating with:  gh auth login"
+        )
+        assert type(st._classify_gh_failure(1, stderr, PR_SLUG, 421)) is st.GhRateLimitError
+
+    def test_an_UNRECOGNISED_failure_falls_through_to_the_WIDE_error(self) -> None:
+        """Not guessed onto a specific diagnosis: a wrong explanation of a failure
+        forecloses the next question."""
+        got = st._classify_gh_failure(1, "HTTP 502: upstream exploded", PR_SLUG, 421)
+        assert type(got) is st.GhApiError, "a 502 was mapped onto a narrower diagnosis"
+
+    def test_an_EMPTY_stderr_still_classifies_rather_than_crashing(self) -> None:
+        got = st._classify_gh_failure(1, "", PR_SLUG, 421)
+        assert type(got) is st.GhApiError
+        assert "(no stderr)" in str(got)
+
+    def test_a_MISSING_gh_BINARY_is_named_not_a_traceback(self, monkeypatch) -> None:
+        """🔴 A LIVE CASE: `gh` is absent from `REQUIRED_TOOLS` and from the
+        flake's `nativeBuildInputs`, so the hermetic tier has none. Simulated at
+        the subprocess seam rather than by running anything."""
+
+        def boom(argv, *a, **kw):
+            raise FileNotFoundError(2, "No such file or directory", "gh")
+
+        monkeypatch.setattr(st.subprocess, "run", boom)
+        with pytest.raises(st.GhMissingError) as exc:
+            st._gh_fetch_pr(PR_SLUG, 421)
+        assert "gh cli not found" in str(exc.value)
+
+    def test_a_ZERO_exit_with_NON_JSON_stdout_is_MALFORMED(self, monkeypatch) -> None:
+        """A success that returns rubbish is not a success. Reachable past every
+        exit-code branch: rc IS 0, so only the decode can object."""
+        monkeypatch.setattr(
+            st.subprocess,
+            "run",
+            lambda *a, **kw: subprocess.CompletedProcess(a[0], 0, "<html>nope</html>", ""),
+        )
+        with pytest.raises(st.PrResponseMalformedError) as exc:
+            st._gh_fetch_pr(PR_SLUG, 421)
+        assert "pull request response is malformed" in str(exc.value)
+
+    def test_the_fetcher_POSITIVE_control(self, monkeypatch) -> None:
+        """🔴 Every case above is a failure; a fetcher that failed on EVERYTHING
+        would pass them all. This is the case that must SUCCEED."""
+        payload = _pr_payload(421, ["src/collector/a.py"])
+        monkeypatch.setattr(
+            st.subprocess,
+            "run",
+            lambda *a, **kw: subprocess.CompletedProcess(a[0], 0, json.dumps(payload), ""),
+        )
+        assert st._gh_fetch_pr(PR_SLUG, 421)["number"] == 421
+
+    def test_the_argv_asks_for_the_fields_the_reader_READS(self) -> None:
+        """A field dropped from the query but still read would come back as a
+        malformed response on every single run."""
+        argv = st._gh_argv(PR_SLUG, 421)
+        assert argv[0] == "gh" and "--repo" in argv and PR_SLUG in argv
+        assert st.PR_JSON_FIELDS in argv
+        for field_name in ("number", "url", "state", "changedFiles", "files"):
+            assert field_name in st.PR_JSON_FIELDS.split(",")
+
+
+class TestRepoSlugDerivation:
+    """The repository a PR number is interpreted against — DERIVED, never assumed
+    and never taken from the caller."""
+
+    @pytest.mark.parametrize(
+        "url,expected",
+        [
+            (f"git@{PR_HOST}:{PR_OWNER}/{SCOPE}.git", PR_SLUG),
+            (f"git@{PR_HOST}:{PR_OWNER}/{SCOPE}", PR_SLUG),
+            (f"ssh://git@{PR_HOST}/{PR_OWNER}/{SCOPE}.git", PR_SLUG),
+            (f"https://{PR_HOST}/{PR_OWNER}/{SCOPE}.git", PR_SLUG),
+            (f"https://{PR_HOST}/{PR_OWNER}/{SCOPE}/", PR_SLUG),
+            (f"https://user@{PR_HOST}/{PR_OWNER}/{SCOPE}", PR_SLUG),
+            ("git@git.example.invalid:o/n.git", "git.example.invalid/o/n"),
+            ("/srv/local-mirror", None),
+            ("", None),
+            ("https://github.com/", None),
+        ],
+        ids=["scp", "scp-no-suffix", "ssh-url", "https", "trailing-slash",
+             "https-userinfo", "other-host", "local-path", "empty", "no-project"],
+    )
+    def test_the_spellings_git_actually_emits(self, url, expected) -> None:
+        assert st._parse_remote_slug(url) == expected
+
+    def test_the_HOST_is_part_of_the_slug(self) -> None:
+        """🔴 Two projects sharing owner/name on different forges must not produce
+        the same slug — that is the entire basis of the repository guard."""
+        a = st._parse_remote_slug(f"git@{PR_HOST}:o/n.git")
+        b = st._parse_remote_slug("git@git.example.invalid:o/n.git")
+        assert a is not None and b is not None and a != b
+
+    def test_it_reads_a_REAL_remote(self, tmp_path: Path) -> None:
+        """Real git, not a mock: the derivation is the design decision."""
+        repo = _init_pr_repo(tmp_path)
+        assert st._repo_slug(repo) == PR_SLUG
+
+    def test_a_pr_url_yields_the_SAME_slug_SHAPE_the_remote_does(self) -> None:
+        """🔴 The repository comparison is only meaningful if both sides are built
+        to the same shape — otherwise it would never match and the guard would
+        fire on everything, which is a guard nobody can use."""
+        assert st._slug_from_pr_url(f"https://{PR_SLUG}/pull/421") == PR_SLUG
+        assert st._slug_from_pr_url("nonsense") is None
+        assert st._slug_from_pr_url(None) is None
+
+
+class TestPrCaveatAnswersTheRightQuestion:
+    """🔴 THE CRUX. A PR's file list is NOT a session's, and the caveat is the only
+    thing standing between that fact and an LLM about to write a dated
+    work-history bullet into a curated, client-confidential store."""
+
+    def _caveat(self, tmp_path: Path, **kw) -> str:
+        repo = _init_pr_repo(tmp_path)
+        return _pr_source(repo, {421: _pr_payload(421, ["a.py"])}, **kw).caveat
+
+    def test_it_says_BRANCH_and_never_claims_SESSION_attribution(self, tmp_path: Path) -> None:
+        caveat = self._caveat(tmp_path)
+        assert "what the BRANCH LANDED" in caveat
+        assert "NOT what a SESSION touched" in caveat
+        # …and none of the session source's affirmative language leaks in.
+        assert "THIS SESSION's own turns" not in caveat
+
+    def test_it_names_the_OVER_reporting_the_union_causes(self, tmp_path: Path) -> None:
+        """A caveat naming only the blind spot would read as if over-reporting
+        were not the other half — and over-reporting is the half that puts
+        someone else's work into the journal."""
+        caveat = self._caveat(tmp_path)
+        for phrase in ("UNION of every commit", "ANOTHER session", "SUBAGENT", "by hand"):
+            assert phrase in caveat, phrase
+
+    def test_it_names_what_the_pr_window_CANNOT_see(self, tmp_path: Path) -> None:
+        assert (
+            "EXCLUDES anything a session did that did not reach one of these PRs"
+            in self._caveat(tmp_path)
+        )
+
+    def test_it_names_the_REPOSITORY_and_the_PRS(self, tmp_path: Path) -> None:
+        """"#4" is ambiguous across repositories; the identity is the point."""
+        repo = _init_pr_repo(tmp_path)
+        caveat = _pr_source(
+            repo,
+            {421: _pr_payload(421, ["a.py"]), 350: _pr_payload(350, ["b.py"])},
+            numbers=[421, 350],
+        ).caveat
+        assert "#421, #350" in caveat
+        assert PR_SLUG in caveat
+
+    def test_the_OTHER_sources_caveats_are_UNCHANGED(self, tmp_path: Path) -> None:
+        """Adding a source must not soften the claim another one makes."""
+        repo = _init_pr_repo(tmp_path)
+        _run_git(repo, "checkout", "-b", "topic", home=tmp_path)
+        _write(repo, "src/collector/a.py")
+        _run_git(repo, "add", "src", home=tmp_path)
+        _run_git(repo, "commit", "-m", "w", home=tmp_path)
+        assert "NOT what this SESSION touched" in st.collect_git_paths(repo).caveat
+        assert "provenance is the caller's" in st.caller_supplied(["a.py"]).caveat
+
+    @pytest.mark.parametrize(
+        "paths,expect",
+        [
+            (["src/collector/a.py", "src/collector/b.py"], "resolved"),
+            (["docs/a.md", "docs/b.md"], "no-match"),
+            ([], "looked-at-nothing"),
+        ],
+        ids=["resolved", "no-match", "looked-at-nothing"],
+    )
+    def test_the_caveat_is_on_EVERY_output_path_of_BOTH_renderers(
+        self, tmp_path: Path, paths, expect
+    ) -> None:
+        """🔴 The property the #415 audit established and #421 kept: the caveat is
+        on every output path of both renderers — INCLUDING the early-return
+        `looked-at-nothing` branch, which returns before most of the text is
+        built. A third source must not be the one that breaks it."""
+        repo = _init_pr_repo(tmp_path)
+        store = _make_store(tmp_path / "s")
+        rep = st.build_report(
+            _pr_source(repo, {421: _pr_payload(421, paths)}), store, SCOPE, today=TODAY
+        )
+        assert rep.status == expect
+        caveat = rep.source.caveat
+        assert caveat in st.render_text(rep)
+        payload = st.report_json(rep)
+        assert payload["source"]["caveat"] == caveat
+        assert payload["source"]["prs"] == [421]
+        assert payload["source"]["repo_slug"] == PR_SLUG
+
+
+class TestCommandsAreTheRealArgv:
+    """`PathSource.commands` exists so a reader can check what was ACTUALLY asked.
+    It used to omit the program name because every source ran `git` and the
+    renderer hardcoded that word — which became a FALSE line the moment a source
+    ran something else."""
+
+    def test_the_git_source_records_its_program(self, tmp_path: Path) -> None:
+        repo = _init_pr_repo(tmp_path)
+        _write(repo, "a.py")
+        src = st.collect_git_paths(repo)
+        assert src.commands and all(c[0] == "git" for c in src.commands), src.commands
+
+    def test_the_session_source_records_its_program(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        repo = _init_pr_repo(tmp_path)
+        t = _write_transcript(tmp_path / "t.jsonl", str(repo), [f"{repo}/a.py"])
+        src = st.collect_session_paths(repo, transcript=t)
+        assert src.commands and all(c[0] == "git" for c in src.commands), src.commands
+
+    def test_the_pr_source_records_gh_NOT_git(self, tmp_path: Path, monkeypatch) -> None:
+        """🔴 The regression this fixes: rendered under the old hardcoded `git`,
+        this line read `ran: git gh pr view 421` — a provenance line false about
+        the one thing it exists to report. The LIVE path is what records an argv,
+        so the swap is at the subprocess seam; an injected fetcher records
+        nothing (see below) and could not exercise this at all."""
+        repo = _init_pr_repo(tmp_path)
+        store = _make_store(tmp_path / "s")
+        payload = _pr_payload(421, ["src/collector/a.py", "src/collector/b.py"])
+        real = subprocess.run
+
+        def fake(argv, *a, **kw):
+            if Path(str(argv[0])).name == "gh":
+                return subprocess.CompletedProcess(argv, 0, json.dumps(payload), "")
+            return real(argv, *a, **kw)
+
+        monkeypatch.setattr(st.subprocess, "run", fake)
+        src = st.collect_pr_paths(repo, [421])
+        assert src.commands and src.commands[0][0] == "gh"
+        rendered = st.render_text(st.build_report(src, store, SCOPE, today=TODAY))
+        assert "ran: gh pr view 421" in rendered
+        assert "ran: git gh" not in rendered
+
+    def test_an_INJECTED_fetcher_records_NO_argv_and_SAYS_so(self, tmp_path: Path) -> None:
+        """🔴 With a fetcher injected NOTHING ran, so recording `gh pr view …`
+        would fabricate provenance in the one field whose purpose is to report
+        what was actually executed."""
+        repo = _init_pr_repo(tmp_path)
+        src = _pr_source(repo, {421: _pr_payload(421, ["a.py"])})
+        assert src.commands == ()
+        assert any("INJECTED fetcher" in n for n in src.notes)
+
+
+class TestPrCli:
+    """The CLI is the only surface `/handoff` touches."""
+
+    def _run(self, args, capsys):
+        rc = st.main(args)
+        return rc, capsys.readouterr()
+
+    def _fixture(self, tmp_path: Path):
+        return _init_pr_repo(tmp_path), _make_store(tmp_path / "s")
+
+    def _patched(self, monkeypatch, payloads):
+        """Swap the live fetcher at the module seam the CLI actually reaches. The
+        CLI takes no `fetch` argument deliberately: a production flag that
+        replaces the data source is a flag that can lie."""
+        monkeypatch.setattr(st, "_gh_fetch_pr", _fetch(payloads))
+
+    def test_a_pr_resolves_end_to_end(self, tmp_path: Path, monkeypatch, capsys) -> None:
+        repo, store = self._fixture(tmp_path)
+        self._patched(
+            monkeypatch,
+            {421: _pr_payload(421, ["src/collector/a.py", "src/collector/b.py"])},
+        )
+        rc, cap = self._run(
+            ["--repo", str(repo), "--store", str(store), "--pr", "421",
+             "--today", TODAY, "--json"],
+            capsys,
+        )
+        assert rc == 0
+        payload = json.loads(cap.out)
+        assert payload["source"]["kind"] == "pr"
+        assert payload["source"]["window"] == "pull-requests"
+        assert payload["source"]["prs"] == [421]
+        assert payload["source"]["repo_slug"] == PR_SLUG
+        assert payload["status"] == "resolved"
+        assert payload["known"][0]["ref"] == "collector"
+
+    @pytest.mark.parametrize(
+        "argv_pr", [["--pr", "421,350"], ["--pr", "421", "--pr", "350"]],
+        ids=["comma", "repeated"],
+    )
+    def test_both_spellings_of_several_prs(
+        self, tmp_path: Path, monkeypatch, capsys, argv_pr
+    ) -> None:
+        repo, store = self._fixture(tmp_path)
+        self._patched(
+            monkeypatch,
+            {421: _pr_payload(421, ["src/collector/a.py"]),
+             350: _pr_payload(350, ["src/collector/b.py"])},
+        )
+        rc, cap = self._run(
+            ["--repo", str(repo), "--store", str(store), "--today", TODAY, "--json", *argv_pr],
+            capsys,
+        )
+        assert rc == 0
+        assert json.loads(cap.out)["source"]["prs"] == [421, 350]
+
+    def test_a_trailing_comma_is_the_typo_it_looks_like(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        repo, store = self._fixture(tmp_path)
+        self._patched(monkeypatch, {421: _pr_payload(421, ["a.py"])})
+        rc, cap = self._run(
+            ["--repo", str(repo), "--store", str(store), "--pr", "421,",
+             "--today", TODAY, "--json"],
+            capsys,
+        )
+        assert rc == 0
+        assert json.loads(cap.out)["source"]["prs"] == [421]
+
+    def test_an_EMPTY_pr_argument_exits_3_naming_the_sentinel(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """Reaches the "no number was given" guard rather than the "not a usable
+        number" one — a different fact, and the empty-token filter is what makes
+        it reachable."""
+        repo, store = self._fixture(tmp_path)
+        self._patched(monkeypatch, {})
+        rc, cap = self._run(
+            ["--repo", str(repo), "--store", str(store), "--pr", ",", "--today", TODAY],
+            capsys,
+        )
+        assert rc == 3
+        assert "no pull request number was given" in cap.err
+        assert cap.out.strip() == ""
+
+    @pytest.mark.parametrize(
+        "failure,phrase",
+        [
+            (st.GhMissingError("gh cli not found: nope"), "gh cli not found"),
+            (st.GhAuthError("gh is not authenticated: nope"), "gh is not authenticated"),
+            (st.GhRateLimitError("github api rate limit: nope"), "github api rate limit"),
+            (st.GhApiError("github api call failed: nope"), "github api call failed"),
+            (st.PrNotFoundError("pull request not found: nope"), "pull request not found"),
+            (st.PrRepoMismatchError("pull request belongs to another repository: nope"),
+             "pull request belongs to another repository"),
+            (st.PrNotLandedError("pull request is closed unmerged: nope"),
+             "pull request is closed unmerged"),
+            (st.PrResponseMalformedError("pull request response is malformed: nope"),
+             "pull request response is malformed"),
+            (st.PrFileListTruncatedError("pull request file list is truncated: nope"),
+             "pull request file list is truncated"),
+        ],
+        ids=["gh-missing", "gh-auth", "rate-limit", "api-error", "not-found",
+             "repo-mismatch", "closed", "malformed", "truncated"],
+    )
+    def test_every_failure_exits_3_with_a_PRINTABLE_line_and_NO_report(
+        self, tmp_path: Path, monkeypatch, capsys, failure, phrase
+    ) -> None:
+        """🔴 THE CONTRACT `/handoff` KEYS ON: non-zero, one printable stderr line,
+        and NOTHING on stdout — a report printed beside an error is a report
+        someone will act on."""
+        repo, store = self._fixture(tmp_path)
+        self._patched(monkeypatch, {421: failure})
+        rc, cap = self._run(
+            ["--repo", str(repo), "--store", str(store), "--pr", "421", "--today", TODAY],
+            capsys,
+        )
+        assert rc == 3
+        assert phrase in cap.err
+        assert cap.out.strip() == ""
+
+    def test_a_network_failure_NEVER_falls_back_to_git(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """🔴 THE CENTRAL PROPERTY, inherited from the session source. The repo has
+        real uncommitted work that git WOULD report, so a fallback would produce a
+        full, plausible report — an answer to a question the caller did not ask,
+        and `/handoff` would write from it."""
+        repo, store = self._fixture(tmp_path)
+        _write(repo, "src/collector/a.py")
+        _write(repo, "src/collector/b.py")
+        assert len(st.collect_git_paths(repo).paths) >= 2, "premise gone: git sees nothing"
+        self._patched(monkeypatch, {421: st.GhApiError("github api call failed: down")})
+        rc, cap = self._run(
+            ["--repo", str(repo), "--store", str(store), "--pr", "421", "--today", TODAY],
+            capsys,
+        )
+        assert rc == 3
+        assert cap.out.strip() == ""
+        assert "collector" not in cap.out
+
+    def test_the_text_renderer_prints_the_caveat_and_the_notes(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        repo, store = self._fixture(tmp_path)
+        self._patched(
+            monkeypatch,
+            {421: _pr_payload(421, ["src/collector/a.py", "src/collector/b.py"])},
+        )
+        rc, cap = self._run(
+            ["--repo", str(repo), "--store", str(store), "--pr", "421", "--today", TODAY],
+            capsys,
+        )
+        assert rc == 0
+        assert "caveat: pull request(s) #421" in cap.out
+        assert "what the BRANCH LANDED, NOT what a SESSION touched" in cap.out
+        assert "2 file(s) reported by the API" in cap.out
+
+
+class TestTheSourcesDoNotCompose:
+    """🔴 ONE QUESTION PER RUN. `--session` and `--pr` answer different questions
+    with OPPOSITE biases, and a union would carry ONE caveat line asserting
+    session attribution for some members and denying it for others, with no way
+    to tell which is which. The composition that IS available — run it twice and
+    read two caveats — keeps exactly the attribution a union destroys.
+    """
+
+    @pytest.mark.parametrize(
+        "extra",
+        [["--session", SESSION_ID], ["--transcript", "/nonexistent.jsonl"]],
+        ids=["session", "transcript"],
+    )
+    def test_pr_with_a_session_is_REFUSED_by_argparse(self, tmp_path: Path, extra) -> None:
+        """Exit 2, the same enforcement `--session` vs `--transcript` already uses:
+        they name different windows and picking one would be a guess about which
+        the caller meant."""
+        with pytest.raises(SystemExit) as exc:
+            st.main(["--repo", str(tmp_path), "--pr", "421", *extra])
+        assert exc.value.code == 2
+
+    def test_pr_with_paths_from_is_REFUSED_with_a_printable_line(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        repo = _init_pr_repo(tmp_path)
+        assert st.main(["--repo", str(repo), "--pr", "421", "--paths-from", "-"]) == 2
+        assert "cannot be combined" in capsys.readouterr().err
+
+    def test_the_session_refusal_STILL_names_itself(self, tmp_path: Path, capsys) -> None:
+        """The message was widened to cover `--pr`; it must not have stopped
+        naming the flags it already covered."""
+        repo = _init_pr_repo(tmp_path)
+        assert st.main(["--repo", str(repo), "--session", SESSION_ID, "--paths-from", "-"]) == 2
+        assert "--session/--transcript/--pr" in capsys.readouterr().err
+
+    def test_running_it_TWICE_is_the_supported_composition(
+        self, tmp_path: Path, monkeypatch, projects_root: Path, tailer_cache, capsys
+    ) -> None:
+        """🔴 The decision, as a measurement: two runs give two path sets EACH WITH
+        ITS OWN CAVEAT. The two windows deliberately DISAGREE here — the PR
+        carries an implementation file the session transcript never saw (the
+        subagent case), and the session carries a doc that reached no PR — which
+        is precisely why a union could not describe either honestly."""
+        repo = _init_pr_repo(tmp_path)
+        store = _make_store(tmp_path / "s")
+        _write_transcript(
+            projects_root / f"{SESSION_ID}.jsonl",
+            str(repo),
+            [f"{repo}/claudedocs/handoff-x.md"],
+        )
+        monkeypatch.setattr(
+            st, "_gh_fetch_pr", _fetch({421: _pr_payload(421, ["src/collector/a.py"])})
+        )
+        base = ["--repo", str(repo), "--store", str(store), "--today", TODAY, "--json"]
+
+        assert st.main(base + ["--session", SESSION_ID]) == 0
+        ses = json.loads(capsys.readouterr().out)
+        assert st.main(base + ["--pr", "421"]) == 0
+        pr = json.loads(capsys.readouterr().out)
+
+        assert ses["source"]["paths"] == ["claudedocs/handoff-x.md"]
+        assert pr["source"]["paths"] == ["src/collector/a.py"]
+        # The point: each set arrives with its OWN account of what it is.
+        assert ses["source"]["caveat"] != pr["source"]["caveat"]
+        assert "THIS SESSION's own turns" in ses["source"]["caveat"]
+        assert "what the BRANCH LANDED" in pr["source"]["caveat"]
+        assert ses["source"]["kind"] == "session" and pr["source"]["kind"] == "pr"
+
+
+class TestPrMutationKillMatrix:
+    """Each PR guard deleted on purpose, each dying to ITS OWN test.
+
+    🔴 The confound this class is built around, as in the session chain: these
+    guards run in sequence over one payload, and a mutant with one removed
+    usually trips the NEXT one. A kill that merely asserts "something raised"
+    would be green with the guard it names deleted — so every test below asserts
+    the specific sentinel is GONE and, where the chain would otherwise swallow
+    the effect, that the run now SUCCEEDS with the wrong answer, which is the
+    actual hazard.
+    """
+
+    def test_the_pr_mutant_harness_WORKS(self, tmp_path: Path) -> None:
+        """Positive control on this class's own loader: an unmutated copy must
+        reach the PR source successfully, or every kill below is vacuous."""
+        mod = _load_mutant(
+            tmp_path, "mp_noop", [('WRITER_ID = "handoff"', 'WRITER_ID = "handoff"  # noop')]
+        )
+        repo = _init_pr_repo(tmp_path)
+        src = mod.collect_pr_paths(repo, [421], fetch=_fetch({421: _pr_payload(421, ["a.py"])}))
+        assert src.paths == ("a.py",)
+
+    def test_kills_the_REPOSITORY_guard(self, tmp_path: Path) -> None:
+        """🔴 THE MOST CONSEQUENTIAL ONE. Without it another project's file list is
+        read AND reported — repo-relative, well-formed, entirely unrelated — and
+        it RESOLVES, manufacturing an association out of a bare number."""
+        mod = _load_mutant(
+            tmp_path, "mp_repo",
+            [("    if got_slug.lower() != slug.lower():", "    if False:")],
+        )
+        repo = _init_pr_repo(tmp_path)
+        foreign = {
+            421: _pr_payload(
+                421,
+                ["src/collector/a.py", "src/collector/b.py"],
+                slug=f"{PR_HOST}/other-org/other-repo",
+            )
+        }
+        leaked = mod.collect_pr_paths(repo, [421], fetch=_fetch(foreign))
+        assert leaked.paths == ("src/collector/a.py", "src/collector/b.py"), "wrong thing removed"
+        store = _make_store(tmp_path / "s")
+        rep = mod.build_report(leaked, store, SCOPE, today=TODAY)
+        assert [m.entry.ref for m in rep.known] == ["collector"], (
+            "the leaked paths did not even resolve — this kill would be vacuous"
+        )
+        with pytest.raises(st.PrRepoMismatchError):
+            st.collect_pr_paths(repo, [421], fetch=_fetch(foreign))
+
+    def test_kills_the_HOST_half_of_the_repository_identity(self, tmp_path: Path) -> None:
+        """🔴 Reached by an input the comparison itself accepts. Both slug builders
+        are collapsed to `owner/name`, which is what an owner/name-only identity
+        would look like — and a repo on ANOTHER FORGE then matches an unrelated
+        GitHub project and its file list is read and reported."""
+        mod = _load_mutant(
+            tmp_path,
+            "mp_host",
+            [
+                ('    return f"{host}/{parts[-2]}/{parts[-1]}"',
+                 '    return f"{parts[-2]}/{parts[-1]}"'),
+                ('    return f"{host}/{parts[1]}/{parts[2]}"',
+                 '    return f"{parts[1]}/{parts[2]}"'),
+            ],
+        )
+        repo = _init_pr_repo(tmp_path, remote=f"git@git.example.invalid:{PR_OWNER}/{SCOPE}.git")
+        payloads = {421: _pr_payload(421, ["src/collector/a.py"])}  # a github.com url
+        leaked = mod.collect_pr_paths(repo, [421], fetch=_fetch(payloads))
+        assert leaked.paths == ("src/collector/a.py",), "no leak — wrong thing removed"
+        with pytest.raises(st.PrRepoMismatchError):
+            st.collect_pr_paths(repo, [421], fetch=_fetch(payloads))
+
+    def test_kills_the_TRUNCATION_guard(self, tmp_path: Path) -> None:
+        """🔴 Without it a 411-file PR reports 100 paths and looks perfect. Not a
+        hypothetical: the cap is live and measured."""
+        mod = _load_mutant(
+            tmp_path, "mp_trunc", [("    if len(paths) < changed:", "    if False:")]
+        )
+        repo = _init_pr_repo(tmp_path)
+        payloads = {421: _pr_payload(421, [f"f{i}.py" for i in range(100)], changed=411)}
+        short = mod.collect_pr_paths(repo, [421], fetch=_fetch(payloads))
+        assert len(short.paths) == 100, "the truncation guard was not the thing removed"
+        with pytest.raises(st.PrFileListTruncatedError):
+            st.collect_pr_paths(repo, [421], fetch=_fetch(payloads))
+
+    def test_kills_the_FILES_PRESENCE_guard(self, tmp_path: Path) -> None:
+        """🔴 Without it an ABSENT file list becomes an EMPTY one — a confident
+        "this PR changed nothing" from a response that never described the files.
+
+        ⚠ MEASURED, NOT ASSUMED: with the guard removed the run does not report a
+        tidy empty window, it dies on a bare `TypeError`. That is still a kill and
+        it is the honest one — the real module fails with a NAMED, printable
+        sentence, and `/handoff` is instructed to print that line verbatim."""
+        mod = _load_mutant(
+            tmp_path, "mp_files", [("    if not isinstance(files, list):", "    if False:")]
+        )
+        repo = _init_pr_repo(tmp_path)
+        payload = _pr_payload(421, [])
+        del payload["files"]
+        with pytest.raises(Exception) as exc:
+            mod.collect_pr_paths(repo, [421], fetch=_fetch({421: payload}))
+        assert isinstance(exc.value, TypeError)
+        assert "pull request response is malformed" not in str(exc.value)
+        with pytest.raises(st.PrResponseMalformedError):
+            st.collect_pr_paths(repo, [421], fetch=_fetch({421: payload}))
+
+    def test_kills_the_CLOSED_UNMERGED_guard(self, tmp_path: Path) -> None:
+        """Without it, work that was proposed and REJECTED is reported as landed,
+        and a journal bullet records a change that exists in no tree."""
+        mod = _load_mutant(
+            tmp_path, "mp_closed",
+            [("    if state not in PR_ACCEPTED_STATES:", "    if False:")],
+        )
+        repo = _init_pr_repo(tmp_path)
+        payloads = {421: _pr_payload(421, ["src/collector/a.py"], state="CLOSED")}
+        assert mod.collect_pr_paths(repo, [421], fetch=_fetch(payloads)).paths == (
+            "src/collector/a.py",
+        )
+        with pytest.raises(st.PrNotLandedError):
+            st.collect_pr_paths(repo, [421], fetch=_fetch(payloads))
+
+    def test_kills_the_PR_IDENTITY_guard(self, tmp_path: Path) -> None:
+        """Without it, the answer to "what did #421 land" can be #999's files."""
+        mod = _load_mutant(
+            tmp_path,
+            "mp_num",
+            [("    if isinstance(got, bool) or not isinstance(got, int) or got != number:",
+              "    if False:")],
+        )
+        repo = _init_pr_repo(tmp_path)
+        payloads = {421: _pr_payload(999, ["src/collector/a.py"])}
+        assert mod.collect_pr_paths(repo, [421], fetch=_fetch(payloads)).paths == (
+            "src/collector/a.py",
+        )
+        with pytest.raises(st.PrResponseMalformedError):
+            st.collect_pr_paths(repo, [421], fetch=_fetch(payloads))
+
+    def test_kills_the_EMPTY_PR_LIST_guard(self, tmp_path: Path) -> None:
+        """Without it, ZERO pull requests produce a perfectly well-formed report
+        over nothing — the confident zero arriving through argument parsing."""
+        mod = _load_mutant(tmp_path, "mp_none", [("    if not read:", "    if False:")])
+        repo = _init_pr_repo(tmp_path)
+        src = mod.collect_pr_paths(repo, [], fetch=_fetch({}))
+        assert src.paths == () and src.prs == ()
+        with pytest.raises(st.PrNotFoundError):
+            st.collect_pr_paths(repo, [], fetch=_fetch({}))
+
+    def test_kills_the_PR_NUMBER_guard(self, tmp_path: Path) -> None:
+        """Without it a junk token is handed to the fetcher as if it named a PR."""
+        mod = _load_mutant(
+            tmp_path,
+            "mp_token",
+            [("    if not (t.isascii() and t.isdigit()) or int(t) < 1:", "    if False:")],
+        )
+        repo = _init_pr_repo(tmp_path)
+        with pytest.raises(Exception) as exc:
+            mod.collect_pr_paths(repo, ["not-a-number"], fetch=_fetch({}))
+        assert "pull request not found" not in str(exc.value)
+        with pytest.raises(st.PrNotFoundError):
+            st.collect_pr_paths(repo, ["not-a-number"], fetch=_fetch({}))
+
+    def test_kills_the_REPO_SLUG_guard(self, tmp_path: Path) -> None:
+        """Without it an unparseable remote yields `None` as the repository, and
+        every subsequent comparison is against nothing."""
+        mod = _load_mutant(
+            tmp_path, "mp_slug", [("    if slug is None:", "    if False:")]
+        )
+        repo = _init_pr_repo(tmp_path, remote="/srv/local-mirror")
+        with pytest.raises(Exception) as exc:
+            mod.collect_pr_paths(repo, [421], fetch=_fetch({421: _pr_payload(421, ["a.py"])}))
+        assert "repo has no usable github remote" not in str(exc.value)
+        with pytest.raises(st.RepoRemoteError):
+            st.collect_pr_paths(repo, [421], fetch=_fetch({421: _pr_payload(421, ["a.py"])}))
+
+    def test_kills_the_RATE_LIMIT_ORDERING(self, tmp_path: Path) -> None:
+        """🔴 The ordering, mutated directly. With the rate-limit branch gone a 403
+        rate-limit body — which carries gh's "gh auth login" hint — classifies as
+        a PERMANENT auth failure, and the caller stops retrying something that
+        would succeed in an hour."""
+        mod = _load_mutant(
+            tmp_path, "mp_rate", [('    if "rate limit" in low:', "    if False:")]
+        )
+        stderr = (
+            "HTTP 403: API rate limit exceeded for user ID 1.\n"
+            "Try authenticating with:  gh auth login"
+        )
+        assert type(mod._classify_gh_failure(1, stderr, PR_SLUG, 421)) is mod.GhAuthError
+        assert type(st._classify_gh_failure(1, stderr, PR_SLUG, 421)) is st.GhRateLimitError
+
+    def test_kills_the_GH_MISSING_guard(self, tmp_path: Path, monkeypatch) -> None:
+        """Without it an absent `gh` dies with an unprintable traceback instead of
+        the sentence `/handoff` is told to print verbatim — and `gh` is genuinely
+        absent in the hermetic tier."""
+        mod = _load_mutant(
+            tmp_path,
+            "mp_ghmiss",
+            [("        raise GhMissingError(\n"
+              '            f"gh cli not found: `{argv[0]}` is not on PATH, so pull '
+              'request #{number} "',
+              "        raise ValueError(\n"
+              '            f"neutered: {argv[0]} "')],
+        )
+
+        def boom(argv, *a, **kw):
+            raise FileNotFoundError(2, "No such file or directory", "gh")
+
+        monkeypatch.setattr(mod.subprocess, "run", boom)
+        with pytest.raises(Exception) as exc:
+            mod._gh_fetch_pr(PR_SLUG, 421)
+        assert not isinstance(exc.value, st.GhMissingError)
+        assert "gh cli not found" not in str(exc.value)
+
+    def test_kills_the_PR_CAVEAT_branch(self, tmp_path: Path) -> None:
+        """🔴 With the branch gone the caveat falls through to the GIT text — "what
+        this BRANCH touched, NOT what this SESSION touched" — which is accidentally
+        close enough to read as correct while naming the wrong window, no
+        repository and no pull request at all."""
+        mod = _load_mutant(
+            tmp_path, "mp_caveat", [('        if self.kind == "pr":', "        if False:")]
+        )
+        repo = _init_pr_repo(tmp_path)
+        payloads = {421: _pr_payload(421, ["a.py"])}
+        wrong = mod.collect_pr_paths(repo, [421], fetch=_fetch(payloads)).caveat
+        assert "what the BRANCH LANDED" not in wrong
+        assert "#421" not in wrong
+        assert PR_SLUG not in wrong
+        assert "what the BRANCH LANDED" in st.collect_pr_paths(
+            repo, [421], fetch=_fetch(payloads)
+        ).caveat
+
+    def test_kills_the_FULL_ARGV_renderer(self, tmp_path: Path) -> None:
+        """🔴 The regression the PR source exposed: with `git` hardcoded back into
+        the renderer, a `gh` invocation renders as `ran: git gh pr view 421`."""
+        mod = _load_mutant(
+            tmp_path,
+            "mp_argv",
+            [('        out.append(f"  ran: {\' \'.join(cmd)}")',
+              '        out.append(f"  ran: git {\' \'.join(cmd)}")')],
+        )
+        store = _make_store(tmp_path / "s")
+        src = st.PathSource(
+            kind="pr",
+            window="pull-requests",
+            paths=("src/collector/a.py",),
+            commands=(("gh", "pr", "view", "421"),),
+            prs=(421,),
+            repo_slug=PR_SLUG,
+        )
+        rep = st.build_report(src, store, SCOPE, today=TODAY, min_paths=1)
+        assert "ran: git gh pr view 421" in mod.render_text(rep)
+        assert "ran: gh pr view 421" in st.render_text(rep)
+
+    def test_kills_the_COMMANDS_HONESTY_guard(self, tmp_path: Path) -> None:
+        """🔴 Without it an injected fetcher still records `gh pr view …` — a
+        fabricated provenance line in the one field that exists to report what was
+        actually executed."""
+        mod = _load_mutant(
+            tmp_path,
+            "mp_cmdhonest",
+            [("        if live:\n            commands.append(_gh_argv(slug, n))",
+              "        if True:\n            commands.append(_gh_argv(slug, n))")],
+        )
+        repo = _init_pr_repo(tmp_path)
+        payloads = {421: _pr_payload(421, ["a.py"])}
+        fabricated = mod.collect_pr_paths(repo, [421], fetch=_fetch(payloads))
+        assert fabricated.commands and fabricated.commands[0][0] == "gh"
+        assert st.collect_pr_paths(repo, [421], fetch=_fetch(payloads)).commands == ()
+
+    def test_kills_the_PATHS_FROM_conflict_guard_for_PR(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """Without it, `--pr 421 --paths-from -` silently honours ONE of two
+        contradictory windows."""
+        mod = _load_mutant(
+            tmp_path,
+            "mp_conflict",
+            [('        if (wants_session or wants_pr) and args.paths_from != "git":',
+              "        if False:")],
+        )
+        repo = _init_pr_repo(tmp_path)
+        store = _make_store(tmp_path / "s")
+        monkeypatch.setattr(mod, "_gh_fetch_pr", _fetch({421: _pr_payload(421, ["a.py"])}))
+        argv = ["--repo", str(repo), "--store", str(store), "--pr", "421",
+                "--paths-from", "-", "--today", TODAY]
+        capsys.readouterr()
+        assert mod.main(argv) == 0
+        assert st.main(argv) == 2
+        assert "cannot be combined" in capsys.readouterr().err
