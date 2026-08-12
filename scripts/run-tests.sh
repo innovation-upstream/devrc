@@ -413,7 +413,17 @@ TARGET_FLOORS=(
   #   2343 - min(50, max(1, 2343/20 = 117)) = 2343 - 50 = 2293.
   # Confirmed by sourcing `_suggested_floor` OUT OF THIS FILE and by the python
   # spelling in test_run_tests_floors.py — both return 2293.
-  "scripts/tests|2293"
+  #
+  # 🔴 PINNED FOR THE MERGED TREE, NOT THIS BRANCH ALONE. This branch and the
+  # sibling session-manager branch (#412) each add tests to scripts/tests, so
+  # whichever lands second leaves the floor short by the other's contribution.
+  # Measured on main + #412 + #413 by the authoritative gate:
+  #   PASS scripts/tests (collected=2364 passed=2364 skipped=0)
+  #   2364 - min(50, max(1, 2364/20 = 118)) = 2364 - 50 = 2314.
+  # 2314 is a valid floor for this branch alone too (2343 collected, 29 slack),
+  # so it cannot go red before the sibling merges — it simply stops carrying
+  # 71 of invisible slack afterwards. Re-measure if #412 lands changed.
+  "scripts/tests|2314"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
