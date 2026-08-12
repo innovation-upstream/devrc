@@ -41,10 +41,68 @@ other reason says **"this is NOT a measured absence"** in so many words.
 |---|---|
 | `--json` | JSON (default is a table) |
 | `--host workbench\|laptop\|all` | default `all` |
+| `--claude-only` | drop non-Claude windows (see below); no effect on `tail`, which says so on stderr |
 | `--stale-threshold <secs>` | default 3600; `age >= threshold` is stale |
 | `--no-ch` | skip ClickHouse — the client is never even constructed |
 | `--no-fuzzyclaw` | skip the task files |
 | `--lines N` | `tail` scrollback depth (default 100) |
+
+## 🔴 A MIXED count is never published as a bare number
+
+The headline question is *"is anything waiting on me"*, and `idle` answered it
+with agents and bare shells added together: measured 2026-08-11, 61 windows gave
+`idle: 17` = **12 agent windows + 5 bare shells**, both rendered `● idle`. The
+row data was always right (every row carries `claude`); the roll-up and the
+table conflated. So:
+
+```json
+"summary": {
+  "total_sessions": 61, "claude": 41, "shell": 20,
+  "status": {"idle": {"claude": 12, "shell": 5, "total": 17}, "busy": {…},
+             "stale": {…}, "unknown": {…}}
+}
+```
+
+🔴 **The flat `summary["idle"|"busy"|"stale"|"unknown"]` integers are GONE** —
+a deliberate break, in the loud direction. Keeping them would have left every
+reader on the mixed number while the fix sat in keys they never learned about;
+`summary["status"]["idle"]["total"]` is the same number and you have to type
+`total` to get it. The table gained a **KIND** column (`claude`/`shell`, read off
+the boolean, not spelled into the status word) and a
+`by status (claude+shell): idle=12+5 …` footer.
+
+All four buckets split, not just `idle`. `unknown` was 15/15 non-claude in that
+measurement, which is a snapshot: a claude row lands in `unknown` as soon as its
+title carries no glyph — which every REMOTE claude window does whenever the
+glyph is absent, since it has no age either.
+
+## `--claude-only`
+
+Drops non-Claude rows on **every** host. 20 of 61 rows were shells the operator
+never asked about, so this is a straight token cut for the agent path.
+
+🔴 **Every summary count then describes the FILTERED set** — `total_sessions`,
+`claude`, `shell`, `status.*` — and `summary.excluded_non_claude` says how many
+rows were dropped (it is `null`, not `0`, when the filter never ran). That
+direction is the safe one: counting the unfiltered set would publish
+`total_sessions: 20` beside an empty table and **exit 0**. Counting the filtered
+set makes "no agent windows here" a real measured zero — **exit 3** — with the
+dropped count proving the host was not empty.
+
+## The two caveats are in the OUTPUT, not just in this file
+
+`report["caveats"]` (structured) + two footer lines in the table, printed
+unconditionally:
+
+- `claude_detection` — `pane_current_command =~ /claude/`; a claude under a
+  wrapper shell reads as `shell`.
+- `fuzzyclaw_scope` — `local_host_only`; the `null_fields_on_remote_rows` ledger
+  (`fuzzyclaw`, `claude_session_id`, `age_secs`) is pinned by a test against a
+  real remote row **and** against the equivalent local row, so it cannot drift
+  into naming fields that are always null.
+
+An agent that runs the script cold never reads this file; a caveat that lives
+only here protects only the readers who already knew.
 
 ## 🔴 Read the exit code — the two zeroes are different facts
 
@@ -52,7 +110,7 @@ other reason says **"this is NOT a measured absence"** in so many words.
 |---|---|
 | `0` | ran, found windows (**including** a partial scan where one host was unreachable) |
 | `2` | usage / malformed `<session>:<window>` target / **`tail`: the host answered and there is no such window** |
-| `3` | every requested host answered and the answer is a **real zero** (for `tail`: the window exists and its scrollback is empty) |
+| `3` | every requested host answered and the answer is a **real zero** (for `tail`: the window exists and its scrollback is empty; under `--claude-only`: zero **agent** windows — read `summary.excluded_non_claude` before concluding the host is idle) |
 | `4` | **no** host could be reached — the zero is unmeasured, not measured |
 | `5` | **`tail` only**: the host answered and there is **no tmux server** on it, so no window exists there |
 
@@ -178,6 +236,8 @@ never `"ok"`. Two ways to get there, both of which used to report
 one succeeding says nothing about the other.
 
 ## Honest limits — do not describe these as working
+
+(The first two are now also carried in the output — see "The two caveats" above.)
 
 - Claude detection is `pane_current_command =~ /claude/`, **shallower** than agent-ops'
   `/proc` descendant walk. `/proc` is not reachable over SSH, so a deeper local check would
