@@ -1196,6 +1196,39 @@ class TestSkillDocsArePinned:
             "the **first-entry case, not a failure**",
             "scope-absent is the reason this step exists, not an error",
         ),
+        # 🔴 The session source. The module is inert unless the step passes the
+        # token, and there is no environment variable for it — so if these
+        # sentences go, the tool silently reverts to the git window that
+        # captured nothing on its first real run.
+        (
+            "--session <session-uuid>",
+            "the step actually passes the session token",
+        ),
+        (
+            "`<session-uuid>` is the basename of your scratchpad directory",
+            "WHERE the agent gets the token — the one fact it cannot look up",
+        ),
+        (
+            "Never pass a UUID you are unsure of",
+            "the token is validated, and a wrong one must not be retried into passing",
+        ),
+        (
+            "fails with a named error rather than silently reporting another "
+            "session's paths",
+            "the no-fallback contract, stated to its caller",
+        ),
+        (
+            "blind to work that has already merged",
+            "why the git fallback is a fallback",
+        ),
+        (
+            "Read the `caveat:` line before you write anything",
+            "each source understates in its own direction",
+        ),
+        (
+            "does **not** include what a **subagent** edited",
+            "the session window's largest measured blind spot",
+        ),
     ]
 
     def test_EVERY_emitted_status_has_a_bullet_in_the_skill(self) -> None:
@@ -1304,6 +1337,871 @@ class TestNoRealStoreIsRead:
         assert f"~/.claude/{st.DEFAULT_STORE_ROOT.name}" in ANALYZE_DOC.read_text(
             encoding="utf-8"
         )
+
+
+# =============================================================================
+# THE SESSION SOURCE — the window git structurally cannot see.
+# =============================================================================
+#
+# 🔴 WHY IT EXISTS, IN ONE MEASUREMENT: on this tool's FIRST real invocation it
+# captured nothing from the session it was built during, because that session
+# landed all its work through merged PRs — by `/handoff` time `git diff HEAD` was
+# empty and HEAD sat at the merge-base. The tool said so honestly. Honest about
+# seeing nothing and useful are different properties.
+#
+# 🔴 EVERY FIXTURE HERE IS SYNTHETIC. The session id below is invented and is
+# not a real UUID from any host; this repo is PUBLIC. No transcript under
+# `~/.claude/projects/` is read by any test in this file — `TestNoRealTranscript`
+# is the guard, and `CLAUDE_PROJECTS_DIR` is repointed at `tmp_path` for every
+# test that exercises id lookup.
+
+SESSION_ID = "11111111-1111-4111-8111-111111111111"  # invented, not a real session
+OTHER_SESSION_ID = "22222222-2222-4222-8222-222222222222"
+
+
+def _edit_block(file_path: str) -> dict:
+    return {
+        "type": "tool_use",
+        "name": "Edit",
+        "input": {"file_path": file_path, "old_string": "a\n", "new_string": "b\n"},
+    }
+
+
+def _assistant(files, *, cwd: str | None = None, sidechain: bool = False) -> dict:
+    obj = {
+        "type": "assistant",
+        "timestamp": "2026-08-12T10:00:00.000Z",
+        "message": {
+            "role": "assistant",
+            "model": "test-model",
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+            "content": [_edit_block(f) for f in files],
+        },
+    }
+    if cwd is not None:
+        obj["cwd"] = cwd
+    if sidechain:
+        obj["isSidechain"] = True
+    return obj
+
+
+def _write_transcript(
+    path: Path,
+    cwd: str,
+    files,
+    *,
+    sidechain_files=(),
+    trailing_partial: bool = False,
+    only_partial: bool = False,
+    age_seconds: float = 0.0,
+) -> Path:
+    """A synthetic transcript in the real JSONL shape.
+
+    `trailing_partial` cuts the LAST line mid-object, which is the ordinary state
+    of a transcript that is being appended to while it is read — the exact
+    condition `/handoff` creates by running this tool during the session the
+    transcript belongs to.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [json.dumps(_assistant(files, cwd=cwd))]
+    if sidechain_files:
+        lines.append(json.dumps(_assistant(sidechain_files, sidechain=True)))
+    body = "\n".join(lines) + "\n" if lines else ""
+    if only_partial:
+        body = json.dumps(_assistant(files, cwd=cwd))[:80]
+    elif trailing_partial:
+        body += json.dumps(_assistant(["/x/late.py"], cwd=cwd))[:80]
+    path.write_text(body, encoding="utf-8")
+    if age_seconds:
+        t = path.stat().st_mtime - age_seconds
+        os.utime(path, (t, t))
+    return path
+
+
+@pytest.fixture()
+def tailer_cache():
+    """The extractor is cached in a module global; restore it around each test."""
+    saved = st._SESSION_TAILER
+    yield
+    st._SESSION_TAILER = saved
+
+
+@pytest.fixture()
+def projects_root(tmp_path: Path, monkeypatch):
+    """Point the id lookup at a fixture tree. 🔴 Never the real one."""
+    root = tmp_path / "projects" / "-synthetic-project"
+    root.mkdir(parents=True)
+    monkeypatch.setenv("CLAUDE_PROJECTS_DIR", str(tmp_path / "projects"))
+    return root
+
+
+def _session_source(repo: Path, transcript: Path, **kw):
+    return st.collect_session_paths(repo, transcript=transcript, **kw)
+
+
+class TestSessionPositiveControl:
+    """🔴 `claude/RULES.md` → "Positive control — can it ever observe the thing?"
+
+    A reassuring empty path set is indistinguishable from an extractor wired to
+    nothing — which is precisely the bug #398 fixed one source over, where the
+    opencode summariser emitted `files_modified=0` for every session for months
+    while its own tests were green. So the pair is reported: a transcript that
+    MUST yield paths, against a control that MUST yield none, on the same code
+    path with the same shape.
+    """
+
+    UNDER_CWD = ["src/collector/a.py", "src/collector/b.py", "src/collector/c.py"]
+
+    def test_THE_PAIR_nonzero_under_test_zero_on_the_control(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        repo = _init_repo(tmp_path, SCOPE)
+        cwd = str(repo)
+
+        # UNDER TEST: three edits inside the session cwd.
+        pos = _write_transcript(
+            tmp_path / "pos.jsonl", cwd, [f"{cwd}/{p}" for p in self.UNDER_CWD]
+        )
+        # CONTROL: the SAME three filenames at the SAME depth, edited in another
+        # repo entirely. They have no repo-relative form here, so the honest
+        # answer is zero — and it must be zero for that reason, not because
+        # nothing was read.
+        neg = _write_transcript(
+            tmp_path / "neg.jsonl",
+            cwd,
+            [f"{tmp_path}/elsewhere/{p}" for p in self.UNDER_CWD],
+        )
+
+        pos_src = _session_source(repo, pos)
+        neg_src = _session_source(repo, neg)
+
+        assert len(pos_src.paths) == 3, "positive control yielded nothing — wired to nothing"
+        assert len(neg_src.paths) == 0
+        assert sorted(pos_src.paths) == sorted(self.UNDER_CWD)
+
+    def test_the_control_zero_is_ACCOUNTED_for_not_merely_empty(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """The three dropped paths are COUNTED. An empty list with no count is
+        the silent zero; an empty list beside `3 outside it` is a reading."""
+        repo = _init_repo(tmp_path, SCOPE)
+        cwd = str(repo)
+        neg = _write_transcript(
+            tmp_path / "neg.jsonl",
+            cwd,
+            [f"{tmp_path}/elsewhere/{p}" for p in self.UNDER_CWD],
+        )
+        src = _session_source(repo, neg)
+        assert src.paths == ()
+        assert any("3 outside it" in n for n in src.notes), src.notes
+        assert any("0 distinct path(s) under the session cwd" in n for n in src.notes)
+
+    def test_the_outside_count_is_emitted_AT_ZERO_too(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """🔴 The caveat refers to this note, so it must always exist to refer
+        to — and a stated zero is a reading, while an absent line is
+        indistinguishable from a counter wired to nothing."""
+        repo = _init_repo(tmp_path, SCOPE)
+        cwd = str(repo)
+        t = _write_transcript(tmp_path / "t.jsonl", cwd, [f"{cwd}/{p}" for p in self.UNDER_CWD])
+        src = _session_source(repo, t)
+        assert any("0 outside it" in n for n in src.notes), src.notes
+
+    def test_the_pair_survives_all_the_way_to_a_REPORT(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """The extractor and the matcher are two places a zero can come from.
+        Both ends are pinned, so one being wired to nothing cannot hide behind
+        the other."""
+        repo = _init_repo(tmp_path, SCOPE)
+        cwd = str(repo)
+        store = _make_store(tmp_path / "s")
+        pos = _write_transcript(
+            tmp_path / "pos.jsonl", cwd, [f"{cwd}/{p}" for p in self.UNDER_CWD]
+        )
+        # Same count of paths, same depth, same store — only the subsystem
+        # directory differs, and it names nothing.
+        neg = _write_transcript(
+            tmp_path / "neg.jsonl",
+            cwd,
+            [f"{cwd}/src/unlisted-widget/{Path(p).name}" for p in self.UNDER_CWD],
+        )
+        pos_rep = st.build_report(_session_source(repo, pos), store, SCOPE, today=TODAY)
+        neg_rep = st.build_report(_session_source(repo, neg), store, SCOPE, today=TODAY)
+
+        assert pos_rep.status == "resolved"
+        assert [m.entry.ref for m in pos_rep.known] == ["collector"]
+        assert neg_rep.status == "no-match"
+        assert neg_rep.known == ()
+        # …and the negative control is NOT an empty window, which would make the
+        # zero uninformative.
+        assert len(neg_rep.source.paths) == 3
+
+    def test_a_MERGED_session_is_exactly_what_git_cannot_see(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """🔴 THE MOTIVATING CASE, as a test. The repo is clean and HEAD is at
+        the base ref — the state a session leaves behind when it lands its work
+        through merged PRs. Git's window is empty and says so; the session's is
+        not. Both are run against the SAME repo at the SAME moment."""
+        repo = _init_repo(tmp_path, SCOPE)  # clean tree, on `main`, nothing staged
+        cwd = str(repo)
+        t = _write_transcript(
+            tmp_path / "t.jsonl", cwd, [f"{cwd}/{p}" for p in self.UNDER_CWD]
+        )
+        git_src = st.collect_git_paths(repo)
+        ses_src = _session_source(repo, t)
+
+        assert git_src.paths == (), "the premise is gone: git's window was not empty"
+        assert git_src.window == "worktree"
+        assert len(ses_src.paths) == 3
+        assert ses_src.window == "session"
+
+
+class TestSessionNegativeControls:
+    """Each guard fails with ITS OWN sentinel, reached by an input no EARLIER
+    guard rejects — otherwise a control passes because a neighbour fired, and
+    stays green with the guard it claims to test deleted.
+
+    Every test also asserts the OTHER sentinels are absent, which is what makes
+    "this guard fired" a measurement rather than an inference.
+    """
+
+    SENTINELS = {
+        "missing": "transcript not found",
+        "ambiguous": "transcript id is ambiguous",
+        "stale": "transcript is stale",
+        "unreadable": "transcript unreadable",
+        "cwd": "transcript cwd does not match",
+        "extractor": "session path extractor not found",
+    }
+
+    def _only(self, exc: Exception, key: str) -> None:
+        text = str(exc)
+        assert self.SENTINELS[key] in text, f"expected the {key} sentinel, got: {text}"
+        for other, phrase in self.SENTINELS.items():
+            if other != key:
+                assert phrase not in text, f"the {other} sentinel also fired: {text}"
+
+    def test_no_two_sentinels_share_a_spelling(self) -> None:
+        """The premise of `_only`. Two guards spelled alike would make every
+        assertion above vacuous."""
+        for a, pa in self.SENTINELS.items():
+            for b, pb in self.SENTINELS.items():
+                if a != b:
+                    assert pa not in pb, f"{a} sentinel is a substring of {b}"
+
+    def test_a_nonexistent_session_id_is_MISSING(
+        self, tmp_path: Path, projects_root: Path, tailer_cache
+    ) -> None:
+        with pytest.raises(st.TranscriptMissingError) as exc:
+            st.find_transcript(SESSION_ID)
+        self._only(exc.value, "missing")
+
+    def test_an_id_with_a_separator_is_MISSING_not_searched_for(
+        self, tmp_path: Path, projects_root: Path, tailer_cache
+    ) -> None:
+        """A separator would let the glob escape the roots entirely."""
+        with pytest.raises(st.TranscriptMissingError) as exc:
+            st.find_transcript("../../etc/passwd")
+        self._only(exc.value, "missing")
+
+    def test_two_transcripts_with_ONE_id_is_AMBIGUOUS_not_a_pick(
+        self, tmp_path: Path, projects_root: Path, tailer_cache
+    ) -> None:
+        """Reachable past the missing guard: the file EXISTS — twice."""
+        for sub in ("a", "b"):
+            _write_transcript(
+                projects_root / sub / f"{SESSION_ID}.jsonl", str(tmp_path), ["x.py"]
+            )
+        with pytest.raises(st.TranscriptAmbiguousError) as exc:
+            st.find_transcript(SESSION_ID)
+        self._only(exc.value, "ambiguous")
+
+    def test_a_stale_transcript_is_STALE(self, tmp_path: Path, tailer_cache) -> None:
+        """Reachable past the missing guard: the file exists and is perfectly
+        readable — it is simply not the session that is running now."""
+        repo = _init_repo(tmp_path, SCOPE)
+        t = _write_transcript(
+            tmp_path / "t.jsonl",
+            str(repo),
+            [f"{repo}/src/collector/a.py"],
+            age_seconds=st.MAX_TRANSCRIPT_AGE_SECONDS + 60,
+        )
+        with pytest.raises(st.TranscriptStaleError) as exc:
+            _session_source(repo, t)
+        self._only(exc.value, "stale")
+
+    def test_the_stale_boundary_is_a_boundary_not_a_slope(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """🔴 Measured at TWO points either side, not one: a bound asserted only
+        from beyond it is equally consistent with a guard that rejects
+        everything."""
+        repo = _init_repo(tmp_path, SCOPE)
+        fresh = _write_transcript(
+            tmp_path / "fresh.jsonl",
+            str(repo),
+            [f"{repo}/src/collector/a.py"],
+            age_seconds=st.MAX_TRANSCRIPT_AGE_SECONDS - 60,
+        )
+        assert _session_source(repo, fresh).paths == ("src/collector/a.py",)
+
+        stale = _write_transcript(
+            tmp_path / "stale.jsonl",
+            str(repo),
+            [f"{repo}/src/collector/a.py"],
+            age_seconds=st.MAX_TRANSCRIPT_AGE_SECONDS + 60,
+        )
+        with pytest.raises(st.TranscriptStaleError):
+            _session_source(repo, stale)
+
+    def test_a_corrupt_transcript_is_UNREADABLE(self, tmp_path: Path, tailer_cache) -> None:
+        """Reachable past missing + stale: the file exists and is fresh; it just
+        is not a session. 🔴 It must NOT come back as an empty path set — that
+        would read as 'this session touched nothing'."""
+        repo = _init_repo(tmp_path, SCOPE)
+        t = tmp_path / "corrupt.jsonl"
+        t.write_text("not json at all\nnor is this\n", encoding="utf-8")
+        with pytest.raises(st.TranscriptUnreadableError) as exc:
+            _session_source(repo, t)
+        self._only(exc.value, "unreadable")
+
+    def test_an_empty_transcript_is_UNREADABLE_not_an_empty_window(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        repo = _init_repo(tmp_path, SCOPE)
+        t = tmp_path / "empty.jsonl"
+        t.write_text("", encoding="utf-8")
+        with pytest.raises(st.TranscriptUnreadableError) as exc:
+            _session_source(repo, t)
+        self._only(exc.value, "unreadable")
+
+    def test_a_FOREIGN_cwd_is_CWD_MISMATCH(self, tmp_path: Path, tailer_cache) -> None:
+        """Reachable past missing + stale + unreadable: the transcript is fresh
+        and reads perfectly — it belongs to a session in another repo."""
+        repo = _init_repo(tmp_path, SCOPE)
+        other = tmp_path / "another-repo"
+        t = _write_transcript(
+            tmp_path / "t.jsonl", str(other), [f"{other}/src/collector/a.py"]
+        )
+        with pytest.raises(st.TranscriptCwdMismatchError) as exc:
+            _session_source(repo, t)
+        self._only(exc.value, "cwd")
+
+    def test_the_cwd_guard_is_reached_by_a_transcript_that_ALSO_reads_fine(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """🔴 The reachability proof, stated as a measurement: the SAME bytes
+        with the cwd corrected produce a working report. So the guard above
+        fired on the cwd, not on some incidental defect in the fixture."""
+        repo = _init_repo(tmp_path, SCOPE)
+        good = _write_transcript(
+            tmp_path / "good.jsonl", str(repo), [f"{repo}/src/collector/a.py"]
+        )
+        assert _session_source(repo, good).paths == ("src/collector/a.py",)
+
+    def test_a_transcript_with_NO_cwd_is_a_mismatch_not_a_match(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """`realpath("")` is the process cwd; without the empty-string guard a
+        session that recorded no cwd would "match" whatever directory the tool
+        happened to be launched from."""
+        repo = _init_repo(tmp_path, SCOPE)
+        t = tmp_path / "nocwd.jsonl"
+        t.write_text(json.dumps(_assistant(["/x/a.py"])) + "\n", encoding="utf-8")
+        with pytest.raises(st.TranscriptCwdMismatchError) as exc:
+            _session_source(repo, t)
+        self._only(exc.value, "cwd")
+        assert st._same_dir("", os.getcwd()) is False
+
+    def test_a_missing_EXTRACTOR_names_itself(
+        self, tmp_path: Path, monkeypatch, tailer_cache
+    ) -> None:
+        """A deploy that omitted the shared extractor is a broken environment,
+        not a reading — and in THIS repo a new file that was never `git add`ed is
+        exactly how that happens."""
+        st._SESSION_TAILER = None
+        monkeypatch.setattr(st, "_session_tailer_path", lambda: tmp_path / "gone.py")
+        with pytest.raises(st.ExtractorMissingError) as exc:
+            st._session_tailer()
+        self._only(exc.value, "extractor")
+
+    def test_EVERY_failure_is_a_TouchError_so_the_CLI_exits_nonzero(self) -> None:
+        """🔴 `/handoff` step 4 keys on the exit code alone. A session error that
+        escaped `TouchError` would crash with a traceback — still non-zero, but
+        the skill's contract is that the stderr line is printable verbatim."""
+        for cls in (
+            st.ExtractorMissingError,
+            st.TranscriptMissingError,
+            st.TranscriptAmbiguousError,
+            st.TranscriptStaleError,
+            st.TranscriptUnreadableError,
+            st.TranscriptCwdMismatchError,
+        ):
+            assert issubclass(cls, st.TouchError), cls
+
+
+class TestTranscriptIsBeingAppendedTo:
+    """🔴 The transcript is LIVE while this reads it. `/handoff` runs the tool
+    during the very session the transcript belongs to, so the last line can be a
+    half-written object. Three things must hold, and only the first is obvious.
+    """
+
+    def test_the_fixture_really_IS_partial(self, tmp_path: Path) -> None:
+        """Positive control on the FIXTURE. A 'partial line' test whose last line
+        happens to parse is testing nothing at all."""
+        repo = _init_repo(tmp_path, SCOPE)
+        t = _write_transcript(
+            tmp_path / "t.jsonl",
+            str(repo),
+            [f"{repo}/src/collector/a.py"],
+            trailing_partial=True,
+        )
+        last = t.read_text(encoding="utf-8").splitlines()[-1]
+        with pytest.raises(json.JSONDecodeError):
+            json.loads(last)
+
+    def test_a_partial_trailing_line_does_not_CRASH_the_run(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        repo = _init_repo(tmp_path, SCOPE)
+        t = _write_transcript(
+            tmp_path / "t.jsonl",
+            str(repo),
+            [f"{repo}/src/collector/a.py", f"{repo}/src/collector/b.py"],
+            trailing_partial=True,
+        )
+        src = _session_source(repo, t)  # must not raise
+        assert set(src.paths) == {"src/collector/a.py", "src/collector/b.py"}
+
+    def test_a_partial_line_does_not_SILENTLY_TRUNCATE_the_complete_ones(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """🔴 The failure that would matter: a decoder that abandons the file at
+        the first bad line would drop every complete line AFTER it. Asserted by
+        comparing against the same transcript without the partial tail — the sets
+        must be equal, so a truncating reader is visible as a smaller set."""
+        repo = _init_repo(tmp_path, SCOPE)
+        files = [f"{repo}/src/collector/{n}.py" for n in ("a", "b", "c")]
+        whole = _write_transcript(tmp_path / "whole.jsonl", str(repo), files)
+        torn = _write_transcript(
+            tmp_path / "torn.jsonl", str(repo), files, trailing_partial=True
+        )
+        assert _session_source(repo, torn).paths == _session_source(repo, whole).paths
+        assert len(_session_source(repo, torn).paths) == 3
+
+    def test_a_transcript_that_is_ONLY_a_partial_line_is_UNREADABLE(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """The other end of the same edge: nothing parseable at all is UNKNOWN,
+        and must raise rather than report an empty window."""
+        repo = _init_repo(tmp_path, SCOPE)
+        t = _write_transcript(
+            tmp_path / "t.jsonl", str(repo), [f"{repo}/a.py"], only_partial=True
+        )
+        with pytest.raises(st.TranscriptUnreadableError):
+            _session_source(repo, t)
+
+
+class TestTheExtractorIsREUSED:
+    """🔴 #398 already implements transcript → changed-paths, and a second
+    implementation is the duplicated predicate that has ALREADY drifted once
+    here: the opencode summariser read key names its store never used and emitted
+    `files_modified=0` for every session for months, green against fixtures built
+    in the same wrong shape.
+
+    Pinned BEHAVIOURALLY — the tailer is loaded independently and its answer is
+    compared — because a grep for "does this file define an extractor" is the
+    spelled guard that passes while a differently-spelled one drifts.
+    """
+
+    def _tailer(self):
+        claude_dir = ROOT / "scripts" / "collector" / "claude"
+        for d in (str(claude_dir.parent), str(claude_dir)):
+            if d not in sys.path:
+                sys.path.insert(0, d)
+        spec = importlib.util.spec_from_file_location(
+            "independent_session_tailer", claude_dir / "session-tailer.py"
+        )
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["independent_session_tailer"] = mod
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_the_paths_are_BYTE_FOR_BYTE_the_shared_extractor_s(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        repo = _init_repo(tmp_path, SCOPE)
+        files = [f"{repo}/src/collector/{n}.py" for n in ("c", "a", "b")]
+        t = _write_transcript(tmp_path / "t.jsonl", str(repo), files)
+        rollup = self._tailer().summarize_transcript(str(t))
+        assert list(_session_source(repo, t).paths) == rollup["changed_paths"]
+        assert rollup["changed_paths"], "the comparison is vacuous — the shared side is empty"
+
+    def test_the_cap_and_the_outside_count_come_from_the_shared_module_too(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        repo = _init_repo(tmp_path, SCOPE)
+        t = _write_transcript(
+            tmp_path / "t.jsonl",
+            str(repo),
+            [f"{repo}/src/collector/a.py", f"{tmp_path}/elsewhere/b.py"],
+        )
+        rollup = self._tailer().summarize_transcript(str(t))
+        src = _session_source(repo, t)
+        assert rollup["changed_paths_outside_cwd"] == 1
+        assert any("1 outside it" in n for n in src.notes)
+
+    def test_a_SUBAGENT_s_edits_are_absent_AND_the_caveat_says_so(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """🔴 The blind spot, measured rather than assumed: the shared extractor
+        skips `isSidechain` turns, so a subagent's edits are not in this window.
+        That is the right call — a subagent typically works in a temp worktree
+        whose paths would inject `.claude/worktrees/agent-<hash>` components and
+        manufacture associations — but it MUST be stated, not discovered."""
+        repo = _init_repo(tmp_path, SCOPE)
+        cwd = str(repo)
+        t = _write_transcript(
+            tmp_path / "t.jsonl",
+            cwd,
+            [f"{cwd}/src/collector/a.py"],
+            sidechain_files=[f"{cwd}/src/status-bar/z.py"],
+        )
+        src = _session_source(repo, t)
+        assert src.paths == ("src/collector/a.py",)
+        assert "src/status-bar/z.py" not in src.paths
+        assert "SUBAGENT" in src.caveat
+
+
+class TestSessionCaveatIsAccuratePerSource:
+    """🔴 The old caveat becomes FALSE IN THE OTHER DIRECTION under a session
+    source: "what this BRANCH touched, NOT what this SESSION touched" would
+    UNDERSTATE a window that is exactly per-session. A single hedging sentence
+    covering both sources would be wrong about both."""
+
+    def test_the_session_caveat_does_not_claim_to_be_a_branch_window(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        repo = _init_repo(tmp_path, SCOPE)
+        t = _write_transcript(tmp_path / "t.jsonl", str(repo), [f"{repo}/a.py"])
+        caveat = _session_source(repo, t).caveat
+        assert "BRANCH" not in caveat
+        assert "NOT what this SESSION touched" not in caveat
+        assert "THIS SESSION's own turns" in caveat
+
+    def test_the_git_caveat_is_UNCHANGED(self, tmp_path: Path) -> None:
+        """The fallback keeps its own honest bound; adding a source must not
+        soften the claim the other one makes."""
+        repo = _init_repo(tmp_path, SCOPE)
+        _run_git(repo, "checkout", "-b", "topic", home=tmp_path)
+        _write(repo, "src/collector/a.py")
+        _run_git(repo, "add", "src", home=tmp_path)
+        _run_git(repo, "commit", "-m", "w", home=tmp_path)
+        assert "NOT what this SESSION touched" in st.collect_git_paths(repo).caveat
+
+    def test_the_session_caveat_names_ALL_THREE_blind_spots(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """A caveat that names one omission reads as if it were the only one."""
+        repo = _init_repo(tmp_path, SCOPE)
+        t = _write_transcript(tmp_path / "t.jsonl", str(repo), [f"{repo}/a.py"])
+        caveat = _session_source(repo, t).caveat
+        for phrase in ("SUBAGENT", "Bash command", "outside the session cwd"):
+            assert phrase in caveat, phrase
+
+    @pytest.mark.parametrize("status_paths,expect", [
+        (["src/collector/a.py", "src/collector/b.py"], "resolved"),
+        (["docs/a.md", "docs/b.md"], "no-match"),
+        ([], "looked-at-nothing"),
+    ], ids=["resolved", "no-match", "looked-at-nothing"])
+    def test_the_caveat_is_on_EVERY_output_path_of_BOTH_renderers(
+        self, tmp_path: Path, tailer_cache, status_paths, expect
+    ) -> None:
+        """🔴 The property the #415 audit established and this change must keep:
+        the caveat is on every output path and both renderers — including the
+        early-return `looked-at-nothing` branch, which is the one that returns
+        before most of the text is built."""
+        repo = _init_repo(tmp_path, SCOPE)
+        cwd = str(repo)
+        store = _make_store(tmp_path / "s")
+        files = [f"{cwd}/{p}" for p in status_paths] or [f"{tmp_path}/away/x.py"]
+        t = _write_transcript(tmp_path / "t.jsonl", cwd, files)
+        rep = st.build_report(_session_source(repo, t), store, SCOPE, today=TODAY)
+        assert rep.status == expect
+        caveat = rep.source.caveat
+        assert caveat in st.render_text(rep)
+        assert st.report_json(rep)["source"]["caveat"] == caveat
+        assert st.report_json(rep)["source"]["session"] is not None
+
+
+class TestSessionCli:
+    """The CLI is the only surface `/handoff` touches."""
+
+    def _run(self, args, capsys):
+        rc = st.main(args)
+        return rc, capsys.readouterr()
+
+    def _fixture(self, tmp_path: Path, projects_root: Path, **kw):
+        repo = _init_repo(tmp_path, SCOPE)
+        t = _write_transcript(
+            projects_root / f"{SESSION_ID}.jsonl",
+            str(repo),
+            [f"{repo}/src/collector/a.py", f"{repo}/src/collector/b.py"],
+            **kw,
+        )
+        return repo, t, _make_store(tmp_path / "s")
+
+    def test_a_session_uuid_resolves_end_to_end(
+        self, tmp_path: Path, projects_root: Path, tailer_cache, capsys
+    ) -> None:
+        repo, _t, store = self._fixture(tmp_path, projects_root)
+        rc, cap = self._run(
+            ["--repo", str(repo), "--store", str(store), "--session", SESSION_ID,
+             "--today", TODAY, "--json"],
+            capsys,
+        )
+        assert rc == 0
+        payload = json.loads(cap.out)
+        assert payload["source"]["kind"] == "session"
+        assert payload["source"]["window"] == "session"
+        assert payload["source"]["session"] == SESSION_ID
+        assert payload["status"] == "resolved"
+        assert payload["known"][0]["ref"] == "collector"
+
+    def test_transcript_and_session_agree(
+        self, tmp_path: Path, projects_root: Path, tailer_cache, capsys
+    ) -> None:
+        """`--transcript` is the SAME source with the lookup skipped — not a
+        second, laxer path. Both must produce the same window."""
+        repo, t, store = self._fixture(tmp_path, projects_root)
+        base = ["--repo", str(repo), "--store", str(store), "--today", TODAY, "--json"]
+        rc1, c1 = self._run(base + ["--session", SESSION_ID], capsys)
+        rc2, c2 = self._run(base + ["--transcript", str(t)], capsys)
+        assert rc1 == rc2 == 0
+        p1, p2 = json.loads(c1.out), json.loads(c2.out)
+        assert p1["source"]["paths"] == p2["source"]["paths"]
+        assert p2["source"]["kind"] == "session"
+
+    def test_transcript_runs_the_SAME_guards(
+        self, tmp_path: Path, projects_root: Path, tailer_cache, capsys
+    ) -> None:
+        """🔴 If `--transcript` skipped validation it would be the escape hatch
+        that voids the whole check."""
+        repo, t, store = self._fixture(
+            tmp_path, projects_root, age_seconds=st.MAX_TRANSCRIPT_AGE_SECONDS + 60
+        )
+        rc, cap = self._run(
+            ["--repo", str(repo), "--store", str(store), "--transcript", str(t),
+             "--today", TODAY],
+            capsys,
+        )
+        assert rc == 3
+        assert "transcript is stale" in cap.err
+
+    @pytest.mark.parametrize(
+        "kw,sentinel",
+        [
+            ({}, "transcript not found"),
+            ({"age_seconds": st.MAX_TRANSCRIPT_AGE_SECONDS + 60}, "transcript is stale"),
+        ],
+        ids=["missing", "stale"],
+    )
+    def test_a_validation_failure_EXITS_3_and_prints_NOTHING_to_stdout(
+        self, tmp_path: Path, projects_root: Path, tailer_cache, capsys, kw, sentinel
+    ) -> None:
+        """🔴 THE NO-FALLBACK CONTRACT, at the surface `/handoff` reads. A report
+        on stdout beside a non-zero exit is how a fallback would look."""
+        repo, t, store = self._fixture(tmp_path, projects_root, **kw)
+        if sentinel == "transcript not found":
+            t.unlink()
+        rc, cap = self._run(
+            ["--repo", str(repo), "--store", str(store), "--session", SESSION_ID,
+             "--today", TODAY],
+            capsys,
+        )
+        assert rc == 3
+        assert sentinel in cap.err
+        assert cap.out.strip() == "", f"a failure still printed a report: {cap.out!r}"
+
+    def test_the_git_window_is_NEVER_what_a_failed_session_returns(
+        self, tmp_path: Path, projects_root: Path, tailer_cache, capsys
+    ) -> None:
+        """The positive control for the test above: the repo has a REAL git
+        window, so a fallback would have produced a visible, plausible report."""
+        repo, t, store = self._fixture(tmp_path, projects_root)
+        _write(repo, "src/collector/leftover.py")
+        assert st.collect_git_paths(repo).paths, "no git window — the control is vacuous"
+        t.unlink()
+        rc, cap = self._run(
+            ["--repo", str(repo), "--store", str(store), "--session", SESSION_ID,
+             "--today", TODAY],
+            capsys,
+        )
+        assert rc == 3
+        assert "collector" not in cap.out
+
+    def test_session_and_transcript_are_mutually_exclusive(
+        self, tmp_path: Path, projects_root: Path, capsys
+    ) -> None:
+        with pytest.raises(SystemExit) as exc:
+            st.main(["--session", SESSION_ID, "--transcript", "/x/y.jsonl"])
+        assert exc.value.code == 2
+
+    def test_session_plus_paths_from_is_REFUSED_not_resolved(
+        self, tmp_path: Path, projects_root: Path, tailer_cache, capsys
+    ) -> None:
+        """Two different windows asked for at once. Honouring either silently is
+        the same wrong-answer class as falling back."""
+        repo, _t, store = self._fixture(tmp_path, projects_root)
+        rc, cap = self._run(
+            ["--repo", str(repo), "--store", str(store), "--session", SESSION_ID,
+             "--paths-from", "-", "--today", TODAY],
+            capsys,
+        )
+        assert rc == 2
+        assert "cannot be combined with --paths-from" in cap.err
+        assert cap.out.strip() == ""
+
+    def test_git_remains_the_default_when_no_session_is_given(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        """The fallback is still the fallback — adding a source must not change
+        what an unchanged call does."""
+        repo = _init_repo(tmp_path, SCOPE)
+        _run_git(repo, "checkout", "-b", "topic", home=tmp_path)
+        _write(repo, "src/collector/a.py")
+        _write(repo, "src/collector/b.py")
+        store = _make_store(tmp_path / "s")
+        rc, cap = self._run(
+            ["--repo", str(repo), "--store", str(store), "--today", TODAY, "--json"],
+            capsys,
+        )
+        assert rc == 0
+        payload = json.loads(cap.out)
+        assert payload["source"]["kind"] == "git"
+        assert payload["source"]["session"] is None
+
+    def test_exclude_applies_to_the_SESSION_window_too(
+        self, tmp_path: Path, projects_root: Path, tailer_cache, capsys
+    ) -> None:
+        """🔴 `/handoff` WRITES its own doc in step 2 with the Write tool, so the
+        doc is in the session window as surely as it is untracked in git's. An
+        exclusion honoured by one source and not the other makes the ritual
+        nominate its own artifact on half the runs."""
+        repo = _init_repo(tmp_path, SCOPE)
+        doc = "claudedocs/handoff-topic.md"
+        _write_transcript(
+            projects_root / f"{SESSION_ID}.jsonl",
+            str(repo),
+            [f"{repo}/src/collector/a.py", f"{repo}/{doc}"],
+        )
+        store = _make_store(tmp_path / "s")
+        rc, cap = self._run(
+            ["--repo", str(repo), "--store", str(store), "--session", SESSION_ID,
+             "--exclude", doc, "--today", TODAY, "--json"],
+            capsys,
+        )
+        assert rc == 0
+        payload = json.loads(cap.out)
+        assert payload["source"]["paths"] == ["src/collector/a.py"]
+        assert any("excluded 1" in n for n in payload["source"]["notes"])
+
+    def test_the_exclusion_is_the_SAME_predicate_as_git_s(
+        self, tmp_path: Path, projects_root: Path, tailer_cache
+    ) -> None:
+        """Structural, not two spellings that happen to agree today: the same
+        helper, reached from both sources."""
+        repo = _init_repo(tmp_path, SCOPE)
+        doc = "claudedocs/handoff-topic.md"
+        _write(repo, doc)
+        _write(repo, "src/collector/a.py")
+        git_src = st.collect_git_paths(repo, exclude=[doc])
+        t = _write_transcript(
+            tmp_path / "t.jsonl", str(repo), [f"{repo}/{doc}", f"{repo}/src/collector/a.py"]
+        )
+        ses_src = _session_source(repo, t, exclude=[doc])
+        assert doc not in git_src.paths and doc not in ses_src.paths
+        assert any("excluded 1" in n for n in git_src.notes)
+        assert any("excluded 1" in n for n in ses_src.notes)
+
+
+class TestSessionSourceNeverWrites:
+    """The store hash either side of the session path, for the same reason
+    `TestNeverWrites` does it for every other mode: the module has no write call
+    site and must acquire none."""
+
+    def test_the_session_report_leaves_the_store_byte_identical(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        repo = _init_repo(tmp_path, SCOPE)
+        store = _make_store(tmp_path / "s")
+        t = _write_transcript(
+            tmp_path / "t.jsonl", str(repo), [f"{repo}/src/collector/{n}.py" for n in "ab"]
+        )
+        before = _tree_hash(store)
+        rep = st.build_report(_session_source(repo, t), store, SCOPE, today=TODAY)
+        st.render_text(rep)
+        json.dumps(st.report_json(rep))
+        assert rep.status == "resolved"
+        assert _tree_hash(store) == before
+
+    def test_the_transcript_itself_is_never_written_either(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """🔴 `~/.claude/projects/` is LIVE session state. The tool reads it and
+        must never touch it — pinned on bytes AND on mtime, since a read that
+        rewrote identical content would pass a content check alone."""
+        repo = _init_repo(tmp_path, SCOPE)
+        t = _write_transcript(
+            tmp_path / "t.jsonl", str(repo), [f"{repo}/src/collector/a.py"]
+        )
+        before, before_stat = t.read_bytes(), t.stat().st_mtime_ns
+        _session_source(repo, t)
+        assert t.read_bytes() == before
+        assert t.stat().st_mtime_ns == before_stat
+
+
+class TestNoRealTranscript:
+    """🔴 No test in this file may read a real transcript. `~/.claude/projects/`
+    is live session state and this repo is PUBLIC."""
+
+    #: A real v4 UUID's 32 hex digits are ~uniformly random, so it carries ~15-16
+    #: DISTINCT characters. A hand-built fixture id carries 3. The bound below
+    #: cannot be met by accident, which is what makes it a check rather than a
+    #: comment — and `test_the_id_check_can_report_a_REAL_uuid` is its negative
+    #: control, without which a threshold that passes everything looks identical.
+    MAX_DISTINCT_HEX_IN_A_SYNTHETIC_ID = 3
+
+    def test_the_fixture_session_ids_are_not_real(self) -> None:
+        """A real UUID committed here would name one of the user's own sessions."""
+        for sid in (SESSION_ID, OTHER_SESSION_ID):
+            digits = set(sid.replace("-", ""))
+            assert len(digits) <= self.MAX_DISTINCT_HEX_IN_A_SYNTHETIC_ID, (
+                f"{sid} looks like a real UUID, not a synthetic one"
+            )
+
+    def test_the_id_check_can_report_a_REAL_uuid(self) -> None:
+        """Negative control on the check above: a threshold nothing can fail is
+        indistinguishable from no check at all."""
+        import uuid
+
+        real_shaped = str(uuid.uuid4())
+        assert (
+            len(set(real_shaped.replace("-", "")))
+            > self.MAX_DISTINCT_HEX_IN_A_SYNTHETIC_ID
+        )
+
+    def test_the_default_roots_are_outside_this_repo(self, tailer_cache) -> None:
+        for root in st._session_tailer().projects_roots():
+            assert not str(Path(root).resolve()).startswith(str(ROOT))
+
+    def test_the_lookup_honours_the_test_override(self, tmp_path: Path, monkeypatch, tailer_cache) -> None:
+        """The mechanism every test above relies on to stay off the real tree."""
+        monkeypatch.setenv("CLAUDE_PROJECTS_DIR", str(tmp_path))
+        assert st._session_tailer().projects_roots() == [str(tmp_path)]
 
 
 # =============================================================================
@@ -1751,8 +2649,19 @@ class TestMutationKillMatrix:
 
     def test_kills_the_exclusion_accounting(self, tmp_path: Path) -> None:
         """A path that vanishes with no note is a smaller number with no reason."""
+        # Anchored on the assignment ABOVE the `if`, not on the `if` alone: since
+        # the session source shares `_filter_excluded`, `    if dropped:` now
+        # occurs twice and the loader's uniqueness assert caught the ambiguity
+        # rather than letting the mutation land on the wrong occurrence.
         mod = _load_mutant(
-            tmp_path, "m_excl_note", [("    if dropped:", "    if False:")]
+            tmp_path,
+            "m_excl_note",
+            [
+                (
+                    "    paths, dropped = _filter_excluded(raw, exclude)\n    if dropped:",
+                    "    paths, dropped = _filter_excluded(raw, exclude)\n    if False:",
+                )
+            ],
         )
         repo = _init_repo(tmp_path)
         _write(repo, "claudedocs/handoff-topic.md")
@@ -1780,3 +2689,330 @@ class TestMutationKillMatrix:
         )
         assert rep.status == "resolved"
         assert [m.entry.ref for m in rep.known] == ["collector"]
+
+
+# =============================================================================
+# 🔴 MUTATION KILL MATRIX — the SESSION source's guards.
+# =============================================================================
+
+
+def _session_mutant(tmp_path: Path, name: str, replacements, tailer):
+    """A mutant that can reach the session source.
+
+    ⚠ THE INJECTION IS NOT PART OF THE MUTATION. A mutant is written to
+    `tmp_path`, so its `__file__` traversal to `scripts/collector/claude/` lands
+    nowhere and `_session_tailer()` would raise `ExtractorMissingError` for every
+    mutant alike — making every kill below green for the wrong reason. Handing it
+    the already-loaded extractor removes that confound and changes nothing about
+    the guard under test.
+    """
+    mod = _load_mutant(tmp_path, name, replacements)
+    mod._SESSION_TAILER = tailer
+    return mod
+
+
+class TestSessionMutationKillMatrix:
+    """Each session guard deleted on purpose, each dying to ITS OWN test.
+
+    🔴 The confound this class is built around: these guards sit in a CHAIN, and
+    a mutant with one removed usually trips the NEXT one. A kill that merely
+    asserts "something raised" would be green with the guard it names deleted, so
+    every test below asserts the specific sentinel is GONE — and, where the chain
+    would otherwise swallow the effect, that the run now SUCCEEDS with the wrong
+    answer, which is the actual hazard.
+    """
+
+    @pytest.fixture()
+    def tailer(self, tailer_cache):
+        return st._session_tailer()
+
+    def test_the_session_mutant_harness_WORKS(self, tmp_path: Path, tailer) -> None:
+        """Positive control on this class's own loader: an unmutated copy must
+        reach the session source successfully, or every kill is vacuous."""
+        mod = _session_mutant(
+            tmp_path, "ms_noop", [('WRITER_ID = "handoff"', 'WRITER_ID = "handoff"  # noop')], tailer
+        )
+        repo = _init_repo(tmp_path, SCOPE)
+        t = _write_transcript(
+            tmp_path / "t.jsonl", str(repo), [f"{repo}/src/collector/a.py"]
+        )
+        assert mod.collect_session_paths(repo, transcript=t).paths == ("src/collector/a.py",)
+
+    def test_kills_the_STALE_guard(self, tmp_path: Path, tailer) -> None:
+        """Without it a yesterday's-uuid paste is reported as this session's
+        work — silently, and with a perfectly well-formed answer."""
+        mod = _session_mutant(
+            tmp_path, "ms_stale", [("    if age > max_age_seconds:", "    if False:")], tailer
+        )
+        repo = _init_repo(tmp_path, SCOPE)
+        t = _write_transcript(
+            tmp_path / "t.jsonl",
+            str(repo),
+            [f"{repo}/src/collector/a.py"],
+            age_seconds=st.MAX_TRANSCRIPT_AGE_SECONDS * 100,
+        )
+        src = mod.collect_session_paths(repo, transcript=t)
+        assert src.paths == ("src/collector/a.py",), "the stale guard was not the thing removed"
+        with pytest.raises(st.TranscriptStaleError):
+            st.collect_session_paths(repo, transcript=t)
+
+    def test_kills_the_UNREADABLE_guard(self, tmp_path: Path, tailer) -> None:
+        """🔴 Without it an unobservable file set becomes an EMPTY one, and
+        `looked-at-nothing` — a confident 'this session touched nothing' from a
+        transcript that was never read. The chain does not save it: an unreadable
+        transcript has cwd '' and the mutant is shown to die on the NEXT guard,
+        so this asserts the STALE/UNREADABLE sentinel is gone specifically."""
+        mod = _session_mutant(
+            tmp_path,
+            "ms_unread",
+            [('    if rollup.get("unreadable") or observed is None:', "    if False:")],
+            tailer,
+        )
+        repo = _init_repo(tmp_path, SCOPE)
+        t = tmp_path / "corrupt.jsonl"
+        t.write_text("not json\n", encoding="utf-8")
+        with pytest.raises(Exception) as exc:
+            mod.collect_session_paths(repo, transcript=t)
+        assert "transcript unreadable" not in str(exc.value)
+        # The mutant's OWN class — an exec'd copy defines its own exceptions.
+        assert isinstance(exc.value, mod.TranscriptCwdMismatchError)
+        with pytest.raises(st.TranscriptUnreadableError):
+            st.collect_session_paths(repo, transcript=t)
+
+    def test_kills_the_UNREADABLE_guard_where_it_ALONE_stands(
+        self, tmp_path: Path, tailer
+    ) -> None:
+        """🔴 The kill above is reached through the CWD guard, because a corrupt
+        transcript also has no cwd — so on its own it cannot show WHICH guard is
+        load-bearing. This one removes that confound: the extractor is replaced
+        by one that reads the session fine (cwd intact) but reports an
+        UNOBSERVABLE file set, which is the extractor's own contract for "we could
+        not see the files". Nothing downstream rejects that input, so this guard
+        is the only thing standing.
+
+        ⚠ MEASURED, NOT ASSUMED: with the guard removed the run does NOT report a
+        silent empty window — `None` reaches `_filter_excluded` and dies with a
+        bare `TypeError`. That is still a kill, and it is the honest one: the
+        real module fails with a NAMED, printable sentence, and `/handoff` step 4
+        is instructed to print that stderr line verbatim. A traceback is not
+        that.
+        """
+
+        class _Unobservable:
+            """The extractor's own 'we could not observe this' shape."""
+
+            @staticmethod
+            def summarize_transcript(path):
+                r = tailer.summarize_transcript(path)
+                r.update({"changed_paths": None, "changed_paths_total": None,
+                          "changed_paths_outside_cwd": None})
+                return r
+
+            projects_roots = staticmethod(tailer.projects_roots)
+
+        repo = _init_repo(tmp_path, SCOPE)
+        t = _write_transcript(tmp_path / "t.jsonl", str(repo), [f"{repo}/a.py"])
+
+        mod = _session_mutant(
+            tmp_path,
+            "ms_unread2",
+            [('    if rollup.get("unreadable") or observed is None:', "    if False:")],
+            _Unobservable,
+        )
+        with pytest.raises(Exception) as exc:
+            mod.collect_session_paths(repo, transcript=t)
+        assert isinstance(exc.value, TypeError)
+        assert "transcript unreadable" not in str(exc.value)
+
+        # The unmutated module, same input, same replaced extractor: a named
+        # error. This is what proves the guard — not the mutant — is what turns
+        # an unobservable file set into a printable refusal.
+        real = _session_mutant(
+            tmp_path,
+            "ms_unread3",
+            [('WRITER_ID = "handoff"', 'WRITER_ID = "handoff"  # noop')],
+            _Unobservable,
+        )
+        # `real.` and not `st.`: an exec'd copy defines its OWN exception
+        # classes, so `st.TranscriptUnreadableError` would never match and the
+        # assertion would be about module identity rather than behaviour.
+        with pytest.raises(real.TranscriptUnreadableError) as ok:
+            real.collect_session_paths(repo, transcript=t)
+        assert "transcript unreadable" in str(ok.value)
+
+    def test_kills_the_CWD_guard(self, tmp_path: Path, tailer) -> None:
+        """🔴 The most consequential one. Without it, another repo's paths are
+        reported — repo-relative to the WRONG root — and they RESOLVE, producing
+        a fully plausible report attributing someone else's work to this repo."""
+        mod = _session_mutant(
+            tmp_path,
+            "ms_cwd",
+            [("    if not _same_dir(session_cwd, toplevel):", "    if False:")],
+            tailer,
+        )
+        repo = _init_repo(tmp_path, SCOPE)
+        other = tmp_path / "another-repo"
+        t = _write_transcript(
+            tmp_path / "t.jsonl", str(other), [f"{other}/src/collector/a.py"]
+        )
+        leaked = mod.collect_session_paths(repo, transcript=t)
+        assert leaked.paths == ("src/collector/a.py",), "no leak — wrong thing removed"
+        store = _make_store(tmp_path / "s")
+        rep = mod.build_report(leaked, store, SCOPE, today=TODAY, min_paths=1)
+        assert [m.entry.ref for m in rep.known] == ["collector"], (
+            "the leaked path did not even resolve — this kill would be vacuous"
+        )
+        with pytest.raises(st.TranscriptCwdMismatchError):
+            st.collect_session_paths(repo, transcript=t)
+
+    def test_kills_the_EMPTY_CWD_guard_inside_same_dir(self, tmp_path: Path, tailer) -> None:
+        """`realpath("")` is the process cwd, so without the empty check a
+        session that recorded no cwd matches wherever the tool was launched."""
+        mod = _session_mutant(
+            tmp_path, "ms_empty", [("    if not a or not b:", "    if False:")], tailer
+        )
+        assert mod._same_dir("", os.getcwd()) is True
+        assert st._same_dir("", os.getcwd()) is False
+
+    def test_kills_the_MISSING_guard(self, tmp_path: Path, projects_root: Path, tailer) -> None:
+        """Without it an unresolvable id falls off the end of the function."""
+        mod = _session_mutant(
+            tmp_path, "ms_missing", [("    if not hits:", "    if False:")], tailer
+        )
+        with pytest.raises(Exception) as exc:
+            mod.find_transcript(SESSION_ID)
+        assert "transcript not found: no `" not in str(exc.value)
+        with pytest.raises(st.TranscriptMissingError):
+            st.find_transcript(SESSION_ID)
+
+    def test_kills_the_AMBIGUITY_guard(self, tmp_path: Path, projects_root: Path, tailer) -> None:
+        """🔴 Without it the resolver PICKS — silently harvesting whichever
+        transcript sorted first, which is the coin flip this refuses to make."""
+        mod = _session_mutant(
+            tmp_path, "ms_ambig", [("    if len(hits) > 1:", "    if False:")], tailer
+        )
+        for sub in ("a", "b"):
+            _write_transcript(
+                projects_root / sub / f"{SESSION_ID}.jsonl", str(tmp_path), ["x.py"]
+            )
+        picked = mod.find_transcript(SESSION_ID)
+        assert picked.name == f"{SESSION_ID}.jsonl"
+        with pytest.raises(st.TranscriptAmbiguousError):
+            st.find_transcript(SESSION_ID)
+
+    def test_kills_the_SESSION_CAVEAT_branch(self, tmp_path: Path, tailer) -> None:
+        """🔴 With the branch gone the caveat falls through to the GIT text —
+        'what this BRANCH touched, NOT what this SESSION touched' — printed over
+        a per-session window, which understates it in the opposite direction and
+        is the specific wrongness this change exists to remove."""
+        mod = _session_mutant(
+            tmp_path, "ms_caveat", [('        if self.kind == "session":', "        if False:")], tailer
+        )
+        repo = _init_repo(tmp_path, SCOPE)
+        t = _write_transcript(tmp_path / "t.jsonl", str(repo), [f"{repo}/a.py"])
+        wrong = mod.collect_session_paths(repo, transcript=t).caveat
+        assert "NOT what this SESSION touched" in wrong or "uncommitted work only" in wrong
+        assert "THIS SESSION's own turns" not in wrong
+        assert "THIS SESSION's own turns" in st.collect_session_paths(
+            repo, transcript=t
+        ).caveat
+
+    def test_kills_the_SESSION_EXCLUSION(self, tmp_path: Path, tailer) -> None:
+        """The ritual's own artifact leaks back into the window it wrote."""
+        mod = _session_mutant(
+            tmp_path,
+            "ms_excl",
+            [("    paths, dropped = _filter_excluded(observed, exclude)",
+              "    paths, dropped = list(observed), []")],
+            tailer,
+        )
+        repo = _init_repo(tmp_path, SCOPE)
+        doc = "claudedocs/handoff-topic.md"
+        t = _write_transcript(
+            tmp_path / "t.jsonl", str(repo), [f"{repo}/{doc}", f"{repo}/src/collector/a.py"]
+        )
+        assert doc in mod.collect_session_paths(repo, transcript=t, exclude=[doc]).paths
+        assert doc not in st.collect_session_paths(repo, transcript=t, exclude=[doc]).paths
+
+    def test_kills_the_NO_FALLBACK_contract(
+        self, tmp_path: Path, projects_root: Path, tailer, capsys
+    ) -> None:
+        """🔴 THE CENTRAL PROPERTY, mutated directly: a validation failure that
+        falls back to git returns 0 and prints a plausible report — an answer to
+        a question the caller did not ask, from a window that overlaps enough to
+        look right. `/handoff` step 4 keys on the exit code, so this mutant would
+        cause a WRITE."""
+        mod = _session_mutant(
+            tmp_path,
+            "ms_fallback",
+            [
+                (
+                    "    except (TouchError, ResolverError) as exc:\n"
+                    '        print(f"subsystem-touch: {exc}", file=sys.stderr)\n'
+                    "        return 3",
+                    "    except (TouchError, ResolverError) as exc:\n"
+                    '        print(f"subsystem-touch: {exc}", file=sys.stderr)\n'
+                    "        print(render_text(build_report(collect_git_paths(repo), "
+                    "args.store, scope, today=stamp)))\n"
+                    "        return 0",
+                )
+            ],
+            tailer,
+        )
+        repo = _init_repo(tmp_path, SCOPE)
+        _write(repo, "src/collector/a.py")
+        _write(repo, "src/collector/b.py")
+        store = _make_store(tmp_path / "s")
+        argv = ["--repo", str(repo), "--store", str(store), "--session", SESSION_ID,
+                "--today", TODAY]
+
+        capsys.readouterr()
+        assert mod.main(argv) == 0
+        leaked = capsys.readouterr()
+        assert "collector" in leaked.out, "the fallback produced nothing — kill is vacuous"
+
+        assert st.main(argv) == 3
+        real = capsys.readouterr()
+        assert real.out.strip() == ""
+        assert "transcript not found" in real.err
+
+    def test_kills_the_PATHS_FROM_conflict_guard(
+        self, tmp_path: Path, projects_root: Path, tailer, capsys
+    ) -> None:
+        """Without it, `--session X --paths-from -` silently honours ONE of two
+        contradictory windows."""
+        mod = _session_mutant(
+            tmp_path,
+            "ms_conflict",
+            [('        if wants_session and args.paths_from != "git":',
+              "        if False:")],
+            tailer,
+        )
+        repo = _init_repo(tmp_path, SCOPE)
+        _write_transcript(
+            projects_root / f"{SESSION_ID}.jsonl",
+            str(repo),
+            [f"{repo}/src/collector/a.py", f"{repo}/src/collector/b.py"],
+        )
+        store = _make_store(tmp_path / "s")
+        argv = ["--repo", str(repo), "--store", str(store), "--session", SESSION_ID,
+                "--paths-from", "-", "--today", TODAY]
+        capsys.readouterr()
+        assert mod.main(argv) == 0
+        assert st.main(argv) == 2
+        assert "cannot be combined" in capsys.readouterr().err
+
+    def test_kills_the_EXTRACTOR_presence_guard(
+        self, tmp_path: Path, monkeypatch, tailer_cache
+    ) -> None:
+        """Without it a missing extractor dies with an unprintable traceback
+        instead of the sentence `/handoff` is told to print verbatim."""
+        mod = _load_mutant(
+            tmp_path, "ms_extractor", [("    if not mod_path.is_file():", "    if False:")]
+        )
+        mod._SESSION_TAILER = None
+        mod._session_tailer_path = lambda: tmp_path / "gone.py"
+        with pytest.raises(Exception) as exc:
+            mod._session_tailer()
+        assert not isinstance(exc.value, st.ExtractorMissingError)
+        assert "session path extractor not found" not in str(exc.value)

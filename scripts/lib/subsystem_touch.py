@@ -33,44 +33,55 @@ nomination, and the census that makes the experiment falsifiable.
 
 WHERE THE PATHS COME FROM, AND WHY
 ----------------------------------
-Three candidate sources were available; the choice is GIT, bounded to the
-branch, with the bound stated in the output. Reasoning, so it can be overturned
-with evidence rather than taste:
+Two real sources, in preference order: the SESSION's own transcript, falling
+back to GIT. The reporting core takes paths as an argument and has never heard
+of either, which is what let the second one be added without touching the
+matching logic.
 
-  * TELEMETRY (`kind=session-summary`'s `changed_paths`) is the source P1 of the
-    decision doc will use, and it is the most honest one — it is per-SESSION. It
-    is also unavailable here: `/handoff` fires at the END of a session, before
-    that session has settled or been summarised, so at the moment this runs the
-    row does not exist yet. Waiting for it would move the write off the ritual,
-    which is the exact property that made every other opt-in tool die.
-  * THE AGENT'S OWN MEMORY of what it edited is available and is what a human
-    would use — and is not deterministic. It cannot be re-run to the same
-    answer, cannot be tested, and is precisely the "prose/heuristic" fix
-    `claude/RULES.md` says to prefer a structural one over.
-  * GIT is available immediately, is deterministic, is re-runnable to the same
-    answer, and — the deciding property — `/handoff` step 1 ALREADY runs
-    `git status -sb` / `git log` / `git diff --stat`. So the path set is a free
-    side-effect of recon the ritual performs anyway, which is the same shape
-    that made `/analyze-service`'s index write stick.
+🔴 GIT WAS THE ORIGINAL SOURCE AND IS STRUCTURALLY BLIND TO THE BEST SESSIONS.
+On its first real invocation this tool captured NOTHING from the session it was
+built during, and the reason is not a bug: that session landed all its work
+through merged PRs, so by `/handoff` time `git diff HEAD` was empty and HEAD sat
+at the merge-base. The window was honestly, uselessly empty — and the tool said
+so, which is not the same as being useful. Merging as you go is the BETTER
+working pattern, so the source that cannot see it is the one that has to change.
 
-Git's known weakness is authorship: `git log` does not know which session
-authored a commit. That is not fixed here, it is BOUNDED and DECLARED. The
-window is:
+  * SESSION TRANSCRIPT (`--session <uuid>` / `--transcript <path>`) — PREFERRED.
+    Per-session by construction, and independent of git: it records the edit
+    whether or not the commit survived, merged, or left a branch behind. The
+    extraction is REUSED, not rewritten — `scripts/collector/claude/
+    session-tailer.py` plus `scripts/collector/changed_paths.py` already compute
+    exactly this set for `kind=session-summary`, tested and deployed. Its blind
+    spots are real and are printed in the caveat, not buried here: a SUBAGENT's
+    edits (a separate transcript — measured at 196 of 733 file-tool calls across
+    the 40 most recent transcripts), files written by a Bash command rather than
+    a file tool, and paths outside the session cwd (counted, never dropped).
+  * GIT (`--paths-from git`, the default) — FALLBACK. Deterministic, re-runnable,
+    already built and tested, and honest about a window that is bounded to the
+    BRANCH rather than the session:
 
-    (working tree vs HEAD, incl. untracked)  ∪  (merge-base(HEAD, base)..HEAD)
+        (working tree vs HEAD, incl. untracked)  ∪  (merge-base(HEAD, base)..HEAD)
 
-i.e. uncommitted work plus THIS BRANCH's own commits — under the repo's standing
-feature-branch rule, the closest deterministic proxy for "this session". Every
-report says `window: branch` and every renderer prints the caveat, because
-"what this branch touched" is a strictly weaker claim than "what this session
-touched" and rounding the two together is how a proxy becomes a lie. On a branch
-that IS the base (or a detached HEAD with no base) the commit half is empty and
-the window degrades to `worktree` — SAID, not silently emptied, because an
-empty commit window and a branch with no commits are different facts.
+    On a branch that IS the base the commit half is empty and the window
+    degrades to `worktree` — SAID, not silently emptied.
+  * THE AGENT'S OWN MEMORY of what it edited was rejected outright, and still is:
+    it cannot be re-run to the same answer and cannot be tested, which is the
+    "prose/heuristic" fix `claude/RULES.md` says to prefer a structural one over.
 
-A caller with a better path set may supply one (`--paths-from -`); the reporting
-core takes paths as an argument and has never heard of git. That is what lets P1
-feed the same core from telemetry later without touching this file's logic.
+🔴 EACH SOURCE PRINTS ITS OWN CAVEAT, AND THE OLD ONE IS NOT REUSABLE. The git
+caveat's "what this BRANCH touched, NOT what this SESSION touched" is false in
+the OTHER direction once the source is per-session — it would understate a
+window that is exactly what it disclaims. `PathSource.caveat` branches per
+source; every renderer prints it, on every output path.
+
+🔴 A SESSION ID IS VALIDATED, NOT TRUSTED, AND A FAILURE NEVER FALLS BACK TO GIT.
+There is no session-id environment variable, so the id arrives as an argument
+and can name another session — and "newest transcript by mtime" is not a
+fallback but a coin flip (14 transcripts modified within one 5-minute window,
+measured). Falling back to git on a validation failure would answer a question
+the caller did not ask, using a window that overlaps enough to look right. See
+`collect_session_paths` for the four guards and the order reachability forces
+them into.
 
 
 SCOPE COMES FROM THE REPO, AND A WORKTREE IS NOT ITS OWN REPO
@@ -86,6 +97,8 @@ its base clone agree. See that function; `TestScopeDerivation` is the guard.
 CONTRACT SUMMARY
 ----------------
     derive_scope(repo_root, git_common_dir)   -> str
+    collect_session_paths(repo, session=…)    -> PathSource      (PREFERRED)
+    find_transcript(session)                  -> Path
     collect_git_paths(repo)                   -> PathSource      (runs git)
     caller_supplied(paths)                    -> PathSource      (pure)
     nominate(assoc, index, *, min_paths, limit)
@@ -106,6 +119,15 @@ mutation test — can tell WHICH guard fired rather than merely that one did:
     "invalid repo-relative path" InvalidPathError, re-raised from the resolver
     "git command failed"         GitError
 
+and, for the session source — each FATAL, none falling back to git:
+
+    "session path extractor not found"  ExtractorMissingError
+    "transcript not found"              TranscriptMissingError
+    "transcript id is ambiguous"        TranscriptAmbiguousError
+    "transcript is stale"               TranscriptStaleError
+    "transcript unreadable"             TranscriptUnreadableError
+    "transcript cwd does not match"     TranscriptCwdMismatchError
+
 🔴 THE FAILURE MODE IS A CONFIDENT ZERO. "Nothing to record" is the observable
 that the most causes share: no paths, an unknown scope, a matcher wired to
 nothing, entries reached but below threshold, and a genuinely untouched index
@@ -125,6 +147,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
@@ -151,15 +174,24 @@ __all__ = [
     "DEFAULT_STORE_ROOT",
     "DEFAULT_NOMINATION_LIMIT",
     "BASE_REF_CANDIDATES",
+    "MAX_TRANSCRIPT_AGE_SECONDS",
     "TouchError",
     "StoreMissingError",
     "GitError",
+    "ExtractorMissingError",
+    "TranscriptMissingError",
+    "TranscriptAmbiguousError",
+    "TranscriptStaleError",
+    "TranscriptUnreadableError",
+    "TranscriptCwdMismatchError",
     "PathSource",
     "Nomination",
     "TouchReport",
     "Census",
     "derive_scope",
     "collect_git_paths",
+    "collect_session_paths",
+    "find_transcript",
     "caller_supplied",
     "nominate",
     "build_report",
@@ -200,6 +232,33 @@ DEFAULT_NOMINATION_LIMIT = 5
 # commits (the diverged-host case CLAUDE.md describes), not empty.
 BASE_REF_CANDIDATES: tuple[str, ...] = ("origin/main", "origin/master", "main", "master")
 
+# 🔴 THE LIVENESS BOUND ON A CALLER-SUPPLIED SESSION ID. There is no session-id
+# environment variable, so the id arrives as an argument and can be WRONG — a
+# uuid copied out of an old handoff doc, or a resumed session's. "Newest by
+# mtime" is not a usable fallback either: MEASURED 2026-08-12 over the live
+# transcript corpus (4,873 files, read-only), 14 were modified within the same
+# 5 minutes. So the id is trusted only after the file it names is shown to be
+# LIVE.
+#
+# 30 minutes, chosen from that same measurement — transcripts within each bound,
+# of 4,873:
+#
+#     5m  14      15m  19      30m  25      1h  36      2h  38      6h  50
+#     24h 210
+#
+# i.e. 30m admits 0.5% of the corpus and rejects 4,848 files, while 24h would
+# admit 8.4x as many. The lower bound comes from the other direction: `/handoff`
+# appends to this transcript on every turn, and step 4 runs one assistant turn
+# after step 3 wrote the doc — seconds to low minutes. 30m is ~1.5 orders of
+# magnitude of headroom over that and still rejects essentially the whole
+# corpus, which is the property that matters: the check must survive a slow turn
+# and still fail a yesterday's-uuid paste.
+#
+# 🔴 DELIBERATELY NOT env-overridable and NOT a CLI flag. A safety bound with an
+# escape hatch is a bound the first inconvenienced caller removes. Tests control
+# it by setting the FIXTURE's mtime, never by widening the constant.
+MAX_TRANSCRIPT_AGE_SECONDS = 1800.0
+
 _SENSITIVITY_FAIL_SAFE = "client-confidential"
 
 
@@ -216,6 +275,71 @@ class StoreMissingError(TouchError):
 
 class GitError(TouchError):
     """A git invocation failed. Sentinel: 'git command failed'."""
+
+
+# --- Session-source errors -----------------------------------------------------
+#
+# 🔴 EVERY ONE OF THESE IS FATAL, AND NONE FALLS BACK TO GIT. A caller that asked
+# "what did SESSION x touch?" and silently got "what this BRANCH touched" has a
+# plausible answer to a question it did not ask — the confident-wrong-answer
+# class this whole module exists to avoid, made worse because the two windows
+# genuinely overlap so the answer looks right. `/handoff` step 4 already treats
+# any non-zero exit as "write nothing", so failing is CHEAPER than guessing.
+#
+# Each carries its own sentinel phrase, so a caller — or a mutation test — can
+# tell WHICH guard fired. No two share a spelling.
+
+
+class ExtractorMissingError(TouchError):
+    """The shared transcript extractor is not on disk.
+
+    Sentinel: 'session path extractor not found'. A broken deploy, not a reading
+    — and a live hazard in THIS repo specifically, where a new file that was
+    never `git add`ed is silently omitted from the flake's deploy.
+    """
+
+
+class TranscriptMissingError(TouchError):
+    """No transcript for the given session id. Sentinel: 'transcript not found'."""
+
+
+class TranscriptAmbiguousError(TouchError):
+    """One id resolved to more than one transcript.
+
+    Sentinel: 'transcript id is ambiguous'. Never observed in the live corpus
+    (0 duplicate stems across 4,873 files, measured 2026-08-12) — but a resolver
+    that PICKS when it cannot tell is how a session's paths get attributed to
+    another session, so it refuses and names the candidates.
+    """
+
+
+class TranscriptStaleError(TouchError):
+    """The transcript's mtime is older than the liveness bound.
+
+    Sentinel: 'transcript is stale'. This is the guard that catches the wrong
+    argument — see `MAX_TRANSCRIPT_AGE_SECONDS` for the bound and its
+    measurement.
+    """
+
+
+class TranscriptUnreadableError(TouchError):
+    """The transcript could not be read as a session at all.
+
+    Sentinel: 'transcript unreadable'. Distinct from "this session changed no
+    files": the extractor reports an unobservable file set as None and an
+    observed-empty one as [], and conflating the two is exactly the defect the
+    shared module was built to prevent.
+    """
+
+
+class TranscriptCwdMismatchError(TouchError):
+    """The transcript's recorded cwd is not the repo under test.
+
+    Sentinel: 'transcript cwd does not match'. Not a formality: the extractor
+    relativizes every path against the SESSION's cwd, so paths from a session
+    rooted elsewhere are repo-relative to the WRONG repo — they would resolve,
+    quietly, against this repo's index.
+    """
 
 
 # --- Scope ---------------------------------------------------------------------
@@ -253,21 +377,42 @@ class PathSource:
     """
 
     kind: str
-    """`git` or `caller`."""
+    """`git`, `session` or `caller`."""
 
     window: str
-    """`branch` (worktree ∪ this branch's commits), `worktree`, or `supplied`."""
+    """`branch` (worktree ∪ this branch's commits), `worktree`, `session`, or `supplied`."""
 
     paths: tuple[str, ...]
     base_ref: str | None = None
     commands: tuple[tuple[str, ...], ...] = ()
     notes: tuple[str, ...] = ()
+    session: str | None = None
+    """The session id, when `kind == "session"`. Part of the caveat, not decoration."""
 
     @property
     def caveat(self) -> str:
-        """The claim this source can actually support. Never widened by a caller."""
+        """The claim this source can actually support. Never widened by a caller.
+
+        🔴 ONE CAVEAT PER SOURCE, AND EACH UNDERSTATES IN ITS OWN DIRECTION. The
+        git caveat's "NOT what this SESSION touched" is not a disclaimer that can
+        be reused: pointed at the session source it would be false in the
+        opposite direction — understating a window that IS per-session. A single
+        hedging sentence covering both would be wrong about both, so each branch
+        names the work its own window structurally cannot see.
+        """
         if self.kind == "caller":
             return "paths were supplied by the caller; provenance is the caller's to state"
+        if self.kind == "session":
+            return (
+                f"session transcript {self.session}: the files THIS SESSION's own turns "
+                f"edited (Edit/Write/NotebookEdit/MultiEdit), relative to the session cwd "
+                f"— independent of git, so work already merged or committed still counts. "
+                f"NOT represented: (a) anything a SUBAGENT edited — its turns are excluded "
+                f"as a separate session, and 196 of 733 file-tool calls across the 40 most "
+                f"recent transcripts were a subagent's (measured 2026-08-12); (b) files "
+                f"written by a Bash command rather than a file tool; (c) paths outside the "
+                f"session cwd, counted in the note above"
+            )
         if self.window == "branch":
             return (
                 f"git: uncommitted work + this branch's own commits since "
@@ -318,6 +463,42 @@ def _nul_list(out: str) -> list[str]:
     return [p for p in out.split("\0") if p]
 
 
+def _filter_excluded(
+    paths: Iterable[str], exclude: Iterable[str]
+) -> tuple[list[str], list[str]]:
+    """(kept, dropped) — dedupe in first-seen order, minus the caller's exclusions.
+
+    🔴 ONE predicate for BOTH real sources. `/handoff` writes its own doc in step
+    2 and asks what changed in step 4, so the doc is in the window either way —
+    it is untracked in git's, and it is a `Write` tool call in the session's. An
+    exclusion honoured by one source and not the other would make the ritual's
+    own artifact a nomination on exactly half the runs, which is the
+    duplicated-predicate shape `claude/RULES.md` says regenerates the same bug at
+    every site.
+
+    Dropped paths are RETURNED, never discarded: the caller counts them into
+    `notes`, because a window that silently shrank is indistinguishable from one
+    that was always small.
+    """
+    excluded = {e.strip() for e in exclude if e and e.strip()}
+    kept: list[str] = []
+    dropped: list[str] = []
+    for p in paths:
+        if p in excluded:
+            if p not in dropped:
+                dropped.append(p)
+        elif p not in kept:
+            kept.append(p)
+    return kept, dropped
+
+
+def _exclusion_note(dropped: Sequence[str]) -> str:
+    return (
+        f"excluded {len(dropped)} caller-named path(s) from the window: "
+        f"{', '.join(dropped)}"
+    )
+
+
 def collect_git_paths(
     repo: str | Path,
     *,
@@ -355,20 +536,12 @@ def collect_git_paths(
     # 🔴 One frame for every command below. See the docstring.
     toplevel = _git(Path(repo), ["rev-parse", "--show-toplevel"]).strip()
     repo = Path(toplevel)
-    excluded = {e.strip() for e in exclude if e.strip()}
     commands: list[tuple[str, ...]] = []
     notes: list[str] = []
-    paths: list[str] = []
-    dropped: list[str] = []
+    raw: list[str] = []
 
     def add(new: Iterable[str]) -> None:
-        for p in new:
-            if p in excluded:
-                if p not in dropped:
-                    dropped.append(p)
-                continue
-            if p not in paths:
-                paths.append(p)
+        raw.extend(new)
 
     worktree_args = ["diff", "--name-only", "-z", "HEAD"]
     commands.append(tuple(worktree_args))
@@ -408,11 +581,12 @@ def collect_git_paths(
             add(_nul_list(_git(repo, branch_args)))
             window = "branch"
 
+    # Filtered ONCE, at the end, over the accumulated window: `_filter_excluded`
+    # dedupes in first-seen order, so this is the same set and the same order the
+    # per-batch filter produced, from one predicate the session source shares.
+    paths, dropped = _filter_excluded(raw, exclude)
     if dropped:
-        notes.append(
-            f"excluded {len(dropped)} caller-named path(s) from the window: "
-            f"{', '.join(dropped)}"
-        )
+        notes.append(_exclusion_note(dropped))
 
     return PathSource(
         kind="git",
@@ -421,6 +595,302 @@ def collect_git_paths(
         base_ref=base_ref,
         commands=tuple(commands),
         notes=tuple(notes),
+    )
+
+
+# --- The session source: paths from the session's OWN transcript ---------------
+#
+# 🔴 THE EXTRACTOR IS REUSED, NOT REWRITTEN. `scripts/collector/claude/
+# session-tailer.py` already turns a transcript into a changed-path set — it is
+# how `changed_paths` on `kind=session-summary` is computed — and
+# `scripts/collector/changed_paths.py` already owns the relativization, the
+# dedupe, the ordering and the cap. Both are tested and deployed on both hosts.
+# A second extractor here would be the duplicated predicate `claude/RULES.md`
+# names, and the first one has ALREADY drifted once in exactly that way: the
+# opencode summariser read key names its store never used and emitted
+# `files_modified=0` for every session for months, green against fixtures built
+# in the same wrong shape. So this file supplies a path and a repo, and takes
+# back the answer.
+#
+# The tailer's filename contains a dash, so it cannot be imported by name; it is
+# loaded by explicit importlib path, the idiom already used for it in
+# `scripts/collector/claude/tests/test_session_tailer.py`.
+
+
+def _session_tailer_path() -> Path:
+    """`scripts/collector/claude/session-tailer.py`, from this file's location.
+
+    Same `.resolve()` idiom as this module's own `sys.path` line above — and
+    unlike the collector's internal imports, safe here: `scripts/lib/` is not a
+    `home.file` target, so this path never runs from `/nix/store`.
+    """
+    return Path(__file__).resolve().parent.parent / "collector" / "claude" / "session-tailer.py"
+
+
+_SESSION_TAILER = None
+
+
+def _session_tailer():
+    """Load the shared tailer once. LAZY on purpose.
+
+    Importing it drags in `changed_paths`, `_shared` and `tailer` and mutates
+    `sys.path`; the git and caller sources must not pay that, and — more to the
+    point — `TestMutationKillMatrix` exec's copies of THIS module, so a heavy
+    module-level import chain would be re-run for every mutant.
+    """
+    global _SESSION_TAILER
+    if _SESSION_TAILER is not None:
+        return _SESSION_TAILER
+
+    import importlib.util
+
+    mod_path = _session_tailer_path()
+    if not mod_path.is_file():
+        raise ExtractorMissingError(
+            f"session path extractor not found: {mod_path} — the transcript source "
+            f"cannot run without it. In this repo that usually means a file was "
+            f"never `git add`ed and the flake omitted it from the deploy."
+        )
+    # The tailer imports its siblings (`_shared`, `tailer`) by BARE NAME and only
+    # puts its own PARENT on sys.path, because it is normally run as a script
+    # from its own directory. Loaded from here, that directory is not on the path
+    # and those imports would fail — so both go on explicitly.
+    #
+    # 🔴 THE ORDER IS THE TAILER'S, NOT A CONVENIENCE. Inserting the collector
+    # root first and the tailer's own directory second leaves the DIRECTORY
+    # AHEAD of the root — which is exactly the constraint the tailer states for
+    # itself ("APPENDED, not inserted at 0: the collector root also holds
+    # `collector.py`, `deadman.py`, `invocation.py` and `ch_regrowth.py`, and
+    # putting it ahead of this file's own directory would let any of those shadow
+    # a sibling module"). Reverse this loop and a sibling can be shadowed.
+    for d in (str(mod_path.parent.parent), str(mod_path.parent)):
+        if d not in sys.path:
+            sys.path.insert(0, d)
+    spec = importlib.util.spec_from_file_location("devrc_session_tailer", mod_path)
+    if spec is None or spec.loader is None:  # pragma: no cover - defensive
+        raise ExtractorMissingError(
+            f"session path extractor not found: {mod_path} could not be loaded as a module"
+        )
+    module = importlib.util.module_from_spec(spec)
+    # Registered BEFORE exec: the tailer defines dataclasses, and `@dataclass`
+    # resolves string annotations through `sys.modules[__module__]`.
+    sys.modules["devrc_session_tailer"] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop("devrc_session_tailer", None)
+        raise
+    _SESSION_TAILER = module
+    return module
+
+
+def find_transcript(session: str, roots: Sequence[str] | None = None) -> Path:
+    """Resolve a session id to its ONE transcript file. Never guesses.
+
+    Roots come from the collector's own `projects_roots()` — one definition of
+    where transcripts live, and it honours `CLAUDE_PROJECTS_DIR` so a test can
+    point the lookup at a fixture tree instead of the real one.
+
+    ⚠ DELIBERATELY DIVERGENT from the tailer's `iter_transcripts`, which skips
+    `subagents/` and `wf_*` directories. That exclusion exists so the telemetry
+    walker does not summarise a subagent's turns twice, under both the parent and
+    itself. Here exactly one id is being resolved, so there is no double count to
+    avoid — and a subagent that runs `/handoff` in its own worktree should get
+    ITS transcript, not a miss. Measured 2026-08-12: 4,254 of 4,873 transcripts
+    live under `subagents/`, and 0 stems appear in more than one directory.
+    """
+    sid = (session or "").strip()
+    # A path separator or a leading dot would make the glob below escape the
+    # roots entirely. Rejected as unusable rather than searched for.
+    if not sid or "/" in sid or os.sep in sid or sid.startswith("."):
+        raise TranscriptMissingError(
+            f"transcript not found: {session!r} is not a usable session id — pass the "
+            f"session UUID, which is the basename of the agent scratchpad directory"
+        )
+    if roots is None:
+        roots = _session_tailer().projects_roots()
+    hits: list[Path] = []
+    for root in roots:
+        for p in sorted(Path(root).glob(f"**/{sid}.jsonl")):
+            if p not in hits:
+                hits.append(p)
+    if not hits:
+        raise TranscriptMissingError(
+            f"transcript not found: no `{sid}.jsonl` under {', '.join(str(r) for r in roots)} "
+            f"— the session id is wrong, or this session's transcript is stored elsewhere"
+        )
+    if len(hits) > 1:
+        raise TranscriptAmbiguousError(
+            f"transcript id is ambiguous: `{sid}` resolves to {len(hits)} files "
+            f"({', '.join(str(h) for h in hits)}); pass --transcript to name one"
+        )
+    return hits[0]
+
+
+def _same_dir(a: str, b: str) -> bool:
+    """Do two directory strings name the same directory?
+
+    Lexical equality first, `realpath` second. The lexical pass is what the
+    extractor itself uses to relativize (deliberately not `realpath`, so a
+    historical session whose cwd no longer exists still resolves); the realpath
+    pass exists only for the symlinked-`$HOME` case, where git's
+    `--show-toplevel` and a transcript's recorded cwd spell one directory two
+    ways. Empty is never equal to anything — `realpath("")` is the process cwd,
+    which would make an unreadable session's empty cwd "match" whatever
+    directory the tool happened to be launched from.
+    """
+    if not a or not b:
+        return False
+    na = os.path.normpath(a).rstrip("/") or "/"
+    nb = os.path.normpath(b).rstrip("/") or "/"
+    if na == nb:
+        return True
+    return os.path.realpath(na) == os.path.realpath(nb)
+
+
+def collect_session_paths(
+    repo: str | Path,
+    *,
+    session: str | None = None,
+    transcript: str | Path | None = None,
+    roots: Sequence[str] | None = None,
+    now: float | None = None,
+    max_age_seconds: float = MAX_TRANSCRIPT_AGE_SECONDS,
+    exclude: Iterable[str] = (),
+) -> PathSource:
+    """What THIS SESSION touched, from its own transcript. Per-session, not per-branch.
+
+    The window git cannot express. `/handoff` fires at the end of a session, and
+    the sessions worth recording are the ones that landed their work through
+    merged PRs — by then `git diff HEAD` is empty and HEAD sits at the
+    merge-base, so the git window is honestly, uselessly, empty. The transcript
+    is not: it records the edit whether or not the commit survived, whether or
+    not it merged, and whether or not the branch still exists.
+
+    🔴 THE ID IS VALIDATED, NEVER TRUSTED, AND A FAILURE NEVER FALLS BACK. There
+    is no session-id environment variable, so this arrives as an argument and can
+    name someone else's session. Four guards, in an order where each is
+    reachable by an input no earlier one rejects:
+
+      1. the transcript RESOLVES        TranscriptMissingError / ...Ambiguous
+      2. its mtime is LIVE              TranscriptStaleError
+      3. it READS as a session          TranscriptUnreadableError
+      4. its cwd IS this repo           TranscriptCwdMismatchError
+
+    (3) must precede (4): an unreadable transcript yields `cwd == ""`, so a cwd
+    check placed first would fire for it and the unreadable case's own test would
+    pass on a neighbour's error — green with the guard it claims to test deleted.
+
+    Falling back to git on any of these would answer a question the caller did
+    not ask, with a window that overlaps enough to look right.
+
+    `now` and `max_age_seconds` are parameters so the liveness check is testable
+    without a clock; neither is reachable from the CLI, deliberately.
+    """
+    tailer = _session_tailer()
+    if transcript is not None:
+        path = Path(transcript)
+        if not path.is_file():
+            raise TranscriptMissingError(
+                f"transcript not found: {path} is not a readable file"
+            )
+    elif session is not None:
+        path = find_transcript(session, roots)
+    else:  # pragma: no cover - the CLI and every caller pass exactly one
+        raise TranscriptMissingError(
+            "transcript not found: neither a session id nor a transcript path was given"
+        )
+    label = session or path.stem
+
+    # --- guard 1b: readable, not merely present ---------------------------------
+    if not os.access(path, os.R_OK):
+        raise TranscriptMissingError(
+            f"transcript not found: {path} exists but is not readable"
+        )
+
+    # --- guard 2: the file is LIVE ----------------------------------------------
+    stamp = now if now is not None else time.time()
+    age = stamp - os.stat(path).st_mtime
+    if age > max_age_seconds:
+        raise TranscriptStaleError(
+            f"transcript is stale: {path} was last written {age / 60:.1f} min ago, "
+            f"bound is {max_age_seconds / 60:.0f} min — this is not the session that "
+            f"is running now, so its paths are another session's. Pass the CURRENT "
+            f"session id (the basename of the agent scratchpad directory)."
+        )
+
+    # --- guard 3: it reads as a session -----------------------------------------
+    # 🔴 The shared extractor. A trailing line that is half-written — the normal
+    # state of a transcript being appended to while it is read — is skipped by
+    # its per-line JSON decode, so a partial write cannot crash the run; and a
+    # transcript it could not read at all comes back with `changed_paths = None`
+    # (the "unobservable" block), NEVER with `[]`. Those two are checked
+    # together here because they are one claim: we do not know this session's
+    # file set. `[]` is a different fact — the session touched nothing — and it
+    # flows through as `looked-at-nothing`.
+    #
+    # ⚠ `unreadable` is REDUNDANT-BUT-KEPT, labelled so a mutation sweep does not
+    # re-derive it as a live guard: the extractor's `_empty_rollup` already
+    # carries the all-None block, and `build_rollup` calls `_mark_unobservable`
+    # whenever it sets `unreadable`, so today `unreadable` IMPLIES
+    # `changed_paths is None` and removing this clause alone is unkillable. It
+    # stays because the two are separate claims in the extractor's own contract,
+    # and an extractor that ever reported one without the other would otherwise
+    # be believed.
+    rollup = tailer.summarize_transcript(str(path))
+    observed = rollup.get("changed_paths")
+    if rollup.get("unreadable") or observed is None:
+        raise TranscriptUnreadableError(
+            f"transcript unreadable: {path} yielded no readable session — the file set "
+            f"is UNKNOWN, which is not the same as empty, so nothing is reported rather "
+            f"than an empty window that reads as 'this session touched nothing'"
+        )
+
+    # --- guard 4: it is THIS repo ------------------------------------------------
+    # The frame, resolved exactly as the git source resolves it: every path the
+    # extractor emits is relative to the session cwd, so unless that cwd IS the
+    # repo root, the paths are repo-relative to a different repo and would
+    # resolve — silently, plausibly — against this repo's index.
+    toplevel = _git(Path(repo), ["rev-parse", "--show-toplevel"]).strip()
+    session_cwd = rollup.get("cwd") or ""
+    if not _same_dir(session_cwd, toplevel):
+        raise TranscriptCwdMismatchError(
+            f"transcript cwd does not match: session {label} ran in "
+            f"{session_cwd or '(no cwd recorded)'}, but --repo resolves to {toplevel}. "
+            f"Every path in a transcript is relative to the session's own cwd, so "
+            f"reporting them against this repo would associate another repo's work here."
+        )
+
+    paths, dropped = _filter_excluded(observed, exclude)
+    notes: list[str] = []
+    total = rollup.get("changed_paths_total")
+    outside = rollup.get("changed_paths_outside_cwd")
+    # 🔴 EMITTED UNCONDITIONALLY, INCLUDING AT ZERO. The caveat below refers to
+    # this count, so it has to be there to refer to — and a stated zero is a
+    # reading, while an absent line is indistinguishable from a counter wired to
+    # nothing (`claude/RULES.md` → "report the pair").
+    notes.append(
+        f"{total} distinct path(s) under the session cwd; {outside} outside it — the "
+        f"latter are COUNTED here and not represented below (a scratchpad file, a "
+        f"temp worktree, or an edit in another repo has no repo-relative form here)"
+    )
+    if rollup.get("changed_paths_truncated"):
+        notes.append(
+            f"🔴 TRUNCATED at the extractor's cap of {rollup.get('changed_paths_cap')} — "
+            f"the list is a lexicographic PREFIX of {total} paths, so a late-sorting "
+            f"subtree may be missing entirely"
+        )
+    if dropped:
+        notes.append(_exclusion_note(dropped))
+    notes.append(f"transcript: {path}")
+
+    return PathSource(
+        kind="session",
+        window="session",
+        paths=tuple(paths),
+        commands=(("rev-parse", "--show-toplevel"),),
+        notes=tuple(notes),
+        session=label,
     )
 
 
@@ -949,6 +1419,7 @@ def report_json(report: TouchReport) -> dict:
             "kind": src.kind,
             "window": src.window,
             "base_ref": src.base_ref,
+            "session": src.session,
             "caveat": src.caveat,
             "notes": list(src.notes),
             "commands": [list(c) for c in src.commands],
@@ -1098,7 +1569,35 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--paths-from",
         default="git",
-        help="`git` (default) or `-` to read repo-relative paths from stdin, one per line",
+        help=(
+            "fallback source when no session is given: `git` (default) or `-` to read "
+            "repo-relative paths from stdin, one per line"
+        ),
+    )
+    # 🔴 MUTUALLY EXCLUSIVE, ENFORCED BY ARGPARSE (exit 2). They name the same
+    # thing two ways, and a caller that passes both has one of them wrong —
+    # picking either would be a guess about which.
+    session_src = p.add_mutually_exclusive_group()
+    session_src.add_argument(
+        "--session",
+        default=None,
+        metavar="UUID",
+        help=(
+            "PREFERRED source: report what THIS SESSION touched, from its own "
+            "transcript. The UUID is the basename of the agent scratchpad directory. "
+            "Validated, never trusted — a wrong or stale id FAILS rather than falling "
+            "back to git."
+        ),
+    )
+    session_src.add_argument(
+        "--transcript",
+        default=None,
+        metavar="PATH",
+        help=(
+            "the session source, naming the transcript file directly instead of "
+            "resolving a UUID. Same validation; use it when --session reports the id "
+            "is ambiguous."
+        ),
     )
     p.add_argument(
         "--exclude",
@@ -1152,7 +1651,29 @@ def main(argv: Sequence[str] | None = None, *, today: str | None = None) -> int:
             print(new_entry_template(normalize_ref(args.template), scope, today=stamp))
             return 0
 
-        if args.paths_from == "git":
+        wants_session = args.session is not None or args.transcript is not None
+        # 🔴 A CONTRADICTION IS REFUSED, NOT RESOLVED. `--paths-from` names the
+        # FALLBACK source, so pairing it with a session request asks for two
+        # different windows at once. Honouring either silently would hand back a
+        # plausible answer to a question the caller did not ask — the same
+        # failure the no-fallback rule above exists to prevent, arriving through
+        # argument parsing instead.
+        if wants_session and args.paths_from != "git":
+            print(
+                "subsystem-touch: --session/--transcript cannot be combined with "
+                "--paths-from; they are different path windows. Drop one.",
+                file=sys.stderr,
+            )
+            return 2
+
+        if wants_session:
+            source = collect_session_paths(
+                repo,
+                session=args.session,
+                transcript=args.transcript,
+                exclude=args.exclude,
+            )
+        elif args.paths_from == "git":
             source = collect_git_paths(repo, exclude=args.exclude)
         elif args.paths_from == "-":
             source = caller_supplied(sys.stdin.read().splitlines())

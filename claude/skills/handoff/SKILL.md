@@ -65,10 +65,18 @@ Topic argument (optional): `$ARGUMENTS`. If empty, infer a short kebab-case topi
 4. **Record what this session touched in the subsystem index** (read-only probe, then an opt-in write). The index is the terse *pointer sheet* that outlives this handoff doc; `/analyze-service` was its only writer, so entries existed for infra services in one scope while work spans ~12 repos. This step is the other writer. Run:
 
    ```
-   python3 /home/zach/workspace/devrc/scripts/lib/subsystem_touch.py --repo <repo> --exclude claudedocs/handoff-<topic>.md
+   python3 /home/zach/workspace/devrc/scripts/lib/subsystem_touch.py --repo <repo> --session <session-uuid> --exclude claudedocs/handoff-<topic>.md
    ```
 
-   `--exclude` drops the doc **you just wrote in step 2** — without it the handoff doc is untracked in its own window and `claudedocs` is a nomination on every single run. It **never writes**; it resolves the changed paths against the store and reports. Scope is derived from the repo you are in (worktree-stable), so entries accrue where the work happened.
+   🔴 **`<session-uuid>` is the basename of your scratchpad directory.** Your system prompt names a scratchpad path of the form `/tmp/claude-<n>/<project>/<session-uuid>/scratchpad` — pass that `<session-uuid>` segment, nothing else. There is no environment variable for it, so it can only come from you.
+
+   **Pass it whenever you can.** It reads what *this session* actually edited from its own transcript, which is **independent of git**: a session that landed its work through merged PRs has an empty `git diff HEAD` and a HEAD sitting at the merge-base by the time this step runs, and on this tool's first real invocation that is exactly why it reported nothing. Without `--session` the tool falls back to git's **branch** window — still honest, still tested, but blind to work that has already merged.
+
+   🔴 **Never pass a UUID you are unsure of.** It is validated — the transcript must exist, have been written in the last 30 minutes, and record a `cwd` equal to `--repo` — and a wrong one **fails with a named error rather than silently reporting another session's paths**. Do not retry with a different UUID to make it pass; drop `--session` and use the git window instead.
+
+   `--exclude` drops the doc **you just wrote in step 2** — it is in *both* windows (untracked in git's, a `Write` tool call in the session's), and without it `claudedocs` is a nomination on every single run. It **never writes**; it resolves the changed paths against the store and reports. Scope is derived from the repo you are in (worktree-stable), so entries accrue where the work happened.
+
+   **Read the `caveat:` line before you write anything** — it states what the chosen window structurally cannot see, and the two sources are blind in *opposite* directions. The session window in particular does **not** include what a **subagent** edited, or files written by a `Bash` command; if the session's real work happened in a dispatched subagent, expect a thin path set and say so rather than inventing entries.
 
    🔴 **Any non-zero exit ⇒ print the stderr line verbatim and write NOTHING.** Exit 3 covers a missing store, a malformed entry, an unusable path and a git failure alike; none of them is a reading. Do **not** fall back to recollection — an entry written from memory is exactly the unverifiable content this store must not accumulate.
 

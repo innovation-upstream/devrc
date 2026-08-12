@@ -429,7 +429,33 @@ TARGET_FLOORS=(
   # says: 2551 -> 2629 collected on main + this branch, measured by the gate on
   # the MERGED tree rather than computed from either side of the conflict.
   #   _suggested_floor 2629 = 2629 - min(50, max(1, 131)) = 2629 - 50 = 2579.
-  "scripts/tests|2579"
+  #
+  # 2026-08-12, the subsystem-touch SESSION path source: 2629 -> 2697 collected,
+  # +68 in test_subsystem_touch.py (136 -> 204 tests: the session source's
+  # positive-control pair, its five named negative controls, the
+  # partial-trailing-line edge, and one mutation kill per new guard). The gate's
+  # own line on the twice-rebased tree:
+  #   PASS  scripts/tests  (collected=2697 passed=2697 skipped=0)
+  # put through the gate's own function:
+  #   _suggested_floor 2697 = 2697 - min(50, max(1, 134)) = 2697 - 50 = 2647.
+  #
+  # 🔴 THIS BRANCH MEASURED THIS LINE THREE TIMES AND THE FIRST TWO READINGS ARE
+  # VOID — which is the whole argument for re-measuring rather than reconciling.
+  # It read `collected=2603` against a base of 2535; the standup fix moved the
+  # base to 2551 and it re-read 2619; the waiting-signal branch moved it again to
+  # 2629. Only the last reading, taken by the authoritative gate on the tree that
+  # actually exists, is worth anything. What that discipline caught: this branch
+  # had recorded its OWN delta as +118, and the measured figure is +68 — a wrong
+  # number that arithmetic across the conflict would have written straight into
+  # the floor, where nothing would ever have caught it (a floor is a minimum, so
+  # one that is merely too low fails silently forever).
+  #
+  # ⚠ Each rebase so far has been purely additive. That is a RESULT of measuring,
+  # not a licence to assume it: a merge can change collection through a shared
+  # fixture, a colliding parametrize id, or a module that stops importing.
+  #
+  # See the commit message for the gate line this number was copied from.
+  "scripts/tests|2647"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
