@@ -27,12 +27,34 @@ Contract: this hook is a best-effort SIDE EFFECT only. It ALWAYS exits 0 and
 never emits blocking output — a non-zero/blocking Stop hook would perturb the
 session. Any internal error is swallowed. Worst case == the hook not existing.
 
+GLOBAL COALESCING (2026-08-12 — the do-not-disturb fix). The per-session
+cooldown above bounds ONE session's ping rate and does nothing to the aggregate:
+with N concurrent sessions the desktop sees N independent streams. Measured from
+this log: 1914 desktop toasts in 11 days on the workbench (~174/day, peak 386)
+and 1183 in 18 days on the laptop — enough that DND was switched on, which then
+swallowed every class of alert except the `notify-failure` deadman. So a second,
+CROSS-SESSION gate sits in front of the desktop toast: at most one toast per
+CLAUDE_NOTIFY_GLOBAL_COOLDOWN_SECONDS across all sessions on this host.
+
+It COALESCES rather than drops. Every turn the window suppresses is recorded in a
+shared state file, and the next toast that does fire names how many other turns
+finished and which projects they were — nothing that would have been said goes
+unsaid, it arrives later and batched onto one line. The gate is applied ONLY to
+the desktop path, so the headless/away-from-machine clawgate push is unchanged
+and a suppressed toast never spills onto the phone instead.
+
+Set CLAUDE_NOTIFY_GLOBAL_COOLDOWN_SECONDS=0 to disable the gate and get exactly
+the pre-2026-08-12 behaviour back.
+
 Kill-switch: CLAUDE_NOTIFY=off (or 0/false/no) disables it for a session.
 Config env:
   CLAUDE_NOTIFY_MIN_SECONDS       threshold in seconds (default 60)
   CLAUDE_NOTIFY_COOLDOWN_SECONDS  min seconds between pings per session
                                   (default = the threshold) — collapses a burst
                                   of parallel SubagentStops into one ping.
+  CLAUDE_NOTIFY_GLOBAL_COOLDOWN_SECONDS
+                                  min seconds between DESKTOP toasts across ALL
+                                  sessions (default 600). 0 disables the gate.
   CLAUDE_NOTIFY                   off/0/false/no -> disabled
   CLAWGATE_API_URL           clawgate base URL (else read from clawgate.env)
   CLAWGATE_HOOK_TOKEN        clawgate machine bearer token (else clawgate.env)
@@ -41,6 +63,7 @@ import os
 import sys
 import json
 import time
+import fcntl
 import shutil
 import subprocess
 
@@ -48,7 +71,13 @@ HOME = os.path.expanduser("~")
 CACHE_DIR = os.path.join(HOME, ".cache", "claude-notify")
 CLAWGATE_ENV = os.path.join(HOME, ".claude", "clawgate.env")
 LOG_FILE = os.path.join(HOME, ".claude", "claude-notify.log")
+# Cross-session coalescing state, shared by every hook process on this host.
+GLOBAL_STATE = os.path.join(CACHE_DIR, "global.json")
 DEFAULT_THRESHOLD = 60
+DEFAULT_GLOBAL_COOLDOWN = 600
+# Bound the pending list so a long quiet-window stretch cannot grow the state
+# file without limit. Only the NAMES are capped; `held` counts every turn.
+PENDING_CAP = 200
 STALE_SECONDS = 24 * 60 * 60  # prune start/lastnotify files older than 1 day
 
 
@@ -80,6 +109,108 @@ def cooldown():
         return float(os.environ.get("CLAUDE_NOTIFY_COOLDOWN_SECONDS", threshold()))
     except Exception:
         return threshold()
+
+
+def global_cooldown():
+    """Min seconds between DESKTOP toasts across ALL sessions on this host.
+
+    0 (or negative, or unparseable-as-0) disables the cross-session gate.
+    """
+    try:
+        return float(os.environ.get("CLAUDE_NOTIFY_GLOBAL_COOLDOWN_SECONDS",
+                                    DEFAULT_GLOBAL_COOLDOWN))
+    except Exception:
+        return DEFAULT_GLOBAL_COOLDOWN
+
+
+def coalesce_decide(state, now, project, window):
+    """PURE. The whole cross-session policy, with no I/O, so it can be replayed
+    against the historical log and unit-tested directly.
+
+    state  -- {"last_emit": epoch, "pending": [project, ...], "held": int}
+    returns (emit, new_state, (held, distinct_projects))
+
+    Emit when the window has elapsed since the last emitted toast; otherwise
+    hold this turn and fold it into whatever fires next. `held` counts EVERY
+    suppressed turn even after the name list hits PENDING_CAP, so the number in
+    the toast stays truthful when the names are truncated.
+    """
+    try:
+        last = float(state.get("last_emit") or 0.0)
+    except (TypeError, ValueError):
+        last = 0.0
+    pending = [p for p in (state.get("pending") or []) if isinstance(p, str)]
+    try:
+        held = int(state.get("held") or 0)
+    except (TypeError, ValueError):
+        held = 0
+
+    # `not last` is the NEVER-EMITTED case and is handled explicitly rather than
+    # left to `now - 0 >= window` arithmetic: that only happens to be true
+    # because real epochs are large, so a fresh cache on a host with a bogus or
+    # reset clock would hold the very first toast instead of emitting it.
+    if window <= 0 or not last or (now - last) >= window:
+        distinct = []
+        for p in pending:
+            if p and p not in distinct:
+                distinct.append(p)
+        return True, {"last_emit": now, "pending": [], "held": 0}, (held, distinct)
+
+    pending.append(project or "")
+    held += 1
+    if len(pending) > PENDING_CAP:
+        pending = pending[-PENDING_CAP:]
+    return False, {"last_emit": last, "pending": pending, "held": held}, (0, [])
+
+
+def coalesce_gate(now, project):
+    """Apply coalesce_decide() to the shared on-disk state under an exclusive
+    lock (many hook processes run concurrently, one per session).
+
+    FAILS OPEN: any error reading/writing/locking the state emits the toast.
+    A broken gate must never become a third silent-delivery failure — the worst
+    case is the old, noisy behaviour, not a lost notification.
+    """
+    window = global_cooldown()
+    if window <= 0:
+        return True, (0, [])
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        with open(GLOBAL_STATE, "a+") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            f.seek(0)
+            raw = f.read()
+            try:
+                state = json.loads(raw) if raw.strip() else {}
+            except Exception:
+                state = {}
+            if not isinstance(state, dict):
+                state = {}
+            emit, new_state, summary = coalesce_decide(state, now, project, window)
+            f.seek(0)
+            f.truncate()
+            f.write(json.dumps(new_state))
+            f.flush()
+            return emit, summary
+    except Exception as e:
+        log("coalesce gate error (failing open, toast emitted): %r" % (e,))
+        return True, (0, [])
+
+
+def coalesce_suffix(held, projects):
+    """The line appended to a toast body naming what was folded into it.
+
+    Empty string when nothing was held, so an uncoalesced toast is byte-for-byte
+    what it was before this feature existed.
+    """
+    if held <= 0:
+        return ""
+    shown = projects[:6]
+    names = ", ".join(p for p in shown if p)
+    if len(projects) > len(shown):
+        names += ", …"
+    line = "+%d other turn%s finished" % (held, "" if held == 1 else "s")
+    return (line + ": " + names) if names else line
 
 
 def safe_session_id(sid):
@@ -142,6 +273,19 @@ def load_clawgate_env():
     except Exception:
         pass
     return url, token
+
+
+def desktop_available():
+    """True when a desktop toast could actually be dispatched from here.
+
+    Deliberately mirrors notify_desktop()'s own preconditions: it decides whether
+    the CROSS-SESSION gate applies at all, and the gate must apply exactly when
+    the desktop path is the one that would fire. On a headless host this is
+    False, the gate is skipped, and the clawgate phone fallback is untouched.
+    """
+    if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
+        return False
+    return bool(shutil.which("dunstify") or shutil.which("notify-send"))
 
 
 def notify_desktop(title, body):
@@ -208,13 +352,33 @@ def do_notify(event, cwd, session):
     label = "subagent finished" if event == "SubagentStop" else "finished"
     title = "✅ Claude %s (%s)" % (label, elapsed)
     body = ("%s — turn ran %s" % (project, elapsed)) if project else ("turn ran %s" % elapsed)
+
+    # CROSS-SESSION gate, desktop path only. When it holds this turn we emit
+    # nothing at all — deliberately NOT falling through to clawgate, which would
+    # just move the noise to the phone while the user sits at the machine.
+    held = 0
+    if desktop_available():
+        emit, (held, projects) = coalesce_gate(time.time(), project)
+        if not emit:
+            log("coalesced event=%s project=%s elapsed=%s (held for next toast)"
+                % (event, project, elapsed))
+            return
+        suffix = coalesce_suffix(held, projects)
+        if suffix:
+            title = "✅ Claude finished (%s) +%d" % (elapsed, held)
+            body = body + "\n" + suffix
+
     d = notify_desktop(title, body)
     # clawgate (phone push) is a FALLBACK: only when there's no local desktop
     # toast (i.e. the headless workbench / away-from-laptop). Firing both would
     # push a redundant phone card while the user is sitting at the laptop.
     c = notify_clawgate(title, body, host, project, cwd, session) if not d else False
-    log("notify event=%s project=%s elapsed=%s desktop=%s clawgate=%s"
-        % (event, project, elapsed, d, c))
+    # `coalesced=` is part of the log CONTRACT: it distinguishes a toast that
+    # correctly merged N held turns from one that fired because the gate crashed
+    # and failed open (which logs its own "coalesce gate error" line and
+    # coalesced=0). Replay/attribution tooling reads both fields.
+    log("notify event=%s project=%s elapsed=%s desktop=%s clawgate=%s coalesced=%d"
+        % (event, project, elapsed, d, c, held))
 
 
 def handle():

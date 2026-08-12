@@ -137,3 +137,74 @@ def test_appname_seam_between_handler_and_rule():
     assert all(a == appname for a in sent), (
         "dunst bypass rule matches appname=%r but notify-failure.sh sends -a %r; "
         "the DND bypass would silently never match" % (appname, sorted(set(sent))))
+
+
+# ---------------------------------------------------------------------------
+# EARLYOOM BURST COALESCING — added 2026-08-12 alongside the notification-volume
+# reduction. These live HERE, not in their own file, because the property that
+# actually needs guarding is a RELATIONSHIP: a new rule was added to the same
+# rule set the deadman bypass depends on, and the thing that must not happen is
+# that it touches the deadman.
+# ---------------------------------------------------------------------------
+
+_STACK_RULE = "system_notify_stack"
+
+
+def test_earlyoom_burst_rule_sets_a_stack_tag():
+    """The mechanism. Measured on dunst 1.13.2 (laptop, 2026-08-12, no fullscreen
+    window focused, 5 notifications per arm with distinct summaries so the global
+    `stack_duplicates` cannot masquerade as this): untagged control -> displayed
+    = 3, tagged -> displayed = 1. The untagged arm is the positive control PR
+    #409 lacked; without it a low tagged number is unreadable.
+    """
+    rule = _dunst_rule(_STACK_RULE)
+    assert rule.get("set_stack_tag"), (
+        "%r must set a stack tag; that is the entire mechanism collapsing an "
+        "OOM burst (204 notifications in one day, 111 in one 3-minute window) "
+        "into a single updating toast" % _STACK_RULE)
+
+
+def test_earlyoom_burst_rule_is_scoped_to_the_oom_bridge():
+    """Keyed on the appname systembus-notify hard-codes. An unfiltered stack tag
+    would collapse UNRELATED notifications into one another — a silent-delivery
+    failure of exactly the shape this system has already shipped twice."""
+    rule = _dunst_rule(_STACK_RULE)
+    assert rule.get("appname") == "system-notify", (
+        "%r must be scoped to appname=system-notify; got %r"
+        % (_STACK_RULE, rule.get("appname")))
+
+
+def test_earlyoom_burst_rule_cannot_match_the_deadman():
+    """🔴 THE ONE THAT MATTERS. `notify-failure` is the only class currently
+    reaching the operator through DND. If both rules ever keyed on the same
+    appname, unit-failure toasts would start REPLACING one another — three
+    different units failing would show as one — and every existing assertion in
+    this file would still pass, because each rule is independently correct."""
+    stack = _dunst_rule(_STACK_RULE)
+    bypass = _dunst_rule(_BYPASS_RULE)
+    assert stack.get("appname") != bypass.get("appname"), (
+        "%r and %r must not key on the same appname (%r): the deadman's toasts "
+        "would collapse into one another"
+        % (_STACK_RULE, _BYPASS_RULE, stack.get("appname")))
+
+
+def test_earlyoom_burst_rule_takes_no_part_in_the_fullscreen_ordering():
+    """The bypass's protection is 'sorts last among rules setting `fullscreen`'.
+    A new rule that sets `fullscreen` and sorts after `zz_` would silently
+    overwrite it. This rule must stay out of that competition entirely."""
+    rule = _dunst_rule(_STACK_RULE)
+    assert "fullscreen" not in rule, (
+        "%r must not set `fullscreen` — it would join the last-write-wins "
+        "ordering that protects %r" % (_STACK_RULE, _BYPASS_RULE))
+    assert "override_pause_level" not in rule, (
+        "%r must not set `override_pause_level` — OOM toasts are not a deadman "
+        "class and must still respect do-not-disturb" % _STACK_RULE)
+
+
+def test_no_other_rule_sets_a_stack_tag():
+    """LEDGER over the tree, not a spot check. A stack tag added to a second rule
+    later is how two unrelated notification classes silently start replacing each
+    other; this fails when the set GROWS as well as when it shrinks."""
+    assert _rules_setting("set_stack_tag") == {_STACK_RULE}, (
+        "exactly one dunst rule may set a stack tag; got %r"
+        % sorted(_rules_setting("set_stack_tag")))
