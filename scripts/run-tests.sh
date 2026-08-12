@@ -181,6 +181,16 @@ if [ -z "$ROOT" ]; then
   [ -n "$ROOT" ] || ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fi
 
+# 🔴 `unset CDPATH` BEFORE the first `cd`, and it is not hygiene theatre. With
+# CDPATH set in the caller's environment, `cd <dir>` PRINTS the resolved
+# directory on stdout, so the extremely common shell idiom
+# `HERE=$(cd "$(dirname "$0")" && pwd)` yields a TWO-LINE value. MEASURED on the
+# dev host: scripts/tests/test_release_wrapper.sh (a SHELL_TESTS target below)
+# then read `.zshrc` through that doubled path and died with
+# `FAIL: could not extract _release_run` — a red gate whose message points at
+# the wrong thing entirely. The variable is inherited by every child this runner
+# starts, so unsetting it here is the one place that fixes it for all of them.
+unset CDPATH
 cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 # --- GUARD 1: tool precondition ------------------------------------------------
 # Every binary the suites `skipif` on. Absence must be an ERROR, never a skip.
@@ -690,6 +700,90 @@ if [ ! -w "$HOME" ]; then
   export HOME="$(mktemp -d)"
 fi
 
+# --- GUARD 7: NO TEST MAY REACH A REAL LAUNCHER, IN ANY TARGET -----------------
+# 🔴 THE ENFORCEMENT POINT. Read this before touching anything below it.
+#
+# #399 built the mechanism (`scripts/testlib/nolaunch.py`) and installed it from
+# `scripts/tests/conftest.py`. This script runs ONE pytest process per target,
+# and there are 17 of them plus the hook/shell scripts — so that conftest
+# protected exactly ONE. A count of enforcement DECLARATIONS is not a count of
+# protected INSTANCES (claude/RULES.md), and the escape that produced 158 real
+# desktop toasts in 49 minutes came from a seam test run against a tree where
+# the seam did not exist — a shape that can occur in any target.
+#
+# The fix is attached HERE, at the single place every target is invoked, rather
+# than copied into 17 directories: 17 copies drift, and the 18th target gets
+# none. Three exports and one pytest flag:
+#
+#   * a record-only stub dir, FIRST on PATH for this whole script. Covers every
+#     PATH-resolved launch made by anything this runner starts — including the
+#     NON-pytest targets (HOOK_TESTS, SHELL_TESTS), which have no plugin to load.
+#   * `PYTHONPATH` + `-p testlib.nolaunch_plugin` on the pytest line, so every
+#     pytest target ALSO gets the in-process layer that intercepts ABSOLUTE-path
+#     launches by basename. PATH cannot shadow an absolute path — see
+#     `scripts/browser-bridge/server.py`'s `_I3_MSG_FALLBACKS`, which resolves
+#     `/run/current-system/sw/bin/i3-msg` directly whenever `which` misses.
+#   * `-p` deliberately, NOT `PYTEST_PLUGINS=`: the env var is INHERITED by the
+#     nested pytest sessions that `test_no_real_launchers.py` runs as
+#     control/mutant pairs, which would protect the mutant half and turn those
+#     pins green on their own mutants.
+#
+# The plugin writes ONE `nolaunch(session)` marker line per pytest session, and
+# the accounting below REQUIRES exactly one per pytest target. That is the
+# per-target positive control: a target with no marker is a target this guard
+# never loaded in, and "no marker" is otherwise indistinguishable from the
+# reassuring zero of "nothing tried to launch".
+NOLAUNCH_DIR="$(mktemp -d)"
+if ! PYTHONPATH="$ROOT/scripts${PYTHONPATH:+:$PYTHONPATH}" \
+     python -m testlib.nolaunch "$NOLAUNCH_DIR" >/dev/null 2>&1; then
+  echo "run-tests: FATAL — could not install the no-real-launcher stubs into" >&2
+  echo "  $NOLAUNCH_DIR. Refusing to run: the suites reach systemd-run, dunstify," >&2
+  echo "  openrgb and ddcutil, and without these stubs a green run means real" >&2
+  echo "  transient timers and real toasts on the operator's desktop." >&2
+  exit 2
+fi
+NOLAUNCH_LOG="$NOLAUNCH_DIR/launches.log"
+export PATH="$NOLAUNCH_DIR:$PATH"
+export DEVRC_TEST_LAUNCH_STUB_DIR="$NOLAUNCH_DIR"
+export PYTHONPATH="$ROOT/scripts${PYTHONPATH:+:$PYTHONPATH}"
+
+# 🔴 THE ACKNOWLEDGEMENT LEDGER — "<target>|<reason>". A target listed here is
+# EXPECTED to drive launchers into the stub, and is REQUIRED to: an entry whose
+# target records zero intercepts fails the run. That direction is the point.
+# The mutant that matters is not "the guard is deleted" — it is "the guard
+# silently covers nothing while the suite stays green", and a ledger that only
+# PERMITTED intercepts would be green under exactly that mutant.
+NOLAUNCH_ACK=(
+  "scripts/tests|drives monitor-blackout's systemd-run scheduling, rig-control's openrgb/notify-send and bar-status-poll's fire_toast INTO the stub on purpose — those are the seam tests, and their whole value is that the launch really happens and really lands here"
+)
+# Every intercept from any OTHER target is a finding: a test in that target
+# tried to touch the operator's machine and only this guard stopped it.
+NOLAUNCH_SEEN=()
+
+_nolaunch_lines() { # total lines in the launch log (0 when absent)
+  if [ -f "$NOLAUNCH_LOG" ]; then wc -l < "$NOLAUNCH_LOG" | tr -d ' '; else echo 0; fi
+}
+_nolaunch_slice() { # $1 = first line (1-based), $2 = last line
+  [ -f "$NOLAUNCH_LOG" ] || return 0
+  [ "$2" -ge "$1" ] || return 0
+  sed -n "$1,$2p" "$NOLAUNCH_LOG"
+}
+_nolaunch_ack_reason() {
+  local t="$1" entry
+  for entry in "${NOLAUNCH_ACK[@]}"; do
+    [ "${entry%%|*}" = "$t" ] && { printf '%s' "${entry#*|}"; return 0; }
+  done
+  return 1
+}
+
+# ⚠ The "every NOLAUNCH_ACK entry names a real target" pin is deliberately NOT
+# a runtime check here. It was one, and it PREEMPTED ten existing regression
+# tests that build a runner copy with a substituted target list — an earlier
+# check that always wins, so their own findings became unobservable (the
+# unreachable-guard trap in claude/RULES.md). It lives in
+# `scripts/tests/test_no_real_launchers_all_targets.py`, which parses THIS file,
+# the same way TARGET_FLOORS' two-way pin is tested.
+
 # --- GUARD 2: the pinned expected-skip set -------------------------------------
 # One "<dir>|<reason-regex>" per LEGITIMATELY skipped test. Both halves must match
 # a pytest `SKIPPED [n] <path>:<line>: <reason>` line, and the skip TOTAL must
@@ -796,10 +890,16 @@ run_pytest() {
     return 1
   fi
 
-  local log rc
+  local log rc nl_before nl_after
   log="$(mktemp)"
-  python -m pytest "$d" -q -p no:cacheprovider --no-header -rs >"$log" 2>&1
+  nl_before="$(_nolaunch_lines)"
+  # 🔴 `-p testlib.nolaunch_plugin` is GUARD 7 (see its header). It is on THIS
+  # line — the one place every target is invoked — and not in 17 conftests.
+  python -m pytest "$d" -q -p no:cacheprovider -p testlib.nolaunch_plugin \
+    --no-header -rs >"$log" 2>&1
   rc=$?
+  nl_after="$(_nolaunch_lines)"
+  NOLAUNCH_SEEN+=("$d|$(( nl_before + 1 ))|$nl_after")
   cat "$log"
 
   # GUARD 4: parse pytest's summary line. `-q` emits it undecorated, e.g.
@@ -918,12 +1018,48 @@ for HOOK_TEST in "${HOOK_TESTS[@]}"; do
     continue
   fi
   echo "=== script $HOOK_TEST ==="
+  nl_before="$(_nolaunch_lines)"
   if python "$HOOK_TEST"; then
     RESULTS+=("PASS  $HOOK_TEST (script)")
   else
     RESULTS+=("FAIL  $HOOK_TEST (script)")
     fail=1
   fi
+  # These are NOT pytest, so they load no plugin: their only protection is the
+  # stub dir this script put first on PATH. They are accounted the same way, and
+  # get no session marker — GUARD 7 requires a marker only from pytest targets.
+  NOLAUNCH_SEEN+=("$HOOK_TEST|$(( nl_before + 1 ))|$(_nolaunch_lines)")
+  echo
+done
+
+# --- SHELL targets -------------------------------------------------------------
+# Bash test scripts. `test_release_wrapper.sh` had been run by NO gate at all
+# since it was written (its own header says `run: bash scripts/tests/
+# test_release_wrapper.sh`, by hand), while creating fake `notify-send`/`git`/
+# `npm` binaries on PATH and driving the real `_release_run` out of `.zshrc`.
+# Nothing forced its stub-prepend to keep inheriting PATH, and nothing ran it.
+# It is here so the guard above covers it too — the stub dir is on PATH for this
+# whole script, so a stub that stopped shadowing lands in the launch log instead
+# of on the operator's desktop.
+SHELL_TESTS=(
+  "scripts/tests/test_release_wrapper.sh"
+)
+for SHELL_TEST in "${SHELL_TESTS[@]}"; do
+  if [ ! -f "$SHELL_TEST" ]; then
+    echo "run-tests: ERROR — shell test '$SHELL_TEST' does not exist (typo, or moved?)." >&2
+    RESULTS+=("FAIL  $SHELL_TEST (missing)")
+    fail=1
+    continue
+  fi
+  echo "=== script $SHELL_TEST ==="
+  nl_before="$(_nolaunch_lines)"
+  if bash "$SHELL_TEST"; then
+    RESULTS+=("PASS  $SHELL_TEST (script)")
+  else
+    RESULTS+=("FAIL  $SHELL_TEST (script)")
+    fail=1
+  fi
+  NOLAUNCH_SEEN+=("$SHELL_TEST|$(( nl_before + 1 ))|$(_nolaunch_lines)")
   echo
 done
 
@@ -988,6 +1124,64 @@ if [ "$TOT_SKIPPED" -ne "${#EXPECTED_SKIPS[@]}" ]; then
   fi
   fail=1
 fi
+
+# --- GUARD 7 (evaluation): per-target launcher accounting ----------------------
+# One line per target, ALWAYS printed — including the zeros. A bare "0 real
+# launches" from a counter nobody has watched move is indistinguishable from a
+# counter wired to nothing, so the acknowledged target's NON-zero count is
+# printed beside every other target's zero, as a pair.
+echo "  ---- launcher intercepts (GUARD 7) ----"
+nolaunch_problems=()
+for t in "${TARGETS[@]}"; do
+  seen=0
+  for entry in "${NOLAUNCH_SEEN[@]}"; do
+    [ "${entry%%|*}" = "$t" ] && seen=1 && break
+  done
+  [ "$seen" -eq 1 ] || nolaunch_problems+=("$t  — never accounted: run_pytest returned before GUARD 7 could measure it")
+done
+
+for entry in "${NOLAUNCH_SEEN[@]}"; do
+  nt="${entry%%|*}"
+  rest="${entry#*|}"
+  nfrom="${rest%%|*}"
+  nto="${rest#*|}"
+  slice="$(_nolaunch_slice "$nfrom" "$nto")"
+  markers=$(printf '%s\n' "$slice" | grep -c '^nolaunch(session)' || true)
+  reads=$(printf '%s\n' "$slice" | grep -c '^systemctl(read)' || true)
+  hits="$(printf '%s\n' "$slice" | grep -vE '^(nolaunch\(session\)|systemctl\(read\)|$)' || true)"
+  nhits=0
+  [ -n "$hits" ] && nhits=$(printf '%s\n' "$hits" | grep -c . || true)
+
+  is_pytest=0
+  for t in "${TARGETS[@]}"; do [ "$t" = "$nt" ] && is_pytest=1 && break; done
+
+  if ack="$(_nolaunch_ack_reason "$nt")"; then
+    echo "    $nt  intercepted=$nhits (ACKNOWLEDGED)  systemctl-reads=$reads  plugin=$markers"
+    # 🔴 The REQUIRED direction: an acknowledged target that intercepts nothing
+    # means the guard is wired to nothing. A ledger that only PERMITTED
+    # intercepts would stay green under the one mutant that matters — the guard
+    # silently covering zero targets.
+    if [ "$nhits" -lt 1 ]; then
+      nolaunch_problems+=("$nt  — acknowledged as a target that DRIVES launchers into the stub, but it intercepted NOTHING. Either the guard stopped being installed, or those seam tests stopped running. Reason on file: $ack")
+    fi
+  else
+    echo "    $nt  intercepted=$nhits  systemctl-reads=$reads  plugin=$markers"
+    if [ "$nhits" -gt 0 ]; then
+      nolaunch_problems+=("$nt  — reached $nhits REAL host launcher(s). They were intercepted and did NOT run; a test in this target tried to touch the operator's machine:"$'\n'"$(printf '%s\n' "$hits" | sed 's/^/           /')")
+    fi
+  fi
+
+  if [ "$is_pytest" -eq 1 ] && [ "$markers" -ne 1 ]; then
+    nolaunch_problems+=("$nt  — the nolaunch plugin emitted $markers session marker(s), expected exactly 1. This target ran WITHOUT the guard, so its zero above means nothing (see GUARD 7's header: -p testlib.nolaunch_plugin on the pytest line).")
+  fi
+done
+
+if [ "${#nolaunch_problems[@]}" -gt 0 ]; then
+  echo "  ERROR: ${#nolaunch_problems[@]} GUARD 7 problem(s):" >&2
+  for p in "${nolaunch_problems[@]}"; do echo "         $p" >&2; done
+  fail=1
+fi
+rm -rf "$NOLAUNCH_DIR"
 
 # GUARD 6. One writer, fed the same value `exit` is about to take, so the
 # printed verdict and the process status cannot disagree — including through a
