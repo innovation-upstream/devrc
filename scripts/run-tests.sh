@@ -401,7 +401,14 @@ TARGET_FLOORS=(
   # (scripts/tests is already a directory target) and adds ZERO skips, so
   # EXPECTED_SKIPS is untouched; movement on THIS line is the evidence the gate
   # runs the new file at all.
-  "scripts/tests|2405"
+  #
+  # 2026-08-12, the idle-bucket split (agents vs bare shells): 2455 -> 2513
+  # collected on main + this branch. Re-measured by the authoritative gate on
+  # the MERGED tree, not computed from either side of the conflict — this line
+  # is a churn magnet (every branch that adds a test re-pins it, so every open
+  # PR conflicts here) and `rerere` has previously replayed a stale resolution
+  # onto it. `_suggested_floor 2513` = 2513 - min(50, max(1, 125)) = 2463.
+  "scripts/tests|2463"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
