@@ -85,6 +85,11 @@ def fg(hex_color: str) -> str:
     return "\033[38;2;%d;%d;%dm" % (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
 
 
+# True when this process renders exactly ONE frame and exits (`--once`, or a
+# non-tty stdout). Set by main(). Anything that promises "…and the next frame
+# will show X" is a lie in that mode — see initiatives_freshness.
+ONE_SHOT = False
+
 # None = not yet decided; decided once, on first use, from the environment.
 _COLOR = None
 
@@ -1245,7 +1250,20 @@ def render_done(initiatives, freshness="", limit=6) -> list:
 # ===========================================================================
 # initiative-scan cache + background refresh
 # ===========================================================================
-def initiatives_freshness(now=None, cache=ISCAN_CACHE, lock=ISCAN_LOCK) -> str:
+def initiatives_freshness(now=None, cache=ISCAN_CACHE, lock=ISCAN_LOCK,
+                          one_shot=None) -> str:
+    """Freshness note for a TTL-cached section: how old the rendered data is,
+    plus whether a refresh is in flight.
+
+    🔴 "refreshing…" is a promise only the INTERACTIVE loop can keep. The frame
+    that kicks a background refresh cannot show its result — the worker finishes
+    seconds later — and in `--once` there is no second frame, so the reader is
+    looking at the old copy while a fresh one lands on disk behind them. That
+    read as `updated 7d ago · refreshing…` beside cache files 20 seconds old,
+    and an agent came within one `stat` of reporting week-old PR data as
+    current. In one-shot mode the note says what is actually true instead.
+    """
+    one_shot = ONE_SHOT if one_shot is None else one_shot
     age = file_age_secs(cache, now)
     if age is None:
         note = "no cache yet"
@@ -1253,7 +1271,8 @@ def initiatives_freshness(now=None, cache=ISCAN_CACHE, lock=ISCAN_LOCK) -> str:
         note = "updated %s ago" % rel_age(age)
     lock_age = file_age_secs(lock, now)
     if lock_age is not None and lock_age < ISCAN_LOCK_TTL:
-        note += " · refreshing…"
+        note += (" · stale; refresh kicked, re-run for current data"
+                 if one_shot else " · refreshing…")
     return note
 
 
@@ -1631,11 +1650,13 @@ def main(argv=None):
         # maybe_refresh_telemetry).
         refresh_telemetry_cache()
         return 0
-    if "--once" in argv:
-        # Non-interactive single frame — handy for capture-pane / debugging.
-        print(build_frame(shutil.get_terminal_size((100, 40)).columns))
-        return 0
-    if not sys.stdout.isatty():
+    if "--once" in argv or not sys.stdout.isatty():
+        # ONE frame, then exit: `--once` (capture-pane / an agent reading the
+        # dashboard) and any piped stdout. Both are announced, because a section
+        # rendered from a TTL cache cannot show the refresh this frame kicks —
+        # there is no next frame to show it in.
+        global ONE_SHOT
+        ONE_SHOT = True
         print(build_frame(shutil.get_terminal_size((100, 40)).columns))
         return 0
     _run_interactive()

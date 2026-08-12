@@ -827,6 +827,75 @@ def test_initiatives_freshness_refreshing(tmp_path):
     assert "updated" in note and "refreshing" in note
 
 
+def test_freshness_one_shot_says_the_refresh_will_not_be_shown(tmp_path):
+    """🔴 "refreshing…" promises a next frame. `--once` has none: the worker
+    finishes AFTER the frame is printed, so the reader holds the old copy while
+    a fresh one lands on disk. Measured: `updated 7d ago · refreshing…` printed
+    beside cache files 20 seconds old."""
+    cache = tmp_path / "c.json"
+    lock = tmp_path / "l"
+    cache.write_text("{}")
+    lock.write_text("")
+    note = ao.initiatives_freshness(cache=str(cache), lock=str(lock),
+                                    one_shot=True)
+    assert "stale; refresh kicked, re-run for current data" in note
+    assert "refreshing" not in note          # the promise is gone, not reworded
+    assert "updated" in note                 # the age it IS showing still stated
+    # An absent cache is still named as such in one-shot mode.
+    gone = ao.initiatives_freshness(cache=str(tmp_path / "nope.json"),
+                                    lock=str(lock), one_shot=True)
+    assert gone.startswith("no cache yet")
+
+
+def test_freshness_defaults_to_the_module_one_shot_flag(tmp_path, monkeypatch):
+    """The kwarg exists for tests; the RENDER path passes nothing, so the
+    default has to follow the flag main() sets — otherwise the fix is inert."""
+    cache = tmp_path / "c.json"
+    lock = tmp_path / "l"
+    cache.write_text("{}")
+    lock.write_text("")
+    monkeypatch.setattr(ao, "ONE_SHOT", True)
+    assert "re-run for current data" in ao.initiatives_freshness(
+        cache=str(cache), lock=str(lock))
+    monkeypatch.setattr(ao, "ONE_SHOT", False)
+    assert "refreshing" in ao.initiatives_freshness(
+        cache=str(cache), lock=str(lock))
+
+
+def test_main_once_and_pipe_set_one_shot(monkeypatch):
+    """Both single-frame entry points announce themselves — and the interactive
+    one must NOT, or the popup starts lying in the other direction."""
+    seen = []
+    monkeypatch.setattr(ao, "build_frame", lambda w: seen.append(ao.ONE_SHOT) or "")
+    monkeypatch.setattr(ao, "_run_interactive", lambda: seen.append(ao.ONE_SHOT))
+
+    class _Out:
+        def __init__(self, tty):
+            self._tty = tty
+
+        def isatty(self):
+            return self._tty
+
+        def write(self, _s):
+            return 0
+
+        def flush(self):
+            pass
+
+    monkeypatch.setattr(ao, "ONE_SHOT", False)
+    monkeypatch.setattr(ao.sys, "stdout", _Out(True))
+    assert ao.main(["--once"]) == 0            # explicit flag, on a tty
+
+    monkeypatch.setattr(ao, "ONE_SHOT", False)
+    monkeypatch.setattr(ao.sys, "stdout", _Out(False))
+    assert ao.main([]) == 0                    # piped stdout, no flag
+
+    monkeypatch.setattr(ao, "ONE_SHOT", False)
+    monkeypatch.setattr(ao.sys, "stdout", _Out(True))
+    assert ao.main([]) == 0                    # interactive popup
+    assert seen == [True, True, False]
+
+
 # ---------------------------------------------------------------------------
 # build_frame smoke test — must never raise even with everything missing
 # ---------------------------------------------------------------------------
