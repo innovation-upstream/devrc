@@ -480,7 +480,34 @@ TARGET_FLOORS=(
   # fetch is injectable and every test drives a fixture. `no_live_gh` in
   # test_subsystem_touch.py fails any test that reaches the real binary, which
   # is what keeps this line's `skipped=0` true rather than lucky.
-  "scripts/tests|2775"
+  #
+  # 2026-08-12, the subsystem-index READ half (`subsystem_recall.py` + the
+  # `/resume` step): 2825 -> 2958 collected, +133 in the new
+  # scripts/tests/test_subsystem_recall.py (the scope-wide selection rule, the
+  # positive-control pair, the six zeros, four named negative controls, the
+  # caveat-on-every-output-path sweep across BOTH renderers, the
+  # append-concurrency MEASUREMENT that retracted the "fails loudly" claim, the
+  # resume/handoff doc pins, and one mutation kill per guard).
+  # The AUTHORITATIVE gate's own line, `nix build .#checks.x86_64-linux.pytests`:
+  #   PASS  scripts/tests  (collected=2958 passed=2958 skipped=0 floor=2775)
+  # put through the gate's OWN rule rather than arithmetic:
+  #   _suggested_floor 2958 = 2958 - min(50, max(1, 147)) = 2958 - 50 = 2908.
+  #
+  # ⚠ The recorded delta and the measured one AGREE (+133 both ways), which the
+  # lines above say not to count on: the check is that 2825 + 133 = 2958
+  # exactly, i.e. nothing else moved the base since #424 landed. That is a
+  # reading, not an assumption. If this line conflicts with another branch,
+  # re-run the gate on the MERGED tree and copy what it prints — do NOT
+  # reconcile the two sides by hand. (This line has now conflicted on nine
+  # consecutive PRs; the reconcile-by-hand failure it keeps inviting is a floor
+  # that is merely too LOW, which is a minimum and therefore fails silently
+  # forever.)
+  #
+  # ⚠ ZERO new skips, and no HERMETIC_TARGETS entry needed (scripts/tests is
+  # already a directory target). The reader shells out to nothing — no `gh`, no
+  # network, and git only via the writer's `scope_for_repo`, which `git` in
+  # REQUIRED_TOOLS already covers.
+  "scripts/tests|2908"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —

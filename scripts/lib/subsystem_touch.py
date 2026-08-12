@@ -267,6 +267,7 @@ __all__ = [
     "TouchReport",
     "Census",
     "derive_scope",
+    "scope_for_repo",
     "collect_git_paths",
     "collect_session_paths",
     "collect_pr_paths",
@@ -606,6 +607,26 @@ def derive_scope(repo_root: str | Path, git_common_dir: str | Path) -> str:
     if common.name == ".git":
         return normalize_ref(common.parent.name)
     return normalize_ref(Path(repo_root).name)
+
+
+def scope_for_repo(repo: str | Path) -> str:
+    """Ask git where `repo` really lives, then `derive_scope` it. Runs git.
+
+    🔴 EXTRACTED SO THERE IS ONE SCOPE-DERIVATION CALL SITE, not two. `main()`
+    below inlined these three lines, which was fine while this module was the
+    store's only reader-of-scope. `scripts/lib/subsystem_recall.py` — the READ
+    half — needs exactly the same answer, and a reader and a writer that
+    disagree about which scope directory they mean is a silent, total failure:
+    the writer accrues entries under one name and the reader surfaces an empty
+    scope under another, which renders as "nothing recorded yet" and is
+    indistinguishable from the ordinary case. So the recall module imports THIS,
+    rather than re-spelling the two `rev-parse` invocations and the worktree
+    rule they exist to satisfy.
+    """
+    repo = Path(repo)
+    common = _git(repo, ["rev-parse", "--path-format=absolute", "--git-common-dir"]).strip()
+    top = _git(repo, ["rev-parse", "--show-toplevel"]).strip()
+    return derive_scope(top, common)
 
 
 # --- Path sources --------------------------------------------------------------
@@ -2333,11 +2354,7 @@ def main(argv: Sequence[str] | None = None, *, today: str | None = None) -> int:
             return 0
 
         repo = Path(args.repo).resolve()
-        scope = args.scope
-        if scope is None:
-            common = _git(repo, ["rev-parse", "--path-format=absolute", "--git-common-dir"]).strip()
-            top = _git(repo, ["rev-parse", "--show-toplevel"]).strip()
-            scope = derive_scope(top, common)
+        scope = args.scope if args.scope is not None else scope_for_repo(repo)
 
         if args.template is not None:
             print(new_entry_template(normalize_ref(args.template), scope, today=stamp))
