@@ -76,9 +76,23 @@ Topic argument (optional): `$ARGUMENTS`. If empty, infer a short kebab-case topi
 
    `--exclude` drops the doc **you just wrote in step 2** — it is in *both* windows (untracked in git's, a `Write` tool call in the session's), and without it `claudedocs` is a nomination on every single run. It **never writes**; it resolves the changed paths against the store and reports. Scope is derived from the repo you are in (worktree-stable), so entries accrue where the work happened.
 
-   **Read the `caveat:` line before you write anything** — it states what the chosen window structurally cannot see, and the two sources are blind in *opposite* directions. The session window in particular does **not** include what a **subagent** edited, or files written by a `Bash` command; if the session's real work happened in a dispatched subagent, expect a thin path set and say so rather than inventing entries.
+   **Read the `caveat:` line before you write anything** — it states what the chosen window structurally cannot see, and the sources are blind in *opposite* directions. The session window in particular does **not** include what a **subagent** edited, or files written by a `Bash` command; if the session's real work happened in a dispatched subagent, expect a thin path set and say so rather than inventing entries.
 
-   🔴 **Any non-zero exit ⇒ print the stderr line verbatim and write NOTHING.** Exit 3 covers a missing store, a malformed entry, an unusable path and a git failure alike; none of them is a reading. Do **not** fall back to recollection — an entry written from memory is exactly the unverifiable content this store must not accumulate.
+   🔴 **If you landed any PRs this session, run it a SECOND time over them** — you know exactly which ones, and nothing else in the toolchain does:
+
+   ```
+   python3 /home/zach/workspace/devrc/scripts/lib/subsystem_touch.py --repo <repo> --pr <n>[,<n>...]
+   ```
+
+   This is the **only** source that sees a **subagent's** work. Delegating implementation to a subagent is the standing default here, and a subagent's turns are a *separate* transcript that `--session` excludes by construction — so on exactly the sessions worth recording, the session window shows the docs you wrote and none of the code. A PR's file list does not care which agent, session or tool wrote the bytes.
+
+   🔴 **A PR's file list is what the BRANCH LANDED, not what this session touched — never describe it as this session's work.** It is the union of every commit on the branch, so it includes another session's commits, hand-made ones, and older work on a long-lived branch; and it omits anything you did that never reached a PR. When you write a journal bullet from a `--pr` run, attribute it to the branch or the PR, not to "this session".
+
+   🔴 **Run it twice; never merge the two path sets.** The flags are mutually exclusive and the tool refuses the combination on purpose: a single merged set would carry one caveat that is wrong about half its members, and you would lose the one fact that decides whether a bullet is honest. Two runs, two caveats, each read on its own.
+
+   Closed-unmerged PRs are refused by name — their files exist in no tree. `OPEN` and `MERGED` are both accepted, so a PR still in review counts. The `gh` call can fail in ways nothing local can (`gh` missing, not authenticated, network down, rate-limited, a truncated file list); every one exits non-zero with its own named line, and **none of them ever returns an empty path set**, so an empty result from this source always means the PRs genuinely listed no files.
+
+   🔴 **Any non-zero exit ⇒ print the stderr line verbatim and write NOTHING.** Exit 3 covers a missing store, a malformed entry, an unusable path, a git failure and every `gh`/pull-request failure alike; none of them is a reading. Do **not** fall back to recollection — an entry written from memory is exactly the unverifiable content this store must not accumulate.
 
    Otherwise read `status=` and act on that case:
 

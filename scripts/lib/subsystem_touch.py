@@ -33,10 +33,19 @@ nomination, and the census that makes the experiment falsifiable.
 
 WHERE THE PATHS COME FROM, AND WHY
 ----------------------------------
-Two real sources, in preference order: the SESSION's own transcript, falling
-back to GIT. The reporting core takes paths as an argument and has never heard
-of either, which is what let the second one be added without touching the
-matching logic.
+Three real sources: the SESSION's own transcript, the PULL REQUESTS a branch
+landed, and GIT. The reporting core takes paths as an argument and has never
+heard of any of them, which is what let the second and third be added without
+touching the matching logic.
+
+🔴 THEY ANSWER TWO DIFFERENT QUESTIONS, AND THE DIFFERENCE IS NOT A NUANCE.
+`--session` answers "what did THIS SESSION touch". `--pr` answers "what did THIS
+BRANCH LAND". Git's window is a third thing again (this branch's uncommitted +
+committed work, whoever authored it). They are not three approximations of one
+quantity — a PR's file list is the UNION of every commit on its branch, so it
+contains another session's commits, a subagent's, and hand-made ones, while a
+session transcript contains exactly one session's turns and nobody else's. Each
+`caveat` says which question its own window answers; see `PathSource.caveat`.
 
 🔴 GIT WAS THE ORIGINAL SOURCE AND IS STRUCTURALLY BLIND TO THE BEST SESSIONS.
 On its first real invocation this tool captured NOTHING from the session it was
@@ -56,6 +65,18 @@ working pattern, so the source that cannot see it is the one that has to change.
     edits (a separate transcript — measured at 196 of 733 file-tool calls across
     the 40 most recent transcripts), files written by a Bash command rather than
     a file tool, and paths outside the session cwd (counted, never dropped).
+  * PULL REQUESTS (`--pr <n>[,<n>...]`) — the only source that sees a SUBAGENT's
+    work. The standing default in this environment is to DELEGATE non-trivial
+    work to a subagent, and a subagent's turns are a separate transcript the
+    session source excludes by construction (196 of 733 file-tool calls,
+    measured) — so on exactly the sessions worth recording, the session window
+    is thin and the implementation is invisible. `gh pr view <n> --json files`
+    is immune to all three blind spots at once: it does not care which session,
+    which agent, or which tool wrote the bytes, and merged work still counts.
+    🔴 What it buys in coverage it pays for in ATTRIBUTION: it over-reports in
+    the exact direction the session source under-reports, and it cannot tell you
+    which. That is why it is a separate flag with a separate caveat rather than
+    a widening of `--session`, and why the two do not compose (see below).
   * GIT (`--paths-from git`, the default) — FALLBACK. Deterministic, re-runnable,
     already built and tested, and honest about a window that is bounded to the
     BRANCH rather than the session:
@@ -73,6 +94,31 @@ caveat's "what this BRANCH touched, NOT what this SESSION touched" is false in
 the OTHER direction once the source is per-session — it would understate a
 window that is exactly what it disclaims. `PathSource.caveat` branches per
 source; every renderer prints it, on every output path.
+
+🔴 THE SOURCES DO NOT COMPOSE — ONE QUESTION PER RUN, ENFORCED BY ARGPARSE.
+`--session`, `--transcript`, `--pr` and `--paths-from` are mutually exclusive.
+Unioning `--session` with `--pr` was considered and REJECTED, and the reason is
+the caveat rather than the paths:
+
+  * A union has ONE `caveat` line describing a set assembled from two windows
+    with opposite biases. It would have to assert session attribution for some
+    members and deny it for others, in one sentence, with no way for a reader to
+    tell which is which. This module's own rule — "a single hedging sentence
+    covering both sources would be wrong about both" — already forbids that
+    shape for two sources; a union makes it unavoidable rather than optional.
+  * The consumer's decision is per-path. `/handoff` proposes a dated journal
+    bullet against a curated, client-confidential, unbacked-up store. "This
+    session worked on X" and "some session moved X on this branch" are different
+    claims and only one of them belongs in a work-history bullet. A merged set
+    destroys exactly the fact needed to choose.
+  * It matches the refusal already enforced for `--session` + `--paths-from`,
+    which is the SAME shape: two windows, one answer. Composing here while
+    refusing there would leave the module inconsistent about its own principle.
+
+The composition that IS available is honest and needs no code: RUN IT TWICE,
+once per source, and read two reports each carrying its own caveat. That keeps
+attribution intact, which the union destroys. `/handoff` step 4 does exactly
+that.
 
 🔴 A SESSION ID IS VALIDATED, NOT TRUSTED, AND A FAILURE NEVER FALLS BACK TO GIT.
 There is no session-id environment variable, so the id arrives as an argument
@@ -99,6 +145,7 @@ CONTRACT SUMMARY
     derive_scope(repo_root, git_common_dir)   -> str
     collect_session_paths(repo, session=…)    -> PathSource      (PREFERRED)
     find_transcript(session)                  -> Path
+    collect_pr_paths(repo, numbers, fetch=…)  -> PathSource      (runs gh)
     collect_git_paths(repo)                   -> PathSource      (runs git)
     caller_supplied(paths)                    -> PathSource      (pure)
     nominate(assoc, index, *, min_paths, limit)
@@ -128,6 +175,24 @@ and, for the session source — each FATAL, none falling back to git:
     "transcript unreadable"             TranscriptUnreadableError
     "transcript cwd does not match"     TranscriptCwdMismatchError
 
+and, for the PR source — the first source that leaves this machine, so the first
+with an ENVIRONMENTAL failure surface. Each is FATAL, none falls back, and none
+of them can return an empty path set:
+
+    "repo has no usable github remote"         RepoRemoteError
+    "gh cli not found"                         GhMissingError
+    "gh is not authenticated"                  GhAuthError
+    "github api rate limit"                    GhRateLimitError
+    "github api call failed"                   GhApiError   (the FALLBACK: any
+                                               unrecognised gh failure, network
+                                               included, lands here rather than
+                                               being mapped to something specific)
+    "pull request not found"                   PrNotFoundError
+    "pull request belongs to another repository"  PrRepoMismatchError
+    "pull request is closed unmerged"          PrNotLandedError
+    "pull request response is malformed"       PrResponseMalformedError
+    "pull request file list is truncated"      PrFileListTruncatedError
+
 🔴 THE FAILURE MODE IS A CONFIDENT ZERO. "Nothing to record" is the observable
 that the most causes share: no paths, an unknown scope, a matcher wired to
 nothing, entries reached but below threshold, and a genuinely untouched index
@@ -143,6 +208,7 @@ path behind it.
 from __future__ import annotations
 
 import argparse
+import collections.abc as _abc
 import json
 import os
 import subprocess
@@ -184,6 +250,18 @@ __all__ = [
     "TranscriptStaleError",
     "TranscriptUnreadableError",
     "TranscriptCwdMismatchError",
+    "RepoRemoteError",
+    "GhMissingError",
+    "GhAuthError",
+    "GhRateLimitError",
+    "GhApiError",
+    "PrNotFoundError",
+    "PrRepoMismatchError",
+    "PrNotLandedError",
+    "PrResponseMalformedError",
+    "PrFileListTruncatedError",
+    "PR_JSON_FIELDS",
+    "PR_ACCEPTED_STATES",
     "PathSource",
     "Nomination",
     "TouchReport",
@@ -191,6 +269,7 @@ __all__ = [
     "derive_scope",
     "collect_git_paths",
     "collect_session_paths",
+    "collect_pr_paths",
     "find_transcript",
     "caller_supplied",
     "nominate",
@@ -274,7 +353,19 @@ class StoreMissingError(TouchError):
 
 
 class GitError(TouchError):
-    """A git invocation failed. Sentinel: 'git command failed'."""
+    """A git invocation failed. Sentinel: 'git command failed'.
+
+    🔴 `stderr` IS CARRIED AS AN ATTRIBUTE, NOT ONLY INSIDE THE MESSAGE, so that a
+    WRAPPING error can quote git's own words WITHOUT embedding this class's
+    sentinel in its own text. `_repo_slug` is that wrapper, and it is where this
+    was found: its `RepoRemoteError` interpolated the whole `GitError`, so its
+    message carried two sentinels at once and "which guard fired" stopped being
+    measurable — `TestPrNegativeControls._only` caught it on the first run.
+    """
+
+    def __init__(self, message: str, *, stderr: str = "") -> None:
+        super().__init__(message)
+        self.stderr = stderr
 
 
 # --- Session-source errors -----------------------------------------------------
@@ -342,6 +433,159 @@ class TranscriptCwdMismatchError(TouchError):
     """
 
 
+# --- PR-source errors ----------------------------------------------------------
+#
+# 🔴 THE FIRST SOURCE THAT LEAVES THIS MACHINE. Every other source reads local
+# disk, so its whole failure surface is "the file is missing" and "the file is
+# malformed". This one crosses a network and an authenticated API, and each new
+# way it can fail is a new way to arrive at ZERO PATHS while looking like a clean
+# read:
+#
+#     gh is not installed · gh is not authenticated · the network is down · the
+#     API errored · the rate limit is exhausted · the PR does not exist · the PR
+#     is in ANOTHER repository · the response is malformed · GitHub silently
+#     TRUNCATED the file list
+#
+# EVERY ONE RAISES, with its own sentinel and a non-zero exit, and NONE returns
+# an empty path set: an empty set is indistinguishable from "this PR changed
+# nothing", which is the confident zero this module exists to refuse. None falls
+# back to git either, for the session source's reason — a plausible answer to a
+# question the caller did not ask is worse than a refusal `/handoff` already
+# knows how to handle (step 4 treats any non-zero exit as "write nothing").
+#
+# No two share a spelling; `TestPrNegativeControls` asserts that as the premise
+# of its `_only` helper, over the session sentinels TOO — a cross-family
+# collision would make both families' controls vacuous.
+
+
+class RepoRemoteError(TouchError):
+    """The repo under `--repo` has no parseable GitHub remote.
+
+    Sentinel: 'repo has no usable github remote'. A PR number is meaningless
+    without the repository it belongs to, and that repository is derived from
+    the local remote rather than assumed — see `_repo_slug`.
+    """
+
+
+class GhMissingError(TouchError):
+    """The `gh` binary is not on PATH. Sentinel: 'gh cli not found'.
+
+    🔴 A LIVE CASE, NOT A DEFENSIVE ONE. `gh` is NOT in `REQUIRED_TOOLS` in
+    `scripts/run-tests.sh` and NOT in `nativeBuildInputs` for the flake's
+    `checks.pytests` — verified 2026-08-12 — so it is absent in the hermetic
+    tier by construction, and may be absent on any host. The tool must degrade
+    with this named error rather than a `FileNotFoundError` traceback, and no
+    test may depend on `gh` existing (which is what `fetch` being injectable is
+    for).
+    """
+
+
+class GhAuthError(TouchError):
+    """`gh` has no usable credentials. Sentinel: 'gh is not authenticated'."""
+
+
+class GhRateLimitError(TouchError):
+    """The GitHub API rate limit is exhausted. Sentinel: 'github api rate limit'.
+
+    Its own error because it is the one failure that is purely temporal: the
+    same command succeeds later, so telling it apart from a real API error is
+    the difference between "wait" and "something is wrong".
+    """
+
+
+class GhApiError(TouchError):
+    """Any other `gh` failure. Sentinel: 'github api call failed'.
+
+    🔴 THE FALLBACK, AND DELIBERATELY THE WIDEST. An unrecognised gh failure —
+    an unreachable network, a 5xx, a TLS problem, a future gh message nobody
+    here has seen — lands HERE rather than being mapped onto a specific
+    diagnosis it might not be. Guessing wrong about WHY would be a confident
+    wrong answer; the sentence carries gh's own stderr verbatim so the reader
+    diagnoses it, not this module.
+    """
+
+
+class PrNotFoundError(TouchError):
+    """No such pull request. Sentinel: 'pull request not found'.
+
+    Also raised for a token that is not a usable PR number at all, following the
+    session source's precedent for an unusable id: the caller passed something
+    that cannot name a PR, and searching for it would be theatre.
+    """
+
+
+class PrRepoMismatchError(TouchError):
+    """The PR belongs to a different repository than `--repo`.
+
+    Sentinel: 'pull request belongs to another repository'.
+
+    🔴 A NUMBER ALONE IS MEANINGLESS ACROSS REPOS — every repo has a #1. Reading
+    another repo's file list here would MANUFACTURE associations: the paths
+    would be well-formed, repo-relative and completely unrelated, and they would
+    resolve against this repo's index without a murmur. The check compares the
+    HOST too, not just `owner/name`: a repo whose origin is on another forge can
+    share `owner/name` with an unrelated GitHub project, and an owner/name-only
+    comparison would call that a match.
+    """
+
+
+class PrNotLandedError(TouchError):
+    """The PR was closed without merging. Sentinel: 'pull request is closed unmerged'.
+
+    🔴 OPEN AND MERGED ARE ACCEPTED; CLOSED-UNMERGED IS NOT, and the asymmetry is
+    the question this source answers — "what did this branch LAND". A merged PR
+    landed. An OPEN one is proposed and is the ordinary case at `/handoff` time,
+    when CI is still running or review has not happened: refusing it would make
+    the tool useless in exactly the moment it is invoked. A CLOSED-unmerged PR
+    was proposed and REJECTED — its paths exist in no tree, so a journal bullet
+    written from them would record a change to a subsystem that never happened.
+    """
+
+
+class PrResponseMalformedError(TouchError):
+    """The API response is not the shape this code reads.
+
+    Sentinel: 'pull request response is malformed'.
+
+    🔴 `files` ABSENT IS NOT `files: []`. The same distinction the session source
+    draws between an unobservable file set and an observed-empty one, at the
+    other end of the pipe: a response missing the key means we do not know what
+    the PR changed, while `[]` means GitHub says it changed nothing. Conflating
+    them turns a broken read into "this PR touched nothing", which is the silent
+    zero again.
+    """
+
+
+class PrFileListTruncatedError(TouchError):
+    """GitHub returned fewer files than the PR actually changed.
+
+    Sentinel: 'pull request file list is truncated'.
+
+    🔴 MEASURED, NOT DEFENSIVE — and this is a LIVE hazard, not a hypothetical.
+    `gh pr view --json files` caps the list at 100 entries while `changedFiles`
+    reports the true count, and it says NOTHING about having done so. Measured
+    2026-08-12 at three points either side of the cap:
+
+        a  39-file PR    changedFiles=39    len(files)=39
+        a 301-file PR    changedFiles=301   len(files)=100
+        a 411-file PR    changedFiles=411   len(files)=100
+
+    So on any PR over the cap the plausible-looking answer is a silent prefix,
+    with a late-sorting subtree missing entirely, no error and no note. The guard
+    is `len(files) < changedFiles`, which is CAP-AGNOSTIC on purpose: pinning the
+    literal 100 would go stale the day GitHub changes it, and the comparison
+    needs no constant at all.
+
+    🔴 IT REFUSES rather than reporting the prefix, which is the OPPOSITE of what
+    the session source does with the extractor's cap (a loud note, then carry
+    on). The difference is what the caller can do about it. The extractor's cap
+    is internal and its paths are still genuinely this session's; here the caller
+    has an exact, provenance-preserving alternative — pipe the paths in with
+    `--paths-from -`, whose caveat says outright that provenance is the caller's
+    to state.
+    """
+
+
 # --- Scope ---------------------------------------------------------------------
 
 
@@ -377,17 +621,34 @@ class PathSource:
     """
 
     kind: str
-    """`git`, `session` or `caller`."""
+    """`git`, `session`, `pr` or `caller`."""
 
     window: str
-    """`branch` (worktree ∪ this branch's commits), `worktree`, `session`, or `supplied`."""
+    """`branch` (worktree ∪ this branch's commits), `worktree`, `session`,
+    `pull-requests`, or `supplied`."""
 
     paths: tuple[str, ...]
     base_ref: str | None = None
     commands: tuple[tuple[str, ...], ...] = ()
+    """🔴 FULL ARGV, PROGRAM INCLUDED. It used to omit the program because every
+    source ran `git` and the renderer hardcoded that word — which became a FALSE
+    provenance line the moment a source ran something else. `commands` exists so
+    a reader can check what was actually asked; a line reading `ran: git pr view
+    421` would be the exact defect it is there to prevent."""
+
     notes: tuple[str, ...] = ()
     session: str | None = None
     """The session id, when `kind == "session"`. Part of the caveat, not decoration."""
+
+    prs: tuple[int, ...] = ()
+    """The pull requests read, when `kind == "pr"`. Part of the caveat."""
+
+    repo_slug: str | None = None
+    """`host/owner/name` the PRs were read from, when `kind == "pr"`.
+
+    In the caveat because "PR #4" is ambiguous across repositories and the whole
+    point of the repository guard is that a bare number names nothing.
+    """
 
     @property
     def caveat(self) -> str:
@@ -402,6 +663,28 @@ class PathSource:
         """
         if self.kind == "caller":
             return "paths were supplied by the caller; provenance is the caller's to state"
+        if self.kind == "pr":
+            # 🔴 THE WORDING IS THE DELIVERABLE. This source answers "what did
+            # this BRANCH LAND", and nothing here may read as session
+            # attribution — a PR's file list is the union of everything on the
+            # branch, so it over-reports in exactly the direction the session
+            # window under-reports, and it cannot say which paths are which.
+            # The last sentence is imperative on purpose: the consumer is an
+            # LLM about to write a dated bullet into a curated store, and
+            # "session" is the word it will reach for unless told not to.
+            listed = ", ".join(f"#{n}" for n in self.prs)
+            return (
+                f"pull request(s) {listed} in {self.repo_slug}: every file GitHub "
+                f"lists on those BRANCHES — what the BRANCH LANDED, NOT what a "
+                f"SESSION touched. A PR's file list is the UNION of every commit "
+                f"on its branch, so it includes commits authored by ANOTHER "
+                f"session, by a SUBAGENT, or by hand, and older work if the branch "
+                f"is long-lived; and it EXCLUDES anything a session did that did "
+                f"not reach one of these PRs. It is blind in the OPPOSITE "
+                f"direction to the session window, which sees exactly one "
+                f"session's turns and nobody else's. Attribute these paths to the "
+                f"BRANCH, never to a session"
+            )
         if self.kind == "session":
             return (
                 f"session transcript {self.session}: the files THIS SESSION's own turns "
@@ -446,7 +729,8 @@ def _git(repo: Path, args: Sequence[str]) -> str:
     if proc.returncode != 0:
         raise GitError(
             f"git command failed ({' '.join(argv)}): exit {proc.returncode}: "
-            f"{proc.stderr.strip() or '(no stderr)'}"
+            f"{proc.stderr.strip() or '(no stderr)'}",
+            stderr=proc.stderr.strip(),
         )
     return proc.stdout
 
@@ -544,11 +828,11 @@ def collect_git_paths(
         raw.extend(new)
 
     worktree_args = ["diff", "--name-only", "-z", "HEAD"]
-    commands.append(tuple(worktree_args))
+    commands.append(("git", *worktree_args))
     add(_nul_list(_git(repo, worktree_args)))
 
     untracked_args = ["ls-files", "--others", "--exclude-standard", "-z"]
-    commands.append(tuple(untracked_args))
+    commands.append(("git", *untracked_args))
     add(_nul_list(_git(repo, untracked_args)))
 
     base_ref: str | None = None
@@ -577,7 +861,7 @@ def collect_git_paths(
             )
         elif merge_base:
             branch_args = ["diff", "--name-only", "-z", f"{merge_base}..HEAD"]
-            commands.append(tuple(branch_args))
+            commands.append(("git", *branch_args))
             add(_nul_list(_git(repo, branch_args)))
             window = "branch"
 
@@ -888,9 +1172,398 @@ def collect_session_paths(
         kind="session",
         window="session",
         paths=tuple(paths),
-        commands=(("rev-parse", "--show-toplevel"),),
+        commands=(("git", "rev-parse", "--show-toplevel"),),
         notes=tuple(notes),
         session=label,
+    )
+
+
+# --- The PR source: paths from what the BRANCH LANDED --------------------------
+#
+# 🔴 READ `PathSource.caveat` FOR WHAT THIS SET IS BEFORE READING WHAT IT DOES.
+# It answers "what did this BRANCH land", NOT "what did this session touch", and
+# the two are not approximations of each other — see the module docstring.
+#
+# 🔴 THE FETCH IS INJECTABLE SO THE GUARDS ARE TESTABLE WITHOUT A NETWORK, AND
+# WITHOUT `gh`. `gh` is NOT in `REQUIRED_TOOLS` in `scripts/run-tests.sh` and NOT
+# in `nativeBuildInputs` for the flake's `checks.pytests` (verified 2026-08-12),
+# so the hermetic tier has no `gh` at all and a test that shelled out would skip
+# — and `run-tests.sh` pins `EXPECTED_SKIPS` exactly, so a new skip breaks the
+# gate on purpose. Every guard below is therefore reached with a fixture payload
+# through `fetch`, and the ONE thing that cannot be: `_gh_fetch_pr` itself, whose
+# classification of gh's own exit codes is pinned separately against the
+# measured stderr strings rather than by running gh.
+
+PR_JSON_FIELDS = "number,url,state,changedFiles,files"
+"""The fields fetched. `changedFiles` is not decoration: it is the ONLY way to
+detect that `files` was truncated — see `PrFileListTruncatedError`."""
+
+PR_ACCEPTED_STATES: tuple[str, ...] = ("OPEN", "MERGED")
+_PR_KNOWN_STATES: tuple[str, ...] = ("OPEN", "MERGED", "CLOSED")
+
+# The remote the repository identity is derived from. Not configurable: a second
+# remote is a second answer to "which repo is this", and picking between them is
+# the kind of guess this module refuses everywhere else.
+_PR_REMOTE = "origin"
+
+
+def _parse_remote_slug(url: str) -> str | None:
+    """`host/owner/name` from a git remote URL, or None if it names no repo.
+
+    🔴 THE HOST IS PART OF THE IDENTITY. Dropping it would let a repo whose
+    origin lives on another forge match an unrelated GitHub project that happens
+    to share `owner/name` — and this function's output is exactly what the
+    repository guard compares, so an owner/name-only slug would make that guard
+    agree with the wrong project.
+
+    Handles the three spellings git actually emits: scp-like
+    (`git@host:owner/name`), ssh URL (`ssh://git@host/owner/name`) and https
+    (`https://host/owner/name`), each with or without a trailing `.git`.
+    """
+    u = (url or "").strip().rstrip("/")
+    if not u:
+        return None
+    if u.endswith(".git"):
+        u = u[: -len(".git")]
+    if "://" not in u and ":" in u:  # scp-like
+        host, _, tail = u.partition(":")
+    else:
+        rest = u.partition("://")[2] or u
+        host, _, tail = rest.partition("/")
+    host = host.rpartition("@")[2].partition(":")[0].strip().lower()
+    parts = [p for p in tail.split("/") if p]
+    if not host or len(parts) < 2 or not parts[-2] or not parts[-1]:
+        return None
+    return f"{host}/{parts[-2]}/{parts[-1]}"
+
+
+def _repo_slug(repo: str | Path) -> str:
+    """The `host/owner/name` a PR number is to be interpreted against.
+
+    DERIVED from the local remote, never assumed and never taken from the
+    caller: a PR number is meaningless without its repository, and the whole
+    point of the repository guard is that the number alone names nothing.
+    """
+    try:
+        url = _git(Path(repo), ["remote", "get-url", _PR_REMOTE]).strip()
+    except GitError as exc:
+        # 🔴 `exc.stderr`, NOT `exc`. Interpolating the whole GitError would put
+        # its sentinel inside this one's message, and a message carrying two
+        # sentinels makes "which guard fired" an inference instead of a
+        # measurement — see `GitError`.
+        raise RepoRemoteError(
+            f"repo has no usable github remote: `{_PR_REMOTE}` could not be read in "
+            f"{repo} ({exc.stderr or 'no detail'}) — a pull request number cannot be "
+            f"resolved without knowing which repository it belongs to"
+        ) from exc
+    slug = _parse_remote_slug(url)
+    if slug is None:
+        raise RepoRemoteError(
+            f"repo has no usable github remote: the `{_PR_REMOTE}` remote of {repo} is "
+            f"{url!r}, which names no host/owner/name — a pull request number cannot "
+            f"be resolved against it"
+        )
+    return slug
+
+
+def _gh_argv(slug: str, number: int) -> tuple[str, ...]:
+    return ("gh", "pr", "view", str(number), "--repo", slug, "--json", PR_JSON_FIELDS)
+
+
+def _classify_gh_failure(rc: int, stderr: str, slug: str, number: int) -> TouchError:
+    """Map a non-zero `gh` exit onto ONE named error. Never onto an empty set.
+
+    ⚠ DECLARED AS PART-HEURISTIC, per `claude/RULES.md` ("if you reach for a
+    prose/keyword patch, say so explicitly"). `gh` exposes exactly ONE
+    distinguishing exit code and returns 1 for everything else, so only the auth
+    case can be read structurally; the rest is keyed on stderr text. MEASURED
+    2026-08-12 against the live binary (gh 2.96.0):
+
+        no credentials at all   rc=4   "please run: gh auth login"
+        bad token               rc=1   "HTTP 401: Bad credentials"
+        unreachable host        rc=1   "error connecting to <host>"
+        nonexistent PR          rc=1   "Could not resolve to a PullRequest"
+
+    🔴 THE ORDER IS FORCED BY OVERLAP, NOT BY TASTE. A rate-limited response is
+    an HTTP 403 that ALSO carries gh's "authenticate with gh auth login" hint, so
+    an auth-first order would swallow it and report a permanent failure for a
+    temporary one. Rate limit is therefore tested first, then not-found, then
+    auth, and everything else falls through.
+
+    🔴 THE FALLBACK IS THE WIDE ONE. An unrecognised failure — the unreachable
+    host above, a 5xx, a gh message written after this was — becomes `GhApiError`
+    carrying gh's stderr verbatim, rather than being guessed onto a specific
+    diagnosis. A wrong explanation of a failure forecloses the next question.
+    """
+    text = (stderr or "").strip()
+    low = text.lower()
+    where = f"(gh pr view {number} --repo {slug}, exit {rc}): {text or '(no stderr)'}"
+    if rc == 4:  # structural: gh's own "not authenticated" exit code
+        return GhAuthError(f"gh is not authenticated {where}")
+    if "rate limit" in low:
+        return GhRateLimitError(f"github api rate limit {where}")
+    if (
+        "could not resolve to a pullrequest" in low
+        or "no pull requests found" in low
+        or "http 404" in low
+    ):
+        return PrNotFoundError(f"pull request not found {where}")
+    if "http 401" in low or "bad credentials" in low or "gh auth login" in low:
+        return GhAuthError(f"gh is not authenticated {where}")
+    return GhApiError(f"github api call failed {where}")
+
+
+def _gh_fetch_pr(slug: str, number: int) -> object:
+    """The live fetcher. The ONLY thing here that touches the network."""
+    argv = list(_gh_argv(slug, number))
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True)
+    except FileNotFoundError as exc:
+        # 🔴 Not a traceback. `gh` is genuinely absent in the hermetic test tier
+        # and may be absent on any host; `/handoff` prints this line verbatim.
+        raise GhMissingError(
+            f"gh cli not found: `{argv[0]}` is not on PATH, so pull request #{number} "
+            f"in {slug} cannot be read. Install the GitHub CLI, or use a different "
+            f"path source."
+        ) from exc
+    if proc.returncode != 0:
+        raise _classify_gh_failure(proc.returncode, proc.stderr, slug, number)
+    try:
+        return json.loads(proc.stdout)
+    except ValueError as exc:
+        raise PrResponseMalformedError(
+            f"pull request response is malformed: gh exited 0 for #{number} in {slug} "
+            f"but its stdout is not JSON ({exc})"
+        ) from exc
+
+
+def _pr_number(token: object) -> int:
+    """A usable PR number, or a named refusal. Never a search for junk."""
+    t = str(token).strip().lstrip("#")
+    if not (t.isascii() and t.isdigit()) or int(t) < 1:
+        raise PrNotFoundError(
+            f"pull request not found: {token!r} is not a usable pull request number — "
+            f"pass the integer from the PR's URL, e.g. `--pr 421` or `--pr 421,350`"
+        )
+    return int(t)
+
+
+def _slug_from_pr_url(url: object) -> str | None:
+    """`host/owner/name` out of a PR's own `url`, or None.
+
+    This is the PR's OWN account of where it lives, which is what makes the
+    repository check a check rather than a restatement of the argument we passed.
+    """
+    if not isinstance(url, str) or not url.strip():
+        return None
+    rest = url.strip().partition("://")[2] or url.strip()
+    parts = [p for p in rest.split("/") if p]
+    if len(parts) < 3:
+        return None
+    host = parts[0].rpartition("@")[2].partition(":")[0].lower()
+    if not host or not parts[1] or not parts[2]:
+        return None
+    return f"{host}/{parts[1]}/{parts[2]}"
+
+
+def _read_pr_payload(payload: object, *, number: int, slug: str) -> tuple[list[str], str, int]:
+    """(paths, state, changed_files) — or a named error. Never a short set.
+
+    🔴 GUARD ORDER IS REACHABILITY ORDER. Each guard is reached by an input no
+    EARLIER guard rejects, so each one's negative control fails on its OWN
+    sentinel rather than on a neighbour's:
+
+      1. the response is an OBJECT          PrResponseMalformedError
+      2. it is the PR we ASKED for          PrResponseMalformedError
+      3. its `url` names a repository       PrResponseMalformedError
+      4. that repository is THIS one        PrRepoMismatchError
+      5. its state is known                 PrResponseMalformedError
+      6. …and it is not closed-unmerged     PrNotLandedError
+      7. `files` is PRESENT and a list      PrResponseMalformedError
+      8. every entry names a path           PrResponseMalformedError
+      9. `changedFiles` is a count          PrResponseMalformedError
+     10. …and NOTHING WAS CUT               PrFileListTruncatedError
+
+    (4) must precede (7): the point of the repository guard is that another
+    repo's file list is never READ, not merely never reported — a set read first
+    and rejected later has already been in memory next to this repo's index.
+
+    (10) is last because it is the only guard that needs the parsed list to
+    exist; it is also the one that fires on a perfectly valid, perfectly
+    authenticated, perfectly on-topic response. See `PrFileListTruncatedError`.
+    """
+    where = f"pull request #{number} in {slug}"
+    if not isinstance(payload, _abc.Mapping):
+        raise PrResponseMalformedError(
+            f"pull request response is malformed: {where} came back as "
+            f"{type(payload).__name__}, not an object"
+        )
+
+    got = payload.get("number")
+    if isinstance(got, bool) or not isinstance(got, int) or got != number:
+        raise PrResponseMalformedError(
+            f"pull request response is malformed: asked for {where} and got number "
+            f"{got!r} — the response does not describe the pull request requested"
+        )
+
+    got_slug = _slug_from_pr_url(payload.get("url"))
+    if got_slug is None:
+        raise PrResponseMalformedError(
+            f"pull request response is malformed: {where} carries no parseable `url` "
+            f"({payload.get('url')!r}), so the repository it belongs to cannot be "
+            f"checked — and an unchecked repository is exactly what makes a bare "
+            f"number dangerous"
+        )
+    if got_slug.lower() != slug.lower():
+        raise PrRepoMismatchError(
+            f"pull request belongs to another repository: #{number} lives in "
+            f"{got_slug}, but --repo resolves to {slug}. Every repository has a #1, "
+            f"so a number alone names nothing; reading that file list here would "
+            f"associate another project's work with this one."
+        )
+
+    state = payload.get("state")
+    if not isinstance(state, str) or state.strip().upper() not in _PR_KNOWN_STATES:
+        raise PrResponseMalformedError(
+            f"pull request response is malformed: {where} has state {state!r}, which is "
+            f"none of {', '.join(_PR_KNOWN_STATES)} — whether it landed cannot be read"
+        )
+    state = state.strip().upper()
+    if state not in PR_ACCEPTED_STATES:
+        raise PrNotLandedError(
+            f"pull request is closed unmerged: {where} was closed without merging, so "
+            f"its files exist in no tree and nothing landed from it. Drop it from "
+            f"--pr; {' and '.join(PR_ACCEPTED_STATES)} are accepted."
+        )
+
+    files = payload.get("files")
+    if not isinstance(files, list):
+        raise PrResponseMalformedError(
+            f"pull request response is malformed: {where} has no `files` list "
+            f"({files!r}). An ABSENT file list means the changed files are UNKNOWN, "
+            f"which is not the same as a PR that changed nothing — reporting the "
+            f"second for the first is the silent zero this refuses."
+        )
+
+    paths: list[str] = []
+    for i, item in enumerate(files):
+        raw_path = item.get("path") if isinstance(item, _abc.Mapping) else None
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            raise PrResponseMalformedError(
+                f"pull request response is malformed: {where} file entry {i} names no "
+                f"path ({item!r}) — a file list with an unreadable entry is not a "
+                f"shorter file list"
+            )
+        paths.append(raw_path.strip())
+
+    changed = payload.get("changedFiles")
+    if isinstance(changed, bool) or not isinstance(changed, int) or changed < 0:
+        raise PrResponseMalformedError(
+            f"pull request response is malformed: {where} has changedFiles={changed!r}, "
+            f"so whether the file list was truncated cannot be determined — and an "
+            f"undetectable truncation is a silently short path set"
+        )
+    if len(paths) < changed:
+        raise PrFileListTruncatedError(
+            f"pull request file list is truncated: {where} changed {changed} files but "
+            f"the API returned only {len(paths)}. The list is a PREFIX, so a "
+            f"late-sorting subtree may be missing entirely and every count below it "
+            f"would be wrong. Nothing is reported. Supply the paths yourself instead: "
+            f"`git diff --name-only <base>...<head> | subsystem_touch.py --paths-from -`, "
+            f"whose caveat states that provenance is the caller's."
+        )
+    return paths, state, changed
+
+
+def collect_pr_paths(
+    repo: str | Path,
+    numbers: Iterable[object],
+    *,
+    fetch=None,
+    exclude: Iterable[str] = (),
+) -> PathSource:
+    """What the named PULL REQUESTS landed. Per-branch, not per-session.
+
+    The window the other two sources cannot express. `--session` is blind to a
+    SUBAGENT's edits — a separate transcript, 196 of 733 file-tool calls measured
+    — and delegating non-trivial work to a subagent is the standing default here,
+    so on the sessions worth recording the implementation is exactly what the
+    session window misses. Git is blind to anything already merged. A PR's file
+    list is blind to neither.
+
+    🔴 AND IT IS BLIND IN THE OPPOSITE DIRECTION: it is the union of every commit
+    on the branch, including another session's and hand-made ones, and it omits
+    whatever a session did that never reached a PR. `PathSource.caveat` says so
+    in those words, on every output path of both renderers. Do not describe this
+    set as a session's.
+
+    `fetch` is the injection seam: a callable `(slug, number) -> payload`,
+    defaulting to `_gh_fetch_pr`. Every guard in `_read_pr_payload` is reachable
+    through it with a fixture, which is what keeps the suite off the network and
+    off `gh` — neither of which exists in the hermetic tier.
+
+    🔴 `commands` RECORDS THE ARGV ONLY WHEN THE ARGV RAN. With a fetcher
+    injected nothing was executed, so recording `gh pr view …` would be a
+    fabricated provenance line in the field whose entire purpose is to say what
+    was actually asked. An injected run says so in a note instead.
+    """
+    slug = _repo_slug(repo)
+    live = fetch is None
+    fetcher = _gh_fetch_pr if live else fetch
+
+    commands: list[tuple[str, ...]] = []
+    notes: list[str] = []
+    raw: list[str] = []
+    read: list[int] = []
+
+    for token in numbers:
+        n = _pr_number(token)
+        if n in read:
+            notes.append(f"pull request #{n} was named more than once; read once")
+            continue
+        read.append(n)
+        if live:
+            commands.append(_gh_argv(slug, n))
+        paths, state, changed = _read_pr_payload(fetcher(slug, n), number=n, slug=slug)
+        # 🔴 EMITTED UNCONDITIONALLY, INCLUDING AT ZERO. A stated `0 file(s)` is
+        # a reading; an absent line is indistinguishable from a fetcher wired to
+        # nothing (`claude/RULES.md` → "report the pair").
+        notes.append(
+            f"pull request #{n} ({state}): {changed} file(s) reported by the API, "
+            f"{len(paths)} read"
+        )
+        raw.extend(paths)
+
+    if not read:
+        # Reachable via `--pr ,` or `--pr ''`. Falling through would return a
+        # perfectly well-formed report over ZERO pull requests — the confident
+        # zero, arriving through argument parsing.
+        raise PrNotFoundError(
+            "pull request not found: no pull request number was given, so nothing was "
+            "read. `--pr` takes one or more integers, e.g. `--pr 421,350`."
+        )
+    if not live:
+        notes.insert(
+            0,
+            "⚠ paths came from an INJECTED fetcher, not from `gh` — this is a test "
+            "harness, not a live read",
+        )
+
+    paths, dropped = _filter_excluded(raw, exclude)
+    notes.append(
+        f"{len(paths)} distinct path(s) across {len(read)} pull request(s) in {slug}"
+    )
+    if dropped:
+        notes.append(_exclusion_note(dropped))
+
+    return PathSource(
+        kind="pr",
+        window="pull-requests",
+        paths=tuple(paths),
+        commands=tuple(commands),
+        notes=tuple(notes),
+        prs=tuple(read),
+        repo_slug=slug,
     )
 
 
@@ -1308,7 +1981,10 @@ def render_text(report: TouchReport) -> str:
     for note in src.notes:
         out.append(f"  note: {note}")
     for cmd in src.commands:
-        out.append(f"  ran: git {' '.join(cmd)}")
+        # The FULL argv, program included. See `PathSource.commands`: the word
+        # `git` used to be hardcoded here, which made this line a false claim
+        # the moment a source ran something else.
+        out.append(f"  ran: {' '.join(cmd)}")
 
     if report.status == "looked-at-nothing":
         out.append("")
@@ -1420,6 +2096,8 @@ def report_json(report: TouchReport) -> dict:
             "window": src.window,
             "base_ref": src.base_ref,
             "session": src.session,
+            "prs": list(src.prs),
+            "repo_slug": src.repo_slug,
             "caveat": src.caveat,
             "notes": list(src.notes),
             "commands": [list(c) for c in src.commands],
@@ -1570,8 +2248,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--paths-from",
         default="git",
         help=(
-            "fallback source when no session is given: `git` (default) or `-` to read "
-            "repo-relative paths from stdin, one per line"
+            "fallback source when no --session/--transcript/--pr is given: `git` "
+            "(default) or `-` to read repo-relative paths from stdin, one per line"
         ),
     )
     # 🔴 MUTUALLY EXCLUSIVE, ENFORCED BY ARGPARSE (exit 2). They name the same
@@ -1597,6 +2275,20 @@ def _build_parser() -> argparse.ArgumentParser:
             "the session source, naming the transcript file directly instead of "
             "resolving a UUID. Same validation; use it when --session reports the id "
             "is ambiguous."
+        ),
+    )
+    session_src.add_argument(
+        "--pr",
+        action="append",
+        default=None,
+        metavar="N[,N...]",
+        help=(
+            "report what these PULL REQUESTS landed, via `gh`. A DIFFERENT QUESTION "
+            "from --session: a PR's file list is the union of every commit on its "
+            "branch, so it SEES a subagent's work (which --session cannot) and also "
+            "another session's (which --session correctly excludes). Repeatable and "
+            "comma-separated. Validated against the repo under --repo; OPEN and "
+            "MERGED are accepted, closed-unmerged is refused."
         ),
     )
     p.add_argument(
@@ -1652,15 +2344,17 @@ def main(argv: Sequence[str] | None = None, *, today: str | None = None) -> int:
             return 0
 
         wants_session = args.session is not None or args.transcript is not None
+        wants_pr = args.pr is not None
         # 🔴 A CONTRADICTION IS REFUSED, NOT RESOLVED. `--paths-from` names the
-        # FALLBACK source, so pairing it with a session request asks for two
-        # different windows at once. Honouring either silently would hand back a
-        # plausible answer to a question the caller did not ask — the same
-        # failure the no-fallback rule above exists to prevent, arriving through
-        # argument parsing instead.
-        if wants_session and args.paths_from != "git":
+        # FALLBACK source, so pairing it with a session or PR request asks for
+        # two different windows at once. Honouring either silently would hand
+        # back a plausible answer to a question the caller did not ask — the
+        # same failure the no-fallback rule above exists to prevent, arriving
+        # through argument parsing instead. (`--session` vs `--transcript` vs
+        # `--pr` is enforced one level up, by argparse's exclusive group.)
+        if (wants_session or wants_pr) and args.paths_from != "git":
             print(
-                "subsystem-touch: --session/--transcript cannot be combined with "
+                "subsystem-touch: --session/--transcript/--pr cannot be combined with "
                 "--paths-from; they are different path windows. Drop one.",
                 file=sys.stderr,
             )
@@ -1671,6 +2365,24 @@ def main(argv: Sequence[str] | None = None, *, today: str | None = None) -> int:
                 repo,
                 session=args.session,
                 transcript=args.transcript,
+                exclude=args.exclude,
+            )
+        elif wants_pr:
+            # Flattened here rather than in `collect_pr_paths` so the library
+            # keeps taking a plain sequence of numbers: `--pr 1,2 --pr 3` is a
+            # CLI spelling, not part of the contract.
+            source = collect_pr_paths(
+                repo,
+                # Empty tokens are dropped so `--pr 421,` is the typo it looks
+                # like rather than a second, unusable number — and so `--pr ,`
+                # reaches the "no pull request number was given" guard instead
+                # of the "not a usable number" one, which is a different fact.
+                [
+                    tok
+                    for group in args.pr
+                    for tok in str(group).split(",")
+                    if tok.strip()
+                ],
                 exclude=args.exclude,
             )
         elif args.paths_from == "git":
