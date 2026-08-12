@@ -517,7 +517,33 @@ TARGET_FLOORS=(
   # already a directory target). The reader shells out to nothing — no `gh`, no
   # network, and git only via the writer's `scope_for_repo`, which `git` in
   # REQUIRED_TOOLS already covers.
-  "scripts/tests|2908"
+  #
+  # 2026-08-12, the subsystem-index writer showing what is ALREADY THERE before
+  # it proposes an append: 2962 -> 3026 collected. The AUTHORITATIVE gate's own
+  # line, `nix build .#checks.x86_64-linux.pytests`:
+  #   PASS  scripts/tests  (collected=3026 passed=3026 skipped=0 floor=2908)
+  # put through the gate's OWN function rather than arithmetic:
+  #   _suggested_floor 3026 = 3026 - min(50, max(1, 151)) = 3026 - 50 = 2976.
+  #
+  # ⚠ THE DELTA WAS ATTRIBUTED, NOT ASSUMED, and doing so moved the number. The
+  # naive read — 3026 minus the 2958 the line above recorded — says this branch
+  # added 68 tests. It added 64. Measured by splitting the target: 3026 total
+  # minus 744 in the three `test_subsystem_*.py` files leaves 2282 elsewhere, and
+  # those three files collected 680 before this branch, so the base this branch
+  # actually started from was 2962, not 2958. The other +4 arrived with main
+  # after #426 landed. The floor is unaffected (it is measured, not computed),
+  # but "+68" would have gone into this comment as a fact about a branch that
+  # never produced it — which is the failure the note below warns about, one
+  # level down. This line has now conflicted on TEN consecutive PRs: if it
+  # conflicts again, re-run the gate on the MERGED tree and copy what it prints.
+  # Do NOT reconcile the two sides by hand.
+  #
+  # ⚠ ZERO new skips, and no HERMETIC_TARGETS entry needed (scripts/tests is
+  # already a directory target). No new FILE either — every change lands in an
+  # already-tracked one, so the "a new file must be git added or the flake
+  # silently omits it" trap has no purchase here; movement on THIS line is still
+  # the evidence the gate ran the new cases.
+  "scripts/tests|2976"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —

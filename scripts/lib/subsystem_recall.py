@@ -96,7 +96,9 @@ its own sentinel phrase so a caller — or a mutation test — can tell WHICH fi
     "store root not found"   StoreMissingError  (reused from subsystem_touch:
                              the same condition, so the same class, not a
                              second spelling of one error)
-    "index entry unreadable" EntryUnreadableError
+    "index entry unreadable" EntryUnreadableError (reused from
+                             subsystem_resolver, for the same reason —
+                             subsystem_touch raises it on the same files)
     "malformed index entry"  MalformedEntryError, raised by the resolver's own
                              loader and deliberately NOT caught here
 
@@ -120,7 +122,10 @@ from typing import Mapping, Sequence
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from subsystem_resolver import (  # noqa: E402
+    NUANCE_HEADING,
+    POINTERS_HEADING,
     AmbiguousRefError,
+    EntryUnreadableError,
     MalformedEntryError,
     ResolverError,
     SubsystemEntry,
@@ -130,6 +135,7 @@ from subsystem_resolver import (  # noqa: E402
     parse_front_matter,
     resolve_ref_tiered,
 )
+from subsystem_resolver import extract_sections as _extract_sections  # noqa: E402
 from subsystem_touch import (  # noqa: E402
     DEFAULT_STORE_ROOT,
     StoreMissingError,
@@ -146,7 +152,6 @@ __all__ = [
     "SENSITIVITY_FAIL_SAFE",
     "KNOWN_SENSITIVITIES",
     "STATUS_PRECEDENCE",
-    "RecallError",
     "EntryUnreadableError",
     "StoreMissingError",
     "RecalledEntry",
@@ -167,12 +172,17 @@ __all__ = [
 # agent, in the same session, for the same store.
 RECALL_LABEL = "from index"
 
-# The two sections the recon step front-loads. `## What it is` is deliberately
-# NOT here: it is one line of durable boilerplate that a resuming session either
-# already knows or can read in the file, and including it turns a recall block
-# into a dump of the store. The point is recall, not a dump.
-POINTERS_HEADING = "## Pointers"
-NUANCE_HEADING = "## Nuance / work-history"
+# The two sections the recon step front-loads, RE-EXPORTED from the resolver —
+# they are schema headings, so they belong with the rest of the on-disk shape and
+# not in one of the two modules that read it. `## What it is` is deliberately NOT
+# in `SURFACED_HEADINGS`: it is one line of durable boilerplate that a resuming
+# session either already knows or can read in the file, and including it turns a
+# recall block into a dump of the store. The point is recall, not a dump.
+#
+# The tuple itself stays HERE because it is this reader's DISPLAY CHOICE, not a
+# fact about the store: `subsystem_touch` reads the same entries and wants only
+# `NUANCE_HEADING`. A shared constant would have made one module's display
+# decision binding on the other.
 SURFACED_HEADINGS: tuple[str, ...] = (POINTERS_HEADING, NUANCE_HEADING)
 
 # A cap, not a filter — see the module docstring on selection. Truncation is
@@ -210,84 +220,35 @@ STATUS_PRECEDENCE: tuple[str, ...] = (
 
 
 # --- Errors --------------------------------------------------------------------
-
-
-class RecallError(Exception):
-    """Base for the errors this module raises in its own right."""
-
-
-class EntryUnreadableError(RecallError):
-    """An entry file cannot be read. Sentinel: 'index entry unreadable'.
-
-    🔴 It exists because the alternative is an unnamed `OSError` escaping from
-    inside `load_index`. The store is a plain directory of hand-curated files on
-    a machine that also runs an hourly autocommit: a file can be mid-rename, a
-    directory can be sitting where a `.md` is expected, a mode can be wrong. Any
-    of those would otherwise reach the caller as `IsADirectoryError` or
-    `PermissionError` with no indication that the SUBSYSTEM STORE was the thing
-    that failed — and a resuming session would read it as a broken tool.
-    """
+#
+# ⚠ There is deliberately NO `RecallError` base any more. `EntryUnreadableError`
+# was its only subclass and moved to `subsystem_resolver` when `subsystem_touch`
+# needed to raise the SAME condition on the SAME files; what was left was a base
+# class with nothing under it — a declaration with no code path behind it, which
+# is the shape this codebase argues against everywhere else. `main()` catches
+# `(TouchError, ResolverError)`, which between them cover every error this module
+# can now emit.
 
 
 # --- Section extraction --------------------------------------------------------
 
 
-def _is_fence(line: str) -> bool:
-    s = line.lstrip()
-    return s.startswith("```") or s.startswith("~~~")
-
-
 def extract_sections(text: str, headings: Sequence[str] = SURFACED_HEADINGS) -> dict[str, str]:
-    """Return `{heading: body}` for each requested heading found in `text`.
+    """This reader's default-binding shim over the ONE section parser.
 
-    Bodies are VERBATIM — the store is markdown precisely so prose survives a
-    read unmangled — with surrounding blank lines trimmed. A heading that is
-    absent is simply not a key; the caller reports it by name rather than
-    printing an empty block (an absent section and an empty one are different
-    facts about a curated entry).
+    🔴 THE PARSER ITSELF LIVES IN `subsystem_resolver`, which is where the fence
+    handling, the present-but-empty tracking and their mutation kills now live
+    too. It moved there — unchanged — when `subsystem_touch` needed the same
+    extraction to show a `/handoff` what an entry ALREADY says before proposing
+    an append. `subsystem_recall` imports `subsystem_touch`, so the writer cannot
+    import the reader back without closing a cycle, and a second copy in the
+    writer would be a parser free to drift from the one measured against the real
+    corpus.
 
-    A section runs from its heading to the next ATX heading of any level, or to
-    end of file.
-
-    🔴 FENCED BLOCKS ARE SKIPPED. A `#` line inside a code fence is not a
-    heading, and treating it as one would END the section early — surfacing
-    HALF an entry's nuance while looking exactly like a complete read. That is a
-    silent under-report, the failure class this whole module is built against,
-    so it is handled rather than left to "entries probably don't contain
-    fences".
-
-    Matching is on the EXACT heading string, not a normalized one: these are
-    schema headings from `analyze-service/SKILL.md`, not user refs. Normalizing
-    them would fold `## Pointers` and `## pointers!` together and quietly widen
-    what the store is allowed to look like.
+    All this adds is the DEFAULT: which sections *this* reader surfaces. That is
+    a display decision and stays with the display.
     """
-    wanted: dict[str, list[str]] = {h: [] for h in headings}
-    # 🔴 PRESENCE IS TRACKED SEPARATELY FROM CONTENT. A heading that appears with
-    # nothing under it must be reported as PRESENT-AND-EMPTY, not as absent —
-    # "the section was never started" and "the section is there and unfilled"
-    # are different facts about a curated entry, and only one of them is a
-    # reason to go look somewhere else. Deriving presence from a non-empty body
-    # collapses them, and it did: an empty section followed by another heading
-    # read as absent while the same empty section at end-of-file read as
-    # present, purely because of what came after it.
-    seen: set[str] = set()
-    current: str | None = None
-    in_fence = False
-    for line in text.splitlines():
-        if _is_fence(line):
-            in_fence = not in_fence
-            if current is not None:
-                wanted[current].append(line)
-            continue
-        if not in_fence and line.startswith("#"):
-            stripped = line.rstrip()
-            current = stripped if stripped in wanted else None
-            if current is not None:
-                seen.add(current)
-            continue
-        if current is not None:
-            wanted[current].append(line)
-    return {h: "\n".join(wanted[h]).strip("\n") for h in headings if h in seen}
+    return _extract_sections(text, headings)
 
 
 def fold_sensitivity(raw: object) -> str:
@@ -693,7 +654,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ValueError as exc:
         print(f"subsystem-recall: {exc}", file=sys.stderr)
         return 2
-    except (RecallError, TouchError, ResolverError) as exc:
+    except (TouchError, ResolverError) as exc:
         print(f"subsystem-recall: {exc}", file=sys.stderr)
         return 3
 
