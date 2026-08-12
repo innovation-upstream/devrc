@@ -41,6 +41,14 @@ tmux focus hooks   ─┼─► emit (pure shell, hot path) ─► spool/current
   re-reads the whole transcript, so newest = most complete). See
   `scripts/session-analysis/insights.py`. A transcript
   that can't be parsed is emitted with `unreadable: true` — never fabricated.
+  A transcript that raises while being summarised is **skipped, named on stderr and
+  counted** (`failed=N` on the run's summary line) so one malformed file cannot abort
+  the pass for every other session — and 🔴 **any `failed` makes the run exit
+  non-zero**, because `claude-activity-source` is `Type=oneshot` with
+  `OnFailure = notify-failure@%n.service`: a count that never reaches the exit status
+  would let a systemic breakage (every session failing) read as unit success with no
+  toast. A skipped transcript's signature is deliberately **not** recorded, so a code
+  fix heals the corpus without the file having to change.
   Both tailers share `claude/_shared.py` (ts/project/emit/root/iter helpers) and run
   on the same 5-min `claude-activity-source` timer (both hosts).
   Layer B (`kind=session-insight`, qualitative goal/outcome/friction) is a later PR.
