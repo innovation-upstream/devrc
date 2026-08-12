@@ -174,8 +174,11 @@ absent toolchain, the `curl` form): `reference/agent-dispatch.md`.
   🔴 **But `clawgate-ci` does NOT run Playwright — browser-layer changes are UNGATED by CI.** Run
   `make e2e` locally and **count** the results: `tasks.spec.ts` `test.skip`s the whole file without
   Docker, so a "green" run can mean 17 tests never executed.
-- 🔴 **The browser extension does NOT ship via Flux — merging to `trunk` deploys NOTHING.** Brave
-  loads it unpacked from a flat copy at `~/clawgate-extension` **on the workbench**, and does not
-  hot-reload it. **A missing `.synced-from` stamp means someone hand-copied it out of band** — that
-  is how a build that never passed CI ran live for ~11 hours while `trunk` looked clean. Check the
-  stamp before trusting any claim about which build is loaded → `reference/extension.md`.
+- 🔴 **The browser extension does NOT ship via Flux — merging to `trunk` deploys NOTHING**, and it
+  runs on **TWO hosts** that each load it unpacked **in place from a git checkout**: workbench
+  `~/workspace/homelab-talos/containers/clawgate/extension` (the dirty base clone) and laptop
+  (`zach@192.168.50.155`) `~/workspace/clawgate-extension/containers/clawgate/extension` (a
+  worktree). Deploying = advance BOTH checkouts + reload each `brave://extensions` (no hot-reload).
+  🔴 **`~/clawgate-extension` + `scripts/sync-clawgate-extension.sh` are a DEAD path — nothing loads
+  that directory**, yet `--check` reports a reassuring "in sync" while both browsers run something
+  else. Only Brave's own "Loaded from" line is authority → `reference/extension.md`.
