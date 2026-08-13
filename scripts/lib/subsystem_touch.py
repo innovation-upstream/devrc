@@ -255,16 +255,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from subsystem_resolver import (  # noqa: E402
     DEFAULT_MIN_PATHS,
     NUANCE_HEADING,
+    ON_MALFORMED_COLLECT,
     AmbiguousRefError,
     Association,
     EntryUnreadableError,
     JournalBullet,
+    MalformedEntry,
     MalformedEntryError,
     ResolverError,
     SubsystemEntry,
     SubsystemIndex,
     UnknownScopeError,
     associate_paths,
+    entry_mapping,
     extract_sections,
     load_index,
     normalize_ref,
@@ -285,6 +288,7 @@ __all__ = [
     "TouchError",
     "StoreMissingError",
     "EntryUnreadableError",
+    "EntryFileMissingError",
     "GitError",
     "ExtractorMissingError",
     "TranscriptMissingError",
@@ -317,6 +321,14 @@ __all__ = [
     "read_entry_journal",
     "TouchReport",
     "Census",
+    "ValidationReport",
+    "POLICY_SCOPE",
+    "POLICY_STORE_ROOT",
+    "POLICY_NONE",
+    "governing_policy",
+    "validate_entry_file",
+    "validate_scope",
+    "render_validation",
     "derive_scope",
     "scope_for_repo",
     "collect_git_paths",
@@ -352,6 +364,47 @@ KNOWN_WRITERS: tuple[str, ...] = ("analyze-service", "handoff")
 UNSTAMPED = "unstamped (pre-instrumentation)"
 
 DEFAULT_STORE_ROOT = Path.home() / ".claude" / "analyze-service-index"
+
+# --- Which policy file governs a scope ------------------------------------------
+#
+# 🔴 THE INSTRUCTION WAS UNFOLLOWABLE IN 80% OF CASES. The store-root README says
+# "read the README inside a scope directory before touching it", and
+# `handoff/SKILL.md` step 4 calls the scope README authoritative — but measured
+# 2026-08-13, only 1 of the store's 5 scopes has one. An agent told to read a file
+# that is not there either invents a reason to proceed or burns a round trip
+# asking.
+#
+# The fix is deterministic and adds NO policy: the tool states WHICH file actually
+# governs. It does not generate a README into a scope, and must not — each scope's
+# README is a human policy statement, and writing one would be manufacturing
+# authority the store never granted. Naming the store-root README as the fallback
+# is the opposite: it points at policy a human already wrote.
+POLICY_SCOPE = "scope README — authoritative for this scope"
+POLICY_STORE_ROOT = "store-root README — this scope has none of its own"
+POLICY_NONE = "NONE — neither a scope README nor a store-root README exists"
+
+
+def governing_policy(store_root: str | Path, scope: str) -> tuple[str | None, str]:
+    """`(path|None, basis)` — the policy file that governs writes to `<scope>/`.
+
+    Precedence, and it is the same order the prose asserts: the scope's own
+    README, else the store-root README, else neither. READ-ONLY: it stats two
+    paths and reads nothing.
+
+    Returns the BASIS as well as the path because a path alone cannot say whether
+    the reader is looking at policy written for this scope or policy written for
+    the store — and an agent that mistakes the second for the first will believe
+    a scope has spoken when it has not.
+    """
+    store = Path(store_root)
+    scoped = store / normalize_ref(scope) / "README.md"
+    if scoped.is_file():
+        return str(scoped), POLICY_SCOPE
+    root = store / "README.md"
+    if root.is_file():
+        return str(root), POLICY_STORE_ROOT
+    return None, POLICY_NONE
+
 
 # `analyze-service/SKILL.md` on auto-discovered pointers: "propose at most ~5-7
 # candidates, never a raw match list — a dump is unusable even though the human
@@ -432,6 +485,17 @@ class TouchError(Exception):
 
 class StoreMissingError(TouchError):
     """The store root does not exist. Sentinel: 'store root not found'."""
+
+
+class EntryFileMissingError(TouchError):
+    """`--validate <path>` names something that is not a file. Sentinel: 'entry file not found'.
+
+    🔴 ITS OWN SENTINEL, NOT `malformed index entry`. A path that does not exist
+    and a file that does not parse are different facts with different fixes
+    (check the path vs. fix the front matter), and reporting the first as the
+    second would make the validator's own output the thing that misleads. They do
+    share an exit code, because the skill's handling of both is identical.
+    """
 
 
 class GitError(TouchError):
@@ -2522,6 +2586,25 @@ class TouchReport:
     entry_files: Mapping[str, str] = field(default_factory=dict)
     """ref -> the filename in the scope dir, for the append target."""
 
+    policy_path: str | None = None
+    """WHICH policy file governs a write into this scope — `governing_policy`'s
+    answer, carried on the report so the renderer and the JSON quote ONE result.
+
+    🔴 It is on the PROBE's report because the probe is what runs before the
+    write. `handoff/SKILL.md` step 4 tells the writer to read the scope's README
+    and calls it authoritative, and measured 2026-08-13 only 1 of 5 scopes has
+    one — so the instruction was unfollowable 80% of the time, with no signal
+    that the file was simply absent rather than unread. Naming the file that
+    actually governs is deterministic and invents no policy; generating a README
+    into a scope would be manufacturing authority, and is deliberately not done.
+    """
+
+    policy_basis: str = POLICY_NONE
+    """Which of the three cases `policy_path` is — a scope README, the store-root
+    fallback, or neither. The path alone cannot say whether the reader is looking
+    at policy written FOR this scope, and mistaking the fallback for the scope's
+    own is believing a scope has spoken when it has not."""
+
     journals: Mapping[str, EntryJournal] = field(default_factory=dict)
     """ref -> what that entry's `## Nuance / work-history` ALREADY holds.
 
@@ -2591,6 +2674,12 @@ def build_report(
     the intended case the failing case.
     """
     store = Path(store_root)
+    # 🔴 RESOLVED ONCE, HERE, AND CARRIED ON EVERY RETURN — including
+    # `looked-at-nothing`, which is where a session with an empty window still
+    # goes on to consider a NEW entry and therefore still needs to know which
+    # policy file governs. Deriving it per branch would be the same predicate at
+    # three sites.
+    policy_path, policy_basis = governing_policy(store, scope)
     if not source.paths:
         return TouchReport(
             status="looked-at-nothing",
@@ -2599,6 +2688,8 @@ def build_report(
             source=source,
             today=today,
             min_paths=min_paths,
+            policy_path=policy_path,
+            policy_basis=policy_basis,
         )
     if not store.is_dir():
         raise StoreMissingError(
@@ -2614,22 +2705,30 @@ def build_report(
     # Same class `subsystem_recall` raises for the same condition, imported from
     # the resolver rather than re-declared.
     #
-    # ⚠ THE `MalformedEntryError` CLAUSE IS REDUNDANT-BUT-KEPT, and it is
-    # labelled because a mutation test PROVED it unkillable rather than because
-    # anyone reasoned about it: `MalformedEntryError` is a `ResolverError`, not
-    # an `OSError`, so the clause below could never have caught it and the
-    # re-raise changes nothing. Replacing it with `except ZeroDivisionError`
-    # leaves the behaviour identical. It stays — spelled the same way in
-    # `subsystem_recall`, which reads the same store — because it makes
-    # "the store is BROKEN is not reworded as the store is UNREADABLE" readable
-    # at the call site, and because deleting it from one of the two readers and
-    # not the other is how they start to drift. It is NOT coverage: nothing in
-    # the suite can measure it, and `test_the_MALFORMED_reraise_is_UNKILLABLE`
-    # says so out loud instead of leaving a green that means nothing.
+    # 🔴 THE WRITER STAYS FAIL-CLOSED, AND THAT IS DELIBERATE. The READER
+    # (`subsystem_recall`) degrades — it serves what it can and reports the rest —
+    # because spending every good entry to report one bad one is a bad trade for
+    # somebody who only wants to look. This is the other side: it gates a WRITE
+    # into a curated, unbacked-up store, and acting on a partially-read index is
+    # the one case where aborting is cheaper than degrading. The exit code is
+    # unchanged (3).
+    #
+    # ⚠ THE CLAUSE USED TO BE A LABELLED NO-OP. `MalformedEntryError` is a
+    # `ResolverError`, not an `OSError`, so `except MalformedEntryError: raise`
+    # sitting above the `OSError` clause could never change an outcome, and a
+    # mutation test proved it by refusing to kill it. It is LOAD-BEARING now: it
+    # rewords the refusal so it names the way out. Do not restore the bare
+    # re-raise — `test_the_refusal_NAMES_the_recovery` is what stops that.
     try:
         index = load_index(store)
-    except MalformedEntryError:
-        raise
+    except MalformedEntryError as exc:
+        # Re-raised as the SAME class with the SAME sentinel leading the message,
+        # so every existing `except`, every `in str(exc)` assertion and the exit
+        # code all keep working. `from exc` preserves the original for a
+        # traceback; what changes is only what the operator reads.
+        raise MalformedEntryError(
+            malformed_refusal(store, scope, exc), source=exc.source, why=exc.why
+        ) from exc
     except OSError as exc:
         raise EntryUnreadableError(
             f"index entry unreadable: under {store} ({type(exc).__name__}: {exc}) — the "
@@ -2655,6 +2754,8 @@ def build_report(
             min_paths=min_paths,
             association=assoc,
             nominations=nominate(assoc, empty, min_paths=min_paths, limit=limit),
+            policy_path=policy_path,
+            policy_basis=policy_basis,
         )
 
     noms = nominate(assoc, index, min_paths=min_paths, limit=limit)
@@ -2670,6 +2771,8 @@ def build_report(
         nominations=noms,
         entry_files=entry_files,
         journals={m.entry.ref: read_entry_journal(store, m.entry) for m in assoc.matched},
+        policy_path=policy_path,
+        policy_basis=policy_basis,
     )
 
 
@@ -2850,6 +2953,11 @@ def render_text(report: TouchReport) -> str:
     out: list[str] = []
     out.append(f"subsystem-touch: status={report.status} scope={report.scope}")
     out.append(f"  store: {report.store_root}")
+    # 🔴 NAMED, NEVER ASSUMED. The write half of this step is told to read the
+    # governing README first; printing WHICH file that is makes the instruction
+    # followable in the 4-of-5 scopes that have no README of their own, and makes
+    # the third case ("neither exists") a stated fact instead of a silent one.
+    out.append(f"  policy: {report.policy_path or '(none)'}  ({report.policy_basis})")
     out.append(
         f"  paths: {len(src.paths)} ({src.kind}, window={src.window}, "
         f"min_paths={report.min_paths})"
@@ -3007,6 +3115,8 @@ def report_json(report: TouchReport) -> dict:
         "today": report.today,
         "min_paths": report.min_paths,
         "writer_id": WRITER_ID,
+        "policy_file": report.policy_path,
+        "policy_basis": report.policy_basis,
         "source": {
             "kind": src.kind,
             "window": src.window,
@@ -3159,6 +3269,272 @@ def render_census(c: Census) -> str:
     return "\n".join(out)
 
 
+# --- Validation: the write-time check -------------------------------------------
+#
+# 🔴 IT REUSES THE READER'S PARSER AND VALIDATOR — `entry_mapping` +
+# `SubsystemEntry.from_mapping` + `load_index(COLLECT)` — and implements no
+# second one. A validator that re-derives the rules is a duplicated predicate,
+# and its specific failure mode is the worst possible one for a checker: it
+# starts blessing entries the reader rejects, which is precisely the situation a
+# write-time check exists to prevent. If the schema grows a field, this function
+# learns it for free or not at all.
+#
+# WHY IT EXISTS: a wrapped `aliases:` list was written by one session and
+# diagnosed by a different tool in a different session hours later. The confirm
+# gate that approved it showed a diff containing the defect while being
+# structurally incapable of revealing it — nothing in the loop parsed the bytes.
+
+
+@dataclass(frozen=True)
+class ValidationReport:
+    """What `--validate` checked, and what it found. Counts on EVERY path.
+
+    🔴 `checked` IS PRINTED BESIDE `malformed`, ALWAYS. A bare "0 malformed" from
+    a scan that walked nothing is indistinguishable from a clean scope, and
+    `claude/RULES.md` names that as the failure, not the all-clear: a reassuring
+    zero has to carry the size of the thing it is a zero over.
+    """
+
+    store_root: str
+    target: str
+    """What was validated, in words — a file path, or `<scope>/`."""
+
+    scope: str | None
+    """The scope, when a whole scope was validated; None for a single file."""
+
+    checked: tuple[str, ...]
+    malformed: tuple[MalformedEntry, ...] = ()
+    policy_path: str | None = None
+    policy_basis: str = POLICY_NONE
+
+    @property
+    def clean(self) -> bool:
+        return not self.malformed
+
+    def to_json(self) -> dict:
+        return {
+            "store_root": self.store_root,
+            "target": self.target,
+            "scope": self.scope,
+            "checked": list(self.checked),
+            "checked_count": len(self.checked),
+            "malformed_count": len(self.malformed),
+            "malformed": [
+                {"scope": m.scope, "file": m.filename, "reason": m.reason, "line": m.line}
+                for m in self.malformed
+            ],
+            "policy_file": self.policy_path,
+            "policy_basis": self.policy_basis,
+        }
+
+
+def validate_entry_file(path: str | Path) -> MalformedEntry | None:
+    """Would the loader accept this ONE file? `None` if yes, the rejection if no.
+
+    The scope is the PARENT DIRECTORY NAME, exactly as `load_index` takes it —
+    the directory is the authority on scope, so validating against the file's own
+    `scope:` field would answer a question the loader never asks.
+
+    ⚠ A single file cannot be checked for DUPLICATES: that is a relationship
+    between two files. `validate_scope` covers it, and `render_validation` says so
+    on the single-file path rather than leaving a narrower check to look total.
+    """
+    p = Path(path)
+    if not p.is_file():
+        raise EntryFileMissingError(
+            f"index entry file not found: {p} — `--validate <path>` takes the path to an "
+            f"entry `.md`. A missing file is not a malformed one, and reporting it as one "
+            f"would send you to fix front matter that is not there"
+        )
+    mapping = entry_mapping(
+        p.read_text(encoding="utf-8", errors="replace"), filename=p.name, scope=p.parent.name
+    )
+    try:
+        SubsystemEntry.from_mapping(mapping, source=p.name)
+    except MalformedEntryError as exc:
+        return MalformedEntry(
+            scope=normalize_ref(p.parent.name), filename=p.name, reason=exc.why
+        )
+    return None
+
+
+def validate_scope(store_root: str | Path, scope: str) -> tuple[tuple[str, ...], tuple[MalformedEntry, ...]]:
+    """`(checked, malformed)` for every entry file in ONE scope. READ-ONLY.
+
+    Goes through `load_index(COLLECT)` rather than looping `validate_entry_file`,
+    so the DUPLICATE-ref check runs too — that rejection lives in `build_index`
+    and a per-file loop structurally cannot see it. The `checked` list is taken
+    from the directory, not from the index, so a file the loader rejected is
+    still counted as examined: `checked` must be "files walked", or the zero it
+    accompanies means nothing.
+    """
+    store = Path(store_root)
+    if not store.is_dir():
+        raise StoreMissingError(
+            f"store root not found: {store} — expected the `/analyze-service` index store; "
+            f"nothing was validated, and this is NOT 'the scope is clean'"
+        )
+    scope_dir = store / normalize_ref(scope)
+    checked = (
+        tuple(md.name for md in sorted(scope_dir.glob("*.md")) if md.name != "README.md")
+        if scope_dir.is_dir()
+        else ()
+    )
+    if not checked:
+        return (), ()
+    index = load_index(store, on_malformed=ON_MALFORMED_COLLECT)
+    return checked, index.malformed_in(scope)
+
+
+def validate_command(store_root: str | Path, scope: str) -> str:
+    """The literal, runnable `--validate` invocation for one scope. ONE spelling.
+
+    🔴 IT IS BUILT, NEVER TYPED INTO PROSE. Every place that tells a caller how to
+    recover emits this, so a flag rename cannot leave a skill or an error message
+    quoting a command that no longer parses — the exact failure a "just run
+    --validate" sentence has no defence against. `Path(__file__)` rather than a
+    hardcoded path so a copy of this module names ITSELF and the command stays
+    true wherever it is running from.
+    """
+    return (
+        f"python3 {Path(__file__).resolve()} --store {store_root} "
+        f"--scope {normalize_ref(scope)} --validate"
+    )
+
+
+def malformed_refusal(store_root: str | Path, scope: str, exc: MalformedEntryError) -> str:
+    """The probe's REFUSAL, with the route out of it. Wording only — it still raises.
+
+    🔴 THE PRECEDENT IS `TranscriptCwdMismatchError` (#436), IN THIS SAME SKILL:
+    the guard was right to refuse, and the fix was to make the refusal NAME THE
+    ALTERNATIVE instead of stopping at the hazard. This message stopped at the
+    hazard — `malformed index entry 'bad.md': ...` and nothing else — while
+    `handoff/SKILL.md` step 4 tells the agent that a non-zero exit means "print
+    the stderr line verbatim and write NOTHING". So the agent got a dead end: no
+    recovery, no way to tell whether the offending file was the entry it was
+    about to touch or something unrelated, and the store stayed broken until a
+    human happened to look.
+
+    🔴 THE RECOVERY COMMAND IS PER AFFECTED SCOPE, AND THAT IS THE WHOLE POINT OF
+    ENUMERATING. The obvious version — "run `--validate` on your scope" — is
+    UNFOLLOWABLE exactly when it matters most: a malformed entry in ANOTHER scope
+    still aborts this repo's load (the loader reads the whole store), so that
+    command would report the caller's own scope clean while the probe kept
+    failing. That is the same shape as the instruction this change exists to fix.
+    So the enumeration is re-read with `COLLECT` and one command is emitted for
+    each scope that actually holds a reject, this repo's first.
+
+    Fail-closed behaviour and the exit code are UNCHANGED: it still raises, and
+    `main()` still exits 3. Only the words moved.
+
+    ⚠ The enumeration is best-effort by construction. If the second read fails
+    for any reason the ORIGINAL diagnosis is still returned in full — a message
+    that turned one failure into a different one would be worse than a terse one.
+    """
+    store = Path(store_root)
+    head = (
+        f"{exc}\n"
+        f"  REFUSED, NOT READ: the probe indexed NOTHING and proposed NOTHING. This is not "
+        f"'nothing touched an entry' — no association was computed at all, because a writer "
+        f"must not act on a store it has read only part of."
+    )
+    try:
+        malformed = load_index(store, on_malformed=ON_MALFORMED_COLLECT).malformed
+    except Exception:  # noqa: BLE001 — see the docstring: never mask the real diagnosis
+        return head
+    if not malformed:
+        # The first read raised and the second found nothing: the store changed
+        # under us, or the rejection is not reproducible. Say so rather than
+        # printing an empty list under a heading that promises one.
+        return (
+            f"{head}\n"
+            f"  (Re-reading {store} to enumerate every unreadable entry found NONE — the "
+            f"store changed between the two reads. Re-run the probe.)"
+        )
+
+    here = normalize_ref(scope)
+    mine = [m for m in malformed if m.scope == here]
+    theirs = [m for m in malformed if m.scope != here]
+    n = len(malformed)
+    lines = [
+        head,
+        f"  {n} entry file{'' if n == 1 else 's'} under {store} cannot be indexed, and EVERY "
+        f"reader skips {'it' if n == 1 else 'them'}:",
+    ]
+    lines += [f"    {m.line}" for m in malformed]
+    if mine:
+        lines.append(
+            f"  {len(mine)} of {'them' if n > 1 else 'those'} "
+            f"{'is' if len(mine) == 1 else 'are'} in THIS repo's scope `{here}/` — "
+            f"{'it' if len(mine) == 1 else 'any of them'} may be the very entry your paths "
+            f"would have matched, so do not conclude this session touched nothing."
+        )
+    if theirs:
+        lines.append(
+            f"  {len(theirs)} {'is' if len(theirs) == 1 else 'are'} in ANOTHER scope and "
+            f"cannot affect this repo's association at all — but the loader reads the WHOLE "
+            f"store, so {'it still blocks' if len(theirs) == 1 else 'they still block'} "
+            f"this probe. "
+            f"Running --validate on `{here}/` alone would report it clean and change nothing."
+        )
+    # This repo's scope first: it is the one the caller can act on without leaving
+    # the task, and the ordering is deterministic so two runs print one diff.
+    affected = [here] if mine else []
+    affected += sorted({m.scope for m in theirs})
+    lines.append("  RECOVER — fix the file(s) named above, then re-run this probe. Check with:")
+    lines += [f"    {validate_command(store, s)}" for s in affected]
+    return "\n".join(lines)
+
+
+def render_validation(report: ValidationReport) -> str:
+    """The validator's brief. Deterministic, and it states its own denominator."""
+    out = [
+        f"subsystem-touch validate: {report.target}",
+        f"  store: {report.store_root}",
+        f"  policy: {report.policy_path or '(none)'}  ({report.policy_basis})",
+    ]
+    if not report.checked:
+        # 🔴 ITS OWN BRANCH AND ITS OWN WORDS. "0 malformed" over 0 files is the
+        # reassuring zero from an instrument wired to nothing; it must not render
+        # anywhere near the clean verdict.
+        out.append("")
+        out.append(
+            f"NOTHING WAS CHECKED — no entry files were found for {report.target}. A zero "
+            f"here is NOT a clean bill of health: it says the validator walked an empty or "
+            f"absent directory, not that the entries parse."
+        )
+        return "\n".join(out)
+
+    out.append(f"  checked: {len(report.checked)} entry file(s) — {', '.join(report.checked)}")
+    if report.scope is None:
+        out.append(
+            "  scope: NOT checked for duplicate refs — that is a relationship between two "
+            "files, and this run looked at one. Re-run as `--validate` (no path) for the "
+            "whole scope."
+        )
+    out.append("")
+    if report.clean:
+        out.append(
+            f"OK — {len(report.checked)} of {len(report.checked)} entry file(s) parse, "
+            f"0 malformed. They will load, be listed, and be reachable by `--ref`."
+        )
+        return "\n".join(out)
+    n = len(report.malformed)
+    out.append(
+        f"🔴 MALFORMED — {n} of {len(report.checked)} entry file(s) could NOT be indexed. "
+        f"Every reader skips {'it' if n == 1 else 'them'}, so the content is invisible "
+        f"until fixed:"
+    )
+    for m in report.malformed:
+        out.append(f"  {m.line}")
+    out.append(
+        "  (Front matter is parsed LINE BY LINE. The commonest cause is a value wrapped "
+        "across two physical lines — an `aliases: [...]` list in particular must be on ONE "
+        "line, or the parser reads an unterminated bare string.)"
+    )
+    return "\n".join(out)
+
+
 # --- CLI -----------------------------------------------------------------------
 
 
@@ -3261,7 +3637,39 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="print the minimal new-entry template for SLUG and exit",
     )
+    p.add_argument(
+        "--validate",
+        nargs="?",
+        const=VALIDATE_SCOPE,
+        default=None,
+        metavar="PATH",
+        help=(
+            "check that entry files PARSE, and exit. With a PATH, check that one file; "
+            "with no argument, check every entry in this repo's scope (which also catches "
+            "duplicate refs). Exit 3 if anything is malformed. It reuses the reader's own "
+            "parser and validator, so a pass here is the reader's verdict and not a second "
+            "opinion — run it right after writing an entry, because the tool that would "
+            "otherwise tell you is a different tool in a later session."
+        ),
+    )
     return p
+
+
+# The `--validate` sentinel for "no path given, do the whole scope". A const
+# rather than `True` so the value is still a string everywhere downstream and one
+# `is`-vs-`==` slip cannot turn "validate the scope" into a path named `True`.
+VALIDATE_SCOPE = ""
+
+# 🔴 ONE RULE, ONE PLACE — the three DO-THIS-AND-EXIT modes. Each pair of them is
+# the same conflict, so three pairwise `if`s would be the predicate open-coded at
+# three sites, wrong at two the first time a fourth mode arrives. They select
+# different things and every combination has an obvious "sensible" reading that
+# differs from the others', so the combination is refused rather than ordered.
+_EXIT_MODES: tuple[tuple[str, str], ...] = (
+    ("--census", "count entries by scope and writer"),
+    ("--template", "print a new-entry template"),
+    ("--validate", "check that entry files parse"),
+)
 
 
 def _comma_tokens(groups: Iterable[object]) -> list[str]:
@@ -3283,6 +3691,25 @@ def main(argv: Sequence[str] | None = None, *, today: str | None = None) -> int:
 
     stamp = args.today or today or date.today().isoformat()
 
+    chosen = [
+        flag
+        for flag, _what in _EXIT_MODES
+        if (flag == "--census" and args.census)
+        or (flag == "--template" and args.template is not None)
+        or (flag == "--validate" and args.validate is not None)
+    ]
+    if len(chosen) > 1:
+        what = {f: w for f, w in _EXIT_MODES}
+        print(
+            "subsystem-touch: "
+            + " and ".join(chosen)
+            + " select different things ("
+            + " vs ".join(what[f] for f in chosen)
+            + "). Pass one.",
+            file=sys.stderr,
+        )
+        return 2
+
     try:
         if args.census:
             c = census(args.store)
@@ -3295,6 +3722,39 @@ def main(argv: Sequence[str] | None = None, *, today: str | None = None) -> int:
         if args.template is not None:
             print(new_entry_template(normalize_ref(args.template), scope, today=stamp))
             return 0
+
+        if args.validate is not None:
+            if args.validate == VALIDATE_SCOPE:
+                checked, malformed = validate_scope(args.store, scope)
+                policy_scope: str | None = scope
+                target = f"`{normalize_ref(scope)}/`"
+            else:
+                bad = validate_entry_file(args.validate)
+                checked = (Path(args.validate).name,)
+                malformed = (bad,) if bad is not None else ()
+                policy_scope = Path(args.validate).parent.name
+                target = str(args.validate)
+            path, basis = governing_policy(args.store, policy_scope or "")
+            report = ValidationReport(
+                store_root=str(args.store),
+                target=target,
+                scope=scope if args.validate == VALIDATE_SCOPE else None,
+                checked=tuple(checked),
+                malformed=tuple(malformed),
+                policy_path=path,
+                policy_basis=basis,
+            )
+            print(
+                json.dumps(report.to_json(), indent=2)
+                if args.json
+                else render_validation(report)
+            )
+            # 🔴 3, the same code every other "the store is broken" condition
+            # uses here. `handoff/SKILL.md` already says any non-zero exit means
+            # print the line and write NOTHING, which is exactly the right
+            # response to an entry that does not parse; a fourth exit code would
+            # need every consumer to learn it before it changed any behaviour.
+            return 0 if report.clean else 3
 
         wants_session = args.session is not None or args.transcript is not None
         wants_pr = args.pr is not None

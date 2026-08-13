@@ -2352,3 +2352,273 @@ class TestEntryMarkdownMutationKills:
             None,
             "2026-02-11",
         ]
+
+
+# =============================================================================
+# DEGRADING: one bad entry must not cost the whole scope.
+# =============================================================================
+#
+# 🔴 THE MEASUREMENT THAT FORCED THIS. Before the change, on a synthetic store:
+#
+#     2 good entries          -> rc=0, both listed
+#     2 good + 1 malformed    -> rc=3, good entries still listed: 0
+#
+# One `aliases:` list wrapped across two physical lines took `/resume` step 4,
+# `--list`, `--ref` and `--search` down together. `RAISE` stays the default so
+# every existing caller keeps its contract; `COLLECT` is what the READER opts
+# into, and its obligation is to REPORT — a silent skip would be strictly worse
+# than the collapse, because a dropped entry is indistinguishable from one that
+# was never written.
+
+# THE EXACT DEFECT, in shape: a flow list broken over two physical lines. The
+# front-matter parser is LINE-BASED, so line 1 is an unterminated `[` and reads
+# as a bare string. Synthetic names only — the live store is
+# client-confidential and this repo is PUBLIC.
+WRAPPED_ALIASES_ENTRY = (
+    "---\n"
+    "service: widget-index\n"
+    "scope: synth-scope\n"
+    "aliases: [widget_touch, widget_recall, widget_resolver,\n"
+    "          test_widget_touch, test_widget_recall]\n"
+    "---\n"
+    "\n"
+    "## What it is\n"
+    "The entry whose front matter the writer wrapped.\n"
+)
+
+GOOD_A = "---\nservice: alpha-unit\nscope: synth-scope\n---\n\n## What it is\nOne.\n"
+GOOD_B = "---\nservice: beta-unit\nscope: synth-scope\n---\n\n## What it is\nTwo.\n"
+
+
+def _synth_store(root: Path, files: dict, scope: str = "synth-scope") -> Path:
+    store = root / "store"
+    (store / scope).mkdir(parents=True)
+    for name, body in files.items():
+        (store / scope / name).write_text(body, encoding="utf-8")
+    return store
+
+
+class TestWrappedAliasesIsTheDefect:
+    """The reported defect, pinned as a fixture rather than described in prose."""
+
+    def test_the_wrapped_list_is_REJECTED_with_the_reported_message(
+        self, tmp_path: Path
+    ) -> None:
+        """The exact sentence the live tool printed. This pins the DIAGNOSIS: if
+        the parser ever learns multi-line flow lists, this is the test that must
+        be revisited deliberately rather than relaxed in passing."""
+        store = _synth_store(tmp_path, {"widget-index.md": WRAPPED_ALIASES_ENTRY})
+        with pytest.raises(sr.MalformedEntryError) as exc:
+            sr.load_index(store)
+        assert "`aliases:` must be a list, not a bare string" in str(exc.value)
+        assert "widget-index.md" in str(exc.value)
+
+    def test_the_WRAP_is_what_breaks_it(self, tmp_path: Path) -> None:
+        """🔴 THE CONTROL THAT MAKES THE FIXTURE A MEASUREMENT. The same aliases
+        on ONE line parse fine — so the fixture above fails because of the wrap,
+        not because of the names, the count or the underscores in it. Without
+        this, a fixture broken for an unrelated reason would look like a faithful
+        reproduction of the reported bug."""
+        one_line = WRAPPED_ALIASES_ENTRY.replace(
+            "aliases: [widget_touch, widget_recall, widget_resolver,\n"
+            "          test_widget_touch, test_widget_recall]\n",
+            "aliases: [widget_touch, widget_recall, widget_resolver, "
+            "test_widget_touch, test_widget_recall]\n",
+        )
+        store = _synth_store(tmp_path, {"widget-index.md": one_line})
+        loaded = sr.load_index(store)  # must not raise
+        entry = sr.resolve_ref("test-widget-recall", loaded, "synth-scope")
+        assert entry is not None and entry.filename == "widget-index.md"
+
+
+class TestCollectDegrades:
+    def test_two_good_and_one_bad_still_serve_the_two(self, tmp_path: Path) -> None:
+        """The blast-radius measurement, as an assertion. `RAISE` serves 0."""
+        store = _synth_store(
+            tmp_path,
+            {
+                "alpha-unit.md": GOOD_A,
+                "beta-unit.md": GOOD_B,
+                "widget-index.md": WRAPPED_ALIASES_ENTRY,
+            },
+        )
+        with pytest.raises(sr.MalformedEntryError):
+            sr.load_index(store)  # the OLD behaviour, still the default
+
+        loaded = sr.load_index(store, on_malformed=sr.ON_MALFORMED_COLLECT)
+        assert sorted(e.ref for e in loaded.entries("synth-scope")) == [
+            "alpha-unit",
+            "beta-unit",
+        ]
+        assert [m.filename for m in loaded.malformed] == ["widget-index.md"]
+        assert loaded.malformed[0].scope == "synth-scope"
+        assert "aliases:" in loaded.malformed[0].reason
+
+    def test_the_reject_is_NOT_counted_as_an_entry(self, tmp_path: Path) -> None:
+        """🔴 A collected reject must not leak into the entry count anywhere — an
+        index that said "3" and held 2 would be the silent short index this mode
+        exists to prevent, wearing a number."""
+        store = _synth_store(
+            tmp_path,
+            {
+                "alpha-unit.md": GOOD_A,
+                "beta-unit.md": GOOD_B,
+                "widget-index.md": WRAPPED_ALIASES_ENTRY,
+            },
+        )
+        loaded = sr.load_index(store, on_malformed=sr.ON_MALFORMED_COLLECT)
+        assert len(loaded) == 2
+
+    def test_a_scope_of_ONLY_rejects_still_EXISTS(self, tmp_path: Path) -> None:
+        """🔴 THE DISCRIMINATOR. If the scope went unregistered, a reader would
+        answer `UnknownScopeError` -> "nothing recorded yet" about a directory
+        full of content it merely could not parse."""
+        store = _synth_store(tmp_path, {"widget-index.md": WRAPPED_ALIASES_ENTRY})
+        loaded = sr.load_index(store, on_malformed=sr.ON_MALFORMED_COLLECT)
+        assert loaded.scopes == ("synth-scope",)
+        assert loaded.entries("synth-scope") == ()  # not a raise
+        assert len(loaded.malformed_in("synth-scope")) == 1
+
+    def test_build_index_registers_a_reject_scope_without_a_disk_load(self) -> None:
+        """The same guard reached through `build_index` directly, where
+        `extra_scopes` is not quietly doing the work. Two code paths; the test
+        above covers only one."""
+        idx = sr.build_index(
+            [{"service": "", "scope": "synth-scope", "filename": "x.md"}],
+            on_malformed=sr.ON_MALFORMED_COLLECT,
+        )
+        assert idx.scopes == ("synth-scope",)
+        assert idx.entries("synth-scope") == ()
+
+    def test_a_reject_is_attributed_to_ITS_OWN_scope(self, tmp_path: Path) -> None:
+        """A broken entry in one scope must not make another look broken."""
+        store = _synth_store(tmp_path, {"alpha-unit.md": GOOD_A})
+        (store / "other-scope").mkdir()
+        (store / "other-scope" / "widget-index.md").write_text(
+            WRAPPED_ALIASES_ENTRY.replace("scope: synth-scope", "scope: other-scope"),
+            encoding="utf-8",
+        )
+        loaded = sr.load_index(store, on_malformed=sr.ON_MALFORMED_COLLECT)
+        assert loaded.malformed_in("synth-scope") == ()
+        assert [m.filename for m in loaded.malformed_in("other-scope")] == [
+            "widget-index.md"
+        ]
+        assert [m.scope for m in loaded.malformed_outside(("synth-scope",))] == [
+            "other-scope"
+        ]
+        assert loaded.malformed_outside(("synth-scope", "other-scope")) == ()
+
+    def test_a_DUPLICATE_ref_is_collected_too_and_the_FIRST_still_serves(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 THE SECOND REJECTION SITE. It lives in `build_index`, not in
+        `from_mapping`, so collecting only the first would leave `COLLECT` able
+        to raise — a mode a caller cannot defend against because it looks
+        handled."""
+        store = _synth_store(
+            tmp_path,
+            {
+                # Two spellings of ONE slug. The filename must agree with
+                # `service:`, so a collision can only be built out of two names
+                # that NORMALIZE together — `_` folds to `-`.
+                "alpha-unit.md": GOOD_A,
+                "alpha_unit.md": "---\nservice: alpha_unit\nscope: synth-scope\n---\n",
+            },
+        )
+        loaded = sr.load_index(store, on_malformed=sr.ON_MALFORMED_COLLECT)
+        assert [e.filename for e in loaded.entries("synth-scope")] == ["alpha-unit.md"]
+        assert [m.filename for m in loaded.malformed] == ["alpha_unit.md"]
+        assert "duplicate" in loaded.malformed[0].reason
+
+    def test_an_unknown_on_malformed_value_is_REFUSED(self) -> None:
+        """Not silently treated as `raise`: a typo'd policy that quietly picks
+        fail-closed is a caller believing it degrades when it does not."""
+        with pytest.raises(ValueError) as exc:
+            sr.build_index([], on_malformed="skip")
+        assert "on_malformed must be one of" in str(exc.value)
+
+    def test_the_default_is_still_RAISE(self, tmp_path: Path) -> None:
+        """An INVARIANT GUARD, labelled as one: it pins that no existing caller's
+        contract moved. It is NOT regression coverage for the reported bug."""
+        store = _synth_store(
+            tmp_path, {"alpha-unit.md": GOOD_A, "widget-index.md": WRAPPED_ALIASES_ENTRY}
+        )
+        with pytest.raises(sr.MalformedEntryError):
+            sr.load_index(store)
+        with pytest.raises(sr.MalformedEntryError):
+            sr.build_index([{"service": "x", "scope": "s", "aliases": "not-a-list"}])
+
+    def test_an_OSError_still_fails_CLOSED_in_collect_mode(self, tmp_path: Path) -> None:
+        """🔴 THE LINE THE DEGRADATION STOPS AT, stated as a test. A malformed
+        entry is a file we READ and could not interpret; an unreadable one means
+        the store was not fully read, so the entry SET is unknown and there is
+        nothing honest to degrade to. Reached with a directory where a `.md`
+        belongs — an OSError any user hits, not a mode change a root-run sandbox
+        would silently bypass."""
+        store = _synth_store(tmp_path, {"alpha-unit.md": GOOD_A})
+        (store / "synth-scope" / "broken.md").mkdir()
+        with pytest.raises(OSError):
+            sr.load_index(store, on_malformed=sr.ON_MALFORMED_COLLECT)
+
+
+class TestMalformedEntryCarriesItsOwnFacts:
+    def test_the_row_carries_the_SENTINEL_and_the_label(self) -> None:
+        """A row is what gets copied into a report or grepped for; one that left
+        its header behind would no longer say what kind of problem it is."""
+        m = sr.MalformedEntry(scope="synth-scope", filename="x.md", reason="because")
+        assert m.label == "synth-scope/x.md"
+        assert m.line == "malformed index entry `synth-scope/x.md`: because"
+
+    def test_the_exception_carries_why_STRUCTURALLY(self) -> None:
+        """`.why` exists so a row is not assembled by re-splitting `str(exc)` on
+        `": "` — a second parser for a format nothing pins. `str(exc)` is
+        unchanged, so every existing `in`-assertion over it still holds."""
+        with pytest.raises(sr.MalformedEntryError) as exc:
+            sr.SubsystemEntry.from_mapping(
+                {"service": "x", "scope": "s", "aliases": "bare"}, source="x.md"
+            )
+        assert exc.value.source == "x.md"
+        assert exc.value.why == "`aliases:` must be a list, not a bare string"
+        assert str(exc.value).startswith("malformed index entry 'x.md': ")
+
+
+class TestEntryMappingIsShared:
+    """🔴 ONE RULE, ONE PLACE — the validator must not build its own mapping."""
+
+    def test_the_loader_builds_its_mapping_through_entry_mapping(self) -> None:
+        """STRUCTURAL: `load_index` must CALL the shared helper. A behavioural
+        test alone cannot tell "the loader uses it" from "the loader happens to
+        agree with it today", and agreement is exactly what drifts."""
+        src = MODULE_PATH.read_text(encoding="utf-8")
+        loader = src[src.index("def load_index("):]
+        assert "entry_mapping(" in loader, (
+            "load_index stopped going through entry_mapping — a validator that "
+            "reuses the helper is then checking a mapping the loader does not build"
+        )
+        for spelled_inline in ('fm["filename"] =', 'fm["scope"] ='):
+            assert spelled_inline not in loader, (
+                f"load_index re-spells {spelled_inline} instead of using entry_mapping"
+            )
+
+    def test_it_produces_exactly_what_the_loader_feeds_from_mapping(
+        self, tmp_path: Path
+    ) -> None:
+        """BEHAVIOURAL half: the mapping a caller builds for one file must be the
+        one the loader would have built for it."""
+        store = _synth_store(tmp_path, {"alpha-unit.md": GOOD_A})
+        path = store / "synth-scope" / "alpha-unit.md"
+        mapping = sr.entry_mapping(
+            path.read_text(encoding="utf-8"), filename="alpha-unit.md", scope="synth-scope"
+        )
+        built = sr.SubsystemEntry.from_mapping(mapping, source="alpha-unit.md")
+        assert built == sr.load_index(store).entries("synth-scope")[0]
+
+    def test_the_directory_beats_a_stale_scope_field(self) -> None:
+        """The one rule `entry_mapping` owns, exercised where it is now spelled."""
+        got = sr.entry_mapping(
+            "---\nservice: x\nscope: stale-name\nrepo: older-name\n---\n",
+            filename="x.md",
+            scope="the-dir",
+        )
+        assert got["scope"] == "the-dir"
+        assert "repo" not in got

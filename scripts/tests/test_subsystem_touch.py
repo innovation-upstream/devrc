@@ -47,8 +47,10 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import io
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -1167,9 +1169,35 @@ class TestSkillDocsArePinned:
             "Never anywhere in the working tree",
             "the negative half of the target — devrc is PUBLIC",
         ),
+        # 🔴 SUPERSEDES the old pin, which named a literal per-scope path:
+        # "Read `~/.claude/analyze-service-index/<scope>/README.md` before
+        # writing there". Measured 2026-08-13, only 1 of the store's 5 scopes has
+        # that file, so the instruction was unfollowable in 80% of cases and an
+        # agent meeting the gap had nothing to fall back on. The step now sends
+        # the writer to the file the PROBE named, which is resolved
+        # deterministically by `governing_policy` — so the pin follows the
+        # tooling instead of a path that usually is not there.
         (
-            "Read `~/.claude/analyze-service-index/<scope>/README.md` before writing there",
-            "the per-scope policy sheet analyze-service requires be read first",
+            "Read the policy file the probe named on its `policy:` line",
+            "the governing policy sheet, resolved by the tool rather than assumed",
+        ),
+        (
+            "do not go looking for one it did not name",
+            "🔴 the 80%-absent case: an unfollowable instruction invites invention",
+        ),
+        (
+            "--validate <path-you-just-wrote>",
+            "🔴 the write-time parse check — the writer finds its own defect, "
+            "not a different tool in a later session",
+        ),
+        (
+            "if the message prints a `RECOVER —` block, run the command it gives you",
+            "🔴 a refusal with no route out leaves the store broken until a human looks",
+        ),
+        (
+            "Run the command it printed, not one you compose",
+            "🔴 the blocking file is often in ANOTHER scope, where a composed "
+            "--validate reports clean and changes nothing",
         ),
         (
             "Any non-zero exit ⇒ print the stderr line verbatim and write NOTHING",
@@ -3470,6 +3498,12 @@ class TestPrNegativeControls:
         # `test_no_two_sentinels_share_a_spelling`, which is what keeps `_only`
         # from passing on a neighbour's error.
         "entry": "index entry unreadable",
+        # ⚠ Shares no spelling with "index entry unreadable" (a file that could
+        # not be OPENED) nor with the resolver's "malformed index entry" (a file
+        # that could not be PARSED). Three conditions, three phrases, three
+        # fixes; `test_no_two_sentinels_share_a_spelling` is what keeps them
+        # from collapsing into one.
+        "entry-file": "index entry file not found",
         # PR-source sentinels
         "remote": "repo has no usable github remote",
         "gh-missing": "gh cli not found",
@@ -3534,6 +3568,11 @@ class TestPrNegativeControls:
             # as everything else: a caller catching it does not care which module
             # the `class` statement is in.
             "EntryUnreadableError",
+            # `--validate <path>` naming something that is not a file. Its own
+            # sentinel ('entry file not found') rather than reusing the malformed
+            # one: a missing path and a file that will not parse have different
+            # fixes, and the validator's own output must not conflate them.
+            "EntryFileMissingError",
         }
         assert declared == covered, (
             "subsystem_touch declares an error class this sentinel map does not "
@@ -6437,40 +6476,56 @@ class TestJournalMutationKillMatrix:
         assert not isinstance(exc.value, st.EntryUnreadableError)
         assert "index entry unreadable" not in str(exc.value)
 
-    def test_the_MALFORMED_reraise_is_UNKILLABLE_and_that_is_the_finding(
-        self, tmp_path
-    ) -> None:
-        """🔴 NOT a kill — the OPPOSITE, recorded so nobody re-derives it.
+    def test_kills_the_MALFORMED_refusal_wording(self, tmp_path) -> None:
+        """🔴 SUPERSEDES `test_the_MALFORMED_reraise_is_UNKILLABLE_and_that_is_the
+        _finding`, and the supersession is the point.
 
-        `build_report`'s `except MalformedEntryError: raise` before the
-        `except OSError` is a NO-OP: `MalformedEntryError` is a `ResolverError`,
-        so the `OSError` clause could never have caught it. A mutation aimed at
-        the clause is what proved this, by refusing to change anything. The same
-        redundancy is in `subsystem_recall`.
+        That test recorded a real finding: `build_report`'s
+        `except MalformedEntryError: raise` was a NO-OP, because
+        `MalformedEntryError` is a `ResolverError` and the `OSError` clause below
+        could never have caught it — a mutation aimed at the clause proved it by
+        refusing to change anything, and the honest thing was to say so rather
+        than dress an unkillable clause up as a green kill.
 
-        `claude/RULES.md` — a guard that cannot be reached is not coverage. So
-        this test asserts the redundancy directly (the mutant behaves IDENTICALLY
-        to the real module) rather than dressing an unkillable clause up as a
-        green kill. The clause stays, labelled, because it documents intent and
-        because deleting it from one of the two store-readers and not the other
-        is how the two start to drift.
+        The clause is LOAD-BEARING now. It rewords the refusal so it names the
+        recovery, so the same mutation that used to change nothing now strips the
+        route out and leaves the agent at the dead end `handoff/SKILL.md` step 4
+        walks it into. Reachable by construction: a malformed entry is the only
+        way in, and no earlier guard rejects one.
+
+        The premise assertion is kept — if `MalformedEntryError` ever became an
+        `OSError` this kill would be measuring clause ORDER instead of wording.
         """
         mod = _load_mutant(
             tmp_path,
             "mj_malformed",
-            [("    except MalformedEntryError:\n        raise",
-              "    except ZeroDivisionError:\n        raise")],
+            [("    except MalformedEntryError as exc:\n        # Re-raised as the SAME class",
+              "    except ZeroDivisionError as exc:\n        # Re-raised as the SAME class")],
         )
         store = _journal_store(tmp_path)
         (store / SCOPE / "nameless.md").write_text("---\nscope: x\n---\n", encoding="utf-8")
-        for module in (mod, st):
-            with pytest.raises(sr.MalformedEntryError) as exc:
-                module.build_report(
-                    module.caller_supplied(_journal_paths("batcher")), store, SCOPE, today=TODAY
-                )
-            assert "malformed index entry" in str(exc.value)
+
+        with pytest.raises(sr.MalformedEntryError) as mutant:
+            mod.build_report(
+                mod.caller_supplied(_journal_paths("batcher")), store, SCOPE, today=TODAY
+            )
+        assert "RECOVER" not in str(mutant.value)
+        assert not _recovery_commands(str(mutant.value))
+
+        with pytest.raises(sr.MalformedEntryError) as real:
+            st.build_report(
+                st.caller_supplied(_journal_paths("batcher")), store, SCOPE, today=TODAY
+            )
+        assert "RECOVER" in str(real.value)
+        assert _recovery_commands(str(real.value))
+
+        # BOTH still refuse with the same sentinel — the kill is about the route
+        # out, not about the refusal, which must not have moved.
+        for exc in (mutant, real):
+            assert str(exc.value).startswith("malformed index entry ")
         assert not issubclass(sr.MalformedEntryError, OSError), (
-            "the premise: if MalformedEntryError were an OSError the clause WOULD matter"
+            "the premise: if MalformedEntryError were an OSError this kill would be "
+            "measuring clause ORDER rather than the wording"
         )
 
     def test_kills_the_COMPARE_instruction(self, tmp_path) -> None:
@@ -6490,3 +6545,588 @@ class TestJournalMutationKillMatrix:
             )
         )
         assert "COMPARE what you write" not in text
+
+
+# =============================================================================
+# --validate: the WRITER finds its own defect, in its own session.
+# =============================================================================
+#
+# 🔴 WHY IT EXISTS. A wrapped `aliases:` list was written by one session,
+# approved through a confirm gate that showed a diff CONTAINING the defect while
+# being structurally incapable of revealing it, and diagnosed hours later by a
+# different tool in a different session. Nothing in the write loop parsed the
+# bytes.
+#
+# 🔴 ONE RULE, ONE PLACE. It reuses `entry_mapping` + `SubsystemEntry.from_mapping`
+# + `load_index(COLLECT)` and implements NO second validator. The failure mode of
+# a duplicated one is the worst possible for a checker: it starts blessing
+# entries the reader rejects.
+#
+# Every fixture is SYNTHETIC — `devrc` is PUBLIC and real entries are
+# client-confidential.
+
+WRAPPED_ALIASES = (
+    "---\n"
+    "service: widget-index\n"
+    f"scope: {SCOPE}\n"
+    "aliases: [widget_touch, widget_recall, widget_resolver,\n"
+    "          test_widget_touch, test_widget_recall]\n"
+    "---\n"
+    "\n"
+    "## What it is\n"
+    "The entry whose front matter the writer wrapped.\n"
+)
+
+
+def _break_one(store: Path, scope: str = SCOPE, name: str = "widget-index.md") -> Path:
+    p = store / scope / name
+    p.write_text(WRAPPED_ALIASES.replace(f"scope: {SCOPE}", f"scope: {scope}"), encoding="utf-8")
+    return p
+
+
+class TestValidate:
+    def test_the_reported_defect_is_CAUGHT_at_write_time(self, store: Path) -> None:
+        """🔴 THE REGRESSION. At base there was no write-time check at all."""
+        bad = _break_one(store)
+        got = st.validate_entry_file(bad)
+        assert got is not None
+        assert got.filename == "widget-index.md"
+        assert got.reason == "`aliases:` must be a list, not a bare string"
+
+    def test_a_GOOD_entry_passes(self, store: Path) -> None:
+        """NEGATIVE CONTROL on the validator: one that reported every file bad
+        would satisfy the test above and be useless."""
+        assert st.validate_entry_file(store / SCOPE / "collector.md") is None
+
+    def test_the_same_aliases_on_ONE_line_pass(self, store: Path) -> None:
+        """🔴 The control that makes the fixture a measurement: the WRAP is what
+        breaks it, not the names or the underscores in it."""
+        p = store / SCOPE / "widget-index.md"
+        p.write_text(
+            WRAPPED_ALIASES.replace(
+                "aliases: [widget_touch, widget_recall, widget_resolver,\n"
+                "          test_widget_touch, test_widget_recall]\n",
+                "aliases: [widget_touch, widget_recall, test_widget_touch]\n",
+            ),
+            encoding="utf-8",
+        )
+        assert st.validate_entry_file(p) is None
+
+    def test_a_missing_path_has_its_OWN_sentinel(self, store: Path) -> None:
+        """Not reported as malformed: a path that is not there and a file that
+        will not parse have different fixes, and the validator's own output must
+        not be the thing that misleads."""
+        with pytest.raises(st.EntryFileMissingError) as exc:
+            st.validate_entry_file(store / SCOPE / "no-such-file.md")
+        assert "index entry file not found" in str(exc.value)
+        assert "malformed index entry" not in str(exc.value)
+
+    def test_scope_validation_counts_EVERY_file_it_walked(self, store: Path) -> None:
+        """🔴 `checked` is files WALKED, not entries indexed. A "0 malformed"
+        with no denominator beside it is the reassuring zero from an instrument
+        wired to nothing."""
+        _break_one(store)
+        checked, malformed = st.validate_scope(store, SCOPE)
+        assert len(checked) == 5, "README.md is not an entry; the four good ones plus the bad"
+        assert [m.filename for m in malformed] == ["widget-index.md"]
+
+    def test_scope_validation_catches_a_DUPLICATE_a_single_file_cannot(
+        self, store: Path
+    ) -> None:
+        """The reason the no-path form exists: a duplicate is a RELATIONSHIP
+        between two files, so a per-file check structurally cannot see it."""
+        dupe = store / SCOPE / "status_bar.md"
+        dupe.write_text(_entry("status_bar", SCOPE), encoding="utf-8")
+        assert st.validate_entry_file(dupe) is None, "one file alone cannot see it"
+        _checked, malformed = st.validate_scope(store, SCOPE)
+        assert [m.filename for m in malformed] == ["status_bar.md"]
+        assert "duplicate" in malformed[0].reason
+
+    def test_a_clean_scope_reports_a_ZERO_WITH_its_denominator(self, store: Path) -> None:
+        """POSITIVE + NEGATIVE CONTROL, reported as a pair."""
+        checked, malformed = st.validate_scope(store, SCOPE)
+        assert len(checked) == 4 and malformed == ()
+        _break_one(store)
+        checked2, malformed2 = st.validate_scope(store, SCOPE)
+        assert len(checked2) == 5 and len(malformed2) == 1
+
+    def test_an_absent_scope_checks_NOTHING_and_says_so(self, store: Path) -> None:
+        checked, malformed = st.validate_scope(store, "never-indexed")
+        assert (checked, malformed) == ((), ())
+        text = st.render_validation(
+            st.ValidationReport(
+                store_root=str(store), target="`never-indexed/`", scope="never-indexed",
+                checked=checked, malformed=malformed,
+            )
+        )
+        assert "NOTHING WAS CHECKED" in text
+        assert "NOT a clean bill of health" in text
+        assert "0 malformed" not in text, "a bare zero over nothing walked"
+
+    def test_a_missing_store_root_is_NOT_a_clean_scope(self, tmp_path: Path) -> None:
+        with pytest.raises(st.StoreMissingError) as exc:
+            st.validate_scope(tmp_path / "absent", SCOPE)
+        assert "store root not found" in str(exc.value)
+
+
+class TestValidateCli:
+    def test_a_bad_file_exits_3_and_names_it(self, store: Path, capsys) -> None:
+        bad = _break_one(store)
+        code = st.main(["--store", str(store), "--scope", SCOPE, "--validate", str(bad)])
+        out = capsys.readouterr().out
+        assert code == 3
+        assert "malformed index entry" in out
+        assert "widget-index.md" in out
+        assert "must be a list, not a bare string" in out
+
+    def test_a_good_file_exits_0(self, store: Path, capsys) -> None:
+        code = st.main(
+            ["--store", str(store), "--scope", SCOPE, "--validate",
+             str(store / SCOPE / "collector.md")]
+        )
+        assert code == 0
+        assert "OK — 1 of 1" in capsys.readouterr().out
+
+    def test_the_whole_scope_form_takes_no_argument(self, store: Path, capsys) -> None:
+        assert st.main(["--store", str(store), "--scope", SCOPE, "--validate"]) == 0
+        assert "checked: 4 entry file(s)" in capsys.readouterr().out
+        _break_one(store)
+        assert st.main(["--store", str(store), "--scope", SCOPE, "--validate"]) == 3
+        assert "1 of 5" in capsys.readouterr().out
+
+    def test_the_single_file_form_SAYS_what_it_did_not_check(
+        self, store: Path, capsys
+    ) -> None:
+        """A narrower check must not look total."""
+        st.main(
+            ["--store", str(store), "--scope", SCOPE, "--validate",
+             str(store / SCOPE / "collector.md")]
+        )
+        assert "NOT checked for duplicate refs" in capsys.readouterr().out
+
+    def test_a_missing_path_exits_3_on_STDERR(self, store: Path, capsys) -> None:
+        code = st.main(
+            ["--store", str(store), "--scope", SCOPE, "--validate",
+             str(store / SCOPE / "nope.md")]
+        )
+        assert code == 3
+        assert "index entry file not found" in capsys.readouterr().err
+
+    def test_json_is_parseable_and_carries_the_denominator(
+        self, store: Path, capsys
+    ) -> None:
+        _break_one(store)
+        assert st.main(
+            ["--store", str(store), "--scope", SCOPE, "--validate", "--json"]
+        ) == 3
+        blob = json.loads(capsys.readouterr().out)
+        assert blob["checked_count"] == 5
+        assert blob["malformed_count"] == 1
+        assert blob["malformed"][0]["file"] == "widget-index.md"
+
+    def test_it_conflicts_with_the_other_exit_modes(self, store: Path, capsys) -> None:
+        """🔴 One rule, one place: three pairwise conflicts from one table."""
+        for argv in (
+            ["--census", "--validate"],
+            ["--template", "widget", "--validate"],
+            ["--census", "--template", "widget"],
+        ):
+            assert st.main(["--store", str(store), "--scope", SCOPE, *argv]) == 2
+            assert "select different things" in capsys.readouterr().err
+
+    def test_validate_writes_NOTHING(self, store: Path) -> None:
+        before = _tree_hash(store)
+        _break_one(store)
+        after_fixture = _tree_hash(store)
+        st.main(["--store", str(store), "--scope", SCOPE, "--validate"])
+        st.main(
+            ["--store", str(store), "--scope", SCOPE, "--validate",
+             str(store / SCOPE / "widget-index.md")]
+        )
+        assert _tree_hash(store) == after_fixture
+        assert after_fixture != before  # the fixture moved it; the validator did not
+
+
+def _recovery_commands(message: str) -> list[list[str]]:
+    """Every `python3 <self> …` line in a refusal, as argv.
+
+    Parsed with `shlex`, not sliced with string ops, so a command that is not
+    actually well-formed shell fails HERE rather than being asserted about.
+    """
+    out = []
+    for line in message.splitlines():
+        line = line.strip()
+        if line.startswith("python3 "):
+            out.append(shlex.split(line))
+    return out
+
+
+class TestMalformedRefusalNamesTheRecovery:
+    """🔴 THE GUARD WAS RIGHT TO REFUSE; THE REFUSAL WAS A DEAD END.
+
+    `handoff/SKILL.md` step 4: any non-zero exit means "print the stderr line
+    verbatim and write NOTHING". So a bare `malformed index entry 'bad.md': …`
+    left the agent with no route out and no way to tell whether the offending
+    file was the entry it was about to touch or something unrelated — and the
+    store stayed broken until a human happened to look.
+
+    Same defect class #436 fixed in this skill for the cwd-mismatch refusal: the
+    fix is to NAME THE ALTERNATIVE, not to stop at the hazard. Behaviour and exit
+    code are unchanged; this is wording, and these tests are about the wording
+    being ACTIONABLE rather than merely present.
+    """
+
+    def test_it_still_REFUSES_and_still_exits_3(
+        self, store: Path, capsys, monkeypatch
+    ) -> None:
+        """INVARIANT GUARD, labelled: the fail-closed decision did not move, and
+        neither did the exit code. Not regression coverage — it was already true
+        at branch-head and must stay true; only the WORDING was asked to change."""
+        _break_one(store)
+        with pytest.raises(sr.MalformedEntryError) as exc:
+            _report(["scripts/collector/a.py", "scripts/collector/b.py"], store)
+        assert str(exc.value).startswith("malformed index entry "), (
+            "the sentinel must still LEAD the message — every existing `except` and "
+            "`in str(exc)` assertion depends on it"
+        )
+        # …and through the CLI, which is where the exit code lives.
+        monkeypatch.setattr(
+            sys, "stdin", io.StringIO("scripts/collector/a.py\nscripts/collector/b.py\n")
+        )
+        code = st.main(["--store", str(store), "--scope", SCOPE, "--paths-from", "-"])
+        assert code == 3
+        assert "malformed index entry" in capsys.readouterr().err
+
+    def test_the_refusal_NAMES_the_recovery(self, store: Path) -> None:
+        """🔴 THE REGRESSION. At branch-head the message was the bare sentinel."""
+        _break_one(store)
+        with pytest.raises(sr.MalformedEntryError) as exc:
+            _report(["scripts/collector/a.py", "scripts/collector/b.py"], store)
+        msg = str(exc.value)
+        assert "RECOVER" in msg
+        assert _recovery_commands(msg), "no runnable recovery command was emitted"
+
+    def test_the_recovery_command_ACTUALLY_RUNS_and_reproduces_the_diagnosis(
+        self, store: Path, capsys
+    ) -> None:
+        """🔴 SPELLED vs STRUCTURAL, settled by EXECUTION. Asserting that the word
+        "validate" appears somewhere would be satisfied by any unrelated sentence
+        containing it. So the command is parsed out of the message and RUN: a
+        sentence cannot survive being executed, and a stale flag cannot survive
+        this parser. It must exit 3 AND name the same file the refusal named."""
+        bad = _break_one(store)
+        with pytest.raises(sr.MalformedEntryError) as exc:
+            _report(["scripts/collector/a.py", "scripts/collector/b.py"], store)
+        cmds = _recovery_commands(str(exc.value))
+        assert len(cmds) == 1
+
+        argv = cmds[0]
+        # The path component is real — a command naming a file that does not
+        # exist is not actionable however well it parses.
+        assert Path(argv[1]).is_file(), f"the recovery command names a missing script: {argv[1]}"
+        assert argv[1].endswith("subsystem_touch.py")
+        assert "--validate" in argv
+
+        capsys.readouterr()
+        code = st.main(argv[2:])          # everything after `python3 <script>`
+        out = capsys.readouterr().out
+        assert code == 3, "the recovery command did not reproduce the failure"
+        assert bad.name in out, "the recovery command ran but named a different file"
+        assert "must be a list, not a bare string" in out
+
+    def test_it_names_WHICH_files_and_whether_they_are_IN_THIS_SCOPE(
+        self, store: Path
+    ) -> None:
+        """The second half of the gap: an agent could not tell whether the
+        malformed entry was the one it was about to touch or an unrelated file."""
+        _break_one(store)
+        with pytest.raises(sr.MalformedEntryError) as exc:
+            _report(["scripts/collector/a.py", "scripts/collector/b.py"], store)
+        msg = str(exc.value)
+        assert "widget-index.md" in msg
+        assert "EVERY reader skips" in msg
+        assert f"THIS repo's scope `{SCOPE}/`" in msg
+        assert "do not conclude this session touched nothing" in msg
+
+    def test_a_reject_in_ANOTHER_scope_gets_a_command_for_THAT_scope(
+        self, store: Path, capsys
+    ) -> None:
+        """🔴 THE TRAP THE OBVIOUS FIX WALKS INTO. "Run --validate on your scope"
+        is UNFOLLOWABLE precisely when the blocking file is elsewhere: the loader
+        reads the whole store, so another scope's reject aborts this repo's probe
+        — and validating this scope would report it CLEAN while the probe kept
+        failing. That is the same unfollowable-instruction shape this PR exists to
+        fix, so the command has to follow the reject, not the caller."""
+        _break_one(store, OTHER_SCOPE, "widget-index.md")
+        with pytest.raises(sr.MalformedEntryError) as exc:
+            _report(["scripts/collector/a.py", "scripts/collector/b.py"], store)
+        msg = str(exc.value)
+        cmds = _recovery_commands(msg)
+        assert len(cmds) == 1
+        assert cmds[0][cmds[0].index("--scope") + 1] == OTHER_SCOPE, (
+            "the recovery command named the CALLER's scope, which is clean — "
+            "an instruction that cannot reach the blocking file"
+        )
+        assert "would report it clean and change nothing" in msg
+
+        # THE NEGATIVE CONTROL that proves the trap is real: the caller's own
+        # scope genuinely does validate clean, so the naive command would have
+        # sent the agent in a circle.
+        capsys.readouterr()
+        assert st.main(["--store", str(store), "--scope", SCOPE, "--validate"]) == 0
+        # …while the emitted one reproduces the failure.
+        capsys.readouterr()
+        assert st.main(cmds[0][2:]) == 3
+
+    def test_rejects_in_BOTH_gives_a_command_per_scope_this_repo_FIRST(
+        self, store: Path
+    ) -> None:
+        _break_one(store)
+        _break_one(store, OTHER_SCOPE, "widget-index.md")
+        with pytest.raises(sr.MalformedEntryError) as exc:
+            _report(["scripts/collector/a.py", "scripts/collector/b.py"], store)
+        cmds = _recovery_commands(str(exc.value))
+        scopes = [c[c.index("--scope") + 1] for c in cmds]
+        assert scopes == [SCOPE, OTHER_SCOPE], "deterministic order, this repo first"
+
+    def test_every_emitted_command_runs_for_EVERY_affected_scope(
+        self, store: Path, capsys
+    ) -> None:
+        """The actionability check, generalised: not just the first command."""
+        _break_one(store)
+        _break_one(store, OTHER_SCOPE, "widget-index.md")
+        with pytest.raises(sr.MalformedEntryError) as exc:
+            _report(["scripts/collector/a.py", "scripts/collector/b.py"], store)
+        cmds = _recovery_commands(str(exc.value))
+        assert len(cmds) == 2
+        for argv in cmds:
+            capsys.readouterr()
+            assert st.main(argv[2:]) == 3
+            assert "widget-index.md" in capsys.readouterr().out
+
+    def test_the_enumeration_NEVER_masks_the_original_diagnosis(
+        self, store: Path, monkeypatch
+    ) -> None:
+        """🔴 A message-builder that can itself fail must not turn one failure
+        into a different one. With the second read broken, the caller still gets
+        the real sentinel and the real reason — just without the enumeration."""
+        _break_one(store)
+
+        def _boom(*_a, **_kw):
+            raise RuntimeError("second read exploded")
+
+        monkeypatch.setattr(st, "load_index", _boom)
+        msg = st.malformed_refusal(
+            store, SCOPE, sr.MalformedEntryError(
+                "malformed index entry 'widget-index.md': `aliases:` must be a list, "
+                "not a bare string",
+                source="widget-index.md",
+                why="`aliases:` must be a list, not a bare string",
+            )
+        )
+        assert msg.startswith("malformed index entry 'widget-index.md'")
+        assert "must be a list, not a bare string" in msg
+        assert "second read exploded" not in msg
+
+    def test_a_vanished_reject_is_SAID_not_printed_as_an_empty_list(
+        self, store: Path
+    ) -> None:
+        """The other best-effort branch: the first read raised, the second found
+        nothing. A heading promising a list, over no list, would be worse than
+        saying the store moved."""
+        msg = st.malformed_refusal(
+            store, SCOPE, sr.MalformedEntryError(
+                "malformed index entry 'gone.md': whatever", source="gone.md", why="whatever"
+            )
+        )
+        assert "found NONE" in msg
+        assert "Re-run the probe" in msg
+        assert "RECOVER" not in msg, "no command can be offered for a file that is not there"
+
+    def test_the_command_is_BUILT_not_typed(self, store: Path) -> None:
+        """🔴 ONE SPELLING. `validate_command` is the only place the invocation is
+        composed, so a flag rename cannot leave a refusal quoting a command that
+        no longer parses — which is exactly what a hand-typed "just run
+        --validate" sentence has no defence against."""
+        src = MODULE_PATH.read_text(encoding="utf-8")
+        fn = src[src.index("def malformed_refusal("):src.index("def render_validation(")]
+        assert "validate_command(" in fn
+        assert '"--validate"' not in fn and "'--validate'" not in fn, (
+            "malformed_refusal spells the flag itself instead of building the command"
+        )
+        # …and what it builds is parseable by THIS parser, derived not asserted.
+        argv = shlex.split(st.validate_command(store, SCOPE))
+        st._build_parser().parse_args(argv[2:])  # must not SystemExit
+
+
+class TestValidatorReusesTheReadersParser:
+    """🔴 ONE RULE, ONE PLACE. Structural AND behavioural, because a behavioural
+    test alone cannot tell "it reuses the parser" from "it agrees with the parser
+    today" — and agreement is precisely what drifts."""
+
+    def test_it_calls_the_shared_helpers_and_declares_no_second_parser(self) -> None:
+        src = MODULE_PATH.read_text(encoding="utf-8")
+        fn = src[src.index("def validate_entry_file("):src.index("def validate_scope(")]
+        assert "entry_mapping(" in fn
+        assert "SubsystemEntry.from_mapping(" in fn
+        for reimplementation in ("_FRONT_MATTER", "splitlines()", "partition(", "startswith(\"[\""):
+            assert reimplementation not in fn, (
+                f"validate_entry_file spells {reimplementation!r} — that is a SECOND parser, "
+                f"and the day it drifts it starts blessing entries the reader rejects"
+            )
+        scope_fn = src[src.index("def validate_scope("):src.index("def render_validation(")]
+        assert "load_index(" in scope_fn, "the scope form must go through the loader"
+
+    def test_the_two_agree_on_EVERY_file_of_a_mixed_scope(self, store: Path) -> None:
+        """BEHAVIOURAL half: the validator's verdict per file is exactly the
+        reader's, over a scope with both kinds in it."""
+        _break_one(store)
+        index = sr.load_index(store, on_malformed=sr.ON_MALFORMED_COLLECT)
+        reader_rejects = {m.filename for m in index.malformed_in(SCOPE)}
+        validator_rejects = {
+            p.name
+            for p in sorted((store / SCOPE).glob("*.md"))
+            if p.name != "README.md" and st.validate_entry_file(p) is not None
+        }
+        assert validator_rejects == reader_rejects == {"widget-index.md"}
+
+
+class TestGoverningPolicy:
+    """🔴 MEASURED 2026-08-13: 1 of the store's 5 scopes has a README, while both
+    the store-root README and `/handoff` step 4 tell the writer to read the
+    scope's own. The instruction was unfollowable in 80% of cases. The fix states
+    which file GOVERNS; it does not generate one, because a scope README is a
+    human policy statement and writing it would manufacture authority."""
+
+    def test_a_scope_README_wins(self, store: Path) -> None:
+        path, basis = st.governing_policy(store, SCOPE)
+        assert path == str(store / SCOPE / "README.md")
+        assert basis == st.POLICY_SCOPE
+
+    def test_the_store_root_README_is_the_FALLBACK_and_says_so(self, store: Path) -> None:
+        (store / "README.md").write_text("store policy\n", encoding="utf-8")
+        path, basis = st.governing_policy(store, OTHER_SCOPE)
+        assert path == str(store / "README.md")
+        assert basis == st.POLICY_STORE_ROOT
+        assert "this scope has none" in basis, (
+            "the fallback must not read as a statement BY this scope"
+        )
+
+    def test_neither_is_a_STATED_case_not_a_silent_one(self, store: Path) -> None:
+        path, basis = st.governing_policy(store, OTHER_SCOPE)
+        assert path is None
+        assert basis == st.POLICY_NONE
+
+    def test_the_three_bases_share_no_spelling(self) -> None:
+        """The premise of every assertion above: two bases that read alike would
+        make the distinction unobservable."""
+        bases = (st.POLICY_SCOPE, st.POLICY_STORE_ROOT, st.POLICY_NONE)
+        assert len(set(bases)) == 3
+        for a in bases:
+            for b in bases:
+                if a != b:
+                    assert a not in b
+
+    def test_the_probe_PRINTS_it_on_every_status(self, store: Path) -> None:
+        """The line has to be on the output the writer already reads, or the
+        instruction is still unfollowable."""
+        for paths in ([], ["scripts/collector/x.py", "scripts/collector/y.py"], ["nope/z.py"]):
+            text = st.render_text(_report(paths, store))
+            assert f"policy: {store / SCOPE / 'README.md'}" in text
+            assert st.POLICY_SCOPE in text
+
+    def test_it_is_in_the_JSON_too(self, store: Path) -> None:
+        blob = st.report_json(_report(["scripts/collector/x.py"], store))
+        assert blob["policy_file"] == str(store / SCOPE / "README.md")
+        assert blob["policy_basis"] == st.POLICY_SCOPE
+
+    def test_a_scope_with_no_README_of_its_own_still_gets_an_answer(
+        self, store: Path
+    ) -> None:
+        """The 80% case, end to end through the probe."""
+        (store / "README.md").write_text("store policy\n", encoding="utf-8")
+        text = st.render_text(_report(["a/b.py"], store, scope=OTHER_SCOPE))
+        assert f"policy: {store / 'README.md'}" in text
+        assert st.POLICY_STORE_ROOT in text
+
+
+class TestValidateMutationKills:
+    def test_kills_the_validator(self, tmp_path: Path) -> None:
+        """With the rejection swallowed, `--validate` blesses the exact entry the
+        reader refuses — the drift a shared validator exists to prevent."""
+        mod = _load_mutant(
+            tmp_path,
+            "mv_validate",
+            [("    except MalformedEntryError as exc:\n        return MalformedEntry(",
+              "    except MalformedEntryError as exc:\n        return None or MalformedEntry(")],
+        )
+        store = _make_store(tmp_path / "s")
+        bad = _break_one(store)
+        # Control first: the anchor above is a NO-OP, so the mutant must still
+        # catch it — otherwise the real kill below would be unattributable.
+        assert mod.validate_entry_file(bad) is not None
+
+        killed = _load_mutant(
+            tmp_path,
+            "mv_validate2",
+            [("        return MalformedEntry(\n            scope=normalize_ref(p.parent.name), filename=p.name, reason=exc.why\n        )",
+              "        return None")],
+        )
+        assert killed.validate_entry_file(bad) is None
+        assert st.validate_entry_file(bad) is not None
+
+    def test_kills_the_nothing_was_checked_guard(self, tmp_path: Path) -> None:
+        """Reachable: an absent scope walks zero files past every earlier check.
+        With the guard gone it renders the clean verdict over a denominator of
+        zero — the reassuring zero from an instrument wired to nothing."""
+        mod = _load_mutant(
+            tmp_path,
+            "mv_nothing",
+            [("    if not report.checked:", "    if False:")],
+        )
+        store = _make_store(tmp_path / "s")
+        rep = mod.ValidationReport(
+            store_root=str(store), target="`never-indexed/`", scope="never-indexed",
+            checked=(), malformed=(),
+        )
+        text = mod.render_validation(rep)
+        assert "NOTHING WAS CHECKED" not in text
+        assert "0 malformed" in text, "the mutant must print the bare zero"
+
+    def test_kills_the_validate_exit_code(self, tmp_path: Path, capsys) -> None:
+        """Reachable past the mode-conflict guard and the store guard: a valid
+        `--validate` over a scope holding one reject."""
+        mod = _load_mutant(
+            tmp_path,
+            "mv_exit",
+            [("            return 0 if report.clean else 3", "            return 0")],
+        )
+        store = _make_store(tmp_path / "s")
+        _break_one(store)
+        argv = ["--store", str(store), "--scope", SCOPE, "--validate"]
+        assert mod.main(argv) == 0
+        capsys.readouterr()
+        assert st.main(argv) == 3
+        assert "malformed index entry" in capsys.readouterr().out
+
+    def test_kills_the_policy_precedence(self, tmp_path: Path) -> None:
+        """With the scope branch gone, a scope that HAS its own policy sheet is
+        told the store-root one governs it."""
+        mod = _load_mutant(
+            tmp_path,
+            "mv_policy",
+            [("    if scoped.is_file():", "    if False:")],
+        )
+        store = _make_store(tmp_path / "s")
+        (store / "README.md").write_text("store policy\n", encoding="utf-8")
+        assert mod.governing_policy(store, SCOPE)[1] == mod.POLICY_STORE_ROOT
+        assert st.governing_policy(store, SCOPE)[1] == st.POLICY_SCOPE
+
+    def test_the_control_for_this_section(self, tmp_path: Path) -> None:
+        """POSITIVE CONTROL on the harness for these anchors."""
+        mod = _load_mutant(tmp_path, "mv_noop", [])
+        store = _make_store(tmp_path / "s")
+        bad = _break_one(store)
+        assert mod.validate_entry_file(bad) is not None
+        assert mod.validate_entry_file(store / SCOPE / "collector.md") is None
+        assert mod.governing_policy(store, SCOPE)[1] == mod.POLICY_SCOPE

@@ -184,6 +184,15 @@ share no spelling:
                       directory. Kept apart on purpose: collapsing them would
                       make "the store was pruned to nothing" indistinguishable
                       from "this repo was never indexed".
+    "scope-unreadable" `<scope>/` holds entry files and NOT ONE of them could be
+                      indexed. A THIRD mechanism behind an empty surface, and the
+                      one that is not a reading at all: there IS content here and
+                      the tool cannot see it. Exits non-zero. Kept apart from
+                      `scope-empty` for the same reason `scope-empty` is kept
+                      apart from `scope-absent` — `/resume` reports an empty
+                      scope as an ordinary non-finding, and reporting "we could
+                      not read anything" that way would be a confident zero with
+                      a broken store behind it.
     "ref-absent"      a `--ref` was given and resolved to no entry.
     "ref-ambiguous"   a `--ref` named more than one entry. Never picked.
     "recalled"        at least one entry surfaced.
@@ -197,8 +206,36 @@ its own sentinel phrase so a caller — or a mutation test — can tell WHICH fi
     "index entry unreadable" EntryUnreadableError (reused from
                              subsystem_resolver, for the same reason —
                              subsystem_touch raises it on the same files)
-    "malformed index entry"  MalformedEntryError, raised by the resolver's own
-                             loader and deliberately NOT caught here
+
+
+🔴 ONE MALFORMED ENTRY USED TO COST THE WHOLE SCOPE
+---------------------------------------------------
+It no longer does. Measured on a synthetic store, before this change:
+
+    2 good entries          -> rc=0, both listed
+    2 good + 1 malformed    -> rc=3, good entries still listed: 0
+
+A single wrapped `aliases:` list — the front-matter parser is line-based, so a
+list broken across two physical lines reads as an unterminated bare string —
+took `/resume` step 4, `--list`, `--ref` and `--search` down together, and the
+writer that produced it had no signal at all (`/handoff`'s own template prints
+`aliases:` on ONE line, so the confirm-gate diff shown to the human contained
+the defect while being structurally incapable of revealing it).
+
+The reader now loads with `ON_MALFORMED_COLLECT`, so the good entries are served
+and every reject is reported PER ENTRY — named, with its reason — in the same
+output. 🔴 THE REPORT IS THE POINT, NOT THE DEGRADATION. Silently skipping a bad
+entry would be strictly worse than the collapse it replaces: a dropped entry is
+indistinguishable from an entry nobody ever wrote, which is the confident zero
+this whole module exists to prevent. So the MALFORMED block renders on EVERY
+status, before anything else, and the index header stops claiming completeness
+the moment a reject exists.
+
+    "malformed index entry"  the row's sentinel, one per rejected file. It is a
+                             ROW and no longer a raise for the reader; the
+                             WRITER's probe (`subsystem_touch.build_report`)
+                             still raises it, because it gates a write into a
+                             store it would otherwise be reading in part.
 
 🔴 EVERY OUTPUT PATH CARRIES THE CAVEAT, INCLUDING THE EMPTY ONES. It is a
 single property on the report (`RecallReport.caveat`) that both renderers print,
@@ -225,7 +262,9 @@ from subsystem_resolver import (  # noqa: E402
     NUANCE_HEADING,
     POINTERS_HEADING,
     AmbiguousRefError,
+    ON_MALFORMED_COLLECT,
     EntryUnreadableError,
+    MalformedEntry,
     MalformedEntryError,
     ResolverError,
     SubsystemEntry,
@@ -266,7 +305,9 @@ __all__ = [
     "SENSITIVITY_FAIL_SAFE",
     "KNOWN_SENSITIVITIES",
     "STATUS_PRECEDENCE",
+    "UNREADABLE_STATUSES",
     "EntryUnreadableError",
+    "MalformedEntry",
     "StoreMissingError",
     "FocusWindow",
     "RecalledEntry",
@@ -275,6 +316,9 @@ __all__ = [
     "Hunk",
     "SearchReport",
     "caveat_text",
+    "scope_label",
+    "unreadable_summary",
+    "render_malformed",
     "extract_sections",
     "read_entry",
     "fold_sensitivity",
@@ -443,30 +487,59 @@ KNOWN_SENSITIVITIES: tuple[str, ...] = ("client-confidential", "personal", "publ
 
 # Stated once so the renderers, the JSON and the tests read the SAME rule.
 # Precedence, and why each outranks the next:
-#   1. scope-absent   — nothing about the store's contents can change this answer.
-#   2. scope-empty    — the scope exists; there is simply nothing in it.
-#   3. ref-ambiguous  — a ref was given and names more than one entry: never pick.
-#   4. ref-absent     — a ref was given and names none.
-#   5. recalled       — something was surfaced.
-# `StoreMissingError` / `EntryUnreadableError` / `MalformedEntryError` are NOT in
-# this tuple: they raise. A status constant no code path could emit would be a
-# declaration with nothing behind it.
+#   1. scope-absent     — nothing about the store's contents can change this answer.
+#   2. scope-unreadable — the scope holds files and NOT ONE of them indexed. It
+#                         outranks `scope-empty` and every ref outcome because it
+#                         is the one case where the tool's answer is about ITSELF:
+#                         a `--ref` into a scope nothing could be read from is
+#                         `ref-absent` only in the sense that nothing is present
+#                         to resolve against, and reporting it that way ("nothing
+#                         recorded under that name yet") would be a lie about the
+#                         store rather than a fact about the ref.
+#   3. scope-empty      — the scope exists; there is simply nothing in it.
+#   4. ref-ambiguous    — a ref was given and names more than one entry: never pick.
+#   5. ref-absent       — a ref was given and names none.
+#   6. recalled         — something was surfaced.
+# `StoreMissingError` / `EntryUnreadableError` are NOT in this tuple: they raise.
+# A status constant no code path could emit would be a declaration with nothing
+# behind it. `MalformedEntryError` used to be in that list too and no longer is —
+# for this reader it is a ROW (`MalformedEntry`), not a raise.
 #
-# The last two belong to `search`, which shares this vocabulary rather than
+# The last three belong to `search`, which shares this vocabulary rather than
 # minting a second one — a caller must be able to switch on ONE status field:
-#   6. search-hit      at least one hunk cleared the threshold.
-#   7. search-no-match nothing did. NOT spelled `*-empty`: an empty scope and a
-#                      query that matched nothing in a full scope are different
-#                      facts, and two statuses that share a word get read as one.
+#   7. search-hit        at least one hunk cleared the threshold.
+#   8. search-no-match   nothing did. NOT spelled `*-empty`: an empty scope and a
+#                        query that matched nothing in a full scope are different
+#                        facts, and two statuses that share a word get read as one.
+#   9. search-unreadable the searched scopes held files and none could be indexed,
+#                        so the query never ran against anything. Same argument as
+#                        `scope-unreadable`, and the same reason it must not
+#                        collapse into `search-no-match`: a zero from a scan that
+#                        walked nothing is not a zero.
 STATUS_PRECEDENCE: tuple[str, ...] = (
     "scope-absent",
+    "scope-unreadable",
     "scope-empty",
     "ref-ambiguous",
     "ref-absent",
     "recalled",
     "search-hit",
     "search-no-match",
+    "search-unreadable",
 )
+
+# 🔴 THE ONE PLACE THE EXIT CODE IS DECIDED, for both report types. `main()`
+# switches on membership here rather than on either status by name, so a third
+# "nothing could be read" outcome cannot be added and silently exit 0.
+#
+# WHY THESE TWO AND NOTHING ELSE — the rule is CONTENT SERVED, not "was anything
+# wrong". `/resume` step 4's contract is "if it exits non-zero, print the stderr
+# line verbatim, note that recall was unavailable, and continue", so a non-zero
+# throws away every entry the run DID surface. A scope with 2 good entries and 1
+# malformed therefore exits 0 with a loud in-band MALFORMED block: recall was
+# available, and it was also honest about what it could not read. Only when
+# nothing readable exists at all is "recall was unavailable" the truth.
+UNREADABLE_STATUSES: tuple[str, ...] = ("scope-unreadable", "search-unreadable")
 
 
 def caveat_text(scope: str) -> str:
@@ -489,6 +562,88 @@ def caveat_text(scope: str) -> str:
         f"a current reading. Sensitivity is marked per entry; absent means "
         f"`{SENSITIVITY_FAIL_SAFE}` — never copy an entry's content into a public repo."
     )
+
+
+def scope_label(scopes: Sequence[str]) -> str:
+    """`a/, b/` — how a set of scopes is named in prose. ONE spelling.
+
+    The caveat, the search header and the unreadable summary all need it, and the
+    first two used to build it inline in two slightly different ways. A label
+    spelled at N sites is wrong at N−1 of them, and this one is inside a sentence
+    that says what the tool could not see.
+    """
+    return "/, ".join(scopes) + "/" if scopes else "(no scope)"
+
+
+def unreadable_summary(label: str, malformed: Sequence[MalformedEntry]) -> str:
+    """The ONE sentence that says "there is content here and none of it could be read".
+
+    🔴 IT MUST SHARE NO PHRASE WITH THE EMPTY CASE. `render_text`'s `scope-empty`
+    branch opens `NOTHING RECORDED YET`; this opens `NOTHING COULD BE READ`, and
+    the two are different facts with opposite next actions — carry on versus fix
+    the store. `/resume` reports `scope-empty` as an ordinary non-finding, so a
+    shared opening word is all it would take for a broken store to be read as an
+    empty one.
+
+    Shared by both report types because both can reach the condition and a
+    sentence written twice is a sentence that will differ.
+    """
+    n = len(malformed)
+    return (
+        f"NOTHING COULD BE READ — `{label}` holds {n} entry file"
+        f"{'' if n == 1 else 's'} and NOT ONE of them could be indexed. This is NOT an "
+        f"empty scope and NOT 'nothing recorded yet': there is content here and the tool "
+        f"cannot see it. Every reason is listed above; fix the file(s) and re-run."
+    )
+
+
+def render_malformed(
+    malformed: Sequence[MalformedEntry], elsewhere: Sequence[MalformedEntry], label: str
+) -> list[str]:
+    """The MALFORMED block — per entry, named, with its reason. Empty when clean.
+
+    🔴 ONE RENDERER, PRINTED ON EVERY STATUS BY BOTH SURFACES, IMMEDIATELY AFTER
+    THE CAVEAT. Not a footer and not a branch: a reject that renders only on the
+    paths somebody remembered is a reject that will be missed on the path they
+    did not, and `scope-absent` — the most common status in most repos — is
+    exactly where a store-wide defect would otherwise never be mentioned.
+
+    `elsewhere` is a COUNT with its scopes named, never full rows. A reader is
+    scope-scoped, so a broken entry in a scope nobody recalls today is invisible
+    until someone does; naming the scopes makes it actionable without putting
+    another scope's filenames (which are client-identifying) on this screen.
+    """
+    out: list[str] = []
+    if malformed:
+        n = len(malformed)
+        out.append("")
+        out.append(
+            f"🔴 MALFORMED — {n} entry file{'' if n == 1 else 's'} in `{label}` could NOT be "
+            f"indexed and {'is' if n == 1 else 'are'} therefore absent from EVERYTHING below "
+            f"(the index, --ref, --search). Not dropped, not hidden: listed here, once each."
+        )
+        for m in malformed:
+            out.append(f"  {m.line}")
+        out.append(
+            "  (A STORE DEFECT, not an absence of content. Front matter is parsed LINE BY "
+            "LINE, so the usual cause is a value wrapped across two physical lines — an "
+            "`aliases: [...]` list in particular must be on ONE line. Check a file with "
+            "`subsystem_touch.py --validate <path>`, or a whole scope with `--validate`.)"
+        )
+    if elsewhere:
+        by_scope: dict[str, int] = {}
+        for m in elsewhere:
+            by_scope[m.scope or "(no scope)"] = by_scope.get(m.scope or "(no scope)", 0) + 1
+        where = ", ".join(f"{s} ({n})" for s, n in sorted(by_scope.items()))
+        k = len(elsewhere)
+        if not malformed:
+            out.append("")
+        out.append(
+            f"  (+{k} further malformed entr{'y' if k == 1 else 'ies'} in OTHER scopes of "
+            f"this store, not shown: {where}. Nothing on this screen is affected by them; "
+            f"they are named so a defect in a scope nobody recalls today is still visible.)"
+        )
+    return out
 
 
 # --- Errors --------------------------------------------------------------------
@@ -817,6 +972,21 @@ class RecallReport:
     unexpectedly-normalized scope is visible instead of reading as "nothing
     recorded yet"."""
 
+    malformed: tuple[MalformedEntry, ...] = ()
+    """Entry files in THIS scope that could not be indexed. Rendered on every
+    status, before anything else — see `render_malformed`. These are NOT in
+    `entries`, `listing` or `total_in_scope`: they never became entries, and
+    counting them as if they had would be the silent short index the collecting
+    loader exists to avoid."""
+
+    malformed_elsewhere: tuple[MalformedEntry, ...] = ()
+    """The same, in every OTHER scope of the store. A count with its scopes named,
+    so a defect outside the scope being recalled is still visible."""
+
+    @property
+    def malformed_total(self) -> int:
+        return len(self.malformed) + len(self.malformed_elsewhere)
+
     mode: str = DEFAULT_MODE
     """Which display mode produced this report — see `RECALL_MODES`."""
 
@@ -913,9 +1083,19 @@ def load_store(store_root: str | Path, *, verb: str) -> tuple[Path, SubsystemInd
     as the ordinary nothing-recorded-yet case, which is the confident zero this
     module exists to prevent.
 
-    `MalformedEntryError` is deliberately NOT caught: the loader is fail-closed
-    on purpose and an interactive caller must be told the store is broken rather
-    than handed a silently short index.
+    🔴 IT LOADS WITH `ON_MALFORMED_COLLECT`, AND THAT IS THIS MODULE'S POLICY
+    DECISION, NOT THE LOADER'S. A malformed entry no longer raises here: it comes
+    back on `index.malformed` and every caller of this function is obliged to
+    render it (`render_malformed`). The measurement that forced the change is in
+    the module docstring — fail-closed cost the whole scope, 2 good entries and 1
+    bad one served ZERO. The WRITER (`subsystem_touch.build_report`) deliberately
+    keeps the raise: it gates a write, and writing into a store you have read
+    only part of is the one case where aborting is cheaper than degrading.
+
+    ⚠ `MalformedEntryError` can therefore no longer escape this function from the
+    validator, so nothing catches it — but an `OSError` still fails closed below,
+    because "could not interpret this file" and "could not READ the store" are
+    different facts and only the first has an honest degraded form.
     """
     store = Path(store_root)
     if not store.is_dir():
@@ -924,9 +1104,7 @@ def load_store(store_root: str | Path, *, verb: str) -> tuple[Path, SubsystemInd
             f"store. Nothing was {verb}; this is NOT 'nothing recorded yet'"
         )
     try:
-        return store, load_index(store)
-    except MalformedEntryError:
-        raise
+        return store, load_index(store, on_malformed=ON_MALFORMED_COLLECT)
     except OSError as exc:
         raise EntryUnreadableError(
             f"index entry unreadable: under {store} ({type(exc).__name__}: {exc}) — the "
@@ -962,11 +1140,12 @@ def recall(
       3. `mode` known        → ValueError  (a valid limit AND page still reach it)
       4. store root exists   → StoreMissingError
       5. store is readable   → EntryUnreadableError
-         (a malformed entry raises `MalformedEntryError` from the resolver's own
-         loader and is deliberately NOT caught: the loader is fail-closed on
-         purpose, and an interactive caller must be told the store is broken
-         rather than handed a silently short index.)
+         (a MALFORMED entry does not raise: it is collected and reported. Only an
+         `OSError` — the store was not fully read — still fails closed here.)
       6. scope known         → status `scope-absent`, NOT an error
+      7. anything readable   → status `scope-unreadable` when the scope holds
+         entry files and none of them indexed. Checked BEFORE `--ref`, because a
+         ref cannot be honestly called absent from a scope nothing was read from.
 
     🔴 AN ABSENT SCOPE IS A STATUS, NOT AN EXCEPTION, and that is the single most
     load-bearing decision here. The store holds 2 scopes while work spans ~12
@@ -984,6 +1163,11 @@ def recall(
         raise ValueError(f"mode must be one of {RECALL_MODES}, got {mode!r}")
 
     store, index = load_store(store_root, verb="recalled")
+    # Computed ONCE, before any status branch, and passed to every one of them —
+    # the block renders on all of them (`render_malformed`), so deriving it per
+    # branch would be the same predicate at six sites, wrong at five.
+    bad = index.malformed_in(scope)
+    bad_elsewhere = index.malformed_outside((scope,))
 
     try:
         entries = index.entries(scope)
@@ -996,6 +1180,29 @@ def recall(
             mode=mode,
             ref=ref,
             known_scopes=index.scopes,
+            malformed=bad,
+            malformed_elsewhere=bad_elsewhere,
+        )
+
+    # 🔴 BEFORE `--ref`, AND BEFORE `scope-empty`. A scope whose every file was
+    # rejected reaches both of those branches looking identical to a scope that
+    # holds nothing — `ref-absent` would say "nothing recorded under that name
+    # yet" and `scope-empty` would say "NOTHING RECORDED YET", and both would be
+    # false about a directory full of content. This is the discriminator, and it
+    # is the ONLY thing standing between a broken store and a status `/resume`
+    # reports as an ordinary non-finding.
+    if not entries and bad:
+        return RecallReport(
+            status="scope-unreadable",
+            scope=normalize_ref(scope),
+            store_root=str(store),
+            total_in_scope=0,
+            limit=limit,
+            mode=mode,
+            ref=normalize_ref(ref) if ref is not None else None,
+            known_scopes=index.scopes,
+            malformed=bad,
+            malformed_elsewhere=bad_elsewhere,
         )
 
     if ref is not None:
@@ -1012,6 +1219,8 @@ def recall(
                 ref=exc.ref,
                 candidates=exc.candidates,
                 known_scopes=index.scopes,
+                malformed=bad,
+                malformed_elsewhere=bad_elsewhere,
             )
         if entry is None:
             return RecallReport(
@@ -1023,6 +1232,8 @@ def recall(
                 mode=mode,
                 ref=normalize_ref(ref),
                 known_scopes=index.scopes,
+                malformed=bad,
+                malformed_elsewhere=bad_elsewhere,
             )
         # A `--ref` run is a NARROWING and prints its one entry in full whatever
         # `mode` says — no index, no featured basis, byte-identical to what it
@@ -1037,6 +1248,8 @@ def recall(
             mode=mode,
             ref=normalize_ref(ref),
             known_scopes=index.scopes,
+            malformed=bad,
+            malformed_elsewhere=bad_elsewhere,
         )
 
     if not entries:
@@ -1048,6 +1261,8 @@ def recall(
             limit=limit,
             mode=mode,
             known_scopes=index.scopes,
+            malformed=bad,
+            malformed_elsewhere=bad_elsewhere,
         )
 
     # THE ONE ordering site: canonical ref ascending, so two runs over an
@@ -1065,6 +1280,8 @@ def recall(
             limit=limit,
             mode=mode,
             known_scopes=index.scopes,
+            malformed=bad,
+            malformed_elsewhere=bad_elsewhere,
         )
 
     # `digest` and `list` both read EVERY entry — the index line carries a bullet
@@ -1087,6 +1304,8 @@ def recall(
             listing_page=page,
             listing_pages=pages,
             known_scopes=index.scopes,
+            malformed=bad,
+            malformed_elsewhere=bad_elsewhere,
         )
 
     featured_ref, basis = select_featured(
@@ -1106,6 +1325,8 @@ def recall(
         listing_pages=pages,
         featured_basis=basis,
         known_scopes=index.scopes,
+        malformed=bad,
+        malformed_elsewhere=bad_elsewhere,
     )
 
 
@@ -1190,10 +1411,20 @@ def _render_listing(report: RecallReport) -> list[str]:
     claim is still exactly true and weakening it would train the reader to skim
     past the page notice on the day it is not. The multi-page wording shares no
     phrase with it.
+
+    🔴 …AND IT IS WITHDRAWN THE MOMENT A REJECT EXISTS. "ALL N entries, none
+    omitted" is a COMPLETENESS CLAIM, and it is simply false about a scope whose
+    third file could not be indexed — the index really does omit it. The claim is
+    a comment about the store like any other, and `claude/RULES.md` is explicit
+    that a comment the implementation contradicts is a defect: so the clean
+    branch keeps its exact historical bytes (nothing pinned to it moves) and a
+    scope with rejects gets its OWN wording, sharing no phrase with either the
+    clean or the paginated one.
     """
     width = max((len(e.ref) for e in report.listing), default=0)
     order = "newest-first by file mtime"
     shown = len(report.listing)
+    n_bad = len(report.malformed)
 
     if report.page_is_past_the_end:
         # 🔴 NO ARITHMETIC ON A PAGE THAT DOES NOT EXIST. The first shipped
@@ -1208,6 +1439,13 @@ def _render_listing(report: RecallReport) -> list[str]:
             f"{report.listing_pages} page{'' if report.listing_pages == 1 else 's'} "
             f"({order}):"
         )
+    elif report.listing_pages <= 1 and n_bad:
+        head = (
+            f"INDEX ({RECALL_LABEL}) — the {shown} READABLE entr"
+            f"{'y' if shown == 1 else 'ies'} in `{report.scope}/` ({order}). NOT complete: "
+            f"{n_bad} further file{'' if n_bad == 1 else 's'} in this scope could not be "
+            f"indexed and {'is' if n_bad == 1 else 'are'} named above, never here:"
+        )
     elif report.listing_pages <= 1:
         head = (
             f"INDEX ({RECALL_LABEL}) — ALL {shown} entr"
@@ -1216,9 +1454,15 @@ def _render_listing(report: RecallReport) -> list[str]:
         )
     else:
         first = report.listing_before_page + 1
+        # The paginated header already declines to claim completeness, so a
+        # reject only needs the count corrected: `listing_total` is READABLE
+        # entries, and without this the reader would take it for the file count.
+        rejects = (
+            f", plus {n_bad} that could NOT be indexed (named above)" if n_bad else ""
+        )
         head = (
             f"INDEX ({RECALL_LABEL}) — entries {first}–{first + shown - 1} "
-            f"of {report.listing_total} in `{report.scope}/`, {order} "
+            f"of {report.listing_total} in `{report.scope}/`{rejects}, {order} "
             f"(page {report.listing_page} of {report.listing_pages}):"
         )
     out = ["", head, *(listing_line(e, width) for e in report.listing)]
@@ -1260,6 +1504,18 @@ def render_text(report: RecallReport) -> str:
         f"  caveat: {report.caveat}",
     ]
 
+    # 🔴 BEFORE EVERY STATUS BRANCH, INCLUDING THE ONES THAT RETURN IMMEDIATELY.
+    # A reject reported only on the paths somebody remembered is a reject that
+    # will be missed on the path they did not — and `scope-absent`, the most
+    # common status in most repos, is precisely where a store-wide defect would
+    # otherwise never be mentioned at all.
+    out.extend(render_malformed(report.malformed, report.malformed_elsewhere, f"{report.scope}/"))
+
+    if report.status == "scope-unreadable":
+        out.append("")
+        out.append(unreadable_summary(f"{report.scope}/", report.malformed))
+        return "\n".join(out)
+
     if report.status == "scope-absent":
         out.append("")
         out.append(
@@ -1292,11 +1548,25 @@ def render_text(report: RecallReport) -> str:
 
     if report.status == "ref-absent":
         out.append("")
+        # 🔴 THE ABSENCE IS QUALIFIED WHEN THE SCOPE HAS REJECTS. "Nothing
+        # recorded under that name yet" is a claim about the STORE, and it is
+        # false if the entry exists in a file the loader refused. The malformed
+        # rows are already above; this sentence is what stops the reader
+        # concluding from them in the wrong direction.
+        extra = (
+            f" ⚠ BUT {len(report.malformed)} entry file"
+            f"{'' if len(report.malformed) == 1 else 's'} in this scope could not be indexed "
+            f"(listed above) — this ref may name one of them, in which case it IS recorded "
+            f"and merely invisible. Check those before concluding the name is new; re-run "
+            f"without `--ref` to see what IS readable."
+            if report.malformed
+            else " Nothing recorded under that name yet; re-run without `--ref` to see what "
+            "IS recorded."
+        )
         out.append(
             f"NO SUCH ENTRY — `{report.ref}` resolves to nothing in `{report.scope}/`, "
             f"which holds {report.total_in_scope} entr"
-            f"{'y' if report.total_in_scope == 1 else 'ies'}. Nothing recorded under that "
-            f"name yet; re-run without `--ref` to see what IS recorded."
+            f"{'y' if report.total_in_scope == 1 else 'ies'}.{extra}"
         )
         return "\n".join(out)
 
@@ -1329,6 +1599,18 @@ def render_text(report: RecallReport) -> str:
                 f"{'is' if shown == 1 else 'are'} page {report.listing_page} of "
                 f"{report.listing_pages} of the index for `{report.scope}/`, which holds "
                 f"{report.total_in_scope} in all"
+            )
+        elif report.malformed:
+            # 🔴 The same withdrawn completeness claim as the header above, in the
+            # other place it is spelled. "the complete index" is false when a file
+            # in the scope could not be indexed, and this line is the one a reader
+            # quotes when they say "the store has N of them".
+            n_bad = len(report.malformed)
+            what = (
+                f"The {report.total_in_scope} entr"
+                f"{'y above is' if report.total_in_scope == 1 else 'ies above are'} every "
+                f"READABLE entry in `{report.scope}/` — NOT the complete index: {n_bad} "
+                f"further file{'' if n_bad == 1 else 's'} could not be indexed"
             )
         else:
             what = (
@@ -1404,6 +1686,24 @@ def render_text(report: RecallReport) -> str:
     return "\n".join(out)
 
 
+def _malformed_json(
+    malformed: Sequence[MalformedEntry], elsewhere: Sequence[MalformedEntry]
+) -> dict:
+    """The reject rows + counts, shaped ONCE for both report types.
+
+    Both JSON payloads carry the same three keys with the same meanings; writing
+    the dict twice is how one of them ends up with a count and no rows.
+    """
+    return {
+        "malformed": [
+            {"scope": m.scope, "file": m.filename, "reason": m.reason, "line": m.line}
+            for m in malformed
+        ],
+        "malformed_elsewhere": sorted({m.scope for m in elsewhere}),
+        "malformed_elsewhere_count": len(elsewhere),
+    }
+
+
 def report_json(report: RecallReport) -> dict:
     return {
         "status": report.status,
@@ -1419,6 +1719,10 @@ def report_json(report: RecallReport) -> dict:
         "omitted": report.omitted,
         "known_scopes": list(report.known_scopes),
         "featured_basis": report.featured_basis,
+        # 🔴 The rejects travel in the JSON too, as ROWS and not just a count. A
+        # consumer reading `listing` has no other way to tell a complete index
+        # from one three files short, and a count alone cannot be acted on.
+        **_malformed_json(report.malformed, report.malformed_elsewhere),
         # The pagination facts travel WITH the page, or a JSON consumer reading
         # `listing` has no way to tell a complete index from page 1 of 3.
         "listing_total": report.listing_total,
@@ -1723,16 +2027,30 @@ class SearchReport:
     facts with different next actions — lower the threshold, or rephrase — and a
     searcher that prints the same blank for both has diagnosed nothing."""
 
+    malformed: tuple[MalformedEntry, ...] = ()
+    """Entry files in the SEARCHED scopes that could not be indexed — so they were
+    never searched, and `entries_searched` does not count them. Rendered on every
+    status: a hit list is incomplete in a way only this block can say."""
+
+    malformed_elsewhere: tuple[MalformedEntry, ...] = ()
+    """The same, outside the searched scopes. Empty under `--all-scopes`, which
+    searches everything the store holds."""
+
     @property
     def omitted(self) -> int:
         return max(0, self.total_hits - len(self.hunks))
+
+    @property
+    def label(self) -> str:
+        """The searched scopes, in prose. ONE spelling, shared with the caveat."""
+        return scope_label(self.scopes_searched)
 
     @property
     def caveat(self) -> str:
         # The label is handed over UNQUOTED — `caveat_text` owns the backticks, so
         # quoting here too would print them twice and is exactly the kind of
         # near-miss a second spelling of one string produces.
-        return caveat_text("/, ".join(self.scopes_searched) + "/" if self.scopes_searched else "(no scope)")
+        return caveat_text(self.label)
 
 
 def _entry_hunks(
@@ -1840,6 +2158,8 @@ def search(
         raise ValueError(f"context must be an int >= 0, got {context!r}")
 
     store, index = load_store(store_root, verb="searched")
+    bad = index.malformed_in(scope)
+    bad_elsewhere = index.malformed_outside((scope,))
 
     if all_scopes:
         scopes = index.scopes
@@ -1857,9 +2177,18 @@ def search(
             context=context,
             max_hits=max_hits,
             known_scopes=index.scopes,
+            malformed=bad,
+            malformed_elsewhere=bad_elsewhere,
         )
     else:
         scopes = (normalize_ref(scope),)
+
+    # Re-derived AFTER `scopes` is settled, because `--all-scopes` changes what
+    # "here" means: with it, every reject in the store is in the searched set and
+    # nothing is elsewhere. Deriving it once above would have reported a
+    # store-wide scan's own broken entries as somebody else's problem.
+    bad = tuple(m for m in index.malformed if m.scope in scopes)
+    bad_elsewhere = index.malformed_outside(scopes)
 
     query_tokens = tokenize(query)
     cleared: list[Hunk] = []
@@ -1880,7 +2209,18 @@ def search(
     cleared.sort(key=lambda h: (-h.score, -h.name_score, h.scope, h.ref, h.start))
     worst = max(below, default=None, key=lambda h: (h.score, -h.start))
     return SearchReport(
-        status="search-hit" if cleared else "search-no-match",
+        # 🔴 `search-unreadable` OUTRANKS `search-no-match`, and the discriminator
+        # is `searched == 0` — not `cleared == 0`. A query that ran over zero
+        # readable entries produced a zero that says nothing about the query, and
+        # `render_search`'s no-match branch would have printed "searched 0 entries
+        # … nothing cleared the threshold" — technically true, and read by
+        # everyone as "the store has nothing on this". Same class of bug as
+        # `scope-empty` swallowing a broken scope.
+        status=(
+            "search-unreadable"
+            if searched == 0 and bad
+            else ("search-hit" if cleared else "search-no-match")
+        ),
         scope=normalize_ref(scope) if not all_scopes else "(all scopes)",
         store_root=str(store),
         query=query,
@@ -1893,6 +2233,8 @@ def search(
         scopes_searched=tuple(scopes),
         known_scopes=index.scopes,
         best_below=(worst.ref, round(worst.score, 3)) if worst is not None else None,
+        malformed=bad,
+        malformed_elsewhere=bad_elsewhere,
     )
 
 
@@ -1905,6 +2247,18 @@ def render_search(report: SearchReport) -> str:
         f"  store: {report.store_root}",
         f"  caveat: {report.caveat}",
     ]
+
+    # Same rule as `render_text`: before every branch, on every status.
+    out.extend(render_malformed(report.malformed, report.malformed_elsewhere, report.label))
+
+    if report.status == "search-unreadable":
+        out.append("")
+        out.append(unreadable_summary(report.label, report.malformed))
+        out.append(
+            f"  The query {report.query!r} was never run against anything — this is NOT "
+            f"'no matches'."
+        )
+        return "\n".join(out)
 
     if report.status == "scope-absent":
         out.append("")
@@ -1981,6 +2335,7 @@ def search_json(report: SearchReport) -> dict:
         "entries_searched": report.entries_searched,
         "scopes_searched": list(report.scopes_searched),
         "known_scopes": list(report.known_scopes),
+        **_malformed_json(report.malformed, report.malformed_elsewhere),
         "best_below": (
             {"ref": report.best_below[0], "score": report.best_below[1]}
             if report.best_below is not None
@@ -2145,6 +2500,41 @@ _SEARCH_ONLY: tuple[tuple[str, str], ...] = (
 )
 
 
+def _exit_for(status: str, label: str, malformed: Sequence[MalformedEntry]) -> int:
+    """The exit code, and the one stderr line that goes with it. ONE decision site.
+
+    🔴 CONTENT SERVED ⇒ 0; NOTHING READABLE ⇒ 3. `/resume` step 4 branches on
+    zero/non-zero and its instruction is "print the stderr line verbatim, note
+    that recall was unavailable, and continue". That instruction is TRUE only when
+    recall really was unavailable — a scope with 2 good entries and 1 malformed
+    one has just served both good ones, and exiting non-zero would throw them
+    away to report a defect the output already names, loudly, in band. So the
+    partial case exits 0 with the MALFORMED block, and only `*-unreadable` exits
+    non-zero.
+
+    🔴 IT REUSES 3 RATHER THAN MINTING A CODE. 3 is already "the store is broken"
+    for this CLI (`StoreMissingError`, `EntryUnreadableError`), the skill's
+    documented handling is identical for all of them, and a fourth code would
+    need every consumer to learn it before it changed any behaviour — a
+    declaration no code path honours.
+
+    The DETAIL is on stdout (per-entry rows, the whole point); this line is the
+    quotable one-sentence summary, and it is the only thing written to stderr, so
+    the verbatim-print instruction yields a sentence and not a wall.
+    """
+    if status not in UNREADABLE_STATUSES:
+        return 0
+    n = len(malformed)
+    print(
+        f"subsystem-recall: {status}: all {n} entry file{'' if n == 1 else 's'} under "
+        f"`{label}` are MALFORMED — nothing could be read, so recall was unavailable. "
+        f"This is NOT an empty scope and NOT 'nothing recorded yet'. Per-entry reasons "
+        f"are on stdout; check a file with `subsystem_touch.py --validate <path>`.",
+        file=sys.stderr,
+    )
+    return 3
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(list(argv) if argv is not None else None)
 
@@ -2224,7 +2614,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if args.json
                 else render_search(found)
             )
-            return 0
+            return _exit_for(found.status, found.label, found.malformed)
         # The ONE call to `focus_window`, and only where it is EVIDENCE. The
         # digest is the only mode that features an entry, and the window is
         # derived from `repo` — so an explicitly overridden `--scope` disables
@@ -2255,7 +2645,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 3
 
     print(json.dumps(report_json(report), indent=2) if args.json else render_text(report))
-    return 0
+    return _exit_for(report.status, f"{report.scope}/", report.malformed)
 
 
 if __name__ == "__main__":  # pragma: no cover
