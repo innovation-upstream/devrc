@@ -576,7 +576,38 @@ TARGET_FLOORS=(
   # filesystem-dependent). The very next run, on this branch, passed 991/991. So
   # it is intermittent and host-level, not a regression here; recorded because a
   # red baseline that nobody writes down is how a real failure gets waved past.
-  "scripts/tests|3100"
+  #
+  # 2026-08-12, the /handoff step-4 probe-first restructure: 3200 -> 3207
+  # collected, +7 in this target. `_suggested_floor 3207` = 3207 - min(50,
+  # max(1, 160)) = 3157, from the gate's OWN shell function (the python
+  # spelling in test_run_tests_floors.py agrees).
+  #
+  # 🔴 ATTRIBUTED BY A CONTROL PAIR, not by subtracting from the line above.
+  # The authoritative gate was run on UNMODIFIED origin/main (c7579e4) FIRST and
+  # printed `collected=3200` — but the previous entry's own arithmetic implies
+  # 3150, so main was carrying 50 tests this table had never seen. Had this
+  # branch computed its delta from the recorded number instead of measuring
+  # main, it would have claimed +57 and written a floor 50 too high — a FALSE
+  # RED for whoever landed next. Both readings come from
+  # `nix build .#checks.x86_64-linux.pytests`, and this branch is a direct child
+  # of c7579e4 with no rebase, so the +7 is this branch's and nothing else's.
+  # The +7: four guards over the new reference/ sidecar (a positive control that
+  # a MOVED pin still bites, an absence control, link resolution, deployability),
+  # one behavioural test that the cwd-mismatch refusal names --pr/--commit, and
+  # two sentence pins.
+  #
+  # ⚠ ZERO new skips — this target reports `skipped=0` in both runs, and the
+  # suite's single skip is still the pinned one in repo-cos. A NEW FILE was
+  # added (claude/skills/handoff/reference/index-write.md); it is `git add`ed,
+  # and `test_the_sidecar_is_DEPLOYED` now fails if it ever is not — in the
+  # sandbox by its absence, on the host via `git ls-files`.
+  #
+  # ⚠ THE dl-router FLAKE RECORDED ABOVE DID NOT REPRODUCE. Both runs of this
+  # branch's control pair reported `PASS scripts/dl-router/tests (collected=991
+  # passed=991 skipped=0)` — including the one on unmodified main. Recorded
+  # because the note above is the only reason anyone would expect otherwise, and
+  # a flake nobody re-measures becomes folklore about a red main.
+  "scripts/tests|3157"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
