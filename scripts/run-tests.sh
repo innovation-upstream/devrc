@@ -737,7 +737,15 @@ TARGET_FLOORS=(
   # 2026-08-13, next-step-nudge.py's suite arrives as a NEW target: 78 collected on the
   # branch. Gate's own count through the gate's own rule:
   #   _suggested_floor 78 = 78 - min(50, max(1, 78/20 = 3)) = 78 - 3 = 75.
-  "scripts/claude-hooks/tests/test_next_step_nudge.py|75"
+  #
+  # 2026-08-13, the audit-fix round: 78 -> 112 collected. +34 for the switch to
+  # additionalContext (IO-contract tests), the ASKS anchor fix, per-ARM fixtures for the
+  # alternation mutants that were surviving, the isMeta guard, the headless opt-out seam,
+  # and main()'s fail-open backstop. Re-measured by the AUTHORITATIVE gate — `nix build
+  # .#checks.x86_64-linux.pytests` -> `collected=112`, read out of `nix log`, not from a
+  # local pytest run — then put through the gate's own function:
+  #   _suggested_floor 112 = 112 - min(50, max(1, 112/20 = 5)) = 112 - 5 = 107.
+  "scripts/claude-hooks/tests/test_next_step_nudge.py|107"
 )
 
 # The allowance rule, in one place, used by BOTH the drift message and anyone

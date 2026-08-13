@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Stop nudge: when a turn ends WITHOUT naming a next step, block the stop once per
-session and ask for one line saying what happens next.
+"""Stop nudge: when a turn ends WITHOUT naming a next step, hand the model one line of
+context asking it to say what happens next. Once per session. It does not block.
 
 Why this exists — measured, not assumed. Over 14 days of operator prompts in
 `activity.events`:
@@ -23,25 +23,45 @@ instruction, and shell-env-nudge.py's own header records the precedent ("the CLA
 pointers documenting them are opt-in, and opt-in guidance has historically not stuck").
 
 --------------------------------------------------------------------------------------
-MECHANISM — exit 2, and why that is the only option
+MECHANISM — additionalContext, and it does NOT block
 
-`hookSpecificOutput.additionalContext` is documented as NOT supported on Stop. The
-documented way to reach the model from a Stop hook is exit code 2, whose row in the
-hooks reference reads: `Stop | Yes | Prevents Claude from stopping, continues the
-conversation`, with stderr fed back to the model. The JSON alternative `continue:false`
-is the OPPOSITE of what is wanted — it halts processing entirely.
+A Stop hook reaches the model through `hookSpecificOutput.additionalContext`: JSON on
+stdout, exit 0. Read out of the INSTALLED CLI's own schema rather than from documentation
+(claude-code 2.1.220) — and note that `bin/claude` is a 20 KB wrapper, so a grep against
+it returns a meaningless zero; the schema lives in the 262 MB `bin/.claude-wrapped`:
 
-So firing means BLOCKING the stop. That is expensive and disruptive if wrong, which is
-why the suppression below is the substance of this file and the firing condition is an
-ABSENCE. The blast radius is bounded three ways: at most ONE block per session ever
-(atomic claim); never a second consecutive block (`stop_hook_active`); and any error,
-missing field or unreadable transcript exits 0 and lets the turn end.
+    v.object({hookEventName: v.literal("Stop"),
+              additionalContext: v.string().optional()})
+      .describe("Hook-specific output for the Stop event. additionalContext is
+       non-error feedback delivered to the model; the conversation continues so
+       the model can act on it.")
 
-🔴 BLOCKING A STOP RE-RUNS EVERY OTHER STOP HOOK — checked against each, one by one,
-because "it only affects my hook" was not true. Stop is shared with three pre-existing
-owners on this host. When this hook blocks, the turn continues and Stop fires AGAIN when
-it really ends, so those three can see two Stop events for one turn. Bounded to at most
-one extra per session by the claim below. What each does with the second event:
+The same union arm exists for SubagentStop.
+
+🔴 AN EARLIER REVISION OF THIS FILE ASSERTED THE OPPOSITE — that additionalContext is
+unsupported on Stop and that exit 2 is therefore the only route to the model — and built
+its entire cost model on that premise. The premise was false, and everything resting on
+it was wrong in the same direction:
+
+  * exit 2 delivers through `blockingError`, which raises a "Stop hook error occurred ·
+    ctrl+o to see" notification on EVERY fire. Non-error feedback was being pushed down
+    the error channel, and the operator was being shown an error for a working hook.
+  * exit 2 PREVENTS the stop. A model that was legitimately finished was compelled to
+    continue — so a false positive did not merely waste a line, it manufactured filler
+    work. That risk is what made false positives expensive.
+  * that expense is what justified sacrificing recall as hard as this file does.
+
+Under additionalContext none of those hold. The model receives one line of context and
+the turn continues normally; a false positive costs one extra model turn and produces no
+operator-facing error at all. The suppression below is still the substance of the file —
+an unwanted turn is not free — but it is no longer defending against a wedged session,
+and the framing that firing == blocking is gone from this file because it was never true.
+
+🔴 THE TURN STILL CONTINUES, so every other Stop hook still sees a SECOND Stop event.
+This is the schema's own wording ("the conversation continues"), so it survives the move
+off exit 2 rather than being repaired by it — re-checked here, not assumed. Stop is shared
+with three pre-existing owners on this host, and the second event is bounded to at most
+one per session by the claim below. What each does with it:
 
   * claude-notify.py — SAFE, twice over: it returns immediately when `stop_hook_active`
     is set, and it also consumes its turn-start marker on the first Stop, so the second
@@ -57,13 +77,15 @@ one extra per session by the claim below. What each does with the second event:
     hidden; it does not affect approval, which is the PermissionRequest hook, not this.
 
 Registration appends this hook LAST so the other three have already observed the turn
-before it can block.
+before it can add anything to it.
 
 🔴 FAIL-OPEN HERE MEANS SILENCE, which is the opposite of this hook's PostToolUse
 siblings. shell-env-nudge/search-tool-nudge fail open by EMITTING (a duplicate nudge is
-cheap, a swallowed one is invisible). This hook fails open by NOT emitting, because its
-emission blocks the operator's turn. Every `except` below therefore exits 0, and every
-gate that cannot be evaluated is treated as "do not fire".
+cheap, a swallowed one is invisible). This hook fails open by NOT emitting: its emission
+spends one of the operator's model turns, and — more to the point — a Stop hook that
+errors or hangs is felt at the exact moment a session is trying to end. Every `except`
+below therefore exits 0, and every gate that cannot be evaluated is treated as "do not
+fire". main() has exactly ONE exit and it is always 0.
 
 --------------------------------------------------------------------------------------
 DETECTION — an absence, in a positional window, over closed grammatical classes
@@ -71,17 +93,48 @@ DETECTION — an absence, in a positional window, over closed grammatical classe
 The firing condition is: the TAIL of the final message contains no forward-looking
 construction. Both halves matter.
 
-  * POSITIONAL — and stated at the scope actually measured. The tail is the message's
-    last paragraph blocks, taken from the end until at least TAIL_CHARS characters are
-    covered, rather than the whole message. 🔴 On this corpus that narrowing changes
-    NOTHING: sweeping TAIL_CHARS from 10 to 10^9 leaves the fire count at 565/11,215,
-    unmoved, because a message that has any forward-looking construction essentially
-    always has one in its final paragraph. So the window is a bound on a shape the real
-    traffic does not contain — a next step stated up top and then buried under kilobytes
-    of findings — and NOT a tuned parameter. It is kept because it is cheap and can only
-    ever make the hook louder, never quieter; it is not evidence for anything, and
-    test_next_step_buried_far_above_the_tail_does_not_suppress is labelled there as the
-    invariant guard it is rather than counted as regression coverage.
+  * POSITIONAL, and it is the single most sensitive constant in this file. The tail is
+    the message's last paragraph blocks, taken from the end until at least TAIL_CHARS
+    characters are covered, rather than the whole message.
+
+    🔴 AN EARLIER REVISION CALLED THIS PARAMETER "MEASURABLY INERT" — fire count 565 at
+    every value from 10 to 10^9 — and demoted its test to an invariant guard on the
+    strength of that. The measurement was wired to nothing. `tail_of(text,
+    nchars=TAIL_CHARS)` binds its default at DEF time, so the sweep, which rebound the
+    module-level `TAIL_CHARS` and then called `suppressed_by()`, changed no behaviour at
+    all; it re-measured the same 800-char window eleven times and reported the flat line
+    as a property of the traffic. Re-measured by passing `nchars` explicitly, over 11,789
+    turn-final messages from this host's transcripts:
+
+        TAIL_CHARS      10    200    400    600    800   1200   3200   10^9
+        fires        1,903  1,385    968    738    577    422    265    262
+
+    A 7.3x swing, and 55% of the fires at the shipped value exist ONLY because of the
+    window. Nothing about "inert" was true.
+
+    800 is KEPT, but now because it was chosen rather than inherited. Raw fire count is
+    the wrong criterion and a precision ratio computed on single-digit false-positive
+    counts is noise, so the criterion is MARGINAL: narrowing the window one step from the
+    value above it, what does it buy in genuinely-needed nudges per false one? Labelled
+    behaviourally by what the operator typed next:
+
+        narrow to    1600    1200     800     600     400     200
+        +true           5       6      18      14      15      30
+        +false          2       2       1       7       6      14
+        ratio         2.5:1   3.0:1  18.0:1   2.0:1   2.5:1   2.1:1
+
+    The 1200 -> 800 step is a genuine knee: every other step trades at 2-3:1, that one at
+    18:1. It survives both robustness checks — 9:1 on a wider draw of the false-positive
+    population, and 12:1 on the newest 25% of sessions held out by mtime, with every
+    adjacent step still <= 3:1 in both.
+
+    This also refutes the old rationale, which claimed the window bounded "a shape the
+    corpus does not contain". The corpus contains it 18 times over: turns where the model
+    DID state something forward-looking, but far enough above the ending that the operator
+    still had to ask for a recommendation. A next step buried under kilobytes of findings
+    is not a usable ending, and the operator's own behaviour is what says so.
+    test_next_step_buried_far_above_the_tail_does_not_suppress is therefore real
+    regression coverage for the file's most sensitive constant, and is labelled as such.
 
   * ABSENCE, NOT PRESENCE. There is no "does the text contain 'next'" test anywhere;
     that is the spelled-guard failure this repo has been bitten by (a
@@ -92,36 +145,45 @@ construction. Both halves matter.
     recommendation in it.
 
   * The suppressors ARE lexical, and that is deliberate and safe in this direction.
-    A false suppressor costs one missed nudge (silent, cheap). A false FIRE costs a
-    blocked turn and trains the operator to ignore the hook. So every suppressor is
+    A false suppressor costs one missed nudge (silent, cheap). A false FIRE costs one
+    wasted model turn and trains the operator to ignore the hook. So every suppressor is
     written GENEROUSLY: when in doubt, suppress. They are closed grammatical classes
-    (pronoun + modal, sentence-final `?`, second-person hand-off) rather than topic
+    (pronoun + modal, line-final `?`, second-person hand-off) rather than topic
     vocabulary, so widening one cannot make the hook fire more.
 
-MEASURED false-positive rate. Against 11,215 turn-final assistant messages taken from
-this host's own transcripts, labelled by what the OPERATOR typed next — a behavioural
-label, not my judgement about whether the turn was any good:
+MEASURED false-positive rate. Against 11,789 turn-final assistant messages taken from
+this host's own transcripts (630 sessions), labelled by what the OPERATOR typed next — a
+behavioural label, not my judgement about whether the turn was any good:
 
-    turns answered with `recommend…`   (SHOULD fire):   39/268   = 14.6%
-    turns answered with bare approval  (MUST NOT fire): 14/1464  =  1.0%
-    all turns                                          565/11215 =  5.0%
-    sessions firing at all (once-per-session dedupe):  190/620   = 30.6%
+    turns answered with `recommend…`  (SHOULD fire):     51/483   = 10.6%
+    bare approval, NARROW draw       (MUST NOT fire):     8/1000  =  0.8%
+    bare approval, WIDE draw         (MUST NOT fire):    13/1554  =  0.8%
+    all turns                                           577/11789 =  4.9%
+    sessions firing at all (once-per-session dedupe):   191/630   = 30.3%
 
-So ~15:1 in favour of firing on a turn that genuinely lacked a next step, and an
-operator sees this at most once in roughly three sessions.
+🔴 THE HEADLINE RATIO IN AN EARLIER REVISION WAS WRONG, and the way it was wrong is the
+interesting part. It claimed ~15:1 from 14.6% recall against a 1.0% false-positive rate
+drawn over 1,464 turns. Re-labelled independently, the same predicate on the same corpus
+gave 2.3% (23/1000) — the gap is DEFINITIONAL, i.e. the 1.0% was not robust to how "bare
+approval" is drawn, which is exactly the objection. The honest number for what that
+revision shipped was 4.6:1, not 15:1.
 
-Bounding the 1.0%, honestly:
-  * It is an UPPER bound on harm. Some of those 14 are turns that did name a next step
-    somewhere the operator was happy with; none of them are turns where the nudge would
-    have been welcome.
-  * It is NOT an artefact of tuning on the same data. Split by session mtime, the newest
-    25% of sessions — which the suppressors were never sampled from — give 1.1%
-    (5/461) against 0.9% (9/1003) on the older 75%. Per project: 1.0%, 0.0%, 3.4%,
-    0.0%, 0.0% (the 3.4% is 4/118, small n).
-  * Recall is deliberately the sacrificed side. Every suppressor is written generously,
-    and each widening traded recall for precision on purpose: an earlier revision sat at
-    36.9%/4.6% and was made quieter, twice. Firing costs a blocked turn; staying silent
-    costs one round trip the operator was going to pay anyway.
+The 13.2:1 above is a different claim: it is what the predicate does AFTER the ASKS
+anchor fix (see ASKS below), which removed 15 false positives and introduced none. Both
+draws of the false-positive population are reported precisely so the ratio does not rest
+on one of them again.
+
+Bounding the 0.8%, honestly:
+  * It is an UPPER bound on harm. Some of those 8 are turns that did name a next step
+    somewhere the operator was happy with; none are turns where the nudge would have
+    been welcome.
+  * Both draws of the population agree at 0.8%, which the earlier 1.0%/2.3% pair did not.
+  * Recall is deliberately the sacrificed side, and the case for sacrificing it is WEAKER
+    now than when it was made: it was justified by a false positive costing a blocked
+    turn, and under additionalContext it costs one model turn. The suppressors have NOT
+    been loosened in this round — that would be a second change measured against the same
+    retrospective corpus that has already misled once — but the trade should be revisited
+    against live data, not re-derived here.
 
 🔴 WHAT THIS DOES NOT MEASURE, stated plainly: the real-world nudge rate cannot be known
 until this ships. The corpus is retrospective — it says how often the predicate WOULD
@@ -135,9 +197,12 @@ activity.events some weeks after deploy; nothing here establishes it.
 import sys, json, os, re
 
 # --------------------------------------------------------------------------- #
-# Tunables. Each carries its own evidence below, INCLUDING where there is none:
-# TAIL_CHARS is measurably inert on this corpus and says so rather than borrowing
-# the others' credibility.
+# Tunables. Each carries its own evidence below. 🔴 Any sweep of one of these must pass
+# the parameter EXPLICITLY into the function under test — every function here that takes
+# a tunable takes it as a default argument, and a default binds at def time, so rebinding
+# the module attribute measures nothing. That mistake produced a confident "TAIL_CHARS is
+# inert" reading of an eleven-point sweep that had in fact re-measured one value eleven
+# times. A sweep must be shown to move a number before any verdict is read from it.
 # --------------------------------------------------------------------------- #
 
 # Below this, the message is a terse answer, not a piece of work that owes a next step.
@@ -146,9 +211,13 @@ import sys, json, os, re
 MIN_MESSAGE_CHARS = 600
 
 # The positional tail: last paragraph blocks covering at least this many characters.
-# NOT a tuned number — swept 10 / 200 / 400 / 800 / 1600 / 3200 / 10^9 against the final
-# suppressor set and the fire count was 565 at EVERY point. See the "POSITIONAL" note in
-# the module docstring: this bounds a pathological shape, it does not tune anything.
+# 🔴 THE MOST SENSITIVE CONSTANT IN THIS FILE — a 7.3x swing in fire count across its
+# range (1,903 at 10 down to 262 unbounded), and 55% of the fires at this value exist
+# only because of the window. Chosen on MARGINAL gain, not on fire count: narrowing
+# 1200 -> 800 buys 18 genuinely-needed nudges per 1 false one, where every adjacent step
+# trades at 2-3:1. Holds on a wider draw of the false-positive population (9:1) and on
+# the newest 25% of sessions held out by mtime (12:1). Full tables in the "POSITIONAL"
+# note in the module docstring.
 TAIL_CHARS = 800
 
 # How much of the transcript's end to read when establishing turn shape. A turn larger
@@ -159,6 +228,22 @@ TRANSCRIPT_TAIL_BYTES = 4 * 1024 * 1024
 SHORT_QUESTION_CHARS = 160
 
 STATE_TOKEN = "fired"
+
+# 🔴 HEADLESS OPT-OUT. `claude -p` inherits this host's hooks, and two of this repo's own
+# scripts drive it under a hard timeout — githooks/audit-on-push.sh (AUDIT_TIMEOUT) and
+# scripts/task-spec-drafter/drafter.sh (DRAFTER_TIMEOUT, 240s default). Both do tool work
+# and end with a long report, so both are ELIGIBLE, and in both the "operator" is a shell
+# pipeline that parses the first line and exits. Nobody reads the nudge and the extra turn
+# is charged against a bounded budget.
+#
+# Gated on an explicit env marker set BY THE CALLERS, not inferred. The alternatives were
+# both rejected as heuristics: CLAUDE_CODE_ENTRYPOINT is "cli" for `claude -p` exactly as
+# it is for an interactive session (checked against the bundle's own enum: cli, sdk-cli,
+# mcp, serve, claude-code-github-action, local-agent), and stdin/stdout are pipes for a
+# hook in BOTH modes, so neither distinguishes the case. The two call sites are ours, so
+# the deterministic fix is for them to say so — set here, read here, and nowhere else.
+# A third-party headless caller can opt out the same way; the default stays "nudge".
+OPT_OUT_ENV = "NEXT_STEP_NUDGE_OFF"
 
 
 def _state_root():
@@ -184,11 +269,27 @@ def _state_root():
 # so none of them is decoration.
 # --------------------------------------------------------------------------- #
 
-# 1. ASKS — a sentence-final '?'. The strongest single signal in the corpus: present in
-#    the tail of 70% of turns the operator answered with a bare approval, versus 26% of
-#    the turns where they had to ask for a recommendation. Anchored to end-of-line so a
-#    rhetorical '?' mid-sentence does not count.
-ASKS = re.compile(r"\?(?=[\s\"'*`)\]]*$)", re.M)
+# 1. ASKS — a question at the END of a line. The strongest single signal in the corpus:
+#    present in the tail of 70% of turns the operator answered with a bare approval,
+#    versus 26% of the turns where they had to ask for a recommendation.
+#
+#    🔴 THE TRAILER ALLOWANCE IS THE WHOLE POINT, and an earlier revision got it wrong.
+#    The first version anchored with `[\s"'*`)\]]*$` — whitespace and closing quotes
+#    only — so a '?' followed by ANY word did not match. That silently excluded the most
+#    common shape of an already-awaiting-the-operator turn: the inline answer hint.
+#    `Append this to the index? (y/N)` scored as NO question and FIRED, while the same
+#    sentence without the hint was correctly suppressed. On this corpus 12 of the 14
+#    first-fires whose operator reply was a bare approval were that one literal prompt —
+#    a flow this repo itself ships. So the trailer is now "up to 40 characters that are
+#    not a newline and not another '?'", which admits `(y/N)`, `[1-3]`, `— your call.`
+#    and the like, while a '?' buried mid-paragraph with a sentence after it still does
+#    not match. `?` is excluded from the trailer purely for attribution: it makes the
+#    LAST question on a line the one that matches, never an earlier one reaching past it.
+#    Pinned by test_asks_allows_an_inline_answer_hint and
+#    test_asks_does_not_match_a_rhetorical_question_mid_paragraph — the anchoring was
+#    previously UNTESTED (replacing the whole regex with a bare `\?` left every test
+#    green), so the claim in this comment now has a guard behind it.
+ASKS = re.compile(r"\?(?=[^\n?]{0,40}$)", re.M)
 
 # 2. COMMITS — a forward-looking clause. Two shapes, both closed classes:
 #    (a) first person + modal/volitional head ("I'll", "I would", "we can", "I plan to")
@@ -361,8 +462,26 @@ def is_short_question(prompt):
 # Turn shape, from the transcript tail
 # --------------------------------------------------------------------------- #
 def _is_real_user(rec):
-    """A genuine operator prompt, not a tool_result the harness wrote back as `user`."""
-    if rec.get("type") != "user" or rec.get("isSidechain"):
+    """A genuine operator prompt, not a tool_result the harness wrote back as `user`.
+
+    Three ways a `type: "user"` record is NOT the operator talking, and all three are
+    excluded here:
+      * isSidechain — a subagent's prompt, written into the shared transcript.
+      * tool_result content — the harness echoing a tool's output back as `user`.
+      * 🔴 isMeta — a harness-authored record with STRING content, e.g. the
+        `<local-command-caveat>` and command-expansion notes Claude Code injects. This
+        one is the dangerous shape precisely because it looks exactly like a real prompt:
+        the content is a plain string, so the tool_result test above passes it straight
+        through and `_turn_shape` returns harness boilerplate as "the opening prompt".
+        Both prompt-shaped gates then evaluate the wrong text, and they do it in the
+        FIRING direction — a caveat string is neither terminal nor a short question, so
+        the two gates that could have stayed the hook are both answered by text the
+        operator never typed. 6.1% of turns in the corpus (722) open on such a record.
+        Measured counterfactual: honouring isMeta changes 0 of the current fires, so this
+        is latent rather than live — taken anyway, because it is one token and the day it
+        becomes live it fails silently and in the expensive direction.
+    """
+    if rec.get("type") != "user" or rec.get("isSidechain") or rec.get("isMeta"):
         return False
     content = (rec.get("message") or {}).get("content")
     if isinstance(content, str):
@@ -450,8 +569,10 @@ def _turn_shape(path):
 # --------------------------------------------------------------------------- #
 # Once-per-session claim. Same atomic O_EXCL test-and-set as search-tool-nudge.py,
 # with the fail direction REVERSED: an unwritable state dir means we cannot promise
-# once-per-session, and an unbounded Stop-blocker is the one outcome worse than a
-# missed nudge — so an unclaimable token means DO NOT FIRE.
+# once-per-session, and a nudge that repeats on EVERY turn of a session is the one
+# outcome worse than a missed nudge — so an unclaimable token means DO NOT FIRE.
+# (This held more sharply when the hook blocked; it still holds, because a per-turn
+# nudge is what trains an operator to ignore the thing.)
 # --------------------------------------------------------------------------- #
 def _sanitize(part):
     return re.sub(r"[^A-Za-z0-9_.-]", "_", part)[:120]
@@ -528,10 +649,19 @@ def should_nudge(data, transcript_reader=_turn_shape):
     if data.get("agent_id"):  # reaches the operator, so it owes them no next step.
         return False
     if data.get("stop_hook_active"):
-        return False          # never block twice in a row
-    stop_reason = data.get("stop_reason")
-    if stop_reason not in (None, "", "end_turn"):
-        return False          # max_tokens/tool_use is truncation, not a considered end
+        return False          # never nudge two Stops in a row
+    if os.environ.get(OPT_OUT_ENV):
+        return False          # headless / batch caller: nobody is here to read it
+
+    # 🔴 There is deliberately NO `stop_reason` gate. An earlier revision had one —
+    # "max_tokens/tool_use is truncation, not a considered end" — and it was DEAD: the
+    # Stop payload has no such field, so the gate could never reject anything, and its
+    # test was an invariant guard wearing a gate's label. The real payload is
+    # `session_id, transcript_path, cwd, prompt_id?, permission_mode?, agent_id?,
+    # agent_type?, effort?` + `hook_event_name, stop_hook_active, last_assistant_message?,
+    # background_tasks?, session_crons?` (read out of the installed CLI's own schema,
+    # claude-code 2.1.220). Removed rather than relabelled: a gate nobody can trip is
+    # indistinguishable from one that works, and it invited a maintainer to trust it.
 
     msg = data.get("last_assistant_message")
     if not isinstance(msg, str) or len(msg) < MIN_MESSAGE_CHARS:
@@ -557,25 +687,41 @@ def should_nudge(data, transcript_reader=_turn_shape):
     return True
 
 
+def emit(text=NUDGE):
+    """The Stop hook's non-error channel: `hookSpecificOutput.additionalContext`.
+
+    Shape taken from the installed CLI's own schema rather than from documentation:
+
+        v.object({hookEventName: v.literal("Stop"),
+                  additionalContext: v.string().optional()})
+          .describe("Hook-specific output for the Stop event. additionalContext is
+           non-error feedback delivered to the model; the conversation continues so
+           the model can act on it.")
+
+    `hookEventName` is the literal "Stop" and not the payload's own field: should_nudge()
+    has already rejected every other event, and echoing an absent field would emit a
+    union arm that validates against nothing.
+    """
+    json.dump({"hookSpecificOutput": {"hookEventName": "Stop",
+                                      "additionalContext": text}}, sys.stdout)
+    sys.stdout.write("\n")
+
+
 def main():
+    # 🔴 ONE exit, and it is always 0. Nothing inside the try may call sys.exit(): a
+    # SystemExit is a BaseException, so `except Exception` would NOT catch it and the
+    # earlier `except SystemExit: raise` arm below it was unreachable decoration. The
+    # structure is now "do the work, swallow anything, exit 0" — which is the whole
+    # fail-open claim, expressed so that there is exactly one place to read it.
     try:
         data = json.load(sys.stdin)
+        if should_nudge(data):
+            state_dir = _state_dir(data)
+            if not already_fired(state_dir) and claim(state_dir):
+                emit()
     except Exception:
-        sys.exit(0)
-    try:
-        if not should_nudge(data):
-            sys.exit(0)
-        state_dir = _state_dir(data)
-        if already_fired(state_dir):
-            sys.exit(0)
-        if not claim(state_dir):
-            sys.exit(0)
-        sys.stderr.write(NUDGE + "\n")
-        sys.exit(2)
-    except SystemExit:
-        raise
-    except Exception:
-        sys.exit(0)
+        pass      # fail-open HERE means silence — see the module docstring.
+    sys.exit(0)
 
 
 if __name__ == "__main__":

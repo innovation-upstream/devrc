@@ -1020,13 +1020,17 @@ in
   # without saying what it would do. Concentrated in datapacket-talos (152) and cli (33),
   # not devrc, which is why this is a hook rather than devrc prose.
   #
-  # 🔴 It BLOCKS: exit 2 is the only documented way a Stop hook can reach the model
-  # (additionalContext is not supported on Stop, and `continue:false` halts instead of
-  # continuing). So the suppression predicate is the product, not the message. Bounded to
-  # at most ONE block per session by an atomic claim, never twice in a row
-  # (stop_hook_active), and every error path exits 0. Measured on 11,215 real turn-final
-  # messages: fires on 1.0% of turns the operator answered with a bare approval and 14.6%
-  # of the turns where they had to ask for a recommendation.
+  # 🔴 It does NOT block. It emits `hookSpecificOutput.additionalContext` on stdout and
+  # exits 0 — the model gets the line as non-error feedback and the conversation
+  # continues. An earlier revision asserted that additionalContext is unsupported on Stop
+  # and used exit 2 instead; that premise was false (checked against the installed CLI's
+  # own schema, claude-code 2.1.220), and exit 2 both blocked the turn and raised a "Stop
+  # hook error occurred" notification on every fire. Still bounded to at most ONE fire per
+  # session by an atomic claim, never twice in a row (stop_hook_active), off for subagents
+  # and for headless callers (NEXT_STEP_NUDGE_OFF), with every error path exiting 0.
+  # Measured on 11,789 real turn-final messages: fires on 0.8% of turns the operator
+  # answered with a bare approval and 10.6% of the turns where they had to ask for a
+  # recommendation.
   #
   # Registered on Stop (NOT SubagentStop) per-host by register-nudge-hook.py, appended
   # alongside the three pre-existing Stop hooks it must never clobber.

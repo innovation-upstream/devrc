@@ -3,12 +3,15 @@
 
 WHAT THIS FILE IS FOR
 
-  1. 🔴 The SUPPRESSION predicate is the whole product. This hook fires by BLOCKING
-     the operator's Stop (exit 2 is the only documented way a Stop hook can reach the
-     model), so a false positive is not a wasted line of context — it is a turn that
-     will not end. A hook that nags is strictly worse than no hook, so the negative
-     controls below outnumber the positive ones roughly 4:1 and that ratio is
-     deliberate.
+  1. 🔴 The SUPPRESSION predicate is the whole product. The hook fires by emitting
+     `hookSpecificOutput.additionalContext` and exiting 0 — it does NOT block, and an
+     earlier revision of this suite asserted the opposite throughout because the hook
+     used exit 2 on a false premise. A false positive therefore costs one wasted model
+     turn rather than a turn that will not end. Still worth suppressing hard — a hook
+     that nags is worse than no hook — so the negative controls below outnumber the
+     positive ones roughly 4:1 and that ratio is deliberate. The IO contract itself
+     (stdout JSON, exit 0, nothing on stderr) is pinned in section 7, because "it does
+     not block" is the claim most likely to rot.
 
   2. ATTRIBUTION. `suppressed_by()` returns the NAMES of the guards that matched, and
      every suppressor has at least one fixture that it and ONLY it saves
@@ -17,7 +20,8 @@ WHAT THIS FILE IS FOR
      rather than the fixture being rescued by a sibling guard and the mutant surviving.
 
   3. FAIL-OPEN, which here means SILENCE. Every error path must exit 0 and write
-     nothing, because the alternative is a wedged turn on the operator's live machine.
+     nothing. A Stop hook runs at the moment a session is trying to end, so anything it
+     writes to stderr surfaces as an error and anything it raises is felt immediately.
      Driven through a real subprocess, not by calling main().
 
   4. The SEAM between should_nudge() and the transcript reader. The unit tests stub the
@@ -72,19 +76,101 @@ def msg(ending):
     return FILLER + "\n" + ending
 
 
+# --------------------------------------------------------------------------- #
+# AST helpers — for the guards that make a claim about the hook's CODE.
+#
+# 🔴 Read the syntax tree, never the source text. This file's subject discusses `exit 2`
+# and `stop_reason` at length in prose, so any text-level guard about them is satisfiable
+# — and breakable — by a comment. Two such guards were written for this round and BOTH
+# tripped on the very prose that explains why the thing they check was removed.
+# --------------------------------------------------------------------------- #
+def _module_ast(path):
+    import ast
+    return ast.parse(Path(path).read_text())
+
+
+def _docstring_nodes(tree):
+    """Every Constant node that IS a docstring, so they can be excluded."""
+    import ast
+    out = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.ClassDef)):
+            body = getattr(node, "body", None)
+            if (body and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)):
+                out.add(id(body[0].value))
+    return out
+
+
+def code_string_literals(path):
+    """Every string literal in the module that is NOT a docstring. Comments never appear
+    in an AST at all, which is the point."""
+    import ast
+    tree = _module_ast(path)
+    skip = _docstring_nodes(tree)
+    return {n.value for n in ast.walk(tree)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)
+            and id(n) not in skip}
+
+
+def sys_exit_calls(path):
+    """The literal argument of every `sys.exit(...)` / `exit(...)` call, in source order.
+    A non-literal argument is reported as the string '<non-literal>' so it cannot pass
+    unnoticed."""
+    import ast
+    out = []
+    for node in ast.walk(_module_ast(path)):
+        if not isinstance(node, ast.Call):
+            continue
+        f = node.func
+        name = (f.attr if isinstance(f, ast.Attribute)
+                else f.id if isinstance(f, ast.Name) else None)
+        if name != "exit":
+            continue
+        if not node.args:
+            out.append(0)
+        elif isinstance(node.args[0], ast.Constant):
+            out.append(node.args[0].value)
+        else:
+            out.append("<non-literal>")
+    return out
+
+
 def payload(text, **over):
     """A realistic Stop payload. Overridable field by field so a gate test can move
-    exactly one thing and leave everything else in its firing state."""
+    exactly one thing and leave everything else in its firing state.
+
+    🔴 EVERY FIELD HERE EXISTS IN THE RUNTIME PAYLOAD. An earlier revision also set
+    `stop_reason`, which the Stop event does not carry — so a fixture invented a field,
+    the hook gated on it, and a test asserted the gate worked. All three agreed with each
+    other and none of them agreed with the CLI. The real schema (claude-code 2.1.220) is
+    `session_id, transcript_path, cwd, prompt_id?, permission_mode?, agent_id?,
+    agent_type?, effort?` plus `hook_event_name, stop_hook_active,
+    last_assistant_message?, background_tasks?, session_crons?`; pinned by
+    test_payload_fixture_invents_no_fields below.
+    """
     d = {
         "hook_event_name": "Stop",
         "session_id": "11111111-2222-3333-4444-555555555555",
         "transcript_path": "/nonexistent/transcript.jsonl",
         "last_assistant_message": text,
-        "stop_reason": "end_turn",
         "cwd": "/tmp",
     }
     d.update(over)
     return d
+
+
+# The Stop payload's real field set, read out of the installed CLI's schema. A fixture
+# field outside this set is an invented one, and inventing one is how the dead
+# `stop_reason` gate came to look live.
+STOP_PAYLOAD_FIELDS = {
+    "session_id", "transcript_path", "cwd", "prompt_id", "permission_mode",
+    "agent_id", "agent_type", "effort",
+    "hook_event_name", "stop_hook_active", "last_assistant_message",
+    "background_tasks", "session_crons",
+}
 
 
 def decide(text, prompt="Audit the retry path and report what you find.", tools=7, **over):
@@ -188,6 +274,102 @@ def test_every_suppressor_has_a_fixture():
     assert owned == declared, f"unowned: {declared - owned}; stale: {owned - declared}"
 
 
+# --------------------------------------------------------------------------- #
+# 2b. ARMS, not just names. `test_every_suppressor_has_a_fixture` pins one fixture per
+#     suppressor NAME, which says nothing about the ~30 alternation ARMS inside them —
+#     a mutation sweep deleting an arm survived, because a sibling arm kept the one
+#     fixture suppressed. Each entry below is owned by exactly one arm of one suppressor.
+# --------------------------------------------------------------------------- #
+SUPPRESSOR_ARMS = {
+    # COMMITS — the impersonal-future arm. No first-person pronoun anywhere, which is
+    # why this arm exists; a real corpus miss fired on exactly this shape.
+    "commits_going_to": ("The counter is going to land with the loop fix.", "commits"),
+    "commits_about_to": ("The re-measure is about to start on both points.", "commits"),
+    "commits_due_to_run": ("The sweep is due to run against both points tonight.", "commits"),
+    "commits_queued_to": ("The counter export is queued to land after the loop fix.", "commits"),
+    "commits_set_to": ("The re-measure is set to start once the counter exists.", "commits"),
+    # MARKED — the `worth <gerund>` / `worth a <noun>` arm. Its docstring says it was
+    # added BECAUSE an earlier revision fired on it: a regression fix that shipped with
+    # no regression test until now.
+    "marked_worth_gerund": ("The retry loop is worth folding into the same change.", "marked"),
+    "marked_worth_a_noun": ("The backoff constant is worth a glance before merging.", "marked"),
+    # MARKED — the soft-preference arm.
+    "marked_defaults_to": ("On a tie like this the order defaults to the cheaper "
+                           "measurement first.", "marked"),
+    "marked_leans_toward": ("The evidence leans toward the loop rather than the cache.",
+                            "marked"),
+}
+
+
+@pytest.mark.parametrize("key", sorted(SUPPRESSOR_ARMS))
+def test_each_alternation_arm_is_uniquely_owned(key):
+    """🔴 ATTRIBUTION AT ARM GRAIN. Each fixture must be saved by exactly ONE suppressor,
+    so deleting the arm under test leaves it firing rather than rescued by a sibling."""
+    ending, owner = SUPPRESSOR_ARMS[key]
+    got = nsn.suppressed_by(msg(ending))
+    assert got == [owner], f"{key}: expected only {owner!r}, got {got!r}"
+
+
+@pytest.mark.parametrize("key", sorted(SUPPRESSOR_ARMS))
+def test_each_alternation_arm_suppresses_the_turn(key):
+    ending, _owner = SUPPRESSOR_ARMS[key]
+    assert decide(msg(ending)) is False
+
+
+def test_arm_ledger_covers_every_arm_named_in_the_source_comments():
+    """A ledger that can go stale silently is not a ledger. Pins the specific arms the
+    source comments justify by name — deleting one from the regex without deleting the
+    fixture fails above, and adding one here without an arm fails immediately."""
+    for arm in ("going to", "about to", "due to run", "queued to", "set to"):
+        assert nsn.COMMITS.search(f"the work is {arm} happen"), arm
+    for arm in ("defaults to", "leans toward", "worth a glance", "worth folding"):
+        assert nsn.MARKED.search(f"it {arm} something"), arm
+
+
+# --------------------------------------------------------------------------- #
+# 2c. ASKS anchoring. Previously UNTESTED: replacing the whole regex with a bare `\\?`
+#     left every test in this file green, so the source comment about rhetorical
+#     mid-sentence '?' was an unverified claim.
+# --------------------------------------------------------------------------- #
+def test_asks_allows_an_inline_answer_hint():
+    """🔴 THE REGRESSION. The original anchor permitted only whitespace/quotes/brackets
+    after the '?', so a question carrying its own answer hint did not match and the hook
+    FIRED on a turn that was already waiting on the operator. On the real corpus, 12 of
+    the 14 first-fires whose operator reply was a bare approval were this one shape — a
+    prompt this repo itself ships."""
+    for ending in ("Append this to the index? (y/N)",
+                   "Which one should land first? [1-3]",
+                   "Do you want the counter first? — your call.",
+                   "Ready to merge? (yes/no)"):
+        assert "asks" in nsn.suppressed_by(msg(ending)), ending
+        assert decide(msg(ending)) is False, ending
+
+
+def test_asks_does_not_match_a_rhetorical_question_mid_paragraph():
+    """The other half: a '?' with a whole sentence after it on the same line is not the
+    turn asking the operator anything. Without this, the anchor could be widened to a
+    bare `\\?` and nothing would notice."""
+    ending = ("So which is it? The evidence points at the retry loop rather than the "
+              "cache, because the hit rate was unchanged across both runs and the tail "
+              "moved by a factor of four.")
+    assert "asks" not in nsn.suppressed_by(msg(ending))
+
+
+def test_asks_anchor_is_not_a_bare_question_mark():
+    """Mutation guard: a bare `\\?` would satisfy every ASKS fixture above. Pin the
+    distinction directly, so replacing the regex with `\\?` fails HERE."""
+    assert nsn.ASKS.search("what next?") is not None
+    assert nsn.ASKS.search("is it? yes, and here is a long trailing clause that "
+                           "runs well past forty characters on this line") is None
+
+
+def test_asks_trailer_has_a_bound():
+    """The trailer is bounded at 40 chars, so a '?' does not reach across an entire
+    sentence to find a line ending. Measured at both sides of the boundary."""
+    assert nsn.ASKS.search("ok? " + "x" * 30) is not None       # inside the bound
+    assert nsn.ASKS.search("ok? " + "x" * 60) is None           # outside it
+
+
 def test_self_consistency_the_nudge_does_not_fire_on_its_own_advice():
     """🔴 The NUDGE text prescribes three endings. A turn that follows the instruction
     must not be nudged again — that is the shape that teaches an operator to ignore a
@@ -251,7 +433,9 @@ def test_gate_message_too_short():
 
 
 def test_gate_stop_hook_active():
-    """Never block twice in a row. Without this the 8-block cap is the only backstop."""
+    """Never nudge two Stops in a row. The hook no longer blocks, but emitting
+    additionalContext still continues the conversation, so a second Stop follows every
+    fire; without this gate that second Stop is a candidate to fire again."""
     assert decide(FIRING, stop_hook_active=True) is False
 
 
@@ -261,12 +445,37 @@ def test_gate_subagent_turn():
     assert decide(FIRING, hook_event_name="SubagentStop") is False
 
 
-def test_gate_non_end_turn_stop_reason():
-    """A max_tokens stop is truncation, not a considered ending; nudging it would ask
-    the model to append a next step to a sentence cut in half."""
-    assert decide(FIRING, stop_reason="max_tokens") is False
-    assert decide(FIRING, stop_reason="tool_use") is False
-    assert decide(FIRING, stop_reason=None) is True   # absent field must not gate
+def test_payload_fixture_invents_no_fields():
+    """🔴 A FIXTURE GUARD, and labelled as one: it constrains this file's own `payload()`,
+    so it is green against the pre-change hook and is NOT regression coverage for it. Its
+    red side is the OLD FIXTURE, which set `stop_reason` and would fail this immediately.
+
+    Kept because it closes the loop that let the dead gate look live: the hook gated on a
+    field, the fixture supplied it, and the test asserted the gate worked — three
+    artefacts agreeing with each other and none of them with the CLI.
+
+    An earlier revision gated on `stop_reason`, a field the Stop event does not send. The
+    gate could never reject, its test was an invariant guard wearing a gate's label, and
+    the fixture below hardcoded the field so everything looked consistent. Pinning the
+    fixture's keys against the CLI's real field set is what makes that class of mistake
+    fail loudly instead of silently agreeing with itself.
+    """
+    invented = set(payload("x")) - STOP_PAYLOAD_FIELDS
+    assert invented == set(), f"fixture invents field(s) the runtime never sends: {invented}"
+
+
+def test_no_gate_on_a_field_the_runtime_does_not_send():
+    """`stop_reason` must not gate: it is absent from every real Stop payload, so a hook
+    that branched on it would be reading None forever. Setting it to the values that
+    'gate' used to reject must change NOTHING."""
+    for bogus in ("max_tokens", "tool_use", "stop_sequence", ""):
+        assert decide(FIRING, stop_reason=bogus) is True, (
+            f"a gate on stop_reason={bogus!r} is back; the runtime never sends the field")
+    # Structural, not spelled: the field name must not appear as a STRING LITERAL IN CODE.
+    # Asserted over the AST so the prose explaining why the gate was removed — which of
+    # course says "stop_reason" — cannot satisfy or break this guard.
+    assert "stop_reason" not in code_string_literals(HOOK), (
+        "stop_reason is read by the hook's CODE; the runtime never sends the field")
 
 
 def test_gate_missing_or_nonstring_message():
@@ -295,19 +504,55 @@ def test_gate_non_dict_payload():
 # 4. Positional tail — the window is the end of the message, not the whole of it.
 # ============================================================================ #
 def test_next_step_buried_far_above_the_tail_does_not_suppress():
-    """🔴 AN INVARIANT GUARD, NOT REGRESSION COVERAGE — labelled as such deliberately.
+    """🔴 REGRESSION COVERAGE for the most sensitive constant in the hook — and it was
+    demoted to "an invariant guard, not regression coverage" on the strength of a
+    measurement that was wired to nothing.
 
-    It pins that the window is positional, but real traffic never violates it: sweeping
-    TAIL_CHARS from 10 to 10^9 over 11,215 real turns leaves the fire count unmoved at
-    565, because a message with any forward-looking construction essentially always has
-    one in its final paragraph. So this test constructs a shape the corpus does not
-    contain. It earns its place by pinning the intent cheaply; it must not be counted as
-    evidence that the window does anything on real messages.
+    That measurement rebound the module-level `TAIL_CHARS` and called `suppressed_by()`.
+    `tail_of(text, nchars=TAIL_CHARS)` binds its default at DEF time, so the rebind
+    reached nothing: an eleven-point sweep re-measured the same 800-char window eleven
+    times and its flat line was read as "the parameter is inert on real traffic".
+
+    Measured properly, by passing `nchars`, the fire count runs 1,903 (at 10) -> 577 (at
+    800) -> 262 (unbounded) over 11,789 real turns: a 7.3x swing, with 55% of the fires
+    at the shipped value existing only because of this window. The shape below is not
+    hypothetical either — the corpus contains 18 turns where the model stated something
+    forward-looking well above the ending and the operator STILL had to ask for a
+    recommendation.
+
+    So this pins real behaviour on real traffic. See test_tail_window_is_load_bearing for
+    the companion that pins the parameter is actually read.
     """
     buried = ("I'll export the counter first.\n\n" + FILLER * 4 + "\n" +
               "The counter is not exported, so the comparison stays open.")
     assert nsn.suppressed_by(buried) == []
     assert decide(buried) is True
+
+
+def test_tail_window_is_load_bearing():
+    """🔴 THE GUARD AGAINST THE SWEEP THAT MEASURED NOTHING.
+
+    Pins that `tail_of` genuinely honours its `nchars` argument, by requiring the SAME
+    text to be suppressed at a wide window and unsuppressed at a narrow one. A default
+    bound at def time (the original defect) cannot satisfy both halves.
+    """
+    buried = ("I'll export the counter first.\n\n" + FILLER * 4 + "\n" +
+              "The counter is not exported, so the comparison stays open.")
+
+    def supp(nchars):
+        t = nsn.tail_of(buried, nchars=nchars)
+        return [n for n, rx in nsn.SUPPRESSORS if rx.search(t)]
+
+    assert supp(10) == [], "a tiny window must see only the (inert) last paragraph"
+    assert "commits" in supp(10 ** 9), "an unbounded window must reach the commitment"
+    assert len(nsn.tail_of(buried, nchars=10)) < len(nsn.tail_of(buried, nchars=10 ** 9))
+
+
+def test_tail_chars_default_matches_the_module_constant():
+    """The shipped default must be the constant a maintainer reads, not a stale literal."""
+    import inspect
+    assert (inspect.signature(nsn.tail_of).parameters["nchars"].default
+            == nsn.TAIL_CHARS == 800)
 
 
 def test_tail_starts_at_a_paragraph_boundary():
@@ -349,8 +594,9 @@ def test_claim_fails_closed_without_a_session_id(tmp_path, monkeypatch):
 
 def test_claim_fails_closed_when_the_state_root_is_not_a_directory(tmp_path, monkeypatch):
     """🔴 The fail direction is REVERSED from the PostToolUse nudges. There, an
-    unwritable cache duplicates a harmless nudge; here it would mean an unbounded
-    Stop-blocker, which is the one outcome worse than a missed nudge.
+    unwritable cache duplicates a harmless nudge; here it would mean a nudge with no
+    once-per-session bound at all, repeating on every turn of the session — which is the
+    one outcome worse than a missed nudge.
 
     This test owns the makedirs arm ONLY — see the companion below."""
     blocker = tmp_path / "s"
@@ -498,6 +744,70 @@ def test_turn_shape_skips_sidechain_user_records(tmp_path):
     assert nsn._turn_shape(str(t)) == ("the operator's real task", 3)
 
 
+def test_turn_shape_skips_meta_user_records(tmp_path):
+    """🔴 THE THIRD WAY a type=user record is not the operator, and the dangerous one.
+
+    Claude Code writes `isMeta` records — `<local-command-caveat>…`, command expansion
+    notes — with STRING content. String content is exactly what the tool_result test
+    passes through, so without an isMeta check the harness's own boilerplate is returned
+    as "the opening prompt" and both prompt-shaped gates evaluate text the operator never
+    typed. 6.1% of real turns (724 of 11,789) open on such a record.
+
+    Reading back from the end here must walk past it to the operator's real prompt, and
+    must keep counting tool_use across it rather than truncating the turn there.
+    """
+    t = tmp_path / "t.jsonl"
+    recs = [
+        {"type": "user", "message": {"content": "the operator's real task"}},
+        {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "a", "name": "Bash", "input": {}}]}},
+        {"type": "user", "isMeta": True,
+         "message": {"content": "<local-command-caveat>caveat text</local-command-caveat>"}},
+        {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "b", "name": "Bash", "input": {}}]}},
+    ]
+    t.write_text("".join(json.dumps(r) + "\n" for r in recs))
+    assert nsn._turn_shape(str(t)) == ("the operator's real task", 2)
+
+
+def test_meta_record_does_not_defeat_the_terminal_prompt_gate(tmp_path):
+    """🔴 WHY isMeta MATTERS, asserted where the HARM lands — end to end, in the FIRING
+    direction.
+
+    A meta record is neither terminal nor a short question. So if one is read as the
+    opening prompt, BOTH gates that could have stayed the hook answer "no" against text
+    the operator never wrote. This fixture is that exact shape: the operator's real prompt
+    is `/clear` (terminal — the hook must stay silent), and a harness caveat record sits
+    after it. Without the isMeta check the caveat is returned as the prompt, the terminal
+    gate never sees `/clear`, and the hook FIRES on a session the operator just ended.
+
+    Asserted on should_nudge with the SHIPPED reader, not on the predicate helpers, so it
+    covers the seam rather than one side of it.
+    """
+    t = tmp_path / "t.jsonl"
+    recs = [
+        {"type": "user", "message": {"content": "/clear"}},
+        {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "a", "name": "Bash", "input": {}}]}},
+        {"type": "user", "isMeta": True, "message": {
+            "content": "<local-command-caveat>caveat text the operator never typed"
+                       "</local-command-caveat>"}},
+    ]
+    t.write_text("".join(json.dumps(r) + "\n" for r in recs))
+
+    prompt, tools = nsn._turn_shape(str(t))
+    assert prompt == "/clear", f"the harness record was read as the prompt: {prompt!r}"
+    assert tools == 1
+    assert nsn.should_nudge(payload(FIRING, transcript_path=str(t))) is False, (
+        "fired on a turn whose operator prompt was terminal")
+
+    # Control: the same transcript WITHOUT the terminal prompt does fire, so the silence
+    # above is the terminal gate doing its job and not some unrelated gate.
+    recs[0] = {"type": "user", "message": {"content": "Audit the retry path and report."}}
+    t.write_text("".join(json.dumps(r) + "\n" for r in recs))
+    assert nsn.should_nudge(payload(FIRING, transcript_path=str(t))) is True
+
+
 def test_turn_shape_survives_malformed_lines(tmp_path):
     t = tmp_path / "t.jsonl"
     write_transcript(t, "Audit it.", 3)
@@ -529,6 +839,35 @@ def test_turn_shape_of_an_unparseable_file_establishes_nothing(tmp_path):
     assert nsn._turn_shape(str(t)) is None
 
 
+def test_turn_shape_reads_only_the_tail_of_a_large_transcript(tmp_path, monkeypatch):
+    """🔴 FOUND BY THE MUTATION SWEEP: deleting the `seek` to the last
+    TRANSCRIPT_TAIL_BYTES survived the whole suite.
+
+    The oversized-turn test below could not catch it. Its fixture writes the operator
+    prompt as line ONE, and the reader discards the first (possibly partial) line after
+    seeking — so with the seek deleted, the very first `readline()` ate the prompt and the
+    result was the same (None, tools) either way. Green for the wrong reason.
+
+    Distinguishing fixture: a junk record FIRST, then the prompt. With the seek, neither
+    is reachable. Without it, the discard eats the junk and the prompt becomes visible —
+    which is exactly the unbounded read the cap exists to prevent.
+    """
+    monkeypatch.setattr(nsn, "TRANSCRIPT_TAIL_BYTES", 2048)
+    t = tmp_path / "big.jsonl"
+    recs = [{"type": "system", "message": {"content": "junk header"}},
+            {"type": "user", "message": {"content": "the prompt that must stay out of reach"}}]
+    for i in range(400):
+        recs.append({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": f"t{i}", "name": "Bash", "input": {"pad": "x" * 40}}]}})
+    t.write_text("".join(json.dumps(r) + "\n" for r in recs))
+    assert t.stat().st_size > nsn.TRANSCRIPT_TAIL_BYTES
+
+    prompt, tools = nsn._turn_shape(str(t))
+    assert prompt is None, (
+        "the reader reached a prompt outside the tail window: it is reading the whole file")
+    assert tools >= 1
+
+
 def test_turn_shape_treats_an_oversized_turn_as_work(tmp_path, monkeypatch):
     """A turn bigger than the read window cannot be re-read cheaply. It is reported as
     work-was-done with no prompt, so the work gate passes and the prompt-shaped gates
@@ -558,13 +897,39 @@ def home(tmp_path):
     return h
 
 
-def test_e2e_fires_with_exit_2_and_a_message_on_stderr(tmp_path, home):
+def test_e2e_fires_as_additional_context_and_does_not_block(tmp_path, home):
+    """🔴 THE IO CONTRACT, and the whole point of the mechanism.
+
+    Non-error feedback goes out as `hookSpecificOutput.additionalContext` on STDOUT with
+    exit 0. The three assertions are independent and each pins a different past defect:
+
+      * rc == 0 — exit 2 would PREVENT the stop, compelling a model that was legitimately
+        finished to keep going. Asserted as `!= 2` too, explicitly, because that is the
+        specific regression.
+      * stderr empty — exit 2 delivered through `blockingError`, which put a "Stop hook
+        error occurred · ctrl+o to see" notification in front of the operator on EVERY
+        fire. Anything on stderr from a Stop hook is operator-visible noise.
+      * the stdout JSON parses and is shaped to the CLI's union arm — a payload the
+        runtime cannot validate is silently ignored, which looks exactly like a hook
+        that never fired.
+    """
     t = tmp_path / "t.jsonl"
     write_transcript(t, "Audit the retry path.", 6)
     p = run_hook(payload(FIRING, transcript_path=str(t)), home)
-    assert p.returncode == 2, p
-    assert p.stdout == ""
-    assert "next-step" in p.stderr and "proceed" in p.stderr
+
+    assert p.returncode == 0, p
+    assert p.returncode != 2, "the hook is blocking the stop again"
+    assert p.stderr == "", f"operator-visible stderr from a Stop hook: {p.stderr!r}"
+
+    out = json.loads(p.stdout)
+    assert set(out) == {"hookSpecificOutput"}, out
+    hso = out["hookSpecificOutput"]
+    assert hso["hookEventName"] == "Stop", hso
+    assert isinstance(hso["additionalContext"], str)
+    assert set(hso) == {"hookEventName", "additionalContext"}, hso
+    assert "next-step" in hso["additionalContext"]
+    assert "proceed" in hso["additionalContext"]
+    assert hso["additionalContext"] == nsn.NUDGE
 
 
 def test_e2e_is_silent_once_per_session(tmp_path, home):
@@ -574,7 +939,8 @@ def test_e2e_is_silent_once_per_session(tmp_path, home):
     d = payload(FIRING, transcript_path=str(t))
     first = run_hook(d, home)
     second = run_hook(d, home)
-    assert (first.returncode, second.returncode) == (2, 0)
+    assert (first.returncode, second.returncode) == (0, 0)
+    assert first.stdout != "" and second.stdout == ""
     assert second.stderr == ""
 
 
@@ -583,7 +949,51 @@ def test_e2e_different_session_still_fires(tmp_path, home):
     write_transcript(t, "Audit the retry path.", 6)
     a = run_hook(payload(FIRING, transcript_path=str(t), session_id="sess-1"), home)
     b = run_hook(payload(FIRING, transcript_path=str(t), session_id="sess-2"), home)
-    assert (a.returncode, b.returncode) == (2, 2)
+    assert (a.returncode, b.returncode) == (0, 0)
+    assert a.stdout != "" and b.stdout != ""
+
+
+def test_e2e_headless_caller_opts_out(tmp_path, home):
+    """🔴 `claude -p` inherits this host's hooks. Two of this repo's own scripts drive it
+    under a hard timeout and parse the first line of the result, so the nudge would spend
+    a turn of a bounded budget on a line nothing reads. Gated on an explicit marker the
+    CALLERS set — pinned here together with the call sites that set it, so deleting either
+    half is visible."""
+    t = tmp_path / "t.jsonl"
+    write_transcript(t, "Audit the retry path.", 6)
+    d = payload(FIRING, transcript_path=str(t))
+
+    env = dict(os.environ)
+    env["HOME"] = str(home)
+    env[nsn.OPT_OUT_ENV] = "1"
+    p = subprocess.run([sys.executable, str(HOOK)], input=json.dumps(d),
+                       capture_output=True, text=True, env=env, timeout=60)
+    assert (p.returncode, p.stdout, p.stderr) == (0, "", "")
+
+    # ...and the same payload without the marker DOES fire, so this is the marker's doing
+    # and not some other gate. (A gate test that only shows silence proves nothing.)
+    assert run_hook(d, home).stdout != ""
+
+
+def test_headless_call_sites_set_the_opt_out():
+    """🔴 The other half of the seam: a hook reading a marker nobody sets is inert, and
+    NOTHING else in this suite would notice — the hook's own gate test passes whether or
+    not any caller cooperates. This is the "verified in isolation" failure mode, so the
+    guard has to pin the RELATIONSHIP, across both files.
+
+    🔴 It also has to be STRUCTURAL. The first version of this test asserted the variable
+    NAME appeared in the file, and a mutation that deleted the actual assignment left it
+    green — because the comment ABOVE the call site explains why the variable is there,
+    and that comment spelled the name. Both call-site mutants survived on that. So:
+    strip comment lines, then require the ASSIGNMENT form on an executable line.
+    """
+    repo = HOOK.resolve().parents[2]
+    for rel in ("githooks/audit-on-push.sh", "scripts/task-spec-drafter/drafter.sh"):
+        src = (repo / rel).read_text()
+        code = "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("#"))
+        assert "claude -p" in code, f"{rel}: no headless claude call; update this test"
+        assert f"{nsn.OPT_OUT_ENV}=1" in code, (
+            f"{rel}: headless `claude -p` call does not set {nsn.OPT_OUT_ENV}")
 
 
 def test_e2e_silent_on_a_turn_that_names_a_next_step(tmp_path, home):
@@ -596,7 +1006,8 @@ def test_e2e_silent_on_a_turn_that_names_a_next_step(tmp_path, home):
 
 # ============================================================================ #
 # 8. FAIL OPEN — every degenerate input exits 0 and writes NOTHING. A Stop hook that
-#    errors into the terminal, or blocks on a bad input, wedges the operator's session.
+#    errors into the terminal, or exits non-zero on a bad input, surfaces as a failure at
+#    the exact moment the operator's session is trying to end.
 # ============================================================================ #
 FAIL_OPEN_INPUTS = {
     "not_json": "not json at all",
@@ -664,6 +1075,55 @@ def test_fail_open_when_the_state_dir_cannot_be_created(tmp_path, home):
     (home / ".cache").write_text("this is a file, not a directory")
     p = run_hook(payload(FIRING, transcript_path=str(t)), home)
     assert (p.returncode, p.stderr) == (0, "")
+
+
+def test_main_backstop_swallows_an_unexpected_error(monkeypatch, capsys):
+    """🔴 THE WHOLE-HOOK FAIL-OPEN BACKSTOP, and it survived every mutation until now:
+    flipping main()'s `except Exception` to exit(2) left all tests green, even though
+    that line IS the central safety claim.
+
+    It was unkillable because nothing in a realistic payload can make the guarded block
+    raise — every helper already fails closed on its own. So reach it directly: make
+    should_nudge() raise, and require main() to still exit 0 having written nothing.
+    """
+    import io
+
+    def boom(_data):
+        raise RuntimeError("simulated defect inside the decision path")
+
+    monkeypatch.setattr(nsn, "should_nudge", boom)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload(FIRING))))
+    with pytest.raises(SystemExit) as exc:
+        nsn.main()
+    assert exc.value.code == 0, "the fail-open backstop no longer exits 0"
+    out = capsys.readouterr()
+    assert out.out == "" and out.err == ""
+
+
+def test_main_exits_zero_even_when_it_fires(monkeypatch, capsys, tmp_path):
+    """The success path is exit 0 too — there is exactly ONE exit in main() and it is
+    always 0. A non-zero exit from a Stop hook is how the old blocking behaviour looked."""
+    import io
+    monkeypatch.setattr(nsn, "_state_root", lambda: str(tmp_path / "s"))
+    monkeypatch.setattr(nsn, "should_nudge", lambda _d: True)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload(FIRING))))
+    with pytest.raises(SystemExit) as exc:
+        nsn.main()
+    assert exc.value.code == 0
+    out = capsys.readouterr()
+    assert out.err == ""
+    assert json.loads(out.out)["hookSpecificOutput"]["hookEventName"] == "Stop"
+
+
+def test_main_has_no_nonzero_exit_anywhere():
+    """Structural companion to the two above: the hook must not be ABLE to exit non-zero.
+
+    Pins the "it does not block" claim against the whole file rather than against the one
+    path a test happened to drive. Read off the AST, not the text — the source discusses
+    exit 2 at length in prose, and a guard a comment can satisfy is not a guard.
+    """
+    exits = sys_exit_calls(HOOK)
+    assert exits == [0], f"the hook's exit codes are {exits}; every one must be 0"
 
 
 def test_hook_is_not_executable_as_a_side_effect_of_import():

@@ -94,7 +94,9 @@ with tempfile.TemporaryDirectory() as tmp:
     check("1: next-step-nudge registered on Stop", NEXT_STEP in cmds(d, "Stop"))
     # Ordering: the two foreign hooks keep their original relative order and stay ahead
     # of everything this script appends. Appending (rather than inserting) is what makes
-    # the blocking hook run last, after the notifiers have already observed the turn.
+    # the nudge run last, after the notifiers have already observed the turn. (It no
+    # longer BLOCKS — it returns additionalContext and exits 0 — but the turn still
+    # continues, so the ordering argument is unchanged.)
     stop = cmds(d, "Stop")
     check("2: foreign Stop hooks keep their original relative order",
           stop.index(TMUX_STOP) < stop.index(CLAWGATE_STOP))
