@@ -2113,12 +2113,39 @@ def test_browser_agent_warm_handles_races_staleness_and_failure():
 
 def test_browser_agent_lock_wait_outlasts_the_work_it_guards():
     """A 30 s wait around a 90 s job force-steals the lock and `rm -rf`s
-    node_modules while the first process is still writing into it."""
+    node_modules while the first process is still writing into it.
+
+    🔴 This used to pin the LITERAL `max=$(( (OC_WARM_TIMEOUT + 30) * 2 ))`, an
+    iteration count that silently encoded the 0.5 s poll. That spelling is not
+    the invariant: re-expressing the same budget in seconds KEPT the invariant
+    and failed this test, while any edit that broke the invariant without
+    touching those characters would have passed it. So evaluate the wrapper's
+    OWN derivation under bash and assert the RELATIONSHIP — at THREE warm
+    timeouts, because a formula can hold at one point and not another, and each
+    of the three catches a class the others miss:
+      warm=0    a doubling bug (`warm * 2`) is red here, green at 90
+      warm=90   a fixed 30 s wait is red here, green at 0
+      warm=600  a fixed LARGE constant (e.g. 200) is green at BOTH of the above
+                and only fails out here. BROWSER_AGENT_WARM_TIMEOUT is an
+                unbounded production seam, so "big enough for my samples" is not
+                "derived from the warm it serialises" — sample past the constant.
+    """
     code = browser_agent_code()
-    assert "max=$(( (OC_WARM_TIMEOUT + 30) * 2 ))" in code, (
-        "the lock wait must be derived from OC_WARM_TIMEOUT, not a fixed count "
-        "shorter than the warm it serialises"
-    )
+    m = re.search(r"^OC_LOCK_BUDGET=.*$", code, re.M)
+    assert m, "the wrapper no longer derives a lock-wait budget from anything"
+    for warm in (0, 90, 600):
+        # `unset` first: the seam must not let the ambient env decide the default.
+        snippet = (f"unset BROWSER_AGENT_LOCK_BUDGET\n"
+                   f"OC_WARM_TIMEOUT={warm}\n{m.group(0)}\n"
+                   f'printf %s "$OC_LOCK_BUDGET"')
+        out = subprocess.run(["bash", "-c", snippet], capture_output=True,
+                             text=True, check=True)
+        budget = int(out.stdout.strip())
+        assert budget >= warm + 30, (
+            f"with OC_WARM_TIMEOUT={warm} the lock wait resolves to {budget}s — "
+            f"it must outlast the warm it serialises (>= {warm + 30}s), or the "
+            f"loser force-steals the lock and rm -rf's a tree still being written"
+        )
 
 
 def test_browser_agent_isolated_config_keeps_the_global_safety_settings():
