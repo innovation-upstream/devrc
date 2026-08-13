@@ -10,7 +10,7 @@ approve-with-comment / deny. It has since grown into the **agent dispatch loop**
 on Postgres, agent self-service + privilege profiles + an Operator, runbooks with approval gates,
 and a machine Task API producers post work into for one-tap Dispatch.
 
-🔴 **Point-in-time state: `/home/zach/workspace/homelab-talos/containers/clawgate/HANDOFF.md` —
+🔴 **Point-in-time state: `~/workspace/homelab-talos/containers/clawgate/HANDOFF.md` —
 GREP it for the section you need, never read it whole (~190 KB, lower half superseded).**
 
 ⚠ **This skill drifts from the code in BOTH directions** — once documented weeks EARLY, and six
@@ -27,10 +27,10 @@ live pin, `git grep` for the feature.
 | `agent-dispatch.md` | debugging the agent loop; `POST /agents`; the sandbox fixture; a silent non-start |
 | `extension.md` | you changed the extension, or need to know which build is loaded |
 | `changelog.md` | *when* a feature landed / why an old decision stands |
-| `architecture.md` | changing agents / repos / runbooks / privilege / native tools / env / e2e |
+| `architecture.md` | changing agents / repos / runbooks / privilege / native tools / e2e |
 | `internals.md` | changing Go code: markdown renderer, the two `taskTitle`s, migrations |
 | `telemetry.md` | metrics/logs missing; adding an event; a red CI check |
-| `troubleshooting.md` | symptom index: push, PWA icon, stale SW, RBAC, kubeconfig, agent model |
+| `troubleshooting.md` | symptoms: push, PWA icon, stale SW, RBAC, kubeconfig, agent model |
 | `hooks.md` | `PermissionRequest` semantics; the defer gates; installing hooks elsewhere; Stop / 💡 |
 | `agent-hardening.md` | locking down a **homelab** kubeclaw devpod (netpol needs Cilium) |
 | `element-references.md` | a task body carries extension-picked element refs |
@@ -50,7 +50,7 @@ Memories: `clawgate-phase2` · `clawgate-phase3` · `clawgate-runbooks` ·
 | LAN URL (hook + UI) | `http://192.168.50.250:30302` (NodePort) — **OPEN, no auth**; machine endpoints still need the token |
 | Public / nebula URL | `https://clawgate.zacx.dev` behind **Authelia passkey** (portal `login.zacx.dev`); laptop `http://10.42.0.10:8109` (homelab gateway) |
 | Hook events | `PermissionRequest` (`CLAWGATE_REMOTE_APPROVAL=off`) + `Stop` (async, `CLAWGATE_SUGGEST=off`), both in `~/.claude/settings.json`, ON by default. 🔴 The `Stop` array also carries **two** unrelated hooks (`tmux/task-hook.sh`, `claude-notify.py`) — **preserve both** |
-| 🔴 Machine client | **`clawgatectl`**, on PATH after a switch (devrc `nix/pkgs/tools/clawgatectl.nix`). **Exactly six commands**: `health` · `agent ls` · `agent resolve <name> [--id]` · `task ls/get/create`. Reads `clawgate.env` itself (no token in argv), JSON on stdout only, exit codes 0–8. **Every other route is still curl.** `task-api.md` |
+| 🔴 Machine client | **`clawgatectl`** (devrc `nix/pkgs/tools/clawgatectl.nix`; on PATH after a switch, but **absent on a host whose homelab-talos checkout predates it — the laptop today**). **Exactly six commands**: `health` · `agent ls` · `agent resolve <name> [--id]` · `task ls/get/create`. Reads `clawgate.env` itself (no token in argv); JSON on stdout only; rc 0–8. **Every other route is still curl.** `task-api.md` |
 
 🔴 **clawgate has NO human auth of its own** (since 0.7.37): `requireSession` is a pass-through no-op,
 so **the LAN NodePort is fully unauthenticated** — including `DELETE /tasks/{id}` and 🔴 **`POST
@@ -69,7 +69,7 @@ clawgatectl health   # live version + uptime; rc 6 = unreachable, rc 8 = you hit
 ```
 
 ## send a test
-⚠ **No `clawgatectl` verb for `/api/send`** — stays curl, token preamble included. Creates a real
+⚠ **No `clawgatectl` verb for `/api/send`** — stays curl, preamble included. Creates a real
 pending request (card + Web Push) via the hook token on the open LAN NodePort; for delivery tail
 logs for `push: delivered ... to N device(s)`.
 ```bash
@@ -103,7 +103,7 @@ $CLAWGATE_HOOK_TOKEN` or `X-Clawgate-Token`. Statuses are exactly `open` / `in_p
 `ready_for_review` / `complete` — no `dismissed`; dismissing deletes.
 
 🔴 **Two paths delete a task, both TEARING DOWN its live dispatched agent pod** (shared
-`dismissTask` → `Provisioner.Destroy`; **no in-progress guard, deliberately**): `DELETE
+`dismissTask`; **no in-progress guard, deliberately**): `DELETE
 /api/tasks/{id}`, unauthenticated on the LAN (above), and 🔴 **its automated twin the idle-task
 reaper** — the daily sweep dismisses any task untouched for **7d**, and `CLAWGATE_TASK_TTL` is
 **unset in the deployment** so that default is LIVE (`off`/`0` disables).
@@ -121,7 +121,7 @@ create** — a load-bearing wire contract producers key their retry on.
 superseded within two days, twice. `agent-dispatch.md` has the sandbox fixture, the agent
 image's absent toolchain and the dispatch `curl`. Durable facts only:
 - **The loop DOES close unattended** (two real runs). "The 5-minute kickoff deadline is why it never
-  worked" is a DEAD theory — don't reopen it.
+  worked" is DEAD — don't reopen it.
 - **`POST /agents` is FORM-ENCODED, not JSON** (hence no `clawgatectl` verb), behind the no-op
   `requireSession` → **no auth on the LAN NodePort**. 🔴 A future webhook needs a **separate
   hostname**, never a path bypass on `clawgate.zacx.dev` — that puts dispatch on the open internet.
@@ -139,7 +139,7 @@ image's absent toolchain and the dispatch `curl`. Durable facts only:
   not evidence of an outage.
 - `hooks.md`: the full gate list, the exact JSON, why an approver comment is **record-only**.
 
-## 🔴 gotchas (don't relearn these)
+## 🔴 gotchas
 - 🔴 **Public routing rule**: clawgate runs on WORKBENCH but is fronted by the homelab + production
   nebula gateways, whose nginx must `proxy_pass` to the **NodePort IP `http://192.168.50.250:30302`**
   — NOT a `.svc.cluster.local` name, which doesn't resolve there and **crashes nginx, taking down ALL

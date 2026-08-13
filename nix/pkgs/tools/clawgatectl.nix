@@ -36,10 +36,17 @@ let
   # root and buildGoModule needs them for the vendor derivation.
   srcDir = "${workspace}/homelab-talos/containers/clawgate";
 
-  # Guard on go.mod specifically rather than the directory: a bare directory
-  # check would pass for an empty placeholder dir and fail deep inside the Go
-  # build with a much worse error.
-  available = builtins.pathExists "${srcDir}/go.mod";
+  # 🔴 Guard on THIS COMMAND'S OWN SOURCE FILE, not on the repo and not on the
+  # module. "Does the checkout exist" is the wrong question and was MEASURED
+  # wrong on 2026-08-13: the laptop has ~/workspace/homelab-talos (so a
+  # directory check passes) and it has go.mod (so a module check passes), but
+  # its checkout sits at c417af30 — well behind the commit that added
+  # cmd/clawgatectl. Under either weaker guard the derivation would be built and
+  # `subPackages` would fail deep in the Go build, taking down that host's whole
+  # home-manager switch — which ship.sh reports as a SKIPPED host, the failure
+  # mode this repo's CLAUDE.md warns silently stops all future delivery.
+  # Guarding on main.go also covers the empty-placeholder-directory case.
+  available = builtins.pathExists "${srcDir}/cmd/clawgatectl/main.go";
 
   clawgatectl = pkgs.buildGoModule {
     pname = "clawgatectl";
