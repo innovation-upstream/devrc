@@ -51,19 +51,38 @@ On the catch-up (startup replay) side the cursor moves in two different ways,
 and the stderr prefix tells you which:
 
 * `[catch-up:rejected:<reason>] … cursor advanced past it` — the stored request
-  can **never** verify (no signature, no `webhook_id`, no registered secret, or
-  a wrong digest), so it is skipped and the cursor moves past it. Without this,
-  ten consecutive unverifiable stored requests were a permanent blind spot: the
-  API pages at 10 and the cursor is a timestamp, so a genuine event behind them
+  can **never** be delivered: it does not verify (no signature, no `webhook_id`,
+  no registered secret, a wrong digest) or its body is not a ClickUp event at
+  all (`invalid-json` — webhook.site stores an empty body for a bare **GET**, so
+  a crawler, a link preview or opening the URL in a browser produces one). Every
+  one of those is a property of bytes that are already stored and will not
+  change, so it is skipped and the cursor moves past it. Without this, ten
+  consecutive unverifiable stored requests were a permanent blind spot: the API
+  pages at 10 and the cursor is a timestamp, so a genuine event behind them
   could never be reached. The common trigger is a lost or reset
   `watchers.json` — the secrets that would verify those events are gone.
-* `[catch-up:blocked:<reason>] … cursor is unchanged` — the request could not be
-  **parsed or dated**, so what would be skipped is unknown. Catch-up stops there
-  rather than step over it silently, and the live listener starts as usual. Pass
-  an explicit `--since` to move past it deliberately.
+* `[catch-up:blocked:<reason>] … cursor is unchanged` — the request carries **no
+  usable `created_at`**, so there is nothing to move the cursor to and advancing
+  would be guessing. Catch-up stops there, the summary line says
+  `BLOCKED at an undatable request`, and the live listener starts as usual.
+
+  🔴 A block **persists across runs**: `--since` defaults to `last-seen.txt`, so
+  the next run re-reads the same page and stops in the same place. Clear it with
+  one explicit run past the stuck request —
+  `node listen.mjs --since '<a timestamp after it>'` — the blocked line prints
+  the neighbouring timestamps you need. (Only an undatable record can do this;
+  an unparseable body is skipped, not blocking. It used to block, and one bare
+  GET then wedged catch-up permanently.)
 
 Nothing rejected is ever written to `webhooks.jsonl` in either case — the body
 is attacker-controlled — so only the timestamp cursor moves.
+
+`CLICKUP_WEBHOOK_SITE_API_BASE` overrides where stored requests are fetched
+from. It is **gated**: loopback (a test stub, and it is never sent the
+`Api-Key`) or `https://webhook.site`. Anything else is refused with a note on
+stderr and the default is used — the webhook.site token travels in the request
+**path**, so an arbitrary base would hand a stranger this workspace's event
+stream.
 
 `webhook-url.txt` is a **credential** — `https://webhook.site/<token>` is a
 capability, and whoever reads it can read this workspace's event stream and post

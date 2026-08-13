@@ -482,24 +482,35 @@ const LOCATION_TOKEN =
  * 🔴 THE SCANNER ASKS ABOUT A **WRITE**, NOT ABOUT A FILENAME.
  *
  * What was here before never distinguished a READ from a WRITE: any literal
- * with a mutable-looking extension near a location token was an offender. Four
- * verified false positives, each a plain `readFileSync` of a SHIPPED file that
- * is entirely legal on a read-only deploy:
+ * with a mutable-looking extension near a location token was an offender, under
+ * a message ("it will EROFS once deployed read-only") that is FALSE for a read.
+ * The escape hatch was an enumerated `READONLY_BUNDLED` holding exactly
+ * `package.json` and `package-lock.json`, and the negative-control table was
+ * calibrated to THAT LIST rather than to the class: its two read-only cases
+ * were the two names that happened to be exempt. A guard that cries wolf gets
+ * deleted, and the exemption list would have had to grow by one entry per
+ * bundled data file forever.
+ *
+ * 🔴 HOW MUCH OF THAT IS OBSERVED, PRECISELY. The shapes below are CONSTRUCTED
+ * — they are what the old predicate does when a bundled read is written in one
+ * of them, not defects it reported in this repo:
  *
  *     join(__dirname, '..', 'data', 'custom-fields.json')
  *     join(__dirname, 'schema.yaml')
  *     new URL('prompt.txt', import.meta.url)
  *     join(__dirname, '..', '.gitignore')
  *
- * and the failure message it printed for them — "it will EROFS once deployed
- * read-only" — is simply FALSE for a read. The escape hatch was an enumerated
- * `READONLY_BUNDLED` holding exactly `package.json` and `package-lock.json`,
- * and the negative-control table was calibrated to THAT LIST rather than to the
- * class: its two read-only cases were the two names that happened to be exempt.
- * A guard that cries wolf gets deleted, and the exemption list would have had
- * to grow by one entry per bundled data file forever.
+ * None of those four files is read by any module in the skill; repo-wide they
+ * occur only as fixture strings in this file. Run over the CURRENT 26 modules,
+ * `origin/main`'s scanner reports **0 offenders — identical to this one**, with
+ * both firing on a planted `writeFileSync(join(__dirname, 'watchers.json'), d)`
+ * (so neither zero is a dead scanner). This rewrite therefore changes nothing
+ * observable today: it is FORWARD-LOOKING hardening against the first bundled
+ * data file somebody reads off `__dirname`, plus the indirect write shapes the
+ * literal predicate structurally cannot see. Calling constructed examples
+ * "verified false positives" is how a claim like that stops being checkable.
  *
- * So the question is now the one the message actually makes: does a path
+ * The question it asks now is the one the message actually makes: does a path
  * derived from the module's own location end up in the TARGET position of a
  * call that WRITES? That needs no filename registry, no extension list and no
  * exemptions — a write into the skill dir is an EROFS whatever the file is
@@ -540,6 +551,18 @@ const WRITE_TARGET_ARG = new Map([
  * decided by the mode argument rather than by the name. A `'r'` open of a
  * bundled file is a read like any other; anything with `w`, `a` or `+` is a
  * write.
+ *
+ * 🔴 THE FLAG IS ARGUMENT 1 ONWARD, NEVER ARGUMENT 0. `WRITE_FLAG` used to be
+ * tested against every literal in the whole call, and argument 0 is the PATH:
+ * `openSync(join(__dirname, 'accounts.json'), 'r')` fired because the FILENAME
+ * begins with an `a`, as did `webhooks.jsonl` (w) and `c++notes.txt` (+). The
+ * shipped negative control used `schema.yaml` — an `s`, the one initial that
+ * cannot trip it — so the table was calibrated AROUND the bug and stayed green.
+ * The flags now come from the argument spans after the path only.
+ *
+ * A non-literal flags argument (`openSync(p, mode)`) has no literal to test and
+ * so does not fire. That is a deliberate false negative: it is unreadable to a
+ * scanner, and firing on it would flag every read too.
  */
 const AMBIGUOUS_OPEN = new Set(['openSync', 'open']);
 const WRITE_FLAG = /^[wa]|\+/;
@@ -597,17 +620,35 @@ function locationTokenIn(bare, start, end) {
  *     more importantly, code cannot be hidden from the guard by commenting the
  *     surrounding lines;
  *   * string CONTENTS are blanked for the token scan, so a bait string in a
- *     fixture is not code;
- *   * the shape is irrelevant — `writeFileSync(new URL('x', import.meta.url))`,
- *     a four-line `join(\n __dirname,\n 'x'\n)`, and a `const p = …` bound one
- *     statement earlier and written LATER are all the same finding;
+ *     fixture is not code — but a template's `${ … }` is KEPT, because that is
+ *     code (`` `${__dirname}/accounts.json` `` is listen.mjs's own idiom);
+ *   * the WRITE SHAPE is irrelevant — `writeFileSync(new URL('x',
+ *     import.meta.url))`, a four-line `join(\n __dirname,\n 'x'\n)`, a template
+ *     literal, and a `const p = …` bound one statement earlier and written
+ *     LATER are all the same finding;
  *   * no filename is required at all: `writeFileSync(join(__dirname, name))`
  *     with a computed `name` is the same EROFS, and the literal-based predicate
  *     could not see it.
+ *
+ * 🔴 WHAT IT DOES **NOT** SEE — measured, not assumed. Each of these is silent,
+ * and none is a regression (the predicate this replaced saw none of them
+ * either); they are the honest edge of "the shape is irrelevant":
+ *
+ *   * a TWO-HOP binding — `const a = join(__dirname,'x'); const b = a;` — the
+ *     binding table is one level deep, by design;
+ *   * an ALIASED import: `import { writeFileSync as wfs }` … `wfs(p, d)`. The
+ *     call names are matched literally, so a rename escapes;
+ *   * a path handed to a FUNCTION and written inside it — that needs dataflow,
+ *     not a scanner.
+ *
+ * The guard's job is this repo's own modules, where the inline and one-hop
+ * forms are what actually get written. Widen it when one of the above appears,
+ * and add the case to MUST_FIRE in the same commit.
  */
 export function findOpenCodedStatePaths(src) {
   const noComments = blankComments(src);
-  const bare = blankStrings(noComments);
+  // keepSubstitutions: `${__dirname}` is a location token in code, not text.
+  const bare = blankStrings(noComments, { keepSubstitutions: true });
   const literals = stringLiterals(noComments);
   const hits = new Map(); // dedup by offset
 
@@ -650,7 +691,11 @@ export function findOpenCodedStatePaths(src) {
     const args = splitArgs(bare, span);
 
     if (isOpen) {
-      const flags = literals.filter((l) => l.start >= span.start && l.end <= span.end);
+      // Arguments 1+ only. Argument 0 is the path, and reading it as a flag
+      // makes the BASENAME decide — see WRITE_FLAG.
+      const flagArgs = args.slice(1);
+      const flags = literals.filter(
+        (l) => flagArgs.some((a) => l.start >= a.start && l.end <= a.end));
       if (!flags.some((l) => WRITE_FLAG.test(l.value))) continue;
     }
     const targets = isOpen ? [0] : WRITE_TARGET_ARG.get(call);
@@ -865,17 +910,34 @@ const MUST_FIRE = [
     "chmodSync(join(__dirname, 'accounts.json'), 0o600);"],
   ['🔴 openSync with a WRITE flag',
     "const fd = openSync(join(__dirname, 'webhooks.jsonl'), 'a');"],
+  ['🔴 openSync WRITE of a name that could never be mistaken for a flag',
+    "const fd = openSync(join(__dirname, 'schema.yaml'), 'w');"],
+  ['🔴 openSync r+ — read-WRITE',
+    "const fd = openSync(join(__dirname, 'schema.yaml'), 'r+');"],
+  ['🔴 a TEMPLATE LITERAL path — the idiom listen.mjs itself writes',
+    'writeFileSync(`${__dirname}/accounts.json`, data);'],
+  ['🔴 a template literal bound one statement earlier',
+    'const p = `${__dirname}/watchers.json`;\nappendFileSync(p, line);'],
   ['🔴 a write stream',
     "const out = createWriteStream(join(__dirname, 'webhooks.jsonl'));"],
   ['🔴 deletion is a write too',
     "rmSync(join(__dirname, '.cache'), { recursive: true, force: true });"],
 ];
 
-// 🔴 CALIBRATED TO THE CLASS, NOT TO AN EXEMPTION LIST. The first four entries
-// are the verified false positives the previous scanner produced: each is a
-// plain READ of a shipped file, and the message it printed for them ("it will
-// EROFS once deployed read-only") was false. None of them is exempt by name any
-// more — they are quiet because nothing writes.
+// 🔴 CALIBRATED TO THE CLASS, NOT TO AN EXEMPTION LIST — and not to the bug
+// either. The first four entries are CONSTRUCTED bundled reads, not defects
+// anything reported in this repo (none of those four files is read by any
+// module here; over the real tree both scanners find zero). They are here
+// because each is a plain READ of a shipped file, and the message the old
+// predicate printed for that shape ("it will EROFS once deployed read-only")
+// was false. None of them is exempt by name any more — they are quiet because
+// nothing writes.
+//
+// 🔴 The openSync read cases below are deliberately basenames that START with
+// `w` and `a` or CONTAIN `+`. The single shipped control was `schema.yaml`,
+// whose `s` is the one initial the flag pattern cannot match, so it passed while
+// `openSync(join(__dirname,'accounts.json'),'r')` fired on the FILENAME. A
+// control chosen to avoid the bug measures nothing.
 const MUST_NOT_FIRE = [
   ['READ: bundled data next to the module',
     "const fields = JSON.parse(readFileSync(join(__dirname, '..', 'data', 'custom-fields.json'), 'utf8'));"],
@@ -895,6 +957,14 @@ const MUST_NOT_FIRE = [
     "cpSync(join(__dirname, '..', 'templates'), outDir, { recursive: true });"],
   ['READ: openSync with a read flag',
     "const fd = openSync(join(__dirname, 'schema.yaml'), 'r');"],
+  ['READ: openSync of a file whose name STARTS WITH W (not a write flag)',
+    "const fd = openSync(join(__dirname, 'webhooks.jsonl'), 'r');"],
+  ['READ: openSync of a file whose name STARTS WITH A (not a write flag)',
+    "const fd = openSync(join(__dirname, 'accounts.json'), 'r');"],
+  ['READ: openSync of a file whose name CONTAINS + (not a write flag)',
+    "const fd = openSync(join(__dirname, 'c++notes.txt'), 'r');"],
+  ['READ: openSync with the flags omitted entirely (defaults to r)',
+    "const fd = openSync(join(__dirname, 'webhooks.jsonl'));"],
   ['the __dirname preamble every module writes',
     "const __dirname = dirname(fileURLToPath(import.meta.url));"],
   ['the run-as-main guard (this is lib/jwt.mjs:338 verbatim)',
@@ -936,12 +1006,57 @@ test('NEGATIVE CONTROL: the seam scanner stays quiet on legitimate uses', () => 
 test('the scanner is exercised against both halves of the control pair', () => {
   // A guard on the guard: a refactor that emptied either table would leave both
   // control tests passing vacuously.
-  assert.ok(MUST_FIRE.length >= 20,
+  assert.ok(MUST_FIRE.length >= 24,
     `only ${MUST_FIRE.length} positive control(s) — the shapes this scanner is trusted ` +
       'to catch are exactly the ones listed here');
-  assert.ok(MUST_NOT_FIRE.length >= 18,
+  assert.ok(MUST_NOT_FIRE.length >= 22,
     `only ${MUST_NOT_FIRE.length} negative control(s) — false positives are what get a ` +
       'guard deleted, so they need as much pinning as the true ones');
+});
+
+// ── openSync: the FLAGS decide, never the filename ────────────────────────
+//
+// Its own test rather than two more table rows, because the failure it pins is
+// specific and was invisible: the flag pattern was tested against every literal
+// in the call, so argument 0 — the PATH — voted. Both directions, over the SAME
+// basenames, is the only arrangement that can tell "reads the flags" apart from
+// "reads the name".
+
+const OPEN_FLAG_CASES = [
+  // basename,           flags,      must fire
+  ['webhooks.jsonl',     "'r'",      false],  // w-initial name, READ
+  ['accounts.json',      "'r'",      false],  // a-initial name, READ
+  ['c++notes.txt',       "'r'",      false],  // + in the name, READ
+  ['schema.yaml',        "'r'",      false],
+  ['webhooks.jsonl',     "'a'",      true],
+  ['accounts.json',      "'w'",      true],
+  ['schema.yaml',        "'w'",      true],   // innocuous name, WRITE
+  ['schema.yaml',        "'r+'",     true],   // read-write
+  ['schema.yaml',        "'wx'",     true],
+  ['webhooks.jsonl',     null,       false],  // flags omitted → defaults to 'r'
+];
+
+test('🔴 openSync is decided by its FLAGS argument, never by the filename', () => {
+  // Both directions have to be present, or this passes by having only one.
+  assert.ok(OPEN_FLAG_CASES.some(([, , fire]) => fire) && OPEN_FLAG_CASES.some(([, , fire]) => !fire),
+    'the openSync table lost one of its two directions');
+  assert.ok(OPEN_FLAG_CASES.filter(([name]) => /^[wa]|\+/.test(name)).length >= 3,
+    'the read cases no longer include basenames that the flag pattern itself would match ' +
+      '(w-initial, a-initial, +-containing) — that is the bug this test exists for');
+  const wrong = [];
+  for (const [name, flags, shouldFire] of OPEN_FLAG_CASES) {
+    const src = `const fd = openSync(join(__dirname, '${name}')${flags ? `, ${flags}` : ''});`;
+    const fired = findOpenCodedStatePaths(src).length > 0;
+    if (fired !== shouldFire) {
+      wrong.push(`openSync('${name}'${flags ? `, ${flags}` : ''}) ${fired ? 'FIRED' : 'was SILENT'}` +
+        ` — expected ${shouldFire ? 'a hit' : 'silence'}`);
+    }
+  }
+  assert.equal(wrong.length, 0,
+    'the openSync branch is not reading the flags argument. If the PATH argument votes, the ' +
+      'basename decides: a plain read of `accounts.json` reports an EROFS that will never ' +
+      'happen (and the only shipped control used an `s`-initial name, which cannot trip ' +
+      `it):\n        ${wrong.join('\n        ')}`);
 });
 
 // ── READ vs WRITE, stated as its own property and proved BOTH ways ────────
@@ -951,6 +1066,8 @@ test('the scanner is exercised against both halves of the control pair', () => {
 // itself is what is being measured: the SAME path expression, in the same
 // module, read and then written.
 
+// CONSTRUCTED shapes — no module in this skill reads any of these four files.
+// They are the bundled-read CLASS written four ways, not observed findings.
 const READ_ONLY_SHAPES = [
   ["join(__dirname, '..', 'data', 'custom-fields.json')", 'readFileSync(EXPR, \'utf8\')'],
   ["join(__dirname, 'schema.yaml')", 'readFileSync(EXPR, \'utf8\')'],

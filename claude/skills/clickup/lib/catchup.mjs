@@ -27,8 +27,8 @@
 import { authenticateDelivery, headerLookup } from './webhook-server.mjs';
 
 /**
- * Rejection reasons that are PERMANENT, and therefore safe to move the cursor
- * past after recording the skip.
+ * Rejection reasons that are PERMANENT: decided from the STORED BYTES alone,
+ * and never decided differently on a later run.
  *
  * 🔴 WHY THE CURSOR MAY ADVANCE AT ALL. `date_from` is the cursor and the API
  * is paged at 10, so before this the FIRST ten consecutive unverifiable stored
@@ -39,8 +39,7 @@ import { authenticateDelivery, headerLookup } from './webhook-server.mjs';
  * stored event is `unknown-webhook` and stays that way forever: the secrets
  * needed to verify them are gone.
  *
- * Each reason here is a decision this process can make from the request alone
- * and will never make differently later:
+ * Each reason here is a property of a record that no longer changes:
  *
  *   missing-signature  ClickUp signs every delivery; a stored request with no
  *                      X-Signature was not one, and no signature will appear.
@@ -50,27 +49,66 @@ import { authenticateDelivery, headerLookup } from './webhook-server.mjs';
  *                      secret is gone. Either way it is unverifiable forever.
  *   bad-signature      the body and the secret are both fixed; the digest will
  *                      not start matching.
+ *   invalid-json       the stored body is not a JSON object, and stored bytes
+ *                      do not change: it will not start being one.
+ *   malformed-record   the API returned something that is not a request object.
  *
- * 🔴 `invalid-json` is deliberately NOT here, and neither is a stored record
- * with no usable `created_at`. Those are the cases where we cannot say WHAT we
- * would be skipping: we could not parse the body, or we have no timestamp to
- * move the cursor to. Fail closed — stop catch-up, leave the cursor where it
- * is, say so on stderr — rather than step silently over something that might
- * have been a real event. That trades the old "any ten unverifiable requests
- * wedge catch-up" for "one UNPARSEABLE request stops this run", which is both
- * far rarer (ClickUp sends JSON) and recoverable with an explicit `--since`.
+ * 🔴 `invalid-json` IS ON THIS LIST, and the first version of this file is why.
+ * It made `invalid-json` undecidable — stop the walk, leave the cursor — on the
+ * reasoning that "we could not parse it, so we cannot say what we are skipping".
+ * That reasoning does not survive contact with the input: webhook.site records
+ * an empty `content` for a bare **GET**, which is what a crawler, a link
+ * preview, or the user opening their own webhook URL in a browser produces. One
+ * such request — plus a `null` content, a JSON scalar, HTML, or a form-encoded
+ * body — parked the cursor permanently, because `SINCE` defaults to
+ * `last-seen.txt` and the same page re-blocks on every subsequent run until
+ * somebody edits state by hand. Measured: a page holding [bare GET, genuine
+ * signed event] delivered NOTHING on two consecutive runs, where the code
+ * before it delivered the genuine event on run 1. It replaced a rare
+ * ten-request wedge with a permanent ONE-request wedge that anyone who can
+ * reach the URL can trigger — and the premise of the whole file is that anyone
+ * can. It was also internally inconsistent: `bad-signature` was decidable
+ * because "the body and the secret are both fixed", and a body that is not JSON
+ * is exactly as fixed.
+ *
+ * 🔴 WHAT IS ACTUALLY UNDECIDABLE IS AN **UNDATABLE** RECORD. `decidable` means
+ * one thing — may the cursor move past this? — and the cursor is a TIMESTAMP.
+ * A record with no usable `created_at` gives nothing to move the cursor TO, so
+ * advancing would be guessing; that, and only that, stops the walk. It cannot
+ * be triggered by the body of a request: webhook.site stamps what it stores.
  *
  * The cost of advancing is stated plainly rather than hidden: `date_from` has
  * one-second granularity, so moving the cursor past a rejected request also
  * moves it past anything stored in the SAME second. The live listener is
  * unaffected — it authenticates every delivery as it arrives.
+ *
+ * This set is a LEDGER, checked both ways by the tests: a reason
+ * `authenticateDelivery()` can return that is missing here defaults to
+ * undecidable — i.e. to the wedge above — so growth has to be deliberate.
  */
-export const DECIDABLE_REJECTIONS = new Set([
+export const PERMANENT_REJECTIONS = new Set([
   'missing-signature',
   'no-webhook-id',
   'unknown-webhook',
   'bad-signature',
+  'invalid-json',
+  'malformed-record',
 ]);
+
+/**
+ * May the cursor move past a REJECTED stored request?
+ *
+ * Exported so the fail-closed default is reachable from a test: no reason the
+ * current authenticator returns is unlisted, so the `PERMANENT_REJECTIONS.has()`
+ * clause has no observable effect until one is — which is precisely when it
+ * matters. Deleting it is otherwise a mutation nothing can catch.
+ *
+ * @param {string} reason
+ * @param {string|null} createdAt  a usable timestamp, or null
+ */
+export function isDecidable(reason, createdAt) {
+  return PERMANENT_REJECTIONS.has(reason) && createdAt !== null;
+}
 
 /**
  * Authenticate ONE request webhook.site stored.
@@ -83,13 +121,30 @@ export const DECIDABLE_REJECTIONS = new Set([
  *   It is meaningless for an accepted event (the cursor moves with the event).
  */
 export function classifyStoredRequest(req, lookupSecret) {
-  if (!req || typeof req !== 'object') {
-    return { accepted: false, reason: 'malformed-record', decidable: false, createdAt: null };
-  }
+  const isRecord = !!req && typeof req === 'object';
   const createdAt =
-    typeof req.created_at === 'string' && req.created_at.trim() !== '' ? req.created_at : null;
-  const raw = typeof req.content === 'string' ? req.content : '';
+    isRecord && typeof req.created_at === 'string' && req.created_at.trim() !== ''
+      ? req.created_at
+      : null;
 
+  // ONE expression for decidability, used by every rejection path: a permanent
+  // reason AND something to move the cursor to. Written once rather than per
+  // branch so a case cannot quietly acquire different rules — the previous
+  // version's `invalid-json` wedge was exactly that kind of special case.
+  const reject = (reason) => ({
+    accepted: false,
+    reason,
+    decidable: isDecidable(reason, createdAt),
+    createdAt,
+  });
+
+  // A non-object has no `created_at` to read, so this is undecidable in
+  // practice today. It goes through the same expression anyway: if the API ever
+  // returns a datable record shape this module does not recognise, the walk
+  // should skip it, not wedge on it.
+  if (!isRecord) return reject('malformed-record');
+
+  const raw = typeof req.content === 'string' ? req.content : '';
   const result = authenticateDelivery(raw, headerLookup(req.headers, 'x-signature'), lookupSecret);
 
   if (result.accepted) {
@@ -97,14 +152,7 @@ export function classifyStoredRequest(req, lookupSecret) {
     if (createdAt) event._wh_created_at = createdAt;
     return { accepted: true, reason: result.reason, decidable: true, createdAt, event };
   }
-  return {
-    accepted: false,
-    reason: result.reason,
-    // No timestamp means nothing to advance the cursor TO, so a rejection we
-    // could otherwise decide is still undecidable in practice.
-    decidable: DECIDABLE_REJECTIONS.has(result.reason) && createdAt !== null,
-    createdAt,
-  };
+  return reject(result.reason);
 }
 
 /**
@@ -122,7 +170,7 @@ export function classifyStoredRequest(req, lookupSecret) {
  * @param {(entry: object, event: object) => void} deps.onDeliver   hand it to the agent; the walk stops
  * @param {(event: object) => void} [deps.onFiltered]     authentic, but not what we are waiting for
  * @param {(info: object) => void} [deps.onSkipped]       decidable rejection — advance the cursor
- * @param {(info: object) => void} [deps.onBlocked]       undecidable — the walk stops, cursor unchanged
+ * @param {(info: object) => void} [deps.onBlocked]       UNDATABLE — the walk stops, cursor unchanged
  * @returns {{delivered: boolean, considered: number, skipped: number, filtered: number,
  *            blocked: object|null}}
  */
@@ -157,9 +205,12 @@ export function catchUp(requests, {
     }
 
     if (!r.decidable) {
-      // 🔴 Stop, do not continue. The cursor is a TIMESTAMP: advancing past a
-      // later request advances past this one too, so "skip it and carry on"
-      // would be the silent version of the thing we are refusing to do.
+      // 🔴 Stop, do not continue. Reaching here means the record is UNDATABLE
+      // (see PERMANENT_REJECTIONS): there is no timestamp to move the cursor
+      // to. Continuing would deliver a LATER event, and because the cursor is a
+      // TIMESTAMP that advances past this record anyway — the silent version of
+      // the thing we are refusing to do. This is not reachable from the BODY of
+      // a stored request; a body we cannot parse is skipped, not blocking.
       onBlocked(r);
       return { delivered: false, considered, skipped, filtered, blocked: r };
     }

@@ -62,6 +62,7 @@ import {
   forwarderArgs,
 } from './lib/webhook-server.mjs';
 import { catchUp } from './lib/catchup.mjs';
+import { resolveApiBase, MAX_RESPONSE_BYTES } from './lib/webhook-site.mjs';
 
 // All of these are STATE, so they resolve under $XDG_STATE_HOME/clickup
 // (fallback ~/.local/state/clickup) — the skill dir deploys read-only.
@@ -258,42 +259,68 @@ function formatEventSummary(event) {
 // ── Catch-up: query webhook.site for missed events ────────────────────────
 
 /**
- * Where the stored-request API lives.
+ * Where the stored-request API lives, and whether the API key may go there.
  *
- * 🔴 The override exists so the catch-up path can be exercised end-to-end
- * against a loopback stub — it had NO test at all, which is why two mutations
- * reinstating the original defect survived the whole suite. It changes WHERE
- * stored requests come from, never WHETHER they are authenticated: every
- * request from it still goes through `authenticateDelivery()` against a secret
- * in watchers.json, so pointing this at a hostile server yields rejections, not
- * forged deliveries.
+ * The policy — and the reason the override is a credential-egress knob rather
+ * than a harmless test seam — is in lib/webhook-site.mjs. Resolved ONCE, at
+ * load, so a malformed value is a message here instead of a `new URL()` throw
+ * inside a promise executor that nothing awaits.
  */
-const WH_API_BASE = process.env.CLICKUP_WEBHOOK_SITE_API_BASE || 'https://webhook.site';
+const API = resolveApiBase(process.env.CLICKUP_WEBHOOK_SITE_API_BASE);
+if (API.warning) process.stderr.write(`[catch-up] ${API.warning}\n`);
+const WH_API_BASE = API.base;
 
 function fetchMissedEvents(since) {
-  return new Promise((resolve, reject) => {
-    const sinceUtc = since.includes('Z') || since.includes('+') ? since : since.replace(' ', 'T') + 'Z';
-    const d = new Date(sinceUtc);
-    if (d.getMilliseconds() > 0) {
+  return new Promise((resolve) => {
+    let url;
+    try {
+      const sinceUtc = since.includes('Z') || since.includes('+') ? since : since.replace(' ', 'T') + 'Z';
+      const d = new Date(sinceUtc);
+      if (d.getMilliseconds() > 0) {
+        d.setSeconds(d.getSeconds() + 1);
+        d.setMilliseconds(0);
+      }
       d.setSeconds(d.getSeconds() + 1);
-      d.setMilliseconds(0);
-    }
-    d.setSeconds(d.getSeconds() + 1);
-    const dateFrom = d.toISOString().replace('T', ' ').replace(/\.\d+Z$/, '');
+      const dateFrom = d.toISOString().replace('T', ' ').replace(/\.\d+Z$/, '');
 
-    const url = new URL(`${WH_API_BASE}/token/${WH_TOKEN}/requests`);
-    url.searchParams.set('date_from', dateFrom);
-    url.searchParams.set('sorting', 'oldest');
-    url.searchParams.set('per_page', '10');
+      url = new URL(`${WH_API_BASE}/token/${WH_TOKEN}/requests`);
+      url.searchParams.set('date_from', dateFrom);
+      url.searchParams.set('sorting', 'oldest');
+      url.searchParams.set('per_page', '10');
+    } catch (err) {
+      // An unusable --since (`new Date` → Invalid Date → toISOString throws) or
+      // a token that will not go in a URL. Both used to reject a promise with
+      // no catch anywhere: main() is called, not awaited.
+      process.stderr.write(`[catch-up] Could not build the query: ${err.message}\n`);
+      resolve({ data: [] });
+      return;
+    }
 
     const headers = {};
-    if (WH_API_KEY) headers['Api-Key'] = WH_API_KEY;
+    // 🔴 Only ever to webhook.site. A loopback stub gets no account credential.
+    if (WH_API_KEY && API.sendApiKey) headers['Api-Key'] = WH_API_KEY;
 
     const client = url.protocol === 'http:' ? http : https;
     client.get(url.toString(), { headers }, (res) => {
       let data = '';
-      res.on('data', (chunk) => (data += chunk));
+      let over = false;
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => {
+        if (over) return;
+        data += chunk;
+        // Bounded: the response comes from whatever host the base names, and
+        // `data += chunk` with no ceiling is an allocation that host controls.
+        if (data.length > MAX_RESPONSE_BYTES) {
+          over = true;
+          process.stderr.write(
+            `[catch-up] The stored-requests response exceeded ${MAX_RESPONSE_BYTES} bytes — ` +
+              'discarding it and starting the live listener.\n');
+          res.destroy();
+          resolve({ data: [] });
+        }
+      });
       res.on('end', () => {
+        if (over) return;
         try {
           const json = JSON.parse(data);
           resolve(json);
@@ -301,6 +328,7 @@ function fetchMissedEvents(since) {
           resolve({ data: [] });
         }
       });
+      res.on('error', () => { if (!over) resolve({ data: [] }); });
     }).on('error', (err) => {
       process.stderr.write(`[catch-up] Failed to query webhook.site: ${err.message}\n`);
       resolve({ data: [] });
@@ -366,7 +394,9 @@ function startForwarder(port) {
   // Read back out of the array being spawned, not recomputed: a second call to
   // forwarderTarget() would print 127.0.0.1 even if the arg said localhost.
   // 🔴 This one element only — `--token=` is in there too.
-  const target = (whArgs.find((a) => a.startsWith('--target=')) || '--target=<none>').slice(9);
+  const TARGET_FLAG = '--target=';
+  const target = (whArgs.find((a) => a.startsWith(TARGET_FLAG)) || `${TARGET_FLAG}<none>`)
+    .slice(TARGET_FLAG.length);
   process.stderr.write(`[whcli] target ${target}\n`);
 
   const proc = spawn('whcli', whArgs, {
@@ -416,30 +446,40 @@ async function main() {
         onFiltered: (event) => {
           process.stderr.write(`[catch-up:filtered] ${event.event || 'unknown'} — skipped\n`);
         },
-        // A PERMANENTLY unverifiable stored request. Nothing about it is
-        // logged — the body is attacker-controlled — but the cursor moves past
-        // it, or ten of these wedge catch-up forever (see lib/catchup.mjs).
+        // A PERMANENTLY un-deliverable stored request — unverifiable, or a body
+        // that is not a ClickUp event at all (a bare GET from a crawler stores
+        // an empty one). Nothing about it is logged, because the body is
+        // attacker-controlled, but the cursor moves past it: standing still
+        // wedges catch-up on it forever (see lib/catchup.mjs).
         onSkipped: ({ reason, createdAt }) => {
           saveLastSeen(createdAt);
           process.stderr.write(
-            `[catch-up:rejected:${reason}] a stored webhook.site request did not verify ` +
+            `[catch-up:rejected:${reason}] a stored webhook.site request was rejected ` +
               `— not logged, cursor advanced past it (${createdAt})\n`
           );
         },
-        // We could not decide what this was. The cursor stays put.
+        // No usable timestamp, so there is nothing to advance the cursor TO.
+        // This is the ONLY case that stops the walk.
         onBlocked: ({ reason, createdAt }) => {
           process.stderr.write(
-            `[catch-up:blocked:${reason}] a stored webhook.site request could not be ` +
-              `parsed or dated (${createdAt || 'no timestamp'}) — catch-up stops here and the ` +
-              'cursor is unchanged, so nothing behind it is skipped silently. Pass an ' +
-              'explicit --since to step over it.\n'
+            `[catch-up:blocked:${reason}] a stored webhook.site request carries no usable ` +
+              `timestamp (created_at=${JSON.stringify(createdAt)}) — there is nothing to move ` +
+              'the cursor to, so catch-up stops here rather than guess. The cursor is ' +
+              'unchanged; pass an explicit --since to step over it.\n'
           );
         },
       });
 
+      // 🔴 `blocked` is reported. Without it a wedged run ends on a line that
+      // reads like a clean sweep — "0 unverifiable, 0 filtered" — which is what
+      // the summary said while the cursor was frozen.
+      const blockedNote = outcome.blocked
+        ? `, BLOCKED at an undatable request (${outcome.blocked.reason}) — cursor NOT advanced`
+        : '';
       process.stderr.write(
         `[catch-up] ${outcome.considered} of ${requests.length} stored request(s) examined, ` +
-          `${outcome.skipped} unverifiable, ${outcome.filtered} filtered. Starting live listener.\n`);
+          `${outcome.skipped} rejected, ${outcome.filtered} filtered${blockedNote}. ` +
+          'Starting live listener.\n');
     } else {
       process.stderr.write(`[catch-up] No missed events. Starting live listener.\n`);
     }
@@ -488,4 +528,10 @@ async function main() {
   }
 }
 
-main();
+// 🔴 Not awaited (top-level await would change how this file loads), so it needs
+// its own catch: an unhandled rejection here exits with a stack trace and no
+// explanation of which step failed.
+main().catch((err) => {
+  process.stderr.write(`Fatal: ${err && err.stack ? err.stack : err}\n`);
+  process.exit(1);
+});
