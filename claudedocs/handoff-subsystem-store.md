@@ -45,33 +45,54 @@ lists all entries instead of hiding 13 of 25 behind a `--limit 12`.
 
 ## Open investigations — live diagnosis state
 
-### `--session` throws away 112 cleanly-attributable paths, and its refusal states a falsehood
+### `--session` throws away cleanly-attributable paths, and its refusal states a falsehood
+🔴 **OPEN — fix written and audited, NOT merged and NOT deployed.** PR **#459**, branch
+`subsystem-touch-absolute-window`. Until it merges *and* a `ship.sh` switch runs, both hosts
+still refuse every cross-repo session, and `~/.claude/skills/handoff/` still carries the false
+sentence. Merged ≠ deployed; a struck-through "FIXED" here would be exactly that error.
 - **Symptom + exact repro:** a session whose cwd is repo A but whose edits are absolute paths
-  into repo B is refused: `subsystem-touch: transcript cwd does not match: session <id> ran in
+  into repo B was refused: `subsystem-touch: transcript cwd does not match: session <id> ran in
   <A>, but --repo resolves to <B>.` Reported twice in one day by two different agents.
 - **Observed (with values):** the refusal's stated reason — *"Every path in a transcript is
-  relative to the session's own cwd"* (`subsystem_touch.py:1404`) — is **false**. Paths come
-  from the tool call's `file_path`, which is absolute when the caller passed one;
-  `changed_paths.py:270 to_repo_relative()` already accepts absolutes and buckets
-  outside-cwd ones into `outside`, of which only `len(outside)` is emitted (`:280`).
-  Measured over 120 recent transcripts: **1,072 distinct file-tool paths, 945 outside cwd
-  (88%)** — 602 agent scratchpad, 143 temp worktree (only 32 still on disk), **112 another
-  real repo under `~/workspace` (absolute, unambiguous)**, 54 other, 34 home/dotfiles.
-  Independently corroborates the extractor's own 2026-08-11 figure (470 of 3,290 under cwd,
-  14.3%).
+  relative to the session's own cwd"* — is **false**. Paths come from the tool call's
+  `file_path`, which is absolute when the caller passed one; `changed_paths.to_repo_relative()`
+  already accepts absolutes and buckets outside-cwd ones into `outside`, of which only
+  `len(outside)` was emitted.
 - **Ruled out:** that this is the "four blind windows" story. In the first report the session
   had **1 file-tool call in 158 records** (the handoff doc itself), 0 subagent turns, 0
   file-writing `Bash` — no window was hiding work. In the second the agent correctly fell
   through to `--commit` and wrote a good first entry for `homelab-talos`. **Both agents
   behaved correctly; the guard's outcome was right and its stated reason was wrong.**
-- **Leading hypothesis:** the guard's safety property (never read an A-relative path as
-  B-relative) is sound and must stay. It over-refuses only because it discards absolute paths
-  that resolve under `--repo`, which need no inference at all. Would take the session window
-  from 127 to 239 attributable paths.
-- **Next probe:** none needed to decide — the yield is measured. Implement: correct the
-  message, then report only paths that are `os.path.isabs()` **and** resolve under
-  `_toplevel(repo)`. Do **not** design around the 143 temp-worktree paths: mostly
-  unrecoverable, and 38 such worktrees were removed this session.
+- **Fix, as built:** `changed_paths.absolute_under(paths, root)` is a SECOND frame — entries
+  that are `posixpath.isabs()` **and** lexically under `root`, made root-relative, reusing
+  `to_repo_relative`'s prefix test so the sibling-directory trap cannot be reintroduced. The
+  claude tailer takes an opt-in `absolute_root` and returns the computed block; the RAW path
+  set never leaves the extractor, and `run()` never opts in, so the emitted ClickHouse payload
+  is byte-identical. `collect_session_paths` falls through to that window on a cwd mismatch
+  and raises only when it is **empty**. A relative path is still never re-anchored — that is
+  the safety property and it is unchanged.
+- 🔴 **THE 112 IS RETRACTED — the cross-project yield is ~30. Do not re-derive 112.** It
+  counted any absolute path under `~/workspace` outside cwd, and its `repo_of()` treated every
+  top-level directory as a distinct project — so devrc's own sibling WORKTREE directories
+  (`devrc-fix443`, `devrc-clickup`, `devrc-clawgate-ext`, `devrc-cutguard`, `devrc-458fix`,
+  `devrc-fix444`) each counted as "another repo". Reconciled on the recent-120 window:
+
+  | step | paths |
+  |---|---|
+  | absolute, outside cwd, under `~/workspace` | 185 |
+  | − the SAME repo reached from one of its worktrees | −97 |
+  | = in a different top-level directory | 88 |
+  | − devrc-* sibling worktrees, still the same project | −58 |
+  | **= genuinely cross-project** | **30** (24 `homelab→civit`, 6 `homelab→devrc`) |
+
+  Corroborated at **33** (29 distinct repo/path pairs) by a second script over the 636
+  transcripts `iter_transcripts` walks — 3,913 distinct paths, 543 under cwd (13.9%, which
+  reproduces the extractor's own 14.3%). **The rewrite rests on the refusal's stated reason
+  being false, which needs no yield figure at all.** Note the 97 same-repo-from-a-worktree
+  paths were *also* refused and are *also* answered now — on this host that is where most of
+  the practical benefit comes from, and it is not a cross-project number.
+- **Not designed around:** the temp-worktree paths. Mostly unrecoverable, and 38 such
+  worktrees were removed this session.
 
 ### The >2-page index shape has never existed in real data
 - **Symptom:** three shipped defects in `#442`'s pagination, all invisible to a green
@@ -105,7 +126,15 @@ lists all entries instead of hiding 13 of 25 behind a `--limit 12`.
    round faults the caveat layer again, cut it — ship the verbatim recovery plus the one
    twice-verified point (compare the EXACT worktree path, not a prefix) and move the
    descendant/`PPid` analysis to its own issue.
-3. **Fix the `--session` cwd-mismatch message and add the absolute-path window** (above).
+3. **Merge and ship the `--session` absolute-path window — PR #459, OPEN, audit-clean.**
+   Written, gated on both tiers, adversarially audited (no deploy-blocking findings) and
+   **not merged**. 🔴 **Nothing is live until `ship.sh` runs**: `~/.claude/skills/handoff/`
+   is a nix-store symlink, so both hosts keep refusing cross-repo sessions — and keep serving
+   the false sentence to every agent — until merge → pull → switch. Verify AFTER that, not
+   before: run `--session <uuid>` with `--repo` pointing at a repo the session did *not* run
+   in, and read the `window:` + `caveat:` lines. `session-absolute` is a **FLOOR**, not a
+   list. Its cross-project yield is ~30 paths, not the 112 that motivated it (retracted;
+   derivation above) — so if the census stalls, look here before blaming the writers.
 4. **Watch the census.** `python3 scripts/lib/subsystem_touch.py --census`. 21→30 across 5
    scopes with 8 handoff-written and now 1 `analyze-service`-written. If it stalls, the
    writers are not sticking.
@@ -211,6 +240,19 @@ so the reversibility this section promised did not actually exist: one disk fail
   nothing here and would have read as green.
 - 🔴 **Never pipe `ship.sh` or a gate to `tail`** — the pipe destroys the exit status. Reported
   `exit 0` over a real `rc=12` this session. Redirect to a file and echo `$?`.
+- 🔴 **`nix build --rebuild` ERRORS on a drv whose previous build FAILED** — *"some outputs …
+  are not valid, so checking is not possible"*. It re-checks a valid cached output; it cannot
+  re-run a failure. After a red gate, plain `nix build` already rebuilds (there is no valid
+  output to reuse), so drop the flag.
+- 🔴 **Attribute an unrelated red test STRUCTURALLY, not by "load" — and check whether wall
+  time actually supports the load story before telling it.** One #459 gate run showed
+  `browser-bridge … failed=1` (`test_gate_reads_from_a_file_not_a_pipe`, a 60 s
+  `TimeoutExpired`). The honest attribution is **there is no import or exec edge from the
+  changed modules to `scripts/browser-bridge/`** — three independent 493/493 runs (control at
+  `main`, a re-run of the branch, and the integration gate) merely corroborate it. The load
+  story was *weaker than it looked*: 238 s versus 164 s at load 12.6 is **1.45×**, nowhere
+  near the ~15× this repo's own rule uses to call a run load-bound. A ratio that small is
+  evidence *against* the explanation you were about to give.
 - 🔴 **`rev-list origin/main..HEAD` is NOT a merged-ness test.** A squash merge never makes the
   branch head an ancestor, so it stays non-zero forever — it flagged **all 52** worktree
   branches as unmerged work. Classify by PR state (`gh pr list --state all --json
@@ -255,6 +297,12 @@ python3 $D/scripts/lib/subsystem_recall.py --scope datapacket-talos --search "zz
 python3 $D/scripts/lib/subsystem_touch.py --repo $D --session <scratchpad-uuid>
 python3 $D/scripts/lib/subsystem_touch.py --repo $D --pr <n>[,...]
 python3 $D/scripts/lib/subsystem_touch.py --repo $D --commit <sha>[,...]
+
+# the FIFTH window — same flag, different repo. Point --repo at a repo the
+# session did NOT run in: `window=session-absolute` and a caveat calling it a
+# FLOOR when the session named absolute paths there, `transcript cwd does not
+# match` (naming --pr/--commit) when it named none.
+python3 $D/scripts/lib/subsystem_touch.py --repo <other-repo> --session <scratchpad-uuid>
 
 # the falsifiability counter — anchor was 21 / 1 scope / 21 unstamped
 python3 $D/scripts/lib/subsystem_touch.py --census

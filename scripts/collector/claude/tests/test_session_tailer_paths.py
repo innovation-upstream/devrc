@@ -398,3 +398,238 @@ class TestClaudeUnusableFilePaths:
         """A key that is sometimes absent is indistinguishable from a consumer
         reading the wrong name — the rule the whole payload block is built on."""
         assert S.build_rollup([])["unusable_file_paths"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# The ABSOLUTE window — the opt-in second frame
+# --------------------------------------------------------------------------- #
+#
+# 🔴 WHY IT EXISTS. `changed_paths` reads every entry against the SESSION's cwd,
+# and 86.1% of entries are not under it (3,913 distinct file-tool paths over the
+# 636 transcripts the tailer walks, 543 under cwd — 13.9%, reproducing the
+# extractor's own 14.3% figure). Some of the remainder are absolute paths into
+# another real tree: attributable to it with no inference whatever, and
+# discarded because the only frame on offer was the session's. This block is
+# that second frame, and NOTHING ELSE — an entry it reports is one the
+# transcript already spelled out in full. (For the COUNT of the recoverable
+# remainder, and why the 112 that motivated this is retracted, see
+# `subsystem_touch.collect_session_paths`.)
+OTHER = "/srv/checkouts/other-repo"
+
+
+class TestAbsoluteWindowPositiveControl:
+    """The pair. A zero here is indistinguishable from a frame wired to nothing,
+    so both arms run on the same code path with the same fixture shape."""
+
+    def test_THE_PAIR_absolute_under_the_root_yields_relative_under_the_control(self):
+        under = [f"{OTHER}/src/a.py", f"{OTHER}/src/b.py"]
+        elsewhere = [f"{REPO}/src/a.py", "/var/tmp/scratch/c.py"]
+        blocks = [("Edit", {"file_path": p}) for p in under + elsewhere]
+        r = S.build_rollup([_user(), _assistant(blocks)], absolute_root=OTHER)
+        assert r["changed_paths_absolute"] == ["src/a.py", "src/b.py"], (
+            "the absolute frame yielded nothing — it is wired to nothing"
+        )
+        assert r["changed_paths_absolute_total"] == 2
+        assert r["changed_paths_absolute_truncated"] is False
+        # …and the CONTROL: the same call, rooted at the session's own repo, sees
+        # a different set. One root cannot answer for both, which is the whole
+        # reason this is a parameter and not a constant.
+        c = S.build_rollup([_user(), _assistant(blocks)], absolute_root=REPO)
+        assert c["changed_paths_absolute"] == ["src/a.py"]
+
+    def test_the_DEFAULT_window_is_untouched_by_the_second_frame(self):
+        """Two frames on one rollup, and neither may bend the other. The session
+        window still answers about the session's cwd."""
+        r = S.build_rollup(
+            [_user(), _assistant([("Edit", {"file_path": f"{REPO}/src/a.py"}),
+                                  ("Edit", {"file_path": f"{OTHER}/src/b.py"})])],
+            absolute_root=OTHER,
+        )
+        assert r["changed_paths"] == ["src/a.py"]
+        assert r["changed_paths_outside_cwd"] == 1
+        assert r["changed_paths_absolute"] == ["src/b.py"]
+
+
+class TestAbsoluteWindowNeverInfers:
+    """🔴 THE SAFETY PROPERTY, which is the reason the guard downstream exists at
+    all. A RELATIVE entry names no tree. Re-anchoring one against a root it was
+    never measured against is how another repo's work gets filed here — and it
+    is invisible, because the manufactured path resolves perfectly."""
+
+    def test_a_RELATIVE_entry_is_excluded_however_plausible_it_looks(self):
+        r = S.build_rollup(
+            [_user(cwd=REPO),
+             _assistant([("Edit", {"file_path": "src/a.py"}),
+                         ("Write", {"file_path": "docs/b.md"})], cwd=REPO)],
+            absolute_root=OTHER,
+        )
+        assert r["changed_paths_absolute"] == []
+        # The negative control on that zero: the SAME two paths, spelled
+        # absolutely under the same root, ARE reported. So the exclusion above is
+        # the relativeness, not the fixture failing to reach the code.
+        ok = S.build_rollup(
+            [_user(cwd=REPO),
+             _assistant([("Edit", {"file_path": f"{OTHER}/src/a.py"}),
+                         ("Write", {"file_path": f"{OTHER}/docs/b.md"})], cwd=REPO)],
+            absolute_root=OTHER,
+        )
+        assert ok["changed_paths_absolute"] == ["docs/b.md", "src/a.py"]
+
+    def test_a_SIBLING_directory_sharing_a_name_prefix_is_not_under_the_root(self):
+        """`…/other-repo-2/a.py` against `…/other-repo` must not become
+        `-2/a.py`. The separator that prevents it lives in `to_repo_relative`,
+        which is why this function reuses it rather than restating the prefix
+        test."""
+        assert CP.absolute_under([f"{OTHER}-2/a.py"], OTHER)["changed_paths_absolute"] == []
+        assert CP.absolute_under([f"{OTHER}/a.py"], OTHER)["changed_paths_absolute"] == ["a.py"]
+
+    def test_the_root_DIRECTORY_itself_is_not_a_changed_file(self):
+        assert CP.absolute_under([OTHER], OTHER)["changed_paths_absolute"] == []
+
+    def test_a_root_that_is_not_absolute_yields_nothing_rather_than_guessing(self):
+        for bad in ("", "relative/root", "."):
+            assert CP.absolute_under([f"{OTHER}/a.py"], bad)["changed_paths_absolute"] == []
+
+    def test_an_escaping_absolute_path_is_normalized_before_the_prefix_test(self):
+        assert CP.absolute_under(
+            [f"{OTHER}/x/../a.py"], OTHER)["changed_paths_absolute"] == ["a.py"]
+        assert CP.absolute_under([f"{OTHER}/../a.py"], OTHER)["changed_paths_absolute"] == []
+
+
+class TestAbsoluteWindowBounds:
+    def test_it_is_capped_and_SAYS_SO(self):
+        """Same cap, same truncation contract as the default window: the list is
+        a lexicographic PREFIX, so a consumer that cannot see it was cut reads a
+        late-sorting subtree as absent."""
+        paths = [f"{OTHER}/f{i:04d}.py" for i in range(CP.CHANGED_PATHS_CAP + 3)]
+        r = CP.absolute_under(paths, OTHER)
+        assert len(r["changed_paths_absolute"]) == CP.CHANGED_PATHS_CAP
+        assert r["changed_paths_absolute_total"] == CP.CHANGED_PATHS_CAP + 3
+        assert r["changed_paths_absolute_truncated"] is True
+
+    def test_EXACTLY_at_the_cap_is_NOT_truncated(self):
+        """🔴 THE BOUNDARY, and it was missing: `total > cap` mutated to
+        `total >= cap` SURVIVED the whole suite, because the only truncation case
+        probed was `cap + 3`. At exactly the cap the list IS complete, so the flag
+        would be a lie — and this module's contract is that a truncated list is
+        readable as truncated from the numbers alone, which requires the
+        un-truncated one to be readable as complete.
+
+        The peer function has had this test since it was written
+        (`scripts/collector/tests/test_changed_paths.py::TestTruncation`); the
+        copy dropped it. Same `cap=5` shape, deliberately, so the two read as one
+        contract rather than two.
+        """
+        paths = [f"{OTHER}/f{i:04d}.py" for i in range(5)]
+        out = CP.absolute_under(paths, OTHER, cap=5)
+        assert out["changed_paths_absolute_truncated"] is False
+        assert len(out["changed_paths_absolute"]) == 5
+        assert out["changed_paths_absolute_total"] == 5
+
+    def test_one_over_the_cap_IS_truncated(self):
+        """The other arm at the same boundary. Without it, a mutant pinning the
+        flag to a constant False would pass the test above."""
+        paths = [f"{OTHER}/f{i:04d}.py" for i in range(6)]
+        out = CP.absolute_under(paths, OTHER, cap=5)
+        assert out["changed_paths_absolute_truncated"] is True
+        assert len(out["changed_paths_absolute"]) == 5
+        # 🔴 The TRUE count survives the truncation — that is what makes the
+        # short list readable as short.
+        assert out["changed_paths_absolute_total"] == 6
+
+    def test_one_UNDER_the_cap_is_not_truncated(self):
+        """The third point. Two points cannot distinguish `>` from `>=` from a
+        constant; three can."""
+        out = CP.absolute_under([f"{OTHER}/f{i}.py" for i in range(4)], OTHER, cap=5)
+        assert out["changed_paths_absolute_truncated"] is False
+        assert out["changed_paths_absolute_total"] == 4
+
+    def test_it_dedupes_on_the_ROOT_RELATIVE_form(self):
+        r = CP.absolute_under([f"{OTHER}/a.py", f"{OTHER}//a.py", f"{OTHER}/./a.py"], OTHER)
+        assert r["changed_paths_absolute"] == ["a.py"]
+        assert r["changed_paths_absolute_total"] == 1
+
+    def test_a_malformed_entry_RAISES_whether_or_not_the_root_is_usable(self):
+        """The same corpus must not raise or not depending on an unrelated
+        argument — that would make the validation a property of the caller."""
+        for root in (OTHER, ""):
+            with pytest.raises(ValueError, match="not a usable path"):
+                CP.absolute_under([f"{OTHER}/a.py", "  "], root)
+
+    def test_a_non_string_root_is_named_rather_than_coerced(self):
+        with pytest.raises(ValueError, match="root must be a string"):
+            CP.absolute_under([f"{OTHER}/a.py"], None)
+
+
+class TestAbsoluteWindowAbsentVsEmpty:
+    """The discriminator the whole module is built on, applied to the new block:
+    [] means "checked, nothing resolved"; None means "we never had a file set"."""
+
+    def test_an_unreadable_rollup_reports_ABSENT(self):
+        r = S.build_rollup([], absolute_root=OTHER)
+        assert r["changed_paths_absolute"] is None
+        assert r["changed_paths_absolute_total"] is None
+        assert r["changed_paths_absolute_truncated"] is None
+
+    def test_an_unopenable_file_reports_ABSENT(self, tmp_path):
+        r = S.summarize_transcript(str(tmp_path / "nope.jsonl"), absolute_root=OTHER)
+        assert r["unreadable"] is True
+        assert r["changed_paths_absolute"] is None
+
+    def test_a_garbage_file_reports_ABSENT(self, tmp_path):
+        p = tmp_path / "junk.jsonl"
+        p.write_text("not json at all\n{{{\n", encoding="utf-8")
+        r = S.summarize_transcript(str(p), absolute_root=OTHER)
+        assert r["unreadable"] is True
+        assert r["changed_paths_absolute"] is None
+
+    def test_a_READABLE_session_with_nothing_under_the_root_reports_EMPTY(self, tmp_path):
+        """The other arm. Without it, a change making EVERY rollup report None
+        would still pass the three above."""
+        p = tmp_path / "s.jsonl"
+        p.write_text(
+            "\n".join(json.dumps(o) for o in
+                      [_user(), _assistant([("Edit", {"file_path": f"{REPO}/a.py"})])]),
+            encoding="utf-8")
+        r = S.summarize_transcript(str(p), absolute_root=OTHER)
+        assert r["unreadable"] is False
+        assert r["changed_paths_absolute"] == []
+
+
+class TestAbsoluteWindowNeverReachesTheEVENT:
+    """🔴 THE EMIT PATH IS THE BLAST RADIUS. `build_event` json-dumps the WHOLE
+    rollup as the payload, so any key placed on it unconditionally would ship a
+    second path list — dominated by agent scratchpad and temp-worktree paths — to
+    ClickHouse for every session on both hosts. The block is opt-in for that
+    reason, and `run()` never opts in."""
+
+    def test_the_keys_are_ABSENT_when_no_root_is_asked_for(self):
+        r = _rollup([("Edit", {"file_path": f"{REPO}/a.py"})])
+        for key in CP.ABSOLUTE_KEYS:
+            assert key not in r, f"{key} appeared without a caller asking for it"
+
+    def test_the_emitted_payload_carries_none_of_them(self):
+        ev = S.build_event("sid", _rollup([("Edit", {"file_path": f"{REPO}/a.py"})]))
+        for key in CP.ABSOLUTE_KEYS:
+            assert key not in ev["payload"]
+
+    def test_the_block_is_NOT_part_of_the_payload_contract(self):
+        """Structural, not a spelling: `PAYLOAD_KEYS` is the set both tailers
+        promise to place ALWAYS. An overlap here would make that promise false
+        for the opencode side, which has no absolute window at all."""
+        assert set(CP.ABSOLUTE_KEYS).isdisjoint(CP.PAYLOAD_KEYS)
+
+    def test_the_tailers_RUN_LOOP_does_not_pass_a_root(self):
+        """The pin that makes the two tests above more than a statement about
+        today's default. A future `run()` that started passing one would ship the
+        paths regardless of the parameter's default.
+
+        ⚠ INVARIANT GUARD, not regression coverage: it is green on the pre-change
+        code too, by construction — the parameter did not exist there. It pins a
+        property nothing has violated yet, which is the point of it."""
+        src = (_CLAUDE_DIR / "session-tailer.py").read_text(encoding="utf-8")
+        body = src[src.index("def run("):]
+        assert "absolute_root" not in body, (
+            "the tailer's run loop now passes absolute_root — that puts a second "
+            "path list into every emitted session-summary payload"
+        )

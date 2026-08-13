@@ -570,12 +570,28 @@ class TranscriptUnreadableError(TouchError):
 
 
 class TranscriptCwdMismatchError(TouchError):
-    """The transcript's recorded cwd is not the repo under test.
+    """A cross-repo session left NOTHING this repo can claim without inference.
 
-    Sentinel: 'transcript cwd does not match'. Not a formality: the extractor
-    relativizes every path against the SESSION's cwd, so paths from a session
-    rooted elsewhere are repo-relative to the WRONG repo — they would resolve,
-    quietly, against this repo's index.
+    Sentinel: 'transcript cwd does not match'. Not a formality: the extractor's
+    default window relativizes every path against the SESSION's cwd, so a
+    RELATIVE path from a session rooted elsewhere is repo-relative to the WRONG
+    repo — it would resolve, quietly, against this repo's index.
+
+    🔴 THIS IS NARROWER THAN ITS NAME, AND THE OLD WORDING WAS FALSE. A cwd
+    mismatch alone no longer raises. `collect_session_paths` first tries the
+    ABSOLUTE window — the entries the session named as absolute paths that
+    resolve under `--repo`, which need no re-anchoring and are attributable
+    whatever cwd the session ran in — and raises only when that window is empty.
+    The superseded message said "every path in a transcript is relative to the
+    session's own cwd"; a transcript entry is the tool call's own `file_path`,
+    and a measurable share of them are absolute paths into another real tree.
+    Those were the ones being thrown away — see `collect_session_paths` for the
+    measurement, and for why the 112 that motivated this is RETRACTED.
+
+    What has NOT been relaxed, and must not be: a relative path is never
+    re-anchored. The frame check on relative entries is the safety property; the
+    over-refusal was the frame check being applied to entries that carry their
+    own frame.
 
     🔴 THE MESSAGE NAMES THE ALTERNATIVE, because the obvious fallback is wrong
     here. For every OTHER session failure the answer is "drop --session and use
@@ -584,11 +600,6 @@ class TranscriptCwdMismatchError(TouchError):
     work reached here as pull requests or commits, so --pr/--commit is the only
     window that can see it. Observed live: a session whose cwd was one repo
     while all of its work landed in another.
-
-    Relativizing against --repo instead would NOT fix this: it happens upstream
-    in the shared collector extractor, so it is a collector change, not a local
-    one — and it would silently file another repo's paths here, which is exactly
-    what this guard exists to prevent. Do not relax it.
     """
 
 
@@ -915,7 +926,16 @@ class PathSource:
 
     window: str
     """`branch` (worktree ∪ this branch's commits), `worktree`, `session`,
-    `pull-requests`, `commits`, or `supplied`."""
+    `session-absolute`, `pull-requests`, `commits`, or `supplied`.
+
+    🔴 `session` and `session-absolute` are DIFFERENT WINDOWS on one transcript,
+    not a flag on one window. `session` is every path the session's turns named,
+    read against the session's own cwd — available only when that cwd IS this
+    repo. `session-absolute` is the cross-repo case: the session ran somewhere
+    else, so only the paths it named ABSOLUTELY and that resolve under this repo
+    are reportable, and every relative path it named is excluded because nothing
+    says which tree it belonged to. They carry different caveats for that reason.
+    """
 
     paths: tuple[str, ...]
     base_ref: str | None = None
@@ -929,6 +949,14 @@ class PathSource:
     notes: tuple[str, ...] = ()
     session: str | None = None
     """The session id, when `kind == "session"`. Part of the caveat, not decoration."""
+
+    session_cwd: str | None = None
+    """The cwd the transcript recorded, when `window == "session-absolute"`.
+
+    In the caveat because it is the reason that window is narrow: a reader who
+    cannot see which repo the session actually ran in has no way to judge how
+    much of its work the absolute subset represents.
+    """
 
     prs: tuple[int, ...] = ()
     """The pull requests read, when `kind == "pr"`. Part of the caveat."""
@@ -1003,6 +1031,27 @@ class PathSource:
                 f"reported WHOLE — this source reads the diff and cannot see intent. "
                 f"Attribute these paths to THESE COMMITS, never to a session and "
                 f"never to a branch"
+            )
+        if self.window == "session-absolute":
+            # 🔴 A FIFTH caveat, not a footnote on the session one. The session
+            # caveat's "relative to the session cwd" is the exact claim this
+            # window cannot make — its cwd is another repo — and its blind spots
+            # are a strict superset: everything the session window misses, plus
+            # every path this session named RELATIVELY, which here is not a
+            # counted remainder but an unknowable one.
+            return (
+                f"session transcript {self.session}, ABSOLUTE-PATH window: this session "
+                f"ran in {self.session_cwd or '(no cwd recorded)'}, NOT this repo, so the "
+                f"only paths reportable here are the ones its turns named as ABSOLUTE "
+                f"paths that resolve UNDER this repo. Nothing was re-anchored: a path this "
+                f"session named RELATIVELY belongs to ITS cwd and is EXCLUDED, not counted "
+                f"— the transcript does not say which tree it meant, so how much work is "
+                f"missing is UNKNOWN, not merely unlisted. This is a FLOOR on what the "
+                f"session did here, never a complete list. NOT represented, additionally: "
+                f"(a) anything a SUBAGENT edited — its turns are excluded as a separate "
+                f"session; (b) files written by a Bash command rather than a file tool; "
+                f"(c) every absolute path in any OTHER tree. Attribute these paths to this "
+                f"SESSION but read the count as a lower bound"
             )
         if self.kind == "session":
             return (
@@ -1366,6 +1415,21 @@ def _same_dir(a: str, b: str) -> bool:
     nb = os.path.normpath(b).rstrip("/") or "/"
     if na == nb:
         return True
+    # ⚠ KNOWN ASYMMETRY WITH THE OTHER HALF OF GUARD 4, stated rather than left
+    # to be discovered. This function resolves symlinks; the absolute window it
+    # falls through to (`changed_paths.absolute_under`) matches purely
+    # LEXICALLY, for the extractor's own reason — a `realpath` pass would make
+    # the answer depend on the filesystem at read time rather than on the
+    # transcript. So a repo reachable by two spellings can be "the same
+    # directory" here and not-under-the-root there, and the refusal's
+    # "NONE of the paths it named are absolute paths under this repo" would then
+    # be false about a path that is under it by another name.
+    #
+    # NOT LIVE on either host — no managed path here resolves through a symlink
+    # into a repo root — and both errors point the safe way (under-report, never
+    # invent). Closing it means choosing ONE frame for the whole guard, which is
+    # a change to the shared extractor's stated policy and does not belong in a
+    # local fix. If a session ever reports a surprising empty window, look here.
     return os.path.realpath(na) == os.path.realpath(nb)
 
 
@@ -1396,11 +1460,19 @@ def collect_session_paths(
       1. the transcript RESOLVES        TranscriptMissingError / ...Ambiguous
       2. its mtime is LIVE              TranscriptStaleError
       3. it READS as a session          TranscriptUnreadableError
-      4. its cwd IS this repo           TranscriptCwdMismatchError
+      4. its cwd IS this repo …         TranscriptCwdMismatchError
+         …or it named ABSOLUTE paths under this repo, which is the OTHER window
+         this function returns (`window="session-absolute"`). (4) raises only
+         when BOTH are false.
 
     (3) must precede (4): an unreadable transcript yields `cwd == ""`, so a cwd
     check placed first would fire for it and the unreadable case's own test would
     pass on a neighbour's error — green with the guard it claims to test deleted.
+
+    🔴 TWO WINDOWS, ONE TRANSCRIPT, DIFFERENT CAVEATS. A cwd match gives the full
+    session window. A mismatch gives the absolute subset — a FLOOR, since the
+    session's relative paths name a tree the transcript does not identify — and
+    the two must never be described in each other's words. See `PathSource.window`.
 
     Falling back to git on any of these would answer a question the caller did
     not ask, with a window that overlaps enough to look right.
@@ -1458,7 +1530,14 @@ def collect_session_paths(
     # stays because the two are separate claims in the extractor's own contract,
     # and an extractor that ever reported one without the other would otherwise
     # be believed.
-    rollup = tailer.summarize_transcript(str(path))
+    #
+    # The repo frame is resolved BEFORE the read, because the extractor needs it:
+    # the absolute window (guard 4) is computed inside the extractor from the raw
+    # path set, which never leaves it. This moves a `git rev-parse` ahead of
+    # guards 3–4 and nothing else — the CWD COMPARISON, which is what the guard
+    # order is about, still happens below, after the readability verdict.
+    toplevel = str(_toplevel(repo))
+    rollup = tailer.summarize_transcript(str(path), absolute_root=toplevel)
     observed = rollup.get("changed_paths")
     if rollup.get("unreadable") or observed is None:
         raise TranscriptUnreadableError(
@@ -1467,22 +1546,115 @@ def collect_session_paths(
             f"than an empty window that reads as 'this session touched nothing'"
         )
 
-    # --- guard 4: it is THIS repo ------------------------------------------------
-    # The frame, resolved exactly as the git source resolves it: every path the
-    # extractor emits is relative to the session cwd, so unless that cwd IS the
-    # repo root, the paths are repo-relative to a different repo and would
-    # resolve — silently, plausibly — against this repo's index.
-    toplevel = str(_toplevel(repo))
+    # --- guard 4: it is THIS repo, or the ABSOLUTE subset that provably is ------
+    #
+    # 🔴 THE GUARD IS A FRAME CHECK, NOT A PROVENANCE CHECK — and stating it as
+    # the latter is what made it over-refuse for months. The extractor's DEFAULT
+    # window reads every entry against the session's cwd, so when that cwd is
+    # another repo the RELATIVE entries are repo-relative to the wrong tree and
+    # would resolve here silently and plausibly. That half is unchanged and must
+    # stay: `src/a.py` in session-cwd A and `src/a.py` under repo B are unrelated
+    # strings that happen to spell the same thing.
+    #
+    # What was false is the generalisation. A transcript entry is the tool call's
+    # own `file_path`, which is ABSOLUTE whenever the caller passed an absolute
+    # path — and an absolute path that resolves under THIS repo needs no
+    # inference to attribute, whatever cwd the session ran in. Those paths were
+    # discarded by a refusal whose stated reason — "every path in a transcript is
+    # relative to the session's own cwd" — was not true of them.
+    #
+    # 🔴 THE YIELD IS ~30 CROSS-PROJECT PATHS, NOT THE 112 THAT MOTIVATED THIS.
+    # The 112 was an over-count and is RETRACTED — do not re-derive it. It came
+    # from treating every top-level directory under ~/workspace as a distinct
+    # project, so devrc's own sibling WORKTREE directories (`devrc-fix443`,
+    # `devrc-clickup`, `devrc-clawgate-ext`, …) each counted as "another repo".
+    # Reconciled on the recent-120 window:
+    #
+    #     185  absolute, outside cwd, under ~/workspace
+    #     -97  the SAME repo reached from one of its worktrees
+    #     = 88  in a different top-level directory
+    #     -58  of which are devrc-* sibling worktrees, still the same project
+    #     = 30  genuinely cross-project (24 homelab->civit, 6 homelab->devrc)
+    #
+    # Independently corroborated here over the 636 transcripts `iter_transcripts`
+    # walks: 3,913 distinct paths, 543 under cwd (13.9%, matching the extractor's
+    # own 14.3% figure), 33 absolute under another ~/workspace repo — 29 distinct
+    # (repo, path) pairs. Same order as 30, by a different script.
+    #
+    # 🔴 THE REWRITE DOES NOT REST ON THAT NUMBER AT ALL. It rests on the
+    # refusal's stated reason being FALSE, which needs no yield figure. The
+    # same-repo-from-a-worktree case above is worth its own note: those 97 are
+    # not cross-project, but they were ALSO refused, and this window answers them
+    # too — which is where most of the practical benefit on this host actually
+    # comes from.
+    #
+    # So a cwd mismatch now falls through to the absolute window instead of
+    # refusing outright, and refuses only when that window is EMPTY, which is the
+    # case the original message actually described.
     session_cwd = rollup.get("cwd") or ""
     if not _same_dir(session_cwd, toplevel):
-        raise TranscriptCwdMismatchError(
-            f"transcript cwd does not match: session {label} ran in "
-            f"{session_cwd or '(no cwd recorded)'}, but --repo resolves to {toplevel}. "
-            f"Every path in a transcript is relative to the session's own cwd, so "
-            f"reporting them against this repo would associate another repo's work here. "
-            f"USE A DIFFERENT SOURCE, not a different uuid: the session ran elsewhere, "
-            f"so this repo's git window is empty too. Re-run with --pr <n>[,<n>...] or "
-            f"--commit <sha>[,<sha>...] over what you landed here."
+        absolute = rollup.get("changed_paths_absolute") or []
+        # 🔴 ONE ACCOUNTING, QUOTED BY BOTH EXITS. This guard leaves two ways —
+        # a refusal and a window — and they owed the reader different numbers:
+        # the refusal named all three counters, the note named two, and the
+        # dropped one (`outside_cwd`) meant a reader adding up the note's figures
+        # reached a SMALLER session than the one on disk. Built here, once, so
+        # the two cannot drift apart again.
+        #
+        # `total` and `outside` PARTITION the distinct set — the extractor pins
+        # `total + outside_cwd == files_modified` — so they are safe to add.
+        # `abs_total` is NOT a third part: it re-reads paths already counted in
+        # one of those two, under a different root, and in the nested case (a
+        # session cwd inside the repo, or the reverse) it can overlap EITHER.
+        # Hence the explicit warning rather than a subtraction that would be
+        # wrong exactly when someone most wants the number.
+        abs_total = rollup.get("changed_paths_absolute_total")
+        total = rollup.get("changed_paths_total")
+        outside = rollup.get("changed_paths_outside_cwd")
+        distinct = rollup.get("files_modified")
+        accounting = (
+            f"of {distinct} distinct path(s) this session named, "
+            f"{total} path(s) expressible relative to that cwd and {outside} outside it"
+        )
+        if not absolute:
+            raise TranscriptCwdMismatchError(
+                f"transcript cwd does not match: session {label} ran in "
+                f"{session_cwd or '(no cwd recorded)'}, but --repo resolves to {toplevel}, "
+                f"and NONE of the paths it named are absolute paths under this repo — "
+                f"{accounting}, and every one of them belongs to a tree this repo cannot "
+                f"claim; re-anchoring them here would associate another repo's work with "
+                f"this one. "
+                f"USE A DIFFERENT SOURCE, not a different uuid: the session ran elsewhere, "
+                f"so this repo's git window is empty too. Re-run with --pr <n>[,<n>...] or "
+                f"--commit <sha>[,<sha>...] over what you landed here."
+            )
+        paths, dropped = _filter_excluded(absolute, exclude)
+        notes = [
+            f"{abs_total} path(s) named ABSOLUTELY by this session and resolving under "
+            f"{toplevel} — that is the window below. The session itself ran in "
+            f"{session_cwd or '(no cwd recorded)'}: {accounting}. The first group is "
+            f"EXCLUDED here, because a relative path names no tree. 🔴 The two groups "
+            f"partition the {distinct}; the {abs_total} above OVERLAPS them — it re-reads "
+            f"paths already counted there, under this repo's root — so do not add it in"
+        ]
+        if rollup.get("changed_paths_absolute_truncated"):
+            notes.append(
+                f"🔴 TRUNCATED at the extractor's cap of {rollup.get('changed_paths_cap')} "
+                f"— the list is a lexicographic PREFIX of "
+                f"{rollup.get('changed_paths_absolute_total')} paths, so a late-sorting "
+                f"subtree may be missing entirely"
+            )
+        if dropped:
+            notes.append(_exclusion_note(dropped))
+        notes.append(f"transcript: {path}")
+        return PathSource(
+            kind="session",
+            window="session-absolute",
+            paths=tuple(paths),
+            commands=(("git", "rev-parse", "--show-toplevel"),),
+            notes=tuple(notes),
+            session=label,
+            session_cwd=session_cwd,
         )
 
     paths, dropped = _filter_excluded(observed, exclude)

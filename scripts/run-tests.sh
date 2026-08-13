@@ -325,6 +325,13 @@ HERMETIC_TARGETS=(
   # suppression predicate is gated here rather than left to the ungated hand-rolled
   # scripts beside it.
   scripts/claude-hooks/tests/test_next_step_nudge.py
+  # Same reason again — a FILE, not the directory. This one gates the DELIVERY seam
+  # rather than a hook's own logic: that register-nudge-hook.py is deployed, that a
+  # switch actually RUNS it, and that the run leaves the right end state in a
+  # throwaway settings.json without ever clobbering a foreign Stop hook. It exists
+  # because #452's hook shipped to both hosts and sat inert — every component was
+  # tested, the seam between them was owned by nobody.
+  scripts/claude-hooks/tests/test_registrar_activation.py
 )
 
 # --- DEV-HOST-ONLY set ---------------------------------------------------------
@@ -765,7 +772,15 @@ TARGET_FLOORS=(
   # ⚠ Two sibling branches also add tests today and will conflict HERE. Do not reconcile
   # the two sides by hand: re-run the gate on the MERGED tree and copy what it prints
   # (`rerere` has replayed a stale resolution onto this line before).
+  #
+  # 2026-08-13, MERGED with main (#465's registrar target below, #459, #463). Both sides
+  # of this conflict are KEPT — they pin different targets — and the number was re-read
+  # from the gate run on the MERGED tree, not carried over from the branch measurement.
   "scripts/claude-hooks/tests/test_next_step_nudge.py|116"
+  # 2026-08-13, the registrar's DELIVERY seam arrives as a NEW target: 17 collected.
+  # Gate's own count through the gate's own rule:
+  #   _suggested_floor 17 = 17 - min(50, max(1, 17/20 = 0 -> 1)) = 17 - 1 = 16.
+  "scripts/claude-hooks/tests/test_registrar_activation.py|16"
 )
 
 # The allowance rule, in one place, used by BOTH the drift message and anyone
