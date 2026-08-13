@@ -7,305 +7,193 @@ python3 ~/workspace/devrc/scripts/lib/subsystem_recall.py --repo ~/workspace/dev
 Terse pointers this doc does not carry, curated by past sessions and outliving it — the
 `devrc/subsystem-index` entry describes the very tooling below. 🔴 RECALL, NOT LIVE
 OBSERVATION: every line is a pointer to VERIFY, never a current reading, and it may describe
-a gotcha already fixed. Non-blocking — if it exits non-zero, print the stderr line and carry
-on. **Two measured sessions skipped this because it was only reachable via `/resume`; it is
-here because reading this doc is the one thing both of them did first.**
+a gotcha already fixed. `scope-absent`/`scope-empty` means nothing recorded yet: ordinary,
+not an error, not a clean bill of health. Non-blocking — if it exits non-zero, print the
+stderr line and carry on. **Two measured sessions skipped this when it was only reachable via
+`/resume`; it is here because reading this doc is the one thing both of them did first.**
 
 ## Goal
 A durable store for subsystem data + history with clean Claude Code integration.
-**Built, deployed, verified end to end.** The read half is now cheap enough to run every
-`/resume` and searchable. What remains is a short list of decisions, not a build.
+**Built, deployed, verified at the consumer on both hosts.** The read half is cheap enough to
+run every `/resume`, searchable, and survives a malformed entry. What remains is measurement,
+not a build.
 
 ## State now
 
-- **Branch:** `main` at `6eaeb61`, clean tracked tree (4 untracked: `.envrc`, `.opencode/`,
+- **Branch:** `main` at `d01cf23`, clean tracked tree (4 untracked: `.envrc`, `.opencode/`,
   `claudedocs/proposed-rules-cut/`, `nix/system/apply-nebula-443.sh.LOCAL-preserved-2026-08-02`).
-- **Merged this session:** `#436` step-4 probe-first + cwd-mismatch routing · `#418` the
-  previous revision of this doc · `#440` the recall **digest** · `#441` the reopening-gate
-  correction · `#442` `--search` + the 100-cap paginated index.
-  (`#437` clawgatectl, `#438` clickup, `#439` clawgate stuck-detector landed from other sessions.)
-- **Deploy:** `ship.sh rc=0` — both hosts converged and **verified**, 429 (workbench) / 391
-  (laptop) managed artifacts checked, **0 dangling on either**. `drift-check.sh` clean.
-- **`/resume` step 4 verified end to end** against the deployed artifact, not the repo:
-  `~/.claude/skills/resume/SKILL.md` resolves into `/nix/store/…-devrc-claude-skills/` and is
-  `cmp`-identical to `origin/main`. Everything dirty is untracked, so the flake source *is*
-  `origin/main`.
+- **Merged this session (10):** `#436` step-4 probe-first · `#418` prior revision of this doc ·
+  `#440` the **digest** · `#441` reopening-gate correction · `#442` `--search` + 100-cap
+  pagination · `#446` kickoff `/resume` prefix · `#448` decline-on-content-not-cost ·
+  `#449` malformed entry no longer kills a scope · `#457` index read moved into the doc ·
+  `#459` the `session-absolute` window.
+- **Deploy:** `ship.sh rc=0` — both hosts converged + verified, **440 (workbench) / 402
+  (laptop) managed artifacts, 0 dangling**. Verified at the consumer, not inferred.
+- **Store:** 34 entries · 5 scopes · **all 5 now have a README** (was 1 of 5) · 0 remotes.
+- **Worktrees:** 61 → 13. The 2026-08-13 sweep is DONE: 22 dropped, 1 kept (`#355`), 1
+  salvaged (→ `#447`). Full 23-row evidence table is in git history at `d1cc0ba`; the 8
+  detached heads are preserved as `preserved/*` tags **on origin**
+  (`git ls-remote --tags origin 'preserved/*'`).
 
-### The numbers that were the point
+### Numbers that were the point
 ```
-30 entries
-  by scope:      civitai 1 · civitai-app-starters 1 · datapacket-talos 26 · devrc 1 · homelab-talos 1
-  by created_by: analyze-service 1 · handoff 8 · unstamped 21
+34 entries — civitai 2 · civitai-app-starters 1 · datapacket-talos 27 · devrc 2 · homelab-talos 2
+by created_by: analyze-service 1 · handoff 12 · unstamped 21
 ```
-Anchor recorded before any second writer existed: **21 entries · 1 scope · 21 unstamped.**
-Five scopes now, three of which did not exist this morning.
+Anchor before any second writer existed: **21 entries · 1 scope · 21 unstamped.**
 
-**`/resume` step 4 cost: 7,871 → ~1,212 tokens (84.6% less) AND strictly more complete** —
-lists all entries instead of hiding 13 of 25 behind a `--limit 12`.
+**`/resume` step 4: 7,871 → ~1,212 tokens (84.6% less) AND strictly more complete** — lists
+every entry instead of hiding 13 of 25.
 
 ## Open investigations — live diagnosis state
 
-### `--session` throws away cleanly-attributable paths, and its refusal states a falsehood
-🔴 **OPEN — fix written and audited, NOT merged and NOT deployed.** PR **#459**, branch
-`subsystem-touch-absolute-window`. Until it merges *and* a `ship.sh` switch runs, both hosts
-still refuse every cross-repo session, and `~/.claude/skills/handoff/` still carries the false
-sentence. Merged ≠ deployed; a struck-through "FIXED" here would be exactly that error.
-- **Symptom + exact repro:** a session whose cwd is repo A but whose edits are absolute paths
-  into repo B was refused: `subsystem-touch: transcript cwd does not match: session <id> ran in
-  <A>, but --repo resolves to <B>.` Reported twice in one day by two different agents.
-- **Observed (with values):** the refusal's stated reason — *"Every path in a transcript is
-  relative to the session's own cwd"* — is **false**. Paths come from the tool call's
-  `file_path`, which is absolute when the caller passed one; `changed_paths.to_repo_relative()`
-  already accepts absolutes and buckets outside-cwd ones into `outside`, of which only
-  `len(outside)` was emitted.
-- **Ruled out:** that this is the "four blind windows" story. In the first report the session
-  had **1 file-tool call in 158 records** (the handoff doc itself), 0 subagent turns, 0
-  file-writing `Bash` — no window was hiding work. In the second the agent correctly fell
-  through to `--commit` and wrote a good first entry for `homelab-talos`. **Both agents
-  behaved correctly; the guard's outcome was right and its stated reason was wrong.**
-- **Fix, as built:** `changed_paths.absolute_under(paths, root)` is a SECOND frame — entries
-  that are `posixpath.isabs()` **and** lexically under `root`, made root-relative, reusing
-  `to_repo_relative`'s prefix test so the sibling-directory trap cannot be reintroduced. The
-  claude tailer takes an opt-in `absolute_root` and returns the computed block; the RAW path
-  set never leaves the extractor, and `run()` never opts in, so the emitted ClickHouse payload
-  is byte-identical. `collect_session_paths` falls through to that window on a cwd mismatch
-  and raises only when it is **empty**. A relative path is still never re-anchored — that is
-  the safety property and it is unchanged.
-- 🔴 **THE 112 IS RETRACTED — the cross-project yield is ~30. Do not re-derive 112.** It
-  counted any absolute path under `~/workspace` outside cwd, and its `repo_of()` treated every
-  top-level directory as a distinct project — so devrc's own sibling WORKTREE directories
+### Is the worktree-path bucket worth closing? — UNMEASURED, do not build on my numbers
+- **Symptom:** a session whose edits all land in a throwaway worktree gets
+  `status=looked-at-nothing` from `--session`. Seen **4×** today; most recent: 0 paths under
+  cwd, **23 outside**, all worktree paths (civitai scope).
+- **Observed:** `#459` does **NOT** fix this. Its window reports paths lexically under
+  `--repo`; a worktree at `/tmp/…/wt-x/src/foo.ts` is not. Measured bucket: **143 of 945**
+  outside-cwd paths were temp worktrees, of which only **32 still existed on disk** — and 38
+  such worktrees were deleted the same day. The correct source today is `--pr` / `--commit`,
+  which is what all 4 sessions used.
+- 🔴 **Ruled out — my own motivating number was WRONG.** I claimed 112 cleanly-attributable
+  cross-repo paths. Actual derivation: 185 loose → −97 same-repo-from-a-worktree → 88
+  different top-level dir → −58 `devrc-*` **sibling worktree directories of devrc itself**
   (`devrc-fix443`, `devrc-clickup`, `devrc-clawgate-ext`, `devrc-cutguard`, `devrc-458fix`,
-  `devrc-fix444`) each counted as "another repo". Reconciled on the recent-120 window:
+  `devrc-fix444`) → **30 genuinely cross-project** (24 `homelab→civit`, 6 `homelab→devrc`).
+  Corroborated independently at 33. The bug was `repo_of()` treating every top-level dir under
+  `~/workspace` as a separate project — a label claiming more than its predicate tested.
+  **The 112 is RETRACTED; do not re-derive it.**
+- **Leading hypothesis:** the practical win from `#459` is mostly the **97 same-repo-from-a-
+  worktree** paths, not the 30 cross-project ones. Worktree→repo mapping is fragile by
+  construction — nothing in a transcript maps a worktree back to its repo, and the worktree is
+  usually already gone.
+- **Next probe (verbatim):** before building anything, measure the yield —
+  `python3 scripts/lib/subsystem_touch.py --repo <r> --session <uuid>` on a worktree-only
+  session, and read `changed_paths_outside_cwd` against what `--pr` recovers for the same work.
 
-  | step | paths |
-  |---|---|
-  | absolute, outside cwd, under `~/workspace` | 185 |
-  | − the SAME repo reached from one of its worktrees | −97 |
-  | = in a different top-level directory | 88 |
-  | − devrc-* sibling worktrees, still the same project | −58 |
-  | **= genuinely cross-project** | **30** (24 `homelab→civit`, 6 `homelab→devrc`) |
-
-  Corroborated at **33** (29 distinct repo/path pairs) by a second script over the 636
-  transcripts `iter_transcripts` walks — 3,913 distinct paths, 543 under cwd (13.9%, which
-  reproduces the extractor's own 14.3%). **The rewrite rests on the refusal's stated reason
-  being false, which needs no yield figure at all.** Note the 97 same-repo-from-a-worktree
-  paths were *also* refused and are *also* answered now — on this host that is where most of
-  the practical benefit comes from, and it is not a cross-project number.
-- **Not designed around:** the temp-worktree paths. Mostly unrecoverable, and 38 such
-  worktrees were removed this session.
-
-### The >2-page index shape has never existed in real data
-- **Symptom:** three shipped defects in `#442`'s pagination, all invisible to a green
-  3,679-test suite.
-- **Observed:** largest real scope is 26 entries against a 100-line cap, so the feature's own
-  boundary was unreachable from live data. Found only by building a synthetic 150- and
-  250-entry scope. Root cause of the worst one: the truncation notice was gated on
-  `listing_total > len(listing)` — *"this page is not the whole index"*, true on the last page
-  too — so page 2 of 2 announced 100 phantom entries and routed to `--page 3`.
-- **Ruled out:** that a green gate says anything here. It was green through all three.
-- **Next probe:** when any scope crosses 100 entries, re-run the four page cases against the
-  real store (`--page 1/2/last/past-end`) rather than trusting the synthetic tests.
+### The doc hook FIRED on its first exposed continuation — n=1, and that 1 is contaminated
+- **Symptom:** the index read is skipped by sessions started from a kickoff block.
+- 🔴 **Every earlier zero was measured PRE-EXPOSURE — the fix had n=0, not n=2.** `#457` put
+  the block in the doc at **20:36Z**. Reconstructing each session's actual `Read` *result* and
+  grepping it for `Run this first`: `d5db63c4` read the doc 3× (17:54Z, 18:02Z, 19:34Z) — all
+  before 20:36Z, hook absent from every one. `e98279bd`'s later read (22:27Z) was
+  `offset:140, limit:95` and never saw the top of the file. **Exposure is a property of the
+  READ, not of the session's start time — check the tool_result, not the clock.**
+- **Observed (2026-08-13, session `4a7d5bf8`, the FIRST exposed continuation):** read the doc
+  at turn 1 → ran `subsystem_recall.py --repo` as its **first Bash call**, before any other
+  work. `Skill` calls **0** (so `/resume` never loaded — the prefix is still inert as prompt
+  text). Attribution is clean: `subsystem_recall` appears in **zero** always-loaded surfaces
+  (`~/.claude/{CLAUDE,RULES,PRINCIPLES}.md`, `devrc/CLAUDE.md`, `MEMORY.md`); the only surface
+  naming it is the `/resume` skill body, which was never loaded. **The doc was the sole path.**
+- 🔴 **Contaminated — do not read this as an adoption rate.** That session's kickoff said
+  *"measure whether the doc hook actually fires"*, which primes the behaviour being measured.
+  It establishes the mechanism is **capable** of firing unaided by `/resume`; it does **not**
+  establish that a session with an ordinary kickoff will run it. **n=1 uncontaminated: 0.**
+- **Ruled out:** that the `/resume` prefix alone suffices (`#446`'s claim, retracted in
+  `#457`). A subagent receives the kickoff as prompt TEXT — no CLI slash-command parsing.
+- 🔴 **Ruled out — counting MENTIONS is not the measurement.** A grep showed `recall=3
+  touch=60` and read as success; parsing actual `tool_use` calls gave **0** recall executions.
+  The 60 were the agent *editing* `subsystem_touch.py`.
+- 🔴 **Parsing `tool_use` is NOT sufficient either — three false-positive modes survive it,**
+  found only because the probe reported **5** for a session known to have run it **once**:
+  (a) **substring containment** — `test_subsystem_recall.py` contains `subsystem_recall.py`,
+  so every `pytest` run and every `git add` of the test file counted; (b) **heredoc bodies** —
+  `python3 - <<'PY' … PY` reads its script from *stdin*, so the body is DATA, yet splitting the
+  command on newlines turns each mentioning line into a fake invocation; (c) `python3 -m
+  pytest <path>` / `python3 -c`. Require an **exact basename match** on a token that is the
+  script argument, strip heredoc bodies first, and reject `-c`/`-m`/`-`.
+- **Instrument validation that the numbers rest on** — three controls, all watched:
+  negative (6 mentions, 0 executions) · false-positive (5 mentions in the shapes above, 0) ·
+  positive (4 distinct invocation shapes, 4/4). Plus a live control: the measuring session's
+  own ground truth of exactly 1 read back as exactly 1. **The pre-fix probe passed the
+  positive control and would still have been wrong** — it had no false-positive control.
+  The probe itself lives only in that session's scratchpad and is **gone**; the recipe above
+  is the durable form. Land it under `scripts/lib/` if this gets measured a third time.
+- **Next probe (verbatim):** dispatch an agent with an ORDINARY kickoff block — one that names
+  the doc and a next step but says nothing about the index, the hook, or measurement — then
+  parse its transcript for `subsystem_recall.py` executions. That is the uncontaminated `n=1`
+  the current result is missing, and it re-tests the dispatched-agent case `#446` failed.
 
 ## Next steps (ranked)
-
-1. ~~Diffed and decided.~~ **DONE AND EXECUTED 2026-08-13.** All 23 diffed (verdict table below):
-   **22 dropped, 1 kept (`#355`), 1 salvaged.** Worktrees 24 → 10; the residue is `#355`, this
-   base clone, and worktrees other sessions created *after* the survey — deliberately untouched,
-   because the removal script re-verified each path's HEAD and cleanliness at the moment of
-   removal rather than trusting the hour-old list, and skipped anything it did not adjudicate.
-   🔴 **Every dropped detached HEAD is preserved as a `preserved/*` tag, pushed to origin**
-   (8 tags — `git ls-remote --tags origin 'preserved/*'`). Branch-backed drops keep their refs.
-   Six were blocked by an untracked one-line `use opencode` `.envrc`; that was verified to be
-   their *only* content, removed, and the **plain** (non-`--force`) remove retried.
-2. **Salvage two rules from `zach/rules-multiagent-lessons` (`ea82146`) — PR #447, open.**
-   `cross-repo-worktree` and `sibling-agent-kill` were absent from BOTH `claude/RULES.md` and
-   `claude/RULES-ARCHIVE.md`. 🔴 **Four audit rounds, four real defects — and every defect after
-   round 1 was in a caveat the fix rounds ADDED, never in the recovered material** (`ea82146`'s
-   bodies have been `cmp`-identical since `ff9589b`). The recurring error class, four times:
-   stating an inference as an observation inside a paragraph headed "Measured". If a further
-   round faults the caveat layer again, cut it — ship the verbatim recovery plus the one
-   twice-verified point (compare the EXACT worktree path, not a prefix) and move the
-   descendant/`PPid` analysis to its own issue.
-3. **Merge and ship the `--session` absolute-path window — PR #459, OPEN, audit-clean.**
-   Written, gated on both tiers, adversarially audited (no deploy-blocking findings) and
-   **not merged**. 🔴 **Nothing is live until `ship.sh` runs**: `~/.claude/skills/handoff/`
-   is a nix-store symlink, so both hosts keep refusing cross-repo sessions — and keep serving
-   the false sentence to every agent — until merge → pull → switch. Verify AFTER that, not
-   before: run `--session <uuid>` with `--repo` pointing at a repo the session did *not* run
-   in, and read the `window:` + `caveat:` lines. `session-absolute` is a **FLOOR**, not a
-   list. Its cross-project yield is ~30 paths, not the 112 that motivated it (retracted;
-   derivation above) — so if the census stalls, look here before blaming the writers.
-4. **Watch the census.** `python3 scripts/lib/subsystem_touch.py --census`. 21→30 across 5
-   scopes with 8 handoff-written and now 1 `analyze-service`-written. If it stalls, the
-   writers are not sticking.
-5. Investigate the `empty` cwd bucket (155 of 290 path-carrying sessions, `depth=4`,
-   `/a/b/empty`); decide the opencode stringified-path question (`str(["a.py"])` is accepted
-   by `to_repo_relative`; zero occurrences in the emitted corpus — the path exists, has never
-   fired).
-6. **The floors line in `scripts/run-tests.sh`** has conflicted on ~9 consecutive PRs. Worth
+1. **Get the UNCONTAMINATED doc-hook sample** (probe above). The hook fired on its first
+   exposed continuation, but that session was told it was being measured. One dispatched
+   agent with an ordinary kickoff settles it; until then the adoption rate is unmeasured,
+   not zero and not one.
+2. **Decide the worktree bucket** — measure the yield first (probe above). I was wrong about
+   exactly this class of number today.
+3. **Watch the census.** `python3 scripts/lib/subsystem_touch.py --census`. 21 → 34 across 5
+   scopes, 12 handoff-written + 1 analyze-service-written. If it stalls, writers aren't sticking.
+4. Investigate the `empty` cwd bucket (155 of 290 path-carrying sessions, `depth=4`); decide
+   the opencode stringified-path question (`str(["a.py"])` is accepted by `to_repo_relative`;
+   zero occurrences in the emitted corpus — the path exists, has never fired).
+5. **The floors line in `scripts/run-tests.sh`** has conflicted on ~9 consecutive PRs. Worth
    measuring separately.
-
-## Worktree verdict — 2026-08-13, all 23 diffed
-
-**Method, and why the obvious diff is the wrong one.** `git diff origin/main <head>` is
-dominated by what **main** added since the branch forked — it reported 100–500 changed files
-for branches that touched 3, and reads as "lots of unique work" when the arrow points the
-other way. The measurement that answers the question is: **take the lines the branch ITSELF
-added (`merge-base..head`), and count how many are present in main's current tree.** Script
-kept at `scratchpad/landed.sh`.
-
-🔴 **The instrument was validated before its verdicts were read** — positive control
-`c8b9f8d` (`#442`, known merged) → **100%**; negative control `ed17f4f` (`#355`, never
-merged) → **2%**. It discriminates. The first run of it was also *wrong* (`grep -c` emitting
-`0` twice into an arithmetic context) and the negative control is what exposed that.
-🔴 A **low score is not proof of lost work** — reworded, restructured and *retired-path*
-content all score low. Every head under ~95% was opened and read; the verdict below is from
-the reading, not the number. Two grep traps fired during that reading and were caught by
-controls: `\|` under `grep -E` (literal, not alternation) and a `&&`-chain whose "file does
-not exist" message actually meant "count was 0".
-
-### Ancestry collapses 5 outright (no diffing needed)
-`91aaa21`, `52fd995` are plain `main` commits, 0 own commits. `a901486` ⊂ `9d61558` ⊂
-`80fb7f1`; `aa8fff4` ⊂ `8cb8692`; `191a336` ⊂ `5bce915`.
-
-### DROP — 22
-| worktree | head | evidence |
-|---|---|---|
-| `devrc-perm-junk` | `6974089` | `#380` merged; **100%** of its 371 added lines in main |
-| `devrc-resume-handoff` | `d2e02d4` | `#326` merged; **99%** — the only gap is `claude/commands/resume.md`, a path main **retired** |
-| `devrc-skilldocs` | `42f4022` | `#213` merged. Its 2 later commits fixed a stale "73 pass / 2 skip" e2e figure — **main's clawgate SKILL.md contains no `73` at all**, the sentence was rewritten. Fix is moot |
-| `agent-a0604347…` | `c8b9f8d` | `#442` merged; **100%** |
-| `agent-a0fc45cd…` (`p377-docfix`) | `191a336` | **99%**; also a strict ancestor of `integration-v2` |
-| `agent-a1d607f8…` (`fix361-worktree`) | `51cc025` | **99%**. Residual is *older wording* — its `die "git is not on PATH"` is in main as `die "the version-control binary is not on PATH"` |
-| `agent-ae800ad6…` (`fix361-round3`) | `a5e1f98` | **99%**; same — main's `commit.sh` has `ASI_IGNORED`/`ASI_CANDFILE`/`ASI_SORTED`/`ASI_NOHOOKS`/`cleanup()` and is the newer copy |
-| `agent-aa81bad9…` (`pr362-fix-83`) | `9404ab4` | scored **0%** only because it edits retired `claude/commands/`. Every marker of its store-safety spec is in `claude/skills/analyze-service/SKILL.md` — incl. the literal sha `60e6d9d` |
-| `agent-af19599e…` (`integration-v2`) | `5bce915` | **99%** of 4,036 added lines; an integration branch of `#377`/`#391`/`#384`/`#392`, all landed |
-| `agent-a3847d8a…`, `agent-acc29d9b…` | `91aaa21`, `52fd995` | 0 own commits — plain `main` checkouts |
-| `agent-a3c74c3d…` | `0ada9b8` | **92%**; script+tests 100%, SKILL.md restructured into `reference/*.md` |
-| `agent-a463578a…` | `80fb7f1` | **95%**; the 66 residual script lines are the superseded busy/idle/stale counter model. Its headline case IS in main — `_NO_SERVER_RE` + the doc at `scripts/session-manager:62,1432` |
-| `agent-a4f43a71…` | `ac35b32` | **99%**; 7 residual lines are prose reflow |
-| `agent-a5abb942…`, `agent-a91600df…`, `agent-af945752…` | `aa8fff4`, `a901486`, `9d61558` | strict ancestors of heads already dropped |
-| `agent-a688672b…` | `8cb8692` | **100%** |
-| `agent-a9bbee8b…` | `6b86d64` | **97%**; residual is the **pre-rename** `AGENT_IDLE_THRESHOLD_SECS`, which landed in `#439` as `STUCK_THRESHOLD_SECS` |
-| `…/scratchpad/wt-436` | `6e16ed1` | **100%** |
-| `/tmp/sa2` | `a41f3e5` | `#332` merged; **85%**. Residual is `claude/commands/prune-skill.md` (retired) plus `test_real_skills_classify_…`, a corpus test pinned to `manage-alerts`/`app-blocks` — skills that do not exist here |
-
-### KEEP — 1
-- `agent-ad6f8275…` / `airvpn-killswitch-env` `ed17f4f` — **`#355`, OPEN, marked
-  🔴 DO-NOT-MERGE-YET**. 1,607 added lines, **2%** in main. Genuinely unlanded, deliberately.
-
-### SALVAGE then drop — 1 (the case the "superseded intermediate" guess would have lost)
-`devrc-rules-lessons` / `zach/rules-multiagent-lessons` `ea82146` — `#313` **merged**, and it
-scores **1%** by bytes, which means nothing: RULES.md is continuously reworded. Measured by
-**anchor** instead, 20 of its 22 lessons are in main. Two are not, in **either** `RULES.md`
-or `RULES-ARCHIVE.md`:
-
-- 🔴 **`cross-repo-worktree`** — `isolation: "worktree"` builds the worktree from your
-  **CURRENT** repo, not the repo the task names. Dispatch at a different repo than your cwd
-  and every agent silently gets a worktree of the wrong one, with no error. Tell: an agent
-  reporting that a file named in its brief does not exist.
-- 🔴 **`sibling-agent-kill`** — filter resolved PIDs by `/proc/<pid>/cwd` to your own
-  worktree before killing; a box-wide `-f` pattern reaches a *sibling agent's* processes. One
-  auditor clearing its own hung run killed ~15 PIDs and destroyed another agent's in-flight
-  test run, whose next attempt collapsed with 0 files collected and exit 144 — both readable
-  as code defects. Main's `pgrep`/`pkill` bullet stops at `/proc/<pid>/cmdline`.
-
-Two near-misses, deliberately NOT salvaged: `cheap-control` and `count-tests` anchors are
-gone but their rule text is in main (`count-tests` → `count-not-exit-code`); `stale-gate-base`
-survives compressed inside the `merged-tree` bullet as "check how far behind main a PR is".
-
-🔴 **Removing a DETACHED worktree makes its commits unreachable and GC-able** — the 8
-detached heads had no branch ref holding them. **Done: tagged before removal, and the tags
-are on ORIGIN** — `git ls-remote --tags origin 'preserved/*'` returns all 8
-(`0ada9b8 80fb7f1 ac35b32 aa8fff4 8cb8692 a901486 6b86d64 9d61558`). Branch-backed worktrees
-were safe to `git worktree remove` — the ref keeps the commits.
-
-🔴 **A LOCAL tag is not a backup.** These sat local-only for the first hour after the drops,
-so the reversibility this section promised did not actually exist: one disk failure and the
-22 "superseded" calls become unfalsifiable. Whatever you preserve before a destructive sweep,
-**push it and then read it back from the remote** — `ls-remote` is the check, not `git tag -l`.
 
 ## Gotchas / decisions / dead-ends
 
-- 🔴 **`nix build` returns a CACHED result silently** — 0-byte log, exit 0, and `grep FAILED`
-  matches nothing. That zero is indistinguishable from "no failures". Use `--rebuild` to force
-  a genuine re-run, but **`--rebuild` errors on a drv that was never built** (`some outputs …
-  are not valid, so checking is not possible`). For a cached drv, `nix log <drv>` *is* the real
-  build output. A valid cached output is itself proof the suite passed — `flake.nix:268` fails
-  the derivation when `run-tests.sh` exits non-zero.
-- 🔴 **A pytest failure does NOT print `FAILED` here.** The runner uses `-q … -rs`
-  (`run-tests.sh:1015`), which overrides the short summary to skips only. Look for
-  `=== FAILURES ===`, the pytest summary line, and `FAIL  <dir>  (… failed=N …)`. Runner lines
-  are prefixed `devrc-pytests>`, so **never anchor a grep at `^`** — that silently matched
-  nothing here and would have read as green.
-- 🔴 **Never pipe `ship.sh` or a gate to `tail`** — the pipe destroys the exit status. Reported
-  `exit 0` over a real `rc=12` this session. Redirect to a file and echo `$?`.
-- 🔴 **`nix build --rebuild` ERRORS on a drv whose previous build FAILED** — *"some outputs …
-  are not valid, so checking is not possible"*. It re-checks a valid cached output; it cannot
-  re-run a failure. After a red gate, plain `nix build` already rebuilds (there is no valid
-  output to reuse), so drop the flag.
-- 🔴 **Attribute an unrelated red test STRUCTURALLY, not by "load" — and check whether wall
-  time actually supports the load story before telling it.** One #459 gate run showed
-  `browser-bridge … failed=1` (`test_gate_reads_from_a_file_not_a_pipe`, a 60 s
-  `TimeoutExpired`). The honest attribution is **there is no import or exec edge from the
-  changed modules to `scripts/browser-bridge/`** — three independent 493/493 runs (control at
-  `main`, a re-run of the branch, and the integration gate) merely corroborate it. The load
-  story was *weaker than it looked*: 238 s versus 164 s at load 12.6 is **1.45×**, nowhere
-  near the ~15× this repo's own rule uses to call a run load-bound. A ratio that small is
-  evidence *against* the explanation you were about to give.
+- 🔴 **Never read an exit status through a pipe.** `cmd | tail; echo $?` gives tail's status.
+  This reported `ship.sh` as green when it was **rc=12** — and that ignored rc=12 was a real
+  broken managed artifact which sat for 15h and later **failed a switch outright (rc=9)**.
+- 🔴 **`nix build` returns a CACHED result silently** — 0-byte log, exit 0, `grep FAILED`
+  matches nothing. `nix log <drv>` is the real output for a cached drv. `--rebuild` forces a
+  re-run but **errors on a drv never built** *and* on one whose previous build failed. A valid
+  cached output is itself proof the suite passed (`flake.nix:268` fails the derivation).
+- 🔴 **A pytest failure does NOT print `FAILED` here** — the runner uses `-q -rs`. Look for
+  `=== FAILURES ===`, the summary line, and `FAIL  <dir>  (… failed=N …)`. Runner lines are
+  prefixed `devrc-pytests>`, so **never anchor a grep at `^`**.
 - 🔴 **`rev-list origin/main..HEAD` is NOT a merged-ness test.** A squash merge never makes the
-  branch head an ancestor, so it stays non-zero forever — it flagged **all 52** worktree
-  branches as unmerged work. Classify by PR state (`gh pr list --state all --json
-  headRefName,state`) or by `git diff origin/main <head>` being empty.
-- 🔴 **A deploy can delete an unmanaged directory.** A `ship.sh` switch removed
-  `~/.claude/skills/clickup` — described in `home.nix:1201` as a *"standalone repo"* and the
-  only copy. Recovered only because `#438` had committed 32 of its files hours earlier; its
-  nested `.git` was **not** captured and is gone. Check what a switch will touch before
-  running one over an unmanaged path.
-- **Four path sources, blind in opposite directions — never merge their outputs.** git window:
-  misses work merged during the session. `--session`: misses **subagent** work (196 of 733
-  file-tool calls), `Bash`-written files, worktree-mandated repos, cross-repo sessions.
-  `--pr`: sees subagents, but is the **branch union** and misses direct pushes (144 of 200
-  recent `datapacket-talos` trunk commits carry no `(#N)`). `--commit`: the primitive the
-  others reduce to. The flags are argparse-exclusive on purpose.
-- **`Edit` vs `Write` on an entry, MEASURED:** `Write` silently loses a concurrent append;
-  `Edit` is bounded so the other bullet survives. 🔴 It does **not** reliably fail loudly — an
-  earlier version of this rationale said it did and was wrong. The real safeguard is
-  **re-read and re-apply to current bytes**.
-- **A brand-new scope is `git init`ed, identity-seeded and committed by the store's own hourly
-  timer** — measured three times now (`homelab-talos` was unversioned when written, 1 commit
-  and 0 remotes an hour later). Do not create the repo yourself.
-- 🔴 **The store must never gain a remote**; no line of it may reach a public repo. `devrc` is
-  PUBLIC. Each scope's `README.md` is authoritative.
-- **The `st_blocks` failure was a flake and the structural-split diagnosis was WRONG** —
-  retracted, do not re-derive. `#435` fixed it. Separately: no stored gate log has **ever**
-  recorded `failed=2` (248 TOTAL lines across 271 logs: values are 0,1,3,20,27,28,29,30,144),
-  and nix keeps only the most recent log per derivation, so a red run later rebuilt green
-  loses its evidence entirely.
+  head an ancestor — it flagged **all 52** worktree branches as unmerged work. Classify by PR
+  state, or by `git diff origin/main <head>` being empty. This misled me **3×** today.
+- 🔴 **Measure "did this branch land" by branch-ADDED lines present in main
+  (`merge-base..head`), never `git diff main head`** — the latter is dominated by what *main*
+  added since the fork and reported 100–500 changed files for branches that touched 3.
+  Validate the instrument first: positive control (a known-merged head → 100%), negative
+  control (a never-merged head → 2%). **A low score is not proof of lost work** — rewording,
+  restructuring and retired paths all score low; read every head under ~95%.
+- 🔴 **A LOCAL tag is not a backup, and removing a DETACHED worktree makes its commits
+  GC-able.** Tag before a destructive sweep, **push the tags, then read them back from the
+  remote** — `git ls-remote --tags origin` is the check, not `git tag -l`.
+- 🔴 **Re-check the branch IMMEDIATELY BEFORE a write, and gate on it** — printing it in the
+  same command is not checking it. I ran `checkout --` + `merge --ff-only` on another
+  session's branch that way; `--ff-only` refusing rather than destroying is what saved it.
+- 🔴 **A failed `home-manager switch` is usually a pre-existing FOREIGN path.** A **dangling**
+  symlink still blocks `mkdir` ("File exists"). Inspect → record its target → remove → re-switch.
+- 🔴 **Front matter is parsed LINE BY LINE.** An `aliases: [...]` wrapped over two physical
+  lines reads as an unterminated bare string and **used to kill the entire scope**. `#449`
+  made the reader degrade; **always run `--validate <path>` in the same turn as a write**.
+- **Mutation found what reading did not.** 3 of the 4 highest-value findings on `#459` came
+  from mutants while the gate stayed green: a surviving `total > cap` → `>=`, a truncation
+  note whose **outright deletion survived the whole suite**, and an unkillable clause.
+- **A green gate certifies nothing broke; it never says a guard is reachable or a boundary
+  covered.** `#442` shipped 3 pagination defects past 3,679 green tests because the largest
+  real scope (26) is far below the 100 cap — the feature's own boundary was unreachable from
+  real data.
+- **`browser-bridge failed=1` was NOT load** — 1.45× wall time, not the ~15× the rule needs.
+  The decisive argument is structural: no import or exec edge from the changed modules.
+- 🔴 **The store must never gain a remote.** `devrc` is PUBLIC. The policy file governing a
+  scope is whichever the probe names on its `policy:` line — do not go looking for another,
+  and never create a scope README yourself.
 
 ## How to verify
 
 ```bash
 D=/home/zach/workspace/devrc
-# the read half — digest, index, search (READ-ONLY, never writes, no network, no subprocess)
+# read half — digest, index, search, pagination (READ-ONLY, no network, no subprocess)
 python3 $D/scripts/lib/subsystem_recall.py --repo $D
 python3 $D/scripts/lib/subsystem_recall.py --scope datapacket-talos --list
 python3 $D/scripts/lib/subsystem_recall.py --scope datapacket-talos --search "nginx ratelimit"
-python3 $D/scripts/lib/subsystem_recall.py --scope datapacket-talos --search "zzz kryptonite"  # must report NO MATCH + closest candidate
+python3 $D/scripts/lib/subsystem_recall.py --scope datapacket-talos --search "zzz kryptonite"  # must print NO MATCH + closest candidate
 
-# all four write windows (read-only; the tool never writes)
+# write windows — run separately, NEVER merge the path sets
 python3 $D/scripts/lib/subsystem_touch.py --repo $D --session <scratchpad-uuid>
 python3 $D/scripts/lib/subsystem_touch.py --repo $D --pr <n>[,...]
 python3 $D/scripts/lib/subsystem_touch.py --repo $D --commit <sha>[,...]
 
-# the FIFTH window — same flag, different repo. Point --repo at a repo the
-# session did NOT run in: `window=session-absolute` and a caveat calling it a
-# FLOOR when the session named absolute paths there, `transcript cwd does not
-# match` (naming --pr/--commit) when it named none.
-python3 $D/scripts/lib/subsystem_touch.py --repo <other-repo> --session <scratchpad-uuid>
+# after ANY entry write, in the SAME turn
+python3 $D/scripts/lib/subsystem_touch.py --validate <path-just-written>
 
-# the falsifiability counter — anchor was 21 / 1 scope / 21 unstamped
-python3 $D/scripts/lib/subsystem_touch.py --census
+python3 $D/scripts/lib/subsystem_touch.py --census      # anchor was 21 / 1 scope / 21 unstamped
 
 # every scope versioned, contained, NO remote
 for s in $(ls -d ~/.claude/analyze-service-index/*/ | xargs -n1 basename); do
@@ -313,10 +201,9 @@ for s in $(ls -d ~/.claude/analyze-service-index/*/ | xargs -n1 basename); do
   echo "$s: $(git -C $T rev-list --count HEAD) commits, $(git -C $T remote -v | wc -l) remotes"
 done
 
-# the authoritative gate — read the CONTENT, never the exit code of a pipe
+# gate — read the CONTENT, never a piped exit code
 nix build .#checks.x86_64-linux.pytests --no-link --print-build-logs > /tmp/gate.log 2>&1; echo "rc=$?"
 grep -aE 'TOTAL +collected|RESULT: (PASS|FAIL)' /tmp/gate.log
 
-# deploy + host parity (read-only deadman)
-scripts/drift-check.sh
+scripts/drift-check.sh      # read-only deploy + host-parity deadman
 ```
