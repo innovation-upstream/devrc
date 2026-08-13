@@ -266,14 +266,22 @@ class TestStatusIsTheDiscriminator:
         two statuses are exercised here too — through the same tuple, so a search
         status that stopped being emitted fails on the same line."""
         (store / "made-never-filled").mkdir()
+        # A scope whose ONLY file cannot be indexed — the `*-unreadable` pair.
+        # Its own directory, so it cannot perturb the statuses above it.
+        (store / "all-broken").mkdir()
+        (store / "all-broken" / "wrapped-aliases.md").write_text(
+            "---\nservice: widget\naliases: [one,\n  two]\n---\n", encoding="utf-8"
+        )
         seen = {
             rc.recall(store, "never-indexed").status,
             rc.recall(store, "made-never-filled").status,
+            rc.recall(store, "all-broken").status,
             rc.recall(store, SCOPE, ref="no-such-subsystem").status,
             rc.recall(store, SCOPE, ref="weekly-digest").status,
             rc.recall(store, SCOPE).status,
             rc.search(store, SCOPE, "readiness").status,
             rc.search(store, SCOPE, "kryptonite").status,
+            rc.search(store, "all-broken", "readiness").status,
         }
         assert seen == set(rc.STATUS_PRECEDENCE)
 
@@ -316,13 +324,24 @@ class TestNegativeControls:
         # NOT confused with the ordinary empty case.
         assert "nothing recorded yet" not in str(exc.value).lower() or "NOT" in str(exc.value)
 
-    def test_a_malformed_entry_RAISES_the_RESOLVERS_sentinel(self, store: Path) -> None:
-        """Fail-closed, and deliberately NOT caught here: an interactive caller
-        must be told the store is broken rather than handed a short index."""
+    def test_a_malformed_entry_DEGRADES_and_is_reported_not_raised(self, store: Path) -> None:
+        """🔴 SUPERSEDES `test_a_malformed_entry_RAISES_the_RESOLVERS_sentinel`.
+
+        That test pinned fail-closed, and fail-closed was MEASURED to cost the
+        whole scope: 2 good entries listed 2, 2 good + 1 malformed listed 0 and
+        exited 3. The reader now serves what it can AND names what it cannot —
+        both halves asserted here, because degrading without reporting is the
+        worse of the two failures.
+        """
         (store / SCOPE / "no-front-matter.md").write_text("just prose\n", encoding="utf-8")
-        with pytest.raises(sr.MalformedEntryError) as exc:
-            rc.recall(store, SCOPE)
-        assert "malformed index entry" in str(exc.value)
+        rep = rc.recall(store, SCOPE)  # must not raise
+        assert rep.status == "recalled"
+        assert rep.listing_total > 0, "the good entries were spent to report a bad one"
+        assert [m.filename for m in rep.malformed] == ["no-front-matter.md"]
+        text = rc.render_text(rep)
+        assert "malformed index entry" in text, "the sentinel must survive into the output"
+        assert "no-front-matter.md" in text, "the bad entry must be NAMED, not counted"
+        assert "none omitted" not in text, "a completeness claim over an incomplete index"
 
     def test_an_unreadable_entry_RAISES_its_own_sentinel(self, store: Path) -> None:
         """Reached with a DIRECTORY sitting where a `.md` is expected — an
@@ -2067,16 +2086,23 @@ class TestSearchNegativeControls:
         assert "store root not found" in str(exc.value)
         assert "Nothing was searched" in str(exc.value)
 
-    def test_a_malformed_entry_RAISES_rather_than_returning_a_SHORT_result(
+    def test_a_malformed_entry_DEGRADES_and_the_SHORT_result_says_so(
         self, search_store: Path
     ) -> None:
-        """Fail-closed: a search that silently skipped an unreadable entry would
-        report a zero the store cannot support."""
+        """🔴 SUPERSEDES the fail-closed version. The old objection — "a search
+        that silently skipped an unreadable entry would report a zero the store
+        cannot support" — is still exactly right, and is now answered by the
+        report rather than by the raise: the hits come back AND the skipped file
+        is named in the same output, so the result is short and SAYS it is."""
         (search_store / SEARCH_SCOPE / "no-front-matter.md").write_text(
             "just prose\n", encoding="utf-8"
         )
-        with pytest.raises(sr.MalformedEntryError):
-            rc.search(search_store, SEARCH_SCOPE, "compaction")
+        rep = rc.search(search_store, SEARCH_SCOPE, "compaction")  # must not raise
+        assert rep.status == "search-hit"
+        assert [m.filename for m in rep.malformed] == ["no-front-matter.md"]
+        text = rc.render_search(rep)
+        assert "malformed index entry" in text
+        assert "no-front-matter.md" in text
 
     def test_search_leaves_the_store_BYTE_IDENTICAL(self, search_store: Path) -> None:
         before = _tree_hash(search_store)
@@ -2324,8 +2350,17 @@ class TestRecallNeverWrites:
             rc.recall(store, SCOPE, limit=0)
         (store / SCOPE / "no-front-matter.md").write_text("prose\n", encoding="utf-8")
         after_fixture = _tree_hash(store)
-        with pytest.raises(sr.MalformedEntryError):
+        # A malformed entry no longer raises — it DEGRADES — so this arm now
+        # exercises the degraded path instead, which is the one that grew new
+        # code and therefore the one that could newly have grown a write.
+        rep = rc.recall(store, SCOPE)
+        rc.render_text(rep)
+        json.dumps(rc.report_json(rep))
+        with pytest.raises(rc.EntryUnreadableError):
+            # …and the raising arm is kept, on the condition that still raises.
+            (store / SCOPE / "broken.md").mkdir()
             rc.recall(store, SCOPE)
+        (store / SCOPE / "broken.md").rmdir()
         assert _tree_hash(store) == after_fixture
         assert after_fixture != before  # the fixture moved it; the module did not
 
@@ -3045,7 +3080,7 @@ class TestSkillDocsArePinned:
         """Derived from the module, not hand-listed. The two "nothing recorded"
         statuses are the ones a resuming agent will actually meet."""
         doc = RESUME_DOC.read_text(encoding="utf-8")
-        for status in ("scope-absent", "scope-empty"):
+        for status in ("scope-absent", "scope-empty", "scope-unreadable"):
             assert f"`{status}`" in doc, (
                 f"claude/skills/resume/SKILL.md never mentions `{status}`, which "
                 f"subsystem_recall.recall can emit and which the step must not "
@@ -4093,3 +4128,443 @@ class TestMutationKillMatrix:
         assert "RECALL, NOT LIVE OBSERVATION" in rc.render_search(
             rc.search(store, SCOPE, "readiness")
         )
+
+
+# =============================================================================
+# ONE BAD ENTRY MUST NOT COST THE WHOLE SCOPE.
+# =============================================================================
+#
+# 🔴 THE MEASUREMENT, on a synthetic store, BEFORE this change:
+#
+#     2 good entries          -> rc=0, both listed
+#     2 good + 1 malformed    -> rc=3, good entries still listed: 0
+#
+# The defect that produced it was an `aliases:` flow list wrapped across two
+# physical lines. The front-matter parser is LINE-BASED, so line 1 is an
+# unterminated `[` and reads as a bare string — and `/handoff`'s own template
+# prints `aliases:` on ONE line, so the writer had no signal and the confirm-gate
+# diff shown to the human CONTAINED the defect while being structurally
+# incapable of revealing it.
+#
+# Every fixture here is SYNTHETIC. `devrc` is PUBLIC and real entries are
+# client-confidential: no real name, host, path or scope appears below.
+
+WRAPPED_ALIASES = (
+    "---\n"
+    "service: widget-index\n"
+    f"scope: {SCOPE}\n"
+    "aliases: [widget_touch, widget_recall, widget_resolver,\n"
+    "          test_widget_touch, test_widget_recall]\n"
+    "---\n"
+    "\n"
+    "## What it is\n"
+    "The entry whose front matter the writer wrapped.\n"
+    "\n"
+    "## Pointers\n"
+    "- lib/widget.py — the wrapped one\n"
+)
+
+
+def _break_one(store: Path, scope: str = SCOPE, name: str = "widget-index.md") -> Path:
+    """Drop THE reported defect into a scope. Returns the file."""
+    p = store / scope / name
+    p.write_text(WRAPPED_ALIASES.replace(f"scope: {SCOPE}", f"scope: {scope}"), encoding="utf-8")
+    return p
+
+
+def _all_broken_scope(store: Path, scope: str = "every-entry-broken") -> Path:
+    """A scope holding files, NONE of which can be indexed."""
+    d = store / scope
+    d.mkdir()
+    _break_one(store, scope, "widget-index.md")
+    (d / "cog-unit.md").write_text(
+        f"---\nservice: cog-unit\nscope: {scope}\naliases: not-a-list\n---\n",
+        encoding="utf-8",
+    )
+    return d
+
+
+class TestBlastRadius:
+    """The reported numbers, reproduced as assertions on THIS code."""
+
+    def test_two_good_plus_one_bad_still_lists_the_good_ones(self, tmp_path: Path) -> None:
+        """🔴 THE REGRESSION. At base this listed 0 and raised."""
+        store = tmp_path / "s"
+        store.mkdir()
+        (store / SCOPE).mkdir()
+        (store / SCOPE / "alpha-unit.md").write_text(_entry("alpha-unit", SCOPE), encoding="utf-8")
+        (store / SCOPE / "beta-unit.md").write_text(_entry("beta-unit", SCOPE), encoding="utf-8")
+        _break_one(store)
+
+        rep = rc.recall(store, SCOPE)
+        assert rep.status == "recalled"
+        assert sorted(e.ref for e in rep.listing) == ["alpha-unit", "beta-unit"]
+        assert rep.listing_total == 2, "readable entries only — a reject is not an entry"
+        assert [m.filename for m in rep.malformed] == ["widget-index.md"]
+
+    def test_the_bad_one_is_NAMED_and_never_silently_dropped(self, store: Path) -> None:
+        """🔴 The obligation that comes with degrading. A silent skip is WORSE
+        than the collapse: a dropped entry is indistinguishable from one nobody
+        ever wrote."""
+        _break_one(store)
+        text = rc.render_text(rc.recall(store, SCOPE))
+        assert "MALFORMED" in text
+        assert "widget-index.md" in text, "the file must be named, not merely counted"
+        assert "malformed index entry" in text, "the sentinel must reach the output"
+        assert "must be a list, not a bare string" in text, "…and so must the REASON"
+
+    def test_every_selector_survives_one_bad_entry(self, store: Path) -> None:
+        """`--list`, `--ref`, the digest and `--search` died TOGETHER at base."""
+        _break_one(store)
+        assert rc.recall(store, SCOPE, mode="list").status == "recalled"
+        assert rc.recall(store, SCOPE, mode="digest").status == "recalled"
+        assert rc.recall(store, SCOPE, mode="full").status == "recalled"
+        assert rc.recall(store, SCOPE, ref="collector").status == "recalled"
+        assert rc.search(store, SCOPE, "readiness").status == "search-hit"
+
+    def test_the_index_stops_claiming_it_is_COMPLETE(self, store: Path) -> None:
+        """🔴 A completeness claim is a comment like any other, and it is FALSE
+        about a scope whose third file could not be indexed."""
+        clean = rc.render_text(rc.recall(store, SCOPE, mode="list"))
+        assert "none omitted" in clean
+        assert "complete index" in clean
+
+        _break_one(store)
+        dirty = rc.render_text(rc.recall(store, SCOPE, mode="list"))
+        assert "none omitted" not in dirty
+        assert "NOT the complete index" in dirty
+        assert "READABLE" in dirty
+
+    def test_a_ref_that_misses_does_not_claim_the_name_is_UNRECORDED(
+        self, store: Path
+    ) -> None:
+        """The `--ref` a reader would type after seeing the reject. "Nothing
+        recorded under that name yet" is a claim about the STORE and it is false
+        when the entry exists in a file the loader refused."""
+        _break_one(store)
+        text = rc.render_text(rc.recall(store, SCOPE, ref="widget-index"))
+        assert "Nothing recorded under that name yet" not in text
+        assert "may name one of them" in text
+
+    def test_the_store_is_still_BYTE_IDENTICAL_after_the_degraded_paths(
+        self, store: Path
+    ) -> None:
+        """The read-only invariant, re-asserted over the code that is NEW."""
+        _break_one(store)
+        before = _tree_hash(store)
+        for kw in ({"mode": "list"}, {"mode": "digest"}, {"mode": "full"}, {"ref": "collector"}):
+            rep = rc.recall(store, SCOPE, **kw)
+            rc.render_text(rep)
+            json.dumps(rc.report_json(rep))
+        srep = rc.search(store, SCOPE, "readiness")
+        rc.render_search(srep)
+        json.dumps(rc.search_json(srep))
+        assert _tree_hash(store) == before
+
+
+class TestUnreadableIsNotEmpty:
+    """🔴 `scope-empty` is reported by `/resume` as an ordinary non-finding. A
+    scope nothing could be read from must NEVER reach that branch."""
+
+    def test_the_pair(self, store: Path) -> None:
+        """POSITIVE AND NEGATIVE CONTROL, one call apart. Both surfaces are
+        empty; only the mechanism differs, and the mechanism is the whole point."""
+        (store / "made-never-filled").mkdir()
+        _all_broken_scope(store)
+
+        empty = rc.recall(store, "made-never-filled")
+        unreadable = rc.recall(store, "every-entry-broken")
+
+        assert empty.status == "scope-empty"
+        assert unreadable.status == "scope-unreadable"
+        assert empty.malformed == ()
+        assert len(unreadable.malformed) == 2, "the positive control collected nothing"
+
+    def test_the_two_share_NO_wording(self, store: Path) -> None:
+        """A shared opening phrase is all it takes for a broken store to be read
+        as an empty one."""
+        (store / "made-never-filled").mkdir()
+        _all_broken_scope(store)
+        empty = rc.render_text(rc.recall(store, "made-never-filled"))
+        unreadable = rc.render_text(rc.recall(store, "every-entry-broken"))
+        assert "NOTHING RECORDED YET" in empty
+        assert "NOTHING RECORDED YET" not in unreadable
+        assert "NOTHING COULD BE READ" in unreadable
+        assert "NOTHING COULD BE READ" not in empty
+        assert "NOT an empty scope" in unreadable
+
+    def test_an_ABSENT_scope_is_a_third_thing_still(self, store: Path) -> None:
+        _all_broken_scope(store)
+        assert rc.recall(store, "never-indexed").status == "scope-absent"
+
+    def test_a_ref_into_an_unreadable_scope_is_NOT_ref_absent(self, store: Path) -> None:
+        """🔴 Order matters: the unreadable check runs BEFORE `--ref`. Otherwise
+        the answer would be "nothing recorded under that name", about a directory
+        the tool never managed to read."""
+        _all_broken_scope(store)
+        rep = rc.recall(store, "every-entry-broken", ref="widget-index")
+        assert rep.status == "scope-unreadable"
+
+    def test_search_has_the_same_pair(self, store: Path) -> None:
+        (store / "made-never-filled").mkdir()
+        _all_broken_scope(store)
+        assert rc.search(store, "made-never-filled", "readiness").status == "search-no-match"
+        broken = rc.search(store, "every-entry-broken", "readiness")
+        assert broken.status == "search-unreadable"
+        text = rc.render_search(broken)
+        assert "NOTHING COULD BE READ" in text
+        assert "never run against anything" in text
+        assert "NO MATCH" not in text
+
+
+class TestRejectsElsewhereAreVisible:
+    def test_a_reject_in_ANOTHER_scope_does_not_contaminate_this_one(
+        self, store: Path
+    ) -> None:
+        _break_one(store, OTHER_SCOPE, "widget-index.md")
+        rep = rc.recall(store, SCOPE)
+        assert rep.malformed == (), "another scope's defect was attributed here"
+        assert rep.listing_total == 4
+        assert "none omitted" in rc.render_text(rep), (
+            "this scope IS complete; the claim must survive a defect elsewhere"
+        )
+
+    def test_but_it_is_still_COUNTED_and_its_scope_NAMED(self, store: Path) -> None:
+        """A reader is scope-scoped, so without this a defect in a scope nobody
+        recalls today is invisible until somebody does."""
+        _break_one(store, OTHER_SCOPE, "widget-index.md")
+        text = rc.render_text(rc.recall(store, SCOPE))
+        assert "+1 further malformed" in text
+        assert OTHER_SCOPE in text
+        assert "widget-index.md" not in text, (
+            "another scope's FILENAMES are client-identifying; the count is named, not the rows"
+        )
+
+    def test_it_shows_up_even_on_scope_absent(self, store: Path) -> None:
+        """🔴 The most common status in most repos. A block that skipped it would
+        never mention a store-wide defect at all."""
+        _break_one(store, OTHER_SCOPE, "widget-index.md")
+        text = rc.render_text(rc.recall(store, "never-indexed"))
+        assert "+1 further malformed" in text
+        assert "NOTHING RECORDED YET" in text  # …and the ordinary case still reads as one
+
+    def test_all_scopes_search_owns_every_reject(self, store: Path) -> None:
+        """Under `--all-scopes` nothing is "elsewhere"."""
+        _break_one(store, OTHER_SCOPE, "widget-index.md")
+        rep = rc.search(store, SCOPE, "readiness", all_scopes=True)
+        assert [m.scope for m in rep.malformed] == [OTHER_SCOPE]
+        assert rep.malformed_elsewhere == ()
+
+
+class TestDegradedExitCodes:
+    """🔴 `/resume` step 4 branches on zero/non-zero: "print the stderr line
+    verbatim, note recall was unavailable, and continue". So a non-zero throws
+    away everything the run DID surface — it is only honest when nothing was."""
+
+    def test_content_served_exits_ZERO_with_the_block_in_band(
+        self, store: Path, capsys
+    ) -> None:
+        _break_one(store)
+        code = rc.main(["--store", str(store), "--scope", SCOPE, "--list"])
+        cap = capsys.readouterr()
+        assert code == 0, "a partial read exited non-zero and threw away 4 good entries"
+        assert "MALFORMED" in cap.out
+        assert "widget-index.md" in cap.out
+        assert cap.err == "", "nothing was unavailable; stderr must stay clean"
+
+    def test_nothing_readable_exits_3_with_ONE_stderr_line(
+        self, store: Path, capsys
+    ) -> None:
+        _all_broken_scope(store)
+        code = rc.main(["--store", str(store), "--scope", "every-entry-broken", "--list"])
+        cap = capsys.readouterr()
+        assert code == 3
+        # The DETAIL is on stdout — per-entry rows are the whole point…
+        assert "widget-index.md" in cap.out
+        assert "cog-unit.md" in cap.out
+        # …and stderr carries exactly one quotable summary, because the skill
+        # says to print it verbatim.
+        assert len(cap.err.strip().splitlines()) == 1
+        assert "scope-unreadable" in cap.err
+        assert "NOT an empty scope" in cap.err
+
+    def test_an_EMPTY_scope_still_exits_zero(self, store: Path, capsys) -> None:
+        """The discriminator, at the exit-code level."""
+        (store / "made-never-filled").mkdir()
+        assert rc.main(["--store", str(store), "--scope", "made-never-filled"]) == 0
+
+    def test_search_follows_the_same_rule(self, store: Path, capsys) -> None:
+        _all_broken_scope(store)
+        assert rc.main(["--store", str(store), "--scope", SCOPE, "-s", "readiness"]) == 0
+        capsys.readouterr()
+        code = rc.main(
+            ["--store", str(store), "--scope", "every-entry-broken", "-s", "readiness"]
+        )
+        assert code == 3
+        assert "search-unreadable" in capsys.readouterr().err
+
+    def test_the_json_carries_the_rows_not_only_a_count(self, store: Path, capsys) -> None:
+        _break_one(store)
+        _break_one(store, OTHER_SCOPE, "widget-index.md")
+        assert rc.main(["--store", str(store), "--scope", SCOPE, "--json"]) == 0
+        blob = json.loads(capsys.readouterr().out)
+        assert [m["file"] for m in blob["malformed"]] == ["widget-index.md"]
+        assert blob["malformed"][0]["reason"]
+        assert blob["malformed_elsewhere"] == [OTHER_SCOPE]
+        assert blob["malformed_elsewhere_count"] == 1
+
+    def test_the_search_json_carries_them_too(self, store: Path, capsys) -> None:
+        _break_one(store)
+        assert rc.main(["--store", str(store), "--scope", SCOPE, "-s", "readiness", "--json"]) == 0
+        blob = json.loads(capsys.readouterr().out)
+        assert [m["file"] for m in blob["malformed"]] == ["widget-index.md"]
+
+    def test_UNREADABLE_STATUSES_is_the_only_gate(self) -> None:
+        """Derived, not hand-listed: a third "nothing could be read" status added
+        later cannot quietly exit 0."""
+        assert set(rc.UNREADABLE_STATUSES) <= set(rc.STATUS_PRECEDENCE)
+        for status in rc.STATUS_PRECEDENCE:
+            expected = 3 if status in rc.UNREADABLE_STATUSES else 0
+            assert rc._exit_for(status, "x/", ()) == expected
+
+
+class TestDegradationMutationKills:
+    """Break each new guard on purpose; assert THIS guard's own symptom dies and
+    the failure is reachable (no earlier check short-circuits it)."""
+
+    def test_kills_the_COLLECT_policy(self, tmp_path: Path) -> None:
+        """The reader must not silently go back to fail-closed."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_collect",
+            [
+                (
+                    "        return store, load_index(store, on_malformed=ON_MALFORMED_COLLECT)",
+                    "        return store, load_index(store)",
+                )
+            ],
+        )
+        store = _make_store(tmp_path / "s")
+        _break_one(store)
+        with pytest.raises(sr.MalformedEntryError):
+            mod.recall(store, SCOPE)
+        # …and the real module does not.
+        assert rc.recall(store, SCOPE).status == "recalled"
+
+    def test_kills_the_MALFORMED_block(self, tmp_path: Path) -> None:
+        """🔴 The one that matters most: degrading WITHOUT reporting is worse
+        than the collapse it replaced. The mutant still serves the good entries,
+        so it is green on every other assertion in this file."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_block",
+            [("    out: list[str] = []\n    if malformed:", "    out: list[str] = []\n    if False:")],
+        )
+        store = _make_store(tmp_path / "s")
+        _break_one(store)
+        text = mod.render_text(mod.recall(store, SCOPE, mode="list"))
+        assert "widget-index.md" not in text
+        assert "malformed index entry" not in text
+        assert "collector" in text, (
+            "the mutant must still SERVE — otherwise this kill is measuring the "
+            "wrong thing (a collapse, not a silent drop)"
+        )
+        # ONE mutation, BOTH surfaces — the point of a single `render_malformed`.
+        assert "widget-index.md" not in mod.render_search(mod.search(store, SCOPE, "readiness"))
+        assert "widget-index.md" in rc.render_search(rc.search(store, SCOPE, "readiness"))
+
+    def test_kills_the_scope_unreadable_discriminator(self, tmp_path: Path) -> None:
+        """Reachable: the scope EXISTS (past `scope-absent`) and holds files
+        (which is what makes `scope-empty` the wrong answer). With the guard
+        gone, a broken scope reports as an ordinary empty one AND exits 0 —
+        exactly the conflation `/resume` acts on."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_unreadable",
+            [("    if not entries and bad:", "    if False:")],
+        )
+        store = _make_store(tmp_path / "s")
+        _all_broken_scope(store)
+        rep = mod.recall(store, "every-entry-broken")
+        assert rep.status == "scope-empty"
+        assert mod._exit_for(rep.status, "x/", rep.malformed) == 0
+        assert rc.recall(store, "every-entry-broken").status == "scope-unreadable"
+
+    def test_kills_the_search_unreadable_discriminator(self, tmp_path: Path) -> None:
+        mod = _load_mutant(
+            tmp_path,
+            "m_search_unreadable",
+            [('            if searched == 0 and bad', "            if False")],
+        )
+        store = _make_store(tmp_path / "s")
+        _all_broken_scope(store)
+        assert mod.search(store, "every-entry-broken", "readiness").status == "search-no-match"
+        assert rc.search(store, "every-entry-broken", "readiness").status == "search-unreadable"
+
+    def test_kills_the_withdrawn_completeness_claim(self, tmp_path: Path) -> None:
+        """With the branch gone, an index three files short says `none omitted`."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_complete",
+            [("    elif report.listing_pages <= 1 and n_bad:", "    elif False:")],
+        )
+        store = _make_store(tmp_path / "s")
+        _break_one(store)
+        text = mod.render_text(mod.recall(store, SCOPE, mode="list"))
+        assert "none omitted" in text, "the mutant must reassert the false claim"
+        assert "none omitted" not in rc.render_text(rc.recall(store, SCOPE, mode="list"))
+
+    def test_kills_the_exit_code_gate(self, tmp_path: Path, capsys) -> None:
+        """Reachable past every argument guard: a valid `--scope`/`--list` run
+        over a scope whose files are all rejects."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_exit",
+            [("    if status not in UNREADABLE_STATUSES:", "    if True:")],
+        )
+        store = _make_store(tmp_path / "s")
+        _all_broken_scope(store)
+        argv = ["--store", str(store), "--scope", "every-entry-broken", "--list"]
+        assert mod.main(argv) == 0
+        capsys.readouterr()
+        assert rc.main(argv) == 3
+        assert "scope-unreadable" in capsys.readouterr().err
+
+    def test_kills_the_scope_attribution(self, tmp_path: Path) -> None:
+        """With the reject not attributed to its own scope, a defect anywhere in
+        the store makes EVERY scope look broken."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_attribution",
+            # The anchor carries the following `try:` so it hits `recall`'s
+            # derivation and not `search`'s identical-looking one — see the
+            # uniqueness assert in `_load_mutant`.
+            [
+                (
+                    "    bad = index.malformed_in(scope)\n"
+                    "    bad_elsewhere = index.malformed_outside((scope,))\n"
+                    "\n"
+                    "    try:",
+                    "    bad = index.malformed\n"
+                    "    bad_elsewhere = index.malformed_outside((scope,))\n"
+                    "\n"
+                    "    try:",
+                )
+            ],
+        )
+        store = _make_store(tmp_path / "s")
+        _break_one(store, OTHER_SCOPE, "widget-index.md")
+        assert len(mod.recall(store, SCOPE).malformed) == 1
+        assert rc.recall(store, SCOPE).malformed == ()
+
+    def test_the_control_for_this_section(self, tmp_path: Path) -> None:
+        """POSITIVE CONTROL on the harness for these anchors: an unmutated copy
+        must degrade exactly as the real module does, or every kill above is a
+        claim about the loader rather than about a guard."""
+        mod = _load_mutant(tmp_path, "m_degrade_noop", [])
+        store = _make_store(tmp_path / "s")
+        _break_one(store)
+        rep = mod.recall(store, SCOPE, mode="list")
+        assert rep.status == "recalled"
+        assert len(rep.malformed) == 1
+        assert "widget-index.md" in mod.render_text(rep)

@@ -124,7 +124,15 @@ Topic argument (optional): `$ARGUMENTS`. If empty, infer a short kebab-case topi
 
    **— the write half; everything above this line only reads —**
 
-   🔴 **The target is `~/.claude/analyze-service-index/<scope>/<slug>.md`** — an absolute path outside every repo. Never anywhere in the working tree: these entries carry client-identifying infrastructure detail and `devrc` is PUBLIC. **Read `~/.claude/analyze-service-index/<scope>/README.md` before writing there** — each scope's own README states the policy governing it, and it is authoritative over this file.
+   🔴 **The target is `~/.claude/analyze-service-index/<scope>/<slug>.md`** — an absolute path outside every repo. Never anywhere in the working tree: these entries carry client-identifying infrastructure detail and `devrc` is PUBLIC. **Read the policy file the probe named on its `policy:` line before writing there, and do not go looking for one it did not name.** Most scopes have no README of their own (measured 2026-08-13: 1 of 5), so the probe resolves it deterministically and prints which of the three cases you are in — the scope's own README (`scope README`, authoritative for that scope), the store-root README (`this scope has none of its own`, so it is the store's general policy and not a statement by this scope), or neither. Do **not** create a scope README to fill the gap: each one is a human policy statement, and writing it yourself would be manufacturing authority.
+
+   🔴 **After writing an entry — new file or appended bullet — validate it in the SAME turn:**
+
+   ```
+   python3 /home/zach/workspace/devrc/scripts/lib/subsystem_touch.py --validate <path-you-just-wrote>
+   ```
+
+   It exits 0 with `OK — N of N entry file(s) parse`, or **3** with a `malformed index entry` row per bad file. This exists because the store's front matter is parsed **line by line**: an `aliases: [...]` list wrapped across two physical lines reads as an unterminated bare string and the entry is rejected — and the confirm-gate diff you just approved *contained* that defect while being structurally incapable of revealing it. Without this check the failure surfaces hours later, in a different session, from a different tool. `--validate` with **no path** checks every entry in the scope instead (and only that form can catch a duplicate ref, which is a relationship between two files). It reuses the reader's own parser and validator, so a pass here is the reader's verdict, not a second opinion.
 
    📖 **The measured evidence behind this whole step is in `reference/index-write.md`** (deployed `~/.claude/skills/handoff/reference/`, source `~/workspace/devrc/claude/skills/handoff/reference/`) — the two-session concurrency simulation and the retraction it forced, the autocommit timer's behaviour, each path source's blind spots with their numbers, and the `gh` file-list truncation cap. Read it when a rule looks arbitrary or you are about to work around one. It is rationale only: every rule you must follow is here, and none of it needs reading before the probe.
 

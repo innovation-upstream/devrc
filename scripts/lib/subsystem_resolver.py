@@ -44,14 +44,23 @@ CONTRACT SUMMARY
     normalize_ref(raw)                -> str            (the shared predicate)
     split_kind(ref)                   -> (slug, kind|None)
     SubsystemEntry.from_mapping(m)    -> SubsystemEntry (raises MalformedEntryError)
-    build_index(mappings)             -> SubsystemIndex (raises MalformedEntryError)
+    build_index(mappings, *, on_malformed=RAISE)
+                                      -> SubsystemIndex (raises MalformedEntryError
+                                         under RAISE; collects into
+                                         `.malformed` under COLLECT)
     resolve_ref(ref, index, scope)    -> SubsystemEntry|None
                                         (raises UnknownScopeError, AmbiguousRefError)
     associate_paths(paths, index, scope, *, min_paths=DEFAULT_MIN_PATHS)
                                       -> Association
                                         (raises UnknownScopeError,
                                          InvalidPathError, ValueError)
-    load_index(root)                  -> SubsystemIndex (the thin disk loader)
+    entry_mapping(text, *, filename, scope)
+                                      -> dict  (ONE entry file -> the mapping the
+                                         loader would build; the shared step a
+                                         validator and the loader must not spell
+                                         twice)
+    load_index(root, *, on_malformed=RAISE)
+                                      -> SubsystemIndex (the thin disk loader)
 
 Every raise carries a distinct sentinel phrase so a caller — or a mutation test —
 can tell WHICH guard fired, not merely that something did:
@@ -90,6 +99,10 @@ __all__ = [
     "AmbiguousRefError",
     "InvalidPathError",
     "EntryUnreadableError",
+    "MalformedEntry",
+    "ON_MALFORMED",
+    "ON_MALFORMED_RAISE",
+    "ON_MALFORMED_COLLECT",
     "JournalBullet",
     "extract_sections",
     "parse_journal_bullets",
@@ -107,6 +120,7 @@ __all__ = [
     "resolve_ref_tiered",
     "associate_paths",
     "parse_front_matter",
+    "entry_mapping",
     "load_index",
 ]
 
@@ -160,7 +174,21 @@ class ResolverError(Exception):
 
 
 class MalformedEntryError(ResolverError):
-    """An index entry cannot be interpreted. Sentinel: 'malformed index entry'."""
+    """An index entry cannot be interpreted. Sentinel: 'malformed index entry'.
+
+    `.why` is the REASON with the sentinel prefix stripped, and `.source` is the
+    entry it was raised about. Both are carried STRUCTURALLY rather than left to
+    be recovered by splitting `str(exc)` on `": "` — a degrading loader has to
+    print one row per bad entry, and a row assembled by re-parsing an error
+    message is a second parser for a format nothing pins. `str(exc)` is unchanged
+    and still leads with the sentinel, so every existing caller and every `in`
+    assertion over it keeps working.
+    """
+
+    def __init__(self, message: str, *, source: str | None = None, why: str | None = None) -> None:
+        self.source = source
+        self.why = message if why is None else why
+        super().__init__(message)
 
 
 class UnknownScopeError(ResolverError):
@@ -225,6 +253,59 @@ class EntryUnreadableError(ResolverError):
     either of those two modules, because `subsystem_recall` already imports
     `subsystem_touch` and the reverse edge would close a cycle.
     """
+
+
+# --- Degrading: what a rejected entry looks like when it is not an exception ----
+#
+# 🔴 ONE BAD ENTRY USED TO COST THE WHOLE SCOPE. Measured on a synthetic store:
+# 2 good entries listed 2; 2 good + 1 malformed listed **0** and exited 3, so
+# `/resume` step 4, `--list`, `--ref` and `--search` all died together on one
+# wrapped `aliases:` line. `RAISE` is still the default — every existing caller
+# keeps its fail-closed contract and no test changes meaning — and `COLLECT` is
+# opt-in, per call site, because whether a rejection should abort is a POLICY of
+# the caller and not a property of the store.
+#
+# 🔴 COLLECT IS NOT "SKIP". A collected entry is carried on the index, counted,
+# and every reader that uses this mode is obliged to print it: silently serving a
+# short index would be a WORSE failure than the collapse it replaces, because a
+# missing entry is indistinguishable from an entry that was never written.
+ON_MALFORMED_RAISE = "raise"
+ON_MALFORMED_COLLECT = "collect"
+ON_MALFORMED: tuple[str, ...] = (ON_MALFORMED_RAISE, ON_MALFORMED_COLLECT)
+
+
+@dataclass(frozen=True)
+class MalformedEntry:
+    """One entry file that could not be interpreted, and WHY — as data, not a raise.
+
+    `scope` is the NORMALIZED owning scope, which for a disk load is the
+    directory name (the authority on scope; see `load_index`). It is what lets a
+    reader report this entry against the scope it belongs to and no other — a
+    malformed entry in `scope-b/` must not appear while recalling `scope-a/`, and
+    must not make `scope-a` look broken.
+    """
+
+    scope: str
+    filename: str
+    reason: str
+    """The `why` clause — the sentence after the sentinel, e.g. "`aliases:` must
+    be a list, not a bare string"."""
+
+    @property
+    def label(self) -> str:
+        """`<scope>/<filename>` — how every surface names this file."""
+        return f"{self.scope}/{self.filename}" if self.scope else self.filename
+
+    @property
+    def line(self) -> str:
+        """ONE row, carrying the sentinel phrase.
+
+        🔴 The sentinel is repeated PER ROW rather than hoisted into a block
+        header, because a row is what gets copied into a report, quoted in a
+        message, or grepped for — and a row that has left its header behind is a
+        row that no longer says what kind of problem it describes.
+        """
+        return f"malformed index entry `{self.label}`: {self.reason}"
 
 
 # --- The shared predicate ------------------------------------------------------
@@ -334,7 +415,9 @@ class SubsystemEntry:
         """
 
         def bad(why: str) -> MalformedEntryError:
-            return MalformedEntryError(f"malformed index entry {source!r}: {why}")
+            return MalformedEntryError(
+                f"malformed index entry {source!r}: {why}", source=source, why=why
+            )
 
         raw_service = mapping.get("service")
         if not isinstance(raw_service, str) or not raw_service.strip():
@@ -440,9 +523,40 @@ class SubsystemIndex:
 
     by_scope: Mapping[str, tuple[SubsystemEntry, ...]]
 
+    malformed: tuple[MalformedEntry, ...] = ()
+    """Entries that were REJECTED, when the index was built with `COLLECT`.
+
+    Always empty under the default `RAISE` — there the first rejection is the
+    whole answer. It is a field on the index rather than a second return value so
+    that "the entries" and "what could not become an entry" cannot be separated
+    by a caller that only unpacks the first thing: a reader holding a
+    `SubsystemIndex` is holding the bad news too, whether or not it asked.
+    """
+
     @property
     def scopes(self) -> tuple[str, ...]:
         return tuple(sorted(self.by_scope))
+
+    def malformed_in(self, scope: str) -> tuple[MalformedEntry, ...]:
+        """The rejected entries belonging to ONE scope, normalized like every ref.
+
+        No `UnknownScopeError`: this answers "what is broken here", and an
+        unknown scope has nothing broken in it. Raising would force every caller
+        to wrap a question it asks on every code path.
+        """
+        key = normalize_ref(scope)
+        return tuple(m for m in self.malformed if m.scope == key)
+
+    def malformed_outside(self, scopes: Iterable[str]) -> tuple[MalformedEntry, ...]:
+        """The rejected entries in EVERY OTHER scope — the store-wide defect count.
+
+        A reader is scope-scoped, so without this a broken entry in a scope
+        nobody happens to recall today is invisible until someone recalls it. The
+        surfaces print it as a COUNT with its scopes named, never as full rows:
+        loud enough to be actionable, cheap enough to sit on every output.
+        """
+        keys = {normalize_ref(s) for s in scopes}
+        return tuple(m for m in self.malformed if m.scope not in keys)
 
     def entries(self, scope: str) -> tuple[SubsystemEntry, ...]:
         key = normalize_ref(scope)
@@ -457,35 +571,111 @@ class SubsystemIndex:
         return sum(len(v) for v in self.by_scope.values())
 
 
+def _rejection(
+    mapping: Mapping[str, object], source: str, exc: MalformedEntryError
+) -> MalformedEntry:
+    """Turn one raise into one row. The scope comes from the MAPPING, deliberately.
+
+    On a disk load `scope` was set from the directory name before validation ran,
+    so it is known even for an entry too broken to construct — which is what lets
+    a rejected entry be reported against the scope it lives in instead of against
+    the store at large. An in-memory mapping with no usable scope yields `""`,
+    and `malformed_in` then matches no scope, so such a row surfaces only through
+    the store-wide count. Stated rather than left to be discovered.
+    """
+    raw_scope = mapping.get("scope")
+    if not isinstance(raw_scope, str) or not raw_scope.strip():
+        raw_scope = mapping.get("repo")
+    scope = normalize_ref(raw_scope) if isinstance(raw_scope, str) else ""
+    filename = mapping.get("filename")
+    return MalformedEntry(
+        scope=scope,
+        filename=filename if isinstance(filename, str) and filename else source,
+        reason=exc.why,
+    )
+
+
 def build_index(
     mappings: Iterable[Mapping[str, object]],
     *,
     extra_scopes: Iterable[str] = (),
+    on_malformed: str = ON_MALFORMED_RAISE,
 ) -> SubsystemIndex:
     """Validate and group entry mappings.
 
     `extra_scopes` registers scopes that exist but hold no entries (a scope dir
     the loader found empty), so they resolve to an empty result rather than
     `UnknownScopeError`.
+
+    `on_malformed` picks the POLICY, and the default keeps the historical one:
+
+      `RAISE`   — the first rejection aborts the whole build. Right for a WRITER,
+                  which is about to modify a curated store and must not act on a
+                  partial picture of it.
+      `COLLECT` — a rejection becomes a `MalformedEntry` on the index and the
+                  build continues. Right for a READER, where aborting spends
+                  every good entry in the scope to report one bad one. **A
+                  collecting caller MUST print what it collected**; see
+                  `ON_MALFORMED`'s note.
+
+    🔴 BOTH REJECTION SITES COLLECT — the per-entry validator AND the duplicate
+    check. A duplicate is a relationship between two files, and the one recorded
+    is the LATER of the pair in the loader's sorted order, so the first spelling
+    of a ref keeps serving and the collision is still named. Collecting only the
+    first site would have left `COLLECT` able to raise, which is the shape a
+    caller cannot defend against because it looks handled.
     """
+    if on_malformed not in ON_MALFORMED:
+        raise ValueError(
+            f"on_malformed must be one of {ON_MALFORMED}, got {on_malformed!r}"
+        )
+    collecting = on_malformed == ON_MALFORMED_COLLECT
     by_scope: dict[str, list[SubsystemEntry]] = {}
+    malformed: list[MalformedEntry] = []
     seen: dict[tuple[str, str, str | None], str] = {}
     for mapping in mappings:
         source = str(mapping.get("filename") or mapping.get("service") or "<unnamed>")
-        entry = SubsystemEntry.from_mapping(mapping, source=source)
+        try:
+            entry = SubsystemEntry.from_mapping(mapping, source=source)
+        except MalformedEntryError as exc:
+            if not collecting:
+                raise
+            malformed.append(_rejection(mapping, source, exc))
+            continue
         key = (entry.scope, entry.slug, entry.kind)
         if key in seen:
-            raise MalformedEntryError(
+            dup = MalformedEntryError(
                 f"malformed index entry {source!r}: duplicate {entry.ref!r} in scope "
-                f"{entry.scope!r} — already defined by {seen[key]!r}"
+                f"{entry.scope!r} — already defined by {seen[key]!r}",
+                source=source,
+                why=(
+                    f"duplicate {entry.ref!r} in scope {entry.scope!r} — already defined "
+                    f"by {seen[key]!r}"
+                ),
             )
+            if not collecting:
+                raise dup
+            malformed.append(_rejection(mapping, source, dup))
+            continue
         seen[key] = entry.filename
         by_scope.setdefault(entry.scope, []).append(entry)
+    # 🔴 A SCOPE THAT HOLDS ONLY BROKEN ENTRIES STILL EXISTS. Without this the
+    # scope would be unknown to the index and a reader would answer `scope-absent`
+    # — "nothing recorded yet" — about a directory full of content it simply
+    # could not parse. That is the exact conflation this store guards against
+    # everywhere else. (On a disk load `extra_scopes` already registers every
+    # directory; this covers `build_index` called directly.)
+    for m in malformed:
+        if m.scope:
+            by_scope.setdefault(m.scope, [])
     for scope in extra_scopes:
         key = normalize_ref(scope)
         if key:
             by_scope.setdefault(key, [])
-    return SubsystemIndex(by_scope={k: tuple(v) for k, v in by_scope.items()})
+    return SubsystemIndex(
+        by_scope={k: tuple(v) for k, v in by_scope.items()},
+        malformed=tuple(malformed),
+    )
 
 
 # --- Resolution ----------------------------------------------------------------
@@ -1012,7 +1202,35 @@ def parse_front_matter(text: str) -> dict[str, object]:
     return out
 
 
-def load_index(root: Path) -> SubsystemIndex:
+def entry_mapping(text: str, *, filename: str, scope: str) -> dict[str, object]:
+    """ONE entry file's bytes -> the mapping `from_mapping` would be handed.
+
+    🔴 EXTRACTED FROM `load_index` SO A VALIDATOR CANNOT BUILD A DIFFERENT ONE.
+    `subsystem_touch --validate` has to answer "would the loader accept this
+    file?", and the only honest way to answer it is to construct exactly what the
+    loader constructs. Re-spelling these four lines at the validator would be the
+    duplicated predicate `claude/RULES.md` names: the day one side learns a new
+    identity field, the validator starts blessing entries the reader rejects —
+    the precise drift a write-time check exists to prevent.
+
+    The directory name is the authority on scope: it is where the file actually
+    lives. A `scope:`/`repo:` field that disagrees is stale front matter, not a
+    relocation, so `scope` is set unconditionally and `repo` is dropped.
+    """
+    fm = dict(parse_front_matter(text))
+    fm["filename"] = filename
+    fm["scope"] = scope
+    # ⚠ REDUNDANT-BUT-KEPT, labelled: `from_mapping` reads `scope` in preference
+    # to `repo`, and `scope` was just set unconditionally on the line above, so
+    # the pop cannot change any outcome. It stays to keep the mapping honest —
+    # leaving a contradicted `repo:` in a dict that is also the malformed-entry
+    # error's source label would put a stale value in front of whoever reads that
+    # error.
+    fm.pop("repo", None)
+    return fm
+
+
+def load_index(root: Path, *, on_malformed: str = ON_MALFORMED_RAISE) -> SubsystemIndex:
     """Read `<root>/<scope>/*.md` into a `SubsystemIndex`. READ-ONLY.
 
     `README.md` is skipped in every scope — each scope dir carries one as its
@@ -1022,20 +1240,30 @@ def load_index(root: Path) -> SubsystemIndex:
     or service file may not exist yet". An existing empty scope must resolve to
     an honest empty result, while a scope that does not exist stays an error.
 
-    🔴 FAIL-CLOSED, AND P1 MUST DECIDE WHETHER THAT IS STILL RIGHT. One malformed
-    entry aborts the WHOLE index. That is correct for the interactive caller this
-    was written for — a human running `/analyze-service` should be told the store
-    is broken, loudly, rather than handed a silently short index. It is likely
-    WRONG for P1's 5-minute timer, where the same raise means every session in
-    that window gets no association at all, and downstream that is indistinguishable
-    from "these subsystems had no sessions" — the exact silent zero this module
-    exists to prevent, reintroduced one layer up.
+    🔴 FAIL-CLOSED BY DEFAULT, AND THE CALLER CHOOSES. `on_malformed=RAISE` (the
+    default) aborts the whole index on the first bad entry — correct for a WRITER
+    about to modify a curated store. `COLLECT` degrades: the good entries load
+    and the rejects come back on `index.malformed` for the caller to PRINT.
 
-    Deliberately NOT changed here: the alternative (skip the bad entry, report it)
-    needs somewhere for the report to GO, and that is P1's design decision, not
-    something to guess at now. When P1 lands, either give it a skip-and-report
-    mode or have the timer treat this raise as a hard alert — but do not let it
-    log-and-continue.
+    The question this docstring used to defer is now answered, and the answer was
+    measured. Fail-closed cost the whole scope: on a synthetic store, 2 good
+    entries listed 2, and 2 good + 1 malformed listed **0** with exit 3 — one
+    wrapped `aliases:` line took `/resume` step 4, `--list`, `--ref` and
+    `--search` down together. The reader (`subsystem_recall`) therefore loads
+    with `COLLECT` and reports every reject per-entry in the same output; the
+    writer's probe (`subsystem_touch.build_report`) keeps `RAISE`, because it
+    gates a WRITE into a store it would then be reading only partially.
+
+    🔴 What `COLLECT` is NOT is "skip the bad entry". Silently serving a short
+    index is a worse failure than the collapse, because a dropped entry is
+    indistinguishable from an entry nobody ever wrote. The obligation to print is
+    part of the mode; see `ON_MALFORMED`.
+
+    ⚠ AN `OSError` STILL FAILS CLOSED IN BOTH MODES, and that is a different
+    fact, not an oversight: a malformed entry is a file we read and could not
+    interpret, while an unreadable one means the store was not fully READ — the
+    set of entries is then unknown, so there is nothing honest to degrade to.
+    `load_store`/`build_report` name it `index entry unreadable`.
     """
     mappings: list[Mapping[str, object]] = []
     scopes: list[str] = []
@@ -1049,18 +1277,11 @@ def load_index(root: Path) -> SubsystemIndex:
         for md in sorted(scope_dir.glob("*.md")):
             if md.name == "README.md":
                 continue
-            fm = dict(parse_front_matter(md.read_text(encoding="utf-8", errors="replace")))
-            fm["filename"] = md.name
-            # The directory name is the authority on scope: it is where the file
-            # actually lives. A `scope:`/`repo:` field that disagrees is stale
-            # front matter, not a relocation.
-            fm["scope"] = scope_dir.name
-            # ⚠ REDUNDANT-BUT-KEPT, labelled: `from_mapping` reads `scope` in
-            # preference to `repo`, and `scope` was just set unconditionally on
-            # the line above, so the pop cannot change any outcome. It stays to
-            # keep the mapping honest — leaving a contradicted `repo:` in a dict
-            # that is also the malformed-entry error's source label would put a
-            # stale value in front of whoever reads that error.
-            fm.pop("repo", None)
-            mappings.append(fm)
-    return build_index(mappings, extra_scopes=scopes)
+            mappings.append(
+                entry_mapping(
+                    md.read_text(encoding="utf-8", errors="replace"),
+                    filename=md.name,
+                    scope=scope_dir.name,
+                )
+            )
+    return build_index(mappings, extra_scopes=scopes, on_malformed=on_malformed)
