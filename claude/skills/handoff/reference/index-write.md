@@ -39,11 +39,22 @@ The three sources are blind in **opposite** directions, which is why the tool re
 
 | source | sees | measured blind spot |
 |---|---|---|
-| `--session <uuid>` | what *this* session's own transcript records as a file-tool edit — independent of git, so merged work still counts | a **subagent's** edits are a separate transcript: **196 of 733 file-tool calls** across the 40 most recent transcripts. Also: files written by a `Bash` command rather than a file tool, and paths outside the session cwd (counted, never dropped). |
+| `--session <uuid>` | what *this* session's own transcript records as a file-tool edit — independent of git, so merged work still counts | a **subagent's** edits are a separate transcript: **196 of 733 file-tool calls** across the 40 most recent transcripts. Also: files written by a `Bash` command rather than a file tool, paths outside the session cwd (counted, never dropped), and a session whose cwd is a *different repo* from where its work landed (refused outright — see below). |
 | `--pr <n>[,…]` | every byte on the branch, whichever agent, session or tool wrote it — the **only** source that can see a subagent's work | over-reports in exactly the direction the session source under-reports: it is the union of every commit on the branch, so it carries other sessions' commits and older work on a long-lived branch, and omits anything that never reached a PR. |
 | `--commit <sha>[,…]` | exactly what those commits changed — the primitive the other two reduce to, so it reaches repos the others cannot | excludes uncommitted work and sibling commits on the same branch; over-reports when a commit carried more than the work being recorded (a formatting sweep, a stray `git add`). |
 
 **Why the commit source exists at all**, measured on the repo that holds almost every entry in the store: its own rules mandate committing from a throwaway `/tmp/wt-*` worktree, so `--session` reported **25 paths outside the session cwd and 0 inside**; and **144 of its last 200 mainline commits** carry no `(#N)` suffix, so `--pr` cannot see 72% of what lands there. Both pre-existing windows were structurally blind in the one repo that mattered most.
+
+### `--session` is blind by construction in FOUR ways, and the answer is always a different source
+
+This is the shape worth seeing at a glance, because each case has arrived separately and each time the instinct was to fix the guard:
+
+1. **Subagent turns** — a separate transcript. 196 of 733 file-tool calls (above). Answer: `--pr`.
+2. **Files written by a `Bash` command** rather than a file tool — never recorded as an edit. Answer: `--pr`/`--commit`.
+3. **A repo whose rules mandate committing from a throwaway worktree** — 25 paths outside the session cwd and 0 inside. Answer: `--commit`.
+4. **A session whose cwd is one repo while its work landed in another** — refused with `transcript cwd does not match`. Answer: `--pr`/`--commit`.
+
+🔴 **All four are CORRECT behaviour, all four are already stated in the `caveat:` line, and in none of them is the fix a change to the session source.** Case 4 in particular must not be "fixed" by relativizing against `--repo`: the relativizing happens upstream in the shared collector extractor, so it is a collector change rather than a local one, and accepting those paths would file another repo's work under this one — silently, and plausibly enough that nobody would catch it. 🔴 **Case 4 is also the one where the ordinary fallback is wrong**: the git branch window is empty too when the session ran elsewhere, so "drop `--session` and use the git window" sends you to a second dead source. `SKILL.md` states that as a conditional rule; this is why.
 
 **Why `--session` is worth passing even so:** the tool's first real invocation reported nothing, because a session that landed its work through merged PRs has an empty `git diff HEAD` and a HEAD sitting at the merge-base by the time this step runs. The git **branch** window is honest and tested, but blind to work that has already merged.
 

@@ -1279,12 +1279,34 @@ class TestSkillDocsArePinned:
         assert HANDOFF_REFERENCE.parent.parent == HANDOFF_DOC.parent
 
     def test_the_sidecar_is_DEPLOYED(self) -> None:
-        """`home.file` ships `claude/skills` wholesale, so a sidecar reaches
-        `~/.claude/skills/handoff/reference/` only if it is TRACKED — an
-        untracked file is silently absent from the flake source."""
+        """`home.file` ships `claude/skills` wholesale, so the sidecar reaches
+        `~/.claude/skills/handoff/reference/` only if it is in the FLAKE SOURCE —
+        and the flake source is the git-TRACKED tree, so an untracked file is
+        silently absent from the deploy while the body keeps pointing at it.
+
+        🔴 TWO TIERS, TWO PROOFS, AND NEITHER IS A SKIP. The first version of
+        this test asked git unconditionally and went RED in the nix sandbox,
+        which has no `.git` at all — a test that passes on the host and fails
+        under the authoritative gate.
+
+          * SANDBOX (no `.git`): the file being here AT ALL is the stronger
+            evidence, because the only way it reached this tree is that the
+            flake copied it, and the flake copies tracked files.
+          * DEV HOST (`.git` present): ask git directly. This is the only tier
+            that can catch added-then-untracked before it ever reaches a build.
+
+        An untracking mutation is caught in BOTH: the sandbox loses the file,
+        the host loses the `ls-files` hit.
+        """
         home_nix = (ROOT / "nix" / "home.nix").read_text(encoding="utf-8")
         assert 'home.file.".claude/skills"' in home_nix
         assert "source = ../claude/skills;" in home_nix
+        assert HANDOFF_REFERENCE.exists(), (
+            f"{HANDOFF_REFERENCE} is absent from the tree under test. In the nix "
+            f"sandbox that means it was never git-added, so the deploy omits it."
+        )
+        if not (ROOT / ".git").exists():
+            return  # sandbox tier: the assertion above IS the tracked-ness proof
         tracked = subprocess.run(
             ["git", "ls-files", "--error-unmatch", str(HANDOFF_REFERENCE.relative_to(ROOT))],
             cwd=ROOT,
