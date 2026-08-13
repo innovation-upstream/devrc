@@ -1247,6 +1247,21 @@ class TestSkillDocsArePinned:
             "session's paths",
             "the no-fallback contract, stated to its caller",
         ),
+        # 🔴 The fallback is CONDITIONAL, and the unconditional version was
+        # wrong for one of the two cases. "Drop --session and use the git
+        # window" is right for a missing/stale/unreadable/wrong uuid; for a cwd
+        # mismatch the session ran in ANOTHER repo, so this repo's branch window
+        # is empty too and the advice routes the agent to a second source that
+        # structurally cannot answer. A rule that reads correct and dead-ends is
+        # the exact shape this step exists to avoid.
+        (
+            "`transcript cwd does not match` ⇒ do NOT fall back to the git window",
+            "the cwd case is exempted from the git-window fallback BY NAME",
+        ),
+        (
+            "Go to `--pr`/`--commit` over what you landed here",
+            "the cwd case is given the source that CAN answer, not just a refusal",
+        ),
         (
             "blind to work that has already merged",
             "why the git fallback is a fallback",
@@ -1813,6 +1828,44 @@ class TestSessionNegativeControls:
             _session_source(repo, t)
         self._only(exc.value, "cwd")
         assert st._same_dir("", os.getcwd()) is False
+
+    def test_the_cwd_error_NAMES_THE_ALTERNATIVE_source(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """🔴 A refusal that does not say where to go next is a refusal the
+        caller has to out-think, and the obvious next move here is WRONG.
+
+        Every other session failure resolves to "drop --session, use the git
+        window". This one must not: the session ran in ANOTHER repo, so this
+        repo's branch window is empty too, and the caller would be reading a
+        second source that structurally cannot answer. The work arrived here as
+        PRs or commits, so the message has to name those.
+
+        Observed live: an agent's session cwd was one repo while all of its work
+        landed in another. The guard fired correctly and the agent then had to
+        derive `--pr` for itself.
+        """
+        repo = _init_repo(tmp_path, SCOPE)
+        other = tmp_path / "elsewhere-repo"
+        t = _write_transcript(
+            tmp_path / "t.jsonl", str(other), [f"{other}/src/collector/a.py"]
+        )
+        with pytest.raises(st.TranscriptCwdMismatchError) as exc:
+            _session_source(repo, t)
+        text = str(exc.value)
+        self._only(exc.value, "cwd")
+        assert "--pr" in text, f"the cwd refusal does not name --pr: {text}"
+        assert "--commit" in text, f"the cwd refusal does not name --commit: {text}"
+        # 🔴 And it must DISARM the usual fallback, not merely omit it. Asserting
+        # the words "git window" are absent would be a SPELLED guard: this very
+        # message contains them, in the clause that rules the fallback OUT. So
+        # assert the STATE — the message says that window is empty — which a
+        # rewrite cannot satisfy by accident while still pointing there.
+        assert "git window is empty" in text, (
+            f"the cwd refusal does not rule OUT the git window. It is the right "
+            f"answer for every other session failure and a second dead source "
+            f"here, so silence about it is not enough: {text}"
+        )
 
     def test_a_missing_EXTRACTOR_names_itself(
         self, tmp_path: Path, monkeypatch, tailer_cache

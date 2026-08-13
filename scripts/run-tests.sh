@@ -579,22 +579,88 @@ TARGET_FLOORS=(
   # It now asserts what the test actually needs — that BOTH files are densely
   # allocated — so it no longer keys on allocator luck.
   #
+  # ⚠ INDEPENDENTLY CORROBORATED BEFORE THAT FIX LANDED, and worth keeping as a
+  # worked example of how to read one red run. The /handoff branch below was
+  # handed a brief asserting main was RED on this test. It measured instead: the
+  # failure appeared in 1 of 5 authoritative runs, with the assertion's operands
+  # REVERSED between reports (`16904 == 16896` vs `16896 == 16904`) — which is
+  # the nondeterminism, visible without knowing the cause. Unmodified main
+  # reported `PASS scripts/dl-router/tests (collected=991 passed=991 skipped=0)`.
+  # So "main is red" was wrong, "it is a real defect" was right, and the two are
+  # separable by re-running. Do not treat a single red run as either one.
+  #
   # 2026-08-12, clawgate stuck-dispatch visibility: 3341 collected on
   # main + this branch, measured by the authoritative gate on the MERGED tree
   # (not arithmetic across the conflict — this line is re-pinned by every
   # branch that adds a test, and rerere has replayed a stale resolution onto
   # it before). _suggested_floor 3341 = 3341 - min(50, max(1, 167)) = 3291.
   #
-  # 2026-08-13, the clawgate stuck-dispatch FIX-FORWARD (the grace window, the
-  # bar's stuck rendering + its own toast latch, the None-vs-[] renderer, the
-  # shared schema reading, and the de-vacuum'd guards): 3341 -> 3471 collected on
-  # main + this branch. Measured by the authoritative gate on this tree, not
-  # computed from either side — same method as every line above.
-  #   _suggested_floor 3471 = 3471 - min(50, max(1, 3471/20 = 173)) = 3471 - 50
-  #                         = 3421.
-  # Net of one DELETION: `clawgate_tasks.unmeasured()` was dead code with no
-  # caller, so its test went with it and a one-line absence guard replaced it.
-  "scripts/tests|3421"
+  # 2026-08-12, the /handoff step-4 probe-first restructure: 3341 -> 3348
+  # collected, +7 in this target. The gate's own line on the twice-merged tree:
+  #   PASS  scripts/tests  (collected=3348 passed=3348 skipped=0)
+  # put through the gate's own function: _suggested_floor 3348 = 3348 - min(50,
+  # max(1, 167)) = 3298. (The python spelling in test_run_tests_floors.py
+  # agrees.)
+  #
+  # 🔴 RE-MEASURED THREE TIMES AND THE FIRST TWO READINGS ARE VOID, because main
+  # moved under this branch twice while it was in flight: 3214 (floor 3164),
+  # then 3341 arrived with #431/#435, then 3348. Only the last, taken by the
+  # authoritative gate on the tree that actually exists, is worth anything.
+  #
+  # 🔴 THE DELTA IS DECOMPOSED, because a floor line that records movement it did
+  # not cause is how the next author inherits a wrong number:
+  #     3200  unmodified origin/main at c7579e4, measured FIRST as the control
+  #     +  7  this branch (4 in test_subsystem_recall.py, 3 in
+  #           test_subsystem_touch.py — confirmed per-file by --collect-only)
+  #     +  7  #433's test_cpu_monitor_ignore.py, landed mid-flight
+  #     +134  #431 + #435, landed mid-flight
+  #     ----
+  #     3348  the merged tree, which is what the gate printed
+  # This branch's +7 held across all THREE measurements, against three different
+  # bases — which is the check. Two independent attributions also agreed exactly
+  # at the 3214 checkpoint: the gate's total and per-file collection. Had they
+  # disagreed, something else in the target had moved and neither number would
+  # have been a fact about a branch.
+  #
+  # 🔴 MEASURING MAIN IS WHAT MADE THIS SAFE. The 3100 entry's own arithmetic
+  # implies main should have been 3150; it measured 3200, so main was carrying 50
+  # tests this table had never seen. Subtracting from the RECORDED number would
+  # have claimed +64 for this branch and a floor ~50 too high — a FALSE RED for
+  # whoever landed next.
+  #
+  # ⚠ ZERO new skips — `skipped=0` on this target in every run, and the suite's
+  # single skip is still the pinned one in repo-cos. A NEW FILE was added
+  # (claude/skills/handoff/reference/index-write.md); it is `git add`ed, and
+  # `test_the_sidecar_is_DEPLOYED` fails if it ever is not — in the sandbox by
+  # its absence, on the host via `git ls-files`.
+  #
+  # 2026-08-13, the clawgate stuck-dispatch FIX-FORWARD (the grace window on
+  # every disjunct, the bar's stuck rendering + its own toast latch, the
+  # None-vs-[] renderer, the shared schema reading, and the de-vacuum'd guards).
+  #
+  # 🔴 RE-MEASURED ON THE MERGED TREE, and the branch's own earlier reading (3471,
+  # floor 3421) is VOID — main moved under this branch while it was in flight
+  # (#418/#436/#437 landed, and #436 re-pinned THIS line to 3298). Resolving the
+  # conflict by arithmetic across the two sides is exactly what the header
+  # forbids; this is the gate's own number on the tree that now exists.
+  #
+  # 🔴 THE DELTA IS DECOMPOSED, so the next author does not inherit movement this
+  # branch did not cause:
+  #     3348  origin/main at 5ebc208 as the merged base recorded it (#436's entry)
+  #     + 14  arrived with #418/#437 after that entry was written
+  #     +116  this branch (the grace-window boundary tables, the bar's stuck
+  #           rendering, the second toast latch, the renderer's None cases, the
+  #           schema_ok matrix, and the rewritten guards) — NET of one deletion:
+  #           `clawgate_tasks.unmeasured()` was dead code with no caller, so its
+  #           test went with it and a one-line absence guard replaced it
+  #     ----
+  #     3478  the merged tree, which is what the gate printed
+  #   _suggested_floor 3478 = 3478 - min(50, max(1, 3478/20 = 173)) = 3478 - 50
+  #                         = 3428.
+  # ⚠ ZERO new skips — `skipped=0` on this target, and the suite's single skip is
+  # still the pinned one in repo-cos. No new FILES: every change is to a file the
+  # flake already tracks.
+  "scripts/tests|3428"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —

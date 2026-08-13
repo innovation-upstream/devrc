@@ -189,5 +189,5 @@ FAB** (per-agent unread → session); session-id-in-URL; a consolidated **auto-a
   JS leak is unfixed (0.7.79 never touched `markdown.go`) — don't trust it. Residual: a backtick
   inside a URL renders a truncated autolink plus literal text (no control byte in the href).
 
-**Live pin as of 2026-07-30: 0.7.79** (`curl -sf http://192.168.50.250:30302/health`). Zach ships
-concurrently — this line is stale by design; always re-check.
+**Live pin as of 2026-08-13: 0.7.87** (`clawgatectl health`). Zach ships concurrently — this line is
+stale by design; always re-check.
