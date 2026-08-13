@@ -3,11 +3,21 @@
 SCOPE — HALF THE PROPERTY, ON PURPOSE
 -------------------------------------
 Four test modules pin SKILL.md files under `claude/skills/` so the pins are
-claims about files that SHIP. This answers only the cheap half:
+claims about files that SHIP. This answers only the cheap half, and only
+**as `nix/home.nix` itself declares it**:
 
-  * `home.file.".claude/skills"` exists and names a `source`;
-  * it is not neutered by `enable = false` or a redirected `target` — the two
-    smallest edits that stop the deploy while the mapping still reads fine.
+  * `home.file.".claude/skills"` exists there and names a `source`;
+  * that declaration is not neutered by `enable = false` or a redirected
+    `target` — the two smallest edits that stop the deploy while the mapping
+    still reads fine.
+
+🔴 FILE-SCOPED, NOT CONFIG-SCOPED. The real `home.file` is a MERGE of every
+module, so a sibling can switch this mapping off and this still returns None —
+verified with `imports = [ ./off.nix ];` + `enable = lib.mkForce false;`. That
+idiom is live here (`graphical.nix` already does `lib.mkIf` on `home.file`).
+Closing it means evaluating the whole `homeConfiguration`, which is the cost
+this module was cut to escape. ship.sh does NOT backstop it either: a disabled
+mapping produces no managed link, so nothing shows up dangling.
 
 🔴 It does NOT trace what the `source` RESOLVES to, and must not grow that back.
 Following it (the source is a derivation built from `../claude/skills`) meant
@@ -59,17 +69,32 @@ _FIX_IT = (
 def skills_mapping_problem(home_nix: Path | str) -> str | None:
     """A failure reason, or None when the mapping is declared and live."""
     home_nix = Path(home_nix)
-    if not home_nix.is_file():
-        return f"{home_nix} is not a file, {_FIX_IT}"
+    # NEVER interpolate the raw argument: a caller passing the file's TEXT
+    # instead of its path makes every message below ~160 KB of nix source.
+    # Depending on the filesystem that argument either raises ENAMETOOLONG out
+    # of is_file() or simply reads as a missing file, so truncating is the fix
+    # that holds in both cases — catching the errno alone does not.
+    shown = (lambda t: t if len(t) <= 120 else t[:117] + "...")(str(home_nix))
+    try:
+        is_file = home_nix.is_file()
+    except OSError as exc:
+        return f"cannot stat {shown!r} ({exc.strerror}), {_FIX_IT}"
+    if not is_file:
+        return f"{shown} is not a file, {_FIX_IT}"
     if shutil.which("nix-instantiate") is None:
         return f"nix-instantiate is not on PATH, {_FIX_IT}"
-    p = subprocess.run(
-        ["nix-instantiate", "--eval", "--strict", "--json",
-         "-E", _EXPR.replace("@PATH@", str(home_nix.resolve()))],
-        capture_output=True, text=True, timeout=180,
-    )
+    try:
+        p = subprocess.run(
+            ["nix-instantiate", "--eval", "--strict", "--json",
+             "-E", _EXPR.replace("@PATH@", str(home_nix.resolve()))],
+            capture_output=True, text=True, timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        # Measured runtime is ~0.02 s; a hang means the environment is wrong,
+        # which is a broken check, not a broken home.nix.
+        return f"nix-instantiate did not finish within 60s, {_FIX_IT}"
     if p.returncode != 0:
-        return f"nix cannot evaluate {home_nix}, {_FIX_IT}\n{p.stderr.strip()[-600:]}"
+        return f"nix cannot evaluate {shown}, {_FIX_IT}\n{p.stderr.strip()[-600:]}"
     m = json.loads(p.stdout)
     if not m["declared"]:
         return (
