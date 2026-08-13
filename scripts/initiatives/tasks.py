@@ -319,7 +319,16 @@ def fetch_tasks_result(*, creds: dict | None = None, env=None,
         _log("CLAWGATE_HOOK_TOKEN not set (~/.claude/clawgate.env) — no linked tasks")
         return False, []
 
-    url = f"{clawgate_base_url(c, env)}/api/tasks"
+    # 🔴 `?summary=1`, on the BOARD RENDER path. It swaps each task's (unbounded)
+    # `body` for `commentCount`/`attachmentCount` and keeps everything else —
+    # this module reads only `id`, `title`, `directory`, `status` and `tags`, all
+    # of which survive it. Measured 2026-08-13 on the live board: 217,379 B full
+    # vs 8,088 B summary, a 27x cut. The headroom under MAX_RESPONSE_BYTES had
+    # fallen to 4.8x (from 11x when that cap was chosen) and the comment there
+    # warns the payload "only ever goes up"; this restores ~130x instead of
+    # raising the cap. `?summary=1` is a query flag an older clawgate ignores, so
+    # it degrades to the full payload rather than failing.
+    url = f"{clawgate_base_url(c, env)}/api/tasks?summary=1"
     get = getter if getter is not None else _get
     try:
         # THE deadline: bounds every phase of the call (and any injected getter), unlike the

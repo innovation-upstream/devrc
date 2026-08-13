@@ -584,7 +584,17 @@ TARGET_FLOORS=(
   # (not arithmetic across the conflict — this line is re-pinned by every
   # branch that adds a test, and rerere has replayed a stale resolution onto
   # it before). _suggested_floor 3341 = 3341 - min(50, max(1, 167)) = 3291.
-  "scripts/tests|3291"
+  #
+  # 2026-08-13, the clawgate stuck-dispatch FIX-FORWARD (the grace window, the
+  # bar's stuck rendering + its own toast latch, the None-vs-[] renderer, the
+  # shared schema reading, and the de-vacuum'd guards): 3341 -> 3471 collected on
+  # main + this branch. Measured by the authoritative gate on this tree, not
+  # computed from either side — same method as every line above.
+  #   _suggested_floor 3471 = 3471 - min(50, max(1, 3471/20 = 173)) = 3471 - 50
+  #                         = 3421.
+  # Net of one DELETION: `clawgate_tasks.unmeasured()` was dead code with no
+  # caller, so its test went with it and a one-line absence guard replaced it.
+  "scripts/tests|3421"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —

@@ -14,6 +14,8 @@ import os
 import re
 import time
 
+import pytest
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SCRIPT = os.path.join(_HERE, "..", "agent-ops")
 
@@ -921,12 +923,53 @@ def test_render_blocked_reports_the_rows_it_could_not_show():
     assert body.count("queued item") == ao.BLOCKED_MAX_ROWS
 
 
-def test_the_live_enrichment_is_asked_even_when_a_legacy_cache_says_zero():
-    """🔴 A zero from a cache that never measured stuck dispatches is not
-    evidence there are none, so the API is asked instead of trusted."""
+@pytest.mark.parametrize("cache,ask,why", [
+    # 🔴 THE CASE THE OLD SPELLING GOT WRONG. `schema: 1` is a cache from a
+    # poller that never measured stuck dispatches; its zero is not an all-clear.
+    # The previous condition (`schema is None`) saw an int and trusted it.
+    ({"count": 0, "schema": 1}, True, "explicit pre-predicate schema"),
+    ({"count": 0}, True, "no schema at all — an even older cache"),
+    ({"count": 0, "schema": None}, True, "schema present but null"),
+    ({"count": 0, "schema": True}, True, "a bool is not a version"),
+    ({"count": 0, "schema": "2"}, True, "a string is not a version"),
+    # A current cache reporting a MEASURED zero is trusted — this is the whole
+    # point of the schema gate, and the negative control for it.
+    ({"count": 0, "schema": 2}, False, "measured zero from a current poller"),
+    ({"count": 0, "schema": 3}, False, "a newer poller is still trusted"),
+    # Anything non-zero is named regardless of schema.
+    ({"count": 3, "schema": 2}, True, "there is something to name"),
+    ({"count": 1, "schema": 1}, True, "both reasons at once"),
+    # Nothing to decide from.
+    (None, False, "no cache"), ({}, False, "empty dict is falsy"),
+])
+def test_should_enrich_clawgate_decides_from_the_SHARED_schema_reading(
+        cache, ask, why):
+    assert ao.should_enrich_clawgate(cache) is ask, why
+
+
+def test_should_enrich_clawgate_agrees_with_the_shared_predicate():
+    """🔴 THE SEAM. agent-ops and session-manager read the same cache file; they
+    used to spell the schema test differently and returned opposite verdicts on
+    a `schema: 1` cache — this one silently rendering an all-clear. Pin the
+    relationship, not either spelling: for a measured-zero cache, "ask the API"
+    is exactly the negation of the shared `schema_ok`.
+    """
+    for schema in (None, 0, 1, 2, 3, True, "2", 2.0):
+        cache = {"count": 0, "schema": schema}
+        assert ao.should_enrich_clawgate(cache) is not ao.CG.schema_ok(cache), \
+            "disagreement on schema=%r" % (schema,)
+
+
+def test_the_live_enrichment_is_actually_WIRED_to_that_decision():
+    # The predicate above is only worth testing if the render path calls it.
+    # Structural, and paired with the behavioural tests rather than replacing
+    # them: assert the call is there AND that no second spelling of the schema
+    # test has grown back beside it.
     import inspect
     src = inspect.getsource(ao.build_body_lines)
-    assert 'clawgate.get("schema") is None' in src
+    assert "should_enrich_clawgate(" in src
+    assert '.get("schema")' not in src, \
+        "the schema test was re-spelled inline; call should_enrich_clawgate"
 
 
 # ---------------------------------------------------------------------------

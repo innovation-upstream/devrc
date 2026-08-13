@@ -9,7 +9,16 @@ CALM rendering (colour == "look at me"):
   missing / stale / error / count<=0  -> empty, invisible block
   count > 0                           -> `tasks` icon + count, coloured (state
                                           from the cache; default Warning)
+  stuck_count > 0                     -> `<count>!<stuck>`, Critical from cache
+  stuck_count absent (old cache)      -> `<count>?` — NOT measured, not zero
 Click (wired in graphical.nix) opens the clawgate UI.
+
+🔴 WHY THE TEXT IS NOT JUST THE COUNT. It was, and `2 open` rendered byte-for-byte
+identically to `2 open + 1 STUCK` (`text 3`, state Warning) — so of the three
+surfaces the stuck predicate was built for, the bar could not show a stuck
+dispatch at all. The count alone is the number the operator already expects to be
+non-zero; the stuck half is the part that is rare and urgent, and it needs its own
+glyph, not a shared one.
 """
 import json
 import os
@@ -35,6 +44,38 @@ def load(path):
         return None
 
 
+def _int_or_none(value):
+    """A strictly-integral reading, or None.
+
+    🔴 NO COERCION. `int()` would turn `2.5` into `2` and `True` into `1`, both
+    of which render as a confident measurement of something nobody measured — a
+    float `stuck_count` of 2.5 announcing "2 stuck dispatches" is worse than
+    announcing that it could not tell. The cache is JSON written by our own
+    poller, where these are always ints, so anything else means the writer
+    changed and the honest reading is `?`. An absent key is None, not 0 — see
+    `stuck_suffix`.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def stuck_suffix(payload) -> str:
+    """The stuck half of the block text: `!N`, `?`, or empty.
+
+    🔴 Three outcomes, not two. `stuck_count: 0` is a MEASURED all-clear and
+    renders nothing; a MISSING `stuck_count` is a cache written by a poller that
+    predates the predicate, and renders `?` — the count beside it was computed by
+    the old status-only rule, so it is not merely missing the stuck half, it is a
+    different number. Rendering that as a clean count is the substitution of an
+    unread queue for an empty one that this whole module refuses.
+    """
+    stuck = _int_or_none(payload.get("stuck_count"))
+    if stuck is None:
+        return "?"
+    return "!%d" % stuck if stuck > 0 else ""
+
+
 def render(payload, icon: str = ICON) -> dict:
     """Pure: cache payload (or None) -> i3status-rust block dict.
 
@@ -45,17 +86,15 @@ def render(payload, icon: str = ICON) -> dict:
         return dict(_EMPTY)
     if payload.get("error") or payload.get("state") == "stale":
         return dict(_EMPTY)
-    try:
-        count = int(payload.get("count", 0))
-    except (TypeError, ValueError):
+    count = _int_or_none(payload.get("count", 0))
+    if count is None or count <= 0:
         return dict(_EMPTY)
-    if count <= 0:
-        return dict(_EMPTY)
+    text = "%d%s" % (count, stuck_suffix(payload))
     state = payload.get("state")
     if state not in _VALID_STATES or state == "Idle":
         state = "Warning"
-    return {"icon": icon, "text": str(count),
-            "short_text": str(count), "state": state}
+    return {"icon": icon, "text": text,
+            "short_text": text, "state": state}
 
 
 def main() -> int:

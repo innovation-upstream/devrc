@@ -4578,6 +4578,70 @@ def test_a_schema2_cache_MISSING_the_stuck_key_is_still_None_not_empty():
     assert got["ready_for_review"] is None and got["open"] is None
 
 
+def test_the_RENDERER_also_says_UNMEASURED_for_a_schema2_cache_with_no_lists():
+    """🔴 THE SAME BUG ONE LAYER DOWN, and the reason a reader test was not
+    enough. `read_blocked_on_me` preserves the None correctly (test above) — and
+    then `_render_blocked_rows` did `b.get("stuck") or []`, collapsing exactly
+    the distinction the reader had just protected. Measured: this cache rendered
+    a clean "3 clawgate task(s) needing you" with NO warning anywhere, while the
+    OLDER schema-1 path warned correctly. The newer, supported shape was the
+    silent one, which is the worse way round.
+
+    So the assertion is on the RENDERED TEXT, not on the parsed dict.
+    """
+    body = {"schema": 2, "count": 3, "ts": NOW - 30, "state": "Warning",
+            "detail": "3 need you"}
+    got = sm.read_blocked_on_me(reader=lambda p: json.dumps(body), now=NOW)
+    text = "\n".join(sm.render_blocked_on_me(got))
+    assert "NOT measured" in text or "NOT enumerated" in text, text
+    assert "stuck" in text.lower()
+    # …and it must not read as a measured all-clear.
+    assert "0 STUCK" not in text
+
+
+def test_the_renderer_distinguishes_a_MEASURED_empty_queue_from_an_ABSENT_one():
+    """🔴 THE DISCRIMINATING PAIR for the renderer. A measured-empty board and a
+    cache that carries no lists at all must not produce the same text — that
+    equality IS the bug."""
+    measured = sm.read_blocked_on_me(
+        reader=_cache(stuck=[], stuck_count=0, open=[], ready_for_review=[],
+                      count=0), now=NOW)
+    absent_lists = sm.read_blocked_on_me(
+        reader=lambda p: json.dumps({"schema": 2, "count": 3, "ts": NOW - 30,
+                                     "state": "Warning", "detail": "3 need you"}),
+        now=NOW)
+    a = "\n".join(sm.render_blocked_on_me(measured))
+    b = "\n".join(sm.render_blocked_on_me(absent_lists))
+    assert a != b
+    assert "NOT measured" not in a and "NOT enumerated" not in a
+    assert "NOT measured" in b or "NOT enumerated" in b
+
+
+# 🔴 The key names are IMPORTED, not re-spelled. Writing them out as
+# `["stuck", "open", "ready_for_review"]` puts a literal superset of the
+# operator-pending state set in this file, and the repo-wide single-source guard
+# fails on it — correctly: the cache's list keys ARE the pending statuses (plus
+# `stuck`), so spelling them here would be the third copy of the predicate that
+# guard exists to prevent. This also follows the definition if it ever changes.
+@pytest.mark.parametrize("missing",
+                         sorted(sm.CG.PENDING_TASK_STATES) + ["stuck"])
+def test_EACH_absent_list_announces_itself_separately(missing):
+    # Per-list, so a fix that only covers `stuck` cannot pass. Each key is
+    # dropped on its own from an otherwise complete schema-2 cache. `count` must
+    # stay positive: a measured ZERO board short-circuits before the row
+    # renderer, so a zero fixture would pass without exercising anything.
+    full = json.loads(_cache(
+        stuck=[], stuck_count=0,
+        open=[{"id": 191, "title": "queued alpha"}],
+        ready_for_review=[{"id": 192, "title": "queued beta"}],
+        count=2, pending_count=2)("p"))
+    del full[missing]
+    got = sm.read_blocked_on_me(reader=lambda p: json.dumps(full), now=NOW)
+    text = "\n".join(sm.render_blocked_on_me(got))
+    assert missing in text, text
+    assert "NOT measured" in text or "NOT enumerated" in text
+
+
 def test_a_schema2_cache_with_zero_stuck_is_a_MEASURED_zero():
     """The other half of the discriminating control: `0` and `None` must not
     render the same, or the field is worthless."""

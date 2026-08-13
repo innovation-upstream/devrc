@@ -722,6 +722,19 @@ def _toast_specs() -> dict:
         "clawgate": {"threshold": 0, "urgency": "normal",
                      "summary": "clawgate: task awaiting",
                      "action": "xdg-open http://192.168.50.250:30302"},
+        # 🔴 A SECOND, INDEPENDENT latch over the SAME payload. `count` includes
+        # the stuck rows, so on a board that is already non-zero — the normal
+        # state; it sat at 13 when this was written — a dispatch wedging is a
+        # 13 -> 14 increment while the `clawgate` latch is ALREADY set. Same
+        # colour, no toast, and the one event worth interrupting for was the one
+        # that could not interrupt. Keying a latch of its own on `stuck_count`
+        # makes the two edges independent: the stuck toast fires on 0 -> 1 stuck
+        # whatever `count` is doing. `source` says which payload it reads (there
+        # is no `clawgate_stuck` poller) and `count_key` which number it gates on.
+        "clawgate_stuck": {"threshold": 0, "urgency": "critical",
+                           "source": "clawgate", "count_key": "stuck_count",
+                           "summary": "🔴 clawgate dispatch STUCK",
+                           "action": "xdg-open http://192.168.50.250:30302"},
         "mail": {"threshold": 0, "urgency": "low",
                  "summary": "New mail action", "action": None},
         # Rare by construction (measured 2026-08-03: 0 dead across 17 live
@@ -751,8 +764,16 @@ def evaluate_edge_toast(name, payload, spec, fire=None,
         return None
     if payload.get("state") == "stale" or payload.get("error"):
         return None
+    # 🔴 An ABSENT count key is NOT a measured zero, so it SKIPS (latch
+    # untouched) exactly like a stale payload. This matters for `stuck_count`:
+    # a cache written by a poller predating the stuck predicate carries no such
+    # key, and reading that as 0 would clear the latch and re-toast a still-stuck
+    # dispatch the moment a newer poller wrote a real number.
+    count = payload.get(spec.get("count_key", "count"))
+    if count is None or isinstance(count, bool):
+        return None
     try:
-        count = int(payload.get("count", 0))
+        count = int(count)
     except (TypeError, ValueError):
         return None
     latched = read(name)
@@ -1223,10 +1244,23 @@ def _dispatch_all(payloads) -> int:
     🔴 THE ONE dispatch site. The live poll and every `--mock-*` run funnel
     through here, so the decision cannot be right in one and wrong in the other,
     and a single test that drives either one covers both.
+
+    Two passes, because a toast is not always 1:1 with a polled source. The first
+    dispatches each source against the spec of the same name; the second
+    dispatches every DERIVED spec — one carrying a `source` — against that
+    source's payload. `clawgate_stuck` is the only one today: a second latch over
+    the clawgate payload, gating on `stuck_count` instead of `count`.
     """
     specs = _toast_specs()
+    by_source = {}
     for name, payload in payloads:
+        by_source[name] = payload
         dispatch_edge_toast(name, payload, specs)
+    for spec_name, spec in specs.items():
+        src = spec.get("source")
+        if src is None or src not in by_source:
+            continue
+        dispatch_edge_toast(spec_name, by_source[src], specs)
     return 0
 
 

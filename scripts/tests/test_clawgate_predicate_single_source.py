@@ -46,18 +46,28 @@ LIB_REL = "scripts/lib/clawgate_tasks.py"
 #: file is its own allowlist entry below — a scanner has to name what it hunts.
 TARGET = {"open", "ready_for_review"}
 
-#: 🔴 Paths permitted to contain the literal, each with the reason.
-#: Accounting is TWO-WAY (same discipline as test_runtime_shebangs' allowlist):
-#: an unlisted hit fails, and a listed path that no longer hits also fails, so a
-#: rubber stamp cannot outlive the thing it stamped.
+#: 🔴 Paths permitted to contain the literal, MAPPED TO HOW MANY TIMES, each
+#: with the reason. Accounting is TWO-WAY (same discipline as
+#: test_runtime_shebangs' allowlist): an unlisted hit fails, and a listed path
+#: that no longer hits also fails, so a rubber stamp cannot outlive the thing it
+#: stamped.
+#:
+#: 🔴 THE COUNT IS THE POINT. A path-level allowlist forgives a path, not an
+#: occurrence: appending a genuine second `frozenset({"open",
+#: "ready_for_review"})` to any file already on this list kept the guard green,
+#: which is exactly the regrowth it exists to catch — the predicate coming back
+#: as copy N+1 inside a file that was pardoned for copy 1. Pinning the number
+#: makes every NEW occurrence fail even in a forgiven file. Update a number here
+#: only together with the reason it moved.
 ALLOWLIST = {
-    # THE definition. Everything else imports it.
-    LIB_REL,
-    # This guard: it must name the set it hunts for.
-    "scripts/tests/test_clawgate_predicate_single_source.py",
+    # THE definition. Everything else imports it: PENDING_TASK_STATES itself.
+    LIB_REL: 1,
+    # This guard: it must name the set it hunts for (TARGET, above).
+    "scripts/tests/test_clawgate_predicate_single_source.py": 1,
     # The unit suite asserts the definition's literal value — a contract test
-    # for the constant is the one legitimate second spelling.
-    "scripts/tests/test_clawgate_tasks.py",
+    # for the constant is the one legitimate second spelling. Two: the contract
+    # assertion, and one fixture that builds the same pair by hand.
+    "scripts/tests/test_clawgate_tasks.py": 2,
     # 🔴 A DIFFERENT RULE that this scanner's superset test legitimately catches,
     # found by writing it. `initiatives/tasks.OPEN_STATUSES` is
     # ("open", "in_progress", "ready_for_review") — the initiatives viewer's
@@ -67,11 +77,11 @@ ALLOWLIST = {
     # not "does this need the operator?", so folding the two together would give
     # the bar an in_progress task it must not count and give the dispatch guard
     # a stuck-agent notion it has no use for. Kept separate ON PURPOSE.
-    "scripts/initiatives/tasks.py",
+    "scripts/initiatives/tasks.py": 1,
     # The same rule re-spelled in that suite's `_tv` fixture (it builds the
     # `open` flag by hand rather than importing OPEN_STATUSES). Pre-existing and
     # out of scope here; noted so the next reader does not think it is this one.
-    "scripts/initiatives/tests/test_viewer.py",
+    "scripts/initiatives/tests/test_viewer.py": 1,
 }
 
 #: 🔴 The importer ledger. Exactly these files load the shared module.
@@ -122,30 +132,46 @@ def python_files(root: Path):
 
 
 def _string_members(node):
-    """The string constants directly inside a set/list/tuple/frozenset node, or
-    None if this node is not one of those containers."""
-    elts = None
+    """`(members, inner)` for a set/list/tuple/frozenset node, else `(None, None)`.
+
+    `members` is the set of string constants directly inside it. `inner` is the
+    wrapped container node when this is a `frozenset({...})`-style call, so the
+    caller can avoid counting one literal twice — the ALLOWLIST pins exact
+    counts now, and `frozenset({...})` matching as both the Call and its inner
+    Set would make every pinned number an artefact of the spelling used.
+    """
+    elts = inner = None
     if isinstance(node, (ast.Set, ast.List, ast.Tuple)):
         elts = node.elts
     elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
           and node.func.id in {"frozenset", "set", "list", "tuple"}
           and len(node.args) == 1
           and isinstance(node.args[0], (ast.Set, ast.List, ast.Tuple))):
-        elts = node.args[0].elts
+        inner = node.args[0]
+        elts = inner.elts
     if elts is None:
-        return None
+        return None, None
     return {e.value for e in elts
-            if isinstance(e, ast.Constant) and isinstance(e.value, str)}
+            if isinstance(e, ast.Constant) and isinstance(e.value, str)}, inner
 
 
 def find_state_set_literals(source: str):
-    """Line numbers of every literal container whose strings ⊇ TARGET."""
-    hits = []
+    """Line numbers of every literal container whose strings ⊇ TARGET.
+
+    ONE entry per literal: `ast.walk` is breadth-first, so a wrapping
+    `frozenset(...)` call is always seen before the set it wraps and can retire
+    it. Without that, `frozenset({"open", "ready_for_review"})` counts as two.
+    """
+    hits, consumed = [], set()
     tree = ast.parse(source)
     for node in ast.walk(tree):
-        members = _string_members(node)
+        if id(node) in consumed:
+            continue
+        members, inner = _string_members(node)
         if members is not None and TARGET <= members:
             hits.append(getattr(node, "lineno", 0))
+            if inner is not None:
+                consumed.add(id(inner))
     return hits
 
 
@@ -210,29 +236,50 @@ def test_the_pending_state_set_is_defined_exactly_once():
         "a second copy of the clawgate operator-pending state set appeared:\n"
         + "\n".join("  %s: line(s) %s" % (k, v) for k, v in offenders.items())
         + "\n\nImport it instead: scripts/lib/clawgate_tasks.PENDING_TASK_STATES."
-        " That module also owns AGENT_IDLE_THRESHOLD_SECS and the stuck"
+        " That module also owns STUCK_THRESHOLD_SECS and the stuck"
         " predicate. If a second spelling is genuinely required, add it to"
         " ALLOWLIST in this file WITH the reason.")
 
 
-def test_every_allowlist_entry_still_carries_the_literal():
-    # Two-way accounting: a stamp that outlives what it stamped is a lie the
-    # next reader will trust.
-    stale = []
-    for rel in sorted(ALLOWLIST):
+def test_every_allowlist_entry_carries_EXACTLY_the_pinned_number_of_literals():
+    """🔴 Two-way accounting, at OCCURRENCE granularity rather than path.
+
+    A stamp that outlives what it stamped is a lie the next reader will trust —
+    and so is a stamp that silently covers more than it was issued for. The
+    path-level version of this check passed when a second literal was appended
+    to an already-listed file, which is the regrowth the whole guard exists to
+    catch, wearing a pardon it was never granted.
+    """
+    wrong = []
+    for rel, expected in sorted(ALLOWLIST.items()):
         p = REPO / rel
         if not p.exists():
-            stale.append("%s (file is gone)" % rel)
+            wrong.append("%s: file is gone (expected %d)" % (rel, expected))
             continue
-        if not find_state_set_literals(p.read_text(encoding="utf-8")):
-            stale.append("%s (no longer contains the literal)" % rel)
-    assert not stale, ("ALLOWLIST entries no longer needed — delete them:\n  "
-                       + "\n  ".join(stale))
+        hits = find_state_set_literals(p.read_text(encoding="utf-8"))
+        if len(hits) != expected:
+            wrong.append("%s: expected %d, found %d at line(s) %s"
+                         % (rel, expected, len(hits), hits))
+    assert not wrong, (
+        "the ALLOWLIST no longer accounts for the literals in these files:\n  "
+        + "\n  ".join(wrong)
+        + "\n\nFOUND MORE than pinned: a new copy of the predicate appeared in a"
+        " file that was allowlisted for a DIFFERENT one — import"
+        " clawgate_tasks.PENDING_TASK_STATES instead. FOUND FEWER (or zero): the"
+        " entry is stale; drop the count or the entry. Never just re-pin the"
+        " number to whatever was measured — say in the comment why it moved.")
 
 
 def test_the_threshold_constant_is_also_defined_exactly_once():
-    # The same regrowth risk applies to the 15-minute idle threshold: a consumer
-    # that hardcodes 900 diverges silently the day the constant is retuned.
+    # The same regrowth risk applies to the 15-minute grace/idle window: a
+    # consumer that hardcodes 900 diverges silently the day it is retuned.
+    #
+    # The needle is `THRESHOLD_SECS`, not the old `IDLE_THRESHOLD`: the constant
+    # is now `STUCK_THRESHOLD_SECS` (it gates every disjunct, not just the idle
+    # clock), and a needle pinned to the previous NAME would have gone quietly
+    # vacuous the moment it was renamed — a guard that stops matching is
+    # indistinguishable from a guard that finds nothing. `_SECS` is what keeps it
+    # off unrelated thresholds like session-manager's DEFAULT_STALE_THRESHOLD.
     offenders = []
     for p in python_files(REPO):
         rel = p.relative_to(REPO).as_posix()
@@ -241,21 +288,118 @@ def test_the_threshold_constant_is_also_defined_exactly_once():
             continue
         text = p.read_text(encoding="utf-8", errors="replace")
         for i, line in enumerate(text.splitlines(), 1):
-            if "IDLE_THRESHOLD" in line and "=" in line and "CG." not in line \
+            if "THRESHOLD_SECS" in line and "=" in line and "CG." not in line \
                     and "clawgate_tasks" not in line:
                 offenders.append("%s:%d %s" % (rel, i, line.strip()))
     assert not offenders, (
-        "an idle-threshold constant was re-spelled outside the shared module:\n  "
+        "a stuck-threshold constant was re-spelled outside the shared module:\n  "
         + "\n  ".join(offenders)
-        + "\n\nUse clawgate_tasks.AGENT_IDLE_THRESHOLD_SECS.")
+        + "\n\nUse clawgate_tasks.STUCK_THRESHOLD_SECS.")
+
+
+def test_the_threshold_needle_can_actually_fire():
+    # 🔴 POSITIVE CONTROL for the scan above. It reports a count of ZERO on a
+    # healthy tree, which is indistinguishable from a needle that matches
+    # nothing — precisely how renaming the constant would have retired the old
+    # `IDLE_THRESHOLD` needle in silence. Both the current name and a plausible
+    # re-spelling must be caught by the same predicate the loop uses.
+    def caught(line):
+        return ("THRESHOLD_SECS" in line and "=" in line
+                and "CG." not in line and "clawgate_tasks" not in line)
+
+    assert caught("STUCK_THRESHOLD_SECS = 900")
+    assert caught("AGENT_IDLE_THRESHOLD_SECS = 900")     # the previous name
+    assert caught("MY_OWN_THRESHOLD_SECS=900")
+    # …and does not fire on a legitimate use of the shared constant, nor on the
+    # unrelated staleness threshold that lives in session-manager.
+    assert not caught("threshold = CG.STUCK_THRESHOLD_SECS")
+    assert not caught("DEFAULT_STALE_THRESHOLD = 3600")
 
 
 # =========================================================================== #
 # THE IMPORTER LEDGER — the SEAM, asserted in both directions
 # =========================================================================== #
+def _docstring_node_ids(tree) -> set:
+    """Ids of every docstring Constant, so PROSE mentioning the module does not
+    read as loading it."""
+    out = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                                 ast.AsyncFunctionDef)):
+            continue
+        body = getattr(node, "body", None) or []
+        if (body and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)):
+            out.add(id(body[0].value))
+    return out
+
+
 def _loads_shared_module(path: Path) -> bool:
-    text = path.read_text(encoding="utf-8", errors="replace")
-    return "clawgate_tasks.py" in text and "_load_clawgate_tasks" in text
+    """Does this file load `clawgate_tasks`, by ANY mechanism or helper name?
+
+    🔴 SPELLED vs STRUCTURAL. This used to require the literal helper name
+    `_load_clawgate_tasks`, so a fourth consumer that loaded the module under any
+    other name was invisible to the ledger and the "GROWS" half — the half that
+    catches a new surface rendering this queue without review — was defeated by a
+    rename. Nothing about the hazard depends on what the helper is called.
+
+    What a loader CANNOT avoid is naming the module: either as a path string
+    handed to an explicit loader, or as an import name. Both are matched, so
+    switching mechanism does not evade it either. Docstrings are excluded, so a
+    file that merely writes ABOUT the module is not counted as a consumer.
+    """
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+    except SyntaxError:
+        return False
+    skip = _docstring_node_ids(tree)
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and "clawgate_tasks" in node.value and id(node) not in skip):
+            return True
+        if isinstance(node, ast.Import):
+            if any("clawgate_tasks" in a.name for a in node.names):
+                return True
+        if isinstance(node, ast.ImportFrom):
+            if node.module and "clawgate_tasks" in node.module:
+                return True
+    return False
+
+
+@pytest.mark.parametrize("snippet", [
+    # the real shape, under the helper name the ledger used to require…
+    'def _load_clawgate_tasks():\n    p = "scripts/lib/clawgate_tasks.py"\n',
+    # …and under three names it never heard of. THIS is the hole: a rename made
+    # a genuine fourth consumer invisible and left the ledger green.
+    'def _boot():\n    p = "scripts/lib/clawgate_tasks.py"\n',
+    'CG = _import_by_path("lib/clawgate_tasks.py")',
+    'x = os.path.join(D, "lib", "clawgate_tasks.py")',
+    # a different MECHANISM entirely — sys.path plus a plain import
+    'import clawgate_tasks',
+    'from clawgate_tasks import PENDING_TASK_STATES',
+    'from scripts.lib.clawgate_tasks import attention',
+])
+def test_positive_control_the_ledger_sees_a_loader_under_ANY_name(snippet,
+                                                                  tmp_path):
+    p = tmp_path / "consumer.py"
+    p.write_text(snippet)
+    assert _loads_shared_module(p), snippet
+
+
+@pytest.mark.parametrize("snippet", [
+    '"""This module is unrelated to clawgate_tasks.py."""\n',   # module docstring
+    'def f():\n    """See clawgate_tasks.py for the predicate."""\n',
+    'x = 1   # clawgate_tasks.py has the real one\n',           # a comment
+    'import json',
+])
+def test_negative_control_prose_about_the_module_is_not_a_consumer(snippet,
+                                                                   tmp_path):
+    # A file that merely mentions the module must not join the ledger, or every
+    # doc edit becomes a ledger failure and the ledger stops being read.
+    p = tmp_path / "prose.py"
+    p.write_text(snippet)
+    assert not _loads_shared_module(p), snippet
 
 
 def test_exactly_the_expected_surfaces_import_the_shared_module():
