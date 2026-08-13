@@ -3080,12 +3080,19 @@ def report_json(report: TouchReport) -> dict:
 class Census:
     """Counts that answer "did entries accrue outside infra recon?".
 
-    The decision doc's reopening gate is a COUNT ("≥5 entries outside its
-    current single scope"), so the instrument for it must be a count too — not a
-    recollection of which sessions felt productive. This reads the store
-    read-only and reports the raw numbers; it deliberately renders no verdict,
-    because the threshold lives in the decision doc and restating it here would
-    be the same number in two places.
+    The decision doc's reopening gate is a COUNT, so the instrument for it must
+    be a count too — not a recollection of which sessions felt productive. This
+    reads the store read-only and reports the raw numbers; it deliberately
+    renders no verdict, because the criterion lives in the decision doc and
+    restating it here would be the same claim in two places.
+
+    ⚠ That gate TRIPPED and was superseded on 2026-08-13: its original
+    entries-outside-one-scope threshold was met, and it was the wrong question
+    anyway — the binding constraint is COVERAGE (does the index cover the repos
+    where work happens). The per-scope numbers below are still exactly what a
+    coverage question reads, so this class is unchanged. Do not copy the new
+    criterion here either; see
+    `claudedocs/decision-subsystem-store-rejected-2026-08-11.md`.
     """
 
     total: int
