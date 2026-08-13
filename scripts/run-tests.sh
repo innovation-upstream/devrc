@@ -745,7 +745,19 @@ TARGET_FLOORS=(
   # .#checks.x86_64-linux.pytests` -> `collected=112`, read out of `nix log`, not from a
   # local pytest run — then put through the gate's own function:
   #   _suggested_floor 112 = 112 - min(50, max(1, 112/20 = 5)) = 112 - 5 = 107.
-  "scripts/claude-hooks/tests/test_next_step_nudge.py|107"
+  #
+  # 2026-08-13, the BLOCKED next-step shape: 112 -> 114 collected. +2 — the shape's own
+  # structural guard and the guard that feeds NUDGE's quoted exemplar back through the
+  # predicate (the two new helpers are not tests and collect nothing). Movement on this
+  # line is the evidence the gate ran the new assertions at all. Measured by the
+  # AUTHORITATIVE gate on THIS branch's tree — `nix build
+  # .#checks.x86_64-linux.pytests` -> `collected=114`, read out of `nix log`, not from a
+  # local pytest run — then put through the gate's own function, not arithmetic:
+  #   _suggested_floor 114 = 114 - min(50, max(1, 114/20 = 5)) = 114 - 5 = 109.
+  # ⚠ Two sibling branches also add tests today and will conflict HERE. Do not reconcile
+  # the two sides by hand: re-run the gate on the MERGED tree and copy what it prints
+  # (`rerere` has replayed a stale resolution onto this line before).
+  "scripts/claude-hooks/tests/test_next_step_nudge.py|109"
 )
 
 # The allowance rule, in one place, used by BOTH the drift message and anyone

@@ -623,12 +623,15 @@ def claim(state_dir):
 
 
 NUDGE = (
-    "next-step: this turn ended without saying what happens next, so answering it "
-    "costs the operator an extra round trip just to ask.\n"
+    "next-step: this turn ended without saying what happens next, which costs the "
+    "operator a round trip to ask.\n"
     "Add ONE short closing line before you stop — either:\n"
     "  • the action you would take next, stated so the reply can be a single "
     "\"proceed\"; or\n"
-    "  • a numbered choice with YOUR recommendation marked.\n"
+    "  • a numbered choice with YOUR recommendation marked; or\n"
+    "  • if the next step is blocked, what it is blocked ON and what happens once that "
+    "clears — \"waiting on the audit agent; when it lands I'll re-run the gate\" is a "
+    "complete ending, never to be dressed up as an authorizable \"proceed\".\n"
     "If the work is genuinely finished and nothing follows, say that explicitly — "
     "\"nothing further; this is done\" is a valid next step.\n"
     "Do not redo any work, re-run any command, or restate the summary: append the one "
