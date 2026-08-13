@@ -47,8 +47,10 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import io
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -1187,6 +1189,15 @@ class TestSkillDocsArePinned:
             "--validate <path-you-just-wrote>",
             "🔴 the write-time parse check — the writer finds its own defect, "
             "not a different tool in a later session",
+        ),
+        (
+            "if the message prints a `RECOVER —` block, run the command it gives you",
+            "🔴 a refusal with no route out leaves the store broken until a human looks",
+        ),
+        (
+            "Run the command it printed, not one you compose",
+            "🔴 the blocking file is often in ANOTHER scope, where a composed "
+            "--validate reports clean and changes nothing",
         ),
         (
             "Any non-zero exit ⇒ print the stderr line verbatim and write NOTHING",
@@ -6465,40 +6476,56 @@ class TestJournalMutationKillMatrix:
         assert not isinstance(exc.value, st.EntryUnreadableError)
         assert "index entry unreadable" not in str(exc.value)
 
-    def test_the_MALFORMED_reraise_is_UNKILLABLE_and_that_is_the_finding(
-        self, tmp_path
-    ) -> None:
-        """🔴 NOT a kill — the OPPOSITE, recorded so nobody re-derives it.
+    def test_kills_the_MALFORMED_refusal_wording(self, tmp_path) -> None:
+        """🔴 SUPERSEDES `test_the_MALFORMED_reraise_is_UNKILLABLE_and_that_is_the
+        _finding`, and the supersession is the point.
 
-        `build_report`'s `except MalformedEntryError: raise` before the
-        `except OSError` is a NO-OP: `MalformedEntryError` is a `ResolverError`,
-        so the `OSError` clause could never have caught it. A mutation aimed at
-        the clause is what proved this, by refusing to change anything. The same
-        redundancy is in `subsystem_recall`.
+        That test recorded a real finding: `build_report`'s
+        `except MalformedEntryError: raise` was a NO-OP, because
+        `MalformedEntryError` is a `ResolverError` and the `OSError` clause below
+        could never have caught it — a mutation aimed at the clause proved it by
+        refusing to change anything, and the honest thing was to say so rather
+        than dress an unkillable clause up as a green kill.
 
-        `claude/RULES.md` — a guard that cannot be reached is not coverage. So
-        this test asserts the redundancy directly (the mutant behaves IDENTICALLY
-        to the real module) rather than dressing an unkillable clause up as a
-        green kill. The clause stays, labelled, because it documents intent and
-        because deleting it from one of the two store-readers and not the other
-        is how the two start to drift.
+        The clause is LOAD-BEARING now. It rewords the refusal so it names the
+        recovery, so the same mutation that used to change nothing now strips the
+        route out and leaves the agent at the dead end `handoff/SKILL.md` step 4
+        walks it into. Reachable by construction: a malformed entry is the only
+        way in, and no earlier guard rejects one.
+
+        The premise assertion is kept — if `MalformedEntryError` ever became an
+        `OSError` this kill would be measuring clause ORDER instead of wording.
         """
         mod = _load_mutant(
             tmp_path,
             "mj_malformed",
-            [("    except MalformedEntryError:\n        raise",
-              "    except ZeroDivisionError:\n        raise")],
+            [("    except MalformedEntryError as exc:\n        # Re-raised as the SAME class",
+              "    except ZeroDivisionError as exc:\n        # Re-raised as the SAME class")],
         )
         store = _journal_store(tmp_path)
         (store / SCOPE / "nameless.md").write_text("---\nscope: x\n---\n", encoding="utf-8")
-        for module in (mod, st):
-            with pytest.raises(sr.MalformedEntryError) as exc:
-                module.build_report(
-                    module.caller_supplied(_journal_paths("batcher")), store, SCOPE, today=TODAY
-                )
-            assert "malformed index entry" in str(exc.value)
+
+        with pytest.raises(sr.MalformedEntryError) as mutant:
+            mod.build_report(
+                mod.caller_supplied(_journal_paths("batcher")), store, SCOPE, today=TODAY
+            )
+        assert "RECOVER" not in str(mutant.value)
+        assert not _recovery_commands(str(mutant.value))
+
+        with pytest.raises(sr.MalformedEntryError) as real:
+            st.build_report(
+                st.caller_supplied(_journal_paths("batcher")), store, SCOPE, today=TODAY
+            )
+        assert "RECOVER" in str(real.value)
+        assert _recovery_commands(str(real.value))
+
+        # BOTH still refuse with the same sentinel — the kill is about the route
+        # out, not about the refusal, which must not have moved.
+        for exc in (mutant, real):
+            assert str(exc.value).startswith("malformed index entry ")
         assert not issubclass(sr.MalformedEntryError, OSError), (
-            "the premise: if MalformedEntryError were an OSError the clause WOULD matter"
+            "the premise: if MalformedEntryError were an OSError this kill would be "
+            "measuring clause ORDER rather than the wording"
         )
 
     def test_kills_the_COMPARE_instruction(self, tmp_path) -> None:
@@ -6718,6 +6745,218 @@ class TestValidateCli:
         )
         assert _tree_hash(store) == after_fixture
         assert after_fixture != before  # the fixture moved it; the validator did not
+
+
+def _recovery_commands(message: str) -> list[list[str]]:
+    """Every `python3 <self> …` line in a refusal, as argv.
+
+    Parsed with `shlex`, not sliced with string ops, so a command that is not
+    actually well-formed shell fails HERE rather than being asserted about.
+    """
+    out = []
+    for line in message.splitlines():
+        line = line.strip()
+        if line.startswith("python3 "):
+            out.append(shlex.split(line))
+    return out
+
+
+class TestMalformedRefusalNamesTheRecovery:
+    """🔴 THE GUARD WAS RIGHT TO REFUSE; THE REFUSAL WAS A DEAD END.
+
+    `handoff/SKILL.md` step 4: any non-zero exit means "print the stderr line
+    verbatim and write NOTHING". So a bare `malformed index entry 'bad.md': …`
+    left the agent with no route out and no way to tell whether the offending
+    file was the entry it was about to touch or something unrelated — and the
+    store stayed broken until a human happened to look.
+
+    Same defect class #436 fixed in this skill for the cwd-mismatch refusal: the
+    fix is to NAME THE ALTERNATIVE, not to stop at the hazard. Behaviour and exit
+    code are unchanged; this is wording, and these tests are about the wording
+    being ACTIONABLE rather than merely present.
+    """
+
+    def test_it_still_REFUSES_and_still_exits_3(
+        self, store: Path, capsys, monkeypatch
+    ) -> None:
+        """INVARIANT GUARD, labelled: the fail-closed decision did not move, and
+        neither did the exit code. Not regression coverage — it was already true
+        at branch-head and must stay true; only the WORDING was asked to change."""
+        _break_one(store)
+        with pytest.raises(sr.MalformedEntryError) as exc:
+            _report(["scripts/collector/a.py", "scripts/collector/b.py"], store)
+        assert str(exc.value).startswith("malformed index entry "), (
+            "the sentinel must still LEAD the message — every existing `except` and "
+            "`in str(exc)` assertion depends on it"
+        )
+        # …and through the CLI, which is where the exit code lives.
+        monkeypatch.setattr(
+            sys, "stdin", io.StringIO("scripts/collector/a.py\nscripts/collector/b.py\n")
+        )
+        code = st.main(["--store", str(store), "--scope", SCOPE, "--paths-from", "-"])
+        assert code == 3
+        assert "malformed index entry" in capsys.readouterr().err
+
+    def test_the_refusal_NAMES_the_recovery(self, store: Path) -> None:
+        """🔴 THE REGRESSION. At branch-head the message was the bare sentinel."""
+        _break_one(store)
+        with pytest.raises(sr.MalformedEntryError) as exc:
+            _report(["scripts/collector/a.py", "scripts/collector/b.py"], store)
+        msg = str(exc.value)
+        assert "RECOVER" in msg
+        assert _recovery_commands(msg), "no runnable recovery command was emitted"
+
+    def test_the_recovery_command_ACTUALLY_RUNS_and_reproduces_the_diagnosis(
+        self, store: Path, capsys
+    ) -> None:
+        """🔴 SPELLED vs STRUCTURAL, settled by EXECUTION. Asserting that the word
+        "validate" appears somewhere would be satisfied by any unrelated sentence
+        containing it. So the command is parsed out of the message and RUN: a
+        sentence cannot survive being executed, and a stale flag cannot survive
+        this parser. It must exit 3 AND name the same file the refusal named."""
+        bad = _break_one(store)
+        with pytest.raises(sr.MalformedEntryError) as exc:
+            _report(["scripts/collector/a.py", "scripts/collector/b.py"], store)
+        cmds = _recovery_commands(str(exc.value))
+        assert len(cmds) == 1
+
+        argv = cmds[0]
+        # The path component is real — a command naming a file that does not
+        # exist is not actionable however well it parses.
+        assert Path(argv[1]).is_file(), f"the recovery command names a missing script: {argv[1]}"
+        assert argv[1].endswith("subsystem_touch.py")
+        assert "--validate" in argv
+
+        capsys.readouterr()
+        code = st.main(argv[2:])          # everything after `python3 <script>`
+        out = capsys.readouterr().out
+        assert code == 3, "the recovery command did not reproduce the failure"
+        assert bad.name in out, "the recovery command ran but named a different file"
+        assert "must be a list, not a bare string" in out
+
+    def test_it_names_WHICH_files_and_whether_they_are_IN_THIS_SCOPE(
+        self, store: Path
+    ) -> None:
+        """The second half of the gap: an agent could not tell whether the
+        malformed entry was the one it was about to touch or an unrelated file."""
+        _break_one(store)
+        with pytest.raises(sr.MalformedEntryError) as exc:
+            _report(["scripts/collector/a.py", "scripts/collector/b.py"], store)
+        msg = str(exc.value)
+        assert "widget-index.md" in msg
+        assert "EVERY reader skips" in msg
+        assert f"THIS repo's scope `{SCOPE}/`" in msg
+        assert "do not conclude this session touched nothing" in msg
+
+    def test_a_reject_in_ANOTHER_scope_gets_a_command_for_THAT_scope(
+        self, store: Path, capsys
+    ) -> None:
+        """🔴 THE TRAP THE OBVIOUS FIX WALKS INTO. "Run --validate on your scope"
+        is UNFOLLOWABLE precisely when the blocking file is elsewhere: the loader
+        reads the whole store, so another scope's reject aborts this repo's probe
+        — and validating this scope would report it CLEAN while the probe kept
+        failing. That is the same unfollowable-instruction shape this PR exists to
+        fix, so the command has to follow the reject, not the caller."""
+        _break_one(store, OTHER_SCOPE, "widget-index.md")
+        with pytest.raises(sr.MalformedEntryError) as exc:
+            _report(["scripts/collector/a.py", "scripts/collector/b.py"], store)
+        msg = str(exc.value)
+        cmds = _recovery_commands(msg)
+        assert len(cmds) == 1
+        assert cmds[0][cmds[0].index("--scope") + 1] == OTHER_SCOPE, (
+            "the recovery command named the CALLER's scope, which is clean — "
+            "an instruction that cannot reach the blocking file"
+        )
+        assert "would report it clean and change nothing" in msg
+
+        # THE NEGATIVE CONTROL that proves the trap is real: the caller's own
+        # scope genuinely does validate clean, so the naive command would have
+        # sent the agent in a circle.
+        capsys.readouterr()
+        assert st.main(["--store", str(store), "--scope", SCOPE, "--validate"]) == 0
+        # …while the emitted one reproduces the failure.
+        capsys.readouterr()
+        assert st.main(cmds[0][2:]) == 3
+
+    def test_rejects_in_BOTH_gives_a_command_per_scope_this_repo_FIRST(
+        self, store: Path
+    ) -> None:
+        _break_one(store)
+        _break_one(store, OTHER_SCOPE, "widget-index.md")
+        with pytest.raises(sr.MalformedEntryError) as exc:
+            _report(["scripts/collector/a.py", "scripts/collector/b.py"], store)
+        cmds = _recovery_commands(str(exc.value))
+        scopes = [c[c.index("--scope") + 1] for c in cmds]
+        assert scopes == [SCOPE, OTHER_SCOPE], "deterministic order, this repo first"
+
+    def test_every_emitted_command_runs_for_EVERY_affected_scope(
+        self, store: Path, capsys
+    ) -> None:
+        """The actionability check, generalised: not just the first command."""
+        _break_one(store)
+        _break_one(store, OTHER_SCOPE, "widget-index.md")
+        with pytest.raises(sr.MalformedEntryError) as exc:
+            _report(["scripts/collector/a.py", "scripts/collector/b.py"], store)
+        cmds = _recovery_commands(str(exc.value))
+        assert len(cmds) == 2
+        for argv in cmds:
+            capsys.readouterr()
+            assert st.main(argv[2:]) == 3
+            assert "widget-index.md" in capsys.readouterr().out
+
+    def test_the_enumeration_NEVER_masks_the_original_diagnosis(
+        self, store: Path, monkeypatch
+    ) -> None:
+        """🔴 A message-builder that can itself fail must not turn one failure
+        into a different one. With the second read broken, the caller still gets
+        the real sentinel and the real reason — just without the enumeration."""
+        _break_one(store)
+
+        def _boom(*_a, **_kw):
+            raise RuntimeError("second read exploded")
+
+        monkeypatch.setattr(st, "load_index", _boom)
+        msg = st.malformed_refusal(
+            store, SCOPE, sr.MalformedEntryError(
+                "malformed index entry 'widget-index.md': `aliases:` must be a list, "
+                "not a bare string",
+                source="widget-index.md",
+                why="`aliases:` must be a list, not a bare string",
+            )
+        )
+        assert msg.startswith("malformed index entry 'widget-index.md'")
+        assert "must be a list, not a bare string" in msg
+        assert "second read exploded" not in msg
+
+    def test_a_vanished_reject_is_SAID_not_printed_as_an_empty_list(
+        self, store: Path
+    ) -> None:
+        """The other best-effort branch: the first read raised, the second found
+        nothing. A heading promising a list, over no list, would be worse than
+        saying the store moved."""
+        msg = st.malformed_refusal(
+            store, SCOPE, sr.MalformedEntryError(
+                "malformed index entry 'gone.md': whatever", source="gone.md", why="whatever"
+            )
+        )
+        assert "found NONE" in msg
+        assert "Re-run the probe" in msg
+        assert "RECOVER" not in msg, "no command can be offered for a file that is not there"
+
+    def test_the_command_is_BUILT_not_typed(self, store: Path) -> None:
+        """🔴 ONE SPELLING. `validate_command` is the only place the invocation is
+        composed, so a flag rename cannot leave a refusal quoting a command that
+        no longer parses — which is exactly what a hand-typed "just run
+        --validate" sentence has no defence against."""
+        src = MODULE_PATH.read_text(encoding="utf-8")
+        fn = src[src.index("def malformed_refusal("):src.index("def render_validation(")]
+        assert "validate_command(" in fn
+        assert '"--validate"' not in fn and "'--validate'" not in fn, (
+            "malformed_refusal spells the flag itself instead of building the command"
+        )
+        # …and what it builds is parseable by THIS parser, derived not asserted.
+        argv = shlex.split(st.validate_command(store, SCOPE))
+        st._build_parser().parse_args(argv[2:])  # must not SystemExit
 
 
 class TestValidatorReusesTheReadersParser:

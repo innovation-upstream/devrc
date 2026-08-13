@@ -2705,22 +2705,30 @@ def build_report(
     # Same class `subsystem_recall` raises for the same condition, imported from
     # the resolver rather than re-declared.
     #
-    # ⚠ THE `MalformedEntryError` CLAUSE IS REDUNDANT-BUT-KEPT, and it is
-    # labelled because a mutation test PROVED it unkillable rather than because
-    # anyone reasoned about it: `MalformedEntryError` is a `ResolverError`, not
-    # an `OSError`, so the clause below could never have caught it and the
-    # re-raise changes nothing. Replacing it with `except ZeroDivisionError`
-    # leaves the behaviour identical. It stays — spelled the same way in
-    # `subsystem_recall`, which reads the same store — because it makes
-    # "the store is BROKEN is not reworded as the store is UNREADABLE" readable
-    # at the call site, and because deleting it from one of the two readers and
-    # not the other is how they start to drift. It is NOT coverage: nothing in
-    # the suite can measure it, and `test_the_MALFORMED_reraise_is_UNKILLABLE`
-    # says so out loud instead of leaving a green that means nothing.
+    # 🔴 THE WRITER STAYS FAIL-CLOSED, AND THAT IS DELIBERATE. The READER
+    # (`subsystem_recall`) degrades — it serves what it can and reports the rest —
+    # because spending every good entry to report one bad one is a bad trade for
+    # somebody who only wants to look. This is the other side: it gates a WRITE
+    # into a curated, unbacked-up store, and acting on a partially-read index is
+    # the one case where aborting is cheaper than degrading. The exit code is
+    # unchanged (3).
+    #
+    # ⚠ THE CLAUSE USED TO BE A LABELLED NO-OP. `MalformedEntryError` is a
+    # `ResolverError`, not an `OSError`, so `except MalformedEntryError: raise`
+    # sitting above the `OSError` clause could never change an outcome, and a
+    # mutation test proved it by refusing to kill it. It is LOAD-BEARING now: it
+    # rewords the refusal so it names the way out. Do not restore the bare
+    # re-raise — `test_the_refusal_NAMES_the_recovery` is what stops that.
     try:
         index = load_index(store)
-    except MalformedEntryError:
-        raise
+    except MalformedEntryError as exc:
+        # Re-raised as the SAME class with the SAME sentinel leading the message,
+        # so every existing `except`, every `in str(exc)` assertion and the exit
+        # code all keep working. `from exc` preserves the original for a
+        # traceback; what changes is only what the operator reads.
+        raise MalformedEntryError(
+            malformed_refusal(store, scope, exc), source=exc.source, why=exc.why
+        ) from exc
     except OSError as exc:
         raise EntryUnreadableError(
             f"index entry unreadable: under {store} ({type(exc).__name__}: {exc}) — the "
@@ -3376,6 +3384,106 @@ def validate_scope(store_root: str | Path, scope: str) -> tuple[tuple[str, ...],
         return (), ()
     index = load_index(store, on_malformed=ON_MALFORMED_COLLECT)
     return checked, index.malformed_in(scope)
+
+
+def validate_command(store_root: str | Path, scope: str) -> str:
+    """The literal, runnable `--validate` invocation for one scope. ONE spelling.
+
+    🔴 IT IS BUILT, NEVER TYPED INTO PROSE. Every place that tells a caller how to
+    recover emits this, so a flag rename cannot leave a skill or an error message
+    quoting a command that no longer parses — the exact failure a "just run
+    --validate" sentence has no defence against. `Path(__file__)` rather than a
+    hardcoded path so a copy of this module names ITSELF and the command stays
+    true wherever it is running from.
+    """
+    return (
+        f"python3 {Path(__file__).resolve()} --store {store_root} "
+        f"--scope {normalize_ref(scope)} --validate"
+    )
+
+
+def malformed_refusal(store_root: str | Path, scope: str, exc: MalformedEntryError) -> str:
+    """The probe's REFUSAL, with the route out of it. Wording only — it still raises.
+
+    🔴 THE PRECEDENT IS `TranscriptCwdMismatchError` (#436), IN THIS SAME SKILL:
+    the guard was right to refuse, and the fix was to make the refusal NAME THE
+    ALTERNATIVE instead of stopping at the hazard. This message stopped at the
+    hazard — `malformed index entry 'bad.md': ...` and nothing else — while
+    `handoff/SKILL.md` step 4 tells the agent that a non-zero exit means "print
+    the stderr line verbatim and write NOTHING". So the agent got a dead end: no
+    recovery, no way to tell whether the offending file was the entry it was
+    about to touch or something unrelated, and the store stayed broken until a
+    human happened to look.
+
+    🔴 THE RECOVERY COMMAND IS PER AFFECTED SCOPE, AND THAT IS THE WHOLE POINT OF
+    ENUMERATING. The obvious version — "run `--validate` on your scope" — is
+    UNFOLLOWABLE exactly when it matters most: a malformed entry in ANOTHER scope
+    still aborts this repo's load (the loader reads the whole store), so that
+    command would report the caller's own scope clean while the probe kept
+    failing. That is the same shape as the instruction this change exists to fix.
+    So the enumeration is re-read with `COLLECT` and one command is emitted for
+    each scope that actually holds a reject, this repo's first.
+
+    Fail-closed behaviour and the exit code are UNCHANGED: it still raises, and
+    `main()` still exits 3. Only the words moved.
+
+    ⚠ The enumeration is best-effort by construction. If the second read fails
+    for any reason the ORIGINAL diagnosis is still returned in full — a message
+    that turned one failure into a different one would be worse than a terse one.
+    """
+    store = Path(store_root)
+    head = (
+        f"{exc}\n"
+        f"  REFUSED, NOT READ: the probe indexed NOTHING and proposed NOTHING. This is not "
+        f"'nothing touched an entry' — no association was computed at all, because a writer "
+        f"must not act on a store it has read only part of."
+    )
+    try:
+        malformed = load_index(store, on_malformed=ON_MALFORMED_COLLECT).malformed
+    except Exception:  # noqa: BLE001 — see the docstring: never mask the real diagnosis
+        return head
+    if not malformed:
+        # The first read raised and the second found nothing: the store changed
+        # under us, or the rejection is not reproducible. Say so rather than
+        # printing an empty list under a heading that promises one.
+        return (
+            f"{head}\n"
+            f"  (Re-reading {store} to enumerate every unreadable entry found NONE — the "
+            f"store changed between the two reads. Re-run the probe.)"
+        )
+
+    here = normalize_ref(scope)
+    mine = [m for m in malformed if m.scope == here]
+    theirs = [m for m in malformed if m.scope != here]
+    n = len(malformed)
+    lines = [
+        head,
+        f"  {n} entry file{'' if n == 1 else 's'} under {store} cannot be indexed, and EVERY "
+        f"reader skips {'it' if n == 1 else 'them'}:",
+    ]
+    lines += [f"    {m.line}" for m in malformed]
+    if mine:
+        lines.append(
+            f"  {len(mine)} of {'them' if n > 1 else 'those'} "
+            f"{'is' if len(mine) == 1 else 'are'} in THIS repo's scope `{here}/` — "
+            f"{'it' if len(mine) == 1 else 'any of them'} may be the very entry your paths "
+            f"would have matched, so do not conclude this session touched nothing."
+        )
+    if theirs:
+        lines.append(
+            f"  {len(theirs)} {'is' if len(theirs) == 1 else 'are'} in ANOTHER scope and "
+            f"cannot affect this repo's association at all — but the loader reads the WHOLE "
+            f"store, so {'it still blocks' if len(theirs) == 1 else 'they still block'} "
+            f"this probe. "
+            f"Running --validate on `{here}/` alone would report it clean and change nothing."
+        )
+    # This repo's scope first: it is the one the caller can act on without leaving
+    # the task, and the ordering is deterministic so two runs print one diff.
+    affected = [here] if mine else []
+    affected += sorted({m.scope for m in theirs})
+    lines.append("  RECOVER — fix the file(s) named above, then re-run this probe. Check with:")
+    lines += [f"    {validate_command(store, s)}" for s in affected]
+    return "\n".join(lines)
 
 
 def render_validation(report: ValidationReport) -> str:
