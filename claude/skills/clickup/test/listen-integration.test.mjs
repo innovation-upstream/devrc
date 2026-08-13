@@ -265,6 +265,152 @@ test('🔴 webhook-url.txt is written 0600 — the URL IS the capability', async
       'and POST forged events into it. Written with no mode argument it lands 0644.');
 });
 
+// ── 6. The forwarder targets the address the receiver actually bound ──────
+
+test('🔴 the forwarder is pointed at 127.0.0.1:<the bound port>, never localhost', () => {
+  // Read back out of the array the process SPAWNS (listen.mjs prints that
+  // element, not a recomputation), because `localhost` can resolve to ::1 and
+  // the receiver binds 127.0.0.1 only: whcli would then be refused on every
+  // delivery by a listener that reports perfectly healthy.
+  const m = /\[whcli\] target (\S+)/.exec(stderrBuf);
+  assert.ok(m, `listen.mjs never reported a forwarder target:\n${redact(stderrBuf)}`);
+  assert.equal(m[1], `http://127.0.0.1:${bound.port}`,
+    `whcli was pointed at ${m[1]} while the receiver bound 127.0.0.1:${bound.port}`);
+});
+
+// ── 7. CATCH-UP, end to end, against a loopback stub of webhook.site ──────
+//
+// The catch-up branch is gated on `SINCE && MODE === 'wait'`, so the server-mode
+// child above can never reach it — which is exactly why two mutations that
+// reinstate the pre-#438 defect (deliver whatever webhook.site stored) survived
+// the entire suite. CLICKUP_WEBHOOK_SITE_API_BASE points the fetch at a stub
+// here; it changes WHERE stored requests come from, never whether they are
+// authenticated.
+
+/** A webhook.site stored-requests API, on loopback, serving a canned page. */
+async function stubWebhookSite(requests) {
+  const srv = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ data: requests }));
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  return { srv, base: `http://127.0.0.1:${srv.address().port}` };
+}
+
+/** One stored request, in the shape webhook.site's API returns (header ARRAYS). */
+function storedRequest(content, signature, created_at) {
+  const r = { uuid: `fixture-${created_at}`, content, created_at, headers: {} };
+  if (signature !== undefined) r.headers['x-signature'] = [signature];
+  return r;
+}
+
+/** Run listen.mjs in WAIT mode against the stub, to completion. */
+async function runCatchUp(requests, { timeout = 8 } = {}) {
+  const scratch = mkdtempSync(join(tmpdir(), 'clickup-catchup-'));
+  const xdg = join(scratch, 'xdg');
+  const state = join(xdg, 'clickup');
+  mkdirSync(state, { recursive: true });
+  writeFileSync(join(state, 'watchers.json'),
+    JSON.stringify([{ webhookId: WEBHOOK_ID, secret: SECRET, kind: 'fixture' }], null, 2));
+
+  const stub = await stubWebhookSite(requests);
+  const proc = spawn(process.execPath, [
+    LISTEN, '--mode', 'wait', '--port', '0',
+    '--since', '2026-08-13 09:00:00', '--timeout', String(timeout),
+  ], {
+    env: { ...process.env, HOME: scratch, XDG_STATE_HOME: xdg,
+      CLICKUP_WEBHOOK_SITE_TOKEN: FIXTURE_TOKEN, WEBHOOK_SITE_API_KEY: '',
+      CLICKUP_WEBHOOK_SITE_API_BASE: stub.base },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let out = '';
+  let err = '';
+  proc.stdout.setEncoding('utf8');
+  proc.stderr.setEncoding('utf8');
+  proc.stdout.on('data', (d) => { out += d; });
+  proc.stderr.on('data', (d) => { err += d; });
+
+  const code = await new Promise((resolve) => {
+    const kill = setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, (timeout + 10) * 1000);
+    proc.on('exit', (c) => { clearTimeout(kill); resolve(c); });
+  });
+  await new Promise((r) => stub.srv.close(r));
+
+  const read = (n) => (existsSync(join(state, n)) ? readFileSync(join(state, n), 'utf8') : null);
+  const result = { code, out, err, state, log: read('webhooks.jsonl'), cursor: read('last-seen.txt') };
+  rmSync(scratch, { recursive: true, force: true });
+  return result;
+}
+
+test('🔴 CATCH-UP: forged and unverifiable stored events are skipped, the genuine one is delivered', async () => {
+  const forged = JSON.stringify({ ...EVENT, task_id: '868forged' });
+  const orphan = JSON.stringify({ ...EVENT, task_id: '868orphan', webhook_id: 'wh-not-in-watchers' });
+  const r = await runCatchUp([
+    // Unsigned — the shape anyone can POST to a webhook.site URL.
+    storedRequest(forged, undefined, '2026-08-13 09:00:01'),
+    // Signed with the wrong key.
+    storedRequest(forged, sign(forged, 'the-attackers-guess'), '2026-08-13 09:00:02'),
+    // Correctly signed, but by a webhook this skill does not own.
+    storedRequest(orphan, sign(orphan, SECRET), '2026-08-13 09:00:03'),
+    // The real one.
+    storedRequest(BODY, sign(BODY, SECRET), '2026-08-13 09:00:04'),
+  ]);
+
+  assert.equal(r.code, 0, `catch-up did not deliver and exit 0:\n${redact(r.err)}`);
+  assert.ok(r.out.includes('868integration'),
+    `the delivered payload was not the authentic event:\n${redact(r.out)}`);
+  assert.ok(!r.out.includes('868forged') && !r.out.includes('868orphan'),
+    `catch-up delivered a payload it never authenticated — this is the pre-#438 defect ` +
+      `in the catch-up path:\n${redact(r.out)}`);
+
+  const lines = (r.log || '').trim().split('\n').filter(Boolean);
+  assert.equal(lines.length, 1,
+    `webhooks.jsonl holds ${lines.length} line(s); exactly ONE stored request was authentic. ` +
+      `Any extra line is a rejected delivery that was logged anyway:\n${redact(r.log || '')}`);
+  assert.equal(JSON.parse(lines[0]).task_id, '868integration');
+  assert.equal((r.cursor || '').trim(), '2026-08-13 09:00:04',
+    'the cursor does not sit on the delivered event');
+});
+
+test('🔴 CATCH-UP: a run of unverifiable stored events advances the cursor instead of wedging', async () => {
+  // The lost-watchers.json case: every stored event is unknown-webhook. With a
+  // 10-per-page cursor keyed on date_from, ten of these used to be a PERMANENT
+  // blind spot — the same ten re-read on every run, forever.
+  const reqs = [];
+  for (let i = 0; i < 10; i++) {
+    const body = JSON.stringify({ ...EVENT, task_id: `868gone${i}`, webhook_id: `wh-gone-${i}` });
+    reqs.push(storedRequest(body, sign(body, SECRET), `2026-08-13 09:10:0${i}`));
+  }
+  const r = await runCatchUp(reqs, { timeout: 3 });
+
+  assert.equal((r.cursor || '').trim(), '2026-08-13 09:10:09',
+    `the cursor is ${JSON.stringify(r.cursor)} after ten permanently-unverifiable stored ` +
+      'requests. It must sit past the last of them, or catch-up re-reads the same page on ' +
+      'every run and can never reach a genuine event behind it.');
+  assert.equal(r.log, null,
+    `a rejected stored request was written to the log:\n${redact(r.log || '')}`);
+  assert.ok(/\[catch-up:rejected:unknown-webhook\]/.test(r.err),
+    `the skips were not reported on stderr:\n${redact(r.err)}`);
+  assert.ok(/Listening on 127\.0\.0\.1:/.test(r.err),
+    `catch-up did not fall through to the live listener:\n${redact(r.err)}`);
+  assert.equal(r.code, 1, 'wait mode should time out with exit 1 having delivered nothing');
+});
+
+test('🔴 CATCH-UP: an UNPARSEABLE stored request stops the walk with the cursor unmoved', async () => {
+  const r = await runCatchUp([
+    storedRequest('<html>not a webhook</html>', 'whatever', '2026-08-13 09:20:00'),
+    storedRequest(BODY, sign(BODY, SECRET), '2026-08-13 09:20:01'),
+  ], { timeout: 3 });
+
+  assert.equal(r.cursor, null,
+    `the cursor advanced to ${JSON.stringify(r.cursor)} past a request that could not be ` +
+      'parsed — we cannot say what was skipped, so nothing may be skipped');
+  assert.ok(/\[catch-up:blocked:invalid-json\]/.test(r.err),
+    `the blocked request was not reported:\n${redact(r.err)}`);
+  assert.equal(r.log, null, 'something was logged despite nothing being authenticated');
+  assert.equal(r.code, 1);
+});
+
 test('a pre-existing 0644 webhook-url.txt is REPAIRED, not left as found', async () => {
   // The mode argument to writeFileSync only applies on CREATE. A host that ran
   // the old listener already has a 0644 copy, and it must not survive.

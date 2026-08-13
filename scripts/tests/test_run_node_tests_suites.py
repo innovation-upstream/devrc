@@ -57,9 +57,7 @@ an INVARIANT GUARD -- label it as one, don't count it as regression coverage"):
 """
 from __future__ import annotations
 
-import os
 import re
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -78,10 +76,13 @@ FORMERLY_UNGATED = {
     # ~/.claude/skills/clickup/ on two hosts and ran only when a human typed it.
     # Measured 2026-08-13 once vendored into claude/skills/clickup/test: 27 at
     # first, then 73 once the webhook listener got the coverage whose absence is
-    # why four defects in it survived review. The number here is the CURRENT
-    # measurement, because the assertion below reads it as one (a floor is only
-    # meaningfully "not drifted" against what the suite actually collects).
-    "claude/skills/clickup/test": 73,
+    # why four defects in it survived review, then 107 once the webhook.site
+    # CATCH-UP path got the same treatment (#444/#445 — two mutations that
+    # reinstated the original defect passed all 73). The number here is the
+    # CURRENT measurement, because the assertion below reads it as one (a floor
+    # is only meaningfully "not drifted" against what the suite actually
+    # collects).
+    "claude/skills/clickup/test": 107,
 }
 
 
@@ -166,7 +167,7 @@ def _discovery_roots() -> list[str]:
     return roots
 
 
-def _discovered_dirs() -> set[str]:
+def _discovered_dirs(base: Path = REPO_ROOT) -> set[str]:
     """Every directory under a DISCOVERY_ROOT holding a .test.mjs file.
 
     Uses pathlib rather than shelling out to `find`: the `find` on this host's
@@ -178,11 +179,11 @@ def _discovered_dirs() -> set[str]:
     """
     out: set[str] = set()
     for root in _discovery_roots():
-        base = REPO_ROOT / root
-        if not base.is_dir():
+        start = base / root
+        if not start.is_dir():
             continue
-        for p in base.rglob("*.test.mjs"):
-            rel = p.relative_to(REPO_ROOT)
+        for p in start.rglob("*.test.mjs"):
+            rel = p.relative_to(base)
             # node_modules is excluded here for the same reason the runner
             # excludes it -- see the 🔴 block above DISCOVERED_DIRS. The two
             # implementations are independent ON PURPOSE (this one cross-checks
@@ -463,30 +464,33 @@ def test_dropping_a_discovery_root_is_loud(tmp_path):
 
 
 @pytest.fixture
-def vendored_test_file():
-    """A `*.test.mjs` inside a node_modules tree, as `npm ci` would leave it.
+def vendored_test_file(tmp_path):
+    """A synthetic ROOT holding the pinned suites plus one vendored test file.
 
-    Written under `claude/skills/clickup/node_modules/`, which is gitignored
-    (claude/skills/.gitignore), so even a failed teardown cannot make it
-    committable.
+    The runner takes a ROOT argument, so this needs no part of the developer's
+    real checkout. It used to write
+    ``claude/skills/clickup/node_modules/pytest-fixture-<pid>/test/`` INTO the
+    working tree -- gitignored and torn down in ``finally``, but a killed run
+    (^C, a timeout, an OOM) left the directory behind in whatever tree the
+    suite happened to run in, including a worktree someone was mid-commit in.
+    A test does not need write access to the repo it is testing.
+
+    The suite layout is derived from the runner's own SUITES list, so the
+    fixture cannot drift from it.
+
+    :returns: ``(root, vendored_file)``
     """
-    victim = (
-        REPO_ROOT
-        / "claude/skills/clickup/node_modules"
-        / f"pytest-fixture-{os.getpid()}"
-        / "test"
-    )
-    root = victim.parents[1]
-    created_root = not root.exists()
+    root = tmp_path / "fake-repo"
+    for suite in _pinned_suites():
+        d = root / suite
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "placeholder.test.mjs").write_text("// stands in for the real suite\n")
+
+    victim = root / "claude/skills/clickup/node_modules/some-package/test"
     victim.mkdir(parents=True, exist_ok=True)
     f = victim / "vendored.test.mjs"
     f.write_text("// a third-party package's own test file\n")
-    try:
-        yield f
-    finally:
-        shutil.rmtree(victim.parent, ignore_errors=True)
-        if created_root and root.exists() and not any(root.iterdir()):
-            root.rmdir()
+    return root, f
 
 
 def test_a_vendored_test_file_does_not_break_the_gate(vendored_test_file):
@@ -502,9 +506,10 @@ def test_a_vendored_test_file_does_not_break_the_gate(vendored_test_file):
     for a third-party file, produced by following the documented procedure.
     """
     _require_check_suites()
-    assert vendored_test_file.exists(), "fixture precondition: the vendored file exists"
+    root, vendored = vendored_test_file
+    assert vendored.exists(), "fixture precondition: the vendored file exists"
 
-    proc = _run([str(RUNNER), "--check-suites", str(REPO_ROOT)])
+    proc = _run([str(RUNNER), "--check-suites", str(root)])
     out = proc.stdout + proc.stderr
     assert proc.returncode == 0, (
         "a *.test.mjs inside node_modules made the runner FATAL:\n"
@@ -515,7 +520,7 @@ def test_a_vendored_test_file_does_not_break_the_gate(vendored_test_file):
     )
 
     # And the second, independent discovery implementation must agree.
-    assert not any("node_modules" in d for d in _discovered_dirs()), (
+    assert not any("node_modules" in d for d in _discovered_dirs(root)), (
         "this file's own discovery still walks node_modules, so it would report "
         "vendored suites the runner deliberately ignores"
     )
@@ -530,19 +535,40 @@ def test_the_vendored_fixture_is_actually_discoverable_without_the_exclusion(
     result would be true for the wrong reason and would hold with the exclusion
     removed. So: an UNFILTERED walk must find it.
     """
+    root, vendored = vendored_test_file
     unfiltered = {
-        str(p.parent.relative_to(REPO_ROOT))
-        for root in _discovery_roots()
-        if (REPO_ROOT / root).is_dir()
-        for p in (REPO_ROOT / root).rglob("*.test.mjs")
+        str(p.parent.relative_to(root))
+        for r in _discovery_roots()
+        if (root / r).is_dir()
+        for p in (root / r).rglob("*.test.mjs")
     }
-    rel = str(vendored_test_file.parent.relative_to(REPO_ROOT))
+    rel = str(vendored.parent.relative_to(root))
     assert rel in unfiltered, (
         f"the fixture at {rel} is invisible even to an unfiltered walk, so the "
         "exclusion test above proves nothing"
     )
-    assert rel not in _discovered_dirs(), (
+    assert rel not in _discovered_dirs(root), (
         f"{rel} survived the node_modules filter"
+    )
+
+
+def test_the_synthetic_root_stays_out_of_the_real_checkout(vendored_test_file):
+    """The point of the fixture change, asserted rather than assumed.
+
+    A killed run must not be able to leave anything behind in the tree the
+    developer is working in -- so the fixture must live under tmp_path and the
+    old victim path must not exist.
+    """
+    root, vendored = vendored_test_file
+    assert REPO_ROOT not in vendored.parents, (
+        f"the vendored fixture at {vendored} is inside the real checkout"
+    )
+    strays = sorted(
+        (REPO_ROOT / "claude/skills/clickup/node_modules").glob("pytest-fixture-*")
+    )
+    assert not strays, (
+        f"a previous run of this file left {strays} in the checkout -- exactly what "
+        "moving the fixture to tmp_path prevents"
     )
 
 

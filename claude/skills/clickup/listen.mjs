@@ -15,8 +15,14 @@
  * wrongly-signed deliveries are REJECTED (401): not acked, not logged, the
  * cursor does not move, and nothing is printed for the agent to act on. The
  * predicate lives in lib/webhook-server.mjs and BOTH paths — the live POST and
- * the webhook.site catch-up — go through it, because an event read back from
- * webhook.site is exactly as forgeable as one POSTed here.
+ * the webhook.site catch-up (lib/catchup.mjs) — go through it, because an event
+ * read back from webhook.site is exactly as forgeable as one POSTed here.
+ *
+ * That used to be asserted HERE, in prose, and by nothing else: the catch-up
+ * branch was unreachable from the tests, so two mutations reinstating the
+ * original defect passed the whole suite. Both halves now have their own file
+ * and their own four-case table (test/{webhook-server,catchup}.test.mjs) plus
+ * an end-to-end run of this script against each (test/listen-integration).
  *
  * The local receiver binds 127.0.0.1 only.
  *
@@ -38,6 +44,7 @@
  */
 
 import { spawn } from 'child_process';
+import http from 'http';
 import https from 'https';
 import fs from 'fs';
 import {
@@ -50,10 +57,11 @@ import {
   ensureStateDir,
 } from './lib/paths.mjs';
 import {
-  authenticateDelivery,
   createWebhookServer,
   listenLoopback,
+  forwarderArgs,
 } from './lib/webhook-server.mjs';
+import { catchUp } from './lib/catchup.mjs';
 
 // All of these are STATE, so they resolve under $XDG_STATE_HOME/clickup
 // (fallback ~/.local/state/clickup) — the skill dir deploys read-only.
@@ -249,6 +257,19 @@ function formatEventSummary(event) {
 
 // ── Catch-up: query webhook.site for missed events ────────────────────────
 
+/**
+ * Where the stored-request API lives.
+ *
+ * 🔴 The override exists so the catch-up path can be exercised end-to-end
+ * against a loopback stub — it had NO test at all, which is why two mutations
+ * reinstating the original defect survived the whole suite. It changes WHERE
+ * stored requests come from, never WHETHER they are authenticated: every
+ * request from it still goes through `authenticateDelivery()` against a secret
+ * in watchers.json, so pointing this at a hostile server yields rejections, not
+ * forged deliveries.
+ */
+const WH_API_BASE = process.env.CLICKUP_WEBHOOK_SITE_API_BASE || 'https://webhook.site';
+
 function fetchMissedEvents(since) {
   return new Promise((resolve, reject) => {
     const sinceUtc = since.includes('Z') || since.includes('+') ? since : since.replace(' ', 'T') + 'Z';
@@ -260,7 +281,7 @@ function fetchMissedEvents(since) {
     d.setSeconds(d.getSeconds() + 1);
     const dateFrom = d.toISOString().replace('T', ' ').replace(/\.\d+Z$/, '');
 
-    const url = new URL(`https://webhook.site/token/${WH_TOKEN}/requests`);
+    const url = new URL(`${WH_API_BASE}/token/${WH_TOKEN}/requests`);
     url.searchParams.set('date_from', dateFrom);
     url.searchParams.set('sorting', 'oldest');
     url.searchParams.set('per_page', '10');
@@ -268,7 +289,8 @@ function fetchMissedEvents(since) {
     const headers = {};
     if (WH_API_KEY) headers['Api-Key'] = WH_API_KEY;
 
-    https.get(url.toString(), { headers }, (res) => {
+    const client = url.protocol === 'http:' ? http : https;
+    client.get(url.toString(), { headers }, (res) => {
       let data = '';
       res.on('data', (chunk) => (data += chunk));
       res.on('end', () => {
@@ -286,30 +308,9 @@ function fetchMissedEvents(since) {
   });
 }
 
-/**
- * Authenticate a request webhook.site stored, and return the event or null.
- *
- * 🔴 Same predicate as the live POST path, deliberately. A webhook.site URL
- * accepts a POST from anyone, so an event read back out of its API is exactly
- * as forgeable as one delivered here — verifying only the live path would move
- * the hole rather than close it. The signature is over the STORED RAW BODY
- * (`req.content`), which is what ClickUp signed.
- */
-function parseWebhookSiteRequest(req) {
-  const raw = req && typeof req.content === 'string' ? req.content : '';
-  const headers = (req && req.headers) || {};
-  const result = authenticateDelivery(raw, headers['x-signature'], lookupWatcherSecret);
-  if (!result.accepted) {
-    process.stderr.write(
-      `[catch-up:rejected:${result.reason}] a stored webhook.site request did not verify ` +
-        '— skipped, not logged\n'
-    );
-    return null;
-  }
-  const event = result.event;
-  event._wh_created_at = req.created_at;
-  return event;
-}
+// The catch-up walk — authentication, the decidable/undecidable split and the
+// cursor policy — lives in lib/catchup.mjs so it can be exercised. See its
+// header: this code was correct by reading and reachable by nothing.
 
 // ── Local HTTP server ─────────────────────────────────────────────────────
 
@@ -354,16 +355,19 @@ const server = createWebhookServer({
 // ── whcli forward process ─────────────────────────────────────────────────
 
 // `port` is the port actually BOUND, not the requested one (`--port 0` asks the
-// OS to choose). The target is 127.0.0.1 rather than `localhost` because the
-// receiver binds 127.0.0.1 only and `localhost` can resolve to ::1 first.
+// OS to choose). The target is built by lib/webhook-server.mjs from the SAME
+// constant it binds — `localhost` can resolve to ::1 first, and the receiver
+// binds 127.0.0.1 only, so a `localhost` target is a listener that reports
+// healthy and receives nothing. The target is printed (it carries no token, and
+// the args do) so the integration test reads back the value actually spawned
+// rather than a second copy of it.
 function startForwarder(port) {
-  const whArgs = [
-    'forward',
-    `--token=${WH_TOKEN}`,
-    `--target=http://127.0.0.1:${port}`,
-    '--listen-timeout=5',
-  ];
-  if (WH_API_KEY) whArgs.push(`--api-key=${WH_API_KEY}`);
+  const whArgs = forwarderArgs({ token: WH_TOKEN, port, apiKey: WH_API_KEY });
+  // Read back out of the array being spawned, not recomputed: a second call to
+  // forwarderTarget() would print 127.0.0.1 even if the arg said localhost.
+  // 🔴 This one element only — `--token=` is in there too.
+  const target = (whArgs.find((a) => a.startsWith('--target=')) || '--target=<none>').slice(9);
+  process.stderr.write(`[whcli] target ${target}\n`);
 
   const proc = spawn('whcli', whArgs, {
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -397,23 +401,45 @@ async function main() {
     const requests = result.data || [];
 
     if (requests.length > 0) {
-      // Find the first missed event that passes our filters
-      for (const req of requests) {
-        const event = parseWebhookSiteRequest(req);
-        if (!event) continue;
-
-        // Always update cursor even for filtered events
-        const entry = processEvent(event, 'catch-up');
-
-        if (matchesFilters(event)) {
-          process.stderr.write(`[catch-up] Found matching event (of ${requests.length} missed). Delivering.\n`);
+      const outcome = catchUp(requests, {
+        lookupSecret: lookupWatcherSecret,
+        matches: matchesFilters,
+        // Records it: log line + cursor. Only reached for a delivery that
+        // authenticated, exactly as on the live path.
+        onAccepted: (event) => processEvent(event, 'catch-up'),
+        onDeliver: (entry) => {
+          process.stderr.write(
+            `[catch-up] Found matching event (of ${requests.length} missed). Delivering.\n`);
           console.log(JSON.stringify(entry, null, 2));
           process.exit(0);
-        } else {
+        },
+        onFiltered: (event) => {
           process.stderr.write(`[catch-up:filtered] ${event.event || 'unknown'} — skipped\n`);
-        }
-      }
-      process.stderr.write(`[catch-up] ${requests.length} missed event(s), none matched filters. Starting live listener.\n`);
+        },
+        // A PERMANENTLY unverifiable stored request. Nothing about it is
+        // logged — the body is attacker-controlled — but the cursor moves past
+        // it, or ten of these wedge catch-up forever (see lib/catchup.mjs).
+        onSkipped: ({ reason, createdAt }) => {
+          saveLastSeen(createdAt);
+          process.stderr.write(
+            `[catch-up:rejected:${reason}] a stored webhook.site request did not verify ` +
+              `— not logged, cursor advanced past it (${createdAt})\n`
+          );
+        },
+        // We could not decide what this was. The cursor stays put.
+        onBlocked: ({ reason, createdAt }) => {
+          process.stderr.write(
+            `[catch-up:blocked:${reason}] a stored webhook.site request could not be ` +
+              `parsed or dated (${createdAt || 'no timestamp'}) — catch-up stops here and the ` +
+              'cursor is unchanged, so nothing behind it is skipped silently. Pass an ' +
+              'explicit --since to step over it.\n'
+          );
+        },
+      });
+
+      process.stderr.write(
+        `[catch-up] ${outcome.considered} of ${requests.length} stored request(s) examined, ` +
+          `${outcome.skipped} unverifiable, ${outcome.filtered} filtered. Starting live listener.\n`);
     } else {
       process.stderr.write(`[catch-up] No missed events. Starting live listener.\n`);
     }

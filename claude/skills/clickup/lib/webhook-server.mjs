@@ -71,6 +71,26 @@ export function headerValue(v) {
 }
 
 /**
+ * Read one header CASE-INSENSITIVELY, array-aware.
+ *
+ * node's http lowercases what it receives, so the live path never needed this.
+ * webhook.site's stored-request API returns whatever case the sender used, and
+ * an exact-case bracket lookup there is a silent fail-closed bug: every stored
+ * event rejects as `missing-signature` and catch-up delivers nothing, which
+ * looks exactly like "no missed events". Case-insensitivity is also what makes
+ * `headers['X-Signature']` a MUTANT rather than a spelling variant — the
+ * catch-up tests feed both spellings, so a bracket access in either case dies.
+ */
+export function headerLookup(headers, name) {
+  if (!headers || typeof headers !== 'object') return undefined;
+  const want = String(name).toLowerCase();
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() === want) return headerValue(headers[key]);
+  }
+  return undefined;
+}
+
+/**
  * Decide whether a delivery may be acted on. THE one predicate — the live POST
  * path and the webhook.site catch-up path both call it, because an event read
  * back from webhook.site is exactly as forgeable as one POSTed here (anyone can
@@ -157,7 +177,10 @@ export function createRequestHandler({
     });
     req.on('end', () => {
       if (aborted) return;
-      const result = authenticateDelivery(rawBody, req.headers['x-signature'], lookupSecret);
+      // Same extraction helper as the catch-up path — one spelling of the
+      // header name, in one place, for both callers of the one predicate.
+      const result = authenticateDelivery(
+        rawBody, headerLookup(req.headers, 'x-signature'), lookupSecret);
       if (!result.accepted) {
         res.writeHead(result.status, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: result.reason }));
@@ -188,4 +211,33 @@ export function listenLoopback(server, port) {
     server.once('error', reject);
     server.listen(port, LOOPBACK_HOST, () => resolve(server.address()));
   });
+}
+
+/**
+ * The argv for `whcli forward`, targeting the address this module BINDS.
+ *
+ * 🔴 The target is `LOOPBACK_HOST` — the same constant `listenLoopback()` binds
+ * — and not `localhost`. `localhost` resolves through the host's name lookup and
+ * can yield `::1` first; the receiver binds 127.0.0.1 ONLY, so a `::1` target is
+ * ECONNREFUSED on every delivery, i.e. a listener that reports healthy and
+ * silently receives nothing. Deriving both from one constant is what makes that
+ * a relationship the tests can pin rather than two literals that agree today.
+ *
+ * @param {{token: string, port: number, apiKey?: string}} opts
+ * @returns {string[]}
+ */
+export function forwarderArgs({ token, port, apiKey }) {
+  const args = [
+    'forward',
+    `--token=${token}`,
+    `--target=${forwarderTarget(port)}`,
+    '--listen-timeout=5',
+  ];
+  if (apiKey) args.push(`--api-key=${apiKey}`);
+  return args;
+}
+
+/** The URL whcli forwards to. Loggable — it carries no token. */
+export function forwarderTarget(port) {
+  return `http://${LOOPBACK_HOST}:${port}`;
 }

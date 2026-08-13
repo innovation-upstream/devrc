@@ -23,13 +23,20 @@
  *      asserted to be inside the constant it was copied from — and it stayed
  *      green while webhook-url.txt (the webhook.site capability token, written
  *      0644) sat outside SECRET_FILES.
- *   4. The SEAM: no module re-derives a state path from its own location. Item
- *      1-3 all pass while a consumer quietly keeps its own copy of the old path,
- *      which is exactly the bug this refactor exists to remove. The scanner is
- *      STRUCTURAL (comment-aware, multi-line, quote-agnostic, and it does not
- *      depend on the filename being one this module already knows about) and
- *      carries a control PAIR: every shape must fire, and the legitimate uses of
- *      the same tokens must not.
+ *   4. The SEAM: no module WRITES to a path it derived from its own location.
+ *      Items 1-3 all pass while a consumer quietly keeps its own copy of the old
+ *      path, which is exactly the bug this refactor exists to remove. The
+ *      scanner is STRUCTURAL (comment-aware, multi-line, quote-agnostic, blind
+ *      to filenames, and it follows a path bound to a variable and written a
+ *      statement later) and carries a control PAIR: every shape must fire, and
+ *      the legitimate uses of the same tokens must not.
+ *
+ *      🔴 It asks about a WRITE, not about a filename. The previous version
+ *      never made that distinction, so four plain `readFileSync` calls on files
+ *      SHIPPED with the skill were reported as defects under a message
+ *      ("it will EROFS once deployed read-only") that is false for a read. The
+ *      escape hatch was an exemption list of two filenames, and the negative
+ *      controls were calibrated to that list rather than to the class.
  *
  * Written in `node:test` form and named `*.test.mjs` because that is what
  * devrc's node gate DISCOVERS (`scripts/run-node-tests.sh`). It still runs
@@ -281,6 +288,39 @@ test('migration: is a no-op on a second run (so the note prints once, then never
       'the stderr note would repeat forever');
 });
 
+// INVARIANT GUARD, not regression coverage — labelled as one deliberately.
+//
+// #438 deleted a `resolve(legacyDir) === resolve(stateDir)` clause from
+// migrateLegacyState() after showing it was DEAD (with src and dest the same
+// path, the existsSync(dest) skip fires for every name that exists and the
+// !existsSync(src) skip for every name that does not), and deleted the test
+// with it. The clause was dead; the BEHAVIOUR it described is not, and it went
+// unasserted. This pins the behaviour without reinstating the clause: a future
+// rewrite that reorders those two skips would silently start copying a file
+// onto itself.
+test('migration: migrating a directory ONTO ITSELF is a no-op', () => {
+  const dir = join(SCRATCH, 'same-dir');
+  mkdirSync(join(dir, '.cache'), { recursive: true });
+  writeFileSync(join(dir, 'accounts.json'), LEGACY_CONTENT);
+  chmodSync(join(dir, 'accounts.json'), 0o600);
+  writeFileSync(join(dir, '.cache', 'jwt-cache-default.json'), '{"cu_jwt":"fixture"}\n');
+  const before = readdirSync(dir).sort();
+
+  const migrated = paths.migrateLegacyState(dir, dir, { log: false });
+
+  assert.deepEqual(migrated, [],
+    `migrateLegacyState(d, d) reported ${JSON.stringify(migrated)} as migrated — it copied ` +
+      'files onto themselves and told the user it had moved their state');
+  assert.equal(readFileSync(join(dir, 'accounts.json'), 'utf8'), LEGACY_CONTENT,
+    'accounts.json was damaged by a same-directory migration — it holds the only copy of a ' +
+      'live API token');
+  assert.equal((statSync(join(dir, 'accounts.json')).mode & 0o777).toString(8), '600');
+  assert.equal(readFileSync(join(dir, '.cache', 'jwt-cache-default.json'), 'utf8'),
+    '{"cu_jwt":"fixture"}\n', 'the .cache contents were damaged');
+  assert.deepEqual(readdirSync(dir).sort(), before,
+    'a same-directory migration changed the directory listing');
+});
+
 test('migration: carries .env, watchers.json and the .cache/ dir too', () => {
   const legacy = join(SCRATCH, 'm3-legacy');
   const state = join(SCRATCH, 'm3-state');
@@ -430,8 +470,6 @@ test('webhook-url.txt is classified secret — the URL IS the credential', () =>
 // Structural, over the real sources. Items 1-3 are all satisfied by a correct
 // lib/paths.mjs that nobody actually uses; this is the check that notices.
 
-const STATE_NAMES = new Set([...paths.STATE_FILES, ...paths.STATE_DIRS]);
-
 // Every way a module can name its own location. `import.meta.url` is in here
 // because `new URL('accounts.json', import.meta.url)` is the skill's OWN idiom
 // (lib/paths.mjs:37 uses it) — the previous guard listed the token and then
@@ -440,82 +478,211 @@ const STATE_NAMES = new Set([...paths.STATE_FILES, ...paths.STATE_DIRS]);
 const LOCATION_TOKEN =
   /(?<![\w$.])(__dirname|import\.meta\.dirname|import\.meta\.url|SKILL_DIR)(?![\w$])/g;
 
-// Bundled READ-ONLY data legitimately read from the skill dir. Enumerated with
-// reasons, not pattern-matched: an unknown name is an offender by default.
-const READONLY_BUNDLED = new Set([
-  'package.json',      // the skill's own manifest — shipped, never written
-  'package-lock.json', // ditto; nix/pkgs/clickup-node-modules.nix builds from it
-]);
+/**
+ * 🔴 THE SCANNER ASKS ABOUT A **WRITE**, NOT ABOUT A FILENAME.
+ *
+ * What was here before never distinguished a READ from a WRITE: any literal
+ * with a mutable-looking extension near a location token was an offender. Four
+ * verified false positives, each a plain `readFileSync` of a SHIPPED file that
+ * is entirely legal on a read-only deploy:
+ *
+ *     join(__dirname, '..', 'data', 'custom-fields.json')
+ *     join(__dirname, 'schema.yaml')
+ *     new URL('prompt.txt', import.meta.url)
+ *     join(__dirname, '..', '.gitignore')
+ *
+ * and the failure message it printed for them — "it will EROFS once deployed
+ * read-only" — is simply FALSE for a read. The escape hatch was an enumerated
+ * `READONLY_BUNDLED` holding exactly `package.json` and `package-lock.json`,
+ * and the negative-control table was calibrated to THAT LIST rather than to the
+ * class: its two read-only cases were the two names that happened to be exempt.
+ * A guard that cries wolf gets deleted, and the exemption list would have had
+ * to grow by one entry per bundled data file forever.
+ *
+ * So the question is now the one the message actually makes: does a path
+ * derived from the module's own location end up in the TARGET position of a
+ * call that WRITES? That needs no filename registry, no extension list and no
+ * exemptions — a write into the skill dir is an EROFS whatever the file is
+ * called, including `package.json`.
+ */
 
-// Extensions a MUTABLE file plausibly has. Deliberately not `.md` (bundled
-// reference docs are read from the skill dir on purpose) and not `.mjs`/`.js`.
-const WRITABLE_EXT = new Set([
-  '.json', '.jsonl', '.ndjson', '.txt', '.log', '.env', '.yaml', '.yml',
-  '.ini', '.toml', '.db', '.sqlite', '.sqlite3', '.csv', '.state', '.lock',
-  '.cache', '.tmp',
+/**
+ * Calls that write, and WHICH argument is the path they write TO.
+ *
+ * The index matters: `cpSync(src, dest)` and `copyFileSync(src, dest)` READ
+ * their first argument, and copying bundled data OUT of the skill dir is
+ * legitimate. Flagging the whole argument list would reintroduce the false
+ * positive one level down.
+ */
+const WRITE_TARGET_ARG = new Map([
+  ['writeFileSync', [0]], ['writeFile', [0]],
+  ['appendFileSync', [0]], ['appendFile', [0]],
+  ['mkdirSync', [0]], ['mkdir', [0]],
+  ['rmSync', [0]], ['rm', [0]],
+  ['rmdirSync', [0]], ['rmdir', [0]],
+  ['unlinkSync', [0]], ['unlink', [0]],
+  ['truncateSync', [0]], ['truncate', [0]],
+  ['chmodSync', [0]], ['chmod', [0]],
+  ['chownSync', [0]], ['chown', [0]],
+  ['utimesSync', [0]], ['utimes', [0]],
+  ['mkdtempSync', [0]], ['mkdtemp', [0]],
+  ['createWriteStream', [0]],
+  // source, DESTINATION — only the destination is written.
+  ['cpSync', [1]], ['cp', [1]],
+  ['copyFileSync', [1]], ['copyFile', [1]],
+  ['renameSync', [1]], ['rename', [1]],
+  ['linkSync', [1]], ['link', [1]],
+  ['symlinkSync', [1]], ['symlink', [1]],
 ]);
 
 /**
- * Does this string literal name a file that would be WRITTEN?
- *
- * 🔴 The old guard asked a much narrower question — "is this literal one of the
- * seven names in STATE_FILES?" — which switched the guard OFF exactly when it
- * was needed: the moment someone adds a state file and forgets to register it,
- * the guard stops looking for it. So the class is "a mutable-looking data file",
- * with the read-only exceptions enumerated.
+ * `openSync`/`open` are read-OR-write depending on the flags, so they are
+ * decided by the mode argument rather than by the name. A `'r'` open of a
+ * bundled file is a read like any other; anything with `w`, `a` or `+` is a
+ * write.
  */
-export function looksLikeStateFile(literal) {
-  if (!literal || literal.includes('${')) return false;
-  const name = literal.split('/').filter(Boolean).pop() || '';
-  if (!name || name === '.' || name === '..') return false;
-  if (READONLY_BUNDLED.has(name)) return false;
-  if (STATE_NAMES.has(name)) return true;
-  if (name.startsWith('.') && name.length > 1 && !name.slice(1).includes('.')) return true;
-  const dot = name.lastIndexOf('.');
-  if (dot <= 0) return false;
-  return WRITABLE_EXT.has(name.slice(dot).toLowerCase());
+const AMBIGUOUS_OPEN = new Set(['openSync', 'open']);
+const WRITE_FLAG = /^[wa]|\+/;
+
+const IDENTIFIER = /(?<![\w$.])([A-Za-z_$][\w$]*)/g;
+
+/** The balanced `(...)` beginning at `open` (an index pointing at the paren). */
+function argSpan(bare, open) {
+  let depth = 0;
+  for (let i = open; i < bare.length; i++) {
+    const c = bare[i];
+    if (c === '(' || c === '[' || c === '{') depth++;
+    else if (c === ')' || c === ']' || c === '}') {
+      depth--;
+      if (depth === 0) return { start: open + 1, end: i };
+    }
+  }
+  return null;
 }
 
-// How far either side of a location token a filename literal still counts as
-// "the same expression". Bounded, and additionally cut at the nearest statement
-// terminator, so a state filename three statements away is not attributed here.
-const WINDOW = 400;
+/** Split an argument list at TOP-LEVEL commas: [{start, end}, …]. */
+function splitArgs(bare, span) {
+  const out = [];
+  let depth = 0;
+  let from = span.start;
+  for (let i = span.start; i < span.end; i++) {
+    const c = bare[i];
+    if (c === '(' || c === '[' || c === '{') depth++;
+    else if (c === ')' || c === ']' || c === '}') depth--;
+    else if (c === ',' && depth === 0) {
+      out.push({ start: from, end: i });
+      from = i + 1;
+    }
+  }
+  out.push({ start: from, end: span.end });
+  return out;
+}
+
+/** Does a location token occur inside [start, end)? */
+function locationTokenIn(bare, start, end) {
+  LOCATION_TOKEN.lastIndex = 0;
+  let m;
+  while ((m = LOCATION_TOKEN.exec(bare)) !== null) {
+    if (m.index >= start && m.index < end) return m[1];
+  }
+  return null;
+}
 
 /**
- * Every place `src` derives a writable path from the module's own location.
+ * Every place `src` derives a path from the module's own location and then
+ * WRITES to it.
  *
  * Structural, not spelled:
  *   * comments are BLANKED first, so prose about the hazard is not a hit and,
  *     more importantly, code cannot be hidden from the guard by commenting the
  *     surrounding lines;
  *   * string CONTENTS are blanked for the token scan, so a bait string in a
- *     test fixture is not code;
- *   * the filename may appear BEFORE or AFTER the token, on any line, in any
- *     quote style — `new URL('x.json', import.meta.url)` and a four-line
- *     `join(\n __dirname,\n 'x.json'\n)` are the same finding.
+ *     fixture is not code;
+ *   * the shape is irrelevant — `writeFileSync(new URL('x', import.meta.url))`,
+ *     a four-line `join(\n __dirname,\n 'x'\n)`, and a `const p = …` bound one
+ *     statement earlier and written LATER are all the same finding;
+ *   * no filename is required at all: `writeFileSync(join(__dirname, name))`
+ *     with a computed `name` is the same EROFS, and the literal-based predicate
+ *     could not see it.
  */
 export function findOpenCodedStatePaths(src) {
   const noComments = blankComments(src);
   const bare = blankStrings(noComments);
   const literals = stringLiterals(noComments);
-  const hits = [];
+  const hits = new Map(); // dedup by offset
+
+  // The path a location token is BOUND to, if any: `const p = join(__dirname,
+  // 'x')` writes the hazard into `p`, and the write happens on another line.
+  // Nearest preceding declaration/assignment within the same statement.
+  //
+  // Deliberately NOT scope-aware — this is a scanner, not a parser. Binding
+  // names are file-global here, so a `p` derived from __dirname in one function
+  // and a DIFFERENT `p` written in another is reported. That over-approximates
+  // in the safe direction (a false positive is a loud question about a name
+  // collision; a false negative is the EROFS this file exists to prevent), and
+  // the negative-control table is what keeps the over-approximation honest.
+  const boundNames = new Map(); // name -> {token, literal}
   LOCATION_TOKEN.lastIndex = 0;
+  let t;
+  while ((t = LOCATION_TOKEN.exec(bare)) !== null) {
+    const cut = bare.lastIndexOf(';', t.index);
+    const stmtStart = cut === -1 ? 0 : cut + 1;
+    const decl = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=|(?:^|\n)\s*([A-Za-z_$][\w$]*)\s*=[^=]/g;
+    const head = bare.slice(stmtStart, t.index);
+    let d;
+    let name = null;
+    while ((d = decl.exec(head)) !== null) name = d[1] || d[2];
+    if (!name) continue;
+    const stmtEnd = bare.indexOf(';', t.index);
+    const lit = literals.find(
+      (l) => l.start >= stmtStart && (stmtEnd === -1 || l.end <= stmtEnd) && l.start > t.index - 400);
+    boundNames.set(name, { token: t[1], literal: lit ? lit.value : null });
+  }
+
+  const CALL = /(?<![\w$])([A-Za-z_$][\w$]*)\s*\(/g;
   let m;
-  while ((m = LOCATION_TOKEN.exec(bare)) !== null) {
-    const at = m.index;
-    const lo = Math.max(0, at - WINDOW);
-    const hi = Math.min(bare.length, at + WINDOW);
-    const leftCut = bare.lastIndexOf(';', at);
-    const rightCut = bare.indexOf(';', at);
-    const from = leftCut >= lo ? leftCut + 1 : lo;
-    const to = rightCut !== -1 && rightCut <= hi ? rightCut : hi;
-    for (const lit of literals) {
-      if (lit.start < from || lit.end > to) continue;
-      if (!looksLikeStateFile(lit.value)) continue;
-      hits.push(`${m[1]} + '${lit.value}'`);
+  while ((m = CALL.exec(bare)) !== null) {
+    const call = m[1];
+    const isOpen = AMBIGUOUS_OPEN.has(call);
+    if (!WRITE_TARGET_ARG.has(call) && !isOpen) continue;
+    const span = argSpan(bare, m.index + m[0].length - 1);
+    if (!span) continue;
+    const args = splitArgs(bare, span);
+
+    if (isOpen) {
+      const flags = literals.filter((l) => l.start >= span.start && l.end <= span.end);
+      if (!flags.some((l) => WRITE_FLAG.test(l.value))) continue;
+    }
+    const targets = isOpen ? [0] : WRITE_TARGET_ARG.get(call);
+
+    for (const idx of targets) {
+      const arg = args[idx];
+      if (!arg) continue;
+
+      // (a) the derivation is written INLINE in the target position.
+      const token = locationTokenIn(bare, arg.start, arg.end);
+      if (token) {
+        const lit = literals
+          .filter((l) => l.start >= arg.start && l.end <= arg.end)
+          .map((l) => l.value)
+          .filter((v) => v && v !== '..' && v !== '.')
+          .pop();
+        hits.set(arg.start, `${token} + '${lit ?? '<computed>'}'  ->  ${call}()`);
+        continue;
+      }
+
+      // (b) the derivation was BOUND earlier and only the name appears here.
+      IDENTIFIER.lastIndex = 0;
+      let id;
+      while ((id = IDENTIFIER.exec(bare.slice(arg.start, arg.end))) !== null) {
+        const bound = boundNames.get(id[1]);
+        if (!bound) continue;
+        hits.set(arg.start, `${bound.token} + '${bound.literal ?? '<computed>'}' (via \`${id[1]}\`)  ->  ${call}()`);
+        break;
+      }
     }
   }
-  return hits;
+  return [...hits.values()];
 }
 
 // lib/paths.mjs is exempt BY DESIGN: it is the one place allowed to name the
@@ -553,22 +720,63 @@ const CONSUMERS = [
  * scan third-party code this guard has no authority over, and would blow the
  * "no offenders" claim on the first unrelated match.
  */
-function allModules() {
+const MODULE_EXT = /\.(mjs|cjs|js)$/;
+
+function allModules(root = SKILL) {
   const out = [];
   const walk = (dir) => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue;
       const abs = join(dir, entry.name);
       if (entry.isDirectory()) { walk(abs); continue; }
-      if (!/\.(mjs|cjs|js)$/.test(entry.name)) continue;
-      const rel = abs.slice(SKILL.length + 1);
+      if (!MODULE_EXT.test(entry.name)) continue;
+      const rel = abs.slice(root.length + 1);
       if (rel.startsWith('test/') || rel === 'lib/paths.mjs') continue;
       out.push(rel);
     }
   };
-  walk(SKILL);
+  walk(root);
   return out;
 }
+
+// The `.js`/`.cjs` widening was INERT: the skill has 31 .mjs and zero .js/.cjs,
+// so narrowing the pattern back to `.mjs` cost nothing and nothing went red.
+// A fixture tree makes the extension set an asserted property rather than a
+// hope — and does it BEHAVIOURALLY, through the walk, not by matching the regex
+// against a list of names.
+test('SEAM: the module walk covers .mjs, .js AND .cjs — and only those', () => {
+  const root = mkdtempSync(join(SCRATCH, 'walk-'));
+  const put = (rel, body = '// fixture\n') => {
+    const abs = join(root, rel);
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, body);
+  };
+  put('a.mjs'); put('lib/b.js'); put('api/c.cjs');
+  put('d.md'); put('e.json'); put('f.txt'); put('g.mjs.bak');
+  put('test/should-be-skipped.mjs');
+  put('node_modules/pkg/vendored.js');
+  put('.hidden/ignored.mjs');
+
+  const got = allModules(root).sort();
+  assert.deepEqual(got, ['a.mjs', 'api/c.cjs', 'lib/b.js'],
+    `the walk collected ${JSON.stringify(got)}. It must see every extension a module can ` +
+      'arrive in — package.json has no "type" field, so a .cjs is the natural way to write ' +
+      'a CommonJS helper here and a .js is legal too — and must keep skipping test/, ' +
+      'node_modules and dot-dirs.');
+});
+
+test('SEAM: the walk finds a .cjs offender the .mjs-only walk would miss', () => {
+  // Reachability for the widening: an offender that exists ONLY in a .cjs file.
+  const root = mkdtempSync(join(SCRATCH, 'walk-cjs-'));
+  writeFileSync(join(root, 'helper.cjs'),
+    "const { writeFileSync } = require('fs');\nwriteFileSync(join(__dirname, 'sessions.json'), d);\n");
+  const offenders = allModules(root).flatMap(
+    (rel) => findOpenCodedStatePaths(readFileSync(join(root, rel), 'utf8')));
+  assert.equal(offenders.length, 1,
+    'a state write open-coded in a .cjs module was invisible to the walk, so the guard\'s ' +
+      'answer to "does any module open-code a state path?" excludes every extension the ' +
+      'answer could arrive in but one');
+});
 
 test('SEAM: no module derives a state path from the skill dir', () => {
   const modules = allModules();
@@ -585,8 +793,9 @@ test('SEAM: no module derives a state path from the skill dir', () => {
     }
   }
   assert.ok(offenders.length === 0,
-    'a module still resolves a state path from the skill dir (it will EROFS once deployed ' +
-      `read-only) — import the accessor from lib/paths.mjs instead:\n        ${offenders.join('\n        ')}`);
+    'a module WRITES to a path it derived from the skill dir. That is an EROFS once the ' +
+      'skill is deployed read-only (home-manager puts it behind /nix/store symlinks) — ' +
+      `import the accessor from lib/paths.mjs instead:\n        ${offenders.join('\n        ')}`);
 });
 
 // The walk is the guard's eyes: pin that it sees the WHOLE tree, not just the
@@ -619,47 +828,89 @@ test('SEAM: every listed consumer still exists', () => {
 // deleted, which is the real way a guard dies).
 
 const MUST_FIRE = [
-  ['the one-line join form (the only shape the old regex caught)',
-    "const p = join(__dirname, 'accounts.json');"],
+  ['the one-line join form, written',
+    "writeFileSync(join(__dirname, 'accounts.json'), data);"],
   ['new URL(name, import.meta.url) — the skill\'s OWN idiom, and the filename comes FIRST',
-    "const p = new URL('accounts.json', import.meta.url);"],
+    "writeFileSync(new URL('accounts.json', import.meta.url), data);"],
   ['fileURLToPath(new URL(...)) — same, one wrapper deeper',
-    "const p = fileURLToPath(new URL('watchers.json', import.meta.url));"],
+    "writeFileSync(fileURLToPath(new URL('watchers.json', import.meta.url)), data);"],
   ['a MULTI-LINE join — the old regex stopped at the newline',
-    "const p = join(\n  __dirname,\n  '..',\n  'webhooks.jsonl'\n);"],
-  ['a state file that is NOT in STATE_FILES — the old regex only knew the seven registered names',
-    "const p = join(__dirname, 'sessions.json');"],
+    "appendFileSync(join(\n  __dirname,\n  '..',\n  'webhooks.jsonl'\n), line);"],
+  ['a state file that is NOT in STATE_FILES — no registry is consulted any more',
+    "writeFileSync(join(__dirname, 'sessions.json'), data);"],
   ['a dotfile the registry does not know either',
-    "const p = join(__dirname, '.credentials');"],
+    "writeFileSync(join(__dirname, '.credentials'), token);"],
   ['double quotes',
-    'const p = join(__dirname, "accounts.json");'],
+    'writeFileSync(join(__dirname, "accounts.json"), data);'],
   ['SKILL_DIR as the base',
-    "const p = join(SKILL_DIR, 'last-seen.txt');"],
+    "writeFileSync(join(SKILL_DIR, 'last-seen.txt'), ts);"],
   ['import.meta.dirname',
-    "const p = join(import.meta.dirname, 'watchers.json');"],
-  ['a nested state dir',
-    "const p = join(__dirname, '.cache', 'jwt-cache-default.json');"],
+    "writeFileSync(join(import.meta.dirname, 'watchers.json'), data);"],
+  ['a nested state dir, created rather than written',
+    "mkdirSync(join(__dirname, '.cache'), { recursive: true });"],
+  // ── shapes the literal-and-extension predicate could NOT see ──
+  ['🔴 INDIRECT: bound one statement earlier, written later',
+    "const p = join(__dirname, 'watchers.json');\nappendFileSync(p, line);"],
+  ['🔴 INDIRECT through an accessor function',
+    "const logFile = () => join(__dirname, 'webhooks.jsonl');\nappendFileSync(logFile(), line);"],
+  ['🔴 a COMPUTED filename — no literal for a filename check to match',
+    'writeFileSync(join(__dirname, name), data);'],
+  ['🔴 WRITING the manifest back — the old READONLY_BUNDLED exemption made this invisible',
+    "writeFileSync(join(__dirname, '..', 'package.json'), JSON.stringify(pkg));"],
+  ['🔴 a .md file — the old WRITABLE_EXT list did not consider one writable',
+    "writeFileSync(join(__dirname, '..', 'reference', 'generated.md'), body);"],
+  ['🔴 the DESTINATION of a copy',
+    "cpSync(tmpDir, join(__dirname, '.cache'), { recursive: true });"],
+  ['🔴 chmod of a skill-dir path',
+    "chmodSync(join(__dirname, 'accounts.json'), 0o600);"],
+  ['🔴 openSync with a WRITE flag',
+    "const fd = openSync(join(__dirname, 'webhooks.jsonl'), 'a');"],
+  ['🔴 a write stream',
+    "const out = createWriteStream(join(__dirname, 'webhooks.jsonl'));"],
+  ['🔴 deletion is a write too',
+    "rmSync(join(__dirname, '.cache'), { recursive: true, force: true });"],
 ];
 
+// 🔴 CALIBRATED TO THE CLASS, NOT TO AN EXEMPTION LIST. The first four entries
+// are the verified false positives the previous scanner produced: each is a
+// plain READ of a shipped file, and the message it printed for them ("it will
+// EROFS once deployed read-only") was false. None of them is exempt by name any
+// more — they are quiet because nothing writes.
 const MUST_NOT_FIRE = [
+  ['READ: bundled data next to the module',
+    "const fields = JSON.parse(readFileSync(join(__dirname, '..', 'data', 'custom-fields.json'), 'utf8'));"],
+  ['READ: a bundled schema with a "writable" extension',
+    "const schema = readFileSync(join(__dirname, 'schema.yaml'), 'utf8');"],
+  ['READ: the skill\'s own idiom, new URL(..., import.meta.url)',
+    "const prompt = readFileSync(new URL('prompt.txt', import.meta.url), 'utf8');"],
+  ['READ: a bundled dotfile',
+    "const ignore = readFileSync(join(__dirname, '..', '.gitignore'), 'utf8');"],
+  ['READ: the manifest (no longer exempt BY NAME — exempt because it is a read)',
+    "const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8'));"],
+  ['READ: a bundled reference doc',
+    "const help = readFileSync(join(__dirname, '..', 'reference', 'setup.md'), 'utf8');"],
+  ['READ: listing a bundled directory',
+    "const docs = readdirSync(join(__dirname, '..', 'reference'));"],
+  ['READ: copying bundled data OUT of the skill dir — the SOURCE argument',
+    "cpSync(join(__dirname, '..', 'templates'), outDir, { recursive: true });"],
+  ['READ: openSync with a read flag',
+    "const fd = openSync(join(__dirname, 'schema.yaml'), 'r');"],
   ['the __dirname preamble every module writes',
     "const __dirname = dirname(fileURLToPath(import.meta.url));"],
   ['the run-as-main guard (this is lib/jwt.mjs:338 verbatim)',
     "const isMain = process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url));"],
-  ['reading a BUNDLED read-only doc out of the skill dir — legitimate',
-    "const help = readFileSync(join(__dirname, '..', 'reference', 'setup.md'), 'utf8');"],
-  ['reading the skill\'s own manifest',
-    "const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8'));"],
   ['deriving the skill dir itself (lib/paths.mjs:43 verbatim)',
     "export const SKILL_DIR = resolve(__dirname, '..');"],
-  ['a state filename with NO location token anywhere near it',
-    "const p = statePath('accounts.json');"],
-  ['a location token and a state name in DIFFERENT statements',
-    "const d = dirname(fileURLToPath(import.meta.url));\nconst p = statePath('accounts.json');"],
+  ['the CORRECT code: a write through the accessor, with a location token nearby',
+    "const __dirname = dirname(fileURLToPath(import.meta.url));\nwriteFileSync(accountsPath(), data);"],
+  ['a write to a path derived from the STATE dir, not the module',
+    "writeFileSync(join(stateBaseDir(), 'accounts.json'), data);"],
+  ['a scratch dir under tmpdir()',
+    "const dir = mkdtempSync(join(tmpdir(), 'clickup-'));\nwriteFileSync(join(dir, 'accounts.json'), data);"],
   ['the hazard described in a COMMENT — prose is not code',
-    "// never write join(__dirname, 'accounts.json') — use the accessor\nconst p = accountsPath();"],
+    "// never write writeFileSync(join(__dirname, 'accounts.json'), d) — use the accessor\nconst p = accountsPath();"],
   ['the hazard commented OUT — still not code',
-    "/* const p = join(__dirname, 'accounts.json'); */\nconst p = accountsPath();"],
+    "/* writeFileSync(join(__dirname, 'accounts.json'), d); */\nconst p = accountsPath();"],
   ['an import specifier that merely ends in .js',
     "import x from './helper.js';\nconst d = dirname(fileURLToPath(import.meta.url));"],
 ];
@@ -685,12 +936,72 @@ test('NEGATIVE CONTROL: the seam scanner stays quiet on legitimate uses', () => 
 test('the scanner is exercised against both halves of the control pair', () => {
   // A guard on the guard: a refactor that emptied either table would leave both
   // control tests passing vacuously.
-  assert.ok(MUST_FIRE.length >= 10,
+  assert.ok(MUST_FIRE.length >= 20,
     `only ${MUST_FIRE.length} positive control(s) — the shapes this scanner is trusted ` +
       'to catch are exactly the ones listed here');
-  assert.ok(MUST_NOT_FIRE.length >= 8,
+  assert.ok(MUST_NOT_FIRE.length >= 18,
     `only ${MUST_NOT_FIRE.length} negative control(s) — false positives are what get a ` +
       'guard deleted, so they need as much pinning as the true ones');
+});
+
+// ── READ vs WRITE, stated as its own property and proved BOTH ways ────────
+//
+// The control tables above would still be satisfied by a scanner that fired on
+// everything containing `writeFileSync` somewhere. These two say the distinction
+// itself is what is being measured: the SAME path expression, in the same
+// module, read and then written.
+
+const READ_ONLY_SHAPES = [
+  ["join(__dirname, '..', 'data', 'custom-fields.json')", 'readFileSync(EXPR, \'utf8\')'],
+  ["join(__dirname, 'schema.yaml')", 'readFileSync(EXPR, \'utf8\')'],
+  ["new URL('prompt.txt', import.meta.url)", 'readFileSync(EXPR, \'utf8\')'],
+  ["join(__dirname, '..', '.gitignore')", 'readFileSync(EXPR, \'utf8\')'],
+];
+
+test('🔴 READ vs WRITE: the four bundled-read shapes are SILENT', () => {
+  const wrong = [];
+  for (const [expr, template] of READ_ONLY_SHAPES) {
+    const src = `const x = ${template.replace('EXPR', expr)};`;
+    const hits = findOpenCodedStatePaths(src);
+    if (hits.length) wrong.push(`${expr}  ->  ${hits.join(', ')}`);
+  }
+  assert.equal(wrong.length, 0,
+    'the seam scanner flagged a plain READ of a file shipped inside the skill dir. Reading ' +
+      'bundled data off __dirname is legal on a read-only deploy, and the message the guard ' +
+      'prints ("it will EROFS once deployed read-only") is FALSE for a read. A guard that ' +
+      `cries wolf gets deleted:\n        ${wrong.join('\n        ')}`);
+});
+
+test('🔴 READ vs WRITE: the SAME expressions WRITTEN all fire', () => {
+  // The other half, over the identical expressions: this is what proves the
+  // scanner is measuring the write context and not just the four templates.
+  const missed = [];
+  for (const [expr] of READ_ONLY_SHAPES) {
+    const src = `writeFileSync(${expr}, data);`;
+    if (findOpenCodedStatePaths(src).length === 0) missed.push(expr);
+  }
+  assert.equal(missed.length, 0,
+    'a genuine open-coded state WRITE off the module\'s own location did NOT fire — the ' +
+      'read/write check was widened into a hole. These EROFS on a read-only deploy:\n        ' +
+      missed.join('\n        '));
+});
+
+test('🔴 READ vs WRITE: a genuine write via EACH location idiom fires, direct and indirect', () => {
+  const cases = [
+    ['__dirname + join, inline',
+      "writeFileSync(join(__dirname, 'sessions.json'), data);"],
+    ['__dirname + join, bound then written',
+      "const p = join(__dirname, 'sessions.json');\nwriteFileSync(p, data);"],
+    ['new URL(..., import.meta.url), inline',
+      "writeFileSync(new URL('sessions.json', import.meta.url), data);"],
+    ['new URL(..., import.meta.url), bound then written',
+      "const p = new URL('sessions.json', import.meta.url);\nwriteFileSync(p, data);"],
+  ];
+  const missed = cases.filter(([, src]) => findOpenCodedStatePaths(src).length === 0)
+    .map(([label]) => label);
+  assert.equal(missed.length, 0,
+    'the scanner missed a genuine state WRITE derived from the module\'s own location — ' +
+      `this is the property the whole file exists for:\n        ${missed.join('\n        ')}`);
 });
 
 test('SEAM: the consumer list covers every module that imports lib/paths.mjs', () => {

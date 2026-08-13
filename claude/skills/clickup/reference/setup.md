@@ -47,6 +47,24 @@ So if the listener logs `[rejected:unknown-webhook]`, the fix is to re-register
 the watcher (`node query.mjs watch …`), not to disable the check. There is no
 override flag.
 
+On the catch-up (startup replay) side the cursor moves in two different ways,
+and the stderr prefix tells you which:
+
+* `[catch-up:rejected:<reason>] … cursor advanced past it` — the stored request
+  can **never** verify (no signature, no `webhook_id`, no registered secret, or
+  a wrong digest), so it is skipped and the cursor moves past it. Without this,
+  ten consecutive unverifiable stored requests were a permanent blind spot: the
+  API pages at 10 and the cursor is a timestamp, so a genuine event behind them
+  could never be reached. The common trigger is a lost or reset
+  `watchers.json` — the secrets that would verify those events are gone.
+* `[catch-up:blocked:<reason>] … cursor is unchanged` — the request could not be
+  **parsed or dated**, so what would be skipped is unknown. Catch-up stops there
+  rather than step over it silently, and the live listener starts as usual. Pass
+  an explicit `--since` to move past it deliberately.
+
+Nothing rejected is ever written to `webhooks.jsonl` in either case — the body
+is attacker-controlled — so only the timestamp cursor moves.
+
 `webhook-url.txt` is a **credential** — `https://webhook.site/<token>` is a
 capability, and whoever reads it can read this workspace's event stream and post
 forged events into it. It is written 0600, and the unauthenticated `GET /` on

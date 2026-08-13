@@ -133,10 +133,12 @@ cd "$ROOT" || { echo "run-node-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 #   scripts/collector/browser-ext/tests  2 files    21 tests
 #
 # MEASURED 2026-08-13, same way:
-#   claude/skills/clickup/test           4 files    73 tests
-#   (was 2 files / 27 tests earlier the same day; the webhook listener had ZERO
-#   coverage, which is why four defects in it survived review — see
-#   claude/skills/clickup/test/{webhook-server,listen-integration}.test.mjs)
+#   claude/skills/clickup/test           5 files   107 tests
+#   (was 2 files / 27 tests earlier the same day, then 4 files / 73; the webhook
+#   listener had ZERO coverage, which is why four defects in it survived review —
+#   see claude/skills/clickup/test/{webhook-server,listen-integration}.test.mjs.
+#   The 73 -> 107 step is #444/#445: the webhook.site CATCH-UP path had no test
+#   either, and two mutations reinstating the original defect passed all 73.)
 #
 # Raise a floor when a suite grows. NEVER lower one to get green — that is the
 # move that turned the pytest global floor into less than half the real total.
@@ -153,11 +155,13 @@ SUITES=(
   # complete; state-paths: no state path resolves inside the read-only skill dir,
   # including a structural seam walk over every module in the tree;
   # webhook-server + listen-integration: the receiver rejects unsigned and forged
-  # deliveries, binds loopback, and discloses no capability URL). They lived in a
-  # standalone, UNCOMMITTED ~/.claude/skills/clickup/ and ran only when a human
-  # remembered — ungated by anything, on either host. 73 tests measured
-  # 2026-08-13, floor 70 = 73 - min(50, max(1, 73/20)).
-  "claude/skills/clickup/test|4|70"
+  # deliveries, binds loopback, and discloses no capability URL; catchup: the
+  # webhook.site catch-up path runs the SAME authentication predicate and its
+  # cursor cannot develop a permanent blind spot). They lived in a standalone,
+  # UNCOMMITTED ~/.claude/skills/clickup/ and ran only when a human remembered —
+  # ungated by anything, on either host. 107 tests measured 2026-08-13,
+  # floor 102 = 107 - min(50, max(1, 107/20)).
+  "claude/skills/clickup/test|5|102"
 )
 
 # --- discovery roots -----------------------------------------------------------

@@ -39,6 +39,7 @@ import {
   safeEqualHex,
   signBody,
   headerValue,
+  headerLookup,
   authenticateDelivery,
   createWebhookServer,
   listenLoopback,
@@ -194,6 +195,19 @@ describe('authenticateDelivery', () => {
     assert.equal(r.accepted, true, `expected accepted, got reason=${r.reason}`);
   });
 
+  test('the header lookup is case-insensitive and array-aware', () => {
+    // node's http lowercases what it receives; webhook.site's stored-request
+    // API echoes whatever case the sender used, and returns values as ARRAYS.
+    // One helper for both callers of the one predicate — an exact-case bracket
+    // access on the catch-up side rejects every stored event, silently.
+    assert.equal(headerLookup({ 'x-signature': GOOD_SIG }, 'x-signature'), GOOD_SIG);
+    assert.equal(headerLookup({ 'X-Signature': GOOD_SIG }, 'x-signature'), GOOD_SIG);
+    assert.equal(headerLookup({ 'X-SIGNATURE': [GOOD_SIG] }, 'x-signature'), GOOD_SIG);
+    assert.equal(headerLookup({ 'content-type': 'application/json' }, 'x-signature'), undefined);
+    assert.equal(headerLookup(undefined, 'x-signature'), undefined);
+    assert.equal(headerLookup(null, 'x-signature'), undefined);
+  });
+
   test('POSITIVE + NEGATIVE control in one: the same body flips on the secret alone', () => {
     const good = authenticateDelivery(BODY, GOOD_SIG, lookupSecret);
     const bad = authenticateDelivery(BODY, GOOD_SIG, () => OTHER_SECRET);
@@ -243,10 +257,25 @@ async function withServer(fn, overrides = {}) {
 describe('the HTTP receiver', () => {
   test('🔴 binds 127.0.0.1, not every interface', async () => {
     await withServer(({ addr }) => {
-      assert.equal(addr.address, LOOPBACK_HOST,
+      // 🔴 The LITERAL, not the constant. `assert.equal(addr.address,
+      // LOOPBACK_HOST)` is SELF-REFERENTIAL: mutate LOOPBACK_HOST to '0.0.0.0'
+      // and the server binds every interface while the assertion still passes,
+      // because both sides moved together. Only listen-integration.test.mjs's
+      // literal killed that mutant, so the whole bind guard rested on one file
+      // — and would have gone vacuous, silently, the day that file was skipped.
+      assert.equal(addr.address, '127.0.0.1',
         `the receiver bound ${addr.address} — 0.0.0.0/:: makes a webhook sidecar ` +
           'reachable from the LAN and from nebula. It must bind loopback.');
     });
+  });
+
+  test('🔴 LOOPBACK_HOST is 127.0.0.1 — the constant everything else derives from', () => {
+    // Pinned separately from the bind so the two claims fail SEPARATELY: this
+    // one says what the constant is, the one above says what the server did.
+    assert.equal(LOOPBACK_HOST, '127.0.0.1',
+      `LOOPBACK_HOST is ${JSON.stringify(LOOPBACK_HOST)}. It is the bind address AND the ` +
+        'whcli forward target; anything but the loopback literal puts the receiver on the ' +
+        'LAN and the nebula address of whichever host runs it.');
   });
 
   test('🔴 GET does not disclose webhook_url', async () => {
