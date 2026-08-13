@@ -62,15 +62,29 @@ real signal: a dogfooding agent read that `agent-ops` has no JSON API, correctly
 this script, never opened agent-ops, and **missed 11 pending approvals — four of them
 credential-exposure or cross-user-data-leak.**
 
-- **`count` is the measurement; `detail` is not.** The cached detail string truncates
-  (names ~6 ids however many are pending) and has dropped `ready_for_review` items —
-  finished work awaiting review. Nothing here parses it.
+- **`count` = pending + STUCK.** `pending_count` is the `{open, ready_for_review}` half;
+  `stuck_count` is `in_progress` tasks whose agent looks dead. The two always travel with
+  the total. 🔴 Excluding `in_progress` ("an agent is working = not on the human") is exactly
+  what hid a dispatch whose agent had been dead **four hours** — invisible on every surface,
+  because this script reads the poller's cache rather than the API. The predicate is
+  `scripts/lib/clawgate_tasks.py`, shared with the poller and agent-ops.
+- **`open` / `ready_for_review` / `stuck` ENUMERATE the queue** — a count that moves without
+  naming what moved is how three finished tasks appeared in no list anywhere. Each `stuck`
+  row carries `reasons` (`no_agent` / `agent_error` / `not_kicked_off` / `agent_idle` /
+  `activity_unknown`) and `agent_idle_secs`: **`idle 16m` and `idle 4h` are the same
+  boolean** and only one is worth acting on. Idle time cannot see progress *within* an
+  in-flight turn, so it errs toward a false alarm — the intended direction.
+- **`count` is the measurement; `detail` is not.** Nothing here parses it. Schema-2 detail
+  states its own cap (`(+N more)`); a schema-1 string truncated silently to ~6 ids and has
+  dropped `ready_for_review` items.
+- 🔴 **`schema_ok: false` means STUCK WAS NOT MEASURED, not zero stuck** — the cache came
+  from a poller predating the predicate (i.e. `home-manager switch` + restart
+  `bar-status-poll` has not happened yet). `stuck_count` is `null` in that case.
 - Four states: `ok` / `stale` (cache older than 300s — the poller writes every 45s) /
   `absent` / `unparseable`. The last three publish **`count: null`, never `0`**.
-- **For WHICH tasks, open `agent-ops`** (`$mod+i`, tmux `prefix+A`, or the ▦ bar button). It
-  has the enumerated queue with titles, open PRs, and a `/proc` walk that finds a `claude`
-  buried under a wrapper shell. This script has the count; that one has the list. They are
-  complements, not substitutes.
+- **`agent-ops`** (`$mod+i`, tmux `prefix+A`, ▦ bar button) shows the same queue LIVE off the
+  API rather than off the cache, plus open PRs and a `/proc` walk that finds a `claude`
+  buried under a wrapper shell. Complements, not substitutes.
 
 ## The caveats are in the OUTPUT, not just in this file
 

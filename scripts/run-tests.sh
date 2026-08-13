@@ -578,7 +578,13 @@ TARGET_FLOORS=(
   # Measured on ext4: the two disagreed in 17 of 40 runs, in either direction.
   # It now asserts what the test actually needs — that BOTH files are densely
   # allocated — so it no longer keys on allocator luck.
-  "scripts/tests|3100"
+  #
+  # 2026-08-12, clawgate stuck-dispatch visibility: 3341 collected on
+  # main + this branch, measured by the authoritative gate on the MERGED tree
+  # (not arithmetic across the conflict — this line is re-pinned by every
+  # branch that adds a test, and rerere has replayed a stale resolution onto
+  # it before). _suggested_floor 3341 = 3341 - min(50, max(1, 167)) = 3291.
+  "scripts/tests|3291"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —

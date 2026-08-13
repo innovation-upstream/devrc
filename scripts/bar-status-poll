@@ -15,9 +15,14 @@ steady state is neutral / invisible). After writing each file the poller signals
 i3status-rs (RTMIN+N) so the corresponding block refreshes immediately.
 
 Sources
-  clawgate : GET $CLAWGATE_API_URL/api/tasks with the bearer CLAWGATE_HOOK_TOKEN
-             (both from ~/.claude/clawgate.env) -> count tasks awaiting the
-             operator (status in {open, ready_for_review}).
+  clawgate : GET $CLAWGATE_API_URL/api/tasks?summary=1 with the bearer
+             CLAWGATE_HOOK_TOKEN (both from ~/.claude/clawgate.env) -> what
+             needs the operator. The predicate is NOT spelled here: it is
+             scripts/lib/clawgate_tasks.py, which all three surfaces that answer
+             this question import (this poller, agent-ops, session-manager).
+             It counts status-pending tasks AND `in_progress` tasks whose agent
+             looks dead — the state a wedged dispatch is stranded in, which this
+             poller used to exclude by name.
   mail     : open rows in the homelab Postgres `mail_actions` table, via
              mail-actions/_db.py (kubectl port-forward + psycopg2). That module
              is loaded by EXPLICIT PATH, never via sys.path — its sibling llm.py
@@ -70,10 +75,14 @@ import urllib.request
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-# clawgate task statuses that mean "the operator still has to act": a freshly
-# posted task awaiting dispatch (open) or a finished agent run awaiting review
-# (ready_for_review). in_progress = an agent is working = not on the human.
-PENDING_TASK_STATES = frozenset({"open", "ready_for_review"})
+# 🔴 The clawgate "needs the operator" predicate USED to be spelled here, as
+# `PENDING_TASK_STATES = frozenset({"open", "ready_for_review"})`, with
+# `in_progress` excluded because "an agent is working = not on the human." It
+# lives in scripts/lib/clawgate_tasks.py now, together with the two other copies
+# it was wrong alongside — see that module's header for what the exclusion cost.
+# Do not re-spell either the state set or the idle threshold here;
+# scripts/tests/test_clawgate_predicate_single_source.py fails the build if a
+# second copy reappears anywhere in the repo.
 
 # Alertmanager: only real, actionable severities count; Watchdog is the
 # always-firing dead-man's switch and InfoInhibitor is an inhibition helper.
@@ -114,30 +123,54 @@ CIVITAI_KUBECONFIG = os.environ.get("CIVITAI_KUBECONFIG") or os.path.expanduser(
     "~/workspace/civit/datapacket-talos/prod-kubeconfig")
 
 
+def _load_clawgate_tasks():
+    """Load scripts/lib/clawgate_tasks.py by EXPLICIT PATH (same idiom as
+    `_load_deadman` below — never via sys.path, so nothing in scripts/lib/ can
+    shadow a name this poller relies on).
+
+    🔴 No hardcoded fallback copy of the predicate, deliberately, unlike
+    `_deadman_unknown_states`. A fallback set is how this bug survived in the
+    first place: two copies, both stale. If this import breaks the source raises
+    and the bar renders the honest `stale` marker, which is the behaviour a
+    silent second copy would have replaced with a confident wrong number.
+
+    Tried sibling-first so the repo checkout wins, then $DEVRC_DIR, because
+    agent-ops runs from a nix-store COPY where no sibling lib/ exists.
+    """
+    import importlib.machinery
+    import importlib.util
+    here = os.path.dirname(os.path.abspath(__file__))
+    for path in (os.path.join(here, "lib", "clawgate_tasks.py"),
+                 os.path.join(DEVRC_DIR, "scripts", "lib", "clawgate_tasks.py")):
+        if os.path.exists(path):
+            loader = importlib.machinery.SourceFileLoader("_bar_clawgate", path)
+            spec = importlib.util.spec_from_file_location("_bar_clawgate", path,
+                                                          loader=loader)
+            mod = importlib.util.module_from_spec(spec)
+            loader.exec_module(mod)
+            return mod
+    raise ImportError("scripts/lib/clawgate_tasks.py not found (tried sibling "
+                      "lib/ and $DEVRC_DIR/scripts/lib/)")
+
+
+CG = _load_clawgate_tasks()
+
+
 # ---------------------------------------------------------------------------
 # Pure parse functions (unit-tested against mock inputs)
 # ---------------------------------------------------------------------------
-def parse_clawgate(tasks, pending_states=PENDING_TASK_STATES) -> dict:
-    """Map the /api/tasks list to a status dict. Counts operator-pending tasks.
+def parse_clawgate(tasks, now=None) -> dict:
+    """Map the /api/tasks payload to a status dict. THIN by design.
+
+    Every judgement — which statuses need the operator, when an `in_progress`
+    dispatch counts as stuck, how the detail line truncates — is
+    `clawgate_tasks.attention`, so the bar, agent-ops and session-manager cannot
+    disagree about what the number means. This function only supplies the clock.
 
     Raises ValueError if the top-level payload is not a list (the caller turns
     that into a 'stale' marker); tolerates junk list *elements*.
     """
-    if not isinstance(tasks, list):
-        raise ValueError("clawgate /api/tasks payload is not a list")
-    pending = [
-        t for t in tasks
-        if isinstance(t, dict) and t.get("status") in pending_states
-    ]
-    count = len(pending)
-    if count:
-        ids = ", ".join("#%s" % t.get("id") for t in pending[:6])
-        detail = "%d task(s) awaiting: %s" % (count, ids)
-        state = "Warning"
-    else:
-        detail = "no pending tasks"
-        state = "Idle"
-    return {"count": count, "state": state, "detail": detail}
+    return CG.attention(tasks, time.time() if now is None else now)
 
 
 def parse_mail(open_count) -> dict:
@@ -766,22 +799,20 @@ def _http_json(url: str, headers=None, timeout: float = 3.0):
 # Fetch functions (network / cluster; wrapped by source() so failures -> stale)
 # ---------------------------------------------------------------------------
 def _clawgate_creds():
-    env = {}
-    with open(os.path.expanduser("~/.claude/clawgate.env")) as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            k, v = line.split("=", 1)
-            env[k.strip()] = v.strip()
-    url = env.get("CLAWGATE_API_URL", "http://192.168.50.250:30302").rstrip("/")
-    token = env["CLAWGATE_HOOK_TOKEN"]
-    return token, url
+    """(token, base_url), read from the env file at CALL time by the shared
+    module — one reader, so agent-ops and this poller cannot disagree about
+    where the credential comes from or what the default base is."""
+    base, token = CG.read_clawgate_env()
+    return token, base
 
 
 def fetch_clawgate() -> dict:
     token, url = _clawgate_creds()
-    tasks = _http_json(url + "/api/tasks",
+    # 🔴 ?summary=1 (CG.tasks_url): the full board is ~190 KB per poll, 27x this,
+    # and the extra is almost entirely task/comment BODIES this poller never
+    # reads. The summary form keeps id/title/status and the `agent` object the
+    # stuck predicate needs. The token goes in a HEADER, never in the URL.
+    tasks = _http_json(CG.tasks_url(url),
                        headers={"Authorization": "Bearer " + token}, timeout=3)
     return parse_clawgate(tasks)
 

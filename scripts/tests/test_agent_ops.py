@@ -34,24 +34,107 @@ def plain(lines):
 
 
 # ---------------------------------------------------------------------------
-# clawgate_pending_titles
+# clawgate_attention_lines (was: clawgate_pending_titles)
 # ---------------------------------------------------------------------------
-def test_clawgate_titles_filters_pending_only():
+# Synthetic throughout — this repo is PUBLIC and real clawgate titles are client
+# work. The clock is 2026-08-12T12:00:00Z.
+_CG_NOW = 1786536000.0
+
+
+def _cg_agent(status="running", kicked=True, activity="2026-08-12T11:59:30Z"):
+    return {"id": 6601, "name": "sample-forge", "status": status,
+            "kickedOff": kicked, "lastActivityAt": activity,
+            "updatedAt": activity}
+
+
+def test_clawgate_lines_filter_by_the_shared_predicate():
     tasks = [
         {"id": 1, "status": "open", "title": "ship X"},
-        {"id": 2, "status": "in_progress", "title": "running Y"},
+        # in_progress with a LIVE agent is still not on the human.
+        {"id": 2, "status": "in_progress", "title": "running Y",
+         "agent": _cg_agent()},
         {"id": 3, "status": "ready_for_review", "title": "review Z"},
         {"id": 4, "status": "done", "title": "old"},
     ]
-    out = ao.clawgate_pending_titles(tasks)
-    assert out == ["#1 ship X", "#3 review Z"]
+    out = ao.clawgate_attention_lines(tasks, now=_CG_NOW)
+    # 🔴 REVIEW BEFORE OPEN: finished work awaiting review is what went unnamed.
+    assert out == ["#3 REVIEW review Z", "#1 ship X"]
 
 
-def test_clawgate_titles_failsafe_on_junk():
-    assert ao.clawgate_pending_titles(None) == []
-    assert ao.clawgate_pending_titles({"not": "a list"}) == []
+def test_clawgate_lines_surface_a_stuck_dispatch_first_and_with_its_idle_time():
+    # 🔴 The four-hour wedge: agent `running`, kickedOff, pod up, silent.
+    tasks = [
+        {"id": 1, "status": "open", "title": "ship X"},
+        {"id": 2, "status": "in_progress", "title": "wedged Y",
+         "agent": _cg_agent(activity="2026-08-12T08:00:00Z")},
+    ]
+    out = ao.clawgate_attention_lines(tasks, now=_CG_NOW)
+    assert out[0] == "#2 STUCK[agent_idle] idle 4h — wedged Y"
+    # A bare flag would read the same at 16 minutes; the idle time is the
+    # difference between "go look" and "probably mid-turn".
+    near = ao.clawgate_attention_lines(
+        [{"id": 2, "status": "in_progress", "title": "wedged Y",
+          "agent": _cg_agent(activity="2026-08-12T11:44:00Z")}], now=_CG_NOW)
+    assert near[0] == "#2 STUCK[agent_idle] idle 16m — wedged Y"
+
+
+def test_enrich_asks_for_the_summary_form_and_keeps_the_token_out_of_the_url(
+        monkeypatch, tmp_path):
+    """The same seam as the poller's, on the panel's own live fetch — one shared
+    url builder, and the credential in a header. Guarded here too because the
+    two fetches drifting apart is how the surfaces disagreed in the first
+    place."""
+    env = tmp_path / "clawgate.env"
+    env.write_text("CLAWGATE_API_URL=http://cg.invalid:1\n"
+                   "CLAWGATE_HOOK_TOKEN=sentinel-token-value\n")
+    monkeypatch.setattr(ao, "CLAWGATE_ENV", str(env))
+    seen = {}
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b'[{"id": 5, "status": "open", "title": "queued item"}]'
+
+    def fake_urlopen(req, timeout=None):
+        seen["url"] = req.full_url
+        seen["headers"] = dict(req.headers)
+        return _Resp()
+
+    import urllib.request
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    out = ao.enrich_clawgate_titles(now=_CG_NOW)
+    assert out == ["#5 queued item"]
+    assert seen["url"] == "http://cg.invalid:1/api/tasks?summary=1"
+    assert "sentinel-token-value" not in seen["url"]
+    assert seen["headers"]["Authorization"] == "Bearer sentinel-token-value"
+
+
+def test_enrich_is_failsafe_and_leaks_nothing_when_the_api_is_down(
+        monkeypatch, tmp_path):
+    env = tmp_path / "clawgate.env"
+    env.write_text("CLAWGATE_API_URL=http://cg.invalid:1\n"
+                   "CLAWGATE_HOOK_TOKEN=sentinel-token-value\n")
+    monkeypatch.setattr(ao, "CLAWGATE_ENV", str(env))
+    import urllib.request
+
+    def boom(req, timeout=None):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(urllib.request, "urlopen", boom)
+    assert ao.enrich_clawgate_titles(now=_CG_NOW) == []
+
+
+def test_clawgate_lines_failsafe_on_junk():
+    assert ao.clawgate_attention_lines(None) == []
+    assert ao.clawgate_attention_lines({"not": "a list"}) == []
     # tolerates junk elements + missing title
-    out = ao.clawgate_pending_titles(["x", 3, {"id": 9, "status": "open"}])
+    out = ao.clawgate_attention_lines(["x", 3, {"id": 9, "status": "open"}],
+                                      now=_CG_NOW)
     assert out == ["#9 (no title)"]
 
 
@@ -796,6 +879,54 @@ def test_render_blocked_failsafe_missing():
     body = "\n".join(out)
     assert "clawgate  — n/a" in body
     assert "mail      — n/a" in body
+
+
+def test_render_blocked_calls_out_stuck_dispatches_separately_from_the_count():
+    """🔴 The wedge was invisible for four hours. A number that merely went up
+    by one would not have told anyone which class moved."""
+    cg = {"schema": 2, "count": 3, "stuck_count": 1,
+          "detail": "3 need you (1 open, 1 review, 1 stuck): !#9, #8, #7"}
+    body = "\n".join(plain(ao.render_blocked(cg, None, titles=[
+        "#9 STUCK[agent_idle] idle 4h — wedged item",
+        "#8 REVIEW finished item", "#7 queued item"])))
+    assert "1 stuck dispatch(es)" in body
+    assert "in_progress with a dead agent" in body
+    assert "idle 4h" in body
+
+
+def test_render_blocked_says_a_LEGACY_cache_never_measured_stuck_dispatches():
+    """🔴 An old cache carries no stuck field. Rendering that silence as an
+    all-clear is exactly the substitution being fixed — so it is named, and it
+    is named even at count 0, when a reader is least likely to look twice."""
+    for cg in ({"count": 4, "detail": "4 task(s) awaiting: #1, #2"},
+               {"count": 0, "detail": "no pending tasks"}):
+        body = "\n".join(plain(ao.render_blocked(cg, None)))
+        assert "stuck dispatches NOT measured" in body
+    # ...and a current cache with zero stuck does NOT print the warning.
+    fresh = "\n".join(plain(ao.render_blocked(
+        {"schema": 2, "count": 0, "stuck_count": 0,
+         "detail": "no pending tasks"}, None)))
+    assert "NOT measured" not in fresh
+
+
+def test_render_blocked_reports_the_rows_it_could_not_show():
+    """The old renderer silently dropped everything past six. Silent truncation
+    is how finished-and-awaiting-review work went unnamed."""
+    rows = ["#%d queued item %d" % (100 + i, i) for i in range(12)]
+    body = "\n".join(plain(ao.render_blocked(
+        {"schema": 2, "count": 12, "stuck_count": 0, "detail": "d"}, None,
+        titles=rows)))
+    assert "+%d more" % (12 - ao.BLOCKED_MAX_ROWS) in body
+    # and nothing is dropped without saying so
+    assert body.count("queued item") == ao.BLOCKED_MAX_ROWS
+
+
+def test_the_live_enrichment_is_asked_even_when_a_legacy_cache_says_zero():
+    """🔴 A zero from a cache that never measured stuck dispatches is not
+    evidence there are none, so the API is asked instead of trusted."""
+    import inspect
+    src = inspect.getsource(ao.build_body_lines)
+    assert 'clawgate.get("schema") is None' in src
 
 
 # ---------------------------------------------------------------------------
