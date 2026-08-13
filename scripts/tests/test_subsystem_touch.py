@@ -981,8 +981,12 @@ class TestCensus:
         assert c.total == 5
 
     def test_it_counts_per_scope_which_is_what_the_gate_asks(self, store: Path) -> None:
-        """The decision doc's reopening gate is "≥5 entries outside its current
-        single scope" — a per-scope count, so the instrument reports one."""
+        """The decision doc's reopening gate reads a per-scope count, so the
+        instrument reports one. The original entries-outside-one-scope threshold
+        was met and superseded on 2026-08-13 by a COVERAGE question (does the
+        index cover the repos where work happens); both read this same per-scope
+        breakdown, so this test is unchanged. The criterion itself stays in the
+        decision doc and is deliberately not restated here."""
         c = st.census(store)
         assert c.by_scope == {SCOPE: 4, OTHER_SCOPE: 1}
         assert c.scopes_with_stamped_entries[OTHER_SCOPE] == {"handoff": 1}
