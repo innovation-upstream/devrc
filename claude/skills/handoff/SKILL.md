@@ -55,10 +55,11 @@ Topic argument (optional): `$ARGUMENTS`. If empty, infer a short kebab-case topi
 
 3. **Output a kickoff block** (fenced, ready to copy-paste into the next session) of the form:
    ```
-   Continue the <topic> work. Canonical handoff (read first):
-     <repo>/claudedocs/handoff-<topic>.md
+   /resume — continue the <topic> work. Canonical handoff (read first): <repo>/claudedocs/handoff-<topic>.md
    <one-line of the single most important next action>
    ```
+
+   🔴 **The block MUST begin with a literal `/resume`, and that is not decoration.** MEASURED 2026-08-13: a kickoff emitted as plain prose (`Continue the <topic> work. Canonical handoff (read first): …`) was pasted into the next session, and that session made **zero** calls to `subsystem_recall.py` / `subsystem_touch.py` — `/resume` was never invoked and the skill did **not** auto-fire, despite "pick up where we left off" matching its description almost verbatim. So `/resume` step 4 — the index READ — never ran, and the entry written by *this* step an hour earlier, describing the very subsystem that session was working on, was never seen. A kickoff that only *points at* a doc gets the doc read and the index skipped. Typing the command is what makes the read deterministic instead of luck.
 
    🔴 **Emit this BEFORE step 4's confirm gate, unconditionally.** The kickoff block is the deliverable; step 4 blocks on a y/N, and a user who walks away from that prompt must still have got it.
 
