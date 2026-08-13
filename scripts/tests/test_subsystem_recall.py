@@ -167,8 +167,11 @@ class TestPositiveControl:
     def test_the_pair(self, store: Path, tmp_path: Path) -> None:
         (store / "empty-scope").mkdir()
 
-        pos = rc.recall(store, SCOPE)
-        neg = rc.recall(store, "empty-scope")
+        # `mode="full"` because this control counts BODIES. The digest prints one
+        # body by design, so the four-entry assertion would be about the display
+        # mode rather than about whether the reader is wired to the store.
+        pos = rc.recall(store, SCOPE, mode="full")
+        neg = rc.recall(store, "empty-scope", mode="full")
 
         # THE PAIR: non-zero on the control that MUST produce content, zero on
         # the one that must not — same code path, same store, same call.
@@ -521,7 +524,7 @@ class TestSelectionIsScopeWide:
     is empty exactly when recall is worth most."""
 
     def test_every_entry_in_the_scope_is_surfaced(self, store: Path) -> None:
-        rep = rc.recall(store, SCOPE)
+        rep = rc.recall(store, SCOPE, mode="full")
         assert [e.ref for e in rep.entries] == [
             "collector",
             "status-bar",
@@ -530,20 +533,23 @@ class TestSelectionIsScopeWide:
         ]
 
     def test_other_scopes_are_NOT_surfaced(self, store: Path) -> None:
-        refs = [e.ref for e in rc.recall(store, SCOPE).entries]
+        refs = [e.ref for e in rc.recall(store, SCOPE, mode="full").entries]
         assert "fan-curve" not in refs
 
     def test_the_readme_is_not_an_entry(self, store: Path) -> None:
-        assert "readme" not in [e.ref for e in rc.recall(store, SCOPE).entries]
+        assert "readme" not in [e.ref for e in rc.recall(store, SCOPE, mode="full").entries]
 
     def test_order_is_canonical_and_STABLE(self, store: Path) -> None:
         """Two runs over an unchanged store must produce identical bytes, or a
         diff of them shows churn that is not there."""
-        a = rc.render_text(rc.recall(store, SCOPE))
-        b = rc.render_text(rc.recall(store, SCOPE))
-        assert a == b
-        refs = [e.ref for e in rc.recall(store, SCOPE).entries]
+        for mode in rc.RECALL_MODES:
+            a = rc.render_text(rc.recall(store, SCOPE, mode=mode))
+            b = rc.render_text(rc.recall(store, SCOPE, mode=mode))
+            assert a == b, mode
+        refs = [e.ref for e in rc.recall(store, SCOPE, mode="full").entries]
         assert refs == sorted(refs)
+        listed = [e.ref for e in rc.recall(store, SCOPE).listing]
+        assert listed == sorted(listed)
 
     def test_a_ref_narrows_to_ONE_entry(self, store: Path) -> None:
         rep = rc.recall(store, SCOPE, ref="collector")
@@ -574,7 +580,7 @@ class TestSelectionIsScopeWide:
 
 class TestTruncationIsLoud:
     def test_a_truncation_is_PRINTED(self, store: Path) -> None:
-        rep = rc.recall(store, SCOPE, limit=2)
+        rep = rc.recall(store, SCOPE, mode="full", limit=2)
         assert len(rep.entries) == 2
         assert rep.total_in_scope == 4
         assert rep.omitted == 2
@@ -584,7 +590,7 @@ class TestTruncationIsLoud:
         assert "display cap" in text
 
     def test_no_truncation_prints_no_truncation_line(self, store: Path) -> None:
-        text = rc.render_text(rc.recall(store, SCOPE, limit=99))
+        text = rc.render_text(rc.recall(store, SCOPE, mode="full", limit=99))
         assert "NOT shown" not in text
 
     def test_a_ref_run_reports_no_omission(self, store: Path) -> None:
@@ -595,9 +601,376 @@ class TestTruncationIsLoud:
         assert "NOT shown" not in rc.render_text(rep)
 
     def test_the_count_is_in_the_json_too(self, store: Path) -> None:
-        blob = rc.report_json(rc.recall(store, SCOPE, limit=1))
+        blob = rc.report_json(rc.recall(store, SCOPE, mode="full", limit=1))
         assert blob["omitted"] == 3
         assert blob["total_in_scope"] == 4
+
+
+# =============================================================================
+# THE DIGEST — an INDEX of everything plus ONE body, and the basis for the pick.
+# =============================================================================
+#
+# 🔴 WHAT THE REGRESSION IS. The old default was `--limit 12` over a scope
+# holding 25 entries: 31,485 B (~7,871 tok) that ALSO hid 13 of the 25. Expensive
+# AND incomplete. A `/resume` step that displaces the task it was loaded for gets
+# dropped, which is how the store came to have two writers and no reader in the
+# first place. `BIG_SCOPE` below holds more entries than `DEFAULT_ENTRY_LIMIT`
+# precisely so the "incomplete" half is observable in a test rather than only on
+# the real, client-confidential store.
+
+BIG_SCOPE = "many-widgets"
+BIG_N = 15
+FOCUS_SLUG = "widget-07"
+
+
+def _make_big_store(root: Path) -> Path:
+    store = root / "big-store"
+    d = store / BIG_SCOPE
+    d.mkdir(parents=True)
+    for i in range(1, BIG_N + 1):
+        slug = f"widget-{i:02d}"
+        nuance = "\n".join(f"- 2026-01-{i:02d}: note {j} for {slug}." for j in range(i))
+        (d / f"{slug}.md").write_text(
+            _entry(slug, BIG_SCOPE, pointers=f"- pointer for {slug}", nuance=nuance or None),
+            encoding="utf-8",
+        )
+    return store
+
+
+@pytest.fixture()
+def big_store(tmp_path: Path) -> Path:
+    return _make_big_store(tmp_path)
+
+
+class TestTheDefaultIsCompleteAndCheap:
+    """🔴 RED AT origin/main ON THE ASSERTION, not on a missing kwarg: the old
+    default printed 12 of 15 bodies and never named the other three at all."""
+
+    def test_the_default_names_EVERY_entry(self, big_store: Path) -> None:
+        text = rc.render_text(rc.recall(big_store, BIG_SCOPE))
+        for i in range(1, BIG_N + 1):
+            assert f"widget-{i:02d}" in text, (
+                f"widget-{i:02d} is absent from the default output — the default is "
+                f"incomplete again, which is half of what the digest exists to fix."
+            )
+
+    def test_the_default_prints_exactly_ONE_body(self, big_store: Path) -> None:
+        rep = rc.recall(big_store, BIG_SCOPE)
+        assert len(rep.entries) == 1
+        text = rc.render_text(rep)
+        # The pointer line is per-entry and pairwise distinct, so counting them
+        # counts BODIES — not headings, not index lines.
+        bodies = sum(text.count(f"- pointer for widget-{i:02d}") for i in range(1, BIG_N + 1))
+        assert bodies == 1, f"{bodies} bodies printed; the digest prints one"
+
+    def test_the_default_is_SMALLER_than_the_old_default(self, big_store: Path) -> None:
+        digest = len(rc.render_text(rc.recall(big_store, BIG_SCOPE)).encode())
+        old = len(
+            rc.render_text(
+                rc.recall(big_store, BIG_SCOPE, mode="full", limit=rc.DEFAULT_ENTRY_LIMIT)
+            ).encode()
+        )
+        assert digest < old, (digest, old)
+
+    def test_a_generous_size_CEILING(self, big_store: Path) -> None:
+        """A ceiling, not a pinned size — an exact byte count would go red on
+        every reworded sentence and teach the next person to bump the number.
+
+        The bound: the fixed caveat/header (~1.3 KB measured on the real store)
+        + one line per entry (~60 B) + ONE body. `BIG_SCOPE`'s largest body is
+        15 bullets, far above the real store's median entry. 8 KB is roughly 4x
+        what this fixture actually produces and still ~4x BELOW the old
+        `--limit 12` default it replaces, so it can only fire if the digest has
+        started printing bodies it should not.
+        """
+        size = len(rc.render_text(rc.recall(big_store, BIG_SCOPE)).encode())
+        assert size < 8192, f"the digest grew to {size} B — is it printing extra bodies?"
+
+    def test_the_UNSHOWN_bodies_are_announced(self, big_store: Path) -> None:
+        """The other half of "truncation is never silent": in the digest nothing
+        is truncated, but 14 bodies genuinely were not printed and the reader is
+        told so, in words that do NOT borrow the `--limit` notice's wording."""
+        rep = rc.recall(big_store, BIG_SCOPE)
+        assert rep.omitted == BIG_N - 1
+        text = rc.render_text(rep)
+        assert "LISTED ABOVE but NOT shown in full" in text
+        assert "Nothing is hidden" in text
+        assert f"--limit {BIG_N}" in text, "the escape hatch must name a usable number"
+        assert "display cap" not in text, "the digest borrowed the truncation wording"
+
+    def test_the_json_carries_the_index_without_the_bodies(self, big_store: Path) -> None:
+        blob = rc.report_json(rc.recall(big_store, BIG_SCOPE))
+        assert blob["mode"] == "digest"
+        assert [row["ref"] for row in blob["listing"]] == [
+            f"widget-{i:02d}" for i in range(1, BIG_N + 1)
+        ]
+        assert len(blob["entries"]) == 1
+        # The index rows are rows, not entries: no `sections` key anywhere in them.
+        assert all("sections" not in row for row in blob["listing"])
+
+
+class TestTheIndexIsNeverTruncated:
+    def test_every_entry_gets_a_line(self, big_store: Path) -> None:
+        for mode in ("digest", "list"):
+            rep = rc.recall(big_store, BIG_SCOPE, mode=mode)
+            assert len(rep.listing) == BIG_N == rep.total_in_scope, mode
+
+    def test_a_limit_cannot_shrink_the_index(self, big_store: Path) -> None:
+        """🔴 `--limit` is a cap on BODIES. If it ever reached the index, the one
+        complete thing the digest offers would silently stop being complete."""
+        rep = rc.recall(big_store, BIG_SCOPE, limit=2)
+        assert len(rep.listing) == BIG_N
+        assert "none omitted" in rc.render_text(rep)
+
+    def test_the_line_carries_ref_size_and_sensitivity(self, store: Path) -> None:
+        rep = rc.recall(store, SCOPE, mode="list")
+        by_ref = {e.ref: e for e in rep.listing}
+        line = rc.listing_line(by_ref["status-bar"], 12)
+        assert "status-bar" in line
+        assert "public" in line, "the per-entry sensitivity left its own line"
+        assert "1 bullet " in line, "the size signal is missing"
+        # It stays ONE line, or "~60 B per entry" is not a bound at all.
+        assert "\n" not in line
+
+    def test_the_sensitivity_on_the_line_is_the_FAIL_SAFE_one(self, store: Path) -> None:
+        rep = rc.recall(store, SCOPE, mode="list")
+        by_ref = {e.ref: e for e in rep.listing}
+        text = rc.render_text(rep)
+        assert by_ref["collector"].sensitivity == "client-confidential"
+        # The RENDERED line, matched by its parts rather than by a width this
+        # test would have to re-derive — a second copy of the layout rule is how
+        # a display test starts asserting its own arithmetic.
+        line = next(l for l in text.splitlines() if l.strip().startswith("collector "))
+        assert line.endswith("client-confidential")
+        assert "1 bullet " in line
+
+    def test_list_mode_says_it_printed_no_bodies(self, big_store: Path) -> None:
+        """A bodyless index must not read like an empty scope."""
+        text = rc.render_text(rc.recall(big_store, BIG_SCOPE, mode="list"))
+        assert "NO ENTRY BODIES WERE PRINTED" in text
+        assert "this is not an empty scope" in text
+        assert "NOTHING RECORDED YET" not in text
+        assert "- pointer for widget-01" not in text
+
+    def test_the_bullet_count_is_the_RESOLVERS(self, store: Path) -> None:
+        """No second bullet parser: the count must equal what the resolver's own
+        `parse_journal_bullets` says about the same body."""
+        rep = rc.recall(store, SCOPE, mode="list")
+        for e in rep.listing:
+            expected = len(sr.parse_journal_bullets(e.sections.get(rc.NUANCE_HEADING, "")))
+            assert e.bullet_count == expected, e.ref
+
+
+# =============================================================================
+# WHICH ENTRY IS FEATURED, AND WHY — never an implicit pick.
+# =============================================================================
+
+
+class TestFeaturedSelection:
+    """🔴 The basis is not decoration. An entry printed first with no stated
+    reason reads as "the tool thinks this matters", which is a claim the store
+    cannot support. Both selectors name themselves."""
+
+    def test_the_resolver_selector_fires_and_SAYS_it_did(self, big_store: Path) -> None:
+        rep = rc.recall(
+            big_store,
+            BIG_SCOPE,
+            focus_paths=[f"apps/{FOCUS_SLUG}/values.yaml", f"apps/{FOCUS_SLUG}/kustomization.yaml"],
+            focus_source="claudedocs/handoff-invented.md",
+        )
+        assert [e.ref for e in rep.entries] == [FOCUS_SLUG]
+        assert rep.featured_basis is not None
+        assert rep.featured_basis.startswith("resolved via claudedocs/handoff-invented.md")
+        assert rep.featured_basis in rc.render_text(rep)
+
+    def test_the_mtime_fallback_fires_and_SAYS_it_did(self, big_store: Path) -> None:
+        # Far-future, so the pick cannot be an accident of the order the fixture
+        # happened to write the files in (`widget-15` is newest by default).
+        newest = big_store / BIG_SCOPE / "widget-03.md"
+        __import__("os").utime(newest, (2 * 10**9, 2 * 10**9))
+        rep = rc.recall(big_store, BIG_SCOPE)
+        assert [e.ref for e in rep.entries] == ["widget-03"]
+        assert rep.featured_basis.startswith("most-recent fallback")
+        assert rep.featured_basis in rc.render_text(rep)
+
+    def test_a_path_window_that_resolves_to_NOTHING_falls_back_and_says_so(
+        self, big_store: Path
+    ) -> None:
+        """🔴 The two zeros again: "there was no window" and "the window matched
+        nothing" are different facts and the basis distinguishes them, so an
+        agent can tell a missing handoff from an unrelated one."""
+        no_window = rc.recall(big_store, BIG_SCOPE).featured_basis
+        dud = rc.recall(
+            big_store,
+            BIG_SCOPE,
+            focus_paths=["some/unrelated/thing.yaml"],
+            focus_source="claudedocs/handoff-invented.md",
+        ).featured_basis
+        assert "no handoff doc" in no_window
+        assert "nothing quoted in claudedocs/handoff-invented.md resolved" in dud
+        assert no_window != dud
+
+    def test_more_matching_paths_WINS(self, big_store: Path) -> None:
+        rep = rc.recall(
+            big_store,
+            BIG_SCOPE,
+            focus_paths=[
+                "apps/widget-02/values.yaml",
+                "apps/widget-09/a.yaml",
+                "apps/widget-09/b.yaml",
+                "apps/widget-09/c.yaml",
+            ],
+            focus_source="doc.md",
+        )
+        assert [e.ref for e in rep.entries] == ["widget-09"]
+
+    def test_selection_does_not_reimplement_the_matcher(self) -> None:
+        """It goes through `associate_paths`, the WRITER's own path→subsystem
+        matcher. A second matcher here could drift from the one the store's
+        aliases were curated against."""
+        src = MODULE_PATH.read_text(encoding="utf-8")
+        assert "associate_paths(" in src
+        for forbidden in ("def associate_paths", "def path_refs", "def resolve_ref_tiered"):
+            assert forbidden not in src
+
+    def test_an_alias_reaches_the_entry(self, store: Path) -> None:
+        """The resolver's alias tier, exercised through the featured pick — the
+        reader adds no matching of its own, so if aliases work here they work
+        because `associate_paths` made them."""
+        rep = rc.recall(
+            store,
+            SCOPE,
+            focus_paths=["nix/event_tap/values.yaml"],
+            focus_source="doc.md",
+        )
+        assert [e.ref for e in rep.entries] == ["collector"]
+
+    def test_an_ambiguous_ref_in_the_window_never_features_anything(
+        self, store: Path
+    ) -> None:
+        """`weekly-digest` names two entries. The resolver refuses to pick and so
+        does this: the run falls back rather than featuring a coin-flip."""
+        rep = rc.recall(
+            store, SCOPE, focus_paths=["nix/weekly-digest/values.yaml"], focus_source="doc.md"
+        )
+        assert rep.featured_basis.startswith("most-recent fallback")
+
+    def test_the_pick_is_DETERMINISTIC_across_runs(self, big_store: Path) -> None:
+        a = rc.render_text(rc.recall(big_store, BIG_SCOPE))
+        b = rc.render_text(rc.recall(big_store, BIG_SCOPE))
+        assert a == b
+
+    def test_the_featured_entry_is_ALSO_in_the_index(self, big_store: Path) -> None:
+        """Or the counts stop adding up: "1 of 15" plus a 15-line index has to
+        describe 15 entries, not 16."""
+        rep = rc.recall(big_store, BIG_SCOPE)
+        assert rep.entries[0].ref in {e.ref for e in rep.listing}
+        assert len(rep.listing) == rep.total_in_scope
+
+
+# =============================================================================
+# THE FOCUS WINDOW — one file read, no git, no network, no subprocess.
+# =============================================================================
+
+
+def _make_repo(root: Path, name: str, body: str) -> Path:
+    repo = root / "fixture-repo"
+    (repo / "claudedocs").mkdir(parents=True, exist_ok=True)
+    (repo / "claudedocs" / name).write_text(body, encoding="utf-8")
+    return repo
+
+
+class TestFocusWindow:
+    def test_it_reads_the_newest_handoff_and_reports_its_path(self, tmp_path: Path) -> None:
+        repo = _make_repo(tmp_path, "handoff-old.md", "old, mentions `apps/widget-01/x.yaml`\n")
+        (repo / "claudedocs" / "handoff-new.md").write_text(
+            "new, mentions `apps/widget-09/x.yaml`\n", encoding="utf-8"
+        )
+        __import__("os").utime(repo / "claudedocs" / "handoff-old.md", (10**9, 10**9))
+        __import__("os").utime(repo / "claudedocs" / "handoff-new.md", (2 * 10**9, 2 * 10**9))
+        w = rc.focus_window(repo)
+        assert w.source == "claudedocs/handoff-new.md"
+        assert "apps/widget-09/x.yaml" in w.paths
+        assert "apps/widget-01/x.yaml" not in w.paths
+
+    def test_the_uppercase_family_is_only_a_FALLBACK(self, tmp_path: Path) -> None:
+        """Same order `scripts/resume-state.sh` resolves in, so step 3 and step 4
+        of /resume cannot end up pointed at different initiatives."""
+        repo = _make_repo(tmp_path, "SESSION-HANDOFF.md", "caps `apps/widget-02/x.yaml`\n")
+        assert rc.focus_window(repo).source == "claudedocs/SESSION-HANDOFF.md"
+        (repo / "claudedocs" / "handoff-lower.md").write_text(
+            "lower `apps/widget-03/x.yaml`\n", encoding="utf-8"
+        )
+        assert rc.focus_window(repo).source == "claudedocs/handoff-lower.md"
+
+    def test_no_handoff_is_an_ORDINARY_empty_window(self, tmp_path: Path) -> None:
+        """Most repos have no handoff at the moment they are resumed. It must not
+        raise: the caller's mtime fallback is a real answer, not a degraded one."""
+        (tmp_path / "bare").mkdir()
+        w = rc.focus_window(tmp_path / "bare")
+        assert w == rc.FocusWindow()
+        assert w.paths == () and w.source is None
+
+    @pytest.mark.parametrize(
+        "token,keep",
+        [
+            ("scripts/lib/thing.py", True),
+            (".claude/skills/resume/SKILL.md", True),
+            ("nix/i3/config", True),
+            ("/etc/nixos/configuration.nix", False),  # absolute
+            ("~/workspace/devrc/flake.nix", False),  # home-relative
+            ("../outside/thing.yaml", False),  # escapes the repo root
+            ("$DEVRC/scripts/ship.sh", False),  # a shell variable
+            ("https://example.invalid/a/b", False),  # a URL
+            ("git@github.invalid:o/r.git", False),  # a host
+            ("README.md", False),  # no separator: not a path
+            ("--limit 25", False),  # a flag, and it has a space
+        ],
+        ids=lambda v: str(v),
+    )
+    def test_which_backticked_tokens_count_as_paths(self, token: str, keep: bool) -> None:
+        got = rc.focus_paths_from_text(f"prose `{token}` prose\n")
+        assert (token in got) is keep, got
+
+    def test_trailing_punctuation_is_stripped(self, tmp_path: Path) -> None:
+        assert rc.focus_paths_from_text("see `scripts/gate.sh`.") == ("scripts/gate.sh",)
+        assert rc.focus_paths_from_text("see `scripts/lib/`") == ("scripts/lib",)
+
+    def test_bare_prose_is_NOT_harvested(self, tmp_path: Path) -> None:
+        """🔴 `scripts/resume-state.sh` learned this with branch tokens: reaching
+        into unquoted prose mints tokens out of ordinary English, and a fabricated
+        fact is worse than the silence it replaced."""
+        assert rc.focus_paths_from_text("we touched scripts/lib/thing.py today") == ()
+
+    def test_every_emitted_path_is_one_associate_paths_ACCEPTS(self, tmp_path: Path) -> None:
+        """🔴 POSITIVE CONTROL ON THE FILTER, and the reason it is stricter than
+        the resolver: anything that gets through is handed straight to
+        `associate_paths`, which RAISES on a path it considers malformed. A
+        /resume step that died because a handoff doc quoted a URL would be worse
+        than the cost this whole change is removing."""
+        store = _make_store(tmp_path / "s")
+        index = sr.load_index(store)
+        text = (
+            "`/abs/path.yaml` `../up.yaml` `~/home.yaml` `$VAR/x.yaml` "
+            "`https://h.invalid/a/b` `ok/one.yaml` `deep/a/b/c/two.yml`"
+        )
+        paths = rc.focus_paths_from_text(text)
+        assert paths  # the control can observe something
+        sr.associate_paths(paths, index, SCOPE, min_paths=1)  # must not raise
+
+    def test_the_doc_itself_joins_the_window(self, tmp_path: Path) -> None:
+        repo = _make_repo(tmp_path, "handoff-topic.md", "no paths here\n")
+        w = rc.focus_window(repo)
+        assert w.paths == ("claudedocs/handoff-topic.md",)
+
+    def test_it_runs_no_subprocess(self) -> None:
+        """🔴 The whole point of reading a FILE rather than asking git: the
+        writer's path sources shell out to `git` and `gh`, and importing that
+        cost into /resume step 4 is what this change exists to avoid."""
+        src = MODULE_PATH.read_text(encoding="utf-8")
+        code = "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("#"))
+        for spelling in ("import subprocess", "subprocess.", "os.system", "popen"):
+            assert spelling not in code, f"the reader grew a subprocess call: {spelling}"
 
 
 # =============================================================================
@@ -675,25 +1048,48 @@ class TestRecallNeverWrites:
         assert _tree_hash(store) != before
 
     @pytest.mark.parametrize(
-        "scope,ref,limit",
+        "scope,ref,limit,mode",
         [
-            (SCOPE, None, rc.DEFAULT_ENTRY_LIMIT),
-            (SCOPE, "collector", rc.DEFAULT_ENTRY_LIMIT),
-            (SCOPE, "weekly-digest", rc.DEFAULT_ENTRY_LIMIT),
-            (SCOPE, "no-such-subsystem", rc.DEFAULT_ENTRY_LIMIT),
-            (SCOPE, None, 1),
-            ("never-indexed", None, rc.DEFAULT_ENTRY_LIMIT),
+            (SCOPE, None, rc.DEFAULT_ENTRY_LIMIT, "full"),
+            (SCOPE, "collector", rc.DEFAULT_ENTRY_LIMIT, "full"),
+            (SCOPE, "weekly-digest", rc.DEFAULT_ENTRY_LIMIT, "full"),
+            (SCOPE, "no-such-subsystem", rc.DEFAULT_ENTRY_LIMIT, "full"),
+            (SCOPE, None, 1, "full"),
+            ("never-indexed", None, rc.DEFAULT_ENTRY_LIMIT, "full"),
+            (SCOPE, None, rc.DEFAULT_ENTRY_LIMIT, "digest"),
+            (SCOPE, None, rc.DEFAULT_ENTRY_LIMIT, "list"),
         ],
-        ids=["recalled", "ref", "ambiguous", "ref-absent", "truncated", "scope-absent"],
+        ids=[
+            "recalled",
+            "ref",
+            "ambiguous",
+            "ref-absent",
+            "truncated",
+            "scope-absent",
+            "digest",
+            "list",
+        ],
     )
     def test_every_mode_leaves_the_store_byte_identical(
-        self, store: Path, scope, ref, limit
+        self, store: Path, scope, ref, limit, mode
     ) -> None:
         before = _tree_hash(store)
-        rep = rc.recall(store, scope, ref=ref, limit=limit)
+        rep = rc.recall(store, scope, ref=ref, limit=limit, mode=mode)
         rc.render_text(rep)
         json.dumps(rc.report_json(rep))
         assert _tree_hash(store) == before
+
+    def test_the_focus_window_never_writes_to_the_REPO_either(self, tmp_path: Path) -> None:
+        """The one thing in the module that reads outside the store. It reads a
+        handoff doc; hashing the repo tree either side proves it does no more."""
+        repo = tmp_path / "repo"
+        (repo / "claudedocs").mkdir(parents=True)
+        (repo / "claudedocs" / "handoff-thing.md").write_text(
+            "touches `nix/collector/values.yaml`\n", encoding="utf-8"
+        )
+        before = _tree_hash(repo)
+        assert rc.focus_window(repo).paths
+        assert _tree_hash(repo) == before
 
     def test_even_the_FAILURE_paths_leave_it_byte_identical(self, store: Path) -> None:
         """A helper that writes only when it errors still writes."""
@@ -809,7 +1205,9 @@ class TestCli:
         assert "limit must be an int >= 1" in capsys.readouterr().err
 
     def test_json_mode_is_parseable(self, store: Path, capsys) -> None:
-        assert rc.main(["--store", str(store), "--scope", SCOPE, "--json"]) == 0
+        assert rc.main(
+            ["--store", str(store), "--scope", SCOPE, "--limit", "25", "--json"]
+        ) == 0
         blob = json.loads(capsys.readouterr().out)
         assert blob["status"] == "recalled"
         assert blob["label"] == "from index"
@@ -826,6 +1224,77 @@ class TestCli:
         help_text = rc._build_parser().format_help()
         assert "never writes to the store" in help_text
         assert "never touches the network" in help_text
+
+    def test_list_prints_the_index_and_no_bodies(self, store: Path, capsys) -> None:
+        assert rc.main(["--store", str(store), "--scope", SCOPE, "--list"]) == 0
+        out = capsys.readouterr().out
+        assert "NO ENTRY BODIES WERE PRINTED" in out
+        assert POINTER_LINE not in out
+        for ref in ("collector", "status-bar", "weekly-digest.process"):
+            assert ref in out
+
+    def test_the_bare_default_is_the_DIGEST(self, store: Path, capsys) -> None:
+        """🔴 RED AT origin/main: the bare default printed every entry's body."""
+        assert rc.main(["--store", str(store), "--scope", SCOPE]) == 0
+        out = capsys.readouterr().out
+        assert "INDEX (from index)" in out
+        assert out.count(POINTER_LINE) == 1, "the bare default printed more than one body"
+        assert "FEATURED IN FULL" in out
+
+    @pytest.mark.parametrize(
+        "extra,expect",
+        [
+            (["--ref", "collector"], "select different things"),
+            (["--limit", "2"], "never truncated"),
+        ],
+        ids=["list+ref", "list+limit"],
+    )
+    def test_list_rejects_the_flags_it_contradicts(
+        self, store: Path, capsys, extra, expect
+    ) -> None:
+        """Rejected, not silently reconciled: each combination has an obvious
+        reading and they are DIFFERENT readings."""
+        code = rc.main(["--store", str(store), "--scope", SCOPE, "--list", *extra])
+        assert code == 2
+        assert expect in capsys.readouterr().err
+
+    def test_an_explicit_scope_DISABLES_the_repo_derived_window(
+        self, store: Path, tmp_path: Path, capsys
+    ) -> None:
+        """The window is derived from `--repo`, so it is evidence about THAT
+        repo's scope and nothing else. Letting it vote on an overridden scope
+        would be a relevance claim built on paths that never described the
+        entries they ranked."""
+        repo = _make_repo(tmp_path, "handoff-x.md", "`nix/collector/values.yaml`\n")
+        assert rc.main(
+            ["--store", str(store), "--scope", SCOPE, "--repo", str(repo)]
+        ) == 0
+        assert "most-recent fallback" in capsys.readouterr().out
+
+    def test_the_cli_really_wires_the_focus_window(self, tmp_path: Path, capsys) -> None:
+        """🔴 THE SEAM. Every selection test above injects `focus_paths`; none of
+        them proves `main()` ever calls `focus_window`. Unwire that one call and
+        they all stay green while the feature is inert. This is the only test
+        that builds the combined state: a real repo whose derived scope is the
+        store scope, with a handoff doc naming a real entry."""
+        repo = tmp_path / SCOPE
+        (repo / "claudedocs").mkdir(parents=True)
+        (repo / "claudedocs" / "handoff-topic.md").write_text(
+            "we touched `nix/status-bar/values.yaml` and `nix/status-bar/config.toml`\n",
+            encoding="utf-8",
+        )
+        env = {
+            "HOME": str(tmp_path),
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_SYSTEM": "/dev/null",
+            "PATH": __import__("os").environ.get("PATH", ""),
+        }
+        subprocess.run(["git", "-C", str(repo), "init", "-q", "-b", "main"], env=env, check=True)
+        store = _make_store(tmp_path / "s")
+        assert rc.main(["--store", str(store), "--repo", str(repo)]) == 0
+        out = capsys.readouterr().out
+        assert "resolved via claudedocs/handoff-topic.md" in out, out
+        assert "### status-bar" in out
 
     def test_the_default_store_is_the_writers_default(self) -> None:
         """Asserted on the parser's DEFAULT, not on its help text: the help
@@ -1102,7 +1571,60 @@ class TestSkillDocsArePinned:
             "writing is /handoff's confirm-gated job, not this step's",
         ),
         ("sensitivity=", "the store is client-confidential and this repo is PUBLIC"),
+        # --- the digest, and the claim it replaced -------------------------
+        (
+            "never truncated",
+            "🔴 the index is the one COMPLETE thing the digest offers",
+        ),
+        (
+            "exactly ONE entry in full",
+            "what the bare command now prints — the step's whole cost model",
+        ),
+        (
+            "the output names the basis",
+            "🔴 a featured entry with no stated basis reads as a relevance claim",
+        ),
+        (
+            "most-recent fallback",
+            "the phrase the tool prints when nothing resolved — the agent must recognise it",
+        ),
+        (
+            "a fallback pick says nothing whatsoever about relevance",
+            "🔴 the misreading the fallback invites, said out loud",
+        ),
+        (
+            "`--list` prints the index alone",
+            "the drill-down path that replaces raising the display cap",
+        ),
+        (
+            "was false for the only scope big enough to matter",
+            "🔴 the retracted 'costs a page' claim, retracted rather than quietly reworded",
+        ),
     ]
+
+    def test_the_RETRACTED_cost_claim_is_not_reasserted(self) -> None:
+        """🔴 NEGATIVE CONTROL ON THE CORRECTION. "it costs a page, not a dump"
+        was measured FALSE for `datapacket-talos` (31,485 B, and incomplete). The
+        sentence may appear only as the thing being retracted, never as a live
+        claim — so the bare phrase must not occur without the retraction beside
+        it."""
+        doc = RESUME_DOC.read_text(encoding="utf-8")
+        if "costs a page, not a dump" in doc:
+            assert "was false" in doc, (
+                "claude/skills/resume/SKILL.md asserts 'costs a page, not a dump' again "
+                "without retracting it. It was measured false on the scope holding 25 of "
+                "the store's 29 entries."
+            )
+
+    def test_the_documented_flags_EXIST(self) -> None:
+        """🔴 A skill is prose whose executor is an LLM, so a flag it names that
+        the CLI does not have is an instruction to type a command that fails.
+        Derived from the parser, not hand-listed."""
+        doc = RESUME_DOC.read_text(encoding="utf-8")
+        help_text = rc._build_parser().format_help()
+        for flag in ("--list", "--ref", "--limit"):
+            assert flag in doc, f"step 4 stopped documenting {flag}"
+            assert flag in help_text, f"step 4 documents {flag}, which the CLI does not have"
 
     @pytest.mark.parametrize(
         "sentence,why", RESUME_SENTENCES, ids=[w for _, w in RESUME_SENTENCES]
@@ -1373,7 +1895,11 @@ class TestMutationKillMatrix:
         mod = _load_mutant(tmp_path, "m_control", [])
         store = _make_store(tmp_path / "s")
         assert mod.recall(store, SCOPE).status == "recalled"
-        assert len(mod.recall(store, SCOPE).entries) == 4
+        assert len(mod.recall(store, SCOPE, mode="full").entries) == 4
+        # …and the digest half of the same control, or every digest kill below
+        # would be measured through a mode this instrument never exercised.
+        assert len(mod.recall(store, SCOPE).listing) == 4
+        assert len(mod.recall(store, SCOPE).entries) == 1
 
     def test_kills_the_store_missing_guard(self, tmp_path: Path) -> None:
         mod = _load_mutant(
@@ -1404,7 +1930,7 @@ class TestMutationKillMatrix:
         mod = _load_mutant(tmp_path, "m_empty", [("    if not entries:", "    if False:")])
         store = _make_store(tmp_path / "s")
         (store / "made-never-filled").mkdir()
-        rep = mod.recall(store, "made-never-filled")
+        rep = mod.recall(store, "made-never-filled", mode="full")
         assert rep.status != "scope-empty"
         assert "NOTHING RECORDED YET" not in mod.render_text(rep)
 
@@ -1479,7 +2005,7 @@ class TestMutationKillMatrix:
               "    if False:")],
         )
         store = _make_store(tmp_path / "s")
-        rep = mod.recall(store, SCOPE, limit=0)
+        rep = mod.recall(store, SCOPE, limit=0, mode="full")
         assert rep.entries == (), "limit=0 silently surfaced nothing instead of erroring"
 
     def test_kills_the_what_it_is_exclusion(self, tmp_path: Path) -> None:
@@ -1522,11 +2048,17 @@ class TestMutationKillMatrix:
     def test_kills_the_truncation_notice(self, tmp_path: Path) -> None:
         """Without it entries vanish silently at the display cap — a filter
         wearing a cap's clothes."""
-        mod = _load_mutant(tmp_path, "m_trunc", [("    if report.omitted:", "    if False:")])
+        mod = _load_mutant(tmp_path, "m_trunc", [("    elif report.omitted:", "    elif False:")])
         store = _make_store(tmp_path / "s")
-        text = mod.render_text(mod.recall(store, SCOPE, limit=1))
+        text = mod.render_text(mod.recall(store, SCOPE, limit=1, mode="full"))
         assert "NOT shown" not in text
         assert "more entr" not in text
+        # 🔴 REACHABILITY, not just breakability: the DIGEST's own not-shown
+        # notice sits in the `if` arm one line above and must be untouched by
+        # this mutation, or "the notice is gone" would be a claim about the
+        # wrong branch. (`claude/RULES.md` — a mutation that a DIFFERENT guard's
+        # behaviour explains is green for the wrong reason.)
+        assert "LISTED ABOVE but NOT shown in full" in mod.render_text(mod.recall(store, SCOPE))
 
     def test_kills_the_deterministic_ordering(self, tmp_path: Path) -> None:
         """Two runs must produce identical bytes; without the sort the order is
@@ -1538,8 +2070,150 @@ class TestMutationKillMatrix:
               "    ordered = sorted(entries, key=lambda e: e.ref, reverse=True)")],
         )
         store = _make_store(tmp_path / "s")
-        refs = [e.ref for e in mod.recall(store, SCOPE).entries]
+        refs = [e.ref for e in mod.recall(store, SCOPE, mode="full").entries]
         assert refs != sorted(refs)
+        listed = [e.ref for e in mod.recall(store, SCOPE).listing]
+        assert listed != sorted(listed), "the digest INDEX escaped the one ordering site"
+
+    # --- the digest's own guards -------------------------------------------
+    #
+    # 🔴 Each of these breaks ONE thing and asserts THAT thing's symptom. Where a
+    # neighbouring branch could produce a similar-looking output (the two
+    # not-shown notices), the assertion names the branch's own wording so a kill
+    # cannot pass because the other arm fired.
+
+    def test_kills_the_mode_guard(self, tmp_path: Path) -> None:
+        """Without it an unknown mode falls through to the digest branch and
+        renders a plausible report for a mode nobody implemented."""
+        mod = _load_mutant(
+            tmp_path, "m_mode", [("    if mode not in RECALL_MODES:", "    if False:")]
+        )
+        store = _make_store(tmp_path / "s")
+        rep = mod.recall(store, SCOPE, mode="not-a-mode")
+        assert rep.status == "recalled", "a neighbouring guard fired instead"
+        # The real module rejects it, with THIS guard's own sentinel.
+        with pytest.raises(ValueError) as exc:
+            rc.recall(store, SCOPE, mode="not-a-mode")
+        assert "mode must be one of" in str(exc.value)
+        assert "limit must be an int" not in str(exc.value)
+
+    def test_kills_the_full_index(self, tmp_path: Path) -> None:
+        """🔴 The index is the ONE complete thing the digest offers. Let `limit`
+        reach it and the default is silently incomplete again — exactly the half
+        of the old default that a size measurement would never have caught."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_index",
+            [
+                (
+                    "    read = tuple(read_entry(store, e) for e in ordered)",
+                    "    read = tuple(read_entry(store, e) for e in ordered[:2])",
+                )
+            ],
+        )
+        store = _make_big_store(tmp_path / "s")
+        assert len(mod.recall(store, BIG_SCOPE).listing) == 2
+        assert len(rc.recall(store, BIG_SCOPE).listing) == BIG_N
+
+    def test_kills_the_featured_basis(self, tmp_path: Path) -> None:
+        """Without it an entry is printed first with no stated reason, which
+        reads as a claim about importance the store cannot support."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_basis",
+            [("    if report.featured_basis is not None:", "    if False:")],
+        )
+        store = _make_big_store(tmp_path / "s")
+        text = mod.render_text(mod.recall(store, BIG_SCOPE))
+        assert "most-recent fallback" not in text
+        assert "resolved via" not in text
+        assert "- pointer for widget-15" in text, "the body vanished too — wrong guard"
+
+    def test_kills_the_resolver_selector(self, tmp_path: Path) -> None:
+        """🔴 REACHABILITY. The fallback ALWAYS produces an entry, so a broken
+        resolver selector still yields a plausible-looking digest. The kill has
+        to be a window that DOES resolve, and the symptom is the basis wording."""
+        mod = _load_mutant(
+            tmp_path, "m_select", [("    if focus_paths:", "    if False:")]
+        )
+        store = _make_big_store(tmp_path / "s")
+        window = dict(
+            focus_paths=["apps/widget-04/a.yaml", "apps/widget-04/b.yaml"],
+            focus_source="doc.md",
+        )
+        assert mod.recall(store, BIG_SCOPE, **window).featured_basis.startswith(
+            "most-recent fallback"
+        )
+        real = rc.recall(store, BIG_SCOPE, **window)
+        assert real.featured_basis.startswith("resolved via doc.md")
+        assert [e.ref for e in real.entries] == ["widget-04"]
+
+    def test_kills_the_mtime_fallback_direction(self, tmp_path: Path) -> None:
+        """`max` vs `min`: a fallback that features the OLDEST entry is the
+        mutation a "something got featured" assertion cannot see."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_mtime",
+            [
+                (
+                    "    newest = max(entries, key=lambda e: (e.mtime, e.ref))",
+                    "    newest = min(entries, key=lambda e: (e.mtime, e.ref))",
+                )
+            ],
+        )
+        store = _make_big_store(tmp_path / "s")
+        __import__("os").utime(store / BIG_SCOPE / "widget-06.md", (2 * 10**9, 2 * 10**9))
+        assert [e.ref for e in mod.recall(store, BIG_SCOPE).entries] != ["widget-06"]
+        assert [e.ref for e in rc.recall(store, BIG_SCOPE).entries] == ["widget-06"]
+
+    def test_kills_the_digest_not_shown_notice(self, tmp_path: Path) -> None:
+        """The `--limit` notice sits in the very next `elif`, so the assertion
+        names THIS branch's wording — otherwise the kill would pass on the
+        neighbour's output and stay green with this branch deleted."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_digest_notice",
+            [("    if report.omitted and report.listing:", "    if False:")],
+        )
+        store = _make_big_store(tmp_path / "s")
+        text = mod.render_text(mod.recall(store, BIG_SCOPE))
+        assert "LISTED ABOVE but NOT shown in full" not in text
+        assert "Nothing is hidden" not in text
+        assert "LISTED ABOVE but NOT shown in full" in rc.render_text(
+            rc.recall(store, BIG_SCOPE)
+        )
+
+    def test_kills_the_repo_relative_path_filter(self, tmp_path: Path) -> None:
+        """🔴 Without it an absolute path reaches `associate_paths`, which RAISES
+        — so /resume step 4 would die on a handoff doc that quoted `/etc/...`."""
+        mod = _load_mutant(
+            tmp_path, "m_pathfilter", [('    if token[0] in "/~-":', "    if False:")]
+        )
+        text = "we edited `/etc/nixos/configuration.nix` yesterday"
+        leaked = mod.focus_paths_from_text(text)
+        assert "/etc/nixos/configuration.nix" in leaked
+        store = _make_store(tmp_path / "s")
+        with pytest.raises(sr.InvalidPathError):
+            sr.associate_paths(leaked, sr.load_index(store), SCOPE, min_paths=1)
+        assert rc.focus_paths_from_text(text) == ()
+
+    def test_kills_the_cli_flag_conflict_guards(self, tmp_path: Path) -> None:
+        """Two guards, killed separately: a shared kill would pass while either
+        one alone still fired."""
+        store = _make_store(tmp_path / "s")
+        for name, anchor in (
+            ("m_list_ref", "    if args.listing and args.ref is not None:"),
+            ("m_list_limit", "    if args.listing and args.limit is not None:"),
+        ):
+            mod = _load_mutant(tmp_path, name, [(anchor, "    if False:")])
+            assert (
+                mod.main(
+                    ["--store", str(store), "--scope", SCOPE, "--list", "--ref", "collector"]
+                    if name == "m_list_ref"
+                    else ["--store", str(store), "--scope", SCOPE, "--list", "--limit", "2"]
+                )
+                == 0
+            ), f"{name}: the OTHER guard fired, so this kill proves nothing"
 
     def test_kills_the_caveat(self, tmp_path: Path) -> None:
         """🔴 Without it index recall is presented as a plain finding, which is
