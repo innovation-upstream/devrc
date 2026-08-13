@@ -332,12 +332,24 @@ def _mark_unobservable(r: dict) -> dict:
     return r
 
 
-def build_rollup(objects: list[dict]) -> dict:
+def build_rollup(objects: list[dict], *, absolute_root: str = "") -> dict:
     """Deterministic per-session rollup from parsed transcript JSON objects.
 
     Mirrors the built-in `/insights` session-meta fields so insights.py is a
     drop-in. `unreadable` is True when the transcript yielded no messages at all
-    (so the report can show it honestly rather than inventing content)."""
+    (so the report can show it honestly rather than inventing content).
+
+    `absolute_root` is OPT-IN and OFF for the emit path. Given an absolute
+    directory it adds `changed_paths.ABSOLUTE_KEYS` — the entries this session
+    named ABSOLUTELY that resolve under that root, made root-relative (see
+    `changed_paths.absolute_under` for why that is the only re-frameable subset).
+    🔴 The root goes IN and the answer comes OUT; the raw path set never leaves
+    this function. That is deliberate: the raw set is dominated by agent
+    scratchpad and temp-worktree paths (measured 88% outside cwd), and handing it
+    to a caller is how one of them ends up persisted somewhere.
+
+    🔴 `run()` never passes it, so the emitted payload — which is `json.dumps` of
+    this whole dict — is byte-for-byte what it was. Pinned by a test."""
     r = _empty_rollup()
     tool_counts: dict = r["tool_counts"]
     languages: dict = r["languages"]
@@ -484,15 +496,28 @@ def build_rollup(objects: list[dict]) -> dict:
     # downstream associator reads as "this session touched nothing".
     if r["unreadable"]:
         _mark_unobservable(r)
+        if absolute_root:
+            # All-None, not []. An empty list would say "the root was checked and
+            # nothing resolved under it" — a measurement — about a session whose
+            # file set we never read at all.
+            r.update(CP.absolute_unobservable())
     else:
         r.update(CP.summarize(files, cwd))
+        if absolute_root:
+            r.update(CP.absolute_under(files, absolute_root))
         r["stats_unavailable"] = []
     return r
 
 
-def summarize_transcript(path: str) -> dict:
+def summarize_transcript(path: str, *, absolute_root: str = "") -> dict:
     """Read a transcript fully and return its rollup. A file that can't be opened
-    or contains no parseable JSON is flagged `unreadable` (never fabricated)."""
+    or contains no parseable JSON is flagged `unreadable` (never fabricated).
+
+    `absolute_root` is forwarded to `build_rollup` — and applied to the two
+    early returns below as well, so a caller that asked for the block gets it in
+    EVERY outcome. An absent key and a None key are different claims, and the
+    OSError path is exactly where the difference was shipped once before (see
+    `_mark_unobservable`)."""
     objects: list[dict] = []
     parsed_any = False
     try:
@@ -508,14 +533,19 @@ def summarize_transcript(path: str) -> dict:
                 parsed_any = True
                 objects.append(obj)
     except OSError:
-        r = _empty_rollup()
-        r["unreadable"] = True
-        return r
+        return _unreadable_rollup(absolute_root)
     if not parsed_any:
-        r = _empty_rollup()
-        r["unreadable"] = True
-        return r
-    return build_rollup(objects)
+        return _unreadable_rollup(absolute_root)
+    return build_rollup(objects, absolute_root=absolute_root)
+
+
+def _unreadable_rollup(absolute_root: str) -> dict:
+    """The zero rollup, flagged unreadable, carrying the absolute block if asked."""
+    r = _empty_rollup()
+    r["unreadable"] = True
+    if absolute_root:
+        r.update(CP.absolute_unobservable())
+    return r
 
 
 # --------------------------------------------------------------------------- #

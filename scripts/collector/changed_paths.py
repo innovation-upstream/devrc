@@ -101,6 +101,17 @@ independent runs (14.3% / 15.2% / 16%). What the superseded figures lacked was a
 measurement of the SUB-classification — the split was approximated while the
 headline was counted, which is why only it was wrong.
 
+🔴 ADDED 2026-08-13 — A SECOND FRAME, `absolute_under`, WHICH RECOVERS PART OF
+THAT LOSS. Everything above describes ONE frame: the session's own cwd. It is
+the only frame a RELATIVE entry can be read in, but not the only one an ABSOLUTE
+entry can — a transcript records the tool call's `file_path` verbatim, so an
+entry the caller spelled out in full carries its own frame and is attributable
+to whatever tree it names. `summarize` still counts every such entry as
+`outside_cwd`, unchanged; `absolute_under(paths, root)` answers the separate
+question "which of these name files under THIS root", and is the only way the
+other-repo bucket above becomes readable rather than merely counted. Its keys
+are `ABSOLUTE_KEYS`, deliberately NOT part of `PAYLOAD_KEYS` — see there.
+
 ⚠ TRUNCATION BIAS, STATED RATHER THAN LEFT TO BE DISCOVERED: the list is sorted
 lexicographically, so a truncated list is a lexicographic PREFIX and can
 therefore omit an entire late-sorting subtree. Sorting is what makes two emits
@@ -119,9 +130,12 @@ from typing import Iterable
 __all__ = [
     "CHANGED_PATHS_CAP",
     "PAYLOAD_KEYS",
+    "ABSOLUTE_KEYS",
     "to_repo_relative",
     "summarize",
     "unobservable",
+    "absolute_under",
+    "absolute_unobservable",
 ]
 
 # See the module docstring for the measurement behind this number.
@@ -136,6 +150,17 @@ PAYLOAD_KEYS = (
     "changed_paths_truncated",
     "changed_paths_outside_cwd",
     "changed_paths_cap",
+)
+
+# The ABSOLUTE-window keys — see `absolute_under`. 🔴 DELIBERATELY NOT IN
+# `PAYLOAD_KEYS`: this block is computed only when a caller names a root, and the
+# tailers' emit path never does. It is an on-demand answer for a local reader,
+# not a field of the telemetry event, and adding it to the payload would ship a
+# second path list to ClickHouse for every session.
+ABSOLUTE_KEYS = (
+    "changed_paths_absolute",
+    "changed_paths_absolute_total",
+    "changed_paths_absolute_truncated",
 )
 
 
@@ -279,4 +304,86 @@ def summarize(paths: Iterable[str], cwd: str, *, cap: int = CHANGED_PATHS_CAP) -
         "changed_paths_truncated": total > cap,
         "changed_paths_outside_cwd": len(outside),
         "changed_paths_cap": cap,
+    }
+
+
+def absolute_unobservable() -> dict:
+    """The absolute block to emit when the file set could not be observed AT ALL.
+
+    The peer of `unobservable()`, and it exists for the same reason: an empty
+    LIST here would read as "the root was checked and nothing resolved under it",
+    which is a measurement. None says "we never got a file set to check".
+    """
+    return {
+        "changed_paths_absolute": None,
+        "changed_paths_absolute_total": None,
+        "changed_paths_absolute_truncated": None,
+    }
+
+
+def absolute_under(paths: Iterable[str], root: str, *, cap: int = CHANGED_PATHS_CAP) -> dict:
+    """The paths that are ABSOLUTE and resolve under `root`, made root-relative.
+
+    🔴 WHAT THIS IS FOR, AND WHY IT IS NOT `summarize(paths, root)`. A transcript
+    records the tool call's `file_path` verbatim: ABSOLUTE when the caller passed
+    an absolute path, RELATIVE when it passed a relative one. `summarize` reads
+    both against ONE frame — the session's own cwd — which is correct for the
+    session's own repo and catastrophic for any other: re-anchoring a RELATIVE
+    path against a different root manufactures an association out of nothing,
+    since `src/a.py` in session-cwd A and `src/a.py` under repo B are unrelated
+    strings that happen to spell the same thing.
+
+    So this function reports ONLY what needs no inference at all — an entry that
+    is `posixpath.isabs()` and lexically under `root`. A relative entry is
+    excluded UNCONDITIONALLY, not because it is unlikely to belong to `root` but
+    because nothing in the transcript says whether it does. The result is
+    therefore safe to attribute to `root` no matter whose session produced it,
+    which is what makes a cross-repo session readable at all.
+
+    Prefix matching is `to_repo_relative`'s, reused rather than restated, so the
+    sibling-directory trap it documents (`/x/repo-2/a.py` against `/x/repo`)
+    cannot be reintroduced here. Matching is LEXICAL for that function's stated
+    reason — a `realpath` pass would make the answer depend on the filesystem at
+    read time — which under-reports through a symlinked root and never
+    over-reports. `root` must be absolute; anything else yields nothing.
+
+    Deduplicated on the root-relative form, sorted, and capped exactly as
+    `summarize` is, with `..._total` carrying the pre-cap count so a truncated
+    list is readable as truncated from the numbers alone.
+    """
+    _check_cap(cap)
+    if not isinstance(root, str):
+        raise ValueError(
+            f"changed-paths root must be a string, got {type(root).__name__} "
+            f"({root!r}); pass '' when there is no root to compare against"
+        )
+
+    base = _normalize_dir(root)
+    usable_root = base.startswith("/")
+    rel: set[str] = set()
+    # The input is validated whether or not the root is usable: a malformed entry
+    # is a defect in the transcript reader, and hiding it behind an unrelated
+    # argument would make the same corpus raise or not depending on the caller.
+    for raw in paths:
+        if not isinstance(raw, str) or not raw.strip():
+            raise ValueError(
+                f"changed-paths entry is not a usable path: {raw!r} "
+                "(expected a non-empty string)"
+            )
+        # The absolute test comes FIRST and is the whole safety property:
+        # `to_repo_relative` returns a relative entry unchanged whatever the
+        # frame, so without this line every relative path in the transcript
+        # would be reported as if it belonged to `root`.
+        if not usable_root or not posixpath.isabs(raw.strip()):
+            continue
+        r = to_repo_relative(raw, base)
+        if r is not None:
+            rel.add(r)
+
+    ordered = sorted(rel)
+    total = len(ordered)
+    return {
+        "changed_paths_absolute": ordered[:cap],
+        "changed_paths_absolute_total": total,
+        "changed_paths_absolute_truncated": total > cap,
     }

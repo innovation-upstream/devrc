@@ -34,33 +34,40 @@ lists all entries instead of hiding 13 of 25 behind a `--limit 12`.
 
 ## Open investigations — live diagnosis state
 
-### `--session` throws away 112 cleanly-attributable paths, and its refusal states a falsehood
+### ~~`--session` throws away cleanly-attributable paths, and its refusal states a falsehood~~ — FIXED
+**SHIPPED as the `session-absolute` window** (branch `worktree-agent-ad33a5cf342be5135`).
 - **Symptom + exact repro:** a session whose cwd is repo A but whose edits are absolute paths
-  into repo B is refused: `subsystem-touch: transcript cwd does not match: session <id> ran in
+  into repo B was refused: `subsystem-touch: transcript cwd does not match: session <id> ran in
   <A>, but --repo resolves to <B>.` Reported twice in one day by two different agents.
 - **Observed (with values):** the refusal's stated reason — *"Every path in a transcript is
-  relative to the session's own cwd"* (`subsystem_touch.py:1404`) — is **false**. Paths come
-  from the tool call's `file_path`, which is absolute when the caller passed one;
-  `changed_paths.py:270 to_repo_relative()` already accepts absolutes and buckets
-  outside-cwd ones into `outside`, of which only `len(outside)` is emitted (`:280`).
-  Measured over 120 recent transcripts: **1,072 distinct file-tool paths, 945 outside cwd
-  (88%)** — 602 agent scratchpad, 143 temp worktree (only 32 still on disk), **112 another
-  real repo under `~/workspace` (absolute, unambiguous)**, 54 other, 34 home/dotfiles.
-  Independently corroborates the extractor's own 2026-08-11 figure (470 of 3,290 under cwd,
-  14.3%).
+  relative to the session's own cwd"* — is **false**. Paths come from the tool call's
+  `file_path`, which is absolute when the caller passed one; `changed_paths.to_repo_relative()`
+  already accepts absolutes and buckets outside-cwd ones into `outside`, of which only
+  `len(outside)` was emitted.
 - **Ruled out:** that this is the "four blind windows" story. In the first report the session
   had **1 file-tool call in 158 records** (the handoff doc itself), 0 subagent turns, 0
   file-writing `Bash` — no window was hiding work. In the second the agent correctly fell
   through to `--commit` and wrote a good first entry for `homelab-talos`. **Both agents
   behaved correctly; the guard's outcome was right and its stated reason was wrong.**
-- **Leading hypothesis:** the guard's safety property (never read an A-relative path as
-  B-relative) is sound and must stay. It over-refuses only because it discards absolute paths
-  that resolve under `--repo`, which need no inference at all. Would take the session window
-  from 127 to 239 attributable paths.
-- **Next probe:** none needed to decide — the yield is measured. Implement: correct the
-  message, then report only paths that are `os.path.isabs()` **and** resolve under
-  `_toplevel(repo)`. Do **not** design around the 143 temp-worktree paths: mostly
-  unrecoverable, and 38 such worktrees were removed this session.
+- **Fix, as built:** `changed_paths.absolute_under(paths, root)` is a SECOND frame — entries
+  that are `posixpath.isabs()` **and** lexically under `root`, made root-relative, reusing
+  `to_repo_relative`'s prefix test so the sibling-directory trap cannot be reintroduced. The
+  claude tailer takes an opt-in `absolute_root` and returns the computed block; the RAW path
+  set never leaves the extractor, and `run()` never opts in, so the emitted ClickHouse payload
+  is byte-identical. `collect_session_paths` falls through to that window on a cwd mismatch
+  and raises only when it is **empty**. A relative path is still never re-anchored — that is
+  the safety property and it is unchanged.
+- 🔴 **The yield claim did NOT reproduce, and both numbers are now in the source.** The
+  earlier measurement (120 recent transcripts: 1,072 distinct paths, 945 outside cwd, **112**
+  absolute into another `~/workspace` repo) versus a re-measurement the same day, after the
+  38-worktree sweep, over the 636 transcripts `iter_transcripts` walks: **3,913 distinct, 543
+  under cwd (13.9%), only 33** absolute under another `~/workspace` repo — 29 distinct
+  (repo, path) pairs; the most recent 120 of that walk give 1,361 / 84 / **7**. Nothing here
+  reconciles them, so `collect_session_paths` states the pair rather than picking. **The
+  rewrite stands on the message being false, which neither number is needed to establish —
+  treat the size of the win as unsettled.**
+- **Not designed around:** the temp-worktree paths. Mostly unrecoverable, and 38 such
+  worktrees were removed this session.
 
 ### The >2-page index shape has never existed in real data
 - **Symptom:** three shipped defects in `#442`'s pagination, all invisible to a green
@@ -94,7 +101,12 @@ lists all entries instead of hiding 13 of 25 behind a `--limit 12`.
    round faults the caveat layer again, cut it — ship the verbatim recovery plus the one
    twice-verified point (compare the EXACT worktree path, not a prefix) and move the
    descendant/`PPid` analysis to its own issue.
-3. **Fix the `--session` cwd-mismatch message and add the absolute-path window** (above).
+3. ~~**Fix the `--session` cwd-mismatch message and add the absolute-path window**~~ —
+   **DONE**, see above. Verify it by running `--session <uuid>` from a session whose cwd is a
+   different repo and reading the `window:` + `caveat:` lines: `session-absolute` is a
+   **FLOOR**, not a list. 🔴 Its measured yield on today's corpus is an order of magnitude
+   below the figure that motivated it — if the census stops growing, that is the reason to
+   look at first, not the writers.
 4. **Watch the census.** `python3 scripts/lib/subsystem_touch.py --census`. 21→30 across 5
    scopes with 8 handoff-written and now 1 `analyze-service`-written. If it stalls, the
    writers are not sticking.
@@ -244,6 +256,12 @@ python3 $D/scripts/lib/subsystem_recall.py --scope datapacket-talos --search "zz
 python3 $D/scripts/lib/subsystem_touch.py --repo $D --session <scratchpad-uuid>
 python3 $D/scripts/lib/subsystem_touch.py --repo $D --pr <n>[,...]
 python3 $D/scripts/lib/subsystem_touch.py --repo $D --commit <sha>[,...]
+
+# the FIFTH window — same flag, different repo. Point --repo at a repo the
+# session did NOT run in: `window=session-absolute` and a caveat calling it a
+# FLOOR when the session named absolute paths there, `transcript cwd does not
+# match` (naming --pr/--commit) when it named none.
+python3 $D/scripts/lib/subsystem_touch.py --repo <other-repo> --session <scratchpad-uuid>
 
 # the falsifiability counter — anchor was 21 / 1 scope / 21 unstamped
 python3 $D/scripts/lib/subsystem_touch.py --census
