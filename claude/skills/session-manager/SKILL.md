@@ -86,6 +86,24 @@ credential-exposure or cross-user-data-leak.**
   API rather than off the cache, plus open PRs and a `/proc` walk that finds a `claude`
   buried under a wrapper shell. Complements, not substitutes.
 
+## `label` + `hotkey` — a name for the sessions the slot table never named
+
+`codename` is null for anything outside `tmux-scratch-slots.sh`; on the workbench that was
+9 of ~30 windows. Every row now also carries `label` (+ `label_source`, the tier that
+answered, + `hotkey`): **`codename`** if the session is a scratch slot → else the **leaf of
+the pane's cwd** (`path`) → else **`main`** (`fallback`, i.e. cwd was `$HOME`/`/`/empty).
+The table's old CODENAME column is now LABEL and renders `Grove (S)`.
+
+🔴 **`hotkey` is the actionable half** — it is the `$mod+Shift+<k>` that gets you to the
+window, read from the slot table's own `key` field. It is **`null` (never `""`) on tiers 2
+and 3**: no binding exists for a session outside the table, so quoting a key there would
+send the operator to press something and land nowhere.
+
+🔴 **`label` is NOT an address — `session:window` still is.** Two sessions sitting in one
+repo resolve to the SAME label, so quote both. New non-scratch sessions get a real tmux name
+at creation from `scripts/tmux-autoname-session.sh`; `label` is what covers the ones that
+predate it.
+
 ## The caveats are in the OUTPUT, not just in this file
 
 `report["caveats"]` (structured) + three footer lines in the table, printed

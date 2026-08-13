@@ -167,9 +167,30 @@ and the roll-ups a caller usually wants are:
     report["blocked_on_me"]             {"status", "count", ...}
 
 Each row carries: host, session, window_index, window_id, window_name,
-codename, pane_id, path, command, task, claude, busy, age_secs, status,
-waiting_probable, waiting_signals, waiting_status, claude_session_id,
-fuzzyclaw, panes. The row ledger is pinned by a test.
+codename, label, label_source, hotkey, pane_id, path, command, task, claude,
+busy, age_secs, status, waiting_probable, waiting_signals, waiting_status,
+claude_session_id, fuzzyclaw, panes. The row ledger is pinned by a test.
+
+🔴 `label` IS NOT AN ADDRESS — `session:window` still is.
+--------------------------------------------------------------------------
+`label` exists because `codename` is null for every session outside the
+scratch slot table, and on the workbench that was 9 of ~30 windows: two
+unnamed sessions (`0`, `8`) that the codename/colour/hotkey machinery could
+not name at all. It resolves in three tiers (`resolve_label`), and
+`label_source` says WHICH tier answered, because "the cwd is a repo called
+main" and "the cwd told us nothing" must not read the same.
+
+`hotkey` rides with it and is the ACTIONABLE half: a slot session is reported
+as `Gold (G)`, because the operator's question is "which key gets me there",
+which `Gold` alone does not answer. It comes from the slot table's own `key`
+field (`scratch2:G:#d79921:Gold`) — never a second copy of that mapping. It is
+`null`, never `""`, for tiers 2 and 3: no `$mod+Shift+<k>` binding EXISTS for
+a session outside the table, and a fabricated key sends the operator to press
+something and land nowhere.
+
+It is ADDITIVE. Two sessions can resolve to the SAME label — `0` and `8` are
+both sitting in one repo today — so a label alone identifies nothing. Every
+surface that renders a row shows `session` and `window_index` beside it.
 """
 from __future__ import annotations
 
@@ -603,12 +624,19 @@ def slots_to_window_ids(live_windows) -> dict:
     return {slot: wid for wid, slot in (live_windows or {}).items()}
 
 
-def load_scratch_codenames(paths=None, reader=None) -> dict:
-    """`{session: codename}` from the SCRATCH_SLOTS table.
+def load_scratch_slots(paths=None, reader=None) -> dict:
+    """`{session: {"codename":…, "key":…, "color":…}}` from the SCRATCH_SLOTS
+    table — THE parse, which everything else here projects out of.
+
+    🔴 THE HOTKEY IS THE POINT, not a bonus field. An entry is
+    `scratch4:V:#83a598:Vapor`, and the operator's question is not "what is this
+    session called" but "which key gets me to it" — `Vapor` alone does not
+    answer that, `Vapor (V)` does. The key was parsed and thrown away into a
+    `_key` for as long as this file has existed.
 
     Tries each path in order (deployed first, then in-repo) and returns the
-    first non-empty mapping. {} on any failure — codenames are a display nicety,
-    never a hard dependency.
+    first non-empty mapping. {} on any failure — the slot table is a display
+    nicety, never a hard dependency.
     """
     reader = reader or _read_text
     for p in (paths if paths is not None
@@ -616,11 +644,108 @@ def load_scratch_codenames(paths=None, reader=None) -> dict:
         text = reader(p)
         if text is None:
             continue
-        mapping = {session: name
-                   for session, _key, _color, name in _SLOT_RE.findall(text)}
+        mapping = {session: {"codename": name, "key": key, "color": color}
+                   for session, key, color, name in _SLOT_RE.findall(text)}
         if mapping:
             return mapping
     return {}
+
+
+def load_scratch_codenames(paths=None, reader=None) -> dict:
+    """`{session: codename}` — a PROJECTION of `load_scratch_slots`, not a
+    second parse. Kept because `codename` is its own row field and several
+    consumers only want the name."""
+    return {s: v["codename"]
+            for s, v in load_scratch_slots(paths, reader).items()}
+
+
+# --------------------------------------------------------------------------- #
+# LABEL RESOLUTION — three tiers, and the tier is carried in the output
+# --------------------------------------------------------------------------- #
+# The tier names, enumerated here rather than spelled at each return, so a
+# consumer can branch on the set and a test can assert it is exactly this.
+LABEL_SOURCES = ("codename", "path", "fallback")
+LABEL_FALLBACK = "main"
+
+
+def label_from_path(path, home=None):
+    """The leaf directory name of a pane's cwd, or None when the cwd says
+    nothing useful (`$HOME`, `/`, `~`, empty).
+
+    🔴 STATED LIMIT: this is the LEAF, not the git repo root. It equals the
+    repo name when the pane sits at the repo root, which is the common case and
+    the case that motivated the feature (a session called nothing but `8`,
+    sitting in a checkout whose name says exactly what it is). A pane parked
+    three directories deep gets
+    that directory's name instead. It is NOT resolved to a repo root here on
+    purpose: `path` is a STRING FROM ANOTHER MACHINE — half of these rows come
+    off the laptop over ssh — so a local `git rev-parse` would silently answer
+    about whatever happens to sit at that path on THIS host, or about nothing.
+    `scripts/tmux-autoname-session.sh` does resolve the repo root, because it
+    runs on the machine that owns the directory.
+
+    `home` is injectable so the test suite does not depend on the operator's
+    real `$HOME`.
+    """
+    home = HOME if home is None else home
+    p = (path or "").strip()
+    if not p:
+        return None
+    if p == "~" or p.startswith("~/"):
+        p = home + p[1:]
+    # `/w/repo/` and `/w/repo` are the same directory; basename disagrees.
+    # 🔴 There is deliberately NO `if not p: return None` here for the `/` case:
+    # a mutation sweep showed it SURVIVED removal, because `basename("")` is
+    # `""` and the final `or None` already covers it. An unreachable guard reads
+    # as a defence and is not one. `test_tier3_…[/]` is what actually pins it.
+    p = p.rstrip("/")
+    if os.path.normpath(p) == os.path.normpath(home):
+        return None
+    return os.path.basename(p) or None
+
+
+def resolve_label(session, path, slots=None, home=None) -> dict:
+    """`{"label": str, "label_source": one of LABEL_SOURCES, "hotkey": str|None}`.
+
+    Precedence, highest first:
+      1. `codename`  — the scratch slot table already names this session, and
+         that name is the one the hotkeys, colours and HUD use. Never overruled
+         by the cwd. THIS is the tier that carries a `hotkey`.
+      2. `path`      — the leaf of the pane's cwd (see `label_from_path`).
+      3. `fallback`  — `main`, and ONLY when the cwd yielded nothing. A row
+         labelled `main` from a cwd of `$HOME` and a row labelled `main`
+         because the operator really is in a directory called `main` are
+         distinguishable by `label_source`, not by the label.
+
+    🔴 `hotkey` IS `None` ON TIERS 2 AND 3, AND THAT IS LOAD-BEARING. A label
+    only answers "where is it"; the key answers "how do I get there", which is
+    the question actually being asked. But no key EXISTS for a session outside
+    the slot table — `$mod+Shift+<k>` is bound per slot in the tmux/i3 config —
+    so inventing one, or rendering it as `""`, would send the operator to press
+    something and land nowhere. `None`, never an empty string, so a consumer
+    cannot read a missing key as a real one.
+
+    Never returns a None label: a row always has something to render.
+    """
+    slot = (slots or {}).get(session) or {}
+    name = slot.get("codename")
+    if name:
+        return {"label": name, "label_source": "codename",
+                "hotkey": slot.get("key") or None}
+    base = label_from_path(path, home=home)
+    if base:
+        return {"label": base, "label_source": "path", "hotkey": None}
+    return {"label": LABEL_FALLBACK, "label_source": "fallback", "hotkey": None}
+
+
+def render_label(row) -> str:
+    """The label as an OPERATOR reads it: `Gold (G)` when a hotkey exists,
+    the bare label when none does. One writer, so the table and any other
+    surface cannot spell the parenthesis differently — or, worse, print an
+    empty `()` for a session that has no key."""
+    label = (row or {}).get("label") or "—"
+    key = (row or {}).get("hotkey")
+    return f"{label} ({key})" if key else label
 
 
 def _is_braille(ch: str) -> bool:
@@ -1119,7 +1244,7 @@ def index_tasks_by_window(tasks) -> dict:
 # =========================================================================== #
 # PURE — folding panes into window rows
 # =========================================================================== #
-def fold_windows(panes, host, codenames=None, task_index=None,
+def fold_windows(panes, host, slots=None, task_index=None,
                  threshold=DEFAULT_STALE_THRESHOLD, now=None,
                  slot_window_ids=None, captures=None,
                  capture_status="skipped") -> list:
@@ -1164,7 +1289,7 @@ def fold_windows(panes, host, codenames=None, task_index=None,
     about a pane nobody looked at.
     """
     now = time.time() if now is None else now
-    codenames = codenames or {}
+    slots = slots or {}
     task_index = task_index or {}
     slot_window_ids = slot_window_ids or {}
     order, groups = [], {}
@@ -1188,6 +1313,7 @@ def fold_windows(panes, host, codenames=None, task_index=None,
                 age = max(0.0, now - last)
         busy = busy_from_title(lead.get("title", ""))
         is_claude = any(pane_is_claude(p) for p in members)
+        lab = resolve_label(session, lead.get("path", ""), slots)
         # 🔴 The waiting fields, resolved through the None-vs-{} distinction
         # above. `probable` is None on every path where nothing was scraped.
         if not is_claude:
@@ -1207,7 +1333,15 @@ def fold_windows(panes, host, codenames=None, task_index=None,
             "window_index": widx,
             "window_id": slot_window_ids.get((str(session), str(widx))),
             "window_name": lead.get("window_name", ""),
-            "codename": codenames.get(session),
+            "codename": (slots.get(session) or {}).get("codename"),
+            # 🔴 ADDITIVE to `session`/`window_index`, never a replacement:
+            # two sessions in one repo resolve to the SAME label. See the
+            # module docstring.
+            "label": lab["label"],
+            "label_source": lab["label_source"],
+            # 🔴 `null` for every non-slot session, because no hotkey EXISTS
+            # for one. Never "".
+            "hotkey": lab["hotkey"],
             "pane_id": lead.get("pane_id"),
             "path": lead.get("path", ""),
             "command": lead.get("command", ""),
@@ -1535,7 +1669,7 @@ def ch_query(client, sql) -> dict:
 def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
            use_fuzzyclaw=False, threshold=DEFAULT_STALE_THRESHOLD, now=None,
            ch_client_factory=None, fuzzyclaw_texts=None,
-           codenames=None, ch_sql=SQL_RECENT_SESSIONS,
+           slots=None, ch_sql=SQL_RECENT_SESSIONS,
            claude_only=False, use_capture=True, capture_nonce=None,
            blocked_reader=None, blocked_path=None) -> dict:
     """Build the whole report. Every source is injectable, so this is the
@@ -1560,7 +1694,7 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
     now = time.time() if now is None else now
     local_host = local_host or local_host_label()
     hosts = [h for h in hosts if h in HOST_NAMES]
-    codenames = load_scratch_codenames() if codenames is None else codenames
+    slots = load_scratch_slots() if slots is None else slots
     # A fresh hex nonce per run: a pane cannot print a marker built from a
     # string that did not exist when it was drawn. Injectable so the suite is
     # deterministic.
@@ -1701,7 +1835,7 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
         if not entry["reachable"]:
             continue
         entry["windows"] = fold_windows(
-            parse_panes(raw_panes.get(host, "")), host, codenames=codenames,
+            parse_panes(raw_panes.get(host, "")), host, slots=slots,
             # fuzzyclaw is LOCAL-only: a remote row gets no task, no session id
             # and no age. Stated, not implied away.
             task_index=(task_index if host == local_host else {}),
@@ -1771,6 +1905,12 @@ def _fmt_age(secs):
 
 _STATUS_GLYPH = {"busy": "▶ busy", "idle": "● idle",
                  "stale": "· stale", "unknown": "? unk"}
+
+# 🔴 ONE format string for the header AND every row, so the header cannot drift
+# out of alignment with the data under it — the previous version carried the
+# column widths twice (a hand-spaced header literal and a `.format` spec) and
+# any width change had to be made in both places or the frame skewed silently.
+_ROW_FMT = ("  {:<9}  {:<12}  {:<3}  {:<14}  {:<25}  {:<6}  {:<8}  {:<4}  {}")
 
 
 def _trunc(s, n):
@@ -1920,17 +2060,27 @@ def render_table(report) -> str:
         # `claude` and `shell` states which one the row IS. `● idle` on an
         # agent and `● idle` on a bare zsh prompt were the same six characters
         # before this.
-        out.append("  HOST       SESSION       WIN  CODENAME   TASK"
-                   "                          KIND    STATUS    AGE   WAIT")
+        # 🔴 THE COLUMN TRADE, stated because the table did not get wider.
+        # CODENAME (9) became LABEL (14) and TASK gave up the 5 characters, so
+        # the frame is byte-for-byte the same width as before. Nothing was lost
+        # by dropping CODENAME: for a scratch session `label` IS the codename
+        # (tier 1) and the cell additionally carries the HOTKEY — `Gold (G)`,
+        # which is what the operator actually needs to reach the window — so
+        # the column says strictly more than CODENAME did, and the rows it used
+        # to render as `—` now say where they are. 14 fits the longest slot
+        # cell (`Yarrow (Y)` = 10) uncut.
+        # The cost is real and it is TASK: 30 -> 25 characters before the
+        # ellipsis. `--json` carries every field untruncated and unjoined.
+        out.append(_ROW_FMT.format("HOST", "SESSION", "WIN", "LABEL", "TASK",
+                                   "KIND", "STATUS", "AGE", "WAIT"))
         out.append("  " + "─" * 112)
         for r in rows:
             out.append(
-                "  {:<9}  {:<12}  {:<3}  {:<9}  {:<30}  {:<6}  {:<8}  "
-                "{:<4}  {}".format(
+                _ROW_FMT.format(
                     _trunc(r.get("host"), 9), _trunc(r.get("session"), 12),
                     _trunc(r.get("window_index"), 3),
-                    _trunc(r.get("codename") or "—", 9),
-                    _trunc(r.get("task") or "—", 30),
+                    _trunc(render_label(r), 14),
+                    _trunc(r.get("task") or "—", 25),
                     "claude" if r.get("claude") else "shell",
                     _STATUS_GLYPH.get(r.get("status"), "?"),
                     _fmt_age(r.get("age_secs")),
