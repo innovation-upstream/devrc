@@ -78,6 +78,38 @@ let
   # true on the graphical workbench (it only gates dunst/espanso there).
   isLaptop = builtins.pathExists "/sys/class/backlight/intel_backlight";
   userPackages = import ./pkgs { inherit pkgs workspace; };
+  # Dependency tree for the `clickup` skill, built from its committed
+  # package-lock.json. See nix/pkgs/clickup-node-modules.nix.
+  clickupNodeModules = pkgs.callPackage ./pkgs/clickup-node-modules.nix { };
+  # 🔴 The skills tree AS DEPLOYED — `claude/skills` with clickup's built
+  # node_modules injected. Both skill mappings below (~/.claude/skills and
+  # ~/.config/opencode/skills) use THIS, not `../claude/skills` directly.
+  #
+  # It exists because of how node resolves modules: from the REALPATH of the
+  # importing file, not the path you invoked. `home.file` deploys each skill file
+  # as a symlink into the store copy of `claude/skills`, so `lib/markdown.mjs`
+  # resolves `unified` starting at `/nix/store/<…>-hm_skills/clickup/node_modules`
+  # — a directory that does not exist. A `home.file` for
+  # `.claude/skills/clickup/node_modules` puts the tree at the DEPLOYED path,
+  # which node never looks at: MEASURED, `node ~/.claude/skills/clickup/query.mjs
+  # accounts` died with `Cannot find package 'unified' imported from
+  # /nix/store/…-hm_skills/clickup/lib/markdown.mjs` with that symlink in place
+  # and resolving correctly. node_modules has to sit in the SAME store tree as
+  # the sources, which means injecting it into the source of the mapping.
+  #
+  # 🔴 `ln -sT`, never a bare `ln -s`. If `claude/skills/clickup/node_modules`
+  # ever existed in the checkout, `cp -R` would create that directory in $out
+  # and a bare `ln -s` would then put the link INSIDE it
+  # (`$out/clickup/node_modules/node_modules`) — silently, exit 0, and the
+  # deployed skill would carry a committed tree while the nix-built one dangled
+  # one level down. `-T` treats the target as a plain name, so that case fails
+  # the build instead. (`claude/skills/.gitignore` is what makes it unlikely; a
+  # gitignore is not a guarantee, and this costs one letter.)
+  claudeSkills = pkgs.runCommandLocal "devrc-claude-skills" { } ''
+    cp -R ${../claude/skills} "$out"
+    chmod -R u+w "$out"
+    ln -sT ${clickupNodeModules}/node_modules "$out/clickup/node_modules"
+  '';
   sessionVariables = import ./sessionVariables.nix {
     inherit pkgs;
     elixirLspPath = pkgs.vscode-extensions.elixir-lsp.vscode-elixir-ls;
@@ -855,8 +887,18 @@ in
   # typed it. Every file under devrc/claude/skills/<name>/ (including `reference/`)
   # lands as a read-only store symlink at ~/.claude/skills/<name>/, so skills ship
   # to all hosts in lockstep. Edit in devrc/claude/skills/ then switch.
+  # 🔴 SOURCE IS `claudeSkills`, NOT `../claude/skills` — it is the same tree plus
+  # clickup's built node_modules, which has to live in the store copy for node to
+  # resolve it. Read the `claudeSkills` comment in the `let` block before changing
+  # this. node_modules is NOT committed (`claude/skills/.gitignore` pins that).
+  # 🔴 The gitignore is the ONLY thing preventing a committed node_modules — the
+  # earlier claim here, that "a path cannot be both", was false: `claudeSkills`
+  # is one derivation, so a committed tree and the injected one do not collide
+  # in home.nix at all. They collide inside `cp -R` + `ln`, which is why that
+  # link is `ln -sT` (a bare `ln -s` would nest the link inside the copied
+  # directory and succeed). See the `claudeSkills` comment in the `let` block.
   home.file.".claude/skills" = {
-    source = ../claude/skills;
+    source = claudeSkills;
     recursive = true;
     force = true;
   };
@@ -1170,8 +1212,10 @@ in
   # skill-sourced command. Its `hints` array is empty for skills and populated for
   # commands, which is at least a TUI autocomplete difference; proving substitution
   # needs a live model call. See the PR for the full matrix.
+  # Same `claudeSkills` source as ~/.claude/skills above — same tree, same reason
+  # (clickup's node_modules must be in the store copy, not at the deployed path).
   home.file.".config/opencode/skills" = {
-    source = ../claude/skills;
+    source = claudeSkills;
     recursive = true;
     force = true;
   };
@@ -1198,10 +1242,15 @@ in
     config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/dl-router/SKILL.md";
   home.file.".config/opencode/skills/dl-router/dl-route".source =
     config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/dl-router/dl-route";
-  # clickup: standalone repo at ~/.claude/skills/clickup/ — symlink the directory
-  # so opencode picks it up without duplicating the checkout.
-  home.file.".config/opencode/skills/clickup".source =
-    config.lib.file.mkOutOfStoreSymlink "${home}/.claude/skills/clickup";
+  # 🔴 clickup used to need a mkOutOfStoreSymlink here, pointing opencode's copy at
+  # ~/.claude/skills/clickup — the standalone, uncommitted checkout that lived only
+  # on this host. Now that the skill is IN `claude/skills/`, the recursive mapping
+  # above covers it like every other skill, and that pointer is not merely
+  # redundant but a CYCLE: `.config/opencode/skills/clickup` -> `~/.claude/skills/
+  # clickup`, whose own links then resolve back through the opencode path. It
+  # deployed a self-referential `<hash>-hm_clickup` entry INSIDE the skill dir.
+  # node_modules needs no entry either: `claudeSkills` carries it into the tree
+  # both mappings are built from.
 
   # These hooks previously existed as PLAIN local files (claude-notify.py +
   # test_claude_notify.py on the laptop; bash-guard.py on BOTH hosts). A

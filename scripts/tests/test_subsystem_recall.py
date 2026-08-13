@@ -61,6 +61,11 @@ HANDOFF_REFERENCE = (
 ANALYZE_DOC = ROOT / "claude" / "skills" / "analyze-service" / "SKILL.md"
 
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
+sys.path.insert(0, str(ROOT / "scripts"))
+
+from testlib.skills_mapping import (  # noqa: E402
+    assert_skills_mapping_deploys_repo_skills,
+)
 
 import subsystem_recall as rc  # noqa: E402
 import subsystem_resolver as sr  # noqa: E402
@@ -1675,8 +1680,11 @@ class TestSkillDocsArePinned:
         assert RESUME_DOC.name == "SKILL.md"
         assert RESUME_DOC.parent.parent.name == "skills"
         home_nix = (ROOT / "nix" / "home.nix").read_text(encoding="utf-8")
-        assert 'home.file.".claude/skills"' in home_nix
-        assert "source = ../claude/skills;" in home_nix
+        # Structural, and shared with test_subsystem_resolver/_touch — the three
+        # copies of this predicate used to match the LITERAL
+        # `source = ../claude/skills;`, and all three went red together when the
+        # mapping's source became a derivation built from that path.
+        assert_skills_mapping_deploys_repo_skills(home_nix)
 
     # 🔴 THE CONCURRENCY FINDING WAS SPLIT ACROSS TWO FILES, so this pin table is
     # split the same way. Step 4 keeps every IMPERATIVE; the measured evidence
@@ -1821,8 +1829,13 @@ class TestSkillDocsArePinned:
         the host loses the `ls-files` hit.
         """
         home_nix = (ROOT / "nix" / "home.nix").read_text(encoding="utf-8")
-        assert 'home.file.".claude/skills"' in home_nix
-        assert "source = ../claude/skills;" in home_nix
+        # Same predicate as the three sites consolidated above, NOT a fourth
+        # open-coded `"source = ../claude/skills;" in home_nix`. That literal is
+        # a SPELLED guard: it pins how the source is written, not what it
+        # resolves to, so it goes red for a change that leaves the deployment
+        # property intact — which is exactly what happened when the mapping's
+        # source became a derivation built FROM ../claude/skills.
+        assert_skills_mapping_deploys_repo_skills(home_nix)
         assert HANDOFF_REFERENCE.exists(), (
             f"{HANDOFF_REFERENCE} is absent from the tree under test. In the nix "
             f"sandbox that means it was never git-added, so the deploy omits it."

@@ -82,6 +82,11 @@ MODULE_PATH = ROOT / "scripts" / "lib" / "subsystem_resolver.py"
 SKILL_DOC = ROOT / "claude" / "skills" / "analyze-service" / "SKILL.md"
 
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
+sys.path.insert(0, str(ROOT / "scripts"))
+
+from testlib.skills_mapping import (  # noqa: E402
+    assert_skills_mapping_deploys_repo_skills,
+)
 
 import subsystem_resolver as sr  # noqa: E402
 
@@ -1751,15 +1756,12 @@ class TestCommandDocIsPinned:
         # The non-tautological half: nix must actually deploy the directory this
         # pin lives under. A pin under a directory home-manager does not ship is
         # precisely the vacuous green this test exists to prevent.
+        # One shared, STRUCTURAL predicate (testlib/skills_mapping.py) instead of
+        # the literal `source = ../claude/skills;` this used to grep for: the
+        # mapping's source is now a derivation BUILT from that path, which the
+        # spelled version could not tell apart from a source pointed elsewhere.
         home_nix = (ROOT / "nix" / "home.nix").read_text(encoding="utf-8")
-        assert 'home.file.".claude/skills"' in home_nix, (
-            "nix/home.nix no longer declares the ~/.claude/skills mapping, so the "
-            "doc this module pins may not ship at all."
-        )
-        assert "source = ../claude/skills;" in home_nix, (
-            "nix/home.nix's ~/.claude/skills mapping no longer sources "
-            "devrc/claude/skills, so SKILL_DOC is not the deployed file."
-        )
+        assert_skills_mapping_deploys_repo_skills(home_nix)
 
     # --- the behavioural half: what each sentence ASSERTS ---------------------
 

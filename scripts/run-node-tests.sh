@@ -20,7 +20,17 @@
 #
 #    The fix is not "add two more lines to the list" — that leaves the next suite
 #    ungated the same way. Collection is now DISCOVERY (every `*.test.mjs` under
-#    `scripts/`), so a new suite is gated the moment it exists.
+#    each entry of `DISCOVERY_ROOTS`), so a new suite is gated the moment it exists.
+#
+# 🔴 DISCOVERY IS ROOTED, AND A ROOT IS THE SAME DEFECT ONE LEVEL UP.
+#    The roots were `scripts/` alone, which is exactly as blind as the old
+#    single-directory glob for anything living elsewhere: `claude/skills/clickup/`
+#    ships executable .mjs to both hosts (via nix/home.nix) and carries two gates,
+#    and a `scripts/**` glob cannot see them no matter how many suites it finds.
+#    So the root list is EXPLICIT and lives in one place (`DISCOVERY_ROOTS`), and
+#    scripts/tests/test_run_node_tests_suites.py parses it out of this file rather
+#    than restating it — a second copy of the list is how a list and its guard
+#    drift apart. Adding a new top-level home for .mjs tests means adding it HERE.
 #
 # 🔴 FOUR STRUCTURAL GUARDS — all four exist because a green exit code lies here:
 #
@@ -122,8 +132,15 @@ cd "$ROOT" || { echo "run-node-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 #   scripts/dl-router/tests             13 files   508 tests
 #   scripts/collector/browser-ext/tests  2 files    21 tests
 #
+# MEASURED 2026-08-13, same way:
+#   claude/skills/clickup/test           4 files    73 tests
+#   (was 2 files / 27 tests earlier the same day; the webhook listener had ZERO
+#   coverage, which is why four defects in it survived review — see
+#   claude/skills/clickup/test/{webhook-server,listen-integration}.test.mjs)
+#
 # Raise a floor when a suite grows. NEVER lower one to get green — that is the
 # move that turned the pytest global floor into less than half the real total.
+# A floor is a function of the measurement, not an opinion: `m - min(50, max(1, m/20))`.
 SUITES=(
   "scripts/browser-bridge/tests|15|490"
   # Ungated until 2026-08-03: `FILES=` above named browser-bridge alone, so these
@@ -132,6 +149,25 @@ SUITES=(
   # Ungated for the same reason. Small, but 21 tests reporting safety they never
   # measured is the same defect as 508 of them.
   "scripts/collector/browser-ext/tests|2|20"
+  # The clickup skill's four hermetic gates (help-coverage: showUsage() is
+  # complete; state-paths: no state path resolves inside the read-only skill dir,
+  # including a structural seam walk over every module in the tree;
+  # webhook-server + listen-integration: the receiver rejects unsigned and forged
+  # deliveries, binds loopback, and discloses no capability URL). They lived in a
+  # standalone, UNCOMMITTED ~/.claude/skills/clickup/ and ran only when a human
+  # remembered — ungated by anything, on either host. 73 tests measured
+  # 2026-08-13, floor 70 = 73 - min(50, max(1, 73/20)).
+  "claude/skills/clickup/test|4|70"
+)
+
+# --- discovery roots -----------------------------------------------------------
+# Every top-level directory that may hold `*.test.mjs`. Read the 🔴 block in the
+# header before adding one: this list is the reason a suite outside scripts/ is
+# gated at all, and scripts/tests/test_run_node_tests_suites.py parses it FROM
+# HERE so the two cannot drift.
+DISCOVERY_ROOTS=(
+  "scripts"
+  "claude"
 )
 
 # --- GUARD 3: discovery + the two-way pin --------------------------------------
@@ -149,19 +185,54 @@ SUITES=(
 # a silent empty list: the exact "an EMPTY RESULT cannot distinguish two
 # mechanisms" trap. Globstar is a bash builtin, so it depends on no external
 # binary at all and behaves identically in every tier.
+#
+# 🔴 node_modules is EXCLUDED. `claude/skills/clickup` has a dependency tree
+# (nix/pkgs/clickup-node-modules.nix), and its own UPDATING instructions tell a
+# developer to run `npm ci` in the checkout — which materialises 51 packages,
+# several of which ship `*.test.mjs` fixtures. Discovery would then find a suite
+# directory nobody pinned and the runner would FATAL with "would run UNGATED",
+# blaming the developer for following the documented procedure. Third-party test
+# files are also not this gate's to run: they are not ours, their floors are not
+# ours, and one of them failing says nothing about this repo.
 shopt -s globstar nullglob
 DISCOVERED_DIRS=()
 _seen=""
-for f in scripts/**/*.test.mjs; do
-  [ -f "$f" ] || continue
-  d="${f%/*}"
-  case "$_seen" in
-    *"|$d|"*) continue ;;
-  esac
-  _seen="$_seen|$d|"
-  DISCOVERED_DIRS+=("$d")
+for _root in "${DISCOVERY_ROOTS[@]}"; do
+  for f in "$_root"/**/*.test.mjs; do
+    [ -f "$f" ] || continue
+    case "$f" in
+      */node_modules/*) continue ;;
+    esac
+    d="${f%/*}"
+    case "$_seen" in
+      *"|$d|"*) continue ;;
+    esac
+    _seen="$_seen|$d|"
+    DISCOVERED_DIRS+=("$d")
+  done
 done
 shopt -u globstar nullglob
+
+# A root that matches NOTHING is the empty-result trap: it cannot be told apart
+# from a root that is simply typo'd or has moved, and both read as "no suites
+# here". Every root must contribute at least one suite directory.
+root_problems=()
+for _root in "${DISCOVERY_ROOTS[@]}"; do
+  found=0
+  for d in "${DISCOVERED_DIRS[@]}"; do
+    case "$d" in
+      "$_root"/*) found=1; break ;;
+    esac
+  done
+  [ "$found" -eq 1 ] || root_problems+=("$_root  — a DISCOVERY_ROOTS entry that matched no *.test.mjs at all (typo, moved, or the suites were deleted?)")
+done
+if [ "${#root_problems[@]}" -gt 0 ]; then
+  echo "run-node-tests: FATAL — ${#root_problems[@]} discovery-root problem(s):" >&2
+  for b in "${root_problems[@]}"; do echo "    $b" >&2; done
+  echo "  A root globbing to nothing silently shrinks the gate to the OTHER roots" >&2
+  echo "  while still reporting PASS. Fix the root or remove it deliberately." >&2
+  exit 2
+fi
 
 PINNED_DIRS=()
 for entry in "${SUITES[@]}"; do
