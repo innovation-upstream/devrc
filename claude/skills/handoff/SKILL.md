@@ -24,6 +24,16 @@ Topic argument (optional): `$ARGUMENTS`. If empty, infer a short kebab-case topi
    ```markdown
    # Handoff: <topic> — <YYYY-MM-DD>
 
+   ## Run this first — the index, one read-only command
+   ```bash
+   python3 ~/workspace/devrc/scripts/lib/subsystem_recall.py --repo <repo>
+   ```
+   Terse pointers this doc does not carry, curated by past sessions and outliving it.
+   🔴 RECALL, NOT LIVE OBSERVATION — every line is a pointer to VERIFY, never a current
+   reading, and it may describe a gotcha already fixed. `scope-absent`/`scope-empty` means
+   nothing is recorded yet: ordinary, not an error, and not a clean bill of health.
+   Non-blocking: if it exits non-zero, print the stderr line and carry on.
+
    ## Goal
    What we're trying to achieve and why (1–3 lines).
 
@@ -59,7 +69,11 @@ Topic argument (optional): `$ARGUMENTS`. If empty, infer a short kebab-case topi
    <one-line of the single most important next action>
    ```
 
-   🔴 **The block MUST begin with a literal `/resume`, and that is not decoration.** MEASURED 2026-08-13: a kickoff emitted as plain prose (`Continue the <topic> work. Canonical handoff (read first): …`) was pasted into the next session, and that session made **zero** calls to `subsystem_recall.py` / `subsystem_touch.py` — `/resume` was never invoked and the skill did **not** auto-fire, despite "pick up where we left off" matching its description almost verbatim. So `/resume` step 4 — the index READ — never ran, and the entry written by *this* step an hour earlier, describing the very subsystem that session was working on, was never seen. A kickoff that only *points at* a doc gets the doc read and the index skipped. Typing the command is what makes the read deterministic instead of luck.
+   🔴 **The block MUST begin with a literal `/resume`, and that is not decoration.** MEASURED 2026-08-13: a kickoff emitted as plain prose (`Continue the <topic> work. Canonical handoff (read first): …`) was pasted into the next session, and that session made **zero** calls to `subsystem_recall.py` / `subsystem_touch.py` — `/resume` was never invoked and the skill did **not** auto-fire, despite "pick up where we left off" matching its description almost verbatim. So `/resume` step 4 — the index READ — never ran, and the entry written by *this* step an hour earlier, describing the very subsystem that session was working on, was never seen. A kickoff that only *points at* a doc gets the doc read and the index skipped.
+
+   🔴 **CORRECTED 2026-08-13, same day: the `/resume` prefix is NOT sufficient, and the claim that "typing the command makes the read deterministic" was wrong.** Re-measured against a DISPATCHED agent given the new `/resume`-prefixed kickoff verbatim and nothing else: **zero `Skill` tool calls, zero `subsystem_recall.py` executions** — behaviourally identical to the prose kickoff it replaced. It read the doc, oriented, and went straight to the named next step. A subagent receives the kickoff as prompt TEXT — there is no CLI slash-command parsing on that path — so a leading `/resume —` reads as a topic label, and the clause after it is a perfectly actionable instruction on its own. This is not a corner case: dispatching implementation to a subagent is the standing default here.
+
+   **So the deterministic hook is step 2's doc, not this block.** Both measured sessions read the handoff doc first, immediately, before anything else — that is the reliable behaviour, so the index command lives at the TOP OF THE DOC where reading it leads into running it. Keep the `/resume` prefix: it costs nothing and does work in an interactive session, where the CLI parses it before the model sees it. Just do not rely on it alone.
 
    🔴 **Emit this BEFORE step 4's confirm gate, unconditionally.** The kickoff block is the deliverable; step 4 blocks on a y/N, and a user who walks away from that prompt must still have got it.
 
