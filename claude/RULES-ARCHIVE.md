@@ -60,10 +60,12 @@ the last revision before the core/archive split.
 - [sops-retraction](#sops-retraction) 🔴 **RETRACTED THEORY — do not re-derive**
 - [worktree-envrc](#worktree-envrc)
 - [base-clone-drift](#base-clone-drift)
+- [cross-repo-worktree](#cross-repo-worktree)
 
 **Shell & Tooling**
 - [readlink-arbiter](#readlink-arbiter)
 - [zsh-unbraced-var](#zsh-unbraced-var)
+- [sibling-agent-kill](#sibling-agent-kill)
 
 **Retired rules — removed from the core 2026-08-10 after a paired revert-and-rerun audit
 (`claudedocs/rules-staleness-audit-2026-08-10.md`). Each entry holds the measurement AND
@@ -602,6 +604,48 @@ the branch. `git worktree list` is the check; `git checkout --detach` is the fix
 
 Same root cause as the `refs/stash` ban: a worktree gives you a private working directory, not a
 private repo and not a private machine.
+
+## cross-repo-worktree
+*Supports: 🔴 "`isolation: "worktree"` builds the worktree from your CURRENT repo, not the repo
+the task NAMES."*
+
+The flag resolves the repo from the **dispatching session's cwd**, never from the prose of the
+task. Dispatch a fan-out at repo B while sitting in repo A and every agent gets a worktree of
+**A** — and nothing fails: the worktree is created successfully, `git status` inside it is
+clean, and the agent begins work in a tree where its brief is nonsense.
+
+The failure surfaces one indirection away, as an agent reporting that a file named in its own
+brief does not exist. That reads as a stale brief or a bad path, so the natural response is to
+re-check the path in repo B — where it *is* present — and conclude the agent is confused. The
+loop can run several times before anyone asks which repo the worktree was cut from.
+
+**For cross-repo work do not pass the flag at all.** Have the agent create its own worktree
+explicitly: `git -C <target-repo> worktree add <path> -b <branch> origin/<main>`. The target
+repo is then named in the command instead of inferred from ambient state.
+
+Same shape as [worktree-not-session](#worktree-not-session): the isolation primitive is
+narrower than the word "isolation" suggests, and it fails silently at exactly the boundary you
+assumed it covered.
+
+## sibling-agent-kill
+*Supports: 🔴 "With parallel agents this widens: also filter resolved PIDs by `/proc/<pid>/cwd`
+to your OWN worktree."*
+
+The core rule already forbids letting a `-f` pattern reach `pkill`, and prescribes resolving
+PIDs and confirming each via `/proc/<pid>/cmdline`. Under a parallel fan-out that confirmation
+is **not sufficient**: a sibling agent running the same suite has a genuinely matching
+`cmdline`. It passes the check, and it is not yours.
+
+One auditor cleaning up its own hung run resolved and killed ~15 PIDs this way and destroyed
+another agent's in-flight test run. The victim's next attempt collapsed with **0 files collected
+and exit 144** — and both of those are readable as code defects, so the second agent spent its
+next rounds hunting a bug in the tree rather than a killer outside it. Neither agent could see
+the other; only the wall-clock coincidence gave it away.
+
+`/proc/<pid>/cwd` is the discriminator, because worktrees differ per agent even when the command
+lines are identical. Resolve, confirm the cmdline, **then** confirm the cwd is under your own
+worktree, and only then kill.
+
 ## retired-professional-honesty
 *Retired from the core 2026-08-10, verdict **NOW-NATIVE**.*
 
