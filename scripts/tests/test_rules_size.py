@@ -96,9 +96,13 @@ ARCHIVE_MD = REPO_ROOT / "claude" / "RULES-ARCHIVE.md"
 # after PR #447). Five sibling bullets became THREE: one `worktree add` recipe,
 # one "a worktree isolates a working DIRECTORY only" frame with the unisolated
 # surfaces as sub-bullets (REPO / SESSION / ENVIRONMENT), and the base-clone
-# re-sync bullet, which stayed top-level. Result: 33,300 -> 33,229 B.
+# re-sync bullet, which stayed top-level. Result: 33,300 -> 33,264 B. (The
+# consolidation itself landed 33,229; an audit then found the new frame verb
+# described only one of its three surfaces correctly, and the reword to fix that
+# spent 35 B back. Both changes ship in the same merge, so -36 B is what the
+# tree actually sees.)
 #
-# 🔴 That -71 B is the honest yield, and it is the finding, not a disappointment:
+# 🔴 That -36 B is the honest yield, and it is the finding, not a disappointment:
 # every clause that survived is scope-bearing, so the only bytes available were
 # genuine restatement -- one duplicated `worktree add` recipe, one duplicated
 # "never two file-modifying agents in one checkout", and the no-error framing
