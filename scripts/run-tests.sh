@@ -543,7 +543,40 @@ TARGET_FLOORS=(
   # already-tracked one, so the "a new file must be git added or the flake
   # silently omits it" trap has no purchase here; movement on THIS line is still
   # the evidence the gate ran the new cases.
-  "scripts/tests|2976"
+  #
+  # 2026-08-12, the subsystem-touch COMMIT path source: 3041 -> 3150 collected.
+  # The AUTHORITATIVE gate's own line, `nix build .#checks.x86_64-linux.pytests`:
+  #   PASS  scripts/tests  (collected=3150 passed=3150 skipped=0 floor=2976)
+  # put through the gate's OWN function rather than arithmetic:
+  #   _suggested_floor 3150 = 3150 - min(50, max(1, 157)) = 3150 - 50 = 3100.
+  #
+  # ⚠ THE DELTA IS THE BRANCH'S, NOT THE TARGET'S MOVEMENT — and the difference
+  # is 15 tests. The naive read, 3150 minus the 3026 the line above recorded,
+  # says +124. This branch added +109. Both halves were measured, not inferred:
+  # the gate was run on UNMODIFIED origin/main first and printed `collected=3041`
+  # (so +15 had arrived with main since #429 landed), and the branch's own tests
+  # all live in ONE file, which went 374 -> 483 = +109 by per-file collection.
+  # The two attributions agree exactly, which is the check — if they had not,
+  # something else in the target had moved and the +109 would have been a fact
+  # about a branch that never produced it. That is now the third consecutive PR
+  # where re-measuring changed the recorded delta.
+  #
+  # ⚠ ZERO new skips (still the one pinned in repo-cos), no HERMETIC_TARGETS
+  # entry needed, and NO NEW FILE — every change lands in an already-tracked one,
+  # so the "a new file must be git added or the flake silently omits it" trap has
+  # no purchase here. Movement on THIS line is still the evidence the gate ran
+  # the new cases. If this line conflicts with another branch — it has now on
+  # ELEVEN consecutive PRs — re-run the gate on the MERGED tree and copy what it
+  # prints. Do NOT reconcile the two sides by hand.
+  #
+  # ⚠ ONE OBSERVED FLAKE, in another target and unrelated to this branch: the
+  # baseline run of UNMODIFIED main reported `FAIL scripts/dl-router/tests` on
+  # test_dedupe.py's `test_st_blocks_CANNOT_see_a_fallocated_partial`
+  # (`assert 16896 == 16904` — st_blocks after `posix_fallocate`, which is
+  # filesystem-dependent). The very next run, on this branch, passed 991/991. So
+  # it is intermittent and host-level, not a regression here; recorded because a
+  # red baseline that nobody writes down is how a real failure gets waved past.
+  "scripts/tests|3100"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —

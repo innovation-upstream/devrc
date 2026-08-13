@@ -1300,6 +1300,33 @@ class TestSkillDocsArePinned:
             "Closed-unmerged PRs are refused by name",
             "which PR states are acceptable input",
         ),
+        # 🔴 The COMMIT source. The one window that reaches a repo which lands
+        # work without pull requests, or forbids committing in the primary
+        # clone — where the other two are blind BY CONSTRUCTION (measured: 25
+        # session paths outside the cwd and 0 inside; 144 of 200 mainline
+        # commits with no PR). Like the PR numbers and unlike a session uuid,
+        # nothing on the machine knows the shas; only the agent that made them
+        # does. If these sentences go, the source is inert.
+        (
+            "--commit <sha>[,<sha>...]",
+            "the step actually passes the shas it created",
+        ),
+        (
+            "You know the shas you just made; nothing else in the toolchain does",
+            "WHERE the shas come from — the fact only the agent has",
+        ),
+        (
+            "This window is what those COMMITS changed",
+            "🔴 the window's identity: neither a session nor a branch",
+        ),
+        (
+            "refused by name; pass a merge's side commits, or use `--pr`",
+            "the merge decision, surfaced to the executor with its alternative",
+        ),
+        (
+            "run it separately, never merge the path sets",
+            "the compose rule, restated for the third source",
+        ),
     ]
 
     def test_EVERY_emitted_status_has_a_bullet_in_the_skill(self) -> None:
@@ -2711,9 +2738,8 @@ class TestMutationKillMatrix:
             "m_frame",
             [
                 (
-                    '    toplevel = _git(Path(repo), ["rev-parse", "--show-toplevel"]).strip()\n'
-                    "    repo = Path(toplevel)",
-                    "    repo = Path(repo)",
+                    '    return Path(_git(Path(repo), ["rev-parse", "--show-toplevel"]).strip())',
+                    "    return Path(repo)",
                 )
             ],
         )
@@ -3062,7 +3088,7 @@ class TestSessionMutationKillMatrix:
         mod = _session_mutant(
             tmp_path,
             "ms_conflict",
-            [('        if (wants_session or wants_pr) and args.paths_from != "git":',
+            [('        if (wants_session or wants_pr or wants_commit) and args.paths_from != "git":',
               "        if False:")],
             tailer,
         )
@@ -3392,6 +3418,19 @@ class TestPrNegativeControls:
         "closed": "pull request is closed unmerged",
         "malformed": "pull request response is malformed",
         "truncated": "pull request file list is truncated",
+        # commit-source sentinels. Here rather than in a fourth map because
+        # `_only` is only a measurement if every OTHER guard's phrase is asserted
+        # ABSENT — a commit sentinel missing from this dict would silently stop
+        # being checked for by the PR and session controls above.
+        # ⚠ "commit sha is malformed" shares no spelling with "pull request
+        # response is malformed", and "commit not found" none with "pull request
+        # not found" / "transcript not found" / "store root not found" / "gh cli
+        # not found"; `test_no_two_sentinels_share_a_spelling` is what proves it.
+        "c-malformed": "commit sha is malformed",
+        "c-missing": "commit not found",
+        "c-ambiguous": "commit sha is ambiguous",
+        "c-type": "object is not a commit",
+        "c-merge": "commit is a merge",
     }
 
     def _only(self, exc: Exception, key: str) -> None:
@@ -3421,6 +3460,8 @@ class TestPrNegativeControls:
             "RepoRemoteError", "GhMissingError", "GhAuthError", "GhRateLimitError",
             "GhApiError", "PrNotFoundError", "PrRepoMismatchError", "PrNotLandedError",
             "PrResponseMalformedError", "PrFileListTruncatedError",
+            "CommitRefMalformedError", "CommitMissingError", "CommitAmbiguousError",
+            "CommitWrongTypeError", "CommitIsMergeError",
             "StoreMissingError", "GitError", "ExtractorMissingError",
             "TranscriptMissingError", "TranscriptAmbiguousError", "TranscriptStaleError",
             "TranscriptUnreadableError", "TranscriptCwdMismatchError",
@@ -4466,13 +4507,1318 @@ class TestPrMutationKillMatrix:
         mod = _load_mutant(
             tmp_path,
             "mp_conflict",
-            [('        if (wants_session or wants_pr) and args.paths_from != "git":',
+            [('        if (wants_session or wants_pr or wants_commit) and args.paths_from != "git":',
               "        if False:")],
         )
         repo = _init_pr_repo(tmp_path)
         store = _make_store(tmp_path / "s")
         monkeypatch.setattr(mod, "_gh_fetch_pr", _fetch({421: _pr_payload(421, ["a.py"])}))
         argv = ["--repo", str(repo), "--store", str(store), "--pr", "421",
+                "--paths-from", "-", "--today", TODAY]
+        capsys.readouterr()
+        assert mod.main(argv) == 0
+        assert st.main(argv) == 2
+        assert "cannot be combined" in capsys.readouterr().err
+
+
+# =============================================================================
+# THE COMMIT SOURCE — paths from what THESE COMMITS changed.
+#
+# 🔴 THE SOURCE WITH THE MOST WAYS TO REACH A SILENT ZERO, AND FOUR OF THEM ARE
+# GIT'S OWN EXIT-0 DEFAULTS RATHER THAN ANYTHING THE MODULE DOES. Measured
+# against git 2.55.0 on a synthetic repo, 2026-08-12 — each prints an EMPTY file
+# list and EXITS 0, so `GitError` (which keys on a non-zero exit) cannot see any
+# of them:
+#
+#     diff-tree <merge>          nothing  (a merge has no single diff)
+#     diff-tree <root-commit>    nothing  without `--root`
+#     diff-tree <blob-sha>       nothing; the complaint goes to STDERR, rc=0
+#     diff-tree <tree-sha>       nothing; same
+#
+# Every one of those is reproduced below as a FIXTURE SELF-CHECK before the guard
+# that closes it is tested, so the guard is never asserted against a hazard
+# nobody demonstrated. `claude/RULES.md` → "Validate the INSTRUMENT before you
+# read its verdict".
+#
+# 🔴 EVERY FIXTURE IS SYNTHETIC AND EVERY SHA IS BUILT IN `tmp_path`. No real
+# commit sha, repo name, path or host appears here; this repo is PUBLIC. The
+# repos whose measurements motivated this source are described by their SHAPE
+# ("a repo whose own rules mandate committing from a throwaway worktree") and
+# never named.
+# =============================================================================
+
+
+def _commit(repo: Path, *rel: str, message: str = "w", tmp_home: Path | None = None) -> str:
+    """Write + stage + commit the named repo-relative paths; return the full sha."""
+    for r in rel:
+        _write(repo, r)
+    for r in rel:
+        _run_git(repo, "add", "--", r, home=tmp_home)
+    _run_git(repo, "commit", "-m", message, home=tmp_home)
+    return _run_git(repo, "rev-parse", "HEAD", home=tmp_home).strip()
+
+
+def _empty_commit(repo: Path, *, message: str = "empty", tmp_home: Path | None = None) -> str:
+    """A well-formed commit that changed NOTHING — the control half of the pair."""
+    _run_git(repo, "commit", "--allow-empty", "-m", message, home=tmp_home)
+    return _run_git(repo, "rev-parse", "HEAD", home=tmp_home).strip()
+
+
+def _blob_sha(content: bytes) -> str:
+    """git's blob object name for `content`, computed WITHOUT git.
+
+    Used to search for a 4-hex prefix collision offline: sha1 over fixed bytes is
+    fixed forever, so the search below is DETERMINISTIC — there is no random
+    fixture here and no flake, only a bounded loop over a fixed sequence.
+    """
+    return hashlib.sha1(b"blob %d\x00" % len(content) + content).hexdigest()
+
+
+def _colliding_blob_pair(bound: int = 20000) -> tuple[bytes, bytes, str]:
+    """Two byte strings whose blob shas share a 4-hex prefix, plus that prefix."""
+    seen: dict[str, bytes] = {}
+    for i in range(bound):
+        c = b"ambiguity-fixture-%d\n" % i
+        p = _blob_sha(c)[:4]
+        if p in seen:
+            return seen[p], c, p
+        seen[p] = c
+    raise AssertionError(  # pragma: no cover - the search is deterministic
+        f"no 4-hex blob-prefix collision within {bound} candidates; the fixture "
+        f"cannot construct an ambiguous sha, so every ambiguity test below would "
+        f"be vacuous."
+    )
+
+
+class TestCommitPositiveControl:
+    """🔴 `claude/RULES.md` → "Positive control — can it ever observe the thing?"
+
+    An empty path set from this source is indistinguishable from a differ wired
+    to nothing, and git hands back exactly that empty set, at exit 0, in four
+    separate situations (see the banner). So the pair is reported: a commit that
+    MUST yield paths against a commit that MUST yield none, on the same code
+    path, in the same repo, through the same `diff-tree` invocation.
+    """
+
+    UNDER_TEST = ("src/collector/a.py", "src/collector/b.py", "src/collector/c.py")
+
+    def test_THE_PAIR_nonzero_under_test_zero_on_the_control(self, tmp_path: Path) -> None:
+        repo = _init_repo(tmp_path, SCOPE)
+        sha = _commit(repo, *self.UNDER_TEST)
+        # CONTROL: a real, well-formed commit that genuinely changed nothing.
+        # Identical machinery; the honest answer is zero, and it must be zero for
+        # THAT reason rather than because nothing was read.
+        empty = _empty_commit(repo)
+
+        pos = st.collect_commit_paths(repo, [sha])
+        neg = st.collect_commit_paths(repo, [empty])
+
+        assert len(pos.paths) == 3, "positive control yielded nothing — wired to nothing"
+        assert sorted(pos.paths) == sorted(self.UNDER_TEST)
+        assert len(neg.paths) == 0
+
+    def test_the_control_zero_is_ACCOUNTED_for_not_merely_empty(self, tmp_path: Path) -> None:
+        """An empty list beside `0 file(s) changed` is a reading; an empty list
+        with no count is the silent zero."""
+        repo = _init_repo(tmp_path, SCOPE)
+        empty = _empty_commit(repo)
+        src = st.collect_commit_paths(repo, [empty])
+        assert src.paths == ()
+        assert any(f"commit {empty[:12]}: 0 file(s) changed" in n for n in src.notes), src.notes
+        assert any("0 distinct path(s) across 1 commit(s)" in n for n in src.notes)
+
+    def test_the_per_commit_count_is_emitted_AT_NONZERO_too(self, tmp_path: Path) -> None:
+        """The other half of the pair: a counter that only ever prints 0 is
+        indistinguishable from one wired to a constant."""
+        repo = _init_repo(tmp_path, SCOPE)
+        sha = _commit(repo, *self.UNDER_TEST)
+        src = st.collect_commit_paths(repo, [sha])
+        assert any(f"commit {sha[:12]}: 3 file(s) changed" in n for n in src.notes), src.notes
+        assert any("3 distinct path(s) across 1 commit(s)" in n for n in src.notes)
+
+    def test_the_pair_survives_all_the_way_to_a_REPORT(self, tmp_path: Path) -> None:
+        """🔴 The brief's other zero: a commit touching paths OUTSIDE any subsystem
+        must be a REAL zero — three paths examined, none naming an entry — not an
+        empty window. The differ and the matcher are two places a zero can come
+        from; both ends are pinned so one being wired to nothing cannot hide
+        behind the other."""
+        repo = _init_repo(tmp_path, SCOPE)
+        store = _make_store(tmp_path / "s")
+        known = _commit(repo, *self.UNDER_TEST, message="known")
+        # Same count, same repo — but three paths in three DIFFERENT directories
+        # with three different stems, so no ref reaches `min_paths` and nothing
+        # is even nominated. That is what makes the renderer print its
+        # `real zero` sentence rather than a NO ENTRY block.
+        unknown = _commit(
+            repo, "docs/alpha.md", "notes/beta.md", "misc/gamma.md", message="unknown"
+        )
+        pos_rep = st.build_report(st.collect_commit_paths(repo, [known]), store, SCOPE, today=TODAY)
+        neg_rep = st.build_report(
+            st.collect_commit_paths(repo, [unknown]), store, SCOPE, today=TODAY
+        )
+
+        assert pos_rep.status == "resolved"
+        assert [m.entry.ref for m in pos_rep.known] == ["collector"]
+        assert neg_rep.status == "no-match"
+        # …and the negative control is NOT an empty window, which would make the
+        # zero uninformative.
+        assert len(neg_rep.source.paths) == 3
+        rendered = st.render_text(neg_rep)
+        assert "This is a real zero, not an empty window." in rendered
+        assert "3 paths examined" in rendered
+
+    def test_a_commit_OUTSIDE_every_subsystem_still_NOMINATES_when_it_clusters(
+        self, tmp_path: Path
+    ) -> None:
+        """The other half of the zero above: paths that name no entry but DO
+        agree on a directory are a nomination, not a bare zero — otherwise the
+        first entry in a repo could never come from this source."""
+        repo = _init_repo(tmp_path, SCOPE)
+        store = _make_store(tmp_path / "s")
+        sha = _commit(
+            repo, "src/unlisted-widget/a.py", "src/unlisted-widget/b.py", message="new"
+        )
+        rep = st.build_report(st.collect_commit_paths(repo, [sha]), store, SCOPE, today=TODAY)
+        assert rep.status == "no-match"
+        assert [n.ref for n in rep.nominations][:1] == ["unlisted-widget"]
+
+    def test_SEVERAL_commits_union_in_first_seen_order(self, tmp_path: Path) -> None:
+        repo = _init_repo(tmp_path, SCOPE)
+        first = _commit(repo, "a.py", "b.py", message="first")
+        second = _commit(repo, "b.py", "c.py", message="second")
+        src = st.collect_commit_paths(repo, [first, second])
+        assert src.paths == ("a.py", "b.py", "c.py")
+        assert src.commits == (first, second)
+
+    def test_a_repeated_sha_is_read_ONCE_and_SAID(self, tmp_path: Path) -> None:
+        repo = _init_repo(tmp_path, SCOPE)
+        sha = _commit(repo, "a.py")
+        src = st.collect_commit_paths(repo, [sha, sha])
+        assert src.commits == (sha,)
+        assert any("named more than once" in n for n in src.notes)
+
+    def test_the_dedupe_is_on_the_RESOLVED_sha_not_the_TOKEN(self, tmp_path: Path) -> None:
+        """🔴 `a1b2c3d` and its own 40-char form are ONE commit. Deduping on the
+        token would read it twice and double the per-commit accounting, so the
+        `1 commit(s)` line — which a reader uses to check the window — would be
+        wrong about a run that is otherwise fine."""
+        repo = _init_repo(tmp_path, SCOPE)
+        sha = _commit(repo, "a.py")
+        src = st.collect_commit_paths(repo, [sha[:8], sha])
+        assert src.commits == (sha,)
+        assert any("1 distinct path(s) across 1 commit(s)" in n for n in src.notes), src.notes
+
+    def test_a_SHORT_sha_is_EXPANDED_to_the_full_one(self, tmp_path: Path) -> None:
+        """Expanding the token is part of validating it — and `commits` feeds the
+        caveat, which must state what the argument RESOLVED to, not echo it."""
+        repo = _init_repo(tmp_path, SCOPE)
+        sha = _commit(repo, "src/collector/a.py")
+        src = st.collect_commit_paths(repo, [sha[:7]])
+        assert src.commits == (sha,)
+        assert len(src.commits[0]) == 40
+        assert src.paths == ("src/collector/a.py",)
+
+    def test_a_ROOT_commit_reports_the_files_it_INTRODUCED(self, tmp_path: Path) -> None:
+        """🔴 POSITIVE CONTROL ON `--root`, paired with the measurement below that
+        shows what git does without it."""
+        repo = _init_repo(tmp_path, SCOPE)  # its seed commit IS the root
+        root = _run_git(repo, "rev-list", "--max-parents=0", "HEAD").strip()
+        src = st.collect_commit_paths(repo, [root])
+        assert src.paths == ("README.md",)
+
+    def test_the_ROOT_hazard_is_REAL_git_prints_nothing_without_the_flag(
+        self, tmp_path: Path
+    ) -> None:
+        """The fixture self-check behind the flag above: without `--root`, git
+        exits 0 and prints an empty file list for a root commit. A guard asserted
+        against a hazard nobody demonstrated is a guard nobody can size."""
+        repo = _init_repo(tmp_path, SCOPE)
+        root = _run_git(repo, "rev-list", "--max-parents=0", "HEAD").strip()
+        without = _run_git(repo, "diff-tree", "--no-commit-id", "--name-only", "-r", root)
+        assert without.strip() == ""
+        with_root = _run_git(
+            repo, "diff-tree", "--no-commit-id", "--name-only", "-r", "--root", root
+        )
+        assert with_root.strip() == "README.md"
+
+    def test_a_DELETION_counts_as_touched(self, tmp_path: Path) -> None:
+        """`--name-only` is not `--diff-filter=d`: removing a file is touching
+        the subsystem it lived in, and dropping it would understate exactly the
+        change most worth a journal bullet."""
+        repo = _init_repo(tmp_path, SCOPE)
+        _commit(repo, "src/collector/gone.py")
+        _run_git(repo, "rm", "-q", "--", "src/collector/gone.py")
+        _run_git(repo, "commit", "-m", "drop")
+        sha = _run_git(repo, "rev-parse", "HEAD").strip()
+        assert st.collect_commit_paths(repo, [sha]).paths == ("src/collector/gone.py",)
+
+    def test_a_RENAME_reports_BOTH_ends(self, tmp_path: Path) -> None:
+        """Rename detection is deliberately OFF (`diff-tree` does not detect them
+        by default): both directories were touched, and a rename that collapsed
+        to one path would hide the one the code LEFT."""
+        repo = _init_repo(tmp_path, SCOPE)
+        _commit(repo, "src/collector/old.py")
+        (repo / "src" / "status-bar").mkdir(parents=True, exist_ok=True)
+        _run_git(repo, "mv", "src/collector/old.py", "src/status-bar/new.py")
+        _run_git(repo, "commit", "-m", "move")
+        sha = _run_git(repo, "rev-parse", "HEAD").strip()
+        assert sorted(st.collect_commit_paths(repo, [sha]).paths) == [
+            "src/collector/old.py",
+            "src/status-bar/new.py",
+        ]
+
+    def test_a_path_with_a_space_survives_intact(self, tmp_path: Path) -> None:
+        """`-z`, for the same reason the git source uses it: a split path would
+        MANUFACTURE two refs out of one."""
+        repo = _init_repo(tmp_path, SCOPE)
+        sha = _commit(repo, "src/collector/two words.py")
+        assert st.collect_commit_paths(repo, [sha]).paths == ("src/collector/two words.py",)
+
+    def test_called_with_a_SUBDIRECTORY_the_paths_stay_repo_root_relative(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 …and the reason is `diff-tree` ITSELF, not this module's frame call.
+
+        Stated because an independent mutation sweep proved it: neutering the
+        shared `_toplevel()` changes NOTHING observable here — `diff-tree
+        --name-only` is repo-root-relative wherever it runs — while it breaks the
+        git source outright, because `ls-files --others` is cwd-relative AND
+        cwd-scoped. So the `_toplevel()` call in `collect_commit_paths` is
+        normalisation and consistency, NOT the thing that makes this assertion
+        true, and claiming otherwise would be a comment the code does not support.
+        The behaviour is still pinned here: it is what a caller relies on.
+        """
+        repo = _init_repo(tmp_path, SCOPE)
+        sha = _commit(repo, "src/collector/a.py")
+        src = st.collect_commit_paths(repo / "src", [sha])
+        assert src.paths == ("src/collector/a.py",)
+        # The measurement behind the paragraph above: git's own output, from the
+        # subdirectory, with no help from this module.
+        raw = _run_git(
+            repo / "src", "diff-tree", "--no-commit-id", "--name-only", "-r", "--root", sha,
+            home=tmp_path,
+        )
+        assert raw.strip() == "src/collector/a.py"
+
+    def test_excluded_paths_are_dropped_AND_counted(self, tmp_path: Path) -> None:
+        """The SHARED exclusion predicate, not a fourth copy of it."""
+        repo = _init_repo(tmp_path, SCOPE)
+        doc = "claudedocs/handoff-topic.md"
+        sha = _commit(repo, doc, "src/collector/a.py")
+        src = st.collect_commit_paths(repo, [sha], exclude=[doc])
+        assert doc not in src.paths
+        assert "src/collector/a.py" in src.paths
+        assert any("excluded 1 caller-named path(s)" in n for n in src.notes)
+
+    def test_the_store_is_never_written(self, tmp_path: Path) -> None:
+        """The module's central invariant, exercised through the NEW source."""
+        repo = _init_repo(tmp_path, SCOPE)
+        store = _make_store(tmp_path / "s")
+        sha = _commit(repo, *self.UNDER_TEST)
+        before = _tree_hash(store)
+        rep = st.build_report(st.collect_commit_paths(repo, [sha]), store, SCOPE, today=TODAY)
+        st.render_text(rep)
+        json.dumps(st.report_json(rep))
+        assert _tree_hash(store) == before
+
+    def test_the_repo_itself_is_never_written_either(self, tmp_path: Path) -> None:
+        """🔴 The other half: this source runs FIVE git commands per sha, and a
+        single non-read-only one would mutate a repo whose working tree is a
+        deploy target. Hashed, not grepped."""
+        repo = _init_repo(tmp_path, SCOPE)
+        sha = _commit(repo, *self.UNDER_TEST)
+        before = _tree_hash(repo)
+        st.collect_commit_paths(repo, [sha])
+        assert _tree_hash(repo) == before
+
+
+class TestCommitDecisionsAreTESTEDNotAsserted:
+    """The three judgement calls in this source, each with the measurement that
+    forced it. They are decisions, so they are pinned behaviourally — a later
+    reader changing one has to change a test that says why."""
+
+    def test_a_MERGE_commit_is_REFUSED_by_name(self, tmp_path: Path) -> None:
+        """🔴 DECISION: refuse. Alternatives rejected in `CommitIsMergeError` —
+        first-parent (the whole other branch's work under one sha), `--cc` (a
+        third question, empty for a clean merge), and empty-with-a-note (does not
+        compose: `--commit a,b,<merge>` would under-report inside a confident
+        union)."""
+        repo = _init_repo(tmp_path, SCOPE)
+        base = _run_git(repo, "rev-parse", "HEAD").strip()
+        _commit(repo, "src/collector/a.py", message="mainline")
+        _run_git(repo, "checkout", "-q", "-b", "side", base)
+        _commit(repo, "src/status-bar/s.py", message="side")
+        _run_git(repo, "checkout", "-q", "main")
+        _run_git(repo, "merge", "-q", "--no-ff", "side", "-m", "merge")
+        merge = _run_git(repo, "rev-parse", "HEAD").strip()
+
+        with pytest.raises(st.CommitIsMergeError) as exc:
+            st.collect_commit_paths(repo, [merge])
+        assert "2 parents" in str(exc.value)
+        # The alternative is NAMED, because a refusal with no next step is how a
+        # caller ends up merging path sets by hand.
+        assert "--pr" in str(exc.value)
+
+    def test_the_MERGE_hazard_is_REAL_git_prints_nothing_for_one(self, tmp_path: Path) -> None:
+        """The fixture self-check behind the refusal: `diff-tree` on a merge
+        exits 0 with an EMPTY file list, so "do nothing special" is not a
+        different design — it is the silent zero, with no note to read."""
+        repo = _init_repo(tmp_path, SCOPE)
+        base = _run_git(repo, "rev-parse", "HEAD").strip()
+        _commit(repo, "src/collector/a.py", message="mainline")
+        _run_git(repo, "checkout", "-q", "-b", "side", base)
+        _commit(repo, "src/status-bar/s.py", message="side")
+        _run_git(repo, "checkout", "-q", "main")
+        _run_git(repo, "merge", "-q", "--no-ff", "side", "-m", "merge")
+        merge = _run_git(repo, "rev-parse", "HEAD").strip()
+        out = _run_git(
+            repo, "diff-tree", "--no-commit-id", "--name-only", "-r", "--root", merge
+        )
+        assert out.strip() == "", "git no longer hides a merge's diff — re-read the decision"
+
+    def test_an_EMPTY_commit_is_a_READING_not_an_error(self, tmp_path: Path) -> None:
+        """🔴 DECISION: a reading. It matches the PR source's `files: []` (a
+        well-formed PR that changed nothing), and refusing would break
+        composition — one empty sha would kill an otherwise good multi-sha run.
+        Here the empty one is named ALONGSIDE a real one and the run still
+        succeeds with the real one's paths."""
+        repo = _init_repo(tmp_path, SCOPE)
+        real = _commit(repo, "src/collector/a.py")
+        empty = _empty_commit(repo)
+        src = st.collect_commit_paths(repo, [empty, real])
+        assert src.paths == ("src/collector/a.py",)
+        assert src.commits == (empty, real)
+        assert any(f"commit {empty[:12]}: 0 file(s) changed" in n for n in src.notes)
+
+    def test_an_UNREACHABLE_commit_is_ACCEPTED_and_the_note_SAYS_so(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 DECISION: accept. A commit made in a throwaway worktree that has
+        since been removed, or one rebased away, is reachable from no ref — and
+        it is exactly the case this flag exists for, since the work happened and
+        the object is still in the shared object database. The real consequence
+        (it can be GC'd, so the run is not reproducible later) is REPORTED."""
+        repo = _init_repo(tmp_path, SCOPE)
+        base = _run_git(repo, "rev-parse", "HEAD").strip()
+        _run_git(repo, "checkout", "-q", "--detach")
+        orphan = _commit(repo, "src/collector/orphan.py", message="detached")
+        _run_git(repo, "checkout", "-q", "main")
+        _run_git(repo, "reset", "-q", "--keep", base)
+
+        src = st.collect_commit_paths(repo, [orphan])
+        assert src.paths == ("src/collector/orphan.py",)
+        note = next(n for n in src.notes if n.startswith(f"commit {orphan[:12]}"))
+        assert "NOT reachable from any ref" in note
+        assert "not reproducible later" in note
+
+    def test_the_reachability_note_prints_the_OTHER_value_too(self, tmp_path: Path) -> None:
+        """🔴 Report the pair. A field that only ever says `NOT reachable` is
+        indistinguishable from a probe wired to a constant, and nobody would ever
+        have seen it say anything else."""
+        repo = _init_repo(tmp_path, SCOPE)
+        sha = _commit(repo, "src/collector/a.py")
+        note = next(
+            n for n in st.collect_commit_paths(repo, [sha]).notes
+            if n.startswith(f"commit {sha[:12]}")
+        )
+        assert "reachable from a ref" in note
+        assert "NOT reachable" not in note
+
+    def test_a_commit_from_a_WORKTREE_of_THIS_repo_IS_visible(self, tmp_path: Path) -> None:
+        """🔴 THE MOTIVATING CASE, and the reason the missing-sha error hedges the
+        way it does. Worktrees of one repo share ONE object database, so a commit
+        made in a `/tmp/wt-*` worktree is present in the primary clone the moment
+        it exists — which is why `--commit` reaches work `--session` cannot see
+        (its paths have no repo-relative form against the primary clone) and
+        `--pr` need never have seen."""
+        repo = _init_repo(tmp_path, SCOPE)
+        wt = tmp_path / "wt-topic"
+        _run_git(repo, "worktree", "add", "-q", "-b", "topic", str(wt))
+        made_elsewhere = _commit(wt, "src/collector/from-worktree.py", tmp_home=tmp_path)
+
+        src = st.collect_commit_paths(repo, [made_elsewhere])
+        assert src.paths == ("src/collector/from-worktree.py",)
+
+    def test_a_sha_from_ANOTHER_repo_is_NOT_visible(self, tmp_path: Path) -> None:
+        """The contrast that makes the sentence above a claim rather than a hope:
+        a separate clone does NOT share objects, so its sha is simply absent."""
+        repo = _init_repo(tmp_path, SCOPE)
+        other = _init_repo(tmp_path, "unrelated-project")
+        foreign = _commit(other, "src/collector/a.py", message="theirs")
+        # It is a perfectly good commit — over THERE.
+        assert st.collect_commit_paths(other, [foreign]).paths == ("src/collector/a.py",)
+        with pytest.raises(st.CommitMissingError):
+            st.collect_commit_paths(repo, [foreign])
+
+
+class TestCommitNegativeControls:
+    """Each guard fails with ITS OWN sentinel, reached by an input no EARLIER
+    guard rejects — otherwise a control passes because a neighbour fired and
+    stays green with the guard it claims to test deleted.
+    """
+
+    #: 🔴 THE SAME MAP THE OTHER TWO FAMILIES USE, deliberately not a fourth copy.
+    #: `_only` is a measurement only if EVERY other guard's phrase is asserted
+    #: absent, so the map has to span all three families at once; a per-family
+    #: copy would make each family's controls blind to the other two.
+    SENTINELS = TestPrNegativeControls.SENTINELS
+
+    def _only(self, exc: Exception, key: str) -> None:
+        text = str(exc)
+        assert self.SENTINELS[key] in text, f"expected the {key} sentinel, got: {text}"
+        for other, phrase in self.SENTINELS.items():
+            if other != key:
+                assert phrase not in text, f"the {other} sentinel also fired: {text}"
+
+    def test_the_sentinel_map_is_the_SHARED_one(self) -> None:
+        """The premise of the note above, as an assertion rather than a comment:
+        two maps that drift apart would let a commit sentinel collide with a PR
+        one and nothing would notice."""
+        assert self.SENTINELS is TestPrNegativeControls.SENTINELS
+        for key in ("c-malformed", "c-missing", "c-ambiguous", "c-type", "c-merge"):
+            assert key in self.SENTINELS
+
+    # --- guard 1: the token is SHAPED like a sha --------------------------------
+
+    @pytest.mark.parametrize(
+        "token", ["HEAD", "main", "HEAD~3", "HEAD^", "@{u}", "origin/main", "v1.0"],
+        ids=["head", "branch", "tilde", "caret", "upstream", "remote-branch", "tag-name"],
+    )
+    def test_a_revision_EXPRESSION_is_MALFORMED_not_resolved(
+        self, tmp_path: Path, token
+    ) -> None:
+        """🔴 Refused rather than resolved: an expression names a DIFFERENT commit
+        on a re-run, in another worktree, or on another host, so the window would
+        move under a source whose whole claim is that it is deterministic."""
+        repo = _init_repo(tmp_path, SCOPE)
+        _commit(repo, "src/collector/a.py")
+        with pytest.raises(st.CommitRefMalformedError) as exc:
+            st.collect_commit_paths(repo, [token])
+        self._only(exc.value, "c-malformed")
+
+    @pytest.mark.parametrize(
+        "token", ["", "   ", "zzzz", "deadbeefg", "0x1234", "abc def", "-r", "../etc/passwd",
+                  "0" * 41],
+        ids=["empty", "spaces", "nonhex", "trailing-nonhex", "prefixed", "spaced",
+             "flaglike", "path", "too-long"],
+    )
+    def test_a_NON_HEX_or_OVERLONG_token_is_MALFORMED(self, tmp_path: Path, token) -> None:
+        repo = _init_repo(tmp_path, SCOPE)
+        with pytest.raises(st.CommitRefMalformedError) as exc:
+            st.collect_commit_paths(repo, [token])
+        self._only(exc.value, "c-malformed")
+
+    def test_a_TOO_SHORT_prefix_is_MALFORMED(self, tmp_path: Path) -> None:
+        repo = _init_repo(tmp_path, SCOPE)
+        sha = _commit(repo, "src/collector/a.py")
+        with pytest.raises(st.CommitRefMalformedError) as exc:
+            st.collect_commit_paths(repo, [sha[:3]])
+        self._only(exc.value, "c-malformed")
+
+    def test_the_LENGTH_bound_is_not_vacuous_git_WOULD_have_expanded_it(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 The measurement behind the bound. `rev-parse --disambiguate` expands
+        a 3-character prefix in a small repo — so without the bound a typo
+        RESOLVES to a real commit and is reported as a deliberate argument. The
+        guard is not restating git's own refusal; git does not refuse."""
+        repo = _init_repo(tmp_path, SCOPE)
+        sha = _commit(repo, "src/collector/a.py")
+        expanded = _run_git(repo, "rev-parse", f"--disambiguate={sha[:3]}").split()
+        assert expanded == [sha], expanded
+
+    def test_the_boundary_is_a_boundary_not_a_slope(self, tmp_path: Path) -> None:
+        """4 is accepted and 3 is not, at the same repo, on the same sha."""
+        repo = _init_repo(tmp_path, SCOPE)
+        sha = _commit(repo, "src/collector/a.py")
+        assert st.collect_commit_paths(repo, [sha[:4]]).commits == (sha,)
+        with pytest.raises(st.CommitRefMalformedError):
+            st.collect_commit_paths(repo, [sha[:3]])
+
+    def test_UPPERCASE_hex_is_accepted_and_normalized(self, tmp_path: Path) -> None:
+        """A sha pasted out of a UI is not a different commit."""
+        repo = _init_repo(tmp_path, SCOPE)
+        sha = _commit(repo, "src/collector/a.py")
+        assert st.collect_commit_paths(repo, [sha.upper()]).commits == (sha,)
+
+    # --- guard 2: the prefix names ONE object -----------------------------------
+
+    def test_the_AMBIGUITY_fixture_really_IS_ambiguous(self, tmp_path: Path) -> None:
+        """🔴 Positive control on the fixture. An ambiguity test built on a prefix
+        that turns out to be unique would pass for the wrong reason forever."""
+        repo = _init_repo(tmp_path, SCOPE)
+        a, b, prefix = _colliding_blob_pair()
+        assert _blob_sha(a)[:4] == _blob_sha(b)[:4] == prefix
+        for content in (a, b):
+            _write(repo, "scratch.txt", content.decode())
+            _run_git(repo, "hash-object", "-w", "--", "scratch.txt")
+        assert len(_run_git(repo, "rev-parse", f"--disambiguate={prefix}").split()) >= 2
+
+    def test_an_AMBIGUOUS_short_sha_is_REFUSED_BY_NAME(self, tmp_path: Path) -> None:
+        """🔴 DECISION: refuse, and count candidates of EVERY object type. Letting
+        `<prefix>^{commit}` pick would inherit git's type-peeling tiebreak as a
+        silent dependency, and the caller always has the full sha in hand."""
+        repo = _init_repo(tmp_path, SCOPE)
+        a, b, prefix = _colliding_blob_pair()
+        for content in (a, b):
+            _write(repo, "scratch.txt", content.decode())
+            _run_git(repo, "hash-object", "-w", "--", "scratch.txt")
+        with pytest.raises(st.CommitAmbiguousError) as exc:
+            st.collect_commit_paths(repo, [prefix])
+        self._only(exc.value, "c-ambiguous")
+        assert "names 2 objects" in str(exc.value) or "names 3 objects" in str(exc.value)
+
+    # --- guard 3: something answers to the name ---------------------------------
+
+    def test_a_NONEXISTENT_sha_is_NOT_FOUND(self, tmp_path: Path) -> None:
+        repo = _init_repo(tmp_path, SCOPE)
+        with pytest.raises(st.CommitMissingError) as exc:
+            st.collect_commit_paths(repo, ["dead" * 10])
+        self._only(exc.value, "c-missing")
+
+    def test_a_sha_from_ANOTHER_repo_is_NOT_FOUND_and_the_message_names_BOTH(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 THE DELIBERATE NON-DISTINCTION, and it is the honest one.
+        `claude/RULES.md` → "an EMPTY RESULT cannot distinguish two mechanisms":
+        a sha that was never created and one created in another clone are the
+        same observable — the object is absent — and no local signal separates
+        them. A `CommitForeignRepoError` would be a diagnosis with no code path
+        behind it, so the message names BOTH mechanisms instead."""
+        repo = _init_repo(tmp_path, SCOPE)
+        other = _init_repo(tmp_path, "unrelated-project")
+        foreign = _commit(other, "src/collector/a.py", message="theirs")
+        with pytest.raises(st.CommitMissingError) as exc:
+            st.collect_commit_paths(repo, [foreign])
+        self._only(exc.value, "c-missing")
+        assert "ANOTHER repository" in str(exc.value)
+        assert "does not exist" in str(exc.value)
+
+    def test_NO_sha_at_all_is_NOT_FOUND_not_an_empty_report(self, tmp_path: Path) -> None:
+        """Reachable through `--commit ,`. Falling through would return a
+        well-formed report over ZERO commits — the confident zero arriving by
+        argument parsing."""
+        repo = _init_repo(tmp_path, SCOPE)
+        with pytest.raises(st.CommitMissingError) as exc:
+            st.collect_commit_paths(repo, [])
+        self._only(exc.value, "c-missing")
+        assert "no commit sha was given" in str(exc.value)
+
+    # --- guard 4: it is a COMMIT -------------------------------------------------
+
+    @pytest.mark.parametrize("kind", ["blob", "tree", "tag"])
+    def test_a_NON_COMMIT_object_is_WRONG_TYPE(self, tmp_path: Path, kind) -> None:
+        """Reached by a sha that EXISTS and is unambiguous — no earlier guard
+        rejects it, so the failure is this guard's own."""
+        repo = _init_repo(tmp_path, SCOPE)
+        _commit(repo, "src/collector/a.py")
+        if kind == "blob":
+            sha = _run_git(repo, "rev-parse", "HEAD:src/collector/a.py").strip()
+        elif kind == "tree":
+            sha = _run_git(repo, "rev-parse", "HEAD^{tree}").strip()
+        else:
+            _run_git(repo, "tag", "-a", "annotated", "-m", "t")
+            sha = _run_git(repo, "rev-parse", "annotated").strip()
+        assert _run_git(repo, "cat-file", "-t", sha).strip() == kind
+        with pytest.raises(st.CommitWrongTypeError) as exc:
+            st.collect_commit_paths(repo, [sha])
+        self._only(exc.value, "c-type")
+        assert f"names a {kind}" in str(exc.value)
+
+    def test_the_WRONG_TYPE_hazard_is_REAL_git_exits_ZERO_on_a_blob(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 The measurement behind the guard, and the reason `GitError` cannot
+        stand in for it: `diff-tree` on a blob EXITS 0 with an empty file list
+        and complains only on stderr. Without the guard the run succeeds and
+        reports a commit that changed nothing."""
+        repo = _init_repo(tmp_path, SCOPE)
+        _commit(repo, "src/collector/a.py")
+        blob = _run_git(repo, "rev-parse", "HEAD:src/collector/a.py").strip()
+        proc = subprocess.run(
+            ["git", "-C", str(repo), "diff-tree", "--no-commit-id", "--name-only",
+             "-r", "--root", blob],
+            capture_output=True, text=True, env=_git_env(tmp_path),
+        )
+        assert proc.returncode == 0, "git now FAILS on a blob — re-read the guard"
+        assert proc.stdout.strip() == ""
+        assert "not a commit" in proc.stderr
+
+    # --- guard 5: it is not a merge ---------------------------------------------
+
+    def test_a_MERGE_is_refused_with_ITS_OWN_sentinel(self, tmp_path: Path) -> None:
+        repo = _init_repo(tmp_path, SCOPE)
+        base = _run_git(repo, "rev-parse", "HEAD").strip()
+        _commit(repo, "src/collector/a.py", message="mainline")
+        _run_git(repo, "checkout", "-q", "-b", "side", base)
+        _commit(repo, "src/status-bar/s.py", message="side")
+        _run_git(repo, "checkout", "-q", "main")
+        _run_git(repo, "merge", "-q", "--no-ff", "side", "-m", "merge")
+        merge = _run_git(repo, "rev-parse", "HEAD").strip()
+        with pytest.raises(st.CommitIsMergeError) as exc:
+            st.collect_commit_paths(repo, [merge])
+        self._only(exc.value, "c-merge")
+
+    def test_the_type_guard_PRECEDES_the_merge_guard(self, tmp_path: Path) -> None:
+        """🔴 The ordering constraint, as a measurement rather than a comment:
+        `rev-list --parents` on a blob prints NOTHING at exit 0, which this code
+        would read as "no parents" — a root commit. A merge check placed first
+        would therefore wave every blob through, and the wrong-type control above
+        would go green on a neighbour's silence."""
+        repo = _init_repo(tmp_path, SCOPE)
+        _commit(repo, "src/collector/a.py")
+        blob = _run_git(repo, "rev-parse", "HEAD:src/collector/a.py").strip()
+        assert _run_git(repo, "rev-list", "--parents", "-n", "1", blob).strip() == ""
+
+    # --- the family-wide contracts ------------------------------------------------
+
+    def test_a_git_failure_PROPAGATES_and_never_becomes_an_empty_set(
+        self, tmp_path: Path
+    ) -> None:
+        """A broken environment is not a reading. `--repo` pointing at a
+        non-repository must raise, not report zero paths."""
+        not_a_repo = tmp_path / "plain"
+        not_a_repo.mkdir()
+        with pytest.raises(st.GitError) as exc:
+            st.collect_commit_paths(not_a_repo, ["dead" * 10])
+        self._only(exc.value, "git")
+
+    def test_EVERY_commit_failure_is_a_TouchError_so_the_CLI_exits_nonzero(self) -> None:
+        """`/handoff` step 4 treats any non-zero exit as "write nothing". An error
+        outside the hierarchy would escape `main`'s handler as a traceback."""
+        for cls in (
+            st.CommitRefMalformedError, st.CommitMissingError, st.CommitAmbiguousError,
+            st.CommitWrongTypeError, st.CommitIsMergeError,
+        ):
+            assert issubclass(cls, st.TouchError)
+
+    def test_NO_failure_can_return_an_EMPTY_path_set(self, tmp_path: Path) -> None:
+        """🔴 The family contract, swept rather than argued: every rejected input
+        RAISES. A source that returned `()` for a bad sha would be
+        indistinguishable from an empty commit."""
+        repo = _init_repo(tmp_path, SCOPE)
+        _commit(repo, "src/collector/a.py")
+        blob = _run_git(repo, "rev-parse", "HEAD:src/collector/a.py").strip()
+        for token in ("HEAD", "zzzz", "dead" * 10, blob):
+            with pytest.raises(st.TouchError):
+                st.collect_commit_paths(repo, [token])
+
+
+class TestCommitCaveatAnswersTheRightQuestion:
+    """🔴 The caveat is the deliverable. This window is a THIRD thing — not a
+    session (it does not know who authored the commit) and not a branch (a
+    SIBLING commit is outside it) — so neither existing sentence could be reused
+    without being wrong in a new direction."""
+
+    def _caveat(self, tmp_path: Path) -> str:
+        repo = _init_repo(tmp_path, SCOPE)
+        sha = _commit(repo, "src/collector/a.py")
+        return st.collect_commit_paths(repo, [sha]).caveat
+
+    def test_it_says_COMMITS_and_denies_BOTH_other_attributions(self, tmp_path: Path) -> None:
+        c = self._caveat(tmp_path)
+        assert "THESE COMMITS CHANGED" in c
+        assert "neither a SESSION nor a BRANCH" in c
+        assert "never to a session and never to a branch" in c
+
+    def test_it_names_what_the_window_EXCLUDES(self, tmp_path: Path) -> None:
+        c = self._caveat(tmp_path)
+        assert "EXCLUDES uncommitted work" in c
+        assert "never became one of these commits" in c
+        assert "SIBLING commit on the same branch is NOT in this window" in c
+
+    def test_it_names_what_the_window_can_WRONGLY_INCLUDE(self, tmp_path: Path) -> None:
+        c = self._caveat(tmp_path)
+        assert "WRONGLY INCLUDE" in c
+        assert "formatting sweep" in c
+        assert "cannot see intent" in c
+
+    def test_it_names_the_COMMITS_it_read(self, tmp_path: Path) -> None:
+        repo = _init_repo(tmp_path, SCOPE)
+        sha = _commit(repo, "src/collector/a.py")
+        c = st.collect_commit_paths(repo, [sha]).caveat
+        assert sha[:12] in c
+
+    def test_the_SIBLING_claim_is_TRUE_not_merely_stated(self, tmp_path: Path) -> None:
+        """🔴 `claude/RULES.md` → "Write the claim AFTER the code, from what the
+        function does". The caveat asserts a sibling commit is outside the
+        window; this measures it, so the sentence cannot drift into a promise the
+        code stopped keeping."""
+        repo = _init_repo(tmp_path, SCOPE)
+        mine = _commit(repo, "src/collector/mine.py", message="mine")
+        _commit(repo, "src/status-bar/theirs.py", message="theirs")
+        src = st.collect_commit_paths(repo, [mine])
+        assert src.paths == ("src/collector/mine.py",)
+
+    def test_the_OTHER_sources_caveats_are_UNCHANGED(self, tmp_path: Path) -> None:
+        """Adding a fourth source must not soften the claim another one makes."""
+        repo = _init_repo(tmp_path, SCOPE)
+        _run_git(repo, "checkout", "-b", "topic")
+        # Committed on a TOPIC branch, so git's window is the `branch` one — the
+        # caveat this asserts only exists on that branch of `PathSource.caveat`.
+        _commit(repo, "src/collector/a.py")
+        assert "NOT what this SESSION touched" in st.collect_git_paths(repo).caveat
+        assert "provenance is the caller's" in st.caller_supplied(["a.py"]).caveat
+
+    @pytest.mark.parametrize(
+        "paths,expect",
+        [
+            (["src/collector/a.py", "src/collector/b.py"], "resolved"),
+            (["docs/a.md", "docs/b.md"], "no-match"),
+            ([], "looked-at-nothing"),
+        ],
+        ids=["resolved", "no-match", "looked-at-nothing"],
+    )
+    def test_the_caveat_is_on_EVERY_output_path_of_BOTH_renderers(
+        self, tmp_path: Path, paths, expect
+    ) -> None:
+        """🔴 The property the #415 audit established and #421/#424 kept: the
+        caveat is on every output path of both renderers — INCLUDING the
+        early-return `looked-at-nothing` branch. A fourth source must not be the
+        one that breaks it. The empty case is a REAL empty commit, so this is
+        also the only place `looked-at-nothing` is reached through this source."""
+        repo = _init_repo(tmp_path, SCOPE)
+        store = _make_store(tmp_path / "s")
+        sha = _commit(repo, *paths) if paths else _empty_commit(repo)
+        rep = st.build_report(st.collect_commit_paths(repo, [sha]), store, SCOPE, today=TODAY)
+        assert rep.status == expect
+        caveat = rep.source.caveat
+        assert caveat in st.render_text(rep)
+        payload = st.report_json(rep)
+        assert payload["source"]["caveat"] == caveat
+        assert payload["source"]["commits"] == [sha]
+        assert payload["source"]["kind"] == "commit"
+        assert payload["source"]["window"] == "commits"
+
+    def test_the_commit_source_records_its_ARGV(self, tmp_path: Path) -> None:
+        """`commands` is the argv that RAN, so a reader can re-run it. Every
+        source's is checked; this one's program is `git`, and the subcommand has
+        to be the one that produced the paths."""
+        repo = _init_repo(tmp_path, SCOPE)
+        sha = _commit(repo, "src/collector/a.py")
+        src = st.collect_commit_paths(repo, [sha])
+        assert src.commands and all(c[0] == "git" for c in src.commands), src.commands
+        assert src.commands[0][1] == "diff-tree"
+        assert sha in src.commands[0]
+        store = _make_store(tmp_path / "s")
+        assert "ran: git diff-tree" in st.render_text(
+            st.build_report(src, store, SCOPE, today=TODAY)
+        )
+
+
+class TestCommitCli:
+    """The CLI is the only surface `/handoff` touches."""
+
+    def _run(self, args, capsys):
+        rc = st.main(args)
+        return rc, capsys.readouterr()
+
+    def _fixture(self, tmp_path: Path):
+        repo = _init_repo(tmp_path, SCOPE)
+        store = _make_store(tmp_path / "s")
+        return repo, store
+
+    def test_a_commit_resolves_end_to_end(self, tmp_path: Path, capsys) -> None:
+        repo, store = self._fixture(tmp_path)
+        sha = _commit(repo, "src/collector/a.py", "src/collector/b.py")
+        rc, cap = self._run(
+            ["--repo", str(repo), "--store", str(store), "--commit", sha,
+             "--today", TODAY, "--json"],
+            capsys,
+        )
+        assert rc == 0
+        payload = json.loads(cap.out)
+        assert payload["source"]["kind"] == "commit"
+        assert payload["source"]["commits"] == [sha]
+        assert payload["status"] == "resolved"
+        assert [k["ref"] for k in payload["known"]] == ["collector"]
+
+    @pytest.mark.parametrize("spelling", ["comma", "repeated"], ids=["comma", "repeated"])
+    def test_both_spellings_of_several_commits(
+        self, tmp_path: Path, capsys, spelling
+    ) -> None:
+        repo, store = self._fixture(tmp_path)
+        first = _commit(repo, "src/collector/a.py", message="first")
+        second = _commit(repo, "src/status-bar/s.py", message="second")
+        flags = (
+            ["--commit", f"{first},{second}"]
+            if spelling == "comma"
+            else ["--commit", first, "--commit", second]
+        )
+        rc, cap = self._run(
+            ["--repo", str(repo), "--store", str(store), *flags, "--today", TODAY, "--json"],
+            capsys,
+        )
+        assert rc == 0
+        assert json.loads(cap.out)["source"]["commits"] == [first, second]
+
+    def test_a_trailing_comma_is_the_typo_it_looks_like(self, tmp_path: Path, capsys) -> None:
+        """The SHARED splitter's decision: an empty token is dropped rather than
+        becoming a second, unusable sha."""
+        repo, store = self._fixture(tmp_path)
+        sha = _commit(repo, "src/collector/a.py")
+        rc, cap = self._run(
+            ["--repo", str(repo), "--store", str(store), "--commit", f"{sha},",
+             "--today", TODAY, "--json"],
+            capsys,
+        )
+        assert rc == 0
+        assert json.loads(cap.out)["source"]["commits"] == [sha]
+
+    def test_an_EMPTY_commit_argument_exits_3_naming_the_sentinel(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        """…and reaches the "nothing was given" guard, not the "unusable token"
+        one — which is the other half of the splitter's decision."""
+        repo, store = self._fixture(tmp_path)
+        rc, cap = self._run(
+            ["--repo", str(repo), "--store", str(store), "--commit", ",", "--today", TODAY],
+            capsys,
+        )
+        assert rc == 3
+        assert "commit not found" in cap.err
+        assert "no commit sha was given" in cap.err
+        assert cap.out == ""
+
+    @pytest.mark.parametrize(
+        "token,phrase",
+        [
+            ("HEAD", "commit sha is malformed"),
+            ("zzzz", "commit sha is malformed"),
+            ("dead" * 10, "commit not found"),
+        ],
+        ids=["expression", "nonhex", "missing"],
+    )
+    def test_every_failure_exits_3_with_a_PRINTABLE_line_and_NO_report(
+        self, tmp_path: Path, capsys, token, phrase
+    ) -> None:
+        """`/handoff` prints the stderr line verbatim and writes nothing, so it
+        must be one line a human can read — and stdout must carry no report a
+        reader could mistake for a result."""
+        repo, store = self._fixture(tmp_path)
+        rc, cap = self._run(
+            ["--repo", str(repo), "--store", str(store), "--commit", token, "--today", TODAY],
+            capsys,
+        )
+        assert rc == 3
+        assert phrase in cap.err
+        assert cap.out == ""
+
+    def test_a_failure_NEVER_falls_back_to_git(self, tmp_path: Path, capsys) -> None:
+        """🔴 The no-fallback contract, at the CLI. The git window here is
+        NON-EMPTY, so a fallback would produce a plausible, well-formed report of
+        a question nobody asked."""
+        repo, store = self._fixture(tmp_path)
+        _write(repo, "src/collector/uncommitted.py")
+        assert st.collect_git_paths(repo).paths, "the fallback window must be non-empty"
+        rc, cap = self._run(
+            ["--repo", str(repo), "--store", str(store), "--commit", "dead" * 10,
+             "--today", TODAY],
+            capsys,
+        )
+        assert rc == 3
+        assert cap.out == ""
+        assert "uncommitted" not in cap.err
+
+    def test_the_text_renderer_prints_the_caveat_and_the_notes(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        repo, store = self._fixture(tmp_path)
+        sha = _commit(repo, "src/collector/a.py", "src/collector/b.py")
+        rc, cap = self._run(
+            ["--repo", str(repo), "--store", str(store), "--commit", sha, "--today", TODAY],
+            capsys,
+        )
+        assert rc == 0
+        assert "THESE COMMITS CHANGED" in cap.out
+        assert f"commit {sha[:12]}: 2 file(s) changed" in cap.out
+        assert "ran: git diff-tree" in cap.out
+        assert "window=commits" in cap.out
+
+    def test_git_remains_the_default_when_no_commit_is_given(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        """Adding a flag must not change what happens without it."""
+        repo, store = self._fixture(tmp_path)
+        _write(repo, "src/collector/a.py")
+        rc, cap = self._run(
+            ["--repo", str(repo), "--store", str(store), "--today", TODAY, "--json"], capsys
+        )
+        assert rc == 0
+        assert json.loads(cap.out)["source"]["kind"] == "git"
+
+    def test_exclude_applies_to_the_COMMIT_window_too(self, tmp_path: Path, capsys) -> None:
+        repo, store = self._fixture(tmp_path)
+        doc = "claudedocs/handoff-topic.md"
+        sha = _commit(repo, doc, "src/collector/a.py")
+        rc, cap = self._run(
+            ["--repo", str(repo), "--store", str(store), "--commit", sha,
+             "--exclude", doc, "--today", TODAY, "--json"],
+            capsys,
+        )
+        assert rc == 0
+        assert json.loads(cap.out)["source"]["paths"] == ["src/collector/a.py"]
+
+    def test_the_commit_source_leaves_the_store_byte_identical(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        repo, store = self._fixture(tmp_path)
+        sha = _commit(repo, "src/collector/a.py", "src/collector/b.py")
+        before = _tree_hash(store)
+        for extra in ([], ["--json"]):
+            assert st.main(
+                ["--repo", str(repo), "--store", str(store), "--commit", sha,
+                 "--today", TODAY, *extra]
+            ) == 0
+        capsys.readouterr()
+        assert _tree_hash(store) == before
+
+
+class TestTheCOMMITSourceDoesNotComposeEither:
+    """🔴 ONE QUESTION PER RUN, one flag further along. A three-way union would
+    need three caveat sentences in one line — asserting commit attribution for
+    some members, branch attribution for others and session attribution for the
+    rest, with no way for a reader to tell which is which."""
+
+    @pytest.mark.parametrize(
+        "extra",
+        [["--session", SESSION_ID], ["--transcript", "/nonexistent.jsonl"], ["--pr", "421"]],
+        ids=["session", "transcript", "pr"],
+    )
+    def test_commit_with_ANOTHER_source_is_REFUSED_by_argparse(
+        self, tmp_path: Path, extra
+    ) -> None:
+        with pytest.raises(SystemExit) as exc:
+            st.main(["--repo", str(tmp_path), "--commit", "dead" * 10, *extra])
+        assert exc.value.code == 2
+
+    def test_commit_with_paths_from_is_REFUSED_with_a_printable_line(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        repo = _init_repo(tmp_path, SCOPE)
+        assert st.main(["--repo", str(repo), "--commit", "dead" * 10, "--paths-from", "-"]) == 2
+        err = capsys.readouterr().err
+        assert "cannot be combined with --paths-from" in err
+        assert "--commit" in err
+
+    def test_the_EARLIER_refusals_STILL_name_themselves(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        """The message was widened to cover `--commit`; it must not have stopped
+        naming the flags it already covered."""
+        repo = _init_repo(tmp_path, SCOPE)
+        assert st.main(["--repo", str(repo), "--session", SESSION_ID, "--paths-from", "-"]) == 2
+        assert "--session/--transcript/--pr" in capsys.readouterr().err
+
+    def test_running_it_TWICE_is_the_supported_composition(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        """🔴 The decision as a measurement: two runs, two path sets, EACH WITH ITS
+        OWN CAVEAT. The two windows deliberately DISAGREE here — the commit
+        carries an implementation file, the git window carries an uncommitted doc
+        that is in no commit — which is precisely why a union could not describe
+        either honestly."""
+        repo = _init_repo(tmp_path, SCOPE)
+        store = _make_store(tmp_path / "s")
+        _run_git(repo, "checkout", "-q", "-b", "topic")
+        sha = _commit(repo, "src/collector/a.py")
+        _write(repo, "claudedocs/handoff-x.md")  # written, never committed
+        base = ["--repo", str(repo), "--store", str(store), "--today", TODAY, "--json"]
+
+        assert st.main(base + ["--commit", sha]) == 0
+        by_commit = json.loads(capsys.readouterr().out)
+        assert st.main(base) == 0
+        by_git = json.loads(capsys.readouterr().out)
+
+        assert by_commit["source"]["paths"] == ["src/collector/a.py"]
+        # The windows genuinely DISAGREE: git carries an uncommitted doc that is
+        # in no commit, which is exactly the fact a union would erase.
+        assert "claudedocs/handoff-x.md" in by_git["source"]["paths"]
+        assert "claudedocs/handoff-x.md" not in by_commit["source"]["paths"]
+        assert by_commit["source"]["caveat"] != by_git["source"]["caveat"]
+        assert "THESE COMMITS CHANGED" in by_commit["source"]["caveat"]
+        assert "NOT what this SESSION touched" in by_git["source"]["caveat"]
+
+
+class TestCommitMutationKillMatrix:
+    """Each commit guard deleted on purpose, each dying to ITS OWN test.
+
+    🔴 The confound this class is built around: these guards run in sequence over
+    one token, and a mutant with one removed usually trips the NEXT one. A kill
+    that merely asserted "something raised" would be green with the guard it
+    names deleted — so every test below asserts the specific sentinel is GONE,
+    and, where git's exit-0 defaults make it possible, that the run now SUCCEEDS
+    WITH A WRONG ANSWER, which is the actual hazard.
+    """
+
+    def _repo_with(self, tmp_path: Path) -> tuple[Path, str]:
+        repo = _init_repo(tmp_path, SCOPE)
+        sha = _commit(repo, "src/collector/a.py", "src/collector/b.py")
+        return repo, sha
+
+    def test_the_commit_mutant_harness_WORKS(self, tmp_path: Path) -> None:
+        """🔴 THE NO-OP CONTROL. An unmutated copy must reach the commit source
+        successfully, or every kill below is a claim about a module that never
+        loaded. Without this a sweep wired to nothing is indistinguishable from a
+        sweep that killed everything."""
+        mod = _load_mutant(
+            tmp_path, "mc_noop", [('WRITER_ID = "handoff"', 'WRITER_ID = "handoff"  # noop')]
+        )
+        repo, sha = self._repo_with(tmp_path)
+        src = mod.collect_commit_paths(repo, [sha])
+        assert src.paths == ("src/collector/a.py", "src/collector/b.py")
+        assert src.commits == (sha,)
+
+    def test_kills_the_LENGTH_guard(self, tmp_path: Path) -> None:
+        """🔴 A CONFIDENT WRONG ANSWER, not merely a wrong diagnosis. Without the
+        length bound a 3-character typo RESOLVES to a real commit — git's own
+        `--disambiguate` expands it — and its diff is reported as though the
+        caller had named it."""
+        mod = _load_mutant(
+            tmp_path, "mc_len",
+            [("    if not COMMIT_SHA_MIN_CHARS <= len(t) <= COMMIT_SHA_MAX_CHARS:",
+              "    if False:")],
+        )
+        repo, sha = self._repo_with(tmp_path)
+        wrong = mod.collect_commit_paths(repo, [sha[:3]])
+        assert wrong.commits == (sha,), "wrong thing removed"
+        assert wrong.paths == ("src/collector/a.py", "src/collector/b.py")
+        with pytest.raises(st.CommitRefMalformedError):
+            st.collect_commit_paths(repo, [sha[:3]])
+
+    def test_kills_the_HEX_SHAPE_guard(self, tmp_path: Path) -> None:
+        """🔴 A SEPARATE guard from the length bound, killed separately — one
+        combined condition would die to one mutation and neither half would be
+        measured. Without it `HEAD` stops refusing by name and misdiagnoses as
+        `commit not found`, a line that sends the caller looking for a commit
+        that is not missing."""
+        mod = _load_mutant(
+            tmp_path, "mc_hex",
+            [("    if not t or not all(c in _HEX_DIGITS for c in t):", "    if False:")],
+        )
+        repo, _sha = self._repo_with(tmp_path)
+        with pytest.raises(mod.CommitMissingError) as exc:
+            mod.collect_commit_paths(repo, ["HEAD"])
+        assert "commit sha is malformed" not in str(exc.value)
+        with pytest.raises(st.CommitRefMalformedError):
+            st.collect_commit_paths(repo, ["HEAD"])
+
+    def test_kills_the_AMBIGUITY_guard(self, tmp_path: Path) -> None:
+        """Without it an ambiguous prefix is misdiagnosed as `commit not found` —
+        the caller is told the object is absent when two of them are right
+        there."""
+        mod = _load_mutant(
+            tmp_path, "mc_ambig", [("    if len(candidates) > 1:", "    if False:")]
+        )
+        repo = _init_repo(tmp_path, SCOPE)
+        a, b, prefix = _colliding_blob_pair()
+        for content in (a, b):
+            _write(repo, "scratch.txt", content.decode())
+            _run_git(repo, "hash-object", "-w", "--", "scratch.txt")
+        with pytest.raises(mod.CommitWrongTypeError) as exc:
+            mod.collect_commit_paths(repo, [prefix])
+        assert "commit sha is ambiguous" not in str(exc.value)
+        with pytest.raises(st.CommitAmbiguousError):
+            st.collect_commit_paths(repo, [prefix])
+
+    def test_kills_the_MISSING_guard(self, tmp_path: Path) -> None:
+        """Without it a nonexistent sha is misdiagnosed as a non-commit OBJECT —
+        a diagnosis about a thing that is not there at all."""
+        mod = _load_mutant(tmp_path, "mc_missing", [("    if not full:", "    if False:")])
+        repo, _sha = self._repo_with(tmp_path)
+        with pytest.raises(mod.CommitWrongTypeError) as exc:
+            mod.collect_commit_paths(repo, ["dead" * 10])
+        assert "commit not found" not in str(exc.value)
+        with pytest.raises(st.CommitMissingError):
+            st.collect_commit_paths(repo, ["dead" * 10])
+
+    def test_kills_the_WRONG_TYPE_guard(self, tmp_path: Path) -> None:
+        """🔴 THE SILENT-ZERO KILL, asserted AT THE SEAM rather than end-to-end,
+        because end-to-end would be green for the wrong reason.
+
+        With the guard gone a blob sha resolves, and `diff-tree` on it exits 0
+        with an EMPTY file list — the silent zero, measured directly below. The
+        RUN then happens to die later, on the unrelated `for-each-ref
+        --contains` reachability probe, which git rejects for a non-commit. That
+        is an ACCIDENT of a neighbouring command, not this guard: `claude/RULES.md`
+        → "a mutation test still passes when a DIFFERENT guard's error kills your
+        test". So the kill pins the seam (the guard is gone, and what it was
+        protecting is silent) and only then records that the end-to-end
+        misdiagnosis no longer names the type.
+        """
+        mod = _load_mutant(
+            tmp_path, "mc_type", [('    if otype != "commit":', "    if False:")]
+        )
+        repo, _sha = self._repo_with(tmp_path)
+        blob = _run_git(repo, "rev-parse", "HEAD:src/collector/a.py").strip()
+
+        # 1. the guard is gone: the blob now resolves as if it were a commit.
+        assert mod._resolve_commit(repo, blob) == blob
+        # 2. …and what it was protecting is a SILENT zero, not an error.
+        assert mod._nul_list(
+            mod._git(
+                repo,
+                ["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "--root", blob],
+            )
+        ) == []
+        # 3. end-to-end the mutant dies elsewhere, WITHOUT naming the type.
+        with pytest.raises(mod.GitError) as exc:
+            mod.collect_commit_paths(repo, [blob])
+        assert "object is not a commit" not in str(exc.value)
+        # 4. the honest module names it before anything is diffed at all.
+        with pytest.raises(st.CommitWrongTypeError):
+            st.collect_commit_paths(repo, [blob])
+
+    def test_kills_the_MERGE_guard(self, tmp_path: Path) -> None:
+        """🔴 THE OTHER SILENT-ZERO KILL, and the one that justifies refusing
+        rather than 'handling' a merge: without the guard the run SUCCEEDS and
+        reports a merge as having changed no files."""
+        mod = _load_mutant(
+            tmp_path, "mc_merge", [("    if len(parents) > 1:", "    if False:")]
+        )
+        repo = _init_repo(tmp_path, SCOPE)
+        base = _run_git(repo, "rev-parse", "HEAD").strip()
+        _commit(repo, "src/collector/a.py", message="mainline")
+        _run_git(repo, "checkout", "-q", "-b", "side", base)
+        _commit(repo, "src/status-bar/s.py", message="side")
+        _run_git(repo, "checkout", "-q", "main")
+        _run_git(repo, "merge", "-q", "--no-ff", "side", "-m", "merge")
+        merge = _run_git(repo, "rev-parse", "HEAD").strip()
+
+        silent = mod.collect_commit_paths(repo, [merge])
+        assert silent.paths == (), "the mutant did not reach the silent zero"
+        with pytest.raises(st.CommitIsMergeError):
+            st.collect_commit_paths(repo, [merge])
+
+    def test_kills_the_ROOT_flag(self, tmp_path: Path) -> None:
+        """Without `--root`, a root commit reports having changed nothing — git's
+        default, and the third silent zero in this source."""
+        mod = _load_mutant(
+            tmp_path, "mc_root",
+            [('        args = ["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "--root", full]',
+              '        args = ["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", full]')],
+        )
+        repo = _init_repo(tmp_path, SCOPE)
+        root = _run_git(repo, "rev-list", "--max-parents=0", "HEAD").strip()
+        assert mod.collect_commit_paths(repo, [root]).paths == ()
+        assert st.collect_commit_paths(repo, [root]).paths == ("README.md",)
+
+    def test_kills_the_FULL_SHA_expansion(self, tmp_path: Path) -> None:
+        """Without it `commits` — and therefore the CAVEAT — echoes the caller's
+        abbreviation instead of stating what it resolved to, and the dedupe stops
+        recognising one commit named two ways."""
+        mod = _load_mutant(tmp_path, "mc_expand", [("    full = candidates[0]", "    full = t")])
+        repo, sha = self._repo_with(tmp_path)
+        echoed = mod.collect_commit_paths(repo, [sha[:8]])
+        assert echoed.commits == (sha[:8],)
+        assert st.collect_commit_paths(repo, [sha[:8]]).commits == (sha,)
+        # …and the dedupe silently reads one commit twice.
+        assert len(mod.collect_commit_paths(repo, [sha[:8], sha]).commits) == 2
+        assert len(st.collect_commit_paths(repo, [sha[:8], sha]).commits) == 1
+
+    def test_kills_the_PER_COMMIT_accounting(self, tmp_path: Path) -> None:
+        """Without the note an empty commit's zero has nothing beside it, and is
+        indistinguishable from a differ wired to nothing."""
+        mod = _load_mutant(
+            tmp_path, "mc_note",
+            [('        notes.append(f"commit {full[:12]}: {len(paths)} file(s) changed; {where}")',
+              "        pass")],
+        )
+        repo = _init_repo(tmp_path, SCOPE)
+        empty = _empty_commit(repo)
+        assert not any("file(s) changed" in n for n in mod.collect_commit_paths(repo, [empty]).notes)
+        assert any(
+            "0 file(s) changed" in n for n in st.collect_commit_paths(repo, [empty]).notes
+        )
+
+    def test_kills_the_EMPTY_COMMIT_LIST_guard(self, tmp_path: Path) -> None:
+        """Without it `--commit ,` returns a well-formed report over ZERO commits
+        — the confident zero, arriving through argument parsing."""
+        mod = _load_mutant(tmp_path, "mc_nolist", [("    if not resolved:", "    if False:")])
+        repo = _init_repo(tmp_path, SCOPE)
+        empty_run = mod.collect_commit_paths(repo, [])
+        assert empty_run.paths == () and empty_run.commits == ()
+        with pytest.raises(st.CommitMissingError):
+            st.collect_commit_paths(repo, [])
+
+    def test_kills_the_COMMIT_CAVEAT_branch(self, tmp_path: Path) -> None:
+        """🔴 Without it the commit window falls through to GIT's caveat, which
+        claims a BRANCH window and names a base ref — a sentence that is wrong
+        about the set printed beneath it, in the field the consumer is told to
+        read before writing."""
+        mod = _load_mutant(
+            tmp_path, "mc_caveat", [('        if self.kind == "commit":', "        if False:")]
+        )
+        repo, sha = self._repo_with(tmp_path)
+        wrong = mod.collect_commit_paths(repo, [sha]).caveat
+        assert "THESE COMMITS CHANGED" not in wrong
+        assert "git:" in wrong
+        assert "THESE COMMITS CHANGED" in st.collect_commit_paths(repo, [sha]).caveat
+
+    def test_kills_the_SHARED_comma_splitter(self, tmp_path: Path) -> None:
+        """Without the empty-token drop, `--commit <sha>,` becomes a second,
+        unusable sha and a good run fails on a trailing comma."""
+        mod = _load_mutant(
+            tmp_path,
+            "mc_split",
+            [('    return [tok for group in groups for tok in str(group).split(",") if tok.strip()]',
+              '    return [tok for group in groups for tok in str(group).split(",")]')],
+        )
+        repo, sha = self._repo_with(tmp_path)
+        store = _make_store(tmp_path / "s")
+        argv = ["--repo", str(repo), "--store", str(store), "--commit", f"{sha},",
+                "--today", TODAY]
+        assert mod.main(argv) == 3
+        assert st.main(argv) == 0
+
+    def test_kills_the_SHARED_toplevel_frame_from_the_COMMIT_side(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 THE CONSOLIDATION THIS BRANCH FORCED, pinned from the new source's
+        side. `--show-toplevel` was open-coded at four call sites; the mutation
+        harness found it because the git source's frame anchor started matching
+        TWICE the moment a second source needed the same two lines — i.e. the
+        mutant that had been pinning it could no longer be applied at all, which
+        is a guard silently retiring itself. It is one helper now, and BOTH
+        sources' kills use the same anchor.
+
+        🔴 WHAT THIS KILL DOES *NOT* CLAIM, because an independent sweep measured
+        it: deleting the frame changes NOTHING about the commit source's own path
+        set. `diff-tree` is repo-root-relative wherever it runs, so the mutant
+        still returns the right paths; the source that actually breaks is the git
+        one (`ls-files --others` is cwd-scoped), and its own kill covers that.
+        What is pinned from THIS side is the helper's behaviour — the thing both
+        sources now share — and that the commit source is unaffected, which is a
+        finding rather than a guarantee.
+        """
+        mod = _load_mutant(
+            tmp_path,
+            "mc_frame",
+            [('    return Path(_git(Path(repo), ["rev-parse", "--show-toplevel"]).strip())',
+              "    return Path(repo)")],
+        )
+        repo, sha = self._repo_with(tmp_path)
+        assert mod._toplevel(repo / "src") == repo / "src", "the mutation did not apply"
+        assert st._toplevel(repo / "src") == repo
+        # …and the commit source survives it, which is the finding, not the claim.
+        assert mod.collect_commit_paths(repo / "src", [sha]).paths == (
+            st.collect_commit_paths(repo / "src", [sha]).paths
+        )
+
+    def test_kills_the_PATHS_FROM_conflict_guard_for_COMMIT(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        """Without it, `--commit <sha> --paths-from -` silently honours ONE of two
+        contradictory windows."""
+        mod = _load_mutant(
+            tmp_path,
+            "mc_conflict",
+            [('        if (wants_session or wants_pr or wants_commit) and args.paths_from != "git":',
+              "        if False:")],
+        )
+        repo, sha = self._repo_with(tmp_path)
+        store = _make_store(tmp_path / "s")
+        argv = ["--repo", str(repo), "--store", str(store), "--commit", sha,
                 "--paths-from", "-", "--today", TODAY]
         capsys.readouterr()
         assert mod.main(argv) == 0
