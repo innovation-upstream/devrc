@@ -1600,8 +1600,11 @@ def test_json_golden_schema_and_values():
             "unmeasured_reasons": {"uncaptured": 2, "not_claude": 1},
         },
         # The clawgate queue was never read (no reader injected in this
-        # fixture's environment), so the count is None with its discriminant.
-        "blocked_on_me": {"count": None, "status": "absent"},
+        # fixture's environment), so the count is None with its discriminant —
+        # and so is `stuck_count`, which is the same rule applied to the
+        # stuck-dispatch half rather than a second, weaker one.
+        "blocked_on_me": {"count": None, "status": "absent",
+                          "stuck_count": None, "schema_ok": False},
     }
 
 
@@ -4441,9 +4444,39 @@ def test_the_waiting_caveat_is_structured_for_json_consumers_not_prose():
 # script, never opened agent-ops, and so missed 11 pending approvals — four of
 # them credential-exposure or cross-user-data-leak.
 # =========================================================================== #
+#
+# 🔴 THE SECOND FAILURE, closed by the same section: the poller this cache comes
+# from used to count ONLY {open, ready_for_review}, so an `in_progress` task
+# whose agent had been dead for four hours contributed 0 here — invisible on
+# every surface at once, because this script reads the cache rather than the
+# API. `schema` now discriminates a cache that measured stuck dispatches from
+# one that never looked; the latter reports None, never 0.
+#
+# Every id/title below is SYNTHETIC (public repo; real titles are client work).
+# =========================================================================== #
 def _cache(**kw):
-    body = {"count": 12, "state": "Warning", "ts": NOW - 30,
-            "detail": "12 task(s) awaiting: #172, #171, #170, #169, #168, #160",
+    """A CURRENT (schema-2) bar-status cache: 10 open + 1 review + 1 stuck."""
+    body = {"schema": 2, "count": 12, "state": "Warning", "ts": NOW - 30,
+            "pending_count": 11, "stuck_count": 1,
+            "open": [{"id": 160 + i, "title": "queued item %d" % i}
+                     for i in range(10)],
+            "ready_for_review": [{"id": 172, "title": "finished item"}],
+            "stuck": [{"id": 173, "title": "wedged dispatch",
+                       "reasons": ["agent_idle"], "agent_idle_secs": 14400}],
+            "threshold_secs": 900,
+            "detail": "12 need you (10 open, 1 review, 1 stuck): !#173, #172, "
+                      "#160, #161, #162, #163 (+6 more)",
+            "detail_shown": 6, "detail_total": 12, "detail_truncated": True,
+            "source": "clawgate"}
+    body.update(kw)
+    return lambda path: json.dumps(body)
+
+
+def _legacy_cache(**kw):
+    """A cache written by a poller from BEFORE the stuck predicate. It has no
+    `schema` key, no lists, and its `detail` truncates without saying so."""
+    body = {"count": 11, "state": "Warning", "ts": NOW - 30,
+            "detail": "11 task(s) awaiting: #171, #170, #169, #168, #160, #165",
             "source": "clawgate"}
     body.update(kw)
     return lambda path: json.dumps(body)
@@ -4454,6 +4487,106 @@ def test_a_fresh_cache_is_ok_and_carries_the_count():
     assert got["status"] == "ok"
     assert got["count"] == 12
     assert got["cache_age_secs"] == 30
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE STUCK-DISPATCH HALF. A live board with zero `in_progress` tasks returns
+# zero stuck, and that zero is indistinguishable from a reader wired to nothing
+# — so every assertion below is driven by a CONSTRUCTED cache that must report
+# one, plus the twin that must not.
+# --------------------------------------------------------------------------- #
+def test_a_schema2_cache_surfaces_the_stuck_dispatch_with_its_idle_time():
+    got = sm.read_blocked_on_me(reader=_cache(), now=NOW)
+    assert got["schema_ok"] is True and got["schema_note"] is None
+    assert got["stuck_count"] == 1
+    assert got["stuck"] == [{"id": 173, "title": "wedged dispatch",
+                             "reasons": ["agent_idle"],
+                             "agent_idle_secs": 14400}]
+    assert got["pending_count"] == 11
+    # count = pending + stuck, and both discriminants travel with it.
+    assert got["count"] == got["pending_count"] + got["stuck_count"]
+
+
+def test_a_LEGACY_cache_reports_stuck_as_UNMEASURED_never_as_zero():
+    """🔴 The exact substitution this whole script refuses, on the newest field.
+    A poller that never looked for stuck dispatches did not find zero of them."""
+    got = sm.read_blocked_on_me(reader=_legacy_cache(), now=NOW)
+    assert got["status"] == "ok", "the COUNT it does carry is still usable"
+    assert got["count"] == 11
+    assert got["schema"] is None and got["schema_ok"] is False
+    assert got["stuck_count"] is None, "a queue nobody looked at is not empty"
+    assert got["stuck"] is None and got["ready_for_review"] is None
+    assert got["schema_note"] and "UNMEASURED" in got["schema_note"]
+
+
+@pytest.mark.parametrize("schema,ok", [
+    (None, False), (0, False), (1, False),      # older than the predicate
+    (2, True), (3, True),                       # current, and a future bump
+    ("2", False), (True, False),                # junk must not read as a version
+])
+def test_the_schema_gate_is_measured_either_side_of_the_boundary(schema, ok):
+    body = {} if schema is None else {"schema": schema}
+    got = sm.read_blocked_on_me(reader=_cache(**body) if schema is not None
+                                else _legacy_cache(), now=NOW)
+    assert got["schema_ok"] is ok, schema
+
+
+def test_a_schema2_cache_enumerates_ready_for_review_rather_than_folding_it_in():
+    """🔴 Three finished tasks once appeared in NO list on any surface: the
+    count moved and nothing said what had finished."""
+    got = sm.read_blocked_on_me(reader=_cache(), now=NOW)
+    assert got["ready_for_review"] == [{"id": 172, "title": "finished item"}]
+    text = "\n".join(sm.render_blocked_on_me(got))
+    assert "#172 REVIEW finished item" in text
+    # and every open row is named too — not just the six the detail string caps
+    for i in range(10):
+        assert "#%d" % (160 + i) in text
+
+
+def test_the_rendered_stuck_row_carries_the_idle_time_beside_the_flag():
+    text = "\n".join(sm.render_blocked_on_me(
+        sm.read_blocked_on_me(reader=_cache(), now=NOW)))
+    assert "1 STUCK dispatch(es)" in text
+    assert "#173 idle 4h [agent_idle]" in text
+    # 🔴 and it says what the measure cannot see, in the output itself
+    assert "within one in-flight turn" in text.lower()
+
+
+def test_a_stuck_row_at_sixteen_minutes_reads_differently_from_one_at_four_hours():
+    """A bare boolean would render these identically; only one is worth acting
+    on, and the number is what tells them apart."""
+    near = _cache(stuck=[{"id": 173, "title": "wedged dispatch",
+                          "reasons": ["agent_idle"], "agent_idle_secs": 960}])
+    far = _cache()
+    a = "\n".join(sm.render_blocked_on_me(sm.read_blocked_on_me(reader=near, now=NOW)))
+    b = "\n".join(sm.render_blocked_on_me(sm.read_blocked_on_me(reader=far, now=NOW)))
+    assert "idle 16m" in a and "idle 4h" in b
+    assert a != b
+
+
+def test_a_schema2_cache_MISSING_the_stuck_key_is_still_None_not_empty():
+    """🔴 Found by a surviving mutant (`obj.get("stuck") or []`). A cache that
+    ANNOUNCES schema 2 but arrives without the list — truncated write, partial
+    upgrade, hand-edited file — must not have an empty measurement invented for
+    it. `[]` here would read as "measured, nothing stuck"; the truth is that
+    nothing was read."""
+    body = {"schema": 2, "count": 3, "ts": NOW - 30, "state": "Warning",
+            "detail": "3 need you"}
+    got = sm.read_blocked_on_me(reader=lambda p: json.dumps(body), now=NOW)
+    assert got["status"] == "ok" and got["count"] == 3
+    assert got["stuck"] is None and got["stuck_count"] is None
+    assert got["ready_for_review"] is None and got["open"] is None
+
+
+def test_a_schema2_cache_with_zero_stuck_is_a_MEASURED_zero():
+    """The other half of the discriminating control: `0` and `None` must not
+    render the same, or the field is worthless."""
+    got = sm.read_blocked_on_me(
+        reader=_cache(stuck=[], stuck_count=0, count=11), now=NOW)
+    assert got["stuck_count"] == 0 and got["schema_ok"] is True
+    text = "\n".join(sm.render_blocked_on_me(got))
+    assert "STUCK" not in text
+    assert "UNMEASURED" not in text
 
 
 def test_an_ABSENT_cache_is_None_and_NEVER_zero():
@@ -4516,21 +4649,33 @@ def test_the_detail_string_is_NEVER_parsed_for_a_count():
     DISAGREES with itself: 11 pending, 6 named. Anything deriving the number
     from the string reports 6 and loses five tasks silently.
     """
-    reader = _cache(count=11,
-                    detail="11 task(s) awaiting: #171, #170, #169, #168, "
-                           "#160, #165")
-    got = sm.read_blocked_on_me(reader=reader, now=NOW)
+    got = sm.read_blocked_on_me(reader=_legacy_cache(), now=NOW)
     assert got["count"] == 11, "the count is the measurement, not the string"
     assert got["detail"].count("#") == 6, "fixture must actually be truncated"
     assert got["detail_truncated"] is True
     assert "TRUNCATE" in got["detail_note"].upper()
 
 
+def test_a_schema2_detail_string_STATES_its_own_truncation():
+    """🔴 Item 5. The old string named six of eleven with no hint any were
+    missing, and the dropped tail has included `ready_for_review` work. The new
+    one says `(+N more)` AND the full sets travel structurally beside it."""
+    got = sm.read_blocked_on_me(reader=_cache(), now=NOW)
+    assert "(+6 more)" in got["detail"]
+    assert got["detail_shown"] == 6 and got["detail_total"] == 12
+    # the note is gone precisely because the lists are present
+    assert got["detail_note"] is None
+    assert len(got["open"]) + len(got["ready_for_review"]) + len(got["stuck"]) \
+        == got["count"], "the enumerated rows account for the whole count"
+
+
 def test_a_real_measured_zero_is_distinguishable_from_an_absent_cache():
     """🔴 THE DISCRIMINATING CONTROL. Both are "no pending approvals" to a
     careless reader; only one of them is a measurement, and the renderer must
     not spell them the same."""
-    zero = sm.read_blocked_on_me(reader=_cache(count=0, detail=None), now=NOW)
+    zero = sm.read_blocked_on_me(
+        reader=_cache(count=0, pending_count=0, stuck_count=0, open=[],
+                      ready_for_review=[], stuck=[], detail=None), now=NOW)
     absent = sm.read_blocked_on_me(reader=lambda p: None, now=NOW)
     assert zero["status"] == "ok" and zero["count"] == 0
     assert absent["status"] == "absent" and absent["count"] is None
@@ -4557,7 +4702,7 @@ def test_the_rendered_queue_points_the_reader_AT_agent_ops_for_the_full_list():
     enumerated queue with titles. The cross-reference now sends a reader
     toward it instead of away."""
     text = sm.render_table(base_gather(blocked_reader=_cache(), now=NOW))
-    assert "12 clawgate task(s) pending" in text
+    assert "12 clawgate task(s) needing you" in text
     assert "agent-ops" in text
     # and the same is true when the count could NOT be read — that is exactly
     # when a reader most needs somewhere else to look
@@ -4568,10 +4713,20 @@ def test_the_rendered_queue_points_the_reader_AT_agent_ops_for_the_full_list():
 def test_the_summary_carries_the_count_WITH_its_discriminant():
     """The count never travels alone, in the roll-up any consumer reads first."""
     ok = base_gather(blocked_reader=_cache(), now=NOW)
-    assert ok["summary"]["blocked_on_me"] == {"count": 12, "status": "ok"}
+    assert ok["summary"]["blocked_on_me"] == {"count": 12, "status": "ok",
+                                              "stuck_count": 1,
+                                              "schema_ok": True}
     gone = base_gather(blocked_reader=lambda p: None, now=NOW)
     assert gone["summary"]["blocked_on_me"] == {"count": None,
-                                                "status": "absent"}
+                                                "status": "absent",
+                                                "stuck_count": None,
+                                                "schema_ok": False}
+    # 🔴 And a legacy cache: a real count, but `stuck_count` None — a roll-up
+    # reader must be able to tell "no wedged dispatches" from "never looked".
+    old = base_gather(blocked_reader=_legacy_cache(), now=NOW)
+    assert old["summary"]["blocked_on_me"] == {"count": 11, "status": "ok",
+                                               "stuck_count": None,
+                                               "schema_ok": False}
 
 
 def test_the_blocked_reader_is_resolved_at_CALL_time_not_bound_as_a_default():

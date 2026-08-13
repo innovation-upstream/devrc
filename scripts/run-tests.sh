@@ -507,7 +507,41 @@ TARGET_FLOORS=(
   # already a directory target). The reader shells out to nothing — no `gh`, no
   # network, and git only via the writer's `scope_for_repo`, which `git` in
   # REQUIRED_TOOLS already covers.
-  "scripts/tests|2908"
+  #
+  # 2026-08-12, the clawgate stuck-dispatch predicate (`scripts/lib/
+  # clawgate_tasks.py` + its two guards): 2962 -> 3096 collected, +134 —
+  # +84 in the new scripts/tests/test_clawgate_tasks.py (five positive controls,
+  # one per disjunct of the stuck predicate, each with its near-miss twin; the
+  # threshold walked at the boundary and an order of magnitude either side; the
+  # detail-string truncation contract) and +23 in the new
+  # scripts/tests/test_clawgate_predicate_single_source.py (nine shapes of
+  # positive control for the AST scanner, five negative controls, the two-way
+  # allowlist and the two-way importer ledger), the rest split across the three
+  # consumer suites.
+  #
+  # 🔴 THE BASE HAD ALREADY MOVED PAST THE LINE ABOVE. That line records 2958
+  # from #424; the AUTHORITATIVE gate run on a PRISTINE `origin/main` worktree
+  # (ad93085) for THIS branch printed
+  #   PASS  scripts/tests  (collected=2962 passed=2962 skipped=0 floor=2908)
+  # so main is 2962 today. Measuring the base rather than trusting the previous
+  # line is what makes the delta accounting below a reading instead of a guess.
+  # The gate's own line on this branch:
+  #   PASS  scripts/tests  (collected=3096 passed=3096 skipped=0 floor=2908)
+  # put through the gate's OWN rule, not arithmetic:
+  #   _suggested_floor 3096 = 3096 - min(50, max(1, 154)) = 3096 - 50 = 3046.
+  #
+  # ⚠ The recorded delta and the measured one AGREE: the five touched files
+  # collect 588 on the base tree and 722 here (+134), and 2962 + 134 = 3096
+  # exactly, i.e. nothing else moved. That is a reading, not an assumption. If
+  # this line conflicts with another branch, re-run the gate on the MERGED tree
+  # and copy what it prints — do NOT reconcile the two sides by hand.
+  #
+  # ⚠ ZERO new skips, and no HERMETIC_TARGETS entry needed (scripts/tests is
+  # already a directory target). The shared module is PURE — no network, no
+  # subprocess, no clock of its own (`now` is injected) — pinned by a test, so
+  # nothing here can reach the live clawgate API and every fetch seam is driven
+  # by an injected fake.
+  "scripts/tests|3046"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —

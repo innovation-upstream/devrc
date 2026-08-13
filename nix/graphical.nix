@@ -544,12 +544,15 @@ lib.mkIf isNixOS {
       ];
       ExecStart = "${pollPyEnv}/bin/python3 %h/workspace/devrc/scripts/bar-status-poll";
       # Re-run the unit when the poller changes (cf. X-Restart-Triggers in home.nix).
-      # deadman.py is listed too: the poller loads it by explicit path out of the
-      # working tree, so without this entry a change to the deadman logic would
-      # leave the unit definition identical and the timer would not re-arm.
+      # deadman.py and lib/clawgate_tasks.py are listed too: the poller loads
+      # BOTH by explicit path out of the working tree, so without these entries a
+      # change to the deadman logic — or to the shared clawgate "needs the
+      # operator" predicate, which decides the pill's whole meaning — would leave
+      # the unit definition identical and the timer would not re-arm.
       X-Restart-Triggers = [
         "${../scripts/bar-status-poll}"
         "${../scripts/collector/deadman.py}"
+        "${../scripts/lib/clawgate_tasks.py}"
       ];
     };
   };

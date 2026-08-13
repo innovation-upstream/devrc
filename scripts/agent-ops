@@ -205,6 +205,37 @@ SCRATCH_SLOTS_DEPLOYED = os.path.join(HOME, ".config", "tmux", "scratch-slots.sh
 SCRATCH_SLOTS_REPO = os.path.join(DEVRC_DIR, "scripts", "tmux-scratch-slots.sh")
 _SLOT_RE = re.compile(r'"([^":]+):([^":]+):(#[0-9a-fA-F]{6}):([^":]+)"')
 
+
+def _load_clawgate_tasks():
+    """Load scripts/lib/clawgate_tasks.py by EXPLICIT PATH — the ONE definition
+    of "which clawgate tasks need the operator", shared with bar-status-poll and
+    session-manager. This panel used to keep its own copy (`_PENDING_STATES`),
+    which is precisely how the two disagreed with reality in the same direction.
+
+    🔴 Sibling-first, then $DEVRC_DIR: this script is DEPLOYED as a lone
+    nix-store copy at ~/.config/tmux/agent-ops, where no sibling lib/ exists, so
+    the $DEVRC_DIR leg is the one that runs on a live host. It is NOT optional —
+    an unimportable predicate raises here rather than degrading to a stale
+    hardcoded set, because a silently-wrong number is the failure being fixed.
+    """
+    import importlib.machinery
+    import importlib.util
+    here = os.path.dirname(os.path.abspath(__file__))
+    for path in (os.path.join(here, "lib", "clawgate_tasks.py"),
+                 os.path.join(DEVRC_DIR, "scripts", "lib", "clawgate_tasks.py")):
+        if os.path.exists(path):
+            loader = importlib.machinery.SourceFileLoader("_ao_clawgate", path)
+            spec = importlib.util.spec_from_file_location("_ao_clawgate", path,
+                                                          loader=loader)
+            mod = importlib.util.module_from_spec(spec)
+            loader.exec_module(mod)
+            return mod
+    raise ImportError("scripts/lib/clawgate_tasks.py not found (tried sibling "
+                      "lib/ and $DEVRC_DIR/scripts/lib/)")
+
+
+CG = _load_clawgate_tasks()
+
 REFRESH = float(os.environ.get("AGENT_OPS_REFRESH", "4"))
 CLAUDE_RE = re.compile(r"claude", re.IGNORECASE)
 # MCP servers & tool subprocesses claude always keeps as children — not a busy signal.
@@ -357,30 +388,25 @@ def own_pid_chain(reader=_read_proc) -> set:
     return chain
 
 
-def enrich_clawgate_titles(timeout=2.5):
-    """Best-effort: fetch operator-pending task titles from the clawgate API.
+def enrich_clawgate_titles(timeout=2.5, now=None):
+    """Best-effort: fetch what needs the operator, live, from the clawgate API.
 
-    Returns a list of "#<id> <title>" strings, or [] on ANY failure (no creds,
-    unreachable, slow, malformed). Purely additive — never blocks the section.
+    Returns `clawgate_attention_lines(...)` — "#<id> <title>" for each pending
+    task and "#<id> STUCK <reasons> idle <t> — <title>" for each wedged
+    dispatch — or [] on ANY failure (no creds, unreachable, slow, malformed).
+    Purely additive; never blocks the section.
+
+    Uses ?summary=1 (CG.tasks_url): the full board is ~27x larger and the extra
+    is task bodies this panel never renders. The token travels in a header.
     """
     try:
-        env = {}
-        with open(CLAWGATE_ENV, "r") as fh:
-            for line in fh:
-                line = line.strip()
-                if "=" in line and not line.startswith("#"):
-                    k, v = line.split("=", 1)
-                    env[k.strip()] = v.strip()
-        base = env.get("CLAWGATE_API_URL")
-        token = env.get("CLAWGATE_HOOK_TOKEN")
-        if not base or not token:
-            return []
+        base, token = CG.read_clawgate_env(CLAWGATE_ENV)
         import urllib.request
-        req = urllib.request.Request(base.rstrip("/") + "/api/tasks",
+        req = urllib.request.Request(CG.tasks_url(base),
                                      headers={"Authorization": "Bearer " + token})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             tasks = json.loads(resp.read().decode("utf-8"))
-        return clawgate_pending_titles(tasks)
+        return clawgate_attention_lines(tasks, now=now)
     except Exception:
         return []
 
@@ -551,18 +577,39 @@ def query_telemetry_freshness(timeout=TELEM_QUERY_TIMEOUT):
 # ===========================================================================
 # PURE aggregation — unit-tested
 # ===========================================================================
-_PENDING_STATES = frozenset({"open", "ready_for_review"})
+# 🔴 The pending-state set used to be spelled here, as
+# `_PENDING_STATES = frozenset({"open", "ready_for_review"})`. It is
+# scripts/lib/clawgate_tasks.PENDING_TASK_STATES now — one definition for this
+# panel, the bar poller and session-manager. Re-spelling it here fails
+# scripts/tests/test_clawgate_predicate_single_source.py.
 
 
-def clawgate_pending_titles(tasks, pending=_PENDING_STATES) -> list:
-    """Map /api/tasks payload → ['#<id> <title>', …] for operator-pending tasks."""
-    if not isinstance(tasks, list):
+def clawgate_attention_lines(tasks, now=None) -> list:
+    """Map an /api/tasks payload → the lines this panel lists under `clawgate`.
+
+    🔴 STUCK DISPATCHES COME FIRST AND CARRY THEIR IDLE TIME. The renderer caps
+    this list, so the class that was invisible for four hours must not be the
+    one the cap drops; and `STUCK … idle 4h` versus `STUCK … idle 16m` is the
+    difference between "go look" and "probably mid-turn", which a bare marker
+    would erase. `ready_for_review` is listed BEFORE `open` for the same reason:
+    finished work awaiting review is what went unnamed on every surface.
+
+    Fail-safe: a non-list payload (or junk elements) yields [] rather than
+    raising — this is decoration on a dashboard, not a measurement.
+    """
+    try:
+        att = CG.attention(tasks, time.time() if now is None else now)
+    except ValueError:
         return []
     out = []
-    for t in tasks:
-        if isinstance(t, dict) and t.get("status") in pending:
-            title = (t.get("title") or "").strip() or "(no title)"
-            out.append("#%s %s" % (t.get("id"), title))
+    for s in att["stuck"]:
+        out.append("#%s STUCK[%s] idle %s — %s" % (
+            s["id"], ",".join(s["reasons"]),
+            CG.fmt_idle(s["agent_idle_secs"]), s["title"]))
+    for r in att["ready_for_review"]:
+        out.append("#%s REVIEW %s" % (r["id"], r["title"]))
+    for o in att["open"]:
+        out.append("#%s %s" % (o["id"], o["title"]))
     return out
 
 
@@ -1094,6 +1141,13 @@ def _header(title: str, color: str, note: str = "") -> str:
     return line
 
 
+#: How many clawgate rows the panel lists under the count. The list is ORDERED
+#: stuck -> review -> open by `clawgate_attention_lines`, and anything past this
+#: is reported as `(+N more)` rather than silently dropped — the old silent drop
+#: is what hid finished-and-awaiting-review work.
+BLOCKED_MAX_ROWS = 8
+
+
 def render_blocked(clawgate, mail, titles=None) -> list:
     lines = [_header("Blocked on me", RED)]
     cg_count = (clawgate or {}).get("count")
@@ -1105,9 +1159,26 @@ def render_blocked(clawgate, mail, titles=None) -> list:
         lines.append("   %s  %s  %s" % (
             paint("clawgate", BLUE),
             paint("%s" % (cg_count if cg_count is not None else "?"), col, bold=True),
-            paint(_truncate(detail, 60), DIM)))
-        for t in (titles or [])[:6]:
-            lines.append("      " + paint("• " + _truncate(t, 66), YELLOW))
+            paint(_truncate(detail, 72), DIM)))
+        # 🔴 A cache written by an OLDER poller carries no stuck information.
+        # That is "not measured", not "zero stuck" — say so rather than let the
+        # absence read as an all-clear.
+        if clawgate.get("schema") is None:
+            lines.append("      " + paint(
+                "! stale cache schema — stuck dispatches NOT measured "
+                "(restart bar-status-poll)", RED))
+        elif clawgate.get("stuck_count"):
+            lines.append("      " + paint(
+                "! %d stuck dispatch(es) — in_progress with a dead agent"
+                % clawgate["stuck_count"], RED, bold=True))
+        rows = titles or []
+        for t in rows[:BLOCKED_MAX_ROWS]:
+            colour = RED if "STUCK[" in t else YELLOW
+            lines.append("      " + paint("• " + _truncate(t, 72), colour))
+        if len(rows) > BLOCKED_MAX_ROWS:
+            lines.append("      " + paint(
+                "… +%d more (clawgate API has the full list)"
+                % (len(rows) - BLOCKED_MAX_ROWS), DIM))
     if mail is None:
         lines.append("   " + paint("mail      — n/a", DIMMER))
     else:
@@ -1533,7 +1604,12 @@ def build_body_lines(width: int) -> list:
     civitai = read_json(os.path.join(BAR_STATUS_DIR, "civitai.json"))
 
     titles = []
-    if clawgate and (clawgate.get("count") or 0) > 0:
+    # Enrich when the cache says there is something to name, AND whenever the
+    # cache predates the stuck predicate (schema missing): a zero from a cache
+    # that never measured stuck dispatches is not evidence there are none, so
+    # the live API is asked instead of trusting it.
+    if clawgate and ((clawgate.get("count") or 0) > 0
+                     or clawgate.get("schema") is None):
         titles = enrich_clawgate_titles()
 
     panes = parse_panes(list_tmux_panes_raw())
