@@ -197,6 +197,42 @@ def test_a_file_nix_cannot_evaluate_fails_and_says_do_not_delete(tmp_path):
     assert "do NOT delete it" in problem, problem
 
 
+def test_passing_the_files_TEXT_reads_as_a_broken_check(tmp_path):
+    """The docstring below claims this case is covered; a short bogus path does
+    not exercise it. Real nix source is ~160 KB, which makes `is_file()` raise
+    ENAMETOOLONG rather than return False — pathlib does not swallow that errno.
+    Must be a named failure, and must NOT echo the argument back."""
+    text = HOME_NIX.read_text(encoding="utf-8")
+    problem = skills_mapping_problem(text)
+    assert problem is not None, "the file's TEXT passed silently"
+    assert "do NOT delete it" in problem, problem
+    assert len(problem) < 2_000, (
+        f"the failure message is {len(problem):,} bytes — it is echoing the "
+        "argument, which here is the whole of home.nix"
+    )
+
+
+#: The module is deliberately SMALL. Its predecessor reached 29,920 B chasing a
+#: property it still got wrong, and was cut to ~4 KB by dropping that ambition.
+#: Without a gate that ceiling is a prose intention, and this file's own history
+#: shows prose intentions do not hold. Precedent: test_rules_size.py.
+MAX_MODULE_BYTES = 5_600
+
+
+def test_the_module_stays_under_its_ceiling():
+    size = (ROOT / "scripts" / "testlib" / "skills_mapping.py").stat().st_size
+    assert size <= MAX_MODULE_BYTES, (
+        f"scripts/testlib/skills_mapping.py is {size:,} bytes\n"
+        f"  ceiling: {MAX_MODULE_BYTES:,} bytes\n"
+        "This module was cut from 8,846 B (and an abandoned 29,920 B rewrite) by\n"
+        "DROPPING source-resolution tracing, not by golfing it. If you are over,\n"
+        "the question is which ambition crept back -- $out analysis, cp/rm\n"
+        "parsing, let-binding resolution, comment stripping -- not how to raise\n"
+        "the number. That half is verified against reality by ship.sh and\n"
+        "drift-check.sh; re-deriving it from nix source is strictly worse."
+    )
+
+
 def test_a_path_that_is_not_a_file_fails(tmp_path):
     """Named as its own failure, not left to nix's "file not found" — a caller
     passing the wrong thing (the file's TEXT, say) must read as a broken check."""
