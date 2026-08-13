@@ -85,7 +85,7 @@ sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from testlib.skills_mapping import (  # noqa: E402
-    assert_skills_mapping_deploys_repo_skills,
+    assert_skills_mapping_declared,
 )
 
 import subsystem_resolver as sr  # noqa: E402
@@ -1756,12 +1756,10 @@ class TestCommandDocIsPinned:
         # The non-tautological half: nix must actually deploy the directory this
         # pin lives under. A pin under a directory home-manager does not ship is
         # precisely the vacuous green this test exists to prevent.
-        # One shared, STRUCTURAL predicate (testlib/skills_mapping.py) instead of
-        # the literal `source = ../claude/skills;` this used to grep for: the
-        # mapping's source is now a derivation BUILT from that path, which the
-        # spelled version could not tell apart from a source pointed elsewhere.
-        home_nix = (ROOT / "nix" / "home.nix").read_text(encoding="utf-8")
-        assert_skills_mapping_deploys_repo_skills(home_nix)
+        # One shared predicate (testlib/skills_mapping.py), and a deliberately
+        # narrow one: the mapping is declared and not switched off. Whether its
+        # source resolves to this tree is ship.sh/drift-check.sh's job.
+        assert_skills_mapping_declared(ROOT / "nix" / "home.nix")
 
     # --- the behavioural half: what each sentence ASSERTS ---------------------
 

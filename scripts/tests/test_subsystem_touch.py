@@ -66,7 +66,7 @@ sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from testlib.skills_mapping import (  # noqa: E402
-    assert_skills_mapping_deploys_repo_skills,
+    assert_skills_mapping_declared,
 )
 
 import subsystem_resolver as sr  # noqa: E402
@@ -1429,10 +1429,9 @@ class TestSkillDocsArePinned:
             assert d.exists(), f"the pinned doc is gone: {d}"
             assert d.name == "SKILL.md"
             assert d.parent.parent.name == "skills"
-        home_nix = (ROOT / "nix" / "home.nix").read_text(encoding="utf-8")
-        # Shared, structural predicate — see testlib/skills_mapping.py for why
-        # the literal-substring version of this had to go.
-        assert_skills_mapping_deploys_repo_skills(home_nix)
+        # Shared predicate — declared-and-not-switched-off only; see
+        # testlib/skills_mapping.py for what it does NOT check, and why.
+        assert_skills_mapping_declared(ROOT / "nix" / "home.nix")
 
 
 class TestEntrySchemaAgreement:
