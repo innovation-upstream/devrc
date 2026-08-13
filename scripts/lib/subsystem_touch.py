@@ -33,19 +33,22 @@ nomination, and the census that makes the experiment falsifiable.
 
 WHERE THE PATHS COME FROM, AND WHY
 ----------------------------------
-Three real sources: the SESSION's own transcript, the PULL REQUESTS a branch
-landed, and GIT. The reporting core takes paths as an argument and has never
-heard of any of them, which is what let the second and third be added without
-touching the matching logic.
+Four real sources: the SESSION's own transcript, the PULL REQUESTS a branch
+landed, the COMMITS an agent created, and GIT. The reporting core takes paths as
+an argument and has never heard of any of them, which is what let the other three
+be added without touching the matching logic.
 
-🔴 THEY ANSWER TWO DIFFERENT QUESTIONS, AND THE DIFFERENCE IS NOT A NUANCE.
+🔴 THEY ANSWER FOUR DIFFERENT QUESTIONS, AND THE DIFFERENCE IS NOT A NUANCE.
 `--session` answers "what did THIS SESSION touch". `--pr` answers "what did THIS
-BRANCH LAND". Git's window is a third thing again (this branch's uncommitted +
-committed work, whoever authored it). They are not three approximations of one
-quantity — a PR's file list is the UNION of every commit on its branch, so it
-contains another session's commits, a subagent's, and hand-made ones, while a
-session transcript contains exactly one session's turns and nobody else's. Each
-`caveat` says which question its own window answers; see `PathSource.caveat`.
+BRANCH LAND". `--commit` answers "what did THESE COMMITS CHANGE". Git's window is
+a fourth thing again (this branch's uncommitted + committed work, whoever
+authored it). They are not four approximations of one quantity — a PR's file list
+is the UNION of every commit on its branch, so it contains another session's
+commits, a subagent's, and hand-made ones; a session transcript contains exactly
+one session's turns and nobody else's; and a named commit contains exactly what
+that commit changed, with a SIBLING commit on the same branch outside the window.
+Each `caveat` says which question its own window answers; see
+`PathSource.caveat`.
 
 🔴 GIT WAS THE ORIGINAL SOURCE AND IS STRUCTURALLY BLIND TO THE BEST SESSIONS.
 On its first real invocation this tool captured NOTHING from the session it was
@@ -77,6 +80,19 @@ working pattern, so the source that cannot see it is the one that has to change.
     the exact direction the session source under-reports, and it cannot tell you
     which. That is why it is a separate flag with a separate caveat rather than
     a widening of `--session`, and why the two do not compose (see below).
+  * COMMITS (`--commit <sha>[,<sha>...]`) — the WORKFLOW-AGNOSTIC one, and the
+    only source that reaches a repo which lands work without pull requests or
+    forbids committing in the primary clone. Both blind spots were MEASURED on
+    the repo holding 23 of the store's 24 entries: its `CLAUDE.md` mandates a
+    throwaway `/tmp/wt-*` worktree, so a real `--session` run reported 25 paths
+    OUTSIDE the session cwd and 0 inside; and of its last 200 mainline commits, 144
+    carry no `(#N)` suffix, so 72% of what lands never passes through a PR. A
+    commit is the primitive the other two reduce to — a PR is a set of commits,
+    worktree-authored work becomes a mainline commit, a direct push IS a commit — so
+    this source is workflow-agnostic by construction rather than by luck. What it
+    costs: the shas must come from the CALLER, because nothing on the machine
+    knows which commits an agent just created. See `collect_commit_paths` for the
+    five guards, and for the merge/empty/unreachable decisions.
   * GIT (`--paths-from git`, the default) — FALLBACK. Deterministic, re-runnable,
     already built and tested, and honest about a window that is bounded to the
     BRANCH rather than the session:
@@ -96,9 +112,11 @@ window that is exactly what it disclaims. `PathSource.caveat` branches per
 source; every renderer prints it, on every output path.
 
 🔴 THE SOURCES DO NOT COMPOSE — ONE QUESTION PER RUN, ENFORCED BY ARGPARSE.
-`--session`, `--transcript`, `--pr` and `--paths-from` are mutually exclusive.
-Unioning `--session` with `--pr` was considered and REJECTED, and the reason is
-the caveat rather than the paths:
+`--session`, `--transcript`, `--pr`, `--commit` and `--paths-from` are mutually
+exclusive. Unioning `--session` with `--pr` was considered and REJECTED, and the
+reason is the caveat rather than the paths — it applies verbatim to `--commit`,
+one flag further along, since a three-way union would need three caveat sentences
+in one line:
 
   * A union has ONE `caveat` line describing a set assembled from two windows
     with opposite biases. It would have to assert session attribution for some
@@ -146,6 +164,7 @@ CONTRACT SUMMARY
     collect_session_paths(repo, session=…)    -> PathSource      (PREFERRED)
     find_transcript(session)                  -> Path
     collect_pr_paths(repo, numbers, fetch=…)  -> PathSource      (runs gh)
+    collect_commit_paths(repo, shas)          -> PathSource      (runs git)
     collect_git_paths(repo)                   -> PathSource      (runs git)
     caller_supplied(paths)                    -> PathSource      (pure)
     nominate(assoc, index, *, min_paths, limit)
@@ -192,6 +211,19 @@ of them can return an empty path set:
     "pull request is closed unmerged"          PrNotLandedError
     "pull request response is malformed"       PrResponseMalformedError
     "pull request file list is truncated"      PrFileListTruncatedError
+
+and, for the commit source — the source with the most ways to reach a SILENT
+zero, because four of them are git's own exit-0 defaults (a merge, a root commit
+without `--root`, and a blob or tree sha, each printing an empty file list at
+exit 0). Each is FATAL and none returns an empty path set:
+
+    "commit sha is malformed"                  CommitRefMalformedError
+    "commit not found"                         CommitMissingError  (also the
+                                               "created in ANOTHER repo" case,
+                                               which is not locally separable)
+    "commit sha is ambiguous"                  CommitAmbiguousError
+    "object is not a commit"                   CommitWrongTypeError
+    "commit is a merge"                        CommitIsMergeError
 
 🔴 THE FAILURE MODE IS A CONFIDENT ZERO. "Nothing to record" is the observable
 that the most causes share: no paths, an unknown scope, a matcher wired to
@@ -270,8 +302,15 @@ __all__ = [
     "PrNotLandedError",
     "PrResponseMalformedError",
     "PrFileListTruncatedError",
+    "CommitRefMalformedError",
+    "CommitMissingError",
+    "CommitAmbiguousError",
+    "CommitWrongTypeError",
+    "CommitIsMergeError",
     "PR_JSON_FIELDS",
     "PR_ACCEPTED_STATES",
+    "COMMIT_SHA_MIN_CHARS",
+    "COMMIT_SHA_MAX_CHARS",
     "PathSource",
     "Nomination",
     "EntryJournal",
@@ -283,6 +322,7 @@ __all__ = [
     "collect_git_paths",
     "collect_session_paths",
     "collect_pr_paths",
+    "collect_commit_paths",
     "find_transcript",
     "caller_supplied",
     "nominate",
@@ -628,6 +668,118 @@ class PrFileListTruncatedError(TouchError):
     """
 
 
+# --- Commit-source errors ------------------------------------------------------
+#
+# 🔴 THE SOURCE WITH THE MOST WAYS TO PRODUCE A SILENT ZERO, AND THEY ARE GIT'S
+# OWN DEFAULTS RATHER THAN ANYTHING THIS MODULE DOES. Measured against git 2.55.0
+# on a synthetic repo, 2026-08-12 — every one of these EXITS 0 and prints an EMPTY
+# path list, so a naive implementation reports "this commit changed nothing":
+#
+#     `diff-tree <merge>`        prints NOTHING (a merge has no single diff)
+#     `diff-tree <root-commit>`  prints NOTHING without `--root`
+#     `diff-tree <blob-sha>`     prints NOTHING; the complaint goes to stderr
+#                                and the EXIT CODE IS 0
+#     `diff-tree <tree-sha>`     same
+#
+# So `GitError` — which keys on a non-zero exit — cannot see any of them. Each is
+# closed by a guard BEFORE the diff runs, and each guard has its own sentinel so a
+# caller (or a mutation test) can tell which fired. None falls back to another
+# source, for the reason the session and PR families already state: a plausible
+# answer to a question the caller did not ask is worse than a refusal `/handoff`
+# step 4 already knows how to handle.
+#
+# No two share a spelling, across BOTH other families too —
+# `TestCommitNegativeControls` asserts that over the union, because a cross-family
+# collision would make every family's `_only` helper vacuous.
+
+
+class CommitRefMalformedError(TouchError):
+    """The token is not an object name at all. Sentinel: 'commit sha is malformed'.
+
+    🔴 ONLY A HEX SHA IS ACCEPTED — never a revision EXPRESSION (`HEAD`, `main`,
+    `HEAD~3`, `@{u}`). An expression resolves against ambient repo state, so the
+    same argument names a different commit tomorrow, in another worktree, or on
+    another host; a window that moves under a re-run is not the deterministic,
+    re-runnable source this flag exists to be. `HEAD` in particular would resolve
+    silently and report a real diff — a confident answer to a token the caller
+    meant as shorthand.
+
+    The length bound is git's own: a prefix shorter than 4 is not a sha git will
+    resolve for a human, and `rev-parse --disambiguate` will still EXPAND a 3-char
+    prefix in a small repo (measured) — so without this bound a typo resolves.
+    """
+
+
+class CommitMissingError(TouchError):
+    """No object in THIS repo has that name. Sentinel: 'commit not found'.
+
+    🔴 IT DELIBERATELY COVERS "THE SHA BELONGS TO ANOTHER REPOSITORY" TOO, and
+    says so in its own message rather than pretending to a diagnosis it cannot
+    make. `claude/RULES.md` → "an EMPTY RESULT cannot distinguish two mechanisms":
+    a sha that was never created and a sha created in a DIFFERENT clone are the
+    same observable here — the object is absent — and no local signal separates
+    them. (Worktrees of one repo share an object database, so a commit made in a
+    throwaway worktree IS present; that is the case this flag was built for, and
+    it is not this error.) A `CommitForeignRepoError` would be a status with no
+    code path behind it, the same shape this module refuses for `no-store`.
+
+    Also raised when no sha was given at all (`--commit ,`), following the PR
+    source's precedent: a well-formed report over ZERO commits is the confident
+    zero arriving through argument parsing.
+    """
+
+
+class CommitAmbiguousError(TouchError):
+    """A short sha names more than one object. Sentinel: 'commit sha is ambiguous'.
+
+    🔴 REFUSED BY NAME, NEVER SILENTLY RESOLVED, and the check is CONSERVATIVE on
+    purpose: it counts candidates of EVERY object type (`rev-parse
+    --disambiguate`), not only those that peel to a commit. Git will happily pick
+    for you when the prefix is ambiguous between a blob and a commit — the
+    type-peeling rules decide, and they are a git-version-dependent tiebreak this
+    module would then be silently inheriting. The caller always has the exact
+    alternative (the full 40-char sha, which it already has in hand), so refusing
+    costs it nothing and removes the whole class.
+    """
+
+
+class CommitWrongTypeError(TouchError):
+    """The sha names a blob/tree/tag, not a commit. Sentinel: 'object is not a commit'.
+
+    🔴 A LIVE SILENT ZERO, MEASURED, NOT A DEFENSIVE CHECK. `git diff-tree
+    --name-only -r --root <blob-sha>` exits **0** with empty stdout and puts
+    `error: object … is a blob, not a commit` on stderr (git 2.55.0). So without
+    this guard the run succeeds and reports that the "commit" changed no files —
+    indistinguishable from an empty commit, and `GitError` never sees it because
+    the exit code is 0.
+    """
+
+
+class CommitIsMergeError(TouchError):
+    """The sha names a merge commit. Sentinel: 'commit is a merge'.
+
+    🔴 REFUSED, AND THIS IS A DECISION WITH THREE REJECTED ALTERNATIVES. A merge
+    has no single diff, and `git diff-tree <merge>` prints NOTHING at exit 0
+    (measured) — so "do nothing special" is the silent zero.
+
+      * FIRST-PARENT diff (`<merge>^1..<merge>`) — what the merged branch brought
+        in. REJECTED: that is the whole other branch's work, attributed to one
+        sha the caller named as "a commit I made". It over-reports in exactly the
+        direction this source exists to avoid, and the caveat printed beside it
+        would say "what these COMMITS changed", which would be false.
+      * COMBINED diff (`--cc`) — only the files that differ from ALL parents, i.e.
+        conflict resolutions. REJECTED: a third question again, and for a clean
+        merge it is empty, so it reintroduces the silent zero for the common case.
+      * EMPTY, stated in a note. REJECTED because it does not compose: `--commit
+        a,b,<merge>` would quietly under-report while still printing a confident
+        union.
+
+    So it refuses and names the alternatives: the merge's own side commits, or
+    `--pr <n>`, which is the source built for "what a BRANCH landed" and says so
+    in its own caveat.
+    """
+
+
 # --- Scope ---------------------------------------------------------------------
 
 
@@ -666,8 +818,7 @@ def scope_for_repo(repo: str | Path) -> str:
     """
     repo = Path(repo)
     common = _git(repo, ["rev-parse", "--path-format=absolute", "--git-common-dir"]).strip()
-    top = _git(repo, ["rev-parse", "--show-toplevel"]).strip()
-    return derive_scope(top, common)
+    return derive_scope(_toplevel(repo), common)
 
 
 # --- Path sources --------------------------------------------------------------
@@ -683,11 +834,11 @@ class PathSource:
     """
 
     kind: str
-    """`git`, `session`, `pr` or `caller`."""
+    """`git`, `session`, `pr`, `commit` or `caller`."""
 
     window: str
     """`branch` (worktree ∪ this branch's commits), `worktree`, `session`,
-    `pull-requests`, or `supplied`."""
+    `pull-requests`, `commits`, or `supplied`."""
 
     paths: tuple[str, ...]
     base_ref: str | None = None
@@ -710,6 +861,14 @@ class PathSource:
 
     In the caveat because "PR #4" is ambiguous across repositories and the whole
     point of the repository guard is that a bare number names nothing.
+    """
+
+    commits: tuple[str, ...] = ()
+    """The FULL 40-char shas read, when `kind == "commit"`.
+
+    Full, never the abbreviation the caller passed: expanding the token is part
+    of validating it, and a report that echoed `a1b2c3d` back would be quoting
+    the argument instead of stating what it resolved to. Part of the caveat.
     """
 
     @property
@@ -746,6 +905,27 @@ class PathSource:
                 f"direction to the session window, which sees exactly one "
                 f"session's turns and nobody else's. Attribute these paths to the "
                 f"BRANCH, never to a session"
+            )
+        if self.kind == "commit":
+            # 🔴 THE WORDING IS THE DELIVERABLE, and this window is a THIRD
+            # thing: not a session (it does not know who authored the commit)
+            # and not a branch (a sibling commit on the same branch is NOT in
+            # it). Both of the other caveats would be wrong here in a different
+            # direction, which is why this is a branch and not a reuse.
+            listed = ", ".join(s[:12] for s in self.commits)
+            return (
+                f"commit(s) {listed}: every file THOSE COMMITS changed, each diffed "
+                f"against its own parent — what THESE COMMITS CHANGED, which is "
+                f"neither a SESSION nor a BRANCH. It EXCLUDES uncommitted work, and "
+                f"anything done that never became one of these commits: an edit later "
+                f"reverted or amended away, and every commit not named here — a "
+                f"SIBLING commit on the same branch is NOT in this window. It can "
+                f"WRONGLY INCLUDE more than the work being recorded: a commit that "
+                f"also carried a formatting sweep, a bulk rename, a squash of hunks "
+                f"someone else wrote, or a file swept in by a wide `git add`, is "
+                f"reported WHOLE — this source reads the diff and cannot see intent. "
+                f"Attribute these paths to THESE COMMITS, never to a session and "
+                f"never to a branch"
             )
         if self.kind == "session":
             return (
@@ -807,6 +987,25 @@ def _git_ok(repo: Path, args: Sequence[str]) -> bool:
 
 def _nul_list(out: str) -> list[str]:
     return [p for p in out.split("\0") if p]
+
+
+def _toplevel(repo: str | Path) -> Path:
+    """The repo ROOT for a directory that may be anywhere inside it. Runs git.
+
+    🔴 ONE FRAME, ONE CALL SITE. This used to be open-coded at four of them —
+    `scope_for_repo`, and each source that has to fix a path frame — and the
+    mutation harness is what surfaced it: the anchor for the git source's frame
+    guard started matching TWICE the moment a second source needed the same two
+    lines, so the mutant that had been pinning it could no longer be applied at
+    all. `claude/RULES.md` → "One rule, one place": a predicate open-coded at N
+    sites is typically wrong at N−1 of them.
+
+    Why it matters is stated where it bites hardest, in `collect_git_paths`:
+    `diff`/`diff-tree` are always repo-root-relative while `ls-files --others` is
+    cwd-relative AND cwd-scoped, so a caller passing a subdirectory would get two
+    different frames in one path set — components both manufactured and lost.
+    """
+    return Path(_git(Path(repo), ["rev-parse", "--show-toplevel"]).strip())
 
 
 def _filter_excluded(
@@ -879,9 +1078,8 @@ def collect_git_paths(
     (`/handoff` writes its own doc, then asks what changed). Exclusions are
     COUNTED into `notes`, never silently dropped.
     """
-    # 🔴 One frame for every command below. See the docstring.
-    toplevel = _git(Path(repo), ["rev-parse", "--show-toplevel"]).strip()
-    repo = Path(toplevel)
+    # 🔴 One frame for every command below. See the docstring, and `_toplevel`.
+    repo = _toplevel(repo)
     commands: list[tuple[str, ...]] = []
     notes: list[str] = []
     raw: list[str] = []
@@ -1197,7 +1395,7 @@ def collect_session_paths(
     # extractor emits is relative to the session cwd, so unless that cwd IS the
     # repo root, the paths are repo-relative to a different repo and would
     # resolve — silently, plausibly — against this repo's index.
-    toplevel = _git(Path(repo), ["rev-parse", "--show-toplevel"]).strip()
+    toplevel = str(_toplevel(repo))
     session_cwd = rollup.get("cwd") or ""
     if not _same_dir(session_cwd, toplevel):
         raise TranscriptCwdMismatchError(
@@ -1626,6 +1824,307 @@ def collect_pr_paths(
         notes=tuple(notes),
         prs=tuple(read),
         repo_slug=slug,
+    )
+
+
+# --- The commit source: paths from what THESE COMMITS changed ------------------
+#
+# 🔴 READ `PathSource.caveat` FOR WHAT THIS SET IS BEFORE READING WHAT IT DOES.
+# It answers "what did THESE COMMITS change" — a third question again, neither
+# the session's nor the branch's.
+#
+# WHY A COMMIT SOURCE RATHER THAN A FOURTH WORKFLOW PATCH
+# -------------------------------------------------------
+# The other two windows are blind BY CONSTRUCTION in the repos where the store's
+# entries actually accrue, and both blind spots were measured rather than
+# supposed (2026-08-12, on the repo that holds 23 of the store's 24 entries;
+# unnamed here because this repo is PUBLIC):
+#
+#   * SESSION. That repo's own `CLAUDE.md` forbids committing in the primary
+#     clone and mandates a throwaway worktree under `/tmp/wt-*`. Every edit
+#     therefore lands outside the session cwd and has NO repo-relative form
+#     against `--repo`: a real run reported 25 paths outside the cwd and 0
+#     inside, i.e. `looked-at-nothing`. The transcript is not wrong; the paths
+#     genuinely do not belong to that directory.
+#   * PR. Over that repo's last 200 mainline commits, 56 carry a `(#N)` suffix and
+#     144 do not — so 72% of what lands never passes through a pull request and
+#     `--pr` cannot see it at all.
+#
+# A COMMIT IS THE PRIMITIVE THE OTHER SOURCES REDUCE TO. A PR is a set of
+# commits; worktree-authored work becomes a mainline commit; a direct push IS a
+# commit. So this source is workflow-agnostic BY CONSTRUCTION rather than by
+# luck — which is the property a fourth per-workflow special case would not have.
+# What it costs is that the shas must come from the caller: nothing on the
+# machine knows which commits an agent just created, and `/handoff` step 4 says
+# so in those words.
+#
+# 🔴 AND IT STILL DOES NOT COMPOSE WITH THE OTHERS. Same reason as `--session` vs
+# `--pr`, one flag further along: a union carries ONE caveat sentence over a set
+# whose members need three different ones. Run it separately.
+
+COMMIT_SHA_MIN_CHARS = 4
+"""Git's own floor for a human-typed abbreviation, and not a style choice: at 3
+chars `rev-parse --disambiguate` still EXPANDS the prefix in a small repo
+(measured, git 2.55.0), so a typo would resolve to a real commit and be reported
+as a deliberate argument."""
+
+COMMIT_SHA_MAX_CHARS = 40
+"""SHA-1 hex length. A repo on SHA-256 would need this widened; it is asserted
+rather than assumed so the failure is a named refusal, not a wrong window."""
+
+_HEX_DIGITS = "0123456789abcdefABCDEF"
+
+
+def _hex_sha_token(token: object) -> str:
+    """A validated, lower-cased hex sha token, or a named refusal.
+
+    Pure — no git, no repo. Splitting it out is what makes the SHAPE guard
+    reachable independently of everything that needs a repository.
+    """
+    t = str(token).strip()
+    # 🔴 TWO GUARDS, NOT ONE CONDITION, because they close different holes and a
+    # single `if` would make them one mutation — killable together and therefore
+    # neither of them measured. They share a class and a sentinel on purpose:
+    # the caller's fix is the same ("pass the sha"), and a second sentinel for a
+    # second spelling of "that is not a sha" would be a distinction nothing acts
+    # on.
+    if not t or not all(c in _HEX_DIGITS for c in t):
+        raise CommitRefMalformedError(
+            f"commit sha is malformed: {token!r} is not an object name — pass a hex "
+            f"sha, e.g. `--commit 4f1eafa` or `--commit 4f1eafa,2ddbc42`. A revision "
+            f"EXPRESSION (`HEAD`, `main`, `HEAD~3`, `@{{u}}`) is refused on purpose: "
+            f"it resolves against ambient repo state, so the same argument would "
+            f"name a different commit on a re-run, in another worktree, or on "
+            f"another host."
+        )
+    if not COMMIT_SHA_MIN_CHARS <= len(t) <= COMMIT_SHA_MAX_CHARS:
+        raise CommitRefMalformedError(
+            f"commit sha is malformed: {token!r} is {len(t)} characters — pass "
+            f"{COMMIT_SHA_MIN_CHARS}-{COMMIT_SHA_MAX_CHARS}. Shorter is refused "
+            f"because `rev-parse --disambiguate` still EXPANDS a 3-character prefix "
+            f"in a small repo (measured), so a typo would resolve to a real commit "
+            f"and be reported as a deliberate argument."
+        )
+    return t.lower()
+
+
+def _disambiguate(repo: Path, prefix: str) -> list[str]:
+    """Every object in this repo whose name starts with `prefix`. READ-ONLY.
+
+    `rev-parse --disambiguate` is used instead of `rev-parse --verify
+    <prefix>^{commit}` for two reasons, both structural:
+
+      * it EXITS 0 and returns a LIST, so "absent", "unique" and "ambiguous" are
+        three distinguishable readings rather than one exit code plus a stderr
+        string this module would have to pattern-match (the part-heuristic it
+        already declares for `gh`, avoided here);
+      * `^{commit}` makes git PICK when a prefix names both a blob and a commit.
+        Counting all types means the ambiguity guard never inherits git's
+        type-peeling tiebreak.
+    """
+    return _git(repo, ["rev-parse", f"--disambiguate={prefix}"]).split()
+
+
+def _object_type(repo: Path, sha: str) -> str:
+    """`commit`/`blob`/`tree`/`tag`, or `""` when git cannot read the object.
+
+    🔴 RETURNS A VALUE, NEVER RAISES, so "the object is absent" is a first-class
+    reading the caller branches on rather than a `GitError` whose sentinel would
+    be `git command failed` — a true statement about the subprocess and a useless
+    one about the sha.
+    """
+    try:
+        return _git(repo, ["cat-file", "-t", sha]).strip()
+    except GitError:
+        return ""
+
+
+def _commit_parents(repo: Path, sha: str) -> list[str]:
+    """The parent shas of a COMMIT. Call only after the type guard.
+
+    `rev-list --parents -n1` prints `<self> <parent>...`; on a non-commit it
+    prints NOTHING at exit 0 (measured), which is why the type guard has to run
+    first — here it would read as "a root commit", the opposite of an error.
+    """
+    out = _git(repo, ["rev-list", "--parents", "-n", "1", sha]).split()
+    return out[1:]
+
+
+def _commit_reachable(repo: Path, sha: str) -> bool:
+    """Is this commit contained in any ref? Reported, never enforced. READ-ONLY."""
+    return bool(
+        _git(repo, ["for-each-ref", "--contains", sha, "--count=1", "--format=%(refname)"]).strip()
+    )
+
+
+def _resolve_commit(repo: Path, token: object) -> str:
+    """One token -> one full 40-char commit sha, or a named refusal.
+
+    🔴 GUARD ORDER IS REACHABILITY ORDER. Each is reached by an input no EARLIER
+    guard rejects, so each one's negative control fails on its OWN sentinel
+    rather than on a neighbour's:
+
+      1a. the token is HEX                    CommitRefMalformedError
+      1b. …and 4-40 characters long           CommitRefMalformedError
+      2.  the prefix names ONE object         CommitAmbiguousError
+      3.  …and it names at least one          CommitMissingError
+      4.  that object is a COMMIT             CommitWrongTypeError
+      5.  …with at most one parent            CommitIsMergeError
+
+    1a and 1b are two `if`s and not one condition: they close different holes
+    (an expression that resolves vs a typo that expands), and one combined `if`
+    would die to one mutation, leaving neither half measured. They share a class
+    and a sentinel because the caller's fix is the same either way.
+
+    (4) must precede (5): `rev-list --parents` on a blob prints nothing at exit
+    0, which this code would read as "no parents" — a root commit — so a merge
+    check placed first would silently pass every blob.
+
+    (2) must precede (3) rather than the other way round because they read the
+    SAME list: `[]` is absent and `[a, b]` is ambiguous, and collapsing them
+    would make an ambiguous prefix report `commit not found` — a diagnosis that
+    sends the caller looking for a commit that is right there.
+    """
+    t = _hex_sha_token(token)
+
+    # --- guards 2 and 3: exactly one object answers to this name ----------------
+    candidates = _disambiguate(repo, t)
+    if len(candidates) > 1:
+        raise CommitAmbiguousError(
+            f"commit sha is ambiguous: `{t}` names {len(candidates)} objects in this "
+            f"repo ({', '.join(candidates)}) — pass the full 40-character sha. It is "
+            f"refused rather than resolved because picking one would inherit git's "
+            f"type-peeling tiebreak, and you already have the exact sha in hand."
+        )
+    # 🔴 A VALUE, THEN A GUARD ON IT — not `candidates[0]` behind an `if`. With
+    # the subscript inside the guarded branch, deleting the guard produces an
+    # IndexError rather than a wrong ANSWER, so the mutation would "kill" on a
+    # crash and prove nothing about what the absent guard lets through.
+    full = candidates[0] if candidates else ""
+    if not full:
+        raise CommitMissingError(
+            f"commit not found: no object in this repo is named `{t}`. Either it does "
+            f"not exist, or it was created in ANOTHER repository — nothing local can "
+            f"tell those two apart, and both mean the same thing here: there is no "
+            f"diff to read. (A commit made in a WORKTREE of this repo IS present; "
+            f"worktrees share one object database.)"
+        )
+
+    # --- guard 4: it is a commit -------------------------------------------------
+    otype = _object_type(repo, full)
+    if otype != "commit":
+        raise CommitWrongTypeError(
+            f"object is not a commit: `{t}` names a {otype or 'unreadable object'} "
+            f"({full}). This is refused rather than diffed because `git diff-tree` on "
+            f"a non-commit EXITS 0 with an empty file list and complains only on "
+            f"stderr — so it would be reported as a commit that changed nothing."
+        )
+
+    # --- guard 5: it is not a merge ---------------------------------------------
+    parents = _commit_parents(repo, full)
+    if len(parents) > 1:
+        raise CommitIsMergeError(
+            f"commit is a merge: {full} has {len(parents)} parents "
+            f"({', '.join(p[:12] for p in parents)}), so it has no single diff — and "
+            f"`git diff-tree` prints NOTHING for one, at exit 0. Pass the side "
+            f"commits it merged, or use `--pr <n>`, which is the source built for "
+            f"what a BRANCH landed and carries that caveat."
+        )
+    return full
+
+
+def collect_commit_paths(
+    repo: str | Path,
+    shas: Iterable[object],
+    *,
+    exclude: Iterable[str] = (),
+) -> PathSource:
+    """What the named COMMITS changed. Per-commit — neither per-session nor per-branch.
+
+    The window the other sources cannot express in a repo that does not land its
+    work through pull requests, or that mandates committing from a throwaway
+    worktree; see the section comment above for both measurements.
+
+    🔴 `--root` IS NOT OPTIONAL. `git diff-tree <root-commit>` prints NOTHING
+    without it (measured) — the first commit in a repo would report having
+    changed no files, which is the silent zero this whole module exists to
+    refuse. With it, a root commit reports the files it introduced.
+
+    🔴 AN EMPTY COMMIT IS A READING, NOT AN ERROR, matching the PR source's
+    treatment of an empty `files` list. A `--allow-empty` commit is well-formed
+    and genuinely changed nothing; its `0 file(s)` is stated in a note, on every
+    run, so the zero is accounted rather than merely absent. Refusing it would
+    also break composition — one empty sha in `--commit a,b,c` would kill an
+    otherwise good run.
+
+    🔴 AN UNREACHABLE COMMIT IS ACCEPTED, and that is a decision. A commit created
+    in a `/tmp/wt-*` worktree that has since been removed, or one rebased away,
+    is reachable from NO ref — and it is exactly the case this flag was built
+    for, since the work still happened and the object is still in the shared
+    object database. Requiring reachability would reject the motivating case. The
+    real consequence — an unreachable object can be garbage-collected, so this
+    run is not reproducible later — is REPORTED in the per-commit note rather
+    than turned into a refusal.
+    """
+    # One frame for every command, through the SHARED resolver: `diff-tree` is
+    # repo-root-relative wherever it runs, but recording an argv that only
+    # reproduces from a subdirectory would make `commands` a line a reader
+    # cannot re-run.
+    repo = _toplevel(repo)
+
+    commands: list[tuple[str, ...]] = []
+    notes: list[str] = []
+    raw: list[str] = []
+    # Named `resolved` rather than `read` deliberately: it holds the EXPANDED
+    # 40-char shas, so `full in resolved` recognises one commit named two ways
+    # (`a1b2c3d` and its own full form) as one. Deduping on the token would read
+    # it twice and double the per-commit accounting a reader uses to check the
+    # window.
+    resolved: list[str] = []
+
+    for token in shas:
+        full = _resolve_commit(repo, token)
+        if full in resolved:
+            notes.append(f"commit {full[:12]} was named more than once; read once")
+            continue
+        resolved.append(full)
+        args = ["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "--root", full]
+        commands.append(("git", *args))
+        paths = _nul_list(_git(repo, args))
+        raw.extend(paths)
+        # 🔴 EMITTED UNCONDITIONALLY, INCLUDING AT ZERO. A stated `0 file(s)` is a
+        # reading; an absent line is indistinguishable from a differ wired to
+        # nothing (`claude/RULES.md` → "report the pair"). The reachability word
+        # is on the same line for the same reason — it prints BOTH values, so
+        # `unreachable` is never the only thing anyone has seen it say.
+        where = "reachable from a ref" if _commit_reachable(repo, full) else (
+            "NOT reachable from any ref — accepted (a throwaway-worktree or "
+            "rebased-away commit is still work that happened), but it can be "
+            "garbage-collected, so this run is not reproducible later"
+        )
+        notes.append(f"commit {full[:12]}: {len(paths)} file(s) changed; {where}")
+
+    if not resolved:
+        # Reachable via `--commit ,` or `--commit ''`. Falling through would
+        # return a perfectly well-formed report over ZERO commits — the confident
+        # zero, arriving through argument parsing.
+        raise CommitMissingError(
+            "commit not found: no commit sha was given, so nothing was read. "
+            "`--commit` takes one or more hex shas, e.g. `--commit 4f1eafa,2ddbc42`."
+        )
+
+    paths, dropped = _filter_excluded(raw, exclude)
+    notes.append(f"{len(paths)} distinct path(s) across {len(resolved)} commit(s)")
+    if dropped:
+        notes.append(_exclusion_note(dropped))
+
+    return PathSource(
+        kind="commit",
+        window="commits",
+        paths=tuple(paths),
+        commands=tuple(commands),
+        notes=tuple(notes),
+        commits=tuple(resolved),
     )
 
 
@@ -2498,6 +2997,7 @@ def report_json(report: TouchReport) -> dict:
             "base_ref": src.base_ref,
             "session": src.session,
             "prs": list(src.prs),
+            "commits": list(src.commits),
             "repo_slug": src.repo_slug,
             "caveat": src.caveat,
             "notes": list(src.notes),
@@ -2654,8 +3154,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--paths-from",
         default="git",
         help=(
-            "fallback source when no --session/--transcript/--pr is given: `git` "
-            "(default) or `-` to read repo-relative paths from stdin, one per line"
+            "fallback source when no --session/--transcript/--pr/--commit is given: "
+            "`git` (default) or `-` to read repo-relative paths from stdin, one per line"
         ),
     )
     # 🔴 MUTUALLY EXCLUSIVE, ENFORCED BY ARGPARSE (exit 2). They name the same
@@ -2697,6 +3197,21 @@ def _build_parser() -> argparse.ArgumentParser:
             "MERGED are accepted, closed-unmerged is refused."
         ),
     )
+    session_src.add_argument(
+        "--commit",
+        action="append",
+        default=None,
+        metavar="SHA[,SHA...]",
+        help=(
+            "report what these COMMITS changed. The workflow-agnostic source: a PR "
+            "is a set of commits, worktree-authored work becomes a mainline commit, and "
+            "a direct push IS a commit — so this reaches repos where --session sees "
+            "only paths outside the cwd and --pr sees under a third of what lands. "
+            "Repeatable and comma-separated. Hex shas only (4-40 chars); a revision "
+            "expression, an ambiguous prefix and a merge commit are each refused by "
+            "name."
+        ),
+    )
     p.add_argument(
         "--exclude",
         action="append",
@@ -2726,6 +3241,19 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _comma_tokens(groups: Iterable[object]) -> list[str]:
+    """`["1,2", "3"]` -> `["1", "2", "3"]`. ONE splitter for `--pr` and `--commit`.
+
+    Empty tokens are DROPPED, which is a decision and not tidiness: it makes
+    `--pr 421,` the typo it looks like rather than a second unusable number, and
+    it makes `--pr ,` / `--commit ,` reach the source's "nothing was given" guard
+    instead of its "unusable token" guard. Those are different facts, and each
+    has its own test. A second copy of this would drift from that decision — the
+    duplicated-predicate shape `claude/RULES.md` names.
+    """
+    return [tok for group in groups for tok in str(group).split(",") if tok.strip()]
+
+
 def main(argv: Sequence[str] | None = None, *, today: str | None = None) -> int:
     args = _build_parser().parse_args(list(argv) if argv is not None else None)
     from datetime import date  # local: the pure layer above never imports a clock
@@ -2747,17 +3275,19 @@ def main(argv: Sequence[str] | None = None, *, today: str | None = None) -> int:
 
         wants_session = args.session is not None or args.transcript is not None
         wants_pr = args.pr is not None
+        wants_commit = args.commit is not None
         # 🔴 A CONTRADICTION IS REFUSED, NOT RESOLVED. `--paths-from` names the
-        # FALLBACK source, so pairing it with a session or PR request asks for
-        # two different windows at once. Honouring either silently would hand
-        # back a plausible answer to a question the caller did not ask — the
+        # FALLBACK source, so pairing it with a session, PR or commit request
+        # asks for two different windows at once. Honouring either silently would
+        # hand back a plausible answer to a question the caller did not ask — the
         # same failure the no-fallback rule above exists to prevent, arriving
         # through argument parsing instead. (`--session` vs `--transcript` vs
-        # `--pr` is enforced one level up, by argparse's exclusive group.)
-        if (wants_session or wants_pr) and args.paths_from != "git":
+        # `--pr` vs `--commit` is enforced one level up, by argparse's exclusive
+        # group.)
+        if (wants_session or wants_pr or wants_commit) and args.paths_from != "git":
             print(
-                "subsystem-touch: --session/--transcript/--pr cannot be combined with "
-                "--paths-from; they are different path windows. Drop one.",
+                "subsystem-touch: --session/--transcript/--pr/--commit cannot be "
+                "combined with --paths-from; they are different path windows. Drop one.",
                 file=sys.stderr,
             )
             return 2
@@ -2773,19 +3303,14 @@ def main(argv: Sequence[str] | None = None, *, today: str | None = None) -> int:
             # Flattened here rather than in `collect_pr_paths` so the library
             # keeps taking a plain sequence of numbers: `--pr 1,2 --pr 3` is a
             # CLI spelling, not part of the contract.
-            source = collect_pr_paths(
-                repo,
-                # Empty tokens are dropped so `--pr 421,` is the typo it looks
-                # like rather than a second, unusable number — and so `--pr ,`
-                # reaches the "no pull request number was given" guard instead
-                # of the "not a usable number" one, which is a different fact.
-                [
-                    tok
-                    for group in args.pr
-                    for tok in str(group).split(",")
-                    if tok.strip()
-                ],
-                exclude=args.exclude,
+            source = collect_pr_paths(repo, _comma_tokens(args.pr), exclude=args.exclude)
+        elif wants_commit:
+            # Same CLI spelling, same reasoning, and the SAME splitter — a second
+            # copy would drift, and this one already encodes the decision that an
+            # empty token reaches the "nothing was given" guard rather than the
+            # "unusable token" one.
+            source = collect_commit_paths(
+                repo, _comma_tokens(args.commit), exclude=args.exclude
             )
         elif args.paths_from == "git":
             source = collect_git_paths(repo, exclude=args.exclude)
