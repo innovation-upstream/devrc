@@ -222,15 +222,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from subsystem_resolver import (  # noqa: E402
     DEFAULT_MIN_PATHS,
+    NUANCE_HEADING,
     AmbiguousRefError,
     Association,
+    EntryUnreadableError,
+    JournalBullet,
+    MalformedEntryError,
     ResolverError,
+    SubsystemEntry,
     SubsystemIndex,
     UnknownScopeError,
     associate_paths,
+    extract_sections,
     load_index,
     normalize_ref,
     parse_front_matter,
+    parse_journal_bullets,
     path_refs,
     resolve_ref_tiered,
 )
@@ -241,8 +248,11 @@ __all__ = [
     "DEFAULT_NOMINATION_LIMIT",
     "BASE_REF_CANDIDATES",
     "MAX_TRANSCRIPT_AGE_SECONDS",
+    "JOURNAL_BULLETS_SHOWN",
+    "JOURNAL_BULLET_MAX_LINES",
     "TouchError",
     "StoreMissingError",
+    "EntryUnreadableError",
     "GitError",
     "ExtractorMissingError",
     "TranscriptMissingError",
@@ -264,6 +274,8 @@ __all__ = [
     "PR_ACCEPTED_STATES",
     "PathSource",
     "Nomination",
+    "EntryJournal",
+    "read_entry_journal",
     "TouchReport",
     "Census",
     "derive_scope",
@@ -340,6 +352,35 @@ BASE_REF_CANDIDATES: tuple[str, ...] = ("origin/main", "origin/master", "main", 
 MAX_TRANSCRIPT_AGE_SECONDS = 1800.0
 
 _SENSITIVITY_FAIL_SAFE = "client-confidential"
+
+# 🔴 HOW MANY EXISTING BULLETS THE KNOWN-ENTRIES BLOCK SHOWS BEFORE PROPOSING AN
+# APPEND. Both numbers come from ONE measurement of the whole live corpus,
+# 2026-08-12, read-only: 26 entries, 110 top-level bullets, 250 continuation
+# lines.
+#
+# Why 3 bullets:
+#   * Bullets per entry: min 1, median 4, max 11. Three shows the ENTIRE history
+#     of 11 of the 26 entries and the top of the rest.
+#   * The hazard is a repeat run re-stating the line above it, so what must be
+#     visible is the most recent few — and same-date accumulation is already
+#     REAL, not hypothetical: the worst entry in the corpus carries 6 bullets
+#     sharing one date, and 12 entries carry at least 2. Three makes a run that
+#     has already appended twice today see both.
+#   * Cost, which is the countervailing force — this prints at the top of a
+#     `/handoff` and a run can match several entries: a 3-bullet window costs a
+#     median of 9 lines per entry and at most 21 under the per-bullet cap below.
+#     Ten would cost the median entry its whole history and turn a multi-entry
+#     run into a page nobody reads, which is how the prose guard failed already.
+# Not a safety bound: showing too few is a missed catch, never a wrong write, and
+# the count of bullets NOT shown is always printed.
+JOURNAL_BULLETS_SHOWN = 3
+
+# Per-bullet line cap. A bullet is WRAPPED PROSE — median 3 lines, p90 5, max 19
+# in the corpus — so 6 renders more than 90% of real bullets whole, and the 7 that
+# are longer are clipped with the remainder PRINTED, never silently. The point of
+# showing a bullet is recognizing it, and the first six lines of a 19-line bullet
+# are more than enough to recognize; the whole thing is one `--json` away.
+JOURNAL_BULLET_MAX_LINES = 6
 
 
 # --- Errors --------------------------------------------------------------------
@@ -1779,6 +1820,160 @@ def _reserve_slot_for_top_noncoherent(
     return tuple(head[: limit - 1] + [promoted])
 
 
+# --- What the entry ALREADY says -----------------------------------------------
+#
+# 🔴 WHY THIS EXISTS, MEASURED. The `KNOWN ENTRIES` block used to print the
+# append SHAPE and the insertion point and nothing else — so the agent deciding
+# whether to append could not see the bullet it was about to duplicate. Verified
+# 2026-08-12 by re-running the writer against an entry appended to ~20 minutes
+# earlier: the block was byte-identical to the first run. The only guard was
+# prose in `handoff/SKILL.md` ("Nothing notable ⇒ propose nothing"), which asks
+# an agent to judge notability immediately after work it feels good about, with
+# the prior bullet invisible.
+#
+# It is not hypothetical that this accumulates: in the live corpus one entry
+# already carries 6 bullets sharing a single date, and 12 of 26 carry at least 2.
+#
+# 🔴 READ-AND-DISPLAY ONLY. This module has NO write call site and that property
+# is what lets it be pointed at a curated, client-confidential, unbacked-up
+# store; `TestNeverWrites` hashes a whole store tree either side of every mode.
+# Everything below reads.
+
+
+@dataclass(frozen=True)
+class EntryJournal:
+    """What `## Nuance / work-history` ALREADY holds for one matched entry.
+
+    🔴 THE EMPTY CASES ARE NAMED, NOT COLLAPSED. Four different things produce
+    "no bullets to show", and they mean different things to an agent about to
+    write one — see `state`. Rendering all four as a blank space is precisely the
+    confident zero this toolchain keeps paying for: an empty display would be
+    indistinguishable from a parser wired to nothing.
+    """
+
+    ref: str
+    filename: str
+    state: str
+    """`journalled` | `section-absent` | `section-empty` | `unbulleted`.
+
+    `section-absent`   the entry has no `## Nuance / work-history` heading at
+                       all. Ordinary for an `/analyze-service`-written entry —
+                       and worth saying LOUDLY, because the skill's append
+                       anchors an `Edit` on that heading, so the append cannot
+                       land until the heading is created.
+    `section-empty`    the heading is there with nothing under it. The writer's
+                       own `new_entry_template` never produces this (it ships a
+                       first bullet), so it means someone emptied it.
+    `unbulleted`       the section has prose but no top-level `- ` bullet. Not a
+                       parse failure to hide: it is a schema violation the agent
+                       should see before appending a bullet beneath it.
+    `journalled`       at least one bullet was parsed.
+    """
+
+    bullets: tuple[JournalBullet, ...] = ()
+    """ALL of them, in stored order. The display cap is applied by the renderer,
+    so `--json` carries the whole history and the count of what was hidden is
+    always derivable."""
+
+    created_by: str | None = None
+    """The entry's front-matter `created_by`, or None for an entry predating the
+    stamp. 🔴 IT ATTRIBUTES THE ENTRY, NOT THE NEWEST BULLET. There is no
+    per-bullet writer field in the schema, so who wrote the most recent line is
+    NOT recorded and this must never be presented as if it were."""
+
+    @property
+    def dated(self) -> tuple[str, ...]:
+        return tuple(b.date for b in self.bullets if b.date)
+
+    @property
+    def newest_date(self) -> str | None:
+        """The recency signal: the MAXIMUM date across the bullets, or None.
+
+        🔴 DERIVED FROM CONTENT, NOT FROM `mtime`, and the two are not
+        interchangeable. The store is a git working tree under an hourly
+        autocommit that other sessions also write to, so a file's mtime moves
+        for a checkout, a `git add`, a touch of the front matter, or an edit to
+        a completely different section — every one of which would report the
+        journal as "just appended to" when nothing was appended. A bullet's date
+        is what the last appender actually claimed.
+
+        🔴 THE MAXIMUM, not the first bullet's date. Newest-first is the store's
+        CONVENTION, and a convention is not an invariant — if a past appender put
+        its line at the bottom, reading position as recency reports the oldest
+        bullet as the newest. `max()` is right whichever way they are ordered.
+        Undated bullets (44% of the corpus) are skipped, not guessed at.
+        """
+        return max(self.dated) if self.dated else None
+
+    def dated_on(self, day: str) -> int:
+        """How many bullets already carry `day`. The repeat-run signal."""
+        return sum(1 for d in self.dated if d == day)
+
+    def days_since(self, today: str) -> int | None:
+        """Days from `newest_date` to `today`, or None if neither is a date.
+
+        No clock: `today` is injected all the way from the CLI, so this stays a
+        pure function of the report. The import is LOCAL for the same reason the
+        one in `main()` is — `date` at module scope would put `date.today()`
+        within reach of this layer, which is exactly what `today: str` exists to
+        keep out. `fromisoformat` on two injected strings is arithmetic, not a
+        clock, and a garbage `today` returns None rather than a wrong number.
+        """
+        newest = self.newest_date
+        if newest is None:
+            return None
+        from datetime import date
+
+        try:
+            return (date.fromisoformat(today) - date.fromisoformat(newest)).days
+        except ValueError:
+            return None
+
+
+def read_entry_journal(store_root: str | Path, entry: SubsystemEntry) -> EntryJournal:
+    """Read ONE entry's existing journal. READ-ONLY.
+
+    The file is located from the loader's own `scope` + `filename`, never from a
+    path rebuilt out of the ref — `<slug>.<kind>.md` and `<slug>.md` are
+    different files and only the loader knows which one this entry came from.
+
+    ⚠ REACHABILITY OF THE `EntryUnreadableError` HERE, stated rather than
+    implied. In `build_report`'s flow it is normally the SECOND read of this
+    file: `load_index` has already read every `*.md` in the store, so a
+    permanently unreadable entry raises from the wrap around THAT call and this
+    one never executes. This wrap covers the case that one cannot — the file
+    becoming unreadable BETWEEN the two reads, which is a live possibility in a
+    store with an hourly autocommit and concurrent sessions — and it is reached
+    directly by callers of this function, which is a public entry point. The
+    mutation test drives it by direct call for that reason.
+    """
+    path = Path(store_root) / entry.scope / entry.filename
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise EntryUnreadableError(
+            f"index entry unreadable: {path} ({type(exc).__name__}: {exc}) — the entry's "
+            f"existing work-history could NOT be read, so nothing can be said about what "
+            f"it already records; propose no append. Nothing was written"
+        ) from exc
+
+    created_by = parse_front_matter(text).get("created_by")
+    body = extract_sections(text, (NUANCE_HEADING,)).get(NUANCE_HEADING)
+    common = {
+        "ref": entry.ref,
+        "filename": entry.filename,
+        "created_by": created_by if isinstance(created_by, str) and created_by else None,
+    }
+    if body is None:
+        return EntryJournal(state="section-absent", **common)
+    if not body.strip():
+        return EntryJournal(state="section-empty", **common)
+    bullets = parse_journal_bullets(body)
+    if not bullets:
+        return EntryJournal(state="unbulleted", **common)
+    return EntryJournal(state="journalled", bullets=bullets, **common)
+
+
 # --- The report ----------------------------------------------------------------
 
 
@@ -1811,6 +2006,16 @@ class TouchReport:
     nominations: tuple[Nomination, ...] = ()
     entry_files: Mapping[str, str] = field(default_factory=dict)
     """ref -> the filename in the scope dir, for the append target."""
+
+    journals: Mapping[str, EntryJournal] = field(default_factory=dict)
+    """ref -> what that entry's `## Nuance / work-history` ALREADY holds.
+
+    Populated for MATCHED entries only — the ones a bullet would be proposed
+    against. Below-threshold and ambiguous entries get none: no append is
+    proposed for them, so there is nothing to compare against, and reading them
+    would put more of a client-confidential store on screen than the decision
+    needs.
+    """
 
     @property
     def known(self) -> tuple:
@@ -1886,7 +2091,37 @@ def build_report(
             f"store; nothing was resolved and nothing should be written"
         )
 
-    index = load_index(store)
+    # 🔴 The loader's OSErrors are NAMED. `load_index` reads every `*.md` under
+    # the store, and an unreadable one — a directory sitting where a `.md` is
+    # expected, a bad mode, a mid-rename file in a tree an hourly autocommit and
+    # other sessions are also touching — would otherwise reach `main()` as a bare
+    # `IsADirectoryError` with nothing saying the SUBSYSTEM STORE was what failed.
+    # Same class `subsystem_recall` raises for the same condition, imported from
+    # the resolver rather than re-declared.
+    #
+    # ⚠ THE `MalformedEntryError` CLAUSE IS REDUNDANT-BUT-KEPT, and it is
+    # labelled because a mutation test PROVED it unkillable rather than because
+    # anyone reasoned about it: `MalformedEntryError` is a `ResolverError`, not
+    # an `OSError`, so the clause below could never have caught it and the
+    # re-raise changes nothing. Replacing it with `except ZeroDivisionError`
+    # leaves the behaviour identical. It stays — spelled the same way in
+    # `subsystem_recall`, which reads the same store — because it makes
+    # "the store is BROKEN is not reworded as the store is UNREADABLE" readable
+    # at the call site, and because deleting it from one of the two readers and
+    # not the other is how they start to drift. It is NOT coverage: nothing in
+    # the suite can measure it, and `test_the_MALFORMED_reraise_is_UNKILLABLE`
+    # says so out loud instead of leaving a green that means nothing.
+    try:
+        index = load_index(store)
+    except MalformedEntryError:
+        raise
+    except OSError as exc:
+        raise EntryUnreadableError(
+            f"index entry unreadable: under {store} ({type(exc).__name__}: {exc}) — the "
+            f"store was not fully read, so this association would be INCOMPLETE and an "
+            f"entry could look untouched purely because its file could not be opened"
+        ) from exc
+
     try:
         assoc = associate_paths(source.paths, index, scope, min_paths=min_paths)
     except UnknownScopeError:
@@ -1919,6 +2154,7 @@ def build_report(
         association=assoc,
         nominations=noms,
         entry_files=entry_files,
+        journals={m.entry.ref: read_entry_journal(store, m.entry) for m in assoc.matched},
     )
 
 
@@ -1934,6 +2170,111 @@ def journal_line_shape(today: str) -> str:
     bloat discipline forbids appending.
     """
     return f"- {today}: <one line, ≤2 — a gotcha, a decision, or why this was touched>"
+
+
+def _render_recency(j: EntryJournal, today: str) -> str:
+    """The one-line recency signal for an entry, WHICHEVER of the five it is."""
+    stamp = (
+        f"entry created_by={j.created_by}"
+        if j.created_by
+        else "entry created_by not recorded (predates the stamp)"
+    )
+    if j.state == "section-absent":
+        return (
+            f"journal: NO `{NUANCE_HEADING}` SECTION — nothing has ever been journalled "
+            f"here, and the skill's `Edit` anchor does not exist yet, so the heading has "
+            f"to be created as part of the append; {stamp}"
+        )
+    if j.state == "section-empty":
+        return (
+            f"journal: `{NUANCE_HEADING}` is present and EMPTY — the heading is there with "
+            f"nothing under it, so nothing can be duplicated; {stamp}"
+        )
+    if j.state == "unbulleted":
+        return (
+            f"journal: `{NUANCE_HEADING}` has content but NO top-level `- ` bullet — it "
+            f"does not match the schema, so this display can show you nothing to compare "
+            f"against. Read the section in the file before appending; {stamp}"
+        )
+
+    n = len(j.bullets)
+    dated = len(j.dated)
+    if j.newest_date is None:
+        return (
+            f"journal: {n} bullet{'' if n == 1 else 's'}, NONE dated — recency is UNKNOWN "
+            f"from content. The file's mtime is deliberately not used: it moves for a "
+            f"checkout, an hourly autocommit or an edit to another section, so it would "
+            f"report an append that never happened; {stamp}"
+        )
+    days = j.days_since(today)
+    if days is None:
+        when = "age not computable"
+    elif days < 0:
+        when = f"dated {-days} day{'' if -days == 1 else 's'} in the FUTURE relative to {today}"
+    elif days == 0:
+        when = "TODAY"
+    else:
+        when = f"{days} day{'' if days == 1 else 's'} ago"
+    return (
+        f"journal: {n} bullet{'' if n == 1 else 's'}, newest dated {j.newest_date} ({when}), "
+        f"{dated} of {n} dated; {stamp}"
+    )
+
+
+def _render_journal(j: EntryJournal, today: str, indent: str) -> list[str]:
+    """The per-entry `already there` block: recency, the repeat warning, bullets.
+
+    🔴 EXISTING BULLETS ARE PREFIXED `|` AND THE PROPOSAL IS NOT. The one thing
+    that must never blur on screen is which lines the entry ALREADY has and which
+    line the agent is about to invent, and an unprefixed quote of curated prose
+    sitting under an unprefixed append shape blurs exactly that.
+    """
+    out = [f"{indent}{_render_recency(j, today)}"]
+    repeats = j.dated_on(today)
+    if repeats:
+        # 🔴 THE LOUD ONE. This is the measured failure: a second or third
+        # `/handoff` in one day proposing another line dated the same day, with
+        # the ones already there invisible.
+        out.append(
+            f"{indent}🔴 {repeats} bullet{'' if repeats == 1 else 's'} on this entry "
+            f"{'is' if repeats == 1 else 'are'} ALREADY dated {today}. A further "
+            f"same-dated bullet is the accumulation this block exists to prevent — append "
+            f"only if you can say what it adds that the line{'' if repeats == 1 else 's'} "
+            f"below do{'es' if repeats == 1 else ''} not."
+        )
+    if not j.bullets:
+        return out
+    shown = j.bullets[:JOURNAL_BULLETS_SHOWN]
+    total = len(j.bullets)
+    # ⚠ "top N, in stored order" — NOT "the newest N". Newest-first is the
+    # store's convention, and `newest_date` above is computed with `max()`
+    # precisely because a convention is not an invariant. A header that called
+    # these the newest would be making a claim this module refuses to make one
+    # line earlier.
+    out.append(
+        f"{indent}already there — READ THESE BEFORE PROPOSING "
+        + (
+            f"(all {total}):"
+            if total <= JOURNAL_BULLETS_SHOWN
+            else f"(top {len(shown)} of {total} in stored order; convention is newest-first):"
+        )
+    )
+    for b in shown:
+        lines = list(b.lines[:JOURNAL_BULLET_MAX_LINES])
+        for line in lines:
+            out.append(f"{indent}  | {line}")
+        clipped = len(b.lines) - len(lines)
+        if clipped:
+            # Printed, never silent — a bullet cut off mid-sentence is one an
+            # agent can fail to recognize as its own line from an hour ago.
+            out.append(f"{indent}  | … +{clipped} more line{'' if clipped == 1 else 's'} of this bullet")
+    if total > len(shown):
+        rest = total - len(shown)
+        out.append(
+            f"{indent}  … {rest} further bullet{'' if rest == 1 else 's'} not shown "
+            f"(display cap, not a judgement — `--json` carries all of them)"
+        )
+    return out
 
 
 def new_entry_template(slug: str, scope: str, *, today: str) -> str:
@@ -2035,7 +2376,30 @@ def render_text(report: TouchReport) -> str:
                 out.append(f"      via {via}  <-  {ev.path}")
             if len(m.evidence) > 3:
                 out.append(f"      … {len(m.evidence) - 3} more")
+            journal = report.journals.get(m.entry.ref)
+            if journal is not None:
+                out.extend(_render_journal(journal, report.today, "      "))
+            else:
+                # 🔴 Said, never left blank. A matched entry with no journal read
+                # is a bug in this module, and printing nothing for it renders
+                # identically to an entry with an empty history — the exact
+                # confounding this block exists to remove.
+                out.append(
+                    "      journal: NOT READ — this entry matched but its existing "
+                    "work-history was never loaded. Do not propose an append; you cannot "
+                    "see what it already says."
+                )
         out.append(f"  append shape: {journal_line_shape(report.today)}")
+        out.append(
+            "  🔴 COMPARE what you write against the `already there` lines above. Restating "
+            "a bullet the entry already carries — in other words, re-recording work whose "
+            "lesson is on screen — is the failure this display exists to prevent; nothing "
+            "notable that is not already there ⇒ propose nothing and say `index unchanged`."
+        )
+        out.append(
+            "  (`created_by` attributes the ENTRY. The schema records no per-bullet writer, "
+            "so who wrote the newest bullet is not recorded anywhere.)"
+        )
         out.append("  insert as the FIRST bullet under `## Nuance / work-history`.")
 
     if report.below_threshold:
@@ -2102,6 +2466,22 @@ def render_text(report: TouchReport) -> str:
     return "\n".join(out)
 
 
+def _journal_json(j: EntryJournal | None, today: str) -> dict | None:
+    if j is None:
+        return None
+    return {
+        "state": j.state,
+        "created_by": j.created_by,
+        "bullet_count": len(j.bullets),
+        "dated_count": len(j.dated),
+        "newest_date": j.newest_date,
+        "recency_source": "newest bullet date (NOT file mtime)",
+        "days_since_newest": j.days_since(today),
+        "dated_today": j.dated_on(today),
+        "bullets": [{"date": b.date, "text": b.text, "lines": len(b.lines)} for b in j.bullets],
+    }
+
+
 def report_json(report: TouchReport) -> dict:
     src = report.source
     assoc = report.association
@@ -2131,6 +2511,11 @@ def report_json(report: TouchReport) -> dict:
                 "file": report.entry_files.get(m.entry.ref, m.entry.filename),
                 "path_count": m.path_count,
                 "paths": list(m.paths),
+                # The WHOLE journal, uncapped — the text renderer's caps are a
+                # display bound, and a consumer that wants to diff a proposed
+                # line against the full history must not have to re-read the
+                # store to get it. `None` only if the journal was not read.
+                "journal": _journal_json(report.journals.get(m.entry.ref), report.today),
                 "evidence": [
                     {
                         "path": e.path,

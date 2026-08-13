@@ -2108,3 +2108,245 @@ class TestMutationKillMatrix:
         with pytest.raises(mod.UnknownScopeError):
             mod.associate_paths(["a/b"], idx, "not-a-scope")
         assert mod.associate_paths([], idx, SCOPE_A).considered_paths == ()
+
+
+# =============================================================================
+# Entry markdown shape — the ONE parser both readers share.
+#
+# `extract_sections` and its two mutation kills MOVED here from
+# test_subsystem_recall.py when the parser itself moved down into this module:
+# `subsystem_touch` has to show a `/handoff` what an entry ALREADY records
+# before proposing an append, `subsystem_recall` already imports
+# `subsystem_touch`, and a copy in the writer would be a second parser free to
+# drift from the one measured against the real corpus.
+#
+# `parse_journal_bullets` is new here for the same reason.
+#
+# 🔴 EVERY FIXTURE BELOW IS SYNTHETIC. This repo is PUBLIC and the real store is
+# client-confidential; the SHAPES are measured from the live corpus (2026-08-12,
+# read-only: 26 entries, 110 top-level bullets all at indent 0, 250 continuation
+# lines all at indent 2, 62 bullets dated and 48 not, longest bullet 19 lines),
+# the CONTENT is invented.
+# =============================================================================
+
+HEADINGS = (sr.POINTERS_HEADING, sr.NUANCE_HEADING)
+
+# A body in the shape the corpus actually has: wrapped multi-line prose, with a
+# mixture of dated and undated bullets. NOT one-liners.
+WRAPPED_BODY = (
+    "- 2026-03-04: the retry budget is per-batch, not per-item, so a batch of\n"
+    "  400 with one poison record burns the whole budget and the other 399 are\n"
+    "  never attempted.\n"
+    "- an undated note, of the kind 48 of the corpus's 110 bullets are,\n"
+    "  and which must still be parsed and shown\n"
+    "- 2026-02-11: the flush interval is a floor, not a schedule.\n"
+)
+
+
+class TestEntryMarkdownShape:
+    """Section extraction. The parser is unchanged by the move; these are the
+    behaviours it was verified with, re-homed with it."""
+
+    def test_a_heading_inside_a_fence_does_not_end_the_section(self) -> None:
+        """🔴 Otherwise HALF an entry's nuance is surfaced while the output looks
+        like a complete read — a silent under-report."""
+        text = (
+            "## Pointers\n- p\n\n"
+            "## Nuance / work-history\n"
+            "- 2026-01-01: run this:\n```\n## not a heading\n```\n"
+            "- 2026-01-02: the SECOND bullet, after the fence\n"
+        )
+        got = sr.extract_sections(text, HEADINGS)
+        assert "the SECOND bullet, after the fence" in got[sr.NUANCE_HEADING]
+
+    def test_a_present_but_EMPTY_section_is_present_not_absent(self) -> None:
+        mid = sr.extract_sections("## Pointers\n\n## Nuance / work-history\n- x\n", HEADINGS)
+        assert sr.POINTERS_HEADING in mid and mid[sr.POINTERS_HEADING] == ""
+        end = sr.extract_sections("## Nuance / work-history\n- x\n\n## Pointers\n", HEADINGS)
+        assert sr.POINTERS_HEADING in end and end[sr.POINTERS_HEADING] == ""
+
+    def test_an_absent_section_is_absent(self) -> None:
+        assert sr.NUANCE_HEADING not in sr.extract_sections("## Pointers\n- p\n", HEADINGS)
+
+
+class TestJournalBullets:
+    """🔴 THE POSITIVE CONTROL COMES FIRST, and its pair with it. An empty
+    result is indistinguishable from a parser wired to nothing, so "it found
+    nothing" is only a reading once this same parser has been watched to find
+    something."""
+
+    def test_POSITIVE_CONTROL_a_real_shaped_body_yields_its_bullets(self) -> None:
+        got = sr.parse_journal_bullets(WRAPPED_BODY)
+        assert len(got) == 3, "the parser observed no bullets in a body that has three"
+        assert [b.date for b in got] == ["2026-03-04", None, "2026-02-11"]
+
+    def test_NEGATIVE_PAIR_an_empty_body_yields_none(self) -> None:
+        """Reported WITH the count above: 3 under test, 0 on the empty body. A
+        bare 0 from a parser never shown to produce non-zero is not evidence."""
+        assert sr.parse_journal_bullets("") == ()
+        assert sr.parse_journal_bullets("\n\n") == ()
+
+    def test_a_bullet_keeps_its_CONTINUATION_LINES_verbatim(self) -> None:
+        """🔴 The corpus is wrapped prose — 110 bullets carry 250 continuation
+        lines between them. A parser that took one line per bullet would truncate
+        most real entries, and a truncated bullet is one an agent cannot
+        recognize as a near-duplicate of the line it is about to write."""
+        first = sr.parse_journal_bullets(WRAPPED_BODY)[0]
+        assert len(first.lines) == 3
+        assert first.lines[1] == (
+            "  400 with one poison record burns the whole budget and the other 399 are"
+        )
+        assert first.text.endswith("never attempted.")
+
+    def test_an_INDENTED_dash_is_a_continuation_not_a_new_bullet(self) -> None:
+        """Measured: every one of the corpus's 110 bullets is at indent 0 and
+        every one of its 250 continuation lines is at indent 2. Folding them
+        together would split one bullet into several and report a longer history
+        than the entry has."""
+        got = sr.parse_journal_bullets("- 2026-01-01: parent\n  - nested item\n  - another\n")
+        assert len(got) == 1
+        assert len(got[0].lines) == 3
+
+    def test_a_dash_inside_a_FENCE_is_not_a_bullet(self) -> None:
+        got = sr.parse_journal_bullets(
+            "- 2026-01-01: run:\n```\n- not-a-bullet\n```\n- 2026-01-02: b\n"
+        )
+        assert len(got) == 2
+        assert "- not-a-bullet" in got[0].text
+
+    def test_an_UNDATED_bullet_is_an_ordinary_reading_not_a_failure(self) -> None:
+        """44% of the real corpus. A parser that required a date would drop them
+        on the floor and call the result a complete read."""
+        got = sr.parse_journal_bullets("- no date here at all\n")
+        assert len(got) == 1 and got[0].date is None
+
+    def test_a_SHAPED_but_IMPOSSIBLE_date_is_rejected(self) -> None:
+        """`2026-13-45` matches the shape and is not a date. Returning it would
+        put a nonexistent day into a recency claim and into arithmetic on it."""
+        assert sr.parse_journal_bullets("- 2026-13-45: x\n")[0].date is None
+        assert sr.parse_journal_bullets("- 2026-02-30: x\n")[0].date is None
+
+    def test_a_date_must_START_the_bullet(self) -> None:
+        assert sr.parse_journal_bullets("- fixed on 2026-01-01 by hand\n")[0].date is None
+
+    def test_asterisk_bullets_parse_too(self) -> None:
+        got = sr.parse_journal_bullets("* 2026-01-01: a\n* 2026-01-02: b\n")
+        assert [b.date for b in got] == ["2026-01-01", "2026-01-02"]
+
+    def test_trailing_blank_lines_do_not_inflate_a_bullet(self) -> None:
+        got = sr.parse_journal_bullets("- 2026-01-01: a\n\n\n- 2026-01-02: b\n")
+        assert [len(b.lines) for b in got] == [1, 1]
+
+    def test_text_BEFORE_the_first_bullet_yields_no_bullet(self) -> None:
+        """Its own state for the caller to report — `subsystem_touch` renders it
+        as `unbulleted`, never as an empty history."""
+        assert sr.parse_journal_bullets("some prose the schema does not allow\n") == ()
+
+    def test_ORDER_IS_PRESERVED_and_no_recency_is_claimed(self) -> None:
+        """This function makes no newest-first claim; recency is derived from the
+        DATES by the caller, because newest-first is a convention a past appender
+        can have broken."""
+        got = sr.parse_journal_bullets("- 2026-01-01: old first\n- 2026-09-09: new second\n")
+        assert [b.date for b in got] == ["2026-01-01", "2026-09-09"]
+
+
+class TestEntryMarkdownMutationKills:
+    """One kill per guard in the shared parser. Two came from
+    test_subsystem_recall.py with the code; the rest are new."""
+
+    def test_kills_the_section_fence_skip(self, tmp_path: Path) -> None:
+        """Relocated. Without it a `#` inside a fence ends the section early —
+        HALF an entry's nuance, looking exactly like a complete read."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_sec_fence",
+            [(
+                "        if _is_fence(line):\n            in_fence = not in_fence\n"
+                "            if current is not None:",
+                "        if False:\n            in_fence = not in_fence\n"
+                "            if current is not None:",
+            )],
+        )
+        text = "## Nuance / work-history\n- a\n```\n## not a heading\n```\n- the SECOND bullet\n"
+        got = mod.extract_sections(text, HEADINGS)
+        assert "the SECOND bullet" not in got.get(sr.NUANCE_HEADING, "")
+
+    def test_kills_the_present_but_empty_tracking(self, tmp_path: Path) -> None:
+        """Relocated. Without it presence is derived from content, so an empty
+        section mid-file reads ABSENT while the same section at EOF reads
+        present — two answers to one question."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_seen",
+            [("            if current is not None:\n                seen.add(current)",
+              "            if False:\n                seen.add(current)")],
+        )
+        got = mod.extract_sections(
+            "## Pointers\n- p\n## Nuance / work-history\n- n\n", HEADINGS
+        )
+        assert got == {}, "the presence tracking was not what produced the keys"
+
+    def test_kills_the_bullet_fence_skip(self, tmp_path: Path) -> None:
+        """Without it a `- ` line inside a fence is promoted to a bullet and the
+        display invents history the entry does not have."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_bul_fence",
+            [(
+                "        if _is_fence(line):\n            in_fence = not in_fence\n"
+                "            if bullets:",
+                "        if False:\n            in_fence = not in_fence\n"
+                "            if bullets:",
+            )],
+        )
+        got = mod.parse_journal_bullets("- 2026-01-01: run:\n```\n- not-a-bullet\n```\n")
+        assert len(got) != 1, "the fence skip was not what kept the sample line out"
+
+    def test_kills_the_column_zero_bullet_rule(self, tmp_path: Path) -> None:
+        """Without it an indented continuation becomes its own bullet, and one
+        wrapped bullet is reported as three."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_col0",
+            [('_JOURNAL_BULLET = re.compile(r"^[-*][ \\t]+")',
+              '_JOURNAL_BULLET = re.compile(r"^\\s*[-*][ \\t]+")')],
+        )
+        got = mod.parse_journal_bullets("- 2026-01-01: parent\n  - nested item\n  - another\n")
+        assert len(got) != 1, "the column-0 rule was not what grouped the nested lines"
+
+    def test_kills_the_date_VALIDATION(self, tmp_path: Path) -> None:
+        """Without it a shaped-but-impossible date is returned as real, and every
+        recency claim built on it is arithmetic on a day that does not exist."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_date_valid",
+            [("        _date.fromisoformat(m.group(1))", "        pass")],
+        )
+        assert mod.parse_journal_bullets("- 2026-13-45: x\n")[0].date == "2026-13-45"
+
+    def test_kills_the_trailing_blank_strip(self, tmp_path: Path) -> None:
+        """Without it a blank separator inflates the preceding bullet's line
+        count, so the per-bullet display cap spends its budget on blanks."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_blank_strip",
+            [("        while group and not group[-1].strip():", "        while False:")],
+        )
+        got = mod.parse_journal_bullets("- 2026-01-01: a\n\n\n- 2026-01-02: b\n")
+        assert len(got[0].lines) != 1
+
+    def test_the_harness_produces_a_WORKING_mutant_for_these_anchors(
+        self, tmp_path: Path
+    ) -> None:
+        """Positive control on the harness for THIS section: with a no-op
+        replacement the mutant must parse exactly as the real module does."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_shape_noop",
+            [('POINTERS_HEADING = "## Pointers"', 'POINTERS_HEADING = "## Pointers"  # noqa')],
+        )
+        assert [b.date for b in mod.parse_journal_bullets(WRAPPED_BODY)] == [
+            "2026-03-04",
+            None,
+            "2026-02-11",
+        ]

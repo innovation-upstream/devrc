@@ -243,11 +243,25 @@ in
         # Cap the visible stack + keep a recall buffer (dunstctl history-pop).
         notification_limit = 4;
         # RECALL BUFFER sized against the MEASURED notification rate, not a guess.
-        # Audited 2026-08-11 on the workbench: ~330 notifications/day reach dunst
-        # (claude-notify ~193/day from its own log; cpu-monitor + earlyoom ~137/day
-        # combined, split by cross-checking `journalctl --user -u systembus-notify`
-        # against dunst's per-notification icon warning). At the previous value of
-        # 40 the buffer therefore held under THREE HOURS of traffic.
+        # Audited 2026-08-11 on the workbench: ~330 notifications/day reach dunst.
+        # At the previous value of 40 the buffer therefore held under THREE HOURS.
+        #
+        # RE-MEASURED 2026-08-12 (PR #409's per-producer split was partly wrong;
+        # the 300 slots are not):
+        #   claude-notify  ~174/day workbench desktop toasts (peak 386), plus
+        #                  ~150/day on the LAPTOP, which #409 never measured at
+        #                  all. Corroborated by a second, independent instrument:
+        #                  dunst's own history is 93% (workbench) / 81% (laptop)
+        #                  `claude`. This is the producer that mattered.
+        #   cpu-monitor    ~23/day workbench, ~13/day laptop — NOT the ~90/day
+        #                  #409 reported. That mean straddled a regime break:
+        #                  raising CPU_MON_THRESHOLD/RUNAWAY_PCT on 08-05 cut the
+        #                  workbench from 123-267/day to 11-32/day. Two
+        #                  instruments agree after the break.
+        #   earlyoom       415 notifications/11 days but on only THREE days
+        #                  (50/161/204); zero on the other eight.
+        # The icon-warning instrument used for the last two was calibrated, not
+        # assumed: 4 probes carrying that icon produced exactly 4 warnings.
         #
         # That is the recall path for anything DND swallowed, and it is the only
         # one: a paused notification sits in the `waiting` queue, which dunst 1.13.2
@@ -301,6 +315,45 @@ in
       # Urgent agent approvals still reach the phone via clawgate push.
       fullscreen_suppress = {
         fullscreen = "suppress";
+      };
+      # EARLYOOM BURST COALESCING — N kills in one episode collapse to ONE toast.
+      #
+      # earlyoom's `-g` kills whole process groups and systembus-notify emits one
+      # notification per killed process. Measured on the workbench: 415 kill
+      # notifications in 11 days, concentrated into THREE days (50 / 161 / 204) —
+      # 111 of them inside a single 3-minute window on 08-11, and zero on the
+      # other eight days. That burst shape is what makes it worth fixing: it is
+      # not a steady rate you can threshold away, it is an occasional wall.
+      #
+      # A shared `set_stack_tag` makes dunst REPLACE the previous toast carrying
+      # the tag rather than enqueue a new one, so an episode of any size occupies
+      # one slot showing its most recent kill.
+      #
+      # VALIDATED 2026-08-12 on the laptop — the thing PR #409 could not do. It
+      # probed twice and both runs were confounded by `fullscreen_suppress`
+      # routing the probes to history, so the tagged and untagged arms both read
+      # 0: a zero from a control that never observed anything. The re-test made
+      # the UNTAGGED arm an explicit POSITIVE CONTROL and refused to read the
+      # tagged number unless that control moved first. Result on dunst 1.13.2,
+      # no fullscreen window focused, 5 notifications per arm with DISTINCT
+      # summaries (so the global `stack_duplicates` cannot masquerade as
+      # stack-tag behaviour):
+      #     untagged (control) -> displayed = 3     [observable]
+      #     tagged             -> displayed = 1     [collapsed]
+      #
+      # WHAT IS LOST: the per-process detail of every kill but the newest, ON THE
+      # DESKTOP ONLY. `journalctl -u earlyoom` keeps every kill permanently with
+      # process, RSS and cmdline, and that is where an episode is actually read.
+      # What the toast is for — "something got OOM-killed, that's why your run
+      # died" — is one bit, and one toast carries it.
+      #
+      # SCOPE: keyed on the appname systembus-notify hard-codes. It cannot match
+      # `notify-failure` (a different appname), and it sets no `fullscreen` key,
+      # so it takes no part in the last-write-wins ordering that protects the
+      # deadman bypass below.
+      system_notify_stack = {
+        appname = "system-notify";
+        set_stack_tag = "system-notify-burst";
       };
       # DEADMAN BYPASS — the ONE class of toast that must defeat do-not-disturb.
       #

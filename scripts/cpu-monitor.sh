@@ -27,6 +27,34 @@
 #   CPU_MON_RUNAWAY_SUSTAIN  consecutive samples same proc stays hot    (default: 6 -> ~3m)
 #   CPU_MON_TEMP_THRESHOLD   package temp (°C) that counts as "hot"     (default: 95)
 #   CPU_MON_TEMP_SUSTAIN     consecutive hot samples to fire            (default: 3 -> ~90s)
+#   CPU_MON_CLEAR_TOASTS     1 = also toast the "✓ back to normal" clears (default: 0)
+#   CPU_MON_MAX_ALERTS_PER_DAY  desktop toasts/day per trigger, 0 = unlimited (default: 8)
+#
+# DESKTOP-VOLUME BUDGET (measured 2026-08-12, correcting PR #409's ~90/day):
+# cpu-monitor now emits ~23/day on the workbench and ~13/day on the laptop, NOT
+# ~90. #409 averaged across a regime break: raising CPU_MON_THRESHOLD/RUNAWAY_PCT
+# on 2026-08-05 cut the workbench from 123-267/day (08-02..08-06) to 11-32/day
+# (08-07..08-12). Both instruments agree post-break — dunst's per-notification
+# icon warning (calibrated at exactly 1 warning per notification by a 4-probe
+# positive control) and dunst's own history. So this file needs a light touch,
+# not surgery, and the two changes below are shaped accordingly:
+#
+#   1. The "✓ back to normal" CLEARS no longer toast by default. They were the
+#      one uncapped, unconditional path in the script (no cooldown, no state) and
+#      were a measured 6/12 of laptop and 3/15 of workbench cpu-monitor toasts.
+#      They carry no action: the bar's load/temp blocks already show the value
+#      continuously, so a toast saying "the number you can see went back down" is
+#      pure recovery chatter. They still go to the journal. CPU_MON_CLEAR_TOASTS=1
+#      restores them.
+#   2. A per-trigger DAILY CAP on the load and runaway alerts. This is a
+#      REGRESSION BOUND, not a reduction of today's rate — at 23/day it will
+#      essentially never bind; its job is to make the 267/day regime structurally
+#      unreachable, because the existing per-episode cooldown does NOT bound the
+#      aggregate (a NEW episode alerts immediately, so a flapping signal is
+#      unbounded). Over-cap alerts go to the journal, not nowhere.
+#      TEMPERATURE IS DELIBERATELY EXEMPT: it is the one trigger whose absence
+#      would be noticed, and thermal events are exactly when you want the 9th
+#      alert of the day.
 set -euo pipefail
 
 CORES=$(nproc)
@@ -39,6 +67,8 @@ RUNAWAY_SUSTAIN=${CPU_MON_RUNAWAY_SUSTAIN:-6}
 TEMP_THRESHOLD=${CPU_MON_TEMP_THRESHOLD:-95}
 TEMP_SUSTAIN=${CPU_MON_TEMP_SUSTAIN:-3}
 TEMP_HYSTERESIS=5   # recover only once temp drops this far below the threshold
+CLEAR_TOASTS=${CPU_MON_CLEAR_TOASTS:-0}
+MAX_ALERTS_PER_DAY=${CPU_MON_MAX_ALERTS_PER_DAY:-8}
 
 # Process comms to NEVER alert on — expected heavy hitters (games, the Android
 # stack, etc.) whose high CPU is not a problem. Case-insensitive SUBSTRING match
@@ -132,8 +162,56 @@ alert() {
     notify-send -u "$urgency" -a cpu-monitor -i utilities-system-monitor "$summary" "$body" || true
   else
     # No desktop reachable — fall back to stderr so nothing is silently lost.
-    printf '[cpu-monitor] %s | %s\n' "$summary" "$(printf '%s' "$body" | tr '\n' ' ')" >&2
+    journal_only "$summary" "$body"
   fi
+}
+
+# journal_only <summary> <body> — the demotion target. EVERYTHING this script
+# decides not to toast still lands here (stderr -> `journalctl --user -u
+# cpu-monitor`), so no reduction in this file is ever a deletion.
+journal_only() {
+  printf '[cpu-monitor] %s | %s\n' "$1" "$(printf '%s' "$2" | tr '\n' ' ')" >&2
+}
+
+# clear_alert <summary> <body> — a "✓ back to normal" recovery notice.
+# Journal-only unless CPU_MON_CLEAR_TOASTS=1.
+clear_alert() {
+  if [ "$CLEAR_TOASTS" = "1" ]; then
+    alert low "$1" "$2"
+  else
+    journal_only "$1" "$2"
+  fi
+}
+
+# alert_capped <counter_var> <urgency> <summary> <body> — desktop alert subject
+# to the per-trigger daily cap. Rolls the counters at local midnight. Past the
+# cap the alert is journalled instead, and says so, naming the knob that undoes
+# it — a suppressed alert must never look like an absent one.
+alert_day=""
+load_alerts_today=0
+runaway_alerts_today=0
+
+roll_alert_day() {
+  local today
+  today=$(date +%F)
+  if [ "$today" != "$alert_day" ]; then
+    alert_day="$today"
+    load_alerts_today=0
+    runaway_alerts_today=0
+  fi
+}
+
+alert_capped() {
+  local name="$1" urgency="$2" summary="$3" body="$4" cur
+  roll_alert_day
+  cur=$(( ${!name} + 1 ))
+  printf -v "$name" '%s' "$cur"
+  if [ "$MAX_ALERTS_PER_DAY" -gt 0 ] && [ "$cur" -gt "$MAX_ALERTS_PER_DAY" ]; then
+    journal_only "$summary" \
+      "$body [desktop toast capped: alert #$cur today > CPU_MON_MAX_ALERTS_PER_DAY=$MAX_ALERTS_PER_DAY; see journalctl --user -u cpu-monitor]"
+    return 0
+  fi
+  alert "$urgency" "$summary" "$body"
 }
 
 # --- load trigger state ---
@@ -162,7 +240,7 @@ while :; do
     # Suppress if the load is dominated by an expected heavy app (game etc.).
     if [ "$high_streak" -ge "$SUSTAIN" ] && ! is_ignored "$(ps -eo comm= --sort=-%cpu | head -1)"; then
       if [ "$load_alerting" -eq 0 ] || [ $((now - load_last_alert)) -ge "$COOLDOWN" ]; then
-        alert critical "⚠ High CPU load" \
+        alert_capped load_alerts_today critical "⚠ High CPU load" \
           "1-min load: ${load} (threshold ${THRESHOLD}, ${CORES} cores)
 Top: $(top_proc)"
         load_last_alert=$now
@@ -170,7 +248,7 @@ Top: $(top_proc)"
       fi
     fi
   else
-    [ "$load_alerting" -eq 1 ] && alert low "✓ CPU load back to normal" "1-min load: ${load}"
+    [ "$load_alerting" -eq 1 ] && clear_alert "✓ CPU load back to normal" "1-min load: ${load}"
     high_streak=0
     load_alerting=0
   fi
@@ -195,7 +273,7 @@ Top: $(top_proc)"
         rcomm=$(ps -o comm= -p "$rpid" 2>/dev/null || echo '?')
         rargs=$(ps -o args= -p "$rpid" 2>/dev/null | cut -c1-90 || true)
         retime=$(ps -o etime= -p "$rpid" 2>/dev/null | tr -d ' ' || echo '?')
-        alert critical "⚠ Runaway process: ${rcomm}" \
+        alert_capped runaway_alerts_today critical "⚠ Runaway process: ${rcomm}" \
           "PID ${rpid} at ${rpct}% CPU for ~$((runaway_streak * INTERVAL))s (running ${retime})
 ${rargs}"
         runaway_last_alert=$now
@@ -203,7 +281,7 @@ ${rargs}"
       fi
     fi
   else
-    [ "$runaway_alerting" -eq 1 ] && alert low "✓ Runaway process cleared" "No process above ${RUNAWAY_PCT}% CPU"
+    [ "$runaway_alerting" -eq 1 ] && clear_alert "✓ Runaway process cleared" "No process above ${RUNAWAY_PCT}% CPU"
     runaway_pid=""
     runaway_streak=0
     runaway_alerting=0
@@ -224,7 +302,7 @@ Load ${load}, top: $(top_proc)"
     fi
   elif [ -n "$temp" ] && [ "$temp" -lt "$((TEMP_THRESHOLD - TEMP_HYSTERESIS))" ]; then
     # Only clear once temp drops a margin below the threshold (avoid flapping).
-    [ "$temp_alerting" -eq 1 ] && alert low "✓ CPU temperature back to normal" "Package: ${temp}°C"
+    [ "$temp_alerting" -eq 1 ] && clear_alert "✓ CPU temperature back to normal" "Package: ${temp}°C"
     temp_streak=0
     temp_alerting=0
   fi

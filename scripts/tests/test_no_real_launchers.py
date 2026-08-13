@@ -132,8 +132,13 @@ def test_the_stubbed_launcher_set_is_pinned():
 ACKNOWLEDGED_UNSTUBBED = {
     "systemctl": (
         {"agent-ops", "airvpn-menu", "keylog-spin-capture.sh",
-         "monitor-blackout.sh", "sync-claude-permissions.py"},
+         "monitor-blackout.sh", "run-tests.sh", "sync-claude-permissions.py"},
         "verb-split rather than record-only — see the systemctl tests below. "
+        "run-tests.sh is a THIRD case, re-justified rather than absorbed: its "
+        "only occurrences of the name are GUARD 7's accounting, which counts "
+        "`systemctl(read)` LINES IN THE LAUNCH LOG (`grep -c '^systemctl(read)'`) "
+        "and reports them per target. It never invokes systemctl — it reads the "
+        "record of calls the stub already classified. "
         "sync-claude-permissions.py is a DIFFERENT case from the other four and "
         "is re-justified rather than absorbed: its only occurrence of the name "
         "is the literal string `Bash(systemctl status:*)` inside its CURATED "
@@ -303,17 +308,26 @@ def test_autouse_is_what_protects_a_test_that_never_asks(tmp_path):
     Both halves run the real `scripts/tests/conftest.py`, so this pins the
     shipped file rather than a paraphrase of it.
     """
-    conftest_src = (SCRIPTS / "tests" / "conftest.py").read_text(encoding="utf-8")
+    # 🔴 The fixture MOVED (see conftest.py's header): the implementation now
+    # lives in testlib/nolaunch_plugin.py so that run-tests.sh can load the same
+    # module for all 17 targets with `-p`, instead of 17 conftests. This pin
+    # follows it — it must mutate the SHIPPED file, not a paraphrase, so the
+    # tree is copied rather than symlinked and the copy is what gets mutated.
+    plugin_rel = Path("testlib") / "nolaunch_plugin.py"
+    plugin_src = (SCRIPTS / plugin_rel).read_text(encoding="utf-8")
     needle = "autouse=" + "True"
-    assert conftest_src.count(needle) == 1, (
+    assert plugin_src.count(needle) == 1, (
         f"expected exactly one autouse declaration to mutate, found "
-        f"{conftest_src.count(needle)}")
+        f"{plugin_src.count(needle)}")
+    conftest_src = (SCRIPTS / "tests" / "conftest.py").read_text(encoding="utf-8")
 
-    def _probe_session(where: Path, conftest_text: str):
+    def _probe_session(where: Path, plugin_text: str):
         root = where / "scripts"
         (root / "tests").mkdir(parents=True)
-        (root / "testlib").symlink_to(SCRIPTS / "testlib")
-        (root / "tests" / "conftest.py").write_text(conftest_text, encoding="utf-8")
+        shutil.copytree(SCRIPTS / "testlib", root / "testlib",
+                        ignore=shutil.ignore_patterns("__pycache__"))
+        (root / plugin_rel).write_text(plugin_text, encoding="utf-8")
+        (root / "tests" / "conftest.py").write_text(conftest_src, encoding="utf-8")
         probe = root / "tests" / "test_probe.py"
         probe.write_text(_PROBE_TEST, encoding="utf-8")
         # `_run_nested` strips this session's stub dir from PATH — without that
@@ -322,13 +336,13 @@ def test_autouse_is_what_protects_a_test_that_never_asks(tmp_path):
         # own mutant.
         return _run_nested(str(probe), where / "basetemp")
 
-    control = _probe_session(tmp_path / "control", conftest_src)
+    control = _probe_session(tmp_path / "control", plugin_src)
     assert control.returncode == 0, (
         "a test that never requested the fixture was NOT protected — autouse is "
         f"not doing its job:\n{control.stdout}")
 
     mutant = _probe_session(tmp_path / "mutant",
-                            conftest_src.replace(needle, "autouse=" + "False"))
+                            plugin_src.replace(needle, "autouse=" + "False"))
     assert mutant.returncode != 0, (
         "with autouse removed the probe STILL passed, so nothing here observes "
         f"autouse and the protection is silently opt-in:\n{mutant.stdout}")

@@ -52,7 +52,15 @@ sys.path.insert(0, str(REPO / "scripts"))
 from testlib import shebang_scan as S  # noqa: E402
 
 SCAN_ROOT = REPO / "scripts"
-PATTERNS = ("test_*.py", "conftest.py")
+# 🔴 `test_*.sh` was ADDED after this scan was measured blind to the one file
+# that carried the defect. `scripts/tests/test_release_wrapper.sh` writes three
+# runtime stubs and gave all three the `/usr/bin/env` shebang; the glob said
+# `test_*.py`, so this guard was structurally incapable of seeing it — the same
+# "narrow the glob until it covers nothing" shape it exists to catch. Nothing
+# noticed for a SECOND reason: no gate ran that file at all until GUARD 7's
+# SHELL_TESTS brought it under `run-tests.sh`, and its first run inside the nix
+# sandbox was RED — with case 1 passing for the wrong reason, which is worse.
+PATTERNS = ("test_*.py", "conftest.py", "test_*.sh")
 
 # --- THE PINNED ALLOWLIST ------------------------------------------------------
 # (relative path, substring the offending line must contain, why it is safe).
