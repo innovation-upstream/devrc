@@ -823,7 +823,22 @@ TARGET_FLOORS=(
   # 2026-08-13, MERGED with main (#465's registrar target below, #459, #463). Both sides
   # of this conflict are KEPT — they pin different targets — and the number was re-read
   # from the gate run on the MERGED tree, not carried over from the branch measurement.
-  "scripts/claude-hooks/tests/test_next_step_nudge.py|116"
+  #
+  # 2026-08-13, the OFFERS `waiting for`/`blocked by` widening — the last two arms of the
+  # blocked/parked family: 122 -> 126 collected. +4 = two new PARKED-arm fixtures x the
+  # two parametrized arm tests. The branch is off fd88780 and `git merge-base --is-ancestor
+  # origin/main HEAD` is TRUE, so the MERGED tree and the branch tree are the same tree —
+  # this number is not a branch-only reading that a merge could invalidate. Measured by
+  # the AUTHORITATIVE gate, `nix build .#checks.x86_64-linux.pytests`, read out of `nix
+  # log` (the build was uncached here, but a cached one prints an EMPTY log and would
+  # otherwise read as a green with no counts):
+  #   PASS  scripts/claude-hooks/tests/test_next_step_nudge.py  (collected=126 passed=126 skipped=0 floor=116)
+  # put through the gate's OWN function rather than arithmetic:
+  #   _suggested_floor 126 = 126 - min(50, max(1, 126/20 = 6)) = 126 - 6 = 120.
+  # ZERO new skips; no HERMETIC_TARGETS entry needed (the file is already a target).
+  # If this line conflicts with a sibling branch, re-run the gate on the MERGED tree and
+  # copy what it prints — do not reconcile the two sides by hand.
+  "scripts/claude-hooks/tests/test_next_step_nudge.py|120"
   # 2026-08-13, the registrar's DELIVERY seam arrives as a NEW target: 17 collected.
   # Gate's own count through the gate's own rule:
   #   _suggested_floor 17 = 17 - min(50, max(1, 17/20 = 0 -> 1)) = 17 - 1 = 16.
