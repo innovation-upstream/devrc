@@ -745,7 +745,13 @@ TARGET_FLOORS=(
   # Re-run the gate on the merged tree and copy what it prints; do NOT reconcile
   # the two sides by hand. (rerere has replayed a stale resolution onto this
   # line before.)
-  "scripts/tests|3865"
+  #
+  # 2026-08-13, done exactly as the note above says: main moved on to d01cf23
+  # (#462 cut a guard, #465 added a whole new target), so the merged tree was
+  # measured rather than reconciled by hand — the gate printed
+  # `scripts/tests collected=3932`, not the 3915 this branch alone measured.
+  #   _suggested_floor 3932 = 3932 - min(50, max(1, 196)) = 3882.
+  "scripts/tests|3882"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
