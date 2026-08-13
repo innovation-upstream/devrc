@@ -656,12 +656,26 @@ the 2026-08-02 write-up.** (a) This harness creates agent worktrees at
 `<dispatching-repo>/.claude/worktrees/agent-<id>`, i.e. **nested inside** the base repo — so a
 prefix check against the repo root matches every sibling and discriminates nothing. Compare the
 **exact** worktree path. (b) Exact-path comparison **would** have prevented the incident above —
-the perpetrator sat in the base clone but the victim was in *another worktree*, so the two cwds
-differ. What cwd cannot separate is two agents that **both** sit in the base clone, which is the
+the victim was in *another worktree*, so its cwd differs from any base-clone killer's. (The
+original does not say where the perpetrator sat; the victim-side fact carries the argument on its
+own.) What cwd cannot separate is two agents that **both** sit in the base clone, which is the
 likely case for read-only agents (the core says they don't *need* a worktree, not that they may
-not have one). For that case — and as the stronger filter in every case, including this one —
-kill only **your own descendants**: walk `PPid` in `/proc/<pid>/status` back to your own pid, or
-simply track the pid you launched. Note also that the
+not have one).
+
+Descendant-filtering by a `PPid` walk is the obvious next idea, and it is **not** a replacement —
+the two filters are incomparable, not ordered. Measured 2026-08-13 on the workbench: a `nix build`
+an agent launches does its real work in a `nix-daemon` child of **PID 1**, so a `PPid` walk from
+the agent returns the **empty set** for precisely the hung-run case this entry is about. The same
+holds for anything that daemonizes or re-parents — including Chrome's zygote, and the original
+pattern here was `chrome-headless-shell`. It is also per-tool-call: each Bash call is a fresh
+`zsh -c`, so an earlier call's strays are not descendants of the current one either. Use a
+descendant walk to **narrow** a cwd-filtered set, never to build one; and note this whole
+discussion is scoped to parallel agents — hunting a genuine **orphan** (PPid 1, by construction
+never your descendant) is the deploy rule's job, not this one.
+
+🔴 **If neither filter leaves a set you are confident in, kill nothing and hand it to the
+operator.** An empty descendant set is the [empty-result](#empty-result) trap wearing a
+procedure: it cannot distinguish "no strays" from "the walk cannot see them". Note also that the
 inference "confirming `cmdline` is not sufficient" was never itself measured: the auditor never
 ran the resolve-then-confirm procedure, it pattern-matched system-wide. The widening is sound
 (identical cmdlines cannot discriminate) but it is reasoning, not an observation.
