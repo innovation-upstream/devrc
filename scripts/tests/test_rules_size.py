@@ -70,9 +70,12 @@ ARCHIVE_MD = REPO_ROOT / "claude" / "RULES-ARCHIVE.md"
 # welcome and is the intended direction of travel. Ratcheting it UP requires
 # saying in the commit message which rule could not be expressed in the budget.
 #
-# 2026-08-11: 34,500 -> 35,200 (+700 B). The rule that would not fit is
-# "A worktree isolates the REPO, not the SESSION" (Git Workflow), 674 B. It
-# clears the hard ceiling and trips only MIN_HEADROOM_BYTES.
+# 2026-08-11: 34,500 -> 35,200 (+700 B). The rule that would not fit was the
+# worktree-isolation rule then worded "A worktree isolates the REPO, not the
+# SESSION" (Git Workflow), 674 B. It cleared the hard ceiling and tripped only
+# MIN_HEADROOM_BYTES. (That wording no longer exists verbatim -- the 2026-08-13
+# consolidation below folded it into "a worktree isolates a working DIRECTORY
+# only". Kept here as the record of what the bump bought.)
 #
 # Carving the 635 B instead was measured and rejected, not skipped: at the time
 # of the bump RULES.md held 87 bullets / 28,628 B of bullet text in 33,561 B, and
@@ -88,6 +91,29 @@ ARCHIVE_MD = REPO_ROOT / "claude" / "RULES-ARCHIVE.md"
 # The honest reading: eviction has been run to completion, so the next real rule
 # costs ceiling. If that recurs, the answer is consolidation (the four scattered
 # worktree bullets are the obvious candidate), not another bump.
+#
+# 2026-08-13: that consolidation was done (the cluster had grown to five bullets
+# after PR #447). Five sibling bullets became one recipe + one "a worktree
+# isolates a working DIRECTORY only" frame with three enumerated unisolated
+# surfaces (REPO / SESSION / ENVIRONMENT). Result: 33,300 -> 33,229 B.
+#
+# 🔴 That -71 B is the honest yield, and it is the finding, not a disappointment:
+# every clause that survived is scope-bearing, so the only bytes available were
+# genuine restatement -- one duplicated `worktree add` recipe, one duplicated
+# "never two file-modifying agents in one checkout", and the silent-failure
+# framing that three bullets each spelled out. Do NOT read this entry as "there
+# is another -71 B in there next time". There is not; the next real rule still
+# costs ceiling.
+#
+# What consolidation DID buy, and why it was worth shipping for 71 B: a fourth
+# worktree hazard now attaches to the enumerated list for the cost of its own
+# text, instead of arriving as a sixth sibling bullet that re-states the frame
+# (~250 B of restatement, measured against the four it would have copied).
+#
+# MAX_BYTES was deliberately NOT ratcheted down to bank this. The slack
+# (headroom ~1,970 vs the 900 floor) predates the consolidation and tightening
+# the gate is a policy change, not a byte cleanup -- it belongs in its own
+# commit where it can be argued on its merits.
 MAX_BYTES = 35_200
 
 # Required working margin below the ceiling.
