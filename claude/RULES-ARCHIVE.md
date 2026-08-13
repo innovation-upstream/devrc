@@ -634,8 +634,8 @@ narrower than the word "isolation" suggests, and it fails silently at exactly th
 assumed it covered.
 
 ## sibling-agent-kill
-*Supports: 🔴 "With parallel agents this widens: also filter resolved PIDs by `/proc/<pid>/cwd`
-to your OWN worktree."*
+*Supports: 🔴 "With parallel agents this widens: also confirm `/proc/<pid>/cwd` is your OWN
+worktree — the EXACT path."*
 
 Measured 2026-08-02. An auditor agent needed to clear **its own** hung browser/test run and
 matched `chrome-headless-shell|vitest|steam-run` **system-wide**, killing ~15 PIDs. Those PIDs
@@ -666,9 +666,13 @@ Descendant-filtering by a `PPid` walk is the obvious next idea, and it is **not*
 the two filters are incomparable, not ordered. Measured 2026-08-13 on the workbench: a `nix build`
 an agent launches does its real work in a `nix-daemon` child of **PID 1**, so a `PPid` walk from
 the agent returns the **empty set** for precisely the hung-run case this entry is about. The same
-holds for anything that daemonizes or re-parents — including Chrome's zygote, and the original
-pattern here was `chrome-headless-shell`. It is also per-tool-call: each Bash call is a fresh
-`zsh -c`, so an earlier call's strays are not descendants of the current one either. Use a
+holds for anything that genuinely daemonizes or re-parents. It is also per-tool-call: each Bash
+call is a fresh `zsh -c` (measured: four calls, four distinct pids), so an earlier call's strays
+are not descendants of the current one either — which is what actually orphans a
+`chrome-headless-shell` from an earlier call, the original pattern here. **Do not assume a
+browser tree orphans itself:** measured on this host, Brave's `--type=zygote` processes all have
+real parents and only `chrome_crashpad` sits at PPid 1. An earlier draft asserted the zygote
+re-parents; that was inference inside a paragraph headed "Measured", and it was wrong. Use a
 descendant walk to **narrow** a cwd-filtered set, never to build one; and note this whole
 discussion is scoped to parallel agents — hunting a genuine **orphan** (PPid 1, by construction
 never your descendant) is the deploy rule's job, not this one.
