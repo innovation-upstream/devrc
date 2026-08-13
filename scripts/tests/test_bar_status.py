@@ -78,34 +78,139 @@ def _never_reach_the_desktop(monkeypatch):
 # --------------------------------------------------------------------------- #
 # poller parse: clawgate
 # --------------------------------------------------------------------------- #
-def test_parse_clawgate_counts_only_pending_states():
+def _agent(status="running", kicked=True, activity="2026-08-12T11:59:30Z"):
+    """A synthetic clawgate 0.7.86 agent object (public repo: nothing here came
+    off the real board)."""
+    return {"id": 5501, "name": "sample-forge", "status": status,
+            "kickedOff": kicked, "lastActivityAt": activity,
+            "updatedAt": activity}
+
+
+# The clock the parse tests evaluate against: 2026-08-12T12:00:00Z.
+_NOW = 1786536000.0
+
+
+def test_parse_clawgate_counts_pending_states():
     tasks = [
         {"id": 1, "status": "open"},
         {"id": 2, "status": "ready_for_review"},
-        {"id": 3, "status": "in_progress"},   # agent working -> NOT operator-pending
+        # 🔴 in_progress WITH A LIVE AGENT is genuinely not on the human — that
+        # much of the old predicate was right, and stays right.
+        {"id": 3, "status": "in_progress", "agent": _agent()},
         {"id": 4, "status": "complete"},
         {"id": 5, "status": "dismissed"},
     ]
-    out = poll.parse_clawgate(tasks)
+    out = poll.parse_clawgate(tasks, now=_NOW)
     assert out["count"] == 2
     assert out["state"] == "Warning"
     assert "#1" in out["detail"] and "#2" in out["detail"]
 
 
+def test_parse_clawgate_counts_a_stuck_in_progress_task():
+    # 🔴 THE BUG. The poller used to exclude `in_progress` by name — "an agent
+    # is working = not on the human" — which is exactly the state a dead
+    # dispatch is stranded in. Four hours idle, agent still `running`.
+    tasks = [{"id": 8, "status": "in_progress",
+              "agent": _agent(activity="2026-08-12T08:00:00Z")}]
+    out = poll.parse_clawgate(tasks, now=_NOW)
+    assert out["count"] == 1 and out["stuck_count"] == 1
+    assert out["stuck"][0]["reasons"] == ["agent_idle"]
+    assert out["stuck"][0]["agent_idle_secs"] == pytest.approx(14400, abs=1)
+    assert "1 stuck" in out["detail"]
+
+
 def test_parse_clawgate_zero_is_neutral():
-    out = poll.parse_clawgate([{"id": 9, "status": "complete"}])
+    out = poll.parse_clawgate([{"id": 9, "status": "complete"}], now=_NOW)
     assert out["count"] == 0
     assert out["state"] == "Idle"
 
 
 def test_parse_clawgate_empty_list():
-    out = poll.parse_clawgate([])
-    assert out == {"count": 0, "state": "Idle", "detail": "no pending tasks"}
+    out = poll.parse_clawgate([], now=_NOW)
+    assert out["count"] == 0 and out["state"] == "Idle"
+    assert out["detail"] == "no pending tasks"
+    # A measured zero on BOTH halves, and the schema that says so.
+    assert out["pending_count"] == 0 and out["stuck_count"] == 0
+    assert out["schema"] == poll.CG.SCHEMA
+
+
+def test_parse_clawgate_enumerates_ready_for_review():
+    # The count moving without naming what finished is the reported failure.
+    out = poll.parse_clawgate(
+        [{"id": 11, "status": "ready_for_review", "title": "finished item"}],
+        now=_NOW)
+    assert out["ready_for_review"] == [{"id": 11, "title": "finished item"}]
+
+
+def test_parse_clawgate_delegates_every_judgement_to_the_shared_module():
+    # 🔴 THE SEAM: the poller supplies a clock and nothing else. If it grew its
+    # own copy of the predicate, agent-ops and session-manager would disagree
+    # with the bar again.
+    import ast
+    import inspect
+    src = inspect.getsource(poll.parse_clawgate)
+    assert "CG.attention" in src
+    # Strip the docstring — prose about the predicate is fine, a second
+    # implementation of it is not.
+    fn = ast.parse(src).body[0]
+    body = fn.body[1:] if (fn.body and isinstance(fn.body[0], ast.Expr)
+                           and isinstance(fn.body[0].value, ast.Constant)
+                           and isinstance(fn.body[0].value.value, str)) else fn.body
+    code = "\n".join(ast.unparse(n) for n in body)
+    # The statuses are taken from the shared module rather than re-spelled here
+    # — test_clawgate_predicate_single_source.py would (correctly) flag a
+    # literal set of them in this file as a second copy of the predicate.
+    for status in sorted(poll.CG.PENDING_TASK_STATES
+                         | {poll.CG.IN_PROGRESS, "complete"}):
+        assert status not in code, status
 
 
 def test_parse_clawgate_tolerates_junk_elements():
-    out = poll.parse_clawgate([None, "x", 3, {"status": "open", "id": 7}])
+    out = poll.parse_clawgate([None, "x", 3, {"status": "open", "id": 7}],
+                              now=_NOW)
     assert out["count"] == 1
+
+
+def test_fetch_clawgate_asks_for_the_summary_form_and_keeps_the_token_out_of_it(
+        monkeypatch):
+    """🔴 TWO claims on one seam, because a mutation sweep found the URL
+    unguarded: the poller must go through the SHARED url builder (a hardcoded
+    `/api/tasks` here would silently re-fetch ~27x the bytes every 45s and drift
+    from agent-ops), and the credential must travel in a HEADER — a token in a
+    URL lands in argv, proxy logs and error strings."""
+    seen = {}
+
+    def fake_http_json(url, headers=None, timeout=None):
+        seen["url"] = url
+        seen["headers"] = headers or {}
+        return []
+
+    monkeypatch.setattr(poll, "_http_json", fake_http_json)
+    monkeypatch.setattr(poll.CG, "read_clawgate_env",
+                        lambda *a, **k: ("http://cg.invalid:1",
+                                         "sentinel-token-value"))
+    poll.fetch_clawgate()
+    assert seen["url"] == "http://cg.invalid:1/api/tasks?summary=1"
+    assert seen["url"] == poll.CG.tasks_url("http://cg.invalid:1")
+    assert "sentinel-token-value" not in seen["url"]
+    assert seen["headers"]["Authorization"] == "Bearer sentinel-token-value"
+
+
+def test_a_failing_clawgate_fetch_never_leaks_the_token_into_the_cache(
+        monkeypatch, tmp_path):
+    """The `stale` marker formats the exception. Pin that the credential cannot
+    reach it — this payload is written to disk and read by two other tools."""
+    monkeypatch.setattr(poll.CG, "read_clawgate_env",
+                        lambda *a, **k: ("http://cg.invalid:1",
+                                         "sentinel-token-value"))
+
+    def boom(url, headers=None, timeout=None):
+        raise OSError("connection refused to %s" % url)
+
+    monkeypatch.setattr(poll, "_http_json", boom)
+    payload = poll.source("clawgate", poll.fetch_clawgate)
+    assert payload["state"] == "stale"
+    assert "sentinel-token-value" not in json.dumps(payload)
 
 
 def test_parse_clawgate_malformed_toplevel_raises():

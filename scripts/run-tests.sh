@@ -569,56 +569,63 @@ TARGET_FLOORS=(
   # ELEVEN consecutive PRs — re-run the gate on the MERGED tree and copy what it
   # prints. Do NOT reconcile the two sides by hand.
   #
-  # ⚠ ONE OBSERVED FLAKE, in another target and unrelated to this branch: the
-  # baseline run of UNMODIFIED main reported `FAIL scripts/dl-router/tests` on
-  # test_dedupe.py's `test_st_blocks_CANNOT_see_a_fallocated_partial`
-  # (`assert 16896 == 16904` — st_blocks after `posix_fallocate`, which is
-  # filesystem-dependent). The very next run, on this branch, passed 991/991. So
-  # it is intermittent and host-level, not a regression here; recorded because a
-  # red baseline that nobody writes down is how a real failure gets waved past.
+  # ✅ FIXED — the flake formerly recorded here is gone. It was test_dedupe.py's
+  # `test_st_blocks_CANNOT_see_a_fallocated_partial` reporting
+  # `assert 16896 == 16904`: it pinned st_blocks EQUALITY between a
+  # `posix_fallocate`d file and a fully-written one, which is a filesystem
+  # allocation property (one 4K extent-tree metadata block, taken or not
+  # depending on tmpdir state), not a property of the code under test.
+  # Measured on ext4: the two disagreed in 17 of 40 runs, in either direction.
+  # It now asserts what the test actually needs — that BOTH files are densely
+  # allocated — so it no longer keys on allocator luck.
   #
-  # 2026-08-12, the /handoff step-4 probe-first restructure: 3200 -> 3214
-  # collected. `_suggested_floor 3214` = 3214 - min(50, max(1, 160)) = 3164,
-  # from the gate's OWN shell function (the python spelling in
-  # test_run_tests_floors.py agrees). Measured by `nix build
-  # .#checks.x86_64-linux.pytests` on the MERGED tree, not computed.
+  # ⚠ INDEPENDENTLY CORROBORATED BEFORE THAT FIX LANDED, and worth keeping as a
+  # worked example of how to read one red run. The /handoff branch below was
+  # handed a brief asserting main was RED on this test. It measured instead: the
+  # failure appeared in 1 of 5 authoritative runs, with the assertion's operands
+  # REVERSED between reports (`16904 == 16896` vs `16896 == 16904`) — which is
+  # the nondeterminism, visible without knowing the cause. Unmodified main
+  # reported `PASS scripts/dl-router/tests (collected=991 passed=991 skipped=0)`.
+  # So "main is red" was wrong, "it is a real defect" was right, and the two are
+  # separable by re-running. Do not treat a single red run as either one.
   #
-  # 🔴 THE +14 IS TWO BRANCHES, AND ONLY +7 IS THIS ONE. Decomposed, because a
-  # floor line that records a delta it did not cause is how the next author
-  # inherits a wrong number:
+  # 2026-08-12, clawgate stuck-dispatch visibility: 3341 collected on
+  # main + this branch, measured by the authoritative gate on the MERGED tree
+  # (not arithmetic across the conflict — this line is re-pinned by every
+  # branch that adds a test, and rerere has replayed a stale resolution onto
+  # it before). _suggested_floor 3341 = 3341 - min(50, max(1, 167)) = 3291.
+  #
+  # 2026-08-12, the /handoff step-4 probe-first restructure: +7 in this target,
+  # for a merged-tree total re-measured below. `_suggested_floor` applied to the
+  # gate's OWN printed count (the python spelling in test_run_tests_floors.py
+  # agrees). RE-MEASURED TWICE, because main moved under this branch twice while
+  # it was in flight — 3164 and then this number; only the last one is worth
+  # anything.
+  #
+  # 🔴 THE DELTA IS DECOMPOSED, because a floor line that records movement it did
+  # not cause is how the next author inherits a wrong number:
   #     3200  unmodified origin/main at c7579e4, measured FIRST as the control
-  #     +  7  this branch
-  #     +  7  #433's scripts/tests/test_cpu_monitor_ignore.py, which landed on
-  #           main WHILE this branch was in flight
-  #     ----
-  #     3214  the merged tree, which is what the gate printed
-  # Two INDEPENDENT attributions agree exactly, which is the check: the gate's
-  # total, and per-file `--collect-only` (7 in the new upstream file; 4 + 3 in
-  # this branch's two touched files). Had they disagreed, something else in the
-  # target had moved and neither number would have been a fact about a branch.
+  #     +  7  this branch (4 in test_subsystem_recall.py, 3 in
+  #           test_subsystem_touch.py — confirmed per-file by --collect-only)
+  #     +  7  #433's test_cpu_monitor_ignore.py, landed mid-flight
+  #     + ...  #431's clawgate suite, landed mid-flight
+  # Two INDEPENDENT attributions agreed exactly at the 3214 checkpoint: the
+  # gate's total and per-file collection. Had they disagreed, something else in
+  # the target had moved and neither number would have been a fact about a
+  # branch.
   #
-  # 🔴 MEASURING MAIN IS WHAT MADE THIS SAFE. The previous entry's own arithmetic
+  # 🔴 MEASURING MAIN IS WHAT MADE THIS SAFE. The 3100 entry's own arithmetic
   # implies main should have been 3150; it measured 3200, so main was carrying 50
   # tests this table had never seen. Subtracting from the RECORDED number would
-  # have produced +64 for this branch and a floor ~50 too high — a FALSE RED for
-  # whoever landed next. Re-run the gate; never reconcile the two sides by hand.
+  # have claimed +64 for this branch and a floor ~50 too high — a FALSE RED for
+  # whoever landed next.
   #
   # ⚠ ZERO new skips — `skipped=0` on this target in every run, and the suite's
   # single skip is still the pinned one in repo-cos. A NEW FILE was added
   # (claude/skills/handoff/reference/index-write.md); it is `git add`ed, and
   # `test_the_sidecar_is_DEPLOYED` fails if it ever is not — in the sandbox by
   # its absence, on the host via `git ls-files`.
-  #
-  # ⚠ THE dl-router st_blocks FLAKE RECORDED ABOVE IS REAL AND IS STILL A FLAKE:
-  # it reproduced ONCE in FIVE authoritative runs during this branch's work
-  # (`assert 16904 == 16896` — note the operands are REVERSED from the report
-  # above, which is itself the nondeterminism). The other four, including the one
-  # on unmodified main and the final merged-tree run, reported `PASS
-  # scripts/dl-router/tests (collected=991 passed=991 skipped=0)`. This branch
-  # touches no dl-router file. 1-in-5 is worth writing down: a single red run is
-  # not a red main, and a flake nobody re-measures becomes folklore in both
-  # directions.
-  "scripts/tests|3164"
+  "scripts/tests|3291"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —

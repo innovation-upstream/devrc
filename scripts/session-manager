@@ -187,6 +187,36 @@ from datetime import datetime, timezone
 _HERE = os.path.dirname(os.path.abspath(__file__))
 HOME = os.path.expanduser("~")
 
+
+def _load_clawgate_tasks():
+    """Load scripts/lib/clawgate_tasks.py by EXPLICIT PATH — the ONE definition
+    of "which clawgate tasks need the operator", shared with bar-status-poll and
+    agent-ops. This file never held its own copy; it inherited both copies' blind
+    spot for free by reading the poller's cache instead of the API, which is why
+    a stuck dispatch was invisible on EVERY surface at once.
+
+    Resolved relative to THIS file (same reason as the chquery insert above:
+    $DEVRC_DIR is wrong inside a worktree and absent in the nix sandbox), with
+    $DEVRC_DIR only as a fallback.
+    """
+    import importlib.machinery
+    import importlib.util
+    devrc = os.environ.get("DEVRC_DIR") or os.path.join(HOME, "workspace", "devrc")
+    for path in (os.path.join(_HERE, "lib", "clawgate_tasks.py"),
+                 os.path.join(devrc, "scripts", "lib", "clawgate_tasks.py")):
+        if os.path.exists(path):
+            loader = importlib.machinery.SourceFileLoader("_sm_clawgate", path)
+            spec = importlib.util.spec_from_file_location("_sm_clawgate", path,
+                                                          loader=loader)
+            mod = importlib.util.module_from_spec(spec)
+            loader.exec_module(mod)
+            return mod
+    raise ImportError("scripts/lib/clawgate_tasks.py not found (tried sibling "
+                      "lib/ and $DEVRC_DIR/scripts/lib/)")
+
+
+CG = _load_clawgate_tasks()
+
 # --------------------------------------------------------------------------- #
 # Shared ClickHouse client. `scripts/validation/chquery.py` is a LIBRARY
 # (CHClient / CHConn, no __main__), so it is imported by a sys.path insert
@@ -258,11 +288,22 @@ CLAUDE_RE = re.compile(r"claude", re.IGNORECASE)
 # missed 11 pending approvals, four of them credential-exposure or
 # cross-user-data-leak. So the count lives here too.
 #
-# 🔴 `count` IS THE MEASUREMENT; `detail` IS NOT. The cached detail string
-# truncates — "11 task(s) awaiting: #171, #170, #169, #168, #160, #165" names
-# SIX of eleven — and the dropped tail has included `ready_for_review` items,
-# i.e. finished work awaiting review. Nothing here ever parses `detail` for a
-# count; it is carried verbatim and labelled truncated.
+# 🔴 `count` IS THE MEASUREMENT; `detail` IS NOT. Nothing here ever parses
+# `detail` for a number. Since the poller adopted schema 2 the string states its
+# own truncation (`… (+5 more)`) and the FULL sets travel structurally beside it
+# in `open` / `ready_for_review` / `stuck` — which is what this reader
+# enumerates. A schema-1 cache (written by a poller from before that change)
+# carries the old silently-truncated string, which named ~6 ids however many
+# were pending and has dropped `ready_for_review` items, i.e. finished work
+# awaiting review; that case is labelled, not parsed.
+#
+# 🔴 A SCHEMA-1 CACHE HAS NO STUCK INFORMATION AT ALL, and this reader reports
+# that as UNMEASURED rather than as zero. That is the whole bug: the poller used
+# to count only {open, ready_for_review}, so an `in_progress` task whose agent
+# had been dead for hours contributed nothing to `count` — and because this
+# script reads the cache rather than the API, the wedge was invisible here too.
+# The predicate now lives in scripts/lib/clawgate_tasks.py, which the poller,
+# agent-ops and this file all import; see that module for what "stuck" means.
 #
 # The cache is written by `scripts/bar-status-poll` every 45s. Anything older
 # than MAX_AGE cannot be called a current measurement, so it is published with
@@ -276,6 +317,11 @@ BLOCKED_DETAIL_NOTE = ("`detail` TRUNCATES (it names ~6 ids however many are "
                        "pending) and has dropped ready_for_review items — read "
                        "`count`, or `agent-ops` / the clawgate API for the "
                        "full queue")
+BLOCKED_SCHEMA_NOTE = ("this cache predates the stuck-dispatch predicate "
+                       "(schema < %d): `stuck` is UNMEASURED here, not zero — "
+                       "an in_progress task with a dead agent is invisible in "
+                       "this count. Re-deploy and restart bar-status-poll, or "
+                       "read the clawgate API directly")
 
 # --------------------------------------------------------------------------- #
 # 🔴 THE `waiting` SIGNAL. `status: idle` merges four states that need four
@@ -763,10 +809,17 @@ def read_blocked_on_me(path=None, reader=None, now=None,
     AND says it cannot be called current: the bar poller writes every 45s, so a
     cache older than `max_age` describes a queue that may since have changed.
 
-    🔴 `detail` IS NEVER PARSED. It truncates to ~6 ids however many are
-    pending, and the ids it drops have included `ready_for_review` work. It is
-    carried verbatim, labelled `detail_truncated: True`, and `count` is the
-    only number anything reads.
+    🔴 `detail` IS NEVER PARSED. On a schema-1 cache it truncates to ~6 ids
+    however many are pending, and the ids it drops have included
+    `ready_for_review` work. It is carried verbatim, labelled
+    `detail_truncated`, and `count` is the only number anything reads.
+
+    🔴 THE STUCK-DISPATCH FIELDS ARE FOUR-VALUED TOO. `stuck_count` is None on
+    any cache older than `clawgate_tasks.SCHEMA`, because such a poller never
+    looked — and an `in_progress` task with a dead agent contributing 0 to a
+    count is exactly the blindness this closes. `schema_ok` says which it was,
+    and `open` / `ready_for_review` / `stuck` ENUMERATE the queue rather than
+    leaving a reader with a number and no way to learn what moved.
     """
     now = time.time() if now is None else now
     path = BLOCKED_CACHE if path is None else path
@@ -774,7 +827,15 @@ def read_blocked_on_me(path=None, reader=None, now=None,
     base = {"source": "bar_status_cache", "path": path, "count": None,
             "detail": None, "detail_truncated": True,
             "detail_note": BLOCKED_DETAIL_NOTE, "cache_age_secs": None,
-            "max_age_secs": max_age, "error": None}
+            "max_age_secs": max_age, "error": None,
+            # 🔴 None, not 0 / []: nothing has been read yet at this point, and
+            # every early return below inherits these.
+            "schema": None, "schema_ok": False,
+            "schema_note": BLOCKED_SCHEMA_NOTE % CG.SCHEMA,
+            "detail_shown": None, "detail_total": None,
+            "pending_count": None, "stuck_count": None,
+            "open": None, "ready_for_review": None, "stuck": None,
+            "threshold_secs": None}
     text = reader(path)
     if text is None:
         base["status"] = "absent"
@@ -795,6 +856,26 @@ def read_blocked_on_me(path=None, reader=None, now=None,
         return base
     base["count"] = obj["count"]
     base["detail"] = obj.get("detail")
+    # --- schema 2: the stuck predicate + the enumerated queue ----------------
+    # 🔴 The gate is `>=`, and everything below it stays None on a miss. An
+    # older poller wrote no `stuck` key; reading that absence as an empty list
+    # would publish "0 stuck dispatches" as a measurement nobody took.
+    schema = obj.get("schema")
+    base["schema"] = schema if isinstance(schema, int) and not isinstance(schema, bool) else None
+    if base["schema"] is not None and base["schema"] >= CG.SCHEMA:
+        base["schema_ok"] = True
+        base["schema_note"] = None
+        base["pending_count"] = obj.get("pending_count")
+        base["stuck_count"] = obj.get("stuck_count")
+        base["open"] = obj.get("open")
+        base["ready_for_review"] = obj.get("ready_for_review")
+        base["stuck"] = obj.get("stuck")
+        base["threshold_secs"] = obj.get("threshold_secs")
+        # The schema-2 detail states its own cap, and the full sets are above.
+        base["detail_truncated"] = bool(obj.get("detail_truncated"))
+        base["detail_shown"] = obj.get("detail_shown")
+        base["detail_total"] = obj.get("detail_total")
+        base["detail_note"] = None
     ts = obj.get("ts")
     if not isinstance(ts, (int, float)) or isinstance(ts, bool):
         # A count whose age cannot be established is not a fresh count. Saying
@@ -1251,9 +1332,15 @@ def summarize(report) -> dict:
         # `detect_waiting` and be missing from the summary.
         "waiting": _waiting_rollup(rows),
         # The clawgate approval queue, count + discriminant, never one alone.
+        # 🔴 `stuck` rides along and is None (not 0) whenever the cache predates
+        # the predicate — a roll-up reader must be able to tell "no wedged
+        # dispatches" from "wedged dispatches were never looked for", which is
+        # the distinction that made a four-hour-dead agent invisible here.
         "blocked_on_me": {
             "count": (report.get("blocked_on_me") or {}).get("count"),
             "status": (report.get("blocked_on_me") or {}).get("status"),
+            "stuck_count": (report.get("blocked_on_me") or {}).get("stuck_count"),
+            "schema_ok": (report.get("blocked_on_me") or {}).get("schema_ok"),
         },
         # Hosts whose `list-windows` did not answer even though `list-panes`
         # did. Their rows carry no window_id and, if local, no fuzzyclaw join.
@@ -1509,7 +1596,8 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
         # 🔴 The clawgate approval queue. Filled in below; the skeleton carries
         # a `status` from the first byte so no code path can publish a bare
         # count. See `read_blocked_on_me` for the four outcomes.
-        "blocked_on_me": {"status": "skipped", "count": None},
+        "blocked_on_me": {"status": "skipped", "count": None,
+                          "stuck_count": None, "schema_ok": False},
         # 🔴 The two limits that change what these rows MEAN, carried in the
         # payload rather than left in the skill body. See CAVEATS.
         "caveats": CAVEATS,
@@ -1699,6 +1787,45 @@ def _fmt_waiting(row) -> str:
                              for s in (row.get("waiting_signals") or ()))
 
 
+def _render_blocked_rows(b) -> list:
+    """The queue itself, ENUMERATED — not folded into the count above it.
+
+    🔴 Order is stuck -> ready_for_review -> open, and every row is printed.
+    Three finished tasks once appeared in no list on ANY surface: the count
+    moved and nothing said what had finished. A stuck row carries its idle time
+    beside the flag, because `idle 4h` and `idle 16m` are the same boolean and
+    only one of them is worth walking over to a terminal for.
+    """
+    out = []
+    if not b.get("schema_ok"):
+        # Old cache: no lists at all. Say what is missing rather than printing
+        # a shorter section that reads like a complete one.
+        out.append("  ⚠ " + _trunc(b.get("schema_note"), 160))
+        out.append("  ⚠ this is a COUNT. " + BLOCKED_DETAIL_NOTE)
+        if b.get("detail"):
+            out.append(f"  cached detail (TRUNCATED): "
+                       f"{_trunc(b.get('detail'), 100)}")
+        return out
+    stuck = b.get("stuck") or []
+    if stuck:
+        thr = b.get("threshold_secs")
+        out.append(f"  🔴 {len(stuck)} STUCK dispatch(es) — in_progress with a "
+                   f"dead-looking agent (idle threshold "
+                   f"{CG.fmt_idle(thr) if thr is not None else '?'}):")
+        for s in stuck:
+            out.append("     #%s idle %s [%s] %s" % (
+                s.get("id"), CG.fmt_idle(s.get("agent_idle_secs")),
+                ",".join(s.get("reasons") or ["?"]), _trunc(s.get("title"), 60)))
+        out.append("     ⚠ idle time cannot see progress WITHIN one in-flight "
+                   "turn, so this errs toward a false alarm, not a false calm")
+    for label, key in (("REVIEW", "ready_for_review"), ("OPEN", "open")):
+        rows = b.get(key) or []
+        for r in rows:
+            out.append("     #%s %-6s %s" % (r.get("id"), label,
+                                             _trunc(r.get("title"), 60)))
+    return out
+
+
 def render_blocked_on_me(blocked) -> list:
     """🔴 The clawgate queue, with the count and its discriminant on one line.
 
@@ -1713,16 +1840,14 @@ def render_blocked_on_me(blocked) -> list:
     count, out = b.get("count"), []
     if st == "ok":
         if count:
-            out.append(f"▸ BLOCKED ON ME: {count} clawgate task(s) pending "
-                       f"approval/review")
-            out.append("  ⚠ this is a COUNT. " + BLOCKED_DETAIL_NOTE)
-            if b.get("detail"):
-                out.append(f"  cached detail (TRUNCATED): "
-                           f"{_trunc(b.get('detail'), 100)}")
+            out.append(f"▸ BLOCKED ON ME: {count} clawgate task(s) needing you")
+            out.extend(_render_blocked_rows(b))
         else:
             out.append("▸ BLOCKED ON ME: 0 clawgate tasks pending "
                        f"(cache {int(b.get('cache_age_secs') or 0)}s old — "
                        "a measured zero)")
+            if not b.get("schema_ok"):
+                out.append("  ⚠ " + _trunc(b.get("schema_note"), 160))
     elif st == "stale":
         out.append(f"▸ BLOCKED ON ME: UNMEASURED (stale cache) — last known "
                    f"count {count}")

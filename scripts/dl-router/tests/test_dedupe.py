@@ -1671,8 +1671,10 @@ def fallocated(path: Path, size: int, *, head: bytes = b"H",
     `os.ftruncate` makes a sparse file, which `st_blocks` catches. This is the
     other shape, and the one qBittorrent actually uses when "pre-allocate disk
     space for all files" is on: `posix_fallocate` reserves REAL extents, so
-    size AND blocks match a finished file exactly. Under "download first and
-    last pieces first" the ends are finished too.
+    the size matches a finished file exactly and the block count matches it to
+    within filesystem metadata overhead -- densely allocated either way, with
+    no hole to give it away. Under "download first and last pieces first" the
+    ends are finished too.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_TRUNC, 0o600)
@@ -1700,14 +1702,35 @@ def test_st_blocks_CANNOT_see_a_fallocated_partial(tmp_path):
     """THE PREMISE of the round-3 blocker, asserted so it cannot rot.
 
     `posix_fallocate` allocates real extents, so the metadata heuristic that
-    caught the sparse variant is blind here: identical size, identical block
-    count, identical head, identical tail.
+    caught the sparse variant is blind here: identical size, identical head,
+    identical tail, and BOTH files densely allocated -- there is no hole left
+    for `st_blocks` to report.
+
+    Density, not EQUAL block counts, is the premise. How many extent-tree
+    metadata blocks a file picks up is a filesystem allocation detail rather
+    than a property of the code under test, and it drifts with tmpdir state:
+    measured on ext4, these two files disagree by exactly one 4K block in
+    roughly 40% of trials, in either direction. Asserting `part.st_blocks ==
+    whole.st_blocks` therefore pinned a coin flip. What actually has to hold
+    -- and what actually blinds the heuristic -- is that NEITHER file is
+    sparse. The sparse variant this contrasts with allocates ~3% of the size
+    it claims; both of these allocate ~100%.
     """
     size = D.HEAD_BYTES + D.TAIL_BYTES + (8 << 20)
     part = fallocated(tmp_path / "part.mkv", size, fill_to=0.4)
     whole = complete_file(tmp_path / "whole.mkv", size)
     assert part.stat().st_size == whole.stat().st_size
-    assert part.stat().st_blocks == whole.stat().st_blocks
+    # Each file is allocated to within 5% (432537 B) of the size it claims.
+    # Measured slack on ext4 is one 4K block, 0.05% of size -- so the band
+    # clears real metadata overhead by ~105x. The sparse variant it must keep
+    # rejecting is 8 MiB short, 97% of its size, which the band rejects by
+    # ~19x. Verified both directions: see the PR's positive control.
+    for label, st in (("partial", part.stat()), ("whole", whole.stat())):
+        allocated = st.st_blocks * 512
+        assert abs(allocated - st.st_size) <= st.st_size // 20, (
+            f"{label} is not densely allocated: {allocated} B allocated "
+            f"against {st.st_size} B of size. If it is short, the file is "
+            f"sparse and the premise of this test no longer holds")
     assert S.App._looks_preallocated(part.stat()) is False
     assert S.App._looks_preallocated(whole.stat()) is False, (
         "the metadata heuristic cannot distinguish these -- that is the point")
