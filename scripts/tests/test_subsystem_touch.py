@@ -61,6 +61,11 @@ HANDOFF_DOC = ROOT / "claude" / "skills" / "handoff" / "SKILL.md"
 ANALYZE_DOC = ROOT / "claude" / "skills" / "analyze-service" / "SKILL.md"
 
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
+sys.path.insert(0, str(ROOT / "scripts"))
+
+from testlib.skills_mapping import (  # noqa: E402
+    assert_skills_mapping_deploys_repo_skills,
+)
 
 import subsystem_resolver as sr  # noqa: E402
 import subsystem_touch as st  # noqa: E402
@@ -1378,8 +1383,9 @@ class TestSkillDocsArePinned:
             assert d.name == "SKILL.md"
             assert d.parent.parent.name == "skills"
         home_nix = (ROOT / "nix" / "home.nix").read_text(encoding="utf-8")
-        assert 'home.file.".claude/skills"' in home_nix
-        assert "source = ../claude/skills;" in home_nix
+        # Shared, structural predicate — see testlib/skills_mapping.py for why
+        # the literal-substring version of this had to go.
+        assert_skills_mapping_deploys_repo_skills(home_nix)
 
 
 class TestEntrySchemaAgreement:

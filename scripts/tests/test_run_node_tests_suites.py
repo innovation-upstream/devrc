@@ -18,8 +18,17 @@ list entry, #298: 166, #306: 989). The runner reported ``RESULT: PASS`` and a
 468-test total the whole time, because a hard-coded list cannot know what it is
 not looking at.
 
-Collection is now DISCOVERY (bash globstar over ``scripts/**/*.test.mjs``) plus
-a TWO-WAY PIN (``SUITES``), and this file guards the pin.
+Collection is now DISCOVERY (bash globstar over ``<root>/**/*.test.mjs`` for
+every entry of ``DISCOVERY_ROOTS``) plus a TWO-WAY PIN (``SUITES``), and this
+file guards the pin.
+
+2026-08-13: the ROOT LIST is the same defect one level up. Discovery was rooted
+at ``scripts/`` alone, so ``claude/skills/clickup/test`` -- two hermetic gates
+shipped through home-manager -- was invisible to it however many suites the glob
+found under ``scripts/``. The roots are now an explicit ``DISCOVERY_ROOTS``
+array, parsed out of the runner HERE rather than restated, and every root must
+match at least one suite (a root that globs to nothing silently shrinks the gate
+while still reporting PASS).
 
 WHAT IS REGRESSION COVERAGE HERE AND WHAT IS NOT
 ------------------------------------------------
@@ -63,6 +72,10 @@ RUNNER = REPO_ROOT / "scripts" / "run-node-tests.sh"
 FORMERLY_UNGATED = {
     "scripts/dl-router/tests": 508,
     "scripts/collector/browser-ext/tests": 21,
+    # Ungated in a different way and for longer: it lived in an UNCOMMITTED
+    # ~/.claude/skills/clickup/ on two hosts and ran only when a human typed it.
+    # Measured 2026-08-13 once vendored into claude/skills/clickup/test.
+    "claude/skills/clickup/test": 27,
 }
 
 
@@ -123,8 +136,32 @@ def _pinned_suites() -> dict[str, tuple[int, int]]:
     return out
 
 
+def _discovery_roots() -> list[str]:
+    """Parse DISCOVERY_ROOTS out of the runner.
+
+    Parsed, not restated, for the same reason SUITES is: a second hand-kept copy
+    of the list drifts from the first, and the drift is silent -- this file would
+    keep discovering under `scripts/` alone while the runner had moved on.
+    """
+    src = RUNNER.read_text()
+    m = re.search(r"^DISCOVERY_ROOTS=\((.*?)^\)", src, re.S | re.M)
+    assert m, (
+        "could not find a DISCOVERY_ROOTS=( ... ) block in run-node-tests.sh. "
+        "If the array was renamed, update this parser -- do NOT fall back to a "
+        "hard-coded 'scripts', which is the blindness this array exists to fix."
+    )
+    roots = []
+    for raw in m.group(1).splitlines():
+        line = raw.strip().strip('"')
+        if not line or line.startswith("#"):
+            continue
+        roots.append(line.strip('"'))
+    assert roots, "parsed DISCOVERY_ROOTS as EMPTY -- the parser is broken, not the list"
+    return roots
+
+
 def _discovered_dirs() -> set[str]:
-    """Every directory under scripts/ holding a .test.mjs file.
+    """Every directory under a DISCOVERY_ROOT holding a .test.mjs file.
 
     Uses pathlib rather than shelling out to `find`: the `find` on this host's
     bash PATH is BUSYBOX and rejects GNU's `-printf` (that exact trap produced a
@@ -133,10 +170,15 @@ def _discovered_dirs() -> set[str]:
     independently-implemented discovery here is the point -- it cross-checks the
     runner's own rather than restating it.
     """
-    return {
-        str(p.parent.relative_to(REPO_ROOT))
-        for p in (REPO_ROOT / "scripts").rglob("*.test.mjs")
-    }
+    out: set[str] = set()
+    for root in _discovery_roots():
+        base = REPO_ROOT / root
+        if not base.is_dir():
+            continue
+        out |= {
+            str(p.parent.relative_to(REPO_ROOT)) for p in base.rglob("*.test.mjs")
+        }
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -155,11 +197,34 @@ def test_parsers_are_positive_controlled():
     """
     pinned = _pinned_suites()
     discovered = _discovered_dirs()
-    assert len(pinned) >= 3, f"only {len(pinned)} suites parsed: {pinned}"
-    assert len(discovered) >= 3, f"only {len(discovered)} dirs discovered: {discovered}"
-    assert all(d.startswith("scripts/") for d in pinned), pinned
+    roots = _discovery_roots()
+    assert len(pinned) >= 4, f"only {len(pinned)} suites parsed: {pinned}"
+    assert len(discovered) >= 4, f"only {len(discovered)} dirs discovered: {discovered}"
+    # Every pinned suite must sit under a DECLARED root, or discovery could never
+    # have found it -- the pin would be pointing somewhere the glob does not look.
+    for d in pinned:
+        assert any(d.startswith(f"{r}/") for r in roots), (
+            f"{d} is pinned in SUITES but lies under none of DISCOVERY_ROOTS "
+            f"({roots}), so discovery cannot reach it."
+        )
     # The floors must be real numbers, not a parse artefact of zeros.
     assert all(mt > 0 and mf > 0 for mf, mt in pinned.values()), pinned
+
+
+def test_every_discovery_root_contributes_a_suite():
+    """A root that matches nothing is an EMPTY RESULT wearing a root's clothes.
+
+    It is indistinguishable from a typo or a moved directory, and both read as
+    "no suites here" while the gate keeps reporting PASS on the other roots. The
+    runner enforces this itself; this pins the property from the outside, with a
+    second implementation of discovery.
+    """
+    discovered = _discovered_dirs()
+    for root in _discovery_roots():
+        assert any(d.startswith(f"{root}/") for d in discovered), (
+            f"DISCOVERY_ROOTS names {root!r} but no *.test.mjs was found under it. "
+            "A root globbing to nothing silently shrinks the gate."
+        )
 
 
 # --------------------------------------------------------------------------
@@ -249,9 +314,26 @@ def test_check_suites_runs_no_tests():
 # REACHABILITY: prove GUARD 3 can go red, naming the offending directory.
 # --------------------------------------------------------------------------
 
-def _runner_copy(tmp_path: Path, *, drop: str | None = None, add: str | None = None) -> Path:
-    """Copy the runner, optionally dropping or adding one SUITES entry."""
+def _runner_copy(
+    tmp_path: Path,
+    *,
+    drop: str | None = None,
+    add: str | None = None,
+    drop_root: str | None = None,
+    add_root: str | None = None,
+) -> Path:
+    """Copy the runner, optionally mutating one SUITES or DISCOVERY_ROOTS entry."""
     src = RUNNER.read_text()
+    if drop_root is not None:
+        src, n = re.subn(
+            rf'^\s*"{re.escape(drop_root)}"\s*$\n', "", src, count=1, flags=re.M
+        )
+        assert n == 1, f"failed to drop root {drop_root!r} from the copied runner"
+    if add_root is not None:
+        src, n = re.subn(
+            r"^DISCOVERY_ROOTS=\(\n", f'DISCOVERY_ROOTS=(\n  "{add_root}"\n', src, count=1, flags=re.M
+        )
+        assert n == 1, "failed to inject a discovery root into the copied runner"
     if drop is not None:
         patched, n = re.subn(
             rf'^\s*"{re.escape(drop)}\|\d+\|\d+"\s*$\n', "", src, count=1, flags=re.M
@@ -337,4 +419,53 @@ def test_runner_does_not_use_find_printf():
     assert "SUITES=(" in code and len(code) > 2000, (
         "comment-stripping left no executable shell behind -- this check would "
         "pass against anything. Fix the stripper, not the assertion."
+    )
+
+
+def test_dropping_a_discovery_root_is_loud(tmp_path):
+    """MUTATION: remove `claude` from DISCOVERY_ROOTS and the pin must notice.
+
+    This is the reachability proof for the ROOT list, which is a separate guard
+    from the SUITES list: with the root gone, discovery simply stops looking at
+    claude/ and -- before the two-way pin -- the run would have gone green having
+    quietly dropped a whole suite. It must fail NAMING the vanished suite, not
+    merely exit non-zero, so an unrelated guard tripping first cannot satisfy it.
+    """
+    _require_check_suites()
+    roots = _discovery_roots()
+    assert "claude" in roots, f"expected `claude` in DISCOVERY_ROOTS, got {roots}"
+    runner = _runner_copy(tmp_path, drop_root="claude")
+    proc = _run([str(runner), "--check-suites", str(REPO_ROOT)])
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 2, (
+        f"dropping the `claude` discovery root did NOT fail the guard (exit "
+        f"{proc.returncode}) -- the clickup suite would silently stop running.\n{out}"
+    )
+    assert "claude/skills/clickup/test" in out, (
+        f"guard failed but never named the suite that vanished with the root.\n{out}"
+    )
+    assert "discovery found no" in out, (
+        f"guard fired for some OTHER reason than the suite vanishing.\n{out}"
+    )
+
+
+def test_a_discovery_root_that_matches_nothing_is_loud(tmp_path):
+    """MUTATION, the other direction: a root that globs to nothing.
+
+    An empty root is the "EMPTY RESULT cannot distinguish two mechanisms" trap --
+    a typo and a deleted directory produce the identical silence. The runner must
+    refuse rather than quietly gate fewer suites.
+    """
+    _require_check_suites()
+    ghost = "no-such-root"
+    runner = _runner_copy(tmp_path, add_root=ghost)
+    proc = _run([str(runner), "--check-suites", str(REPO_ROOT)])
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 2, (
+        f"a DISCOVERY_ROOTS entry matching nothing did NOT fail the guard (exit "
+        f"{proc.returncode}).\n{out}"
+    )
+    assert ghost in out, f"guard failed but never named {ghost!r}.\n{out}"
+    assert "matched no *.test.mjs" in out, (
+        f"guard named {ghost!r} but not WHY (expected the empty-root reason).\n{out}"
     )

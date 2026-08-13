@@ -56,6 +56,11 @@ HANDOFF_DOC = ROOT / "claude" / "skills" / "handoff" / "SKILL.md"
 ANALYZE_DOC = ROOT / "claude" / "skills" / "analyze-service" / "SKILL.md"
 
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
+sys.path.insert(0, str(ROOT / "scripts"))
+
+from testlib.skills_mapping import (  # noqa: E402
+    assert_skills_mapping_deploys_repo_skills,
+)
 
 import subsystem_recall as rc  # noqa: E402
 import subsystem_resolver as sr  # noqa: E402
@@ -1148,8 +1153,11 @@ class TestSkillDocsArePinned:
         assert RESUME_DOC.name == "SKILL.md"
         assert RESUME_DOC.parent.parent.name == "skills"
         home_nix = (ROOT / "nix" / "home.nix").read_text(encoding="utf-8")
-        assert 'home.file.".claude/skills"' in home_nix
-        assert "source = ../claude/skills;" in home_nix
+        # Structural, and shared with test_subsystem_resolver/_touch — the three
+        # copies of this predicate used to match the LITERAL
+        # `source = ../claude/skills;`, and all three went red together when the
+        # mapping's source became a derivation built from that path.
+        assert_skills_mapping_deploys_repo_skills(home_nix)
 
     HANDOFF_CORRECTIONS: list[tuple[str, str]] = [
         (
