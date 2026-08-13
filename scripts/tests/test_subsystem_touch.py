@@ -66,7 +66,7 @@ sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from testlib.skills_mapping import (  # noqa: E402
-    assert_skills_mapping_deploys_repo_skills,
+    assert_skills_mapping_declared,
 )
 
 import subsystem_resolver as sr  # noqa: E402
@@ -1303,6 +1303,25 @@ class TestSkillDocsArePinned:
             "blind to work that has already merged",
             "why the git fallback is a fallback",
         ),
+        # 🔴 The cross-repo window. The tool now ANSWERS a case the step used to
+        # describe as a dead end, and an executor still holding the old rule
+        # would treat a normal run as a failure — or worse, read a floor as a
+        # complete list. Both halves are pinned: that the window exists, and
+        # what its count means.
+        (
+            "the `session-absolute` window",
+            "the cross-repo case has a window, not only a refusal",
+        ),
+        (
+            "that window is a **floor**, not a list",
+            "🔴 its count is a lower bound — the relative paths are excluded, "
+            "not counted, so how much is missing is unknown",
+        ),
+        (
+            "a **relative** path in a transcript is relative to its own session's cwd",
+            "🔴 the guard's REAL scope, replacing a claim about *every* path that "
+            "was false and threw away the absolute ones",
+        ),
         (
             "Read the `caveat:` line before you write anything",
             "each source understates in its own direction",
@@ -1429,10 +1448,9 @@ class TestSkillDocsArePinned:
             assert d.exists(), f"the pinned doc is gone: {d}"
             assert d.name == "SKILL.md"
             assert d.parent.parent.name == "skills"
-        home_nix = (ROOT / "nix" / "home.nix").read_text(encoding="utf-8")
-        # Shared, structural predicate — see testlib/skills_mapping.py for why
-        # the literal-substring version of this had to go.
-        assert_skills_mapping_deploys_repo_skills(home_nix)
+        # Shared predicate — declared-and-not-switched-off only; see
+        # testlib/skills_mapping.py for what it does NOT check, and why.
+        assert_skills_mapping_declared(ROOT / "nix" / "home.nix")
 
 
 class TestEntrySchemaAgreement:
@@ -1588,6 +1606,16 @@ def projects_root(tmp_path: Path, monkeypatch):
 
 def _session_source(repo: Path, transcript: Path, **kw):
     return st.collect_session_paths(repo, transcript=transcript, **kw)
+
+
+def _CHANGED_PATHS_CAP() -> int:
+    """The extractor's OWN cap, read through the extractor this module loads.
+
+    🔴 Not restated as a literal here. The cap is `changed_paths`'s constant and
+    the note under test quotes it; a second copy in the tests would let the two
+    drift and turn a real truncation regression into a green boundary test.
+    """
+    return st._session_tailer().CP.CHANGED_PATHS_CAP
 
 
 class TestSessionPositiveControl:
@@ -1930,6 +1958,414 @@ class TestSessionNegativeControls:
             st.TranscriptCwdMismatchError,
         ):
             assert issubclass(cls, st.TouchError), cls
+
+
+class TestCrossRepoAbsoluteWindow:
+    """🔴 THE FALSE SENTENCE THE CWD GUARD THREW ATTRIBUTABLE PATHS AWAY WITH.
+
+    The refusal read: *"Every path in a transcript is relative to the session's
+    own cwd."* It is not. A transcript entry is the tool call's own `file_path`,
+    ABSOLUTE whenever the caller passed an absolute path — which agents do
+    constantly, because the harness tells them to. Such a path needs no
+    inference to attribute, and it was refused anyway.
+
+    ⚠ NO YIELD FIGURE IS ASSERTED HERE, deliberately. The 112 that motivated the
+    work is RETRACTED — it counted devrc's own sibling worktree directories
+    (`devrc-fix443`, `devrc-clickup`, …) as other repos. Reconciled: ~30
+    genuinely cross-project, corroborated at 33 by a second script;
+    `subsystem_touch.collect_session_paths` carries the derivation. These tests
+    pin the BEHAVIOUR, which does not depend on it — the stated reason was false
+    at ANY yield.
+
+    So a cwd mismatch now yields the ABSOLUTE window instead of refusing, and
+    refuses only when that window is empty. What is unchanged, and is the actual
+    safety property, is that a RELATIVE path is NEVER re-anchored: `src/a.py` in
+    session-cwd A and `src/a.py` under repo B are unrelated strings that happen
+    to spell the same thing, and reading one as the other files another repo's
+    work here — silently, because the manufactured path resolves perfectly.
+    """
+
+    UNDER_B = ["src/collector/a.py", "src/collector/b.py"]
+
+    def _two_repos(self, tmp_path: Path):
+        """B is the repo under test; A is where the session actually ran."""
+        b = _init_repo(tmp_path, SCOPE)
+        a = tmp_path / "the-other-checkout"
+        a.mkdir()
+        return a, b
+
+    def test_THE_PAIR_absolute_paths_are_reported_relative_ones_are_refused(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """🔴 The measurement, as one test. Both arms are the SAME session shape
+        in the SAME repos with the SAME filenames at the SAME depth — the single
+        difference is whether the transcript spelled the path out.
+
+        Without the negative arm the positive one is indistinguishable from a
+        window that re-anchors everything, which is the defect the guard exists
+        to prevent and would be invisible: every path would resolve.
+        """
+        a, b = self._two_repos(tmp_path)
+
+        spelled = _write_transcript(
+            tmp_path / "spelled.jsonl", str(a), [f"{b}/{p}" for p in self.UNDER_B]
+        )
+        src = _session_source(b, spelled)
+        assert sorted(src.paths) == sorted(self.UNDER_B), (
+            "the absolute window yielded nothing — it is wired to nothing"
+        )
+
+        implied = _write_transcript(
+            tmp_path / "implied.jsonl", str(a), list(self.UNDER_B)
+        )
+        with pytest.raises(st.TranscriptCwdMismatchError):
+            _session_source(b, implied)
+
+    def test_it_is_a_DIFFERENT_WINDOW_not_a_flag_on_the_session_one(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        a, b = self._two_repos(tmp_path)
+        t = _write_transcript(tmp_path / "t.jsonl", str(a), [f"{b}/{self.UNDER_B[0]}"])
+        src = _session_source(b, t)
+        assert src.kind == "session"
+        assert src.window == "session-absolute"
+        assert src.session_cwd == str(a)
+
+    def test_ONE_transcript_two_repos_two_disjoint_windows(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """🔴 THE SEAM. The same bytes, read against two repos, must answer two
+        different questions and never blend them: repo A gets what the session
+        named relative to its own cwd; repo B gets only what it named absolutely
+        under B. A window that leaked either way would be invisible in a test
+        that only ever loaded one repo.
+        """
+        a_repo = _init_repo(tmp_path, "the-other-checkout")
+        b = _init_repo(tmp_path, SCOPE)
+        t = _write_transcript(
+            tmp_path / "t.jsonl",
+            str(a_repo),
+            ["local/only-in-a.py", f"{b}/src/collector/a.py"],
+        )
+        from_a = _session_source(a_repo, t)
+        from_b = _session_source(b, t)
+
+        assert from_a.window == "session"
+        assert from_a.paths == ("local/only-in-a.py",)
+        assert from_b.window == "session-absolute"
+        assert from_b.paths == ("src/collector/a.py",)
+        assert set(from_a.paths).isdisjoint(from_b.paths)
+
+    def test_a_SIBLING_repo_sharing_a_name_prefix_is_not_this_repo(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """`<repo>-2/src/a.py` must not be read as `-2/src/a.py` under `<repo>`.
+        A manufactured path that matches nothing is the better half of that bug;
+        the worse half is one that matches something.
+
+        ⚠ Green on the pre-change code too — everything was refused there — so it
+        is not regression coverage for the old defect. It pins a hazard THIS
+        change creates, which is why it is here rather than in the tailer suite
+        alone."""
+        a, b = self._two_repos(tmp_path)
+        t = _write_transcript(tmp_path / "t.jsonl", str(a), [f"{b}-2/src/collector/a.py"])
+        with pytest.raises(st.TranscriptCwdMismatchError):
+            _session_source(b, t)
+
+    def test_the_notes_report_the_PAIR_not_just_the_yield(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """A count of what was reported, beside a count of what was excluded and
+        WHY. Without the second number a thin window is indistinguishable from a
+        thin session."""
+        a, b = self._two_repos(tmp_path)
+        t = _write_transcript(
+            tmp_path / "t.jsonl",
+            str(a),
+            [f"{b}/{self.UNDER_B[0]}", "only-in-a.py", "also-in-a.py"],
+        )
+        src = _session_source(b, t)
+        joined = " ".join(src.notes)
+        assert "1 path(s) named ABSOLUTELY" in joined, src.notes
+        assert str(a) in joined, src.notes
+        assert "2 path(s) expressible relative to that cwd" in joined, src.notes
+        assert "EXCLUDED" in joined, src.notes
+
+    def test_the_notes_ACCOUNT_FOR_EVERY_PATH_the_session_named(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """🔴 A BUCKET WENT UNREPORTED, so the numbers did not add up and a reader
+        doing the arithmetic reached a smaller session than the real one.
+
+        Fixture: FIVE distinct paths — 2 absolute under `--repo`, 2 expressible
+        relative to the session's own cwd, 1 absolute in a sibling tree that is
+        neither. The note used to print `2 … ABSOLUTELY` and `2 … relative`, and
+        the fifth path appeared nowhere; the REFUSAL path already quoted all
+        three counts, so the two halves of one guard disagreed about what they
+        owed the reader.
+
+        Asserted on the ACCOUNTING, not on a phrase: the distinct total is
+        stated, and the two partitioning counts sum to it. A rewrite cannot
+        satisfy that by accident while still dropping a bucket.
+        """
+        a, b = self._two_repos(tmp_path)
+        t = _write_transcript(
+            tmp_path / "t.jsonl",
+            str(a),
+            [
+                f"{b}/{self.UNDER_B[0]}",          # absolute, under --repo
+                f"{b}/{self.UNDER_B[1]}",          # absolute, under --repo
+                f"{a}/in-the-session-repo.py",     # absolute, under the session cwd
+                "relative-in-a.py",                # relative -> the session cwd
+                f"{tmp_path}/a-third-tree/x.py",   # absolute, neither
+            ],
+        )
+        src = _session_source(b, t)
+        joined = " ".join(src.notes)
+        assert "5 distinct path(s)" in joined, src.notes
+        assert "2 path(s) named ABSOLUTELY" in joined, src.notes
+        assert "2 path(s) expressible relative to that cwd" in joined, src.notes
+        assert "3 outside it" in joined, src.notes
+        # 🔴 And it must WARN that the yield overlaps, or a reader adding all
+        # three reaches 7 from a 5-path session. The absolute set is a re-reading
+        # of paths already counted, under a different root — not a fourth bucket.
+        assert "OVERLAPS" in joined, src.notes
+
+    def test_the_note_and_the_REFUSAL_quote_the_same_counters(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """One guard, two exits, and they used to owe the reader different
+        things. Both must name the same three numbers — a divergence here is how
+        the omission survived review in the first place."""
+        a, b = self._two_repos(tmp_path)
+        shared = ["relative-in-a.py", f"{tmp_path}/a-third-tree/x.py"]
+        refused = _write_transcript(tmp_path / "no.jsonl", str(a), shared)
+        with pytest.raises(st.TranscriptCwdMismatchError) as exc:
+            _session_source(b, refused)
+        answered = _write_transcript(
+            tmp_path / "yes.jsonl", str(a), shared + [f"{b}/{self.UNDER_B[0]}"]
+        )
+        note = " ".join(_session_source(b, answered).notes)
+        for phrase in ("distinct path(s)", "expressible relative to that cwd", "outside it"):
+            assert phrase in str(exc.value), f"the refusal dropped {phrase!r}"
+            assert phrase in note, f"the success note dropped {phrase!r}"
+
+    def test_the_caveat_calls_it_a_FLOOR_and_never_claims_the_session_frame(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """🔴 A FIFTH caveat, because the session one is FALSE here in a specific
+        direction: it says the paths are "relative to the session cwd", and this
+        window's whole premise is that they are not. Its blind spots are also a
+        strict superset — every relative path the session named is not a counted
+        remainder but an UNKNOWABLE one, so the count is a lower bound.
+        """
+        a, b = self._two_repos(tmp_path)
+        t = _write_transcript(tmp_path / "t.jsonl", str(a), [f"{b}/{self.UNDER_B[0]}"])
+        src = _session_source(b, t)
+        cav = src.caveat
+        assert "relative to the session cwd" not in cav, cav
+        assert str(a) in cav, "the caveat does not say where the session ran"
+        assert "lower bound" in cav, cav
+        assert "EXCLUDED" in cav and "UNKNOWN" in cav, cav
+        # …and it is genuinely a different sentence from the session caveat, not
+        # the same one with a word changed.
+        same = _write_transcript(tmp_path / "same.jsonl", str(b), [f"{b}/x.py"])
+        assert _session_source(b, same).caveat != cav
+
+    def test_the_REFUSAL_no_longer_states_the_falsehood(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """🔴 The message is the deliverable here: two agents in one day read it,
+        believed it, and correctly stopped — the guard's outcome was right and
+        its stated reason was wrong, which is the failure mode that survives a
+        green suite indefinitely. Asserted on the STATE it now claims (this
+        session named nothing absolute under this repo), not merely on the
+        absence of the old sentence.
+        """
+        a, b = self._two_repos(tmp_path)
+        t = _write_transcript(tmp_path / "t.jsonl", str(a), ["only/in/a.py"])
+        with pytest.raises(st.TranscriptCwdMismatchError) as exc:
+            _session_source(b, t)
+        text = str(exc.value)
+        assert "Every path in a transcript is relative" not in text, text
+        assert "NONE of the paths it named are absolute paths under this repo" in text, text
+        # The routing half is unchanged and still load-bearing — see
+        # TestSessionNegativeControls for why the git window must be ruled OUT.
+        assert "--pr" in text and "--commit" in text, text
+        assert "git window is empty" in text, text
+
+    def test_the_refusal_COUNTS_what_it_declined_to_re_anchor(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """A refusal that names no number is indistinguishable from one issued by
+        a reader that saw nothing at all."""
+        a, b = self._two_repos(tmp_path)
+        t = _write_transcript(
+            tmp_path / "t.jsonl", str(a), ["one.py", "two.py", "/var/tmp/three.py"]
+        )
+        with pytest.raises(st.TranscriptCwdMismatchError) as exc:
+            _session_source(b, t)
+        text = str(exc.value)
+        assert "of 3 distinct path(s) this session named" in text, text
+        assert "2 path(s) expressible relative to that cwd" in text, text
+        assert "1 outside it" in text, text
+
+    def test_a_TRUNCATED_absolute_window_says_so(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """🔴 THE NOTE NOBODY HAD REACHED. A mutant that deleted the truncation
+        branch outright SURVIVED the whole suite: the extractor's cap is 256 and
+        no fixture went near it, so the note could have been dead code and every
+        test would still have been green — the `>2-page index` defect one
+        subsystem over, in this window's costume.
+
+        Driven through the REAL cap rather than a monkeypatched one, because the
+        cap is what a reader of the note will check against. The list is a
+        lexicographic PREFIX, so the missing tail is a whole late-sorting subtree
+        — `zzz/` here, chosen to sort after every `f####.py`.
+        """
+        a, b = self._two_repos(tmp_path)
+        cap = _CHANGED_PATHS_CAP()
+        files = [f"{b}/f{i:04d}.py" for i in range(cap)] + [f"{b}/zzz/late.py"]
+        t = _write_transcript(tmp_path / "big.jsonl", str(a), files)
+        src = _session_source(b, t)
+
+        assert len(src.paths) == cap
+        assert "zzz/late.py" not in src.paths, (
+            "the fixture did not actually truncate — the note under test is unreached"
+        )
+        joined = " ".join(src.notes)
+        assert "TRUNCATED" in joined, src.notes
+        assert f"cap of {cap}" in joined, src.notes
+        assert f"PREFIX of {cap + 1} paths" in joined, src.notes
+
+    def test_a_window_AT_the_cap_does_NOT_say_truncated(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """The other arm at the same boundary — otherwise a note wired to fire
+        always would pass the test above. Exactly `cap` paths is a COMPLETE
+        list."""
+        a, b = self._two_repos(tmp_path)
+        cap = _CHANGED_PATHS_CAP()
+        t = _write_transcript(
+            tmp_path / "atcap.jsonl", str(a), [f"{b}/f{i:04d}.py" for i in range(cap)]
+        )
+        src = _session_source(b, t)
+        assert len(src.paths) == cap
+        assert not any("TRUNCATED" in n for n in src.notes), src.notes
+
+    def test_UNREADABLE_still_wins_over_the_absolute_window(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """🔴 Guard order. The new window sits INSIDE guard 4, so guard 3 must
+        still fire first — otherwise a transcript we could not read at all would
+        be answered with an empty absolute window, which reads as 'this session
+        touched nothing here'. Reached with a file that is unreadable AND whose
+        (unreadable) content would have carried absolute paths under this repo.
+
+        ⚠ Green pre-change by construction (guard 4 raised unconditionally
+        there). Like the sibling-prefix case it pins a hazard this change
+        introduces, and the mutation sweep — not the base run — is what shows it
+        can go red.
+        """
+        a, b = self._two_repos(tmp_path)
+        t = tmp_path / "torn.jsonl"
+        t.write_text(
+            json.dumps(_assistant([f"{b}/src/collector/a.py"], cwd=str(a)))[:60],
+            encoding="utf-8",
+        )
+        with pytest.raises(st.TranscriptUnreadableError):
+            _session_source(b, t)
+
+    def test_STALE_still_wins_over_the_absolute_window(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """The same ordering claim one guard earlier: a transcript whose absolute
+        paths are perfect is still another session's if it is not live.
+
+        ⚠ Green pre-change by construction — see the note two tests up."""
+        a, b = self._two_repos(tmp_path)
+        t = _write_transcript(
+            tmp_path / "old.jsonl",
+            str(a),
+            [f"{b}/{self.UNDER_B[0]}"],
+            age_seconds=st.MAX_TRANSCRIPT_AGE_SECONDS + 60,
+        )
+        with pytest.raises(st.TranscriptStaleError):
+            _session_source(b, t)
+
+    def test_a_SUBAGENTS_turns_are_excluded_here_too(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """The caveat claims it, so it is measured. A sidechain turn is a
+        separate session and its paths are not this one's, absolute or not."""
+        a, b = self._two_repos(tmp_path)
+        t = _write_transcript(
+            tmp_path / "t.jsonl",
+            str(a),
+            [f"{b}/{self.UNDER_B[0]}"],
+            sidechain_files=[f"{b}/src/collector/subagent-only.py"],
+        )
+        src = _session_source(b, t)
+        assert src.paths == (self.UNDER_B[0],)
+
+    def test_the_callers_exclusions_are_honoured_in_this_window_too(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """One predicate for every source — `/handoff` passes `--exclude` for its
+        own doc, and a window that ignored it would nominate that doc on exactly
+        the cross-repo runs."""
+        a, b = self._two_repos(tmp_path)
+        t = _write_transcript(
+            tmp_path / "t.jsonl",
+            str(a),
+            [f"{b}/{p}" for p in self.UNDER_B] + [f"{b}/claudedocs/handoff-x.md"],
+        )
+        src = _session_source(b, t, exclude=["claudedocs/handoff-x.md"])
+        assert sorted(src.paths) == sorted(self.UNDER_B)
+        assert any("excluded 1 caller-named path(s)" in n for n in src.notes), src.notes
+
+    def test_it_survives_all_the_way_to_a_REPORT(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """🔴 End to end, because the extractor and the matcher are two places a
+        zero can come from and either one being wired to nothing would hide
+        behind the other. The pair again: a cross-repo session that touched a
+        KNOWN subsystem resolves; one that touched an unlisted directory, from
+        the same window, does not."""
+        a, b = self._two_repos(tmp_path)
+        store = _make_store(tmp_path / "s")
+        hit = _write_transcript(
+            tmp_path / "hit.jsonl", str(a), [f"{b}/{p}" for p in self.UNDER_B]
+        )
+        miss = _write_transcript(
+            tmp_path / "miss.jsonl",
+            str(a),
+            [f"{b}/src/unlisted-widget/{Path(p).name}" for p in self.UNDER_B],
+        )
+        hit_rep = st.build_report(_session_source(b, hit), store, SCOPE, today=TODAY)
+        miss_rep = st.build_report(_session_source(b, miss), store, SCOPE, today=TODAY)
+        assert hit_rep.status == "resolved"
+        assert [m.entry.ref for m in hit_rep.known] == ["collector"]
+        assert miss_rep.status == "no-match"
+        # …and the miss is NOT an empty window, which would make its zero
+        # uninformative.
+        assert len(miss_rep.source.paths) == 2
+
+    def test_the_window_name_reaches_the_rendered_report(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """A reader deciding whether to trust the count needs to see WHICH window
+        produced it; a window that renders as plain `session` would be read with
+        the wrong caveat."""
+        a, b = self._two_repos(tmp_path)
+        store = _make_store(tmp_path / "s")
+        t = _write_transcript(
+            tmp_path / "t.jsonl", str(a), [f"{b}/{p}" for p in self.UNDER_B]
+        )
+        rep = st.build_report(_session_source(b, t), store, SCOPE, today=TODAY)
+        assert "session-absolute" in st.render_text(rep)
+        assert st.report_json(rep)["source"]["window"] == "session-absolute"
 
 
 class TestTranscriptIsBeingAppendedTo:
@@ -2997,10 +3433,16 @@ class TestSessionMutationKillMatrix:
             """The extractor's own 'we could not observe this' shape."""
 
             @staticmethod
-            def summarize_transcript(path):
-                r = tailer.summarize_transcript(path)
+            def summarize_transcript(path, *, absolute_root=""):
+                r = tailer.summarize_transcript(path, absolute_root=absolute_root)
+                # 🔴 The ABSOLUTE block is nulled with the rest. Leaving it
+                # populated would let the mutant fall through to the
+                # session-absolute window and survive on a DIFFERENT window's
+                # paths — a mutant kept alive by the fixture, not by the code.
                 r.update({"changed_paths": None, "changed_paths_total": None,
-                          "changed_paths_outside_cwd": None})
+                          "changed_paths_outside_cwd": None,
+                          "changed_paths_absolute": None,
+                          "changed_paths_absolute_total": None})
                 return r
 
             projects_roots = staticmethod(tailer.projects_roots)
