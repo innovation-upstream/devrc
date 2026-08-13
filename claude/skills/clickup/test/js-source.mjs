@@ -17,10 +17,20 @@
  *
  * Neither can be fixed by a longer regex over raw text, because both need to
  * know what is CODE and what is a comment or a string. So: one small scanner,
- * used by both, with its own controls in js-source.test.mjs.
+ * used by both, with its own controls in js-source.test.mjs — which for one
+ * round was a claim about a file that did not exist, while both guards rested
+ * on this module's behaviour. `blankStrings` blanking `${…}` (below) is exactly
+ * the kind of thing direct controls catch and a downstream guard does not: it
+ * showed up as a state-path scanner that was silent on a template literal.
  *
  * It is not a parser. It tracks exactly what these guards need — string,
- * template, regex and comment context — and nothing else.
+ * template, regex and comment context — and nothing else. Known limits, all
+ * exercised in js-source.test.mjs:
+ *
+ *   * a nested quote INSIDE a `${…}` substitution (`` `${x['a`b']}` ``) ends the
+ *     template early — the literal scan does not recurse;
+ *   * `blankComments` does not know about JSX or about a regex whose preceding
+ *     token is a keyword (`return /x/`), because neither occurs here.
  */
 
 const REGEX_PREFIX = new Set([
@@ -123,15 +133,56 @@ export function stringLiterals(code) {
 }
 
 /**
+ * The `${ … }` substitutions inside ONE template literal, as [start, end)
+ * offsets into `code` covering the delimiters as well.
+ *
+ * Brace-matched, so `${join(a, {b: 1})}` is one range. Not quote-aware inside
+ * the substitution — see the module header's known limits.
+ */
+export function substitutionRanges(code, lit) {
+  if (code[lit.start] !== '`') return [];
+  const out = [];
+  for (let i = lit.start + 1; i < lit.end - 1; i++) {
+    if (code[i] === '\\') { i += 1; continue; }
+    if (code[i] !== '$' || code[i + 1] !== '{') continue;
+    let depth = 0;
+    let j = i + 1;
+    for (; j < lit.end - 1; j++) {
+      if (code[j] === '{') depth++;
+      else if (code[j] === '}') { depth--; if (depth === 0) break; }
+    }
+    const end = Math.min(j + 1, lit.end - 1);
+    out.push([i, end]);
+    i = end - 1;
+  }
+  return out;
+}
+
+/**
  * Blank the CONTENTS of every string/template literal (quotes kept), preserving
  * offsets. Brace-depth counting needs this: a lone `'{'` in a string would
  * otherwise skew the depth and silently move where "top level" is.
+ *
+ * 🔴 `keepSubstitutions` leaves the CODE inside a template's `${ … }` intact.
+ * The default blanks it, and that is a hole for any guard that looks for an
+ * identifier: `` writeFileSync(`${__dirname}/accounts.json`, d) `` — the idiom
+ * listen.mjs itself writes — became a token-free string and the state-path
+ * scanner was silent on it. A substitution's braces are balanced by
+ * construction, so keeping them does not disturb the depth counting this
+ * function exists to protect; the literal TEXT around them is still blanked, so
+ * a `{` or a comma in the text cannot skew it either.
+ *
+ * @param {string} code
+ * @param {{keepSubstitutions?: boolean}} [opts]
  */
-export function blankStrings(code) {
+export function blankStrings(code, { keepSubstitutions = false } = {}) {
   const out = Array.from(code);
   for (const lit of stringLiterals(code)) {
+    const keep = keepSubstitutions ? substitutionRanges(code, lit) : [];
     for (let k = lit.start + 1; k < lit.end - 1; k++) {
-      if (out[k] !== '\n') out[k] = ' ';
+      if (out[k] === '\n') continue;
+      if (keep.some(([s, e]) => k >= s && k < e)) continue;
+      out[k] = ' ';
     }
   }
   return out.join('');
@@ -175,8 +226,17 @@ export function topLevelCaseLabels(code, block) {
   const re = /case\s*(['"])([a-z][a-z0-9-]*)\1\s*:/g;
   const marks = [];
   let m;
+  // 🔴 The label NAME has to be read from the raw text (blanking strings blanks
+  // the name too), so the "is this code?" question is asked separately: a match
+  // whose `case` keyword sits INSIDE a string literal is text, not a label.
+  // Without this, `usage("case 'restore':")` in a help string invented a
+  // dispatchable command and the coverage guard demanded docs for it.
+  const lits = stringLiterals(code);
+  const insideLiteral = (i) => lits.some((l) => i > l.start && i < l.end - 1);
   while ((m = re.exec(code.slice(block.start, block.end))) !== null) {
-    marks.push({ index: block.start + m.index, name: m[2] });
+    const index = block.start + m.index;
+    if (insideLiteral(index)) continue;
+    marks.push({ index, name: m[2] });
   }
   const bare = blankStrings(code);
   let mi = 0;
