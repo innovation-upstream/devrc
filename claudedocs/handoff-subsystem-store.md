@@ -1,5 +1,16 @@
 # Handoff: subsystem-store — 2026-08-13
 
+## Run this first — the index, one read-only command
+```bash
+python3 ~/workspace/devrc/scripts/lib/subsystem_recall.py --repo ~/workspace/devrc
+```
+Terse pointers this doc does not carry, curated by past sessions and outliving it — the
+`devrc/subsystem-index` entry describes the very tooling below. 🔴 RECALL, NOT LIVE
+OBSERVATION: every line is a pointer to VERIFY, never a current reading, and it may describe
+a gotcha already fixed. Non-blocking — if it exits non-zero, print the stderr line and carry
+on. **Two measured sessions skipped this because it was only reachable via `/resume`; it is
+here because reading this doc is the one thing both of them did first.**
+
 ## Goal
 A durable store for subsystem data + history with clean Claude Code integration.
 **Built, deployed, verified end to end.** The read half is now cheap enough to run every
