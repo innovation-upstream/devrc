@@ -76,16 +76,24 @@ lists all entries instead of hiding 13 of 25 behind a `--limit 12`.
 
 ## Next steps (ranked)
 
-1. **DIFFED AND DECIDED — NOT EXECUTED.** All 23 diffed, see "Worktree verdict" below: 22 DROP,
-   1 KEEP (`#355`), and one salvage the guess would have missed. 🔴 **The drops have NOT been
-   run** — 24 worktrees were still present at 2026-08-13 13:10 (a `git worktree list` count
-   above that includes any agent worktrees created since). **Do step 2 BEFORE executing any
-   drop:** `ea82146` is inside the DROP set and holds the only copy of the two rules.
-2. **Salvage two rules from `zach/rules-multiagent-lessons` (`ea82146`), then drop it.**
-   `cross-repo-worktree` and `sibling-agent-kill` are absent from BOTH `claude/RULES.md` and
-   `claude/RULES-ARCHIVE.md` on `main` — see the verdict section for the measurement. Needs a
-   branch + PR, and both must fit under the `test_rules_size.py` ceiling (read the constants
-   there; budget an eviction in the same commit).
+1. ~~Diffed and decided.~~ **DONE AND EXECUTED 2026-08-13.** All 23 diffed (verdict table below):
+   **22 dropped, 1 kept (`#355`), 1 salvaged.** Worktrees 24 → 10; the residue is `#355`, this
+   base clone, and worktrees other sessions created *after* the survey — deliberately untouched,
+   because the removal script re-verified each path's HEAD and cleanliness at the moment of
+   removal rather than trusting the hour-old list, and skipped anything it did not adjudicate.
+   🔴 **Every dropped detached HEAD is preserved as a `preserved/*` tag, pushed to origin**
+   (8 tags — `git ls-remote --tags origin 'preserved/*'`). Branch-backed drops keep their refs.
+   Six were blocked by an untracked one-line `use opencode` `.envrc`; that was verified to be
+   their *only* content, removed, and the **plain** (non-`--force`) remove retried.
+2. **Salvage two rules from `zach/rules-multiagent-lessons` (`ea82146`) — PR #447, open.**
+   `cross-repo-worktree` and `sibling-agent-kill` were absent from BOTH `claude/RULES.md` and
+   `claude/RULES-ARCHIVE.md`. 🔴 **Four audit rounds, four real defects — and every defect after
+   round 1 was in a caveat the fix rounds ADDED, never in the recovered material** (`ea82146`'s
+   bodies have been `cmp`-identical since `ff9589b`). The recurring error class, four times:
+   stating an inference as an observation inside a paragraph headed "Measured". If a further
+   round faults the caveat layer again, cut it — ship the verbatim recovery plus the one
+   twice-verified point (compare the EXACT worktree path, not a prefix) and move the
+   descendant/`PPid` analysis to its own issue.
 3. **Fix the `--session` cwd-mismatch message and add the absolute-path window** (above).
 4. **Watch the census.** `python3 scripts/lib/subsystem_touch.py --census`. 21→30 across 5
    scopes with 8 handoff-written and now 1 `analyze-service`-written. If it stalls, the
@@ -167,11 +175,15 @@ gone but their rule text is in main (`count-tests` → `count-not-exit-code`); `
 survives compressed inside the `merged-tree` bullet as "check how far behind main a PR is".
 
 🔴 **Removing a DETACHED worktree makes its commits unreachable and GC-able** — the 8
-detached heads have no branch ref holding them. Tag them before removal if any of the
-"superseded" calls above is to stay reversible:
-`git tag preserved/<name> <sha>` for `0ada9b8 80fb7f1 ac35b32 aa8fff4 8cb8692 a901486
-6b86d64 9d61558`. Branch-backed worktrees are safe to `git worktree remove` — the ref keeps
-the commits.
+detached heads had no branch ref holding them. **Done: tagged before removal, and the tags
+are on ORIGIN** — `git ls-remote --tags origin 'preserved/*'` returns all 8
+(`0ada9b8 80fb7f1 ac35b32 aa8fff4 8cb8692 a901486 6b86d64 9d61558`). Branch-backed worktrees
+were safe to `git worktree remove` — the ref keeps the commits.
+
+🔴 **A LOCAL tag is not a backup.** These sat local-only for the first hour after the drops,
+so the reversibility this section promised did not actually exist: one disk failure and the
+22 "superseded" calls become unfalsifiable. Whatever you preserve before a destructive sweep,
+**push it and then read it back from the remote** — `ls-remote` is the check, not `git tag -l`.
 
 ## Gotchas / decisions / dead-ends
 
