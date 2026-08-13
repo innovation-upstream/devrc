@@ -569,13 +569,15 @@ TARGET_FLOORS=(
   # ELEVEN consecutive PRs — re-run the gate on the MERGED tree and copy what it
   # prints. Do NOT reconcile the two sides by hand.
   #
-  # ⚠ ONE OBSERVED FLAKE, in another target and unrelated to this branch: the
-  # baseline run of UNMODIFIED main reported `FAIL scripts/dl-router/tests` on
-  # test_dedupe.py's `test_st_blocks_CANNOT_see_a_fallocated_partial`
-  # (`assert 16896 == 16904` — st_blocks after `posix_fallocate`, which is
-  # filesystem-dependent). The very next run, on this branch, passed 991/991. So
-  # it is intermittent and host-level, not a regression here; recorded because a
-  # red baseline that nobody writes down is how a real failure gets waved past.
+  # ✅ FIXED — the flake formerly recorded here is gone. It was test_dedupe.py's
+  # `test_st_blocks_CANNOT_see_a_fallocated_partial` reporting
+  # `assert 16896 == 16904`: it pinned st_blocks EQUALITY between a
+  # `posix_fallocate`d file and a fully-written one, which is a filesystem
+  # allocation property (one 4K extent-tree metadata block, taken or not
+  # depending on tmpdir state), not a property of the code under test.
+  # Measured on ext4: the two disagreed in 17 of 40 runs, in either direction.
+  # It now asserts what the test actually needs — that BOTH files are densely
+  # allocated — so it no longer keys on allocator luck.
   "scripts/tests|3100"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
