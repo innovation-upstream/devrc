@@ -317,6 +317,18 @@ SUPPRESSOR_ARMS = {
                         "comparison closes.", "offers"),
     "offers_standing_by": ("Standing by for the sweep to report on the retry loop.",
                            "offers"),
+    # ...and the family's other two prepositions, which were still unknown to OFFERS.
+    # Measured before the arm existed: the plain "Waiting for the audit agent to report."
+    # and "This is blocked by an upstream decision that isn't mine." both FIRED, while
+    # their ornamented neighbours suppressed only INCIDENTALLY — one via DONE, one via
+    # COMMITS. These two fixtures are deliberately free of that ornament (no "I'll", no
+    # "will", no "nothing further") so each is owned by OFFERS alone and a mutation
+    # deleting the arm leaves it FIRING rather than rescued by the sibling that happened
+    # to overlap in the corpus.
+    "offers_waiting_for": ("Waiting for the retry-loop sweep to report on the backoff "
+                           "reset.", "offers"),
+    "offers_blocked_by": ("Blocked by the cache rollout that has to land before the "
+                          "counter exists.", "offers"),
 }
 
 
@@ -345,7 +357,8 @@ def test_arm_ledger_covers_every_arm_named_in_the_source_comments():
         assert nsn.MARKED.search(f"it {arm} something"), arm
     # OFFERS' PARKED family. It was absent from this ledger entirely, which is how
     # `awaiting` and `standing by` came to have no fixture and survive a sweep.
-    for arm in ("awaiting", "standing by", "waiting on", "blocked on"):
+    for arm in ("awaiting", "standing by", "waiting on", "blocked on",
+                "waiting for", "blocked by"):
         assert nsn.OFFERS.search(f"the turn is {arm} something"), arm
 
 

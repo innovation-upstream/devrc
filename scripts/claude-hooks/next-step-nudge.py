@@ -321,11 +321,22 @@ COMMITS = re.compile(
 #          on the wording its own advice recommends is the worst version of the defect
 #          that bullet exists to fix, so the arm closes it at the source rather than
 #          leaving a test to guard the exemplar's phrasing forever.
+#          `waiting for` and `blocked by` are the same family's other two prepositions,
+#          added after the same measurement was repeated on the plainest phrasings:
+#          "Waiting for the audit agent to report." and "This is blocked by an upstream
+#          decision that isn't mine." both FIRED, and the two neighbours that did
+#          suppress did so INCIDENTALLY — via DONE ("nothing to do until it clears") and
+#          COMMITS ("before I merge") — so the family was covered only where some other
+#          guard happened to overlap. An arm that holds only for the ornamented phrasing
+#          is not an arm; these close the plain one, which is the shape the blocked
+#          bullet below actually teaches.
 #    🔴 Widening a suppressor can only make this hook QUIETER, never louder, and that is
 #    the whole argument for taking (b) broad: a false suppression costs one missed nudge,
 #    a false fire costs a wrong injection into a turn that was already correct. So yes,
-#    "the request is waiting on the cache" mid-analysis now suppresses too. That is the
-#    trade, made deliberately and in the safe direction.
+#    "the request is waiting on the cache" mid-analysis now suppresses too — and with
+#    `waiting for`, so does "the job is waiting for the lock", which is the commonest
+#    mid-analysis sentence in this family. Stated here rather than discovered later: that
+#    is the trade, made deliberately and in the safe direction.
 #    The `your <noun>` arm is an enumerated set, not `your \w+`: "your repo is dirty" is
 #    a statement about the world, not a hand-off, and the open form would suppress it.
 OFFERS = re.compile(
@@ -335,7 +346,8 @@ OFFERS = re.compile(
     r"move|turn|PR|approval|sign[- ]?off)|"
     r"(?:ready|over|up) for (?:your )?review|"
     r"if you(?:['’]d| would)? (?:like|want|prefer)|on your (?:say|word|go)|"
-    r"awaiting|standing by|waiting on|blocked on|ready when you are|whenever you)\b",
+    r"awaiting|standing by|waiting on|waiting for|blocked on|blocked by|"
+    r"ready when you are|whenever you)\b",
     re.I)
 
 # 4. MARKED — a recommendation marked as such. Covers the "explicit numbered ask with a
