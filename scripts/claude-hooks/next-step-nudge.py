@@ -308,9 +308,24 @@ COMMITS = re.compile(
     r"|\b(?:going to|about to|due to run|queued to|set to)\b",
     re.I)
 
-# 3. OFFERS — an explicit hand-off to the operator: second-person and possessive shapes.
-#    A tail containing one of these has already put the ball in the operator's court,
-#    which is exactly the state this hook exists to produce.
+# 3. OFFERS — the turn is no longer waiting on ITSELF. Two families, and the second is
+#    why the name is now slightly narrower than the guard:
+#      (a) an explicit hand-off to the operator — second-person and possessive shapes.
+#          A tail containing one of these has already put the ball in the operator's
+#          court, which is exactly the state this hook exists to produce.
+#      (b) PARKED: the turn states what it is waiting on. "awaiting", "standing by" were
+#          always here; `waiting on` and `blocked on` were NOT, and that gap was measured
+#          against six realistic blocked endings — five suppressed, and the one that
+#          fired was "Waiting on the running agent. The gate re-runs when it lands.",
+#          i.e. EXACTLY the ending NUDGE's blocked bullet now teaches. A hook that fires
+#          on the wording its own advice recommends is the worst version of the defect
+#          that bullet exists to fix, so the arm closes it at the source rather than
+#          leaving a test to guard the exemplar's phrasing forever.
+#    🔴 Widening a suppressor can only make this hook QUIETER, never louder, and that is
+#    the whole argument for taking (b) broad: a false suppression costs one missed nudge,
+#    a false fire costs a wrong injection into a turn that was already correct. So yes,
+#    "the request is waiting on the cache" mid-analysis now suppresses too. That is the
+#    trade, made deliberately and in the safe direction.
 #    The `your <noun>` arm is an enumerated set, not `your \w+`: "your repo is dirty" is
 #    a statement about the world, not a hand-off, and the open form would suppress it.
 OFFERS = re.compile(
@@ -320,7 +335,7 @@ OFFERS = re.compile(
     r"move|turn|PR|approval|sign[- ]?off)|"
     r"(?:ready|over|up) for (?:your )?review|"
     r"if you(?:['’]d| would)? (?:like|want|prefer)|on your (?:say|word|go)|"
-    r"awaiting|standing by|ready when you are|whenever you)\b",
+    r"awaiting|standing by|waiting on|blocked on|ready when you are|whenever you)\b",
     re.I)
 
 # 4. MARKED — a recommendation marked as such. Covers the "explicit numbered ask with a
@@ -623,12 +638,15 @@ def claim(state_dir):
 
 
 NUDGE = (
-    "next-step: this turn ended without saying what happens next, so answering it "
-    "costs the operator an extra round trip just to ask.\n"
+    "next-step: this turn ended without saying what happens next, which costs the "
+    "operator a round trip to ask.\n"
     "Add ONE short closing line before you stop — either:\n"
     "  • the action you would take next, stated so the reply can be a single "
     "\"proceed\"; or\n"
-    "  • a numbered choice with YOUR recommendation marked.\n"
+    "  • a numbered choice with YOUR recommendation marked; or\n"
+    "  • if the next step is blocked, what it is blocked ON and what happens once that "
+    "clears — \"waiting on the audit agent; when it lands I'll re-run the gate\" is a "
+    "complete ending, never to be dressed up as an authorizable \"proceed\".\n"
     "If the work is genuinely finished and nothing follows, say that explicitly — "
     "\"nothing further; this is done\" is a valid next step.\n"
     "Do not redo any work, re-run any command, or restate the summary: append the one "

@@ -35,6 +35,7 @@ Fixtures are synthetic. This repo is public: no real paths, hostnames or task ti
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -298,6 +299,24 @@ SUPPRESSOR_ARMS = {
                            "measurement first.", "marked"),
     "marked_leans_toward": ("The evidence leans toward the loop rather than the cache.",
                             "marked"),
+    # OFFERS — the PARKED arms. Neither ending hands anything to the operator; each says
+    # what the turn is waiting on, which discharges the round trip just as well. Both
+    # were MEASURED firing before the arm existed, and the second is the exact shape
+    # NUDGE's blocked bullet teaches, so a mutation deleting either arm reopens the
+    # defect the bullet was written for. Deliberately free of "I'll"/"will" so COMMITS
+    # cannot rescue them — that shadowing is what let an arm-level mutant survive before.
+    "offers_waiting_on": ("Waiting on the background sweep to report before the next "
+                          "measurement.", "offers"),
+    "offers_blocked_on": ("Blocked on the deploy that carries the counter.", "offers"),
+    # ...and the two PARKED arms that were already here and had NO fixture. Found by
+    # running the battery over the WHOLE suppressor set rather than only over the arm
+    # being added: deleting `awaiting` or `standing by` left the suite green, so a
+    # mutation sweep could not see them at all. Pre-existing gap, closed here because the
+    # widening above is what made this family load-bearing.
+    "offers_awaiting": ("Awaiting the second point of the measurement before the "
+                        "comparison closes.", "offers"),
+    "offers_standing_by": ("Standing by for the sweep to report on the retry loop.",
+                           "offers"),
 }
 
 
@@ -324,6 +343,10 @@ def test_arm_ledger_covers_every_arm_named_in_the_source_comments():
         assert nsn.COMMITS.search(f"the work is {arm} happen"), arm
     for arm in ("defaults to", "leans toward", "worth a glance", "worth folding"):
         assert nsn.MARKED.search(f"it {arm} something"), arm
+    # OFFERS' PARKED family. It was absent from this ledger entirely, which is how
+    # `awaiting` and `standing by` came to have no fixture and survive a sweep.
+    for arm in ("awaiting", "standing by", "waiting on", "blocked on"):
+        assert nsn.OFFERS.search(f"the turn is {arm} something"), arm
 
 
 # --------------------------------------------------------------------------- #
@@ -370,18 +393,92 @@ def test_asks_trailer_has_a_bound():
     assert nsn.ASKS.search("ok? " + "x" * 60) is None           # outside it
 
 
+def nudge_bullets():
+    """The SHAPES NUDGE offers, as a list, parsed structurally out of the text.
+
+    A claim about "which shapes exist" is a claim about this list — not about a word the
+    surrounding paragraph could also spell. The prose above and below the bullets talks
+    about proceeding, finishing and blocking, so a bare `in nsn.NUDGE` substring check
+    cannot tell an offered shape from an aside that mentions one.
+    """
+    return [ln.strip().lstrip("•").strip()
+            for ln in nsn.NUDGE.splitlines() if ln.strip().startswith("•")]
+
+
+def blocked_bullet():
+    """The one bullet that offers the blocked shape. Fails loudly if it is absent or
+    ambiguous, so every test built on it inherits that check."""
+    hits = [b for b in nudge_bullets() if "blocked" in b.lower()]
+    assert len(hits) == 1, f"expected exactly one blocked shape, got: {nudge_bullets()}"
+    return hits[0]
+
+
 def test_self_consistency_the_nudge_does_not_fire_on_its_own_advice():
-    """🔴 The NUDGE text prescribes three endings. A turn that follows the instruction
+    """🔴 The NUDGE text prescribes four endings. A turn that follows the instruction
     must not be nudged again — that is the shape that teaches an operator to ignore a
     hook. Read out of NUDGE's own wording rather than restated, so a reword that drops
-    an option is visible here."""
-    assert "proceed" in nsn.NUDGE and "recommendation marked" in nsn.NUDGE
+    an option is visible here.
+
+    The first shape is pinned by its own distinguishing phrase, not by the bare word
+    "proceed": since the blocked bullet quotes "proceed" too (to forbid it), a substring
+    check for it would now pass with the FIRST shape deleted entirely.
+    """
+    assert 'single "proceed"' in nsn.NUDGE and "recommendation marked" in nsn.NUDGE
+    assert len(nudge_bullets()) == 3, nudge_bullets()   # the DONE shape is prose, not a bullet
     for ending in (
         "I would take the counter export next, so this can be a single proceed.",
         "1. Export the counter. 2. Fix the loop. My recommendation is 1.",
+        "Waiting on the audit agent; when it lands I'll re-run the gate.",
         "Nothing further; this is done.",
     ):
         assert decide(msg(ending)) is False, f"nudge fires on its own prescribed ending: {ending!r}"
+
+
+def test_nudge_offers_a_shape_for_a_next_step_that_is_blocked():
+    """🔴 The defect this bullet exists for, observed live within an hour of deploy: a
+    next step that EXISTS but cannot be actioned this turn — a running background agent,
+    a pending deploy, a decision that is somebody else's. "Finished" is false, so the
+    DONE escape does not fit either, and with only the two action-shaped bullets on
+    offer the model reached for the first one and phrased a blocked step as an
+    authorizable "say `proceed` and I'll …" while the agent producing the thing to
+    verify was still running. The operator typed `proceed`; there was nothing to action.
+
+    Asserted as STATE rather than as a keyword: the bullet LIST must carry a shape that
+    names both halves of the informative content (what it is blocked ON, and what
+    happens when that clears) AND forbids the rewording. A stray "blocked" in the
+    surrounding prose satisfies none of it.
+    """
+    b = blocked_bullet().lower()
+    assert "blocked on" in b, b            # what it is waiting for
+    assert "clears" in b, b                # and what follows when it does
+    assert "never" in b and "proceed" in b, b   # not reworded into an authorizable ask
+
+
+def test_the_blocked_shape_ships_an_exemplar_the_predicate_recognises():
+    """🔴 The seam this change did NOT touch: the suppressors. NUDGE quotes an exemplar
+    of the blocked ending, and that exact string — extracted from NUDGE, never restated
+    here — is fed back through the predicate. A turn ending exactly as the hook tells it
+    to must not be nudged again.
+
+    It is now suppressed TWICE OVER, and that is the point of keeping this test after the
+    OFFERS widening: by COMMITS ("I'll re-run") and by the OFFERS `waiting on` arm. When
+    this guard was first written only COMMITS covered it, so a reword of the exemplar
+    into bare present tense — "waiting on the agent; the gate re-runs when it lands" —
+    would have made the hook fire on its own advice. That hole is closed at the source
+    now (the arm, pinned by `offers_waiting_on`), and this stays as the SELF-CONSISTENCY
+    check: it asserts the shipped exemplar specifically, so a future reword into a shape
+    no suppressor knows fails HERE rather than in front of the operator.
+
+    COMMITS attribution is asserted with `in`, not equality, precisely because a second
+    suppressor now matches — but it is still asserted, so the exemplar cannot come to
+    pass for an entirely unrelated reason.
+    """
+    quoted = [q for q in re.findall(r'"([^"]+)"', blocked_bullet())
+              if q.lower() != "proceed"]        # "proceed" is quoted to FORBID it
+    assert len(quoted) == 1, f"expected one blocked exemplar, got {quoted!r}"
+    ending = quoted[0].rstrip(".") + "."
+    assert "commits" in nsn.suppressed_by(msg(ending)), ending
+    assert decide(msg(ending)) is False, ending
 
 
 # ============================================================================ #
@@ -928,7 +1025,7 @@ def test_e2e_fires_as_additional_context_and_does_not_block(tmp_path, home):
     assert isinstance(hso["additionalContext"], str)
     assert set(hso) == {"hookEventName", "additionalContext"}, hso
     assert "next-step" in hso["additionalContext"]
-    assert "proceed" in hso["additionalContext"]
+    assert 'single "proceed"' in hso["additionalContext"]
     assert hso["additionalContext"] == nsn.NUDGE
 
 

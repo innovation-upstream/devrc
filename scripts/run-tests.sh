@@ -799,7 +799,31 @@ TARGET_FLOORS=(
   # .#checks.x86_64-linux.pytests` -> `collected=112`, read out of `nix log`, not from a
   # local pytest run — then put through the gate's own function:
   #   _suggested_floor 112 = 112 - min(50, max(1, 112/20 = 5)) = 112 - 5 = 107.
-  "scripts/claude-hooks/tests/test_next_step_nudge.py|107"
+  #
+  # 2026-08-13, the BLOCKED next-step shape: 112 -> 114 collected. +2 — the shape's own
+  # structural guard and the guard that feeds NUDGE's quoted exemplar back through the
+  # predicate (the two new helpers are not tests and collect nothing). Movement on this
+  # line is the evidence the gate ran the new assertions at all. Measured by the
+  # AUTHORITATIVE gate on THIS branch's tree — `nix build
+  # .#checks.x86_64-linux.pytests` -> `collected=114`, read out of `nix log`, not from a
+  # local pytest run — then put through the gate's own function, not arithmetic:
+  #   _suggested_floor 114 = 114 - min(50, max(1, 114/20 = 5)) = 114 - 5 = 109.
+  #
+  # 2026-08-13, same branch, the OFFERS `waiting on`/`blocked on` widening: 114 -> 122.
+  # +8 = four new PARKED-arm fixtures x the two parametrized arm tests. Two of the four
+  # cover arms that already existed and had NO fixture (`awaiting`, `standing by`) — a
+  # full mutant battery over the whole suppressor set found both surviving. Measured by
+  # the AUTHORITATIVE gate on this branch's tree, `nix build
+  # .#checks.x86_64-linux.pytests` -> `collected=122`, read out of `nix log`:
+  #   _suggested_floor 122 = 122 - min(50, max(1, 122/20 = 6)) = 122 - 6 = 116.
+  # ⚠ Two sibling branches also add tests today and will conflict HERE. Do not reconcile
+  # the two sides by hand: re-run the gate on the MERGED tree and copy what it prints
+  # (`rerere` has replayed a stale resolution onto this line before).
+  #
+  # 2026-08-13, MERGED with main (#465's registrar target below, #459, #463). Both sides
+  # of this conflict are KEPT — they pin different targets — and the number was re-read
+  # from the gate run on the MERGED tree, not carried over from the branch measurement.
+  "scripts/claude-hooks/tests/test_next_step_nudge.py|116"
   # 2026-08-13, the registrar's DELIVERY seam arrives as a NEW target: 17 collected.
   # Gate's own count through the gate's own rule:
   #   _suggested_floor 17 = 17 - min(50, max(1, 17/20 = 0 -> 1)) = 17 - 1 = 16.
