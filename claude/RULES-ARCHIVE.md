@@ -319,8 +319,8 @@ wrapped around the suspected operation proves nothing if the real write happens 
 one compared hashes around the stash while the overwrite landed on the next `cd` into the repo.
 
 ## worktree-envrc
-*Supports: 🔴 "the ENVIRONMENT -- `.envrc` is gitignored, so it never comes with the checkout" --
-one of the three surfaces under "A worktree isolates a working DIRECTORY only".*
+*Supports: 🔴 "`.envrc` is gitignored, so it never comes with the checkout" — the ENVIRONMENT
+surface under "a worktree isolates a working DIRECTORY only".*
 
 On civitai (2026-07-31) three subagents each hard-coded a `/nix/store/…` Prisma engine path that
 `devShells.default` already exports, every gate ran on system Node 26 instead of the flake's
@@ -581,8 +581,8 @@ element, an ARIA role, or an enumerated set of allowed callers. Any assertion wh
 word that another feature is free to use is a coincidence waiting to be relied on.
 
 ## worktree-not-session
-*Supports: 🔴 "A worktree isolates a working DIRECTORY only" -> the surface it does not isolate
-is **the SESSION**.*
+*Supports: 🔴 "a worktree isolates a working DIRECTORY only" — the SESSION surface: "subagents
+share ONE scratchpad path and the branch namespace".*
 
 civitai/cli, 2026-08-10, one session, 12 subagents — every one dispatched with
 `isolation: "worktree"`, so the documented rule was followed exactly.
@@ -609,8 +609,8 @@ Same root cause as the `refs/stash` ban: a worktree gives you a private working 
 private repo and not a private machine.
 
 ## cross-repo-worktree
-*Supports: 🔴 "the REPO it is built from is your CURRENT cwd's, not the one the task NAMES" --
-one of the three surfaces under "A worktree isolates a working DIRECTORY only".*
+*Supports: 🔴 "the REPO it is built from is your CURRENT cwd's, not the one the task NAMES" —
+the REPO surface under "a worktree isolates a working DIRECTORY only".*
 
 Measured 2026-08-02. Two agents were dispatched with `isolation: "worktree"` at a TypeScript
 monorepo (`civit/civitai`) while the dispatching session's cwd was a **different**, unrelated Go

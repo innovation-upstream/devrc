@@ -93,27 +93,37 @@ ARCHIVE_MD = REPO_ROOT / "claude" / "RULES-ARCHIVE.md"
 # worktree bullets are the obvious candidate), not another bump.
 #
 # 2026-08-13: that consolidation was done (the cluster had grown to five bullets
-# after PR #447). Five sibling bullets became one recipe + one "a worktree
-# isolates a working DIRECTORY only" frame with three enumerated unisolated
-# surfaces (REPO / SESSION / ENVIRONMENT). Result: 33,300 -> 33,229 B.
+# after PR #447). Five sibling bullets became THREE: one `worktree add` recipe,
+# one "a worktree isolates a working DIRECTORY only" frame with the unisolated
+# surfaces as sub-bullets (REPO / SESSION / ENVIRONMENT), and the base-clone
+# re-sync bullet, which stayed top-level. Result: 33,300 -> 33,229 B.
 #
 # 🔴 That -71 B is the honest yield, and it is the finding, not a disappointment:
 # every clause that survived is scope-bearing, so the only bytes available were
 # genuine restatement -- one duplicated `worktree add` recipe, one duplicated
-# "never two file-modifying agents in one checkout", and the silent-failure
-# framing that three bullets each spelled out. Do NOT read this entry as "there
-# is another -71 B in there next time". There is not; the next real rule still
-# costs ceiling.
+# "never two file-modifying agents in one checkout", and the no-error framing
+# (hoisted from the cross-repo bullet, which was the only one that spelled it
+# out). Do NOT read this entry as "there is another -71 B in there next time".
+# There is not; the next real rule still costs ceiling.
 #
 # What consolidation DID buy, and why it was worth shipping for 71 B: a fourth
-# worktree hazard now attaches to the enumerated list for the cost of its own
-# text, instead of arriving as a sixth sibling bullet that re-states the frame
-# (~250 B of restatement, measured against the four it would have copied).
+# worktree hazard now attaches to the sub-bullet list for the cost of its own
+# text, instead of arriving as a sixth sibling bullet that re-states the frame.
+# (That saving is an ESTIMATE of a hypothetical -- it has not been measured, and
+# cannot be until such a rule is actually written.)
 #
-# MAX_BYTES was deliberately NOT ratcheted down to bank this. The slack
-# (headroom ~1,970 vs the 900 floor) predates the consolidation and tightening
-# the gate is a policy change, not a byte cleanup -- it belongs in its own
-# commit where it can be argued on its merits.
+# 🔴 The surface list is deliberately NOT closed, and the frame says so. A fourth
+# already exists in this file -- the machine/process surface at the pgrep/pkill
+# bullet, where a box-wide pattern reaches a sibling agent's processes
+# (-> archive: sibling-agent-kill). The archive's own wording is "not a private
+# repo and not a private machine".
+#
+# MAX_BYTES was deliberately NOT ratcheted down to bank this. The slack predates
+# the consolidation (compare the live size against MAX_BYTES and
+# MIN_HEADROOM_BYTES below rather than trusting a literal here -- restating a
+# live constant in a comment is what this module's own docstring warns against),
+# and tightening the gate is a policy change, not a byte cleanup -- it belongs in
+# its own commit where it can be argued on its merits.
 MAX_BYTES = 35_200
 
 # Required working margin below the ceiling.
