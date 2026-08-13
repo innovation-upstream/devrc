@@ -664,12 +664,20 @@ not have one).
 
 Descendant-filtering by a `PPid` walk is the obvious next idea, and it is **not** a replacement —
 the two filters are incomparable, not ordered. Measured 2026-08-13 on the workbench: a `nix build`
-an agent launches does its real work in a `nix-daemon` child of **PID 1**, so a `PPid` walk from
-the agent returns the **empty set** for precisely the hung-run case this entry is about. The same
-holds for anything that genuinely daemonizes or re-parents. It is also per-tool-call: each Bash
-call is a fresh `zsh -c` (measured: four calls, four distinct pids), so an earlier call's strays
-are not descendants of the current one either — which is what actually orphans a
-`chrome-headless-shell` from an earlier call, the original pattern here. **Do not assume a
+an agent launches does its real work in a `nix-daemon` child of **PID 1**
+(`nix-daemon 368389 ← 18717 ← 1`), so a `PPid` walk from the agent reaches only the `nix` **client
+stub** — `368350 ← 366150(zsh) ← 328364(.claude-wrapped)`, a genuine descendant — and **never the
+process doing the work**. Killing what the walk returns does not stop the build. The same holds
+for anything that genuinely daemonizes or re-parents. It is also per-tool-call: each Bash call is
+a fresh `zsh -c` (measured: seven calls, seven distinct pids), so an earlier call's strays are not
+descendants of the current one **at all** — that is where the walk truly returns EMPTY, and it is
+what orphans a `chrome-headless-shell` from an earlier call, the original pattern here (measured:
+`nix 2085612 ← 1`, exactly such a stray).
+
+🔴 **An earlier draft of this paragraph said the walk "returns the empty set" because of the
+nix-daemon fact. That was inference wearing a "Measured" label — the two grounds are different
+and only the per-tool-call one yields emptiness.** Fifth instance in one PR of the same class:
+stating a conclusion as measured when only its premise was. **Do not assume a
 browser tree orphans itself:** measured on this host, Brave's `--type=zygote` processes all have
 real parents and only `chrome_crashpad` sits at PPid 1. An earlier draft asserted the zygote
 re-parents; that was inference inside a paragraph headed "Measured", and it was wrong. Use a
