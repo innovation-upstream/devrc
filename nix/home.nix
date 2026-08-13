@@ -1333,7 +1333,15 @@ in
         # case-insensitive substring match on the busy process's command.
         # COMMA-separated (a space gets split by systemd's Environment= parsing
         # and silently drops entries). Add more, e.g. "anno,logd,steam,lmkd".
-        "CPU_MON_IGNORE=anno,logd"
+        #
+        # 🔴 MATCH THE `comm`, NOT THE GAME'S NAME. Linux truncates comm to 15
+        # chars, so Farthest Frontier appears as "Farthest Fronti" — an entry of
+        # "frontier" would never match anything and would look like it worked.
+        # The comm also contains a SPACE, and is_ignored splits on spaces as well
+        # as commas, so a two-word entry becomes two independent substrings.
+        # Hence the single distinctive first token. Verified against 12 real
+        # alerts on the workbench, all reading "Runaway process: Farthest Fronti".
+        "CPU_MON_IGNORE=anno,logd,farthest"
       ];
       ExecStart = "${pkgs.bash}/bin/bash %h/.config/cpu-monitor/cpu-monitor.sh";
       Restart = "always";
