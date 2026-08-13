@@ -544,48 +544,39 @@ TARGET_FLOORS=(
   # silently omits it" trap has no purchase here; movement on THIS line is still
   # the evidence the gate ran the new cases.
   #
-  # 2026-08-12, the clawgate stuck-dispatch predicate (`scripts/lib/
-  # clawgate_tasks.py` + its two guards): +134 —
-  # +84 in the new scripts/tests/test_clawgate_tasks.py (five positive controls,
-  # one per disjunct of the stuck predicate, each with its near-miss twin; the
-  # threshold walked at the boundary and an order of magnitude either side; the
-  # detail-string truncation contract) and +23 in the new
-  # scripts/tests/test_clawgate_predicate_single_source.py (nine shapes of
-  # positive control for the AST scanner, five negative controls, the two-way
-  # allowlist and the two-way importer ledger), the rest split across the three
-  # consumer suites.
+  # 2026-08-12, the subsystem-touch COMMIT path source: 3041 -> 3150 collected.
+  # The AUTHORITATIVE gate's own line, `nix build .#checks.x86_64-linux.pytests`:
+  #   PASS  scripts/tests  (collected=3150 passed=3150 skipped=0 floor=2976)
+  # put through the gate's OWN function rather than arithmetic:
+  #   _suggested_floor 3150 = 3150 - min(50, max(1, 157)) = 3150 - 50 = 3100.
   #
-  # 🔴 THIS BRANCH MEASURED THE LINE TWICE AND THE FIRST READING IS VOID — the
-  # eleventh consecutive demonstration of the note above. Off ad93085 it read a
-  # base of 2962 (the line above had recorded 2958, already stale) and a branch
-  # total of 3096. It then had to merge current main, and NAIVE ARITHMETIC
-  # across the conflict — 3026 from the line above plus this branch's 134 —
-  # predicts 3160. The gate measured 3225. Neither side of the conflict was
-  # wrong: main had simply moved again (#427, #428, #430 landed after #429 took
-  # its reading), and no amount of reconciling two stale numbers recovers a
-  # third.
+  # ⚠ THE DELTA IS THE BRANCH'S, NOT THE TARGET'S MOVEMENT — and the difference
+  # is 15 tests. The naive read, 3150 minus the 3026 the line above recorded,
+  # says +124. This branch added +109. Both halves were measured, not inferred:
+  # the gate was run on UNMODIFIED origin/main first and printed `collected=3041`
+  # (so +15 had arrived with main since #429 landed), and the branch's own tests
+  # all live in ONE file, which went 374 -> 483 = +109 by per-file collection.
+  # The two attributions agree exactly, which is the check — if they had not,
+  # something else in the target had moved and the +109 would have been a fact
+  # about a branch that never produced it. That is now the third consecutive PR
+  # where re-measuring changed the recorded delta.
   #
-  # The two readings that count, both from the AUTHORITATIVE gate
-  # (`nix build .#checks.x86_64-linux.pytests`), each on a tree that exists:
-  #   origin/main d71bf18  PASS scripts/tests (collected=3091 passed=3091 skipped=0)
-  #   merged tree          PASS scripts/tests (collected=3225 passed=3225 skipped=0)
-  # put through the gate's OWN rule rather than arithmetic:
-  #   _suggested_floor 3225 = 3225 - min(50, max(1, 161)) = 3225 - 50 = 3175.
+  # ⚠ ZERO new skips (still the one pinned in repo-cos), no HERMETIC_TARGETS
+  # entry needed, and NO NEW FILE — every change lands in an already-tracked one,
+  # so the "a new file must be git added or the flake silently omits it" trap has
+  # no purchase here. Movement on THIS line is still the evidence the gate ran
+  # the new cases. If this line conflicts with another branch — it has now on
+  # ELEVEN consecutive PRs — re-run the gate on the MERGED tree and copy what it
+  # prints. Do NOT reconcile the two sides by hand.
   #
-  # ⚠ The attribution holds ACROSS the re-measurement, which is the check worth
-  # having: 3091 + 134 = 3225 exactly, and 134 is the same delta measured
-  # against ad93085 (2962 -> 3096, and 588 -> 722 across the five touched files).
-  # So the merge moved the base and changed nothing about this branch's
-  # contribution. That is a reading, not an assumption. If this line conflicts
-  # again, re-run the gate on the MERGED tree and copy what it prints — do NOT
-  # reconcile the two sides by hand.
-  #
-  # ⚠ ZERO new skips, and no HERMETIC_TARGETS entry needed (scripts/tests is
-  # already a directory target). The shared module is PURE — no network, no
-  # subprocess, no clock of its own (`now` is injected) — pinned by a test, so
-  # nothing here can reach the live clawgate API and every fetch seam is driven
-  # by an injected fake.
-  "scripts/tests|3175"
+  # ⚠ ONE OBSERVED FLAKE, in another target and unrelated to this branch: the
+  # baseline run of UNMODIFIED main reported `FAIL scripts/dl-router/tests` on
+  # test_dedupe.py's `test_st_blocks_CANNOT_see_a_fallocated_partial`
+  # (`assert 16896 == 16904` — st_blocks after `posix_fallocate`, which is
+  # filesystem-dependent). The very next run, on this branch, passed 991/991. So
+  # it is intermittent and host-level, not a regression here; recorded because a
+  # red baseline that nobody writes down is how a real failure gets waved past.
+  "scripts/tests|3100"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
