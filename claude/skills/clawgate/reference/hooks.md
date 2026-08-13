@@ -8,7 +8,7 @@ Read when: wiring clawgate's hooks onto a new machine, or debugging the "Suggest
 1. **Reachability decides the API URL.**
    - Homelab LAN → `http://192.168.50.250:30302`.
    - A **nebula** host (10.42.0.x, e.g. the laptop) → **`http://10.42.0.10:8109`** (homelab gateway
-     → clawgate; hook-token auth — `curl .../health` returns 200).
+     → clawgate; hook-token auth — check with `clawgatectl --api-url http://10.42.0.10:8109 health`).
    - ⚠ The public `clawgate.zacx.dev` sits behind Authelia passkey (forward-auth), so **do not use
      it for the machine hook** — use a hook-token-gated path.
 2. Copy the hook script:
@@ -46,8 +46,11 @@ from the 💡 Suggestions tab.
 
 Tests: `bats hook/tests/clawgate-stop-hook.bats`.
 
-Live test:
+Live test — ⚠ **stays curl: `clawgatectl` has no `/api/suggest` verb** (nor `/api/send`), so the
+`B=`/`HOOK=` preamble survives here and only here:
 ```bash
+B=http://192.168.50.250:30302
+HOOK=$(grep '^CLAWGATE_HOOK_TOKEN=' ~/.claude/clawgate.env | cut -d= -f2)
 curl -s -X POST "$B/api/suggest" -H "Authorization: Bearer $HOOK" -H 'Content-Type: application/json' \
   -d '{"session_id":"t1","project":"clawgate","cwd":"/x","message":"done","transcript_tail":"...JSONL..."}'
 ```
@@ -80,9 +83,9 @@ blows `ARG_MAX`) and `curl --data-binary @file`.
 
 (`"behavior"` is `"allow"` or `"deny"`.)
 
-- It has **NO reason/context channel** — an approver comment is **record-only**. Only `PreToolUse`
-  can steer the model, via `additionalContext`. Do not design a feature that relies on feeding an
-  approver's words back into the session through this hook.
+- It has **NO reason/context channel** — an approver comment is **record-only**; only `PreToolUse`
+  can steer the model (`additionalContext`). Never design on feeding an approver's words back into
+  the session through this hook.
 ### Every path that DEFERS (this list is exhaustive; verified against `hook/clawgate-hook.sh` 2026-08-12)
 Two of these defer **before any network call**, so a missing card is not evidence clawgate is down:
 
