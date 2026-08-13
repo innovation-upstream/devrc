@@ -655,9 +655,13 @@ from, so filtering resolved PIDs on it separates your own strays from every othe
 the 2026-08-02 write-up.** (a) This harness creates agent worktrees at
 `<dispatching-repo>/.claude/worktrees/agent-<id>`, i.e. **nested inside** the base repo — so a
 prefix check against the repo root matches every sibling and discriminates nothing. Compare the
-**exact** worktree path. (b) Read-only agents are told elsewhere in the core not to take a
-worktree at all; those share the base clone, so their cwds are identical and the discriminator
-**does not exist** for them — and the perpetrator above was an auditor. Note also that the
+**exact** worktree path. (b) Exact-path comparison **would** have prevented the incident above —
+the perpetrator sat in the base clone but the victim was in *another worktree*, so the two cwds
+differ. What cwd cannot separate is two agents that **both** sit in the base clone, which is the
+likely case for read-only agents (the core says they don't *need* a worktree, not that they may
+not have one). For that case — and as the stronger filter in every case, including this one —
+kill only **your own descendants**: walk `PPid` in `/proc/<pid>/status` back to your own pid, or
+simply track the pid you launched. Note also that the
 inference "confirming `cmdline` is not sufficient" was never itself measured: the auditor never
 ran the resolve-then-confirm procedure, it pattern-matched system-wide. The widening is sound
 (identical cmdlines cannot discriminate) but it is reasoning, not an observation.
