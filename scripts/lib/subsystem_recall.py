@@ -99,6 +99,62 @@ repo's newest handoff doc (`focus_window`), and falls back to the newest entry b
 mtime. Which of the two fired is PRINTED, never implicit.
 
 
+…AND WHY THE INDEX IS NOW PAGINATED AT 100
+------------------------------------------
+The index line is ~60 B, so an unbounded index is a cost that grows with the
+store forever: today's biggest scope holds 26 entries (~1.6 KB of index), but the
+store is append-mostly and pruning is manual. `LISTING_PAGE_SIZE` caps a page at
+100 lines (~6 KB) and the remainder is announced, never dropped — `--page N`
+reaches it. The order is NEWEST-FIRST BY FILE MTIME, tie-broken by ref, and the
+header says so: capping an ALPHABETICAL list hides entries by an accident of
+their name, while capping a RECENCY list hides the stale ones, which is the only
+cut that means anything to a resuming session. (`full` mode's bodies keep the
+canonical ref-ascending order — that output is a dump by request and its reader
+is scanning for a name, not for recency.)
+
+
+…AND WHY THERE IS A `--search`
+------------------------------
+Reading by WHOLE ENTRY does not scale on either axis: entry count grows and entry
+size grows. `--search` reads by MATCH instead — it returns HUNKS, each carrying
+its own `scope/ref`, section and `sensitivity=`, because hunk output interleaves
+entries and a label printed once per invocation would get separated from the
+content it governs.
+
+🔴 IT SHELLS OUT TO NOTHING, and that is a measurement, not a preference. The
+whole store is ~81 KB / 30 files; a pure-stdlib scan of it takes single-digit
+milliseconds, so `rg` would buy nothing and would cost a nix-store binary that is
+not guaranteed on PATH plus an output format nobody pinned.
+
+The scorer is TWO-STAGE, which is the shape a prototype round found correct
+(ranking whole lines by `difflib` ratio returned noise; ranking a line's token
+set returned front matter):
+
+  1. ENTRY — an entry qualifies when its NAME (ref + aliases) or its best BLOCK
+     clears the threshold.
+  2. BLOCK — within a qualifying entry, every block at or above the threshold is
+     emitted. If none is but the NAME qualified, the entry's best block is
+     emitted with `basis=entry-name`, so a name-only hit is a hit and not the
+     silent nothing the two-stage prototype produced.
+
+A BLOCK — not a line — is the unit because a bullet is the unit the store is
+written in: `nginx` on one line and `rate-limit` on its continuation line is ONE
+fact, and a per-line scorer scores each half at 0.5 and returns nothing.
+
+Compound/concatenated query terms are handled DELIBERATELY rather than by
+lowering the cutoff: a block's candidate token set includes every ADJACENT PAIR
+JOINED (`rate`,`limit` ⇒ `ratelimit`), so `ratelimit` hits `rate-limit` at 1.00,
+and the reverse direction is covered by the prefix/substring rules. Tokens
+shorter than `MIN_INEXACT_LEN` must match EXACTLY — one rule, and it is why `pod`
+does not fuzzily reach `pgo`.
+
+🔴 A SUB-THRESHOLD ZERO IS ACCOUNTED FOR. `SearchReport.best_below` carries the
+highest-scoring hunk that did NOT clear the threshold, and the renderer prints it
+on a no-match. "Nothing matched" and "something nearly matched at 0.50" are
+different facts and a searcher that prints the same thing for both is the
+confident-wrong instrument this module exists to avoid.
+
+
 CONTRACT SUMMARY
 ----------------
     extract_sections(text, headings)          -> dict[str, str]
@@ -106,9 +162,14 @@ CONTRACT SUMMARY
     focus_paths_from_text(text)               -> tuple[str, ...]
     focus_window(repo)                        -> FocusWindow
     select_featured(entries, index, scope, …) -> (ref, basis)
-    recall(store_root, scope, *, ref=…, limit=…, mode=…, focus_paths=…)
+    recall(store_root, scope, *, ref=…, limit=…, mode=…, page=…, focus_paths=…)
                                               -> RecallReport
     render_text(report) / report_json(report) -> str / dict
+    tokenize(text) / pair_strength(a, b) / score_unit(q_tokens, unit_tokens)
+    entry_blocks(text)                        -> tuple[Block, ...]
+    search(store_root, scope, query, *, context=…, threshold=…, …)
+                                              -> SearchReport
+    render_search(report) / search_json(report) -> str / dict
     main(argv)                                -> int
 
 🔴 THE FAILURE MODE IS A CONFIDENT ZERO, and an empty surface has FOUR causes
@@ -150,6 +211,7 @@ session did.
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import re
 import sys
@@ -192,6 +254,13 @@ __all__ = [
     "DEFAULT_ENTRY_LIMIT",
     "DEFAULT_MODE",
     "RECALL_MODES",
+    "LISTING_PAGE_SIZE",
+    "DEFAULT_SEARCH_THRESHOLD",
+    "FUZZY_FLOOR",
+    "MIN_INEXACT_LEN",
+    "DEFAULT_MAX_HITS",
+    "CONTEXT_BULLET",
+    "HUNK_BASES",
     "FOCUS_MIN_PATHS",
     "HANDOFF_GLOBS",
     "SENSITIVITY_FAIL_SAFE",
@@ -202,9 +271,25 @@ __all__ = [
     "FocusWindow",
     "RecalledEntry",
     "RecallReport",
+    "Block",
+    "Hunk",
+    "SearchReport",
+    "caveat_text",
     "extract_sections",
     "read_entry",
     "fold_sensitivity",
+    "discarded_sensitivity",
+    "sensitivity_label",
+    "load_store",
+    "listing_order",
+    "listing_page",
+    "tokenize",
+    "pair_strength",
+    "score_unit",
+    "entry_blocks",
+    "search",
+    "render_search",
+    "search_json",
     "focus_paths_from_text",
     "focus_window",
     "select_featured",
@@ -260,6 +345,66 @@ DEFAULT_ENTRY_LIMIT = 12
 RECALL_MODES: tuple[str, ...] = ("digest", "list", "full")
 DEFAULT_MODE = "digest"
 
+# 🔴 THE INDEX IS CAPPED, AND THE CAP IS LOUD. Every line is ~60 B, so an index
+# that grows with the store forever is a per-session cost with no ceiling; 100
+# lines is ~6 KB, which is still smaller than the ONE featured body it sits above
+# on a large entry. Past the cap the remainder is COUNTED and `--page N` reaches
+# it — nothing is dropped and nothing is silent.
+#
+# ⚠ It is a LISTING cap and not a selection rule: `total_in_scope` still counts
+# every entry, and the truncation notice names both the count and the flag. The
+# module docstring argues why the page order is newest-first by mtime rather than
+# the canonical ref order that `full` mode's bodies keep.
+LISTING_PAGE_SIZE = 100
+
+# --- Search tuning. Every number here is gated by `TestSearchFixtureCorpus`, ----
+# which scores a labelled query→expected-hunk set; none of them is taste.
+#
+# The threshold a hunk must clear. Scores are a COVERAGE MEAN over the query's
+# tokens (see `score_unit`), so 0.60 means: on a two-token query both tokens must
+# land (one alone scores 0.50), while on a three-token query two strong tokens
+# (0.67) are enough. That asymmetry is deliberate — a longer query is a
+# description, and demanding every word of a description is how a search returns
+# a confident zero.
+DEFAULT_SEARCH_THRESHOLD = 0.60
+
+# Below this, `difflib`'s ratio is not evidence of a typo. 0.82 and not 0.80
+# because 0.80 is exactly where a one-character SUBSTITUTION in a five-letter word
+# lands — and so does the ordinary English pair `probe`/`prone`, which is not a
+# typo of anything. Every typo class in the fixture set clears 0.88.
+FUZZY_FLOOR = 0.82
+
+# 🔴 ONE length rule, not three. A token shorter than this must match EXACTLY:
+# no prefix rule, no substring rule, no fuzzy rule. Short tokens are where every
+# inexact rule turns into noise (`pod` prefixes `podman`, `pgo`, `podinfo`), and a
+# reader cannot tell a noisy hit from a real one once it is on the screen.
+MIN_INEXACT_LEN = 4
+
+# What an inexact match is WORTH, so a weak hit prints as visibly weak. Ordered,
+# and each strictly below 1.0 — an exact token match must always outrank them.
+PREFIX_STRENGTH = 0.92
+SUBSTRING_STRENGTH = 0.85
+
+# A display cap on HUNKS, with the same contract as `--limit`: printed when it
+# bites, never silent. 10 because the point of searching is to read LESS than the
+# digest, and it is measured: a one-word query for a heavily-mentioned subsystem
+# returns 22 hunks on the real store, which at 20 shown costs ~9.4 KB — twice the
+# 4.9 KB digest it was supposed to be cheaper than. At 10 it is ~4.6 KB, and the
+# other 12 are counted on the screen with the flag that shows them.
+DEFAULT_MAX_HITS = 10
+
+# `context=CONTEXT_BULLET` means "the enclosing bullet/block", which is the
+# DEFAULT and not merely one option — see `--help`. A sentinel rather than `None`
+# so a report always carries a concrete value into JSON.
+CONTEXT_BULLET = -1
+
+# Why a hunk is on the screen. Two values sharing no spelling, printed per hunk:
+#   "line"        this block itself cleared the threshold.
+#   "entry-name"  the ENTRY's ref/aliases cleared it and no block did, so the
+#                 entry's best block is shown as the worked example. Without this
+#                 value a name-only hit is indistinguishable from a no-match.
+HUNK_BASES: tuple[str, ...] = ("line", "entry-name")
+
 # 🔴 ONE path is enough to feature an entry, where the WRITER needs two
 # (`DEFAULT_MIN_PATHS = 2`). The asymmetry is deliberate and is about what the
 # two are deciding. The writer is proposing a DURABLE journal bullet against a
@@ -306,13 +451,44 @@ KNOWN_SENSITIVITIES: tuple[str, ...] = ("client-confidential", "personal", "publ
 # `StoreMissingError` / `EntryUnreadableError` / `MalformedEntryError` are NOT in
 # this tuple: they raise. A status constant no code path could emit would be a
 # declaration with nothing behind it.
+#
+# The last two belong to `search`, which shares this vocabulary rather than
+# minting a second one — a caller must be able to switch on ONE status field:
+#   6. search-hit      at least one hunk cleared the threshold.
+#   7. search-no-match nothing did. NOT spelled `*-empty`: an empty scope and a
+#                      query that matched nothing in a full scope are different
+#                      facts, and two statuses that share a word get read as one.
 STATUS_PRECEDENCE: tuple[str, ...] = (
     "scope-absent",
     "scope-empty",
     "ref-ambiguous",
     "ref-absent",
     "recalled",
+    "search-hit",
+    "search-no-match",
 )
+
+
+def caveat_text(scope: str) -> str:
+    """What every window this module opens can and cannot see. ONE spelling.
+
+    🔴 A MODULE-LEVEL FUNCTION rather than a property on one report, because
+    there are now TWO report types and a caveat spelled twice is wrong in one of
+    them. `/analyze-service` words the provenance as `from index`; this reuses
+    that exact label.
+    """
+    return (
+        f"{RECALL_LABEL} — RECALL, NOT LIVE OBSERVATION. These are notes curated by "
+        f"PAST sessions in the local store under `{scope}`. Nothing here was "
+        f"re-derived just now, nothing was matched against anything THIS session has "
+        f"done, and an entry is exactly as fresh as the last time someone pruned it "
+        f"(prune-on-resolve is manual), so a bullet may describe a gotcha already "
+        f"fixed. This window CANNOT see: live state of any kind, any repo whose scope "
+        f"has no directory in this store, and any work neither `/analyze-service` nor "
+        f"`/handoff` ever recorded. Treat every line as a POINTER to verify, never as "
+        f"a current reading. Sensitivity is marked per entry; absent means "
+        f"`{SENSITIVITY_FAIL_SAFE}` — never copy an entry's content into a public repo."
+    )
 
 
 # --- Errors --------------------------------------------------------------------
@@ -363,6 +539,34 @@ def fold_sensitivity(raw: object) -> str:
     return SENSITIVITY_FAIL_SAFE
 
 
+def discarded_sensitivity(raw: object) -> str | None:
+    """The marker a file DECLARED and `fold_sensitivity` overrode, if any.
+
+    🔴 THE FOLD IS NEVER WEAKENED — this only makes it VISIBLE. `sensitivity:`
+    is the one field this module treats as safety-critical, and there is a real
+    difference between the two inputs that both render as `client-confidential`:
+
+        (absent)              nobody said anything. The ordinary case, and the
+                              fail-safe default is the whole answer.
+        `sensitivity: internal`  somebody WROTE a value and the tool overrode it,
+                              because `internal` is not one of the schema's three.
+
+    Silently rewriting the second reads as "the file says client-confidential",
+    which it does not — and the author who typed `internal` gets no signal that
+    the schema does not know the word. So an overridden declaration is printed
+    beside the effective value; an absent one prints nothing.
+
+    DERIVED from `fold_sensitivity` rather than re-testing membership, so the two
+    cannot drift into disagreeing about which values are known.
+    """
+    if not isinstance(raw, str):
+        return None
+    written = raw.strip()
+    if not written:
+        return None
+    return None if fold_sensitivity(raw) == written.lower() else written
+
+
 # --- The recalled entry --------------------------------------------------------
 
 
@@ -374,6 +578,12 @@ class RecalledEntry:
     filename: str
     sensitivity: str
     sections: Mapping[str, str] = field(default_factory=dict)
+
+    declared_sensitivity: str | None = None
+    """A `sensitivity:` the file wrote that the schema does not know, which
+    `fold_sensitivity` overrode — see `discarded_sensitivity`. `None` when the
+    marker was absent or was honoured. Printed beside the effective value so an
+    override is never silent."""
 
     bullet_count: int = 0
     """Top-level `## Nuance / work-history` bullets, via the resolver's own
@@ -430,6 +640,7 @@ def read_entry(store_root: str | Path, entry: SubsystemEntry) -> RecalledEntry:
         ref=entry.ref,
         filename=entry.filename,
         sensitivity=fold_sensitivity(fm.get("sensitivity")),
+        declared_sensitivity=discarded_sensitivity(fm.get("sensitivity")),
         sections=sections,
         bullet_count=len(parse_journal_bullets(sections.get(NUANCE_HEADING, ""))),
         mtime=mtime,
@@ -610,10 +821,57 @@ class RecallReport:
     """Which display mode produced this report — see `RECALL_MODES`."""
 
     listing: tuple[RecalledEntry, ...] = ()
-    """EVERY entry in the scope, one index line each. NEVER truncated, in any
-    mode that populates it: the whole point of the digest is that the set of
-    things on record is complete even when only one of them is printed in full.
-    Empty in `full` mode, which prints bodies and a truncation notice instead."""
+    """ONE PAGE of the index, one line per entry, newest-first by file mtime.
+
+    Up to `LISTING_PAGE_SIZE` lines. It is a PAGE and not a filter: `listing_total`
+    counts every entry in the scope, `listing_pages` says how many pages that is,
+    and the renderer prints the remainder with the `--page` that reaches it — so
+    the set of things on record stays complete even when only one of them is
+    printed in full. Empty in `full` mode, which prints bodies and a truncation
+    notice instead."""
+
+    listing_total: int = 0
+    """Entries the index covers, BEFORE the page cap. The pagination discriminator:
+    `listing_total > len(listing)` is the ONLY thing that makes the notice fire."""
+
+    listing_page: int = 1
+    listing_pages: int = 1
+    """1-based page, and how many pages `listing_total` makes at
+    `LISTING_PAGE_SIZE`. `listing_pages` is at least 1 even for an empty index, so
+    "page 1 of 1" never reads as "page 1 of 0"."""
+
+    @property
+    def page_is_past_the_end(self) -> bool:
+        """🔴 THE ONE PLACE THIS QUESTION IS ASKED. Three renderer branches need
+        it — the index header, the page notice and `--list`'s completeness line —
+        and the first shipped version answered it separately in each, which is how
+        a header printed `entries 801–800 of 150 (page 9 of 2)` while the notice
+        directly under it was correct."""
+        return self.listing_page > self.listing_pages
+
+    @property
+    def listing_before_page(self) -> int:
+        """Index rows on EARLIER pages. 0 on a page past the end: nothing was
+        listed there, so "before" describes no position."""
+        if self.page_is_past_the_end:
+            return 0
+        return (self.listing_page - 1) * LISTING_PAGE_SIZE
+
+    @property
+    def listing_after_page(self) -> int:
+        """Index rows on LATER pages — what a truncation notice is about.
+
+        🔴 THE BUG THIS PROPERTY EXISTS FOR. The notice originally fired on
+        `listing_total > len(listing)`, which is "this page does not hold the
+        whole index" — TRUE on the LAST page too. On page 2 of 2 it therefore
+        announced page 1's 100 entries as still unseen and routed the reader to a
+        `--page 3` that does not exist: a false truncation notice contradicting
+        the correct header on the line above it. What a notice must count is what
+        comes AFTER this page, which is 0 on the last one.
+        """
+        if self.page_is_past_the_end:
+            return 0
+        return max(0, self.listing_total - self.listing_before_page - len(self.listing))
 
     featured_basis: str | None = None
     """Which selector chose `entries[0]`, in words — `select_featured`'s second
@@ -635,26 +893,45 @@ class RecallReport:
 
     @property
     def caveat(self) -> str:
-        """What this window can and cannot see. ONE spelling, every output path.
+        """What this window can and cannot see — `caveat_text`, and nothing local.
 
-        🔴 Stated as a property rather than written into each renderer: the two
-        renderers and every status branch must make the SAME claim, and a
+        🔴 Delegated rather than written into each renderer: the two renderers,
+        every status branch AND the search report must make the SAME claim, and a
         sentence duplicated per branch is one edit away from a branch that
-        promises more than the store can support. `/analyze-service` words the
-        provenance as `from index`; this reuses that exact label.
+        promises more than the store can support.
         """
-        return (
-            f"{RECALL_LABEL} — RECALL, NOT LIVE OBSERVATION. These are notes curated by "
-            f"PAST sessions in the local store under `{self.scope}/`. Nothing here was "
-            f"re-derived just now, nothing was matched against anything THIS session has "
-            f"done, and an entry is exactly as fresh as the last time someone pruned it "
-            f"(prune-on-resolve is manual), so a bullet may describe a gotcha already "
-            f"fixed. This window CANNOT see: live state of any kind, any repo whose scope "
-            f"has no directory in this store, and any work neither `/analyze-service` nor "
-            f"`/handoff` ever recorded. Treat every line as a POINTER to verify, never as "
-            f"a current reading. Sensitivity is marked per entry; absent means "
-            f"`{SENSITIVITY_FAIL_SAFE}` — never copy an entry's content into a public repo."
+        return caveat_text(f"{self.scope}/")
+
+
+def load_store(store_root: str | Path, *, verb: str) -> tuple[Path, SubsystemIndex]:
+    """Resolve the store root and load its index, or raise with a sentinel.
+
+    🔴 ONE PLACE, because `recall` and `search` open the SAME store for the same
+    reasons and a predicate open-coded at two sites is wrong at one of them.
+    `verb` is the only thing that differs: a store-missing message has to say what
+    did NOT happen ("nothing was recalled" / "nothing was searched") or it reads
+    as the ordinary nothing-recorded-yet case, which is the confident zero this
+    module exists to prevent.
+
+    `MalformedEntryError` is deliberately NOT caught: the loader is fail-closed
+    on purpose and an interactive caller must be told the store is broken rather
+    than handed a silently short index.
+    """
+    store = Path(store_root)
+    if not store.is_dir():
+        raise StoreMissingError(
+            f"store root not found: {store} — expected the `/analyze-service` index "
+            f"store. Nothing was {verb}; this is NOT 'nothing recorded yet'"
         )
+    try:
+        return store, load_index(store)
+    except MalformedEntryError:
+        raise
+    except OSError as exc:
+        raise EntryUnreadableError(
+            f"index entry unreadable: under {store} ({type(exc).__name__}: {exc}) — the "
+            f"store was not fully read, so this report would be INCOMPLETE"
+        ) from exc
 
 
 def recall(
@@ -664,6 +941,7 @@ def recall(
     ref: str | None = None,
     limit: int = DEFAULT_ENTRY_LIMIT,
     mode: str = DEFAULT_MODE,
+    page: int = 1,
     focus_paths: Sequence[str] = (),
     focus_source: str | None = None,
 ) -> RecallReport:
@@ -680,14 +958,15 @@ def recall(
 
     Guard order — each reachable by an input no earlier guard rejects:
       1. `limit` sanity      → ValueError
-      2. `mode` known        → ValueError  (a valid limit still reaches it)
-      3. store root exists   → StoreMissingError
-      4. store is readable   → EntryUnreadableError
+      2. `page` sanity       → ValueError  (a valid limit still reaches it)
+      3. `mode` known        → ValueError  (a valid limit AND page still reach it)
+      4. store root exists   → StoreMissingError
+      5. store is readable   → EntryUnreadableError
          (a malformed entry raises `MalformedEntryError` from the resolver's own
          loader and is deliberately NOT caught: the loader is fail-closed on
          purpose, and an interactive caller must be told the store is broken
          rather than handed a silently short index.)
-      5. scope known         → status `scope-absent`, NOT an error
+      6. scope known         → status `scope-absent`, NOT an error
 
     🔴 AN ABSENT SCOPE IS A STATUS, NOT AN EXCEPTION, and that is the single most
     load-bearing decision here. The store holds 2 scopes while work spans ~12
@@ -699,25 +978,12 @@ def recall(
     """
     if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
         raise ValueError(f"limit must be an int >= 1, got {limit!r}")
+    if not isinstance(page, int) or isinstance(page, bool) or page < 1:
+        raise ValueError(f"page must be an int >= 1, got {page!r}")
     if mode not in RECALL_MODES:
         raise ValueError(f"mode must be one of {RECALL_MODES}, got {mode!r}")
 
-    store = Path(store_root)
-    if not store.is_dir():
-        raise StoreMissingError(
-            f"store root not found: {store} — expected the `/analyze-service` index "
-            f"store. Nothing was recalled; this is NOT 'nothing recorded yet'"
-        )
-
-    try:
-        index = load_index(store)
-    except MalformedEntryError:
-        raise
-    except OSError as exc:
-        raise EntryUnreadableError(
-            f"index entry unreadable: under {store} ({type(exc).__name__}: {exc}) — the "
-            f"store was not fully read, so this report would be INCOMPLETE"
-        ) from exc
+    store, index = load_store(store_root, verb="recalled")
 
     try:
         entries = index.entries(scope)
@@ -802,9 +1068,12 @@ def recall(
         )
 
     # `digest` and `list` both read EVERY entry — the index line carries a bullet
-    # count, which only the file can answer. Reading 25 small files costs
-    # milliseconds; it is the OUTPUT that had to shrink, not the input.
+    # count, which only the file can answer, and the featured pick needs every
+    # entry's mtime. Reading 26 small files costs milliseconds; it is the OUTPUT
+    # that had to shrink, not the input. The PAGE cap is applied to the rendered
+    # listing only, never to `read`.
     read = tuple(read_entry(store, e) for e in ordered)
+    page_slice, pages = listing_page(read, page)
     if mode == "list":
         return RecallReport(
             status="recalled",
@@ -813,7 +1082,10 @@ def recall(
             total_in_scope=len(ordered),
             limit=limit,
             mode=mode,
-            listing=read,
+            listing=page_slice,
+            listing_total=len(read),
+            listing_page=page,
+            listing_pages=pages,
             known_scopes=index.scopes,
         )
 
@@ -828,35 +1100,156 @@ def recall(
         total_in_scope=len(ordered),
         limit=limit,
         mode=mode,
-        listing=read,
+        listing=page_slice,
+        listing_total=len(read),
+        listing_page=page,
+        listing_pages=pages,
         featured_basis=basis,
         known_scopes=index.scopes,
     )
 
 
+# --- The index page ------------------------------------------------------------
+
+
+def listing_order(entries: Sequence[RecalledEntry]) -> tuple[RecalledEntry, ...]:
+    """The index's OWN order: newest-first by file mtime, tie-broken by ref.
+
+    🔴 A SECOND ORDERING SITE, on purpose, and the only one that is not
+    ref-ascending. It exists because the index is now CAPPED (`LISTING_PAGE_SIZE`)
+    and a cap makes the order load-bearing: cutting an alphabetical list at 100
+    hides entries by an accident of their names, while cutting a recency list
+    hides the stale ones — the only cut that means anything to a session
+    re-entering work. `full` mode's bodies keep the canonical ref order, because
+    that output is a requested dump whose reader is scanning for a name.
+
+    Determinism is unaffected: the store is never cloned, checked out or rebased
+    (see `select_featured` on why mtime is the edit time here), and the ref
+    tie-break settles two entries written in the same nanosecond.
+    """
+    return tuple(sorted(entries, key=lambda e: (-e.mtime, e.ref)))
+
+
+def listing_page(
+    entries: Sequence[RecalledEntry], page: int
+) -> tuple[tuple[RecalledEntry, ...], int]:
+    """One page of the ordered index, and how many pages there are in total.
+
+    A page PAST the end returns an empty slice rather than clamping to the last
+    one: clamping would answer a question the caller did not ask and print a full
+    page under a heading saying `--page 9`, which is the silent-wrong shape this
+    module refuses everywhere else. The renderer says the page is past the end and
+    names the valid range.
+    """
+    ordered = listing_order(entries)
+    pages = max(1, -(-len(ordered) // LISTING_PAGE_SIZE))  # ceil, no float
+    start = (page - 1) * LISTING_PAGE_SIZE
+    return ordered[start : start + LISTING_PAGE_SIZE], pages
+
+
 # --- Rendering -----------------------------------------------------------------
 
 
-def listing_line(entry: RecalledEntry, width: int) -> str:
-    """ONE index line: `  <ref>   N bullets  <sensitivity>`. ~60 B.
+def sensitivity_label(effective: str, declared: str | None) -> str:
+    """`<effective>` — or `<effective> (declared: <x>)` when a marker was overridden.
 
-    Three fields and no fourth. The ref is what `--ref` takes, the bullet count
-    is the size signal that says whether a `--ref` is worth spending, and the
+    ONE spelling, taking the two VALUES rather than a report type, because THREE
+    surfaces print it — the index row, the `--ref`/featured entry header and the
+    search hunk — and only two of them hold a `RecalledEntry`.
+    """
+    if declared is None:
+        return effective
+    return f"{effective} (declared: {declared})"
+
+
+def listing_line(entry: RecalledEntry, width: int) -> str:
+    """ONE index line: `  <ref>   N nuance  <sensitivity>`. ~60 B.
+
+    Three fields and no fourth. The ref is what `--ref` takes, the count is the
+    size signal that says whether a `--ref` is worth spending, and the
     sensitivity has to travel WITH the entry it describes — a sensitivity stated
     once at the top of a block is a sensitivity that gets copied away from.
+
+    ⚠ THE COUNT IS `## Nuance / work-history` BULLETS ONLY, and the word says so
+    rather than leaving it to be assumed. It was `N bullets`, which reads as
+    ENTRY SIZE to anyone scanning the index — an entry with 5 pointers and 7
+    nuance bullets showed `7 bullets` and has 12. Naming the section is free
+    (`nuance` is one character shorter than `bullets`) and the count itself is
+    deliberately not entry size: pointers are durable and do not grow, while
+    work-history is what the store's prune-on-resolve discipline is denominated
+    in, so it is the number that predicts whether a `--ref` is worth spending.
     """
-    n = entry.bullet_count
-    return f"  {entry.ref.ljust(width)}  {n:>3} {'bullet ' if n == 1 else 'bullets'}  {entry.sensitivity}"
+    return f"  {entry.ref.ljust(width)}  {entry.bullet_count:>3} nuance   {sensitivity_label(entry.sensitivity, entry.declared_sensitivity)}"
 
 
 def _render_listing(report: RecallReport) -> list[str]:
+    """The index block, its ORDER stated, and its remainder counted.
+
+    🔴 The single-page wording is unchanged from the pre-pagination default
+    ("ALL N … none omitted"), because on every scope that fits in one page the
+    claim is still exactly true and weakening it would train the reader to skim
+    past the page notice on the day it is not. The multi-page wording shares no
+    phrase with it.
+    """
     width = max((len(e.ref) for e in report.listing), default=0)
-    return [
-        "",
-        f"INDEX ({RECALL_LABEL}) — ALL {len(report.listing)} entr"
-        f"{'y' if len(report.listing) == 1 else 'ies'} in `{report.scope}/`, none omitted:",
-        *(listing_line(e, width) for e in report.listing),
-    ]
+    order = "newest-first by file mtime"
+    shown = len(report.listing)
+
+    if report.page_is_past_the_end:
+        # 🔴 NO ARITHMETIC ON A PAGE THAT DOES NOT EXIST. The first shipped
+        # version computed the range unconditionally and printed
+        # `entries 801–800 of 150 … (page 9 of 2)` — an inverted range and an
+        # impossible page-of-page — directly above a correct guidance line. A
+        # header is a claim like any other; it does not get to be wrong because
+        # something below it is right.
+        head = (
+            f"INDEX ({RECALL_LABEL}) — no entries: page {report.listing_page} is past the "
+            f"end of `{report.scope}/`, which holds {report.listing_total} in "
+            f"{report.listing_pages} page{'' if report.listing_pages == 1 else 's'} "
+            f"({order}):"
+        )
+    elif report.listing_pages <= 1:
+        head = (
+            f"INDEX ({RECALL_LABEL}) — ALL {shown} entr"
+            f"{'y' if shown == 1 else 'ies'} in `{report.scope}/`, "
+            f"none omitted ({order}):"
+        )
+    else:
+        first = report.listing_before_page + 1
+        head = (
+            f"INDEX ({RECALL_LABEL}) — entries {first}–{first + shown - 1} "
+            f"of {report.listing_total} in `{report.scope}/`, {order} "
+            f"(page {report.listing_page} of {report.listing_pages}):"
+        )
+    out = ["", head, *(listing_line(e, width) for e in report.listing)]
+
+    if report.page_is_past_the_end:
+        # Its own branch and its own words: a page past the end lists nothing,
+        # and "nothing on this page" must not be readable as "nothing on record".
+        out.append(
+            f"  (PAGE {report.listing_page} IS PAST THE END — `{report.scope}/` holds "
+            f"{report.listing_total} entr"
+            f"{'y' if report.listing_total == 1 else 'ies'} across "
+            f"{report.listing_pages} page"
+            f"{'' if report.listing_pages == 1 else 's'} of {LISTING_PAGE_SIZE}. Nothing "
+            f"was listed here and nothing is missing from the store; re-run with "
+            f"`--page 1` … `--page {report.listing_pages}`.)"
+        )
+    elif report.listing_after_page:
+        # 🔴 GATED ON WHAT COMES AFTER THIS PAGE, never on "this page is not the
+        # whole index" — see `RecallReport.listing_after_page`. On the LAST page
+        # this is 0 and nothing prints, because there is nothing left to announce
+        # and a notice pointing at a page that does not exist is worse than none.
+        remaining = report.listing_after_page
+        nxt = report.listing_page + 1
+        out.append(
+            f"  (… {remaining} more entr{'y' if remaining == 1 else 'ies'} NOT LISTED on "
+            f"this page — the index is capped at {LISTING_PAGE_SIZE} lines per page. "
+            f"Nothing is hidden and nothing was filtered: `--page {nxt}`"
+            f"{f' … `--page {report.listing_pages}`' if nxt < report.listing_pages else ''} "
+            f"lists the rest, oldest last.)"
+        )
+    return out
 
 
 def render_text(report: RecallReport) -> str:
@@ -907,18 +1300,46 @@ def render_text(report: RecallReport) -> str:
         )
         return "\n".join(out)
 
-    if report.listing:
+    # `listing_total`, not `listing`: a `--page` past the end has an EMPTY slice
+    # and still has an index block to render — the notice saying so is the whole
+    # point. Gating on the slice would make that page render as `full` mode.
+    if report.listing_total:
         out.extend(_render_listing(report))
 
     if not report.entries:
         # `list` mode. LOUD about what it did not do: an index with no bodies is
         # not an empty scope, and the two must not read the same.
+        #
+        # 🔴 IT DESCRIBES THE PAGE, NOT THE SCOPE. This line originally asserted
+        # "the N entries above are the complete index", with N the SCOPE total —
+        # false on every paginated page (100 were above, not 150) and flatly
+        # self-contradictory past the end (zero were). Same class as a false
+        # truncation notice: it claims a completeness the page does not have.
+        # `total_in_scope` still appears, because "this is not an empty scope" is
+        # the other half of the sentence and has to stay true.
+        shown = len(report.listing)
+        if report.page_is_past_the_end:
+            what = (
+                f"NO entries were listed — see the page notice above. `{report.scope}/` "
+                f"holds {report.total_in_scope}"
+            )
+        elif report.listing_pages > 1:
+            what = (
+                f"The {shown} entr{'y' if shown == 1 else 'ies'} above "
+                f"{'is' if shown == 1 else 'are'} page {report.listing_page} of "
+                f"{report.listing_pages} of the index for `{report.scope}/`, which holds "
+                f"{report.total_in_scope} in all"
+            )
+        else:
+            what = (
+                f"The {report.total_in_scope} entr"
+                f"{'y above is' if report.total_in_scope == 1 else 'ies above are'} the "
+                f"complete index for `{report.scope}/`"
+            )
         out.append("")
         out.append(
-            f"NO ENTRY BODIES WERE PRINTED (--list). The {report.total_in_scope} entr"
-            f"{'y above is' if report.total_in_scope == 1 else 'ies above are'} the complete "
-            f"index for `{report.scope}/` — this is not an empty scope. Run `--ref <name>` for "
-            f"one entry's `{POINTERS_HEADING}` + `{NUANCE_HEADING}`."
+            f"NO ENTRY BODIES WERE PRINTED (--list). {what} — this is not an empty scope. "
+            f"Run `--ref <name>` for one entry's `{POINTERS_HEADING}` + `{NUANCE_HEADING}`."
         )
         return "\n".join(out)
 
@@ -939,7 +1360,10 @@ def render_text(report: RecallReport) -> str:
         )
     for e in report.entries:
         out.append("")
-        out.append(f"  ### {e.ref}  ({report.scope}/{e.filename}, sensitivity={e.sensitivity})")
+        out.append(
+            f"  ### {e.ref}  ({report.scope}/{e.filename}, "
+            f"sensitivity={sensitivity_label(e.sensitivity, e.declared_sensitivity)})"
+        )
         for heading in SURFACED_HEADINGS:
             body = e.sections.get(heading)
             if body:
@@ -958,7 +1382,7 @@ def render_text(report: RecallReport) -> str:
         elif e.missing_sections:
             out.append(f"    (no {', '.join(f'`{h}`' for h in e.missing_sections)} section)")
 
-    if report.omitted and report.listing:
+    if report.omitted and report.listing_total:
         # The digest's own words. It is NOT the `--limit` truncation below: every
         # one of these entries IS listed above and is one `--ref` away, so
         # borrowing the truncation wording would train the reader to read a
@@ -995,6 +1419,13 @@ def report_json(report: RecallReport) -> dict:
         "omitted": report.omitted,
         "known_scopes": list(report.known_scopes),
         "featured_basis": report.featured_basis,
+        # The pagination facts travel WITH the page, or a JSON consumer reading
+        # `listing` has no way to tell a complete index from page 1 of 3.
+        "listing_total": report.listing_total,
+        "listing_page": report.listing_page,
+        "listing_pages": report.listing_pages,
+        "listing_page_size": LISTING_PAGE_SIZE,
+        "listing_order": "mtime-desc,ref-asc",
         # The index, as ROWS — ref, size signal, sensitivity. No `sections`:
         # a JSON consumer that wanted every body can ask for `--limit <n>`, and
         # putting them here would rebuild the dump the digest exists to avoid.
@@ -1003,7 +1434,8 @@ def report_json(report: RecallReport) -> dict:
                 "ref": e.ref,
                 "file": e.filename,
                 "sensitivity": e.sensitivity,
-                "bullets": e.bullet_count,
+                "declared_sensitivity": e.declared_sensitivity,
+                "nuance_bullets": e.bullet_count,
             }
             for e in report.listing
         ],
@@ -1012,11 +1444,564 @@ def report_json(report: RecallReport) -> dict:
                 "ref": e.ref,
                 "file": e.filename,
                 "sensitivity": e.sensitivity,
+                "declared_sensitivity": e.declared_sensitivity,
                 "sections": dict(e.sections),
                 "missing_sections": list(e.missing_sections),
                 "is_bare": e.is_bare,
             }
             for e in report.entries
+        ],
+    }
+
+
+# --- Search: the scorer --------------------------------------------------------
+#
+# 🔴 STDLIB ONLY, AND THAT IS A MEASUREMENT. The store is ~81 KB across 30 files;
+# a `re`-based scan of all of it is single-digit milliseconds, so an external
+# matcher would buy no speed while costing a binary that is not guaranteed on
+# PATH and an output format nobody pinned. This module shells out to NOTHING and
+# that property is asserted, not asserted-about.
+
+_TOKEN = re.compile(r"[a-z0-9]+")
+
+
+def tokenize(text: str) -> tuple[str, ...]:
+    """Lowercase alphanumeric runs, in order. THE one tokenizer.
+
+    Punctuation is a separator, so `rate-limit`, `rate_limit` and `rate limit` all
+    tokenize identically — which is why the compound handling below only has to
+    solve the CONCATENATED spelling (`ratelimit`) and not four punctuation
+    variants.
+    """
+    return tuple(_TOKEN.findall(text.lower()))
+
+
+def candidate_tokens(tokens: Sequence[str]) -> tuple[str, ...]:
+    """A unit's tokens PLUS every adjacent pair joined.
+
+    🔴 THIS IS THE COMPOUND-TERM FIX, and it is deliberate rather than a lowered
+    cutoff. `ratelimit` never clears a fuzzy threshold against `rate` or `limit`
+    — it is not a typo of either — so the corpus side grows the concatenation and
+    the match becomes EXACT (1.00) instead of fuzzy-and-arguable. The other
+    direction (`rate limit` searched against a corpus that writes `ratelimit`) is
+    covered by the prefix/substring rules in `pair_strength`.
+
+    Adjacent PAIRS only. Triples were not added: nothing in the corpus or the
+    fixture set needs them, and each extra join widens the false-match surface.
+    """
+    return tuple(tokens) + tuple(a + b for a, b in zip(tokens, tokens[1:]))
+
+
+def pair_strength(q: str, t: str) -> float:
+    """How strongly one query token matches one candidate token, in [0, 1].
+
+    The ladder, each rung strictly below the one above so an exact match always
+    wins and a weak hit PRINTS as weak:
+
+        1.00  identical
+        0.92  one is a prefix of the other   (`postgres` → `postgresql`)
+        0.85  one contains the other         (`limit` → `ratelimit`)
+        ratio a `difflib` ratio ≥ FUZZY_FLOOR (`conection` → `connection`, 0.95)
+        0.00  otherwise
+
+    🔴 Tokens shorter than `MIN_INEXACT_LEN` take the first rung or nothing. One
+    length rule guarding all three inexact rungs, not three — a per-rung length
+    constant is how a predicate ends up wrong at N−1 of its sites.
+
+    The `difflib` call is gated on a length window as well as on the floor: a
+    ratio can only reach `FUZZY_FLOOR` when the lengths are close, so the window
+    changes no answer and keeps a full-store scan in the millisecond range.
+    """
+    if q == t:
+        return 1.0
+    if len(q) < MIN_INEXACT_LEN or len(t) < MIN_INEXACT_LEN:
+        return 0.0
+    if t.startswith(q) or q.startswith(t):
+        return PREFIX_STRENGTH
+    if q in t or t in q:
+        return SUBSTRING_STRENGTH
+    if abs(len(q) - len(t)) > 2:
+        return 0.0
+    ratio = difflib.SequenceMatcher(None, q, t).ratio()
+    return ratio if ratio >= FUZZY_FLOOR else 0.0
+
+
+def score_unit(query_tokens: Sequence[str], unit_tokens: Sequence[str]) -> float:
+    """COVERAGE of the query by the unit: the mean best strength per query token.
+
+    🔴 A MEAN AND NOT A MAX, which is the whole reason an absent term is
+    observable. `nginx zzzz` against a block that says `nginx` scores 0.50 and
+    does not clear the default threshold, so a query whose second word appears
+    nowhere returns nothing rather than the first word's hits wearing the second
+    word's authority. A max would have made every multi-token query as loose as
+    its loosest word.
+
+    An empty query scores 0 everywhere rather than matching everything: "the user
+    asked for nothing" and "everything matches" are different answers and only one
+    of them is honest.
+    """
+    if not query_tokens:
+        return 0.0
+    cands = candidate_tokens(unit_tokens)
+    if not cands:
+        return 0.0
+    total = 0.0
+    for q in query_tokens:
+        best = 0.0
+        for t in cands:
+            s = pair_strength(q, t)
+            if s > best:
+                best = s
+                if best == 1.0:
+                    break
+        total += best
+    return total / len(query_tokens)
+
+
+# --- Search: what a hunk is ----------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Block:
+    """One searchable unit of an entry body: a bullet with its continuation
+    lines, or a paragraph, ALWAYS under a named section.
+
+    🔴 THE UNIT IS A BLOCK, NOT A LINE, and that is what makes multi-token queries
+    work at all. The store is written in bullets that wrap: `nginx` on the first
+    line and `rate-limit` on its continuation is ONE fact, and a per-line scorer
+    gives each half 0.50 and returns nothing — the exact "returns NOTHING" failure
+    a per-line two-stage prototype produced.
+    """
+
+    section: str
+    start: int
+    """1-based line number of the block's first line, in the entry FILE."""
+    lines: tuple[str, ...] = ()
+
+    @property
+    def end(self) -> int:
+        return self.start + len(self.lines) - 1
+
+    @property
+    def text(self) -> str:
+        return "\n".join(self.lines)
+
+
+_HEADING = re.compile(r"^(#{1,6})\s+(.*\S)\s*$")
+_BULLET = re.compile(r"^\s*[-*+]\s+\S")
+_FENCE = re.compile(r"^\s*(```|~~~)")
+
+
+def entry_blocks(text: str) -> tuple[Block, ...]:
+    """Split an entry body into searchable blocks, each under its section.
+
+    🔴 EVERYTHING BEFORE THE FIRST HEADING IS SKIPPED, and that is the front-matter
+    exclusion — expressed as a property of the OUTPUT rather than as a second
+    front-matter parser. A hunk has to name its section (the caller prints it), so
+    text with no section cannot be a hunk; front matter, which carries no `##`,
+    falls out for free. That matters: a prototype that folded slug tokens into
+    every line ranked the `---` fence line first, and `parse_front_matter` in
+    `subsystem_resolver` stays the ONE thing that reads front matter.
+
+    Headings themselves are not blocks — a query matching the literal words
+    "Nuance / work-history" would otherwise hit every entry in the store.
+
+    Fenced code is kept whole: a fence's contents are not bullets even when they
+    begin with `-`, and splitting a snippet mid-command emits a fragment that
+    reads like a complete instruction.
+    """
+    blocks: list[Block] = []
+    section: str | None = None
+    cur: list[str] = []
+    start = 0
+    in_fence = False
+
+    def flush() -> None:
+        nonlocal cur, start
+        if cur and section is not None:
+            blocks.append(Block(section=section, start=start, lines=tuple(cur)))
+        cur = []
+        start = 0
+
+    for n, line in enumerate(text.splitlines(), start=1):
+        if _FENCE.match(line):
+            in_fence = not in_fence
+            if not cur:
+                start = n
+            cur.append(line)
+            continue
+        if in_fence:
+            cur.append(line)
+            continue
+        heading = _HEADING.match(line)
+        if heading:
+            flush()
+            section = heading.group(0).strip()
+            continue
+        if not line.strip():
+            flush()
+            continue
+        if _BULLET.match(line):
+            flush()
+        if not cur:
+            start = n
+        cur.append(line)
+    flush()
+    return tuple(blocks)
+
+
+@dataclass(frozen=True)
+class Hunk:
+    """One match, carrying EVERYTHING needed to read it safely on its own.
+
+    🔴 THE LABELS TRAVEL WITH THE CONTENT. The caveat prints once per invocation
+    and sensitivity is a per-entry fact, but hunk output INTERLEAVES entries — so
+    a `scope/ref` or a `sensitivity=` printed once at the top would end up
+    describing somebody else's lines by the time a reader reaches them. Every
+    hunk therefore restates its scope, ref, file, line, section and sensitivity.
+    """
+
+    scope: str
+    ref: str
+    filename: str
+    sensitivity: str
+    declared_sensitivity: str | None
+    """A `sensitivity:` the schema does not know, which the fail-safe overrode.
+    Carried onto the HUNK and not just the entry: hunk output interleaves
+    entries, so an override noted anywhere but on the hunk itself is an override
+    the reader never sees next to the lines it governs."""
+
+    section: str
+    start: int
+    lines: tuple[str, ...]
+    score: float
+    basis: str
+    """One of `HUNK_BASES`."""
+
+    name_score: float = 0.0
+    """How well the query matched this entry's ref/aliases. A TIE-BREAK ONLY — it
+    is deliberately NOT folded into `score`, which stays a claim about the printed
+    lines and nothing else.
+
+    🔴 It exists because a one-word query for a subsystem's NAME hits that
+    subsystem's own entry and half a dozen passing mentions elsewhere, ALL at
+    1.00, and an alphabetical tie-break then puts the passing mentions first. That
+    is the "ranks noise above signal" failure with a perfect-looking score beside
+    it. Adding it to `score` instead would have made a printed 1.15 or a hunk
+    whose number nothing on the screen explains."""
+
+    @property
+    def end(self) -> int:
+        return self.start + len(self.lines) - 1
+
+
+@dataclass(frozen=True)
+class SearchReport:
+    """One deterministic answer to "where does the index say anything about X?"."""
+
+    status: str
+    scope: str
+    store_root: str
+    query: str
+    threshold: float = DEFAULT_SEARCH_THRESHOLD
+    context: int = CONTEXT_BULLET
+    hunks: tuple[Hunk, ...] = ()
+    total_hits: int = 0
+    """Hunks that cleared the threshold, BEFORE `max_hits`. The truncation
+    discriminator, exactly as `total_in_scope` is for the digest."""
+
+    max_hits: int = DEFAULT_MAX_HITS
+    entries_searched: int = 0
+    scopes_searched: tuple[str, ...] = ()
+    known_scopes: tuple[str, ...] = ()
+    best_below: tuple[str, float] | None = None
+    """`(ref, score)` of the best hunk that did NOT clear the threshold.
+
+    🔴 THIS IS WHAT MAKES A ZERO READABLE. `claude/RULES.md`: an empty result
+    cannot distinguish two mechanisms. "The query matched nothing anywhere" and
+    "the best candidate scored 0.50 against a threshold of 0.60" are different
+    facts with different next actions — lower the threshold, or rephrase — and a
+    searcher that prints the same blank for both has diagnosed nothing."""
+
+    @property
+    def omitted(self) -> int:
+        return max(0, self.total_hits - len(self.hunks))
+
+    @property
+    def caveat(self) -> str:
+        # The label is handed over UNQUOTED — `caveat_text` owns the backticks, so
+        # quoting here too would print them twice and is exactly the kind of
+        # near-miss a second spelling of one string produces.
+        return caveat_text("/, ".join(self.scopes_searched) + "/" if self.scopes_searched else "(no scope)")
+
+
+def _entry_hunks(
+    store: Path,
+    entry: SubsystemEntry,
+    query_tokens: Sequence[str],
+    *,
+    threshold: float,
+    context: int,
+) -> tuple[list[Hunk], list[Hunk]]:
+    """Every hunk this ONE entry offers, split into (cleared, below).
+
+    Stage 2 of the two-stage scorer. Stage 1 — does the entry qualify at all —
+    is the caller's, because it needs the NAME score and the best block score
+    together.
+    """
+    recalled = read_entry(store, entry)
+    path = store / entry.scope / entry.filename
+    text = path.read_text(encoding="utf-8", errors="replace")
+    raw = text.splitlines()
+
+    name_tokens = tokenize(" ".join((entry.ref, entry.slug, *entry.aliases)))
+    name_score = score_unit(query_tokens, name_tokens)
+
+    def make(block: Block, score: float, basis: str) -> Hunk:
+        if context == CONTEXT_BULLET:
+            lines, start = block.lines, block.start
+        else:
+            # `-C N` — N RAW lines either side of the block's first line, clamped
+            # to the file. Deliberately raw: the caller asked for a window, and a
+            # window that quietly snapped back to a bullet would not be one.
+            lo = max(1, block.start - context)
+            hi = min(len(raw), block.end + context)
+            lines, start = tuple(raw[lo - 1 : hi]), lo
+        return Hunk(
+            scope=entry.scope,
+            ref=entry.ref,
+            filename=entry.filename,
+            sensitivity=recalled.sensitivity,
+            declared_sensitivity=recalled.declared_sensitivity,
+            section=block.section,
+            start=start,
+            lines=lines,
+            score=score,
+            basis=basis,
+            name_score=name_score,
+        )
+
+    scored =[(score_unit(query_tokens, tokenize(b.text)), b) for b in entry_blocks(text)]
+    cleared = [make(b, s, "line") for s, b in scored if s >= threshold]
+    if cleared:
+        return cleared, []
+
+    best = max(scored, default=None, key=lambda sb: (sb[0], -sb[1].start))
+    if best is None or (best[0] <= 0.0 and name_score < threshold):
+        # 🔴 A ZERO-SCORING BLOCK IS NOT A NEAR MISS. Reporting it as one would
+        # make `best_below` say "the closest candidate scored 0.00", which reads
+        # as a weak match and is really an ABSENT TERM — the two need different
+        # next actions (lower the threshold vs. rephrase), so they must not
+        # collapse into one sentence.
+        return [], []
+    if name_score >= threshold:
+        # 🔴 THE NAME-ONLY HIT. The entry IS the answer — its ref or an alias is
+        # what was searched for — and no single block happened to clear. Emitting
+        # nothing here is what made a per-line two-stage prototype return NOTHING
+        # for a query that named an entry outright. The basis says which selector
+        # fired, so a name hit is never mistaken for a content hit.
+        return [make(best[1], name_score, "entry-name")], []
+    return [], [make(best[1], best[0], "line")]
+
+
+def search(
+    store_root: str | Path,
+    scope: str,
+    query: str,
+    *,
+    context: int = CONTEXT_BULLET,
+    threshold: float = DEFAULT_SEARCH_THRESHOLD,
+    max_hits: int = DEFAULT_MAX_HITS,
+    all_scopes: bool = False,
+) -> SearchReport:
+    """Find HUNKS matching `query`. READ-ONLY, stdlib only, nothing is spawned.
+
+    Guard order — each reachable by an input no earlier guard rejects:
+      1. `query` non-empty      → ValueError
+      2. `threshold` in [0, 1]  → ValueError  (a real query still reaches it)
+      3. `max_hits` sanity      → ValueError
+      4. `context` sanity       → ValueError
+      5. store root exists      → StoreMissingError  (reused, same condition)
+      6. scope known            → status `scope-absent`, NOT an error
+
+    Statuses are `STATUS_PRECEDENCE`'s, not a second vocabulary: `search-hit`,
+    `search-no-match`, and `scope-absent` when a single named scope is not in the
+    store. `--all-scopes` cannot produce `scope-absent` — it names no scope.
+    """
+    if not query or not query.strip():
+        raise ValueError("query must be a non-empty string")
+    if not isinstance(threshold, (int, float)) or isinstance(threshold, bool):
+        raise ValueError(f"threshold must be a number in [0, 1], got {threshold!r}")
+    if not 0.0 <= float(threshold) <= 1.0:
+        raise ValueError(f"threshold must be a number in [0, 1], got {threshold!r}")
+    if not isinstance(max_hits, int) or isinstance(max_hits, bool) or max_hits < 1:
+        raise ValueError(f"max-hits must be an int >= 1, got {max_hits!r}")
+    if not isinstance(context, int) or isinstance(context, bool) or context < CONTEXT_BULLET:
+        raise ValueError(f"context must be an int >= 0, got {context!r}")
+
+    store, index = load_store(store_root, verb="searched")
+
+    if all_scopes:
+        scopes = index.scopes
+    elif normalize_ref(scope) not in index.scopes:
+        # Asked of `index.scopes` rather than by catching the loader's raise: the
+        # ONE `except UnknownScopeError` in this module is `recall`'s, and a
+        # second copy of a catch is a second place for the two to disagree about
+        # what an unknown scope means.
+        return SearchReport(
+            status="scope-absent",
+            scope=normalize_ref(scope),
+            store_root=str(store),
+            query=query,
+            threshold=float(threshold),
+            context=context,
+            max_hits=max_hits,
+            known_scopes=index.scopes,
+        )
+    else:
+        scopes = (normalize_ref(scope),)
+
+    query_tokens = tokenize(query)
+    cleared: list[Hunk] = []
+    below: list[Hunk] = []
+    searched = 0
+    for sc in scopes:
+        for entry in sorted(index.entries(sc), key=lambda e: e.ref):
+            searched += 1
+            hits, misses = _entry_hunks(
+                store, entry, query_tokens, threshold=float(threshold), context=context
+            )
+            cleared.extend(hits)
+            below.extend(misses)
+
+    # THE ONE ordering site for hunks: score descending, then the entry-name
+    # tie-break (see `Hunk.name_score`), then scope/ref/line ascending so two runs
+    # over an unchanged store produce identical bytes.
+    cleared.sort(key=lambda h: (-h.score, -h.name_score, h.scope, h.ref, h.start))
+    worst = max(below, default=None, key=lambda h: (h.score, -h.start))
+    return SearchReport(
+        status="search-hit" if cleared else "search-no-match",
+        scope=normalize_ref(scope) if not all_scopes else "(all scopes)",
+        store_root=str(store),
+        query=query,
+        threshold=float(threshold),
+        context=context,
+        hunks=tuple(cleared[:max_hits]),
+        total_hits=len(cleared),
+        max_hits=max_hits,
+        entries_searched=searched,
+        scopes_searched=tuple(scopes),
+        known_scopes=index.scopes,
+        best_below=(worst.ref, round(worst.score, 3)) if worst is not None else None,
+    )
+
+
+def render_search(report: SearchReport) -> str:
+    """The agent-facing search block. Deterministic: same report in, same bytes out."""
+    ctx = "bullet" if report.context == CONTEXT_BULLET else f"±{report.context} raw lines"
+    out: list[str] = [
+        f"subsystem-recall: status={report.status} scope={report.scope} "
+        f"query={report.query!r} threshold={report.threshold:.2f} context={ctx}",
+        f"  store: {report.store_root}",
+        f"  caveat: {report.caveat}",
+    ]
+
+    if report.status == "scope-absent":
+        out.append("")
+        out.append(
+            f"NOTHING RECORDED YET — the store has no `{report.scope}/` directory, so the "
+            f"query was never run. This is NOT 'no matches': nothing was searched, so "
+            f"nothing can be concluded from it."
+        )
+        out.append(f"  scopes the store does hold: {', '.join(report.known_scopes) or '(none)'}")
+        return "\n".join(out)
+
+    scanned = (
+        f"{report.entries_searched} entr"
+        f"{'y' if report.entries_searched == 1 else 'ies'} in "
+        f"{', '.join(f'`{s}/`' for s in report.scopes_searched) or '(none)'}"
+    )
+
+    if report.status == "search-no-match":
+        out.append("")
+        # 🔴 THE ZERO CARRIES ITS OWN EVIDENCE. How much was scanned (so a zero
+        # from an empty scan is visible), and the best NEAR miss with its score
+        # (so "matched nothing" and "just missed" are distinguishable).
+        near = (
+            f" The closest candidate was `{report.best_below[0]}` at "
+            f"{report.best_below[1]:.2f}, below the {report.threshold:.2f} threshold — "
+            f"re-run with `--threshold {max(0.0, report.best_below[1] - 0.01):.2f}` to see "
+            f"it, or rephrase."
+            if report.best_below is not None
+            else " No candidate scored above zero at all, so this is an absent term rather "
+            "than a weak one."
+        )
+        out.append(f"NO MATCH — searched {scanned}, and nothing cleared the threshold.{near}")
+        return "\n".join(out)
+
+    out.append("")
+    out.append(
+        f"SEARCH ({RECALL_LABEL}) — {len(report.hunks)} of {report.total_hits} hunk"
+        f"{'' if report.total_hits == 1 else 's'} at or above {report.threshold:.2f}, "
+        f"from {scanned}:"
+    )
+    for h in report.hunks:
+        out.append("")
+        out.append(
+            f"  [{h.score:.2f} {h.basis}] {h.scope}/{h.ref}  {h.section}  "
+            f"({h.scope}/{h.filename}:{h.start}-{h.end}, "
+            f"sensitivity={sensitivity_label(h.sensitivity, h.declared_sensitivity)})"
+        )
+        for line in h.lines:
+            out.append(f"    {line}")
+
+    if report.omitted:
+        out.append("")
+        out.append(
+            f"… {report.omitted} further hunk{'' if report.omitted == 1 else 's'} cleared "
+            f"the threshold and were NOT shown (--max-hits {report.max_hits}). This is a "
+            f"display cap, not a judgement about relevance — raise it to see the rest."
+        )
+    return "\n".join(out)
+
+
+def search_json(report: SearchReport) -> dict:
+    return {
+        "status": report.status,
+        "scope": report.scope,
+        "store_root": report.store_root,
+        "label": RECALL_LABEL,
+        "caveat": report.caveat,
+        "query": report.query,
+        "threshold": report.threshold,
+        "context": report.context,
+        "max_hits": report.max_hits,
+        "total_hits": report.total_hits,
+        "omitted": report.omitted,
+        "entries_searched": report.entries_searched,
+        "scopes_searched": list(report.scopes_searched),
+        "known_scopes": list(report.known_scopes),
+        "best_below": (
+            {"ref": report.best_below[0], "score": report.best_below[1]}
+            if report.best_below is not None
+            else None
+        ),
+        "hunks": [
+            {
+                "scope": h.scope,
+                "ref": h.ref,
+                "file": h.filename,
+                "sensitivity": h.sensitivity,
+                "declared_sensitivity": h.declared_sensitivity,
+                "section": h.section,
+                "start_line": h.start,
+                "end_line": h.end,
+                "score": round(h.score, 4),
+                "name_score": round(h.name_score, 4),
+                "basis": h.basis,
+                "lines": list(h.lines),
+            }
+            for h in report.hunks
         ],
     }
 
@@ -1063,20 +2048,124 @@ def _build_parser() -> argparse.ArgumentParser:
             f"always printed; it is never silent."
         ),
     )
+    p.add_argument(
+        "--page",
+        type=int,
+        default=None,
+        help=(
+            f"which page of the INDEX to list, 1-based (default 1). The index is capped "
+            f"at {LISTING_PAGE_SIZE} lines per page and the remainder is always counted "
+            f"and never dropped. Order is NEWEST-FIRST by entry-file mtime, tie-broken by "
+            f"ref, so page 1 is the freshest and the last page is the stalest. Applies to "
+            f"the digest and to --list; --ref and --limit print no index."
+        ),
+    )
+    p.add_argument(
+        "-s",
+        "--search",
+        default=None,
+        metavar="QUERY",
+        help=(
+            "search the scope for QUERY and print matching HUNKS instead of whole "
+            "entries — for when the scope has grown past the point where reading entries "
+            "whole is affordable. Fuzzy and stdlib-only: it shells out to nothing. Every "
+            "hunk carries its own scope/ref, section and sensitivity=, plus its score and "
+            "the threshold, so a weak match is visibly weak. A query term that matches "
+            "nothing costs its share of the score, so a two-word query needs both words."
+        ),
+    )
+    p.add_argument(
+        "-C",
+        "--context",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "with --search: print N RAW lines either side of the match instead of the "
+            "default, which is the ENCLOSING BULLET. Why the bullet is the default: an "
+            "entry is structured (`## Pointers`, `## Nuance / work-history`) and its "
+            "bullets wrap, so a fixed line window can cut one in half and emit a fragment "
+            "that reads like a complete instruction when it is not — `-C 0` gives you the "
+            "matched block's own lines only, and a small `-C` can still slice a "
+            "neighbouring bullet's tail onto the screen. The tradeoff is yours: the "
+            "bullet is safer to quote, a raw window shows you what SURROUNDS the match "
+            "(the heading above it, the next bullet) which is what you want when you are "
+            "orienting rather than quoting."
+        ),
+    )
+    p.add_argument(
+        "--all-scopes",
+        action="store_true",
+        help="with --search: search every scope in the store, not just this repo's.",
+    )
+    p.add_argument(
+        "--threshold",
+        type=float,
+        default=None,
+        metavar="F",
+        help=(
+            f"with --search: the score a hunk must clear, in [0, 1] "
+            f"(default {DEFAULT_SEARCH_THRESHOLD:.2f}). A no-match prints the best "
+            f"sub-threshold candidate and the exact --threshold that would surface it."
+        ),
+    )
+    p.add_argument(
+        "--max-hits",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            f"with --search: print at most N hunks (default {DEFAULT_MAX_HITS}). A "
+            f"truncation is always printed; it is never silent."
+        ),
+    )
     p.add_argument("--json", action="store_true")
     return p
+
+
+# 🔴 ONE RULE, ONE PLACE. `--search`, `--ref` and `--list` are three SELECTORS
+# over the same store and every pair of them is the same conflict; three pairwise
+# `if`s would be that predicate open-coded at three sites, wrong at two of them
+# the first time somebody adds a fourth selector. The message keeps the wording a
+# pinned test already asserts ("select different things").
+_SELECTORS: tuple[tuple[str, str], ...] = (
+    ("--search", "hunks matching a query"),
+    ("--ref", "one entry's body"),
+    ("--list", "the whole index"),
+)
+
+# Flags that only mean something under `--search`. Rejected rather than ignored:
+# a flag silently doing nothing is the failure mode where a caller believes a
+# setting took effect.
+_SEARCH_ONLY: tuple[tuple[str, str], ...] = (
+    ("context", "-C/--context"),
+    ("all_scopes", "--all-scopes"),
+    ("threshold", "--threshold"),
+    ("max_hits", "--max-hits"),
+)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(list(argv) if argv is not None else None)
 
-    # 🔴 Rejected, not silently reconciled. Either combination has an obvious
-    # "sensible" reading and they are different readings, so honouring one would
+    # 🔴 Rejected, not silently reconciled. Every combination below has an obvious
+    # "sensible" reading and they are DIFFERENT readings, so honouring one would
     # give the caller output they did not ask for and no sign of it.
-    if args.listing and args.ref is not None:
+    chosen = [
+        flag
+        for flag, _what in _SELECTORS
+        if (flag == "--search" and args.search is not None)
+        or (flag == "--ref" and args.ref is not None)
+        or (flag == "--list" and args.listing)
+    ]
+    if len(chosen) > 1:
+        what = {f: w for f, w in _SELECTORS}
         print(
-            "subsystem-recall: --list and --ref select different things (the whole "
-            "index vs one entry's body). Pass one.",
+            "subsystem-recall: "
+            + " and ".join(chosen)
+            + " select different things ("
+            + " vs ".join(what[f] for f in chosen)
+            + "). Pass one.",
             file=sys.stderr,
         )
         return 2
@@ -1087,6 +2176,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    if args.page is not None and (args.ref is not None or args.limit is not None):
+        print(
+            "subsystem-recall: --page pages the INDEX, and --ref/--limit print no index "
+            "at all. Drop one.",
+            file=sys.stderr,
+        )
+        return 2
+    if args.search is None:
+        stray = [
+            flag
+            for attr, flag in _SEARCH_ONLY
+            if getattr(args, attr) not in (None, False)
+        ]
+        if stray:
+            print(
+                f"subsystem-recall: {', '.join(stray)} only mean something with --search, "
+                f"and doing nothing quietly is how a caller comes to believe a setting "
+                f"took effect. Add --search or drop them.",
+                file=sys.stderr,
+            )
+            return 2
 
     # `--limit` is what selects the pre-digest full-body mode. Nothing else does:
     # a default of DEFAULT_ENTRY_LIMIT here would make "the caller asked for a cap"
@@ -1097,6 +2207,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         repo = Path(args.repo).resolve()
         scope = args.scope if args.scope is not None else scope_for_repo(repo)
+        if args.search is not None:
+            found = search(
+                args.store,
+                scope,
+                args.search,
+                context=args.context if args.context is not None else CONTEXT_BULLET,
+                threshold=(
+                    args.threshold if args.threshold is not None else DEFAULT_SEARCH_THRESHOLD
+                ),
+                max_hits=args.max_hits if args.max_hits is not None else DEFAULT_MAX_HITS,
+                all_scopes=args.all_scopes,
+            )
+            print(
+                json.dumps(search_json(found), indent=2)
+                if args.json
+                else render_search(found)
+            )
+            return 0
         # The ONE call to `focus_window`, and only where it is EVIDENCE. The
         # digest is the only mode that features an entry, and the window is
         # derived from `repo` — so an explicitly overridden `--scope` disables
@@ -1115,6 +2243,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             ref=args.ref,
             limit=limit,
             mode=mode,
+            page=args.page if args.page is not None else 1,
             focus_paths=window.paths,
             focus_source=window.source,
         )
