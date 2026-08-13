@@ -1013,6 +1013,30 @@ in
   home.file.".claude/hooks/claude-notify.py" = {
     source = ../scripts/claude-hooks/claude-notify.py;
   };
+  # next-step-nudge fires on Stop when the turn that just ended named no next step, and
+  # asks for one line saying what happens next. Measured over 14 days of operator
+  # prompts: `recommend*` is 216 occurrences against 542 `proceed` + 134 `yes` — roughly
+  # 1 in 3.5 approvals is a round trip that exists only because the assistant stopped
+  # without saying what it would do. Concentrated in datapacket-talos (152) and cli (33),
+  # not devrc, which is why this is a hook rather than devrc prose.
+  #
+  # 🔴 It does NOT block. It emits `hookSpecificOutput.additionalContext` on stdout and
+  # exits 0 — the model gets the line as non-error feedback and the conversation
+  # continues. An earlier revision asserted that additionalContext is unsupported on Stop
+  # and used exit 2 instead; that premise was false (checked against the installed CLI's
+  # own schema, claude-code 2.1.220), and exit 2 both blocked the turn and raised a "Stop
+  # hook error occurred" notification on every fire. Still bounded to at most ONE fire per
+  # session by an atomic claim, never twice in a row (stop_hook_active), off for subagents
+  # and for headless callers (NEXT_STEP_NUDGE_OFF), with every error path exiting 0.
+  # Measured on 11,789 real turn-final messages: fires on 0.8% of turns the operator
+  # answered with a bare approval and 10.6% of the turns where they had to ask for a
+  # recommendation.
+  #
+  # Registered on Stop (NOT SubagentStop) per-host by register-nudge-hook.py, appended
+  # alongside the three pre-existing Stop hooks it must never clobber.
+  home.file.".claude/hooks/next-step-nudge.py" = {
+    source = ../scripts/claude-hooks/next-step-nudge.py;
+  };
 
   # ------------------------------------------------------------------------- #
   # opencode — global config, instruction file, env plugin and subagents.

@@ -144,7 +144,10 @@ Output format — STRICT, machine-read by the hook:
   VERDICT:SAFE
   CLEAN"
 
-AUDIT_OUT="$(cd "$REPO_ROOT" && timeout "$AUDIT_TIMEOUT" claude -p "$PROMPT" \
+# NEXT_STEP_NUDGE_OFF: this is a headless run whose "operator" is the parser below, which
+# keeps the verdict line and drops the rest. The Stop next-step nudge would spend an extra
+# turn against AUDIT_TIMEOUT writing a line nothing here reads.
+AUDIT_OUT="$(cd "$REPO_ROOT" && NEXT_STEP_NUDGE_OFF=1 timeout "$AUDIT_TIMEOUT" claude -p "$PROMPT" \
   --permission-mode plan 2>>"$AUDIT_LOG_FILE")"
 RC=$?
 if [ $RC -ne 0 ]; then

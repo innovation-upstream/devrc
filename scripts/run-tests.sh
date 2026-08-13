@@ -319,6 +319,12 @@ HERMETIC_TARGETS=(
   # apart. (test_guard_core.py covers the shared guard core behind BOTH
   # bash-guard.py and opencode's plugin/guard.js.)
   scripts/claude-hooks/tests/test_guard_core.py
+  # Same reason as the line above: a FILE, because its directory neighbours are
+  # hand-rolled scripts pytest cannot collect. next-step-nudge is the Stop hook that
+  # asks for a next step; it BLOCKS the operator's turn when it fires, so its
+  # suppression predicate is gated here rather than left to the ungated hand-rolled
+  # scripts beside it.
+  scripts/claude-hooks/tests/test_next_step_nudge.py
 )
 
 # --- DEV-HOST-ONLY set ---------------------------------------------------------
@@ -728,6 +734,18 @@ TARGET_FLOORS=(
   "scripts/repo-cos/tests|315"
   "scripts/task-spec-drafter/tests|135"
   "scripts/claude-hooks/tests/test_guard_core.py|1260"
+  # 2026-08-13, next-step-nudge.py's suite arrives as a NEW target: 78 collected on the
+  # branch. Gate's own count through the gate's own rule:
+  #   _suggested_floor 78 = 78 - min(50, max(1, 78/20 = 3)) = 78 - 3 = 75.
+  #
+  # 2026-08-13, the audit-fix round: 78 -> 112 collected. +34 for the switch to
+  # additionalContext (IO-contract tests), the ASKS anchor fix, per-ARM fixtures for the
+  # alternation mutants that were surviving, the isMeta guard, the headless opt-out seam,
+  # and main()'s fail-open backstop. Re-measured by the AUTHORITATIVE gate — `nix build
+  # .#checks.x86_64-linux.pytests` -> `collected=112`, read out of `nix log`, not from a
+  # local pytest run — then put through the gate's own function:
+  #   _suggested_floor 112 = 112 - min(50, max(1, 112/20 = 5)) = 112 - 5 = 107.
+  "scripts/claude-hooks/tests/test_next_step_nudge.py|107"
 )
 
 # The allowance rule, in one place, used by BOTH the drift message and anyone

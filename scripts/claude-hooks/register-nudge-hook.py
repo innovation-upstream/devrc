@@ -12,6 +12,20 @@ Registers:
   * UserPromptSubmit / Stop / SubagentStop: claude-notify.py (the turn-finished
     notifier — a best-effort side-effect hook, appended alongside any existing
     Stop/clawgate-stop/tmux hooks).
+  * Stop: next-step-nudge.py
+
+🔴 Stop is a SHARED event with three pre-existing owners this script does not own and
+must never disturb: the fuzzyclaw tmux writer (~/.config/tmux/task-hook.sh), the
+clawgate stop hook (drives remote approval) and claude-notify.py (drives turn-finished
+notifications). Clobbering any of them is a serious regression, so registration here is
+strictly APPEND-ONLY — an entry is added only when its exact command string is absent
+from the event's existing entries, and no existing entry is ever rewritten, reordered or
+removed. tests/test_register_nudge_hook.py asserts all four coexist afterwards.
+
+next-step-nudge is registered on Stop ONLY, not SubagentStop: a subagent's turn ends
+without ever reaching the operator, so it owes them no next step. The hook refuses that
+event itself as well — belt and braces, because the registration is per-host mutable
+state and the hook is the thing that actually ships.
 
 Run on each host after a home-manager switch that adds a new hook:
     python3 ~/workspace/devrc/scripts/claude-hooks/register-nudge-hook.py
@@ -31,6 +45,11 @@ POST_BASH_CMDS = [
 # dispatched on the event name in its stdin payload).
 NOTIFY_CMD = "python3 ~/.claude/hooks/claude-notify.py"
 NOTIFY_EVENTS = ["UserPromptSubmit", "Stop", "SubagentStop"]
+
+# Hooks registered on exactly one event each: {event: [command, ...]}.
+SINGLE_EVENT_CMDS = {
+    "Stop": ["python3 ~/.claude/hooks/next-step-nudge.py"],
+}
 
 with open(SETTINGS) as f:
     data = json.load(f)
@@ -62,6 +81,16 @@ for event in NOTIFY_EVENTS:
         continue
     arr.append({"hooks": [{"type": "command", "command": NOTIFY_CMD}]})
     added.append("%s: %s" % (event, NOTIFY_CMD))
+
+# --- single-event hooks (append-only, same discipline) -----------------------
+for event, cmds in SINGLE_EVENT_CMDS.items():
+    arr = hooks.setdefault(event, [])
+    present = registered_commands(arr)
+    for cmd in cmds:
+        if cmd in present:
+            continue
+        arr.append({"hooks": [{"type": "command", "command": cmd}]})
+        added.append("%s: %s" % (event, cmd))
 
 if not added:
     print("all devrc-managed hooks already registered — no change")
