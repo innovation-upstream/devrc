@@ -96,10 +96,19 @@ let
   # /nix/store/…-hm_skills/clickup/lib/markdown.mjs` with that symlink in place
   # and resolving correctly. node_modules has to sit in the SAME store tree as
   # the sources, which means injecting it into the source of the mapping.
+  #
+  # 🔴 `ln -sT`, never a bare `ln -s`. If `claude/skills/clickup/node_modules`
+  # ever existed in the checkout, `cp -R` would create that directory in $out
+  # and a bare `ln -s` would then put the link INSIDE it
+  # (`$out/clickup/node_modules/node_modules`) — silently, exit 0, and the
+  # deployed skill would carry a committed tree while the nix-built one dangled
+  # one level down. `-T` treats the target as a plain name, so that case fails
+  # the build instead. (`claude/skills/.gitignore` is what makes it unlikely; a
+  # gitignore is not a guarantee, and this costs one letter.)
   claudeSkills = pkgs.runCommandLocal "devrc-claude-skills" { } ''
     cp -R ${../claude/skills} "$out"
     chmod -R u+w "$out"
-    ln -s ${clickupNodeModules}/node_modules "$out/clickup/node_modules"
+    ln -sT ${clickupNodeModules}/node_modules "$out/clickup/node_modules"
   '';
   sessionVariables = import ./sessionVariables.nix {
     inherit pkgs;
@@ -881,9 +890,13 @@ in
   # 🔴 SOURCE IS `claudeSkills`, NOT `../claude/skills` — it is the same tree plus
   # clickup's built node_modules, which has to live in the store copy for node to
   # resolve it. Read the `claudeSkills` comment in the `let` block before changing
-  # this. node_modules is NOT committed (`claude/skills/.gitignore` pins that):
-  # committing it would put the path in both this recursive mapping and the
-  # injection, and a path cannot be both.
+  # this. node_modules is NOT committed (`claude/skills/.gitignore` pins that).
+  # 🔴 The gitignore is the ONLY thing preventing a committed node_modules — the
+  # earlier claim here, that "a path cannot be both", was false: `claudeSkills`
+  # is one derivation, so a committed tree and the injected one do not collide
+  # in home.nix at all. They collide inside `cp -R` + `ln`, which is why that
+  # link is `ln -sT` (a bare `ln -s` would nest the link inside the copied
+  # directory and succeed). See the `claudeSkills` comment in the `let` block.
   home.file.".claude/skills" = {
     source = claudeSkills;
     recursive = true;

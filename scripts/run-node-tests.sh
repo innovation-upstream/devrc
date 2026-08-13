@@ -133,7 +133,10 @@ cd "$ROOT" || { echo "run-node-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 #   scripts/collector/browser-ext/tests  2 files    21 tests
 #
 # MEASURED 2026-08-13, same way:
-#   claude/skills/clickup/test           2 files    27 tests
+#   claude/skills/clickup/test           4 files    73 tests
+#   (was 2 files / 27 tests earlier the same day; the webhook listener had ZERO
+#   coverage, which is why four defects in it survived review — see
+#   claude/skills/clickup/test/{webhook-server,listen-integration}.test.mjs)
 #
 # Raise a floor when a suite grows. NEVER lower one to get green — that is the
 # move that turned the pytest global floor into less than half the real total.
@@ -146,12 +149,15 @@ SUITES=(
   # Ungated for the same reason. Small, but 21 tests reporting safety they never
   # measured is the same defect as 508 of them.
   "scripts/collector/browser-ext/tests|2|20"
-  # The clickup skill's two hermetic gates (help-coverage: showUsage() is complete;
-  # state-paths: no state path resolves inside the read-only skill dir, including
-  # a seam walk over every .mjs in the tree). They lived in a standalone,
-  # UNCOMMITTED ~/.claude/skills/clickup/ and ran only when a human remembered —
-  # ungated by anything, on either host. 27 tests measured 2026-08-13, floor 26.
-  "claude/skills/clickup/test|2|26"
+  # The clickup skill's four hermetic gates (help-coverage: showUsage() is
+  # complete; state-paths: no state path resolves inside the read-only skill dir,
+  # including a structural seam walk over every module in the tree;
+  # webhook-server + listen-integration: the receiver rejects unsigned and forged
+  # deliveries, binds loopback, and discloses no capability URL). They lived in a
+  # standalone, UNCOMMITTED ~/.claude/skills/clickup/ and ran only when a human
+  # remembered — ungated by anything, on either host. 73 tests measured
+  # 2026-08-13, floor 70 = 73 - min(50, max(1, 73/20)).
+  "claude/skills/clickup/test|4|70"
 )
 
 # --- discovery roots -----------------------------------------------------------
@@ -179,12 +185,24 @@ DISCOVERY_ROOTS=(
 # a silent empty list: the exact "an EMPTY RESULT cannot distinguish two
 # mechanisms" trap. Globstar is a bash builtin, so it depends on no external
 # binary at all and behaves identically in every tier.
+#
+# 🔴 node_modules is EXCLUDED. `claude/skills/clickup` has a dependency tree
+# (nix/pkgs/clickup-node-modules.nix), and its own UPDATING instructions tell a
+# developer to run `npm ci` in the checkout — which materialises 51 packages,
+# several of which ship `*.test.mjs` fixtures. Discovery would then find a suite
+# directory nobody pinned and the runner would FATAL with "would run UNGATED",
+# blaming the developer for following the documented procedure. Third-party test
+# files are also not this gate's to run: they are not ours, their floors are not
+# ours, and one of them failing says nothing about this repo.
 shopt -s globstar nullglob
 DISCOVERED_DIRS=()
 _seen=""
 for _root in "${DISCOVERY_ROOTS[@]}"; do
   for f in "$_root"/**/*.test.mjs; do
     [ -f "$f" ] || continue
+    case "$f" in
+      */node_modules/*) continue ;;
+    esac
     d="${f%/*}"
     case "$_seen" in
       *"|$d|"*) continue ;;

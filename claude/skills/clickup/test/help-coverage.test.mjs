@@ -30,6 +30,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'fs';
 import { dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
+import { blankComments, balancedBlockAfter, topLevelCaseLabels } from './js-source.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const QUERY = resolve(__dirname, '..', 'query.mjs');
@@ -77,19 +78,36 @@ function documentedCommands(usage) {
  *   1. `if (command === 'x')` guards, ahead of the main switch
  *   2. `case 'x':` labels inside `switch (command) {`
  * Both are read, because missing either understates the real surface.
+ *
+ * 🔴 NEITHER READER MAY BE PINNED TO A STYLE. Both were:
+ *   * `command === '([a-z…])'` required single quotes and exactly one space
+ *     either side of `===`;
+ *   * `^ {6}case '…':` required SIX spaces of indentation and single quotes.
+ * A `case "x":`, an eight-space `case` inside a nested block, or a reformatted
+ * `command==='x'` was dispatchable, undocumented, and green — and nothing in
+ * this repo enforces the assumed style: there is no prettier/eslint config for
+ * `claude/skills/`, so the layout these guards depend on is a coincidence.
+ *
+ * The `case` reader is now DEPTH-based over the brace-matched body of
+ * `switch (command) { … }`: quote- and indentation-agnostic, and it still
+ * excludes the labels of any NESTED switch (which are not command dispatch and
+ * would inflate the set with phantom commands).
  */
-function dispatchableCommands() {
+function dispatchableCommands(source = src) {
   const out = new Set();
 
-  for (const m of src.matchAll(/command === '([a-z][a-z0-9-]*)'/g)) {
-    out.add(m[1]);
+  // Comments blanked: a `// case 'foo':` note or a commented-out dispatch is
+  // not a dispatchable command, and counting one would make this gate demand
+  // documentation for a command that does not exist.
+  const code = blankComments(source);
+
+  for (const m of code.matchAll(/command\s*===\s*(['"])([a-z][a-z0-9-]*)\1/g)) {
+    out.add(m[2]);
   }
 
-  const sw = src.indexOf('switch (command)');
-  if (sw === -1) throw new Error('switch (command) not found in query.mjs');
-  for (const m of src.slice(sw).matchAll(/^ {6}case '([a-z][a-z0-9-]*)':/gm)) {
-    out.add(m[1]);
-  }
+  const block = balancedBlockAfter(code, 'switch (command)');
+  if (!block) throw new Error('switch (command) { … } not found in query.mjs');
+  for (const name of topLevelCaseLabels(code, block)) out.add(name);
   return out;
 }
 
@@ -120,6 +138,60 @@ test('POSITIVE CONTROL: the showUsage() extractor found a plausible number of co
       `(floor ${MIN_DOCUMENTED}). showUsage()'s format changed — ` +
       `fix documentedCommands(), do not lower the floor.`
   );
+});
+
+// ── CONTROLS for the dispatch extractor's style-independence ───────────────
+//
+// The floors above prove the extractor found SOMETHING. They cannot prove it
+// would find a command written in a style query.mjs does not currently use —
+// and an UNDER-count is the dangerous direction: it makes an undocumented
+// command invisible to the gate that exists to notice it. So: a synthetic
+// query.mjs, written in every style no formatter forbids.
+
+const SYNTHETIC = `
+const command = process.argv[2];
+if (command === 'alpha') { doAlpha(); }
+if (command === "bravo") { doBravo(); }
+if (command==='charlie') { doCharlie(); }
+// if (command === 'ghost-guard') { never(); }
+switch (command) {
+      case 'delta':
+        return doDelta();
+      case "echo":
+        return doEcho();
+  case 'foxtrot':
+        return doFoxtrot();
+        case 'golf': {
+          switch (subcommand) {
+            case 'nested-not-a-command':
+              return nested();
+          }
+          return doGolf();
+        }
+      // case 'ghost-case':
+      case 'hotel':
+        return doHotel();
+}
+`;
+
+test('CONTROL: the dispatch extractor is quote- and indent-agnostic', () => {
+  const found = dispatchableCommands(SYNTHETIC);
+  const expected = ['alpha', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot', 'golf', 'hotel'];
+  const missed = expected.filter((c) => !found.has(c));
+  assert.ok(missed.length === 0,
+    `the dispatch extractor MISSED ${missed.join(', ')} — each is dispatchable and each ` +
+      'is written in a style nothing in this repo forbids (double quotes, 2/6/8-space ' +
+      'indentation, no spaces around ===). A missed command is an undocumented command ' +
+      'this gate reports as fine.');
+});
+
+test('CONTROL: the dispatch extractor counts no phantom commands', () => {
+  const found = [...dispatchableCommands(SYNTHETIC)].sort();
+  const expected = ['alpha', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot', 'golf', 'hotel'];
+  assert.deepEqual(found, expected,
+    'the dispatch extractor reported commands that are NOT command dispatch. A NESTED ' +
+      "switch's labels and a commented-out `case` are the two ways this happens, and each " +
+      'would make the gate demand showUsage() document something that does not exist.');
 });
 
 // ── The gate itself, both directions ───────────────────────────────────────

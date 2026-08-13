@@ -10,6 +10,16 @@
  * KEY FEATURE: On startup, checks webhook.site API for events that
  * arrived since last seen timestamp. Prevents gaps between restarts.
  *
+ * 🔴 EVERY delivery must carry a valid HMAC signature from a webhook this
+ * skill registered (watchers.json). Unsigned, unknown-webhook and
+ * wrongly-signed deliveries are REJECTED (401): not acked, not logged, the
+ * cursor does not move, and nothing is printed for the agent to act on. The
+ * predicate lives in lib/webhook-server.mjs and BOTH paths — the live POST and
+ * the webhook.site catch-up — go through it, because an event read back from
+ * webhook.site is exactly as forgeable as one POSTed here.
+ *
+ * The local receiver binds 127.0.0.1 only.
+ *
  * Modes:
  *   1. "wait" (default) — Check for missed events, then listen for ONE
  *      new webhook, print it, and exit. Agent gets background task notification.
@@ -28,11 +38,8 @@
  */
 
 import { spawn } from 'child_process';
-import http from 'http';
 import https from 'https';
-import crypto from 'crypto';
 import fs from 'fs';
-import path from 'path';
 import {
   accountsPath,
   watchersFile,
@@ -42,6 +49,11 @@ import {
   lastSeenFile,
   ensureStateDir,
 } from './lib/paths.mjs';
+import {
+  authenticateDelivery,
+  createWebhookServer,
+  listenLoopback,
+} from './lib/webhook-server.mjs';
 
 // All of these are STATE, so they resolve under $XDG_STATE_HOME/clickup
 // (fallback ~/.local/state/clickup) — the skill dir deploys read-only.
@@ -109,26 +121,47 @@ if (!WH_TOKEN) {
 
 const WEBHOOK_URL = `https://webhook.site/${WH_TOKEN}`;
 
-// Write the webhook URL so other commands can read it
-fs.writeFileSync(WEBHOOK_URL_FILE, WEBHOOK_URL);
+// Write the webhook URL so other commands can read it.
+// 🔴 0600, and `webhook-url.txt` is in SECRET_FILES: the URL embeds the
+// webhook.site capability token, so anyone who can read this file can read
+// (and forge posts to) this workspace's event stream. The mode argument only
+// applies when the file is CREATED, so chmod unconditionally — a pre-existing
+// 0644 copy from the version that omitted the mode must be repaired.
+fs.writeFileSync(WEBHOOK_URL_FILE, WEBHOOK_URL, { mode: 0o600 });
+try { fs.chmodSync(WEBHOOK_URL_FILE, 0o600); } catch { /* best effort */ }
 
-// ── Load watcher secrets for signature verification ───────────────────────
+// ── Watcher secrets for signature verification ────────────────────────────
 
-function loadWatcherSecrets() {
-  if (!fs.existsSync(WATCHERS_FILE)) return {};
+/**
+ * The signing secret for one webhook, read FRESH on every delivery.
+ *
+ * Deliberately not a snapshot taken at startup: `clickup watch …` registering a
+ * new webhook while a listener runs would otherwise make every event from it
+ * unverifiable, and the fail-closed policy would drop them all with no way to
+ * tell that from an attack. Deliveries are rare; a file read per delivery is
+ * cheaper than that failure mode.
+ */
+function lookupWatcherSecret(webhookId) {
+  if (!webhookId || !fs.existsSync(WATCHERS_FILE)) return null;
   try {
     const watchers = JSON.parse(fs.readFileSync(WATCHERS_FILE, 'utf-8'));
-    const secrets = {};
-    for (const w of watchers) {
-      if (w.webhookId && w.secret) secrets[w.webhookId] = w.secret;
-    }
-    return secrets;
+    if (!Array.isArray(watchers)) return null;
+    const entry = watchers.find((w) => w && w.webhookId === webhookId && w.secret);
+    return entry ? entry.secret : null;
   } catch {
-    return {};
+    return null;
   }
 }
 
-const WATCHER_SECRETS = loadWatcherSecrets();
+function countWatcherSecrets() {
+  if (!fs.existsSync(WATCHERS_FILE)) return 0;
+  try {
+    const watchers = JSON.parse(fs.readFileSync(WATCHERS_FILE, 'utf-8'));
+    return Array.isArray(watchers) ? watchers.filter((w) => w && w.webhookId && w.secret).length : 0;
+  } catch {
+    return 0;
+  }
+}
 
 // ── Event Filtering ───────────────────────────────────────────────────────
 
@@ -164,33 +197,25 @@ function matchesFilters(event) {
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
-function verifySignature(rawBody, signature, webhookId) {
-  if (!signature) return null;
-  // Try the specific webhook's secret first
-  const secret = WATCHER_SECRETS[webhookId];
-  if (!secret) return null;
-
-  const hash = crypto
-    .createHmac('sha256', secret)
-    .update(rawBody)
-    .digest('hex');
-  return hash === signature;
-}
-
 function saveLastSeen(timestamp) {
   fs.writeFileSync(LAST_SEEN_FILE, timestamp);
 }
 
-function processEvent(event, source = 'live', verified = 'skipped') {
+// `verified` is now an INVARIANT of anything that reaches here, not a report:
+// processEvent() is only ever called for a delivery authenticateDelivery()
+// accepted. It stays in the log entry so an existing log stays readable.
+function processEvent(event, source = 'live', { writeLatest = true } = {}) {
   const entry = {
     received_at: new Date().toISOString(),
     source,
-    verified,
+    verified: true,
     ...event,
   };
 
   fs.appendFileSync(LOG_FILE, JSON.stringify(entry) + '\n');
-  fs.writeFileSync(LATEST_FILE, JSON.stringify(entry, null, 2));
+  // The live path defers this until AFTER the filter check, exactly as before —
+  // webhook-latest.json is the "what you were waiting for" file.
+  if (writeLatest) fs.writeFileSync(LATEST_FILE, JSON.stringify(entry, null, 2));
 
   if (entry._wh_created_at) {
     saveLastSeen(entry._wh_created_at);
@@ -261,85 +286,81 @@ function fetchMissedEvents(since) {
   });
 }
 
+/**
+ * Authenticate a request webhook.site stored, and return the event or null.
+ *
+ * 🔴 Same predicate as the live POST path, deliberately. A webhook.site URL
+ * accepts a POST from anyone, so an event read back out of its API is exactly
+ * as forgeable as one delivered here — verifying only the live path would move
+ * the hole rather than close it. The signature is over the STORED RAW BODY
+ * (`req.content`), which is what ClickUp signed.
+ */
 function parseWebhookSiteRequest(req) {
-  try {
-    const event = JSON.parse(req.content);
-    event._wh_created_at = req.created_at;
-    return event;
-  } catch {
+  const raw = req && typeof req.content === 'string' ? req.content : '';
+  const headers = (req && req.headers) || {};
+  const result = authenticateDelivery(raw, headers['x-signature'], lookupWatcherSecret);
+  if (!result.accepted) {
+    process.stderr.write(
+      `[catch-up:rejected:${result.reason}] a stored webhook.site request did not verify ` +
+        '— skipped, not logged\n'
+    );
     return null;
   }
+  const event = result.event;
+  event._wh_created_at = req.created_at;
+  return event;
 }
 
 // ── Local HTTP server ─────────────────────────────────────────────────────
 
 let serverResolve;
 
-const server = http.createServer((req, res) => {
-  if (req.method === 'GET') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'listening', webhook_url: WEBHOOK_URL }));
-    return;
-  }
+const server = createWebhookServer({
+  lookupSecret: lookupWatcherSecret,
 
-  if (req.method === 'POST') {
-    let rawBody = '';
-    req.on('data', (chunk) => (rawBody += chunk));
-    req.on('end', () => {
-      try {
-        const event = JSON.parse(rawBody);
-        const signature = req.headers['x-signature'];
-        const webhookId = event.webhook_id;
-        const verified = verifySignature(rawBody, signature, webhookId);
+  // 🔴 Reached ONLY by a delivery whose HMAC verified against a registered
+  // watcher secret. Everything with a side effect — the log, the cursor, the
+  // latest-event file, the payload printed for the agent — hangs off here, so a
+  // rejected delivery leaves no trace at all.
+  onAccepted(event) {
+    const entry = processEvent(event, 'live', { writeLatest: false });
 
-        const entry = {
-          received_at: new Date().toISOString(),
-          source: 'live',
-          verified: verified === null ? 'skipped' : verified,
-          ...event,
-        };
+    // Check filters — only deliver to agent if event matches
+    if (!matchesFilters(event)) {
+      process.stderr.write(`[filtered] ${formatEventSummary(event)}\n`);
+      return;
+    }
 
-        // Always ack the webhook to prevent ClickUp from marking it unhealthy
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: true }));
+    fs.writeFileSync(LATEST_FILE, JSON.stringify(entry, null, 2));
 
-        // Always log and update cursor
-        fs.appendFileSync(LOG_FILE, JSON.stringify(entry) + '\n');
-        saveLastSeen(entry.received_at);
+    if (MODE === 'server') {
+      process.stderr.write(`[${entry.received_at}] ${formatEventSummary(event)}\n`);
+    } else {
+      console.log(JSON.stringify(entry, null, 2));
+      if (serverResolve) serverResolve();
+    }
+  },
 
-        // Check filters — only deliver to agent if event matches
-        if (!matchesFilters(event)) {
-          process.stderr.write(`[filtered] ${formatEventSummary(event)}\n`);
-          return;
-        }
-
-        fs.writeFileSync(LATEST_FILE, JSON.stringify(entry, null, 2));
-
-        if (MODE === 'server') {
-          process.stderr.write(`[${entry.received_at}] ${formatEventSummary(event)}\n`);
-        } else {
-          console.log(JSON.stringify(entry, null, 2));
-          if (serverResolve) serverResolve();
-        }
-      } catch (err) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Invalid JSON' }));
-      }
-    });
-    return;
-  }
-
-  res.writeHead(404);
-  res.end('Not found');
+  // Reason and size ONLY. A rejected body is attacker-controlled: it does not
+  // go in the log file and it is not echoed back into this process's stderr.
+  onRejected(result, rawBody) {
+    process.stderr.write(
+      `[rejected:${result.reason}] ${Buffer.byteLength(rawBody)} bytes — not logged, ` +
+        'cursor unchanged\n'
+    );
+  },
 });
 
 // ── whcli forward process ─────────────────────────────────────────────────
 
-function startForwarder() {
+// `port` is the port actually BOUND, not the requested one (`--port 0` asks the
+// OS to choose). The target is 127.0.0.1 rather than `localhost` because the
+// receiver binds 127.0.0.1 only and `localhost` can resolve to ::1 first.
+function startForwarder(port) {
   const whArgs = [
     'forward',
     `--token=${WH_TOKEN}`,
-    `--target=http://localhost:${PORT}`,
+    `--target=http://127.0.0.1:${port}`,
     '--listen-timeout=5',
   ];
   if (WH_API_KEY) whArgs.push(`--api-key=${WH_API_KEY}`);
@@ -363,7 +384,7 @@ async function main() {
   process.stderr.write(`Webhook URL: ${WEBHOOK_URL}\n`);
   process.stderr.write(`Mode: ${MODE} | Port: ${PORT} | Timeout: ${TIMEOUT / 1000}s\n`);
   process.stderr.write(`Since: ${SINCE || 'none (first run)'}\n`);
-  process.stderr.write(`Tracked webhooks: ${Object.keys(WATCHER_SECRETS).length}\n`);
+  process.stderr.write(`Tracked webhooks: ${countWatcherSecrets()}\n`);
   if (FILTER_STATUS) process.stderr.write(`Filter status: ${FILTER_STATUS}\n`);
   if (FILTER_EVENT) process.stderr.write(`Filter event: ${FILTER_EVENT}\n`);
   if (FILTER_TASK) process.stderr.write(`Filter task: ${FILTER_TASK}\n`);
@@ -399,10 +420,14 @@ async function main() {
   }
 
   // ── Step 2: Start live listener ─────────────────────────────────────────
-  await new Promise((resolve) => server.listen(PORT, resolve));
-  process.stderr.write(`Listening on port ${PORT}\n\n`);
+  // Loopback only — see lib/webhook-server.mjs. The address printed is the one
+  // `server.address()` REPORTS, not the one we asked for: that is the only
+  // form of this line that is evidence rather than a claim, and the
+  // listen-integration test reads it back.
+  const addr = await listenLoopback(server, PORT);
+  process.stderr.write(`Listening on ${addr.address}:${addr.port}\n\n`);
 
-  const forwarder = startForwarder();
+  const forwarder = startForwarder(addr.port);
 
   if (MODE === 'wait') {
     const gotWebhook = new Promise((resolve) => { serverResolve = resolve; });

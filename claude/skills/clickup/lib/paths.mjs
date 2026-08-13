@@ -65,8 +65,23 @@ export const STATE_DIRS = ['.cache'];
  *
  * watchers.json is on the list because each entry carries the webhook's
  * `secret` — the HMAC key ClickUp signs deliveries with.
+ *
+ * webhook-url.txt is on the list because the URL IS the credential:
+ * `https://webhook.site/<token>` is a capability — whoever holds it can read
+ * this workspace's entire event stream and POST forged events into it. It was
+ * left off originally on the reasoning that "it is only a URL", and listen.mjs
+ * wrote it with no mode at all (0644 under umask 022).
+ *
+ * 🔴 Every STATE_FILES entry must be classified as secret or deliberately
+ * public; test/state-paths.test.mjs pins the partition BOTH ways, so adding a
+ * state file without deciding fails the gate.
  */
-export const SECRET_FILES = new Set(['accounts.json', '.env', 'watchers.json']);
+export const SECRET_FILES = new Set([
+  'accounts.json',
+  '.env',
+  'watchers.json',
+  'webhook-url.txt',
+]);
 
 /** Files inside .cache hold JWTs, so the whole directory is secret. */
 const SECRET_DIRS = new Set(['.cache']);
@@ -121,7 +136,14 @@ export const lastSeenFile = () => statePath('last-seen.txt');
 export function migrateLegacyState(legacyDir, stateDir, opts = {}) {
   const { log = true } = opts;
   const migrated = [];
-  if (!legacyDir || resolve(legacyDir) === resolve(stateDir)) return migrated;
+  // There is deliberately NO `resolve(legacyDir) === resolve(stateDir)` check.
+  // It looked protective and was DEAD: when the two directories are the same,
+  // src and dest are the same path, so the `existsSync(dest)` skip below fires
+  // for every name that exists and the `!existsSync(src)` skip fires for every
+  // name that does not — the same-directory case is a no-op through the normal
+  // path, for every input. Deleting the clause left the whole suite green,
+  // which is what a test "covering" it was really measuring.
+  if (!legacyDir) return migrated;
   if (!existsSync(legacyDir)) return migrated;
 
   for (const name of STATE_FILES) {

@@ -32,6 +32,26 @@ one-line note on stderr. The originals are deliberately left in place — anothe
 host may still be running the old code. Delete them yourself once every host has
 moved over.
 
+## Webhook listener (`listen.mjs`)
+
+It binds **127.0.0.1 only** and it **fails closed**. A delivery is acted on only
+if it carries an `X-Signature` HMAC that verifies against the secret stored for
+its `webhook_id` in `watchers.json` — the secret the skill records when it
+creates the webhook. Anything else (no signature, unknown `webhook_id`, wrong
+digest) is answered **401** and leaves no trace: nothing appended to
+`webhooks.jsonl`, no cursor advance, nothing delivered to the agent. The same
+check runs over events replayed from webhook.site on startup, because anyone can
+POST to a webhook.site URL.
+
+So if the listener logs `[rejected:unknown-webhook]`, the fix is to re-register
+the watcher (`node query.mjs watch …`), not to disable the check. There is no
+override flag.
+
+`webhook-url.txt` is a **credential** — `https://webhook.site/<token>` is a
+capability, and whoever reads it can read this workspace's event stream and post
+forged events into it. It is written 0600, and the unauthenticated `GET /` on
+the listener port deliberately does not return it.
+
 ## Credentials
 
 Create `accounts.json` in the state directory — `~/.local/state/clickup/accounts.json`

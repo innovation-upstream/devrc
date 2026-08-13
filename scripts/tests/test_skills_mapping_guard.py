@@ -83,6 +83,134 @@ NO_SOURCE = '''
 }
 '''
 
+# The real binding's shape: a second store path is symlinked in by IDENT, which
+# is not a repo tree and must not be mistaken for one.
+WITH_INJECTION = '''
+{
+let
+  claudeSkills = pkgs.runCommandLocal "devrc-claude-skills" { } \'\'
+    cp -R ${../claude/skills} "$out"
+    chmod -R u+w "$out"
+    ln -sT ${clickupNodeModules}/node_modules "$out/clickup/node_modules"
+  \'\';
+in
+  home.file.".claude/skills" = {
+    source = claudeSkills;
+    recursive = true;
+    force = true;
+  };
+}
+'''
+
+# A `\`-continued copy: the path and the $out reference are on DIFFERENT lines.
+CONTINUED = '''
+{
+let
+  claudeSkills = pkgs.runCommandLocal "devrc-claude-skills" { } \'\'
+    cp -R \\
+      ${../claude/skills} \\
+      "$out"
+  \'\';
+in
+  home.file.".claude/skills" = {
+    source = claudeSkills;
+  };
+}
+'''
+
+# --- the three ways the OLD substring check was too weak -------------------
+
+#: Mentions the path in a nix COMMENT while copying somewhere else.
+COMMENT_ONLY = '''
+{
+let
+  claudeSkills = pkgs.runCommandLocal "devrc-claude-skills" { } \'\'
+    # was: cp -R ${../claude/skills} "$out"
+    cp -R ${../claudedocs} "$out"
+  \'\';
+in
+  home.file.".claude/skills" = {
+    source = claudeSkills;
+  };
+}
+'''
+
+#: Mentions it in a SHELL comment inside the build script -- dead code that nix
+#: still interpolates, so even a "does the path resolve" check would be fooled.
+SHELL_COMMENT_ONLY = '''
+{
+let
+  claudeSkills = pkgs.runCommandLocal "devrc-claude-skills" { } \'\'
+    cp -R ${../claudedocs} "$out"
+    # keep for reference: ${../claude/skills}
+  \'\';
+in
+  home.file.".claude/skills" = {
+    source = claudeSkills;
+  };
+}
+'''
+
+#: Copies the right tree, then empties $out and substitutes another.
+RM_AND_SUBSTITUTE = '''
+{
+let
+  claudeSkills = pkgs.runCommandLocal "devrc-claude-skills" { } \'\'
+    cp -R ${../claude/skills} "$out"
+    rm -rf "$out"
+    cp -R ${../claudedocs} "$out"
+  \'\';
+in
+  home.file.".claude/skills" = {
+    source = claudeSkills;
+  };
+}
+'''
+
+#: Copies a SECOND repo tree over the same output, without removing anything.
+SECOND_TREE = '''
+{
+let
+  claudeSkills = pkgs.runCommandLocal "devrc-claude-skills" { } \'\'
+    cp -R ${../claude/skills} "$out"
+    cp -R ${../claudedocs}/. "$out"
+  \'\';
+in
+  home.file.".claude/skills" = {
+    source = claudeSkills;
+  };
+}
+'''
+
+#: Copies the right tree and then empties $out, with NO second tree involved.
+#: Needed as a distinct fixture so the `rm $out` check is REACHABLE: in
+#: RM_AND_SUBSTITUTE the second-tree check fires first, so that fixture alone
+#: would leave the removal check untested behind an earlier guard.
+RM_ONLY = '''
+{
+let
+  claudeSkills = pkgs.runCommandLocal "devrc-claude-skills" { } \'\'
+    cp -R ${../claude/skills} "$out"
+    rm -rf "$out"
+    mkdir -p "$out"
+  \'\';
+in
+  home.file.".claude/skills" = {
+    source = claudeSkills;
+  };
+}
+'''
+
+#: A source bound to an ident that has no binding at all.
+DANGLING_IDENT = '''
+{
+  home.file.".claude/skills" = {
+    source = somethingUndefined;
+    recursive = true;
+  };
+}
+'''
+
 
 # --------------------------------------------------------------------------
 # POSITIVE: the shipped file, and both accepted shapes.
@@ -137,3 +265,84 @@ def test_a_mapping_without_a_source_fails():
     problem = skills_mapping_problem(NO_SOURCE)
     assert problem is not None
     assert "no `source =`" in problem
+
+
+# --------------------------------------------------------------------------
+# POSITIVE, continued: shapes the TIGHTENED predicate must still accept.
+# A guard that rejects the legitimate case gets loosened back, so these matter
+# as much as the negatives below.
+# --------------------------------------------------------------------------
+
+def test_a_symlinked_store_path_is_not_mistaken_for_a_second_tree():
+    """`ln -sT ${clickupNodeModules}/… "$out/…"` is the real binding's shape."""
+    assert skills_mapping_problem(WITH_INJECTION) is None
+
+
+def test_a_line_continued_copy_passes():
+    """The path and `$out` on different lines is still one copy."""
+    assert skills_mapping_problem(CONTINUED) is None
+
+
+# --------------------------------------------------------------------------
+# NEGATIVE CONTROLS for the three weaknesses of the substring version.
+# Each was ACCEPTED before the tightening: the predicate asked whether the
+# characters `../claude/skills` occurred in the binding, not what they did.
+# --------------------------------------------------------------------------
+
+def test_a_path_named_only_in_a_nix_comment_fails():
+    problem = skills_mapping_problem(COMMENT_ONLY)
+    assert problem is not None, (
+        "a binding that copies ../claudedocs and only MENTIONS ../claude/skills in a "
+        "comment was accepted — the predicate is reading prose as if it were code"
+    )
+    assert "never copies" in problem, problem
+
+
+def test_a_path_named_only_in_dead_shell_code_fails():
+    problem = skills_mapping_problem(SHELL_COMMENT_ONLY)
+    assert problem is not None, (
+        "a binding whose only use of ../claude/skills is a commented-out shell line "
+        "was accepted"
+    )
+    assert "never copies" in problem, problem
+
+
+def test_copying_the_tree_and_then_emptying_out_fails():
+    problem = skills_mapping_problem(RM_AND_SUBSTITUTE)
+    assert problem is not None, (
+        "a binding that copies claude/skills, then `rm -rf \"$out\"` and copies another "
+        "tree over it was accepted — it contains every string the check looks for and "
+        "deploys none of them"
+    )
+    # It must fail for one of the two REAL reasons, not incidentally.
+    assert ("removes its own output" in problem) or ("as well as" in problem), problem
+
+
+def test_copying_a_second_repo_tree_over_the_output_fails():
+    problem = skills_mapping_problem(SECOND_TREE)
+    assert problem is not None, (
+        "a binding that copies a SECOND repo tree over $out was accepted — whichever "
+        "copy runs last decides what ships"
+    )
+    assert "as well as" in problem, problem
+
+
+def test_emptying_out_after_copying_fails_on_its_own():
+    """REACHABILITY for the `rm $out` check.
+
+    RM_AND_SUBSTITUTE trips the second-tree check first, so it would pass with
+    the removal check deleted — a guard sitting behind an earlier one that
+    always wins. This fixture reaches it: one tree, copied, then removed.
+    """
+    problem = skills_mapping_problem(RM_ONLY)
+    assert problem is not None, (
+        "a binding that copies claude/skills and then `rm -rf \"$out\"` was accepted — "
+        "it deploys an EMPTY tree"
+    )
+    assert "removes its own output" in problem, problem
+
+
+def test_a_source_bound_to_a_nonexistent_ident_fails():
+    problem = skills_mapping_problem(DANGLING_IDENT)
+    assert problem is not None
+    assert "no such let-binding" in problem, problem
