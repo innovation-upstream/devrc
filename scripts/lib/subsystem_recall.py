@@ -65,11 +65,48 @@ and it goes through `resolve_ref_tiered` — the writer's resolver — so an
 ambiguous ref is reported with its candidates and never picked.
 
 
+…AND WHY "THE WHOLE SCOPE" IS NOW AN *INDEX* PLUS *ONE BODY*
+------------------------------------------------------------
+The argument above is about SELECTION — which entries the reader is allowed to
+know about — and it stands: the reader still reads every entry in the scope, and
+`--list`/the digest index still name every one of them. What did not stand is the
+claim `claude/skills/resume/SKILL.md` made about the COST: "it costs a page, not a
+dump".
+
+Measured on 2026-08-13 against the scope holding 25 of the store's 29 entries:
+
+    old default (`--limit 12`)   31,485 B  (~7,871 tok)  and it hid 13 of 25
+    old `--limit 25`             62,643 B  (~15,660 tok)
+    fixed caveat + header         1,290 B
+    per entry                    ~2,454 B  (min 1,245 / median 2,277 / max 5,183)
+
+So the old default was the worst of both worlds — expensive AND incomplete — and
+a step that displaces the task it was loaded for gets dropped from `/resume`,
+which is how the store went unread the first time.
+
+The digest splits the two things the old output conflated:
+
+    the INDEX     one line per entry, EVERY entry, never truncated (~60 B/line).
+                  What a resuming session actually needs: what is on record here,
+                  how much of it there is, and how sensitive it is.
+    ONE BODY      the single entry most likely to be the one being resumed,
+                  printed in full — because an index with no worked example is a
+                  menu, and a menu costs a round trip.
+
+Selection of that one body goes through `subsystem_resolver.associate_paths` —
+the WRITER's own path→subsystem matcher — over a path window read out of the
+repo's newest handoff doc (`focus_window`), and falls back to the newest entry by
+mtime. Which of the two fired is PRINTED, never implicit.
+
+
 CONTRACT SUMMARY
 ----------------
     extract_sections(text, headings)          -> dict[str, str]
     read_entry(store_root, entry)             -> RecalledEntry
-    recall(store_root, scope, *, ref=…, limit=…)
+    focus_paths_from_text(text)               -> tuple[str, ...]
+    focus_window(repo)                        -> FocusWindow
+    select_featured(entries, index, scope, …) -> (ref, basis)
+    recall(store_root, scope, *, ref=…, limit=…, mode=…, focus_paths=…)
                                               -> RecallReport
     render_text(report) / report_json(report) -> str / dict
     main(argv)                                -> int
@@ -114,6 +151,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -129,10 +167,13 @@ from subsystem_resolver import (  # noqa: E402
     MalformedEntryError,
     ResolverError,
     SubsystemEntry,
+    SubsystemIndex,
     UnknownScopeError,
+    associate_paths,
     load_index,
     normalize_ref,
     parse_front_matter,
+    parse_journal_bullets,
     resolve_ref_tiered,
 )
 from subsystem_resolver import extract_sections as _extract_sections  # noqa: E402
@@ -149,16 +190,25 @@ __all__ = [
     "NUANCE_HEADING",
     "SURFACED_HEADINGS",
     "DEFAULT_ENTRY_LIMIT",
+    "DEFAULT_MODE",
+    "RECALL_MODES",
+    "FOCUS_MIN_PATHS",
+    "HANDOFF_GLOBS",
     "SENSITIVITY_FAIL_SAFE",
     "KNOWN_SENSITIVITIES",
     "STATUS_PRECEDENCE",
     "EntryUnreadableError",
     "StoreMissingError",
+    "FocusWindow",
     "RecalledEntry",
     "RecallReport",
     "extract_sections",
     "read_entry",
     "fold_sensitivity",
+    "focus_paths_from_text",
+    "focus_window",
+    "select_featured",
+    "listing_line",
     "recall",
     "render_text",
     "report_json",
@@ -190,7 +240,53 @@ SURFACED_HEADINGS: tuple[str, ...] = (POINTERS_HEADING, NUANCE_HEADING)
 # that is not the infra repo, and small enough to read at the top of a session";
 # it is a display bound with an escape hatch (`--limit`), not a safety bound, so
 # unlike `MAX_TRANSCRIPT_AGE_SECONDS` in the writer it is deliberately overridable.
+#
+# ⚠ IT IS A FULL-MODE CONCEPT ONLY. `digest` prints exactly one body by design and
+# `list` prints none, so neither applies a cap and neither can truncate; `limit`
+# is still carried on the report (and in the JSON) so a caller can see what a
+# `--limit` run WOULD have used, but it changes nothing outside `full`. That is
+# the same shape `--ref` already had: a narrowing ignores the display cap.
 DEFAULT_ENTRY_LIMIT = 12
+
+# The three display modes. `ref` is NOT one of them: a `--ref` run is a narrowing
+# to a single named entry and prints that entry in full whatever the mode says,
+# exactly as it did before the digest existed.
+#
+#   "digest"  the caveat + the FULL index (every entry, one line) + ONE body.
+#             The default, and what `/resume` step 4 runs.
+#   "list"    the caveat + the FULL index, and no body at all.
+#   "full"    the pre-digest behaviour, byte-for-byte: up to `limit` bodies, with
+#             a LOUD truncation notice. Selected by passing `--limit`.
+RECALL_MODES: tuple[str, ...] = ("digest", "list", "full")
+DEFAULT_MODE = "digest"
+
+# 🔴 ONE path is enough to feature an entry, where the WRITER needs two
+# (`DEFAULT_MIN_PATHS = 2`). The asymmetry is deliberate and is about what the
+# two are deciding. The writer is proposing a DURABLE journal bullet against a
+# subsystem, so a single incidental path must not be enough. The reader is only
+# choosing which of N already-listed entries to print first, it PRINTS the basis
+# it used, and every other entry is one line above and one `--ref` away — so the
+# cost of a weak signal is a slightly worse first pick, not a wrong record.
+FOCUS_MIN_PATHS = 1
+
+# Where the path window comes from, in the order `scripts/resume-state.sh`
+# resolves a handoff — lowercase family first, the uppercase `*HANDOFF*.md`
+# family (civitai-manager's `SESSION-HANDOFF.md`) only as a fallback. Same repo,
+# same step, same doc: `/resume` has just read this file at step 2, so it is the
+# session's own statement of what is being worked on, and reading it costs one
+# file read with no git, no network and no subprocess.
+HANDOFF_GLOBS: tuple[str, ...] = ("claudedocs/handoff-*.md", "claudedocs/*HANDOFF*.md")
+
+# Path-shaped tokens are taken from BACKTICKED SPANS ONLY. Handoff docs are prose
+# and the convention in this fleet is that a real path is code-quoted; harvesting
+# bare prose would mint tokens out of ordinary English (`resume-state.sh` learned
+# this the hard way with branch tokens — see its comment on the fabricated
+# "referenced by handoff no longer exists" line). The failure direction here is
+# benign either way: a token that names no entry is dropped by the resolver, and
+# a token that names the wrong one produces a differently-featured entry whose
+# basis is printed on the same screen.
+_BACKTICKED = re.compile(r"`([^`\n]+)`")
+_PATH_TOKEN_STRIP = "`,;:()[]{}<>\"'*_"
 
 # 🔴 FAIL-SAFE, from `analyze-service/SKILL.md`: "`sensitivity:` — fail-safe:
 # absent means sensitive… absent or unrecognized ⇒ `client-confidential`, never
@@ -278,6 +374,21 @@ class RecalledEntry:
     filename: str
     sensitivity: str
     sections: Mapping[str, str] = field(default_factory=dict)
+
+    bullet_count: int = 0
+    """Top-level `## Nuance / work-history` bullets, via the resolver's own
+    `parse_journal_bullets`. The index line's SIZE SIGNAL: it is what a reader
+    wants in order to decide whether an entry is worth a `--ref`, and it is the
+    unit the store's own prune-on-resolve discipline is denominated in. A byte
+    count would have been cheaper and would have measured markdown, not history.
+    """
+
+    mtime: float = 0.0
+    """The entry file's mtime. Used ONLY as the featured-entry fallback, and
+    deliberately NOT rendered or emitted in JSON — `render_text` must produce
+    identical bytes for an unchanged store, and a printed timestamp would make a
+    diff of two runs show movement that is not there."""
+
     missing_sections: tuple[str, ...] = ()
     """Requested headings this entry does not carry — REPORTED, never silent.
 
@@ -311,13 +422,164 @@ def read_entry(store_root: str | Path, entry: SubsystemEntry) -> RecalledEntry:
         ) from exc
     sections = extract_sections(text)
     fm = parse_front_matter(text)
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:  # pragma: no cover - the read above already succeeded
+        mtime = 0.0
     return RecalledEntry(
         ref=entry.ref,
         filename=entry.filename,
         sensitivity=fold_sensitivity(fm.get("sensitivity")),
         sections=sections,
+        bullet_count=len(parse_journal_bullets(sections.get(NUANCE_HEADING, ""))),
+        mtime=mtime,
         missing_sections=tuple(h for h in SURFACED_HEADINGS if h not in sections),
     )
+
+
+# --- The focus window ----------------------------------------------------------
+#
+# 🔴 THIS IS THE ONLY THING IN THE MODULE THAT LOOKS OUTSIDE THE STORE, and it
+# reads exactly one file. It runs no git, no `gh` and no subprocess — the writer's
+# path sources do all three, and importing that cost into `/resume` step 4 is the
+# thing this whole change exists to avoid.
+
+
+@dataclass(frozen=True)
+class FocusWindow:
+    """Repo-relative paths standing in for "what is being worked on", plus where
+    they came from. `source` is `None` exactly when `paths` is empty, and the
+    renderer says which of the two selectors fired either way — an unattributed
+    pick is the failure this dataclass exists to prevent."""
+
+    paths: tuple[str, ...] = ()
+    source: str | None = None
+
+
+def _is_repo_relative(token: str) -> bool:
+    """Superset of `subsystem_resolver._validate_path`'s rejections, plus shape.
+
+    Kept a hair STRICTER than the resolver on purpose: anything this lets
+    through is handed to `associate_paths`, which raises `InvalidPathError` on a
+    path it considers malformed. A reader that raised because a handoff doc
+    quoted a URL would be a `/resume` step that fails on ordinary prose.
+    """
+    if not token or "/" not in token:
+        return False
+    if any(c.isspace() for c in token):
+        return False
+    if token[0] in "/~-":  # absolute, home-relative, a CLI flag
+        return False
+    if "$" in token or "://" in token or "@" in token:  # a var, a URL, a host
+        return False
+    return ".." not in token.split("/")
+
+
+def focus_paths_from_text(text: str) -> tuple[str, ...]:
+    """Repo-relative path tokens quoted in `text`, deduped, in order of first use."""
+    out: dict[str, None] = {}
+    for span in _BACKTICKED.findall(text):
+        for raw in span.split():
+            token = raw.strip(_PATH_TOKEN_STRIP).rstrip(".").rstrip("/")
+            if _is_repo_relative(token):
+                out[token] = None
+    return tuple(out)
+
+
+def focus_window(repo: str | Path) -> FocusWindow:
+    """The repo's newest handoff doc, as a path window. READ-ONLY, one file read.
+
+    Resolution order mirrors `scripts/resume-state.sh` (see `HANDOFF_GLOBS`), so
+    step 3 and step 4 of `/resume` cannot end up reconciling one initiative while
+    recalling against another. An absent or unreadable doc is an ORDINARY
+    outcome — most repos have no handoff at the moment they are resumed — and
+    returns an empty window rather than raising: the caller's fallback is a real
+    answer, not a degraded one.
+    """
+    root = Path(repo)
+    doc: Path | None = None
+    for pattern in HANDOFF_GLOBS:
+        try:
+            matches = [p for p in root.glob(pattern) if p.is_file()]
+        except OSError:
+            matches = []
+        if matches:
+            # mtime, then name: two docs written in the same second must still
+            # resolve identically on every run.
+            doc = max(matches, key=lambda p: (p.stat().st_mtime, p.name))
+            break
+    if doc is None:
+        return FocusWindow()
+    try:
+        text = doc.read_text(encoding="utf-8", errors="replace")
+        rel = doc.relative_to(root).as_posix()
+    except (OSError, ValueError):
+        return FocusWindow()
+    paths = (rel,) + tuple(p for p in focus_paths_from_text(text) if p != rel)
+    return FocusWindow(paths=paths, source=rel)
+
+
+def select_featured(
+    entries: Sequence[RecalledEntry],
+    index: SubsystemIndex,
+    scope: str,
+    *,
+    focus_paths: Sequence[str] = (),
+    focus_source: str | None = None,
+) -> tuple[str, str]:
+    """Pick the ONE entry to print in full, and say why. Returns `(ref, basis)`.
+
+    🔴 THE BASIS IS RETURNED, NOT LOGGED, so no caller can render a pick without
+    also rendering how it was made. Two selectors, in this order:
+
+      1. RESOLVED — `subsystem_resolver.associate_paths` over `focus_paths`.
+         That is the WRITER's matcher, unmodified; this module adds no second
+         one. Ranking is `path_count` descending, and the tie-break is the
+         fallback's own mtime signal rather than a third rule.
+      2. MOST-RECENT FALLBACK — the newest entry file by mtime.
+
+    🔴 WHY MTIME AND NOT GIT RECENCY, WHICH WOULD OTHERWISE BE THE OBVIOUS
+    CHOICE: mtime is trustworthy for THIS store specifically because the store
+    has no remote and is never cloned, checked out or rebased — the only thing
+    that ever touches those files is a session editing them in place, so mtime is
+    the edit time. Git recency is NOT usable as the primary signal here: the
+    store's history is mostly bulk autocommits ("4 change(s)"), so four entries
+    share one commit timestamp and the intra-commit order is unrecoverable. The
+    ordinary git-recency argument (a checkout rewrites mtime and git does not) is
+    exactly backwards for a repo nobody ever checks out.
+    """
+    if len(entries) == 0:  # pragma: no cover - callers guard on `scope-empty` first
+        # Spelled `len(...) == 0` and not `not entries` on purpose: the latter is
+        # the mutation anchor for `recall`'s `scope-empty` guard, and a duplicate
+        # anchor turns that kill into a mutation applied to whichever occurrence
+        # came first (`claude/RULES.md` — the `count=1` replace hazard).
+        raise ValueError("select_featured called with no entries")
+
+    by_ref = {e.ref: e for e in entries}
+    if focus_paths:
+        matched = [
+            m
+            for m in associate_paths(
+                focus_paths, index, scope, min_paths=FOCUS_MIN_PATHS
+            ).matched
+            if m.entry.ref in by_ref
+        ]
+        if matched:
+            matched.sort(key=lambda m: (-m.path_count, -by_ref[m.entry.ref].mtime, m.entry.ref))
+            best = matched[0]
+            shown = ", ".join(best.paths[:3]) + (" …" if best.path_count > 3 else "")
+            return best.entry.ref, (
+                f"resolved via {focus_source or 'the supplied path window'} — "
+                f"{best.path_count} of {len(focus_paths)} quoted path(s) name it: {shown}"
+            )
+
+    why = (
+        "no handoff doc to read a path window from"
+        if not focus_paths
+        else f"nothing quoted in {focus_source} resolved to an entry"
+    )
+    newest = max(entries, key=lambda e: (e.mtime, e.ref))
+    return newest.ref, f"most-recent fallback — newest entry file in `{scope}/` ({why})"
 
 
 # --- The report ----------------------------------------------------------------
@@ -344,8 +606,31 @@ class RecallReport:
     unexpectedly-normalized scope is visible instead of reading as "nothing
     recorded yet"."""
 
+    mode: str = DEFAULT_MODE
+    """Which display mode produced this report — see `RECALL_MODES`."""
+
+    listing: tuple[RecalledEntry, ...] = ()
+    """EVERY entry in the scope, one index line each. NEVER truncated, in any
+    mode that populates it: the whole point of the digest is that the set of
+    things on record is complete even when only one of them is printed in full.
+    Empty in `full` mode, which prints bodies and a truncation notice instead."""
+
+    featured_basis: str | None = None
+    """Which selector chose `entries[0]`, in words — `select_featured`'s second
+    return value. Set in `digest` mode only. Never None there: a featured entry
+    with no stated basis is the implicit pick this module refuses to make."""
+
     @property
     def omitted(self) -> int:
+        """Entries in the scope whose BODY was not printed.
+
+        A `--ref` run reports 0: one of four is a NARROWING, not a truncation,
+        and calling it an omission trains the reader to ignore the real one. The
+        digest reports a real count — 24 of 25 bodies genuinely were not printed
+        — and the renderer says so in the digest's own words, because there
+        every one of those 24 is still LISTED and one `--ref` away, which is not
+        what `--limit` truncation means.
+        """
         return max(0, self.total_in_scope - len(self.entries)) if self.ref is None else 0
 
     @property
@@ -378,6 +663,9 @@ def recall(
     *,
     ref: str | None = None,
     limit: int = DEFAULT_ENTRY_LIMIT,
+    mode: str = DEFAULT_MODE,
+    focus_paths: Sequence[str] = (),
+    focus_source: str | None = None,
 ) -> RecallReport:
     """Surface the index's `## Pointers` + `## Nuance / work-history` for a scope.
 
@@ -385,15 +673,21 @@ def recall(
     re-enter work, and a recall step that interrogated the network or blocked on
     a confirm would make the thing it is supposed to accelerate slower.
 
+    `focus_paths` is INJECTED, exactly as `associate_paths` injects its index:
+    this function performs no repo I/O of its own, so a test can pin the
+    selection rule without a fixture repo and `main()` owns the one call to
+    `focus_window`. `focus_source` is only ever quoted back in the printed basis.
+
     Guard order — each reachable by an input no earlier guard rejects:
       1. `limit` sanity      → ValueError
-      2. store root exists   → StoreMissingError
-      3. store is readable   → EntryUnreadableError
+      2. `mode` known        → ValueError  (a valid limit still reaches it)
+      3. store root exists   → StoreMissingError
+      4. store is readable   → EntryUnreadableError
          (a malformed entry raises `MalformedEntryError` from the resolver's own
          loader and is deliberately NOT caught: the loader is fail-closed on
          purpose, and an interactive caller must be told the store is broken
          rather than handed a silently short index.)
-      4. scope known         → status `scope-absent`, NOT an error
+      5. scope known         → status `scope-absent`, NOT an error
 
     🔴 AN ABSENT SCOPE IS A STATUS, NOT AN EXCEPTION, and that is the single most
     load-bearing decision here. The store holds 2 scopes while work spans ~12
@@ -405,6 +699,8 @@ def recall(
     """
     if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
         raise ValueError(f"limit must be an int >= 1, got {limit!r}")
+    if mode not in RECALL_MODES:
+        raise ValueError(f"mode must be one of {RECALL_MODES}, got {mode!r}")
 
     store = Path(store_root)
     if not store.is_dir():
@@ -431,6 +727,7 @@ def recall(
             scope=normalize_ref(scope),
             store_root=str(store),
             limit=limit,
+            mode=mode,
             ref=ref,
             known_scopes=index.scopes,
         )
@@ -445,6 +742,7 @@ def recall(
                 store_root=str(store),
                 total_in_scope=len(entries),
                 limit=limit,
+                mode=mode,
                 ref=exc.ref,
                 candidates=exc.candidates,
                 known_scopes=index.scopes,
@@ -456,9 +754,13 @@ def recall(
                 store_root=str(store),
                 total_in_scope=len(entries),
                 limit=limit,
+                mode=mode,
                 ref=normalize_ref(ref),
                 known_scopes=index.scopes,
             )
+        # A `--ref` run is a NARROWING and prints its one entry in full whatever
+        # `mode` says — no index, no featured basis, byte-identical to what it
+        # printed before the digest existed.
         return RecallReport(
             status="recalled",
             scope=normalize_ref(scope),
@@ -466,6 +768,7 @@ def recall(
             entries=(read_entry(store, entry),),
             total_in_scope=len(entries),
             limit=limit,
+            mode=mode,
             ref=normalize_ref(ref),
             known_scopes=index.scopes,
         )
@@ -477,6 +780,7 @@ def recall(
             store_root=str(store),
             total_in_scope=0,
             limit=limit,
+            mode=mode,
             known_scopes=index.scopes,
         )
 
@@ -484,18 +788,75 @@ def recall(
     # unchanged store produce identical bytes and a diff of them shows only real
     # movement.
     ordered = sorted(entries, key=lambda e: e.ref)
+
+    if mode == "full":
+        return RecallReport(
+            status="recalled",
+            scope=normalize_ref(scope),
+            store_root=str(store),
+            entries=tuple(read_entry(store, e) for e in ordered[:limit]),
+            total_in_scope=len(ordered),
+            limit=limit,
+            mode=mode,
+            known_scopes=index.scopes,
+        )
+
+    # `digest` and `list` both read EVERY entry — the index line carries a bullet
+    # count, which only the file can answer. Reading 25 small files costs
+    # milliseconds; it is the OUTPUT that had to shrink, not the input.
+    read = tuple(read_entry(store, e) for e in ordered)
+    if mode == "list":
+        return RecallReport(
+            status="recalled",
+            scope=normalize_ref(scope),
+            store_root=str(store),
+            total_in_scope=len(ordered),
+            limit=limit,
+            mode=mode,
+            listing=read,
+            known_scopes=index.scopes,
+        )
+
+    featured_ref, basis = select_featured(
+        read, index, scope, focus_paths=focus_paths, focus_source=focus_source
+    )
     return RecallReport(
         status="recalled",
         scope=normalize_ref(scope),
         store_root=str(store),
-        entries=tuple(read_entry(store, e) for e in ordered[:limit]),
+        entries=tuple(e for e in read if e.ref == featured_ref),
         total_in_scope=len(ordered),
         limit=limit,
+        mode=mode,
+        listing=read,
+        featured_basis=basis,
         known_scopes=index.scopes,
     )
 
 
 # --- Rendering -----------------------------------------------------------------
+
+
+def listing_line(entry: RecalledEntry, width: int) -> str:
+    """ONE index line: `  <ref>   N bullets  <sensitivity>`. ~60 B.
+
+    Three fields and no fourth. The ref is what `--ref` takes, the bullet count
+    is the size signal that says whether a `--ref` is worth spending, and the
+    sensitivity has to travel WITH the entry it describes — a sensitivity stated
+    once at the top of a block is a sensitivity that gets copied away from.
+    """
+    n = entry.bullet_count
+    return f"  {entry.ref.ljust(width)}  {n:>3} {'bullet ' if n == 1 else 'bullets'}  {entry.sensitivity}"
+
+
+def _render_listing(report: RecallReport) -> list[str]:
+    width = max((len(e.ref) for e in report.listing), default=0)
+    return [
+        "",
+        f"INDEX ({RECALL_LABEL}) — ALL {len(report.listing)} entr"
+        f"{'y' if len(report.listing) == 1 else 'ies'} in `{report.scope}/`, none omitted:",
+        *(listing_line(e, width) for e in report.listing),
+    ]
 
 
 def render_text(report: RecallReport) -> str:
@@ -546,12 +907,36 @@ def render_text(report: RecallReport) -> str:
         )
         return "\n".join(out)
 
+    if report.listing:
+        out.extend(_render_listing(report))
+
+    if not report.entries:
+        # `list` mode. LOUD about what it did not do: an index with no bodies is
+        # not an empty scope, and the two must not read the same.
+        out.append("")
+        out.append(
+            f"NO ENTRY BODIES WERE PRINTED (--list). The {report.total_in_scope} entr"
+            f"{'y above is' if report.total_in_scope == 1 else 'ies above are'} the complete "
+            f"index for `{report.scope}/` — this is not an empty scope. Run `--ref <name>` for "
+            f"one entry's `{POINTERS_HEADING}` + `{NUANCE_HEADING}`."
+        )
+        return "\n".join(out)
+
     n = len(report.entries)
     out.append("")
-    out.append(
-        f"RECALL ({RECALL_LABEL}) — {n} of {report.total_in_scope} entr"
-        f"{'y' if report.total_in_scope == 1 else 'ies'} in `{report.scope}/`:"
-    )
+    if report.featured_basis is not None:
+        # 🔴 THE BASIS, NEVER THE PICK ALONE. An entry featured without saying
+        # which selector chose it is indistinguishable from an entry the tool
+        # thinks is IMPORTANT, and that is a claim the store cannot support.
+        out.append(
+            f"FEATURED IN FULL ({RECALL_LABEL}) — 1 of {report.total_in_scope}, "
+            f"{report.featured_basis}:"
+        )
+    else:
+        out.append(
+            f"RECALL ({RECALL_LABEL}) — {n} of {report.total_in_scope} entr"
+            f"{'y' if report.total_in_scope == 1 else 'ies'} in `{report.scope}/`:"
+        )
     for e in report.entries:
         out.append("")
         out.append(f"  ### {e.ref}  ({report.scope}/{e.filename}, sensitivity={e.sensitivity})")
@@ -573,7 +958,19 @@ def render_text(report: RecallReport) -> str:
         elif e.missing_sections:
             out.append(f"    (no {', '.join(f'`{h}`' for h in e.missing_sections)} section)")
 
-    if report.omitted:
+    if report.omitted and report.listing:
+        # The digest's own words. It is NOT the `--limit` truncation below: every
+        # one of these entries IS listed above and is one `--ref` away, so
+        # borrowing the truncation wording would train the reader to read a
+        # complete index as a lossy one — and then to ignore the real notice.
+        out.append("")
+        out.append(
+            f"… {report.omitted} further entr{'y' if report.omitted == 1 else 'ies'} in "
+            f"`{report.scope}/` LISTED ABOVE but NOT shown in full. Nothing is hidden: this "
+            f"is the default digest, not a judgement about relevance. `--ref <name>` prints "
+            f"any one of them in full; `--limit {report.total_in_scope}` prints them all."
+        )
+    elif report.omitted:
         out.append("")
         out.append(
             f"… {report.omitted} more entr{'y' if report.omitted == 1 else 'ies'} in "
@@ -593,9 +990,23 @@ def report_json(report: RecallReport) -> dict:
         "ref": report.ref,
         "candidates": list(report.candidates),
         "limit": report.limit,
+        "mode": report.mode,
         "total_in_scope": report.total_in_scope,
         "omitted": report.omitted,
         "known_scopes": list(report.known_scopes),
+        "featured_basis": report.featured_basis,
+        # The index, as ROWS — ref, size signal, sensitivity. No `sections`:
+        # a JSON consumer that wanted every body can ask for `--limit <n>`, and
+        # putting them here would rebuild the dump the digest exists to avoid.
+        "listing": [
+            {
+                "ref": e.ref,
+                "file": e.filename,
+                "sensitivity": e.sensitivity,
+                "bullets": e.bullet_count,
+            }
+            for e in report.listing
+        ],
         "entries": [
             {
                 "ref": e.ref,
@@ -634,11 +1045,21 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
+        "--list",
+        action="store_true",
+        dest="listing",
+        help=(
+            "the INDEX ONLY: one line per entry — ref, bullet count, sensitivity — for "
+            "EVERY entry in the scope. Never truncated, and never a body."
+        ),
+    )
+    p.add_argument(
         "--limit",
         type=int,
-        default=DEFAULT_ENTRY_LIMIT,
+        default=None,
         help=(
-            f"display cap on entries (default {DEFAULT_ENTRY_LIMIT}). A truncation is "
+            f"print up to N entry BODIES instead of the default digest (the pre-digest "
+            f"behaviour; N={DEFAULT_ENTRY_LIMIT} was the old default). A truncation is "
             f"always printed; it is never silent."
         ),
     )
@@ -648,9 +1069,55 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(list(argv) if argv is not None else None)
+
+    # 🔴 Rejected, not silently reconciled. Either combination has an obvious
+    # "sensible" reading and they are different readings, so honouring one would
+    # give the caller output they did not ask for and no sign of it.
+    if args.listing and args.ref is not None:
+        print(
+            "subsystem-recall: --list and --ref select different things (the whole "
+            "index vs one entry's body). Pass one.",
+            file=sys.stderr,
+        )
+        return 2
+    if args.listing and args.limit is not None:
+        print(
+            "subsystem-recall: --limit is a cap on entry BODIES and --list prints none; "
+            "the index is never truncated. Drop one.",
+            file=sys.stderr,
+        )
+        return 2
+
+    # `--limit` is what selects the pre-digest full-body mode. Nothing else does:
+    # a default of DEFAULT_ENTRY_LIMIT here would make "the caller asked for a cap"
+    # indistinguishable from "the caller asked for nothing".
+    mode = "list" if args.listing else ("full" if args.limit is not None else DEFAULT_MODE)
+    limit = args.limit if args.limit is not None else DEFAULT_ENTRY_LIMIT
+
     try:
-        scope = args.scope if args.scope is not None else scope_for_repo(Path(args.repo).resolve())
-        report = recall(args.store, scope, ref=args.ref, limit=args.limit)
+        repo = Path(args.repo).resolve()
+        scope = args.scope if args.scope is not None else scope_for_repo(repo)
+        # The ONE call to `focus_window`, and only where it is EVIDENCE. The
+        # digest is the only mode that features an entry, and the window is
+        # derived from `repo` — so an explicitly overridden `--scope` disables
+        # it: the handoff doc in THIS repo says nothing about somebody else's
+        # scope, and letting it vote there would be a relevance claim built on a
+        # path window that never described the entries it ranked. The printed
+        # basis then says `most-recent fallback`, which is the truth.
+        window = (
+            focus_window(repo)
+            if mode == DEFAULT_MODE and args.scope is None
+            else FocusWindow()
+        )
+        report = recall(
+            args.store,
+            scope,
+            ref=args.ref,
+            limit=limit,
+            mode=mode,
+            focus_paths=window.paths,
+            focus_source=window.source,
+        )
     except ValueError as exc:
         print(f"subsystem-recall: {exc}", file=sys.stderr)
         return 2

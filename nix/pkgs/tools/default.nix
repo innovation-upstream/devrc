@@ -36,3 +36,8 @@ with pkgs; [
   opencode
 ]
 ++ (import ./tmux-fuzzyclaw.nix { inherit pkgs workspace; })
+# clawgatectl — machine client for the clawgate JSON API. Built from the
+# homelab-talos working tree; the file itself explains why that is a local path
+# and not fetchFromGitHub, and it yields [] on a host without that checkout
+# rather than failing the switch.
+++ (import ./clawgatectl.nix { inherit pkgs workspace; })

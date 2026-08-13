@@ -512,6 +512,19 @@ class TranscriptCwdMismatchError(TouchError):
     relativizes every path against the SESSION's cwd, so paths from a session
     rooted elsewhere are repo-relative to the WRONG repo — they would resolve,
     quietly, against this repo's index.
+
+    🔴 THE MESSAGE NAMES THE ALTERNATIVE, because the obvious fallback is wrong
+    here. For every OTHER session failure the answer is "drop --session and use
+    the git window"; for this one that is a SECOND dead source — a session that
+    ran in another repo left nothing in this repo's branch window either. The
+    work reached here as pull requests or commits, so --pr/--commit is the only
+    window that can see it. Observed live: a session whose cwd was one repo
+    while all of its work landed in another.
+
+    Relativizing against --repo instead would NOT fix this: it happens upstream
+    in the shared collector extractor, so it is a collector change, not a local
+    one — and it would silently file another repo's paths here, which is exactly
+    what this guard exists to prevent. Do not relax it.
     """
 
 
@@ -1402,7 +1415,10 @@ def collect_session_paths(
             f"transcript cwd does not match: session {label} ran in "
             f"{session_cwd or '(no cwd recorded)'}, but --repo resolves to {toplevel}. "
             f"Every path in a transcript is relative to the session's own cwd, so "
-            f"reporting them against this repo would associate another repo's work here."
+            f"reporting them against this repo would associate another repo's work here. "
+            f"USE A DIFFERENT SOURCE, not a different uuid: the session ran elsewhere, "
+            f"so this repo's git window is empty too. Re-run with --pr <n>[,<n>...] or "
+            f"--commit <sha>[,<sha>...] over what you landed here."
         )
 
     paths, dropped = _filter_excluded(observed, exclude)

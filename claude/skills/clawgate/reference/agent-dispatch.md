@@ -34,8 +34,10 @@ PIPELINE, not the toolchain. Node because the agent image is Debian 12 + Node 22
 `ready_for_review` in ~2–3 min.
 
 ## `POST /agents` is FORM-ENCODED, not JSON
-Registered behind `requireSession` — which is a literal pass-through (`internal/api/auth.go`), so on
-the LAN NodePort it needs **no auth**:
+⚠ **There is no `clawgatectl` verb for dispatch and there cannot be a trivial one** — the route is
+form-encoded and answers with an HTML fragment, not JSON, so it stays curl. Registered behind
+`requireSession` — a literal pass-through (`internal/api/auth.go`) — so on the LAN NodePort it needs
+**no auth**:
 
 ```bash
 curl -sS -X POST http://192.168.50.250:30302/agents \
@@ -48,8 +50,9 @@ webhook must live on a **separate hostname**, never a path bypass there — a by
 **unauthenticated agent dispatch** on the internet.
 
 ## ⚠ A dispatch that cannot START fails SILENTLY
-The task stays `in_progress`, `agents.kicked_off` stays `false`, and nothing surfaces it. **Read the
-POD LOGS first**: the clawgate-side message ("gateway for X not ready after 3m0s; leaving
+`provisioningStuckTimeout` (**15m**, `internal/agents/reconcile.go`) marks the **agent** `error` —
+but the task stays `in_progress`, `agents.kicked_off` stays `false`, and nothing surfaces it.
+**Read the POD LOGS first**: the clawgate-side message ("gateway for X not ready after 3m0s; leaving
 provisioning for reconciler to recover") describes the symptom, not the cause, and a reconciler
 cannot recover an unrecoverable pod. Do not read it as a provisioning flake — readiness was ~17–21 s
 on every dispatch that could start.
