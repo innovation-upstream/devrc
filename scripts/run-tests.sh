@@ -660,7 +660,38 @@ TARGET_FLOORS=(
   # ⚠ ZERO new skips — `skipped=0` on this target, and the suite's single skip is
   # still the pinned one in repo-cos. No new FILES: every change is to a file the
   # flake already tracks.
-  "scripts/tests|3428"
+  #
+  # 2026-08-13, the session LABEL/HOTKEY resolver + the tmux session-created
+  # autoname hook: 3704 -> 3774 collected on the merged tree.
+  #
+  # 🔴 THE DELTA IS DECOMPOSED, and the CONTROL was measured first — the entry
+  # above implies main should have been 3478, and it was 3704, i.e. main was
+  # carrying 226 tests this table had never seen. Subtracting from the RECORDED
+  # number would have claimed +296 for this branch and a floor ~226 too high, a
+  # FALSE RED for whoever lands next.
+  #     3704  origin/main at a8f8426, measured FIRST by the authoritative gate
+  #           as the control
+  #     + 27  scripts/tests/test_session_manager.py, 391 -> 418 (the three label
+  #           tiers, the hotkey seam against the slot table, render_label, the
+  #           column trade, and the two-sessions-one-label tie)
+  #     + 44  scripts/tests/test_tmux_autoname_session.py (NEW FILE)
+  #     ----
+  #     3775  the merged tree, which is what the gate printed
+  #   _suggested_floor 3775 = 3775 - min(50, max(1, 3775/20 = 188)) = 3775 - 50
+  #                         = 3725.
+  # Two independent attributions agree: the same delta was measured against the
+  # branch's ORIGINAL base (6eaeb61) too, where the gate printed 3774 at 43
+  # cases in the new file — #446/#448 landed in between and added no tests,
+  # which is what makes the two readings agree rather than a coincidence to
+  # explain away. The 44th case (a MISSING slot table, `set -u` + unset array)
+  # was added after that reading and re-measured here.
+  #
+  # ⚠ ZERO new skips (`skipped=0` on this target; the suite's single skip is
+  # still the pinned one in repo-cos). A NEW FILE was added in BOTH senses —
+  # `scripts/tmux-autoname-session.sh` and its test — and both are `git add`ed;
+  # `test_the_script_is_tracked_by_git` fails if the script ever is not, in the
+  # sandbox by its ABSENCE and on the host via `git ls-files`.
+  "scripts/tests|3725"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —

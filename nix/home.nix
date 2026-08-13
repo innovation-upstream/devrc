@@ -734,6 +734,13 @@ in
     source = ../scripts/tmux-task-resume.sh;
     executable = true;
   };
+  # session-created hook: names an auto-numbered session after its cwd. It
+  # SOURCES scratch-slots.sh from its own directory, so it must land beside it
+  # under ~/.config/tmux/ — the same reason that file is deployed there.
+  home.file.".config/tmux/autoname-session.sh" = {
+    source = ../scripts/tmux-autoname-session.sh;
+    executable = true;
+  };
   # Canonical scratchpad slot table (session<->hotkey<->color<->codename), sourced by
   # scratch-monitor/initiatives/status; must sit beside them under ~/.config/tmux/.
   home.file.".config/tmux/scratch-slots.sh" = {

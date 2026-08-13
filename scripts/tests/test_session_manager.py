@@ -28,6 +28,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import re
 
 import pytest
 
@@ -228,6 +229,14 @@ SLOT_TABLE = '\n'.join([
     '  "scratch2:T:#83a598:Vapor"',
     ')',
 ])
+# The PARSED form of exactly the table above. Deliberately derived by hand
+# rather than by calling the parser, so a broken parser cannot define its own
+# expectation. Keys, colours and codenames are pairwise distinct — a fixture
+# whose fields coincide cannot show WHICH field a value came from.
+SLOTS_FIXTURE = {
+    "scratch7": {"codename": "Grove", "key": "S", "color": "#b8bb26"},
+    "scratch2": {"codename": "Vapor", "key": "T", "color": "#83a598"},
+}
 
 
 def make_runner(local_panes=WORKBENCH_PANES, local_windows=WORKBENCH_WINDOWS,
@@ -326,7 +335,7 @@ def base_gather(**kw):
         use_fuzzyclaw=True,
         now=NOW,
         fuzzyclaw_texts=[json.dumps(TASK_LIVE), json.dumps(TASK_STALE)],
-        codenames={"scratch7": "Grove", "scratch2": "Vapor"},
+        slots=SLOTS_FIXTURE,
         # The clawgate cache: absent by default, so no test inherits a value
         # that depends on the operator's real queue. Override per test.
         blocked_reader=lambda p: None,
@@ -501,6 +510,191 @@ def test_codename_lookup_falls_through_to_the_next_path():
     got = sm.load_scratch_codenames(paths=["/deployed", "/repo"], reader=reader)
     assert seen == ["/deployed", "/repo"]
     assert got == {"scratch7": "Grove", "scratch2": "Vapor"}
+
+
+# =========================================================================== #
+# §3.2b — LABEL RESOLUTION (the three tiers, and the tie they cannot break)
+# =========================================================================== #
+# `codename` is null for every session outside the slot table; measured on the
+# workbench 2026-08-13 that was 9 of ~30 windows, all of them rendering `—`.
+# `resolve_label` fills that in from the cwd, and `label_source` says which tier
+# answered — because "labelled `main` because the cwd is a repo called main" and
+# "labelled `main` because the cwd said nothing" are different facts.
+SYNTH_HOME = "/home/synthuser"
+
+
+def test_tier1_a_slot_table_session_is_labelled_by_its_CODENAME_AND_HOTKEY():
+    """🔴 The hotkey is the ACTIONABLE half. `Grove` says which session it is;
+    `S` is what the operator presses to get there."""
+    got = sm.resolve_label("scratch7", "/w/synth-alpha", SLOTS_FIXTURE,
+                           home=SYNTH_HOME)
+    assert got == {"label": "Grove", "label_source": "codename", "hotkey": "S"}
+
+
+def test_tier1_BEATS_the_cwd_rather_than_merging_with_it():
+    """PRECEDENCE, stated as its own case. The codename is what the hotkeys, the
+    colours and the ledger already call this session; a cwd-derived name for the
+    same window would be a second vocabulary for one thing."""
+    with_cwd = sm.resolve_label("scratch7", "/w/synth-bravo", SLOTS_FIXTURE,
+                                home=SYNTH_HOME)
+    without = sm.resolve_label("scratch7", "", SLOTS_FIXTURE, home=SYNTH_HOME)
+    assert with_cwd == without == {"label": "Grove", "label_source": "codename",
+                                   "hotkey": "S"}
+
+
+def test_tier2_a_session_with_no_codename_is_labelled_by_its_CWD():
+    got = sm.resolve_label("8", "/w/synth-charlie", {}, home=SYNTH_HOME)
+    assert got == {"label": "synth-charlie", "label_source": "path",
+                   "hotkey": None}
+
+
+def test_tier2_a_trailing_slash_is_the_same_directory():
+    """`basename("/w/x/")` is `""`. Without the rstrip this row would fall all
+    the way to `main` — pinned because a mutation sweep can otherwise delete the
+    rstrip and nothing goes red."""
+    assert sm.resolve_label("8", "/w/synth-india/", {}, home=SYNTH_HOME) == {
+        "label": "synth-india", "label_source": "path", "hotkey": None}
+
+
+def test_tier2_an_EMPTY_codename_does_not_win():
+    """A slot entry with a falsy codename is not a name, and returning it would
+    render a blank cell that looks like a bug in the table rather than a missing
+    slot entry. Its key must not leak out either — a hotkey with no label is
+    exactly as useless as a label with no hotkey."""
+    got = sm.resolve_label("8", "/w/synth-delta",
+                           {"8": {"codename": "", "key": "Q"}}, home=SYNTH_HOME)
+    assert got == {"label": "synth-delta", "label_source": "path",
+                   "hotkey": None}
+
+
+@pytest.mark.parametrize("path", [
+    SYNTH_HOME, SYNTH_HOME + "/", "~", "/", "//", "", "   ", None,
+])
+def test_tier3_a_cwd_that_yields_nothing_falls_back_to_main(path):
+    got = sm.resolve_label("8", path, {}, home=SYNTH_HOME)
+    assert got == {"label": "main", "label_source": "fallback", "hotkey": None}
+
+
+def test_tier3_is_DISTINGUISHABLE_from_a_directory_actually_called_main():
+    """SILENT-ZERO, label edition. Both rows read `main`; only `label_source`
+    says which one was measured and which one is a shrug."""
+    real = sm.resolve_label("8", "/w/main", {}, home=SYNTH_HOME)
+    shrug = sm.resolve_label("9", SYNTH_HOME, {}, home=SYNTH_HOME)
+    assert real["label"] == shrug["label"] == "main"
+    assert real["label_source"] == "path"
+    assert shrug["label_source"] == "fallback"
+    assert real != shrug
+
+
+def test_a_tilde_path_resolves_against_the_given_home():
+    assert sm.resolve_label("8", "~/workspace/synth-echo", {},
+                            home=SYNTH_HOME) == {
+        "label": "synth-echo", "label_source": "path", "hotkey": None}
+
+
+def test_label_source_is_always_one_of_the_declared_set():
+    for path in ("/w/synth-fox", SYNTH_HOME, "", "/"):
+        for names in ({}, {"8": {"codename": "Grove", "key": "S"}}):
+            got = sm.resolve_label("8", path, names, home=SYNTH_HOME)
+            assert got["label_source"] in sm.LABEL_SOURCES
+            assert got["label"]          # never None, never empty
+            # 🔴 A key only ever accompanies tier 1, and is None (not "")
+            # otherwise — the shape a consumer branches on.
+            assert (got["hotkey"] is not None) is (
+                got["label_source"] == "codename")
+            assert got["hotkey"] != ""
+    assert set(sm.LABEL_SOURCES) == {"codename", "path", "fallback"}
+
+
+# --------------------------------------------------------------------------- #
+# THE HOTKEY, and where it comes from
+# --------------------------------------------------------------------------- #
+def test_the_hotkey_comes_from_the_SLOT_TABLE_not_a_second_map():
+    """🔴 A SEAM guard, not a spelling one. The slot table is hand-edited and is
+    the single source of truth for session <-> hotkey <-> colour <-> codename;
+    a hardcoded map here — or in the script — would agree today and drift the
+    first time a slot is rekeyed. So the expectation is READ OUT OF the table
+    text, and the answer must track an edit to it.
+    """
+    slots = sm.load_scratch_slots(paths=["/x"], reader=lambda p: SLOT_TABLE)
+    assert slots == SLOTS_FIXTURE
+    for session, entry in slots.items():
+        got = sm.resolve_label(session, "/w/synth-whatever", slots,
+                               home=SYNTH_HOME)
+        assert got["hotkey"] == entry["key"]
+        assert got["label"] == entry["codename"]
+
+    # ...and REKEYING the table moves the answer. A hardcoded map passes every
+    # assertion above and fails this one.
+    rekeyed = SLOT_TABLE.replace('"scratch7:S:', '"scratch7:X:')
+    assert rekeyed != SLOT_TABLE
+    moved = sm.load_scratch_slots(paths=["/x"], reader=lambda p: rekeyed)
+    assert sm.resolve_label("scratch7", "/w/x", moved,
+                            home=SYNTH_HOME)["hotkey"] == "X"
+
+
+def test_load_scratch_codenames_is_a_PROJECTION_of_one_parse():
+    """One rule, one place: the codename map must be derived from the slot
+    parse, not from a second regex pass that can disagree with it."""
+    slots = sm.load_scratch_slots(paths=["/x"], reader=lambda p: SLOT_TABLE)
+    names = sm.load_scratch_codenames(paths=["/x"], reader=lambda p: SLOT_TABLE)
+    assert names == {s: v["codename"] for s, v in slots.items()}
+
+
+def test_the_colour_rides_along_too_but_is_not_rendered():
+    slots = sm.load_scratch_slots(paths=["/x"], reader=lambda p: SLOT_TABLE)
+    assert slots["scratch2"]["color"] == "#83a598"
+
+
+@pytest.mark.parametrize("row,expect", [
+    ({"label": "Gold", "hotkey": "G"}, "Gold (G)"),
+    ({"label": "synth-longer-repo", "hotkey": None}, "synth-longer-repo"),
+    ({"label": "main", "hotkey": None}, "main"),
+    ({"label": "x", "hotkey": ""}, "x"),        # never an empty `()`
+    ({}, "—"),
+])
+def test_render_label_never_fabricates_or_empties_the_parens(row, expect):
+    assert sm.render_label(row) == expect
+
+
+def test_the_label_is_the_LEAF_not_the_repo_root_and_that_is_documented():
+    """🔴 A STATED LIMIT, pinned so the docstring cannot drift away from it.
+    `session-manager` sees a path STRING from another machine, so it does not
+    resolve a repo root — a local `git rev-parse` would answer about whatever
+    happens to sit at that path on THIS host. `tmux-autoname-session.sh` does
+    resolve it, because it runs where the directory lives."""
+    got = sm.resolve_label("8", "/w/synth-golf/nix/system", {}, home=SYNTH_HOME)
+    assert got == {"label": "system", "label_source": "path", "hotkey": None}
+    assert "LEAF, not the git repo root" in sm.label_from_path.__doc__
+
+
+def test_TWO_SESSIONS_IN_ONE_REPO_share_a_label_and_stay_addressable():
+    """🔴 THE TIE, which is the whole reason `label` is additive.
+
+    On the workbench today `0` and `8` are both sitting in one repo, so they
+    resolve to the SAME label. A consumer that switched from `session:window` to
+    `label` would silently address the wrong window; the rows must still be
+    told apart by the identifier, and every renderer must carry it.
+    """
+    panes = sm.parse_panes("\n".join([
+        "%1|1|0|1|w-one|/w/synth-hotel|zsh|first",
+        "%2|2|8|1|w-two|/w/synth-hotel|zsh|second",
+    ]))
+    rows = sm.fold_windows(panes, "workbench", slots={}, now=NOW)
+    assert [r["label"] for r in rows] == ["synth-hotel", "synth-hotel"]
+    assert [r["label_source"] for r in rows] == ["path", "path"]
+    # ...and the identifier still separates them, in the data AND on screen.
+    ids = {(r["session"], r["window_index"]) for r in rows}
+    assert ids == {("0", "1"), ("8", "1")}
+    report = base_gather()
+    report["hosts"]["workbench"]["windows"] = rows
+    report["hosts"]["laptop"]["windows"] = []
+    text = sm.render_table(report)
+    body = [ln for ln in text.splitlines() if "synth-hotel" in ln]
+    assert len(body) == 2
+    assert any(re.search(r"\b0\b.*\b1\b", ln) for ln in body)
+    assert any(re.search(r"\b8\b.*\b1\b", ln) for ln in body)
+    assert body[0] != body[1], "two rows rendered identically — unaddressable"
 
 
 # =========================================================================== #
@@ -1521,6 +1715,15 @@ def test_json_golden_schema_and_values():
         "window_id": "@41",
         "window_name": "win-alpha",
         "codename": "Grove",
+        # tier 1: the slot table names this session, so the cwd never gets a
+        # vote — `repo-alpha` would be a DIFFERENT name for a window the
+        # hotkeys, the HUD and the ledger all already call `Grove`.
+        "label": "Grove",
+        "label_source": "codename",
+        # ...and the key that actually gets the operator there. `S` is this
+        # fixture's, not the real table's — pinned so a hardcoded map cannot
+        # satisfy it.
+        "hotkey": "S",
         "pane_id": "%11",
         "path": "/home/zach/workspace/repo-alpha",
         "command": "claude",
@@ -1559,6 +1762,9 @@ def test_json_golden_schema_and_values():
     assert second["window_id"] == "@52"
     assert second["claude"] is False
     assert second["codename"] is None
+    # ...and this is the row the whole feature exists for: no codename, and a
+    # cwd (`/home/zach/tmp`) that names it anyway.
+    assert (second["label"], second["label_source"]) == ("tmp", "path")
     assert second["status"] == "unknown"
     assert second["age_secs"] is None
     assert second["fuzzyclaw"] is None
@@ -1796,10 +2002,49 @@ def test_table_renders_ch_rows():
     assert "devrc" in text and "Add session-manager" in text
 
 
+def test_table_shows_the_LABEL_column_and_the_frame_did_not_get_wider():
+    """🔴 The trade is the assertion. CODENAME (9 wide) became LABEL (14) and
+    TASK gave up exactly those 5 characters, so the frame is byte-for-byte the
+    width it was — checked against the rule line the renderer prints, not
+    against a number restated here.
+    """
+    text = sm.render_table(base_gather())
+    header = next(ln for ln in text.splitlines() if ln.strip().startswith("HOST"))
+    rule = next(ln for ln in text.splitlines() if "─" in ln)
+    assert "LABEL" in header and "CODENAME" not in header
+    assert len(rule.strip()) == 112
+
+    # 🔴 The width claim, read off the FORMAT STRING rather than off one
+    # rendered line — a line's width depends on the data in it, so a row that
+    # happens to be short would satisfy a length check while the frame grew.
+    widths = [int(w) for w in re.findall(r"\{:<(\d+)\}", sm._ROW_FMT)]
+    assert widths == [9, 12, 3, 14, 25, 6, 8, 4]     # host ses win LABEL task …
+    assert sum(widths) == 9 + 12 + 3 + 9 + 30 + 6 + 8 + 4, (
+        "the table got wider. The pre-change columns were "
+        "host9 session12 win3 CODENAME9 task30 kind6 status8 age4; LABEL may "
+        "only grow by what another column gives up")
+
+    # Nothing was LOST by dropping the column: for a slot session the label IS
+    # the codename — and it now carries the HOTKEY too, which CODENAME never
+    # did and which is the half that gets the operator to the window.
+    assert "Grove (S)" in text
+    # ...and a row that used to render `—` now says where it is — with NO
+    # fabricated key, because none exists for a non-slot session.
+    assert "tmp" in text
+    assert "tmp (" not in text
+    # The longest possible slot cell still fits the column uncut.
+    assert len(sm.render_label({"label": "Yarrow", "hotkey": "Y"})) <= 14
+    # The header and the rows come from ONE format string, so they cannot skew.
+    assert sm._ROW_FMT.count("{") == 9
+    assert header == sm._ROW_FMT.format("HOST", "SESSION", "WIN", "LABEL",
+                                        "TASK", "KIND", "STATUS", "AGE", "WAIT")
+
+
 def test_table_does_not_crash_on_none_valued_fields():
     report = base_gather()
     row = report["hosts"]["workbench"]["windows"][0]
-    for key in ("task", "codename", "status", "age_secs", "session"):
+    for key in ("task", "codename", "label", "label_source", "status",
+                "age_secs", "session"):
         mutated = copy.deepcopy(report)
         mutated["hosts"]["workbench"]["windows"][0][key] = None
         assert isinstance(sm.render_table(mutated), str)
@@ -2921,7 +3166,7 @@ def test_a_detail_json_never_claims_a_measured_absence_it_did_not_measure(
                                     local_windows_err="list-windows died"))
     monkeypatch.setattr(sm, "read_fuzzyclaw_texts",
                         lambda *a, **k: [json.dumps(TASK_LIVE)])
-    monkeypatch.setattr(sm, "load_scratch_codenames", lambda *a, **k: {})
+    monkeypatch.setattr(sm, "load_scratch_slots", lambda *a, **k: {})
     # 🔴 `--fuzzyclaw` is now REQUIRED to reach this code path at all: the join
     # is opt-in, so without it the status would be `skipped` and this test
     # would pass vacuously against a source that was never read.
@@ -3300,7 +3545,7 @@ def mix_gather(**kw):
     defaults = dict(hosts=("workbench",), local_host="workbench",
                     runner=make_runner(local_panes=IDLE_MIX_PANES,
                                        local_windows=IDLE_MIX_WINDOWS),
-                    fuzzyclaw_texts=[], codenames={})
+                    fuzzyclaw_texts=[], slots={})
     defaults.update(kw)
     return base_gather(**defaults)
 
@@ -4867,7 +5112,7 @@ def test_fuzzyclaw_is_OFF_by_default_and_publishes_None_not_zero():
         is False
     rep = _REAL_GATHER(hosts=("workbench",), local_host="workbench",
                        runner=make_runner(), use_ch=False, now=NOW,
-                       codenames={}, blocked_reader=lambda p: None)
+                       slots={}, blocked_reader=lambda p: None)
     assert rep["fuzzyclaw"]["status"] == "skipped"
     assert rep["fuzzyclaw"]["files_seen"] is None
     assert rep["summary"]["fuzzyclaw_live"] is None
@@ -4892,7 +5137,7 @@ def test_the_fuzzyclaw_flags_compose_with_explicit_OFF_winning(
     def fake_gather(**kw):
         seen.update(kw)
         return _REAL_GATHER(**dict(kw, runner=make_runner(),
-                                   fuzzyclaw_texts=[], codenames={},
+                                   fuzzyclaw_texts=[], slots={},
                                    blocked_reader=lambda p: None, now=NOW))
     monkeypatch.setattr(sm, "gather", fake_gather)
     sm.main(["scan", "--host", "workbench", "--no-ch", *argv])
@@ -4908,7 +5153,7 @@ def test_no_capture_flag_reaches_gather(monkeypatch, absent_blocked_cache):
 
     def fake_gather(**kw):
         seen.update(kw)
-        return _REAL_GATHER(**dict(kw, runner=make_runner(), codenames={},
+        return _REAL_GATHER(**dict(kw, runner=make_runner(), slots={},
                                    blocked_reader=lambda p: None, now=NOW))
     monkeypatch.setattr(sm, "gather", fake_gather)
     sm.main(["scan", "--host", "workbench", "--no-ch", "--no-capture"])
@@ -4940,9 +5185,11 @@ def test_the_row_FIELD_LEDGER_fails_when_it_grows_or_shrinks():
     row = base_gather()["hosts"]["workbench"]["windows"][0]
     expected = {
         "host", "session", "window_index", "window_id", "window_name",
-        "codename", "pane_id", "path", "command", "task", "claude", "busy",
-        "age_secs", "status", "waiting_probable", "waiting_signals",
-        "waiting_status", "claude_session_id", "fuzzyclaw", "panes",
+        "codename", "label", "label_source", "hotkey", "pane_id", "path",
+        "command",
+        "task", "claude", "busy", "age_secs", "status", "waiting_probable",
+        "waiting_signals", "waiting_status", "claude_session_id", "fuzzyclaw",
+        "panes",
     }
     assert set(row) == expected
     for field in expected:
