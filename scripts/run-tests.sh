@@ -595,12 +595,17 @@ TARGET_FLOORS=(
   # branch that adds a test, and rerere has replayed a stale resolution onto
   # it before). _suggested_floor 3341 = 3341 - min(50, max(1, 167)) = 3291.
   #
-  # 2026-08-12, the /handoff step-4 probe-first restructure: +7 in this target,
-  # for a merged-tree total re-measured below. `_suggested_floor` applied to the
-  # gate's OWN printed count (the python spelling in test_run_tests_floors.py
-  # agrees). RE-MEASURED TWICE, because main moved under this branch twice while
-  # it was in flight — 3164 and then this number; only the last one is worth
-  # anything.
+  # 2026-08-12, the /handoff step-4 probe-first restructure: 3341 -> 3348
+  # collected, +7 in this target. The gate's own line on the twice-merged tree:
+  #   PASS  scripts/tests  (collected=3348 passed=3348 skipped=0)
+  # put through the gate's own function: _suggested_floor 3348 = 3348 - min(50,
+  # max(1, 167)) = 3298. (The python spelling in test_run_tests_floors.py
+  # agrees.)
+  #
+  # 🔴 RE-MEASURED THREE TIMES AND THE FIRST TWO READINGS ARE VOID, because main
+  # moved under this branch twice while it was in flight: 3214 (floor 3164),
+  # then 3341 arrived with #431/#435, then 3348. Only the last, taken by the
+  # authoritative gate on the tree that actually exists, is worth anything.
   #
   # 🔴 THE DELTA IS DECOMPOSED, because a floor line that records movement it did
   # not cause is how the next author inherits a wrong number:
@@ -608,11 +613,14 @@ TARGET_FLOORS=(
   #     +  7  this branch (4 in test_subsystem_recall.py, 3 in
   #           test_subsystem_touch.py — confirmed per-file by --collect-only)
   #     +  7  #433's test_cpu_monitor_ignore.py, landed mid-flight
-  #     + ...  #431's clawgate suite, landed mid-flight
-  # Two INDEPENDENT attributions agreed exactly at the 3214 checkpoint: the
-  # gate's total and per-file collection. Had they disagreed, something else in
-  # the target had moved and neither number would have been a fact about a
-  # branch.
+  #     +134  #431 + #435, landed mid-flight
+  #     ----
+  #     3348  the merged tree, which is what the gate printed
+  # This branch's +7 held across all THREE measurements, against three different
+  # bases — which is the check. Two independent attributions also agreed exactly
+  # at the 3214 checkpoint: the gate's total and per-file collection. Had they
+  # disagreed, something else in the target had moved and neither number would
+  # have been a fact about a branch.
   #
   # 🔴 MEASURING MAIN IS WHAT MADE THIS SAFE. The 3100 entry's own arithmetic
   # implies main should have been 3150; it measured 3200, so main was carrying 50
@@ -625,7 +633,7 @@ TARGET_FLOORS=(
   # (claude/skills/handoff/reference/index-write.md); it is `git add`ed, and
   # `test_the_sidecar_is_DEPLOYED` fails if it ever is not — in the sandbox by
   # its absence, on the host via `git ls-files`.
-  "scripts/tests|3291"
+  "scripts/tests|3298"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
