@@ -1037,6 +1037,56 @@ in
   home.file.".claude/hooks/next-step-nudge.py" = {
     source = ../scripts/claude-hooks/next-step-nudge.py;
   };
+  # 🔴 THE REGISTRAR ITSELF — the hook that makes the hooks above DO anything.
+  # settings.json is per-host and unmanaged (permissions/allowlists), so a hook
+  # script landing in ~/.claude/hooks/ registers nothing by itself; this script
+  # appends the missing entries. Until 2026-08-13 it had NO home.file entry at
+  # all — only the two comments above mentioning it — and nothing ever invoked
+  # it. Measured consequence: next-step-nudge.py (#452) deployed to both hosts
+  # and sat INERT, because the switch reported success about the LAYER BELOW
+  # (the file landed) and nothing checked the layer above (it was registered).
+  # Same shape as this repo's `git add`-or-the-flake-omits-it trap.
+  #
+  # No `force = true` and no `dropStaleClaudeHooks` entry, unlike bash-guard.py:
+  # that treatment exists to displace a PRE-EXISTING hand-placed regular file,
+  # and this path has never been hand-placed. MEASURED 2026-08-13 on both hosts
+  # before the first switch that deploys it: `ls -la ~/.claude/hooks/` shows
+  # eight entries on the workbench and eight on the laptop, all store symlinks,
+  # and register-nudge-hook.py among none of them. If a foreign file ever does
+  # appear here the switch fails LOUDLY ("would be clobbered") rather than
+  # silently leaving it unmanaged — add it to dropStaleClaudeHooks then.
+  home.file.".claude/hooks/register-nudge-hook.py" = {
+    source = ../scripts/claude-hooks/register-nudge-hook.py;
+  };
+
+  # ...and RUN it, every switch. Delivering the registrar without invoking it
+  # would only move the manual step, not remove it.
+  #
+  # 🔴 SLOT: after "linkGeneration", NOT merely after "writeBoundary".
+  # linkGeneration is the step that creates the home-file symlinks, and it is
+  # itself `entryAfter ["writeBoundary"]` — so two entries that both declare
+  # only writeBoundary have NO order between them. MEASURED in this host's
+  # current generated `activate`: activityCollectorEnv and
+  # browserBridgeExtension (both writeBoundary-only) are emitted at lines 290
+  # and 300, linkGeneration at 502 — i.e. the topo sort put them BEFORE the
+  # files land. Copying that precedent here would have run the registrar
+  # before ~/.claude/hooks/register-nudge-hook.py existed on the one switch
+  # where it matters (the first one on each host), and worked on every switch
+  # after — a bug visible only on a fresh host.
+  #
+  # VERIFIED on the built artifact rather than argued: `nix build` of this
+  # config's activation-script derivation emits "registerClaudeHooks" at line
+  # 546, after "linkGeneration" at 502. (Building that derivation activates
+  # nothing — it only writes the script.)
+  #
+  # The wrapper never returns non-zero, so this cannot abort a switch under
+  # activation's `set -eu -o pipefail`; see the contract in its header.
+  # $DRY_RUN_CMD keeps `home-manager build`/dry-run read-only.
+  home.activation.registerClaudeHooks =
+    lib.hm.dag.entryAfter [ "writeBoundary" "linkGeneration" ] ''
+      $DRY_RUN_CMD ${pkgs.bash}/bin/bash ${../scripts/claude-hooks/register-hooks-activation.sh} \
+        "$HOME/.claude/hooks/register-nudge-hook.py" ${pkgs.python312}/bin/python3
+    '';
 
   # ------------------------------------------------------------------------- #
   # opencode — global config, instruction file, env plugin and subagents.
