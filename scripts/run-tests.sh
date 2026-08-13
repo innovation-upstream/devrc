@@ -577,37 +577,48 @@ TARGET_FLOORS=(
   # it is intermittent and host-level, not a regression here; recorded because a
   # red baseline that nobody writes down is how a real failure gets waved past.
   #
-  # 2026-08-12, the /handoff step-4 probe-first restructure: 3200 -> 3207
-  # collected, +7 in this target. `_suggested_floor 3207` = 3207 - min(50,
-  # max(1, 160)) = 3157, from the gate's OWN shell function (the python
-  # spelling in test_run_tests_floors.py agrees).
+  # 2026-08-12, the /handoff step-4 probe-first restructure: 3200 -> 3214
+  # collected. `_suggested_floor 3214` = 3214 - min(50, max(1, 160)) = 3164,
+  # from the gate's OWN shell function (the python spelling in
+  # test_run_tests_floors.py agrees). Measured by `nix build
+  # .#checks.x86_64-linux.pytests` on the MERGED tree, not computed.
   #
-  # 🔴 ATTRIBUTED BY A CONTROL PAIR, not by subtracting from the line above.
-  # The authoritative gate was run on UNMODIFIED origin/main (c7579e4) FIRST and
-  # printed `collected=3200` — but the previous entry's own arithmetic implies
-  # 3150, so main was carrying 50 tests this table had never seen. Had this
-  # branch computed its delta from the recorded number instead of measuring
-  # main, it would have claimed +57 and written a floor 50 too high — a FALSE
-  # RED for whoever landed next. Both readings come from
-  # `nix build .#checks.x86_64-linux.pytests`, and this branch is a direct child
-  # of c7579e4 with no rebase, so the +7 is this branch's and nothing else's.
-  # The +7: four guards over the new reference/ sidecar (a positive control that
-  # a MOVED pin still bites, an absence control, link resolution, deployability),
-  # one behavioural test that the cwd-mismatch refusal names --pr/--commit, and
-  # two sentence pins.
+  # 🔴 THE +14 IS TWO BRANCHES, AND ONLY +7 IS THIS ONE. Decomposed, because a
+  # floor line that records a delta it did not cause is how the next author
+  # inherits a wrong number:
+  #     3200  unmodified origin/main at c7579e4, measured FIRST as the control
+  #     +  7  this branch
+  #     +  7  #433's scripts/tests/test_cpu_monitor_ignore.py, which landed on
+  #           main WHILE this branch was in flight
+  #     ----
+  #     3214  the merged tree, which is what the gate printed
+  # Two INDEPENDENT attributions agree exactly, which is the check: the gate's
+  # total, and per-file `--collect-only` (7 in the new upstream file; 4 + 3 in
+  # this branch's two touched files). Had they disagreed, something else in the
+  # target had moved and neither number would have been a fact about a branch.
   #
-  # ⚠ ZERO new skips — this target reports `skipped=0` in both runs, and the
-  # suite's single skip is still the pinned one in repo-cos. A NEW FILE was
-  # added (claude/skills/handoff/reference/index-write.md); it is `git add`ed,
-  # and `test_the_sidecar_is_DEPLOYED` now fails if it ever is not — in the
-  # sandbox by its absence, on the host via `git ls-files`.
+  # 🔴 MEASURING MAIN IS WHAT MADE THIS SAFE. The previous entry's own arithmetic
+  # implies main should have been 3150; it measured 3200, so main was carrying 50
+  # tests this table had never seen. Subtracting from the RECORDED number would
+  # have produced +64 for this branch and a floor ~50 too high — a FALSE RED for
+  # whoever landed next. Re-run the gate; never reconcile the two sides by hand.
   #
-  # ⚠ THE dl-router FLAKE RECORDED ABOVE DID NOT REPRODUCE. Both runs of this
-  # branch's control pair reported `PASS scripts/dl-router/tests (collected=991
-  # passed=991 skipped=0)` — including the one on unmodified main. Recorded
-  # because the note above is the only reason anyone would expect otherwise, and
-  # a flake nobody re-measures becomes folklore about a red main.
-  "scripts/tests|3157"
+  # ⚠ ZERO new skips — `skipped=0` on this target in every run, and the suite's
+  # single skip is still the pinned one in repo-cos. A NEW FILE was added
+  # (claude/skills/handoff/reference/index-write.md); it is `git add`ed, and
+  # `test_the_sidecar_is_DEPLOYED` fails if it ever is not — in the sandbox by
+  # its absence, on the host via `git ls-files`.
+  #
+  # ⚠ THE dl-router st_blocks FLAKE RECORDED ABOVE IS REAL AND IS STILL A FLAKE:
+  # it reproduced ONCE in FIVE authoritative runs during this branch's work
+  # (`assert 16904 == 16896` — note the operands are REVERSED from the report
+  # above, which is itself the nondeterminism). The other four, including the one
+  # on unmodified main and the final merged-tree run, reported `PASS
+  # scripts/dl-router/tests (collected=991 passed=991 skipped=0)`. This branch
+  # touches no dl-router file. 1-in-5 is worth writing down: a single red run is
+  # not a red main, and a flake nobody re-measures becomes folklore in both
+  # directions.
+  "scripts/tests|3164"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
