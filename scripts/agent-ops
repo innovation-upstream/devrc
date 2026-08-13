@@ -1162,8 +1162,11 @@ def render_blocked(clawgate, mail, titles=None) -> list:
             paint(_truncate(detail, 72), DIM)))
         # 🔴 A cache written by an OLDER poller carries no stuck information.
         # That is "not measured", not "zero stuck" — say so rather than let the
-        # absence read as an all-clear.
-        if clawgate.get("schema") is None:
+        # absence read as an all-clear. `CG.schema_ok`, not a local spelling:
+        # this site used to test `is None`, so a cache carrying an explicit
+        # `schema: 1` slipped straight through to the all-clear here while
+        # session-manager (`>= SCHEMA`) warned on the very same bytes.
+        if not CG.schema_ok(clawgate):
             lines.append("      " + paint(
                 "! stale cache schema — stuck dispatches NOT measured "
                 "(restart bar-status-poll)", RED))
@@ -1591,6 +1594,27 @@ def maybe_refresh_telemetry(now=None):
 # ===========================================================================
 # Frame assembly + interactive loop
 # ===========================================================================
+def should_enrich_clawgate(clawgate) -> bool:
+    """Ask the live API rather than trust this cache?
+
+    Two reasons to ask, and the second is the one that is easy to lose: the
+    cache says there is something to NAME (count > 0), or the cache PREDATES the
+    stuck predicate, in which case its zero was computed by a rule that could not
+    see a stuck dispatch at all. A zero from a measurement that never looked is
+    not evidence of absence.
+
+    🔴 A NAMED FUNCTION so it can be tested for what it DOES. Its only test used
+    to be `assert 'clawgate.get("schema") is None' in inspect.getsource(...)` — a
+    spelled guard that pinned one rendering of the condition while saying nothing
+    about whether the condition was right, and it stayed green through the whole
+    period in which this site and session-manager disagreed on the very same
+    cache. `CG.schema_ok` is the shared reading; this decides what to do with it.
+    """
+    if not clawgate:
+        return False
+    return (clawgate.get("count") or 0) > 0 or not CG.schema_ok(clawgate)
+
+
 def build_body_lines(width: int) -> list:
     """Assemble the scrollable BODY (all sections) as a list of ANSI lines.
 
@@ -1604,12 +1628,7 @@ def build_body_lines(width: int) -> list:
     civitai = read_json(os.path.join(BAR_STATUS_DIR, "civitai.json"))
 
     titles = []
-    # Enrich when the cache says there is something to name, AND whenever the
-    # cache predates the stuck predicate (schema missing): a zero from a cache
-    # that never measured stuck dispatches is not evidence there are none, so
-    # the live API is asked instead of trusting it.
-    if clawgate and ((clawgate.get("count") or 0) > 0
-                     or clawgate.get("schema") is None):
+    if should_enrich_clawgate(clawgate):
         titles = enrich_clawgate_titles()
 
     panes = parse_panes(list_tmux_panes_raw())

@@ -554,6 +554,22 @@ BLOCKS = [
 ]
 
 
+#: Fields a block needs BEYOND `count`/`state` to render its normal, FULLY
+#: MEASURED shape. Only clawgate has any: its block also reports stuck
+#: dispatches, and an ABSENT `stuck_count` renders `?` on purpose (a cache from a
+#: poller predating the stuck predicate carries a count computed by the old
+#: status-only rule, so it is a different number, not merely a partial one). The
+#: generic block tests below are about icon / colour / hide-at-zero, so they hand
+#: it a MEASURED zero; the `?` and `!N` renderings have their own tests.
+BLOCK_MEASURED_EXTRA = {"clawgate": {"stuck_count": 0}}
+
+
+def _measured(name, **fields):
+    """A cache payload for `name` in its fully-measured shape."""
+    fields.update(BLOCK_MEASURED_EXTRA.get(name, {}))
+    return fields
+
+
 def _expected_text(mod, count):
     # The alert blocks (i3status-alerts / -civitai) prepend a literal nf-md-alert
     # GLYPH to the text; i3status-civitai additionally prefixes the `civ` LABEL.
@@ -578,7 +594,7 @@ def test_block_hides_at_zero(name, mod, icon, default_state):
 
 @pytest.mark.parametrize("name,mod,icon,default_state", BLOCKS)
 def test_block_visible_and_coloured_when_positive(name, mod, icon, default_state):
-    out = mod.render({"count": 3, "state": default_state})
+    out = mod.render(_measured(name, count=3, state=default_state))
     exp = _expected_text(mod, 3)
     if getattr(mod, "ALERT_GLYPH", None):
         # alert blocks carry the glyph in the text, NOT the i3status-rust `icon`
@@ -588,6 +604,116 @@ def test_block_visible_and_coloured_when_positive(name, mod, icon, default_state
         assert out["icon"] == icon
     assert out["text"] == exp and out["short_text"] == exp
     assert out["state"] == default_state
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 The clawgate block and the STUCK half — the surface that could not show it.
+# --------------------------------------------------------------------------- #
+def test_the_bar_RENDERS_A_STUCK_DISPATCH_DIFFERENTLY_from_plain_pending():
+    """🔴 THE MEASURED DEFECT. `2 open` and `2 open + 1 STUCK` both rendered
+    `{"text": "3", "state": "Warning"}` — byte-identical. The bar is one of the
+    three surfaces the stuck predicate was built for and it could not express
+    the one condition worth walking to a terminal for.
+
+    Everything about the two blocks must differ: the text AND the colour.
+    """
+    plain_pending = clawgate_block.render(
+        {"count": 3, "stuck_count": 0, "state": "Warning"})
+    with_stuck = clawgate_block.render(
+        {"count": 3, "stuck_count": 1, "state": "Critical"})
+    assert plain_pending["text"] == "3"
+    assert with_stuck["text"] == "3!1"
+    assert plain_pending["text"] != with_stuck["text"]
+    assert plain_pending["state"] != with_stuck["state"]
+    assert with_stuck["state"] == "Critical"
+    assert with_stuck["short_text"] == with_stuck["text"]
+
+
+@pytest.mark.parametrize("stuck,expected", [
+    (0, "5"),          # a MEASURED all-clear renders nothing extra
+    (1, "5!1"),
+    (4, "5!4"),
+    (None, "5?"),      # key present but null -> unmeasured
+])
+def test_the_stuck_half_of_the_block_text(stuck, expected):
+    assert clawgate_block.render(
+        {"count": 5, "stuck_count": stuck, "state": "Warning"})["text"] == expected
+
+
+def test_a_cache_with_NO_stuck_key_renders_unmeasured_not_a_clean_count():
+    """🔴 A cache written by a poller predating the stuck predicate carries a
+    `count` computed by the old status-only rule — a DIFFERENT number, not a
+    partial one. Rendering it as a clean count is the substitution of an unread
+    queue for an empty one. The measured zero and the absent key must not look
+    alike."""
+    absent = clawgate_block.render({"count": 5, "state": "Warning"})
+    measured_zero = clawgate_block.render(
+        {"count": 5, "stuck_count": 0, "state": "Warning"})
+    assert absent["text"] == "5?"
+    assert measured_zero["text"] == "5"
+    assert absent["text"] != measured_zero["text"]
+
+
+@pytest.mark.parametrize("junk", ["x", [], {}, None, True, False, 2.5])
+def test_a_malformed_stuck_count_reads_as_unmeasured_never_as_zero(junk):
+    # 🔴 Fail-safe in the HONEST direction: garbage is "cannot tell" (`?`), never
+    # "none" (a bare count). `True`/`False` are in here deliberately — a bool is
+    # an int in Python, so `int(True) == 1` would render a fabricated stuck
+    # dispatch and `int(False) == 0` a fabricated all-clear.
+    out = clawgate_block.render({"count": 2, "stuck_count": junk,
+                                 "state": "Warning"})
+    assert out["text"] == "2?", junk
+
+
+def test_the_stuck_block_still_hides_at_zero_and_on_a_stale_cache():
+    # The calm contract is unchanged: a stuck count cannot make an empty or
+    # unusable cache visible.
+    assert clawgate_block.render(
+        {"count": 0, "stuck_count": 2, "state": "Critical"})["text"] == ""
+    assert clawgate_block.render(
+        {"count": 3, "stuck_count": 2, "state": "stale"})["text"] == ""
+    assert clawgate_block.render(
+        {"count": 3, "stuck_count": 2, "error": "boom"})["text"] == ""
+
+
+def test_the_block_renders_what_attention_ACTUALLY_writes():
+    """🔴 THE SEAM between the predicate and the pixel. Both halves were tested
+    in isolation and the pair was still broken; these drive the real roll-up into
+    the real renderer so no hand-written fixture can paper over a key rename.
+    """
+    import importlib.machinery
+    import importlib.util
+    lib = SCRIPTS / "lib" / "clawgate_tasks.py"
+    ldr = importlib.machinery.SourceFileLoader("_cg_seam", str(lib))
+    cg = importlib.util.module_from_spec(
+        importlib.util.spec_from_file_location("_cg_seam", str(lib), loader=ldr))
+    ldr.exec_module(cg)
+
+    now = 1_800_000_000.0
+    import datetime
+
+    def iso(e):
+        return (datetime.datetime.fromtimestamp(e, datetime.timezone.utc)
+                .strftime("%Y-%m-%dT%H:%M:%S.%fZ"))
+
+    def task(tid, status, agent="none", age=7200):
+        t = {"id": tid, "title": "synthetic %d" % tid, "status": status,
+             "createdAt": iso(now - age)}
+        if agent != "none":
+            t["agent"] = agent
+        return t
+
+    healthy = [task(901, "open", None), task(902, "ready_for_review", None),
+               # a freshly dispatched, unlinked task — the live shape
+               task(903, cg.IN_PROGRESS, None, age=30)]
+    wedged = healthy + [task(904, cg.IN_PROGRESS, None, age=9000)]
+
+    h = clawgate_block.render(cg.attention(healthy, now))
+    w = clawgate_block.render(cg.attention(wedged, now))
+    assert h == {"icon": "tasks", "text": "2", "short_text": "2",
+                 "state": "Warning"}
+    assert w == {"icon": "tasks", "text": "3!1", "short_text": "3!1",
+                 "state": "Critical"}
 
 
 def test_civitai_block_labels_count_distinctly():
@@ -696,8 +822,9 @@ def test_block_subprocess_missing_file_is_invisible(tmp_path, script, cachefile)
     ("i3status-civitai", "civitai.json", None, "civ 2"),
 ])
 def test_block_subprocess_positive_renders(tmp_path, script, cachefile, icon, text):
-    (tmp_path / cachefile).write_text(json.dumps(
-        {"count": 2, "state": "Warning", "detail": "x"}))
+    (tmp_path / cachefile).write_text(json.dumps(_measured(
+        cachefile.removesuffix(".json"),
+        count=2, state="Warning", detail="x")))
     env = dict(os.environ, BAR_STATUS_DIR=str(tmp_path))
     r = subprocess.run([sys.executable, str(SCRIPTS / script)],
                        capture_output=True, text=True, env=env)
@@ -866,6 +993,154 @@ def test_eval_skips_malformed_payloads():
         out = poll.evaluate_edge_toast("alerts", bad, ALERTS_SPEC,
                                        fire=fr, read=rd, write=wr)
         assert out is None and fired == []
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE STUCK TOAST, and why it needs a latch of its OWN.
+# --------------------------------------------------------------------------- #
+STUCK_SPEC_NAME = "clawgate_stuck"
+
+
+def _both_specs():
+    s = poll._toast_specs()
+    return s["clawgate"], s[STUCK_SPEC_NAME]
+
+
+def test_the_stuck_toast_FIRES_WHILE_THE_COUNT_LATCH_IS_ALREADY_SET():
+    """🔴 THE MEASURED DEFECT. The clawgate toast uses threshold 0 with a LEVEL
+    latch, and the live board sits permanently above zero (13 when this was
+    written), so its latch is ALWAYS set. A dispatch wedging is then a 13 -> 14
+    increment on an already-latched source: no toast, same colour on the bar,
+    nothing anywhere. The one event worth interrupting for could not interrupt.
+
+    So the stuck toast gets its own latch on its own number. This drives BOTH
+    specs over the same payload with the count latch already set.
+    """
+    cg_spec, stuck_spec = _both_specs()
+    latches = {"clawgate": True, STUCK_SPEC_NAME: False}   # count already latched
+    fired = []
+    rd = lambda n: latches[n]                                  # noqa: E731
+    wr = lambda n, v: latches.__setitem__(n, v)                # noqa: E731
+    fr = lambda *a, **k: fired.append(a[1])                    # noqa: E731
+
+    payload = {"count": 14, "stuck_count": 1, "state": "Critical",
+               "detail": "14 need you (12 open, 1 review, 1 stuck)"}
+    # the ordinary clawgate toast stays quiet — steady state, correctly
+    assert poll.evaluate_edge_toast("clawgate", payload, cg_spec,
+                                    fire=fr, read=rd, write=wr) == (False, True)
+    # …and the stuck toast fires anyway. THIS is the independence.
+    assert poll.evaluate_edge_toast(STUCK_SPEC_NAME, payload, stuck_spec,
+                                    fire=fr, read=rd, write=wr) == (True, True)
+    assert len(fired) == 1 and "STUCK" in fired[0]
+    assert latches == {"clawgate": True, STUCK_SPEC_NAME: True}
+
+
+def test_the_two_clawgate_latches_are_SEPARATE_FILES():
+    # Structural: one latch path per spec name. Sharing a file would recreate the
+    # coupling this exists to break, and no behavioural test of the pure decision
+    # function would notice.
+    assert poll._latch_path("clawgate") != poll._latch_path(STUCK_SPEC_NAME)
+
+
+def test_the_stuck_toast_does_not_refire_while_the_wedge_persists():
+    _, stuck_spec = _both_specs()
+    state, fired, rd, wr, fr = _latch_store(initial=True)
+    out = poll.evaluate_edge_toast(STUCK_SPEC_NAME,
+                                   {"count": 9, "stuck_count": 2,
+                                    "state": "Critical"},
+                                   stuck_spec, fire=fr, read=rd, write=wr)
+    assert out == (False, True) and fired == []
+
+
+def test_the_stuck_latch_clears_when_the_wedge_does_and_can_refire():
+    _, stuck_spec = _both_specs()
+    state, fired, rd, wr, fr = _latch_store(initial=True)
+    # resolved: stuck back to a MEASURED zero -> latch clears, no toast
+    assert poll.evaluate_edge_toast(
+        STUCK_SPEC_NAME, {"count": 9, "stuck_count": 0, "state": "Warning"},
+        stuck_spec, fire=fr, read=rd, write=wr) == (False, False)
+    assert fired == []
+    # a NEW wedge then re-fires, even though `count` never moved
+    assert poll.evaluate_edge_toast(
+        STUCK_SPEC_NAME, {"count": 9, "stuck_count": 1, "state": "Critical"},
+        stuck_spec, fire=fr, read=rd, write=wr) == (True, True)
+    assert len(fired) == 1
+
+
+def test_an_ABSENT_stuck_count_SKIPS_rather_than_clearing_the_latch():
+    """🔴 An absent key is NOT a measured zero. A cache from a poller predating
+    the stuck predicate carries no `stuck_count`; reading that as 0 would clear
+    the latch and re-toast a still-wedged dispatch the moment a current poller
+    wrote a real number again."""
+    _, stuck_spec = _both_specs()
+    state, fired, rd, wr, fr = _latch_store(initial=True)
+    out = poll.evaluate_edge_toast(STUCK_SPEC_NAME,
+                                   {"count": 9, "state": "Warning"},
+                                   stuck_spec, fire=fr, read=rd, write=wr)
+    assert out is None
+    assert fired == [] and state["latched"] is True    # untouched
+
+
+@pytest.mark.parametrize("bad", [None, "NaN", [], {}, "x"])
+def test_a_MALFORMED_stuck_count_also_skips(bad):
+    # ⚠ SCOPE, stated because the two surfaces differ on purpose: the POLLER
+    # keeps its pre-existing `int()` coercion, so a numeric STRING ("2") is
+    # accepted here, while the BLOCK's renderer is strict and shows `?` for it.
+    # The poller is the write path and this leniency predates the stuck predicate
+    # — it is not widened here, and nothing in the pipeline produces a string
+    # count. Non-numeric and absent values skip on BOTH, which is the property
+    # that matters: a latch is never cleared by something nobody measured.
+    _, stuck_spec = _both_specs()
+    state, fired, rd, wr, fr = _latch_store(initial=True)
+    assert poll.evaluate_edge_toast(
+        STUCK_SPEC_NAME, {"count": 9, "stuck_count": bad, "state": "Warning"},
+        stuck_spec, fire=fr, read=rd, write=wr) is None
+    assert fired == [] and state["latched"] is True
+
+
+def test_the_stuck_toast_is_LOUDER_than_the_ordinary_pending_one():
+    cg_spec, stuck_spec = _both_specs()
+    assert cg_spec["urgency"] == "normal"
+    assert stuck_spec["urgency"] == "critical"
+    assert stuck_spec["summary"] != cg_spec["summary"]
+    assert stuck_spec["count_key"] == "stuck_count"
+    assert cg_spec.get("count_key", "count") == "count"
+
+
+def test_BOTH_clawgate_toasts_reach_the_dispatch_loop_from_ONE_payload(
+        monkeypatch):
+    """🔴 THE SEAM. `_dispatch_all` iterates POLLED SOURCES, and there is no
+    `clawgate_stuck` poller — a derived spec that nothing dispatches is a toast
+    that can never fire, and every unit test of the decision function above would
+    still pass. This drives the real loop with the real spec table.
+    """
+    seen = {}
+
+    def fake_eval(name, payload, spec, **kw):
+        seen[name] = (payload, spec)
+        return (True, True)
+
+    monkeypatch.setattr(poll, "evaluate_edge_toast", fake_eval)
+    payload = {"count": 4, "stuck_count": 1, "state": "Critical", "detail": "d"}
+    poll._dispatch_all([("clawgate", payload)])
+
+    assert sorted(seen) == ["clawgate", STUCK_SPEC_NAME], sorted(seen)
+    # Both read the SAME payload…
+    assert seen["clawgate"][0] is seen[STUCK_SPEC_NAME][0] is payload
+    # …and gate on DIFFERENT numbers in it.
+    assert seen[STUCK_SPEC_NAME][1]["count_key"] == "stuck_count"
+    assert seen["clawgate"][1].get("count_key", "count") == "count"
+
+
+def test_a_derived_spec_is_NOT_dispatched_when_its_source_did_not_poll(
+        monkeypatch):
+    # A source that failed to poll produces no payload for the loop; the derived
+    # toast must not be dispatched against nothing.
+    fired = []
+    monkeypatch.setattr(poll, "evaluate_edge_toast",
+                        lambda name, *a, **k: fired.append(name))
+    poll._dispatch_all([("mail", {"count": 1, "state": "Warning"})])
+    assert fired == ["mail"], fired
 
 
 def test_eval_is_failsafe_when_fire_raises():
@@ -1308,9 +1583,25 @@ def test_the_SOURCES_table_is_a_LEDGER_of_every_polled_source():
     # Every polled source has a refresh signal, and every signal has a poller.
     assert set(names) == set(poll.SIGNALS), \
         sorted(set(names) ^ set(poll.SIGNALS))
-    # Every toast spec belongs to something actually polled.
-    assert set(poll._toast_specs()) <= set(names), \
-        sorted(set(poll._toast_specs()) - set(names))
+    # 🔴 Every toast spec gates on a payload something actually POLLS. A spec is
+    # no longer 1:1 with a source — `clawgate_stuck` is a second, independently
+    # latched toast over the clawgate payload — so the relationship to assert is
+    # "the payload this spec reads comes from a polled source", via `source`.
+    # The previous `set(specs) <= set(names)` spelled that as "every spec name IS
+    # a source name", which a derived spec cannot satisfy however correct it is.
+    specs = poll._toast_specs()
+    for spec_name, spec in specs.items():
+        assert spec.get("source", spec_name) in names, \
+            "toast spec %r reads a payload nothing polls" % spec_name
+    # …and the derived specs are a pinned LEDGER of their own: one appearing
+    # unreviewed is a toast nobody decided to fire.
+    derived = {n: s["source"] for n, s in specs.items() if s.get("source")}
+    assert derived == {"clawgate_stuck": "clawgate"}, derived
+    # A derived spec must gate on a DIFFERENT number than its source's own spec,
+    # or it is a duplicate toast that fires on the same edge.
+    for spec_name, src in derived.items():
+        assert specs[spec_name].get("count_key") != \
+            specs[src].get("count_key", "count"), spec_name
 
 
 def test_the_LIVE_poll_path_dispatches_toasts_too(tmp_path, monkeypatch):

@@ -862,7 +862,10 @@ def read_blocked_on_me(path=None, reader=None, now=None,
     # would publish "0 stuck dispatches" as a measurement nobody took.
     schema = obj.get("schema")
     base["schema"] = schema if isinstance(schema, int) and not isinstance(schema, bool) else None
-    if base["schema"] is not None and base["schema"] >= CG.SCHEMA:
+    # 🔴 `CG.schema_ok`, not a local spelling. This reader said `>= SCHEMA` while
+    # agent-ops said `is None`, so the same file with `schema: 1` warned here and
+    # rendered a clean all-clear there. One predicate, one verdict.
+    if CG.schema_ok(obj):
         base["schema_ok"] = True
         base["schema_note"] = None
         base["pending_count"] = obj.get("pending_count")
@@ -1806,11 +1809,21 @@ def _render_blocked_rows(b) -> list:
             out.append(f"  cached detail (TRUNCATED): "
                        f"{_trunc(b.get('detail'), 100)}")
         return out
-    stuck = b.get("stuck") or []
-    if stuck:
+    # 🔴 `or []` HERE IS THE ROUND-ONE BUG ONE LAYER DOWN. The reader preserves
+    # `None` (unmeasured) distinctly from `[]` (measured empty) and is tested for
+    # it — and then this renderer collapsed the two, so a schema-2 cache missing
+    # its `stuck` key printed a clean "N task(s) needing you" with no warning at
+    # all, while the OLDER schema-1 path above correctly warned. The newer,
+    # supported shape was the silent one. `is None` is the only reading that
+    # survives: an absent list must announce itself, never render as empty.
+    stuck = b.get("stuck")
+    if stuck is None:
+        out.append("  ⚠ this cache carries NO `stuck` list — stuck dispatches "
+                   "were NOT measured; this is not zero stuck")
+    elif stuck:
         thr = b.get("threshold_secs")
         out.append(f"  🔴 {len(stuck)} STUCK dispatch(es) — in_progress with a "
-                   f"dead-looking agent (idle threshold "
+                   f"dead-looking agent (grace/idle threshold "
                    f"{CG.fmt_idle(thr) if thr is not None else '?'}):")
         for s in stuck:
             out.append("     #%s idle %s [%s] %s" % (
@@ -1819,7 +1832,11 @@ def _render_blocked_rows(b) -> list:
         out.append("     ⚠ idle time cannot see progress WITHIN one in-flight "
                    "turn, so this errs toward a false alarm, not a false calm")
     for label, key in (("REVIEW", "ready_for_review"), ("OPEN", "open")):
-        rows = b.get(key) or []
+        rows = b.get(key)
+        if rows is None:
+            out.append("  ⚠ this cache carries NO `%s` list — that queue was "
+                       "NOT enumerated; this is not zero %s" % (key, label))
+            continue
         for r in rows:
             out.append("     #%s %-6s %s" % (r.get("id"), label,
                                              _trunc(r.get("title"), 60)))

@@ -183,7 +183,11 @@ def test_fetch_tasks_happy_path_hits_api_tasks_with_the_bearer_token():
     got = tasks.fetch_tasks(creds=CREDS, env={}, getter=get)
     assert [t["id"] for t in got] == [1]
     url, token, deadline = get.calls[0]
-    assert url == "http://cg.test:30302/api/tasks"
+    # 🔴 `?summary=1`: this is a BOARD RENDER fetch and the full payload measured
+    # 217,379 B against 8,088 B for the summary (2026-08-13), which had eaten the
+    # MAX_RESPONSE_BYTES headroom down to 4.8x. The summary form keeps every
+    # field this module reads.
+    assert url == "http://cg.test:30302/api/tasks?summary=1"
     assert token == "tok"
     # SHORT wall-clock deadline — this is a decoration on the render path, not core data
     assert deadline == tasks.FETCH_DEADLINE and tasks.FETCH_DEADLINE <= 5

@@ -633,7 +633,34 @@ TARGET_FLOORS=(
   # (claude/skills/handoff/reference/index-write.md); it is `git add`ed, and
   # `test_the_sidecar_is_DEPLOYED` fails if it ever is not — in the sandbox by
   # its absence, on the host via `git ls-files`.
-  "scripts/tests|3298"
+  #
+  # 2026-08-13, the clawgate stuck-dispatch FIX-FORWARD (the grace window on
+  # every disjunct, the bar's stuck rendering + its own toast latch, the
+  # None-vs-[] renderer, the shared schema reading, and the de-vacuum'd guards).
+  #
+  # 🔴 RE-MEASURED ON THE MERGED TREE, and the branch's own earlier reading (3471,
+  # floor 3421) is VOID — main moved under this branch while it was in flight
+  # (#418/#436/#437 landed, and #436 re-pinned THIS line to 3298). Resolving the
+  # conflict by arithmetic across the two sides is exactly what the header
+  # forbids; this is the gate's own number on the tree that now exists.
+  #
+  # 🔴 THE DELTA IS DECOMPOSED, so the next author does not inherit movement this
+  # branch did not cause:
+  #     3348  origin/main at 5ebc208 as the merged base recorded it (#436's entry)
+  #     + 14  arrived with #418/#437 after that entry was written
+  #     +116  this branch (the grace-window boundary tables, the bar's stuck
+  #           rendering, the second toast latch, the renderer's None cases, the
+  #           schema_ok matrix, and the rewritten guards) — NET of one deletion:
+  #           `clawgate_tasks.unmeasured()` was dead code with no caller, so its
+  #           test went with it and a one-line absence guard replaced it
+  #     ----
+  #     3478  the merged tree, which is what the gate printed
+  #   _suggested_floor 3478 = 3478 - min(50, max(1, 3478/20 = 173)) = 3478 - 50
+  #                         = 3428.
+  # ⚠ ZERO new skips — `skipped=0` on this target, and the suite's single skip is
+  # still the pinned one in repo-cos. No new FILES: every change is to a file the
+  # flake already tracks.
+  "scripts/tests|3428"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —

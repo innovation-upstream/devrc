@@ -25,6 +25,27 @@ conflated. `?summary=1` swaps the (large) `body` for `commentCount` /
 `attachmentCount` and keeps everything else including `agent` — 190,385 bytes
 down to 7,058 on the live board, so every consumer here uses it.
 
+🔴 THE LINK IS INTERMITTENT, AND THAT IS WHY `no_agent` IS WEAK. Measured live
+2026-08-13 by repeated sampling (the first sample alone would have been read
+wrong, twice):
+
+  - one sample of 19 tasks: `agent` key present on 19, non-null on **0**, while
+    `GET /api/agents` reported a healthy `status=running, kickedOff=true` agent;
+  - 80s of sampling later: 3 concurrent `in_progress` tasks, `agent` non-null on
+    exactly **1** of them (a task dispatched ~90s earlier), null on the other two;
+  - `/api/agents` carries no `taskId` (non-null on 0 of 2), so when the link is
+    absent there is no join key to reconstruct it from.
+
+So the field is populated for SOME dispatches and not others, and an unlinked
+task is not evidence of a dead one. `agent: null` is the observable that "no
+agent was dispatched" and "this dispatch's link is one of the ones the server did
+not populate" SHARE — it cannot distinguish them (`claude/RULES.md`: an empty
+result cannot distinguish two mechanisms). Hence: `no_agent` is graced rather
+than trusted, and its honest reading is "look at this dispatch", never "this
+dispatch is dead". The other four disjuncts are only reachable on a task whose
+link IS populated; they are tested, not observed in the wild. Nothing here should
+be tightened on the strength of a live zero.
+
 This module is PURE: no network, no clock of its own (`now` is injected), no
 filesystem beyond `read_clawgate_env`. Everything is unit-tested in
 scripts/tests/test_clawgate_tasks.py, and the consolidation itself is pinned by
@@ -50,12 +71,22 @@ PENDING_TASK_STATES = frozenset({"open", "ready_for_review"})
 #: A task in this state needs the operator only if its agent looks dead.
 IN_PROGRESS = "in_progress"
 
-#: 🔴 How long an `in_progress` task's agent may be silent before we call the
-#: dispatch stuck. 15 minutes, chosen from measurement rather than taste: two
-#: healthy runs closed in 138s and 149s (an order of magnitude below this), and
-#: the observed wedge sat idle for four hours (an order of magnitude above).
-#: Anything inside that gap is a judgement call, and this errs toward the alarm.
-AGENT_IDLE_THRESHOLD_SECS = 900
+#: 🔴 The ONE grace window, applied to EVERY disjunct in `stuck_reasons`.
+#: 15 minutes, chosen from measurement rather than taste: two healthy runs closed
+#: in 138s and 149s (an order of magnitude below this), the observed wedge sat
+#: idle for four hours (an order of magnitude above), and clawgate's own
+#: `provisioningStuckTimeout` is the same 15 minutes — so this matches the
+#: server's own notion of "not yet worth worrying about". Anything inside that
+#: gap is a judgement call, and this errs toward the alarm.
+#:
+#: 🔴 WHY IT IS NOT JUST THE IDLE CLOCK (it was, for one release). `no_agent`,
+#: `agent_error` and `not_kicked_off` were appended with NO time gate at all, so
+#: every task read stuck from the instant it entered `in_progress`. That is not a
+#: sensitive detector, it is a permanently-red gate: an alarm that fires on 100%
+#: of healthy dispatches teaches the operator to ignore it, re-burying the exact
+#: wedge this module exists to surface. A grace window on every disjunct is what
+#: makes a red pill mean something.
+STUCK_THRESHOLD_SECS = 900
 
 #: The path (query included) every consumer fetches the board from. Kept here so
 #: `?summary=1` cannot be adopted on one surface and missed on another.
@@ -78,10 +109,13 @@ DEFAULT_API_URL = "http://192.168.50.250:30302"
 #: verbatim, and the single-source test pins this tuple against the branches in
 #: `stuck_reasons` so a new disjunct cannot exist in the code and be missing
 #: from the vocabulary a reader is shown.
+#: Every one of them is inside the grace window (`STUCK_THRESHOLD_SECS`) except
+#: `activity_unknown`, which is a statement about the object in hand rather than
+#: about elapsed time — see `stuck_reasons`.
 STUCK_REASONS = (
-    "no_agent",             # in_progress, but `agent` is null — nothing is running
+    "no_agent",             # in_progress past the window, `agent` still null
     "agent_error",          # the agent reconciler marked it `error`
-    "not_kicked_off",       # provisioned but the session never started
+    "not_kicked_off",       # provisioned past the window, session never started
     "agent_idle",           # kicked off and running, but silent past the threshold
     "activity_unknown",     # running, but it carries no usable activity timestamp
 )
@@ -180,14 +214,101 @@ def is_pending(task) -> bool:
     return isinstance(task, dict) and task.get("status") in PENDING_TASK_STATES
 
 
-def stuck_reasons(task, now, threshold: int = AGENT_IDLE_THRESHOLD_SECS) -> list:
+def created_age_secs(obj, now):
+    """Seconds since `obj["createdAt"]`, or None if it carries no readable one.
+
+    Works for a task or an agent — both carry `createdAt` in the same RFC3339
+    spelling (measured live: 22/22 tasks and 2/2 agents parse). Clamped at 0 so
+    clock skew reads as "just now" rather than as a negative age, matching
+    `agent_idle_secs`.
+
+    ⚠ For a TASK this is the wrong clock for anything about a DISPATCH — see
+    `dispatch_age_secs`. It is the right one for an AGENT, which is created when
+    the dispatch starts.
+    """
+    if not isinstance(obj, dict):
+        return None
+    ts = parse_api_ts(obj.get("createdAt"))
+    return None if ts is None else max(0.0, float(now) - ts)
+
+
+def dispatch_age_secs(task, now):
+    """How long this task has been in its CURRENT state — the dispatch's age.
+
+    🔴 `updatedAt`, NOT `createdAt`, AND THIS IS LOAD-BEARING. A task's
+    `createdAt` is when it was FILED, which for a queue is arbitrarily long
+    before it is DISPATCHED — so grading a dispatch by it re-creates the very
+    false positive the grace window exists to remove, for exactly the tasks that
+    sat in the backlog longest.
+
+    Measured live 2026-08-13, three concurrent `in_progress` tasks:
+
+        id   createdAt age   updatedAt age   ratio
+        177       10,200 s            88 s   116x     <- dispatched 88s ago
+        187           96 s            96 s     1x
+        186        1,892 s         1,892 s     1x
+
+    Task 177 had been open ~2.8 hours and was dispatched 88 seconds earlier. On
+    the `createdAt` clock it is 11x past a 15-minute window the instant it starts
+    and reads STUCK for its whole run; on `updatedAt` it correctly gets its
+    grace. The other two are indistinguishable under either clock, which is why
+    one sample would have "confirmed" the wrong field — the two clocks only
+    disagree for a task that WAITED, and those are the common case.
+
+    `createdAt` is the fallback, so a server that stops sending `updatedAt`
+    degrades to a coarser clock rather than to none. `updatedAt` is never older
+    than `createdAt`, so the fallback can only ever make the window SHORTER, i.e.
+    fail toward the alarm.
+
+    ⚠ WHAT THIS GIVES UP: `updatedAt` moves on ANY write to the task — a comment,
+    a tag — not only on the status change, so editing a wedged task grants it
+    another window. That is bounded (one window per edit) and points the wrong
+    way only while someone is actively touching the task, which is the moment
+    they least need the bar to tell them about it.
+    """
+    if not isinstance(task, dict):
+        return None
+    for key in ("updatedAt", "createdAt"):
+        ts = parse_api_ts(task.get(key))
+        if ts is not None:
+            return max(0.0, float(now) - ts)
+    return None
+
+
+def _past_grace(age, threshold) -> bool:
+    """Is this age outside the grace window?
+
+    🔴 An UNREADABLE age (None) counts as PAST it. "I cannot tell how old this
+    is" must never render as "healthy" — that is the same substitution of an
+    unmeasured value for a benign one that `fmt_idle` refuses. It is safe to be
+    strict here precisely because the timestamp is measured to be present: a None
+    means the server changed, which is worth an alarm.
+
+    Strictly `>`, matching `agent_idle`'s comparison, so `threshold` is the last
+    second that is still considered healthy rather than the first that is not.
+    """
+    return age is None or age > threshold
+
+
+def stuck_reasons(task, now, threshold: int = STUCK_THRESHOLD_SECS) -> list:
     """Why this `in_progress` task looks stranded — `[]` means it does not.
 
     Gate first: a task that is not `in_progress` is never stuck, whatever its
     agent looks like (a `complete` task's agent is expected to be idle forever).
 
-    Then the disjuncts, each independently sufficient:
-      no_agent          the task claims in_progress with no agent object at all
+    🔴 SECOND GATE, AND THE REASON THIS FUNCTION WAS WRONG. Every disjunct below
+    is now inside a grace window; none of them may fire on a young dispatch. The
+    first release gated only `agent_idle`, so `no_agent` — which is the state
+    EVERY task is in, because the server never populates the link — fired from
+    second zero and marked 100% of in-flight dispatches stuck. See
+    STUCK_THRESHOLD_SECS. The clock is the object's own `createdAt`: the AGENT's
+    where there is an agent (that is when kickoff was due), the TASK's otherwise.
+
+    Then the disjuncts, each independently sufficient AND each past the grace
+    window:
+      no_agent          in_progress for longer than the window with no agent
+                        object at all — see the module docstring for why this
+                        cannot distinguish "none dispatched" from "not linked"
       agent_error       the reconciler already gave up on it
       not_kicked_off    provisioned but the session never started; clawgate's own
                         `provisioningStuckTimeout` marks the AGENT `error` while
@@ -197,6 +318,15 @@ def stuck_reasons(task, now, threshold: int = AGENT_IDLE_THRESHOLD_SECS) -> list
       activity_unknown  running, kicked off, and carrying no timestamp we can
                         read — "cannot tell" must never render as "healthy"
 
+    ⚠ THE COST OF GRACING `agent_error`, stated because it is a real one: an
+    agent that dies FAST (image pull, immediate crash) is now silent for up to
+    the window rather than reported at once. That is deliberate — `error` has
+    been observed on an agent that was still being retried, and the failure this
+    module exists to catch is measured in HOURS, so a bounded 15-minute delay
+    costs far less than an alarm nobody reads. Revisit if a fast-fail wedge is
+    ever actually observed; `agent_error` is the one disjunct where an ungraced
+    reading would be defensible.
+
     They are collected rather than short-circuited so a reader sees every reason
     that applies; the caller's boolean is `bool(...)` of this list.
     """
@@ -204,21 +334,37 @@ def stuck_reasons(task, now, threshold: int = AGENT_IDLE_THRESHOLD_SECS) -> list
         return []
     agent = task.get("agent")
     if not isinstance(agent, dict):
-        return ["no_agent"]
+        # No agent object at all: the only clock available is the task's own —
+        # and it must be `dispatch_age_secs`, never `createdAt`. See that
+        # function: a task that queued for hours before being dispatched is past
+        # any window on the creation clock from the moment it starts.
+        return ["no_agent"] if _past_grace(
+            dispatch_age_secs(task, now), threshold) else []
+    # An agent exists — its own age is when kickoff/reconciliation was due. Fall
+    # back to the task's dispatch age if the agent carries no readable
+    # `createdAt`, so a server that drops the field degrades to a coarser clock,
+    # not to no clock.
+    age = created_age_secs(agent, now)
+    if age is None:
+        age = dispatch_age_secs(task, now)
+    past = _past_grace(age, threshold)
     reasons = []
-    if agent.get("status") == "error":
+    if past and agent.get("status") == "error":
         reasons.append("agent_error")
-    if agent.get("kickedOff") is not True:
+    if past and agent.get("kickedOff") is not True:
         reasons.append("not_kicked_off")
     idle = agent_idle_secs(task, now)
     if idle is None:
+        # `activity_unknown` is NOT graced: it is a statement about the agent
+        # object we are holding right now (it carries no readable timestamp at
+        # all), not a guess about a dispatch that may simply be young.
         reasons.append("activity_unknown")
     elif idle > threshold:
         reasons.append("agent_idle")
     return reasons
 
 
-def is_stuck(task, now, threshold: int = AGENT_IDLE_THRESHOLD_SECS) -> bool:
+def is_stuck(task, now, threshold: int = STUCK_THRESHOLD_SECS) -> bool:
     """`stuck_reasons` as a boolean. Never use it without the reasons or the
     idle seconds beside it — see `agent_idle_secs`."""
     return bool(stuck_reasons(task, now, threshold))
@@ -247,7 +393,33 @@ def _row(task, now, threshold):
 SCHEMA = 2
 
 
-def attention(tasks, now, threshold: int = AGENT_IDLE_THRESHOLD_SECS) -> dict:
+def schema_ok(obj) -> bool:
+    """Does this CACHED roll-up carry the stuck measurement, or predate it?
+
+    🔴 ONE definition, because the two readers had two and disagreed on the same
+    file: agent-ops spelled it `schema is None` and session-manager `>= SCHEMA`,
+    so a cache with an explicit `schema: 1` made session-manager warn "stuck
+    dispatches NOT measured" while agent-ops rendered a clean all-clear. Same
+    bytes, opposite verdicts, and the silent one was the newer reader.
+
+    ⚠ THE BOOL CHECK IS NOT REACHABLE AT SCHEMA 2, and is kept deliberately. In
+    Python `True` IS an int (`1`), so `True >= 2` is already False and the
+    comparison below rejects it without help — a mutation removing
+    `isinstance(schema, bool)` survives every test unless the test lowers SCHEMA.
+    It becomes load-bearing the moment SCHEMA is 1 or 0, which a future bump
+    could reintroduce, and `{"schema": true}` reading as "current" would publish
+    a stuck measurement nobody took. Tested by lowering SCHEMA rather than left
+    as an unexercised branch that looks covered.
+    """
+    if not isinstance(obj, dict):
+        return False
+    schema = obj.get("schema")
+    if not isinstance(schema, int) or isinstance(schema, bool):
+        return False
+    return schema >= SCHEMA
+
+
+def attention(tasks, now, threshold: int = STUCK_THRESHOLD_SECS) -> dict:
     """The whole `/api/tasks` payload -> what needs the operator.
 
     Raises ValueError if the top level is not a list (the poller turns that into
@@ -290,7 +462,12 @@ def attention(tasks, now, threshold: int = AGENT_IDLE_THRESHOLD_SECS) -> dict:
         "stuck": [{"id": r["id"], "title": r["title"], "reasons": r["reasons"],
                    "agent_idle_secs": r["agent_idle_secs"]} for r in stuck_rows],
         "threshold_secs": threshold,
-        "state": "Warning" if count else "Idle",
+        # 🔴 A stuck dispatch ESCALATES. With a single "Warning" above zero the
+        # bar rendered `2 open` and `2 open + 1 STUCK` identically — same colour,
+        # same glyph — so the one state worth walking to a terminal for was the
+        # one the bar could not express. Critical is the bar's loudest state and
+        # `stuck_count` is rare by construction, so it stays meaningful.
+        "state": ("Critical" if stuck_rows else "Warning") if count else "Idle",
         "detail": detail,
         "detail_shown": shown,
         "detail_total": count,
@@ -340,15 +517,12 @@ def _detail(count, open_rows, review_rows, stuck_rows):
     return "%s: %s" % (head, tail), len(shown), more > 0
 
 
-def unmeasured(reason: str) -> dict:
-    """A roll-up that says nothing was measured. `count: None`, never 0 — the
-    substitution of an unread queue for an empty one is the failure every
-    consumer of this module exists to refuse."""
-    return {"schema": SCHEMA, "count": None, "pending_count": None,
-            "stuck_count": None, "open": None, "ready_for_review": None,
-            "stuck": None, "threshold_secs": AGENT_IDLE_THRESHOLD_SECS,
-            "state": "Unknown", "detail": reason, "detail_shown": 0,
-            "detail_total": None, "detail_truncated": False}
+# NOTE: an `unmeasured()` roll-up constructor lived here and was removed as dead
+# code — it never had a caller. The poller writes `stale()` (its own marker) on a
+# failed fetch, and session-manager/agent-ops each build their own "not measured"
+# shape while READING a cache, which is a different job from producing one. If a
+# producer ever needs it, bring it back with the consumer that uses it rather
+# than ahead of one.
 
 
 # --------------------------------------------------------------------------- #
