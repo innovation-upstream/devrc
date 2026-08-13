@@ -82,16 +82,60 @@ rather than fixed. Now:
 
 The property being defended is unchanged and deliberately NOT softened: the
 deployed tree must be built from ``../claude/skills``, and no other repo tree
-may be written over the output root. Where the parser cannot decide -- an
-unrecognised source expression, or an unresolvable identifier written over the
-output root -- it FAILS, saying it needs updating and must not be deleted.
-Silence is the one answer it must never give.
+may be written over the output root. Where the parser cannot decide it FAILS,
+saying it needs updating and must not be deleted, rather than returning None --
+because None is the answer that silently stops checking anything.
+
+WHAT AN ADVERSARIAL AUDIT OF THAT FIX THEN FOUND
+------------------------------------------------
+Eight constructible shapes still returned a clean bill of health, two of them
+using idioms already in this file. Each is now a loud failure, and each has a
+fixture:
+
+  * ``#`` is only a comment at line start or after WHITESPACE. Blanking every
+    ``#`` to end-of-line ate the ``}`` out of ``"''${bbOld##*.}"`` -- which is
+    `nix/home.nix:548`, today -- unbalancing the braces the attrset scan counts
+    and letting it run into the NEXT mapping's ``source``. Comments are blanked
+    in place now (offsets preserved), never deleted.
+  * The mapping literal occurring MORE THAN ONCE (in a ``''…''`` script, in
+    prose) took the first match and never noticed the disagreement.
+  * ``cd "$out"`` then ``cp -R ${../claudedocs}/. .``, a ``tar | tar`` pipe, and
+    ``dst="$out"`` all write the root in a statement that does not name ``$out``.
+    Statement-scoping cannot see those, so every repo path in the binding must
+    now be ACCOUNTED FOR -- as a root write or as a write under the root -- and
+    one that is neither is undecidable, not ignorable.
+  * ``{ … } // lib.optionalAttrs cond { source = <other>; }``: the override was
+    invisible because only the first attribute set was read.
+  * A ``let`` binding whose name is declared more than once (shadowing).
+  * ``${pkgs.other}`` over the root fell through both the path branch and the
+    identifier branch and was dropped in silence.
+
+And the headline false positive of #443 was still alive one character to the
+left: ``rm -rf "$out"/clickup/node_modules`` (quote before the slash, not after)
+read as a removal of the root.
+
+KNOWN LIMITS -- read before trusting a PASS
+-------------------------------------------
+  * ``src``/``srcs``/``paths`` are matched by NAME, not by POSITION, so a
+    ``src`` sitting in a ``runCommandLocal`` ENV attribute set is credited as
+    the output tree even though it is only an environment variable there.
+  * A repo path this cannot classify is reported as undecidable rather than
+    ignored, which makes some legitimate-but-unusual builds (a ``tar`` pipe out
+    of the right tree) fail asking for the parser. That direction is deliberate:
+    the alternative is `cd "$out"` aliasing passing in silence.
+  * It reads text, not nix. `nix eval` is the only thing that actually knows
+    what a `home.file` source resolves to.
 """
 from __future__ import annotations
 
 import re
+from typing import NamedTuple
 
 MAPPING = 'home.file.".claude/skills"'
+
+#: The attribute on its own, for telling "the entry is gone" apart from "the
+#: entry is spelled some way this cannot read" (`home.file = { … }`, `mkMerge`).
+ATTR_NAME = '".claude/skills"'
 
 #: The repo path the mapping must ultimately deploy.
 SKILLS_PATH = "../claude/skills"
@@ -102,6 +146,11 @@ _NEEDS_UPDATING = "this parser needs updating, do NOT delete the check."
 
 #: A nix path literal: `../claude/skills`, `./pkgs/foo.nix`.
 _PATH_LITERAL = re.compile(r"\.{1,2}/[^\s;,\]\)\}\"']+")
+
+#: A path OUT of the nix/ directory -- i.e. some other tree in this repo. `./x`
+#: is excluded: inside a build script `./.` is the builder's cwd, not a repo
+#: tree, and crediting it as one would reject every `installPhase`.
+_REPO_PATH = re.compile(r"\.\./[^\s;,\]\)\}\"']+")
 
 #: An expression that is EXACTLY a path literal.
 _ONLY_PATH = re.compile(r"^\.{1,2}/[^\s;,\]\)\}\"']+$")
@@ -129,32 +178,60 @@ _ROOT_ATTR = re.compile(r"(?<![\w.'-])(src|srcs|paths)\s*=\s*")
 #: A `$out` reference, with whatever path follows it. Group 1 empty/absent means
 #: the reference is to the output ROOT (`"$out"`, `$out/.`); a non-trivial group
 #: 1 means a path UNDER the output (`"$out/clickup/node_modules"`).
-_OUT_REF = re.compile(r"\$\{?out\}?(/[^\s\"';|&)]*)?")
+#:
+#: 🔴 The optional quote before group 1 is load-bearing: `"$out"/clickup/x` and
+#: `"$out/clickup/x"` are the same destination, and without it the first read as
+#: the ROOT -- resurrecting #443's headline false positive one character to the
+#: left of where it was fixed.
+_OUT_REF = re.compile(r"\$\{?out\}?[\"']?(/[^\s\"';|&)]*)?")
 
-#: Shell statement separators. Line continuations are folded first, so a
-#: `\`-continued `cp` is one statement.
-_STATEMENT_SPLIT = re.compile(r"[\n;|&]")
+#: Shell statement separators: newline and `;` only. `|`, `&&` and `||` are
+#: deliberately NOT separators -- `tar -C ${…} -cf - . | tar -C "$out" -xf -` is
+#: ONE write, and splitting it put the source and the destination in different
+#: statements where nothing could relate them.
+_STATEMENT_SPLIT = re.compile(r"[\n;]")
 
 #: `rm`/`rmdir`, in a statement that may or may not aim at the output ROOT.
 _RM = re.compile(r"\brm(?:dir)?\b")
 
 
-def _strip_comments(text: str) -> str:
-    """Remove nix `#` line comments and `/* … */` blocks.
+#: A comment `#` -- at the start of the text or after WHITESPACE, and nowhere
+#: else. 🔴 The lookbehind is the whole point. `#` mid-token is not a comment in
+#: any of the languages in this file, and blanking from one to end-of-line ate
+#: the closing brace out of `bbPid="''${bbOld##*.}"` -- `nix/home.nix:548`,
+#: present today -- which unbalanced the braces the attrset scan counts and let
+#: it run past the mapping into the NEXT one's `source`. It also ate the rest of
+#: `echo "theme=#282828"`, taking any statement that followed on that line.
+_COMMENT = re.compile(r"(?<![^\s])#[^\n]*")
 
-    Both a nix comment and a SHELL comment inside a `''…''` build script are
-    handled by the same rule, which is what we want: nix interpolates
-    `${../claude/skills}` inside a `''…''` string even on a line the shell will
-    treat as a comment, so "the path appears" and "the path is used" are
-    different questions there too.
+#: `/* … */`, which nix allows anywhere.
+_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.S)
+
+
+def _blank(m: re.Match[str]) -> str:
+    """The match, with every character but `\\n` replaced by a space.
+
+    Comments are BLANKED, not deleted: every offset and every line number in the
+    text stays exactly where it was, so a scan can be run on the stripped text
+    and its results quoted against the original.
+    """
+    return re.sub(r"[^\n]", " ", m.group(0))
+
+
+def _strip_comments(text: str) -> str:
+    """Blank nix `#` line comments and `/* … */` blocks, in place.
+
+    A SHELL comment inside a `''…''` build script is blanked by the same rule,
+    which is what we want: nix interpolates `${../claude/skills}` inside a
+    `''…''` string even on a line the shell will treat as a comment, so "the
+    path appears" and "the path is used" are different questions there too.
 
     Applied to the WHOLE file before anything is located, so a commented-out
-    mapping cannot be mistaken for a live one. Line structure is preserved (a
-    `#` comment is replaced to end-of-line only), which `_binding_body`'s
-    indentation scan depends on.
+    mapping cannot be mistaken for a live one -- and, because it blanks rather
+    than deletes, without moving anything the brace and indentation scans read.
     """
-    text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
-    return re.sub(r"#[^\n]*", "", text)
+    text = _BLOCK_COMMENT.sub(_blank, text)
+    return _COMMENT.sub(_blank, text)
 
 
 def _brace_block(text: str, open_brace: int) -> str:
@@ -193,16 +270,29 @@ def _source_expr(text: str) -> tuple[str | None, str | None]:
 
     `text` must already be comment-stripped.
     """
+    hits = list(re.finditer(re.escape(MAPPING), text))
+    if not hits:
+        if ATTR_NAME in text:
+            return None, (
+                f"{ATTR_NAME} appears in nix/home.nix but not as `{MAPPING}` -- it "
+                f"may be declared through `home.file = {{ … }}`, `mkMerge` or a "
+                f"loop, which this cannot read. {_NEEDS_UPDATING}"
+            )
+        return None, (
+            "nix/home.nix no longer declares the ~/.claude/skills mapping, so a "
+            "doc pinned under claude/skills/ may not ship at all."
+        )
     problem: str | None = None
-    seen = False
-    for m in re.finditer(re.escape(MAPPING), text):
-        seen = True
+    found: list[tuple[str, int]] = []
+    for m in hits:
         rest = text[m.end() :]
+        line_no = text[: m.start()].count("\n") + 1
         dotted = re.match(r"\s*\.\s*source\s*=\s*", rest)
         if dotted:
             expr = _expr_until_semicolon(rest, dotted.end())
             if expr:
-                return expr, None
+                found.append((expr, line_no))
+                continue
             problem = problem or (
                 f"the {MAPPING} mapping's dotted `.source =` has no terminating "
                 f"`;` -- {_NEEDS_UPDATING}"
@@ -217,6 +307,15 @@ def _source_expr(text: str) -> tuple[str | None, str | None]:
                     f"{_NEEDS_UPDATING}"
                 )
                 continue
+            after = rest[attrset.end() - 1 + len(block) :]
+            if re.match(r"\s*//", after):
+                # `{ source = A; } // lib.optionalAttrs cond { source = B; }`:
+                # nix's effective source is B, and only A is in `block`.
+                return None, (
+                    f"the {MAPPING} mapping's attribute set is merged with `//`, so "
+                    f"its effective `source` is not the one written here. "
+                    f"{_NEEDS_UPDATING}"
+                )
             src = re.search(r"(?<![\w.'-])source\s*=\s*", block)
             if not src:
                 problem = problem or (
@@ -225,7 +324,8 @@ def _source_expr(text: str) -> tuple[str | None, str | None]:
                 continue
             expr = _expr_until_semicolon(block, src.end())
             if expr:
-                return expr, None
+                found.append((expr, line_no))
+                continue
             problem = problem or (
                 f"the {MAPPING} mapping's `source =` has no terminating `;` -- "
                 f"{_NEEDS_UPDATING}\n{block}"
@@ -237,11 +337,26 @@ def _source_expr(text: str) -> tuple[str | None, str | None]:
             f"found {MAPPING} but it is neither `.source = <expr>;` nor "
             f"`= {{ source = <expr>; … }}` -- {_NEEDS_UPDATING}"
         )
-    if not seen:
+
+    # 🔴 Reading the FIRST occurrence is how a mapping quoted inside a `''…''`
+    # script or an activation-script heredoc answered for the real declaration.
+    # Several `.source` spellings are only safe when they AGREE; disagreement is
+    # a question about which one nix takes, which this cannot answer.
+    #
+    # Several occurrences that do NOT each carry a source are fine and normal --
+    # `home.file."…".source = X;` beside `home.file."…".recursive = true;` is one
+    # entry written as two dotted attributes.
+    distinct = {expr for expr, _ in found}
+    if len(distinct) > 1:
+        where = ", ".join(f"line {n}: `{e}`" for e, n in found)
         return None, (
-            "nix/home.nix no longer declares the ~/.claude/skills mapping, so a "
-            "doc pinned under claude/skills/ may not ship at all."
+            f"`{MAPPING}` is given {len(distinct)} DIFFERENT sources in "
+            f"nix/home.nix ({where}); which one nix takes is not something this can "
+            f"read, and taking the first is how a copy inside a string answers for "
+            f"the real one. {_NEEDS_UPDATING}"
         )
+    if found:
+        return found[0][0], None
     return None, problem
 
 
@@ -252,18 +367,19 @@ def _binding_body(home_nix: str, ident: str) -> str:
     same-or-shallower indentation, or to `in` -- rather than by hunting for a
     terminating `;`, which a multi-line nix string (`''…''`) makes unreliable.
     Returns "" when there is no such binding.
+
+    This is a TEXT scan and knows nothing about nix scope, so a name declared
+    more than once (a nested attribute set using it as a key, a shadowing
+    binding) is not resolvable here -- see `_binding_head_count`, which makes
+    that case fail loudly rather than silently taking the first one.
     """
     lines = home_nix.splitlines()
-    start = None
-    indent = ""
-    for i, line in enumerate(lines):
-        m = _BINDING_HEAD.match(line)
-        if m and m.group(2) == ident:
-            start = i
-            indent = m.group(1)
-            break
-    if start is None:
+    heads = [i for i, line in enumerate(lines)
+             if (m := _BINDING_HEAD.match(line)) and m.group(2) == ident]
+    if not heads:
         return ""
+    start = heads[0]
+    indent = _BINDING_HEAD.match(lines[start]).group(1)  # type: ignore[union-attr]
     body = [lines[start]]
     for line in lines[start + 1 :]:
         if re.match(r"^in\b", line):
@@ -275,6 +391,15 @@ def _binding_body(home_nix: str, ident: str) -> str:
     return "\n".join(body)
 
 
+def _binding_head_count(home_nix: str, ident: str) -> int:
+    """How many `<ident> =` heads exist. More than one means this cannot say
+    which one a reference resolves to -- nix scope is not a text property."""
+    return sum(
+        1 for line in home_nix.splitlines()
+        if (m := _BINDING_HEAD.match(line)) and m.group(2) == ident
+    )
+
+
 def _resolve_path_ident(text: str, ident: str) -> str | None:
     """`ident`'s value when it is a bare path literal, else None.
 
@@ -282,7 +407,14 @@ def _resolve_path_ident(text: str, ident: str) -> str | None:
     `${skillsSrc}` is the indirection real nix code uses. An identifier bound to
     a derivation (`clickupNodeModules = pkgs.callPackage …`) is not a repo tree
     and must not be reported as one.
+
+    A name declared MORE THAN ONCE resolves to nothing here, in ONE place rather
+    than at each call site: which declaration a reference sees is a question
+    about nix scope, and this is a text scan. Callers get None and report it in
+    their own terms.
     """
+    if _binding_head_count(text, ident) != 1:
+        return None
     body = _binding_body(text, ident)
     if not body:
         return None
@@ -310,36 +442,49 @@ def _statements(body: str) -> list[str]:
     return [s for s in _STATEMENT_SPLIT.split(folded) if s.strip()]
 
 
-def _writes_output_root(statement: str) -> bool:
-    """True when the statement writes `$out` ITSELF, not a path under it.
+def _out_scope(statement: str) -> str | None:
+    """`"root"`, `"under"`, or None -- what part of the output this writes.
 
     `"$out"`, `$out/` and `"$out/."` all name the output tree; `"$out/clickup/
     node_modules"` names one entry inside it. That distinction IS #443's `rm -rf
     "$out/clickup/node_modules"` false positive, and it is what makes a file
-    copied to a name under $out an addition rather than a second tree.
+    copied to a name under $out an addition rather than a second tree. A root
+    reference wins: a statement naming both replaces the tree.
     """
+    scope: str | None = None
     for m in _OUT_REF.finditer(statement):
         tail = (m.group(1) or "").rstrip("\"'")
         if tail in ("", "/", "/."):
-            return True
-    return False
+            return "root"
+        scope = "under"
+    return scope
 
 
 def _paths_in(statement: str, text: str) -> tuple[set[str], set[str]]:
-    """`(repo paths, unresolvable identifiers)` interpolated in `statement`."""
+    """`(repo paths, expressions this cannot resolve)` interpolated here.
+
+    Every `${…}` lands in one bucket or the other. An earlier version had a
+    third, silent outcome -- an expression matching neither the path shape nor
+    the identifier shape (`${pkgs.otherTree}`, `${inputs.x}`) fell off the end
+    of the `elif` and was dropped -- so a whole derivation copied over the
+    output root was invisible.
+    """
     paths: set[str] = set()
-    idents: set[str] = set()
+    opaque: set[str] = set()
     for m in _INTERP.finditer(statement):
         expr = m.group(1).strip()
+        if expr == "out":
+            continue  # the output itself, not something being copied into it
         if _ONLY_PATH.match(expr):
             paths.add(_normalise(expr))
-        elif _ONLY_IDENT.match(expr):
+            continue
+        if _ONLY_IDENT.match(expr):
             resolved = _resolve_path_ident(text, expr)
             if resolved is not None:
                 paths.add(_normalise(resolved))
-            else:
-                idents.add(expr)
-    return paths, idents
+                continue
+        opaque.add(expr)
+    return paths, opaque
 
 
 #: An identifier in a derivation-attribute value. `/` is in the lookbehind so
@@ -371,26 +516,55 @@ def _root_attr_paths(body: str, text: str) -> set[str]:
     return paths
 
 
-def _analyse_binding(body: str, text: str) -> tuple[set[str], set[str], str]:
-    """What `body` writes over its output ROOT: repo paths, opaque identifiers,
-    and the first statement that REMOVES the root, if any.
+class _Writes(NamedTuple):
+    """What a binding does to its output."""
 
-    Only root writes are collected. A statement that writes a path UNDER $out
-    adds to the tree and cannot replace it, so it is not a hazard and not
-    tracked -- see `_writes_output_root`.
+    #: Repo paths written over the output ROOT -- these decide what ships.
+    roots: set[str]
+    #: Expressions written over the root that cannot be resolved to a tree.
+    opaque: set[str]
+    #: The first statement that removes the root, verbatim, or "".
+    removes_root: str
+    #: Repo paths in the binding that are neither of the above -- not written
+    #: to the output as far as this can tell, which is not the same as harmless.
+    unaccounted: set[str]
+
+
+def _analyse_binding(body: str, text: str) -> _Writes:
+    """What `body` writes into its output.
+
+    🔴 Every repo path in the binding must come out CLASSIFIED -- as a root
+    write or as a write under the root. A path that is neither is reported, not
+    dropped, because statement-scoping cannot see a write whose statement does
+    not name `$out`:
+
+        cp -R ${../claude/skills} "$out"
+        cd "$out"
+        cp -R ${../claudedocs}/. .
+
+    Nothing here relates that third line to the output; `../claudedocs` simply
+    goes unaccounted for. Ignoring it made the above a clean PASS while the
+    deployed tree was ../claudedocs.
     """
     roots = _root_attr_paths(body, text)
-    root_idents: set[str] = set()
+    opaque: set[str] = set()
+    additions: set[str] = set()
     removes_root = ""
     for statement in _statements(body):
-        if not _writes_output_root(statement):
+        scope = _out_scope(statement)
+        if scope is None:
             continue
-        if _RM.search(statement) and not removes_root:
-            removes_root = statement.strip()
-        paths, idents = _paths_in(statement, text)
-        roots |= paths
-        root_idents |= idents
-    return roots, root_idents, removes_root
+        paths, unresolved = _paths_in(statement, text)
+        if scope == "root":
+            if _RM.search(statement) and not removes_root:
+                removes_root = statement.strip()
+            roots |= paths
+            opaque |= unresolved
+        else:
+            additions |= paths
+    mentioned = {_normalise(p) for p in _REPO_PATH.findall(body)}
+    return _Writes(roots, opaque, removes_root,
+                   mentioned - roots - additions)
 
 
 def skills_mapping_problem(home_nix: str) -> str | None:
@@ -420,6 +594,15 @@ def skills_mapping_problem(home_nix: str) -> str | None:
         )
 
     ident = expr
+    declared = _binding_head_count(text, ident)
+    if declared > 1:
+        return (
+            f"the ~/.claude/skills mapping sources `{ident}`, and `{ident} =` is "
+            f"declared {declared} times in nix/home.nix -- which one a reference "
+            f"resolves to is a question about nix SCOPE, and this reads text. "
+            f"{_NEEDS_UPDATING}"
+        )
+
     direct = _resolve_path_ident(text, ident)
     if direct is not None:
         if _normalise(direct) == SKILLS_PATH:
@@ -439,15 +622,15 @@ def skills_mapping_problem(home_nix: str) -> str | None:
 
     # Not "the characters appear somewhere in the binding" -- the path has to
     # BECOME the output. Comments and dead code are already gone above.
-    roots, opaque, removes_root = _analyse_binding(body, text)
-    if SKILLS_PATH not in roots:
+    writes = _analyse_binding(body, text)
+    if SKILLS_PATH not in writes.roots:
         return (
             f"the ~/.claude/skills mapping sources `{ident}`, but that binding never "
             f"copies {SKILLS_PATH} into $out (it writes: "
-            f"{sorted(roots) or 'no repo tree at all'}) -- the pinned docs are not "
-            "the deployed files."
+            f"{sorted(writes.roots) or 'no repo tree at all'}) -- the pinned docs are "
+            "not the deployed files."
         )
-    others = sorted(roots - {SKILLS_PATH})
+    others = sorted(writes.roots - {SKILLS_PATH})
     if others:
         return (
             f"the `{ident}` binding copies {others} into $out as well as "
@@ -455,17 +638,26 @@ def skills_mapping_problem(home_nix: str) -> str | None:
             "actually ships, and the pins under claude/skills/ stop being claims "
             "about the deployed files."
         )
-    if opaque:
+    if writes.unaccounted:
         return (
-            f"the `{ident}` binding writes {sorted(opaque)} over the output ROOT, and "
-            f"this check cannot tell what those resolve to -- whichever write runs "
-            f"last decides what ships. {_NEEDS_UPDATING}"
+            f"the `{ident}` binding names {sorted(writes.unaccounted)} in statements "
+            f"this cannot relate to $out -- so it cannot say whether they land in the "
+            f"deployed tree. A `cd \"$out\"` or a `dst=\"$out\"` reads exactly like "
+            f"this, and it replaces everything. {_NEEDS_UPDATING}"
         )
-    if removes_root:
+    if writes.opaque:
         return (
-            f"the `{ident}` binding removes its own output (`{removes_root}`). "
-            f"A binding that copies {SKILLS_PATH} and then empties $out contains every "
-            "string this check looks for and deploys none of it."
+            f"the `{ident}` binding writes {sorted(writes.opaque)} over the output "
+            f"ROOT, and this check cannot tell what those resolve to -- whichever "
+            f"write runs last decides what ships. {_NEEDS_UPDATING}"
+        )
+    if writes.removes_root:
+        return (
+            f"the `{ident}` binding both copies {SKILLS_PATH} into $out and REMOVES "
+            f"$out (`{writes.removes_root}`). Which one wins is a question about "
+            "order that this does not answer, and if the removal runs last the "
+            "binding contains every string this check looks for and deploys none of "
+            "it."
         )
     return None
 

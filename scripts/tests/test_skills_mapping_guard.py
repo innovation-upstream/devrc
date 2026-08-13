@@ -613,6 +613,289 @@ MAPPING_BEHIND_MKIF = '''
 }
 '''
 
+# --------------------------------------------------------------------------
+# Found by an adversarial audit OF the #443 fix. Each of these returned a clean
+# bill of health against the first version of the new parser; two use idioms
+# that are in nix/home.nix today. They are the reason the fix took two rounds.
+# --------------------------------------------------------------------------
+
+#: 🔴 `''${bbOld##*.}` — a shell parameter expansion inside an indented string,
+#: verbatim from `nix/home.nix:548`. Blanking every `#` to end-of-line ate the
+#: `}`, unbalanced the braces the attrset scan counts, and let it run out of
+#: this mapping and into the NEXT one's `source`. Verdict was None.
+HASH_IN_A_SHELL_EXPANSION = '''
+{
+  home.file.".claude/skills" = {
+    recursive = true;
+    onChange = \'\'
+      ext="\'\'${f##*.}"
+    \'\';
+  };
+  home.file.".config/opencode/skills" = {
+    source = ../claude/skills;
+  };
+}
+'''
+
+#: A `#` inside a quoted shell string, followed on the SAME line by the
+#: statement that overwrites the output. Blanking from the `#` deleted it.
+HASH_INSIDE_A_STRING_HIDES_A_STATEMENT = '''
+{
+let
+  claudeSkills = pkgs.runCommandLocal "devrc-claude-skills" { } \'\'
+    cp -R ${../claude/skills} "$out"
+    echo "theme=#282828" > /dev/null ; cp -R ${../claudedocs}/. "$out"
+  \'\';
+in
+  home.file.".claude/skills" = {
+    source = claudeSkills;
+  };
+}
+'''
+
+#: The mapping quoted inside a `\'\'…\'\'` string, ABOVE the real declaration.
+#: First-match-wins let the quoted copy answer for the live one.
+MAPPING_QUOTED_IN_A_STRING = '''
+{
+let
+  readme = \'\'
+    home.file.".claude/skills" = { source = ../claude/skills; };
+  \'\';
+in
+  home.file.".claude/skills" = { source = ../claudedocs; };
+}
+'''
+
+#: `cd "$out"` then a copy whose statement never names $out. Statement-scoping
+#: cannot relate the two, so `../claudedocs` must come out UNACCOUNTED FOR
+#: rather than ignored — ignoring it was a clean PASS on a replaced tree.
+CD_INTO_OUT_THEN_OVERWRITE = '''
+{
+let
+  claudeSkills = pkgs.runCommandLocal "devrc-claude-skills" { } \'\'
+    cp -R ${../claude/skills} "$out"
+    cd "$out"
+    cp -R ${../claudedocs}/. .
+  \'\';
+in
+  home.file.".claude/skills" = {
+    source = claudeSkills;
+  };
+}
+'''
+
+#: The same evasion through a shell variable alias.
+OUT_ALIASED_TO_A_VARIABLE = '''
+{
+let
+  claudeSkills = pkgs.runCommandLocal "devrc-claude-skills" { } \'\'
+    cp -R ${../claude/skills} "$out"
+    dst="$out"
+    cp -R ${../claudedocs}/. "$dst"
+  \'\';
+in
+  home.file.".claude/skills" = {
+    source = claudeSkills;
+  };
+}
+'''
+
+#: A `tar | tar` pipe from the RIGHT tree. `|` used to split the statement, so
+#: the source and the destination ended up in different ones and nothing could
+#: relate them: "never copies ../claude/skills into $out" — wrong.
+TAR_PIPE_FROM_THE_SKILLS_TREE = '''
+{
+let
+  claudeSkills = pkgs.runCommandLocal "devrc-claude-skills" { } \'\'
+    mkdir -p "$out"
+    tar -C ${../claude/skills} -cf - . | tar -C "$out" -xf -
+  \'\';
+in
+  home.file.".claude/skills" = {
+    source = claudeSkills;
+  };
+}
+'''
+
+#: …and the same pipe from the WRONG tree, which must still fail.
+TAR_PIPE_FROM_ANOTHER_TREE = '''
+{
+let
+  claudeSkills = pkgs.runCommandLocal "devrc-claude-skills" { } \'\'
+    cp -R ${../claude/skills} "$out"
+    tar -C ${../claudedocs} -cf - . | tar -C "$out" -xf -
+  \'\';
+in
+  home.file.".claude/skills" = {
+    source = claudeSkills;
+  };
+}
+'''
+
+#: `//` merge: nix's effective `source` is the RIGHT operand, and only the left
+#: attribute set was ever read.
+ATTRSET_OVERRIDDEN_BY_MERGE = '''
+{
+  home.file.".claude/skills" = { source = ../claude/skills; recursive = true; }
+    // lib.optionalAttrs isLaptop { source = ../claudedocs; };
+}
+'''
+
+#: The same identifier declared twice — as an attribute key inside an unrelated
+#: attribute set, and as the real binding. Which one a reference resolves to is
+#: a question about nix SCOPE, and this reads text.
+SHADOWED_BINDING = '''
+{
+let
+  opencodeDefaults = {
+      claudeSkills = ../claude/skills;
+      recursive = true;
+  };
+  claudeSkills = ../claudedocs;
+in
+  home.file.".claude/skills".source = claudeSkills;
+}
+'''
+
+#: A whole other derivation copied over the output root, written as a DOTTED
+#: expression. It matched neither the path shape nor the identifier shape and
+#: was dropped by both branches, in silence.
+DOTTED_EXPR_OVER_ROOT = '''
+{
+let
+  claudeSkills = pkgs.runCommandLocal "devrc-claude-skills" { } \'\'
+    cp -R ${../claude/skills} "$out"
+    cp -R ${pkgs.someOtherSkillsTree}/. "$out"
+  \'\';
+in
+  home.file.".claude/skills" = {
+    source = claudeSkills;
+  };
+}
+'''
+
+#: 🔴 #443's headline false positive, one character to the LEFT: the quote
+#: before the slash rather than after it. Same destination, and it read as the
+#: output ROOT — "the binding removes its own output".
+RM_UNDER_OUT_QUOTE_FIRST = '''
+{
+let
+  claudeSkills = pkgs.runCommandLocal "devrc-claude-skills" { } \'\'
+    cp -R ${../claude/skills} "$out"
+    chmod -R u+w "$out"
+    rm -rf "$out"/clickup/node_modules
+    ln -sT ${clickupNodeModules}/node_modules "$out"/clickup/node_modules
+    cp ${../claude/PRINCIPLES.md} "$out"/PRINCIPLES.md
+  \'\';
+in
+  home.file.".claude/skills" = {
+    source = claudeSkills;
+  };
+}
+'''
+
+#: `${out}` — a spelling `_OUT_REF`'s own comment claims to support, which the
+#: interpolation scan then reported as an unresolvable tree written over $out.
+OUT_SPELLED_AS_AN_INTERPOLATION = '''
+{
+let
+  claudeSkills = pkgs.runCommandLocal "devrc-claude-skills" { } \'\'
+    cp -R ${../claude/skills} "${out}"
+  \'\';
+in
+  home.file.".claude/skills" = {
+    source = claudeSkills;
+  };
+}
+'''
+
+#: The entry declared through an attribute set rather than a dotted path. The
+#: literal `home.file.".claude/skills"` never appears, so this read as "the
+#: mapping was deleted" and sent the reader hunting for a removal.
+MAPPING_AS_A_NESTED_ATTRSET = '''
+{
+  home.file = {
+    ".claude/skills" = {
+      source = ../claude/skills;
+      recursive = true;
+    };
+  };
+}
+'''
+
+#: `src = <ident>;` where the ident is a bare path. Without this, the identifier
+#: resolution inside a root attribute never executes on any fixture — the
+#: feature is unexercised and its guard vacuous.
+ROOT_ATTR_THROUGH_AN_IDENT = '''
+{
+let
+  skillsSrc = ../claude/skills;
+  claudeSkills = pkgs.stdenv.mkDerivation {
+    name = "devrc-claude-skills";
+    src = skillsSrc;
+    installPhase = "cp -R ./. $out";
+  };
+in
+  home.file.".claude/skills" = {
+    source = claudeSkills;
+  };
+}
+'''
+
+#: …and the same, where the identifier is declared TWICE. One declaration is
+#: the right tree and the other is not; which one `src` sees is nix scope, so
+#: the resolution must decline rather than pick.
+ROOT_ATTR_THROUGH_A_SHADOWED_IDENT = '''
+{
+let
+  opencodeDefaults = {
+      skillsSrc = ../claude/skills;
+  };
+  skillsSrc = ../claudedocs;
+  claudeSkills = pkgs.stdenv.mkDerivation {
+    name = "devrc-claude-skills";
+    src = skillsSrc;
+    installPhase = "cp -R ./. $out";
+  };
+in
+  home.file.".claude/skills" = {
+    source = claudeSkills;
+  };
+}
+'''
+
+ROOT_ATTR_THROUGH_AN_IDENT_WRONG_TREE = '''
+{
+let
+  skillsSrc = ../claudedocs;
+  claudeSkills = pkgs.stdenv.mkDerivation {
+    name = "devrc-claude-skills";
+    src = skillsSrc;
+    installPhase = "cp -R ./. $out";
+  };
+in
+  home.file.".claude/skills" = {
+    source = claudeSkills;
+  };
+}
+'''
+
+#: A defensive `rm -rf "$out"` BEFORE the copy. Genuinely harmless — and this
+#: cannot tell it from the harmful order, so the message must not claim one.
+RM_BEFORE_THE_COPY = '''
+{
+let
+  claudeSkills = pkgs.runCommandLocal "devrc-claude-skills" { } \'\'
+    rm -rf "$out"
+    cp -R ${../claude/skills} "$out"
+  \'\';
+in
+  home.file.".claude/skills" = {
+    source = claudeSkills;
+  };
+}
+'''
+
 #: An UNRESOLVABLE identifier written over the output root. Not a repo path, so
 #: nothing here can say what ships — the parser must say so, not stay silent.
 OPAQUE_IDENT_OVER_ROOT = '''
@@ -733,7 +1016,7 @@ def test_copying_the_tree_and_then_emptying_out_fails():
         "deploys none of them"
     )
     # It must fail for one of the two REAL reasons, not incidentally.
-    assert ("removes its own output" in problem) or ("as well as" in problem), problem
+    assert ("REMOVES $out" in problem) or ("as well as" in problem), problem
 
 
 def test_copying_a_second_repo_tree_over_the_output_fails():
@@ -757,7 +1040,11 @@ def test_emptying_out_after_copying_fails_on_its_own():
         "a binding that copies claude/skills and then `rm -rf \"$out\"` was accepted — "
         "it deploys an EMPTY tree"
     )
-    assert "removes its own output" in problem, problem
+    assert "REMOVES $out" in problem, problem
+    # The message must NOT assert an order it did not establish: a defensive
+    # `rm -rf "$out"` BEFORE the copy is harmless, and this cannot tell the two
+    # apart, so it has to say which question is open rather than invent an answer.
+    assert "question about order" in problem, problem
 
 
 def test_a_source_bound_to_a_nonexistent_ident_fails():
@@ -1013,6 +1300,168 @@ def test_malformed_nix_is_reported_as_a_parser_problem_not_a_pass():
         problem = skills_mapping_problem(fixture)
         assert problem is not None, f"{name} was accepted as a valid deploy"
         assert "do NOT delete the check" in problem, f"{name}: {problem}"
+
+
+# --------------------------------------------------------------------------
+# Found by an adversarial audit OF the #443 fix. Every one of these was a clean
+# PASS (or, for the last group, a confident wrong FAIL) against the first
+# version of the new parser.
+# --------------------------------------------------------------------------
+
+def test_a_hash_inside_a_shell_expansion_is_not_a_comment():
+    """🔴 `''${bbOld##*.}` is `nix/home.nix:548`, today.
+
+    Blanking every `#` to end-of-line removed the closing `}` of the expansion,
+    which unbalanced the braces the attrset scan counts, which let it run out of
+    this mapping and into the NEXT one's `source`. Verdict: None — the same
+    false all-clear #443 is about, reintroduced by the fix for it.
+    """
+    problem = skills_mapping_problem(HASH_IN_A_SHELL_EXPANSION)
+    assert problem is not None, (
+        "a sourceless mapping containing `${x##*.}` was accepted because comment "
+        "stripping ate a brace and the scan read the next mapping's source"
+    )
+    assert "no `source =`" in problem, problem
+
+
+def test_a_hash_inside_a_string_does_not_swallow_the_rest_of_the_line():
+    problem = skills_mapping_problem(HASH_INSIDE_A_STRING_HIDES_A_STATEMENT)
+    assert problem is not None, (
+        "a `#` inside a quoted string blanked the statement after it on the same "
+        "line — the one that copied another tree over $out"
+    )
+    assert "as well as" in problem, problem
+
+
+def test_the_mapping_quoted_in_a_string_cannot_answer_for_the_real_one():
+    """Two DIFFERENT sources for one path is not a question this can settle."""
+    problem = skills_mapping_problem(MAPPING_QUOTED_IN_A_STRING)
+    assert problem is not None, (
+        "a copy of the mapping inside a `''…''` string answered for the real "
+        "declaration below it, which sourced ../claudedocs"
+    )
+    assert "do NOT delete the check" in problem, problem
+
+
+def test_a_write_this_cannot_relate_to_out_is_reported_not_ignored():
+    """`cd "$out"` and `dst="$out"` both replace the tree from a statement that
+    never names `$out`. Statement-scoping is blind to them by construction, so
+    an unclassified repo path has to be an ANSWER, not a shrug."""
+    for name, fixture in (
+        ("cd into $out", CD_INTO_OUT_THEN_OVERWRITE),
+        ("$out aliased to a variable", OUT_ALIASED_TO_A_VARIABLE),
+    ):
+        problem = skills_mapping_problem(fixture)
+        assert problem is not None, (
+            f"{name}: ../claudedocs was copied over the deployed tree and accepted"
+        )
+        assert "../claudedocs" in problem, f"{name}: {problem}"
+        assert "do NOT delete the check" in problem, f"{name}: {problem}"
+
+
+def test_a_pipeline_is_one_statement():
+    """`tar -C ${src} -cf - . | tar -C "$out" -xf -` is a single write.
+
+    Splitting on `|` put the source and the destination in different statements,
+    so the legitimate form was rejected ("never copies …") and the hostile form
+    was accepted. Both directions are pinned.
+    """
+    assert skills_mapping_problem(TAR_PIPE_FROM_THE_SKILLS_TREE) is None
+    problem = skills_mapping_problem(TAR_PIPE_FROM_ANOTHER_TREE)
+    assert problem is not None, "a second tree untarred over $out was accepted"
+    assert "as well as" in problem, problem
+
+
+def test_an_attribute_set_merged_with_an_override_is_not_readable():
+    """`{ source = A; } // lib.optionalAttrs cond { source = B; }` deploys B."""
+    problem = skills_mapping_problem(ATTRSET_OVERRIDDEN_BY_MERGE)
+    assert problem is not None, (
+        "only the left operand of `//` was read, so an override to ../claudedocs "
+        "was invisible"
+    )
+    assert "do NOT delete the check" in problem, problem
+
+
+def test_a_shadowed_binding_is_a_question_about_scope_not_text():
+    problem = skills_mapping_problem(SHADOWED_BINDING)
+    assert problem is not None, (
+        "the first `claudeSkills =` head in the file won — but it was an attribute "
+        "inside an unrelated set, not the binding the source refers to"
+    )
+    assert "do NOT delete the check" in problem, problem
+
+
+def test_a_dotted_expression_over_the_root_is_not_dropped():
+    """`${pkgs.someOtherSkillsTree}` matches neither the path shape nor the
+    identifier shape. It used to fall off the end of the `elif` — the one
+    outcome the module docstring says must never happen."""
+    problem = skills_mapping_problem(DOTTED_EXPR_OVER_ROOT)
+    assert problem is not None, (
+        "a whole other derivation copied over the output root was silently dropped"
+    )
+    assert "do NOT delete the check" in problem, problem
+
+
+def test_the_quote_may_come_before_the_slash():
+    """🔴 `"$out"/clickup/node_modules` — #443's headline false positive, one
+    character to the left of where it was fixed. Same destination, and the
+    root-vs-under split has to read the DESTINATION, not the spelling."""
+    assert skills_mapping_problem(RM_UNDER_OUT_QUOTE_FIRST) is None
+
+
+def test_out_spelled_as_an_interpolation_is_the_output_not_a_tree():
+    """`${out}` is the output. `_OUT_REF`'s comment already said so; the
+    interpolation scan then reported it as an unresolvable tree written there."""
+    assert skills_mapping_problem(OUT_SPELLED_AS_AN_INTERPOLATION) is None
+
+
+def test_the_mapping_declared_as_a_nested_attribute_set_asks_for_the_parser():
+    """`home.file = { ".claude/skills" = …; }` never spells the literal this
+    searches for. That is not "the mapping was deleted" — it is a spelling this
+    cannot read, and the two send a reader to completely different places."""
+    problem = skills_mapping_problem(MAPPING_AS_A_NESTED_ATTRSET)
+    assert problem is not None
+    assert "do NOT delete the check" in problem, problem
+    assert "no longer declares" not in problem, problem
+
+
+def test_a_root_attribute_bound_to_an_identifier_resolves():
+    """`src = skillsSrc;` with `skillsSrc = ../claude/skills;`.
+
+    Without this fixture the identifier resolution inside `src`/`paths` never
+    executes on anything, and the guard that keeps it from eating path
+    components is vacuous — it asserts a loop does not do something, while
+    nothing shows the loop does anything.
+    """
+    assert skills_mapping_problem(ROOT_ATTR_THROUGH_AN_IDENT) is None
+    problem = skills_mapping_problem(ROOT_ATTR_THROUGH_AN_IDENT_WRONG_TREE)
+    assert problem is not None, "`src = skillsSrc;` bound to ../claudedocs passed"
+    assert "never copies" in problem, problem
+
+
+def test_a_root_attribute_bound_to_a_SHADOWED_identifier_does_not_resolve():
+    """`src = skillsSrc;` where `skillsSrc =` is declared twice.
+
+    Declining is the only honest answer — picking the first declaration is a
+    guess about nix scope. Pinned because the shadow check sits at a second call
+    site, and until this fixture existed a mutation of it changed no verdict.
+    """
+    problem = skills_mapping_problem(ROOT_ATTR_THROUGH_A_SHADOWED_IDENT)
+    assert problem is not None, (
+        "a `src` bound to a name declared twice — once to ../claude/skills and "
+        "once to ../claudedocs — was resolved to whichever came first in the file"
+    )
+    assert "never copies" in problem, problem
+
+
+def test_a_removal_before_the_copy_is_not_claimed_to_come_after():
+    """A defensive `rm -rf "$out"` first is harmless, and this cannot tell it
+    from the harmful order — so it must report the open question, not assert an
+    answer. It still fails: order is exactly what is undetermined."""
+    problem = skills_mapping_problem(RM_BEFORE_THE_COPY)
+    assert problem is not None
+    assert "question about order" in problem, problem
+    assert "and then empties" not in problem, problem
 
 
 def test_an_opaque_identifier_written_over_the_output_root_is_not_silently_ok():
