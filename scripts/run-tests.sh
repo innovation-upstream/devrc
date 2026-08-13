@@ -754,10 +754,18 @@ TARGET_FLOORS=(
   # .#checks.x86_64-linux.pytests` -> `collected=114`, read out of `nix log`, not from a
   # local pytest run — then put through the gate's own function, not arithmetic:
   #   _suggested_floor 114 = 114 - min(50, max(1, 114/20 = 5)) = 114 - 5 = 109.
+  #
+  # 2026-08-13, same branch, the OFFERS `waiting on`/`blocked on` widening: 114 -> 122.
+  # +8 = four new PARKED-arm fixtures x the two parametrized arm tests. Two of the four
+  # cover arms that already existed and had NO fixture (`awaiting`, `standing by`) — a
+  # full mutant battery over the whole suppressor set found both surviving. Measured by
+  # the AUTHORITATIVE gate on this branch's tree, `nix build
+  # .#checks.x86_64-linux.pytests` -> `collected=122`, read out of `nix log`:
+  #   _suggested_floor 122 = 122 - min(50, max(1, 122/20 = 6)) = 122 - 6 = 116.
   # ⚠ Two sibling branches also add tests today and will conflict HERE. Do not reconcile
   # the two sides by hand: re-run the gate on the MERGED tree and copy what it prints
   # (`rerere` has replayed a stale resolution onto this line before).
-  "scripts/claude-hooks/tests/test_next_step_nudge.py|109"
+  "scripts/claude-hooks/tests/test_next_step_nudge.py|116"
 )
 
 # The allowance rule, in one place, used by BOTH the drift message and anyone

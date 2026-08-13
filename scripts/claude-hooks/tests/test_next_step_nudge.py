@@ -299,6 +299,24 @@ SUPPRESSOR_ARMS = {
                            "measurement first.", "marked"),
     "marked_leans_toward": ("The evidence leans toward the loop rather than the cache.",
                             "marked"),
+    # OFFERS — the PARKED arms. Neither ending hands anything to the operator; each says
+    # what the turn is waiting on, which discharges the round trip just as well. Both
+    # were MEASURED firing before the arm existed, and the second is the exact shape
+    # NUDGE's blocked bullet teaches, so a mutation deleting either arm reopens the
+    # defect the bullet was written for. Deliberately free of "I'll"/"will" so COMMITS
+    # cannot rescue them — that shadowing is what let an arm-level mutant survive before.
+    "offers_waiting_on": ("Waiting on the background sweep to report before the next "
+                          "measurement.", "offers"),
+    "offers_blocked_on": ("Blocked on the deploy that carries the counter.", "offers"),
+    # ...and the two PARKED arms that were already here and had NO fixture. Found by
+    # running the battery over the WHOLE suppressor set rather than only over the arm
+    # being added: deleting `awaiting` or `standing by` left the suite green, so a
+    # mutation sweep could not see them at all. Pre-existing gap, closed here because the
+    # widening above is what made this family load-bearing.
+    "offers_awaiting": ("Awaiting the second point of the measurement before the "
+                        "comparison closes.", "offers"),
+    "offers_standing_by": ("Standing by for the sweep to report on the retry loop.",
+                           "offers"),
 }
 
 
@@ -325,6 +343,10 @@ def test_arm_ledger_covers_every_arm_named_in_the_source_comments():
         assert nsn.COMMITS.search(f"the work is {arm} happen"), arm
     for arm in ("defaults to", "leans toward", "worth a glance", "worth folding"):
         assert nsn.MARKED.search(f"it {arm} something"), arm
+    # OFFERS' PARKED family. It was absent from this ledger entirely, which is how
+    # `awaiting` and `standing by` came to have no fixture and survive a sweep.
+    for arm in ("awaiting", "standing by", "waiting on", "blocked on"):
+        assert nsn.OFFERS.search(f"the turn is {arm} something"), arm
 
 
 # --------------------------------------------------------------------------- #
@@ -438,12 +460,18 @@ def test_the_blocked_shape_ships_an_exemplar_the_predicate_recognises():
     here — is fed back through the predicate. A turn ending exactly as the hook tells it
     to must not be nudged again.
 
-    It survives on COMMITS ("I'll re-run"), not on any "waiting on" pattern: OFFERS
-    knows "awaiting" and "standing by" but NOT "waiting on". So rewording the exemplar
+    It is now suppressed TWICE OVER, and that is the point of keeping this test after the
+    OFFERS widening: by COMMITS ("I'll re-run") and by the OFFERS `waiting on` arm. When
+    this guard was first written only COMMITS covered it, so a reword of the exemplar
     into bare present tense — "waiting on the agent; the gate re-runs when it lands" —
-    would make the hook fire on its own advice, and that fails HERE rather than in front
-    of the operator. Attribution is asserted, not just the verdict, so the exemplar
-    cannot start passing for an unrelated reason.
+    would have made the hook fire on its own advice. That hole is closed at the source
+    now (the arm, pinned by `offers_waiting_on`), and this stays as the SELF-CONSISTENCY
+    check: it asserts the shipped exemplar specifically, so a future reword into a shape
+    no suppressor knows fails HERE rather than in front of the operator.
+
+    COMMITS attribution is asserted with `in`, not equality, precisely because a second
+    suppressor now matches — but it is still asserted, so the exemplar cannot come to
+    pass for an entirely unrelated reason.
     """
     quoted = [q for q in re.findall(r'"([^"]+)"', blocked_bullet())
               if q.lower() != "proceed"]        # "proceed" is quoted to FORBID it
