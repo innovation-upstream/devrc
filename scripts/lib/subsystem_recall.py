@@ -278,6 +278,8 @@ __all__ = [
     "extract_sections",
     "read_entry",
     "fold_sensitivity",
+    "discarded_sensitivity",
+    "sensitivity_label",
     "load_store",
     "listing_order",
     "listing_page",
@@ -537,6 +539,34 @@ def fold_sensitivity(raw: object) -> str:
     return SENSITIVITY_FAIL_SAFE
 
 
+def discarded_sensitivity(raw: object) -> str | None:
+    """The marker a file DECLARED and `fold_sensitivity` overrode, if any.
+
+    🔴 THE FOLD IS NEVER WEAKENED — this only makes it VISIBLE. `sensitivity:`
+    is the one field this module treats as safety-critical, and there is a real
+    difference between the two inputs that both render as `client-confidential`:
+
+        (absent)              nobody said anything. The ordinary case, and the
+                              fail-safe default is the whole answer.
+        `sensitivity: internal`  somebody WROTE a value and the tool overrode it,
+                              because `internal` is not one of the schema's three.
+
+    Silently rewriting the second reads as "the file says client-confidential",
+    which it does not — and the author who typed `internal` gets no signal that
+    the schema does not know the word. So an overridden declaration is printed
+    beside the effective value; an absent one prints nothing.
+
+    DERIVED from `fold_sensitivity` rather than re-testing membership, so the two
+    cannot drift into disagreeing about which values are known.
+    """
+    if not isinstance(raw, str):
+        return None
+    written = raw.strip()
+    if not written:
+        return None
+    return None if fold_sensitivity(raw) == written.lower() else written
+
+
 # --- The recalled entry --------------------------------------------------------
 
 
@@ -548,6 +578,12 @@ class RecalledEntry:
     filename: str
     sensitivity: str
     sections: Mapping[str, str] = field(default_factory=dict)
+
+    declared_sensitivity: str | None = None
+    """A `sensitivity:` the file wrote that the schema does not know, which
+    `fold_sensitivity` overrode — see `discarded_sensitivity`. `None` when the
+    marker was absent or was honoured. Printed beside the effective value so an
+    override is never silent."""
 
     bullet_count: int = 0
     """Top-level `## Nuance / work-history` bullets, via the resolver's own
@@ -604,6 +640,7 @@ def read_entry(store_root: str | Path, entry: SubsystemEntry) -> RecalledEntry:
         ref=entry.ref,
         filename=entry.filename,
         sensitivity=fold_sensitivity(fm.get("sensitivity")),
+        declared_sensitivity=discarded_sensitivity(fm.get("sensitivity")),
         sections=sections,
         bullet_count=len(parse_journal_bullets(sections.get(NUANCE_HEADING, ""))),
         mtime=mtime,
@@ -802,6 +839,39 @@ class RecallReport:
     """1-based page, and how many pages `listing_total` makes at
     `LISTING_PAGE_SIZE`. `listing_pages` is at least 1 even for an empty index, so
     "page 1 of 1" never reads as "page 1 of 0"."""
+
+    @property
+    def page_is_past_the_end(self) -> bool:
+        """🔴 THE ONE PLACE THIS QUESTION IS ASKED. Three renderer branches need
+        it — the index header, the page notice and `--list`'s completeness line —
+        and the first shipped version answered it separately in each, which is how
+        a header printed `entries 801–800 of 150 (page 9 of 2)` while the notice
+        directly under it was correct."""
+        return self.listing_page > self.listing_pages
+
+    @property
+    def listing_before_page(self) -> int:
+        """Index rows on EARLIER pages. 0 on a page past the end: nothing was
+        listed there, so "before" describes no position."""
+        if self.page_is_past_the_end:
+            return 0
+        return (self.listing_page - 1) * LISTING_PAGE_SIZE
+
+    @property
+    def listing_after_page(self) -> int:
+        """Index rows on LATER pages — what a truncation notice is about.
+
+        🔴 THE BUG THIS PROPERTY EXISTS FOR. The notice originally fired on
+        `listing_total > len(listing)`, which is "this page does not hold the
+        whole index" — TRUE on the LAST page too. On page 2 of 2 it therefore
+        announced page 1's 100 entries as still unseen and routed the reader to a
+        `--page 3` that does not exist: a false truncation notice contradicting
+        the correct header on the line above it. What a notice must count is what
+        comes AFTER this page, which is 0 on the last one.
+        """
+        if self.page_is_past_the_end:
+            return 0
+        return max(0, self.listing_total - self.listing_before_page - len(self.listing))
 
     featured_basis: str | None = None
     """Which selector chose `entries[0]`, in words — `select_featured`'s second
@@ -1080,16 +1150,36 @@ def listing_page(
 # --- Rendering -----------------------------------------------------------------
 
 
-def listing_line(entry: RecalledEntry, width: int) -> str:
-    """ONE index line: `  <ref>   N bullets  <sensitivity>`. ~60 B.
+def sensitivity_label(effective: str, declared: str | None) -> str:
+    """`<effective>` — or `<effective> (declared: <x>)` when a marker was overridden.
 
-    Three fields and no fourth. The ref is what `--ref` takes, the bullet count
-    is the size signal that says whether a `--ref` is worth spending, and the
+    ONE spelling, taking the two VALUES rather than a report type, because THREE
+    surfaces print it — the index row, the `--ref`/featured entry header and the
+    search hunk — and only two of them hold a `RecalledEntry`.
+    """
+    if declared is None:
+        return effective
+    return f"{effective} (declared: {declared})"
+
+
+def listing_line(entry: RecalledEntry, width: int) -> str:
+    """ONE index line: `  <ref>   N nuance  <sensitivity>`. ~60 B.
+
+    Three fields and no fourth. The ref is what `--ref` takes, the count is the
+    size signal that says whether a `--ref` is worth spending, and the
     sensitivity has to travel WITH the entry it describes — a sensitivity stated
     once at the top of a block is a sensitivity that gets copied away from.
+
+    ⚠ THE COUNT IS `## Nuance / work-history` BULLETS ONLY, and the word says so
+    rather than leaving it to be assumed. It was `N bullets`, which reads as
+    ENTRY SIZE to anyone scanning the index — an entry with 5 pointers and 7
+    nuance bullets showed `7 bullets` and has 12. Naming the section is free
+    (`nuance` is one character shorter than `bullets`) and the count itself is
+    deliberately not entry size: pointers are durable and do not grow, while
+    work-history is what the store's prune-on-resolve discipline is denominated
+    in, so it is the number that predicts whether a `--ref` is worth spending.
     """
-    n = entry.bullet_count
-    return f"  {entry.ref.ljust(width)}  {n:>3} {'bullet ' if n == 1 else 'bullets'}  {entry.sensitivity}"
+    return f"  {entry.ref.ljust(width)}  {entry.bullet_count:>3} nuance   {sensitivity_label(entry.sensitivity, entry.declared_sensitivity)}"
 
 
 def _render_listing(report: RecallReport) -> list[str]:
@@ -1103,23 +1193,38 @@ def _render_listing(report: RecallReport) -> list[str]:
     """
     width = max((len(e.ref) for e in report.listing), default=0)
     order = "newest-first by file mtime"
-    if report.listing_pages <= 1:
+    shown = len(report.listing)
+
+    if report.page_is_past_the_end:
+        # 🔴 NO ARITHMETIC ON A PAGE THAT DOES NOT EXIST. The first shipped
+        # version computed the range unconditionally and printed
+        # `entries 801–800 of 150 … (page 9 of 2)` — an inverted range and an
+        # impossible page-of-page — directly above a correct guidance line. A
+        # header is a claim like any other; it does not get to be wrong because
+        # something below it is right.
         head = (
-            f"INDEX ({RECALL_LABEL}) — ALL {len(report.listing)} entr"
-            f"{'y' if len(report.listing) == 1 else 'ies'} in `{report.scope}/`, "
+            f"INDEX ({RECALL_LABEL}) — no entries: page {report.listing_page} is past the "
+            f"end of `{report.scope}/`, which holds {report.listing_total} in "
+            f"{report.listing_pages} page{'' if report.listing_pages == 1 else 's'} "
+            f"({order}):"
+        )
+    elif report.listing_pages <= 1:
+        head = (
+            f"INDEX ({RECALL_LABEL}) — ALL {shown} entr"
+            f"{'y' if shown == 1 else 'ies'} in `{report.scope}/`, "
             f"none omitted ({order}):"
         )
     else:
-        first = (report.listing_page - 1) * LISTING_PAGE_SIZE + 1
+        first = report.listing_before_page + 1
         head = (
-            f"INDEX ({RECALL_LABEL}) — entries {first}–{first + len(report.listing) - 1} "
+            f"INDEX ({RECALL_LABEL}) — entries {first}–{first + shown - 1} "
             f"of {report.listing_total} in `{report.scope}/`, {order} "
             f"(page {report.listing_page} of {report.listing_pages}):"
         )
     out = ["", head, *(listing_line(e, width) for e in report.listing)]
 
-    if report.listing_page > report.listing_pages:
-        # 🔴 Its own branch and its own words: a page past the end lists nothing,
+    if report.page_is_past_the_end:
+        # Its own branch and its own words: a page past the end lists nothing,
         # and "nothing on this page" must not be readable as "nothing on record".
         out.append(
             f"  (PAGE {report.listing_page} IS PAST THE END — `{report.scope}/` holds "
@@ -1130,8 +1235,12 @@ def _render_listing(report: RecallReport) -> list[str]:
             f"was listed here and nothing is missing from the store; re-run with "
             f"`--page 1` … `--page {report.listing_pages}`.)"
         )
-    elif report.listing_total > len(report.listing):
-        remaining = report.listing_total - len(report.listing)
+    elif report.listing_after_page:
+        # 🔴 GATED ON WHAT COMES AFTER THIS PAGE, never on "this page is not the
+        # whole index" — see `RecallReport.listing_after_page`. On the LAST page
+        # this is 0 and nothing prints, because there is nothing left to announce
+        # and a notice pointing at a page that does not exist is worse than none.
+        remaining = report.listing_after_page
         nxt = report.listing_page + 1
         out.append(
             f"  (… {remaining} more entr{'y' if remaining == 1 else 'ies'} NOT LISTED on "
@@ -1200,12 +1309,37 @@ def render_text(report: RecallReport) -> str:
     if not report.entries:
         # `list` mode. LOUD about what it did not do: an index with no bodies is
         # not an empty scope, and the two must not read the same.
+        #
+        # 🔴 IT DESCRIBES THE PAGE, NOT THE SCOPE. This line originally asserted
+        # "the N entries above are the complete index", with N the SCOPE total —
+        # false on every paginated page (100 were above, not 150) and flatly
+        # self-contradictory past the end (zero were). Same class as a false
+        # truncation notice: it claims a completeness the page does not have.
+        # `total_in_scope` still appears, because "this is not an empty scope" is
+        # the other half of the sentence and has to stay true.
+        shown = len(report.listing)
+        if report.page_is_past_the_end:
+            what = (
+                f"NO entries were listed — see the page notice above. `{report.scope}/` "
+                f"holds {report.total_in_scope}"
+            )
+        elif report.listing_pages > 1:
+            what = (
+                f"The {shown} entr{'y' if shown == 1 else 'ies'} above "
+                f"{'is' if shown == 1 else 'are'} page {report.listing_page} of "
+                f"{report.listing_pages} of the index for `{report.scope}/`, which holds "
+                f"{report.total_in_scope} in all"
+            )
+        else:
+            what = (
+                f"The {report.total_in_scope} entr"
+                f"{'y above is' if report.total_in_scope == 1 else 'ies above are'} the "
+                f"complete index for `{report.scope}/`"
+            )
         out.append("")
         out.append(
-            f"NO ENTRY BODIES WERE PRINTED (--list). The {report.total_in_scope} entr"
-            f"{'y above is' if report.total_in_scope == 1 else 'ies above are'} the complete "
-            f"index for `{report.scope}/` — this is not an empty scope. Run `--ref <name>` for "
-            f"one entry's `{POINTERS_HEADING}` + `{NUANCE_HEADING}`."
+            f"NO ENTRY BODIES WERE PRINTED (--list). {what} — this is not an empty scope. "
+            f"Run `--ref <name>` for one entry's `{POINTERS_HEADING}` + `{NUANCE_HEADING}`."
         )
         return "\n".join(out)
 
@@ -1226,7 +1360,10 @@ def render_text(report: RecallReport) -> str:
         )
     for e in report.entries:
         out.append("")
-        out.append(f"  ### {e.ref}  ({report.scope}/{e.filename}, sensitivity={e.sensitivity})")
+        out.append(
+            f"  ### {e.ref}  ({report.scope}/{e.filename}, "
+            f"sensitivity={sensitivity_label(e.sensitivity, e.declared_sensitivity)})"
+        )
         for heading in SURFACED_HEADINGS:
             body = e.sections.get(heading)
             if body:
@@ -1297,7 +1434,8 @@ def report_json(report: RecallReport) -> dict:
                 "ref": e.ref,
                 "file": e.filename,
                 "sensitivity": e.sensitivity,
-                "bullets": e.bullet_count,
+                "declared_sensitivity": e.declared_sensitivity,
+                "nuance_bullets": e.bullet_count,
             }
             for e in report.listing
         ],
@@ -1306,6 +1444,7 @@ def report_json(report: RecallReport) -> dict:
                 "ref": e.ref,
                 "file": e.filename,
                 "sensitivity": e.sensitivity,
+                "declared_sensitivity": e.declared_sensitivity,
                 "sections": dict(e.sections),
                 "missing_sections": list(e.missing_sections),
                 "is_bare": e.is_bare,
@@ -1526,6 +1665,12 @@ class Hunk:
     ref: str
     filename: str
     sensitivity: str
+    declared_sensitivity: str | None
+    """A `sensitivity:` the schema does not know, which the fail-safe overrode.
+    Carried onto the HUNK and not just the entry: hunk output interleaves
+    entries, so an override noted anywhere but on the hunk itself is an override
+    the reader never sees next to the lines it governs."""
+
     section: str
     start: int
     lines: tuple[str, ...]
@@ -1627,6 +1772,7 @@ def _entry_hunks(
             ref=entry.ref,
             filename=entry.filename,
             sensitivity=recalled.sensitivity,
+            declared_sensitivity=recalled.declared_sensitivity,
             section=block.section,
             start=start,
             lines=lines,
@@ -1803,7 +1949,8 @@ def render_search(report: SearchReport) -> str:
         out.append("")
         out.append(
             f"  [{h.score:.2f} {h.basis}] {h.scope}/{h.ref}  {h.section}  "
-            f"({h.scope}/{h.filename}:{h.start}-{h.end}, sensitivity={h.sensitivity})"
+            f"({h.scope}/{h.filename}:{h.start}-{h.end}, "
+            f"sensitivity={sensitivity_label(h.sensitivity, h.declared_sensitivity)})"
         )
         for line in h.lines:
             out.append(f"    {line}")
@@ -1845,6 +1992,7 @@ def search_json(report: SearchReport) -> dict:
                 "ref": h.ref,
                 "file": h.filename,
                 "sensitivity": h.sensitivity,
+                "declared_sensitivity": h.declared_sensitivity,
                 "section": h.section,
                 "start_line": h.start,
                 "end_line": h.end,

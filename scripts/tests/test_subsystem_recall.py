@@ -538,6 +538,97 @@ class TestSensitivityIsFailSafe:
 # =============================================================================
 
 
+class TestAnOverriddenSensitivityIsVISIBLE:
+    """🔴 THE FOLD IS NEVER WEAKENED — this makes it AUDIBLE.
+
+    `sensitivity: public` is honoured because it is one of the schema's three
+    values; `sensitivity: internal` is not a schema value at all, so the
+    fail-safe overrides it. That asymmetry is deliberate and correct. What was
+    NOT deliberate is that the override was SILENT: `internal` and an absent
+    marker both rendered as a bare `client-confidential`, so the file's own claim
+    disappeared and the author who typed a word the schema does not know got no
+    signal. Absent stays silent (nothing was claimed); an overridden declaration
+    is printed beside the effective value.
+    """
+
+    def test_the_fold_itself_is_UNCHANGED(self, tmp_path: Path) -> None:
+        """The safety property first: nothing here may make an unknown marker
+        read as less sensitive than the fail-safe."""
+        for raw in ("internal", "INTERNAL", "probably-fine", "", None, 7, True):
+            assert rc.fold_sensitivity(raw) == rc.SENSITIVITY_FAIL_SAFE, raw
+        for known in rc.KNOWN_SENSITIVITIES:
+            assert rc.fold_sensitivity(known.upper()) == known
+
+    def test_only_an_OVERRIDDEN_declaration_is_reported(self) -> None:
+        assert rc.discarded_sensitivity("internal") == "internal"
+        assert rc.discarded_sensitivity("  Internal  ") == "Internal"
+        # Honoured values and absence report nothing — an annotation on every
+        # row would be noise, and noise is what gets skimmed past.
+        for quiet in ("public", "personal", "client-confidential", "", "   ", None, 7):
+            assert rc.discarded_sensitivity(quiet) is None, quiet
+
+    def test_it_is_DERIVED_from_the_fold_and_cannot_disagree_with_it(self) -> None:
+        """Swept over the same inputs both functions see: a value is reported as
+        overridden if and only if the fold did not keep it."""
+        for raw in ("public", "personal", "internal", "secret", "PUBLIC", "", None):
+            kept = isinstance(raw, str) and rc.fold_sensitivity(raw) == raw.strip().lower()
+            declared = rc.discarded_sensitivity(raw)
+            if isinstance(raw, str) and raw.strip():
+                assert (declared is None) == kept, raw
+            else:
+                assert declared is None, raw
+
+    def test_the_index_row_shows_the_override(self, tmp_path: Path) -> None:
+        store = tmp_path / "s"
+        (store / SCOPE).mkdir(parents=True)
+        (store / SCOPE / "collector.md").write_text(
+            _entry("collector", SCOPE, sensitivity="internal"), encoding="utf-8"
+        )
+        (store / SCOPE / "status-bar.md").write_text(
+            _entry("status-bar", SCOPE, sensitivity="public"), encoding="utf-8"
+        )
+        (store / SCOPE / "weekly-digest.md").write_text(
+            _entry("weekly-digest", SCOPE), encoding="utf-8"
+        )
+        rows = {e.ref: rc.listing_line(e, 16) for e in rc.recall(store, SCOPE, mode="list").listing}
+        assert "client-confidential (declared: internal)" in rows["collector"]
+        # The honoured value and the absent one are unannotated — three states,
+        # two spellings would collapse two of them.
+        assert rows["status-bar"].endswith("public")
+        assert rows["weekly-digest"].endswith("client-confidential")
+
+    def test_the_override_travels_onto_a_HUNK_too(self, tmp_path: Path) -> None:
+        """Hunk output interleaves entries, so an override noted anywhere but on
+        the hunk is one the reader never sees beside the lines it governs."""
+        store = tmp_path / "s"
+        (store / SCOPE).mkdir(parents=True)
+        (store / SCOPE / "collector.md").write_text(
+            _entry("collector", SCOPE, sensitivity="internal"), encoding="utf-8"
+        )
+        hunk = rc.search(store, SCOPE, "readiness").hunks[0]
+        assert hunk.sensitivity == rc.SENSITIVITY_FAIL_SAFE
+        assert hunk.declared_sensitivity == "internal"
+        assert "sensitivity=client-confidential (declared: internal)" in rc.render_search(
+            rc.search(store, SCOPE, "readiness")
+        )
+
+    def test_the_JSON_keeps_the_two_APART(self, tmp_path: Path) -> None:
+        """A consumer must be able to act on the EFFECTIVE value without parsing
+        prose, and still see what the file claimed."""
+        store = tmp_path / "s"
+        (store / SCOPE).mkdir(parents=True)
+        (store / SCOPE / "collector.md").write_text(
+            _entry("collector", SCOPE, sensitivity="internal"), encoding="utf-8"
+        )
+        blob = rc.report_json(rc.recall(store, SCOPE, mode="list"))
+        row = blob["listing"][0]
+        assert row["sensitivity"] == "client-confidential"
+        assert row["declared_sensitivity"] == "internal"
+        hunk = rc.search_json(rc.search(store, SCOPE, "readiness"))["hunks"][0]
+        assert hunk["sensitivity"] == "client-confidential"
+        assert hunk["declared_sensitivity"] == "internal"
+
+
 class TestSelectionIsScopeWide:
     """🔴 The reader does NOT reuse the writer's path-derived selection, and the
     asymmetry is the reason. A resuming session has no PRs, a one-turn
@@ -771,9 +862,48 @@ class TestTheIndexIsNeverTruncated:
         line = rc.listing_line(by_ref["status-bar"], 12)
         assert "status-bar" in line
         assert "public" in line, "the per-entry sensitivity left its own line"
-        assert "1 bullet " in line, "the size signal is missing"
+        assert "1 nuance" in line, "the size signal is missing"
         # It stays ONE line, or "~60 B per entry" is not a bound at all.
         assert "\n" not in line
+
+    def test_the_count_NAMES_the_section_it_counts(self, store: Path) -> None:
+        """⚠ It was `N bullets`, which reads as ENTRY SIZE to anyone scanning the
+        index — the count is `## Nuance / work-history` bullets ONLY, so an entry
+        with 5 pointers and 7 nuance bullets showed `7 bullets` and has 12. The
+        word now names the section; the ambiguous one must not come back."""
+        rep = rc.recall(store, SCOPE, mode="list")
+        # The ROWS, not the whole block: the caveat legitimately uses the word
+        # "bullet" in prose ("a bullet may describe a gotcha already fixed"), and
+        # a whole-text grep would be asserting about the wrong lines — the
+        # spelled-vs-structural trap in `claude/RULES.md`.
+        rows = [rc.listing_line(e, 12) for e in rep.listing]
+        assert rows
+        for row in rows:
+            assert " nuance " in row, row
+            assert "bullet" not in row, (
+                "the index row says `bullets` again — it counts only the nuance "
+                "section, and that word reads as entry size"
+            )
+
+    def test_the_count_is_the_NUANCE_section_and_not_the_whole_entry(
+        self, tmp_path: Path
+    ) -> None:
+        """The claim the label now makes, measured: an entry with bullets under
+        BOTH surfaced headings reports only the nuance ones."""
+        store = tmp_path / "s"
+        (store / SCOPE).mkdir(parents=True)
+        (store / SCOPE / "collector.md").write_text(
+            _entry(
+                "collector",
+                SCOPE,
+                pointers="- p1\n- p2\n- p3\n- p4\n- p5",
+                nuance="\n".join(f"- 2026-02-{i:02d}: n{i}." for i in range(1, 8)),
+            ),
+            encoding="utf-8",
+        )
+        row = rc.recall(store, SCOPE, mode="list").listing[0]
+        assert row.bullet_count == 7, "not the nuance count"
+        assert "7 nuance" in rc.listing_line(row, 12)
 
     def test_the_sensitivity_on_the_line_is_the_FAIL_SAFE_one(self, store: Path) -> None:
         rep = rc.recall(store, SCOPE, mode="list")
@@ -785,7 +915,7 @@ class TestTheIndexIsNeverTruncated:
         # a display test starts asserting its own arithmetic.
         line = next(l for l in text.splitlines() if l.strip().startswith("collector "))
         assert line.endswith("client-confidential")
-        assert "1 bullet " in line
+        assert "1 nuance" in line
 
     def test_list_mode_says_it_printed_no_bodies(self, big_store: Path) -> None:
         """A bodyless index must not read like an empty scope."""
@@ -815,19 +945,27 @@ class TestTheIndexIsNeverTruncated:
 # cut is meaningless — so the tests below pin the notice AND the order.
 
 PAGED_SCOPE = "many-gizmos"
+MULTI_SCOPE = PAGED_SCOPE
 PAGED_N = rc.LISTING_PAGE_SIZE + 5
 
 
-def _make_paged_store(root: Path) -> Path:
+def _make_paged_store(root: Path, n: int = PAGED_N) -> Path:
     """More entries than one page holds, with mtime PINNED ascending by index.
 
     Pinned rather than left to the loop's speed: the index is newest-first by
-    mtime, so an order derived from how fast 105 files were written would be a
-    test asserting its own timing."""
-    store = root / "paged-store"
+    mtime, so an order derived from how fast the files were written would be a
+    test asserting its own timing. `gizmo-001` is therefore always the OLDEST and
+    always the last row of the last page, which is what lets a test ask "did this
+    page claim more entries follow the oldest one?".
+
+    `n` is a parameter because the page-cap tests need a 2-page store and the
+    every-page-describes-itself tests need a 3-page one — a middle page is the
+    only shape that can tell "print nothing on the LAST page" apart from the
+    wrong fix, "print nothing after page 1"."""
+    store = root / f"paged-store-{n}"
     d = store / PAGED_SCOPE
     d.mkdir(parents=True)
-    for i in range(1, PAGED_N + 1):
+    for i in range(1, n + 1):
         slug = f"gizmo-{i:03d}"
         path = d / f"{slug}.md"
         path.write_text(
@@ -961,6 +1099,211 @@ class TestTheIndexPageCap:
         assert rc.listing_page((), 1) == ((), 1)
         assert len(rc.listing_page(entries, 1)[0]) == len(entries)
         assert rc.listing_page(entries, 2)[0] == ()
+
+
+# =============================================================================
+# 🔴 EVERY PAGE AFTER THE FIRST — the three defects review found on PR #442.
+# =============================================================================
+#
+# WHAT GOT THROUGH, AND WHY. The page-cap tests above all exercised page 1, or
+# checked page 2's CONTENT (`listing`) without ever RENDERING it. The live
+# store's largest scope holds 25 entries — one page — so nothing in the repo or
+# in a live probe could surface any of this. All three defects are the same
+# class: a line that describes the SCOPE while sitting under a header that
+# describes the PAGE.
+#
+#   1. the truncation notice fired on "this page is not the whole index" (TRUE
+#      on the last page), announcing page 1's 100 entries as unseen and routing
+#      to a `--page 3` that does not exist — a FALSE truncation notice, which
+#      this repo treats as worse than no notice, contradicting the correct
+#      header on the line directly above it.
+#   2. the header computed its range unconditionally: `entries 801–800 of 150
+#      … (page 9 of 2)`.
+#   3. `--list`'s closing line asserted "the 150 entries above are the complete
+#      index" on a page that printed 100, and on one that printed none.
+#
+# These are rendered-TEXT defects, so every test here asserts on rendered text.
+# `TestTheIndexPageCap` above asserts mostly on the report object, which is
+# exactly why it stayed green.
+
+MULTI_N = 150
+"""Three pages' worth would be better still, but 150 is what review measured
+and reproducing the reported numbers exactly is worth more than a rounder
+fixture. `test_a_MIDDLE_page_still_announces_what_follows` covers the >2-page
+shape, which is the only thing 150 cannot show."""
+
+
+@pytest.fixture()
+def multi_store(tmp_path: Path) -> Path:
+    return _make_paged_store(tmp_path, n=MULTI_N)
+
+
+class TestEveryPageDescribesITSELF:
+    """Each test names the wrong string it would print, so a regression cannot
+    be satisfied by the absence of some other line."""
+
+    def test_the_LAST_page_prints_NO_truncation_notice(self, multi_store: Path) -> None:
+        """🔴 BLOCKER 1. On page 2 of 2 there is nothing after this page, so
+        there is nothing to announce. The notice printed anyway."""
+        text = rc.render_text(rc.recall(multi_store, MULTI_SCOPE, mode="list", page=2))
+        assert "NOT LISTED on this page" not in text, (
+            "the last page announced a truncation that is not there"
+        )
+        assert "Nothing is hidden and nothing was filtered" not in text
+        # …and the header it used to contradict is still correct and still there.
+        assert f"entries 101–{MULTI_N} of {MULTI_N}" in text
+        assert "(page 2 of 2)" in text
+
+    def test_the_last_page_NEVER_routes_to_a_page_that_does_not_exist(
+        self, multi_store: Path
+    ) -> None:
+        """The specific wrong string: `--page 3` on a two-page index."""
+        text = rc.render_text(rc.recall(multi_store, MULTI_SCOPE, mode="list", page=2))
+        assert "`--page 3`" not in text, "the last page routed past the end"
+        rep = rc.recall(multi_store, MULTI_SCOPE, mode="list", page=2)
+        assert rep.listing_after_page == 0
+
+    def test_the_count_is_what_comes_AFTER_this_page_not_what_is_off_it(
+        self, multi_store: Path
+    ) -> None:
+        """🔴 The arithmetic itself. Page 1 of 2 has 50 after it, not 100 — and
+        the old predicate would have said 100 here too if the numbers had lined
+        up differently, so both pages are asserted."""
+        one = rc.recall(multi_store, MULTI_SCOPE, mode="list", page=1)
+        two = rc.recall(multi_store, MULTI_SCOPE, mode="list", page=2)
+        assert (one.listing_before_page, one.listing_after_page) == (0, 50)
+        assert (two.listing_before_page, two.listing_after_page) == (100, 0)
+        assert "50 more entries NOT LISTED" in rc.render_text(one)
+        assert "100 more entries NOT LISTED" not in rc.render_text(two)
+
+    def test_a_MIDDLE_page_still_announces_what_follows(self, tmp_path: Path) -> None:
+        """🔴 REACHABILITY, and the control on the fix. "Print nothing on the
+        last page" must not become "print nothing after page 1" — so a THREE-page
+        index is checked at every page. Without this, gating the notice on
+        `page == 1` would pass every other test in this class."""
+        store = _make_paged_store(tmp_path, n=2 * rc.LISTING_PAGE_SIZE + 7)
+        expected = {1: 107, 2: 7, 3: 0}
+        for page, after in expected.items():
+            rep = rc.recall(store, MULTI_SCOPE, mode="list", page=page)
+            text = rc.render_text(rep)
+            assert rep.listing_after_page == after, page
+            if after:
+                assert f"{after} more entries NOT LISTED" in text, page
+                assert f"`--page {page + 1}`" in text, page
+            else:
+                assert "NOT LISTED on this page" not in text, page
+
+    def test_page_1_of_a_capped_index_is_UNCHANGED(self, multi_store: Path) -> None:
+        """🔴 The loud truncation on page 1 was correct and must stay exactly as
+        loud — the fix narrows WHEN the notice fires, never what it says."""
+        text = rc.render_text(rc.recall(multi_store, MULTI_SCOPE, mode="list", page=1))
+        assert f"entries 1–100 of {MULTI_N}" in text
+        assert "newest-first by file mtime (page 1 of 2)" in text
+        assert "50 more entries NOT LISTED on this page" in text
+        assert "capped at 100 lines per page" in text
+        assert "Nothing is hidden and nothing was filtered" in text
+        assert "`--page 2` lists the rest, oldest last" in text
+
+    def test_a_page_past_the_end_prints_NO_inverted_range(
+        self, multi_store: Path
+    ) -> None:
+        """🔴 BLOCKER 2. The header did unguarded arithmetic and printed
+        `entries 801–800 of 150 … (page 9 of 2)`."""
+        text = rc.render_text(rc.recall(multi_store, MULTI_SCOPE, mode="list", page=9))
+        assert "801–800" not in text, "the header inverted its own range"
+        assert "(page 9 of 2)" not in text, "the header claimed page 9 of 2"
+        assert "entries 801" not in text
+        # It says what it is instead, and the correct guidance line is untouched.
+        assert "page 9 is past the end" in text
+        assert "PAGE 9 IS PAST THE END" in text
+        assert "`--page 1` … `--page 2`" in text
+
+    def test_no_header_ever_prints_a_range_it_did_not_list(
+        self, multi_store: Path
+    ) -> None:
+        """The general form, swept across pages rather than asserted at one — a
+        range in the header must count exactly the rows under it."""
+        for page in (1, 2, 3, 9, 40):
+            rep = rc.recall(multi_store, MULTI_SCOPE, mode="list", page=page)
+            head = next(
+                l for l in rc.render_text(rep).splitlines() if l.startswith("INDEX")
+            )
+            rows = [l for l in rc.render_text(rep).splitlines() if l.startswith("  gizmo-")]
+            assert len(rows) == len(rep.listing), page
+            if "entries " in head and "–" in head:
+                lo, hi = head.split("entries ")[1].split(" of ")[0].split("–")
+                assert int(hi) - int(lo) + 1 == len(rows), (page, head)
+            else:
+                assert rows == [], (page, head)
+
+    def test_the_list_completeness_line_describes_THIS_PAGE(
+        self, multi_store: Path
+    ) -> None:
+        """🔴 BLOCKER 3. It claimed "the 150 entries above are the complete
+        index" on a page that printed 100."""
+        text = rc.render_text(rc.recall(multi_store, MULTI_SCOPE, mode="list", page=1))
+        assert f"The {MULTI_N} entries above are the complete index" not in text, (
+            "the closing line claimed a completeness the page does not have"
+        )
+        assert "The 100 entries above are page 1 of 2" in text
+        assert f"holds {MULTI_N} in all" in text
+        # The half of the sentence that was always true stays true.
+        assert "NO ENTRY BODIES WERE PRINTED" in text
+        assert "this is not an empty scope" in text
+
+    def test_the_completeness_line_past_the_end_is_not_self_contradictory(
+        self, multi_store: Path
+    ) -> None:
+        """Zero entries were above it, so it may not describe any."""
+        text = rc.render_text(rc.recall(multi_store, MULTI_SCOPE, mode="list", page=9))
+        assert "entries above" not in text, "it described rows it never printed"
+        assert "NO entries were listed" in text
+        assert "NO ENTRY BODIES WERE PRINTED" in text
+        assert "this is not an empty scope" in text
+        assert "NOTHING RECORDED YET" not in text
+
+    def test_a_SINGLE_page_scope_keeps_the_complete_index_claim(
+        self, big_store: Path
+    ) -> None:
+        """🔴 The control on blocker 3: the claim is TRUE when the page is the
+        whole index, and weakening it everywhere would train the reader to skim
+        past the page wording on the day it matters."""
+        text = rc.render_text(rc.recall(big_store, BIG_SCOPE, mode="list"))
+        assert f"The {BIG_N} entries above are the complete index" in text
+        assert "are page 1 of" not in text
+
+    def test_the_digest_pages_the_same_way(self, multi_store: Path) -> None:
+        """The default mode, not only `--list` — the three lines are shared and
+        a fix that only reached `--list` would leave the digest wrong."""
+        text = rc.render_text(rc.recall(multi_store, MULTI_SCOPE, page=2))
+        assert "NOT LISTED on this page" not in text
+        assert "`--page 3`" not in text
+        assert f"entries 101–{MULTI_N} of {MULTI_N}" in text
+        # …and the digest's own not-shown notice (about BODIES) is untouched.
+        assert "LISTED ABOVE but NOT shown in full" in text
+
+    def test_no_page_CONTRADICTS_its_own_header(self, multi_store: Path) -> None:
+        """🔴 THE INVARIANT UNDERNEATH ALL THREE, swept rather than spot-checked:
+        a page that says it holds the last entry may not also say entries remain.
+        This is the assertion that would have caught the original defect without
+        anyone having thought of the last page specifically."""
+        # 🔴 THE BEHAVIOURAL SWEEP RUNS FIRST AND COMPLETES, spelled against
+        # nothing this PR introduced. Interleaved with the property check below it
+        # died on `AttributeError: listing_after_page` at page 1 and never reached
+        # page 2 — where the contradiction actually lives — so the red it produced
+        # said "the surface is new" instead of "the output is wrong".
+        for page in (1, 2, 3, 9):
+            rep = rc.recall(multi_store, MULTI_SCOPE, mode="list", page=page)
+            text = rc.render_text(rep)
+            says_more = "NOT LISTED on this page" in text
+            last_row_is_oldest = bool(rep.listing) and rep.listing[-1].ref == "gizmo-001"
+            assert not (says_more and last_row_is_oldest), (
+                f"page {page} listed the OLDEST entry and still claimed more follow it"
+            )
+        for page in (1, 2, 3, 9):
+            rep = rc.recall(multi_store, MULTI_SCOPE, mode="list", page=page)
+            says_more = "NOT LISTED on this page" in rc.render_text(rep)
+            assert says_more == (rep.listing_after_page > 0), page
 
 
 # =============================================================================
@@ -2651,6 +2994,14 @@ class TestSkillDocsArePinned:
             "reads like a complete instruction",
             "🔴 WHY the bullet is the default — the tradeoff -C hands to the agent",
         ),
+        (
+            "not* entry size",
+            "the index count names its section; `bullets` read as entry size",
+        ),
+        (
+            "the fail-safe overrode it",
+            "🔴 an overridden sensitivity marker is shown, never silently rewritten",
+        ),
     ]
 
     def test_the_RETRACTED_cost_claim_is_not_reasserted(self) -> None:
@@ -3347,7 +3698,7 @@ class TestMutationKillMatrix:
         mod = _load_mutant(
             tmp_path,
             "m_page_notice",
-            [("    elif report.listing_total > len(report.listing):", "    elif False:")],
+            [("    elif report.listing_after_page:", "    elif False:")],
         )
         store = _make_paged_store(tmp_path / "s")
         text = mod.render_text(mod.recall(store, PAGED_SCOPE))
@@ -3360,21 +3711,119 @@ class TestMutationKillMatrix:
         )
         assert "NOT LISTED on this page" in rc.render_text(rc.recall(store, PAGED_SCOPE))
 
-    def test_kills_the_past_the_end_notice(self, tmp_path: Path) -> None:
-        """Without it `--page 9` renders an empty index under a header that says
-        "entries 801–800 of 105" and nothing explains it."""
+    def test_kills_the_past_the_end_PREDICATE(self, tmp_path: Path) -> None:
+        """🔴 ONE predicate, THREE branches — and this kill proves all three hang
+        off it. The first shipped version asked the question separately in each,
+        which is exactly how the header printed `entries 801–800 of 150 (page 9
+        of 2)` directly above a guidance line that was correct.
+
+        The mutant reproduces that original defect verbatim, which is the
+        strongest form this kill can take: the symptom is not "something is
+        missing", it is the specific wrong output the property exists to
+        prevent."""
         mod = _load_mutant(
             tmp_path,
             "m_past_end",
-            [("    if report.listing_page > report.listing_pages:", "    if False:")],
+            [("        return self.listing_page > self.listing_pages",
+              "        return False")],
         )
         store = _make_paged_store(tmp_path / "s")
-        text = mod.render_text(mod.recall(store, PAGED_SCOPE, page=9))
+        text = mod.render_text(mod.recall(store, PAGED_SCOPE, mode="list", page=9))
+        # (1) the guidance line is gone…
         assert "PAGE 9 IS PAST THE END" not in text
         assert "nothing is missing from the store" not in text
-        assert "PAGE 9 IS PAST THE END" in rc.render_text(
-            rc.recall(store, PAGED_SCOPE, page=9)
+        # (2) …and the header does the unguarded arithmetic again: an inverted
+        #     range and an impossible page-of-page.
+        first = (9 - 1) * rc.LISTING_PAGE_SIZE + 1
+        assert f"entries {first}–{first - 1} of {PAGED_N}" in text
+        assert f"(page 9 of {(PAGED_N - 1) // rc.LISTING_PAGE_SIZE + 1})" in text
+        # (3) …and `--list`'s completeness line describes rows it never printed.
+        assert "The 0 entries above are page 9 of 2" in text
+
+        real = rc.render_text(rc.recall(store, PAGED_SCOPE, mode="list", page=9))
+        assert "PAGE 9 IS PAST THE END" in real
+        assert f"entries {first}–" not in real
+        assert "page 9 is past the end" in real
+        assert "NO entries were listed" in real
+
+    def test_kills_the_past_the_end_HEADER_branch(self, tmp_path: Path) -> None:
+        """The header's own branch, killed separately from the predicate: a
+        shared kill would pass while the header alone was still guarded.
+
+        The symptom is asserted as the INVARIANT (`hi < lo`) rather than as the
+        literal `801–800`, because `listing_before_page` still guards past the
+        end, so this mutant inverts to `1–0` instead. Pinning the numbers would
+        have made this test a claim about which of the two guards is missing."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_past_end_head",
+            [("    if report.page_is_past_the_end:\n        # 🔴 NO ARITHMETIC",
+              "    if False:\n        # 🔴 NO ARITHMETIC")],
         )
+        store = _make_paged_store(tmp_path / "s")
+        head = next(
+            l
+            for l in mod.render_text(
+                mod.recall(store, PAGED_SCOPE, mode="list", page=9)
+            ).splitlines()
+            if l.startswith("INDEX")
+        )
+        lo, hi = head.split("entries ")[1].split(" of ")[0].split("–")
+        assert int(hi) < int(lo), f"the header stopped inverting: {head}"
+        assert "(page 9 of 2)" in head
+        # REACHABILITY: the guidance line below is untouched, so this kill is
+        # about the HEADER and not about the whole past-the-end handling.
+        assert "PAGE 9 IS PAST THE END" in mod.render_text(
+            mod.recall(store, PAGED_SCOPE, mode="list", page=9)
+        )
+
+    def test_kills_the_list_completeness_line_being_PAGE_SCOPED(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 Reinstating the original defect: the closing line claims "the N
+        entries above are the complete index" with N the SCOPE total, on a page
+        that printed 100 of 105."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_complete_line",
+            [("        elif report.listing_pages > 1:", "        elif False:")],
+        )
+        store = _make_paged_store(tmp_path / "s")
+        text = mod.render_text(mod.recall(store, PAGED_SCOPE, mode="list"))
+        assert f"The {PAGED_N} entries above are the complete index" in text
+        assert "are page 1 of 2" not in text
+        # REACHABILITY: the past-the-end arm sits ABOVE this `elif` and must be
+        # untouched, or the kill would be about the wrong branch.
+        assert "NO entries were listed" in mod.render_text(
+            mod.recall(store, PAGED_SCOPE, mode="list", page=9)
+        )
+        assert "The 100 entries above are page 1 of 2" in rc.render_text(
+            rc.recall(store, PAGED_SCOPE, mode="list")
+        )
+
+    def test_kills_the_overridden_sensitivity_ANNOTATION(self, tmp_path: Path) -> None:
+        """Without it an unknown marker is silently rewritten: `internal` and an
+        absent marker become the same bare string, and the file's own claim
+        disappears. The fold is asserted UNCHANGED in the mutant, so this kill is
+        about visibility and not about the safety property."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_declared",
+            [("    if declared is None:\n        return effective",
+              "    if True:\n        return effective")],
+        )
+        store = tmp_path / "s2"
+        (store / SCOPE).mkdir(parents=True)
+        (store / SCOPE / "collector.md").write_text(
+            _entry("collector", SCOPE, sensitivity="internal"), encoding="utf-8"
+        )
+        rows = mod.recall(store, SCOPE, mode="list").listing
+        assert mod.listing_line(rows[0], 12).endswith("client-confidential")
+        assert "declared" not in mod.listing_line(rows[0], 12)
+        # the fail-safe itself still fires in the mutant — visibility, not safety
+        assert rows[0].sensitivity == mod.SENSITIVITY_FAIL_SAFE
+        real = rc.recall(store, SCOPE, mode="list").listing
+        assert "client-confidential (declared: internal)" in rc.listing_line(real[0], 12)
 
     def test_kills_the_page_sanity_guard(self, tmp_path: Path) -> None:
         """Reached with a valid `limit`, so the guard above it cannot be what
@@ -3542,8 +3991,8 @@ class TestMutationKillMatrix:
         mod = _load_mutant(
             tmp_path,
             "m_hunklabel",
-            [('            f"({h.scope}/{h.filename}:{h.start}-{h.end}, sensitivity={h.sensitivity})"',
-              '            f"({h.scope}/{h.filename}:{h.start}-{h.end})"')],
+            [('            f"sensitivity={sensitivity_label(h.sensitivity, h.declared_sensitivity)})"',
+              '            f")"')],
         )
         store = _make_search_store(tmp_path / "s")
         rep = mod.search(store, SEARCH_SCOPE, "blob-vault")
