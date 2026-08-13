@@ -53,6 +53,11 @@ MODULE_PATH = ROOT / "scripts" / "lib" / "subsystem_recall.py"
 TOUCH_PATH = ROOT / "scripts" / "lib" / "subsystem_touch.py"
 RESUME_DOC = ROOT / "claude" / "skills" / "resume" / "SKILL.md"
 HANDOFF_DOC = ROOT / "claude" / "skills" / "handoff" / "SKILL.md"
+# The on-demand evidence sidecar. Step 4's IMPERATIVES stay in HANDOFF_DOC; the
+# measured rationale behind them lives here and costs nothing until it is read.
+HANDOFF_REFERENCE = (
+    ROOT / "claude" / "skills" / "handoff" / "reference" / "index-write.md"
+)
 ANALYZE_DOC = ROOT / "claude" / "skills" / "analyze-service" / "SKILL.md"
 
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
@@ -1151,7 +1156,22 @@ class TestSkillDocsArePinned:
         assert 'home.file.".claude/skills"' in home_nix
         assert "source = ../claude/skills;" in home_nix
 
-    HANDOFF_CORRECTIONS: list[tuple[str, str]] = [
+    # 🔴 THE CONCURRENCY FINDING WAS SPLIT ACROSS TWO FILES, so this pin table is
+    # split the same way. Step 4 keeps every IMPERATIVE; the measured evidence
+    # moved to the `reference/index-write.md` sidecar, which costs nothing until
+    # it is read. A pin has to MOVE WITH ITS SENTENCE: one left pointing at
+    # SKILL.md after the sentence went to the sidecar would pass or fail for the
+    # wrong file, and a pin that quietly stops covering anything is worse than no
+    # pin. `test_a_reworded_pin_is_still_caught_in_its_new_home` is the positive
+    # control that these still bite where they now point.
+    HANDOFF_CORRECTIONS_SKILL: list[tuple[str, str]] = [
+        (
+            "do not treat \"no error\" as evidence you were alone",
+            "the operational consequence of the retraction — an INSTRUCTION, so it stays in the body",
+        ),
+    ]
+
+    HANDOFF_CORRECTIONS_REFERENCE: list[tuple[str, str]] = [
         (
             "the protection is that `Edit` is BOUNDED, not that a stale anchor fails",
             "🔴 the corrected mechanism — measured, not reasoned",
@@ -1165,33 +1185,126 @@ class TestSkillDocsArePinned:
             "what actually happens on the anchor the protocol names",
         ),
         (
-            "do not treat \"no error\" as evidence you were alone",
-            "the operational consequence of the retraction",
-        ),
-        (
             "rewrites no working-tree byte",
             "the autocommit cannot disturb an anchor — measured",
         ),
     ]
 
-    @pytest.mark.parametrize(
-        "sentence,why", HANDOFF_CORRECTIONS, ids=[w for _, w in HANDOFF_CORRECTIONS]
-    )
-    def test_handoff_rationale_is_the_MEASURED_one(self, sentence: str, why: str) -> None:
-        doc = HANDOFF_DOC.read_text(encoding="utf-8")
-        assert sentence in doc, (
-            f"claude/skills/handoff/SKILL.md no longer states {why}.\n"
+    @staticmethod
+    def _assert_rationale_pin(text: str, sentence: str, why: str, where: str) -> None:
+        """The pin predicate, as ONE function so the positive control below can
+        exercise the same code the real pins run."""
+        assert sentence in text, (
+            f"{where} no longer states {why}.\n"
             f"  missing: {sentence!r}\n"
             f"  The earlier rationale asserted the second Edit 'fails loudly'; "
             f"TestAppendConcurrency in this file measures that it does not, for the "
-            f"anchor the protocol names. Do not restore the unmeasured wording."
+            f"anchor the protocol names. Do not restore the unmeasured wording.\n"
+            f"  If you MOVED this sentence, move its pin too — a pin left behind "
+            f"stops asserting anything."
+        )
+
+    @pytest.mark.parametrize(
+        "sentence,why",
+        HANDOFF_CORRECTIONS_SKILL,
+        ids=[w for _, w in HANDOFF_CORRECTIONS_SKILL],
+    )
+    def test_handoff_rationale_INSTRUCTION_stays_in_the_body(
+        self, sentence: str, why: str
+    ) -> None:
+        self._assert_rationale_pin(
+            HANDOFF_DOC.read_text(encoding="utf-8"),
+            sentence,
+            why,
+            "claude/skills/handoff/SKILL.md",
+        )
+
+    @pytest.mark.parametrize(
+        "sentence,why",
+        HANDOFF_CORRECTIONS_REFERENCE,
+        ids=[w for _, w in HANDOFF_CORRECTIONS_REFERENCE],
+    )
+    def test_handoff_rationale_is_the_MEASURED_one(self, sentence: str, why: str) -> None:
+        self._assert_rationale_pin(
+            HANDOFF_REFERENCE.read_text(encoding="utf-8"),
+            sentence,
+            why,
+            "claude/skills/handoff/reference/index-write.md",
+        )
+
+    def test_a_reworded_pin_is_still_caught_in_its_new_home(self) -> None:
+        """🔴 POSITIVE CONTROL on the move itself. The failure this guards against
+        is not "the sentence vanished" but "the pin followed it and went inert".
+
+        Rewording each pinned sentence IN the sidecar's real text must make the
+        SAME predicate the real tests use go red — proving the pins bite against
+        the file they now point at, not merely that some file somewhere contains
+        the words."""
+        real = HANDOFF_REFERENCE.read_text(encoding="utf-8")
+        for sentence, why in self.HANDOFF_CORRECTIONS_REFERENCE:
+            assert sentence in real, "precondition: the pin passes on the real text"
+            # A plausible REWORDING, not a deletion — the drift that actually
+            # happens when someone "tightens" a paragraph.
+            reworded = real.replace(sentence, "the mechanism is described elsewhere")
+            assert reworded != real, f"the rewrite was a no-op for {sentence!r}"
+            with pytest.raises(AssertionError) as caught:
+                self._assert_rationale_pin(
+                    reworded, sentence, why, "the reworded sidecar"
+                )
+            assert sentence in str(caught.value), (
+                "the failure must name the missing sentence, or a maintainer "
+                "cannot tell which pin broke"
+            )
+
+    def test_the_reference_pin_can_report_absence(self) -> None:
+        """Negative control on the sidecar pin, matching the one over SKILL.md: a
+        check against a doc that happens to contain everything is
+        indistinguishable from one pointed at the wrong file."""
+        text = HANDOFF_REFERENCE.read_text(encoding="utf-8")
+        assert "a sentence deliberately absent from the handoff reference" not in text
+
+    def test_the_body_ROUTES_to_the_sidecar_and_the_target_exists(self) -> None:
+        """Splitting rationale out is only safe if the body still points at it AND
+        the pointer resolves. Nothing else in the gate checks that any skill's
+        `reference/` link resolves, so an evidence file could be deleted or
+        renamed and the body would keep advertising it."""
+        doc = HANDOFF_DOC.read_text(encoding="utf-8")
+        assert "reference/index-write.md" in doc, (
+            "claude/skills/handoff/SKILL.md no longer routes to its evidence "
+            "sidecar — the rules would be left looking arbitrary with nowhere "
+            "to check them."
+        )
+        assert HANDOFF_REFERENCE.exists(), f"the routed-to sidecar is gone: {HANDOFF_REFERENCE}"
+        assert HANDOFF_REFERENCE.parent.name == "reference"
+        assert HANDOFF_REFERENCE.parent.parent == HANDOFF_DOC.parent
+
+    def test_the_sidecar_is_DEPLOYED(self) -> None:
+        """`home.file` ships `claude/skills` wholesale, so a sidecar reaches
+        `~/.claude/skills/handoff/reference/` only if it is TRACKED — an
+        untracked file is silently absent from the flake source."""
+        home_nix = (ROOT / "nix" / "home.nix").read_text(encoding="utf-8")
+        assert 'home.file.".claude/skills"' in home_nix
+        assert "source = ../claude/skills;" in home_nix
+        tracked = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", str(HANDOFF_REFERENCE.relative_to(ROOT))],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+        )
+        assert tracked.returncode == 0, (
+            f"{HANDOFF_REFERENCE.relative_to(ROOT)} is not tracked by git, so the "
+            f"flake omits it from the deploy and the body's pointer dangles on "
+            f"every host.\n{tracked.stderr}"
         )
 
     def test_the_retracted_claim_is_NOT_still_asserted(self) -> None:
         """The half that had to GO. A correction that only adds text leaves the
-        false sentence in front of the executor."""
-        doc = HANDOFF_DOC.read_text(encoding="utf-8")
-        assert "fails loudly rather than clobbering" not in doc
+        false sentence in front of the executor — and after the split it must be
+        absent from BOTH files, or moving the rationale would have reopened it."""
+        for path in (HANDOFF_DOC, HANDOFF_REFERENCE):
+            assert "fails loudly rather than clobbering" not in path.read_text(
+                encoding="utf-8"
+            ), f"the retracted wording is back in {path}"
 
 
 # =============================================================================
