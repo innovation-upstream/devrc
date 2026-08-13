@@ -697,7 +697,48 @@ TARGET_FLOORS=(
   # `scripts/tmux-autoname-session.sh` and its test — and both are `git add`ed;
   # `test_the_script_is_tracked_by_git` fails if the script ever is not, in the
   # sandbox by its ABSENCE and on the host via `git ls-files`.
-  "scripts/tests|3725"
+  #
+  # 2026-08-13, the /handoff doc write+push gate (`scripts/lib/handoff_doc.py`):
+  # 3867 -> 3915 collected.
+  #
+  # 🔴 THE CONTROL WAS MEASURED FIRST, and it is what makes the delta a fact
+  # about this branch. The entry above implies main should have been 3775; the
+  # authoritative gate run on UNMODIFIED origin/main at bab2012 — rev-pinned
+  # (`nix build 'git+file://<repo>?rev=bab2012…#checks.x86_64-linux.pytests'
+  # --rebuild`, because a cache hit prints an EMPTY log and `nix log` then has
+  # nothing to read) — printed `collected=3867`. So main was carrying 92 tests
+  # this table had never seen, and subtracting from the RECORDED number would
+  # have claimed +140 for this branch and a floor ~92 too high: a FALSE RED for
+  # whoever lands next.
+  #     3867  origin/main at bab2012, measured FIRST by the authoritative gate
+  #           as the control
+  #     + 48  scripts/tests/test_handoff_doc.py (NEW FILE) — the both-directions
+  #           gate (decline hashes the whole repo tree; accept compares the diff
+  #           SHOWN against the one `git show` reports for the commit), the
+  #           append-vs-replace fixture with two prior findings, the no-advance
+  #           and no-change refusals, four instrument controls, and the
+  #           skill/module pins
+  #     ----
+  #     3915  which is what the gate printed
+  #   _suggested_floor 3915 = 3915 - min(50, max(1, 3915/20 = 195)) = 3915 - 50
+  #                         = 3865.
+  # Two independent attributions agree exactly: the gate's own total (3915) and
+  # per-file collection on the new file (`--collect-only` = 48) against the
+  # measured control. Had they disagreed, something else in the target had moved
+  # and the +48 would have been a fact about a branch that never produced it.
+  #
+  # ⚠ ZERO new skips (`skipped=0` on this target; the suite's single skip is
+  # still the pinned one in repo-cos). NEW FILES were added — the module, its
+  # test, and two `claude/skills/handoff/reference/*.md` — and all are `git
+  # add`ed; `test_the_tool_is_tracked_by_git` fails if the module ever is not,
+  # in the sandbox by its ABSENCE and on the host via `git ls-files`.
+  #
+  # ⚠ origin/main moved to ed35850 (#462) while this was in flight, and that PR
+  # CUT a guard — so the merged tree's count will differ in BOTH directions.
+  # Re-run the gate on the merged tree and copy what it prints; do NOT reconcile
+  # the two sides by hand. (rerere has replayed a stale resolution onto this
+  # line before.)
+  "scripts/tests|3865"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —

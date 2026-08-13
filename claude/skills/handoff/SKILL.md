@@ -19,9 +19,9 @@ Topic argument (optional): `$ARGUMENTS`. If empty, infer a short kebab-case topi
    - Any in-flight deploy/build/job state relevant to this work
    - **For every UNRESOLVED bug/investigation, capture the live diagnosis state** (the next section). This is the single highest-value part of the handoff: without it, the next session re-runs every probe you already ran. Record observed *values* and *eliminations*, not narrative — paste the actual error string, the actual header/response, the exact failing request, the command whose output you read. "We looked into the CSP issue" is worthless; "`frame-ancestors` on app.example.test = `https://example.test https://*.example.test` — does NOT include `gen-matrix.embed.example.test`, confirmed via response header on GET /apps/run/dogfood-manual" is the whole point.
 
-2. **Write the handoff doc** to `claudedocs/handoff-<topic>.md` in the active repo (create `claudedocs/` if absent; overwrite the file if a handoff for the same topic exists). Use this structure — be concrete, link exact file paths and commands, no vague prose:
+2. **Write the handoff doc** to `claudedocs/handoff-<topic>.md` in the active repo (create `claudedocs/` if absent). 🔴 **If that file ALREADY EXISTS this is an UPDATE, not a rewrite — do not touch it here.** Draft your new/changed sections into a scratch file instead (`## ` headings, a *delta* — omit a section and it is left alone) and land it in **step 5**, which owns the merge and the gate. Use this structure — be concrete, link exact file paths and commands, no vague prose:
 
-   ```markdown
+   ````markdown
    # Handoff: <topic> — <YYYY-MM-DD>
 
    ## Run this first — the index, one read-only command
@@ -61,7 +61,7 @@ Topic argument (optional): `$ARGUMENTS`. If empty, infer a short kebab-case topi
 
    ## How to verify
    Exact command(s) / click-path that prove the work is correct.
-   ```
+   ````
 
 3. **Output a kickoff block** (fenced, ready to copy-paste into the next session) of the form:
    ```
@@ -69,11 +69,7 @@ Topic argument (optional): `$ARGUMENTS`. If empty, infer a short kebab-case topi
    <one-line of the single most important next action>
    ```
 
-   🔴 **The block MUST begin with a literal `/resume`, and that is not decoration.** MEASURED 2026-08-13: a kickoff emitted as plain prose (`Continue the <topic> work. Canonical handoff (read first): …`) was pasted into the next session, and that session made **zero** calls to `subsystem_recall.py` / `subsystem_touch.py` — `/resume` was never invoked and the skill did **not** auto-fire, despite "pick up where we left off" matching its description almost verbatim. So `/resume` step 4 — the index READ — never ran, and the entry written by *this* step an hour earlier, describing the very subsystem that session was working on, was never seen. A kickoff that only *points at* a doc gets the doc read and the index skipped.
-
-   🔴 **CORRECTED 2026-08-13, same day: the `/resume` prefix is NOT sufficient, and the claim that "typing the command makes the read deterministic" was wrong.** Re-measured against a DISPATCHED agent given the new `/resume`-prefixed kickoff verbatim and nothing else: **zero `Skill` tool calls, zero `subsystem_recall.py` executions** — behaviourally identical to the prose kickoff it replaced. It read the doc, oriented, and went straight to the named next step. A subagent receives the kickoff as prompt TEXT — there is no CLI slash-command parsing on that path — so a leading `/resume —` reads as a topic label, and the clause after it is a perfectly actionable instruction on its own. This is not a corner case: dispatching implementation to a subagent is the standing default here.
-
-   **So the deterministic hook is step 2's doc, not this block.** Both measured sessions read the handoff doc first, immediately, before anything else — that is the reliable behaviour, so the index command lives at the TOP OF THE DOC where reading it leads into running it. Keep the `/resume` prefix: it costs nothing and does work in an interactive session, where the CLI parses it before the model sees it. Just do not rely on it alone.
+   🔴 **Keep the literal `/resume` prefix, and do NOT rely on it.** Measured twice on 2026-08-13: a prose kickoff got the doc read and the index skipped entirely (zero `subsystem_recall.py` calls), and the `/resume`-prefixed replacement did **exactly the same** to a *dispatched agent* — a subagent gets the kickoff as prompt TEXT, with no CLI slash-command parsing, so the prefix reads as a topic label. **The deterministic hook is step 2's doc, not this block**: both sessions read the doc first, immediately, which is why the index command lives at the TOP of it. The prefix costs nothing and does work in an interactive session; it is not a mechanism. 📖 Both measurements: `reference/kickoff-prefix.md`.
 
    🔴 **Emit this BEFORE step 4's confirm gate, unconditionally.** The kickoff block is the deliverable; step 4 blocks on a y/N, and a user who walks away from that prompt must still have got it.
 
@@ -155,5 +151,21 @@ Topic argument (optional): `$ARGUMENTS`. If empty, infer a short kebab-case topi
    🔴 **Write only on explicit confirm, diff first, exactly as `analyze-service`'s write-back specifies** — show one compact unified diff, ask a single *"append this to the index? (y/N)"*, and **on decline, discard**. On confirm **re-read the file and re-apply to current bytes** so a concurrent append isn't clobbered, then **use `Edit` anchored on `## Nuance / work-history`, not `Write`** — a whole-file retype of a curated, unbacked-up entry risks losing content the diff never showed. (`Write` only for a first-ever file, which has no prior content to lose.) 🔴 **The re-read is the actual safeguard, not the anchor: do it every time, and do not treat "no error" as evidence you were alone** — a concurrent append on this anchor is measured to land silently.
 
    Carry the store's invariants: **pointers, not copies**; **never persist live status** (no counts, no Ready/NotReady, no current version) — for anything with no live probe, persist the *derivation method and what a stale reading looks like*, never the reading. Never silent-mutate. 🔴 **Write the file and run no git command** — the store is versioned by its own out-of-band autocommit. Never add a remote, never copy a line of it into a public repo. **This holds for a brand-new scope directory too: the hourly timer creates and commits its repository — do not create the repository yourself.** So a just-written entry in a new scope is **unversioned for up to an hour**; that is the normal window, not a failure, and not something to fix by hand.
+
+5. **Land the handoff doc — the write+push gate.** MEASURED: a session re-entered from a handoff, did ten minutes of real analysis, then wrote and **pushed** an updated handoff to a shared branch that nobody approved. `/resume` is read-only and followed its contract; step 4's *index* write is gated; the doc's own write+push was not.
+
+   🔴 **Do NOT forbid updating the handoff** — that one was correct and valuable (it answered the doc's open question *and* corrected a prior misreading), and suppressing it costs the next session the same ten minutes. Make the update **safe**, not rare.
+
+   **Answer first, in one line: what changed since the doc was written?** If the honest answer is *nothing*, **say so and write nothing** — a handoff that still describes reality is not stale. Otherwise merge it; this **writes nothing** and prints the diff you are about to ask about:
+
+   ```
+   python3 /home/zach/workspace/devrc/scripts/lib/handoff_doc.py --repo <repo> --topic <topic> --update <scratch-file> --advanced '<what changed since the doc was written>'
+   ```
+
+   🔴 **Status header REPLACED, findings APPENDED — which is why the tool merges rather than you rewriting the file.** `State now`/`Next steps`/`How to verify` are current state and are overwritten; `Open investigations`/`Findings`/`Gotchas` append and the earlier text survives **verbatim**, even when your block supersedes an old one — the value is seeing a prior reading was *corrected*, not finding it gone. A section your delta omits is left untouched.
+
+   `status=proposed` ⇒ the diff is on screen and nothing has been written: not the doc, not a commit, not a ref. `no-advance` (4) and `no-change` (5) print **no diff at all** — a session that went nowhere gets no write offer, not an empty one — so report the line and stop.
+
+   🔴 **Gate the PUSH, with the SAME shape step 4 uses for the index — one compact diff, a single y/N, and on decline, discard.** Ask exactly *"update the handoff doc and push it? (y/N)"*. On **n** run nothing else; the tree is already byte-identical. On **y** re-run the identical command with **`--confirm`** (plus `--push`): exactly one commit, path-limited to the doc, carrying exactly the diff shown. Whether to push at all where trunk is the deploy branch is a per-repo policy question. 📖 The incident and the shape of each half: `reference/write-gate.md`.
 
 Keep the doc tight and high-signal — it is read first thing next session, so every line must earn its place. The "Open investigations" blocks are the exception to brevity: a mid-diagnosis bug is worth verbatim evidence, because re-deriving it next session costs far more than the lines do. Pair: `/resume`.
