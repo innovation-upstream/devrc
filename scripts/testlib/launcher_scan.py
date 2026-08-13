@@ -260,3 +260,46 @@ def path_clobbers(tests_dir: Path) -> list[tuple[str, int, str]]:
             src = ast.get_source_segment(text, node) or ""
             out.append((py.name, lineno, " ".join(src.split())[:160]))
     return sorted(out)
+
+
+def absolute_launcher_sites(scripts_root: Path) -> dict[str, list[str]]:
+    """`{relative-path: [literals…]}` for every ABSOLUTE path to a launcher.
+
+    🔴 THE SHAPE NO PATH STUB CAN COVER. A stub directory shadows a launcher by
+    winning the PATH lookup; a literal like
+    `"/run/current-system/sw/bin/i3-msg"` never performs one. That is not
+    hypothetical — `scripts/browser-bridge/server.py`'s `_I3_MSG_FALLBACKS`
+    exists precisely because the browser-bridge systemd --user unit runs with a
+    minimal PATH, and `i3_available()` returns True off it.
+
+    The in-process layer in `testlib.nolaunch_plugin` intercepts these by
+    BASENAME for launches made by the pytest process itself. A launch made by a
+    CHILD process (a shell script execing an absolute path) is covered by
+    NEITHER layer, which is why this scan exists: the set of sites is pinned, so
+    a new one is a decision someone makes in the open rather than a silent hole.
+
+    Scans every `.py` under `scripts_root` (excluding `__pycache__`). It matches
+    STRING LITERALS, so — like `hazard_hits` — it cannot see a path assembled at
+    runtime from pieces. Stated, not implied.
+    """
+    out: dict[str, list[str]] = {}
+    root = Path(scripts_root)
+    for py in sorted(root.rglob("*.py")):
+        if "__pycache__" in py.parts:
+            continue
+        try:
+            module = ast.parse(py.read_text(encoding="utf-8", errors="replace"))
+        except (SyntaxError, OSError):  # pragma: no cover
+            continue
+        found = []
+        for node in ast.walk(module):
+            if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+                continue
+            v = node.value
+            if "/" not in v:
+                continue
+            if v.rsplit("/", 1)[-1] in HAZARD_VOCABULARY:
+                found.append(v)
+        if found:
+            out[str(py.relative_to(root))] = sorted(set(found))
+    return out

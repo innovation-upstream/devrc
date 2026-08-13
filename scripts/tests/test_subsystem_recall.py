@@ -452,6 +452,29 @@ class TestSectionExtraction:
         assert rc.extract_sections("## pointers\n- p\n") == {}
         assert rc.extract_sections("##Pointers\n- p\n") == {}
 
+    def test_there_is_ONE_parser_and_this_module_only_binds_its_DEFAULT(self) -> None:
+        """🔴 The anti-duplication pin, structural rather than by eye.
+
+        `subsystem_touch` needed the same extraction to show a `/handoff` what an
+        entry already says. The parser moved to `subsystem_resolver` so both
+        modules call ONE function; what stayed here is a shim that supplies this
+        reader's default heading set. If someone re-inlines a copy, this fails.
+        """
+        text = "## Pointers\n- p\n## Nuance / work-history\n- 2026-01-01: n\n"
+        assert rc.extract_sections(text) == sr.extract_sections(text, rc.SURFACED_HEADINGS)
+        assert rc.POINTERS_HEADING is sr.POINTERS_HEADING
+        assert rc.NUANCE_HEADING is sr.NUANCE_HEADING
+        # The shim's only job: bind the default. Called with one argument the
+        # resolver's own function would not even be callable.
+        with pytest.raises(TypeError):
+            sr.extract_sections(text)
+
+    def test_the_unreadable_entry_error_is_the_SAME_class_the_writer_raises(self) -> None:
+        """🔴 One condition, one class. Two spellings is how a caller catches the
+        reader's failure and misses the writer's on the very same file."""
+        assert rc.EntryUnreadableError is sr.EntryUnreadableError
+        assert st.EntryUnreadableError is sr.EntryUnreadableError
+
 
 class TestSensitivityIsFailSafe:
     @pytest.mark.parametrize(
@@ -1341,30 +1364,14 @@ class TestMutationKillMatrix:
         store = _make_store(tmp_path / "s")
         assert WHAT_IT_IS in mod.render_text(mod.recall(store, SCOPE))
 
-    def test_kills_the_fence_skip(self, tmp_path: Path) -> None:
-        """Without it a `#` line inside a fence ends the section early —
-        surfacing HALF an entry's nuance while looking like a complete read."""
-        mod = _load_mutant(
-            tmp_path, "m_fence", [("        if _is_fence(line):", "        if False:")]
-        )
-        text = (
-            "## Nuance / work-history\n- a\n```\n## not a heading\n```\n- the SECOND bullet\n"
-        )
-        got = mod.extract_sections(text)
-        assert "the SECOND bullet" not in got.get(rc.NUANCE_HEADING, "")
-
-    def test_kills_the_present_but_empty_tracking(self, tmp_path: Path) -> None:
-        """Without it, presence is derived from content and an empty section
-        mid-file reads as ABSENT while the same section at EOF reads as
-        present — two different answers to one question."""
-        mod = _load_mutant(
-            tmp_path,
-            "m_seen",
-            [("            if current is not None:\n                seen.add(current)",
-              "            if False:\n                seen.add(current)")],
-        )
-        got = mod.extract_sections("## Pointers\n- p\n## Nuance / work-history\n- n\n")
-        assert got == {}, "the presence tracking was not what produced the keys"
+    # ⚠ THE FENCE-SKIP AND PRESENT-BUT-EMPTY KILLS MOVED TO
+    # test_subsystem_resolver.py, with the parser itself. `extract_sections` is
+    # no longer defined in `subsystem_recall` — it moved down to the resolver so
+    # `subsystem_touch` could read an entry's existing bullets without a second
+    # copy — and mutating THIS module's source can no longer reach it. They are
+    # not deleted: `TestEntryMarkdownShape` over there runs both, and the
+    # anchor-uniqueness assert in `_load_mutant` is what made the move loud
+    # rather than silently turning two mutation tests into no-ops.
 
     def test_kills_the_sensitivity_fail_safe(self, tmp_path: Path) -> None:
         """🔴 Without it an unrecognized or absent marker reads as whatever the

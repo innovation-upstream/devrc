@@ -40,11 +40,19 @@ fi
 source "$FN"
 
 # ── fake binaries earlier on PATH ────────────────────────────────────────
+# 🔴 `#!/bin/sh`, NOT `#!/usr/bin/env bash`. This script had never been run by
+# any gate; the first run of it inside `nix build .#checks…pytests` was RED,
+# because the sandbox has no `/usr/bin/env` and all three stubs failed to exec.
+# The damage was not merely red: case 1 ("outside a civitai repo → refuses")
+# went GREEN for the wrong reason — the `git` stub could not run, so
+# `rev-parse --show-toplevel` produced nothing and the guard refused for a
+# reason the test was not measuring. Same trap `scripts/testlib/mockbin.py`
+# exists to stop, in the one file that could not import it (it is bash).
 BIN="$SANDBOX/bin"
 mkdir -p "$BIN"
 
 cat > "$BIN/git" <<'EOF'
-#!/usr/bin/env bash
+#!/bin/sh
 # `git rev-parse --show-toplevel` → the fake repo root (guard input).
 if [ "$1" = "rev-parse" ]; then echo "${FAKE_REPO_ROOT:-}"; exit 0; fi
 printf 'git %s\n' "$*" >> "$ORDER_LOG"   # record fetch (and anything else)
@@ -52,13 +60,13 @@ exit 0
 EOF
 
 cat > "$BIN/npm" <<'EOF'
-#!/usr/bin/env bash
+#!/bin/sh
 printf 'npm %s\n' "$*" >> "$ORDER_LOG"
 exit "${NPM_RC:-0}"
 EOF
 
 cat > "$BIN/notify-send" <<'EOF'
-#!/usr/bin/env bash
+#!/bin/sh
 printf 'notify %s\n' "$*" >> "$ORDER_LOG"
 exit 0
 EOF
