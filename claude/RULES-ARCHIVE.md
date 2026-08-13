@@ -60,6 +60,9 @@ the last revision before the core/archive split.
 - [sops-retraction](#sops-retraction) 🔴 **RETRACTED THEORY — do not re-derive**
 - [worktree-envrc](#worktree-envrc)
 - [base-clone-drift](#base-clone-drift)
+- [worktree-not-session](#worktree-not-session)
+- [cross-repo-worktree](#cross-repo-worktree)
+- [sibling-agent-kill](#sibling-agent-kill)
 
 **Shell & Tooling**
 - [readlink-arbiter](#readlink-arbiter)
@@ -602,6 +605,93 @@ the branch. `git worktree list` is the check; `git checkout --detach` is the fix
 
 Same root cause as the `refs/stash` ban: a worktree gives you a private working directory, not a
 private repo and not a private machine.
+
+## cross-repo-worktree
+*Supports: 🔴 "`isolation: "worktree"` builds the worktree from your CURRENT repo, not the repo
+the task NAMES."*
+
+Measured 2026-08-02. Two agents were dispatched with `isolation: "worktree"` at a TypeScript
+monorepo (`civit/civitai`) while the dispatching session's cwd was a **different**, unrelated Go
+repo (`civit/cli`). Both agents received worktrees of the **Go** repo. The flag resolves the
+repo from the caller's cwd; nothing in the task text redirects it, and no error is raised — the
+worktree is created successfully, of the wrong thing.
+
+The two failure modes are both worth knowing, because only one of them is loud:
+- one agent correctly refused to proceed and reported that the files in its brief did not exist —
+  **that report is the tell**, and it is the good outcome;
+- the other self-recovered by silently creating its own worktree in the right repo, which worked
+  but meant the dispatcher's mental model of where the work was happening was wrong.
+
+**For cross-repo work do not pass the flag at all.** Have the agent create its own worktree
+explicitly: `git -C <target-repo> worktree add <path> -b <branch> origin/<main>`. The target
+repo is then named in the command instead of inferred from ambient state.
+
+Not re-measured since 2026-08-02. Structural corroboration as of 2026-08-13: the `Agent` tool
+schema exposes no target-repo parameter at all, so there is no way to redirect the flag.
+
+Same shape as [worktree-not-session](#worktree-not-session): the isolation primitive is
+narrower than the word "isolation" suggests, and it fails silently at exactly the boundary you
+assumed it covered.
+
+## sibling-agent-kill
+*Supports: 🔴 "With parallel agents this widens: also confirm `/proc/<pid>/cwd` is your OWN
+worktree — the EXACT path."*
+
+Measured 2026-08-02. An auditor agent needed to clear **its own** hung browser/test run and
+matched `chrome-headless-shell|vitest|steam-run` **system-wide**, killing ~15 PIDs. Those PIDs
+included a sibling agent's in-flight integration test run, which died mid-suite in another
+worktree of the same repo.
+
+What makes this expensive is the misattribution downstream, not the lost run: the sibling's
+**first attempt after the kill collapsed with 0 files collected and exit 144**. Both of those
+read exactly like a code defect in the branch under test — a collection failure and a nonzero
+exit — and both were artifacts of the kill. The run had to be repeated from scratch to get an
+honest verdict.
+
+`/proc/<pid>/cwd` is the discriminator: it resolves to the worktree the process was launched
+from, so filtering resolved PIDs on it separates your own strays from every other agent's.
+
+🔴 **Two limits on that discriminator, measured on the workbench 2026-08-13 — neither was in
+the 2026-08-02 write-up.** (a) This harness creates agent worktrees at
+`<dispatching-repo>/.claude/worktrees/agent-<id>`, i.e. **nested inside** the base repo — so a
+prefix check against the repo root matches every sibling and discriminates nothing. Compare the
+**exact** worktree path. (b) Exact-path comparison **would** have prevented the incident above —
+the victim was in *another worktree*, so its cwd differs from any base-clone killer's. (The
+original does not say where the perpetrator sat; the victim-side fact carries the argument on its
+own.) What cwd cannot separate is two agents that **both** sit in the base clone, which is the
+likely case for read-only agents (the core says they don't *need* a worktree, not that they may
+not have one).
+
+Descendant-filtering by a `PPid` walk is the obvious next idea, and it is **not** a replacement —
+the two filters are incomparable, not ordered. Measured 2026-08-13 on the workbench: a `nix build`
+an agent launches does its real work in a `nix-daemon` child of **PID 1**
+(`nix-daemon 368389 ← 18717 ← 1`), so a `PPid` walk from the agent reaches only the `nix` **client
+stub** — `368350 ← 366150(zsh) ← 328364(.claude-wrapped)`, a genuine descendant — and **never the
+process doing the work**. Killing what the walk returns does not stop the build. The same holds
+for anything that genuinely daemonizes or re-parents. It is also per-tool-call: each Bash call is
+a fresh `zsh -c` (measured: seven calls, seven distinct pids), so an earlier call's strays are not
+descendants of the current one **at all** — that is where the walk truly returns EMPTY, and it is
+what orphans a `chrome-headless-shell` from an earlier call, the original pattern here (measured:
+`nix 2085612 ← 1`, exactly such a stray).
+
+🔴 **An earlier draft of this paragraph said the walk "returns the empty set" because of the
+nix-daemon fact. That was inference wearing a "Measured" label — the two grounds are different
+and only the per-tool-call one yields emptiness.** Fifth instance in one PR of the same class:
+stating a conclusion as measured when only its premise was. **Do not assume a
+browser tree orphans itself:** measured on this host, Brave's `--type=zygote` processes all have
+real parents and only `chrome_crashpad` sits at PPid 1. An earlier draft asserted the zygote
+re-parents; that was inference inside a paragraph headed "Measured", and it was wrong. Use a
+descendant walk to **narrow** a cwd-filtered set, never to build one; and note this whole
+discussion is scoped to parallel agents — hunting a genuine **orphan** (PPid 1, by construction
+never your descendant) is the deploy rule's job, not this one.
+
+🔴 **If neither filter leaves a set you are confident in, kill nothing and hand it to the
+operator.** An empty descendant set is the [empty-result](#empty-result) trap wearing a
+procedure: it cannot distinguish "no strays" from "the walk cannot see them". Note also that the
+inference "confirming `cmdline` is not sufficient" was never itself measured: the auditor never
+ran the resolve-then-confirm procedure, it pattern-matched system-wide. The widening is sound
+(identical cmdlines cannot discriminate) but it is reasoning, not an observation.
+
 ## retired-professional-honesty
 *Retired from the core 2026-08-10, verdict **NOW-NATIVE**.*
 
