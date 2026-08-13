@@ -21,6 +21,8 @@ SCRIPT = os.path.join(HERE, "..", "register-nudge-hook.py")
 NOTIFY = "python3 ~/.claude/hooks/claude-notify.py"
 CLAWGATE_STOP = "/home/zach/.claude/clawgate-stop-hook.sh"
 SEARCH_NUDGE = "python3 ~/.claude/hooks/search-tool-nudge.py"
+NEXT_STEP = "python3 ~/.claude/hooks/next-step-nudge.py"
+TMUX_STOP = "~/.config/tmux/task-hook.sh"
 
 failures = []
 
@@ -43,8 +45,13 @@ BASE_SETTINGS = {
             {"matcher": "Bash", "hooks": [{"type": "command", "command": "python3 ~/.claude/hooks/audit-pr-nudge.py"}]},
             {"matcher": "Bash", "hooks": [{"type": "command", "command": "python3 ~/.claude/hooks/shell-env-nudge.py"}]},
         ],
+        # 🔴 Stop already has TWO foreign owners before this script ever runs: the
+        # fuzzyclaw tmux writer and the clawgate stop hook (remote approval). Both are
+        # in the fixture so "append-only" is tested against a populated event, not an
+        # empty one — an append-only bug is invisible on an empty array.
         "Stop": [
-            {"hooks": [{"type": "command", "command": CLAWGATE_STOP}]}
+            {"hooks": [{"type": "command", "command": TMUX_STOP}]},
+            {"hooks": [{"type": "command", "command": CLAWGATE_STOP}]},
         ],
     }
 }
@@ -77,6 +84,26 @@ with tempfile.TemporaryDirectory() as tmp:
     for ev in ("UserPromptSubmit", "Stop", "SubagentStop"):
         check("1: claude-notify registered on " + ev, NOTIFY in cmds(d, ev))
     check("2: pre-existing clawgate Stop hook preserved", CLAWGATE_STOP in cmds(d, "Stop"))
+    check("2: pre-existing tmux Stop hook preserved", TMUX_STOP in cmds(d, "Stop"))
+
+    # 🔴 ALL FOUR Stop owners coexist. Asserted as a SET EQUALITY, not four membership
+    # checks: equality fails when the set GROWS (a fifth hook registered by accident)
+    # as well as when it SHRINKS (one clobbered), which membership checks cannot see.
+    check("2: exactly the four expected Stop hooks, none clobbered, none extra",
+          set(cmds(d, "Stop")) == {TMUX_STOP, CLAWGATE_STOP, NOTIFY, NEXT_STEP})
+    check("1: next-step-nudge registered on Stop", NEXT_STEP in cmds(d, "Stop"))
+    # Ordering: the two foreign hooks keep their original relative order and stay ahead
+    # of everything this script appends. Appending (rather than inserting) is what makes
+    # the blocking hook run last, after the notifiers have already observed the turn.
+    stop = cmds(d, "Stop")
+    check("2: foreign Stop hooks keep their original relative order",
+          stop.index(TMUX_STOP) < stop.index(CLAWGATE_STOP))
+    check("2: appended hooks come after the pre-existing ones",
+          max(stop.index(TMUX_STOP), stop.index(CLAWGATE_STOP))
+          < min(stop.index(NOTIFY), stop.index(NEXT_STEP)))
+    # next-step-nudge is Stop-only: it must NOT have been added to SubagentStop.
+    check("1: next-step-nudge NOT registered on SubagentStop",
+          NEXT_STEP not in cmds(d, "SubagentStop"))
     check("2: bash-guard preserved", "python3 ~/.claude/hooks/bash-guard.py" in cmds(d, "PreToolUse"))
     check("2: both PostToolUse nudges preserved",
           "python3 ~/.claude/hooks/audit-pr-nudge.py" in cmds(d, "PostToolUse")
@@ -95,6 +122,9 @@ with tempfile.TemporaryDirectory() as tmp:
     check("3: no duplicate claude-notify on Stop", cmds(d2, "Stop").count(NOTIFY) == 1)
     check("3: no duplicate search-tool-nudge", cmds(d2, "PostToolUse").count(SEARCH_NUDGE) == 1)
     check("3: clawgate Stop still single + present", cmds(d2, "Stop").count(CLAWGATE_STOP) == 1)
+    check("3: no duplicate next-step-nudge on Stop", cmds(d2, "Stop").count(NEXT_STEP) == 1)
+    check("3: Stop set unchanged by the second run",
+          set(cmds(d2, "Stop")) == {TMUX_STOP, CLAWGATE_STOP, NOTIFY, NEXT_STEP})
 
     # Atomicity: no temp litter left in the dir, and the source uses os.replace.
     leftovers = [n for n in os.listdir(os.path.dirname(settings)) if n.startswith(".settings.")]
