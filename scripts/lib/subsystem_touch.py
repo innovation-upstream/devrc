@@ -584,9 +584,9 @@ class TranscriptCwdMismatchError(TouchError):
     whatever cwd the session ran in — and raises only when that window is empty.
     The superseded message said "every path in a transcript is relative to the
     session's own cwd"; a transcript entry is the tool call's own `file_path`,
-    and a measurable share of them are absolute paths into another real repo.
+    and a measurable share of them are absolute paths into another real tree.
     Those were the ones being thrown away — see `collect_session_paths` for the
-    two disagreeing measurements of how many.
+    measurement, and for why the 112 that motivated this is RETRACTED.
 
     What has NOT been relaxed, and must not be: a relative path is never
     re-anchored. The frame check on relative entries is the safety property; the
@@ -1415,6 +1415,21 @@ def _same_dir(a: str, b: str) -> bool:
     nb = os.path.normpath(b).rstrip("/") or "/"
     if na == nb:
         return True
+    # ⚠ KNOWN ASYMMETRY WITH THE OTHER HALF OF GUARD 4, stated rather than left
+    # to be discovered. This function resolves symlinks; the absolute window it
+    # falls through to (`changed_paths.absolute_under`) matches purely
+    # LEXICALLY, for the extractor's own reason — a `realpath` pass would make
+    # the answer depend on the filesystem at read time rather than on the
+    # transcript. So a repo reachable by two spellings can be "the same
+    # directory" here and not-under-the-root there, and the refusal's
+    # "NONE of the paths it named are absolute paths under this repo" would then
+    # be false about a path that is under it by another name.
+    #
+    # NOT LIVE on either host — no managed path here resolves through a symlink
+    # into a repo root — and both errors point the safe way (under-report, never
+    # invent). Closing it means choosing ONE frame for the whole guard, which is
+    # a change to the shared extractor's stated policy and does not belong in a
+    # local fix. If a session ever reports a surprising empty window, look here.
     return os.path.realpath(na) == os.path.realpath(nb)
 
 
@@ -1548,20 +1563,30 @@ def collect_session_paths(
     # discarded by a refusal whose stated reason — "every path in a transcript is
     # relative to the session's own cwd" — was not true of them.
     #
-    # 🔴 THE YIELD IS REAL BUT SAMPLE-DEPENDENT, AND THE TWO MEASUREMENTS OF IT
-    # DISAGREE BY AN ORDER OF MAGNITUDE. Stated as a pair rather than picked
-    # between, because nothing here reconciles them and quoting the larger alone
-    # would oversell the change:
-    #   * 2026-08-13, 120 recent transcripts, prior session's script: 1,072
-    #     distinct file-tool paths, 945 outside cwd, 112 absolute into another
-    #     real repo under ~/workspace.
-    #   * 2026-08-13, re-measured here after 38 temp worktrees were removed, over
-    #     the 636 transcripts `iter_transcripts` walks: 3,913 distinct paths, 543
-    #     under cwd (13.9%, matching the extractor's own 14.3% figure), and only
-    #     33 absolute under another ~/workspace repo — 29 distinct (repo, path)
-    #     pairs. Over the most recent 120 of the same walk: 1,361 / 84 / 7.
-    # The rewrite stands on the message being FALSE, which neither number is
-    # needed to establish; treat the size of the win as unsettled.
+    # 🔴 THE YIELD IS ~30 CROSS-PROJECT PATHS, NOT THE 112 THAT MOTIVATED THIS.
+    # The 112 was an over-count and is RETRACTED — do not re-derive it. It came
+    # from treating every top-level directory under ~/workspace as a distinct
+    # project, so devrc's own sibling WORKTREE directories (`devrc-fix443`,
+    # `devrc-clickup`, `devrc-clawgate-ext`, …) each counted as "another repo".
+    # Reconciled on the recent-120 window:
+    #
+    #     185  absolute, outside cwd, under ~/workspace
+    #     -97  the SAME repo reached from one of its worktrees
+    #     = 88  in a different top-level directory
+    #     -58  of which are devrc-* sibling worktrees, still the same project
+    #     = 30  genuinely cross-project (24 homelab->civit, 6 homelab->devrc)
+    #
+    # Independently corroborated here over the 636 transcripts `iter_transcripts`
+    # walks: 3,913 distinct paths, 543 under cwd (13.9%, matching the extractor's
+    # own 14.3% figure), 33 absolute under another ~/workspace repo — 29 distinct
+    # (repo, path) pairs. Same order as 30, by a different script.
+    #
+    # 🔴 THE REWRITE DOES NOT REST ON THAT NUMBER AT ALL. It rests on the
+    # refusal's stated reason being FALSE, which needs no yield figure. The
+    # same-repo-from-a-worktree case above is worth its own note: those 97 are
+    # not cross-project, but they were ALSO refused, and this window answers them
+    # too — which is where most of the practical benefit on this host actually
+    # comes from.
     #
     # So a cwd mismatch now falls through to the absolute window instead of
     # refusing outright, and refuses only when that window is EMPTY, which is the
@@ -1569,27 +1594,48 @@ def collect_session_paths(
     session_cwd = rollup.get("cwd") or ""
     if not _same_dir(session_cwd, toplevel):
         absolute = rollup.get("changed_paths_absolute") or []
+        # 🔴 ONE ACCOUNTING, QUOTED BY BOTH EXITS. This guard leaves two ways —
+        # a refusal and a window — and they owed the reader different numbers:
+        # the refusal named all three counters, the note named two, and the
+        # dropped one (`outside_cwd`) meant a reader adding up the note's figures
+        # reached a SMALLER session than the one on disk. Built here, once, so
+        # the two cannot drift apart again.
+        #
+        # `total` and `outside` PARTITION the distinct set — the extractor pins
+        # `total + outside_cwd == files_modified` — so they are safe to add.
+        # `abs_total` is NOT a third part: it re-reads paths already counted in
+        # one of those two, under a different root, and in the nested case (a
+        # session cwd inside the repo, or the reverse) it can overlap EITHER.
+        # Hence the explicit warning rather than a subtraction that would be
+        # wrong exactly when someone most wants the number.
+        abs_total = rollup.get("changed_paths_absolute_total")
+        total = rollup.get("changed_paths_total")
+        outside = rollup.get("changed_paths_outside_cwd")
+        distinct = rollup.get("files_modified")
+        accounting = (
+            f"of {distinct} distinct path(s) this session named, "
+            f"{total} path(s) expressible relative to that cwd and {outside} outside it"
+        )
         if not absolute:
             raise TranscriptCwdMismatchError(
                 f"transcript cwd does not match: session {label} ran in "
                 f"{session_cwd or '(no cwd recorded)'}, but --repo resolves to {toplevel}, "
-                f"and NONE of the paths it named are absolute paths under this repo — the "
-                f"{rollup.get('changed_paths_total')} path(s) it named relative to its own "
-                f"cwd, plus {rollup.get('changed_paths_outside_cwd')} elsewhere, belong to "
-                f"trees this repo cannot claim, and re-anchoring them here would associate "
-                f"another repo's work with this one. "
+                f"and NONE of the paths it named are absolute paths under this repo — "
+                f"{accounting}, and every one of them belongs to a tree this repo cannot "
+                f"claim; re-anchoring them here would associate another repo's work with "
+                f"this one. "
                 f"USE A DIFFERENT SOURCE, not a different uuid: the session ran elsewhere, "
                 f"so this repo's git window is empty too. Re-run with --pr <n>[,<n>...] or "
                 f"--commit <sha>[,<sha>...] over what you landed here."
             )
         paths, dropped = _filter_excluded(absolute, exclude)
         notes = [
-            f"{rollup.get('changed_paths_absolute_total')} path(s) named ABSOLUTELY by "
-            f"this session and resolving under {toplevel}; the session itself ran in "
-            f"{session_cwd or '(no cwd recorded)'}, where it named "
-            f"{rollup.get('changed_paths_total')} further path(s) relative to that cwd — "
-            f"those are EXCLUDED, not counted against this repo, because a relative path "
-            f"names no tree"
+            f"{abs_total} path(s) named ABSOLUTELY by this session and resolving under "
+            f"{toplevel} — that is the window below. The session itself ran in "
+            f"{session_cwd or '(no cwd recorded)'}: {accounting}. The first group is "
+            f"EXCLUDED here, because a relative path names no tree. 🔴 The two groups "
+            f"partition the {distinct}; the {abs_total} above OVERLAPS them — it re-reads "
+            f"paths already counted there, under this repo's root — so do not add it in"
         ]
         if rollup.get("changed_paths_absolute_truncated"):
             notes.append(

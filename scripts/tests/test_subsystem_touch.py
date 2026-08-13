@@ -1320,7 +1320,7 @@ class TestSkillDocsArePinned:
         (
             "a **relative** path in a transcript is relative to its own session's cwd",
             "🔴 the guard's REAL scope, replacing a claim about *every* path that "
-            "was false and threw away 112 attributable ones",
+            "was false and threw away the absolute ones",
         ),
         (
             "Read the `caveat:` line before you write anything",
@@ -1607,6 +1607,16 @@ def projects_root(tmp_path: Path, monkeypatch):
 
 def _session_source(repo: Path, transcript: Path, **kw):
     return st.collect_session_paths(repo, transcript=transcript, **kw)
+
+
+def _CHANGED_PATHS_CAP() -> int:
+    """The extractor's OWN cap, read through the extractor this module loads.
+
+    🔴 Not restated as a literal here. The cap is `changed_paths`'s constant and
+    the note under test quotes it; a second copy in the tests would let the two
+    drift and turn a real truncation regression into a green boundary test.
+    """
+    return st._session_tailer().CP.CHANGED_PATHS_CAP
 
 
 class TestSessionPositiveControl:
@@ -1952,8 +1962,7 @@ class TestSessionNegativeControls:
 
 
 class TestCrossRepoAbsoluteWindow:
-    """🔴 THE 112 PATHS THE CWD GUARD USED TO THROW AWAY, AND THE FALSE SENTENCE
-    IT THREW THEM AWAY WITH.
+    """🔴 THE FALSE SENTENCE THE CWD GUARD THREW ATTRIBUTABLE PATHS AWAY WITH.
 
     The refusal read: *"Every path in a transcript is relative to the session's
     own cwd."* It is not. A transcript entry is the tool call's own `file_path`,
@@ -1961,10 +1970,13 @@ class TestCrossRepoAbsoluteWindow:
     constantly, because the harness tells them to. Such a path needs no
     inference to attribute, and it was refused anyway.
 
-    ⚠ HOW MANY is unsettled and deliberately not asserted here — two same-day
-    measurements disagree by an order of magnitude (112 vs 33; see
-    `subsystem_touch.collect_session_paths` for both, with their samples). These
-    tests pin the BEHAVIOUR, which does not depend on the size of the win.
+    ⚠ NO YIELD FIGURE IS ASSERTED HERE, deliberately. The 112 that motivated the
+    work is RETRACTED — it counted devrc's own sibling worktree directories
+    (`devrc-fix443`, `devrc-clickup`, …) as other repos. Reconciled: ~30
+    genuinely cross-project, corroborated at 33 by a second script;
+    `subsystem_touch.collect_session_paths` carries the derivation. These tests
+    pin the BEHAVIOUR, which does not depend on it — the stated reason was false
+    at ANY yield.
 
     So a cwd mismatch now yields the ABSOLUTE window instead of refusing, and
     refuses only when that window is empty. What is unchanged, and is the actual
@@ -2077,8 +2089,67 @@ class TestCrossRepoAbsoluteWindow:
         joined = " ".join(src.notes)
         assert "1 path(s) named ABSOLUTELY" in joined, src.notes
         assert str(a) in joined, src.notes
-        assert "2 further path(s) relative to that cwd" in joined, src.notes
+        assert "2 path(s) expressible relative to that cwd" in joined, src.notes
         assert "EXCLUDED" in joined, src.notes
+
+    def test_the_notes_ACCOUNT_FOR_EVERY_PATH_the_session_named(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """🔴 A BUCKET WENT UNREPORTED, so the numbers did not add up and a reader
+        doing the arithmetic reached a smaller session than the real one.
+
+        Fixture: FIVE distinct paths — 2 absolute under `--repo`, 2 expressible
+        relative to the session's own cwd, 1 absolute in a sibling tree that is
+        neither. The note used to print `2 … ABSOLUTELY` and `2 … relative`, and
+        the fifth path appeared nowhere; the REFUSAL path already quoted all
+        three counts, so the two halves of one guard disagreed about what they
+        owed the reader.
+
+        Asserted on the ACCOUNTING, not on a phrase: the distinct total is
+        stated, and the two partitioning counts sum to it. A rewrite cannot
+        satisfy that by accident while still dropping a bucket.
+        """
+        a, b = self._two_repos(tmp_path)
+        t = _write_transcript(
+            tmp_path / "t.jsonl",
+            str(a),
+            [
+                f"{b}/{self.UNDER_B[0]}",          # absolute, under --repo
+                f"{b}/{self.UNDER_B[1]}",          # absolute, under --repo
+                f"{a}/in-the-session-repo.py",     # absolute, under the session cwd
+                "relative-in-a.py",                # relative -> the session cwd
+                f"{tmp_path}/a-third-tree/x.py",   # absolute, neither
+            ],
+        )
+        src = _session_source(b, t)
+        joined = " ".join(src.notes)
+        assert "5 distinct path(s)" in joined, src.notes
+        assert "2 path(s) named ABSOLUTELY" in joined, src.notes
+        assert "2 path(s) expressible relative to that cwd" in joined, src.notes
+        assert "3 outside it" in joined, src.notes
+        # 🔴 And it must WARN that the yield overlaps, or a reader adding all
+        # three reaches 7 from a 5-path session. The absolute set is a re-reading
+        # of paths already counted, under a different root — not a fourth bucket.
+        assert "OVERLAPS" in joined, src.notes
+
+    def test_the_note_and_the_REFUSAL_quote_the_same_counters(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """One guard, two exits, and they used to owe the reader different
+        things. Both must name the same three numbers — a divergence here is how
+        the omission survived review in the first place."""
+        a, b = self._two_repos(tmp_path)
+        shared = ["relative-in-a.py", f"{tmp_path}/a-third-tree/x.py"]
+        refused = _write_transcript(tmp_path / "no.jsonl", str(a), shared)
+        with pytest.raises(st.TranscriptCwdMismatchError) as exc:
+            _session_source(b, refused)
+        answered = _write_transcript(
+            tmp_path / "yes.jsonl", str(a), shared + [f"{b}/{self.UNDER_B[0]}"]
+        )
+        note = " ".join(_session_source(b, answered).notes)
+        for phrase in ("distinct path(s)", "expressible relative to that cwd", "outside it"):
+            assert phrase in str(exc.value), f"the refusal dropped {phrase!r}"
+            assert phrase in note, f"the success note dropped {phrase!r}"
 
     def test_the_caveat_calls_it_a_FLOOR_and_never_claims_the_session_frame(
         self, tmp_path: Path, tailer_cache
@@ -2136,8 +2207,53 @@ class TestCrossRepoAbsoluteWindow:
         with pytest.raises(st.TranscriptCwdMismatchError) as exc:
             _session_source(b, t)
         text = str(exc.value)
-        assert "2 path(s) it named relative to its own cwd" in text, text
-        assert "plus 1 elsewhere" in text, text
+        assert "of 3 distinct path(s) this session named" in text, text
+        assert "2 path(s) expressible relative to that cwd" in text, text
+        assert "1 outside it" in text, text
+
+    def test_a_TRUNCATED_absolute_window_says_so(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """🔴 THE NOTE NOBODY HAD REACHED. A mutant that deleted the truncation
+        branch outright SURVIVED the whole suite: the extractor's cap is 256 and
+        no fixture went near it, so the note could have been dead code and every
+        test would still have been green — the `>2-page index` defect one
+        subsystem over, in this window's costume.
+
+        Driven through the REAL cap rather than a monkeypatched one, because the
+        cap is what a reader of the note will check against. The list is a
+        lexicographic PREFIX, so the missing tail is a whole late-sorting subtree
+        — `zzz/` here, chosen to sort after every `f####.py`.
+        """
+        a, b = self._two_repos(tmp_path)
+        cap = _CHANGED_PATHS_CAP()
+        files = [f"{b}/f{i:04d}.py" for i in range(cap)] + [f"{b}/zzz/late.py"]
+        t = _write_transcript(tmp_path / "big.jsonl", str(a), files)
+        src = _session_source(b, t)
+
+        assert len(src.paths) == cap
+        assert "zzz/late.py" not in src.paths, (
+            "the fixture did not actually truncate — the note under test is unreached"
+        )
+        joined = " ".join(src.notes)
+        assert "TRUNCATED" in joined, src.notes
+        assert f"cap of {cap}" in joined, src.notes
+        assert f"PREFIX of {cap + 1} paths" in joined, src.notes
+
+    def test_a_window_AT_the_cap_does_NOT_say_truncated(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """The other arm at the same boundary — otherwise a note wired to fire
+        always would pass the test above. Exactly `cap` paths is a COMPLETE
+        list."""
+        a, b = self._two_repos(tmp_path)
+        cap = _CHANGED_PATHS_CAP()
+        t = _write_transcript(
+            tmp_path / "atcap.jsonl", str(a), [f"{b}/f{i:04d}.py" for i in range(cap)]
+        )
+        src = _session_source(b, t)
+        assert len(src.paths) == cap
+        assert not any("TRUNCATED" in n for n in src.notes), src.notes
 
     def test_UNREADABLE_still_wins_over_the_absolute_window(
         self, tmp_path: Path, tailer_cache

@@ -34,8 +34,11 @@ lists all entries instead of hiding 13 of 25 behind a `--limit 12`.
 
 ## Open investigations — live diagnosis state
 
-### ~~`--session` throws away cleanly-attributable paths, and its refusal states a falsehood~~ — FIXED
-**SHIPPED as the `session-absolute` window** (branch `worktree-agent-ad33a5cf342be5135`).
+### `--session` throws away cleanly-attributable paths, and its refusal states a falsehood
+🔴 **OPEN — fix written and audited, NOT merged and NOT deployed.** PR **#459**, branch
+`subsystem-touch-absolute-window`. Until it merges *and* a `ship.sh` switch runs, both hosts
+still refuse every cross-repo session, and `~/.claude/skills/handoff/` still carries the false
+sentence. Merged ≠ deployed; a struck-through "FIXED" here would be exactly that error.
 - **Symptom + exact repro:** a session whose cwd is repo A but whose edits are absolute paths
   into repo B was refused: `subsystem-touch: transcript cwd does not match: session <id> ran in
   <A>, but --repo resolves to <B>.` Reported twice in one day by two different agents.
@@ -57,15 +60,26 @@ lists all entries instead of hiding 13 of 25 behind a `--limit 12`.
   is byte-identical. `collect_session_paths` falls through to that window on a cwd mismatch
   and raises only when it is **empty**. A relative path is still never re-anchored — that is
   the safety property and it is unchanged.
-- 🔴 **The yield claim did NOT reproduce, and both numbers are now in the source.** The
-  earlier measurement (120 recent transcripts: 1,072 distinct paths, 945 outside cwd, **112**
-  absolute into another `~/workspace` repo) versus a re-measurement the same day, after the
-  38-worktree sweep, over the 636 transcripts `iter_transcripts` walks: **3,913 distinct, 543
-  under cwd (13.9%), only 33** absolute under another `~/workspace` repo — 29 distinct
-  (repo, path) pairs; the most recent 120 of that walk give 1,361 / 84 / **7**. Nothing here
-  reconciles them, so `collect_session_paths` states the pair rather than picking. **The
-  rewrite stands on the message being false, which neither number is needed to establish —
-  treat the size of the win as unsettled.**
+- 🔴 **THE 112 IS RETRACTED — the cross-project yield is ~30. Do not re-derive 112.** It
+  counted any absolute path under `~/workspace` outside cwd, and its `repo_of()` treated every
+  top-level directory as a distinct project — so devrc's own sibling WORKTREE directories
+  (`devrc-fix443`, `devrc-clickup`, `devrc-clawgate-ext`, `devrc-cutguard`, `devrc-458fix`,
+  `devrc-fix444`) each counted as "another repo". Reconciled on the recent-120 window:
+
+  | step | paths |
+  |---|---|
+  | absolute, outside cwd, under `~/workspace` | 185 |
+  | − the SAME repo reached from one of its worktrees | −97 |
+  | = in a different top-level directory | 88 |
+  | − devrc-* sibling worktrees, still the same project | −58 |
+  | **= genuinely cross-project** | **30** (24 `homelab→civit`, 6 `homelab→devrc`) |
+
+  Corroborated at **33** (29 distinct repo/path pairs) by a second script over the 636
+  transcripts `iter_transcripts` walks — 3,913 distinct paths, 543 under cwd (13.9%, which
+  reproduces the extractor's own 14.3%). **The rewrite rests on the refusal's stated reason
+  being false, which needs no yield figure at all.** Note the 97 same-repo-from-a-worktree
+  paths were *also* refused and are *also* answered now — on this host that is where most of
+  the practical benefit comes from, and it is not a cross-project number.
 - **Not designed around:** the temp-worktree paths. Mostly unrecoverable, and 38 such
   worktrees were removed this session.
 
@@ -101,12 +115,15 @@ lists all entries instead of hiding 13 of 25 behind a `--limit 12`.
    round faults the caveat layer again, cut it — ship the verbatim recovery plus the one
    twice-verified point (compare the EXACT worktree path, not a prefix) and move the
    descendant/`PPid` analysis to its own issue.
-3. ~~**Fix the `--session` cwd-mismatch message and add the absolute-path window**~~ —
-   **DONE**, see above. Verify it by running `--session <uuid>` from a session whose cwd is a
-   different repo and reading the `window:` + `caveat:` lines: `session-absolute` is a
-   **FLOOR**, not a list. 🔴 Its measured yield on today's corpus is an order of magnitude
-   below the figure that motivated it — if the census stops growing, that is the reason to
-   look at first, not the writers.
+3. **Merge and ship the `--session` absolute-path window — PR #459, OPEN, audit-clean.**
+   Written, gated on both tiers, adversarially audited (no deploy-blocking findings) and
+   **not merged**. 🔴 **Nothing is live until `ship.sh` runs**: `~/.claude/skills/handoff/`
+   is a nix-store symlink, so both hosts keep refusing cross-repo sessions — and keep serving
+   the false sentence to every agent — until merge → pull → switch. Verify AFTER that, not
+   before: run `--session <uuid>` with `--repo` pointing at a repo the session did *not* run
+   in, and read the `window:` + `caveat:` lines. `session-absolute` is a **FLOOR**, not a
+   list. Its cross-project yield is ~30 paths, not the 112 that motivated it (retracted;
+   derivation above) — so if the census stalls, look here before blaming the writers.
 4. **Watch the census.** `python3 scripts/lib/subsystem_touch.py --census`. 21→30 across 5
    scopes with 8 handoff-written and now 1 `analyze-service`-written. If it stalls, the
    writers are not sticking.
@@ -212,6 +229,19 @@ so the reversibility this section promised did not actually exist: one disk fail
   nothing here and would have read as green.
 - 🔴 **Never pipe `ship.sh` or a gate to `tail`** — the pipe destroys the exit status. Reported
   `exit 0` over a real `rc=12` this session. Redirect to a file and echo `$?`.
+- 🔴 **`nix build --rebuild` ERRORS on a drv whose previous build FAILED** — *"some outputs …
+  are not valid, so checking is not possible"*. It re-checks a valid cached output; it cannot
+  re-run a failure. After a red gate, plain `nix build` already rebuilds (there is no valid
+  output to reuse), so drop the flag.
+- 🔴 **Attribute an unrelated red test STRUCTURALLY, not by "load" — and check whether wall
+  time actually supports the load story before telling it.** One #459 gate run showed
+  `browser-bridge … failed=1` (`test_gate_reads_from_a_file_not_a_pipe`, a 60 s
+  `TimeoutExpired`). The honest attribution is **there is no import or exec edge from the
+  changed modules to `scripts/browser-bridge/`** — three independent 493/493 runs (control at
+  `main`, a re-run of the branch, and the integration gate) merely corroborate it. The load
+  story was *weaker than it looked*: 238 s versus 164 s at load 12.6 is **1.45×**, nowhere
+  near the ~15× this repo's own rule uses to call a run load-bound. A ratio that small is
+  evidence *against* the explanation you were about to give.
 - 🔴 **`rev-list origin/main..HEAD` is NOT a merged-ness test.** A squash merge never makes the
   branch head an ancestor, so it stays non-zero forever — it flagged **all 52** worktree
   branches as unmerged work. Classify by PR state (`gh pr list --state all --json

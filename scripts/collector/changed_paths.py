@@ -358,25 +358,34 @@ def absolute_under(paths: Iterable[str], root: str, *, cap: int = CHANGED_PATHS_
             f"({root!r}); pass '' when there is no root to compare against"
         )
 
-    base = _normalize_dir(root)
-    usable_root = base.startswith("/")
     rel: set[str] = set()
     # The input is validated whether or not the root is usable: a malformed entry
     # is a defect in the transcript reader, and hiding it behind an unrelated
     # argument would make the same corpus raise or not depending on the caller.
+    #
+    # ⚠ TWO LINES THAT LOOKED LIKE GUARDS WERE REMOVED FROM HERE AS UNKILLABLE —
+    # a local `_normalize_dir(root)`, and an `if not base.startswith("/")` skip.
+    # A mutation sweep could not distinguish the code with them from the code
+    # without: `to_repo_relative` normalizes its own `cwd`, and already returns
+    # None for EVERY path when that `cwd` is empty or relative. Same reasoning
+    # and same outcome as the `if norm == base` guard removed from that function.
+    # A redundant line that LOOKS like a guard invites a maintainer to trust it
+    # and a sweep to report a false survivor; the behaviour it appeared to
+    # provide is pinned by a test instead
+    # (`test_a_root_that_is_not_absolute_yields_nothing_rather_than_guessing`).
     for raw in paths:
         if not isinstance(raw, str) or not raw.strip():
             raise ValueError(
                 f"changed-paths entry is not a usable path: {raw!r} "
                 "(expected a non-empty string)"
             )
-        # The absolute test comes FIRST and is the whole safety property:
-        # `to_repo_relative` returns a relative entry unchanged whatever the
-        # frame, so without this line every relative path in the transcript
-        # would be reported as if it belonged to `root`.
-        if not usable_root or not posixpath.isabs(raw.strip()):
+        # The absolute test is the whole safety property: `to_repo_relative`
+        # returns a relative entry unchanged whatever the frame, so without this
+        # line every relative path in the transcript would be reported as if it
+        # belonged to `root`.
+        if not posixpath.isabs(raw.strip()):
             continue
-        r = to_repo_relative(raw, base)
+        r = to_repo_relative(raw, root)
         if r is not None:
             rel.add(r)
 

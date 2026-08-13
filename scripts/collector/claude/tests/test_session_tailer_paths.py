@@ -405,14 +405,14 @@ class TestClaudeUnusableFilePaths:
 # --------------------------------------------------------------------------- #
 #
 # 🔴 WHY IT EXISTS. `changed_paths` reads every entry against the SESSION's cwd,
-# and ~86% of entries are not under it (3,913 distinct file-tool paths over the
-# 636 transcripts the tailer walks, 543 under cwd — 13.9%, matching the
+# and 86.1% of entries are not under it (3,913 distinct file-tool paths over the
+# 636 transcripts the tailer walks, 543 under cwd — 13.9%, reproducing the
 # extractor's own 14.3% figure). Some of the remainder are absolute paths into
-# another real repo: attributable to that repo with no inference whatever, and
+# another real tree: attributable to it with no inference whatever, and
 # discarded because the only frame on offer was the session's. This block is
 # that second frame, and NOTHING ELSE — an entry it reports is one the
-# transcript already spelled out in full. (The COUNT of the recoverable
-# remainder is sample-dependent and two same-day measurements disagree; see
+# transcript already spelled out in full. (For the COUNT of the recoverable
+# remainder, and why the 112 that motivated this is retracted, see
 # `subsystem_touch.collect_session_paths`.)
 OTHER = "/srv/checkouts/other-repo"
 
@@ -506,6 +506,43 @@ class TestAbsoluteWindowBounds:
         assert len(r["changed_paths_absolute"]) == CP.CHANGED_PATHS_CAP
         assert r["changed_paths_absolute_total"] == CP.CHANGED_PATHS_CAP + 3
         assert r["changed_paths_absolute_truncated"] is True
+
+    def test_EXACTLY_at_the_cap_is_NOT_truncated(self):
+        """🔴 THE BOUNDARY, and it was missing: `total > cap` mutated to
+        `total >= cap` SURVIVED the whole suite, because the only truncation case
+        probed was `cap + 3`. At exactly the cap the list IS complete, so the flag
+        would be a lie — and this module's contract is that a truncated list is
+        readable as truncated from the numbers alone, which requires the
+        un-truncated one to be readable as complete.
+
+        The peer function has had this test since it was written
+        (`scripts/collector/tests/test_changed_paths.py::TestTruncation`); the
+        copy dropped it. Same `cap=5` shape, deliberately, so the two read as one
+        contract rather than two.
+        """
+        paths = [f"{OTHER}/f{i:04d}.py" for i in range(5)]
+        out = CP.absolute_under(paths, OTHER, cap=5)
+        assert out["changed_paths_absolute_truncated"] is False
+        assert len(out["changed_paths_absolute"]) == 5
+        assert out["changed_paths_absolute_total"] == 5
+
+    def test_one_over_the_cap_IS_truncated(self):
+        """The other arm at the same boundary. Without it, a mutant pinning the
+        flag to a constant False would pass the test above."""
+        paths = [f"{OTHER}/f{i:04d}.py" for i in range(6)]
+        out = CP.absolute_under(paths, OTHER, cap=5)
+        assert out["changed_paths_absolute_truncated"] is True
+        assert len(out["changed_paths_absolute"]) == 5
+        # 🔴 The TRUE count survives the truncation — that is what makes the
+        # short list readable as short.
+        assert out["changed_paths_absolute_total"] == 6
+
+    def test_one_UNDER_the_cap_is_not_truncated(self):
+        """The third point. Two points cannot distinguish `>` from `>=` from a
+        constant; three can."""
+        out = CP.absolute_under([f"{OTHER}/f{i}.py" for i in range(4)], OTHER, cap=5)
+        assert out["changed_paths_absolute_truncated"] is False
+        assert out["changed_paths_absolute_total"] == 4
 
     def test_it_dedupes_on_the_ROOT_RELATIVE_form(self):
         r = CP.absolute_under([f"{OTHER}/a.py", f"{OTHER}//a.py", f"{OTHER}/./a.py"], OTHER)
