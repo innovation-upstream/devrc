@@ -1370,6 +1370,29 @@ class TestSkillDocsArePinned:
         ("re-read the file and re-apply to current bytes", "no concurrent append is clobbered"),
         ("Never silent-mutate.", "the invariant carried over from analyze-service"),
         ("pointers, not copies", "the bloat rule"),
+        (
+            "belongs in a skill\" is a ROUTE, not a disposal",
+            "the decline path files the lesson instead of terminating",
+        ),
+        # 🔴 Three rows, not one. Pinning only the headline clause left the rest
+        # of that paragraph deletable green — measured, 1513 chars -> 100 with
+        # the suite passing, silently taking the doc's ONLY mention of the tool
+        # block, the fallback search, and the UNFILED instruction with it.
+        ("SKILL HOMES", "the agent is told to take the owning skill from the TOOL"),
+        ("say **UNFILED**", "an unrecoverable dead end must name its search term"),
+        # 🔴 WHAT THIS PIN CANNOT DO, measured rather than assumed. Widening it
+        # from one row to five did NOT stop gutting: a rewrite that keeps all
+        # five substrings and deletes everything else takes the paragraph
+        # 1513 -> 119 chars and stays GREEN. A substring pin is satisfied by the
+        # substrings, always — it catches DELETION of a named instruction and
+        # DRIFT in its wording, not a hostile rewrite that keeps the words. That
+        # residual is inherent, and a minimum-length gate would false-fail every
+        # legitimate edit, which is how a gate gets clicked through. So: name
+        # every sentence that carries an INSTRUCTION (deleting any one is the
+        # realistic failure), and do not read a green here as "the paragraph is
+        # intact".
+        ("grep -ril", "the agent can search its OWN domain term when the tool matched none"),
+        ("must be `git add`ed", "a new skill file the flake never sees is a silent no-op"),
         ("never persist live status", "the anti-bloat rule that matters most"),
         (
             "persist the *derivation method and what a stale reading looks like*",
@@ -7838,6 +7861,88 @@ class TestRouteOutOfADeadEnd:
         text = st.render_text(_report([], store))
         assert "ROUTE OUT" in text and "--pr" in text
 
+    def test_the_skill_homes_block_REACHES_the_rendered_output(self, store: Path) -> None:
+        """🔴 THE SEAM, and it was open. An audit deleted BOTH
+        `render_skill_homes` call sites in `render_text` and the suite stayed
+        green — 578 passed — because every test called the helper directly with
+        an injected root. The feature could ship INERT. Its sibling eight lines
+        up already had this exact assertion, with a docstring explaining why; the
+        lesson was written down and not applied.
+        """
+        text = st.render_text(_report(["docs/a.md", "notes/b.md"], store))
+        assert "SKILL HOMES" in text
+        assert "grep -ril" in text, "the fallback search must survive the seam too"
+        # 🔴 The two assertions above are SPELLED: both strings live in the
+        # block's static header/footer and print in EVERY branch, so they hold
+        # even if the call site passes the wrong arguments. Measured: changing
+        # both call sites to `render_skill_homes([], report.scope)` left the
+        # suite green while the block degraded to a FALSE "(no paths were
+        # examined…)" on every dead end. The structural version is below.
+        assert "no paths were examined" not in text, (
+            "the call site dropped the paths — the block now states an absence "
+            "of signal that is not true of this report"
+        )
+
+    def test_the_call_site_passes_BOTH_the_paths_and_the_scope(
+        self, store: Path, tmp_path: Path, monkeypatch
+    ) -> None:
+        """🔴 STRUCTURAL, because the spelled version cannot see a wrong argument.
+
+        Neither call site threads `skills_root`, so a content assertion is
+        impossible until the catalogue is injected — patch the module default and
+        the rendered rows become evidence about what `render_text` actually
+        passed. Two fixture skills with pairwise-distinct domains: one reachable
+        only from a PATH term, one only from the SCOPE term.
+
+        Dropping the SCOPE removes one row; dropping the PATHS removes BOTH — the
+        scope fill is gated on `paths`, so the block flips to its no-signal
+        branch. Either way the output changes in a way no header-string
+        assertion can see, which is the point. An earlier docstring said
+        "exactly one row" for both cases: the test killed both mutants, but the
+        mechanism it stated was wrong.
+        """
+        root = tmp_path / "skills"
+        for name, desc in [
+            ("pathside", "Owns the wibblesprocket subsystem."),
+            ("scopeside", f"Owns everything in the {SCOPE} repository."),
+        ]:
+            (root / name).mkdir(parents=True)
+            (root / name / "SKILL.md").write_text(
+                f"---\nname: {name}\ndescription: {desc}\n---\n", encoding="utf-8"
+            )
+        monkeypatch.setattr(st, "SKILLS_ROOT_DEFAULT", str(root))
+        # The fixture's own scope, so the report is built normally — mutating a
+        # frozen report after the fact would test a state the tool never emits.
+        # Paths in DIFFERENT directories on purpose: two under one dir cluster
+        # into a NOMINATION, which is not a dead end, so the block correctly
+        # does not render and the test would fail for the wrong reason.
+        rep = _report(["docs/wibblesprocket-notes.md", "notes/b.md"], store)
+        assert rep.status == "no-match", rep.status
+        text = st.render_text(rep)
+        # The FULL row, not the bare name: the patched root is interpolated
+        # into the fallback `grep` line, so a bare name would match there too.
+        assert "claude/skills/pathside/SKILL.md" in text, (
+            "the call site did not pass the report's PATHS"
+        )
+        assert "claude/skills/scopeside/SKILL.md" in text, (
+            "the call site did not pass the report's SCOPE"
+        )
+
+    def test_looked_at_nothing_reaches_it_too(self, store: Path) -> None:
+        """The other exit — it returns EARLY from the renderer, so one assertion
+        cannot cover both. This is the exit the original incident hit first."""
+        text = st.render_text(_report([], store))
+        assert "SKILL HOMES" in text
+
+    def test_a_RESOLVED_run_stays_silent_about_skill_homes(self, store: Path) -> None:
+        """🔴 The negative control — without it, an unconditional print would
+        satisfy both assertions above. Uses the same resolving paths as the
+        sibling ROUTE OUT control rather than skipping: a test that skips itself
+        reports safety while checking nothing."""
+        rep = _report(["src/collector/a.py", "src/collector/b.py"], store)
+        assert rep.status == "resolved", rep.status
+        assert "SKILL HOMES" not in st.render_text(rep)
+
     def test_a_RESOLVED_run_stays_silent(self, store: Path) -> None:
         """🔴 The negative control, and the reason this is worth having: a block
         printed on every run is boilerplate, and boilerplate is skipped. It
@@ -7900,3 +8005,212 @@ class TestRouteOutOfADeadEnd:
         # every mapped source (bar the deliberate blank) has exactly one row
         mapped = {s for s in st._WINDOW_SOURCE.values() if s}
         assert mapped == {src for src, _, _ in st._ROUTE_OUT}
+
+
+# --------------------------------------------------------------------------- #
+# The SECOND route out: the lesson is real and the INDEX is the wrong home.
+#
+# 🔴 THE BUG THIS PINS IS SILENT KNOWLEDGE LOSS, not a wrong number. MEASURED
+# 2026-08-14: a session correctly declined both windows, correctly concluded its
+# gotchas belonged in a skill, named `.claude/skills/pyroscope/SKILL.md` — a skill
+# that DOES NOT EXIST, while `obs-read` already owns Pyroscope — and stopped. The
+# handoff skill names a skill file as a legitimate alternative home, but only as a
+# REASON TO DECLINE; nothing routed the lesson there, so it ended as prose in a
+# transcript.
+# --------------------------------------------------------------------------- #
+class TestSkillHomes:
+    def _root(self, tmp_path: Path) -> Path:
+        """A fixture catalogue with PAIRWISE-DISTINCT domains, so a hit cannot be
+        right by accident and a mis-wired matcher cannot look correct."""
+        root = tmp_path / "skills"
+        for name, desc in [
+            ("obs-read", "Query Prometheus/Loki/Pyroscope on a named cluster."),
+            ("mailbox", "The self-hosted mail inbox on the homelab cluster."),
+            ("bar", "The i3status-rust status bar and its poller."),
+            ("no-frontmatter", None),
+        ]:
+            d = root / name
+            d.mkdir(parents=True)
+            body = "# body\n" if desc is None else f"---\nname: {name}\ndescription: {desc}\n---\n"
+            (d / "SKILL.md").write_text(body, encoding="utf-8")
+        (root / "not-a-skill").mkdir()  # a dir with no SKILL.md must be skipped
+        return root
+
+    def test_the_real_incident_resolves_to_the_skill_that_already_owns_it(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 THE CASE THE FEATURE EXISTS FOR. The agent invented a `pyroscope`
+        skill; the tool must name the one that already owns the domain."""
+        root = self._root(tmp_path)
+        hits = st.skill_homes(["pyroscope"], skills_root=root)
+        assert hits == (("obs-read", "pyroscope"),)
+
+    def test_a_directory_component_is_a_candidate_term(self, tmp_path: Path) -> None:
+        """The domain usually lives in a DIRECTORY, not a filename. A basename-only
+        tokeniser dropped `pyroscope` from `src/pyroscope/query.go` entirely —
+        not ranked low, absent."""
+        terms = st._terms_from(["src/pyroscope/query.go"], "homelab-talos")
+        assert "pyroscope" in terms
+        assert "homelab" in terms and "talos" in terms
+
+    def test_the_most_DISCRIMINATING_term_ranks_first(self, tmp_path: Path) -> None:
+        """🔴 Unranked, the one right answer drowns.
+
+        Both `pyroscope` and `homelab` match exactly ONE fixture skill, so this
+        pins the TIE-BREAK: at equal breadth the longer, more specific term wins.
+        Plain alphabetical ordering put `mailbox` first and obs-read second — the
+        right answer losing a coin flip. Real-catalogue breadth differs; the tie
+        is the case that needs pinning because it is the one that is arbitrary.
+        """
+        root = self._root(tmp_path)
+        hits = st.render_skill_homes(
+            ["src/pyroscope/x.go"], "homelab-cluster", skills_root=root
+        )
+        rows = [ln for ln in hits if "SKILL.md" in ln]
+        assert rows, hits
+        assert "obs-read" in rows[0], rows
+        assert "pyroscope" in rows[0]
+
+    def test_matching_is_name_plus_DESCRIPTION_only_never_the_body(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 The description IS the routing surface — it is what the always-on
+        listing carries. Matching bodies returns half the catalogue for a common
+        word, and noise is what makes this block ignorable: measured on the real
+        catalogue, two generic terms pushed the one right answer out of a cap of
+        four. A surviving mutant that widened the haystack to the body stayed
+        green until this test existed.
+        """
+        root = self._root(tmp_path)
+        (root / "bar" / "SKILL.md").write_text(
+            "---\nname: bar\ndescription: The i3status-rust status bar and its poller.\n---\n"
+            "\n# body\nThis paragraph mentions pyroscope at length, in the BODY only.\n",
+            encoding="utf-8",
+        )
+        hits = st.skill_homes(["pyroscope"], skills_root=root)
+        assert hits == (("obs-read", "pyroscope"),), (
+            f"a body-only mention was treated as ownership: {hits!r}"
+        )
+
+    def test_the_noise_knobs_actually_filter(self, tmp_path: Path) -> None:
+        """🔴 The two constants that decide this block's whole signal/noise ratio
+        had no coverage: emptying `_TERM_STOPLIST` and dropping the length floor
+        both left the suite green. Noise is the failure mode here — a block that
+        prints the same generic leads every time gets skipped, which is exactly
+        what it exists to prevent.
+        """
+        # A path made only of stoplisted words and short tokens yields no terms.
+        assert st._terms_from(["scripts/tests/test_index.py"], "") == ()
+        # ...while a real domain word in the same shape survives.
+        assert "mailbox" in st._terms_from(["scripts/mailbox/tests/test_index.py"], "")
+        # The length floor: 3-char tokens are dropped, 4-char kept.
+        terms = st._terms_from(["a/i3x/bars/x.py"], "")
+        assert "i3x" not in terms and "bars" in terms
+
+    def test_a_COMPOUND_component_is_its_own_term(self, tmp_path: Path) -> None:
+        """🔴 A skill named for a compound owns the compound. Splitting hyphens
+        away made `scripts/repo-cos/scan.py` yield only `repo` + `scan`, so
+        `repo-cos` matched on the generic `scan` (breadth 4) and ranked FOURTH,
+        inside a cap of 4 by one place. As its own term it has breadth 1.
+        """
+        terms = st._terms_from(["scripts/repo-cos/scan.py"], "")
+        assert "repo-cos" in terms, terms
+        assert "repo" in terms and "scan" in terms, "the split pieces must survive too"
+
+    def test_the_scope_cannot_crowd_out_a_path_derived_lead(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 The scope is a per-repo CONSTANT. Folded in with path terms it took
+        slots on every dead end in that repo — measured on `devrc`, two of four,
+        hiding `repo-cos` entirely for `scripts/repo-cos/scan.py`. Path-derived
+        hits must come first.
+        """
+        root = self._root(tmp_path)
+        rows = [
+            ln for ln in st.render_skill_homes(
+                ["src/pyroscope/x.go"], "homelab", skills_root=root, limit=1
+            ) if "(matched" in ln  # the fallback grep line also carries "SKILL.md"
+        ]
+        assert len(rows) == 1 and "obs-read" in rows[0], rows
+
+    def test_no_paths_prints_no_rows_because_there_is_no_signal(
+        self, tmp_path: Path
+    ) -> None:
+        """A `looked-at-nothing` run has nothing to derive from. Printing the
+        scope's constant leads there would look like an answer."""
+        body = "\n".join(st.render_skill_homes([], "homelab", skills_root=self._root(tmp_path)))
+        assert "(matched" not in body, "no lead rows may print without a path term"
+        assert "no paths were examined" in body
+        assert "grep -ril" in body
+
+    def test_an_absent_skills_root_is_ordinary_not_an_error(self, tmp_path: Path) -> None:
+        """A host without skills deployed must still get its dead-end report; an
+        exception here would turn a helpful extra into a total failure."""
+        assert st.skill_catalogue(tmp_path / "nope") == ()
+        lines = st.render_skill_homes(["a/b.py"], "s", skills_root=tmp_path / "nope")
+        assert any("no skill matched" in ln for ln in lines)
+
+    def test_a_malformed_skill_degrades_and_does_not_kill_the_catalogue(
+        self, tmp_path: Path
+    ) -> None:
+        """Same degrade-don't-die rule the reader learned from a wrapped
+        `aliases:`. The three good skills must survive the bad one."""
+        root = self._root(tmp_path)
+        (root / "obs-read" / "SKILL.md").write_text(
+            "---\naliases: [a,\n b]\nname: obs-read\ndescription: Pyroscope.\n---\n",
+            encoding="utf-8",
+        )
+        names = {n for n, _ in st.skill_catalogue(root)}
+        assert {"mailbox", "bar", "no-frontmatter"} <= names
+
+    def test_an_UNREADABLE_skill_is_kept_NAME_ONLY_not_dropped(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 The degrade handler was reached ZERO times by the whole suite — an
+        audit instrumented it and counted 0 hits across 586 tests, because the
+        "malformed" fixture parses fine. This reaches it for real, with a
+        SKILL.md that cannot be READ.
+
+        And it pins the behaviour, not just the survival: the skill is kept with
+        an empty description, NOT dropped. Its NAME is normally the single most
+        SPECIFIC term available, so dropping it makes a skill called `pyroscope`
+        unfindable by the word `pyroscope` exactly when its file is broken.
+        """
+        root = self._root(tmp_path)
+        bad = root / "obs-read" / "SKILL.md"
+        bad.chmod(0o000)
+        try:
+            if os.access(bad, os.R_OK):  # running as root: the premise is gone
+                pytest.skip("cannot make a file unreadable as this user")
+            cat = dict(st.skill_catalogue(root))
+            assert "obs-read" in cat, "an unreadable skill was DROPPED, losing its name"
+            assert cat["obs-read"] == "", "no description should have been parsed"
+            assert {"mailbox", "bar"} <= set(cat), "the good skills must survive"
+            # The name still routes, which is the point of keeping it.
+            assert st.skill_homes(["obs-read"], skills_root=root) == (
+                ("obs-read", "obs-read"),
+            )
+        finally:
+            bad.chmod(0o644)
+
+    def test_a_miss_says_so_and_still_hands_over_the_search(self, tmp_path: Path) -> None:
+        """🔴 An empty result must NOT read as 'no skill owns this' — the tool
+        cannot see what the session was ABOUT, and saying nothing would let a
+        miss discharge the obligation exactly like the incident did."""
+        root = self._root(tmp_path)
+        lines = st.render_skill_homes(["zzz/kryptonite.md"], "zzz", skills_root=root)
+        body = "\n".join(lines)
+        assert "no skill matched" in body
+        assert "grep -ril" in body, "the fallback search command is the whole point"
+        assert "UNFILED" in body
+
+    def test_the_block_says_where_to_EDIT_not_just_which_skill(
+        self, tmp_path: Path
+    ) -> None:
+        """Naming `~/.claude/skills/...` as the edit target sends the agent at a
+        read-only store symlink; and a NEW file the flake never sees is a silent
+        no-op. Both are named in the block."""
+        body = "\n".join(st.render_skill_homes(["a/pyroscope.md"], "s",
+                                               skills_root=self._root(tmp_path)))
+        assert "claude/skills/" in body
+        assert "git add" in body
