@@ -220,6 +220,7 @@ surface that renders a row shows `session` and `window_index` beside it.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import re
@@ -2391,16 +2392,20 @@ def measured_caveats(report) -> dict:
     collapses "derived" and "hardcoded" into the same observation; the fix is
     an input where they differ, which means a seam that accepts one.
     """
-    # 🔴 EVERY SUB-DICT IS COPIED, not just the one being written. Copying only
-    # `kind_scope` left `claude_detection`/`fuzzyclaw_scope`/`ledger_scope`/
-    # `waiting_signal` as the SAME objects as the module constant, so a
-    # consumer writing through `report["caveats"]["waiting_signal"]` — which
-    # this function's own "returns a new dict, mutates nothing" docstring
-    # invites — would poison CAVEATS for every later caller in the process. A
-    # purity claim that holds for one key and not its siblings is worse than no
-    # claim: it is exactly specific enough to be trusted.
-    cav = {k: (dict(v) if isinstance(v, dict) else v)
-           for k, v in (report.get("caveats") or CAVEATS).items()}
+    # 🔴 DEEP-COPIED, because a purity claim is only as true as its DEEPEST
+    # shared object. This was fixed once at depth 1 — `{k: dict(v)}` — and an
+    # audit walked straight past it into depth 2: `waiting_signal["excluded"]`
+    # is itself a dict, and `signals` / `kinds_enumerated` /
+    # `null_fields_on_remote_rows` are lists, all still the SAME objects as the
+    # module constant. Writing into any of them poisoned CAVEATS for every
+    # later caller in the process, and the contamination surfaced in a
+    # DIFFERENT scan's rendered caveat line.
+    #
+    # "One level deeper than the fix" is the shape this whole change keeps
+    # producing, so the copy is made total rather than incrementally deepened
+    # again. CAVEATS is a handful of small literals; `deepcopy` is not a cost
+    # worth trading for a claim that has now been wrong twice.
+    cav = copy.deepcopy(report.get("caveats") or CAVEATS)
     rows = [r for h in (report.get("hosts") or {}).values()
             for r in (h.get("windows") or [])]
     # Sorted for a deterministic render. `"none"` rather than dropping a row
@@ -3042,10 +3047,16 @@ def _fmt_kind_scope(kd) -> str:
     """
     produced = kd.get("kinds_produced")
     if produced is None:
-        # No measurement supplied at all — a caller rendering the bare CAVEATS
-        # constant. Say what the tool produces by construction, not what this
-        # scan saw, because this scan was never measured.
-        produced = ["tmux"]
+        # 🔴 NO MEASUREMENT SUPPLIED AT ALL — a caller rendering the bare
+        # CAVEATS constant rather than a scanned report. The sentence must then
+        # describe what this tool produces BY CONSTRUCTION and must NOT say
+        # "in this scan", because no scan happened. The first version said
+        # exactly that while its own comment claimed otherwise: a comment is a
+        # claim too, and it disagreed with the string three lines below it.
+        return _kind_scope_sentence(
+            "this tool produces kind={} rows by construction (no scan "
+            "measured here)", ["tmux"],
+            list(kd.get("kinds_enumerated") or KINDS))
     produced = list(produced)
     enumerated = list(kd.get("kinds_enumerated") or KINDS)
     if not produced:
@@ -3057,8 +3068,16 @@ def _fmt_kind_scope(kd) -> str:
                 "kinds ({}) say nothing about what a reachable host holds; "
                 "clawgate is reported separately under BLOCKED ON ME".format(
                     "/".join(enumerated)))
+    return _kind_scope_sentence("rows in this scan are kind={}", produced,
+                                enumerated)
+
+
+def _kind_scope_sentence(head_fmt, produced, enumerated) -> str:
+    """Build the non-empty `kind_scope` sentence. ONE builder for both the
+    measured and the by-construction heads, so the two cannot drift into
+    saying different things about the same relationship."""
     unproduced = [k for k in enumerated if k not in produced]
-    head = "rows in this scan are kind={}".format("/".join(produced))
+    head = head_fmt.format("/".join(produced))
     if not unproduced:
         # Every enumerated kind is present. Saying "NOT PRODUCED" here would be
         # false; saying nothing would drop the pointer to where clawgate lives.

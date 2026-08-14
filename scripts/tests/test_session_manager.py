@@ -6668,10 +6668,13 @@ def test_a_ZERO_ROW_scan_does_not_CLAIM_a_kind_it_never_measured():
     assert "kind=tmux" not in line
     assert "NO rows were measured" in line
     assert "NOT a claim that any kind is absent" in line
-    # a MISSING key is different from a measured empty one, and still falls
-    # back — that is the bare-constant render, not a scan
+    # A MISSING key is different from a measured empty one, and still falls
+    # back — that is the bare-constant render, not a scan. It must say so:
+    # phrasing it as "in this scan" was the very contradiction between this
+    # branch's comment and its own output.
     missing = sm._fmt_kind_scope({"kinds_enumerated": ["tmux", "cluster"]})
-    assert "kind=tmux —" in missing
+    assert "kind=tmux rows by construction" in missing
+    assert "in this scan are" not in missing
 
 
 def test_the_zero_row_scan_reaches_that_branch_through_the_REAL_render():
@@ -6727,6 +6730,134 @@ def test_measured_caveats_detaches_EVERY_caveat_from_the_module_constant():
     before = list(sm.CAVEATS["waiting_signal"]["signals"])
     out["waiting_signal"]["signals"] = ["POISONED"]
     assert sm.CAVEATS["waiting_signal"]["signals"] == before
+
+
+# 🔴 THE WHOLE SENTENCE, PINNED — because a PARTIAL assertion on prose is
+# satisfied by prose that says something else. Two mutants walked the earlier
+# feature-based guards by REWORDING the banned claim: one put
+# "every row here is a tmux pane and the cluster kind never appears" into the
+# note (the banned substring was "every row is a tmux pane"), the other slipped
+# a false parenthetical into the zero-row sentence while keeping all three
+# asserted phrases. Both passed the full suite.
+#
+# So each branch's exact output is pinned. The trade is explicit and accepted:
+# a cosmetic reword fails this test. That is the price of a guard a reword
+# cannot walk, and these four sentences are the tool's machine-readable claims
+# about what it did and did not measure.
+_CG = ("clawgate is reported separately under BLOCKED ON ME")
+KIND_SCOPE_SENTENCES = {
+    # no measurement supplied — the bare-constant render. MUST NOT say "scan".
+    "missing": (
+        "this tool produces kind=tmux rows by construction (no scan measured "
+        "here) — cluster is ENUMERATED but NOT PRODUCED, so no such row "
+        "appears and its absence is NOT a measured zero; " + _CG),
+    # measured ZERO rows — must name no kind as observed
+    "empty": (
+        "NO rows were measured in this scan, so no kind was observed — this "
+        "is NOT a claim that any kind is absent, and the enumerated kinds "
+        "(tmux/cluster) say nothing about what a reachable host holds; " + _CG),
+    # today's ordinary scan
+    "tmux": (
+        "rows in this scan are kind=tmux — cluster is ENUMERATED but NOT "
+        "PRODUCED, so no such row appears and its absence is NOT a measured "
+        "zero; " + _CG),
+    # after writer 3
+    "both": (
+        "rows in this scan are kind=cluster/tmux — every enumerated kind IS "
+        "produced, so this scan covers the whole entity axis; clawgate "
+        "approval state is still reported separately under BLOCKED ON ME"),
+}
+
+
+def test_every_kind_scope_sentence_is_pinned_WHOLE_not_by_feature():
+    """🔴 Feature-based assertions on this sentence have been walked TWICE by
+    mutants that reworded the claim while keeping the asserted fragments. The
+    whole string is the only thing a reword cannot satisfy."""
+    E = ["tmux", "cluster"]
+    got = {
+        "missing": sm._fmt_kind_scope({"kinds_enumerated": E}),
+        "empty": sm._fmt_kind_scope({"kinds_produced": [],
+                                     "kinds_enumerated": E}),
+        "tmux": sm._fmt_kind_scope({"kinds_produced": ["tmux"],
+                                    "kinds_enumerated": E}),
+        "both": sm._fmt_kind_scope({"kinds_produced": ["cluster", "tmux"],
+                                    "kinds_enumerated": E}),
+    }
+    assert got == KIND_SCOPE_SENTENCES
+    # INSTRUMENT CHECK: the four are genuinely distinct, so a builder that
+    # collapsed two branches into one could not satisfy this by accident.
+    assert len(set(got.values())) == 4
+    # the two that must never phrase themselves as a measurement of a scan
+    assert "in this scan are" not in got["missing"]
+    assert "kind=" not in got["empty"]
+
+
+def test_the_kind_scope_NOTE_names_NO_kind_at_all():
+    """🔴 STRUCTURAL, replacing a spelled guard an auditor walked.
+
+    The old assertion banned the literal string "every row is a tmux pane", and
+    a mutant saying "every row here is a tmux pane and the cluster kind never
+    appears" passed. Any ban-list of phrasings is walkable; the invariant that
+    is not is that the NOTE must name NO member of KINDS. `kinds_produced` is
+    the measured field and the note's job is to point at it — the moment the
+    note itself names a kind, it is making the standing claim that field
+    exists to replace, in whatever words.
+    """
+    note = sm.CAVEATS["kind_scope"]["note"]
+    for k in sm.KINDS:
+        assert k not in note, (
+            f"the note names the kind {k!r}; that is a standing claim which "
+            f"will contradict the measured `kinds_produced` after writer 3")
+    # ...and it must still do its job, or "names no kind" is satisfied by ""
+    assert "MEASURED" in note and "kinds_produced" in note
+    assert "blocked_on_me" in note
+    assert len(note) > 200
+
+
+def test_the_kind_scope_NOTE_is_pinned_WHOLE():
+    """The structural guard above bans naming a kind; this pins everything
+    else, so a reword that keeps the kinds out but drops the pointer to
+    `blocked_on_me` — or reintroduces a scope claim in other words — fails."""
+    assert sm.CAVEATS["kind_scope"]["note"] == (
+        "`kinds_produced` is MEASURED from this scan's rows — read it rather "
+        "than assuming. A kind that is enumerated but absent from "
+        "`kinds_produced` was NOT LOOKED FOR by this build, so its absence is "
+        "NOT a measured absence of that work. For clawgate use "
+        "report.blocked_on_me (tasks needing the operator, and its "
+        "`stuck_count` for wedged dispatches), a different population from "
+        "these rows that is never double-counted with them.")
+
+
+def test_measured_caveats_detaches_at_EVERY_DEPTH_not_just_the_first():
+    """🔴 FIXED ONCE AT DEPTH 1, WALKED AT DEPTH 2. `{k: dict(v)}` copies each
+    caveat but leaves every nested dict and list SHARED with the module
+    constant: `waiting_signal["excluded"]` is a dict, and `signals` /
+    `kinds_enumerated` / `null_fields_on_remote_rows` are lists. Writing into
+    any of them in place poisoned CAVEATS process-wide, and the contamination
+    surfaced in a LATER scan's rendered line.
+
+    The earlier purity test asserted a top-level REBIND, which a shallow copy
+    survives — precisely one level too shallow to see this.
+    """
+    out = sm.measured_caveats({"hosts": {}})
+    # nested dict, mutated IN PLACE (not rebound)
+    before_excl = dict(sm.CAVEATS["waiting_signal"]["excluded"])
+    out["waiting_signal"]["excluded"]["prompt_buffer_text"] = "POISONED"
+    assert sm.CAVEATS["waiting_signal"]["excluded"] == before_excl
+    # nested list, mutated IN PLACE
+    before_sig = list(sm.CAVEATS["waiting_signal"]["signals"])
+    out["waiting_signal"]["signals"].append("POISONED")
+    assert sm.CAVEATS["waiting_signal"]["signals"] == before_sig
+    before_enum = list(sm.CAVEATS["kind_scope"]["kinds_enumerated"])
+    out["kind_scope"]["kinds_enumerated"].append("POISONED")
+    assert sm.CAVEATS["kind_scope"]["kinds_enumerated"] == before_enum
+    before_null = list(sm.CAVEATS["fuzzyclaw_scope"]["null_fields_on_remote_rows"])
+    out["fuzzyclaw_scope"]["null_fields_on_remote_rows"].append("POISONED")
+    assert sm.CAVEATS["fuzzyclaw_scope"]["null_fields_on_remote_rows"] \
+        == before_null
+    # and a SECOND caller still sees the clean constant
+    assert sm.measured_caveats({"hosts": {}})["waiting_signal"]["excluded"] \
+        == before_excl
 
 
 def test_the_kind_scope_NOTE_does_not_restate_the_measured_field():
