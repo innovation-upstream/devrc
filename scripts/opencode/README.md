@@ -84,7 +84,12 @@ action is irreversible, add a check to `guard_core.py`'s `"opencode"` policy.
 
 ### Why `tool.execute.before` and not `permission.ask`
 
-Measured on 1.18.4, this host, 2026-08-02:
+Measured on 1.18.4, this host, 2026-08-02. 🔴 Still 1.18.4 on purpose: the
+2026-08-13 re-derivation to 1.18.16 covered the resolved permissions, tool sets
+and resolver ordering (see `PINNED_VERSION` in
+`scripts/tests/test_opencode_engine.py`), but **not** the two hook claims below —
+those need a running hook to observe and were not re-measured. Treat them as
+last confirmed on 1.18.4.
 
 - `permission.ask` **is** in the `Hooks` type and its `output.status` is typed
   `"ask" | "deny" | "allow"`, so an *ask* decision looks expressible. It is not:
@@ -149,7 +154,7 @@ spelling going ALLOW → DENY — and on **0** rows under `opencode`.
 ## Why `AGENTS.md` is generated rather than symlinked
 
 opencode does **not** expand `@`-imports inside `AGENTS.md`/`CLAUDE.md`
-(measured on v1.18.4 with an all-tools-denied agent, so no file read was
+(measured on v1.18.16 with an all-tools-denied agent, so no file read was
 possible: an imported passphrase returned `NONE`, the same content inline
 returned verbatim). `~/.claude/CLAUDE.md` is ~1.5 KB consisting almost entirely
 of `@PRINCIPLES.md` / `@RULES.md` import lines — so if opencode read it, it
@@ -213,7 +218,7 @@ existence guard**, and defined a `KC_PROD` that zsh did not have. Add a handle i
   (`*.env` → ask); a blanket allow is appended after it and silently defeats it
   on every agent. The default already allows every non-`.env` read, so the
   correct configuration is to say nothing.
-- **There is no `list` tool and no `websearch` tool** on 1.18.4. The resolved set
+- **There is no `list` tool and no `websearch` tool** on 1.18.16. The resolved set
   is exactly {bash, edit, glob, grep, invalid, question, read, skill, task,
   todowrite, webfetch, write}. Naming a nonexistent tool is a silent no-op that
   reads like configuration.
@@ -238,7 +243,7 @@ existence guard**, and defined a `KC_PROD` that zsh did not have. Add a handle i
   global `"task": "allow"` is appended after it and flips it, which hands `plan`
   a shell by delegation (the `general` subagent has one). It is restated at agent
   level.
-- **Deprecated on 1.18.4, deliberately absent:** agent-level `tools`, `mode` at
+- **Deprecated on 1.18.16, deliberately absent:** agent-level `tools`, `mode` at
   config level, `layout`, `autoshare`, `reference` (now `references`),
   `maxSteps` (now `steps`). `theme`/`keybinds`/`tui` live in a separate
   `~/.config/opencode/tui.json`.
