@@ -6418,8 +6418,15 @@ def test_NO_cluster_key_is_published_while_no_cluster_row_exists():
     for b in sm.STATUS_BUCKETS:
         assert set(s["status"][b]) == {"claude", "shell", "total"}, (
             "a tmux-only scan must not publish a cluster count")
-    # the caveat is what tells the reader why, instead of the absent key
-    assert sm.CAVEATS["kind_scope"]["kinds_produced"] == ["tmux"]
+    # the caveat is what tells the reader why, instead of the absent key.
+    # 🔴 The CONSTANT carries no `kinds_produced` at all — that key is a
+    # MEASUREMENT and a literal there was a fake one. What the build produces
+    # without measuring lives in its own named constant.
+    assert "kinds_produced" not in sm.CAVEATS["kind_scope"]
+    assert sm.KINDS_PRODUCED_BY_CONSTRUCTION == ("tmux",)
+    # a real scan supplies it
+    assert sm.summarize(mix_gather())  # (fixture sanity)
+    assert mix_gather()["caveats"]["kind_scope"]["kinds_produced"] == ["tmux"]
 
 
 def test_a_row_with_NO_kind_gets_its_OWN_class_and_never_becomes_cluster():
@@ -6761,6 +6768,14 @@ KIND_SCOPE_SENTENCES = {
         "rows in this scan are kind=tmux — cluster is ENUMERATED but NOT "
         "PRODUCED, so no such row appears and its absence is NOT a measured "
         "zero; " + _CG),
+    # 🔴 by-construction head with NOTHING unproduced — the combination the
+    # shared builder rendered self-contradicting ("no scan measured here …
+    # so this scan covers"). Its tail must speak of the BUILD.
+    "by_construction_all_produced": (
+        "this tool produces kind=tmux rows by construction (no scan measured "
+        "here) — every enumerated kind IS produced, so this build covers the "
+        "whole entity axis; clawgate approval state is still reported "
+        "separately under BLOCKED ON ME"),
     # after writer 3
     "both": (
         "rows in this scan are kind=cluster/tmux — every enumerated kind IS "
@@ -6782,14 +6797,50 @@ def test_every_kind_scope_sentence_is_pinned_WHOLE_not_by_feature():
                                     "kinds_enumerated": E}),
         "both": sm._fmt_kind_scope({"kinds_produced": ["cluster", "tmux"],
                                     "kinds_enumerated": E}),
+        # 🔴 THE COMBINATION THE SHARED BUILDER MADE FALSE. The by-construction
+        # head with NOTHING unproduced took a tail hardcoded to "so THIS SCAN
+        # covers the whole entity axis" — contradicting the head's own "no scan
+        # measured here" eight words earlier. Unreachable until
+        # KINDS_PRODUCED_BY_CONSTRUCTION covers the enumerated set, i.e. the
+        # moment writer 3 lands, which is what this caveat is FOR.
+        "by_construction_all_produced": sm._fmt_kind_scope(
+            {"kinds_enumerated": ["tmux"]}),
     }
     assert got == KIND_SCOPE_SENTENCES
-    # INSTRUMENT CHECK: the four are genuinely distinct, so a builder that
+    # INSTRUMENT CHECK: all five are genuinely distinct, so a builder that
     # collapsed two branches into one could not satisfy this by accident.
-    assert len(set(got.values())) == 4
-    # the two that must never phrase themselves as a measurement of a scan
+    assert len(set(got.values())) == 5
+    # the three that must never phrase themselves as a measurement of a scan
     assert "in this scan are" not in got["missing"]
     assert "kind=" not in got["empty"]
+    assert "this scan" not in got["by_construction_all_produced"]
+
+
+def test_the_kinds_enumerated_SLOT_IS_LIVE_not_defaulted_to_KINDS():
+    """🔴 THE FIXTURE-COINCIDES-WITH-THE-CONSTANT TRAP, which this file names
+    in its own comments and which I then walked into.
+
+    Every pin above uses `["tmux", "cluster"]` — which IS `KINDS`. So
+    `kd.get("kinds_enumerated") or KINDS` and a hardcoded `KINDS` produce
+    byte-identical output, and two mutants replacing the lookup with the
+    constant SURVIVED the whole suite. A fixture whose value equals the
+    constant cannot distinguish "read the argument" from "ignored it".
+
+    So this passes an enumerated set that CANNOT be KINDS.
+    """
+    line = sm._fmt_kind_scope({"kinds_produced": ["tmux"],
+                              "kinds_enumerated": ["tmux", "zzz"]})
+    assert "zzz is ENUMERATED but NOT PRODUCED" in line
+    assert "cluster" not in line, "the argument was ignored in favour of KINDS"
+    # the zero-row branch interpolates it too, and had the same blind spot
+    zero = sm._fmt_kind_scope({"kinds_produced": [],
+                               "kinds_enumerated": ["zzz", "qqq"]})
+    assert "(zzz/qqq)" in zero
+    assert "tmux" not in zero and "cluster" not in zero
+    # ...and so does the by-construction branch
+    bc = sm._fmt_kind_scope({"kinds_enumerated": ["tmux", "zzz"]})
+    assert "zzz is ENUMERATED but NOT PRODUCED" in bc
+    assert "cluster" not in bc
 
 
 def test_the_kind_scope_NOTE_names_NO_kind_at_all():
@@ -6797,11 +6848,22 @@ def test_the_kind_scope_NOTE_names_NO_kind_at_all():
 
     The old assertion banned the literal string "every row is a tmux pane", and
     a mutant saying "every row here is a tmux pane and the cluster kind never
-    appears" passed. Any ban-list of phrasings is walkable; the invariant that
-    is not is that the NOTE must name NO member of KINDS. `kinds_produced` is
-    the measured field and the note's job is to point at it — the moment the
-    note itself names a kind, it is making the standing claim that field
-    exists to replace, in whatever words.
+    appears" passed. Any ban-list of phrasings is walkable, so this bans
+    naming a KIND at all: `kinds_produced` is the measured field and the note's
+    job is to point AT it, so the moment the note names a kind it is making the
+    standing claim that field exists to replace.
+
+    🔴 THIS GUARD IS NOT SUFFICIENT ON ITS OWN, and saying so is the point of
+    this paragraph. An audit walked it with a SYNONYM: "every row here is a
+    terminal pane and the second enumerated entity never appears" names no
+    member of KINDS, keeps every required token, and clears the length floor.
+    The WHOLE-STRING pin in `test_the_kind_scope_NOTE_is_pinned_WHOLE` is what
+    actually kills that; deleting the pin lets it through and deleting this
+    guard does not. So this one adds no kill power TODAY — it exists to
+    constrain a future edit that legitimately updates the pin, where "the new
+    text must still name no kind" is the invariant a human re-pinning the
+    string would otherwise drop. Documented rather than deleted, and
+    documented as redundant rather than as protection.
     """
     note = sm.CAVEATS["kind_scope"]["note"]
     for k in sm.KINDS:
@@ -6942,8 +7004,8 @@ def test_measured_caveats_is_PURE_and_does_not_touch_its_input():
     rep = {"hosts": {"h": {"windows": [{"kind": "cluster"}]}}}
     out = sm.measured_caveats(rep)
     assert out["kind_scope"]["kinds_produced"] == ["cluster"]
-    assert sm.CAVEATS["kind_scope"]["kinds_produced"] == \
-        before["kind_scope"]["kinds_produced"]
+    # the constant never GAINS the measured key
+    assert "kinds_produced" not in sm.CAVEATS["kind_scope"]
     assert out["kind_scope"] is not sm.CAVEATS["kind_scope"]
 
 
@@ -6952,10 +7014,11 @@ def test_deriving_the_caveat_does_not_MUTATE_the_module_constant():
     Writing the derived value through it would leak one scan's measurement into
     every later caller in the process — and the tests would still pass, because
     each one gathers its own report."""
-    before = list(sm.CAVEATS["kind_scope"]["kinds_produced"])
+    assert "kinds_produced" not in sm.CAVEATS["kind_scope"]
     rep = base_gather()
     rep["caveats"]["kind_scope"]["kinds_produced"] = ["MUTATED"]
-    assert sm.CAVEATS["kind_scope"]["kinds_produced"] == before
+    # the constant never gains the key by being written through a report
+    assert "kinds_produced" not in sm.CAVEATS["kind_scope"]
     assert base_gather()["caveats"]["kind_scope"]["kinds_produced"] == ["tmux"]
 
 
@@ -7031,7 +7094,15 @@ def test_the_kind_scope_caveat_MATCHES_what_the_code_actually_produces():
         produced |= {r["kind"] for h in rep["hosts"].values()
                      for r in h["windows"]}
     assert produced, "no rows measured — this guard would pass vacuously"
-    assert produced == set(sm.CAVEATS["kind_scope"]["kinds_produced"])
+    # 🔴 Compared against each report's OWN measured caveat, not against a
+    # constant. The constant carries no `kinds_produced` at all now — a
+    # literal there was a fake measurement, and comparing to it was comparing
+    # the code to a copy of itself.
+    for rep in (base_gather(), mix_gather()):
+        assert set(rep["caveats"]["kind_scope"]["kinds_produced"]) == {
+            r["kind"] for h in rep["hosts"].values() for r in h["windows"]}
     assert set(sm.CAVEATS["kind_scope"]["kinds_enumerated"]) == set(sm.KINDS)
     assert produced < set(sm.KINDS), (
         "cluster is enumerated but must not be produced yet")
+    # what the build produces WITHOUT measuring agrees with what it measured
+    assert set(sm.KINDS_PRODUCED_BY_CONSTRUCTION) == produced

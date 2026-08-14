@@ -500,6 +500,14 @@ STATUS_BUCKETS = ("busy", "idle", "stale", "unknown")
 # summary of a tmux-only scan is byte-identical to what it was before `kind`.
 KINDS = ("tmux", "cluster")
 
+#: 🔴 What this build produces WITHOUT measuring — the honest answer for a
+#: caller that has no scan. Separate from `KINDS` (what exists) and from a
+#: report's measured `kinds_produced` (what a scan saw). Writer 3 updates THIS
+#: tuple, and the moment it gains `cluster` the all-produced branch of
+#: `_kind_scope_sentence` goes live under the by-construction head — which is
+#: why that branch's wording is parameterised rather than hardcoded to a scan.
+KINDS_PRODUCED_BY_CONSTRUCTION = ("tmux",)
+
 # 🔴 `kind` VS `runtime` — TWO AXES, AND NEITHER IS DERIVABLE FROM THE OTHER.
 # They will agree on almost every row, which is exactly how someone collapses
 # them later and finds out the hard way that the null semantics differ:
@@ -599,10 +607,14 @@ CAVEATS = {
     # conclude the tool simply cannot say.
     "kind_scope": {
         "kinds_enumerated": list(KINDS),
-        # 🔴 OVERWRITTEN PER SCAN by `measured_caveats`. This literal is only
-        # what a caller rendering the bare constant sees; the shipped value is
-        # measured from the rows.
-        "kinds_produced": ["tmux"],
+        # 🔴 DELIBERATELY ABSENT. `kinds_produced` is a MEASUREMENT, supplied
+        # per scan by `measured_caveats`, and a literal here is a fake one: it
+        # made the bare constant render "rows in this scan are kind=tmux" when
+        # no scan had happened, and it made the honest by-construction branch
+        # in `_fmt_kind_scope` UNREACHABLE — so the fix for that sentence sat
+        # in code nothing could execute while the false sentence stayed live.
+        # A missing key is the honest representation of "not measured", which
+        # is exactly what this constant knows.
         # 🔴 THE NOTE STATES ONLY WHAT IS DURABLY TRUE, because it sits beside
         # a MEASURED field and ships in the same `--json` payload. It used to
         # assert "every row is a tmux pane … cluster is ENUMERATED but NOT
@@ -3047,15 +3059,24 @@ def _fmt_kind_scope(kd) -> str:
     """
     produced = kd.get("kinds_produced")
     if produced is None:
-        # 🔴 NO MEASUREMENT SUPPLIED AT ALL — a caller rendering the bare
-        # CAVEATS constant rather than a scanned report. The sentence must then
-        # describe what this tool produces BY CONSTRUCTION and must NOT say
-        # "in this scan", because no scan happened. The first version said
-        # exactly that while its own comment claimed otherwise: a comment is a
-        # claim too, and it disagreed with the string three lines below it.
+        # 🔴 NO MEASUREMENT SUPPLIED — reached by any caveats dict without a
+        # `kinds_produced` key, which is the bare CAVEATS constant (the key is
+        # deliberately absent there) and any report that never went through
+        # `measured_caveats`. The sentence must then describe what this tool
+        # produces BY CONSTRUCTION and must NOT say "in this scan", because no
+        # scan happened.
+        #
+        # An earlier comment here named the bare-constant caller while the
+        # constant still carried a literal `kinds_produced`, so that caller
+        # took the MEASURED branch and this one was unreachable: the comment
+        # described a path its own code could not take, and the false sentence
+        # it claimed to have fixed was still being rendered. A comment is a
+        # claim, and this one was wrong about reachability, which is the
+        # hardest kind to notice.
         return _kind_scope_sentence(
             "this tool produces kind={} rows by construction (no scan "
-            "measured here)", ["tmux"],
+            "measured here)", "this build",
+            list(KINDS_PRODUCED_BY_CONSTRUCTION),
             list(kd.get("kinds_enumerated") or KINDS))
     produced = list(produced)
     enumerated = list(kd.get("kinds_enumerated") or KINDS)
@@ -3068,22 +3089,33 @@ def _fmt_kind_scope(kd) -> str:
                 "kinds ({}) say nothing about what a reachable host holds; "
                 "clawgate is reported separately under BLOCKED ON ME".format(
                     "/".join(enumerated)))
-    return _kind_scope_sentence("rows in this scan are kind={}", produced,
-                                enumerated)
+    return _kind_scope_sentence("rows in this scan are kind={}", "this scan",
+                                produced, enumerated)
 
 
-def _kind_scope_sentence(head_fmt, produced, enumerated) -> str:
+def _kind_scope_sentence(head_fmt, subject, produced, enumerated) -> str:
     """Build the non-empty `kind_scope` sentence. ONE builder for both the
     measured and the by-construction heads, so the two cannot drift into
-    saying different things about the same relationship."""
+    saying different things about the same relationship.
+
+    🔴 `subject` EXISTS BECAUSE SHARING THE BUILDER CREATED A FALSE SENTENCE.
+    The all-produced tail hardcoded "so THIS SCAN covers the whole entity
+    axis". Under the by-construction head — which explicitly says "no scan
+    measured here" — that produced a sentence contradicting itself eight words
+    later. It was unreachable the moment the builder was shared and becomes
+    reachable the moment `KINDS_PRODUCED_BY_CONSTRUCTION` gains `cluster`,
+    i.e. exactly when writer 3 lands, which is what this caveat is FOR.
+    Consolidating two strings is only safe where they say the same thing; the
+    part that differed had to become a parameter, not a coincidence.
+    """
     unproduced = [k for k in enumerated if k not in produced]
     head = head_fmt.format("/".join(produced))
     if not unproduced:
         # Every enumerated kind is present. Saying "NOT PRODUCED" here would be
         # false; saying nothing would drop the pointer to where clawgate lives.
-        return (head + " — every enumerated kind IS produced, so this scan "
-                "covers the whole entity axis; clawgate approval state is "
-                "still reported separately under BLOCKED ON ME")
+        return (head + " — every enumerated kind IS produced, so {} covers the "
+                "whole entity axis; clawgate approval state is still reported "
+                "separately under BLOCKED ON ME".format(subject))
     return (head + " — {} is ENUMERATED but NOT PRODUCED, so no such row "
             "appears and its absence is NOT a measured zero; clawgate is "
             "reported separately under BLOCKED ON ME".format(
