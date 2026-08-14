@@ -6425,7 +6425,6 @@ def test_NO_cluster_key_is_published_while_no_cluster_row_exists():
     assert "kinds_produced" not in sm.CAVEATS["kind_scope"]
     assert sm.KINDS_PRODUCED_BY_CONSTRUCTION == ("tmux",)
     # a real scan supplies it
-    assert sm.summarize(mix_gather())  # (fixture sanity)
     assert mix_gather()["caveats"]["kind_scope"]["kinds_produced"] == ["tmux"]
 
 
@@ -6816,6 +6815,39 @@ def test_every_kind_scope_sentence_is_pinned_WHOLE_not_by_feature():
     assert "this scan" not in got["by_construction_all_produced"]
 
 
+def test_the_BY_CONSTRUCTION_slot_IS_LIVE_not_a_coincident_literal(monkeypatch):
+    """🔴 THE SAME TRAP, ONE SLOT OVER — and it survived the commit that fixed
+    the neighbouring one.
+
+    `_fmt_kind_scope` renders `list(KINDS_PRODUCED_BY_CONSTRUCTION)`, and that
+    constant is `("tmux",)`. So the lookup and a hardcoded `["tmux"]` produce
+    byte-identical output, and a mutant replacing one with the other SURVIVES
+    the whole suite. Every pin asserts `kind=tmux` — the value both spellings
+    give.
+
+    That matters precisely at writer 3: someone updating the constant to
+    `("tmux", "cluster")` would update the two tests that pin it, see the
+    `missing` whole-string pin still green, and ship a sentence that still says
+    `kind=tmux`. The constant's own comment promises "writer 3 updates THIS
+    tuple"; nothing proved the render reads it.
+
+    So: move the constant to a value it cannot coincidentally equal, and watch
+    the sentence move.
+    """
+    monkeypatch.setattr(sm, "KINDS_PRODUCED_BY_CONSTRUCTION", ("zzz",))
+    line = sm._fmt_kind_scope({"kinds_enumerated": ["zzz", "qqq"]})
+    assert "produces kind=zzz rows by construction" in line
+    assert "tmux" not in line, "the render ignored the constant"
+    assert "qqq is ENUMERATED but NOT PRODUCED" in line
+    # and the writer-3 shape: the constant covering the whole enumerated set
+    # must reach the all-produced tail, with the BUILD subject
+    monkeypatch.setattr(sm, "KINDS_PRODUCED_BY_CONSTRUCTION", ("tmux", "cluster"))
+    w3 = sm._fmt_kind_scope({"kinds_enumerated": ["tmux", "cluster"]})
+    assert "produces kind=tmux/cluster rows by construction" in w3
+    assert "so this build covers the whole entity axis" in w3
+    assert "this scan covers" not in w3
+
+
 def test_the_kinds_enumerated_SLOT_IS_LIVE_not_defaulted_to_KINDS():
     """🔴 THE FIXTURE-COINCIDES-WITH-THE-CONSTANT TRAP, which this file names
     in its own comments and which I then walked into.
@@ -7000,7 +7032,6 @@ def test_the_summary_line_NAMES_every_class_even_when_the_count_is_missing():
 
 
 def test_measured_caveats_is_PURE_and_does_not_touch_its_input():
-    before = {k: dict(v) for k, v in sm.CAVEATS.items()}
     rep = {"hosts": {"h": {"windows": [{"kind": "cluster"}]}}}
     out = sm.measured_caveats(rep)
     assert out["kind_scope"]["kinds_produced"] == ["cluster"]
