@@ -6,7 +6,7 @@ instruction file (`~/.config/opencode/AGENTS.md`) and covers the ways opencode
 differs from Claude Code.
 
 🔴 **Why this file is CONCATENATED rather than `@`-imported.** opencode does NOT
-expand `@`-imports inside `AGENTS.md`/`CLAUDE.md` — measured on v1.18.4 with an
+expand `@`-imports inside `AGENTS.md`/`CLAUDE.md` — measured on v1.18.16 with an
 agent that had every tool denied, so no file read was possible: an imported
 passphrase came back `NONE`, the same content inline came back verbatim. Since
 `~/.claude/CLAUDE.md` is ~1.5 KB consisting almost entirely of `@PRINCIPLES.md`
@@ -31,7 +31,7 @@ bash guard.
 | search file contents | `grep` | `rg` / `grep` via bash |
 | see what is in a dir | `glob` on `<dir>/*` | `ls` |
 
-There is **no `list` tool** on opencode 1.18.4 — verified against the resolved
+There is **no `list` tool** on opencode 1.18.16 — verified against the resolved
 tool map, which contains exactly `bash, edit, glob, grep, invalid, question,
 read, skill, task, todowrite, webfetch, write`. Use `glob` to enumerate a
 directory.

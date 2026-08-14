@@ -63,6 +63,7 @@ green here as "the config is fine".
 
 import ast
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -613,6 +614,160 @@ def test_engine_is_the_version_every_measurement_is_keyed_to():
         f"PINNED_VERSION: re-derive the header's measurements against the new "
         f"binary first (the rest of this file tells you which ones changed), "
         f"then update both together."
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE PIN'S SURFACE — every file that spells a version-keyed claim.
+#
+# WHY THIS EXISTS. The 1.18.4 -> 1.18.16 bump updated 23 claim lines and MISSED
+# four files, because the author grepped `scripts/opencode/` and the two test
+# modules and stopped there. The misses were not cosmetic: nix/pkgs/tools/
+# default.nix and flake.nix are the files the pin names as its OWN mechanism,
+# and both asserted in the PRESENT TENSE that `pkgs.opencode` *is* 1.18.4 at a
+# nixpkgs rev the lock had already left behind. claude/opencode-addendum.md is
+# concatenated into ~/.config/opencode/AGENTS.md, so the agent was being told
+# the old version while the repo said the new one. An adversarial reviewer found
+# all four; nothing in the suite could.
+#
+# `test_engine_is_the_version_every_measurement_is_keyed_to` pins the BINARY
+# against PINNED_VERSION. It cannot see a doc that disagrees with either. This
+# closes that gap: within the pin's surface, a version literal is either
+# PINNED_VERSION or an ENUMERATED historical exception.
+#
+# 🔴 The allowlist is a LEDGER, not a filter: a stale entry is a failure too
+# (see the second half of the test). It is keyed on version-FREE snippets on
+# purpose — an allowlist quoting `1.18.4` would match itself when this very file
+# is scanned.
+PIN_SURFACE = (
+    "scripts/opencode/README.md",
+    "scripts/opencode/opencode.jsonc",
+    "scripts/opencode/agent/k8s.md",
+    "scripts/opencode/agent/review.md",
+    "scripts/opencode/plugin/guard.js",
+    "scripts/tests/test_opencode_config.py",
+    "scripts/tests/test_opencode_engine.py",
+    "nix/pkgs/tools/default.nix",
+    "nix/home.nix",
+    "flake.nix",
+    "claude/opencode-addendum.md",
+)
+
+# 🔴 SCOPED TO opencode's VERSION SERIES, and it has to be. `nix/home.nix` and
+# `flake.nix` also carry dunst 1.13.2 and playwright 1.57.0/1.61.1; a bare
+# `1\.\d+\.\d+` sweep flags all of them, and an allowlist full of unrelated
+# packages would go red on every unrelated bump — a gate nobody can keep green
+# gets switched off. Note the lookbehind admits a leading `v`: `\b` does NOT
+# match between `v` and `1` (both word characters), so an anchored pattern
+# silently skips every `v1.18.4` — which is how the FIRST draft of this test
+# passed while `README.md:229` was stale.
+#
+# WHEN opencode CROSSES A MINOR (1.19.x), append the old series here rather than
+# replacing it — otherwise every surviving 1.18.x claim becomes invisible on the
+# same day the pin stops matching it.
+OPENCODE_SERIES = ("1.18",)
+_VERSION_RE = re.compile(
+    r"(?<![\d.])(?:" + "|".join(re.escape(s) + r"\.\d+" for s in OPENCODE_SERIES) + r")(?![\d.])"
+)
+
+# (path, snippet on the SAME LINE as the version, why it does not track the pin)
+# 🔴 Same line, not same paragraph: a snippet one line above its version matches
+# nothing and reads as an orphan. Snippets carry no version literal of their own,
+# or they would match themselves when this file is scanned.
+HISTORICAL_VERSION_CLAIMS = (
+    ("nix/pkgs/tools/default.nix", "which drifted: MEASURED",
+     "the per-host drift that motivated pinning; a dated fact"),
+    ("nix/pkgs/tools/default.nix", "when this pin was introduced",
+     "states what the pin resolved to when it was created"),
+    ("nix/home.nix", "and not `permission.ask`: MEASURED on",
+     "hook-firing claim — needs a running hook to observe, not re-derived"),
+    ("nix/home.nix", "opencode has NO `env` config key (verified on v",
+     "plugin/env claim — not re-derived at the new version"),
+    ("nix/home.nix", "CORRECTION (measured 2026-08-02, opencode",
+     "dated correction record"),
+    ("nix/home.nix", 'DEPLOYMENT CONSTRAINTS (measured on v',
+     "plugin-loading deployment claim — not re-derived"),
+    ("nix/home.nix", "before removing it, against a",
+     "dated record of a removal decision"),
+    ("nix/home.nix", "reads BOTH (measured: it",
+     "plugin-glob claim — not re-derived"),
+    ("scripts/opencode/plugin/guard.js", ", this host, 2026-08-02 — and STILL",
+     "hook-firing claim — needs a running hook to observe"),
+    ("scripts/opencode/plugin/guard.js", "see PINNED_VERSION in scripts/tests",
+     "the in-place marker saying that claim is deliberately not re-derived"),
+    ("scripts/opencode/README.md", ", this host, 2026-08-02. \U0001f534 Still",
+     "heads the hook-behaviour block; deliberately not re-derived"),
+    ("scripts/opencode/README.md", 'startup files" is **FALSE on this host**',
+     "zsh-startup-files claim — not re-derived"),
+    ("scripts/tests/test_opencode_engine.py", "RE-DERIVED",
+     "names the transition itself"),
+    ("scripts/tests/test_opencode_engine.py", "deliberately still keyed to",
+     "the pin's own note naming the not-re-derived subset"),
+    ("scripts/tests/test_opencode_engine.py", "MEASURED 2026-08-11 on the workbench, opencode",
+     "the pipe-truncation incident record; history"),
+    ("scripts/tests/test_opencode_engine.py", "the SAME store",
+     "the store path the incident was measured on"),
+    ("scripts/tests/test_opencode_engine.py", "drifting independently",
+     "the cross-host drift example in the version test's docstring"),
+    ("scripts/tests/test_opencode_engine.py", "claim lines and MISSED",
+     "this test's own account of the bump that motivated it"),
+    ("scripts/tests/test_opencode_engine.py", "in the PRESENT TENSE",
+     "same account"),
+    ("scripts/tests/test_opencode_engine.py", "an allowlist quoting",
+     "the note explaining why snippets carry no version literal"),
+    ("scripts/tests/test_opencode_engine.py", "silently skips every",
+     "the worked example of the `v`-prefix regex trap"),
+    ("scripts/tests/test_opencode_engine.py", "The binary assertion cannot see this class",
+     "this test's own docstring, naming the bump it was written for"),
+)
+
+
+def test_no_file_in_the_pins_surface_still_claims_an_OLD_version():
+    """\U0001f534 A doc that names a superseded version is a FALSE CLAIM, not a typo.
+
+    The binary assertion cannot see this class at all, and the 1.18.4 -> 1.18.16
+    bump shipped four instances of it — two in the very files that implement the
+    pin, one in a file concatenated into the agent's own AGENTS.md.
+    """
+    stale = []
+    for rel in PIN_SURFACE:
+        path = ROOT / rel
+        assert path.exists(), f"{rel} is in PIN_SURFACE but does not exist — the ledger rotted"
+        allowed = [s for p, s, _ in HISTORICAL_VERSION_CLAIMS if p == rel]
+        for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            hits = [v for v in _VERSION_RE.findall(line) if v != PINNED_VERSION]
+            if hits and not any(snip in line for snip in allowed):
+                stale.append(f"  {rel}:{n}: {hits} :: {line.strip()[:100]}")
+    assert not stale, (
+        f"{len(stale)} version claim(s) in the pin's surface disagree with "
+        f"PINNED_VERSION={PINNED_VERSION!r} and are not enumerated as historical:\n"
+        + "\n".join(stale)
+        + "\n\nEither re-derive the claim against the pinned binary and update the "
+          "number, or add it to HISTORICAL_VERSION_CLAIMS with the reason it does "
+          "not track the pin. Do NOT allowlist it just to go green — a claim keyed "
+          "to a version nothing runs is exactly what this test exists to catch."
+    )
+
+
+def test_every_historical_version_claim_still_exists():
+    """The allowlist is a LEDGER: it must fail when the set SHRINKS too.
+
+    A stale entry silently grants an exemption to a line that no longer exists,
+    and the next edit to that file inherits the hole.
+    """
+    orphans = []
+    for rel, snippet, reason in HISTORICAL_VERSION_CLAIMS:
+        text = (ROOT / rel).read_text(encoding="utf-8")
+        hits = [
+            ln for ln in text.splitlines()
+            if snippet in ln
+            and any(v != PINNED_VERSION for v in _VERSION_RE.findall(ln))
+        ]
+        if not hits:
+            orphans.append(f"  {rel}: {snippet!r} ({reason})")
+    assert not orphans, (
+        "HISTORICAL_VERSION_CLAIMS entries match no old-version line any more — "
+        "the claim was updated or deleted, so drop the entry:\n" + "\n".join(orphans)
     )
 
 
