@@ -2560,6 +2560,105 @@ def render_ledger(led) -> list:
     return out
 
 
+# =========================================================================== #
+# PURE — the LEAN view, for the only consumer this tool has
+# =========================================================================== #
+# 🔴 MEASURED, and it is why this exists. The operator confirmed 2026-08-14 what
+# spec §7 measured: 0 interactive shell invocations in 30 days against 55 agent
+# references. An AGENT is the only reader, and neither existing shape fits one:
+#
+#   the table   ~3,280 tokens, and LOSSY — 73 truncated cells on a 75-row scan,
+#               45 rows whose task text exceeds the 25-char column, with no way
+#               for the reader to recover what was cut.
+#   --json      lossless, ~14,013 tokens even after compaction — a large slice
+#               of a context window for one call.
+#
+# Rows are ~85% of the payload — 47,409 B of 56,068 B, re-measured on one live
+# 75-row scan 2026-08-14 — so trimming ROWS is the whole win. The single biggest
+# row field was `ledger` at ~7.5 KB: a full embedded record whose useful
+# contents (`age_secs`, `age_source`, `claude_session_id`) are ALREADY flat on
+# the row, added in the same change that added the duplication.
+#
+# 🔴 Every figure here comes from ONE scan. An earlier draft quoted
+# `52,564 B of 60,631 B` (86%) with the two halves taken from DIFFERENT scans —
+# an audit caught the same defect in the compaction comment below and it was
+# corrected there while these siblings kept the retracted number. A ratio built
+# from two measurements is a ratio of nothing.
+#
+# 🔴 WHAT THIS MUST NOT DO, and the reason it keeps more than it looks like it
+# should: a cheap payload that can LIE is worse than an expensive one. Every
+# null-vs-zero discriminator survives verbatim — `summary` (whose `waiting`
+# block carries the tri-state and `unmeasured_reasons`), `caveats` IN FULL,
+# `blocked_on_me`, `ledger`/`fuzzyclaw` section status, and per host
+# `reachable`/`windows_measured`/`captures_status`. `caveats` costs ~586 tokens
+# and is the one thing standing between a cold agent and a fabricated zero; it
+# is the LAST thing to trim, not the first. What goes is duplication and
+# human-facing identity, never a measurement's provenance.
+LEAN_ROW_FIELDS = (
+    # reach it. `label_source` rides with `label` for the same reason
+    # `age_source` rides with `age_secs`: it is PROVENANCE, and this view's own
+    # rule is that duplication and human-facing identity go while a
+    # measurement's provenance never does. `resolve_label` says a row labelled
+    # `main` from a real directory and one labelled `main` because the cwd
+    # yielded nothing "are distinguishable by `label_source`, not by the
+    # label" — dropping it made exactly that pair unreadable. An audit caught
+    # the inconsistency between the rule and the field list; the rule won.
+    "host", "session", "window_index", "label", "label_source", "hotkey",
+    # what it is working on
+    "path", "task",
+    # what state it is in
+    "claude", "busy", "status", "age_secs", "age_source",
+    # whether it needs the operator — `waiting_status` is NOT optional, it is
+    # the discriminant that makes `waiting_probable: null` readable
+    "waiting_probable", "waiting_signals", "waiting_status",
+    # the carrier into ClickHouse
+    "claude_session_id",
+)
+
+# Per-host keys the lean view keeps. `ssh_target` and `live_window_ids` are
+# dropped: the first is fixed config the caller already knows, the second is a
+# 346 B array no consumer reads. The rest are measurement provenance.
+LEAN_HOST_FIELDS = (
+    "reachable", "error", "windows_measured", "windows_error",
+    "captures_measured", "captures_status", "captures_seen",
+)
+
+
+def lean_report(report) -> dict:
+    """Project a full report onto the agent-shaped view. PURE.
+
+    Lossless for every field it keeps — values are passed through untouched and
+    untruncated, which is the property the TABLE cannot offer at any price.
+    """
+    out = {k: v for k, v in report.items() if k != "hosts"}
+    out["view"] = "lean"
+    # 🔴 The field lists travel IN the payload, and they name what this view
+    # CARRIES — so any key absent from a row was omitted BY THE VIEW, not
+    # measured as null. Without them a consumer that finds no `window_id`
+    # cannot tell those two apart, which reintroduces exactly the ambiguity the
+    # rest of this tool exists to remove.
+    #
+    # An earlier draft described these three times as naming "what was
+    # omitted", which is the inverse of what they hold. The sole documented
+    # consumer is an LLM reading the payload against that sentence, so an
+    # inverted description is not a cosmetic slip.
+    #
+    # HOSTS GET ONE TOO. The rows had a list and the hosts did not, which left
+    # the omitted-vs-null argument true of rows and false of the host entries
+    # that carry most of the measurement provenance.
+    out["lean_row_fields"] = list(LEAN_ROW_FIELDS)
+    out["lean_host_fields"] = list(LEAN_HOST_FIELDS)
+    out["hosts"] = {}
+    for name, h in (report.get("hosts") or {}).items():
+        entry = {k: h[k] for k in LEAN_HOST_FIELDS if k in h}
+        entry["windows"] = [
+            {k: r[k] for k in LEAN_ROW_FIELDS if k in r}
+            for r in (h.get("windows") or [])
+        ]
+        out["hosts"][name] = entry
+    return out
+
+
 def render_caveats(report) -> list:
     """🔴 Every structured caveat, in the OUTPUT, unconditionally — one line
     each, and the count is whatever CAVEATS holds (a test pins the relationship
@@ -2757,6 +2856,19 @@ def build_parser():
     # switch — it exists so a scan can be run against a host whose ledger read is
     # misbehaving, and so a test can prove the ledger is what supplies the age.
     # Off, `report["ledger"]["status"]` is `skipped` and every count is null.
+    # 🔴 The AGENT-SHAPED view. See `lean_report` for the measurement behind it.
+    # It trims ROWS (86% of the payload) to the fields that answer "what is being
+    # worked on, what is waiting on me", untruncated — and keeps every
+    # null-vs-zero discriminator, because a cheap payload that can lie is worse
+    # than an expensive one.
+    p.add_argument("--lean", action="store_true",
+                   help="JSON only: the agent-shaped view — rows trimmed to "
+                        "the fields that answer the tool's question, "
+                        "untruncated, with every measurement discriminator and "
+                        "the caveats kept. `lean_row_fields`/`lean_host_fields` "
+                        "in the payload name what this view CARRIES, so a key "
+                        "absent from a row was omitted by the view rather than "
+                        "measured as null.")
     p.add_argument("--no-ledger", action="store_true",
                    help="skip the per-host agent activity ledger read. Rows "
                         "then fall back to fuzzyclaw for age/session-id, which "
@@ -2798,6 +2910,12 @@ def main(argv=None):
         if args.claude_only:
             print("(--claude-only has no effect on `tail`: it targets one "
                   "named window)", file=sys.stderr)
+        # `tail` RETURNS before the shared --lean notice below, so it needs its
+        # own. Silently ignoring it here is the exact rule this flag's own
+        # justification cites, broken where the precedent sits one line up.
+        if args.lean:
+            print("(--lean has no effect on `tail`: it returns one window's "
+                  "scrollback, not rows)", file=sys.stderr)
         if not args.target:
             print("tail requires <session>:<window>", file=sys.stderr)
             return EXIT_USAGE
@@ -2897,14 +3015,28 @@ def main(argv=None):
         report["session_history"] = detail_history(report,
                                                    use_ch=not args.no_ch)
 
+    if args.lean and not args.json:
+        print("(--lean shapes the JSON payload; it has no effect without "
+              "--json)", file=sys.stderr)
+    # 🔴 COMPUTED BEFORE THE PROJECTION, deliberately. `exit_code_for` reads
+    # `hosts[*].reachable`, so running it on the LEAN report would make the exit
+    # CONTRACT silently depend on `reachable` staying in `LEAN_HOST_FIELDS` — a
+    # coupling nothing states and no test would notice, where the failure is a
+    # scan that reports success over an unreachable fleet. The code is a fact
+    # about the SCAN, not about which view was rendered.
+    code = exit_code_for(report)
     if args.json:
+        if args.lean:
+            report = lean_report(report)
         # 🔴 COMPACT, NOT INDENTED, and the reason is measured. The ONLY
         # consumer of this tool is an agent — 0 interactive shell invocations
         # in 30 days against 55 agent references (spec §7), confirmed by the
         # operator 2026-08-14 — and an agent pays for output by the TOKEN.
-        # Measured on a 75-row scan: 86,066 B indented against 60,631 B
-        # compact, so 29% of every payload was whitespace formatting for a
-        # reader who does not exist. That is ~6,400 tokens per call.
+        # Measured on ONE 75-row scan: 86,066 B indented against 56,052 B
+        # compact — 34.9% of the payload was whitespace for a reader who does
+        # not exist, ~7,500 tokens per call. (An earlier draft said 29%, from a
+        # byte pair taken across two DIFFERENT scans; an audit re-measured a
+        # single scan at 34.9%, which is what SKILL.md quotes.)
         # `sort_keys` STAYS: it costs nothing and makes two scans diffable.
         # A human who wants it readable can pipe it through `jq .`, which is
         # what they would do anyway.
@@ -2914,7 +3046,7 @@ def main(argv=None):
         print(render_table(report))
         if "session_history" in report:
             print(render_session_history(report["session_history"]))
-    return exit_code_for(report)
+    return code
 
 
 DEFAULT_HISTORY_LIMIT = 10

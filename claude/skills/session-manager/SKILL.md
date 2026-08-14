@@ -20,7 +20,8 @@ level. Roll-ups: `summary.waiting`, `summary.status[bucket]` (`{claude, shell, t
 
 | flag | effect |
 |---|---|
-| `--json` | JSON (default is a table) |
+| `--json` | JSON (default is a table). Compact, not indented — 34% of the payload was whitespace for a reader that does not exist |
+| `--lean` | 🔴 **with `--json`, prefer this.** The agent-shaped view: rows trimmed to the fields that answer this tool's question, **untruncated**, with every measurement discriminator and the caveats kept |
 | `--host workbench\|laptop\|all` | default `all`; `tail` resolves `all` to LOCAL |
 | `--claude-only` | drop non-Claude rows; every count then describes the FILTERED set, and `summary.excluded_non_claude` says how many went |
 | `--no-ch` | skip ClickHouse — the client is never constructed |
@@ -30,6 +31,33 @@ level. Roll-ups: `summary.waiting`, `summary.status[bucket]` (`{claude, shell, t
 | `--plain` | `tail` only: strip ANSI at the source instead of `sed`-ing it out |
 | `--stale-threshold <secs>` | default 3600; `age >= threshold` is stale |
 | `--lines N` | `tail` scrollback depth (default 100) |
+
+## 🔴 Which output to ask for — you are the only consumer
+
+Measured: **0 interactive shell invocations in 30 days against 55 agent references**, confirmed
+by the operator 2026-08-14. An agent reads this, and pays by the token.
+
+| | cost on a 75-row scan | faithful? |
+|---|---|---|
+| table (default) | ~3,280 tok | ❌ **lossy** — 73 truncated cells, 45 rows whose task exceeds the 25-char column |
+| `--json` | ~14,017 tok | ✅ |
+| `--json --lean` | ~9,629 tok | ✅ on what it keeps |
+
+**Ask for `--json --lean` unless you need a dropped field.** It is cheaper than the full payload
+AND more faithful than the cheap one. `lean_row_fields` and `lean_host_fields` travel in the payload
+naming exactly what this view CARRIES — so a key absent from a row was omitted by the view, never
+measured as null. `caveats`, `summary.waiting`'s tri-state, `blocked_on_me` and every per-host
+measurement status are kept in full, because a cheap payload that can lie is worse than an
+expensive one.
+
+Dropped from **rows** (8): `window_id`, `window_name`, `codename`, `pane_id`, `command`, `panes`,
+and the `ledger`/`fuzzyclaw` sub-objects — duplication, their useful contents are already flat on
+the row. `label_source` is deliberately KEPT: like `age_source` it is provenance, and it is the
+only thing separating a row labelled from a real directory from one labelled because the cwd
+yielded nothing.
+
+Dropped from **hosts** (2): `ssh_target` (fixed config the caller already knows) and
+`live_window_ids` (a ~346 B array no consumer reads).
 
 ## 🔴 `waiting_probable` — is anything waiting on a HUMAN
 
