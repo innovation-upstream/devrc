@@ -911,6 +911,25 @@ const MUST_FIRE = [
     "const out = createWriteStream(join(__dirname, 'webhooks.jsonl'));"],
   ['🔴 deletion is a write too',
     "rmSync(join(__dirname, '.cache'), { recursive: true, force: true });"],
+  // ── the emoji desync, pinned where it had its consequence ──
+  //
+  // 🔴 js-source.mjs split by CODE POINT and indexed by CODE UNIT, so every
+  // astral character shifted the offsets after it by one. Two markers — fewer
+  // than a normal header in this repo carries — moved the blanking of the middle
+  // comment far enough to leave its apostrophe behind; the stray quote opened a
+  // "string literal" that ran on through the write and swallowed it. Measured
+  // against the tree that still had the webhook listener: 4 of 26 walked modules
+  // desynced, and a genuine write planted in listen.mjs was invisible here.
+  //
+  // This entry FIRED red before the fix. Keep the apostrophe and both markers —
+  // one marker alone shifts uniformly and strands nothing.
+  ['🔴 TWO emoji markers and an apostrophe — the shape that swallowed a real write',
+    "// \u{1F534} a marker, the idiom every header in this repo opens with\n" +
+    "// the receiver doesn't care which host it runs on\n" +
+    '// \u{1F534} a second marker\n' +
+    "writeFileSync(join(__dirname, 'accounts.json'), data);"],
+  ['🔴 an emoji inside the WRITTEN template path itself',
+    'writeFileSync(`${__dirname}/\u{1F534}-accounts.json`, data);'],
 ];
 
 // 🔴 CALIBRATED TO THE CLASS, NOT TO AN EXEMPTION LIST — and not to the bug
@@ -972,6 +991,11 @@ const MUST_NOT_FIRE = [
     "/* writeFileSync(join(__dirname, 'accounts.json'), d); */\nconst p = accountsPath();"],
   ['an import specifier that merely ends in .js',
     "import x from './helper.js';\nconst d = dirname(fileURLToPath(import.meta.url));"],
+  // The other direction of the emoji fix: blanking that is correct must not
+  // start UNDER-blanking either, or the prose above becomes a reported defect.
+  ['the hazard described in a comment that also carries emoji markers',
+    "// \u{1F534} never write writeFileSync(join(__dirname, 'accounts.json'), d)\n" +
+    "// \u{1F534} — use the accessor; the receiver doesn't care\nconst p = accountsPath();"],
 ];
 
 test('POSITIVE CONTROL: the seam scanner fires on every shape of the hazard', () => {
