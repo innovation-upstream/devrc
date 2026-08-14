@@ -643,7 +643,10 @@ def test_engine_is_the_version_every_measurement_is_keyed_to():
 # is scanned.
 # 🔴 SCOPE, STATED HONESTLY — this is NOT "every file that spells a version".
 # An earlier draft of this comment claimed it was, and a re-audit falsified the
-# claim in one grep: eight more tracked files carry opencode version literals.
+# claim in one grep: eleven more tracked files carry opencode version literals
+# (excluding claudedocs/, which is history). Do not trust that count to stay
+# current — it is context for WHY the surface is enumerated, not an assertion,
+# and nothing re-derives it.
 # Worse, THIS PR made four of them false — `scripts/browser-bridge/` asserted in
 # the present tense that "both hosts run 1.18.4", true at the merge-base and
 # false the moment the lock moved. Those four are fixed by naming the PIN rather

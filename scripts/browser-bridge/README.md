@@ -1654,8 +1654,12 @@ field** (the CDP ops are bounded typed ops only; see the CDP security model abov
   parses to exactly one enabled tool, `browser`). There is no version-skew caveat
   here any more. 🔴 1.18.4 is what the hosts RUN; `flake.lock` pins **1.18.16**
   and they converge on the next `ship.sh` — merged is not deployed. The
-  browser-only resolution was re-derived on 1.18.16 too (byte-identical dump), so
-  the deploy gap does not reopen the version-skew question.
+  browser-only resolution was re-derived on 1.18.16 too — identical resolved tool
+  set, on both binaries. 🔴 The RAW dump is NOT byte-stable, on either binary: the
+  `permission` array's order follows a directory walk and varies run to run, so
+  `cmp` on two dumps differs for reasons that have nothing to do with the version.
+  Compare the resolved tool set, or canonicalise first. So the deploy gap does not
+  reopen the version-skew question.
 
   *The failure mode that actually bites — capture the dump to a FILE, never a
   pipe.* opencode does not reliably flush stdout before exiting when stdout is a
