@@ -2589,8 +2589,15 @@ def render_ledger(led) -> list:
 # is the LAST thing to trim, not the first. What goes is duplication and
 # human-facing identity, never a measurement's provenance.
 LEAN_ROW_FIELDS = (
-    # reach it
-    "host", "session", "window_index", "label", "hotkey",
+    # reach it. `label_source` rides with `label` for the same reason
+    # `age_source` rides with `age_secs`: it is PROVENANCE, and this view's own
+    # rule is that duplication and human-facing identity go while a
+    # measurement's provenance never does. `resolve_label` says a row labelled
+    # `main` from a real directory and one labelled `main` because the cwd
+    # yielded nothing "are distinguishable by `label_source`, not by the
+    # label" — dropping it made exactly that pair unreadable. An audit caught
+    # the inconsistency between the rule and the field list; the rule won.
+    "host", "session", "window_index", "label", "label_source", "hotkey",
     # what it is working on
     "path", "task",
     # what state it is in
@@ -2619,11 +2626,22 @@ def lean_report(report) -> dict:
     """
     out = {k: v for k, v in report.items() if k != "hosts"}
     out["view"] = "lean"
-    # 🔴 The row field list travels IN the payload. A consumer that gets fewer
-    # keys than it expected must be able to tell "this view omits it" from
-    # "this scan measured it as null" — without that, the lean view reintroduces
-    # exactly the ambiguity the rest of this tool exists to remove.
+    # 🔴 The field lists travel IN the payload, and they name what this view
+    # CARRIES — so any key absent from a row was omitted BY THE VIEW, not
+    # measured as null. Without them a consumer that finds no `window_id`
+    # cannot tell those two apart, which reintroduces exactly the ambiguity the
+    # rest of this tool exists to remove.
+    #
+    # An earlier draft described these three times as naming "what was
+    # omitted", which is the inverse of what they hold. The sole documented
+    # consumer is an LLM reading the payload against that sentence, so an
+    # inverted description is not a cosmetic slip.
+    #
+    # HOSTS GET ONE TOO. The rows had a list and the hosts did not, which left
+    # the omitted-vs-null argument true of rows and false of the host entries
+    # that carry most of the measurement provenance.
     out["lean_row_fields"] = list(LEAN_ROW_FIELDS)
+    out["lean_host_fields"] = list(LEAN_HOST_FIELDS)
     out["hosts"] = {}
     for name, h in (report.get("hosts") or {}).items():
         entry = {k: h[k] for k in LEAN_HOST_FIELDS if k in h}
@@ -2841,9 +2859,10 @@ def build_parser():
                    help="JSON only: the agent-shaped view — rows trimmed to "
                         "the fields that answer the tool's question, "
                         "untruncated, with every measurement discriminator and "
-                        "the caveats kept. `lean_row_fields` in the payload "
-                        "names what was omitted, so a missing key is never "
-                        "mistaken for a measured null.")
+                        "the caveats kept. `lean_row_fields`/`lean_host_fields` "
+                        "in the payload name what this view CARRIES, so a key "
+                        "absent from a row was omitted by the view rather than "
+                        "measured as null.")
     p.add_argument("--no-ledger", action="store_true",
                    help="skip the per-host agent activity ledger read. Rows "
                         "then fall back to fuzzyclaw for age/session-id, which "
@@ -2885,6 +2904,12 @@ def main(argv=None):
         if args.claude_only:
             print("(--claude-only has no effect on `tail`: it targets one "
                   "named window)", file=sys.stderr)
+        # `tail` RETURNS before the shared --lean notice below, so it needs its
+        # own. Silently ignoring it here is the exact rule this flag's own
+        # justification cites, broken where the precedent sits one line up.
+        if args.lean:
+            print("(--lean has no effect on `tail`: it returns one window's "
+                  "scrollback, not rows)", file=sys.stderr)
         if not args.target:
             print("tail requires <session>:<window>", file=sys.stderr)
             return EXIT_USAGE
@@ -2984,11 +3009,16 @@ def main(argv=None):
         report["session_history"] = detail_history(report,
                                                    use_ch=not args.no_ch)
 
-    # A silently-ignored flag is how a caller concludes it was honoured — the
-    # same rule `--plain` and `--claude-only` already follow.
     if args.lean and not args.json:
         print("(--lean shapes the JSON payload; it has no effect without "
               "--json)", file=sys.stderr)
+    # 🔴 COMPUTED BEFORE THE PROJECTION, deliberately. `exit_code_for` reads
+    # `hosts[*].reachable`, so running it on the LEAN report would make the exit
+    # CONTRACT silently depend on `reachable` staying in `LEAN_HOST_FIELDS` — a
+    # coupling nothing states and no test would notice, where the failure is a
+    # scan that reports success over an unreachable fleet. The code is a fact
+    # about the SCAN, not about which view was rendered.
+    code = exit_code_for(report)
     if args.json:
         if args.lean:
             report = lean_report(report)
@@ -2996,9 +3026,11 @@ def main(argv=None):
         # consumer of this tool is an agent — 0 interactive shell invocations
         # in 30 days against 55 agent references (spec §7), confirmed by the
         # operator 2026-08-14 — and an agent pays for output by the TOKEN.
-        # Measured on a 75-row scan: 86,066 B indented against 60,631 B
-        # compact, so 29% of every payload was whitespace formatting for a
-        # reader who does not exist. That is ~6,400 tokens per call.
+        # Measured on ONE 75-row scan: 86,066 B indented against 56,052 B
+        # compact — 34.9% of the payload was whitespace for a reader who does
+        # not exist, ~7,500 tokens per call. (An earlier draft said 29%, from a
+        # byte pair taken across two DIFFERENT scans; an audit re-measured a
+        # single scan at 34.9%, which is what SKILL.md quotes.)
         # `sort_keys` STAYS: it costs nothing and makes two scans diffable.
         # A human who wants it readable can pipe it through `jq .`, which is
         # what they would do anyway.
@@ -3008,7 +3040,7 @@ def main(argv=None):
         print(render_table(report))
         if "session_history" in report:
             print(render_session_history(report["session_history"]))
-    return exit_code_for(report)
+    return code
 
 
 DEFAULT_HISTORY_LIMIT = 10

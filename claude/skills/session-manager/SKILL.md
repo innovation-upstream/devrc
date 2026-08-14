@@ -44,13 +44,20 @@ by the operator 2026-08-14. An agent reads this, and pays by the token.
 | `--json --lean` | ~9,085 tok | ✅ on what it keeps |
 
 **Ask for `--json --lean` unless you need a dropped field.** It is cheaper than the full payload
-AND more faithful than the cheap one. `lean_row_fields` travels in the payload naming exactly what
-was omitted, so a missing key is never mistaken for a measured null — and `caveats`,
-`summary.waiting`'s tri-state, `blocked_on_me` and every per-host measurement status are kept in
-full, because a cheap payload that can lie is worse than an expensive one.
+AND more faithful than the cheap one. `lean_row_fields` and `lean_host_fields` travel in the payload
+naming exactly what this view CARRIES — so a key absent from a row was omitted by the view, never
+measured as null. `caveats`, `summary.waiting`'s tri-state, `blocked_on_me` and every per-host
+measurement status are kept in full, because a cheap payload that can lie is worse than an
+expensive one.
 
-Dropped from rows: `window_id`, `window_name`, `codename`, `pane_id`, `command`, `panes`, and the
-`ledger`/`fuzzyclaw` sub-objects (duplication — their useful contents are already flat on the row).
+Dropped from **rows** (8): `window_id`, `window_name`, `codename`, `pane_id`, `command`, `panes`,
+and the `ledger`/`fuzzyclaw` sub-objects — duplication, their useful contents are already flat on
+the row. `label_source` is deliberately KEPT: like `age_source` it is provenance, and it is the
+only thing separating a row labelled from a real directory from one labelled because the cwd
+yielded nothing.
+
+Dropped from **hosts** (2): `ssh_target` (fixed config the caller already knows) and
+`live_window_ids` (a ~346 B array no consumer reads).
 
 ## 🔴 `waiting_probable` — is anything waiting on a HUMAN
 

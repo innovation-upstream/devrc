@@ -5827,11 +5827,19 @@ def test_the_LEAN_row_field_ledger_fails_when_it_grows_or_shrinks():
     row = rep["hosts"]["workbench"]["windows"][0]
     assert set(row) == set(sm.LEAN_ROW_FIELDS)
     assert set(sm.LEAN_ROW_FIELDS) == {
-        "host", "session", "window_index", "label", "hotkey",
+        "host", "session", "window_index", "label", "label_source", "hotkey",
         "path", "task", "claude", "busy", "status", "age_secs", "age_source",
         "waiting_probable", "waiting_signals", "waiting_status",
         "claude_session_id",
     }
+    # 🔴 `label_source` is here because an audit caught the view's own rule
+    # contradicting its field list: "duplication and human-facing identity go,
+    # a measurement's PROVENANCE never does" — and `label_source` is provenance,
+    # the same shape as `age_source` two entries along. Dropping it made a row
+    # labelled from a real directory indistinguishable from one labelled
+    # because the cwd yielded nothing. The rule won over the list.
+    assert "label_source" in sm.LEAN_ROW_FIELDS
+    assert "age_source" in sm.LEAN_ROW_FIELDS
 
 
 def test_the_lean_view_keeps_EVERY_null_vs_zero_discriminator():
@@ -5874,11 +5882,24 @@ def test_the_lean_view_is_LOSSLESS_on_every_field_it_keeps():
     full = ledger_gather(workbench=[led_rec(window_id="@41", ago=600)],
                          use_fuzzyclaw=False)
     lean = lean_of(full)
+    # 🔴 PAIRED BY IDENTITY AND COUNTED, because `zip` alone is length-blind: an
+    # audit's mutant that dropped the LAST row of every host (`[:-1]`) survived
+    # all 456 tests, since zip truncates to the shorter list and nothing
+    # compared counts. This tool's headline question is "is anything waiting on
+    # me"; a projection that silently drops a window hides exactly the row being
+    # looked for.
+    total_full = sum(len(h["windows"]) for h in full["hosts"].values())
+    total_lean = sum(len(h["windows"]) for h in lean["hosts"].values())
+    assert total_lean == total_full == full["summary"]["total_sessions"]
     for host in full["hosts"]:
-        for fr, lr in zip(full["hosts"][host]["windows"],
-                          lean["hosts"][host]["windows"]):
+        fulls = {(r["session"], r["window_index"]): r
+                 for r in full["hosts"][host]["windows"]}
+        leans = {(r["session"], r["window_index"]): r
+                 for r in lean["hosts"][host]["windows"]}
+        assert set(leans) == set(fulls), host
+        for key, lr in leans.items():
             for k in sm.LEAN_ROW_FIELDS:
-                assert lr[k] == fr[k], (host, k)
+                assert lr[k] == fulls[key][k], (host, key, k)
 
 
 def test_a_long_task_survives_the_lean_view_UNTRUNCATED():
@@ -5972,3 +5993,138 @@ def test_lean_without_json_says_so_rather_than_being_ignored(
     assert "--lean" in cap.err and "no effect without" in cap.err
     # ...and it printed the TABLE, not a lean payload
     assert "TMUX WINDOWS" in cap.out
+
+
+def test_the_LEAN_HOST_field_ledger_fails_when_it_grows_or_shrinks():
+    """🔴 The host list carries most of this view's measurement-provenance
+    promise, and it had NO ledger while the row list had one. An audit's
+    mutants dropping `captures_seen`, `captures_measured`, `windows_error` or
+    `error` — and one RE-ADDING `live_window_ids`/`ssh_target`, silently
+    re-inflating the payload — all survived the suite.
+
+    Both directions, and the payload's own `lean_host_fields` must agree with
+    what the entries actually carry.
+    """
+    lean = lean_of(base_gather(use_ledger=False))
+    assert set(sm.LEAN_HOST_FIELDS) == {
+        "reachable", "error", "windows_measured", "windows_error",
+        "captures_measured", "captures_status", "captures_seen",
+    }
+    assert lean["lean_host_fields"] == list(sm.LEAN_HOST_FIELDS)
+    for host, h in lean["hosts"].items():
+        assert set(h) == set(sm.LEAN_HOST_FIELDS) | {"windows"}, host
+    # ...and the two dropped keys stay dropped
+    assert "live_window_ids" not in lean["hosts"]["workbench"]
+    assert "ssh_target" not in lean["hosts"]["workbench"]
+
+
+def test_a_NULL_host_field_survives_the_projection():
+    """🔴 KILLS: `{k: h.get(k) ... if h.get(k) is not None}`, which an audit
+    found survives — and which deletes precisely the values that ARE the
+    discriminators. `captures_seen: null` means the capture batch never
+    answered; `windows_error: null` means `list-windows` succeeded. Dropping a
+    null here does not shrink a payload, it removes a measurement's provenance.
+    """
+    lean = lean_of(base_gather(use_ledger=False, use_capture=False))
+    wb = lean["hosts"]["workbench"]
+    assert "captures_seen" in wb and wb["captures_seen"] is None
+    assert "windows_error" in wb and wb["windows_error"] is None
+
+
+def test_the_retained_TOP_LEVEL_set_is_pinned_in_both_directions():
+    """🔴 Three sections were unpinned and all three are load-bearing:
+    `clickhouse` (a status-discriminated section), `stale_threshold_secs` (what
+    makes `status: stale` mean anything at all), and — on `detail` —
+    `session_history`. Mutants dropping each survived."""
+    lean = lean_of(base_gather(use_ledger=False))
+    assert set(lean) == {
+        "ts", "local_host", "stale_threshold_secs", "hosts", "clickhouse",
+        "fuzzyclaw", "ledger", "filters", "caveats", "summary",
+        "blocked_on_me", "view", "lean_row_fields", "lean_host_fields",
+    }
+
+
+# --------------------------------------------------------------------------- #
+# §10.2 — the CLI SEAM. The pure projection and the flag are each tested; the
+# WIRE between them was tested by nothing.
+# --------------------------------------------------------------------------- #
+def test_the_lean_FLAG_actually_reaches_the_projection(
+        monkeypatch, capsys, absent_blocked_cache):
+    """🔴 THE ISOLATION SEAM, and an audit proved it open: mutating the call
+    site to `if False and args.lean` — or inverting it to `if not args.lean` —
+    left ALL 456 tests green while `scan --json --lean` emitted the full
+    payload. Every lean test called `sm.lean_report` directly; the only test
+    that went through `main` with the flag was the *without*-`--json` case.
+
+    "Verified in isolation" is the new vacuous green: two components each
+    tested, and the defect lives in the seam nobody owns. This drives the REAL
+    CLI and reads the REAL stdout.
+
+    KILLS: disconnecting the flag from the projection, in either direction.
+    """
+    monkeypatch.setattr(sm, "local_host_label", lambda *a, **k: "workbench")
+    monkeypatch.setattr(sm, "_default_runner", make_runner())
+    monkeypatch.setattr(sm, "read_fuzzyclaw_texts", lambda *a, **k: [])
+    rc = sm.main(["scan", "--no-ch", "--no-ledger", "--host", "workbench",
+                  "--json", "--lean"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["view"] == "lean"
+    assert payload["lean_row_fields"] == list(sm.LEAN_ROW_FIELDS)
+    row = payload["hosts"]["workbench"]["windows"][0]
+    assert set(row) == set(sm.LEAN_ROW_FIELDS)
+    # the fields the view exists to drop are really gone off the wire
+    for dropped in ("window_id", "ledger", "pane_id", "panes"):
+        assert dropped not in row, dropped
+    assert "live_window_ids" not in payload["hosts"]["workbench"]
+    # ...and the exit contract is unchanged by the view
+    assert rc == sm.EXIT_OK
+
+
+def test_WITHOUT_the_flag_the_same_command_emits_the_FULL_payload(
+        monkeypatch, capsys, absent_blocked_cache):
+    """The other half of the seam — without this, the test above passes on a
+    binary that emits the lean view unconditionally."""
+    monkeypatch.setattr(sm, "local_host_label", lambda *a, **k: "workbench")
+    monkeypatch.setattr(sm, "_default_runner", make_runner())
+    monkeypatch.setattr(sm, "read_fuzzyclaw_texts", lambda *a, **k: [])
+    sm.main(["scan", "--no-ch", "--no-ledger", "--host", "workbench", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert "view" not in payload and "lean_row_fields" not in payload
+    row = payload["hosts"]["workbench"]["windows"][0]
+    assert "window_id" in row and "ledger" in row
+    assert "live_window_ids" in payload["hosts"]["workbench"]
+
+
+def test_the_exit_code_is_computed_BEFORE_the_projection(
+        monkeypatch, capsys, absent_blocked_cache):
+    """🔴 `exit_code_for` reads `hosts[*].reachable`. Computed AFTER the
+    projection, the exit CONTRACT would silently depend on `reachable` staying
+    in `LEAN_HOST_FIELDS` — a coupling nothing states, whose failure is a scan
+    reporting success over an unreachable fleet.
+
+    Both hosts unreachable must be EXIT_UNAVAILABLE with `--lean` exactly as
+    without it.
+    """
+    monkeypatch.setattr(sm, "local_host_label", lambda *a, **k: "workbench")
+    monkeypatch.setattr(sm, "_default_runner",
+                        make_runner(local_rc=1, local_err="down",
+                                    remote_rc=1, remote_err="down"))
+    monkeypatch.setattr(sm, "read_fuzzyclaw_texts", lambda *a, **k: [])
+    lean_rc = sm.main(["scan", "--no-ch", "--no-ledger", "--json", "--lean"])
+    capsys.readouterr()
+    full_rc = sm.main(["scan", "--no-ch", "--no-ledger", "--json"])
+    capsys.readouterr()
+    assert lean_rc == full_rc == sm.EXIT_UNAVAILABLE
+
+
+def test_tail_says_lean_has_no_effect_rather_than_ignoring_it(
+        monkeypatch, capsys, absent_blocked_cache):
+    """`tail` RETURNS before the shared notice, so it needed its own — the rule
+    this flag's own justification cites, with the precedent (`--claude-only`)
+    sitting one line above it."""
+    monkeypatch.setattr(sm, "local_host_label", lambda *a, **k: "workbench")
+    monkeypatch.setattr(sm, "_default_runner", make_runner())
+    sm.main(["tail", "scratch7:3", "--json", "--lean"])
+    assert "--lean has no effect on `tail`" in capsys.readouterr().err
