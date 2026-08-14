@@ -3247,10 +3247,25 @@ def _terms_from(paths: _abc.Iterable[str], scope: str) -> tuple[str, ...]:
         stem = str(raw)
         for sep in ("/", "\\", ".", ":"):
             stem = stem.replace(sep, " ")
-        for tok in stem.replace("-", " ").replace("_", " ").split():
-            tok = tok.strip().lower()
-            if len(tok) >= 4 and tok not in _TERM_STOPLIST and not tok.isdigit():
-                out.setdefault(tok, None)
+        for part in stem.split():
+            # 🔴 The WHOLE component as well as its split pieces. A skill named
+            # for a compound owns the compound: `scripts/repo-cos/scan.py` split
+            # only into `repo` + `scan`, so `repo-cos` matched on the generic
+            # `scan` (breadth 3) and ranked FOURTH behind three scan-ish skills —
+            # inside a cap of 4 by one place. As its own term it has breadth 1
+            # and ranks first, which is the whole point of specificity ranking.
+            pieces = [p.strip().lower() for p in
+                      part.replace("-", " ").replace("_", " ").split()]
+            keep = [p for p in pieces
+                    if len(p) >= 4 and p not in _TERM_STOPLIST and not p.isdigit()]
+            # The compound rides on its pieces: `repo-cos` survives because
+            # `repo` does, but `test_index` must NOT — both of ITS pieces are
+            # stoplisted, and letting the compound through re-admitted exactly
+            # the noise the stoplist exists to remove. Caught by the knob test.
+            cand = ([part.strip().lower()] if keep and len(pieces) > 1 else []) + keep
+            for tok in cand:
+                if len(tok) >= 4 and tok not in _TERM_STOPLIST and not tok.isdigit():
+                    out.setdefault(tok, None)
     return tuple(out)
 
 
@@ -3262,19 +3277,30 @@ def skill_catalogue(skills_root: str | Path | None = None) -> tuple[tuple[str, s
     into a reason the whole dead-end report fails.
     """
     root = Path(os.path.expanduser(str(skills_root or SKILLS_ROOT_DEFAULT)))
-    if not root.is_dir():
+    # 🔴 The WALK is inside the try, not just the parse. An `if not root.is_dir()`
+    # pre-check is TOCTOU — a concurrent `home-manager switch` can remove the
+    # directory between the check and `iterdir()` — and an unreadable skill dir
+    # raises PermissionError from `iterdir`/`is_dir`/`is_file`, none of which a
+    # parse-only try would catch. `main` renders OUTSIDE its TouchError handler,
+    # so either escape surfaces as a traceback and the dead-end report — the
+    # thing the handoff protocol keys on — never prints at all. This helper is an
+    # EXTRA; it must never be why the report fails.
+    try:
+        entries = sorted(p for p in root.iterdir() if p.is_dir())
+    except OSError:
         return ()
     found: list[tuple[str, str]] = []
-    for entry in sorted(p for p in root.iterdir() if p.is_dir()):
-        md = entry / "SKILL.md"
-        if not md.is_file():
-            continue
+    for entry in entries:
         try:
+            md = entry / "SKILL.md"
+            if not md.is_file():
+                continue
             fm = parse_front_matter(md.read_text(encoding="utf-8", errors="replace"))
-        except Exception:
-            # A malformed skill must not take the report down with it — the same
-            # degrade-don't-die rule the reader learned from a wrapped `aliases:`.
-            fm = {}
+        except (OSError, Exception):
+            # A malformed or unreadable skill must not take the report down with
+            # it — the same degrade-don't-die rule the reader learned from a
+            # wrapped `aliases:`.
+            continue
         desc = fm.get("description")
         found.append((entry.name, desc if isinstance(desc, str) else ""))
     return tuple(found)
@@ -3287,9 +3313,11 @@ def skill_homes(
 
     🔴 Ranked by term specificity, and it has to be. Unranked, the real lead
     drowns: measured on this host, a path carrying `pyroscope` also yields the
-    terms `query` and `homelab`, which match 2 skills each — so `obs-read`, the
-    one right answer, came out FOURTH and a cap of 4 was one generic term away
-    from hiding it entirely. A term matching one skill is a lead; a term matching
+    terms `query` and `homelab`, which match FOUR and THREE other skills
+    respectively (re-measured 2026-08-14 on the live 34-skill catalogue; an
+    earlier draft of this comment said "2 each" and was wrong) — so `obs-read`,
+    the one right answer, came out FOURTH and a cap of 4 was one generic term
+    away from hiding it entirely. A term matching one skill is a lead; a term matching
     six is a coincidence.
 
     On a BREADTH TIE the LONGER term wins, then the skill name. Measured on the
@@ -3304,7 +3332,7 @@ def skill_homes(
     breadth = {
         term: sum(1 for hay in hay_by_skill.values() if term in hay) for term in terms
     }
-    hits: list[tuple[int, str, str]] = []
+    hits: list[tuple[int, int, str, str]] = []
     for name, hay in hay_by_skill.items():
         matched = [t for t in terms if t in hay]
         if not matched:
@@ -3319,8 +3347,34 @@ def render_skill_homes(
     paths: _abc.Iterable[str], scope: str, skills_root: str | Path | None = None,
     limit: int = 4,
 ) -> list[str]:
-    """The second route out: where a lesson goes when the INDEX is the wrong home."""
-    hits = skill_homes(_terms_from(paths, scope), skills_root)
+    """The second route out: where a lesson goes when the INDEX is the wrong home.
+
+    🔴 THE SCOPE IS RANKED LAST, AND WITH NO PATHS IT PRINTS NO ROWS AT ALL.
+    The scope is a per-repo CONSTANT, so folding it in with the path terms makes
+    the same one or two skills occupy the cap on every dead end in that repo —
+    measured on `devrc`, `devrc-dx` and `i3` took two of four slots every time,
+    hiding `repo-cos` entirely for `scripts/repo-cos/scan.py` and demoting `bar`
+    to third for `scripts/bar-status-poll`. Boilerplate is the failure mode this
+    block exists to avoid: a section that prints the same thing regardless of
+    input gets skipped, and then it is decoration rather than a route. So
+    path-derived hits come first, scope-derived hits fill only what is left, and
+    a `looked-at-nothing` run (0 paths, hence no signal whatsoever) prints the
+    search command instead of a constant that would look like an answer.
+    """
+    # Materialised once: `paths` may be a generator, and the empty-vs-no-terms
+    # distinction below has to ask about the PATHS, not about the terms.
+    paths = tuple(paths)
+    path_terms = _terms_from(paths, "")
+    scope_terms = tuple(t for t in _terms_from((), scope) if t not in path_terms)
+    hits = list(skill_homes(path_terms, skills_root))
+    if paths:
+        # Scope hits FILL what the path terms left, and only then. With no paths
+        # at all the scope is the only term available and every dead end in the
+        # repo would print the same rows — a constant that reads as an answer.
+        # (A test caught this: the first draft guarded only the MESSAGE branch
+        # and still emitted scope rows, which made the docstring above false.)
+        seen = {name for name, _ in hits}
+        hits += [h for h in skill_homes(scope_terms, skills_root) if h[0] not in seen]
     lines = [
         "",
         "SKILL HOMES — if the lesson is a durable ops-gotcha rather than a "
@@ -3331,7 +3385,16 @@ def render_skill_homes(
             lines.append(f"    claude/skills/{name}/SKILL.md   (matched {term!r})")
         if len(hits) > limit:
             lines.append(f"    … and {len(hits) - limit} more; these are LEADS, not answers.")
+    elif not paths:
+        lines.append(
+            "    (no paths were examined, so there is NOTHING to derive a term from — "
+            "this is an absence of signal, not an absence of a home)"
+        )
     else:
+        # 🔴 Paths WERE examined and yielded nothing usable — a different fact
+        # from "no paths", and keying this branch on the TERMS being empty
+        # conflated the two: `a/b.py` has paths but every token is under the
+        # length floor, and it printed "no paths were examined", which is false.
         lines.append("    (no skill matched a term derivable from the paths)")
     lines.append(
         "  🔴 Derived from path stems + the scope — NOT from what the session was "
@@ -3377,7 +3440,17 @@ def render_route_out(window: str) -> list[str]:
 
 
 def render_text(report: TouchReport) -> str:
-    """The agent-facing brief. Deterministic: same report in, same bytes out."""
+    """The agent-facing brief.
+
+    Deterministic in the REPORT: same report in, same bytes out — with one
+    documented exception. On a dead end the `SKILL HOMES` block reads the host's
+    `~/.claude/skills`, so its rows vary with what is deployed there. That makes
+    the two tiers differ by construction: `flake.nix` exports `HOME=$TMPDIR/home`
+    for the sandbox and nothing creates `.claude/skills` in it, so CI always
+    renders the empty branch and a dev host always renders rows. Never assert on
+    those rows from a test that does not inject `skills_root` — the sandbox
+    tier is structurally blind to them.
+    """
     src = report.source
     out: list[str] = []
     out.append(f"subsystem-touch: status={report.status} scope={report.scope}")

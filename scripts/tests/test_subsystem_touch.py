@@ -1370,6 +1370,10 @@ class TestSkillDocsArePinned:
         ("re-read the file and re-apply to current bytes", "no concurrent append is clobbered"),
         ("Never silent-mutate.", "the invariant carried over from analyze-service"),
         ("pointers, not copies", "the bloat rule"),
+        (
+            "belongs in a skill\" is a ROUTE, not a disposal",
+            "the decline path files the lesson instead of terminating",
+        ),
         ("never persist live status", "the anti-bloat rule that matters most"),
         (
             "persist the *derivation method and what a stale reading looks like*",
@@ -7838,6 +7842,33 @@ class TestRouteOutOfADeadEnd:
         text = st.render_text(_report([], store))
         assert "ROUTE OUT" in text and "--pr" in text
 
+    def test_the_skill_homes_block_REACHES_the_rendered_output(self, store: Path) -> None:
+        """🔴 THE SEAM, and it was open. An audit deleted BOTH
+        `render_skill_homes` call sites in `render_text` and the suite stayed
+        green — 578 passed — because every test called the helper directly with
+        an injected root. The feature could ship INERT. Its sibling eight lines
+        up already had this exact assertion, with a docstring explaining why; the
+        lesson was written down and not applied.
+        """
+        text = st.render_text(_report(["docs/a.md", "notes/b.md"], store))
+        assert "SKILL HOMES" in text
+        assert "grep -ril" in text, "the fallback search must survive the seam too"
+
+    def test_looked_at_nothing_reaches_it_too(self, store: Path) -> None:
+        """The other exit — it returns EARLY from the renderer, so one assertion
+        cannot cover both. This is the exit the original incident hit first."""
+        text = st.render_text(_report([], store))
+        assert "SKILL HOMES" in text
+
+    def test_a_RESOLVED_run_stays_silent_about_skill_homes(self, store: Path) -> None:
+        """🔴 The negative control — without it, an unconditional print would
+        satisfy both assertions above. Uses the same resolving paths as the
+        sibling ROUTE OUT control rather than skipping: a test that skips itself
+        reports safety while checking nothing."""
+        rep = _report(["src/collector/a.py", "src/collector/b.py"], store)
+        assert rep.status == "resolved", rep.status
+        assert "SKILL HOMES" not in st.render_text(rep)
+
     def test_a_RESOLVED_run_stays_silent(self, store: Path) -> None:
         """🔴 The negative control, and the reason this is worth having: a block
         printed on every run is boilerplate, and boilerplate is skipped. It
@@ -7986,6 +8017,57 @@ class TestSkillHomes:
         assert hits == (("obs-read", "pyroscope"),), (
             f"a body-only mention was treated as ownership: {hits!r}"
         )
+
+    def test_the_noise_knobs_actually_filter(self, tmp_path: Path) -> None:
+        """🔴 The two constants that decide this block's whole signal/noise ratio
+        had no coverage: emptying `_TERM_STOPLIST` and dropping the length floor
+        both left the suite green. Noise is the failure mode here — a block that
+        prints the same generic leads every time gets skipped, which is exactly
+        what it exists to prevent.
+        """
+        # A path made only of stoplisted words and short tokens yields no terms.
+        assert st._terms_from(["scripts/tests/test_index.py"], "") == ()
+        # ...while a real domain word in the same shape survives.
+        assert "mailbox" in st._terms_from(["scripts/mailbox/tests/test_index.py"], "")
+        # The length floor: 3-char tokens are dropped, 4-char kept.
+        terms = st._terms_from(["a/i3x/bars/x.py"], "")
+        assert "i3x" not in terms and "bars" in terms
+
+    def test_a_COMPOUND_component_is_its_own_term(self, tmp_path: Path) -> None:
+        """🔴 A skill named for a compound owns the compound. Splitting hyphens
+        away made `scripts/repo-cos/scan.py` yield only `repo` + `scan`, so
+        `repo-cos` matched on the generic `scan` (breadth 3) and ranked FOURTH,
+        inside a cap of 4 by one place. As its own term it has breadth 1.
+        """
+        terms = st._terms_from(["scripts/repo-cos/scan.py"], "")
+        assert "repo-cos" in terms, terms
+        assert "repo" in terms and "scan" in terms, "the split pieces must survive too"
+
+    def test_the_scope_cannot_crowd_out_a_path_derived_lead(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 The scope is a per-repo CONSTANT. Folded in with path terms it took
+        slots on every dead end in that repo — measured on `devrc`, two of four,
+        hiding `repo-cos` entirely for `scripts/repo-cos/scan.py`. Path-derived
+        hits must come first.
+        """
+        root = self._root(tmp_path)
+        rows = [
+            ln for ln in st.render_skill_homes(
+                ["src/pyroscope/x.go"], "homelab", skills_root=root, limit=1
+            ) if "(matched" in ln  # the fallback grep line also carries "SKILL.md"
+        ]
+        assert len(rows) == 1 and "obs-read" in rows[0], rows
+
+    def test_no_paths_prints_no_rows_because_there_is_no_signal(
+        self, tmp_path: Path
+    ) -> None:
+        """A `looked-at-nothing` run has nothing to derive from. Printing the
+        scope's constant leads there would look like an answer."""
+        body = "\n".join(st.render_skill_homes([], "homelab", skills_root=self._root(tmp_path)))
+        assert "(matched" not in body, "no lead rows may print without a path term"
+        assert "no paths were examined" in body
+        assert "grep -ril" in body
 
     def test_an_absent_skills_root_is_ordinary_not_an_error(self, tmp_path: Path) -> None:
         """A host without skills deployed must still get its dead-end report; an
