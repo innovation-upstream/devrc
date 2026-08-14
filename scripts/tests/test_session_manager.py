@@ -1752,6 +1752,12 @@ def test_json_golden_schema_and_values():
         "waiting_signals": None,
         "waiting_status": "uncaptured",
         "claude_session_id": "11111111-2222-4333-8444-555555555555",
+        # 🔴 `runtime` names WHICH agent recorded the window. Null here because
+        # this fixture runs `use_ledger=False`, so no writer answered — and
+        # `claude: true` above is the pane's COMMAND matching /claude/, which is
+        # a different fact. An opencode window is `claude: false` with
+        # `runtime: "opencode"`, which is why the row needs both.
+        "runtime": None,
         "ledger": None,
         "fuzzyclaw": {
             "task": "task-alpha-text",
@@ -5269,7 +5275,7 @@ def test_the_row_FIELD_LEDGER_fails_when_it_grows_or_shrinks():
         "command",
         "task", "claude", "busy", "age_secs", "age_source", "status",
         "waiting_probable", "waiting_signals", "waiting_status",
-        "claude_session_id", "ledger", "fuzzyclaw",
+        "claude_session_id", "runtime", "ledger", "fuzzyclaw",
         "panes",
     }
     assert set(row) == expected
@@ -5828,7 +5834,8 @@ def test_the_LEAN_row_field_ledger_fails_when_it_grows_or_shrinks():
     assert set(row) == set(sm.LEAN_ROW_FIELDS)
     assert set(sm.LEAN_ROW_FIELDS) == {
         "host", "session", "window_index", "label", "label_source", "hotkey",
-        "path", "task", "claude", "busy", "status", "age_secs", "age_source",
+        "path", "task", "runtime", "claude", "busy", "status", "age_secs",
+        "age_source",
         "waiting_probable", "waiting_signals", "waiting_status",
         "claude_session_id",
     }
@@ -6207,3 +6214,56 @@ def test_a_PLAIN_tail_also_says_lean_has_no_effect(
     monkeypatch.setattr(sm, "_default_runner", make_runner())
     sm.main(["tail", "scratch7:3", "--lean"])
     assert "--lean has no effect on `tail`" in capsys.readouterr().err
+
+
+def test_the_row_RUNTIME_carries_the_VALUE_not_just_the_key(monkeypatch):
+    """🔴 THE PR'S HEADLINE FIELD, and an audit found it pinned by NAME in three
+    places and by VALUE in none. Two mutants survived the whole 9,849-test gate:
+    `"runtime": None` (the feature ships completely inert) and
+    `.get("session_id")` (a WRONG value on every row). The three tests naming
+    `runtime` were the two field ledgers — which assert key names — and a golden
+    that asserts `None` on a `use_ledger=False` fixture, which every mutant also
+    produces. "A type declaration is not a code path."
+
+    So: a row joined to a record must carry that record's RUNTIME, and it must
+    be distinguishable from the session id — the fixture's two values are
+    deliberately different strings.
+    """
+    rep = ledger_gather(
+        workbench=[led_rec(window_id="@41", session_id="ses_9911",
+                           runtime="opencode")],
+        use_fuzzyclaw=False)
+    row = next(r for r in rows_of(rep) if r["window_id"] == "@41")
+    assert row["runtime"] == "opencode"
+    assert row["claude_session_id"] == "ses_9911"
+    assert row["runtime"] != row["claude_session_id"]
+    # ...and it survives the lean projection, which is the view agents read
+    lean = lean_of(rep)
+    lrow = next(r for r in rows_of(lean) if r["session"] == row["session"])
+    assert lrow["runtime"] == "opencode"
+
+
+def test_a_row_no_writer_recorded_has_a_NULL_runtime_not_a_guess():
+    """The other direction: `runtime` is null when nothing recorded the window,
+    never inferred from the pane command. `claude` (the command matching
+    /claude/) and `runtime` (which writer answered) are different facts."""
+    rep = ledger_gather(workbench=[], use_fuzzyclaw=False)
+    for row in rows_of(rep):
+        assert row["runtime"] is None
+
+
+def test_a_CROSS_RUNTIME_conflict_names_the_runtimes_in_the_TABLE():
+    """🔴 `runtimes` was computed and never rendered — the line printed two
+    UUIDs, which is the exact thing the change adding the field said it fixed.
+    The commonest real conflict is cross-runtime, and `claude, opencode` is what
+    makes the ⚠ actionable rather than alarming."""
+    text = sm.render_table(ledger_gather(
+        workbench=[led_rec(pane_id="%11", session_id="7f3a-claude",
+                           runtime="claude", ago=900),
+                   led_rec(pane_id="%12", session_id="ses_9911",
+                           runtime="opencode", ago=60)],
+        use_fuzzyclaw=False))
+    assert "⚠ LEDGER CONFLICT" in text
+    assert "claude, opencode" in text
+    # the session ids stay too — they are how you find the actual sessions
+    assert "7f3a-claude" in text and "ses_9911" in text

@@ -72,35 +72,6 @@ WRITE_EVENTS = {"SessionStart", "UserPromptSubmit", "PostToolUse", "Stop"}
 PRUNE_EVENTS = {"SessionStart", "Stop"}
 
 
-def tmux_context(runner=None, pane=None):
-    """`(window_id, tmux_pid)` for this pane, or `(None, None)`.
-
-    ONE tmux call for both fields: they come from the same server and asking twice
-    invites a skew between them for no benefit. Outside tmux — a Claude run in a
-    bare terminal, or a subagent — there is no pane and both are None, which the
-    record carries as "does not apply".
-    """
-    pane = os.environ.get("TMUX_PANE") if pane is None else pane
-    if not pane:
-        return None, None
-    argv = ["tmux", "display-message", "-t", pane, "-p", "#{window_id}|#{pid}"]
-    try:
-        run = runner or (lambda a: subprocess.run(
-            a, capture_output=True, text=True, timeout=2.0))
-        proc = run(argv)
-        if proc.returncode != 0:
-            return None, None
-        parts = (proc.stdout or "").strip().split("|")
-    except Exception:  # noqa: BLE001 — no tmux, dead server, timeout: all "no pane"
-        return None, None
-    if len(parts) < 2:
-        return None, None
-    wid, pid = parts[0].strip(), parts[1].strip()
-    if not wid.startswith("@") or not pid.isdigit():
-        return None, None
-    return wid, pid
-
-
 def record_from_payload(AL, payload, window_id=None, pane_id=None,
                         tmux_pid=None, now=None):
     """Payload -> record, or None when this event does not write one.
@@ -196,7 +167,7 @@ def main() -> int:
                                 AL.pane_filename("claude", pane))
             if AL.is_throttled(path, payload.get("session_id"), throttle):
                 return 0
-        wid, pid = tmux_context(pane=pane if pane else "")
+        wid, pid = AL.tmux_context(pane=pane if pane else "")
         rec = record_from_payload(AL, payload, window_id=wid, pane_id=pane,
                                   tmux_pid=pid)
         if rec is None:

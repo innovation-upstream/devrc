@@ -338,6 +338,14 @@ HERMETIC_TARGETS=(
   # stderr, on every malformed input) is felt on every turn and is gated here
   # rather than left to the ungated hand-rolled scripts beside it.
   scripts/claude-hooks/tests/test_agent_ledger_hook.py
+  # Writer 2 of the agent activity ledger — the OPENCODE half. A Python suite
+  # driving real `node`, mirroring scripts/collector/opencode/tests/test_plugin.py
+  # (this repo's established way to test an opencode plugin; there is no node
+  # suite for scripts/opencode/plugin/ and this does not add one). It gates the
+  # SEAM that matters: the record shape is Python and the writer is JavaScript,
+  # so "the plugin ran" and "the record is one session-manager can read" are
+  # different claims.
+  scripts/opencode/tests
 )
 
 # --- DEV-HOST-ONLY set ---------------------------------------------------------
@@ -901,6 +909,9 @@ TARGET_FLOORS=(
   # failed-tmux-lookup regression. Gate's own count through the gate's own rule:
   #   _suggested_floor 39 = 39 - min(50, max(1, 39/20 = 1)) = 39 - 1 = 38.
   "scripts/claude-hooks/tests/test_agent_ledger_hook.py|38"
+  # 2026-08-14, writer 2 (opencode) arrives as a NEW target: 15 collected.
+  #   _suggested_floor 15 = 15 - min(50, max(1, 15/20 = 0 -> 1)) = 14.
+  "scripts/opencode/tests|14"
 )
 
 # The allowance rule, in one place, used by BOTH the drift message and anyone

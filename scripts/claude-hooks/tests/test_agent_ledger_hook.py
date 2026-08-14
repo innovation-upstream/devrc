@@ -183,6 +183,15 @@ class FakeProc:
         self.returncode, self.stdout = rc, out
 
 
+def test_the_hook_keeps_NO_COPY_of_the_tmux_resolver():
+    """🔴 It moved into `agent_ledger.py` when the opencode `--write` CLI became
+    its second caller. A window/pid resolver copied into each writer is the
+    duplicated predicate that ends up wrong at one of its sites — so the hook
+    must have none of its own, and this fails if one grows back."""
+    assert not hasattr(hook, "tmux_context")
+    assert callable(AL.tmux_context)
+
+
 def test_tmux_context_parses_the_window_and_the_SERVER_pid():
     """ONE tmux call for both fields — asking twice invites a skew between them
     for no benefit. KILLS: reading the pane pid instead of the server pid, and
@@ -194,7 +203,7 @@ def test_tmux_context_parses_the_window_and_the_SERVER_pid():
         seen.append(argv)
         return FakeProc(0, "@41|4025325\n")
 
-    assert hook.tmux_context(runner=runner, pane="%11") == ("@41", "4025325")
+    assert AL.tmux_context(runner=runner, pane="%11") == ("@41", "4025325")
     assert seen[0][:3] == ["tmux", "display-message", "-t"]
     assert "#{window_id}|#{pid}" in seen[0]
 
@@ -210,7 +219,7 @@ def test_tmux_context_returns_a_PAIR_OF_NULLS_rather_than_half_an_answer(rc, out
     """🔴 KILLS: returning a window id with no generation. A record carrying a
     window and no pid is KEPT by the reader as `generation_unchecked` — so half
     an answer here is silently promoted to a trusted join downstream."""
-    assert hook.tmux_context(runner=lambda a: FakeProc(rc, out),
+    assert AL.tmux_context(runner=lambda a: FakeProc(rc, out),
                              pane="%11") == (None, None)
 
 
@@ -218,7 +227,7 @@ def test_no_TMUX_PANE_means_no_tmux_call_at_all():
     """A Claude run in a bare terminal has no pane. KILLS: shelling out to tmux
     anyway, which costs a subprocess on every tool call of every non-tmux run."""
     called = []
-    assert hook.tmux_context(runner=lambda a: called.append(a),
+    assert AL.tmux_context(runner=lambda a: called.append(a),
                             pane="") == (None, None)
     assert called == []
 

@@ -16,10 +16,14 @@ import importlib.util
 import json
 import os
 import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.abspath(os.path.join(_HERE, os.pardir)))
+from testlib import mockbin  # noqa: E402
 _MODULE = os.path.join(_HERE, os.pardir, "lib", "agent_ledger.py")
 
 
@@ -479,7 +483,8 @@ def test_two_records_claiming_one_window_resolve_to_the_NEWEST_and_are_reported(
     out = AL.index_by_window([older, newer])
     assert out["index"]["@41"]["session_id"] == "new"
     assert out["conflicts"] == [{"window_id": "@41", "claimants": 2,
-                                 "session_ids": ["new", "old"]}]
+                                 "session_ids": ["new", "old"],
+                                 "runtimes": ["claude"]}]
     # order-independent: the newest wins whichever way round they arrive
     assert AL.index_by_window([newer, older])["index"]["@41"]["session_id"] \
         == "new"
@@ -641,3 +646,187 @@ def test_the_tie_break_resolves_on_the_record_read_FIRST():
     assert AL.index_by_window([b, a])["index"]["@41"]["session_id"] == "second"
     # ...and it is still reported as contested either way round
     assert AL.index_by_window([a, b])["conflicts"][0]["claimants"] == 2
+
+
+# =========================================================================== #
+# the --write CLI, and writer 2 (opencode)
+# =========================================================================== #
+def _stub_tmux(bindir, answer="@41|4025325"):
+    """A stub `tmux` on PATH so the CLI can resolve a window hermetically.
+
+    🔴 Without one the CLI takes the DEGRADED path — `$TMUX_PANE` set, tmux
+    unable to answer — and correctly writes a session-keyed file instead of a
+    pane-keyed one. That is the regression guard from `filename_for` doing its
+    job, and it is why a fixture that fakes only the pane tests the wrong path.
+    Via `testlib.mockbin`, which owns the shebang (`#!/usr/bin/env bash` is dead
+    in the nix sandbox).
+    """
+    return str(mockbin.write_exec(Path(str(bindir)) / "tmux",
+                                  "printf '%s\\n'\n" % answer))
+
+
+def _cli(*args, env=None, directory=None):
+    """Drive the REAL CLI as `ledger.js` does — argv, no shell."""
+    e = dict(os.environ)
+    e.pop("TMUX_PANE", None)
+    e.update(env or {})
+    argv = [sys.executable, _MODULE, "--write", *args]
+    if directory:
+        argv += ["--directory", str(directory)]
+    return subprocess.run(argv, capture_output=True, text=True, timeout=30,
+                          env=e)
+
+
+def test_the_CLI_writes_a_record_a_runtime_that_cannot_IMPORT_us_can_reach(
+        tmp_path):
+    """🔴 THE WHOLE POINT OF THE CLI. `scripts/opencode/plugin/ledger.js` is
+    JavaScript and cannot import this module, so it spawns it. If it
+    re-implemented the record instead, writer 2 would drift from writer 1 and
+    from the reader while all three looked correct — the failure this module's
+    docstring names. The JS carries arguments; this carries the structure.
+    """
+    proc = _cli("--runtime", "opencode", "--session", "oc-1",
+                directory=tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    written = json.loads(open(os.path.join(str(tmp_path),
+                                           "opencode-s-oc-1.json")).read())
+    assert written["runtime"] == "opencode"
+    assert written["session_id"] == "oc-1"
+    assert written["schema"] == AL.SCHEMA
+    # ...and it is a record the READER accepts, not merely valid JSON
+    assert AL.valid_record(written)
+
+
+def test_the_CLI_record_is_readable_through_the_SHIPPING_read_path(tmp_path):
+    """End-to-end: what the opencode plugin writes is what session-manager
+    reads. A writer test that stops at the file proves the file."""
+    _cli("--runtime", "opencode", "--session", "oc-2", directory=tmp_path)
+    proc = subprocess.run(list(AL.read_argv(abs_dir=str(tmp_path))),
+                          capture_output=True, text=True, timeout=10)
+    parsed = AL.parse_ledger(proc.stdout)
+    assert parsed["measured"] is True and len(parsed["records"]) == 1
+    assert parsed["records"][0]["runtime"] == "opencode"
+
+
+def test_the_CLI_refuses_a_record_with_no_session_rather_than_writing_a_hollow_one(
+        tmp_path):
+    """Same rule as `build_record`: no session id means nothing can resolve the
+    ClickHouse join, and a hollow record is worse than none. Exit code is
+    HONEST even though the only caller ignores it — a CLI that always exits 0
+    is untestable."""
+    proc = _cli("--runtime", "opencode", "--session", "", directory=tmp_path)
+    assert proc.returncode == 1
+    assert os.listdir(tmp_path) == []
+
+
+def test_the_CLI_throttles_on_a_repeat_from_the_SAME_session(tmp_path):
+    """The hot path: `tool.execute.after` fires on every opencode tool call."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    _stub_tmux(bindir)
+    env = {"TMUX_PANE": "%77",
+           "PATH": "%s:%s" % (bindir, os.environ["PATH"])}
+    first = _cli("--runtime", "opencode", "--session", "oc-3", env=env,
+                 directory=tmp_path)
+    assert first.returncode == 0
+    path = os.path.join(str(tmp_path), "opencode-p77.json")
+    before = os.stat(path)
+
+    second = _cli("--runtime", "opencode", "--session", "oc-3", env=env,
+                  directory=tmp_path)
+    assert second.returncode == 0
+    after = os.stat(path)
+
+    # 🔴 INODE AND mtime, NOT CONTENT — and an audit is why. This compared the
+    # file's BYTES, and `now_iso()` has one-second resolution, so two
+    # back-to-back spawns write byte-identical records whether or not the
+    # throttle fires. Proof it was vacuous: setting DEFAULT_THROTTLE to 0 —
+    # throttling fully disabled — left the old assertion passing. `write_record`
+    # replaces via `os.replace`, so a write that DID happen shows a new inode
+    # even when the bytes match.
+    assert (after.st_ino, after.st_mtime_ns) == (before.st_ino,
+                                                 before.st_mtime_ns), (
+        "the record was rewritten — the throttle did not fire")
+
+
+def test_TWO_RUNTIMES_in_one_pane_do_not_overwrite_each_other(tmp_path):
+    """🔴 THE GUARD THAT WAS BUILT BEFORE ITS WRITER EXISTED. `pane_filename` is
+    namespaced by runtime, so a pane that ran Claude and later opencode holds
+    ONE record each rather than the second silently replacing the first. This
+    became reachable the moment writer 2 landed; it was pinned in advance.
+    """
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    _stub_tmux(bindir)
+    env = {"TMUX_PANE": "%77",
+           "PATH": "%s:%s" % (bindir, os.environ["PATH"])}
+    _cli("--runtime", "opencode", "--session", "oc-4", env=env,
+         directory=tmp_path)
+    AL.write_record(rec(runtime="claude", pane_id="%77", session_id="cl-4"),
+                    directory=str(tmp_path))
+    assert sorted(n for n in os.listdir(tmp_path) if n.endswith(".json")) == [
+        "claude-p77.json", "opencode-p77.json"]
+
+
+def test_a_cross_runtime_conflict_NAMES_THE_RUNTIMES():
+    """🔴 The commonest real conflict is cross-runtime, and two opaque session
+    ids do not say so. `claude, opencode` is the difference between "which agent
+    owns this window" and two UUIDs a reader cannot act on."""
+    a = rec(runtime="claude", pane_id="%77", session_id="cl-5",
+            last_activity_ts=AL.now_iso(NOW - 600))
+    b = rec(runtime="opencode", pane_id="%78", session_id="oc-5",
+            last_activity_ts=AL.now_iso(NOW))
+    out = AL.index_by_window([a, b])
+    assert out["index"]["@41"]["runtime"] == "opencode"   # newest wins
+    conflict = out["conflicts"][0]
+    assert conflict["runtimes"] == ["claude", "opencode"]
+    assert conflict["claimants"] == 2
+
+
+def test_tmux_context_lives_HERE_so_both_writers_share_one_resolver():
+    """🔴 It moved out of the Claude hook when the CLI became its second caller.
+    A window/pid resolver copied into each writer is the duplicated predicate
+    that ends up wrong at one of its sites."""
+    assert callable(AL.tmux_context)
+    # no pane => no tmux call at all, and a PAIR of nulls rather than half an
+    # answer (a window with no generation is silently trusted downstream)
+    called = []
+    assert AL.tmux_context(runner=lambda a: called.append(a),
+                           pane="") == (None, None)
+    assert called == []
+
+
+
+def test_the_CLI_exit_code_distinguishes_a_FAILED_write(tmp_path):
+    """🔴 The `return 0` mutant survived: the only test reaching a non-zero exit
+    went through the EXCEPTION path, so the write-failure branch was unpinned.
+    A directory that cannot be created is the reachable case."""
+    blocker = tmp_path / "blocked"
+    blocker.write_text("a FILE where the ledger directory should be\n")
+    proc = _cli("--runtime", "opencode", "--session", "oc-x",
+                directory=blocker)
+    # 🔴 Exit 1 with EMPTY stderr, which is the discriminant: `write_record`
+    # catches the OSError itself and returns `reason: "error"`, so this is the
+    # write-failure branch and NOT the exception branch the other test covers.
+    # That distinction is the whole point — `return 0` survived precisely
+    # because only the exception path was ever reached.
+    assert proc.returncode == 1
+    assert proc.stderr == ""
+    assert blocker.read_text().startswith("a FILE")
+
+
+def test_the_CLI_sets_the_host_like_writer_1_does(tmp_path):
+    """Writer 2's records carried `host: null` while writer 1's did not — an
+    asymmetry with no consumer, but no reason either. Both directions: set and
+    unset."""
+    proc = _cli("--runtime", "opencode", "--session", "oc-h",
+                env={"ACTIVITY_HOST": "laptop"}, directory=tmp_path)
+    assert proc.returncode == 0
+    rec = json.loads(open(os.path.join(str(tmp_path),
+                                       "opencode-s-oc-h.json")).read())
+    assert rec["host"] == "laptop"
+
+    _cli("--runtime", "opencode", "--session", "oc-h2", directory=tmp_path)
+    rec2 = json.loads(open(os.path.join(str(tmp_path),
+                                        "opencode-s-oc-h2.json")).read())
+    assert rec2["host"] is None

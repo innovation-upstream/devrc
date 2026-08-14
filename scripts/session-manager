@@ -169,7 +169,7 @@ and the roll-ups a caller usually wants are:
 Each row carries: host, session, window_index, window_id, window_name,
 codename, label, label_source, hotkey, pane_id, path, command, task, claude,
 busy, age_secs, age_source, status, waiting_probable, waiting_signals,
-waiting_status, claude_session_id, ledger, fuzzyclaw, panes. The row ledger is
+waiting_status, claude_session_id, runtime, ledger, fuzzyclaw, panes. The row ledger is
 pinned by a test.
 
 🔴 `label` IS NOT AN ADDRESS — `session:window` still is.
@@ -1451,6 +1451,14 @@ def fold_windows(panes, host, slots=None, task_index=None,
             # window's history to a session that ended days ago.
             "claude_session_id": ((led or {}).get("session_id")
                                   or (task or {}).get("claude_session")),
+            # 🔴 WHICH AGENT wrote the record, and it is not cosmetic. `claude`
+            # on a row is `pane_current_command =~ /claude/`, so an OPENCODE
+            # window is classified `shell` — an agent counted as a bare prompt
+            # in every bucket. That was invisible while opencode wrote no
+            # records; writer 2 makes it a row with an age, a session id and
+            # `claude: false`, which is worse than invisible unless the row can
+            # say what it is. `null` means no writer has recorded this window.
+            "runtime": (led or {}).get("runtime"),
             "ledger": led,
             "fuzzyclaw": task,
             "panes": len(members),
@@ -2553,9 +2561,17 @@ def render_ledger(led) -> list:
             ("  [%d unverified generation]" % h["generation_unchecked"]
              if h.get("generation_unchecked") else "")))
     for c in (led.get("conflicts") or []):
+        # 🔴 THE RUNTIMES, not just the session ids. An audit found this line
+        # printing `[7f3a-uuid-claude, ses_9911]` — "two UUIDs a reader cannot
+        # act on", which is the exact phrase the change adding `runtimes` used
+        # to justify itself while the renderer still ignored the field. The
+        # commonest real conflict is cross-runtime (a pane that ran Claude and
+        # later opencode holds one record each, both live, both naming that
+        # window), and naming them is what turns an alarming ⚠ into a fact.
         out.append("  ⚠ LEDGER CONFLICT {} {} claimed by {} record(s) "
-                   "[{}] — NEWEST wins".format(
+                   "[{}] — sessions [{}] — NEWEST wins".format(
                        c.get("host"), c.get("window_id"), c.get("claimants"),
+                       ", ".join(c.get("runtimes") or ["unknown runtime"]),
                        ", ".join(c.get("session_ids") or [])))
     return out
 
@@ -2604,8 +2620,8 @@ LEAN_ROW_FIELDS = (
     # label" — dropping it made exactly that pair unreadable. An audit caught
     # the inconsistency between the rule and the field list; the rule won.
     "host", "session", "window_index", "label", "label_source", "hotkey",
-    # what it is working on
-    "path", "task",
+    # what it is working on, and WHICH agent is doing it
+    "path", "task", "runtime",
     # what state it is in
     "claude", "busy", "status", "age_secs", "age_source",
     # whether it needs the operator — `waiting_status` is NOT optional, it is
