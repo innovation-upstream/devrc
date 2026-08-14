@@ -50,7 +50,7 @@ Memories: `clawgate-phase2` · `clawgate-phase3` · `clawgate-runbooks` ·
 | LAN URL (hook + UI) | `http://192.168.50.250:30302` (NodePort) — **OPEN, no auth**; machine endpoints still need the token |
 | Public / nebula URL | `https://clawgate.zacx.dev` behind **Authelia passkey** (portal `login.zacx.dev`); laptop `http://10.42.0.10:8109` (homelab gateway) |
 | Hook events | `PermissionRequest` (`CLAWGATE_REMOTE_APPROVAL=off`) + `Stop` (async, `CLAWGATE_SUGGEST=off`), both in `~/.claude/settings.json`, ON by default. 🔴 The `Stop` array also carries **two** unrelated hooks (`tmux/task-hook.sh`, `claude-notify.py`) — **preserve both** |
-| 🔴 Machine client | **`clawgatectl`** (devrc `nix/pkgs/tools/clawgatectl.nix`; on PATH after a switch, but **absent on a host whose homelab-talos checkout predates it — the laptop today**). **Exactly six commands**: `health` · `agent ls` · `agent resolve <name> [--id]` · `task ls/get/create`. Reads `clawgate.env` itself (no token in argv); JSON on stdout only; rc 0–8. **Every other route is still curl.** `task-api.md` |
+| 🔴 Machine client | **`clawgatectl`** (devrc `nix/pkgs/tools/clawgatectl.nix`; on PATH after a switch, but **absent on a host whose homelab-talos checkout predates it — the laptop today**). **Exactly eight commands**: `health` · `agent ls` · `agent resolve <name> [--id]` · `task ls/get/create` · **`task status <id> <status>`** · **`task comment <id> --body …`** (both added 2026-08-14; they hit routes that already existed, so they need NO server release). Reads `clawgate.env` itself (no token in argv); JSON on stdout only; rc 0–8. **Every other route is still curl.** `task-api.md` |
 
 🔴 **clawgate has NO human auth of its own** (since 0.7.37): `requireSession` is a pass-through no-op,
 so **the LAN NodePort is fully unauthenticated** — including `DELETE /tasks/{id}` and 🔴 **`POST
@@ -94,11 +94,47 @@ evidence the code is live; the live pin and `clawgatectl health` are. **Load `de
 version-from-the-live-pin, the ONE commit path (worktree off `origin/trunk`; never `git add -A`),
 test gate, build/push, pin bump, the CSS-cwd trap that fakes ~25 e2e failures, chart sync.
 
+## task pickup — "read and evaluate clawgate task N", then "local dispatch"
+🔴 **The status/comment steps are NOT optional and NOT a thing to be asked for.** They were skipped
+for months because reading a task was one command while writing to it was a curl preamble; that
+asymmetry is gone (`task status` / `task comment` since 2026-08-14), so there is no longer an excuse
+to leave a task's state stale. Run the ritual unprompted.
+
+```bash
+clawgatectl task get <id>            # 1. READ — body + comments are BOTH already here
+                                     #    (no /comments GET exists; it is 405)
+#  2. EVALUATE and report to Zach. Do NOT flip status yet — see the ordering trap below.
+clawgatectl task status <id> in_progress          # 3. on "local dispatch", THEN work
+#     …implement per repo defaults: tests that have been watched to FAIL, worktree, PR…
+clawgatectl task comment <id> --body "$(cat <<'EOF'
+Shipped in <PR link>. Tests: <matrix, incl. red-at-base evidence>.
+Verified: <the actual symptom reproduced>. NOT verified: <state it plainly>.
+EOF
+)"                                                # 4. ONE comment, at the end
+clawgatectl task status <id> ready_for_review     # 5. hand back
+```
+
+- 🔴 **Ordering trap — flip to `in_progress` LAST, after any edit to the task itself.** The
+  `in_progress` 409 is refined but real: once in progress, a `PATCH /api/tasks/{id}` carrying any
+  non-tag field (or any routing tag) is refused. Descriptive-tag-only edits still succeed.
+- 🔴 **NEVER set `complete` — that is Zach's call, always.** The machine route permits it (the
+  in-devpod agent route structurally forbids it), so nothing stops you but this line.
+  `ready_for_review` is where your work ends.
+- **Comments author as `claude-code`** by default via `X-Clawgate-Source`. There is no `--author`
+  flag: the header IS the impersonation guard, and `user`/`operator` are unreachable by design. An
+  unknown `--source` is silently downgraded to `api`, so the CLI warns on stderr when the author it
+  gets back differs from the one it asked for.
+- **One comment, at the end — not per turn.** Per-turn self-reporting was measured as noise and
+  removed once already (memory `clawgate-loop-validation`); do not reintroduce it here.
+- ⚠ **A comment/status write also refreshes the task's idle clock**, which matters: the reaper
+  dismisses anything untouched for 7d, and dismissing **tears down the linked agent pod**.
+
 ## machine (hook-token) Task API
 Read/create with `clawgatectl task ls --summary [--status open --tag t --limit n]` · `task get <id>`
 · `task create --body …`; **`--summary`/`--status`/`--limit` filter SERVER-side** — NOT true at
-0.7.85, re-measured live 0.7.87 on 2026-08-13. Every other verb (`PATCH`, `DELETE`, comments,
-`/api/tags`, `/api/projects`, `/api/notify`) is still curl with `Authorization: Bearer
+0.7.85, re-measured live 0.7.87 on 2026-08-13. Write status + comments with `clawgatectl task
+status` / `task comment` (above). Every remaining verb (`PATCH` content/tags, `DELETE`, comment
+DELETE, `/api/tags`, `/api/projects`, `/api/notify`) is still curl with `Authorization: Bearer
 $CLAWGATE_HOOK_TOKEN` or `X-Clawgate-Token`. Statuses are exactly `open` / `in_progress` /
 `ready_for_review` / `complete` — no `dismissed`; dismissing deletes.
 

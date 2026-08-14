@@ -30,7 +30,7 @@
 { pkgs, workspace }:
 
 let
-  version = "0.7.87";
+  version = "0.7.95";
 
   # The whole Go module, not just cmd/clawgatectl: go.mod/go.sum live at its
   # root and buildGoModule needs them for the vendor derivation.
