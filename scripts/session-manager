@@ -598,15 +598,26 @@ CAVEATS = {
     # conclude the tool simply cannot say.
     "kind_scope": {
         "kinds_enumerated": list(KINDS),
+        # 🔴 OVERWRITTEN PER SCAN by `measured_caveats`. This literal is only
+        # what a caller rendering the bare constant sees; the shipped value is
+        # measured from the rows.
         "kinds_produced": ["tmux"],
-        "note": ("every row is a tmux pane on a scanned host. `cluster` is "
-                 "ENUMERATED but NOT PRODUCED — no clawgate dispatch is read "
-                 "into rows by this build, so an absence of cluster rows is "
-                 "NOT a measured absence of cluster work. For clawgate use "
-                 "report.blocked_on_me (tasks needing the operator, and its "
-                 "`stuck_count` for wedged dispatches), which is a different "
-                 "population from these rows and is never double-counted "
-                 "with them."),
+        # 🔴 THE NOTE STATES ONLY WHAT IS DURABLY TRUE, because it sits beside
+        # a MEASURED field and ships in the same `--json` payload. It used to
+        # assert "every row is a tmux pane … cluster is ENUMERATED but NOT
+        # PRODUCED" — a standing claim that would contradict its own
+        # `kinds_produced` the day writer 3 lands, which is precisely the
+        # adjacent-fields-disagree failure `fuzzyclaw_scope` shipped in #471.
+        # What is durable is the RELATIONSHIP: which kinds exist, that an
+        # absence is not a measurement, and where clawgate actually lives.
+        "note": ("`kinds_produced` is MEASURED from this scan's rows — read it "
+                 "rather than assuming. A kind that is enumerated but absent "
+                 "from `kinds_produced` was NOT LOOKED FOR by this build, so "
+                 "its absence is NOT a measured absence of that work. For "
+                 "clawgate use report.blocked_on_me (tasks needing the "
+                 "operator, and its `stuck_count` for wedged dispatches), a "
+                 "different population from these rows that is never "
+                 "double-counted with them."),
     },
     "ledger_scope": {
         "scope": "per_host",
@@ -1641,10 +1652,10 @@ def _summary_classes(summ) -> list:
     seen = set()
     for cell in (summ.get("status") or {}).values():
         seen |= {k for k in cell if k != "total"}
-    # `claude`/`shell` unconditionally: every bucket is pre-seeded with both, so
-    # they are always present, and a scan that happened to contain neither must
+    # `claude`/`shell` unconditionally: `summarize` PRE-SEEDS both in every
+    # bucket, so they are always present, and a scan containing neither must
     # still render `claude=0 shell=0` rather than quietly dropping the columns
-    # a reader is scanning for.
+    # a reader is scanning for. Only classes BEYOND these two are on-demand.
     lead = ["claude", "shell"]
     return lead + sorted(seen - set(lead))
 
@@ -1674,9 +1685,11 @@ def summarize(report) -> dict:
     🔴 BACKWARD COMPATIBILITY, chosen deliberately in the LOUD direction. The
     flat `summary["busy"|"idle"|"stale"|"unknown"]` integers are GONE, replaced
     by `summary["status"][bucket]` -> one key per CLASS plus `"total"`. On a
-    tmux-only scan the classes are exactly `{"claude", "shell"}`; a class key is
-    added on demand (see `row_class`), never pre-seeded, so no bucket publishes
-    a zero for a class the build cannot produce. Keeping
+    tmux-only scan the classes are exactly `{"claude", "shell"}`. Those TWO are
+    pre-seeded and always present (a reader scans for them, and dropping the
+    column would be its own confusion); every class BEYOND them — `cluster`,
+    `unknown_kind` — is added on demand, so no bucket publishes a zero for a
+    class this build cannot produce. Keeping
     the flat ints would have left every existing reader silently reading the
     mixed number as an agent count — the exact defect — while the fix sat in
     keys they never learned about. A KeyError is a worse morning and a better
@@ -2366,7 +2379,7 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
     return report
 
 
-def measured_caveats(report, caveats=None) -> dict:
+def measured_caveats(report) -> dict:
     """CAVEATS with `kind_scope.kinds_produced` MEASURED from `report`'s rows.
     PURE — returns a new dict, mutates nothing.
 
@@ -2378,9 +2391,16 @@ def measured_caveats(report, caveats=None) -> dict:
     collapses "derived" and "hardcoded" into the same observation; the fix is
     an input where they differ, which means a seam that accepts one.
     """
-    cav = dict(caveats if caveats is not None else report.get("caveats")
-               or CAVEATS)
-    cav["kind_scope"] = dict(cav["kind_scope"])
+    # 🔴 EVERY SUB-DICT IS COPIED, not just the one being written. Copying only
+    # `kind_scope` left `claude_detection`/`fuzzyclaw_scope`/`ledger_scope`/
+    # `waiting_signal` as the SAME objects as the module constant, so a
+    # consumer writing through `report["caveats"]["waiting_signal"]` — which
+    # this function's own "returns a new dict, mutates nothing" docstring
+    # invites — would poison CAVEATS for every later caller in the process. A
+    # purity claim that holds for one key and not its siblings is worse than no
+    # claim: it is exactly specific enough to be trusted.
+    cav = {k: (dict(v) if isinstance(v, dict) else v)
+           for k, v in (report.get("caveats") or CAVEATS).items()}
     rows = [r for h in (report.get("hosts") or {}).values()
             for r in (h.get("windows") or [])]
     # Sorted for a deterministic render. `"none"` rather than dropping a row
@@ -2704,8 +2724,16 @@ def render_table(report) -> str:
     classes = _summary_classes(summ)
     out.append("  summary: {total} windows  {parts}".format(
         total=summ.get("total_sessions", 0),
-        parts="  ".join("{}={}".format(c, summ.get(c, 0))
-                        for c in classes if c in summ)))
+        # 🔴 `.get(c, 0)`, and NO `if c in summ` filter. An audit called that
+        # filter dead because `classes` derives from the rows `summarize`
+        # counted — true of the `gather` path, and FALSE of `render_table`,
+        # which is also called on a bare/empty report whose summary carries
+        # neither key. Removing the guard raised `KeyError: 'claude'` in two
+        # existing tests: unreachable through one entry point is not
+        # unreachable. But the filter was still the wrong shape — it SKIPPED
+        # the class, dropping it from this line while the legend one line below
+        # still named it. `.get` renders every class, missing ones as 0.
+        parts="  ".join("{}={}".format(c, summ.get(c, 0)) for c in classes)))
     # 🔴 Every bucket prints per class, never as one number. The legend is on
     # the same line, so no reader has to remember which part is which — and
     # there is no rendering of `idle` that a reader can mistake for a count of
@@ -2998,12 +3026,39 @@ def render_caveats(report) -> list:
 
 
 def _fmt_kind_scope(kd) -> str:
-    """The `kind_scope` caveat's sentence, split out so both branches are
-    reachable from a test without building a whole report."""
-    produced = list(kd.get("kinds_produced") or ["tmux"])
+    """The `kind_scope` caveat's sentence, split out so every branch is
+    reachable from a test without building a whole report.
+
+    🔴 `[]` IS A MEASUREMENT AND MUST NOT FALL BACK TO A LITERAL. The first
+    version read `kd.get("kinds_produced") or ["tmux"]`, and an empty list is
+    FALSY — so a scan that measured zero rows rendered `rows in this scan are
+    kind=tmux` over `summary: 0 windows`. Reachable today, with no cluster row
+    anywhere: both hosts unreachable, or `--claude-only` on a host with no
+    claude windows. That is a literal masquerading as a measurement — the exact
+    defect this caveat was made measured to kill — reintroduced one function
+    downstream by an `or` that cannot tell "not supplied" from "measured none".
+    So the two cases are separated explicitly, and only a MISSING key falls
+    back.
+    """
+    produced = kd.get("kinds_produced")
+    if produced is None:
+        # No measurement supplied at all — a caller rendering the bare CAVEATS
+        # constant. Say what the tool produces by construction, not what this
+        # scan saw, because this scan was never measured.
+        produced = ["tmux"]
+    produced = list(produced)
     enumerated = list(kd.get("kinds_enumerated") or KINDS)
+    if not produced:
+        # 🔴 ZERO ROWS. Naming any kind here would be inventing one. The reader
+        # most likely to hit this is the one whose hosts are unreachable, and
+        # the wrong thing to tell them is which kinds were "in this scan".
+        return ("NO rows were measured in this scan, so no kind was observed — "
+                "this is NOT a claim that any kind is absent, and the enumerated "
+                "kinds ({}) say nothing about what a reachable host holds; "
+                "clawgate is reported separately under BLOCKED ON ME".format(
+                    "/".join(enumerated)))
     unproduced = [k for k in enumerated if k not in produced]
-    head = "rows in this scan are kind={}".format("/".join(produced) or "none")
+    head = "rows in this scan are kind={}".format("/".join(produced))
     if not unproduced:
         # Every enumerated kind is present. Saying "NOT PRODUCED" here would be
         # false; saying nothing would drop the pointer to where clawgate lives.
@@ -3504,6 +3559,14 @@ def filter_report(report, session, window_index) -> dict:
                          and str(r.get("window_index")) == str(window_index)]
         out["hosts"][name] = h2
     out["summary"] = summarize(out)
+    # 🔴 THE CAVEATS ARE RE-DERIVED HERE TOO. This path re-runs `summarize` and
+    # then renders through `render_caveats`, so leaving the inherited caveats
+    # alone made `kind_scope` a claim about the FULL scan printed under a
+    # ONE-ROW table — the disagreement between the line and the table above it
+    # that measuring it was supposed to make impossible. `gather` was fixed and
+    # this second summarize call was not; a rule enforced at one of its two
+    # sites is the failure this whole change keeps re-finding.
+    out["caveats"] = measured_caveats(out)
     return out
 
 

@@ -6653,6 +6653,159 @@ def test_the_derived_kinds_are_SORTED_deterministically():
     assert json.loads(out.stdout) == ["cluster", "tmux"]
 
 
+def test_a_ZERO_ROW_scan_does_not_CLAIM_a_kind_it_never_measured():
+    """🔴 REACHABLE TODAY, with no cluster row anywhere. `kinds_produced` is
+    measured, so a scan with no rows measures `[]` — and `[] or ["tmux"]` is
+    `["tmux"]`, because an empty list is FALSY. The line then read `rows in
+    this scan are kind=tmux` over `summary: 0 windows`: a literal wearing a
+    measurement's clothes, which is the defect measuring it was meant to kill.
+
+    The reader who hits this is the one whose hosts are unreachable — exactly
+    the reader who must not be told what "this scan" contained.
+    """
+    line = sm._fmt_kind_scope({"kinds_produced": [],
+                               "kinds_enumerated": ["tmux", "cluster"]})
+    assert "kind=tmux" not in line
+    assert "NO rows were measured" in line
+    assert "NOT a claim that any kind is absent" in line
+    # a MISSING key is different from a measured empty one, and still falls
+    # back — that is the bare-constant render, not a scan
+    missing = sm._fmt_kind_scope({"kinds_enumerated": ["tmux", "cluster"]})
+    assert "kind=tmux —" in missing
+
+
+def test_the_zero_row_scan_reaches_that_branch_through_the_REAL_render():
+    """The unit test above proves the branch; this proves it is REACHED. A
+    scan where no host answers produces zero rows through the ordinary path."""
+    rep = base_gather(runner=make_runner(local_rc=1, remote_rc=1))
+    assert rep["summary"]["total_sessions"] == 0, "fixture did not go empty"
+    assert rep["caveats"]["kind_scope"]["kinds_produced"] == []
+    line = next(ln for ln in sm.render_caveats(rep) if "kind_scope" in ln)
+    assert "NO rows were measured" in line
+    assert "kind=tmux" not in line
+
+
+def test_the_DETAIL_path_re_derives_the_caveats_it_re_summarizes():
+    """🔴 `filter_report` re-runs `summarize` and renders through
+    `render_caveats`. Inheriting the full scan's caveats made `kind_scope` a
+    claim about every row, printed under a ONE-ROW table — the disagreement
+    between line and table that measuring it was supposed to make impossible.
+    One rule enforced at one of its two call sites."""
+    rep = with_cluster_rows(mix_gather(), cluster_row())
+    rep["summary"] = sm.summarize(rep)
+    rep["caveats"] = sm.measured_caveats(rep)
+    assert rep["caveats"]["kind_scope"]["kinds_produced"] == ["cluster", "tmux"]
+    # narrow to one TMUX window — the cluster row is filtered out, so the
+    # caveat must stop claiming cluster was produced
+    one = sm.filter_report(rep, "hollow", "2")
+    assert one["summary"]["total_sessions"] == 1
+    assert one["caveats"]["kind_scope"]["kinds_produced"] == ["tmux"]
+    line = next(ln for ln in sm.render_caveats(one) if "kind_scope" in ln)
+    assert "cluster is ENUMERATED but NOT PRODUCED" in line
+
+
+def test_measured_caveats_reads_EVERY_host_not_just_the_first():
+    """A cluster row on the second host would otherwise vanish from
+    `kinds_produced`, and the caveat would deny rows that ARE in the payload."""
+    rep = {"hosts": {"a": {"windows": [{"kind": "tmux"}]},
+                     "b": {"windows": [{"kind": "cluster"}]}}}
+    assert sm.measured_caveats(rep)["kind_scope"]["kinds_produced"] \
+        == ["cluster", "tmux"]
+
+
+def test_measured_caveats_detaches_EVERY_caveat_from_the_module_constant():
+    """🔴 Copying only `kind_scope` left the other four as the SAME objects as
+    CAVEATS, so a consumer writing through the returned dict — which the
+    "returns a new dict, mutates nothing" docstring invites — poisoned the
+    process-global constant. A purity claim true of one key and false of its
+    siblings is worse than none: it is specific enough to be trusted."""
+    rep = {"hosts": {}}
+    out = sm.measured_caveats(rep)
+    assert set(out) == set(sm.CAVEATS)
+    for key in sm.CAVEATS:
+        assert out[key] is not sm.CAVEATS[key], f"{key} is still shared"
+    before = list(sm.CAVEATS["waiting_signal"]["signals"])
+    out["waiting_signal"]["signals"] = ["POISONED"]
+    assert sm.CAVEATS["waiting_signal"]["signals"] == before
+
+
+def test_the_kind_scope_NOTE_does_not_restate_the_measured_field():
+    """🔴 The note ships in the same `--json` payload as `kinds_produced`. It
+    used to assert "every row is a tmux pane … cluster is ENUMERATED but NOT
+    PRODUCED" — a standing claim that would contradict its own measured
+    neighbour the day writer 3 lands. That adjacent-fields-disagree failure is
+    what `fuzzyclaw_scope` shipped in #471."""
+    note = sm.CAVEATS["kind_scope"]["note"]
+    assert "MEASURED" in note
+    assert "every row is a tmux pane" not in note
+    assert "cluster is ENUMERATED but NOT PRODUCED" not in note
+    # it still has to say the durable part, or the field loses its meaning
+    assert "NOT a measured absence" in note
+    assert "blocked_on_me" in note
+
+
+def _under_seed(seed, expr):
+    """Evaluate `expr` against a freshly-imported session-manager in a
+    subprocess with PYTHONHASHSEED pinned. Set iteration order is seed-derived,
+    so this is the only way to kill a dropped-`sorted()` mutant DETERMINISTICALLY
+    rather than on the runs whose seed happens to disagree."""
+    prog = (
+        "import importlib.machinery as m, importlib.util as u, json;"
+        "l=m.SourceFileLoader('sm', %r);"
+        "sp=u.spec_from_file_location('sm', %r, loader=l);"
+        "sm=u.module_from_spec(sp); sp.loader.exec_module(sm);"
+        "print(json.dumps(%s))" % (_SCRIPT, _SCRIPT, expr))
+    env = dict(os.environ, PYTHONHASHSEED=str(seed),
+               PYTHONDONTWRITEBYTECODE="1")
+    out = subprocess.run([sys.executable, "-c", prog], capture_output=True,
+                         text=True, env=env, timeout=60)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+def test_summary_classes_sorts_the_non_lead_classes_DETERMINISTICALLY():
+    """🔴 SAME NONDETERMINISM TRAP AS THE OTHER SORT, and it was left unguarded
+    while the sibling got a seed-pinned harness — rigor applied to one of two
+    identical hazards, which is how the unguarded one ships.
+
+    Two non-lead classes are needed to observe order at all, and no other test
+    produces two. Under seed 3 the RAW set yields `unknown_kind` first
+    (measured), so a `sorted()` that ran returns `cluster` first and a dropped
+    one returns `unknown_kind` first — every run, not most.
+    """
+    summ = {"status": {"busy": {"unknown_kind": 1, "cluster": 1, "claude": 0,
+                                "shell": 0, "total": 2}}}
+    # POSITIVE CONTROL: seed 3 really does order this set the other way, so a
+    # pass below means `sorted()` ran — not that the seed agreed with it.
+    raw = subprocess.run(
+        [sys.executable, "-c", "print(list({'cluster','unknown_kind'}))"],
+        capture_output=True, text=True, timeout=60,
+        env=dict(os.environ, PYTHONHASHSEED="3"))
+    assert raw.stdout.strip() == "['unknown_kind', 'cluster']", (
+        "seed 3 no longer orders this set unknown_kind-first; pick another "
+        "seed or this test proves nothing")
+    assert _under_seed(3, "sm._summary_classes(%r)" % (summ,)) == [
+        "claude", "shell", "cluster", "unknown_kind"]
+    # in-process too, so the ordinary path is covered as well
+    assert sm._summary_classes(summ) == ["claude", "shell", "cluster",
+                                         "unknown_kind"]
+    # ...and it is robust to a summary with no status at all
+    assert sm._summary_classes({}) == ["claude", "shell"]
+
+
+def test_the_summary_line_NAMES_every_class_even_when_the_count_is_missing():
+    """🔴 The difference between `.get(c, 0)` and the `if c in summ` filter is
+    invisible unless a class is ABSENT from the summary — which `render_table`
+    reaches on a bare report, the same path that made removing the filter
+    outright raise `KeyError`. Filtering SKIPS the class, so the summary line
+    silently loses a column the by-status legend one line below still names."""
+    text = sm.render_table({"hosts": {}, "summary": {"total_sessions": 0},
+                            "fuzzyclaw": {}, "ledger": {}})
+    line = next(ln for ln in text.splitlines() if "summary:" in ln)
+    assert "claude=0" in line and "shell=0" in line, (
+        "a missing count must render as 0, not vanish from the line")
+
+
 def test_measured_caveats_is_PURE_and_does_not_touch_its_input():
     before = {k: dict(v) for k, v in sm.CAVEATS.items()}
     rep = {"hosts": {"h": {"windows": [{"kind": "cluster"}]}}}

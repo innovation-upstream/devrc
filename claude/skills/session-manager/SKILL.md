@@ -19,8 +19,10 @@ level. Roll-ups: `summary.waiting`, `summary.status[bucket]`, `summary.kind`,
 `blocked_on_me`.
 
 🔴 **`summary.status[bucket]` is one key per CLASS plus `total`** — `{claude, shell, total}`
-on every scan today. A class key is added **on demand**, never pre-seeded, so the absence of
-`cluster` is not a zero. Same rule at the top level (`summary.claude`, `summary.shell`).
+on every scan today. `claude` and `shell` are **always present** (pre-seeded, so a zero there
+is a real zero); every class **beyond** those two — `cluster`, `unknown_kind` — appears only
+when such a row exists, so the *absence* of a `cluster` key is not a measured zero. Same at
+the top level (`summary.claude`/`summary.shell` always; others on demand).
 
 🔴 **`kind` (row field) and `CLASS` (table column) are DIFFERENT axes — do not conflate.**
 `kind` is `tmux` | `cluster`: **what the entity is**. `CLASS` is `claude` | `shell` |
