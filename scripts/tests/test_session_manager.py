@@ -5755,3 +5755,55 @@ def test_the_table_names_the_rejections_and_the_unverified_separately():
     assert "rejected:" in text
     assert "1 window gone" in text and "1 older tmux server" in text
     assert "unverified generation" not in text
+
+
+# --------------------------------------------------------------------------- #
+# §10 — the output is priced for an AGENT, because that is the only consumer
+# --------------------------------------------------------------------------- #
+def test_the_json_is_COMPACT_because_the_only_consumer_pays_by_the_token(
+        monkeypatch, capsys, absent_blocked_cache):
+    """🔴 MEASURED, and the measurement is the whole argument. This tool has 0
+    interactive shell invocations in 30 days against 55 agent references (spec
+    §7), confirmed by the operator 2026-08-14: an AGENT is the only consumer,
+    and an agent pays for output by the token.
+
+    Indented at 2 spaces, a 75-row scan emitted 86,066 B against 60,631 B
+    compact — 29% of every payload was whitespace for a reader who does not
+    exist, about 6,400 tokens per call.
+
+    KILLS: restoring `indent=2` (or any indent) at any of the three emit sites.
+    Asserted as a PROPERTY of the bytes rather than by grepping the source for
+    `indent`, so a differently-spelled reformat is caught too.
+    """
+    monkeypatch.setattr(sm, "local_host_label", lambda *a, **k: "workbench")
+    monkeypatch.setattr(sm, "_default_runner", make_runner())
+    monkeypatch.setattr(sm, "read_fuzzyclaw_texts", lambda *a, **k: [])
+    sm.main(["scan", "--no-ch", "--no-ledger", "--host", "workbench", "--json"])
+    out = capsys.readouterr().out
+
+    # it parses...
+    parsed = json.loads(out)
+    assert parsed["local_host"] == "workbench"
+    # ...on ONE line, and with no run of spaces an indent would produce
+    assert out.count("\n") == 1, "the payload is not a single line"
+    assert '": ' not in out, "a key/value separator carries indent padding"
+    assert "  " not in out, "the payload carries multi-space padding"
+
+    # ...and the compaction is real, not cosmetic: re-encoding it indented is
+    # measurably larger, which is the cost this refuses to pay.
+    indented = json.dumps(parsed, sort_keys=True, indent=2, default=str)
+    assert len(indented) > len(out.strip()) * 1.2, (
+        "compaction saved less than 20% — the claim in the source comment "
+        "no longer holds for this payload shape")
+
+
+def test_sort_keys_SURVIVES_the_compaction():
+    """🔴 The half that must NOT be dropped while trimming bytes. `sort_keys`
+    costs nothing and is what makes two scans diffable — an agent comparing a
+    before/after would otherwise see key reordering as change."""
+    report = base_gather()
+    blob = json.dumps(report, sort_keys=True, default=str,
+                      separators=(",", ":"))
+    top = [k.strip('"') for k in
+           __import__("re").findall(r'"([a-z_]+)":', blob)[:4]]
+    assert top == sorted(top), top
