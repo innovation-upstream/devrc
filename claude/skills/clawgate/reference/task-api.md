@@ -63,6 +63,8 @@ readable) and never reaches your scrollback.
 | `clawgatectl task ls [--tag --status --limit --summary]` | `GET /api/tasks` |
 | `clawgatectl task get <id>` | `GET /api/tasks/{id}` |
 | `clawgatectl task create --body\|--body-file [--title --tag --repo --branch --model --directory --privilege]` | `POST /api/tasks` |
+| `clawgatectl task status <id> <open\|in_progress\|ready_for_review\|complete>` | `PATCH /api/tasks/{id}/status` |
+| `clawgatectl task comment <id> --body\|--body-file [--source]` | `POST /api/tasks/{id}/comments` |
 
 ```bash
 # board summary, filtered SERVER-side (MEASURED live 0.7.87, 2026-08-13: 19 tasks unfiltered, 3 with --limit 3)
@@ -238,9 +240,9 @@ two until it was corrected):
 | `GET /api/tasks/{id}` | `task get` | comments embedded |
 | `POST /api/tasks` | `task create` | returns `{"id":N}` only |
 | `PATCH /api/tasks/{id}` | — curl | content/dispatch/tags; refined `in_progress` 409 |
-| `PATCH /api/tasks/{id}/status` | — curl | any status incl. `complete`; no in-progress guard |
+| `PATCH /api/tasks/{id}/status` | `task status` | any status incl. `complete`; no in-progress guard. The CLI validates the status client-side (exit 2, nothing sent) because the server's 400 is the bare `invalid or missing status` and never names the four |
 | `DELETE /api/tasks/{id}` | — curl | ⚠ tears down a live agent pod |
-| `POST /api/tasks/{id}/comments` | — curl | author from `X-Clawgate-Source`, never the body |
+| `POST /api/tasks/{id}/comments` | `task comment` | author from `X-Clawgate-Source`, never the body — so the CLI has **no `--author` flag**. `--source` defaults to `claude-code`; an unallowlisted value is not an error, it is silently authored as `api`, so the CLI compares the returned author against the requested source and warns on **stderr** |
 | `GET /api/tags` | — curl | `[{tag,count}]` |
 | `GET /api/projects` | — curl | ⚠ an OBJECT `{"projects":[…]}`, keyed `name` |
 | `POST /api/send` | — curl | the approval card the PermissionRequest hook posts |
