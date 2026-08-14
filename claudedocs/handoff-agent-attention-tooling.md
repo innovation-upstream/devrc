@@ -15,29 +15,42 @@ Make *"what is being worked on, and what is waiting on me"* answerable in one ca
 of 13 pane tails, and stop turns ending without a stated next step.
 
 ## State now
-- **Branch:** `main`, at `a12f101` = `origin/main`. Both hosts converged and switched
-  (`ship.sh`: workbench 446 managed artifacts resolve / 0 dangling, laptop 408 / 0).
-- **Working tree:** untracked only (`.envrc`, `.opencode/`, `claudedocs/proposed-rules-cut/`,
-  `nix/system/apply-nebula-443.sh.LOCAL-preserved-2026-08-02`). ⚠ THIS DOC was untracked from
-  before this session — stranded work; it is committed now.
+- **Branch:** `main` at `1797d42` = `origin/main`. Both hosts converged and switched
+  (`ship.sh`: workbench 431 managed artifacts resolve / 0 dangling, laptop 393 / 0).
+- **Working tree:** ⚠ `nix/i3/config.nix` is MODIFIED and is **not mine** — I never touched
+  i3 this session. Left alone deliberately; it predates this work or belongs to another
+  session. Plus the usual untracked (`.envrc`, `.opencode/`, `claudedocs/proposed-rules-cut/`,
+  `nix/system/apply-nebula-443.sh.LOCAL-preserved-2026-08-02`).
 
-**Shipped and verified live this session:**
+**Shipped and verified live this session** (mine; #470/#474/#479 are other work):
 
-| what | PR / sha |
+| what | PR |
 |---|---|
-| the agent activity ledger — closes the #419 regression | **#471** `a12f101` |
+| the agent activity ledger + writer 1 (Claude) | **#471** |
+| the handoff doc, untracked since before the session | #472 |
+| `/handoff`'s index step: `ROUTE OUT` on a dead end | #473 |
+| the tmux bar's dead waiting counters, DELETED not migrated | #475 |
+| `--json` compacted — 34% was indentation | #476 |
+| `--lean`, the agent-shaped view | #477 |
+| writer 2 — opencode | **#478** |
 
-`scripts/lib/agent_ledger.py` (record, write/prune, read protocol, live-join filter) ·
-`scripts/claude-hooks/agent-ledger-hook.py` (writer 1, Claude Code) ·
-`scripts/session-manager` reads it **per host** · deploy + registration in `nix/home.nix` /
-`register-nudge-hook.py`.
+**The ledger, ~7h after launch** (was `1 of 74` at ship, `0` before it existed):
+```
+▸ AGENT LEDGER (23 live of 27)   ages: 23 of 77 (ledger=23)   session ids: 23
+by status: busy=5+0  idle=42+5  stale=4+0  unknown=0+21
+```
+`stale=4` is a bucket that was structurally impossible this morning. Rejections are the
+guards working (`2 window gone`, `2 no window`).
 
-**Verified live, not merely deployed.** Before: `rows with an age: 0`, `claude_session_id` on
-0 rows, no `stale` bucket. After the switch, both hosts: `AGENT LEDGER (15 live of 16)`,
-`ages: 15 of 73 (ledger=15)`, `session ids: 15` — the hooks fired *naturally* as each live
-session took its next turn, no manual probing. The laptop's writer is confirmed too (all four
-events registered; its deployed hook wrote `claude-p23.json` from a real pane), so this is
-verified on the WHOLE fleet, not half.
+**Writer 2 verified on the DEPLOYED plugin**, not just in tests: first call 79 ms (a real
+spawn, now including `--prune`), next nine memoised at 0 ms, record written with the true
+pane/window/server-pid. Deployed on both hosts.
+
+🔴 **The design constraint that reshaped the back half of the session:** the operator
+confirmed an AGENT is the only consumer of `session-manager`/`agent-ops` — 0 interactive
+shell invocations in 30 days against 55 agent references. That is why the bar counters were
+deleted rather than migrated, and why #476/#477 exist. One scan went from **~21,516 to
+~9,629 tokens (55% off)** while *removing* the lossy option rather than living with it.
 
 ## Open investigations — live diagnosis state
 
@@ -108,27 +121,61 @@ verified on the WHOLE fleet, not half.
   non-trivial `stale.claude` count on windows that are demonstrably working means the
   heartbeat is not reaching them — check `age_source` on those rows first.
 
+### Writer 3 (clawgate) + the §4 `kind` field — needs a DESIGN pass before code
+- **Why it is not just "writer 2 again":** clawgate agents have no pane, no window index and
+  no host in the tmux sense. Spec §4 decides *one table, add a `kind` field*
+  (`tmux` | `cluster`) with the tmux-only fields null — explicitly NOT a separate section,
+  because that forces every consumer to learn two shapes and merge them by hand.
+- **Observed:** `GET /api/agents` (0.7.86) returns `lastActivityAt`, already defined as
+  `max(newest persisted transcript row, updatedAt)` — exactly the ledger's semantic. So
+  writer 3 needs **no local writer**; `session-manager` fetches it.
+- **What makes it a design question:** the row's primary entity stops being a tmux window.
+  `fold_windows` is built around `(session, window_index)` and every row field assumes a
+  pane. `filter_live`'s window/generation guard cannot apply to a cluster row at all.
+- **Next probe:** none — decide the shape first. Read spec §4 and §7's disposition table
+  together, because agent-ops retirement depends on the same decision.
+
+### Cross-runtime ledger conflicts persist for the full 7-day retention
+- **Symptom:** a pane that ran Claude and later opencode holds one record each (keyed
+  `<runtime>-p<pane>.json`), both live, both naming that window → a permanent `⚠ LEDGER
+  CONFLICT` line until a prune deletes one.
+- **Observed:** an audit measured it at 0 / 1 / 3 / 6.9 / 7.1 days — `live=2 conflicts=1`
+  throughout, because `filter_live` has **no age cutoff**.
+- **Ruled out:** that it produces a wrong value. The winner is always the newest, which is
+  the agent actually active; no bad data reaches a row.
+- **Mitigated, not fixed:** the line now names the RUNTIMES (`claude, opencode`) as well as
+  the session ids, so the ⚠ explains itself instead of showing two UUIDs.
+- **Next probe:** decide whether `filter_live` should age out a record whose runtime differs
+  from the newest claimant. That is a change to its semantics — do it WITH writer 3, not
+  before.
+
+### `ledger.js`'s module-relative fallback is dead under nix deployment
+- **Observed:** the deployed `~/.config/opencode/plugin/ledger.js` is a symlink into
+  `/nix/store/…-hm_ledger.js`, so `import.meta.url` resolves there and
+  `../agent_ledger.py` looks for `/nix/store/agent_ledger.py`, which does not exist.
+- **Why it does not bite:** candidate 1 (`~/.config/opencode/agent_ledger.py`) always hits in
+  production — verified live on both hosts.
+- **How it surfaced:** a probe that overrode `HOME` reported `10 calls, 1 ms` and wrote
+  NOTHING; the 1 ms was the tell (a real spawn is ~24 ms), and it nearly read as success.
+- **Next probe:** none needed. Either drop the fallback or point it at a path that exists
+  under a store symlink; it has never been exercised.
+
 ## Next steps (ranked)
-1. **fuzzyclaw removal, phase 2** — migrate the six readers ONE at a time:
-   `session-manager`, `agent-ops`, `tmux-scratch-status.sh`, `tmux-claude-counters.sh`,
-   `verify-agent-work`, `validation/{reconcile,refsources}.py`. Then phase 3 (a test that
-   fails if any fuzzyclaw read reappears), then phase 4 (remove the writers — never first).
-2. **Writer 2 (opencode)** — `scripts/opencode/plugin/guard.js`, same record. 🔴
-   `pane_filename` is already runtime-namespaced and pinned by a test, so an opencode pane
-   record cannot collide with a claude one; that guard exists FOR this step.
-3. **Writer 3 (clawgate agents)** + the §4 `kind` field (`tmux` | `cluster`), one table.
-4. **The §5 bar inversion** — a 45s systemd-user timer writing
-   `~/.cache/bar-status/sessions.json`, read by `tmux-scratch-status.sh` and
-   `tmux-claude-counters.sh`. 🔴 The cache MUST carry its own timestamp and measured/unmeasured
-   state; both existing caches have failed exactly there.
-5. **`no_session_reason` is KNOWN INCOMPLETE** (`scripts/session-manager`) — it reasons about
-   fuzzyclaw alone while the ledger is a second, winning supplier. Its docstring says so.
-   Fixing it re-decides ~12 pinned branch selections including
-   `test_the_unmeasured_reasons_are_PAIRWISE_DISTINCT`; attempted and reverted deliberately.
-   Failure mode is bounded and safe: it can understate what is known, never assert an
-   unsupported measured absence.
-6. `render_caveats`' caveat CONTENT is unpinned (only the one-line-per-caveat relationship is).
-   Pre-existing; the sibling `waiting` false-positive item below is still open too.
+1. **Writer 3 + the `kind` field** — design first (block above). This is also the gate on
+   spec §7's agent-ops retirement.
+2. **fuzzyclaw removal phase 2, the remaining readers.** Two of six are DONE (#475 deleted
+   both bar readers). Left: `session-manager` (opt-in behind `--fuzzyclaw`),
+   `validation/{reconcile,refsources}.py`. Then phase 3 (a test that fails if any fuzzyclaw
+   read reappears), then phase 4 (remove the writers — never first).
+3. **`no_session_reason` is KNOWN INCOMPLETE** and says so in its docstring. It reasons about
+   fuzzyclaw alone while the ledger is a second, winning supplier. Fixing it re-decides ~12
+   pinned branch selections including `test_the_unmeasured_reasons_are_PAIRWISE_DISTINCT`;
+   attempted and reverted deliberately. Failure mode is bounded and SAFE — it can understate
+   what is known, never assert an unsupported measured absence.
+4. `render_caveats`' caveat CONTENT is unpinned (only the one-line-per-caveat relationship
+   is). Pre-existing.
+5. The `waiting` false-positive on a pane showing another session's output — still open,
+   unchanged from this morning.
 
 ## Gotchas / decisions / dead-ends
 
@@ -208,18 +255,67 @@ verified on the WHOLE fleet, not half.
   `list-panes`/`list-windows` skew catchable and collapse most of the two-key join design.
   Deliberately deferred: it touches `parse_panes` and every pane fixture. Flagged in spec §2.
 
+**From five audit rounds across #471/#477/#478 — every one found something a green gate did not:**
+- 🔴 **"Verified in isolation" is the vacuous green.** `--lean`'s CLI wiring had ZERO
+  coverage: `if False and args.lean` left all 456 tests passing while the flag emitted the
+  full payload. The pure function was tested, the flag was tested, the wire between them by
+  nothing. Same shape twice more: `detail --lean` untested, and writer 2's `runtime` field
+  name-pinned three times and value-pinned nowhere.
+- 🔴 **A test can be unable to see what it tests.** The CLI throttle test compared file
+  CONTENT, and `now_iso()` has one-second resolution — two back-to-back writes are
+  byte-identical either way. Setting the throttle to 0 left it green. Compare inode/mtime.
+- 🔴 **A guard's stated DIRECTION can be backwards.** My exit-code comment said the hazard was
+  "a dead fleet reporting success"; it is the inverse (a missing `reachable` makes
+  `exit_code_for` return UNAVAILABLE *more* often). A guard whose direction is stated wrong is
+  how the wrong test gets written to defend it — which is exactly what happened.
+- 🔴 **A ratio built from two different measurements is a ratio of nothing.**
+  `52,564 B of 60,631 B` survived in four places after being retracted in one.
+
+**Instrument failures, all mine, all caught by something other than me:**
+- **`"" or X` evaluates to `X`.** Written as a mutant TWICE. Applies cleanly, imports fine,
+  changes nothing, reads as a coverage gap.
+- **The mutation sweep's CONTROL went red twice** — once for a missing `scripts/testlib` in
+  the copy list, once for a stray `/tmp/package.json`. A sweep on a red baseline kills nothing.
+- **An import probe must register the module in `sys.modules`** before `exec_module`, or
+  `dataclasses` raises and EVERY mutant scores BAD-MUTANT (measured: 9/9 unscored).
+- **A guard blocking a Bash call aborts the WHOLE call** — a `python3 - <<PY` edit chained
+  with a blocked `git add -A` never ran, and I read the absent output as success. The gate
+  then passed reporting "sum of **20** per-target floors" while the new suite ran nowhere.
+- **`readlink -f` returns a path for a file that does not exist** — bit me again on
+  `~/.tmux.conf`. `ls`/`[ -e ]` is the arbiter.
+- **A 16 KB "binary" is a wrapper.** `bin/opencode` is 16 KB; the real bundle is
+  `bin/.opencode-wrapped` (191 MB). Positive-control every grep against it.
+
+**Decisions:**
+- **Deleted, not migrated.** The bar's `●`/counters keyed on fuzzyclaw's `status`, and across
+  407 task files that field read `301 done / 87 paused / 18 running / **1 waiting**` — so the
+  bar showed `0●` while `session-manager` measured 5 windows waiting. A dead indicator that
+  lies is worse than none, and the operator does not use it.
+- **`label_source` is KEPT in `--lean`** — an audit caught the view's own rule ("provenance
+  never goes") contradicting its field list. The rule won; saving is 32% not 36%.
+- **No columnar encoding for `--lean`**, though 38% of the payload is repeated key names.
+  Positional arrays make an LLM index-map every value, which is how a row gets misread.
+- **The opencode plugin holds NO schema** — it spawns `agent_ledger.py --write`, the same
+  module the reader uses. A test asserts the record's field names appear nowhere in the JS.
+- **The throttle is memoised in the PLUGIN**, in front of the spawn: it lives inside Python,
+  so every `tool.execute.after` was paying 24.5 ms of blocked node event loop.
+
 ## How to verify
 ```bash
-# the ledger, both hosts — `live of seen` per host, and the ages meter
+# the ledger, both hosts, both writers — `live of seen` per host and the ages meter
 python3 ~/workspace/devrc/scripts/session-manager --no-ch | grep -E 'AGENT LEDGER|live of|ages:'
 
-# the writer, on THIS host, without touching the real ledger
-python3 ~/.claude/hooks/agent-ledger-hook.py --selftest   # expect "1 expected, 1 observed -> PASS"
+# the agent-shaped view (prefer this; ~9.6k tokens vs ~14k, lossless on what it keeps)
+python3 ~/workspace/devrc/scripts/session-manager --no-ch --json --lean | head -c 400
 
-# registered on all four events
-jq -r '.hooks | to_entries[] | .key as $e | .value[] | .hooks[]?
-       | select(.command|test("agent-ledger")) | $e' ~/.claude/settings.json | sort
+# writer 1 on this host, without touching the real ledger
+python3 ~/.claude/hooks/agent-ledger-hook.py --selftest   # "1 expected, 1 observed -> PASS"
 
-# the gate (authoritative)
+# writer 2 is deployed on both hosts
+for f in ~/.config/opencode/plugin/ledger.js ~/.config/opencode/agent_ledger.py; do \
+  printf '%s %s\n' "$([ -e "$f" ] && echo OK || echo MISSING)" "$f"; done
+
+# both gate tiers (BOTH — #479 touched run-node-tests.sh; reading one is the two-tier trap)
 cd ~/workspace/devrc && nix build .#checks.x86_64-linux.pytests -L 2>&1 | grep -E 'TOTAL collected|RESULT:'
+cd ~/workspace/devrc && nix build .#checks.x86_64-linux.nodetests -L 2>&1 | grep -E 'TOTAL|RESULT:'
 ```
