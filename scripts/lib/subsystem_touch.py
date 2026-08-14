@@ -3251,7 +3251,7 @@ def _terms_from(paths: _abc.Iterable[str], scope: str) -> tuple[str, ...]:
             # 🔴 The WHOLE component as well as its split pieces. A skill named
             # for a compound owns the compound: `scripts/repo-cos/scan.py` split
             # only into `repo` + `scan`, so `repo-cos` matched on the generic
-            # `scan` (breadth 3) and ranked FOURTH behind three scan-ish skills —
+            # `scan` (breadth 4) and ranked FOURTH behind three scan-ish skills —
             # inside a cap of 4 by one place. As its own term it has breadth 1
             # and ranks first, which is the whole point of specificity ranking.
             pieces = [p.strip().lower() for p in
@@ -3326,8 +3326,10 @@ def skill_homes(
 
     🔴 Ranked by term specificity, and it has to be. Unranked, the real lead
     drowns: measured on this host, a path carrying `pyroscope` also yields the
-    terms `query` and `homelab`, which match FOUR and THREE skills IN TOTAL (three others and two
-    others respectively — an inserted "other" made an earlier draft overcount)
+    terms `query` and `homelab`, which match FOUR and THREE skills on the live
+    catalogue (measured 2026-08-14). Stated as TOTALS on purpose: two successive
+    drafts tried to phrase this as "N OTHER skills" and got the arithmetic wrong
+    both times, in a comment whose only job is to carry a measurement
     respectively (re-measured 2026-08-14 on the live 34-skill catalogue; an
     earlier draft of this comment said "2 each" and was wrong) — so `obs-read`,
     the one right answer, came out FOURTH and a cap of 4 was one generic term

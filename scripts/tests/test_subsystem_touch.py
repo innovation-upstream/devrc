@@ -1380,6 +1380,19 @@ class TestSkillDocsArePinned:
         # block, the fallback search, and the UNFILED instruction with it.
         ("SKILL HOMES", "the agent is told to take the owning skill from the TOOL"),
         ("say **UNFILED**", "an unrecoverable dead end must name its search term"),
+        # 🔴 WHAT THIS PIN CANNOT DO, measured rather than assumed. Widening it
+        # from one row to five did NOT stop gutting: a rewrite that keeps all
+        # five substrings and deletes everything else takes the paragraph
+        # 1513 -> 119 chars and stays GREEN. A substring pin is satisfied by the
+        # substrings, always — it catches DELETION of a named instruction and
+        # DRIFT in its wording, not a hostile rewrite that keeps the words. That
+        # residual is inherent, and a minimum-length gate would false-fail every
+        # legitimate edit, which is how a gate gets clicked through. So: name
+        # every sentence that carries an INSTRUCTION (deleting any one is the
+        # realistic failure), and do not read a green here as "the paragraph is
+        # intact".
+        ("grep -ril", "the agent can search its OWN domain term when the tool matched none"),
+        ("must be `git add`ed", "a new skill file the flake never sees is a silent no-op"),
         ("never persist live status", "the anti-bloat rule that matters most"),
         (
             "persist the *derivation method and what a stale reading looks like*",
@@ -7879,9 +7892,14 @@ class TestRouteOutOfADeadEnd:
         impossible until the catalogue is injected — patch the module default and
         the rendered rows become evidence about what `render_text` actually
         passed. Two fixture skills with pairwise-distinct domains: one reachable
-        only from a PATH term, one only from the SCOPE term. Dropping either
-        argument removes exactly one row, which no header-string assertion can
-        detect.
+        only from a PATH term, one only from the SCOPE term.
+
+        Dropping the SCOPE removes one row; dropping the PATHS removes BOTH — the
+        scope fill is gated on `paths`, so the block flips to its no-signal
+        branch. Either way the output changes in a way no header-string
+        assertion can see, which is the point. An earlier docstring said
+        "exactly one row" for both cases: the test killed both mutants, but the
+        mechanism it stated was wrong.
         """
         root = tmp_path / "skills"
         for name, desc in [
@@ -7901,8 +7919,14 @@ class TestRouteOutOfADeadEnd:
         rep = _report(["docs/wibblesprocket-notes.md", "notes/b.md"], store)
         assert rep.status == "no-match", rep.status
         text = st.render_text(rep)
-        assert "pathside" in text, "the call site did not pass the report's PATHS"
-        assert "scopeside" in text, "the call site did not pass the report's SCOPE"
+        # The FULL row, not the bare name: the patched root is interpolated
+        # into the fallback `grep` line, so a bare name would match there too.
+        assert "claude/skills/pathside/SKILL.md" in text, (
+            "the call site did not pass the report's PATHS"
+        )
+        assert "claude/skills/scopeside/SKILL.md" in text, (
+            "the call site did not pass the report's SCOPE"
+        )
 
     def test_looked_at_nothing_reaches_it_too(self, store: Path) -> None:
         """The other exit — it returns EARLY from the renderer, so one assertion
