@@ -5322,6 +5322,11 @@ def ledger_gather(workbench=(), laptop=(), wb_pid=LEDGER_PID,
     return base_gather(use_ledger=True, ledger_outputs=outputs, **kw)
 
 
+def lean_of(report):
+    """The lean projection, via the SHIPPING function."""
+    return sm.lean_report(report)
+
+
 def rows_of(report):
     return [r for h in report["hosts"].values() for r in h["windows"]]
 
@@ -5807,3 +5812,163 @@ def test_sort_keys_SURVIVES_the_compaction():
     top = [k.strip('"') for k in
            __import__("re").findall(r'"([a-z_]+)":', blob)[:4]]
     assert top == sorted(top), top
+
+
+# --------------------------------------------------------------------------- #
+# §10.1 — the LEAN view
+# --------------------------------------------------------------------------- #
+def test_the_LEAN_row_field_ledger_fails_when_it_grows_or_shrinks():
+    """🔴 Both directions, same rule as the full row ledger. A field that
+    vanishes turns a consumer's read into a permanent absence; one that appears
+    is a contract nobody reviewed — and here it also silently re-inflates the
+    payload the view exists to shrink."""
+    rep = lean_of(ledger_gather(workbench=[led_rec(window_id="@41", ago=600)],
+                                use_fuzzyclaw=False))
+    row = rep["hosts"]["workbench"]["windows"][0]
+    assert set(row) == set(sm.LEAN_ROW_FIELDS)
+    assert set(sm.LEAN_ROW_FIELDS) == {
+        "host", "session", "window_index", "label", "hotkey",
+        "path", "task", "claude", "busy", "status", "age_secs", "age_source",
+        "waiting_probable", "waiting_signals", "waiting_status",
+        "claude_session_id",
+    }
+
+
+def test_the_lean_view_keeps_EVERY_null_vs_zero_discriminator():
+    """🔴 THE CONSTRAINT THAT SHAPES THIS VIEW. A cheap payload that can LIE is
+    worse than an expensive one. Trimming is allowed to remove duplication and
+    human-facing identity; it is never allowed to remove a measurement's
+    provenance, because then a consumer cannot tell a measured zero from a
+    measurement nobody took — which is the defect this whole tool exists to
+    refuse.
+
+    KILLS: dropping `caveats` (the cheapest-looking cut, ~586 tokens, and the
+    one thing standing between a cold agent and a fabricated zero), dropping
+    `summary.waiting`'s tri-state, or trimming a host down to its rows.
+    """
+    full = ledger_gather(use_fuzzyclaw=False,
+                         ledger_outputs={"workbench": None})
+    lean = lean_of(full)
+
+    for key in ("summary", "caveats", "blocked_on_me", "ledger", "fuzzyclaw",
+                "filters", "local_host", "ts"):
+        assert key in lean, key
+    # the caveats survive IN FULL, not as a pointer to somewhere else
+    assert lean["caveats"] == full["caveats"]
+    # the waiting tri-state and its reasons
+    assert lean["summary"]["waiting"] == full["summary"]["waiting"]
+    # ...and the ledger's per-host failure is still legible
+    assert lean["ledger"]["hosts"]["workbench"]["status"] == "error"
+    for host in ("workbench", "laptop"):
+        h = lean["hosts"][host]
+        for key in ("reachable", "windows_measured", "captures_status"):
+            assert key in h, (host, key)
+
+
+def test_the_lean_view_is_LOSSLESS_on_every_field_it_keeps():
+    """🔴 The property the TABLE cannot offer at any price. The table truncates
+    task text at 25 characters with no way for the reader to recover it —
+    measured, 45 of 75 rows on a live scan. Lean passes values through
+    untouched, so it is cheaper than the full payload AND more faithful than
+    the cheap one."""
+    full = ledger_gather(workbench=[led_rec(window_id="@41", ago=600)],
+                         use_fuzzyclaw=False)
+    lean = lean_of(full)
+    for host in full["hosts"]:
+        for fr, lr in zip(full["hosts"][host]["windows"],
+                          lean["hosts"][host]["windows"]):
+            for k in sm.LEAN_ROW_FIELDS:
+                assert lr[k] == fr[k], (host, k)
+
+
+def test_a_long_task_survives_the_lean_view_UNTRUNCATED():
+    """The lossless claim, made concrete against the failure it replaces: a task
+    longer than the table's 25-char column comes back whole."""
+    long_task = "OC | a task title comfortably past the table's column width"
+    panes = WORKBENCH_PANES.replace("Working on alpha", long_task)
+    lean = lean_of(base_gather(use_ledger=False,
+                               runner=make_runner(local_panes=panes)))
+    tasks = [r["task"] for r in lean["hosts"]["workbench"]["windows"]]
+    assert any(long_task in t for t in tasks), tasks
+    assert not any("…" in t for t in tasks), tasks
+
+
+def test_the_lean_view_drops_the_sub_objects_that_DUPLICATE_row_fields():
+    """🔴 `ledger` was the single biggest row field at 7,039 B of 60,631 B — a
+    full embedded record whose useful contents are already flat on the row, and
+    it was added in the same change that added the duplication. KILLS: putting
+    either sub-object back."""
+    lean = lean_of(ledger_gather(workbench=[led_rec(window_id="@41")],
+                                 use_fuzzyclaw=True))
+    row = lean["hosts"]["workbench"]["windows"][0]
+    assert "ledger" not in row and "fuzzyclaw" not in row
+    # ...but everything the dropped record CARRIED is still on the row
+    assert row["claude_session_id"] and row["age_secs"] is not None
+    assert row["age_source"] == "ledger"
+
+
+def test_the_payload_NAMES_the_fields_it_omitted():
+    """🔴 Without this, a consumer that finds no `window_id` cannot tell "this
+    view omits it" from "this scan measured it as null" — which reintroduces
+    exactly the ambiguity the rest of this tool removes. The list travels IN the
+    payload and must match the rows it describes."""
+    lean = lean_of(base_gather(use_ledger=False))
+    assert lean["view"] == "lean"
+    assert lean["lean_row_fields"] == list(sm.LEAN_ROW_FIELDS)
+    row = lean["hosts"]["workbench"]["windows"][0]
+    assert set(row) == set(lean["lean_row_fields"])
+
+
+def test_the_lean_view_shrinks_the_ROWS_which_is_where_the_payload_lives():
+    """🔴 ASSERTED ON THE ROWS, not on the whole payload, and the first draft of
+    this test got that wrong. Rows are 86% of a real payload (52,564 B of
+    60,631 B on a 75-row scan) and are the only part lean trims — the fixed
+    sections (`caveats`, `blocked_on_me`, `summary`) are kept ON PURPOSE.
+
+    So whole-payload saving SCALES WITH ROW COUNT: 36% measured live at 75
+    rows, but only ~12% on this 3-row fixture, where the retained fixed cost
+    dominates. A ratio asserted against the whole payload therefore encodes the
+    fixture's size rather than the view's behaviour, and would have to be
+    re-tuned every time the fixture changed — indistinguishable from silencing
+    it. The row-section ratio is the claim that is actually true at any size.
+
+    A property, not a literal byte count, for the same reason.
+    """
+    full = ledger_gather(workbench=[led_rec(window_id="@41")],
+                         use_fuzzyclaw=True)
+    enc = lambda o: json.dumps(o, sort_keys=True, default=str,
+                               separators=(",", ":"))
+    lean = lean_of(full)
+
+    def rowbytes(rep):
+        return sum(len(enc(r)) for h in rep["hosts"].values()
+                   for r in h["windows"])
+
+    assert rowbytes(lean) < rowbytes(full) * 0.7, (rowbytes(lean),
+                                                   rowbytes(full))
+    # ...and the retained fixed sections really are byte-identical, so the
+    # saving above came from trimming rows and nothing else.
+    for key in ("caveats", "summary", "blocked_on_me"):
+        assert enc(lean[key]) == enc(full[key]), key
+
+
+def test_the_FULL_view_is_untouched_when_lean_is_not_asked_for():
+    """The flag must not leak into the default payload."""
+    full = base_gather(use_ledger=False)
+    assert "view" not in full and "lean_row_fields" not in full
+    assert "ledger" in full["hosts"]["workbench"]["windows"][0]
+    assert "live_window_ids" in full["hosts"]["workbench"]
+
+
+def test_lean_without_json_says_so_rather_than_being_ignored(
+        monkeypatch, capsys, absent_blocked_cache):
+    """A silently ignored flag is how a caller concludes it was honoured — the
+    same rule `--plain` and `--claude-only` already follow."""
+    monkeypatch.setattr(sm, "local_host_label", lambda *a, **k: "workbench")
+    monkeypatch.setattr(sm, "_default_runner", make_runner())
+    monkeypatch.setattr(sm, "read_fuzzyclaw_texts", lambda *a, **k: [])
+    sm.main(["scan", "--no-ch", "--no-ledger", "--host", "workbench", "--lean"])
+    cap = capsys.readouterr()
+    assert "--lean" in cap.err and "no effect without" in cap.err
+    # ...and it printed the TABLE, not a lean payload
+    assert "TMUX WINDOWS" in cap.out
