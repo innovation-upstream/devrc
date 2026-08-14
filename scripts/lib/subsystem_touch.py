@@ -3429,9 +3429,17 @@ def census(store_root: str | Path, now: float | None = None) -> Census:
     `analyze-service-index-commit.timer` (`OnCalendar=*-*-* *:00:00` with
     `RandomizedDelaySec=10min`, so the real bound is ~70 min, not 60), a
     git-derived reading lags the actual writes and a mid-hour check can report
-    silence during an active session. git IS still the only source for the two
-    things below that mtime cannot see — it is wrong for FRESHNESS, not useless. mtime is what the writer touched, when it
-    touched it. It also keeps this function subprocess-free and hermetically
+    silence during an active session. mtime is what the writer touched, when it
+    touched it.
+
+    🔴 AND git DOES NOT ANSWER THE OTHER TWO EITHER — an earlier draft of this
+    comment said it was "the only source" for them, which was the same overclaim
+    it was written to correct. MEASURED: every commit in every scope carries ONE
+    fixed identity (`analyze-service index <analyze-service-index@localhost>`,
+    pinned at commit.sh:174), so `git log` cannot attribute a write to a writer
+    at all; and the hourly batching above collapses N appends within an hour
+    into one commit, so it undercounts them. git is better than mtime at
+    counting appends ACROSS hours. That is the whole of its advantage. It also keeps this function subprocess-free and hermetically
     testable with `os.utime`.
 
     What mtime CANNOT see, and no caller should claim otherwise:
@@ -3440,8 +3448,9 @@ def census(store_root: str | Path, now: float | None = None) -> Census:
       * WHO touched it. `by_writer` is creation-time attribution and stays that.
       * A restore, SOMETIMES — and which operations reset mtime is not obvious,
         so it is measured here rather than guessed (2026-08-13):
-            plain `cp`, `git clone`  -> mtime RESET  (reads as a burst that never happened)
-            `cp -a`, `git commit`    -> mtime PRESERVED
+            plain `cp`, `git clone`, `git checkout -- <path>`  -> mtime RESET
+                                        (reads as a burst that never happened)
+            `cp -a`, `git add`, `git commit`                   -> mtime PRESERVED
         So a fresh clone of the store lies; archiving it aside with `cp -a` does
         not, and neither does the hourly autocommit. A rewrite with IDENTICAL
         content still reads as a touch — `analyze-service`'s confirm flow does

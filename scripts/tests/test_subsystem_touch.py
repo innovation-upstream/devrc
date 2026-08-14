@@ -1138,8 +1138,11 @@ class TestCensusActivity:
     #
     # The first version of this feature mutated `census()` five times and
     # `render_census()`/`to_json()` ZERO times. Both survived deletion with a
-    # fully green suite: dropping the entire `newest write:` line, and dropping
-    # both new JSON keys, each passed 559 tests. That is the isolation-seam
+    # fully green suite: dropping the newest-write line's NON-EMPTY branch, and
+    # dropping both new JSON keys, each passed 559 tests. (Dropping BOTH branches
+    # gives 558 — the empty-store test catches that arm. The distinction matters:
+    # a re-audit re-measured this comment and the first wording overstated the
+    # gap by one branch.) That is the isolation-seam
     # shape — the computation was guarded and the two surfaces a consumer
     # actually READS were not, while the handoff doc had just started telling
     # the operator to read exactly those.
