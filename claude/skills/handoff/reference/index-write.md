@@ -51,7 +51,7 @@ This is the shape worth seeing at a glance, because each case has arrived separa
 
 1. **Subagent turns** — a separate transcript. 196 of 733 file-tool calls (above). Answer: `--pr`.
 2. **Files written by a `Bash` command** rather than a file tool — never recorded as an edit. Answer: `--pr`/`--commit`.
-3. **A repo whose rules mandate committing from a throwaway worktree** — 25 paths outside the session cwd and 0 inside. Answer: `--commit`.
+3. **A repo whose rules mandate committing from a throwaway worktree** — 25 paths outside the session cwd and 0 inside. Answer: `--commit` **or** `--pr`, and the worktree does not decide which — **whether the work landed as a PR does.** In the repo measured above, 144 of 200 mainline commits carry no `(#N)`, so `--commit` is right there; a worktree whose branch was opened as a PR is a `--pr` case, and reading "worktree" as "use `--commit`" cost a session its index write on 2026-08-14 (five base-clone shas, one `claudedocs/` path, reported as a real zero).
 4. **A session whose cwd is one repo while its work landed in another** — *partially* answered since 2026-08-13 by the `session-absolute` window, and refused with `transcript cwd does not match` only when that window is empty. Answer when refused: `--pr`/`--commit`.
 
 🔴 **All four are CORRECT behaviour, all four are already stated in the `caveat:` line, and in none of them is the fix a change to the session source** — with case 4 the documented exception, and the way it was wrong is worth keeping.

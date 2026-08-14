@@ -7799,3 +7799,104 @@ class TestValidateMutationKills:
         assert mod.validate_entry_file(bad) is not None
         assert mod.validate_entry_file(store / SCOPE / "collector.md") is None
         assert mod.governing_policy(store, SCOPE)[1] == mod.POLICY_SCOPE
+
+
+# =============================================================================
+# The route out of a dead end.
+# =============================================================================
+
+
+class TestRouteOutOfADeadEnd:
+    """🔴 MEASURED 2026-08-14, and this class is that incident.
+
+    A session in a repo whose rules force every edit into a throwaway worktree
+    got `looked-at-nothing` from `--session` (0 paths under the session cwd, 12
+    outside it — structural there, not occasional), correctly fell through to
+    `--commit` over the shas it had made, and got `no-match` over ONE
+    `claudedocs/` path from five commits. It reported that as "a real zero,
+    index unchanged, correctly".
+
+    The zero was real FOR THE WINDOW READ, and the window was the wrong one:
+    worktree work is committed in the worktree and lands as a PR, so the
+    base-clone shas were just the handoff doc. `--pr` — the only source that
+    sees it — was never tried, and nothing on screen named it. The skill said so
+    in prose; the agent was being told "no" at the moment it needed to remember.
+    So the tool says it instead.
+    """
+
+    def test_a_no_match_names_the_windows_it_did_NOT_read(self, store: Path) -> None:
+        text = st.render_text(_report(["docs/a.md", "notes/b.md"], store))
+        assert "ROUTE OUT" in text
+        for flag in ("--pr", "--commit", "--session"):
+            assert flag in text, flag
+
+    def test_looked_at_nothing_names_them_too(self, store: Path) -> None:
+        """The other dead end, and the one the incident hit FIRST. It returns
+        early from the renderer, so it needs its own assertion — a block added
+        to one exit and not the other is exactly the shape that leaves the
+        commonest path uncovered."""
+        text = st.render_text(_report([], store))
+        assert "ROUTE OUT" in text and "--pr" in text
+
+    def test_a_RESOLVED_run_stays_silent(self, store: Path) -> None:
+        """🔴 The negative control, and the reason this is worth having: a block
+        printed on every run is boilerplate, and boilerplate is skipped. It
+        appears only where the agent is stuck."""
+        text = st.render_text(_report(["src/collector/a.py", "src/collector/b.py"], store))
+        assert "ROUTE OUT" not in text
+
+    def test_the_source_that_just_FAILED_is_not_suggested_back(self) -> None:
+        """Re-running the window that came back empty is the one move that
+        cannot help. Asserted per window, including both spellings that share a
+        source — `session`/`session-absolute` and `branch`/`worktree` — because
+        a mapping that covers one spelling and not its twin fails only on the
+        rarer one."""
+        cases = {
+            "commits": "--commit",
+            "pull-requests": "--pr",
+            "session": "--session",
+            "session-absolute": "--session",
+            "branch": "(no flag)",
+            "worktree": "(no flag)",
+        }
+        for window, own in cases.items():
+            body = "\n".join(st.render_route_out(window)[3:-1])
+            assert own not in body, f"{window} suggested its own source back"
+            # ...and it still offers the other three, so exclusion never empties
+            # the block
+            assert len(body.strip().splitlines()) == 3, window
+
+    def test_an_unknown_window_excludes_NOTHING_rather_than_guessing(self) -> None:
+        """🔴 The fail-safe direction. `supplied` is the in-process entry point
+        and belongs to no flag; a future window name nobody mapped lands here
+        too. Offering one source too many costs a reader a line; silently
+        dropping the one they needed costs them the lesson.
+
+        🔴 ASSERTED ON THE ROWS, NOT THE WHOLE BLOCK — and that is the fix for a
+        defect in this very test. It used to search the joined block, which
+        includes the `read:` header naming the source that was used. A mutant
+        defaulting the unknown window to `"pr"` therefore dropped the `--pr` ROW
+        while `--pr` still appeared in the header, and the assertion passed: a
+        guard satisfied by the same word somewhere else in the output. Counting
+        the rows is what makes it structural.
+        """
+        for window in ("supplied", "some-window-added-later"):
+            rows = st.render_route_out(window)[3:-1]
+            assert len(rows) == 4, (window, rows)
+            body = "\n".join(rows)
+            for flag in ("--pr", "--commit", "--session", "(no flag)"):
+                assert flag in body, (window, flag)
+
+    def test_every_window_the_tool_can_emit_is_mapped(self) -> None:
+        """🔴 A ledger, failing in both directions. An unmapped window falls back
+        to naming the raw window string in `read:`, which is honest but tells the
+        reader nothing about which flag produced it — and a mapping for a window
+        that no longer exists is a phantom."""
+        emitted = {
+            "session", "session-absolute", "branch", "worktree",
+            "pull-requests", "commits", "supplied",
+        }
+        assert set(st._WINDOW_SOURCE) == emitted
+        # every mapped source (bar the deliberate blank) has exactly one row
+        mapped = {s for s in st._WINDOW_SOURCE.values() if s}
+        assert mapped == {src for src, _, _ in st._ROUTE_OUT}
