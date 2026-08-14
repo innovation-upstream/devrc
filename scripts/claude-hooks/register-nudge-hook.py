@@ -13,6 +13,16 @@ Registers:
     notifier — a best-effort side-effect hook, appended alongside any existing
     Stop/clawgate-stop/tmux hooks).
   * Stop: next-step-nudge.py
+  * SessionStart / UserPromptSubmit / PostToolUse / Stop: agent-ledger-hook.py
+
+🔴 agent-ledger-hook.py is registered on PostToolUse with NO `matcher`, unlike the
+three nudges above. Those are about the shape of a Bash COMMAND, so `Bash` is the
+right scope; the ledger records that a tool call HAPPENED, and scoping it to Bash
+would silently stop the heartbeat for a session doing a long stretch of Read/Edit
+work — which then renders `stale` while it is demonstrably working, because
+`classify_status` lets `stale` win over `busy`. The hook itself throttles
+(30s), so the unmatched registration costs one short-circuiting process per tool
+call, not a write.
 
 🔴 Stop is a SHARED event with three pre-existing owners this script does not own and
 must never disturb: the fuzzyclaw tmux writer (~/.config/tmux/task-hook.sh), the
@@ -45,6 +55,11 @@ POST_BASH_CMDS = [
 # dispatched on the event name in its stdin payload).
 NOTIFY_CMD = "python3 ~/.claude/hooks/claude-notify.py"
 NOTIFY_EVENTS = ["UserPromptSubmit", "Stop", "SubagentStop"]
+
+# The agent activity ledger's writer. Four events, and a PostToolUse entry with
+# no matcher — see the module docstring for why it is not scoped to Bash.
+LEDGER_CMD = "python3 ~/.claude/hooks/agent-ledger-hook.py"
+LEDGER_EVENTS = ["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop"]
 
 # Hooks registered on exactly one event each: {event: [command, ...]}.
 SINGLE_EVENT_CMDS = {
@@ -81,6 +96,20 @@ for event in NOTIFY_EVENTS:
         continue
     arr.append({"hooks": [{"type": "command", "command": NOTIFY_CMD}]})
     added.append("%s: %s" % (event, NOTIFY_CMD))
+
+# --- the agent activity ledger writer (append-only, same discipline) ---------
+# 🔴 `registered_commands` looks across the WHOLE event array, matchered entries
+# included, so re-running this after a hand-edit that scoped the ledger to Bash
+# would NOT add a second entry — it would leave the narrower one in place. That
+# is the right failure (append-only never rewrites what it does not own) and it
+# is the one case where this script's idempotence hides a real misconfiguration;
+# `tests/test_register_nudge_hook.py` pins the shape it writes.
+for event in LEDGER_EVENTS:
+    arr = hooks.setdefault(event, [])
+    if LEDGER_CMD in registered_commands(arr):
+        continue
+    arr.append({"hooks": [{"type": "command", "command": LEDGER_CMD}]})
+    added.append("%s: %s" % (event, LEDGER_CMD))
 
 # --- single-event hooks (append-only, same discipline) -----------------------
 for event, cmds in SINGLE_EVENT_CMDS.items():

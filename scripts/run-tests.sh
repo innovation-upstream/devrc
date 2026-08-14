@@ -332,6 +332,12 @@ HERMETIC_TARGETS=(
   # because #452's hook shipped to both hosts and sat inert — every component was
   # tested, the seam between them was owned by nobody.
   scripts/claude-hooks/tests/test_registrar_activation.py
+  # Same reason again — a FILE, not the directory. Writer 1 of the agent activity
+  # ledger. It fires on PostToolUse, i.e. after EVERY tool call the operator's
+  # session makes, so its fail-open contract (exit 0, nothing on stdout or
+  # stderr, on every malformed input) is felt on every turn and is gated here
+  # rather than left to the ungated hand-rolled scripts beside it.
+  scripts/claude-hooks/tests/test_agent_ledger_hook.py
 )
 
 # --- DEV-HOST-ONLY set ---------------------------------------------------------
@@ -751,7 +757,19 @@ TARGET_FLOORS=(
   # measured rather than reconciled by hand — the gate printed
   # `scripts/tests collected=3932`, not the 3915 this branch alone measured.
   #   _suggested_floor 3932 = 3932 - min(50, max(1, 196)) = 3882.
-  "scripts/tests|3882"
+  #
+  # 2026-08-13, the agent activity ledger (spec #428): +55 on this target —
+  # 35 in the NEW `scripts/tests/test_agent_ledger.py` and 20 added to
+  # `test_session_manager.py` (the §9 ledger section, 418 -> 438). Gate's own
+  # count on this branch: `scripts/tests collected=3987`.
+  #   _suggested_floor 3987 = 3987 - min(50, max(1, 199)) = 3937.
+  # ⚠ ZERO new skips on this target. TWO NEW FILES land under it (the module
+  # `scripts/lib/agent_ledger.py` and its test) plus the hook and its own
+  # target — all `git add`ed, which this repo's flake requires or the deploy
+  # silently omits them.
+  # ⚠ If main moves before this merges, re-run the gate on the MERGED tree and
+  # copy what it prints. Do not reconcile the two sides by arithmetic.
+  "scripts/tests|3937"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
@@ -861,6 +879,10 @@ TARGET_FLOORS=(
   # Gate's own count through the gate's own rule:
   #   _suggested_floor 17 = 17 - min(50, max(1, 17/20 = 0 -> 1)) = 17 - 1 = 16.
   "scripts/claude-hooks/tests/test_registrar_activation.py|16"
+  # 2026-08-13, the agent activity ledger's WRITER arrives as a NEW target: 33
+  # collected. Gate's own count through the gate's own rule:
+  #   _suggested_floor 33 = 33 - min(50, max(1, 33/20 = 1)) = 33 - 1 = 32.
+  "scripts/claude-hooks/tests/test_agent_ledger_hook.py|32"
 )
 
 # The allowance rule, in one place, used by BOTH the drift message and anyone
