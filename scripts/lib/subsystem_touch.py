@@ -3296,7 +3296,7 @@ def skill_catalogue(skills_root: str | Path | None = None) -> tuple[tuple[str, s
             if not md.is_file():
                 continue
             fm = parse_front_matter(md.read_text(encoding="utf-8", errors="replace"))
-        except (OSError, Exception):
+        except Exception:  # OSError is one of these; naming both read as wider
             # A malformed or unreadable skill must not take the report down with
             # it — the same degrade-don't-die rule the reader learned from a
             # wrapped `aliases:`.
