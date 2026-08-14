@@ -85,7 +85,12 @@ FORMERLY_UNGATED = {
     # the assertion below reads it as one (a floor is only meaningfully "not
     # drifted" against what the suite actually collects) — it is NOT a
     # high-water mark, and it moves DOWN when a feature is removed.
-    "claude/skills/clickup/test": 71,
+    #
+    # 92 on 2026-08-14: js-source.mjs, the scanner both structural guards rest
+    # on, split by CODE POINT while indexing by CODE UNIT, so one emoji shifted
+    # every later offset. Its own controls asserted exactly the right property
+    # and had never been handed a non-ASCII character.
+    "claude/skills/clickup/test": 92,
 }
 
 
