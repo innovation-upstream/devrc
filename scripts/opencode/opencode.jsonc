@@ -44,7 +44,7 @@
 // patterns has known bypasses, which is the whole reason layer 2 exists.
 //
 // ==========================================================================
-// Mechanics of layer 1 (measured on v1.18.4 — do not re-derive)
+// Mechanics of layer 1 (measured on v1.18.16 — do not re-derive)
 // ==========================================================================
 //
 // 🔴 PERMISSION ORDERING IS LOAD-BEARING AND IS THE INVERSE OF CLAUDE CODE.
@@ -70,7 +70,7 @@
 // that fires too often on a mutation family is a far better failure than an
 // `ask` that never fires on the spelling an operator actually types.
 //
-// Other measured facts baked into this file (v1.18.4):
+// Other measured facts baked into this file (v1.18.16):
 //   * `opencode run` AUTO-REJECTS an `ask` (it prints "auto-rejecting"); only
 //     the interactive TUI turns one into a prompt. `opencode debug agent
 //     --tool` AUTO-APPROVES it. So `ask` means "friction for a human", never
@@ -83,11 +83,11 @@
 //   * a tool listed in this global `permission` block is re-enabled on the
 //     HIDDEN title/summary/compaction agents too, whose stock tool set is
 //     EMPTY. Hence the explicit `"*": "deny"` on each of them below.
-//   * DEPRECATED in 1.18.4, deliberately absent: agent-level `tools`, `mode`
+//   * DEPRECATED in 1.18.16, deliberately absent: agent-level `tools`, `mode`
 //     (at config level), `layout`, `autoshare`, `reference` (now `references`),
 //     `maxSteps` (now `steps`). `theme`/`keybinds`/`tui` moved to a separate
 //     ~/.config/opencode/tui.json and are NOT set here.
-//   * there is NO `list` tool and NO `websearch` tool on 1.18.4. The real set is
+//   * there is NO `list` tool and NO `websearch` tool on 1.18.16. The real set is
 //     exactly {bash, edit, glob, grep, invalid, question, read, skill, task,
 //     todowrite, webfetch, write}. Naming a nonexistent tool here is a no-op.
 {
@@ -178,7 +178,7 @@
     // — a blanket `"read": "allow"` here lands AFTER those and silently defeats
     // the `.env` guard on every agent. The default already allows everything
     // except `.env`, so there is nothing to add.
-    // `list` and `websearch` are absent because NO SUCH TOOLS EXIST on 1.18.4.
+    // `list` and `websearch` are absent because NO SUCH TOOLS EXIST on 1.18.16.
     "glob": "allow",
     "grep": "allow",
     "edit": "allow",

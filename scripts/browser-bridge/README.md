@@ -1652,7 +1652,14 @@ field** (the CDP ops are bounded typed ops only; see the CDP security model abov
   *Prerequisite:* an opencode whose `debug agent` reports a browser-only tool set.
   **Both hosts run 1.18.4 and both resolve browser-only** (verified: the dump
   parses to exactly one enabled tool, `browser`). There is no version-skew caveat
-  here any more.
+  here any more. 🔴 1.18.4 is what the hosts RUN; `flake.lock` pins **1.18.16**
+  and they converge on the next `ship.sh` — merged is not deployed. The
+  browser-only resolution was re-derived on 1.18.16 too — identical resolved tool
+  set, on both binaries. 🔴 The RAW dump is NOT byte-stable, on either binary: the
+  `permission` array's order follows a directory walk and varies run to run, so
+  `cmp` on two dumps differs for reasons that have nothing to do with the version.
+  Compare the resolved tool set, or canonicalise first. So the deploy gap does not
+  reopen the version-skew question.
 
   *The failure mode that actually bites — capture the dump to a FILE, never a
   pipe.* opencode does not reliably flush stdout before exiting when stdout is a
@@ -1742,7 +1749,8 @@ the wrapper substitutes them per run.)
 
 **opencode version.** The custom-tool mechanism (`.opencode/tools/*.js`,
 `permission: {"*": deny, …}`) is **verified on 1.18.4, which is what BOTH hosts
-run** — `opencode debug agent browser-agent` resolves to `bash:false … browser:true`
+run today, and re-derived on the pinned 1.18.16** — `opencode debug agent
+browser-agent` resolves to `bash:false … browser:true`
 (exactly one enabled tool) on each, plus an end-to-end `opencode debug agent …
 --tool browser` run against a fake bridge. The wrapper still writes the tool to
 BOTH `.opencode/tools/` and `.opencode/tool/` as cheap insurance against a future

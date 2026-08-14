@@ -1096,7 +1096,8 @@ in
 
   # 🔴 GENERATED, not symlinked — and that is the whole point.
   # opencode does NOT expand `@`-imports inside AGENTS.md/CLAUDE.md (measured on
-  # v1.18.4 with an all-tools-denied agent, so no file read was possible: an
+  # v1.18.4, NOT re-derived since — it needs a live model call — with an
+  # all-tools-denied agent, so no file read was possible: an
   # imported passphrase came back NONE, the same content inline came back
   # verbatim). ~/.claude/CLAUDE.md is ~1.5 KB of `@PRINCIPLES.md` + `@RULES.md`
   # import lines, so pointing opencode at it would deliver NONE of the 32 KB of

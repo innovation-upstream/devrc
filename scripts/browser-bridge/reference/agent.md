@@ -26,8 +26,9 @@ command unrunnable, which is why fixing the first didn't appear to help:
    be reached. Fixed by probing without injecting.
 
 🔴 **Every doc misattributed both symptoms to an opencode *version* problem for the
-entire arc.** They are not version-related — both hosts run opencode 1.18.4 and both
-resolve browser-only. Do not re-open that hypothesis.
+entire arc.** They are not version-related — both hosts run 1.18.4 and both
+resolve browser-only, and the same resolution was re-derived on the pinned
+1.18.16. Do not re-open that hypothesis.
 
 ✅ **The `browser agent`-first default IS shipped** (SKILL.md → `## FIRST DECISION`).
 It was held back until capability was measured rather than argued from token
@@ -173,8 +174,9 @@ browser agent "go to news.ycombinator.com and report the top 3 story titles" \
   fail-closed property is *verified at runtime* rather than trusted — on any
   opencode where the host-tool denial didn't take, `browser agent` refuses instead
   of running the model unconfined. The gate runs BEFORE the tab is opened, so a
-  gate failure leaks no tab. **Both hosts run opencode 1.18.4 and both resolve
-  browser-only** — there is no version-skew caveat.
+  gate failure leaks no tab. **Both hosts run 1.18.4 and both resolve
+  browser-only**, and it re-derives identically on the pinned 1.18.16 — there is
+  no version-skew caveat.
   - ⚠ **If you check the gate by hand, redirect to a FILE**
     (`opencode debug agent browser-agent > /tmp/gate.json`), never a pipe or
     `$(...)`: opencode doesn't reliably flush stdout before exiting into a pipe, so
