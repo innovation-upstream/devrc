@@ -20,9 +20,15 @@ three nudges above. Those are about the shape of a Bash COMMAND, so `Bash` is th
 right scope; the ledger records that a tool call HAPPENED, and scoping it to Bash
 would silently stop the heartbeat for a session doing a long stretch of Read/Edit
 work — which then renders `stale` while it is demonstrably working, because
-`classify_status` lets `stale` win over `busy`. The hook itself throttles
-(30s), so the unmatched registration costs one short-circuiting process per tool
-call, not a write.
+`classify_status` lets `stale` win over `busy`.
+
+The cost, MEASURED rather than asserted: ~21 ms per call against ~9 ms for a bare
+interpreter start, and the hook throttles at 30s, so the overwhelming majority of
+those calls resolve the pane from `$TMUX_PANE`, read one small file and exit
+without writing and without spawning `tmux`. An earlier version of this comment
+said "one short-circuiting process per tool call" while the hook was in fact
+shelling out to `tmux` BEFORE consulting the throttle — two processes, every
+call. That ordering is now reversed and pinned by a test.
 
 🔴 Stop is a SHARED event with three pre-existing owners this script does not own and
 must never disturb: the fuzzyclaw tmux writer (~/.config/tmux/task-hook.sh), the

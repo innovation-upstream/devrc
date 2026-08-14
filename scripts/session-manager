@@ -471,15 +471,34 @@ CAVEATS = {
                  "over SSH and so would make the two hosts report by different "
                  "rules."),
     },
+    # 🔴 THIS CAVEAT USED TO SAY A REMOTE ROW CARRIES NO `claude_session_id` AND
+    # NO `age_secs`, AND IS NEVER `stale`. That was true of fuzzyclaw and is NOT
+    # true of the tool: the agent activity ledger is read PER HOST, so a remote
+    # row now gets both fields and can be `stale`. The claim survived the change
+    # for one revision, and it is the machine-readable one — a `--json` consumer
+    # following it would discard exactly the three fields the ledger exists to
+    # add. Narrowed here to what is still true, which is a statement about
+    # fuzzyclaw ALONE, with the ledger's own scope stated separately below.
     "fuzzyclaw_scope": {
         "scope": "local_host_only",
-        "null_fields_on_remote_rows": ["fuzzyclaw", "claude_session_id",
-                                       "age_secs"],
+        "null_fields_on_remote_rows": ["fuzzyclaw"],
         "note": ("fuzzyclaw task files are LOCAL state, so a row from the "
-                 "remote host carries no task, no claude_session_id and no "
-                 "age, and is NEVER labelled `stale` — it is classified from "
-                 "the title glyph alone. Do not read a remote row's absent "
-                 "task as a measured absence."),
+                 "remote host carries no `fuzzyclaw` task. Do not read a "
+                 "remote row's absent task as a measured absence. It says "
+                 "NOTHING about `age_secs`/`claude_session_id`/`stale` — those "
+                 "come from the agent ledger, which IS read per host; see "
+                 "caveats.ledger_scope."),
+    },
+    "ledger_scope": {
+        "scope": "per_host",
+        "note": ("`age_secs` and `claude_session_id` come from the agent "
+                 "activity ledger, read on EVERY scanned host, so a remote row "
+                 "carries both and CAN be `stale`. `age_source` names the "
+                 "writer that supplied the age (`ledger`/`fuzzyclaw`/null). A "
+                 "null age is not a measured zero: it means no writer has "
+                 "recorded that window — a session that has not taken a turn "
+                 "since the hook was registered has none yet. Read "
+                 "report.ledger for what was and was not measured."),
     },
     # 🔴 The third limit, and the one most likely to be over-read: `waiting`
     # is a SCREEN SCRAPE of a TUI, and its signal set is CLOSED. Carried in the
@@ -1984,6 +2003,19 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
         if not use_ledger:
             ledger_res[host] = {"status": "skipped", "records": [],
                                 "error": None}
+        elif not (panes_res["reachable"] or wins_res["reachable"]):
+            # 🔴 NOT AN OPTIMISATION DRESSED AS A MEASUREMENT. This host answered
+            # NEITHER tmux call, so it is down; issuing a third command buys one
+            # more `ConnectTimeout=4` on every scan of an offline laptop and can
+            # only return the same failure. The status is still `error` — nothing
+            # was measured and no count is published — and the reason SAYS the
+            # read was never attempted rather than implying it was tried and
+            # failed, which are different facts about the host.
+            ledger_res[host] = _host_ledger(
+                {"reachable": False,
+                 "error": "host answered neither tmux call; the ledger read "
+                          "was not attempted"},
+                live, host)
         else:
             if ledger_outputs is not None:
                 raw_led = ledger_outputs.get(host)
@@ -2536,6 +2568,7 @@ def render_caveats(report) -> list:
     cav = (report or {}).get("caveats") or CAVEATS
     det = cav.get("claude_detection") or {}
     fz = cav.get("fuzzyclaw_scope") or {}
+    led = cav.get("ledger_scope") or {}
     wt = cav.get("waiting_signal") or {}
     return [
         # 🔴 The signal set is ENUMERATED in the footer, because `WAIT: no` is
@@ -2552,9 +2585,17 @@ def render_caveats(report) -> list:
         "shallower than agent-ops' /proc walk; a claude under a wrapper shell "
         "reads as `shell`".format(det.get("pattern", "claude")),
         "  caveat[fuzzyclaw_scope]: fuzzyclaw is {} — REMOTE rows carry null "
-        "{} and are never `stale`".format(
+        "{}. This says NOTHING about age/session-id/stale".format(
             fz.get("scope", "local_host_only"),
             "/".join(fz.get("null_fields_on_remote_rows") or [])),
+        # 🔴 Printed beside the one it corrects, on purpose. The line above was
+        # read for months as "remote rows have no age", which stopped being true
+        # the moment the ledger shipped; leaving it alone and adding this one
+        # would have left both readings available.
+        "  caveat[ledger_scope]: age_secs/claude_session_id come from the "
+        "agent ledger, read {} — a REMOTE row has both and CAN be `stale`. A "
+        "null age means NO WRITER HAS RECORDED that window, not age 0; "
+        "`age_source` names the writer".format(led.get("scope", "per_host")),
     ]
 
 

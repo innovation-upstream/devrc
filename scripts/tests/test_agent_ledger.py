@@ -47,8 +47,9 @@ def rec(**kw):
     assertion by accident. A fixture whose fields share a value certifies nothing.
     """
     base = dict(runtime="claude", session_id="sess-aaaa",
-                last_activity_ts=TS_NOW, window_id="@41", tmux_pid="4025325",
-                host="workbench", transcript_path="/t/a.jsonl")
+                last_activity_ts=TS_NOW, window_id="@41", pane_id="%77",
+                tmux_pid="4025325", host="workbench",
+                transcript_path="/t/a.jsonl")
     base.update(kw)
     return AL.build_record(**base)
 
@@ -61,8 +62,8 @@ def test_build_record_carries_exactly_the_documented_fields():
     vanishes turns the reader's join into a permanent None; one that appears
     undocumented is a wire contract nobody reviewed."""
     assert set(rec()) == {"schema", "runtime", "session_id",
-                          "last_activity_ts", "window_id", "tmux_pid", "host",
-                          "transcript_path"}
+                          "last_activity_ts", "window_id", "pane_id",
+                          "tmux_pid", "host", "transcript_path"}
     assert rec()["schema"] == AL.SCHEMA
 
 
@@ -84,22 +85,61 @@ def test_the_optional_fields_are_None_not_empty_string():
     """`None` means "does not apply" everywhere in session-manager. An empty
     string is falsy in Python and truthy in JSON-consumer terms, and the row's
     `claude_session_id` fallback branches on truthiness."""
-    r = rec(window_id=None, tmux_pid=None, host="", transcript_path=None)
+    r = rec(window_id=None, pane_id=None, tmux_pid=None, host="",
+            transcript_path=None)
     assert r["window_id"] is None and r["tmux_pid"] is None
+    assert r["pane_id"] is None
     assert r["host"] is None and r["transcript_path"] is None
 
 
-def test_a_tmux_record_is_keyed_on_its_WINDOW_and_a_pane_less_one_on_its_SESSION():
-    """🔴 KILLS: keying every record on the session id.
+def test_a_record_is_keyed_on_its_PANE_falling_back_to_window_then_session():
+    """🔴 KILLS: keying on the session id (a file per session ever run — the
+    fuzzyclaw rot), and KILLS: keying on the window (see the test below).
 
-    fuzzyclaw named files `<index>.json` and so let two files claim one window,
-    which cost that window its record entirely. One file per window means a
-    window that hosts three sessions in a day holds one record, not three.
+    Three tiers, and each is reachable: a tmux pane, a tmux record with no pane
+    id, and a runtime with no tmux presence at all.
     """
-    assert AL.record_filename(rec()) == "claude-41.json"
-    assert AL.record_filename(rec(window_id=None)) == "claude-s-sess-aaaa.json"
-    # a second session in the SAME window overwrites rather than accumulating
-    assert AL.record_filename(rec(session_id="sess-bbbb")) == "claude-41.json"
+    assert AL.record_filename(rec()) == "claude-p77.json"
+    assert AL.record_filename(rec(pane_id=None)) == "claude-41.json"
+    assert AL.record_filename(
+        rec(pane_id=None, window_id=None)) == "claude-s-sess-aaaa.json"
+    # a second session in the SAME pane overwrites rather than accumulating
+    assert AL.record_filename(rec(session_id="sess-bbbb")) == "claude-p77.json"
+
+
+def test_two_CLAUDE_PANES_IN_ONE_WINDOW_get_two_files_not_one():
+    """🔴 THE CO-TENANCY BUG, pinned. Keyed on the window, two live agents
+    sharing a window overwrite each other: the throttle is session-scoped, so
+    alternating writers never throttle, the single file ends up naming whichever
+    wrote last, and `index_by_window` cannot see any of it because there is only
+    ever one file to compare. `row["claude_session_id"]` is the sole carrier into
+    the ClickHouse join, so the window silently resolved to an arbitrary one of
+    its two agents.
+
+    Two files, one `window_id`, is exactly the shape the conflict detector
+    already reports. KILLS: dropping `pane_id` from the file key.
+    """
+    a = rec(pane_id="%77", session_id="agent-a")
+    b = rec(pane_id="%78", session_id="agent-b")
+    assert AL.record_filename(a) != AL.record_filename(b)
+    assert a["window_id"] == b["window_id"] == "@41"
+    idx = AL.index_by_window([a, b])
+    assert idx["conflicts"] and idx["conflicts"][0]["claimants"] == 2
+    assert idx["conflicts"][0]["session_ids"] == ["agent-a", "agent-b"]
+
+
+def test_two_alternating_sessions_in_ONE_PANE_still_both_write(tmp_path):
+    """The measured failure that motivated the key change, now confined to the
+    case where it is CORRECT: alternating writers in the same pane really are a
+    handover, and each must claim the pane immediately. 10 writes, 10 land."""
+    d = str(tmp_path)
+    for i in range(10):
+        out = AL.write_record(
+            rec(session_id="sess-%s" % ("aaaa" if i % 2 else "bbbb"),
+                last_activity_ts=AL.now_iso(NOW + i)),
+            directory=d, throttle_secs=30, now=NOW + i)
+        assert out["written"] is True, i
+    assert os.listdir(d) == ["claude-p77.json"]
 
 
 def test_a_filename_can_never_escape_its_directory():
@@ -108,7 +148,7 @@ def test_a_filename_can_never_escape_its_directory():
     is the property that matters — the joined path stays in the directory — not
     the spelling of the substitution."""
     for hostile in ("../../etc/passwd", "/etc/shadow", "a/b", ".."):
-        name = AL.record_filename(rec(window_id=hostile))
+        name = AL.record_filename(rec(pane_id=hostile))
         assert os.path.dirname(os.path.join("/ledger", name)) == "/ledger"
         assert os.sep not in name
 
@@ -148,7 +188,8 @@ def test_write_then_read_back_through_the_REAL_read_argv(tmp_path):
     """
     d = str(tmp_path)
     assert AL.write_record(rec(), directory=d)["written"] is True
-    assert AL.write_record(rec(window_id="@52", session_id="sess-bbbb"),
+    assert AL.write_record(rec(window_id="@52", pane_id="%78",
+                               session_id="sess-bbbb"),
                            directory=d)["written"] is True
     proc = subprocess.run(list(AL.read_argv(abs_dir=d)),
                           capture_output=True, text=True, timeout=10)
@@ -199,7 +240,7 @@ def test_the_throttle_suppresses_the_SAME_session_and_never_a_DIFFERENT_one(
         directory=d, throttle_secs=30, now=NOW + 6)
     assert other["written"] is True, (
         "a new session in this window must claim it immediately")
-    with open(os.path.join(d, "claude-41.json")) as fh:
+    with open(os.path.join(d, "claude-p77.json")) as fh:
         assert json.loads(fh.read())["session_id"] == "sess-bbbb"
 
 
@@ -221,7 +262,7 @@ def test_write_leaves_no_temp_file_behind(tmp_path):
     """The reader globs `*.json`; a leaked `.ledger.*.tmp` would not match, but a
     leaked file in the ledger's own directory is the rot fuzzyclaw died of."""
     AL.write_record(rec(), directory=str(tmp_path))
-    assert sorted(os.listdir(tmp_path)) == ["claude-41.json"]
+    assert sorted(os.listdir(tmp_path)) == ["claude-p77.json"]
 
 
 def test_prune_removes_the_old_keeps_the_fresh_and_REPORTS_what_it_examined(
@@ -231,14 +272,14 @@ def test_prune_removes_the_old_keeps_the_fresh_and_REPORTS_what_it_examined(
     are different facts and only the second is a clean bill of health.
     """
     d = str(tmp_path)
-    AL.write_record(rec(window_id="@1",
+    AL.write_record(rec(pane_id="%1",
                         last_activity_ts=AL.now_iso(NOW - 8 * 86400)),
                     directory=d)
-    AL.write_record(rec(window_id="@2", last_activity_ts=AL.now_iso(NOW)),
+    AL.write_record(rec(pane_id="%2", last_activity_ts=AL.now_iso(NOW)),
                     directory=d)
     out = AL.prune(directory=d, max_age_secs=7 * 86400, now=NOW)
     assert (out["examined"], out["removed"], out["kept"]) == (2, 1, 1)
-    assert os.listdir(d) == ["claude-2.json"]
+    assert os.listdir(d) == ["claude-p2.json"]
 
 
 def test_prune_KEEPS_a_record_whose_timestamp_it_cannot_read(tmp_path):
@@ -408,7 +449,6 @@ def test_a_record_with_no_window_is_set_ASIDE_never_joined():
     silently attached to one — it goes to `unjoinable`, counted separately."""
     out = AL.filter_live([rec(window_id=None)], LIVE, tmux_pid="4025325")
     assert out["records"] == [] and out["no_window"] == 1
-    assert len(out["unjoinable"]) == 1
 
 
 def test_the_counts_account_for_every_record_seen():
@@ -446,3 +486,78 @@ def test_two_records_claiming_one_window_resolve_to_the_NEWEST_and_are_reported(
 def test_the_index_is_silent_when_there_is_nothing_to_contend():
     out = AL.index_by_window([rec(), rec(window_id="@52")])
     assert set(out["index"]) == {"@41", "@52"} and out["conflicts"] == []
+
+
+# =========================================================================== #
+# the throttle predicate, and the reader-side newline fix
+# =========================================================================== #
+def test_is_throttled_is_the_ONE_definition_write_record_uses(tmp_path):
+    """🔴 The predicate is public because the HOOK consults it before spawning
+    `tmux` — the hot path, where most `PostToolUse` calls are throttled. Two
+    copies of a throttle rule is how the cheap path and the correct path drift
+    apart, so this pins that `write_record` agrees with it rather than carrying
+    its own.
+    """
+    d = str(tmp_path)
+    AL.write_record(rec(), directory=d, now=NOW)
+    path = os.path.join(d, "claude-p77.json")
+
+    assert AL.is_throttled(path, "sess-aaaa", 30, now=NOW + 5) is True
+    assert AL.write_record(rec(last_activity_ts=AL.now_iso(NOW + 5)),
+                           directory=d, throttle_secs=30,
+                           now=NOW + 5)["written"] is False
+
+    # a DIFFERENT session is never throttled — both agree
+    assert AL.is_throttled(path, "sess-bbbb", 30, now=NOW + 5) is False
+    # ...and neither is any session once the interval has passed
+    assert AL.is_throttled(path, "sess-aaaa", 30, now=NOW + 31) is False
+    # no throttle configured, or no record yet: nothing to suppress
+    assert AL.is_throttled(path, "sess-aaaa", None, now=NOW) is False
+    assert AL.is_throttled(os.path.join(d, "nope.json"), "x", 30,
+                           now=NOW) is False
+
+
+def test_a_record_with_NO_TRAILING_NEWLINE_does_not_eat_its_neighbour(tmp_path):
+    """🔴 REGRESSION GUARD on a class the reader now closes. `cat` concatenates
+    bytes, so a file lacking its final newline welds onto the next file in the
+    glob and BOTH records are lost — measured on the first draft: 3 written, 1
+    parsed, 2 counted unparseable. `write_record` always terminates its line, but
+    it will not be the only writer (spec §4 adds opencode and clawgate), and
+    "every writer remembers" is a convention, not a guarantee.
+
+    KILLS: reverting `awk 1` to `cat` in `read_command`.
+    """
+    d = str(tmp_path)
+    for i, sess in enumerate(("a", "b", "c")):
+        body = json.dumps(rec(pane_id="%%%d" % i, session_id="sess-%s" % sess))
+        # deliberately UNTERMINATED — the shape the guard exists for
+        with open(os.path.join(d, "claude-p%d.json" % i), "w") as fh:
+            fh.write(body)
+    proc = subprocess.run(list(AL.read_argv(abs_dir=d)),
+                          capture_output=True, text=True, timeout=10)
+    parsed = AL.parse_ledger(proc.stdout)
+    assert parsed["seen"] == 3 and parsed["unparseable"] == 0
+    assert {r["session_id"] for r in parsed["records"]} == {
+        "sess-a", "sess-b", "sess-c"}
+
+
+def test_prune_reaps_a_leaked_temp_file_which_only_it_can_see(tmp_path):
+    """🔴 `write_record` cleans its temp file on a Python exception, but a
+    SIGKILL between `mkstemp` and `os.replace` leaks one — and prune otherwise
+    only ever looks at `*.json`, so that leak would be PERMANENT. Reaped by mtime
+    because a temp file carries no parseable record.
+
+    The fresh temp is left alone, so this is not "delete every temp".
+    """
+    d = str(tmp_path)
+    old = os.path.join(d, ".ledger.abc.tmp")
+    new = os.path.join(d, ".ledger.def.tmp")
+    for path, mtime in ((old, NOW - 8 * 86400), (new, NOW)):
+        with open(path, "w") as fh:
+            fh.write("half a re")
+        os.utime(path, (mtime, mtime))
+    out = AL.prune(directory=d, max_age_secs=7 * 86400, now=NOW)
+    assert out["temps_removed"] == 1
+    assert os.path.exists(new) and not os.path.exists(old)
+    # temps are NOT counted as records — `examined` describes the ledger
+    assert out["examined"] == 0

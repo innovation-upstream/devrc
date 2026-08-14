@@ -17,25 +17,44 @@ Spec: `claudedocs/spec-agent-activity-ledger.md` (#428).
 
 THE RECORD
 ----------
-    {schema, runtime, session_id, last_activity_ts, window_id?, tmux_pid?,
-     host?, transcript_path?}
+    {schema, runtime, session_id, last_activity_ts, window_id?, pane_id?,
+     tmux_pid?, host?, transcript_path?}
 
 🔴 `None` means "does not apply", NEVER zero — the convention throughout
 `session-manager`. A clawgate agent has no pane, so its `window_id`/`tmux_pid` are
 null; that is a fact about the runtime, not a missing measurement.
 
-ONE FILE PER JOIN KEY, ONE LINE PER FILE
-----------------------------------------
-A tmux record is keyed on its `window_id`, because the window is what the reader
-joins to and a window must not accumulate one file per session it has ever hosted —
-fuzzyclaw's `<index>.json` naming let two files claim one window, which cost that
-window its record entirely (`index_tasks_by_window`), and grew to 401 files of which
-90% were stale.
+ONE FILE PER PANE, ONE LINE PER FILE
+------------------------------------
+A tmux record is keyed on its `pane_id` — NOT on the window it is joined by, and not
+on the session. Sessions come and go inside one pane, so keying on the session would
+accumulate a file per session ever run (fuzzyclaw's rot: 401 files, ~90% stale).
+
+🔴 KEYING ON THE WINDOW LOOKS RIGHT AND IS WRONG, because a window can hold TWO
+CLAUDE PANES. One file per window then means two live agents overwrite each other:
+measured on the first draft, 10 alternating writes from two sessions inside a 10s
+throttle window all landed (the throttle is session-scoped, so alternating writers
+never throttle), the file ended up naming whichever wrote last, and
+`index_by_window` could not see any of it — there was only ever one file to compare.
+The row's `claude_session_id` is the sole carrier into the ClickHouse join, so a
+shared window silently resolved to an arbitrary one of its two agents.
+
+Per pane, the same situation produces TWO files carrying ONE `window_id`, which is
+exactly the shape `index_by_window` already reports as a conflict. The window still
+gets one row and one age — the newest — but the contention is now visible instead
+of being decided by write order.
 
 The body is EXACTLY ONE LINE of JSON terminated by a newline, so the whole ledger
-reads as `cat dir/*.json` over a pipe — one command, local or over SSH, no
-per-file round trip. A writer that emits a second line breaks the next record on the
-wire; `write_record` is the only writer and it enforces this.
+reads as one command over a pipe — local or over SSH, no per-file round trip.
+
+🔴 The read uses `awk 1` rather than `cat`, and that is a correctness fix, not a
+style one. `cat` concatenates bytes, so a record file with NO trailing newline welds
+onto its glob-neighbour and BOTH are lost: measured on the first draft, 3 records
+written, 1 parsed, 2 counted `unparseable`. `write_record` always terminates its
+line — but it is not the only writer for long (spec §4 adds opencode and clawgate),
+and "every writer remembers the newline" is a convention across processes, which is
+not a guarantee. `awk 1` emits every input line with a terminator regardless, so the
+class is closed at the reader for the price of one fork.
 
 🔴 THE GENERATION GUARD — WHY `tmux_pid` IS ON THE RECORD
 ---------------------------------------------------------
@@ -72,10 +91,17 @@ from datetime import datetime, timezone
 SCHEMA = 1
 
 # Bumping SCHEMA is a WIRE break: the reader rejects a record whose schema it does
-# not know rather than guessing at the shape. Both halves ship together (the hook
-# and session-manager are one repo, one switch), so there is no mixed-version
-# window to support — and a record silently reinterpreted under the wrong shape is
-# how a wrong session id gets published.
+# not know rather than guessing at the shape — a record silently reinterpreted
+# under the wrong shape is how a wrong session id gets published.
+#
+# 🔴 THERE **IS** A MIXED-VERSION WINDOW, and an earlier version of this comment
+# denied it. The hook runs the nix-store COPY (`~/.claude/hooks/agent_ledger.py`,
+# a `home.file`) while `session-manager` loads the repo WORKING COPY by path — so
+# between a `git pull` and a `home-manager switch`, the very gap this repo's
+# CLAUDE.md warns about, writer and reader are running different code. Writer and
+# reader agree by construction only at the instant of a switch. What SCHEMA buys
+# is that the disagreement surfaces as a rising `unparseable` count in the
+# rendered ledger section rather than as a wrong value on a row.
 KNOWN_SCHEMAS = frozenset({SCHEMA})
 
 HOME = os.path.expanduser("~")
@@ -148,7 +174,8 @@ def now_iso(now=None) -> str:
 
 
 def build_record(runtime, session_id, last_activity_ts, window_id=None,
-                 tmux_pid=None, host=None, transcript_path=None) -> dict:
+                 pane_id=None, tmux_pid=None, host=None,
+                 transcript_path=None) -> dict:
     """The record, validated. Raises ValueError on a shape that cannot be joined.
 
     🔴 It raises rather than returning a partial record. A record with no
@@ -169,6 +196,10 @@ def build_record(runtime, session_id, last_activity_ts, window_id=None,
         "session_id": str(session_id).strip(),
         "last_activity_ts": str(last_activity_ts).strip(),
         "window_id": (str(window_id).strip() or None) if window_id else None,
+        # The FILE KEY. `window_id` stays the JOIN key — the two are different
+        # jobs and collapsing them is what let two agents in one window
+        # overwrite each other (see the module docstring).
+        "pane_id": (str(pane_id).strip() or None) if pane_id else None,
         "tmux_pid": (str(tmux_pid).strip() or None) if tmux_pid else None,
         "host": (str(host).strip() or None) if host else None,
         "transcript_path": (str(transcript_path).strip() or None
@@ -176,18 +207,30 @@ def build_record(runtime, session_id, last_activity_ts, window_id=None,
     }
 
 
-def record_filename(rec) -> str:
-    """`claude-41.json` for a tmux record, `claude-s-<session>.json` without one.
+def filename_for(runtime, pane_id=None, window_id=None, session_id=None) -> str:
+    """The file key, in ONE place — the writer needs it before it has a record.
 
-    Keyed on `window_id` when there is one so a window holds exactly ONE record
-    whatever sequence of sessions has run in it. A runtime with no tmux presence
-    falls back to the session id, which is a UUID and unique by construction.
+    `claude-p11.json` for a pane, `claude-41.json` for a tmux record with no pane
+    id, `claude-s-<session>.json` for a runtime with no tmux presence at all. The
+    `p` prefix keeps the two namespaces apart: pane `%11` and window `@41` both
+    clean to digits, and without it a pane could collide with a window.
+
+    🔴 The hook resolves this from `$TMUX_PANE` alone — free, no subprocess —
+    so it can consult the throttle BEFORE deciding whether to shell out to tmux
+    for the window id and the server pid. That ordering is why this is a
+    standalone function rather than a body inside `record_filename`.
     """
-    runtime = _clean(rec.get("runtime") or "unknown")
-    wid = rec.get("window_id")
-    if wid:
-        return "%s-%s.json" % (runtime, _clean(wid))
-    return "%s-s-%s.json" % (runtime, _clean(rec.get("session_id") or "unknown"))
+    runtime = _clean(runtime or "unknown")
+    if pane_id:
+        return "%s-p%s.json" % (runtime, _clean(pane_id))
+    if window_id:
+        return "%s-%s.json" % (runtime, _clean(window_id))
+    return "%s-s-%s.json" % (runtime, _clean(session_id or "unknown"))
+
+
+def record_filename(rec) -> str:
+    return filename_for(rec.get("runtime"), rec.get("pane_id"),
+                        rec.get("window_id"), rec.get("session_id"))
 
 
 def valid_record(obj) -> bool:
@@ -221,15 +264,36 @@ def _read_existing(path):
     return obj if valid_record(obj) else None
 
 
-def write_record(rec, directory=LEDGER_DIR, throttle_secs=None, now=None) -> dict:
-    """Write `rec` atomically. Returns {"written", "path", "reason"}.
+def is_throttled(path, session_id, throttle_secs, now=None) -> bool:
+    """Would a write to `path` by `session_id` be suppressed right now?
 
     🔴 THE THROTTLE IS SESSION-SCOPED, and that is not a detail. Skipping a write
     because "one landed 4 seconds ago" is right for the same session's next tool
-    call and WRONG the moment a different session takes the window over: the stale
+    call and WRONG the moment a different session takes the pane over: the stale
     record's session id would keep winning the join for a full throttle interval,
-    publishing one session's history under another's window. So a differing
-    `session_id` always writes, immediately.
+    publishing one session's ClickHouse history under another's window. So a
+    differing `session_id` is never throttled.
+
+    ONE definition, called by `write_record` AND by the hook — which consults it
+    before spawning `tmux`, on the hot path where most calls are throttled. Two
+    copies of a predicate is how the cheap path and the correct path drift apart.
+    """
+    if not throttle_secs:
+        return False
+    import time as _time
+    ts = _time.time() if now is None else float(now)
+    prev = _read_existing(path)
+    if prev is None or prev.get("session_id") != session_id:
+        return False
+    prev_ts = parse_iso_epoch(prev.get("last_activity_ts"))
+    return prev_ts is not None and (ts - prev_ts) < float(throttle_secs)
+
+
+def write_record(rec, directory=LEDGER_DIR, throttle_secs=None, now=None) -> dict:
+    """Write `rec` atomically. Returns {"written", "path", "reason"}.
+
+    The throttle rule lives in `is_throttled` — see it for why it is scoped to
+    the session rather than to the file.
     """
     import time as _time
     ts = _time.time() if now is None else float(now)
@@ -237,13 +301,9 @@ def write_record(rec, directory=LEDGER_DIR, throttle_secs=None, now=None) -> dic
     try:
         os.makedirs(directory, exist_ok=True)
         path = os.path.join(directory, record_filename(rec))
-        if throttle_secs:
-            prev = _read_existing(path)
-            if prev is not None and prev.get("session_id") == rec.get("session_id"):
-                prev_ts = parse_iso_epoch(prev.get("last_activity_ts"))
-                if prev_ts is not None and (ts - prev_ts) < float(throttle_secs):
-                    return {"written": False, "path": path,
-                            "reason": "throttled", "error": None}
+        if is_throttled(path, rec.get("session_id"), throttle_secs, now=ts):
+            return {"written": False, "path": path,
+                    "reason": "throttled", "error": None}
         # Atomic: a reader `cat`ing the directory mid-write must see either the old
         # record or the new one, never half a line — a truncated line would be
         # counted `unparseable` and the window would silently lose its age.
@@ -276,14 +336,29 @@ def prune(directory=LEDGER_DIR, max_age_secs=DEFAULT_MAX_AGE, now=None) -> dict:
     read as an old one.
     """
     out = {"examined": 0, "removed": 0, "kept": 0, "unparseable": 0,
-           "error": None}
+           "temps_removed": 0, "error": None}
     import time as _time
     ts = _time.time() if now is None else float(now)
     try:
-        names = sorted(n for n in os.listdir(directory) if n.endswith(".json"))
+        entries = sorted(os.listdir(directory))
     except OSError as e:
         out["error"] = "%s: %s" % (type(e).__name__, e)
         return out
+    # 🔴 `write_record` cleans its own temp file on a Python exception, but a
+    # SIGKILL between `mkstemp` and `os.replace` leaks one — and since prune
+    # otherwise only ever looks at `*.json`, that leak would be PERMANENT. Same
+    # age rule, by mtime, because a temp file carries no parseable record.
+    for name in entries:
+        if not (name.startswith(".ledger.") and name.endswith(".tmp")):
+            continue
+        path = os.path.join(directory, name)
+        try:
+            if (ts - os.path.getmtime(path)) >= max_age_secs:
+                os.remove(path)
+                out["temps_removed"] += 1
+        except OSError:
+            pass
+    names = [n for n in entries if n.endswith(".json")]
     for name in names:
         path = os.path.join(directory, name)
         out["examined"] += 1
@@ -335,7 +410,7 @@ def read_command(subpath=LEDGER_SUBPATH, abs_dir=None) -> str:
     generations, one command.
     """
     return ('echo "%s $(tmux display-message -p \'#{pid}\' 2>/dev/null)"; '
-            'cat %s/*.json 2>/dev/null; exit 0'
+            'awk 1 %s/*.json 2>/dev/null; exit 0'
             % (SENTINEL, _dir_expr(subpath, abs_dir)))
 
 
@@ -417,7 +492,12 @@ def filter_live(records, live_windows, tmux_pid=None, unmeasured_reason=None):
       * `generation_mismatch`   — the window id exists but belongs to a DIFFERENT
                                   tmux server than the one that wrote the record
       * `no_window`             — the record has no `window_id` at all, so it is
-                                  not a tmux row; kept aside, never joined
+                                  not a tmux row; COUNTED and dropped, never
+                                  joined (a Claude run outside tmux). It is a
+                                  count and not a list on purpose: an earlier
+                                  revision returned the records too and every
+                                  caller discarded them, which is a field that
+                                  looks like a feature and is dead weight.
 
     🔴 When `live_windows is None` NOTHING is filtered and NOTHING is kept: the
     status is `unmeasured`, every count is None and `records` is empty. Returning
@@ -427,18 +507,17 @@ def filter_live(records, live_windows, tmux_pid=None, unmeasured_reason=None):
     before, on this exact join.
     """
     if live_windows is None:
-        return {"status": "unmeasured", "records": [], "unjoinable": [],
+        return {"status": "unmeasured", "records": [],
                 "seen": None, "live": None, "not_live": None,
                 "generation_mismatch": None, "generation_unchecked": None,
                 "no_window": None, "error": unmeasured_reason}
-    kept, unjoinable = [], []
+    kept = []
     counts = {"not_live": 0, "generation_mismatch": 0,
               "generation_unchecked": 0, "no_window": 0}
     for rec in (records or ()):
         wid = rec.get("window_id")
         if not wid:
             counts["no_window"] += 1
-            unjoinable.append(rec)
             continue
         rec_pid, live_pid = rec.get("tmux_pid"), tmux_pid
         if rec_pid and live_pid and str(rec_pid) != str(live_pid):
@@ -450,7 +529,7 @@ def filter_live(records, live_windows, tmux_pid=None, unmeasured_reason=None):
         if not (rec_pid and live_pid):
             counts["generation_unchecked"] += 1
         kept.append(rec)
-    return {"status": "ok", "records": kept, "unjoinable": unjoinable,
+    return {"status": "ok", "records": kept,
             "seen": len(records or ()), "live": len(kept), "error": None,
             **counts}
 
@@ -465,8 +544,10 @@ def index_by_window(records) -> dict:
     window being dropped. Contested windows are reported either way — a silent
     tie-break is how the wrong session id gets published without a trace.
 
-    Ties (identical timestamps) resolve on the record read first, which is
-    `sorted()` filename order from `read_command` — deterministic, not arbitrary.
+    Ties (identical timestamps) resolve on the record read FIRST. That is the
+    shell's glob order in `read_command` — locale collation, not Python
+    `sorted()`, which an earlier version of this sentence claimed. Stable for a
+    given host and locale; not something to depend on across hosts.
     """
     index, conflicts = {}, {}
     for rec in (records or ()):

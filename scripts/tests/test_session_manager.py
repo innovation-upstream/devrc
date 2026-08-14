@@ -3881,16 +3881,20 @@ def test_the_caveats_are_in_the_json_as_structured_fields_not_prose():
     """🔴 KILLS: dropping `caveats` from the report, or reducing it to a
     string a consumer would have to parse."""
     cav = mix_gather()["caveats"]
-    assert set(cav) == {"claude_detection", "fuzzyclaw_scope",
+    assert set(cav) == {"claude_detection", "fuzzyclaw_scope", "ledger_scope",
                         "waiting_signal"}
     det = cav["claude_detection"]
     assert det["method"] == "pane_current_command_regex"
     assert det["pattern"] == sm.CLAUDE_RE.pattern == "claude"
     fz = cav["fuzzyclaw_scope"]
     assert fz["scope"] == "local_host_only"
-    assert fz["null_fields_on_remote_rows"] == ["fuzzyclaw",
-                                                "claude_session_id",
-                                                "age_secs"]
+    # 🔴 NARROWED, and the narrowing is the point. This list used to include
+    # `claude_session_id` and `age_secs`, which stopped being true the moment
+    # the ledger shipped — it is read per host, so a remote row carries both.
+    # The caveat is the MACHINE-READABLE one: a `--json` consumer following the
+    # old list would discard exactly the fields the ledger exists to add.
+    assert fz["null_fields_on_remote_rows"] == ["fuzzyclaw"]
+    assert cav["ledger_scope"]["scope"] == "per_host"
     for entry in cav.values():
         assert entry["note"] and isinstance(entry["note"], str)
 
@@ -3903,20 +3907,56 @@ def test_the_remote_null_field_LEDGER_is_true_of_a_real_remote_row():
     and non-null on the equivalent LOCAL row (or the caveat names fields that
     are always null and the remote-vs-local distinction it exists to draw is
     vacuous — the positive control).
+
+    🔴 RUN IN BOTH LEDGER CONFIGURATIONS, and that is not thoroughness — it is
+    the fix for how this guard went blind. It reads `base_gather()`, which is
+    pinned `use_ledger=False`, so when the ledger arrived this test could no
+    longer see the two fields it had been asserting. A caveat naming
+    `age_secs`/`claude_session_id` as null-on-remote would have stayed green
+    here forever while the tool printed the opposite. Re-adding either to the
+    list now fails on the ledger-ON pass.
     """
-    report = base_gather()
-    ledger = report["caveats"]["fuzzyclaw_scope"]["null_fields_on_remote_rows"]
-    remote = report["hosts"]["laptop"]["windows"][0]
-    assert remote["host"] == "laptop"
-    for field in ledger:
-        assert remote[field] is None, f"{field} is not null on a remote row"
-    local = next(r for r in report["hosts"]["workbench"]["windows"]
-                 if r["session"] == "scratch7")
-    for field in ledger:
-        assert local[field] is not None, (
-            f"{field} is null LOCALLY too — the ledger draws no distinction")
-    # and the classification consequence the caveat states is real
-    assert remote["status"] != "stale"
+    for report in (base_gather(),
+                   ledger_gather(laptop=[led_rec(window_id="@7", ago=120,
+                                                 tmux_pid=LEDGER_PID_LAPTOP)],
+                                 use_fuzzyclaw=True)):
+        claimed = (report["caveats"]["fuzzyclaw_scope"]
+                   ["null_fields_on_remote_rows"])
+        remote = report["hosts"]["laptop"]["windows"][0]
+        assert remote["host"] == "laptop"
+        for field in claimed:
+            assert remote[field] is None, f"{field} is not null on a remote row"
+        local = next(r for r in report["hosts"]["workbench"]["windows"]
+                     if r["session"] == "scratch7")
+        for field in claimed:
+            assert local[field] is not None, (
+                f"{field} is null LOCALLY too — the ledger draws no "
+                "distinction")
+
+
+def test_the_LEDGER_scope_caveat_is_true_of_a_real_remote_row():
+    """🔴 The other half, and the direction the old caveat got WRONG: it stated
+    a remote row is "NEVER labelled `stale`" and carries no session id. The
+    ledger is read per host, so both are false — asserted here against a real
+    remote row rather than against the sentence.
+
+    Positive control built in: the SAME fixture with no laptop record leaves
+    that row null, so this is a claim about the ledger supplying the fields and
+    not about the row being non-null for some unrelated reason.
+    """
+    with_rec = ledger_gather(
+        laptop=[led_rec(window_id="@7", session_id="ledger-remote",
+                        ago=9000, tmux_pid=LEDGER_PID_LAPTOP)],
+        use_fuzzyclaw=False)
+    remote = next(r for r in rows_of(with_rec) if r["host"] == "laptop")
+    assert remote["age_secs"] == 9000.0
+    assert remote["claude_session_id"] == "ledger-remote"
+    assert remote["status"] == "stale", (
+        "the old caveat said a remote row is NEVER stale; it can be")
+
+    without = ledger_gather(laptop=[], use_fuzzyclaw=False)
+    bare = next(r for r in rows_of(without) if r["host"] == "laptop")
+    assert bare["age_secs"] is None and bare["claude_session_id"] is None
 
 
 def test_the_caveats_are_printed_in_the_table_UNCONDITIONALLY(
@@ -3932,7 +3972,15 @@ def test_the_caveats_are_printed_in_the_table_UNCONDITIONALLY(
         assert "wrapper shell" in text
         assert "caveat[fuzzyclaw_scope]:" in text
         assert "local_host_only" in text
-        assert "never `stale`" in text
+        # 🔴 The corrected pair, asserted TOGETHER. The fuzzyclaw line used to
+        # end "and are never `stale`" — a claim about age/session-id/stale that
+        # the per-host ledger falsifies. Printing the correction beside it is
+        # what stops both readings staying available.
+        assert "caveat[ledger_scope]:" in text
+        assert "per_host" in text
+        assert "CAN be `stale`" in text
+        assert "never `stale`" not in text, (
+            "the retracted claim is back in the footer")
     # ...including the degenerate reports the renderer must survive
     empty = {"hosts": {}, "summary": {}, "clickhouse": {}, "fuzzyclaw": {}}
     assert "caveat[claude_detection]:" in sm.render_table(empty)
@@ -5245,12 +5293,17 @@ LEDGER_PID_LAPTOP = "3737"       # a DIFFERENT one — hosts must not share a pi
 
 
 def led_rec(window_id="@41", session_id="ledger-sess-alpha", ago=600,
-            tmux_pid=LEDGER_PID, runtime="claude", **kw):
-    """A ledger record, aged `ago` seconds before the suite's fixed NOW."""
+            tmux_pid=LEDGER_PID, runtime="claude", pane_id="%11", **kw):
+    """A ledger record, aged `ago` seconds before the suite's fixed NOW.
+
+    `pane_id` is the FILE key and `window_id` the JOIN key — two different jobs,
+    given two distinct values here so a mutant that confuses them cannot satisfy
+    an assertion by accident.
+    """
     return sm.AL.build_record(
         runtime=runtime, session_id=session_id,
         last_activity_ts=sm.AL.now_iso(NOW - ago),
-        window_id=window_id, tmux_pid=tmux_pid, **kw)
+        window_id=window_id, pane_id=pane_id, tmux_pid=tmux_pid, **kw)
 
 
 def led_out(*records, pid=LEDGER_PID):
@@ -5481,6 +5534,43 @@ def test_the_ledger_section_is_in_the_report_even_when_it_was_skipped():
     field rather than on whether a key exists."""
     assert "ledger" in base_gather(use_ledger=False)
     assert "ledger" in ledger_gather()
+
+
+def test_a_record_from_the_FUTURE_clamps_to_zero_rather_than_going_negative():
+    """🔴 The clamp is load-bearing and was untested. A record whose timestamp is
+    ahead of this host's clock yields a NEGATIVE age, and `classify_status` reads
+    `age >= threshold` — so a negative age silently passes as fresh, and worse,
+    `AGE` renders as a negative duration.
+
+    Cross-host clock skew only became REACHABLE because the ledger is the first
+    source of remote ages: the record is written on the laptop and the arithmetic
+    happens here. Measured at two points — 300s ahead and exactly now — because
+    one point is not a claim about a clamp.
+
+    KILLS: dropping `max(0.0, …)` from either the ledger or the fuzzyclaw branch.
+    """
+    ahead = ledger_gather(
+        laptop=[led_rec(window_id="@7", ago=-300, tmux_pid=LEDGER_PID_LAPTOP)],
+        use_fuzzyclaw=False)
+    row = next(r for r in rows_of(ahead) if r["host"] == "laptop")
+    assert row["age_secs"] == 0.0, "a future record must clamp, not go negative"
+    assert row["age_source"] == "ledger"
+
+    exact = ledger_gather(
+        laptop=[led_rec(window_id="@7", ago=0, tmux_pid=LEDGER_PID_LAPTOP)],
+        use_fuzzyclaw=False)
+    assert next(r for r in rows_of(exact)
+                if r["host"] == "laptop")["age_secs"] == 0.0
+
+
+def test_a_FUZZYCLAW_task_from_the_future_clamps_too():
+    """The same clamp on the other branch — pinned separately, because a mutant
+    that drops only one of the two would otherwise be caught by neither."""
+    future = dict(TASK_LIVE, last_activity="2026-08-11T12:05:00+00:00")
+    rep = base_gather(use_fuzzyclaw=True,
+                      fuzzyclaw_texts=[json.dumps(future)])
+    row = next(r for r in rows_of(rep) if r["window_id"] == "@41")
+    assert row["age_secs"] == 0.0 and row["age_source"] == "fuzzyclaw"
 
 
 def test_a_generation_that_could_not_be_CHECKED_is_kept_and_declared():

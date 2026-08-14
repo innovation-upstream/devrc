@@ -25,10 +25,16 @@ import json
 import os
 import subprocess
 import sys
+import time
+from pathlib import Path
 
 import pytest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# `scripts/` on sys.path so `testlib.mockbin` — the ONE definition of "write an
+# executable stub" in this repo — is importable from a tests dir two levels down.
+sys.path.insert(0, os.path.abspath(os.path.join(HERE, os.pardir, os.pardir)))
+from testlib import mockbin  # noqa: E402
 HOOK = os.path.abspath(os.path.join(HERE, os.pardir, "agent-ledger-hook.py"))
 LEDGER = os.path.abspath(
     os.path.join(HERE, os.pardir, os.pardir, "lib", "agent_ledger.py"))
@@ -72,6 +78,27 @@ def run_hook(data, home, env=None, args=()):
 
 def ledger_dir(home):
     return os.path.join(str(home), ".cache", "agent-ledger")
+
+
+def _fake_tmux(bindir, answer, log=None):
+    """A stub `tmux` on PATH that answers `display-message` and records that it
+    was called.
+
+    🔴 The real binary is deliberately NOT used: these tests assert WHETHER tmux
+    was spawned and how often, which the real one cannot report, and a live tmux
+    would make the result depend on the operator's own session.
+
+    🔴 Via `testlib.mockbin.write_exec`, which owns the shebang. A hand-written
+    `#!/usr/bin/env bash` is DEAD in the nix build sandbox — six sites in this
+    repo re-derived that lesson before `mockbin` existed, and
+    `scripts/tests/test_runtime_shebangs.py` now fails the gate for a seventh.
+    It caught this file.
+    """
+    body = ""
+    if log is not None:
+        body += 'echo "$@" >> %s\n' % json.dumps(str(log))
+    body += "printf '%s\\n'\n" % answer
+    return str(mockbin.write_exec(Path(str(bindir)) / "tmux", body))
 
 
 def read_back(home):
@@ -234,12 +261,101 @@ def test_the_throttle_is_scoped_to_the_session_not_to_the_window(tmp_path):
     assert handover["written"] is True
 
 
-def test_two_PostToolUse_calls_in_a_row_leave_ONE_record(tmp_path):
-    """The observable consequence of the throttle at the process level: a window
-    holds one record however many tool calls run in it."""
-    for _ in range(3):
-        assert run_hook(payload(event="PostToolUse"), tmp_path).returncode == 0
-    assert len(read_back(tmp_path)["records"]) == 1
+def test_a_second_PostToolUse_inside_the_interval_does_not_MOVE_the_timestamp(
+        tmp_path):
+    """🔴 THIS TEST USED TO BE VACUOUS, and an audit caught it. It asserted "two
+    calls leave ONE record" — which one-file-per-key guarantees on its own, with
+    the throttle deleted, so the mutant `throttle_secs=None` at
+    `agent-ledger-hook.py:main` survived the whole suite. The declaration
+    (`THROTTLED_EVENTS`) was asserted; the INSTANCE, the argument actually passed
+    at the call site, was not. A count of declarations is not a count of
+    instances.
+
+    The throttle's real observable is that the record's `last_activity_ts` does
+    NOT advance. Two calls a second apart: with the throttle the stamp is
+    unchanged, without it the second write moves it.
+    """
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    _fake_tmux(fake, "@41|4025325")
+    env = {"PATH": "%s:%s" % (fake, os.environ["PATH"]), "TMUX_PANE": "%11"}
+
+    assert run_hook(payload(event="PostToolUse"), tmp_path, env=env).returncode == 0
+    first = read_back(tmp_path)["records"][0]["last_activity_ts"]
+    time.sleep(1.1)                      # a real second, so the stamp COULD move
+    assert run_hook(payload(event="PostToolUse"), tmp_path, env=env).returncode == 0
+    records = read_back(tmp_path)["records"]
+
+    assert len(records) == 1
+    assert records[0]["last_activity_ts"] == first, (
+        "the second write was not throttled — the stamp advanced")
+
+
+def test_the_POSITIVE_CONTROL_a_non_throttled_event_DOES_move_the_timestamp(
+        tmp_path):
+    """🔴 Without this, the test above passes on a hook that never writes at all.
+    `Stop` is not in THROTTLED_EVENTS, so its second call must move the stamp —
+    same fixture, same pane, opposite outcome."""
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    _fake_tmux(fake, "@41|4025325")
+    env = {"PATH": "%s:%s" % (fake, os.environ["PATH"]), "TMUX_PANE": "%11"}
+
+    run_hook(payload(event="Stop"), tmp_path, env=env)
+    first = read_back(tmp_path)["records"][0]["last_activity_ts"]
+    time.sleep(1.1)
+    run_hook(payload(event="Stop"), tmp_path, env=env)
+    assert read_back(tmp_path)["records"][0]["last_activity_ts"] != first
+
+
+def test_a_THROTTLED_call_never_spawns_tmux(tmp_path):
+    """🔴 The ordering that makes `PostToolUse` affordable. It fires after every
+    tool call of every session, and most are inside the interval — so the common
+    case must not pay for a subprocess. The pane comes free from `$TMUX_PANE` and
+    the file is keyed on it, so the throttle decision needs nothing from tmux.
+
+    KILLS: moving the `tmux_context()` call back above the throttle check.
+    Measured before the reorder: 23.2 ms per in-tmux call against 8.6 ms for a
+    bare interpreter start — the tmux call dominated, and ran every time.
+    """
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    log = tmp_path / "tmux-calls.log"
+    _fake_tmux(fake, "@41|4025325", log=log)
+    env = {"PATH": "%s:%s" % (fake, os.environ["PATH"]), "TMUX_PANE": "%11"}
+
+    run_hook(payload(event="PostToolUse"), tmp_path, env=env)
+    assert log.read_text().count("\n") == 1, "the first write must ask tmux"
+    run_hook(payload(event="PostToolUse"), tmp_path, env=env)
+    assert log.read_text().count("\n") == 1, (
+        "a throttled call spawned tmux anyway")
+
+
+def test_prune_actually_RUNS_on_a_turn_boundary_and_not_per_tool_call(tmp_path):
+    """🔴 KILLS: deleting the `AL.prune()` call. `PRUNE_EVENTS` was asserted as a
+    SET and never exercised, so dropping the call survived the suite — and prune
+    is the only defence against the rot the module cites as its own motivation
+    (fuzzyclaw: 401 files, ~90% stale).
+
+    Both directions: `Stop` reaps the ancient record, `PostToolUse` leaves it
+    (walking the directory after every tool call is the cost this avoids).
+    """
+    d = ledger_dir(tmp_path)
+    os.makedirs(d, exist_ok=True)
+    ancient = os.path.join(d, "claude-p999.json")
+
+    def plant():
+        with open(ancient, "w") as fh:
+            fh.write(AL.encode_record(AL.build_record(
+                "claude", "long-gone",
+                AL.now_iso(time.time() - 30 * 86400), pane_id="%999")))
+
+    plant()
+    run_hook(payload(event="PostToolUse"), tmp_path)
+    assert os.path.exists(ancient), "PostToolUse must not walk the directory"
+
+    run_hook(payload(event="Stop"), tmp_path)
+    assert not os.path.exists(ancient), "Stop did not prune"
 
 
 # =========================================================================== #

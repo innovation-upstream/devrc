@@ -101,7 +101,8 @@ def tmux_context(runner=None, pane=None):
     return wid, pid
 
 
-def record_from_payload(AL, payload, window_id=None, tmux_pid=None, now=None):
+def record_from_payload(AL, payload, window_id=None, pane_id=None,
+                        tmux_pid=None, now=None):
     """Payload -> record, or None when this event does not write one.
 
     Returns None rather than raising for an unhandled event; a payload that IS ours
@@ -116,6 +117,7 @@ def record_from_payload(AL, payload, window_id=None, tmux_pid=None, now=None):
         session_id=payload.get("session_id"),
         last_activity_ts=AL.now_iso(now),
         window_id=window_id,
+        pane_id=pane_id,
         tmux_pid=tmux_pid,
         host=(os.environ.get("ACTIVITY_HOST") or "").strip() or None,
         transcript_path=payload.get("transcript_path"),
@@ -177,14 +179,32 @@ def main() -> int:
         event = (payload or {}).get("hook_event_name")
         if event not in WRITE_EVENTS:
             return 0
-        wid, pid = tmux_context()
-        rec = record_from_payload(AL, payload, window_id=wid, tmux_pid=pid)
+        pane = os.environ.get("TMUX_PANE") or None
+        throttle = AL.DEFAULT_THROTTLE if event in THROTTLED_EVENTS else None
+        # 🔴 THE THROTTLE IS CONSULTED BEFORE `tmux` IS SPAWNED, and the ordering
+        # is the whole point on the hot path. `PostToolUse` fires after EVERY
+        # tool call of every session, and most of those are inside the throttle
+        # interval — so the common case must not pay for a subprocess. The pane
+        # comes free from `$TMUX_PANE`, and the file is keyed on the pane, so the
+        # record's path (and therefore the throttle decision) is known without
+        # asking tmux anything. Only a write that is actually going to happen
+        # pays for the window id and the server pid. Measured before this
+        # ordering: 23.2 ms per call in tmux against 8.6 ms for a bare
+        # interpreter start, i.e. the tmux call dominated and ran every time.
+        if throttle and pane:
+            path = os.path.join(
+                AL.LEDGER_DIR, AL.filename_for("claude", pane_id=pane))
+            if AL.is_throttled(path, payload.get("session_id"), throttle):
+                return 0
+        wid, pid = tmux_context(pane=pane if pane else "")
+        rec = record_from_payload(AL, payload, window_id=wid, pane_id=pane,
+                                  tmux_pid=pid)
         if rec is None:
             return 0
-        AL.write_record(
-            rec,
-            throttle_secs=(AL.DEFAULT_THROTTLE if event in THROTTLED_EVENTS
-                           else None))
+        # Still passed: the early check above is an optimisation, not the
+        # authority. Outside tmux there is no pane to key on, and `write_record`
+        # is the one place the rule is enforced for every writer.
+        AL.write_record(rec, throttle_secs=throttle)
         if event in PRUNE_EVENTS:
             AL.prune()
     except Exception:  # noqa: BLE001 — see the fail-open note in the module docstring
