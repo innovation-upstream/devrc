@@ -1752,6 +1752,12 @@ def test_json_golden_schema_and_values():
         "waiting_signals": None,
         "waiting_status": "uncaptured",
         "claude_session_id": "11111111-2222-4333-8444-555555555555",
+        # 🔴 `runtime` names WHICH agent recorded the window. Null here because
+        # this fixture runs `use_ledger=False`, so no writer answered — and
+        # `claude: true` above is the pane's COMMAND matching /claude/, which is
+        # a different fact. An opencode window is `claude: false` with
+        # `runtime: "opencode"`, which is why the row needs both.
+        "runtime": None,
         "ledger": None,
         "fuzzyclaw": {
             "task": "task-alpha-text",
@@ -5269,7 +5275,7 @@ def test_the_row_FIELD_LEDGER_fails_when_it_grows_or_shrinks():
         "command",
         "task", "claude", "busy", "age_secs", "age_source", "status",
         "waiting_probable", "waiting_signals", "waiting_status",
-        "claude_session_id", "ledger", "fuzzyclaw",
+        "claude_session_id", "runtime", "ledger", "fuzzyclaw",
         "panes",
     }
     assert set(row) == expected
@@ -5828,7 +5834,8 @@ def test_the_LEAN_row_field_ledger_fails_when_it_grows_or_shrinks():
     assert set(row) == set(sm.LEAN_ROW_FIELDS)
     assert set(sm.LEAN_ROW_FIELDS) == {
         "host", "session", "window_index", "label", "label_source", "hotkey",
-        "path", "task", "claude", "busy", "status", "age_secs", "age_source",
+        "path", "task", "runtime", "claude", "busy", "status", "age_secs",
+        "age_source",
         "waiting_probable", "waiting_signals", "waiting_status",
         "claude_session_id",
     }

@@ -169,7 +169,7 @@ and the roll-ups a caller usually wants are:
 Each row carries: host, session, window_index, window_id, window_name,
 codename, label, label_source, hotkey, pane_id, path, command, task, claude,
 busy, age_secs, age_source, status, waiting_probable, waiting_signals,
-waiting_status, claude_session_id, ledger, fuzzyclaw, panes. The row ledger is
+waiting_status, claude_session_id, runtime, ledger, fuzzyclaw, panes. The row ledger is
 pinned by a test.
 
 🔴 `label` IS NOT AN ADDRESS — `session:window` still is.
@@ -1451,6 +1451,14 @@ def fold_windows(panes, host, slots=None, task_index=None,
             # window's history to a session that ended days ago.
             "claude_session_id": ((led or {}).get("session_id")
                                   or (task or {}).get("claude_session")),
+            # 🔴 WHICH AGENT wrote the record, and it is not cosmetic. `claude`
+            # on a row is `pane_current_command =~ /claude/`, so an OPENCODE
+            # window is classified `shell` — an agent counted as a bare prompt
+            # in every bucket. That was invisible while opencode wrote no
+            # records; writer 2 makes it a row with an age, a session id and
+            # `claude: false`, which is worse than invisible unless the row can
+            # say what it is. `null` means no writer has recorded this window.
+            "runtime": (led or {}).get("runtime"),
             "ledger": led,
             "fuzzyclaw": task,
             "panes": len(members),
@@ -2604,8 +2612,8 @@ LEAN_ROW_FIELDS = (
     # label" — dropping it made exactly that pair unreadable. An audit caught
     # the inconsistency between the rule and the field list; the rule won.
     "host", "session", "window_index", "label", "label_source", "hotkey",
-    # what it is working on
-    "path", "task",
+    # what it is working on, and WHICH agent is doing it
+    "path", "task", "runtime",
     # what state it is in
     "claude", "busy", "status", "age_secs", "age_source",
     # whether it needs the operator — `waiting_status` is NOT optional, it is

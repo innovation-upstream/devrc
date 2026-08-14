@@ -70,11 +70,25 @@ same pid (4025325) on every window. Records that cannot be checked (writer preda
 the field, or a host whose pid was not measured) are KEPT and COUNTED separately —
 `generation_unchecked` — never silently treated as verified.
 
-WHAT THIS MODULE DOES NOT DO
-----------------------------
-It does not read tmux and it does not read the network. `write_record` and `prune`
-touch the filesystem; everything else is pure, so the reader's join is exercised
-end-to-end from fixtures with no host state at all.
+WHAT THIS MODULE DOES AND DOES NOT DO
+-------------------------------------
+It does not read the network. `write_record`/`prune` touch the filesystem and
+`tmux_context` shells out to tmux; everything else is pure, so the reader's join
+is exercised end-to-end from fixtures with no host state at all.
+
+🔴 `tmux_context` LIVES HERE rather than in the Claude hook, because it now has
+TWO callers — that hook and the `--write` CLI the opencode plugin spawns. A
+window/pid resolver copied into each writer is the duplicated predicate that ends
+up wrong at one of its sites; there is one, and both writers reach it.
+
+THE `--write` CLI, and why the opencode writer is a SPAWN
+---------------------------------------------------------
+`scripts/opencode/plugin/ledger.js` shells out to `python3 agent_ledger.py
+--write …` rather than re-implementing the record in JavaScript. That is the
+same shape `guard.js` uses for `guard_core.py` and `activity-plugin.js` uses for
+its emit script: the JS holds no schema, so writer 2 cannot drift from writer 1
+or from the reader. It costs one interpreter start per opencode tool call
+(~9 ms measured), which is the price of there being one definition.
 
 `parse_iso_epoch` lives HERE and `session-manager` aliases it, so the timestamp both
 sides of the ledger agree on has ONE definition. The hook cannot import
@@ -85,6 +99,8 @@ one of its two sites.
 import json
 import os
 import re
+import subprocess
+import sys
 import tempfile
 from datetime import datetime, timezone
 
@@ -596,6 +612,103 @@ def index_by_window(records) -> dict:
         "conflicts": [{"window_id": w,
                        "claimants": len(v),
                        "session_ids": sorted({str(r.get("session_id"))
-                                              for r in v})}
+                                              for r in v}),
+                       # 🔴 The RUNTIMES too, because the commonest real
+                       # conflict is cross-runtime and two opaque session ids
+                       # do not say so. A pane that ran Claude and later
+                       # opencode holds one record per runtime — both live,
+                       # both naming the same window — and `claude, opencode`
+                       # is the difference between "which agent owns this
+                       # window" and two UUIDs a reader cannot act on.
+                       "runtimes": sorted({str(r.get("runtime")) for r in v})}
                       for w, v in sorted(conflicts.items())],
     }
+
+
+# =========================================================================== #
+# TMUX + the CLI — the two IMPURE edges, both shared by every writer
+# =========================================================================== #
+def tmux_context(runner=None, pane=None):
+    """`(window_id, tmux_pid)` for this pane, or `(None, None)`.
+
+    ONE tmux call for both fields: they come from the same server and asking twice
+    invites a skew between them for no benefit. Outside tmux — a Claude run in a
+    bare terminal, an opencode run outside tmux, or a subagent — there is no
+    pane and both are None, which the record carries as "does not apply".
+
+    TWO callers: the Claude hook and the `--write` CLI. It is here so there is
+    one resolver rather than one per writer.
+    """
+    pane = os.environ.get("TMUX_PANE") if pane is None else pane
+    if not pane:
+        return None, None
+    argv = ["tmux", "display-message", "-t", pane, "-p", "#{window_id}|#{pid}"]
+    try:
+        run = runner or (lambda a: subprocess.run(
+            a, capture_output=True, text=True, timeout=2.0))
+        proc = run(argv)
+        if proc.returncode != 0:
+            return None, None
+        parts = (proc.stdout or "").strip().split("|")
+    except Exception:  # noqa: BLE001 — no tmux, dead server, timeout: all "no pane"
+        return None, None
+    if len(parts) < 2:
+        return None, None
+    wid, pid = parts[0].strip(), parts[1].strip()
+    if not wid.startswith("@") or not pid.isdigit():
+        return None, None
+    return wid, pid
+
+
+def main(argv=None) -> int:
+    """`--write` a record for a runtime that cannot import this module.
+
+    Used by `scripts/opencode/plugin/ledger.js`. The pane comes from
+    `$TMUX_PANE` (free); the window id and server pid cost one tmux call, and
+    only when a write is actually going to happen — the same ordering the Claude
+    hook uses, for the same reason: most calls are inside the throttle.
+
+    🔴 Exit codes are HONEST (0 wrote-or-throttled, 1 could not) even though the
+    only caller ignores them. A CLI that always exits 0 is untestable, and its
+    tests would then be asserting nothing.
+    """
+    import argparse
+    p = argparse.ArgumentParser(prog="agent_ledger", description=__doc__)
+    p.add_argument("--write", action="store_true", required=True)
+    p.add_argument("--runtime", required=True)
+    p.add_argument("--session", required=True)
+    p.add_argument("--transcript-path", default=None)
+    p.add_argument("--throttle", type=float, default=DEFAULT_THROTTLE)
+    p.add_argument("--prune", action="store_true",
+                   help="also reap records past the retention window; the "
+                        "caller does this on a session boundary, not per call")
+    p.add_argument("--directory", default=LEDGER_DIR)
+    args = p.parse_args(sys.argv[1:] if argv is None else list(argv))
+
+    try:
+        pane = os.environ.get("TMUX_PANE") or None
+        # Same early-out as the hook: the pane names the file, so the throttle
+        # is answerable without asking tmux anything.
+        if args.throttle and pane:
+            path = os.path.join(args.directory,
+                                pane_filename(args.runtime, pane))
+            if is_throttled(path, args.session, args.throttle):
+                return 0
+        wid, pid = tmux_context(pane=pane or "")
+        rec = build_record(
+            runtime=args.runtime, session_id=args.session,
+            last_activity_ts=now_iso(), window_id=wid, pane_id=pane,
+            tmux_pid=pid, transcript_path=args.transcript_path)
+        out = write_record(rec, directory=args.directory,
+                           throttle_secs=args.throttle)
+        if args.prune:
+            prune(directory=args.directory)
+        return 0 if out["written"] or out["reason"] == "throttled" else 1
+    except Exception as e:  # noqa: BLE001
+        print("agent_ledger --write: %s: %s" % (type(e).__name__, e),
+              file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

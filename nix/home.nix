@@ -1202,6 +1202,29 @@ in
   home.file.".config/opencode/plugin/activity.js".source =
     ../scripts/collector/opencode/activity-plugin.js;
 
+  # 🔴 WRITER 2 of the agent activity ledger — opencode's half of what makes a
+  # `session-manager` row carry an age, a `stale` bucket and a session id.
+  # Writer 1 is the Claude hook; without this every opencode window is a row
+  # with no age, which is the #419 shape narrowed to one runtime. Spec:
+  # claudedocs/spec-agent-activity-ledger.md §3.
+  #
+  # It holds NO schema: it shells out to `agent_ledger.py --write`, the same
+  # module session-manager reads the record shape from — so writer 2 cannot
+  # drift from writer 1. That is why the module is deployed BESIDE it here, the
+  # same arrangement guard.js has with guard_core.py. `ledger.js` looks for it
+  # at `~/.config/opencode/agent_ledger.py` first.
+  #
+  # Same deployment constraints as guard.js/env.js: directly in `plugin/`,
+  # `.js` only, non-recursive glob, and NEVER also in `plugins/` (plural) — the
+  # glob reads both and a file in each loads the plugin twice.
+  #
+  # 🔴 Both are NEW files and must be `git add`ed or the flake silently omits
+  # them: the switch succeeds and opencode simply never writes a record.
+  home.file.".config/opencode/plugin/ledger.js".source =
+    ../scripts/opencode/plugin/ledger.js;
+  home.file.".config/opencode/agent_ledger.py".source =
+    ../scripts/lib/agent_ledger.py;
+
   # `shell.env` plugin — the only supported seam for putting environment into
   # opencode's bash tool (there is no `env` config key; setting one is silently
   # ignored). NOTE the bash tool DOES source .zshenv on this host — see the
