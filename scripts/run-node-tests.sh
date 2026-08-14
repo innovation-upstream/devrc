@@ -133,16 +133,14 @@ cd "$ROOT" || { echo "run-node-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 #   scripts/collector/browser-ext/tests  2 files    21 tests
 #
 # MEASURED 2026-08-13, same way:
-#   claude/skills/clickup/test           6 files   154 tests
-#   (was 2 files / 27 tests earlier the same day, then 4 files / 73, then 107;
-#   the webhook listener had ZERO coverage, which is why four defects in it
-#   survived review — see claude/skills/clickup/test/{webhook-server,
-#   listen-integration}.test.mjs. The 73 -> 107 step is #444/#445: the
-#   webhook.site CATCH-UP path had no test either, and two mutations
-#   reinstating the original defect passed all 73. The 107 -> 154 step is that
-#   round's own audit: the cursor policy it shipped wedged permanently on one
-#   non-JSON stored request, and test/js-source.mjs — the substrate under both
-#   structural guards — cited controls in a file that did not exist.)
+#   claude/skills/clickup/test           3 files    71 tests
+#   (it peaked at 6 files / 154 tests earlier the same day. Most of that was
+#   coverage OF the webhook listener, and the listener was then deleted — it
+#   had never run on either host: no token configured, no watcher ever
+#   registered, no state files, and the forwarder it spawned was not installed.
+#   Deleting the feature deleted its three suites with it. A count going DOWN
+#   is normally the thing this file exists to catch, so the accounting entry
+#   below records why this one is a deletion and not a suite going silent.)
 #
 # Raise a floor when a suite grows. NEVER lower one to get green — that is the
 # move that turned the pytest global floor into less than half the real total.
@@ -157,17 +155,16 @@ SUITES=(
   "scripts/collector/browser-ext/tests|2|20"
   # The clickup skill's hermetic gates (help-coverage: showUsage() is complete;
   # state-paths: no state path resolves inside the read-only skill dir,
-  # including a structural seam walk over every module in the tree;
-  # webhook-server + listen-integration: the receiver rejects unsigned and forged
-  # deliveries, binds loopback, and discloses no capability URL; catchup: the
-  # webhook.site catch-up path runs the SAME authentication predicate and its
-  # cursor neither develops a permanent blind spot nor wedges on one stored
-  # request; js-source: direct controls for the scanner both structural guards
-  # are built on). They lived in a standalone, UNCOMMITTED
-  # ~/.claude/skills/clickup/ and ran only when a human remembered — ungated by
-  # anything, on either host. 154 tests measured 2026-08-13,
-  # floor 147 = 154 - min(50, max(1, 154/20)).
-  "claude/skills/clickup/test|6|147"
+  # including a structural seam walk over every module in the tree; js-source:
+  # direct controls for the scanner both structural guards are built on). They
+  # lived in a standalone, UNCOMMITTED ~/.claude/skills/clickup/ and ran only
+  # when a human remembered — ungated by anything, on either host.
+  #
+  # Was 6 files / 154 tests until the webhook listener was deleted (it had never
+  # run on either host): that removed webhook-server, listen-integration and
+  # catchup along with the feature. 71 tests measured 2026-08-13,
+  # floor 68 = 71 - min(50, max(1, 71/20)).
+  "claude/skills/clickup/test|3|68"
 )
 
 # --- discovery roots -----------------------------------------------------------

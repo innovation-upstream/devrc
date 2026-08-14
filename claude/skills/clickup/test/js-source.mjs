@@ -165,8 +165,8 @@ export function substitutionRanges(code, lit) {
  *
  * 🔴 `keepSubstitutions` leaves the CODE inside a template's `${ … }` intact.
  * The default blanks it, and that is a hole for any guard that looks for an
- * identifier: `` writeFileSync(`${__dirname}/accounts.json`, d) `` — the idiom
- * listen.mjs itself writes — became a token-free string and the state-path
+ * identifier: `` writeFileSync(`${__dirname}/accounts.json`, d) `` — a real
+ * write idiom in this skill — became a token-free string and the state-path
  * scanner was silent on it. A substitution's braces are balanced by
  * construction, so keeping them does not disturb the depth counting this
  * function exists to protect; the literal TEXT around them is still blanked, so

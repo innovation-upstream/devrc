@@ -75,14 +75,17 @@ FORMERLY_UNGATED = {
     # Ungated in a different way and for longer: it lived in an UNCOMMITTED
     # ~/.claude/skills/clickup/ on two hosts and ran only when a human typed it.
     # Measured 2026-08-13 once vendored into claude/skills/clickup/test: 27 at
-    # first, then 73 once the webhook listener got the coverage whose absence is
-    # why four defects in it survived review, then 107 once the webhook.site
-    # CATCH-UP path got the same treatment (#444/#445 — two mutations that
-    # reinstated the original defect passed all 73). The number here is the
-    # CURRENT measurement, because the assertion below reads it as one (a floor
-    # is only meaningfully "not drifted" against what the suite actually
-    # collects).
-    "claude/skills/clickup/test": 107,
+    # first, then 73, then 107, then 154 as the webhook listener accreted the
+    # coverage whose absence is why several defects in it survived review.
+    #
+    # Now 71, measured 2026-08-13 after the webhook listener was DELETED — it
+    # had never run on either host (no token configured, no watcher ever
+    # registered, no state files, forwarder not installed), so its three suites
+    # went with the feature. The number here is the CURRENT measurement, because
+    # the assertion below reads it as one (a floor is only meaningfully "not
+    # drifted" against what the suite actually collects) — it is NOT a
+    # high-water mark, and it moves DOWN when a feature is removed.
+    "claude/skills/clickup/test": 71,
 }
 
 
