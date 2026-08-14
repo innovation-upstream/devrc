@@ -134,6 +134,11 @@ cd "$ROOT" || { echo "run-node-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 #
 # MEASURED 2026-08-13, same way:
 #   claude/skills/clickup/test           3 files    71 tests
+#   -> 92 tests on 2026-08-14: js-source.mjs split by CODE POINT and indexed by
+#      CODE UNIT, so every emoji desynced the offsets both structural guards are
+#      built on. Its controls asserted the right property and had simply never
+#      been handed a non-ASCII character; 21 of the 21 new tests are those
+#      fixtures plus the substitution brace accounting they exposed.
 #   (it peaked at 6 files / 154 tests earlier the same day. Most of that was
 #   coverage OF the webhook listener, and the listener was then deleted — it
 #   had never run on either host: no token configured, no watcher ever
@@ -164,7 +169,9 @@ SUITES=(
   # run on either host): that removed webhook-server, listen-integration and
   # catchup along with the feature. 71 tests measured 2026-08-13,
   # floor 68 = 71 - min(50, max(1, 71/20)).
-  "claude/skills/clickup/test|3|68"
+  # 92 tests measured 2026-08-14 (the astral-character controls js-source.mjs
+  # never had), floor 88 = 92 - min(50, max(1, 92/20)) = 92 - 4.
+  "claude/skills/clickup/test|3|88"
 )
 
 # --- discovery roots -----------------------------------------------------------
