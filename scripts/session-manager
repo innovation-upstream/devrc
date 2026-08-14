@@ -2573,11 +2573,17 @@ def render_ledger(led) -> list:
 #   --json      lossless, ~14,013 tokens even after compaction — a large slice
 #               of a context window for one call.
 #
-# Rows are 86% of the payload (52,564 B of 60,631 B), so trimming ROWS is the
-# whole win. The single biggest row field was `ledger` at 7,039 B — a full
-# embedded record whose useful contents (`age_secs`, `age_source`,
-# `claude_session_id`) are ALREADY flat on the row, added in the same change
-# that added the duplication.
+# Rows are ~85% of the payload — 47,409 B of 56,068 B, re-measured on one live
+# 75-row scan 2026-08-14 — so trimming ROWS is the whole win. The single biggest
+# row field was `ledger` at ~7.5 KB: a full embedded record whose useful
+# contents (`age_secs`, `age_source`, `claude_session_id`) are ALREADY flat on
+# the row, added in the same change that added the duplication.
+#
+# 🔴 Every figure here comes from ONE scan. An earlier draft quoted
+# `52,564 B of 60,631 B` (86%) with the two halves taken from DIFFERENT scans —
+# an audit caught the same defect in the compaction comment below and it was
+# corrected there while these siblings kept the retracted number. A ratio built
+# from two measurements is a ratio of nothing.
 #
 # 🔴 WHAT THIS MUST NOT DO, and the reason it keeps more than it looks like it
 # should: a cheap payload that can LIE is worse than an expensive one. Every

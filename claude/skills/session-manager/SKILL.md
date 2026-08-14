@@ -40,8 +40,8 @@ by the operator 2026-08-14. An agent reads this, and pays by the token.
 | | cost on a 75-row scan | faithful? |
 |---|---|---|
 | table (default) | ~3,280 tok | ❌ **lossy** — 73 truncated cells, 45 rows whose task exceeds the 25-char column |
-| `--json` | ~14,013 tok | ✅ |
-| `--json --lean` | ~9,085 tok | ✅ on what it keeps |
+| `--json` | ~14,017 tok | ✅ |
+| `--json --lean` | ~9,629 tok | ✅ on what it keeps |
 
 **Ask for `--json --lean` unless you need a dropped field.** It is cheaper than the full payload
 AND more faithful than the cheap one. `lean_row_fields` and `lean_host_fields` travel in the payload

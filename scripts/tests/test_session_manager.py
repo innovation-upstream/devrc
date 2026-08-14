@@ -5928,7 +5928,7 @@ def test_the_lean_view_drops_the_sub_objects_that_DUPLICATE_row_fields():
     assert row["age_source"] == "ledger"
 
 
-def test_the_payload_NAMES_the_fields_it_omitted():
+def test_the_payload_NAMES_the_fields_it_CARRIES():
     """🔴 Without this, a consumer that finds no `window_id` cannot tell "this
     view omits it" from "this scan measured it as null" — which reintroduces
     exactly the ambiguity the rest of this tool removes. The list travels IN the
@@ -6097,15 +6097,17 @@ def test_WITHOUT_the_flag_the_same_command_emits_the_FULL_payload(
     assert "live_window_ids" in payload["hosts"]["workbench"]
 
 
-def test_the_exit_code_is_computed_BEFORE_the_projection(
+def test_INVARIANT_lean_and_full_agree_on_an_unreachable_fleet(
         monkeypatch, capsys, absent_blocked_cache):
-    """🔴 `exit_code_for` reads `hosts[*].reachable`. Computed AFTER the
-    projection, the exit CONTRACT would silently depend on `reachable` staying
-    in `LEAN_HOST_FIELDS` — a coupling nothing states, whose failure is a scan
-    reporting success over an unreachable fleet.
+    """🔴 LABELLED AS AN INVARIANT GUARD, because that is what it is. A delta
+    re-audit showed it CANNOT fail: reverting `return code` to
+    `return exit_code_for(report)` leaves the whole suite green, because
+    EXIT_UNAVAILABLE is the one outcome where the two call sites provably agree
+    whatever `LEAN_HOST_FIELDS` holds. An earlier name claimed it covered the
+    ordering; it never did, and counting an invariant guard as regression
+    coverage is how a gap stays invisible.
 
-    Both hosts unreachable must be EXIT_UNAVAILABLE with `--lean` exactly as
-    without it.
+    The real regression coverage for the move is the test below.
     """
     monkeypatch.setattr(sm, "local_host_label", lambda *a, **k: "workbench")
     monkeypatch.setattr(sm, "_default_runner",
@@ -6119,6 +6121,41 @@ def test_the_exit_code_is_computed_BEFORE_the_projection(
     assert lean_rc == full_rc == sm.EXIT_UNAVAILABLE
 
 
+def test_the_exit_code_is_computed_BEFORE_the_projection(
+        monkeypatch, capsys, absent_blocked_cache):
+    """🔴 THE ACTUAL REGRESSION COVERAGE for the ordering, and it has to force
+    the coupling to bite. `exit_code_for` reads `hosts[*].reachable`; run AFTER
+    the projection it would read the LEAN report, so the exit contract would
+    silently depend on `reachable` staying in `LEAN_HOST_FIELDS`.
+
+    🔴 THE HAZARD RUNS THE OTHER WAY from what an earlier comment claimed. A
+    missing `reachable` makes `exit_code_for` return EXIT_UNAVAILABLE MORE
+    often, so the failure is a HEALTHY fleet reporting UNAVAILABLE — not a dead
+    one reporting success. Stating a guard's direction backwards is how the
+    wrong test gets written to defend it.
+
+    So: drop `reachable` from the projection, scan a REACHABLE host, and require
+    the code to be unchanged. With the computation after the projection this
+    returns EXIT_UNAVAILABLE and the assertion fails; before it, the projection
+    cannot reach the answer at all.
+    """
+    monkeypatch.setattr(sm, "local_host_label", lambda *a, **k: "workbench")
+    monkeypatch.setattr(sm, "_default_runner", make_runner())
+    monkeypatch.setattr(sm, "read_fuzzyclaw_texts", lambda *a, **k: [])
+    monkeypatch.setattr(sm, "LEAN_HOST_FIELDS",
+                        tuple(f for f in sm.LEAN_HOST_FIELDS
+                              if f != "reachable"))
+    rc = sm.main(["scan", "--no-ch", "--no-ledger", "--host", "workbench",
+                  "--json", "--lean"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert "reachable" not in payload["hosts"]["workbench"], (
+        "the monkeypatch did not take — this test would pass vacuously")
+    assert rc == sm.EXIT_OK, (
+        "the exit code was read off the PROJECTED report: a reachable host "
+        "with rows reported as unavailable")
+
+
 def test_tail_says_lean_has_no_effect_rather_than_ignoring_it(
         monkeypatch, capsys, absent_blocked_cache):
     """`tail` RETURNS before the shared notice, so it needed its own — the rule
@@ -6127,4 +6164,46 @@ def test_tail_says_lean_has_no_effect_rather_than_ignoring_it(
     monkeypatch.setattr(sm, "local_host_label", lambda *a, **k: "workbench")
     monkeypatch.setattr(sm, "_default_runner", make_runner())
     sm.main(["tail", "scratch7:3", "--json", "--lean"])
+    assert "--lean has no effect on `tail`" in capsys.readouterr().err
+
+
+def test_DETAIL_lean_keeps_the_prompt_history_that_detail_exists_for(
+        monkeypatch, capsys, absent_blocked_cache):
+    """🔴 THE PR'S OWN THESIS, APPLIED TO ITSELF. A delta re-audit found that
+    dropping `session_history` in `lean_report` survives the whole suite — no
+    test combined `detail` with `--lean` at all, so `detail <t> --json --lean`
+    could silently lose the prompt history, which is the only reason `detail`
+    exists. Same shape as the CLI seam this PR was written to close: each part
+    tested, the combination by nothing.
+
+    KILLS: excluding `session_history` from the projection.
+    """
+    monkeypatch.setattr(sm, "local_host_label", lambda *a, **k: "workbench")
+    monkeypatch.setattr(sm, "_default_runner", make_runner())
+    monkeypatch.setattr(sm, "read_fuzzyclaw_texts", lambda *a, **k: [])
+    monkeypatch.setattr(sm, "detail_history",
+                        lambda *a, **k: {"status": "ok", "session": "s-1",
+                                         "rows": [{"ts": "t", "kind": "user",
+                                                   "snippet": "hello"}]})
+    sm.main(["detail", "scratch7:3", "--no-ch", "--no-ledger", "--json",
+             "--lean"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["view"] == "lean"
+    assert "session_history" in payload, (
+        "the lean projection dropped the payload detail exists to produce")
+    assert payload["session_history"]["rows"][0]["snippet"] == "hello"
+    # ...and the narrowing still happened, so this is `detail`, not a scan
+    rows = [r for h in payload["hosts"].values() for r in h["windows"]]
+    assert len(rows) == 1 and rows[0]["session"] == "scratch7"
+
+
+def test_a_PLAIN_tail_also_says_lean_has_no_effect(
+        monkeypatch, capsys, absent_blocked_cache):
+    """One-dimension coverage: the existing notice test passes `--json`, so
+    `tail --lean` without it was unobserved. The notice is about the SUBCOMMAND,
+    not about the output format."""
+    monkeypatch.setattr(sm, "local_host_label", lambda *a, **k: "workbench")
+    monkeypatch.setattr(sm, "_default_runner", make_runner())
+    sm.main(["tail", "scratch7:3", "--lean"])
     assert "--lean has no effect on `tail`" in capsys.readouterr().err
