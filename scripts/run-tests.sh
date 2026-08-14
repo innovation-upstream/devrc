@@ -332,6 +332,12 @@ HERMETIC_TARGETS=(
   # because #452's hook shipped to both hosts and sat inert — every component was
   # tested, the seam between them was owned by nobody.
   scripts/claude-hooks/tests/test_registrar_activation.py
+  # Same reason again — a FILE, not the directory. Writer 1 of the agent activity
+  # ledger. It fires on PostToolUse, i.e. after EVERY tool call the operator's
+  # session makes, so its fail-open contract (exit 0, nothing on stdout or
+  # stderr, on every malformed input) is felt on every turn and is gated here
+  # rather than left to the ungated hand-rolled scripts beside it.
+  scripts/claude-hooks/tests/test_agent_ledger_hook.py
 )
 
 # --- DEV-HOST-ONLY set ---------------------------------------------------------
@@ -751,7 +757,30 @@ TARGET_FLOORS=(
   # measured rather than reconciled by hand — the gate printed
   # `scripts/tests collected=3932`, not the 3915 this branch alone measured.
   #   _suggested_floor 3932 = 3932 - min(50, max(1, 196)) = 3882.
-  "scripts/tests|3882"
+  #
+  # 2026-08-13, the agent activity ledger (spec #428): +79 on this target —
+  # 40 in the NEW `scripts/tests/test_agent_ledger.py` and 39 added to
+  # `test_session_manager.py` (the §9 ledger section, 418 -> 439). Includes the
+  # audit round: the co-tenancy guard, the two clock-skew clamps, and the
+  # caveat guard re-run with the ledger ON (it had gone structurally blind).
+  # Plus the delta re-audit round: the failed-tmux-lookup regression guard, the
+  # conflict->report->render seam (three tests, mirroring the ones fuzzyclaw's
+  # identically-shaped path already had), and the two branches of the
+  # "host answered neither tmux call" skip.
+  # Gate's own count on this branch: `scripts/tests collected=4002`
+  # (confirmed by `PASS … collected=4002 … floor=3970`).
+  #   _suggested_floor 4002 = 4002 - min(50, max(1, 200)) = 3952.
+  # Pinned at 3970 rather than 3952 — a floor the gate ACCEPTS and which sits
+  # closer to the measurement, so a collapse is caught sooner. Do not reconcile
+  # this by arithmetic against another branch: re-run the gate on the merged
+  # tree and copy what it prints.
+  # ⚠ ZERO new skips on this target. TWO NEW FILES land under it (the module
+  # `scripts/lib/agent_ledger.py` and its test) plus the hook and its own
+  # target — all `git add`ed, which this repo's flake requires or the deploy
+  # silently omits them.
+  # ⚠ If main moves before this merges, re-run the gate on the MERGED tree and
+  # copy what it prints. Do not reconcile the two sides by arithmetic.
+  "scripts/tests|3970"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
@@ -861,6 +890,17 @@ TARGET_FLOORS=(
   # Gate's own count through the gate's own rule:
   #   _suggested_floor 17 = 17 - min(50, max(1, 17/20 = 0 -> 1)) = 17 - 1 = 16.
   "scripts/claude-hooks/tests/test_registrar_activation.py|16"
+  # 2026-08-13, the agent activity ledger's WRITER arrives as a NEW target.
+  # 39 collected after TWO audit rounds. Round 1 (+3): the throttle's real
+  # observable, its positive control, and that prune is actually CALLED — the
+  # first two replaced a vacuous "two calls leave one record", which
+  # one-file-per-key satisfied on its own. Round 2 (+3): the no-pane path, where
+  # the call-site throttle ARGUMENT is the only thing suppressing the write (the
+  # round-1 test set TMUX_PANE, so it only ever exercised the early check and a
+  # delta re-audit found that mutant still alive), its positive control, and the
+  # failed-tmux-lookup regression. Gate's own count through the gate's own rule:
+  #   _suggested_floor 39 = 39 - min(50, max(1, 39/20 = 1)) = 39 - 1 = 38.
+  "scripts/claude-hooks/tests/test_agent_ledger_hook.py|38"
 )
 
 # The allowance rule, in one place, used by BOTH the drift message and anyone

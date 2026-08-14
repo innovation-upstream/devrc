@@ -26,6 +26,7 @@ level. Roll-ups: `summary.waiting`, `summary.status[bucket]` (`{claude, shell, t
 | `--no-ch` | skip ClickHouse — the client is never constructed |
 | `--no-capture` | skip the pane scrape; **every** `waiting_probable` becomes `null` |
 | `--fuzzyclaw` / `--no-fuzzyclaw` | the task-file join is **OFF by default** (see below) |
+| `--no-ledger` | skip the per-host agent-ledger read. Rows then have **no age and no session id** — the #419 view, reproducible on demand |
 | `--plain` | `tail` only: strip ANSI at the source instead of `sed`-ing it out |
 | `--stale-threshold <secs>` | default 3600; `age >= threshold` is stale |
 | `--lines N` | `tail` scrollback depth (default 100) |
@@ -111,8 +112,10 @@ unconditionally — an agent that runs the script cold never reads this file:
 
 - `claude_detection` — `pane_current_command =~ /claude/`; a claude under a wrapper shell
   reads as `shell` (shallower than agent-ops' `/proc` walk, which is not reachable over SSH).
-- `fuzzyclaw_scope` — `local_host_only`; a REMOTE row carries null `fuzzyclaw` /
-  `claude_session_id` / `age_secs` and is never labelled `stale`.
+- `fuzzyclaw_scope` — `local_host_only`; a REMOTE row carries null `fuzzyclaw`. It says
+  **nothing** about age/session-id/stale (it used to, and that was wrong — see below).
+- `ledger_scope` — `per_host`; `age_secs` / `claude_session_id` come from the agent ledger,
+  read on EVERY scanned host, so a REMOTE row has both and **can** be `stale`.
 - `waiting_signal` — the enumerated signal set, the claude-rows-only scope, and the
   prompt-text exclusion with its reason.
 
@@ -148,6 +151,36 @@ the one the file recorded. Why that relationship (not mere existence) is the gua
 slot-conflict drop does and does not still catch, and the field ledger:
 `reference/fuzzyclaw-guard.md`.
 
+## The agent activity ledger — where age / `stale` / `claude_session_id` come from
+
+#419 switched fuzzyclaw off, which also switched off the only supplier of `age_secs`, the
+`stale` bucket derived from it, and the `claude_session_id` the ClickHouse join needs.
+Measured 2026-08-12 on the shipped default view: **0 rows with an age, 0 with a session id,
+no `stale` bucket at all** — and nothing in the output said so.
+
+A devrc-owned Claude hook now writes one record per tmux pane into `~/.cache/agent-ledger/`,
+and the script reads each host's ledger with one `sh -c` (locally and over SSH). Read
+`report["ledger"]`, never just the row:
+
+- `status` — `ok` / `partial` (some host did not answer) / `error` / `skipped`. Only `ok`
+  and `partial` publish integers; the rest are `null`, never `0`.
+- `hosts.<host>` — per host: `live of seen`, its `tmux_pid`, and the rejections
+  (`not_live`, `generation_mismatch`, `unparseable`, `no_window`) plus
+  `generation_unchecked`, which counts records that were **kept while unverified**.
+- `summary.rows_with_age` / `rows_with_session_id` / `age_sources` — the meter. A `stale=0`
+  bucket means *either* nothing is stale *or* nothing has an age; only this tells them apart.
+
+Row fields: `age_secs`, `age_source` (`ledger` / `fuzzyclaw` / `null` — which writer
+answered; the ledger wins), `ledger` (the joined record), `claude_session_id`.
+
+🔴 **A null age is not age 0** — it means no writer has recorded that window. A session that
+has not taken a turn since the hook was registered has none yet.
+
+🔴 **Records carry the tmux SERVER pid and the reader checks it.** Window ids restart at `@0`
+when the server does, so after a reboot a stale `@41` record and a fresh `@41` window would
+otherwise collide and hand the new window a dead session's id. Spec:
+`claudedocs/spec-agent-activity-ledger.md`.
+
 ## Where everything lives
 
 | path | what |
@@ -159,6 +192,9 @@ slot-conflict drop does and does not still catch, and the field ledger:
 | `~/.config/activity-collector/env` | CH endpoint + creds (never hardcoded) |
 | `~/.cache/bar-status/clawgate.json` | the blocked-on-me cache (`scripts/bar-status-poll`) |
 | `~/.tmux/tasks/*.json` | fuzzyclaw task files (UNTRUSTED) |
+| `~/.cache/agent-ledger/*.json` | the agent activity ledger, one record per pane |
+| `scripts/lib/agent_ledger.py` | its record shape, read protocol and join filter |
+| `scripts/claude-hooks/agent-ledger-hook.py` | writer 1 (Claude Code) |
 
 Reference: `waiting-signal.md`, `exit-codes.md`, `fuzzyclaw-guard.md`,
 `clickhouse-queries.md`, `cross-host.md`.

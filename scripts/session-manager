@@ -168,8 +168,9 @@ and the roll-ups a caller usually wants are:
 
 Each row carries: host, session, window_index, window_id, window_name,
 codename, label, label_source, hotkey, pane_id, path, command, task, claude,
-busy, age_secs, status, waiting_probable, waiting_signals, waiting_status,
-claude_session_id, fuzzyclaw, panes. The row ledger is pinned by a test.
+busy, age_secs, age_source, status, waiting_probable, waiting_signals,
+waiting_status, claude_session_id, ledger, fuzzyclaw, panes. The row ledger is
+pinned by a test.
 
 🔴 `label` IS NOT AN ADDRESS — `session:window` still is.
 --------------------------------------------------------------------------
@@ -237,6 +238,43 @@ def _load_clawgate_tasks():
 
 
 CG = _load_clawgate_tasks()
+
+
+def _load_agent_ledger():
+    """Load `scripts/lib/agent_ledger.py` by EXPLICIT PATH — the record shape, the
+    read protocol and the live-join filter, shared with the writer hook.
+
+    Same resolution rule and the same reason as `_load_clawgate_tasks` above:
+    relative to THIS file first, `$DEVRC_DIR` only as a fallback, because
+    `$DEVRC_DIR` is wrong inside a worktree and absent in the nix build sandbox.
+
+    🔴 THE HOOK DOES NOT LOAD THIS FILE — it loads a nix-store COPY of it at
+    `~/.claude/hooks/agent_ledger.py` (a `home.file`), while this resolves the
+    repo WORKING COPY. An earlier version of this comment said "the SAME source
+    file", which is the more misleading half of a claim also corrected in
+    `agent_ledger.py`: writer and reader agree by construction only at the
+    instant of a `home-manager switch`. Between a `git pull` and that switch —
+    this repo's documented standing trap — they are running different code.
+    What keeps that from becoming a wrong value on a row is `SCHEMA`: a record
+    the reader does not recognise lands in the rendered `unparseable` count.
+    """
+    import importlib.machinery
+    import importlib.util
+    devrc = os.environ.get("DEVRC_DIR") or os.path.join(HOME, "workspace", "devrc")
+    for path in (os.path.join(_HERE, "lib", "agent_ledger.py"),
+                 os.path.join(devrc, "scripts", "lib", "agent_ledger.py")):
+        if os.path.exists(path):
+            loader = importlib.machinery.SourceFileLoader("_sm_ledger", path)
+            spec = importlib.util.spec_from_file_location("_sm_ledger", path,
+                                                          loader=loader)
+            mod = importlib.util.module_from_spec(spec)
+            loader.exec_module(mod)
+            return mod
+    raise ImportError("scripts/lib/agent_ledger.py not found (tried sibling "
+                      "lib/ and $DEVRC_DIR/scripts/lib/)")
+
+
+AL = _load_agent_ledger()
 
 # --------------------------------------------------------------------------- #
 # Shared ClickHouse client. `scripts/validation/chquery.py` is a LIBRARY
@@ -438,15 +476,34 @@ CAVEATS = {
                  "over SSH and so would make the two hosts report by different "
                  "rules."),
     },
+    # 🔴 THIS CAVEAT USED TO SAY A REMOTE ROW CARRIES NO `claude_session_id` AND
+    # NO `age_secs`, AND IS NEVER `stale`. That was true of fuzzyclaw and is NOT
+    # true of the tool: the agent activity ledger is read PER HOST, so a remote
+    # row now gets both fields and can be `stale`. The claim survived the change
+    # for one revision, and it is the machine-readable one — a `--json` consumer
+    # following it would discard exactly the three fields the ledger exists to
+    # add. Narrowed here to what is still true, which is a statement about
+    # fuzzyclaw ALONE, with the ledger's own scope stated separately below.
     "fuzzyclaw_scope": {
         "scope": "local_host_only",
-        "null_fields_on_remote_rows": ["fuzzyclaw", "claude_session_id",
-                                       "age_secs"],
+        "null_fields_on_remote_rows": ["fuzzyclaw"],
         "note": ("fuzzyclaw task files are LOCAL state, so a row from the "
-                 "remote host carries no task, no claude_session_id and no "
-                 "age, and is NEVER labelled `stale` — it is classified from "
-                 "the title glyph alone. Do not read a remote row's absent "
-                 "task as a measured absence."),
+                 "remote host carries no `fuzzyclaw` task. Do not read a "
+                 "remote row's absent task as a measured absence. It says "
+                 "NOTHING about `age_secs`/`claude_session_id`/`stale` — those "
+                 "come from the agent ledger, which IS read per host; see "
+                 "caveats.ledger_scope."),
+    },
+    "ledger_scope": {
+        "scope": "per_host",
+        "note": ("`age_secs` and `claude_session_id` come from the agent "
+                 "activity ledger, read on EVERY scanned host, so a remote row "
+                 "carries both and CAN be `stale`. `age_source` names the "
+                 "writer that supplied the age (`ledger`/`fuzzyclaw`/null). A "
+                 "null age is not a measured zero: it means no writer has "
+                 "recorded that window — a session that has not taken a turn "
+                 "since the hook was registered has none yet. Read "
+                 "report.ledger for what was and was not measured."),
     },
     # 🔴 The third limit, and the one most likely to be over-read: `waiting`
     # is a SCREEN SCRAPE of a TUI, and its signal set is CLOSED. Carried in the
@@ -1043,20 +1100,13 @@ def classify_status(busy, age_secs, threshold) -> str:
     return "unknown"
 
 
-def parse_iso_epoch(value):
-    """ISO-8601 (with or without offset, `Z` accepted) -> epoch secs, else None."""
-    if not isinstance(value, str) or not value.strip():
-        return None
-    s = value.strip()
-    if s.endswith("Z"):
-        s = s[:-1] + "+00:00"
-    try:
-        dt = datetime.fromisoformat(s)
-    except ValueError:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.timestamp()
+# 🔴 ONE definition, ALIASED — not a second copy. Both sides of the ledger compare
+# timestamps this function produced, and the hook cannot import this file (it is
+# extensionless and opens a ClickHouse client on import), so the canonical parser
+# lives in `agent_ledger.py` and this name points at it. A duplicated six-line ISO
+# parser is precisely the predicate that ends up wrong at one of its two sites and
+# disagrees only on the inputs nobody wrote a test for.
+parse_iso_epoch = AL.parse_iso_epoch
 
 
 # =========================================================================== #
@@ -1247,7 +1297,7 @@ def index_tasks_by_window(tasks) -> dict:
 def fold_windows(panes, host, slots=None, task_index=None,
                  threshold=DEFAULT_STALE_THRESHOLD, now=None,
                  slot_window_ids=None, captures=None,
-                 capture_status="skipped") -> list:
+                 capture_status="skipped", ledger_index=None) -> list:
     """Collapse panes into one row per (session, window_index).
 
     A window is `claude` if ANY of its panes is; the row's task/busy/pane_id
@@ -1274,11 +1324,33 @@ def fold_windows(panes, host, slots=None, task_index=None,
     the join, NOT counted as a defence.
 
     It therefore does NOT detect the one skew that is genuinely reachable:
-    `list-panes` and `list-windows` are two non-atomic calls (gather:846-847),
-    so with `renumber-windows on` a window can move between them and a row can
-    pair one snapshot's pane data with the other's window id. The pane format
-    carries no `window_id`, so nothing here can catch that. UNGUARDED, and
-    named so no one reads the invariant above as covering it.
+    `list-panes` and `list-windows` are two non-atomic calls, so with
+    `renumber-windows on` a window can move between them and a row can pair one
+    snapshot's pane data with the other's window id. UNGUARDED, and named so no
+    one reads the invariant above as covering it.
+
+    🔴 AN EARLIER REVISION OF THIS DOCSTRING SAID "the pane format carries no
+    `window_id`, so nothing here can catch that". THAT WAS FALSE and it is
+    retracted. `PANE_FORMAT` carries no window id — a fact about the format string
+    twelve lines up, which anyone may change — but tmux supplies one for every
+    pane: measured 2026-08-13, `tmux list-panes -a -F '#{window_id}'` returned a
+    non-empty id on 47 of 47 panes. The false claim justified the whole two-key
+    guard/join design, which cost one 🔴, three fix rounds and three audits.
+    Putting `#{window_id}` in `PANE_FORMAT` would make this skew catchable and
+    collapse most of that design; it is deliberately NOT done here, because
+    changing the format touches `parse_panes` and every pane fixture in the suite,
+    and this change is already load-bearing enough. Flagged in
+    `claudedocs/spec-agent-activity-ledger.md` §2 as the follow-on.
+
+    🔴 `ledger_index` IS `{window_id: record}` FROM `agent_ledger`, AND IT WINS
+    OVER fuzzyclaw wherever both answer. It supplies `age_secs` and
+    `claude_session_id` — the two fields the default view lost in #419 — and the
+    row records WHICH source in `age_source` (`ledger` / `fuzzyclaw` / `None`), so
+    a missing age can be read as "no writer has recorded this window" rather than
+    as a bug in whichever source the reader assumed. During the supersede phase
+    both sources are live on purpose (spec §6); precedence, not a merge, because
+    two ages averaged or preferred by recency would be a number neither writer
+    ever measured.
 
     🔴 `captures` IS `None`-VS-`{}`, and the difference is the whole point.
     `None` means no capture batch ran on this host, so every row's
@@ -1292,6 +1364,7 @@ def fold_windows(panes, host, slots=None, task_index=None,
     slots = slots or {}
     task_index = task_index or {}
     slot_window_ids = slot_window_ids or {}
+    ledger_index = ledger_index or {}
     order, groups = [], {}
     for p in (panes or ()):
         key = (p.get("session"), p.get("window_index"))
@@ -1306,11 +1379,21 @@ def fold_windows(panes, host, slots=None, task_index=None,
         lead = next((p for p in members if pane_is_claude(p)), members[0])
         session, widx = key
         task = task_index.get((str(session), str(widx)))
-        age = None
-        if task is not None:
+        wid = slot_window_ids.get((str(session), str(widx)))
+        # 🔴 LEDGER FIRST, fuzzyclaw only as the fallback, and `age_source` names
+        # which one answered. `max(0.0, …)` on both: a clock skew between the
+        # writing host and this one must render as "just now", never as a
+        # negative age that `classify_status` would silently read as fresh.
+        led = ledger_index.get(wid) if wid else None
+        age, age_source = None, None
+        if led is not None:
+            last = parse_iso_epoch(led.get("last_activity_ts"))
+            if last is not None:
+                age, age_source = max(0.0, now - last), "ledger"
+        if age is None and task is not None:
             last = parse_iso_epoch(task.get("last_activity"))
             if last is not None:
-                age = max(0.0, now - last)
+                age, age_source = max(0.0, now - last), "fuzzyclaw"
         busy = busy_from_title(lead.get("title", ""))
         is_claude = any(pane_is_claude(p) for p in members)
         lab = resolve_label(session, lead.get("path", ""), slots)
@@ -1331,7 +1414,7 @@ def fold_windows(panes, host, slots=None, task_index=None,
             "host": host,
             "session": session,
             "window_index": widx,
-            "window_id": slot_window_ids.get((str(session), str(widx))),
+            "window_id": wid,
             "window_name": lead.get("window_name", ""),
             "codename": (slots.get(session) or {}).get("codename"),
             # 🔴 ADDITIVE to `session`/`window_index`, never a replacement:
@@ -1349,6 +1432,11 @@ def fold_windows(panes, host, slots=None, task_index=None,
             "claude": is_claude,
             "busy": busy,
             "age_secs": age,
+            # 🔴 WHICH writer supplied `age_secs`. `None` here alongside a `None`
+            # age is "nobody has recorded this window", which is a different
+            # finding from "the ledger is broken" — and telling them apart is
+            # exactly what #419 left no way to do.
+            "age_source": age_source,
             "status": classify_status(busy, age, threshold),
             # 🔴 `waiting_probable` is a TRI-STATE. True/False are measurements;
             # None means this pane was not scraped, and `waiting_status` says
@@ -1357,7 +1445,13 @@ def fold_windows(panes, host, slots=None, task_index=None,
             "waiting_probable": w_probable,
             "waiting_signals": w_signals,
             "waiting_status": w_status,
-            "claude_session_id": (task or {}).get("claude_session"),
+            # Same precedence as `age_secs`, and for the same reason: this is the
+            # ONE carrier of the session id into the ClickHouse join, so a stale
+            # fuzzyclaw value overwriting a live ledger one would resolve a
+            # window's history to a session that ended days ago.
+            "claude_session_id": ((led or {}).get("session_id")
+                                  or (task or {}).get("claude_session")),
+            "ledger": led,
             "fuzzyclaw": task,
             "panes": len(members),
         })
@@ -1417,9 +1511,12 @@ def summarize(report) -> dict:
     The split is applied to ALL FOUR buckets, not just `idle`. `unknown` was
     15/15 non-claude in that same measurement, which is a SNAPSHOT, not an
     invariant: `classify_status` returns `unknown` for any row with no glyph and
-    no age, and a REMOTE claude window has no age by construction (see
-    CAVEATS["fuzzyclaw_scope"]), so a claude row lands there as soon as its
-    title carries no glyph. Splitting one bucket fixes one instance; splitting
+    no age — and while fuzzyclaw was the only writer, a REMOTE claude window had
+    none by construction. That is no longer true (the ledger is read per host;
+    see CAVEATS["ledger_scope"]), but the class this split kills is unchanged:
+    ANY claude row with no glyph and no recorded age lands in `unknown`, and a
+    window no writer has recorded yet is the common case for a session that has
+    not taken a turn since the hook was registered. Splitting one bucket fixes one instance; splitting
     the tuple kills the class.
 
     🔴 BACKWARD COMPATIBILITY, chosen deliberately in the LOUD direction. The
@@ -1484,6 +1581,18 @@ def summarize(report) -> dict:
         "windows_unmeasured": sorted(
             k for k, v in report["hosts"].items()
             if not v.get("windows_measured")),
+        # 🔴 THE REGRESSION'S OWN METER, published on every scan. #419's damage
+        # was measurable in exactly one number — "rows with an age: 0" — and
+        # nothing in the output stated it, so the tool reported a healthy scan
+        # for weeks while three fields were dead. `age_sources` and
+        # `rows_with_session_id` are that number, split by WHICH writer supplied
+        # it, so "0 from the ledger" can never again hide behind a total.
+        # `"none"`, not `None` — a null JSON key serialises to the string
+        # `"null"` and reads as a source called null rather than as "no source".
+        "age_sources": _count_by(r.get("age_source") or "none" for r in rows),
+        "rows_with_age": sum(1 for r in rows if r.get("age_secs") is not None),
+        "rows_with_session_id": sum(1 for r in rows
+                                    if r.get("claude_session_id")),
     }
 
 
@@ -1557,6 +1666,65 @@ def read_fuzzyclaw_texts(directory=FUZZYCLAW_DIR, lister=None, reader=None):
         if text is not None:
             out.append(text)
     return out
+
+
+def _host_ledger(read_result, live_windows, host) -> dict:
+    """One host's ledger read -> `{status, records, index, conflicts, counts}`.
+
+    🔴 FOUR statuses, and collapsing any two of them re-creates a fabricated zero:
+
+      * `error`       — the command never answered (host down, SSH refused, spawn
+                        failed). Nothing was measured.
+      * `no_sentinel` — it answered, but without the protocol's own positive
+                        control on the first line, so the output is not evidence
+                        about this host's ledger at all. An empty stdout from a
+                        swallowed command and a host with no records are the same
+                        bytes; only the sentinel tells them apart.
+      * `unmeasured`  — the ledger WAS read, but this host's `list-windows` was
+                        not, so no record can be intersected against a live
+                        window. Records exist and none of them is joinable.
+      * `ok`          — read and joined; counts are real measurements.
+
+    Only `ok` publishes integers. The other three publish `None`, so a reader
+    cannot mistake "did not answer" for "answered, nothing there".
+    """
+    if not read_result.get("reachable"):
+        return {"status": "error", "records": [], "index": {},
+                "conflicts": [], "tmux_pid": None,
+                "error": read_result.get("error") or "unknown error",
+                "seen": None, "live": None, "unparseable": None,
+                "not_live": None, "generation_mismatch": None,
+                "generation_unchecked": None, "no_window": None}
+    parsed = AL.parse_ledger(read_result.get("stdout"))
+    if not parsed["measured"]:
+        return {"status": "no_sentinel", "records": [], "index": {},
+                "conflicts": [], "tmux_pid": None,
+                "error": ("the ledger command answered without its sentinel "
+                          f"line on {host} — output not trusted"),
+                "seen": None, "live": None, "unparseable": None,
+                "not_live": None, "generation_mismatch": None,
+                "generation_unchecked": None, "no_window": None}
+    filt = AL.filter_live(
+        parsed["records"], live_windows, tmux_pid=parsed["tmux_pid"],
+        unmeasured_reason=("`tmux list-windows` did not answer on "
+                           f"{host}, so ledger records cannot be intersected "
+                           "against live windows"))
+    if filt["status"] != "ok":
+        return {"status": "unmeasured", "records": [], "index": {},
+                "conflicts": [], "tmux_pid": parsed["tmux_pid"],
+                "error": filt["error"], "seen": parsed["seen"],
+                "live": None, "unparseable": parsed["unparseable"],
+                "not_live": None, "generation_mismatch": None,
+                "generation_unchecked": None, "no_window": None}
+    idx = AL.index_by_window(filt["records"])
+    return {"status": "ok", "records": filt["records"], "index": idx["index"],
+            "conflicts": idx["conflicts"], "tmux_pid": parsed["tmux_pid"],
+            "error": None, "seen": parsed["seen"], "live": filt["live"],
+            "unparseable": parsed["unparseable"],
+            "not_live": filt["not_live"],
+            "generation_mismatch": filt["generation_mismatch"],
+            "generation_unchecked": filt["generation_unchecked"],
+            "no_window": filt["no_window"]}
 
 
 def run_tmux(argv, host, local_host, runner=None, timeout=None):
@@ -1671,7 +1839,8 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
            ch_client_factory=None, fuzzyclaw_texts=None,
            slots=None, ch_sql=SQL_RECENT_SESSIONS,
            claude_only=False, use_capture=True, capture_nonce=None,
-           blocked_reader=None, blocked_path=None) -> dict:
+           blocked_reader=None, blocked_path=None,
+           use_ledger=True, ledger_outputs=None) -> dict:
     """Build the whole report. Every source is injectable, so this is the
     function the hermetic suite exercises end-to-end.
 
@@ -1690,6 +1859,20 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
     of its tests are untouched and still run when you do. Off, the section's
     status is `skipped` and every count is None, so the absence is never
     rendered as a measured zero.
+
+    🔴 `use_ledger` DEFAULTS TO TRUE, and it is what makes the paragraph above
+    survivable. Switching fuzzyclaw off in #419 also switched off the only source
+    of AGE, the `stale` bucket and `claude_session_id`, so the shipped default view
+    has had none of them since: measured 2026-08-12, `rows with an age: 0`,
+    `claude_session_id` on 0 rows, no `stale` bucket at all. The ledger restores
+    all three from writers this repo owns.
+
+    🔴 IT IS READ PER HOST, WHICH FUZZYCLAW NEVER WAS. fuzzyclaw's task files are
+    local state, so every REMOTE row carried a null age by construction — the
+    caveat says so. The ledger read is one `sh -c` per host that goes over the same
+    SSH transport as the tmux calls, so a laptop row gets an age and a session id
+    the same way a workbench row does. `ledger_outputs` injects that stdout per
+    host for the hermetic suite.
     """
     now = time.time() if now is None else now
     local_host = local_host or local_host_label()
@@ -1725,6 +1908,14 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
                       "files_seen": None, "files_live": None,
                       "files_unparseable": None, "files_stale": None,
                       "files_mismatched": None, "slot_conflicts": []},
+        # 🔴 The ledger roll-up, with the SAME null-not-zero discipline as
+        # fuzzyclaw above and one addition: `hosts` is per host, because a ledger
+        # that answered on the workbench and not on the laptop is a partial
+        # measurement, and a single flattened count would render it as a complete
+        # one. `status` is `skipped` only under `--no-ledger`.
+        "ledger": {"status": "skipped", "error": None, "hosts": {},
+                   "records_seen": None, "records_live": None,
+                   "records_unparseable": None, "conflicts": []},
         # The row set this report describes, and how it was narrowed. Present
         # on EVERY report, filtered or not, so a consumer branches on a field
         # rather than on whether a key exists.
@@ -1751,6 +1942,7 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
     local_windows_error = None
     raw_panes, slot_ids = {}, {}
     captures, capture_status = {}, {}
+    ledger_res = {}
     for host in hosts:
         panes_res = run_tmux(TMUX_PANES_ARGV, host, local_host, runner=runner)
         wins_res = run_tmux(TMUX_WINDOWS_ARGV, host, local_host, runner=runner)
@@ -1809,6 +2001,40 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
             "captures_seen": (len(captures[host])
                               if captures[host] is not None else None),
         }
+        # --- the agent activity ledger, ONE `sh -c` per host -----------------
+        # 🔴 Read HERE, inside the per-host loop, and filtered against THIS
+        # host's `live` windows and THIS host's tmux server pid — the pid arrives
+        # on the ledger's own sentinel line, from the same instant as the records
+        # it validates. Reusing the local host's window set for a remote host
+        # would drop every remote record on a window-id space that has nothing to
+        # do with it, and would do so silently.
+        if not use_ledger:
+            ledger_res[host] = {"status": "skipped", "records": [],
+                                "error": None}
+        elif not (panes_res["reachable"] or wins_res["reachable"]):
+            # 🔴 NOT AN OPTIMISATION DRESSED AS A MEASUREMENT. This host answered
+            # NEITHER tmux call, so it is down; issuing a third command buys one
+            # more `ConnectTimeout=4` on every scan of an offline laptop and can
+            # only return the same failure. The status is still `error` — nothing
+            # was measured and no count is published — and the reason SAYS the
+            # read was never attempted rather than implying it was tried and
+            # failed, which are different facts about the host.
+            ledger_res[host] = _host_ledger(
+                {"reachable": False,
+                 "error": "host answered neither tmux call; the ledger read "
+                          "was not attempted"},
+                live, host)
+        else:
+            if ledger_outputs is not None:
+                raw_led = ledger_outputs.get(host)
+                led_read = {"reachable": raw_led is not None,
+                            "stdout": raw_led or "",
+                            "error": None if raw_led is not None
+                            else "no injected ledger output for this host"}
+            else:
+                led_read = run_tmux(AL.read_argv(), host, local_host,
+                                    runner=runner)
+            ledger_res[host] = _host_ledger(led_read, live, host)
         if host == local_host:
             local_live_windows = live
             local_windows_error = wins_res["error"]
@@ -1830,6 +2056,43 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
     task_index = idx_res["index"]
     report["fuzzyclaw"]["slot_conflicts"] = idx_res["conflicts"]
 
+    # --- the ledger roll-up -------------------------------------------------
+    # 🔴 A SUM ONLY OVER THE HOSTS THAT ANSWERED, and `status` says which. A total
+    # built across a host whose read errored would count that host as contributing
+    # zero records, which is the same lie as `files_live: 0` under `--no-fuzzyclaw`
+    # — a real integer standing in for a measurement nobody took. `partial` is
+    # therefore its own status, not a footnote on `ok`.
+    if use_ledger:
+        per_host = {h: {k: v for k, v in blk.items()
+                        if k not in ("records", "index")}
+                    for h, blk in ledger_res.items()}
+        ok_hosts = [h for h, blk in ledger_res.items()
+                    if blk.get("status") == "ok"]
+        bad_hosts = [h for h, blk in ledger_res.items()
+                     if blk.get("status") not in ("ok", "skipped")]
+        totals = {}
+        for key in ("seen", "live", "unparseable", "not_live",
+                    "generation_mismatch", "generation_unchecked", "no_window"):
+            totals[key] = (sum((ledger_res[h].get(key) or 0) for h in ok_hosts)
+                           if ok_hosts else None)
+        report["ledger"] = {
+            "status": ("ok" if ok_hosts and not bad_hosts
+                       else "partial" if ok_hosts else "error"),
+            "error": (None if not bad_hosts else
+                      "; ".join("%s: %s" % (h, ledger_res[h].get("error"))
+                                for h in sorted(bad_hosts))),
+            "hosts": per_host,
+            "records_seen": totals["seen"],
+            "records_live": totals["live"],
+            "records_unparseable": totals["unparseable"],
+            "records_not_live": totals["not_live"],
+            "generation_mismatch": totals["generation_mismatch"],
+            "generation_unchecked": totals["generation_unchecked"],
+            "records_no_window": totals["no_window"],
+            "conflicts": [dict(c, host=h) for h in sorted(ledger_res)
+                          for c in (ledger_res[h].get("conflicts") or [])],
+        }
+
     for host in hosts:
         entry = report["hosts"][host]
         if not entry["reachable"]:
@@ -1842,7 +2105,9 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
             threshold=threshold, now=now,
             slot_window_ids=slot_ids.get(host),
             captures=captures.get(host),
-            capture_status=capture_status.get(host, "skipped"))
+            capture_status=capture_status.get(host, "skipped"),
+            # Per host, unlike fuzzyclaw's local-only index above.
+            ledger_index=(ledger_res.get(host) or {}).get("index"))
 
     # --- 🔴 --claude-only: drop the shells, and COUNT what was dropped -------
     # The summary then describes the RENDERED set, which is the safe direction:
@@ -2175,6 +2440,8 @@ def render_table(report) -> str:
                        c.get("session"), c.get("window_index"),
                        c.get("claimants"), len(ids), ", ".join(ids)))
     out.append("")
+    out.extend(render_ledger(report.get("ledger")))
+    out.append("")
     out.append("  summary: {total} windows  claude={claude}  shell={shell}"
                .format(total=summ.get("total_sessions", 0),
                        claude=summ.get("claude", 0),
@@ -2188,6 +2455,19 @@ def render_table(report) -> str:
         "{}={}+{}".format(b, (st.get(b) or {}).get("claude", 0),
                           (st.get(b) or {}).get("shell", 0))
         for b in STATUS_BUCKETS))
+    # 🔴 The line that would have made #419 visible on the day it shipped.
+    # `stale` is derived from an age, so a `stale=0+0` bucket means one of two
+    # completely different things — nothing is stale, or nothing has an age — and
+    # the by-status line above cannot tell them apart. This one can.
+    out.append("  ages: {with_age} of {total} row(s) have one ({by_src})"
+               "   session ids: {sid}".format(
+                   with_age=summ.get("rows_with_age", 0),
+                   total=summ.get("total_sessions", 0),
+                   by_src=", ".join(
+                       "{}={}".format(k, v) for k, v in
+                       sorted((summ.get("age_sources") or {}).items()))
+                   or "no rows",
+                   sid=summ.get("rows_with_session_id", 0)))
     # 🔴 The headline number, and it is allowed to be "unmeasured". `probable`
     # is None whenever no pane was scraped, and printing `waiting=0` there would
     # answer the question this tool exists for with a measurement nobody took.
@@ -2225,8 +2505,65 @@ def render_table(report) -> str:
     return "\n".join(out)
 
 
+def render_ledger(led) -> list:
+    """The ledger section — printed ALWAYS, including when it did not answer.
+
+    🔴 It leads with the per-host line rather than the total. A total is what
+    hid #419 for weeks: `rows with an age: 0` was a true statement about a healthy
+    scan and the output had no place to say it. Here each host states its own
+    `live of seen`, so one host answering and one not cannot average into a number
+    that describes neither.
+    """
+    led = led or {}
+    st = led.get("status")
+    if st == "skipped":
+        return ["▸ AGENT LEDGER (skipped — --no-ledger; every count is null, "
+                "not 0)"]
+    if st == "error":
+        return ["▸ AGENT LEDGER — NO HOST ANSWERED",
+                "  " + _trunc(led.get("error") or "unknown error", 110),
+                "  (this is NOT zero records; the ledger was never read)"]
+    out = ["▸ AGENT LEDGER ({live} live of {seen} record(s){bad})".format(
+        live=led.get("records_live"), seen=led.get("records_seen"),
+        bad=("" if not led.get("error") else "  ⚠ PARTIAL"))]
+    if led.get("error"):
+        out.append("  ⚠ " + _trunc(led["error"], 110))
+        out.append("  (the counts above cover only the hosts that answered)")
+    for host in sorted(led.get("hosts") or {}):
+        h = (led["hosts"] or {})[host]
+        if h.get("status") != "ok":
+            out.append("  {:<10} {} — {}".format(
+                host, (h.get("status") or "?").upper(),
+                _trunc(h.get("error") or "no reason given", 80)))
+            continue
+        rejected = []
+        for key, word in (("not_live", "window gone"),
+                          ("generation_mismatch", "older tmux server"),
+                          ("unparseable", "unparseable"),
+                          ("no_window", "no window")):
+            if h.get(key):
+                rejected.append("%d %s" % (h[key], word))
+        # 🔴 `generation_unchecked` is reported SEPARATELY from the rejections,
+        # because those records were KEPT. A record whose generation could not be
+        # verified is being trusted, and a reader is entitled to know how many of
+        # the live rows rest on that.
+        out.append("  {:<10} {} live of {} (tmux pid {}){}{}".format(
+            host, h.get("live"), h.get("seen"), h.get("tmux_pid") or "unknown",
+            ("  [rejected: " + ", ".join(rejected) + "]") if rejected else "",
+            ("  [%d unverified generation]" % h["generation_unchecked"]
+             if h.get("generation_unchecked") else "")))
+    for c in (led.get("conflicts") or []):
+        out.append("  ⚠ LEDGER CONFLICT {} {} claimed by {} record(s) "
+                   "[{}] — NEWEST wins".format(
+                       c.get("host"), c.get("window_id"), c.get("claimants"),
+                       ", ".join(c.get("session_ids") or [])))
+    return out
+
+
 def render_caveats(report) -> list:
-    """🔴 The two limits, in the OUTPUT, unconditionally.
+    """🔴 Every structured caveat, in the OUTPUT, unconditionally — one line
+    each, and the count is whatever CAVEATS holds (a test pins the relationship
+    rather than a literal, so adding one cannot silently drop another).
 
     They were documented in the skill body only, and a dogfooding agent credited
     reading that body with not mixing two different session populations — which
@@ -2241,6 +2578,7 @@ def render_caveats(report) -> list:
     cav = (report or {}).get("caveats") or CAVEATS
     det = cav.get("claude_detection") or {}
     fz = cav.get("fuzzyclaw_scope") or {}
+    led = cav.get("ledger_scope") or {}
     wt = cav.get("waiting_signal") or {}
     return [
         # 🔴 The signal set is ENUMERATED in the footer, because `WAIT: no` is
@@ -2257,9 +2595,17 @@ def render_caveats(report) -> list:
         "shallower than agent-ops' /proc walk; a claude under a wrapper shell "
         "reads as `shell`".format(det.get("pattern", "claude")),
         "  caveat[fuzzyclaw_scope]: fuzzyclaw is {} — REMOTE rows carry null "
-        "{} and are never `stale`".format(
+        "{}. This says NOTHING about age/session-id/stale".format(
             fz.get("scope", "local_host_only"),
             "/".join(fz.get("null_fields_on_remote_rows") or [])),
+        # 🔴 Printed beside the one it corrects, on purpose. The line above was
+        # read for months as "remote rows have no age", which stopped being true
+        # the moment the ledger shipped; leaving it alone and adding this one
+        # would have left both readings available.
+        "  caveat[ledger_scope]: age_secs/claude_session_id come from the "
+        "agent ledger, read {} — a REMOTE row has both and CAN be `stale`. A "
+        "null age means NO WRITER HAS RECORDED that window, not age 0; "
+        "`age_source` names the writer".format(led.get("scope", "per_host")),
     ]
 
 
@@ -2407,6 +2753,15 @@ def build_parser():
     p.add_argument("--no-fuzzyclaw", action="store_true",
                    help="explicitly off — now the DEFAULT; kept so existing "
                         "callers keep working. Wins over --fuzzyclaw.")
+    # 🔴 The ledger is ON by default and this flag is the ESCAPE HATCH, not the
+    # switch — it exists so a scan can be run against a host whose ledger read is
+    # misbehaving, and so a test can prove the ledger is what supplies the age.
+    # Off, `report["ledger"]["status"]` is `skipped` and every count is null.
+    p.add_argument("--no-ledger", action="store_true",
+                   help="skip the per-host agent activity ledger read. Rows "
+                        "then fall back to fuzzyclaw for age/session-id, which "
+                        "is off by default — i.e. no ages at all, the #419 "
+                        "regression, reproducible on demand.")
     p.add_argument("--no-capture", action="store_true",
                    help="skip the per-host pane capture. Every row's "
                         "waiting_probable is then null (never false) and "
@@ -2524,6 +2879,7 @@ def main(argv=None):
     report = gather(hosts=hosts, local_host=local,
                     use_ch=(not args.no_ch and args.subcommand != "list"),
                     use_fuzzyclaw=use_fuzzyclaw,
+                    use_ledger=not args.no_ledger,
                     use_capture=not args.no_capture,
                     threshold=args.stale_threshold,
                     claude_only=args.claude_only)
@@ -2563,6 +2919,22 @@ def no_session_reason(report) -> str:
     same unmeasured set. Only the LAST branch here is a measured absence; every
     branch above it says plainly that nothing was measured.
 
+    🔴 KNOWN INCOMPLETE, stated rather than left to be discovered. There are now
+    TWO suppliers of `claude_session_id` — the agent ledger (which WINS; see
+    `fold_windows`) and fuzzyclaw — and every branch here reasons about fuzzyclaw
+    alone. The consequence is bounded and in the SAFE direction: each branch
+    either declines to claim a measured absence, or claims one that is true of
+    fuzzyclaw while the ledger may separately have answered. So it can understate
+    what is known; it cannot assert a measured absence the data does not support,
+    which is the failure this function exists to prevent.
+
+    Making it ledger-aware means re-deciding twelve pinned branch selections
+    (including `test_the_unmeasured_reasons_are_PAIRWISE_DISTINCT`), so it is a
+    follow-up rather than a rider on the ledger PR. What DID change here is
+    wording only: the remote branch used to say "no task file was ever searched
+    for it", which reads as "nothing was searched" now that the ledger IS read
+    per host. It says "no fuzzyclaw task file" instead.
+
     Pure — it reads only facts the report already carries (`fuzzyclaw.status`,
     `fuzzyclaw.slot_conflicts`, `local_host`, and each row's `host`), so it is
     unit-testable without a ClickHouse client.
@@ -2594,9 +2966,9 @@ def no_session_reason(report) -> str:
                      if r.get("host") != local})
     if remote:
         return (f"fuzzyclaw is read on the LOCAL host only ({local}) and this "
-                f"target matches a window on {', '.join(remote)}, so no task "
-                "file was ever searched for it — this is NOT a measured "
-                "absence")
+                f"target matches a window on {', '.join(remote)}, so no "
+                "fuzzyclaw task file was ever searched for it — this is NOT a "
+                "measured absence")
     if st == "unmeasured":
         return ("the fuzzyclaw intersection never ran, so no claude_session_id "
                 "could be measured for this window — this is NOT a measured "

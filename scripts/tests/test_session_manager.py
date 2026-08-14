@@ -333,6 +333,14 @@ def base_gather(**kw):
         runner=make_runner(),
         use_ch=False,
         use_fuzzyclaw=True,
+        # 🔴 The agent activity ledger is OFF in the SHARED fixture, deliberately.
+        # It ships ON, and its own tests below turn it on with injected per-host
+        # output. Leaving it on here would silently re-source `age_secs` and
+        # `claude_session_id` for every pre-existing assertion in this file, so
+        # each of those tests would stop pinning what its name says it pins. The
+        # ledger's default-on behaviour is asserted directly instead — see
+        # `test_the_ledger_is_ON_by_default_in_gathers_signature`.
+        use_ledger=False,
         now=NOW,
         fuzzyclaw_texts=[json.dumps(TASK_LIVE), json.dumps(TASK_STALE)],
         slots=SLOTS_FIXTURE,
@@ -1694,8 +1702,8 @@ def test_json_golden_schema_and_values():
     assert blob["local_host"] == "workbench"
     assert blob["stale_threshold_secs"] == 3600
     assert set(blob) == {"ts", "local_host", "stale_threshold_secs", "hosts",
-                         "clickhouse", "fuzzyclaw", "filters", "caveats",
-                         "summary", "blocked_on_me"}
+                         "clickhouse", "fuzzyclaw", "ledger", "filters",
+                         "caveats", "summary", "blocked_on_me"}
     assert set(blob["hosts"]) == {"workbench", "laptop"}
 
     wb = blob["hosts"]["workbench"]
@@ -1731,6 +1739,10 @@ def test_json_golden_schema_and_values():
         "claude": True,
         "busy": True,
         "age_secs": 1800.0,
+        # `use_ledger=False` in this fixture, so fuzzyclaw is the only writer
+        # that answered — and the row SAYS so rather than leaving the reader to
+        # infer which source an age came from.
+        "age_source": "fuzzyclaw",
         "status": "busy",
         # 🔴 The capture batch RAN (make_runner answers it) but its output
         # carries no markers, so this pane is `uncaptured` — measured absence
@@ -1740,6 +1752,7 @@ def test_json_golden_schema_and_values():
         "waiting_signals": None,
         "waiting_status": "uncaptured",
         "claude_session_id": "11111111-2222-4333-8444-555555555555",
+        "ledger": None,
         "fuzzyclaw": {
             "task": "task-alpha-text",
             "window_id": "@41",
@@ -1811,6 +1824,16 @@ def test_json_golden_schema_and_values():
         # stuck-dispatch half rather than a second, weaker one.
         "blocked_on_me": {"count": None, "status": "absent",
                           "stuck_count": None, "schema_ok": False},
+        # 🔴 THE #419 METER, in the golden. One of these three windows has an
+        # age and it came from fuzzyclaw — because this fixture runs
+        # `use_ledger=False`. The two `none` rows are the shape the SHIPPED
+        # default had for every row between #419 and the ledger: a null age with
+        # nothing anywhere in the output naming which writer failed to supply
+        # it. Pinned literally so a regression that re-zeroes the ages cannot
+        # pass by leaving some unrelated total unchanged.
+        "age_sources": {"fuzzyclaw": 1, "none": 2},
+        "rows_with_age": 1,
+        "rows_with_session_id": 1,
     }
 
 
@@ -3600,7 +3623,16 @@ def test_an_idle_AGENT_and_an_idle_SHELL_are_never_merged_into_one_count():
     int_keys = {k for k, v in s.items()
                 if isinstance(v, int) and not isinstance(v, bool)}
     assert int_keys == {"total_sessions", "claude", "shell",
-                        "fuzzyclaw_live"}   # a FILE count, not a window count
+                        "fuzzyclaw_live",   # a FILE count, not a window count
+                        # Whole-set totals in the same class as
+                        # `total_sessions`, NOT per-status buckets: they count
+                        # rows carrying a fact, across every status. The split
+                        # this guard protects is claude-vs-shell inside a
+                        # STATUS, and neither of these is one — the breakdown
+                        # that matters for an age is by WRITER, and it lives in
+                        # `age_sources`, which is a dict and so cannot be
+                        # misread as a bucket count.
+                        "rows_with_age", "rows_with_session_id"}
 
 
 def test_the_flat_mixed_status_INTEGERS_are_gone_not_kept_alongside():
@@ -3849,16 +3881,20 @@ def test_the_caveats_are_in_the_json_as_structured_fields_not_prose():
     """🔴 KILLS: dropping `caveats` from the report, or reducing it to a
     string a consumer would have to parse."""
     cav = mix_gather()["caveats"]
-    assert set(cav) == {"claude_detection", "fuzzyclaw_scope",
+    assert set(cav) == {"claude_detection", "fuzzyclaw_scope", "ledger_scope",
                         "waiting_signal"}
     det = cav["claude_detection"]
     assert det["method"] == "pane_current_command_regex"
     assert det["pattern"] == sm.CLAUDE_RE.pattern == "claude"
     fz = cav["fuzzyclaw_scope"]
     assert fz["scope"] == "local_host_only"
-    assert fz["null_fields_on_remote_rows"] == ["fuzzyclaw",
-                                                "claude_session_id",
-                                                "age_secs"]
+    # 🔴 NARROWED, and the narrowing is the point. This list used to include
+    # `claude_session_id` and `age_secs`, which stopped being true the moment
+    # the ledger shipped — it is read per host, so a remote row carries both.
+    # The caveat is the MACHINE-READABLE one: a `--json` consumer following the
+    # old list would discard exactly the fields the ledger exists to add.
+    assert fz["null_fields_on_remote_rows"] == ["fuzzyclaw"]
+    assert cav["ledger_scope"]["scope"] == "per_host"
     for entry in cav.values():
         assert entry["note"] and isinstance(entry["note"], str)
 
@@ -3871,20 +3907,56 @@ def test_the_remote_null_field_LEDGER_is_true_of_a_real_remote_row():
     and non-null on the equivalent LOCAL row (or the caveat names fields that
     are always null and the remote-vs-local distinction it exists to draw is
     vacuous — the positive control).
+
+    🔴 RUN IN BOTH LEDGER CONFIGURATIONS, and that is not thoroughness — it is
+    the fix for how this guard went blind. It reads `base_gather()`, which is
+    pinned `use_ledger=False`, so when the ledger arrived this test could no
+    longer see the two fields it had been asserting. A caveat naming
+    `age_secs`/`claude_session_id` as null-on-remote would have stayed green
+    here forever while the tool printed the opposite. Re-adding either to the
+    list now fails on the ledger-ON pass.
     """
-    report = base_gather()
-    ledger = report["caveats"]["fuzzyclaw_scope"]["null_fields_on_remote_rows"]
-    remote = report["hosts"]["laptop"]["windows"][0]
-    assert remote["host"] == "laptop"
-    for field in ledger:
-        assert remote[field] is None, f"{field} is not null on a remote row"
-    local = next(r for r in report["hosts"]["workbench"]["windows"]
-                 if r["session"] == "scratch7")
-    for field in ledger:
-        assert local[field] is not None, (
-            f"{field} is null LOCALLY too — the ledger draws no distinction")
-    # and the classification consequence the caveat states is real
-    assert remote["status"] != "stale"
+    for report in (base_gather(),
+                   ledger_gather(laptop=[led_rec(window_id="@7", ago=120,
+                                                 tmux_pid=LEDGER_PID_LAPTOP)],
+                                 use_fuzzyclaw=True)):
+        claimed = (report["caveats"]["fuzzyclaw_scope"]
+                   ["null_fields_on_remote_rows"])
+        remote = report["hosts"]["laptop"]["windows"][0]
+        assert remote["host"] == "laptop"
+        for field in claimed:
+            assert remote[field] is None, f"{field} is not null on a remote row"
+        local = next(r for r in report["hosts"]["workbench"]["windows"]
+                     if r["session"] == "scratch7")
+        for field in claimed:
+            assert local[field] is not None, (
+                f"{field} is null LOCALLY too — the ledger draws no "
+                "distinction")
+
+
+def test_the_LEDGER_scope_caveat_is_true_of_a_real_remote_row():
+    """🔴 The other half, and the direction the old caveat got WRONG: it stated
+    a remote row is "NEVER labelled `stale`" and carries no session id. The
+    ledger is read per host, so both are false — asserted here against a real
+    remote row rather than against the sentence.
+
+    Positive control built in: the SAME fixture with no laptop record leaves
+    that row null, so this is a claim about the ledger supplying the fields and
+    not about the row being non-null for some unrelated reason.
+    """
+    with_rec = ledger_gather(
+        laptop=[led_rec(window_id="@7", session_id="ledger-remote",
+                        ago=9000, tmux_pid=LEDGER_PID_LAPTOP)],
+        use_fuzzyclaw=False)
+    remote = next(r for r in rows_of(with_rec) if r["host"] == "laptop")
+    assert remote["age_secs"] == 9000.0
+    assert remote["claude_session_id"] == "ledger-remote"
+    assert remote["status"] == "stale", (
+        "the old caveat said a remote row is NEVER stale; it can be")
+
+    without = ledger_gather(laptop=[], use_fuzzyclaw=False)
+    bare = next(r for r in rows_of(without) if r["host"] == "laptop")
+    assert bare["age_secs"] is None and bare["claude_session_id"] is None
 
 
 def test_the_caveats_are_printed_in_the_table_UNCONDITIONALLY(
@@ -3900,7 +3972,15 @@ def test_the_caveats_are_printed_in_the_table_UNCONDITIONALLY(
         assert "wrapper shell" in text
         assert "caveat[fuzzyclaw_scope]:" in text
         assert "local_host_only" in text
-        assert "never `stale`" in text
+        # 🔴 The corrected pair, asserted TOGETHER. The fuzzyclaw line used to
+        # end "and are never `stale`" — a claim about age/session-id/stale that
+        # the per-host ledger falsifies. Printing the correction beside it is
+        # what stops both readings staying available.
+        assert "caveat[ledger_scope]:" in text
+        assert "per_host" in text
+        assert "CAN be `stale`" in text
+        assert "never `stale`" not in text, (
+            "the retracted claim is back in the footer")
     # ...including the degenerate reports the renderer must survive
     empty = {"hosts": {}, "summary": {}, "clickhouse": {}, "fuzzyclaw": {}}
     assert "caveat[claude_detection]:" in sm.render_table(empty)
@@ -5187,10 +5267,491 @@ def test_the_row_FIELD_LEDGER_fails_when_it_grows_or_shrinks():
         "host", "session", "window_index", "window_id", "window_name",
         "codename", "label", "label_source", "hotkey", "pane_id", "path",
         "command",
-        "task", "claude", "busy", "age_secs", "status", "waiting_probable",
-        "waiting_signals", "waiting_status", "claude_session_id", "fuzzyclaw",
+        "task", "claude", "busy", "age_secs", "age_source", "status",
+        "waiting_probable", "waiting_signals", "waiting_status",
+        "claude_session_id", "ledger", "fuzzyclaw",
         "panes",
     }
     assert set(row) == expected
     for field in expected:
         assert field in sm.__doc__, f"{field} is undocumented in the header"
+
+
+# =========================================================================== #
+# §9 — the agent activity ledger (spec: claudedocs/spec-agent-activity-ledger.md)
+#
+# 🔴 THE DEFECT THIS SECTION EXISTS FOR. #419 switched fuzzyclaw off on a
+# dogfood finding that it "contributes nothing" — true of its `status` field,
+# false of the SOURCE. It was also the only supplier of `age_secs`, of the
+# `stale` bucket derived from it, and of the `claude_session_id` the ClickHouse
+# join needs. Measured on the workbench 2026-08-12, the SHIPPED default view:
+# `rows with an age: 0`, `claude_session_id` on 0 rows, no `stale` bucket at all.
+# Nothing in the output said so, which is why it survived weeks of green scans.
+# =========================================================================== #
+LEDGER_PID = "4025325"           # the workbench's tmux server, per the fixture
+LEDGER_PID_LAPTOP = "3737"       # a DIFFERENT one — hosts must not share a pid
+
+
+def led_rec(window_id="@41", session_id="ledger-sess-alpha", ago=600,
+            tmux_pid=LEDGER_PID, runtime="claude", pane_id="%11", **kw):
+    """A ledger record, aged `ago` seconds before the suite's fixed NOW.
+
+    `pane_id` is the FILE key and `window_id` the JOIN key — two different jobs,
+    given two distinct values here so a mutant that confuses them cannot satisfy
+    an assertion by accident.
+    """
+    return sm.AL.build_record(
+        runtime=runtime, session_id=session_id,
+        last_activity_ts=sm.AL.now_iso(NOW - ago),
+        window_id=window_id, pane_id=pane_id, tmux_pid=tmux_pid, **kw)
+
+
+def led_out(*records, pid=LEDGER_PID):
+    """The bytes a host's ledger read actually returns: the sentinel line
+    carrying the tmux server pid, then one JSON line per record."""
+    head = "%s %s" % (sm.AL.SENTINEL, pid) if pid else sm.AL.SENTINEL
+    return "\n".join([head] + [json.dumps(r) for r in records]) + "\n"
+
+
+def ledger_gather(workbench=(), laptop=(), wb_pid=LEDGER_PID,
+                  lt_pid=LEDGER_PID_LAPTOP, **kw):
+    """`base_gather` with the ledger ON and both hosts' output injected."""
+    outputs = {"workbench": led_out(*workbench, pid=wb_pid),
+               "laptop": led_out(*laptop, pid=lt_pid)}
+    outputs.update(kw.pop("ledger_outputs", {}))
+    return base_gather(use_ledger=True, ledger_outputs=outputs, **kw)
+
+
+def rows_of(report):
+    return [r for h in report["hosts"].values() for r in h["windows"]]
+
+
+def test_the_ledger_is_ON_by_default_in_gathers_signature():
+    """🔴 The shared fixture pins it OFF so the pre-existing assertions keep
+    their meaning, which leaves the SHIPPED default unasserted by every one of
+    them. This is that assertion. KILLS: flipping the default to False, which
+    would silently restore the #419 view while every other test stayed green."""
+    import inspect
+    sig = inspect.signature(sm.gather)
+    assert sig.parameters["use_ledger"].default is True
+    assert "--no-ledger" in sm.build_parser().format_help()
+
+
+def test_THE_REGRESSION_the_ledger_restores_age_session_id_and_stale():
+    """🔴 THE HEADLINE TEST, reported as a PAIR: the same fixture with the ledger
+    off, then on. The 'off' half is not decoration — a reader that returns 0 ages
+    is indistinguishable from one wired to nothing, so the 'on' number means
+    something only beside a control that moved.
+
+    KILLS: dropping the ledger join in `fold_windows`; sourcing `age_secs` from
+    fuzzyclaw only; leaving `claude_session_id` on the fuzzyclaw field.
+    """
+    # --- the control: exactly what shipped after #419 ---------------------
+    off = base_gather(use_ledger=False, use_fuzzyclaw=False)
+    assert off["summary"]["rows_with_age"] == 0
+    assert off["summary"]["rows_with_session_id"] == 0
+    assert off["summary"]["status"]["stale"]["total"] == 0
+    assert all(r["age_source"] is None for r in rows_of(off))
+
+    # --- the same scan with the ledger on ---------------------------------
+    on = ledger_gather(
+        workbench=[led_rec(window_id="@41", ago=600)],
+        laptop=[led_rec(window_id="@7", session_id="ledger-sess-laptop",
+                        ago=9000, tmux_pid=LEDGER_PID_LAPTOP)],
+        use_fuzzyclaw=False)
+    assert on["summary"]["rows_with_age"] == 2
+    assert on["summary"]["rows_with_session_id"] == 2
+    # 3 rows in this fixture: 2 joined to a ledger record, 1 (the bare shell in
+    # `misc:5`) with no writer at all — and `none` is the literal string, never
+    # a null key.
+    assert on["summary"]["age_sources"] == {"ledger": 2, "none": 1}
+
+    wb = next(r for r in rows_of(on) if r["window_id"] == "@41")
+    assert wb["age_secs"] == 600.0 and wb["age_source"] == "ledger"
+    assert wb["claude_session_id"] == "ledger-sess-alpha"
+    assert wb["status"] == "busy"
+
+    # ...and `stale` is a bucket again, because there is an age to derive it
+    # from. 9000s > the 3600s threshold, and `stale` WINS over the glyph.
+    lt = next(r for r in rows_of(on) if r["window_id"] == "@7")
+    assert lt["age_secs"] == 9000.0 and lt["status"] == "stale"
+    assert on["summary"]["status"]["stale"]["claude"] == 1
+
+
+def test_a_REMOTE_row_gets_an_age_which_fuzzyclaw_structurally_could_not_give_it():
+    """🔴 THE STRUCTURAL WIN, pinned. fuzzyclaw task files are LOCAL state, so
+    every remote row carried a null age by construction — the tool's own caveat
+    says so. The ledger is read per host over the same SSH transport, so a laptop
+    row is not a second-class row. KILLS: reading the ledger once and reusing the
+    local host's index for every host.
+    """
+    rep = ledger_gather(laptop=[led_rec(window_id="@7", ago=120,
+                                        tmux_pid=LEDGER_PID_LAPTOP)],
+                        use_fuzzyclaw=False)
+    lt = next(r for r in rows_of(rep) if r["host"] == "laptop")
+    assert lt["age_secs"] == 120.0 and lt["age_source"] == "ledger"
+    # ...and the workbench, whose ledger answered with NO records, is a measured
+    # zero rather than an error.
+    assert rep["ledger"]["hosts"]["workbench"]["seen"] == 0
+    assert rep["ledger"]["hosts"]["workbench"]["status"] == "ok"
+
+
+def test_the_ledger_read_goes_to_EVERY_host_not_just_the_local_one():
+    """The transport claim behind the test above, at the argv level: two hosts,
+    two reads, and the remote one is wrapped for SSH."""
+    calls = []
+    base_gather(use_ledger=True, runner=make_runner(calls=calls))
+    ledger_calls = [c for c in calls if sm.AL.SENTINEL in " ".join(c)]
+    assert len(ledger_calls) == 2, ledger_calls
+    assert sum(1 for c in ledger_calls if c[0] == "ssh") == 1
+
+
+def test_the_ledger_WINS_over_fuzzyclaw_when_both_describe_one_window():
+    """🔴 Precedence, not a merge. Both writers are live during the supersede
+    phase (spec §6) and they can disagree; two ages averaged or picked by
+    recency would be a number neither writer ever measured.
+
+    Pinned on BOTH fields, because `claude_session_id` is the one carrier of the
+    session id into the ClickHouse join — a stale fuzzyclaw value winning here
+    resolves a live window's history to a session that ended days ago.
+    """
+    rep = ledger_gather(workbench=[led_rec(window_id="@41", ago=600)],
+                        use_fuzzyclaw=True)
+    row = next(r for r in rows_of(rep) if r["window_id"] == "@41")
+    assert row["age_source"] == "ledger"
+    assert row["age_secs"] == 600.0          # NOT fuzzyclaw's 1800.0
+    assert row["claude_session_id"] == "ledger-sess-alpha"
+    # ...and the fuzzyclaw record is still CARRIED, not deleted: the supersede
+    # phase keeps both visible so a disagreement can be seen rather than
+    # resolved in silence.
+    assert row["fuzzyclaw"]["claude_session"].startswith("11111111")
+    assert row["ledger"]["session_id"] == "ledger-sess-alpha"
+
+
+def test_fuzzyclaw_still_answers_for_a_window_the_ledger_has_never_seen():
+    """The fallback half of the precedence above. KILLS: making the ledger
+    authoritative for the ABSENCE of a record — during the supersede phase a
+    window whose agent predates the hook has no ledger record and must not lose
+    the age it already had."""
+    rep = ledger_gather(workbench=[], use_fuzzyclaw=True)
+    row = next(r for r in rows_of(rep) if r["window_id"] == "@41")
+    assert row["age_source"] == "fuzzyclaw" and row["age_secs"] == 1800.0
+
+
+def test_a_record_from_an_OLDER_TMUX_SERVER_never_reaches_a_row():
+    """🔴 THE GENERATION GUARD, end-to-end. After a reboot tmux window ids
+    restart at `@0`, so yesterday's `@41` record and today's `@41` window
+    collide — and `tmux-task-resume.sh` rebuilding the workspace is exactly when
+    that happens. Without the pid check the fresh window inherits a dead
+    session's id and a multi-day age.
+
+    KILLS: joining on `window_id` alone; comparing the pid as an int against a
+    str; treating a mismatch as `not_live` (which would report the wrong reason).
+    """
+    rep = ledger_gather(
+        workbench=[led_rec(window_id="@41", tmux_pid="999999", ago=300)],
+        use_fuzzyclaw=False)
+    row = next(r for r in rows_of(rep) if r["window_id"] == "@41")
+    assert row["age_secs"] is None and row["ledger"] is None
+    assert row["claude_session_id"] is None
+    wb = rep["ledger"]["hosts"]["workbench"]
+    assert wb["generation_mismatch"] == 1 and wb["not_live"] == 0
+    assert wb["live"] == 0
+
+
+def test_a_record_for_a_DEAD_window_never_reaches_a_row():
+    """The other rejection, kept distinct from the one above so the report says
+    WHICH happened."""
+    rep = ledger_gather(workbench=[led_rec(window_id="@998")],
+                        use_fuzzyclaw=False)
+    assert all(r["ledger"] is None for r in rows_of(rep))
+    assert rep["ledger"]["hosts"]["workbench"]["not_live"] == 1
+    assert rep["ledger"]["hosts"]["workbench"]["generation_mismatch"] == 0
+
+
+def test_a_host_whose_ledger_read_FAILED_is_partial_and_says_which_host():
+    """🔴 A total summed across a host that never answered counts it as
+    contributing zero records — the same lie as `files_live: 0` under
+    `--no-fuzzyclaw`. `partial` is its own status, and the other host's rows are
+    unaffected. KILLS: folding a failed host into `ok`; zero-filling its counts.
+    """
+    rep = ledger_gather(laptop=[led_rec(window_id="@7",
+                                        tmux_pid=LEDGER_PID_LAPTOP, ago=60)],
+                        use_fuzzyclaw=False,
+                        ledger_outputs={"workbench": None})
+    assert rep["ledger"]["status"] == "partial"
+    assert "workbench" in rep["ledger"]["error"]
+    assert rep["ledger"]["hosts"]["workbench"]["status"] == "error"
+    assert rep["ledger"]["hosts"]["workbench"]["seen"] is None
+    # the laptop still measured, and its row still got its age
+    assert rep["ledger"]["records_live"] == 1
+    lt = next(r for r in rows_of(rep) if r["host"] == "laptop")
+    assert lt["age_secs"] == 60.0
+
+
+def test_a_host_that_answered_NEITHER_tmux_call_is_not_asked_a_third_time():
+    """The skip exists so an offline laptop does not cost a third
+    `ConnectTimeout=4` on every scan. It must remain an ERROR — nothing was
+    measured — and the reason must say the read was never ATTEMPTED, which is a
+    different fact about the host from "tried and failed".
+
+    KILLS: reporting the skipped host as `ok` (a fabricated `0 live of 0` for a
+    machine that is down — the exact class this module refuses), and KILLS:
+    reporting it as `no_sentinel`, which would blame the protocol for a host
+    that was never asked.
+    """
+    calls = []
+    rep = base_gather(use_ledger=True, use_fuzzyclaw=False,
+                      runner=make_runner(calls=calls, remote_rc=1,
+                                         remote_err="ssh: connect timed out"))
+    lt = rep["ledger"]["hosts"]["laptop"]
+    assert lt["status"] == "error"
+    assert "not attempted" in lt["error"]
+    for key in ("seen", "live", "not_live", "generation_mismatch"):
+        assert lt[key] is None, key
+    # the THIRD command was never issued to that host...
+    ledger_calls = [c for c in calls if c and sm.AL.SENTINEL in " ".join(c)]
+    assert [c for c in ledger_calls if c[0] == "ssh"] == [], ledger_calls
+    # ...and the REACHABLE host was still asked, so this is a per-host skip and
+    # not a switch that turned the whole feature off. Asserted on the ARGV
+    # rather than on the status: `make_runner` answers pane text for any argv it
+    # does not recognise, so the local read honestly comes back `no_sentinel`
+    # here — which is the fixture's answer, not the host's.
+    assert len([c for c in ledger_calls if c[0] != "ssh"]) == 1, ledger_calls
+
+
+def test_a_host_that_answered_EITHER_tmux_call_is_still_read():
+    """🔴 The OTHER direction of the skip, and it was unpinned: only
+    `not wins_res["reachable"]` was killable, so `not panes_res["reachable"]`
+    could be dropped from the conjunction with the suite green — and the ledger
+    would then be skipped for a host whose `list-windows` demonstrably answered.
+
+    The guard's own justification is "answered NEITHER tmux call", so both
+    halves have to be asserted or the sentence is only half true. Both
+    asymmetric cases here, because a conjunction pinned at one operand is not
+    pinned.
+    """
+    for kw in ({"local_rc": 1, "local_err": "panes blew up",
+                "local_windows_rc": 0},
+               {"local_windows_rc": 1, "local_windows_err": "windows blew up"}):
+        calls = []
+        base_gather(use_ledger=True, use_fuzzyclaw=False,
+                    runner=make_runner(calls=calls, **kw))
+        local_ledger = [c for c in calls
+                        if c and c[0] != "ssh"
+                        and sm.AL.SENTINEL in " ".join(c)]
+        assert len(local_ledger) == 1, (kw, local_ledger)
+
+
+def test_a_host_with_NO_TMUX_SERVER_is_still_read():
+    """🔴 `no_server` is REACHABLE with empty output — the host answered, it
+    simply has no tmux running. It must NOT be caught by the skip above: a
+    machine with a dead tmux server can still hold a ledger (records survive the
+    server that produced them), and skipping it would publish `error` for a host
+    that was perfectly able to answer.
+    """
+    rep = base_gather(
+        use_ledger=True, use_fuzzyclaw=False,
+        ledger_outputs={"workbench": led_out(pid=None),
+                        "laptop": led_out(pid=None)},
+        runner=make_runner(remote_rc=1, remote_err="no server running on /tmp/x",
+                           local_rc=1, local_err="no server running on /tmp/x"))
+    for host in ("workbench", "laptop"):
+        assert rep["hosts"][host]["reachable"] is True, host
+        assert rep["ledger"]["hosts"][host]["status"] == "ok", host
+        assert rep["ledger"]["hosts"][host]["seen"] == 0, host
+
+
+def test_output_without_the_SENTINEL_is_NO_SENTINEL_not_zero_records():
+    """🔴 THE FABRICATED ZERO. Empty stdout from a swallowed command and a host
+    with no records are the same bytes. KILLS: reading `records: []` off a read
+    whose protocol never confirmed it ran."""
+    rep = ledger_gather(use_fuzzyclaw=False,
+                        ledger_outputs={"workbench": "garbage\n"})
+    wb = rep["ledger"]["hosts"]["workbench"]
+    assert wb["status"] == "no_sentinel"
+    assert wb["seen"] is None and wb["live"] is None
+    assert rep["ledger"]["status"] == "partial"
+
+
+def test_a_host_whose_WINDOW_LIST_is_unmeasured_joins_nothing_and_says_so():
+    """The ledger read succeeded and the intersection could not run. Records
+    exist, none is joinable, and every count that would describe the join is
+    None rather than 0."""
+    rep = ledger_gather(workbench=[led_rec(window_id="@41")],
+                        use_fuzzyclaw=False,
+                        runner=make_runner(local_windows_rc=1,
+                                           local_windows_err="boom"))
+    wb = rep["ledger"]["hosts"]["workbench"]
+    assert wb["status"] == "unmeasured"
+    assert wb["seen"] == 1 and wb["live"] is None
+    assert "list-windows" in wb["error"]
+    assert all(r["age_source"] is None for r in rows_of(rep)
+               if r["host"] == "workbench")
+
+
+def test_no_ledger_publishes_NULLS_not_zeroes():
+    """🔴 The same rule `--no-fuzzyclaw` already obeys: under `--no-ledger` the
+    directory is never read, so `records_live: 0` would be a fabricated
+    measurement. `status: skipped` discriminates it, but a discriminated lie is
+    still a lie in the count."""
+    rep = base_gather(use_ledger=False)
+    assert rep["ledger"]["status"] == "skipped"
+    for key in ("records_seen", "records_live", "records_unparseable"):
+        assert rep["ledger"][key] is None, key
+    assert rep["ledger"]["hosts"] == {}
+
+
+def test_the_ledger_section_is_in_the_report_even_when_it_was_skipped():
+    """The skeleton is present from the first byte, so a consumer branches on a
+    field rather than on whether a key exists."""
+    assert "ledger" in base_gather(use_ledger=False)
+    assert "ledger" in ledger_gather()
+
+
+def test_a_record_from_the_FUTURE_clamps_to_zero_rather_than_going_negative():
+    """🔴 The clamp is load-bearing and was untested. A record whose timestamp is
+    ahead of this host's clock yields a NEGATIVE age, and `classify_status` reads
+    `age >= threshold` — so a negative age silently passes as fresh, and worse,
+    `AGE` renders as a negative duration.
+
+    Cross-host clock skew only became REACHABLE because the ledger is the first
+    source of remote ages: the record is written on the laptop and the arithmetic
+    happens here. Measured at two points — 300s ahead and exactly now — because
+    one point is not a claim about a clamp.
+
+    KILLS: dropping `max(0.0, …)` from either the ledger or the fuzzyclaw branch.
+    """
+    ahead = ledger_gather(
+        laptop=[led_rec(window_id="@7", ago=-300, tmux_pid=LEDGER_PID_LAPTOP)],
+        use_fuzzyclaw=False)
+    row = next(r for r in rows_of(ahead) if r["host"] == "laptop")
+    assert row["age_secs"] == 0.0, "a future record must clamp, not go negative"
+    assert row["age_source"] == "ledger"
+
+    exact = ledger_gather(
+        laptop=[led_rec(window_id="@7", ago=0, tmux_pid=LEDGER_PID_LAPTOP)],
+        use_fuzzyclaw=False)
+    assert next(r for r in rows_of(exact)
+                if r["host"] == "laptop")["age_secs"] == 0.0
+
+
+def test_a_FUZZYCLAW_task_from_the_future_clamps_too():
+    """The same clamp on the other branch — pinned separately, because a mutant
+    that drops only one of the two would otherwise be caught by neither."""
+    future = dict(TASK_LIVE, last_activity="2026-08-11T12:05:00+00:00")
+    rep = base_gather(use_fuzzyclaw=True,
+                      fuzzyclaw_texts=[json.dumps(future)])
+    row = next(r for r in rows_of(rep) if r["window_id"] == "@41")
+    assert row["age_secs"] == 0.0 and row["age_source"] == "fuzzyclaw"
+
+
+def test_a_generation_that_could_not_be_CHECKED_is_kept_and_declared():
+    """🔴 KEPT, and visible. A host with no tmux server prints the sentinel with
+    no pid; those records are being TRUSTED, and the count says how many live
+    rows rest on that. KILLS: counting them as verified, and KILLS: dropping
+    them."""
+    rep = ledger_gather(workbench=[led_rec(window_id="@41", tmux_pid=None)],
+                        wb_pid=None, use_fuzzyclaw=False)
+    wb = rep["ledger"]["hosts"]["workbench"]
+    assert wb["live"] == 1 and wb["generation_unchecked"] == 1
+    assert wb["tmux_pid"] is None
+    row = next(r for r in rows_of(rep) if r["window_id"] == "@41")
+    assert row["age_source"] == "ledger"
+
+
+# --------------------------------------------------------------------------- #
+# §9.1 — the ledger in the rendered table
+# --------------------------------------------------------------------------- #
+def test_the_table_states_how_many_rows_have_an_age_and_from_which_writer():
+    """🔴 The line that would have made #419 visible on the day it shipped. A
+    `stale=0+0` bucket means one of two completely different things — nothing is
+    stale, or nothing has an AGE — and the by-status line cannot tell them
+    apart. KILLS: rendering the summary without the ages line."""
+    text = sm.render_table(ledger_gather(
+        workbench=[led_rec(window_id="@41", ago=600)], use_fuzzyclaw=False))
+    assert "ages: 1 of 3 row(s) have one" in text
+    assert "ledger=1" in text and "none=2" in text
+    assert "session ids: 1" in text
+
+
+def test_the_table_reports_a_host_that_did_not_answer_as_such():
+    """KILLS: rendering a failed read as an empty section — the exact shape the
+    ClickHouse section is already forbidden from taking."""
+    text = sm.render_table(ledger_gather(
+        use_fuzzyclaw=False, ledger_outputs={"workbench": None}))
+    assert "⚠ PARTIAL" in text
+    assert "workbench  ERROR" in text
+    # ...and the reason travels with it, so the operator is not left to guess
+    # whether the host is down or the read is broken.
+    assert "no injected ledger output" in text
+
+
+def test_a_ledger_CONFLICT_reaches_the_REPORT_through_gather():
+    """🔴 THE SEAM, not the function. `index_by_window` detecting a conflict is
+    pinned at the pure-function level, and that proves nothing about whether the
+    finding survives the trip through `gather` into the payload — the exact gap a
+    prior round already found and closed for fuzzyclaw's identically-shaped
+    `slot_conflicts` path, which this one was written without.
+
+    The co-tenancy fix's whole claim is that contention "is now visible instead
+    of being decided by write order". Delete the aggregation and it silently is
+    not, while the window still resolves to one arbitrary agent of two.
+
+    KILLS: `report["ledger"]["conflicts"] = []`.
+    """
+    rep = ledger_gather(
+        workbench=[led_rec(pane_id="%11", session_id="agent-a", ago=900),
+                   led_rec(pane_id="%12", session_id="agent-b", ago=120)],
+        use_fuzzyclaw=False)
+    conflicts = rep["ledger"]["conflicts"]
+    assert len(conflicts) == 1, conflicts
+    assert conflicts[0]["window_id"] == "@41"
+    assert conflicts[0]["claimants"] == 2
+    assert conflicts[0]["session_ids"] == ["agent-a", "agent-b"]
+    # the host travels WITH the conflict — two hosts can each have one
+    assert conflicts[0]["host"] == "workbench"
+    # ...and the window still gets exactly one row, resolved to the NEWEST
+    row = next(r for r in rows_of(rep) if r["window_id"] == "@41")
+    assert row["claude_session_id"] == "agent-b" and row["age_secs"] == 120.0
+
+
+def test_a_ledger_CONFLICT_is_PRINTED_not_only_carried():
+    """The other half of the seam. A `--json` consumer and a human reader must
+    both be told; the plain-text reader is the one who would otherwise see a
+    single confident row. KILLS: dropping the conflict loop from
+    `render_ledger`."""
+    text = sm.render_table(ledger_gather(
+        workbench=[led_rec(pane_id="%11", session_id="agent-a"),
+                   led_rec(pane_id="%12", session_id="agent-b")],
+        use_fuzzyclaw=False))
+    assert "⚠ LEDGER CONFLICT" in text
+    assert "@41" in text and "claimed by 2 record(s)" in text
+    assert "agent-a" in text and "agent-b" in text
+
+
+def test_no_conflict_prints_NOTHING_so_the_warning_stays_meaningful():
+    """The negative control: a warning that appears on every scan is one a
+    reader learns to skip."""
+    text = sm.render_table(ledger_gather(
+        workbench=[led_rec(pane_id="%11")], use_fuzzyclaw=False))
+    assert "LEDGER CONFLICT" not in text
+
+
+def test_the_table_survives_a_skipped_ledger():
+    text = sm.render_table(base_gather(use_ledger=False))
+    assert "AGENT LEDGER (skipped" in text
+    assert "null, not 0" in text
+
+
+def test_the_table_names_the_rejections_and_the_unverified_separately():
+    """🔴 `generation_unchecked` is NOT a rejection — those records were kept.
+    Rendering them inside the rejected list would tell an operator that records
+    were dropped when they were in fact trusted."""
+    text = sm.render_table(ledger_gather(
+        workbench=[led_rec(window_id="@998"),
+                   led_rec(window_id="@41", tmux_pid="999")],
+        use_fuzzyclaw=False))
+    assert "rejected:" in text
+    assert "1 window gone" in text and "1 older tmux server" in text
+    assert "unverified generation" not in text

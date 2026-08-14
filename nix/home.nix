@@ -1037,6 +1037,33 @@ in
   home.file.".claude/hooks/next-step-nudge.py" = {
     source = ../scripts/claude-hooks/next-step-nudge.py;
   };
+  # 🔴 THE AGENT ACTIVITY LEDGER — writer 1 (Claude Code), plus the shared module
+  # it and `scripts/session-manager` BOTH read the record shape from.
+  #
+  # Why the module ships here and not only in the repo: the hook runs as
+  # `python3 ~/.claude/hooks/agent-ledger-hook.py`, and Python puts the SCRIPT's
+  # directory on sys.path — so `agent_ledger.py` must sit beside it, exactly the
+  # arrangement bash-guard.py already has with guard_core.py. Same source file as
+  # `scripts/lib/agent_ledger.py`, which session-manager loads by explicit path,
+  # so writer and reader agree on the record BY CONSTRUCTION. A second copy of
+  # the shape is how the two halves of a ledger drift apart while both look fine.
+  #
+  # What it buys: `session-manager`'s DEFAULT view lost `age_secs`, the `stale`
+  # bucket derived from it, and `claude_session_id` when #419 switched fuzzyclaw
+  # off — measured 2026-08-12, 0 rows with an age and 0 with a session id. This
+  # writer restores all three from a source this repo owns. Spec:
+  # claudedocs/spec-agent-activity-ledger.md (#428).
+  #
+  # 🔴 BOTH files are NEW, so both must be `git add`ed or the flake silently
+  # omits them and the switch succeeds with the hook absent — this repo's
+  # standing trap (CLAUDE.md).
+  home.file.".claude/hooks/agent-ledger-hook.py" = {
+    source = ../scripts/claude-hooks/agent-ledger-hook.py;
+  };
+  home.file.".claude/hooks/agent_ledger.py" = {
+    source = ../scripts/lib/agent_ledger.py;
+  };
+
   # 🔴 THE REGISTRAR ITSELF — the hook that makes the hooks above DO anything.
   # settings.json is per-host and unmanaged (permissions/allowlists), so a hook
   # script landing in ~/.claude/hooks/ registers nothing by itself; this script

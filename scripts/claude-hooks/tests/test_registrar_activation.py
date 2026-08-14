@@ -54,6 +54,7 @@ BASH = shutil.which("bash") or "/bin/bash"
 
 NEXT_STEP = "python3 ~/.claude/hooks/next-step-nudge.py"
 NOTIFY = "python3 ~/.claude/hooks/claude-notify.py"
+LEDGER = "python3 ~/.claude/hooks/agent-ledger-hook.py"
 CLAWGATE_STOP = "/home/zach/.claude/clawgate-stop-hook.sh"
 TMUX_STOP = "~/.config/tmux/task-hook.sh"
 
@@ -155,7 +156,7 @@ def test_it_says_what_it_did_on_stdout(tmp_path):
     assert NEXT_STEP in p.stdout, p.stdout
 
 
-def test_three_foreign_stop_hooks_come_back_as_four_originals_intact_and_in_order(tmp_path):
+def test_three_foreign_stop_hooks_come_back_as_five_originals_intact_and_in_order(tmp_path):
     """🔴 Losing the clawgate Stop hook would silently break remote approval."""
     home = make_home(tmp_path, settings_with(THREE_FOREIGN_STOP_HOOKS))
 
@@ -165,12 +166,17 @@ def test_three_foreign_stop_hooks_come_back_as_four_originals_intact_and_in_orde
     assert p.returncode == 0, p.stderr
     # SET equality, not membership: it fails when the set SHRINKS (one clobbered) and
     # when it GROWS (something registered by accident), which membership cannot see.
-    assert set(after) == set(THREE_FOREIGN_STOP_HOOKS) | {NEXT_STEP}, after
-    assert len(after) == 4, after
+    assert set(after) == set(THREE_FOREIGN_STOP_HOOKS) | {NEXT_STEP, LEDGER}, after
+    assert len(after) == 5, after
     # The three originals keep their identity AND their relative order, and stay ahead
-    # of the appended one — append-only, never a rewrite.
+    # of the appended ones — append-only, never a rewrite.
     assert after[:3] == THREE_FOREIGN_STOP_HOOKS, after
-    assert after[3] == NEXT_STEP, after
+    # 🔴 The two appended hooks in the order the registrant adds them. Order is
+    # load-bearing for next-step-nudge (it returns additionalContext and should
+    # run after the notifiers have observed the turn) and irrelevant to the
+    # ledger, which neither blocks nor prints — but it is pinned so a reordering
+    # is a decision someone makes rather than a diff nobody reads.
+    assert after[3:] == [LEDGER, NEXT_STEP], after
 
 
 def test_unrelated_settings_content_is_untouched(tmp_path):
