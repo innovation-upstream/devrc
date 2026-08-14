@@ -607,3 +607,37 @@ def test_pane_filename_is_the_SAME_SPELLING_the_write_path_uses():
     assert AL.pane_filename("claude", "%77") == "claude-p77.json"
     assert AL.pane_filename("claude", "%77") == AL.record_filename(
         rec(pane_id="%77", window_id="@41"))
+
+
+def test_the_pane_file_is_namespaced_BY_RUNTIME():
+    """🔴 KILLS: hardcoding `"claude"` inside `pane_filename`.
+
+    Latent today — Claude is the only writer — but spec §4 adds opencode next,
+    and opencode runs in tmux panes too. Two runtimes sharing a pane's filename
+    would make them overwrite each other's records, which is the co-tenancy bug
+    again with a different pair of writers. The runtime handling MOVED into this
+    function when the hook's pre-tmux prediction needed it, so it is pinned here
+    rather than left to the writer that will trip on it.
+    """
+    assert AL.pane_filename("opencode", "%77") == "opencode-p77.json"
+    assert AL.pane_filename("claude", "%77") != AL.pane_filename("opencode",
+                                                                 "%77")
+    # ...and the full builder agrees, so the prediction and the write stay in
+    # step for a non-claude runtime too
+    assert AL.record_filename(rec(runtime="opencode")) == "opencode-p77.json"
+
+
+def test_the_tie_break_resolves_on_the_record_read_FIRST():
+    """🔴 The docstring CLAIMS ties resolve on the record read first. That claim
+    was unpinned, so `>` -> `>=` in `index_by_window` survived — silently
+    inverting it to last-wins. A comment is a claim too.
+
+    Identical timestamps, distinct session ids, both orders asserted.
+    """
+    ts = AL.now_iso(NOW)
+    a = rec(pane_id="%1", session_id="first", last_activity_ts=ts)
+    b = rec(pane_id="%2", session_id="second", last_activity_ts=ts)
+    assert AL.index_by_window([a, b])["index"]["@41"]["session_id"] == "first"
+    assert AL.index_by_window([b, a])["index"]["@41"]["session_id"] == "second"
+    # ...and it is still reported as contested either way round
+    assert AL.index_by_window([a, b])["conflicts"][0]["claimants"] == 2

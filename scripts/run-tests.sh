@@ -770,7 +770,7 @@ TARGET_FLOORS=(
   # Gate's own count on this branch: `scripts/tests collected=4002`
   # (confirmed by `PASS … collected=4002 … floor=3970`).
   #   _suggested_floor 4002 = 4002 - min(50, max(1, 200)) = 3952.
-  # Pinned at 3970 rather than 3954 — a floor the gate ACCEPTS and which sits
+  # Pinned at 3970 rather than 3952 — a floor the gate ACCEPTS and which sits
   # closer to the measurement, so a collapse is caught sooner. Do not reconcile
   # this by arithmetic against another branch: re-run the gate on the merged
   # tree and copy what it prints.

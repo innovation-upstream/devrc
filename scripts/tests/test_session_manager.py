@@ -5520,6 +5520,29 @@ def test_a_host_that_answered_NEITHER_tmux_call_is_not_asked_a_third_time():
     assert len([c for c in ledger_calls if c[0] != "ssh"]) == 1, ledger_calls
 
 
+def test_a_host_that_answered_EITHER_tmux_call_is_still_read():
+    """🔴 The OTHER direction of the skip, and it was unpinned: only
+    `not wins_res["reachable"]` was killable, so `not panes_res["reachable"]`
+    could be dropped from the conjunction with the suite green — and the ledger
+    would then be skipped for a host whose `list-windows` demonstrably answered.
+
+    The guard's own justification is "answered NEITHER tmux call", so both
+    halves have to be asserted or the sentence is only half true. Both
+    asymmetric cases here, because a conjunction pinned at one operand is not
+    pinned.
+    """
+    for kw in ({"local_rc": 1, "local_err": "panes blew up",
+                "local_windows_rc": 0},
+               {"local_windows_rc": 1, "local_windows_err": "windows blew up"}):
+        calls = []
+        base_gather(use_ledger=True, use_fuzzyclaw=False,
+                    runner=make_runner(calls=calls, **kw))
+        local_ledger = [c for c in calls
+                        if c and c[0] != "ssh"
+                        and sm.AL.SENTINEL in " ".join(c)]
+        assert len(local_ledger) == 1, (kw, local_ledger)
+
+
 def test_a_host_with_NO_TMUX_SERVER_is_still_read():
     """🔴 `no_server` is REACHABLE with empty output — the host answered, it
     simply has no tmux running. It must NOT be caught by the skip above: a
