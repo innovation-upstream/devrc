@@ -119,10 +119,15 @@ The headline question is "is anything waiting on me", and `idle` answered it
 with 12 agent windows and 5 bare shells added together — rendered identically
 as `● idle`, with nothing on the row saying which was which. The row data was
 already right (every row carries `claude`); only the roll-up and the table
-conflated. So every status bucket now splits `{claude, shell, total}` in the
-summary, and the table carries a KIND column. See `summarize` for why all four
-buckets split rather than just `idle`, and for the deliberate removal of the
-flat `summary["idle"]` integer.
+conflated. So every status bucket now splits per CLASS plus `total` in the
+summary, and the table carries a CLASS column. The classes are `claude` and
+`shell` for a tmux row and `cluster` for a row with no pane — see `row_class`,
+and `summarize` for why all four buckets split rather than just `idle` and for
+the deliberate removal of the flat `summary["idle"]` integer.
+
+⚠ The CLASS column and the `kind` FIELD are different axes and are deliberately
+not the same word: `kind` is `tmux`/`cluster` (WHAT the entity is), `CLASS` is
+`claude`/`shell`/`cluster` (how it is COUNTED).
 
 `--claude-only` drops the shells outright; the summary then describes the
 FILTERED set and carries `excluded_non_claude` so an empty table cannot read as
@@ -163,14 +168,33 @@ and the roll-ups a caller usually wants are:
 
     report["summary"]["waiting"]        {"probable", "measured", "unmeasured",
                                          "per_signal", "unmeasured_reasons"}
-    report["summary"]["status"][b]      {"claude", "shell", "total"} per bucket
+    report["summary"]["status"][b]      class counts + "total" per bucket
+    report["summary"]["kind"]           {"tmux": N} — the entity axis
     report["blocked_on_me"]             {"status", "count", ...}
 
-Each row carries: host, session, window_index, window_id, window_name,
+Each row carries: kind, host, session, window_index, window_id, window_name,
 codename, label, label_source, hotkey, pane_id, path, command, task, claude,
 busy, age_secs, age_source, status, waiting_probable, waiting_signals,
 waiting_status, claude_session_id, runtime, ledger, fuzzyclaw, panes. The row ledger is
 pinned by a test.
+
+🔴 `kind` IS THE ENTITY AXIS, AND IT IS WHY THE STATUS BUCKETS ARE NOT
+SIMPLY {claude, shell}.
+--------------------------------------------------------------------------
+`kind` is `tmux` on every row this build produces: a pane on a host it ssh'd
+to. `cluster` is enumerated for a dispatch with NO pane (spec §4, writer 3)
+and is NOT produced yet — `caveats.kind_scope` says so in the payload, so an
+absence of cluster rows is never readable as a measured absence of cluster
+work. Clawgate is reported instead under `blocked_on_me`, a different
+population that is never double-counted with these rows.
+
+The buckets count by `row_class`, not by `claude`-or-`shell`, because
+`row["claude"]` is `pane_current_command =~ /claude/` — a fact about a PANE.
+A row with no pane has `claude: None`, which is FALSY, so an inline
+`"claude" if row["claude"] else "shell"` would file every cluster agent as a
+BARE SHELL. That is the claude/shell conflation this summary already exists
+to prevent, one axis over. A class key is created on demand, so no `cluster: 0`
+is published while no cluster row can exist.
 
 🔴 `label` IS NOT AN ADDRESS — `session:window` still is.
 --------------------------------------------------------------------------
@@ -196,6 +220,7 @@ surface that renders a row shows `session` and `window_index` beside it.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import re
@@ -457,6 +482,86 @@ CAPTURE_MARK_PREFIX = "SMCAP"
 # bucket cannot exist in `classify_status` and be missing from the summary.
 STATUS_BUCKETS = ("busy", "idle", "stale", "unknown")
 
+# 🔴 WHAT KIND OF THING A ROW IS — the entity axis, enumerated and CLOSED.
+#
+# Every row today is `tmux`: a pane on a host this tool ssh'd to. `cluster` is
+# the name reserved for a row with NO pane — a clawgate dispatch running in the
+# workbench cluster (spec §4). It is enumerated here BEFORE such a row exists,
+# and that is the point: the decision this constant records is that clawgate
+# rows join the SAME collection with the tmux-only fields null, rather than
+# living in a second section every consumer has to merge by hand.
+# `claudedocs/design-ledger-writer3-and-kind-2026-08-14.md` has the reasoning
+# and the measurement that says `cluster` rows are NOT built yet.
+#
+# 🔴 NO `cluster` COUNT IS PUBLISHED UNTIL A `cluster` ROW EXISTS. `summarize`
+# creates a class key on demand, never pre-seeded, because a `cluster: 0` in a
+# build that cannot produce cluster rows is indistinguishable from a reader
+# wired to nothing — the exact zero this tool exists to stop emitting. So the
+# summary of a tmux-only scan is byte-identical to what it was before `kind`.
+KINDS = ("tmux", "cluster")
+
+#: 🔴 What this build produces WITHOUT measuring — the honest answer for a
+#: caller that has no scan. Separate from `KINDS` (what exists) and from a
+#: report's measured `kinds_produced` (what a scan saw). Writer 3 updates THIS
+#: tuple, and the moment it gains `cluster` the all-produced branch of
+#: `_kind_scope_sentence` goes live under the by-construction head — which is
+#: why that branch's wording is parameterised rather than hardcoded to a scan.
+KINDS_PRODUCED_BY_CONSTRUCTION = ("tmux",)
+
+# 🔴 `kind` VS `runtime` — TWO AXES, AND NEITHER IS DERIVABLE FROM THE OTHER.
+# They will agree on almost every row, which is exactly how someone collapses
+# them later and finds out the hard way that the null semantics differ:
+#
+#   kind     WHERE the row came from — a tmux pane scan, or the clawgate API.
+#            Known with certainty when the row is built. NEVER null.
+#   runtime  WHICH agent software — from the ledger record (`claude`/`opencode`).
+#            NULL whenever no writer has recorded that window, which is the
+#            common case for a session that has not taken a turn yet.
+#
+# So `runtime is None` is a real, frequent measurement about a tmux row, and
+# `kind is None` is a bug. Do not infer one from the other.
+
+
+def row_class(row) -> str:
+    """Which class a row is counted as in the roll-ups: `claude` | `shell` |
+    `cluster`. THE ONE definition — `summarize` uses it for both the per-status
+    buckets and the top-level totals, so the two cannot disagree.
+
+    🔴 `claude`/`shell` IS A TMUX-ONLY DISTINCTION, and that is the whole reason
+    this function exists rather than an inline conditional. The old roll-up read
+    `"claude" if row.get("claude") else "shell"`, and `row["claude"]` is
+    `pane_current_command =~ /claude/` — a fact about a PANE. A row with no pane
+    has `claude: None`, which is falsy, so every cluster agent would have been
+    counted as a BARE SHELL: an agent silently added to the bucket that means
+    "nobody is working here".
+
+    That is not a hypothetical restatement of the rule — it is the identical
+    defect the claude/shell split was built to kill one axis over. Measured on
+    this host 2026-08-11, `idle: 17` was 12 agent windows + 5 bare shells
+    rendered identically, and the fix was to stop publishing the mixed integer.
+    Publishing a cluster agent inside `shell` re-opens it in a form the existing
+    tests cannot see, because every fixture in the suite is tmux-only.
+
+    Keyed on `kind`, NOT on `claude is None`. A tmux row can also carry a null
+    `claude` (a pane whose command did not parse), and that row genuinely is
+    "not a claude pane" — it belongs in `shell`. The two nulls mean different
+    things and only `kind` separates them.
+
+    🔴 A MISSING OR UNKNOWN `kind` GETS ITS OWN CLASS, and does not fall through
+    to `cluster`. Folding it into `cluster` would be the same mistake one level
+    down: "a row whose kind nobody set" and "a row measured as a cluster
+    dispatch" are different findings, and the first is a bug in whatever built
+    the row. `unknown_kind` is never pre-seeded, so it publishes a count only
+    when such a row actually exists — at which point it is loud rather than
+    absorbed into a plausible neighbour.
+    """
+    kind = row.get("kind")
+    if kind == "tmux":
+        return "claude" if row.get("claude") else "shell"
+    if kind in KINDS:
+        return kind
+    return "unknown_kind"
+
 # 🔴 THE TWO LIMITS THAT CHANGE WHAT THE OUTPUT MEANS, CARRIED IN THE OUTPUT.
 # Both were documented in the skill body only. An agent that runs this script
 # cold never reads the skill, and the failure mode of each is silent: a `claude`
@@ -493,6 +598,39 @@ CAVEATS = {
                  "NOTHING about `age_secs`/`claude_session_id`/`stale` — those "
                  "come from the agent ledger, which IS read per host; see "
                  "caveats.ledger_scope."),
+    },
+    # 🔴 THE SCOPE OF THE ENTITY AXIS. Without this a `--json` consumer reads a
+    # scan containing only `kind: tmux` rows as "there are no cluster
+    # dispatches", when the truth is that this build never looks for one — the
+    # zero-vs-wired-to-nothing confusion, in the one field newly added to every
+    # row. It names the source that DOES answer, so the reader is not left to
+    # conclude the tool simply cannot say.
+    "kind_scope": {
+        "kinds_enumerated": list(KINDS),
+        # 🔴 DELIBERATELY ABSENT. `kinds_produced` is a MEASUREMENT, supplied
+        # per scan by `measured_caveats`, and a literal here is a fake one: it
+        # made the bare constant render "rows in this scan are kind=tmux" when
+        # no scan had happened, and it made the honest by-construction branch
+        # in `_fmt_kind_scope` UNREACHABLE — so the fix for that sentence sat
+        # in code nothing could execute while the false sentence stayed live.
+        # A missing key is the honest representation of "not measured", which
+        # is exactly what this constant knows.
+        # 🔴 THE NOTE STATES ONLY WHAT IS DURABLY TRUE, because it sits beside
+        # a MEASURED field and ships in the same `--json` payload. It used to
+        # assert "every row is a tmux pane … cluster is ENUMERATED but NOT
+        # PRODUCED" — a standing claim that would contradict its own
+        # `kinds_produced` the day writer 3 lands, which is precisely the
+        # adjacent-fields-disagree failure `fuzzyclaw_scope` shipped in #471.
+        # What is durable is the RELATIONSHIP: which kinds exist, that an
+        # absence is not a measurement, and where clawgate actually lives.
+        "note": ("`kinds_produced` is MEASURED from this scan's rows — read it "
+                 "rather than assuming. A kind that is enumerated but absent "
+                 "from `kinds_produced` was NOT LOOKED FOR by this build, so "
+                 "its absence is NOT a measured absence of that work. For "
+                 "clawgate use report.blocked_on_me (tasks needing the "
+                 "operator, and its `stuck_count` for wedged dispatches), a "
+                 "different population from these rows that is never "
+                 "double-counted with them."),
     },
     "ledger_scope": {
         "scope": "per_host",
@@ -1411,6 +1549,15 @@ def fold_windows(panes, host, slots=None, task_index=None,
             w_probable = det["probable"]
             w_signals = det["signals"]
         rows.append({
+            # 🔴 WHAT KIND OF ENTITY THIS ROW IS. Always `tmux` here — this
+            # function folds PANES, so by construction every row it builds has
+            # one. It is written explicitly rather than left to a default
+            # because the field's contract is that it is NEVER null (see
+            # `KINDS`). A row built somewhere else that forgets to set it does
+            # NOT quietly become a cluster row: `row_class` gives it
+            # `unknown_kind` and `summary["kind"]` counts it as `"none"`, both
+            # of which a test asserts against `KINDS`.
+            "kind": "tmux",
             "host": host,
             "session": session,
             "window_index": widx,
@@ -1505,6 +1652,27 @@ def _count_by(values) -> dict:
     return out
 
 
+def _summary_classes(summ) -> list:
+    """The class names this summary actually contains, in render order.
+
+    DERIVED from the status buckets, so a class cannot exist in `row_class` and
+    be missing from the human-facing lines — the same rule `age_sources` and
+    `waiting.per_signal` follow. `claude`/`shell` lead because they are the two
+    a reader has been reading for months and their order carries meaning in the
+    `claude+shell` legend; anything else is appended in sorted order so the
+    render is deterministic rather than dict-insertion dependent.
+    """
+    seen = set()
+    for cell in (summ.get("status") or {}).values():
+        seen |= {k for k in cell if k != "total"}
+    # `claude`/`shell` unconditionally: `summarize` PRE-SEEDS both in every
+    # bucket, so they are always present, and a scan containing neither must
+    # still render `claude=0 shell=0` rather than quietly dropping the columns
+    # a reader is scanning for. Only classes BEYOND these two are on-demand.
+    lead = ["claude", "shell"]
+    return lead + sorted(seen - set(lead))
+
+
 def summarize(report) -> dict:
     """🔴 EVERY status bucket is split claude/shell. A MIXED count is never
     published as a bare integer.
@@ -1529,7 +1697,12 @@ def summarize(report) -> dict:
 
     🔴 BACKWARD COMPATIBILITY, chosen deliberately in the LOUD direction. The
     flat `summary["busy"|"idle"|"stale"|"unknown"]` integers are GONE, replaced
-    by `summary["status"][bucket]` -> `{"claude", "shell", "total"}`. Keeping
+    by `summary["status"][bucket]` -> one key per CLASS plus `"total"`. On a
+    tmux-only scan the classes are exactly `{"claude", "shell"}`. Those TWO are
+    pre-seeded and always present (a reader scans for them, and dropping the
+    column would be its own confusion); every class BEYOND them — `cluster`,
+    `unknown_kind` — is added on demand, so no bucket publishes a zero for a
+    class this build cannot produce. Keeping
     the flat ints would have left every existing reader silently reading the
     mixed number as an agent count — the exact defect — while the fix sat in
     keys they never learned about. A KeyError is a worse morning and a better
@@ -1540,15 +1713,46 @@ def summarize(report) -> dict:
     counts = {b: {"claude": 0, "shell": 0} for b in STATUS_BUCKETS}
     for r in rows:
         bucket = counts.setdefault(r["status"], {"claude": 0, "shell": 0})
-        bucket["claude" if r.get("claude") else "shell"] += 1
+        # 🔴 `row_class`, not an inline `claude`-or-`shell`: a row with no pane
+        # must NOT land in `shell`. See `row_class` for why that is the same
+        # defect this split was built to kill. The class key is created ON
+        # DEMAND — `cluster` appears only once a cluster row does, so a
+        # tmux-only scan never publishes a `cluster: 0` that would read as a
+        # measured absence of something this build cannot produce.
+        cls = row_class(r)
+        bucket[cls] = bucket.get(cls, 0) + 1
     for b in counts.values():
-        b["total"] = b["claude"] + b["shell"]
+        # Every class key accounts for the bucket's own total, whatever class
+        # keys the rows produced. Summing `claude + shell` by name would have
+        # silently dropped any third class from the total instead of failing.
+        #
+        # No `if k != "total"` filter: `total` is assigned HERE and `counts` is
+        # rebuilt per call, so the key cannot already be present and the filter
+        # could never fire. A mutation sweep proved it — deleting the clause
+        # changed nothing and no test could tell. An unreachable guard reads as
+        # protection while providing none, so it is stated as a precondition
+        # instead of pantomimed as a check.
+        b["total"] = sum(b.values())
     filters = report.get("filters") or {}
-    return {
+    out = {
         "total_sessions": len(rows),
-        "claude": sum(1 for r in rows if r["claude"]),
-        "shell": sum(1 for r in rows if not r["claude"]),
+        # 🔴 THE SAME `row_class`, so the top-level totals and the per-status
+        # buckets cannot disagree. These read `row_class`, not `r["claude"]`
+        # directly: `shell` used to be `not r["claude"]`, which absorbs every
+        # row with a null `claude` — including a cluster row that has no pane
+        # to have a command. One predicate, one place; the version of this that
+        # is open-coded at two sites is wrong at exactly one of them.
+        "claude": sum(1 for r in rows if row_class(r) == "claude"),
+        "shell": sum(1 for r in rows if row_class(r) == "shell"),
         "status": counts,
+        # 🔴 THE ENTITY AXIS, published as its own histogram and DERIVED from
+        # the rows — never hardcoded — so a kind cannot exist on a row and be
+        # missing from the summary. Same idiom, and same reason, as
+        # `age_sources`: `"none"` rather than `None`, because a null JSON key
+        # serialises to the string `"null"` and reads as a kind called null.
+        # A `kind` of `"none"` appearing at all is a bug (see `KINDS`), which
+        # is precisely why it is counted rather than coerced away.
+        "kind": _count_by(r.get("kind") or "none" for r in rows),
         # 🔴 The filter travels WITH the counts it changed. Under
         # `--claude-only` every number above describes the FILTERED set (see
         # `gather`), so a reader that does not know the filter ran would read a
@@ -1602,6 +1806,18 @@ def summarize(report) -> dict:
         "rows_with_session_id": sum(1 for r in rows
                                     if r.get("claude_session_id")),
     }
+    # 🔴 A TOP-LEVEL COUNT FOR EVERY CLASS, ON DEMAND. `claude` and `shell`
+    # are above; any further class gets its own key here rather than being
+    # left out of the whole-set totals. Without this the human summary line
+    # renders `N windows claude=3 shell=2` while N is 7 — a complete-looking
+    # accounting with rows missing and nothing saying so.
+    #
+    # On demand, for the same reason the buckets are: a `cluster: 0` at the top
+    # level of a build that cannot produce cluster rows is a measurement of
+    # nothing. So a tmux-only summary keeps exactly the integer keys it had.
+    for cls, n in _count_by(row_class(r) for r in rows).items():
+        out.setdefault(cls, n)
+    return out
 
 
 def exit_code_for(report) -> int:
@@ -2157,7 +2373,58 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
             report["clickhouse"] = res
 
     report["summary"] = summarize(report)
+    # 🔴 THE `kind_scope` CAVEAT IS A MEASUREMENT, NOT A STANDING CLAIM.
+    #
+    # `kinds_produced` used to be a literal in the CAVEATS constant, so the
+    # rendered line asserted "every row is kind=tmux" no matter what the rows
+    # actually were — it would keep saying that on the day writer 3 starts
+    # emitting cluster rows, and the reader most likely to be misled is the one
+    # reading the line to find out. That is exactly how `fuzzyclaw_scope` went
+    # stale in #471: a machine-readable claim that outlived the code it
+    # described.
+    #
+    # Derived from THIS report's rows instead, so the line cannot disagree with
+    # the table above it. Sorted for a deterministic render, and copied rather
+    # than mutated in place — `report["caveats"]` is the module-level CAVEATS
+    # dict by reference, and writing through it would leak one scan's
+    # measurement into every later caller in the process.
+    report["caveats"] = measured_caveats(report)
     return report
+
+
+def measured_caveats(report) -> dict:
+    """CAVEATS with `kind_scope.kinds_produced` MEASURED from `report`'s rows.
+    PURE — returns a new dict, mutates nothing.
+
+    🔴 THIS IS A SEPARATE FUNCTION SO THE DERIVATION IS REACHABLE FROM A TEST
+    WITH NON-TMUX INPUT. Inlined in `gather`, the only way to exercise it was a
+    real scan — and every real scan is tmux-only, so a mutant that replaced the
+    derivation with the literal `["tmux"]` produced byte-identical output and
+    SURVIVED a green suite. A fixture whose values coincide with the constant
+    collapses "derived" and "hardcoded" into the same observation; the fix is
+    an input where they differ, which means a seam that accepts one.
+    """
+    # 🔴 DEEP-COPIED, because a purity claim is only as true as its DEEPEST
+    # shared object. This was fixed once at depth 1 — `{k: dict(v)}` — and an
+    # audit walked straight past it into depth 2: `waiting_signal["excluded"]`
+    # is itself a dict, and `signals` / `kinds_enumerated` /
+    # `null_fields_on_remote_rows` are lists, all still the SAME objects as the
+    # module constant. Writing into any of them poisoned CAVEATS for every
+    # later caller in the process, and the contamination surfaced in a
+    # DIFFERENT scan's rendered caveat line.
+    #
+    # "One level deeper than the fix" is the shape this whole change keeps
+    # producing, so the copy is made total rather than incrementally deepened
+    # again. CAVEATS is a handful of small literals; `deepcopy` is not a cost
+    # worth trading for a claim that has now been wrong twice.
+    cav = copy.deepcopy(report.get("caveats") or CAVEATS)
+    rows = [r for h in (report.get("hosts") or {}).values()
+            for r in (h.get("windows") or [])]
+    # Sorted for a deterministic render. `"none"` rather than dropping a row
+    # with no `kind`: it is a bug, and the caveat is where it becomes visible.
+    cav["kind_scope"]["kinds_produced"] = sorted(
+        {r.get("kind") or "none" for r in rows})
+    return cav
 
 
 # =========================================================================== #
@@ -2326,13 +2593,25 @@ def render_table(report) -> str:
         out.append("  (none)" if reach
                    else "  (no host answered — nothing was measured)")
     else:
-        # 🔴 KIND is its own column, read straight off the row's `claude`
-        # boolean. It is deliberately NOT spelled into the STATUS word: a
-        # status cell of "idle·sh" can be satisfied by anything that happens to
-        # contain those characters, while a column whose only two values are
-        # `claude` and `shell` states which one the row IS. `● idle` on an
-        # agent and `● idle` on a bare zsh prompt were the same six characters
-        # before this.
+        # 🔴 CLASS is its own column. It is deliberately NOT spelled into the
+        # STATUS word: a status cell of "idle·sh" can be satisfied by anything
+        # that happens to contain those characters, while a column stating
+        # which class the row IS cannot. `● idle` on an agent and `● idle` on a
+        # bare zsh prompt were the same six characters before this.
+        #
+        # 🔴 IT WAS HEADED `KIND` AND IT IS NOT THE `kind` FIELD. The row now
+        # carries a real `kind` (`tmux`/`cluster`, the ENTITY axis), and this
+        # column renders `claude`/`shell`/`cluster` — the CLASS axis. Two
+        # vocabularies under one word, on the two surfaces a reader compares
+        # side by side (`--json` and the table), is a misread waiting to
+        # happen, so the column is `CLASS` and the field is `kind`.
+        #
+        # It also renders `row_class(r)` rather than a third open-coded
+        # `"claude" if r["claude"] else "shell"`. That inline conditional is
+        # the exact predicate `row_class` exists to consolidate, and leaving a
+        # copy here would have made the TABLE say `shell` for a cluster row
+        # while the SUMMARY it sits under said `cluster` — the one-rule-one-
+        # place failure, visible on one screen.
         # 🔴 THE COLUMN TRADE, stated because the table did not get wider.
         # CODENAME (9) became LABEL (14) and TASK gave up the 5 characters, so
         # the frame is byte-for-byte the same width as before. Nothing was lost
@@ -2345,7 +2624,7 @@ def render_table(report) -> str:
         # The cost is real and it is TASK: 30 -> 25 characters before the
         # ellipsis. `--json` carries every field untruncated and unjoined.
         out.append(_ROW_FMT.format("HOST", "SESSION", "WIN", "LABEL", "TASK",
-                                   "KIND", "STATUS", "AGE", "WAIT"))
+                                   "CLASS", "STATUS", "AGE", "WAIT"))
         out.append("  " + "─" * 112)
         for r in rows:
             out.append(
@@ -2354,7 +2633,7 @@ def render_table(report) -> str:
                     _trunc(r.get("window_index"), 3),
                     _trunc(render_label(r), 14),
                     _trunc(r.get("task") or "—", 25),
-                    "claude" if r.get("claude") else "shell",
+                    row_class(r),
                     _STATUS_GLYPH.get(r.get("status"), "?"),
                     _fmt_age(r.get("age_secs")),
                     _fmt_waiting(r)))
@@ -2450,18 +2729,36 @@ def render_table(report) -> str:
     out.append("")
     out.extend(render_ledger(report.get("ledger")))
     out.append("")
-    out.append("  summary: {total} windows  claude={claude}  shell={shell}"
-               .format(total=summ.get("total_sessions", 0),
-                       claude=summ.get("claude", 0),
-                       shell=summ.get("shell", 0)))
-    # 🔴 Every bucket prints as `claude+shell`, never as one number. The legend
-    # is on the same line, so no reader has to remember which half is which —
-    # and there is no rendering of `idle` that a reader can mistake for a count
-    # of waiting AGENTS.
+    # 🔴 THE HUMAN LINE IS CLASS-GENERIC TOO. `summarize` was made to total over
+    # whatever class keys exist; this render was left summing `claude`/`shell`
+    # BY NAME, so a row in any third class was silently absent from a line that
+    # still looked like a complete accounting — `7 windows claude=3 shell=2`,
+    # with two rows unmentioned and no discriminant saying so. The JSON was
+    # right and the screen was wrong, which is the harder version to notice.
+    #
+    # `_kind_classes` derives the class names from the summary itself, so a
+    # class cannot exist in `row_class` and be missing from either line.
+    classes = _summary_classes(summ)
+    out.append("  summary: {total} windows  {parts}".format(
+        total=summ.get("total_sessions", 0),
+        # 🔴 `.get(c, 0)`, and NO `if c in summ` filter. An audit called that
+        # filter dead because `classes` derives from the rows `summarize`
+        # counted — true of the `gather` path, and FALSE of `render_table`,
+        # which is also called on a bare/empty report whose summary carries
+        # neither key. Removing the guard raised `KeyError: 'claude'` in two
+        # existing tests: unreachable through one entry point is not
+        # unreachable. But the filter was still the wrong shape — it SKIPPED
+        # the class, dropping it from this line while the legend one line below
+        # still named it. `.get` renders every class, missing ones as 0.
+        parts="  ".join("{}={}".format(c, summ.get(c, 0)) for c in classes)))
+    # 🔴 Every bucket prints per class, never as one number. The legend is on
+    # the same line, so no reader has to remember which part is which — and
+    # there is no rendering of `idle` that a reader can mistake for a count of
+    # waiting AGENTS.
     st = summ.get("status") or {}
-    out.append("  by status (claude+shell): " + "  ".join(
-        "{}={}+{}".format(b, (st.get(b) or {}).get("claude", 0),
-                          (st.get(b) or {}).get("shell", 0))
+    out.append("  by status ({}): ".format("+".join(classes)) + "  ".join(
+        "{}={}".format(b, "+".join(str((st.get(b) or {}).get(c, 0))
+                                   for c in classes))
         for b in STATUS_BUCKETS))
     # 🔴 The line that would have made #419 visible on the day it shipped.
     # `stale` is derived from an age, so a `stale=0+0` bucket means one of two
@@ -2619,6 +2916,12 @@ LEAN_ROW_FIELDS = (
     # yielded nothing "are distinguishable by `label_source`, not by the
     # label" — dropping it made exactly that pair unreadable. An audit caught
     # the inconsistency between the rule and the field list; the rule won.
+    # 🔴 `kind` is a DISCRIMINANT, not duplication — it is what tells a reader
+    # whether the null `session`/`window_index` on a row is "not measured" or
+    # "this entity has no such thing". Dropping it would leave a cluster row
+    # indistinguishable from a tmux row whose host went unreachable, which is
+    # the ambiguity this whole view exists to remove.
+    "kind",
     "host", "session", "window_index", "label", "label_source", "hotkey",
     # what it is working on, and WHICH agent is doing it
     "path", "task", "runtime",
@@ -2695,6 +2998,7 @@ def render_caveats(report) -> list:
     fz = cav.get("fuzzyclaw_scope") or {}
     led = cav.get("ledger_scope") or {}
     wt = cav.get("waiting_signal") or {}
+    kd = cav.get("kind_scope") or {}
     return [
         # 🔴 The signal set is ENUMERATED in the footer, because `WAIT: no` is
         # the cell a reader will over-trust. Naming the three things that were
@@ -2706,7 +3010,9 @@ def render_caveats(report) -> list:
         "deliberately EXCLUDED, so a window one Enter away reads `no` "
         "(reference/waiting-signal.md)".format(
             "/".join(wt.get("signals") or WAITING_SIGNALS)),
-        "  caveat[claude_detection]: KIND is `pane_current_command =~ /{}/` — "
+        # `CLASS`, matching the column header. It said `KIND`, which now names
+        # a different field with a different vocabulary.
+        "  caveat[claude_detection]: CLASS is `pane_current_command =~ /{}/` — "
         "shallower than agent-ops' /proc walk; a claude under a wrapper shell "
         "reads as `shell`".format(det.get("pattern", "claude")),
         "  caveat[fuzzyclaw_scope]: fuzzyclaw is {} — REMOTE rows carry null "
@@ -2721,7 +3027,99 @@ def render_caveats(report) -> list:
         "agent ledger, read {} — a REMOTE row has both and CAN be `stale`. A "
         "null age means NO WRITER HAS RECORDED that window, not age 0; "
         "`age_source` names the writer".format(led.get("scope", "per_host")),
+        # 🔴 The entity axis, printed for the same reason as the three above:
+        # `kind` is now on every row, and "only tmux rows here" must not be
+        # read as "no cluster work exists".
+        #
+        # 🔴 BOTH BRANCHES EXIST BECAUSE THE EMPTY SET IS REACHABLE. `gather`
+        # derives `kinds_produced` from the rows, so once every enumerated kind
+        # IS produced the set difference is empty and the single-sentence
+        # version rendered "—  is ENUMERATED but NOT PRODUCED": a blank subject
+        # in a sentence whose whole job is naming what is missing. A caveat
+        # that degrades into a grammatically-broken half-claim is worse than
+        # one that says nothing, because it still reads as a claim.
+        "  caveat[kind_scope]: " + _fmt_kind_scope(kd),
     ]
+
+
+def _fmt_kind_scope(kd) -> str:
+    """The `kind_scope` caveat's sentence, split out so every branch is
+    reachable from a test without building a whole report.
+
+    🔴 `[]` IS A MEASUREMENT AND MUST NOT FALL BACK TO A LITERAL. The first
+    version read `kd.get("kinds_produced") or ["tmux"]`, and an empty list is
+    FALSY — so a scan that measured zero rows rendered `rows in this scan are
+    kind=tmux` over `summary: 0 windows`. Reachable today, with no cluster row
+    anywhere: both hosts unreachable, or `--claude-only` on a host with no
+    claude windows. That is a literal masquerading as a measurement — the exact
+    defect this caveat was made measured to kill — reintroduced one function
+    downstream by an `or` that cannot tell "not supplied" from "measured none".
+    So the two cases are separated explicitly, and only a MISSING key falls
+    back.
+    """
+    produced = kd.get("kinds_produced")
+    if produced is None:
+        # 🔴 NO MEASUREMENT SUPPLIED — reached by any caveats dict without a
+        # `kinds_produced` key, which is the bare CAVEATS constant (the key is
+        # deliberately absent there) and any report that never went through
+        # `measured_caveats`. The sentence must then describe what this tool
+        # produces BY CONSTRUCTION and must NOT say "in this scan", because no
+        # scan happened.
+        #
+        # An earlier comment here named the bare-constant caller while the
+        # constant still carried a literal `kinds_produced`, so that caller
+        # took the MEASURED branch and this one was unreachable: the comment
+        # described a path its own code could not take, and the false sentence
+        # it claimed to have fixed was still being rendered. A comment is a
+        # claim, and this one was wrong about reachability, which is the
+        # hardest kind to notice.
+        return _kind_scope_sentence(
+            "this tool produces kind={} rows by construction (no scan "
+            "measured here)", "this build",
+            list(KINDS_PRODUCED_BY_CONSTRUCTION),
+            list(kd.get("kinds_enumerated") or KINDS))
+    produced = list(produced)
+    enumerated = list(kd.get("kinds_enumerated") or KINDS)
+    if not produced:
+        # 🔴 ZERO ROWS. Naming any kind here would be inventing one. The reader
+        # most likely to hit this is the one whose hosts are unreachable, and
+        # the wrong thing to tell them is which kinds were "in this scan".
+        return ("NO rows were measured in this scan, so no kind was observed — "
+                "this is NOT a claim that any kind is absent, and the enumerated "
+                "kinds ({}) say nothing about what a reachable host holds; "
+                "clawgate is reported separately under BLOCKED ON ME".format(
+                    "/".join(enumerated)))
+    return _kind_scope_sentence("rows in this scan are kind={}", "this scan",
+                                produced, enumerated)
+
+
+def _kind_scope_sentence(head_fmt, subject, produced, enumerated) -> str:
+    """Build the non-empty `kind_scope` sentence. ONE builder for both the
+    measured and the by-construction heads, so the two cannot drift into
+    saying different things about the same relationship.
+
+    🔴 `subject` EXISTS BECAUSE SHARING THE BUILDER CREATED A FALSE SENTENCE.
+    The all-produced tail hardcoded "so THIS SCAN covers the whole entity
+    axis". Under the by-construction head — which explicitly says "no scan
+    measured here" — that produced a sentence contradicting itself eight words
+    later. It was unreachable the moment the builder was shared and becomes
+    reachable the moment `KINDS_PRODUCED_BY_CONSTRUCTION` gains `cluster`,
+    i.e. exactly when writer 3 lands, which is what this caveat is FOR.
+    Consolidating two strings is only safe where they say the same thing; the
+    part that differed had to become a parameter, not a coincidence.
+    """
+    unproduced = [k for k in enumerated if k not in produced]
+    head = head_fmt.format("/".join(produced))
+    if not unproduced:
+        # Every enumerated kind is present. Saying "NOT PRODUCED" here would be
+        # false; saying nothing would drop the pointer to where clawgate lives.
+        return (head + " — every enumerated kind IS produced, so {} covers the "
+                "whole entity axis; clawgate approval state is still reported "
+                "separately under BLOCKED ON ME".format(subject))
+    return (head + " — {} is ENUMERATED but NOT PRODUCED, so no such row "
+            "appears and its absence is NOT a measured zero; clawgate is "
+            "reported separately under BLOCKED ON ME".format(
+                "/".join(unproduced)))
 
 
 def render_session_history(hist) -> str:
@@ -3212,6 +3610,14 @@ def filter_report(report, session, window_index) -> dict:
                          and str(r.get("window_index")) == str(window_index)]
         out["hosts"][name] = h2
     out["summary"] = summarize(out)
+    # 🔴 THE CAVEATS ARE RE-DERIVED HERE TOO. This path re-runs `summarize` and
+    # then renders through `render_caveats`, so leaving the inherited caveats
+    # alone made `kind_scope` a claim about the FULL scan printed under a
+    # ONE-ROW table — the disagreement between the line and the table above it
+    # that measuring it was supposed to make impossible. `gather` was fixed and
+    # this second summarize call was not; a rule enforced at one of its two
+    # sites is the failure this whole change keeps re-finding.
+    out["caveats"] = measured_caveats(out)
     return out
 
 

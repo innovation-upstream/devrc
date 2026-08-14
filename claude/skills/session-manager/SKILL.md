@@ -15,8 +15,24 @@ python3 $DEVRC/scripts/session-manager tail scratch7:3 --plain     # scrollback,
 ```
 
 🔴 **Rows are at `report["hosts"][<"workbench"|"laptop">]["windows"]`** — not at the top
-level. Roll-ups: `summary.waiting`, `summary.status[bucket]` (`{claude, shell, total}`),
+level. Roll-ups: `summary.waiting`, `summary.status[bucket]`, `summary.kind`,
 `blocked_on_me`.
+
+🔴 **`summary.status[bucket]` is one key per CLASS plus `total`** — `{claude, shell, total}`
+on every scan today. `claude` and `shell` are **always present** (pre-seeded, so a zero there
+is a real zero); every class **beyond** those two — `cluster`, `unknown_kind` — appears only
+when such a row exists, so the *absence* of a `cluster` key is not a measured zero. Same at
+the top level (`summary.claude`/`summary.shell` always; others on demand).
+
+🔴 **`kind` (row field) and `CLASS` (table column) are DIFFERENT axes — do not conflate.**
+`kind` is `tmux` | `cluster`: **what the entity is**. `CLASS` is `claude` | `shell` |
+`cluster`: **how it is counted**. Every row today is `kind: tmux`; `cluster` is enumerated
+for a clawgate dispatch with no pane and is **not produced yet**, which
+`caveats.kind_scope` states in the payload (`kinds_produced` is **measured from the rows**,
+not asserted). So an absence of cluster rows is **not** a measured absence of cluster work —
+clawgate lives in `blocked_on_me`, a different population that is never double-counted with
+these rows. `kind` is never null; `runtime` frequently is, and means something else
+(**which agent software**, from the ledger).
 
 | flag | effect |
 |---|---|
