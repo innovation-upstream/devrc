@@ -219,13 +219,41 @@ def filename_for(runtime, pane_id=None, window_id=None, session_id=None) -> str:
     so it can consult the throttle BEFORE deciding whether to shell out to tmux
     for the window id and the server pid. That ordering is why this is a
     standalone function rather than a body inside `record_filename`.
+
+    🔴 THE PANE KEY REQUIRES A WINDOW, and that conjunction is a regression fix,
+    not a tidiness rule. `$TMUX_PANE` is set but `tmux display-message` can still
+    fail — a 2s timeout under load, a dead or restarted server — and the record
+    then has a pane and NO `window_id`. Keyed on the pane alone it would overwrite
+    the good record IN PLACE, and the window would lose `age_secs`,
+    `claude_session_id` and its `stale` bucket outright: the #419 symptom,
+    reproduced silently, and rendered as a *measured* `no_window` rejection.
+    Measured on the broken version — one file, `seen=1 live=0 no_window=1`;
+    with this conjunction, two files and `live=1`. The degraded record still
+    lands (it is real activity) but in the session file, where it cannot
+    displace a joinable one.
     """
+    if pane_id and window_id:
+        return pane_filename(runtime, pane_id)
     runtime = _clean(runtime or "unknown")
-    if pane_id:
-        return "%s-p%s.json" % (runtime, _clean(pane_id))
     if window_id:
         return "%s-%s.json" % (runtime, _clean(window_id))
     return "%s-s-%s.json" % (runtime, _clean(session_id or "unknown"))
+
+
+def pane_filename(runtime, pane_id) -> str:
+    """The pane file's name for a caller that knows the pane but has NOT yet
+    resolved the window — the hook's pre-tmux throttle check, and the only such
+    caller.
+
+    🔴 It is a PREDICTION, and it is allowed to be wrong in exactly one way: if
+    the tmux lookup then fails, the record lands in the session file instead
+    (see `filename_for`). Mispredicting there costs at most one suppressed write
+    for a session that is already inside its throttle interval — never a wrong
+    value on a row. Sharing `filename_for`'s spelling rather than restating it,
+    because two format strings for one filename is how the check and the write
+    end up looking at different files.
+    """
+    return "%s-p%s.json" % (_clean(runtime or "unknown"), _clean(pane_id))
 
 
 def record_filename(rec) -> str:

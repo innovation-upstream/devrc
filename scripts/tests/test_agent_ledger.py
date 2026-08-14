@@ -445,8 +445,10 @@ def test_an_UNCHECKABLE_generation_is_kept_but_declared():
 
 
 def test_a_record_with_no_window_is_set_ASIDE_never_joined():
-    """A clawgate agent has no pane. It is not a tmux row and must not be
-    silently attached to one — it goes to `unjoinable`, counted separately."""
+    """A Claude run outside tmux has no window. It is not a tmux row and must
+    not be silently attached to one — it is COUNTED under `no_window` and
+    dropped. A count, not a list: an earlier revision returned the records too
+    and every caller discarded them."""
     out = AL.filter_live([rec(window_id=None)], LIVE, tmux_pid="4025325")
     assert out["records"] == [] and out["no_window"] == 1
 
@@ -561,3 +563,47 @@ def test_prune_reaps_a_leaked_temp_file_which_only_it_can_see(tmp_path):
     assert os.path.exists(new) and not os.path.exists(old)
     # temps are NOT counted as records — `examined` describes the ledger
     assert out["examined"] == 0
+
+
+# =========================================================================== #
+# the degraded-tmux path — a pane with no window
+# =========================================================================== #
+def test_a_pane_with_NO_WINDOW_does_not_land_in_the_pane_file(tmp_path):
+    """🔴 REGRESSION GUARD, and the regression was introduced by the fix that
+    added pane keying. `$TMUX_PANE` is set but `tmux display-message` can still
+    fail — a 2s timeout under load, a dead or restarted server — leaving a record
+    with a pane and NO `window_id`.
+
+    Keyed on the pane alone it OVERWRITES the good record in place, and the
+    window loses `age_secs`, `claude_session_id` and its `stale` bucket outright:
+    the #419 symptom, reproduced silently, and rendered as a *measured*
+    `no_window` rejection rather than as a fault. Worst on `Stop`, the last event
+    before a window goes idle, so it would persist for the whole idle period.
+
+    KILLS: dropping `and window_id` from `filename_for`'s pane branch.
+    """
+    good = rec(pane_id="%77", window_id="@41")
+    degraded = rec(pane_id="%77", window_id=None, tmux_pid=None)
+    assert AL.record_filename(good) == "claude-p77.json"
+    assert AL.record_filename(degraded) == "claude-s-sess-aaaa.json"
+
+    d = str(tmp_path)
+    AL.write_record(good, directory=d)
+    AL.write_record(degraded, directory=d)
+    assert sorted(os.listdir(d)) == ["claude-p77.json", "claude-s-sess-aaaa.json"]
+
+    # ...and the consequence at the CONSUMING site: the window is still joinable
+    proc = subprocess.run(list(AL.read_argv(abs_dir=d)),
+                          capture_output=True, text=True, timeout=10)
+    filt = AL.filter_live(AL.parse_ledger(proc.stdout)["records"],
+                          {"@41": ("scratch7", "3")}, tmux_pid="4025325")
+    assert (filt["seen"], filt["live"], filt["no_window"]) == (2, 1, 1)
+    assert filt["records"][0]["window_id"] == "@41"
+
+
+def test_pane_filename_is_the_SAME_SPELLING_the_write_path_uses():
+    """The hook predicts the pane file before it knows the window, so the check
+    and the write must agree on the name. KILLS: a second format string."""
+    assert AL.pane_filename("claude", "%77") == "claude-p77.json"
+    assert AL.pane_filename("claude", "%77") == AL.record_filename(
+        rec(pane_id="%77", window_id="@41"))

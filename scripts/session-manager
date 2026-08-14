@@ -248,10 +248,15 @@ def _load_agent_ledger():
     relative to THIS file first, `$DEVRC_DIR` only as a fallback, because
     `$DEVRC_DIR` is wrong inside a worktree and absent in the nix build sandbox.
 
-    🔴 Deployed, the hook imports the SAME source file from
-    `~/.claude/hooks/agent_ledger.py` (`nix/home.nix`). Writer and reader agreeing
-    on the record by construction is the whole point — a second copy of the shape
-    is how the two halves of a ledger drift apart while both look correct.
+    🔴 THE HOOK DOES NOT LOAD THIS FILE — it loads a nix-store COPY of it at
+    `~/.claude/hooks/agent_ledger.py` (a `home.file`), while this resolves the
+    repo WORKING COPY. An earlier version of this comment said "the SAME source
+    file", which is the more misleading half of a claim also corrected in
+    `agent_ledger.py`: writer and reader agree by construction only at the
+    instant of a `home-manager switch`. Between a `git pull` and that switch —
+    this repo's documented standing trap — they are running different code.
+    What keeps that from becoming a wrong value on a row is `SCHEMA`: a record
+    the reader does not recognise lands in the rendered `unparseable` count.
     """
     import importlib.machinery
     import importlib.util
@@ -1506,9 +1511,12 @@ def summarize(report) -> dict:
     The split is applied to ALL FOUR buckets, not just `idle`. `unknown` was
     15/15 non-claude in that same measurement, which is a SNAPSHOT, not an
     invariant: `classify_status` returns `unknown` for any row with no glyph and
-    no age, and a REMOTE claude window has no age by construction (see
-    CAVEATS["fuzzyclaw_scope"]), so a claude row lands there as soon as its
-    title carries no glyph. Splitting one bucket fixes one instance; splitting
+    no age — and while fuzzyclaw was the only writer, a REMOTE claude window had
+    none by construction. That is no longer true (the ledger is read per host;
+    see CAVEATS["ledger_scope"]), but the class this split kills is unchanged:
+    ANY claude row with no glyph and no recorded age lands in `unknown`, and a
+    window no writer has recorded yet is the common case for a session that has
+    not taken a turn since the hook was registered. Splitting one bucket fixes one instance; splitting
     the tuple kills the class.
 
     🔴 BACKWARD COMPATIBILITY, chosen deliberately in the LOUD direction. The
@@ -2553,7 +2561,9 @@ def render_ledger(led) -> list:
 
 
 def render_caveats(report) -> list:
-    """🔴 The two limits, in the OUTPUT, unconditionally.
+    """🔴 Every structured caveat, in the OUTPUT, unconditionally — one line
+    each, and the count is whatever CAVEATS holds (a test pins the relationship
+    rather than a literal, so adding one cannot silently drop another).
 
     They were documented in the skill body only, and a dogfooding agent credited
     reading that body with not mixing two different session populations — which
@@ -2909,6 +2919,22 @@ def no_session_reason(report) -> str:
     same unmeasured set. Only the LAST branch here is a measured absence; every
     branch above it says plainly that nothing was measured.
 
+    🔴 KNOWN INCOMPLETE, stated rather than left to be discovered. There are now
+    TWO suppliers of `claude_session_id` — the agent ledger (which WINS; see
+    `fold_windows`) and fuzzyclaw — and every branch here reasons about fuzzyclaw
+    alone. The consequence is bounded and in the SAFE direction: each branch
+    either declines to claim a measured absence, or claims one that is true of
+    fuzzyclaw while the ledger may separately have answered. So it can understate
+    what is known; it cannot assert a measured absence the data does not support,
+    which is the failure this function exists to prevent.
+
+    Making it ledger-aware means re-deciding twelve pinned branch selections
+    (including `test_the_unmeasured_reasons_are_PAIRWISE_DISTINCT`), so it is a
+    follow-up rather than a rider on the ledger PR. What DID change here is
+    wording only: the remote branch used to say "no task file was ever searched
+    for it", which reads as "nothing was searched" now that the ledger IS read
+    per host. It says "no fuzzyclaw task file" instead.
+
     Pure — it reads only facts the report already carries (`fuzzyclaw.status`,
     `fuzzyclaw.slot_conflicts`, `local_host`, and each row's `host`), so it is
     unit-testable without a ClickHouse client.
@@ -2940,9 +2966,9 @@ def no_session_reason(report) -> str:
                      if r.get("host") != local})
     if remote:
         return (f"fuzzyclaw is read on the LOCAL host only ({local}) and this "
-                f"target matches a window on {', '.join(remote)}, so no task "
-                "file was ever searched for it — this is NOT a measured "
-                "absence")
+                f"target matches a window on {', '.join(remote)}, so no "
+                "fuzzyclaw task file was ever searched for it — this is NOT a "
+                "measured absence")
     if st == "unmeasured":
         return ("the fuzzyclaw intersection never ran, so no claude_session_id "
                 "could be measured for this window — this is NOT a measured "

@@ -148,11 +148,19 @@ ACKNOWLEDGED_UNSTUBBED = {
         "justification cannot rot into a claim about a file that has changed"),
     "home-manager": (
         {"bar-status-poll", "drift-check.sh", "keylog-spin-capture.sh",
-         "notify-failure.sh", "playwright-nixos", "ship.sh",
+         "notify-failure.sh", "playwright-nixos", "session-manager", "ship.sh",
          "tmux-post-save.sh"},
         "MEASURED unreachable: a whole-tier run under a recording interceptor "
-        "logged ZERO calls. Of these only notify-failure.sh is executed by "
-        "scripts/tests, and it names home-manager in a journal hint"),
+        "logged ZERO calls. TWO of these are executed by scripts/tests and "
+        "neither can reach the binary: notify-failure.sh names home-manager in "
+        "a journal hint, and session-manager (added 2026-08-13 with the agent "
+        "activity ledger) names it in ONE docstring — `_load_agent_ledger`, "
+        "explaining that the hook loads a nix-store COPY of agent_ledger.py so "
+        "writer and reader agree only at the instant of a switch. This scan is "
+        "a TEXT scan (launcher_scan.hazard_hits regexes the file body), so a "
+        "prose mention is a hit; verified by grep that the file carries no "
+        "call site, and re-justified here rather than reworded to dodge the "
+        "scanner"),
     "nixos-rebuild": (
         {"airvpn-sudo", "ship.sh"},
         "MEASURED unreachable in the same whole-tier run; both call sites are "

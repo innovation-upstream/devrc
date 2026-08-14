@@ -308,6 +308,69 @@ def test_the_POSITIVE_CONTROL_a_non_throttled_event_DOES_move_the_timestamp(
     assert read_back(tmp_path)["records"][0]["last_activity_ts"] != first
 
 
+def test_the_throttle_still_applies_with_NO_PANE_where_only_the_ARGUMENT_holds(
+        tmp_path):
+    """🔴 THE PATH THAT LEFT THE CALL SITE UNPINNED. Everything above runs with
+    `TMUX_PANE` set, so it exercises the EARLY check in `main()` — and a mutant
+    that changes only the argument passed to `write_record`
+    (`throttle_secs=None`) survives all of it. A delta re-audit found exactly
+    that mutant still alive after the first fix round.
+
+    Outside tmux there is no pane, so the early check cannot run and the
+    call-site argument is the ONLY thing throttling the write. Consequence at
+    the consuming site: a Claude run in a bare terminal would write on every
+    single tool call — precisely the cost `DEFAULT_THROTTLE` exists to prevent.
+
+    KILLS: `AL.write_record(rec, throttle_secs=None)`.
+    """
+    assert run_hook(payload(event="PostToolUse"), tmp_path).returncode == 0
+    first = read_back(tmp_path)["records"][0]["last_activity_ts"]
+    time.sleep(1.1)
+    assert run_hook(payload(event="PostToolUse"), tmp_path).returncode == 0
+    records = read_back(tmp_path)["records"]
+
+    assert len(records) == 1
+    assert records[0]["pane_id"] is None, "this path must have no pane"
+    assert records[0]["last_activity_ts"] == first, (
+        "with no pane the early check cannot run, so the throttle argument "
+        "passed to write_record is the only thing suppressing this write")
+
+
+def test_the_POSITIVE_CONTROL_no_pane_and_a_NON_throttled_event_does_write(
+        tmp_path):
+    """Without this the test above passes on a hook that stopped writing at all
+    on the no-pane path. Same fixture, `Stop` instead, opposite outcome."""
+    run_hook(payload(event="Stop"), tmp_path)
+    first = read_back(tmp_path)["records"][0]["last_activity_ts"]
+    time.sleep(1.1)
+    run_hook(payload(event="Stop"), tmp_path)
+    assert read_back(tmp_path)["records"][0]["last_activity_ts"] != first
+
+
+def test_a_FAILED_tmux_lookup_does_not_destroy_the_joinable_record(tmp_path):
+    """🔴 The regression this round's pane keying introduced, at the PROCESS
+    level. A stub tmux that exits non-zero leaves `$TMUX_PANE` set and the window
+    unresolved; the record must not land on top of the good pane-keyed one.
+    """
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    _fake_tmux(fake, "@41|4025325")
+    env = {"PATH": "%s:%s" % (fake, os.environ["PATH"]), "TMUX_PANE": "%11"}
+    run_hook(payload(event="Stop", session_id="sess-good"), tmp_path, env=env)
+    assert os.path.exists(os.path.join(ledger_dir(tmp_path),
+                                       "claude-p11.json"))
+
+    # now tmux fails, and the SAME pane's next turn must not clobber it
+    mockbin.write_exec(fake / "tmux", "exit 1\n")
+    run_hook(payload(event="Stop", session_id="sess-degraded"), tmp_path,
+             env=env)
+    names = sorted(os.listdir(ledger_dir(tmp_path)))
+    assert "claude-p11.json" in names
+    with open(os.path.join(ledger_dir(tmp_path), "claude-p11.json")) as fh:
+        kept = json.loads(fh.read())
+    assert kept["window_id"] == "@41" and kept["session_id"] == "sess-good"
+
+
 def test_a_THROTTLED_call_never_spawns_tmux(tmp_path):
     """🔴 The ordering that makes `PostToolUse` affordable. It fires after every
     tool call of every session, and most are inside the interval — so the common

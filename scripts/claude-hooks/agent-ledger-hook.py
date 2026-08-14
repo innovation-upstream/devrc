@@ -192,8 +192,8 @@ def main() -> int:
         # ordering: 23.2 ms per call in tmux against 8.6 ms for a bare
         # interpreter start, i.e. the tmux call dominated and ran every time.
         if throttle and pane:
-            path = os.path.join(
-                AL.LEDGER_DIR, AL.filename_for("claude", pane_id=pane))
+            path = os.path.join(AL.LEDGER_DIR,
+                                AL.pane_filename("claude", pane))
             if AL.is_throttled(path, payload.get("session_id"), throttle):
                 return 0
         wid, pid = tmux_context(pane=pane if pane else "")

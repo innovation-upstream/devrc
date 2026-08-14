@@ -763,19 +763,24 @@ TARGET_FLOORS=(
   # `test_session_manager.py` (the §9 ledger section, 418 -> 439). Includes the
   # audit round: the co-tenancy guard, the two clock-skew clamps, and the
   # caveat guard re-run with the ledger ON (it had gone structurally blind).
-  # Gate's own count on this branch: `scripts/tests collected=3995`.
-  #   _suggested_floor 3995 = 3995 - min(50, max(1, 199)) = 3945.
-  # Pinned at 3961 rather than 3945 — a floor the gate ACCEPTS (3961 <= 3995,
-  # confirmed by `PASS … floor=3961`) and which sits closer to the measurement,
-  # so a collapse is caught sooner. Do not reconcile this by arithmetic against
-  # another branch: re-run the gate on the merged tree and copy what it prints.
+  # Plus the delta re-audit round: the failed-tmux-lookup regression guard, the
+  # conflict->report->render seam (three tests, mirroring the ones fuzzyclaw's
+  # identically-shaped path already had), and the two branches of the
+  # "host answered neither tmux call" skip.
+  # Gate's own count on this branch: `scripts/tests collected=4002`
+  # (confirmed by `PASS … collected=4002 … floor=3970`).
+  #   _suggested_floor 4002 = 4002 - min(50, max(1, 200)) = 3952.
+  # Pinned at 3970 rather than 3954 — a floor the gate ACCEPTS and which sits
+  # closer to the measurement, so a collapse is caught sooner. Do not reconcile
+  # this by arithmetic against another branch: re-run the gate on the merged
+  # tree and copy what it prints.
   # ⚠ ZERO new skips on this target. TWO NEW FILES land under it (the module
   # `scripts/lib/agent_ledger.py` and its test) plus the hook and its own
   # target — all `git add`ed, which this repo's flake requires or the deploy
   # silently omits them.
   # ⚠ If main moves before this merges, re-run the gate on the MERGED tree and
   # copy what it prints. Do not reconcile the two sides by arithmetic.
-  "scripts/tests|3961"
+  "scripts/tests|3970"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
@@ -886,12 +891,16 @@ TARGET_FLOORS=(
   #   _suggested_floor 17 = 17 - min(50, max(1, 17/20 = 0 -> 1)) = 17 - 1 = 16.
   "scripts/claude-hooks/tests/test_registrar_activation.py|16"
   # 2026-08-13, the agent activity ledger's WRITER arrives as a NEW target.
-  # 36 collected AFTER the audit round (+3: the throttle's real observable, its
-  # positive control, and that prune is actually CALLED — the first two replaced
-  # a vacuous "two calls leave one record", which one-file-per-key satisfied on
-  # its own). Gate's own count through the gate's own rule:
-  #   _suggested_floor 36 = 36 - min(50, max(1, 36/20 = 1)) = 36 - 1 = 35.
-  "scripts/claude-hooks/tests/test_agent_ledger_hook.py|35"
+  # 39 collected after TWO audit rounds. Round 1 (+3): the throttle's real
+  # observable, its positive control, and that prune is actually CALLED — the
+  # first two replaced a vacuous "two calls leave one record", which
+  # one-file-per-key satisfied on its own. Round 2 (+3): the no-pane path, where
+  # the call-site throttle ARGUMENT is the only thing suppressing the write (the
+  # round-1 test set TMUX_PANE, so it only ever exercised the early check and a
+  # delta re-audit found that mutant still alive), its positive control, and the
+  # failed-tmux-lookup regression. Gate's own count through the gate's own rule:
+  #   _suggested_floor 39 = 39 - min(50, max(1, 39/20 = 1)) = 39 - 1 = 38.
+  "scripts/claude-hooks/tests/test_agent_ledger_hook.py|38"
 )
 
 # The allowance rule, in one place, used by BOTH the drift message and anyone

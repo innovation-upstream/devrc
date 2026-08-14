@@ -5489,6 +5489,56 @@ def test_a_host_whose_ledger_read_FAILED_is_partial_and_says_which_host():
     assert lt["age_secs"] == 60.0
 
 
+def test_a_host_that_answered_NEITHER_tmux_call_is_not_asked_a_third_time():
+    """The skip exists so an offline laptop does not cost a third
+    `ConnectTimeout=4` on every scan. It must remain an ERROR — nothing was
+    measured — and the reason must say the read was never ATTEMPTED, which is a
+    different fact about the host from "tried and failed".
+
+    KILLS: reporting the skipped host as `ok` (a fabricated `0 live of 0` for a
+    machine that is down — the exact class this module refuses), and KILLS:
+    reporting it as `no_sentinel`, which would blame the protocol for a host
+    that was never asked.
+    """
+    calls = []
+    rep = base_gather(use_ledger=True, use_fuzzyclaw=False,
+                      runner=make_runner(calls=calls, remote_rc=1,
+                                         remote_err="ssh: connect timed out"))
+    lt = rep["ledger"]["hosts"]["laptop"]
+    assert lt["status"] == "error"
+    assert "not attempted" in lt["error"]
+    for key in ("seen", "live", "not_live", "generation_mismatch"):
+        assert lt[key] is None, key
+    # the THIRD command was never issued to that host...
+    ledger_calls = [c for c in calls if c and sm.AL.SENTINEL in " ".join(c)]
+    assert [c for c in ledger_calls if c[0] == "ssh"] == [], ledger_calls
+    # ...and the REACHABLE host was still asked, so this is a per-host skip and
+    # not a switch that turned the whole feature off. Asserted on the ARGV
+    # rather than on the status: `make_runner` answers pane text for any argv it
+    # does not recognise, so the local read honestly comes back `no_sentinel`
+    # here — which is the fixture's answer, not the host's.
+    assert len([c for c in ledger_calls if c[0] != "ssh"]) == 1, ledger_calls
+
+
+def test_a_host_with_NO_TMUX_SERVER_is_still_read():
+    """🔴 `no_server` is REACHABLE with empty output — the host answered, it
+    simply has no tmux running. It must NOT be caught by the skip above: a
+    machine with a dead tmux server can still hold a ledger (records survive the
+    server that produced them), and skipping it would publish `error` for a host
+    that was perfectly able to answer.
+    """
+    rep = base_gather(
+        use_ledger=True, use_fuzzyclaw=False,
+        ledger_outputs={"workbench": led_out(pid=None),
+                        "laptop": led_out(pid=None)},
+        runner=make_runner(remote_rc=1, remote_err="no server running on /tmp/x",
+                           local_rc=1, local_err="no server running on /tmp/x"))
+    for host in ("workbench", "laptop"):
+        assert rep["hosts"][host]["reachable"] is True, host
+        assert rep["ledger"]["hosts"][host]["status"] == "ok", host
+        assert rep["ledger"]["hosts"][host]["seen"] == 0, host
+
+
 def test_output_without_the_SENTINEL_is_NO_SENTINEL_not_zero_records():
     """🔴 THE FABRICATED ZERO. Empty stdout from a swallowed command and a host
     with no records are the same bytes. KILLS: reading `records: []` off a read
@@ -5612,6 +5662,57 @@ def test_the_table_reports_a_host_that_did_not_answer_as_such():
     # ...and the reason travels with it, so the operator is not left to guess
     # whether the host is down or the read is broken.
     assert "no injected ledger output" in text
+
+
+def test_a_ledger_CONFLICT_reaches_the_REPORT_through_gather():
+    """🔴 THE SEAM, not the function. `index_by_window` detecting a conflict is
+    pinned at the pure-function level, and that proves nothing about whether the
+    finding survives the trip through `gather` into the payload — the exact gap a
+    prior round already found and closed for fuzzyclaw's identically-shaped
+    `slot_conflicts` path, which this one was written without.
+
+    The co-tenancy fix's whole claim is that contention "is now visible instead
+    of being decided by write order". Delete the aggregation and it silently is
+    not, while the window still resolves to one arbitrary agent of two.
+
+    KILLS: `report["ledger"]["conflicts"] = []`.
+    """
+    rep = ledger_gather(
+        workbench=[led_rec(pane_id="%11", session_id="agent-a", ago=900),
+                   led_rec(pane_id="%12", session_id="agent-b", ago=120)],
+        use_fuzzyclaw=False)
+    conflicts = rep["ledger"]["conflicts"]
+    assert len(conflicts) == 1, conflicts
+    assert conflicts[0]["window_id"] == "@41"
+    assert conflicts[0]["claimants"] == 2
+    assert conflicts[0]["session_ids"] == ["agent-a", "agent-b"]
+    # the host travels WITH the conflict — two hosts can each have one
+    assert conflicts[0]["host"] == "workbench"
+    # ...and the window still gets exactly one row, resolved to the NEWEST
+    row = next(r for r in rows_of(rep) if r["window_id"] == "@41")
+    assert row["claude_session_id"] == "agent-b" and row["age_secs"] == 120.0
+
+
+def test_a_ledger_CONFLICT_is_PRINTED_not_only_carried():
+    """The other half of the seam. A `--json` consumer and a human reader must
+    both be told; the plain-text reader is the one who would otherwise see a
+    single confident row. KILLS: dropping the conflict loop from
+    `render_ledger`."""
+    text = sm.render_table(ledger_gather(
+        workbench=[led_rec(pane_id="%11", session_id="agent-a"),
+                   led_rec(pane_id="%12", session_id="agent-b")],
+        use_fuzzyclaw=False))
+    assert "⚠ LEDGER CONFLICT" in text
+    assert "@41" in text and "claimed by 2 record(s)" in text
+    assert "agent-a" in text and "agent-b" in text
+
+
+def test_no_conflict_prints_NOTHING_so_the_warning_stays_meaningful():
+    """The negative control: a warning that appears on every scan is one a
+    reader learns to skip."""
+    text = sm.render_table(ledger_gather(
+        workbench=[led_rec(pane_id="%11")], use_fuzzyclaw=False))
+    assert "LEDGER CONFLICT" not in text
 
 
 def test_the_table_survives_a_skipped_ledger():
