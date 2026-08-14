@@ -1374,6 +1374,12 @@ class TestSkillDocsArePinned:
             "belongs in a skill\" is a ROUTE, not a disposal",
             "the decline path files the lesson instead of terminating",
         ),
+        # 🔴 Three rows, not one. Pinning only the headline clause left the rest
+        # of that paragraph deletable green — measured, 1513 chars -> 100 with
+        # the suite passing, silently taking the doc's ONLY mention of the tool
+        # block, the fallback search, and the UNFILED instruction with it.
+        ("SKILL HOMES", "the agent is told to take the owning skill from the TOOL"),
+        ("say **UNFILED**", "an unrecoverable dead end must name its search term"),
         ("never persist live status", "the anti-bloat rule that matters most"),
         (
             "persist the *derivation method and what a stale reading looks like*",
@@ -7853,6 +7859,50 @@ class TestRouteOutOfADeadEnd:
         text = st.render_text(_report(["docs/a.md", "notes/b.md"], store))
         assert "SKILL HOMES" in text
         assert "grep -ril" in text, "the fallback search must survive the seam too"
+        # 🔴 The two assertions above are SPELLED: both strings live in the
+        # block's static header/footer and print in EVERY branch, so they hold
+        # even if the call site passes the wrong arguments. Measured: changing
+        # both call sites to `render_skill_homes([], report.scope)` left the
+        # suite green while the block degraded to a FALSE "(no paths were
+        # examined…)" on every dead end. The structural version is below.
+        assert "no paths were examined" not in text, (
+            "the call site dropped the paths — the block now states an absence "
+            "of signal that is not true of this report"
+        )
+
+    def test_the_call_site_passes_BOTH_the_paths_and_the_scope(
+        self, store: Path, tmp_path: Path, monkeypatch
+    ) -> None:
+        """🔴 STRUCTURAL, because the spelled version cannot see a wrong argument.
+
+        Neither call site threads `skills_root`, so a content assertion is
+        impossible until the catalogue is injected — patch the module default and
+        the rendered rows become evidence about what `render_text` actually
+        passed. Two fixture skills with pairwise-distinct domains: one reachable
+        only from a PATH term, one only from the SCOPE term. Dropping either
+        argument removes exactly one row, which no header-string assertion can
+        detect.
+        """
+        root = tmp_path / "skills"
+        for name, desc in [
+            ("pathside", "Owns the wibblesprocket subsystem."),
+            ("scopeside", f"Owns everything in the {SCOPE} repository."),
+        ]:
+            (root / name).mkdir(parents=True)
+            (root / name / "SKILL.md").write_text(
+                f"---\nname: {name}\ndescription: {desc}\n---\n", encoding="utf-8"
+            )
+        monkeypatch.setattr(st, "SKILLS_ROOT_DEFAULT", str(root))
+        # The fixture's own scope, so the report is built normally — mutating a
+        # frozen report after the fact would test a state the tool never emits.
+        # Paths in DIFFERENT directories on purpose: two under one dir cluster
+        # into a NOMINATION, which is not a dead end, so the block correctly
+        # does not render and the test would fail for the wrong reason.
+        rep = _report(["docs/wibblesprocket-notes.md", "notes/b.md"], store)
+        assert rep.status == "no-match", rep.status
+        text = st.render_text(rep)
+        assert "pathside" in text, "the call site did not pass the report's PATHS"
+        assert "scopeside" in text, "the call site did not pass the report's SCOPE"
 
     def test_looked_at_nothing_reaches_it_too(self, store: Path) -> None:
         """The other exit — it returns EARLY from the renderer, so one assertion
@@ -8036,7 +8086,7 @@ class TestSkillHomes:
     def test_a_COMPOUND_component_is_its_own_term(self, tmp_path: Path) -> None:
         """🔴 A skill named for a compound owns the compound. Splitting hyphens
         away made `scripts/repo-cos/scan.py` yield only `repo` + `scan`, so
-        `repo-cos` matched on the generic `scan` (breadth 3) and ranked FOURTH,
+        `repo-cos` matched on the generic `scan` (breadth 4) and ranked FOURTH,
         inside a cap of 4 by one place. As its own term it has breadth 1.
         """
         terms = st._terms_from(["scripts/repo-cos/scan.py"], "")
@@ -8088,6 +8138,36 @@ class TestSkillHomes:
         )
         names = {n for n, _ in st.skill_catalogue(root)}
         assert {"mailbox", "bar", "no-frontmatter"} <= names
+
+    def test_an_UNREADABLE_skill_is_kept_NAME_ONLY_not_dropped(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 The degrade handler was reached ZERO times by the whole suite — an
+        audit instrumented it and counted 0 hits across 586 tests, because the
+        "malformed" fixture parses fine. This reaches it for real, with a
+        SKILL.md that cannot be READ.
+
+        And it pins the behaviour, not just the survival: the skill is kept with
+        an empty description, NOT dropped. Its NAME is normally the single most
+        SPECIFIC term available, so dropping it makes a skill called `pyroscope`
+        unfindable by the word `pyroscope` exactly when its file is broken.
+        """
+        root = self._root(tmp_path)
+        bad = root / "obs-read" / "SKILL.md"
+        bad.chmod(0o000)
+        try:
+            if os.access(bad, os.R_OK):  # running as root: the premise is gone
+                pytest.skip("cannot make a file unreadable as this user")
+            cat = dict(st.skill_catalogue(root))
+            assert "obs-read" in cat, "an unreadable skill was DROPPED, losing its name"
+            assert cat["obs-read"] == "", "no description should have been parsed"
+            assert {"mailbox", "bar"} <= set(cat), "the good skills must survive"
+            # The name still routes, which is the point of keeping it.
+            assert st.skill_homes(["obs-read"], skills_root=root) == (
+                ("obs-read", "obs-read"),
+            )
+        finally:
+            bad.chmod(0o644)
 
     def test_a_miss_says_so_and_still_hands_over_the_search(self, tmp_path: Path) -> None:
         """🔴 An empty result must NOT read as 'no skill owns this' — the tool

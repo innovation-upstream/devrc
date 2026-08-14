@@ -3262,10 +3262,17 @@ def _terms_from(paths: _abc.Iterable[str], scope: str) -> tuple[str, ...]:
             # `repo` does, but `test_index` must NOT — both of ITS pieces are
             # stoplisted, and letting the compound through re-admitted exactly
             # the noise the stoplist exists to remove. Caught by the knob test.
-            cand = ([part.strip().lower()] if keep and len(pieces) > 1 else []) + keep
-            for tok in cand:
-                if len(tok) >= 4 and tok not in _TERM_STOPLIST and not tok.isdigit():
-                    out.setdefault(tok, None)
+            # 🔴 ONE copy of the predicate. A second `if len>=4 and not
+            # stoplisted…` guarded `cand` and was DEAD BY CONSTRUCTION — a
+            # compound only reaches here when a piece already passed the floor,
+            # so it is >=4 chars and contains a separator, hence never
+            # stoplisted and never a digit. Deleting it entirely left the suite
+            # green (measured), which is the tell for a rejector that cannot
+            # reject. Duplicating a predicate is also how the two copies drift.
+            if keep and len(pieces) > 1:
+                out.setdefault(part.strip().lower(), None)
+            for tok in keep:
+                out.setdefault(tok, None)
     return tuple(out)
 
 
@@ -3297,10 +3304,16 @@ def skill_catalogue(skills_root: str | Path | None = None) -> tuple[tuple[str, s
                 continue
             fm = parse_front_matter(md.read_text(encoding="utf-8", errors="replace"))
         except Exception:  # OSError is one of these; naming both read as wider
-            # A malformed or unreadable skill must not take the report down with
-            # it — the same degrade-don't-die rule the reader learned from a
-            # wrapped `aliases:`.
-            continue
+            # 🔴 KEEP THE SKILL, NAME-ONLY — do not `continue`. A malformed or
+            # unreadable skill must not take the report down (the degrade-don't-
+            # die rule the reader learned from a wrapped `aliases:`), but
+            # dropping it loses its NAME, which is normally the single most
+            # SPECIFIC term available: a skill called `pyroscope` would stop
+            # being findable by the word `pyroscope` precisely because its file
+            # was broken. An earlier draft of this handler used `continue` while
+            # its comment still said "degrade", describing behaviour it no
+            # longer had.
+            fm = {}
         desc = fm.get("description")
         found.append((entry.name, desc if isinstance(desc, str) else ""))
     return tuple(found)
@@ -3313,7 +3326,8 @@ def skill_homes(
 
     🔴 Ranked by term specificity, and it has to be. Unranked, the real lead
     drowns: measured on this host, a path carrying `pyroscope` also yields the
-    terms `query` and `homelab`, which match FOUR and THREE other skills
+    terms `query` and `homelab`, which match FOUR and THREE skills IN TOTAL (three others and two
+    others respectively — an inserted "other" made an earlier draft overcount)
     respectively (re-measured 2026-08-14 on the live 34-skill catalogue; an
     earlier draft of this comment said "2 each" and was wrong) — so `obs-read`,
     the one right answer, came out FOURTH and a cap of 4 was one generic term
