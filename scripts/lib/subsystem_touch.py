@@ -172,7 +172,7 @@ CONTRACT SUMMARY
     build_report(source, store_root, scope, *, today, ...)
                                               -> TouchReport
     render_text(report) / report_json(report) -> str / dict
-    census(store_root)                        -> Census
+    census(store_root, now=None)              -> Census  (counts + write activity)
     main(argv)                                -> int
 
 Every failure mode carries a distinct sentinel phrase, so a caller — or a
@@ -3426,9 +3426,11 @@ def census(store_root: str | Path, now: float | None = None) -> Census:
 
     🔴 WHY mtime AND NOT THE STORE'S GIT LOG. The obvious source is
     `git log` per scope repo, and it is the WRONG one: commits are batched by an
-    hourly `analyze-service-index-commit.timer`, so a git-derived reading lags
-    the actual writes by up to 60 minutes and a mid-hour check can report
-    silence during an active session. mtime is what the writer touched, when it
+    `analyze-service-index-commit.timer` (`OnCalendar=*-*-* *:00:00` with
+    `RandomizedDelaySec=10min`, so the real bound is ~70 min, not 60), a
+    git-derived reading lags the actual writes and a mid-hour check can report
+    silence during an active session. git IS still the only source for the two
+    things below that mtime cannot see — it is wrong for FRESHNESS, not useless. mtime is what the writer touched, when it
     touched it. It also keeps this function subprocess-free and hermetically
     testable with `os.utime`.
 
@@ -3436,9 +3438,14 @@ def census(store_root: str | Path, now: float | None = None) -> Census:
       * HOW MANY times an entry was appended to — a file touched thirty times
         counts once. These are "entries touched", never "writes".
       * WHO touched it. `by_writer` is creation-time attribution and stays that.
-      * A restore. Anything that rewrites a file — `git checkout`, a `cp -a`, a
-        fresh clone of the store — stamps every file with a new mtime and will
-        read as a burst of activity that never happened.
+      * A restore, SOMETIMES — and which operations reset mtime is not obvious,
+        so it is measured here rather than guessed (2026-08-13):
+            plain `cp`, `git clone`  -> mtime RESET  (reads as a burst that never happened)
+            `cp -a`, `git commit`    -> mtime PRESERVED
+        So a fresh clone of the store lies; archiving it aside with `cp -a` does
+        not, and neither does the hourly autocommit. A rewrite with IDENTICAL
+        content still reads as a touch — `analyze-service`'s confirm flow does
+        exactly that.
 
     `now` is injectable so the windows are testable without sleeping; it
     defaults to wall clock.
@@ -3480,7 +3487,7 @@ def census(store_root: str | Path, now: float | None = None) -> Census:
         by_writer=dict(sorted(by_writer.items())),
         scopes_with_stamped_entries={k: dict(sorted(v.items())) for k, v in sorted(nested.items())},
         newest_write_epoch=newest,
-        touched_within=touched,
+        touched_within=dict(touched),
     )
 
 
@@ -3516,7 +3523,7 @@ def render_census(c: Census, now: float | None = None) -> str:
         out.append(f"    touched in the last {label}: {n}")
     out.append(
         "    (mtime-derived, deliberately NOT the store's git log — commits are "
-        "batched hourly, so a git reading lags real writes by up to 60m)"
+        "batched hourly with 10m of jitter, so a git reading lags real writes by ~70m)"
     )
     out.append(
         "  (the reopening gate is stated in "
@@ -3885,7 +3892,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--census",
         action="store_true",
-        help="count entries by scope and created_by, and exit (the falsifiability instrument)",
+        help="count entries by scope and created_by, PLUS write activity (newest write, entries touched in 24h/7d), and exit. The counts are the coverage instrument; the activity lines are the stall detector — the counts cannot detect a stall.",
     )
     p.add_argument(
         "--template",
@@ -3922,7 +3929,7 @@ VALIDATE_SCOPE = ""
 # different things and every combination has an obvious "sensible" reading that
 # differs from the others', so the combination is refused rather than ordered.
 _EXIT_MODES: tuple[tuple[str, str], ...] = (
-    ("--census", "count entries by scope and writer"),
+    ("--census", "count entries by scope and writer, plus write activity"),
     ("--template", "print a new-entry template"),
     ("--validate", "check that entry files parse"),
 )
@@ -3968,8 +3975,12 @@ def main(argv: Sequence[str] | None = None, *, today: str | None = None) -> int:
 
     try:
         if args.census:
-            c = census(args.store)
-            print(json.dumps(c.to_json(), indent=2) if args.json else render_census(c))
+            # One clock read for the whole report: census() and render_census()
+            # must not disagree about "now" in the same output.
+            at = time.time()
+            c = census(args.store, now=at)
+            print(json.dumps(c.to_json(), indent=2) if args.json
+                  else render_census(c, now=at))
             return 0
 
         repo = Path(args.repo).resolve()

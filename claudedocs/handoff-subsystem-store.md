@@ -141,7 +141,8 @@ every entry instead of hiding 13 of 25.
    across two readings 40 minutes apart while the git history showed **7 new entries and 9
    appends that same day** across 5 scopes. Read `newest write` and `touched in the last
    24h/7d` instead — mtime-derived, deliberately not the store's git log, because commits are
-   batched by an hourly timer and a git reading lags real writes by up to 60 minutes.
+   batched by an hourly timer with `RandomizedDelaySec=10min`, so a git reading lags real
+   writes by ~70 minutes (measured, not the round 60 this doc first claimed).
    **The number actually worth watching is the `analyze-service` share**: 12 of 13 stamped
    entries are `handoff`, so the store is effectively single-writer and the second writer has
    an n=1 track record over the whole instrumented period.
@@ -215,6 +216,8 @@ python3 $D/scripts/lib/subsystem_touch.py --repo $D --commit <sha>[,...]
 python3 $D/scripts/lib/subsystem_touch.py --validate <path-just-written>
 
 python3 $D/scripts/lib/subsystem_touch.py --census      # anchor was 21 / 1 scope / 21 unstamped
+# 🔴 read the ACTIVITY lines, not the total: every count is a CREATION event, so a week
+# of pure appends moves none of them and a worked store reads identical to a dead one.
 
 # every scope versioned, contained, NO remote
 for s in $(ls -d ~/.claude/analyze-service-index/*/ | xargs -n1 basename); do

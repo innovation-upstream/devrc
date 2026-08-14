@@ -1133,6 +1133,111 @@ class TestCensusActivity:
         assert "TOUCHED" in text
         assert "counts once" in text
 
+    # ----------------------------------------------------------------------- #
+    # 🔴 THE OUTPUT SURFACE — guarded because an audit proved it was NOT.
+    #
+    # The first version of this feature mutated `census()` five times and
+    # `render_census()`/`to_json()` ZERO times. Both survived deletion with a
+    # fully green suite: dropping the entire `newest write:` line, and dropping
+    # both new JSON keys, each passed 559 tests. That is the isolation-seam
+    # shape — the computation was guarded and the two surfaces a consumer
+    # actually READS were not, while the handoff doc had just started telling
+    # the operator to read exactly those.
+    #
+    # These assert SHAPE (a label with a number next to it), not prose, so they
+    # cannot be satisfied by a sentence that merely spells the right word.
+    # ----------------------------------------------------------------------- #
+    def test_the_rendering_carries_the_newest_write_AGE_not_just_a_label(
+        self, store: Path
+    ) -> None:
+        now = 1_800_000_000.0
+        for md in sorted(store.glob("*/*.md")):
+            self._age(md, hours=400, now=now)
+        target = sorted(p for p in (store / SCOPE).glob("*.md") if p.name != "README.md")[0]
+        self._age(target, hours=3, now=now)
+        text = st.render_census(st.census(store, now=now), now=now)
+        line = [ln for ln in text.splitlines() if "newest write" in ln]
+        assert len(line) == 1, f"expected exactly one newest-write line, got {line!r}"
+        assert "3.0h ago" in line[0], (
+            f"the age is missing or wrong — the line must carry a NUMBER, not just a "
+            f"label: {line[0]!r}"
+        )
+
+    def test_the_rendering_carries_a_COUNT_for_every_configured_window(
+        self, store: Path
+    ) -> None:
+        """One line per window, each with its number. Pinned per-window so a
+        renderer that emits only the first window cannot pass."""
+        now = 1_800_000_000.0
+        mds = sorted(p for p in store.glob("*/*.md") if p.name != "README.md")
+        for md in mds:
+            self._age(md, hours=900, now=now)
+        self._age(mds[0], hours=2, now=now)
+        self._age(mds[1], hours=72, now=now)
+        c = st.census(store, now=now)
+        text = st.render_census(c, now=now)
+        for hours, expected in sorted(c.touched_within.items()):
+            label = f"{hours}h" if hours < 48 else f"{hours // 24}d"
+            hit = [ln for ln in text.splitlines() if f"last {label}" in ln]
+            assert len(hit) == 1, f"window {label} not rendered exactly once: {hit!r}"
+            assert f": {expected}" in hit[0], (
+                f"window {label} rendered without its count: {hit[0]!r}"
+            )
+        assert c.touched_within[24] == 1 and c.touched_within[168] == 2
+
+    def test_a_future_stamp_is_rendered_as_such_and_not_as_an_age(
+        self, store: Path
+    ) -> None:
+        """The absorbing failure mode: one clock-skewed file counts inside EVERY
+        window forever. The loud tell is this phrase — so the phrase is pinned,
+        because an unguarded tell is not a tell."""
+        now = 1_800_000_000.0
+        mds = sorted(p for p in store.glob("*/*.md") if p.name != "README.md")
+        for md in mds:
+            self._age(md, hours=900, now=now)
+        self._age(mds[0], hours=-5, now=now)
+        text = st.render_census(st.census(store, now=now), now=now)
+        lines = [ln for ln in text.splitlines() if "newest write" in ln]
+        assert len(lines) == 1, f"newest-write line missing entirely: {text!r}"
+        assert "in the future" in lines[0], (
+            f"clock skew rendered as a normal age: {lines[0]!r}"
+        )
+        assert "ago" not in lines[0]
+
+    def test_to_json_carries_the_activity_keys_and_their_types(
+        self, store: Path
+    ) -> None:
+        """`--census --json` had NO test at all, so both keys could be deleted
+        green. Pins the key names, the epoch value, and the int->str coercion of
+        the window keys — an undocumented contract a reader will otherwise index
+        as `[24]` and get a KeyError."""
+        now = 1_800_000_000.0
+        mds = sorted(p for p in store.glob("*/*.md") if p.name != "README.md")
+        for md in mds:
+            self._age(md, hours=900, now=now)
+        self._age(mds[0], hours=1, now=now)
+        payload = st.census(store, now=now).to_json()
+        assert "newest_write_epoch" in payload and "touched_within_hours" in payload
+        assert payload["newest_write_epoch"] == pytest.approx(now - self.HOUR)
+        windows = payload["touched_within_hours"]
+        assert set(windows) == {"24", "168"}, (
+            f"window keys are strings by contract (JSON has no int keys): {windows!r}"
+        )
+        assert all(isinstance(k, str) for k in windows)
+        assert windows["24"] == 1
+        # Round-trips through real JSON — a dict with int keys would silently
+        # coerce here instead of failing, which is why the check is on the dict.
+        assert json.loads(json.dumps(payload))["touched_within_hours"]["24"] == 1
+
+    def test_an_empty_stores_json_reports_null_not_a_bogus_epoch(
+        self, tmp_path: Path
+    ) -> None:
+        store = tmp_path / "empty"
+        (store / "scope").mkdir(parents=True)
+        payload = st.census(store).to_json()
+        assert payload["newest_write_epoch"] is None
+        assert payload["touched_within_hours"] == {"24": 0, "168": 0}
+
 
 # =============================================================================
 # The CLI.
