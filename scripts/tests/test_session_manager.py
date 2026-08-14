@@ -29,6 +29,8 @@ import importlib.util
 import json
 import os
 import re
+import subprocess
+import sys
 
 import pytest
 
@@ -2073,7 +2075,7 @@ def test_table_shows_the_LABEL_column_and_the_frame_did_not_get_wider():
     # The header and the rows come from ONE format string, so they cannot skew.
     assert sm._ROW_FMT.count("{") == 9
     assert header == sm._ROW_FMT.format("HOST", "SESSION", "WIN", "LABEL",
-                                        "TASK", "KIND", "STATUS", "AGE", "WAIT")
+                                        "TASK", "CLASS", "STATUS", "AGE", "WAIT")
 
 
 def test_table_does_not_crash_on_none_valued_fields():
@@ -3698,7 +3700,7 @@ def test_the_bucket_tuple_and_the_classifier_cannot_drift_apart():
 
 
 def test_the_table_distinguishes_an_idle_AGENT_from_an_idle_SHELL():
-    """🔴 KILLS: dropping the KIND column, or deriving it from the wrong field.
+    """🔴 KILLS: dropping the CLASS column, or deriving it from the wrong field.
 
     Both rows render `● idle`; the row must still say which one it is, and the
     footer must never print a bare `idle=3`.
@@ -3710,7 +3712,11 @@ def test_the_table_distinguishes_an_idle_AGENT_from_an_idle_SHELL():
     assert "● idle" in agent and "● idle" in shell, "both are idle rows"
     assert "claude" in agent.split("● idle")[0]
     assert "shell" in shell.split("● idle")[0]
-    assert "KIND" in text
+    # 🔴 `CLASS`, not `KIND`: the row now carries a real `kind` field with a
+    # DIFFERENT vocabulary (tmux/cluster), and one word for two axes on the
+    # two surfaces a reader compares is a misread waiting to happen.
+    assert "CLASS" in text
+    assert "KIND" not in text, "the old header collides with the kind field"
     # the footer carries both halves, labelled, and never the mixed integer
     assert "by status (claude+shell):" in text
     assert "idle=2+1" in text
@@ -6494,13 +6500,236 @@ def test_the_lean_view_carries_kind():
 # the caveat — a machine-readable CLAIM, and claims go stale
 # --------------------------------------------------------------------------- #
 def test_the_kind_scope_caveat_is_rendered_and_names_the_unproduced_kind():
+    """🔴 THIS TEST USED TO BE SPELLED RATHER THAN STRUCTURAL, and an audit
+    found two mutants surviving a fully green suite because of it.
+
+    It asserted `"tmux" in line and "cluster" in line` — and BOTH words also
+    appear in the sentence's STATIC prose, so neither computed slot was ever
+    read. Swapping `kinds_produced` for `kinds_enumerated` (rendering the false
+    claim "every row is kind=tmux/cluster"), or inverting the set difference
+    (rendering the self-contradictory "tmux is ENUMERATED but NOT PRODUCED"),
+    both passed. A guard is spelled when it can pass while the hazard exists in
+    a different shape; the fix is to assert the COMPUTED substrings, with the
+    surrounding punctuation that pins which slot they came from.
+    """
     lines = sm.render_caveats(base_gather())
     line = next(ln for ln in lines if "caveat[kind_scope]" in ln)
-    assert "tmux" in line and "cluster" in line
-    assert "NOT " in line and "PRODUCED" in line
+    # the two computed slots, each anchored so a swap cannot satisfy the other
+    assert "kind=tmux —" in line, "the produced-kinds slot"
+    assert "— cluster is ENUMERATED" in line, "the unproduced-kinds slot"
+    # ...and the inversions the old spelling allowed are now excluded by name
+    assert "kind=tmux/cluster" not in line
+    assert "tmux is ENUMERATED" not in line
+    assert "NOT PRODUCED" in line
     # it must point at where clawgate IS reported, or the reader concludes the
     # tool cannot say anything about cluster work at all
     assert "BLOCKED ON ME" in line
+
+
+def test_the_kind_scope_caveat_SLOTS_ARE_LIVE_not_static_prose():
+    """The positive control the spelled version never had: change the inputs
+    and watch BOTH slots move. If either is hardcoded in the sentence, one of
+    these renders identically to the default and this fails."""
+    default = sm._fmt_kind_scope({"kinds_produced": ["tmux"],
+                                  "kinds_enumerated": ["tmux", "cluster"]})
+    swapped = sm._fmt_kind_scope({"kinds_produced": ["cluster"],
+                                  "kinds_enumerated": ["tmux", "cluster"]})
+    assert "kind=cluster —" in swapped and "— tmux is ENUMERATED" in swapped
+    assert swapped != default
+
+
+def test_the_caveat_does_not_degrade_when_EVERY_kind_is_produced():
+    """🔴 THE EMPTY SET IS REACHABLE — `gather` derives `kinds_produced` from
+    the rows, so once writer 3 lands, the unproduced set is empty. The
+    single-sentence version then rendered `—  is ENUMERATED but NOT PRODUCED`:
+    a blank subject in the sentence whose only job is naming what is missing.
+
+    A caveat that degrades into a grammatically-broken half-claim is worse than
+    one that says nothing, because it still reads as a claim.
+    """
+    line = sm._fmt_kind_scope({"kinds_produced": ["cluster", "tmux"],
+                               "kinds_enumerated": ["tmux", "cluster"]})
+    assert "NOT PRODUCED" not in line
+    assert "  is ENUMERATED" not in line, "blank subject"
+    assert "every enumerated kind IS produced" in line
+    # the pointer to where clawgate lives survives BOTH branches
+    assert "BLOCKED ON ME" in line
+
+
+def test_the_caveat_is_MEASURED_from_the_rows_not_asserted_from_the_constant():
+    """🔴 A caveat is a machine-readable claim, and this one used to be a
+    literal in CAVEATS — so it said "every row is kind=tmux" no matter what the
+    rows were, and would have kept saying it on the day writer 3 shipped. That
+    is precisely how `fuzzyclaw_scope` went stale in #471.
+
+    Derived from the report's own rows, so the line cannot disagree with the
+    table printed above it.
+    """
+    rep = with_cluster_rows(mix_gather(), cluster_row())
+    rep["summary"] = sm.summarize(rep)
+    rep["caveats"] = dict(rep["caveats"])
+    rep["caveats"]["kind_scope"] = dict(rep["caveats"]["kind_scope"])
+    rep["caveats"]["kind_scope"]["kinds_produced"] = sorted(
+        rep["summary"]["kind"])
+    line = next(ln for ln in sm.render_caveats(rep) if "kind_scope" in ln)
+    assert "cluster/tmux" in line, "the caveat ignored the cluster row"
+    assert "every enumerated kind IS produced" in line
+    # and the REAL gather path does the same derivation, not just this test
+    live = base_gather()
+    assert live["caveats"]["kind_scope"]["kinds_produced"] == ["tmux"]
+
+
+def test_measured_caveats_DERIVES_from_rows_where_derived_differs_from_the_constant():
+    """🔴 THE CONTROL THAT THE PREVIOUS TEST CANNOT PROVIDE.
+
+    Asserting `kinds_produced == ["tmux"]` off a real gather is satisfied
+    equally by the derivation and by a hardcoded `["tmux"]` — every real scan
+    is tmux-only, so the two are byte-identical and a mutant replacing one with
+    the other SURVIVED a green suite. A fixture whose values coincide with the
+    constant collapses distinct implementations into one observation.
+
+    So this feeds rows whose kinds CANNOT be the constant, and watches the
+    output move.
+    """
+    def rep_of(*kinds):
+        return {"hosts": {"h": {"windows": [{"kind": k} for k in kinds]}}}
+
+    assert sm.measured_caveats(
+        rep_of("cluster"))["kind_scope"]["kinds_produced"] == ["cluster"]
+    assert sm.measured_caveats(
+        rep_of("cluster", "tmux"))["kind_scope"]["kinds_produced"] \
+        == ["cluster", "tmux"]
+    # deduplicated and sorted, so the render is deterministic
+    assert sm.measured_caveats(
+        rep_of("tmux", "cluster", "tmux"))["kind_scope"]["kinds_produced"] \
+        == ["cluster", "tmux"]
+    # a row with NO kind is a bug, and the caveat is where it surfaces —
+    # dropping it would let the line claim a scope it did not measure
+    assert sm.measured_caveats(
+        rep_of("tmux", None))["kind_scope"]["kinds_produced"] \
+        == ["none", "tmux"]
+    # empty report: no rows measured, so no kinds claimed
+    assert sm.measured_caveats(
+        {"hosts": {}})["kind_scope"]["kinds_produced"] == []
+
+
+def test_the_derived_kinds_are_SORTED_deterministically():
+    """🔴 A DETERMINISTIC KILL FOR A NONDETERMINISM MUTANT.
+
+    Dropping `sorted()` leaves `list({...})`, whose order depends on
+    PYTHONHASHSEED — which is RANDOM per process by default. The literal
+    assertion above catches that only on the seeds that happen to order the set
+    wrongly, so it is a coin-flip kill, not a kill: a mutation sweep scored it
+    SURVIVED on one run purely because that run's seed put `cluster` first.
+
+    A flaky guard is fixable rather than re-runnable, so the seed dependency is
+    removed instead of tolerated: seed 2 is one under which
+    `list({"cluster", "tmux"})` yields `tmux` FIRST (measured), so with
+    `sorted()` this returns `["cluster", "tmux"]` and without it `["tmux",
+    "cluster"]` — every run, not most runs.
+    """
+    prog = (
+        "import importlib.machinery as m, importlib.util as u, json;"
+        "l=m.SourceFileLoader('sm', %r);"
+        "sp=u.spec_from_file_location('sm', %r, loader=l);"
+        "mod=u.module_from_spec(sp); sp.loader.exec_module(mod);"
+        "rep={'hosts':{'h':{'windows':[{'kind':'tmux'},{'kind':'cluster'}]}}};"
+        "print(json.dumps("
+        "mod.measured_caveats(rep)['kind_scope']['kinds_produced']))"
+    ) % (_SCRIPT, _SCRIPT)
+    env = dict(os.environ, PYTHONHASHSEED="2", PYTHONDONTWRITEBYTECODE="1")
+    out = subprocess.run([sys.executable, "-c", prog], capture_output=True,
+                         text=True, env=env, timeout=60)
+    assert out.returncode == 0, out.stderr
+    # POSITIVE CONTROL: under this seed the RAW set order really is tmux-first,
+    # so a passing assertion below proves `sorted()` ran — not that the seed
+    # happened to agree with it.
+    raw = subprocess.run(
+        [sys.executable, "-c", "print(list({'cluster','tmux'}))"],
+        capture_output=True, text=True, env=env, timeout=60)
+    assert raw.stdout.strip() == "['tmux', 'cluster']", (
+        "seed 2 no longer orders this set tmux-first; pick another seed or "
+        "this test proves nothing")
+    assert json.loads(out.stdout) == ["cluster", "tmux"]
+
+
+def test_measured_caveats_is_PURE_and_does_not_touch_its_input():
+    before = {k: dict(v) for k, v in sm.CAVEATS.items()}
+    rep = {"hosts": {"h": {"windows": [{"kind": "cluster"}]}}}
+    out = sm.measured_caveats(rep)
+    assert out["kind_scope"]["kinds_produced"] == ["cluster"]
+    assert sm.CAVEATS["kind_scope"]["kinds_produced"] == \
+        before["kind_scope"]["kinds_produced"]
+    assert out["kind_scope"] is not sm.CAVEATS["kind_scope"]
+
+
+def test_deriving_the_caveat_does_not_MUTATE_the_module_constant():
+    """`report["caveats"]` is the module-level CAVEATS dict by reference.
+    Writing the derived value through it would leak one scan's measurement into
+    every later caller in the process — and the tests would still pass, because
+    each one gathers its own report."""
+    before = list(sm.CAVEATS["kind_scope"]["kinds_produced"])
+    rep = base_gather()
+    rep["caveats"]["kind_scope"]["kinds_produced"] = ["MUTATED"]
+    assert sm.CAVEATS["kind_scope"]["kinds_produced"] == before
+    assert base_gather()["caveats"]["kind_scope"]["kinds_produced"] == ["tmux"]
+
+
+# --------------------------------------------------------------------------- #
+# the TABLE — the JSON was made class-generic and the screen was not
+# --------------------------------------------------------------------------- #
+def test_the_table_summary_line_ACCOUNTS_for_every_row():
+    """🔴 `summarize` totals over whatever class keys exist; `render_table`
+    summed `claude`/`shell` BY NAME, so a row in any third class vanished from
+    a line that still looked like a complete accounting —
+    `7 windows claude=3 shell=2`, two rows unmentioned, no discriminant."""
+    rep = with_cluster_rows(mix_gather(), cluster_row(status="busy"),
+                            cluster_row(status="idle"))
+    rep["summary"] = sm.summarize(rep)
+    text = sm.render_table(rep)
+    line = next(ln for ln in text.splitlines() if "summary:" in ln)
+    assert "7 windows" in line
+    # every class named, and the parts account for the whole
+    assert "claude=3" in line and "shell=2" in line and "cluster=2" in line
+    parts = [int(p.split("=")[1]) for p in line.split() if "=" in p]
+    assert sum(parts) == 7
+
+
+def test_the_by_status_line_carries_the_cluster_class_and_its_legend():
+    rep = with_cluster_rows(mix_gather(), cluster_row(status="idle"))
+    rep["summary"] = sm.summarize(rep)
+    text = sm.render_table(rep)
+    line = next(ln for ln in text.splitlines() if "by status" in ln)
+    assert "(claude+shell+cluster)" in line, "the legend must name every part"
+    assert "idle=2+1+1" in line
+    assert "idle=4" not in line, "never the mixed integer"
+
+
+def test_the_table_CLASS_column_renders_cluster_not_shell():
+    """The one-rule-one-place failure made visible on one screen: the table
+    said `shell` for a row the summary underneath counted as `cluster`."""
+    rep = with_cluster_rows(mix_gather(), cluster_row(status="idle",
+                                                      task="wedged dispatch"))
+    rep["summary"] = sm.summarize(rep)
+    text = sm.render_table(rep)
+    row = next(ln for ln in text.splitlines() if "wedged dispatch" in ln)
+    assert "cluster" in row
+    assert "shell" not in row
+
+
+def test_the_table_totals_stay_IDENTICAL_for_a_tmux_only_scan():
+    """The class-generic render must not change today's output. Pinned against
+    the literal strings a reader has been reading for months."""
+    text = sm.render_table(mix_gather())
+    assert "summary: 5 windows  claude=3  shell=2" in text
+    assert "by status (claude+shell): " in text
+    assert "idle=2+1" in text
+    # scoped to the two TOTAL lines — the kind_scope caveat legitimately says
+    # "cluster" further down, and asserting over the whole tail would have made
+    # this fail for a reason that is not the one it is testing
+    totals = "\n".join(ln for ln in text.splitlines()
+                       if "summary:" in ln or "by status" in ln)
+    assert "cluster" not in totals
 
 
 def test_the_kind_scope_caveat_MATCHES_what_the_code_actually_produces():
