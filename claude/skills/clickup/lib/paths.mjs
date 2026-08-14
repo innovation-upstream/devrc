@@ -49,11 +49,6 @@ export const SKILL_DIR = resolve(__dirname, '..');
 export const STATE_FILES = [
   'accounts.json',
   '.env',
-  'watchers.json',
-  'webhook-url.txt',
-  'webhooks.jsonl',
-  'webhook-latest.json',
-  'last-seen.txt',
 ];
 
 /** State subdirectories (migrated wholesale). */
@@ -63,14 +58,11 @@ export const STATE_DIRS = ['.cache'];
  * Names that hold credentials. These are forced to 0600 on migration
  * regardless of what the legacy copy's mode happened to be.
  *
- * watchers.json is on the list because each entry carries the webhook's
- * `secret` — the HMAC key ClickUp signs deliveries with.
- *
- * webhook-url.txt is on the list because the URL IS the credential:
- * `https://webhook.site/<token>` is a capability — whoever holds it can read
- * this workspace's entire event stream and POST forged events into it. It was
- * left off originally on the reasoning that "it is only a URL", and listen.mjs
- * wrote it with no mode at all (0644 under umask 022).
+ * Every current state file is a credential (`accounts.json` holds a live `pk_`
+ * token, `.env` its legacy equivalent), so the non-secret branch of the
+ * migration below is currently unreachable. It is kept because the CLASSIFICATION
+ * is the gate: a new state file must be put on one side of the line or the
+ * other before it can ship.
  *
  * 🔴 Every STATE_FILES entry must be classified as secret or deliberately
  * public; test/state-paths.test.mjs pins the partition BOTH ways, so adding a
@@ -79,8 +71,6 @@ export const STATE_DIRS = ['.cache'];
 export const SECRET_FILES = new Set([
   'accounts.json',
   '.env',
-  'watchers.json',
-  'webhook-url.txt',
 ]);
 
 /** Files inside .cache hold JWTs, so the whole directory is secret. */
@@ -112,11 +102,6 @@ export function statePath(...parts) {
 export const accountsPath = () => statePath('accounts.json');
 export const envPath = () => statePath('.env');
 export const cacheDir = () => statePath('.cache');
-export const watchersFile = () => statePath('watchers.json');
-export const webhookUrlFile = () => statePath('webhook-url.txt');
-export const webhookLogFile = () => statePath('webhooks.jsonl');
-export const webhookLatestFile = () => statePath('webhook-latest.json');
-export const lastSeenFile = () => statePath('last-seen.txt');
 
 // ── Migration ─────────────────────────────────────────────────────────────
 

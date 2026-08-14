@@ -8,13 +8,8 @@ accounts.json
 .git/
 
 # clickup skill state. It normally lives in $XDG_STATE_HOME/clickup (see
-# clickup/lib/paths.mjs) — these entries exist so a LEGACY copy, or a stray
-# `add-account`/listener run from inside the checkout, can never be staged into
-# a PUBLIC repo. watchers.json carries each webhook's HMAC secret and .cache/
-# the session JWTs; accounts.json (a live `pk_` token) is covered above.
-watchers.json
+# clickup/lib/paths.mjs) — this entry exists so a LEGACY copy, or a stray
+# `add-account` run from inside the checkout, can never be staged into a
+# PUBLIC repo. .cache/ holds the session JWTs; accounts.json (a live `pk_`
+# token) and .env are covered above.
 .cache/
-webhook-url.txt
-webhooks.jsonl
-webhook-latest.json
-last-seen.txt

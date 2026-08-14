@@ -15,15 +15,15 @@ node query.mjs <command> [options]
 ## Finding a command — ask the CLI, not this file
 
 ```bash
-node query.mjs              # all 69 commands, grouped by area
+node query.mjs              # all 63 commands, grouped by area
 node query.mjs <command>    # usage for one command
 ```
 
 🔴 **This file deliberately does not list the commands.** It used to, and the tables
-drifted to 56 of 68 — the entire webhook-watcher group and `batch-create` were
-invisible here for months. `showUsage()` in `query.mjs` is the single source of
-truth, pinned by `test/help-coverage.test.mjs`, which fails if any dispatchable
-command is missing from the help (or any printed command cannot dispatch).
+drifted to 56 of 68 — a whole command group and `batch-create` were invisible here
+for months. `showUsage()` in `query.mjs` is the single source of truth, pinned by
+`test/help-coverage.test.mjs`, which fails if any dispatchable command is missing
+from the help (or any printed command cannot dispatch).
 
 **Adding a command? Add it to `showUsage()`** — devrc's node gate runs the check.
 Do not restate the list here.
@@ -93,12 +93,13 @@ tree of read-only `/nix/store` symlinks — editing it directly is impossible, a
 
 ## Tests
 
-Both hermetic gates are `node:test` suites, run by devrc's node gate
+The hermetic gates are `node:test` suites, run by devrc's node gate
 (`bash scripts/run-node-tests.sh .` from the devrc checkout, and
 `nix build .#checks.x86_64-linux.nodetests` in CI). Standalone still works:
 
 ```bash
 node test/help-coverage.test.mjs      # hermetic; pins showUsage() completeness
 node test/state-paths.test.mjs        # hermetic; pins state OUT of the skill dir
+node test/js-source.test.mjs          # hermetic; controls for the source scanner
 node test/smoke-test.mjs --readonly   # live API, needs credentials — NOT in any gate
 ```

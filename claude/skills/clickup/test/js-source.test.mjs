@@ -15,8 +15,8 @@
  *
  * It was not hypothetical. `blankStrings` blanked the CONTENTS of a template
  * literal including its `${ … }` substitutions, so
- * `` writeFileSync(`${__dirname}/accounts.json`, d) `` — the idiom listen.mjs
- * itself writes — reached the seam scanner as a token-free string and passed
+ * `` writeFileSync(`${__dirname}/accounts.json`, d) `` — a real write idiom in
+ * this skill — reached the seam scanner as a token-free string and passed
  * clean. A guard downstream cannot see that; a direct control can, and does
  * below.
  *
@@ -77,9 +77,9 @@ describe('blankComments', () => {
   test('🔴 a comment MARKER INSIDE A STRING is not a comment', () => {
     // The control that matters in the other direction: over-blanking silently
     // deletes real code from every guard downstream.
-    const src = "const u = 'https://webhook.site/token';\nconst p = accountsPath();";
+    const src = "const u = 'https://example.com/token';\nconst p = accountsPath();";
     const out = blankComments(src);
-    assert.ok(out.includes('webhook.site/token'),
+    assert.ok(out.includes('example.com/token'),
       'the // inside a URL string was treated as a comment, so everything after it on the ' +
         'line was erased — including, in a real module, the call being guarded');
     assert.ok(out.includes('accountsPath()'));
@@ -166,7 +166,7 @@ describe('blankStrings', () => {
     const out = blankStrings(src, { keepSubstitutions: true });
     assertSameShape(src, out, 'blankStrings(keepSubstitutions)');
     assert.ok(/\$\{__dirname\}/.test(out),
-      'the substitution was blanked, so a location token written the way listen.mjs writes it ' +
+      'the substitution was blanked, so a location token written in template-literal form ' +
         'is invisible to any guard scanning this text — which is exactly how the seam scanner ' +
         'stayed silent on `writeFileSync(`${__dirname}/accounts.json`, d)`');
     assert.ok(!/accounts\.json/.test(out),

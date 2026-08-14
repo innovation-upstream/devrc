@@ -21,8 +21,7 @@
  *   3b. The secret/public PARTITION of STATE_FILES, and that the classification
  *      has CONSEQUENCES. What was here before was a tautology — a literal list
  *      asserted to be inside the constant it was copied from — and it stayed
- *      green while webhook-url.txt (the webhook.site capability token, written
- *      0644) sat outside SECRET_FILES.
+ *      green while a capability token, written 0644, sat outside SECRET_FILES.
  *   4. The SEAM: no module WRITES to a path it derived from its own location.
  *      Items 1-3 all pass while a consumer quietly keeps its own copy of the old
  *      path, which is exactly the bug this refactor exists to remove. The
@@ -147,11 +146,6 @@ const ACCESSORS = [
   'accountsPath',
   'envPath',
   'cacheDir',
-  'watchersFile',
-  'webhookUrlFile',
-  'webhookLogFile',
-  'webhookLatestFile',
-  'lastSeenFile',
 ];
 
 test(`all ${ACCESSORS.length} state accessors are exported`, () => {
@@ -321,27 +315,24 @@ test('migration: migrating a directory ONTO ITSELF is a no-op', () => {
     'a same-directory migration changed the directory listing');
 });
 
-test('migration: carries .env, watchers.json and the .cache/ dir too', () => {
+test('migration: carries .env and the .cache/ dir too', () => {
   const legacy = join(SCRATCH, 'm3-legacy');
   const state = join(SCRATCH, 'm3-state');
   mkdirSync(join(legacy, '.cache'), { recursive: true });
   writeFileSync(join(legacy, '.env'), 'CLICKUP_API_TOKEN=fixture-not-a-real-token\n');
   chmodSync(join(legacy, '.env'), 0o600);
-  writeFileSync(join(legacy, 'watchers.json'), '[]\n');
   writeFileSync(join(legacy, '.cache', 'jwt-cache-default.json'), '{"cu_jwt":"fixture"}\n');
 
   const migrated = paths.migrateLegacyState(legacy, state, { log: false });
 
-  for (const want of ['.env', 'watchers.json', '.cache/']) {
+  for (const want of ['.env', '.cache/']) {
     assert.ok(migrated.includes(want),
       `migrateLegacyState() did not migrate ${want} (got: ${JSON.stringify(migrated)})`);
   }
+  assert.equal(readFileSync(join(state, '.env'), 'utf8'),
+    'CLICKUP_API_TOKEN=fixture-not-a-real-token\n', 'migrated .env contents differ');
   assert.equal((statSync(join(state, '.env')).mode & 0o777).toString(8), '600',
     'migrated .env is not mode 0600 — it holds an API token');
-  assert.equal(readFileSync(join(state, 'watchers.json'), 'utf8'), '[]\n',
-    'migrated watchers.json contents differ');
-  assert.equal((statSync(join(state, 'watchers.json')).mode & 0o777).toString(8), '600',
-    'migrated watchers.json is not mode 0600 — each entry holds the webhook HMAC secret');
   assert.ok(existsSync(join(state, '.cache', 'jwt-cache-default.json')),
     'migrateLegacyState() did not carry the .cache/ contents across');
   assert.equal((statSync(join(state, '.cache')).mode & 0o777).toString(8), '700',
@@ -355,9 +346,9 @@ test('migration: carries .env, watchers.json and the .cache/ dir too', () => {
 // What used to be here was a TAUTOLOGY: it looped over a literal list of three
 // names and asserted each was in SECRET_FILES — which is that constant's own
 // contents, written out a second time. It could not fail for any edit to the
-// code it guards. In particular it stayed green while `webhook-url.txt` — the
-// webhook.site CAPABILITY token, written 0644 — sat outside SECRET_FILES,
-// because the tautology never asked about the files it did not name.
+// code it guards. In particular it stayed green while a CAPABILITY token that
+// the skill wrote 0644 sat outside SECRET_FILES, because the tautology never
+// asked about the files it did not name.
 //
 // The replacement asks the question that can actually go red: is EVERY state
 // file classified, and does the classification have CONSEQUENCES?
@@ -367,14 +358,14 @@ test('migration: carries .env, watchers.json and the .cache/ dir too', () => {
  * an ENUMERATION, not a pattern: a new state file is secret-by-default as far
  * as this gate is concerned, and stays red until someone writes down which
  * side of the line it is on.
+ *
+ * It is EMPTY today. Its three entries were the webhook listener's event log,
+ * latest-event snapshot and timestamp cursor; removing the listener removed
+ * them, and every state file that remains is a credential. The partition still
+ * holds — STATE_FILES == SECRET_FILES ⊎ ∅ — and the classification test below
+ * is still what goes red when a new state file arrives unclassified.
  */
-const PUBLIC_STATE_FILES = new Map([
-  // Event payloads (task titles, comment text). Sensitive-ish, but not a
-  // credential: holding this file grants no access to anything.
-  ['webhooks.jsonl', 'received event payloads — no credential'],
-  ['webhook-latest.json', 'the most recent event payload — no credential'],
-  ['last-seen.txt', 'an ISO timestamp cursor'],
-]);
+const PUBLIC_STATE_FILES = new Map([]);
 
 test('every state file is classified secret or deliberately public', () => {
   const unclassified = paths.STATE_FILES.filter(
@@ -415,7 +406,7 @@ test('migration: EVERY secret file is forced to 0600 from a 0644 legacy copy', (
   const state = join(SCRATCH, 'part-secret-state');
   mkdirSync(legacy, { recursive: true });
   const names = [...paths.SECRET_FILES];
-  assert.ok(names.length >= 4,
+  assert.ok(names.length >= 2,
     `SECRET_FILES holds only ${names.length} name(s) — this loop is the guard's eyes ` +
       'and it is looking at almost nothing');
   for (const name of names) {
@@ -433,36 +424,27 @@ test('migration: EVERY secret file is forced to 0600 from a 0644 legacy copy', (
   }
 });
 
-// The other half of the partition: a PUBLIC file keeps the legacy mode. Without
-// this, `chmod 0600 everything` would satisfy the loop above and the two classes
-// would be indistinguishable — i.e. SECRET_FILES would be pinning nothing.
-test('migration: a deliberately-public state file keeps its legacy mode', () => {
-  const legacy = join(SCRATCH, 'part-public-legacy');
-  const state = join(SCRATCH, 'part-public-state');
-  mkdirSync(legacy, { recursive: true });
-  const names = [...PUBLIC_STATE_FILES.keys()];
-  assert.ok(names.length >= 1, 'PUBLIC_STATE_FILES is empty — nothing is being compared');
-  for (const name of names) {
-    writeFileSync(join(legacy, name), 'fixture\n');
-    chmodSync(join(legacy, name), 0o644);
-  }
-
-  paths.migrateLegacyState(legacy, state, { log: false });
-
-  for (const name of names) {
-    assert.equal((statSync(join(state, name)).mode & 0o777).toString(8), '644',
-      `${name} is declared PUBLIC but migration forced its mode — the secret/public ` +
-        'distinction has no consequence, so SECRET_FILES pins nothing');
-  }
-});
-
-// webhook-url.txt by name, because its classification is the one that was
-// wrong: `https://webhook.site/<token>` is a capability, not "just a URL".
-test('webhook-url.txt is classified secret — the URL IS the credential', () => {
-  assert.ok(paths.SECRET_FILES.has('webhook-url.txt'),
-    'webhook-url.txt is not in SECRET_FILES. It holds https://webhook.site/<token>, ' +
-      'and that token is a capability: whoever reads it can read this workspace\'s ' +
-      'entire event stream and POST forged events into it.');
+// The other half of the partition USED to be a behavioural test: a PUBLIC file
+// keeps its legacy mode, so `chmod 0600 everything` could not satisfy the loop
+// above and the two classes stayed distinguishable.
+//
+// 🔴 That test has no subject any more. PUBLIC_STATE_FILES is empty, so no input
+// reaches the mode-PRESERVING branch of migrateLegacyState, and a loop over zero
+// names is a test that passes by looking at nothing — the vacuous green this
+// whole section was written to eliminate. It is deleted rather than left to run
+// empty, and replaced by the tripwire below.
+//
+// This IS a real reduction in coverage: nothing now proves migration reads
+// SECRET_FILES rather than hardcoding 0600. It is not restorable without a
+// public state file to compare against, so the tripwire fails the moment one
+// exists, which is the moment the behavioural test becomes writable again.
+test('PUBLIC_STATE_FILES is empty — restore the behavioural mode test if that changes', () => {
+  assert.equal(PUBLIC_STATE_FILES.size, 0,
+    `PUBLIC_STATE_FILES now declares ${[...PUBLIC_STATE_FILES.keys()].join(', ')}. The ` +
+      'mode-preserving branch of migrateLegacyState is reachable again, so restore the ' +
+      "deleted 'a deliberately-public state file keeps its legacy mode' test (git log this " +
+      'file) — otherwise nothing proves the secret/public split has any consequence and ' +
+      'SECRET_FILES is decorative.');
 });
 
 // ── 4. Seam: no consumer re-derives a state path from __dirname ───────────
@@ -501,9 +483,9 @@ const LOCATION_TOKEN =
  *     join(__dirname, '..', '.gitignore')
  *
  * None of those four files is read by any module in the skill; repo-wide they
- * occur only as fixture strings in this file. Run over the CURRENT 26 modules,
+ * occur only as fixture strings in this file. Run over the CURRENT 21 modules,
  * `origin/main`'s scanner reports **0 offenders — identical to this one**, with
- * both firing on a planted `writeFileSync(join(__dirname, 'watchers.json'), d)`
+ * both firing on a planted `writeFileSync(join(__dirname, 'sessions.json'), d)`
  * (so neither zero is a dead scanner). This rewrite therefore changes nothing
  * observable today: it is FORWARD-LOOKING hardening against the first bundled
  * data file somebody reads off `__dirname`, plus the indirect write shapes the
@@ -621,7 +603,7 @@ function locationTokenIn(bare, start, end) {
  *     surrounding lines;
  *   * string CONTENTS are blanked for the token scan, so a bait string in a
  *     fixture is not code — but a template's `${ … }` is KEPT, because that is
- *     code (`` `${__dirname}/accounts.json` `` is listen.mjs's own idiom);
+ *     code (`` `${__dirname}/accounts.json` `` is a real idiom in this skill);
  *   * the WRITE SHAPE is irrelevant — `writeFileSync(new URL('x',
  *     import.meta.url))`, a four-line `join(\n __dirname,\n 'x'\n)`, a template
  *     literal, and a `const p = …` bound one statement earlier and written
@@ -734,11 +716,9 @@ export function findOpenCodedStatePaths(src) {
 // skill dir alongside a state file, because it is the migration SOURCE.
 const CONSUMERS = [
   'query.mjs',
-  'listen.mjs',
   'lib/accounts.mjs',
   'lib/jwt.mjs',
   'api/client.mjs',
-  'api/webhooks.mjs',
 ];
 
 /**
@@ -826,7 +806,7 @@ test('SEAM: the walk finds a .cjs offender the .mjs-only walk would miss', () =>
 test('SEAM: no module derives a state path from the skill dir', () => {
   const modules = allModules();
   // Positive control: a walk that found nothing would report zero offenders and
-  // read as an all-clear. The floor is the 6 known consumers.
+  // read as an all-clear. The floor is the 4 known consumers.
   assert.ok(modules.length >= CONSUMERS.length,
     `the module walk found only ${modules.length} .mjs file(s) (floor ${CONSUMERS.length}) — ` +
       'it is wired to nothing, so "no offenders" means nothing');
@@ -856,7 +836,7 @@ test('SEAM: the walk covers every consumer and the whole source tree', () => {
   assert.ok(modules.length >= 15,
     `the module walk found only ${modules.length} .mjs file(s); the skill has 20+ ` +
       `(SKILL=${SKILL}). A walk rooted at the wrong directory would still find the ` +
-      'six consumers and look fine.');
+      'four consumers and look fine.');
 });
 
 test('SEAM: every listed consumer still exists', () => {
@@ -871,6 +851,15 @@ test('SEAM: every listed consumer still exists', () => {
 // shape of the hazard (or it is decoration), and that it stays quiet on the
 // legitimate uses of the same tokens (or the first false positive gets it
 // deleted, which is the real way a guard dies).
+//
+// 🔴 THE FILENAMES BELOW ARE ARBITRARY, AND DELIBERATELY SO. The scanner
+// consults no registry — `watchers.json`, `webhooks.jsonl` and `last-seen.txt`
+// are no longer state files (they belonged to the deleted webhook listener),
+// and that is precisely the property being pinned: a write into the skill dir
+// is an EROFS whatever the file is called. Do NOT "tidy" these to current state
+// filenames. Several are load-bearing as SPELLINGS — `webhooks.jsonl` starts
+// with `w` and `accounts.json` with `a`, the two initials that caught the
+// openSync bug where the FLAG pattern was tested against the PATH argument.
 
 const MUST_FIRE = [
   ['the one-line join form, written',
@@ -914,7 +903,7 @@ const MUST_FIRE = [
     "const fd = openSync(join(__dirname, 'schema.yaml'), 'w');"],
   ['🔴 openSync r+ — read-WRITE',
     "const fd = openSync(join(__dirname, 'schema.yaml'), 'r+');"],
-  ['🔴 a TEMPLATE LITERAL path — the idiom listen.mjs itself writes',
+  ['🔴 a TEMPLATE LITERAL path',
     'writeFileSync(`${__dirname}/accounts.json`, data);'],
   ['🔴 a template literal bound one statement earlier',
     'const p = `${__dirname}/watchers.json`;\nappendFileSync(p, line);'],

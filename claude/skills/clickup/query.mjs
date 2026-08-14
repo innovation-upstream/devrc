@@ -10,7 +10,7 @@
  *
  * Do NOT restate the command list here or in SKILL.md. Both were hand-kept
  * copies that drifted: this header lagged by ~15 commands and SKILL.md's
- * tables documented 56 of 68, hiding the whole webhook-watcher group.
+ * tables documented 56 of 68, hiding a whole command group.
  */
 
 import { readFileSync, existsSync, unlinkSync, writeFileSync, mkdirSync } from 'fs';
@@ -80,18 +80,6 @@ import {
   formatInboxStats,
 } from './api/inbox.mjs';
 import { uploadAttachment, uploadAttachments } from './api/attachments.mjs';
-import {
-  createWebhook,
-  listWebhooks,
-  deleteWebhook,
-  addWatcherEntry,
-  removeWatcherEntry,
-  getWatcherEntries,
-  clearAllWatcherEntries,
-  DEFAULT_TASK_EVENTS,
-  DEFAULT_LIST_EVENTS,
-  DEFAULT_SPACE_EVENTS,
-} from './api/webhooks.mjs';
 
 // Lib imports
 import { executeBatchCreate } from './lib/batch-create.mjs';
@@ -108,38 +96,7 @@ import {
   formatPageList,
   formatList,
 } from './lib/format.mjs';
-import { accountsPath, webhookUrlFile, ensureStateDir, stateBaseDir } from './lib/paths.mjs';
-
-/**
- * The endpoint the watch-* commands register with ClickUp.
- *
- * Prefer the URL the running listener wrote; otherwise derive it from the
- * account's webhookSiteToken. Both files are STATE (they live under
- * $XDG_STATE_HOME/clickup, never in the read-only skill dir).
- *
- * This was open-coded identically in watch-task, watch-list and watch-space —
- * three copies of one rule, which is three places for the path to drift.
- */
-function resolveWebhookUrl() {
-  ensureStateDir();
-  const urlFile = webhookUrlFile();
-  if (existsSync(urlFile)) {
-    return readFileSync(urlFile, 'utf-8').trim();
-  }
-  const acctFile = accountsPath();
-  if (!existsSync(acctFile)) {
-    console.error('Error: No webhook.site token configured.');
-    console.error(`Add "webhookSiteToken" to ${acctFile}`);
-    process.exit(1);
-  }
-  const accts = JSON.parse(readFileSync(acctFile, 'utf-8'));
-  if (!accts.webhookSiteToken) {
-    console.error('Error: No webhook.site token configured.');
-    console.error(`Add "webhookSiteToken" to ${acctFile}`);
-    process.exit(1);
-  }
-  return `https://webhook.site/${accts.webhookSiteToken}`;
-}
+import { stateBaseDir } from './lib/paths.mjs';
 
 // Parse arguments
 const args = process.argv.slice(2);
@@ -164,7 +121,6 @@ let pageArg = null;
 let accountArg = null;
 let threadsFlag = false;
 let attachArgs = [];
-let eventsArg = null;
 let allSpacesFlag = false;
 let sinceArg = null;
 let allTimeFlag = false;
@@ -203,8 +159,6 @@ for (let i = 0; i < args.length; i++) {
     threadsFlag = true;
   } else if (arg === '--attach') {
     attachArgs.push(args[++i]);
-  } else if (arg === '--events' || arg === '-e') {
-    eventsArg = args[++i];
   } else if (arg === '--account') {
     accountArg = args[++i];
   } else if (arg === '--all-spaces') {
@@ -324,18 +278,6 @@ Project Setup:
   batch-create --file plan.json  Create multiple tasks from JSON (with deps, subtasks, assignments)
   batch-create --file plan.json --dry-run  Preview without creating
 
-Watcher Commands (webhook-based event monitoring):
-  watch-task <id>[,id2,...]     Watch task(s) for events (--events to customize)
-  watch-list <list_id>          Watch a list for events
-  watch-space <space_id>        Watch a space for events
-  watchers                      List active webhook watchers
-  webhooks                      List all webhooks in workspace (from API)
-  unwatch-webhook <wh_id>       Delete a webhook watcher
-  unwatch-webhook --all         Delete all webhook watchers
-
-  Listener (run as background task):
-  node listen.mjs [--timeout 600] [--port 3458] [--mode wait|server]
-
 Account Commands:
   accounts                      List configured accounts
   switch-account <name>         Change the default account
@@ -359,7 +301,6 @@ Options:
   --attach     File path to upload as attachment (repeatable, for attach/comment)
   --page       Page ID for doc-reply (identifies which page the thread is on)
   --space      Space ID for create-doc (places doc in that space)
-  --events     Comma-separated event types for watch commands (e.g. taskStatusUpdated,taskCommentPosted)
 
 Bulk Operations (comma-separated IDs):
   node query.mjs get id1,id2,id3              Fetch multiple tasks at once
@@ -755,49 +696,6 @@ async function main() {
           for (const e of result.errors) {
             console.log(`  ${e.ref || e.name || '?'}: ${e.error}`);
           }
-        }
-      }
-    } catch (err) {
-      console.error('Error:', err.message);
-      process.exit(1);
-    }
-    return;
-  }
-
-  // Watcher commands that don't require a target
-  if (command === 'watchers') {
-    const entries = getWatcherEntries();
-    if (entries.length === 0) {
-      console.log('No active watchers. Use watch-task, watch-list, or watch-space to create one.');
-    } else if (jsonOutput) {
-      console.log(JSON.stringify(entries, null, 2));
-    } else {
-      console.log(`Active watchers (${entries.length}):\n`);
-      for (const e of entries) {
-        console.log(`  ${e.webhookId} | ${e.scope}:${e.scopeId} | ${e.events.length} events | ${e.createdAt}`);
-      }
-    }
-    return;
-  }
-
-  if (command === 'webhooks') {
-    try {
-      const webhooks = await listWebhooks();
-      if (webhooks.length === 0) {
-        console.log('No webhooks registered in workspace.');
-      } else if (jsonOutput) {
-        console.log(JSON.stringify(webhooks, null, 2));
-      } else {
-        console.log(`Webhooks in workspace (${webhooks.length}):\n`);
-        for (const wh of webhooks) {
-          const health = wh.health?.status || '?';
-          const fails = wh.health?.fail_count || 0;
-          const scope = wh.task_id ? `task:${wh.task_id}` :
-                        wh.list_id ? `list:${wh.list_id}` :
-                        wh.folder_id ? `folder:${wh.folder_id}` :
-                        wh.space_id ? `space:${wh.space_id}` : 'workspace';
-          console.log(`  ${wh.id} | ${scope} | ${wh.events?.length || 0} events | ${health} (${fails} fails)`);
-          console.log(`    → ${wh.endpoint}`);
         }
       }
     } catch (err) {
@@ -2115,141 +2013,6 @@ async function main() {
           console.log(JSON.stringify({ path: outputPath, url }, null, 2));
         } else {
           console.log(`Downloaded: ${outputPath}`);
-        }
-        break;
-      }
-
-      // ── Webhook Watcher Commands ──────────────────────────────────────────
-
-      case 'watch-task': {
-        // watch-task <task_id>[,task_id2,...] [--events evt1,evt2]
-        if (!targetInput) {
-          console.error('Error: Task ID(s) required');
-          console.error('Usage: node query.mjs watch-task <task_id>[,id2,...] [--events evt1,evt2]');
-          process.exit(1);
-        }
-        const webhookUrl = resolveWebhookUrl();
-        const events = eventsArg ? eventsArg.split(',') : DEFAULT_TASK_EVENTS;
-        const taskIds = targetInput.split(',').map(id => parseTaskId(id));
-        const results = [];
-
-        for (const taskId of taskIds) {
-          const wh = await createWebhook(webhookUrl, events, { taskId });
-          const entry = {
-            webhookId: wh.id,
-            secret: wh.secret,
-            scope: 'task',
-            scopeId: taskId,
-            events,
-            endpoint: webhookUrl,
-            createdAt: new Date().toISOString(),
-          };
-          addWatcherEntry(entry);
-          results.push(entry);
-        }
-
-        if (jsonOutput) {
-          console.log(JSON.stringify(results, null, 2));
-        } else {
-          for (const r of results) {
-            console.log(`Watching task ${r.scopeId} (webhook: ${r.webhookId})`);
-            console.log(`  Events: ${r.events.join(', ')}`);
-          }
-          console.log(`\nStart listener: node query.mjs listen`);
-        }
-        break;
-      }
-
-      case 'watch-list': {
-        if (!targetInput) {
-          console.error('Error: List ID required');
-          console.error('Usage: node query.mjs watch-list <list_id> [--events evt1,evt2]');
-          process.exit(1);
-        }
-        const webhookUrl = resolveWebhookUrl();
-        const listId = parseListId(targetInput);
-        const events = eventsArg ? eventsArg.split(',') : DEFAULT_LIST_EVENTS;
-        const wh = await createWebhook(webhookUrl, events, { listId });
-        const entry = {
-          webhookId: wh.id,
-          secret: wh.secret,
-          scope: 'list',
-          scopeId: listId,
-          events,
-          endpoint: webhookUrl,
-          createdAt: new Date().toISOString(),
-        };
-        addWatcherEntry(entry);
-
-        if (jsonOutput) {
-          console.log(JSON.stringify(entry, null, 2));
-        } else {
-          console.log(`Watching list ${listId} (webhook: ${wh.id})`);
-          console.log(`  Events: ${events.join(', ')}`);
-          console.log(`\nStart listener: node query.mjs listen`);
-        }
-        break;
-      }
-
-      case 'watch-space': {
-        if (!targetInput) {
-          console.error('Error: Space ID required');
-          console.error('Usage: node query.mjs watch-space <space_id> [--events evt1,evt2]');
-          process.exit(1);
-        }
-        const webhookUrl = resolveWebhookUrl();
-        const spaceId = parseSpaceId(targetInput);
-        const events = eventsArg ? eventsArg.split(',') : DEFAULT_SPACE_EVENTS;
-        const wh = await createWebhook(webhookUrl, events, { spaceId });
-        const entry = {
-          webhookId: wh.id,
-          secret: wh.secret,
-          scope: 'space',
-          scopeId: spaceId,
-          events,
-          endpoint: webhookUrl,
-          createdAt: new Date().toISOString(),
-        };
-        addWatcherEntry(entry);
-
-        if (jsonOutput) {
-          console.log(JSON.stringify(entry, null, 2));
-        } else {
-          console.log(`Watching space ${spaceId} (webhook: ${wh.id})`);
-          console.log(`  Events: ${events.join(', ')}`);
-          console.log(`\nStart listener: node query.mjs listen`);
-        }
-        break;
-      }
-
-      case 'unwatch-webhook': {
-        if (!targetInput) {
-          console.error('Error: Webhook ID required (or --all to remove all)');
-          console.error('Usage: node query.mjs unwatch-webhook <webhook_id>');
-          console.error('       node query.mjs unwatch-webhook --all');
-          process.exit(1);
-        }
-        if (targetInput === '--all') {
-          const entries = getWatcherEntries();
-          if (entries.length === 0) {
-            console.log('No watchers to remove.');
-            break;
-          }
-          let removed = 0;
-          for (const e of entries) {
-            try {
-              await deleteWebhook(e.webhookId);
-              removed++;
-            } catch (err) {
-              console.error(`  Failed to delete ${e.webhookId}: ${err.message}`);
-            }
-          }
-          clearAllWatcherEntries();
-          console.log(`Removed ${removed}/${entries.length} webhook(s).`);
-        } else {
-          await deleteWebhook(targetInput);
-          removeWatcherEntry(targetInput);
-          console.log(`Webhook ${targetInput} deleted.`);
         }
         break;
       }
