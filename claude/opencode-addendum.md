@@ -6,7 +6,8 @@ instruction file (`~/.config/opencode/AGENTS.md`) and covers the ways opencode
 differs from Claude Code.
 
 🔴 **Why this file is CONCATENATED rather than `@`-imported.** opencode does NOT
-expand `@`-imports inside `AGENTS.md`/`CLAUDE.md` — measured on v1.18.16 with an
+expand `@`-imports inside `AGENTS.md`/`CLAUDE.md` — measured on v1.18.4, NOT re-derived
+since (it needs a live model call), with an
 agent that had every tool denied, so no file read was possible: an imported
 passphrase came back `NONE`, the same content inline came back verbatim. Since
 `~/.claude/CLAUDE.md` is ~1.5 KB consisting almost entirely of `@PRINCIPLES.md`

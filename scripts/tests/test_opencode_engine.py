@@ -639,7 +639,27 @@ def test_engine_is_the_version_every_measurement_is_keyed_to():
 # (see the second half of the test). It is keyed on version-FREE snippets on
 # purpose — an allowlist quoting `1.18.4` would match itself when this very file
 # is scanned.
+# 🔴 SCOPE, STATED HONESTLY — this is NOT "every file that spells a version".
+# An earlier draft of this comment claimed it was, and a re-audit falsified the
+# claim in one grep: eight more tracked files carry opencode version literals.
+# Worse, THIS PR made four of them false — `scripts/browser-bridge/` asserted in
+# the present tense that "both hosts run 1.18.4", true at the merge-base and
+# false the moment the lock moved. Those four are fixed by naming the PIN rather
+# than copying its value, and the two files are now IN the surface.
+#
+# What is deliberately OUTSIDE, and why: `claudedocs/**` (dated session records —
+# history, and they must not be rewritten), and the DATED measurement records in
+# `scripts/claude-hooks/guard_core.py`, `scripts/collector/opencode/`,
+# `claude/skills/activity/SKILL.md`, `scripts/browser-bridge/browser-agent*` and
+# `scripts/browser-bridge/opencode/tools/`. Those say "measured on <version>,
+# <date>" — a claim about the past, which does not track the pin.
+#
+# 🔴 THE SURFACE ONLY ROTS DOWNWARD. A deleted path fails loudly; a NEW file
+# carrying a live claim is simply invisible. Adding a file that documents opencode
+# behaviour means adding it here — nothing can detect that omission for you.
 PIN_SURFACE = (
+    "scripts/browser-bridge/README.md",
+    "scripts/browser-bridge/reference/agent.md",
     "scripts/opencode/README.md",
     "scripts/opencode/opencode.jsonc",
     "scripts/opencode/agent/k8s.md",
@@ -666,6 +686,15 @@ PIN_SURFACE = (
 # replacing it — otherwise every surviving 1.18.x claim becomes invisible on the
 # same day the pin stops matching it.
 OPENCODE_SERIES = ("1.18",)
+# 🔴 Not prose: a re-audit showed a claim keyed to 1.17.20 (a version these hosts
+# genuinely ran) sailed through green. The comment above is advice; THIS is the
+# thing that cannot be forgotten on a minor bump.
+assert PINNED_VERSION.rsplit(".", 1)[0] in OPENCODE_SERIES, (
+    f"PINNED_VERSION={PINNED_VERSION!r} is outside OPENCODE_SERIES={OPENCODE_SERIES!r}. "
+    "APPEND the new series, do not replace the old one — replacing it makes every "
+    "surviving claim in the previous series invisible on the same day the pin stops "
+    "matching it."
+)
 _VERSION_RE = re.compile(
     r"(?<![\d.])(?:" + "|".join(re.escape(s) + r"\.\d+" for s in OPENCODE_SERIES) + r")(?![\d.])"
 )
@@ -719,6 +748,25 @@ HISTORICAL_VERSION_CLAIMS = (
      "the worked example of the `v`-prefix regex trap"),
     ("scripts/tests/test_opencode_engine.py", "The binary assertion cannot see this class",
      "this test's own docstring, naming the bump it was written for"),
+    ("scripts/tests/test_opencode_engine.py", "true at the merge-base",
+     "the scope note's account of the claims this PR falsified"),
+    ("scripts/browser-bridge/README.md", "opencode JSON envelope (verified live, opencode",
+     "dated envelope-shape observation; not re-derived"),
+    ("scripts/browser-bridge/reference/agent.md", "extension 0.2.0, `opencode`",
+     "a run record: the exact stack one measurement was taken on"),
+    # 🔴 The @-import claim, in all four places it is spelled. It was re-SPELLED to
+    # 1.18.16 on the first audit's consistency advice and a re-audit caught that:
+    # nothing re-derived it, because it needs an all-tools-denied agent making a
+    # real model call. Reverted to the version it was actually measured on. Fixing
+    # a consistency complaint by making a claim FALSE is the worse trade.
+    ("claude/opencode-addendum.md", "NOT re-derived",
+     "@-import claim — needs a live model call, never re-measured"),
+    ("nix/home.nix", "NOT re-derived since — it needs a live model call",
+     "@-import claim, second copy"),
+    ("scripts/opencode/README.md", "NOT re-derived since — it needs a live model call",
+     "@-import claim, third copy"),
+    ("scripts/tests/test_opencode_config.py", "NOT re-derived since — needs a live model call",
+     "@-import claim, fourth copy"),
 )
 
 
@@ -764,10 +812,19 @@ def test_every_historical_version_claim_still_exists():
             and any(v != PINNED_VERSION for v in _VERSION_RE.findall(ln))
         ]
         if not hits:
-            orphans.append(f"  {rel}: {snippet!r} ({reason})")
+            orphans.append(f"  {rel}: {snippet!r} ({reason}) — matches NO old-version line")
+        elif len(hits) > 1:
+            # 🔴 An exemption is for ONE line. Ten of these snippets are generic
+            # English ("RE-DERIVED", "the SAME store"), and a re-audit showed a
+            # NEW stale line reusing an existing snippet is silently exempted.
+            # Requiring exactly one match turns that hole into a failure.
+            orphans.append(
+                f"  {rel}: {snippet!r} ({reason}) — matches {len(hits)} old-version "
+                f"lines, must match exactly 1; make the snippet more specific"
+            )
     assert not orphans, (
-        "HISTORICAL_VERSION_CLAIMS entries match no old-version line any more — "
-        "the claim was updated or deleted, so drop the entry:\n" + "\n".join(orphans)
+        "HISTORICAL_VERSION_CLAIMS is a LEDGER and it no longer matches the tree "
+        "one-for-one:\n" + "\n".join(orphans)
     )
 
 

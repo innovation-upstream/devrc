@@ -154,7 +154,8 @@ spelling going ALLOW → DENY — and on **0** rows under `opencode`.
 ## Why `AGENTS.md` is generated rather than symlinked
 
 opencode does **not** expand `@`-imports inside `AGENTS.md`/`CLAUDE.md`
-(measured on v1.18.16 with an all-tools-denied agent, so no file read was
+(measured on v1.18.4, NOT re-derived since — it needs a live model call — with an
+all-tools-denied agent, so no file read was
 possible: an imported passphrase returned `NONE`, the same content inline
 returned verbatim). `~/.claude/CLAUDE.md` is ~1.5 KB consisting almost entirely
 of `@PRINCIPLES.md` / `@RULES.md` import lines — so if opencode read it, it

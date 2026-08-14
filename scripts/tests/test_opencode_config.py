@@ -6,7 +6,8 @@ WHAT IS UNDER TEST (see scripts/opencode/README.md for the measurements):
      CONCATENATING claude/PRINCIPLES.md + claude/RULES.md +
      claude/opencode-addendum.md at switch time. It has to be a concatenation
      because opencode does NOT expand `@`-imports in AGENTS.md/CLAUDE.md
-     (measured on v1.18.16 with an all-tools-denied agent, so no file read was
+     (measured on v1.18.4, NOT re-derived since — needs a live model call — with
+     an all-tools-denied agent, so no file read was
      possible: an imported passphrase returned NONE, the same content inline
      returned verbatim). ~/.claude/CLAUDE.md is ~1.5 KB of `@PRINCIPLES.md` +
      `@RULES.md` import lines, so if opencode read THAT it would receive none of
