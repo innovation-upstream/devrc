@@ -1015,6 +1015,125 @@ class TestCensus:
         assert "store root not found" in str(exc.value)
 
 
+# --------------------------------------------------------------------------- #
+# The ACTIVITY half of the census.
+#
+# 🔴 THE BUG THIS PINS IS A FALSE NEGATIVE, not a wrong number. Every count in
+# the census is a count of CREATION events, so a writer that spends a week
+# appending to existing entries moves NONE of them. MEASURED 2026-08-13: the
+# live store read 34 entries across two readings 40 minutes apart while its git
+# history showed 7 new entries and 9 appends the same day. "Watch the census" as
+# a stall detector would therefore have reported a dead store as dead and an
+# actively-worked store as dead, identically — the observable both share.
+#
+# So the load-bearing case here is `test_activity_moves_when_the_counts_do_not`.
+# The rest exist so that one cannot pass for the wrong reason.
+# --------------------------------------------------------------------------- #
+class TestCensusActivity:
+    HOUR = 3600.0
+
+    def _age(self, path: Path, hours: float, now: float) -> None:
+        stamp = now - hours * self.HOUR
+        os.utime(path, (stamp, stamp))
+
+    def test_activity_moves_when_the_counts_do_not(self, store: Path) -> None:
+        """🔴 THE POINT OF THE WHOLE FEATURE.
+
+        Append to an existing entry — create nothing — and every count must stay
+        put while the activity reading moves. If this ever fails green, the
+        census is back to being unable to tell an appending writer from a dead
+        one.
+        """
+        now = 1_800_000_000.0
+        for md in sorted(store.glob("*/*.md")):
+            self._age(md, hours=400, now=now)  # everything long stale
+        before = st.census(store, now=now)
+        assert before.touched_within[24] == 0, "fixture is not stale — the test proves nothing"
+
+        target = sorted(p for p in (store / SCOPE).glob("*.md") if p.name != "README.md")[0]
+        with target.open("a", encoding="utf-8") as fh:
+            fh.write("\n- 2026-08-13: an append, creating no new entry\n")
+        self._age(target, hours=0.5, now=now)
+
+        after = st.census(store, now=now)
+        assert after.total == before.total, "an append must not create an entry"
+        assert after.by_scope == before.by_scope
+        assert after.by_writer == before.by_writer, "created_by is creation-time attribution"
+        assert after.touched_within[24] == 1, "the append was INVISIBLE — the stall detector is inert"
+        assert after.newest_write_epoch is not None
+        assert now - after.newest_write_epoch < self.HOUR
+
+    def test_the_windows_are_not_the_same_number(self, store: Path) -> None:
+        """A 24h and a 7d window that always agree would be one window reported
+        twice, and the wider one could never distinguish a quiet day from a dead
+        fortnight."""
+        now = 1_800_000_000.0
+        mds = sorted(p for p in store.glob("*/*.md") if p.name != "README.md")
+        assert len(mds) >= 3, "fixture too small to separate the windows"
+        self._age(mds[0], hours=2, now=now)      # inside both
+        self._age(mds[1], hours=72, now=now)     # inside 7d only
+        for md in mds[2:]:
+            self._age(md, hours=900, now=now)    # outside both
+        c = st.census(store, now=now)
+        assert c.touched_within[24] == 1
+        assert c.touched_within[168] == 2
+
+    def test_the_window_boundary_is_inclusive_on_both_sides(self, store: Path) -> None:
+        """Pinned because an off-by-one here is silent: it can only ever make the
+        store look one entry quieter than it is."""
+        now = 1_800_000_000.0
+        mds = sorted(p for p in store.glob("*/*.md") if p.name != "README.md")
+        for md in mds:
+            self._age(md, hours=900, now=now)
+        self._age(mds[0], hours=24, now=now)             # exactly on the boundary
+        assert st.census(store, now=now).touched_within[24] == 1
+        self._age(mds[0], hours=24.001, now=now)         # a breath outside it
+        assert st.census(store, now=now).touched_within[24] == 0
+
+    def test_a_future_mtime_counts_as_recent_not_as_silence(self, store: Path) -> None:
+        """Clock skew and a restored file both stamp the future. Dropping those
+        from every window would read as QUIET, which is the one direction this
+        detector must never fail in."""
+        now = 1_800_000_000.0
+        mds = sorted(p for p in store.glob("*/*.md") if p.name != "README.md")
+        for md in mds:
+            self._age(md, hours=900, now=now)
+        self._age(mds[0], hours=-5, now=now)  # five hours into the future
+        c = st.census(store, now=now)
+        assert c.touched_within[24] == 1
+        assert c.newest_write_epoch is not None and c.newest_write_epoch > now
+
+    def test_a_readme_touch_is_not_activity(self, store: Path) -> None:
+        """READMEs are policy sheets, not entries. A store whose only recent
+        write is a README edit is NOT an active store, and counting it would
+        manufacture a heartbeat."""
+        now = 1_800_000_000.0
+        for md in sorted(store.glob("*/*.md")):
+            self._age(md, hours=900, now=now)
+        readme = store / SCOPE / "README.md"
+        assert readme.exists(), "fixture has no README — this test would pass vacuously"
+        self._age(readme, hours=1, now=now)
+        c = st.census(store, now=now)
+        assert c.touched_within[24] == 0
+        assert c.touched_within[168] == 0
+
+    def test_an_empty_store_reports_no_write_rather_than_a_time(self, tmp_path: Path) -> None:
+        store = tmp_path / "empty"
+        (store / "some-scope").mkdir(parents=True)
+        c = st.census(store)
+        assert c.total == 0
+        assert c.newest_write_epoch is None
+        assert "none" in st.render_census(c).lower()
+
+    def test_the_rendering_states_what_it_counts(self, store: Path) -> None:
+        """The number is 'entries touched', never 'writes' — an entry appended to
+        thirty times counts once. A reader who mistakes one for the other will
+        over-read a quiet store as dead."""
+        text = st.render_census(st.census(store))
+        assert "TOUCHED" in text
+        assert "counts once" in text
+
+
 # =============================================================================
 # The CLI.
 # =============================================================================

@@ -110,20 +110,41 @@ every entry instead of hiding 13 of 25.
   positive control and would still have been wrong** — it had no false-positive control.
   The probe itself lives only in that session's scratchpad and is **gone**; the recipe above
   is the durable form. Land it under `scripts/lib/` if this gets measured a third time.
-- **Next probe (verbatim):** dispatch an agent with an ORDINARY kickoff block — one that names
-  the doc and a next step but says nothing about the index, the hook, or measurement — then
-  parse its transcript for `subsystem_recall.py` executions. That is the uncontaminated `n=1`
-  the current result is missing, and it re-tests the dispatched-agent case `#446` failed.
+- **Observed (2026-08-13, a DISPATCHED agent, ordinary kickoff naming only the doc and
+  next-step 3):** tool call 1 = `Read` the doc, tool call 2 = **execute
+  `subsystem_recall.py --repo`**, before any task work. `Skill` calls **0**. So the kickoff
+  reaching a subagent as plain prompt text — the thing that made `#446` inert — does **not**
+  stop the read happening, because the instruction now travels in the doc the agent reads
+  anyway. Counted from the agent's own transcript, not its self-report: it *claimed* it ran
+  the index read first, and the claim happened to be true, but the claim is not the evidence.
+- 🔴 **The remaining contamination is STRUCTURAL and a staged probe cannot remove it.** This
+  doc describes the experiment, and `Read` returns the whole file — so any agent dispatched
+  here can see it may be the subject. Two exposed continuations, two fired, neither clean:
+  the first was told by its prompt, the second could read about itself. **Do not stage a
+  third and call it uncontaminated.** Measure organically instead: parse the next few real
+  continuations. The instrument recipe is above; it is three controls and twenty lines.
 
 ## Next steps (ranked)
-1. **Get the UNCONTAMINATED doc-hook sample** (probe above). The hook fired on its first
-   exposed continuation, but that session was told it was being measured. One dispatched
-   agent with an ordinary kickoff settles it; until then the adoption rate is unmeasured,
-   not zero and not one.
+1. **Get an ORGANIC doc-hook sample.** Two exposed continuations, two fired — including a
+   **dispatched agent**, the exact case `#446` failed (details above). Both are contaminated,
+   in different ways, and the remaining contamination is now structural: **this doc describes
+   the experiment, and `Read` returns the whole file**, so any agent sent here can see it may
+   be the subject. A staged probe cannot fix that. Just watch the next few real continuations
+   and parse their transcripts; do not stage another one and count it as clean.
 2. **Decide the worktree bucket** — measure the yield first (probe above). I was wrong about
    exactly this class of number today.
-3. **Watch the census.** `python3 scripts/lib/subsystem_touch.py --census`. 21 → 34 across 5
-   scopes, 12 handoff-written + 1 analyze-service-written. If it stalls, writers aren't sticking.
+3. **Watch the census — the ACTIVITY lines, not the total.** `python3
+   scripts/lib/subsystem_touch.py --census`. Coverage is 21 → 34 across 5 scopes, 12
+   handoff-written + 1 analyze-service-written. 🔴 **The total cannot detect a stall and never
+   could**: every count is a count of CREATION events, `created_by` is stamped once and never
+   updated, so a week of pure appends moves nothing. Measured 2026-08-13: the store read 34
+   across two readings 40 minutes apart while the git history showed **7 new entries and 9
+   appends that same day** across 5 scopes. Read `newest write` and `touched in the last
+   24h/7d` instead — mtime-derived, deliberately not the store's git log, because commits are
+   batched by an hourly timer and a git reading lags real writes by up to 60 minutes.
+   **The number actually worth watching is the `analyze-service` share**: 12 of 13 stamped
+   entries are `handoff`, so the store is effectively single-writer and the second writer has
+   an n=1 track record over the whole instrumented period.
 4. Investigate the `empty` cwd bucket (155 of 290 path-carrying sessions, `depth=4`); decide
    the opencode stringified-path question (`str(["a.py"])` is accepted by `to_repo_relative`;
    zero occurrences in the emitted corpus — the path exists, has never fired).

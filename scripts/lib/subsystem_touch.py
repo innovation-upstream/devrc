@@ -3381,6 +3381,10 @@ class Census:
     by_scope: Mapping[str, int]
     by_writer: Mapping[str, int]
     scopes_with_stamped_entries: Mapping[str, Mapping[str, int]]
+    # --- activity. See `census()`'s docstring for why a COUNT cannot answer
+    # "are the writers still writing", and what these can and cannot see.
+    newest_write_epoch: float | None
+    touched_within: Mapping[int, int]
 
     def to_json(self) -> dict:
         return {
@@ -3388,23 +3392,66 @@ class Census:
             "by_scope": dict(self.by_scope),
             "by_writer": dict(self.by_writer),
             "by_scope_and_writer": {k: dict(v) for k, v in self.scopes_with_stamped_entries.items()},
+            "newest_write_epoch": self.newest_write_epoch,
+            "touched_within_hours": {str(h): n for h, n in sorted(self.touched_within.items())},
         }
 
 
-def census(store_root: str | Path) -> Census:
-    """Count entries by scope and by `created_by:`. READ-ONLY.
+# The activity windows, in hours. 24h answers "is anyone writing today", 168h
+# (7d) answers "has this gone quiet" without a single idle weekend reading as
+# death.
+TOUCH_WINDOWS_HOURS = (24, 168)
+
+
+def census(store_root: str | Path, now: float | None = None) -> Census:
+    """Count entries by scope and by `created_by:`, plus write ACTIVITY. READ-ONLY.
 
     Front matter is parsed with the resolver's own `parse_front_matter`, not a
     second parser: the live corpus uses an inline flow list and hand-rolled
     quoting that PyYAML would type-coerce, and two parsers over one file format
     is the duplicated-predicate shape again.
+
+    🔴 WHY THE COUNTS ALONE CANNOT DETECT A STALL, which is what they were being
+    read for. Every count here is a count of CREATION events: an entry is one
+    row forever, and `created_by:` is stamped once at creation and never
+    updated. So a writer that spends a week APPENDING to existing entries moves
+    none of these numbers, and `total` reads exactly the same whether the store
+    is being worked hard or is dead. MEASURED 2026-08-13: the store sat at 34
+    across two readings 40 minutes apart while the git history showed 7 new
+    entries and 9 appends that same day across 5 scopes. Reading a flat total as
+    "the writers are not sticking" would have been precisely backwards.
+
+    So `newest_write_epoch` and `touched_within` are the stall detector, and the
+    counts are the coverage instrument. Do not substitute one for the other.
+
+    🔴 WHY mtime AND NOT THE STORE'S GIT LOG. The obvious source is
+    `git log` per scope repo, and it is the WRONG one: commits are batched by an
+    hourly `analyze-service-index-commit.timer`, so a git-derived reading lags
+    the actual writes by up to 60 minutes and a mid-hour check can report
+    silence during an active session. mtime is what the writer touched, when it
+    touched it. It also keeps this function subprocess-free and hermetically
+    testable with `os.utime`.
+
+    What mtime CANNOT see, and no caller should claim otherwise:
+      * HOW MANY times an entry was appended to — a file touched thirty times
+        counts once. These are "entries touched", never "writes".
+      * WHO touched it. `by_writer` is creation-time attribution and stays that.
+      * A restore. Anything that rewrites a file — `git checkout`, a `cp -a`, a
+        fresh clone of the store — stamps every file with a new mtime and will
+        read as a burst of activity that never happened.
+
+    `now` is injectable so the windows are testable without sleeping; it
+    defaults to wall clock.
     """
     store = Path(store_root)
     if not store.is_dir():
         raise StoreMissingError(f"store root not found: {store}")
+    at = time.time() if now is None else now
     by_scope: dict[str, int] = {}
     by_writer: dict[str, int] = {}
     nested: dict[str, dict[str, int]] = {}
+    newest: float | None = None
+    touched = {h: 0 for h in TOUCH_WINDOWS_HOURS}
     for scope_dir in sorted(p for p in store.iterdir() if p.is_dir()):
         scope = scope_dir.name
         by_scope.setdefault(scope, 0)
@@ -3418,15 +3465,36 @@ def census(store_root: str | Path) -> Census:
             by_scope[scope] += 1
             by_writer[writer] = by_writer.get(writer, 0) + 1
             nested[scope][writer] = nested[scope].get(writer, 0) + 1
+            mtime = md.stat().st_mtime
+            if newest is None or mtime > newest:
+                newest = mtime
+            for hours in TOUCH_WINDOWS_HOURS:
+                # A file stamped in the FUTURE (clock skew, a bad restore) is
+                # still "recent" — the alternative is silently dropping it from
+                # every window, which reads as quiet.
+                if at - mtime <= hours * 3600:
+                    touched[hours] += 1
     return Census(
         total=sum(by_scope.values()),
         by_scope=dict(sorted(by_scope.items())),
         by_writer=dict(sorted(by_writer.items())),
         scopes_with_stamped_entries={k: dict(sorted(v.items())) for k, v in sorted(nested.items())},
+        newest_write_epoch=newest,
+        touched_within=touched,
     )
 
 
-def render_census(c: Census) -> str:
+def _age_phrase(seconds: float) -> str:
+    if seconds < 0:
+        return "in the future (clock skew or a restored file)"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m ago"
+    if seconds < 86400:
+        return f"{seconds / 3600:.1f}h ago"
+    return f"{seconds / 86400:.1f}d ago"
+
+
+def render_census(c: Census, now: float | None = None) -> str:
     out = [f"subsystem-touch census: {c.total} entries"]
     out.append("  by scope:")
     for scope, n in c.by_scope.items():
@@ -3434,6 +3502,22 @@ def render_census(c: Census) -> str:
     out.append("  by created_by:")
     for writer, n in c.by_writer.items():
         out.append(f"    {writer}: {n}")
+    # 🔴 The counts above are a COVERAGE reading and CANNOT go down or sideways
+    # when a writer spends the week appending. Everything below is the stall
+    # detector; see census()'s docstring for what it can and cannot see.
+    at = time.time() if now is None else now
+    out.append("  activity (entries TOUCHED — not writes; an entry appended to 30x counts once):")
+    if c.newest_write_epoch is None:
+        out.append("    newest write: none — the store holds no entries")
+    else:
+        out.append(f"    newest write: {_age_phrase(at - c.newest_write_epoch)}")
+    for hours, n in sorted(c.touched_within.items()):
+        label = f"{hours}h" if hours < 48 else f"{hours // 24}d"
+        out.append(f"    touched in the last {label}: {n}")
+    out.append(
+        "    (mtime-derived, deliberately NOT the store's git log — commits are "
+        "batched hourly, so a git reading lags real writes by up to 60m)"
+    )
     out.append(
         "  (the reopening gate is stated in "
         "claudedocs/decision-subsystem-store-rejected-2026-08-11.md, not here)"
