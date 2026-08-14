@@ -109,7 +109,9 @@ Topic argument (optional): `$ARGUMENTS`. If empty, infer a short kebab-case topi
 
    Closed-unmerged PRs are refused by name — their files exist in no tree. `OPEN` and `MERGED` are both accepted, so a PR still in review counts. The `gh` call can fail in ways nothing local can (`gh` missing, not authenticated, network down, rate-limited, a truncated file list); every one exits non-zero with its own named line, and **none of them ever returns an empty path set**, so an empty result from this source always means the PRs genuinely listed no files.
 
-   🔴 **If the work did not land through a PR — a direct push, or a repo whose own rules force every edit into a throwaway worktree — run it over the SHAS YOU CREATED:**
+   🔴 **The discriminator is whether the work LANDED AS A PR — never whether a worktree was involved.** A throwaway worktree goes both ways and the clause below is one *example* of "no PR", not an independent trigger: in the repo holding most of this store, 144 of its last 200 mainline commits carry no `(#N)`, so `--commit` is right there; elsewhere the same worktree rule lands PRs and `--pr` is the only source that sees them. MEASURED 2026-08-14: a session read "worktree" as "use `--commit`", ran it over five of its own shas, got `no-match` on one `claudedocs/` path — the base-clone shas were just the handoff doc — and reported "a real zero, index unchanged, correctly". Real for the window read; the window was wrong. **Ask which way yours landed.** 📖 `reference/index-write.md` §3.
+
+   🔴 **If the work became a commit but NO PR — a direct push, or a branch not opened yet — run it over the SHAS YOU CREATED:**
 
    ```
    python3 /home/zach/workspace/devrc/scripts/lib/subsystem_touch.py --repo <repo> --commit <sha>[,<sha>...]
@@ -133,6 +135,8 @@ Topic argument (optional): `$ARGUMENTS`. If empty, infer a short kebab-case topi
    - **`ambiguous` listed** — report the candidates and **write nothing** for that ref. The resolver refuses to pick; so do you.
    - **`no-match` / `scope-absent`** — no existing entry was touched. `scope-absent` means this repo has no scope directory yet: the **first-entry case, not a failure**, and the reason this step exists. Nothing to append either way; go to the NO ENTRY clause below.
    - **`looked-at-nothing`** — say so plainly and write nothing. This is *not* "nothing touched an entry": no path was examined at all. Never report the two as the same result.
+
+   🔴 **On either dead end the tool now prints a `ROUTE OUT` block naming the windows it did NOT read** — read it before concluding "a real zero". A zero is a fact about the window, and the four windows are blind in different directions; the block excludes the source that just failed, so every line in it is a move you have not made. It appears on `looked-at-nothing` and `no-match` only, never on a resolved run.
 
    **Separately, and independently of `status=`: if a `NO ENTRY` block is printed, consider a new entry.** It appears alongside `resolved` too — a session normally touches a known subsystem *and* an unrecorded one, and treating nominations as a `no-match`-only concern is what would stop entries ever accruing in a repo that already has one. Pick **at most one** nomination that is a real durable subsystem, or none — they are candidates, not answers, and rejecting all of them is a normal outcome. `--template <slug>` prints the entry to write — identity front matter (`scope`, `sensitivity: client-confidential`, `created_by: handoff`) plus `## What it is` and `## Pointers`. **Do not demand the full schema** — a thin entry that exists beats a rich one that doesn't. Uncomment the template's `aliases:` line if the subsystem is spelled more than one way, in particular the `test_<slug>` stem: matching is exact, so without it a module and its own test count as one path and stay under the threshold forever.
 

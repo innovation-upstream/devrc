@@ -3117,6 +3117,105 @@ def new_entry_template(slug: str, scope: str, *, today: str) -> str:
 
 
 # --- Rendering -----------------------------------------------------------------
+# 🔴 THE ROUTE OUT OF A DEAD END. A window that resolved nothing is a fact about
+# THE WINDOW READ, never about the session — and the four windows are blind in
+# different directions, so the agent's next move is to read a different one. The
+# tool knows which one it just ran and the alternatives are a closed set, so it
+# can say this deterministically instead of leaving the skill to describe it in
+# prose and the agent to remember at the one moment it is being told "no".
+#
+# MEASURED, 2026-08-14, the incident this exists for: a session in a repo whose
+# rules force every edit into a throwaway worktree got `looked-at-nothing` from
+# `--session` (0 paths under the session cwd, 12 outside it — structural there,
+# not occasional), correctly fell through to `--commit` over the shas it had
+# made, and got `no-match` over ONE `claudedocs/` path from five commits. It
+# reported that as "a real zero, index unchanged, correctly". The zero was real
+# for the window read and the window was the wrong one: that session's work was
+# committed inside the worktree and landed as a PR, so the base-clone shas were
+# just the handoff doc. `--pr` — the only source that sees it — was never tried,
+# and nothing on screen named it. 🔴 The trigger was reading "worktree" as "use
+# `--commit`"; the real discriminator is whether the work LANDED AS A PR, and a
+# worktree goes both ways (in the repo holding most of this store, 144 of its
+# last 200 mainline commits carry no `(#N)`, so `--commit` IS right there).
+# Which is why this block names every unread window rather than picking one.
+#
+# The mapping is deliberately NOT a recommendation engine. It states which
+# windows exist and which was read; choosing among them stays with the agent,
+# which is why every line carries what that source uniquely sees rather than a
+# score.
+# 🔴 Keyed by SOURCE, not by matching the flag's spelling. An earlier draft
+# excluded the used source by comparing the first token of two display strings,
+# which silently failed for the git window (`(git, the default)` vs `(no flag)`
+# share no prefix) — so the git window would have suggested itself. A window maps
+# to a source; a source has one row. No string arithmetic.
+_WINDOW_SOURCE: dict[str, str] = {
+    "session": "session",
+    "session-absolute": "session",
+    "branch": "git",
+    "worktree": "git",
+    "pull-requests": "pr",
+    "commits": "commit",
+    # `supplied` is the in-process/test entry point and belongs to no flag, so
+    # it excludes nothing: all four real windows genuinely are untried.
+    "supplied": "",
+}
+
+# (source, flag, what it UNIQUELY sees). The `why` is what the source can see
+# that the others cannot — never a score, because choosing among them is the
+# agent's call and this block is a statement of fact, not a recommendation.
+_ROUTE_OUT: tuple[tuple[str, str, str], ...] = (
+    (
+        "pr",
+        "--pr <n>[,<n>...]",
+        "the only source that sees a SUBAGENT's work, and the only one that "
+        "sees work committed inside a throwaway worktree AND landed as a PR",
+    ),
+    (
+        "commit",
+        "--commit <sha>[,<sha>...]",
+        "work that became a commit but no PR — a direct push, or a branch not "
+        "opened yet",
+    ),
+    (
+        "session",
+        "--session <uuid>",
+        "what THIS session's own turns edited, independent of git — blind to a "
+        "subagent's work and to anything outside the session cwd",
+    ),
+    (
+        "git",
+        "(no flag)",
+        "the git branch/worktree window — blind to work already merged",
+    ),
+)
+
+_SOURCE_FLAG: dict[str, str] = {src: flag for src, flag, _ in _ROUTE_OUT}
+
+
+def render_route_out(window: str) -> list[str]:
+    """The untried windows, named, for a run that resolved nothing.
+
+    Excludes the source that produced THIS window: re-running the one that just
+    came back empty is the single suggestion that cannot help, and printing it
+    would make the block read as boilerplate rather than as a route.
+    """
+    used = _WINDOW_SOURCE.get(window, "")
+    read = _SOURCE_FLAG.get(used, window)
+    lines = [
+        "",
+        "ROUTE OUT — a dead end is a fact about THE WINDOW READ, not about the "
+        "session.",
+        f"  read: {read}.  The other windows were NOT read:",
+    ]
+    for src, flag, why in _ROUTE_OUT:
+        if src == used:
+            continue
+        lines.append(f"    {flag:<26} {why}")
+    lines.append(
+        "  Run at most ONE more, on its own — the windows never compose (see "
+        "the skill: run it twice, never merge the two path sets)."
+    )
+    return lines
 
 
 def render_text(report: TouchReport) -> str:
@@ -3150,6 +3249,7 @@ def render_text(report: TouchReport) -> str:
             "'nothing touched an entry'; no path was examined at all."
         )
         out.append("Propose no write. Say which window was empty and why.")
+        out.extend(render_route_out(src.window))
         return "\n".join(out)
 
     if report.status == "scope-absent":
@@ -3257,6 +3357,7 @@ def render_text(report: TouchReport) -> str:
         else:
             out.append(f"NOTHING TO PROPOSE — {examined}; see the accounting above.")
         out.append("Propose no write.")
+        out.extend(render_route_out(src.window))
 
     return "\n".join(out)
 
