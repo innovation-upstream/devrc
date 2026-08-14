@@ -7900,3 +7900,131 @@ class TestRouteOutOfADeadEnd:
         # every mapped source (bar the deliberate blank) has exactly one row
         mapped = {s for s in st._WINDOW_SOURCE.values() if s}
         assert mapped == {src for src, _, _ in st._ROUTE_OUT}
+
+
+# --------------------------------------------------------------------------- #
+# The SECOND route out: the lesson is real and the INDEX is the wrong home.
+#
+# 🔴 THE BUG THIS PINS IS SILENT KNOWLEDGE LOSS, not a wrong number. MEASURED
+# 2026-08-14: a session correctly declined both windows, correctly concluded its
+# gotchas belonged in a skill, named `.claude/skills/pyroscope/SKILL.md` — a skill
+# that DOES NOT EXIST, while `obs-read` already owns Pyroscope — and stopped. The
+# handoff skill names a skill file as a legitimate alternative home, but only as a
+# REASON TO DECLINE; nothing routed the lesson there, so it ended as prose in a
+# transcript.
+# --------------------------------------------------------------------------- #
+class TestSkillHomes:
+    def _root(self, tmp_path: Path) -> Path:
+        """A fixture catalogue with PAIRWISE-DISTINCT domains, so a hit cannot be
+        right by accident and a mis-wired matcher cannot look correct."""
+        root = tmp_path / "skills"
+        for name, desc in [
+            ("obs-read", "Query Prometheus/Loki/Pyroscope on a named cluster."),
+            ("mailbox", "The self-hosted mail inbox on the homelab cluster."),
+            ("bar", "The i3status-rust status bar and its poller."),
+            ("no-frontmatter", None),
+        ]:
+            d = root / name
+            d.mkdir(parents=True)
+            body = "# body\n" if desc is None else f"---\nname: {name}\ndescription: {desc}\n---\n"
+            (d / "SKILL.md").write_text(body, encoding="utf-8")
+        (root / "not-a-skill").mkdir()  # a dir with no SKILL.md must be skipped
+        return root
+
+    def test_the_real_incident_resolves_to_the_skill_that_already_owns_it(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 THE CASE THE FEATURE EXISTS FOR. The agent invented a `pyroscope`
+        skill; the tool must name the one that already owns the domain."""
+        root = self._root(tmp_path)
+        hits = st.skill_homes(["pyroscope"], skills_root=root)
+        assert hits == (("obs-read", "pyroscope"),)
+
+    def test_a_directory_component_is_a_candidate_term(self, tmp_path: Path) -> None:
+        """The domain usually lives in a DIRECTORY, not a filename. A basename-only
+        tokeniser dropped `pyroscope` from `src/pyroscope/query.go` entirely —
+        not ranked low, absent."""
+        terms = st._terms_from(["src/pyroscope/query.go"], "homelab-talos")
+        assert "pyroscope" in terms
+        assert "homelab" in terms and "talos" in terms
+
+    def test_the_most_DISCRIMINATING_term_ranks_first(self, tmp_path: Path) -> None:
+        """🔴 Unranked, the one right answer drowns.
+
+        Both `pyroscope` and `homelab` match exactly ONE fixture skill, so this
+        pins the TIE-BREAK: at equal breadth the longer, more specific term wins.
+        Plain alphabetical ordering put `mailbox` first and obs-read second — the
+        right answer losing a coin flip. Real-catalogue breadth differs; the tie
+        is the case that needs pinning because it is the one that is arbitrary.
+        """
+        root = self._root(tmp_path)
+        hits = st.render_skill_homes(
+            ["src/pyroscope/x.go"], "homelab-cluster", skills_root=root
+        )
+        rows = [ln for ln in hits if "SKILL.md" in ln]
+        assert rows, hits
+        assert "obs-read" in rows[0], rows
+        assert "pyroscope" in rows[0]
+
+    def test_matching_is_name_plus_DESCRIPTION_only_never_the_body(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 The description IS the routing surface — it is what the always-on
+        listing carries. Matching bodies returns half the catalogue for a common
+        word, and noise is what makes this block ignorable: measured on the real
+        catalogue, two generic terms pushed the one right answer out of a cap of
+        four. A surviving mutant that widened the haystack to the body stayed
+        green until this test existed.
+        """
+        root = self._root(tmp_path)
+        (root / "bar" / "SKILL.md").write_text(
+            "---\nname: bar\ndescription: The i3status-rust status bar and its poller.\n---\n"
+            "\n# body\nThis paragraph mentions pyroscope at length, in the BODY only.\n",
+            encoding="utf-8",
+        )
+        hits = st.skill_homes(["pyroscope"], skills_root=root)
+        assert hits == (("obs-read", "pyroscope"),), (
+            f"a body-only mention was treated as ownership: {hits!r}"
+        )
+
+    def test_an_absent_skills_root_is_ordinary_not_an_error(self, tmp_path: Path) -> None:
+        """A host without skills deployed must still get its dead-end report; an
+        exception here would turn a helpful extra into a total failure."""
+        assert st.skill_catalogue(tmp_path / "nope") == ()
+        lines = st.render_skill_homes(["a/b.py"], "s", skills_root=tmp_path / "nope")
+        assert any("no skill matched" in ln for ln in lines)
+
+    def test_a_malformed_skill_degrades_and_does_not_kill_the_catalogue(
+        self, tmp_path: Path
+    ) -> None:
+        """Same degrade-don't-die rule the reader learned from a wrapped
+        `aliases:`. The three good skills must survive the bad one."""
+        root = self._root(tmp_path)
+        (root / "obs-read" / "SKILL.md").write_text(
+            "---\naliases: [a,\n b]\nname: obs-read\ndescription: Pyroscope.\n---\n",
+            encoding="utf-8",
+        )
+        names = {n for n, _ in st.skill_catalogue(root)}
+        assert {"mailbox", "bar", "no-frontmatter"} <= names
+
+    def test_a_miss_says_so_and_still_hands_over_the_search(self, tmp_path: Path) -> None:
+        """🔴 An empty result must NOT read as 'no skill owns this' — the tool
+        cannot see what the session was ABOUT, and saying nothing would let a
+        miss discharge the obligation exactly like the incident did."""
+        root = self._root(tmp_path)
+        lines = st.render_skill_homes(["zzz/kryptonite.md"], "zzz", skills_root=root)
+        body = "\n".join(lines)
+        assert "no skill matched" in body
+        assert "grep -ril" in body, "the fallback search command is the whole point"
+        assert "UNFILED" in body
+
+    def test_the_block_says_where_to_EDIT_not_just_which_skill(
+        self, tmp_path: Path
+    ) -> None:
+        """Naming `~/.claude/skills/...` as the edit target sends the agent at a
+        read-only store symlink; and a NEW file the flake never sees is a silent
+        no-op. Both are named in the block."""
+        body = "\n".join(st.render_skill_homes(["a/pyroscope.md"], "s",
+                                               skills_root=self._root(tmp_path)))
+        assert "claude/skills/" in body
+        assert "git add" in body
