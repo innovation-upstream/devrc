@@ -186,9 +186,9 @@ slot-conflict drop does and does not still catch, and the field ledger:
 Measured 2026-08-12 on the shipped default view: **0 rows with an age, 0 with a session id,
 no `stale` bucket at all** — and nothing in the output said so.
 
-A devrc-owned Claude hook now writes one record per tmux pane into `~/.cache/agent-ledger/`,
-and the script reads each host's ledger with one `sh -c` (locally and over SSH). Read
-`report["ledger"]`, never just the row:
+Two writers now record one file per tmux PANE into `~/.cache/agent-ledger/` — a devrc-owned
+Claude hook, and an opencode plugin — and the script reads each host's ledger with one `sh -c`
+(locally and over SSH). Read `report["ledger"]`, never just the row:
 
 - `status` — `ok` / `partial` (some host did not answer) / `error` / `skipped`. Only `ok`
   and `partial` publish integers; the rest are `null`, never `0`.
@@ -198,8 +198,13 @@ and the script reads each host's ledger with one `sh -c` (locally and over SSH).
 - `summary.rows_with_age` / `rows_with_session_id` / `age_sources` — the meter. A `stale=0`
   bucket means *either* nothing is stale *or* nothing has an age; only this tells them apart.
 
-Row fields: `age_secs`, `age_source` (`ledger` / `fuzzyclaw` / `null` — which writer
-answered; the ledger wins), `ledger` (the joined record), `claude_session_id`.
+Row fields: `age_secs`, `age_source` (`ledger` / `fuzzyclaw` / `null` — which SOURCE answered;
+the ledger wins), `runtime` (`claude` / `opencode` / `null` — which AGENT recorded it), `ledger`
+(the joined record), `claude_session_id`.
+
+🔴 `runtime` is not `claude`. The `claude` column is `pane_current_command =~ /claude/`, so an
+opencode window reads `shell` — an agent counted as a bare prompt in every bucket. `runtime` is
+what the row says it actually is.
 
 🔴 **A null age is not age 0** — it means no writer has recorded that window. A session that
 has not taken a turn since the hook was registered has none yet.

@@ -2561,9 +2561,17 @@ def render_ledger(led) -> list:
             ("  [%d unverified generation]" % h["generation_unchecked"]
              if h.get("generation_unchecked") else "")))
     for c in (led.get("conflicts") or []):
+        # 🔴 THE RUNTIMES, not just the session ids. An audit found this line
+        # printing `[7f3a-uuid-claude, ses_9911]` — "two UUIDs a reader cannot
+        # act on", which is the exact phrase the change adding `runtimes` used
+        # to justify itself while the renderer still ignored the field. The
+        # commonest real conflict is cross-runtime (a pane that ran Claude and
+        # later opencode holds one record each, both live, both naming that
+        # window), and naming them is what turns an alarming ⚠ into a fact.
         out.append("  ⚠ LEDGER CONFLICT {} {} claimed by {} record(s) "
-                   "[{}] — NEWEST wins".format(
+                   "[{}] — sessions [{}] — NEWEST wins".format(
                        c.get("host"), c.get("window_id"), c.get("claimants"),
+                       ", ".join(c.get("runtimes") or ["unknown runtime"]),
                        ", ".join(c.get("session_ids") or [])))
     return out
 

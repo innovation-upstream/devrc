@@ -698,7 +698,13 @@ def main(argv=None) -> int:
         rec = build_record(
             runtime=args.runtime, session_id=args.session,
             last_activity_ts=now_iso(), window_id=wid, pane_id=pane,
-            tmux_pid=pid, transcript_path=args.transcript_path)
+            tmux_pid=pid, transcript_path=args.transcript_path,
+            # Same source the Claude hook uses. Without it writer 2's records
+            # carried `host: null` while writer 1's did not — an asymmetry no
+            # consumer reads today (the READER attributes a host by which
+            # machine it read from, which is strictly more reliable), but one
+            # that made the record shape differ by writer for no reason.
+            host=(os.environ.get("ACTIVITY_HOST") or "").strip() or None)
         out = write_record(rec, directory=args.directory,
                            throttle_secs=args.throttle)
         if args.prune:

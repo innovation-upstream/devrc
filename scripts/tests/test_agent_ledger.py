@@ -729,12 +729,24 @@ def test_the_CLI_throttles_on_a_repeat_from_the_SAME_session(tmp_path):
     first = _cli("--runtime", "opencode", "--session", "oc-3", env=env,
                  directory=tmp_path)
     assert first.returncode == 0
-    before = open(os.path.join(str(tmp_path), "opencode-p77.json")).read()
+    path = os.path.join(str(tmp_path), "opencode-p77.json")
+    before = os.stat(path)
+
     second = _cli("--runtime", "opencode", "--session", "oc-3", env=env,
                   directory=tmp_path)
     assert second.returncode == 0
-    assert open(os.path.join(str(tmp_path),
-                             "opencode-p77.json")).read() == before
+    after = os.stat(path)
+
+    # 🔴 INODE AND mtime, NOT CONTENT — and an audit is why. This compared the
+    # file's BYTES, and `now_iso()` has one-second resolution, so two
+    # back-to-back spawns write byte-identical records whether or not the
+    # throttle fires. Proof it was vacuous: setting DEFAULT_THROTTLE to 0 —
+    # throttling fully disabled — left the old assertion passing. `write_record`
+    # replaces via `os.replace`, so a write that DID happen shows a new inode
+    # even when the bytes match.
+    assert (after.st_ino, after.st_mtime_ns) == (before.st_ino,
+                                                 before.st_mtime_ns), (
+        "the record was rewritten — the throttle did not fire")
 
 
 def test_TWO_RUNTIMES_in_one_pane_do_not_overwrite_each_other(tmp_path):
@@ -782,3 +794,39 @@ def test_tmux_context_lives_HERE_so_both_writers_share_one_resolver():
     assert AL.tmux_context(runner=lambda a: called.append(a),
                            pane="") == (None, None)
     assert called == []
+
+
+
+def test_the_CLI_exit_code_distinguishes_a_FAILED_write(tmp_path):
+    """🔴 The `return 0` mutant survived: the only test reaching a non-zero exit
+    went through the EXCEPTION path, so the write-failure branch was unpinned.
+    A directory that cannot be created is the reachable case."""
+    blocker = tmp_path / "blocked"
+    blocker.write_text("a FILE where the ledger directory should be\n")
+    proc = _cli("--runtime", "opencode", "--session", "oc-x",
+                directory=blocker)
+    # 🔴 Exit 1 with EMPTY stderr, which is the discriminant: `write_record`
+    # catches the OSError itself and returns `reason: "error"`, so this is the
+    # write-failure branch and NOT the exception branch the other test covers.
+    # That distinction is the whole point — `return 0` survived precisely
+    # because only the exception path was ever reached.
+    assert proc.returncode == 1
+    assert proc.stderr == ""
+    assert blocker.read_text().startswith("a FILE")
+
+
+def test_the_CLI_sets_the_host_like_writer_1_does(tmp_path):
+    """Writer 2's records carried `host: null` while writer 1's did not — an
+    asymmetry with no consumer, but no reason either. Both directions: set and
+    unset."""
+    proc = _cli("--runtime", "opencode", "--session", "oc-h",
+                env={"ACTIVITY_HOST": "laptop"}, directory=tmp_path)
+    assert proc.returncode == 0
+    rec = json.loads(open(os.path.join(str(tmp_path),
+                                       "opencode-s-oc-h.json")).read())
+    assert rec["host"] == "laptop"
+
+    _cli("--runtime", "opencode", "--session", "oc-h2", directory=tmp_path)
+    rec2 = json.loads(open(os.path.join(str(tmp_path),
+                                        "opencode-s-oc-h2.json")).read())
+    assert rec2["host"] is None

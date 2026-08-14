@@ -12,8 +12,23 @@
 // and from the reader while all three look correct — the failure the module's own
 // docstring calls out. Same shape `guard.js` uses for `guard_core.py` and
 // `activity-plugin.js` for its emit script: the JS carries arguments, never
-// structure. It costs one interpreter start (~9 ms measured) per tool call that
-// is not throttled, and that is the price of there being one definition.
+// structure.
+//
+// 🔴 THE COST, MEASURED RATHER THAN ASSUMED, and an earlier version of this
+// comment was wrong twice. It said "~9 ms per tool call that is not throttled":
+// 9 ms is a BARE interpreter start, and the throttle lives INSIDE the Python
+// process — so every `tool.execute.after` paid a full spawn, measured at
+// **24.5 ms** of synchronously blocked node event loop, on top of
+// `activity-plugin.js`'s own `execFileSync` on the same event.
+//
+// So the throttle is memoised HERE, in front of the spawn. This is the only
+// change that actually removes it: `lastWrite` holds one timestamp per session,
+// and a repeat inside the interval returns without touching the process table.
+// It is a CACHE, not logic — the Python throttle stays authoritative and is
+// still consulted on every call that gets through, so the worst a wrong memo
+// can do is skip a write the writer would have skipped anyway. Keyed on the
+// session, never on the pane, for the same reason the Python rule is: a
+// different session taking the pane over must claim it immediately.
 //
 // 🔴 `tool.execute.AFTER`, never `.before`. `.before` is where `guard.js` THROWS
 // to block a command; a second handler on that event that can fail is a way to
@@ -37,6 +52,16 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const PYTHON = process.env.DEVRC_LEDGER_PYTHON || "python3";
+
+// Must match `agent_ledger.DEFAULT_THROTTLE`. It is a memo in front of the real
+// rule rather than a second copy of it: too LOW only costs a spawn the Python
+// side then skips, and too HIGH is bounded by the same interval the writer uses.
+const THROTTLE_MS = 30 * 1000;
+
+// sessionID -> Date.now() of the last spawn. Module scope, so it lives as long
+// as the opencode process — which is exactly the window in which repeat tool
+// calls happen.
+const lastWrite = new Map();
 
 function moduleRelativeModule() {
   try {
@@ -73,6 +98,12 @@ export const LedgerPlugin = async () => ({
       // would be the hollow one `build_record` refuses. Skip rather than write it.
       if (typeof session !== "string" || session === "") return;
 
+      // 🔴 BEFORE `resolveModule()` and before the spawn — the whole point.
+      // A `stat` and a Map lookup instead of a 24.5 ms subprocess.
+      const now = Date.now();
+      const previous = lastWrite.get(session);
+      if (previous !== undefined && now - previous < THROTTLE_MS) return;
+
       const mod = resolveModule();
       // 🔴 Absent module => SILENTLY skip. Unlike the guard, which refuses the
       // command rather than run it unchecked, a missing ledger writer is not a
@@ -87,9 +118,19 @@ export const LedgerPlugin = async () => ({
           "--write",
           "--runtime", "opencode",
           "--session", session,
+          // Reaping is bounded here BECAUSE of the memo above: this runs at
+          // most once per session per interval, not once per tool call. Writer
+          // 1 prunes on its session boundaries; without this a host running
+          // opencode and NOT Claude Code would grow the ledger without bound —
+          // the fuzzyclaw rot (401 files, ~90% stale) the module cites.
+          "--prune",
         ],
         { stdio: "ignore", timeout: 5000, shell: false },
       );
+      // Recorded only on a spawn that RETURNED. A throw leaves the map
+      // untouched, so a transient failure retries on the next call rather than
+      // being memoised into a 30 s hole.
+      lastWrite.set(session, now);
     } catch {
       // swallow — a ledger write must never fail a tool call
     }

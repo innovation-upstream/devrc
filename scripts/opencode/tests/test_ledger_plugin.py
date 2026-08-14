@@ -62,6 +62,23 @@ def fire(session="oc-sess", env=None, tool="bash"):
     return run_node(code, env=env)
 
 
+def _no_plugin_error(stderr: str) -> bool:
+    """🔴 ASSERTS THE ABSENCE OF A THROW, not an empty stderr.
+
+    `stderr == ""` is a property of the ENVIRONMENT: node picks ESM-vs-CJS by
+    walking up from the module's ABSOLUTE path looking for a `package.json`, so
+    a checkout placed under any directory with a typeless one emits
+    `MODULE_TYPELESS_PACKAGE_JSON` and every such assertion fails — an audit hit
+    exactly that. devrc has none above `scripts/` and CI runs from
+    `/nix/store/...-source`, so it passes today for a reason that has nothing to
+    do with this plugin. What the tests actually mean is "the hook did not
+    throw", which is what this checks.
+    """
+    lowered = stderr.lower()
+    return not any(marker in lowered for marker in
+                   ("error", "throw", "traceback", "unhandled"))
+
+
 def ledger_env(tmp_path, **extra):
     e = {"DEVRC_LEDGER_MODULE": str(MODULE_PY),
          "HOME": str(tmp_path)}
@@ -165,7 +182,8 @@ def test_a_missing_or_non_string_session_writes_NOTHING_and_is_silent(
     """No session id means no ClickHouse join and no row identity — the hollow
     record `build_record` refuses. Skip, silently."""
     proc = fire(session=session, env=ledger_env(tmp_path))
-    assert proc.returncode == 0 and proc.stderr == ""
+    assert proc.returncode == 0
+    assert _no_plugin_error(proc.stderr), proc.stderr
     assert not (tmp_path / ".cache" / "agent-ledger").exists()
 
 
@@ -176,7 +194,8 @@ def test_an_ABSENT_module_is_survived_silently(tmp_path):
     has recorded this window"."""
     env = ledger_env(tmp_path, DEVRC_LEDGER_MODULE=str(tmp_path / "nope.py"))
     proc = fire(env=env)
-    assert proc.returncode == 0 and proc.stderr == ""
+    assert proc.returncode == 0
+    assert _no_plugin_error(proc.stderr), proc.stderr
 
 
 def test_a_FAILING_python_does_not_fail_the_tool_call(tmp_path):
@@ -188,14 +207,16 @@ def test_a_FAILING_python_does_not_fail_the_tool_call(tmp_path):
     env = ledger_env(tmp_path,
                      DEVRC_LEDGER_PYTHON=str(bindir / "python3"))
     proc = fire(env=env)
-    assert proc.returncode == 0 and proc.stderr == ""
+    assert proc.returncode == 0
+    assert _no_plugin_error(proc.stderr), proc.stderr
 
 
 def test_a_MISSING_interpreter_does_not_fail_the_tool_call(tmp_path):
     env = ledger_env(tmp_path,
                      DEVRC_LEDGER_PYTHON="/nonexistent/python-that-is-not-here")
     proc = fire(env=env)
-    assert proc.returncode == 0 and proc.stderr == ""
+    assert proc.returncode == 0
+    assert _no_plugin_error(proc.stderr), proc.stderr
 
 
 def test_the_kill_switch_writes_nothing(tmp_path):
@@ -258,3 +279,103 @@ def test_the_plugin_carries_NO_record_schema_of_its_own():
     js = PLUGIN_JS.read_text()
     for field in ("last_activity_ts", "tmux_pid", "window_id", "schema"):
         assert field not in js, field
+
+
+# =========================================================================== #
+# the spawn memo — the throttle in front of the subprocess
+# =========================================================================== #
+def _counting_python(bindir, log):
+    """A stub `python3` that records each invocation."""
+    return str(M.write_exec(bindir / "python3",
+                            'echo "$@" >> %s\n' % json.dumps(str(log))))
+
+
+def test_a_REPEAT_call_inside_the_interval_never_SPAWNS(tmp_path):
+    """🔴 THE FIX FOR THE COST, and it must be observed as a MISSING PROCESS
+    rather than a missing record. The throttle lives inside Python, so before
+    this every `tool.execute.after` paid a full interpreter start — measured
+    24.5 ms of synchronously blocked node event loop per opencode tool call, on
+    top of activity-plugin.js's own. The memo in front of the spawn is the only
+    change that removes it.
+
+    KILLS: deleting the memo, or keying it on anything that repeats.
+    """
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    log = tmp_path / "spawns.log"
+    env = ledger_env(tmp_path, DEVRC_LEDGER_PYTHON=_counting_python(bindir, log))
+
+    code = (
+        'import { LedgerPlugin } from %s;\n'
+        'const p = await LedgerPlugin();\n'
+        'const ev = { tool: "bash", sessionID: "memo-1", callID: "c" };\n'
+        'for (let i = 0; i < 5; i++) await p["tool.execute.after"](ev, {});\n'
+        'console.log("OK");\n'
+    ) % json.dumps(str(PLUGIN_JS))
+    proc = run_node(code, env=env)
+    assert proc.returncode == 0, proc.stderr
+    assert log.read_text().count("\n") == 1, (
+        "five tool calls spawned python more than once: " + log.read_text())
+
+
+def test_a_DIFFERENT_session_is_never_memoised_away(tmp_path):
+    """🔴 The asymmetry the Python rule already has, mirrored: a different
+    session taking the pane over must claim it IMMEDIATELY, or the departed
+    session's id keeps winning the join for a full interval. KILLS: keying the
+    memo on the pane, or on nothing."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    log = tmp_path / "spawns.log"
+    env = ledger_env(tmp_path, DEVRC_LEDGER_PYTHON=_counting_python(bindir, log))
+
+    code = (
+        'import { LedgerPlugin } from %s;\n'
+        'const p = await LedgerPlugin();\n'
+        'for (const s of ["a", "b", "c"]) {\n'
+        '  await p["tool.execute.after"]({ tool: "bash", sessionID: s }, {});\n'
+        '}\n'
+        'console.log("OK");\n'
+    ) % json.dumps(str(PLUGIN_JS))
+    proc = run_node(code, env=env)
+    assert proc.returncode == 0, proc.stderr
+    assert log.read_text().count("\n") == 3, log.read_text()
+
+
+def test_a_FAILED_spawn_is_not_memoised_into_a_hole(tmp_path):
+    """The memo is set only after a spawn that RETURNED. A throw must leave it
+    untouched, so a transient failure retries on the next call rather than
+    suppressing writes for a full interval."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    log = tmp_path / "spawns.log"
+    M.write_exec(bindir / "python3", 'echo "$@" >> %s\nexit 9\n'
+                 % json.dumps(str(log)))
+    env = ledger_env(tmp_path,
+                     DEVRC_LEDGER_PYTHON=str(bindir / "python3"))
+    code = (
+        'import { LedgerPlugin } from %s;\n'
+        'const p = await LedgerPlugin();\n'
+        'const ev = { tool: "bash", sessionID: "fail-1", callID: "c" };\n'
+        'await p["tool.execute.after"](ev, {});\n'
+        'await p["tool.execute.after"](ev, {});\n'
+        'console.log("OK");\n'
+    ) % json.dumps(str(PLUGIN_JS))
+    proc = run_node(code, env=env)
+    assert proc.returncode == 0, proc.stderr
+    assert log.read_text().count("\n") == 2, (
+        "a failed spawn was memoised: " + log.read_text())
+
+
+def test_the_plugin_asks_the_writer_to_PRUNE(tmp_path):
+    """🔴 Writer 1 prunes on its session boundaries; writer 2 passed no
+    `--prune`, so a host running opencode and NOT Claude Code would grow the
+    ledger without bound — the fuzzyclaw rot (401 files, ~90% stale) the module
+    cites as its own motivation. Bounded by the memo: once per session per
+    interval, not once per tool call."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    log = tmp_path / "spawns.log"
+    env = ledger_env(tmp_path, DEVRC_LEDGER_PYTHON=_counting_python(bindir, log))
+    proc = fire(session="prune-1", env=env)
+    assert proc.returncode == 0, proc.stderr
+    assert "--prune" in log.read_text()
