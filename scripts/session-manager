@@ -2831,7 +2831,7 @@ def main(argv=None):
             stays on stderr, so a JSON reader is unaffected either way.
             """
             if args.json:
-                print(json.dumps(res, indent=2))
+                print(json.dumps(res, separators=(",", ":")))
 
         if not res["reachable"]:
             # The host said nothing at all. This is the unmeasured case.
@@ -2862,7 +2862,7 @@ def main(argv=None):
             _tail_json()
             return EXIT_USAGE
         if args.json:
-            print(json.dumps(res, indent=2))
+            print(json.dumps(res, separators=(",", ":")))
         else:
             sys.stdout.write(res["text"])
             # The defaulted host is recorded in the JSON but was INVISIBLE in
@@ -2898,7 +2898,18 @@ def main(argv=None):
                                                    use_ch=not args.no_ch)
 
     if args.json:
-        print(json.dumps(report, indent=2, sort_keys=True, default=str))
+        # 🔴 COMPACT, NOT INDENTED, and the reason is measured. The ONLY
+        # consumer of this tool is an agent — 0 interactive shell invocations
+        # in 30 days against 55 agent references (spec §7), confirmed by the
+        # operator 2026-08-14 — and an agent pays for output by the TOKEN.
+        # Measured on a 75-row scan: 86,066 B indented against 60,631 B
+        # compact, so 29% of every payload was whitespace formatting for a
+        # reader who does not exist. That is ~6,400 tokens per call.
+        # `sort_keys` STAYS: it costs nothing and makes two scans diffable.
+        # A human who wants it readable can pipe it through `jq .`, which is
+        # what they would do anyway.
+        print(json.dumps(report, sort_keys=True, default=str,
+                         separators=(",", ":")))
     else:
         print(render_table(report))
         if "session_history" in report:
