@@ -1717,6 +1717,8 @@ def test_json_golden_schema_and_values():
 
     row = wb["windows"][0]
     assert row == {
+        # the entity axis — `tmux` here because `fold_windows` folds panes
+        "kind": "tmux",
         "host": "workbench",
         "session": "scratch7",
         "window_index": "3",
@@ -1838,6 +1840,11 @@ def test_json_golden_schema_and_values():
         # it. Pinned literally so a regression that re-zeroes the ages cannot
         # pass by leaving some unrelated total unchanged.
         "age_sources": {"fuzzyclaw": 1, "none": 2},
+        # The entity axis, DERIVED from the rows. All three are tmux. Pinned
+        # literally for the same reason as `age_sources`: it is the number that
+        # moves when a row is built without a `kind`, and `total_sessions`
+        # alone would not.
+        "kind": {"tmux": 3},
         "rows_with_age": 1,
         "rows_with_session_id": 1,
     }
@@ -2749,12 +2756,23 @@ def test_summarize_counts_every_status_bucket():
     s = sm.summarize(report)
     assert sum(s["status"][b]["total"] for b in sm.STATUS_BUCKETS) \
         == s["total_sessions"]
-    # ...and each bucket's halves account for its own total, so a row cannot be
-    # counted in a bucket without also being counted as claude or as shell.
+    # ...and each bucket's CLASS KEYS account for its own total, so a row cannot
+    # be counted in a bucket without also being counted in some class.
+    #
+    # 🔴 Summed over whatever class keys the bucket actually has, NOT over
+    # `claude + shell` by name. Naming the two would have quietly stopped being
+    # an accounting check the moment a third class appeared: the sum would still
+    # be computed, still be compared, and simply omit the new class from both
+    # sides of nothing. This fixture is tmux-only, so the classes here ARE
+    # claude/shell — the generality is what stops the guard rotting when they
+    # are not (see the cluster tests in §kind).
     for b in sm.STATUS_BUCKETS:
         cell = s["status"][b]
-        assert cell["claude"] + cell["shell"] == cell["total"]
+        assert sum(v for k, v in cell.items() if k != "total") == cell["total"]
     assert s["claude"] + s["shell"] == s["total_sessions"]
+    # This fixture really is tmux-only — stated, so the line above is read as
+    # "no cluster rows here", not as a claim that the two always sum.
+    assert s["kind"] == {"tmux": s["total_sessions"]}
 
 
 # =========================================================================== #
@@ -3888,7 +3906,7 @@ def test_the_caveats_are_in_the_json_as_structured_fields_not_prose():
     string a consumer would have to parse."""
     cav = mix_gather()["caveats"]
     assert set(cav) == {"claude_detection", "fuzzyclaw_scope", "ledger_scope",
-                        "waiting_signal"}
+                        "waiting_signal", "kind_scope"}
     det = cav["claude_detection"]
     assert det["method"] == "pane_current_command_regex"
     assert det["pattern"] == sm.CLAUDE_RE.pattern == "claude"
@@ -5270,6 +5288,7 @@ def test_the_row_FIELD_LEDGER_fails_when_it_grows_or_shrinks():
     checked."""
     row = base_gather()["hosts"]["workbench"]["windows"][0]
     expected = {
+        "kind",
         "host", "session", "window_index", "window_id", "window_name",
         "codename", "label", "label_source", "hotkey", "pane_id", "path",
         "command",
@@ -5833,6 +5852,7 @@ def test_the_LEAN_row_field_ledger_fails_when_it_grows_or_shrinks():
     row = rep["hosts"]["workbench"]["windows"][0]
     assert set(row) == set(sm.LEAN_ROW_FIELDS)
     assert set(sm.LEAN_ROW_FIELDS) == {
+        "kind",
         "host", "session", "window_index", "label", "label_source", "hotkey",
         "path", "task", "runtime", "claude", "busy", "status", "age_secs",
         "age_source",
@@ -6267,3 +6287,238 @@ def test_a_CROSS_RUNTIME_conflict_names_the_runtimes_in_the_TABLE():
     assert "claude, opencode" in text
     # the session ids stay too — they are how you find the actual sessions
     assert "7f3a-claude" in text and "ses_9911" in text
+
+
+# =========================================================================== #
+# §kind — THE ENTITY AXIS
+#
+# `kind` says WHAT a row is: a tmux pane (`tmux`) or a dispatch with no pane
+# (`cluster`). Only `tmux` rows are produced today; `cluster` is enumerated
+# ahead of writer 3 so the roll-ups are decided BEFORE such a row can appear,
+# not patched after one silently miscounts.
+#
+# 🔴 EVERY CLUSTER TEST BELOW CONSTRUCTS ITS OWN ROW, because no fixture and no
+# code path in this build produces one. A test that waited for a real cluster
+# row would be VACUOUS — green today, green with the whole classifier deleted,
+# and still green on the day writer 3 lands wrong. Constructing the row is what
+# makes these fail on pre-`kind` code.
+# =========================================================================== #
+def cluster_row(status="busy", **kw):
+    """A row shaped the way spec §4 says a clawgate dispatch will be shaped:
+    the tmux-only fields null, `claude` null because there is no pane whose
+    command could be read, `kind` the discriminant that says so."""
+    row = dict(kind="cluster", host=None, session=None, window_index=None,
+               window_id=None, claude=None, busy=None, status=status,
+               age_secs=42.0, age_source="clawgate", runtime="clawgate",
+               claude_session_id=None, task="a wedged dispatch",
+               waiting_probable=None, waiting_status="not_tmux",
+               waiting_signals=None, path="", command="", panes=0,
+               label="cg", label_source="none", hotkey=None, codename=None,
+               window_name="", pane_id=None, ledger=None, fuzzyclaw=None)
+    row.update(kw)
+    return row
+
+
+def with_cluster_rows(rep, *rows):
+    """Append constructed cluster rows to a real gathered report, in place."""
+    rep["hosts"]["workbench"]["windows"].extend(rows)
+    return rep
+
+
+def test_the_mix_fixture_really_produces_only_tmux_rows():
+    """INSTRUMENT CHECK, before any cluster claim is read off this fixture.
+
+    Every test below asserts what changes when a cluster row is ADDED. That is
+    only meaningful if the baseline has none — otherwise the deltas are
+    measured against an unknown starting point.
+    """
+    rows = mix_gather()["hosts"]["workbench"]["windows"]
+    assert rows, "empty fixture would make every assertion below vacuous"
+    assert {r["kind"] for r in rows} == {"tmux"}
+
+
+def test_every_row_carries_a_kind_and_it_is_never_null():
+    """🔴 `kind` is the one field on a row whose null IS a bug. `runtime` is
+    null all the time and means something; `kind` is known at construction."""
+    for rep in (base_gather(), mix_gather()):
+        rows = [r for h in rep["hosts"].values() for r in h["windows"]]
+        assert rows
+        for r in rows:
+            assert "kind" in r, "a row was built without the discriminant"
+            assert r["kind"] is not None
+            assert r["kind"] in sm.KINDS
+
+
+def test_KINDS_is_a_closed_vocabulary_that_fails_if_it_GROWS_or_SHRINKS():
+    """The same ledger idiom as FUZZYCLAW_FIELDS/WAITING_SIGNALS/STUCK_REASONS.
+    Both directions are silent breakage: a kind removed here while rows still
+    carry it turns `row_class` into `unknown_kind`, and a kind added without
+    the roll-up being taught about it is the miscount this axis exists to stop.
+    """
+    assert sm.KINDS == ("tmux", "cluster")
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE DEFECT THIS AXIS EXISTS TO PREVENT
+# --------------------------------------------------------------------------- #
+def test_a_CLUSTER_row_is_NOT_counted_as_a_SHELL():
+    """🔴 THE ONE THAT MATTERS. `claude` on a row is
+    `pane_current_command =~ /claude/` — a fact about a PANE. A dispatch with no
+    pane has `claude: None`, which is FALSY, so the old
+    `"claude" if row["claude"] else "shell"` counted an agent as a bare shell:
+    an agent filed under the bucket that means "nobody is working here".
+
+    That is the claude/shell conflation one axis over — the same defect that
+    published `idle: 17` for 12 agents + 5 shells. Every fixture in this suite
+    is tmux-only, so nothing else here can see it.
+    """
+    rep = with_cluster_rows(mix_gather(), cluster_row(status="busy"))
+    s = sm.summarize(rep)
+    busy = s["status"]["busy"]
+    # the bare shell that was already busy in the fixture is still the ONLY one
+    assert busy["shell"] == 1, "the cluster dispatch leaked into `shell`"
+    assert busy["cluster"] == 1
+    assert busy["claude"] == 0
+    # ...and it is not absorbed at the top level either. The fixture has TWO
+    # bare shells (ridge idle, thicket busy) and three agents; adding a cluster
+    # dispatch must move neither number.
+    assert s["shell"] == 2
+    assert s["claude"] == 3
+
+
+def test_a_CLUSTER_row_is_not_quietly_counted_as_CLAUDE_either():
+    """The mirror image. Overcounting agents is the friendlier direction and
+    still wrong: `claude` is what the operator reads as "my Claude windows"."""
+    rep = with_cluster_rows(mix_gather(),
+                            cluster_row(status="busy", claude=True))
+    s = sm.summarize(rep)
+    # `kind` decides, NOT the `claude` flag — a cluster row asserting claude:True
+    # must still not land in the claude count.
+    assert s["status"]["busy"]["cluster"] == 1
+    assert s["status"]["busy"]["claude"] == 0
+    assert s["claude"] == 3
+
+
+def test_NO_cluster_key_is_published_while_no_cluster_row_exists():
+    """🔴 THE FAKE ZERO. Pre-seeding `cluster: 0` in every bucket would publish
+    a measurement of a population this build structurally cannot produce, and a
+    reader cannot tell that zero from "wired to nothing" — which is the exact
+    failure this tool spends most of its output guarding against.
+
+    So the class key is created ON DEMAND, and a tmux-only summary is
+    byte-identical to what it was before `kind` existed.
+    """
+    s = sm.summarize(mix_gather())
+    for b in sm.STATUS_BUCKETS:
+        assert set(s["status"][b]) == {"claude", "shell", "total"}, (
+            "a tmux-only scan must not publish a cluster count")
+    # the caveat is what tells the reader why, instead of the absent key
+    assert sm.CAVEATS["kind_scope"]["kinds_produced"] == ["tmux"]
+
+
+def test_a_row_with_NO_kind_gets_its_OWN_class_and_never_becomes_cluster():
+    """A row built by code that forgot the field is a BUG in that code. Folding
+    it into `cluster` would dress it as a real measurement — the same mistake
+    one level down from counting a cluster row as a shell."""
+    assert sm.row_class({"claude": True}) == "unknown_kind"
+    assert sm.row_class({"kind": None, "claude": False}) == "unknown_kind"
+    assert sm.row_class({"kind": "wat"}) == "unknown_kind"
+    rep = with_cluster_rows(mix_gather(), cluster_row(status="busy", kind=None))
+    s = sm.summarize(rep)
+    assert s["status"]["busy"].get("cluster") is None
+    assert s["status"]["busy"]["unknown_kind"] == 1
+    # and it is visible in the histogram rather than absorbed
+    assert s["kind"]["none"] == 1
+
+
+def test_row_class_keys_on_KIND_not_on_a_null_claude():
+    """A tmux pane whose command did not parse also has `claude: None`, and
+    that row genuinely IS "not a claude pane" — it belongs in `shell`. Two
+    different nulls, and only `kind` separates them. Keying on `claude is None`
+    would have collapsed both into one class and looked correct."""
+    assert sm.row_class({"kind": "tmux", "claude": None}) == "shell"
+    assert sm.row_class({"kind": "tmux", "claude": False}) == "shell"
+    assert sm.row_class({"kind": "tmux", "claude": True}) == "claude"
+    assert sm.row_class({"kind": "cluster", "claude": None}) == "cluster"
+
+
+def test_the_bucket_TOTAL_accounts_for_the_cluster_class_too():
+    """🔴 The total is summed over whatever class keys exist, never over
+    `claude + shell` by name. Named summation would have kept returning a
+    plausible number that silently omitted the new class."""
+    rep = with_cluster_rows(mix_gather(), cluster_row(status="idle"),
+                            cluster_row(status="idle"))
+    s = sm.summarize(rep)
+    idle = s["status"]["idle"]
+    assert idle["cluster"] == 2
+    assert idle["total"] == idle["claude"] + idle["shell"] + idle["cluster"]
+    assert sum(s["status"][b]["total"] for b in s["status"]) \
+        == s["total_sessions"]
+
+
+def test_the_top_level_totals_use_the_SAME_predicate_as_the_buckets():
+    """One rule, one place. `claude`/`shell` were open-coded at two sites with
+    different expressions (`r["claude"]` and `not r["claude"]`), which is the
+    shape that ends up wrong at exactly one site."""
+    rep = with_cluster_rows(mix_gather(), cluster_row(status="busy"),
+                            cluster_row(status="idle"))
+    s = sm.summarize(rep)
+    rows = [r for h in rep["hosts"].values() for r in h["windows"]]
+    assert s["claude"] == sum(1 for r in rows if sm.row_class(r) == "claude")
+    assert s["shell"] == sum(1 for r in rows if sm.row_class(r) == "shell")
+    # the two no longer sum to the whole set — the cluster rows are neither
+    assert s["claude"] + s["shell"] == s["total_sessions"] - 2
+
+
+def test_the_kind_histogram_is_DERIVED_from_the_rows():
+    """Derived, not hardcoded, so a kind cannot exist on a row and be missing
+    from the summary — the rule `age_sources` and `waiting.per_signal` follow."""
+    rep = with_cluster_rows(mix_gather(), cluster_row(), cluster_row())
+    s = sm.summarize(rep)
+    assert s["kind"] == {"tmux": 5, "cluster": 2}
+    assert sum(s["kind"].values()) == s["total_sessions"]
+
+
+def test_the_lean_view_carries_kind():
+    """`kind` is what tells a lean reader whether a null `session` is "not
+    measured" or "this entity has no session". Dropping it would recreate the
+    ambiguity the lean field lists exist to remove."""
+    assert "kind" in sm.LEAN_ROW_FIELDS
+    lean = sm.lean_report(mix_gather())
+    assert "kind" in lean["lean_row_fields"]
+    for r in lean["hosts"]["workbench"]["windows"]:
+        assert r["kind"] == "tmux"
+
+
+# --------------------------------------------------------------------------- #
+# the caveat — a machine-readable CLAIM, and claims go stale
+# --------------------------------------------------------------------------- #
+def test_the_kind_scope_caveat_is_rendered_and_names_the_unproduced_kind():
+    lines = sm.render_caveats(base_gather())
+    line = next(ln for ln in lines if "caveat[kind_scope]" in ln)
+    assert "tmux" in line and "cluster" in line
+    assert "NOT " in line and "PRODUCED" in line
+    # it must point at where clawgate IS reported, or the reader concludes the
+    # tool cannot say anything about cluster work at all
+    assert "BLOCKED ON ME" in line
+
+
+def test_the_kind_scope_caveat_MATCHES_what_the_code_actually_produces():
+    """🔴 A caveat is a machine-readable claim, and `fuzzyclaw_scope` proved it
+    goes stale the moment the code changes — while the guard that should have
+    caught it was blinded by a fixture default.
+
+    So this reads the kinds from a REAL gather rather than from a constant, and
+    from BOTH shared fixtures, so no single fixture's defaults can make it
+    agree by accident. The day writer 3 produces cluster rows, this fails and
+    `kinds_produced` must be updated in the same commit.
+    """
+    produced = set()
+    for rep in (base_gather(), mix_gather()):
+        produced |= {r["kind"] for h in rep["hosts"].values()
+                     for r in h["windows"]}
+    assert produced, "no rows measured — this guard would pass vacuously"
+    assert produced == set(sm.CAVEATS["kind_scope"]["kinds_produced"])
+    assert set(sm.CAVEATS["kind_scope"]["kinds_enumerated"]) == set(sm.KINDS)
+    assert produced < set(sm.KINDS), (
+        "cluster is enumerated but must not be produced yet")

@@ -163,14 +163,33 @@ and the roll-ups a caller usually wants are:
 
     report["summary"]["waiting"]        {"probable", "measured", "unmeasured",
                                          "per_signal", "unmeasured_reasons"}
-    report["summary"]["status"][b]      {"claude", "shell", "total"} per bucket
+    report["summary"]["status"][b]      class counts + "total" per bucket
+    report["summary"]["kind"]           {"tmux": N} — the entity axis
     report["blocked_on_me"]             {"status", "count", ...}
 
-Each row carries: host, session, window_index, window_id, window_name,
+Each row carries: kind, host, session, window_index, window_id, window_name,
 codename, label, label_source, hotkey, pane_id, path, command, task, claude,
 busy, age_secs, age_source, status, waiting_probable, waiting_signals,
 waiting_status, claude_session_id, runtime, ledger, fuzzyclaw, panes. The row ledger is
 pinned by a test.
+
+🔴 `kind` IS THE ENTITY AXIS, AND IT IS WHY THE STATUS BUCKETS ARE NOT
+SIMPLY {claude, shell}.
+--------------------------------------------------------------------------
+`kind` is `tmux` on every row this build produces: a pane on a host it ssh'd
+to. `cluster` is enumerated for a dispatch with NO pane (spec §4, writer 3)
+and is NOT produced yet — `caveats.kind_scope` says so in the payload, so an
+absence of cluster rows is never readable as a measured absence of cluster
+work. Clawgate is reported instead under `blocked_on_me`, a different
+population that is never double-counted with these rows.
+
+The buckets count by `row_class`, not by `claude`-or-`shell`, because
+`row["claude"]` is `pane_current_command =~ /claude/` — a fact about a PANE.
+A row with no pane has `claude: None`, which is FALSY, so an inline
+`"claude" if row["claude"] else "shell"` would file every cluster agent as a
+BARE SHELL. That is the claude/shell conflation this summary already exists
+to prevent, one axis over. A class key is created on demand, so no `cluster: 0`
+is published while no cluster row can exist.
 
 🔴 `label` IS NOT AN ADDRESS — `session:window` still is.
 --------------------------------------------------------------------------
@@ -457,6 +476,78 @@ CAPTURE_MARK_PREFIX = "SMCAP"
 # bucket cannot exist in `classify_status` and be missing from the summary.
 STATUS_BUCKETS = ("busy", "idle", "stale", "unknown")
 
+# 🔴 WHAT KIND OF THING A ROW IS — the entity axis, enumerated and CLOSED.
+#
+# Every row today is `tmux`: a pane on a host this tool ssh'd to. `cluster` is
+# the name reserved for a row with NO pane — a clawgate dispatch running in the
+# workbench cluster (spec §4). It is enumerated here BEFORE such a row exists,
+# and that is the point: the decision this constant records is that clawgate
+# rows join the SAME collection with the tmux-only fields null, rather than
+# living in a second section every consumer has to merge by hand.
+# `claudedocs/design-ledger-writer3-and-kind-2026-08-14.md` has the reasoning
+# and the measurement that says `cluster` rows are NOT built yet.
+#
+# 🔴 NO `cluster` COUNT IS PUBLISHED UNTIL A `cluster` ROW EXISTS. `summarize`
+# creates a class key on demand, never pre-seeded, because a `cluster: 0` in a
+# build that cannot produce cluster rows is indistinguishable from a reader
+# wired to nothing — the exact zero this tool exists to stop emitting. So the
+# summary of a tmux-only scan is byte-identical to what it was before `kind`.
+KINDS = ("tmux", "cluster")
+
+# 🔴 `kind` VS `runtime` — TWO AXES, AND NEITHER IS DERIVABLE FROM THE OTHER.
+# They will agree on almost every row, which is exactly how someone collapses
+# them later and finds out the hard way that the null semantics differ:
+#
+#   kind     WHERE the row came from — a tmux pane scan, or the clawgate API.
+#            Known with certainty when the row is built. NEVER null.
+#   runtime  WHICH agent software — from the ledger record (`claude`/`opencode`).
+#            NULL whenever no writer has recorded that window, which is the
+#            common case for a session that has not taken a turn yet.
+#
+# So `runtime is None` is a real, frequent measurement about a tmux row, and
+# `kind is None` is a bug. Do not infer one from the other.
+
+
+def row_class(row) -> str:
+    """Which class a row is counted as in the roll-ups: `claude` | `shell` |
+    `cluster`. THE ONE definition — `summarize` uses it for both the per-status
+    buckets and the top-level totals, so the two cannot disagree.
+
+    🔴 `claude`/`shell` IS A TMUX-ONLY DISTINCTION, and that is the whole reason
+    this function exists rather than an inline conditional. The old roll-up read
+    `"claude" if row.get("claude") else "shell"`, and `row["claude"]` is
+    `pane_current_command =~ /claude/` — a fact about a PANE. A row with no pane
+    has `claude: None`, which is falsy, so every cluster agent would have been
+    counted as a BARE SHELL: an agent silently added to the bucket that means
+    "nobody is working here".
+
+    That is not a hypothetical restatement of the rule — it is the identical
+    defect the claude/shell split was built to kill one axis over. Measured on
+    this host 2026-08-11, `idle: 17` was 12 agent windows + 5 bare shells
+    rendered identically, and the fix was to stop publishing the mixed integer.
+    Publishing a cluster agent inside `shell` re-opens it in a form the existing
+    tests cannot see, because every fixture in the suite is tmux-only.
+
+    Keyed on `kind`, NOT on `claude is None`. A tmux row can also carry a null
+    `claude` (a pane whose command did not parse), and that row genuinely is
+    "not a claude pane" — it belongs in `shell`. The two nulls mean different
+    things and only `kind` separates them.
+
+    🔴 A MISSING OR UNKNOWN `kind` GETS ITS OWN CLASS, and does not fall through
+    to `cluster`. Folding it into `cluster` would be the same mistake one level
+    down: "a row whose kind nobody set" and "a row measured as a cluster
+    dispatch" are different findings, and the first is a bug in whatever built
+    the row. `unknown_kind` is never pre-seeded, so it publishes a count only
+    when such a row actually exists — at which point it is loud rather than
+    absorbed into a plausible neighbour.
+    """
+    kind = row.get("kind")
+    if kind == "tmux":
+        return "claude" if row.get("claude") else "shell"
+    if kind in KINDS:
+        return kind
+    return "unknown_kind"
+
 # 🔴 THE TWO LIMITS THAT CHANGE WHAT THE OUTPUT MEANS, CARRIED IN THE OUTPUT.
 # Both were documented in the skill body only. An agent that runs this script
 # cold never reads the skill, and the failure mode of each is silent: a `claude`
@@ -493,6 +584,24 @@ CAVEATS = {
                  "NOTHING about `age_secs`/`claude_session_id`/`stale` — those "
                  "come from the agent ledger, which IS read per host; see "
                  "caveats.ledger_scope."),
+    },
+    # 🔴 THE SCOPE OF THE ENTITY AXIS. Without this a `--json` consumer reads a
+    # scan containing only `kind: tmux` rows as "there are no cluster
+    # dispatches", when the truth is that this build never looks for one — the
+    # zero-vs-wired-to-nothing confusion, in the one field newly added to every
+    # row. It names the source that DOES answer, so the reader is not left to
+    # conclude the tool simply cannot say.
+    "kind_scope": {
+        "kinds_enumerated": list(KINDS),
+        "kinds_produced": ["tmux"],
+        "note": ("every row is a tmux pane on a scanned host. `cluster` is "
+                 "ENUMERATED but NOT PRODUCED — no clawgate dispatch is read "
+                 "into rows by this build, so an absence of cluster rows is "
+                 "NOT a measured absence of cluster work. For clawgate use "
+                 "report.blocked_on_me (tasks needing the operator, and its "
+                 "`stuck_count` for wedged dispatches), which is a different "
+                 "population from these rows and is never double-counted "
+                 "with them."),
     },
     "ledger_scope": {
         "scope": "per_host",
@@ -1411,6 +1520,15 @@ def fold_windows(panes, host, slots=None, task_index=None,
             w_probable = det["probable"]
             w_signals = det["signals"]
         rows.append({
+            # 🔴 WHAT KIND OF ENTITY THIS ROW IS. Always `tmux` here — this
+            # function folds PANES, so by construction every row it builds has
+            # one. It is written explicitly rather than left to a default
+            # because the field's contract is that it is NEVER null (see
+            # `KINDS`). A row built somewhere else that forgets to set it does
+            # NOT quietly become a cluster row: `row_class` gives it
+            # `unknown_kind` and `summary["kind"]` counts it as `"none"`, both
+            # of which a test asserts against `KINDS`.
+            "kind": "tmux",
             "host": host,
             "session": session,
             "window_index": widx,
@@ -1540,15 +1658,39 @@ def summarize(report) -> dict:
     counts = {b: {"claude": 0, "shell": 0} for b in STATUS_BUCKETS}
     for r in rows:
         bucket = counts.setdefault(r["status"], {"claude": 0, "shell": 0})
-        bucket["claude" if r.get("claude") else "shell"] += 1
+        # 🔴 `row_class`, not an inline `claude`-or-`shell`: a row with no pane
+        # must NOT land in `shell`. See `row_class` for why that is the same
+        # defect this split was built to kill. The class key is created ON
+        # DEMAND — `cluster` appears only once a cluster row does, so a
+        # tmux-only scan never publishes a `cluster: 0` that would read as a
+        # measured absence of something this build cannot produce.
+        cls = row_class(r)
+        bucket[cls] = bucket.get(cls, 0) + 1
     for b in counts.values():
-        b["total"] = b["claude"] + b["shell"]
+        # Every class key accounts for the bucket's own total, whatever class
+        # keys the rows produced. Summing `claude + shell` by name would have
+        # silently dropped any third class from the total instead of failing.
+        b["total"] = sum(v for k, v in b.items() if k != "total")
     filters = report.get("filters") or {}
     return {
         "total_sessions": len(rows),
-        "claude": sum(1 for r in rows if r["claude"]),
-        "shell": sum(1 for r in rows if not r["claude"]),
+        # 🔴 THE SAME `row_class`, so the top-level totals and the per-status
+        # buckets cannot disagree. These read `row_class`, not `r["claude"]`
+        # directly: `shell` used to be `not r["claude"]`, which absorbs every
+        # row with a null `claude` — including a cluster row that has no pane
+        # to have a command. One predicate, one place; the version of this that
+        # is open-coded at two sites is wrong at exactly one of them.
+        "claude": sum(1 for r in rows if row_class(r) == "claude"),
+        "shell": sum(1 for r in rows if row_class(r) == "shell"),
         "status": counts,
+        # 🔴 THE ENTITY AXIS, published as its own histogram and DERIVED from
+        # the rows — never hardcoded — so a kind cannot exist on a row and be
+        # missing from the summary. Same idiom, and same reason, as
+        # `age_sources`: `"none"` rather than `None`, because a null JSON key
+        # serialises to the string `"null"` and reads as a kind called null.
+        # A `kind` of `"none"` appearing at all is a bug (see `KINDS`), which
+        # is precisely why it is counted rather than coerced away.
+        "kind": _count_by(r.get("kind") or "none" for r in rows),
         # 🔴 The filter travels WITH the counts it changed. Under
         # `--claude-only` every number above describes the FILTERED set (see
         # `gather`), so a reader that does not know the filter ran would read a
@@ -2619,6 +2761,12 @@ LEAN_ROW_FIELDS = (
     # yielded nothing "are distinguishable by `label_source`, not by the
     # label" — dropping it made exactly that pair unreadable. An audit caught
     # the inconsistency between the rule and the field list; the rule won.
+    # 🔴 `kind` is a DISCRIMINANT, not duplication — it is what tells a reader
+    # whether the null `session`/`window_index` on a row is "not measured" or
+    # "this entity has no such thing". Dropping it would leave a cluster row
+    # indistinguishable from a tmux row whose host went unreachable, which is
+    # the ambiguity this whole view exists to remove.
+    "kind",
     "host", "session", "window_index", "label", "label_source", "hotkey",
     # what it is working on, and WHICH agent is doing it
     "path", "task", "runtime",
@@ -2695,6 +2843,7 @@ def render_caveats(report) -> list:
     fz = cav.get("fuzzyclaw_scope") or {}
     led = cav.get("ledger_scope") or {}
     wt = cav.get("waiting_signal") or {}
+    kd = cav.get("kind_scope") or {}
     return [
         # 🔴 The signal set is ENUMERATED in the footer, because `WAIT: no` is
         # the cell a reader will over-trust. Naming the three things that were
@@ -2721,6 +2870,16 @@ def render_caveats(report) -> list:
         "agent ledger, read {} — a REMOTE row has both and CAN be `stale`. A "
         "null age means NO WRITER HAS RECORDED that window, not age 0; "
         "`age_source` names the writer".format(led.get("scope", "per_host")),
+        # 🔴 The entity axis, printed for the same reason as the three above:
+        # `kind` is now on every row, and "only tmux rows here" must not be
+        # read as "no cluster work exists".
+        "  caveat[kind_scope]: every row is kind={} — {} is ENUMERATED but NOT "
+        "PRODUCED, so no cluster/clawgate dispatch appears as a row and their "
+        "absence is NOT a measured zero; clawgate is reported separately under "
+        "BLOCKED ON ME".format(
+            "/".join(kd.get("kinds_produced") or ["tmux"]),
+            "/".join(k for k in (kd.get("kinds_enumerated") or list(KINDS))
+                     if k not in (kd.get("kinds_produced") or ["tmux"]))),
     ]
 
 
