@@ -823,7 +823,40 @@ TARGET_FLOORS=(
   # 2026-08-13, MERGED with main (#465's registrar target below, #459, #463). Both sides
   # of this conflict are KEPT — they pin different targets — and the number was re-read
   # from the gate run on the MERGED tree, not carried over from the branch measurement.
-  "scripts/claude-hooks/tests/test_next_step_nudge.py|116"
+  #
+  # 2026-08-13, the OFFERS `waiting for`/`blocked by` widening — the last two arms of the
+  # blocked/parked family: 122 -> 126 collected. +4 = two new PARKED-arm fixtures x the
+  # two parametrized arm tests. The branch is off fd88780 and `git merge-base --is-ancestor
+  # origin/main HEAD` is TRUE, so the MERGED tree and the branch tree are the same tree —
+  # this number is not a branch-only reading that a merge could invalidate. Measured by
+  # the AUTHORITATIVE gate, `nix build .#checks.x86_64-linux.pytests`, read out of `nix
+  # log` (the build was uncached here, but a cached one prints an EMPTY log and would
+  # otherwise read as a green with no counts):
+  #   PASS  scripts/claude-hooks/tests/test_next_step_nudge.py  (collected=126 passed=126 skipped=0 floor=116)
+  # put through the gate's OWN function rather than arithmetic:
+  #   _suggested_floor 126 = 126 - min(50, max(1, 126/20 = 6)) = 126 - 6 = 120.
+  # ZERO new skips; no HERMETIC_TARGETS entry needed (the file is already a target).
+  # If this line conflicts with a sibling branch, re-run the gate on the MERGED tree and
+  # copy what it prints — do not reconcile the two sides by hand.
+  #
+  # 2026-08-13, same branch, closing the two arms a differently-built mutation sweep
+  # found SURVIVING (COMMITS' bare `'ll`, DONE's `that's it`): 126 -> 130 collected.
+  # +4 = two more arm fixtures x the two parametrized arm tests.
+  #
+  # ⚠ RE-MEASURED, and the earlier reading on this line is VOID — which is the whole
+  # argument for re-measuring rather than reconciling. The 126 above was taken when
+  # `origin/main` was fd88780; main moved to 71c0aa2 (#467) mid-round, so that number was
+  # a claim about a tree that no longer exists. This one was taken AFTER `git merge
+  # origin/main`, on the tree the merge actually produced. (#467 touched only
+  # claudedocs/handoff-subsystem-store.md, so the merge was textually AND semantically
+  # clean here — checked, not assumed: a clean `ort` merge only means no textual
+  # conflict.) The AUTHORITATIVE gate's own line, `nix build
+  # .#checks.x86_64-linux.pytests`, read out of `nix log`:
+  #   PASS  scripts/claude-hooks/tests/test_next_step_nudge.py  (collected=130 passed=130 skipped=0 floor=120)
+  #   TOTAL collected=9666  passed=9665  skipped=1  failed=0
+  # put through the gate's OWN function rather than arithmetic:
+  #   _suggested_floor 130 = 130 - min(50, max(1, 130/20 = 6)) = 130 - 6 = 124.
+  "scripts/claude-hooks/tests/test_next_step_nudge.py|124"
   # 2026-08-13, the registrar's DELIVERY seam arrives as a NEW target: 17 collected.
   # Gate's own count through the gate's own rule:
   #   _suggested_floor 17 = 17 - min(50, max(1, 17/20 = 0 -> 1)) = 17 - 1 = 16.

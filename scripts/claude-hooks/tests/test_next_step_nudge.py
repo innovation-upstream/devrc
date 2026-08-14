@@ -280,6 +280,18 @@ def test_every_suppressor_has_a_fixture():
 #     suppressor NAME, which says nothing about the ~30 alternation ARMS inside them —
 #     a mutation sweep deleting an arm survived, because a sibling arm kept the one
 #     fixture suppressed. Each entry below is owned by exactly one arm of one suppressor.
+#
+# 🔴 IF YOU ARE BUILDING A MUTATION BATTERY FOR THIS FILE, READ THIS FIRST. Deleting an
+#    arm from one of these alternations is a one-line edit that very easily produces
+#    INVALID REGEX OR INVALID PYTHON — an unbalanced group, a dangling `|`, a raw string
+#    truncated mid-literal. pytest then reports a COLLECTION ERROR, which is non-zero, and
+#    a sweep that reads only the exit status scores it as a KILL. It is not one: the
+#    module never imported, so no guard was ever exercised and the mutant proved nothing.
+#    This has now happened THREE times in this file's history, most recently on the
+#    whole-line OFFERS mutant. Two defences, both cheap: assert the mutated module still
+#    IMPORTS before running the suite, and require the kill to be a `failed` count rather
+#    than any non-zero rc. Substituting a never-matching literal (`__zzz_never__`) instead
+#    of deleting text keeps the syntax valid by construction.
 # --------------------------------------------------------------------------- #
 SUPPRESSOR_ARMS = {
     # COMMITS — the impersonal-future arm. No first-person pronoun anywhere, which is
@@ -317,6 +329,36 @@ SUPPRESSOR_ARMS = {
                         "comparison closes.", "offers"),
     "offers_standing_by": ("Standing by for the sweep to report on the retry loop.",
                            "offers"),
+    # ...and the family's other two prepositions, which were still unknown to OFFERS.
+    # Measured before the arm existed: the plain "Waiting for the audit agent to report."
+    # and "This is blocked by an upstream decision that isn't mine." both FIRED, while
+    # their ornamented neighbours suppressed only INCIDENTALLY — one via DONE, one via
+    # COMMITS. These two fixtures are deliberately free of that ornament (no "I'll", no
+    # "will", no "nothing further") so each is owned by OFFERS alone and a mutation
+    # deleting the arm leaves it FIRING rather than rescued by the sibling that happened
+    # to overlap in the corpus.
+    "offers_waiting_for": ("Waiting for the retry-loop sweep to report on the backoff "
+                           "reset.", "offers"),
+    "offers_blocked_by": ("Blocked by the cache rollout that has to land before the "
+                          "counter exists.", "offers"),
+    # ...and two arms in OTHER families that had no fixture either. Found the same way
+    # the PARKED gaps were — by running the battery over the WHOLE suppressor set — but
+    # by a battery built DIFFERENTLY from the one that certified the previous round: 29
+    # mutants instead of 19, enumerated arm-by-arm from the regex source rather than
+    # inherited. That sweep reported 27/29 with these two surviving, which the earlier
+    # 19-mutant sweep had scored as a clean run. A sweep is only a claim about the
+    # mutations someone imagined, so the fix is a differently-built sweep, never a
+    # bigger one.
+    #
+    # COMMITS' BARE `'ll` — no first-person pronoun, which is exactly what separates it
+    # from the `I'll`/`we'll` arm above it in the regex. The source comment justifies the
+    # impersonal-future family by name but never spells this arm, so nothing pointed at
+    # the gap.
+    "commits_bare_ll": ("There'll be one more delta re-audit once the counter lands.",
+                        "commits"),
+    # DONE's `that's it`. Same story: an arm with no fixture is an arm a sweep cannot
+    # kill, and this one sat unkillable through three rounds of work on this file.
+    "done_thats_it": ("That's everything the three runs support.", "done"),
 }
 
 
@@ -338,15 +380,28 @@ def test_each_alternation_arm_suppresses_the_turn(key):
 def test_arm_ledger_covers_every_arm_named_in_the_source_comments():
     """A ledger that can go stale silently is not a ledger. Pins the specific arms the
     source comments justify by name — deleting one from the regex without deleting the
-    fixture fails above, and adding one here without an arm fails immediately."""
+    fixture fails above, and adding one here without an arm fails immediately.
+
+    It also pins arms the source comments do NOT name, once a sweep has found them
+    surviving. That is the more useful half: an arm nobody wrote a sentence about is
+    exactly the arm nobody wrote a fixture for."""
     for arm in ("going to", "about to", "due to run", "queued to", "set to"):
         assert nsn.COMMITS.search(f"the work is {arm} happen"), arm
     for arm in ("defaults to", "leans toward", "worth a glance", "worth folding"):
         assert nsn.MARKED.search(f"it {arm} something"), arm
     # OFFERS' PARKED family. It was absent from this ledger entirely, which is how
     # `awaiting` and `standing by` came to have no fixture and survive a sweep.
-    for arm in ("awaiting", "standing by", "waiting on", "blocked on"):
+    for arm in ("awaiting", "standing by", "waiting on", "blocked on",
+                "waiting for", "blocked by"):
         assert nsn.OFFERS.search(f"the turn is {arm} something"), arm
+    # COMMITS' BARE `'ll` — no first-person pronoun, which is the whole reason it is a
+    # separate arm from `I'll`/`we'll`. Named by no source comment; found only when a
+    # differently-built battery mutated it and the suite stayed green.
+    for arm in ("there'll", "it'll", "there’ll", "it’ll"):
+        assert nsn.COMMITS.search(f"{arm} land with the counter"), arm
+    # DONE's `that's it` arm. Same shape of gap, unkillable through three rounds here.
+    for arm in ("that's it", "that's all", "that’s everything"):
+        assert nsn.DONE.search(f"and {arm}"), arm
 
 
 # --------------------------------------------------------------------------- #
