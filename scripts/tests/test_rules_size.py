@@ -142,8 +142,14 @@ ARCHIVE_MD = REPO_ROOT / "claude" / "RULES-ARCHIVE.md"
 # already is when the hazard fires, not by which cluster the lesson came from.
 #
 # 🔴 The 202 B those three additions overshot the budget by was reclaimed WITHOUT
-# narrowing anything, and it is worth recording what that actually looked like,
-# because "reclaim without narrowing" sounds impossible until you have examples:
+# narrowing anything. An audit measured where it actually came from, and the
+# split matters to anyone reusing this as a recipe: only 133 B came out of
+# EXISTING rules (stash -89, pkill -26, worktree -18); the remaining ~69 B came
+# from trimming the three NEW additions themselves. An earlier version of this
+# comment named only the two existing-rule sources and so read as though all
+# 202 B were reclaimed from prose already in the file -- which would make
+# "reclaim without narrowing" look about 50% cheaper than it is. What the
+# existing-rule half looked like:
 # the `git stash` section stated "for ANY reason" THREE times (heading, a 🔴
 # clause, and "regardless of why") -- the third was dropped and the other two
 # kept verbatim, since that is the exact scope clause a narrower wording once
@@ -159,6 +165,14 @@ ARCHIVE_MD = REPO_ROOT / "claude" / "RULES-ARCHIVE.md"
 # performs it: "run a SINGLE agent in-place -- never two file-modifying ones" had
 # been shortened to "never two", which reads as forbidding a second READ-ONLY
 # agent that the previous sentence explicitly permits. 20 B restored.
+#
+# 🔴 SO THAT BULLET SHIPPED 18 B SHORTER THAN IT WAS, and this comment previously
+# recorded only the caught regression -- which reads as "untouched" to the next
+# person sizing it up. The shipped wording is the MIDDLE position: "run a SINGLE
+# agent in-place -- never two file-modifying ones". The antecedent survives
+# because "agent" is in the same clause and the full form ("two file-modifying
+# agents in one checkout WILL clobber each other") appears earlier in the same
+# bullet. Shave it further and that stops being true.
 #
 # MAX_BYTES was deliberately NOT ratcheted down to bank this. The slack predates
 # the consolidation (compare the live size against MAX_BYTES and
@@ -288,6 +302,38 @@ def test_every_archive_pointer_resolves():
     assert not dangling, (
         f"claude/RULES.md points at archive anchors that do not exist: "
         f"{dangling}.\nArchive has: {sorted(anchors)}"
+    )
+
+    # 🔴 THE OTHER DIRECTION, WHICH WAS ASSERTED IN PROSE AND GATED NOWHERE.
+    # An audit found this module claiming anchors "resolve both directions"
+    # while only `referenced - anchors` was ever computed. The inverse — an
+    # archive section nothing points at — is the same rot one step over, and
+    # this module's own `_archive_anchors` docstring already argues the case:
+    # "a hand-maintained list drifts, and a drifted list steers a maintainer
+    # into duplicating an entry that already has a home." An orphan is exactly
+    # how that happens: the evidence is there, nothing routes to it, and the
+    # next person writes it again in the core where bytes are scarce.
+    #
+    # ⚠ THIS IS AN INVARIANT GUARD, NOT REGRESSION COVERAGE — it was green the
+    # moment it was written (0 orphans measured), so it never caught the bug it
+    # describes. It is labelled as such rather than counted as a catch. Watched
+    # to fail by injecting an orphan section; it goes red with its own message.
+    #
+    # `retired-*` is excluded BY PREFIX and deliberately: a retired rule's
+    # evidence is meant to outlive the pointer that used to reach it. Any other
+    # unreferenced section is drift.
+    orphans = sorted(
+        a for a in (anchors - referenced) if not a.startswith("retired-")
+    )
+    assert not orphans, (
+        f"\n\nclaude/RULES-ARCHIVE.md has section(s) nothing points at: "
+        f"{orphans}.\n"
+        f"  Either add a `→ archive: <anchor>` tag on the rule whose evidence "
+        f"this is,\n"
+        f"  or rename it `retired-<name>` if the rule itself is gone.\n"
+        f"  An orphan is not harmless: the next author cannot find it, so they "
+        f"write it\n"
+        f"  again in the core, where bytes are the scarce thing."
     )
 
 
