@@ -20,30 +20,22 @@ not a build.
 
 ## State now
 
-- **Branch:** `main` at `d01cf23`, clean tracked tree (4 untracked: `.envrc`, `.opencode/`,
-  `claudedocs/proposed-rules-cut/`, `nix/system/apply-nebula-443.sh.LOCAL-preserved-2026-08-02`).
-- **Merged this session (10):** `#436` step-4 probe-first · `#418` prior revision of this doc ·
-  `#440` the **digest** · `#441` reopening-gate correction · `#442` `--search` + 100-cap
-  pagination · `#446` kickoff `/resume` prefix · `#448` decline-on-content-not-cost ·
-  `#449` malformed entry no longer kills a scope · `#457` index read moved into the doc ·
-  `#459` the `session-absolute` window.
-- **Deploy:** `ship.sh rc=0` — both hosts converged + verified, **440 (workbench) / 402
-  (laptop) managed artifacts, 0 dangling**. Verified at the consumer, not inferred.
-- **Store:** 34 entries · 5 scopes · **all 5 now have a README** (was 1 of 5) · 0 remotes.
-- **Worktrees:** 61 → 13. The 2026-08-13 sweep is DONE: 22 dropped, 1 kept (`#355`), 1
-  salvaged (→ `#447`). Full 23-row evidence table is in git history at `d1cc0ba`; the 8
-  detached heads are preserved as `preserved/*` tags **on origin**
-  (`git ls-remote --tags origin 'preserved/*'`).
-
-### Numbers that were the point
-```
-34 entries — civitai 2 · civitai-app-starters 1 · datapacket-talos 27 · devrc 2 · homelab-talos 2
-by created_by: analyze-service 1 · handoff 12 · unstamped 21
-```
-Anchor before any second writer existed: **21 entries · 1 scope · 21 unstamped.**
-
-**`/resume` step 4: 7,871 → ~1,212 tokens (84.6% less) AND strictly more complete** — lists
-every entry instead of hiding 13 of 25.
+- **Branch:** `main`. The base clone is a SHARED checkout and other sessions move it — it was
+  switched onto another session's branch twice mid-work today. Re-check `git branch --show-current`
+  immediately before any write; do the work in a worktree.
+- **Merged this session (6):** `#467` the doc-hook measurement · `#469` flake.lock + the opencode
+  pin re-derived at 1.18.16 · `#470` census write-activity · `#481` `SKILL HOMES` routing ·
+  `#485` `NO PATH FOOTPRINT?` routing · `#494` the worktree-bucket measurement.
+  (Other PRs merged today — 479, 482–484, 486–490 — are **other sessions'**, not this one's.)
+- **The dead-end report is now complete.** Three routes, one per failure mode:
+  `ROUTE OUT` (wrong window) → `SKILL HOMES` (right lesson, wrong home) → `NO PATH FOOTPRINT?`
+  (right home, no window at all). All three fire only on `looked-at-nothing`/`no-match`; a
+  resolved run stays silent, which is pinned by a negative control in each.
+- **Store:** 35 entries · 5 scopes. `census` now reports write ACTIVITY (newest write, entries
+  touched in 24h/7d) beside the counts, because the counts are creation-events only and could
+  not tell an appending writer from a dead one.
+- 🔴 **HOSTS ARE SPLIT and this is not resolved:** laptop on opencode **1.18.16** (converged +
+  verified at the consumer), workbench still on **1.18.4**. See the open investigation below.
 
 ## Open investigations — live diagnosis state
 
@@ -143,33 +135,59 @@ which reads the path distribution without pretending to be those sessions.
   third and call it uncontaminated.** Measure organically instead: parse the next few real
   continuations. The instrument recipe is above; it is three controls and twenty lines.
 
+### The two hosts run different opencode, and five doc lines are false while they do
+- **Symptom:** `ship.sh` rc=7 — workbench SKIPPED, laptop converged. The dev-host
+  `scripts/gate.sh --tier pytest` is RED on the workbench and will stay red until it converges:
+  `test_engine_is_the_version_every_measurement_is_keyed_to` compares the binary against
+  `PINNED_VERSION` and gets `assert '1.18.4' == '1.18.16'`.
+- **Observed (values):** `readlink -f $(command -v opencode)` → workbench
+  `/nix/store/64n428…-opencode-1.18.4`, laptop `/nix/store/rcrzfd71…-opencode-1.18.16`;
+  `flake.lock` pins 1.18.16. `ship.sh` named the three blocking files verbatim
+  (`scripts/run-tests.sh`, `scripts/tests/test_agent_ledger.py`,
+  `scripts/tests/test_session_manager.py`) and left the host **exactly as found** — the
+  protective outcome, by design.
+- **Ruled out:** that this is a nix error. The laptop's first switch failed the same way
+  (`converge exited 9`) on **pre-existing FOREIGN files** — `~/.config/opencode/agent/review.md`
+  and `plugin/guard.js`, read-only with 1969 mtimes, stale pre-#469 store copies. Preserved to
+  `~/foreign-opencode-preserved-2026-08-13`, diffed (they differed only by #469's edits), removed,
+  re-switched clean.
+- **Blocked on, not broken:** the blocker has since cleared — that session committed and merged —
+  so `ship.sh` would now SUCCEED at `git checkout main` and switch a live session off
+  `feat/agent-activity-ledger`. That is why it was not re-run. **Decide before running it.**
+- 🔴 **Consequence to fix the moment it converges:** five DEPLOYED-STATE lines in
+  `scripts/browser-bridge/{README.md,reference/agent.md}` say "Both hosts run 1.18.4". True today,
+  false the instant the workbench switches, and the `HISTORICAL_VERSION_CLAIMS` ledger **exempts
+  them**, so nothing will catch it. One-word fix to 1.18.16 once both hosts agree.
+- **Next probe (verbatim):** `scripts/ship.sh` then, on the workbench,
+  `readlink -f $(command -v opencode) && opencode --version` — a deploy reporting success is a
+  claim about the DEPLOY, not the consumer.
+
+### The doc hook fires; the uncontaminated sample is still n=0
+- **Observed:** two exposed continuations, two fired. A CLI session read the doc at turn 1 and ran
+  `subsystem_recall.py` as its first Bash call; a **dispatched agent** with an ordinary kickoff did
+  the same at tool calls 1→2, with **0 `Skill` calls** — the case `#446` failed.
+- 🔴 **Both contaminated, differently, and the residue is STRUCTURAL:** the first session's prompt
+  named the measurement; the second could read about the experiment because this doc describes it
+  and `Read` returns the whole file. A staged probe cannot fix that. **Do not stage a third and
+  call it clean** — parse the next few organic continuations instead.
+- **Instrument (reusable, and the reason to trust the numbers):** parse `tool_use` calls, never
+  string mentions — and three false-positive modes survive naive parsing: `test_<name>.py` contains
+  `<name>.py`; heredoc bodies (`python3 - <<'PY'`) are DATA yet split into fake invocations;
+  `-m pytest`/`-c`. Require an exact basename match, strip heredocs, reject `-c`/`-m`/`-`.
+
 ## Next steps (ranked)
-1. **Get an ORGANIC doc-hook sample.** Two exposed continuations, two fired — including a
-   **dispatched agent**, the exact case `#446` failed (details above). Both are contaminated,
-   in different ways, and the remaining contamination is now structural: **this doc describes
-   the experiment, and `Read` returns the whole file**, so any agent sent here can see it may
-   be the subject. A staged probe cannot fix that. Just watch the next few real continuations
-   and parse their transcripts; do not stage another one and count it as clean.
-2. **Decide the worktree bucket** — measure the yield first (probe above). I was wrong about
-   exactly this class of number today.
-3. **Watch the census — the ACTIVITY lines, not the total.** `python3
-   scripts/lib/subsystem_touch.py --census`. Coverage is 21 → 34 across 5 scopes, 12
-   handoff-written + 1 analyze-service-written. 🔴 **The total cannot detect a stall and never
-   could**: every count is a count of CREATION events, `created_by` is stamped once and never
-   updated, so a week of pure appends moves nothing. Measured 2026-08-13: the store read 34
-   across two readings 40 minutes apart while the git history showed **7 new entries and 9
-   appends that same day** across 5 scopes. Read `newest write` and `touched in the last
-   24h/7d` instead — mtime-derived, deliberately not the store's git log, because commits are
-   batched by an hourly timer with `RandomizedDelaySec=10min`, so a git reading lags real
-   writes by ~70 minutes (measured, not the round 60 this doc first claimed).
-   **The number actually worth watching is the `analyze-service` share**: 12 of 13 stamped
-   entries are `handoff`, so the store is effectively single-writer and the second writer has
-   an n=1 track record over the whole instrumented period.
-4. Investigate the `empty` cwd bucket (155 of 290 path-carrying sessions, `depth=4`); decide
-   the opencode stringified-path question (`str(["a.py"])` is accepted by `to_repo_relative`;
-   zero occurrences in the emitted corpus — the path exists, has never fired).
-5. **The floors line in `scripts/run-tests.sh`** has conflicted on ~9 consecutive PRs. Worth
-   measuring separately.
+1. **Decide the workbench convergence** (investigation above). It needs your call because
+   `ship.sh` would now switch another session off its branch, and the doc-line fix follows
+   immediately after.
+2. **Write the `__pycache__` false-green into `claude/RULES.md`.** `cp -a` preserves `__pycache__`
+   and a SAME-LENGTH source mutation does not change file size, so the `.pyc` staleness check
+   (mtime+size) misses it and pytest imports the CACHED module — a mutation battery then reports a
+   mutant as SURVIVED when it never ran. Bit this session twice. Needs an eviction in the same
+   commit (`scripts/tests/test_rules_size.py` owns the ceiling and prints the playbook).
+3. **Parse the next few organic continuations** for the doc-hook rate (probe above).
+4. **Watch the census ACTIVITY lines, not the total** — `newest write`, `touched in 24h/7d`. The
+   number worth watching is the `analyze-service` share: 13 of 14 stamped entries are `handoff`,
+   so the store is still effectively single-writer.
 
 ## Gotchas / decisions / dead-ends
 
@@ -215,6 +233,31 @@ which reads the path distribution without pretending to be those sessions.
 - 🔴 **The store must never gain a remote.** `devrc` is PUBLIC. The policy file governing a
   scope is whichever the probe names on its `policy:` line — do not go looking for another,
   and never create a scope README yourself.
+
+- 🔴 **A trailing `echo` destroys the exit status exactly like a pipe.** `cmd > log 2>&1; echo
+  "RC=$?"` makes the COMPOUND return the echo's 0 — the harness reported `ship.sh` as **exit code
+  0** when the log said `SHIP_RC=7`. Reading the log content is what caught it. Same lesson as
+  `| tail`, new shape.
+- 🔴 **`cp -a` PRESERVES mtime; plain `cp`, `git clone` and `git checkout -- <path>` RESET it;
+  `git add`/`git commit` preserve it.** Measured 2026-08-14. A docstring asserted the opposite and
+  was shipped.
+- 🔴 **`--session` refuses any transcript older than 30 minutes**, so the CLI structurally cannot
+  measure historical sessions. Go under it: `collect_session_paths(repo, session=…,
+  max_age_seconds=math.inf)` reads the path distribution without pretending to be that session.
+- 🔴 **`\b1\.18\.4` never matches `v1.18.4`** — `v` and `1` are both word characters, so there is
+  no boundary. A version-consistency guard passed green while a `v`-prefixed claim was stale.
+- **A grep is an instrument: give it a positive control.** A case-wrong pattern (`raw` vs `RAW`)
+  reported content missing from `origin/main` that was present; a typo'd test path made pytest say
+  "no tests ran", which is an instrument error, not a zero.
+- **Audit rounds, honestly:** across `#481` and `#485` every round but the last found a real defect
+  in the PRECEDING fix — a feature that would have shipped INERT (both call sites deletable green),
+  a guard pinned by a header string that stayed green while its arguments were corrupted, a
+  suppression gate that was DEAD CODE, and a caveat that was simply false. **Five consecutive rounds
+  contained a false claim inside the sentence doing the correcting.** Budget for it.
+- 🔴 **The recurring error was one thing: stating a claim beyond what was measured.** Never caught
+  by re-reading; always caught by running something. The `#494` measurement REFUTED the
+  recommendation that motivated it — three agent reports of "0 paths under cwd" were one turn from
+  becoming a structural claim in the store, and the real rate was **1 in 12**.
 
 ## How to verify
 
