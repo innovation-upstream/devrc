@@ -585,6 +585,156 @@ SKILL_PINS: list[tuple[str, str]] = [
 ]
 
 
+class TestBehindRemoteWritesNothing:
+    """🔴 The gap this closes, and it is not hypothetical.
+
+    MEASURED 2026-08-15: `--confirm --push` committed the doc to `main` in a
+    SHARED base clone, then the push was rejected non-fast-forward because two
+    other sessions had pushed during the session. The commit STAYED. An
+    un-pushed commit on `main` in a devrc checkout is exactly what `ship.sh`
+    skips over — silently, because `merge --ff-only` refuses and the host is
+    left "as found" — so that host stops receiving every future change while
+    still looking healthy. It has bitten this repo twice.
+
+    The tool already had the right property everywhere else: a failure writes
+    nothing. Push was the one path that traded it for a commit the caller then
+    had to know how to undo.
+    """
+
+    def _advance_remote(self, repo: Path, tmp_path: Path) -> None:
+        """Push a commit to origin from a SECOND clone — the other session."""
+        # Clone the BARE origin, not the working repo — pushing into a non-bare
+        # checkout's current branch is refused, which would fail for a reason
+        # that has nothing to do with what this class is testing.
+        other = tmp_path / "other"
+        _sh("git", "clone", "-q", str(tmp_path / "origin.git"), str(other), cwd=tmp_path)
+        for k, v in (("user.name", "Other"), ("user.email", "o@example.invalid"),
+                     ("commit.gpgsign", "false")):
+            _sh("git", "config", k, v, cwd=other)
+        (other / "OTHER.md").write_text("other session\n", encoding="utf-8")
+        _sh("git", "add", "--", "OTHER.md", cwd=other)
+        _sh("git", "commit", "-q", "-m", "another session's work", cwd=other)
+        _sh("git", "push", "-q", "origin", "main", cwd=other)
+
+    def test_behind_remote_writes_NOTHING(
+        self, repo: Path, update_file: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE LOAD-BEARING CASE. Not 'the push fails cleanly' — nothing is
+        written at all, so there is no commit to strand on a shared branch."""
+        self._advance_remote(repo, tmp_path)
+        # 🔴 NOT `tree_hash` here, and the reason matters: it hashes `.git` too,
+        # and the pre-check's `git fetch` legitimately writes FETCH_HEAD and
+        # remote refs. Using it would fail for a side effect that is the guard
+        # working, so assert the three things "nothing written" actually means.
+        doc_before, shas_before = doc_of(repo), commit_shas(repo)
+        remote_before = _sh("git", "rev-parse", "refs/heads/main",
+                            cwd=tmp_path / "origin.git")
+        res = run_tool(repo, "--confirm", "--push", update=update_file)
+        assert res.returncode == 6, (res.returncode, res.stdout, res.stderr)
+        assert "status=behind" in res.stderr
+        assert doc_of(repo) == doc_before, "the doc was written before refusing"
+        assert commit_shas(repo) == shas_before, (
+            "a commit was made and then stranded — the exact failure this closes"
+        )
+        assert _sh("git", "rev-parse", "refs/heads/main",
+                   cwd=tmp_path / "origin.git") == remote_before
+
+    def test_it_names_the_hazard_and_the_recovery(
+        self, repo: Path, update_file: Path, tmp_path: Path
+    ) -> None:
+        """A refusal a caller cannot act on gets worked around. It must name the
+        fast-forward, and the preserve-verify-reset path for a real divergence."""
+        self._advance_remote(repo, tmp_path)
+        err = run_tool(repo, "--confirm", "--push", update=update_file).stderr
+        assert "merge --ff-only" in err
+        assert "reset --keep" in err
+        assert "ship.sh" in err, "the consequence is what makes this worth obeying"
+
+    def test_it_does_not_fire_when_the_remote_has_not_moved(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 The negative control. A check that always refuses would pass the
+        two tests above while making --push permanently unusable."""
+        res = run_tool(repo, "--confirm", "--push", update=update_file)
+        assert res.returncode == 0, (res.returncode, res.stderr)
+        assert "status=pushed" in res.stdout
+        assert "status=behind" not in res.stderr
+
+    def test_it_does_not_fetch_or_refuse_WITHOUT_push(
+        self, repo: Path, update_file: Path, tmp_path: Path
+    ) -> None:
+        """A behind remote is irrelevant to a local-only `--confirm`: there is no
+        push to be rejected, so refusing would block honest offline work."""
+        self._advance_remote(repo, tmp_path)
+        res = run_tool(repo, "--confirm", update=update_file)
+        assert res.returncode == 0, (res.returncode, res.stderr)
+        assert "status=written" in res.stdout
+
+    def test_an_UNREACHABLE_remote_refuses_rather_than_assuming_pushable(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 A fetch that FAILS is not '0 behind'. Guessing pushable is exactly
+        the confident-wrong-answer this guard exists to prevent, and it would
+        strand the commit the same way."""
+        doc_before, shas_before = doc_of(repo), commit_shas(repo)
+        _sh("git", "remote", "set-url", "origin",
+            str(repo.parent / "does-not-exist.git"), cwd=repo)
+        res = run_tool(repo, "--confirm", "--push", update=update_file)
+        assert res.returncode != 0
+        assert "refusing to commit something that may not be pushable" in res.stderr
+        assert doc_of(repo) == doc_before
+        assert commit_shas(repo) == shas_before
+
+
+class TestPushFailureHandsOverTheRecovery:
+    """The RESIDUAL path: the pre-check passed and the push still failed.
+
+    🔴 It cannot be designed away — the remote can move in the window between
+    the fetch and the push — so the commit really does exist at that point. What
+    must not happen is the caller not being told: an un-pushed commit on a shared
+    branch is the state `ship.sh` skips over silently, and a session that does
+    not know it is there will not clean it up.
+
+    Triggered deterministically by pointing `origin` at a NON-BARE repo with
+    `main` checked out: fetch succeeds (so the pre-check passes), push is refused
+    ("refusing to update checked out branch"). Discovered by accident when a
+    fixture cloned the wrong path.
+    """
+
+    def _origin_that_fetches_but_refuses_push(self, repo: Path, tmp_path: Path) -> None:
+        sibling = tmp_path / "sibling"
+        _sh("git", "clone", "-q", str(tmp_path / "origin.git"), str(sibling), cwd=tmp_path)
+        _sh("git", "remote", "set-url", "origin", str(sibling), cwd=repo)
+
+    def test_it_says_the_commit_exists_and_names_the_recovery(
+        self, repo: Path, update_file: Path, tmp_path: Path
+    ) -> None:
+        self._origin_that_fetches_but_refuses_push(repo, tmp_path)
+        before = commit_shas(repo)
+        res = run_tool(repo, "--confirm", "--push", update=update_file)
+        assert res.returncode != 0
+        assert "status=push-failed" in res.stderr
+        # The commit DOES exist — the message must not pretend otherwise.
+        assert len(commit_shas(repo)) == len(before) + 1
+        # 🔴 "in that order" is pinned too, not just the three commands. The
+        # ORDER is the load-bearing part — verifying the sha reached the remote
+        # BEFORE moving the branch pointer is what makes the recovery safe, and
+        # deleting that clause left the suite green while the commands stayed.
+        for needed in ("EXISTS LOCALLY", "ship.sh", "in that order",
+                       "branch <topic>", "ls-remote", "reset --keep"):
+            assert needed in res.stderr, f"recovery step missing: {needed}"
+
+    def test_the_pre_check_did_not_fire_here(
+        self, repo: Path, update_file: Path, tmp_path: Path
+    ) -> None:
+        """🔴 Distinguishes the two paths. Without this, a pre-check that refused
+        everything would satisfy the test above for the wrong reason."""
+        self._origin_that_fetches_but_refuses_push(repo, tmp_path)
+        res = run_tool(repo, "--confirm", "--push", update=update_file)
+        assert "status=behind" not in res.stderr
+        assert "status=written" in res.stdout, "the write must have happened first"
+
+
 class TestSkillAndModuleAgree:
     """The module cannot enforce a protocol its only caller stopped following,
     and the drift is silent — the step simply stops happening. Same shape as
