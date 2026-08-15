@@ -4563,3 +4563,79 @@ class TestDegradationMutationKills:
         assert rep.status == "recalled"
         assert len(rep.malformed) == 1
         assert "widget-index.md" in mod.render_text(rep)
+
+
+# =============================================================================
+# The index line's OPEN annotation. See test_subsystem_touch.py's open-actions
+# section for the measured incident behind the marker.
+# =============================================================================
+
+
+def _recalled(nuance: list[str], ref: str = "svc") -> rc.RecalledEntry:
+    text = "\n".join(
+        ["---", f"service: {ref}", "sensitivity: public", "---", "",
+         "## Pointers", "- a", "", "## Nuance / work-history", *nuance, ""]
+    )
+    sections = sr.extract_sections(text, (sr.POINTERS_HEADING, sr.NUANCE_HEADING))
+    bullets = sr.parse_journal_bullets(sections.get(sr.NUANCE_HEADING, ""))
+    return rc.RecalledEntry(
+        ref=ref, filename=f"{ref}.md", sensitivity="public", sections=sections,
+        bullet_count=len(bullets),
+        open_count=sum(1 for b in bullets if b.is_open),
+    )
+
+
+class TestListingLineOpenAnnotation:
+    def test_an_entry_with_nothing_open_renders_BYTE_IDENTICAL_to_before(self):
+        """🔴 The index prints for EVERY entry on EVERY read, so a field that
+        rendered unconditionally would tax the common case forever to describe the
+        rare one. The annotation is conditional for that reason, and this pins it:
+        the no-open line ends at the sensitivity, exactly as it always has."""
+        # The pre-change format, SPELLED OUT here rather than copied from the
+        # renderer — a literal lifted from the implementation would agree with it
+        # by construction and could not detect the format moving.
+        expected = "  " + "svc".ljust(12) + "  " + f"{1:>3}" + " nuance   " + "public"
+        line = rc.listing_line(_recalled(["- 2026-08-15: an ordinary lesson."]), 12)
+        assert line == expected
+
+    def test_an_open_entry_is_annotated_with_its_COUNT(self):
+        line = rc.listing_line(
+            _recalled([
+                "- 2026-08-01: OPEN: one.",
+                "- 2026-08-02: OPEN: two.",
+                "- 2026-08-03: an ordinary lesson.",
+            ]), 12,
+        )
+        assert line.endswith("🔴 2 OPEN")
+        assert "3 nuance" in line
+
+    def test_a_RESOLVED_bullet_does_not_count_as_open(self):
+        """The whole point of the marker: closing one has to be visible on the
+        index, or nobody is rewarded for closing it."""
+        line = rc.listing_line(
+            _recalled(["- 2026-08-02: RESOLVED b83bfb584: closed."]), 12
+        )
+        assert "OPEN" not in line
+
+    def test_an_unmarked_action_does_NOT_reach_the_index_line(self):
+        """Deliberate: the index is the highest-traffic surface in the tool, and a
+        two-phrasing guess with unmeasured recall does not belong on a line that
+        cannot carry its own caveat. It is reported by `--validate`, which can."""
+        line = rc.listing_line(
+            _recalled(["- 2026-07-24: FIX (1 line): repoint the address."]), 12
+        )
+        assert "OPEN" not in line
+
+    def test_read_entry_populates_open_count_from_disk(self, tmp_path):
+        store = tmp_path / "s"
+        (store / "sc").mkdir(parents=True)
+        (store / "sc" / "svc.md").write_text(
+            "\n".join(["---", "service: svc", "scope: sc", "---", "",
+                       "## Nuance / work-history",
+                       "- 2026-08-01: OPEN: outstanding.",
+                       "- 2026-08-02: an ordinary lesson.", ""]),
+            encoding="utf-8",
+        )
+        index = sr.load_index(store)
+        entry = index.entries("sc")[0]
+        assert rc.read_entry(store, entry).open_count == 1

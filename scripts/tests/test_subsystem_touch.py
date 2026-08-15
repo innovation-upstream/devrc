@@ -8380,3 +8380,294 @@ class TestSkillHomes:
                                                skills_root=self._root(tmp_path)))
         assert "claude/skills/" in body
         assert "git add" in body
+
+
+# =============================================================================
+# Open actions — the `OPEN:` / `RESOLVED <sha>:` marker.
+#
+# WHY THIS EXISTS, measured rather than imagined. `datapacket-talos/forgejo` was
+# written at 15:00:18 on 2026-07-24 carrying a bullet that proposed a
+# one-line remedy as future work. That remedy landed in commit b83bfb584 at
+# 15:02:21 — 2m03s later — and the entry served the remedy as
+# outstanding for the next 22 days. The store had no way to say "still open", so
+# nothing could notice it had stopped being true.
+#
+# The marker is a PREFIX the writer types, not a phrase the tool greps for,
+# because `claude/RULES.md` names the alternative: "a guard on WORDS is walkable
+# by REWORDING". `unmarked_action` is a deliberately narrow net under the entries
+# written before the marker existed, and every test below that touches it pins
+# the FLOOR language, not a completeness claim.
+# =============================================================================
+
+
+class TestOpennessMarkerParsing:
+    def test_the_four_marker_shapes_parse_to_their_declared_values(self):
+        body = "\n".join([
+            "- 2026-08-15: OPEN: dated and open.",
+            "- OPEN: undated and open.",
+            "- 2026-08-15: RESOLVED b83bfb584: dated, closed, with a sha.",
+            "- 2026-08-15: RESOLVED: closed but naming no sha.",
+        ])
+        got = [(b.openness, b.resolved_by) for b in sr.parse_journal_bullets(body)]
+        assert got == [
+            (sr.OPENNESS_OPEN, None),
+            (sr.OPENNESS_OPEN, None),
+            (sr.OPENNESS_RESOLVED, "b83bfb584"),
+            (sr.OPENNESS_RESOLVED, None),
+        ]
+
+    def test_an_unmarked_bullet_declares_nothing_rather_than_defaulting_to_open(self):
+        """195 of the 196 live bullets carry no marker. If the absent marker read
+        as OPEN, every one of them would light up red on its next read and the
+        signal would be worthless on the day it shipped.
+
+        (The 196th was already written `- OPEN: …` by hand, by a session with no
+        tooling asking for it — the shape here formalises what the corpus had
+        already invented.)"""
+        (b,) = sr.parse_journal_bullets("- 2026-08-15: an ordinary durable lesson.")
+        assert b.openness is None
+        assert b.is_open is False
+
+    def test_the_sha_is_lowercased_so_one_claim_is_not_two(self):
+        (b,) = sr.parse_journal_bullets("- RESOLVED B83BFB584: shouty.")
+        assert b.resolved_by == "b83bfb584"
+
+    def test_a_lowercase_marker_is_NOT_a_marker(self):
+        """Uppercase is the whole point: it is a token a writer types on purpose,
+        so it cannot be produced by prose that happens to use the word 'open'."""
+        (b,) = sr.parse_journal_bullets("- 2026-08-15: open: the port is open: 8080.")
+        assert b.openness is None
+
+    def test_the_marker_is_read_from_the_FIRST_line_only(self):
+        """A marker matched anywhere in wrapped prose would INVENT openness — the
+        mirror of the rewording failure, and the worse direction of the two."""
+        body = "- 2026-08-15: a durable lesson.\n  Later prose mentioning OPEN: nothing.\n"
+        (b,) = sr.parse_journal_bullets(body)
+        assert b.openness is None
+
+    def test_a_marker_inside_a_fenced_block_is_not_a_bullet_at_all(self):
+        body = "\n".join([
+            "- 2026-08-15: a lesson with a sample.",
+            "  ```",
+            "  - OPEN: this is sample text, not history",
+            "  ```",
+        ])
+        bullets = sr.parse_journal_bullets(body)
+        assert len(bullets) == 1
+        assert bullets[0].openness is None
+
+
+class TestUnmarkedActionIsAFloor:
+    """The narrow net. Both positives below are REAL bullets from the live corpus."""
+
+    def test_it_catches_the_forgejo_shape_that_motivated_the_work(self):
+        (b,) = sr.parse_journal_bullets(
+            "- 2026-07-24: FIX (1 line, keeps the GitHub-org gate): repoint the address."
+        )
+        assert b.unmarked_action is True
+
+    def test_it_catches_the_other_live_shape_an_unpinned_image(self):
+        (b,) = sr.parse_journal_bullets(
+            "- image `some/tool:latest` unpinned + imagePullPolicy Always "
+            "(not yet addressed)."
+        )
+        assert b.unmarked_action is True
+
+    def test_an_ordinary_durable_lesson_is_not_flagged(self):
+        """Precision matters more than recall here: a noisy advisory is one nobody
+        reads, and the corpus measurement that chose these two phrasings rejected
+        `TODO` and bare `not yet` for exactly this — both scored false positives."""
+        (b,) = sr.parse_journal_bullets(
+            "- 2026-07-09: VFE dedicated CPU worker pool = DO NOT re-attempt — twice "
+            "added then reverted."
+        )
+        assert b.unmarked_action is False
+
+    def test_the_rejected_TODO_phrasing_stays_rejected(self):
+        """Measured FALSE on the corpus: an entry describing an UPSTREAM project's
+        TODO as a fact about that project, not a remedy this operator owes."""
+        (b,) = sr.parse_journal_bullets(
+            "- Presigned URL lifetime defaults to 365 DAYS, with an upstream TODO to "
+            "lower it for prod."
+        )
+        assert b.unmarked_action is False
+
+    def test_a_declared_bullet_is_never_ALSO_reported_as_unmarked(self):
+        """Double-reporting one bullet in two populations would make the advisory's
+        own count wrong, and train the reader to discount it."""
+        for line in (
+            "- OPEN: FIX (1 line): repoint the address.",
+            "- RESOLVED b83bfb584: FIX (1 line): repointed the address.",
+        ):
+            (b,) = sr.parse_journal_bullets(line)
+            assert b.unmarked_action is False, line
+
+
+def _journal(*bullets: str) -> st.EntryJournal:
+    body = "\n".join(bullets)
+    return st.EntryJournal(
+        ref="r", filename="r.md", state="journalled",
+        bullets=sr.parse_journal_bullets(body),
+    )
+
+
+class TestEntryJournalOpenAccessors:
+    def test_open_bullets_counts_only_the_declared_ones(self):
+        j = _journal(
+            "- 2026-08-01: OPEN: one.",
+            "- 2026-08-02: RESOLVED abc1234: two.",
+            "- 2026-08-03: FIX (1 line): three.",
+            "- 2026-08-04: an ordinary lesson.",
+        )
+        assert len(j.open_bullets) == 1
+        assert len(j.unmarked_action_bullets) == 1
+
+    def test_oldest_open_days_takes_the_OLDEST_not_the_newest(self):
+        """The question is 'how long has something here been unverified', and the
+        newest open action structurally cannot answer it. A `min()` here would
+        report the forgejo case as 0 days old on the day a second one was added."""
+        j = _journal(
+            "- 2026-08-09: OPEN: recent.",
+            "- 2026-07-24: OPEN: the old one — this is the answer.",
+        )
+        assert j.oldest_open_days("2026-08-15") == 22
+
+    def test_an_undated_open_bullet_is_skipped_not_guessed_at(self):
+        """It must still COUNT as open — the age is unknown, the openness is not."""
+        j = _journal("- OPEN: no date on this one.")
+        assert len(j.open_bullets) == 1
+        assert j.oldest_open_days("2026-08-15") is None
+
+    def test_a_garbage_today_returns_None_rather_than_a_wrong_number(self):
+        j = _journal("- 2026-07-24: OPEN: something.")
+        assert j.oldest_open_days("not-a-date") is None
+
+    def test_no_open_bullets_gives_None_and_an_empty_tuple(self):
+        j = _journal("- 2026-08-15: an ordinary lesson.")
+        assert j.open_bullets == ()
+        assert j.oldest_open_days("2026-08-15") is None
+
+
+class TestRenderOpenActionsAddressesTheWriter:
+    def test_it_names_the_age_and_demands_a_verdict_before_appending(self):
+        j = _journal("- 2026-07-24: OPEN: repoint the address to oauth-shared.")
+        body = "\n".join(st._render_open_actions(j, "2026-08-15", ""))
+        assert "22 days" in body
+        assert "RE-CHECK" in body
+        assert "RESOLVED <sha>:" in body
+
+    def test_the_unmarked_block_says_AT_LEAST_and_never_states_a_total(self):
+        """The floor language is the load-bearing part. Without it the advisory
+        reads as a complete count of the entry's open work, which it is not and
+        cannot be — the detector knows two phrasings and recall is unmeasured.
+
+        🔴 PINS THE WHOLE NORMALISED CLAIM, not two keywords. The keyword version
+        of this test was WALKED by a mutation that deleted "so this is a floor and
+        never a count of what exists" while leaving `AT LEAST` standing in an
+        adjacent fragment — `claude/RULES.md`: when the artifact under test is
+        prose, a guard on words is walkable by rewording, so pin the string. A
+        cosmetic reword now fails this test; that is the price of the claim being
+        machine-readable, and it is worth paying here because this exact sentence
+        is what stops a floor being read as a total."""
+        j = _journal("- 2026-07-24: FIX (1 line): repoint the address.")
+        body = " ".join("\n".join(st._render_open_actions(j, "2026-08-15", "")).split())
+        assert (
+            "AT LEAST this many — the detector matches two phrasings measured over "
+            "the live corpus and has UNKNOWN recall, so this is a floor and never a "
+            "count of what exists."
+        ) in body
+
+    def test_it_renders_NOTHING_when_the_entry_has_no_unfinished_business(self):
+        """The common case by far. A block that printed 'no open actions' on every
+        entry would push the `already there` bullets — the thing step 4 must
+        actually read — down the screen for no information."""
+        j = _journal("- 2026-08-15: an ordinary durable lesson.")
+        assert st._render_open_actions(j, "2026-08-15", "") == []
+
+    def test_an_undated_open_bullet_says_its_age_is_unknown_not_zero(self):
+        j = _journal("- OPEN: something.")
+        body = "\n".join(st._render_open_actions(j, "2026-08-15", ""))
+        assert "age is unknown" in body
+        assert "0 day" not in body
+
+
+def _entry_with(nuance: list[str], service: str = "svc", scope: str = SCOPE) -> str:
+    return "\n".join(
+        ["---", f"service: {service}", f"scope: {scope}", "---", "",
+         "## Pointers", "- somewhere", "", "## Nuance / work-history", *nuance, ""]
+    )
+
+
+class TestValidateReportsOpenActionsWithoutChangingTheVerdict:
+    def _store(self, tmp_path: Path, nuance: list[str]) -> Path:
+        store = tmp_path / "s"
+        (store / SCOPE).mkdir(parents=True)
+        (store / SCOPE / "svc.md").write_text(_entry_with(nuance), encoding="utf-8")
+        return store
+
+    def test_an_entry_with_open_actions_still_validates_CLEAN_and_exits_0(self, tmp_path, capsys):
+        """🔴 THE INVARIANT. `--validate` answers 'would the loader accept this
+        file'. An entry with unfinished business is well-formed, and failing it
+        would be a gate nobody can turn green by fixing the file — the
+        permanently-red gate `claude/RULES.md` forbids, which trains everyone to
+        click through the malformed findings sitting beside it."""
+        store = self._store(tmp_path, [
+            "- 2026-08-01: OPEN: still outstanding.",
+            "- 2026-07-24: FIX (1 line): repoint the address.",
+        ])
+        rc = st.main(["--store", str(store), "--scope", SCOPE, "--validate"])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "OK — 1 of 1 entry file(s) parse, 0 malformed" in out
+        assert "1 declared `OPEN:`" in out
+        assert "1 unmarked bullet(s)" in out
+
+    def test_a_zero_prints_its_DENOMINATOR_and_refuses_to_be_a_clean_bill(self, tmp_path, capsys):
+        """A reassuring zero has to carry the size of what it is a zero over, and
+        this one has to disclaim its own recall as well."""
+        store = self._store(tmp_path, ["- 2026-08-15: an ordinary durable lesson."])
+        st.main(["--store", str(store), "--scope", SCOPE, "--validate"])
+        out = capsys.readouterr().out
+        assert "0 declared across 1 entry file(s)" in out
+        assert "FLOOR" in out
+        assert "not a clean bill of health" in out
+
+    def test_a_MALFORMED_entry_still_reports_malformed_first_and_exits_3(self, tmp_path, capsys):
+        """The advisory must never displace the finding that actually blocks a read."""
+        store = tmp_path / "s"
+        (store / SCOPE).mkdir(parents=True)
+        (store / SCOPE / "bad.md").write_text(
+            "---\nservice: bad\nscope: " + SCOPE + "\naliases: [a,\n  b]\n---\n\n"
+            "## Nuance / work-history\n- 2026-08-01: OPEN: outstanding.\n",
+            encoding="utf-8",
+        )
+        rc = st.main(["--store", str(store), "--scope", SCOPE, "--validate"])
+        out = capsys.readouterr().out
+        assert rc == 3
+        assert "🔴 MALFORMED" in out
+        assert out.index("MALFORMED") < out.index("open actions")
+
+    def test_json_keeps_the_two_populations_separate(self, tmp_path, capsys):
+        """Merged into one number, a floor masquerades as a count."""
+        store = self._store(tmp_path, [
+            "- 2026-08-01: OPEN: declared.",
+            "- 2026-07-24: FIX (1 line): guessed.",
+        ])
+        st.main(["--store", str(store), "--scope", SCOPE, "--validate", "--json"])
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["open_action_count"] == 2
+        assert [a["declared"] for a in payload["open_actions"]] == [False, True] or \
+               [a["declared"] for a in payload["open_actions"]] == [True, False]
+        assert sum(a["declared"] for a in payload["open_actions"]) == 1
+
+
+class TestScanOpenActions:
+    def test_a_file_with_no_nuance_section_contributes_nothing_and_does_not_raise(self, tmp_path):
+        p = tmp_path / "x.md"
+        p.write_text("---\nservice: x\n---\n\n## Pointers\n- a\n", encoding="utf-8")
+        assert st.scan_open_actions([p]) == ()
+
+    def test_an_unreadable_path_is_skipped_rather_than_raising(self, tmp_path):
+        """The advisory runs beside the parse check; it must never be the thing
+        that turns a validation run into a crash."""
+        assert st.scan_open_actions([tmp_path / "does-not-exist.md"]) == ()

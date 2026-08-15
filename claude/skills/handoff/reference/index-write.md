@@ -80,6 +80,43 @@ The tool therefore **refuses** rather than reporting the prefix — the opposite
 
 The guard is `len(files) < changedFiles`, deliberately **cap-agnostic**: pinning the literal 100 would go stale the day GitHub changes it, and the comparison needs no constant at all.
 
-## 5. Why this step exists at all
+## 5. `OPEN:` / `RESOLVED <sha>:` — the two minutes that cost 22 days
+
+The store's read path has always carried the caveat *"a bullet may describe a gotcha already fixed"*. On 2026-08-15 that stopped being a disclaimer and became a measured instance.
+
+One entry in the `datapacket-talos` scope carries a full diagnosis of an auth failure and ends with a proposed remedy — a one-line config change, written as future work. (The entry is named in the store; the details are client-confidential and are not reproduced here, because the lesson is in the timing.)
+
+| event | time |
+|---|---|
+| the entry was written | 2026-07-24 **15:00:18** |
+| the fix it calls future work landed (`b83bfb584`) | 2026-07-24 **15:02:21** |
+
+**Stale 2m03s after it was written; served as an open action for 22 days.** The config today already carries the change — the remedy is in place, and the entry still asks for it.
+
+Nobody was careless. Step 4 runs **mid-session**: the writer records what it knows, the session keeps working, and the thing that changes the answer happens after the write. There was no moment at which anyone was asked to come back.
+
+### Why a marker and not a detector
+
+The obvious repair is to grep the prose for remedy words. Measured over the live corpus (196 nuance bullets, 2026-08-15) the best candidates score like this:
+
+| candidate | hits | verdict |
+|---|---|---|
+| `FIX (` / `FIX:` | 1 | true — the entry above |
+| `not (yet) addressed` | 1 | true — one other entry, an unpinned image tag |
+| `TODO` | 1 | **false** — an entry describing an *upstream* project's TODO as a fact |
+| bare `not yet` | 3 | **2 false** — one describes a mechanism, one is an explicit WONTFIX |
+| `should be` / `next step` / `pending` / `deferred` / `proposed fix` | 0 each | no corpus evidence either way |
+
+So a detector finds **two** bullets, and `claude/RULES.md` names what it would be: *"a guard on WORDS is walkable by REWORDING"*. A writer who says "the correct address is oauth-shared" instead of "FIX:" walks past it silently.
+
+The marker is a **prefix the writer types**, which cannot be walked by rewording the sentence after it. The two measured phrasings survive as a deliberately narrow **floor** under entries written before the marker existed — reported by `--validate` as *"AT LEAST this many"*, never as a count, and never on the index line, which cannot carry that caveat.
+
+### Where each half surfaces
+
+- **`--validate`** reports both populations, separately, and **does not change its verdict**: an entry with unfinished business is well-formed, and failing it would be a gate nobody could turn green by fixing the file.
+- **The index line** gains `🔴 N OPEN` — declared bullets only, conditional, so entries with nothing open render byte-identical to before.
+- **Step 4's own output** prints the open block with an age, addressed to the writer, because the next write is the only moment anyone is looking.
+
+## 6. Why this step exists at all
 
 `/analyze-service` was the store's only writer, so entries accumulated for infra services inside a single scope while the work being recorded spans ~12 repos. `/handoff` is the second writer, and the one that runs at the end of every session rather than only when someone asks for a recon.

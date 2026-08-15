@@ -103,6 +103,8 @@ __all__ = [
     "ON_MALFORMED",
     "ON_MALFORMED_RAISE",
     "ON_MALFORMED_COLLECT",
+    "OPENNESS_OPEN",
+    "OPENNESS_RESOLVED",
     "JournalBullet",
     "extract_sections",
     "parse_journal_bullets",
@@ -1006,6 +1008,57 @@ _JOURNAL_BULLET = re.compile(r"^[-*][ \t]+")
 # 44% of the real corpus on the floor and call the result a complete read.
 _JOURNAL_DATE = re.compile(r"^[-*][ \t]+(\d{4}-\d{2}-\d{2})(?=[:,)\]\s]|$)")
 
+# `- [YYYY-MM-DD: ]OPEN: …` / `- [YYYY-MM-DD: ]RESOLVED <sha>: …` — the openness
+# marker, and the reason it is a PREFIX rather than a phrase.
+#
+# 🔴 WHY THIS IS SCHEMA AND NOT A PROSE DETECTOR. The motivating entry
+# (`datapacket-talos/forgejo`) carries a bullet proposing a one-line config change
+# as future work. That change landed in `b83ffb584` at 15:02:21 on 2026-07-24;
+# the entry was written at
+# 15:00:18 — stale 2m03s after it was written, and still being served as an open
+# action 22 days later. Nothing could have noticed, because "this remedy is not
+# applied yet" was a claim made only in prose.
+#
+# The obvious repair is to grep the prose for remedy words. Measured over the live
+# corpus (196 nuance bullets, 2026-08-15) that finds TWO bullets — and
+# `claude/RULES.md` names the failure it would be: "a guard on WORDS is walkable by
+# REWORDING". A writer who says "the correct address is oauth-shared" instead of
+# "FIX:" walks past it, and the walk is silent. A prefix a writer must TYPE cannot
+# be walked by rewording the sentence after it; that is the whole reason the
+# marker sits before the prose rather than inside it.
+#
+# `RESOLVED` takes the sha that closed it so the claim is checkable — `git cat-file
+# -e <sha>` answers it — rather than being a second unverifiable assertion.
+_JOURNAL_OPENNESS = re.compile(
+    r"^[-*][ \t]+"
+    r"(?:\d{4}-\d{2}-\d{2}:[ \t]+)?"           # the optional leading date
+    r"(OPEN|RESOLVED)"
+    r"(?:[ \t]+([0-9a-fA-F]{7,40}))?"          # RESOLVED carries the closing sha
+    r":"                                        # exact terminator, no fuzz
+)
+
+OPENNESS_OPEN = "open"
+OPENNESS_RESOLVED = "resolved"
+
+# The retrospective advisory — DELIBERATELY NARROW, and a FLOOR, not a list.
+#
+# These two shapes are the only ones that scored 2 hits and 0 false positives over
+# the 196-bullet corpus. The ones rejected, and why, so nobody re-adds them:
+#   `TODO`        1 hit, FALSE — an entry describing an UPSTREAM project's TODO as
+#                 a fact about that project, not a remedy this operator owes.
+#   `not yet`     3 hits, 2 FALSE — one describes a mechanism (deps not yet on
+#                 npm), one is an explicit WONTFIX that says "don't re-litigate".
+#   `should be` / `next step` / `pending` / `deferred` / `proposed fix` — 0 hits
+#                 each. Adding a marker with no corpus evidence buys recall that
+#                 cannot be demonstrated and precision that cannot be defended.
+#
+# 🔴 RECALL IS UNKNOWN AND MUST BE REPORTED AS SUCH. This finds bullets that
+# HAPPEN to be phrased the two ways already seen. It is an advisory that says
+# "at least these"; it is never evidence that an entry has no open actions. The
+# schema marker above is the mechanism; this is a net under it for entries written
+# before the marker existed.
+_UNMARKED_ACTION = re.compile(r"\bFIX\s*[(:]|\bnot (yet )?addressed\b", re.I)
+
 
 def _is_fence(line: str) -> bool:
     s = line.lstrip()
@@ -1082,6 +1135,31 @@ class JournalBullet:
     """The ISO date the bullet is dated with, or None. ~44% of the real corpus
     carries no date; `None` is an ordinary reading, not a parse failure."""
 
+    openness: str | None = None
+    """`'open'` | `'resolved'` | None — the bullet's DECLARED openness marker.
+
+    None is by far the common reading — **195 of 196** bullets in the live corpus
+    on 2026-08-15 — and means only that nothing was declared. 🔴 It does NOT mean
+    "this bullet proposes no work": an unmarked bullet that proposes a remedy is
+    exactly the `forgejo` failure, and `unmarked_action` is the (narrow,
+    floor-only) net for that case.
+
+    ⚠ The 196th is why this reads 195 and not 196. A past session had ALREADY
+    written `- OPEN: rotate …` by hand, with no tooling asking it to and no
+    convention documented — so this schema is a formalisation of a shape the
+    corpus invented on its own, not one imposed on it. An earlier revision of
+    this docstring claimed all 196 were unmarked; that was written before the
+    corpus was grepped for markers, and the grep is what corrected it.
+    """
+
+    resolved_by: str | None = None
+    """The sha a `RESOLVED <sha>:` bullet names as having closed it, or None.
+
+    Carried so the claim is CHECKABLE — a reader can run `git cat-file -e` on it.
+    A `RESOLVED` with no sha parses fine and leaves this None; the marker is still
+    worth having, it just cannot be verified, and the renderer says which it got.
+    """
+
     @property
     def first_line(self) -> str:
         return self.lines[0] if self.lines else ""
@@ -1089,6 +1167,28 @@ class JournalBullet:
     @property
     def text(self) -> str:
         return "\n".join(self.lines)
+
+    @property
+    def is_open(self) -> bool:
+        return self.openness == OPENNESS_OPEN
+
+    @property
+    def unmarked_action(self) -> bool:
+        """Does this bullet LOOK like an unmarked open action? A FLOOR, never a list.
+
+        True only for the two phrasings measured to occur with no false positives
+        over the live corpus (see `_UNMARKED_ACTION`). An unmarked bullet phrased
+        any other way returns False, and that False is not evidence of anything —
+        which is why every renderer of this prints it as "at least N", never as a
+        count of what exists.
+
+        Suppressed once the bullet declares openness: a bullet that already says
+        `OPEN:` is not *unmarked*, and one that says `RESOLVED:` has been closed —
+        re-flagging either would train the reader to ignore the advisory.
+        """
+        if self.openness is not None:
+            return False
+        return bool(_UNMARKED_ACTION.search(self.text))
 
 
 def parse_journal_bullets(body: str) -> tuple[JournalBullet, ...]:
@@ -1133,8 +1233,44 @@ def parse_journal_bullets(body: str) -> tuple[JournalBullet, ...]:
     for group in bullets:
         while group and not group[-1].strip():
             group.pop()
-        out.append(JournalBullet(lines=tuple(group), date=_bullet_date(group[0])))
+        openness, resolved_by = _bullet_openness(group[0])
+        out.append(
+            JournalBullet(
+                lines=tuple(group),
+                date=_bullet_date(group[0]),
+                openness=openness,
+                resolved_by=resolved_by,
+            )
+        )
     return tuple(out)
+
+
+def _bullet_openness(first_line: str) -> tuple[str | None, str | None]:
+    """`(openness, resolved_by)` for one bullet's first line.
+
+    Takes the first line only, but 🔴 THAT IS NOT WHAT ENFORCES IT — the guard is
+    `re.match`, which anchors at position 0, over a pattern with no `re.MULTILINE`.
+    A marker on a continuation line is therefore unreachable whether this is passed
+    one line or the whole joined bullet.
+
+    Stated because a mutation battery proved it: replacing `group[0]` with the
+    joined bullet text is an EQUIVALENT mutant and survives the suite, and an
+    earlier version of this docstring claimed the argument was the protection.
+    Two mechanisms reaching one outcome cannot be told apart by any test
+    (`claude/RULES.md`), so the honest form is to name the one that actually holds
+    and keep the narrower argument as defence-in-depth — if the pattern ever gains
+    `re.MULTILINE`, passing one line is what stops markers being invented from
+    wrapped prose, and that is a real hazard rather than a hypothetical one.
+
+    The sha is normalised to lower case so `RESOLVED B83BFB58:` and
+    `RESOLVED b83bfb58:` are one claim, not two.
+    """
+    m = _JOURNAL_OPENNESS.match(first_line)
+    if not m:
+        return None, None
+    marker = OPENNESS_OPEN if m.group(1) == "OPEN" else OPENNESS_RESOLVED
+    sha = m.group(2)
+    return marker, sha.lower() if sha else None
 
 
 def _bullet_date(first_line: str) -> str | None:
