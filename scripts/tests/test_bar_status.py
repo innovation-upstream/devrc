@@ -1317,6 +1317,33 @@ def test_an_UNREADABLE_COUNT_still_keeps_a_KNOWN_stuck_alarm():
     assert out["text"] == "!2?" and out["state"] == "Critical"
 
 
+@pytest.mark.parametrize("outage", ["frozen", "marker"])
+@pytest.mark.parametrize("stuck", [1, 2, 9])
+def test_ONE_stuck_dispatch_survives_an_OUTAGE_as_loudly_as_two(outage, stuck):
+    """🔴 FOUND BY A MUTATION SWEEP, NOT BY REVIEW. Every fixture pinning the
+    carried stuck alarm used `stuck_count: 2`, so `_unmeasured`'s `if stuck > 0`
+    could be changed to `if stuck > 1` and the whole suite stayed green — a
+    SINGLE wedged dispatch dropping from `!1?`/Critical to a bare `?`/Warning
+    the moment the poller stopped, which is the exact downgrade `_unmeasured`
+    exists to refuse. One is the count a threshold slip hides behind; nine is a
+    value no constant in this module can be.
+
+    BOTH outage shapes, because they reach `_unmeasured` by different routes:
+    the FROZEN file still holds its own `stuck_count`, while the MARKER is
+    handed one by `bar-status-poll.carry_stuck_forward`. A guard on one of them
+    says nothing about the other.
+    """
+    if outage == "frozen":
+        payload = _aged(86_400, count=22, stuck_count=stuck, state="Critical")
+    else:
+        payload = _aged(0, count=0, state="stale", stuck_count=stuck)
+    out = clawgate_block.render(payload, now=FIXED_NOW)
+    assert out["text"] == "!%d?" % stuck, (outage, out)
+    assert out["short_text"] == out["text"], (outage, out)
+    assert out["state"] == "Critical", (outage, out)
+    assert out != UNKNOWN_PILL, (outage, stuck)
+
+
 # --------------------------------------------------------------------------- #
 # 🔴 The OTHER outage shape: the poller writes `stale` OVER the last reading.
 #
@@ -3185,6 +3212,32 @@ def test_a_MEASURED_death_outranks_an_UNKNOWN_at_the_PILL_too(
         _aged(0, count=0, unknown=True, state="Warning"), now=FIXED_NOW)
     assert quiet_unknown == {"text": "tlm ?", "short_text": "tlm ?",
                              "state": "Warning"}
+
+
+@pytest.mark.parametrize("age,expected_text", [(0, "tlm 3"), (86_400, "tlm 3?")])
+@pytest.mark.parametrize("cache_state", [None, "Idle", "Chartreuse"])
+def test_a_MEASURED_DEATH_COLOURS_whatever_the_CACHE_calls_its_state(
+        cache_state, age, expected_text):
+    """🔴 FOUND BY A MUTATION SWEEP, NOT BY REVIEW.
+    `test_block_defaults_state_when_missing_or_idle` is parametrized over
+    `BLOCKS`, which is clawgate/mail/alerts/civitai — telemetry is NOT in it. So
+    `_reading_pill`'s `state = "Critical"` fallback could be changed to
+    `"Warning"` and the entire suite stayed green: three measured dead sources
+    rendering soft-yellow whenever the cache's own `state` is absent, calm, or
+    junk — i.e. any cache from a writer this block no longer recognises.
+
+    Both ages, because the carried pill takes its colour from the same helper:
+    a downgrade here is a downgrade on the outage path too. `Critical` is a
+    LITERAL read off the operator's decision, not from the module — a source
+    that has stopped emitting is the loudest thing this pill says.
+    """
+    payload = _aged(age, count=3)
+    if cache_state is not None:
+        payload["state"] = cache_state
+    out = telemetry_block.render(payload, now=FIXED_NOW)
+    assert out["text"] == expected_text, (cache_state, out)
+    assert out["short_text"] == out["text"], (cache_state, out)
+    assert out["state"] == "Critical", (cache_state, out)
 
 
 @pytest.mark.parametrize("bad", [
