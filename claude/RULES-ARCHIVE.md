@@ -185,6 +185,56 @@ The control is mechanical and cheap, and it does not require imagining the mutan
 value the constant cannot equal, and watch the output move.** If the output does not move, the
 lookup under test is not being exercised, whatever the assertion says.
 
+### The mutant that never ran — a stale bytecode cache (2026-08-15)
+
+Every trap above is about a mutant that RAN and was not caught. This one is worse and reads
+identically in the report: the mutant **never executed at all**, and the sweep scored it
+SURVIVED.
+
+CPython decides whether a cached `__pycache__/*.pyc` is still valid from two fields in its
+header: the source's **mtime truncated to whole seconds**, and the source's **size in bytes**.
+A mutation that changes neither is invisible. Mutations are routinely same-length by
+construction — `>` → `>=` is not, but `"AAA"` → `"BBB"`, `<` → `>`, `and` → `or`, a swapped
+identifier of equal length, and a flipped boolean all are — and a sweep loop rewrites the file
+in milliseconds, well inside the same whole second as the import that built the `.pyc`.
+
+Measured 2026-08-15, 200 trials per arm, fresh temp dir per trial, no mtime tampering of any
+kind — write `AAA`, import it in a fresh interpreter to build the `.pyc`, immediately overwrite,
+import again, and record what the second import returns:
+
+| arm | landed in the same whole second | imported the STALE module |
+|---|---|---|
+| same-length `AAA` → `BBB` | 198/200 | **198/200** |
+| different-length `AAA` → `BBBB` (negative control) | 197/200 | **0/200** |
+
+The negative control is what makes the first row mean something: the size field alone catches
+every different-length mutation, so the harness is demonstrably able to report "not stale", and
+the 198 is a real blindness rather than a broken probe. The two same-length trials that were
+caught are the two that happened to cross a second boundary.
+
+🔴 **The first framing of this was wrong in a way worth recording, because it was the narrower
+one.** It was written down as "`cp -a` preserves `__pycache__` and a same-length mutation does
+not change size, so the check misses it" — blaming the copy. Measured directly: `cp -a` followed
+by an ordinary mutation is **caught** (the write moves mtime to now, a different second). What
+is required is that mtime *not move across a second boundary*, which `cp -a` + an explicit
+`touch -r` produces, and which a fast edit loop produces **on its own, with no copying at all**.
+A session reading the `cp -a` version and thinking "I did not copy anything, so this cannot be
+me" would walk straight into it. Same shape as the `git stash` ban's first wording.
+
+Controls that actually close it, cheapest first:
+
+- run the sweep under `PYTHONDONTWRITEBYTECODE=1`, or `rm -rf` the `__pycache__` dirs between
+  mutants — either removes the mechanism rather than detecting it;
+- keep one mutant you KNOW is caught in every batch. A sweep that reports 100% survival is far
+  more likely to be a broken harness than a suite with no coverage, and this is the positive
+  control that tells the two apart (→ [positive-control](#positive-control));
+- if a SURVIVED verdict matters, confirm the mutated line actually executed — a print, a
+  coverage run, or an assertion that the mutant's own value came back.
+
+Generalises past Python: any cache keyed on a coarse timestamp has this shape. The failure is
+not "the test was weak", it is "the artifact under test was never the artifact that ran" —
+which is the same class as verifying a deploy against an orphan process still serving old code.
+
 ## nine-broken-harnesses
 *Supports: 🔴 "Validate the INSTRUMENT before you read its verdict." (negative control).*
 
