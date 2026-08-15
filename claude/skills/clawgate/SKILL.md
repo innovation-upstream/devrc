@@ -95,37 +95,75 @@ version-from-the-live-pin, the ONE commit path (worktree off `origin/trunk`; nev
 test gate, build/push, pin bump, the CSS-cwd trap that fakes ~25 e2e failures, chart sync.
 
 ## task pickup — "read and evaluate clawgate task N", then "local dispatch"
-🔴 **The status/comment steps are NOT optional and NOT a thing to be asked for.** They were skipped
-for months because reading a task was one command while writing to it was a curl preamble; that
-asymmetry is gone (`task status` / `task comment` since 2026-08-14), so there is no longer an excuse
-to leave a task's state stale. Run the ritual unprompted.
+🔴 **The comment/status ritual is NOT optional and NOT a thing to be asked for.** It was skipped for
+months because reading a task was one command while writing to it was a curl preamble; that
+asymmetry is gone (`task status` / `task comment` since 2026-08-14). Run it unprompted.
+
+🔴 **A COMMENT is the only write that notifies a watcher.** A status flip pushes **only** on
+*entering* `ready_for_review` (`notifyTaskDone`), so going `in_progress` notifies **nobody**. That is
+*why* the pre-start comment exists — it is Zach's only chance to object **before** the work happens,
+not after. Route-level cites: `task-api.md` → "Notifications".
 
 ```bash
 clawgatectl task get <id>            # 1. READ — body + comments are BOTH already here
                                      #    (no /comments GET exists; it is 405)
 #  2. EVALUATE and report to Zach. Do NOT flip status yet — see the ordering trap below.
-clawgatectl task status <id> in_progress          # 3. on "local dispatch", THEN work
-#     …implement per repo defaults: tests that have been watched to FAIL, worktree, PR…
+#  3a. On "local dispatch": settle the acceptance criteria (detector below).
 clawgatectl task comment <id> --body "$(cat <<'EOF'
-Shipped in <PR link>. Tests: <matrix, incl. red-at-base evidence>.
-Verified: <the actual symptom reproduced>. NOT verified: <state it plainly>.
+**Starting** — host <host>, session <id>.
+Acceptance criteria (AUTHOR-SPECIFIED | DERIVED — not author-specified):
+1. … 2. …
+Plan: <2–3 lines>.
+Not doing: <explicit non-goals>.
+Assumptions: <the ones that would change the work if wrong>.
+<if DERIVED> These criteria are mine, not yours — object now if they are wrong.
 EOF
-)"                                                # 4. ONE comment, at the end
-clawgatectl task status <id> ready_for_review     # 5. hand back
+)"                                                # 3b. PRE-START comment, BEFORE the flip
+clawgatectl task status <id> in_progress          # 3c. THEN flip, and work
+#     …4. implement per repo defaults: tests watched to FAIL at base, worktree, PR…
+clawgatectl task comment <id> --body "…"          # 5. ONE completion comment (shape below)
+clawgatectl task status <id> ready_for_review     # 6. …or `complete` — see the gate
 ```
 
-- 🔴 **Ordering trap — flip to `in_progress` LAST, after any edit to the task itself.** The
+**Acceptance-criteria detector — deterministic, not a judgement call.** The body contains a heading
+matching `## Acceptance criteria` (case-insensitive) → **AUTHOR-SPECIFIED**. Anything else — including
+a body that merely *reads* like criteria — means you **DERIVE** them, and you must label them
+`DERIVED — not author-specified` in the comment.
+
+**The completion comment (5)** carries evidence **per criterion** — one line each, naming what proves
+it — plus an explicit **NOT verified** list. "All green" with no per-criterion mapping is not a
+completion report.
+
+🔴 **Status gate (6) — the only place `complete` is ever yours to set:**
+
+| criteria | every criterion validated with evidence? | final status |
+|---|---|---|
+| AUTHOR-SPECIFIED | yes | **`complete`** |
+| DERIVED | yes | **`ready_for_review`** — you must not grade an exam you wrote |
+| either | **no** | **`ready_for_review`**, naming WHICH criterion and WHY it was not validatable |
+
+🔴 **That gate is LOCAL-pickup only, structurally.** The in-devpod agent route
+`PATCH /agent/task/status` **forbids `complete`** (`notes.StatusAllowedForAgent`), so a dispatched
+devpod agent ends at `ready_for_review` regardless of what this skill says. Only the machine route
+this ritual uses can set `complete` at all — the gate governs that permission, nothing else.
+
+📌 **For the task AUTHOR (Zach): a `## Acceptance criteria` section in the body is what unlocks agent
+self-completion.** Without one, every pickup comes back `ready_for_review` for a human read. That is
+the one lever you have.
+
+- 🔴 **Ordering trap — flip to `in_progress` LAST, after any edit to the task ITSELF.** The
   `in_progress` 409 is refined but real: once in progress, a `PATCH /api/tasks/{id}` carrying any
   non-tag field (or any routing tag) is refused. Descriptive-tag-only edits still succeed.
-- 🔴 **NEVER set `complete` — that is Zach's call, always.** The machine route permits it (the
-  in-devpod agent route structurally forbids it), so nothing stops you but this line.
-  `ready_for_review` is where your work ends.
+  **Comments are exempt** — different route, no in-progress guard. So derived criteria go in the
+  **comment, never PATCHed into the body**: it dodges the 409, leaves Zach's task text untouched, and
+  makes provenance unambiguous (body = the author's words, comments = the agent's).
+- **Exactly TWO comments per pickup — start and finish, never per turn.** Per-turn self-reporting was
+  measured as noise and removed once already (memory `clawgate-loop-validation`); do not reintroduce
+  it in a new costume.
 - **Comments author as `claude-code`** by default via `X-Clawgate-Source`. There is no `--author`
   flag: the header IS the impersonation guard, and `user`/`operator` are unreachable by design. An
   unknown `--source` is silently downgraded to `api`, so the CLI warns on stderr when the author it
   gets back differs from the one it asked for.
-- **One comment, at the end — not per turn.** Per-turn self-reporting was measured as noise and
-  removed once already (memory `clawgate-loop-validation`); do not reintroduce it here.
 - ⚠ **A comment/status write also refreshes the task's idle clock**, which matters: the reaper
   dismisses anything untouched for 7d, and dismissing **tears down the linked agent pod**.
 

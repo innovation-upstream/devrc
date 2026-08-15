@@ -31,6 +31,40 @@ read-back `GET` is usually redundant:
 - `POST /api/tasks/{id}/comments` → the **created comment** `{id,noteId,author,body,createdAt}`.
 - `DELETE /api/tasks/{id}` → `{"id":N,"deleted":true}`.
 
+## 🔴 Notifications: a COMMENT is the only write that notifies a watcher
+Read in source on `trunk`, 2026-08-14 — not inferred from behaviour:
+
+| write | pushes? | site |
+|---|---|---|
+| `POST /api/tasks/{id}/comments` | **always**, coalesced, **machine path only** | `notifyTaskCommented`, `internal/api/notes.go:1414` (handler `handleAPITaskComment`, `:1354`) |
+| `PATCH /api/tasks/{id}/status` | **only on ENTERING `ready_for_review`**, deduped | `notifyTaskDone` from `applyTaskStatus`, `notes.go:1065`; impl `internal/api/push_task.go:214` |
+| `PATCH /api/tasks/{id}` (edit) | no | — |
+| `POST /api/tasks` (create) | no task push — the card paths are `/api/send` and `/api/notify` | — |
+
+What a producer (and any agent picking up a task) must design around:
+- 🔴 **Flipping a task to `in_progress` notifies NOBODY.** Any "I have started" signal has to be a
+  COMMENT. This is exactly why the skill's pickup ritual posts a **pre-start comment before** the
+  `in_progress` flip: it is the watcher's only chance to object before the work happens.
+- The **session** (human) comment route deliberately does not push — that is Zach typing, and his own
+  phone must not buzz; the per-agent route keeps its existing no-push behaviour. Only the machine
+  `/api/tasks/{id}/comments` path buzzes.
+- `notifyTaskDone` is deduped per task, and the mark is CLEARED whenever the task leaves
+  `ready_for_review` — so `ready → in_progress → ready` notifies again, while a no-op re-save does not.
+
+**Comments are exempt from the `in_progress` 409.** `POST /api/tasks/{id}/comments` is a different
+route with no in-progress guard, while `PATCH /api/tasks/{id}` 409s once in progress on any non-tag
+field or any routing tag. So an agent recording derived acceptance criteria, a plan or an assumption
+against an in-progress task **comments them — it never PATCHes the body.** Three reasons, all
+load-bearing: it dodges the 409, it leaves the author's text untouched, and it keeps provenance
+unambiguous (body = the author's words, comments = the agent's).
+
+🔴 **`complete` is structurally out of reach for a dispatched devpod agent.**
+`PATCH /agent/task/status` gates on `notes.StatusAllowedForAgent` → `taskstatus.AllowedForAgent` =
+`Valid(s) && s != Complete` (`internal/taskstatus/taskstatus.go:79`), so a devpod agent's terminal
+state is always `ready_for_review`. Only the machine `PATCH /api/tasks/{id}/status` — the LOCAL
+pickup path — can set `complete`, so the skill's author-specified-criteria gate governs that
+permission and has no bearing whatsoever on the devpod route.
+
 ## ⚠ Request keys ≠ response keys (the `sourceSessionId` trap, twice more)
 `POST`/`PATCH` take **`branch`** and **`privileges`**; the task reads back as **`repoBranch`**
 and **`grantProfiles`** (`notes.go`). Round-tripping a GET body into a PATCH silently drops both.
