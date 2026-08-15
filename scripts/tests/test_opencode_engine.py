@@ -755,8 +755,20 @@ HISTORICAL_VERSION_CLAIMS = (
      "this test's own docstring, naming the bump it was written for"),
     ("scripts/tests/test_opencode_engine.py", "true at the merge-base",
      "the scope note's account of the claims this PR touched"),
-    ("scripts/tests/test_opencode_engine.py", "while the lock pins",
-     "this ledger's own record of the measured deploy gap"),
+    # The CONVERGENCE record. These lines now state the pinned version and cite
+    # the pre-bump one as evidence that the bump changed nothing — history, not a
+    # claim about what runs. Distinct from the deployed-state category above,
+    # which is gone: these do not stop being true on the next ship.
+    ("scripts/browser-bridge/README.md", "resolution was measured identical on",
+     "cites the pre-bump measurement as evidence the bump was a no-op"),
+    ("scripts/browser-bridge/README.md", "pins** (measured identical on",
+     "same, for the custom-tool claim"),
+    ("scripts/browser-bridge/reference/agent.md", "the same resolution was measured on",
+     "same, for the misattribution warning"),
+    ("scripts/browser-bridge/reference/agent.md", "and it resolved identically on",
+     "same, for the gate claim"),
+    ("scripts/tests/test_opencode_engine.py", 'Five lines said "both hosts run',
+     "this ledger's own record of the exemptions it used to carry"),
     ("scripts/browser-bridge/README.md", "opencode JSON envelope (verified live, opencode",
      "dated envelope-shape observation; not re-derived"),
     ("scripts/browser-bridge/reference/agent.md", "extension 0.2.0, `opencode`",
@@ -774,25 +786,19 @@ HISTORICAL_VERSION_CLAIMS = (
      "@-import claim, third copy"),
     ("scripts/tests/test_opencode_config.py", "NOT re-derived since — needs a live model call",
      "@-import claim, fourth copy"),
-    # 🔴 DEPLOYED-STATE claims — a category of their own, and the one this PR got
-    # wrong twice. A `flake.lock` bump changes what the lock PINS; it changes
-    # nothing about what a host RUNS until `home-manager switch` (this repo's
-    # CLAUDE.md: "Merged ≠ deployed"). MEASURED 2026-08-13: both hosts resolve
-    # /nix/store/64n428…-opencode-1.18.4 while the lock pins 1.18.16.
-    # An audit round called these "falsified by this PR" and they were not — they
-    # were TRUE. Rewriting them to "the pinned version" made them FALSE and, worse,
-    # UNCHECKABLE: with no literal left, nothing above can ever see them go stale.
-    # They track the DEPLOY, so they change on the next ship.sh, not on this merge.
-    ("scripts/browser-bridge/README.md", "and both resolve browser-only** (verified: the dump",
-     "deployed-state: what the hosts RUN, not what the lock pins"),
-    ("scripts/browser-bridge/README.md", "is what the hosts RUN",
-     "deployed-state: names the deploy gap explicitly"),
-    ("scripts/browser-bridge/README.md", "which is what BOTH hosts",
-     "deployed-state: what the hosts RUN"),
-    ("scripts/browser-bridge/reference/agent.md", "They are not version-related — both hosts run",
-     "deployed-state: what the hosts RUN"),
-    ("scripts/browser-bridge/reference/agent.md", "gate failure leaks no tab.",
-     "deployed-state: what the hosts RUN"),
+    # 🔴 THE DEPLOYED-STATE EXEMPTIONS ARE GONE, and their absence is the record.
+    # Five lines said "both hosts run 1.18.4" — TRUE while the lock pinned 1.18.16
+    # and the hosts had not converged, which is exactly why they were exempt
+    # rather than wrong. `ship.sh` converged both on 2026-08-15, verified at the
+    # CONSUMER (both `readlink -f $(command -v opencode)` resolve to the same
+    # …-opencode-1.18.16 store path), so those lines now carry the pinned version
+    # and need no exemption.
+    #
+    # The ledger caught its own obsolescence: the moment the lines were updated,
+    # all five entries orphaned and the suite went red. That is the SHRINK
+    # direction working, and the reason this category was named separately
+    # instead of filed under "historical" — a historical record never stops being
+    # true, a deployed-state claim stops the day you ship.
 )
 
 
