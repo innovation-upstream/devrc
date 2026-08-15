@@ -3465,8 +3465,10 @@ def render_no_path_footprint(scope: str) -> list[str]:
     `looked-at-nothing` returns before `nominations` is ever set, and the other
     site sits inside `if not report.writes_proposed:` where
     `writes_proposed = bool(known) or bool(nominations)` makes it empty by
-    construction. Measured with an instrumented raise: 0 trips across 600 tests,
-    against 12 on a positive control that added a third call site. The commit
+    construction. Measured with an instrumented counter over 600 tests: 25 of 25 calls
+    FROM `render_text` had zero nominations. (One trip existed, from a test
+    calling the helper directly with a hand-made list — which is the point: the
+    only way to reach it was to construct a state `render_text` cannot produce.) The commit
     that introduced it called the suppression the design's load-bearing decision
     and its "negative control" test built a state `render_text` cannot produce —
     breakable, not reachable, which is the distinction RULES.md draws.
@@ -3474,7 +3476,7 @@ def render_no_path_footprint(scope: str) -> list[str]:
 
     The real gap it was reaching for is handled where it actually occurs: see the
     one-line variant appended to the `NO ENTRY` block, which is the branch that
-    genuinely has nominations. Estimated over 287 real commits, ~65% of dead ends would have been
+    genuinely has nominations. Estimated at ~65% of dead ends over 287 real commits, which would have been
     suppressed there — the common case, not the corner. 🔴 A PROXY: per-commit
     file lists standing in for the real `--session`/`--pr`/`--commit` windows,
     against a synthetic empty scope. The direction is unambiguous and the dead

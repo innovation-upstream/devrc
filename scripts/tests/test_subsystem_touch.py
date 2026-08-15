@@ -8062,6 +8062,22 @@ class TestNoPathFootprint:
             "the nomination branch offers only path-derived slugs"
         )
         assert f"--template <slug> --scope {SCOPE}" in text
+        assert f"python3 {st.SELF_PATH} --template" in text, (
+            "the NO ENTRY variant must carry the absolute path too"
+        )
+
+    def test_the_nomination_offer_prints_EXACTLY_ONCE(self, store: Path) -> None:
+        """🔴 It belongs after the loop, not inside it. This round put it inside
+        by accident once (caught only because the indentation happened to be
+        invalid); moved one line further down it would have been VALID, printed
+        once per nomination, and passed 602/602 — measured, four copies for a
+        four-nomination report."""
+        rep = _report(
+            ["src/alpha/a.py", "src/alpha/b.py", "src/beta/c.py", "src/beta/d.py"],
+            store,
+        )
+        assert len(rep.nominations) >= 2, rep.nominations
+        assert st.render_text(rep).count("NO file footprint") == 1
 
     def test_the_printed_command_names_a_file_that_EXISTS(self) -> None:
         """🔴 A pasteable command is worth printing only if it runs. Replacing
@@ -8082,10 +8098,19 @@ class TestNoPathFootprint:
         assert text.index("SKILL HOMES") < text.index("NO PATH FOOTPRINT?")
 
     def test_it_states_the_limit_it_buys(self) -> None:
-        """An entry with no paths can never be RESOLVED from one. Saying so is
-        the difference between a useful pointer and a promise the resolver
-        cannot keep — a reader who expects auto-matching will conclude the store
-        is broken."""
+        """🔴 An entry with no paths IS resolvable — verified, twice.
+
+        Write one via `--template` with zero paths, then let two paths carry the
+        slug: `status=resolved`, matched on the filename tier. Resolution is a
+        property of the PATHS, not of the entry.
+
+        This docstring used to assert the opposite, and survived the commit that
+        corrected the same claim in the module, the skill and the pin — the
+        fourth copy, inside the corrective test, contradicting its own body two
+        lines down. The practical cost of the false version was not confusion but
+        bad advice: it discouraged choosing a slug a future path would carry,
+        which is the one choice that makes the entry findable later.
+        """
         body = "\n".join(st.render_no_path_footprint("s"))
         assert "automatically TODAY" in body
         assert "PREFER a slug a future path would carry" in body, (
@@ -8095,7 +8120,7 @@ class TestNoPathFootprint:
         assert "never be RESOLVED" not in body, (
             "VERIFIED FALSE: an entry written with no paths resolved normally as "
             "soon as a path named its slug (status=resolved, matched via "
-            "filename). The absolute claim was pinned in three places."
+            "filename). The absolute claim was pinned in FOUR places, the last of\n            them this test's own docstring."
         )
 
     def test_it_reaches_render_text_on_BOTH_dead_ends(self, store: Path) -> None:
@@ -8111,8 +8136,20 @@ class TestNoPathFootprint:
             assert f"--scope {SCOPE}" in text, (
                 f"{why}: the call site did not pass the report's scope"
             )
+            # 🔴 The RENDERED line, not just the constant. Substituting a bare
+            # relative path at either call site individually left all 602 tests
+            # green: the command would read correctly and fail from any other
+            # cwd. `Path(SELF_PATH).is_file()` cannot see a per-site swap.
+            assert f"python3 {st.SELF_PATH} --template" in text, (
+                f"{why}: the rendered command does not carry the absolute path"
+            )
 
-    def test_a_RESOLVED_run_stays_silent(self, store: Path) -> None:
+    def test_a_RESOLVED_run_stays_silent_about_the_STANDALONE_block(
+        self, store: Path
+    ) -> None:
+        """Narrowly named on purpose: a `resolved` report that ALSO nominates does
+        print the one-line offer from the NO ENTRY branch. Only the standalone
+        block is silent here."""
         rep = _report(["src/collector/a.py", "src/collector/b.py"], store)
         assert rep.status == "resolved", rep.status
         assert "NO PATH FOOTPRINT?" not in st.render_text(rep)
