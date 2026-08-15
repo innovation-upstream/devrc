@@ -31,6 +31,7 @@ X — your call"). Leave the setup a little more modern than you found it; never
 | i3 WM config (binds, bar buttons) | `nix/i3/config.nix` → `~/.config/i3/config` |
 | Decoupled poller (workbench systemd-user timer) | `scripts/bar-status-poll` |
 | Instant block scripts (read cache, never network) | `scripts/i3status-{clawgate,mail,alerts,civitai,dnd,media,airvpn,telemetry}` |
+| 🔴 ONE definition of "this cache is too old" | `scripts/bar_freshness.py` — a CO-LOCATED SIBLING module every cache-backed block loads by explicit path. Needs its OWN `home.file` in `graphical.nix` (it is deployed *beside* the blocks); a missing symlink turns every count pill into `?` on a healthy host. Pinned by `test_every_block_that_loads_the_sibling_is_DEPLOYED_beside_it` |
 | Poller output (per-source JSON) | `~/.cache/bar-status/*.json` (0600) |
 | Generated bar TOML + symlinked scripts | `~/.config/i3status-rust/` |
 | **RETIRED — never edit** | `/etc/nixos/{i3config,i3blocks}.nix`, `/etc/nixos/i3blocks-scripts` (except `airvpn-sudo` + `airvpn-updown`, which MUST stay there for the NOPASSWD sudoers rule + the tunnel PostUp/PostDown; the old Mullvad `vpn-sudo` is dead) |
@@ -39,16 +40,39 @@ X — your call"). Leave the setup a little more modern than you found it; never
 - **Blocks render local files only.** The bar NEVER queries a remote per tick. Anything remote
   (alert counts, mail, clawgate tasks) is fetched out-of-band by `bar-status-poll` (~45s
   systemd-user timer, workbench-only) which writes tiny JSON to `~/.cache/bar-status/` — so a
-  slow/down source can never hang or break the bar. A down source writes `{"state":"stale"}` →
-  the block renders **empty/invisible** — **except `clawgate`**, whose reassuring answer is a
-  ZERO, so "cannot tell" must not borrow the pixels that mean "nothing to tell": it renders a
-  visible `?` (and `!N?`, keeping the last known stuck count — `carry_stuck_forward` copies it
-  onto the stale marker, so a clawgate outage cannot silence a live wedge).
-  ⚠ **`telemetry` does NOT** — `i3status-telemetry` maps a poller `stale`/`error` to the empty
-  pill on purpose (the unit's `OnFailure` toast covers a fetch that raised). Its `tlm ?` comes
-  only from `payload["unknown"]` **inside a readable payload** — the deadman said "cannot
-  evaluate", grace-gated at 1800s in `parse_telemetry`. So telemetry is guarded against a dead
-  *backend* but not against a dead *poller*; see the block table row.
+  slow/down source can never hang or break the bar.
+- 🔴 **A COUNT NEVER TRAVELS WITHOUT ITS DISCRIMINANT — every cache-backed block, not just
+  clawgate.** "0 measured" and "not measured" render differently everywhere. **Four shapes, one
+  answer** (`bar_freshness.unmeasured`): the file is missing/corrupt, the poller wrote a
+  `stale`/`error` marker, `ts` is absent or non-integral, or `ts` is older than
+  `MAX_CACHE_AGE_SECS` (**600s**, from the unit: 45s re-arm + 60s systemd `AccuracyUSec` + 90s
+  `TimeoutStartSec` = 195s worst healthy gap, ×3). Grammar, one system across all blocks: a
+  **TRAILING `?` = "this is not a current measurement"**, and it composes with whatever the
+  reading still says (`24!2?`, `tlm 3?`). Hide-at-zero applies to the **MEASURED** zero ONLY.
+  🔴 **Fixture rule: `ts` must be an INT** — `int_or_none` refuses to coerce, so a float
+  `time.time()` short-circuits every case to `?` and looks exactly like a code bug.
+  Per block: `mail` → `?`; `alerts` → `󰀪 ?`; `civitai` → `󰀪 civ ?` (label kept, so you can tell
+  WHICH prod went unreadable); `telemetry` → `tlm ?` / `tlm N?`; `clawgate` → `?` / `!N?`;
+  `media` → `qBit?`; `airvpn` → soft-yellow icon (**its discriminant is COLOUR alone** — off and
+  unknown are both an icon with empty text). Every `__main__` last-resort `except` prints the
+  block's `?` pill too, literal-built so it cannot depend on what just failed.
+- **Until 2026-08-14 only `clawgate` did any of this.** Measured against the operator's own
+  caches: a payload aged 24h rendered **byte-identically to the live one in six of seven
+  blocks** — `alerts` announcing 39 firing alerts, `civitai` 146 on CLIENT PROD, `media` live
+  transfer speeds, `airvpn` "tunnel deliberately off", `mail`/`telemetry` an invisible
+  all-clear. None read `ts` at all. `telemetry` was the sharpest: the deadman block had **no
+  deadman of its own**, and its `stale`→empty mapping was justified by an `OnFailure` toast that
+  **cannot fire** (`source()` swallows every fetch exception into a `stale()` marker and the
+  unit exits 0; a stopped timer raises no failure either).
+- 🔴 **`MAX_CACHE_AGE_SECS` (600) and `TELEMETRY_UNKNOWN_GRACE` (1800) are NOT the same number
+  twice — do not merge them.** The gate asks *"is the WRITER alive?"* (derived from the timer;
+  below ~195s it fires on healthy jitter). The grace asks *"how long has a LIVING writer been
+  saying it cannot tell?"* (debounces a ClickHouse restart; near 600s it flaps the pill).
+  Pinned as an ORDERING by `test_the_two_TOO_OLD_constants_measure_DIFFERENT_THINGS`.
+- **Only `clawgate` carries a known alarm THROUGH the marker path** — `carry_stuck_forward`
+  copies the last `stuck_count` onto the stale marker, so an outage renders `!2?` rather than a
+  bare `?`. The others keep a count only on the FROZEN-file path (the old payload is still on
+  disk); `stale()` writes `count: 0` over everything else. Known, deliberate gap.
 - **Colour == "look at me."** Steady state is neutral/invisible (hide-at-zero count blocks). A
   block reddens only when something NEW crosses its `--red-above` line — standing backlogs read
   neutral.
@@ -75,7 +99,7 @@ X — your call"). Leave the setup a little more modern than you found it; never
 | clawgate | `i3status-clawgate` | 11 | 0 (0→>0) | Tasks needing the operator = `{open, ready_for_review}` **plus `in_progress` tasks whose agent looks dead**. 🔴 The predicate is NOT in the poller — it is `scripts/lib/clawgate_tasks.py`, shared with `agent-ops` and `session-manager`, and re-spelling it anywhere fails `scripts/tests/test_clawgate_predicate_single_source.py`. Excluding `in_progress` outright is what hid a four-hour-dead dispatch on all three surfaces at once. Stuck = no agent / agent `error` / never kicked off / silent >15m (`AGENT_IDLE_THRESHOLD_SECS`) / no readable timestamp; the payload always ships `agent_idle_secs` beside the flag. Fetch is `?summary=1` (~27x smaller). **Changing the shared module requires the `X-Restart-Triggers` entry in `graphical.nix` to re-arm the unit** — without a restart the pill keeps the OLD meaning across a green switch. 🔴 **Text grammar: `22` = count; `22!2` = 2 of them STUCK (Critical); a TRAILING `?` = "this is not a current measurement".** So `?` alone = the board could not be read at all (missing/corrupt/`stale`/`error` cache, or one the poller stopped refreshing — older than `MAX_CACHE_AGE_SECS`, 600s vs the **195s** worst healthy gap: `OnUnitActiveSec` 45 + systemd's default `AccuracyUSec` 60 + `TimeoutStartSec` 90) and `!2?` = 2 stuck as of the last readable poll, still Critical. 🔴 A measurement outage never makes the pill QUIETER, and that needed BOTH halves: the block's `ts` gate covers a frozen cache, and `bar-status-poll.carry_stuck_forward` copies the last known `stuck_count` onto a `stale`/`error` marker — without it a clawgate outage overwrote `24!2`/Critical with a bare `?`/Warning. The carry is not a ratchet (a recovered poll's own reading wins outright) and never reaches the toast gate. **This is the one count pill that does NOT go invisible when its cache is unusable**: a stuck dispatch is announced nowhere else that cannot be dismissed (the toast is one-shot and dies with dunst, the notif badge clears on `seen`, `session-manager` is on-demand), so an unreadable board must not look like an empty one |
 | DND | `i3status-dnd` | 15 | — | dunst paused indicator; `$mod+Shift+n` toggles |
 | media | `i3status-media` | 16 | n/a | qBit-POD AirVPN pill (net_down), **state-driven**: neutral=connected, **RED**=firewalled (tunnel/port-fwd broken), soft-yellow=stale. poller `parse_media`/`fetch_media` read creds from `~/.config/bar/media.env` (0600) — the same `media.env` also feeds `deep-search`, a media release search/grab CLI on PATH (workbench) after `home-manager switch`. **left → `media-menu`**; **right → qBit WebUI** |
-| telemetry deadman | `i3status-telemetry` | 17 | n/a | `tlm N` = N activity-telemetry (host, source) pairs have STOPPED emitting into ClickHouse; `tlm ?` = the check itself has been unable to evaluate for >30 min. 🔴 **It does NOT render an unreachable BACKEND as empty** — its reassuring answer is a zero, so "cannot tell" must not look like "all healthy". ⚠ But that guard covers only a readable payload whose deadman verdict is `unknown`: a poller `stale`/`error` marker, and a cache the poller stopped refreshing, still render EMPTY here (unlike `clawgate`). The deadman block has no deadman of its own — known follow-up, see PR #490. Measures BOTH hosts from the workbench poller (it reads the shared table). Logic + the per-source budget table: `scripts/collector/deadman.py` (run it bare for the table; left-click floats it). See the `activity` skill. |
+| telemetry deadman | `i3status-telemetry` | 17 | n/a | `tlm N` = N activity-telemetry (host, source) pairs have STOPPED emitting into ClickHouse. 🔴 **`tlm ?` now means ALL FOUR ways of not knowing**, not just one: the deadman evaluated and could not tell (grace-gated >30 min in `parse_telemetry`), OR the poller wrote a `stale`/`error` marker, OR the cache is missing/corrupt, OR the poller stopped refreshing it. They render alike on purpose — the operator's action is the same. `tlm N?` = N were dead as of the last readable poll and this is not current (Critical; a measurement outage never downgrades a known alarm). ⚠ On the MARKER path `stale()` zeroes the count, so that shape is a bare `tlm ?`. Measures BOTH hosts from the workbench poller (it reads the shared table). Logic + the per-source budget table: `scripts/collector/deadman.py` (run it bare for the table; left-click floats it). See the `activity` skill. |
 | airvpn (host) | `i3status-airvpn` | 10 | n/a | **HOST** AirVPN WireGuard pill (net_vpn), **state-driven**, default-OFF. **left → `airvpn-menu`**; **right → `airvpn-detail` float**. 🔴 Full detail + the killswitch re-test protocol: **`reference/airvpn.md`** |
 
 Bars differ by host (`isLaptop` in `graphical.nix`): laptop gets `batteryBlock` and **omits** GPU
@@ -132,8 +156,15 @@ python3 -m pytest ~/workspace/devrc/scripts/tests/test_bar_status.py
 # manually refresh one block (N = signal)
 pkill -RTMIN+13 i3status-rs
 ```
-- **Block stuck/empty:** check its `~/.cache/bar-status/<src>.json` — `state:"stale"` means the
-  source (kubeconfig/port-forward/creds) failed; run the poller by hand to see the exception.
+- **Block showing `?` (or `qBit?` / a soft-yellow airvpn icon):** it could not MEASURE. `stat`
+  the cache first — if `ts` is more than ~10 min old the **POLLER** is dead
+  (`systemctl --user status bar-status-poll.timer`), and every other pill will be `?` too. If
+  `ts` is fresh, read `state`/`detail`: `"stale"` means that ONE source
+  (kubeconfig/port-forward/creds) failed — run the poller by hand to see the exception. A single
+  `?` on an otherwise normal bar is a source outage; a bar full of them is the poller.
+- **Block empty/invisible:** that now means MEASURED and quiet, for every cache-backed block. If
+  a pill is invisible while you believe the source is down, the bug is in the block, not the
+  source.
 - **Block never refreshes on change:** the block's `signal` in `graphical.nix` ≠ `SIGNALS` in
   `bar-status-poll`.
 - **All icons show as text:** the `[icons.overrides]` / `icons=` shortcut conflict (see gotcha).
@@ -144,7 +175,10 @@ pkill -RTMIN+13 i3status-rs
 ## Common tasks
 - **Add a block:** define `fooBlock` in `graphical.nix`, add it to the `blocks` list (order =
   left→right, gate with `lib.optional*` for host scoping), symlink any script via `home.file`,
-  `git add` the script, switch.
+  `git add` the script, switch. 🔴 **If it reads a poller cache it MUST use
+  `bar_freshness.unmeasured`** (copy the `_load_freshness` bootstrap from any block) and render
+  a visible `?`-grammar pill — add it to `ALL_BLOCKS`/`BLOCK_SCRIPTS`/`UNMEASURED_PILL` in
+  `scripts/tests/test_bar_status.py`, which are pinned two-way against each other.
 - **Change a threshold:** edit the block's `--red-above N` in `graphical.nix` **and** the matching
   `*_TOAST_ABOVE` env in the poller's `_toast_specs()` so the toast fires on the same line; switch.
 - **New remote count source:** add a `parse_*`/`fetch_*` to `bar-status-poll`, a `SIGNALS` entry,

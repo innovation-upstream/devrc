@@ -6,19 +6,40 @@ i3status-rust JSON line. INSTANT local file read — never touches the network,
 never blocks the bar.
 
 CALM rendering (colour == "look at me"):
-  missing / stale / error / count<=0  -> empty, invisible block
-  count > 0                           -> `󰀪` alert glyph + count, coloured
+  measured, count <= 0                -> empty, invisible block (hide-at-zero)
+  measured, count > 0                 -> `󰀪` alert glyph + count, coloured
                                           (Critical if any critical is firing,
                                           else Warning — state comes from cache)
+  UNMEASURED (missing / corrupt /     -> `󰀪 ?`, VISIBLE (Warning) — the cluster
+   stale / error / stopped refreshing)   could not be read, which is not a quiet
+                                         one
 Click (wired in graphical.nix) opens Grafana.
+
+🔴 WHY AN UNREADABLE CACHE IS NOT A QUIET ONE. It rendered as one, measured
+2026-08-14: a `stale` payload, an `error` marker, a missing file and a cache the
+poller had stopped refreshing ALL produced `{"text": "", "state": "Idle"}` —
+byte-identical to the measured all-clear hide-at-zero produces when nothing is
+firing. The `stale` marker is written on exactly the failures that accompany a
+real incident (the kubeconfig, the port-forward, Alertmanager itself), so the
+pill went dark precisely when the cluster was least well. And nothing here read
+the `ts` the poller stamps, so a cache nobody had rewritten for days rendered a
+confident, present-tense count.
+
+Grafana is a second surface for this data, which is why the `?` is Warning
+rather than Critical — but it is not a GLANCEABLE one, and a pill that reads
+"quiet" is what stops anyone opening it.
 
 The leading glyph is the nf-md-alert triangle (rendered from the bar font),
 deliberately DISTINCT from the notifications-pill bell so a firing alert never
-reads as an unseen notification.
+reads as an unseen notification. Text grammar, shared with the rest of the bar:
+a TRAILING `?` is "this reading is not a current measurement".
 """
+import importlib.machinery
+import importlib.util
 import json
 import os
 import sys
+import time
 
 NAME = "alerts"
 # nf-md-alert 󰀪 (U+F002A) — a warning triangle, rendered in the bar's
@@ -27,6 +48,42 @@ NAME = "alerts"
 ALERT_GLYPH = "\U000f002a"
 _VALID_STATES = ("Idle", "Info", "Good", "Warning", "Critical")
 _EMPTY = {"text": "", "state": "Idle"}
+
+
+def _load_freshness():
+    """Load the co-located `bar_freshness.py` sibling by EXPLICIT PATH.
+
+    Extensionless block scripts cannot be a package, so this is the repo's
+    standard sibling-module shape (cf. `notif-center` loading `i3status-notifs`,
+    `bar-status-poll` loading `scripts/lib/`). Deliberately NOT wrapped in a
+    try: a block that cannot load the freshness predicate cannot know whether
+    its cache is current, and `__main__` below turns that into the VISIBLE `?`
+    pill rather than a confident count. `dont_write_bytecode` keeps a
+    `__pycache__` out of the operator's ~/.config/i3status-rust/scripts.
+    """
+    sys.dont_write_bytecode = True
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "bar_freshness.py")
+    loader = importlib.machinery.SourceFileLoader("_bar_freshness", path)
+    spec = importlib.util.spec_from_loader("_bar_freshness", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+fresh = _load_freshness()
+
+
+def unknown_pill(glyph: str = ALERT_GLYPH) -> dict:
+    """The VISIBLE "could not be read" pill: the glyph, then a bare `?`.
+
+    Built from the same glyph the measured pill uses so the reader knows WHICH
+    source cannot be read, and Warning rather than Critical because "cannot
+    tell" is not a confirmed fire. It must never be the empty block: hide-at-zero
+    means "measured, and nothing is firing".
+    """
+    text = "%s ?" % glyph
+    return {"text": text, "short_text": text, "state": "Warning"}
 
 
 def cache_path() -> str:
@@ -43,24 +100,36 @@ def load(path):
         return None
 
 
-def render(payload, glyph: str = ALERT_GLYPH, red_above: int = 0) -> dict:
+def render(payload, glyph: str = ALERT_GLYPH, red_above: int = 0,
+           now=None) -> dict:
     """Pure: cache payload (or None) -> i3status-rust block dict.
 
-    Hide-at-zero + fail-safe: None / malformed / stale / error / count<=0 all
-    map to the empty (invisible) block — never a crash.
+    Three outcomes, and the first is the one this module gained:
+      * NOT MEASURED (None / malformed / stale / error / no or old `ts`)
+        -> the visible `?` pill, never the empty one;
+      * measured, count <= 0 -> the empty, invisible block (hide-at-zero);
+      * measured, count > 0  -> the glyph, the count, and a colour.
 
     red_above: the standing-backlog baseline. count <= red_above shows the count
     but NEUTRAL (no colour); red is reserved for the count climbing ABOVE the
     known backlog (i.e. something new firing). red_above=0 => colour whenever >0.
+    🔴 It applies to a MEASURED count only — a backlog baseline is a statement
+    about how many alerts are boring, and says nothing about a reading that does
+    not exist.
+
+    `now` is injected rather than read here so the freshness gate is testable
+    without sleeping; it defaults to the wall clock. Fail-safe throughout: it
+    never raises, whatever the file contains — a claim only a DIRECT call can
+    test, since `__main__` below prints a `?` pill for any exception.
     """
-    if not isinstance(payload, dict):
-        return dict(_EMPTY)
-    if payload.get("error") or payload.get("state") == "stale":
-        return dict(_EMPTY)
-    try:
-        count = int(payload.get("count", 0))
-    except (TypeError, ValueError):
-        return dict(_EMPTY)
+    now = time.time() if now is None else now
+    if fresh.unmeasured(payload, now):
+        return unknown_pill(glyph)
+    count = fresh.int_or_none(payload.get("count", 0))
+    if count is None:
+        # A count we refuse to read is not a count of zero. `int()` would coerce
+        # `"2"`, `2.5` and `True` into confident numbers nobody measured.
+        return unknown_pill(glyph)
     if count <= 0:
         return dict(_EMPTY)
     if count <= red_above:
@@ -94,5 +163,12 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except Exception:
-        sys.stdout.write(json.dumps(_EMPTY) + "\n")
+        # 🔴 The last-resort fallback is the `?` pill, NOT the empty one: a block
+        # that crashed measured nothing, and that must not look like a quiet
+        # cluster. Built literally so it cannot depend on anything that just
+        # failed — including the sibling module the import above may not have
+        # found.
+        sys.stdout.write(
+            '{"text": "%s ?", "short_text": "%s ?", "state": "Warning"}\n'
+            % (ALERT_GLYPH, ALERT_GLYPH))
         sys.exit(0)

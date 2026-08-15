@@ -21,6 +21,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -285,22 +286,37 @@ def test_forwarded_port_verdict():
 # --------------------------------------------------------------------------- #
 # block render (i3status-airvpn) — cache payload -> block dict
 # --------------------------------------------------------------------------- #
+def _fresh(**fields):
+    """A cache payload the block will accept as a CURRENT reading.
+
+    🔴 `ts` IS NOT OPTIONAL ANY MORE, and it is an INT. `i3status-airvpn` now
+    refuses to present a cache the poller has stopped rewriting as a measurement
+    of the tunnel — see `bar_freshness.py`. A fixture without `ts` is not a
+    "minimal" payload, it is a payload no poller ever wrote, and it renders the
+    soft-yellow unknown pill. A FLOAT `ts` does the same: `int_or_none` refuses
+    to coerce, so a bare `time.time()` here would make every case below look
+    like a code defect.
+    """
+    fields.setdefault("ts", int(time.time()))
+    return fields
+
+
 def test_render_off_is_neutral_icon_only():
     # Minimal: off is a dim, icon-only button (empty text), NEVER hidden — it's the
     # left-click Connect target. The glyph still renders.
-    r = blk.render({"up": False})
+    r = blk.render(_fresh(up=False))
     assert r["state"] == "Idle" and r["text"] == "" and r["icon"] == blk.ICON
 
 
 def test_render_up_verified_neutral():
     # Minimal token: just `CC`, no "AirVPN" prose and no handshake age on the pill.
-    r = blk.render({"up": True, "country_code": "ca", "verdict": "verified",
-                    "handshake_age": 30})
+    r = blk.render(_fresh(up=True, country_code="ca", verdict="verified",
+                          handshake_age=30))
     assert r["state"] == "Idle" and r["text"] == "CA"
 
 
 def test_render_up_unknown_marks_but_stays_neutral():
-    r = blk.render({"up": True, "country_code": "ca", "verdict": "unknown"})
+    r = blk.render(_fresh(up=True, country_code="ca", verdict="unknown"))
     assert r["state"] == "Idle" and r["text"] == "CA?"
 
 
@@ -308,26 +324,68 @@ def test_render_up_falls_back_to_exit_country_when_server_unknown():
     # Active tunnel to a HOSTNAME endpoint (e.g. ca3.vpn.airdns.org): the poller
     # can't map it to a manifest server so country_code/country are null, but ipinfo
     # still gives exit_country. Must show the exit CC, not a useless '??' -> '???'.
-    r = blk.render({"up": True, "country_code": None, "country": None,
-                    "exit_country": "ca", "verdict": "unknown"})
+    r = blk.render(_fresh(up=True, country_code=None, country=None,
+                          exit_country="ca", verdict="unknown"))
     assert r["state"] == "Idle" and r["text"] == "CA?"
 
 
 def test_render_leak_is_critical():
-    r = blk.render({"up": True, "country_code": "ca", "verdict": "leak"})
+    r = blk.render(_fresh(up=True, country_code="ca", verdict="leak"))
     assert r["state"] == "Critical" and r["text"] == "LEAK"
 
 
 def test_render_port_down_is_warning():
-    r = blk.render({"up": True, "country_code": "ca", "verdict": "verified",
-                    "fwd_verdict": "down"})
+    r = blk.render(_fresh(up=True, country_code="ca", verdict="verified",
+                          fwd_verdict="down"))
     assert r["state"] == "Warning" and r["text"] == "CA!"
 
 
 def test_render_stale_error_missing_corrupt_soft_yellow_icon_only():
-    for payload in ({"state": "stale"}, {"error": "boom"}, None, "garbage", 42):
+    for payload in ({"state": "stale"}, {"error": "boom"}, {"state": "error"},
+                    None, "garbage", 42):
         r = blk.render(payload)
         assert r["state"] == "Warning" and r["text"] == "" and r["icon"] == blk.ICON
+
+
+def test_a_tunnel_nobody_has_MEASURED_does_not_read_as_deliberately_OFF():
+    """🔴 THE DEFECT, on this block. `render` never looked at `ts`, so when
+    `bar-status-poll` stopped, the last cache stayed on screen forever as a
+    present-tense fact. The steady state here is `up: False` -> a DIM NEUTRAL
+    icon, so a dead poller pinned this pill to "tunnel deliberately off" — and
+    the state it was pinned away from is `LEAK`, the one thing the killswitch
+    exists to make loud.
+
+    Measured against the shipped block before the fix: an `up: True,
+    verdict: "leak"` cache aged 24h rendered `LEAK`/Critical, and an `up: False`
+    one rendered the OFF pill, both indistinguishable from a live reading.
+
+    The discriminant here is COLOUR, not text — off and unknown are both an
+    icon with empty text — so this compares whole pills.
+    """
+    day = int(time.time()) - 86_400
+    off_live = blk.render(_fresh(up=False))
+    off_frozen = blk.render({"up": False, "ts": day})
+    leak_frozen = blk.render({"up": True, "country_code": "ca",
+                              "verdict": "leak", "ts": day})
+    assert off_live == {"icon": "net_vpn", "text": "", "short_text": "",
+                        "state": "Idle"}
+    assert off_frozen != off_live
+    assert off_frozen["state"] == "Warning"
+    # ...and a frozen LEAK does not keep announcing itself as a live one either
+    assert leak_frozen["text"] != "LEAK"
+    assert leak_frozen == off_frozen
+
+
+def test_the_airvpn_render_FUNCTION_is_failsafe_AND_stays_visible():
+    """🔴 A DIRECT call, because `__main__` catches everything and prints the
+    same soft-yellow pill — so no subprocess test can tell a correct render from
+    a crash. The truthy non-dicts are the load-bearing rows: any `payload.get`
+    reached before the type check raises on them.
+    """
+    for bad in (None, [], ["a", "list"], {}, "x", "", 3, 0, True, 2.5):
+        out = blk.render(bad)               # must not raise
+        assert out == {"icon": "net_vpn", "text": "", "short_text": "",
+                       "state": "Warning"}, bad
 
 
 # --------------------------------------------------------------------------- #

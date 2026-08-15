@@ -47,6 +47,8 @@ against the deployed copy in HM generation 450, 08-13 18:29, i.e. for ~21 of
 those 24 hours). This closes the compound case — a wedge during a measurement
 outage — not that incident. See the PR.
 """
+import importlib.machinery
+import importlib.util
 import json
 import os
 import sys
@@ -57,22 +59,36 @@ ICON = "tasks"
 _VALID_STATES = ("Idle", "Info", "Good", "Warning", "Critical")
 _EMPTY = {"text": "", "state": "Idle"}
 
-#: How old a cache may be and still count as a CURRENT measurement.
-#:
-#: Derived from the unit, not from taste (nix/graphical.nix). THREE terms, and
-#: the middle one is the one this derivation originally dropped:
-#:   * `OnUnitActiveSec = 45s`  — the timer re-arms this long after each run;
-#:   * `AccuracyUSec = 1min`    — systemd's DEFAULT, and the timer does NOT
-#:                                override it, so an elapse may be deferred up
-#:                                to a further 60s to coalesce with other timers;
-#:   * `TimeoutStartSec = 90`   — the hard ceiling on one run of the service.
-#: 45 + 60 + 90 = 195s is therefore the widest gap a HEALTHY poller can leave
-#: between two writes, not the 135s this comment used to claim. 600s is ~3x that
-#: — so it still cannot be reached by scheduler jitter, a slow port-forward or
-#: one bounded timeout, and it is still short enough that a dead poller is
-#: announced within the same working session rather than the next day. The
-#: constant is unchanged; only the arithmetic behind it is corrected.
-MAX_CACHE_AGE_SECS = 600
+
+def _load_freshness():
+    """Load the co-located `bar_freshness.py` sibling by EXPLICIT PATH.
+
+    Extensionless block scripts cannot be a package, so this is the repo's
+    standard sibling-module shape (cf. `notif-center` loading `i3status-notifs`,
+    `bar-status-poll` loading `scripts/lib/`). Deliberately NOT wrapped in a
+    try: a block that cannot load the freshness predicate cannot know whether
+    its cache is current, and `__main__` below turns that into the VISIBLE `?`
+    pill rather than a confident count. `dont_write_bytecode` keeps a
+    `__pycache__` out of the operator's ~/.config/i3status-rust/scripts.
+    """
+    sys.dont_write_bytecode = True
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "bar_freshness.py")
+    loader = importlib.machinery.SourceFileLoader("_bar_freshness", path)
+    spec = importlib.util.spec_from_loader("_bar_freshness", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+fresh = _load_freshness()
+
+#: Re-exported so this module's public surface is unchanged by the extraction,
+#: and so a reader of this file still finds the number it renders by. The
+#: DEFINITION and its derivation from the systemd unit now live in
+#: `bar_freshness.py`, which every block imports — the same gate was about to be
+#: hand-copied into six more of them.
+MAX_CACHE_AGE_SECS = fresh.MAX_CACHE_AGE_SECS
 
 
 def cache_path() -> str:
@@ -89,20 +105,12 @@ def load(path):
         return None
 
 
-def _int_or_none(value):
-    """A strictly-integral reading, or None.
-
-    🔴 NO COERCION. `int()` would turn `2.5` into `2` and `True` into `1`, both
-    of which render as a confident measurement of something nobody measured — a
-    float `stuck_count` of 2.5 announcing "2 stuck dispatches" is worse than
-    announcing that it could not tell. The cache is JSON written by our own
-    poller, where these are always ints, so anything else means the writer
-    changed and the honest reading is `?`. An absent key is None, not 0 — see
-    `stuck_suffix`.
-    """
-    if isinstance(value, bool) or not isinstance(value, int):
-        return None
-    return value
+#: The no-coercion integer reading, now shared with every other block. Kept as a
+#: module-level name because this file's own docstrings and tests refer to it: a
+#: float `stuck_count` of 2.5 announcing "2 stuck dispatches" is worse than
+#: announcing that it could not tell, and an absent key is None, not 0 — see
+#: `stuck_suffix`.
+_int_or_none = fresh.int_or_none
 
 
 def stuck_suffix(payload) -> str:
@@ -121,32 +129,11 @@ def stuck_suffix(payload) -> str:
     return "!%d" % stuck if stuck > 0 else ""
 
 
-def cache_age_secs(payload, now):
-    """Seconds since the poller wrote this payload, or None if it cannot say.
-
-    `ts` is stamped by `bar-status-poll.source()` onto EVERY payload it writes,
-    the `stale` markers included, so an absent or non-integral `ts` means the
-    file did not come from a poller we recognise — which is a reason to distrust
-    the reading, never a reason to assume it is fresh. Same no-coercion rule as
-    `_int_or_none`, and clamped at 0 so clock skew reads as "just now" rather
-    than as a negative age (matching `clawgate_tasks.agent_idle_secs`).
-    """
-    ts = _int_or_none((payload or {}).get("ts"))
-    if ts is None:
-        return None
-    return max(0.0, float(now) - ts)
-
-
-def is_current(payload, now, max_age: int = MAX_CACHE_AGE_SECS) -> bool:
-    """Is this cache a CURRENT measurement of the board?
-
-    An unreadable age is NOT current — "I cannot tell how old this is" must not
-    render as "this is fresh", the same substitution `_int_or_none` and
-    `stuck_suffix` refuse. Strictly `<=`, so `max_age` is the last age still
-    considered current rather than the first that is not.
-    """
-    age = cache_age_secs(payload, now)
-    return age is not None and age <= max_age
+#: Freshness, from the ONE definition (`bar_freshness.py`). Re-exported under the
+#: names this module already published so nothing that reads the clawgate block
+#: has to know the predicate moved.
+cache_age_secs = fresh.cache_age_secs
+is_current = fresh.is_current
 
 
 def _unmeasured(payload, icon: str) -> dict:
@@ -207,11 +194,13 @@ def render(payload, icon: str = ICON, now=None) -> dict:
     a comment again.
     """
     now = time.time() if now is None else now
+    # 🔴 The non-dict case is handled SEPARATELY and passes `None` on purpose:
+    # `_unmeasured` reads `(payload or {}).get(...)`, so a TRUTHY non-dict
+    # (`["a", "list"]`, `"x"`, `3`) would raise there. `fresh.unmeasured` answers
+    # for it too, but the payload must not travel.
     if not isinstance(payload, dict):
         return _unmeasured(None, icon)
-    if payload.get("error") or payload.get("state") == "stale":
-        return _unmeasured(payload, icon)
-    if not is_current(payload, now):
+    if fresh.unmeasured(payload, now):
         return _unmeasured(payload, icon)
     count = _int_or_none(payload.get("count", 0))
     if count is None:

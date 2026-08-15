@@ -42,7 +42,12 @@ mail_block = _load("i3status-mail", "i3status_mail")
 alerts_block = _load("i3status-alerts", "i3status_alerts")
 civitai_block = _load("i3status-civitai", "i3status_civitai")
 media_block = _load("i3status-media", "i3status_media")
+airvpn_block = _load("i3status-airvpn", "i3status_airvpn")
 telemetry_block = _load("i3status-telemetry", "i3status_telemetry")
+# The ONE definition of "this cache is too old to present as a measurement",
+# which every block above loads as a co-located sibling. A real `.py`, so it
+# imports by path like any module — the blocks are extensionless and cannot.
+freshness = _load("bar_freshness.py", "bar_freshness")
 
 # The deadman states the telemetry pill treats as "cannot tell". Pinned here as
 # a LITERAL rather than imported from deadman.py: a test expectation derived
@@ -411,24 +416,52 @@ def test_fetch_media_stale_when_creds_missing(monkeypatch):
 # --------------------------------------------------------------------------- #
 # media block render: alarms (not hides) on stale/firewalled per decision 5
 # --------------------------------------------------------------------------- #
+def _media_cache(qbit_payload):
+    """`parse_media`'s facts, STAMPED as the poller would stamp them.
+
+    🔴 `poll.source()` puts an integer `ts` on every payload it writes, and
+    `i3status-media` now refuses to present an unstamped or old one as a reading
+    of the tunnel. Going through the real `source()` rather than adding a `ts`
+    by hand keeps the fixture the shape the writer actually produces.
+    """
+    return poll.source("media", lambda: poll.parse_media(qbit_payload))
+
+
 def test_media_block_passes_through_connected_active():
-    payload = poll.parse_media({"connection_status": "connected",
-                                "dl_info_speed": 151903, "up_info_speed": 412349})
+    payload = _media_cache({"connection_status": "connected",
+                            "dl_info_speed": 151903, "up_info_speed": 412349})
     out = media_block.render(payload)
     assert out["icon"] == "net_down" and out["state"] == "Idle"
     assert out["text"] == payload["text"]
 
 
 def test_media_block_hides_when_connected_idle():
-    payload = poll.parse_media({"connection_status": "connected",
-                                "dl_info_speed": 0, "up_info_speed": 0})
+    payload = _media_cache({"connection_status": "connected",
+                            "dl_info_speed": 0, "up_info_speed": 0})
     assert media_block.render(payload) == {"text": "", "state": "Idle"}
 
 
 def test_media_block_firewalled_is_red():
-    payload = poll.parse_media({"connection_status": "firewalled"})
+    payload = _media_cache({"connection_status": "firewalled"})
     out = media_block.render(payload)
     assert out["state"] == "Critical" and "firewalled" in out["text"]
+
+
+def test_a_media_cache_nobody_REWROTE_stops_showing_live_transfer_speeds():
+    """🔴 THE DEFECT, on this block. It always ALARMED on the stale MARKER, so
+    it looked immune — but nothing here read `ts`, and alarming on the marker
+    only covers the outage the poller is alive to report. Measured against the
+    shipped block: a day-old cache kept rendering `CA ↓148K ↑402K` as a
+    present-tense fact about a tunnel nobody had looked at.
+    """
+    payload = _media_cache({"connection_status": "connected",
+                            "dl_info_speed": 151903, "up_info_speed": 412349})
+    live = media_block.render(payload)
+    frozen = media_block.render(dict(payload, ts=payload["ts"] - 86_400))
+    assert "↓" in live["text"] and live["state"] == "Idle"
+    assert frozen == {"icon": "net_down", "text": "qBit?",
+                      "short_text": "qBit?", "state": "Warning"}
+    assert frozen != live
 
 
 def test_media_block_stale_is_soft_yellow():
@@ -555,24 +588,27 @@ BLOCKS = [
 ]
 
 
-#: Fields a block needs BEYOND `count`/`state` to render its normal, FULLY
-#: MEASURED shape, as ZERO-ARG FACTORIES (one of them has to be built against the
-#: current clock). Only clawgate has any, and it has two:
+#: Fields EVERY block now needs beyond `count`/`state` to render its normal,
+#: FULLY MEASURED shape, as ZERO-ARG FACTORIES (they have to be built against the
+#: current clock).
 #:
-#:  * `stuck_count` — an ABSENT one renders `?` on purpose (a cache from a poller
-#:    predating the stuck predicate carries a count computed by the old
-#:    status-only rule, so it is a different number, not merely a partial one);
-#:  * `ts` — an absent or OLD one now also renders `?`, because a cache nobody
-#:    has refreshed is not a measurement of the board as it is now. Every payload
-#:    `bar-status-poll` writes carries `ts`, so a fixture without one was never a
-#:    realistic cache; it was a fixture that could not tell the freshness gate
-#:    from a hole in it.
+#:  * `ts` — an absent or OLD one renders the block's UNMEASURED pill, because a
+#:    cache nobody has refreshed is not a measurement of anything as it is now.
+#:    Every payload `bar-status-poll` writes carries `ts`, so a fixture without
+#:    one was never a realistic cache; it was a fixture that could not tell the
+#:    freshness gate from a hole in it. This applied to clawgate alone until this
+#:    change and applies to all seven blocks now.
+#:  * `stuck_count` (clawgate only) — an ABSENT one renders `?` on purpose (a
+#:    cache from a poller predating the stuck predicate carries a count computed
+#:    by the old status-only rule, so it is a different number, not merely a
+#:    partial one).
 #:
 #: The generic block tests below are about icon / colour / hide-at-zero, so they
-#: hand clawgate a MEASURED, CURRENT payload; the `?` and `!N` renderings and the
+#: hand every block a MEASURED, CURRENT payload; the `?` renderings and the
 #: freshness gate have their own tests.
+_MEASURED_EVERY_BLOCK = ("ts",)
 BLOCK_MEASURED_EXTRA = {
-    "clawgate": lambda: {"stuck_count": 0, "ts": int(time.time())},
+    "clawgate": lambda: {"stuck_count": 0},
 }
 
 
@@ -584,6 +620,7 @@ def _measured(name, **fields):
     replaced it with the measured-zero default would turn that test into an
     assertion about the default instead.
     """
+    fields.setdefault("ts", int(time.time()))
     extra = BLOCK_MEASURED_EXTRA.get(name)
     if extra is not None:
         for key, value in extra().items():
@@ -599,7 +636,13 @@ FIXED_NOW = 1_800_000_000.0
 
 
 def _aged(age_secs, **fields):
-    """A clawgate cache payload written `age_secs` before FIXED_NOW."""
+    """A cache payload written `age_secs` before FIXED_NOW.
+
+    🔴 `ts` is set as an INT, not a float. `bar_freshness.int_or_none` treats a
+    non-integral `ts` as "not written by a poller we recognise", so a fixture
+    built on a bare `time.time()` short-circuits EVERY case to the unmeasured
+    pill and looks exactly like a code defect. That cost a wrong diagnosis once.
+    """
     fields.setdefault("ts", int(FIXED_NOW - age_secs))
     return fields
 
@@ -611,6 +654,93 @@ def _aged(age_secs, **fields):
 UNKNOWN_PILL = {"icon": "tasks", "text": "?", "short_text": "?",
                 "state": "Warning"}
 INVISIBLE_PILL = {"text": "", "state": "Idle"}
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE WHOLE BAR, not one block: every cache the poller writes, and what each
+# block renders for it in the two shapes that must never be confusable.
+#
+# `i3status-clawgate` grew a freshness gate and a visible `?` in PR #490. The
+# other six had the same defect and none of the gate: measured 2026-08-14 against
+# the OPERATOR'S OWN cache payloads, a file aged 24h rendered BYTE-IDENTICALLY to
+# the live one in six of seven blocks — `alerts` announcing 39 firing alerts,
+# `civitai` 146 on a CLIENT PROD cluster, `media` live transfer speeds, `airvpn`
+# a dim "tunnel deliberately off", `mail` and `telemetry` an invisible all-clear.
+# None of them had read `ts` at all.
+# --------------------------------------------------------------------------- #
+ALL_BLOCKS = [
+    ("clawgate", clawgate_block),
+    ("mail", mail_block),
+    ("alerts", alerts_block),
+    ("civitai", civitai_block),
+    ("media", media_block),
+    ("airvpn", airvpn_block),
+    ("telemetry", telemetry_block),
+]
+
+#: The nf-md-alert triangle the two alert blocks prepend. A LITERAL codepoint,
+#: not `mod.ALERT_GLYPH` — a test that reads the constant it is checking cannot
+#: notice the constant changing.
+_GLYPH = "\U000f002a"
+
+#: 🔴 What each block renders when it CANNOT MEASURE, as LITERALS. Every entry
+#: was read off the shipped block and typed out here; none is computed from the
+#: module, so this table can disagree with the code rather than restate it.
+UNMEASURED_PILL = {
+    "clawgate": {"icon": "tasks", "text": "?", "short_text": "?",
+                 "state": "Warning"},
+    "mail": {"icon": "mail", "text": "?", "short_text": "?",
+             "state": "Warning"},
+    "alerts": {"text": _GLYPH + " ?", "short_text": _GLYPH + " ?",
+               "state": "Warning"},
+    "civitai": {"text": _GLYPH + " civ ?", "short_text": _GLYPH + " civ ?",
+                "state": "Warning"},
+    "media": {"icon": "net_down", "text": "qBit?", "short_text": "qBit?",
+              "state": "Warning"},
+    # ⚠ THE ONE PILL WHOSE DISCRIMINANT IS COLOUR ALONE. The airvpn block is an
+    # icon BUTTON: its steady state is `up: false` -> a dim neutral icon with no
+    # text, and its unreadable state is the same icon in soft yellow. So `text`
+    # is empty in both and only `state` separates them. That is the block's
+    # existing design (a hidden pill cannot be clicked to open the menu), not
+    # something this change introduced — but it means the assertions below must
+    # compare WHOLE PILLS, never just text, or airvpn passes them vacuously.
+    "airvpn": {"icon": "net_vpn", "text": "", "short_text": "",
+               "state": "Warning"},
+    "telemetry": {"text": "tlm ?", "short_text": "tlm ?", "state": "Warning"},
+}
+
+#: 🔴 What each block renders for a MEASURED, CURRENT, entirely quiet reading.
+#: The pill the table above must never be equal to — that inequality IS the
+#: defect this change fixes, stated as a relationship rather than as a spelling.
+MEASURED_ALL_CLEAR_PILL = {
+    "clawgate": {"text": "", "state": "Idle"},
+    "mail": {"text": "", "state": "Idle"},
+    "alerts": {"text": "", "state": "Idle"},
+    "civitai": {"text": "", "state": "Idle"},
+    "media": {"text": "", "state": "Idle"},          # connected + idle
+    "airvpn": {"icon": "net_vpn", "text": "", "short_text": "",
+               "state": "Idle"},                      # tunnel deliberately off
+    "telemetry": {"text": "", "state": "Idle"},
+}
+
+
+def _quiet_payload(name, age_secs=0):
+    """A MEASURED, entirely quiet cache payload for `name`, aged `age_secs`.
+
+    Per-block because the state blocks are not counts: `media` says "connected
+    and idle" with an empty `text`, `airvpn` says "tunnel off" with `up: False`.
+    Both are readings, both are reassuring, and both must stop being what an
+    unreadable cache looks like.
+    """
+    base = _aged(age_secs)
+    if name == "media":
+        base.update({"text": "", "short_text": "", "state": "Idle"})
+    elif name == "airvpn":
+        base.update({"up": False})
+    elif name == "clawgate":
+        base.update({"count": 0, "stuck_count": 0, "state": "Idle"})
+    else:
+        base.update({"count": 0, "state": "Idle"})
+    return base
 
 
 def _expected_text(mod, count):
@@ -770,6 +900,171 @@ def test_the_freshness_window_is_far_outside_normal_poller_jitter():
     assert clawgate_block.MAX_CACHE_AGE_SECS <= 3600
 
 
+# --------------------------------------------------------------------------- #
+# 🔴 ONE DEFINITION OF "TOO OLD", and the one that only LOOKS like it.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("name,mod", ALL_BLOCKS)
+def test_every_block_shares_ONE_freshness_definition(name, mod):
+    """🔴 The gate is a predicate, and a predicate open-coded at seven sites is
+    typically wrong at six of them in the same direction. Every block must be
+    holding the SAME module object, not a copy and not a re-spelling."""
+    assert mod.fresh.MAX_CACHE_AGE_SECS == freshness.MAX_CACHE_AGE_SECS
+    assert mod.fresh.unmeasured is not None
+    # the block loads it from its OWN directory, which is what makes the nix
+    # symlink below load-bearing
+    assert mod.fresh.__name__ == "_bar_freshness"
+
+
+@pytest.mark.parametrize("name,mod", ALL_BLOCKS)
+def test_no_block_RE_SPELLS_the_freshness_window(name, mod):
+    """A block that hard-codes `600` (or its own age comparison) has left the
+    shared definition behind while still importing it, which is the worst of
+    both — it passes the test above and drifts anyway. Read the SOURCE."""
+    src = (SCRIPTS / dict(BLOCK_SOURCE_FILES)[name]).read_text()
+    body = "\n".join(line for line in src.splitlines()
+                     if not line.lstrip().startswith("#"))
+    assert "MAX_CACHE_AGE_SECS = 600" not in body, name
+    assert body.count("fresh.unmeasured") >= 1, name
+
+
+#: name -> the extensionless script implementing it. Hand-written, and pinned
+#: two-way against the block registry so neither can gain an entry silently.
+BLOCK_SOURCE_FILES = [
+    ("clawgate", "i3status-clawgate"), ("mail", "i3status-mail"),
+    ("alerts", "i3status-alerts"), ("civitai", "i3status-civitai"),
+    ("media", "i3status-media"), ("airvpn", "i3status-airvpn"),
+    ("telemetry", "i3status-telemetry"),
+]
+assert [n for n, _ in BLOCK_SOURCE_FILES] == [n for n, _ in ALL_BLOCKS]
+
+
+def test_every_block_that_loads_the_sibling_is_DEPLOYED_beside_it():
+    """🔴 THE SEAM A UNIT TEST CANNOT SEE. Each block loads `bar_freshness.py`
+    out of its OWN directory — which at runtime is
+    `~/.config/i3status-rust/scripts`, populated entirely by `home.file` entries
+    in `nix/graphical.nix`. The tests here load blocks from the repo, where the
+    sibling is always present, so nothing else in this file can notice a missing
+    symlink. Without it EVERY count pill on a healthy workbench renders `?`.
+
+    Two-way: every block that loads the sibling must be deployed, AND the
+    sibling itself must be deployed, under the SAME host gate. (A flake also
+    silently omits an untracked file, which is why `bar_freshness.py` had to be
+    `git add`ed before the first switch.)
+    """
+    nix = (SCRIPTS.parent / "nix" / "graphical.nix").read_text()
+    assert '.config/i3status-rust/scripts/bar_freshness.py"' in nix, \
+        "bar_freshness.py has no home.file entry — every count pill would be `?`"
+    assert "../scripts/bar_freshness.py" in nix
+    for name, script in BLOCK_SOURCE_FILES:
+        src = (SCRIPTS / script).read_text()
+        assert "_load_freshness" in src, name
+        entry = '.config/i3status-rust/scripts/%s"' % script
+        assert entry in nix, "%s loads the sibling but is not deployed" % name
+    # the sibling must not be deployed on a NARROWER gate than its consumers:
+    # both are !isLaptop, so a laptop has neither rather than blocks with no
+    # module to load.
+    for line in nix.splitlines():
+        if "scripts/bar_freshness.py\"" in line and "home.file" in line:
+            assert "!isLaptop" in line, line
+            break
+    else:
+        raise AssertionError("no home.file line for bar_freshness.py")
+
+
+def test_the_two_TOO_OLD_constants_measure_DIFFERENT_THINGS():
+    """🔴 THE DUPLICATE THAT IS NOT ONE, examined rather than merged.
+
+    `bar_freshness.MAX_CACHE_AGE_SECS` (600) and
+    `bar-status-poll.TELEMETRY_UNKNOWN_GRACE` (1800) both read as "how old is
+    too old", and they were the two hand-spelled age numbers in this subsystem.
+    They are different quantities with different subjects:
+
+      * MAX_CACHE_AGE_SECS asks "is the WRITER alive?" — nobody has rewritten
+        this file, so no reading is being taken at all. Derived from the timer
+        (45s re-arm + 60s systemd accuracy + 90s run ceiling = 195s worst
+        healthy gap); anything at or below that fires on healthy jitter.
+      * TELEMETRY_UNKNOWN_GRACE asks "how long has a LIVING writer been saying
+        it cannot tell?" — the poller is stamping fresh payloads every 45s and
+        the ClickHouse query is what keeps failing. Its job is to debounce a
+        restart, so it must be far longer than one.
+
+    Collapsing them breaks whichever question loses, so the invariant is an
+    ORDERING with room in it, not equality — and NOT two restated literals,
+    which would just move the duplication into this file.
+    """
+    gate = freshness.MAX_CACHE_AGE_SECS
+    grace = poll.TELEMETRY_UNKNOWN_GRACE
+    assert gate != grace, "if these ever became one number, one of the two " \
+                          "questions above stopped being asked"
+    # the writer-liveness gate must fire FIRST: a frozen poller is a fact about
+    # every source, and must not wait out a single source's backend debounce.
+    assert gate < grace
+    # ...and the gate must still be out of reach of healthy jitter, while the
+    # grace must be well clear of a restart-length blackout.
+    assert gate > WORST_HEALTHY_GAP_SECS * 2
+    assert grace >= gate * 2
+
+
+@pytest.mark.parametrize("age,current", [
+    (0, True),
+    (WORST_HEALTHY_GAP_SECS, True),
+    (599, True),
+    (600, True),          # the last age still considered current
+    (601, False),         # the first that is not
+    (86_400, False),
+])
+def test_the_SHARED_freshness_boundary(age, current):
+    """The gate itself, at the boundary from both sides plus a middle — so it
+    cannot pass against a comparison that is merely present and always-true, or
+    against one that is off by a tick in either direction."""
+    payload = {"ts": int(FIXED_NOW - age), "count": 1}
+    assert freshness.is_current(payload, FIXED_NOW) is current
+    assert freshness.unmeasured(payload, FIXED_NOW) is not current
+    assert freshness.cache_age_secs(payload, FIXED_NOW) == float(age)
+
+
+@pytest.mark.parametrize("ts", [None, "1786759794", True, False, 2.5, [], {}])
+def test_an_ABSENT_OR_JUNK_ts_is_never_a_fresh_one(ts):
+    """`True` is here deliberately: a bool is an int in Python, so a coercing
+    check would read it as epoch second 1 — an age of ~57 years passing as a
+    timestamp."""
+    payload = {"count": 7}
+    if ts is not None:
+        payload["ts"] = ts
+    assert freshness.cache_age_secs(payload, FIXED_NOW) is None
+    assert freshness.is_current(payload, FIXED_NOW) is False
+    assert freshness.unmeasured(payload, FIXED_NOW) is True
+
+
+@pytest.mark.parametrize("payload,marker", [
+    ({"state": "stale", "count": 0}, True),
+    ({"error": "boom"}, True),
+    ({"error": "", "state": "Idle"}, False),   # falsy error is not a marker
+    ({"state": "Idle", "count": 3}, False),
+    ({}, False),
+    # 🔴 A NON-DICT IS NOT A MARKER — it is a missing or corrupt FILE, which is
+    # nobody's statement about anything. Only a direct call reaches this: every
+    # caller in the tree checks the type first, so a mechanically-generated
+    # sweep found `return False` -> `return True` here SURVIVING the whole
+    # suite. It is pinned rather than deleted because `is_marker` is a public
+    # helper — `i3status-airvpn` sits one term away from calling it standalone —
+    # and a helper that raises on a shape its own module hands around is a trap
+    # for the next caller.
+    (None, False), ([], False), (["a"], False), ("x", False), (3, False),
+])
+def test_is_marker_answers_only_for_what_the_POLLER_said(payload, marker):
+    assert freshness.is_marker(payload) is marker, payload
+
+
+def test_a_CLOCK_SKEWED_cache_reads_as_just_now_not_as_ancient():
+    """A `ts` in the FUTURE (NTP step, a host with a fast clock) clamps to age 0
+    rather than going negative — a negative age passing an `age <= max` check by
+    accident is the same class of luck as a coerced bool."""
+    future = {"ts": int(FIXED_NOW + 10_000), "count": 1}
+    assert freshness.cache_age_secs(future, FIXED_NOW) == 0.0
+    assert freshness.is_current(future, FIXED_NOW) is True
+
+
 @pytest.mark.parametrize("ts", [None, "1786759794", True, False, 2.5, [], {}])
 def test_an_ABSENT_OR_JUNK_ts_is_not_a_fresh_one(ts):
     """Every payload `bar-status-poll` writes carries an integer `ts`, so
@@ -871,24 +1166,12 @@ def test_the_clawgate_render_FUNCTION_is_failsafe_AND_stays_visible(bad):
     assert out != INVISIBLE_PILL, bad
 
 
-@pytest.mark.parametrize("junk", ["NaN", "2", 2.5, True, False, None, [], {}])
-def test_a_count_the_block_REFUSES_TO_READ_is_not_a_count_of_zero(junk):
-    """🔴 THE BRANCH THIS CHANGE ADDED, WHICH HAD NO TEST. `render`'s
-    `if count is None: return _unmeasured(...)` could be swapped for
-    `return dict(_EMPTY)` and the whole suite stayed green — a CURRENT cache
-    whose `count` is `"NaN"` / `2.5` / `True` would silently revert to the
-    invisible pill, which is the exact substitution the change exists to forbid,
-    on a payload the freshness gate says IS a present-tense reading.
-
-    `"2"` is in the list deliberately: `int()` would coerce it happily. The
-    poller writes ints, so a string count means the WRITER changed, and a block
-    that quietly agrees with a writer it no longer recognises is how a pill stops
-    meaning what it says.
-    """
-    payload = _aged(0, count=junk, stuck_count=0, state="Warning")
-    # the payload must reach the count branch, not stop at the freshness gate
-    assert clawgate_block.is_current(payload, FIXED_NOW) is True
-    assert clawgate_block.render(payload, now=FIXED_NOW) == UNKNOWN_PILL, junk
+# ⚠ The clawgate-only version of this test — `render`'s `if count is None:
+# return _unmeasured(...)` swapped for `return dict(_EMPTY)` — is now the
+# `clawgate` row of `test_a_count_ANY_block_REFUSES_TO_READ_is_not_a_count_of_zero`
+# above, which runs the same junk set against every count block. It was left
+# clawgate-only when the branch was copied into five more of them, and a mutation
+# sweep found the mail and telemetry copies unguarded.
 
 
 def test_an_UNREADABLE_COUNT_still_keeps_a_KNOWN_stuck_alarm():
@@ -1116,13 +1399,26 @@ def test_the_block_renders_what_attention_ACTUALLY_writes():
 def test_civitai_block_labels_count_distinctly():
     # The civitai block must be visually distinguishable from homelab alerts:
     # its text carries the `civ` label prefix, alerts' does not.
-    civ = civitai_block.render({"count": 317, "state": "Critical"})
-    hl = alerts_block.render({"count": 317, "state": "Critical"})
+    civ = civitai_block.render(_measured("civitai", count=317, state="Critical"))
+    hl = alerts_block.render(_measured("alerts", count=317, state="Critical"))
     assert civ["text"] == "%s civ 317" % civitai_block.ALERT_GLYPH
     assert civ["state"] == "Critical"
     assert hl["text"] == "%s 317" % alerts_block.ALERT_GLYPH
     assert "civ" not in hl["text"]
     assert civ["text"] != hl["text"]
+
+
+def test_the_two_alert_blocks_stay_distinguishable_when_UNMEASURED_TOO():
+    """A `?` that does not say WHICH cluster went unreadable is barely better
+    than an invisible pill — the operator has two alert pills and the label is
+    the only thing that tells them apart. `civ` must survive onto the `?`.
+    """
+    civ = civitai_block.render(None)
+    hl = alerts_block.render(None)
+    assert civ["text"] == "%s civ ?" % _GLYPH
+    assert hl["text"] == "%s ?" % _GLYPH
+    assert civ["text"] != hl["text"]
+    assert "civ" not in hl["text"]
 
 
 # red_above threshold — neutral at/below the standing backlog, red only above it.
@@ -1132,7 +1428,8 @@ ALERT_BLOCKS = [("alerts", alerts_block), ("civitai", civitai_block)]
 @pytest.mark.parametrize("name,mod", ALERT_BLOCKS)
 def test_red_above_neutral_at_or_below_baseline(name, mod):
     for count in (25, 30):  # <= red_above=30
-        out = mod.render({"count": count, "state": "Critical"}, red_above=30)
+        out = mod.render(_measured(name, count=count, state="Critical"),
+                         red_above=30)
         assert out["state"] == "Idle"          # visible but NOT coloured
         assert mod.ALERT_GLYPH in out["text"]  # still shown (not hidden)
         assert str(count) in out["text"]
@@ -1140,20 +1437,40 @@ def test_red_above_neutral_at_or_below_baseline(name, mod):
 
 @pytest.mark.parametrize("name,mod", ALERT_BLOCKS)
 def test_red_above_colours_when_over_baseline(name, mod):
-    out = mod.render({"count": 31, "state": "Critical"}, red_above=30)
+    out = mod.render(_measured(name, count=31, state="Critical"), red_above=30)
     assert out["state"] == "Critical"          # above the baseline -> red
 
 
 @pytest.mark.parametrize("name,mod", ALERT_BLOCKS)
 def test_red_above_zero_is_backward_compatible(name, mod):
     # default (no threshold) still colours whenever count > 0
-    assert mod.render({"count": 1, "state": "Critical"})["state"] == "Critical"
+    assert mod.render(_measured(name, count=1,
+                                state="Critical"))["state"] == "Critical"
 
 
 @pytest.mark.parametrize("name,mod", ALERT_BLOCKS)
 def test_red_above_still_hides_at_zero(name, mod):
-    assert mod.render({"count": 0, "state": "Idle"}, red_above=30) == \
+    assert mod.render(_measured(name, count=0, state="Idle"), red_above=30) == \
         {"text": "", "state": "Idle"}
+
+
+@pytest.mark.parametrize("name,mod", ALERT_BLOCKS)
+@pytest.mark.parametrize("red_above", [0, 30, 340, 10_000])
+def test_the_backlog_BASELINE_cannot_quieten_an_UNREADABLE_cache(name, mod,
+                                                                 red_above):
+    """🔴 `red_above` says how many alerts are BORING. It says nothing about a
+    reading that does not exist, so it must not reach the `?` pill.
+
+    The tempting mutant is to fold the unmeasured case into the count path,
+    where `count = 0 <= red_above` would render `Idle` — the neutral colour —
+    and a big enough baseline would neutralise every blackout. `10_000` is here
+    because it is nothing like either shipped threshold: a fixture whose value
+    equals the constant it tests cannot see the difference.
+    """
+    out = mod.render(None, red_above=red_above)
+    assert out["state"] == "Warning", red_above
+    assert out["text"].endswith("?")
+    assert out != {"text": "", "state": "Idle"}
 
 
 @pytest.mark.parametrize("name,mod", ALERT_BLOCKS)
@@ -1166,40 +1483,141 @@ def test_red_above_arg_parsing(name, mod, monkeypatch):
     assert mod._red_above_arg() == 0
 
 
-#: The blocks whose UNREADABLE rendering is the invisible pill. clawgate is
-#: excluded by design and asserted the other way — it is the only surface for a
-#: stuck dispatch that nothing can dismiss, so it renders `?` rather than hiding.
-#: Derived from BLOCKS by SUBTRACTION, so a block added to BLOCKS joins this list
-#: automatically instead of silently escaping it.
-#:
-#: 🔴 WHAT REPLACED clawgate's ROW HERE. Leaving this list was also leaving the
-#: only test that fed it `None, [], "x", 3, {"count": "NaN"}, {}` as a PURE
-#: function, and for a while nothing did — a mutant passing `payload` instead of
-#: `None` to `_unmeasured` (an `AttributeError` on any truthy non-dict) survived
-#: the whole suite. `test_the_clawgate_render_FUNCTION_is_failsafe_AND_stays_visible`
-#: feeds it that same set and asserts the OPPOSITE pill; the subprocess pair in
-#: `test_the_clawgate_block_renders_an_UNREADABLE_board_VISIBLY` covers the
-#: pixels but, going through `__main__`'s `except`, cannot see a crash at all.
-HIDES_WHEN_UNREADABLE = [b for b in BLOCKS if b[0] != "clawgate"]
-assert len(HIDES_WHEN_UNREADABLE) == len(BLOCKS) - 1, "clawgate left BLOCKS"
+# --------------------------------------------------------------------------- #
+# 🔴 THE DEFECT, ASSERTED ACROSS THE WHOLE BAR: a cache that could not be read
+# never renders as a cache that was read and said nothing.
+#
+# There used to be a `HIDES_WHEN_UNREADABLE = [b for b in BLOCKS if b[0] !=
+# "clawgate"]` here, and three parametrizations pinning `{"text": "", "state":
+# "Idle"}` — the MEASURED all-clear pill — as the correct rendering for a stale
+# marker, an error marker, a missing file and a corrupt one. That list was the
+# defect written down as an expectation. It is replaced by its own negation,
+# widened from the four count blocks to all SEVEN cache-backed blocks.
+#
+# ⚠ LABEL, honestly: for `clawgate`, `media` and `airvpn` these are INVARIANT
+# GUARDS — those three already discriminated on the MARKER paths, and stay green
+# on the pre-change tree for the marker/missing rows. They are REGRESSION
+# coverage for `mail`, `alerts`, `civitai` and `telemetry`, and for the FROZEN
+# row (`test_a_cache_the_poller_STOPPED_REWRITING_*`) they are regression
+# coverage for all seven but clawgate. The red-at-base matrix is in the PR.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("name,mod", ALL_BLOCKS)
+def test_a_poller_STALE_marker_is_not_a_measured_all_clear(name, mod):
+    """`bar-status-poll.stale()` is written when the SOURCE did not answer — the
+    kubeconfig, the port-forward, Alertmanager, clawgate, qBit. That is a
+    statement about our ability to look, never about what is there."""
+    out = mod.render(_aged(0, count=0, state="stale", detail="unreachable"),
+                     now=FIXED_NOW)
+    assert out == UNMEASURED_PILL[name], out
+    assert out != MEASURED_ALL_CLEAR_PILL[name]
 
 
-@pytest.mark.parametrize("name,mod,icon,default_state", HIDES_WHEN_UNREADABLE)
-def test_block_stale_is_invisible(name, mod, icon, default_state):
-    assert mod.render({"count": 5, "state": "stale"}) == {"text": "", "state": "Idle"}
+@pytest.mark.parametrize("name,mod", ALL_BLOCKS)
+def test_an_ERROR_marker_is_not_a_measured_all_clear(name, mod):
+    # `count: 0` because that is what `stale()` actually writes — the count on a
+    # marker is not a reading. A marker that still CARRIES a number is a
+    # different claim (the alarm must survive the outage) and has its own tests:
+    # `test_a_clawgate_OUTAGE_carries_the_LAST_KNOWN_stuck_count_forward` and
+    # `test_a_FROZEN_telemetry_cache_KEEPS_the_dead_sources_it_last_counted`.
+    out = mod.render(_aged(0, count=0, state="Warning", error="boom"),
+                     now=FIXED_NOW)
+    assert out == UNMEASURED_PILL[name], out
+    assert out != MEASURED_ALL_CLEAR_PILL[name]
 
 
-@pytest.mark.parametrize("name,mod,icon,default_state", HIDES_WHEN_UNREADABLE)
-def test_block_error_marker_is_invisible(name, mod, icon, default_state):
-    assert mod.render({"count": 5, "state": "Warning", "error": "x"}) == \
-        {"text": "", "state": "Idle"}
+@pytest.mark.parametrize("name,mod", ALL_BLOCKS)
+@pytest.mark.parametrize("bad", [
+    None,             # no file at all, or one `load()` could not parse
+    [],               # valid JSON, wrong shape — and FALSY
+    ["a", "list"],    # ...and a TRUTHY one
+    {},               # a dict that says nothing at all
+    "x",              # a bare JSON string (truthy)
+    "",               # ...and a falsy one
+    3,                # a bare JSON number (truthy)
+    0,                # ...and a falsy one
+    True,             # a bare JSON bool — an int in Python
+    2.5,              # a bare JSON float
+])
+def test_a_MISSING_or_corrupt_cache_is_not_a_measured_all_clear(name, mod, bad):
+    """The truthy non-dicts are the load-bearing rows: any `payload.get(...)`
+    a block reaches before its type check raises on them, and `__main__` would
+    swallow that into a pill indistinguishable from a correct one."""
+    out = mod.render(bad, now=FIXED_NOW)          # must not raise
+    assert out == UNMEASURED_PILL[name], (name, bad, out)
+    assert out != MEASURED_ALL_CLEAR_PILL[name]
 
 
-@pytest.mark.parametrize("name,mod,icon,default_state", HIDES_WHEN_UNREADABLE)
-def test_block_none_and_malformed_are_invisible(name, mod, icon, default_state):
-    for bad in (None, [], "x", 3, {"count": "NaN"}, {}):
-        out = mod.render(bad)
-        assert out == {"text": "", "state": "Idle"}
+@pytest.mark.parametrize("name,mod", ALL_BLOCKS)
+def test_a_cache_the_poller_STOPPED_REWRITING_is_not_a_current_reading(name, mod):
+    """🔴 THE HALF NO BLOCK BUT clawgate HAD AT ALL. Not one of these files read
+    the `ts` that `bar-status-poll.source()` stamps on every payload, so a dead
+    poller did not make the bar go quiet — it FROZE it, and every pill went on
+    presenting its last reading as a present-tense fact.
+
+    Both directions are asserted against the SAME payload, so this cannot pass
+    against a gate that is merely present and always-true: fresh renders the
+    quiet reading, a day old renders the `?`.
+    """
+    fresh_out = mod.render(_quiet_payload(name, age_secs=0), now=FIXED_NOW)
+    frozen_out = mod.render(_quiet_payload(name, age_secs=86_400), now=FIXED_NOW)
+    assert fresh_out == MEASURED_ALL_CLEAR_PILL[name], fresh_out
+    assert frozen_out == UNMEASURED_PILL[name], frozen_out
+    assert fresh_out != frozen_out
+
+
+#: The blocks that render a COUNT (media/airvpn are state pills and have no
+#: count branch at all). Derived by SUBTRACTION from the registry, so a new count
+#: block joins automatically rather than silently escaping the guard below.
+COUNT_BLOCKS = [b for b in ALL_BLOCKS if b[0] not in ("media", "airvpn")]
+assert len(COUNT_BLOCKS) == len(ALL_BLOCKS) - 2
+
+
+@pytest.mark.parametrize("name,mod", COUNT_BLOCKS)
+@pytest.mark.parametrize("junk", ["NaN", "2", 2.5, True, False, None, [], {}])
+def test_a_count_ANY_block_REFUSES_TO_READ_is_not_a_count_of_zero(name, mod,
+                                                                  junk):
+    """🔴 FOUND BY THE MUTATION SWEEP, NOT BY REVIEW. `if count is None: return
+    <unmeasured>` could be swapped for `return dict(_EMPTY)` in `i3status-mail`
+    and `i3status-telemetry` and the ENTIRE suite stayed green — a CURRENT cache
+    whose `count` is unreadable would silently revert to the invisible pill,
+    which is the exact substitution this change exists to forbid, on a payload
+    the freshness gate says IS a present-tense reading. clawgate had this test;
+    the blocks it was copied to did not, and the copy is what the sweep caught.
+
+    `"2"` is in the list deliberately: `int()` would coerce it happily. The
+    poller writes ints, so a string count means the WRITER changed, and a block
+    that quietly agrees with a writer it no longer recognises is how a pill stops
+    meaning what it says. `True`/`False` are here because a bool is an int in
+    Python, so a coercing check fabricates a 1 or a 0.
+    """
+    payload = _aged(0, count=junk, state="Warning")
+    if name == "clawgate":
+        payload["stuck_count"] = 0
+    # the payload must reach the COUNT branch, not stop at the freshness gate
+    assert freshness.unmeasured(payload, FIXED_NOW) is False
+    out = mod.render(payload, now=FIXED_NOW)
+    assert out == UNMEASURED_PILL[name], (name, junk, out)
+    assert out != MEASURED_ALL_CLEAR_PILL[name], (name, junk)
+
+
+@pytest.mark.parametrize("name,mod", ALL_BLOCKS)
+def test_every_block_render_is_FAILSAFE_when_called_DIRECTLY(name, mod):
+    """🔴 THE HALF A SUBPROCESS CANNOT MEASURE, for every block at once.
+
+    Each block's `__main__` catches every exception and prints a pill that is
+    BYTE-IDENTICAL to the one a correct `render` produces for an unreadable
+    cache. So `render` replaced wholesale by `raise RuntimeError` leaves every
+    end-to-end test in this file green — measured on clawgate, where five
+    parametrizations stayed green under exactly that mutant. Only a direct call
+    can tell a computed answer from a swallowed crash, which is what makes each
+    module's "it never raises, whatever the file contains" a tested claim.
+    """
+    for payload in (None, [], ["a"], {}, "x", 3, True, 2.5,
+                    {"count": "NaN"}, {"ts": "nope"}, {"ts": None},
+                    _aged(0, count=1, state="Warning"),
+                    _aged(10**9, count=1, state="Warning")):
+        out = mod.render(payload, now=FIXED_NOW)      # must not raise
+        assert isinstance(out, dict) and "state" in out, (name, payload)
 
 
 @pytest.mark.parametrize("name,mod,icon,default_state", BLOCKS)
@@ -1221,23 +1639,40 @@ def test_block_defaults_state_when_missing_or_idle(name, mod, icon, default_stat
 # --------------------------------------------------------------------------- #
 # block scripts: end-to-end subprocess against a fixture cache dir
 # --------------------------------------------------------------------------- #
-# ⚠ `i3status-clawgate` is DELIBERATELY ABSENT from the two "…_is_invisible"
-# parametrizations below and has its own pair further down. It is the one block
-# whose no-file / corrupt-file rendering is a VISIBLE `?`: a stuck dispatch is
-# announced nowhere else that cannot be dismissed, so "I could not read the
-# board" must not borrow the pixels that mean "the board is empty". The other
-# three still hide, and whether they should is a separate question from this one.
-@pytest.mark.parametrize("script,cachefile", [
-    ("i3status-mail", "mail.json"),
-    ("i3status-alerts", "alerts.json"),
-    ("i3status-civitai", "civitai.json"),
-])
-def test_block_subprocess_missing_file_is_invisible(tmp_path, script, cachefile):
+# ⚠ `i3status-clawgate` USED to be absent from the two "…_is_invisible"
+# parametrizations below, because it was the only block whose no-file /
+# corrupt-file rendering was a VISIBLE `?`. That is now every block's rendering,
+# so the parametrization is the full list and the assertion is inverted.
+#
+# ⚠ AND THESE CANNOT SEE A CRASH. They drive each block as a SUBPROCESS, and
+# every `__main__` catches all exceptions and prints a BYTE-IDENTICAL unmeasured
+# pill. They prove the PIXEL; `test_every_block_render_is_FAILSAFE_when_called_
+# DIRECTLY` is the other half and neither is sufficient alone.
+BLOCK_SCRIPTS = [
+    ("i3status-clawgate", "clawgate.json", "clawgate"),
+    ("i3status-mail", "mail.json", "mail"),
+    ("i3status-alerts", "alerts.json", "alerts"),
+    ("i3status-civitai", "civitai.json", "civitai"),
+    ("i3status-media", "media.json", "media"),
+    ("i3status-airvpn", "airvpn.json", "airvpn"),
+    ("i3status-telemetry", "telemetry.json", "telemetry"),
+]
+# 🔴 Pinned two-way against the block registry, so a block added to one and not
+# the other is a failure rather than a silent hole. Both lists are hand-written
+# on purpose — deriving one from the other would make this assertion vacuous.
+assert [n for _, _, n in BLOCK_SCRIPTS] == [n for n, _ in ALL_BLOCKS]
+
+
+@pytest.mark.parametrize("script,cachefile,name", BLOCK_SCRIPTS)
+def test_block_subprocess_missing_file_is_VISIBLE(tmp_path, script, cachefile,
+                                                  name):
     env = dict(os.environ, BAR_STATUS_DIR=str(tmp_path))
     r = subprocess.run([sys.executable, str(SCRIPTS / script)],
                        capture_output=True, text=True, env=env)
-    assert r.returncode == 0
-    assert json.loads(r.stdout) == {"text": "", "state": "Idle"}
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert out == UNMEASURED_PILL[name], (name, out)
+    assert out != MEASURED_ALL_CLEAR_PILL[name]
 
 
 # icon=None => alert blocks (glyph in text, no `icon` field); the given `text`
@@ -1264,18 +1699,54 @@ def test_block_subprocess_positive_renders(tmp_path, script, cachefile, icon, te
         assert out["icon"] == icon and out["text"] == text
 
 
-@pytest.mark.parametrize("script,cachefile", [
-    ("i3status-mail", "mail.json"),
-    ("i3status-alerts", "alerts.json"),
-    ("i3status-civitai", "civitai.json"),
-])
-def test_block_subprocess_corrupt_json_is_invisible(tmp_path, script, cachefile):
+@pytest.mark.parametrize("script,cachefile,name", BLOCK_SCRIPTS)
+def test_block_subprocess_corrupt_json_is_VISIBLE(tmp_path, script, cachefile,
+                                                  name):
     (tmp_path / cachefile).write_text("{ this is not json ")
     env = dict(os.environ, BAR_STATUS_DIR=str(tmp_path))
     r = subprocess.run([sys.executable, str(SCRIPTS / script)],
                        capture_output=True, text=True, env=env)
-    assert r.returncode == 0
-    assert json.loads(r.stdout) == {"text": "", "state": "Idle"}
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert out == UNMEASURED_PILL[name], (name, out)
+    assert out != MEASURED_ALL_CLEAR_PILL[name]
+
+
+@pytest.mark.parametrize("script,cachefile,name", BLOCK_SCRIPTS)
+def test_block_subprocess_FROZEN_cache_is_VISIBLE(tmp_path, script, cachefile,
+                                                  name):
+    """🔴 THE DEFECT, END TO END AND THROUGH THE REAL CLOCK. The pure-function
+    tests inject `now`; nothing they do can catch a `main()` that drops it or a
+    `render` whose default `now` is wrong. Here the cache is genuinely stamped a
+    day in the past and the block reads its own wall clock."""
+    payload = _quiet_payload(name, age_secs=0)
+    payload["ts"] = int(time.time()) - 86_400
+    (tmp_path / cachefile).write_text(json.dumps(payload))
+    env = dict(os.environ, BAR_STATUS_DIR=str(tmp_path))
+    r = subprocess.run([sys.executable, str(SCRIPTS / script)],
+                       capture_output=True, text=True, env=env)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert out == UNMEASURED_PILL[name], (name, out)
+    assert out != MEASURED_ALL_CLEAR_PILL[name]
+
+
+@pytest.mark.parametrize("script,cachefile,name", BLOCK_SCRIPTS)
+def test_block_subprocess_FRESH_quiet_cache_stays_QUIET(tmp_path, script,
+                                                        cachefile, name):
+    """🔴 THE OTHER DIRECTION, and the one that keeps this change from being a
+    regression: a healthy, quiet bar must stay quiet. A fix that made every pill
+    visible would pass every assertion above and ruin the calm bar."""
+    payload = _quiet_payload(name, age_secs=0)
+    payload["ts"] = int(time.time())
+    (tmp_path / cachefile).write_text(json.dumps(payload))
+    env = dict(os.environ, BAR_STATUS_DIR=str(tmp_path))
+    r = subprocess.run([sys.executable, str(SCRIPTS / script)],
+                       capture_output=True, text=True, env=env)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert out == MEASURED_ALL_CLEAR_PILL[name], (name, out)
+    assert out != UNMEASURED_PILL[name]
 
 
 # --------------------------------------------------------------------------- #
@@ -1741,12 +2212,25 @@ def test_telemetry_uses_a_free_signal():
     assert len(set(poll.SIGNALS.values())) == len(poll.SIGNALS)
 
 
+def _stamp(payload):
+    """Stamp a `parse_*` result the way `bar-status-poll.source()` does.
+
+    🔴 `parse_telemetry` returns FACTS; `source()` is what puts the integer `ts`
+    on them before `write_status` writes the file a block reads. The block now
+    refuses to present an unstamped payload as a current reading, so a test that
+    renders a bare `parse_*` result is rendering something no poller ever wrote.
+    An INT, because `int_or_none` will not coerce a float.
+    """
+    payload["ts"] = int(time.time())
+    return payload
+
+
 def test_parse_telemetry_clean_is_idle_and_invisible():
     out = poll.parse_telemetry(_verdict(count=0, detail="17 source(s) fresh"),
                                now=1000)
     assert out["count"] == 0 and out["state"] == "Idle"
     assert out["unknown"] is False
-    assert telemetry_block.render(out) == {"text": "", "state": "Idle"}
+    assert telemetry_block.render(_stamp(out)) == {"text": "", "state": "Idle"}
 
 
 def test_parse_telemetry_dead_source_is_critical_and_visible():
@@ -1755,7 +2239,7 @@ def test_parse_telemetry_dead_source_is_critical_and_visible():
         _verdict(count=2, detail="workbench/opencode silent 19.0h active"),
         now=1000)
     assert out["count"] == 2 and out["state"] == "Critical"
-    blk = telemetry_block.render(out)
+    blk = telemetry_block.render(_stamp(out))
     assert blk["text"] == "tlm 2"
     assert blk["state"] == "Critical"
 
@@ -1783,7 +2267,7 @@ def test_a_MEASURED_death_outranks_an_unknown_state_at_the_pill():
     assert out["suppress_toast"] is False, out
     assert out["unknown_since"] == 1000, out
     assert "h1/claude" in out["detail"] and "UNKNOWN" in out["detail"], out
-    blk = telemetry_block.render(out)
+    blk = telemetry_block.render(_stamp(out))
     assert (blk["text"], blk["state"]) == ("tlm 1", "Critical"), blk
 
     # NEGATIVE CONTROL, same state, nothing measured dead -> the `tlm ?` path is
@@ -1878,7 +2362,7 @@ def test_a_junk_count_DEGRADES_it_does_not_raise():
     neg = poll.parse_telemetry(_verdict(state="ok", count=-5), now=1000,
                                unknown_states=UNKNOWN_STATES)
     assert neg["count"] == 0 and neg["state"] == "Idle", neg
-    assert telemetry_block.render(neg)["text"] == "", neg
+    assert telemetry_block.render(_stamp(neg))["text"] == "", neg
     # And `evaluated`/`rows` are on the same footing — they are ints in the
     # payload contract and a junk verdict must not crash the poll.
     weird = poll.parse_telemetry({"state": "ok", "count": 0, "evaluated": "x",
@@ -2187,8 +2671,17 @@ def test_parse_telemetry_unknown_is_grace_gated_then_visible():
     first = poll.parse_telemetry(_verdict(state="unreachable"), now=1000,
                                  grace=1800, unknown_states=UNKNOWN_STATES)
     # A single failed poll must NOT flicker the bar.
+    #
+    # 🔴 THE GRACE PERIOD IS THE POLLER'S, AND IT IS NOT THE FRESHNESS GATE.
+    # The payload is STAMPED here, so it is a CURRENT cache written by a LIVING
+    # poller that merely could not evaluate — which is exactly the distinction
+    # `bar_freshness.MAX_CACHE_AGE_SECS` (600s, "is the writer alive?") and
+    # `TELEMETRY_UNKNOWN_GRACE` (1800s, "how long has a living writer been
+    # unable to tell?") measure separately. Without the stamp this assertion
+    # would pass for the wrong reason: an unstamped payload renders `tlm ?` too,
+    # so the debounce would look broken-or-working identically.
     assert first["unknown"] is False
-    assert telemetry_block.render(first) == {"text": "", "state": "Idle"}
+    assert telemetry_block.render(_stamp(first)) == {"text": "", "state": "Idle"}
     # ...but a persistent one must become visible, carrying `unknown_since`
     # forward across the oneshot poller's restarts.
     later = poll.parse_telemetry(_verdict(state="unreachable"), prev=first,
@@ -2196,7 +2689,7 @@ def test_parse_telemetry_unknown_is_grace_gated_then_visible():
                                  unknown_states=UNKNOWN_STATES)
     assert later["unknown_since"] == 1000
     assert later["unknown"] is True
-    assert telemetry_block.render(later) == {
+    assert telemetry_block.render(_stamp(later)) == {
         "text": "tlm ?", "short_text": "tlm ?", "state": "Warning"}
 
 
@@ -2219,19 +2712,118 @@ def test_parse_telemetry_junk_verdict_is_unknown_not_healthy():
         assert out["unknown_since"] == 1000
 
 
-def test_telemetry_block_hides_on_missing_and_poller_stale():
-    assert telemetry_block.render(None) == {"text": "", "state": "Idle"}
-    assert telemetry_block.render({"state": "stale", "count": 0}) == {
-        "text": "", "state": "Idle"}
-    assert telemetry_block.render({"error": "boom", "count": 5}) == {
-        "text": "", "state": "Idle"}
-    assert telemetry_block.render({"count": "NaN"}) == {"text": "", "state": "Idle"}
+# --------------------------------------------------------------------------- #
+# 🔴 THE DEADMAN'S OWN DEADMAN. This block exists to make silence visible, and
+# it was silent about its own silence.
+#
+# This group REPLACES `test_telemetry_block_hides_on_missing_and_poller_stale`,
+# which asserted the defect as the contract: a missing cache, a `stale` marker,
+# an `error` marker carrying FIVE dead sources, and an unreadable count all had
+# to render `{"text": "", "state": "Idle"}` — the same pixels as a fully healthy
+# pipeline. The old mapping was deliberate and its stated ground was that "the
+# unit's OnFailure toast covers a fetch that raised". That ground does not exist:
+# `bar-status-poll.source()` converts every fetch exception into a `stale()`
+# marker, `main()` returns 0, and `__main__` ends `except Exception: sys.exit(0)`
+# — so the service EXITS SUCCESSFULLY on exactly the failure the marker records
+# and `OnFailure=` never fires. A STOPPED timer raises no failure at all, so it
+# cannot cover the frozen-cache case even in principle.
+# --------------------------------------------------------------------------- #
+def test_the_poller_EXITS_ZERO_on_the_failure_the_marker_records(monkeypatch,
+                                                                 tmp_path):
+    """🔴 THE LOAD-BEARING FACT behind the group above, measured rather than
+    asserted from the docstring it replaces. If this is ever false — if a failing
+    source really does fail the unit — then `OnFailure` IS a compensating control
+    and the group below is arguing from a premise that no longer holds.
+    """
+    monkeypatch.setenv("BAR_STATUS_DIR", str(tmp_path))
+    monkeypatch.setattr(poll, "signal_bar", lambda _n: None)
+
+    def _boom():
+        raise RuntimeError("clickhouse unreachable")
+
+    payload = poll.run_source("telemetry", _boom)
+    assert payload["state"] == "stale", payload
+    # the marker is on disk...
+    on_disk = json.loads((tmp_path / "telemetry.json").read_text())
+    assert on_disk["state"] == "stale"
+    # ...and the process that wrote it reports SUCCESS, so nothing downstream of
+    # the unit's exit status can know the fetch failed.
+    monkeypatch.setattr(poll, "SOURCES", (("telemetry", _boom),))
+    assert poll.main([]) == 0
+
+
+def test_the_deadman_block_now_has_a_DEADMAN_OF_ITS_OWN():
+    """🔴 THE DEFECT. Four ways of not knowing, one of which used to be the only
+    one this block could express. All four must be visible, and none may render
+    as the healthy pipeline."""
+    healthy = telemetry_block.render(_aged(0, count=0, state="Idle"),
+                                     now=FIXED_NOW)
+    assert healthy == {"text": "", "state": "Idle"}
+
+    missing = telemetry_block.render(None, now=FIXED_NOW)
+    marker = telemetry_block.render(_aged(0, state="stale", count=0),
+                                    now=FIXED_NOW)
+    frozen = telemetry_block.render(_aged(86_400, count=0, state="Idle"),
+                                    now=FIXED_NOW)
+    unknown = telemetry_block.render(_aged(0, count=0, unknown=True,
+                                           state="Warning"), now=FIXED_NOW)
+    for name, pill in (("missing", missing), ("marker", marker),
+                       ("frozen", frozen), ("unknown", unknown)):
+        assert pill == {"text": "tlm ?", "short_text": "tlm ?",
+                        "state": "Warning"}, (name, pill)
+        assert pill != healthy, name
+
+
+def test_a_FROZEN_telemetry_cache_KEEPS_the_dead_sources_it_last_counted():
+    """🔴 A MEASUREMENT OUTAGE MUST NOT MAKE A KNOWN ALARM QUIETER — the same
+    line `i3status-clawgate._unmeasured` draws for `stuck_count`. A source does
+    not come back to life because the poller stopped looking, so three dead
+    sources stay three, Critical, with the trailing `?` marking the number as
+    the last readable poll rather than a fresh measurement.
+
+    ⚠ SCOPE, stated because the name would otherwise overclaim: this is the
+    FROZEN-FILE branch, where the old payload is still on disk. On the MARKER
+    branch `stale()` writes `count: 0` OVER the last reading, so the pill is a
+    bare `tlm ?` — louder than the empty pill it used to be, but not the full
+    carry-forward `bar-status-poll.carry_stuck_forward` gives clawgate.
+    """
+    frozen = telemetry_block.render(_aged(86_400, count=3, state="Critical"),
+                                    now=FIXED_NOW)
+    assert frozen["text"] == "tlm 3?"
+    assert frozen["state"] == "Critical"
+    assert frozen["short_text"] == frozen["text"]
+    assert frozen["text"].endswith("?")
+    # ...and a frozen QUIET reading may not borrow that alarm
+    calm = telemetry_block.render(_aged(86_400, count=0, state="Idle"),
+                                  now=FIXED_NOW)
+    assert calm["text"] == "tlm ?" and calm["state"] == "Warning"
+    assert frozen["state"] != calm["state"]
+    # ...and the live reading of the SAME count is not marked as uncertain
+    live = telemetry_block.render(_aged(0, count=3, state="Critical"),
+                                  now=FIXED_NOW)
+    assert live["text"] == "tlm 3" and "?" not in live["text"]
+
+
+@pytest.mark.parametrize("bad", [
+    None, [], ["a", "list"], {}, "x", "", 3, 0, True, 2.5, {"count": "NaN"},
+])
+def test_the_telemetry_render_FUNCTION_is_failsafe_AND_stays_visible(bad):
+    """🔴 A DIRECT call. `__main__` catches everything and prints a
+    BYTE-IDENTICAL `tlm ?`, so `render` replaced wholesale by `raise` is
+    invisible to every subprocess test of this block. The truthy non-dicts are
+    the load-bearing rows: `_unmeasured` reaches for `.get("count")`.
+    """
+    out = telemetry_block.render(bad, now=FIXED_NOW)     # must not raise
+    assert out == {"text": "tlm ?", "short_text": "tlm ?",
+                   "state": "Warning"}, bad
+    assert out != {"text": "", "state": "Idle"}, bad
 
 
 def test_telemetry_block_main_emits_one_json_line(tmp_path, monkeypatch):
     monkeypatch.setenv("BAR_STATUS_DIR", str(tmp_path))
     (tmp_path / "telemetry.json").write_text(json.dumps(
-        {"count": 3, "state": "Critical", "unknown": False}))
+        {"count": 3, "state": "Critical", "unknown": False,
+         "ts": int(time.time())}))
     out = subprocess.run([sys.executable, str(SCRIPTS / "i3status-telemetry")],
                          capture_output=True, text=True,
                          env={**os.environ, "BAR_STATUS_DIR": str(tmp_path)})
