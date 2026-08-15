@@ -1366,7 +1366,8 @@ class TestSkillDocsArePinned:
     HANDOFF_SENTENCES: list[tuple[str, str]] = [
         ("scripts/lib/subsystem_touch.py", "the step actually calls this module"),
         ("It **never writes**", "the helper's read-only contract, stated to its caller"),
-        ("Write only on explicit confirm, diff first", "the confirm gate"),
+        ("Write it — no question", "the index write is deliberately ungated"),
+        ("Step 5 keeps its y/N", "the PUSH gate survives; blast radius earns a gate"),
         ("re-read the file and re-apply to current bytes", "no concurrent append is clobbered"),
         ("Never silent-mutate.", "the invariant carried over from analyze-service"),
         ("pointers, not copies", "the bloat rule"),
@@ -1669,9 +1670,25 @@ class TestSkillDocsArePinned:
         still have the deliverable. Asserted on ORDER in the file, because the
         pin above only proves the sentence exists somewhere."""
         doc = HANDOFF_DOC.read_text(encoding="utf-8")
-        kickoff = doc.index("**Output a kickoff block**")
-        index_step = doc.index("**Record what this session touched")
-        gate = doc.index("append this to the index? (y/N)")
+
+        def at(needle: str) -> int:
+            # 🔴 Not `.index()`: a deleted anchor raised a bare ValueError, which
+            # reports a real regression as a traceback and names nothing.
+            pos = doc.find(needle)
+            assert pos >= 0, (
+                f"anchor missing from claude/skills/handoff/SKILL.md: {needle!r}. "
+                f"If a step was deliberately removed, update this ordering test "
+                f"in the SAME commit — it is the only thing asserting the "
+                f"deliverable comes before anything that can block."
+            )
+            return pos
+
+        kickoff = at("**Output a kickoff block**")
+        index_step = at("**Record what this session touched")
+        # The index write is no longer gated (2026-08-15, operator decision), so
+        # the ordering anchor is step 5's PUSH gate — still the last thing that
+        # can block, and still after the deliverable.
+        gate = at("update the handoff doc and push it? (y/N)")
         assert kickoff < index_step < gate
 
     @pytest.mark.parametrize(
