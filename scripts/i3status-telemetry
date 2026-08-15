@@ -7,37 +7,101 @@ i3status-rust JSON line. INSTANT local file read — never touches the network,
 never blocks the bar.
 
 CALM rendering (colour == "look at me"):
-  missing / poller-stale / malformed / count<=0  -> empty, invisible block
-  count > 0                                     -> `tlm N`, Critical
-  unknown (grace-gated by the poller)           -> `tlm ?`, Warning
+  measured, count == 0                   -> empty, invisible block
+  measured, count > 0                    -> `tlm N`, Critical
+  UNMEASURED, nothing else known         -> `tlm ?`, Warning
+  UNMEASURED, N still recorded on disk   -> `tlm N?`, Critical
 
-🔴 THE `tlm ?` STATE IS THE WHOLE POINT. Every other block in this bar renders a
-"cannot reach the source" as an EMPTY block, because for those a blackout is a
-non-event. Here it is not: this block's reassuring answer IS a zero, so a zero
-that came from a broken query is indistinguishable from a zero that came from a
-healthy pipeline — which is exactly the bug class the deadman check exists to
-catch, and it must not embody it. So `unknown` gets its own visible pill.
+🔴 THE `tlm ?` STATE IS THE WHOLE POINT. Every other block in this bar used to
+render "cannot reach the source" as an EMPTY block, because for those a blackout
+looked like a non-event. Here it never was: this block's reassuring answer IS a
+zero, so a zero that came from a broken query is indistinguishable from a zero
+that came from a healthy pipeline — which is exactly the bug class the deadman
+check exists to catch, and it must not embody it.
 
-The pill is grace-gated IN THE POLLER (not here): the poller only sets
-`unknown: true` once the check has been unable to evaluate CONTINUOUSLY for
-TELEMETRY_UNKNOWN_GRACE seconds (default 1800), so a nebula blip or a ClickHouse
-restart between two 45s polls never flickers the bar. This script stays a pure
-function of the cache payload and holds no clock of its own.
+🔴 THE DEADMAN HAD NO DEADMAN OF ITS OWN, WHICH IS THE HALF THIS MODULE ADDED.
+Until now `tlm ?` came from ONE source only: `payload["unknown"]` inside a
+READABLE, FRESH payload — the deadman itself reporting "cannot evaluate",
+grace-gated at 1800s in the poller. Every OTHER way of not knowing rendered the
+empty pill:
+  * a poller `stale`/`error` marker  -> EMPTY  (measured 2026-08-14)
+  * a missing or corrupt cache       -> EMPTY
+  * a cache the poller STOPPED REWRITING -> the last verdict, forever, with no
+    `ts` check anywhere in this file
+So the one block whose entire job is making silence visible was silent about its
+own silence: if `bar-status-poll` died while the pipeline was healthy, `tlm`
+rendered a confident, present-tense all-clear until someone rebooted.
+
+⚠ THE ORIGINAL REASONING, AND WHY IT NO LONGER HOLDS. The `stale`/`error` ->
+EMPTY mapping was deliberate, and its stated ground was "the unit's `OnFailure`
+toast covers a fetch that raised". That is not true of this path, and is
+checkable in `bar-status-poll`: `source()` catches EVERY exception from a fetch
+and converts it into a `stale()` marker, `main()` then returns 0, and even the
+`__main__` guard ends `except Exception: sys.exit(0)`. The service therefore
+EXITS SUCCESSFULLY on precisely the failure the marker records, so
+`OnFailure=notify-failure@%n.service` never fires for it. The compensating
+control the comment named does not exist. And the frozen-poller case is worse
+still: a STOPPED timer raises no failure at all, so `OnFailure` is structurally
+incapable of covering it.
 
 A TEXT label (`tlm`) rather than a nerd-font glyph, deliberately: the two
 existing count pills that carry meaning by GLYPH (alerts/notifs) are already a
 pair a reader has to tell apart, and `civ` set the precedent that a short text
 label reads unambiguously. It also cannot silently render as a tofu box if the
 icon set changes.
+
+Text grammar, shared with `i3status-clawgate`: a TRAILING `?` is "this reading is
+not a current measurement", and it composes with whatever the reading still says
+(`tlm 3?` = three sources were dead as of the last poll we could take, and that
+poll is not current).
 """
+import importlib.machinery
+import importlib.util
 import json
 import os
 import sys
+import time
 
 NAME = "telemetry"
 LABEL = "tlm"
 _VALID_STATES = ("Idle", "Info", "Good", "Warning", "Critical")
 _EMPTY = {"text": "", "state": "Idle"}
+
+
+def _load_freshness():
+    """Load the co-located `bar_freshness.py` sibling by EXPLICIT PATH.
+
+    Extensionless block scripts cannot be a package, so this is the repo's
+    standard sibling-module shape (cf. `notif-center` loading `i3status-notifs`,
+    `bar-status-poll` loading `scripts/lib/`). `dont_write_bytecode` keeps a
+    `__pycache__` out of the operator's ~/.config/i3status-rust/scripts.
+    """
+    sys.dont_write_bytecode = True
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "bar_freshness.py")
+    loader = importlib.machinery.SourceFileLoader("_bar_freshness", path)
+    spec = importlib.util.spec_from_loader("_bar_freshness", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+try:
+    fresh = _load_freshness()
+except Exception:
+    # 🔴 THE FAILURE IS DEFERRED, NEVER ANSWERED. This load used to run bare at
+    # module level and four documents claimed a block that could not load the
+    # sibling "falls through to its `?` pill". It did not: the block died at
+    # import — traceback, exit 1, EMPTY stdout — so the promised fallback was
+    # unreachable, which is a guard that reads as protection while providing
+    # none. Now `fresh` stays None, every use of it raises inside `render`, and
+    # `__main__` below turns that into the VISIBLE `?` pill.
+    # 🔴 None IS THE POINT: a `try` that degraded to a permissive stub
+    # (`unmeasured -> False`) would reinstate the whole defect with the suite
+    # green. None cannot be permissive, because it cannot answer at all. Pinned
+    # by `test_a_block_that_cannot_load_the_SIBLING_renders_the_VISIBLE_pill`,
+    # which runs each block with the sibling absent and a fresh QUIET cache.
+    fresh = None
 
 
 def cache_path() -> str:
@@ -54,32 +118,105 @@ def load(path):
         return None
 
 
-def render(payload, label: str = LABEL) -> dict:
-    """Pure: cache payload (or None) -> i3status-rust block dict.
+def _reading_pill(payload, count, label: str):
+    """The pill the payload's OWN count renders, or None if it counted nothing.
 
-    Fail-safe: None / malformed / poller-stale all map to the empty block.
-    `unknown` (already grace-gated by the poller) renders a visible `tlm ?`.
+    Shared by the measured path and the carry-forward path below, so the number
+    and the colour an outage carries cannot drift from the ones it would have
+    shown. `count` is passed in already read (and refused) by the caller.
     """
-    if not isinstance(payload, dict):
-        return dict(_EMPTY)
-    # A poller-level failure (the fetch itself raised) — the unit's OnFailure
-    # toast covers that, and it is NOT the check's own "cannot tell".
-    if payload.get("error") or payload.get("state") == "stale":
-        return dict(_EMPTY)
-    if payload.get("unknown"):
-        text = "%s ?" % label
-        return {"text": text, "short_text": text, "state": "Warning"}
-    try:
-        count = int(payload.get("count", 0))
-    except (TypeError, ValueError):
-        return dict(_EMPTY)
-    if count <= 0:
-        return dict(_EMPTY)
+    if count is None or count <= 0:
+        return None
     state = payload.get("state")
     if state not in _VALID_STATES or state == "Idle":
         state = "Critical"
     text = "%s %d" % (label, count)
     return {"text": text, "short_text": text, "state": state}
+
+
+def _unmeasured(payload, label: str) -> dict:
+    """The VISIBLE `?` pill: the deadman could not be read just now.
+
+    🔴 It stays visible on purpose. Hide-at-zero is the convention for a count
+    pill, but a hidden pill means "measured, and there is nothing" — so an
+    unreadable cache may not borrow those pixels. On this block least of all.
+
+    🔴 AND IT NEVER GETS QUIETER THAN WHAT THE CACHE STILL RECORDS. A frozen
+    cache still holds its last verdict, so `tlm 3` becomes `tlm 3?` and stays
+    Critical: a measurement outage is a reason to trust a reading less, never a
+    reason to downgrade an alarm it already raised. Every other cache-backed
+    block now draws the same line through the same helper
+    (`bar_freshness.carry_forward`); `i3status-clawgate` draws it by hand for
+    `stuck_count`, and `parse_telemetry` for an UNKNOWN verdict carrying a
+    non-zero count.
+
+    ⚠ THE SCOPE OF THAT CLAIM IS EXACTLY THE CACHE IN FRONT OF US. A frozen file
+    still carries its count; a `stale()` marker does NOT — the poller writes
+    `count: 0` over the old reading, so a telemetry outage that lands on the
+    marker path renders a bare `tlm ?`. That is still strictly louder than the
+    EMPTY pill it used to render, but it is not the full carry-forward
+    `bar-status-poll.carry_stuck_forward` gives clawgate. Deliberately left: see
+    the PR. Unlike a wedged dispatch, a dead telemetry source IS announced
+    elsewhere that does not expire (`scripts/collector/deadman.py`, agent-ops).
+    """
+    count = fresh.int_or_none((payload or {}).get("count")
+                              if isinstance(payload, dict) else None)
+    text = "%s ?" % label
+    return fresh.carry_forward(
+        _reading_pill(payload, count, label) if isinstance(payload, dict)
+        else None,
+        {"text": text, "short_text": text, "state": "Warning"})
+
+
+def render(payload, label: str = LABEL, now=None) -> dict:
+    """Pure: cache payload (or None) -> i3status-rust block dict.
+
+    Three outcomes, and the first one is what this module is for:
+      * NOT MEASURED (None / malformed / stale / error / no or old `ts`)
+        -> the visible `?` pill, never the empty one;
+      * measured, count <= 0 -> the empty, invisible block (hide-at-zero);
+      * measured, count > 0  -> `tlm N` and a colour.
+
+    `unknown` is checked INSIDE the measured branch and keeps its own `tlm ?`:
+    that is the deadman saying "I ran and cannot evaluate", already grace-gated
+    by the poller, and it is a different fact from "nobody is measuring". They
+    render alike on purpose — the operator's action is the same — but only the
+    measured one can be reached with a fresh cache.
+
+    🔴 AND IT IS CHECKED AFTER THE COUNT, WHICH IS NOT A DETAIL. Checked first —
+    as it was — a payload carrying `unknown` AND a non-zero count rendered
+    `tlm ?`/Warning, silently dropping N measured deaths: the same downgrade the
+    freshness path exists to refuse, on the measured path. `parse_telemetry`
+    already draws this line at the writer ("A MEASURED DEATH OUTRANKS AN
+    UNCERTAINTY", its fourth case) and writes `unknown: False` when the count is
+    non-zero — so the renderer contradicting it was invisible against a
+    current-schema cache, and reachable from any cache written before that rule
+    existed. A count is evidence; an uncertainty is not evidence against it.
+
+    `now` is injected rather than read here so the freshness gate is testable
+    without sleeping; it defaults to the wall clock. Fail-safe throughout: it
+    never raises, whatever the file contains.
+
+    🔴 THAT LAST SENTENCE IS A CLAIM, AND ONLY A DIRECT CALL CAN TEST IT.
+    `__main__` below catches every exception and prints a byte-identical `?`
+    pill, so a `render` that raises unconditionally is invisible to any test
+    that drives this block as a subprocess. See
+    `test_the_telemetry_render_FUNCTION_is_failsafe_AND_stays_visible`.
+    """
+    now = time.time() if now is None else now
+    if fresh.unmeasured(payload, now):
+        return _unmeasured(payload, label)
+    count = fresh.int_or_none(payload.get("count", 0))
+    if count is None:
+        # A count we refuse to read is not a count of zero.
+        return _unmeasured(payload, label)
+    recorded = _reading_pill(payload, count, label)
+    if recorded is not None:
+        return recorded                 # a measured death outranks an unknown
+    if payload.get("unknown"):
+        text = "%s ?" % label
+        return {"text": text, "short_text": text, "state": "Warning"}
+    return dict(_EMPTY)
 
 
 def main() -> int:
@@ -91,5 +228,13 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except Exception:
-        sys.stdout.write(json.dumps(_EMPTY) + "\n")
+        # 🔴 The last-resort fallback is the `?` pill, NOT the empty one, for the
+        # same reason `render` refuses it: a block that crashed measured nothing,
+        # and the operator must be able to tell that from a healthy pipeline.
+        # Built literally so this path cannot depend on anything that just
+        # failed — including the sibling module the import above may not have
+        # found.
+        sys.stdout.write(
+            '{"text": "%s ?", "short_text": "%s ?", "state": "Warning"}\n'
+            % (LABEL, LABEL))
         sys.exit(0)

@@ -9,10 +9,14 @@ that the *instant* i3status-rust block scripts (i3status-clawgate / -mail /
 local file — so a slow or down source can never hang or break the bar.
 
 Fully FAIL-SAFE: a down/slow source writes a {"state":"stale"} marker (never
-crashes the poller); the block scripts render a stale/missing file as an empty
-(invisible) block, honouring the bar's CALM principle (colour == "look at me";
-steady state is neutral / invisible). After writing each file the poller signals
-i3status-rs (RTMIN+N) so the corresponding block refreshes immediately.
+crashes the poller). 🔴 EVERY block renders that marker — and a missing, corrupt
+or FROZEN cache — as its VISIBLE "not measured" pill (a trailing `?`), never as
+the empty/invisible block, which is reserved for a MEASURED all-clear. That is
+the bar's CALM principle read correctly: steady state is invisible because it
+was measured and there is nothing, so "I could not look" must not borrow those
+pixels. `scripts/bar_freshness.py` is the one predicate all seven use. After
+writing each file the poller signals i3status-rs (RTMIN+N) so the corresponding
+block refreshes immediately.
 
 Sources
   clawgate : GET $CLAWGATE_API_URL/api/tasks?summary=1 with the bearer
@@ -35,11 +39,13 @@ Sources
              pairs have STOPPED emitting into ClickHouse `activity.events`.
              scripts/collector/deadman.py does the measuring (read its docstring
              for what "dead" means for a source that only fires on demand); this
-             poller only maps the verdict onto a pill. UNLIKE every other source
-             here, an unreachable backend does NOT render as an empty block: a
-             check whose reassuring answer is a zero must never let "cannot tell"
-             look like "all healthy", so a persistent unknown gets a visible
-             `tlm ?` pill (grace-gated, see TELEMETRY_UNKNOWN_GRACE).
+             poller only maps the verdict onto a pill. An unreachable backend
+             does NOT render as an empty block — nor does any other source's
+             now, but this is the one that carries a SECOND, narrower case: a
+             backend the poller CAN reach and which answers "cannot evaluate"
+             gets a visible `tlm ?` after a grace period (see
+             TELEMETRY_UNKNOWN_GRACE), because a check whose reassuring answer
+             is a zero must never let "cannot tell" look like "all healthy".
   civitai  : the SAME firing-alert filter, but against the civitai DataPacket
              prod cluster (a CLIENT prod cluster) via its own kubeconfig
              (CIVITAI_KUBECONFIG). Deliberately a SEPARATE block/count from the
@@ -553,14 +559,27 @@ def dispatch_edge_toast(name, payload, specs, evaluate=None):
 def stale(reason: str, err=None) -> dict:
     """A 'source unavailable' marker.
 
-    Every block renders it as the empty, invisible pill EXCEPT
-    `i3status-clawgate`, whose reassuring answer is a zero — so "cannot tell"
-    must not borrow the pixels that mean "nothing to tell". (`i3status-telemetry`
-    is NOT a second exception, however its `tlm ?` reads: that comes from a
-    READABLE payload whose deadman verdict is `unknown`; a `stale` marker maps to
-    the empty pill there on purpose, the unit's `OnFailure` toast covering a
-    fetch that raised.) See `carry_stuck_forward` for what this marker must
-    preserve on its way to the one block that shows it.
+    🔴 EVERY block renders it as its VISIBLE "not measured" pill — `?`, `󰀪 ?`,
+    `󰀪 civ ?`, `tlm ?`, `qBit?`, the soft-yellow airvpn icon — and none renders
+    it as the empty, invisible one, which means "measured, and there is
+    nothing". `bar_freshness.unmeasured` is the single predicate all seven ask.
+
+    ⚠ THIS COMMENT USED TO SAY THE OPPOSITE, and it was the comment a maintainer
+    would have acted on. It read: every block renders this as the empty pill
+    except `i3status-clawgate`, and `i3status-telemetry` maps it to the empty
+    pill on purpose because "the unit's `OnFailure` toast covers a fetch that
+    raised". BOTH halves were false. The first was a description of the defect
+    PR #492 fixed. The second named a control that does not exist: `source()`
+    converts every fetch exception into this marker, `main()` returns 0 and
+    `__main__` ends `except Exception: sys.exit(0)`, so the unit EXITS
+    SUCCESSFULLY on precisely the failure this marker records and `OnFailure=`
+    never fires. That is now measured rather than asserted, by
+    `test_the_poller_EXITS_ZERO_on_the_failure_the_marker_records`.
+
+    See `carry_stuck_forward` for what this marker must preserve on its way to
+    the block that shows it: the marker itself writes `count: 0` over the last
+    reading, so anything an outage should keep has to be carried onto it HERE,
+    at the writer — the renderers can only carry what a frozen FILE still holds.
     """
     d = {"count": 0, "state": "stale", "detail": reason}
     if err is not None:
@@ -568,17 +587,40 @@ def stale(reason: str, err=None) -> dict:
     return d
 
 
-def _strict_int(value):
-    """A strictly-integral reading, or None. NO coercion, and a bool is not one.
+def _load_freshness():
+    """Load the co-located `bar_freshness.py` sibling by EXPLICIT PATH.
 
-    Deliberately mirrors `i3status-clawgate._int_or_none`, because the two sit
-    on opposite sides of an extensionless-script boundary that neither can
-    import across. `test_the_two_NO_COERCION_predicates_AGREE` pins them to each
-    other so the pair cannot drift into disagreeing about what a reading is.
+    Same idiom as `_load_clawgate_tasks` / `_load_deadman` / `_load_airvpn_menu`
+    above — and no hardcoded fallback copy, for the same reason: a second copy
+    of a predicate is how it drifts. If this raises, the poller does not start,
+    every cache stops being rewritten, and within `MAX_CACHE_AGE_SECS` all seven
+    blocks say `?`. That is the honest outcome, and (since PR #492) a visible
+    one.
     """
-    if isinstance(value, bool) or not isinstance(value, int):
-        return None
-    return value
+    import importlib.machinery
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "bar_freshness.py")
+    loader = importlib.machinery.SourceFileLoader("_bar_freshness", path)
+    spec = importlib.util.spec_from_loader("_bar_freshness", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+FRESH = _load_freshness()
+
+#: A strictly-integral reading, or None. NO coercion, and a bool is not one.
+#:
+#: 🔴 IT IS THE SAME OBJECT the blocks use, not a mirror of it. This was a
+#: hand-written copy whose docstring justified itself with "the two sit on
+#: opposite sides of an extensionless-script boundary that neither can import
+#: across" — a barrier that stopped existing the moment `bar_freshness.py` was
+#: extracted as a plain `.py`. This file already loads three siblings by
+#: explicit path, so the cited reason was checkable and false. Two copies of a
+#: no-coercion predicate cannot drift if there is one copy;
+#: `test_the_two_NO_COERCION_predicates_ARE_ONE` pins the identity.
+_strict_int = FRESH.int_or_none
 
 
 def carry_stuck_forward(payload, prev):
