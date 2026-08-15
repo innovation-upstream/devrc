@@ -174,13 +174,45 @@ ARCHIVE_MD = REPO_ROOT / "claude" / "RULES-ARCHIVE.md"
 # agents in one checkout WILL clobber each other") appears earlier in the same
 # bullet. Shave it further and that stops being true.
 #
-# MAX_BYTES was deliberately NOT ratcheted down to bank this. The slack predates
-# the consolidation (compare the live size against MAX_BYTES and
-# MIN_HEADROOM_BYTES below rather than trusting a literal here -- restating a
-# live constant in a comment is what this module's own docstring warns against),
-# and tightening the gate is a policy change, not a byte cleanup -- it belongs in
-# its own commit where it can be argued on its merits.
-MAX_BYTES = 35_200
+# MAX_BYTES was deliberately NOT ratcheted down to bank that. The comment above
+# said tightening the gate "is a policy change, not a byte cleanup -- it belongs
+# in its own commit where it can be argued on its merits." That cuts both ways,
+# and this IS that commit, in the RAISING direction.
+#
+# 🔴 THE ARGUMENT, so the next person can attack it rather than re-derive it.
+#
+# The previous ceiling left 32 B of slack above MIN_HEADROOM_BYTES -- i.e. a
+# 33 B addition broke the gate. That spends the early-warning margin this floor
+# exists to provide: the next contributor got the surprise, not the warning,
+# which is the exact failure MIN_HEADROOM_BYTES was introduced to prevent.
+#
+# The honest question is whether that is a signal to EVICT or to RAISE, and it
+# was answered by measurement, not preference. Eviction is exhausted:
+#   * `skill-audit.py` reports ZERO work-status history and ZERO dated-lesson
+#     blocks in this file -- the two categories that are evictable by rule;
+#   * of the 24 lines over 500 B, 18 (14,950 B) ALREADY carry a `-> archive:`
+#     tag, meaning their evidence is demoted and what remains is imperative;
+#   * the 6 untagged fat lines total 3,595 B and are mechanism plus fix with no
+#     narrative to move. The largest (760 B) is the worktree frame bullet -- the
+#     one PR #447 trimmed and re-opened an incident doing it.
+# An audit re-tested this independently across all 73 bullets and found exactly
+# one untagged bullet over 600 B: the same one. There is nothing left to move.
+#
+# So the choice is raise the ceiling or stop accepting rules. Rules are still
+# being learned -- three landed in a single day -- so the ceiling moves.
+#
+# 🔴 THE COST IS REAL AND IS THE REASON THIS IS NOT GENEROUS. This file loads
+# EVERY session AND is concatenated into opencode's `AGENTS.md`, so every byte
+# is paid TWICE per session. At the new ceiling, full, that is roughly 9.6k
+# tokens per load and ~19k per session.
+#
+# Sized in the same units as MIN_HEADROOM_BYTES rather than picked round: the
+# mean substantive bullet is ~500 B, so slack for SIX of them (3,000 B) plus the
+# 900 B floor is ~3,900 B of free space above the current size. That is about
+# three heavy days at the observed rate, which is a working margin without
+# removing the pressure the gate exists to apply. A bigger jump would make the
+# gate decorative; a smaller one puts the next author back here immediately.
+MAX_BYTES = 38_400
 
 # Required working margin below the ceiling.
 #
