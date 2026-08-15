@@ -14,10 +14,12 @@ they are loaded via importlib.machinery.SourceFileLoader.
 
     run:  pytest scripts/tests/test_bar_status.py
 """
+import ast
 import importlib.machinery
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -915,15 +917,73 @@ def test_every_block_shares_ONE_freshness_definition(name, mod):
     assert mod.fresh.__name__ == "_bar_freshness"
 
 
+def _renders_as_measured(name, mod, age):
+    """Does `name` still present its own ALARM cache as a CURRENT reading at
+    `age` seconds old? Asked of the RENDER, not of any constant."""
+    payload, measured_pill, _frozen = ALARM_CACHES[name]
+    return mod.render(_aged(age, **payload), now=FIXED_NOW) == measured_pill
+
+
 @pytest.mark.parametrize("name,mod", ALL_BLOCKS)
-def test_no_block_RE_SPELLS_the_freshness_window(name, mod):
-    """A block that hard-codes `600` (or its own age comparison) has left the
-    shared definition behind while still importing it, which is the worst of
-    both — it passes the test above and drifts anyway. Read the SOURCE."""
+def test_every_block_measures_the_SAME_WINDOW_as_the_shared_one(name, mod):
+    """🔴 STRUCTURAL, BECAUSE THE SPELLED VERSION LET THE MUTANT THROUGH.
+
+    This test used to assert `"MAX_CACHE_AGE_SECS = 600" not in <source>`, i.e.
+    it rejected a copy of the CORRECT value and permitted every wrong one: a
+    mutant setting clawgate's re-export to 900 passed 499 of 499. A guard that
+    can be satisfied by changing the number it exists to protect is a spelling,
+    not a structure.
+
+    Three checks, none of which mentions a number:
+      (i)  BEHAVIOURAL — bisect the age at which THIS block stops presenting its
+           own alarm cache as current, and require it to equal the shared
+           window. Catches a block that re-implements the comparison, passes its
+           own `max_age`, or gates on a different field entirely. This is the
+           only one of the three that would notice a `<`/`<=` slip.
+      (ii) PUBLISHED CONSTANTS — any int a block exports whose name mentions an
+           age must BE the shared value, whatever the shared value is. This is
+           the 900-mutant's grave.
+      (iii) NO LITERALS — via the AST, no block may bind an age-named constant
+           to a literal at all, which is the original intent stated so that it
+           cannot be satisfied by picking a different literal.
+    """
+    window = freshness.MAX_CACHE_AGE_SECS
+    # (i) bisect the block's own flip point. The bracket is asserted first: a
+    # bisection whose ends do not straddle the boundary would "find" one anyway.
+    lo, hi = 0, 100_000
+    assert _renders_as_measured(name, mod, lo), name
+    assert not _renders_as_measured(name, mod, hi), name
+    while lo + 1 < hi:
+        mid = (lo + hi) // 2
+        if _renders_as_measured(name, mod, mid):
+            lo = mid
+        else:
+            hi = mid
+    assert lo == window, (name, "last age still presented as measured", lo)
+
+    # (ii) every age constant the block PUBLISHES is the shared one
+    for attr, value in vars(mod).items():
+        if isinstance(value, bool) or not isinstance(value, int):
+            continue
+        if "AGE" in attr.upper() or "SECS" in attr.upper():
+            assert value == window, (name, attr, value)
+
+    # (iii) ...and none of them is written as a literal in the first place
+    tree = ast.parse((SCRIPTS / dict(BLOCK_SOURCE_FILES)[name]).read_text())
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if not isinstance(target, ast.Name):
+                continue
+            if "AGE" in target.id.upper() or "SECS" in target.id.upper():
+                assert not isinstance(node.value, ast.Constant), \
+                    (name, target.id, "an age bound to a literal has left the "
+                                      "shared definition behind")
+
     src = (SCRIPTS / dict(BLOCK_SOURCE_FILES)[name]).read_text()
     body = "\n".join(line for line in src.splitlines()
                      if not line.lstrip().startswith("#"))
-    assert "MAX_CACHE_AGE_SECS = 600" not in body, name
     assert body.count("fresh.unmeasured") >= 1, name
 
 
@@ -1021,6 +1081,80 @@ def test_the_SHARED_freshness_boundary(age, current):
     assert freshness.is_current(payload, FIXED_NOW) is current
     assert freshness.unmeasured(payload, FIXED_NOW) is not current
     assert freshness.cache_age_secs(payload, FIXED_NOW) == float(age)
+
+
+@pytest.mark.parametrize("recorded,expected", [
+    # a loud reading keeps its colour and gains the marker
+    ({"text": "39", "short_text": "39", "state": "Critical"},
+     {"text": "39?", "short_text": "39?", "state": "Critical"}),
+    ({"text": "5", "short_text": "5", "state": "Warning"},
+     {"text": "5?", "short_text": "5?", "state": "Warning"}),
+    # a VISIBLE but neutral reading is floored at Warning: an unreadable cache
+    # is never Idle, whatever colour it wore while someone was measuring it
+    ({"text": "20", "short_text": "20", "state": "Idle"},
+     {"text": "20?", "short_text": "20?", "state": "Warning"}),
+    ({"text": "20", "short_text": "20", "state": "Good"},
+     {"text": "20?", "short_text": "20?", "state": "Warning"}),
+    # a junk state is not a colour to preserve
+    ({"text": "20", "short_text": "20", "state": "Chartreuse"},
+     {"text": "20?", "short_text": "20?", "state": "Warning"}),
+    # short_text is derived from text when the reading did not carry one
+    ({"text": "LEAK", "state": "Critical"},
+     {"text": "LEAK?", "short_text": "LEAK?", "state": "Critical"}),
+])
+def test_carry_forward_MARKS_a_reading_without_QUIETENING_it(recorded, expected):
+    """🔴 THE ONE DEFINITION of how an unmeasured cache renders a reading it
+    still holds, exercised on its own so the seven blocks' expectations are not
+    the only thing pinning it. `fallback` must not be reached for any of these.
+    """
+    sentinel = {"text": "FALLBACK", "state": "Warning"}
+    out = freshness.carry_forward(recorded, sentinel)
+    assert out == expected, recorded
+    assert out != sentinel
+
+
+@pytest.mark.parametrize("recorded", [
+    None, {}, [], "x", 3, True, 2.5,
+    {"text": "", "state": "Critical"},      # invisible: nothing to carry
+    {"text": None, "state": "Critical"},    # junk text is not a reading
+    {"state": "Critical"},                  # ...nor is an absent one
+])
+def test_carry_forward_INVENTS_NOTHING_when_there_is_no_reading(recorded):
+    """The other half of the decision: only a RECORDED alarm is carried. A
+    payload that recorded nothing — a marker, which writes `count: 0` over the
+    last reading, a missing file, a measured zero — falls back to the block's
+    bare `?`, never to a fabricated number or a borrowed colour."""
+    fallback = {"icon": "mail", "text": "?", "short_text": "?",
+                "state": "Warning"}
+    out = freshness.carry_forward(recorded, fallback)
+    assert out == fallback, recorded
+    assert out is not fallback, "must be a copy: a block hands in its constant"
+
+
+def test_carry_forward_KEEPS_THE_ICON_a_state_pill_renders_by():
+    """`media` and `airvpn` carry their identity in the i3status-rust `icon`
+    field, not in the text. A carry that dropped it would render a bare `LEAK?`
+    with no VPN glyph — a different pill in the same pixels."""
+    out = freshness.carry_forward(
+        {"icon": "net_vpn", "text": "LEAK", "short_text": "LEAK",
+         "state": "Critical"}, {"icon": "net_vpn", "text": "", "state": "Warning"})
+    assert out["icon"] == "net_vpn"
+    assert out["text"] == "LEAK?" and out["state"] == "Critical"
+
+
+@pytest.mark.parametrize("pill,loud", [
+    ({"state": "Critical"}, True),
+    ({"state": "Warning"}, True),
+    ({"state": "Idle"}, False),
+    ({"state": "Good"}, False),
+    ({"state": "Info"}, False),
+    ({"state": "critical"}, False),        # i3status-rust states are cased
+    ({}, False),
+    (None, False),
+    ("Critical", False),
+])
+def test_is_loud_answers_only_for_a_pill_that_says_LOOK_AT_ME(pill, loud):
+    assert freshness.is_loud(pill) is loud
 
 
 @pytest.mark.parametrize("ts", [None, "1786759794", True, False, 2.5, [], {}])
@@ -1335,17 +1469,34 @@ def test_an_ERROR_MARKER_carries_forward_too():
 @pytest.mark.parametrize("value", [
     0, 1, 2, 7, -1, 10 ** 9, True, False, None, 2.5, 0.0, "2", "x", [], {},
 ])
-def test_the_two_NO_COERCION_predicates_AGREE(value):
-    """ONE RULE, TWO FILES. `bar-status-poll._strict_int` and
-    `i3status-clawgate._int_or_none` are the same predicate on opposite sides of
-    an extensionless-script boundary neither can import across, so the only thing
-    that can keep them honest is an assertion that they answer identically. A
-    poller that starts accepting `2.5` while the block still refuses it writes a
-    number the pill renders as `?` forever, and neither file's own tests can see
-    it."""
+def test_the_two_NO_COERCION_predicates_ARE_ONE(value):
+    """ONE RULE, ONE COPY — it used to be two, kept in step by this test.
+
+    `bar-status-poll._strict_int` was a hand-written twin of the block's
+    predicate, and its docstring justified the duplication with "the two sit on
+    opposite sides of an extensionless-script boundary that neither can import
+    across". That barrier stopped existing when `bar_freshness.py` was extracted
+    as a plain `.py` — this poller already loads three siblings by explicit path
+    — so the reason did not survive checking and the copy is gone.
+
+    The values still go through both names (a rename that silently pointed one
+    of them at `int` would pass an identity check on the module object but fail
+    here on `2.5`/`True`), and the identity is asserted so a re-spelled copy
+    cannot come back looking equal.
+    """
     mine = poll._strict_int(value)
     theirs = clawgate_block._int_or_none(value)
     assert mine == theirs and type(mine) is type(theirs), value
+    # ⚠ NOT `is freshness.int_or_none`: every consumer loads the sibling by path
+    # and gets its OWN module object, so identity across consumers is false by
+    # construction. What is checkable — and what a re-spelled copy would break —
+    # is that each name IS its own loaded module's function, and that both
+    # modules were loaded from the ONE file.
+    assert poll._strict_int is poll.FRESH.int_or_none
+    assert clawgate_block._int_or_none is clawgate_block.fresh.int_or_none
+    one_file = str(SCRIPTS / "bar_freshness.py")
+    assert poll.FRESH.__file__ == one_file
+    assert clawgate_block.fresh.__file__ == one_file
 
 
 def test_the_block_renders_what_attention_ACTUALLY_writes():
@@ -1565,6 +1716,153 @@ def test_a_cache_the_poller_STOPPED_REWRITING_is_not_a_current_reading(name, mod
     assert fresh_out != frozen_out
 
 
+# --------------------------------------------------------------------------- #
+# 🔴 THE OPERATOR'S DECISION, ACROSS THE WHOLE BAR: an outage may make a reading
+# less TRUSTED; it may never make a recorded alarm QUIETER.
+#
+# The first version of this change got the freshness gate right and then threw
+# the reading away: a frozen cache still holding `39` firing alerts rendered a
+# bare `󰀪 ?`/Warning, a client-prod `146` rendered `󰀪 civ ?`, a firewalled qBit
+# tunnel rendered `qBit?`, and a recorded `LEAK` — the one condition the
+# killswitch exists to make loud — rendered a soft-yellow icon. Four downgrades,
+# each defended by "cannot tell is only ever a Warning".
+#
+# The rule is now: alerts do not resolve because the poller died, the trailing
+# `?` already marks the number as not-currently-measured, and the cost is
+# asymmetric — a false-quiet on a leak is far worse than a false-loud. So a
+# recorded alarm is CARRIED, marked. A MEASURED quiet board still hides.
+# --------------------------------------------------------------------------- #
+#: How loud each i3status-rust state is. Used to assert a RELATIONSHIP (the
+#: frozen pill is never quieter than the live one) rather than a spelling.
+_LOUDNESS = {"Idle": 0, "Good": 0, "Info": 1, "Warning": 2, "Critical": 3}
+
+#: name -> (the LOUDEST realistic cache payload in the shape `bar-status-poll`
+#: writes, the pill it renders while MEASURED, the pill it must render once the
+#: poller has STOPPED REWRITING it). Every pill is a LITERAL, read off the
+#: operator's decision and typed out here — none is computed from the module, so
+#: this table can disagree with the code rather than restate it.
+ALARM_CACHES = {
+    "clawgate": (
+        {"count": 22, "stuck_count": 2, "state": "Critical"},
+        {"icon": "tasks", "text": "22!2", "short_text": "22!2",
+         "state": "Critical"},
+        # ⚠ clawgate carries only the STUCK half: its count is the EXPECTED
+        # steady state, not an alarm. The other six carry their count because
+        # for them a non-zero count IS the alarm.
+        {"icon": "tasks", "text": "!2?", "short_text": "!2?",
+         "state": "Critical"}),
+    "mail": (
+        {"count": 5, "state": "Warning"},
+        {"icon": "mail", "text": "5", "short_text": "5", "state": "Warning"},
+        {"icon": "mail", "text": "5?", "short_text": "5?", "state": "Warning"}),
+    "alerts": (
+        {"count": 39, "state": "Critical"},
+        {"text": _GLYPH + " 39", "short_text": _GLYPH + " 39",
+         "state": "Critical"},
+        {"text": _GLYPH + " 39?", "short_text": _GLYPH + " 39?",
+         "state": "Critical"}),
+    "civitai": (
+        {"count": 146, "state": "Critical"},
+        {"text": _GLYPH + " civ 146", "short_text": _GLYPH + " civ 146",
+         "state": "Critical"},
+        {"text": _GLYPH + " civ 146?", "short_text": _GLYPH + " civ 146?",
+         "state": "Critical"}),
+    "media": (
+        # what `parse_media` writes for connection_status == "firewalled" — the
+        # forwarded port is down, which is the regression AirVPN was chosen for
+        {"icon": "net_down", "text": "CA ⚠ firewalled", "short_text": "CA !",
+         "state": "Critical"},
+        {"icon": "net_down", "text": "CA ⚠ firewalled", "short_text": "CA !",
+         "state": "Critical"},
+        {"icon": "net_down", "text": "CA ⚠ firewalled?", "short_text": "CA !?",
+         "state": "Critical"}),
+    "airvpn": (
+        {"up": True, "verdict": "leak", "country_code": "CA"},
+        {"icon": "net_vpn", "text": "LEAK", "short_text": "LEAK",
+         "state": "Critical"},
+        {"icon": "net_vpn", "text": "LEAK?", "short_text": "LEAK?",
+         "state": "Critical"}),
+    "telemetry": (
+        {"count": 3, "state": "Critical"},
+        {"text": "tlm 3", "short_text": "tlm 3", "state": "Critical"},
+        {"text": "tlm 3?", "short_text": "tlm 3?", "state": "Critical"}),
+}
+assert sorted(ALARM_CACHES) == sorted(n for n, _ in ALL_BLOCKS)
+
+
+@pytest.mark.parametrize("name,mod", ALL_BLOCKS)
+def test_a_measurement_OUTAGE_never_makes_a_KNOWN_alarm_QUIETER_in_ANY_block(
+        name, mod):
+    """🔴 THE OPERATOR'S RULE, one block at a time, on the FROZEN-FILE path.
+
+    Both directions come from the SAME payload, so this cannot pass against a
+    renderer that marks everything, or one that marks nothing: fresh renders the
+    alarm plainly, a day old renders the same alarm MARKED.
+    """
+    payload, measured_pill, frozen_pill = ALARM_CACHES[name]
+    live = mod.render(_aged(0, **payload), now=FIXED_NOW)
+    frozen = mod.render(_aged(86_400, **payload), now=FIXED_NOW)
+    assert live == measured_pill, (name, live)
+    assert frozen == frozen_pill, (name, frozen)
+    # ...and the three properties the literals above are an instance of:
+    assert frozen["text"].endswith("?"), name        # marked as not current
+    assert _LOUDNESS[frozen["state"]] >= _LOUDNESS[live["state"]], name
+    assert frozen != UNMEASURED_PILL[name], name     # not the bare `?`
+    assert frozen != MEASURED_ALL_CLEAR_PILL[name], name
+
+
+@pytest.mark.parametrize("name,mod", ALL_BLOCKS)
+def test_a_MEASURED_quiet_board_still_HIDES_when_frozen(name, mod):
+    """The other half of the decision, and the reason it is not "always show the
+    last reading": a cache that recorded NOTHING has no alarm to carry, so it
+    falls through to the bare `?` — visible, but not pretending to a number."""
+    frozen_quiet = mod.render(_quiet_payload(name, age_secs=86_400),
+                              now=FIXED_NOW)
+    assert frozen_quiet == UNMEASURED_PILL[name], (name, frozen_quiet)
+    _payload, _measured, frozen_alarm = ALARM_CACHES[name]
+    assert frozen_quiet != frozen_alarm, name
+
+
+@pytest.mark.parametrize("name,mod", ALERT_BLOCKS)
+@pytest.mark.parametrize("red_above", [0, 30, 340, 10_000])
+def test_the_backlog_BASELINE_cannot_ERASE_a_CARRIED_count(name, mod, red_above):
+    """`red_above` may still say a CARRIED count is boring — it may not delete
+    it, and it may not return the pill to a neutral colour it no longer earns.
+
+    `10_000` is nothing like either shipped threshold, and 39 is nothing like
+    either: a fixture whose value equals the constant it tests cannot see the
+    difference.
+    """
+    out = mod.render(_aged(86_400, count=39, state="Critical"),
+                     red_above=red_above, now=FIXED_NOW)
+    assert "39" in out["text"], (name, red_above)
+    assert out["text"].endswith("?"), (name, red_above)
+    assert out["state"] in ("Warning", "Critical"), (name, red_above)
+
+
+@pytest.mark.parametrize("name,mod", [("media", media_block),
+                                      ("airvpn", airvpn_block)])
+def test_the_STATE_blocks_carry_an_ALARM_but_not_a_NEUTRAL_reading(name, mod):
+    """⚠ THE ONE DELIBERATE ASYMMETRY, pinned so it is a decision and not a gap.
+
+    The count blocks carry any non-zero count. `media` and `airvpn` carry only a
+    LOUD reading (`bar_freshness.is_loud`), because their neutral readings are
+    not alarms — day-old transfer speeds are noise, and `airvpn` has already
+    spent the `?` character on a different meaning (`CA?` = "up, exit
+    unverified"), so carrying `CA` forward as `CA?` would collide with a
+    MEASURED state. Both fall back to a Warning pill, so nothing gets quieter.
+    """
+    neutral = {"media": {"icon": "net_down", "text": "CA ↓0B ↑2.9M",
+                         "short_text": "↓0B ↑2.9M", "state": "Idle"},
+               "airvpn": {"up": True, "verdict": "verified",
+                          "country_code": "CA"}}[name]
+    frozen = mod.render(_aged(86_400, **neutral), now=FIXED_NOW)
+    assert frozen == UNMEASURED_PILL[name], (name, frozen)
+    # ...while the LOUD reading of the same block IS carried
+    payload, _measured, frozen_alarm = ALARM_CACHES[name]
+    assert mod.render(_aged(86_400, **payload), now=FIXED_NOW) == frozen_alarm
+
+
 #: The blocks that render a COUNT (media/airvpn are state pills and have no
 #: count branch at all). Derived by SUBTRACTION from the registry, so a new count
 #: block joins automatically rather than silently escaping the guard below.
@@ -1747,6 +2045,61 @@ def test_block_subprocess_FRESH_quiet_cache_stays_QUIET(tmp_path, script,
     out = json.loads(r.stdout)
     assert out == MEASURED_ALL_CLEAR_PILL[name], (name, out)
     assert out != UNMEASURED_PILL[name]
+
+
+@pytest.mark.parametrize("script,cachefile,name", BLOCK_SCRIPTS)
+def test_a_block_that_cannot_load_the_SIBLING_renders_the_VISIBLE_pill(
+        tmp_path, script, cachefile, name):
+    """🔴 AN ADVERTISED FALLBACK THAT COULD NOT FIRE, now measured rather than
+    documented. Seven docstrings, six `__main__` comments, `nix/graphical.nix`
+    and the `bar` skill all claimed a block that cannot load `bar_freshness.py`
+    "falls through to its `?` pill". It could not: `fresh = _load_freshness()`
+    ran BARE at module level, outside `__main__`'s `try`, so the block died with
+    a `FileNotFoundError`, exit 1 and EMPTY stdout — never the pill. An
+    unreachable guard reads as protection while providing none.
+
+    The load is now DEFERRED (`except: fresh = None`), and this drives the case
+    the documents describe: the block ALONE in a directory with no sibling,
+    against a cache that is FRESH AND QUIET — the payload a permissive
+    degradation would render as the invisible all-clear.
+
+    It kills three mutants at once, which is why it is one test:
+      * `__main__`'s fallback reverted to the invisible pill (or `_OFF`)
+        -> the assertion below sees the quiet pill;
+      * `_load_freshness` degraded to a permissive stub (`unmeasured -> False`)
+        -> same, and that is the whole defect reinstated;
+      * the deferral removed (back to a bare module-level load)
+        -> exit 1 and unparseable stdout.
+
+    The POSITIVE CONTROL is in the same test: the identical cache, with the
+    sibling present, must render the QUIET pill. Without it a block hard-wired
+    to `?` would pass.
+    """
+    alone = tmp_path / "no-sibling"
+    alone.mkdir()
+    shutil.copy(SCRIPTS / script, alone / script)
+    assert not (alone / "bar_freshness.py").exists()
+
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    payload = _quiet_payload(name, age_secs=0)
+    payload["ts"] = int(time.time())
+    (cache / cachefile).write_text(json.dumps(payload))
+    env = dict(os.environ, BAR_STATUS_DIR=str(cache))
+
+    r = subprocess.run([sys.executable, str(alone / script)],
+                       capture_output=True, text=True, env=env)
+    assert r.returncode == 0, (name, r.returncode, r.stderr)
+    out = json.loads(r.stdout)
+    assert out == UNMEASURED_PILL[name], (name, out)
+    assert out != MEASURED_ALL_CLEAR_PILL[name], name
+
+    # POSITIVE CONTROL: the same script, the same cache, sibling present.
+    shutil.copy(SCRIPTS / "bar_freshness.py", alone / "bar_freshness.py")
+    r2 = subprocess.run([sys.executable, str(alone / script)],
+                        capture_output=True, text=True, env=env)
+    assert r2.returncode == 0, (name, r2.stderr)
+    assert json.loads(r2.stdout) == MEASURED_ALL_CLEAR_PILL[name], name
 
 
 # --------------------------------------------------------------------------- #
@@ -2802,6 +3155,36 @@ def test_a_FROZEN_telemetry_cache_KEEPS_the_dead_sources_it_last_counted():
     live = telemetry_block.render(_aged(0, count=3, state="Critical"),
                                   now=FIXED_NOW)
     assert live["text"] == "tlm 3" and "?" not in live["text"]
+
+
+@pytest.mark.parametrize("age,expected_text,expected_state", [
+    (0, "tlm 3", "Critical"),          # measured: the death is the reading
+    (86_400, "tlm 3?", "Critical"),    # frozen: the same death, marked
+])
+def test_a_MEASURED_death_outranks_an_UNKNOWN_at_the_PILL_too(
+        age, expected_text, expected_state):
+    """🔴 THE SAME DOWNGRADE, ONE BRANCH FURTHER IN. `parse_telemetry` decided
+    this at the WRITER — its fourth case, "A MEASURED DEATH OUTRANKS AN
+    UNCERTAINTY" — and the renderer contradicted it: `unknown` was checked
+    BEFORE the count, so a payload carrying both rendered `tlm ?`/Warning and
+    silently dropped three measured deaths.
+
+    It was invisible against a current-schema cache (the poller clears `unknown`
+    whenever the count is non-zero) and reachable from any cache written before
+    that rule existed — i.e. exactly the shape of a defect that survives review
+    and then fires once, during an incident, on an old file.
+
+    A count is evidence; an uncertainty is not evidence against it.
+    """
+    out = telemetry_block.render(
+        _aged(age, count=3, unknown=True, state="Critical"), now=FIXED_NOW)
+    assert out["text"] == expected_text, out
+    assert out["state"] == expected_state, out
+    # ...and the uncertainty ALONE, with nothing measured dead, still says `?`
+    quiet_unknown = telemetry_block.render(
+        _aged(0, count=0, unknown=True, state="Warning"), now=FIXED_NOW)
+    assert quiet_unknown == {"text": "tlm ?", "short_text": "tlm ?",
+                             "state": "Warning"}
 
 
 @pytest.mark.parametrize("bad", [

@@ -28,6 +28,9 @@ full status line lives in the menu header + the detail TUI.
   poller stale / error / missing / corrupt cache   -> soft-yellow icon ONLY (Warning),
        never red (avoid crying wolf on a transient poller hiccup)
   a cache the poller STOPPED REFRESHING            -> the same soft-yellow icon
+  ...but any of those over a cache still recording an ALARM -> that alarm, marked:
+       `LEAK?` (still Critical) / `CC!?` (still Warning). A measurement outage is a
+       reason to trust a reading less, never a reason to downgrade one.
 
 The left-click (airvpn-menu) and right-click (airvpn-detail float term) are wired
 in graphical.nix, not here.
@@ -64,10 +67,7 @@ def _load_freshness():
 
     Extensionless block scripts cannot be a package, so this is the repo's
     standard sibling-module shape (cf. `notif-center` loading `i3status-notifs`,
-    `bar-status-poll` loading `scripts/lib/`). Deliberately NOT wrapped in a
-    try: a block that cannot load the freshness predicate cannot know whether
-    its cache is current, and `__main__` below turns that into the VISIBLE
-    soft-yellow pill rather than a confident tunnel state. `dont_write_bytecode`
+    `bar-status-poll` loading `scripts/lib/`). `dont_write_bytecode`
     keeps a `__pycache__` out of the operator's ~/.config/i3status-rust/scripts.
     """
     sys.dont_write_bytecode = True
@@ -80,7 +80,22 @@ def _load_freshness():
     return mod
 
 
-fresh = _load_freshness()
+try:
+    fresh = _load_freshness()
+except Exception:
+    # 🔴 THE FAILURE IS DEFERRED, NEVER ANSWERED. This load used to run bare at
+    # module level and four documents claimed a block that could not load the
+    # sibling "falls through to its `?` pill". It did not: the block died at
+    # import — traceback, exit 1, EMPTY stdout — so the promised fallback was
+    # unreachable, which is a guard that reads as protection while providing
+    # none. Now `fresh` stays None, every use of it raises inside `render`, and
+    # `__main__` below turns that into the VISIBLE `?` pill.
+    # 🔴 None IS THE POINT: a `try` that degraded to a permissive stub
+    # (`unmeasured -> False`) would reinstate the whole defect with the suite
+    # green. None cannot be permissive, because it cannot answer at all. Pinned
+    # by `test_a_block_that_cannot_load_the_SIBLING_renders_the_VISIBLE_pill`,
+    # which runs each block with the sibling absent and a fresh QUIET cache.
+    fresh = None
 
 
 def cache_path() -> str:
@@ -115,38 +130,15 @@ def _cc(payload) -> str:
     return "??"
 
 
-def render(payload, now=None) -> dict:
-    """Pure: cache payload (facts written by parse_airvpn) -> i3status-rust block.
+def _reading_pill(payload):
+    """The pill the payload's OWN facts render, or None for the tunnel-down
+    steady state (which is the `_OFF` icon, and is not a reading worth carrying).
 
-    A MINIMAL icon button. NOT MEASURED — None / malformed / stale / error / a
-    `ts` that is absent, junk or older than `bar_freshness.MAX_CACHE_AGE_SECS`
-    -> soft-yellow icon only. Tunnel down -> dim icon only. Up: neutral `CC`
-    (verified) / `CC?` (unknown), RED `LEAK`, yellow `CC!` on a down forwarded
-    port. Colour is reserved for the leak (critical) + port-down (warning)
-    attention cases; the verbose status line lives in the menu header + detail
-    TUI, not the pill.
-
-    🔴 THE FRESHNESS GATE COMES BEFORE THE `up` CHECK, and the order is the whole
-    point: `not up` is the DIM NEUTRAL steady state, so a stale cache falling
-    through to it would render "deliberately off" for a tunnel nobody has
-    measured — including one that is up and leaking.
-
-    `now` is injected rather than read here so the gate is testable without
-    sleeping; it defaults to the wall clock. Fail-safe throughout: it never
-    raises, whatever the file contains — a claim only a DIRECT call can test,
-    since `__main__` below prints the soft-yellow pill for any exception.
+    Factored out of `render` so the carry-forward path below shows exactly what
+    the last reading showed rather than re-deriving it.
     """
-    now = time.time() if now is None else now
-    # missing / corrupt cache, a poller that ran but could not decide, and a
-    # poller that stopped writing altogether — one predicate, one answer.
-    # `state == "error"` is kept as its own term: `bar_freshness.is_marker`
-    # matches `stale` plus a truthy `error` KEY, and narrowing this block to
-    # that would be a behaviour change smuggled in as a refactor.
-    if fresh.unmeasured(payload, now) or payload.get("state") == "error":
-        return dict(_STALE)
     if not payload.get("up"):
-        return dict(_OFF)                          # default-off steady state
-
+        return None                                # default-off steady state
     cc = _cc(payload)
     verdict = payload.get("verdict")
     if verdict == "leak":
@@ -162,6 +154,58 @@ def render(payload, now=None) -> dict:
     mark = "" if verdict == "verified" else "?"
     text = "%s%s" % (cc, mark)
     return {"icon": ICON, "text": text, "short_text": text, "state": "Idle"}
+
+
+def render(payload, now=None) -> dict:
+    """Pure: cache payload (facts written by parse_airvpn) -> i3status-rust block.
+
+    A MINIMAL icon button. NOT MEASURED — None / malformed / stale / error / a
+    `ts` that is absent, junk or older than `bar_freshness.MAX_CACHE_AGE_SECS`
+    -> soft-yellow icon only, UNLESS the cache still records an ALARM, which is
+    carried with the bar-wide `?` marker: a frozen leak renders `LEAK?` and
+    stays CRITICAL. Tunnel down -> dim icon only. Up: neutral `CC` (verified) /
+    `CC?` (unknown), RED `LEAK`, yellow `CC!` on a down forwarded port. Colour is
+    reserved for the leak (critical) + port-down (warning) attention cases; the
+    verbose status line lives in the menu header + detail TUI, not the pill.
+
+    🔴 THE FRESHNESS GATE COMES BEFORE THE `up` CHECK, and the order is the whole
+    point: `not up` is the DIM NEUTRAL steady state, so a stale cache falling
+    through to it would render "deliberately off" for a tunnel nobody has
+    measured — including one that is up and leaking.
+
+    🔴 AND A MEASUREMENT OUTAGE MUST NOT MAKE A KNOWN ALARM QUIETER, which is the
+    same defect one step further in: the gate fired, but it OVERWROTE a recorded
+    `LEAK` (Critical) with the soft-yellow unknown icon (Warning) — the single
+    loudest downgrade on this bar, on the one condition the killswitch exists to
+    make loud. A tunnel does not stop leaking because the poller stopped looking.
+
+    ⚠ ONLY AN ALARM IS CARRIED HERE (`bar_freshness.is_loud`), i.e. `LEAK` and
+    the down-forwarded-port `CC!`. The count blocks carry any non-zero reading,
+    but a NEUTRAL tunnel reading is not an alarm, and this block has already
+    spent the `?` character on a different meaning: measured `CC?` is "up, exit
+    unverified". Carrying `CA` forward as `CA?` would collide with that, and
+    `CA?` -> `CA??` reads as noise. So the neutral readings fall through to the
+    soft-yellow icon — which is Warning, i.e. never quieter than they were.
+
+    `now` is injected rather than read here so the gate is testable without
+    sleeping; it defaults to the wall clock. Fail-safe throughout: it never
+    raises, whatever the file contains — a claim only a DIRECT call can test,
+    since `__main__` below prints the soft-yellow pill for any exception.
+    """
+    now = time.time() if now is None else now
+    recorded = _reading_pill(payload) if isinstance(payload, dict) else None
+    # missing / corrupt cache, a poller that ran but could not decide, and a
+    # poller that stopped writing altogether — one predicate, one answer.
+    # `state == "error"` is kept as its own term: `bar_freshness.is_marker`
+    # matches `stale` plus a truthy `error` KEY, and narrowing this block to
+    # that would be a behaviour change smuggled in as a refactor.
+    if (fresh.unmeasured(payload, now)
+            or (isinstance(payload, dict) and payload.get("state") == "error")):
+        alarm = recorded if fresh.is_loud(recorded) else None
+        return fresh.carry_forward(alarm, dict(_STALE))
+    if recorded is None:
+        return dict(_OFF)                          # default-off steady state
+    return recorded
 
 
 def main() -> int:

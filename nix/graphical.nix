@@ -430,6 +430,15 @@ lib.mkIf isNixOS {
   # on a perfectly healthy workbench into a question mark. Same !isLaptop gate as
   # its consumers, pinned two-way against this file by
   # `test_every_block_that_loads_the_sibling_is_DEPLOYED_beside_it`.
+  #
+  # ⚠ THAT FALLBACK IS ONLY TRUE BECAUSE THE LOAD IS DEFERRED, and it was FALSE
+  # when this comment was first written: the load ran bare at module level, so a
+  # missing sibling killed the block outright (exit 1, empty stdout) rather than
+  # producing the `?` this comment promises. The blocks now keep `fresh = None`
+  # on a failed load and fail at USE, inside `__main__`'s `except`. Measured by
+  # `test_a_block_that_cannot_load_the_SIBLING_renders_the_VISIBLE_pill`, which
+  # runs each block with no sibling present — so if that ever regresses, the
+  # failure here is a dead pill, not a question mark.
   home.file.".config/i3status-rust/scripts/bar_freshness.py" = lib.mkIf (!isLaptop) {
     source = ../scripts/bar_freshness.py;
   };

@@ -65,10 +65,7 @@ def _load_freshness():
 
     Extensionless block scripts cannot be a package, so this is the repo's
     standard sibling-module shape (cf. `notif-center` loading `i3status-notifs`,
-    `bar-status-poll` loading `scripts/lib/`). Deliberately NOT wrapped in a
-    try: a block that cannot load the freshness predicate cannot know whether
-    its cache is current, and `__main__` below turns that into the VISIBLE `?`
-    pill rather than a confident count. `dont_write_bytecode` keeps a
+    `bar-status-poll` loading `scripts/lib/`). `dont_write_bytecode` keeps a
     `__pycache__` out of the operator's ~/.config/i3status-rust/scripts.
     """
     sys.dont_write_bytecode = True
@@ -81,14 +78,40 @@ def _load_freshness():
     return mod
 
 
-fresh = _load_freshness()
+try:
+    fresh = _load_freshness()
+except Exception:
+    # 🔴 THE FAILURE IS DEFERRED, NEVER ANSWERED. This load used to run bare at
+    # module level and four documents claimed a block that could not load the
+    # sibling "falls through to its `?` pill". It did not: the block died at
+    # import — traceback, exit 1, EMPTY stdout — so the promised fallback was
+    # unreachable, which is a guard that reads as protection while providing
+    # none. Now `fresh` stays None, every use of it raises inside `render`, and
+    # `__main__` below turns that into the VISIBLE `?` pill.
+    # 🔴 None IS THE POINT: a `try` that degraded to a permissive stub
+    # (`unmeasured -> False`) would reinstate the whole defect with the suite
+    # green. None cannot be permissive, because it cannot answer at all. Pinned
+    # by `test_a_block_that_cannot_load_the_SIBLING_renders_the_VISIBLE_pill`,
+    # which runs each block with the sibling absent and a fresh QUIET cache.
+    fresh = None
 
 #: Re-exported so this module's public surface is unchanged by the extraction,
 #: and so a reader of this file still finds the number it renders by. The
 #: DEFINITION and its derivation from the systemd unit now live in
 #: `bar_freshness.py`, which every block imports — the same gate was about to be
 #: hand-copied into six more of them.
-MAX_CACHE_AGE_SECS = fresh.MAX_CACHE_AGE_SECS
+#:
+#: 🔴 `getattr(..., None)` rather than plain attribute access, here and in the
+#: three below, because the sibling load above is DEFERRED: an unloadable
+#: sibling leaves `fresh` as None, and a bare `fresh.X` at module level would
+#: kill the block at import — exactly the failure the deferral removes. None
+#: then fails at USE, inside `render`, where `__main__` turns it into the
+#: visible `?` pill. A re-export must never be permitted to hold a DIFFERENT
+#: number from the shared one either:
+#: `test_every_block_measures_the_SAME_WINDOW_as_the_shared_one` pins every
+#: age constant a block publishes to `bar_freshness.MAX_CACHE_AGE_SECS`,
+#: whatever that value is (a re-export mutated to 900 survived 499 mutants).
+MAX_CACHE_AGE_SECS = getattr(fresh, "MAX_CACHE_AGE_SECS", None)
 
 
 def cache_path() -> str:
@@ -110,7 +133,7 @@ def load(path):
 #: float `stuck_count` of 2.5 announcing "2 stuck dispatches" is worse than
 #: announcing that it could not tell, and an absent key is None, not 0 — see
 #: `stuck_suffix`.
-_int_or_none = fresh.int_or_none
+_int_or_none = getattr(fresh, "int_or_none", None)
 
 
 def stuck_suffix(payload) -> str:
@@ -132,8 +155,8 @@ def stuck_suffix(payload) -> str:
 #: Freshness, from the ONE definition (`bar_freshness.py`). Re-exported under the
 #: names this module already published so nothing that reads the clawgate block
 #: has to know the predicate moved.
-cache_age_secs = fresh.cache_age_secs
-is_current = fresh.is_current
+cache_age_secs = getattr(fresh, "cache_age_secs", None)
+is_current = getattr(fresh, "is_current", None)
 
 
 def _unmeasured(payload, icon: str) -> dict:
@@ -149,6 +172,14 @@ def _unmeasured(payload, icon: str) -> dict:
     trust a reading less, never a reason to downgrade an alarm it already
     raised. `parse_telemetry` draws the same line — an UNKNOWN verdict with a
     non-zero count stays Critical and keeps the count.
+
+    ⚠ THIS BLOCK CARRIES THE ALARM BY HAND rather than through the shared
+    `bar_freshness.carry_forward` the other six now use, and the difference is
+    deliberate: what those blocks carry is their COUNT, because a non-zero count
+    is their alarm. Here it is not — a non-empty board is the EXPECTED steady
+    state, so carrying `22` forward as `22?` would mark an outage with a number
+    that is loud on every ordinary day. The alarm on this pill is the STUCK
+    half, and that is what survives the outage.
 
     ⚠ THE SCOPE OF THAT CLAIM IS EXACTLY THE CACHE, and it took a poller change
     to make it true on the primary path. Two of the three outage shapes reach

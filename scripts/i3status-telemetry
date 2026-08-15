@@ -73,10 +73,7 @@ def _load_freshness():
 
     Extensionless block scripts cannot be a package, so this is the repo's
     standard sibling-module shape (cf. `notif-center` loading `i3status-notifs`,
-    `bar-status-poll` loading `scripts/lib/`). Deliberately NOT wrapped in a
-    try: a block that cannot load the freshness predicate cannot know whether
-    its cache is current, and `__main__` below turns that into the VISIBLE `?`
-    pill rather than a confident count. `dont_write_bytecode` keeps a
+    `bar-status-poll` loading `scripts/lib/`). `dont_write_bytecode` keeps a
     `__pycache__` out of the operator's ~/.config/i3status-rust/scripts.
     """
     sys.dont_write_bytecode = True
@@ -89,7 +86,22 @@ def _load_freshness():
     return mod
 
 
-fresh = _load_freshness()
+try:
+    fresh = _load_freshness()
+except Exception:
+    # 🔴 THE FAILURE IS DEFERRED, NEVER ANSWERED. This load used to run bare at
+    # module level and four documents claimed a block that could not load the
+    # sibling "falls through to its `?` pill". It did not: the block died at
+    # import — traceback, exit 1, EMPTY stdout — so the promised fallback was
+    # unreachable, which is a guard that reads as protection while providing
+    # none. Now `fresh` stays None, every use of it raises inside `render`, and
+    # `__main__` below turns that into the VISIBLE `?` pill.
+    # 🔴 None IS THE POINT: a `try` that degraded to a permissive stub
+    # (`unmeasured -> False`) would reinstate the whole defect with the suite
+    # green. None cannot be permissive, because it cannot answer at all. Pinned
+    # by `test_a_block_that_cannot_load_the_SIBLING_renders_the_VISIBLE_pill`,
+    # which runs each block with the sibling absent and a fresh QUIET cache.
+    fresh = None
 
 
 def cache_path() -> str:
@@ -106,6 +118,22 @@ def load(path):
         return None
 
 
+def _reading_pill(payload, count, label: str):
+    """The pill the payload's OWN count renders, or None if it counted nothing.
+
+    Shared by the measured path and the carry-forward path below, so the number
+    and the colour an outage carries cannot drift from the ones it would have
+    shown. `count` is passed in already read (and refused) by the caller.
+    """
+    if count is None or count <= 0:
+        return None
+    state = payload.get("state")
+    if state not in _VALID_STATES or state == "Idle":
+        state = "Critical"
+    text = "%s %d" % (label, count)
+    return {"text": text, "short_text": text, "state": state}
+
+
 def _unmeasured(payload, label: str) -> dict:
     """The VISIBLE `?` pill: the deadman could not be read just now.
 
@@ -116,9 +144,11 @@ def _unmeasured(payload, label: str) -> dict:
     🔴 AND IT NEVER GETS QUIETER THAN WHAT THE CACHE STILL RECORDS. A frozen
     cache still holds its last verdict, so `tlm 3` becomes `tlm 3?` and stays
     Critical: a measurement outage is a reason to trust a reading less, never a
-    reason to downgrade an alarm it already raised. `i3status-clawgate` draws
-    the same line for `stuck_count`, and `parse_telemetry` for an UNKNOWN
-    verdict carrying a non-zero count.
+    reason to downgrade an alarm it already raised. Every other cache-backed
+    block now draws the same line through the same helper
+    (`bar_freshness.carry_forward`); `i3status-clawgate` draws it by hand for
+    `stuck_count`, and `parse_telemetry` for an UNKNOWN verdict carrying a
+    non-zero count.
 
     ⚠ THE SCOPE OF THAT CLAIM IS EXACTLY THE CACHE IN FRONT OF US. A frozen file
     still carries its count; a `stale()` marker does NOT — the poller writes
@@ -130,12 +160,12 @@ def _unmeasured(payload, label: str) -> dict:
     elsewhere that does not expire (`scripts/collector/deadman.py`, agent-ops).
     """
     count = fresh.int_or_none((payload or {}).get("count")
-                              if isinstance(payload, dict) else None) or 0
-    if count > 0:
-        text = "%s %d?" % (label, count)
-        return {"text": text, "short_text": text, "state": "Critical"}
+                              if isinstance(payload, dict) else None)
     text = "%s ?" % label
-    return {"text": text, "short_text": text, "state": "Warning"}
+    return fresh.carry_forward(
+        _reading_pill(payload, count, label) if isinstance(payload, dict)
+        else None,
+        {"text": text, "short_text": text, "state": "Warning"})
 
 
 def render(payload, label: str = LABEL, now=None) -> dict:
@@ -153,6 +183,16 @@ def render(payload, label: str = LABEL, now=None) -> dict:
     render alike on purpose — the operator's action is the same — but only the
     measured one can be reached with a fresh cache.
 
+    🔴 AND IT IS CHECKED AFTER THE COUNT, WHICH IS NOT A DETAIL. Checked first —
+    as it was — a payload carrying `unknown` AND a non-zero count rendered
+    `tlm ?`/Warning, silently dropping N measured deaths: the same downgrade the
+    freshness path exists to refuse, on the measured path. `parse_telemetry`
+    already draws this line at the writer ("A MEASURED DEATH OUTRANKS AN
+    UNCERTAINTY", its fourth case) and writes `unknown: False` when the count is
+    non-zero — so the renderer contradicting it was invisible against a
+    current-schema cache, and reachable from any cache written before that rule
+    existed. A count is evidence; an uncertainty is not evidence against it.
+
     `now` is injected rather than read here so the freshness gate is testable
     without sleeping; it defaults to the wall clock. Fail-safe throughout: it
     never raises, whatever the file contains.
@@ -166,20 +206,17 @@ def render(payload, label: str = LABEL, now=None) -> dict:
     now = time.time() if now is None else now
     if fresh.unmeasured(payload, now):
         return _unmeasured(payload, label)
-    if payload.get("unknown"):
-        text = "%s ?" % label
-        return {"text": text, "short_text": text, "state": "Warning"}
     count = fresh.int_or_none(payload.get("count", 0))
     if count is None:
         # A count we refuse to read is not a count of zero.
         return _unmeasured(payload, label)
-    if count <= 0:
-        return dict(_EMPTY)
-    state = payload.get("state")
-    if state not in _VALID_STATES or state == "Idle":
-        state = "Critical"
-    text = "%s %d" % (label, count)
-    return {"text": text, "short_text": text, "state": state}
+    recorded = _reading_pill(payload, count, label)
+    if recorded is not None:
+        return recorded                 # a measured death outranks an unknown
+    if payload.get("unknown"):
+        text = "%s ?" % label
+        return {"text": text, "short_text": text, "state": "Warning"}
+    return dict(_EMPTY)
 
 
 def main() -> int:

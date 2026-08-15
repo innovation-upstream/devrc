@@ -13,6 +13,8 @@ failure states (per the media widget's decision 5):
   firewalled (port not forwarded)   -> RED  (Critical; the AirVPN-fixed regression)
   poller-stale / qBit unreachable / missing / corrupt cache
     / a cache the poller STOPPED REFRESHING                 -> soft yellow `qBit?`
+  any of those over a cache that still records an ALARM     -> that alarm, marked
+    (e.g. a frozen `firewalled`)                               `CA ⚠ firewalled?`
 
 The right-click detail popup (media-detail) and left-click (open the qBit WebUI)
 are wired in graphical.nix, not here.
@@ -48,10 +50,7 @@ def _load_freshness():
 
     Extensionless block scripts cannot be a package, so this is the repo's
     standard sibling-module shape (cf. `notif-center` loading `i3status-notifs`,
-    `bar-status-poll` loading `scripts/lib/`). Deliberately NOT wrapped in a
-    try: a block that cannot load the freshness predicate cannot know whether
-    its cache is current, and `__main__` below turns that into the VISIBLE
-    `qBit?` pill rather than a confident tunnel state. `dont_write_bytecode`
+    `bar-status-poll` loading `scripts/lib/`). `dont_write_bytecode`
     keeps a `__pycache__` out of the operator's ~/.config/i3status-rust/scripts.
     """
     sys.dont_write_bytecode = True
@@ -64,7 +63,22 @@ def _load_freshness():
     return mod
 
 
-fresh = _load_freshness()
+try:
+    fresh = _load_freshness()
+except Exception:
+    # 🔴 THE FAILURE IS DEFERRED, NEVER ANSWERED. This load used to run bare at
+    # module level and four documents claimed a block that could not load the
+    # sibling "falls through to its `?` pill". It did not: the block died at
+    # import — traceback, exit 1, EMPTY stdout — so the promised fallback was
+    # unreachable, which is a guard that reads as protection while providing
+    # none. Now `fresh` stays None, every use of it raises inside `render`, and
+    # `__main__` below turns that into the VISIBLE `?` pill.
+    # 🔴 None IS THE POINT: a `try` that degraded to a permissive stub
+    # (`unmeasured -> False`) would reinstate the whole defect with the suite
+    # green. None cannot be permissive, because it cannot answer at all. Pinned
+    # by `test_a_block_that_cannot_load_the_SIBLING_renders_the_VISIBLE_pill`,
+    # which runs each block with the sibling absent and a fresh QUIET cache.
+    fresh = None
 
 
 def cache_path() -> str:
@@ -81,27 +95,16 @@ def load(path):
         return None
 
 
-def render(payload, now=None) -> dict:
-    """Pure: cache payload (or None) -> i3status-rust block dict.
+def _reading_pill(payload):
+    """The pill the payload's OWN reading renders, or None when it is invisible.
 
-    NOT MEASURED — None / malformed / stale / error / a `ts` that is absent,
-    junk or older than `bar_freshness.MAX_CACHE_AGE_SECS` -> soft-yellow `qBit?`
-    (alarm, not hide). Otherwise pass through parse_media's render fields; an
-    empty text (the connected+idle case) collapses to the invisible block.
-
-    `now` is injected rather than read here so the freshness gate is testable
-    without sleeping; it defaults to the wall clock. Fail-safe throughout: it
-    never raises, whatever the file contains — a claim only a DIRECT call can
-    test, since `__main__` below prints a `qBit?` pill for any exception.
+    This block's payload IS the render dict `parse_media` wrote, so the measured
+    path is a pass-through — factored out only so the carry-forward path below
+    shows exactly what the reading showed rather than re-deriving it.
     """
-    now = time.time() if now is None else now
-    # missing / corrupt cache, a poller that reached us but not qBit, and a
-    # poller that stopped writing altogether — one predicate, one answer.
-    if fresh.unmeasured(payload, now):
-        return dict(_STALE)
     text = payload.get("text", "")
     if not isinstance(text, str) or text == "":
-        return dict(_EMPTY)                        # connected + idle -> hidden
+        return None                                # connected + idle -> hidden
     state = payload.get("state")
     if state not in _VALID_STATES:
         state = "Idle"
@@ -111,6 +114,44 @@ def render(payload, now=None) -> dict:
     if icon:
         out["icon"] = icon
     return out
+
+
+def render(payload, now=None) -> dict:
+    """Pure: cache payload (or None) -> i3status-rust block dict.
+
+    NOT MEASURED — None / malformed / stale / error / a `ts` that is absent,
+    junk or older than `bar_freshness.MAX_CACHE_AGE_SECS` -> soft-yellow `qBit?`
+    (alarm, not hide)... UNLESS the cache still records an ALARM, in which case
+    that alarm is carried with the bar-wide `?` marker: a frozen `firewalled`
+    reading renders `CA ⚠ firewalled?` and stays CRITICAL.
+
+    🔴 A MEASUREMENT OUTAGE MUST NOT MAKE A KNOWN ALARM QUIETER, and this block
+    used to break that in the loudest place on the bar: a cache holding a
+    firewalled tunnel (Critical, the AirVPN-fixed regression) was replaced by
+    `qBit?` (Warning) the moment it went stale — a downgrade, on the reasoning
+    that "cannot tell" is only ever a Warning. A port does not un-close itself
+    because the poller stopped looking.
+
+    Only an ALARM is carried (`bar_freshness.is_loud`): the neutral
+    connected+transferring reading is not one, so it falls through to `qBit?`
+    rather than leaving day-old speeds on the bar. `bar_freshness.carry_forward`
+    is the one definition of how a carried reading renders.
+
+    `now` is injected rather than read here so the freshness gate is testable
+    without sleeping; it defaults to the wall clock. Fail-safe throughout: it
+    never raises, whatever the file contains — a claim only a DIRECT call can
+    test, since `__main__` below prints a `qBit?` pill for any exception.
+    """
+    now = time.time() if now is None else now
+    recorded = _reading_pill(payload) if isinstance(payload, dict) else None
+    # missing / corrupt cache, a poller that reached us but not qBit, and a
+    # poller that stopped writing altogether — one predicate, one answer.
+    if fresh.unmeasured(payload, now):
+        alarm = recorded if fresh.is_loud(recorded) else None
+        return fresh.carry_forward(alarm, dict(_STALE))
+    if recorded is None:
+        return dict(_EMPTY)
+    return recorded
 
 
 def main() -> int:

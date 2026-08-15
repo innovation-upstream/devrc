@@ -9,9 +9,11 @@ CALM rendering (colour == "look at me"):
   measured, count <= 0                -> empty, invisible block (hide-at-zero)
   measured, count > 0                 -> `mail` icon + count, coloured (state
                                           from the cache; default Warning)
-  UNMEASURED (missing / corrupt /     -> `?`, VISIBLE (Warning) — the queue
-   stale / error / stopped refreshing)   could not be read, which is not an
+  UNMEASURED, nothing recorded        -> `?`, VISIBLE (Warning) — the queue
+   (missing / corrupt / marker)          could not be read, which is not an
                                          empty one
+  UNMEASURED, count still on disk     -> `5?`, keeping the colour the reading
+   (the poller stopped refreshing)       had — see `render`
 Click (wired in graphical.nix) opens the mail-actions triage list.
 
 🔴 WHY AN UNREADABLE CACHE IS NOT AN EMPTY ONE. It rendered as one, measured
@@ -48,10 +50,7 @@ def _load_freshness():
 
     Extensionless block scripts cannot be a package, so this is the repo's
     standard sibling-module shape (cf. `notif-center` loading `i3status-notifs`,
-    `bar-status-poll` loading `scripts/lib/`). Deliberately NOT wrapped in a
-    try: a block that cannot load the freshness predicate cannot know whether
-    its cache is current, and `__main__` below turns that into the VISIBLE `?`
-    pill rather than a confident count. `dont_write_bytecode` keeps a
+    `bar-status-poll` loading `scripts/lib/`). `dont_write_bytecode` keeps a
     `__pycache__` out of the operator's ~/.config/i3status-rust/scripts.
     """
     sys.dont_write_bytecode = True
@@ -64,7 +63,22 @@ def _load_freshness():
     return mod
 
 
-fresh = _load_freshness()
+try:
+    fresh = _load_freshness()
+except Exception:
+    # 🔴 THE FAILURE IS DEFERRED, NEVER ANSWERED. This load used to run bare at
+    # module level and four documents claimed a block that could not load the
+    # sibling "falls through to its `?` pill". It did not: the block died at
+    # import — traceback, exit 1, EMPTY stdout — so the promised fallback was
+    # unreachable, which is a guard that reads as protection while providing
+    # none. Now `fresh` stays None, every use of it raises inside `render`, and
+    # `__main__` below turns that into the VISIBLE `?` pill.
+    # 🔴 None IS THE POINT: a `try` that degraded to a permissive stub
+    # (`unmeasured -> False`) would reinstate the whole defect with the suite
+    # green. None cannot be permissive, because it cannot answer at all. Pinned
+    # by `test_a_block_that_cannot_load_the_SIBLING_renders_the_VISIBLE_pill`,
+    # which runs each block with the sibling absent and a fresh QUIET cache.
+    fresh = None
 
 
 def cache_path() -> str:
@@ -81,14 +95,41 @@ def load(path):
         return None
 
 
+def _reading_pill(payload, count, icon: str):
+    """The pill the payload's OWN count renders, or None if it counted nothing.
+
+    Shared by the measured path and the carry-forward path below, so the number
+    and the colour an outage carries cannot drift from the ones it would have
+    shown. `count` is passed in already read (and refused) by `render`.
+    """
+    if count is None or count <= 0:
+        return None
+    state = payload.get("state")
+    if state not in _VALID_STATES or state == "Idle":
+        state = "Warning"
+    return {"icon": icon, "text": str(count),
+            "short_text": str(count), "state": state}
+
+
 def render(payload, icon: str = ICON, now=None) -> dict:
     """Pure: cache payload (or None) -> i3status-rust block dict.
 
-    Three outcomes, and the first is the one this module gained:
-      * NOT MEASURED (None / malformed / stale / error / no or old `ts`)
-        -> the visible `?` pill, never the empty one;
+    Four outcomes, and the first two are what this module gained:
+      * NOT MEASURED, with a count still on disk (the poller stopped refreshing)
+        -> that count, MARKED: `5?`, keeping the colour it had;
+      * NOT MEASURED, nothing recorded (None / malformed / stale / error / no or
+        old `ts` over a zero) -> the visible `?` pill, never the empty one;
       * measured, count <= 0 -> the empty, invisible block (hide-at-zero);
       * measured, count > 0  -> the count and a colour.
+
+    🔴 A MEASUREMENT OUTAGE MUST NOT MAKE A KNOWN ALARM QUIETER. A queue does
+    not empty itself because the poller died, so a frozen cache still holding
+    five open actions renders `5?` rather than the bare `?` it used to — the
+    trailing `?` is what keeps that honest. Only a RECORDED alarm is carried: a
+    measured empty queue still hides, and a marker, which writes `count: 0` over
+    the last reading, still renders the bare `?`. `bar_freshness.carry_forward`
+    is the one definition of how a carried reading renders, shared with every
+    other block.
 
     `now` is injected rather than read here so the freshness gate is testable
     without sleeping; it defaults to the wall clock. Fail-safe throughout: it
@@ -96,20 +137,18 @@ def render(payload, icon: str = ICON, now=None) -> dict:
     test, since `__main__` below prints a `?` pill for any exception.
     """
     now = time.time() if now is None else now
+    count = (fresh.int_or_none(payload.get("count", 0))
+             if isinstance(payload, dict) else None)
+    recorded = _reading_pill(payload, count, icon)
     if fresh.unmeasured(payload, now):
-        return dict(_UNKNOWN)
-    count = fresh.int_or_none(payload.get("count", 0))
+        return fresh.carry_forward(recorded, dict(_UNKNOWN))
     if count is None:
         # A count we refuse to read is not a count of zero. `int()` would coerce
         # `"2"`, `2.5` and `True` into confident numbers nobody measured.
         return dict(_UNKNOWN)
-    if count <= 0:
+    if recorded is None:
         return dict(_EMPTY)
-    state = payload.get("state")
-    if state not in _VALID_STATES or state == "Idle":
-        state = "Warning"
-    return {"icon": icon, "text": str(count),
-            "short_text": str(count), "state": state}
+    return recorded
 
 
 def main() -> int:

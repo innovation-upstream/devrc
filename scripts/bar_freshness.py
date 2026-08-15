@@ -28,6 +28,14 @@ a missing symlink turns every count pill into `?` on a healthy machine.
 same "too old" number and are not — see the constant's own comment below.
 """
 
+#: The i3status-rust states that mean "look at me". `Idle`/`Good`/`Info` are the
+#: calm ones; a pill in any of these is already asking for attention.
+LOUD_STATES = ("Warning", "Critical")
+
+#: The bar-wide grammar for "this reading is not a current measurement",
+#: appended to whatever the reading still says (`39?`, `!2?`, `tlm 3?`, `LEAK?`).
+UNMEASURED_MARK = "?"
+
 MAX_CACHE_AGE_SECS = 600
 #: How old a cache may be and still count as a CURRENT measurement.
 #:
@@ -146,3 +154,63 @@ def unmeasured(payload, now, max_age: int = MAX_CACHE_AGE_SECS) -> bool:
     if is_marker(payload):
         return True
     return not is_current(payload, now, max_age)
+
+
+def is_loud(pill) -> bool:
+    """Is this rendered pill already asking for attention (Warning/Critical)?
+
+    For the STATE-driven blocks (`media`, `airvpn`) this is the whole test of
+    "did the cache record an alarm": they have no count, so the pill's colour is
+    the reading. The COUNT blocks use a different test — any count above zero is
+    a recorded number worth carrying, even one a `--red-above` backlog baseline
+    renders neutral — see `carry_forward`.
+    """
+    return isinstance(pill, dict) and pill.get("state") in LOUD_STATES
+
+
+def carry_forward(recorded, fallback):
+    """🔴 A MEASUREMENT OUTAGE MUST NOT MAKE A KNOWN ALARM QUIETER.
+
+    THE ONE DEFINITION of *how* an unmeasured cache renders a reading it still
+    holds, so the seven blocks cannot disagree about the grammar. `recorded` is
+    the pill the payload's OWN last reading renders (None when it recorded
+    nothing worth carrying); `fallback` is the block's bare "cannot tell" pill.
+
+    A carried pill keeps its text and its colour and gains the trailing
+    `UNMEASURED_MARK`: `39` -> `39?`, `LEAK` -> `LEAK?`, `tlm 3` -> `tlm 3?`.
+    Alerts do not resolve because the poller died, the `?` marks the number as
+    not-currently-measured, and the cost is asymmetric — a false-quiet on a leak
+    is far worse than a false-loud. State is floored at `Warning`: an unreadable
+    cache is never Idle, so a reading that was neutral-but-visible (a count
+    inside its `--red-above` backlog) comes back as Warning rather than as the
+    calm colour it had when someone was still measuring it.
+
+    🔴 WHAT is worth carrying is the CALLER'S judgement, not this function's —
+    it differs per block by design and the blocks state their own reason:
+      * count blocks pass their measured pill whenever the count is > 0;
+      * `media`/`airvpn` pass it only when `is_loud` (their neutral readings are
+        not alarms, and `airvpn`'s own `CC?` already spends the `?` on a
+        different meaning);
+      * `i3status-clawgate` does not use this at all: its recorded `count` is
+        the EXPECTED steady state rather than an alarm, so it carries only the
+        stuck half (`!2?`), by hand, in `_unmeasured`.
+    A `stale()`/`error` marker records `count: 0` over the last reading, so on
+    that path there is usually nothing to carry and the fallback is honest;
+    `bar-status-poll.carry_stuck_forward` is the one writer-side exception.
+    """
+    if not isinstance(recorded, dict):
+        return dict(fallback)
+    text = recorded.get("text")
+    if not isinstance(text, str) or not text:
+        return dict(fallback)          # an invisible reading is not an alarm
+    short = recorded.get("short_text")
+    if not isinstance(short, str) or not short:
+        short = text
+    state = recorded.get("state")
+    if state not in LOUD_STATES:
+        state = "Warning"
+    out = dict(recorded)               # keeps `icon`, which media/airvpn need
+    out.update({"text": text + UNMEASURED_MARK,
+                "short_text": short + UNMEASURED_MARK,
+                "state": state})
+    return out

@@ -361,6 +361,16 @@ def test_a_tunnel_nobody_has_MEASURED_does_not_read_as_deliberately_OFF():
 
     The discriminant here is COLOUR, not text — off and unknown are both an
     icon with empty text — so this compares whole pills.
+
+    ⚠ THE LAST TWO ASSERTIONS WERE THE OPPOSITE OF WHAT THEY ARE NOW, and the
+    change is the operator's decision, not a loosening. They read
+    `leak_frozen == off_frozen`: a frozen LEAK had to render EXACTLY the pill an
+    unmeasured tunnel-off renders — i.e. the freshness gate was allowed to
+    ERASE a recorded leak and drop the pill from Critical to Warning. A tunnel
+    does not stop leaking because the poller stopped looking, and a false-quiet
+    on a leak costs far more than a false-loud, so the leak is now CARRIED with
+    the bar-wide `?` marker (`LEAK?`, still Critical) and is no longer the same
+    pill as a frozen off.
     """
     day = int(time.time()) - 86_400
     off_live = blk.render(_fresh(up=False))
@@ -371,9 +381,12 @@ def test_a_tunnel_nobody_has_MEASURED_does_not_read_as_deliberately_OFF():
                         "state": "Idle"}
     assert off_frozen != off_live
     assert off_frozen["state"] == "Warning"
-    # ...and a frozen LEAK does not keep announcing itself as a live one either
+    # ...and a frozen LEAK is not presented as a live measurement either — but
+    # it is not thrown away: marked, and still the loudest pill on the bar.
     assert leak_frozen["text"] != "LEAK"
-    assert leak_frozen == off_frozen
+    assert leak_frozen == {"icon": "net_vpn", "text": "LEAK?",
+                           "short_text": "LEAK?", "state": "Critical"}
+    assert leak_frozen != off_frozen
 
 
 def test_the_airvpn_render_FUNCTION_is_failsafe_AND_stays_visible():
