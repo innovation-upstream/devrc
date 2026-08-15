@@ -1650,12 +1650,13 @@ field** (the CDP ops are bounded typed ops only; see the CDP security model abov
   Because the gate runs **before** the tab is opened, a gate failure leaks no tab.
 
   *Prerequisite:* an opencode whose `debug agent` reports a browser-only tool set.
-  **Both hosts run 1.18.4 and both resolve browser-only** (verified: the dump
+  **Both hosts run 1.18.16 and both resolve browser-only** (verified: the dump
   parses to exactly one enabled tool, `browser`). There is no version-skew caveat
-  here any more. 🔴 1.18.4 is what the hosts RUN; `flake.lock` pins **1.18.16**
-  and they converge on the next `ship.sh` — merged is not deployed. The
-  browser-only resolution was re-derived on 1.18.16 too — identical resolved tool
-  set, on both binaries. 🔴 The RAW dump is NOT byte-stable, on either binary: the
+  here any more. The hosts CONVERGED on 2026-08-15 — `ship.sh` verified at the
+  consumer, both `readlink -f $(command -v opencode)` resolving to the same
+  `…-opencode-1.18.16` store path — so the pin and the deploy now agree. The
+  browser-only resolution was measured identical on 1.18.4 and 1.18.16, so the
+  bump did not change it. 🔴 The RAW dump is NOT byte-stable, on either binary: the
   `permission` array's order follows a directory walk and varies run to run, so
   `cmp` on two dumps differs for reasons that have nothing to do with the version.
   Compare the resolved tool set, or canonicalise first. So the deploy gap does not
@@ -1748,8 +1749,8 @@ ln -sf ~/workspace/devrc/scripts/browser-bridge/opencode/tools/browser_tool_impl
 the wrapper substitutes them per run.)
 
 **opencode version.** The custom-tool mechanism (`.opencode/tools/*.js`,
-`permission: {"*": deny, …}`) is **verified on 1.18.4, which is what BOTH hosts
-run today, and re-derived on the pinned 1.18.16** — `opencode debug agent
+`permission: {"*": deny, …}`) is **verified on 1.18.16, which is what BOTH hosts
+run and what `flake.lock` pins** (measured identical on 1.18.4 before the bump) — `opencode debug agent
 browser-agent` resolves to `bash:false … browser:true`
 (exactly one enabled tool) on each, plus an end-to-end `opencode debug agent …
 --tool browser` run against a fake bridge. The wrapper still writes the tool to
