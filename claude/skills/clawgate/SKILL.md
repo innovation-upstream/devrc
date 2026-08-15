@@ -130,6 +130,13 @@ matching `## Acceptance criteria` (case-insensitive) → **AUTHOR-SPECIFIED**. A
 a body that merely *reads* like criteria — means you **DERIVE** them, and you must label them
 `DERIVED — not author-specified` in the comment.
 
+🔴 **The verdict is frozen at your FIRST read (step 1).** Body edits are legal before the
+`in_progress` flip, so without this an agent could PATCH the heading in, re-read it as
+AUTHOR-SPECIFIED and self-complete — the exact self-grading the gate exists to stop. **Writing the
+criteria and grading them is one act, in either order.** Touch or reword the author's criteria and
+they become yours: DERIVED. **Quote them VERBATIM in the pre-start comment** (author-specified ones
+too) — that timestamped copy is what makes this auditable rather than honour-system.
+
 **The completion comment (5)** carries evidence **per criterion** — one line each, naming what proves
 it — plus an explicit **NOT verified** list. "All green" with no per-criterion mapping is not a
 completion report.
