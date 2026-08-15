@@ -103,16 +103,18 @@ you" off a look that never happened.
 ## 🔴 `blocked_on_me` — the clawgate approval queue
 
 Read from the bar poller's cache. It is here because an accurate cross-reference once cost
-real signal: a dogfooding agent read that `agent-ops` has no JSON API, correctly preferred
-this script, never opened agent-ops, and **missed 11 pending approvals — four of them
-credential-exposure or cross-user-data-leak.**
+real signal: a dogfooding agent read that the (now retired) `agent-ops` TUI had no JSON API,
+correctly preferred this script, never opened agent-ops, and **missed 11 pending approvals —
+four of them credential-exposure or cross-user-data-leak.** 🔴 With that TUI gone this
+section is the ONLY place the queue surfaces outside the bar pill, so the lesson binds
+harder, not less: never answer a `blocked_on_me` question by pointing somewhere else.
 
 - **`count` = pending + STUCK.** `pending_count` is the `{open, ready_for_review}` half;
   `stuck_count` is `in_progress` tasks whose agent looks dead. The two always travel with
   the total. 🔴 Excluding `in_progress` ("an agent is working = not on the human") is exactly
   what hid a dispatch whose agent had been dead **four hours** — invisible on every surface,
   because this script reads the poller's cache rather than the API. The predicate is
-  `scripts/lib/clawgate_tasks.py`, shared with the poller and agent-ops.
+  `scripts/lib/clawgate_tasks.py`, shared with the poller.
 - **`open` / `ready_for_review` / `stuck` ENUMERATE the queue** — a count that moves without
   naming what moved is how three finished tasks appeared in no list anywhere. Each `stuck`
   row carries `reasons` (`no_agent` / `agent_error` / `not_kicked_off` / `agent_idle` /
@@ -127,9 +129,12 @@ credential-exposure or cross-user-data-leak.**
   `bar-status-poll` has not happened yet). `stuck_count` is `null` in that case.
 - Four states: `ok` / `stale` (cache older than 300s — the poller writes every 45s) /
   `absent` / `unparseable`. The last three publish **`count: null`, never `0`**.
-- **`agent-ops`** (`$mod+i`, tmux `prefix+A`, ▦ bar button) shows the same queue LIVE off the
-  API rather than off the cache, plus open PRs and a `/proc` walk that finds a `claude`
-  buried under a wrapper shell. Complements, not substitutes.
+- ⚠ **Nothing enumerates the queue with TASK TITLES any more.** `agent-ops` did — the tmux
+  popup on `$mod+i` / `prefix+A` / the ▦ bar button — and it is **RETIRED**; do not send a
+  reader there. The bar's clawgate pill carries the live count (`22!2` = 22 needing you, 2
+  stuck) and the **clawgate API** is where the titles are. The one part of agent-ops worth
+  keeping, its `/proc` walk that finds a `claude` buried under a wrapper shell, now lives in
+  `scripts/lib/claude_sessions.py` and feeds the bar's Claude-runs pill.
 
 ## `label` + `hotkey` — a name for the sessions the slot table never named
 
@@ -155,7 +160,8 @@ predate it.
 unconditionally — an agent that runs the script cold never reads this file:
 
 - `claude_detection` — `pane_current_command =~ /claude/`; a claude under a wrapper shell
-  reads as `shell` (shallower than agent-ops' `/proc` walk, which is not reachable over SSH).
+  reads as `shell` (shallower than the `/proc` walk in `scripts/lib/claude_sessions.py`,
+  which is not reachable over SSH — so both hosts are reported by ONE rule).
 - `fuzzyclaw_scope` — `local_host_only`; a REMOTE row carries null `fuzzyclaw`. It says
   **nothing** about age/session-id/stale (it used to, and that was wrong — see below).
 - `ledger_scope` — `per_host`; `age_secs` / `claude_session_id` come from the agent ledger,

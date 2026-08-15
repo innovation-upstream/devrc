@@ -152,7 +152,7 @@ def test_parse_clawgate_enumerates_ready_for_review():
 
 def test_parse_clawgate_delegates_every_judgement_to_the_shared_module():
     # 🔴 THE SEAM: the poller supplies a clock and nothing else. If it grew its
-    # own copy of the predicate, agent-ops and session-manager would disagree
+    # own copy of the predicate, the poller and session-manager would disagree
     # with the bar again.
     import ast
     import inspect

@@ -69,7 +69,7 @@ tmux focus hooks   ─┼─► emit (pure shell, hot path) ─► spool/current
   read DEAD overnight. Note `browser` is not in that set either — the bridge drives
   the same Brave profile the activity extension instruments, so agent navigation
   emits `browser` rows. `MACHINE_CADENCE` still exists in that module, but only for
-  `scripts/agent-ops`' freshness panel — it no longer touches active time.
+  agent-ops' since-retired freshness panel — it no longer touches active time.
   The deadman's query is `FORMAT TSVWithNames`: the header is what stops a capture
   from the previous (also 5-column, `n_op`) format replaying as a wrong answer.
   Both reuse `keylog/spool_emit.py` for the v1 line format.

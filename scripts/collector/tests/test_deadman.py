@@ -859,14 +859,14 @@ def test_cadence_predicate_is_exported_for_the_other_consumer():
     """`cadence_predicate_sql` + `MACHINE_CADENCE` are PUBLIC on purpose, and are
     NO LONGER USED BY THIS MODULE'S OWN QUERY — active time is defined by
     PRESENCE_SOURCES, which subsumes them (`browser-bridge` is not a presence
-    source). They survive because scripts/agent-ops imports both for its
+    source). They survived because scripts/agent-ops imported both for its
     telemetry-freshness panel, where the question is "is this row machine
     generated?" rather than "does this row prove a human is at the desk?" — that
     panel still counts `claude`/`tool` as real usage.
 
     A local copy of the rendering there was immediately wrong in the same way
     (AND-joined), so this pins the contract that consumer depends on. Its seam
-    tests live in scripts/tests/test_agent_ops.py.
+    tests lived in scripts/tests/test_agent_ops.py, deleted with that TUI.
     """
     assert D.cadence_predicate_sql(()) == ""
     one = D.cadence_predicate_sql((("x", "beat"),))
@@ -881,7 +881,7 @@ def test_cadence_predicate_is_exported_for_the_other_consumer():
     assert " AND (source = 'y'" not in two, "cadence terms joined with AND: %s" % two
     # The DEFAULT argument is what the consumer reaches for (a mutant defaulting
     # it to () survived until this was asserted), and the tuple must be non-empty
-    # — an emptied MACHINE_CADENCE makes agent-ops' filter vanish silently.
+    # — an emptied MACHINE_CADENCE made agent-ops' filter vanish silently.
     assert D.cadence_predicate_sql() == D.cadence_predicate_sql(D.MACHINE_CADENCE)
     assert D.cadence_predicate_sql() != ""
     assert ("browser-bridge", "heartbeat") in D.MACHINE_CADENCE, \

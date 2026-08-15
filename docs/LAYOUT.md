@@ -19,7 +19,7 @@ new `## Layout` pointers rather than left to rot here:
   commit
 - the CI check names `checks.x86_64-linux.nodetests` / `checks.x86_64-linux.pytests`
 - the flake rule that a NEW file must be `git add`ed or it is silently omitted from the deploy
-- the `scripts/agent-ops` dashboard, its entry points and its panes
+- the `scripts/agent-ops` dashboard, its entry points and its panes — ⚠ RETIRED; see CLAUDE.md for where each panel went
 - the steering rule: modernization targets the agent-facing layer, not interactive-CLI ricing
 - dl-router's extension is separate from browser-bridge **so a routing bug cannot take down the
   agent command channel**

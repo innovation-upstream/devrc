@@ -6,7 +6,8 @@
 - **Bar**: i3status-rust at top, home-manager-managed (`nix/graphical.nix` — NOT the old
   i3blocks in `/etc/nixos`, migrated PR #74). System blocks (mem/disk/net/cpu/temp/GPU/
   sound/vpn/time) + hide-at-zero count blocks (clawgate/mail/homelab-alerts/civitai-alerts,
-  fed by `scripts/bar-status-poll`) + agent-ops launcher ▦ + rig-control ⚙.
+  fed by `scripts/bar-status-poll`) + the live Claude-runs count ▦ (indicator only —
+  its click-to-launch went with the retired agent-ops TUI) + rig-control ⚙.
   **Bar work belongs to the `bar` skill, not this one.**
 - **Theme**: gruvbox dark (#282828 bg, pixel 2 borders)
 - **Launcher**: `rofi -show drun -show-icons -theme gruvbox-dark-hard`

@@ -758,13 +758,11 @@ in
     source = ../scripts/tmux-scratch-monitor.sh;
     executable = true;
   };
-  # agent-ops "mission control" popup (prefix+A). Renders over the existing
-  # deterministic sources (bar-status cache + a live tmux/process scan + a
-  # TTL-cached initiative-scan) — see scripts/agent-ops.
-  home.file.".config/tmux/agent-ops" = {
-    source = ../scripts/agent-ops;
-    executable = true;
-  };
+  # (The `agent-ops` "mission control" popup that used to be deployed here, and
+  # bound to tmux prefix+A, is RETIRED — see nix/graphical.nix's claudeRunsBlock
+  # for where its one irreplaceable part went. Do not re-add a home.file for it:
+  # `test_the_retired_TUI_has_no_launcher_anywhere` fails if a launch surface
+  # names it again.)
 
   home.file.".config/tmux/activity-emit.sh" = {
     source = ../scripts/tmux-activity-emit.sh;
@@ -2295,7 +2293,7 @@ in
   # run-viewer.sh) that renders the current initiatives from `initiatives.latest`
   # (ghost-free: newest snapshot only) grouped by repo, with momentum badges,
   # next-step, open PRs, and a LIVE tmux overlay read from THIS host at render time.
-  # It is the durable, browser-viewable counterpart to the ephemeral agent-ops TUI.
+  # It is the durable, browser-viewable successor to the retired agent-ops TUI.
   #
   # WORKBENCH-ONLY (gated on serverMode), same rationale as the sync: the homelab
   # kubeconfig is direct-LAN only here, AND the viewer must run on the host whose

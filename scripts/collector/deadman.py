@@ -320,16 +320,17 @@ PRESENCE_STALL_HOURS = 72
 # `kind` it carries — and the two are deliberately NOT both applied to the active
 # set, because layering a denylist under an allowlist gives two places to edit
 # for one rule.
-# It stays exported because scripts/agent-ops imports BOTH this tuple and
+# It stayed exported because scripts/agent-ops imported BOTH this tuple and
 # `cadence_predicate_sql` for its telemetry-freshness panel, where the concept is
 # genuinely different: that panel wants to exclude MACHINE-GENERATED rows while
 # still counting `claude`/`tool` as real USAGE of those sources. "Is this row
 # machine-generated?" and "does this row prove a human is at the desk?" are
 # different questions, and only the second one defines active time.
-# Seam tests: scripts/tests/test_agent_ops.py.
+# Seam tests: scripts/collector/tests/test_deadman.py (the agent-ops-side
+# ones went with that TUI when it was retired).
 #
 # 🔴 ADDING A TIMER-DRIVEN EMITTER ANYWHERE IN THE PIPELINE MEANS ADDING IT HERE
-# (for agent-ops' freshness panel) — and, separately, keeping it OUT of
+# (for agent-ops' since-retired freshness panel) — and, separately, keeping it OUT of
 # PRESENCE_SOURCES.
 MACHINE_CADENCE = (("browser-bridge", "heartbeat"),)
 
@@ -364,7 +365,7 @@ def cadence_predicate_sql(cadence=MACHINE_CADENCE) -> str:
     """A ClickHouse boolean matching any MACHINE_CADENCE pair; "" when empty.
 
     🔴 THE ONE PLACE this predicate is RENDERED, not just the one place the pairs
-    are declared. Exported because scripts/agent-ops needs the same predicate for
+    are declared. Exported because scripts/agent-ops needed the same predicate for
     its freshness panel: a second copy of the `" OR ".join` immediately grew the
     same latent bug (joining with AND makes `NOT (A AND B)` exclude NOTHING),
     which is only reachable once a second pair exists -- i.e. it would have gone
