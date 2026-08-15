@@ -585,6 +585,321 @@ SKILL_PINS: list[tuple[str, str]] = [
 ]
 
 
+class TestBehindRemoteWritesNothing:
+    """🔴 The gap this closes, and it is not hypothetical.
+
+    MEASURED 2026-08-15: `--confirm --push` committed the doc to `main` in a
+    SHARED base clone, then the push was rejected non-fast-forward because two
+    other sessions had pushed during the session. The commit STAYED. An
+    un-pushed commit on `main` in a devrc checkout is exactly what `ship.sh`
+    skips over — silently, because `merge --ff-only` refuses and the host is
+    left "as found" — so that host stops receiving every future change while
+    still looking healthy. It has bitten this repo twice.
+
+    The tool already had the right property everywhere else: a failure writes
+    nothing. Push was the one path that traded it for a commit the caller then
+    had to know how to undo.
+    """
+
+    def _advance_remote(self, repo: Path, tmp_path: Path) -> None:
+        """Push a commit to origin from a SECOND clone — the other session."""
+        # Clone the BARE origin, not the working repo — pushing into a non-bare
+        # checkout's current branch is refused, which would fail for a reason
+        # that has nothing to do with what this class is testing.
+        other = tmp_path / "other"
+        _sh("git", "clone", "-q", str(tmp_path / "origin.git"), str(other), cwd=tmp_path)
+        for k, v in (("user.name", "Other"), ("user.email", "o@example.invalid"),
+                     ("commit.gpgsign", "false")):
+            _sh("git", "config", k, v, cwd=other)
+        (other / "OTHER.md").write_text("other session\n", encoding="utf-8")
+        _sh("git", "add", "--", "OTHER.md", cwd=other)
+        _sh("git", "commit", "-q", "-m", "another session's work", cwd=other)
+        _sh("git", "push", "-q", "origin", "main", cwd=other)
+
+    def test_behind_remote_writes_NOTHING(
+        self, repo: Path, update_file: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE LOAD-BEARING CASE. Not 'the push fails cleanly' — nothing is
+        written at all, so there is no commit to strand on a shared branch."""
+        self._advance_remote(repo, tmp_path)
+        # 🔴 NOT `tree_hash` here, and the reason matters: it hashes `.git` too,
+        # and the pre-check's `git fetch` legitimately writes FETCH_HEAD and
+        # remote refs. Using it would fail for a side effect that is the guard
+        # working, so assert the three things "nothing written" actually means.
+        doc_before, shas_before = doc_of(repo), commit_shas(repo)
+        remote_before = _sh("git", "rev-parse", "refs/heads/main",
+                            cwd=tmp_path / "origin.git")
+        res = run_tool(repo, "--confirm", "--push", update=update_file)
+        assert res.returncode == 6, (res.returncode, res.stdout, res.stderr)
+        assert "status=behind" in res.stderr
+        assert doc_of(repo) == doc_before, "the doc was written before refusing"
+        assert commit_shas(repo) == shas_before, (
+            "a commit was made and then stranded — the exact failure this closes"
+        )
+        assert _sh("git", "rev-parse", "refs/heads/main",
+                   cwd=tmp_path / "origin.git") == remote_before
+
+    def test_it_names_the_hazard_and_the_recovery(
+        self, repo: Path, update_file: Path, tmp_path: Path
+    ) -> None:
+        """A refusal a caller cannot act on gets worked around. It must name the
+        fast-forward, and the preserve-verify-reset path for a real divergence."""
+        self._advance_remote(repo, tmp_path)
+        err = run_tool(repo, "--confirm", "--push", update=update_file).stderr
+        assert "merge --ff-only" in err
+        assert "reset --keep" in err
+        assert "ship.sh" in err, "the consequence is what makes this worth obeying"
+
+    def test_it_does_not_fire_when_the_remote_has_not_moved(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 The negative control. A check that always refuses would pass the
+        two tests above while making --push permanently unusable."""
+        res = run_tool(repo, "--confirm", "--push", update=update_file)
+        assert res.returncode == 0, (res.returncode, res.stderr)
+        assert "status=pushed" in res.stdout
+        assert "status=behind" not in res.stderr
+
+    def test_it_does_not_fetch_or_refuse_WITHOUT_push(
+        self, repo: Path, update_file: Path, tmp_path: Path
+    ) -> None:
+        """A behind remote is irrelevant to a local-only `--confirm`: there is no
+        push to be rejected, so refusing would block honest offline work."""
+        self._advance_remote(repo, tmp_path)
+        res = run_tool(repo, "--confirm", update=update_file)
+        assert res.returncode == 0, (res.returncode, res.stderr)
+        assert "status=written" in res.stdout
+
+    def test_an_UNREACHABLE_remote_refuses_rather_than_assuming_pushable(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 A fetch that FAILS is not '0 behind'. Guessing pushable is exactly
+        the confident-wrong-answer this guard exists to prevent, and it would
+        strand the commit the same way."""
+        doc_before, shas_before = doc_of(repo), commit_shas(repo)
+        _sh("git", "remote", "set-url", "origin",
+            str(repo.parent / "does-not-exist.git"), cwd=repo)
+        res = run_tool(repo, "--confirm", "--push", update=update_file)
+        assert res.returncode != 0
+        assert "refusing to commit something that may not be pushable" in res.stderr
+        # 🔴 Pin the DIAGNOSTIC, not just the refusal. Two guards reach "refuse"
+        # here — the non-zero exit and the empty-sha fallback — so disabling the
+        # first left the suite green while the message degraded from "cannot read
+        # origin/main: <git's actual error>" to "returned no sha". The refusal is
+        # the safety property; naming WHY (network vs auth vs no such remote) is
+        # what makes it actionable.
+        assert "cannot read origin/main" in res.stderr, res.stderr
+        # …and the local-only escape hatch, since a dead remote must not cost the
+        # whole handoff.
+        assert "re-run without" in res.stderr and "--push" in res.stderr
+        assert doc_of(repo) == doc_before
+        assert commit_shas(repo) == shas_before
+
+
+class TestPushabilityCasesTheFetchVersionGotWRONG:
+    """🔴 Each of these was measured wrong, or dangerously right, before the
+    mechanism moved from `git fetch` + `FETCH_HEAD` to `git ls-remote`.
+
+    `FETCH_HEAD` is shared mutable state: a concurrent fetch between the write
+    and the read made the check return a confident 0 on a checkout that was
+    genuinely behind — write, commit, push rejected, stranded commit. And
+    `fetch <remote> <branch>` simply FAILS when the branch is not on the remote,
+    which made a first push impossible.
+    """
+
+    def test_a_branch_NOT_YET_on_the_remote_is_pushable(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 THE REGRESSION. A first push cannot be rejected non-fast-forward,
+        so it must not be refused. `git fetch origin <branch>` exits 128 here."""
+        _sh("git", "checkout", "-q", "-b", "brand-new", cwd=repo)
+        res = run_tool(repo, "--confirm", "--push", update=update_file)
+        assert res.returncode == 0, (res.returncode, res.stdout, res.stderr)
+        assert "status=pushed" in res.stdout
+        assert "status=behind" not in res.stderr
+
+    def test_AHEAD_only_is_pushable(self, repo: Path, update_file: Path) -> None:
+        """Ahead is the normal case; refusing it would block every handoff."""
+        (repo / "extra.md").write_text("x\n", encoding="utf-8")
+        _sh("git", "add", "--", "extra.md", cwd=repo)
+        _sh("git", "commit", "-q", "-m", "local work", cwd=repo)
+        res = run_tool(repo, "--confirm", "--push", update=update_file)
+        assert res.returncode == 0, res.stderr
+        assert "status=pushed" in res.stdout
+
+    def test_AHEAD_and_BEHIND_refuses(
+        self, repo: Path, update_file: Path, tmp_path: Path
+    ) -> None:
+        """Diverged. `behind`-only logic that asked 'is the remote strictly
+        ahead' would call this pushable and strand the commit."""
+        other = tmp_path / "other2"
+        _sh("git", "clone", "-q", str(tmp_path / "origin.git"), str(other), cwd=tmp_path)
+        for k, v in (("user.name", "O"), ("user.email", "o@example.invalid"),
+                     ("commit.gpgsign", "false")):
+            _sh("git", "config", k, v, cwd=other)
+        (other / "theirs.md").write_text("t\n", encoding="utf-8")
+        _sh("git", "add", "--", "theirs.md", cwd=other)
+        _sh("git", "commit", "-q", "-m", "theirs", cwd=other)
+        _sh("git", "push", "-q", "origin", "main", cwd=other)
+        (repo / "mine.md").write_text("m\n", encoding="utf-8")
+        _sh("git", "add", "--", "mine.md", cwd=repo)
+        _sh("git", "commit", "-q", "-m", "mine", cwd=repo)
+        shas = commit_shas(repo)
+        res = run_tool(repo, "--confirm", "--push", update=update_file)
+        assert res.returncode == 6, (res.returncode, res.stderr)
+        assert commit_shas(repo) == shas
+
+    def test_AHEAD_and_BEHIND_refuses_even_when_the_tip_IS_known_locally(
+        self, repo: Path, update_file: Path, tmp_path: Path
+    ) -> None:
+        """🔴 The sibling test above does NOT reach the ancestry comparison.
+
+        Its repo has never fetched the other clone's commit, so the lookup
+        refuses on the unknown tip and the `merge-base` result is never
+        consulted — measured: replacing that comparison with a flat `False` left
+        the whole suite green. Fetching the object first (without merging it) is
+        what forces the ancestry path to be the thing deciding.
+        """
+        other = tmp_path / "other4"
+        _sh("git", "clone", "-q", str(tmp_path / "origin.git"), str(other), cwd=tmp_path)
+        for k, v in (("user.name", "O"), ("user.email", "o@example.invalid"),
+                     ("commit.gpgsign", "false")):
+            _sh("git", "config", k, v, cwd=other)
+        (other / "theirs2.md").write_text("t\n", encoding="utf-8")
+        _sh("git", "add", "--", "theirs2.md", cwd=other)
+        _sh("git", "commit", "-q", "-m", "theirs2", cwd=other)
+        _sh("git", "push", "-q", "origin", "main", cwd=other)
+        # The object is now LOCAL, but not merged: ahead 1, behind 1.
+        _sh("git", "fetch", "-q", "origin", "main", cwd=repo)
+        (repo / "mine2.md").write_text("m\n", encoding="utf-8")
+        _sh("git", "add", "--", "mine2.md", cwd=repo)
+        _sh("git", "commit", "-q", "-m", "mine2", cwd=repo)
+        hd = _load_module()
+        tip = _sh("git", "rev-parse", "refs/heads/main", cwd=tmp_path / "origin.git").strip()
+        assert hd.git_allow(repo, "cat-file", "-e", f"{tip}^{{commit}}").code == 0, (
+            "premise: the remote tip must be present locally, or this test takes "
+            "the unknown-tip path and proves nothing about ancestry"
+        )
+        shas = commit_shas(repo)
+        res = run_tool(repo, "--confirm", "--push", update=update_file)
+        assert res.returncode == 6, (res.returncode, res.stderr)
+        assert commit_shas(repo) == shas
+
+    def test_the_lookup_writes_NOTHING_into_dot_git(
+        self, repo: Path, update_file: Path, tmp_path: Path
+    ) -> None:
+        """🔴 The claim the previous version got wrong. `fetch` writes
+        `refs/remotes/<remote>/<branch>` in the COMMON gitdir — shared by every
+        worktree — plus objects and reflogs, and two concurrent fetches failed to
+        lock in 30/30 trials. `ls-remote` must write nothing at all."""
+        def snapshot() -> dict:
+            return {
+                str(p.relative_to(repo)): p.stat().st_mtime_ns
+                for p in (repo / ".git").rglob("*") if p.is_file()
+            }
+        # Make the remote ahead so the pre-check refuses AFTER doing its lookup.
+        other = tmp_path / "other3"
+        _sh("git", "clone", "-q", str(tmp_path / "origin.git"), str(other), cwd=tmp_path)
+        for k, v in (("user.name", "O"), ("user.email", "o@example.invalid"),
+                     ("commit.gpgsign", "false")):
+            _sh("git", "config", k, v, cwd=other)
+        (other / "z.md").write_text("z\n", encoding="utf-8")
+        _sh("git", "add", "--", "z.md", cwd=other)
+        _sh("git", "commit", "-q", "-m", "z", cwd=other)
+        _sh("git", "push", "-q", "origin", "main", cwd=other)
+        before = snapshot()
+        assert run_tool(repo, "--confirm", "--push", update=update_file).returncode == 6
+        assert snapshot() == before, (
+            "the pushability lookup wrote into .git — on a shared gitdir that is "
+            "a side effect on every other worktree, and FETCH_HEAD in particular "
+            "is what made the old check racy"
+        )
+
+    def test_an_unreadable_remote_tip_is_NOT_read_as_pushable(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """A remote tip this repo has never fetched is by definition a commit
+        HEAD lacks. `merge-base` would FAIL on the unknown object, and a failure
+        must not collapse to 'pushable'."""
+        hd = _load_module()
+        assert hd.remote_has_commits_we_lack(repo, "origin", "main") is False
+        # An unknown sha must land on REFUSE via the ancestry check's non-zero,
+        # which is the single fail-safe now that the redundant guard is gone.
+        ghost = "0" * 40
+        assert hd.git_allow(repo, "merge-base", "--is-ancestor", ghost, "HEAD").code != 0
+
+
+class TestResolveBranch:
+    """🔴 Extracted by this PR and shipped with ZERO coverage — a mutant
+    returning the constant "main", ignoring `--branch` and never raising on a
+    detached HEAD, survived all 55 tests."""
+
+    def test_it_honours_the_override(self, repo: Path) -> None:
+        hd = _load_module()
+        assert hd.resolve_branch(repo, "release-42") == "release-42"
+
+    def test_it_reads_the_current_branch(self, repo: Path) -> None:
+        hd = _load_module()
+        _sh("git", "checkout", "-q", "-b", "topic-x", cwd=repo)
+        assert hd.resolve_branch(repo, None) == "topic-x"
+
+    def test_a_detached_HEAD_refuses_rather_than_guessing(self, repo: Path) -> None:
+        hd = _load_module()
+        _sh("git", "checkout", "-q", "--detach", cwd=repo)
+        with pytest.raises(hd.GitError) as exc:
+            hd.resolve_branch(repo, None)
+        assert "detached HEAD" in str(exc.value)
+
+
+class TestPushFailureHandsOverTheRecovery:
+    """The RESIDUAL path: the pre-check passed and the push still failed.
+
+    🔴 It cannot be designed away — the remote can move in the window between
+    the fetch and the push — so the commit really does exist at that point. What
+    must not happen is the caller not being told: an un-pushed commit on a shared
+    branch is the state `ship.sh` skips over silently, and a session that does
+    not know it is there will not clean it up.
+
+    Triggered deterministically by pointing `origin` at a NON-BARE repo with
+    `main` checked out: fetch succeeds (so the pre-check passes), push is refused
+    ("refusing to update checked out branch"). Discovered by accident when a
+    fixture cloned the wrong path.
+    """
+
+    def _origin_that_fetches_but_refuses_push(self, repo: Path, tmp_path: Path) -> None:
+        sibling = tmp_path / "sibling"
+        _sh("git", "clone", "-q", str(tmp_path / "origin.git"), str(sibling), cwd=tmp_path)
+        _sh("git", "remote", "set-url", "origin", str(sibling), cwd=repo)
+
+    def test_it_says_the_commit_exists_and_names_the_recovery(
+        self, repo: Path, update_file: Path, tmp_path: Path
+    ) -> None:
+        self._origin_that_fetches_but_refuses_push(repo, tmp_path)
+        before = commit_shas(repo)
+        res = run_tool(repo, "--confirm", "--push", update=update_file)
+        assert res.returncode != 0
+        assert "status=push-failed" in res.stderr
+        # The commit DOES exist — the message must not pretend otherwise.
+        assert len(commit_shas(repo)) == len(before) + 1
+        # 🔴 "in that order" is pinned too, not just the three commands. The
+        # ORDER is the load-bearing part — verifying the sha reached the remote
+        # BEFORE moving the branch pointer is what makes the recovery safe, and
+        # deleting that clause left the suite green while the commands stayed.
+        for needed in ("EXISTS LOCALLY", "ship.sh", "in that order",
+                       "branch <topic>", "ls-remote", "reset --keep"):
+            assert needed in res.stderr, f"recovery step missing: {needed}"
+
+    def test_the_pre_check_did_not_fire_here(
+        self, repo: Path, update_file: Path, tmp_path: Path
+    ) -> None:
+        """🔴 Distinguishes the two paths. Without this, a pre-check that refused
+        everything would satisfy the test above for the wrong reason."""
+        self._origin_that_fetches_but_refuses_push(repo, tmp_path)
+        res = run_tool(repo, "--confirm", "--push", update=update_file)
+        assert "status=behind" not in res.stderr
+        assert "status=written" in res.stdout, "the write must have happened first"
+
+
 class TestSkillAndModuleAgree:
     """The module cannot enforce a protocol its only caller stopped following,
     and the drift is silent — the step simply stops happening. Same shape as
@@ -623,8 +938,21 @@ class TestSkillAndModuleAgree:
         """A status the tool returns and the skill never mentions leaves the
         agent improvising at the moment it is about to push to a shared branch."""
         doc = HANDOFF_SKILL.read_text(encoding="utf-8")
-        for status in ("no-advance", "no-change", "proposed"):
-            assert status in doc, f"SKILL.md never mentions `{status}`"
+        # 🔴 DERIVED FROM THE MODULE, not restated. The hand-written literal
+        # ("no-advance", "no-change", "proposed") is why `behind` — added by the
+        # very PR that closes the stranded-commit bug — reached the skill's only
+        # audience undocumented: the test built to catch exactly that could not
+        # see a status nobody remembered to add to its own list.
+        src = TOOL.read_text(encoding="utf-8")
+        emitted = sorted(set(re.findall(r'status=([a-z-]+)', src)))
+        assert len(emitted) >= 5, f"the scraper found too few statuses: {emitted}"
+        for status in emitted:
+            assert status in doc, (
+                f"the module can print `status={status}` and "
+                f"claude/skills/handoff/SKILL.md never mentions it. An agent hits "
+                f"an undocumented status at the moment it is about to push to a "
+                f"shared branch. Document it, or stop emitting it."
+            )
 
     def test_the_tool_is_tracked_by_git(self) -> None:
         """A new file the flake never sees deploys as an absence, silently.
