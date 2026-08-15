@@ -122,6 +122,58 @@ ARCHIVE_MD = REPO_ROOT / "claude" / "RULES-ARCHIVE.md"
 # (-> archive: sibling-agent-kill). The archive's own wording is "not a private
 # repo and not a private machine".
 #
+# 2026-08-14: the 2026-08-13 estimate above got measured, and it held. A fourth
+# worktree hazard arrived (`cp -a` of a worktree shares the ORIGINAL's git dir,
+# because a worktree's `.git` is a FILE, not a directory) and it did attach to
+# the sub-bullet list for the cost of its own text -- 394 B, with the frame,
+# the "list is not closed" clause and the silent-failure framing all reused. As
+# a sixth sibling bullet it would have re-stated those. The estimate is now a
+# measurement of ONE instance, not a general claim; a fifth surface is still
+# unmeasured.
+#
+# That same commit folded in two VERIFICATION lessons rather than worktree ones,
+# and deliberately did NOT give either its own bullet: a guard on prose being
+# walkable by rewording extends the existing "SPELLED rather than STRUCTURAL"
+# bullet (same question, new artifact type), and a fixture whose value equals
+# the constant it tests extends the existing "fixtures pairwise distinct" clause
+# in the mutation bullet (same collision, different pair). Both therefore cost
+# only their own text AND reuse the archive anchor already on those bullets, so
+# neither added a `→ archive:` tag. Placement was chosen by where the reader
+# already is when the hazard fires, not by which cluster the lesson came from.
+#
+# 🔴 The 202 B those three additions overshot the budget by was reclaimed WITHOUT
+# narrowing anything. An audit measured where it actually came from, and the
+# split matters to anyone reusing this as a recipe: only 133 B came out of
+# EXISTING rules (stash -89, pkill -26, worktree -18); the remaining ~69 B came
+# from trimming the three NEW additions themselves. An earlier version of this
+# comment named only the two existing-rule sources and so read as though all
+# 202 B were reclaimed from prose already in the file -- which would make
+# "reclaim without narrowing" look about 50% cheaper than it is. What the
+# existing-rule half looked like:
+# the `git stash` section stated "for ANY reason" THREE times (heading, a 🔴
+# clause, and "regardless of why") -- the third was dropped and the other two
+# kept verbatim, since that is the exact scope clause a narrower wording once
+# destroyed; and the pkill bullet's incident numbers ("~15 PIDs", "0 files
+# collected and exit 144") moved out to `sibling-agent-kill`, which already held
+# them verbatim and was already tagged on that bullet. What did NOT move: the
+# clause saying `/proc/<pid>/cwd` CANNOT separate two agents that both sit in the
+# base clone. PR #447 trimmed exactly that and re-opened the incident; it is
+# named here so the next person shaving this bullet knows which sentence is load-
+# bearing.
+#
+# The cold read is what caught the one real regression in this pass, and no test
+# performs it: "run a SINGLE agent in-place -- never two file-modifying ones" had
+# been shortened to "never two", which reads as forbidding a second READ-ONLY
+# agent that the previous sentence explicitly permits. 20 B restored.
+#
+# 🔴 SO THAT BULLET SHIPPED 18 B SHORTER THAN IT WAS, and this comment previously
+# recorded only the caught regression -- which reads as "untouched" to the next
+# person sizing it up. The shipped wording is the MIDDLE position: "run a SINGLE
+# agent in-place -- never two file-modifying ones". The antecedent survives
+# because "agent" is in the same clause and the full form ("two file-modifying
+# agents in one checkout WILL clobber each other") appears earlier in the same
+# bullet. Shave it further and that stops being true.
+#
 # MAX_BYTES was deliberately NOT ratcheted down to bank this. The slack predates
 # the consolidation (compare the live size against MAX_BYTES and
 # MIN_HEADROOM_BYTES below rather than trusting a literal here -- restating a
@@ -250,6 +302,38 @@ def test_every_archive_pointer_resolves():
     assert not dangling, (
         f"claude/RULES.md points at archive anchors that do not exist: "
         f"{dangling}.\nArchive has: {sorted(anchors)}"
+    )
+
+    # 🔴 THE OTHER DIRECTION, WHICH WAS ASSERTED IN PROSE AND GATED NOWHERE.
+    # An audit found this module claiming anchors "resolve both directions"
+    # while only `referenced - anchors` was ever computed. The inverse — an
+    # archive section nothing points at — is the same rot one step over, and
+    # this module's own `_archive_anchors` docstring already argues the case:
+    # "a hand-maintained list drifts, and a drifted list steers a maintainer
+    # into duplicating an entry that already has a home." An orphan is exactly
+    # how that happens: the evidence is there, nothing routes to it, and the
+    # next person writes it again in the core where bytes are scarce.
+    #
+    # ⚠ THIS IS AN INVARIANT GUARD, NOT REGRESSION COVERAGE — it was green the
+    # moment it was written (0 orphans measured), so it never caught the bug it
+    # describes. It is labelled as such rather than counted as a catch. Watched
+    # to fail by injecting an orphan section; it goes red with its own message.
+    #
+    # `retired-*` is excluded BY PREFIX and deliberately: a retired rule's
+    # evidence is meant to outlive the pointer that used to reach it. Any other
+    # unreferenced section is drift.
+    orphans = sorted(
+        a for a in (anchors - referenced) if not a.startswith("retired-")
+    )
+    assert not orphans, (
+        f"\n\nclaude/RULES-ARCHIVE.md has section(s) nothing points at: "
+        f"{orphans}.\n"
+        f"  Either add a `→ archive: <anchor>` tag on the rule whose evidence "
+        f"this is,\n"
+        f"  or rename it `retired-<name>` if the rule itself is gone.\n"
+        f"  An orphan is not harmless: the next author cannot find it, so they "
+        f"write it\n"
+        f"  again in the core, where bytes are the scarce thing."
     )
 
 

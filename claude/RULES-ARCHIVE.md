@@ -62,6 +62,7 @@ the last revision before the core/archive split.
 - [base-clone-drift](#base-clone-drift)
 - [worktree-not-session](#worktree-not-session)
 - [cross-repo-worktree](#cross-repo-worktree)
+- [worktree-copy-git](#worktree-copy-git)
 - [sibling-agent-kill](#sibling-agent-kill)
 
 **Shell & Tooling**
@@ -160,6 +161,29 @@ An 18/18 and a 20/20 sweep each had blind spots that only a *differently-constru
 independent* sweep found — including a mutant that dropped one component from a signature and
 **survived**, silently reintroducing the very bug the PR fixed, because the value-pin test
 happened to use a fixture where `pid == pgid == sid` and could not discriminate.
+
+### Fixture-equals-constant (2026-08-14)
+
+The `pid == pgid == sid` case above is a collision *between fields of one fixture*. There is a
+second, less obvious pairing that produces exactly the same blindness: a fixture whose value
+equals **the constant the assertion names**. Three in one PR:
+
+1. Asserting a derived value equals `["tmux"]`, against a fixture that could only ever produce
+   `tmux`. A mutant replacing the derivation with the hardcoded literal `["tmux"]` produced
+   byte-identical output.
+2. Using an enumerated set in the assertion that happened to **be** the module constant under
+   test, so the assertion compared the constant with itself.
+3. Pinning a by-construction constant to the same value every other assertion in the file
+   already used, so nothing in the suite could tell a computed value from a baked-in one.
+
+All three survived a fully green suite. **The third was introduced inside the commit that fixed
+the second** — which is the point worth carrying: knowing about the trap does not prevent it,
+because the fixture that makes a test readable is exactly the fixture that makes it degenerate.
+The natural fixture value *is* the constant; that is why it keeps happening.
+
+The control is mechanical and cheap, and it does not require imagining the mutant: **feed a
+value the constant cannot equal, and watch the output move.** If the output does not move, the
+lookup under test is not being exercised, whatever the assertion says.
 
 ## nine-broken-harnesses
 *Supports: 🔴 "Validate the INSTRUMENT before you read its verdict." (negative control).*
@@ -580,6 +604,31 @@ The remedy is to assert a **state**, not a spelling: an `id` plus the attribute 
 element, an ARIA role, or an enumerated set of allowed callers. Any assertion whose subject is a
 word that another feature is free to use is a coincidence waiting to be relied on.
 
+### The prose mirror image (2026-08-14)
+
+The four cases above all have a **state** available to assert instead of a spelling. When the
+artifact under test *is* prose — a rendered sentence, a legend, a status line — there is no such
+state, and every intuitive guard is a guard on words. Three were walked in a single PR:
+
+1. **A check asserting two words appeared in a rendered sentence** was satisfied by that
+   sentence's own **static** prose. Neither of the two computed slots the check existed to
+   verify was ever read; the assertion would have passed against a sentence with both computed
+   values missing entirely.
+2. **A ban on one literal phrasing** was walked by a reword — *"every row **here is** a tmux
+   pane"* — which carried the same forbidden claim in different words.
+3. **A ban on a term by name** was walked by a **synonym**: *"a terminal pane… the second
+   enumerated entity"* said the banned thing without using the banned token.
+
+Each fix made the guard tighter in the direction it was already pointing (more words, more
+phrasings, more terms) and each was walked again by the next reword. Only pinning the **whole
+normalised string** — the complete expected sentence, whitespace-normalised, compared for
+equality — ended it, because there is then no room left for a variant to occupy.
+
+The objection to the whole-string pin is real and should be accepted rather than argued with: a
+purely cosmetic reword now fails the test, and someone has to update the expected string. That
+is the cost of having a machine-readable claim about prose at all. A guard that survives every
+reword is a guard that was never checking the claim.
+
 ## worktree-not-session
 *Supports: 🔴 "a worktree isolates a working DIRECTORY only" — the SESSION surface: "subagents
 share ONE scratchpad path and the branch namespace".*
@@ -634,6 +683,36 @@ schema exposes no target-repo parameter at all, so there is no way to redirect t
 Same shape as [worktree-not-session](#worktree-not-session): the isolation primitive is
 narrower than the word "isolation" suggests, and it fails silently at exactly the boundary you
 assumed it covered.
+
+## worktree-copy-git
+*Supports: 🔴 "any COPY you make OF it" — the fourth surface under "a worktree isolates a
+working DIRECTORY only".*
+
+Measured 2026-08-14. An auditor wanted a scratch copy of its worktree to test a mutation
+against, and did the obvious thing: `cp -a <worktree> <scratch>`. It then ran `git commit`
+inside the copy. **The commit landed on the real feature branch.** It was caught and reverted
+before any push, but nothing about the copy signalled that it was not independent.
+
+The mechanism is a detail of how linked worktrees are represented. In a normal clone `.git` is
+a **directory** holding the object store, index, refs and reflog, so `cp -a` genuinely
+duplicates all of it. In a worktree `.git` is a one-line **FILE**:
+
+    gitdir: /path/to/repo/.git/worktrees/<name>
+
+`cp -a` copies that file verbatim, so the copy points at the *original's* git dir. Every git
+operation in the scratch copy — `add`, `commit`, `checkout`, `branch`, `reflog` — reads and
+writes the parent's state. The working directory is isolated; version control is not isolated
+at all.
+
+This is the same shape as [worktree-not-session](#worktree-not-session) and
+[cross-repo-worktree](#cross-repo-worktree): an isolation primitive that is narrower than the
+word "isolation" suggests, failing silently at exactly the boundary that was assumed covered.
+It is sharpened here by the fact that the SESSION surface's own advice — "restore from `cp -a`,
+not `git checkout --`" — is what tells an agent to make these copies in the first place.
+
+**`rm -f <copy>/.git` immediately after any `cp -a` of a worktree.** The copy then has no git
+at all, which is what a scratch tree should have: `git status` inside it errors loudly instead
+of silently operating on the parent.
 
 ## sibling-agent-kill
 *Supports: 🔴 "With parallel agents this widens: also confirm `/proc/<pid>/cwd` is your OWN
