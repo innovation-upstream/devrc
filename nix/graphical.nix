@@ -420,6 +420,28 @@ lib.mkIf isNixOS {
   # its sibling scripts/mail-actions/_db.py (cf. mail-actions/run-archive.sh).
   # The clawgate/mail/alerts block scripts + poller are workbench-only, so their
   # symlinks are !isLaptop-gated too (they'd be dead files on the laptop otherwise).
+  #
+  # 🔴 bar_freshness.py is a CO-LOCATED SIBLING MODULE, not a block. Every count/
+  # state block below loads it by explicit path out of its OWN directory (the
+  # scripts are extensionless, so they cannot be a package and cannot import each
+  # other) to get the one definition of "this cache is too old to present as a
+  # measurement". It MUST be symlinked beside them: a block that cannot load it
+  # falls through to its `?` pill, so a missing entry here turns every count pill
+  # on a perfectly healthy workbench into a question mark. Same !isLaptop gate as
+  # its consumers, pinned two-way against this file by
+  # `test_every_block_that_loads_the_sibling_is_DEPLOYED_beside_it`.
+  #
+  # ⚠ THAT FALLBACK IS ONLY TRUE BECAUSE THE LOAD IS DEFERRED, and it was FALSE
+  # when this comment was first written: the load ran bare at module level, so a
+  # missing sibling killed the block outright (exit 1, empty stdout) rather than
+  # producing the `?` this comment promises. The blocks now keep `fresh = None`
+  # on a failed load and fail at USE, inside `__main__`'s `except`. Measured by
+  # `test_a_block_that_cannot_load_the_SIBLING_renders_the_VISIBLE_pill`, which
+  # runs each block with no sibling present — so if that ever regresses, the
+  # failure here is a dead pill, not a question mark.
+  home.file.".config/i3status-rust/scripts/bar_freshness.py" = lib.mkIf (!isLaptop) {
+    source = ../scripts/bar_freshness.py;
+  };
   home.file.".config/i3status-rust/scripts/i3status-clawgate" = lib.mkIf (!isLaptop) {
     source = ../scripts/i3status-clawgate;
     executable = true;
