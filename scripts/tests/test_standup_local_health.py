@@ -54,9 +54,26 @@ pytestmark = pytest.mark.skipif(
 # runs. A stub that pre-digested the output would be testing the stub.
 #   --failed …            -> $SC_FIX/failed.txt   (absent => none failed)
 #   show <unit> -p …      -> $SC_FIX/<unit>.txt   (absent => empty, i.e. absent)
+#
+# 🔴 UNREACHABLE-BUS MODE ($SC_FAIL_ALL / $SC_FAIL_SHOW). This is not invented:
+# it is what the real binary does with no XDG_RUNTIME_DIR /
+# DBUS_SESSION_BUS_ADDRESS — measured on this host before the stub was written:
+#
+#   $ env -u DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR=/nonexistent \
+#         systemctl --user --failed --plain --no-legend --no-pager
+#   Failed to connect to user scope bus via local transport: No such file or directory
+#   rc=1                       # …and NOTHING on stdout
+#
+# stdout is empty and only the EXIT STATUS distinguishes it from a healthy host,
+# which is exactly why discarding the status renders a false all-clear.
 SYSTEMCTL_STUB = r"""
 set -u
 fix="$SC_FIX"
+_bus_down(){
+  echo "Failed to connect to user scope bus via local transport: No such file or directory" >&2
+  exit 1
+}
+[ -n "${SC_FAIL_ALL:-}" ] && _bus_down
 for a in "$@"; do
   case "$a" in
     --failed) [ -f "$fix/failed.txt" ] && cat "$fix/failed.txt"; exit 0;;
@@ -68,6 +85,7 @@ for a in "$@"; do
   [ "$prev" = show ] && { unit="$a"; break; }
   prev="$a"
 done
+[ -n "${SC_FAIL_SHOW:-}" ] && [ -n "$unit" ] && _bus_down
 [ -n "$unit" ] && [ -f "$fix/$unit.txt" ] && cat "$fix/$unit.txt"
 exit 0
 """
@@ -134,7 +152,8 @@ class Harness:
         assert "systemctl" not in os.listdir(d)
         return d
 
-    def run(self, units=UNITS, *, stub_systemctl=True):
+    def run(self, units=UNITS, *, stub_systemctl=True, bus_down=False,
+            show_bus_down=False):
         env = dict(os.environ)
         if stub_systemctl:
             env["PATH"] = "%s:%s" % (self.bin, env["PATH"])
@@ -144,6 +163,12 @@ class Harness:
             env["PATH"] = str(self._restricted_bin())
         env["SC_FIX"] = str(self.fix)
         env["STANDUP_LOCAL_UNITS"] = units
+        env.pop("SC_FAIL_ALL", None)
+        env.pop("SC_FAIL_SHOW", None)
+        if bus_down:
+            env["SC_FAIL_ALL"] = "1"
+        if show_bus_down:
+            env["SC_FAIL_SHOW"] = "1"
         r = subprocess.run(["bash", str(STANDUP), "local"], env=env,
                            capture_output=True, text=True, timeout=120)
         assert "STATUS:" in r.stdout, "no STATUS line:\n%s\n%s" % (
@@ -153,6 +178,13 @@ class Harness:
     @staticmethod
     def status(out):
         return next(ln for ln in out.splitlines() if ln.startswith("STATUS:"))
+
+    @staticmethod
+    def local_segment(out):
+        """The raw `Local …` STATUS segment, whatever it says. Unlike
+        local_counts this never coerces to int, so a run that reports `n/a` is
+        readable rather than an exception."""
+        return [s for s in Harness.status(out).split("·") if "Local" in s][0].strip()
 
     @staticmethod
     def local_counts(out):
@@ -285,6 +317,10 @@ def test_missing_systemctl_skips_gracefully(h):
     out = h.run(stub_systemctl=False)
     assert "systemctl unavailable" in out
     assert "STATUS:" in out          # the run still completes
+    # …and a skipped section is NOT a clean bill of health for it.
+    assert "All clear" not in out
+    assert "coverage was degraded" in out
+    assert "n/a failed/n/a unhealthy" in Harness.status(out)
 
 
 def test_the_local_scope_is_reachable_and_scoped(h):
@@ -301,3 +337,97 @@ def test_the_local_scope_is_reachable_and_scoped(h):
                        capture_output=True, text=True, timeout=120)
     status = next(ln for ln in r.stdout.splitlines() if ln.startswith("STATUS:"))
     assert "Local" not in status, status
+
+
+# ---------------------------------------------------------------------------
+# 🔴 systemctl PRESENT but the user manager UNREACHABLE.
+#
+# `have systemctl` covers only the binary. The port pipes `systemctl --user
+# --failed` straight into awk, which DISCARDS the exit status — so on an ssh
+# non-login shell, inside a system unit or a container (no XDG_RUNTIME_DIR /
+# DBUS_SESSION_BUS_ADDRESS) the empty stdout used to render:
+#
+#     units          ✓ all user units healthy
+#     STATUS: … · Local 0 failed/0 unhealthy
+#     All clear in scope 'local' — nothing needs you.
+#
+# byte-for-byte identical to a genuinely healthy run. Same defect class the same
+# PR fixes on the bar pill: a count that travelled without its discriminant.
+# The original `render_local_health` in the retired agent-ops DID draw this
+# distinction — `fetch_failed_units` returned None on ANY failure and
+# `failed_units is None` rendered "— systemctl n/a" from a branch separate from
+# the `[]` one. These pin that it survived the port.
+# ---------------------------------------------------------------------------
+def test_an_unreachable_user_manager_is_not_an_all_clear(h):
+    """🔴 The reproduction, as a guard."""
+    h.unit("svc-a.service").unit("svc-b.service")
+    out = h.run(bus_down=True)
+    assert "systemctl n/a" in out
+    assert "all user units healthy" not in out
+    assert "All clear" not in out
+    assert "coverage was degraded" in out
+    # the counts are absent, not zeroed
+    assert "n/a failed/n/a unhealthy" in Harness.status(out)
+    assert "0 failed" not in Harness.status(out)
+
+
+def test_control_pair_a_dead_bus_and_a_HEALTHY_host_render_DIFFERENTLY(h):
+    """🔴 THE CONTROL PAIR FOR THIS DEFECT. The bug was not "it printed the
+    wrong words" — it was that the two runs were INDISTINGUISHABLE. So assert
+    the difference, over the identical fixture, rather than either output alone.
+    """
+    h.unit("svc-a.service").unit("svc-b.service")
+    healthy = h.run()
+    dead = h.run(bus_down=True)
+    assert healthy != dead
+    assert Harness.local_segment(healthy) != Harness.local_segment(dead)
+    assert Harness.local_segment(healthy) == "Local 0 failed/0 unhealthy"
+    assert Harness.local_segment(dead) == "Local n/a failed/n/a unhealthy"
+    assert "All clear" in healthy and "All clear" not in dead
+
+
+def test_a_dead_bus_is_also_distinguishable_from_REAL_FAILURES(h):
+    """🔴 A fixture whose value equals the constant under test cannot see the
+    difference, and 0-vs-n/a is one step from that: a render hard-wired to
+    "n/a" would pass the pair above. So drive a NON-ZERO measured count through
+    the same code and require all three renders to be mutually distinct."""
+    h.unit("svc-a.service").unit("svc-b.service")
+    healthy = Harness.local_segment(h.run())
+    h.failed("borked.timer", "wedged.service")
+    h.unit("svc-a.service", active="failed", result="exit-code")
+    broken = Harness.local_segment(h.run())
+    dead = Harness.local_segment(h.run(bus_down=True))
+    assert len({healthy, broken, dead}) == 3, (healthy, broken, dead)
+    assert broken == "Local 2 failed/1 unhealthy"
+    assert dead == "Local n/a failed/n/a unhealthy"
+
+
+def test_a_unit_whose_show_FAILED_is_n_a_not_absent(h):
+    """"absent" is a positive claim about this host — that the unit is not
+    installed. A `systemctl show` that exited non-zero never asked the question,
+    and a real not-installed unit answers rc=0 with LoadState=not-found, so the
+    two are distinguishable and must not be collapsed."""
+    h.unit("svc-a.service").unit("svc-b.service")
+    out = h.run(show_bus_down=True)
+    assert "systemctl n/a" in out
+    assert "— absent" not in out
+    # the failed-units probe still worked, so THAT half stays a real 0…
+    assert "✓ all user units healthy" in out
+    assert "0 failed/n/a unhealthy" in Harness.status(out), Harness.status(out)
+    # …but the section as a whole is degraded and must not read as all-clear.
+    assert "All clear" not in out
+    # positive control: the SAME fixture with a live bus does say absent when a
+    # unit really is not installed, so the assertion above is not unmatchable.
+    h.unit("svc-a.service", load="not-found", result="")
+    live = h.run()
+    assert "— absent" in live and "systemctl n/a" not in live
+
+
+def test_the_degraded_line_NAMES_the_section_that_could_not_measure(h):
+    """The all-clear suppression is only useful if the reader learns WHICH
+    probe failed; "coverage was degraded" alone sends them hunting."""
+    h.unit("svc-a.service")
+    out = h.run(bus_down=True)
+    line = next(ln for ln in out.splitlines() if "coverage was degraded" in ln)
+    assert "local host health" in line, line
+    assert "systemctl" in line, line

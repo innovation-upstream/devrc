@@ -1,7 +1,7 @@
 ---
 name: standup
 description: "One-shot fleet-wide status sweep across every active repo and cluster — your approved-mergeable/red/conflicting PRs, in-flight deploys and rollouts, and firing alerts split per cluster, as an action-first roll-up. Use for \"standup\", \"fleet status\", \"what's in flight\", \"check everything\", \"what's the state of everything\", or \"merged, what's next\"."
-argument-hint: [all|repos|deploys|alerts|state|initiatives]
+argument-hint: [all|repos|deploys|alerts|state|local|initiatives]
 allowed-tools: Bash, Read
 ---
 
@@ -10,7 +10,7 @@ allowed-tools: Bash, Read
 **Run the deterministic sweep — do NOT hand-roll the queries:**
 
 ```
-bash ~/.claude/skills/standup/standup.sh [all|repos|deploys|alerts|state|initiatives]   # default: all (~20–40s)
+bash ~/.claude/skills/standup/standup.sh [all|repos|deploys|alerts|state|local|initiatives]   # default: all (~20–40s)
 ```
 
 All logic lives in the script (every run identical, token-efficient, correctly attributed). Scopes:
@@ -18,6 +18,7 @@ All logic lives in the script (every run identical, token-efficient, correctly a
 - **deploys** → Flagger canaries mid-wave + deployments not fully ready, per cluster.
 - **alerts** → firing alerts **split by `cluster` label** (so the dp-1 multi-cluster fan-in is never misattributed — submodel-GPU alerts don't get blamed on dp-1 prod), with known-noise filtered.
 - **state** → per-repo *working state* (the "where was I" view, distinct from the action queue): branch · ahead/behind origin · dirty-file count · last-commit age+subject · `⚠unpushed`/`⚠wip` flags · a pointer to each repo's `HANDOFF.md`/`STATE.md` if present. **Cross-host:** workbench `REPOS` read locally, the laptop's `LAPTOP_REPOS` (vetr, naida — tagged `(lap)`) over `ssh`; host-aware, works from either host. Informational — not folded into `ACTIONS`.
+- **local** → **this host's** health, folded in from the retired agent-ops dashboard (the one panel with no other owner): failed **user** units, plus the last-run result and age of the five timer-backed services (`repo-cos`, `mail-archive`, `bar-poll`, `claude-src`, `collector`). Three distinctions it keeps, all of which used to be lies: *absent* (not installed here — normal for the workbench-only units on the laptop) is not unhealthy; *never run* is not `0s ago`; a non-success `Result` is unhealthy even while `ActiveState` reads inactive. Adds `Local N failed/M unhealthy` to `STATUS`. 🔴 **`n/a` there is not `0`** — `systemctl` present but the **user manager unreachable** (ssh non-login shell, a system unit, a container: no `XDG_RUNTIME_DIR`/`DBUS_SESSION_BUS_ADDRESS`) renders `— systemctl n/a`, `Local n/a failed/n/a unhealthy` and `coverage was degraded`, never an all-clear.
 - **initiatives** → the durable cross-repo, cross-session *initiative ledger* (it absorbed the momentum panel of the retired agent-ops dashboard): momentum counts (active/slowing/stalled), **owed/held** next-steps (folded into `ACTIONS` — they need you), initiative-tied open PRs, and the most-stalled. Runs `initiative-scan.py --json` **telemetry-OFF** (fast, no creds); the full telemetry view is the **`/initiative-scan`** command. Skips gracefully if the script/`nix-shell`/`jq` are absent. Adds an `Initiatives Na/Ms/Kst` field to `STATUS`.
 
 Output is **action-first**: a `STATUS` counts line, an `ACTIONS` block (only items needing you, each naming a drill-down skill), and a `Filtered:` transparency line. Only that digest reaches context — never the raw JSON.

@@ -314,24 +314,29 @@ PRESENCE_STALL_HOURS = 72
 # the OPERATOR is present: `browser-bridge` emits a `heartbeat` every 900s so its
 # own liveness is measurable (see the heartbeat contract in the tests).
 #
-# 🔴 THIS IS NO LONGER USED FOR ACTIVE TIME, AND IT IS STILL HERE ON PURPOSE.
+# 🔴 THIS IS NOT USED FOR ACTIVE TIME, AND IT IS STILL HERE ON PURPOSE — but the
+# purpose CHANGED, so read this rather than the shape.
 # PRESENCE_SOURCES subsumes it for this module — `browser-bridge` is not a
 # presence source, so its heartbeat cannot mark a bucket active no matter what
 # `kind` it carries — and the two are deliberately NOT both applied to the active
 # set, because layering a denylist under an allowlist gives two places to edit
 # for one rule.
-# It stayed exported because scripts/agent-ops imported BOTH this tuple and
-# `cadence_predicate_sql` for its telemetry-freshness panel, where the concept is
-# genuinely different: that panel wants to exclude MACHINE-GENERATED rows while
-# still counting `claude`/`tool` as real USAGE of those sources. "Is this row
-# machine-generated?" and "does this row prove a human is at the desk?" are
-# different questions, and only the second one defines active time.
-# Seam tests: scripts/collector/tests/test_deadman.py (the agent-ops-side
-# ones went with that TUI when it was retired).
 #
-# 🔴 ADDING A TIMER-DRIVEN EMITTER ANYWHERE IN THE PIPELINE MEANS ADDING IT HERE
-# (for agent-ops' since-retired freshness panel) — and, separately, keeping it OUT of
-# PRESENCE_SOURCES.
+# WHAT IT IS NOW: the DECLARATION, in one place, of which emitters are timer-
+# driven — i.e. the reason `browser-bridge`/`heartbeat` must stay OUT of
+# PRESENCE_SOURCES. `scripts/browser-bridge/tests/test_server.py` asserts its own
+# heartbeat is declared here, so this tuple is a live cross-module contract.
+#
+# WHAT IT IS NO LONGER: half of a rendered SQL predicate. `cadence_predicate_sql`
+# was exported alongside it for `scripts/agent-ops`' telemetry-freshness panel;
+# that TUI was retired and the function was left with ZERO production callers and
+# one test guarding it, still named for "the other consumer". It has been DELETED
+# rather than kept as a maybe-someday export — an unused renderer is regrowth
+# surface, and git has it if a second consumer ever appears. Re-add it WITH the
+# caller that needs it, not before (a guard in test_deadman.py pins that).
+#
+# 🔴 ADDING A TIMER-DRIVEN EMITTER ANYWHERE IN THE PIPELINE MEANS DECLARING IT
+# HERE — and, separately, keeping it OUT of PRESENCE_SOURCES.
 MACHINE_CADENCE = (("browser-bridge", "heartbeat"),)
 
 DEFAULT_ENV_FILE = "~/.config/activity-collector/env"
@@ -361,21 +366,6 @@ UNKNOWN_STATES = frozenset(
 # --------------------------------------------------------------------------- #
 # Query
 # --------------------------------------------------------------------------- #
-def cadence_predicate_sql(cadence=MACHINE_CADENCE) -> str:
-    """A ClickHouse boolean matching any MACHINE_CADENCE pair; "" when empty.
-
-    🔴 THE ONE PLACE this predicate is RENDERED, not just the one place the pairs
-    are declared. Exported because scripts/agent-ops needed the same predicate for
-    its freshness panel: a second copy of the `" OR ".join` immediately grew the
-    same latent bug (joining with AND makes `NOT (A AND B)` exclude NOTHING),
-    which is only reachable once a second pair exists -- i.e. it would have gone
-    unnoticed until exactly the moment MACHINE_CADENCE's own note tells a
-    maintainer to add one. Single-sourcing the DATA was not enough.
-    """
-    return " OR ".join("(source = '%s' AND kind = '%s')" % (s, k)
-                       for s, k in cadence)
-
-
 def presence_predicate_sql(presence=PRESENCE_SOURCES) -> str:
     """A ClickHouse boolean matching any PRESENCE_SOURCES member.
 

@@ -275,7 +275,12 @@ LOCAL_UNITS=(
 # ';'-separated override (the unit specs themselves contain ':'), so the tests
 # can drive a stub systemctl over a throwaway unit set.
 [ -n "${STANDUP_LOCAL_UNITS:-}" ] && IFS=';' read -r -a LOCAL_UNITS <<< "$STANDUP_LOCAL_UNITS"
-LOCAL_FAILED=0; LOCAL_BAD=0
+# 🔴 UNSET, not 0 — these are MEASUREMENTS, and a measurement that never
+# happened must not be spellable as "0 failed". They are assigned only on the
+# branches that actually read an answer out of systemctl; every reader below
+# renders `n/a` for the empty string. LOCAL_DEGRADED records that at least one
+# probe could not be taken at all, which suppresses the unqualified all-clear.
+LOCAL_FAILED=""; LOCAL_BAD=""; LOCAL_DEGRADED=0
 
 # seconds -> compact age ("45s" / "12m" / "3h" / "4d"); "?" when unknown.
 _rel_age(){
@@ -289,22 +294,42 @@ _rel_age(){
 }
 
 scan_local(){
-  have systemctl || { echo "  (systemctl unavailable — skipped)"; return; }
-  local up failed nfailed spec unit label show load active sub result
+  have systemctl || {
+    echo "  (systemctl unavailable — skipped)"; LOCAL_DEGRADED=1; return; }
+  local up raw rc failed nfailed spec unit label show load active sub result
   local runflag mono age mark
   up=$(awk '{print int($1)}' /proc/uptime 2>/dev/null)
 
   # 1. failed user units. Only tokens ending in a real unit suffix are kept, so
   #    a stray header or legend line can never leak in as a "failed unit".
-  failed=$(systemctl --user --failed --plain --no-legend --no-pager 2>/dev/null \
-    | awk '$1 ~ /\.(service|timer|socket|mount|path|scope|slice|target|device|automount|swap)$/ {print $1}')
-  if [ -z "${failed:-}" ]; then
-    printf '  %-14s %s\n' "units" "✓ all user units healthy"
+  #
+  # 🔴 CAPTURE THE EXIT STATUS. `have systemctl` only proves the BINARY exists;
+  #    it says nothing about the user manager being reachable. With no
+  #    XDG_RUNTIME_DIR / DBUS_SESSION_BUS_ADDRESS — an ssh non-login shell, a
+  #    system unit, a container — systemctl is on PATH and exits 1 with
+  #    "Failed to connect to user scope bus" on stderr and NOTHING on stdout.
+  #    Piping straight into awk discards that status, so the empty stdout used
+  #    to render "✓ all user units healthy" and "Local 0 failed", byte-identical
+  #    to a genuinely healthy host. Same defect class as a count travelling
+  #    without its discriminant (the bar pill's `?`): an unmeasurable answer is
+  #    NOT a zero. So: read the raw output, branch on rc, and on failure leave
+  #    LOCAL_FAILED unset so no downstream line can spell it as a measured 0.
+  raw=$(systemctl --user --failed --plain --no-legend --no-pager 2>/dev/null); rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf '  %-14s %s\n' "units" "— systemctl n/a (user manager unreachable)"
+    LOCAL_DEGRADED=1
   else
-    nfailed=$(printf '%s\n' "$failed" | grep -c .)
-    LOCAL_FAILED=$nfailed
-    printf '  %-14s %s\n' "units" "✗ $nfailed failed: $(printf '%s' "$failed" | tr '\n' ' ')"
-    ACT+=("$nfailed failed user unit(s): $(printf '%s' "$failed" | tr '\n' ' ')→ journalctl --user -u <unit> -n 50")
+    failed=$(printf '%s\n' "$raw" \
+      | awk '$1 ~ /\.(service|timer|socket|mount|path|scope|slice|target|device|automount|swap)$/ {print $1}')
+    if [ -z "${failed:-}" ]; then
+      LOCAL_FAILED=0
+      printf '  %-14s %s\n' "units" "✓ all user units healthy"
+    else
+      nfailed=$(printf '%s\n' "$failed" | grep -c .)
+      LOCAL_FAILED=$nfailed
+      printf '  %-14s %s\n' "units" "✗ $nfailed failed: $(printf '%s' "$failed" | tr '\n' ' ')"
+      ACT+=("$nfailed failed user unit(s): $(printf '%s' "$failed" | tr '\n' ' ')→ journalctl --user -u <unit> -n 50")
+    fi
   fi
 
   # 2. key timer-backed services — last-run result + age.
@@ -313,7 +338,18 @@ scan_local(){
     show=$(systemctl --user show "$unit" \
       -p LoadState -p ActiveState -p SubState -p Result \
       -p ExecMainExitTimestampMonotonic -p ExecMainStartTimestampMonotonic \
-      2>/dev/null)
+      2>/dev/null); rc=$?
+    # A unit that is genuinely not installed answers rc=0 with
+    # LoadState=not-found. A NON-ZERO rc means the question was never asked, so
+    # it is "n/a", not "absent" — "absent" is a positive claim about this host.
+    if [ "$rc" -ne 0 ]; then
+      printf '  %-14s %s\n' "$label" "— systemctl n/a"
+      LOCAL_DEGRADED=1
+      continue
+    fi
+    # first unit we could actually read -> the unhealthy tally is now a real
+    # measurement and may be spelled as a number.
+    [ -z "${LOCAL_BAD}" ] && LOCAL_BAD=0
     load=$(printf '%s\n' "$show" | awk -F= '$1=="LoadState"{print $2}')
     active=$(printf '%s\n' "$show" | awk -F= '$1=="ActiveState"{print $2}')
     sub=$(printf '%s\n' "$show" | awk -F= '$1=="SubState"{print $2}')
@@ -492,15 +528,23 @@ INIT_STATUS=""
 PR_STATUS="PRs ${PR_OPEN} open across ${PR_SCOPE} (${PR_READY} ready, ${PR_RED} red, ${PR_CONFLICT} conflicting — yours)"
 { [ "$SCOPE" = all ] || [ "$SCOPE" = repos ]; } || PR_STATUS="PRs not scanned"
 LOCAL_STATUS=""
+# `n/a`, never 0, when the probe could not be taken — see LOCAL_FAILED's comment.
 { [ "$SCOPE" = all ] || [ "$SCOPE" = local ]; } && \
-  LOCAL_STATUS=" · Local ${LOCAL_FAILED} failed/${LOCAL_BAD} unhealthy"
+  LOCAL_STATUS=" · Local ${LOCAL_FAILED:-n/a} failed/${LOCAL_BAD:-n/a} unhealthy"
 echo "STATUS: ${PR_STATUS} · Deploys ${DEP_WAVE} mid-wave/${DEP_STUCK} stuck · Alerts ${ALERT_LINE:-n/a}${INIT_STATUS}${LOCAL_STATUS}"
+# Every section that could NOT measure, named. A degraded section must never
+# fall through to the unqualified all-clear: "nothing needs you" off a probe
+# that asked nothing is the loudest lie this script can print.
+DEGRADED=()
+{ [ "$PR_ERR" -gt 0 ] || [ "$PR_DISCOVERY" = failed ]; } && DEGRADED+=("PRs: ${PR_SCOPE}")
+[ "${LOCAL_DEGRADED:-0}" = 1 ] && DEGRADED+=("local host health: systemctl/user manager unreachable")
 if [ "${#ACT[@]}" -gt 0 ]; then
   echo "ACTIONS"
   printf '  - %s\n' "${ACT[@]}"
-elif [ "$PR_ERR" -gt 0 ] || [ "$PR_DISCOVERY" = failed ]; then
+elif [ "${#DEGRADED[@]}" -gt 0 ]; then
   # Never print an unqualified all-clear off a scan that could not see everything.
-  echo "Nothing flagged IN WHAT WAS SCANNED — coverage was degraded (${PR_SCOPE})."
+  DEG_MSG=$(IFS=$'\1'; printf '%s' "${DEGRADED[*]}")
+  echo "Nothing flagged IN WHAT WAS SCANNED — coverage was degraded (${DEG_MSG//$'\1'/; })."
 else
   # ONE branch, and it always names the scope: a `standup.sh alerts` run that
   # printed a bare "All clear" would be claiming something about the four

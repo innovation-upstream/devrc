@@ -871,9 +871,14 @@ PINNED_PATH_CLOBBERS = {
         "Harness.RESTRICTED_BIN lists the nine coreutils standup needs to run "
         "at all, the harness asserts the directory's contents are a subset of "
         "that list, and it asserts systemctl is absent — which is the point of "
-        "the test (standup.sh must skip its host-health section gracefully "
-        "when there is no user manager, and no amount of PREPENDING can make a "
-        "binary unfindable). No launcher in HAZARD_VOCABULARY is reachable "
+        "the test: standup.sh must skip its host-health section gracefully "
+        "when the systemctl BINARY IS NOT INSTALLED, and no amount of "
+        "PREPENDING can make a binary unfindable. 🔴 That is ALL it removes — "
+        "it says nothing about a systemctl that is present while the user "
+        "manager/bus is unreachable, which is a different condition with a "
+        "different (and once-broken) rendering; that one is covered by the "
+        "SC_FAIL_ALL/SC_FAIL_SHOW modes of the stub, with systemctl very much "
+        "on PATH. No launcher in HAZARD_VOCABULARY is reachable "
         "from it: no systemctl, kubectl, gh, ssh, home-manager or pkill"),
 }
 

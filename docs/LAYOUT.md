@@ -38,6 +38,14 @@ hostnames in this repo (it is public); it should never have been there and is no
 
 *(the real example hostname noted above has been elided from the dl-router bullet)*
 
+⚠ **Everything below is a QUOTATION and is deliberately NOT maintained** — see the header.
+It is edited only to remove something that must not be in a public repo, never to bring a
+claim up to date, because a snapshot that gets selectively refreshed is no longer evidence of
+what the file said. Known-stale since the snapshot, called out here rather than rewritten
+below: **`scripts/agent-ops` is RETIRED** — the script, the `$mod+i` binding, the tmux
+`prefix+A` popup and the ▦ bar button's click are all gone; the paragraph below still
+describes them in the present tense. `CLAUDE.md` names where each panel went.
+
 - `nix/` — home-manager modules (`programs/zsh`, tmux, nvim, i3, …). `flake.nix` at root.
 - **Graphical / agent-facing layer (home-manager since 2026-07, workbench):** the i3 window-manager config (`nix/i3/config.nix` → `~/.config/i3/config`) and the **i3status-rust status bar** (`nix/graphical.nix`, `programs.i3status-rust`, gruvbox + JetBrainsMono Nerd Font) both **migrated out of `/etc/nixos` into home-manager (PR #74)** — edit them in HM, never `/etc/nixos` (the old `i3config.nix`/`i3blocks.nix`/`i3blocks-scripts` are RETIRED). Cutover gotcha: finish with `sudo systemctl restart display-manager`, NOT `i3-msg restart`. The bar's hide-at-zero **count blocks** (clawgate/mail/homelab-alerts/civitai-alerts) are fed by `scripts/bar-status-poll` (a workbench `systemd --user` timer, ~45s → `~/.cache/bar-status/*.json`) which ALSO fires edge-triggered dunst toasts; `dunst` is hardened in `nix/graphical.nix`. The **agent-ops "mission-control" dashboard** (`scripts/agent-ops`, opened via `$mod+i` / tmux `prefix+A` / the ▦ bar button) is the read-only "what are my agents doing / what's blocked on me" view — blocked-on-me, live Claude-in-tmux runs (task from pane title + scratch codename), open PRs (`gh pr list`), momentum (`initiative-scan --json`), health. **Zach works ENTIRELY via agents → modernization targets this agent-facing layer, NOT interactive-CLI ricing.** ⚠ fuzzyclaw (`~/.tmux/tasks/*.json`) is UNTRUSTED as a data source.
 - `scripts/` — utility scripts (prefer extending these over re-typing inline bash / heredocs).

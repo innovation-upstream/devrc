@@ -855,43 +855,50 @@ def test_an_empty_allowlist_is_LOUD_not_a_confident_green():
     assert not called, "check() queried ClickHouse with an undefined active time"
 
 
-def test_cadence_predicate_is_exported_for_the_other_consumer():
-    """`cadence_predicate_sql` + `MACHINE_CADENCE` are PUBLIC on purpose, and are
-    NO LONGER USED BY THIS MODULE'S OWN QUERY — active time is defined by
-    PRESENCE_SOURCES, which subsumes them (`browser-bridge` is not a presence
-    source). They survived because scripts/agent-ops imported both for its
-    telemetry-freshness panel, where the question is "is this row machine
-    generated?" rather than "does this row prove a human is at the desk?" — that
-    panel still counts `claude`/`tool` as real usage.
+def test_MACHINE_CADENCE_is_a_DECLARATION_and_its_renderer_is_gone():
+    """🔴 WHAT THIS GUARD IS NOW, and why it was renamed.
 
-    A local copy of the rendering there was immediately wrong in the same way
-    (AND-joined), so this pins the contract that consumer depends on. Its seam
-    tests lived in scripts/tests/test_agent_ops.py, deleted with that TUI.
+    It used to be `test_cadence_predicate_is_exported_for_the_other_consumer`
+    and it pinned `cadence_predicate_sql`'s OR-join. "The other consumer" was
+    `scripts/agent-ops`, and that TUI is retired: a tree-wide grep then showed
+    the function had ZERO production callers and exactly one caller in total —
+    this test. A guard whose only consumer is itself proves the code compiles.
+    So the renderer was DELETED (this repo's own "check USED/configured before
+    hardening" lesson), and what remains is pinned for what it actually is.
+
+    `MACHINE_CADENCE` is kept, and is NOT dead: it is the single declaration of
+    which emitters are timer-driven, i.e. the stated reason the browser-bridge
+    heartbeat must stay OUT of PRESENCE_SOURCES — and
+    `scripts/browser-bridge/tests/test_server.py` asserts its own heartbeat is
+    declared here, which makes it a live cross-module contract rather than an
+    ornament.
     """
-    assert D.cadence_predicate_sql(()) == ""
-    one = D.cadence_predicate_sql((("x", "beat"),))
-    assert one == "(source = 'x' AND kind = 'beat')", one
-    # 🔴 TWO entries: the terms must be OR-joined. With AND, the consumer's
-    # `AND NOT (A AND B)` excludes NOTHING (measured against the live table:
-    # 206760 of 206760 rows counted), so a second cadence emitter would silently
-    # reinstate that panel's bug.
-    two = D.cadence_predicate_sql((("x", "beat"), ("y", "tick")))
-    assert two == ("(source = 'x' AND kind = 'beat') OR "
-                   "(source = 'y' AND kind = 'tick')"), two
-    assert " AND (source = 'y'" not in two, "cadence terms joined with AND: %s" % two
-    # The DEFAULT argument is what the consumer reaches for (a mutant defaulting
-    # it to () survived until this was asserted), and the tuple must be non-empty
-    # — an emptied MACHINE_CADENCE made agent-ops' filter vanish silently.
-    assert D.cadence_predicate_sql() == D.cadence_predicate_sql(D.MACHINE_CADENCE)
-    assert D.cadence_predicate_sql() != ""
     assert ("browser-bridge", "heartbeat") in D.MACHINE_CADENCE, \
         "the browser-bridge heartbeat is no longer declared machine-cadence"
+    assert D.MACHINE_CADENCE, "an emptied declaration silently declares nothing"
 
-    # 🔴 And the cadence predicate must NOT have leaked back into this module's
-    # own query: two rules for one active-time definition is the shape that
-    # regenerates the bug at whichever site gets edited second.
+    # 🔴 The declaration's whole point: a machine-cadence pair may never be a
+    # presence source. Both halves asserted, because "not in the set" is also
+    # what an empty set says.
+    for source, _kind in D.MACHINE_CADENCE:
+        assert source not in D.PRESENCE_SOURCES, source
+    assert D.PRESENCE_SOURCES, "PRESENCE_SOURCES is empty — see above"
+
+    # 🔴 And it must NOT have leaked into this module's own query: two rules for
+    # one active-time definition is the shape that regenerates the bug at
+    # whichever site gets edited second.
     assert "kind = 'heartbeat'" not in D.bucket_query(), \
         "the bucket query is filtering on machine cadence again"
+
+    # 🔴 REGROWTH PIN, with the reason. `cadence_predicate_sql` renders these
+    # pairs into SQL and had no caller; re-exporting it "for later" puts an
+    # untested `" OR ".join` back in the tree, which is exactly the copy that
+    # was once AND-joined (measured: `AND NOT (A AND B)` excluded 0 of 206760
+    # rows). If a second consumer really appears, re-add the function AND its
+    # caller AND a seam test in the same change, and delete this assertion.
+    assert not hasattr(D, "cadence_predicate_sql"), (
+        "cadence_predicate_sql is back — it must arrive with the caller that "
+        "needs it, not as a maybe-someday export")
 
 
 def test_a_stopped_heartbeat_is_dead_within_the_floor():

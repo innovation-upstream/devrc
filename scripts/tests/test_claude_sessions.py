@@ -26,6 +26,8 @@ import pathlib
 import subprocess
 import time
 
+import pytest
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _MODULE = os.path.join(_HERE, "..", "lib", "claude_sessions.py")
 
@@ -877,6 +879,12 @@ def test_the_shared_module_is_DEPLOYED_beside_the_block_that_loads_it():
     Both halves are asserted: the home.file entry exists, and the file is
     actually visible to the flake.
 
+    ⚠ THE FIRST HALF IS SPELLED, and three real breakages walked past it — see
+    `test_the_bar_block_and_EVERY_file_it_needs_deploy_on_the_SAME_hosts`
+    below, which owns the structural half now. What stays load-bearing HERE is
+    the git-visibility half: whether the flake can see the file at all is not a
+    question the nix source can answer.
+
     ⚠ HOW THE SECOND HALF IS MEASURED DIFFERS BY TIER, deliberately. In the nix
     build sandbox the source tree IS what the flake could see — an untracked
     file is simply not there — so `exists()` is a direct measurement of the
@@ -927,3 +935,247 @@ def test_the_retired_TUI_has_no_launcher_anywhere():
                 continue          # a comment recording the retirement is fine
             assert "tmux/agent-ops" not in line, "%s: %s" % (rel, line.strip())
             assert "scripts/agent-ops" not in line, "%s: %s" % (rel, line.strip())
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE DEPLOY WIRING, ASSERTED STRUCTURALLY.
+#
+# The guard above (`…is_DEPLOYED_beside_the_block_that_loads_it`) was SPELLED on
+# nix source text: `'.config/…/claude_sessions.py"' in nix`. An adversarial
+# round drove seven mutations through `nix/graphical.nix` against 710 tests and
+# THREE REAL BREAKAGES SURVIVED — every one of them still containing the spelled
+# substring, which is why spelling it was never a guard:
+#
+#   1. the pill's `home.file` gated `lib.mkIf isLaptop` -> the pill is NOT
+#      deployed on the workbench, the only host whose bar carries the block;
+#   2. `source = ../scripts/lib/clawgate_tasks.py;` with the correct path moved
+#      into a trailing comment -> the symlink points at the wrong module;
+#   3. `claudeRunsBlock` dropped from the `blocks` list -> the pill is off the
+#      bar entirely, while both symlinks still deploy perfectly.
+#
+# So the parse below reads ASSIGNMENTS, not the file's vocabulary, and pins a
+# RELATIONSHIP: everything the bar's block list references must be deployed on
+# every host that carries the block, from the right source. `graphical.nix:432`
+# even ASSERTS in prose that "the gate is NOT narrower than its consumer's" —
+# an untested claim, in a file whose sibling `bar_freshness.py` IS
+# `mkIf (!isLaptop)`, so the narrower shape is the local idiom and one edit away.
+#
+# ⚠ TIERS. This one runs in BOTH — pure text plus a two-point guard evaluator,
+# no `nix` binary. Asking nix itself would be ground truth and was written, but
+# it cannot run in the tier that gates merges; see the block at the end of this
+# file for the probe, its measured result, and why it is not a test here.
+# --------------------------------------------------------------------------- #
+_GRAPHICAL_NIX = "nix/graphical.nix"
+_HOSTS = ("workbench", "laptop")
+
+
+def _nix_guard_hosts(guard):
+    """Which of _HOSTS a `lib.mkIf <guard>` / `lib.optional <guard>` enables.
+
+    Deliberately tiny and deliberately STRICT: an expression it does not
+    recognise RAISES rather than defaulting to "both", because defaulting to
+    both is exactly how a narrowed gate would slip past. `isLaptop` is the only
+    host discriminator graphical.nix takes (nix/home.nix:79 derives it from
+    /sys/class/backlight/intel_backlight and threads it in via _module.args).
+    """
+    g = (guard or "").strip()
+    while g.startswith("(") and g.endswith(")"):
+        g = g[1:-1].strip()
+    if g == "":
+        return set(_HOSTS)                 # ungated
+    if g == "isLaptop":
+        return {"laptop"}
+    if g == "!isLaptop":
+        return {"workbench"}
+    raise AssertionError(
+        "unrecognised nix guard %r — extend _nix_guard_hosts rather than "
+        "letting an unknown gate read as 'enabled everywhere'" % guard)
+
+
+def _parse_home_file_entries(text):
+    """{attr: {"guard": str, "source": str|None}} for every `home.file."…"`.
+
+    `source = <expr>;` is captured up to its SEMICOLON, so a trailing `#`
+    comment cannot contribute — which is precisely the shape of survivor 2.
+    """
+    out = {}
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        m = re.match(r'\s*home\.file\."([^"]+)"\s*=\s*(.*)$', line)
+        if not m:
+            continue
+        attr, rhs = m.group(1), m.group(2).strip()
+        g = re.match(r'lib\.mkIf\s+(.+?)\s*\{$', rhs)
+        guard = g.group(1) if g else ""
+        src = None
+        for j in range(i + 1, min(i + 12, len(lines))):
+            if re.match(r'\s*\};\s*$', lines[j]):
+                break
+            sm = re.match(r'\s*source\s*=\s*([^;]+);', lines[j])
+            if sm:
+                src = sm.group(1).strip()
+        out[attr] = {"guard": guard, "source": src}
+    return out
+
+
+def _parse_block_list(text):
+    """{identifier: guard} for the bar's `blocks = …` expression.
+
+    The list is a `++` chain of plain lists and `lib.optional(s) <guard> […]`,
+    so each segment carries the gate its members inherit.
+    """
+    m = re.search(r'\n  blocks =\s*\n(.*?);\n', text, re.S)
+    assert m, "could not find the `blocks =` assignment in " + _GRAPHICAL_NIX
+    body = "\n".join(ln for ln in m.group(1).splitlines()
+                     if not ln.strip().startswith("#"))
+    out = {}
+    for seg in body.split("++"):
+        seg = seg.strip()
+        if not seg:
+            continue
+        om = re.match(r'lib\.optionals?\s+(\([^)]*\)|!?\w+)\s*(.*)$', seg, re.S)
+        guard, rest = (om.group(1), om.group(2)) if om else ("", seg)
+        for ident in re.findall(r'\b([a-z]\w*Block)\b', rest):
+            out[ident] = guard
+    assert out, "parsed no blocks out of:\n" + body
+    return out
+
+
+def _parse_block_command(text, ident):
+    """The `command = "…";` of a named block definition."""
+    m = re.search(r'\n  %s = \{(.*?)\n  \};' % re.escape(ident), text, re.S)
+    assert m, "no block definition named " + ident
+    cm = re.search(r'command\s*=\s*"([^"]+)"', m.group(1))
+    assert cm, ident + " has no command"
+    return cm.group(1)
+
+
+def test_the_bar_block_and_EVERY_file_it_needs_deploy_on_the_SAME_hosts():
+    """🔴 The relationship, not the vocabulary. Kills all three survivors."""
+    text = (_REPO / _GRAPHICAL_NIX).read_text(encoding="utf-8")
+    blocks = _parse_block_list(text)
+    files = _parse_home_file_entries(text)
+
+    # (1) the block is ON THE BAR at all — survivor 3 deleted it from the list
+    #     while leaving every symlink and every spelled string intact.
+    assert "claudeRunsBlock" in blocks, (
+        "claudeRunsBlock is not in the bar's block list — the pill is gone "
+        "from the bar; found %s" % sorted(blocks))
+    block_hosts = _nix_guard_hosts(blocks["claudeRunsBlock"])
+    assert block_hosts, "the block is enabled on no host at all"
+
+    # (2) what the block EXECUTES must be a deployed file, RESOLVED FROM THE
+    #     COMMAND rather than restated here — a rename cannot drift past this.
+    cmd = _parse_block_command(text, "claudeRunsBlock")
+    assert cmd.startswith("${scriptsDir}/"), cmd
+    name = cmd.split("/")[-1]
+    needed = {
+        ".config/i3status-rust/scripts/" + name: "../scripts/" + name,
+        # the sibling module the pill imports out of its own directory
+        ".config/i3status-rust/scripts/claude_sessions.py":
+            "../scripts/lib/claude_sessions.py",
+    }
+    for attr, want_source in needed.items():
+        assert attr in files, (
+            "%s has no home.file entry — the block would exec / import a path "
+            "home-manager does not deploy" % attr)
+        hosts = _nix_guard_hosts(files[attr]["guard"])
+        # (3) NOT NARROWER THAN ITS CONSUMER. `mkIf isLaptop` on either entry
+        #     leaves the workbench — the only host with the block — without it.
+        assert block_hosts <= hosts, (
+            "%s deploys on %s but its block runs on %s: the gate is NARROWER "
+            "than its consumer's" % (attr, sorted(hosts), sorted(block_hosts)))
+        # (4) …and it points at the right module. Survivor 2 swapped the source
+        #     and parked the correct path in a trailing comment.
+        assert files[attr]["source"] == want_source, (
+            "%s deploys source=%r, expected %r"
+            % (attr, files[attr]["source"], want_source))
+        assert (_REPO / want_source[3:]).is_file(), want_source
+
+
+def test_the_guard_evaluator_and_the_parsers_are_not_wired_to_nothing():
+    """🔴 POSITIVE CONTROL for the machinery above. Every assertion there reads
+    "X is present" / "X covers Y", and all of them pass vacuously if a parser
+    returns something empty or uniform. So: the parsers must DISAGREE across
+    entries that really do differ in the file, and the guard evaluator must
+    return different host sets for different gates.
+    """
+    text = (_REPO / _GRAPHICAL_NIX).read_text(encoding="utf-8")
+    files = _parse_home_file_entries(text)
+    blocks = _parse_block_list(text)
+
+    assert _nix_guard_hosts("") == {"workbench", "laptop"}
+    assert _nix_guard_hosts("(!isLaptop)") == {"workbench"}
+    assert _nix_guard_hosts("isLaptop") == {"laptop"}
+    with pytest.raises(AssertionError):
+        _nix_guard_hosts("(config.something.else)")
+
+    # ⚠ Every entry named below is deliberately NOT the subject of the test
+    # above — a control that restates the claim it is controlling for would go
+    # red with it and prove nothing about the machinery.
+    #
+    # The file really does contain BOTH shapes, so "ungated" is a measurement
+    # and not the only value this parser is able to produce…
+    guards = {v["guard"] for v in files.values()}
+    assert "" in guards and any("isLaptop" in g for g in guards), guards
+    # …specifically: disk-explore is ungated, while bar_freshness.py — the
+    # sibling-module idiom this one is modelled on — is (!isLaptop).
+    assert files[".config/i3status-rust/scripts/disk-explore"]["guard"] == ""
+    assert "isLaptop" in files[
+        ".config/i3status-rust/scripts/bar_freshness.py"]["guard"]
+    # sources are read per entry, not one value echoed back
+    assert len({v["source"] for v in files.values() if v["source"]}) > 5
+
+    # the block parser distinguishes gated from ungated members too
+    assert _nix_guard_hosts(blocks["memoryBlock"]) == {"workbench", "laptop"}
+    assert _nix_guard_hosts(blocks["rigcontrolBlock"]) == {"workbench"}
+    assert _nix_guard_hosts(blocks["batteryBlock"]) == {"laptop"}
+
+# --------------------------------------------------------------------------- #
+# 🔴 WHY THERE IS NO `nix eval` TEST HERE, having written one and deleted it.
+#
+# Asking NIX is the ground truth, and a probe that imports nix/graphical.nix
+# directly can even measure BOTH host shapes (the flake's
+# `homeConfigurations.zach` derives isLaptop from this machine's hardware, so it
+# can only ever show one). It works, it is fast, and it agreed with the parse
+# above on every mutant:
+#
+#   nix eval --impure --json --expr 'let
+#     pkgs = import <nixpkgs> { }; lib = pkgs.lib;
+#     mod = isLaptop: (import /home/zach/workspace/devrc/nix/graphical.nix {
+#       config = { home = { homeDirectory = "/home/zach"; }; };
+#       inherit pkgs lib isLaptop; isNixOS = true; }).content;
+#     isOn = v: if builtins.isAttrs v && (v._type or "") == "if"
+#               then v.condition else true;
+#     body = v: if builtins.isAttrs v && (v._type or "") == "if"
+#               then v.content else v;
+#     probe = isLaptop: let m = mod isLaptop; f = m.home.file;
+#       pill = f.".config/i3status-rust/scripts/i3status-claude-runs";
+#       sib  = f.".config/i3status-rust/scripts/claude_sessions.py"; in {
+#       blockCommands = map (b: b.command or "")
+#                           m.programs.i3status-rust.bars.top.blocks;
+#       pillDeployed = isOn pill; siblingDeployed = isOn sib;
+#       pillSource = toString (body pill).source;
+#       siblingSource = toString (body sib).source; };
+#     in { workbench = probe false; laptop = probe true; }'
+#
+# It cannot live in this suite, for a reason this repo has already written down
+# twice. The nix BUILD SANDBOX has a `nix` binary but with the `nix-command`
+# feature disabled, so the test does not fail there — it is skipped, or worse,
+# `shutil.which("nix")` reports it available and the eval errors. Either way the
+# guard means one thing on a dev host and NOTHING in the tier that gates merges,
+# which is exactly the shape `scripts/run-tests.sh`'s EXPECTED_SKIPS block
+# records removing twice (test_skill_audit.py's live-corpus pins; test_scrub.py's
+# HOME-keyed drift guard) with "fix that instead" attached.
+#
+# So the guard that ships is the PARSE above — it runs in both tiers, and it was
+# mutation-proven against the four real breakages (both `home.file` entries
+# gated `mkIf isLaptop`, the sibling's `source` swapped to clawgate_tasks.py with
+# the right path parked in a trailing comment, and `claudeRunsBlock` dropped from
+# the `blocks` list). Each mutant was confirmed to `nix-instantiate --parse`
+# before being scored, and each died here.
+#
+# Run the eval above by hand when changing the deploy wiring; it is also the
+# right check to put in a host-side script (scripts/drift-check.sh) rather than
+# in a hermetic suite.
+# --------------------------------------------------------------------------- #

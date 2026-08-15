@@ -68,8 +68,11 @@ tmux focus hooks   ─┼─► emit (pure shell, hot path) ─► spool/current
   agent-driven counted as operator activity makes every idle source on the host
   read DEAD overnight. Note `browser` is not in that set either — the bridge drives
   the same Brave profile the activity extension instruments, so agent navigation
-  emits `browser` rows. `MACHINE_CADENCE` still exists in that module, but only for
-  agent-ops' since-retired freshness panel — it no longer touches active time.
+  emits `browser` rows. `MACHINE_CADENCE` still exists in that module as the one
+  DECLARATION of which emitters are timer-driven (the stated reason the heartbeat
+  stays out of `PRESENCE_SOURCES`); it no longer touches active time, and its
+  SQL renderer `cadence_predicate_sql` was deleted with agent-ops — that TUI was
+  its only caller.
   The deadman's query is `FORMAT TSVWithNames`: the header is what stops a capture
   from the previous (also 5-column, `n_op`) format replaying as a wrong answer.
   Both reuse `keylog/spool_emit.py` for the v1 line format.

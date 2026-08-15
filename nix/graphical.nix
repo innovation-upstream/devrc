@@ -418,20 +418,28 @@ lib.mkIf isNixOS {
     executable = true;
   };
   # 🔴 claude_sessions.py is a CO-LOCATED SIBLING MODULE, not a block — the same
-  # shape as bar_freshness.py above, and for the same reason: the block scripts
-  # are extensionless, so they cannot be a package and cannot import each other.
-  # It holds the ONE Claude-in-tmux detector (a /proc tree walk, strictly more
-  # accurate than session-manager's `pane_current_command =~ /claude/`), which
-  # used to live inside the retired `agent-ops` TUI and be loaded out of
-  # ~/.config/tmux/agent-ops.
+  # shape as bar_freshness.py BELOW (~line 470), and for the same reason: the
+  # block scripts are extensionless, so they cannot be a package and cannot
+  # import each other. It holds the ONE Claude-in-tmux detector (a /proc tree
+  # walk, strictly more accurate than session-manager's
+  # `pane_current_command =~ /claude/`), which used to live inside the retired
+  # `agent-ops` TUI and be loaded out of ~/.config/tmux/agent-ops.
   #
   # It MUST be symlinked beside its consumer: without this entry the pill cannot
   # load the detector. That case now renders `󰕮 ?` rather than a bare glyph —
   # before the extraction it was indistinguishable from "nothing is running",
-  # which on a workbench with 35 live sessions is the quietest possible lie. The
-  # gate is NOT narrower than its consumer's (both ungated, matching the block
-  # script above), and the file must be `git add`ed or the flake omits it with a
-  # perfectly green switch. Pinned two-way against this file by
+  # which on a workbench with 35 live sessions is the quietest possible lie.
+  #
+  # Both this entry and the block script above are UNGATED, while claudeRunsBlock
+  # itself is `(!isLaptop)` — so the deploy is WIDER than its consumer, never
+  # narrower. ⚠ That direction matters and is one edit from inverting:
+  # bar_freshness.py below IS `mkIf (!isLaptop)`, so the narrow shape is the
+  # local idiom. `mkIf isLaptop` here would leave the workbench — the only host
+  # carrying the block — without the module, and the pill would render `?` on
+  # the one machine that has it. The file must also be `git add`ed or the flake
+  # omits it with a perfectly green switch. All of that is asserted structurally
+  # (not by spelling this path) in
+  # `test_the_bar_block_and_EVERY_file_it_needs_deploy_on_the_SAME_hosts` +
   # `test_the_shared_module_is_DEPLOYED_beside_the_block_that_loads_it`.
   home.file.".config/i3status-rust/scripts/claude_sessions.py" = {
     source = ../scripts/lib/claude_sessions.py;

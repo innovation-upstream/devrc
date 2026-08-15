@@ -123,6 +123,18 @@ went with it), `rigcontrolBlock` (⚙).
 - **Single host (validate an edit end-to-end):** `home-manager switch --flake ~/workspace/devrc --impure`.
   This DOES restart the poller on a script change (`X-Restart-Triggers`).
 - **Both hosts (after merge):** `scripts/ship.sh`.
+- 🔴 **A switch does NOT restart `i3status-rs` — and RENAMING or REMOVING a block script
+  breaks the pill until you restart i3 by hand.** The only `X-Restart-Triggers` in
+  `graphical.nix` is the **poller's**; the bar process holds the config it parsed at startup,
+  including each block's absolute `command` path, while the switch deletes the old symlink the
+  moment the path changes. The pill then runs a path that no longer exists, on a host that
+  reports a perfectly successful deploy. So for a block **rename/removal/`command` change**:
+  **merge → `ship.sh` → `i3-msg restart` → re-check the pill renders.**
+  `i3-msg restart` is right here (it re-execs i3, which re-spawns i3status-rs, and keeps the
+  session); the `display-manager` caveat below applies only to changing WHICH i3 config file
+  is authoritative. A threshold/format edit inside an existing script needs no restart — the
+  block re-runs the same path on its next interval.
+  *Applies to this PR:* `i3status-agent-ops` → `i3status-claude-runs`.
 - **Syntax check first:** `nix-instantiate --parse nix/graphical.nix >/dev/null`.
 - **Flake gotcha:** a NEW *block script* referenced from `graphical.nix` — and any new file in
   this skill dir — must be `git add`ed before switch (flakes only see tracked files). This skill

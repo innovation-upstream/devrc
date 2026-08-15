@@ -46,7 +46,12 @@ import sys
 
 GLYPH = "\U000f056e"  # 󰕮 nf-md-view_dashboard (verified present in the bar font)
 UNMEASURED = "%s ?" % GLYPH
-_BARE = {"text": UNMEASURED, "state": "Idle"}
+# The last-resort pill for an exception that escaped `main()`. It carries the `?`
+# DISCRIMINANT, not the bare glyph — the name used to be `_BARE`, from when this
+# fallback really did render `󰕮` alone, i.e. byte-identical to "nothing is
+# running". Renamed so the identifier stops asserting the behaviour the rest of
+# this file exists to prevent.
+_UNMEASURED_PILL = {"text": UNMEASURED, "state": "Idle"}
 
 # Three legs, in the order they are true:
 #   1. SIBLING — at runtime this script's directory is
@@ -144,5 +149,5 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except Exception:
-        sys.stdout.write(json.dumps(_BARE) + "\n")
+        sys.stdout.write(json.dumps(_UNMEASURED_PILL) + "\n")
         sys.exit(0)
