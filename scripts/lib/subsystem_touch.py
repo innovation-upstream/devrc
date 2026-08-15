@@ -3222,6 +3222,9 @@ _SOURCE_FLAG: dict[str, str] = {src: flag for src, flag, _ in _ROUTE_OUT}
 # and matching bodies would return half the catalogue for a common word.
 SKILLS_ROOT_DEFAULT = "~/.claude/skills"
 
+# The command a reader can paste. `__file__` so it is right in a worktree too.
+SELF_PATH = os.path.abspath(__file__)
+
 # Tokens that appear in paths everywhere and would match a skill by accident.
 # Deliberately short: over-filtering loses the lead, and every hit is printed with
 # the term that produced it so the agent can dismiss a bad one in one glance.
@@ -3429,6 +3432,74 @@ def render_skill_homes(
     return lines
 
 
+# 🔴 THE THIRD DEAD END: the subsystem is real and has NO PATH FOOTPRINT.
+#
+# Every window above produces FILE PATHS, `nominate()` clusters paths and needs
+# two of them, and the `NO ENTRY` prompt is gated on there being a nomination. So
+# a session whose work product is not files — a production database, a cluster, a
+# DNS record, a SaaS config — resolves nothing, nominates nothing, and is offered
+# nothing. It is not a wrong home (that is SKILL HOMES above) and not a wrong
+# window (that is ROUTE OUT); there is no window, by construction.
+#
+# MEASURED 2026-08-14, the report this exists for: a session correctly hit
+# `looked-at-nothing`, correctly followed the ROUTE OUT to `--commit`, correctly
+# applied the PR-vs-commit discriminator, and correctly called the zero genuine —
+# then closed with "the work happened in the production database, which no path
+# window can see." Every step right, and the knowledge still had nowhere to go.
+#
+# 🔴 THE BIAS IS THE POINT. The subsystems that live OUTSIDE the repo are exactly
+# the ones whose knowledge is tribal and least recoverable from code — how to
+# reach the prod database, which operations are irreversible on it, which schema
+# quirk bites. A store that can only learn about things with a file footprint
+# will never hold any of them, and the emptiness then reads as nobody wanting it.
+#
+# The escape hatch already existed and nothing pointed at it: `--template <slug>`
+# takes an arbitrary slug and needs no paths at all. This is a pointer, not a
+# recommendation — "at most one, or none" still applies, and declining stays a
+# normal outcome.
+def render_no_path_footprint(scope: str) -> list[str]:
+    """The route for work the path model cannot represent.
+
+    🔴 THIS TOOK A `nominations` ARGUMENT AND SUPPRESSED ITSELF WHEN IT WAS
+    NON-EMPTY, and that branch was DEAD — never taken through either call site.
+    `looked-at-nothing` returns before `nominations` is ever set, and the other
+    site sits inside `if not report.writes_proposed:` where
+    `writes_proposed = bool(known) or bool(nominations)` makes it empty by
+    construction. Measured with an instrumented counter over 600 tests: 25 of 25 calls
+    FROM `render_text` had zero nominations. (One trip existed, from a test
+    calling the helper directly with a hand-made list — which is the point: the
+    only way to reach it was to construct a state `render_text` cannot produce.) The commit
+    that introduced it called the suppression the design's load-bearing decision
+    and its "negative control" test built a state `render_text` cannot produce —
+    breakable, not reachable, which is the distinction RULES.md draws.
+    Deleting it changed nothing, so it is gone rather than left to be believed.
+
+    The real gap it was reaching for is handled where it actually occurs: see the
+    one-line variant appended to the `NO ENTRY` block, which is the branch that
+    genuinely has nominations. Estimated at ~65% of dead ends over 287 real commits, which would have been
+    suppressed there — the common case, not the corner. 🔴 A PROXY: per-commit
+    file lists standing in for the real `--session`/`--pr`/`--commit` windows,
+    against a synthetic empty scope. The direction is unambiguous and the dead
+    branch is proved statically; the exact rate in live use will differ.
+    """
+    return [
+        "",
+        "NO PATH FOOTPRINT? — every window above reads FILE PATHS. If this "
+        "session's work was on a subsystem that has none",
+        "  (a production database, a cluster, a DNS record, an external service), "
+        "the store can still hold it:",
+        f"    python3 {SELF_PATH} --template <slug> --scope {scope}",
+        "  🔴 Nothing matches it automatically TODAY — but it is not permanently "
+        "unresolvable: it gains normal path",
+        "  resolution the moment some path is named for the slug (verified). So "
+        "PREFER a slug a future path would carry.",
+        "  Until then it is listed in the scope index and found by `--search`, "
+        "which is enough to read at /resume.",
+        "  Still at most ONE, or none: a subsystem you will want to know about "
+        "again, never a log of what you did today.",
+    ]
+
+
 def render_route_out(window: str) -> list[str]:
     """The untried windows, named, for a run that resolved nothing.
 
@@ -3498,6 +3569,7 @@ def render_text(report: TouchReport) -> str:
         out.append("Propose no write. Say which window was empty and why.")
         out.extend(render_route_out(src.window))
         out.extend(render_skill_homes(src.paths, report.scope))
+        out.extend(render_no_path_footprint(report.scope))
         return "\n".join(out)
 
     if report.status == "scope-absent":
@@ -3578,6 +3650,20 @@ def render_text(report: TouchReport) -> str:
             f"`## What it is` + `## Pointers`; sensitivity={_SENSITIVITY_FAIL_SAFE}, "
             f"created_by={WRITER_ID})"
         )
+        # 🔴 Every nomination above is derived from PATHS, so it can only name
+        # what left a file behind. A session whose real subject was a database or
+        # a cluster is offered the directory it happened to touch and nothing
+        # about the thing it actually worked on. Measured over 287 real commits,
+        # ~65% of dead ends nominate SOMETHING (estimated from per-commit file lists,
+        # not the real windows — a proxy) — so THIS branch, not the empty
+        # one, is where the no-footprint case usually hides. The sibling block
+        # below never renders here (it sits under `if not writes_proposed`), so
+        # without this line the common case gets no route at all.
+        out.append(
+            "  …or, if this session's real subject has NO file footprint (a "
+            "database, a cluster, an external service), it needs no paths:"
+        )
+        out.append(f"    python3 {SELF_PATH} --template <slug> --scope {report.scope}")
 
     if not report.writes_proposed:
         out.append("")
@@ -3607,6 +3693,7 @@ def render_text(report: TouchReport) -> str:
         out.append("Propose no write.")
         out.extend(render_route_out(src.window))
         out.extend(render_skill_homes(src.paths, report.scope))
+        out.extend(render_no_path_footprint(report.scope))
 
     return "\n".join(out)
 

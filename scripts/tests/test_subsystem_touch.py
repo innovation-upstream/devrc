@@ -1393,6 +1393,8 @@ class TestSkillDocsArePinned:
         # intact".
         ("grep -ril", "the agent can search its OWN domain term when the tool matched none"),
         ("must be `git add`ed", "a new skill file the flake never sees is a silent no-op"),
+        ("NO PATH FOOTPRINT?", "work the path model cannot see is still recordable"),
+        ("gains normal path resolution", "the trade, stated without overclaiming"),
         ("never persist live status", "the anti-bloat rule that matters most"),
         (
             "persist the *derivation method and what a stale reading looks like*",
@@ -8018,6 +8020,153 @@ class TestRouteOutOfADeadEnd:
 # REASON TO DECLINE; nothing routed the lesson there, so it ended as prose in a
 # transcript.
 # --------------------------------------------------------------------------- #
+class TestNoPathFootprint:
+    """The third dead end: the subsystem is real and the PATH MODEL cannot see it.
+
+    🔴 Not a wrong home (SKILL HOMES) and not a wrong window (ROUTE OUT) — there
+    is no window. MEASURED 2026-08-14: a session did every step right (hit
+    `looked-at-nothing`, followed the route to `--commit`, applied the
+    PR-vs-commit discriminator, called the zero genuine) and closed with "the
+    work happened in the production database, which no path window can see."
+    Nothing was offered, and the escape hatch (`--template <slug>`, which needs
+    no paths at all) already existed.
+    """
+
+    def test_it_offers_the_template_when_nothing_was_nominated(self) -> None:
+        body = "\n".join(st.render_no_path_footprint("homelab-talos"))
+        assert "--template <slug>" in body
+        assert "--scope homelab-talos" in body, (
+            "the command must carry THIS report's scope or it is not pasteable"
+        )
+
+    def test_the_NOMINATION_branch_also_offers_it(self, store: Path) -> None:
+        """🔴 THE CASE THE FIRST DRAFT LOST, and it is the common one.
+
+        That draft suppressed this block whenever a nomination printed, reasoning
+        that NO ENTRY already asked. Two things were wrong. The suppression was
+        DEAD CODE — never taken through either call site (measured: 0 trips
+        across 600 tests) — and the reasoning was backwards: a nomination is
+        derived from PATHS, so it names the directory the session happened to
+        touch, never the database it actually worked on. Measured over 287 real
+        commits, ~65% of dead ends nominate something — a PROXY, from per-commit
+        file lists rather than the real windows — so this branch is where
+        the no-footprint case usually hides. The two blocks are mutually
+        exclusive by construction (the sibling sits under
+        `if not writes_proposed`), so NO ENTRY has to carry its own line.
+        """
+        rep = _report(["src/newthing/a.py", "src/newthing/b.py"], store)
+        assert rep.nominations, "fixture must nominate, or this proves nothing"
+        text = st.render_text(rep)
+        assert "NO ENTRY" in text
+        assert "NO file footprint" in text, (
+            "the nomination branch offers only path-derived slugs"
+        )
+        assert f"--template <slug> --scope {SCOPE}" in text
+        assert f"python3 {st.SELF_PATH} --template" in text, (
+            "the NO ENTRY variant must carry the absolute path too"
+        )
+
+    def test_the_nomination_offer_prints_EXACTLY_ONCE(self, store: Path) -> None:
+        """🔴 It belongs after the loop, not inside it. This round put it inside
+        by accident once (caught only because the indentation happened to be
+        invalid); moved one line further down it would have been VALID, printed
+        once per nomination, and passed 602/602 — measured, four copies for a
+        four-nomination report."""
+        rep = _report(
+            ["src/alpha/a.py", "src/alpha/b.py", "src/beta/c.py", "src/beta/d.py"],
+            store,
+        )
+        assert len(rep.nominations) >= 2, rep.nominations
+        assert st.render_text(rep).count("NO file footprint") == 1
+
+    def test_the_printed_command_names_a_file_that_EXISTS(self) -> None:
+        """🔴 A pasteable command is worth printing only if it runs. Replacing
+        `SELF_PATH` with a bare relative string survived every other test — the
+        block would look right and the command would fail from any other cwd.
+        """
+        assert Path(st.SELF_PATH).is_file(), st.SELF_PATH
+        assert Path(st.SELF_PATH).is_absolute()
+        assert Path(st.SELF_PATH).name == "subsystem_touch.py"
+
+    def test_it_renders_AFTER_the_other_two_routes(self, store: Path) -> None:
+        """Ordering is load-bearing: this block offers a competing explanation
+        for an empty window, so it must not appear before ROUTE OUT (which names
+        the window that was not read) or SKILL HOMES. Moving it earlier survived
+        every other test."""
+        text = st.render_text(_report([], store))
+        assert text.index("ROUTE OUT") < text.index("NO PATH FOOTPRINT?")
+        assert text.index("SKILL HOMES") < text.index("NO PATH FOOTPRINT?")
+
+    def test_it_states_the_limit_it_buys(self) -> None:
+        """🔴 An entry with no paths IS resolvable — verified, twice.
+
+        Write one via `--template` with zero paths, then let two paths carry the
+        slug: `status=resolved`, matched on the filename tier. Resolution is a
+        property of the PATHS, not of the entry.
+
+        This docstring used to assert the opposite, and survived the commit that
+        corrected the same claim in the module, the skill and the pin — the
+        fourth copy, inside the corrective test, contradicting its own body two
+        lines down. The practical cost of the false version was not confusion but
+        bad advice: it discouraged choosing a slug a future path would carry,
+        which is the one choice that makes the entry findable later.
+        """
+        body = "\n".join(st.render_no_path_footprint("s"))
+        assert "automatically TODAY" in body
+        assert "PREFER a slug a future path would carry" in body, (
+            "the actionable half: a matching slug is strictly better"
+        )
+        assert "--search" in body, "the way it IS findable must be named too"
+        assert "never be RESOLVED" not in body, (
+            "VERIFIED FALSE: an entry written with no paths resolved normally as "
+            "soon as a path named its slug (status=resolved, matched via "
+            "filename). The absolute claim was pinned in FOUR places, the last of\n            them this test's own docstring."
+        )
+
+    def test_it_reaches_render_text_on_BOTH_dead_ends(self, store: Path) -> None:
+        """🔴 STRUCTURAL, not spelled — asserts the SCOPE reaches the command, so
+        a call site passing a constant or the wrong field is visible. A previous
+        block in this file was pinned by a header string and stayed green while
+        both its call sites were corrupted.
+        """
+        for paths, why in (([], "looked-at-nothing"),
+                           (["docs/a.md", "notes/b.md"], "no-match")):
+            text = st.render_text(_report(paths, store))
+            assert "NO PATH FOOTPRINT?" in text, why
+            assert f"--scope {SCOPE}" in text, (
+                f"{why}: the call site did not pass the report's scope"
+            )
+            # 🔴 The RENDERED line, not just the constant. Substituting a bare
+            # relative path at either call site individually left all 602 tests
+            # green: the command would read correctly and fail from any other
+            # cwd. `Path(SELF_PATH).is_file()` cannot see a per-site swap.
+            assert f"python3 {st.SELF_PATH} --template" in text, (
+                f"{why}: the rendered command does not carry the absolute path"
+            )
+
+    def test_a_RESOLVED_run_stays_silent_about_the_STANDALONE_block(
+        self, store: Path
+    ) -> None:
+        """Narrowly named on purpose: a `resolved` report that ALSO nominates does
+        print the one-line offer from the NO ENTRY branch. Only the standalone
+        block is silent here."""
+        rep = _report(["src/collector/a.py", "src/collector/b.py"], store)
+        assert rep.status == "resolved", rep.status
+        assert "NO PATH FOOTPRINT?" not in st.render_text(rep)
+
+    def test_the_template_it_points_at_actually_works_with_no_paths(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 The pointer is only worth printing if the destination exists. Pins
+        that `--template <slug>` really does emit a complete entry for an
+        arbitrary slug — the whole premise of this block.
+        """
+        out = st.new_entry_template("prod-postgres", "devrc", today=TODAY)
+        assert "service: prod-postgres" in out
+        assert "scope: devrc" in out
+        assert "created_by: handoff" in out
+
+
 class TestSkillHomes:
     def _root(self, tmp_path: Path) -> Path:
         """A fixture catalogue with PAIRWISE-DISTINCT domains, so a hit cannot be
