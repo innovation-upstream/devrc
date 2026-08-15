@@ -604,6 +604,15 @@ def _aged(age_secs, **fields):
     return fields
 
 
+#: The VISIBLE "the board could not be read" pill, spelled out as a LITERAL —
+#: never built from the block's own constants, so a test can disagree with the
+#: module instead of restating it. Used by both the pure-function assertions and
+#: the end-to-end subprocess pair, which is what lets the two be compared.
+UNKNOWN_PILL = {"icon": "tasks", "text": "?", "short_text": "?",
+                "state": "Warning"}
+INVISIBLE_PILL = {"text": "", "state": "Idle"}
+
+
 def _expected_text(mod, count):
     # The alert blocks (i3status-alerts / -civitai) prepend a literal nf-md-alert
     # GLYPH to the text; i3status-civitai additionally prefixes the `civ` LABEL.
@@ -786,6 +795,12 @@ def test_a_measurement_OUTAGE_never_makes_a_KNOWN_alarm_QUIETER():
 
     `parse_telemetry` draws the same line — an UNKNOWN verdict carrying a
     non-zero count stays Critical and keeps the count.
+
+    ⚠ SCOPE: this exercises the FROZEN-FILE branch only — an old `ts` on a cache
+    nobody rewrote. The other outage shape, where the poller writes a `stale()`
+    marker OVER the cache, is a different code path and lives in
+    `test_a_clawgate_OUTAGE_carries_the_LAST_KNOWN_stuck_count_forward`. It was
+    FALSE until that fix landed, while this test's name claimed it generally.
     """
     stale_wedge = clawgate_block.render(
         _aged(86_400, count=24, stuck_count=2, state="Critical"), now=FIXED_NOW)
@@ -809,6 +824,245 @@ def test_a_stale_cache_carrying_stuck_rows_still_names_them(tmp_path):
          "ts": int(time.time()) - 86_400}))
     out = _run_clawgate_block(tmp_path)
     assert out["text"] == "!2?" and out["state"] == "Critical"
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 `render` AS A PURE FUNCTION — the half a subprocess cannot measure.
+#
+# The end-to-end group at the bottom of this file runs the block as a SUBPROCESS,
+# and `i3status-clawgate.__main__` catches every exception and prints a
+# BYTE-IDENTICAL `?` pill. So those tests cannot tell "rendered an unreadable
+# cache correctly" from "crashed on the way there": replacing the whole body of
+# `render()` with `raise RuntimeError` leaves all five of them green. These call
+# `render()` directly, where a raise is a raise — which is also what makes the
+# module's "Fail-safe throughout: it never raises, whatever the file contains" a
+# TESTED claim rather than a docstring.
+#
+# ⚠ LABEL: this group is an INVARIANT GUARD, not regression coverage. The
+# shipped block already answers all of these correctly, so it is green on the
+# pre-change tree; what it kills is the mutant. Named in the PR: `render` raising
+# unconditionally, and `_unmeasured(payload)` instead of `_unmeasured(None)` for
+# a non-dict payload — both of which survived the entire suite before it existed.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("bad", [
+    None,             # no file at all, or one `load()` could not parse
+    [],               # valid JSON, wrong shape — and FALSY
+    ["a", "list"],    # ...and a TRUTHY one: `payload or {}` keeps the list
+    {},               # a dict that says nothing at all
+    "x",              # a bare JSON string (truthy)
+    "",               # ...and a falsy one
+    3,                # a bare JSON number (truthy)
+    0,                # ...and a falsy one
+    True,             # a bare JSON bool — an int in Python
+    2.5,              # a bare JSON float
+    {"count": "NaN"},  # a dict whose count is unreadable, and with no `ts`
+])
+def test_the_clawgate_render_FUNCTION_is_failsafe_AND_stays_visible(bad):
+    """Both halves in one assertion, because the module makes both claims:
+    it does not RAISE, and it does not HIDE.
+
+    🔴 The truthy non-dicts are the load-bearing rows. `_unmeasured` reads
+    `(payload or {}).get("stuck_count")`, so handing it a truthy non-dict is an
+    `AttributeError` — `[]` and `""` and `0` fall back to `{}` and would pass a
+    mutant that `["a", "list"]`, `"x"` and `3` kill.
+    """
+    out = clawgate_block.render(bad, now=FIXED_NOW)   # must not raise
+    assert out == UNKNOWN_PILL, bad
+    assert out != INVISIBLE_PILL, bad
+
+
+@pytest.mark.parametrize("junk", ["NaN", "2", 2.5, True, False, None, [], {}])
+def test_a_count_the_block_REFUSES_TO_READ_is_not_a_count_of_zero(junk):
+    """🔴 THE BRANCH THIS CHANGE ADDED, WHICH HAD NO TEST. `render`'s
+    `if count is None: return _unmeasured(...)` could be swapped for
+    `return dict(_EMPTY)` and the whole suite stayed green — a CURRENT cache
+    whose `count` is `"NaN"` / `2.5` / `True` would silently revert to the
+    invisible pill, which is the exact substitution the change exists to forbid,
+    on a payload the freshness gate says IS a present-tense reading.
+
+    `"2"` is in the list deliberately: `int()` would coerce it happily. The
+    poller writes ints, so a string count means the WRITER changed, and a block
+    that quietly agrees with a writer it no longer recognises is how a pill stops
+    meaning what it says.
+    """
+    payload = _aged(0, count=junk, stuck_count=0, state="Warning")
+    # the payload must reach the count branch, not stop at the freshness gate
+    assert clawgate_block.is_current(payload, FIXED_NOW) is True
+    assert clawgate_block.render(payload, now=FIXED_NOW) == UNKNOWN_PILL, junk
+
+
+def test_an_UNREADABLE_COUNT_still_keeps_a_KNOWN_stuck_alarm():
+    """The escalation invariant on the junk-count path too: refusing to read the
+    count is a reason to distrust the number beside the alarm, not to drop the
+    alarm."""
+    out = clawgate_block.render(
+        _aged(0, count="NaN", stuck_count=2, state="Critical"), now=FIXED_NOW)
+    assert out["text"] == "!2?" and out["state"] == "Critical"
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 The OTHER outage shape: the poller writes `stale` OVER the last reading.
+#
+# `test_a_measurement_OUTAGE_never_makes_a_KNOWN_alarm_QUIETER` above asserts the
+# general claim in its NAME but exercises only the FROZEN-FILE branch (nobody
+# rewrote the cache, so the old `stuck_count` is still on disk). On the branch
+# the module names as PRIMARY — clawgate unreachable, so `bar-status-poll`
+# writes a `stale()` marker OVER the cache — the claim was FALSE, measured:
+#
+#     t0  poller healthy, 2 stuck                  -> `24!2`  Critical
+#     t1  clawgate down, stale() overwrites        -> `?`      Warning  <- QUIETER
+#
+# `carry_stuck_forward` is the fix: the marker inherits the previous cache's
+# `stuck_count`, so the pill renders `!2?` and the alarm survives the outage that
+# would otherwise have silenced it. These tests are RED on the pre-change tree.
+# --------------------------------------------------------------------------- #
+def _clawgate_unreachable():
+    raise RuntimeError("clawgate unavailable")
+
+
+@pytest.fixture
+def _poll_into(tmp_path, monkeypatch):
+    """Drive the REAL writer against a throwaway cache dir.
+
+    🔴 `BAR_STATUS_DIR` and `signal_bar` are both redirected: the live cache in
+    `~/.cache/bar-status` is the operator's, and `signal_bar` would `pkill
+    -RTMIN+11` the running bar.
+    """
+    monkeypatch.setenv("BAR_STATUS_DIR", str(tmp_path))
+    monkeypatch.setattr(poll, "signal_bar", lambda _n: None)
+    return tmp_path
+
+
+def test_a_clawgate_OUTAGE_carries_the_LAST_KNOWN_stuck_count_forward(_poll_into):
+    """🔴 THE SEAM, driven through the real writer and the real renderer: a
+    healthy poll, then a failing one, then the pixel.
+
+    A dispatch does not become un-stuck because clawgate stopped answering, so
+    the alarm must survive the outage — and the trailing `?` is what keeps that
+    honest, marking the carried 2 as the last readable poll rather than a fresh
+    measurement.
+    """
+    healthy = poll.run_source("clawgate", lambda: {
+        "count": 24, "stuck_count": 2, "state": "Critical", "detail": "2 stuck"})
+    assert clawgate_block.render(healthy)["text"] == "24!2"
+
+    outage = poll.run_source("clawgate", _clawgate_unreachable)
+    assert outage["state"] == "stale", outage
+    assert outage["stuck_count"] == 2, "the outage destroyed a live alarm"
+
+    # ...and it is on DISK, not merely in the returned dict — the cache is what
+    # the block reads, and `write_status` is the overwrite this guards against.
+    on_disk = json.loads((_poll_into / "clawgate.json").read_text())
+    assert on_disk["stuck_count"] == 2, on_disk
+    rendered = clawgate_block.render(on_disk)
+    assert rendered["text"] == "!2?", rendered
+    assert rendered["state"] == "Critical", rendered
+    assert rendered["text"].endswith("?")
+
+
+def test_a_FIRST_EVER_poll_that_FAILS_invents_no_alarm(_poll_into):
+    """No previous cache to carry: the honest answer is a bare `?`, and above all
+    not a fabricated `!N?`. This is also the new-host / freshly-GC'd-cache path,
+    so it runs on every machine's first poll."""
+    out = poll.run_source("clawgate", _clawgate_unreachable)
+    assert "stuck_count" not in out, out
+    assert clawgate_block.render(out) == UNKNOWN_PILL
+
+
+def test_a_RECOVERED_poll_REPLACES_the_carried_alarm(_poll_into):
+    """🔴 The carry is not a RATCHET. Once clawgate answers again its own
+    measurement wins outright — including a measured all-clear, which must take
+    the pill back to calm. A carry that could only ever add would turn one
+    outage during one wedge into a permanently Critical bar."""
+    poll.run_source("clawgate", lambda: {
+        "count": 24, "stuck_count": 2, "state": "Critical"})
+    carried = poll.run_source("clawgate", _clawgate_unreachable)
+    assert carried["stuck_count"] == 2
+
+    recovered = poll.run_source("clawgate", lambda: {
+        "count": 0, "stuck_count": 0, "state": "Idle"})
+    assert recovered["stuck_count"] == 0
+    assert clawgate_block.render(recovered) == INVISIBLE_PILL
+
+    # and a subsequent outage now carries NOTHING, because nothing is known
+    again = poll.run_source("clawgate", _clawgate_unreachable)
+    assert "stuck_count" not in again, again
+    assert clawgate_block.render(again) == UNKNOWN_PILL
+
+
+@pytest.mark.parametrize("prev,expected", [
+    (None, None),                    # first-ever poll: no cache at all
+    ({}, None),                      # a cache that says nothing
+    ("not a dict", None),            # a cache of the wrong shape
+    ({"stuck_count": 0}, None),      # a MEASURED all-clear is not an alarm
+    ({"stuck_count": -1}, None),     # incoherent; nothing to escalate
+    ({"stuck_count": 2}, 2),
+    ({"stuck_count": 7}, 7),
+    ({"stuck_count": True}, None),   # a bool is not a reading (int in Python)
+    ({"stuck_count": 2.5}, None),    # no coercion: 2.5 stuck dispatches is nobody's measurement
+    ({"stuck_count": "2"}, None),    # ...nor is a string int() would swallow
+    ({"stuck_count": None}, None),
+])
+def test_carry_stuck_forward_only_carries_a_REAL_previous_alarm(prev, expected):
+    marker = poll.stale("clawgate unavailable")
+    out = poll.carry_stuck_forward(marker, prev)
+    assert out is marker, "it must mutate the payload it was handed"
+    if expected is None:
+        assert "stuck_count" not in out, prev
+    else:
+        assert out["stuck_count"] == expected, prev
+
+
+@pytest.mark.parametrize("payload", [
+    {"count": 24, "stuck_count": 0, "state": "Critical"},  # a measured all-clear
+    {"count": 24, "stuck_count": 1, "state": "Critical"},  # a measured alarm
+    {"count": 0, "state": "Idle"},                         # a pre-predicate cache
+])
+def test_carry_stuck_forward_NEVER_REWRITES_A_REAL_MEASUREMENT(payload):
+    """The guard that keeps this from being a lie generator. A READABLE payload
+    speaks for itself — including the third row, whose absent `stuck_count` is
+    what makes the pill render `?` rather than a clean count. Overwriting that
+    from a stale neighbour would put a number in the cache nobody measured."""
+    before = dict(payload)
+    poll.carry_stuck_forward(payload, {"stuck_count": 9})
+    assert payload == before
+
+
+@pytest.mark.parametrize("own", [0, 1, 5])
+def test_carry_stuck_forward_NEVER_CARRIES_BACKWARDS(own):
+    """A marker that already carries its OWN `stuck_count` has been measured,
+    however partially, and an OLDER cache must not overwrite it. Carrying
+    backwards is how a wedge that has since been resolved gets resurrected — and
+    a `0` of its own is the sharpest case, because that is precisely the reading
+    an unguarded carry would replace with an alarm."""
+    out = poll.carry_stuck_forward(
+        {"count": 0, "state": "stale", "stuck_count": own}, {"stuck_count": 5})
+    assert out["stuck_count"] == own
+
+
+def test_an_ERROR_MARKER_carries_forward_too():
+    """`stale()` is not the only unreadable shape: a payload carrying `error`
+    reaches `_unmeasured` by the same door in the block, so it must reach the
+    carry by the same door here."""
+    out = poll.carry_stuck_forward({"count": 0, "error": "boom"},
+                                   {"stuck_count": 3})
+    assert out["stuck_count"] == 3
+
+
+@pytest.mark.parametrize("value", [
+    0, 1, 2, 7, -1, 10 ** 9, True, False, None, 2.5, 0.0, "2", "x", [], {},
+])
+def test_the_two_NO_COERCION_predicates_AGREE(value):
+    """ONE RULE, TWO FILES. `bar-status-poll._strict_int` and
+    `i3status-clawgate._int_or_none` are the same predicate on opposite sides of
+    an extensionless-script boundary neither can import across, so the only thing
+    that can keep them honest is an assertion that they answer identically. A
+    poller that starts accepting `2.5` while the block still refuses it writes a
+    number the pill renders as `?` forever, and neither file's own tests can see
+    it."""
+    mine = poll._strict_int(value)
+    theirs = clawgate_block._int_or_none(value)
+    assert mine == theirs and type(mine) is type(theirs), value
 
 
 def test_the_block_renders_what_attention_ACTUALLY_writes():
@@ -913,11 +1167,19 @@ def test_red_above_arg_parsing(name, mod, monkeypatch):
 
 
 #: The blocks whose UNREADABLE rendering is the invisible pill. clawgate is
-#: excluded by design and asserted the other way in
-#: `test_the_clawgate_block_renders_an_UNREADABLE_board_VISIBLY`: it is the only
-#: surface for a stuck dispatch that nothing can dismiss, so it renders `?`
-#: rather than hiding. Derived from BLOCKS by SUBTRACTION, so a block added to
-#: BLOCKS joins this list automatically instead of silently escaping it.
+#: excluded by design and asserted the other way — it is the only surface for a
+#: stuck dispatch that nothing can dismiss, so it renders `?` rather than hiding.
+#: Derived from BLOCKS by SUBTRACTION, so a block added to BLOCKS joins this list
+#: automatically instead of silently escaping it.
+#:
+#: 🔴 WHAT REPLACED clawgate's ROW HERE. Leaving this list was also leaving the
+#: only test that fed it `None, [], "x", 3, {"count": "NaN"}, {}` as a PURE
+#: function, and for a while nothing did — a mutant passing `payload` instead of
+#: `None` to `_unmeasured` (an `AttributeError` on any truthy non-dict) survived
+#: the whole suite. `test_the_clawgate_render_FUNCTION_is_failsafe_AND_stays_visible`
+#: feeds it that same set and asserts the OPPOSITE pill; the subprocess pair in
+#: `test_the_clawgate_block_renders_an_UNREADABLE_board_VISIBLY` covers the
+#: pixels but, going through `__main__`'s `except`, cannot see a crash at all.
 HIDES_WHEN_UNREADABLE = [b for b in BLOCKS if b[0] != "clawgate"]
 assert len(HIDES_WHEN_UNREADABLE) == len(BLOCKS) - 1, "clawgate left BLOCKS"
 
@@ -1018,11 +1280,15 @@ def test_block_subprocess_corrupt_json_is_invisible(tmp_path, script, cachefile)
 
 # --------------------------------------------------------------------------- #
 # 🔴 The clawgate block END TO END: an unreadable board is VISIBLE.
+#
+# ⚠ THESE CANNOT SEE A CRASH. They drive the block as a SUBPROCESS, and
+# `__main__`'s `except` prints a BYTE-IDENTICAL `?` pill — so this whole group
+# passes with the entire body of `render()` replaced by `raise RuntimeError`
+# (measured: 5/5 parametrizations still green). What they prove is the pixel the
+# operator sees; what they CANNOT prove is that the block computed it. The pure
+# `render()` assertions above (`test_the_clawgate_render_FUNCTION_*`) are the
+# other half of that pair, and neither is sufficient alone.
 # --------------------------------------------------------------------------- #
-UNKNOWN_PILL = {"icon": "tasks", "text": "?", "short_text": "?",
-                "state": "Warning"}
-
-
 def _run_clawgate_block(cache_dir):
     env = dict(os.environ, BAR_STATUS_DIR=str(cache_dir))
     r = subprocess.run([sys.executable, str(SCRIPTS / "i3status-clawgate")],
@@ -1332,6 +1598,31 @@ def test_a_MALFORMED_stuck_count_also_skips(bad):
         STUCK_SPEC_NAME, {"count": 9, "stuck_count": bad, "state": "Warning"},
         stuck_spec, fire=fr, read=rd, write=wr) is None
     assert fired == [] and state["latched"] is True
+
+
+@pytest.mark.parametrize("marker", [
+    {"count": 0, "state": "stale", "detail": "clawgate unavailable"},
+    {"count": 0, "error": "clawgate unavailable"},
+])
+def test_a_CARRIED_stuck_count_CANNOT_fire_or_clear_a_toast_latch(marker):
+    """🔴 THE SEAM `carry_stuck_forward` OPENS, closed here. It puts a
+    `stuck_count` onto a payload that never had one — a shape the rising-edge
+    gate had never seen — and that number is NOT a measurement. If it reached the
+    gate, a wedge riding out a clawgate outage would re-toast a critical
+    notification every 45s for as long as the outage lasted, latch or no latch.
+
+    `evaluate_edge_toast` returns before reading any count for a stale/error
+    payload, so the property holds by construction; this pins it, because the
+    construction is one `return None` away from not holding.
+    """
+    _, stuck_spec = _both_specs()
+    carried = poll.carry_stuck_forward(dict(marker), {"stuck_count": 4})
+    assert carried["stuck_count"] == 4, "fixture did not reach the carry"
+    for latched in (True, False):
+        state, fired, rd, wr, fr = _latch_store(initial=latched)
+        assert poll.evaluate_edge_toast(STUCK_SPEC_NAME, carried, stuck_spec,
+                                        fire=fr, read=rd, write=wr) is None
+        assert fired == [] and state["latched"] is latched
 
 
 def test_the_stuck_toast_is_LOUDER_than_the_ordinary_pending_one():

@@ -59,13 +59,19 @@ _EMPTY = {"text": "", "state": "Idle"}
 
 #: How old a cache may be and still count as a CURRENT measurement.
 #:
-#: Derived from the poller, not from taste (measured 2026-08-14 on the
-#: workbench): `bar-status-poll.timer` re-arms `OnUnitActiveSec = 45s` and the
-#: service is bounded by `TimeoutStartSec = 90`, so the widest gap a HEALTHY
-#: poller can leave between two writes is 135s. 600s is ~4.4x that — roughly
-#: thirteen missed cycles — so it cannot be reached by scheduler jitter, a slow
-#: port-forward or one bounded timeout, and it is still short enough that a dead
-#: poller is announced within the same working session rather than the next day.
+#: Derived from the unit, not from taste (nix/graphical.nix). THREE terms, and
+#: the middle one is the one this derivation originally dropped:
+#:   * `OnUnitActiveSec = 45s`  — the timer re-arms this long after each run;
+#:   * `AccuracyUSec = 1min`    — systemd's DEFAULT, and the timer does NOT
+#:                                override it, so an elapse may be deferred up
+#:                                to a further 60s to coalesce with other timers;
+#:   * `TimeoutStartSec = 90`   — the hard ceiling on one run of the service.
+#: 45 + 60 + 90 = 195s is therefore the widest gap a HEALTHY poller can leave
+#: between two writes, not the 135s this comment used to claim. 600s is ~3x that
+#: — so it still cannot be reached by scheduler jitter, a slow port-forward or
+#: one bounded timeout, and it is still short enough that a dead poller is
+#: announced within the same working session rather than the next day. The
+#: constant is unchanged; only the arithmetic behind it is corrected.
 MAX_CACHE_AGE_SECS = 600
 
 
@@ -150,12 +156,26 @@ def _unmeasured(payload, icon: str) -> dict:
     pill, but a hidden pill means "measured, and there is nothing" — so an
     unreadable cache may not borrow those pixels.
 
-    🔴 AND IT NEVER GETS QUIETER THAN THE LAST THING WE KNEW. If the last
-    readable payload carried stuck dispatches, they are still shown (`!N?`) and
-    the pill stays Critical: a measurement outage is a reason to trust a reading
-    less, never a reason to downgrade an alarm it already raised. `parse_telemetry`
-    draws the same line — an UNKNOWN verdict with a non-zero count stays Critical
-    and keeps the count.
+    🔴 AND IT NEVER GETS QUIETER THAN WHAT THE CACHE STILL RECORDS. If the
+    payload in front of us carries stuck dispatches, they are still shown
+    (`!N?`) and the pill stays Critical: a measurement outage is a reason to
+    trust a reading less, never a reason to downgrade an alarm it already
+    raised. `parse_telemetry` draws the same line — an UNKNOWN verdict with a
+    non-zero count stays Critical and keeps the count.
+
+    ⚠ THE SCOPE OF THAT CLAIM IS EXACTLY THE CACHE, and it took a poller change
+    to make it true on the primary path. Two of the three outage shapes reach
+    here holding the last known `stuck_count`:
+      * the poller FROZE (nobody rewrote the file) — the old payload is still on
+        disk, stuck_count and all, and the `ts` gate is what makes it `!N?`;
+      * clawgate is UNREACHABLE — `bar-status-poll.stale()` reports `count: 0`
+        and nothing else, so this used to drop `24!2`/Critical to a bare
+        `?`/Warning, i.e. QUIETER, on the very path the module names as primary.
+        `bar-status-poll.carry_stuck_forward` now copies the previous cache's
+        `stuck_count` onto the marker, so it arrives here and renders `!2?`.
+    The third shape — the file is MISSING or unparseable — carries nothing, and
+    honestly renders a bare `?`: this module's whole memory is that one file, so
+    when it is gone there is no last reading to be quieter than.
     """
     stuck = _int_or_none((payload or {}).get("stuck_count")) or 0
     if stuck > 0:
@@ -177,6 +197,14 @@ def render(payload, icon: str = ICON, now=None) -> dict:
     `now` is injected rather than read here so the freshness gate is testable
     without sleeping; it defaults to the wall clock. Fail-safe throughout: it
     never raises, whatever the file contains.
+
+    🔴 THAT LAST SENTENCE IS A CLAIM, AND IT IS TESTED HERE-AND-ONLY-HERE:
+    `test_the_clawgate_render_FUNCTION_is_failsafe_AND_stays_visible` calls this
+    function DIRECTLY. Nothing that drives the block as a subprocess can check
+    it — `__main__` below catches every exception and prints a byte-identical
+    `?` pill, so a `render` that raises unconditionally is invisible to every
+    end-to-end test in the file. If you delete that test, this sentence becomes
+    a comment again.
     """
     now = time.time() if now is None else now
     if not isinstance(payload, dict):

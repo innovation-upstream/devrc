@@ -551,11 +551,81 @@ def dispatch_edge_toast(name, payload, specs, evaluate=None):
 
 
 def stale(reason: str, err=None) -> dict:
-    """A neutral 'source unavailable' marker; the block renders it as empty."""
+    """A 'source unavailable' marker.
+
+    Every block renders it as the empty, invisible pill EXCEPT
+    `i3status-clawgate`, whose reassuring answer is a zero — so "cannot tell"
+    must not borrow the pixels that mean "nothing to tell". (`i3status-telemetry`
+    is NOT a second exception, however its `tlm ?` reads: that comes from a
+    READABLE payload whose deadman verdict is `unknown`; a `stale` marker maps to
+    the empty pill there on purpose, the unit's `OnFailure` toast covering a
+    fetch that raised.) See `carry_stuck_forward` for what this marker must
+    preserve on its way to the one block that shows it.
+    """
     d = {"count": 0, "state": "stale", "detail": reason}
     if err is not None:
         d["error"] = str(err)[:200]
     return d
+
+
+def _strict_int(value):
+    """A strictly-integral reading, or None. NO coercion, and a bool is not one.
+
+    Deliberately mirrors `i3status-clawgate._int_or_none`, because the two sit
+    on opposite sides of an extensionless-script boundary that neither can
+    import across. `test_the_two_NO_COERCION_predicates_AGREE` pins them to each
+    other so the pair cannot drift into disagreeing about what a reading is.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def carry_stuck_forward(payload, prev):
+    """🔴 A MEASUREMENT OUTAGE MUST NOT MAKE A KNOWN ALARM QUIETER.
+
+    `stale()` reports `count: 0` and nothing else, and `run_source` OVERWRITES
+    the cache with it — so the last thing we actually knew was destroyed by the
+    failure to learn anything new. Measured on the shipped pair:
+
+        t0  poller healthy, 2 stuck              -> `24!2`  Critical
+        t1  clawgate unreachable, stale() writes -> `?`     Warning   <- QUIETER
+
+    That is the same substitution `i3status-clawgate._unmeasured` exists to
+    refuse, arriving through the writer instead of the renderer: a dispatch does
+    not become un-stuck because clawgate stopped answering. So an unreadable
+    marker INHERITS the previous cache's `stuck_count` and the pill renders
+    `!2?` — "2 stuck as of the last readable poll, and this is not a current
+    measurement". The trailing `?` is what keeps the carry honest; the number is
+    never presented as freshly measured.
+
+    Four things it must NOT do, each a case below:
+      * touch a REAL measurement — a readable payload carries its own
+        `stuck_count`, including a measured zero, and speaks for itself;
+      * invent one on a FIRST-EVER poll, or when the previous cache is missing,
+        unparseable or was itself a marker that knew nothing (`prev is None` /
+        no usable `stuck_count`);
+      * COERCE — `2.5` and `True` are not readings (see `_strict_int`);
+      * carry a measured ZERO forward as if it were news; it renders nothing
+        either way, and not writing it keeps "we carried an alarm" legible in
+        the cache file.
+
+    Toasts are unaffected by construction: `evaluate_edge_toast` returns before
+    reading any count for a stale/error payload, so the carried number cannot
+    fire or clear a latch.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    if not (payload.get("error") or payload.get("state") == "stale"):
+        return payload
+    if _strict_int(payload.get("stuck_count")) is not None:
+        return payload
+    carried = _strict_int(prev.get("stuck_count")
+                          if isinstance(prev, dict) else None)
+    if carried is None or carried <= 0:
+        return payload
+    payload["stuck_count"] = carried
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -1223,6 +1293,15 @@ def signal_bar(name: str) -> None:
 
 def run_source(name: str, fn) -> dict:
     payload = source(name, fn)
+    # 🔴 The carry-forward lives HERE, in the function that DESTROYS the previous
+    # reading, not in `source()` — `write_status` below is the overwrite, so this
+    # is the last moment the old cache still exists. `source()` stays a pure
+    # fetch+stamp with no disk read of its own. The read is skipped entirely on
+    # the happy path (an unreadable marker is rare), so the live poll pays for it
+    # only when something is already wrong.
+    if isinstance(payload, dict) and (payload.get("error")
+                                      or payload.get("state") == "stale"):
+        carry_stuck_forward(payload, read_prev_status(name))
     write_status(name, payload)
     signal_bar(name)
     return payload
