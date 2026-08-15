@@ -58,6 +58,7 @@ floating_modifier $mod
 # Float any window explicitly launched with WM_CLASS "float" (e.g. the VPN detail
 # terminal: `alacritty --class float,float`). No such rule existed pre-migration.
 for_window [class="float"] floating enable
+for_window [class="espanso"] floating enable
 ${rigControlFloat}
 
 # Terminal
