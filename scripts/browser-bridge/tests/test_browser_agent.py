@@ -320,6 +320,20 @@ _SPAWN_PROBE_N = 10
 # 10 trivial spawns cost 0.085-0.105 s on this idle 24-core box (n=5, 2026-08-13).
 # 8x that is comfortably outside the idle spread and far below what a real stall
 # produces, so it does not read a busy-but-healthy box as stalled.
+#
+# 🔴 That was ONE host in ONE tier, and this constant decides every hung-vs-
+# stalled verdict in the file — so the scope it carries matters. Set it too low
+# and a healthy-but-busy box extends forever up to RUN_HARD_CAP instead of
+# reporting a real hang. Re-measured 2026-08-15 at the two points the first
+# measurement could not see (same probe, n=3-5 each):
+#   * inside a NIX BUILD SANDBOX — the tier the authoritative gate runs in, and
+#     the one the 2026-08-13 flake actually happened in: 0.099-0.113 s, taken
+#     while a devrc-pytests build was in flight (loadavg 15.5).
+#   * the LAPTOP host (8-core i7-1165G7, idle): 0.113-0.117 s.
+# So 0.10 holds across both hosts and both tiers, with ~7x headroom to the
+# 0.80 s threshold. For reference at the other end: 6 concurrent full runs of
+# this file plus 12 CPU hogs on the 24-core box only reached 0.14-0.22 s — a
+# busy box is nowhere near the threshold, which is the point.
 _SPAWN_IDLE_REF = 0.10
 _SPAWN_STALL_FACTOR = 8.0
 
