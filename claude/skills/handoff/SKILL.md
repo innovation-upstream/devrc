@@ -176,6 +176,10 @@ Topic argument (optional): `$ARGUMENTS`. If empty, infer a short kebab-case topi
 
    `status=proposed` ⇒ the diff is on screen and nothing has been written: not the doc, not a commit, not a ref. `no-advance` (4) and `no-change` (5) print **no diff at all** — a session that went nowhere gets no write offer, not an empty one — so report the line and stop.
 
+   🔴 **Two more statuses exist and both mean NOTHING WAS WRITTEN OR IS SAFE — read them, do not retry blindly.**
+   - **`status=behind` (exit 6)** — `--push` was asked for and the remote has commits this checkout does not, so the push would be rejected and the commit would be **stranded on a shared branch**: the state that silently blocks `ship.sh`. Nothing was written. It prints the exact `merge --ff-only` to run, and the preserve→verify→`reset --keep` path if that refuses. Fast-forward, then re-run the identical command.
+   - **`status=push-failed`** — the pre-check passed and the push still failed (the remote can move in between; that race cannot be designed away). 🔴 **Unlike every other failure here, the COMMIT EXISTS.** The message names it and hands over preserve→verify→`reset --keep` **in that order**. Do not leave it: an un-pushed commit on a shared branch is invisible until `ship.sh` skips that host.
+
    🔴 **Gate the PUSH, with the SAME shape step 4 uses for the index — one compact diff, a single y/N, and on decline, discard.** Ask exactly *"update the handoff doc and push it? (y/N)"*. On **n** run nothing else; the tree is already byte-identical. On **y** re-run the identical command with **`--confirm`** (plus `--push`): exactly one commit, path-limited to the doc, carrying exactly the diff shown. Whether to push at all where trunk is the deploy branch is a per-repo policy question. 📖 The incident and the shape of each half: `reference/write-gate.md`.
 
 Keep the doc tight and high-signal — it is read first thing next session, so every line must earn its place. The "Open investigations" blocks are the exception to brevity: a mid-diagnosis bug is worth verbatim evidence, because re-deriving it next session costs far more than the lines do. Pair: `/resume`.

@@ -77,6 +77,7 @@ import difflib
 import re
 import subprocess
 import sys
+import typing
 from pathlib import Path
 
 EXIT_OK = 0
@@ -311,20 +312,78 @@ def resolve_branch(repo: Path, override: str | None) -> str:
     return branch
 
 
-def behind_remote(repo: Path, remote: str, branch: str) -> int:
-    """How many commits `<remote>/<branch>` has that HEAD does not. 0 = pushable.
+def remote_has_commits_we_lack(repo: Path, remote: str, branch: str) -> bool:
+    """Would a push to `<remote>/<branch>` be rejected non-fast-forward?
 
-    🔴 Fetches first — the whole point is that the local ref is stale. A read-only
-    `git fetch <remote> <branch>` touches no working file, so it is safe in a
-    shared checkout another session is using.
+    🔴 `ls-remote`, NOT `fetch` — three measured reasons, all found by audit after
+    the fetch version shipped:
 
-    A fetch that FAILS is not "0 behind": network down, no such remote, auth
-    expired. It raises, and the caller refuses rather than guessing pushable —
-    the failure mode this guards against is precisely a confident wrong answer.
+      1. **`fetch` REINTRODUCED THE BUG THIS GUARD EXISTS TO CLOSE.** It wrote
+         `FETCH_HEAD` and a second process then read `HEAD..FETCH_HEAD`.
+         `FETCH_HEAD` is shared mutable state: any other fetch in that checkout
+         between the two wins. Measured on a checkout genuinely 1 behind — after
+         another session's `git fetch origin stable`, the check returned **0**.
+         A confident zero here means write → commit → push rejected → a stranded
+         commit on a shared branch. `drift-check.sh` fetches on a systemd timer,
+         so the racer is unattended.
+      2. **`fetch` is NOT read-only, and the earlier comment saying so was false.**
+         It writes `refs/remotes/<remote>/<branch>` in the COMMON gitdir — shared
+         by every worktree — plus objects and reflogs. Two concurrent
+         `git fetch --quiet origin main` produced `cannot lock ref` in **30 of 30**
+         trials. Fail-safe, but a new transient refusal of the handoff.
+      3. **`fetch <remote> <branch>` FAILS when the branch is not on the remote
+         yet**, which made a first push impossible — an ordinary end-of-session
+         state, hard-refused with no way past it.
+
+    `ls-remote` writes NOTHING locally (measured: added/changed/removed all empty)
+    and 12/12 concurrent runs exited 0.
+
+    Returns False — pushable — when the branch does not exist on the remote (a
+    first push cannot be rejected non-fast-forward) and when the remote tip is an
+    ancestor of HEAD (ahead-only). True when the remote has anything HEAD lacks,
+    which covers behind AND diverged.
+
+    🔴 A LOOKUP THAT FAILS IS NOT "PUSHABLE". Network down, no such remote, auth
+    expired, or a remote tip this repo has never fetched — each RAISES, and the
+    caller refuses rather than guessing. Guessing pushable strands the commit in
+    exactly the way this whole guard exists to prevent.
     """
-    git(repo, "fetch", "--quiet", remote, branch)
-    out = git(repo, "rev-list", "--count", f"HEAD..FETCH_HEAD").strip()
-    return int(out or "0")
+    out = git_allow(repo, "ls-remote", "--exit-code", remote, f"refs/heads/{branch}")
+    if out.code == 2:
+        return False  # no such branch on the remote — a first push
+    if out.code != 0:
+        raise GitError(
+            f"cannot read {remote}/{branch}: {out.err.strip() or f'git exited {out.code}'}"
+        )
+    tip = out.out.split()[0] if out.out.split() else ""
+    if not tip:
+        raise GitError(f"{remote}/{branch} returned no sha")
+    # 🔴 One check, not two. A `cat-file -e` guard for "a tip this repo has
+    # never fetched" was here and was REDUNDANT: `merge-base --is-ancestor` on an
+    # unknown object exits non-zero too, which is already the refuse answer. Two
+    # branches reaching one outcome cannot be told apart by any test — deleting
+    # either left the suite green — and that is the dead-predicate shape. The
+    # fail-safe is the non-zero, so state it once:
+    #   ancestor  -> 0     -> ahead-only, pushable
+    #   not       -> 1     -> behind or diverged, refuse
+    #   unknown / any error-> refuse (this is the property, not an accident)
+    return git_allow(repo, "merge-base", "--is-ancestor", tip, "HEAD").code != 0
+
+
+class GitRun(typing.NamedTuple):
+    code: int
+    out: str
+    err: str
+
+
+def git_allow(repo: Path, *args: str) -> GitRun:
+    """`git` that RETURNS its exit code. `ls-remote --exit-code` uses 2 to mean
+    "no such ref", which is an answer, not a failure — raising on it is what made
+    a first push impossible."""
+    proc = subprocess.run(
+        ["git", "-C", str(repo), *args], capture_output=True, text=True
+    )
+    return GitRun(proc.returncode, proc.stdout, proc.stderr)
 
 
 def git(repo: Path, *args: str) -> str:
@@ -447,29 +506,40 @@ def main(argv: list[str] | None = None) -> int:
         # 🔴 BEFORE the write, not after. See EXIT_BEHIND.
         try:
             push_branch = resolve_branch(repo, args.branch)
-            behind = behind_remote(repo, args.remote, push_branch)
+            behind = remote_has_commits_we_lack(repo, args.remote, push_branch)
         except (GitError, ValueError) as exc:
             print(
                 f"status=failed\ncannot determine whether {args.remote} has moved, "
-                f"so refusing to commit something that may not be pushable: {exc}",
+                f"so refusing to commit something that may not be pushable: {exc}\n"
+                f"  If you only want the doc updated LOCALLY, re-run without "
+                f"`--push` — the remote being unreachable does not make the local "
+                f"write wrong.",
                 file=sys.stderr,
             )
             return EXIT_FAIL
         if behind:
+            # 🔴 The RESOLVED branch in every line. An earlier version printed
+            # `HEAD` and a literal `<branch>`, so the recovery could not be
+            # pasted — and this message is the entire second half of the fix.
+            ff = f"git -C {repo} merge --ff-only {args.remote}/{push_branch}"
             print(
-                f"status=behind remote={args.remote} branch={push_branch} "
-                f"behind={behind}\n"
+                f"status=behind remote={args.remote} branch={push_branch}\n"
                 f"NOTHING WRITTEN — not the doc, not a commit, not a ref.\n"
-                f"  {args.remote}/{push_branch} has {behind} commit(s) this "
-                f"checkout does not, so the push would be rejected and the commit "
-                f"would be left behind on a shared branch. That is the state that "
-                f"silently blocks `ship.sh`.\n"
+                f"  {args.remote}/{push_branch} has commit(s) this checkout does "
+                f"not, so the push would be rejected and the commit would be left "
+                f"behind on a shared branch. That is the state that silently "
+                f"blocks `ship.sh`.\n"
                 f"  Fast-forward, then re-run this exact command:\n"
-                f"    git -C {repo} merge --ff-only {args.remote}/{push_branch}\n"
-                f"  If that refuses, this checkout has diverged — preserve first: "
-                f"`git -C {repo} branch <topic> HEAD && git -C {repo} push -u "
-                f"{args.remote} <topic>`, confirm the sha on the remote, then "
-                f"`git -C {repo} reset --keep {args.remote}/{push_branch}`.",
+                f"    {ff}\n"
+                f"  🔴 If `--branch {push_branch}` is not the branch you are ON, "
+                f"do NOT run that merge — it would merge an unrelated branch into "
+                f"your checkout. Push from a checkout of {push_branch} instead.\n"
+                f"  If the merge refuses, this checkout has DIVERGED — preserve, "
+                f"verify, then move the pointer, in that order:\n"
+                f"    git -C {repo} branch <topic> HEAD && git -C {repo} push -u "
+                f"{args.remote} <topic>\n"
+                f"    git -C {repo} ls-remote --heads {args.remote} <topic>\n"
+                f"    git -C {repo} reset --keep {args.remote}/{push_branch}",
                 file=sys.stderr,
             )
             return EXIT_BEHIND
@@ -493,8 +563,7 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_OK
 
     try:
-        branch = resolve_branch(repo, args.branch)
-        git(repo, "push", args.remote, f"HEAD:refs/heads/{branch}")
+        git(repo, "push", args.remote, f"HEAD:refs/heads/{push_branch}")
     except GitError as exc:
         # The pre-check makes this rare, not impossible: the remote can move in
         # the window between them. The commit EXISTS at this point, so say so and
@@ -502,19 +571,19 @@ def main(argv: list[str] | None = None) -> int:
         # leaves a shared branch diverged.
         print(
             f"status=push-failed\n{exc}\n"
-            f"🔴 THE COMMIT {sha[:12]} EXISTS LOCALLY on `{args.branch or 'HEAD'}` "
+            f"🔴 THE COMMIT {sha[:12]} EXISTS LOCALLY on `{push_branch}` "
             f"and is NOT on {args.remote}. On a shared branch that is the state "
             f"`ship.sh` skips over silently.\n"
             f"  Preserve, verify, then move the pointer — in that order:\n"
             f"    git -C {repo} branch <topic> HEAD && git -C {repo} push -u "
             f"{args.remote} <topic>\n"
             f"    git -C {repo} ls-remote --heads {args.remote} <topic>   # confirm it landed\n"
-            f"    git -C {repo} reset --keep {args.remote}/<branch>       # --keep refuses rather than destroys",
+            f"    git -C {repo} reset --keep {args.remote}/{push_branch}   # --keep refuses rather than destroys",
             file=sys.stderr,
         )
         return EXIT_FAIL
 
-    print(f"status=pushed remote={args.remote} branch={branch}")
+    print(f"status=pushed remote={args.remote} branch={push_branch}")
     return EXIT_OK
 
 
