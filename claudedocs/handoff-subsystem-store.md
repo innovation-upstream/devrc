@@ -47,10 +47,29 @@ every entry instead of hiding 13 of 25.
 
 ## Open investigations — live diagnosis state
 
-### Is the worktree-path bucket worth closing? — UNMEASURED, do not build on my numbers
-- **Symptom:** a session whose edits all land in a throwaway worktree gets
-  `status=looked-at-nothing` from `--session`. Seen **4×** today; most recent: 0 paths under
-  cwd, **23 outside**, all worktree paths (civitai scope).
+### The worktree-path bucket — MEASURED 2026-08-15, and the framing was wrong
+🔴 **`--session` is THIN, not dead. "Structurally empty here because of the worktree rule" is
+REFUTED.** Over 14 recent devrc sessions, using the repo's own `collect_session_paths`: 12 did
+file work, **only 1 had an empty in-cwd set**, and **41 of 232 paths (17.7%) landed under cwd** —
+independently matching the 13.9% over 3,913 paths recorded below, from a different sample. What
+IS true is the threshold: only **5 of 12** reached the 2 paths a nomination needs, so the window
+usually cannot nominate even when it is not empty. `--pr`/`--commit` stay primary for work that
+LANDED; `--session` stays worth running.
+
+🔴 **How this nearly went the other way.** Three agent reports of "0 under cwd, N outside" were
+about to be written into the store as a structural fact about this host. They are the tail: 1 in
+12. The scan takes two minutes and the entry it would have created would have outlived the
+session that got it wrong — which is the entire premise of the store. **Do not promote an
+anecdote to a structural claim without the scan.**
+
+⚠ **The CLI cannot reproduce this.** `--session` refuses any transcript not written in the last
+30 minutes ("this is not the session that is running now"), which is correct for a writer and
+fatal for a retrospective. Measure through `collect_session_paths(..., max_age_seconds=inf)`,
+which reads the path distribution without pretending to be those sessions.
+
+- **Original symptom (the tail case, not the norm):** a session whose edits all land in a
+  throwaway worktree gets `status=looked-at-nothing` from `--session`. Seen **4×** on 08-13;
+  most recent: 0 paths under cwd, **23 outside**, all worktree paths (civitai scope).
 - **Observed:** `#459` does **NOT** fix this. Its window reports paths lexically under
   `--repo`; a worktree at `/tmp/…/wt-x/src/foo.ts` is not. Measured bucket: **143 of 945**
   outside-cwd paths were temp worktrees, of which only **32 still existed on disk** — and 38
