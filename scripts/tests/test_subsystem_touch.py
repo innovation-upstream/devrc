@@ -8048,7 +8048,8 @@ class TestNoPathFootprint:
         across 600 tests) — and the reasoning was backwards: a nomination is
         derived from PATHS, so it names the directory the session happened to
         touch, never the database it actually worked on. Measured over 287 real
-        commits, 65.5% of dead ends nominate something, so this branch is where
+        commits, ~65% of dead ends nominate something — a PROXY, from per-commit
+        file lists rather than the real windows — so this branch is where
         the no-footprint case usually hides. The two blocks are mutually
         exclusive by construction (the sibling sits under
         `if not writes_proposed`), so NO ENTRY has to carry its own line.

@@ -3474,8 +3474,11 @@ def render_no_path_footprint(scope: str) -> list[str]:
 
     The real gap it was reaching for is handled where it actually occurs: see the
     one-line variant appended to the `NO ENTRY` block, which is the branch that
-    genuinely has nominations. Measured over 287 real commits, 65.5% of dead ends
-    would have been suppressed there — the common case, not the corner.
+    genuinely has nominations. Estimated over 287 real commits, ~65% of dead ends would have been
+    suppressed there — the common case, not the corner. 🔴 A PROXY: per-commit
+    file lists standing in for the real `--session`/`--pr`/`--commit` windows,
+    against a synthetic empty scope. The direction is unambiguous and the dead
+    branch is proved statically; the exact rate in live use will differ.
     """
     return [
         "",
@@ -3649,7 +3652,8 @@ def render_text(report: TouchReport) -> str:
         # what left a file behind. A session whose real subject was a database or
         # a cluster is offered the directory it happened to touch and nothing
         # about the thing it actually worked on. Measured over 287 real commits,
-        # 65.5% of dead ends nominate SOMETHING — so THIS branch, not the empty
+        # ~65% of dead ends nominate SOMETHING (estimated from per-commit file lists,
+        # not the real windows — a proxy) — so THIS branch, not the empty
         # one, is where the no-footprint case usually hides. The sibling block
         # below never renders here (it sits under `if not writes_proposed`), so
         # without this line the common case gets no route at all.
