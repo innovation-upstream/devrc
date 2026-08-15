@@ -1393,6 +1393,8 @@ class TestSkillDocsArePinned:
         # intact".
         ("grep -ril", "the agent can search its OWN domain term when the tool matched none"),
         ("must be `git add`ed", "a new skill file the flake never sees is a silent no-op"),
+        ("NO PATH FOOTPRINT?", "work the path model cannot see is still recordable"),
+        ("never be resolved from a path", "the trade that entry makes, stated up front"),
         ("never persist live status", "the anti-bloat rule that matters most"),
         (
             "persist the *derivation method and what a stale reading looks like*",
@@ -8018,6 +8020,73 @@ class TestRouteOutOfADeadEnd:
 # REASON TO DECLINE; nothing routed the lesson there, so it ended as prose in a
 # transcript.
 # --------------------------------------------------------------------------- #
+class TestNoPathFootprint:
+    """The third dead end: the subsystem is real and the PATH MODEL cannot see it.
+
+    🔴 Not a wrong home (SKILL HOMES) and not a wrong window (ROUTE OUT) — there
+    is no window. MEASURED 2026-08-14: a session did every step right (hit
+    `looked-at-nothing`, followed the route to `--commit`, applied the
+    PR-vs-commit discriminator, called the zero genuine) and closed with "the
+    work happened in the production database, which no path window can see."
+    Nothing was offered, and the escape hatch (`--template <slug>`, which needs
+    no paths at all) already existed.
+    """
+
+    def test_it_offers_the_template_when_nothing_was_nominated(self) -> None:
+        body = "\n".join(st.render_no_path_footprint("homelab-talos", ()))
+        assert "--template <slug>" in body
+        assert "--scope homelab-talos" in body, (
+            "the command must carry THIS report's scope or it is not pasteable"
+        )
+
+    def test_it_is_SILENT_when_a_nomination_already_asked(self) -> None:
+        """🔴 The negative control. The NO ENTRY block asks the same question
+        with better information; a second prompt beside it is the boilerplate
+        that gets skipped, and without this an unconditional print would satisfy
+        every other test here."""
+        assert st.render_no_path_footprint("s", ["a-nomination"]) == []
+
+    def test_it_states_the_limit_it_buys(self) -> None:
+        """An entry with no paths can never be RESOLVED from one. Saying so is
+        the difference between a useful pointer and a promise the resolver
+        cannot keep — a reader who expects auto-matching will conclude the store
+        is broken."""
+        body = "\n".join(st.render_no_path_footprint("s", ()))
+        assert "never be RESOLVED FROM A PATH" in body
+        assert "--search" in body, "the way it IS findable must be named too"
+
+    def test_it_reaches_render_text_on_BOTH_dead_ends(self, store: Path) -> None:
+        """🔴 STRUCTURAL, not spelled — asserts the SCOPE reaches the command, so
+        a call site passing a constant or the wrong field is visible. A previous
+        block in this file was pinned by a header string and stayed green while
+        both its call sites were corrupted.
+        """
+        for paths, why in (([], "looked-at-nothing"),
+                           (["docs/a.md", "notes/b.md"], "no-match")):
+            text = st.render_text(_report(paths, store))
+            assert "NO PATH FOOTPRINT?" in text, why
+            assert f"--scope {SCOPE}" in text, (
+                f"{why}: the call site did not pass the report's scope"
+            )
+
+    def test_a_RESOLVED_run_stays_silent(self, store: Path) -> None:
+        rep = _report(["src/collector/a.py", "src/collector/b.py"], store)
+        assert rep.status == "resolved", rep.status
+        assert "NO PATH FOOTPRINT?" not in st.render_text(rep)
+
+    def test_the_template_it_points_at_actually_works_with_no_paths(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 The pointer is only worth printing if the destination exists. Pins
+        that `--template <slug>` really does emit a complete entry for an
+        arbitrary slug — the whole premise of this block.
+        """
+        out = st.new_entry_template("prod-postgres", "devrc", today=TODAY)
+        assert "service: prod-postgres" in out
+        assert "scope: devrc" in out
+        assert "created_by: handoff" in out
+
+
 class TestSkillHomes:
     def _root(self, tmp_path: Path) -> Path:
         """A fixture catalogue with PAIRWISE-DISTINCT domains, so a hit cannot be

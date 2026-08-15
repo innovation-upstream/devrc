@@ -3222,6 +3222,9 @@ _SOURCE_FLAG: dict[str, str] = {src: flag for src, flag, _ in _ROUTE_OUT}
 # and matching bodies would return half the catalogue for a common word.
 SKILLS_ROOT_DEFAULT = "~/.claude/skills"
 
+# The command a reader can paste. `__file__` so it is right in a worktree too.
+SELF_PATH = os.path.abspath(__file__)
+
 # Tokens that appear in paths everywhere and would match a skill by accident.
 # Deliberately short: over-filtering loses the lead, and every hit is printed with
 # the term that produced it so the agent can dismiss a bad one in one glance.
@@ -3429,6 +3432,56 @@ def render_skill_homes(
     return lines
 
 
+# 🔴 THE THIRD DEAD END: the subsystem is real and has NO PATH FOOTPRINT.
+#
+# Every window above produces FILE PATHS, `nominate()` clusters paths and needs
+# two of them, and the `NO ENTRY` prompt is gated on there being a nomination. So
+# a session whose work product is not files — a production database, a cluster, a
+# DNS record, a SaaS config — resolves nothing, nominates nothing, and is offered
+# nothing. It is not a wrong home (that is SKILL HOMES above) and not a wrong
+# window (that is ROUTE OUT); there is no window, by construction.
+#
+# MEASURED 2026-08-14, the report this exists for: a session correctly hit
+# `looked-at-nothing`, correctly followed the ROUTE OUT to `--commit`, correctly
+# applied the PR-vs-commit discriminator, and correctly called the zero genuine —
+# then closed with "the work happened in the production database, which no path
+# window can see." Every step right, and the knowledge still had nowhere to go.
+#
+# 🔴 THE BIAS IS THE POINT. The subsystems that live OUTSIDE the repo are exactly
+# the ones whose knowledge is tribal and least recoverable from code — how to
+# reach the prod database, which operations are irreversible on it, which schema
+# quirk bites. A store that can only learn about things with a file footprint
+# will never hold any of them, and the emptiness then reads as nobody wanting it.
+#
+# The escape hatch already existed and nothing pointed at it: `--template <slug>`
+# takes an arbitrary slug and needs no paths at all. This is a pointer, not a
+# recommendation — "at most one, or none" still applies, and declining stays a
+# normal outcome.
+def render_no_path_footprint(scope: str, nominations: _abc.Sized) -> list[str]:
+    """The route for work the path model cannot represent. Empty if already prompted.
+
+    Silent when a nomination printed: the `NO ENTRY` block is already asking the
+    same question with better information, and a second prompt beside it is the
+    boilerplate that gets skipped.
+    """
+    if len(nominations):
+        return []
+    return [
+        "",
+        "NO PATH FOOTPRINT? — every window above reads FILE PATHS. If this "
+        "session's work was on a subsystem that has none",
+        "  (a production database, a cluster, a DNS record, an external service), "
+        "the store can still hold it:",
+        f"    python3 {SELF_PATH} --template <slug> --scope {scope}",
+        "  🔴 Such an entry can never be RESOLVED FROM A PATH — nothing will ever "
+        "match it automatically. It is listed in",
+        "  the scope index and found by `--search`, which is enough to read at "
+        "/resume and is the whole of what it buys.",
+        "  Still at most ONE, or none: a subsystem you will want to know about "
+        "again, never a log of what you did today.",
+    ]
+
+
 def render_route_out(window: str) -> list[str]:
     """The untried windows, named, for a run that resolved nothing.
 
@@ -3498,6 +3551,7 @@ def render_text(report: TouchReport) -> str:
         out.append("Propose no write. Say which window was empty and why.")
         out.extend(render_route_out(src.window))
         out.extend(render_skill_homes(src.paths, report.scope))
+        out.extend(render_no_path_footprint(report.scope, report.nominations))
         return "\n".join(out)
 
     if report.status == "scope-absent":
@@ -3607,6 +3661,7 @@ def render_text(report: TouchReport) -> str:
         out.append("Propose no write.")
         out.extend(render_route_out(src.window))
         out.extend(render_skill_homes(src.paths, report.scope))
+        out.extend(render_no_path_footprint(report.scope, report.nominations))
 
     return "\n".join(out)
 
