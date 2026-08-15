@@ -20,6 +20,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -555,18 +556,51 @@ BLOCKS = [
 
 
 #: Fields a block needs BEYOND `count`/`state` to render its normal, FULLY
-#: MEASURED shape. Only clawgate has any: its block also reports stuck
-#: dispatches, and an ABSENT `stuck_count` renders `?` on purpose (a cache from a
-#: poller predating the stuck predicate carries a count computed by the old
-#: status-only rule, so it is a different number, not merely a partial one). The
-#: generic block tests below are about icon / colour / hide-at-zero, so they hand
-#: it a MEASURED zero; the `?` and `!N` renderings have their own tests.
-BLOCK_MEASURED_EXTRA = {"clawgate": {"stuck_count": 0}}
+#: MEASURED shape, as ZERO-ARG FACTORIES (one of them has to be built against the
+#: current clock). Only clawgate has any, and it has two:
+#:
+#:  * `stuck_count` — an ABSENT one renders `?` on purpose (a cache from a poller
+#:    predating the stuck predicate carries a count computed by the old
+#:    status-only rule, so it is a different number, not merely a partial one);
+#:  * `ts` — an absent or OLD one now also renders `?`, because a cache nobody
+#:    has refreshed is not a measurement of the board as it is now. Every payload
+#:    `bar-status-poll` writes carries `ts`, so a fixture without one was never a
+#:    realistic cache; it was a fixture that could not tell the freshness gate
+#:    from a hole in it.
+#:
+#: The generic block tests below are about icon / colour / hide-at-zero, so they
+#: hand clawgate a MEASURED, CURRENT payload; the `?` and `!N` renderings and the
+#: freshness gate have their own tests.
+BLOCK_MEASURED_EXTRA = {
+    "clawgate": lambda: {"stuck_count": 0, "ts": int(time.time())},
+}
 
 
 def _measured(name, **fields):
-    """A cache payload for `name` in its fully-measured shape."""
-    fields.update(BLOCK_MEASURED_EXTRA.get(name, {}))
+    """A cache payload for `name` in its fully-measured shape.
+
+    The defaults FILL IN, they do not overwrite: a caller passing an explicit
+    `stuck_count=1` is naming the thing under test, and a helper that quietly
+    replaced it with the measured-zero default would turn that test into an
+    assertion about the default instead.
+    """
+    extra = BLOCK_MEASURED_EXTRA.get(name)
+    if extra is not None:
+        for key, value in extra().items():
+            fields.setdefault(key, value)
+    return fields
+
+
+#: A `now` that is nothing like a default. Freshness is a function of
+#: `now - ts`, and a fixture built on `now = 0` (or on a `ts` equal to the
+#: constant under test) cannot distinguish a working subtraction from a missing
+#: one — so every freshness test below is anchored here and offsets from it.
+FIXED_NOW = 1_800_000_000.0
+
+
+def _aged(age_secs, **fields):
+    """A clawgate cache payload written `age_secs` before FIXED_NOW."""
+    fields.setdefault("ts", int(FIXED_NOW - age_secs))
     return fields
 
 
@@ -587,7 +621,11 @@ def _expected_text(mod, count):
 
 @pytest.mark.parametrize("name,mod,icon,default_state", BLOCKS)
 def test_block_hides_at_zero(name, mod, icon, default_state):
-    out = mod.render({"count": 0, "state": "Idle"})
+    # 🔴 A MEASURED zero, which is the only thing allowed to hide. The payload
+    # goes through `_measured` so clawgate gets the current `ts` its freshness
+    # gate requires — an unmeasured cache has its own, VISIBLE rendering and
+    # must not be able to reach this assertion.
+    out = mod.render(_measured(name, count=0, state="Idle"))
     assert out == {"text": "", "state": "Idle"}
     assert "icon" not in out            # truly invisible: no icon either
 
@@ -618,9 +656,9 @@ def test_the_bar_RENDERS_A_STUCK_DISPATCH_DIFFERENTLY_from_plain_pending():
     Everything about the two blocks must differ: the text AND the colour.
     """
     plain_pending = clawgate_block.render(
-        {"count": 3, "stuck_count": 0, "state": "Warning"})
+        _measured("clawgate", count=3, state="Warning"))
     with_stuck = clawgate_block.render(
-        {"count": 3, "stuck_count": 1, "state": "Critical"})
+        _measured("clawgate", count=3, stuck_count=1, state="Critical"))
     assert plain_pending["text"] == "3"
     assert with_stuck["text"] == "3!1"
     assert plain_pending["text"] != with_stuck["text"]
@@ -636,8 +674,9 @@ def test_the_bar_RENDERS_A_STUCK_DISPATCH_DIFFERENTLY_from_plain_pending():
     (None, "5?"),      # key present but null -> unmeasured
 ])
 def test_the_stuck_half_of_the_block_text(stuck, expected):
-    assert clawgate_block.render(
-        {"count": 5, "stuck_count": stuck, "state": "Warning"})["text"] == expected
+    assert clawgate_block.render(_measured(
+        "clawgate", count=5, stuck_count=stuck,
+        state="Warning"))["text"] == expected
 
 
 def test_a_cache_with_NO_stuck_key_renders_unmeasured_not_a_clean_count():
@@ -646,9 +685,10 @@ def test_a_cache_with_NO_stuck_key_renders_unmeasured_not_a_clean_count():
     partial one. Rendering it as a clean count is the substitution of an unread
     queue for an empty one. The measured zero and the absent key must not look
     alike."""
-    absent = clawgate_block.render({"count": 5, "state": "Warning"})
+    absent = clawgate_block.render(
+        _aged(0, count=5, state="Warning"), now=FIXED_NOW)
     measured_zero = clawgate_block.render(
-        {"count": 5, "stuck_count": 0, "state": "Warning"})
+        _aged(0, count=5, stuck_count=0, state="Warning"), now=FIXED_NOW)
     assert absent["text"] == "5?"
     assert measured_zero["text"] == "5"
     assert absent["text"] != measured_zero["text"]
@@ -660,20 +700,115 @@ def test_a_malformed_stuck_count_reads_as_unmeasured_never_as_zero(junk):
     # "none" (a bare count). `True`/`False` are in here deliberately — a bool is
     # an int in Python, so `int(True) == 1` would render a fabricated stuck
     # dispatch and `int(False) == 0` a fabricated all-clear.
-    out = clawgate_block.render({"count": 2, "stuck_count": junk,
-                                 "state": "Warning"})
+    out = clawgate_block.render(
+        _aged(0, count=2, stuck_count=junk, state="Warning"), now=FIXED_NOW)
     assert out["text"] == "2?", junk
 
 
-def test_the_stuck_block_still_hides_at_zero_and_on_a_stale_cache():
-    # The calm contract is unchanged: a stuck count cannot make an empty or
-    # unusable cache visible.
+def test_the_stuck_block_still_hides_at_a_MEASURED_zero():
+    # The calm contract for a MEASURED reading is unchanged: an empty board is
+    # an invisible pill, and a stuck count cannot make one visible (a stuck row
+    # is counted IN `count`, so `count == 0` with `stuck_count == 2` is an
+    # incoherent payload, not a wedge — it must not light the bar).
     assert clawgate_block.render(
-        {"count": 0, "stuck_count": 2, "state": "Critical"})["text"] == ""
-    assert clawgate_block.render(
-        {"count": 3, "stuck_count": 2, "state": "stale"})["text"] == ""
-    assert clawgate_block.render(
-        {"count": 3, "stuck_count": 2, "error": "boom"})["text"] == ""
+        _aged(0, count=0, stuck_count=2, state="Critical"),
+        now=FIXED_NOW)["text"] == ""
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 The freshness gate: a cache nobody refreshed is not a reading of NOW.
+# --------------------------------------------------------------------------- #
+#: The widest gap a HEALTHY poller can leave between two writes, from the unit
+#: itself (nix/graphical.nix): `OnUnitActiveSec = 45s` re-arms after each run and
+#: `TimeoutStartSec = 90` bounds the run. Pinned as a LITERAL derived from those
+#: two numbers rather than imported from the block, so this test can disagree
+#: with the block's constant instead of restating it.
+WORST_HEALTHY_GAP_SECS = 45 + 90
+
+
+@pytest.mark.parametrize("age,current", [
+    (0, True),                        # just written
+    (WORST_HEALTHY_GAP_SECS, True),   # the worst a healthy poller can do
+    (599, True),
+    (600, True),                      # the last age still considered current
+    (601, False),                     # the first that is not
+    (3600, False),
+    (86_400, False),                  # the poller has been dead for a day
+])
+def test_a_cache_the_poller_STOPPED_REFRESHING_is_not_a_current_reading(
+        age, current):
+    """🔴 `render` never read `ts` at all, so a cache frozen days ago rendered a
+    confident, current-looking count — a poller that dies while the board is
+    clean pins the pill to "clean" forever, and a dead measuring apparatus is
+    exactly when a wedge is least visible elsewhere.
+
+    The ages bracket the constant from BOTH sides and include a middle, so this
+    cannot pass against a gate that is merely present-and-always-true.
+    """
+    payload = _aged(age, count=7, stuck_count=0, state="Warning")
+    assert clawgate_block.is_current(payload, FIXED_NOW) is current
+    out = clawgate_block.render(payload, now=FIXED_NOW)
+    assert (out["text"] == "7") is current
+    assert (out["text"] == "?") is not current
+
+
+def test_the_freshness_window_is_far_outside_normal_poller_jitter():
+    """The constant is a claim about the unit, so assert the relationship rather
+    than the number: anything a healthy poller can produce must be current, and
+    the window must not be so wide that a dead poller goes unreported for hours.
+    """
+    assert clawgate_block.MAX_CACHE_AGE_SECS > WORST_HEALTHY_GAP_SECS * 2
+    assert clawgate_block.MAX_CACHE_AGE_SECS <= 3600
+
+
+@pytest.mark.parametrize("ts", [None, "1786759794", True, False, 2.5, [], {}])
+def test_an_ABSENT_OR_JUNK_ts_is_not_a_fresh_one(ts):
+    """Every payload `bar-status-poll` writes carries an integer `ts`, so
+    anything else means the file did not come from a poller we recognise. That
+    is a reason to distrust the reading, never to assume it is fresh. `True` is
+    in here deliberately: a bool is an int in Python, so a coercing check would
+    read `True` as epoch second 1 — an age of ~57 years passing as a timestamp.
+    """
+    payload = {"count": 7, "stuck_count": 0, "state": "Warning"}
+    if ts is not None:
+        payload["ts"] = ts
+    assert clawgate_block.cache_age_secs(payload, FIXED_NOW) is None
+    assert clawgate_block.is_current(payload, FIXED_NOW) is False
+    assert clawgate_block.render(payload, now=FIXED_NOW)["text"] == "?"
+
+
+def test_a_measurement_OUTAGE_never_makes_a_KNOWN_alarm_QUIETER():
+    """🔴 A stale reading is a reason to trust a number less, NOT to downgrade an
+    alarm it already raised. The compound case this whole change is about is a
+    dispatch wedging WHILE the poller is dead: the last thing we knew was `2
+    stuck`, and dropping that to a bare `?` (or to an invisible pill) would let a
+    measurement outage silence a live wedge.
+
+    `parse_telemetry` draws the same line — an UNKNOWN verdict carrying a
+    non-zero count stays Critical and keeps the count.
+    """
+    stale_wedge = clawgate_block.render(
+        _aged(86_400, count=24, stuck_count=2, state="Critical"), now=FIXED_NOW)
+    stale_calm = clawgate_block.render(
+        _aged(86_400, count=24, stuck_count=0, state="Warning"), now=FIXED_NOW)
+    assert stale_wedge["text"] == "!2?"
+    assert stale_wedge["state"] == "Critical"
+    assert stale_wedge["short_text"] == stale_wedge["text"]
+    # the trailing `?` is what says "not a current reading" — it must survive
+    assert stale_wedge["text"].endswith("?")
+    # and a stale CALM reading is NOT allowed to borrow that alarm
+    assert stale_calm["text"] == "?" and stale_calm["state"] == "Warning"
+    assert stale_wedge["state"] != stale_calm["state"]
+
+
+def test_a_stale_cache_carrying_stuck_rows_still_names_them(tmp_path):
+    """The same claim end to end, through the real script and the real cache
+    path — the pure function above cannot see a `main()` that drops `now`."""
+    (tmp_path / "clawgate.json").write_text(json.dumps(
+        {"count": 24, "stuck_count": 2, "state": "Critical",
+         "ts": int(time.time()) - 86_400}))
+    out = _run_clawgate_block(tmp_path)
+    assert out["text"] == "!2?" and out["state"] == "Critical"
 
 
 def test_the_block_renders_what_attention_ACTUALLY_writes():
@@ -708,8 +843,16 @@ def test_the_block_renders_what_attention_ACTUALLY_writes():
                task(903, cg.IN_PROGRESS, None, age=30)]
     wedged = healthy + [task(904, cg.IN_PROGRESS, None, age=9000)]
 
-    h = clawgate_block.render(cg.attention(healthy, now))
-    w = clawgate_block.render(cg.attention(wedged, now))
+    # 🔴 Through the POLLER'S OWN WRITER, not a hand-stamped dict. `attention()`
+    # emits no `ts` — `bar-status-poll.source()` adds it — so the block's
+    # freshness gate depends on a field the predicate does not produce. That is a
+    # seam between two components that are each tested alone, and the shape this
+    # repo has been bitten by: hand-stamping `ts` here would test the fixture.
+    # `source()` is what actually writes the cache, so drive it.
+    h = clawgate_block.render(poll.source("clawgate",
+                                          lambda: cg.attention(healthy, now)))
+    w = clawgate_block.render(poll.source("clawgate",
+                                          lambda: cg.attention(wedged, now)))
     assert h == {"icon": "tasks", "text": "2", "short_text": "2",
                  "state": "Warning"}
     assert w == {"icon": "tasks", "text": "3!1", "short_text": "3!1",
@@ -769,18 +912,28 @@ def test_red_above_arg_parsing(name, mod, monkeypatch):
     assert mod._red_above_arg() == 0
 
 
-@pytest.mark.parametrize("name,mod,icon,default_state", BLOCKS)
+#: The blocks whose UNREADABLE rendering is the invisible pill. clawgate is
+#: excluded by design and asserted the other way in
+#: `test_the_clawgate_block_renders_an_UNREADABLE_board_VISIBLY`: it is the only
+#: surface for a stuck dispatch that nothing can dismiss, so it renders `?`
+#: rather than hiding. Derived from BLOCKS by SUBTRACTION, so a block added to
+#: BLOCKS joins this list automatically instead of silently escaping it.
+HIDES_WHEN_UNREADABLE = [b for b in BLOCKS if b[0] != "clawgate"]
+assert len(HIDES_WHEN_UNREADABLE) == len(BLOCKS) - 1, "clawgate left BLOCKS"
+
+
+@pytest.mark.parametrize("name,mod,icon,default_state", HIDES_WHEN_UNREADABLE)
 def test_block_stale_is_invisible(name, mod, icon, default_state):
     assert mod.render({"count": 5, "state": "stale"}) == {"text": "", "state": "Idle"}
 
 
-@pytest.mark.parametrize("name,mod,icon,default_state", BLOCKS)
+@pytest.mark.parametrize("name,mod,icon,default_state", HIDES_WHEN_UNREADABLE)
 def test_block_error_marker_is_invisible(name, mod, icon, default_state):
     assert mod.render({"count": 5, "state": "Warning", "error": "x"}) == \
         {"text": "", "state": "Idle"}
 
 
-@pytest.mark.parametrize("name,mod,icon,default_state", BLOCKS)
+@pytest.mark.parametrize("name,mod,icon,default_state", HIDES_WHEN_UNREADABLE)
 def test_block_none_and_malformed_are_invisible(name, mod, icon, default_state):
     for bad in (None, [], "x", 3, {"count": "NaN"}, {}):
         out = mod.render(bad)
@@ -790,17 +943,29 @@ def test_block_none_and_malformed_are_invisible(name, mod, icon, default_state):
 @pytest.mark.parametrize("name,mod,icon,default_state", BLOCKS)
 def test_block_defaults_state_when_missing_or_idle(name, mod, icon, default_state):
     # A positive count with a missing/Idle state must still colour (never neutral).
-    out = mod.render({"count": 1})
+    #
+    # 🔴 `_measured` IS LOAD-BEARING HERE, and this test passed for the wrong
+    # reason without it. A bare `{"count": 1}` carries no `ts`, so clawgate
+    # rendered the UNKNOWN pill — whose state is also `Warning`, which is also
+    # clawgate's `default_state`. The assertion was green while measuring a
+    # completely different code path from the one it names.
+    out = mod.render(_measured(name, count=1))
     assert out["state"] == default_state
-    out2 = mod.render({"count": 1, "state": "Idle"})
+    assert out["text"] != "?", "measured payload rendered as unmeasured"
+    out2 = mod.render(_measured(name, count=1, state="Idle"))
     assert out2["state"] == default_state
 
 
 # --------------------------------------------------------------------------- #
 # block scripts: end-to-end subprocess against a fixture cache dir
 # --------------------------------------------------------------------------- #
+# ⚠ `i3status-clawgate` is DELIBERATELY ABSENT from the two "…_is_invisible"
+# parametrizations below and has its own pair further down. It is the one block
+# whose no-file / corrupt-file rendering is a VISIBLE `?`: a stuck dispatch is
+# announced nowhere else that cannot be dismissed, so "I could not read the
+# board" must not borrow the pixels that mean "the board is empty". The other
+# three still hide, and whether they should is a separate question from this one.
 @pytest.mark.parametrize("script,cachefile", [
-    ("i3status-clawgate", "clawgate.json"),
     ("i3status-mail", "mail.json"),
     ("i3status-alerts", "alerts.json"),
     ("i3status-civitai", "civitai.json"),
@@ -838,7 +1003,6 @@ def test_block_subprocess_positive_renders(tmp_path, script, cachefile, icon, te
 
 
 @pytest.mark.parametrize("script,cachefile", [
-    ("i3status-clawgate", "clawgate.json"),
     ("i3status-mail", "mail.json"),
     ("i3status-alerts", "alerts.json"),
     ("i3status-civitai", "civitai.json"),
@@ -850,6 +1014,78 @@ def test_block_subprocess_corrupt_json_is_invisible(tmp_path, script, cachefile)
                        capture_output=True, text=True, env=env)
     assert r.returncode == 0
     assert json.loads(r.stdout) == {"text": "", "state": "Idle"}
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 The clawgate block END TO END: an unreadable board is VISIBLE.
+# --------------------------------------------------------------------------- #
+UNKNOWN_PILL = {"icon": "tasks", "text": "?", "short_text": "?",
+                "state": "Warning"}
+
+
+def _run_clawgate_block(cache_dir):
+    env = dict(os.environ, BAR_STATUS_DIR=str(cache_dir))
+    r = subprocess.run([sys.executable, str(SCRIPTS / "i3status-clawgate")],
+                       capture_output=True, text=True, env=env)
+    assert r.returncode == 0, r.stderr
+    return json.loads(r.stdout)
+
+
+@pytest.mark.parametrize("body", [
+    None,                                  # no file at all
+    "{ this is not json ",                 # corrupt
+    '["a", "list"]',                       # valid JSON, wrong shape
+    '{"state": "stale", "count": 0, "ts": 1786759794}',
+    '{"error": "clawgate unavailable", "count": 0, "ts": 1786759794}',
+])
+def test_the_clawgate_block_renders_an_UNREADABLE_board_VISIBLY(tmp_path, body):
+    """🔴 THE MEASURED DEFECT (2026-08-14, against the shipped block). Every one
+    of these rendered `{"text": "", "state": "Idle"}` — byte-identical to the
+    hide-at-zero all-clear for an empty board. The pill therefore went dark in
+    precisely the two situations where a wedged dispatch is least visible
+    anywhere else: clawgate unreachable (the poller writes `stale`) and the
+    poller itself dead (no file, or a file nobody can parse).
+
+    This block is the only surface for a stuck dispatch that nothing can
+    dismiss — the critical toast is one-shot and dies with dunst, the
+    notification badge clears on `seen`, `session-manager` is on-demand — so
+    "cannot tell" and "nothing to tell" must not be the same pixels.
+    """
+    if body is not None:
+        (tmp_path / "clawgate.json").write_text(body)
+    out = _run_clawgate_block(tmp_path)
+    assert out == UNKNOWN_PILL
+    assert out != {"text": "", "state": "Idle"}
+
+
+def test_the_clawgate_block_end_to_end_positive_control(tmp_path):
+    """The POSITIVE CONTROL for the pair above: the same subprocess, the same
+    cache path, a payload that IS readable — so a `?` from that test is evidence
+    about the payload and not about a block wired to nothing.
+
+    Three readable payloads, three different renderings.
+    """
+    path = tmp_path / "clawgate.json"
+    now = int(time.time())
+
+    path.write_text(json.dumps(
+        {"count": 0, "stuck_count": 0, "state": "Idle", "ts": now}))
+    empty_board = _run_clawgate_block(tmp_path)
+
+    path.write_text(json.dumps(
+        {"count": 22, "stuck_count": 0, "state": "Warning", "ts": now}))
+    backlog = _run_clawgate_block(tmp_path)
+
+    path.write_text(json.dumps(
+        {"count": 24, "stuck_count": 2, "state": "Critical", "ts": now}))
+    wedged = _run_clawgate_block(tmp_path)
+
+    assert empty_board == {"text": "", "state": "Idle"}
+    assert backlog["text"] == "22" and backlog["state"] == "Warning"
+    assert wedged["text"] == "24!2" and wedged["state"] == "Critical"
+    # …and none of the three is the unreadable pill, which is what makes the
+    # `?` above a measurement rather than this block's only trick.
+    assert UNKNOWN_PILL not in (empty_board, backlog, wedged)
 
 
 # --------------------------------------------------------------------------- #

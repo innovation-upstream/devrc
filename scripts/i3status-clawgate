@@ -6,12 +6,18 @@ i3status-rust JSON line. This is INSTANT (a local file read) and never touches
 the network, so it can never block the bar.
 
 CALM rendering (colour == "look at me"):
-  missing / stale / error / count<=0  -> empty, invisible block
-  count > 0                           -> `tasks` icon + count, coloured (state
-                                          from the cache; default Warning)
-  stuck_count > 0                     -> `<count>!<stuck>`, Critical from cache
-  stuck_count absent (old cache)      -> `<count>?` — NOT measured, not zero
+  count == 0, measured           -> empty, invisible block (hide-at-zero)
+  count > 0                      -> `tasks` icon + count, coloured (state from
+                                     the cache; default Warning)
+  stuck_count > 0                -> `<count>!<stuck>`, Critical from cache
+  stuck_count absent (old cache) -> `<count>?` — NOT measured, not zero
+  cache missing/stale/error/OLD  -> `?` (or `!<stuck>?`), VISIBLE — the board
+                                     could not be read, which is not an empty one
 Click (wired in graphical.nix) opens the clawgate UI.
+
+Text grammar, one rule each: `!N` is "N stuck dispatches"; a TRAILING `?` is
+"this reading is not a current measurement". They compose (`!2?` = two stuck as
+of the last reading we could take, and that reading is not current).
 
 🔴 WHY THE TEXT IS NOT JUST THE COUNT. It was, and `2 open` rendered byte-for-byte
 identically to `2 open + 1 STUCK` (`text 3`, state Warning) — so of the three
@@ -19,15 +25,48 @@ surfaces the stuck predicate was built for, the bar could not show a stuck
 dispatch at all. The count alone is the number the operator already expects to be
 non-zero; the stuck half is the part that is rare and urgent, and it needs its own
 glyph, not a shared one.
+
+🔴 WHY AN UNREADABLE CACHE IS NOT AN EMPTY ONE, which is the newer half of this
+module. Measured 2026-08-14 against the shipped block: a `stale` payload, an
+`error` marker and a missing file ALL rendered `{"text": "", "state": "Idle"}` —
+byte-identical to the measured all-clear that hide-at-zero produces for an empty
+board. So the pill went dark in exactly the two situations where a wedged
+dispatch is least visible elsewhere: the clawgate API being unreachable (the
+poller writes `stale`), and the poller itself being dead (the cache simply stops
+moving). The second was invisible to this module twice over, because `render`
+never read `ts` at all — a cache frozen days ago rendered a confident, current-
+looking count. This block is the ONE surface for a stuck dispatch that nothing
+can dismiss: the toast is one-shot and destroyed by any dunst restart, the
+notification badge clears on `seen`, and `session-manager` is on-demand. A
+surface with that job must not answer "I cannot tell" with the same pixels it
+uses for "nothing is wrong".
+
+⚠ WHAT THIS DOES NOT CLAIM. The 24-hour wedge of 2026-08-13/14 was NOT this bug:
+the cache was fresh throughout, and the pill did render `!2` Critical (verified
+against the deployed copy in HM generation 450, 08-13 18:29, i.e. for ~21 of
+those 24 hours). This closes the compound case — a wedge during a measurement
+outage — not that incident. See the PR.
 """
 import json
 import os
 import sys
+import time
 
 NAME = "clawgate"
 ICON = "tasks"
 _VALID_STATES = ("Idle", "Info", "Good", "Warning", "Critical")
 _EMPTY = {"text": "", "state": "Idle"}
+
+#: How old a cache may be and still count as a CURRENT measurement.
+#:
+#: Derived from the poller, not from taste (measured 2026-08-14 on the
+#: workbench): `bar-status-poll.timer` re-arms `OnUnitActiveSec = 45s` and the
+#: service is bounded by `TimeoutStartSec = 90`, so the widest gap a HEALTHY
+#: poller can leave between two writes is 135s. 600s is ~4.4x that — roughly
+#: thirteen missed cycles — so it cannot be reached by scheduler jitter, a slow
+#: port-forward or one bounded timeout, and it is still short enough that a dead
+#: poller is announced within the same working session rather than the next day.
+MAX_CACHE_AGE_SECS = 600
 
 
 def cache_path() -> str:
@@ -76,18 +115,81 @@ def stuck_suffix(payload) -> str:
     return "!%d" % stuck if stuck > 0 else ""
 
 
-def render(payload, icon: str = ICON) -> dict:
+def cache_age_secs(payload, now):
+    """Seconds since the poller wrote this payload, or None if it cannot say.
+
+    `ts` is stamped by `bar-status-poll.source()` onto EVERY payload it writes,
+    the `stale` markers included, so an absent or non-integral `ts` means the
+    file did not come from a poller we recognise — which is a reason to distrust
+    the reading, never a reason to assume it is fresh. Same no-coercion rule as
+    `_int_or_none`, and clamped at 0 so clock skew reads as "just now" rather
+    than as a negative age (matching `clawgate_tasks.agent_idle_secs`).
+    """
+    ts = _int_or_none((payload or {}).get("ts"))
+    if ts is None:
+        return None
+    return max(0.0, float(now) - ts)
+
+
+def is_current(payload, now, max_age: int = MAX_CACHE_AGE_SECS) -> bool:
+    """Is this cache a CURRENT measurement of the board?
+
+    An unreadable age is NOT current — "I cannot tell how old this is" must not
+    render as "this is fresh", the same substitution `_int_or_none` and
+    `stuck_suffix` refuse. Strictly `<=`, so `max_age` is the last age still
+    considered current rather than the first that is not.
+    """
+    age = cache_age_secs(payload, now)
+    return age is not None and age <= max_age
+
+
+def _unmeasured(payload, icon: str) -> dict:
+    """The VISIBLE `?` pill: the board could not be read just now.
+
+    🔴 It stays visible on purpose. Hide-at-zero is the convention for a count
+    pill, but a hidden pill means "measured, and there is nothing" — so an
+    unreadable cache may not borrow those pixels.
+
+    🔴 AND IT NEVER GETS QUIETER THAN THE LAST THING WE KNEW. If the last
+    readable payload carried stuck dispatches, they are still shown (`!N?`) and
+    the pill stays Critical: a measurement outage is a reason to trust a reading
+    less, never a reason to downgrade an alarm it already raised. `parse_telemetry`
+    draws the same line — an UNKNOWN verdict with a non-zero count stays Critical
+    and keeps the count.
+    """
+    stuck = _int_or_none((payload or {}).get("stuck_count")) or 0
+    if stuck > 0:
+        text = "!%d?" % stuck
+        return {"icon": icon, "text": text, "short_text": text,
+                "state": "Critical"}
+    return {"icon": icon, "text": "?", "short_text": "?", "state": "Warning"}
+
+
+def render(payload, icon: str = ICON, now=None) -> dict:
     """Pure: cache payload (or None) -> i3status-rust block dict.
 
-    Hide-at-zero + fail-safe: None / malformed / stale / error / count<=0 all
-    map to the empty (invisible) block — never a crash.
+    Three outcomes, and the middle one is the whole point:
+      * NOT MEASURED (None / malformed / stale / error / no or old `ts`)
+        -> the visible `?` pill, never the empty one;
+      * measured, count <= 0 -> the empty, invisible block (hide-at-zero);
+      * measured, count > 0  -> the count, its stuck half, and a colour.
+
+    `now` is injected rather than read here so the freshness gate is testable
+    without sleeping; it defaults to the wall clock. Fail-safe throughout: it
+    never raises, whatever the file contains.
     """
+    now = time.time() if now is None else now
     if not isinstance(payload, dict):
-        return dict(_EMPTY)
+        return _unmeasured(None, icon)
     if payload.get("error") or payload.get("state") == "stale":
-        return dict(_EMPTY)
+        return _unmeasured(payload, icon)
+    if not is_current(payload, now):
+        return _unmeasured(payload, icon)
     count = _int_or_none(payload.get("count", 0))
-    if count is None or count <= 0:
+    if count is None:
+        # A count we refuse to read is not a count of zero.
+        return _unmeasured(payload, icon)
+    if count <= 0:
         return dict(_EMPTY)
     text = "%d%s" % (count, stuck_suffix(payload))
     state = payload.get("state")
@@ -106,5 +208,11 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except Exception:
-        sys.stdout.write(json.dumps(_EMPTY) + "\n")
+        # 🔴 The last-resort fallback is the `?` pill, NOT the empty one, for the
+        # same reason `render` refuses it: a block that crashed measured nothing,
+        # and the operator must be able to tell that from an empty board. Built
+        # literally so this path cannot depend on anything that just failed.
+        sys.stdout.write(
+            '{"icon": "%s", "text": "?", "short_text": "?", '
+            '"state": "Warning"}\n' % ICON)
         sys.exit(0)
