@@ -122,6 +122,44 @@ ARCHIVE_MD = REPO_ROOT / "claude" / "RULES-ARCHIVE.md"
 # (-> archive: sibling-agent-kill). The archive's own wording is "not a private
 # repo and not a private machine".
 #
+# 2026-08-14: the 2026-08-13 estimate above got measured, and it held. A fourth
+# worktree hazard arrived (`cp -a` of a worktree shares the ORIGINAL's git dir,
+# because a worktree's `.git` is a FILE, not a directory) and it did attach to
+# the sub-bullet list for the cost of its own text -- 394 B, with the frame,
+# the "list is not closed" clause and the silent-failure framing all reused. As
+# a sixth sibling bullet it would have re-stated those. The estimate is now a
+# measurement of ONE instance, not a general claim; a fifth surface is still
+# unmeasured.
+#
+# That same commit folded in two VERIFICATION lessons rather than worktree ones,
+# and deliberately did NOT give either its own bullet: a guard on prose being
+# walkable by rewording extends the existing "SPELLED rather than STRUCTURAL"
+# bullet (same question, new artifact type), and a fixture whose value equals
+# the constant it tests extends the existing "fixtures pairwise distinct" clause
+# in the mutation bullet (same collision, different pair). Both therefore cost
+# only their own text AND reuse the archive anchor already on those bullets, so
+# neither added a `→ archive:` tag. Placement was chosen by where the reader
+# already is when the hazard fires, not by which cluster the lesson came from.
+#
+# 🔴 The 202 B those three additions overshot the budget by was reclaimed WITHOUT
+# narrowing anything, and it is worth recording what that actually looked like,
+# because "reclaim without narrowing" sounds impossible until you have examples:
+# the `git stash` section stated "for ANY reason" THREE times (heading, a 🔴
+# clause, and "regardless of why") -- the third was dropped and the other two
+# kept verbatim, since that is the exact scope clause a narrower wording once
+# destroyed; and the pkill bullet's incident numbers ("~15 PIDs", "0 files
+# collected and exit 144") moved out to `sibling-agent-kill`, which already held
+# them verbatim and was already tagged on that bullet. What did NOT move: the
+# clause saying `/proc/<pid>/cwd` CANNOT separate two agents that both sit in the
+# base clone. PR #447 trimmed exactly that and re-opened the incident; it is
+# named here so the next person shaving this bullet knows which sentence is load-
+# bearing.
+#
+# The cold read is what caught the one real regression in this pass, and no test
+# performs it: "run a SINGLE agent in-place -- never two file-modifying ones" had
+# been shortened to "never two", which reads as forbidding a second READ-ONLY
+# agent that the previous sentence explicitly permits. 20 B restored.
+#
 # MAX_BYTES was deliberately NOT ratcheted down to bank this. The slack predates
 # the consolidation (compare the live size against MAX_BYTES and
 # MIN_HEADROOM_BYTES below rather than trusting a literal here -- restating a
