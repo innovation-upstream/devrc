@@ -18,6 +18,8 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import subprocess
+import sys
 
 import pytest
 
@@ -264,3 +266,90 @@ def test_the_deployed_sibling_leg_is_first():
     # the in-checkout leg resolves without $DEVRC_DIR being set correctly
     assert paths[1].endswith(os.path.join("lib", "claude_sessions.py"))
     assert os.path.exists(paths[1]), paths[1]
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE LAST-RESORT PILL — the one path in this file nothing reached.
+#
+# `main()` is defensive all the way down (load_detector and count_live_sessions
+# each swallow Exception, render never raises), so the `except Exception` around
+# `sys.exit(main())` is the handler for what nobody predicted. It was named
+# `_BARE`, from when it really did render the bare glyph — i.e. the same pixels
+# as "nothing is running", the exact lie the rest of this script exists to
+# prevent. The value had already been fixed to carry `?`; the NAME still claimed
+# otherwise, and MEASURED, reverting the value to `GLYPH` survived all 4,712
+# tests. So both a behavioural and a structural guard, because they fail on
+# different things.
+# --------------------------------------------------------------------------- #
+_MAIN_FAILS_DRIVER = r'''
+import json, runpy, sys
+_real = json.dumps
+_calls = []
+def _dumps(obj, *a, **k):
+    _calls.append(obj)
+    if len(_calls) == 1:            # the write inside main() — the unpredicted
+        raise RuntimeError("boom inside main()")
+    return _real(obj, *a, **k)      # the last-resort handler's own write
+json.dumps = _dumps
+runpy.run_path(sys.argv[1], run_name="__main__")
+'''
+
+
+def test_an_exception_that_escapes_main_STILL_emits_the_unmeasured_pill(tmp_path):
+    """🔴 BEHAVIOURAL, through the real `__main__` guard.
+
+    The failure is injected where a real one would land — the first
+    `json.dumps`, i.e. main()'s own write — so the handler runs for a genuine
+    unpredicted error rather than one the test hand-delivered to it.
+    """
+    driver = tmp_path / "drive_main_failure.py"
+    driver.write_text(_MAIN_FAILS_DRIVER, encoding="utf-8")
+    script = os.path.join(_SCRIPTS, "i3status-claude-runs")
+    r = subprocess.run([sys.executable, "-B", str(driver), script],
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    out = json.loads(r.stdout.strip())
+    assert out["text"] == blk.UNMEASURED, out
+    assert out["text"].endswith("?"), out
+    assert out["text"] != blk.render(0)["text"], "a crash rendered as an idle machine"
+    assert out["state"] == "Idle"
+
+    # 🔴 POSITIVE CONTROL for the injection: without it, the SAME driver runs
+    # the script's normal path and must NOT produce the `?` pill — otherwise
+    # this test would pass on a script that always renders `?`.
+    plain = tmp_path / "drive_plain.py"
+    plain.write_text('import runpy, sys\n'
+                     'runpy.run_path(sys.argv[1], run_name="__main__")\n',
+                     encoding="utf-8")
+    r2 = subprocess.run([sys.executable, "-B", str(plain), script],
+                        capture_output=True, text=True, timeout=120)
+    assert r2.returncode == 0, (r2.returncode, r2.stdout, r2.stderr)
+    ok = json.loads(r2.stdout.strip())
+    assert ok["text"] != blk.UNMEASURED, (
+        "the un-injected run also rendered `?` — this host cannot load the "
+        "detector, so the injected run proves nothing: %r" % ok)
+
+
+def test_the_last_resort_pill_IS_the_unmeasured_pill_not_a_second_literal():
+    """STRUCTURAL, and it fails on the thing the behavioural test cannot see: a
+    fallback that is spelled out again by hand instead of derived. Two literals
+    for one discriminant is how the value drifts back to a bare glyph while
+    every other path stays correct."""
+    assert blk._UNMEASURED_PILL == blk.render(None)
+    assert blk._UNMEASURED_PILL["text"] == blk.UNMEASURED
+    assert blk._UNMEASURED_PILL["text"] != blk.GLYPH, (
+        "the last-resort pill is the bare glyph again — indistinguishable "
+        "from a measured zero")
+    # …and the handler must actually USE it. The name is checked in source
+    # because the guard body only runs under __main__.
+    src = open(os.path.join(_SCRIPTS, "i3status-claude-runs"),
+               encoding="utf-8").read()
+    tail = src.split('if __name__ == "__main__":')[1]
+    assert "_UNMEASURED_PILL" in tail, tail
+    # …and the stale name has not come back. Scoped to CODE lines: the comment
+    # above the constant names `_BARE` while explaining why it is gone, and a
+    # whole-file substring check would trip on the prose recording the fix —
+    # the same spelled-guard trap this PR hit with `sys.path`.
+    code = [ln for ln in src.splitlines() if not ln.strip().startswith("#")]
+    assert not [ln for ln in code if "_BARE" in ln], (
+        "the stale name is back in code; it asserts the old lie")
