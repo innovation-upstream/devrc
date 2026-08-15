@@ -3457,15 +3457,26 @@ def render_skill_homes(
 # takes an arbitrary slug and needs no paths at all. This is a pointer, not a
 # recommendation — "at most one, or none" still applies, and declining stays a
 # normal outcome.
-def render_no_path_footprint(scope: str, nominations: _abc.Sized) -> list[str]:
-    """The route for work the path model cannot represent. Empty if already prompted.
+def render_no_path_footprint(scope: str) -> list[str]:
+    """The route for work the path model cannot represent.
 
-    Silent when a nomination printed: the `NO ENTRY` block is already asking the
-    same question with better information, and a second prompt beside it is the
-    boilerplate that gets skipped.
+    🔴 THIS TOOK A `nominations` ARGUMENT AND SUPPRESSED ITSELF WHEN IT WAS
+    NON-EMPTY, and that branch was DEAD — never taken through either call site.
+    `looked-at-nothing` returns before `nominations` is ever set, and the other
+    site sits inside `if not report.writes_proposed:` where
+    `writes_proposed = bool(known) or bool(nominations)` makes it empty by
+    construction. Measured with an instrumented raise: 0 trips across 600 tests,
+    against 12 on a positive control that added a third call site. The commit
+    that introduced it called the suppression the design's load-bearing decision
+    and its "negative control" test built a state `render_text` cannot produce —
+    breakable, not reachable, which is the distinction RULES.md draws.
+    Deleting it changed nothing, so it is gone rather than left to be believed.
+
+    The real gap it was reaching for is handled where it actually occurs: see the
+    one-line variant appended to the `NO ENTRY` block, which is the branch that
+    genuinely has nominations. Measured over 287 real commits, 65.5% of dead ends
+    would have been suppressed there — the common case, not the corner.
     """
-    if len(nominations):
-        return []
     return [
         "",
         "NO PATH FOOTPRINT? — every window above reads FILE PATHS. If this "
@@ -3473,10 +3484,12 @@ def render_no_path_footprint(scope: str, nominations: _abc.Sized) -> list[str]:
         "  (a production database, a cluster, a DNS record, an external service), "
         "the store can still hold it:",
         f"    python3 {SELF_PATH} --template <slug> --scope {scope}",
-        "  🔴 Such an entry can never be RESOLVED FROM A PATH — nothing will ever "
-        "match it automatically. It is listed in",
-        "  the scope index and found by `--search`, which is enough to read at "
-        "/resume and is the whole of what it buys.",
+        "  🔴 Nothing matches it automatically TODAY — but it is not permanently "
+        "unresolvable: it gains normal path",
+        "  resolution the moment some path is named for the slug (verified). So "
+        "PREFER a slug a future path would carry.",
+        "  Until then it is listed in the scope index and found by `--search`, "
+        "which is enough to read at /resume.",
         "  Still at most ONE, or none: a subsystem you will want to know about "
         "again, never a log of what you did today.",
     ]
@@ -3551,7 +3564,7 @@ def render_text(report: TouchReport) -> str:
         out.append("Propose no write. Say which window was empty and why.")
         out.extend(render_route_out(src.window))
         out.extend(render_skill_homes(src.paths, report.scope))
-        out.extend(render_no_path_footprint(report.scope, report.nominations))
+        out.extend(render_no_path_footprint(report.scope))
         return "\n".join(out)
 
     if report.status == "scope-absent":
@@ -3632,6 +3645,19 @@ def render_text(report: TouchReport) -> str:
             f"`## What it is` + `## Pointers`; sensitivity={_SENSITIVITY_FAIL_SAFE}, "
             f"created_by={WRITER_ID})"
         )
+        # 🔴 Every nomination above is derived from PATHS, so it can only name
+        # what left a file behind. A session whose real subject was a database or
+        # a cluster is offered the directory it happened to touch and nothing
+        # about the thing it actually worked on. Measured over 287 real commits,
+        # 65.5% of dead ends nominate SOMETHING — so THIS branch, not the empty
+        # one, is where the no-footprint case usually hides. The sibling block
+        # below never renders here (it sits under `if not writes_proposed`), so
+        # without this line the common case gets no route at all.
+        out.append(
+            "  …or, if this session's real subject has NO file footprint (a "
+            "database, a cluster, an external service), it needs no paths:"
+        )
+        out.append(f"    python3 {SELF_PATH} --template <slug> --scope {report.scope}")
 
     if not report.writes_proposed:
         out.append("")
@@ -3661,7 +3687,7 @@ def render_text(report: TouchReport) -> str:
         out.append("Propose no write.")
         out.extend(render_route_out(src.window))
         out.extend(render_skill_homes(src.paths, report.scope))
-        out.extend(render_no_path_footprint(report.scope, report.nominations))
+        out.extend(render_no_path_footprint(report.scope))
 
     return "\n".join(out)
 

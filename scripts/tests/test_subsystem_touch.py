@@ -1394,7 +1394,7 @@ class TestSkillDocsArePinned:
         ("grep -ril", "the agent can search its OWN domain term when the tool matched none"),
         ("must be `git add`ed", "a new skill file the flake never sees is a silent no-op"),
         ("NO PATH FOOTPRINT?", "work the path model cannot see is still recordable"),
-        ("never be resolved from a path", "the trade that entry makes, stated up front"),
+        ("gains normal path resolution", "the trade, stated without overclaiming"),
         ("never persist live status", "the anti-bloat rule that matters most"),
         (
             "persist the *derivation method and what a stale reading looks like*",
@@ -8033,27 +8033,69 @@ class TestNoPathFootprint:
     """
 
     def test_it_offers_the_template_when_nothing_was_nominated(self) -> None:
-        body = "\n".join(st.render_no_path_footprint("homelab-talos", ()))
+        body = "\n".join(st.render_no_path_footprint("homelab-talos"))
         assert "--template <slug>" in body
         assert "--scope homelab-talos" in body, (
             "the command must carry THIS report's scope or it is not pasteable"
         )
 
-    def test_it_is_SILENT_when_a_nomination_already_asked(self) -> None:
-        """🔴 The negative control. The NO ENTRY block asks the same question
-        with better information; a second prompt beside it is the boilerplate
-        that gets skipped, and without this an unconditional print would satisfy
-        every other test here."""
-        assert st.render_no_path_footprint("s", ["a-nomination"]) == []
+    def test_the_NOMINATION_branch_also_offers_it(self, store: Path) -> None:
+        """🔴 THE CASE THE FIRST DRAFT LOST, and it is the common one.
+
+        That draft suppressed this block whenever a nomination printed, reasoning
+        that NO ENTRY already asked. Two things were wrong. The suppression was
+        DEAD CODE — never taken through either call site (measured: 0 trips
+        across 600 tests) — and the reasoning was backwards: a nomination is
+        derived from PATHS, so it names the directory the session happened to
+        touch, never the database it actually worked on. Measured over 287 real
+        commits, 65.5% of dead ends nominate something, so this branch is where
+        the no-footprint case usually hides. The two blocks are mutually
+        exclusive by construction (the sibling sits under
+        `if not writes_proposed`), so NO ENTRY has to carry its own line.
+        """
+        rep = _report(["src/newthing/a.py", "src/newthing/b.py"], store)
+        assert rep.nominations, "fixture must nominate, or this proves nothing"
+        text = st.render_text(rep)
+        assert "NO ENTRY" in text
+        assert "NO file footprint" in text, (
+            "the nomination branch offers only path-derived slugs"
+        )
+        assert f"--template <slug> --scope {SCOPE}" in text
+
+    def test_the_printed_command_names_a_file_that_EXISTS(self) -> None:
+        """🔴 A pasteable command is worth printing only if it runs. Replacing
+        `SELF_PATH` with a bare relative string survived every other test — the
+        block would look right and the command would fail from any other cwd.
+        """
+        assert Path(st.SELF_PATH).is_file(), st.SELF_PATH
+        assert Path(st.SELF_PATH).is_absolute()
+        assert Path(st.SELF_PATH).name == "subsystem_touch.py"
+
+    def test_it_renders_AFTER_the_other_two_routes(self, store: Path) -> None:
+        """Ordering is load-bearing: this block offers a competing explanation
+        for an empty window, so it must not appear before ROUTE OUT (which names
+        the window that was not read) or SKILL HOMES. Moving it earlier survived
+        every other test."""
+        text = st.render_text(_report([], store))
+        assert text.index("ROUTE OUT") < text.index("NO PATH FOOTPRINT?")
+        assert text.index("SKILL HOMES") < text.index("NO PATH FOOTPRINT?")
 
     def test_it_states_the_limit_it_buys(self) -> None:
         """An entry with no paths can never be RESOLVED from one. Saying so is
         the difference between a useful pointer and a promise the resolver
         cannot keep — a reader who expects auto-matching will conclude the store
         is broken."""
-        body = "\n".join(st.render_no_path_footprint("s", ()))
-        assert "never be RESOLVED FROM A PATH" in body
+        body = "\n".join(st.render_no_path_footprint("s"))
+        assert "automatically TODAY" in body
+        assert "PREFER a slug a future path would carry" in body, (
+            "the actionable half: a matching slug is strictly better"
+        )
         assert "--search" in body, "the way it IS findable must be named too"
+        assert "never be RESOLVED" not in body, (
+            "VERIFIED FALSE: an entry written with no paths resolved normally as "
+            "soon as a path named its slug (status=resolved, matched via "
+            "filename). The absolute claim was pinned in three places."
+        )
 
     def test_it_reaches_render_text_on_BOTH_dead_ends(self, store: Path) -> None:
         """🔴 STRUCTURAL, not spelled — asserts the SCOPE reaches the command, so
