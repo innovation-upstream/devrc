@@ -20,22 +20,22 @@ not a build.
 
 ## State now
 
-- **Branch:** `main`. The base clone is a SHARED checkout and other sessions move it — it was
-  switched onto another session's branch twice mid-work today. Re-check `git branch --show-current`
+- **Branch:** `main` at `98ce099`, clean tracked tree. The base clone is SHARED — other
+  sessions have moved it mid-work twice today. Re-check `git branch --show-current`
   immediately before any write; do the work in a worktree.
-- **Merged this session (6):** `#467` the doc-hook measurement · `#469` flake.lock + the opencode
-  pin re-derived at 1.18.16 · `#470` census write-activity · `#481` `SKILL HOMES` routing ·
-  `#485` `NO PATH FOOTPRINT?` routing · `#494` the worktree-bucket measurement.
-  (Other PRs merged today — 479, 482–484, 486–490 — are **other sessions'**, not this one's.)
-- **The dead-end report is now complete.** Three routes, one per failure mode:
-  `ROUTE OUT` (wrong window) → `SKILL HOMES` (right lesson, wrong home) → `NO PATH FOOTPRINT?`
-  (right home, no window at all). All three fire only on `looked-at-nothing`/`no-match`; a
-  resolved run stays silent, which is pinned by a negative control in each.
-- **Store:** 35 entries · 5 scopes. `census` now reports write ACTIVITY (newest write, entries
-  touched in 24h/7d) beside the counts, because the counts are creation-events only and could
-  not tell an appending writer from a dead one.
-- 🔴 **HOSTS ARE SPLIT and this is not resolved:** laptop on opencode **1.18.16** (converged +
-  verified at the consumer), workbench still on **1.18.4**. See the open investigation below.
+- 🔴 **HOSTS ARE CONVERGED — the split recorded below is CLOSED.** `ship.sh` ran clean and
+  was verified AT THE CONSUMER, not at the deploy: `readlink -f $(command -v opencode)` on
+  the workbench **and** the laptop both resolve to
+  `/nix/store/rcrzfd71k96f1r55533lzc16p7ix3v22-opencode-1.18.16`. 432 (workbench) / 393
+  (laptop) managed artifacts, 0 dangling, 0 absent. The dev-host gate that was red here
+  (`assert '1.18.4' == '1.18.16'`) now passes.
+- **Merged since the last handoff (3 mine):** `#496` the `--push` pre-check, rewritten onto
+  `ls-remote` after audit · `#498` the index write ungated · `#502` the deployed-state doc
+  lines updated for the convergence.
+  (`#492`, `#497`, `#499`, `#500` merged today are **other sessions'**.)
+- **The handoff skill's own step 4 no longer asks y/N** and the change is DEPLOYED (verified
+  in `~/.claude/skills/handoff/SKILL.md`, not inferred from the merge). Step 5's push gate is
+  kept, and the asymmetry is stated in the source so it does not get "harmonised".
 
 ## Open investigations — live diagnosis state
 
@@ -175,19 +175,52 @@ which reads the path distribution without pretending to be those sessions.
   `<name>.py`; heredoc bodies (`python3 - <<'PY'`) are DATA yet split into fake invocations;
   `-m pytest`/`-c`. Require an exact basename match, strip heredocs, reject `-c`/`-m`/`-`.
 
+### RESOLVED 2026-08-15 — the opencode host split (kept for the trail, do not re-open)
+Both hosts are on 1.18.16, verified at the consumer (values above). The five DEPLOYED-STATE
+doc lines went false exactly as predicted, and the version ledger **caught it**: updating
+them orphaned all five exemptions and the suite went red. 🔴 The prediction in the previous
+revision — "the ledger exempts them, so nothing will catch it" — was WRONG, and usefully so:
+the exemptions themselves are asserted, so the shrink direction fires. The category earned
+its separate name: *a historical record never stops being true; a deployed-state claim stops
+the day you ship.*
+
+### One test failed ONCE and I could not reproduce it — three mechanisms eliminated
+- **Symptom:** during the `#496` merge resolution, the combined run of
+  `test_handoff_doc.py + test_subsystem_touch.py` failed at
+  `test_the_LENGTH_bound_is_not_vacuous_git_WOULD_have_expanded_it`,
+  `scripts/tests/test_subsystem_touch.py:5841`: `assert expanded == [sha]`, where
+  `expanded = _run_git(repo, "rev-parse", f"--disambiguate={sha[:3]}").split()`.
+- **Ruled out — prefix collision** (my first theory, and the plausible one): a 3-hex prefix
+  matching more than one object. **0 of 550** trials, measured at TWO repo shapes — 0/250 on a
+  minimal repo, then 0/300 on the REAL fixture (`_init_repo` + `_commit`, ~9 reachable
+  objects) after the first probe used the wrong shape.
+- **Ruled out — order dependence:** `pytest-randomly` is NOT installed (checked
+  `importlib.util.find_spec`), so collection order is deterministic; the same order passed
+  on re-run.
+- **Ruled out — a swallowed git failure:** `_run_git` asserts `proc.returncode == 0`
+  (`test_subsystem_touch.py:184`), so a transient git failure surfaces there, not at 5841.
+- **Ruled out — merge-induced:** passes in isolation, passes in the same combined pair, and
+  40/40 in a loop on the merged tree. The authoritative nix gate is green.
+- **Leading hypothesis:** none that survives. Say so rather than picking one.
+- **Next probe (verbatim):** if it recurs, capture the FULL failure block before re-running —
+  `nix-shell -p python3Packages.pytest python3Packages.pyyaml --run "python3 -m pytest
+  scripts/tests/test_subsystem_touch.py scripts/tests/test_handoff_doc.py -q -rs" >
+  /tmp/f.log 2>&1` — and read `expanded`'s actual value. Every elimination above assumed the
+  assertion compared `[sha]` against a LONGER list; a shorter or different one points
+  elsewhere and none of this work applies.
+
 ## Next steps (ranked)
-1. **Decide the workbench convergence** (investigation above). It needs your call because
-   `ship.sh` would now switch another session off its branch, and the doc-line fix follows
-   immediately after.
-2. **Write the `__pycache__` false-green into `claude/RULES.md`.** `cp -a` preserves `__pycache__`
-   and a SAME-LENGTH source mutation does not change file size, so the `.pyc` staleness check
-   (mtime+size) misses it and pytest imports the CACHED module — a mutation battery then reports a
-   mutant as SURVIVED when it never ran. Bit this session twice. Needs an eviction in the same
-   commit (`scripts/tests/test_rules_size.py` owns the ceiling and prints the playbook).
-3. **Parse the next few organic continuations** for the doc-hook rate (probe above).
-4. **Watch the census ACTIVITY lines, not the total** — `newest write`, `touched in 24h/7d`. The
-   number worth watching is the `analyze-service` share: 13 of 14 stamped entries are `handoff`,
-   so the store is still effectively single-writer.
+1. **Nothing is queued.** Every item raised this session is landed and verified. The two
+   standing offers, both declined or deferred by the operator, are below.
+2. **The `__pycache__` false-green is still unwritten** (operator said skip, 2026-08-15).
+   `cp -a` preserves `__pycache__` and a SAME-LENGTH source mutation does not change file
+   size, so the `.pyc` staleness check (mtime+size) misses it and pytest imports the CACHED
+   module — a mutation battery then reports a mutant as SURVIVED when it never ran. Bit this
+   session twice. It belongs in `claude/RULES.md` and needs an eviction in the same commit.
+3. **Get an ORGANIC doc-hook sample** — still `n=0` uncontaminated. Do not stage a third
+   probe; parse the next few real continuations.
+4. **Watch the `analyze-service` share of the census**, not the total: 13 of 14 stamped
+   entries are `handoff`, so the store is effectively single-writer.
 
 ## Gotchas / decisions / dead-ends
 
@@ -258,6 +291,32 @@ which reads the path distribution without pretending to be those sessions.
   by re-reading; always caught by running something. The `#494` measurement REFUTED the
   recommendation that motivated it — three agent reports of "0 paths under cwd" were one turn from
   becoming a structural claim in the store, and the real rate was **1 in 12**.
+
+- 🔴 **`git fetch` is NOT a safe read in a shared checkout, and `FETCH_HEAD` is NOT a private
+  scratch ref.** Measured: `fetch` writes `refs/remotes/<remote>/<branch>` in the COMMON
+  gitdir (shared by every worktree) plus objects and reflogs, and two concurrent
+  `git fetch --quiet origin main` produced `cannot lock ref` in **30 of 30** trials. Worse,
+  reading `HEAD..FETCH_HEAD` in a SECOND process is racy — another session's fetch in between
+  made a pushability check return a confident `0` on a checkout that was genuinely behind.
+  **Use `git ls-remote` when you only need to know what the remote has**: zero local writes,
+  12/12 concurrent runs clean.
+- 🔴 **A ledger that RESTATES cannot catch what it was written for.** A test asserting "every
+  status the module emits is documented in the skill" iterated a hand-written literal, so the
+  status added by the very PR that needed it walked straight past. Deriving the list from the
+  module (`re.findall(r'status=([a-z-]+)', src)`) caught a SECOND undocumented status
+  immediately.
+- 🔴 **Two guards reaching one outcome cannot be told apart by any test.** A `cat-file -e`
+  check and `merge-base --is-ancestor` both refused on an unknown sha, so deleting either
+  stayed green — the dead-predicate shape. Keep one, or pin the DIAGNOSTIC that differs
+  (which is what made the second one worth keeping elsewhere: the message, not the verdict).
+- 🔴 **A test can be satisfied through the wrong branch.** An ahead-and-behind fixture never
+  reached the ancestry comparison because its repo had never fetched the remote commit, so
+  the unknown-tip path decided and flattening `merge-base` to `False` stayed green. Ask which
+  branch your fixture actually takes.
+- **Reading a diff/grep is an instrument too.** A case-wrong pattern (`raw` vs `RAW`) reported
+  content missing from `origin/main` that was present; a typo'd test path made pytest say "no
+  tests ran"; a `-k` selector that matched the wrong 4 tests made a mutant look survived.
+  Give every zero a positive control.
 
 ## How to verify
 
