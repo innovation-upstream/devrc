@@ -61,17 +61,29 @@ STORE = Path(os.environ.get("SUBSYSTEM_STORE_ROOT",
 
 # A phrase long enough that sharing it with the store is copying, not coincidence.
 #
-# 8 words. Measured shared-phrase counts between the store and this repo, over
-# the whole tracked tree on 2026-08-15:
+# 8 words. Shared-phrase counts between the store and this repo, counted as
+# distinct (file, phrase) pairs using THIS module's own `_phrases` and
+# `_tracked_text_files` — 825 tracked files against 35 store entries with the own
+# scope excluded, measured 2026-08-15 at the PR tip:
 #
-#     N=4 → 348    N=5 → 44    N=6 → 3    N=7 → 2    N=8 → 0
+#     N=4 → 477    N=5 → 49    N=6 → 3    N=7 → 1    N=8 → 0
 #
-# 🔴 STATED HONESTLY, because the first version of this comment was not: it
-# claimed "at 8 every surviving phrase in a manual read was specific to one
-# entry", which cannot be true when nothing survives at 8. 8 is the FIRST value
-# that yields zero — it is tuned to a noise floor, not to a measured precision
-# point, and ≤5 is unusable (348 hits is ordinary technical English this repo
+# 🔴 THE METHOD IS STATED BECAUSE TWO EARLIER VERSIONS OF THIS COMMENT WERE
+# WRONG. The first justified 8 by claiming "at 8 every surviving phrase in a
+# manual read was specific to one entry" — impossible, since nothing survives at
+# 8. The second quoted 348/44/3/2/0, which an audit could not reproduce against
+# any tree-and-filter combination; re-measured with the method above it is the
+# row printed here. A distribution with no stated denominator or tokenizer is not
+# a measurement, it is a memory.
+#
+# 8 is the FIRST value that yields zero — tuned to a noise floor, not to a
+# measured precision point. ≤5 is unusable (ordinary technical English this repo
 # writes on its own).
+#
+# ⚠ The residual N=6 and N=7 hits are in `claude/skills/analyze-service/SKILL.md`
+# and `claude/skills/clawgate/reference/task-api.md` — files this work does not
+# touch, so they are pre-existing and out of its scope. They are named rather
+# than left as an anonymous "3" that a future reader would have to re-derive.
 #
 # ⚠ The corollary, which is the real caveat: a copy of SEVEN words or fewer is
 # invisible here, and one such fixture did survive the first fix round at exactly
@@ -115,6 +127,11 @@ def is_scannable(path: Path) -> bool:
     predicate against synthetic files is also a stronger guard: it asserts the
     rule rather than the repo's current contents.
     """
+    # ⚠ BOTH HALVES OF THIS LINE ARE UNKILLED BY MUTATION, and that is stated
+    # rather than left to be rediscovered: the PNG fixture carries a NUL so the
+    # extension check is redundant for it, and `open()` on a directory raises
+    # OSError so `is_file()` is redundant too. They are kept as cheap early exits
+    # — a NUL sniff on every tracked file is the slower path — not as guards.
     if path.suffix.lower() in _BINARY_EXT or not path.is_file():
         return False
     try:
@@ -122,6 +139,11 @@ def is_scannable(path: Path) -> bool:
         # Cheaper and more honest than guessing from the name.
         return b"\0" not in path.open("rb").read(8192)
     except OSError:
+        # ⚠ SILENTLY DROPPED, and so is a UTF-16 file (its NULs read as binary).
+        # The module docstring says it compares "any tracked repo file"; these two
+        # cases are the exception. Both are vanishingly rare in this repo and
+        # neither can hold store prose in a form the tokenizer would match, but
+        # the claim is narrowed here rather than left overbroad.
         return False
 
 
@@ -332,29 +354,6 @@ def test_the_live_check_finds_a_planted_copy(tmp_path, monkeypatch):
     assert len(hits) == 1 and "some-scope/svc.md" in hits[0], hits
 
 
-if __name__ == "__main__":
-    import sys as _sys
-
-    try:
-        offenders = live_check()
-    except (FileNotFoundError, RuntimeError) as exc:
-        print(f"store-content check DID NOT RUN: {exc}")
-        raise SystemExit(2) from exc
-    if offenders:
-        print("client-confidential store prose has been copied into this PUBLIC repo:")
-        for line in offenders:
-            print(line)
-        print(
-            f"\n{len(offenders)} site(s). A push is irreversible. Reword with INVENTED "
-            f"content that preserves only the SHAPE under test — never the wording. "
-            f"Do NOT add the phrase to an exclusion list: the phrase itself is the "
-            f"thing that must not be committed."
-        )
-        raise SystemExit(1)
-    print("store-content check: no shared phrases. (Live comparison ran.)")
-    _sys.exit(0)
-
-
 def test_the_denominator_guard_fires_on_a_too_small_store(tmp_path, monkeypatch):
     """An audit found this guard reachable and correct but never watched to fire —
     it survived deletion against a green suite. It is the thing standing between
@@ -418,3 +417,26 @@ def test_the_scan_covers_extensionless_and_js_files(tmp_path):
         "the NUL sniff is not running — an unlisted binary extension is being "
         "compared as prose"
     )
+
+
+if __name__ == "__main__":
+    import sys as _sys
+
+    try:
+        offenders = live_check()
+    except (FileNotFoundError, RuntimeError) as exc:
+        print(f"store-content check DID NOT RUN: {exc}")
+        raise SystemExit(2) from exc
+    if offenders:
+        print("client-confidential store prose has been copied into this PUBLIC repo:")
+        for line in offenders:
+            print(line)
+        print(
+            f"\n{len(offenders)} site(s). A push is irreversible. Reword with INVENTED "
+            f"content that preserves only the SHAPE under test — never the wording. "
+            f"Do NOT add the phrase to an exclusion list: the phrase itself is the "
+            f"thing that must not be committed."
+        )
+        raise SystemExit(1)
+    print("store-content check: no shared phrases. (Live comparison ran.)")
+    _sys.exit(0)

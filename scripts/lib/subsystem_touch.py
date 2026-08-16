@@ -2675,6 +2675,13 @@ class EntryJournal:
         Reported separately from both other populations: this is neither an open
         action nor a guess about one, it is a WRITE THAT DID NOT LAND. Treating
         it as either would hide the only thing the writer can act on.
+
+        ⚠ Reverting this to the raw `b.near_miss_marker` is an EQUIVALENT mutant
+        (measured — it survives the battery), because `near_miss_marker` already
+        returns False whenever `openness` is set, so the two sets are identical.
+        Its SIBLING is not: reverting `unmarked_action_bullets` to the raw
+        predicate reintroduces the double-count and IS killed. Both go through
+        `openness_population` anyway, so the precedence has exactly one home.
         """
         return tuple(b for b in self.bullets if b.openness_population == "near-miss")
 

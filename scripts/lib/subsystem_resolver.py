@@ -1098,19 +1098,40 @@ _NEAR_MISS_MARKER = re.compile(
     r"^[-*][ \t]+"
     r"(?:\d{4}-\d{2}-\d{2}[^A-Za-z]{0,3})?"    # a date in any of its corpus forms
     r"[^A-Za-z0-9]{0,4}"                        # `**`, quotes, stray punctuation
-    r"(OPEN|RESOLVED)\b",
+    r"(OPEN|RESOLVED)"
+    # an optional sha / PR reference / parenthetical between marker and terminator
+    r"(?:[ \t]*(?:[0-9a-fA-F]{7,40}|PR#\d+|#\d+|\([^)]{1,30}\)))*"
+    r"[^A-Za-z0-9\n]{0,4}"
+    r":",                                       # 🔴 THE DISCRIMINATOR
+    re.I,
 )
-# 🔴 NO `re.I`, and a delta re-audit is why. With it, this fired on ordinary
-# prose — `- Open questions remain about the retry budget.`, `- Resolved by
-# pinning the image tag.`, `- resolved upstream in 1.2.3.` — each producing a 🔴
-# "DID NOT PARSE, fix the LINE" advisory about a correct sentence. That is how a
-# loud path gets ignored, which is the failure this detector exists to avoid.
-# The tool's own advisory text says the marker "is upper-case"; matching
-# case-insensitively contradicted it. `test_ordinary_prose_using_the_word_open_is_
-# _not_a_near_miss` did not catch it — it probed the word MID-sentence, where a
-# `^`-anchored pattern structurally cannot match, so it was a vacuous guard and
-# deleting `re.I` SURVIVED the whole suite. The replacement probes sentence-INITIAL
-# capitalised prose, which is where the false positives actually were.
+# 🔴 THE DISCRIMINATOR IS THE TERMINATOR, NOT THE CASE — and getting that wrong
+# cost two rounds in opposite directions.
+#
+# Round 1 matched case-insensitively with no `:` requirement and fired on ordinary
+# English ("Open questions remain…", "Resolved by pinning…"). Round 2 "fixed" it by
+# dropping `re.I` — which silently lost `Open:` and `Resolved <sha>:`, i.e. the
+# likeliest typos of all, since a writer sentence-cases by habit. Worse, the
+# comment justifying that drop asserted the detector "fired on ordinary prose" as
+# though measured; it was not. Measured over the live 196-bullet corpus, `re.I`
+# produced **0** false positives. The three examples were constructed.
+#
+# What actually separates an attempted marker from prose is that the attempt ends
+# in `:` right after the marker (optionally with a sha, `PR#n` or a parenthetical
+# between). Measured across all four candidates on a fixed matrix — 8 attempted
+# shapes, 9 prose shapes, 196 live bullets:
+#
+#     no re.I, no terminator (shipped in round 2)   5/8 found   0 FP   0 corpus
+#     re.I, no terminator    (shipped in round 1)   8/8 found   6 FP   0 corpus
+#     terminator + re.I      (this)                 8/8 found   1 FP   0 corpus
+#     terminator + any-one-token + re.I             7/8 found   2 FP   0 corpus
+#
+# ⚠ THE ONE RESIDUAL FALSE POSITIVE IS ACCEPTED AND NAMED: `- Resolved: we decided
+# to keep it.` is flagged. It is genuinely ambiguous — in a store that HAS a
+# `RESOLVED:` convention, a bullet opening `Resolved:` is more likely an attempt
+# than prose — and the advisory is non-blocking, so the cost of being wrong is one
+# line of output. Do not "fix" it by dropping the case-insensitivity again; that
+# trade was measured and it is worse.
 
 
 def _is_fence(line: str) -> bool:
@@ -1252,7 +1273,7 @@ class JournalBullet:
 
     @property
     def openness_population(self) -> str:
-        """WHICH of the five populations this bullet belongs to. Exactly one.
+        """WHICH of the six populations this bullet belongs to. Exactly one.
 
         🔴 THE SINGLE SOURCE OF THE PRECEDENCE ORDER, and the reason it exists.
         A delta re-audit found one bullet counted TWICE in the writer-facing
@@ -1275,6 +1296,14 @@ class JournalBullet:
                           action" is a guess about the same line.
           `unmarked`      no marker, and the prose matches the narrow floor.
           `none`          everything else — the overwhelming majority.
+
+        ⚠ ONLY `near-miss` > `unmarked` IS OBSERVABLE, and the docstring says so
+        rather than implying all five levels are load-bearing. `near_miss_marker`
+        and `unmarked_action` both self-suppress when `openness` is set, so
+        reordering `open`/`resolved`/`unverifiable` against them are EQUIVALENT
+        mutants that no test can kill (measured — they survive the battery). The
+        order is still written most-certain-first because that is what makes it
+        readable; just do not count those levels as guards.
         """
         if self.openness == OPENNESS_OPEN:
             return "open"

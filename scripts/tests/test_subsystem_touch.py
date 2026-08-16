@@ -8894,8 +8894,8 @@ class TestPopulationsAreMutuallyExclusive:
         near-miss wins because "your write did not land" is actionable and
         specific; "this reads like an open action" is a guess about the same line.
         """
-        for line in ("- OPEN FIX (1 line): widen the timeout.",
-                     "- 2026-08-15 OPEN: the retry budget is not yet addressed."):
+        for line in ("- 2026-08-15 OPEN: the retry budget is not yet addressed.",
+                     "- Open: the retry budget is not yet addressed."):
             (b,) = sr.parse_journal_bullets(line)
             assert b.near_miss_marker and b.unmarked_action, (
                 f"precondition: {line!r} must match BOTH detectors, or this test "
@@ -8926,9 +8926,56 @@ class TestPopulationsAreMutuallyExclusive:
         # quoted exactly once, under exactly one heading
         assert body.count("  ? ") == 1
         assert ("DID NOT PARSE" in body) != ("AT LEAST" in body)
-        # and the validator's classification matches
-        actions = st.scan_open_actions([])  # smoke: empty input is empty
-        assert actions == ()
+
+    def test_the_writer_block_renders_a_genuinely_BOTH_bullet_exactly_once(self):
+        """🔴 THE GUARD THAT WAS MISSING, and its absence let the round-2 defect be
+        reintroduced against a green suite: reverting `near_miss_bullets` to the
+        raw `b.near_miss_marker` predicate left 1301 tests passing while the writer
+        block quoted one bullet under BOTH headings again.
+
+        The earlier test asserted on the `openness_population` PROPERTY, which the
+        revert does not touch. Nothing rendered a genuinely-both bullet through
+        `_render_open_actions`, so nothing could see it. This does.
+        """
+        line = "- 2026-08-15 OPEN: the retry budget is not yet addressed."
+        (b,) = sr.parse_journal_bullets(line)
+        assert b.near_miss_marker and b.unmarked_action, (
+            "precondition: this line must match BOTH raw detectors, or the test "
+            "cannot observe the consolidation it exists to pin"
+        )
+        body = "\n".join(st._render_open_actions(_journal(line), "2026-08-15", ""))
+        assert body.count("  ? ") == 1, "the bullet is quoted more than once"
+        assert ("DID NOT PARSE" in body) != ("AT LEAST" in body), (
+            "the bullet appears under two headings"
+        )
+
+    def test_the_writer_block_and_validate_classify_a_BOTH_bullet_the_SAME_way(
+        self, tmp_path
+    ):
+        """🔴 THE ACTUAL SEAM. The previous version of this test called
+        `scan_open_actions([])` and asserted it returned `()` — an empty-input
+        smoke test whose comment claimed "the validator's classification matches".
+        Nothing was compared, which is why the divergence survived.
+        """
+        line = "- 2026-08-15 OPEN: the retry budget is not yet addressed."
+        store = tmp_path / "s"
+        (store / SCOPE).mkdir(parents=True)
+        (store / SCOPE / "svc.md").write_text(_entry_with([line]), encoding="utf-8")
+
+        rows = st.scan_open_actions([store / SCOPE / "svc.md"])
+        assert len(rows) == 1, "the validator split one bullet across rows"
+        row = rows[0]
+        validator_says = (
+            "near-miss" if row.near_miss else "unmarked" if not row.declared else "open"
+        )
+
+        body = "\n".join(st._render_open_actions(_journal(line), "2026-08-15", ""))
+        writer_says = "near-miss" if "DID NOT PARSE" in body else "unmarked"
+
+        assert validator_says == writer_says == "near-miss", (
+            f"the two surfaces disagree about the same bullet: validator says "
+            f"{validator_says!r}, writer block says {writer_says!r}"
+        )
 
     def test_scan_open_actions_emits_one_row_per_bullet(self, tmp_path):
         store = tmp_path / "s"
@@ -8956,6 +9003,10 @@ class TestNearMissDoesNotFireOnOrdinaryProse:
         "- 2026-08-15: Resolved by pinning the image tag.",
         "- resolved upstream in 1.2.3.",
         "- **Open** by design.",
+        # ⚠ `Opening…` is a WEAK probe, kept and labelled: it survives both
+        # restoring `re.I` and deleting `\b`, so it pins nothing on its own. The
+        # discriminating cases are the ones above it, which have no `:` after the
+        # marker word — that is what the pattern actually tests.
         "- Opening the pool early caused the stall.",
     ])
     def test_capitalised_prose_is_not_an_attempted_marker(self, line):
@@ -8968,3 +9019,56 @@ class TestNearMissDoesNotFireOnOrdinaryProse:
     def test_the_marker_is_still_case_SENSITIVE_in_the_real_grammar(self):
         (b,) = sr.parse_journal_bullets("- 2026-08-15: open: not a marker.")
         assert b.openness is None
+
+
+class TestTheDiscriminatorIsTheTerminatorNotTheCase:
+    """🔴 TWO ROUNDS GOT THIS WRONG IN OPPOSITE DIRECTIONS, so both are pinned.
+
+    Round 1 matched case-insensitively with no `:` requirement and fired on
+    ordinary English. Round 2 dropped `re.I` — which silently lost `Open:` and
+    `Resolved <sha>:`, the likeliest typos of all, because a writer sentence-cases
+    by habit. Neither direction had a test that could see the other's failure.
+
+    Measured over the live 196-bullet corpus, `re.I` produced ZERO false
+    positives — so case was never the discriminator. The terminator is.
+    """
+
+    @pytest.mark.parametrize("line", [
+        "- 2026-08-15: Open: the retry budget.",
+        "- 2026-08-15: Resolved abc1234: done.",
+        "- Open: no date, still an attempt.",
+    ])
+    def test_a_SENTENCE_CASED_attempt_is_still_caught(self, line):
+        """The round-2 regression. Silence here is the 22-day failure by typo."""
+        (b,) = sr.parse_journal_bullets(line)
+        assert b.near_miss_marker is True
+
+    @pytest.mark.parametrize("line", [
+        "- Open questions remain about the retry budget.",
+        "- 2026-08-15: Resolved by pinning the image tag.",
+        "- resolved upstream in 1.2.3.",
+        "- **Open** by design.",
+    ])
+    def test_prose_with_NO_terminator_is_still_rejected(self, line):
+        """The round-1 regression. Each of these has the marker word and no `:`
+        after it — which is exactly what separates prose from an attempt."""
+        (b,) = sr.parse_journal_bullets(line)
+        assert b.near_miss_marker is False
+
+    def test_a_sha_or_reference_may_sit_between_the_marker_and_the_colon(self):
+        for line in ("- 2026-08-15: RESOLVED abc1234 (some-repo): closed.",
+                     "- 2026-08-15: RESOLVED PR#505: closed."):
+            (b,) = sr.parse_journal_bullets(line)
+            assert b.near_miss_marker is True, line
+
+    def test_the_ONE_accepted_false_positive_is_pinned_as_a_decision(self):
+        """`- Resolved: we decided to keep it.` IS flagged, deliberately.
+
+        Pinned so it is a recorded decision rather than an accident someone
+        "fixes" later by dropping case-insensitivity — that trade was measured
+        (8/8 found + 1 FP, versus 5/8 found + 0 FP) and it is worse. In a store
+        that HAS a `RESOLVED:` convention, a bullet opening `Resolved:` is more
+        likely an attempt than prose, and the advisory is non-blocking.
+        """
+        (b,) = sr.parse_journal_bullets("- Resolved: we decided to keep it.")
+        assert b.near_miss_marker is True
