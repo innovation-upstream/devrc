@@ -36,3 +36,19 @@ __pycache__/
 # NodePort and the Brave profile name. `claudedocs/` is otherwise committable,
 # so this one file is excluded by name.
 /claudedocs/dl-router-design-*.md
+
+# Per-host direnv entrypoint. It is `use opencode` today and holds nothing
+# secret, but an .envrc is exactly where a credential export lands, and this
+# repo is PUBLIC — so it must not be stageable even by accident. Deliberately
+# NOT shipped with a worktree either (see RULES.md "Git Workflow": copy it in
+# and `direnv allow`, or the worktree gets the wrong toolchain). Unanchored on
+# purpose: the hazard is the FILE NAME, not the depth, and nothing named .envrc
+# is tracked at any depth today. `.envrc-example` is a different name and stays
+# committable.
+.envrc
+
+# opencode's per-repo runtime dir: node_modules, a generated package.json, and
+# a `commands` symlink into the gitignored .claude/. Its own inner .gitignore
+# covers the generated files but not the directory itself, so without this line
+# the dir shows up untracked forever and is one `git add .` from being staged.
+/.opencode/
