@@ -26,9 +26,11 @@ WHAT FIRES IT — THREE CONDITIONS, ALL REQUIRED
 -----------------------------------------------
   1. the session READ a specific clawgate task id (above), and
   2. REAL WORK happened after that read — an Edit/Write/NotebookEdit tool call, or a
-     Bash `git commit` / `git push` / `gh pr create`, and
+     Bash `git commit` / `git push` / `gh pr create|merge` / `gh release create`
+     **in command position, outside quotes and comments** (see WORK_BASH_PAT), and
   3. a LIVE re-read of the board at Stop shows NO comment authored by `claude-code`
-     with `createdAt` at or after the first read.
+     with `createdAt` at or after the MOST RECENT WORK EVENT (not merely at or after
+     the read — see the anchor note below).
 
 Condition 2 is the false-positive killer and it is not optional. The SKILL's own
 step 2 is "EVALUATE and report to Zach. Do NOT flip status yet" — a session that
@@ -41,6 +43,18 @@ board says so and the guard goes quiet, including for a comment written by a
 different process, a subagent, or a devpod agent. A hook that tracked only its own
 observations would keep firing after the work was correctly written back.
 
+🔴 THE COMPARISON ANCHOR IS THE LAST WORK EVENT, NOT THE READ — and that is a fix,
+not a detail. The clawgate skill's own pickup ritual posts a **"Starting" comment
+immediately after the read and BEFORE the work**. Anchored on the read, that comment
+satisfies the guard at pickup and the hook can then never observe a missing
+COMPLETION write-back: its forward yield on every ritual-following session is zero,
+which is the opposite of what it was built for. Anchored on the last work event,
+`Starting -> work -> Stop` correctly owes a comment and `Starting -> work -> Done ->
+Stop` is satisfied. The CLOCK_SKEW_ALLOWANCE_SECS below is doing real work on this
+path: a `Done` comment followed within the allowance by a `git push` is still
+satisfied, so only work that lands well AFTER the last comment re-arms the guard.
+Bounded, not free — see MULTI-TURN COST below.
+
 🔴 A LIVE READ THAT FAILS IS NOT A CLEAN BILL OF HEALTH. Unreachable board, no
 client, unparseable JSON — all of those mean "could not measure", and this hook says
 so out loud with a NON-BLOCKING notice rather than going silent. RULES.md: an empty
@@ -49,16 +63,50 @@ down" is reporting the same observable as "the ritual was followed".
 
 ESCALATION LADDER — per session, per task id
 ---------------------------------------------
-    fire 1  ->  decision: block      (the turn does not end; `reason` reaches the model)
-    fire 2  ->  decision: block
-    fire 3  ->  additionalContext    (non-blocking; the turn ends)
+    fire 1  ->  decision: block      (FORCED CONTINUATION; `reason` reaches the model)
+    fire 2  ->  decision: block      (FORCED CONTINUATION)
+    fire 3  ->  systemMessage        (the turn ENDS; operator sees it, model does not)
     fire 4+ ->  silent
+
+    TRUE COST of a measured missing write-back: exactly TWO forced continuations.
+    TRUE COST of a "could not measure" notice:  ZERO forced continuations, and it
+    runs on its OWN counter (`unknown-<id>`), so a board that is down for the first
+    Stops cannot spend the block budget a genuinely missing write-back needs later.
+
+🔴 `additionalContext` IS NOT A NON-BLOCKING CHANNEL ON Stop, AND THE FIRST VERSION
+OF THIS FILE WAS WRONG ABOUT THAT. Re-derived from the installed bundle (see the
+controls below), `Ycd` — the Stop-hook driver — pushes an `additionalContexts` entry
+into the SAME array as a `blockingError`:
+
+    if (F.blockingError)      { …; E.push(G); … }
+    if (F.additionalContexts) { …; E.push(j); … }
+    …
+    if (E.length > 0) return { blockingErrors: E, preventContinuation: !1 };
+
+and its caller treats ANY non-empty `blockingErrors` as a forced continuation —
+re-querying the model with `stopHookActive:!0` and incrementing the very counter
+that `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` (default 8) bounds. So the old "relent" rung
+did not relent: an unreachable board cost THREE forced continuations, not zero.
+
+`systemMessage` is the channel that genuinely does not. In the same bundle it is
+yielded on the MESSAGE channel, never into `E`:
+
+    if (j.systemMessage) yield { message: Va({ type:"hook_system_message", … }) };
+
+`Ycd` yields `F.message` straight through and pushes nothing, so `E` stays empty and
+the caller returns `{reason:"completed"}` — the turn ends. It is rendered to the
+operator as `"<hookName> says: <content>"`, and its attachment-to-messages entry is
+`hook_system_message: () => []`, i.e. it is NOT fed back to the model. That is the
+right shape for a rung whose whole job is to stop nagging the model and tell the
+human instead.
 
 Derived from the INSTALLED CLI bundle, not from documentation (claude-code 2.1.220,
 `bin/.claude-wrapped` — NOT the 20 KB `bin/claude` wrapper, a grep against which
-returns a meaningless zero). Both controls were run against the 275 MB bundle before
-any of this was believed: positive `hookEventName` -> 68 matches, negative
-`zzzNOTPRESENTzzz_devrc_control` -> 0.
+returns a meaningless zero). Both controls were re-run against the 275 MB bundle
+before ANY of the above was believed a second time: positive
+`CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` -> 5 matches, negative
+`zzQuuxNotPresentNonce9137` -> 0. (`ugrep` chokes on `.{N}` against a binary this
+size; the reads were done with plain `bytes.find` in Python.)
 
   * The hook output schema is a top-level object, NOT a hookSpecificOutput arm:
         v.object({continue: …, suppressOutput: …, stopReason: …,
@@ -77,7 +125,8 @@ any of this was believed: positive `hookEventName` -> 68 matches, negative
         if (Kt > 0 && yo > Kt) … "A hook blocked the turn from ending N consecutive
         times — overriding and ending turn."
     Our MAX_BLOCKS = 2 is deliberately far stricter than that 8. A guard that has to
-    be overridden by the harness has already lost the operator.
+    be overridden by the harness has already lost the operator. 🔴 That cap counts
+    `additionalContext` rungs TOO — which is why fire 3 is a `systemMessage`.
 
 🔴 THERE IS DELIBERATELY NO `stop_hook_active` GATE, and that is the one place this
 hook diverges from the CLI's own advice ("check stop_hook_active and return success
@@ -89,21 +138,64 @@ matters. The interaction with MAX_TASKS is named rather than hidden: several tas
 each blocking twice can in principle stack toward the CLI's 8, at which point the
 CLI ends the turn with a warning — a graceful ceiling, not a wedge.
 
-🔴 SubagentStop IS REFUSED. A subagent's turn never reaches the operator, so it owes
-them nothing (next-step-nudge.py refuses it for the same reason). PostToolUse is NOT
-refused for subagents: in both measured failures the work ran in a dispatched
-subagent, and its edits and commits are exactly the evidence condition 2 needs.
+🔴 SubagentStop IS REFUSED, AND SO IS EVERY PostToolUse CARRYING AN `agent_id`.
+A subagent's turn never reaches the operator, so it owes them nothing
+(next-step-nudge.py refuses SubagentStop for the same reason). The PostToolUse half
+is the one that was WRONG in the first version of this file, and it was wrong
+structurally rather than by degree: the bundle builds every hook payload through
+
+    function Kf(e, t, r) { … return { session_id: t ?? kt(), …,
+                                      agent_id: r?.agentId, agent_type: … } }
+
+and PostToolUse calls it as `{...Kf(i, void 0, o), hook_event_name:"PostToolUse", …}`
+— second argument `void 0`. So a tool call made INSIDE a dispatched subagent arrives
+carrying the PARENT's `session_id`, with only `agent_id` to tell them apart; the
+bundle's own schema says as much ("Use this field (not agent_type) to distinguish
+subagent calls from main-thread calls"). Accepting those armed the PARENT session's
+work flag off a subagent that merely happened to edit a file, and the parent's Stop
+then blocked on a card the parent never touched. MEASURED as a false positive.
+
+🔴 SCOPE OF THE WORK FLAG — SESSION-WIDE, NOT PER-TASK, AND THAT IS A KNOWN COST.
+Nothing in a PostToolUse payload says WHICH task an edit belongs to, so "work
+happened" is necessarily a session-level fact. Two shapes therefore still fire
+without the session owing anything, and both are TESTED rather than hoped away:
+  * read task N, then do unrelated work in a different repo -> blocks on N;
+  * survey N and M, work on and write back only M -> blocks naming N.
+The escape is not prose. `--dismiss` (below) is a real, deterministic mechanism, it
+is named in the block text with the session id already filled in, and it clears that
+task from this session's ledger for good. The previous escape — "if you did NOT do
+work on this task, say so in one line and stop" — was measured NOT to work: the next
+Stop re-blocked with identical text, because saying something changes no state.
+
+MULTI-TURN COST OF THE WORK ANCHOR
+-----------------------------------
+Work that spans several turns fires once per turn until the per-task ladder is spent:
+at most TWO forced continuations and one `systemMessage`, then silence forever for
+that task in that session. A `Done` comment written within CLOCK_SKEW_ALLOWANCE_SECS
+of the last work event already satisfies it, so the shape that actually costs is
+"comment, then keep working for more than the allowance, then stop" — which is a turn
+whose write-back genuinely is stale. Pinned by tests, so the noise is measured rather
+than discovered in production.
 
 🔴 HOT PATH. PostToolUse fires after EVERY tool call of every session, and
-agent-ledger-hook.py already costs ~21 ms there. The fast path is: resolve the state
-dir from `session_id` (string work, no IO), ONE `os.path.exists`, and the trigger
-regex. A session that has never read a clawgate task and is not reading one now does
-nothing else — no directory creation, no state read, no subprocess, and it does not
-even IMPORT `subprocess` or `shutil` (see the deferred-import note below). That
-ordering is pinned by tests that COUNT the calls and read the module list out of
-`-X importtime`, because an earlier hook in this repo shipped with its throttle
-consulted AFTER the subprocess spawn while its comment claimed otherwise. Measured:
-13.9 ms/call against 8.6 ms for a bare interpreter start.
+agent-ledger-hook.py already costs ~21 ms there. The fast path is: refuse anything
+carrying an `agent_id` (one dict read), resolve the state dir from `session_id`
+(string work, no IO), ONE `os.path.exists`, and the trigger regex. A session that has
+never read a clawgate task and is not reading one now does nothing else — no
+directory creation, no state read, no subprocess, and it does not even IMPORT
+`subprocess` or `shutil` (see the deferred-import note below). That ordering is
+pinned by tests that COUNT the calls and read the module list out of `-X importtime`,
+because an earlier hook in this repo shipped with its throttle consulted AFTER the
+subprocess spawn while its comment claimed otherwise.
+
+Re-measured 2026-08-16 after the audit round, 30 runs per sample, four samples, on
+this host: 14.30 / 14.56 / 14.33 / 14.62 ms per call, against 14.57 / 14.43 / 14.14 /
+14.03 for the PRE-audit file measured in the same session and 7.7-8.2 ms for a bare
+interpreter start. I.e. PARITY — the run-to-run spread (~0.5 ms) is wider than the
+difference. Getting there took one deliberate change: the three work-detection
+patterns moved from module-level `re.compile` to pattern STRINGS compiled on first
+use, because none of them is reachable from the fast path (see their note below). A
+first cut with them compiled at import measured 14.7 against 13.9.
 
 🔴 FAIL-OPEN, ALWAYS. Every internal exception exits 0 with an empty stdout and
 blocks nothing. main() has exactly ONE exit and it is always 0. A hook that wedges a
@@ -115,12 +207,15 @@ WHAT THIS STRUCTURALLY CANNOT SEE (say it here, not in a report nobody re-reads)
   * a session that read the task via a route neither trigger matches (the board UI,
     an `/api/tasks?summary=1` list, someone pasting the body in);
   * whether the comment that DOES exist is any good — it checks that a `claude-code`
-    comment exists since the read, never what it says;
-  * the `in_progress` flip and the pre-start comment, neither of which it requires:
-    it gates the WRITE-BACK, which is the thing that was measured missing.
+    comment exists after the last work event, never what it says;
+  * WHICH task a given edit belongs to (see SCOPE OF THE WORK FLAG above);
+  * the `in_progress` flip, which it does not require: it gates the WRITE-BACK, which
+    is the thing that was measured missing.
 
 Deployed by `nix/home.nix`; registered on PostToolUse (no matcher) + Stop by
-`register-nudge-hook.py`.
+`register-nudge-hook.py`. It has ONE other mode, and it is not a hook mode:
+
+    clawgate-writeback-guard.py --dismiss <task_id> --session <session_id>
 """
 import datetime
 import json
@@ -192,8 +287,22 @@ MAX_TASKS = 5
 
 # Wall-clock budget for ALL live reads on one Stop, and the ceiling for any single
 # one. A Stop hook that hangs is felt at the exact moment a session is trying to end.
+#
+# 🔴 NEITHER IS THE REAL WORST CASE, AND SAYING 8.0 OUT LOUD WAS WRONG. The budget is
+# only ever consulted BEFORE a read starts, so a read admitted with 0.01 s left can
+# still run for its full per-task ceiling; and `_via_curl` gives its `subprocess.run`
+# a hard kill at `timeout + 2` so an unkillable curl cannot outlive the wait. The
+# bound a Stop can actually hang for is therefore
+#     STOP_BUDGET_SECS + PER_TASK_TIMEOUT_SECS + 2  =  15.0 s
+# against the CLI's own 600 000 ms hook timeout (`var Hm=600000` in the bundle), which
+# is the only other thing bounding it. Both numbers are pinned by tests that exercise
+# the DEFAULTS — the ladder tests inject `budget=3.0` and a fake clock, so for a while
+# nothing executed these values at all and both survived being multiplied by 75.
 STOP_BUDGET_SECS = 8.0
 PER_TASK_TIMEOUT_SECS = 5.0
+# The margin `_via_curl` adds on top of curl's own `max-time`, so the wait outlives
+# the client's self-imposed deadline rather than racing it.
+CURL_KILL_MARGIN_SECS = 2
 
 # The board's `createdAt` comes from the SERVER clock; `first_read_ts` is written
 # from THIS host's clock. Comparing them across even a small skew would let a
@@ -225,18 +334,57 @@ CLAWGATE_ENV = "~/.claude/clawgate.env"
 # --------------------------------------------------------------------------- #
 TASK_GET_RX = re.compile(r"\bclawgatectl\s+task\s+get\s+(\d+)\b")
 # `\b` after the id is what keeps `/api/tasks/193abc` out while admitting the
-# trailing segment shapes that exist (`/api/tasks/193/comments`, `/193`).
+# trailing segment shapes that exist. `/api/tasks/<id>/comments` is one of them — it
+# is 405 on GET (POST-only, per the clawgate skill's task-api reference), so as a
+# READ it cannot occur; what it really matches is a curl POSTING a comment, which is
+# the write-back itself. Admitting that is harmless in both directions: the live read
+# then finds the comment and the guard stays silent.
 TASK_API_RX = re.compile(r"/api/tasks/(\d+)\b")
 
 # Tool calls that ARE work, by name.
 WORK_TOOLS = ("Edit", "Write", "NotebookEdit")
 
-# ...and by Bash command. Anchored on the SUBCOMMAND immediately after `git` (with
-# an allowance for `-C <path>` / `--git-dir=…` style global flags), so
-# `git log --oneline | grep commit` is not work and `git -C $DEVRC commit -m …` is.
-WORK_BASH_RX = re.compile(
-    r"\bgit\s+(?:-[A-Za-z]\s+\S+\s+|--[A-Za-z][-\w]*(?:=\S+)?\s+)*(?:commit|push)\b"
-    r"|\bgh\s+pr\s+create\b")
+# 🔴 MATCHING THE LITERAL TEXT ANYWHERE IN A BASH COMMAND IS NOT "IS THIS WORK", AND
+# THE FIRST VERSION OF THIS FILE DID EXACTLY THAT. `grep -rn 'git commit' scripts/`,
+# `rg 'gh pr create' claude/skills/` and `git log --grep='git push'` all armed the
+# work flag — and those exact strings live in this repo's own RULES.md and CLAUDE.md,
+# so grepping for them is routine rather than exotic. Seven such over-matches were
+# measured. Two deterministic narrowings, in this order:
+#
+#   1. QUOTED STRINGS AND COMMENTS ARE BLANKED FIRST (`_strip_literals`). A command
+#      that merely mentions `git commit` inside quotes, or after a `#`, is talking
+#      about work, not doing it.
+#   2. THE VERB MUST BE IN COMMAND POSITION — string start, or after a shell
+#      separator (`; & | ( ) { } newline backtick $(`), optionally through one of the
+#      keywords that legitimately precede a command (`then`/`else`/`do`/`!`). An
+#      unquoted `echo remember to git commit later` is not a commit.
+#
+# Within `git` itself the match is still anchored on the SUBCOMMAND, allowing
+# `-C <path>` / `--git-dir=…` global flags, so `git log --oneline` is not work and
+# `git -C $DEVRC commit -m …` is. `gh pr merge` and `gh release create` are here
+# because they ship things and their absence was a fail-open under-match.
+# 🔴 THESE THREE ARE PATTERN STRINGS, NOT COMPILED OBJECTS, AND THAT IS THE HOT PATH
+# AGAIN. Unlike TASK_GET_RX/TASK_API_RX above — which `task_read_ids` consults BEFORE
+# the fast-path return and so cannot avoid — every one of these is reachable only from
+# `is_work`, i.e. only for a session that has already read a clawgate task. Compiling
+# them at import made every tool call in every session pay for three regexes almost
+# none of them would use: MEASURED at 14.7 ms/call against 13.9 before, on a path that
+# runs thousands of times a day. `re.sub`/`re.search` on a string pattern compile once
+# and hit `re`'s own cache thereafter, so a session that DOES work pays exactly what it
+# paid when they were module-level `re.compile` calls.
+_CMD_START = r"(?:^|[\n;&|(){}`]|\$\()\s*(?:(?:then|else|do|!)\s+)*"
+WORK_BASH_PAT = (
+    _CMD_START
+    + r"git\s+(?:-[A-Za-z]\s+\S+\s+|--[A-Za-z][-\w]*(?:=\S+)?\s+)*(?:commit|push)\b"
+    r"|" + _CMD_START
+    + r"gh\s+(?:pr\s+(?:create|merge)|release\s+create)\b")
+
+# Single-quoted runs, and double-quoted runs with backslash escapes. Replaced by a
+# SPACE rather than deleted, so `-m'x'commit` cannot be welded into a false match.
+QUOTED_PAT = r"'[^']*'|\"(?:[^\"\\]|\\.)*\""
+# A `#` at the start of the string or after whitespace, to end of line. Applied AFTER
+# the quote strip, so a `#` living inside a quoted string is already gone.
+COMMENT_PAT = r"(?:^|(?<=\s))#[^\n]*"
 
 STATE_WORK = "work"
 
@@ -265,8 +413,13 @@ def _read_path(state_dir, task_id):
     return os.path.join(state_dir, "read-%d" % int(task_id))
 
 
-def _fires_path(state_dir, task_id):
-    return os.path.join(state_dir, "fires-%d" % int(task_id))
+def _fires_path(state_dir, task_id, kind="fires"):
+    """`fires-<id>` for a MEASURED missing write-back, `unknown-<id>` for a
+    could-not-measure notice. 🔴 Two counters, deliberately: sharing one let a board
+    that was merely unreachable for the first Stops spend the budget a genuinely
+    missing write-back needs later, so the case the hook exists for could no longer
+    be blocked in that session."""
+    return os.path.join(state_dir, "%s-%d" % (kind, int(task_id)))
 
 
 def now_iso(now=None):
@@ -279,17 +432,22 @@ def parse_ts(s):
     """RFC3339 -> epoch seconds, or None.
 
     The board emits Go's `time.RFC3339Nano` (`2026-08-15T04:27:49.005565Z`), which
-    can carry up to nine fractional digits; `datetime.fromisoformat` accepts at most
-    six, so the tail is trimmed rather than allowed to fail the whole comparison.
+    can carry up to nine fractional digits.
+
+    🔴 THE NANOSECOND TRIM THAT USED TO LIVE HERE IS GONE, AND SO IS THE CLAIM THAT
+    JUSTIFIED IT. "`datetime.fromisoformat` accepts at most six [fractional digits]"
+    was true up to CPython 3.10 and is FALSE on the interpreter this repo pins
+    (`python312` in flake.nix; measured on 3.12.13: `.000000000` parses, and
+    `.12345678` is truncated to microseconds rather than rejected). The trim was
+    therefore dead code whose only visible effect was a mutation-sweep survivor —
+    setting its match result to None changed nothing, because the try block below had
+    always been doing the whole job. The nine-digit case is still pinned by a test.
     """
     if not isinstance(s, str) or not s.strip():
         return None
     t = s.strip()
     if t.endswith("Z") or t.endswith("z"):
         t = t[:-1] + "+00:00"
-    m = re.match(r"^(.*\.\d{1,6})\d*([+-]\d{2}:?\d{2})?$", t)
-    if m:
-        t = m.group(1) + (m.group(2) or "")
     try:
         dt = datetime.datetime.fromisoformat(t)
     except ValueError:
@@ -325,11 +483,14 @@ def record_read(state_dir, task_id, now=None):
     """Record the FIRST read of `task_id`. Idempotent: a later read never moves the
     timestamp, because the window this hook measures over starts at the first one."""
     path = _read_path(state_dir, task_id)
+    # ONE existence check, not two. The second (post-`makedirs`) copy that used to sit
+    # below was provably redundant — `makedirs(exist_ok=True)` cannot create or delete
+    # THIS file — so neither copy could be killed by a mutation: deleting either left
+    # the other answering identically. The cheap one is kept, so a re-read of an
+    # already-recorded task still costs no `makedirs`.
     if os.path.exists(path):
         return False
     os.makedirs(state_dir, exist_ok=True)
-    if os.path.exists(path):
-        return False
     if len([n for n in os.listdir(state_dir) if n.startswith("read-")]) >= MAX_TASKS:
         return False
     tmp = path + ".tmp"
@@ -339,19 +500,35 @@ def record_read(state_dir, task_id, now=None):
     return True
 
 
-def record_work(state_dir):
+def record_work(state_dir, now=None):
+    """Stamp the LATEST work event. The file used to hold the literal `"1"`; it now
+    holds an RFC3339 timestamp, because "was there a comment since the work" needs a
+    when and not just a whether — see the anchor note in the module docstring. Every
+    work tool call overwrites it, so the value is the MOST RECENT work, which is the
+    one a completion write-back has to be newer than."""
     os.makedirs(state_dir, exist_ok=True)
     with open(os.path.join(state_dir, STATE_WORK), "w") as fh:
-        fh.write("1")
+        fh.write(now_iso(now))
 
 
 def work_after_read(state_dir):
     return os.path.exists(os.path.join(state_dir, STATE_WORK))
 
 
-def bump_fires(state_dir, task_id):
+def last_work_ts(state_dir):
+    """The stamp `record_work` wrote, or None. None is the FAIL-QUIET direction: a
+    truncated write, or state left by a build that wrote `"1"`, falls back to the read
+    anchor rather than inventing a stricter cutoff out of an unreadable file."""
+    try:
+        with open(os.path.join(state_dir, STATE_WORK)) as fh:
+            return fh.read().strip() or None
+    except Exception:                     # noqa: BLE001
+        return None
+
+
+def bump_fires(state_dir, task_id, kind="fires"):
     """Read-increment-write the per-task fire counter; returns the NEW 1-based count."""
-    path = _fires_path(state_dir, task_id)
+    path = _fires_path(state_dir, task_id, kind)
     n = 0
     try:
         with open(path) as fh:
@@ -366,6 +543,26 @@ def bump_fires(state_dir, task_id):
     except Exception:
         pass
     return n
+
+
+def dismiss(state_dir, task_id):
+    """Clear ONE task from ONE session's ledger. Returns the file names removed.
+
+    🔴 THIS IS THE ESCAPE HATCH, AND IT HAS TO BE A MECHANISM. The block text used to
+    say "if you did NOT do work on this task, say so in one line and stop" — measured
+    NOT to work, because saying something changes no state and the next Stop re-blocked
+    with identical text. Removing `read-<id>` is what actually ends it: `tracked_ids`
+    no longer yields the task, so no live read, no counter, no verdict, forever.
+    """
+    removed = []
+    for name in ("read-%d" % int(task_id), "fires-%d" % int(task_id),
+                 "unknown-%d" % int(task_id)):
+        try:
+            os.remove(os.path.join(state_dir, name))
+            removed.append(name)
+        except Exception:                 # noqa: BLE001 — absent is the common case
+            pass
+    return removed
 
 
 def prune(ttl=STATE_TTL_SECS, now=None):
@@ -396,11 +593,18 @@ def prune(ttl=STATE_TTL_SECS, now=None):
 
 
 def escalate(fire_number):
-    """1-based fire number -> "block" | "context" | "silent"."""
+    """1-based fire number -> "block" | "notice" | "silent".
+
+    "notice" is the rung that RELENTS. It used to be named "context" and emitted
+    `hookSpecificOutput.additionalContext`, which the CLI feeds into the same
+    `blockingErrors` array as `decision:"block"` — so it forced a third continuation
+    instead of letting the turn end. It now emits `systemMessage`. See the module
+    docstring for the bundle reads, both controls, and why that channel is different.
+    """
     if fire_number <= MAX_BLOCKS:
         return "block"
     if fire_number <= MAX_FIRES:
-        return "context"
+        return "notice"
     return "silent"
 
 
@@ -422,6 +626,12 @@ def task_read_ids(data):
     return out
 
 
+def _strip_literals(cmd):
+    """Blank out quoted runs and trailing `#` comments, so a command that MENTIONS a
+    work verb is not mistaken for one that RUNS it. See WORK_BASH_PAT's note."""
+    return re.sub(COMMENT_PAT, " ", re.sub(QUOTED_PAT, " ", cmd))
+
+
 def is_work(data):
     """True when this PostToolUse payload is REAL WORK, not a read or a look-around."""
     d = data or {}
@@ -430,7 +640,9 @@ def is_work(data):
     if d.get("tool_name") != "Bash":
         return False
     cmd = (d.get("tool_input") or {}).get("command")
-    return isinstance(cmd, str) and bool(WORK_BASH_RX.search(cmd))
+    if not isinstance(cmd, str):
+        return False
+    return bool(re.search(WORK_BASH_PAT, _strip_literals(cmd)))
 
 
 # --------------------------------------------------------------------------- #
@@ -455,18 +667,35 @@ def _env_file(path=CLAWGATE_ENV):
     return conf
 
 
+def _scrub(s, limit=120):
+    """Third-party stderr, made safe to splice into text an operator will read.
+
+    🔴 `proc.stderr` is an UNFILTERED PIPE OUT OF A BINARY THIS HOOK DOES NOT OWN, and
+    it used to go straight into the reason string. Control bytes (a `\\r`, an ANSI
+    escape, a stray newline) let that binary's output impersonate structure in the
+    transcript. Collapse to single-space-separated printables, then truncate.
+    """
+    return " ".join((s or "").split())[:limit]
+
+
 def _via_clawgatectl(task_id, timeout):
     proc = _sp().run(["clawgatectl", "task", "get", str(int(task_id))],
                           capture_output=True, text=True, timeout=timeout)
     if proc.returncode != 0:
         raise LiveReadError("clawgatectl rc=%d %s"
-                            % (proc.returncode, (proc.stderr or "").strip()[:120]))
+                            % (proc.returncode, _scrub(proc.stderr)))
     return json.loads(proc.stdout)
 
 
 def _via_curl(task_id, timeout, env_path=CLAWGATE_ENV, why=None):
-    """The fallback for a host with no `clawgatectl` (the laptop today — its
-    homelab-talos checkout predates the command, so nix does not build it).
+    """The fallback for a host with no `clawgatectl` on PATH.
+
+    That used to say "the laptop today — its homelab-talos checkout predates the
+    command, so nix does not build it", and that is now STALE: `clawgatectl` was
+    verified present on BOTH hosts. The fallback stays anyway — it costs nothing on a
+    host that has the binary (it is only reached once `clawgatectl` has failed or is
+    absent), and "the client is missing" is not the only way to arrive here: a
+    `clawgatectl` that exists and exits non-zero lands here too.
 
     🔴 The token goes in on STDIN via `curl -K -`, never in argv: an argv is visible
     to every process on the box through /proc, and this runs after every turn.
@@ -489,8 +718,12 @@ def _via_curl(task_id, timeout, env_path=CLAWGATE_ENV, why=None):
         'url = "%s/api/tasks/%d"\n' % (url.rstrip("/"), int(task_id)),
         'header = "Authorization: Bearer %s"\n' % token,
     ])
-    proc = _sp().run(["curl", "-K", "-"], input=cfg,
-                          capture_output=True, text=True, timeout=timeout + 2)
+    # 🔴 `timeout + CURL_KILL_MARGIN_SECS`, not `timeout`: curl's own `max-time` above
+    # is the deadline we WANT it to honour, and the wait has to outlive it or the
+    # SIGKILL races the clean exit and we lose curl's rc. Deleting the margin survived
+    # a mutation sweep until a test pinned the two numbers apart.
+    proc = _sp().run(["curl", "-K", "-"], input=cfg, capture_output=True, text=True,
+                     timeout=timeout + CURL_KILL_MARGIN_SECS)
     if proc.returncode != 0:
         raise LiveReadError("curl rc=%d" % proc.returncode)
     return json.loads(proc.stdout)
@@ -526,8 +759,16 @@ def live_task(task_id, timeout=PER_TASK_TIMEOUT_SECS, env_path=CLAWGATE_ENV):
         raise LiveReadError("%s: %s" % (type(e).__name__, e))
 
 
-def writeback_state(task, first_read_ts, skew=CLOCK_SKEW_ALLOWANCE_SECS):
+def writeback_state(task, first_read_ts, skew=CLOCK_SKEW_ALLOWANCE_SECS,
+                    work_ts=None):
     """"closed" | "written" | "missing" | "unknown" for one live task payload.
+
+    🔴 THE CUTOFF IS THE LATER OF THE FIRST READ AND THE LAST WORK EVENT. Anchoring on
+    the read alone is what let the skill's own pre-start "Starting" comment — posted
+    right after the read and BEFORE the work — satisfy this check at pickup, so the
+    guard could never observe a missing COMPLETION write-back on any session that
+    followed the ritual. `work_ts` is optional and a None (or unparseable) value falls
+    back to the read anchor, which is the quieter of the two.
 
     🔴 An UNPARSEABLE `createdAt` on a `claude-code` comment resolves to "written",
     not to "missing". The comment demonstrably exists and only its timestamp is
@@ -541,7 +782,11 @@ def writeback_state(task, first_read_ts, skew=CLOCK_SKEW_ALLOWANCE_SECS):
     read_at = parse_ts(first_read_ts)
     if read_at is None:
         return "unknown"
-    cutoff = read_at - skew
+    anchor = read_at
+    worked_at = parse_ts(work_ts)
+    if worked_at is not None and worked_at > anchor:
+        anchor = worked_at
+    cutoff = anchor - skew
     comments = task.get("comments")
     if comments is None:
         comments = []
@@ -561,36 +806,58 @@ def writeback_state(task, first_read_ts, skew=CLOCK_SKEW_ALLOWANCE_SECS):
 # --------------------------------------------------------------------------- #
 # The text the operator's model actually reads
 # --------------------------------------------------------------------------- #
-def missing_text(task_id, first_read_ts):
+def dismiss_cmd(task_id, session_id):
+    """The ONE command that deterministically clears a task from this session.
+
+    🔴 The session id is INTERPOLATED rather than left as a placeholder. A model
+    cannot see its own hook payload, so a command it has to fill in a session id for
+    is a command it cannot run — which is how the previous escape ("say so and stop")
+    ended up being no escape at all.
+    """
+    return ("python3 ~/.claude/hooks/clawgate-writeback-guard.py --dismiss %d "
+            "--session %s" % (int(task_id), _sanitize(session_id)))
+
+
+def missing_text(task_id, first_read_ts, session_id=""):
     return (
         "clawgate write-back MISSING for task %(id)d.\n"
-        "This session read task %(id)d at %(ts)s and then did real work (an edit, a "
-        "commit, a push or a PR), but a LIVE read of the board just now shows no "
-        "comment authored by `claude-code` since that read. Two tasks (#193, #194) "
-        "already shipped this way: the card stayed `open` with zero comments and was "
-        "re-dispatched and paid for twice.\n"
+        "This session read task %(id)d at %(ts)s and has done real work (an edit, a "
+        "commit, a push or a PR) since, but a LIVE read of the board just now shows no "
+        "comment authored by `claude-code` newer than that work. Two tasks (#193, "
+        "#194) already shipped this way: the card stayed `open` with zero comments and "
+        "was re-dispatched and paid for twice.\n"
         "Write it back before this turn ends:\n"
         "  clawgatectl task comment %(id)d --body \"<what shipped, evidence per "
         "acceptance criterion, and an explicit NOT-verified list>\"\n"
         "  clawgatectl task status %(id)d ready_for_review\n"
         "Use `complete` instead of `ready_for_review` ONLY when the task body carried "
         "a `## Acceptance criteria` heading AND every criterion is validated — see the "
-        "clawgate skill's status gate. If you did NOT do work on this task, say so in "
-        "one line and stop; nothing else is being asked for."
-        % {"id": int(task_id), "ts": first_read_ts}
+        "clawgate skill's status gate.\n"
+        "🔴 IF THIS SESSION'S WORK WAS NOT FOR TASK %(id)d — you only read the card, or "
+        "the work belongs to a different task or repo — do NOT comment and do NOT flip "
+        "the status: a junk comment permanently silences this guard for the card, and "
+        "`ready_for_review` fires a push notification to Zach. Run this instead, and it "
+        "will not ask again:\n"
+        "  %(dismiss)s"
+        % {"id": int(task_id), "ts": first_read_ts,
+           "dismiss": dismiss_cmd(task_id, session_id)}
     )
 
 
-def unknown_text(task_id, first_read_ts, error):
+def unknown_text(task_id, first_read_ts, error, session_id=""):
     return (
         "clawgate write-back UNVERIFIED for task %(id)d: the board could not be "
         "reached to check whether a `claude-code` comment was written since %(ts)s "
         "(%(err)s). This is a NOTICE, not a block — nothing is being asserted about "
-        "the card, because nothing could be measured.\n"
+        "the card, because nothing could be measured, and this turn is ending "
+        "normally.\n"
         "If this session did work on task %(id)d, write it back:\n"
         "  clawgatectl task comment %(id)d --body \"…\"\n"
-        "  clawgatectl task status %(id)d ready_for_review"
-        % {"id": int(task_id), "ts": first_read_ts, "err": str(error)[:160]}
+        "  clawgatectl task status %(id)d ready_for_review\n"
+        "If it did not, silence it for this session with:\n"
+        "  %(dismiss)s"
+        % {"id": int(task_id), "ts": first_read_ts, "err": _scrub(str(error), 160),
+           "dismiss": dismiss_cmd(task_id, session_id)}
     )
 
 
@@ -605,6 +872,13 @@ def post_tool_use(data, now=None):
     reading a task returns before touching the filesystem again. Nothing below the
     fast-path return runs for the overwhelming majority of tool calls.
     """
+    # 🔴 A SUBAGENT'S TOOL CALL IS NOT THE PARENT'S WORK — and it arrives wearing the
+    # parent's `session_id`, so this is the ONLY field that separates them. Checked
+    # before the state dir is even computed: a dispatched subagent that edits a file
+    # must not arm the parent session, whose Stop would then block on a card the
+    # parent merely read. See the `Kf()` quote in the module docstring.
+    if (data or {}).get("agent_id"):
+        return {"fast_path": True, "recorded": [], "work": False}
     state_dir = _state_dir(data)
     if state_dir is None:
         return {"fast_path": True, "recorded": [], "work": False}
@@ -627,13 +901,17 @@ def post_tool_use(data, now=None):
                 recorded.append(tid)
         except Exception:                 # noqa: BLE001 — fail-open, per read
             pass
-    # Work only counts AFTER a read: `tracked` (or a read recorded on this very call)
-    # is what says a card is in play. A session that has never touched the board
-    # cannot accumulate a work flag it would later be judged on.
+    # Work only counts AFTER a read, and the fast-path return above is ALREADY that
+    # gate: reaching this line means `tracked or ids` was true, so a session that has
+    # never touched the board cannot get here at all. The `and (tracked or recorded)`
+    # that used to be spelled out here was a second copy of a decision already made —
+    # unkillable by any mutation, and therefore a coverage gap that was really a
+    # duplicate. The condition it encoded is pinned by
+    # test_work_is_only_recorded_after_a_read, which drives the real writer.
     marked = False
-    if work and (tracked or recorded):
+    if work:
         try:
-            record_work(state_dir)
+            record_work(state_dir, now=now)
             marked = True
         except Exception:                 # noqa: BLE001
             pass
@@ -646,7 +924,7 @@ def post_tool_use(data, now=None):
 def stop_decision(data, reader=None, budget=STOP_BUDGET_SECS,
                   clock=time.monotonic):
     """Pure-ish decision for a Stop payload -> (kind, text) with kind in
-    {"silent", "context", "block"}. Side effect: it bumps the per-task fire counters,
+    {"silent", "notice", "block"}. Side effect: it bumps the per-task fire counters,
     which is what the ladder is made of.
 
     🔴 `reader` defaults to None and is resolved to `live_task` HERE, not in the
@@ -674,9 +952,15 @@ def stop_decision(data, reader=None, budget=STOP_BUDGET_SECS,
     if not ids:
         return ("silent", "")
 
+    session_id = d.get("session_id") or ""
+    worked_at = last_work_ts(state_dir)
     deadline = clock() + budget
     blocks, notices = [], []
-    for tid in sorted(ids)[:MAX_TASKS]:
+    # No `[:MAX_TASKS]` slice here: `record_read` refuses to create a sixth `read-`
+    # file, so `tracked_ids` structurally cannot return more than MAX_TASKS and the
+    # slice was a second copy of a cap already enforced at the writer — unkillable,
+    # and pinned instead by test_at_most_five_task_ids_are_tracked_per_session.
+    for tid in sorted(ids):
         remaining = deadline - clock()
         if remaining <= 0:
             break
@@ -684,33 +968,36 @@ def stop_decision(data, reader=None, budget=STOP_BUDGET_SECS,
         err = "the board returned a task payload this hook could not read"
         try:
             task = reader(tid, timeout=min(PER_TASK_TIMEOUT_SECS, remaining))
-            state = writeback_state(task, first_read_ts)
+            state = writeback_state(task, first_read_ts, work_ts=worked_at)
         except LiveReadError as e:
             state, err = "unknown", e
         except Exception as e:            # noqa: BLE001 — a reader that raises anything
             state, err = "unknown", e
         if state in ("closed", "written"):
             continue
-        fire = bump_fires(state_dir, tid)
-        rung = escalate(fire)
+        if state == "unknown":
+            # 🔴 NEVER blocks, and spends its OWN counter. Cannot-measure is reported,
+            # never enforced — and never at the expense of the block budget that a
+            # measured miss will need if the board comes back later in this session.
+            if escalate(bump_fires(state_dir, tid, "unknown")) != "silent":
+                notices.append(unknown_text(tid, first_read_ts, err, session_id))
+            continue
+        rung = escalate(bump_fires(state_dir, tid))
         if rung == "silent":
             continue
-        if state == "unknown":
-            # 🔴 NEVER blocks. Cannot-measure is reported, never enforced.
-            notices.append(unknown_text(tid, first_read_ts, err))
-            continue
         (blocks if rung == "block" else notices).append(
-            missing_text(tid, first_read_ts))
+            missing_text(tid, first_read_ts, session_id))
 
     # 🔴 A "could not measure" notice NEVER CAUSES a block — only `blocks` does, and
     # only a MEASURED missing write-back can put an entry there. When some other task
     # is blocking anyway the notice rides along in the same reason rather than being
     # dropped, but a Stop whose every task is unmeasurable can only ever reach
-    # `context`. Pinned by a test that drives an all-unknown session up the ladder.
+    # `notice` — which does not force a continuation at all. Pinned by a test that
+    # drives an all-unknown session up the ladder and reads the EMITTED JSON.
     if blocks:
         return ("block", "\n\n".join(blocks + notices))
     if notices:
-        return ("context", "\n\n".join(notices))
+        return ("notice", "\n\n".join(notices))
     return ("silent", "")
 
 
@@ -719,23 +1006,81 @@ def emit(kind, text):
     is exactly one place that decides what reaches stdout — a caller-side `if kind !=
     "silent"` in front of this was redundant with the fall-through below, and a branch
     no mutation can kill reads as a coverage gap when it is really just a duplicate.
+
+    🔴 THERE ARE EXACTLY TWO CHANNELS AND ONLY ONE OF THEM ENDS THE TURN. `decision:
+    "block"` forces a continuation. `systemMessage` does not — it is yielded on the
+    CLI's message channel, never into `blockingErrors`, and its attachment renders to
+    the operator without being fed back to the model. `hookSpecificOutput.
+    additionalContext` is NOT a third option: on Stop the CLI pushes it into the same
+    `blockingErrors` array as a block, so emitting it here would force a continuation
+    while claiming not to. It is deliberately absent from this function.
     """
     if kind == "block":
         json.dump({"decision": "block", "reason": text}, sys.stdout)
         sys.stdout.write("\n")
-    elif kind == "context":
-        json.dump({"hookSpecificOutput": {"hookEventName": "Stop",
-                                          "additionalContext": text}}, sys.stdout)
+    elif kind == "notice":
+        json.dump({"systemMessage": text}, sys.stdout)
         sys.stdout.write("\n")
 
 
 # --------------------------------------------------------------------------- #
+def dismiss_main(argv):
+    """`--dismiss <task_id> --session <session_id>` — the escape hatch, as a command.
+
+    Prints one line saying what it did and returns. NEVER reads stdin: it is invoked
+    by a model from a Bash tool call, where stdin is not a hook payload.
+
+    🔴 `--session` is REQUIRED and is not defaulted to anything. This process has no
+    way to learn the caller's session id — it is not in the environment — and guessing
+    would let a dismissal land on some other session's ledger. The block text supplies
+    the id already filled in, so there is nothing for the caller to look up.
+    """
+    tid = sess = None
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--dismiss" and i + 1 < len(argv):
+            tid, i = argv[i + 1], i + 2
+        elif argv[i] == "--session" and i + 1 < len(argv):
+            sess, i = argv[i + 1], i + 2
+        else:
+            i += 1
+    if tid is None or sess is None:
+        sys.stdout.write("usage: clawgate-writeback-guard.py --dismiss <task_id> "
+                         "--session <session_id>\n")
+        return
+    try:
+        task_id = int(tid)
+    except (TypeError, ValueError):
+        sys.stdout.write("not a task id: %s\n" % _sanitize(tid))
+        return
+    state_dir = _state_dir({"session_id": sess})
+    if state_dir is None:
+        sys.stdout.write("not a session id: %s\n" % _sanitize(sess))
+        return
+    removed = dismiss(state_dir, task_id)
+    if removed:
+        sys.stdout.write("clawgate write-back guard: dismissed task %d for session "
+                         "%s (cleared %s). It will not ask about this task again.\n"
+                         % (task_id, _sanitize(sess), ", ".join(sorted(removed))))
+    else:
+        sys.stdout.write("clawgate write-back guard: nothing to dismiss — task %d is "
+                         "not in session %s's ledger (%s).\n"
+                         % (task_id, _sanitize(sess), state_dir))
+
+
 def main():
     # 🔴 ONE exit, and it is always 0. Nothing inside the try may call sys.exit():
     # SystemExit is a BaseException and would sail past `except Exception`.
     try:
-        data = json.load(sys.stdin)
-        event = (data or {}).get("hook_event_name")
+        # 🔴 THE CLI MODE IS DECIDED BEFORE THE STDIN READ, and it never performs one.
+        # A hook invocation carries no argv, so this cannot shadow the hook path — and
+        # reading stdin in CLI mode would hang on a terminal forever.
+        if "--dismiss" in sys.argv[1:]:
+            dismiss_main(sys.argv[1:])
+            data, event = None, None
+        else:
+            data = json.load(sys.stdin)
+            event = (data or {}).get("hook_event_name")
         if event == "PostToolUse":
             post_tool_use(data)
         elif event == "Stop":

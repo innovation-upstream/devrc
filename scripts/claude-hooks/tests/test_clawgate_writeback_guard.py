@@ -30,6 +30,17 @@ WHAT THIS FILE IS FOR
      driven through a REAL subprocess with stub `clawgatectl` and `curl` on PATH that
      LOG every invocation — "no subprocess work" is a claim about the process, and an
      in-process assertion cannot make it.
+
+  6. 🔴 THE NON-BLOCKING RUNG IS ASSERTED ON THE OBSERVABLE, NOT ON A KIND STRING.
+     `stop_decision` returning the string "context" was the whole of the old proof
+     that a rung "did not block" — and it was a SPELLED guard in the exact sense
+     RULES.md names: the string said non-blocking while the JSON it produced
+     (`hookSpecificOutput.additionalContext`) was pushed by the CLI into the same
+     `blockingErrors` array as `decision:"block"`, forcing a third continuation. A
+     test on the internal name structurally could not see that. Every such assertion
+     now runs the verdict through `guard.emit` and asks
+     `forces_a_continuation(<the emitted JSON>)`, whose rule is transcribed from the
+     installed bundle (see the module docstring of the hook).
 """
 import importlib.machinery
 import importlib.util
@@ -71,6 +82,41 @@ SESSION = "sess-writeback-1"
 READ_TS = "2026-08-15T12:00:00.000000Z"
 READ_EPOCH = 1786795200.0  # the same instant, pinned as a LITERAL, not computed here
 READ_PLUS_1H = 1786798800.0
+# The last work event: 30 min after the read, 30 min before the "written" comment at
+# 13:00. Distinct from BOTH so a fixture cannot pass by collapsing the two anchors.
+WORK_TS = "2026-08-15T12:30:00.000000Z"
+WORK_EPOCH = 1786797000.0
+
+
+def forces_a_continuation(out):
+    """Would this hook output make the CLI re-query the model instead of ending the
+    turn? Transcribed from claude-code 2.1.220's `bin/.claude-wrapped`, function
+    `Ycd`, which pushes BOTH shapes into one `blockingErrors` array:
+
+        if (F.blockingError)      { … E.push(G); … }
+        if (F.additionalContexts) { … E.push(j); … }
+        if (E.length > 0) return { blockingErrors: E, preventContinuation: !1 };
+
+    and whose caller continues the loop with `stopHookActive:!0` for any non-empty
+    `blockingErrors`. `systemMessage` is absent from that path on purpose: it is
+    yielded as a `hook_system_message` MESSAGE and never reaches `E`.
+    """
+    if not isinstance(out, dict):
+        return False
+    if out.get("decision") == "block":
+        return True
+    hso = out.get("hookSpecificOutput")
+    return bool(isinstance(hso, dict) and hso.get("additionalContext"))
+
+
+def emitted(capsys, verdict):
+    """Run one `(kind, text)` verdict through the REAL writer and return the JSON that
+    reached stdout (None when it wrote nothing). The point is that no test asserts
+    "non-blocking" against an internal kind string — see item 6 in the module
+    docstring."""
+    guard.emit(*verdict)
+    raw = capsys.readouterr().out
+    return json.loads(raw) if raw.strip() else None
 
 
 # --------------------------------------------------------------------------- #
@@ -100,14 +146,20 @@ def state_dir():
     return guard._state_dir({"session_id": SESSION})
 
 
-def seed(task_id=193, ts=READ_TS, work=True):
-    """Put a session into the state the Stop gate reads: task read, work done."""
-    sd = state_dir()
+def seed(task_id=193, ts=READ_TS, work=True, work_ts=WORK_EPOCH, session=SESSION):
+    """Put a session into the state the Stop gate reads: task read, work done.
+
+    🔴 The work stamp is a FIXED instant (WORK_TS), never `time.time()`. The Stop gate
+    compares board comments against the LAST WORK EVENT, so a "now" here would sit in
+    the real present and make every fixture comment retroactively stale — a whole file
+    of tests that pass or fail by the calendar.
+    """
+    sd = guard._state_dir({"session_id": session})
     os.makedirs(sd, exist_ok=True)
     with open(guard._read_path(sd, task_id), "w") as fh:
         json.dump({"task_id": task_id, "first_read_ts": ts}, fh)
     if work:
-        guard.record_work(sd)
+        guard.record_work(sd, now=work_ts)
     return sd
 
 
@@ -203,6 +255,16 @@ def test_two_ids_in_one_command_are_both_recorded_and_deduplicated():
     bash("git -C /home/zach/workspace/devrc commit -m 'x'"),
     bash("git push -u origin feat/x"),
     bash("gh pr create --fill --base main"),
+    # Previously FAIL-OPEN under-matches: both ship something, neither was work.
+    bash("gh pr merge 512 --squash"),
+    bash("gh release create v0.7.90 --notes 'x'"),
+    # ...and the shapes the command-position anchor must still admit, or narrowing
+    # the regex would have silently traded seven false positives for a dead hook.
+    bash("git status -s && git commit -m ok"),
+    bash("cd /tmp; git push"),
+    bash("for f in a b; do git commit -m x; done"),
+    bash("if true; then git push; fi"),
+    bash("(git commit -m x)"),
 ])
 def test_real_work_sets_the_work_flag(data):
     assert guard.is_work(data) is True
@@ -218,6 +280,47 @@ def test_real_work_sets_the_work_flag(data):
 ])
 def test_a_look_around_is_not_work(data):
     assert guard.is_work(data) is False
+
+
+@pytest.mark.parametrize("cmd", [
+    # 🔴 THE SEVEN MEASURED OVER-MATCHES. `is_work` used to search for its literal
+    # text ANYWHERE in the command, and these exact strings live in this repo's own
+    # RULES.md and CLAUDE.md — so grepping for them is a routine act that armed a hook
+    # able to BLOCK the turn. Every one of them TALKS about work; none does any.
+    "grep -rn 'git commit' scripts/",
+    "rg 'gh pr create' claude/skills/",
+    "git log --grep='git push'",
+    "ls -la  # then git commit",
+    "echo 'remember to git commit later'",
+    'echo "reminder: git push before you stop"',
+    "echo remember to git commit later",
+    # ...and the neighbours a sloppier narrowing would readmit
+    "rg -n 'gh pr merge' docs/",
+    "git log --oneline --grep='gh release create'",
+    # 🔴 THE CASES THAT NEED THE STRIPPER AND NOT JUST THE ANCHOR. A shell separator
+    # INSIDE a quoted string is not a separator — but the command-position regex has
+    # no way to know that, so it reads `'…; git commit'` as a fresh command and the
+    # over-match comes straight back. Found by a mutation sweep: bypassing
+    # `_strip_literals` SURVIVED until these three existed.
+    "echo 'first do a thing; git commit -m x'",
+    'echo "build it && git push"',
+    "rg -n 'foo | git push' claude/",
+])
+def test_TALKING_about_work_is_not_DOING_work(cmd):
+    """🔴 The single negative case this file used to carry did not contain the literal
+    at all, so the whole over-match class was untested. `_strip_literals` blanks quoted
+    runs and `#` comments; the command-position anchor rejects the unquoted echo."""
+    assert guard.is_work(bash(cmd)) is False
+
+
+def test_the_positive_control_for_the_literal_stripper():
+    """🔴 Nine `False`s are indistinguishable from an `is_work` wired to nothing. The
+    same commands with the verb moved OUT of the quotes must all be True — and the
+    stripper must not eat a real `git commit -m 'msg'`, whose message IS quoted."""
+    assert guard.is_work(bash("git commit -m 'wire up the grep for git commit'")) \
+        is True
+    assert guard.is_work(bash("grep -rn foo scripts/ && git push")) is True
+    assert guard._strip_literals("echo 'git commit' # git push") .strip() == "echo"
 
 
 # =========================================================================== #
@@ -625,43 +728,96 @@ def test_several_offending_tasks_are_reported_in_one_decision(home):
 # =========================================================================== #
 # 8. THE LIVE READ FAILING — a notice, NEVER a block
 # =========================================================================== #
-def test_an_unreachable_board_emits_a_NON_BLOCKING_notice(home):
+def test_an_unreachable_board_emits_a_notice_that_LETS_THE_TURN_END(home, capsys):
+    """🔴 ASSERTED ON THE EMITTED JSON. The old version of this test asserted the
+    internal kind string `"context"` and called that non-blocking — while the JSON it
+    stood for forced a continuation. Only the writer's output can answer this."""
     seed()
     r = Reader(raises=guard.LiveReadError("connection refused"))
-    kind, text = guard.stop_decision(payload("Stop"), reader=r)
-    assert kind == "context"
-    assert kind != "block"
+    verdict = guard.stop_decision(payload("Stop"), reader=r)
+    text = verdict[1]
     assert "193" in text and "could not be reached" in text
     assert "connection refused" in text
+    out = emitted(capsys, verdict)
+    assert forces_a_continuation(out) is False, out
+    assert out == {"systemMessage": text}
 
 
-def test_an_unreachable_board_NEVER_blocks_at_any_rung(home):
-    """🔴 Driven up the whole ladder. The first two rungs are where a MEASURED miss
-    blocks, so an all-unknown session reaching them and staying non-blocking is the
-    real assertion."""
+def test_an_unreachable_board_costs_ZERO_forced_continuations_at_ANY_rung(home,
+                                                                          capsys):
+    """🔴 Driven up the whole ladder and read as JSON at every rung. The first two
+    rungs are where a MEASURED miss blocks, so an all-unknown session reaching them
+    and STILL letting the turn end is the real assertion — and it is the one that was
+    false before: three `additionalContext` emissions were three forced
+    continuations."""
     seed()
-    kinds = []
+    forced = []
     for _ in range(5):
         r = Reader(raises=guard.LiveReadError("boom"))
-        kinds.append(guard.stop_decision(payload("Stop"), reader=r)[0])
-    assert kinds == ["context", "context", "context", "silent", "silent"]
-    assert "block" not in kinds
+        v = guard.stop_decision(payload("Stop"), reader=r)
+        forced.append(forces_a_continuation(emitted(capsys, v)))
+    assert forced == [False, False, False, False, False]
 
 
-def test_a_reader_raising_something_unexpected_is_also_only_a_notice(home):
+def test_the_positive_control_for_that_zero(home, capsys):
+    """🔴 `forces_a_continuation` returning False five times is indistinguishable from
+    a predicate wired to nothing. The SAME predicate on a MEASURED miss must return
+    True — and on the literal shape the old code emitted, which is the mutant this
+    whole finding is about."""
+    seed()
+    r = Reader(result=task(comments=[]))
+    v = guard.stop_decision(payload("Stop"), reader=r)
+    assert forces_a_continuation(emitted(capsys, v)) is True
+    assert forces_a_continuation(
+        {"hookSpecificOutput": {"hookEventName": "Stop",
+                                "additionalContext": "fyi"}}) is True
+
+
+def test_a_reader_raising_something_unexpected_is_also_only_a_notice(home, capsys):
     seed()
     r = Reader(raises=RuntimeError("kaboom"))
-    kind, text = guard.stop_decision(payload("Stop"), reader=r)
-    assert kind == "context"
-    assert "kaboom" in text
+    v = guard.stop_decision(payload("Stop"), reader=r)
+    assert "kaboom" in v[1]
+    assert forces_a_continuation(emitted(capsys, v)) is False
 
 
-def test_an_unreadable_task_payload_is_a_notice_not_a_block(home):
+def test_an_unreadable_task_payload_is_a_notice_not_a_block(home, capsys):
     seed()
     r = Reader(result="this is not a task object")
-    kind, text = guard.stop_decision(payload("Stop"), reader=r)
-    assert kind == "context"
-    assert "UNVERIFIED" in text
+    v = guard.stop_decision(payload("Stop"), reader=r)
+    assert "UNVERIFIED" in v[1]
+    assert forces_a_continuation(emitted(capsys, v)) is False
+
+
+def test_an_unreachable_board_does_not_spend_the_BLOCK_budget(home, capsys):
+    """🔴 THE TWO COUNTERS. A board down for the first three Stops used to exhaust the
+    per-task ladder, so a genuinely missing write-back could never be blocked later in
+    that session — the hook's whole purpose, defeated by an outage. The measured-miss
+    counter is now separate: after three unmeasurable Stops the FOURTH, with the board
+    back, must still block."""
+    seed()
+    for _ in range(3):
+        guard.stop_decision(payload("Stop"),
+                            reader=Reader(raises=guard.LiveReadError("boom")))
+    r = Reader(result=task(comments=[]))
+    v = guard.stop_decision(payload("Stop"), reader=r)
+    out = emitted(capsys, v)
+    assert out["decision"] == "block", out
+    assert "task status 193 ready_for_review" in out["reason"]
+
+
+def test_an_unmeasurable_board_goes_quiet_rather_than_notifying_forever(home,
+                                                                        capsys):
+    """The other side of that separation: its own counter is still a CAP, so an
+    outage cannot produce one notice per Stop indefinitely. 3 notices, then silence —
+    driven with a range of 6, a length neither MAX_FIRES (3) nor MAX_BLOCKS (2)."""
+    seed()
+    wrote = []
+    for _ in range(6):
+        v = guard.stop_decision(payload("Stop"),
+                                reader=Reader(raises=guard.LiveReadError("boom")))
+        wrote.append(emitted(capsys, v) is not None)
+    assert wrote == [True, True, True, False, False, False]
 
 
 # =========================================================================== #
@@ -674,22 +830,39 @@ def test_the_ladder_constants_are_what_the_docstring_claims():
 
 
 @pytest.mark.parametrize("fire,rung", [
-    (1, "block"), (2, "block"), (3, "context"), (4, "silent"), (9, "silent"),
+    (1, "block"), (2, "block"), (3, "notice"), (4, "silent"), (9, "silent"),
 ])
 def test_escalate_maps_each_fire_number_to_its_rung(fire, rung):
     assert guard.escalate(fire) == rung
 
 
-def test_the_ladder_end_to_end_on_one_task(home):
+def test_the_ladder_end_to_end_on_one_task(home, capsys):
     """🔴 Literal expected sequence, pinned from the ladder in the docstring — NOT
     derived from MAX_BLOCKS/MAX_FIRES, which is how a test comes to agree with a
-    mutated implementation."""
+    mutated implementation. Read as the EMITTED JSON, so "the third rung relents" is
+    a claim about what the CLI receives rather than about a string this file chose."""
     seed()
-    kinds = []
+    shapes = []
     for _ in range(5):
         r = Reader(result=task(comments=[]))
-        kinds.append(guard.stop_decision(payload("Stop"), reader=r)[0])
-    assert kinds == ["block", "block", "context", "silent", "silent"]
+        out = emitted(capsys, guard.stop_decision(payload("Stop"), reader=r))
+        shapes.append(None if out is None
+                      else ("block" if "decision" in out else sorted(out)[0]))
+    assert shapes == ["block", "block", "systemMessage", None, None]
+
+
+def test_the_ladder_costs_EXACTLY_TWO_forced_continuations(home, capsys):
+    """🔴 THE NUMBER IN THE DOCSTRING, MEASURED. It said two and delivered three: the
+    third rung's `additionalContext` went into the CLI's `blockingErrors` array
+    exactly like a block. Counted here off the emitted JSON, over a 5-Stop run whose
+    length equals neither MAX_BLOCKS (2) nor MAX_FIRES (3)."""
+    seed()
+    forced = 0
+    for _ in range(5):
+        r = Reader(result=task(comments=[]))
+        v = guard.stop_decision(payload("Stop"), reader=r)
+        forced += bool(forces_a_continuation(emitted(capsys, v)))
+    assert forced == 2
 
 
 def test_a_counter_seeded_far_past_the_cap_is_silent(home):
@@ -790,6 +963,40 @@ def test_a_payload_carrying_an_agent_id_is_refused(home):
     assert r.calls == []
 
 
+def test_a_SUBAGENTS_tool_call_never_arms_the_PARENT_session(home):
+    """🔴 PROBE C, MEASURED AS A FALSE POSITIVE BEFORE THIS FIX. The bundle builds a
+    PostToolUse payload as `{...Kf(i, void 0, o), hook_event_name:"PostToolUse", …}`,
+    and `Kf`'s `session_id` is `t ?? kt()` with `t` undefined — so a tool call made
+    inside a dispatched subagent arrives carrying the PARENT's session id, with only
+    `agent_id` to tell them apart. The parent reads the card, the subagent does the
+    editing, and the parent's Stop then blocked on work it never did."""
+    guard.post_tool_use(bash("clawgatectl task get 193"))
+    out = guard.post_tool_use(payload(tool_name="Edit", tool_input={"file_path": "/x"},
+                                      agent_id="agent_012xyz"))
+    assert out["work"] is False
+    assert guard.work_after_read(state_dir()) is False
+    r = Reader(result=task(comments=[]))
+    assert guard.stop_decision(payload("Stop"), reader=r) == ("silent", "")
+    assert r.calls == []
+
+
+def test_the_positive_control_for_the_agent_id_refusal(home):
+    """The identical payload WITHOUT `agent_id` must arm it — otherwise the refusal
+    above is green because nothing in this fixture could ever set the flag."""
+    guard.post_tool_use(bash("clawgatectl task get 193"))
+    out = guard.post_tool_use(payload(tool_name="Edit",
+                                      tool_input={"file_path": "/x"}))
+    assert out["work"] is True
+    assert guard.work_after_read(state_dir()) is True
+
+
+def test_a_subagents_READ_also_does_not_arm_the_parent(home):
+    """The other half: the refusal is checked before the state dir is even computed,
+    so a subagent surveying the board cannot create a ledger for its parent."""
+    guard.post_tool_use(bash("clawgatectl task get 193", agent_id="agent_012xyz"))
+    assert not os.path.exists(state_dir())
+
+
 def test_SubagentStop_produces_no_output_through_the_real_process(home, tmp_path):
     seed()
     bindir = tmp_path / "bin"
@@ -857,11 +1064,26 @@ def test_block_is_a_TOP_LEVEL_decision_object(capsys):
     assert out == {"decision": "block", "reason": "why"}
 
 
-def test_context_is_a_hookSpecificOutput_arm_naming_Stop(capsys):
-    guard.emit("context", "fyi")
+def test_the_relenting_rung_is_a_systemMessage_and_NOTHING_ELSE(capsys):
+    """🔴 THE WHOLE OF FINDING 1, PINNED AS THE EXACT OBJECT. `systemMessage` is the
+    only field in the CLI's Stop-hook output schema that reaches the operator without
+    entering `blockingErrors`. Asserted as EQUALITY, not membership: an
+    `additionalContext` key added alongside would restore the forced continuation
+    while every "contains systemMessage" check stayed green."""
+    guard.emit("notice", "fyi")
     out = json.loads(capsys.readouterr().out)
-    assert out == {"hookSpecificOutput": {"hookEventName": "Stop",
-                                          "additionalContext": "fyi"}}
+    assert out == {"systemMessage": "fyi"}
+
+
+def test_emit_can_NEVER_produce_an_additionalContext_on_any_kind(capsys):
+    """🔴 The negative half, swept over every kind the ladder can return plus two it
+    cannot. `additionalContext` is not a channel this hook may use on Stop, and a
+    future rung that reached for it would be a silent regression of finding 1."""
+    for kind in ("block", "notice", "silent", "context", "whatever"):
+        guard.emit(kind, "text-%s" % kind)
+        raw = capsys.readouterr().out
+        assert "additionalContext" not in raw, kind
+        assert "hookSpecificOutput" not in raw, kind
 
 
 def test_silent_writes_nothing_at_all(capsys):
@@ -1080,3 +1302,513 @@ def test_the_registrar_registers_it_on_PostToolUse_and_Stop():
 def test_the_hook_file_is_executable_and_parses():
     assert os.path.exists(HOOK)
     compile(open(HOOK).read(), HOOK, "exec")
+
+
+# =========================================================================== #
+# 16. THE FOUR MEASURED FALSE-POSITIVE PROBES, AND THE ESCAPE THAT ACTUALLY WORKS
+#
+# 🔴 The work flag is SESSION-wide. Nothing in a PostToolUse payload says which task
+# an edit belongs to, so two of these four shapes STILL fire — and they are pinned
+# here as behaviour rather than left to be rediscovered. What changed is that the
+# escape is now a mechanism: one command, named in the block text with the session id
+# already filled in, that clears the task for good. The old escape ("say so in one
+# line and stop") was measured NOT to work — saying something changes no state, so
+# the next Stop re-blocked with identical text.
+# =========================================================================== #
+def run_cli(args, home_dir):
+    env = dict(os.environ)
+    env["HOME"] = str(home_dir)
+    return subprocess.run([sys.executable, HOOK] + list(args), input="",
+                          capture_output=True, text=True, timeout=30, env=env)
+
+
+def test_PROBE_A_work_in_a_DIFFERENT_repo_still_fires_and_dismiss_ends_it(home):
+    """🔴 PROBE A, and an honest one: this IS still a false positive. Read task 193,
+    then edit and commit somewhere else entirely — the hook cannot tell, and blocks.
+    What it must NOT do is keep blocking after the operator says the work was not for
+    this card, which is exactly what "say so and stop" did."""
+    guard.post_tool_use(bash("clawgatectl task get 193"))
+    guard.post_tool_use(payload(tool_name="Edit",
+                                tool_input={"file_path": "/other/repo/x.py"}))
+    guard.post_tool_use(bash("git -C /other/repo commit -m 'unrelated'"))
+    kind, text = guard.stop_decision(payload("Stop"),
+                                     reader=Reader(result=task(comments=[])))
+    assert kind == "block"
+    # The escape is a COMMAND, and it carries this session's id already resolved —
+    # a model cannot see its own hook payload, so a placeholder would be unrunnable.
+    assert "--dismiss 193 --session %s" % SESSION in text
+    assert "say so in one line and stop" not in text
+    guard.dismiss(state_dir(), 193)
+    r = Reader(result=task(comments=[]))
+    assert guard.stop_decision(payload("Stop"), reader=r) == ("silent", "")
+    assert r.calls == []
+
+
+def test_PROBE_B_writing_back_only_ONE_of_two_surveyed_cards(home):
+    """🔴 PROBE B. Survey 193 and 194, work, write back 194 only. 194 goes quiet on
+    its own — the live read sees its comment. 193 still fires, and the block text
+    names ONLY 193, so the operator is told exactly which card to dismiss."""
+    guard.post_tool_use(bash("clawgatectl task get 193"), now=READ_EPOCH)
+    guard.post_tool_use(bash("clawgatectl task get 194"), now=READ_EPOCH)
+    guard.post_tool_use(payload(tool_name="Edit", tool_input={"file_path": "/x"}),
+                        now=WORK_EPOCH)
+
+    def reader(task_id, timeout=None):
+        if task_id == 194:
+            return task(task_id=194,
+                        comments=[comment(created="2026-08-15T13:00:00.000000Z")])
+        return task(task_id=193, comments=[])
+
+    kind, text = guard.stop_decision(payload("Stop"), reader=reader)
+    assert kind == "block"
+    assert "task status 193 ready_for_review" in text
+    assert "task status 194" not in text
+    assert "--dismiss 193 --session %s" % SESSION in text
+
+
+def test_PROBE_D_a_command_that_merely_MENTIONS_a_commit_does_not_fire(home):
+    """🔴 PROBE D. Read the card, then `echo 'remember to git commit later'`. That was
+    measured to block; it is now not even work. Driven through `post_tool_use` rather
+    than `is_work` so the writer is exercised, which is where a previous sweep found a
+    forced-true mutant surviving every unit-level test in this file."""
+    guard.post_tool_use(bash("clawgatectl task get 193"))
+    guard.post_tool_use(bash("echo 'remember to git commit later'"))
+    guard.post_tool_use(bash("grep -rn 'gh pr create' claude/skills/"))
+    assert guard.work_after_read(state_dir()) is False
+    r = Reader(result=task(comments=[]))
+    assert guard.stop_decision(payload("Stop"), reader=r) == ("silent", "")
+    assert r.calls == []
+
+
+def test_dismiss_removes_the_read_and_BOTH_counters(home):
+    sd = seed()
+    guard.bump_fires(sd, 193)
+    guard.bump_fires(sd, 193, "unknown")
+    removed = guard.dismiss(sd, 193)
+    assert sorted(removed) == ["fires-193", "read-193", "unknown-193"]
+    assert guard.tracked_ids(sd) == {}
+
+
+def test_dismiss_is_PER_TASK_and_leaves_its_neighbours_alone(home):
+    """🔴 A dismissal that swept the session would silence cards the operator never
+    mentioned — the failure mode a blunt "clear everything" escape would have."""
+    seed(task_id=193)
+    sd = seed(task_id=194)
+    guard.dismiss(sd, 193)
+    assert sorted(guard.tracked_ids(sd)) == [194]
+    r = Reader(result=task(comments=[]))
+    kind, text = guard.stop_decision(payload("Stop"), reader=r)
+    assert kind == "block"
+    assert [c[0] for c in r.calls] == [194]
+    assert "task status 194 ready_for_review" in text
+
+
+def test_dismiss_on_an_absent_task_is_not_an_error(home):
+    sd = seed(task_id=193)
+    assert guard.dismiss(sd, 999) == []
+    assert sorted(guard.tracked_ids(sd)) == [193]
+
+
+def test_the_dismiss_command_from_the_block_text_RUNS_and_ENDS_the_nagging(home,
+                                                                           tmp_path):
+    """🔴 THE ESCAPE, EXERCISED AS A REAL SUBPROCESS FROM THE EXACT TEXT THE MODEL IS
+    GIVEN. The command is extracted from the block reason rather than retyped here —
+    a hand-written invocation would still pass if the text advertised a different
+    flag, which is precisely how "say so and stop" survived being useless."""
+    b = tmp_path / "dismissbin"
+    b.mkdir()
+    mockbin.write_exec(b / "clawgatectl",
+                       "printf '%%s\\n' '%s'\n" % json.dumps(task(comments=[])))
+    run_hook(bash("clawgatectl task get 193"), home, path_extra=b)
+    run_hook(payload(tool_name="Edit", tool_input={"file_path": "/x"}), home,
+             path_extra=b)
+    first = run_hook(payload("Stop"), home, path_extra=b)
+    reason = json.loads(first.stdout)["reason"]
+    line = [ln.strip() for ln in reason.splitlines() if "--dismiss" in ln]
+    assert len(line) == 1, reason
+    args = line[0].split()[2:]            # drop `python3 <script>`
+    assert args[0] == "--dismiss"
+    p = run_cli(args, home)
+    assert p.returncode == 0, p.stderr
+    assert "dismissed task 193" in p.stdout
+    # ...and the NEXT Stop is silent, which is the thing the old escape could not do.
+    again = run_hook(payload("Stop"), home, path_extra=b)
+    assert again.returncode == 0
+    assert again.stdout == ""
+
+
+def test_the_positive_control_for_that_dismissal(home, tmp_path):
+    """Without the dismiss step the same sequence blocks a SECOND time — so the
+    silence above is the mechanism working, not a session that had gone quiet anyway
+    (the ladder still has a rung left at this point)."""
+    b = tmp_path / "dismissbin2"
+    b.mkdir()
+    mockbin.write_exec(b / "clawgatectl",
+                       "printf '%%s\\n' '%s'\n" % json.dumps(task(comments=[])))
+    run_hook(bash("clawgatectl task get 193"), home, path_extra=b)
+    run_hook(payload(tool_name="Edit", tool_input={"file_path": "/x"}), home,
+             path_extra=b)
+    run_hook(payload("Stop"), home, path_extra=b)
+    second = run_hook(payload("Stop"), home, path_extra=b)
+    assert json.loads(second.stdout)["decision"] == "block"
+
+
+def test_the_cli_refuses_a_dismiss_without_a_session_rather_than_guessing(home):
+    """🔴 There is no way for this process to learn the caller's session id, so a
+    default would land the dismissal on some other session's ledger. It prints usage
+    and touches nothing."""
+    sd = seed()
+    p = run_cli(["--dismiss", "193"], home)
+    assert p.returncode == 0
+    assert "usage:" in p.stdout
+    assert sorted(guard.tracked_ids(sd)) == [193]
+
+
+@pytest.mark.parametrize("args", [
+    ["--dismiss", "not-a-number", "--session", SESSION],
+    ["--dismiss", "193", "--session", ""],
+])
+def test_the_cli_survives_junk_arguments(home, args):
+    sd = seed()
+    p = run_cli(args, home)
+    assert p.returncode == 0
+    assert p.stderr == ""
+    assert sorted(guard.tracked_ids(sd)) == [193]
+
+
+def test_the_cli_mode_never_reads_stdin(home):
+    """🔴 A model runs this from a Bash tool call, where stdin is a terminal or empty.
+    A dismiss path that fell through to `json.load(sys.stdin)` would hang the turn it
+    was supposed to release. Driven with stdin held OPEN and never written to."""
+    seed()
+    p = subprocess.Popen([sys.executable, HOOK, "--dismiss", "193",
+                          "--session", SESSION],
+                         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, text=True,
+                         env={**os.environ, "HOME": str(home)})
+    try:
+        out, _ = p.communicate(timeout=20)   # no input written; the pipe stays open
+    except subprocess.TimeoutExpired:
+        p.kill()
+        raise AssertionError("the CLI mode blocked on stdin")
+    assert p.returncode == 0
+    assert "dismissed task 193" in out
+
+
+# =========================================================================== #
+# 17. THE COMPARISON ANCHOR — the last WORK event, not the read
+#
+# 🔴 THIS IS THE FIX FOR A GUARD THAT WAS DISARMED BY THE RITUAL IT ENFORCES. The
+# clawgate skill posts a "Starting" comment right after the read and BEFORE the work.
+# Anchored on the read, that comment satisfied the check at pickup, so on every
+# session that followed the ritual the hook could never observe a missing COMPLETION
+# write-back — a forward yield of zero on exactly the compliant population.
+# =========================================================================== #
+def test_a_PRE_START_comment_no_longer_disarms_the_guard(home):
+    """The measured shape: read at 12:00, "Starting" comment at 12:01, work at 12:30,
+    Stop. The comment predates the work, so the completion write-back is still owed."""
+    starting = comment(created="2026-08-15T12:01:00.000000Z", body="Starting")
+    assert guard.writeback_state(task(comments=[starting]), READ_TS,
+                                 work_ts=WORK_TS) == "missing"
+
+
+def test_the_full_compliant_ritual_is_still_satisfied(home):
+    """Starting -> work -> Done -> Stop. The Done comment is newer than the work, so
+    the guard goes quiet — the behaviour that must NOT regress while fixing the one
+    above."""
+    starting = comment(created="2026-08-15T12:01:00.000000Z", body="Starting")
+    done = comment(created="2026-08-15T13:00:00.000000Z", body="Done")
+    assert guard.writeback_state(task(comments=[starting, done]), READ_TS,
+                                 work_ts=WORK_TS) == "written"
+
+
+def test_the_anchor_moves_with_the_work_and_NOT_with_the_read(home):
+    """🔴 Three distinct instants, none of which can be produced by collapsing the
+    other two: read 12:00, comment 12:45, work 12:30 vs work 13:30. The SAME comment
+    must read as written against the earlier work and missing against the later one —
+    a mutant that anchors on the read alone gives the same answer to both."""
+    c = comment(created="2026-08-15T12:45:00.000000Z")
+    t = task(comments=[c])
+    assert guard.writeback_state(t, READ_TS, work_ts="2026-08-15T12:30:00Z") \
+        == "written"
+    assert guard.writeback_state(t, READ_TS, work_ts="2026-08-15T13:30:00Z") \
+        == "missing"
+
+
+def test_a_work_stamp_OLDER_than_the_read_does_not_LOOSEN_the_cutoff(home):
+    """The anchor is the LATER of the two. A stale or clock-skewed work stamp must not
+    be able to move the cutoff backwards and admit a comment from before the read."""
+    old = comment(created="2026-08-15T11:00:00.000000Z")
+    assert guard.writeback_state(task(comments=[old]), READ_TS,
+                                 work_ts="2026-08-15T10:00:00Z") == "missing"
+
+
+@pytest.mark.parametrize("bad", [None, "", "1", "garbage", 42])
+def test_an_UNREADABLE_work_stamp_falls_back_to_the_read_anchor(home, bad):
+    """Fail-QUIET, deliberately: a truncated write, or state left by the build that
+    wrote the literal "1", must not invent a stricter cutoff out of an unreadable
+    file. `"1"` is in here because it is exactly what the previous format stored."""
+    c = comment(created="2026-08-15T13:00:00.000000Z")
+    assert guard.writeback_state(task(comments=[c]), READ_TS, work_ts=bad) == "written"
+
+
+def test_the_skew_allowance_absorbs_a_push_right_after_the_comment(home):
+    """🔴 THE NOISE BOUND, MEASURED. Comment at 12:45:00, work at 12:46:00 — 60 s
+    later, inside CLOCK_SKEW_ALLOWANCE_SECS — is still satisfied. 12:50:00, 300 s
+    later, is not. Neither fixture interval (60 s / 300 s) can equal the constant
+    (120 s), so this cannot pass by being it."""
+    c = comment(created="2026-08-15T12:45:00.000000Z")
+    t = task(comments=[c])
+    assert guard.writeback_state(t, READ_TS, work_ts="2026-08-15T12:46:00Z") \
+        == "written"
+    assert guard.writeback_state(t, READ_TS, work_ts="2026-08-15T12:50:00Z") \
+        == "missing"
+
+
+def test_record_work_stores_the_MOST_RECENT_work_not_the_first(home):
+    guard.post_tool_use(bash("clawgatectl task get 193"), now=READ_EPOCH)
+    guard.post_tool_use(payload(tool_name="Edit", tool_input={"file_path": "/x"}),
+                        now=WORK_EPOCH)
+    guard.post_tool_use(payload(tool_name="Write", tool_input={"file_path": "/y"}),
+                        now=READ_PLUS_1H)
+    assert guard.last_work_ts(state_dir()) == "2026-08-15T13:00:00Z"
+
+
+def test_MULTI_TURN_work_fires_once_per_turn_and_then_STOPS(home, capsys):
+    """🔴 THE COST OF THE ANCHOR, BOUNDED AND MEASURED RATHER THAN DISCOVERED LATER.
+    Work spanning several turns, with a Done comment each time that the NEXT turn's
+    work then outdates, fires once per turn — until the per-task ladder is spent. Four
+    turns: block, block, systemMessage, silence. Driven with 4, which is neither
+    MAX_BLOCKS (2) nor MAX_FIRES (3)."""
+    sd = seed(work=False)
+    done_at = "2026-08-15T12:45:00.000000Z"
+    shapes = []
+    for i in range(4):
+        # each turn: more work, landing well past the last comment + the skew allowance
+        guard.record_work(sd, now=WORK_EPOCH + 3600 * (i + 1))
+        r = Reader(result=task(comments=[comment(created=done_at)]))
+        out = emitted(capsys, guard.stop_decision(payload("Stop"), reader=r))
+        shapes.append(None if out is None
+                      else ("block" if "decision" in out else sorted(out)[0]))
+    assert shapes == ["block", "block", "systemMessage", None]
+
+
+def test_MULTI_TURN_work_that_KEEPS_writing_back_never_fires_at_all(home):
+    """The positive control for that noise: the same four turns, each with a comment
+    NEWER than that turn's work, stay silent. So the firing above is the anchor
+    doing its job, not an unconditional per-turn nag."""
+    sd = seed(work=False)
+    for i in range(4):
+        worked = WORK_EPOCH + 3600 * (i + 1)
+        guard.record_work(sd, now=worked)
+        fresh = guard.now_iso(worked + 60)
+        r = Reader(result=task(comments=[comment(created=fresh)]))
+        assert guard.stop_decision(payload("Stop"), reader=r) == ("silent", "")
+
+
+# =========================================================================== #
+# 18. THE TWO HANG BOUNDS, EXERCISED AT THEIR DEFAULTS
+#
+# 🔴 The ladder tests inject `budget=3.0` and a fake clock, so for a while NOTHING
+# executed these constants: `STOP_BUDGET_SECS 8.0 -> 600.0` and
+# `PER_TASK_TIMEOUT_SECS 5.0 -> 300.0` both SURVIVED a mutation sweep, and the CLI's
+# own hook timeout (600 000 ms) is the only other thing bounding a Stop.
+# =========================================================================== #
+def test_the_DEFAULT_stop_budget_is_what_cuts_the_reads_off(home):
+    """Clock ticks 0.0 / 7.9 / 8.1 bracket STOP_BUDGET_SECS (8.0) from both sides and
+    equal neither it nor PER_TASK_TIMEOUT_SECS (5.0). At 8.0 exactly one task is read
+    with 0.1 s left; at 600.0 all five are read with the full 5.0 ceiling; at anything
+    below 7.9 none is read at all."""
+    for tid in (11, 12, 13, 14, 15):
+        seed(task_id=tid)
+    ticks = iter([0.0, 7.9, 8.1, 8.1, 8.1, 8.1])
+    r = Reader(result=task(comments=[]))
+    guard.stop_decision(payload("Stop"), reader=r, clock=lambda: next(ticks))
+    assert [c[0] for c in r.calls] == [11]
+    assert r.calls[0][1] == pytest.approx(0.1)
+
+
+def test_a_read_is_NOT_started_with_exactly_zero_budget_left(home):
+    """🔴 THE BOUNDARY ITSELF. `remaining <= 0` vs `remaining < 0` differ at exactly
+    one point, and every other budget test sits off it — so flipping the comparison
+    SURVIVED a sweep. At `remaining == 0.0` the loop must break: admitting the read
+    would hand the client a `timeout=0.0`, which is a spawn that can only fail."""
+    for tid in (11, 12):
+        seed(task_id=tid)
+    ticks = iter([0.0, 8.0, 8.0, 8.0])
+    r = Reader(result=task(comments=[]))
+    guard.stop_decision(payload("Stop"), reader=r, clock=lambda: next(ticks))
+    assert r.calls == []
+
+
+def test_the_positive_control_for_that_boundary(home):
+    """One microsecond of budget on the other side of it, and the read happens."""
+    for tid in (11, 12):
+        seed(task_id=tid)
+    ticks = iter([0.0, 7.999999, 8.0, 8.0, 8.0])
+    r = Reader(result=task(comments=[]))
+    guard.stop_decision(payload("Stop"), reader=r, clock=lambda: next(ticks))
+    assert [c[0] for c in r.calls] == [11]
+
+
+def test_the_DEFAULT_per_task_timeout_is_the_ceiling_on_one_read(home):
+    """With the whole default budget available the ceiling is what bounds a single
+    read — 5.0, not 8.0. Paired with the 3.0 case below, which MOVES the number, so a
+    mutant that hardcodes the ceiling cannot survive both."""
+    seed(task_id=11)
+    r = Reader(result=task(comments=[]))
+    guard.stop_decision(payload("Stop"), reader=r, clock=lambda: 0.0)
+    assert r.calls[0][1] == 5.0
+
+
+def test_the_two_hang_bounds_are_the_numbers_the_docstring_states():
+    """🔴 Pinned as a PAIR with the derived worst case, because the file used to
+    advertise 8.0 as the bound while `_via_curl` waits `timeout + 2` on a read that
+    the budget check admits before it starts: 8.0 + 5.0 + 2 = 15.0 s."""
+    assert guard.STOP_BUDGET_SECS == 8.0
+    assert guard.PER_TASK_TIMEOUT_SECS == 5.0
+    assert guard.CURL_KILL_MARGIN_SECS == 2
+    worst = (guard.STOP_BUDGET_SECS + guard.PER_TASK_TIMEOUT_SECS
+             + guard.CURL_KILL_MARGIN_SECS)
+    assert worst == 15.0
+
+
+def test_the_source_states_the_TRUE_hang_bound_not_the_budget_alone():
+    """The comment above the constants is a claim like any other. It said 8.0 was the
+    bound; the arithmetic says 15.0."""
+    src = open(HOOK).read()
+    assert "STOP_BUDGET_SECS + PER_TASK_TIMEOUT_SECS + 2  =  15.0 s" in src
+
+
+class _FakeProc:
+    returncode = 0
+    stdout = json.dumps({"id": 194, "status": "open", "comments": []})
+    stderr = ""
+
+
+def test_the_curl_wait_OUTLIVES_curls_own_max_time(tmp_path, monkeypatch):
+    """🔴 THE `+ CURL_KILL_MARGIN_SECS`, PINNED AS TWO DIFFERENT NUMBERS. Deleting it
+    survived a sweep: every test drove curl through a stub that returned instantly, so
+    nothing ever compared the two. `max-time = 5` inside the config and `timeout=7` on
+    the wait cannot both come from one literal."""
+    seen = {}
+
+    class _Fake:
+        TimeoutExpired = subprocess.TimeoutExpired
+
+        @staticmethod
+        def run(argv, **kw):
+            seen.update(kw)
+            seen["argv"] = argv
+            return _FakeProc()
+
+    monkeypatch.setattr(guard, "_sp", lambda: _Fake)
+    envf = tmp_path / "clawgate.env"
+    envf.write_text("CLAWGATE_API_URL=http://board.invalid:1\n"
+                    "CLAWGATE_HOOK_TOKEN=t\n")
+    guard._via_curl(194, 5, env_path=str(envf))
+    assert seen["timeout"] == 7
+    cfg_lines = [ln.strip() for ln in seen["input"].splitlines()]
+    assert "max-time = 5" in cfg_lines
+    # ...and the two options that make a failure LOOK like one: without `fail` a 404
+    # body is parsed as a task, without `silent` curl's progress meter lands in stdout.
+    assert "fail" in cfg_lines
+    assert "silent" in cfg_lines
+    assert 'url = "http://board.invalid:1/api/tasks/194"' in cfg_lines
+
+
+def test_the_positive_control_for_that_pair(tmp_path, monkeypatch):
+    """A different timeout must move BOTH numbers — otherwise the assertion above is
+    satisfied by two constants that merely happen to differ by 2."""
+    seen = {}
+
+    class _Fake:
+        TimeoutExpired = subprocess.TimeoutExpired
+
+        @staticmethod
+        def run(argv, **kw):
+            seen.update(kw)
+            return _FakeProc()
+
+    monkeypatch.setattr(guard, "_sp", lambda: _Fake)
+    envf = tmp_path / "clawgate.env"
+    envf.write_text("CLAWGATE_API_URL=http://board.invalid:1\n"
+                    "CLAWGATE_HOOK_TOKEN=t\n")
+    guard._via_curl(194, 11, env_path=str(envf))
+    assert seen["timeout"] == 13
+    assert "max-time = 11" in [ln.strip() for ln in seen["input"].splitlines()]
+
+
+# =========================================================================== #
+# 19. THE SMALL SURFACES THAT HAD NO COVERAGE AT ALL
+# =========================================================================== #
+@pytest.mark.parametrize("raw,want", [
+    ("plain-session_1.2", "plain-session_1.2"),
+    ("../../etc/passwd", ".._.._etc_passwd"),
+    ("a/b c;d$(x)", "a_b_c_d__x_"),
+    ("", ""),
+])
+def test_sanitize_replaces_every_unsafe_character(raw, want):
+    """🔴 This is the only thing standing between an attacker-shaped `session_id` and
+    a path join. It had ZERO coverage: both "return `str(part)` unchanged" and
+    dropping the `[:120]` survived a sweep."""
+    assert guard._sanitize(raw) == want
+
+
+def test_sanitize_truncates_at_120_characters():
+    """Driven with 500 and 119 — neither can equal the 120 it pins."""
+    assert len(guard._sanitize("x" * 500)) == 120
+    assert len(guard._sanitize("y" * 119)) == 119
+
+
+def test_sanitize_coerces_a_non_string():
+    assert guard._sanitize(193) == "193"
+
+
+@pytest.mark.parametrize("session", [None, 42, {"x": 1}, ["a"], ""])
+def test_a_session_id_that_is_not_a_usable_string_has_no_state_dir(session):
+    """🔴 The `isinstance(session, str)` bail survived removal: without it a dict id
+    is `str()`-ed into a path and the hook silently keeps state under a key no other
+    call can reproduce. Asserted directly rather than through main()'s empty stdout,
+    which a mutant produces just as happily."""
+    assert guard._state_dir({"session_id": session}) is None
+
+
+def test_the_positive_control_for_that_bail():
+    sd = guard._state_dir({"session_id": "real-session"})
+    assert sd is not None and sd.endswith("real-session")
+
+
+@pytest.mark.parametrize("raw,want", [
+    ("boom\r\nmore", "boom more"),
+    ("  spaced   out  ", "spaced out"),
+    ("\x1b[31mred\x1b[0m", "\x1b[31mred\x1b[0m"),   # not a newline: length-capped only
+    (None, ""),
+])
+def test_scrub_collapses_third_party_stderr(raw, want):
+    assert guard._scrub(raw) == want
+
+
+def test_scrub_truncates_and_a_failing_client_cannot_flood_the_transcript(tmp_path,
+                                                                          monkeypatch):
+    """🔴 `proc.stderr` is an unfiltered pipe out of a binary this hook does not own,
+    spliced into text an operator reads. Driven with 400 bytes of newline-separated
+    junk: it must come back on ONE line and at most 120 characters."""
+    b = _bin(tmp_path)
+    mockbin.write_exec(b / "clawgatectl",
+                       "echo 'l1' >&2\necho 'l2' >&2\n"
+                       + "".join("echo '%s' >&2\n" % ("x" * 40) for _ in range(10))
+                       + "exit 9\n")
+    _isolated_path(monkeypatch, b)
+    with pytest.raises(guard.LiveReadError) as e:
+        guard.live_task(197, timeout=5, env_path=str(tmp_path / "nope.env"))
+    # The surfacing error is the SECOND client's, carrying the first's message
+    # inside `(first client: …)` — so the scrubbed text is bounded on both sides
+    # rather than running to the end of the string.
+    msg = str(e.value)
+    assert "clawgatectl rc=9" in msg
+    tail = msg.split("clawgatectl rc=9 ", 1)[1].rsplit(")", 1)[0]
+    assert "\n" not in tail and "\r" not in tail
+    assert len(tail) == 120, tail
+    assert tail.startswith("l1 l2 ")
+    assert msg.count("\n") == 0

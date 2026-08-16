@@ -926,7 +926,20 @@ TARGET_FLOORS=(
   #   _suggested_floor 130 = 130 - min(50, max(1, 130/20 = 6)) = 130 - 6 = 124.
   # ZERO new skips, so EXPECTED_SKIPS is untouched. If this line conflicts with a
   # sibling branch, re-run the gate on the MERGED tree and copy what it prints.
-  "scripts/claude-hooks/tests/test_clawgate_writeback_guard.py|124"
+  #
+  # 2026-08-16, THE AUDIT ROUND: 130 -> 208. The additions are not padding — each one
+  # answers a measured defect: the relenting rung asserted on the EMITTED JSON rather
+  # than on an internal kind string (the CLI feeds `additionalContext` into the same
+  # `blockingErrors` array as a block, so the old rung forced a third continuation),
+  # the four false-positive probes (subagent `agent_id`, unrelated-repo work, a
+  # partially-written-back survey, a command that merely MENTIONS a commit), the
+  # `--dismiss` escape driven end to end from the block text it advertises, the work
+  # anchor that stops the skill's own pre-start comment from disarming the guard, and
+  # the two hang bounds + `_sanitize`/`_state_dir`/`_scrub`, all of which had ZERO
+  # coverage and survived a sweep. Read from the gate's per-target line, then through
+  # the gate's OWN function:
+  #   _suggested_floor 208 = 208 - min(50, max(1, 208/20 = 10)) = 208 - 10 = 198.
+  "scripts/claude-hooks/tests/test_clawgate_writeback_guard.py|198"
   # 2026-08-14, writer 2 (opencode) arrives as a NEW target: 15 collected.
   #   _suggested_floor 15 = 15 - min(50, max(1, 15/20 = 0 -> 1)) = 14.
   "scripts/opencode/tests|14"
