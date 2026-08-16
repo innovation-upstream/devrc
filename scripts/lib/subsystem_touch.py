@@ -256,7 +256,6 @@ from subsystem_resolver import (  # noqa: E402
     DEFAULT_MIN_PATHS,
     NUANCE_HEADING,
     ON_MALFORMED_COLLECT,
-    OPENNESS_RESOLVED,
     AmbiguousRefError,
     Association,
     EntryUnreadableError,
@@ -2667,7 +2666,7 @@ class EntryJournal:
         net for those; anything phrased a third way is invisible to both, and
         every renderer says so rather than printing a bare confident zero.
         """
-        return tuple(b for b in self.bullets if b.is_open)
+        return tuple(b for b in self.bullets if b.openness_population == "open")
 
     @property
     def near_miss_bullets(self) -> tuple[JournalBullet, ...]:
@@ -2677,7 +2676,7 @@ class EntryJournal:
         action nor a guess about one, it is a WRITE THAT DID NOT LAND. Treating
         it as either would hide the only thing the writer can act on.
         """
-        return tuple(b for b in self.bullets if b.near_miss_marker)
+        return tuple(b for b in self.bullets if b.openness_population == "near-miss")
 
     @property
     def unmarked_action_bullets(self) -> tuple[JournalBullet, ...]:
@@ -2687,7 +2686,7 @@ class EntryJournal:
         and not twelve: the others measured either zero hits or false ones over
         the live corpus, and a noisy advisory is one nobody reads.
         """
-        return tuple(b for b in self.bullets if b.unmarked_action)
+        return tuple(b for b in self.bullets if b.openness_population == "unmarked")
 
     def oldest_open_days(self, today: str) -> int | None:
         """Age in days of the OLDEST dated `OPEN:` bullet, or None.
@@ -4302,27 +4301,23 @@ def scan_open_actions(paths: Iterable[str | Path]) -> tuple[OpenAction, ...]:
         if not body:
             continue
         for b in parse_journal_bullets(body):
-            if b.openness == OPENNESS_RESOLVED and not b.resolved_by:
-                out.append(
-                    OpenAction(
-                        filename=path.name,
-                        declared=False,
-                        unverifiable_closure=True,
-                        date=b.date,
-                        first_line=b.first_line,
-                    )
-                )
+            # ONE branch, on the resolver's single precedence source. Re-deriving
+            # membership from the individual predicates here is what let a bullet
+            # be both a near-miss and an unmarked action on the writer surface
+            # while being one thing in JSON.
+            pop = b.openness_population
+            if pop in ("none", "resolved"):
                 continue
-            if b.is_open or b.unmarked_action or b.near_miss_marker:
-                out.append(
-                    OpenAction(
-                        filename=path.name,
-                        declared=b.is_open,
-                        near_miss=b.near_miss_marker,
-                        date=b.date,
-                        first_line=b.first_line,
-                    )
+            out.append(
+                OpenAction(
+                    filename=path.name,
+                    declared=pop == "open",
+                    near_miss=pop == "near-miss",
+                    unverifiable_closure=pop == "unverifiable",
+                    date=b.date,
+                    first_line=b.first_line,
                 )
+            )
     return tuple(out)
 
 

@@ -61,12 +61,23 @@ STORE = Path(os.environ.get("SUBSYSTEM_STORE_ROOT",
 
 # A phrase long enough that sharing it with the store is copying, not coincidence.
 #
-# 8 words, measured rather than picked: at 6 the corpus yields ordinary technical
-# English ("the image tag in the deployment is") that this repo writes on its own
-# and would fail on innocently; at 8 every surviving phrase in a manual read was
-# specific to one entry. Raising it weakens the guard, lowering it makes it noisy —
-# if you change it, re-read a sample of what it then matches before believing the
-# new number.
+# 8 words. Measured shared-phrase counts between the store and this repo, over
+# the whole tracked tree on 2026-08-15:
+#
+#     N=4 → 348    N=5 → 44    N=6 → 3    N=7 → 2    N=8 → 0
+#
+# 🔴 STATED HONESTLY, because the first version of this comment was not: it
+# claimed "at 8 every surviving phrase in a manual read was specific to one
+# entry", which cannot be true when nothing survives at 8. 8 is the FIRST value
+# that yields zero — it is tuned to a noise floor, not to a measured precision
+# point, and ≤5 is unusable (348 hits is ordinary technical English this repo
+# writes on its own).
+#
+# ⚠ The corollary, which is the real caveat: a copy of SEVEN words or fewer is
+# invisible here, and one such fixture did survive the first fix round at exactly
+# 7. Lowering the threshold trades that for false positives; the honest position
+# is that this catches wholesale copying, not fragments. If you change it, re-read
+# a sample of what it then matches before believing the new number.
 PHRASE_WORDS = 8
 
 # Tokenisation. A `word` keeps dots/slashes/dashes so `foo.bar/baz` stays one
@@ -75,12 +86,49 @@ _WORD = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*")
 _CODE_FENCE = re.compile(r"^\s*```")
 
 
+# Extensions that cannot carry prose. Everything else is scanned, INCLUDING
+# extensionless files.
+#
+# 🔴 THIS WAS AN ALLOWLIST AND THAT WAS THE BUG. A delta re-audit measured the
+# allowlist version scanning 632 of 839 tracked files — 207 never compared,
+# among them 62 `.mjs`, 48 extensionless scripts, 22 `.js`, 18 `.html`. The
+# module's own documentation claimed it reported "any tracked repo file", so a
+# copy into the browser extension or `scripts/bar-status-poll` was invisible
+# while the check reported clean. An allowlist answers "did I think of this
+# extension?"; a denylist answers "can this file hold prose?", which is the
+# question. New file types are then covered by default rather than by memory.
+_BINARY_EXT = {
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".svgz", ".pdf", ".zip",
+    ".gz", ".xz", ".zst", ".tar", ".woff", ".woff2", ".ttf", ".otf", ".mp4",
+    ".webm", ".wasm", ".so", ".bin", ".pyc",
+}
+
+
+def is_scannable(path: Path) -> bool:
+    """Can this file hold prose? PURE — no git, no repo layout.
+
+    Separated from `_tracked_text_files` so the DECISION is testable in every
+    tier. The first version tested the filter by calling `git ls-files` over the
+    real repo, which fails in the nix sandbox (`/build/src` has no `.git`) — the
+    same "keyed to something the gating tier does not have" class that
+    `run-tests.sh`'s EXPECTED_SKIPS ledger records removing twice. Pinning the
+    predicate against synthetic files is also a stronger guard: it asserts the
+    rule rather than the repo's current contents.
+    """
+    if path.suffix.lower() in _BINARY_EXT or not path.is_file():
+        return False
+    try:
+        # A NUL byte in the first 8 KiB is git's own heuristic for binary.
+        # Cheaper and more honest than guessing from the name.
+        return b"\0" not in path.open("rb").read(8192)
+    except OSError:
+        return False
+
+
 def _tracked_text_files() -> list[Path]:
     out = subprocess.run(["git", "-C", str(ROOT), "ls-files"],
                          capture_output=True, text=True, check=True).stdout
-    keep = {".py", ".md", ".sh", ".nix", ".json", ".toml", ".yaml", ".yml", ".txt"}
-    return [ROOT / line for line in out.splitlines()
-            if Path(line).suffix in keep and (ROOT / line).is_file()]
+    return [ROOT / line for line in out.splitlines() if is_scannable(ROOT / line)]
 
 
 def _phrases(text: str) -> set[str]:
@@ -179,8 +227,15 @@ def live_check() -> list[str]:
         except OSError:  # pragma: no cover - ls-files just listed it
             continue
         for phrase in _phrases(text) & store_phrases.keys():
+            # `relative_to` RAISES for a path outside ROOT, and a caller may
+            # legitimately hand in one (the tests do). A crash there would turn a
+            # real finding into a stack trace, so the display degrades instead.
+            try:
+                shown = f.relative_to(ROOT)
+            except ValueError:
+                shown = f
             hits.append(
-                f"  {f.relative_to(ROOT)} shares an {PHRASE_WORDS}-word phrase "
+                f"  {shown} shares an {PHRASE_WORDS}-word phrase "
                 f"with store entry {store_phrases[phrase]}"
             )
 
@@ -263,16 +318,17 @@ def test_the_live_check_finds_a_planted_copy(tmp_path, monkeypatch):
         f"- 2026-01-01: {secret}\n{filler}\n",
         encoding="utf-8",
     )
-    planted = ROOT / "scripts" / "tests" / "_planted_leak_probe.tmp.md"
+    # Written under tmp_path, never inside ROOT. The first version planted the
+    # file in `scripts/tests/` and removed it in a `finally`; an interrupted run
+    # would strand an untracked file in a repo whose CLAUDE.md says new files get
+    # `git add`ed — a test that can leave a mess in the tree it is protecting.
+    planted = tmp_path / "planted.md"
     planted.write_text(f"A doc that quotes it: {secret}.\n", encoding="utf-8")
-    try:
-        monkeypatch.setattr("test_store_content_not_copied.STORE", scope.parent)
-        monkeypatch.setattr("test_store_content_not_copied._own_scope", lambda: "")
-        monkeypatch.setattr("test_store_content_not_copied._tracked_text_files",
-                            lambda: [planted])
-        hits = live_check()
-    finally:
-        planted.unlink(missing_ok=True)
+    monkeypatch.setattr("test_store_content_not_copied.STORE", scope.parent)
+    monkeypatch.setattr("test_store_content_not_copied._own_scope", lambda: "")
+    monkeypatch.setattr("test_store_content_not_copied._tracked_text_files",
+                        lambda: [planted])
+    hits = live_check()
     assert len(hits) == 1 and "some-scope/svc.md" in hits[0], hits
 
 
@@ -297,3 +353,68 @@ if __name__ == "__main__":
         raise SystemExit(1)
     print("store-content check: no shared phrases. (Live comparison ran.)")
     _sys.exit(0)
+
+
+def test_the_denominator_guard_fires_on_a_too_small_store(tmp_path, monkeypatch):
+    """An audit found this guard reachable and correct but never watched to fire —
+    it survived deletion against a green suite. It is the thing standing between
+    a clean result and a comparison over almost nothing."""
+    scope = tmp_path / "store" / "sc"
+    scope.mkdir(parents=True)
+    (scope / "svc.md").write_text("---\nservice: svc\n---\n\n- tiny.\n", encoding="utf-8")
+    monkeypatch.setattr("test_store_content_not_copied.STORE", scope.parent)
+    monkeypatch.setattr("test_store_content_not_copied._own_scope", lambda: "")
+    try:
+        live_check()
+    except RuntimeError as exc:
+        assert "not reading the store properly" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("a 1-bullet store did not trip the denominator guard")
+
+
+def test_the_own_scope_exclusion_actually_excludes(tmp_path, monkeypatch):
+    """The provenance rule the module spends 20 lines defending survived deletion
+    against a green suite. Without it the guard fires forever on this repo's own
+    documentation, which is how a gate becomes one everyone clicks through."""
+    root = tmp_path / "store"
+    (root / "mine").mkdir(parents=True)
+    (root / "theirs").mkdir(parents=True)
+    for d in ("mine", "theirs"):
+        (root / d / "svc.md").write_text(
+            "---\nservice: svc\n---\n\n## Nuance / work-history\n"
+            + "\n".join(f"- 2026-01-{i:02d}: scope {d} distinct filler sentence "
+                        f"number {i} with plenty of unique words in it here."
+                        for i in range(1, 20)),
+            encoding="utf-8",
+        )
+    monkeypatch.setattr("test_store_content_not_copied.STORE", root)
+    monkeypatch.setattr("test_store_content_not_copied._own_scope", lambda: "mine")
+    names = {p.parent.name for p in _store_entry_files()}
+    assert names == {"theirs"}, f"own scope was not excluded: {names}"
+
+
+def test_the_scan_covers_extensionless_and_js_files(tmp_path):
+    """🔴 The allowlist version skipped 207 of 839 tracked files — .mjs, .js,
+    .html and every extensionless script — while claiming to report "any tracked
+    repo file". This pins the denylist behaviour that replaced it, against
+    synthetic files so it runs in every tier.
+    """
+    for name in ("bar-status-poll", "ext.mjs", "app.js", "page.html", "init.lua",
+                 "notes.md", "mod.py"):
+        f = tmp_path / name
+        f.write_text("some prose here\n", encoding="utf-8")
+        assert is_scannable(f) is True, f"{name} would not be compared"
+
+    binary = tmp_path / "logo.png"
+    binary.write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00")
+    assert is_scannable(binary) is False, "a real binary must be skipped"
+
+    # ⚠ The NUL sniff is the half that catches an unlisted binary EXTENSION.
+    # Without it a new binary type is scanned as text until someone remembers to
+    # add it — which is the allowlist failure again, wearing a denylist.
+    unlisted = tmp_path / "blob.unknownext"
+    unlisted.write_bytes(b"text then a nul\x00 and more")
+    assert is_scannable(unlisted) is False, (
+        "the NUL sniff is not running — an unlisted binary extension is being "
+        "compared as prose"
+    )

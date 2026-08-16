@@ -1099,8 +1099,18 @@ _NEAR_MISS_MARKER = re.compile(
     r"(?:\d{4}-\d{2}-\d{2}[^A-Za-z]{0,3})?"    # a date in any of its corpus forms
     r"[^A-Za-z0-9]{0,4}"                        # `**`, quotes, stray punctuation
     r"(OPEN|RESOLVED)\b",
-    re.I,
 )
+# 🔴 NO `re.I`, and a delta re-audit is why. With it, this fired on ordinary
+# prose — `- Open questions remain about the retry budget.`, `- Resolved by
+# pinning the image tag.`, `- resolved upstream in 1.2.3.` — each producing a 🔴
+# "DID NOT PARSE, fix the LINE" advisory about a correct sentence. That is how a
+# loud path gets ignored, which is the failure this detector exists to avoid.
+# The tool's own advisory text says the marker "is upper-case"; matching
+# case-insensitively contradicted it. `test_ordinary_prose_using_the_word_open_is_
+# _not_a_near_miss` did not catch it — it probed the word MID-sentence, where a
+# `^`-anchored pattern structurally cannot match, so it was a vacuous guard and
+# deleting `re.I` SURVIVED the whole suite. The replacement probes sentence-INITIAL
+# capitalised prose, which is where the false positives actually were.
 
 
 def _is_fence(line: str) -> bool:
@@ -1239,6 +1249,42 @@ class JournalBullet:
         if self.openness is not None:
             return False
         return bool(_UNMARKED_ACTION.search(self.text))
+
+    @property
+    def openness_population(self) -> str:
+        """WHICH of the five populations this bullet belongs to. Exactly one.
+
+        🔴 THE SINGLE SOURCE OF THE PRECEDENCE ORDER, and the reason it exists.
+        A delta re-audit found one bullet counted TWICE in the writer-facing
+        block — `- Open items: the retry budget is not yet addressed.` is both a
+        near-miss and an unmarked action, so it rendered under both headings with
+        its own line quoted under each, while `--validate` classified it once.
+        Two surfaces disagreed about the same input because each decided
+        membership for itself (`claude/RULES.md` → "One rule, one place: a
+        predicate duplicated across call sites regenerates the same bug at every
+        site"). Every consumer now branches on THIS.
+
+        Precedence, most-certain first — an earlier case wins outright:
+
+          `open`          the writer declared `OPEN:`. Exact.
+          `unverifiable`  a `RESOLVED:` naming no sha; closed but unprovable.
+          `resolved`      a `RESOLVED <sha>:`. Nothing to report.
+          `near-miss`     no marker parsed, but the line looks like an attempt.
+                          Beats `unmarked` because "your write did not land" is
+                          actionable and specific, where "this reads like an open
+                          action" is a guess about the same line.
+          `unmarked`      no marker, and the prose matches the narrow floor.
+          `none`          everything else — the overwhelming majority.
+        """
+        if self.openness == OPENNESS_OPEN:
+            return "open"
+        if self.openness == OPENNESS_RESOLVED:
+            return "resolved" if self.resolved_by else "unverifiable"
+        if self.near_miss_marker:
+            return "near-miss"
+        if self.unmarked_action:
+            return "unmarked"
+        return "none"
 
     @property
     def near_miss_marker(self) -> bool:
