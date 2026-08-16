@@ -47,6 +47,12 @@ there. Only what's specific to this repo, where a working tree is also a **deplo
   block prompts for what the other allows, which is a real gap. Close it with
   `scripts/sync-claude-permissions.py` (idempotent, additive, **curated** — never copy the
   other host's block wholesale; #380 exists because that file accretes junk).
+  🔴 **rc 16 is NOT drift** — it is the fuzzyclaw phase-2 gate reporting that zero rows
+  still take their age from fuzzyclaw alone, i.e. the readers can now be deleted; the
+  final line says `ACTIONABLE (not drift)` and it is the least severe code, so it can
+  only ever be the verdict on an otherwise-clean run. Every way that gate can fail to
+  measure prints `COULD NOT MEASURE` with a reason and sets **no** rc — a `0` there is
+  never a pass, because the answer it hands over is a deletion.
 - **Recovering a diverged host** — preserve, verify, *then* move the pointer:
   `git branch <topic> HEAD && git push -u origin <topic>` on that host → confirm the shas are
   on origin **from a different host** → `git reset --keep origin/main` (`--keep` refuses

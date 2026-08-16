@@ -57,4 +57,24 @@ Under `--claude-only`, every summary count describes the **filtered** set. That 
 direction: counting the unfiltered set would publish `total_sessions: 20` beside an empty
 table and **exit 0** — "ran, found windows" over nothing printed. Counting the filtered set
 makes the same run a real measured zero (**exit 3**), because zero *agent* windows is what
-was asked, and `summary.excluded_non_claude` keeps it from reading as an empty host.
+was asked, and `summary.excluded_shells` keeps it from reading as an empty host.
+
+🔴 **The predicate is the CLASS axis, not the `claude` flag.** `--claude-only` drops
+`CLASS=shell` (via `dropped_by_claude_only` → `row_class`), so a `cluster` dispatch — an
+agent with no pane, hence `claude: null` — is **kept**. The old `r["claude"]` spelling was
+correct only while every row was a tmux pane; with the `kind` axis it silently reclassified
+every cluster agent as a shell and deleted it.
+
+🔴 **And whatever the filter removed is attributed to the FILTER, not to the build.** The
+filter runs *before* `summarize` and `measured_caveats`, both of which derive from the rows
+that survived — so a kind it removed entirely would have shown up in `kinds_produced` as a
+kind this build never emits, and rendered *"X is ENUMERATED but NOT PRODUCED, so no such row
+appears and its absence is NOT a measured zero"*, which would be false in all three clauses.
+`caveats.kind_scope.kinds_excluded_by_filter` (mirrored at
+`summary.kinds_excluded_by_filter`) names those kinds, and the rendered caveat carries an
+explicit *"a FILTER REMOVED every kind=… row this scan produced"* clause instead. The key is
+**absent when no filter ran** and `[]` when one ran and removed no whole kind — the same
+not-measured-vs-measured-none distinction as `excluded_shells` being `null` rather than `0`.
+
+Reachable today with no cluster row anywhere: `--claude-only` over a host whose tmux rows are
+all bare shells removes the last `tmux` row.

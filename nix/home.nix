@@ -2271,7 +2271,16 @@ in
         # iproute2 is load-bearing, not incidental: `ip -4 -o addr show` is how
         # local_ipv4s identifies WHICH host this is (both report hostname `nixos`).
         # Without it detection returns "unknown" and the script exits 6.
-        "PATH=${lib.makeBinPath [ pkgs.git pkgs.openssh pkgs.iproute2 pkgs.bash pkgs.coreutils pkgs.gawk pkgs.gnused pkgs.gnugrep ]}"
+        #
+        # 🔴 python3 AND tmux ARE FOR THE CHILD, NOT FOR drift-check.sh ITSELF.
+        # The fuzzyclaw phase-2 gate execs `scripts/session-manager`, whose
+        # shebang resolves `python3` from PATH and which shells out to `tmux
+        # list-panes`. Under systemd there is none of the login shell's PATH, so
+        # without these the gate reports COULD NOT MEASURE on every timer run
+        # forever — from a unit that looks correct, which is the exact shape the
+        # iproute2 note above records. Pinned by
+        # `test_the_phase2_child_binaries_are_on_the_unit_path`.
+        "PATH=${lib.makeBinPath [ pkgs.git pkgs.openssh pkgs.iproute2 pkgs.bash pkgs.coreutils pkgs.gawk pkgs.gnused pkgs.gnugrep pkgs.python3 pkgs.tmux ]}"
         "HOME=%h"
       ];
       ExecStart = "${pkgs.bash}/bin/bash %h/workspace/devrc/scripts/drift-check.sh";
@@ -2280,6 +2289,7 @@ in
       X-Restart-Triggers = [
         "${../scripts/drift-check.sh}"
         "${../scripts/lib/host-role.sh}"
+        "${../scripts/lib/drift_phase2.py}"
       ];
     };
   };

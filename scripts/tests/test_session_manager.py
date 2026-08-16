@@ -1803,7 +1803,9 @@ def test_json_golden_schema_and_values():
         # 🔴 LITERAL, and the whole point: this fixture's 3 windows are one busy
         # claude, one idle claude and one unknown SHELL. No bucket publishes a
         # bare number, and no flat `idle` key exists to be read as an agent
-        # count. `claude_only` false -> `excluded_non_claude` is None, not 0.
+        # count. `claude_only` false -> `excluded_shells` is None, not 0, and
+        # so is `kinds_excluded_by_filter`: no filter ran, so "which kinds did
+        # it remove" was never measured and `[]` would be a fake measurement.
         "status": {
             "busy": {"claude": 1, "shell": 0, "total": 1},
             "idle": {"claude": 1, "shell": 0, "total": 1},
@@ -1811,7 +1813,8 @@ def test_json_golden_schema_and_values():
             "unknown": {"claude": 0, "shell": 1, "total": 1},
         },
         "claude_only": False,
-        "excluded_non_claude": None,
+        "excluded_shells": None,
+        "kinds_excluded_by_filter": None,
         "hosts_reachable": ["laptop", "workbench"],
         "hosts_unreachable": [],
         "fuzzyclaw_live": 1,
@@ -3754,7 +3757,7 @@ def test_claude_only_drops_the_shells_on_EVERY_host_and_keeps_the_agents():
     assert [r["session"] for r in wb] == ["scratch7"], "misc:5 is a zsh window"
     assert [r["session"] for r in lt] == ["naida-dev"], "thistle:4 is a shell"
     assert all(r["claude"] is True for r in wb + lt)
-    assert report["summary"]["excluded_non_claude"] == 2, "one PER HOST"
+    assert report["summary"]["excluded_shells"] == 2, "one PER HOST"
     # ...and the unfiltered scan still carries both shells, so the drop is
     # caused by the flag and by nothing else (positive control on the filter).
     unfiltered = base_gather(runner=make_runner(
@@ -3779,7 +3782,7 @@ def test_claude_only_filters_on_the_claude_BOOLEAN_not_a_lookalike_field():
 
 def test_claude_only_summary_counts_the_FILTERED_set_and_says_what_it_dropped():
     """🔴 KILLS: summarizing the UNFILTERED set (the silent trap), and
-    reporting `excluded_non_claude` as 0 when the filter never ran.
+    reporting `excluded_shells` as 0 when the filter never ran.
 
     Counting the unfiltered set would publish `total_sessions: 5` beside 3
     printed rows. The dropped count is what keeps the filtered zero from
@@ -3791,11 +3794,11 @@ def test_claude_only_summary_counts_the_FILTERED_set_and_says_what_it_dropped():
     assert s["status"]["idle"] == {"claude": 2, "shell": 0, "total": 2}
     assert s["status"]["busy"]["total"] == 0, "the busy SHELL is gone"
     assert s["claude_only"] is True
-    assert s["excluded_non_claude"] == 2
+    assert s["excluded_shells"] == 2
 
     off = mix_gather()["summary"]
     assert off["claude_only"] is False
-    assert off["excluded_non_claude"] is None, (
+    assert off["excluded_shells"] is None, (
         "nothing was excluded because nothing was ever counted — not 0")
 
 
@@ -3804,7 +3807,7 @@ def test_claude_only_composes_with_host_and_counts_only_the_scanned_host():
                          local_host="workbench")
     assert [r["host"] for r in report["hosts"]["laptop"]["windows"]] \
         == ["laptop"]
-    assert report["summary"]["excluded_non_claude"] == 0, (
+    assert report["summary"]["excluded_shells"] == 0, (
         "the laptop fixture has no shell window — a MEASURED zero")
     assert report["summary"]["total_sessions"] == 1
     # the workbench's zsh window was never scanned, so it is not in the count
@@ -3825,7 +3828,7 @@ def test_claude_only_over_a_shell_only_host_is_a_MEASURED_zero_not_a_success():
     assert report["summary"]["total_sessions"] == 0
     assert sm.exit_code_for(report) == sm.EXIT_EMPTY == 3
     assert sm.exit_code_for(report) != sm.EXIT_OK
-    assert report["summary"]["excluded_non_claude"] == 1, (
+    assert report["summary"]["excluded_shells"] == 1, (
         "and the zero says the host was NOT empty — 1 shell was dropped")
     # unfiltered, the very same scan is a non-empty EXIT_OK
     unfiltered = mix_gather(
@@ -3837,8 +3840,12 @@ def test_claude_only_over_a_shell_only_host_is_a_MEASURED_zero_not_a_success():
 def test_claude_only_is_STATED_in_the_table_beside_the_counts_it_changed():
     text = sm.render_table(mix_gather(claude_only=True))
     assert "FILTER --claude-only" in text
-    assert "2 non-claude window(s) excluded" in text
+    assert "2 shell window(s) excluded" in text
     assert "FILTER --claude-only" not in sm.render_table(mix_gather())
+    # ...and on a tmux-only scan NO kind vanished, so the second FILTER line —
+    # the one that names a removed kind — must not appear. Printing it with an
+    # empty slot would assert a removal that did not happen.
+    assert "removed EVERY kind=" not in text
 
 
 def test_cli_claude_only_flag_reaches_gather_and_defaults_off(monkeypatch):
@@ -3871,8 +3878,11 @@ def test_main_json_end_to_end_carries_the_split_and_the_filter(
     assert rc == sm.EXIT_OK
     assert blob["summary"]["status"]["idle"] == {"claude": 2, "shell": 0,
                                                  "total": 2}
-    assert blob["summary"]["excluded_non_claude"] == 2
-    assert blob["filters"] == {"claude_only": True, "excluded_non_claude": 2}
+    assert blob["summary"]["excluded_shells"] == 2
+    assert blob["filters"] == {"claude_only": True, "excluded_shells": 2,
+                               # the filter RAN and removed no whole kind —
+                               # `[]`, not None, and not absent
+                               "kinds_excluded_by_filter": []}
 
 
 def test_detail_under_claude_only_explains_its_own_emptiness(monkeypatch):
@@ -3884,7 +3894,7 @@ def test_detail_under_claude_only_explains_its_own_emptiness(monkeypatch):
     rows = [r for h in narrowed["hosts"].values() for r in h["windows"]]
     assert rows == []
     assert narrowed["summary"]["claude_only"] is True
-    assert narrowed["summary"]["excluded_non_claude"] == 2
+    assert narrowed["summary"]["excluded_shells"] == 2
     assert "NOT a measured absence" in sm.no_session_reason(narrowed)
 
 
@@ -3902,6 +3912,310 @@ def test_claude_only_says_it_does_nothing_for_tail_rather_than_ignoring_it(
     # ...and it is NOT printed when the flag was not passed
     sm.main(["tail", "scratch7:3", "--host", "workbench"])
     assert "--claude-only" not in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
+# §5.2b — --claude-only AGAINST THE `kind` AXIS
+#
+# Two defects, one flag. `r.get("claude")` was a correct SPELLING of "drop the
+# shells" only while every row was a tmux pane, and the filter runs BEFORE both
+# `summarize` and `measured_caveats`, so whatever it removed was then attributed
+# to the BUILD rather than to the FILTER.
+#
+# 🔴 NO REAL SCAN CAN REACH EITHER ONE. Writer 3 is still gated (measured on the
+# live board: `in_progress: 0`, `agent` non-null on 0 of 29 tasks), so every real
+# scan is 100% tmux. A test that waited for a cluster row would be green today,
+# green with the whole predicate deleted, and green on the day writer 3 lands
+# wrong. So the rows are CONSTRUCTED and injected at the `fold_windows` seam,
+# which is the last point before the filter runs.
+# --------------------------------------------------------------------------- #
+def gather_with_injected(monkeypatch, *rows, **kw):
+    """A REAL `gather` whose local `fold_windows` also emits `rows`.
+
+    🔴 THE SEAM MATTERS: appending to `report["hosts"][h]["windows"]` AFTER
+    `gather` returns — which is what `with_cluster_rows` does — is too late.
+    The `--claude-only` block, `summarize` and `measured_caveats` have all
+    already run, so such a row exercises none of them. Wrapping `fold_windows`
+    puts the constructed row in front of the filter, which is the code under
+    test.
+    """
+    real = sm.fold_windows
+
+    def folded(panes, host, **fkw):
+        out = real(panes, host, **fkw)
+        if host == "workbench":
+            out.extend(copy.deepcopy(r) for r in rows)
+        return out
+
+    monkeypatch.setattr(sm, "fold_windows", folded)
+    return mix_gather(**kw)
+
+
+def test_the_injection_seam_reaches_the_filter_and_the_baseline_is_tmux_only(
+        monkeypatch):
+    """INSTRUMENT CHECK, before any verdict is read off this seam.
+
+    Two things every test below depends on, neither of which is observable from
+    the assertions themselves: the constructed row really arrives (so a seam
+    that silently stopped applying would not leave the suite green), and the
+    UNINJECTED baseline really is tmux-only (so the deltas are measured against
+    a known starting point rather than an unknown one).
+    """
+    plain = mix_gather()
+    assert {r["kind"] for r in plain["hosts"]["workbench"]["windows"]} == {"tmux"}
+    assert plain["summary"]["kind"] == {"tmux": 5}
+
+    rep = gather_with_injected(monkeypatch, cluster_row(status="busy"))
+    kinds = [r["kind"] for r in rep["hosts"]["workbench"]["windows"]]
+    assert kinds.count("cluster") == 1, (
+        "the fold_windows seam did not deliver the constructed row: %r" % kinds)
+    # ...and it went through the REAL summarize, i.e. it was present before the
+    # roll-up ran rather than bolted on afterwards.
+    assert rep["summary"]["kind"] == {"tmux": 5, "cluster": 1}
+
+
+# --- the PREDICATE, unit --------------------------------------------------- #
+def test_the_claude_only_predicate_is_the_CLASS_axis_not_the_claude_FLAG():
+    """🔴 THE DEFECT. `row["claude"]` is `pane_current_command =~ /claude/` — a
+    fact about a PANE. A cluster dispatch has no pane, so `claude` is None,
+    which is FALSY, and `--claude-only` silently reclassified an AGENT as a
+    shell and deleted it. That is the identical conflation `row_class` exists
+    to prevent, one operation further along.
+
+    Every case is pinned, including the two that must be UNCHANGED, so a fix
+    that merely inverts something cannot pass.
+    """
+    claude_pane = {"kind": "tmux", "claude": True}
+    shell_pane = {"kind": "tmux", "claude": False}
+    # a pane whose command did not parse: genuinely "not a claude pane"
+    unparsed_pane = {"kind": "tmux", "claude": None}
+    dispatch = cluster_row()
+    kindless = {"kind": None, "claude": None}
+
+    assert sm.dropped_by_claude_only(shell_pane) is True
+    assert sm.dropped_by_claude_only(unparsed_pane) is True
+    assert sm.dropped_by_claude_only(claude_pane) is False
+    # 🔴 THE REGRESSION. `not row.get("claude")` returns True here.
+    assert sm.dropped_by_claude_only(dispatch) is False, (
+        "a cluster dispatch is an AGENT, not a shell — the flag must keep it")
+    assert dispatch["claude"] is None, (
+        "fixture no longer exercises the falsy-claude path this pins")
+    # ...and a cluster row that DOES assert claude:True is kept for the same
+    # reason, so the answer comes from `kind` and not from the flag either way.
+    assert sm.dropped_by_claude_only(cluster_row(claude=True)) is False
+    # a row whose kind nobody set is a BUG; filtering it out deletes the
+    # evidence, so it survives and stays visible in `unknown_kind`.
+    assert sm.dropped_by_claude_only(kindless) is False
+    assert sm.row_class(kindless) == "unknown_kind"
+
+
+def test_the_predicate_is_DERIVED_from_row_class_not_a_second_copy_of_it():
+    """🔴 ONE RULE, ONE PLACE — asserted BEHAVIOURALLY, because a structural
+    check would type-check past a copy that merely happens to agree today.
+
+    Move `row_class`'s answer to a value the predicate cannot coincidentally
+    equal and watch the predicate follow. A second open-coded classifier stays
+    put and fails here.
+    """
+    row = {"kind": "tmux", "claude": False}
+    assert sm.dropped_by_claude_only(row) is True    # control: it drops today
+    seen = []
+
+    def fake_class(r):
+        seen.append(r)
+        return "claude"
+
+    orig = sm.row_class
+    sm.row_class = fake_class
+    try:
+        assert sm.dropped_by_claude_only(row) is False, (
+            "the predicate ignored row_class — it holds a second copy of the "
+            "claude/shell rule, and the two will disagree")
+    finally:
+        sm.row_class = orig
+    assert seen == [row], "row_class was not consulted with the row itself"
+
+
+def test_gather_applies_the_ONE_predicate_rather_than_open_coding_it(
+        monkeypatch):
+    """The seam between the flag and its definition, pinned. `gather` used to
+    spell the rule inline (`if r.get("claude")`), which is how the definition
+    and its only caller drifted apart in the first place."""
+    calls = []
+    real = sm.dropped_by_claude_only
+
+    def spy(row):
+        calls.append(row)
+        return real(row)
+
+    monkeypatch.setattr(sm, "dropped_by_claude_only", spy)
+    rep = mix_gather(claude_only=True)
+    assert len(calls) == 5, (
+        "gather did not consult the predicate for every row: %d call(s)"
+        % len(calls))
+    assert rep["summary"]["excluded_shells"] == 2
+    # POSITIVE CONTROL on the spy: with the predicate forced to keep
+    # everything, the filter must keep everything. A spy nothing calls would
+    # leave this identical to the line above.
+    monkeypatch.setattr(sm, "dropped_by_claude_only", lambda r: False)
+    kept_all = mix_gather(claude_only=True)
+    assert kept_all["summary"]["total_sessions"] == 5
+    assert kept_all["summary"]["excluded_shells"] == 0
+
+
+# --- cluster rows SURVIVE the filter, end to end --------------------------- #
+def test_claude_only_KEEPS_a_cluster_dispatch_and_still_drops_the_shells(
+        monkeypatch):
+    """🔴 THE HEADLINE REGRESSION, through the real `gather` filter.
+
+    The mix fixture is 3 agents + 2 bare shells. Adding one cluster dispatch
+    must leave the shells dropped and the dispatch present — under the old
+    predicate the dispatch went with the shells, and `excluded_shells` counted
+    it as one of them.
+    """
+    rep = gather_with_injected(monkeypatch, cluster_row(status="busy"),
+                               claude_only=True)
+    rows = rep["hosts"]["workbench"]["windows"]
+    kinds = sorted(r["kind"] for r in rows)
+    assert kinds == ["cluster", "tmux", "tmux", "tmux"], (
+        "the cluster dispatch was filtered out with the shells")
+    assert sorted(sm.row_class(r) for r in rows) == [
+        "claude", "claude", "claude", "cluster"]
+    # exactly the two BARE SHELLS went, and the count says two — not three
+    assert rep["summary"]["excluded_shells"] == 2, (
+        "the dispatch was counted among the excluded shells")
+    assert rep["summary"]["total_sessions"] == 4
+    assert rep["summary"]["kind"] == {"tmux": 3, "cluster": 1}
+    assert rep["summary"]["status"]["busy"] == {
+        "claude": 0, "shell": 0, "cluster": 1, "total": 1}
+
+
+def test_a_cluster_only_host_under_claude_only_is_not_an_empty_scan(
+        monkeypatch):
+    """The direction that changes the EXIT CODE. A host whose only agent work
+    is a cluster dispatch used to filter down to nothing and exit EXIT_EMPTY —
+    "no agent windows" over a live dispatch."""
+    rep = gather_with_injected(
+        monkeypatch, cluster_row(status="busy"), claude_only=True,
+        runner=make_runner(local_panes=SHELLS_ONLY_PANES,
+                           local_windows=SHELLS_ONLY_WINDOWS))
+    assert rep["summary"]["total_sessions"] == 1
+    assert sm.exit_code_for(rep) == sm.EXIT_OK
+    assert sm.exit_code_for(rep) != sm.EXIT_EMPTY
+    assert rep["summary"]["excluded_shells"] == 1
+
+
+# --- ATTRIBUTION: what the filter removed, said out loud ------------------- #
+def test_a_kind_the_FILTER_removed_is_never_attributed_to_the_build(
+        monkeypatch):
+    """🔴 THE SECOND DEFECT, and it is REACHABLE TODAY with no cluster row
+    anywhere: `--claude-only` over a host whose tmux rows are all bare shells
+    removes the LAST `tmux` row, so `kinds_produced` measures `[]`.
+
+    The scan produced tmux rows. The filter removed them. Every claim the
+    caveat could make about `tmux` from `kinds_produced` alone would therefore
+    be about the wrong actor, and the reader most likely to be misled is the one
+    reading that line to find out what this build emits.
+    """
+    rep = gather_with_injected(
+        monkeypatch, cluster_row(status="busy"), claude_only=True,
+        runner=make_runner(local_panes=SHELLS_ONLY_PANES,
+                           local_windows=SHELLS_ONLY_WINDOWS))
+    kd = rep["caveats"]["kind_scope"]
+    assert kd["kinds_produced"] == ["cluster"]
+    assert kd["kinds_excluded_by_filter"] == ["tmux"]
+    assert rep["summary"]["kinds_excluded_by_filter"] == ["tmux"]
+    line = next(ln for ln in sm.render_caveats(rep) if "kind_scope" in ln)
+    # the false sentence the old code rendered, banned BY NAME
+    assert "tmux is ENUMERATED but NOT PRODUCED" not in line
+    assert "a FILTER REMOVED every kind=tmux row this scan produced" in line
+
+
+def test_the_filter_records_an_EMPTY_removal_set_distinctly_from_NO_FILTER():
+    """🔴 `[]` AND `None` ARE DIFFERENT FACTS, one level down from the rule this
+    file already applies to `excluded_shells`. `[]` says a filter ran and
+    removed no whole kind; `None` says nothing was ever measured. Collapsing
+    them lets a future reader treat an unfiltered scan as one that was checked
+    and came back clean."""
+    filtered = mix_gather(claude_only=True)
+    assert filtered["filters"]["kinds_excluded_by_filter"] == []
+    assert filtered["summary"]["kinds_excluded_by_filter"] == []
+    assert filtered["caveats"]["kind_scope"]["kinds_excluded_by_filter"] == []
+
+    off = mix_gather()
+    assert off["filters"]["kinds_excluded_by_filter"] is None
+    assert off["summary"]["kinds_excluded_by_filter"] is None
+    # 🔴 and the CAVEAT omits the key entirely rather than carrying a null —
+    # `_fmt_kind_scope` branches on its presence, so a None here would read as
+    # "a filter ran and removed nothing".
+    assert "kinds_excluded_by_filter" not in off["caveats"]["kind_scope"]
+
+
+def test_an_unfiltered_scan_still_renders_the_UNCHANGED_caveat_sentence():
+    """CONTROL. Every assertion above is about what changes under the flag; this
+    pins that nothing changes without it, so the new clause cannot leak into the
+    ordinary render."""
+    line = next(ln for ln in sm.render_caveats(mix_gather())
+                if "kind_scope" in ln)
+    assert line == (
+        "  caveat[kind_scope]: rows in this scan are kind=tmux — cluster is "
+        "ENUMERATED but NOT PRODUCED, so no such row appears and its absence "
+        "is NOT a measured zero; clawgate is reported separately under "
+        "BLOCKED ON ME")
+
+
+def test_the_FILTER_line_in_the_table_names_the_kind_it_removed():
+    """The rendered claim, pinned WHOLE. A word check on this line has been
+    walked before: "shell" and "kind" both appear in its own static prose."""
+    rep = mix_gather(
+        claude_only=True,
+        runner=make_runner(local_panes=SHELLS_ONLY_PANES,
+                           local_windows=SHELLS_ONLY_WINDOWS))
+    lines = [ln for ln in sm.render_table(rep).splitlines()
+             if "FILTER --claude-only" in ln]
+    assert lines == [
+        "  FILTER --claude-only: 1 shell window(s) excluded from every count "
+        "above",
+        "  FILTER --claude-only: it removed EVERY kind=tmux row this scan "
+        "produced — their absence above is the FILTER's doing, not a measured "
+        "absence",
+    ]
+    # ...and the second line is absent when no whole kind went (positive
+    # control on the pair: the SAME flag, one row different).
+    assert [ln for ln in sm.render_table(mix_gather(claude_only=True)).splitlines()
+            if "FILTER --claude-only" in ln] == [
+        "  FILTER --claude-only: 2 shell window(s) excluded from every count "
+        "above"]
+
+
+def test_measured_caveats_does_not_SHARE_the_excluded_kinds_with_the_report():
+    """🔴 The purity claim, extended to the field this change adds. `cav` is
+    deep-copied from CAVEATS, but the excluded-kinds list comes from
+    `report["filters"]` — a DIFFERENT object, so the deepcopy says nothing
+    about it. Handing the caller the report's own list lets a consumer writing
+    through the returned caveats mutate the report it was derived from."""
+    rep = {"hosts": {}, "filters": {"kinds_excluded_by_filter": ["cluster"]}}
+    out = sm.measured_caveats(rep)
+    got = out["kind_scope"]["kinds_excluded_by_filter"]
+    assert got == ["cluster"]
+    assert got is not rep["filters"]["kinds_excluded_by_filter"]
+    got.append("POISONED")
+    assert rep["filters"]["kinds_excluded_by_filter"] == ["cluster"]
+
+
+def test_measured_caveats_reads_the_excluded_kinds_where_they_are_RECORDED():
+    """🔴 It cannot recompute them: by the time this function runs the removed
+    rows are GONE, and only the filter ever saw them. So the derivation is a
+    lookup, and this feeds values that CANNOT coincide with anything derivable
+    from the rows — which is the trap this file has walked into five times."""
+    rep = {"hosts": {"h": {"windows": [{"kind": "tmux"}]}},
+           "filters": {"kinds_excluded_by_filter": ["zzz", "qqq"]}}
+    out = sm.measured_caveats(rep)["kind_scope"]
+    assert out["kinds_produced"] == ["tmux"]
+    assert out["kinds_excluded_by_filter"] == ["qqq", "zzz"], "sorted"
+    # ...and the render moves with it, so the field is not merely stored
+    line = sm._fmt_kind_scope(out)
+    assert "a FILTER REMOVED every kind=qqq/zzz row this scan produced" in line
 
 
 # --------------------------------------------------------------------------- #
@@ -6819,6 +7133,29 @@ KIND_SCOPE_SENTENCES = {
         "rows in this scan are kind=cluster/tmux — every enumerated kind IS "
         "produced, so this scan covers the whole entity axis; clawgate "
         "approval state is still reported separately under BLOCKED ON ME"),
+    # 🔴 A FILTER REMOVED A WHOLE KIND. Without its own clause this rendered
+    # "tmux is ENUMERATED but NOT PRODUCED" — three false claims in one
+    # sentence, about rows the scan had just measured and thrown away.
+    "filtered_out": (
+        "rows in this scan are kind=cluster — a FILTER REMOVED every kind=tmux "
+        "row this scan produced, so their absence above is the FILTER's doing "
+        "and NOT a measured absence of that work; " + _CG),
+    # a filter removed one kind AND another was never produced — both causes
+    # are named, and neither is allowed to absorb the other
+    "filtered_and_unproduced": (
+        "rows in this scan are kind=tmux — a FILTER REMOVED every kind=zzz row "
+        "this scan produced, so their absence above is the FILTER's doing and "
+        "NOT a measured absence of that work; cluster is ENUMERATED but NOT "
+        "PRODUCED, so no such row appears and its absence is NOT a measured "
+        "zero; " + _CG),
+    # 🔴 ZERO SURVIVING ROWS BECAUSE OF THE FILTER. "NO rows were measured in
+    # this scan" is FALSE here and blames the hosts for what the flag did —
+    # reachable TODAY, as `--claude-only` over a shell-only host.
+    "filtered_to_empty": (
+        "every row this scan measured was REMOVED BY A FILTER (kind=tmux), so "
+        "no kind survives to be reported — rows were measured and dropped, NOT "
+        "absent, and this says nothing about what an unfiltered scan holds; "
+        + _CG),
 }
 
 
@@ -6843,15 +7180,36 @@ def test_every_kind_scope_sentence_is_pinned_WHOLE_not_by_feature():
         # moment writer 3 lands, which is what this caveat is FOR.
         "by_construction_all_produced": sm._fmt_kind_scope(
             {"kinds_enumerated": ["tmux"]}),
+        # 🔴 THE FILTERED BRANCHES. `kinds_excluded_by_filter` is the field that
+        # separates "this build never emitted that kind" from "this run threw
+        # those rows away", and both of those render out of `kinds_produced`
+        # alone as the SAME sentence.
+        "filtered_out": sm._fmt_kind_scope(
+            {"kinds_produced": ["cluster"], "kinds_enumerated": E,
+             "kinds_excluded_by_filter": ["tmux"]}),
+        # `zzz` cannot be a member of KINDS, so the filter slot is proved LIVE
+        # rather than coincident with a constant this module already holds.
+        "filtered_and_unproduced": sm._fmt_kind_scope(
+            {"kinds_produced": ["tmux"], "kinds_enumerated": ["tmux", "cluster",
+                                                              "zzz"],
+             "kinds_excluded_by_filter": ["zzz"]}),
+        "filtered_to_empty": sm._fmt_kind_scope(
+            {"kinds_produced": [], "kinds_enumerated": E,
+             "kinds_excluded_by_filter": ["tmux"]}),
     }
     assert got == KIND_SCOPE_SENTENCES
-    # INSTRUMENT CHECK: all five are genuinely distinct, so a builder that
+    # INSTRUMENT CHECK: all eight are genuinely distinct, so a builder that
     # collapsed two branches into one could not satisfy this by accident.
-    assert len(set(got.values())) == 5
+    assert len(set(got.values())) == 8
     # the three that must never phrase themselves as a measurement of a scan
     assert "in this scan are" not in got["missing"]
     assert "kind=" not in got["empty"]
     assert "this scan" not in got["by_construction_all_produced"]
+    # 🔴 the two claims a filtered branch must NEVER make about a kind the
+    # filter removed, banned by name in the branches that could make them
+    assert "tmux is ENUMERATED but NOT PRODUCED" not in got["filtered_out"]
+    assert "every enumerated kind IS produced" not in got["filtered_out"]
+    assert "NO rows were measured" not in got["filtered_to_empty"]
 
 
 def test_the_BY_CONSTRUCTION_slot_IS_LIVE_not_a_coincident_literal(monkeypatch):
@@ -6955,9 +7313,11 @@ def test_the_kind_scope_NOTE_is_pinned_WHOLE():
         "`kinds_produced` is MEASURED from this scan's rows — read it rather "
         "than assuming. A kind that is enumerated but absent from "
         "`kinds_produced` was NOT LOOKED FOR by this build, so its absence is "
-        "NOT a measured absence of that work. For clawgate use "
-        "report.blocked_on_me (tasks needing the operator, and its "
-        "`stuck_count` for wedged dispatches), a different population from "
+        "NOT a measured absence of that work — UNLESS it is named in "
+        "`kinds_excluded_by_filter`, which is where a kind removed by a filter "
+        "is reported instead of being silently attributed to the build. For "
+        "clawgate use report.blocked_on_me (tasks needing the operator, and "
+        "its `stuck_count` for wedged dispatches), a different population from "
         "these rows that is never double-counted with them.")
 
 

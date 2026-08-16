@@ -156,6 +156,20 @@ class Fleet:
         env = self.env(
             SHIP_ROLE="workbench",           # bypass IP detection (no `ip` here)
             DRIFT_REPO=str(repo or self.work),
+            # 🔴 THE FOURTH HERMETICITY SEAM, and it caught a live breach the
+            # moment it was added. The fuzzyclaw phase-2 gate EXECS
+            # `scripts/session-manager`, which scans the operator's REAL tmux —
+            # unstubbed, every test in this file did exactly that (48 live
+            # windows, measured), and one of them declared "READY — 0 of 48"
+            # because the fixture $HOME has no fuzzyclaw task files. A
+            # read-only breach is still a breach, and the verdict it produced
+            # was wrong.
+            #
+            # Defaulted to a path INSIDE tmp_path that does not exist, so the
+            # gate takes its no-session-manager branch. A test that wants the
+            # gate to answer calls `stub_session_manager()`, exactly like
+            # `stub_ssh`.
+            DRIFT_SESSION_MANAGER=str(self.bin / "session-manager"),
             # Pinned into tmp_path: the unreachable streak is PERSISTENT state,
             # and left to its default ($XDG_STATE_HOME/…) these tests would both
             # write to the operator's real state dir and inherit a streak from
@@ -182,6 +196,42 @@ class Fleet:
             body.append("echo '%s'" % stdout.replace("'", "'\\''"))
         body.append("exit %d" % exit_code)
         write_exec(self.bin / "ssh", "\n".join(body) + "\n")
+
+    def stub_session_manager(self, payload, exit_code=0):
+        """Install a stub `session-manager` that prints `payload` on stdout.
+
+        `payload` is a dict (serialised to JSON) or a raw string, so both the
+        well-formed reports and the malformed ones — a crash, an empty stream,
+        a truncated body — are drivable. The real binary is never executed by
+        this suite: it scans the operator's live tmux.
+        """
+        text = payload if isinstance(payload, str) else json.dumps(payload)
+        body = "cat <<'SM_JSON_EOF'\n%s\nSM_JSON_EOF\nexit %d\n" % (
+            text, exit_code)
+        write_exec(self.bin / "session-manager", body)
+
+    def sm_report(self, rows=47, fuzzy=7, host="workbench", files_seen=400,
+                  status="ok"):
+        """The SHAPE `session-manager scan --json` really emits, cut down to the
+        four facts the phase-2 reader consults.
+
+        Pinned against the live payload rather than invented: `age_sources` is
+        a histogram keyed by WRITER (`ledger`/`fuzzyclaw`/`none`) and
+        `total_sessions` is the row count, both under `summary`. Measured on
+        the workbench 2026-08-15 — `{fuzzyclaw: 7, ledger: 27, none: 13}` over
+        47 rows — which is the default here so the fixture is a real
+        observation and not a round number.
+        """
+        return {
+            "local_host": host,
+            "fuzzyclaw": {"status": status, "files_seen": files_seen},
+            "summary": {
+                "total_sessions": rows,
+                # the two OTHER writers carry distinct values, so an assertion
+                # cannot pass by reading the wrong key
+                "age_sources": {"fuzzyclaw": fuzzy, "ledger": 27, "none": 13},
+            },
+        }
 
 
 @pytest.fixture
@@ -1435,6 +1485,28 @@ UNIT_PATH_REQUIREMENTS = {
     # remote payload are both handed to.
     "dirname": "pkgs.coreutils",
     "bash": "pkgs.bash",
+    # The fuzzyclaw phase-2 gate: `timeout` caps the scan, `python3` runs
+    # lib/drift_phase2.py over its JSON. Both are resolved from PATH BY THIS
+    # SCRIPT, which is what puts them in this table rather than the child table
+    # below.
+    "timeout": "pkgs.coreutils",
+    "python3": "pkgs.python3",
+}
+
+# 🔴 A SECOND SEAM, AND THE TABLE ABOVE STRUCTURALLY CANNOT SEE IT. The phase-2
+# gate EXECS `scripts/session-manager`, and that child resolves binaries of its
+# own from the same unit PATH: `python3` (its `#!/usr/bin/env python3` shebang)
+# and `tmux` (`tmux list-panes -a`, its only subprocess on a local scan). Neither
+# word ever appears in drift-check.sh, so the reverse tokenizer cannot find them
+# and `test_every_command_the_checker_runs_is_on_the_unit_path` would fail if
+# they were added above (it asserts the command IS called by the scripts).
+#
+# The failure is the silent kind this file keeps meeting: nothing crashes. The
+# gate reports COULD NOT MEASURE on every timer run, forever, from a unit that
+# looks correct — a checker wired to nothing, wearing an honest error message.
+CHILD_PATH_REQUIREMENTS = {
+    "python3": "pkgs.python3",
+    "tmux": "pkgs.tmux",
 }
 
 # Shell builtins/keywords: present as command words, never resolved via PATH.
@@ -2304,3 +2376,300 @@ def test_the_parity_scan_writes_nothing_into_the_home_it_walks(fleet):
     before = snapshot()
     _parity(fleet, "--no-remote", store=store)
     assert snapshot() == before, "the parity scan modified the tree it was reading"
+
+
+# --------------------------------------------------------------------------- #
+# 11. THE FUZZYCLAW PHASE-2 GATE (rc 16)
+#
+# 🔴 WHY IT IS A GATE AND NOT A NOTE. "Is it safe to delete the fuzzyclaw
+# readers?" was answered by a human remembering to run a probe — the same shape
+# as "nothing runs ship.sh on a schedule", which is the failure this whole file
+# exists to convert into a measurement.
+#
+# 🔴 AND WHY THE ZERO IS THE DANGEROUS DIRECTION. The answer this gate hands over
+# is a DELETION, and every way it can break produces the number that authorises
+# one: no session-manager -> 0, a crashed scan -> 0, fuzzyclaw not read -> 0, a
+# scan of the wrong host -> 0, a host with no windows -> 0. So the load-bearing
+# tests here are not the READY case; they are the six ways a zero can be false.
+# Each must be visibly distinct from a real zero AND must not set rc 16.
+# --------------------------------------------------------------------------- #
+def _phase2(fleet, report=None, raw=None, exit_code=0, **env):
+    """A clean local-only run with the phase-2 gate pointed at a stubbed scan."""
+    fleet.catch_up()
+    if raw is not None:
+        fleet.stub_session_manager(raw, exit_code=exit_code)
+    elif report is not None:
+        fleet.stub_session_manager(report, exit_code=exit_code)
+    return fleet.check("--no-remote", **env)
+
+
+def test_the_phase2_stub_is_the_instrument_and_it_can_move(fleet):
+    """INSTRUMENT CHECK, before any verdict is read off this stub.
+
+    A stub whose output the gate never actually reads would make every
+    assertion below pass for the wrong reason — and the zero it would report is
+    exactly the value that means READY. So: two different stub payloads, two
+    different rendered numbers, from the same fixture.
+    """
+    rc_a, out_a = _phase2(fleet, fleet.sm_report(rows=47, fuzzy=7))
+    assert "fuzzyclaw-only ages: 7 of 47 row(s) EXAMINED" in out_a, out_a
+    rc_b, out_b = _phase2(fleet, fleet.sm_report(rows=12, fuzzy=3))
+    assert "fuzzyclaw-only ages: 3 of 12 row(s) EXAMINED" in out_b, out_b
+    # BOTH numbers moved, so neither slot is static prose
+    assert rc_a == 0 and rc_b == 0
+
+
+def test_a_nonzero_fuzzyclaw_count_is_NOT_READY_and_does_not_fail_the_unit(fleet):
+    """🔴 TODAY'S STATE, and it must stay green. 7 of 47 rows were measured on
+    the workbench 2026-08-15. A gate that went red for the NORMAL condition
+    would be permanently red, which trains the operator to click through the one
+    alert that has to keep its meaning."""
+    rc, out = _phase2(fleet, fleet.sm_report(rows=47, fuzzy=7))
+    assert rc == 0, out
+    assert "fuzzyclaw-only ages: 7 of 47 row(s) EXAMINED" in out
+    assert "NOT READY — 7 of 47 row(s) still take their age ONLY from" in out
+    assert "READY — 0 of" not in out
+    assert "rc=16" not in out
+
+
+def test_a_REAL_zero_over_real_rows_is_READY_and_is_rc16(fleet):
+    """The transition this gate exists to catch, pinned at BOTH the exit code
+    and the rendered claim."""
+    rc, out = _phase2(fleet, fleet.sm_report(rows=47, fuzzy=0))
+    assert rc == 16, out
+    assert "fuzzyclaw-only ages: 0 of 47 row(s) EXAMINED" in out
+    assert "🔴 READY — 0 of 47 rows depend on fuzzyclaw for an age." in out
+    assert "Phase 2 is UNBLOCKED" in out
+    # 🔴 rc 16 is NOT drift, and the verdict word is a claim like any other.
+    assert "drift-check: ACTIONABLE (not drift) (rc=16)" in out
+    assert "drift-check: DRIFT (rc=16)" not in out
+    assert "rc16=NOT drift: the fuzzyclaw phase-2 gate OPENED" in out
+
+
+def test_a_zero_over_ZERO_ROWS_is_not_ready_and_says_it_walked_nothing(fleet):
+    """🔴 THE SILENT ZERO, in the one form this file already has a name for:
+    "a scan that examined nothing is not a clean scan; it is no scan." A host
+    with no tmux windows reports `0 of 0`, which is byte-identical to a real
+    zero if only the numerator is printed."""
+    rc, out = _phase2(fleet, fleet.sm_report(rows=0, fuzzy=0))
+    assert rc == 0, out
+    # the pair is the claim — the denominator is what distinguishes this
+    assert "fuzzyclaw-only ages: 0 of 0 row(s) EXAMINED" in out
+    assert "COULD NOT MEASURE — 0 rows examined. A zero over zero rows is a scan" in out
+    assert "that walked nothing, not a measurement. NOT 'phase 2 is ready'." in out
+    assert "READY — 0 of" not in out
+    assert "UNBLOCKED" not in out
+
+
+def test_a_missing_session_manager_is_a_could_not_measure_not_a_zero(fleet):
+    """The default in this suite: no stub installed, so the path does not exist.
+    A tool that is not there cannot have measured 0."""
+    fleet.catch_up()
+    rc, out = fleet.check("--no-remote")
+    assert rc == 0, out
+    assert "COULD NOT MEASURE — no executable session-manager at" in out
+    assert "This is NOT a zero and NOT 'phase 2 is ready'." in out
+    assert "EXAMINED" not in out
+
+
+def test_a_CRASHED_scan_is_a_could_not_measure_not_a_zero(fleet):
+    """A non-zero exit with no JSON on stdout. The reader sees an empty stream,
+    which `json.load` rejects — and the reason token names it rather than
+    letting the run fall through to the numbers."""
+    rc, out = _phase2(fleet, raw="", exit_code=2)
+    assert rc == 0, out
+    assert "COULD NOT MEASURE — the scan produced no usable counts" in out
+    assert "reason: no-json:JSONDecodeError" in out
+    assert "UNBLOCKED" not in out
+
+
+def test_TRUNCATED_json_is_a_could_not_measure_not_a_zero(fleet):
+    """Half a payload parses as nothing, and a stream cut mid-object is what a
+    `timeout` kill actually looks like."""
+    rc, out = _phase2(fleet, raw='{"summary": {"total_sessions": 47,')
+    assert rc == 0, out
+    assert "reason: no-json:" in out
+    assert "UNBLOCKED" not in out
+
+
+def test_a_scan_of_the_WRONG_HOST_is_a_could_not_measure_not_a_zero(fleet):
+    """🔴 THE ONE THAT WOULD HAVE BEEN INVISIBLE. `session-manager` decides which
+    host is local from ACTIVITY_HOST / the collector env file; drift-check
+    decides from lib/host-role.sh and the machine's IPs. If they disagree,
+    `--host <role>` names the REMOTE machine and the scan ssh's there — and a
+    remote row can never carry a fuzzyclaw age, so the count comes back 0 and
+    the gate authorises a deletion off the wrong machine."""
+    rc, out = _phase2(fleet, fleet.sm_report(rows=47, fuzzy=0, host="laptop"))
+    assert rc == 0, out
+    assert "COULD NOT MEASURE — reason: host-mismatch:laptop" in out
+    assert "UNBLOCKED" not in out
+    # ...and the counts are still shown, so the finding is legible
+    assert "raw: 0 of 47 row(s)" in out
+
+
+def test_fuzzyclaw_NOT_READ_is_a_could_not_measure_not_a_zero(fleet):
+    """fuzzyclaw is opt-in. With the index unread, NO row can have a fuzzyclaw
+    age — so 0 is guaranteed by the reader being wired to nothing, which is the
+    same output as the answer that authorises deleting it."""
+    rc, out = _phase2(fleet, fleet.sm_report(rows=47, fuzzy=0,
+                                             status="skipped"))
+    assert rc == 0, out
+    assert "COULD NOT MEASURE — reason: fuzzyclaw-skipped" in out
+    assert "UNBLOCKED" not in out
+
+
+def test_ZERO_TASK_FILES_is_a_could_not_measure_not_a_zero(fleet):
+    """🔴 MEASURED, NOT IMAGINED — this suite produced the false READY itself.
+    An empty (or absent) `~/.tmux/tasks` reads successfully, so `status` is
+    "ok" with `files_seen: 0`, and the first version of this gate announced
+    "READY — 0 of 48 rows" off a fixture HOME while the real count on that
+    machine was 7. `status == "ok"` is necessary and NOT sufficient."""
+    rc, out = _phase2(fleet, fleet.sm_report(rows=47, fuzzy=0, files_seen=0))
+    assert rc == 0, out
+    assert "COULD NOT MEASURE — reason: fuzzyclaw-no-task-files" in out
+    assert "UNBLOCKED" not in out
+    # ...and with task files present the SAME payload IS ready — the positive
+    # control that pins this guard to `files_seen` and nothing else.
+    rc2, out2 = _phase2(fleet, fleet.sm_report(rows=47, fuzzy=0, files_seen=1))
+    assert rc2 == 16, out2
+
+
+def test_a_no_local_run_does_not_report_a_phase2_zero(fleet):
+    """The gate is LOCAL-ONLY (fuzzyclaw task files are local state), so a
+    --no-local run has not measured it. That must not read as a pass, for the
+    same reason `[parity] NOT COMPARED` exists one block up."""
+    fleet.catch_up()
+    fleet.stub_ssh(0, "[laptop] clean")
+    fleet.stub_session_manager(fleet.sm_report(rows=47, fuzzy=0))
+    rc, out = fleet.check("--no-local")
+    assert "NOT EVALUATED — --no-local, and this gate is LOCAL-ONLY" in out
+    assert "Not a zero, and not a pass." in out
+    assert "UNBLOCKED" not in out
+    assert rc != 16
+
+
+def test_rc16_never_outranks_a_real_drift(fleet):
+    """🔴 SEVERITY. rc 16 says an optional cleanup became possible; rc 8 says
+    work exists on exactly one machine. A run that is both must report 8, or the
+    codes that need a rescue procedure hide behind a housekeeping note."""
+    fleet.catch_up()
+    fleet.add_local_commit()
+    fleet.stub_session_manager(fleet.sm_report(rows=47, fuzzy=0))
+    rc, out = fleet.check("--no-remote")
+    assert rc == 8, out
+    # the phase-2 finding is still PRINTED — it just does not win
+    assert "Phase 2 is UNBLOCKED" in out
+    assert "drift-check: DRIFT (rc=8)" in out
+    # ...and the mirror image: alone, the same phase-2 state IS the verdict
+    fleet.git(fleet.work, "reset", "--soft", "HEAD~1")
+    rc2, _ = fleet.check("--no-remote")
+    assert rc2 == 16
+
+
+def test_the_phase2_gate_does_not_fail_the_run_when_it_cannot_measure(fleet):
+    """"Cheap and non-fatal": a broken phase-2 gate must never change another
+    leg's verdict. A behind-only host is rc 10 with the gate answering, silent,
+    and crashed alike.
+
+    RED/GREEN: this is GREEN at the base sha and is NOT regression coverage —
+    with no gate there is nothing to interfere, so it passes vacuously there.
+    It is a non-interference guard on the new block. Proved REACHABLE by
+    mutation: changing `note_rc 16` to `note_rc 4` in the could-not-measure
+    branch fails it with rc 4 != 10."""
+    fleet.stub_session_manager(fleet.sm_report(rows=47, fuzzy=7))
+    rc_ok, _ = fleet.check("--no-remote")          # `work` is 1 behind origin
+    fleet.stub_session_manager("not json at all")
+    rc_broken, _ = fleet.check("--no-remote")
+    fleet.stub_session_manager("", exit_code=127)
+    rc_gone, _ = fleet.check("--no-remote")
+    assert rc_ok == rc_broken == rc_gone == 10
+
+
+def test_the_phase2_gate_passes_the_flags_that_make_the_measurement_valid(fleet):
+    """🔴 THE FLAGS ARE LOAD-BEARING, and two of the four fail SILENTLY.
+
+    Without `--fuzzyclaw` the index is never read and the count is a guaranteed
+    0; without `--host <role>` the scan can ssh to the other machine; `--no-ch`
+    and `--no-capture` keep a 6-hourly timer from opening a ClickHouse
+    connection and capturing every pane. Asserted from the argv the stub
+    actually received, not from the source text.
+    """
+    fleet.catch_up()
+    argv_log = fleet.root / "sm-argv.txt"
+    write_exec(
+        fleet.bin / "session-manager",
+        'printf "%%s\\n" "$*" >> "$SM_ARGV_LOG"\n'
+        "cat <<'SM_JSON_EOF'\n%s\nSM_JSON_EOF\n" % json.dumps(fleet.sm_report()),
+    )
+    fleet.check("--no-remote", SM_ARGV_LOG=str(argv_log))
+    argv = argv_log.read_text().strip()
+    assert argv.split() == ["scan", "--json", "--no-ch", "--no-capture",
+                            "--fuzzyclaw", "--host", "workbench"], argv
+
+
+def test_the_phase2_reader_is_read_only_and_imports_nothing_else():
+    """The passivity scanner walks drift-check.sh and lib/host-role.sh only, so
+    a NEW file under lib/ is unscanned by it. This is that file's guard: it may
+    import `json` and `sys`, and nothing else — no `os`, no `subprocess`, no
+    `open`, no `pathlib`."""
+    import ast
+
+    src = (REPO_ROOT / "scripts" / "lib" / "drift_phase2.py").read_text()
+    tree = ast.parse(src)
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            imported.add((node.module or "").split(".")[0])
+    assert imported == {"json", "sys"}, imported
+    called = {n.func.id for n in ast.walk(tree)
+              if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+    assert "open" not in called, "the phase-2 reader opened a file"
+    assert "exec" not in called and "eval" not in called
+
+
+@pytest.mark.parametrize("cmd,attr", sorted(CHILD_PATH_REQUIREMENTS.items()))
+def test_the_phase2_child_binaries_are_on_the_unit_path(cmd, attr):
+    """🔴 THE SEAM NEITHER EXISTING GUARD CAN SEE. `session-manager` is exec'd
+    by drift-check but resolves ITS OWN binaries from the same unit PATH, and
+    neither `python3`-as-a-shebang nor `tmux` appears as a command word in
+    drift-check.sh — so the reverse tokenizer cannot find them and the forward
+    table would reject them. Nothing crashes when they are missing: the gate
+    just reports COULD NOT MEASURE on every timer run, forever."""
+    assert attr in _drift_service_block(), (
+        "the drift-check unit's PATH is missing %s — the phase-2 gate execs "
+        "session-manager, which needs %r and would silently never measure"
+        % (attr, cmd)
+    )
+
+
+def test_the_phase2_child_requirements_are_what_session_manager_actually_runs():
+    """The table above is only accounting if it matches the child. `tmux` is
+    session-manager's ONLY subprocess on a local scan, and `python3` is its
+    shebang — both read off session-manager itself, so a child that grows a new
+    dependency makes this fail rather than silently unmeasurable.
+
+    RED/GREEN: GREEN at the base sha — it reads facts about session-manager
+    that were already true there. It is an INVARIANT GUARD on the ledger, not
+    regression coverage: it fires when the child's dependencies change and the
+    table does not.
+
+    🔴 THE SHEBANG IS MATCHED BY ITS TAIL, NOT PINNED WHOLE, and both halves of
+    that are forced. `patchShebangs` rewrites it to an absolute store path
+    inside the nix sandbox — the tier that gates merges — so a whole-string pin
+    is red exactly where it must be green; and the repo-wide scan in
+    `test_runtime_shebangs.py` forbids this file from containing the literal
+    interpreter path at all. What both tiers agree on, and what this table is
+    actually about, is that the interpreter IS python3.
+    """
+    sm_src = (REPO_ROOT / "scripts" / "session-manager").read_text()
+    shebang = sm_src.splitlines()[0]
+    # 🔴 ASSEMBLED FROM CHARACTER CODES, the same idiom and the same reason as
+    # `testlib/shebang_scan.py`'s own needles: a quote followed by the two
+    # shebang characters is shape 1 of the hazard that scan looks for, so
+    # writing it as a literal makes this read-only assertion its own offender.
+    assert shebang.startswith(chr(35) + chr(33)), shebang
+    assert shebang.rstrip().endswith("python3"), shebang
+    assert 'TMUX_PANES_ARGV = ("tmux"' in sm_src
+    assert set(CHILD_PATH_REQUIREMENTS) == {"python3", "tmux"}
