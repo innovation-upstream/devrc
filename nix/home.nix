@@ -1057,6 +1057,33 @@ in
   home.file.".claude/hooks/agent_ledger.py" = {
     source = ../scripts/lib/agent_ledger.py;
   };
+  # 🔴 THE CLAWGATE WRITE-BACK GUARD — the deterministic replacement for a 🔴 prose
+  # rule that lost 2/2. Tasks #193 and #194 were both picked up, the work shipped as
+  # PRs, and both cards stayed `open` with ZERO comments; both were re-dispatched and
+  # paid for twice. `claude/skills/clawgate/SKILL.md` §"task pickup" already said the
+  # ritual was NOT optional. PRINCIPLES.md prefers a structural fix to prompt-tuning.
+  #
+  # 🔴 KEYED ON THE READ (`clawgatectl task get <N>` / a curl to `/api/tasks/<N>`),
+  # NOT on the `in_progress` flip. In both measured failures no status command was
+  # ever issued — the cards never left `open` — so a PreToolUse deny on the flip
+  # would have been structurally unreachable for the exact failure it was built for.
+  #
+  # Fires only when all three hold: the id was read, REAL work followed it (an
+  # Edit/Write/NotebookEdit, or a `git commit`/`git push`/`gh pr create`), and a LIVE
+  # re-read of the board shows no `claude-code` comment since that read. The middle
+  # condition is what keeps read-and-evaluate-only turns — the SKILL's own step 2 —
+  # untouched; the last is a measurement, so it self-suppresses the moment the ritual
+  # is followed, including by a subagent or a devpod agent. Escalates block, block,
+  # notice, silence per task per session, and NEVER blocks when the board could not
+  # be reached (it says so instead). Every error path exits 0.
+  #
+  # 🔴 A NEW file, so it must be `git add`ed or the flake silently omits it and the
+  # switch still succeeds with the hook absent — this repo's standing trap.
+  # Registered on PostToolUse (NO matcher — half of what it watches for is an Edit)
+  # and Stop, per-host, by register-nudge-hook.py.
+  home.file.".claude/hooks/clawgate-writeback-guard.py" = {
+    source = ../scripts/claude-hooks/clawgate-writeback-guard.py;
+  };
 
   # 🔴 THE REGISTRAR ITSELF — the hook that makes the hooks above DO anything.
   # settings.json is per-host and unmanaged (permissions/allowlists), so a hook

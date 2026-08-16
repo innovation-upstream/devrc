@@ -338,6 +338,13 @@ HERMETIC_TARGETS=(
   # stderr, on every malformed input) is felt on every turn and is gated here
   # rather than left to the ungated hand-rolled scripts beside it.
   scripts/claude-hooks/tests/test_agent_ledger_hook.py
+  # Same reason again — a FILE, not the directory. The clawgate write-back guard is
+  # the only hook in this repo that can BLOCK a turn, and it fires on BOTH the
+  # per-tool-call hot path and Stop, so its trigger's non-matches, its
+  # no-work-after-read false-positive killer, its never-block-when-unmeasurable
+  # contract and its exit-0-on-anything backstop are all gated here rather than left
+  # to the ungated hand-rolled scripts beside it.
+  scripts/claude-hooks/tests/test_clawgate_writeback_guard.py
   # Writer 2 of the agent activity ledger — the OPENCODE half. A Python suite
   # driving real `node`, mirroring scripts/collector/opencode/tests/test_plugin.py
   # (this repo's established way to test an opencode plugin; there is no node
@@ -909,6 +916,17 @@ TARGET_FLOORS=(
   # failed-tmux-lookup regression. Gate's own count through the gate's own rule:
   #   _suggested_floor 39 = 39 - min(50, max(1, 39/20 = 1)) = 39 - 1 = 38.
   "scripts/claude-hooks/tests/test_agent_ledger_hook.py|38"
+  # 2026-08-16, the clawgate write-back guard arrives as a NEW target: 128 collected.
+  # (118 in the first round; +6 for the wall-clock budget and its positive control, a
+  # naive-timestamp case, and the two gaps a DIFFERENTLY-BUILT mutation sweep found —
+  # the work gate exercised through `post_tool_use` rather than a seeded state dir,
+  # and a corrupt state file; +4 for the state prune.) Read from the AUTHORITATIVE
+  # gate's own per-target line, then put through the gate's OWN function rather than
+  # arithmetic:
+  #   _suggested_floor 128 = 128 - min(50, max(1, 128/20 = 6)) = 128 - 6 = 122.
+  # ZERO new skips, so EXPECTED_SKIPS is untouched. If this line conflicts with a
+  # sibling branch, re-run the gate on the MERGED tree and copy what it prints.
+  "scripts/claude-hooks/tests/test_clawgate_writeback_guard.py|122"
   # 2026-08-14, writer 2 (opencode) arrives as a NEW target: 15 collected.
   #   _suggested_floor 15 = 15 - min(50, max(1, 15/20 = 0 -> 1)) = 14.
   "scripts/opencode/tests|14"

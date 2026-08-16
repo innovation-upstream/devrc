@@ -14,13 +14,25 @@ Registers:
     Stop/clawgate-stop/tmux hooks).
   * Stop: next-step-nudge.py
   * SessionStart / UserPromptSubmit / PostToolUse / Stop: agent-ledger-hook.py
+  * PostToolUse / Stop: clawgate-writeback-guard.py (the hook that makes the clawgate
+    task write-back non-optional — PostToolUse watches for a read of a specific task
+    id and for real work after it, Stop re-reads the board live and blocks a turn
+    that is about to end with the card still uncommented).
 
-🔴 agent-ledger-hook.py is registered on PostToolUse with NO `matcher`, unlike the
-three nudges above. Those are about the shape of a Bash COMMAND, so `Bash` is the
-right scope; the ledger records that a tool call HAPPENED, and scoping it to Bash
-would silently stop the heartbeat for a session doing a long stretch of Read/Edit
-work — which then renders `stale` while it is demonstrably working, because
-`classify_status` lets `stale` win over `busy`.
+🔴 TWO of these carry NO `matcher` on PostToolUse — agent-ledger-hook.py and
+clawgate-writeback-guard.py — unlike the three nudges above. Those three are about
+the shape of a Bash COMMAND, so `Bash` is the right scope. The other two are not:
+
+  * the ledger records that a tool call HAPPENED, and scoping it to Bash would
+    silently stop the heartbeat for a session doing a long stretch of Read/Edit work
+    — which then renders `stale` while it is demonstrably working, because
+    `classify_status` lets `stale` win over `busy`.
+  * the write-back guard's second job is detecting that REAL WORK followed a task
+    read, and `Edit` / `Write` / `NotebookEdit` are exactly that work. Under a `Bash`
+    matcher the guard would never see an agent that read a card and then edited files
+    for an hour — the commonest shape of the failure it exists to catch — and would
+    stay silent for it. The Bash half (`git commit` / `git push` / `gh pr create`) is
+    the part a matcher WOULD cover, and it is the smaller half.
 
 The cost, MEASURED rather than asserted: ~21 ms per call against ~9 ms for a bare
 interpreter start, and the hook throttles at 30s, so the overwhelming majority of
@@ -36,7 +48,8 @@ clawgate stop hook (drives remote approval) and claude-notify.py (drives turn-fi
 notifications). Clobbering any of them is a serious regression, so registration here is
 strictly APPEND-ONLY — an entry is added only when its exact command string is absent
 from the event's existing entries, and no existing entry is ever rewritten, reordered or
-removed. tests/test_register_nudge_hook.py asserts all four coexist afterwards.
+removed. tests/test_register_nudge_hook.py asserts every owner coexists afterwards, as a
+SET EQUALITY so the assertion fails when the set grows as well as when it shrinks.
 
 next-step-nudge is registered on Stop ONLY, not SubagentStop: a subagent's turn ends
 without ever reaching the operator, so it owes them no next step. The hook refuses that
@@ -66,6 +79,12 @@ NOTIFY_EVENTS = ["UserPromptSubmit", "Stop", "SubagentStop"]
 # no matcher — see the module docstring for why it is not scoped to Bash.
 LEDGER_CMD = "python3 ~/.claude/hooks/agent-ledger-hook.py"
 LEDGER_EVENTS = ["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop"]
+
+# The clawgate write-back guard. Two events, and — like the ledger above — a
+# PostToolUse entry with NO matcher, because half of what it watches for is an
+# Edit/Write/NotebookEdit tool call. See the module docstring.
+WRITEBACK_CMD = "python3 ~/.claude/hooks/clawgate-writeback-guard.py"
+WRITEBACK_EVENTS = ["PostToolUse", "Stop"]
 
 # Hooks registered on exactly one event each: {event: [command, ...]}.
 SINGLE_EVENT_CMDS = {
@@ -116,6 +135,18 @@ for event in LEDGER_EVENTS:
         continue
     arr.append({"hooks": [{"type": "command", "command": LEDGER_CMD}]})
     added.append("%s: %s" % (event, LEDGER_CMD))
+
+# --- the clawgate write-back guard (append-only, same discipline) ------------
+# 🔴 Stop already carries three foreign owners at this point; this one is appended
+# after them, never inserted, so they have all observed the turn before it can add
+# anything to it. It is the only entry here that can BLOCK, and it caps itself at two
+# consecutive blocks per task — well inside the CLI's own cap of 8.
+for event in WRITEBACK_EVENTS:
+    arr = hooks.setdefault(event, [])
+    if WRITEBACK_CMD in registered_commands(arr):
+        continue
+    arr.append({"hooks": [{"type": "command", "command": WRITEBACK_CMD}]})
+    added.append("%s: %s" % (event, WRITEBACK_CMD))
 
 # --- single-event hooks (append-only, same discipline) -----------------------
 for event, cmds in SINGLE_EVENT_CMDS.items():
