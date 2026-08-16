@@ -15,36 +15,30 @@ Make *"what is being worked on, and what is waiting on me"* answerable in one ca
 of 13 pane tails, and stop turns ending without a stated next step.
 
 ## State now
-- **Branch:** `main`, at `df12bdf` = `origin/main`. Both hosts converged and switched
-  (`ship.sh`: workbench 431 managed artifacts resolve / 0 dangling, laptop 393 / 0), and the
-  deployed skill + tool were exercised on BOTH hosts, not just rolled out.
-- **Working tree:** ⚠ the base clone is DIRTY with work that is NOT mine and NOT in any PR —
-  `nix/i3/config.nix` (a `for_window [class="Espanso"] floating enable` rule) and
-  `scripts/tmux-scratch-status.sh` (per-session window counts on the scratch slots, plus an
-  em-dash→`--` mangling that looks unintended). Untracked: `.envrc`, `.opencode/`,
-  `claudedocs/proposal-tmux-server-multiplexing.md`, `claudedocs/proposed-rules-cut/`,
-  `nix/system/apply-nebula-443.sh.LOCAL-preserved-2026-08-02`. **`ship.sh` says `tree is DIRTY`
-  on BOTH hosts** — it still converged, but this is stranded work one `checkout` from deletion.
+- **Branch:** `main` at `423e79a` = `origin/main`. Both hosts converged, switched and
+  **verified at the consumer** (`ship.sh`: workbench 432 managed artifacts resolve / 0
+  dangling, laptop 393 / 0).
+- **Working tree:** untracked only (`.envrc`, `.opencode/`,
+  `nix/system/apply-nebula-443.sh.LOCAL-preserved-2026-08-02`). The two tracked files that
+  were dirty for days (`nix/i3/config.nix`, `scripts/tmux-scratch-status.sh`) are committed
+  (#486); the three stranded proposal docs were rescued by another session (#503).
+- ⚠ **This repo has concurrent sessions.** `main` moved six times mid-session (#495, #496,
+  #498, #502, #503, #504). Re-fetch before assuming anything, and gate the MERGED tree.
 
-**Shipped and verified live this session:**
+**Shipped and verified live this session** — 11 devrc PRs + 1 in `ZacxDev/homelab-infra`:
 
-| what | PR / sha |
+| what | PR |
 |---|---|
-| the agent activity ledger — closes the #419 regression | **#471** `a12f101` |
-| writer 2 (opencode) | **#478** `1797d42` |
-| the `kind` entity axis + the design pass gating writer 3 | **#482** `df12bdf` |
-
-`scripts/lib/agent_ledger.py` (record, write/prune, read protocol, live-join filter) ·
-`scripts/claude-hooks/agent-ledger-hook.py` (writer 1, Claude Code) ·
-`scripts/session-manager` reads it **per host** · deploy + registration in `nix/home.nix` /
-`register-nudge-hook.py`.
-
-**Verified live, not merely deployed.** Before: `rows with an age: 0`, `claude_session_id` on
-0 rows, no `stale` bucket. After the switch, both hosts: `AGENT LEDGER (15 live of 16)`,
-`ages: 15 of 73 (ledger=15)`, `session ids: 15` — the hooks fired *naturally* as each live
-session took its next turn, no manual probing. The laptop's writer is confirmed too (all four
-events registered; its deployed hook wrote `claude-p23.json` from a real pane), so this is
-verified on the WHOLE fleet, not half.
+| `kind` — the entity axis on every row; roll-ups count by class, not by a falsy `claude` | **#482** |
+| six bar pills rendered a day-old cache as present tense; the deadman had no deadman | **#490**, **#492** |
+| agent-ops TUI retired; `/proc` detector extracted to `scripts/lib/claude_sessions.py` | **#501** |
+| `RULES.md` ceiling 35,200 → 38,400 after proving eviction exhausted | **#497** |
+| three measured lessons into `RULES.md` + an orphaned-anchor gate | **#489** |
+| clawgate DELETE/`retracted` semantics documented; the `jq` recipe that hid it fixed | **#499** |
+| `clawgatectl` false "lost a rune" warning on every heredoc comment | homelab-infra **#325** |
+| espanso float rule was case-sensitive and may never have matched | **#488** |
+| scratch-slot legend gains window counts | **#486** |
+| the `_SPAWN_IDLE_REF` stall constant was measured on one host in one tier | **#500** |
 
 ## Open investigations — live diagnosis state
 
@@ -124,44 +118,74 @@ verified on the WHOLE fleet, not half.
   non-trivial `stale.claude` count on windows that are demonstrably working means the
   heartbeat is not reaching them — check `age_source` on those rows first.
 
+### RESOLVED: the clawgate wedge — mechanism (b), no agent was ever dispatched
+- **Was:** tasks #193/#194 sat `in_progress` 23.9h with `agent: null`; the stuck detector
+  fired for the first time (`stuck_count: 2`, reasons `["no_agent"]`).
+- 🔴 **The handoff's own discriminator was WRONG and is retracted.** It said `no_agent`
+  rather than `not_kicked_off` would confirm the #316 link theory. `no_agent` is an
+  ABSENCE and cannot separate "link broken" from "never dispatched" — following it would
+  have recorded a coin flip as a diagnosis.
+- **Settled by server-side route counters** (`clawgate_http_requests_total`, 30d Prometheus
+  retention). The one pod serving at 20:12:22 (`clawgate-6d7779c7d9-7fxzp`, 0.7.91) served
+  `PATCH /api/tasks/{id}/status` ×2 and **no `POST /agents` at all**;
+  `clawgate_agent_provision_total` empty on that pod. Both controls run: task-creation
+  counters saw the window (×2), and `POST /agents` is a real emitted label on 11 other pods
+  — so the zero is measured, not wiring.
+- **The receipt:** a local Claude session's own transcript, a two-iteration `curl` loop
+  flipping both to `in_progress` — the 10 ms "batch write". "dispatch both" meant **local
+  subagents**, not a devpod. It never wrote back.
+- 🔴 **`no_agent` conflates THREE states, not two.** `Provisioner.Destroy` hard-deletes the
+  agent row with no tombstone, and deleting a task sets `agents.note_id` NULL.
+- **Recommended, not built:** split `agent_link_missing` (some agent claims this task id but
+  the task read shows `agent: null`) from a residual `no_agent`. One extra API call, and it
+  gives #316 a detector instead of an anecdote. `never_dispatched` vs `agent_missing` is
+  **not client-observable** — it needs clawgate to write a `system` comment on dispatch.
+
+### RETRACTED: two "defects" I reported that were misreadings
+- **`DELETE /api/tasks/{id}/comments/{cid}` blanking the body** is a designed **soft delete**
+  — shipped homelab-infra #318, live at 0.7.95, `retracted: true`, body redacted rather than
+  filtered so the thread shows a tombstone instead of silently shortening. `retracted` is
+  `omitempty` (absent on normal comments) and the reference's own `jq` recipe printed
+  `.body`, so a retraction rendered as an unexplained blank. **The trap was in the docs**;
+  fixed in #499.
+- **"The server truncates comment bodies" (3929 → 3928 runes)** — nothing was truncated. A
+  trailing newline meeting `strings.TrimSpace` server-side, compared untrimmed in the CLI.
+  Real cap is 200,000 runes. I quoted the CLI's warning as fact about the server.
+
+### The board write-back is a single point of failure — 2 for 2
+- **Observed:** both tasks dispatched this session were **already shipped** — #193 by #458,
+  #194 by #461, whose commit subject literally reads `(#194) (#461)`. Both cards stayed
+  `open` with **zero comments**, so both were re-dispatched and paid for twice.
+- **So:** git recorded it, the board never did. The pickup ritual's write-back is the only
+  thing closing that loop and it failed both times, including once by me an hour after
+  diagnosing it. That is evidence it needs enforcing by something other than discipline.
+
+### `--claude-only` is a writer-3 prerequisite, and got slightly worse
+- It filters on `r["claude"]` (`scripts/session-manager`) and runs BEFORE `measured_caveats`,
+  so once cluster rows exist a filtered-out row is dropped **and** has its exclusion
+  attributed to the build rather than to the filter.
+
 ## Next steps (ranked)
+🔴 **Writer 3 is still GATED** — trigger unchanged: `in_progress` routinely non-zero AND
+`task.agent` non-null (#316 resolved). Both false. Design + measurements:
+`claudedocs/design-ledger-writer3-and-kind-2026-08-14.md`. spec §4's premise is wrong —
+clawgate has no agent-run entity, so cluster rows would come from `/api/tasks`, never
+`/api/agents`.
 
-🔴 **Writer 3 is GATED, not next — and spec §4's premise is wrong.** Design pass with the
-measurements: `claudedocs/design-ledger-writer3-and-kind-2026-08-14.md`. In short: §4 says the
-primary entity "becomes an agent run", but clawgate has **no agent-run entity** — `/api/agents`
-is 2 long-lived devpods, both `status: error`, one created 2026-06-06. The ephemeral thing is
-the **task in `in_progress`**, which `scripts/lib/clawgate_tasks.py` already models and which
-just reported the 2 wedged dispatches correctly. So if cluster rows are ever built, their
-source is `/api/tasks` filtered to `in_progress`, **not** `/api/agents`.
-**Trigger to un-gate:** the `in_progress` population routinely non-zero **and** `task.agent`
-non-null (#316 resolved). Both false today; re-check with one `/api/tasks?summary=1` call.
-
-1. **fuzzyclaw removal, phase 2** — migrate the readers ONE at a time. `tmux-scratch-status.sh`
-   is already done (#475 deleted the marker rather than migrating it). Remaining:
-   `session-manager`, `agent-ops`, `tmux-claude-counters.sh`, `verify-agent-work`,
-   `validation/{reconcile,refsources}.py`. Then phase 3 (a test that fails if any fuzzyclaw
+1. **Make the board write-back not optional.** The highest-value item, and the only one with
+   a measured 2/2 failure rate. Either the pickup ritual enforces it, or `in_progress`
+   stops being settable without a dispatch.
+2. **`agent_link_missing`** in `scripts/lib/clawgate_tasks.py` — gives #316 a real detector.
+   Note that module's docstring claim "`/api/agents` carries no `taskId` … no join key" is
+   **wrong**: the field is `noteId`, emitted unconditionally.
+3. **fuzzyclaw removal, phase 2.** `agent-ops` and `tmux-scratch-status.sh` are done.
+   Remaining readers: `session-manager`, `tmux-claude-counters.sh`, `verify-agent-work`,
+   `validation/{reconcile,refsources}.py`. Then phase 3 (a test that fails if a fuzzyclaw
    read reappears), then phase 4 (remove the writers — never first).
-2. **agent-ops retirement does NOT gate on writer 3 or on `kind`** — re-read of spec §7 against
-   the code: every disposition routes to `session-manager` / `standup` / `/initiative-scan`.
-   The one 🔴 KEEP is the **`/proc` detector** (`scripts/i3status-agent-ops` depends on it, and
-   it is strictly more accurate than `pane_current_command =~ /claude/`, which is why rows
-   render `? unk`). Moving that to a shared module IS the real gate.
-3. **Writer-3 prerequisites, tracked from the #482 audits** (same defect class as `kind`, left
-   open at the sites it did not consolidate):
-   - 🔴 `--claude-only` filters on `r["claude"]` and runs BEFORE `measured_caveats`, so a
-     cluster row would be dropped AND have its exclusion attributed to the build rather than
-     to the filter.
-   - The `CLASS` column and every roll-up are class-generic now, but nothing else is.
-4. **The §5 bar inversion** — a 45s systemd-user timer writing `~/.cache/bar-status/sessions.json`.
-   🔴 The cache MUST carry its own timestamp and measured/unmeasured state; both existing caches
-   have failed exactly there. Note #475 deleted the `●` waiting marker outright (the operator
-   does not use it), so this now has one fewer consumer — re-justify before building.
-5. **`no_session_reason` is KNOWN INCOMPLETE** (`scripts/session-manager`) — it reasons about
-   fuzzyclaw alone while the ledger is a second, winning supplier. Failure mode is bounded and
-   safe: it can understate what is known, never assert an unsupported measured absence.
-6. `render_caveats`' caveat CONTENT is **now pinned** for `kind_scope` (whole-string, five
-   branches) but NOT for the other four caveats. The `waiting` false-positive item below is
-   still open.
+4. **`--claude-only`** (above), before any cluster row exists.
+5. Two pre-existing coverage gaps in the extracted detector, left deliberately, nil blast
+   radius today: `_read_proc`'s positional `/proc/stat` index (`rest[19]`→`rest[18]`
+   survives) and `CLAUDE_RE` losing `re.IGNORECASE`.
 
 ## Gotchas / decisions / dead-ends
 
@@ -278,28 +302,99 @@ not in the code. Every one passed a full green gate.**
   seed in a subprocess **plus a positive control** asserting that seed still orders the raw set
   the other way — otherwise the guard is a coin flip.
 
+**Five occurrences of ONE trap, and it is now a rule:**
+🔴 **A fixture whose value EQUALS the constant it tests cannot see the difference.** Every
+time, a mutant replacing a lookup with a hardcoded literal produced byte-identical output and
+survived a fully green suite: `kinds_produced == ["tmux"]` off a tmux-only gather;
+`kinds_enumerated` set to a value that WAS `KINDS`; `KINDS_PRODUCED_BY_CONSTRUCTION` pinned
+to the same value every other assertion used; `stuck_count: 2` in every carry-forward fixture
+(so `stuck > 0` → `stuck > 1` survived, and a SINGLE wedged dispatch would have dropped from
+`!1?` Critical to `?` Warning); and a systemctl stub with no mode failing only the `--failed`
+probe. **The third recurred INSIDE the commit that fixed the second.** The control is
+mechanical: feed a value the constant CANNOT be, and watch the output move.
+
+🔴 **A mutation that did not APPLY is not a survival.** Bit three parties: an agent's
+validator used `py_compile.compile(path, cfile="/dev/null")`, which raises `FileExistsError`
+on every input → 5 phantom survivors; I patched by string match, the pattern silently did not
+match, and the green suite read exactly like a result; and another session landed #504 on the
+same class (198/200 never ran). Assert the patch site occurs exactly once, apply by line
+number when the text is fiddly, and PROVE the mutation landed before scoring it.
+
+🔴 **A guard on PROSE is walkable by rewording — pin the WHOLE normalised string.** Four
+guards were walked: two asserted words that also appear in the sentence's own STATIC prose;
+banning one literal phrasing was walked by "every row **here is** a tmux pane"; banning a
+term by NAME was walked by a SYNONYM ("a terminal pane… the second enumerated entity"). The
+structural version ("names no member of `KINDS`") adds no kill power on its own — the
+whole-string pin is what kills. Accept that a cosmetic reword fails the test.
+
+🔴 **`grep -c` counts MENTIONS, not INSTANCES — it lied to me three times in one session.**
+"agent-ops referenced 4,233 times" (it is in always-loaded context; real invocations: **0**);
+"the false claims are still present" (they were fixed — the phrase now appears inside a
+comment explaining that it did not); "16 vs 22 requireHookToken sites" (my count included
+three comment lines and the function definition; 16 route wraps is right).
+
+**Instrument failures, all mine:**
+- A **cache-hit `nix build` returns exit 0 with NO output** — read the derivation log, never
+  trust silence. Nearly read it as success twice.
+- **zsh brace-expands `{'a':1,'b':2}` inside double quotes**, so a control payload I thought
+  I wrote never landed; and `"$BR:scripts/…"` is eaten by history modifiers (`:s`) →
+  "bad substitution". Brace it: `${BR}`.
+- **A non-integral `ts` is rejected by design** (`cache_age_secs` treats it as "not from a
+  poller we recognise"), so a float `time.time()` in a fixture short-circuits every case to
+  `?` and looks exactly like a code bug.
+- **A subprocess harness cannot distinguish a correct render from a swallowed crash** —
+  `__main__` catches everything and prints a byte-identical `?` pill. Five parametrizations
+  passed with `render()` replaced by `raise`. Call `render()` DIRECTLY.
+
+**Decisions:**
+- **A recorded alarm is carried forward** (operator, 2026-08-15). A frozen cache renders
+  `39?` / `LEAK?` in Critical, not `?` in Warning — alerts do not resolve because the poller
+  died, and the `?` already marks it unmeasured. A MEASURED quiet board still hides.
+- **`RULES.md` ceiling raised, not evicted** — measured first: `skill-audit.py` found ZERO
+  work-status and ZERO dated-lesson blocks, and 18 of 24 fat lines already carry
+  `→ archive:` tags. Note `skill-audit.py` reports RULES.md "over target by 21,980 B"
+  against a **12 KB SKILL** budget that does not govern it; the prune-skill's own 🔴 says
+  report the mismatch, not execute it.
+- **agent-ops TUI deleted, detector kept.** 0 invocations in 30 days; the GUI half rests on
+  the operator's statement, not data (transcripts cannot see a bar-button launch).
+- 🔴 **A block rename needs `i3-msg restart`.** The switch DELETES the old symlink while a
+  running `i3status-rs` holds the old parsed config, so the pill is broken between `ship.sh`
+  and the restart. Sequence: **merge → `ship.sh` → `i3-msg restart` → re-check the pill.**
+  Now in `claude/skills/bar/SKILL.md`, generalised to any block rename/removal/`command`
+  change.
+- **`cp -a` of a worktree gives ZERO git isolation** — `.git` is a POINTER FILE, so a copy
+  shares the real git dir, index and refs. An auditor's scratch `git commit` landed on a live
+  branch (recovered, never pushed). `rm -f <copy>/.git` after any copy.
+
+**Loose ends, not defects:**
+- Two `i3status-rs` processes from Aug 4 are orphaned to systemd (`--no-init`, ppid 1,
+  attached to no `i3bar`). Not killed — resolving PIDs I did not start is the documented
+  sibling-kill hazard.
+- `~/workspace/homelab-talos` (which IS `ZacxDev/homelab-infra` — the directory name lies)
+  carries untracked `.kube/`, a `cilium-l2-announcement-policy.yaml`, and a modified
+  `flake.nix`.
+- GitHub Actions is **billing-blocked repo-wide** on homelab-infra; gates run on Tekton as
+  `tekton/clawgate-ci`, and the workflow was cut to `workflow_dispatch` so it contributes no
+  red check. Merging a `containers/clawgate` change does NOT redeploy clawgate.
+
 ## How to verify
 ```bash
-# the ledger, both hosts — `live of seen` per host, and the ages meter
-python3 ~/workspace/devrc/scripts/session-manager --no-ch | grep -E 'AGENT LEDGER|live of|ages:'
+# the bar, every block, at the path i3status-rust invokes — all rc=0
+for b in claude-runs clawgate telemetry alerts civitai mail media airvpn; do
+  printf '%-14s rc=%s\n' "$b" "$(timeout 15 python3 ~/.config/i3status-rust/scripts/i3status-$b >/dev/null 2>&1; echo $?)"
+done
 
-# the writer, on THIS host, without touching the real ledger
-python3 ~/.claude/hooks/agent-ledger-hook.py --selftest   # expect "1 expected, 1 observed -> PASS"
+# the freshness grammar, on a COPY of the real caches aged 24h (never write the live ones)
+#   fresh alarm -> `39` Critical ; frozen -> `39?` Critical ; quiet+frozen -> `?` Warning
+# the entity axis, live — every row tmux, and NO cluster key in any bucket
+python3 ~/workspace/devrc/scripts/session-manager --no-ch --json \
+  | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["summary"]["kind"], d["summary"]["status"]["idle"])'
 
-# registered on all four events
-jq -r '.hooks | to_entries[] | .key as $e | .value[] | .hooks[]?
-       | select(.command|test("agent-ledger")) | $e' ~/.claude/settings.json | sort
-
-# the gate (authoritative). 🔴 A CACHE HIT RETURNS EXIT 0 WITH NO OUTPUT — read the log,
-# never trust silence, and never read a piped exit code.
+# the gate (authoritative). 🔴 A CACHE HIT RETURNS EXIT 0 WITH NO OUTPUT — read the log.
 nix build ~/workspace/devrc#checks.x86_64-linux.pytests -L --no-link 2>&1 \
   | grep -E 'TOTAL collected|RESULT:'
 
-# the entity axis, live — every row tmux, and NO cluster key in any bucket
-python3 ~/workspace/devrc/scripts/session-manager --no-ch --json \
-  | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d["summary"]["kind"], d["summary"]["status"]["idle"])'
-
-# the clawgate board + the stuck detector, one call
+# clawgate board + stuck detector, one call
 curl -s -H "Authorization: Bearer $CLAWGATE_HOOK_TOKEN" \
   "${CLAWGATE_API_URL:-http://192.168.50.250:30302}/api/tasks?summary=1" \
   | python3 -c 'import sys,json,collections; t=json.load(sys.stdin); print(collections.Counter(r["status"] for r in t)); print("agent non-null:", sum(1 for r in t if r.get("agent")))'
