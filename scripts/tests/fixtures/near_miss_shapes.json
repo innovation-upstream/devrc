@@ -1,0 +1,59 @@
+{
+  "_readme": [
+    "The near-miss detector's evaluation matrix, COMMITTED so its numbers are reproducible.",
+    "",
+    "Three rounds of review changed this pattern, each justified by a matrix that lived",
+    "only in the author's scratchpad. Round 4 built a different 20-shape matrix and got",
+    "the opposite verdict from round 3's 8-shape one — because a matrix nobody can re-run",
+    "is an opinion. `test_subsystem_touch.py` reads this file, so changing the pattern",
+    "means changing numbers anyone can reproduce.",
+    "",
+    "attempts:  a writer TRIED to declare a marker and missed the grammar. MUST be detected.",
+    "prose:     correct English a 'DID NOT PARSE, fix the LINE' advisory would be wrong about.",
+    "real:      valid markers. Handled before near-miss runs; listed so a change that starts",
+    "           matching them is visible even though precedence makes it harmless."
+  ],
+
+  "attempts": [
+    "- 2026-08-15 OPEN: rotate the key.",
+    "- 2026-08-15: RESOLVED abc1234 (some-repo): closed.",
+    "- 2026-08-15: **OPEN:** rotate the key.",
+    "- 2026-08-15: OPEN : rotate the key.",
+    "- 2026-08-15: RESOLVED PR#505: closed.",
+    "- 2026-08-15: Open: the retry budget.",
+    "- 2026-08-15: Resolved abc1234: done.",
+    "- Open: no date, still an attempt.",
+    "- OPEN FIX (1 line): widen the timeout.",
+    "- RESOLVED in abc1234: done.",
+    "- RESOLVED by abc1234: done.",
+    "- OPEN [#505]: rotate the key.",
+    "- OPEN the retry budget is not addressed.",
+    "- OPEN — the retry budget.",
+    "- 2026-08-15: OPEN the retry budget.",
+    "- RESOLVED abc1234 — closed it."
+  ],
+
+  "prose": [
+    "- Open questions remain about the retry budget.",
+    "- 2026-08-15: Resolved by pinning the image tag.",
+    "- resolved upstream in 1.2.3.",
+    "- **Open** by design.",
+    "- Opening the pool early caused the stall.",
+    "- Open items: the retry budget is not yet addressed.",
+    "- 2026-08-15: an ordinary durable lesson.",
+    "- 2026-08-15: the port is open for business.",
+    "- 2026-08-15: we resolved the ticket last week.",
+    "- the open file limit is the constraint here."
+  ],
+
+  "accepted_false_positives": [
+    "- Resolved: we decided to keep it.",
+    "- Open (for now): the retry budget stays.",
+    "- Resolved (finally): we shipped it."
+  ],
+
+  "real": [
+    "- 2026-08-15: OPEN: fine.",
+    "- 2026-08-15: RESOLVED b83bfb584: fine."
+  ]
+}

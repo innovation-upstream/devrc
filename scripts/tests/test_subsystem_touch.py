@@ -8929,12 +8929,18 @@ class TestPopulationsAreMutuallyExclusive:
 
     def test_the_writer_block_renders_a_genuinely_BOTH_bullet_exactly_once(self):
         """🔴 THE GUARD THAT WAS MISSING, and its absence let the round-2 defect be
-        reintroduced against a green suite: reverting `near_miss_bullets` to the
-        raw `b.near_miss_marker` predicate left 1301 tests passing while the writer
-        block quoted one bullet under BOTH headings again.
+        reintroduced against a green suite: reverting `unmarked_action_bullets` to
+        the raw `b.unmarked_action` predicate put a genuinely-both bullet in TWO
+        lists again, quoting it under both headings, with the suite green.
 
-        The earlier test asserted on the `openness_population` PROPERTY, which the
-        revert does not touch. Nothing rendered a genuinely-both bullet through
+        ⚠ NAMED PRECISELY, because an earlier version of this docstring blamed the
+        `near_miss_bullets` revert instead — which is an EQUIVALENT mutant and
+        survives, since `near_miss_marker` already self-suppresses on `openness`.
+        Two claims about the same mutant shipped in one commit, contradicting each
+        other; `subsystem_touch.py` had it right and this did not.
+
+        The earlier test asserted on the `openness_population` PROPERTY, which
+        neither revert touches. Nothing rendered a genuinely-both bullet through
         `_render_open_actions`, so nothing could see it. This does.
         """
         line = "- 2026-08-15 OPEN: the retry budget is not yet addressed."
@@ -9003,10 +9009,10 @@ class TestNearMissDoesNotFireOnOrdinaryProse:
         "- 2026-08-15: Resolved by pinning the image tag.",
         "- resolved upstream in 1.2.3.",
         "- **Open** by design.",
-        # ⚠ `Opening…` is a WEAK probe, kept and labelled: it survives both
-        # restoring `re.I` and deleting `\b`, so it pins nothing on its own. The
-        # discriminating cases are the ones above it, which have no `:` after the
-        # marker word — that is what the pattern actually tests.
+        # ⚠ `Opening…` is a WEAK probe, kept and labelled. It is guarded by the
+        # `(?![a-z])` in the shouted branch, but nothing else about the pattern —
+        # so it pins little on its own. The discriminating prose cases are the
+        # ones above it, which carry the marker word with no `:` after it.
         "- Opening the pool early caused the stall.",
     ])
     def test_capitalised_prose_is_not_an_attempted_marker(self, line):
@@ -9021,54 +9027,103 @@ class TestNearMissDoesNotFireOnOrdinaryProse:
         assert b.openness is None
 
 
-class TestTheDiscriminatorIsTheTerminatorNotTheCase:
-    """🔴 TWO ROUNDS GOT THIS WRONG IN OPPOSITE DIRECTIONS, so both are pinned.
+NEAR_MISS_MATRIX = json.loads(
+    (ROOT / "scripts" / "tests" / "fixtures" / "near_miss_shapes.json").read_text(
+        encoding="utf-8"
+    )
+)
 
-    Round 1 matched case-insensitively with no `:` requirement and fired on
-    ordinary English. Round 2 dropped `re.I` — which silently lost `Open:` and
-    `Resolved <sha>:`, the likeliest typos of all, because a writer sentence-cases
-    by habit. Neither direction had a test that could see the other's failure.
 
-    Measured over the live 196-bullet corpus, `re.I` produced ZERO false
-    positives — so case was never the discriminator. The terminator is.
+class TestNearMissShapesAgainstTheCommittedMatrix:
+    """🔴 THE MATRIX IS A FIXTURE IN THE REPO, and that is the point.
+
+    This pattern changed in three consecutive review rounds. Each change was
+    justified by a matrix that existed only in the author's scratchpad, so the
+    next round could not re-run it — and round 4 built a different 20-shape
+    matrix and reached the OPPOSITE verdict from round 3's 8-shape one. A matrix
+    nobody can re-run is an opinion, not a measurement.
+
+    `fixtures/near_miss_shapes.json` is now the shared one. Changing the pattern
+    means changing numbers anyone can reproduce, and a shape that regresses names
+    itself.
     """
 
-    @pytest.mark.parametrize("line", [
-        "- 2026-08-15: Open: the retry budget.",
-        "- 2026-08-15: Resolved abc1234: done.",
-        "- Open: no date, still an attempt.",
-    ])
-    def test_a_SENTENCE_CASED_attempt_is_still_caught(self, line):
-        """The round-2 regression. Silence here is the 22-day failure by typo."""
+    @pytest.mark.parametrize("line", NEAR_MISS_MATRIX["attempts"])
+    def test_every_attempted_marker_shape_is_detected(self, line):
+        """A miss here is SILENT in production: the writer sees no badge and no
+        advisory, which reads as success. That is the 22-day failure by typo."""
         (b,) = sr.parse_journal_bullets(line)
         assert b.near_miss_marker is True
 
-    @pytest.mark.parametrize("line", [
-        "- Open questions remain about the retry budget.",
-        "- 2026-08-15: Resolved by pinning the image tag.",
-        "- resolved upstream in 1.2.3.",
-        "- **Open** by design.",
-    ])
-    def test_prose_with_NO_terminator_is_still_rejected(self, line):
-        """The round-1 regression. Each of these has the marker word and no `:`
-        after it — which is exactly what separates prose from an attempt."""
+    @pytest.mark.parametrize("line", NEAR_MISS_MATRIX["prose"])
+    def test_no_prose_shape_is_flagged(self, line):
+        """A 🔴 'DID NOT PARSE, fix the LINE' advisory about a correct sentence is
+        how a loud path gets ignored."""
         (b,) = sr.parse_journal_bullets(line)
         assert b.near_miss_marker is False
 
-    def test_a_sha_or_reference_may_sit_between_the_marker_and_the_colon(self):
-        for line in ("- 2026-08-15: RESOLVED abc1234 (some-repo): closed.",
-                     "- 2026-08-15: RESOLVED PR#505: closed."):
-            (b,) = sr.parse_journal_bullets(line)
-            assert b.near_miss_marker is True, line
-
-    def test_the_ONE_accepted_false_positive_is_pinned_as_a_decision(self):
-        """`- Resolved: we decided to keep it.` IS flagged, deliberately.
-
-        Pinned so it is a recorded decision rather than an accident someone
-        "fixes" later by dropping case-insensitivity — that trade was measured
-        (8/8 found + 1 FP, versus 5/8 found + 0 FP) and it is worse. In a store
-        that HAS a `RESOLVED:` convention, a bullet opening `Resolved:` is more
-        likely an attempt than prose, and the advisory is non-blocking.
-        """
-        (b,) = sr.parse_journal_bullets("- Resolved: we decided to keep it.")
+    @pytest.mark.parametrize("line", NEAR_MISS_MATRIX["accepted_false_positives"])
+    def test_the_accepted_false_positives_stay_a_recorded_DECISION(self, line):
+        """These ARE flagged, deliberately. Pinned so the trade is a decision on
+        the record rather than an accident a later round "fixes" by narrowing the
+        pattern — a narrowing that was measured (9/16 found) and is worse. Each is
+        genuinely ambiguous, and the advisory is non-blocking."""
+        (b,) = sr.parse_journal_bullets(line)
         assert b.near_miss_marker is True
+
+    @pytest.mark.parametrize("line", NEAR_MISS_MATRIX["real"])
+    def test_a_real_marker_never_reaches_the_near_miss_population(self, line):
+        (b,) = sr.parse_journal_bullets(line)
+        assert b.openness_population in ("open", "resolved")
+
+    def test_the_matrix_is_not_degenerate(self):
+        """A fixture that lost its arms would make every test above vacuous."""
+        assert len(NEAR_MISS_MATRIX["attempts"]) >= 12
+        assert len(NEAR_MISS_MATRIX["prose"]) >= 8
+        assert not set(NEAR_MISS_MATRIX["attempts"]) & set(NEAR_MISS_MATRIX["prose"])
+
+    def test_the_SHOUTED_branch_needs_no_terminator(self):
+        """Round 3 required `:` and so went silent on the likeliest omission of
+        all — the colon itself. This is the arm that fixes that."""
+        (b,) = sr.parse_journal_bullets("- OPEN the retry budget is not addressed.")
+        assert b.near_miss_marker is True
+
+    def test_the_sentence_cased_branch_DOES_need_a_terminator(self):
+        """And this is why the shouted arm cannot simply be case-insensitive:
+        `Open questions remain…` is ordinary English."""
+        (b,) = sr.parse_journal_bullets("- Open questions remain about the budget.")
+        assert b.near_miss_marker is False
+
+    def test_a_long_hex_run_without_a_terminator_returns_promptly(self):
+        """🔴 ReDoS REGRESSION GUARD. `{7,40}` inside a `*` loop is exponentially
+        ambiguous when the trailing `:` never arrives. Measured before the
+        `(?![0-9a-fA-F])` lookahead was added: 64 hex chars 0.07 s, 80 chars
+        2.9 s, three 40-char shas did not return in 30 s — hanging
+        `scan_open_actions`, and so `/handoff` and `--validate`, with no output.
+
+        The bound is deliberately loose (1 s against a ~0 s expectation): this
+        must fail on exponential blow-up, not on a slow machine.
+
+        🔴 THE MARKER IS SENTENCE-CASED ON PURPOSE, and an earlier version of this
+        test was all-caps and therefore VACUOUS: the shouted branch matches at
+        `OPEN` immediately and never enters the ref loop, so the pathological
+        input never reached the vulnerable code and deleting the lookahead
+        survived. Only the sentence-cased branch requires the terminator, so only
+        it backtracks looking for a `:` that never comes. Measured without the
+        lookahead: `Open` + 64 hex → 0.028 s, + 120 hex → no return in 30 s;
+        `OPEN` with the same payload → 0.000 s either way.
+        """
+        import time as _time
+
+        line = "- Open " + " ".join(["a1b2c3d4" * 5] * 3) + " still needs rebasing"
+        started = _time.perf_counter()
+        # 🔴 THE PROPERTY MUST BE READ, not just the bullet parsed. `near_miss_marker`
+        # is lazy — `parse_journal_bullets` alone never evaluates it, so an earlier
+        # version of this test timed a call that could not reach the regex at all
+        # and passed happily with the lookahead deleted. Its own mutation battery
+        # is what caught that, twice: first the all-caps payload, then this.
+        # `False` is the CORRECT verdict — sentence-cased with no terminator is
+        # prose. What matters is that the property is EVALUATED (which is what
+        # reaches the regex) and that it comes back at all.
+        assert [b.near_miss_marker for b in sr.parse_journal_bullets(line)] == [False]
+        assert _time.perf_counter() - started < 1.0

@@ -1085,8 +1085,11 @@ _UNMARKED_ACTION = re.compile(r"\bFIX\s*[(:]|\bnot (yet )?addressed\b", re.I)
 # a false `RESOLVED` closes an action nobody closed. So the strict grammar stands
 # and the near-misses are REPORTED instead, which is the fail-loud half.
 #
-# ⚠ THE LEADING `^[-*][ \t]+` IS REDUNDANT HERE AND IN `_JOURNAL_OPENNESS`, and
-# is kept knowingly. Both are consumed with `re.match`, which anchors at position
+# ⚠ THE LEADING `^[-*][ \t]+` IS REDUNDANT IN `_JOURNAL_OPENNESS` ONLY — an
+# audit measured that deleting it from `_NEAR_MISS_MARKER` is KILLED (14 failures),
+# because that pattern's optional date/punctuation prefixes make the bullet marker
+# load-bearing there. The claim below applies to `_JOURNAL_OPENNESS`, and is kept
+# knowingly for it. Both are consumed with `re.match`, which anchors at position
 # 0, and neither pattern sets `re.MULTILINE` — so loosening or deleting that
 # prefix is an EQUIVALENT mutant that no test can kill (two batteries have now
 # reported exactly these two as survivors, which is how the redundancy was
@@ -1098,40 +1101,52 @@ _NEAR_MISS_MARKER = re.compile(
     r"^[-*][ \t]+"
     r"(?:\d{4}-\d{2}-\d{2}[^A-Za-z]{0,3})?"    # a date in any of its corpus forms
     r"[^A-Za-z0-9]{0,4}"                        # `**`, quotes, stray punctuation
-    r"(OPEN|RESOLVED)"
-    # an optional sha / PR reference / parenthetical between marker and terminator
-    r"(?:[ \t]*(?:[0-9a-fA-F]{7,40}|PR#\d+|#\d+|\([^)]{1,30}\)))*"
-    r"[^A-Za-z0-9\n]{0,4}"
-    r":",                                       # 🔴 THE DISCRIMINATOR
-    re.I,
+    r"(?:"
+    # (a) SHOUTED — all-caps marker, no terminator needed. Prose does not shout.
+    r"(?:OPEN|RESOLVED)(?![a-z])"
+    r"|"
+    # (b) sentence-cased — then a `:` IS required, optionally after a sha /
+    #     PR reference / parenthetical / bracketed ref.
+    r"(?i:OPEN|RESOLVED)"
+    r"(?:[ \t]*(?:[0-9a-fA-F]{7,40}(?![0-9a-fA-F])|PR#\d+|#\d+"
+    r"|\([^)]{1,30}\)|\[[^\]]{1,30}\]))*"
+    r"[^A-Za-z0-9\n]{0,4}:"
+    r")",
 )
-# 🔴 THE DISCRIMINATOR IS THE TERMINATOR, NOT THE CASE — and getting that wrong
-# cost two rounds in opposite directions.
+# 🔴 TWO BRANCHES, BECAUSE THREE ROUNDS PROVED NEITHER ALONE IS ENOUGH — and the
+# matrix that says so is COMMITTED at `scripts/tests/fixtures/near_miss_shapes.json`
+# rather than living in whoever's scratchpad wrote the last version. Each previous
+# pattern was justified by a private matrix, and round 4 built a different one and
+# reached the opposite verdict; a matrix nobody can re-run is an opinion.
 #
-# Round 1 matched case-insensitively with no `:` requirement and fired on ordinary
-# English ("Open questions remain…", "Resolved by pinning…"). Round 2 "fixed" it by
-# dropping `re.I` — which silently lost `Open:` and `Resolved <sha>:`, i.e. the
-# likeliest typos of all, since a writer sentence-cases by habit. Worse, the
-# comment justifying that drop asserted the detector "fired on ordinary prose" as
-# though measured; it was not. Measured over the live 196-bullet corpus, `re.I`
-# produced **0** false positives. The three examples were constructed.
+# Measured over that fixture (16 attempted shapes, 10 prose shapes) plus the live
+# 196-bullet corpus:
 #
-# What actually separates an attempted marker from prose is that the attempt ends
-# in `:` right after the marker (optionally with a sha, `PR#n` or a parenthetical
-# between). Measured across all four candidates on a fixed matrix — 8 attempted
-# shapes, 9 prose shapes, 196 live bullets:
+#     re.I, no terminator    (round 1)    16/16 found   6 prose FP   0 corpus
+#     no re.I, no terminator (round 2)     ?/16 found   0 prose FP   0 corpus
+#     terminator + re.I      (round 3)     9/16 found   0 prose FP   0 corpus
+#     this union                          16/16 found   0 prose FP   0 corpus
 #
-#     no re.I, no terminator (shipped in round 2)   5/8 found   0 FP   0 corpus
-#     re.I, no terminator    (shipped in round 1)   8/8 found   6 FP   0 corpus
-#     terminator + re.I      (this)                 8/8 found   1 FP   0 corpus
-#     terminator + any-one-token + re.I             7/8 found   2 FP   0 corpus
+# Round 3's terminator requirement was the subtler failure: it demanded the exact
+# character whose OMISSION is the likeliest way to miss the grammar, so
+# `- OPEN the retry budget is not addressed.` went silent — the failure this
+# detector exists to prevent, reintroduced by the fix for the previous one.
 #
-# ⚠ THE ONE RESIDUAL FALSE POSITIVE IS ACCEPTED AND NAMED: `- Resolved: we decided
-# to keep it.` is flagged. It is genuinely ambiguous — in a store that HAS a
-# `RESOLVED:` convention, a bullet opening `Resolved:` is more likely an attempt
-# than prose — and the advisory is non-blocking, so the cost of being wrong is one
-# line of output. Do not "fix" it by dropping the case-insensitivity again; that
-# trade was measured and it is worse.
+# (a) carries no terminator because an all-caps `OPEN`/`RESOLVED` opening a bullet
+# is a marker attempt in every sample examined; `(?![a-z])` keeps it off `Opening`.
+# (b) needs the terminator because sentence case IS ordinary English — "Open
+# questions remain" must not fire, while "Open:" must.
+#
+# 🔴 THE `(?![0-9a-fA-F])` ON THE HEX ATOM IS A ReDoS FIX, NOT STYLE. `{7,40}`
+# inside a `*` loop is exponentially ambiguous when the trailing `:` never
+# arrives — which is branch (b) only, since (a) matches before the loop is
+# reached. Measured on a SENTENCE-CASED bullet quoting long shas without a colon:
+# 48 hex 0.0007 s, 64 hex 0.028 s, three 40-char shas did not return in 30 s,
+# hanging `scan_open_actions` and therefore `/handoff` and `--validate` with no
+# output. An all-caps bullet with the identical payload is unaffected, which is
+# exactly why the regression test for this must be sentence-cased.
+# The lookahead makes the atom non-splittable and drops the pathological case to
+# ~0 s with zero behavioural change across the whole fixture.
 
 
 def _is_fence(line: str) -> bool:

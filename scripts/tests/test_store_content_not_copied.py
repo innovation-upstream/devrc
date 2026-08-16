@@ -66,7 +66,14 @@ STORE = Path(os.environ.get("SUBSYSTEM_STORE_ROOT",
 # `_tracked_text_files` — 825 tracked files against 35 store entries with the own
 # scope excluded, measured 2026-08-15 at the PR tip:
 #
-#     N=4 → 477    N=5 → 49    N=6 → 3    N=7 → 1    N=8 → 0
+#     N=4 → ~480 (VOLATILE)   N=5 → 49   N=6 → 3   N=7 → 1   N=8 → 0
+#
+# ⚠ THE N=4 ROW IS PINNED TO A CORPUS THAT GROWS and is given a tilde for that
+# reason: two measurements the same day, on the same tree, read 477 and 491 —
+# the store gained a bullet between them. At N=4 the count tracks ordinary
+# English and moves with every write to the store, so an exact figure there
+# would be stale within a day and would read as a discrepancy to whoever
+# re-measured. N≥5 is stable and is what the choice rests on.
 #
 # 🔴 THE METHOD IS STATED BECAUSE TWO EARLIER VERSIONS OF THIS COMMENT WERE
 # WRONG. The first justified 8 by claiming "at 8 every surviving phrase in a
