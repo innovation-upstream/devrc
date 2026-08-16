@@ -157,7 +157,7 @@ def _unmeasured(payload, label: str) -> dict:
     EMPTY pill it used to render, but it is not the full carry-forward
     `bar-status-poll.carry_stuck_forward` gives clawgate. Deliberately left: see
     the PR. Unlike a wedged dispatch, a dead telemetry source IS announced
-    elsewhere that does not expire (`scripts/collector/deadman.py`, agent-ops).
+    elsewhere that does not expire (`scripts/collector/deadman.py`).
     """
     count = fresh.int_or_none((payload or {}).get("count")
                               if isinstance(payload, dict) else None)

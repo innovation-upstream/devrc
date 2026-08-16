@@ -30,7 +30,8 @@ let
   # Floating btop for the vitals-block left-clicks (memory/cpu/temperature/gpu).
   # `float,float` matches the existing i3 float rule so it opens as a float.
   # Explicit dimensions are REQUIRED — btop refuses to render ("terminal size too
-  # small") in the default float size; matches the agentOps popup sizing idiom.
+  # small") in the default float size. (This 160x45 shape was the house idiom for
+  # every float popup, including the retired agent-ops one.)
   btopCmd = "alacritty --class float,float -o window.dimensions.columns=160 -o window.dimensions.lines=45 -e btop";
 
   # Python env for the decoupled bar-status poller (workbench systemd user timer):
@@ -311,20 +312,24 @@ let
       { button = "left"; cmd = "setsid -f ${home}/workspace/devrc/scripts/rig-control.sh gui"; }
     ];
   };
-  # agent-ops: workbench only. LIVE count of Claude-Code-in-tmux runs — renders
-  # `󰕮 N` (N>0) / bare `󰕮` (N==0), always neutral (running agents are steady
-  # state, not "blocked on you"). json render, recounts every 15s via a local
-  # tmux+/proc scan (reuses agent-ops's tested detector) — NO poller/cache/signal
-  # needed since it's local + cheap. The left-click still opens the mission-control
-  # dashboard in a FLOATING alacritty (the `class="float"` i3 rule floats it).
-  agentOpsBlock = {
+  # claude-runs: workbench only. LIVE count of Claude-Code-in-tmux runs — renders
+  # `󰕮 N` (N>0) / bare `󰕮` (N==0) / `󰕮 ?` (could not measure), always neutral
+  # (running agents are steady state, not "blocked on you"). json render,
+  # recounts every 15s via a local tmux+/proc scan — NO poller/cache/signal
+  # needed since it's local + cheap, so `bar_freshness` does not apply here.
+  #
+  # 🔴 IT HAS NO CLICK ANY MORE, deliberately. This block used to double as the
+  # launcher for the `agent-ops` mission-control TUI, which is RETIRED (its
+  # panels all had homes elsewhere — session-manager, standup, /initiative-scan
+  # and the bar's own pills — and its one irreplaceable part, the /proc-walking
+  # Claude detector, was extracted to scripts/lib/claude_sessions.py). A click
+  # exec'ing a path home-manager no longer deploys fails silently, so the click
+  # goes with the TUI rather than pointing at a successor that is not a TUI.
+  claudeRunsBlock = {
     block = "custom";
-    command = "${scriptsDir}/i3status-agent-ops";
+    command = "${scriptsDir}/i3status-claude-runs";
     json = true;
     interval = 15;
-    click = [
-      { button = "left"; cmd = "alacritty --class float,float -o window.dimensions.columns=130 -o window.dimensions.lines=45 -e ${home}/.config/tmux/agent-ops"; }
-    ];
   };
 
   blocks =
@@ -334,7 +339,7 @@ let
     ++ [ soundBlock ]
     ++ lib.optionals (!isLaptop) [ telemetryBlock alertsBlock civitaiBlock mailBlock clawgateBlock mediaBlock airvpnBlock ]
     ++ [ timeBlock ]
-    ++ lib.optionals (!isLaptop) [ agentOpsBlock rigcontrolBlock ]
+    ++ lib.optionals (!isLaptop) [ claudeRunsBlock rigcontrolBlock ]
     ++ [ notifsBlock ];
 in
 lib.mkIf isNixOS {
@@ -408,9 +413,36 @@ lib.mkIf isNixOS {
     source = ../scripts/i3blocks-rigcontrol;
     executable = true;
   };
-  home.file.".config/i3status-rust/scripts/i3status-agent-ops" = {
-    source = ../scripts/i3status-agent-ops;
+  home.file.".config/i3status-rust/scripts/i3status-claude-runs" = {
+    source = ../scripts/i3status-claude-runs;
     executable = true;
+  };
+  # 🔴 claude_sessions.py is a CO-LOCATED SIBLING MODULE, not a block — the same
+  # shape as bar_freshness.py BELOW (~line 470), and for the same reason: the
+  # block scripts are extensionless, so they cannot be a package and cannot
+  # import each other. It holds the ONE Claude-in-tmux detector (a /proc tree
+  # walk, strictly more accurate than session-manager's
+  # `pane_current_command =~ /claude/`), which used to live inside the retired
+  # `agent-ops` TUI and be loaded out of ~/.config/tmux/agent-ops.
+  #
+  # It MUST be symlinked beside its consumer: without this entry the pill cannot
+  # load the detector. That case now renders `󰕮 ?` rather than a bare glyph —
+  # before the extraction it was indistinguishable from "nothing is running",
+  # which on a workbench with 35 live sessions is the quietest possible lie.
+  #
+  # Both this entry and the block script above are UNGATED, while claudeRunsBlock
+  # itself is `(!isLaptop)` — so the deploy is WIDER than its consumer, never
+  # narrower. ⚠ That direction matters and is one edit from inverting:
+  # bar_freshness.py below IS `mkIf (!isLaptop)`, so the narrow shape is the
+  # local idiom. `mkIf isLaptop` here would leave the workbench — the only host
+  # carrying the block — without the module, and the pill would render `?` on
+  # the one machine that has it. The file must also be `git add`ed or the flake
+  # omits it with a perfectly green switch. All of that is asserted structurally
+  # (not by spelling this path) in
+  # `test_the_bar_block_and_EVERY_file_it_needs_deploy_on_the_SAME_hosts` +
+  # `test_the_shared_module_is_DEPLOYED_beside_the_block_that_loads_it`.
+  home.file.".config/i3status-rust/scripts/claude_sessions.py" = {
+    source = ../scripts/lib/claude_sessions.py;
   };
 
   # Decoupled status-count block scripts (workbench blocks reference these by

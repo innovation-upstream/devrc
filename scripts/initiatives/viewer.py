@@ -6,7 +6,7 @@ PHASE 3 of the "initiatives consolidation" feature. A self-contained web page (s
 renders the CURRENT initiatives from the homelab `mailbox` Postgres, with momentum
 badges, a per-initiative goal/summary line, next-step, open PRs (titles, not bare
 numbers), and a LIVE tmux overlay (which tmux session is on each initiative right now).
-It is the durable, browser-viewable counterpart to the ephemeral agent-ops TUI.
+It is the durable, browser-viewable successor to the retired agent-ops TUI.
 
 Interaction (all client-side over the embedded JSON / `/api/initiatives.json`):
   - a **flat / grouped** toggle (FLAT is the default, most-recently-active first, with a

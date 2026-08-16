@@ -87,9 +87,12 @@ ALLOWLIST = {
 #: 🔴 The importer ledger. Exactly these files load the shared module.
 EXPECTED_IMPORTERS = {
     "scripts/bar-status-poll",      # the 45s bar poller, writes the cache
-    "scripts/agent-ops",            # the mission-control TUI, reads it live
     "scripts/session-manager",      # the cross-host JSON report
 }
+# `scripts/agent-ops` — the mission-control TUI — was the third importer until it
+# was RETIRED. It is not "one fewer surface to keep in sync": it read this
+# predicate live, and dropping it here is the SHRINK case this ledger is built
+# to make audible, recorded rather than silently absorbed.
 
 SKIP_DIRS = {".git", "node_modules", "__pycache__", ".direnv", "result",
              ".claude"}
@@ -422,8 +425,8 @@ def test_exactly_the_expected_surfaces_import_the_shared_module():
 def test_each_importer_resolves_the_module_by_explicit_path_not_sys_path():
     # scripts/lib/ holds unrelated modules; a sys.path insert would let any of
     # them shadow a name these consumers rely on (the CLAUDE.md _db.py/llm.py
-    # gotcha). Also: agent-ops is DEPLOYED as a lone nix-store copy, so it must
-    # fall back to $DEVRC_DIR rather than assume a sibling lib/ exists.
+    # gotcha). Also: a consumer may be DEPLOYED as a lone nix-store copy, so it
+    # must fall back to $DEVRC_DIR rather than assume a sibling lib/ exists.
     for rel in sorted(EXPECTED_IMPORTERS):
         text = (REPO / rel).read_text(encoding="utf-8")
         assert "SourceFileLoader" in text, rel

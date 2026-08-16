@@ -46,14 +46,15 @@ Read the config sources — do NOT assume locations, discover them.
 - `.tmux.conf` / `.zshrc` — extra config pulled in with `builtins.readFile` by
   `nix/programs/tmux/default.nix` and `nix/programs/zsh/default.nix`
 - `scripts/` — tmux scripts (task-hook, task-resume, activity-receiver — thin wrappers over
-  fuzzyclaw; scratch-picker, scratch-status, scratch-monitor, claude-counters; the `agent-ops`
-  dashboard) + the i3status-rust bar scripts (`i3status-*` block scripts, `bar-status-poll`,
-  `i3blocks-rigcontrol` / `i3blocks-agent-ops` launchers). (`tmux-initiatives.sh` +
-  `dictation` were removed 2026-07.)
+  fuzzyclaw; scratch-picker, scratch-status, scratch-monitor, claude-counters) + the
+  i3status-rust bar scripts (`i3status-*` block scripts, `bar-status-poll`,
+  `i3blocks-rigcontrol` launcher). (`tmux-initiatives.sh` + `dictation` were removed
+  2026-07; the `agent-ops` dashboard and its launchers were RETIRED — its `/proc`
+  detector survives as `scripts/lib/claude_sessions.py`.)
 - `nix/pkgs/tools/tmux-fuzzyclaw.nix` — buildGoModule package for the fuzzyclaw Go binary
 
 **i3 + status bar — home-manager since 2026-07 (PR #74), NOT `/etc/nixos`:**
-- `nix/i3/config.nix` — the i3 config (raw string → `~/.config/i3/config`); keybinds incl. `$mod+i` → agent-ops
+- `nix/i3/config.nix` — the i3 config (raw string → `~/.config/i3/config`); keybinds ( `$mod+i` is free — it used to open the retired agent-ops TUI)
 - `nix/graphical.nix` — the i3status-rust bar (`programs.i3status-rust`, gruvbox, nerd-font
   icons) + `services.dunst` + the `bar-status-poll` systemd user timer feeding the count blocks
 - ⚠ `/etc/nixos/{i3config.nix,i3blocks.nix,i3blocks-scripts/}` are **RETIRED** — never edit the

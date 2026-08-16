@@ -23,7 +23,7 @@ Sources
              CLAWGATE_HOOK_TOKEN (both from ~/.claude/clawgate.env) -> what
              needs the operator. The predicate is NOT spelled here: it is
              scripts/lib/clawgate_tasks.py, which all three surfaces that answer
-             this question import (this poller, agent-ops, session-manager).
+             this question import (this poller and session-manager).
              It counts status-pending tasks AND `in_progress` tasks whose agent
              looks dead — the state a wedged dispatch is stranded in, which this
              poller used to exclude by name.
@@ -141,7 +141,7 @@ def _load_clawgate_tasks():
     silent second copy would have replaced with a confident wrong number.
 
     Tried sibling-first so the repo checkout wins, then $DEVRC_DIR, because
-    agent-ops runs from a nix-store COPY where no sibling lib/ exists.
+    a consumer may run from a nix-store COPY where no sibling lib/ exists.
     """
     import importlib.machinery
     import importlib.util
@@ -170,7 +170,7 @@ def parse_clawgate(tasks, now=None) -> dict:
 
     Every judgement — which statuses need the operator, when an `in_progress`
     dispatch counts as stuck, how the detail line truncates — is
-    `clawgate_tasks.attention`, so the bar, agent-ops and session-manager cannot
+    `clawgate_tasks.attention`, so the bar and session-manager cannot
     disagree about what the number means. This function only supplies the clock.
 
     Raises ValueError if the top-level payload is not a list (the caller turns
@@ -933,7 +933,7 @@ def _http_json(url: str, headers=None, timeout: float = 3.0):
 # ---------------------------------------------------------------------------
 def _clawgate_creds():
     """(token, base_url), read from the env file at CALL time by the shared
-    module — one reader, so agent-ops and this poller cannot disagree about
+    module — one reader, so session-manager and this poller cannot disagree about
     where the credential comes from or what the default base is."""
     base, token = CG.read_clawgate_env()
     return token, base

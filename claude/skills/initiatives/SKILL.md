@@ -5,8 +5,8 @@ description: "Operate the DURABLE initiatives board — the Postgres store, the 
 
 # initiatives subsystem operations
 
-The **durable, queryable counterpart** to the on-demand `/initiative-scan` scan and the ephemeral
-agent-ops TUI. Four layers **store → sync → viewer → recaps** + a **router** (signal→initiative)
+The **durable, queryable counterpart** to the on-demand `/initiative-scan` scan, and the
+successor to the retired agent-ops TUI's momentum panel. Four layers **store → sync → viewer → recaps** + a **router** (signal→initiative)
 + a **read-only assistant**. Code: `~/workspace/devrc/scripts/initiatives/` (sync.py, viewer.py,
 route.py, assistant.py, recap.py, run-sync.sh, run-viewer.sh); engine =
 `scripts/session-analysis/initiative-scan.py`. Everything is **workbench-only,

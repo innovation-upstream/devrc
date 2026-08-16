@@ -5116,17 +5116,56 @@ def test_the_blocked_section_is_rendered_in_EVERY_state():
         assert "▸ BLOCKED ON ME" in text
 
 
-def test_the_rendered_queue_points_the_reader_AT_agent_ops_for_the_full_list():
-    """🔴 Unit B's other half. This script has the COUNT; agent-ops has the
-    enumerated queue with titles. The cross-reference now sends a reader
-    toward it instead of away."""
+def test_the_rendered_queue_points_the_reader_AT_A_LIVE_SURFACE_for_the_full_list():
+    """🔴 Unit B's other half. This script has the COUNT, not the enumerated
+    queue with titles, so the render must name somewhere to GET that list.
+
+    ⚠ It used to name `agent-ops`, and this test asserted the literal string
+    "agent-ops" appeared. That tool is now RETIRED — and the test kept passing
+    after its two pointer strings were rewritten, because the word still
+    occurred elsewhere in the render. A guard that a stray mention can satisfy
+    is the "spelled, not structural" failure: it would have certified a render
+    pointing readers at a tool that no longer exists. So assert the CONTRACT
+    (the pointer names a surface that is still live) and assert the retired
+    name is ABSENT, which is the half that can actually go red.
+
+    ⚠⚠ The FIRST fix was still only HALF structural: `any(live)` was applied to
+    the UNMEASURED branch only, and the measured branches asserted nothing but
+    the absence of `agent-ops`. Measured: deleting `, or the clawgate API,`
+    from `BLOCKED_DETAIL_NOTE` SURVIVED the whole 508-test file, while the same
+    deletion in the unmeasured render died. `BLOCKED_DETAIL_NOTE` renders on
+    the branch a reader hits when there ARE pending approvals and the cache is
+    too old to enumerate them — i.e. the count is real, the `detail` truncates,
+    and that note is the ONLY pointer to somewhere the full queue lives. It
+    could be stripped with a green suite.
+
+    So the contract is now stated per RENDER, because the three differ in what
+    they owe the reader:
+      * schema-ok + a count -> the queue is ENUMERATED here; no pointer is owed
+        (and asserting one would be asserting a string, not a contract).
+      * legacy cache + a count -> truncated detail, no lists: a live surface
+        MUST be named. This is the render the surviving mutant lived in.
+      * unmeasured -> a live surface MUST be named; that is the whole render.
+    """
+    live = ("clawgate API", "clawgate pill")
     text = sm.render_table(base_gather(blocked_reader=_cache(), now=NOW))
     assert "12 clawgate task(s) needing you" in text
-    assert "agent-ops" in text
-    # and the same is true when the count could NOT be read — that is exactly
-    # when a reader most needs somewhere else to look
+    assert "agent-ops" not in text, "the render points at a retired tool"
+    # what this render owes instead of a pointer: the queue itself, enumerated
+    assert "#172 REVIEW finished item" in text, text
+    assert "#173 idle 4h" in text, text
+
+    # 🔴 the branch the mutant survived in: a real count whose detail truncates
+    legacy = sm.render_table(base_gather(blocked_reader=_legacy_cache(), now=NOW))
+    assert "11 clawgate task(s) needing you" in legacy
+    assert "agent-ops" not in legacy
+    assert any(s in legacy for s in live), legacy
+
+    # and the same when the count could NOT be read — that is exactly when a
+    # reader most needs somewhere else to look
     absent = sm.render_table(base_gather(blocked_reader=lambda p: None))
-    assert "agent-ops" in absent
+    assert "agent-ops" not in absent
+    assert any(s in absent for s in live), absent
 
 
 def test_the_summary_carries_the_count_WITH_its_discriminant():

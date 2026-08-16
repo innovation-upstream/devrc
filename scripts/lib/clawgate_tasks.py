@@ -1,7 +1,8 @@
 """The ONE definition of "which clawgate tasks need the operator".
 
 🔴 WHY THIS MODULE EXISTS. The predicate was open-coded at two sites —
-`scripts/bar-status-poll` (`PENDING_TASK_STATES`) and `scripts/agent-ops`
+`scripts/bar-status-poll` (`PENDING_TASK_STATES`) and the retired
+`scripts/agent-ops`
 (`_PENDING_STATES`) — and both spelled it `{"open", "ready_for_review"}`, i.e.
 both were wrong in the SAME direction. `scripts/session-manager` inherited the
 same blindness for free by reading the poller's cache rather than the API.

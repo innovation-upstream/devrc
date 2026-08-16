@@ -5,30 +5,29 @@ WHAT IT ANSWERS
 ---------------
 "Show me every tmux window on both hosts, which ones have Claude Code running,
 what they are doing, and what ClickHouse says about recent agent sessions."
-Today that requires stitching `agent-ops` (local-only popup, no JSON API),
-`tmux list-panes -a` per host, a manual `curl` at ClickHouse, and the fuzzyclaw
-task files.
+Today that requires stitching `tmux list-panes -a` per host, a manual `curl` at
+ClickHouse, and the fuzzyclaw task files.
 
-RELATIONSHIP TO agent-ops — READ BOTH, THEY ARE NOT SUBSTITUTES
----------------------------------------------------------------
-`agent-ops` is the always-on tmux popup. This is its queryable/programmatic
-counterpart: one-shot, `--json`-first, and cross-host. It deliberately does NOT
-share agent-ops' `/proc` BFS — see "HONEST LIMITS" below.
+🔴 THIS IS NOW THE ONLY SURFACE FOR THE APPROVAL QUEUE — DO NOT POINT ELSEWHERE
+------------------------------------------------------------------------------
+There used to be a second one, the `agent-ops` tmux popup, and this header used
+to say "read both, they are not substitutes". agent-ops is RETIRED, which makes
+the history below MORE binding rather than less:
 
-🔴 That description used to end there, and its MEASURED EFFECT was losing
-signal. A dogfooding agent read "agent-ops has no JSON API and no cross-host
-reach", correctly concluded this script was the better tool, never opened
-agent-ops — and so missed the ELEVEN pending clawgate approvals only agent-ops
-showed, four of them credential-exposure or cross-user-data-leak. An accurate
-cross-reference steered a reader away from the highest-stakes signal on the
-machine. Two fixes, both applied:
+A dogfooding agent read an accurate cross-reference — "agent-ops has no JSON API
+and no cross-host reach" — correctly concluded this script was the better tool,
+never opened agent-ops, and so missed the ELEVEN pending clawgate approvals only
+agent-ops showed, four of them credential-exposure or cross-user-data-leak. An
+accurate cross-reference steered a reader away from the highest-stakes signal on
+the machine. The fix that survived the retirement is the one that mattered:
 
-  * the pending count is now read HERE (`report["blocked_on_me"]`, and a
+  * the pending count is read HERE (`report["blocked_on_me"]`, and a
     `▸ BLOCKED ON ME` section printed in every state including unmeasured), so
-    the headline question does not depend on remembering another tool;
-  * agent-ops remains the place to see WHICH tasks, and is pointed AT rather
-    than away from. It has what this cannot: the enumerated queue with titles,
-    open PRs, and the /proc walk that finds a `claude` under a wrapper shell.
+    the headline question does not depend on remembering another tool.
+
+⚠ What agent-ops had that nothing here replaces: the ENUMERATED queue with task
+titles. When this reports a count you cannot act on, the clawgate API is the
+place to get the list — never a pointer back to the popup.
 
 ARCHITECTURE
 ------------
@@ -137,7 +136,8 @@ HONEST LIMITS (stated, not implied away — AND CARRIED IN THE OUTPUT as
 `report["caveats"]` plus two footer lines; see CAVEATS)
 ----------------------------------------------------------------------
   * Claude detection is `pane_current_command =~ /claude/`, which is SHALLOWER
-    than agent-ops' `/proc` descendant walk. It sees `claude` running as the
+    than the `/proc` descendant walk in scripts/lib/claude_sessions.py. It
+    sees `claude` running as the
     pane's foreground command (the live shape on both hosts today) and MISSES a
     `claude` buried under a wrapper shell. It is used because `/proc` is not
     reachable over SSH, so a deeper local check would make the two hosts report
@@ -337,7 +337,8 @@ LOCAL_TIMEOUT = 5.0
 HOST_NAMES = ("workbench", "laptop")
 DEFAULT_LOCAL_HOST = "workbench"
 
-# The 8-field pipe format, IDENTICAL to agent-ops' (`list_tmux_panes_raw`).
+# The 8-field pipe format, a SUBSET of the detector's in
+# scripts/lib/claude_sessions.py (`list_tmux_panes_raw`).
 # pane_title is LAST because it carries the agent's task and may itself contain
 # '|' — parse_panes absorbs trailing pipes into it via a bounded maxsplit.
 PANE_FORMAT = ("#{pane_id}|#{pane_pid}|#{session_name}|#{window_index}|"
@@ -357,7 +358,7 @@ FUZZYCLAW_DIR = os.path.join(HOME, ".tmux", "tasks")
 SCRATCH_SLOTS_DEPLOYED = os.path.join(HOME, ".config", "tmux", "scratch-slots.sh")
 SCRATCH_SLOTS_REPO = os.path.join(_HERE, "tmux-scratch-slots.sh")
 # A SCRATCH_SLOTS entry is "scratch4:V:#83a598:Vapor" (session:key:color:name).
-# Same regex as agent-ops / initiative-scan — one table, one parser.
+# Same regex as claude_sessions / initiative-scan — one table, one parser.
 _SLOT_RE = re.compile(r'"([^":]+):([^":]+):(#[0-9a-fA-F]{6}):([^":]+)"')
 
 DEFAULT_STALE_THRESHOLD = 3600      # 1h
@@ -367,10 +368,11 @@ CLAUDE_RE = re.compile(r"claude", re.IGNORECASE)
 
 # --------------------------------------------------------------------------- #
 # 🔴 BLOCKED-ON-ME (the clawgate approval queue), read from the bar poller's
-# cache. `agent-ops` is the only other surface that shows this, and a dogfood
-# agent that (correctly) rejected agent-ops for having no JSON API therefore
-# missed 11 pending approvals, four of them credential-exposure or
-# cross-user-data-leak. So the count lives here too.
+# cache. `agent-ops` used to be the other surface that showed this, and a
+# dogfood agent that (correctly) rejected agent-ops for having no JSON API
+# therefore missed 11 pending approvals, four of them credential-exposure or
+# cross-user-data-leak. So the count lives here too — and now that agent-ops is
+# RETIRED, this and the bar's clawgate pill are the only two surfaces left.
 #
 # 🔴 `count` IS THE MEASUREMENT; `detail` IS NOT. Nothing here ever parses
 # `detail` for a number. Since the poller adopted schema 2 the string states its
@@ -387,7 +389,7 @@ CLAUDE_RE = re.compile(r"claude", re.IGNORECASE)
 # had been dead for hours contributed nothing to `count` — and because this
 # script reads the cache rather than the API, the wedge was invisible here too.
 # The predicate now lives in scripts/lib/clawgate_tasks.py, which the poller,
-# agent-ops and this file all import; see that module for what "stuck" means.
+# and this file both import; see that module for what "stuck" means.
 #
 # The cache is written by `scripts/bar-status-poll` every 45s. Anything older
 # than MAX_AGE cannot be called a current measurement, so it is published with
@@ -399,8 +401,7 @@ BLOCKED_CACHE = os.path.join(HOME, ".cache", "bar-status", "clawgate.json")
 BLOCKED_CACHE_MAX_AGE = 300         # 5x the 45s poll interval
 BLOCKED_DETAIL_NOTE = ("`detail` TRUNCATES (it names ~6 ids however many are "
                        "pending) and has dropped ready_for_review items — read "
-                       "`count`, or `agent-ops` / the clawgate API for the "
-                       "full queue")
+                       "`count`, or the clawgate API, for the full queue")
 BLOCKED_SCHEMA_NOTE = ("this cache predates the stuck-dispatch predicate "
                        "(schema < %d): `stuck` is UNMEASURED here, not zero — "
                        "an in_progress task with a dead agent is invisible in "
@@ -577,9 +578,9 @@ CAVEATS = {
         "pattern": CLAUDE_RE.pattern,
         "note": ("`claude` must be the pane's FOREGROUND command; a claude "
                  "under a wrapper shell is reported as a shell. Shallower than "
-                 "agent-ops' /proc descendant walk, which is not reachable "
-                 "over SSH and so would make the two hosts report by different "
-                 "rules."),
+                 "the /proc descendant walk in scripts/lib/claude_sessions.py, "
+                 "which is not reachable over SSH and so would make the two "
+                 "hosts report by different rules."),
     },
     # 🔴 THIS CAVEAT USED TO SAY A REMOTE ROW CARRIES NO `claude_session_id` AND
     # NO `age_secs`, AND IS NEVER `stale`. That was true of fuzzyclaw and is NOT
@@ -673,7 +674,8 @@ CAVEATS = {
 }
 
 # Claude Code renders a leading status glyph in the pane_title: a BRAILLE
-# spinner while working, a "sparkle" at rest. Same taxonomy as agent-ops.
+# spinner while working, a "sparkle" at rest. Same taxonomy as
+# scripts/lib/claude_sessions.py.
 _BRAILLE_LO, _BRAILLE_HI = 0x2800, 0x28FF
 _SPARKLE_GLYPHS = frozenset("✳✻✽✶✷✢✺❋✱*")
 
@@ -959,7 +961,7 @@ def strip_status_glyph(title: str) -> str:
 
 def busy_from_title(title: str):
     """Busy tri-state from the leading glyph: spinner -> True, sparkle ->
-    False, neither -> None (unknown). Same taxonomy as agent-ops."""
+    False, neither -> None (unknown). Same taxonomy as claude_sessions."""
     t = (title or "").strip()
     if not t:
         return None
@@ -2549,13 +2551,13 @@ def render_blocked_on_me(blocked) -> list:
         out.append(f"▸ BLOCKED ON ME: UNMEASURED (stale cache) — last known "
                    f"count {count}")
         out.append(f"  {_trunc(b.get('error'), 110)}")
-        out.append("  (this is NOT a current count; check agent-ops or the "
-                   "clawgate API)")
+        out.append("  (this is NOT a current count; check the clawgate API or "
+                   "the bar's clawgate pill)")
     else:
         out.append(f"▸ BLOCKED ON ME: UNMEASURED [{st}]")
         out.append(f"  {_trunc(b.get('error') or 'unknown reason', 110)}")
         out.append("  (this is NOT zero pending approvals — the queue was "
-                   "never read. `agent-ops` shows it live)")
+                   "never read. The clawgate API has it live)")
     return out
 
 
@@ -3013,8 +3015,9 @@ def render_caveats(report) -> list:
         # `CLASS`, matching the column header. It said `KIND`, which now names
         # a different field with a different vocabulary.
         "  caveat[claude_detection]: CLASS is `pane_current_command =~ /{}/` — "
-        "shallower than agent-ops' /proc walk; a claude under a wrapper shell "
-        "reads as `shell`".format(det.get("pattern", "claude")),
+        "shallower than the /proc walk in scripts/lib/claude_sessions.py; a "
+        "claude under a wrapper shell reads as `shell`".format(
+            det.get("pattern", "claude")),
         "  caveat[fuzzyclaw_scope]: fuzzyclaw is {} — REMOTE rows carry null "
         "{}. This says NOTHING about age/session-id/stale".format(
             fz.get("scope", "local_host_only"),

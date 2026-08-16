@@ -205,8 +205,9 @@ bar {
 # Launch browser
 bindsym $mod+b exec --no-startup-id brave
 
-# agent-ops "mission control" dashboard — accessible via tmux prefix+A and the
-# bar button. Removed $mod+i to free Alt+i for tmux scratch15 (fern).
+# ($mod+i used to open the "agent-ops" mission-control dashboard; it was freed
+# for tmux scratch15 (fern) long before the dashboard itself was RETIRED, along
+# with its tmux prefix+A popup and its bar button. Nothing here launches it.)
 
 # Quick workspace switching
 bindsym $mod+Tab workspace back_and_forth
