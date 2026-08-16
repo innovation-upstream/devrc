@@ -4622,7 +4622,7 @@ class TestListingLineOpenAnnotation:
         two-phrasing guess with unmeasured recall does not belong on a line that
         cannot carry its own caveat. It is reported by `--validate`, which can."""
         line = rc.listing_line(
-            _recalled(["- 2026-07-24: FIX (1 line): repoint the address."]), 12
+            _recalled(["- 2026-07-24: FIX (1 line): widen the widget timeout."]), 12
         )
         assert "OPEN" not in line
 
@@ -4639,3 +4639,40 @@ class TestListingLineOpenAnnotation:
         index = sr.load_index(store)
         entry = index.entries("sc")[0]
         assert rc.read_entry(store, entry).open_count == 1
+
+
+class TestReadEntryOpenCountIsNotFixtureCollapsed:
+    """An audit found `read_entry`'s open count mutation-blind: replacing
+    `if b.is_open` with `if b.openness is not None` SURVIVED the whole suite,
+    because the only disk-level fixture had no `RESOLVED` bullet — so "open" and
+    "declared anything" produced identical output.
+
+    `claude/RULES.md`: a fixture of default or absent sibling values collapses
+    distinct implementations into the same result. The fix is a fixture whose
+    values are pairwise DISTINCT — here, all three openness states present at
+    once, so any predicate that confuses two of them moves the number.
+    """
+
+    def _store(self, tmp_path, bullets):
+        store = tmp_path / "s"
+        (store / "sc").mkdir(parents=True)
+        (store / "sc" / "svc.md").write_text(
+            "\n".join(["---", "service: svc", "scope: sc", "---", "",
+                       "## Nuance / work-history", *bullets, ""]),
+            encoding="utf-8",
+        )
+        return store
+
+    def test_all_three_openness_states_at_once_and_only_OPEN_is_counted(self, tmp_path):
+        store = self._store(tmp_path, [
+            "- 2026-08-01: OPEN: still outstanding.",
+            "- 2026-08-02: RESOLVED b83bfb584: closed by that commit.",
+            "- 2026-08-03: an ordinary durable lesson, no marker.",
+        ])
+        index = sr.load_index(store)
+        got = rc.read_entry(store, index.entries("sc")[0])
+        assert got.bullet_count == 3, "the fixture must exercise all three states"
+        assert got.open_count == 1, (
+            "counted something other than the OPEN bullet — a predicate of "
+            "'declared anything' gives 2 here, and 'any bullet' gives 3"
+        )

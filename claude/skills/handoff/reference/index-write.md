@@ -89,7 +89,7 @@ One entry in the `datapacket-talos` scope carries a full diagnosis of an auth fa
 | event | time |
 |---|---|
 | the entry was written | 2026-07-24 **15:00:18** |
-| the fix it calls future work landed (`b83bfb584`) | 2026-07-24 **15:02:21** |
+| the remedy it calls future work landed | 2026-07-24 **15:02:21** |
 
 **Stale 2m03s after it was written; served as an open action for 22 days.** The config today already carries the change — the remedy is in place, and the entry still asks for it.
 
@@ -107,7 +107,7 @@ The obvious repair is to grep the prose for remedy words. Measured over the live
 | bare `not yet` | 3 | **2 false** — one describes a mechanism, one is an explicit WONTFIX |
 | `should be` / `next step` / `pending` / `deferred` / `proposed fix` | 0 each | no corpus evidence either way |
 
-So a detector finds **two** bullets, and `claude/RULES.md` names what it would be: *"a guard on WORDS is walkable by REWORDING"*. A writer who says "the correct address is oauth-shared" instead of "FIX:" walks past it silently.
+So a detector finds **two** bullets, and `claude/RULES.md` names what it would be: *"a guard on WORDS is walkable by REWORDING"*. A writer who says "the endpoint is already correct" instead of "FIX:" walks past it silently.
 
 The marker is a **prefix the writer types**, which cannot be walked by rewording the sentence after it. The two measured phrasings survive as a deliberately narrow **floor** under entries written before the marker existed — reported by `--validate` as *"AT LEAST this many"*, never as a count, and never on the index line, which cannot carry that caveat.
 
@@ -116,6 +116,24 @@ The marker is a **prefix the writer types**, which cannot be walked by rewording
 - **`--validate`** reports both populations, separately, and **does not change its verdict**: an entry with unfinished business is well-formed, and failing it would be a gate nobody could turn green by fixing the file.
 - **The index line** gains `🔴 N OPEN` — declared bullets only, conditional, so entries with nothing open render byte-identical to before.
 - **Step 4's own output** prints the open block with an age, addressed to the writer, because the next write is the only moment anyone is looking.
+
+### 🔴 Never copy store prose into a public repo — and do not verify that by grep
+
+The store is client-confidential; `devrc` is public; a push is irreversible.
+
+PR #505 used the two real corpus bullets that motivated the marker as test fixtures, and "verified" the absence of client content with a hand-written `grep -iE 'oauth2-proxy|CSRF|…'` over the diff. It returned nothing and was reported clean. It was not clean: what survived was a service name **without** the prefix the pattern required, and two fragments of ordinary English no hand-written pattern would have contained. The zero was a fact about the pattern, not about the diff.
+
+A later derived check found **two further copies** in the same PR that neither the grep nor a full adversarial audit had caught.
+
+So the check is derived from the store, never enumerated:
+
+```bash
+python3 ~/workspace/devrc/scripts/tests/test_store_content_not_copied.py
+```
+
+It extracts every 8-word phrase from the store's non-`devrc` scopes and reports any tracked repo file that shares one, naming both sides. **Run it on the host that holds the store before pushing anything that touches store tooling.** Its pytest half runs everywhere and proves the machinery works, but it compares synthetic fixtures — *the pytest half passing is not evidence that no content was copied.*
+
+If it fires: reword the copy with **invented** content that preserves only the SHAPE under test. Never add the phrase to an exclusion list — the phrase itself is the thing that must not be committed.
 
 ## 6. Why this step exists at all
 

@@ -1013,7 +1013,8 @@ _JOURNAL_DATE = re.compile(r"^[-*][ \t]+(\d{4}-\d{2}-\d{2})(?=[:,)\]\s]|$)")
 #
 # 🔴 WHY THIS IS SCHEMA AND NOT A PROSE DETECTOR. The motivating entry
 # (`datapacket-talos/forgejo`) carries a bullet proposing a one-line config change
-# as future work. That change landed in `b83ffb584` at 15:02:21 on 2026-07-24;
+# as future work. That change landed at 15:02:21 on 2026-07-24 (the sha is in the
+# client repo and is deliberately not reproduced here);
 # the entry was written at
 # 15:00:18 — stale 2m03s after it was written, and still being served as an open
 # action 22 days later. Nothing could have noticed, because "this remedy is not
@@ -1022,7 +1023,7 @@ _JOURNAL_DATE = re.compile(r"^[-*][ \t]+(\d{4}-\d{2}-\d{2})(?=[:,)\]\s]|$)")
 # The obvious repair is to grep the prose for remedy words. Measured over the live
 # corpus (196 nuance bullets, 2026-08-15) that finds TWO bullets — and
 # `claude/RULES.md` names the failure it would be: "a guard on WORDS is walkable by
-# REWORDING". A writer who says "the correct address is oauth-shared" instead of
+# REWORDING". A writer who says "the endpoint is already correct" instead of
 # "FIX:" walks past it, and the walk is silent. A prefix a writer must TYPE cannot
 # be walked by rewording the sentence after it; that is the whole reason the
 # marker sits before the prose rather than inside it.
@@ -1058,6 +1059,48 @@ OPENNESS_RESOLVED = "resolved"
 # schema marker above is the mechanism; this is a net under it for entries written
 # before the marker existed.
 _UNMARKED_ACTION = re.compile(r"\bFIX\s*[(:]|\bnot (yet )?addressed\b", re.I)
+
+# A bullet that MEANT to carry a marker and just missed the grammar.
+#
+# 🔴 THE SILENT FAILURE IS THE SAME CLASS AS THE ORIGINAL BUG, which is why this
+# exists at all. Measured shapes that parse as NO MARKER today:
+#
+#   - 2026-08-15 OPEN: …                 (date not followed by `:`)
+#   - 2026-08-15: RESOLVED abc1234 (repo): …   (parenthetical before the colon)
+#   - 2026-08-15: **OPEN:** …            (marker wrapped in emphasis)
+#   - 2026-08-15: OPEN : …               (space before the colon)
+#   - 2026-08-15: RESOLVED PR#505: …     (a non-sha reference)
+#
+# The first matters most: `_JOURNAL_DATE` accepts a date followed by any of
+# `[:,)\]\s]` while `_JOURNAL_OPENNESS` requires `date:` + whitespace, and **7 of
+# 147 dated bullets in the live corpus (4.8%) already use a date form the
+# openness regex cannot parse**. So a writer follows the skill, closes an action
+# as `RESOLVED <sha> (<repo>):`, the `🔴 N OPEN` badge disappears — which LOOKS
+# like success — and the claim is discarded. Symmetrically a typo'd `OPEN`
+# reverts the entry to "nothing declared", reintroducing the exact 22-day failure
+# the marker exists to prevent, through a typo, silently.
+#
+# Deliberately NOT fixed by widening `_JOURNAL_OPENNESS`. A lenient marker
+# regex starts matching prose, and inventing a marker is worse than missing one:
+# a false `RESOLVED` closes an action nobody closed. So the strict grammar stands
+# and the near-misses are REPORTED instead, which is the fail-loud half.
+#
+# ⚠ THE LEADING `^[-*][ \t]+` IS REDUNDANT HERE AND IN `_JOURNAL_OPENNESS`, and
+# is kept knowingly. Both are consumed with `re.match`, which anchors at position
+# 0, and neither pattern sets `re.MULTILINE` — so loosening or deleting that
+# prefix is an EQUIVALENT mutant that no test can kill (two batteries have now
+# reported exactly these two as survivors, which is how the redundancy was
+# identified rather than assumed). It stays because the anchoring it duplicates
+# is a property of the CALL, not of the pattern: switch either consumer to
+# `search` and the prefix becomes the only thing standing between this and
+# matching mid-prose. Do not "simplify" it, and do not count it as a guard.
+_NEAR_MISS_MARKER = re.compile(
+    r"^[-*][ \t]+"
+    r"(?:\d{4}-\d{2}-\d{2}[^A-Za-z]{0,3})?"    # a date in any of its corpus forms
+    r"[^A-Za-z0-9]{0,4}"                        # `**`, quotes, stray punctuation
+    r"(OPEN|RESOLVED)\b",
+    re.I,
+)
 
 
 def _is_fence(line: str) -> bool:
@@ -1156,8 +1199,15 @@ class JournalBullet:
     """The sha a `RESOLVED <sha>:` bullet names as having closed it, or None.
 
     Carried so the claim is CHECKABLE — a reader can run `git cat-file -e` on it.
-    A `RESOLVED` with no sha parses fine and leaves this None; the marker is still
-    worth having, it just cannot be verified, and the renderer says which it got.
+    A `RESOLVED` with no sha parses fine and leaves this None: the marker is still
+    worth having, it just cannot be verified.
+
+    🔴 BRANCHED ON, not merely stored. An audit found this field read by nothing
+    outside the tests while its docstring claimed "the renderer says which it
+    got" — a field in a DTO is not a guard (`claude/RULES.md`), and the design's
+    headline rationale ("the sha makes the claim checkable") was unimplemented.
+    `--validate` now reports every sha-less `RESOLVED` as an UNVERIFIABLE closure,
+    which is the branch that makes the field load-bearing.
     """
 
     @property
@@ -1189,6 +1239,20 @@ class JournalBullet:
         if self.openness is not None:
             return False
         return bool(_UNMARKED_ACTION.search(self.text))
+
+    @property
+    def near_miss_marker(self) -> bool:
+        """Did this bullet TRY to carry a marker and miss the grammar?
+
+        The fail-loud half of a deliberately strict `_JOURNAL_OPENNESS`. True only
+        when no marker parsed AND the first line opens with something that reads
+        like an attempt — so a writer whose `RESOLVED <sha> (<repo>):` silently
+        did nothing is told, instead of seeing the badge vanish and reading that
+        as success.
+        """
+        if self.openness is not None:
+            return False
+        return bool(_NEAR_MISS_MARKER.match(self.first_line))
 
 
 def parse_journal_bullets(body: str) -> tuple[JournalBullet, ...]:

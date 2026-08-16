@@ -8387,8 +8387,7 @@ class TestSkillHomes:
 #
 # WHY THIS EXISTS, measured rather than imagined. `datapacket-talos/forgejo` was
 # written at 15:00:18 on 2026-07-24 carrying a bullet that proposed a
-# one-line remedy as future work. That remedy landed in commit b83bfb584 at
-# 15:02:21 — 2m03s later — and the entry served the remedy as
+# one-line remedy as future work. That remedy landed at 15:02:21 — 2m03s later — and the entry served the remedy as
 # outstanding for the next 22 days. The store had no way to say "still open", so
 # nothing could notice it had stopped being true.
 #
@@ -8458,11 +8457,25 @@ class TestOpennessMarkerParsing:
 
 
 class TestUnmarkedActionIsAFloor:
-    """The narrow net. Both positives below are REAL bullets from the live corpus."""
+    """The narrow net.
+
+    🔴 THE FIXTURES BELOW ARE INVENTED, AND THAT IS A REQUIREMENT, NOT A STYLE
+    CHOICE. They started out as the real corpus bullets — which made them
+    load-bearing evidence and also copied client-confidential prose into a PUBLIC
+    repo, where a push is irreversible. An audit caught it; the docstring that
+    used to sit here said "Both positives below are REAL bullets from the live
+    corpus", which documented the leak while asserting its own correctness.
+
+    What the fixtures must preserve is the SHAPE the detector keys on — a `FIX (`
+    prefix, a `not yet addressed` suffix — never the content. If you ever need to
+    check a phrasing against the corpus, do it in a scratch probe and land the
+    COUNT, not the line. `scripts/tests/test_store_content_not_copied.py` fails if
+    a corpus phrase reappears here.
+    """
 
     def test_it_catches_the_forgejo_shape_that_motivated_the_work(self):
         (b,) = sr.parse_journal_bullets(
-            "- 2026-07-24: FIX (1 line, keeps the GitHub-org gate): repoint the address."
+            "- 2026-07-24: FIX (1 line): widen the widget timeout."
         )
         assert b.unmarked_action is True
 
@@ -8478,8 +8491,8 @@ class TestUnmarkedActionIsAFloor:
         reads, and the corpus measurement that chose these two phrasings rejected
         `TODO` and bare `not yet` for exactly this — both scored false positives."""
         (b,) = sr.parse_journal_bullets(
-            "- 2026-07-09: VFE dedicated CPU worker pool = DO NOT re-attempt — twice "
-            "added then reverted."
+            "- 2026-01-05: a dedicated worker pool for this = DO NOT re-attempt — "
+            "tried twice, reverted twice."
         )
         assert b.unmarked_action is False
 
@@ -8487,8 +8500,8 @@ class TestUnmarkedActionIsAFloor:
         """Measured FALSE on the corpus: an entry describing an UPSTREAM project's
         TODO as a fact about that project, not a remedy this operator owes."""
         (b,) = sr.parse_journal_bullets(
-            "- Presigned URL lifetime defaults to 365 DAYS, with an upstream TODO to "
-            "lower it for prod."
+            "- the signed-link lifetime defaults to a year, with an upstream TODO to "
+            "shorten it."
         )
         assert b.unmarked_action is False
 
@@ -8496,8 +8509,8 @@ class TestUnmarkedActionIsAFloor:
         """Double-reporting one bullet in two populations would make the advisory's
         own count wrong, and train the reader to discount it."""
         for line in (
-            "- OPEN: FIX (1 line): repoint the address.",
-            "- RESOLVED b83bfb584: FIX (1 line): repointed the address.",
+            "- OPEN: FIX (1 line): widen the widget timeout.",
+            "- RESOLVED b83bfb584: FIX (1 line): widened the widget timeout.",
         ):
             (b,) = sr.parse_journal_bullets(line)
             assert b.unmarked_action is False, line
@@ -8550,7 +8563,7 @@ class TestEntryJournalOpenAccessors:
 
 class TestRenderOpenActionsAddressesTheWriter:
     def test_it_names_the_age_and_demands_a_verdict_before_appending(self):
-        j = _journal("- 2026-07-24: OPEN: repoint the address to oauth-shared.")
+        j = _journal("- 2026-07-24: OPEN: widen the widget timeout.")
         body = "\n".join(st._render_open_actions(j, "2026-08-15", ""))
         assert "22 days" in body
         assert "RE-CHECK" in body
@@ -8569,7 +8582,7 @@ class TestRenderOpenActionsAddressesTheWriter:
         cosmetic reword now fails this test; that is the price of the claim being
         machine-readable, and it is worth paying here because this exact sentence
         is what stops a floor being read as a total."""
-        j = _journal("- 2026-07-24: FIX (1 line): repoint the address.")
+        j = _journal("- 2026-07-24: FIX (1 line): widen the widget timeout.")
         body = " ".join("\n".join(st._render_open_actions(j, "2026-08-15", "")).split())
         assert (
             "AT LEAST this many — the detector matches two phrasings measured over "
@@ -8613,7 +8626,7 @@ class TestValidateReportsOpenActionsWithoutChangingTheVerdict:
         click through the malformed findings sitting beside it."""
         store = self._store(tmp_path, [
             "- 2026-08-01: OPEN: still outstanding.",
-            "- 2026-07-24: FIX (1 line): repoint the address.",
+            "- 2026-07-24: FIX (1 line): widen the widget timeout.",
         ])
         rc = st.main(["--store", str(store), "--scope", SCOPE, "--validate"])
         out = capsys.readouterr().out
@@ -8655,9 +8668,18 @@ class TestValidateReportsOpenActionsWithoutChangingTheVerdict:
         ])
         st.main(["--store", str(store), "--scope", SCOPE, "--validate", "--json"])
         payload = json.loads(capsys.readouterr().out)
-        assert payload["open_action_count"] == 2
-        assert [a["declared"] for a in payload["open_actions"]] == [False, True] or \
-               [a["declared"] for a in payload["open_actions"]] == [True, False]
+        # 🔴 NO SUMMED TOTAL. An audit found this test asserting a single
+        # `open_action_count == 2` — which PINNED the very merge the
+        # `OpenAction` docstring forbids, so the guard was certifying the bug.
+        # JSON cannot carry the floor caveat the text renderer states in words,
+        # so a merged number is all a machine consumer would ever see.
+        assert "open_action_count" not in payload, (
+            "a summed count is back: it lets a two-phrasing floor with unmeasured "
+            "recall masquerade as a count of what exists"
+        )
+        assert payload["declared_open_count"] == 1
+        assert payload["unmarked_action_count"] == 1
+        assert payload["unmarked_is_a_floor"] is True
         assert sum(a["declared"] for a in payload["open_actions"]) == 1
 
 
@@ -8671,3 +8693,169 @@ class TestScanOpenActions:
         """The advisory runs beside the parse check; it must never be the thing
         that turns a validation run into a crash."""
         assert st.scan_open_actions([tmp_path / "does-not-exist.md"]) == ()
+
+
+class TestTheOpenBlockActuallyREACHESStep4Output:
+    """🔴 THE SEAM, which nothing tested until an audit mutated it.
+
+    `_render_open_actions` was exercised only in isolation. Replacing its CALL
+    SITE in `_render_journal` with `pass` left the ENTIRE suite green — the
+    feature was one refactor from being completely inert behind a green gate,
+    which is `claude/RULES.md` → "verified in isolation is the new vacuous green:
+    the defect lives in the SEAM nobody owns".
+
+    So this asserts the RELATIONSHIP — that the writer-facing block a `/handoff`
+    step 4 actually prints contains the re-check text — rather than that the
+    renderer works when called directly.
+    """
+
+    def test_render_journal_carries_the_open_block(self):
+        j = _journal(
+            "- 2026-07-24: OPEN: widen the widget timeout.",
+            "- 2026-08-01: an ordinary durable lesson.",
+        )
+        body = "\n".join(st._render_journal(j, "2026-08-15", ""))
+        assert "RE-CHECK" in body
+        assert "22 day" in body
+        # and the pre-existing content is still there beside it, not displaced
+        assert "already there — READ THESE BEFORE PROPOSING" in body
+
+    def test_render_journal_carries_the_unmarked_floor_too(self):
+        j = _journal("- 2026-07-24: FIX (1 line): widen the widget timeout.")
+        body = "\n".join(st._render_journal(j, "2026-08-15", ""))
+        assert "AT LEAST" in body
+
+    def test_a_journal_with_nothing_open_is_unchanged_by_the_block(self):
+        """The seam must be invisible in the common case, or every step 4 pays."""
+        j = _journal("- 2026-08-15: an ordinary durable lesson.")
+        body = "\n".join(st._render_journal(j, "2026-08-15", ""))
+        assert "RE-CHECK" not in body and "AT LEAST" not in body
+
+
+class TestNearMissMarkersFailLOUDLY:
+    """🔴 An audit found that a marker which misses the grammar declares NOTHING
+    and says nothing about it — the badge simply does not appear, which reads as
+    success. That is the same SILENT class as the 22-day bug the marker exists to
+    prevent, reachable by a typo.
+
+    The measured shapes below all parse as no-marker. The first is the common
+    one: `_JOURNAL_DATE` accepts a date followed by any of `[:,)\\]\\s]` while the
+    openness grammar requires `date:` + whitespace, and 7 of 147 dated bullets in
+    the live corpus (4.8%) already use a date form the openness regex cannot
+    parse.
+    """
+
+    SHAPES = [
+        "- 2026-08-15 OPEN: rotate the key.",
+        "- 2026-08-15: RESOLVED abc1234 (some-repo): closed.",
+        "- 2026-08-15: **OPEN:** rotate the key.",
+        "- 2026-08-15: OPEN : rotate the key.",
+        "- 2026-08-15: RESOLVED PR#505: closed.",
+    ]
+
+    @pytest.mark.parametrize("line", SHAPES)
+    def test_each_measured_near_miss_is_detected(self, line):
+        (b,) = sr.parse_journal_bullets(line)
+        assert b.openness is None, "precondition: this shape must NOT parse as a marker"
+        assert b.near_miss_marker is True
+
+    def test_a_REAL_marker_is_never_a_near_miss(self):
+        """Otherwise every correct marker also raises an alarm, and the alarm dies."""
+        for line in ("- 2026-08-15: OPEN: fine.",
+                     "- 2026-08-15: RESOLVED b83bfb584: fine."):
+            (b,) = sr.parse_journal_bullets(line)
+            assert b.near_miss_marker is False, line
+
+    def test_ordinary_prose_using_the_word_open_is_not_a_near_miss(self):
+        """The detector anchors at the start of the bullet for this reason: the
+        word `open` is ordinary English and matching it anywhere would make the
+        loud path fire constantly, which is how a loud path gets ignored."""
+        for line in ("- 2026-08-15: the port is open for business.",
+                     "- 2026-08-15: we resolved the ticket last week."):
+            (b,) = sr.parse_journal_bullets(line)
+            assert b.near_miss_marker is False, line
+
+    def test_the_writer_block_names_it_and_says_the_marker_declared_nothing(self):
+        j = _journal("- 2026-08-15 OPEN: rotate the key.")
+        body = " ".join("\n".join(st._render_open_actions(j, "2026-08-15", "")).split())
+        assert "DID NOT PARSE" in body
+        assert "declares nothing" in body
+
+    def test_validate_reports_it_as_its_own_population(self, tmp_path, capsys):
+        store = tmp_path / "s"
+        (store / SCOPE).mkdir(parents=True)
+        (store / SCOPE / "svc.md").write_text(
+            _entry_with([
+                "- 2026-08-01: OPEN: a real one.",
+                "- 2026-08-15 OPEN: an attempted one.",
+                "- 2026-07-24: FIX (1 line): an unmarked one.",
+            ]),
+            encoding="utf-8",
+        )
+        st.main(["--store", str(store), "--scope", SCOPE, "--validate", "--json"])
+        p = json.loads(capsys.readouterr().out)
+        # 🔴 THREE populations, none of them summed into the others.
+        assert p["declared_open_count"] == 1
+        assert p["near_miss_marker_count"] == 1
+        assert p["unmarked_action_count"] == 1
+
+
+class TestOpenBulletQuotesAreBounded:
+    def test_a_long_open_list_is_capped_and_says_how_many_it_dropped(self):
+        """An audit found these lists uncapped while the sibling `already there`
+        list caps at 3 — on the highest-traffic writer surface in the tool."""
+        j = _journal(*[f"- 2026-08-0{i}: OPEN: item {i}." for i in range(1, 8)])
+        body = "\n".join(st._render_open_actions(j, "2026-08-15", ""))
+        assert body.count("  ? ") == st.JOURNAL_BULLETS_SHOWN
+        assert "4 more not quoted" in body
+        # the COUNT in the sentence is never truncated
+        assert "7 bullets here" in body
+
+
+class TestNegativeAgeIsNotStatedAsFact:
+    def test_a_future_dated_open_bullet_does_not_render_a_negative_age(self):
+        j = _journal("- 2026-09-01: OPEN: dated in the future.")
+        body = "\n".join(st._render_open_actions(j, "2026-08-15", ""))
+        assert "-17" not in body
+        assert "FUTURE" in body and "one of those dates is wrong" in body
+
+
+class TestResolvedByIsBranchedOnNotJustStored:
+    """🔴 An audit found `resolved_by` read by nothing outside the tests, while
+    its docstring claimed a renderer displayed it. `claude/RULES.md`: a field
+    that exists in a DTO is not a guard — only a BRANCH on it is. The design's
+    headline rationale ("the sha makes the closure checkable") was unimplemented,
+    so `RESOLVED:` and `RESOLVED <sha>:` were indistinguishable downstream.
+    """
+
+    def _validate(self, tmp_path, capsys, nuance, json_mode=False):
+        store = tmp_path / "s"
+        (store / SCOPE).mkdir(parents=True)
+        (store / SCOPE / "svc.md").write_text(_entry_with(nuance), encoding="utf-8")
+        argv = ["--store", str(store), "--scope", SCOPE, "--validate"]
+        st.main(argv + (["--json"] if json_mode else []))
+        return capsys.readouterr().out
+
+    def test_a_shaless_RESOLVED_is_reported_as_unverifiable(self, tmp_path, capsys):
+        out = self._validate(tmp_path, capsys, ["- 2026-08-02: RESOLVED: closed."])
+        assert "name no sha" in out
+        assert "cannot be checked" in out
+
+    def test_a_RESOLVED_WITH_a_sha_is_not_reported(self, tmp_path, capsys):
+        """The branch must DISCRIMINATE. If both shapes reported, the field is
+        still doing nothing and the test would pass anyway."""
+        out = self._validate(
+            tmp_path, capsys, ["- 2026-08-02: RESOLVED b83bfb584: closed."]
+        )
+        assert "name no sha" not in out
+        assert "0 declared" in out
+
+    def test_it_is_its_own_population_in_json(self, tmp_path, capsys):
+        payload = json.loads(self._validate(
+            tmp_path, capsys,
+            ["- 2026-08-01: OPEN: one.", "- 2026-08-02: RESOLVED: no sha."],
+            json_mode=True,
+        ))
+        assert payload["declared_open_count"] == 1
+        assert payload["unverifiable_closure_count"] == 1
+        assert payload["unmarked_action_count"] == 0

@@ -256,6 +256,7 @@ from subsystem_resolver import (  # noqa: E402
     DEFAULT_MIN_PATHS,
     NUANCE_HEADING,
     ON_MALFORMED_COLLECT,
+    OPENNESS_RESOLVED,
     AmbiguousRefError,
     Association,
     EntryUnreadableError,
@@ -2669,6 +2670,16 @@ class EntryJournal:
         return tuple(b for b in self.bullets if b.is_open)
 
     @property
+    def near_miss_bullets(self) -> tuple[JournalBullet, ...]:
+        """Bullets that TRIED to declare a marker and missed the grammar.
+
+        Reported separately from both other populations: this is neither an open
+        action nor a guess about one, it is a WRITE THAT DID NOT LAND. Treating
+        it as either would hide the only thing the writer can act on.
+        """
+        return tuple(b for b in self.bullets if b.near_miss_marker)
+
+    @property
     def unmarked_action_bullets(self) -> tuple[JournalBullet, ...]:
         """Bullets that LOOK like an unmarked open action. A FLOOR, never a list.
 
@@ -3059,7 +3070,7 @@ def _render_open_actions(j: EntryJournal, today: str, indent: str) -> list[str]:
 
     🔴 WHY THIS IS ADDRESSED TO THE WRITER AND NOT THE READER. Measured on
     `datapacket-talos/forgejo`: the entry was written at 15:00:18 on 2026-07-24
-    proposing a one-line fix, and that fix landed in `b83bfb584` at **15:02:21** —
+    proposing a one-line remedy, which landed at **15:02:21** —
     two minutes and three seconds later, by the same effort. It then served that
     remedy as outstanding for 22 days. Nobody was negligent; the writer simply had
     no prompt to come back, because `/handoff` runs mid-effort and the store had no
@@ -3072,15 +3083,23 @@ def _render_open_actions(j: EntryJournal, today: str, indent: str) -> list[str]:
     out: list[str] = []
     open_b = j.open_bullets
     unmarked = j.unmarked_action_bullets
-    if not open_b and not unmarked:
+    near = j.near_miss_bullets
+    if not open_b and not unmarked and not near:
         return out
     if open_b:
         age = j.oldest_open_days(today)
-        aged = (
-            f", oldest unverified for {age} day{'' if age == 1 else 's'}"
-            if age is not None
-            else ", none of them dated, so their age is unknown"
-        )
+        if age is None:
+            aged = ", none of them dated, so their age is unknown"
+        elif age < 0:
+            # A bullet dated in the FUTURE. Rendering "-17 days" inside a 🔴
+            # advisory states a nonsense age as fact; the honest reading is that
+            # one of the two dates is wrong, and which one is not knowable here.
+            aged = (
+                f", but the oldest is dated {-age} day(s) in the FUTURE relative to "
+                f"{today} — one of those dates is wrong, so its age is not usable"
+            )
+        else:
+            aged = f", oldest unverified for {age} day{'' if age == 1 else 's'}"
         out.append(
             f"{indent}🔴 {len(open_b)} bullet{'' if len(open_b) == 1 else 's'} here "
             f"still declare{'s' if len(open_b) == 1 else ''} `OPEN:`{aged}. RE-CHECK "
@@ -3089,8 +3108,7 @@ def _render_open_actions(j: EntryJournal, today: str, indent: str) -> list[str]:
             f"An open action that has quietly been done is the failure this marker exists "
             f"for — it reads exactly like one that has not."
         )
-        for b in open_b:
-            out.append(f"{indent}  ? {b.first_line[:160]}")
+        out += _bullet_lines(open_b, indent)
     if unmarked:
         out.append(
             f"{indent}⚠ {len(unmarked)} further bullet{'' if len(unmarked) == 1 else 's'} "
@@ -3100,8 +3118,40 @@ def _render_open_actions(j: EntryJournal, today: str, indent: str) -> list[str]:
             f"recall, so this is a floor and never a count of what exists. If one is still "
             f"open, mark it `OPEN:`; if it landed, `RESOLVED <sha>:`."
         )
-        for b in unmarked:
-            out.append(f"{indent}  ? {b.first_line[:160]}")
+        out += _bullet_lines(unmarked, indent)
+    if near:
+        out.append(
+            f"{indent}🔴 {len(near)} bullet{'' if len(near) == 1 else 's'} here "
+            f"look{'s' if len(near) == 1 else ''} like an attempted `OPEN:`/"
+            f"`RESOLVED <sha>:` marker that DID NOT PARSE, so it declares nothing "
+            f"and no badge will show. The grammar is strict on purpose — inventing "
+            f"a marker is worse than missing one — so fix the LINE: the marker goes "
+            f"immediately after `YYYY-MM-DD: `, is upper-case, carries no emphasis "
+            f"or parenthetical, and ends in `:`."
+        )
+        out += _bullet_lines(near, indent)
+    return out
+
+
+def _bullet_lines(bullets: Sequence[JournalBullet], indent: str) -> list[str]:
+    """Quote a bounded number of bullets, and SAY how many were not quoted.
+
+    Capped at `JOURNAL_BULLETS_SHOWN` — the same cap the sibling `already there`
+    list uses. An audit found these lists uncapped while their neighbour was
+    bounded: an entry with 9 open bullets printed 10 lines here and then quoted
+    several of them AGAIN below, on the highest-traffic writer surface in the
+    tool. The count in the sentence above is never truncated, so nothing is
+    hidden by capping the quotes — but the remainder is stated anyway, because a
+    list that silently stops looks like a complete one.
+    """
+    shown = list(bullets[:JOURNAL_BULLETS_SHOWN])
+    out = [f"{indent}  ? {b.first_line[:160]}" for b in shown]
+    rest = len(bullets) - len(shown)
+    if rest:
+        out.append(
+            f"{indent}  … {rest} more not quoted (display cap; the count above is "
+            f"complete, and `--json` carries every one)"
+        )
     return out
 
 
@@ -4103,6 +4153,21 @@ class OpenAction:
     declared: bool
     date: str | None
     first_line: str
+    near_miss: bool = False
+    """The bullet tried to declare a marker and missed the grammar.
+
+    A THIRD population, never folded into either other one: it is not an open
+    action and not a guess about one, it is a write that did not land.
+    """
+
+    unverifiable_closure: bool = False
+    """A `RESOLVED:` that names no sha, so its claim cannot be checked.
+
+    A FOURTH population. Not a problem — closing an action is the outcome this
+    whole design wants — but the sha is what separates "closed, and here is the
+    commit" from an assertion, and only a branch on `resolved_by` makes the field
+    mean anything.
+    """
 
 
 @dataclass(frozen=True)
@@ -4153,11 +4218,30 @@ class ValidationReport:
                 {"scope": m.scope, "file": m.filename, "reason": m.reason, "line": m.line}
                 for m in self.malformed
             ],
-            "open_action_count": len(self.open_actions),
+            # 🔴 TWO COUNTS, NEVER A SUM. `OpenAction.declared` exists precisely
+            # because these populations must not be added: `declared` is exact
+            # (a writer typed the marker) and `unmarked` is a two-phrasing FLOOR
+            # with unmeasured recall. An audit caught a single `open_action_count`
+            # here — the text renderer states the floor caveat in words, but JSON
+            # has nowhere to put a caveat, so a merged number is the only thing a
+            # machine consumer would ever see. `unmarked_is_a_floor` carries the
+            # disclaimer as DATA so it cannot be dropped by a reader skimming keys.
+            "declared_open_count": sum(1 for a in self.open_actions if a.declared),
+            "near_miss_marker_count": sum(1 for a in self.open_actions if a.near_miss),
+            "unverifiable_closure_count": sum(
+                1 for a in self.open_actions if a.unverifiable_closure
+            ),
+            "unmarked_action_count": sum(
+                1 for a in self.open_actions
+                if not a.declared and not a.near_miss and not a.unverifiable_closure
+            ),
+            "unmarked_is_a_floor": True,
             "open_actions": [
                 {
                     "file": a.filename,
                     "declared": a.declared,
+                    "near_miss": a.near_miss,
+                    "unverifiable_closure": a.unverifiable_closure,
                     "date": a.date,
                     "first_line": a.first_line,
                 }
@@ -4218,11 +4302,23 @@ def scan_open_actions(paths: Iterable[str | Path]) -> tuple[OpenAction, ...]:
         if not body:
             continue
         for b in parse_journal_bullets(body):
-            if b.is_open or b.unmarked_action:
+            if b.openness == OPENNESS_RESOLVED and not b.resolved_by:
+                out.append(
+                    OpenAction(
+                        filename=path.name,
+                        declared=False,
+                        unverifiable_closure=True,
+                        date=b.date,
+                        first_line=b.first_line,
+                    )
+                )
+                continue
+            if b.is_open or b.unmarked_action or b.near_miss_marker:
                 out.append(
                     OpenAction(
                         filename=path.name,
                         declared=b.is_open,
+                        near_miss=b.near_miss_marker,
                         date=b.date,
                         first_line=b.first_line,
                     )
@@ -4408,7 +4504,7 @@ def render_validation(report: ValidationReport) -> str:
 
 
 def _render_validation_open_actions(report: ValidationReport) -> list[str]:
-    """The advisory tail. Prints on EVERY path, including the clean one.
+    """The advisory tail. Prints on every path that CHECKED something.
 
     🔴 IT PRINTS ITS DENOMINATOR EVEN WHEN IT FINDS NOTHING. `claude/RULES.md`:
     a reassuring zero is indistinguishable from an instrument wired to nothing
@@ -4417,11 +4513,17 @@ def _render_validation_open_actions(report: ValidationReport) -> list[str]:
     """
     n_files = len(report.checked)
     declared = [a for a in report.open_actions if a.declared]
-    guessed = [a for a in report.open_actions if not a.declared]
+    near = [a for a in report.open_actions if a.near_miss]
+    unverifiable = [a for a in report.open_actions if a.unverifiable_closure]
+    guessed = [
+        a for a in report.open_actions
+        if not a.declared and not a.near_miss and not a.unverifiable_closure
+    ]
     out = [""]
     if not report.open_actions:
         out.append(
-            f"open actions: 0 declared across {n_files} entry file(s), and 0 unmarked "
+            f"open actions: 0 declared across {n_files} entry file(s), 0 attempted-but-"
+            f"unparsed, and 0 unmarked "
             f"bullets matched the two phrasings this tool can recognise. 🔴 The second "
             f"half of that is a FLOOR with unknown recall, not a clean bill of health — "
             f"an unfinished action phrased any other way is invisible here."
@@ -4435,12 +4537,29 @@ def _render_validation_open_actions(report: ValidationReport) -> list[str]:
         )
         for a in declared:
             out.append(f"    {a.filename}: {a.first_line[:150]}")
+    if near:
+        out.append(
+            f"  🔴 {len(near)} bullet(s) look like an ATTEMPTED marker that did not "
+            f"parse — they declare nothing and show no badge. Fix the line: the "
+            f"marker follows `YYYY-MM-DD: `, is upper-case, carries no emphasis or "
+            f"parenthetical, and ends in `:`."
+        )
+        for a in near:
+            out.append(f"    {a.filename}: {a.first_line[:150]}")
     if guessed:
         out.append(
             f"  ⚠ {len(guessed)} unmarked bullet(s) that READ like an open action. "
             f"AT LEAST this many — two measured phrasings, unknown recall."
         )
         for a in guessed:
+            out.append(f"    {a.filename}: {a.first_line[:150]}")
+    if unverifiable:
+        out.append(
+            f"  ⚠ {len(unverifiable)} `RESOLVED:` bullet(s) name no sha, so the "
+            f"closure cannot be checked. Not a defect — closing is the point — but "
+            f"`RESOLVED <sha>:` is what makes it verifiable rather than asserted."
+        )
+        for a in unverifiable:
             out.append(f"    {a.filename}: {a.first_line[:150]}")
     out.append(
         "  (Advisory. None of this changes the verdict above: an entry with unfinished "
