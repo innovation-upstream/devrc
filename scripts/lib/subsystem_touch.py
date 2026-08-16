@@ -2656,6 +2656,66 @@ class EntryJournal:
         """
         return max(self.dated) if self.dated else None
 
+    @property
+    def open_bullets(self) -> tuple[JournalBullet, ...]:
+        """Bullets DECLARED `OPEN:` and not since closed. Exact, not heuristic.
+
+        🔴 An empty tuple means "nothing is declared open", NOT "there is no open
+        work here" — the marker is opt-in and every bullet written before it
+        existed carries None. `unmarked_action_bullets` is the (narrow, floor)
+        net for those; anything phrased a third way is invisible to both, and
+        every renderer says so rather than printing a bare confident zero.
+        """
+        return tuple(b for b in self.bullets if b.openness_population == "open")
+
+    @property
+    def near_miss_bullets(self) -> tuple[JournalBullet, ...]:
+        """Bullets that TRIED to declare a marker and missed the grammar.
+
+        Reported separately from both other populations: this is neither an open
+        action nor a guess about one, it is a WRITE THAT DID NOT LAND. Treating
+        it as either would hide the only thing the writer can act on.
+
+        ⚠ Reverting this to the raw `b.near_miss_marker` is an EQUIVALENT mutant
+        (measured — it survives the battery), because `near_miss_marker` already
+        returns False whenever `openness` is set, so the two sets are identical.
+        Its SIBLING is not: reverting `unmarked_action_bullets` to the raw
+        predicate reintroduces the double-count and IS killed. Both go through
+        `openness_population` anyway, so the precedence has exactly one home.
+        """
+        return tuple(b for b in self.bullets if b.openness_population == "near-miss")
+
+    @property
+    def unmarked_action_bullets(self) -> tuple[JournalBullet, ...]:
+        """Bullets that LOOK like an unmarked open action. A FLOOR, never a list.
+
+        See `subsystem_resolver._UNMARKED_ACTION` for why this is two phrasings
+        and not twelve: the others measured either zero hits or false ones over
+        the live corpus, and a noisy advisory is one nobody reads.
+        """
+        return tuple(b for b in self.bullets if b.openness_population == "unmarked")
+
+    def oldest_open_days(self, today: str) -> int | None:
+        """Age in days of the OLDEST dated `OPEN:` bullet, or None.
+
+        The oldest rather than the newest: the question this answers is "how long
+        has something here been unverified", and the newest open action cannot
+        answer it. Undated open bullets are skipped, not guessed at — same rule as
+        `newest_date` — so this can be None while `open_bullets` is non-empty, and
+        the renderer prints the count either way.
+        """
+        from datetime import date
+
+        ages = []
+        for b in self.open_bullets:
+            if not b.date:
+                continue
+            try:
+                ages.append((date.fromisoformat(today) - date.fromisoformat(b.date)).days)
+            except ValueError:
+                return None
+        return max(ages) if ages else None
+
     def dated_on(self, day: str) -> int:
         """How many bullets already carry `day`. The repeat-run signal."""
         return sum(1 for d in self.dated if d == day)
@@ -3011,6 +3071,96 @@ def _render_recency(j: EntryJournal, today: str) -> str:
     )
 
 
+def _render_open_actions(j: EntryJournal, today: str, indent: str) -> list[str]:
+    """The RE-CHECK block: what this entry still claims is unfinished.
+
+    🔴 WHY THIS IS ADDRESSED TO THE WRITER AND NOT THE READER. Measured on
+    `datapacket-talos/forgejo`: the entry was written at 15:00:18 on 2026-07-24
+    proposing a one-line remedy, which landed at **15:02:21** —
+    two minutes and three seconds later, by the same effort. It then served that
+    remedy as outstanding for 22 days. Nobody was negligent; the writer simply had
+    no prompt to come back, because `/handoff` runs mid-effort and the store had no
+    way to represent "this is still open".
+
+    So the moment to re-check an open action is the NEXT write to the same entry,
+    which is exactly when this block prints. It asks for a verdict — close it, or
+    restate it — and refuses to imply anything about bullets that declared nothing.
+    """
+    out: list[str] = []
+    open_b = j.open_bullets
+    unmarked = j.unmarked_action_bullets
+    near = j.near_miss_bullets
+    if not open_b and not unmarked and not near:
+        return out
+    if open_b:
+        age = j.oldest_open_days(today)
+        if age is None:
+            aged = ", none of them dated, so their age is unknown"
+        elif age < 0:
+            # A bullet dated in the FUTURE. Rendering "-17 days" inside a 🔴
+            # advisory states a nonsense age as fact; the honest reading is that
+            # one of the two dates is wrong, and which one is not knowable here.
+            aged = (
+                f", but the oldest is dated {-age} day(s) in the FUTURE relative to "
+                f"{today} — one of those dates is wrong, so its age is not usable"
+            )
+        else:
+            aged = f", oldest unverified for {age} day{'' if age == 1 else 's'}"
+        out.append(
+            f"{indent}🔴 {len(open_b)} bullet{'' if len(open_b) == 1 else 's'} here "
+            f"still declare{'s' if len(open_b) == 1 else ''} `OPEN:`{aged}. RE-CHECK "
+            f"{'it' if len(open_b) == 1 else 'each'} against the repo BEFORE appending: "
+            f"if the work landed, rewrite the line as `RESOLVED <sha>:` in the same edit. "
+            f"An open action that has quietly been done is the failure this marker exists "
+            f"for — it reads exactly like one that has not."
+        )
+        out += _bullet_lines(open_b, indent)
+    if unmarked:
+        out.append(
+            f"{indent}⚠ {len(unmarked)} further bullet{'' if len(unmarked) == 1 else 's'} "
+            f"read{'s' if len(unmarked) == 1 else ''} like an open action but declare"
+            f"{'s' if len(unmarked) == 1 else ''} no marker. 🔴 AT LEAST this many — the "
+            f"detector matches two phrasings measured over the live corpus and has UNKNOWN "
+            f"recall, so this is a floor and never a count of what exists. If one is still "
+            f"open, mark it `OPEN:`; if it landed, `RESOLVED <sha>:`."
+        )
+        out += _bullet_lines(unmarked, indent)
+    if near:
+        out.append(
+            f"{indent}🔴 {len(near)} bullet{'' if len(near) == 1 else 's'} here "
+            f"look{'s' if len(near) == 1 else ''} like an attempted `OPEN:`/"
+            f"`RESOLVED <sha>:` marker that DID NOT PARSE, so it declares nothing "
+            f"and no badge will show. The grammar is strict on purpose — inventing "
+            f"a marker is worse than missing one — so fix the LINE: the marker goes "
+            f"immediately after `YYYY-MM-DD: `, is upper-case, carries no emphasis "
+            f"or parenthetical, and ends in `:`."
+        )
+        out += _bullet_lines(near, indent)
+    return out
+
+
+def _bullet_lines(bullets: Sequence[JournalBullet], indent: str) -> list[str]:
+    """Quote a bounded number of bullets, and SAY how many were not quoted.
+
+    Capped at `JOURNAL_BULLETS_SHOWN` — the same cap the sibling `already there`
+    list uses. An audit found these lists uncapped while their neighbour was
+    bounded: an entry with 9 open bullets printed 10 lines here and then quoted
+    several of them AGAIN below, on the highest-traffic writer surface in the
+    tool. The count in the sentence above is never truncated, so nothing is
+    hidden by capping the quotes — but the remainder is stated anyway, because a
+    list that silently stops looks like a complete one.
+    """
+    shown = list(bullets[:JOURNAL_BULLETS_SHOWN])
+    out = [f"{indent}  ? {b.first_line[:160]}" for b in shown]
+    rest = len(bullets) - len(shown)
+    if rest:
+        out.append(
+            f"{indent}  … {rest} more not quoted (display cap; the count above is "
+            f"complete, and `--json` carries every one)"
+        )
+    return out
+
+
 def _render_journal(j: EntryJournal, today: str, indent: str) -> list[str]:
     """The per-entry `already there` block: recency, the repeat warning, bullets.
 
@@ -3032,6 +3182,7 @@ def _render_journal(j: EntryJournal, today: str, indent: str) -> list[str]:
             f"only if you can say what it adds that the line{'' if repeats == 1 else 's'} "
             f"below do{'es' if repeats == 1 else ''} not."
         )
+    out += _render_open_actions(j, today, indent)
     if not j.bullets:
         return out
     shown = j.bullets[:JOURNAL_BULLETS_SHOWN]
@@ -3995,6 +4146,37 @@ def render_census(c: Census, now: float | None = None) -> str:
 
 
 @dataclass(frozen=True)
+class OpenAction:
+    """One bullet `--validate` is reporting as unfinished business.
+
+    `declared` separates the two populations, which must never be added together
+    into one number: a `OPEN:` bullet is a claim the WRITER made and is exact,
+    while an unmarked one is this tool's guess from two measured phrasings and has
+    unknown recall. Merging them would let a floor masquerade as a count.
+    """
+
+    filename: str
+    declared: bool
+    date: str | None
+    first_line: str
+    near_miss: bool = False
+    """The bullet tried to declare a marker and missed the grammar.
+
+    A THIRD population, never folded into either other one: it is not an open
+    action and not a guess about one, it is a write that did not land.
+    """
+
+    unverifiable_closure: bool = False
+    """A `RESOLVED:` that names no sha, so its claim cannot be checked.
+
+    A FOURTH population. Not a problem — closing an action is the outcome this
+    whole design wants — but the sha is what separates "closed, and here is the
+    commit" from an assertion, and only a branch on `resolved_by` makes the field
+    mean anything.
+    """
+
+
+@dataclass(frozen=True)
 class ValidationReport:
     """What `--validate` checked, and what it found. Counts on EVERY path.
 
@@ -4015,6 +4197,16 @@ class ValidationReport:
     malformed: tuple[MalformedEntry, ...] = ()
     policy_path: str | None = None
     policy_basis: str = POLICY_NONE
+    open_actions: tuple[OpenAction, ...] = ()
+    """Unfinished business found in the files that PARSED. Advisory only.
+
+    🔴 IT DOES NOT AFFECT `clean`, AND MUST NOT. `--validate` answers one question
+    — "would the loader accept this file?" — and an entry with an open action is
+    perfectly well-formed. Folding this into the verdict would fail 2 of the 40
+    live entries for a reason that is not a schema violation, and a gate that goes
+    red for something the author cannot fix by fixing the file is the
+    permanently-red gate `claude/RULES.md` forbids.
+    """
 
     @property
     def clean(self) -> bool:
@@ -4031,6 +4223,35 @@ class ValidationReport:
             "malformed": [
                 {"scope": m.scope, "file": m.filename, "reason": m.reason, "line": m.line}
                 for m in self.malformed
+            ],
+            # 🔴 TWO COUNTS, NEVER A SUM. `OpenAction.declared` exists precisely
+            # because these populations must not be added: `declared` is exact
+            # (a writer typed the marker) and `unmarked` is a two-phrasing FLOOR
+            # with unmeasured recall. An audit caught a single `open_action_count`
+            # here — the text renderer states the floor caveat in words, but JSON
+            # has nowhere to put a caveat, so a merged number is the only thing a
+            # machine consumer would ever see. `unmarked_is_a_floor` carries the
+            # disclaimer as DATA so it cannot be dropped by a reader skimming keys.
+            "declared_open_count": sum(1 for a in self.open_actions if a.declared),
+            "near_miss_marker_count": sum(1 for a in self.open_actions if a.near_miss),
+            "unverifiable_closure_count": sum(
+                1 for a in self.open_actions if a.unverifiable_closure
+            ),
+            "unmarked_action_count": sum(
+                1 for a in self.open_actions
+                if not a.declared and not a.near_miss and not a.unverifiable_closure
+            ),
+            "unmarked_is_a_floor": True,
+            "open_actions": [
+                {
+                    "file": a.filename,
+                    "declared": a.declared,
+                    "near_miss": a.near_miss,
+                    "unverifiable_closure": a.unverifiable_closure,
+                    "date": a.date,
+                    "first_line": a.first_line,
+                }
+                for a in self.open_actions
             ],
             "policy_file": self.policy_path,
             "policy_basis": self.policy_basis,
@@ -4065,6 +4286,46 @@ def validate_entry_file(path: str | Path) -> MalformedEntry | None:
             scope=normalize_ref(p.parent.name), filename=p.name, reason=exc.why
         )
     return None
+
+
+def scan_open_actions(paths: Iterable[str | Path]) -> tuple[OpenAction, ...]:
+    """Read each entry file's journal and collect its unfinished business.
+
+    READ-ONLY, and deliberately tolerant: a file that cannot be read or has no
+    `## Nuance / work-history` section contributes nothing rather than raising.
+    This runs BESIDE the parse check, never in front of it — a malformed file's
+    own rejection is the finding that matters, and an advisory computed from its
+    half-parsed body would bury it.
+    """
+    out: list[OpenAction] = []
+    for p in paths:
+        path = Path(p)
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        body = extract_sections(text, (NUANCE_HEADING,)).get(NUANCE_HEADING)
+        if not body:
+            continue
+        for b in parse_journal_bullets(body):
+            # ONE branch, on the resolver's single precedence source. Re-deriving
+            # membership from the individual predicates here is what let a bullet
+            # be both a near-miss and an unmarked action on the writer surface
+            # while being one thing in JSON.
+            pop = b.openness_population
+            if pop in ("none", "resolved"):
+                continue
+            out.append(
+                OpenAction(
+                    filename=path.name,
+                    declared=pop == "open",
+                    near_miss=pop == "near-miss",
+                    unverifiable_closure=pop == "unverifiable",
+                    date=b.date,
+                    first_line=b.first_line,
+                )
+            )
+    return tuple(out)
 
 
 def validate_scope(store_root: str | Path, scope: str) -> tuple[tuple[str, ...], tuple[MalformedEntry, ...]]:
@@ -4227,7 +4488,7 @@ def render_validation(report: ValidationReport) -> str:
             f"OK — {len(report.checked)} of {len(report.checked)} entry file(s) parse, "
             f"0 malformed. They will load, be listed, and be reachable by `--ref`."
         )
-        return "\n".join(out)
+        return "\n".join(out + _render_validation_open_actions(report))
     n = len(report.malformed)
     out.append(
         f"🔴 MALFORMED — {n} of {len(report.checked)} entry file(s) could NOT be indexed. "
@@ -4241,7 +4502,73 @@ def render_validation(report: ValidationReport) -> str:
         "across two physical lines — an `aliases: [...]` list in particular must be on ONE "
         "line, or the parser reads an unterminated bare string.)"
     )
-    return "\n".join(out)
+    return "\n".join(out + _render_validation_open_actions(report))
+
+
+def _render_validation_open_actions(report: ValidationReport) -> list[str]:
+    """The advisory tail. Prints on every path that CHECKED something.
+
+    🔴 IT PRINTS ITS DENOMINATOR EVEN WHEN IT FINDS NOTHING. `claude/RULES.md`:
+    a reassuring zero is indistinguishable from an instrument wired to nothing
+    unless it carries the size of what it looked at. "0 open actions across 29
+    entry file(s)" is a reading; a blank space is not.
+    """
+    n_files = len(report.checked)
+    declared = [a for a in report.open_actions if a.declared]
+    near = [a for a in report.open_actions if a.near_miss]
+    unverifiable = [a for a in report.open_actions if a.unverifiable_closure]
+    guessed = [
+        a for a in report.open_actions
+        if not a.declared and not a.near_miss and not a.unverifiable_closure
+    ]
+    out = [""]
+    if not report.open_actions:
+        out.append(
+            f"open actions: 0 declared across {n_files} entry file(s), 0 attempted-but-"
+            f"unparsed, and 0 unmarked "
+            f"bullets matched the two phrasings this tool can recognise. 🔴 The second "
+            f"half of that is a FLOOR with unknown recall, not a clean bill of health — "
+            f"an unfinished action phrased any other way is invisible here."
+        )
+        return out
+    out.append(f"open actions across {n_files} entry file(s):")
+    if declared:
+        out.append(
+            f"  🔴 {len(declared)} declared `OPEN:` — exact, the writer said so. "
+            f"Re-check against the repo; if it landed, rewrite as `RESOLVED <sha>:`."
+        )
+        for a in declared:
+            out.append(f"    {a.filename}: {a.first_line[:150]}")
+    if near:
+        out.append(
+            f"  🔴 {len(near)} bullet(s) look like an ATTEMPTED marker that did not "
+            f"parse — they declare nothing and show no badge. Fix the line: the "
+            f"marker follows `YYYY-MM-DD: `, is upper-case, carries no emphasis or "
+            f"parenthetical, and ends in `:`."
+        )
+        for a in near:
+            out.append(f"    {a.filename}: {a.first_line[:150]}")
+    if guessed:
+        out.append(
+            f"  ⚠ {len(guessed)} unmarked bullet(s) that READ like an open action. "
+            f"AT LEAST this many — two measured phrasings, unknown recall."
+        )
+        for a in guessed:
+            out.append(f"    {a.filename}: {a.first_line[:150]}")
+    if unverifiable:
+        out.append(
+            f"  ⚠ {len(unverifiable)} `RESOLVED:` bullet(s) name no sha, so the "
+            f"closure cannot be checked. Not a defect — closing is the point — but "
+            f"`RESOLVED <sha>:` is what makes it verifiable rather than asserted."
+        )
+        for a in unverifiable:
+            out.append(f"    {a.filename}: {a.first_line[:150]}")
+    out.append(
+        "  (Advisory. None of this changes the verdict above: an entry with unfinished "
+        "business is still well-formed, and failing it here would be a red gate nobody "
+        "could turn green by fixing the file.)"
+    )
+    return out
 
 
 # --- CLI -----------------------------------------------------------------------
@@ -4441,12 +4768,16 @@ def main(argv: Sequence[str] | None = None, *, today: str | None = None) -> int:
                 checked, malformed = validate_scope(args.store, scope)
                 policy_scope: str | None = scope
                 target = f"`{normalize_ref(scope)}/`"
+                scanned = [
+                    Path(args.store) / normalize_ref(scope) / name for name in checked
+                ]
             else:
                 bad = validate_entry_file(args.validate)
                 checked = (Path(args.validate).name,)
                 malformed = (bad,) if bad is not None else ()
                 policy_scope = Path(args.validate).parent.name
                 target = str(args.validate)
+                scanned = [Path(args.validate)]
             path, basis = governing_policy(args.store, policy_scope or "")
             report = ValidationReport(
                 store_root=str(args.store),
@@ -4456,6 +4787,7 @@ def main(argv: Sequence[str] | None = None, *, today: str | None = None) -> int:
                 malformed=tuple(malformed),
                 policy_path=path,
                 policy_basis=basis,
+                open_actions=scan_open_actions(scanned),
             )
             print(
                 json.dumps(report.to_json(), indent=2)

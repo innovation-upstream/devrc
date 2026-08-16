@@ -559,8 +559,12 @@ def caveat_text(scope: str) -> str:
         f"fixed. This window CANNOT see: live state of any kind, any repo whose scope "
         f"has no directory in this store, and any work neither `/analyze-service` nor "
         f"`/handoff` ever recorded. Treat every line as a POINTER to verify, never as "
-        f"a current reading. Sensitivity is marked per entry; absent means "
-        f"`{SENSITIVITY_FAIL_SAFE}` — never copy an entry's content into a public repo."
+        f"a current reading. `🔴 N OPEN` on an index row means N bullets DECLARE "
+        f"unfinished business — re-check each against the repo, because a remedy that "
+        f"has since landed reads exactly like one that has not; the absence of that "
+        f"marker means nothing was declared, NOT that nothing is open. Sensitivity is "
+        f"marked per entry; absent means `{SENSITIVITY_FAIL_SAFE}` — never copy an "
+        f"entry's content into a public repo."
     )
 
 
@@ -748,6 +752,21 @@ class RecalledEntry:
     count would have been cheaper and would have measured markdown, not history.
     """
 
+    open_count: int = 0
+    """Bullets DECLARING `OPEN:` — unfinished business the writer marked.
+
+    On the index line this is the one field that changes what a reader should DO,
+    which is why it earns a place beside the size signal: an entry carrying an
+    open action may be describing a remedy that has since landed, and reading it
+    as current is the `forgejo` failure (proposed a fix at 15:00:18 that shipped
+    at 15:02:21, served as outstanding for 22 days).
+
+    🔴 A ZERO HERE IS NOT "NOTHING IS OPEN". The marker is opt-in and every bullet
+    written before it existed carries none, so zero means "nothing was declared".
+    The digest's caveat says so; this docstring exists so a future caller cannot
+    quietly promote the field to a completeness claim.
+    """
+
     mtime: float = 0.0
     """The entry file's mtime. Used ONLY as the featured-entry fallback, and
     deliberately NOT rendered or emitted in JSON — `render_text` must produce
@@ -791,13 +810,15 @@ def read_entry(store_root: str | Path, entry: SubsystemEntry) -> RecalledEntry:
         mtime = path.stat().st_mtime
     except OSError:  # pragma: no cover - the read above already succeeded
         mtime = 0.0
+    bullets = parse_journal_bullets(sections.get(NUANCE_HEADING, ""))
     return RecalledEntry(
         ref=entry.ref,
         filename=entry.filename,
         sensitivity=fold_sensitivity(fm.get("sensitivity")),
         declared_sensitivity=discarded_sensitivity(fm.get("sensitivity")),
         sections=sections,
-        bullet_count=len(parse_journal_bullets(sections.get(NUANCE_HEADING, ""))),
+        bullet_count=len(bullets),
+        open_count=sum(1 for b in bullets if b.is_open),
         mtime=mtime,
         missing_sections=tuple(h for h in SURFACED_HEADINGS if h not in sections),
     )
@@ -1384,12 +1405,22 @@ def sensitivity_label(effective: str, declared: str | None) -> str:
 
 
 def listing_line(entry: RecalledEntry, width: int) -> str:
-    """ONE index line: `  <ref>   N nuance  <sensitivity>`. ~60 B.
+    """ONE index line: `  <ref>   N nuance  <sensitivity>[  🔴 N OPEN]`. ~60 B.
 
-    Three fields and no fourth. The ref is what `--ref` takes, the count is the
-    size signal that says whether a `--ref` is worth spending, and the
-    sensitivity has to travel WITH the entry it describes — a sensitivity stated
-    once at the top of a block is a sensitivity that gets copied away from.
+    The ref is what `--ref` takes, the count is the size signal that says whether
+    a `--ref` is worth spending, and the sensitivity has to travel WITH the entry
+    it describes — a sensitivity stated once at the top of a block is a
+    sensitivity that gets copied away from.
+
+    🔴 THIS SAID "THREE FIELDS AND NO FOURTH", AND THE FOURTH IS ADDED
+    DELIBERATELY. The bar that wording set is the right one, so it is restated
+    rather than dropped: a field earns this line only if it changes what the
+    reader DOES, because the index is the one thing printed for every entry and
+    the cost is paid on every read. `open` clears that bar where size does not —
+    an entry with unfinished business may be describing a remedy that has since
+    landed, and the reader cannot tell from the body. It is also **conditional**:
+    entries with nothing declared open render byte-identical to before, so the
+    common case pays nothing. Nothing else has cleared this bar; keep it that way.
 
     ⚠ THE COUNT IS `## Nuance / work-history` BULLETS ONLY, and the word says so
     rather than leaving it to be assumed. It was `N bullets`, which reads as
@@ -1400,7 +1431,10 @@ def listing_line(entry: RecalledEntry, width: int) -> str:
     work-history is what the store's prune-on-resolve discipline is denominated
     in, so it is the number that predicts whether a `--ref` is worth spending.
     """
-    return f"  {entry.ref.ljust(width)}  {entry.bullet_count:>3} nuance   {sensitivity_label(entry.sensitivity, entry.declared_sensitivity)}"
+    base = f"  {entry.ref.ljust(width)}  {entry.bullet_count:>3} nuance   {sensitivity_label(entry.sensitivity, entry.declared_sensitivity)}"
+    if not entry.open_count:
+        return base
+    return f"{base}   🔴 {entry.open_count} OPEN"
 
 
 def _render_listing(report: RecallReport) -> list[str]:

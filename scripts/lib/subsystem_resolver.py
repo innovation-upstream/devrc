@@ -103,6 +103,8 @@ __all__ = [
     "ON_MALFORMED",
     "ON_MALFORMED_RAISE",
     "ON_MALFORMED_COLLECT",
+    "OPENNESS_OPEN",
+    "OPENNESS_RESOLVED",
     "JournalBullet",
     "extract_sections",
     "parse_journal_bullets",
@@ -1006,6 +1008,163 @@ _JOURNAL_BULLET = re.compile(r"^[-*][ \t]+")
 # 44% of the real corpus on the floor and call the result a complete read.
 _JOURNAL_DATE = re.compile(r"^[-*][ \t]+(\d{4}-\d{2}-\d{2})(?=[:,)\]\s]|$)")
 
+# `- [YYYY-MM-DD: ]OPEN: …` / `- [YYYY-MM-DD: ]RESOLVED <sha>: …` — the openness
+# marker, and the reason it is a PREFIX rather than a phrase.
+#
+# 🔴 WHY THIS IS SCHEMA AND NOT A PROSE DETECTOR. The motivating entry
+# (`datapacket-talos/forgejo`) carries a bullet proposing a one-line config change
+# as future work. That change landed at 15:02:21 on 2026-07-24 (the sha is in the
+# client repo and is deliberately not reproduced here);
+# the entry was written at
+# 15:00:18 — stale 2m03s after it was written, and still being served as an open
+# action 22 days later. Nothing could have noticed, because "this remedy is not
+# applied yet" was a claim made only in prose.
+#
+# The obvious repair is to grep the prose for remedy words. Measured over the live
+# corpus (196 nuance bullets, 2026-08-15) that finds TWO bullets — and
+# `claude/RULES.md` names the failure it would be: "a guard on WORDS is walkable by
+# REWORDING". A writer who says "the endpoint is already correct" instead of
+# "FIX:" walks past it, and the walk is silent. A prefix a writer must TYPE cannot
+# be walked by rewording the sentence after it; that is the whole reason the
+# marker sits before the prose rather than inside it.
+#
+# `RESOLVED` takes the sha that closed it so the claim is checkable — `git cat-file
+# -e <sha>` answers it — rather than being a second unverifiable assertion.
+_JOURNAL_OPENNESS = re.compile(
+    r"^[-*][ \t]+"
+    r"(?:\d{4}-\d{2}-\d{2}:[ \t]+)?"           # the optional leading date
+    r"(OPEN|RESOLVED)"
+    r"(?:[ \t]+([0-9a-fA-F]{7,40}))?"          # RESOLVED carries the closing sha
+    r":"                                        # exact terminator, no fuzz
+)
+
+OPENNESS_OPEN = "open"
+OPENNESS_RESOLVED = "resolved"
+
+# The retrospective advisory — DELIBERATELY NARROW, and a FLOOR, not a list.
+#
+# These two shapes are the only ones that scored 2 hits and 0 false positives over
+# the 196-bullet corpus. The ones rejected, and why, so nobody re-adds them:
+#   `TODO`        1 hit, FALSE — an entry describing an UPSTREAM project's TODO as
+#                 a fact about that project, not a remedy this operator owes.
+#   `not yet`     3 hits, 2 FALSE — one describes a mechanism (deps not yet on
+#                 npm), one is an explicit WONTFIX that says "don't re-litigate".
+#   `should be` / `next step` / `pending` / `deferred` / `proposed fix` — 0 hits
+#                 each. Adding a marker with no corpus evidence buys recall that
+#                 cannot be demonstrated and precision that cannot be defended.
+#
+# 🔴 RECALL IS UNKNOWN AND MUST BE REPORTED AS SUCH. This finds bullets that
+# HAPPEN to be phrased the two ways already seen. It is an advisory that says
+# "at least these"; it is never evidence that an entry has no open actions. The
+# schema marker above is the mechanism; this is a net under it for entries written
+# before the marker existed.
+_UNMARKED_ACTION = re.compile(r"\bFIX\s*[(:]|\bnot (yet )?addressed\b", re.I)
+
+# A bullet that MEANT to carry a marker and just missed the grammar.
+#
+# 🔴 THE SILENT FAILURE IS THE SAME CLASS AS THE ORIGINAL BUG, which is why this
+# exists at all. Measured shapes that parse as NO MARKER today:
+#
+#   - 2026-08-15 OPEN: …                 (date not followed by `:`)
+#   - 2026-08-15: RESOLVED abc1234 (repo): …   (parenthetical before the colon)
+#   - 2026-08-15: **OPEN:** …            (marker wrapped in emphasis)
+#   - 2026-08-15: OPEN : …               (space before the colon)
+#   - 2026-08-15: RESOLVED PR#505: …     (a non-sha reference)
+#
+# The first matters most: `_JOURNAL_DATE` accepts a date followed by any of
+# `[:,)\]\s]` while `_JOURNAL_OPENNESS` requires `date:` + whitespace, and **7 of
+# 147 dated bullets in the live corpus (4.8%) already use a date form the
+# openness regex cannot parse**. So a writer follows the skill, closes an action
+# as `RESOLVED <sha> (<repo>):`, the `🔴 N OPEN` badge disappears — which LOOKS
+# like success — and the claim is discarded. Symmetrically a typo'd `OPEN`
+# reverts the entry to "nothing declared", reintroducing the exact 22-day failure
+# the marker exists to prevent, through a typo, silently.
+#
+# Deliberately NOT fixed by widening `_JOURNAL_OPENNESS`. A lenient marker
+# regex starts matching prose, and inventing a marker is worse than missing one:
+# a false `RESOLVED` closes an action nobody closed. So the strict grammar stands
+# and the near-misses are REPORTED instead, which is the fail-loud half.
+#
+# ⚠ ONLY THE BARE `^` IS REDUNDANT. The `[-*][ \t]+` after it is LOAD-BEARING in
+# BOTH patterns, and two earlier versions of this comment said the opposite.
+#
+# Measured against the full `test_subsystem_touch.py` (baseline 712 passed):
+#     delete `^[-*][ \t]+` from `_JOURNAL_OPENNESS`  → 22 FAILURES
+#     delete `^[-*][ \t]+` from `_NEAR_MISS_MARKER`  → 19 FAILURES
+#     delete only the `^` from either                → 712 passed (equivalent)
+#
+# The `^` is redundant because both are consumed with `re.match`, which anchors at
+# position 0, over patterns with no `re.MULTILINE`. The bullet marker is not: the
+# optional date and punctuation prefixes mean that without it these match happily
+# mid-string. A maintainer acting on the old wording — "do not count it as a
+# guard" — would have deleted the whole prefix and broken 22 tests.
+#
+# The `^` stays regardless: it costs nothing, and it is what keeps the anchoring
+# true if a consumer ever switches to `search`.
+_NEAR_MISS_MARKER = re.compile(
+    r"^[-*][ \t]+"
+    r"(?:\d{4}-\d{2}-\d{2}[^A-Za-z]{0,3})?"    # a date in any of its corpus forms
+    r"[^A-Za-z0-9]{0,4}"                        # `**`, quotes, stray punctuation
+    r"(?:"
+    # (a) SHOUTED — all-caps marker, no terminator needed. Prose does not shout.
+    r"(?:OPEN|RESOLVED)(?![A-Za-z0-9_])"
+    r"|"
+    # (b) sentence-cased — then a `:` IS required, optionally after a sha /
+    #     PR reference / parenthetical / bracketed ref.
+    r"(?i:OPEN|RESOLVED)"
+    r"(?:[ \t]*(?:[0-9a-fA-F]{7,40}(?![0-9a-fA-F])|PR#\d+|#\d+"
+    r"|\([^)]{1,30}\)|\[[^\]]{1,30}\]))*"
+    r"[^A-Za-z0-9\n]{0,4}:"
+    r")",
+)
+# 🔴 TWO BRANCHES, BECAUSE THREE ROUNDS PROVED NEITHER ALONE IS ENOUGH — and the
+# matrix that says so is COMMITTED at `scripts/tests/fixtures/near_miss_shapes.json`
+# rather than living in whoever's scratchpad wrote the last version. Each previous
+# pattern was justified by a private matrix, and round 4 built a different one and
+# reached the opposite verdict; a matrix nobody can re-run is an opinion.
+#
+# Measured over that fixture (16 attempted shapes, 10 prose shapes) plus the live
+# 196-bullet corpus:
+#
+#     re.I, no terminator    (round 1)    16/16 found   6 prose FP   0 corpus
+#     no re.I, no terminator (round 2)     ?/16 found   0 prose FP   0 corpus
+#     terminator + re.I      (round 3)     9/16 found   0 prose FP   0 corpus
+#     this union                          16/16 found   0 prose FP   0 corpus
+#
+# Round 3's terminator requirement was the subtler failure: it demanded the exact
+# character whose OMISSION is the likeliest way to miss the grammar, so
+# `- OPEN the retry budget is not addressed.` went silent — the failure this
+# detector exists to prevent, reintroduced by the fix for the previous one.
+#
+# (a) carries no terminator because an all-caps `OPEN`/`RESOLVED` opening a bullet
+# is a marker attempt in every sample examined.
+#
+# 🔴 THE GUARD IS `(?![A-Za-z0-9_])`, NOT `(?![a-z])`, and the difference is a
+# whole class of false positive. `(?![a-z])` blocks only a LOWERCASE continuation,
+# so it stopped `Opening` and let through every all-caps identifier a real bullet
+# quotes: `OPENSSL_CONF`, `OPEN_MAX`, `RESOLVED_ADDR`, `OPENTELEMETRY`, `OPENED`.
+# Each produced a 🔴 "attempted marker that DID NOT PARSE — fix the LINE" advisory
+# about a correct sentence, which is how a loud path gets ignored.
+#
+# ⚠ AND THE FIXTURE COULD NOT SEE IT: the `prose` arm shipped with this branch held
+# ZERO all-caps shapes, so the matrix introduced alongside the branch was
+# structurally blind to the class the branch introduced. All-caps prose is pinned
+# in the fixture now, and a test asserts the arm can still express it — a fixture
+# that cannot express the failure mode is not covering it, however green it is.
+# (b) needs the terminator because sentence case IS ordinary English — "Open
+# questions remain" must not fire, while "Open:" must.
+#
+# 🔴 THE `(?![0-9a-fA-F])` ON THE HEX ATOM IS A ReDoS FIX, NOT STYLE. `{7,40}`
+# inside a `*` loop is exponentially ambiguous when the trailing `:` never
+# arrives — which is branch (b) only, since (a) matches before the loop is
+# reached. Measured on a SENTENCE-CASED bullet quoting long shas without a colon:
+# 48 hex 0.0007 s, 64 hex 0.028 s, three 40-char shas did not return in 30 s,
+# hanging `scan_open_actions` and therefore `/handoff` and `--validate` with no
+# output. An all-caps bullet with the identical payload is unaffected, which is
+# exactly why the regression test for this must be sentence-cased.
+# The lookahead makes the atom non-splittable and drops the pathological case to
+# ~0 s with zero behavioural change across the whole fixture.
+
 
 def _is_fence(line: str) -> bool:
     s = line.lstrip()
@@ -1082,6 +1241,38 @@ class JournalBullet:
     """The ISO date the bullet is dated with, or None. ~44% of the real corpus
     carries no date; `None` is an ordinary reading, not a parse failure."""
 
+    openness: str | None = None
+    """`'open'` | `'resolved'` | None — the bullet's DECLARED openness marker.
+
+    None is by far the common reading — **195 of 196** bullets in the live corpus
+    on 2026-08-15 — and means only that nothing was declared. 🔴 It does NOT mean
+    "this bullet proposes no work": an unmarked bullet that proposes a remedy is
+    exactly the `forgejo` failure, and `unmarked_action` is the (narrow,
+    floor-only) net for that case.
+
+    ⚠ The 196th is why this reads 195 and not 196. A past session had ALREADY
+    written `- OPEN: rotate …` by hand, with no tooling asking it to and no
+    convention documented — so this schema is a formalisation of a shape the
+    corpus invented on its own, not one imposed on it. An earlier revision of
+    this docstring claimed all 196 were unmarked; that was written before the
+    corpus was grepped for markers, and the grep is what corrected it.
+    """
+
+    resolved_by: str | None = None
+    """The sha a `RESOLVED <sha>:` bullet names as having closed it, or None.
+
+    Carried so the claim is CHECKABLE — a reader can run `git cat-file -e` on it.
+    A `RESOLVED` with no sha parses fine and leaves this None: the marker is still
+    worth having, it just cannot be verified.
+
+    🔴 BRANCHED ON, not merely stored. An audit found this field read by nothing
+    outside the tests while its docstring claimed "the renderer says which it
+    got" — a field in a DTO is not a guard (`claude/RULES.md`), and the design's
+    headline rationale ("the sha makes the claim checkable") was unimplemented.
+    `--validate` now reports every sha-less `RESOLVED` as an UNVERIFIABLE closure,
+    which is the branch that makes the field load-bearing.
+    """
+
     @property
     def first_line(self) -> str:
         return self.lines[0] if self.lines else ""
@@ -1089,6 +1280,86 @@ class JournalBullet:
     @property
     def text(self) -> str:
         return "\n".join(self.lines)
+
+    @property
+    def is_open(self) -> bool:
+        return self.openness == OPENNESS_OPEN
+
+    @property
+    def unmarked_action(self) -> bool:
+        """Does this bullet LOOK like an unmarked open action? A FLOOR, never a list.
+
+        True only for the two phrasings measured to occur with no false positives
+        over the live corpus (see `_UNMARKED_ACTION`). An unmarked bullet phrased
+        any other way returns False, and that False is not evidence of anything —
+        which is why every renderer of this prints it as "at least N", never as a
+        count of what exists.
+
+        Suppressed once the bullet declares openness: a bullet that already says
+        `OPEN:` is not *unmarked*, and one that says `RESOLVED:` has been closed —
+        re-flagging either would train the reader to ignore the advisory.
+        """
+        if self.openness is not None:
+            return False
+        return bool(_UNMARKED_ACTION.search(self.text))
+
+    @property
+    def openness_population(self) -> str:
+        """WHICH of the six populations this bullet belongs to. Exactly one.
+
+        🔴 THE SINGLE SOURCE OF THE PRECEDENCE ORDER, and the reason it exists.
+        A delta re-audit found one bullet counted TWICE in the writer-facing
+        block — `- Open items: the retry budget is not yet addressed.` is both a
+        near-miss and an unmarked action, so it rendered under both headings with
+        its own line quoted under each, while `--validate` classified it once.
+        Two surfaces disagreed about the same input because each decided
+        membership for itself (`claude/RULES.md` → "One rule, one place: a
+        predicate duplicated across call sites regenerates the same bug at every
+        site"). Every consumer now branches on THIS.
+
+        Precedence, most-certain first — an earlier case wins outright:
+
+          `open`          the writer declared `OPEN:`. Exact.
+          `unverifiable`  a `RESOLVED:` naming no sha; closed but unprovable.
+          `resolved`      a `RESOLVED <sha>:`. Nothing to report.
+          `near-miss`     no marker parsed, but the line looks like an attempt.
+                          Beats `unmarked` because "your write did not land" is
+                          actionable and specific, where "this reads like an open
+                          action" is a guess about the same line.
+          `unmarked`      no marker, and the prose matches the narrow floor.
+          `none`          everything else — the overwhelming majority.
+
+        ⚠ ONLY `near-miss` > `unmarked` IS OBSERVABLE, and the docstring says so
+        rather than implying all five levels are load-bearing. `near_miss_marker`
+        and `unmarked_action` both self-suppress when `openness` is set, so
+        reordering `open`/`resolved`/`unverifiable` against them are EQUIVALENT
+        mutants that no test can kill (measured — they survive the battery). The
+        order is still written most-certain-first because that is what makes it
+        readable; just do not count those levels as guards.
+        """
+        if self.openness == OPENNESS_OPEN:
+            return "open"
+        if self.openness == OPENNESS_RESOLVED:
+            return "resolved" if self.resolved_by else "unverifiable"
+        if self.near_miss_marker:
+            return "near-miss"
+        if self.unmarked_action:
+            return "unmarked"
+        return "none"
+
+    @property
+    def near_miss_marker(self) -> bool:
+        """Did this bullet TRY to carry a marker and miss the grammar?
+
+        The fail-loud half of a deliberately strict `_JOURNAL_OPENNESS`. True only
+        when no marker parsed AND the first line opens with something that reads
+        like an attempt — so a writer whose `RESOLVED <sha> (<repo>):` silently
+        did nothing is told, instead of seeing the badge vanish and reading that
+        as success.
+        """
+        if self.openness is not None:
+            return False
+        return bool(_NEAR_MISS_MARKER.match(self.first_line))
 
 
 def parse_journal_bullets(body: str) -> tuple[JournalBullet, ...]:
@@ -1133,8 +1404,44 @@ def parse_journal_bullets(body: str) -> tuple[JournalBullet, ...]:
     for group in bullets:
         while group and not group[-1].strip():
             group.pop()
-        out.append(JournalBullet(lines=tuple(group), date=_bullet_date(group[0])))
+        openness, resolved_by = _bullet_openness(group[0])
+        out.append(
+            JournalBullet(
+                lines=tuple(group),
+                date=_bullet_date(group[0]),
+                openness=openness,
+                resolved_by=resolved_by,
+            )
+        )
     return tuple(out)
+
+
+def _bullet_openness(first_line: str) -> tuple[str | None, str | None]:
+    """`(openness, resolved_by)` for one bullet's first line.
+
+    Takes the first line only, but 🔴 THAT IS NOT WHAT ENFORCES IT — the guard is
+    `re.match`, which anchors at position 0, over a pattern with no `re.MULTILINE`.
+    A marker on a continuation line is therefore unreachable whether this is passed
+    one line or the whole joined bullet.
+
+    Stated because a mutation battery proved it: replacing `group[0]` with the
+    joined bullet text is an EQUIVALENT mutant and survives the suite, and an
+    earlier version of this docstring claimed the argument was the protection.
+    Two mechanisms reaching one outcome cannot be told apart by any test
+    (`claude/RULES.md`), so the honest form is to name the one that actually holds
+    and keep the narrower argument as defence-in-depth — if the pattern ever gains
+    `re.MULTILINE`, passing one line is what stops markers being invented from
+    wrapped prose, and that is a real hazard rather than a hypothetical one.
+
+    The sha is normalised to lower case so `RESOLVED B83BFB58:` and
+    `RESOLVED b83bfb58:` are one claim, not two.
+    """
+    m = _JOURNAL_OPENNESS.match(first_line)
+    if not m:
+        return None, None
+    marker = OPENNESS_OPEN if m.group(1) == "OPEN" else OPENNESS_RESOLVED
+    sha = m.group(2)
+    return marker, sha.lower() if sha else None
 
 
 def _bullet_date(first_line: str) -> str | None:
