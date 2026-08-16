@@ -20,22 +20,15 @@ not a build.
 
 ## State now
 
-- **Branch:** `main` at `98ce099`, clean tracked tree. The base clone is SHARED — other
-  sessions have moved it mid-work twice today. Re-check `git branch --show-current`
-  immediately before any write; do the work in a worktree.
-- 🔴 **HOSTS ARE CONVERGED — the split recorded below is CLOSED.** `ship.sh` ran clean and
-  was verified AT THE CONSUMER, not at the deploy: `readlink -f $(command -v opencode)` on
-  the workbench **and** the laptop both resolve to
-  `/nix/store/rcrzfd71k96f1r55533lzc16p7ix3v22-opencode-1.18.16`. 432 (workbench) / 393
-  (laptop) managed artifacts, 0 dangling, 0 absent. The dev-host gate that was red here
-  (`assert '1.18.4' == '1.18.16'`) now passes.
-- **Merged since the last handoff (3 mine):** `#496` the `--push` pre-check, rewritten onto
-  `ls-remote` after audit · `#498` the index write ungated · `#502` the deployed-state doc
-  lines updated for the convergence.
-  (`#492`, `#497`, `#499`, `#500` merged today are **other sessions'**.)
-- **The handoff skill's own step 4 no longer asks y/N** and the change is DEPLOYED (verified
-  in `~/.claude/skills/handoff/SKILL.md`, not inferred from the merge). Step 5's push gate is
-  kept, and the asymmetry is stated in the source so it does not get "harmonised".
+- **Branch:** `main` at `f522077`, clean tracked tree (untracked: `.envrc`, `.opencode/`, one `nix/system/*.LOCAL-preserved` — none are work). Base clone re-synced.
+- **Merged + SHIPPED + verified at the consumer on both hosts** (`ship.sh` rc=0, both per-host lines `✅ VERIFIED`; `~/.claude/skills/*` resolve to the SAME store path on workbench and laptop, so they are converged, not separately built):
+  - **`#503`** — preserved three untracked proposal doc sets that were one `checkout` from silent deletion (two opencode proposals, one 2026-08-06 rules-cut draft), plus a README saying the rules-cut must not be applied verbatim.
+  - **`#504`** — the `__pycache__` false-green rule in `claude/RULES.md` (34,268 → 35,152 B of 38,400).
+  - **`#505`** — `OPEN:` / `RESOLVED <sha>:` as SCHEMA on journal bullets, after five audit rounds.
+- **`drift-check.sh` rc=0** after the earlier ship: 245/210 managed symlinks examined, 0 dangling on both; parity differs only on the three allowlisted per-host keys.
+
+### `#505` in one paragraph
+An entry proposed a one-line remedy at **15:00:18** on 2026-07-24; the remedy landed at **15:02:21** — 2m03s later — and the entry served it as outstanding for **22 days**. `/handoff` step 4 runs MID-session, so the writer is gone by the time the work finishes. Openness is now a typed prefix, not prose, because a prose detector is walkable by rewording. Six populations, one precedence source (`JournalBullet.openness_population`); `--validate` reports four of them and its VERDICT is deliberately unchanged (an entry with unfinished business is well-formed; failing it would be a permanently-red gate). Index rows gain `🔴 N OPEN`, conditional so the common case is byte-identical.
 
 ## Open investigations — live diagnosis state
 
@@ -209,18 +202,22 @@ the day you ship.*
   assertion compared `[sha]` against a LONGER list; a shorter or different one points
   elsewhere and none of this work applies.
 
+### 🔴 A leaked credential in the store has been OPEN for 33 days and nothing was tracking it
+- **Symptom:** the new `--validate` advisory surfaced the store's ONE pre-existing hand-written `OPEN:` bullet. It is a credential rotation + SOPS re-encrypt, dated **2026-07-14**, in the `datapacket-talos` scope. 🔴 **Deliberately not named here — this repo is PUBLIC and the entry is client-confidential.** Read it with `subsystem_recall.py --scope datapacket-talos --search "rotate"`.
+- **Observed:** `subsystem_touch.py --scope datapacket-talos --validate` → `28 of 28 parse, 0 malformed`, then `🔴 1 declared OPEN:` naming the file, plus `⚠ 2 unmarked` (the forgejo remedy and an unpinned image tag).
+- **Ruled out:** that the marker convention was invented by `#505` — a past session had ALREADY hand-written this bullet as `- OPEN: …` with no tooling asking for it. The schema formalises a shape the corpus invented on its own.
+- **Next probe (verbatim):** rotate the credential, re-encrypt the SOPS file, then rewrite that bullet as `- RESOLVED <sha>: …` in the SAME edit so the badge clears. **Operator's call whether an agent touches the credential.**
+
+### The doc hook — still n=0 uncontaminated, and THIS session cannot be the sample
+- **Observed:** this session ran `subsystem_recall.py` at `/resume` step 4, i.e. because the SKILL told it to. `Skill` calls were non-zero (the `resume` skill loaded), so attribution to the doc is structurally impossible here.
+- **Unchanged:** parse the next few ORGANIC continuations; do not stage a probe.
+
 ## Next steps (ranked)
-1. **Nothing is queued.** Every item raised this session is landed and verified. The two
-   standing offers, both declined or deferred by the operator, are below.
-2. **The `__pycache__` false-green is still unwritten** (operator said skip, 2026-08-15).
-   `cp -a` preserves `__pycache__` and a SAME-LENGTH source mutation does not change file
-   size, so the `.pyc` staleness check (mtime+size) misses it and pytest imports the CACHED
-   module — a mutation battery then reports a mutant as SURVIVED when it never ran. Bit this
-   session twice. It belongs in `claude/RULES.md` and needs an eviction in the same commit.
-3. **Get an ORGANIC doc-hook sample** — still `n=0` uncontaminated. Do not stage a third
-   probe; parse the next few real continuations.
-4. **Watch the `analyze-service` share of the census**, not the total: 13 of 14 stamped
-   entries are `handoff`, so the store is effectively single-writer.
+
+1. **Rotate the credential above and close its `OPEN:` bullet.** 33 days, security-relevant, and it is the only declared-open item in the store.
+2. **Items 3–5 of the store evaluation are unbuilt.** Ranked, with the trap named: a weekly drift deadman keyed on referenced paths would **NOT** have caught the motivating entry (its paths are brace-expanded outside backticks, so it scores zero exposure — measured). Then: the `cli` scope maps to no repo on this host; 21 of 40 entries carry no `created_by`.
+3. **`.envrc` and `.opencode/` are untracked AND absent from `.gitignore`** (`git check-ignore` non-zero for both) in a PUBLIC repo where `.envrc` can hold credentials. Small, separate PR.
+4. **The laptop has two `nix/system/*logitech*` files present on that host only, in no commit and no backup** (from `drift-check.sh`). Same stranded-work class `#503` fixed on the workbench.
 
 ## Gotchas / decisions / dead-ends
 
@@ -318,6 +315,17 @@ the day you ship.*
   tests ran"; a `-k` selector that matched the wrong 4 tests made a mutant look survived.
   Give every zero a positive control.
 
+- 🔴 **A `grep` you wrote the pattern for is not a leak check.** `grep -iE 'oauth2-proxy|CSRF|…'` over the diff returned nothing and was reported clean. It was not: what survived was a service name WITHOUT the prefix the pattern required, plus two fragments of ordinary English no hand-written pattern would contain. The zero was a fact about the pattern. Replaced by `scripts/tests/test_store_content_not_copied.py`, which DERIVES 8-word phrases from the store — and immediately found **two more copies** that neither the grep nor a full adversarial audit had caught.
+- 🔴 **A denylist beats an allowlist for "which files can hold prose".** That check first scanned 632 of 839 tracked files (an extension allowlist missing every `.mjs`/`.js`/`.html` and 48 extensionless scripts) while documented as covering "any tracked file".
+- 🔴 **`{7,40}` inside a `*` regex loop is a ReDoS.** Introduced mid-review; measured on a SENTENCE-CASED bullet quoting long shas with no trailing colon: 64 hex 0.028 s, three 40-char shas **no return in 30 s**, hanging `/handoff` and `--validate` with no output. Fix is a non-splittable atom, `(?![0-9a-fA-F])`. The all-caps form is unaffected — which is why its regression test must be sentence-cased.
+- 🔴 **A timing guard must be shown to REACH the code it times.** That ReDoS test was vacuous twice: first the payload was all-caps and short-circuited the branch; then it called `parse_journal_bullets` without reading `near_miss_marker`, which is a LAZY property. Both passed with the fix deleted.
+- 🔴 **An evaluation matrix in a scratchpad is an opinion.** Three rounds changed one regex, each justified by a private matrix; a differently-constructed one inverted the verdict. Now `scripts/tests/fixtures/near_miss_shapes.json`, parametrized, with a `matrix_problems()` guard that is itself tested against degenerate matrices.
+- 🔴 **A fixture can be blind to the class its own change introduces.** The `prose` arm shipped with the all-caps branch contained ZERO all-caps shapes, so 39 green assertions said nothing about `OPENSSL_CONF` / `OPEN_MAX` firing a red advisory.
+- 🔴 **A mutation result with no BASELINE is a fact about the harness.** One probe reported KILLED for both variants because it ran bare `python3` with no pytest installed.
+- **Two claims of mine measured false and were corrected in place:** "`re.I` fires on ordinary prose" (0 FPs over 196 live bullets — the examples were constructed), and a phrase-distribution row that reproduced under no tree-and-filter combination.
+- **Splice a comment with anchored `Edit`, not index arithmetic** — one such splice deleted a whole regex definition and turned 129 tests red.
+- **A new test file must be `git add`ed or the flake silently omits it** — the gate passed green without ever running it; caught only because `skipped=` did not move.
+
 ## How to verify
 
 ```bash
@@ -336,6 +344,15 @@ python3 $D/scripts/lib/subsystem_touch.py --repo $D --commit <sha>[,...]
 # after ANY entry write, in the SAME turn
 python3 $D/scripts/lib/subsystem_touch.py --validate <path-just-written>
 
+# the OPEN:/RESOLVED marker end-to-end on the real store (READ-ONLY, added #505)
+python3 $D/scripts/lib/subsystem_touch.py --scope datapacket-talos --validate
+# ^ reports 4 populations: declared OPEN, attempted-but-unparsed, unmarked (a FLOOR),
+#   and sha-less RESOLVED. It NEVER changes the parse verdict — that is deliberate.
+
+# the leak guard (added #505) — the pytest half runs everywhere and compares SYNTHETIC
+# fixtures; only this LIVE half compares the real store, and only on the host that has it
+python3 $D/scripts/tests/test_store_content_not_copied.py   # exit 0 = compared and clean
+
 python3 $D/scripts/lib/subsystem_touch.py --census      # anchor was 21 / 1 scope / 21 unstamped
 # 🔴 read the ACTIVITY lines, not the total: every count is a CREATION event, so a week
 # of pure appends moves none of them and a worked store reads identical to a dead one.
@@ -349,6 +366,8 @@ done
 # gate — read the CONTENT, never a piped exit code
 nix build .#checks.x86_64-linux.pytests --no-link --print-build-logs > /tmp/gate.log 2>&1; echo "rc=$?"
 grep -aE 'TOTAL +collected|RESULT: (PASS|FAIL)' /tmp/gate.log
+# last measured on the MERGED tree (main + #505): pytest 10380 passed / failed=0,
+# node 1116 pass / fail=0. A PR green on its OWN branch says nothing about the merge.
 
 scripts/drift-check.sh      # read-only deploy + host-parity deadman
 ```
