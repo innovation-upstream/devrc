@@ -939,7 +939,21 @@ TARGET_FLOORS=(
   # coverage and survived a sweep. Read from the gate's per-target line, then through
   # the gate's OWN function:
   #   _suggested_floor 208 = 208 - min(50, max(1, 208/20 = 10)) = 208 - 10 = 198.
-  "scripts/claude-hooks/tests/test_clawgate_writeback_guard.py|198"
+  #
+  # 2026-08-16, THE SECOND AUDIT ROUND: 208 -> 244, and the 198 above had already
+  # accumulated 46 of slack — nearly the whole 50-test allowance, i.e. one target away
+  # from being unable to see a collapse. Again not padding: the quoted `git -C "<path>"
+  # commit` shapes (all five measured NOT work, and `git -C` is the form this repo's own
+  # CLAUDE.md mandates, so the guard silently never armed for it), the ASYMMETRIC
+  # subagent rule (a subagent's READ must not arm the parent — a measured false positive
+  # — while its WORK must count, because in BOTH incidents #193/#194 the work ran in
+  # dispatched local subagents and refusing it made the hook silent on its own
+  # motivating case), the per-task read anchor that closes "read N, work, write N back,
+  # then merely read M -> blocks on M", the notice sentence that has to be true both
+  # alone and spliced into a block reason, and the `--dismiss` audit ledger. Read from
+  # the gate's per-target line, then through the gate's OWN function:
+  #   _suggested_floor 244 = 244 - min(50, max(1, 244/20 = 12)) = 244 - 12 = 232.
+  "scripts/claude-hooks/tests/test_clawgate_writeback_guard.py|232"
   # 2026-08-14, writer 2 (opencode) arrives as a NEW target: 15 collected.
   #   _suggested_floor 15 = 15 - min(50, max(1, 15/20 = 0 -> 1)) = 14.
   "scripts/opencode/tests|14"

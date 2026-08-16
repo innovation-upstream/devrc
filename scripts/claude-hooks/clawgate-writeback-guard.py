@@ -138,11 +138,11 @@ matters. The interaction with MAX_TASKS is named rather than hidden: several tas
 each blocking twice can in principle stack toward the CLI's 8, at which point the
 CLI ends the turn with a warning — a graceful ceiling, not a wedge.
 
-🔴 SubagentStop IS REFUSED, AND SO IS EVERY PostToolUse CARRYING AN `agent_id`.
-A subagent's turn never reaches the operator, so it owes them nothing
-(next-step-nudge.py refuses SubagentStop for the same reason). The PostToolUse half
-is the one that was WRONG in the first version of this file, and it was wrong
-structurally rather than by degree: the bundle builds every hook payload through
+🔴 THE SUBAGENT RULE IS ASYMMETRIC: A SUBAGENT'S **READ** DOES NOT ARM THE PARENT,
+A SUBAGENT'S **WORK** DOES COUNT AS THE SESSION'S WORK. Two rounds of this file got
+it wrong in OPPOSITE directions, so state the rule and both failures, not one.
+
+The mechanism first. The bundle builds every hook payload through
 
     function Kf(e, t, r) { … return { session_id: t ?? kt(), …,
                                       agent_id: r?.agentId, agent_type: … } }
@@ -151,9 +151,26 @@ and PostToolUse calls it as `{...Kf(i, void 0, o), hook_event_name:"PostToolUse"
 — second argument `void 0`. So a tool call made INSIDE a dispatched subagent arrives
 carrying the PARENT's `session_id`, with only `agent_id` to tell them apart; the
 bundle's own schema says as much ("Use this field (not agent_type) to distinguish
-subagent calls from main-thread calls"). Accepting those armed the PARENT session's
-work flag off a subagent that merely happened to edit a file, and the parent's Stop
-then blocked on a card the parent never touched. MEASURED as a false positive.
+subagent calls from main-thread calls").
+
+  * ACCEPTING A SUBAGENT'S READ was wrong: it armed the PARENT off a subagent that
+    merely happened to touch a card, and the parent's Stop then blocked on a task the
+    parent never touched. MEASURED as a false positive. Still refused.
+  * REFUSING A SUBAGENT'S WORK was wrong, and it deleted the yield on the exact
+    incident this hook exists for. In BOTH measured failures the work ran in
+    dispatched LOCAL SUBAGENTS — `claudedocs/handoff-agent-attention-tooling.md`
+    records for #193/#194 that "'dispatch both' meant local subagents, not a devpod".
+    MEASURED with a positive control: `parent reads 193 -> a subagent does ALL the work
+    (Edit + git commit + git push + gh pr create, every payload carrying agent_id) ->
+    parent Stop` returned SILENT against a card with zero comments, while the SAME Edit
+    without `agent_id` returned `block`. The parent dispatched the subagent; that work
+    is the session's, and the parent owns the write-back.
+
+The work half is still gated on the session being ALREADY TRACKED — i.e. the parent
+read a card on its own thread — so a subagent cannot both arm and satisfy the trigger
+by itself. SubagentStop (and any Stop carrying an `agent_id`) remains refused
+outright: a subagent's turn never reaches the operator, so it owes them nothing
+(next-step-nudge.py refuses SubagentStop for the same reason).
 
 🔴 SCOPE OF THE WORK FLAG — SESSION-WIDE, NOT PER-TASK, AND THAT IS A KNOWN COST.
 Nothing in a PostToolUse payload says WHICH task an edit belongs to, so "work
@@ -161,6 +178,14 @@ happened" is necessarily a session-level fact. Two shapes therefore still fire
 without the session owing anything, and both are TESTED rather than hoped away:
   * read task N, then do unrelated work in a different repo -> blocks on N;
   * survey N and M, work on and write back only M -> blocks naming N.
+🔴 The THIRD shape that used to be here is now CLOSED, and by data this hook already
+stored rather than by a heuristic: `read N -> work -> write N back -> Stop (silent,
+correct) -> later merely READ M, no work at all -> Stop blocked naming M`. Work is a
+session-level fact, but "was there work AFTER **this task's own** read" is not — the
+state dir holds a per-task `first_read_ts` beside the session's `last_work_ts`, so a
+task whose read is NEWER than the last work event is skipped outright, before the
+live read is even attempted. Deterministic, and it also spends one fewer subprocess.
+It does NOT use `cwd` or `agent_type`, both of which are partial and heuristic.
 The escape is not prose. `--dismiss` (below) is a real, deterministic mechanism, it
 is named in the block text with the session id already filled in, and it clears that
 task from this session's ledger for good. The previous escape — "if you did NOT do
@@ -178,9 +203,9 @@ whose write-back genuinely is stale. Pinned by tests, so the noise is measured r
 than discovered in production.
 
 🔴 HOT PATH. PostToolUse fires after EVERY tool call of every session, and
-agent-ledger-hook.py already costs ~21 ms there. The fast path is: refuse anything
-carrying an `agent_id` (one dict read), resolve the state dir from `session_id`
-(string work, no IO), ONE `os.path.exists`, and the trigger regex. A session that has
+agent-ledger-hook.py already costs ~21 ms there. The fast path is: one dict read for
+`agent_id`, resolve the state dir from `session_id` (string work, no IO), ONE
+`os.path.exists`, and — for a main-thread call only — the trigger regex. A session that has
 never read a clawgate task and is not reading one now does nothing else — no
 directory creation, no state read, no subprocess, and it does not even IMPORT
 `subprocess` or `shutil` (see the deferred-import note below). That ordering is
@@ -188,14 +213,30 @@ pinned by tests that COUNT the calls and read the module list out of `-X importt
 because an earlier hook in this repo shipped with its throttle consulted AFTER the
 subprocess spawn while its comment claimed otherwise.
 
-Re-measured 2026-08-16 after the audit round, 30 runs per sample, four samples, on
-this host: 14.30 / 14.56 / 14.33 / 14.62 ms per call, against 14.57 / 14.43 / 14.14 /
-14.03 for the PRE-audit file measured in the same session and 7.7-8.2 ms for a bare
-interpreter start. I.e. PARITY — the run-to-run spread (~0.5 ms) is wider than the
-difference. Getting there took one deliberate change: the three work-detection
-patterns moved from module-level `re.compile` to pattern STRINGS compiled on first
-use, because none of them is reachable from the fast path (see their note below). A
-first cut with them compiled at import measured 14.7 against 13.9.
+Re-measured 2026-08-16 after the SECOND audit round, 30 runs per sample, EIGHT
+INTERLEAVED samples (1200 processes), every process spawned from an explicit argv list
+by a python parent — no shell, so zsh's non-splitting `$var` cannot produce the
+impossible 0.37 ms/call an earlier loop reported — and each sample asserting that all
+30 exited 0 before its mean is believed:
+
+    main-thread fast path   15.72 ms/call   vs 15.65 for the pre-delta file
+    subagent    fast path   15.80 ms/call   vs 15.53
+    bare interpreter start   8.90 ms
+
+The main-thread path is PARITY: +0.07 ms against a run-to-run spread of ~0.6 ms, which
+is wider. The subagent path is +0.27 ms — also inside that spread, but consistently
+above it in 7 of 8 samples, and it is a real added cost with a named cause: a
+subagent's payload no longer returns on one dict read, because its WORK has to be able
+to count (see the asymmetric rule above). It now resolves the state dir and does ONE
+`os.path.exists`; the trigger regex is still skipped for it. Both counts are pinned by
+tests that COUNT the calls. A FOUR-sample run of the same benchmark read +0.7 ms on
+the main thread and was pure drift — the interleave and the sample count are what
+distinguish the two, not one re-run.
+
+The earlier round's parity took one deliberate change, still in force: the three
+work-detection patterns are pattern STRINGS compiled on first use rather than
+module-level `re.compile`, because none of them is reachable from the fast path (see
+their note below). A first cut with them compiled at import measured 14.7 against 13.9.
 
 🔴 FAIL-OPEN, ALWAYS. Every internal exception exits 0 with an empty stdout and
 blocks nothing. main() has exactly ONE exit and it is always 0. A hook that wedges a
@@ -203,12 +244,22 @@ turn to enforce a bookkeeping ritual has inverted its own cost model.
 
 WHAT THIS STRUCTURALLY CANNOT SEE (say it here, not in a report nobody re-reads):
   * work done anywhere this hook is not running — a devpod agent, the clawgate web
-    UI, a human, opencode, or a host that has not had `home-manager switch` run;
+    UI, a human, opencode, or a host that has not had `home-manager switch` run.
+    🔴 A LOCAL DISPATCHED SUBAGENT IS **NOT** IN THIS LIST: this hook DOES run in one
+    (its PostToolUse payloads carry the parent's `session_id` plus an `agent_id`), and
+    its work IS counted — see the asymmetric rule above. It is a devpod/remote agent,
+    where no hook of ours runs at all, that is invisible;
+  * a READ performed only inside a subagent. The read half refuses `agent_id`, so
+    `subagent reads 193 -> subagent works -> parent Stop` is SILENT: nothing was ever
+    armed. The parent must have read the card on its own thread. Deliberate — the
+    alternative was a measured false positive — and the cost is named, not hidden;
   * a session that read the task via a route neither trigger matches (the board UI,
     an `/api/tasks?summary=1` list, someone pasting the body in);
   * whether the comment that DOES exist is any good — it checks that a `claude-code`
     comment exists after the last work event, never what it says;
-  * WHICH task a given edit belongs to (see SCOPE OF THE WORK FLAG above);
+  * WHICH task a given edit belongs to. The per-task read anchor below narrows this —
+    a task read AFTER the last work event is skipped — but among tasks read BEFORE it,
+    nothing distinguishes them (see SCOPE OF THE WORK FLAG above);
   * the `in_progress` flip, which it does not require: it gates the WRITE-BACK, which
     is the thing that was measured missing.
 
@@ -216,6 +267,10 @@ Deployed by `nix/home.nix`; registered on PostToolUse (no matcher) + Stop by
 `register-nudge-hook.py`. It has ONE other mode, and it is not a hook mode:
 
     clawgate-writeback-guard.py --dismiss <task_id> --session <session_id>
+
+Every invocation of that mode appends one JSON line to
+`~/.cache/claude-clawgate-writeback/dismissals` — it is a bypass of a deterministic
+guard, so it is MEASURABLE rather than merely discouraged in the block text.
 """
 import datetime
 import json
@@ -351,9 +406,11 @@ WORK_TOOLS = ("Edit", "Write", "NotebookEdit")
 # so grepping for them is routine rather than exotic. Seven such over-matches were
 # measured. Two deterministic narrowings, in this order:
 #
-#   1. QUOTED STRINGS AND COMMENTS ARE BLANKED FIRST (`_strip_literals`). A command
+#   1. QUOTED STRINGS AND COMMENTS ARE STRIPPED FIRST (`_strip_literals`). A command
 #      that merely mentions `git commit` inside quotes, or after a `#`, is talking
-#      about work, not doing it.
+#      about work, not doing it. A quoted run becomes QUOTED_PLACEHOLDER — a TOKEN,
+#      not whitespace, because it was a WORD in the shell's own parse and blanking it
+#      let the subcommand be eaten as a flag's value. See that constant's note.
 #   2. THE VERB MUST BE IN COMMAND POSITION — string start, or after a shell
 #      separator (`; & | ( ) { } newline backtick $(`), optionally through one of the
 #      keywords that legitimately precede a command (`then`/`else`/`do`/`!`). An
@@ -379,8 +436,31 @@ WORK_BASH_PAT = (
     r"|" + _CMD_START
     + r"gh\s+(?:pr\s+(?:create|merge)|release\s+create)\b")
 
-# Single-quoted runs, and double-quoted runs with backslash escapes. Replaced by a
-# SPACE rather than deleted, so `-m'x'commit` cannot be welded into a false match.
+# Single-quoted runs, and double-quoted runs with backslash escapes.
+#
+# 🔴 REPLACED BY THE PLACEHOLDER TOKEN BELOW, NOT BY A SPACE, AND A SPACE WAS MEASURED
+# WRONG IN BOTH DIRECTIONS. A quoted run is a WORD in the shell's own parse — a flag's
+# value, a commit message, a path. Blanking it to whitespace destroys that word, and
+# WORK_BASH_PAT's global-flag arm (`-[A-Za-z]\s+\S+\s+`) then has no `\S+` to consume,
+# so it reads the SUBCOMMAND as the flag's value:
+#
+#     git -C "$DEVRC" commit -m "msg"   ->  `git -C   commit -m  `  ->  NOT work
+#
+# `git -C <path>` is the form this repo's own CLAUDE.md MANDATES, so a quoted path is
+# routine; the guard silently never armed for it. Measured False for all five shapes
+# (`-C "$VAR"`, `-C '/lit'`, `-C "…" push`, `--git-dir="…"`, `-C "$H" -c k=v commit`)
+# — the only `git -C` fixtures in the test file were UNQUOTED, which is why nothing
+# caught it. A one-character placeholder that is a WORD restores all five.
+#
+# The token must be non-whitespace, or the weld the space was chosen to prevent comes
+# back. Measured over 13 kept positives, 16 negatives and the 5 shapes above:
+#     " "     0 lost   0 false-pos   0/5 recovered
+#     " '' "  0 lost   0 false-pos   4/5 recovered   + welds `git -m'x'commit` -> True
+#     "''"    0 lost   0 false-pos   5/5 recovered   + welds NOTHING
+# and `''` additionally CLOSES a false positive the space had: `git 'x'commit` blanked
+# to `git  commit` and matched. So the placeholder is strictly better than the space on
+# every measured axis, not a trade.
+QUOTED_PLACEHOLDER = "''"
 QUOTED_PAT = r"'[^']*'|\"(?:[^\"\\]|\\.)*\""
 # A `#` at the start of the string or after whitespace, to end of line. Applied AFTER
 # the quote strip, so a `#` living inside a quoted string is already gone.
@@ -399,7 +479,21 @@ def _state_root():
 
 
 def _sanitize(part):
-    return re.sub(r"[^A-Za-z0-9_.-]", "_", str(part))[:120]
+    """One path component, made safe to join onto the state root.
+
+    🔴 THE ALLOWED SET INCLUDES `.`, SO IT MUST EXCLUDE THE ALL-DOTS COMPONENTS. `/` is
+    already replaced, which leaves exactly `.`, `..`, `...` … as the strings that can
+    traverse: `--session ..` resolved to the state ROOT rather than to a session dir.
+    Bounded today (only `read-N`/`fires-N`/`unknown-N` are ever unlinked, all
+    `%d`-formatted, and `os.remove` refuses a directory) and nothing here is ever
+    interpolated into a shell — but "bounded" is a property of today's call sites, not
+    of this function. An enumerated fix, not a pattern: a component that is nothing but
+    dots is neutered; `.zshrc` or `v1.2.3` are untouched.
+    """
+    out = re.sub(r"[^A-Za-z0-9_.-]", "_", str(part))[:120]
+    if out and set(out) <= {"."}:
+        out = "_" * len(out)
+    return out
 
 
 def _state_dir(data):
@@ -565,6 +659,42 @@ def dismiss(state_dir, task_id):
     return removed
 
 
+def _dismissals_path():
+    """The audit log, deliberately OUTSIDE the per-session root that `prune` sweeps.
+
+    `_state_root()` is `…/claude-clawgate-writeback/s`; this is its sibling, so a
+    session dir ageing out cannot take the record of its dismissals with it.
+    """
+    return os.path.join(os.path.dirname(_state_root()), "dismissals")
+
+
+def record_dismissal(task_id, session_id, removed, now=None):
+    """Append ONE line per `--dismiss` invocation. Returns True if it was written.
+
+    🔴 `--dismiss` IS A REAL BYPASS OF A DETERMINISTIC GUARD, and until this existed it
+    left no trace anywhere — so "is it being used honestly, or is it the new way to make
+    the hook shut up?" was unanswerable. In a hook whose entire premise is that PROSE
+    LOST 2/2, gating the bypass on prose alone ("do NOT run this if you did work") and
+    then not measuring it is the same mistake one level up. One JSON line: when, which
+    task, which session, and what was actually cleared — a no-op dismissal records too,
+    so repeat attempts are visible rather than silently identical to a first one.
+
+    Fail-open and best-effort: an unwritable log NEVER changes what `--dismiss` does.
+    The dismissal is the user-visible act; the record is bookkeeping.
+    """
+    try:
+        path = _dismissals_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a") as fh:
+            fh.write(json.dumps({"ts": now_iso(now), "task_id": int(task_id),
+                                 "session": _sanitize(session_id),
+                                 "removed": sorted(removed)},
+                                sort_keys=True) + "\n")
+        return True
+    except Exception:                     # noqa: BLE001
+        return False
+
+
 def prune(ttl=STATE_TTL_SECS, now=None):
     """Drop session state directories older than `ttl`. Returns the names removed.
 
@@ -627,9 +757,18 @@ def task_read_ids(data):
 
 
 def _strip_literals(cmd):
-    """Blank out quoted runs and trailing `#` comments, so a command that MENTIONS a
-    work verb is not mistaken for one that RUNS it. See WORK_BASH_PAT's note."""
-    return re.sub(COMMENT_PAT, " ", re.sub(QUOTED_PAT, " ", cmd))
+    """Replace quoted runs with QUOTED_PLACEHOLDER and blank trailing `#` comments, so
+    a command that MENTIONS a work verb is not mistaken for one that RUNS it.
+
+    🔴 The quoted run becomes a TOKEN, not whitespace — a quoted flag value is a word
+    and deleting the word let the subcommand be eaten as the flag's value. See
+    QUOTED_PLACEHOLDER's note for the five measured shapes and the three-way sweep.
+    This function's exact output is deliberately NOT pinned by any test: the observable
+    is `is_work`, and an assertion on the internal string is a spelling of it that
+    breaks on any change to the placeholder while proving nothing extra.
+    """
+    return re.sub(COMMENT_PAT, " ",
+                  re.sub(QUOTED_PAT, QUOTED_PLACEHOLDER, cmd))
 
 
 def is_work(data):
@@ -845,12 +984,19 @@ def missing_text(task_id, first_read_ts, session_id=""):
 
 
 def unknown_text(task_id, first_read_ts, error, session_id=""):
+    # 🔴 THE SENTENCE MUST BE TRUE IN BOTH CONTEXTS IT IS READ IN. This text is emitted
+    # on its own as a `systemMessage` (the turn does end) AND spliced into a
+    # `decision:"block"` reason whenever some OTHER task is blocking — `stop_decision`
+    # joins `blocks + notices` into one string. The previous wording, "and this turn is
+    # ending normally", was MEASURED verbatim inside a block reason, i.e. the model was
+    # told the turn was ending while it was being forcibly continued. The claim this
+    # notice can actually make is about ITSELF, not about the turn.
     return (
         "clawgate write-back UNVERIFIED for task %(id)d: the board could not be "
         "reached to check whether a `claude-code` comment was written since %(ts)s "
         "(%(err)s). This is a NOTICE, not a block — nothing is being asserted about "
-        "the card, because nothing could be measured, and this turn is ending "
-        "normally.\n"
+        "the card, because nothing could be measured, and this notice on its own "
+        "does not hold the turn open.\n"
         "If this session did work on task %(id)d, write it back:\n"
         "  clawgatectl task comment %(id)d --body \"…\"\n"
         "  clawgatectl task status %(id)d ready_for_review\n"
@@ -872,18 +1018,35 @@ def post_tool_use(data, now=None):
     reading a task returns before touching the filesystem again. Nothing below the
     fast-path return runs for the overwhelming majority of tool calls.
     """
-    # 🔴 A SUBAGENT'S TOOL CALL IS NOT THE PARENT'S WORK — and it arrives wearing the
-    # parent's `session_id`, so this is the ONLY field that separates them. Checked
-    # before the state dir is even computed: a dispatched subagent that edits a file
-    # must not arm the parent session, whose Stop would then block on a card the
-    # parent merely read. See the `Kf()` quote in the module docstring.
-    if (data or {}).get("agent_id"):
-        return {"fast_path": True, "recorded": [], "work": False}
+    # 🔴 THE SUBAGENT RULE IS ASYMMETRIC, AND BOTH HALVES ARE THERE BECAUSE THE
+    # SYMMETRIC VERSIONS WERE EACH MEASURED WRONG. A subagent's tool call arrives
+    # wearing the PARENT's `session_id` (see the `Kf()` quote in the module docstring),
+    # so `agent_id` is the only field separating them — but the two directions are not
+    # the same question:
+    #
+    #   * a subagent's READ MUST NOT ARM the parent. Accepting it armed the parent off a
+    #     subagent that merely happened to read a card, and the parent's Stop then
+    #     blocked on a task the parent never touched. MEASURED as a false positive.
+    #   * a subagent's WORK IS THE SESSION'S WORK. The parent dispatched it; the parent
+    #     owns the write-back. REFUSING it is what the previous round got wrong, and it
+    #     deleted the yield on the exact incident this hook exists for: in BOTH measured
+    #     failures (#193/#194) the work ran in dispatched LOCAL SUBAGENTS — the canonical
+    #     handoff records "'dispatch both' meant local subagents, not a devpod". With the
+    #     refusal in place, `parent reads 193 -> subagent edits/commits/pushes/opens the
+    #     PR -> parent Stop` measured SILENT against a card with zero comments, while the
+    #     same Edit WITHOUT `agent_id` measured `block`.
+    #
+    # So: `agent_id` suppresses only the READ half. The work half still requires the
+    # session to be ALREADY TRACKED (`tracked` below), i.e. the parent read a card on
+    # its own thread — a subagent cannot both arm and satisfy the trigger by itself.
+    agent = bool((data or {}).get("agent_id"))
     state_dir = _state_dir(data)
     if state_dir is None:
         return {"fast_path": True, "recorded": [], "work": False}
     tracked = os.path.exists(state_dir)
-    ids = task_read_ids(data)
+    # A subagent's payload never contributes ids, so the trigger regex is skipped
+    # entirely for it — the fast path stays one `exists` and no `re` work.
+    ids = [] if agent else task_read_ids(data)
     if not tracked and not ids:
         # 🔴 THE FAST-PATH RETURN. Exactly ONE filesystem call (the `exists` above)
         # has happened and nothing has been spawned. Everything below this line —
@@ -954,6 +1117,11 @@ def stop_decision(data, reader=None, budget=STOP_BUDGET_SECS,
 
     session_id = d.get("session_id") or ""
     worked_at = last_work_ts(state_dir)
+    # 🔴 Parsed ONCE, outside the loop, and compared against each task's OWN read. Both
+    # sides come from THIS host's clock (`record_read` and `record_work` both call
+    # `now_iso`), so no skew allowance belongs here — unlike `writeback_state`, which
+    # compares a local stamp against the SERVER's `createdAt`.
+    worked_at_epoch = parse_ts(worked_at)
     deadline = clock() + budget
     blocks, notices = [], []
     # No `[:MAX_TASKS]` slice here: `record_read` refuses to create a sixth `read-`
@@ -961,10 +1129,26 @@ def stop_decision(data, reader=None, budget=STOP_BUDGET_SECS,
     # slice was a second copy of a cap already enforced at the writer — unkillable,
     # and pinned instead by test_at_most_five_task_ids_are_tracked_per_session.
     for tid in sorted(ids):
+        first_read_ts = ids[tid]
+        # 🔴 THE PER-TASK READ ANCHOR. `work_after_read` above is a SESSION-level fact;
+        # this is the per-task one. A task read AFTER the session's last work event is
+        # owed nothing yet — the measured false positive was `read N, work, write N
+        # back, then merely read M` blocking on M. Skipped BEFORE the budget check and
+        # the live read, so it costs no subprocess either.
+        #
+        # `>=`, not `>`: one Bash call can be both a read and work (`clawgatectl task
+        # get 194 && git commit -m x`), and `post_tool_use` stamps both from the SAME
+        # `now`, so an equal pair is work ON that task, not work before it.
+        #
+        # Either side unparseable -> DO NOT skip. A truncated `work` stamp must not
+        # silently disable the guard; `work_after_read` already proved work happened.
+        read_at_epoch = parse_ts(first_read_ts)
+        if (worked_at_epoch is not None and read_at_epoch is not None
+                and worked_at_epoch < read_at_epoch):
+            continue
         remaining = deadline - clock()
         if remaining <= 0:
             break
-        first_read_ts = ids[tid]
         err = "the board returned a task payload this hook could not read"
         try:
             task = reader(tid, timeout=min(PER_TASK_TIMEOUT_SECS, remaining))
@@ -1058,14 +1242,18 @@ def dismiss_main(argv):
         sys.stdout.write("not a session id: %s\n" % _sanitize(sess))
         return
     removed = dismiss(state_dir, task_id)
+    record_dismissal(task_id, sess, removed)
     if removed:
         sys.stdout.write("clawgate write-back guard: dismissed task %d for session "
                          "%s (cleared %s). It will not ask about this task again.\n"
                          % (task_id, _sanitize(sess), ", ".join(sorted(removed))))
     else:
+        # 🔴 The state dir is NOT printed. It is an absolute path containing $HOME, and
+        # everything this writes goes to stdout, which the model reads and may quote
+        # onward. The session id is the only part the caller needs to see.
         sys.stdout.write("clawgate write-back guard: nothing to dismiss — task %d is "
-                         "not in session %s's ledger (%s).\n"
-                         % (task_id, _sanitize(sess), state_dir))
+                         "not in session %s's ledger.\n"
+                         % (task_id, _sanitize(sess)))
 
 
 def main():

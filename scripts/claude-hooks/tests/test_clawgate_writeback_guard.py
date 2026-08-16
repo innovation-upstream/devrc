@@ -253,6 +253,17 @@ def test_two_ids_in_one_command_are_both_recorded_and_deduplicated():
     payload(tool_name="NotebookEdit", tool_input={"notebook_path": "/x"}),
     bash("git commit -m 'x'"),
     bash("git -C /home/zach/workspace/devrc commit -m 'x'"),
+    # 🔴 THE QUOTED GLOBAL-FLAG VALUE. All five measured False before the placeholder
+    # fix: `_strip_literals` blanked the quoted run to WHITESPACE, and WORK_BASH_PAT's
+    # `-[A-Za-z]\s+\S+\s+` arm then ate the SUBCOMMAND as `-C`'s value. `git -C <path>`
+    # is the form this repo's own CLAUDE.md mandates, so a quoted path is routine — and
+    # the only `git -C` fixtures this file carried were UNQUOTED, which is exactly why
+    # nothing saw it. Fail-open (the guard silently never armed), but it gutted the fix.
+    bash('git -C "$DEVRC" commit -m "msg"'),
+    bash("git -C '/tmp/wt' commit -m x"),
+    bash('git -C "/home/zach/workspace/devrc" push origin main'),
+    bash('git --git-dir="/a/.git" commit -m x'),
+    bash('git -C "$H" -c user.name=x commit -m y'),
     bash("git push -u origin feat/x"),
     bash("gh pr create --fill --base main"),
     # Previously FAIL-OPEN under-matches: both ship something, neither was work.
@@ -305,22 +316,62 @@ def test_a_look_around_is_not_work(data):
     "echo 'first do a thing; git commit -m x'",
     'echo "build it && git push"',
     "rg -n 'foo | git push' claude/",
+    # 🔴 THE WELD CASES — why QUOTED_PLACEHOLDER is a TOKEN and not whitespace. A
+    # quoted run abutting a verb must not be blanked into a separator that manufactures
+    # a command out of two half-words. `git 'x'commit` blanked to `git  commit` and
+    # matched: a false positive the SPACE had and the placeholder closes. `git
+    # -m'x'commit` is the case the space was originally chosen for, and it must stay
+    # closed — the auditor's proposed ` '' ` (a token WITH surrounding spaces) reopened
+    # exactly this one, which is why the replacement carries no spaces.
+    "git 'x'commit",
+    "git -m'x'commit",
 ])
 def test_TALKING_about_work_is_not_DOING_work(cmd):
     """🔴 The single negative case this file used to carry did not contain the literal
-    at all, so the whole over-match class was untested. `_strip_literals` blanks quoted
-    runs and `#` comments; the command-position anchor rejects the unquoted echo."""
+    at all, so the whole over-match class was untested. `_strip_literals` replaces
+    quoted runs with a placeholder TOKEN and blanks `#` comments; the command-position
+    anchor rejects the unquoted echo."""
     assert guard.is_work(bash(cmd)) is False
 
 
 def test_the_positive_control_for_the_literal_stripper():
     """🔴 Nine `False`s are indistinguishable from an `is_work` wired to nothing. The
     same commands with the verb moved OUT of the quotes must all be True — and the
-    stripper must not eat a real `git commit -m 'msg'`, whose message IS quoted."""
+    stripper must not eat a real `git commit -m 'msg'`, whose message IS quoted.
+
+    🔴 The third assertion used to be `_strip_literals(...).strip() == "echo"`, i.e. a
+    pin on this function's INTERNAL output string. That is a spelling of the guard, not
+    the guard: it broke the moment the quoted run stopped being replaced by whitespace
+    (the fix for the `git -C "<path>" commit` miss below) while proving nothing extra,
+    since the observable was always `is_work`. It is now asserted as what the stripper
+    is FOR — neither verb survives into the text the work regex sees, in a command that
+    needs BOTH halves (a quoted run and a `#` comment) — plus a control proving the
+    check can move.
+    """
     assert guard.is_work(bash("git commit -m 'wire up the grep for git commit'")) \
         is True
     assert guard.is_work(bash("grep -rn foo scripts/ && git push")) is True
-    assert guard._strip_literals("echo 'git commit' # git push") .strip() == "echo"
+
+    both_halves = "echo 'git commit' # git push"
+    stripped = guard._strip_literals(both_halves)
+    assert "git commit" not in stripped and "git push" not in stripped
+    assert guard.is_work(bash(both_halves)) is False
+    # ...and the control: the SAME shape with a real verb outside both the quotes and
+    # the comment must still be True, so the two `False`s above cannot be a stripper
+    # that simply eats everything.
+    assert guard.is_work(bash("echo 'git commit'; git push # git commit")) is True
+
+
+def test_the_quote_strip_runs_BEFORE_the_comment_strip(home):
+    """🔴 THE ORDER IS LOAD-BEARING, and swapping it is a semantic mutant that no other
+    case in this file can see. A `#` INSIDE a quoted string is not a comment: strip
+    comments first and `echo "a # b" && git commit` loses everything from the `#`
+    onward — including the real, unquoted `git commit` — and a genuine work command
+    silently stops being work. Quotes first, comments second."""
+    assert guard.is_work(bash('echo "a # b" && git commit -m x')) is True
+    assert guard.is_work(bash("echo 'a # b' ; git push")) is True
+    # ...and the direction the comment strip is actually for still holds.
+    assert guard.is_work(bash("ls -la  # then git commit")) is False
 
 
 # =========================================================================== #
@@ -377,6 +428,34 @@ def test_the_fast_path_does_exactly_one_stat_and_nothing_else(home, monkeypatch)
     guard.post_tool_use(bash("ls -la"))
     assert _mine(calls) == [("exists", state_dir())], calls
     assert [c for c in calls if c[0] == "subprocess"] == []
+
+
+def test_a_SUBAGENTS_call_on_an_untracked_session_also_costs_exactly_one_stat(
+        home, monkeypatch):
+    """🔴 THE COST THE ASYMMETRIC RULE ADDED, PINNED RATHER THAN ASSUMED. A subagent's
+    payload used to return on a single dict read; it now resolves the state dir and
+    stats it, because its WORK has to be able to count. That is ONE `os.path.exists`
+    and nothing else — in particular the trigger regex is skipped entirely, since a
+    subagent contributes no ids. MEASURED end to end at 15.80 ms/call against 15.53 for
+    the pre-delta file (30 runs x 8 interleaved samples, bare interpreter 8.90).
+    """
+    calls = _io_spy(monkeypatch)
+    guard.post_tool_use(payload(tool_name="Edit", tool_input={"file_path": "/x"},
+                                agent_id="agent_012xyz"))
+    assert _mine(calls) == [("exists", state_dir())], calls
+    assert [c for c in calls if c[0] == "subprocess"] == []
+
+
+def test_a_subagents_call_does_not_evaluate_the_TRIGGER_regex(home, monkeypatch):
+    """A subagent cannot arm the read half, so consulting `task_read_ids` for it would
+    be pure hot-path cost. Made to raise rather than counted, so a mutation that drops
+    the `[] if agent` short-circuit is loud."""
+    monkeypatch.setattr(guard, "task_read_ids",
+                        lambda d: (_ for _ in ()).throw(
+                            AssertionError("task_read_ids ran for a subagent")))
+    out = guard.post_tool_use(bash("clawgatectl task get 193",
+                                   agent_id="agent_012xyz"))
+    assert out["recorded"] == []
 
 
 def test_the_positive_control_for_that_count(home, monkeypatch):
@@ -963,15 +1042,43 @@ def test_a_payload_carrying_an_agent_id_is_refused(home):
     assert r.calls == []
 
 
-def test_a_SUBAGENTS_tool_call_never_arms_the_PARENT_session(home):
-    """🔴 PROBE C, MEASURED AS A FALSE POSITIVE BEFORE THIS FIX. The bundle builds a
-    PostToolUse payload as `{...Kf(i, void 0, o), hook_event_name:"PostToolUse", …}`,
-    and `Kf`'s `session_id` is `t ?? kt()` with `t` undefined — so a tool call made
-    inside a dispatched subagent arrives carrying the PARENT's session id, with only
-    `agent_id` to tell them apart. The parent reads the card, the subagent does the
-    editing, and the parent's Stop then blocked on work it never did."""
+@pytest.mark.parametrize("work_payload", [
+    payload(tool_name="Edit", tool_input={"file_path": "/x"}, agent_id="agent_012xyz"),
+    bash("git commit -m 'ship it'", agent_id="agent_012xyz"),
+    bash("git push -u origin feat/x", agent_id="agent_012xyz"),
+    bash("gh pr create --fill --base main", agent_id="agent_012xyz"),
+])
+def test_a_SUBAGENTS_work_IS_the_parent_sessions_work(home, work_payload):
+    """🔴 THE MOTIVATING SHAPE, AND A PREVIOUS ROUND DELETED THE YIELD ON IT. In BOTH
+    measured failures (#193/#194) the work ran in dispatched LOCAL subagents —
+    `claudedocs/handoff-agent-attention-tooling.md` records that "'dispatch both' meant
+    local subagents, not a devpod" — so refusing every PostToolUse carrying an
+    `agent_id` made this hook SILENT on the exact incident it exists to prevent.
+    MEASURED: `parent reads 193 -> a subagent does all the work -> parent Stop`
+    returned ('silent', '') against a card with ZERO comments.
+
+    The parent dispatched the subagent; that work is the session's, and the parent owns
+    the write-back. So: the read half still refuses `agent_id` (the test below), the
+    work half does not.
+    """
+    guard.post_tool_use(bash("clawgatectl task get 193"))       # parent, main thread
+    out = guard.post_tool_use(work_payload)                     # subagent does it all
+    assert out["work"] is True
+    assert guard.work_after_read(state_dir()) is True
+    r = Reader(result=task(comments=[]))
+    kind, text = guard.stop_decision(payload("Stop"), reader=r)
+    assert kind == "block"
+    assert r.calls and r.calls[0][0] == 193
+    assert "193" in text
+
+
+def test_the_NEGATIVE_control_a_subagents_LOOK_AROUND_is_still_not_work(home):
+    """The counterpart control: accepting a subagent's work must not degenerate into
+    accepting everything a subagent does. A subagent that only reads files leaves the
+    parent unarmed — otherwise the four `True`s above are green because `is_work` is
+    no longer consulted on this path at all."""
     guard.post_tool_use(bash("clawgatectl task get 193"))
-    out = guard.post_tool_use(payload(tool_name="Edit", tool_input={"file_path": "/x"},
+    out = guard.post_tool_use(payload(tool_name="Read", tool_input={"file_path": "/x"},
                                       agent_id="agent_012xyz"))
     assert out["work"] is False
     assert guard.work_after_read(state_dir()) is False
@@ -980,9 +1087,9 @@ def test_a_SUBAGENTS_tool_call_never_arms_the_PARENT_session(home):
     assert r.calls == []
 
 
-def test_the_positive_control_for_the_agent_id_refusal(home):
-    """The identical payload WITHOUT `agent_id` must arm it — otherwise the refusal
-    above is green because nothing in this fixture could ever set the flag."""
+def test_the_positive_control_for_the_agent_id_asymmetry(home):
+    """The identical Edit WITHOUT `agent_id` must arm it too — so the assertions above
+    are about the ASYMMETRY and not about a flag nothing in this fixture could set."""
     guard.post_tool_use(bash("clawgatectl task get 193"))
     out = guard.post_tool_use(payload(tool_name="Edit",
                                       tool_input={"file_path": "/x"}))
@@ -990,11 +1097,28 @@ def test_the_positive_control_for_the_agent_id_refusal(home):
     assert guard.work_after_read(state_dir()) is True
 
 
-def test_a_subagents_READ_also_does_not_arm_the_parent(home):
-    """The other half: the refusal is checked before the state dir is even computed,
-    so a subagent surveying the board cannot create a ledger for its parent."""
+def test_a_subagents_READ_does_not_arm_the_parent(home):
+    """🔴 THE OTHER HALF OF THE ASYMMETRY, AND IT WAS A MEASURED FALSE POSITIVE. A
+    subagent surveying the board must not create a ledger for its parent, whose Stop
+    would then block on a card the parent never touched. `agent_id` suppresses the READ
+    unconditionally — before the state dir is even used."""
     guard.post_tool_use(bash("clawgatectl task get 193", agent_id="agent_012xyz"))
     assert not os.path.exists(state_dir())
+
+
+def test_a_subagent_can_neither_ARM_nor_SATISFY_the_trigger_by_itself(home):
+    """🔴 THE COMBINED SHAPE — finding 2C, which must stay fixed. A subagent that reads
+    the card AND does the work leaves the parent with nothing: the read was refused, so
+    there is no ledger, so the work half's `tracked` gate is false and no state dir is
+    ever created. Parent Stop is SILENT and never even measures."""
+    guard.post_tool_use(bash("clawgatectl task get 193", agent_id="agent_012xyz"))
+    out = guard.post_tool_use(payload(tool_name="Edit", tool_input={"file_path": "/x"},
+                                      agent_id="agent_012xyz"))
+    assert out["work"] is False
+    assert not os.path.exists(state_dir())
+    r = Reader(result=task(comments=[]))
+    assert guard.stop_decision(payload("Stop"), reader=r) == ("silent", "")
+    assert r.calls == []
 
 
 def test_SubagentStop_produces_no_output_through_the_real_process(home, tmp_path):
@@ -1812,3 +1936,289 @@ def test_scrub_truncates_and_a_failing_client_cannot_flood_the_transcript(tmp_pa
     assert len(tail) == 120, tail
     assert tail.startswith("l1 l2 ")
     assert msg.count("\n") == 0
+
+
+# =========================================================================== #
+# 20. THE PER-TASK READ ANCHOR, THE NOTICE'S OWN CLAIM, AND THE DISMISSAL LEDGER
+# =========================================================================== #
+
+# 🔴 One instant per role, all distinct and none derived from another, so a fixture
+# cannot pass by collapsing two anchors into one.
+READ_194_EPOCH = READ_PLUS_1H                    # 13:00 — AFTER the 12:30 work event
+WORK_AFTER_194_EPOCH = 1786799400.0              # 13:10 — the positive control's work
+COMMENT_TS = "2026-08-15T13:00:00.000000Z"       # the 193 write-back
+
+
+def _reader_193_written_194_bare():
+    """193 has a `claude-code` comment; 194 has none. Records every call, so "194 was
+    never measured" is assertable as an ABSENCE of the live read and not merely as a
+    quiet verdict."""
+    calls = []
+
+    def reader(task_id, timeout=None):
+        calls.append(task_id)
+        if task_id == 194:
+            return task(task_id=194, comments=[])
+        return task(task_id=193, comments=[comment(created=COMMENT_TS)])
+    return reader, calls
+
+
+def test_a_task_read_AFTER_the_last_work_event_is_owed_NOTHING(home):
+    """🔴 PRIOR FINDING 2B, MEASURED ON BOTH COMMITS — pre-existing, not a delta
+    regression. `read 193 -> work -> write 193 back -> Stop` is correctly silent; then
+    merely READING 194, with no work at all after it, BLOCKED and named 194.
+
+    "Was there work in this session" is necessarily session-wide, but "was there work
+    after THIS task's own read" is not: the state dir already stores a per-task
+    `first_read_ts` beside the session's `last_work_ts`. Comparing them is
+    deterministic with data the hook already has — no `cwd`, no `agent_type`, both of
+    which are partial and heuristic. 194 is skipped BEFORE the live read, so the fix
+    also spends one fewer subprocess.
+    """
+    guard.post_tool_use(bash("clawgatectl task get 193"), now=READ_EPOCH)
+    guard.post_tool_use(payload(tool_name="Edit", tool_input={"file_path": "/x"}),
+                        now=WORK_EPOCH)
+    guard.post_tool_use(bash("clawgatectl task get 194"), now=READ_194_EPOCH)
+
+    reader, calls = _reader_193_written_194_bare()
+    assert guard.stop_decision(payload("Stop"), reader=reader) == ("silent", "")
+    # 193 WAS measured (and came back written); 194 was never even asked about.
+    assert calls == [193]
+
+
+def test_the_positive_control_for_the_read_anchor(home):
+    """The identical session with ONE thing changed — a work event AFTER 194's read —
+    must block and name 194. Without this the silence above is indistinguishable from a
+    Stop path that had stopped looking at 194 for some other reason."""
+    guard.post_tool_use(bash("clawgatectl task get 193"), now=READ_EPOCH)
+    guard.post_tool_use(payload(tool_name="Edit", tool_input={"file_path": "/x"}),
+                        now=WORK_EPOCH)
+    guard.post_tool_use(bash("clawgatectl task get 194"), now=READ_194_EPOCH)
+    guard.post_tool_use(bash("git commit -m 'now work on 194'"),
+                        now=WORK_AFTER_194_EPOCH)
+
+    reader, calls = _reader_193_written_194_bare()
+    kind, text = guard.stop_decision(payload("Stop"), reader=reader)
+    assert kind == "block"
+    assert 194 in calls
+    assert "task status 194 ready_for_review" in text
+
+
+def test_the_read_anchor_uses_the_TASKS_OWN_read_not_the_earliest_one(home):
+    """The comparison is per-task, not "the session's oldest read". 193 (read before
+    the work) still fires; 194 (read after it) does not — in ONE Stop, so a mutant that
+    replaced the per-task read with a session-wide minimum or maximum is visible."""
+    guard.post_tool_use(bash("clawgatectl task get 193"), now=READ_EPOCH)
+    guard.post_tool_use(payload(tool_name="Edit", tool_input={"file_path": "/x"}),
+                        now=WORK_EPOCH)
+    guard.post_tool_use(bash("clawgatectl task get 194"), now=READ_194_EPOCH)
+
+    calls = []
+
+    def reader(task_id, timeout=None):
+        calls.append(task_id)
+        return task(task_id=task_id, comments=[])       # NEITHER is written back
+
+    kind, text = guard.stop_decision(payload("Stop"), reader=reader)
+    assert kind == "block"
+    assert calls == [193]
+    assert "task status 193 ready_for_review" in text
+    assert "task status 194" not in text
+
+
+def test_a_read_in_the_SAME_call_as_the_work_still_counts_as_work_on_it(home):
+    """🔴 `>=`, not `>`. One Bash call can be both the read and the work
+    (`clawgatectl task get 194 && git commit -m x`), and `post_tool_use` stamps both
+    from the SAME `now` — so an equal pair is work ON that task, not work before it. An
+    off-by-one here would silence the guard for every single-command pickup."""
+    guard.post_tool_use(bash("clawgatectl task get 194 && git commit -m x"),
+                        now=READ_194_EPOCH)
+    r = Reader(result=task(task_id=194, comments=[]))
+    kind, text = guard.stop_decision(payload("Stop"), reader=r)
+    assert kind == "block"
+    assert [c[0] for c in r.calls] == [194]
+    assert "task status 194 ready_for_review" in text
+
+
+def test_an_UNREADABLE_work_stamp_does_not_silently_disable_the_anchor(home):
+    """🔴 FAIL-LOUD, deliberately, and the opposite direction from `writeback_state`'s
+    fallback. `work_after_read` has already proved work happened; if the stamp itself
+    cannot be parsed we cannot say the work predates any read, so the task is still
+    measured. A truncated file must not be a silent global off-switch."""
+    sd = seed(task_id=193, ts=READ_TS)
+    with open(os.path.join(sd, guard.STATE_WORK), "w") as fh:
+        fh.write("1")                     # the shape an older build wrote
+    assert guard.last_work_ts(sd) == "1"
+    assert guard.parse_ts("1") is None
+    r = Reader(result=task(comments=[]))
+    kind, _ = guard.stop_decision(payload("Stop"), reader=r)
+    assert kind == "block"
+    assert [c[0] for c in r.calls] == [193]
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE NOTICE'S CLAIM ABOUT ITSELF — it is read in TWO contexts, so it must be
+# true in both. `stop_decision` joins `blocks + notices` into ONE reason string, so
+# a notice's text is spliced verbatim into a `decision:"block"` payload whenever any
+# OTHER task is blocking. The previous wording ("and this turn is ending normally")
+# was measured verbatim inside such a reason: the model was told the turn was ending
+# while it was being forcibly continued.
+#
+# Pinned as the WHOLE normalised sentence, not as a keyword. A two-word check here
+# would be walkable by rewording — and the sentence IS the artifact under test.
+# --------------------------------------------------------------------------- #
+NOTICE_SELF_CLAIM = ("This is a NOTICE, not a block — nothing is being asserted "
+                     "about the card, because nothing could be measured, and this "
+                     "notice on its own does not hold the turn open.")
+
+
+def _norm(s):
+    return " ".join(s.split())
+
+
+def test_the_notice_claims_only_what_is_true_of_the_NOTICE(home):
+    assert NOTICE_SELF_CLAIM in _norm(guard.unknown_text(193, READ_TS, "boom", SESSION))
+
+
+def test_that_same_sentence_is_still_true_when_it_rides_inside_a_BLOCK(home, capsys):
+    """One task measurably missing, one unmeasurable. The reason string carries both,
+    and the CLI forces a continuation — so any sentence in it asserting the turn is
+    ending is false at the moment the model reads it."""
+    guard.post_tool_use(bash("clawgatectl task get 193"), now=READ_EPOCH)
+    guard.post_tool_use(bash("clawgatectl task get 194"), now=READ_EPOCH)
+    guard.post_tool_use(payload(tool_name="Edit", tool_input={"file_path": "/x"}),
+                        now=WORK_EPOCH)
+
+    def reader(task_id, timeout=None):
+        if task_id == 194:
+            raise guard.LiveReadError("board unreachable")
+        return task(task_id=193, comments=[])
+
+    verdict = guard.stop_decision(payload("Stop"), reader=reader)
+    assert verdict[0] == "block"
+    out = emitted(capsys, verdict)
+    reason = _norm(out["reason"])
+    # The context really is a forced continuation, per the rule transcribed from the
+    # installed bundle — so this is not a hypothetical splice.
+    assert forces_a_continuation(out) is True
+    assert "UNVERIFIED for task 194" in reason
+    assert NOTICE_SELF_CLAIM in reason
+
+
+def test_a_notice_ALONE_still_ends_the_turn_and_carries_the_same_sentence(home,
+                                                                          capsys):
+    """The other context, byte-identical text: emitted on its own the notice does NOT
+    force a continuation. Both halves of "true in both contexts" measured, not one."""
+    seed()
+    verdict = guard.stop_decision(payload("Stop"),
+                                  reader=Reader(raises=guard.LiveReadError("down")))
+    assert verdict[0] == "notice"
+    out = emitted(capsys, verdict)
+    assert forces_a_continuation(out) is False
+    assert NOTICE_SELF_CLAIM in _norm(out["systemMessage"])
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE DISMISSAL LEDGER — `--dismiss` is a real bypass of a deterministic guard,
+# gated only by prose in the block text, in a hook whose whole premise is that PROSE
+# LOST 2/2. It used to write no record anywhere, so "is it being used honestly?" was
+# structurally unanswerable and the loop could never be closed.
+# --------------------------------------------------------------------------- #
+def test_every_dismissal_appends_one_line_to_the_ledger(home):
+    seed()
+    p = run_cli(["--dismiss", "193", "--session", SESSION], home)
+    assert p.returncode == 0
+    with open(guard._dismissals_path()) as fh:
+        lines = [ln for ln in fh.read().splitlines() if ln.strip()]
+    assert len(lines) == 1
+    rec = json.loads(lines[0])
+    assert rec["task_id"] == 193
+    assert rec["session"] == SESSION
+    assert rec["removed"] == ["read-193"]
+    assert guard.parse_ts(rec["ts"]) is not None
+
+
+def test_a_REPEAT_dismissal_is_recorded_too_and_is_distinguishable(home):
+    """A no-op dismissal records as well — otherwise "ran it three times" is
+    indistinguishable from "ran it once", which is exactly the thing being measured."""
+    seed()
+    run_cli(["--dismiss", "193", "--session", SESSION], home)
+    run_cli(["--dismiss", "193", "--session", SESSION], home)
+    with open(guard._dismissals_path()) as fh:
+        recs = [json.loads(ln) for ln in fh.read().splitlines() if ln.strip()]
+    assert len(recs) == 2
+    assert recs[0]["removed"] == ["read-193"]
+    assert recs[1]["removed"] == []       # the second cleared nothing
+
+
+def test_the_ledger_survives_the_state_prune(home):
+    """🔴 It lives OUTSIDE the per-session root `prune` sweeps. A record that ages out
+    with the session that produced it cannot answer a question asked weeks later."""
+    seed()
+    guard.record_dismissal(193, SESSION, ["read-193"])
+    # 🔴 STRUCTURAL, not just behavioural. `prune` sweeps with `shutil.rmtree`, which
+    # silently no-ops on a FILE — so a ledger moved INSIDE the swept root would survive
+    # this test by accident while being one `os.remove` away from vanishing. Assert the
+    # RELATIONSHIP (the ledger is not under the directory prune walks) as well as the
+    # outcome.
+    root = os.path.normpath(guard._state_root())
+    assert not os.path.normpath(guard._dismissals_path()).startswith(root + os.sep)
+    guard.prune(ttl=0)
+    assert guard.tracked_ids(state_dir()) == {}     # the session state IS gone
+    assert os.path.exists(guard._dismissals_path())
+
+
+def test_an_UNWRITABLE_ledger_never_changes_what_dismiss_does(home, monkeypatch):
+    """🔴 FAIL-OPEN. The dismissal is the user-visible act; the record is bookkeeping.
+    Driven with the writer made to raise, through the same entry point the CLI uses."""
+    sd = seed()
+    monkeypatch.setattr(guard, "record_dismissal",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("read-only")))
+    with pytest.raises(OSError):
+        guard.dismiss_main(["--dismiss", "193", "--session", SESSION])
+    assert guard.tracked_ids(sd) == {}     # the dismissal itself already landed
+
+
+def test_the_ledger_writer_swallows_its_own_failure(home, monkeypatch):
+    """...and in the real process it never even raises: `record_dismissal` returns
+    False rather than propagating, so `main()`'s fail-open backstop is not what is
+    keeping the CLI alive."""
+    monkeypatch.setattr(guard.os, "makedirs",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("read-only")))
+    assert guard.record_dismissal(193, SESSION, []) is False
+
+
+def test_the_not_found_message_does_not_print_an_absolute_path(home, capsys):
+    """🔴 Everything this writes goes to stdout, which the model reads and may quote
+    onward. The state dir is an absolute path containing $HOME; the session id is the
+    only part the caller needs."""
+    guard.dismiss_main(["--dismiss", "999", "--session", SESSION])
+    out = capsys.readouterr().out
+    assert "nothing to dismiss" in out
+    assert str(home) not in out
+    assert guard._state_root() not in out
+    assert SESSION in out                 # ...and it still says WHICH session
+
+
+@pytest.mark.parametrize("raw,want", [
+    (".", "_"),
+    ("..", "__"),
+    ("...", "___"),
+])
+def test_sanitize_neuters_an_all_dots_component(raw, want):
+    """🔴 The allowed set includes `.`, so `--session ..` resolved one level UP to the
+    state root. Bounded today — only `read-N`/`fires-N`/`unknown-N` are ever unlinked,
+    all `%d`-formatted, and `os.remove` refuses a directory — but "bounded" is a
+    property of today's call sites, not of `_sanitize`."""
+    assert guard._sanitize(raw) == want
+    joined = guard._state_dir({"session_id": raw})
+    assert os.path.normpath(joined) != os.path.normpath(guard._state_root())
+    assert os.path.dirname(os.path.normpath(joined)) == \
+        os.path.normpath(guard._state_root())
+
+
+@pytest.mark.parametrize("raw", [".zshrc", "v1.2.3", "a.b", "sess-1.0.tmp"])
+def test_the_negative_control_a_normal_dotted_component_is_untouched(raw):
+    """The neutering is enumerated, not a pattern: a component that merely CONTAINS
+    dots must survive intact, or the tighten above is green by eating everything."""
+    assert guard._sanitize(raw) == raw
