@@ -532,9 +532,18 @@ LOCAL_STATUS=""
 { [ "$SCOPE" = all ] || [ "$SCOPE" = local ]; } && \
   LOCAL_STATUS=" · Local ${LOCAL_FAILED:-n/a} failed/${LOCAL_BAD:-n/a} unhealthy"
 echo "STATUS: ${PR_STATUS} · Deploys ${DEP_WAVE} mid-wave/${DEP_STUCK} stuck · Alerts ${ALERT_LINE:-n/a}${INIT_STATUS}${LOCAL_STATUS}"
-# Every section that could NOT measure, named. A degraded section must never
-# fall through to the unqualified all-clear: "nothing needs you" off a probe
-# that asked nothing is the loudest lie this script can print.
+# 🔴 A degraded section must never fall through to the unqualified all-clear:
+# "nothing needs you" off a probe that asked nothing is the loudest lie this
+# script can print.
+#
+# ⚠ SCOPE, stated because an earlier wording here overclaimed. This list covers
+# PRs and local host health ONLY -- `deploys`, `alerts`, `state` and
+# `initiatives` contribute nothing to it, so it is NOT "every section that could
+# not measure". And it is printed in the `elif` below, so when ACTIONS is
+# non-empty the degradation is not NAMED at all. Nothing is spelled as a
+# measured zero either way -- the discriminant survives in the STATUS line
+# above (`Local n/a failed/...`) -- but the naming is lost, and a comment
+# promising more than the code delivers is how the next reader stops checking.
 DEGRADED=()
 { [ "$PR_ERR" -gt 0 ] || [ "$PR_DISCOVERY" = failed ]; } && DEGRADED+=("PRs: ${PR_SCOPE}")
 [ "${LOCAL_DEGRADED:-0}" = 1 ] && DEGRADED+=("local host health: systemctl/user manager unreachable")

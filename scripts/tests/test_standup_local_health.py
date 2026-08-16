@@ -76,7 +76,15 @@ _bus_down(){
 [ -n "${SC_FAIL_ALL:-}" ] && _bus_down
 for a in "$@"; do
   case "$a" in
-    --failed) [ -f "$fix/failed.txt" ] && cat "$fix/failed.txt"; exit 0;;
+    # 🔴 SC_FAIL_FAILED fails the --failed PROBE ONLY, leaving per-unit `show`
+    # working. Without a mode that isolates it, the two legs of the degraded
+    # flag cannot be told apart: under SC_FAIL_ALL the per-unit leg sets the
+    # flag anyway, so deleting the probe's own `LOCAL_DEGRADED=1` is invisible
+    # and a real false all-clear (`Local n/a failed/0 unhealthy` printed beside
+    # `All clear`) renders with the suite green. A fixture that cannot isolate
+    # the leg it is aimed at proves nothing about that leg.
+    --failed) [ -n "${SC_FAIL_FAILED:-}" ] && _bus_down
+              [ -f "$fix/failed.txt" ] && cat "$fix/failed.txt"; exit 0;;
   esac
 done
 # `systemctl --user show <unit> -p ...` — the unit is the arg after `show`
@@ -153,7 +161,7 @@ class Harness:
         return d
 
     def run(self, units=UNITS, *, stub_systemctl=True, bus_down=False,
-            show_bus_down=False):
+            show_bus_down=False, failed_bus_down=False):
         env = dict(os.environ)
         if stub_systemctl:
             env["PATH"] = "%s:%s" % (self.bin, env["PATH"])
@@ -165,10 +173,13 @@ class Harness:
         env["STANDUP_LOCAL_UNITS"] = units
         env.pop("SC_FAIL_ALL", None)
         env.pop("SC_FAIL_SHOW", None)
+        env.pop("SC_FAIL_FAILED", None)
         if bus_down:
             env["SC_FAIL_ALL"] = "1"
         if show_bus_down:
             env["SC_FAIL_SHOW"] = "1"
+        if failed_bus_down:
+            env["SC_FAIL_FAILED"] = "1"
         r = subprocess.run(["bash", str(STANDUP), "local"], env=env,
                            capture_output=True, text=True, timeout=120)
         assert "STATUS:" in r.stdout, "no STATUS line:\n%s\n%s" % (
@@ -401,6 +412,47 @@ def test_a_dead_bus_is_also_distinguishable_from_REAL_FAILURES(h):
     assert broken == "Local 2 failed/1 unhealthy"
     assert dead == "Local n/a failed/n/a unhealthy"
 
+
+
+def test_a_FAILED_PROBE_that_cannot_ANSWER_suppresses_the_all_clear(h):
+    """🔴 THE LEG THE OLD STUB COULD NOT ISOLATE.
+
+    `LOCAL_DEGRADED=1` on the `--failed` rc!=0 branch had no guard: deleting
+    that line survived all 87 tests, because the only bus-down modes were
+    FAIL_ALL (which also kills the per-unit `show`, so the OTHER leg sets the
+    flag and hides the deletion) and FAIL_SHOW (which leaves the probe
+    working). Neither can see this leg on its own.
+
+    What the deletion actually ships, measured: `Local n/a failed/0 unhealthy`
+    printed directly beside `All clear in scope 'local' — nothing needs you.`
+    An `n/a` in the very same line as the all-clear is worse than the original
+    false zero, because it proves the code KNEW it could not measure and said
+    all-clear anyway.
+    """
+    out = h.run(failed_bus_down=True)
+    # the probe could not answer -> it must say so, and must NOT spell a zero
+    assert "systemctl n/a" in out
+    assert "n/a failed" in out
+    assert "0 failed" not in out
+    # ...and the all-clear must be suppressed, naming the degraded section
+    assert "All clear" not in out, (
+        "an all-clear beside an unmeasurable probe is the defect itself")
+    assert "coverage was degraded" in out
+    assert "local host health" in out
+
+
+def test_the_failed_probe_leg_is_INDEPENDENT_of_the_per_unit_leg(h):
+    """The control that makes the test above non-vacuous: the per-unit `show`
+    leg still works here, so the flag can ONLY have come from the probe. If a
+    future refactor makes one leg imply the other, this fails rather than
+    quietly restoring the blind spot."""
+    out = h.run(failed_bus_down=True)
+    # per-unit rows still rendered a real verdict -> that leg was NOT degraded
+    assert "— systemctl n/a" in out
+    assert out.count("systemctl n/a") >= 1
+    # and the healthy path is untouched by the new stub knob
+    clean = h.run()
+    assert "All clear" in clean and "coverage was degraded" not in clean
 
 def test_a_unit_whose_show_FAILED_is_n_a_not_absent(h):
     """"absent" is a positive claim about this host — that the unit is not
