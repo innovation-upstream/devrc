@@ -126,13 +126,28 @@
 # NEVER printed alone: `N of M row(s) EXAMINED` is the claim, and a 0 over M=0 is
 # reported as COULD NOT MEASURE, never as ready. Every way this can fail to
 # measure — no session-manager, a crash, unparseable output, a scan of the wrong
-# host, fuzzyclaw not actually read — is its own reason token from
+# host, fuzzyclaw not actually read, the age histogram ABSENT or in a writer
+# vocabulary this gate does not recognise — is its own reason token from
 # lib/drift_phase2.py and lands in the same COULD-NOT-MEASURE branch. None of
 # them sets rc 16, and none of them is a zero.
 #
+# 🔴 THAT LAST SENTENCE WAS FALSE ON ARRIVAL, which is why the ledger below
+# exists. `summary.age_sources` shipped with no presence or type check, so a
+# report without it — including one from a session-manager older than the field,
+# i.e. exactly the stale host this deadman is FOR — printed `READY — 0 of 47`
+# byte-identical to a real one. The claim is now MACHINE-CHECKED rather than
+# restated: `test_drift_check.py::test_the_phase2_reason_token_ledger_is_pinned_
+# to_the_fields_read` ast-extracts the emitted token set AND the set of report
+# fields the reader consults, and fails when either grows or shrinks — so a
+# newly-read field with no reason token of its own is a red test.
+#
 # It is NON-FATAL to the rest of the run by construction: it is the last block
 # before the summary, it only ever raises rc from 0 to 16, and a failure to
-# measure raises nothing at all.
+# measure raises nothing at all. 🔴 rc 16 is a SUCCESS to systemd
+# (`SuccessExitStatus = 16` on the unit in nix/home.nix): it stays set until
+# somebody does the cleanup, so failing the unit on it would fire the
+# DND-defeating failure toast 4× a day forever — the same permanently-red-gate
+# refusal this file already makes for an unreachable remote, below.
 #
 # ── UNREACHABLE IS NOT DRIFT (the alerting policy) ────────────────────────────
 # 🔴 The timer runs on the WORKBENCH ONLY (gated on the ~/.server-mode marker in
@@ -1050,6 +1065,17 @@ else
   # A reader that printed nothing, or something that is not `<token> <int> <int>`,
   # is itself a could-not-measure — not a zero. Checked before any comparison,
   # because `[ "" -gt 0 ]` is an error, not a false.
+  #
+  # 🔴 THE FIELD **COUNT** IS PART OF THAT, AND CHECKING ONLY THE FIELDS' SHAPE
+  # WAS NOT ENOUGH. These expansions read positionally, and `${x%% *}` / `${x##
+  # * }` both fall back to the WHOLE STRING when there is no space — so a
+  # two-field line `ok 47` set BOTH counts from the same field and rendered
+  # `47 of 47 row(s) EXAMINED`, a well-formed-looking measurement that is one
+  # number read twice. It is fail-safe by luck (it reads as NOT READY, never
+  # READY) and it is still a fabricated denominator. `p2_rest` must therefore
+  # contain a space (>=3 fields) and must not contain a second one (<=3).
+  case "$p2_rest" in *' '*) ;; *) p2_rows=-1 ;; esac
+  case "${p2_rest#* }" in *' '*) p2_rows=-1 ;; esac
   case "$p2_rows" in ''|*[!0-9-]*) p2_rows=-1 ;; esac
   case "$p2_fz" in ''|*[!0-9-]*) p2_fz=-1 ;; esac
   if [ -z "$p2_out" ] || [ "$p2_rows" = -1 ] || [ "$p2_fz" = -1 ]; then
@@ -1085,7 +1111,15 @@ echo
 # 🔴 The summary states WHAT WAS CHECKED. It previously said "both hosts on
 # branch main at origin/main" regardless — including for a --no-remote run that
 # looked at one host, and for a --no-local --no-remote run that looked at none.
-if [ "$rc" = 0 ]; then
+#
+# 🔴 rc 16 TAKES **BOTH** BRANCHES, and that is not a convenience. It is the one
+# owned code that is NOT a statement about host health — nothing is out of sync
+# — so suppressing the affirmative line for it withheld the very finding the run
+# DID make ("no drift on the host(s) CHECKED") and printed only the cleanup
+# notice. An operator then cannot tell an rc 16 over a clean host from an rc 16
+# over a host nobody vouched for. Both claims are true and independent, so both
+# are printed. Pinned by `test_the_phase2_ready_run_still_prints_the_no_drift_line`.
+if [ "$rc" = 0 ] || [ "$rc" = 16 ]; then
   if [ -n "$CHECKED" ]; then
     # 🔴 No phrasing here may name a host this run did not contact — the wording
     # it replaced said "both hosts" unconditionally, and read as coverage the run
@@ -1103,10 +1137,18 @@ if [ "$rc" = 0 ]; then
     # `--no-local --no-remote` refusal above is already rc 2 for, so it gets the
     # same code: a run that observed no host is a usage outcome, not a verdict.
     #
-    # 🔴 GUARDED ON rc = 0, deliberately. This can only ever turn a ZERO into a
-    # 2 — it can never rewrite a real verdict, so an rc 8 stays 8 and still
-    # reaches OnFailure. (`test_local_rc8_still_wins_when_the_remote_is_
-    # unreachable` and `test_checked_nothing_does_not_rewrite_a_real_verdict`.)
+    # 🔴 GUARDED ON rc IN {0, 16}, deliberately. This can only ever turn a
+    # "nothing is wrong" code into a 2 — it can never rewrite a DRIFT verdict,
+    # so an rc 8 stays 8 and still reaches OnFailure.
+    # (`test_local_rc8_still_wins_when_the_remote_is_unreachable` and
+    # `test_checked_nothing_does_not_rewrite_a_real_verdict`.)
+    #
+    # rc 16 reaching here is unreachable rather than handled: 16 is the LEAST
+    # severe owned code, so it survives `note_rc` only when the local leg was
+    # clean, and a clean local leg is what puts the host in $CHECKED. If that
+    # ever changes, 2 ("observed no host") is the right answer over 16 ("a
+    # cleanup is safe") — the reason this branch exists is that a run which
+    # vouched for nothing must not hand systemd a code that reads as fine.
     #
     # NOT reachable from the timer, whose ExecStart passes no flags — with both
     # legs on, an unreachable remote still leaves the local host CHECKED. This
@@ -1116,7 +1158,8 @@ if [ "$rc" = 0 ]; then
     [ -n "$UNCHECKED" ] && echo "drift-check: NOT checked: $UNCHECKED"
     exit 2
   fi
-else
+fi
+if [ "$rc" != 0 ]; then
   # 🔴 THE VERDICT WORD IS ITSELF A CLAIM. rc 16 is not drift — nothing is out of
   # sync and no host needs repairing; a cleanup became possible. Printing "DRIFT"
   # for it would send the operator hunting a divergence that does not exist, and

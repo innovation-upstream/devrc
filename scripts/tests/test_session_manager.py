@@ -4145,10 +4145,45 @@ def test_the_filter_records_an_EMPTY_removal_set_distinctly_from_NO_FILTER():
     off = mix_gather()
     assert off["filters"]["kinds_excluded_by_filter"] is None
     assert off["summary"]["kinds_excluded_by_filter"] is None
-    # 🔴 and the CAVEAT omits the key entirely rather than carrying a null —
-    # `_fmt_kind_scope` branches on its presence, so a None here would read as
-    # "a filter ran and removed nothing".
+    # 🔴 and the CAVEAT omits the key entirely rather than carrying a null, so
+    # the JSON reader sees the same not-measured-vs-measured-none distinction
+    # here as in the two surfaces above. A null would spell "a filter ran"
+    # inside a structure whose other two keys spell "none ran".
+    #
+    # 🔴 THE RENDERER DELIBERATELY DOES NOT DISTINGUISH THEM, and an earlier
+    # version of this comment claimed it did ("`_fmt_kind_scope` branches on its
+    # presence") — it does not; it is `kd.get(...) or []`. Pinned as behaviour
+    # by `test_the_kind_scope_RENDER_collapses_missing_and_empty_deliberately`,
+    # with the reasoning there.
     assert "kinds_excluded_by_filter" not in off["caveats"]["kind_scope"]
+
+
+def test_the_kind_scope_RENDER_collapses_missing_and_empty_deliberately():
+    """🔴 THE PROSE ASKS A NARROWER QUESTION THAN THE JSON, and that is the
+    whole reason the two surfaces differ. `_fmt_kind_scope` asks only WHICH
+    WHOLE KINDS A FILTER TOOK — every clause it can emit about the filter is
+    guarded on a non-empty list. "No filter ran" and "a filter ran and took no
+    whole kind" give the same answer to that question, so rendering them
+    differently would mean inventing a sentence about a filter that removed
+    nothing.
+
+    Contrast `kinds_produced` one field over, where missing and empty ARE
+    different sentences ("no scan happened, describe the build" vs "a scan
+    measured zero rows") and an `or` would be the literal-masquerading-as-a-
+    measurement bug that field's guard exists to prevent. The asymmetry is the
+    point; this pins it so the docstring stating it is machine-checked.
+    """
+    base = {"kinds_produced": ["tmux"], "kinds_enumerated": ["cluster", "tmux"]}
+    missing = sm._fmt_kind_scope(dict(base))
+    empty = sm._fmt_kind_scope(dict(base, kinds_excluded_by_filter=[]))
+    assert missing == empty, (missing, empty)
+    # ...and a POSITIVE CONTROL, or the equality above is satisfiable by a
+    # renderer that ignores the field entirely.
+    populated = sm._fmt_kind_scope(
+        dict(base, kinds_excluded_by_filter=["cluster"]))
+    assert populated != missing
+    assert "a FILTER REMOVED every kind=cluster row this scan produced" in populated
+    assert "a FILTER REMOVED" not in missing
 
 
 def test_an_unfiltered_scan_still_renders_the_UNCHANGED_caveat_sentence():

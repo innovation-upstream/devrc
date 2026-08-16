@@ -38,12 +38,46 @@ OUTPUT CONTRACT — one line, three space-separated fields:
 
 `<token>` is `ok` when the two counts are a real measurement, and otherwise a
 reason token explaining why they are not. The counts are `-1` when unknown.
-🔴 The caller must branch on the TOKEN, never on the counts alone: every failure
-mode here would otherwise present as `0 0`, which is indistinguishable from a
-clean host and would read as "phase 2 is ready".
+🔴 The caller must branch on the TOKEN, never on the counts alone: a failure
+mode without a token of its own presents as a plausible count — `0`, or `N 0` —
+which is indistinguishable from a clean host and reads as "phase 2 is ready".
+
+🔴 THE TOKEN SET IS A PINNED LEDGER, NOT A CONVENTION, and it is pinned against
+the FIELDS THIS MODULE READS. `test_drift_check.py::test_the_phase2_reason_token
+_ledger_is_pinned_to_the_fields_read` extracts both sets from this source with
+`ast` and fails when either GROWS or SHRINKS, so consulting a new field without
+giving its absence a token is a red test rather than a silent zero. That guard
+exists because the prose version of it was WRONG for three days: `age_sources`
+had no check at all, so a report missing it — or one from a session-manager
+predating it (it landed 2026-08-13) — printed `ok 47 0`, byte-identical to a
+legitimate READY, on the exact staleness this deadman exists to detect.
 """
 import json
 import sys
+
+# 🔴 THE WRITER VOCABULARY, and it is what makes an ABSENT `fuzzyclaw` key a
+# real zero rather than an unmeasured one. `summary.age_sources` is
+# `_count_by(r.get("age_source") or "none" for r in rows)` — a histogram that
+# creates a key only for a value it OBSERVED — so zero fuzzyclaw-sourced rows
+# means NO `fuzzyclaw` key, not `fuzzyclaw: 0`. Reading that absence as 0 is
+# therefore correct, but only while the vocabulary is intact: rename the
+# `age_source` VALUE and the absence means "renamed", not "none", and the gate
+# would authorise a deletion off it. So an unrecognised writer is its own
+# reason token. Fail-closed is the right direction here — a new legitimate
+# writer (phase 3's ledger scope change) makes this say COULD NOT MEASURE until
+# somebody adds it, which is a morning's edit versus a wrong deletion.
+# Measured on the workbench 2026-08-16: `{fuzzyclaw: 7, ledger: 29, none: 13}`.
+AGE_WRITERS = ("fuzzyclaw", "ledger", "none")
+
+
+def _tok(value):
+    """A reason token is the FIRST SPACE-SEPARATED FIELD of the output line, so
+    anything interpolated into one must not contain a space — `${p2_out%% *}`
+    in drift-check.sh would otherwise silently truncate the reason and shift
+    both counts one field left. JSON keys and host names are free text; this
+    makes them safe to quote back."""
+    text = str(value)[:40]
+    return "".join(c if (c.isalnum() or c in "-_.") else "_" for c in text) or "empty"
 
 
 def emit(token, rows=-1, fuzzy=-1):
@@ -62,12 +96,42 @@ def main(argv):
 
     summ = rep.get("summary") or {}
     rows = summ.get("total_sessions")
-    fuzzy = (summ.get("age_sources") or {}).get("fuzzyclaw", 0)
     # `bool` is an `int` in Python; a True here would print as a count.
     if not isinstance(rows, int) or isinstance(rows, bool):
         emit("no-counts")
-    if not isinstance(fuzzy, int) or isinstance(fuzzy, bool):
-        emit("no-counts")
+
+    # 🔴 THE THIRD STRUCTURAL ZERO, AND IT SHIPPED. `age_sources` used to be read
+    # as `(summ.get("age_sources") or {}).get("fuzzyclaw", 0)` — no presence
+    # check, no type check — so ALL of: the key absent, the key renamed, the key
+    # holding a non-dict, and a report from a session-manager that predates the
+    # field entirely (it landed 2026-08-13) collapsed to `0`, and `0` is the
+    # value that authorises the deletion this gate gates. Measured: with a stub
+    # emitting only `{"summary": {"total_sessions": 47}}` the run printed
+    # `🔴 READY — 0 of 47 rows depend on fuzzyclaw`, byte-identical to a real one.
+    #
+    # 🔴 AND IT WAS REACHABLE, on the one host shape this deadman is FOR.
+    # `DRIFT_SESSION_MANAGER` defaults to the checkout's own `scripts/session-
+    # manager`, so a host more than three days behind ran a scan with no
+    # `age_sources` at all — the staleness detector disabled by staleness.
+    srcs = summ.get("age_sources")
+    if not isinstance(srcs, dict):
+        emit("no-age-sources", rows)
+    unknown = sorted(k for k in srcs if k not in AGE_WRITERS)
+    if unknown:
+        emit("unknown-age-writer:%s" % _tok(unknown[0]), rows)
+    if not all(isinstance(v, int) and not isinstance(v, bool)
+               for v in srcs.values()):
+        emit("no-counts", rows)
+    # 🔴 THE COHERENCE CHECK, between two fields derived from the SAME `rows`
+    # list one line apart in `summarize()` (`total_sessions = len(rows)`,
+    # `age_sources = _count_by(... for r in rows)`), so their disagreement is
+    # never legitimate. It is what turns "the `fuzzyclaw` key is absent" from an
+    # assumption into a measurement: over a histogram proven COMPLETE and in a
+    # known vocabulary, an absent key can only mean zero rows had that writer.
+    total = sum(srcs.values())
+    if total != rows:
+        emit("age-sources-incoherent:%d" % total, rows)
+    fuzzy = srcs.get("fuzzyclaw", 0)
 
     # 🔴 THE HOST GUARD, and it is not paranoia. `session-manager` decides which
     # host is LOCAL from `ACTIVITY_HOST` / the collector env file, while
@@ -82,7 +146,7 @@ def main(argv):
     # with the reason and the caller can print the finding in full.
     got = rep.get("local_host")
     if want and got != want:
-        emit("host-mismatch:%s" % (got,), rows, fuzzy)
+        emit("host-mismatch:%s" % _tok(got), rows, fuzzy)
 
     # 🔴 THE POSITIVE-CONTROL GUARD, IN TWO PARTS, because `status == "ok"` is
     # NOT sufficient and I proved it by accident. fuzzyclaw is OPT-IN
@@ -103,7 +167,7 @@ def main(argv):
     fz = rep.get("fuzzyclaw") or {}
     status = fz.get("status")
     if status != "ok":
-        emit("fuzzyclaw-%s" % (status,), rows, fuzzy)
+        emit("fuzzyclaw-%s" % _tok(status), rows, fuzzy)
     seen = fz.get("files_seen")
     if not isinstance(seen, int) or isinstance(seen, bool) or seen <= 0:
         emit("fuzzyclaw-no-task-files", rows, fuzzy)

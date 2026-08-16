@@ -78,3 +78,11 @@ not-measured-vs-measured-none distinction as `excluded_shells` being `null` rath
 
 Reachable today with no cluster row anywhere: `--claude-only` over a host whose tmux rows are
 all bare shells removes the last `tmux` row.
+
+🔴 **`excluded_shells` was `excluded_non_claude` until this change, and THE SCRIPT IS THE
+AUTHORITY ON WHICH NAME IS LIVE — not this file.** These skill docs deploy as a **nix-store
+copy**, so they only change on a `home-manager switch`; `scripts/session-manager` is read from
+the checkout. Between a `git pull` and the switch the two genuinely disagree, and the doc is
+the stale one. Settle it by reading the emitter, never the prose:
+`git grep -n 'excluded_' scripts/session-manager`, or just run a scan and look at the key.
+Same rule for every field named here.

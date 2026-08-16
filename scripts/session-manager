@@ -3209,9 +3209,29 @@ def _fmt_kind_scope(kd) -> str:
     this sentence attributes to the BUILD what a filter did: `--claude-only`
     runs before the derivation, so a scan that produced cluster rows and then
     dropped them rendered "cluster is ENUMERATED but NOT PRODUCED" — false in
-    all three of its clauses. Same treatment as `kinds_produced`: a MISSING key
-    means no filter ran, an EMPTY list means one ran and removed no whole kind,
-    and the two must not collapse.
+    all three of its clauses.
+
+    🔴 AND IT IS **NOT** TREATED LIKE `kinds_produced`. That distinction is
+    load-bearing and this docstring used to get it backwards, claiming a MISSING
+    key and an EMPTY list "must not collapse" three lines above an `or []` that
+    collapses them. What differs is what the two keys are ASKED:
+
+      - `kinds_produced` is asked WHICH KINDS THE SCAN SAW, and missing vs empty
+        are different answers — "no scan happened, describe the build" vs "a
+        scan measured zero rows". Different sentences, so an `or` there is the
+        literal-masquerading-as-a-measurement bug above.
+      - `kinds_excluded_by_filter` is asked ONLY WHICH WHOLE KINDS A FILTER
+        TOOK, and every clause below is guarded on `if filtered:`. Missing ("no
+        filter ran") and `[]` ("one ran and took no whole kind") agree exactly
+        on that: no kind's absence is the filter's doing, so there is nothing
+        for the filter clause to say and the head/tails are identical. Rendering
+        them differently would mean inventing a sentence about a filter that
+        removed nothing.
+
+    The distinction survives where it is actually needed — `summary` publishes
+    `None` vs `[]` verbatim, and `test_session_manager.py` pins all three states
+    as distinguishable in every JSON surface. It is collapsed HERE, in prose
+    that only ever asks the yes/no question, deliberately.
     """
     produced = kd.get("kinds_produced")
     filtered = list(kd.get("kinds_excluded_by_filter") or [])
