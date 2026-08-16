@@ -9009,10 +9009,11 @@ class TestNearMissDoesNotFireOnOrdinaryProse:
         "- 2026-08-15: Resolved by pinning the image tag.",
         "- resolved upstream in 1.2.3.",
         "- **Open** by design.",
-        # ⚠ `Opening…` is a WEAK probe, kept and labelled. It is guarded by the
-        # `(?![a-z])` in the shouted branch, but nothing else about the pattern —
-        # so it pins little on its own. The discriminating prose cases are the
-        # ones above it, which carry the marker word with no `:` after it.
+        # ⚠ `Opening…` is a WEAK probe, kept and labelled — and an audit measured
+        # that the reason previously given here was WRONG. It is NOT guarded by
+        # the shouted branch's lookahead: it is rejected because branch (a) is
+        # case-SENSITIVE and `Opening` is not all-caps. The lookahead only bites
+        # on `OPENing`/`OPENED`, which the all-caps prose shapes now cover.
         "- Opening the pool early caused the stall.",
     ])
     def test_capitalised_prose_is_not_an_attempted_marker(self, line):
@@ -9032,6 +9033,32 @@ NEAR_MISS_MATRIX = json.loads(
         encoding="utf-8"
     )
 )
+
+
+def matrix_problems(matrix: dict) -> list[str]:
+    """Everything wrong with a near-miss matrix, as a list. Empty means sound.
+
+    A FUNCTION rather than inline assertions, so the guard itself is testable:
+    on the real fixture it is always silent, which is exactly the shape that ships
+    broken. `test_the_degeneracy_guard_can_actually_FIRE` feeds it degenerate
+    matrices and watches it speak.
+
+    Counts DISTINCT shapes: duplicates inflate a length without covering anything,
+    and that is how the first version of this check was walked.
+    """
+    problems = []
+    for arm, floor in (("attempts", 12), ("prose", 10),
+                       ("accepted_false_positives", 2), ("real", 2)):
+        shapes = matrix.get(arm, [])
+        if len(set(shapes)) < floor:
+            problems.append(
+                f"{arm}: {len(set(shapes))} distinct shape(s) of {len(shapes)} "
+                f"entries — below the floor of {floor}"
+            )
+    overlap = set(matrix.get("attempts", [])) & set(matrix.get("prose", []))
+    if overlap:
+        problems.append(f"attempts and prose share {len(overlap)} shape(s)")
+    return problems
 
 
 class TestNearMissShapesAgainstTheCommittedMatrix:
@@ -9077,10 +9104,65 @@ class TestNearMissShapesAgainstTheCommittedMatrix:
         assert b.openness_population in ("open", "resolved")
 
     def test_the_matrix_is_not_degenerate(self):
-        """A fixture that lost its arms would make every test above vacuous."""
-        assert len(NEAR_MISS_MATRIX["attempts"]) >= 12
-        assert len(NEAR_MISS_MATRIX["prose"]) >= 8
-        assert not set(NEAR_MISS_MATRIX["attempts"]) & set(NEAR_MISS_MATRIX["prose"])
+        """A fixture that lost its arms would make every test above vacuous.
+
+        🔴 COUNTS DISTINCT SHAPES, AND FLOORS ALL FOUR ARMS. The first version
+        counted `len()` on two arms only, and an audit walked it: replacing
+        `attempts` with 12 copies of ONE line, or emptying
+        `accepted_false_positives` and `real` entirely, left the whole 700-test
+        file green — pytest silently skips an empty parametrize set, so three
+        tests vanished without a failure. A guard on a fixture has to be able to
+        see the fixture collapse.
+        """
+        assert matrix_problems(NEAR_MISS_MATRIX) == []
+
+    def test_the_degeneracy_guard_can_actually_FIRE(self):
+        """🔴 A GUARD NOBODY HAS WATCHED GO RED IS A CLAIM ABOUT NOTHING — and this
+        one guards a fixture, so on the real matrix it is always silent.
+
+        Its first version counted `len()` on two arms; an audit walked it by
+        replacing `attempts` with 12 copies of one line and by emptying two arms
+        entirely (pytest skips an empty parametrize set, so three tests vanished
+        with the suite green). These are those exact degeneracies.
+        """
+        good = NEAR_MISS_MATRIX
+        assert matrix_problems(good) == [], "precondition: the real matrix is sound"
+
+        one = good["attempts"][0]
+        cases = {
+            "duplicates": {**good, "attempts": [one] * 40},
+            "emptied arm": {**good, "accepted_false_positives": []},
+            "emptied real": {**good, "real": []},
+            "overlapping arms": {**good, "prose": list(good["prose"]) + [one]},
+        }
+        for label, bad in cases.items():
+            assert matrix_problems(bad), f"{label} was not detected"
+
+    def test_the_prose_arm_can_express_the_ALL_CAPS_failure_mode(self):
+        """🔴 THE BLIND SPOT THAT LET A WHOLE FP CLASS SHIP. The shouted branch was
+        introduced with a `prose` arm containing ZERO all-caps shapes, so the
+        matrix was structurally incapable of seeing that branch fire on
+        `OPENSSL_CONF`, `OPEN_MAX`, `RESOLVED_ADDR`. A fixture that cannot express
+        the failure mode is not covering it, however green it is."""
+        caps = [s for s in NEAR_MISS_MATRIX["prose"]
+                if any(w.isupper() and len(w) > 3 for w in s.split())]
+        assert len(caps) >= 4, (
+            f"only {len(caps)} all-caps prose shape(s) — the shouted branch's own "
+            f"false-positive class is not represented"
+        )
+
+    def test_the_attempts_arm_reaches_the_sentence_cased_ref_loop(self):
+        """The ref loop (`PR#n`, `#n`, `[...]`, the punctuation run) lives ONLY on
+        branch (b), which all-caps shapes short-circuit past. An audit measured
+        five mutants inside it surviving because every ref-shape in the fixture was
+        shouted. These reach it."""
+        lower_refs = [s for s in NEAR_MISS_MATRIX["attempts"]
+                      if ("#" in s or "[" in s or " : " in s)
+                      and "OPEN" not in s and "RESOLVED" not in s]
+        assert len(lower_refs) >= 3, (
+            f"only {len(lower_refs)} sentence-cased ref shape(s) — branch (b)'s "
+            f"loop is unreachable from this fixture"
+        )
 
     def test_the_SHOUTED_branch_needs_no_terminator(self):
         """Round 3 required `:` and so went silent on the likeliest omission of

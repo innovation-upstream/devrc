@@ -1085,25 +1085,29 @@ _UNMARKED_ACTION = re.compile(r"\bFIX\s*[(:]|\bnot (yet )?addressed\b", re.I)
 # a false `RESOLVED` closes an action nobody closed. So the strict grammar stands
 # and the near-misses are REPORTED instead, which is the fail-loud half.
 #
-# ⚠ THE LEADING `^[-*][ \t]+` IS REDUNDANT IN `_JOURNAL_OPENNESS` ONLY — an
-# audit measured that deleting it from `_NEAR_MISS_MARKER` is KILLED (14 failures),
-# because that pattern's optional date/punctuation prefixes make the bullet marker
-# load-bearing there. The claim below applies to `_JOURNAL_OPENNESS`, and is kept
-# knowingly for it. Both are consumed with `re.match`, which anchors at position
-# 0, and neither pattern sets `re.MULTILINE` — so loosening or deleting that
-# prefix is an EQUIVALENT mutant that no test can kill (two batteries have now
-# reported exactly these two as survivors, which is how the redundancy was
-# identified rather than assumed). It stays because the anchoring it duplicates
-# is a property of the CALL, not of the pattern: switch either consumer to
-# `search` and the prefix becomes the only thing standing between this and
-# matching mid-prose. Do not "simplify" it, and do not count it as a guard.
+# ⚠ ONLY THE BARE `^` IS REDUNDANT. The `[-*][ \t]+` after it is LOAD-BEARING in
+# BOTH patterns, and two earlier versions of this comment said the opposite.
+#
+# Measured against the full `test_subsystem_touch.py` (baseline 712 passed):
+#     delete `^[-*][ \t]+` from `_JOURNAL_OPENNESS`  → 22 FAILURES
+#     delete `^[-*][ \t]+` from `_NEAR_MISS_MARKER`  → 19 FAILURES
+#     delete only the `^` from either                → 712 passed (equivalent)
+#
+# The `^` is redundant because both are consumed with `re.match`, which anchors at
+# position 0, over patterns with no `re.MULTILINE`. The bullet marker is not: the
+# optional date and punctuation prefixes mean that without it these match happily
+# mid-string. A maintainer acting on the old wording — "do not count it as a
+# guard" — would have deleted the whole prefix and broken 22 tests.
+#
+# The `^` stays regardless: it costs nothing, and it is what keeps the anchoring
+# true if a consumer ever switches to `search`.
 _NEAR_MISS_MARKER = re.compile(
     r"^[-*][ \t]+"
     r"(?:\d{4}-\d{2}-\d{2}[^A-Za-z]{0,3})?"    # a date in any of its corpus forms
     r"[^A-Za-z0-9]{0,4}"                        # `**`, quotes, stray punctuation
     r"(?:"
     # (a) SHOUTED — all-caps marker, no terminator needed. Prose does not shout.
-    r"(?:OPEN|RESOLVED)(?![a-z])"
+    r"(?:OPEN|RESOLVED)(?![A-Za-z0-9_])"
     r"|"
     # (b) sentence-cased — then a `:` IS required, optionally after a sha /
     #     PR reference / parenthetical / bracketed ref.
@@ -1133,7 +1137,20 @@ _NEAR_MISS_MARKER = re.compile(
 # detector exists to prevent, reintroduced by the fix for the previous one.
 #
 # (a) carries no terminator because an all-caps `OPEN`/`RESOLVED` opening a bullet
-# is a marker attempt in every sample examined; `(?![a-z])` keeps it off `Opening`.
+# is a marker attempt in every sample examined.
+#
+# 🔴 THE GUARD IS `(?![A-Za-z0-9_])`, NOT `(?![a-z])`, and the difference is a
+# whole class of false positive. `(?![a-z])` blocks only a LOWERCASE continuation,
+# so it stopped `Opening` and let through every all-caps identifier a real bullet
+# quotes: `OPENSSL_CONF`, `OPEN_MAX`, `RESOLVED_ADDR`, `OPENTELEMETRY`, `OPENED`.
+# Each produced a 🔴 "attempted marker that DID NOT PARSE — fix the LINE" advisory
+# about a correct sentence, which is how a loud path gets ignored.
+#
+# ⚠ AND THE FIXTURE COULD NOT SEE IT: the `prose` arm shipped with this branch held
+# ZERO all-caps shapes, so the matrix introduced alongside the branch was
+# structurally blind to the class the branch introduced. All-caps prose is pinned
+# in the fixture now, and a test asserts the arm can still express it — a fixture
+# that cannot express the failure mode is not covering it, however green it is.
 # (b) needs the terminator because sentence case IS ordinary English — "Open
 # questions remain" must not fire, while "Open:" must.
 #

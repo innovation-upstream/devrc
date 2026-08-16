@@ -4,16 +4,22 @@
     "",
     "Three rounds of review changed this pattern, each justified by a matrix that lived",
     "only in the author's scratchpad. Round 4 built a different 20-shape matrix and got",
-    "the opposite verdict from round 3's 8-shape one — because a matrix nobody can re-run",
+    "the opposite verdict from round 3's 8-shape one \u2014 because a matrix nobody can re-run",
     "is an opinion. `test_subsystem_touch.py` reads this file, so changing the pattern",
     "means changing numbers anyone can reproduce.",
     "",
     "attempts:  a writer TRIED to declare a marker and missed the grammar. MUST be detected.",
     "prose:     correct English a 'DID NOT PARSE, fix the LINE' advisory would be wrong about.",
     "real:      valid markers. Handled before near-miss runs; listed so a change that starts",
-    "           matching them is visible even though precedence makes it harmless."
+    "           matching them is visible even though precedence makes it harmless.",
+    "",
+    "Two arms were extended after review found them structurally blind:",
+    "  * `prose` had ZERO all-caps shapes, so it could not see the shouted branch",
+    "    firing on OPENSSL_CONF / OPEN_MAX / RESOLVED_ADDR.",
+    "  * every `attempts` shape exercising the sha/ref loop was all-caps, so it",
+    "    short-circuited on the shouted branch and the loop went untested \u2014 five",
+    "    mutants inside it survived. The sentence-cased ones below reach it."
   ],
-
   "attempts": [
     "- 2026-08-15 OPEN: rotate the key.",
     "- 2026-08-15: RESOLVED abc1234 (some-repo): closed.",
@@ -28,11 +34,14 @@
     "- RESOLVED by abc1234: done.",
     "- OPEN [#505]: rotate the key.",
     "- OPEN the retry budget is not addressed.",
-    "- OPEN — the retry budget.",
+    "- OPEN \u2014 the retry budget.",
     "- 2026-08-15: OPEN the retry budget.",
-    "- RESOLVED abc1234 — closed it."
+    "- RESOLVED abc1234 \u2014 closed it.",
+    "- Resolved PR#505: done.",
+    "- Open #505: rotate the key.",
+    "- Open [#505]: rotate the key.",
+    "- Open : the budget."
   ],
-
   "prose": [
     "- Open questions remain about the retry budget.",
     "- 2026-08-15: Resolved by pinning the image tag.",
@@ -43,15 +52,19 @@
     "- 2026-08-15: an ordinary durable lesson.",
     "- 2026-08-15: the port is open for business.",
     "- 2026-08-15: we resolved the ticket last week.",
-    "- the open file limit is the constraint here."
+    "- the open file limit is the constraint here.",
+    "- OPENSSL_CONF must point at the vendored bundle.",
+    "- OPEN_MAX is 1024 on this host.",
+    "- RESOLVED_ADDR in the trace was the stale ClusterIP.",
+    "- OPENTELEMETRY exporter was never wired up.",
+    "- OPENED the PR against the wrong base.",
+    "- **OPENSSL** was the culprit."
   ],
-
   "accepted_false_positives": [
     "- Resolved: we decided to keep it.",
     "- Open (for now): the retry budget stays.",
     "- Resolved (finally): we shipped it."
   ],
-
   "real": [
     "- 2026-08-15: OPEN: fine.",
     "- 2026-08-15: RESOLVED b83bfb584: fine."
