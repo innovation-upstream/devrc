@@ -57,6 +57,16 @@ $OBS --cluster homelab --backend loki --query '{namespace="monitoring"}' --since
   alerts firing" = healthy) carry an `absence_ok` flag, so an empty result renders
   a calm `✓ OK — nothing firing` instead of the ⚠ banner — the guard stays loud
   only where empty is genuinely suspicious.
+- 🔴 **A PARTIAL result set is the third case, and the guard above does not cover it.
+  Loki emits NO sample for a bucket with no matching lines**, so a range query over a
+  sparse stream returns far fewer points than `(end-start)/step` — measured 6 where 49
+  were expected. That reads as downsampling or a server limit; it is **absent-means-zero**,
+  and the non-zero points are the whole truth. **Compute the expected sample count and
+  compare** before drawing any conclusion from a short series, and for "is it still
+  happening?" prefer a Prometheus **counter** (dense — `increase()` over the window)
+  to a Loki `count_over_time`. Same trap in the time axis: `count_over_time[1h]`
+  evaluated at instant T covers **T-1h → T**, so a bucket labelled `16:00` can be
+  reporting a 15:31 incident.
 
 ## Presets
 Seeded from **real** queries surveyed out of the datapacket skills
