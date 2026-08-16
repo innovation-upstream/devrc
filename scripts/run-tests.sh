@@ -916,17 +916,17 @@ TARGET_FLOORS=(
   # failed-tmux-lookup regression. Gate's own count through the gate's own rule:
   #   _suggested_floor 39 = 39 - min(50, max(1, 39/20 = 1)) = 39 - 1 = 38.
   "scripts/claude-hooks/tests/test_agent_ledger_hook.py|38"
-  # 2026-08-16, the clawgate write-back guard arrives as a NEW target: 128 collected.
+  # 2026-08-16, the clawgate write-back guard arrives as a NEW target: 130 collected.
   # (118 in the first round; +6 for the wall-clock budget and its positive control, a
   # naive-timestamp case, and the two gaps a DIFFERENTLY-BUILT mutation sweep found —
   # the work gate exercised through `post_tool_use` rather than a seeded state dir,
-  # and a corrupt state file; +4 for the state prune.) Read from the AUTHORITATIVE
-  # gate's own per-target line, then put through the gate's OWN function rather than
-  # arithmetic:
-  #   _suggested_floor 128 = 128 - min(50, max(1, 128/20 = 6)) = 128 - 6 = 122.
+  # and a corrupt state file; +4 for the state prune; +2 for the deferred-import
+  # measurement and its positive control.) Read from the AUTHORITATIVE gate's own
+  # per-target line, then put through the gate's OWN function rather than arithmetic:
+  #   _suggested_floor 130 = 130 - min(50, max(1, 130/20 = 6)) = 130 - 6 = 124.
   # ZERO new skips, so EXPECTED_SKIPS is untouched. If this line conflicts with a
   # sibling branch, re-run the gate on the MERGED tree and copy what it prints.
-  "scripts/claude-hooks/tests/test_clawgate_writeback_guard.py|122"
+  "scripts/claude-hooks/tests/test_clawgate_writeback_guard.py|124"
   # 2026-08-14, writer 2 (opencode) arrives as a NEW target: 15 collected.
   #   _suggested_floor 15 = 15 - min(50, max(1, 15/20 = 0 -> 1)) = 14.
   "scripts/opencode/tests|14"

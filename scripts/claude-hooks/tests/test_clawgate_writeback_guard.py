@@ -247,8 +247,12 @@ def _io_spy(monkeypatch):
     monkeypatch.setattr(guard.os.path, "exists",
                         lambda p, *a, **k: (calls.append(("exists", str(p))),
                                             real_exists(p, *a, **k))[1])
-    real_run = guard.subprocess.run
-    monkeypatch.setattr(guard.subprocess, "run",
+    # `subprocess` is a DEFERRED import (Stop path only), so the module attribute may
+    # still be None. Force it bound before patching — a spy that skipped the patch
+    # because the attribute was None would report a reassuring zero from nothing.
+    sp = guard._sp()
+    real_run = sp.run
+    monkeypatch.setattr(sp, "run",
                         lambda *a, **k: (calls.append(("subprocess", str(a[0]))),
                                          real_run(*a, **k))[1])
     return calls
@@ -316,6 +320,46 @@ def test_the_fast_path_spawns_no_subprocess_at_all(home, tmp_path):
     assert not log.exists(), log.read_text()
     assert not os.path.exists(os.path.join(str(home), ".cache",
                                            "claude-clawgate-writeback"))
+
+
+def _imported_modules(payload_obj, home_dir):
+    """The module names CPython actually imported for one hook run, taken from
+    `-X importtime`. Measured, not asserted — the deferral is a cost claim and a cost
+    claim needs a measurement."""
+    env = dict(os.environ)
+    env["HOME"] = str(home_dir)
+    env.pop("PYTHONDONTWRITEBYTECODE", None)
+    p = subprocess.run([sys.executable, "-X", "importtime", HOOK],
+                       input=json.dumps(payload_obj), capture_output=True,
+                       text=True, timeout=60, env=env)
+    return {line.rsplit("|", 1)[-1].strip()
+            for line in p.stderr.splitlines() if line.startswith("import time:")}
+
+
+def test_the_fast_path_does_not_even_IMPORT_subprocess_or_shutil(home):
+    """🔴 The two most expensive imports in this file — measured with `-X importtime`
+    at 3.4 ms and 3.7 ms — are Stop-only, and the PostToolUse path must not pay them.
+    Asserted on what CPython actually loaded, not on where the `import` line sits."""
+    mods = _imported_modules(bash("ls -la"), home)
+    assert "re" in mods and "json" in mods          # the path CANNOT avoid these
+    assert "subprocess" not in mods
+    assert "shutil" not in mods
+
+
+def test_the_positive_control_for_that_deferral(home):
+    """The Stop path DOES import both — so the absence above is the deferral working,
+    rather than an importtime parser that matches nothing."""
+    guard.post_tool_use(bash("clawgatectl task get 193"))
+    guard.record_work(state_dir())
+    # ...and something for the prune to actually remove: `shutil` is loaded inside the
+    # removal itself, so a Stop with nothing stale to sweep legitimately never needs it.
+    stale = os.path.join(guard._state_root(), "ancient")
+    os.makedirs(stale, exist_ok=True)
+    os.utime(stale, (1.0, 1.0))
+    mods = _imported_modules(payload("Stop"), home)
+    assert "subprocess" in mods
+    assert "shutil" in mods
+    assert not os.path.exists(stale)
 
 
 def test_a_read_records_the_first_timestamp_and_never_moves_it(home):

@@ -98,9 +98,12 @@ subagent, and its edits and commits are exactly the evidence condition 2 needs.
 agent-ledger-hook.py already costs ~21 ms there. The fast path is: resolve the state
 dir from `session_id` (string work, no IO), ONE `os.path.exists`, and the trigger
 regex. A session that has never read a clawgate task and is not reading one now does
-nothing else — no directory creation, no state read, no subprocess, ever. That
-ordering is pinned by a test, because an earlier hook in this repo shipped with its
-throttle consulted AFTER the subprocess spawn while its comment claimed otherwise.
+nothing else — no directory creation, no state read, no subprocess, and it does not
+even IMPORT `subprocess` or `shutil` (see the deferred-import note below). That
+ordering is pinned by tests that COUNT the calls and read the module list out of
+`-X importtime`, because an earlier hook in this repo shipped with its throttle
+consulted AFTER the subprocess spawn while its comment claimed otherwise. Measured:
+13.9 ms/call against 8.6 ms for a bare interpreter start.
 
 🔴 FAIL-OPEN, ALWAYS. Every internal exception exits 0 with an empty stdout and
 blocks nothing. main() has exactly ONE exit and it is always 0. A hook that wedges a
@@ -123,10 +126,46 @@ import datetime
 import json
 import os
 import re
-import shutil
-import subprocess
 import sys
 import time
+
+# 🔴 DEFERRED IMPORTS, AND THE REASON IS THE HOT PATH. This hook runs after EVERY
+# tool call, so its import cost is paid thousands of times a day. Measured with
+# `python -X importtime` on this host: subprocess 3.4 ms, shutil 3.7 ms — 7.1 ms of
+# the ~11 ms this hook added over a bare interpreter start, and NEITHER is reachable
+# from the PostToolUse path. Both are Stop-only (the live read, and the state prune).
+# Measured end to end, 30 fast-path runs per sample, four samples: 19.0 ms/call before
+# this against 13.7/13.9/13.8/14.3 after, with a bare interpreter at 8.0-8.8 ms — i.e.
+# the hook's own overhead falls from ~11 ms to ~5.4 ms. `re` (2.4 ms) and `json`
+# (0.9 ms) stay: the trigger patterns compile at import and the payload is JSON on
+# stdin, so both are on the path that cannot avoid them.
+# `shutil` is loaded inside the REMOVAL, not at the top of prune(), so a Stop with
+# nothing stale to sweep never pays it either — pinned by the importtime test.
+subprocess = None
+shutil = None
+
+
+def _sp():
+    """`subprocess`, imported on first use. Bound to the MODULE attribute so a test
+    can still monkeypatch `guard.subprocess` once the Stop path has touched it.
+
+    No `if subprocess is None` memo guard: `import` IS the memo (every call after the
+    first is a `sys.modules` lookup), and a guard whose only effect is skipping that
+    lookup is a branch no mutation can kill — which reads as a coverage gap when it is
+    really just a duplicate of what the import statement already does.
+    """
+    global subprocess
+    import subprocess as _m
+    subprocess = _m
+    return subprocess
+
+
+def _sh():
+    """`shutil`, imported on first use — see `_sp`."""
+    global shutil
+    import shutil as _m
+    shutil = _m
+    return shutil
 
 # --------------------------------------------------------------------------- #
 # Tunables
@@ -349,7 +388,7 @@ def prune(ttl=STATE_TTL_SECS, now=None):
         try:
             if os.path.getmtime(path) >= cutoff:
                 continue
-            shutil.rmtree(path, ignore_errors=True)
+            _sh().rmtree(path, ignore_errors=True)
             removed.append(name)
         except Exception:                 # noqa: BLE001
             pass
@@ -417,7 +456,7 @@ def _env_file(path=CLAWGATE_ENV):
 
 
 def _via_clawgatectl(task_id, timeout):
-    proc = subprocess.run(["clawgatectl", "task", "get", str(int(task_id))],
+    proc = _sp().run(["clawgatectl", "task", "get", str(int(task_id))],
                           capture_output=True, text=True, timeout=timeout)
     if proc.returncode != 0:
         raise LiveReadError("clawgatectl rc=%d %s"
@@ -450,7 +489,7 @@ def _via_curl(task_id, timeout, env_path=CLAWGATE_ENV, why=None):
         'url = "%s/api/tasks/%d"\n' % (url.rstrip("/"), int(task_id)),
         'header = "Authorization: Bearer %s"\n' % token,
     ])
-    proc = subprocess.run(["curl", "-K", "-"], input=cfg,
+    proc = _sp().run(["curl", "-K", "-"], input=cfg,
                           capture_output=True, text=True, timeout=timeout + 2)
     if proc.returncode != 0:
         raise LiveReadError("curl rc=%d" % proc.returncode)
@@ -459,6 +498,11 @@ def _via_curl(task_id, timeout, env_path=CLAWGATE_ENV, why=None):
 
 def live_task(task_id, timeout=PER_TASK_TIMEOUT_SECS, env_path=CLAWGATE_ENV):
     """Live re-read of one task. Raises LiveReadError when it cannot be measured."""
+    # Bound BEFORE the try: the `except subprocess.TimeoutExpired` clauses below name
+    # the module attribute, and an except clause is evaluated even when the exception
+    # came from the import itself — at which point a still-None `subprocess` would
+    # raise AttributeError out of the handler and defeat the fail-open contract.
+    _sp()
     why = None
     try:
         return _via_clawgatectl(task_id, timeout)
