@@ -99,6 +99,10 @@ test gate, build/push, pin bump, the CSS-cwd trap that fakes ~25 e2e failures, c
 months because reading a task was one command while writing to it was a curl preamble; that
 asymmetry is gone (`task status` / `task comment` since 2026-08-14). Run it unprompted.
 
+🔴 **A hook ENFORCES this now** (`~/.claude/hooks/clawgate-writeback-guard.py`): armed by the
+step-1 **read**, it **blocks Stop** when work followed (edit/commit/push/PR) and a **live** re-read
+shows no `claude-code` comment since. Read-and-evaluate-only never fires; commenting silences it.
+
 🔴 **A COMMENT is the only write that notifies a watcher.** A status flip pushes **only** on
 *entering* `ready_for_review` (`notifyTaskDone`), so going `in_progress` notifies **nobody**. That is
 *why* the pre-start comment exists — it is Zach's only chance to object **before** the work happens,

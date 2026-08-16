@@ -24,6 +24,7 @@ SEARCH_NUDGE = "python3 ~/.claude/hooks/search-tool-nudge.py"
 NEXT_STEP = "python3 ~/.claude/hooks/next-step-nudge.py"
 TMUX_STOP = "~/.config/tmux/task-hook.sh"
 LEDGER = "python3 ~/.claude/hooks/agent-ledger-hook.py"
+WRITEBACK = "python3 ~/.claude/hooks/clawgate-writeback-guard.py"
 
 failures = []
 
@@ -87,11 +88,13 @@ with tempfile.TemporaryDirectory() as tmp:
     check("2: pre-existing clawgate Stop hook preserved", CLAWGATE_STOP in cmds(d, "Stop"))
     check("2: pre-existing tmux Stop hook preserved", TMUX_STOP in cmds(d, "Stop"))
 
-    # 🔴 ALL FOUR Stop owners coexist. Asserted as a SET EQUALITY, not four membership
-    # checks: equality fails when the set GROWS (a fifth hook registered by accident)
-    # as well as when it SHRINKS (one clobbered), which membership checks cannot see.
-    check("2: exactly the five expected Stop hooks, none clobbered, none extra",
-          set(cmds(d, "Stop")) == {TMUX_STOP, CLAWGATE_STOP, NOTIFY, NEXT_STEP, LEDGER})
+    # 🔴 EVERY Stop owner coexists — the two FOREIGN ones this script must never
+    # disturb plus the four it appends. Asserted as a SET EQUALITY, not membership
+    # checks: equality fails when the set GROWS (a hook registered by accident) as
+    # well as when it SHRINKS (one clobbered), which membership checks cannot see.
+    check("2: exactly the six expected Stop hooks, none clobbered, none extra",
+          set(cmds(d, "Stop")) == {TMUX_STOP, CLAWGATE_STOP, NOTIFY, NEXT_STEP,
+                                   LEDGER, WRITEBACK})
     check("1: next-step-nudge registered on Stop", NEXT_STEP in cmds(d, "Stop"))
     # Ordering: the two foreign hooks keep their original relative order and stay ahead
     # of everything this script appends. Appending (rather than inserting) is what makes
@@ -146,6 +149,27 @@ with tempfile.TemporaryDirectory() as tmp:
     check("1: the Bash nudges keep their matcher",
           len(bash_entries) == 1 and bash_entries[0].get("matcher") == "Bash")
 
+    # --- the clawgate write-back guard: PostToolUse + Stop ---------------------
+    for ev in ("PostToolUse", "Stop"):
+        check("1: clawgate-writeback-guard registered on " + ev,
+              WRITEBACK in cmds(d, ev))
+    # Stop-and-PostToolUse only. It must NOT reach SubagentStop: a subagent's turn
+    # never reaches the operator, so it owes them no write-back — and the hook
+    # refuses that event itself as well, belt and braces, because registration is
+    # per-host mutable state.
+    check("1: clawgate-writeback-guard NOT registered on SubagentStop",
+          WRITEBACK not in cmds(d, "SubagentStop"))
+    check("1: clawgate-writeback-guard NOT registered on SessionStart",
+          WRITEBACK not in cmds(d, "SessionStart"))
+    # 🔴 UNMATCHERED on PostToolUse, for a DIFFERENT reason than the ledger's: half
+    # of what this guard watches for is an Edit/Write/NotebookEdit tool call, i.e.
+    # exactly the work a `Bash` matcher would never show it. Asserted on the ENTRY,
+    # because the command string alone cannot show which matcher it was filed under.
+    wb_entries = [e for e in d["hooks"]["PostToolUse"]
+                  if any(h.get("command") == WRITEBACK for h in e.get("hooks", []))]
+    check("1: clawgate-writeback-guard PostToolUse entry carries NO matcher",
+          len(wb_entries) == 1 and "matcher" not in wb_entries[0])
+
     # Idempotency: a second run changes nothing and never duplicates.
     p2 = run(env)
     check("3: second run exit 0", p2.returncode == 0)
@@ -157,7 +181,12 @@ with tempfile.TemporaryDirectory() as tmp:
     check("3: clawgate Stop still single + present", cmds(d2, "Stop").count(CLAWGATE_STOP) == 1)
     check("3: no duplicate next-step-nudge on Stop", cmds(d2, "Stop").count(NEXT_STEP) == 1)
     check("3: Stop set unchanged by the second run",
-          set(cmds(d2, "Stop")) == {TMUX_STOP, CLAWGATE_STOP, NOTIFY, NEXT_STEP, LEDGER})
+          set(cmds(d2, "Stop")) == {TMUX_STOP, CLAWGATE_STOP, NOTIFY, NEXT_STEP,
+                                    LEDGER, WRITEBACK})
+    check("3: no duplicate clawgate-writeback-guard on Stop",
+          cmds(d2, "Stop").count(WRITEBACK) == 1)
+    check("3: no duplicate clawgate-writeback-guard on PostToolUse",
+          cmds(d2, "PostToolUse").count(WRITEBACK) == 1)
     check("3: no duplicate agent-ledger on Stop", cmds(d2, "Stop").count(LEDGER) == 1)
     check("3: no duplicate agent-ledger on PostToolUse",
           cmds(d2, "PostToolUse").count(LEDGER) == 1)

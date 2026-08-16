@@ -338,6 +338,13 @@ HERMETIC_TARGETS=(
   # stderr, on every malformed input) is felt on every turn and is gated here
   # rather than left to the ungated hand-rolled scripts beside it.
   scripts/claude-hooks/tests/test_agent_ledger_hook.py
+  # Same reason again — a FILE, not the directory. The clawgate write-back guard is
+  # the only hook in this repo that can BLOCK a turn, and it fires on BOTH the
+  # per-tool-call hot path and Stop, so its trigger's non-matches, its
+  # no-work-after-read false-positive killer, its never-block-when-unmeasurable
+  # contract and its exit-0-on-anything backstop are all gated here rather than left
+  # to the ungated hand-rolled scripts beside it.
+  scripts/claude-hooks/tests/test_clawgate_writeback_guard.py
   # Writer 2 of the agent activity ledger — the OPENCODE half. A Python suite
   # driving real `node`, mirroring scripts/collector/opencode/tests/test_plugin.py
   # (this repo's established way to test an opencode plugin; there is no node
@@ -909,6 +916,44 @@ TARGET_FLOORS=(
   # failed-tmux-lookup regression. Gate's own count through the gate's own rule:
   #   _suggested_floor 39 = 39 - min(50, max(1, 39/20 = 1)) = 39 - 1 = 38.
   "scripts/claude-hooks/tests/test_agent_ledger_hook.py|38"
+  # 2026-08-16, the clawgate write-back guard arrives as a NEW target: 130 collected.
+  # (118 in the first round; +6 for the wall-clock budget and its positive control, a
+  # naive-timestamp case, and the two gaps a DIFFERENTLY-BUILT mutation sweep found —
+  # the work gate exercised through `post_tool_use` rather than a seeded state dir,
+  # and a corrupt state file; +4 for the state prune; +2 for the deferred-import
+  # measurement and its positive control.) Read from the AUTHORITATIVE gate's own
+  # per-target line, then put through the gate's OWN function rather than arithmetic:
+  #   _suggested_floor 130 = 130 - min(50, max(1, 130/20 = 6)) = 130 - 6 = 124.
+  # ZERO new skips, so EXPECTED_SKIPS is untouched. If this line conflicts with a
+  # sibling branch, re-run the gate on the MERGED tree and copy what it prints.
+  #
+  # 2026-08-16, THE AUDIT ROUND: 130 -> 208. The additions are not padding — each one
+  # answers a measured defect: the relenting rung asserted on the EMITTED JSON rather
+  # than on an internal kind string (the CLI feeds `additionalContext` into the same
+  # `blockingErrors` array as a block, so the old rung forced a third continuation),
+  # the four false-positive probes (subagent `agent_id`, unrelated-repo work, a
+  # partially-written-back survey, a command that merely MENTIONS a commit), the
+  # `--dismiss` escape driven end to end from the block text it advertises, the work
+  # anchor that stops the skill's own pre-start comment from disarming the guard, and
+  # the two hang bounds + `_sanitize`/`_state_dir`/`_scrub`, all of which had ZERO
+  # coverage and survived a sweep. Read from the gate's per-target line, then through
+  # the gate's OWN function:
+  #   _suggested_floor 208 = 208 - min(50, max(1, 208/20 = 10)) = 208 - 10 = 198.
+  #
+  # 2026-08-16, THE SECOND AUDIT ROUND: 208 -> 244, and the 198 above had already
+  # accumulated 46 of slack — nearly the whole 50-test allowance, i.e. one target away
+  # from being unable to see a collapse. Again not padding: the quoted `git -C "<path>"
+  # commit` shapes (all five measured NOT work, and `git -C` is the form this repo's own
+  # CLAUDE.md mandates, so the guard silently never armed for it), the ASYMMETRIC
+  # subagent rule (a subagent's READ must not arm the parent — a measured false positive
+  # — while its WORK must count, because in BOTH incidents #193/#194 the work ran in
+  # dispatched local subagents and refusing it made the hook silent on its own
+  # motivating case), the per-task read anchor that closes "read N, work, write N back,
+  # then merely read M -> blocks on M", the notice sentence that has to be true both
+  # alone and spliced into a block reason, and the `--dismiss` audit ledger. Read from
+  # the gate's per-target line, then through the gate's OWN function:
+  #   _suggested_floor 244 = 244 - min(50, max(1, 244/20 = 12)) = 244 - 12 = 232.
+  "scripts/claude-hooks/tests/test_clawgate_writeback_guard.py|232"
   # 2026-08-14, writer 2 (opencode) arrives as a NEW target: 15 collected.
   #   _suggested_floor 15 = 15 - min(50, max(1, 15/20 = 0 -> 1)) = 14.
   "scripts/opencode/tests|14"
