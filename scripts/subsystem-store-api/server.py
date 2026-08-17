@@ -172,16 +172,23 @@ MAX_TRACKED_LOCKOUTS = 16384
 # desynchronise a keep-alive connection (see `_drain_body`).
 MAX_DRAIN_BYTES = 1 << 20
 
-# A scope or ref name, as it may appear in a URL path. Deliberately strict: the
-# store's own directory names are lowercase-hyphenated, and anything outside this
-# set is a caller probing the filesystem rather than naming a scope.
+# A scope name, as it may appear in a URL path.
 #
-# ⚠ `.` IS IN THE CLASS, so `..` MATCHES THIS PATTERN. Dots are allowed because
-# entry refs contain them; the traversal cases are therefore excluded by name at
-# the call site, NOT by this regex. A guard that looks like it covers a case it
-# does not is worse than an obvious gap — which is exactly the shape this
-# comment exists to stop the next reader from re-introducing.
-SAFE_PATH_COMPONENT = re.compile(r"[A-Za-z0-9._-]+")
+# 🔴 NO DOT. That makes traversal impossible BY CONSTRUCTION rather than by
+# excluding `.` and `..` by name — a structural guard instead of a spelled one,
+# which is the difference between "the two spellings I thought of are blocked"
+# and "the character that enables them cannot appear".
+#
+# The first draft DID permit dots (on the reasoning that refs contain them) and
+# excluded `..` by name beside it. A mutation sweep then removed the dot from
+# this class and the ENTIRE SUITE STAYED GREEN — no test had a dotted path
+# component at all, because refs travel in the QUERY STRING, not the path. So
+# the permissive class was never justified by a real caller.
+#
+# MEASURED before tightening, since this could break a real scope: all 8 scopes
+# in the live store match `[A-Za-z0-9_-]+`, and 0 contain a dot. (Counts only —
+# the names are client-confidential and this repo is PUBLIC.)
+SAFE_PATH_COMPONENT = re.compile(r"[A-Za-z0-9_-]+")
 
 DEFAULT_STORE = "/data"
 DEFAULT_TOKEN_FILE = "/run/secrets/subsystem-store/token"
@@ -957,10 +964,7 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         rest = path[len(API_PREFIX) :]
         parts = [p for p in rest.split("/") if p]
 
-        if any(
-            part in (".", "..") or not SAFE_PATH_COMPONENT.fullmatch(part)
-            for part in parts
-        ):
+        if any(not SAFE_PATH_COMPONENT.fullmatch(part) for part in parts):
             # 🔴 A PATH COMPONENT REACHES THE FILESYSTEM. `%2e%2e` decoded to
             # `..`, and `scope_revision` then read `<store>/../.git/HEAD` and put
             # the result in `X-Store-Revision`. Harmless in the pod (the store

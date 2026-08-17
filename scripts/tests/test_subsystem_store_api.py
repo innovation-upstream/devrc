@@ -1666,7 +1666,7 @@ class TestClientIpIsCloudflareOnly:
         everybody. Twenty rejected no-IP requests — four times the failure
         budget — must leave an identified client completely unaffected.
         """
-        with running(store) as (base, _):
+        with running(store) as (base, audit):
             for _ in range(20):
                 assert fetch(f"{base}/api/v1/recall/{SCOPE}", client_ip=None)[0] == 401
             code, _h, body = fetch(
@@ -1674,6 +1674,20 @@ class TestClientIpIsCloudflareOnly:
             )
         assert code == 200, "an unidentifiable caller locked out an identified one"
         assert POINTER_LINE.encode() in body
+        # 🔴 THE ASSERTION THAT MAKES THIS TEST MEAN ANYTHING, and it was missing.
+        # An audit found this test VACUOUS against the very hazard it names:
+        # under the mutant `ip = "unknown"` (bucket every unidentified caller
+        # under one shared key) the flood locks out `"unknown"` while the final
+        # request above uses a DIFFERENT key — so it stayed green. What actually
+        # distinguishes fail-closed from a shared bucket is that the twentieth
+        # unidentified request is STILL `no-client-ip` and never `locked-out`:
+        # nothing was counted, because there was no bucket to count into.
+        statuses = {
+            line.split("status=")[1].split()[0] for line in audit[:20]
+        }
+        assert statuses == {"no-client-ip"}, statuses
+        assert not any("locked-out" in line for line in audit)
+        assert not any("lockout-triggered" in line for line in audit)
 
     def test_the_address_is_NORMALISED_so_one_caller_is_one_bucket(self):
         assert api.client_ip({"CF-Connecting-IP": "::FFFF:203.0.113.7"}) == api.client_ip(
@@ -2238,11 +2252,18 @@ class TestAuditLogCannotBeForged:
         with running(store) as (base, audit):
             fetch(f"{base}/api/v1/x%20auth=ok%20token=deadbeef1234")
         line = audit[0]
-        fields = dict(
-            part.split("=", 1) for part in line.split()[2:] if "=" in part
-        )
-        assert fields["auth"] == "fail", f"auth was forged to {fields['auth']!r}"
-        assert fields["token"] == "-"
+        # 🔴 COUNT THE FIELDS; DO NOT `dict()` THEM. A round-2 mutation sweep
+        # caught this test being vacuous: `dict()` lets the LAST occurrence win,
+        # and the genuine `auth=fail` the server appends is always last — so
+        # under the mutant that stops escaping spaces (leaving the forged
+        # `auth=ok` in the line as its own field) the assertions still passed.
+        # What a log consumer sees is a DUPLICATE key, so that is what to assert.
+        keys = [part.split("=", 1)[0] for part in line.split() if "=" in part]
+        assert keys.count("auth") == 1, f"the record has {keys.count('auth')} auth fields"
+        assert keys.count("token") == 1, f"the record has {keys.count('token')} token fields"
+        parsed = dict(part.split("=", 1) for part in line.split() if "=" in part)
+        assert parsed["auth"] == "fail"
+        assert parsed["token"] == "-"
 
     def test_control_characters_are_neutralised_but_the_path_is_still_LEGIBLE(
         self, store: Path
@@ -2301,6 +2322,13 @@ class TestNoRequestSmuggling:
         return b"".join(chunks).split(b"HTTP/1.1 ")[1:]
 
     def test_a_POST_BODY_is_not_served_as_the_next_request(self, store: Path):
+        """The end-to-end property. ⚠ It is defended by BOTH layers, so a sweep
+        shows it killed by the connection-close mutant and NOT by the
+        no-drain one — the 405 closes the socket either way. The drain's own
+        guard is the GET case below, where the response is a 200 and the
+        connection legitimately stays open. Recorded because a reader who
+        assumed this test covers the drain would delete the other one.
+        """
         with running(store) as (base, _):
             host = base.split("//", 1)[1]
             smuggled = (
@@ -2324,6 +2352,11 @@ class TestNoRequestSmuggling:
     def test_a_GET_with_a_body_does_not_desynchronise_the_connection(
         self, store: Path
     ):
+        """🔴 THIS is the drain's guard, not the POST case above. `/healthz`
+        answers 200, so the connection is deliberately kept alive and the ONLY
+        thing standing between the body and the next request is `_drain_body`.
+        Confirmed by mutation: removing the drain kills exactly this test.
+        """
         with running(store) as (base, _):
             host = base.split("//", 1)[1]
             smuggled = (
@@ -2485,14 +2518,41 @@ class TestMalformedTargetsAndUnknownMethods:
         assert headers["X-Store-Status"] == "bad-request"
 
     def test_a_NORMAL_scope_name_is_still_accepted(self, store: Path):
-        """The positive control on that guard: dots are legal in refs, so the
-        pattern permits them and `..` is excluded BY NAME. A guard that rejected
-        every dot would pass the test above and break real callers.
+        """The positive control on that guard — a guard that refused everything
+        would pass the traversal test above and break every real caller.
         """
         with running(store) as (base, _):
             assert fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)[0] == 200
             code, _h, _b = fetch(
                 f"{base}/api/v1/recall/{SCOPE}?ref=thing-alpha", token=GOOD_TOKEN
+            )
+        assert code == 200
+
+    def test_a_DOT_in_a_path_component_is_refused_at_all(self, store: Path):
+        """🔴 ADDED BECAUSE A MUTANT SURVIVED. Removing `.` from the character
+        class left the whole suite green: nothing had a dotted PATH component,
+        because refs travel in the query string. So the permissive class was
+        never justified by a caller, and the guard is now structural — no dot at
+        all, which makes `..` impossible to spell rather than excluded by name.
+
+        Measured before tightening: all 8 scopes in the live store match
+        `[A-Za-z0-9_-]+` and 0 contain a dot (counts only — the names are
+        client-confidential and this repo is public).
+        """
+        with running(store) as (base, _):
+            for probe in ("with.dot", "..", ".", "a.b.c", "%2e%2e%2f"):
+                code, _h, _b = fetch(
+                    f"{base}/api/v1/recall/{probe}", token=GOOD_TOKEN
+                )
+                assert code == 400, f"{probe!r} was accepted as a path component"
+
+    def test_the_ref_QUERY_parameter_may_still_contain_a_dot(self, store: Path):
+        """The path is strict; the query string is not, and must not become so —
+        that is the distinction the surviving mutant exposed.
+        """
+        with running(store) as (base, _):
+            code, _h, _b = fetch(
+                f"{base}/api/v1/recall/{SCOPE}?ref=thing.alpha.v2", token=GOOD_TOKEN
             )
         assert code == 200
 
