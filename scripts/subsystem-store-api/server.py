@@ -95,7 +95,9 @@ import argparse
 import hashlib
 import hmac
 import ipaddress
+import math
 import os
+import re
 import sys
 import threading
 import time
@@ -157,9 +159,29 @@ ENV_MAX_FAILURES = "SUBSYSTEM_STORE_MAX_FAILURES"
 ENV_FAILURE_WINDOW = "SUBSYSTEM_STORE_FAILURE_WINDOW_S"
 ENV_LOCKOUT = "SUBSYSTEM_STORE_LOCKOUT_S"
 
-# A bound on the failure table so a flood of distinct keys cannot grow it
-# without limit. Active lockouts are NEVER evicted — evicting one is a bypass.
+# 🔴 REAL bounds on both tables, enforced in `RateLimiter._evict` — see the
+# note there for why the earlier version was a bound in name only. Active
+# lockouts are NEVER evicted for space; the lockout table is instead capped, and
+# at the cap new lockouts are refused rather than old ones released.
 MAX_TRACKED_CLIENTS = 4096
+MAX_TRACKED_LOCKOUTS = 16384
+
+# How much of an unwanted request body this server will read and throw away
+# before giving up and closing the connection instead. There is no endpoint that
+# accepts a body at all, so this exists only so that a small one does not
+# desynchronise a keep-alive connection (see `_drain_body`).
+MAX_DRAIN_BYTES = 1 << 20
+
+# A scope or ref name, as it may appear in a URL path. Deliberately strict: the
+# store's own directory names are lowercase-hyphenated, and anything outside this
+# set is a caller probing the filesystem rather than naming a scope.
+#
+# ⚠ `.` IS IN THE CLASS, so `..` MATCHES THIS PATTERN. Dots are allowed because
+# entry refs contain them; the traversal cases are therefore excluded by name at
+# the call site, NOT by this regex. A guard that looks like it covers a case it
+# does not is worse than an obvious gap — which is exactly the shape this
+# comment exists to stop the next reader from re-introducing.
+SAFE_PATH_COMPONENT = re.compile(r"[A-Za-z0-9._-]+")
 
 DEFAULT_STORE = "/data"
 DEFAULT_TOKEN_FILE = "/run/secrets/subsystem-store/token"
@@ -326,9 +348,63 @@ def client_ip(headers: Any) -> str | None:
     if not values or len(values) != 1:
         return None
     try:
-        return str(ipaddress.ip_address(values[0].strip()))
+        address = ipaddress.ip_address(values[0].strip())
     except ValueError:
         return None
+    return str(rate_limit_key(address))
+
+
+def rate_limit_key(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> Any:
+    """Collapse an address to the unit a lockout should apply to.
+
+    🔴 A FULL IPv6 ADDRESS IS NOT A CLIENT, IT IS A CHOICE. An ordinary
+    residential allocation is a /64 — 2**64 addresses the same person can pick
+    freely — so keying on the full address gives one attacker 2**64 buckets and
+    the lockout becomes decorative. Worse, it is also the cheapest way to grow
+    the failure table without bound. So IPv6 is aggregated to its **/64**.
+
+    🔴 An IPv4-MAPPED IPv6 ADDRESS IS THE SAME CLIENT AS ITS IPv4 FORM. Left
+    alone, one IPv4 caller gets a free second bucket simply by reaching the edge
+    over v6 — and the guard that claimed "one caller is one bucket" only ever
+    compared two spellings of the mapped form, so it did not see this.
+    """
+    if isinstance(address, ipaddress.IPv6Address):
+        if address.ipv4_mapped is not None:
+            return address.ipv4_mapped
+        return ipaddress.ip_network(f"{address}/64", strict=False)
+    return address
+
+
+_AUDIT_SAFE = re.compile(r"[^\x20-\x7e]")
+
+
+def audit_field(value: Any, *, limit: int = 256) -> str:
+    """Make `value` safe to put in a whitespace-delimited log record.
+
+    🔴 THE AUDIT LINE IS A LOG-INJECTION SINK, AND IT IS REACHED BEFORE AUTH.
+    The request path is `unquote()`d, so `%0a` becomes a REAL NEWLINE — and this
+    record is one f-string with no escaping. An unauthenticated caller could
+    therefore emit a second, syntactically perfect line of their choosing:
+
+        GET /api/v1/x%0astore-api%20audit%20…%20token=<any>%20auth=ok%20…
+
+    That is not a cosmetic defect. This module's whole claim is that the `token=`
+    fingerprint proves which credential a client used, and the README's rotation
+    procedure says to delete the old token once its fingerprint stops appearing.
+    A caller who can forge that line can keep any fingerprint alive forever
+    (blocking rotation), fabricate an `auth=ok` from an address of their choice,
+    and drown or forge the Loki auth-fail alert.
+
+    So every field is passed through here: non-printable characters — CR, LF, NUL,
+    tabs, escapes — become `?`, spaces become `_` so a value cannot split into
+    two fields, and the result is length-capped. Percent-encoding rather than
+    replacement would be reversible, but reversibility is not what the log needs;
+    unforgeable record boundaries are.
+    """
+    text = str(value)
+    if len(text) > limit:
+        text = text[:limit] + "...truncated"
+    return _AUDIT_SAFE.sub("?", text).replace(" ", "_")
 
 
 def limiter_settings(env: dict[str, str]) -> tuple[int, float, float]:
@@ -349,6 +425,15 @@ def limiter_settings(env: dict[str, str]) -> tuple[int, float, float]:
             value = cast(raw)
         except ValueError:
             raise ValueError(f"{name} must be a number, got {raw!r}") from None
+        # 🔴 `nan` and `inf` PARSE, and both walk straight through `<= 0`
+        # (`nan <= 0` is False). Measured consequences: a nan WINDOW silently
+        # disables the limiter entirely, because `t > now - nan` is False for
+        # every recorded failure; a nan or inf LOCKOUT makes it permanent. Both
+        # are exactly the "misconfiguration that defaults is invisible forever"
+        # this function's docstring exists to prevent, arriving through the one
+        # comparison that does not order them.
+        if not math.isfinite(value):
+            raise ValueError(f"{name} must be a finite number, got {raw!r}")
         if value <= 0:
             raise ValueError(f"{name} must be positive, got {raw!r}")
         return value
@@ -412,7 +497,11 @@ class RateLimiter:
             recent = [t for t in self._failures.get(key, []) if t > now - self.window_s]
             recent.append(now)
             if len(recent) >= self.max_failures:
-                self._locked_until[key] = now + self.lockout_s
+                if (
+                    key in self._locked_until
+                    or len(self._locked_until) < MAX_TRACKED_LOCKOUTS
+                ):
+                    self._locked_until[key] = now + self.lockout_s
                 self._failures.pop(key, None)
                 self._evict(now)
                 return True
@@ -421,34 +510,63 @@ class RateLimiter:
             return False
 
     def record_success(self, key: str) -> None:
-        """A good credential clears the failure streak — but NOT a live lockout.
+        """🔴 DELIBERATELY A NO-OP. A success does NOT forgive a failure streak.
 
-        🔴 The asymmetry is the point. Forgiving a streak keeps a legitimate
-        client from being locked out by sporadic typos across an hour; forgiving
-        a LOCKOUT would mean an attacker who eventually guessed one token could
-        wipe the record of having guessed, and `locked_out` is checked before
-        this is ever reached anyway.
+        It used to. That was my invention, not the specification — which says
+        five failed auths per client per minute — and it created two attacks,
+        both of which turn on the key being an ADDRESS rather than an identity:
+
+          * an attacker holding ANY accepted token (including the old one that
+            overlap rotation deliberately keeps live) interleaves one success
+            per four guesses and brute-forces the rest of the set forever;
+          * an attacker sharing a NAT with a legitimate client is never locked
+            out at all, because the victim's ordinary traffic keeps resetting
+            the counter on their behalf.
+
+        The sliding window already provides the forgiveness this was reaching
+        for: four typos age out after `window_s` on their own. Kept as a method
+        rather than deleted so the call site still reads as a decision.
         """
-        with self._lock:
-            self._failures.pop(key, None)
+        return
 
     def _evict(self, now: float) -> None:
-        """Bound the failure table. Called under `self._lock`.
+        """Bound BOTH tables. Called under `self._lock`.
 
-        Only entries whose whole streak has aged out of the window are dropped,
-        and ACTIVE LOCKOUTS ARE NEVER TOUCHED — evicting a lockout is a bypass
-        dressed as memory hygiene.
+        🔴 THIS USED TO BE A BOUND IN NAME ONLY, and the comment saying otherwise
+        was false. It dropped only entries whose whole streak had already aged
+        out of the window — so INSIDE the window nothing was evictable and the
+        table grew without limit (measured: 20,000 keys held against a cap of
+        4,096). `_locked_until` had no cap at all (measured: 5,000). It also ran
+        `max(times)` over every entry on every failed auth, under the global
+        lock, which is O(n) per request once the table is large.
+
+        Now: expired lockouts go first (free), then aged-out failure streaks,
+        and only if the table is STILL over the cap are the oldest live streaks
+        dropped — oldest-first, so the client closest to being locked out is the
+        last to be forgotten.
+
+        ⚠ ACTIVE LOCKOUTS ARE STILL NEVER DROPPED FOR SPACE. Evicting one is a
+        bypass dressed as memory hygiene. `_locked_until` is instead bounded by
+        construction: an entry costs an attacker `max_failures` requests to
+        create, and each one expires on its own; at the cap, new lockouts are
+        refused rather than old ones released — a bounded, stated failure mode,
+        and the safe direction is not obvious enough to leave implicit.
         """
         for key in [k for k, v in self._locked_until.items() if v <= now]:
             del self._locked_until[key]
         if len(self._failures) <= MAX_TRACKED_CLIENTS:
             return
-        stale = [
-            key
-            for key, times in self._failures.items()
-            if not times or max(times) <= now - self.window_s
-        ]
-        for key in stale:
+        cutoff = now - self.window_s
+        for key in [
+            k for k, times in self._failures.items() if not times or times[-1] <= cutoff
+        ]:
+            del self._failures[key]
+        if len(self._failures) <= MAX_TRACKED_CLIENTS:
+            return
+        # Still over: drop the OLDEST live streaks. `times` is append-ordered, so
+        # `times[-1]` is that key's most recent failure — no scan of the list.
+        overflow = len(self._failures) - MAX_TRACKED_CLIENTS
+        for key in sorted(self._failures, key=lambda k: self._failures[k][-1])[:overflow]:
             del self._failures[key]
 
 
@@ -520,6 +638,12 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
     """One GET router. Everything else is a 405."""
 
     protocol_version = "HTTP/1.1"
+    # 🔴 WITHOUT THIS, `timeout` IS None AND A HALF-OPEN CONNECTION PINS A THREAD
+    # FOREVER. Measured: 50 slowloris connections held 50 live threads, and
+    # `ThreadingHTTPServer` caps neither threads nor memory. Cloudflare shields
+    # the public side, but nothing shields a caller that reaches the pod
+    # directly — which is the same exposure the CF-Connecting-IP trust rests on.
+    timeout = 15
     # Suppress the default `BaseHTTP/x.y Python/3.n` banner. An unauthenticated
     # request should not be able to read the interpreter version off the wire.
     server_version = SERVER_BANNER
@@ -558,10 +682,22 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         content_type: str = "text/plain; charset=utf-8",
         headers: dict[str, str] | None = None,
     ) -> None:
+        if code != 200:
+            # 🔴 A REJECTED REQUEST NEVER KEEPS ITS CONNECTION. Belt to
+            # `_drain_body`'s braces: if framing was ever mis-read, the socket
+            # is already untrustworthy and reusing it is the smuggling primitive
+            # itself. Costs one TCP handshake per 401, on a path nobody legitimate
+            # walks twice.
+            self.close_connection = True
         self.send_response(code)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        if self.close_connection:
+            # Setting the flag alone closes the socket but tells the PEER
+            # nothing, so a pooling proxy keeps the entry and discovers the
+            # close on its next use. Say it on the wire.
+            self.send_header("Connection", "close")
         for key, value in (headers or {}).items():
             self.send_header(key, value)
         self.end_headers()
@@ -590,11 +726,12 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         self.audit(
             "store-api audit "
             f"ts={datetime.now(timezone.utc).isoformat(timespec='seconds')} "
-            f"ip={self._client_ip or '-'} "
-            f"method={self.command} path={path} "
-            f"token={self._token_fp or '-'} "
+            f"ip={audit_field(self._client_ip or '-')} "
+            f"method={audit_field(self.command, limit=16)} "
+            f"path={audit_field(path)} "
+            f"token={audit_field(self._token_fp or '-', limit=16)} "
             f"auth={'ok' if self._token_fp else 'fail'} "
-            f"result={result} status={status}"
+            f"result={int(result)} status={audit_field(status, limit=32)}"
         )
 
     # --- methods ----------------------------------------------------------------
@@ -605,6 +742,48 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
     def do_HEAD(self) -> None:  # noqa: N802
         self._handle()
 
+    def _drain_body(self) -> None:
+        """🔴 READ AND DISCARD THE ENTITY BODY. THIS IS A SMUGGLING FIX.
+
+        `BaseHTTPRequestHandler` never reads a request body, and this server
+        keeps connections alive (HTTP/1.1). So an unread body stayed in the
+        socket buffer and was parsed as THE NEXT REQUEST on the same connection.
+        Measured: one `POST` whose body was a complete
+        `GET /api/v1/recall/<scope>` with a valid bearer returned TWO responses,
+        the second carrying store content — from a request the caller never
+        appeared to make.
+
+        Behind a proxy that pools upstream connections (Traefik does, by
+        default) that is CL.0 request smuggling: a POST body holding a PARTIAL
+        request line desynchronises the connection, and the NEXT victim request
+        completes the attacker's line — carrying the VICTIM's `Authorization`
+        header to a scope the attacker chose.
+
+        Belt and braces, because either alone is one mistake from failing:
+        drain the declared body here, and `_respond` sets `close_connection` on
+        every non-200 so a desynchronised connection cannot be reused at all.
+        """
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            # A malformed length means the framing is already unknowable. Do not
+            # guess; `_respond` will close the connection.
+            self.close_connection = True
+            return
+        if length <= 0:
+            return
+        if length > MAX_DRAIN_BYTES:
+            # Too big to swallow politely. Closing is the only safe answer —
+            # leaving it queued is exactly the desync above.
+            self.close_connection = True
+            return
+        remaining = length
+        while remaining > 0:
+            chunk = self.rfile.read(min(remaining, 65536))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+
     def _reject_write(self) -> None:
         """🔴 PHASE 1 IS READ-ONLY, and that is enforced here, not documented.
 
@@ -612,17 +791,54 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         Until then a POST/PUT/PATCH/DELETE must not fall through to the GET
         router and be served as a read — a mutation that silently succeeded as a
         no-op read is indistinguishable from one that worked.
+
+        🔴 IT NO LONGER SHORT-CIRCUITS THE CLIENT-IP AND LOCKOUT CHECKS. It used
+        to answer 405 before either, which made it a free, unauthenticated,
+        UNMETERED channel: 31 anonymous POSTs with no token and no
+        `CF-Connecting-IP` produced 31 audit lines and counted for nothing —
+        enough to drown the Loki auth-fail alert this design relies on. A write
+        attempt from an unidentifiable or locked-out client is now the same
+        uniform 401 as everything else, and the 405 is reserved for a caller who
+        got that far.
         """
-        self._client_ip = client_ip(self.headers)
+        self._client_ip = None
         self._token_fp = None
-        self._respond(
-            405,
-            b"read-only\n",
-            headers={"Allow": "GET, HEAD"},
-        )
-        self._audit(urlsplit(self.path).path, 405, "method-not-allowed")
+        path = self._request_path()
+        if path is None:
+            return
+        self._drain_body()
+        if not self._identify_and_meter(path):
+            return
+        try:
+            # 🔴 AUTHENTICATE BEFORE ANSWERING 405. Otherwise an anonymous
+            # POST flood is still free: identified, not locked out, and never
+            # counted — 405 after 405 with nothing charged. A write attempt
+            # with no valid credential is not a "wrong method", it is an
+            # unauthorised request, and it is answered and charged as one.
+            self._token_fp = authorize(
+                self.headers.get("Authorization"), self.expected_tokens
+            )
+        except _Rejected:
+            self._refuse(path, self._count_failure(self.limiter, self._client_ip))
+            return
+        self._respond(405, b"read-only\n", headers={"Allow": "GET, HEAD"})
+        self._audit(path, 405, "method-not-allowed")
 
     do_POST = do_PUT = do_PATCH = do_DELETE = _reject_write  # noqa: N815
+
+    def send_error(self, code: int, message=None, explain=None) -> None:  # noqa: D102
+        """🔴 EVERY unhandled method answers the ONE uniform 401, not a 501 page.
+
+        `BaseHTTPRequestHandler.send_error` renders a ~350-byte HTML page that
+        echoes the method back — pre-auth, unmetered, unaudited, and a fourth
+        distinct shape for what the docstring calls "ONE 401 response,
+        byte-identical for every rejection". `OPTIONS`, `TRACE` and any invented
+        verb reached it. They now look exactly like a bad token.
+        """
+        self._client_ip = None
+        self._token_fp = None
+        self._unauthorized()
+        self._audit(self._raw_path(), code, "method-not-allowed")
 
     # --- the router -------------------------------------------------------------
 
@@ -646,11 +862,63 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         self._unauthorized()
         self._audit(path, 401, status)
 
+    def _raw_path(self) -> str:
+        """The request target, never parsed. Safe to log; safe on any input."""
+        return self.path if isinstance(self.path, str) else "-"
+
+    def _request_path(self) -> str | None:
+        """The decoded path, or `None` having already answered.
+
+        🔴 `urlsplit` RAISES on a malformed absolute-form target. Measured:
+        `GET http://[ HTTP/1.1` produced an unhandled `ValueError: Invalid IPv6
+        URL`, no response at all, a killed connection and a ~20-line traceback
+        in the pod log — pre-auth, unauthenticated, unmetered, and a cheaper
+        log-flood than any of the paths that ARE metered. Absolute-form targets
+        are mandatory-to-accept, so this is a request a conforming client may
+        legitimately send; it must be a uniform 401, not a crash.
+        """
+        try:
+            return unquote(urlsplit(self.path).path)
+        except ValueError:
+            self._client_ip = None
+            self._token_fp = None
+            self._unauthorized()
+            self._audit(self._raw_path(), 401, "malformed-target")
+            return None
+
+    def _identify_and_meter(self, path: str) -> bool:
+        """Establish the client and charge the lockout. False = already answered.
+
+        Shared by the read router and the write rejection, because a rule
+        enforced at one call site and not the other is the failure this whole
+        file keeps finding: writes used to skip both checks entirely.
+        """
+        ip = client_ip(self.headers)
+        if ip is None:
+            # 🔴 FAIL CLOSED. The alternative — bucketing every unidentified
+            # request under one shared key — is the failure the whole
+            # `CF-Connecting-IP` design exists to avoid: one abuser would then
+            # lock out everybody. Nothing is counted here, precisely because
+            # there is no bucket to count into.
+            self._refuse(path, "no-client-ip")
+            return False
+        self._client_ip = ip
+        limiter = self.limiter
+        if limiter is not None and limiter.locked_out(ip):
+            # Checked BEFORE the token: a lockout that a valid credential could
+            # walk through would not be a lockout, and an attacker who guesses
+            # one token mid-run must not have the record wiped.
+            self._refuse(path, "locked-out")
+            return False
+        return True
+
     def _handle(self) -> None:
-        split = urlsplit(self.path)
-        path = unquote(split.path)
         self._client_ip = None
         self._token_fp = None
+        path = self._request_path()
+        if path is None:
+            return
+        self._drain_body()
 
         # 🔴 BEFORE EVERYTHING, and it is the ONLY thing before auth.
         # Unauthenticated by design (§2b) and it says nothing but "ok". It is
@@ -660,24 +928,11 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             self._respond(200, HEALTH_BODY)
             return
 
-        ip = client_ip(self.headers)
-        if ip is None:
-            # 🔴 FAIL CLOSED. The alternative — bucketing every unidentified
-            # request under one shared key — is the failure the whole
-            # `CF-Connecting-IP` design exists to avoid: one abuser would then
-            # lock out everybody. Nothing is counted here, precisely because
-            # there is no bucket to count into.
-            self._refuse(path, "no-client-ip")
+        if not self._identify_and_meter(path):
             return
-        self._client_ip = ip
-
+        ip = self._client_ip
+        assert ip is not None  # set by `_identify_and_meter` on the True path
         limiter = self.limiter
-        if limiter is not None and limiter.locked_out(ip):
-            # Checked BEFORE the token: a lockout that a valid credential could
-            # walk through would not be a lockout, and an attacker who guesses
-            # one token mid-run must not have the record wiped.
-            self._refuse(path, "locked-out")
-            return
 
         if not path.startswith(API_PREFIX):
             # Not an API path and not health. Answered with the SAME uniform 401
@@ -698,9 +953,27 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         if limiter is not None:
             limiter.record_success(ip)
 
-        params = parse_qs(split.query, keep_blank_values=True)
+        params = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
         rest = path[len(API_PREFIX) :]
         parts = [p for p in rest.split("/") if p]
+
+        if any(
+            part in (".", "..") or not SAFE_PATH_COMPONENT.fullmatch(part)
+            for part in parts
+        ):
+            # 🔴 A PATH COMPONENT REACHES THE FILESYSTEM. `%2e%2e` decoded to
+            # `..`, and `scope_revision` then read `<store>/../.git/HEAD` and put
+            # the result in `X-Store-Revision`. Harmless in the pod (the store
+            # root is `/data`, whose parent holds nothing) and authenticated-only
+            # — but "harmless because of where it happens to be mounted" is not a
+            # property this file should rely on. Authenticated, so it may be told
+            # what it did wrong.
+            self._respond(
+                400, b"bad request: invalid path component\n",
+                headers={"X-Store-Status": "bad-request"},
+            )
+            self._audit(path, 400, "bad-request")
+            return
 
         try:
             if len(parts) == 2 and parts[0] == "recall":

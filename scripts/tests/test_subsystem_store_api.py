@@ -1764,12 +1764,32 @@ class TestRateLimiterUnit:
         assert lim.locked_out("a") is True
         assert lim.locked_out("b") is False
 
-    def test_a_success_clears_the_STREAK(self):
+    def test_a_success_does_NOT_forgive_the_streak(self):
+        """🔴 INVERTED BY AN AUDIT FINDING, and the old behaviour was mine, not
+        the spec's. Forgiving a streak on success created two attacks, both
+        because the key is an ADDRESS and not an identity: an attacker holding
+        ANY accepted token — including the old one overlap rotation keeps live —
+        interleaves one success per four guesses and brute-forces forever; and
+        an attacker behind the same NAT as a legitimate client is never locked
+        out, because the victim's own traffic keeps resetting them.
+        """
         now = [1000.0]
         lim = self._limiter(now)
         for _ in range(4):
             lim.record_failure("a")
         lim.record_success("a")
+        assert lim.record_failure("a") is True, "a success forgave the streak"
+        assert lim.locked_out("a") is True
+
+    def test_the_WINDOW_is_what_forgives_a_streak(self):
+        """The forgiveness the inverted test above was reaching for, done by the
+        mechanism that cannot be driven by an attacker: four typos age out.
+        """
+        now = [1000.0]
+        lim = self._limiter(now)
+        for _ in range(4):
+            assert lim.record_failure("a") is False
+        now[0] += 61.0
         for _ in range(4):
             assert lim.record_failure("a") is False
         assert lim.locked_out("a") is False
@@ -1929,15 +1949,21 @@ class TestLockoutOverHTTP:
         assert "status=unauthorized" in audit[0]
         assert "status=locked-out" in audit[-1]
 
-    def test_a_SUCCESS_clears_the_streak_over_HTTP(self, store: Path):
-        with running(store) as (base, _):
+    def test_a_SUCCESS_does_NOT_buy_more_GUESSES(self, store: Path):
+        """🔴 THE INTERLEAVE ATTACK, over HTTP. An attacker holding one accepted
+        token — the old one, during an overlap rotation — must not be able to
+        spend it to reset the budget and keep guessing the rest of the set.
+        Four wrong, one right, one wrong: the sixth request is the fifth FAILURE
+        inside the window, so it locks out.
+        """
+        with running(store, tokens=(GOOD_TOKEN, SECOND_TOKEN)) as (base, audit):
             for _ in range(4):
                 fetch(f"{base}/api/v1/recall/{SCOPE}", token="w" * 48)
             assert fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)[0] == 200
-            for _ in range(4):
-                fetch(f"{base}/api/v1/recall/{SCOPE}", token="w" * 48)
-            code, _h, _b = fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
-        assert code == 200, "a cleared streak still locked the client out"
+            fetch(f"{base}/api/v1/recall/{SCOPE}", token="x" * 48)
+            code, _h, _b = fetch(f"{base}/api/v1/recall/{SCOPE}", token=SECOND_TOKEN)
+        assert code == 401, "a valid token reset the guessing budget"
+        assert "status=lockout-triggered" in audit[5]
 
     def test_probing_NON_API_paths_also_counts_toward_the_lockout(self, store: Path):
         """URL probing from one address is the same attack as token probing from
@@ -2151,3 +2177,483 @@ class TestTheDeployedEntrypoint:
         # And never a credential, on any line.
         assert GOOD_TOKEN not in stdout and SECOND_TOKEN not in stdout
         assert "w" * 48 not in stdout
+
+
+# =============================================================================
+# 16. THE AUDIT ROUND — one test per finding, each red before its fix.
+#
+# 🔴 EVERY TEST BELOW EXISTS BECAUSE A REVIEW FOUND A REAL DEFECT IN SECTIONS
+# 14-15, NOT BECAUSE OF A STYLE NOTE. Two were critical: an unauthenticated
+# caller could FORGE audit lines (defeating the exact property the token-set
+# design rests on), and an unread request body could be re-parsed as the next
+# request on a keep-alive connection (CL.0 smuggling). A fix made in response to
+# a review is a code change like any other, so each one is pinned here.
+# =============================================================================
+
+
+class TestAuditLogCannotBeForged:
+    """🔴 CRITICAL. `unquote()` turns `%0a` into a REAL newline and the audit
+    record is one f-string. An unauthenticated caller could emit a second,
+    syntactically perfect `auth=ok` line naming any fingerprint and any address.
+
+    Why that is not cosmetic: the README's rotation procedure says to delete the
+    old token once its fingerprint stops appearing in the log. A caller who can
+    keep any fingerprint appearing forever can block rotation indefinitely, and
+    one who can forge `auth=fail` at will can drown or fabricate the Loki alert.
+    """
+
+    FORGED = (
+        "store-api%20audit%20ts=2026-01-01T00:00:00+00:00%20ip=198.51.100.4"
+        "%20method=GET%20path=/api/v1/recall/x%20token=deadbeef1234%20auth=ok"
+        "%20result=200%20status=recalled"
+    )
+
+    def test_a_NEWLINE_in_the_path_cannot_open_a_second_record(self, store: Path):
+        with running(store) as (base, audit):
+            code, _h, _b = fetch(f"{base}/api/v1/x%0a{self.FORGED}")
+        assert code == 401
+        # ONE request, ONE record — the property nothing asserted before.
+        assert len(audit) == 1, f"the request produced {len(audit)} audit entries"
+        assert "\n" not in audit[0], "a newline survived into the audit record"
+        assert "\r" not in audit[0]
+        # 🔴 ASSERT THE PARSED FIELDS, NOT THE SPELLING. The escaped text still
+        # CONTAINS the characters `auth=ok` inside the path value — a substring
+        # check would be red for a record that is perfectly safe, and would then
+        # be "fixed" by scrubbing the path into uselessness. What matters is
+        # that a splitter sees one `auth` field and it says `fail`.
+        fields = [part for part in audit[0].split() if "=" in part]
+        keys = [part.split("=", 1)[0] for part in fields]
+        assert keys.count("auth") == 1, f"more than one auth field: {audit[0]}"
+        assert keys.count("token") == 1
+        parsed = dict(part.split("=", 1) for part in fields)
+        assert parsed["auth"] == "fail"
+        assert parsed["token"] == "-"
+
+    def test_the_forged_text_cannot_reach_the_log_as_SEPARATE_FIELDS(
+        self, store: Path
+    ):
+        """Escaping newlines alone is not enough — a SPACE also opens a new
+        field, so `path=/x auth=ok` would parse as two fields to any splitter.
+        """
+        with running(store) as (base, audit):
+            fetch(f"{base}/api/v1/x%20auth=ok%20token=deadbeef1234")
+        line = audit[0]
+        fields = dict(
+            part.split("=", 1) for part in line.split()[2:] if "=" in part
+        )
+        assert fields["auth"] == "fail", f"auth was forged to {fields['auth']!r}"
+        assert fields["token"] == "-"
+
+    def test_control_characters_are_neutralised_but_the_path_is_still_LEGIBLE(
+        self, store: Path
+    ):
+        with running(store) as (base, audit):
+            fetch(f"{base}/api/v1/recall/{SCOPE}%00%09%1b[31m", token=GOOD_TOKEN)
+        line = audit[0]
+        assert "\x00" not in line and "\x1b" not in line and "\t" not in line
+        # A log that scrubbed everything would be safe and useless.
+        assert SCOPE in line
+
+    def test_an_ABSURDLY_long_path_cannot_flood_one_record(self, store: Path):
+        with running(store) as (base, audit):
+            fetch(f"{base}/api/v1/{'z' * 4000}")
+        assert len(audit[0]) < 1000, "one request wrote an unbounded log record"
+        assert "truncated" in audit[0]
+
+    def test_POSITIVE_CONTROL_an_ordinary_path_is_logged_verbatim(self, store: Path):
+        """Without this, every assertion above is satisfied by a `_audit` that
+        logs nothing at all.
+        """
+        with running(store) as (base, audit):
+            fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
+        assert f"path=/api/v1/recall/{SCOPE}" in audit[0]
+        assert f"token={api.token_id(GOOD_TOKEN)}" in audit[0]
+
+
+class TestNoRequestSmuggling:
+    """🔴 CRITICAL. The server keeps connections alive and never read request
+    bodies, so a body was parsed as the NEXT request on the same socket.
+
+    Behind a proxy that pools upstream connections — Traefik does by default —
+    that is CL.0 smuggling: a POST body holding a partial request line
+    desynchronises the connection and the next VICTIM request completes the
+    attacker's line, carrying the victim's `Authorization` header to a scope the
+    attacker chose.
+    """
+
+    def _raw(self, host: str, payload: bytes, expect: int = 2) -> list[bytes]:
+        """Write raw bytes on ONE socket and read every response that comes back."""
+        import socket
+
+        host_name, port = host.split(":")
+        with socket.create_connection((host_name, int(port)), timeout=10) as sock:
+            sock.sendall(payload)
+            sock.settimeout(5)
+            chunks = []
+            try:
+                while True:
+                    chunk = sock.recv(65536)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+            except (TimeoutError, OSError):
+                pass
+        return b"".join(chunks).split(b"HTTP/1.1 ")[1:]
+
+    def test_a_POST_BODY_is_not_served_as_the_next_request(self, store: Path):
+        with running(store) as (base, _):
+            host = base.split("//", 1)[1]
+            smuggled = (
+                f"GET /api/v1/recall/{SCOPE} HTTP/1.1\r\n"
+                f"Host: {host}\r\n"
+                f"Authorization: Bearer {GOOD_TOKEN}\r\n"
+                f"CF-Connecting-IP: {CLIENT_IP}\r\n\r\n"
+            ).encode()
+            payload = (
+                f"POST /api/v1/recall/{SCOPE} HTTP/1.1\r\n"
+                f"Host: {host}\r\n"
+                f"CF-Connecting-IP: {CLIENT_IP}\r\n"
+                f"Content-Length: {len(smuggled)}\r\n\r\n"
+            ).encode() + smuggled
+            responses = self._raw(host, payload)
+        assert len(responses) == 1, (
+            f"the body was re-parsed as a request: {len(responses)} responses"
+        )
+        assert POINTER_LINE.encode() not in b"".join(responses)
+
+    def test_a_GET_with_a_body_does_not_desynchronise_the_connection(
+        self, store: Path
+    ):
+        with running(store) as (base, _):
+            host = base.split("//", 1)[1]
+            smuggled = (
+                f"GET /api/v1/recall/{SCOPE} HTTP/1.1\r\n"
+                f"Host: {host}\r\n"
+                f"Authorization: Bearer {GOOD_TOKEN}\r\n"
+                f"CF-Connecting-IP: {CLIENT_IP}\r\n\r\n"
+            ).encode()
+            payload = (
+                f"GET /healthz HTTP/1.1\r\nHost: {host}\r\n"
+                f"Content-Length: {len(smuggled)}\r\n\r\n"
+            ).encode() + smuggled
+            responses = self._raw(host, payload)
+        assert len(responses) == 1, "a GET body was re-parsed as a request"
+        assert POINTER_LINE.encode() not in b"".join(responses)
+
+    def test_POSITIVE_CONTROL_the_raw_harness_CAN_see_two_responses(
+        self, store: Path
+    ):
+        """🔴 Otherwise "1 response" is a fact about the socket reader. Two
+        genuinely pipelined requests must come back as two.
+        """
+        with running(store) as (base, _):
+            host = base.split("//", 1)[1]
+            one = (
+                f"GET /healthz HTTP/1.1\r\nHost: {host}\r\n\r\n"
+            ).encode()
+            responses = self._raw(host, one + one)
+        assert len(responses) == 2, f"the harness cannot see two: {len(responses)}"
+
+    def test_a_rejected_request_does_not_keep_its_connection(self, store: Path):
+        with running(store) as (base, _):
+            host = base.split("//", 1)[1]
+            bad = (
+                f"GET /api/v1/recall/{SCOPE} HTTP/1.1\r\nHost: {host}\r\n"
+                f"CF-Connecting-IP: {CLIENT_IP}\r\n\r\n"
+            ).encode()
+            responses = self._raw(host, bad + bad)
+        assert len(responses) == 1, "a 401 left the connection open for reuse"
+        assert b"Connection: close" in responses[0]
+
+
+class TestWritesAreMeteredLikeEverythingElse:
+    """A write attempt used to answer 405 BEFORE the client-IP and lockout
+    checks: 31 anonymous POSTs with no token and no `CF-Connecting-IP` produced
+    31 audit lines and counted for nothing. That is a free, unauthenticated,
+    unbounded channel for drowning the Loki alert this design depends on.
+    """
+
+    def test_a_POST_with_NO_client_ip_is_a_401_not_a_405(self, store: Path):
+        with running(store) as (base, audit):
+            code, _h, body = fetch(
+                f"{base}/api/v1/recall/{SCOPE}", method="POST", client_ip=None
+            )
+        assert code == 401
+        assert body == b"unauthorized\n"
+        assert "status=no-client-ip" in audit[0]
+
+    def test_POST_probing_COUNTS_toward_the_lockout(self, store: Path):
+        with running(store) as (base, _):
+            for _ in range(5):
+                fetch(f"{base}/api/v1/recall/{SCOPE}", method="POST")
+            code, _h, _b = fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
+        assert code == 401, "unauthenticated POSTs were an unmetered channel"
+
+    def test_a_LOCKED_OUT_client_cannot_even_learn_that_writes_are_405(
+        self, store: Path
+    ):
+        with running(store) as (base, _):
+            for _ in range(5):
+                fetch(f"{base}/api/v1/recall/{SCOPE}", token="w" * 48)
+            code, _h, body = fetch(
+                f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, method="POST"
+            )
+        assert (code, body) == (401, b"unauthorized\n")
+
+    def test_an_IDENTIFIED_caller_still_gets_the_405(self, store: Path):
+        """The read-only guarantee is unchanged for anyone who gets that far —
+        this is the positive control on the reordering.
+        """
+        with running(store) as (base, _):
+            for method in ("POST", "PUT", "PATCH", "DELETE"):
+                code, headers, body = fetch(
+                    f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, method=method
+                )
+                assert code == 405, f"{method} answered {code}"
+                assert body == b"read-only\n"
+                assert headers["Allow"] == "GET, HEAD"
+
+
+class TestMalformedTargetsAndUnknownMethods:
+    def test_an_absolute_form_target_that_breaks_urlsplit_is_a_401_not_a_CRASH(
+        self, store: Path
+    ):
+        """`GET http://[ HTTP/1.1` raised an unhandled ValueError: no response,
+        a killed connection, and a ~20-line traceback per request in the pod log
+        — cheaper than any metered path. Absolute-form is mandatory-to-accept.
+        """
+        import socket
+
+        with running(store) as (base, audit):
+            host = base.split("//", 1)[1]
+            with socket.create_connection(tuple(host.split(":")[:1]) + (int(host.split(":")[1]),), timeout=10) as sock:
+                sock.sendall(
+                    f"GET http://[ HTTP/1.1\r\nHost: {host}\r\n"
+                    f"CF-Connecting-IP: {CLIENT_IP}\r\n\r\n".encode()
+                )
+                sock.settimeout(5)
+                data = b""
+                try:
+                    while True:
+                        chunk = sock.recv(65536)
+                        if not chunk:
+                            break
+                        data += chunk
+                except (TimeoutError, OSError):
+                    pass
+        assert data, "the request got no response at all"
+        assert b"401" in data.split(b"\r\n")[0], data.split(b"\r\n")[0]
+        assert b"unauthorized" in data
+        assert any("status=malformed-target" in line for line in audit)
+
+    def test_an_UNKNOWN_method_is_the_same_uniform_401_not_a_501_page(
+        self, store: Path
+    ):
+        import socket
+
+        for verb in ("OPTIONS", "TRACE", "FROBNICATE"):
+            with running(store) as (base, _):
+                host = base.split("//", 1)[1]
+                name, port = host.split(":")
+                with socket.create_connection((name, int(port)), timeout=10) as sock:
+                    sock.sendall(
+                        f"{verb} /api/v1/recall/{SCOPE} HTTP/1.1\r\nHost: {host}\r\n"
+                        f"CF-Connecting-IP: {CLIENT_IP}\r\n\r\n".encode()
+                    )
+                    sock.settimeout(5)
+                    data = b""
+                    try:
+                        while True:
+                            chunk = sock.recv(65536)
+                            if not chunk:
+                                break
+                            data += chunk
+                    except (TimeoutError, OSError):
+                        pass
+            assert b"401" in data.split(b"\r\n")[0], f"{verb}: {data[:80]!r}"
+            assert b"unauthorized\n" in data
+            assert verb.encode() not in data, f"{verb} was echoed back to the caller"
+
+    def test_a_traversal_component_is_refused_before_it_reaches_the_disk(
+        self, store: Path
+    ):
+        with running(store) as (base, _):
+            code, headers, _b = fetch(
+                f"{base}/api/v1/recall/%2e%2e", token=GOOD_TOKEN
+            )
+        assert code == 400
+        assert headers["X-Store-Status"] == "bad-request"
+
+    def test_a_NORMAL_scope_name_is_still_accepted(self, store: Path):
+        """The positive control on that guard: dots are legal in refs, so the
+        pattern permits them and `..` is excluded BY NAME. A guard that rejected
+        every dot would pass the test above and break real callers.
+        """
+        with running(store) as (base, _):
+            assert fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)[0] == 200
+            code, _h, _b = fetch(
+                f"{base}/api/v1/recall/{SCOPE}?ref=thing-alpha", token=GOOD_TOKEN
+            )
+        assert code == 200
+
+
+class TestRateLimitKeyIsAClientNotAnAddress:
+    """An IPv6 /64 is one client's free choice of 2**64 addresses. Keying on the
+    full address makes the lockout decorative and is the cheapest way to grow the
+    failure table without bound.
+    """
+
+    def test_two_addresses_in_ONE_v6_slash_64_are_ONE_bucket(self, store: Path):
+        a = "2001:db8:1:2::1"
+        b = "2001:db8:1:2:ffff:ffff:ffff:ffff"
+        with running(store) as (base, _):
+            for _ in range(3):
+                fetch(f"{base}/api/v1/recall/{SCOPE}", token="w" * 48, client_ip=a)
+            for _ in range(2):
+                fetch(f"{base}/api/v1/recall/{SCOPE}", token="w" * 48, client_ip=b)
+            code, _h, _b = fetch(
+                f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, client_ip=a
+            )
+        assert code == 401, "an attacker got a fresh bucket by changing host bits"
+
+    def test_a_DIFFERENT_slash_64_is_a_DIFFERENT_bucket(self, store: Path):
+        """The negative half: aggregating to /64 must not aggregate the world.
+        Without this, `return 0` would pass the test above.
+        """
+        with running(store) as (base, _):
+            for _ in range(6):
+                fetch(
+                    f"{base}/api/v1/recall/{SCOPE}",
+                    token="w" * 48,
+                    client_ip="2001:db8:1:2::1",
+                )
+            code, _h, _b = fetch(
+                f"{base}/api/v1/recall/{SCOPE}",
+                token=GOOD_TOKEN,
+                client_ip="2001:db8:9:9::1",
+            )
+        assert code == 200, "an unrelated /64 was caught in someone else's lockout"
+
+    def test_a_v4_MAPPED_address_is_the_SAME_bucket_as_its_v4_form(self):
+        assert api.client_ip({"CF-Connecting-IP": "::ffff:203.0.113.7"}) == api.client_ip(
+            {"CF-Connecting-IP": "203.0.113.7"}
+        )
+
+    def test_v4_is_NOT_aggregated(self):
+        """A /64 rule misapplied to v4 would collapse whole ISPs into one
+        bucket. Two adjacent v4 addresses stay two clients.
+        """
+        first = api.client_ip({"CF-Connecting-IP": "203.0.113.7"})
+        second = api.client_ip({"CF-Connecting-IP": "203.0.113.8"})
+        assert first != second
+
+
+class TestTheTablesAreActuallyBounded:
+    """`MAX_TRACKED_CLIENTS` was a bound in name only: it dropped just the
+    entries that had already aged out, so INSIDE the window nothing was
+    evictable. Measured before the fix: 20,000 tracked against a cap of 4,096.
+    """
+
+    def _limiter(self, now: list[float]):
+        return api.RateLimiter(clock=lambda: now[0])
+
+    def test_the_failure_table_stays_under_the_cap_with_NON_stale_entries(self):
+        now = [1000.0]
+        lim = self._limiter(now)
+        for i in range(api.MAX_TRACKED_CLIENTS * 2):
+            now[0] += 0.0001  # every entry stays well inside the window
+            lim.record_failure(f"k{i}")
+        assert len(lim._failures) <= api.MAX_TRACKED_CLIENTS, len(lim._failures)
+
+    def test_a_LIVE_lockout_survives_that_flood(self):
+        """Bounding must never be a release valve — the whole reason the first
+        version only dropped stale entries.
+        """
+        now = [1000.0]
+        lim = self._limiter(now)
+        for _ in range(5):
+            lim.record_failure("victim")
+        assert lim.locked_out("victim") is True
+        for i in range(api.MAX_TRACKED_CLIENTS * 2):
+            now[0] += 0.0001
+            lim.record_failure(f"k{i}")
+        assert lim.locked_out("victim") is True
+
+    def test_the_lockout_table_is_bounded_too(self):
+        now = [1000.0]
+        lim = self._limiter(now)
+        for i in range(api.MAX_TRACKED_LOCKOUTS + 500):
+            for _ in range(5):
+                lim.record_failure(f"lk{i}")
+            now[0] += 0.0001
+        assert len(lim._locked_until) <= api.MAX_TRACKED_LOCKOUTS
+
+    def test_the_client_CLOSEST_to_a_lockout_is_the_LAST_forgotten(self):
+        """Oldest-first eviction, so the flood does not launder the attacker's
+        own streak out of the table.
+        """
+        now = [1000.0]
+        lim = self._limiter(now)
+        lim.record_failure("early")
+        for i in range(api.MAX_TRACKED_CLIENTS * 2):
+            now[0] += 0.0001
+            lim.record_failure(f"k{i}")
+        assert "early" not in lim._failures
+        assert f"k{api.MAX_TRACKED_CLIENTS * 2 - 1}" in lim._failures
+
+
+class TestNonFiniteLimiterSettings:
+    """`nan <= 0` is False, so both walked through the "must be positive" guard —
+    the exact "misconfiguration that defaults is invisible forever" the function
+    exists to prevent, arriving through the one comparison that does not order
+    them. Measured before the fix: a nan WINDOW silently disabled the limiter
+    entirely; a nan or inf LOCKOUT made it permanent.
+    """
+
+    @pytest.mark.parametrize("value", ["nan", "inf", "-inf", "NaN", "Infinity"])
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "SUBSYSTEM_STORE_FAILURE_WINDOW_S",
+            "SUBSYSTEM_STORE_LOCKOUT_S",
+        ],
+    )
+    def test_a_non_finite_value_is_REFUSED(self, name: str, value: str):
+        with pytest.raises(ValueError) as exc:
+            api.limiter_settings({name: value})
+        assert name in str(exc.value)
+
+    def test_a_FINITE_value_is_still_accepted(self):
+        assert api.limiter_settings(
+            {"SUBSYSTEM_STORE_LOCKOUT_S": "42.5"}
+        ) == (5, 60.0, 42.5)
+
+
+class TestSlowlorisCannotPinAThreadForever:
+    def test_the_handler_declares_a_socket_TIMEOUT(self):
+        # `timeout = None` is the stdlib default and means "wait forever".
+        # Measured before the fix: 50 half-open connections held 50 threads.
+        assert api.StoreRequestHandler.timeout is not None
+        assert 0 < api.StoreRequestHandler.timeout <= 60
+
+    def test_a_HALF_OPEN_connection_is_dropped_rather_than_held(self, store: Path):
+        """Behavioural, not a constant check: send headers with no terminating
+        blank line and watch the server give up on its own.
+        """
+        import socket
+        import time
+
+        with running(store) as (base, _):
+            host = base.split("//", 1)[1]
+            name, port = host.split(":")
+            sock = socket.create_connection((name, int(port)), timeout=10)
+            try:
+                sock.sendall(b"GET /healthz HTTP/1.1\r\n")  # never finished
+                sock.settimeout(api.StoreRequestHandler.timeout + 10)
+                started = time.monotonic()
+                data = sock.recv(65536)  # returns b"" when the server closes
+                elapsed = time.monotonic() - started
+            finally:
+                sock.close()
+        assert data == b"", f"expected a close, got {data[:60]!r}"
+        assert elapsed < api.StoreRequestHandler.timeout + 5
