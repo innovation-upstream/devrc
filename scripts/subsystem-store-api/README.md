@@ -1,4 +1,4 @@
-# subsystem-store-api — phase 1
+# subsystem-store-api — phase 1 + 1.5
 
 Read-only HTTP layer over the `/analyze-service` subsystem index, so the store is
 reachable from more than the workbench. Design: `claudedocs/proposal-subsystem-store-homelab.md`.
@@ -12,9 +12,15 @@ usable is phase 2. Add the pointer when there is something to point at.
 | in | out, until |
 |---|---|
 | the pod, seeded from the local store | — |
-| read-only `GET` API, bearer token | writes / append endpoints → **phase 3** |
-| cluster-internal `ClusterIP` | IngressRoute, DNS, Authelia → **phase 1.5** |
+| read-only `GET` API, bearer token **SET** | writes / append endpoints → **phase 3** |
+| per-client rate limit + lockout, `CF-Connecting-IP` keying | separate read/write tokens → **phase 3** |
+| cluster-internal `ClusterIP` | 🔴 IngressRoute + DNS → **an UNMERGED PR** |
 | byte-identity verified against local | the CLI wrapper + read-through cache → **phase 2** |
+
+🔴 **Phase 1.5 landed the hardening and NOT the exposure.** The store is still
+unreachable from the internet: the IngressRoute and DNS Ingress live in a
+homelab-infra PR that is deliberately open and unmerged, because merging to
+`trunk` there IS deploying and that merge is the go/no-go.
 
 The local store at `~/.claude/analyze-service-index/` stays **authoritative and
 untouched**. Rollback is `kubectl delete ns subsystem-store`.
@@ -76,6 +82,10 @@ scripts/subsystem-store-api/verify-byte-identity.sh \
                      -o jsonpath='{.data.token}' | base64 -d)
 ```
 
+The verifier sends `CF-Connecting-IP: 127.0.0.1` (override with `$CLIENT_IP`)
+because the server requires one — see "Rate limit, lockout and the client
+address" below.
+
 ⚠ `verify-byte-identity.sh` prints a `diff` on failure, and that diff is store
 content. Redirect it to a file on a shared terminal.
 
@@ -88,13 +98,102 @@ canonicalises exactly that line and `cmp`s the result, and prints beside the
 verdict how many lines differ **with no canonicalisation** and how many of those
 are the store-root line — `2` and `2` for pod-vs-workbench.
 
+## The token is a SET, and rotation is by overlap
+
+The token file holds **one token per line, current first**. Whitespace-separated
+is also accepted; blank lines are ignored; duplicates collapse. Up to
+`MAX_TOKENS` (4) — every line is a live credential, so an uncapped set is an
+accumulation nobody has retired, and the server refuses to start rather than
+serve one.
+
+Generate one:
+
+```bash
+python3 -c 'import secrets; print(secrets.token_urlsafe(43))'   # 58 chars
+```
+
+### Rotating, and how you know it is safe to finish
+
+🔴 **The audit line names the fingerprint of the token that MATCHED**, not the
+one the server was configured with. That is the whole safety of overlap
+rotation — without it, "nobody uses the old token any more" is a guess:
+
+```
+store-api audit ts=… ip=203.0.113.7 method=GET path=/api/v1/recall/x \
+  token=dbb22a50030d auth=ok result=200 status=recalled
+```
+
+1. `sops clusters/homelab/apps/subsystem-store/secrets.enc.yaml` — put the NEW
+   token on the first line, keep the old one below it. Commit; Flux applies.
+2. Restart the pod. Its startup line prints every fingerprint in file order:
+   `token-ids=<new>,<old>`.
+3. Roll clients onto the new token. Watch the audit stream until the OLD
+   fingerprint stops appearing:
+   `kubectl -n subsystem-store logs deploy/subsystem-store-api | grep 'token=<old>'`
+4. Only then delete the old line, commit, restart. A request presenting it is
+   now an ordinary 401.
+
+Step 3 is the step that does not exist without step 2's fingerprint, and step 4
+is the one people skip — a rotation that leaves the old credential live is not a
+rotation. The whole sequence is exercised in-band by
+`TestTokenSetAndOverlapRotation::test_a_ROTATION_end_to_end_old_still_works_then_stops`
+and against the real process by `TestTheDeployedEntrypoint`.
+
+## Rate limit, lockout and the client address
+
+| knob | default | env |
+|---|---|---|
+| failed auths before a lockout | 5 | `SUBSYSTEM_STORE_MAX_FAILURES` |
+| window they must fall inside | 60 s | `SUBSYSTEM_STORE_FAILURE_WINDOW_S` |
+| lockout duration | 900 s | `SUBSYSTEM_STORE_LOCKOUT_S` |
+
+A malformed value **exits 78** at startup rather than defaulting silently.
+
+🔴 **The client is keyed on `CF-Connecting-IP`, and nothing else.** Cloudflare
+overwrites it on every proxied request, which is the only reason it can be
+trusted — and it stops being trustworthy the moment Cloudflare is not the sole
+public ingress. `X-Forwarded-For` is never read: it is caller-supplied, so an
+attacker keyed on it gets a fresh bucket per request *and* can lock out a third
+party by forging theirs. Behind Cloudflare + Traefik the TCP peer address is the
+gateway's for everybody, so keying on that is the mirror failure — one abuser
+locks out the world.
+
+An absent, unparseable or **duplicated** header therefore **fails closed**: a
+uniform 401, and nothing counted, because there is no bucket to count into.
+Anything reaching the pod directly (a port-forward, `verify-byte-identity.sh`)
+must send the header itself; that is not a hole, since addressing the pod
+directly already bypasses the edge.
+
+Every rejection is the same 401 on the wire — body, code and header set — and is
+told apart only in the audit log's `status=` field. The full vocabulary, which is
+what the Loki rules select on:
+
+| `status=` | meaning |
+|---|---|
+| `unauthorized` | no/!wrong token, or a path outside `/api/v1/` |
+| `no-client-ip` | absent, unparseable or duplicated `CF-Connecting-IP` — fails closed |
+| `locked-out` | this client is serving a lockout |
+| `lockout-triggered` | this request is the one that started it |
+| `malformed-target` | a request target `urlsplit` could not parse |
+| `malformed-request` | the request LINE itself was unparseable — no headers exist |
+| `method-not-allowed` | a write verb from an authenticated caller (405, not 401) |
+
+An error that discriminates is an enumeration API; a log that does not is a
+post-mortem with no evidence.
+
+⚠ **A wrong PATH is not a failed AUTH and is not counted.** Only a request that
+reaches the token check and fails it moves the lockout. Counting path probes
+measured as a client holding the *right* token locking itself out with five
+ordinary 404-ish requests. Volumetric probing is the Traefik and Cloudflare
+layers' job; this layer is the only one that can see a wrong credential.
+
 ## Deferred, and why (not oversights)
 
-- **Rate-limit / lockout on repeated 401s**, and **separate read/write tokens** —
-  §2b `(B-required)` hardening for the moment an IngressRoute exists. Phase 1
-  creates none, and shipping an unexercised throttle is how a throttle nobody has
-  watched trip gets trusted.
+- **Separate read/write tokens** — there is no write path until phase 3, so a
+  write-scoped token today is a label on a capability that does not exist.
 - **Backup CronJob, daily-commit CronJob** — the workbench copy is authoritative
-  in phase 1, so the PVC is a second copy, not the only one.
-- **Token rotation as a one-command operation** — §2b requires it be exercised
-  once before cutover. It is not, so it is not claimed.
+  until phase 3, so the PVC is a second copy, not the only one.
+- **A `rotate-token` script** — the procedure above is four steps across a SOPS
+  file and a `kubectl` restart in another repo, and §2b's "one command" is worth
+  building only once phase 2's wrapper exists to be the thing that holds it.
+  Stated here rather than claimed as done.

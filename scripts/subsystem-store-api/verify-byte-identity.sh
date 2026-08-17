@@ -108,8 +108,17 @@ for scope in "${SCOPES[@]}"; do
     fail=$((fail + 1)); continue
   fi
 
+  # 🔴 CF-Connecting-IP is REQUIRED by the server (phase 1.5): it keys the
+  # per-client rate limiter on the one header Cloudflare overwrites, and an
+  # absent one fails CLOSED rather than being bucketed with every other
+  # unidentified caller. This verifier reaches the pod directly (port-forward or
+  # in-cluster), so no proxy sets it and it must identify itself. That is not a
+  # hole: anything that can address the pod directly has already bypassed the
+  # edge, and the header is only ever TRUSTED because Cloudflare is the sole
+  # PUBLIC ingress.
   code=$(curl -sS -o "$remote_out" -D "$tmp/hdr" -w '%{http_code}' \
            -H "Authorization: Bearer $TOKEN" \
+           -H "CF-Connecting-IP: ${CLIENT_IP:-127.0.0.1}" \
            "$URL/api/v1/recall/$scope" || echo "000")
   if [[ "$code" != "200" ]]; then
     echo "FAIL scope=$scope remote HTTP $code (body: $(head -c 120 "$remote_out"))"
