@@ -624,3 +624,90 @@ def _run(root, *extra):
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     return r.stdout
+
+
+# --- numbered-corpus integrity --------------------------------------------------
+# The numbers in a split corpus are an API: they are cited from the core, from
+# sibling reference files and from OTHER skills, so a demote that renumbers
+# per-file silently breaks every citation while leaving all PATHS valid — no path
+# gate can see it. Measured on datapacket-talos app-blocks 2026-08-17: intact at
+# 200 items / 0 dangling; renumbering its 9 shards to 1..n each produced 53
+# dangling citations, which is the mutation the reporter below must catch.
+
+def _corpus_skill(tmp_path, name, core, shards):
+    d = tmp_path / name
+    (d / "reference").mkdir(parents=True)
+    (d / "SKILL.md").write_text(core)
+    for fn, nums in shards.items():
+        body = "# shard\n\n" + "".join(f"{n}. **item {n}** body\n\n" for n in nums)
+        (d / "reference" / fn).write_text(body)
+    return d / "SKILL.md"
+
+
+# Two sparse shards of one 1..200-style sequence, as a real split corpus looks.
+# 12 apiece, so a total renumber still leaves >= CORPUS_MIN defined numbers —
+# otherwise the size gate, not the logic, is what the mutation test measures.
+SHARDS = {"a.md": [3, 17, 45, 92, 140, 155, 161, 170, 175, 182, 190, 196],
+          "b.md": [8, 23, 60, 111, 150, 158, 166, 172, 178, 185, 193, 199]}
+CORE_CITES = "# core\n\nSee gotcha #45 and gotcha #111 for detail.\n"
+
+
+def test_a_split_corpus_with_frozen_numbers_is_clean(tmp_path):
+    a = sa.audit_one(_corpus_skill(tmp_path, "ok", CORE_CITES, SHARDS))
+    assert a["corpus_n"] == 24
+    assert a["corpus_dangling"] == []
+    assert a["corpus_dupes"] == []
+
+
+def test_positive_control_renumbering_shards_breaks_citations(tmp_path):
+    """THE mutation this check exists for — and the one a ceiling-bounded
+    citation regex could not see, because renumbering drops the ceiling too."""
+    renumbered = {"a.md": list(range(1, 13)), "b.md": list(range(1, 13))}
+    a = sa.audit_one(_corpus_skill(tmp_path, "renum", CORE_CITES, renumbered))
+    assert a["corpus_dangling"] == [45, 111], (
+        "renumbering every shard to 1..n must strand both citations; got "
+        f"{a['corpus_dangling']}")
+
+
+def test_positive_control_a_duplicate_number_across_shards_is_reported(tmp_path):
+    """A PARTIAL renumber — one shard rewritten, the other left alone."""
+    clashing = {"a.md": SHARDS["a.md"], "b.md": SHARDS["a.md"][:-1] + [141]}
+    a = sa.audit_one(_corpus_skill(tmp_path, "dupe", CORE_CITES, clashing))
+    assert [n for n, *_ in a["corpus_dupes"]] == SHARDS["a.md"][:-1]
+
+
+def test_a_dense_procedure_list_is_not_a_corpus(tmp_path):
+    """1..n is a procedure. Scoring these as shards reported 15 bogus
+    collisions against app-blocks' provably-intact corpus."""
+    dense = {"a.md": [1, 2, 3, 4, 5, 6], "b.md": [1, 2, 3, 4, 5, 6]}
+    a = sa.audit_one(_corpus_skill(tmp_path, "dense", "# core\n\ngotcha #3\n", dense))
+    assert a["corpus_dupes"] == []
+
+
+def test_a_skill_citing_another_skills_corpus_is_not_policed(tmp_path):
+    """Several datapacket skills cite app-blocks' numbers ("gotchas #137" in
+    manage-design-system, one in gitops-gate). None of those is theirs to
+    resolve. The SIZE gate is what keeps them silent — they have no corpus of
+    their own — so this pins the real shape: a reference/ dir, a borrowed
+    citation, and too few numbers to be a corpus."""
+    tiny = {"a.md": [1, 2, 3]}
+    a = sa.audit_one(_corpus_skill(tmp_path, "borrow",
+                                   "# core\n\nsee gotcha #137 elsewhere\n", tiny))
+    assert a["corpus_n"] == 0 and a["corpus_dangling"] == []
+
+
+def test_a_bare_hash_number_is_not_read_as_a_citation(tmp_path):
+    """`#2319` is a PR. Across app-blocks the bare form matches 313 distinct
+    numbers, 189 of them outside the corpus entirely."""
+    a = sa.audit_one(_corpus_skill(tmp_path, "prs",
+                                   CORE_CITES + "\nShipped in #2319 and #201.\n", SHARDS))
+    assert a["corpus_dangling"] == []
+
+
+def test_a_skill_with_no_reference_dir_is_never_policed(tmp_path):
+    d = tmp_path / "flat"
+    d.mkdir()
+    (d / "SKILL.md").write_text(CORE_CITES + "".join(
+        f"{n}. **step {n}**\n\n" for n in range(1, 21)))
+    a = sa.audit_one(d / "SKILL.md")
+    assert a["corpus_n"] == 0
