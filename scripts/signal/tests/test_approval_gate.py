@@ -15,9 +15,14 @@ The routes attempted:
   5. re-using a spent capability (replay);
   6. approving a draft that was already sent, to re-arm it.
 
-Plus a STRUCTURAL check that there is exactly one call site posting to the send
-endpoint in the whole of `scripts/signal/` — the property that makes the five
-behavioural checks above exhaustive rather than a sample.
+Plus a STRUCTURAL ledger of the functions that can build a send-endpoint URL.
+🔴 It is a TRIPWIRE over enumerated spellings, NOT a proof that no other door can
+exist — an earlier version claimed the latter and was then walked by four
+spellings a blind audit found in minutes. What it supports is narrower and true:
+the door this codebase HAS is the gated one, every function in the ledger is
+asserted to spend a capability, and adding an obvious second door fails the
+suite. The unconditional guarantee is the capability check inside
+`transmit_approved()`, which no caller can skip.
 """
 import ast
 import sys
@@ -209,23 +214,37 @@ def test_approving_a_missing_draft_is_refused(db):
 
 
 # --------------------------------------------------------------------------- #
-# The structural claim that makes the above exhaustive
+# The structural ledger — a tripwire, scoped in its own docstring
 # --------------------------------------------------------------------------- #
-def _functions_that_can_reach_the_send_endpoint() -> dict:
+def _functions_that_can_reach_the_send_endpoint(root: Path = SIGNAL_DIR) -> dict:
     """AST ledger: every function that can BUILD a send-endpoint URL.
 
-    🔴 WHY AN AST WALK AND NOT A GREP. The first version of this ledger grepped
-    for the identifier `SEND_PATH`, so a second door spelled with the LITERAL —
-    `poster(API_URL + "/v2/send", …)`, no capability, no gate call — was invisible
-    to it and survived the whole suite. A guard that can be walked by rewording
-    is not a structural guard. This one recognises BOTH spellings, at every
-    function in every module, by looking at the parsed code rather than its text.
+    🔴 WHAT THIS IS AND IS NOT. It is a TRIPWIRE over the spellings enumerated
+    below, not a proof that no other door exists — a determined `exec()` or a URL
+    assembled from runtime data would pass it, and no static check of this size
+    can say otherwise. The claim it supports is narrow and worth stating exactly:
+    *the door this codebase actually has is the gated one, and adding an obvious
+    second one fails the suite.* The real guarantee is the capability check
+    inside `transmit_approved()`, which every function in this ledger is
+    separately asserted to call.
 
+    An earlier version grepped for the identifier `SEND_PATH` and was walked by
+    FOUR spellings a blind audit found in minutes. Recognised now:
+
+      * the `SEND_PATH` name, and any local ALIAS of it (`from consumer import
+        SEND_PATH as _SP`);
+      * `getattr(consumer, "SEND_PATH")`;
+      * a string literal containing the path;
+      * a SPLIT or FORMATTED literal — the constant parts of any expression are
+        joined, so `"/v2" + "/send"` and `"%s/v2/%s" % …` are caught too.
+
+    Walks `rglob`, not `glob`: a module in a subdirectory was never visited.
     Returns `{module: {function: [reasons]}}`.
     """
     found: dict[str, dict[str, list[str]]] = {}
-    modules = sorted(SIGNAL_DIR.glob("*.py"))
-    assert len(modules) >= 4, f"HARNESS BROKEN: only found {modules}"
+    modules = sorted(p for p in root.rglob("*.py")
+                     if "tests" not in p.parts and "__pycache__" not in p.parts)
+    assert modules, f"HARNESS BROKEN: no modules under {root}"
     for path in modules:
         tree = ast.parse(path.read_text(encoding="utf-8"))
         parents = {}
@@ -256,10 +275,46 @@ def _functions_that_can_reach_the_send_endpoint() -> dict:
                     return False
             return False
 
+        # Local names that ALIAS the constant: `from consumer import SEND_PATH as
+        # _SP`, `_SP = SEND_PATH`. Without these a one-line rename walks the guard.
+        aliases = {"SEND_PATH"}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    if alias.name == "SEND_PATH":
+                        aliases.add(alias.asname or alias.name)
+            elif isinstance(node, ast.Assign) and isinstance(node.value, ast.Name):
+                if node.value.id in aliases:
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            aliases.add(target.id)
+
+        def joined_constants(node) -> str:
+            """Every string constant inside an expression, concatenated.
+
+            Catches a SPLIT or FORMATTED path — `"/v2" + "/send"`,
+            `"%s/v2/%s" % (...)`, an f-string — which a whole-literal check misses.
+            """
+            return "".join(
+                n.value for n in ast.walk(node)
+                if isinstance(n, ast.Constant) and isinstance(n.value, str))
+
         for node in ast.walk(tree):
             reason = None
-            if isinstance(node, ast.Name) and node.id == "SEND_PATH":
-                reason = "SEND_PATH"
+            if isinstance(node, ast.Name) and node.id in aliases:
+                reason = f"name {node.id}"
+            elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                  and node.func.id == "getattr"
+                  and any(isinstance(a, ast.Constant) and a.value == "SEND_PATH"
+                          for a in node.args)):
+                reason = 'getattr(..., "SEND_PATH")'
+            elif isinstance(node, (ast.BinOp, ast.JoinedStr)):
+                merged = joined_constants(node)
+                if consumer.SEND_PATH in merged or (
+                        "/v2" in merged and "send" in merged):
+                    if inside_a_raise(node):
+                        continue
+                    reason = f"assembled path {merged!r}"
             elif (isinstance(node, ast.Constant) and isinstance(node.value, str)
                   and consumer.SEND_PATH in node.value):
                 # A bare string STATEMENT is a docstring, not a URL being built.
@@ -289,32 +344,64 @@ def test_exactly_one_function_can_reach_the_send_endpoint():
     assert set(ledger["consumer.py"]) == {"transmit_approved"}, ledger
 
 
-def test_the_ledger_would_see_a_second_door_spelled_with_the_literal():
-    """POSITIVE CONTROL on the ledger itself, against the mutant that escaped it.
+# Five ungated back doors, one per spelling. A blind audit walked the previous
+# ledger with four of these; each is now a named case run through the REAL
+# function.
+BACKDOOR_SPELLINGS = {
+    "plain_literal": '    return poster(API_URL + "/v2/send", json={"m": body})',
+    "aliased_name": "    return poster(API_URL + _SP, json={'m': body})",
+    "split_literal": '    return poster(API_URL + "/v2" + "/send", json={"m": body})',
+    "getattr_lookup":
+        '    return poster(API_URL + getattr(consumer, "SEND_PATH"), json={"m": body})',
+    "percent_format": '    return poster("%s/v2/%s" % (API_URL, "send"), json={"m": body})',
+}
 
-    A `quick_send()` that posts to `API_URL + "/v2/send"` without touching the
-    gate must be VISIBLE. Verified against a synthetic module here rather than by
-    mutating the real one, so the control ships with the guard.
+
+def _write_backdoor_module(tmp_path: Path, name: str, body_line: str) -> Path:
+    module = tmp_path / f"backdoor_{name}.py"
+    module.write_text(
+        "import consumer\n"
+        "from consumer import SEND_PATH as _SP\n"
+        'API_URL = "http://x"\n'
+        f"def quick_send(poster, body):\n{body_line}\n",
+        encoding="utf-8")
+    return module
+
+
+@pytest.mark.parametrize("spelling", sorted(BACKDOOR_SPELLINGS))
+def test_the_ledger_catches_every_spelling_of_a_second_door(tmp_path, spelling):
+    """🔴 NEGATIVE CONTROL, run through the REAL ledger function.
+
+    The previous control re-implemented a mini walk over synthetic source, so it
+    validated the IDEA and not the INSTRUMENT — and the instrument was in fact
+    walked by four of these five spellings while the suite stayed green. Each
+    case now writes a module to a temp dir and calls
+    `_functions_that_can_reach_the_send_endpoint()` on it.
     """
-    source = (
-        "API_URL = 'http://x'\n"
-        "SEND_PATH = '/v2/send'\n"
-        "def quick_send(poster, body):\n"
-        "    return poster(API_URL + '/v2/send', json={'message': body})\n"
-    )
-    tree = ast.parse(source)
-    hits = [n for n in ast.walk(tree)
-            if isinstance(n, ast.Constant) and isinstance(n.value, str)
-            and consumer.SEND_PATH in n.value]
-    # Two: the constant's definition and the ungated call site inside quick_send.
-    assert len(hits) == 2
-    inside_function = [
-        n for fn in ast.walk(tree) if isinstance(fn, ast.FunctionDef)
-        for n in ast.walk(fn)
-        if isinstance(n, ast.Constant) and isinstance(n.value, str)
-        and consumer.SEND_PATH in n.value
-    ]
-    assert len(inside_function) == 1, "the literal spelling must be detectable"
+    _write_backdoor_module(tmp_path, spelling, BACKDOOR_SPELLINGS[spelling])
+    ledger = _functions_that_can_reach_the_send_endpoint(tmp_path)
+    assert ledger, f"the {spelling!r} back door was INVISIBLE to the ledger"
+    functions = {fn for mod in ledger.values() for fn in mod}
+    assert "quick_send" in functions, ledger
+
+
+def test_the_ledger_is_quiet_on_a_module_with_no_door(tmp_path):
+    """POSITIVE CONTROL the other way: it does not flag everything it reads."""
+    (tmp_path / "innocent.py").write_text(
+        'API_URL = "http://x"\n'
+        "def fetch(getter):\n"
+        '    return getter(API_URL + "/v1/attachments/abc")\n',
+        encoding="utf-8")
+    assert _functions_that_can_reach_the_send_endpoint(tmp_path) == {}
+
+
+def test_the_ledger_walks_subdirectories(tmp_path):
+    """`glob` is not `rglob` — a module one directory down was never visited."""
+    nested = tmp_path / "deeper"
+    nested.mkdir()
+    _write_backdoor_module(nested, "nested", BACKDOOR_SPELLINGS["plain_literal"])
+    ledger = _functions_that_can_reach_the_send_endpoint(tmp_path)
+    assert ledger, "a back door in a SUBDIRECTORY was invisible to the ledger"
 
 
 def test_every_function_in_the_ledger_spends_a_capability():
@@ -420,16 +507,207 @@ def test_send_attempts_records_that_a_send_was_tried(db):
     assert row["send_attempts"] == 1
 
 
-def test_per_recipient_errors_in_the_response_are_not_treated_as_success(db):
-    """A 201 can still carry `errors` — upstream's response has that field."""
+@pytest.mark.parametrize("errors", [
+    # The shape upstream actually sends (`SendMessageErrors{Recipients: …}`) ...
+    {"recipients": [{"recipient": PEER, "message": "unregistered user"}]},
+    # ... and a bare list, in case the encoding differs by version.
+    [{"recipient": PEER, "message": "unregistered user"}],
+])
+def test_per_recipient_errors_in_the_response_are_not_treated_as_success(db, errors):
+    """A 201 can still carry `errors` — upstream's response has that field.
+
+    Parametrised over BOTH shapes: the earlier test fed a bare list while
+    upstream sends an object, and "both are truthy so the guard holds" is a
+    reason to test the real shape, not a reason to skip it.
+    """
     draft = _pending(db)
     db.approve_draft(draft["id"], approval_ref="cg-errors")
     with pytest.raises(RuntimeError) as exc:
         db.send_approved(draft["id"], transmit=lambda a, **kw: {
-            "timestamp": str(SERVER_TS),
-            "errors": [{"recipient": PEER, "message": "unregistered user"}]})
+            "timestamp": str(SERVER_TS), "errors": errors})
     assert "per-recipient errors" in str(exc.value)
     assert db.get_draft(draft["id"])["send_state"] == _signal_db.STATE_SENDING
+
+
+def test_an_error_response_reports_the_ERROR_not_a_timestamp_complaint(db):
+    """Ordering: the reason must survive, not be masked by a parsing gripe.
+
+    A response carrying both an error and an unusable timestamp used to raise the
+    timestamp `ValueError`, hiding the per-recipient reason — the one piece of
+    information the operator needs to reconcile.
+    """
+    draft = _pending(db)
+    db.approve_draft(draft["id"], approval_ref="cg-error-order")
+    with pytest.raises(RuntimeError) as exc:
+        db.send_approved(draft["id"], transmit=lambda a, **kw: {
+            "timestamp": "", "errors": {"recipients": [{"message": "rate limited"}]}})
+    assert "rate limited" in str(exc.value)
+    assert "sync-echo dedupe" not in str(exc.value)
+
+
+def test_a_sender_without_a_number_is_refused_BEFORE_the_claim(db):
+    """🔴 A refusal must not strand the draft.
+
+    `account_number()` used to be an ARGUMENT to `transmit(...)`, which evaluates
+    AFTER the claim has committed — so a draft whose sender had no phone number
+    (`draft_message(self_uuid=…)`, a supported signature) ended `sending` with
+    nothing transmitted: stranded, and unsendable forever.
+    """
+    draft = db.draft_message(recipient=PEER, body="no sender number",
+                             self_uuid="90909090-9090-4909-8909-909090909090")
+    db.approve_draft(draft["id"], approval_ref="cg-no-number")
+    poster = Poster()
+
+    with pytest.raises(SendGateError) as exc:
+        db.send_approved(draft["id"],
+                         transmit=lambda a, **kw: consumer.transmit_approved(
+                             a, poster=poster, **kw))
+    assert "no sending phone number" in str(exc.value)
+    assert poster.calls == []
+    # Still APPROVED — a refusal is recoverable, a strand is not.
+    assert db.get_draft(draft["id"])["send_state"] == _signal_db.STATE_APPROVED
+    row = db.conn.rows("SELECT send_attempts FROM signal.messages WHERE id = ?",
+                       (draft["id"],))[0]
+    assert row["send_attempts"] == 0            # the claim never ran
+
+
+def test_two_senders_that_BOTH_minted_still_transmit_once(db):
+    """🔴 The claim is the lock, and it has to be atomic.
+
+    This is the real race, and the one `_ISSUED_NONCES` cannot cover: both
+    senders read `approved` and BOTH mint a valid capability before either
+    claims. (The nonce registry is per-process — two pods or two shells share
+    nothing.) The database row is the only thing both can contend on, so the
+    transition has to be a single conditional statement with the loser told.
+    """
+    draft = _pending(db, body="exactly once, please")
+    db.approve_draft(draft["id"], approval_ref="cg-race")
+
+    auth_a = _signal_db._mint_send_authorization(db.get_draft(draft["id"]))
+    auth_b = _signal_db._mint_send_authorization(db.get_draft(draft["id"]))
+    assert auth_a is not auth_b          # both are genuine, both would transmit
+
+    db._claim_for_sending(draft["id"])   # sender A wins the row
+    with pytest.raises(SendGateError) as exc:
+        db._claim_for_sending(draft["id"])   # sender B loses AT THE DATABASE
+    assert "could not be claimed" in str(exc.value)
+
+    poster = Poster()
+    consumer.transmit_approved(auth_a, recipient=PEER, body="exactly once, please",
+                               number=SELF_NUMBER, poster=poster)
+    assert len(poster.calls) == 1
+
+
+def test_a_re_entrant_send_of_the_same_draft_is_refused(db):
+    """End to end: whichever guard gets there first, only ONE send happens."""
+    draft = _pending(db, body="exactly once, end to end")
+    db.approve_draft(draft["id"], approval_ref="cg-reentrant")
+    sends = []
+    second = {}
+
+    def transmit(auth, *, recipient, body, number):
+        sends.append(body)
+        if "attempted" not in second:
+            second["attempted"] = True
+            try:
+                db.send_approved(draft["id"], transmit=transmit)
+            except SendGateError as exc:
+                second["refused"] = str(exc)
+        return {"timestamp": str(SERVER_TS)}
+
+    db.send_approved(draft["id"], transmit=transmit)
+    assert sends == ["exactly once, end to end"]
+    assert "D3 approval gate" in second["refused"]
+
+
+def test_the_claim_refuses_a_draft_that_is_no_longer_approved(db):
+    draft = _pending(db)
+    db.approve_draft(draft["id"], approval_ref="cg-claim")
+    db._claim_for_sending(draft["id"])
+    with pytest.raises(SendGateError) as exc:
+        db._claim_for_sending(draft["id"])
+    assert "could not be claimed" in str(exc.value)
+
+
+# --------------------------------------------------------------------------- #
+# Reconciling a stranded send — the operator's way out of `sending`
+# --------------------------------------------------------------------------- #
+def _stranded(db, body="stranded draft"):
+    draft = _pending(db, body=body)
+    db.approve_draft(draft["id"], approval_ref="cg-strand")
+
+    def die(auth, **kw):
+        raise ConnectionResetError("pod killed mid-send")
+
+    with pytest.raises(ConnectionResetError):
+        db.send_approved(draft["id"], transmit=die)
+    assert db.get_draft(draft["id"])["send_state"] == _signal_db.STATE_SENDING
+    return draft
+
+
+def test_reconcile_sent_records_the_server_timestamp(db):
+    """It DID go out — so the row must carry the timestamp the echo will bring."""
+    draft = _stranded(db)
+    row = db.reconcile_send(draft["id"], outcome=_signal_db.RECONCILE_SENT,
+                            server_timestamp="1723800000001")
+    assert row["send_state"] == _signal_db.STATE_SENT
+    assert row["message_timestamp"] == 1723800000001
+
+
+def test_reconcile_sent_refuses_an_unusable_timestamp(db):
+    """Guessing here would break sync-echo dedupe silently."""
+    draft = _stranded(db)
+    for bad in (None, "", "not-a-number", "0"):
+        with pytest.raises(ValueError):
+            db.reconcile_send(draft["id"], outcome=_signal_db.RECONCILE_SENT,
+                              server_timestamp=bad)
+    assert db.get_draft(draft["id"])["send_state"] == _signal_db.STATE_SENDING
+
+
+def test_reconcile_not_sent_returns_the_draft_to_pending_for_RE_APPROVAL(db):
+    """It did not go out — and a retry must not ride on the old approval."""
+    draft = _stranded(db)
+    row = db.reconcile_send(draft["id"], outcome=_signal_db.RECONCILE_NOT_SENT,
+                            note="nothing in the thread")
+    assert row["send_state"] == _signal_db.STATE_PENDING
+    # It cannot be sent until a human approves again ...
+    with pytest.raises(SendGateError):
+        db.send_approved(draft["id"], transmit=lambda a, **kw: {"timestamp": "1"})
+    # ... and once they do, it sends normally.
+    db.approve_draft(draft["id"], approval_ref="cg-second-look")
+    poster = Poster()
+    db.send_approved(draft["id"],
+                     transmit=lambda a, **kw: consumer.transmit_approved(
+                         a, poster=poster, **kw))
+    assert len(poster.calls) == 1
+
+
+def test_reconcile_refuses_a_draft_that_is_not_sending(db):
+    draft = _pending(db)
+    with pytest.raises(SendGateError) as exc:
+        db.reconcile_send(draft["id"], outcome=_signal_db.RECONCILE_NOT_SENT)
+    assert "are reconciled" in str(exc.value)
+
+
+def test_reconcile_needs_the_operator_token(db, monkeypatch):
+    draft = _stranded(db)
+    monkeypatch.delenv(_signal_db.APPROVAL_TOKEN_ENV, raising=False)
+    with pytest.raises(SendGateError) as exc:
+        db.reconcile_send(draft["id"], outcome=_signal_db.RECONCILE_NOT_SENT)
+    assert _signal_db.APPROVAL_TOKEN_ENV in str(exc.value)
+
+
+def test_reconcile_rejects_an_unknown_outcome(db):
+    draft = _stranded(db)
+    with pytest.raises(ValueError):
+        db.reconcile_send(draft["id"], outcome="probably-sent")
+
+
+def test_a_stranded_draft_is_reachable_from_the_drafts_listing(db):
+    """The operator has to be able to FIND it before reconciling it."""
+    draft = _stranded(db)
+    listed = db.list_drafts(state=_signal_db.STATE_SENDING)
+    assert [d["id"] for d in listed] == [draft["id"]]
 
 
 # --------------------------------------------------------------------------- #

@@ -189,6 +189,51 @@ def test_remote_delete_tombstones_the_target_instead_of_storing_a_ghost(db):
     assert db.conn.count("attachments") == 0    # and its attachments with it
 
 
+def test_a_retraction_made_on_ZACHS_OWN_PHONE_is_honoured(db):
+    """🔴 The own-device direction, which arrives wrapped in `syncMessage`.
+
+    The sync branch runs BEFORE the inbound `dataMessage` branch, so a retraction
+    Zach makes on his own phone never reached the remote-delete handler: both
+    defects it exists to prevent — the ghost row AND the retained retracted text
+    — survived in that direction, while SKILL.md claimed retractions were
+    honoured full stop.
+    """
+    self_uuid = "90909090-9090-4909-8909-909090909090"
+    target_ts = 1723250000001
+    sent = consumer.parse_envelope({
+        "sourceUuid": self_uuid, "sourceNumber": "+15559090",
+        "timestamp": target_ts,
+        "syncMessage": {"sentMessage": {
+            "timestamp": target_ts, "destination": "+15550101",
+            "message": "typed on my phone, then retracted"}},
+    })
+    db.upsert_message(sent.message)
+    assert db.conn.count("messages") == 1
+
+    retraction = consumer.parse_envelope({
+        "sourceUuid": self_uuid, "sourceNumber": "+15559090",
+        "timestamp": target_ts + 5,
+        "syncMessage": {"sentMessage": {
+            "timestamp": target_ts + 5, "destination": "+15550101",
+            "remoteDelete": {"targetSentTimestamp": target_ts}}},
+    })
+    assert retraction.kind == consumer.KIND_REMOTE_DELETE
+    assert retraction.message is None
+    assert db.apply_remote_delete(retraction.remote_delete) == 1
+
+    rows = db.conn.rows("SELECT body, message_type FROM signal.messages")
+    assert len(rows) == 1
+    assert rows[0]["body"] is None
+    assert rows[0]["message_type"] == "deleted"
+
+
+def test_a_sync_remote_delete_without_a_target_is_malformed():
+    with pytest.raises(consumer.MalformedEvent):
+        consumer.parse_envelope({
+            "sourceUuid": ALICE, "timestamp": 1,
+            "syncMessage": {"sentMessage": {"timestamp": 1, "remoteDelete": {}}}})
+
+
 def test_remote_delete_for_a_message_we_never_received_is_a_quiet_no_op(db):
     event = consumer.parse_envelope({
         "sourceUuid": ALICE, "timestamp": NEVER_SEEN_TS + 1,

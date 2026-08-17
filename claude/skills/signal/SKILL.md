@@ -31,7 +31,7 @@ code route and will raise `SendGateError`.
 | Tests | `scripts/signal/tests/` — hermetic (sqlite substrate + fixtures), in the pytest gate |
 | Manifests | `homelab-talos: clusters/homelab/apps/signal/`, parent ks `clusters/homelab/flux-system/root-kustomizations/system/signal.yaml` |
 | API | `signal-cli-rest-api`, ns `signal`, ClusterIP `signal-api.signal.svc:8080`, **pinned tag** (never `:latest`), `replicas: 1` |
-| Routes | the WHOLE surface this server has: `GET /v1/receive/{number}` (a **websocket** in json-rpc mode), `GET /v1/attachments/{id}`, `POST /v2/send`. There is **no SSE endpoint** — `/api/v1/events` belongs to AsamK's native daemon, a different server |
+| Routes | the three this module speaks (the server has many more): `GET /v1/receive/{number}` (a **websocket** in json-rpc mode), `GET /v1/attachments/{id}`, `POST /v2/send`. It has **no event-stream endpoint** — `/api/v1/events` belongs to AsamK's native daemon, a different server |
 | Postgres | `mailbox-postgres-0` in ns `mailbox`, schema **`signal`** (shares the instance + role with `mail`) |
 | Attachments | MinIO archive tenant, bucket `signal-attachments`, key `{conversation}/{YYYY-MM-DD}/{attachment_id}_{filename}` + a `.json` sidecar. The id is in the key deliberately — see gotchas |
 | Tables | `signal.contacts`, `signal.groups`, `signal.messages`, `signal.attachments`, `signal.reactions` |
@@ -41,13 +41,14 @@ code route and will raise `SendGateError`.
 
 | Command | What it does |
 |---|---|
-| `run` | consume the SSE stream forever — this is what the Deployment runs |
+| `run` | consume `/v1/receive/{number}` forever — this is what the Deployment runs |
 | `conversations` | list conversations (group, else the DM peer), newest first |
 | `search` | full-text search over message bodies (`websearch_to_tsquery`) |
 | `draft` | compose an outbound draft — **stores it, transmits nothing** |
 | `drafts` | list drafts with their `send_state` |
 | `approve` | record Zach's clawgate approval for one pending draft |
 | `send` | transmit an **approved** draft (refuses anything else) |
+| `reconcile` | resolve a draft stranded in `sending`, after checking Signal yourself |
 
 ```bash
 cd ~/workspace/devrc/scripts/signal
@@ -57,6 +58,11 @@ python3 consumer.py draft --to +15550100 --body "on my way"   # -> pending + a c
 python3 consumer.py drafts --state pending
 python3 consumer.py approve 42 --ref clawgate-task-91
 python3 consumer.py send 42
+
+# a draft stuck in `sending` — check Signal FIRST, then say which happened:
+python3 consumer.py drafts --state sending
+python3 consumer.py reconcile 42 --sent --timestamp 1723000009090   # it did go out
+python3 consumer.py reconcile 42 --not-sent --note "no message in the thread"
 ```
 
 Direct SQL (the store is authoritative):
@@ -101,8 +107,19 @@ every agent environment.
 
 **A draft stuck in `sending`** means the POST was attempted and the outcome is
 unknown (crash, dropped connection, or per-recipient errors from the API). It is
-deliberately inert — nothing can mint from it — so it will never resend on its own.
-Check Signal, then reconcile by hand: `drafts --state sending`.
+deliberately inert — nothing can mint from it — so it will never resend on its own,
+and nothing but you can get it out again.
+
+Check the Signal conversation, then record what you saw with **`reconcile`** (same
+operator token as `approve`):
+- `reconcile <id> --sent --timestamp <server-ts>` — it DID go out. Give the server
+  timestamp from the conversation so the sync echo still dedupes (🔧 #4).
+- `reconcile <id> --not-sent [--note "…"]` — it did not. Returns the draft to
+  `pending`, so it needs a **fresh approval** before anything can send it: a retry
+  never rides on the old one.
+
+`--sent` refuses a missing or unusable timestamp rather than guessing, and
+`reconcile` refuses any draft that is not `sending` — it is not a state editor.
 
 ## Event kinds the consumer emits
 
@@ -129,7 +146,7 @@ are counted only.
 | `stored` | rows written (messages + reactions) |
 | `ignored` | events observed but not stored (receipts, typing, unknown) |
 | `malformed` | payloads skipped as unparseable — never fatal |
-| `reconnects` | SSE stream drops recovered from |
+| `reconnects` | receive-stream drops recovered from |
 | `db_retries` | transient Postgres faults retried rather than dropped |
 | `db_recoveries` | aborted transactions rolled back (or connections re-opened) so the next event can be written |
 | `db_recovery_failures` | recovery itself failed — the pod cannot write and needs looking at |
@@ -158,7 +175,7 @@ and tear it down on exit — exactly like `mail-actions`.
 
 - **`UNIQUE` does not dedupe over NULL in Postgres.** `messages.source_contact_id` is
   `NOT NULL` and an unresolved sender gets a **deterministic placeholder contact**
-  (uuid5 of the identifier). Never relax that column — every SSE redelivery from an
+  (uuid5 of the identifier). Never relax that column — every redelivery from an
   unknown sender would insert a fresh row.
 - **Outbound messages echo back via device sync.** The send path stores the
   **server-assigned** timestamp so `unique_message` catches the echo. A locally
@@ -166,7 +183,7 @@ and tear it down on exit — exactly like `mail-actions`.
   bare phone number creates a placeholder contact that is **promoted** to the real uuid
   when that person's envelopes arrive — without promotion the echo lands under a
   different contact and dedupe fails even with the right timestamp.
-- **Reactions can precede their target message** (SSE is not ordered, and history is not
+- **Reactions can precede their target message** (delivery is not ordered, and history is not
   backfilled). `reactions.message_id` is NULLable, resolved later, with the partial index
   `idx_rx_unresolved`. Unresolvable reactions are RETAINED, not dropped.
 - **Redelivery duplicates attachments** without `UNIQUE (message_id,

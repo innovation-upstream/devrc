@@ -203,21 +203,16 @@ def test_malformed_envelopes_raise_malformed_event(bad):
         consumer.parse_envelope(bad)
 
 
-def test_iter_frames_yields_one_item_per_message_for_both_transports():
-    """One websocket frame per message; one REST response holding MANY.
-
-    Both shapes reach `iter_frames`, and the consumer downstream only ever sees
-    "one message at a time" — which is why the same core serves json-rpc mode and
-    the plain REST drain.
-    """
+def test_iter_frames_yields_one_item_per_websocket_frame():
+    """The websocket writes one text frame per message; bytes are decoded."""
     ws_frames = ['{"envelope": {"timestamp": 1}}', b'{"envelope": {"timestamp": 2}}']
     assert list(consumer.iter_frames(ws_frames)) == [
         '{"envelope": {"timestamp": 1}}', '{"envelope": {"timestamp": 2}}']
 
-    rest_body = ['[{"envelope": {"timestamp": 3}}, {"envelope": {"timestamp": 4}}]']
-    out = list(consumer.iter_frames(rest_body))
-    assert len(out) == 2
-    assert [f["envelope"]["timestamp"] for f in out] == [3, 4]
+
+def test_iter_frames_passes_already_decoded_objects_through():
+    frame = {"envelope": {"timestamp": 3}}
+    assert list(consumer.iter_frames([frame])) == [frame]
 
 
 def test_iter_frames_skips_blank_frames_and_passes_junk_through_to_be_counted():
@@ -234,6 +229,55 @@ def test_receive_url_is_per_account_and_upgrades_scheme_for_websockets():
             == "ws://signal-api.signal.svc:8080/v1/receive/+15559090")
     assert consumer.receive_url("+1", api_url="https://x.example",
                                 websocket=True).startswith("wss://")
+
+
+def test_a_missing_websocket_package_fails_at_FACTORY_BUILD_not_in_the_loop(
+        monkeypatch):
+    """🔴 A missing dependency must not become an infinite silent reconnect.
+
+    `run()` calls the factory once per connect and treats any exception from it
+    as a dropped stream. With the import INSIDE `_open()`, an absent
+    `websocket-client` produced `stream ended (No module named 'websocket');
+    reconnecting` forever, zero rows — MEASURED at 25/25 connects. That is the
+    same zombie mode `run()`'s hoisted stream-factory check exists to prevent.
+    """
+    import sys as _sys
+
+    monkeypatch.setitem(_sys.modules, "websocket", None)
+    with pytest.raises(RuntimeError) as exc:
+        consumer.ws_stream_factory("+15559090")
+    message = str(exc.value)
+    assert "websocket-client" in message
+    assert "requirements.txt" in message
+
+
+def test_the_websocket_dependency_is_DECLARED_not_just_imported():
+    """It was declared nowhere — the only trace was a trailing comment."""
+    requirements = (Path(consumer.__file__).parent / "requirements.txt")
+    assert requirements.is_file(), "scripts/signal/requirements.txt is missing"
+    listed = {line.split("#")[0].strip().lower()
+              for line in requirements.read_text(encoding="utf-8").splitlines()
+              if line.strip() and not line.strip().startswith("#")}
+    assert "websocket-client" in listed
+    for also_imported in ("psycopg2-binary", "minio", "requests"):
+        assert also_imported in listed, f"{also_imported} is imported but undeclared"
+
+
+def test_the_factory_builds_when_the_package_IS_present(monkeypatch):
+    """POSITIVE CONTROL: the refusal above is about the package, not the function."""
+    import sys as _sys
+    import types as _types
+
+    fake = _types.ModuleType("websocket")
+    fake.create_connection = lambda *a, **k: None      # never called here
+    monkeypatch.setitem(_sys.modules, "websocket", fake)
+    factory = consumer.ws_stream_factory("+15559090")
+    assert callable(factory)
+
+
+def test_no_rest_polling_factory_ships():
+    """It was referenced nowhere and hot-loops if used (`run()` only sleeps on error)."""
+    assert not hasattr(consumer, "rest_poll_stream_factory")
 
 
 def test_receive_url_refuses_an_empty_account():

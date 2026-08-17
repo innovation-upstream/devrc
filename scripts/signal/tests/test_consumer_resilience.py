@@ -150,6 +150,69 @@ def test_transient_postgres_failure_is_retried_and_the_event_survives(db):
     assert db.conn.count("messages") == 1
 
 
+class FailOnCommit:
+    """A transient fault landing on the COMMIT rather than on the write."""
+
+    def __init__(self, inner, failures):
+        self._inner = inner
+        self.remaining = failures
+        self.commits_attempted = 0
+
+    def commit(self):
+        self.commits_attempted += 1
+        if self.remaining > 0:
+            self.remaining -= 1
+            raise psycopg2.OperationalError("server closed the connection")
+        return self._inner.commit()
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def test_a_transient_fault_ON_THE_COMMIT_does_not_drop_the_message(db):
+    """🔴 The retry must not turn a loud failure into a silent one.
+
+    The write and its commit used to be retried SEPARATELY. When the fault landed
+    on the commit, recovery rolled back — discarding the row already written —
+    and the retried bare `commit()` then committed an empty transaction and
+    reported success. MEASURED before the fix: `rows=[]`, `stored=1`. The message
+    was gone, the counter said otherwise, and the module docstring promised "the
+    event is not dropped".
+    """
+    flaky = FailOnCommit(db, failures=1)
+    c = _consumer(flaky, Streams([_payload(1723700000001, "must survive")]))
+    c.run(max_connections=1)
+
+    rows = db.conn.rows("SELECT body FROM signal.messages")
+    assert [r["body"] for r in rows] == ["must survive"]
+    assert c.stats[consumer.STAT_STORED] == 1
+    assert c.stats[consumer.STAT_DB_RETRIES] == 1
+    assert flaky.commits_attempted == 2       # failed once, then succeeded
+
+
+def test_positive_control_the_commit_path_can_still_fail_for_real(db):
+    """The rescue above is a retry, not a swallow: an endless fault still raises."""
+    flaky = FailOnCommit(db, failures=99)
+    c = _consumer(flaky, Streams([]), db_retries=2)
+    with pytest.raises(psycopg2.OperationalError):
+        c.handle_payload(_payload(1723700000011))
+    assert db.conn.count("messages") == 0
+
+
+def test_a_reaction_write_is_also_one_unit_with_its_commit(db):
+    """The same hazard on the OTHER write paths, not just messages."""
+    flaky = FailOnCommit(db, failures=1)
+    reaction = json.dumps({"account": "+15559090", "envelope": {
+        "sourceUuid": "33333333-3333-4333-8333-333333333333",
+        "timestamp": 1723700000021,
+        "dataMessage": {"timestamp": 1723700000021, "reaction": {
+            "emoji": "🔥", "targetAuthorUuid": ALICE,
+            "targetSentTimestamp": 1723700000020, "isRemove": False}}}})
+    c = _consumer(flaky, Streams([reaction]))
+    c.run(max_connections=1)
+    assert db.conn.count("reactions") == 1
+
+
 def test_a_persistent_postgres_failure_is_not_swallowed(db):
     """Retry must have a floor: an endless outage has to surface, not vanish."""
     flaky = FlakyDB(db, failures=99)

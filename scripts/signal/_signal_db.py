@@ -76,6 +76,10 @@ STATE_SENT = "sent"
 # `approve_draft()`'s docstring says exactly how far it goes.
 APPROVAL_TOKEN_ENV = "SIGNAL_APPROVAL_TOKEN"
 
+# The two outcomes an operator can record for a draft stranded in `sending`.
+RECONCILE_SENT = "sent"
+RECONCILE_NOT_SENT = "not-sent"
+
 
 # --------------------------------------------------------------------------- #
 # Schema — the single source of truth. Tests DERIVE from these statements rather
@@ -1052,6 +1056,13 @@ class SignalDB:
         with `unique_message` instead of inserting a duplicate.
         """
         draft = self._draft_or_raise(draft_id)
+        # 🔴 EVERY precondition that can REFUSE is resolved BEFORE the claim, so a
+        # refusal leaves the draft `approved` and re-sendable. `account_number()`
+        # used to be an ARGUMENT to `transmit(...)`, which evaluates after the
+        # claim has committed: a draft whose sender carried no phone number
+        # (`draft_message(self_uuid=…)`, a supported signature) ended up
+        # `sending` with nothing transmitted — stranded, and unsendable forever.
+        number = self.account_number(draft_id)
         auth = _mint_send_authorization(draft)
         if transmit is None:
             from consumer import transmit_approved as transmit  # local import: no cycle
@@ -1066,15 +1077,18 @@ class SignalDB:
         self._claim_for_sending(draft_id)
 
         result = transmit(auth, recipient=draft["recipient"], body=draft["body"],
-                          number=self.account_number(draft_id))
-        server_ts = _server_timestamp(result)
+                          number=number)
+        # The per-recipient errors are read BEFORE the timestamp: a response that
+        # carries both an error and an unusable timestamp must report the ERROR,
+        # which says what went wrong, not a timestamp complaint that hides it.
         errors = (result or {}).get("errors")
         if errors:
             raise RuntimeError(
                 f"the Signal API reported per-recipient errors for draft "
                 f"{draft_id!r}: {errors!r}; the draft stays in {STATE_SENDING!r} "
-                f"for manual reconciliation"
+                f"for manual reconciliation — see `reconcile`"
             )
+        server_ts = _server_timestamp(result)
         with self._c.cursor() as cur:
             cur.execute(
                 "UPDATE signal.messages SET message_timestamp = %s, send_state = %s, "
@@ -1085,14 +1099,90 @@ class SignalDB:
         return self._draft_or_raise(draft_id)
 
     def _claim_for_sending(self, draft_id: int) -> None:
-        """Move an approved draft to `sending` and COMMIT, before anything is sent."""
+        """ATOMICALLY move an approved draft to `sending`, and COMMIT the claim.
+
+        🔴 THE STATE PREDICATE IS THE LOCK. Without `AND send_state = 'approved'`
+        plus the rowcount check, two concurrent `send_approved()` calls both read
+        `approved`, both mint a capability and both transmit — reproduced, two
+        sends of one draft. `_ISSUED_NONCES` cannot help: it is per-process, so
+        two pods or two shells share nothing. The database row is the only thing
+        both callers can contend on, so the transition has to happen there, in
+        one statement, with the loser told it lost.
+        """
         with self._c.cursor() as cur:
             cur.execute(
                 "UPDATE signal.messages SET send_state = %s, "
-                "send_attempts = COALESCE(send_attempts, 0) + 1 WHERE id = %s",
-                (STATE_SENDING, draft_id),
+                "send_attempts = COALESCE(send_attempts, 0) + 1 "
+                "WHERE id = %s AND send_state = %s",
+                (STATE_SENDING, draft_id, STATE_APPROVED),
             )
+            claimed = cur.rowcount
         self._c.commit()
+        if claimed != 1:
+            raise SendGateError(
+                f"draft {draft_id!r} could not be claimed for sending — it is no "
+                f"longer {STATE_APPROVED!r} (another sender claimed it first, or "
+                f"it was already sent). D3 approval gate."
+            )
+
+    def reconcile_send(self, draft_id: int, *, outcome: str,
+                       server_timestamp: int | str | None = None,
+                       note: str | None = None) -> dict:
+        """Resolve a draft stranded in `sending`. The OPERATOR's call, after looking.
+
+        🔴 WHY THIS EXISTS. `sending` is deliberately inert — nothing can mint a
+        capability from it, which is what stops a crash mid-send from resending.
+        But inert with no way out is a dead end: `approve_draft` refuses (not
+        `pending`) and `send_approved` refuses (not `approved`), so a draft that
+        strands is unsendable forever and the documented "reconcile by hand" was
+        a listing command and nothing else.
+
+        The operator checks Signal and says which happened:
+
+          `sent`     — it did go out. Record the SERVER timestamp read from the
+                       conversation, so the sync echo still dedupes (🔧 #4).
+          `not-sent` — it did not. Returns to `pending`, so it needs a FRESH
+                       approval before it can be sent: the human stays in the
+                       loop rather than a retry slipping through on the strength
+                       of the old one.
+
+        Gated by the same operator token as `approve_draft`, and refuses any
+        draft that is not `sending` — this is not a general state-editing tool.
+        """
+        if not os.environ.get(APPROVAL_TOKEN_ENV):
+            raise SendGateError(
+                f"reconcile refused: {APPROVAL_TOKEN_ENV} is not set. Reconciling "
+                f"a stranded send is the OPERATOR's step (D3 approval gate)"
+            )
+        if outcome not in (RECONCILE_SENT, RECONCILE_NOT_SENT):
+            raise ValueError(
+                f"outcome must be {RECONCILE_SENT!r} or {RECONCILE_NOT_SENT!r}, "
+                f"not {outcome!r}"
+            )
+        row = self._draft_or_raise(draft_id)
+        if row["send_state"] != STATE_SENDING:
+            raise SendGateError(
+                f"draft {draft_id!r} has send_state={row['send_state']!r}; only "
+                f"{STATE_SENDING!r} drafts are reconciled (D3 approval gate)"
+            )
+        if outcome == RECONCILE_SENT:
+            server_ts = _server_timestamp({"timestamp": server_timestamp})
+            with self._c.cursor() as cur:
+                cur.execute(
+                    "UPDATE signal.messages SET message_timestamp = %s, "
+                    "send_state = %s, message_type = 'message', "
+                    "approval_ref = COALESCE(%s, approval_ref) WHERE id = %s",
+                    (server_ts, STATE_SENT, note, draft_id),
+                )
+        else:
+            with self._c.cursor() as cur:
+                cur.execute(
+                    "UPDATE signal.messages SET send_state = %s, "
+                    "approval_ref = %s WHERE id = %s",
+                    (STATE_PENDING, note, draft_id),
+                )
+        self._c.commit()
+        return self._draft_or_raise(draft_id)
 
     def account_number(self, draft_id: int) -> str:
         """The SENDING account's phone number for a draft — required by `/v2/send`."""

@@ -385,6 +385,30 @@
     }
   },
 
+  "sync_remote_delete": {
+    "envelope": {
+      "source": "+15559091",
+      "sourceNumber": "+15559091",
+      "sourceUuid": "91919191-9191-4919-8919-919191919191",
+      "timestamp": 1723000001717,
+      "syncMessage": {
+        "sentMessage": {
+          "timestamp": 1723000001717,
+          "destination": "+15550101",
+          "remoteDelete": {"targetSentTimestamp": 1723000001707}
+        }
+      }
+    },
+    "expect": {
+      "kind": "remote_delete",
+      "remote_delete": {
+        "target_sent_timestamp": 1723000001707,
+        "target_author_uuid": "91919191-9191-4919-8919-919191919191",
+        "target_author_number": "+15559091"
+      }
+    }
+  },
+
   "unknown_type": {
     "envelope": {
       "source": "+15551515",

@@ -17,7 +17,7 @@ Layout (bucket `signal-attachments`):
     <conversation>/<YYYY-MM-DD>/<filename>.json     a sidecar with the metadata
 
 `put_attachment()` is idempotent: re-uploading an existing key is a NO-OP, not a
-second copy — SSE redelivery replays attachments and must not duplicate objects.
+second copy — redelivery replays attachments and must not duplicate objects.
 
 Usage:
     with MinioSignal() as mc:
@@ -251,7 +251,7 @@ class MinioSignal:
         """Upload one attachment + its sidecar. Returns the object key.
 
         Idempotent: an existing key is left alone (both the object and its
-        sidecar), so SSE redelivery re-derives the same key and writes nothing.
+        sidecar), so a redelivery re-derives the same key and writes nothing.
         """
         if not self._bucket_checked:
             self.ensure_bucket()
