@@ -1782,6 +1782,27 @@ class TestRateLimiterUnit:
         lim.record_success("a")
         assert lim.locked_out("a") is True
 
+    def test_eviction_NEVER_releases_a_live_lockout(self):
+        """🔴 The failure table is bounded, and a bound is a deletion policy —
+        so the question is what it is allowed to delete. Flooding it with more
+        distinct keys than it will hold must not buy an attacker their way out
+        of a lockout they already earned. Reachable: `MAX_TRACKED_CLIENTS` + 1
+        distinct keys, each with one failure, is exactly one eviction pass.
+        """
+        now = [1000.0]
+        lim = self._limiter(now)
+        for _ in range(5):
+            lim.record_failure("victim")
+        assert lim.locked_out("victim") is True
+        # Age every subsequent failure past the window so they are all evictable
+        # — the eviction path only ever considers stale entries.
+        for i in range(api.MAX_TRACKED_CLIENTS + 1):
+            now[0] += 0.001
+            lim.record_failure(f"flood-{i}")
+        now[0] += 61.0
+        lim.record_failure("one-more")
+        assert lim.locked_out("victim") is True, "a flood released a live lockout"
+
     def test_the_thresholds_are_tunable(self):
         now = [1000.0]
         lim = self._limiter(now, max_failures=2, window_s=10.0, lockout_s=30.0)
