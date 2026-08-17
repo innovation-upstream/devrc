@@ -310,8 +310,13 @@ def client_ip(headers: Any) -> str | None:
       * more than one     — a caller trying to smuggle a second value past a
                             proxy that appends rather than overwrites
 
-    Returns the NORMALISED form (`ipaddress`), so `::FFFF:1.2.3.4` and
-    `::ffff:1.2.3.4` cannot be two buckets for one attacker.
+    Returns the NORMALISED form (`ipaddress`), so an IPv4-mapped address written
+    in upper and lower case cannot become two buckets for one attacker. (The
+    example that belongs here is spelled out in the test rather than in this
+    docstring: `test_no_public_ips.py` rejects an IP literal in a PUBLIC repo,
+    and it is right to — see `TestClientIpIsCloudflareOnly::
+    test_the_address_is_NORMALISED_so_one_caller_is_one_bucket`, which uses the
+    RFC 5737 documentation range.)
     """
     try:
         values = headers.get_all(CLIENT_IP_HEADER)
