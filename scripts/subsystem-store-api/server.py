@@ -56,9 +56,37 @@ becomes internet-reachable is an auth layer nobody has watched deny anything.
     in memory: the agent exec sandbox strips env vars from agent-run commands,
     so `$SUBSYSTEM_STORE_TOKEN` is the fallback, never the primary.
 
-NOT here, on purpose, and tracked to phase 1.5: rate-limiting / lockout on
-repeated 401s, and separate read/write tokens. Both are (B-required) hardening
-for the moment an IngressRoute exists; phase 1 creates none.
+PHASE 1.5 — THE (B-REQUIRED) HARDENING, ADDED BEFORE ANY INGRESS EXISTS
+------------------------------------------------------------------------
+Exposure **B** was decided by the operator: public `store.zacx.dev`, Cloudflare-
+proxied, and `/api/*` carries NO edge auth because Authelia's 302 is unusable
+from a CLI. So the bearer token is the ONLY thing between the public internet
+and client-confidential content, and §2b's hardening stops being optional:
+
+  * **A token SET, not a token** (`load_tokens`). Rotation is by overlap —
+    current + previous both accepted — because a single-token rotation has a
+    window in which every client is broken, which is why nobody performs it.
+  * **The audit log names WHICH fingerprint matched** (`token=<12 hex>`). This
+    is the whole safety of overlap rotation: without it, "the old token is
+    unused now" is a guess, and removing it is a coin flip. Fingerprint only —
+    the token itself in a log line is the leak the log exists to detect.
+  * **The client is keyed on `CF-Connecting-IP`** (`client_ip`), which is
+    trustworthy ONLY because Cloudflare is the sole public ingress. 🔴
+    `X-Forwarded-For` is NEVER read: it is caller-supplied, so keying on it
+    lets one attacker rotate through a million buckets AND lets them lock out
+    a third party by forging theirs. Behind CF + Traefik the TCP peer address
+    is the gateway's for everybody, so keying on THAT is the mirror failure —
+    one abuser locks out the world. An absent or unparseable `CF-Connecting-IP`
+    therefore FAILS CLOSED (uniform 401), rather than being bucketed into a
+    shared "unknown" that reproduces exactly that hazard.
+  * **Rate limit + lockout in the app** (`RateLimiter`): 5 failed auths per
+    client IP per minute, then a 15-minute lockout. Defaults live here in code;
+    all three are tunable by env. Cloudflare's WAF and the Traefik middleware
+    are the outer two layers, not the only ones.
+
+Still NOT here, and still tracked forward: separate read/write tokens (there is
+no write path until phase 3, so a write-scoped token would today be a label on
+a capability that does not exist).
 """
 
 from __future__ import annotations
@@ -66,12 +94,15 @@ from __future__ import annotations
 import argparse
 import hashlib
 import hmac
+import ipaddress
 import os
 import sys
+import threading
+import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 from urllib.parse import parse_qs, unquote, urlsplit
 
 _LIB = Path(__file__).resolve().parents[1] / "lib"
@@ -100,7 +131,35 @@ SERVER_BANNER = "subsystem-store"
 # 256 bits, base64url'd without padding, is 43 characters. A shorter token is
 # refused at STARTUP rather than served: a store that came up with a weak token
 # is worse than one that did not come up at all, because it looks healthy.
+# Generate one with `python3 -c 'import secrets; print(secrets.token_urlsafe(43))'`
+# — 43 BYTES of entropy renders as 58 characters, comfortably over this floor.
 MIN_TOKEN_CHARS = 43
+
+# Overlap rotation needs two (current + previous); three covers a rotation that
+# overlaps another. Beyond that a "set" is an accumulation nobody has retired,
+# and every one of them is a live credential — so the file is refused rather
+# than served, at STARTUP, for the same reason a short token is.
+MAX_TOKENS = 4
+
+# 🔴 THE ONLY HEADER THIS SERVER WILL ACCEPT AS A CLIENT IDENTITY, and it is
+# trustworthy for exactly one reason: Cloudflare is the sole public ingress and
+# overwrites it on every request it proxies. `X-Forwarded-For` is deliberately
+# absent from this file — see the module docstring.
+CLIENT_IP_HEADER = "CF-Connecting-IP"
+
+# §2b: "Rate-limit + lock out on repeated 401s". The defaults are HERE, in code,
+# so a deployment that sets no env still gets them; each is overridable.
+DEFAULT_MAX_FAILURES = 5
+DEFAULT_FAILURE_WINDOW_S = 60.0
+DEFAULT_LOCKOUT_S = 900.0
+
+ENV_MAX_FAILURES = "SUBSYSTEM_STORE_MAX_FAILURES"
+ENV_FAILURE_WINDOW = "SUBSYSTEM_STORE_FAILURE_WINDOW_S"
+ENV_LOCKOUT = "SUBSYSTEM_STORE_LOCKOUT_S"
+
+# A bound on the failure table so a flood of distinct keys cannot grow it
+# without limit. Active lockouts are NEVER evicted — evicting one is a bypass.
+MAX_TRACKED_CLIENTS = 4096
 
 DEFAULT_STORE = "/data"
 DEFAULT_TOKEN_FILE = "/run/secrets/subsystem-store/token"
@@ -123,17 +182,26 @@ def token_id(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()[:12]
 
 
-def load_token(token_file: str | None, env: dict[str, str]) -> str:
-    """Resolve the bearer token. FILE FIRST, env only as a fallback.
+def load_tokens(token_file: str | None, env: dict[str, str]) -> list[str]:
+    """Resolve the bearer token SET. FILE FIRST, env only as a fallback.
+
+    🔴 A SET, NOT A TOKEN, and that is the whole of rotation (§2b: "token
+    rotation must be a one-command operation"). One token per line — the CURRENT
+    one first, the PREVIOUS one below it. Rotation is then: add the new line,
+    watch the audit log until every client's `token=` fingerprint has moved,
+    then delete the old line. There is no window in which a client is broken,
+    which is the reason single-token rotations never actually get performed.
 
     Guard order — each reachable by an input no earlier guard rejects:
       1. some source at all      -> "no token source"
       2. the file is readable    -> "token file unreadable"
-      3. non-empty after strip   -> "token is empty"
-      4. long enough             -> "token is too short"
+      3. at least one token      -> "token is empty"
+      4. not an accumulation     -> "too many tokens"
+      5. every token long enough -> "token N of M is too short"
 
-    Guard 4 is reachable with a perfectly readable, non-empty file, which is the
-    case that matters: a hand-typed token passes 1-3 and is exactly what 4 is for.
+    Guard 5 names the POSITION, never the token. A file whose second line was
+    truncated by an editor passes 1-4 and is exactly what 5 is for; saying
+    "one of them is short" would leave the operator grepping a secret by hand.
     """
     raw: str | None = None
     if token_file:
@@ -152,15 +220,29 @@ def load_token(token_file: str | None, env: dict[str, str]) -> str:
             "The API is not served without one"
         )
 
-    token = raw.strip()
-    if not token:
+    # `.split()` on any whitespace: a base64url token contains none, so this
+    # accepts one-per-line (the documented shape) and survives a trailing
+    # newline, CRLF, or an operator who used spaces.
+    tokens: list[str] = []
+    for candidate in raw.split():
+        if candidate not in tokens:  # de-duplicated, ORDER PRESERVED
+            tokens.append(candidate)
+
+    if not tokens:
         raise ValueError("token is empty: the source resolved to whitespace only")
-    if len(token) < MIN_TOKEN_CHARS:
+    if len(tokens) > MAX_TOKENS:
         raise ValueError(
-            f"token is too short: {len(token)} chars, need >= {MIN_TOKEN_CHARS} "
-            f"(256 bits base64url). A short token is a guessable one"
+            f"too many tokens: {len(tokens)}, max {MAX_TOKENS}. Every line is a "
+            f"live credential; retire the old ones instead of accumulating them"
         )
-    return token
+    for index, token in enumerate(tokens, start=1):
+        if len(token) < MIN_TOKEN_CHARS:
+            raise ValueError(
+                f"token {index} of {len(tokens)} is too short: {len(token)} chars, "
+                f"need >= {MIN_TOKEN_CHARS} (256 bits base64url). A short token is "
+                f"a guessable one"
+            )
+    return tokens
 
 
 def presented_token(header: str | None) -> str:
@@ -177,17 +259,192 @@ def presented_token(header: str | None) -> str:
     return parts[1].strip()
 
 
-def authorize(header: str | None, expected: str) -> None:
-    """Constant-time bearer check. Raises `_Rejected`; never returns a reason.
+def authorize(header: str | None, expected: Sequence[str]) -> str:
+    """Constant-time bearer check against a token SET. Returns the fingerprint
+    of the token that matched; raises `_Rejected` and never returns a reason.
 
     🔴 `hmac.compare_digest`, NOT `==`. A public endpoint makes a byte-at-a-time
     timing oracle practically exploitable, and the difference is invisible in
     every functional test — which is why the test for this asserts on the CALL,
     and there is a behavioural test either side of it.
+
+    🔴 NO EARLY EXIT. The loop runs to the end whether or not it has already
+    matched, so the response time does not encode WHICH token was presented —
+    a `break` on the first hit would make "you used the old one" measurable from
+    outside, and during an overlap window that is precisely the fact an attacker
+    wants. It is also why the match is accumulated rather than returned inline.
+
+    🔴 A BARE STRING IS REFUSED, LOUDLY. `for token in "abc…"` iterates
+    CHARACTERS, so passing one token as a `str` would authorize any caller who
+    presented a single character of it. A type annotation is not a code path;
+    this check is.
     """
-    got = presented_token(header)
-    if not hmac.compare_digest(got.encode("utf-8"), expected.encode("utf-8")):
+    if isinstance(expected, (str, bytes)):
+        raise TypeError(
+            "expected must be a SEQUENCE of tokens, not one string: iterating a "
+            "str yields characters, and a one-character token would authorize"
+        )
+    got = presented_token(header).encode("utf-8")
+    matched: str | None = None
+    for token in expected:
+        if hmac.compare_digest(got, token.encode("utf-8")):
+            matched = token
+    if matched is None:
         raise _Rejected()
+    return token_id(matched)
+
+
+def client_ip(headers: Any) -> str | None:
+    """The client's address, or `None` — and `None` means REFUSE, not "unknown".
+
+    🔴 `CF-Connecting-IP` ONLY. Cloudflare sets it on every proxied request and
+    overwrites whatever the caller sent, which is what makes it trustworthy —
+    and it is trustworthy for that reason alone, so the moment Cloudflare stops
+    being the sole ingress this function stops being sound. `X-Forwarded-For` is
+    never consulted: it is caller-supplied, so an attacker keyed on it gets a
+    fresh bucket per request AND can lock out a third party by forging theirs.
+
+    Three ways to get `None`, all of them fail-closed at the call site:
+      * absent            — not a Cloudflare-proxied request
+      * not an IP address — a forged or mangled value
+      * more than one     — a caller trying to smuggle a second value past a
+                            proxy that appends rather than overwrites
+
+    Returns the NORMALISED form (`ipaddress`), so `::FFFF:1.2.3.4` and
+    `::ffff:1.2.3.4` cannot be two buckets for one attacker.
+    """
+    try:
+        values = headers.get_all(CLIENT_IP_HEADER)
+    except AttributeError:  # a plain dict, in a unit test
+        single = headers.get(CLIENT_IP_HEADER)
+        values = None if single is None else [single]
+    if not values or len(values) != 1:
+        return None
+    try:
+        return str(ipaddress.ip_address(values[0].strip()))
+    except ValueError:
+        return None
+
+
+def limiter_settings(env: dict[str, str]) -> tuple[int, float, float]:
+    """Read the three rate-limit knobs from env, or RAISE.
+
+    🔴 It raises rather than silently defaulting, for the same reason
+    `_int_param` does: a typo'd `SUBSYSTEM_STORE_MAX_FAILURES=fve` that quietly
+    became 5 is an operator believing a setting took effect. A misconfiguration
+    at startup is `EXIT_CONFIG`, visible in a CrashLoopBackOff; a
+    misconfiguration that defaults is invisible forever.
+    """
+
+    def _num(name: str, default: float, cast: Callable[[str], Any]) -> Any:
+        raw = env.get(name)
+        if raw is None or raw == "":
+            return default
+        try:
+            value = cast(raw)
+        except ValueError:
+            raise ValueError(f"{name} must be a number, got {raw!r}") from None
+        if value <= 0:
+            raise ValueError(f"{name} must be positive, got {raw!r}")
+        return value
+
+    return (
+        _num(ENV_MAX_FAILURES, DEFAULT_MAX_FAILURES, int),
+        _num(ENV_FAILURE_WINDOW, DEFAULT_FAILURE_WINDOW_S, float),
+        _num(ENV_LOCKOUT, DEFAULT_LOCKOUT_S, float),
+    )
+
+
+class RateLimiter:
+    """N failed auths per client per window -> a lockout of `lockout_s`.
+
+    §2b (B-required): "Rate-limit + lock out on repeated 401s, at the Traefik
+    middleware layer *and* in the app. Cloudflare's WAF is the third layer, not
+    the only one." This is the innermost of the three, and the only one that
+    knows an auth actually FAILED rather than that a request arrived.
+
+    Thread-safe on purpose: the server is a `ThreadingHTTPServer`, so a
+    dict-mutating limiter without a lock would drop failures under exactly the
+    concurrency a credential-stuffing run produces.
+
+    The clock is injectable so a test can prove the window and the lockout
+    EXPIRE, rather than sleeping 15 minutes or asserting only the easy half.
+    """
+
+    def __init__(
+        self,
+        *,
+        max_failures: int = DEFAULT_MAX_FAILURES,
+        window_s: float = DEFAULT_FAILURE_WINDOW_S,
+        lockout_s: float = DEFAULT_LOCKOUT_S,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.max_failures = max_failures
+        self.window_s = window_s
+        self.lockout_s = lockout_s
+        self.clock = clock
+        self._lock = threading.Lock()
+        self._failures: dict[str, list[float]] = {}
+        self._locked_until: dict[str, float] = {}
+
+    def locked_out(self, key: str) -> bool:
+        """True while `key` is serving a lockout. Expired lockouts are dropped."""
+        now = self.clock()
+        with self._lock:
+            until = self._locked_until.get(key)
+            if until is None:
+                return False
+            if until <= now:
+                del self._locked_until[key]
+                self._failures.pop(key, None)
+                return False
+            return True
+
+    def record_failure(self, key: str) -> bool:
+        """Count one failed auth. Returns True iff THIS one started a lockout."""
+        now = self.clock()
+        with self._lock:
+            recent = [t for t in self._failures.get(key, []) if t > now - self.window_s]
+            recent.append(now)
+            if len(recent) >= self.max_failures:
+                self._locked_until[key] = now + self.lockout_s
+                self._failures.pop(key, None)
+                self._evict(now)
+                return True
+            self._failures[key] = recent
+            self._evict(now)
+            return False
+
+    def record_success(self, key: str) -> None:
+        """A good credential clears the failure streak — but NOT a live lockout.
+
+        🔴 The asymmetry is the point. Forgiving a streak keeps a legitimate
+        client from being locked out by sporadic typos across an hour; forgiving
+        a LOCKOUT would mean an attacker who eventually guessed one token could
+        wipe the record of having guessed, and `locked_out` is checked before
+        this is ever reached anyway.
+        """
+        with self._lock:
+            self._failures.pop(key, None)
+
+    def _evict(self, now: float) -> None:
+        """Bound the failure table. Called under `self._lock`.
+
+        Only entries whose whole streak has aged out of the window are dropped,
+        and ACTIVE LOCKOUTS ARE NEVER TOUCHED — evicting a lockout is a bypass
+        dressed as memory hygiene.
+        """
+        for key in [k for k, v in self._locked_until.items() if v <= now]:
+            del self._locked_until[key]
+        if len(self._failures) <= MAX_TRACKED_CLIENTS:
+            return
+        stale = [
+            key
+            for key, times in self._failures.items()
+            if not times or max(times) <= now - self.window_s
+        ]
+        for key in stale:
+            del self._failures[key]
 
 
 def scope_revision(store_root: str | Path, scope: str) -> str:
@@ -263,10 +520,17 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
     server_version = SERVER_BANNER
     sys_version = ""
 
-    # Injected by `serve()`.
+    # Injected by `build_server`.
     store_root: str = DEFAULT_STORE
-    expected_token: str = ""
+    expected_tokens: tuple[str, ...] = ()
+    limiter: RateLimiter | None = None
     audit: Callable[[str], None] = staticmethod(lambda line: print(line, flush=True))
+
+    # Per-request identity, reset at the top of every dispatch so a keep-alive
+    # connection cannot carry the previous request's fingerprint into this
+    # request's audit line.
+    _client_ip: str | None = None
+    _token_fp: str | None = None
 
     # --- plumbing ---------------------------------------------------------------
 
@@ -307,13 +571,25 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             headers={"WWW-Authenticate": 'Bearer realm="subsystem-store"'},
         )
 
-    def _audit(self, path: str, result: int, status: str, authed: bool) -> None:
+    def _audit(self, path: str, result: int, status: str) -> None:
+        """One line per `/api/*` request. `/healthz` is deliberately not audited.
+
+        🔴 `token=` is the fingerprint of the token that ACTUALLY MATCHED, not
+        of the one the server was configured with. With a token SET those differ,
+        and the difference is the entire safety of overlap rotation: it is the
+        only evidence that every client has moved off the old credential before
+        it is deleted. Nothing here is derived from `authed` any more — the
+        fingerprint's presence IS the authentication result, so the two cannot
+        disagree.
+        """
         self.audit(
             "store-api audit "
             f"ts={datetime.now(timezone.utc).isoformat(timespec='seconds')} "
+            f"ip={self._client_ip or '-'} "
             f"method={self.command} path={path} "
-            f"token={token_id(self.expected_token) if authed else '-'} "
-            f"auth={'ok' if authed else 'fail'} result={result} status={status}"
+            f"token={self._token_fp or '-'} "
+            f"auth={'ok' if self._token_fp else 'fail'} "
+            f"result={result} status={status}"
         )
 
     # --- methods ----------------------------------------------------------------
@@ -332,41 +608,90 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         router and be served as a read — a mutation that silently succeeded as a
         no-op read is indistinguishable from one that worked.
         """
+        self._client_ip = client_ip(self.headers)
+        self._token_fp = None
         self._respond(
             405,
             b"read-only\n",
             headers={"Allow": "GET, HEAD"},
         )
-        self._audit(urlsplit(self.path).path, 405, "method-not-allowed", authed=False)
+        self._audit(urlsplit(self.path).path, 405, "method-not-allowed")
 
     do_POST = do_PUT = do_PATCH = do_DELETE = _reject_write  # noqa: N815
 
     # --- the router -------------------------------------------------------------
 
+    @staticmethod
+    def _count_failure(limiter: RateLimiter | None, ip: str) -> str:
+        """Record one failed auth and name the audit status it produced."""
+        if limiter is None:
+            return "unauthorized"
+        return "lockout-triggered" if limiter.record_failure(ip) else "unauthorized"
+
+    def _refuse(self, path: str, status: str) -> None:
+        """The uniform 401, plus the audit line that says which reason it was.
+
+        🔴 THE WIRE DOES NOT DISCRIMINATE; THE LOG DOES. Every rejection below —
+        no client IP, locked out, not an API path, bad token — is the same code,
+        the same body and the same header set, because an error that
+        discriminates is an enumeration API (§2b). The `status=` field exists so
+        the operator can still tell a credential-stuffing run from a
+        misconfigured client, in a place the attacker cannot read.
+        """
+        self._unauthorized()
+        self._audit(path, 401, status)
+
     def _handle(self) -> None:
         split = urlsplit(self.path)
         path = unquote(split.path)
+        self._client_ip = None
+        self._token_fp = None
 
-        # 🔴 BEFORE AUTH, and it is the ONLY thing before auth. Unauthenticated
-        # by design (§2b) and it says nothing but "ok".
+        # 🔴 BEFORE EVERYTHING, and it is the ONLY thing before auth.
+        # Unauthenticated by design (§2b) and it says nothing but "ok". It is
+        # also the kubelet's probe, so it must not be rate-limited or require a
+        # `CF-Connecting-IP` the kubelet has no reason to send.
         if path == HEALTH_PATH:
             self._respond(200, HEALTH_BODY)
+            return
+
+        ip = client_ip(self.headers)
+        if ip is None:
+            # 🔴 FAIL CLOSED. The alternative — bucketing every unidentified
+            # request under one shared key — is the failure the whole
+            # `CF-Connecting-IP` design exists to avoid: one abuser would then
+            # lock out everybody. Nothing is counted here, precisely because
+            # there is no bucket to count into.
+            self._refuse(path, "no-client-ip")
+            return
+        self._client_ip = ip
+
+        limiter = self.limiter
+        if limiter is not None and limiter.locked_out(ip):
+            # Checked BEFORE the token: a lockout that a valid credential could
+            # walk through would not be a lockout, and an attacker who guesses
+            # one token mid-run must not have the record wiped.
+            self._refuse(path, "locked-out")
             return
 
         if not path.startswith(API_PREFIX):
             # Not an API path and not health. Answered with the SAME uniform 401
             # as a bad token: a 404 here would let an unauthenticated caller map
-            # the URL space, which is the enumeration surface §2b forbids.
-            self._unauthorized()
-            self._audit(path, 401, "unauthorized", authed=False)
+            # the URL space, which is the enumeration surface §2b forbids. It
+            # counts toward the lockout for the same reason — URL probing from
+            # one address is the same attack as token probing from one address.
+            self._refuse(path, self._count_failure(limiter, ip))
             return
 
         try:
-            authorize(self.headers.get("Authorization"), self.expected_token)
+            self._token_fp = authorize(
+                self.headers.get("Authorization"), self.expected_tokens
+            )
         except _Rejected:
-            self._unauthorized()
-            self._audit(path, 401, "unauthorized", authed=False)
+            self._refuse(path, self._count_failure(limiter, ip))
             return
+        if limiter is not None:
+            limiter.record_success(ip)
 
         params = parse_qs(split.query, keep_blank_values=True)
         rest = path[len(API_PREFIX) :]
@@ -384,7 +709,7 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             # what it did wrong.
             body = f"bad request: {exc}\n".encode("utf-8")
             self._respond(400, body, headers={"X-Store-Status": "bad-request"})
-            self._audit(path, 400, "bad-request", authed=True)
+            self._audit(path, 400, "bad-request")
             return
         except (rc.StoreMissingError, rc.EntryUnreadableError) as exc:
             # 🔴 THE STATE THIS WHOLE DESIGN EXISTS TO KEEP SEPARATE. The store
@@ -396,11 +721,11 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
                 body,
                 headers={"X-Store-Status": "store-unreachable", "X-Store-Exit": "3"},
             )
-            self._audit(path, 503, "store-unreachable", authed=True)
+            self._audit(path, 503, "store-unreachable")
             return
 
         self._respond(404, b"no such endpoint\n", headers={"X-Store-Status": "no-route"})
-        self._audit(path, 404, "no-route", authed=True)
+        self._audit(path, 404, "no-route")
 
     # --- handlers ---------------------------------------------------------------
 
@@ -429,7 +754,7 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
                 "X-Store-Revision": scope_revision(self.store_root, scope),
             },
         )
-        self._audit(path, 200, status, authed=True)
+        self._audit(path, 200, status)
 
     def _recall(self, scope: str, params: dict[str, list[str]]) -> None:
         mode_values = params.get("mode")
@@ -487,16 +812,27 @@ def build_server(
     host: str,
     port: int,
     store_root: str,
-    token: str,
+    tokens: Sequence[str],
+    limiter: RateLimiter | None = None,
     audit: Callable[[str], None] | None = None,
 ) -> ThreadingHTTPServer:
-    """Wire a server without starting it — so a test can bind :0 and drive it."""
+    """Wire a server without starting it — so a test can bind :0 and drive it.
+
+    🔴 `tokens` is a SEQUENCE, and a bare `str` is refused here as well as in
+    `authorize`. The keyword was renamed from `token=` on purpose: a caller
+    still passing the old name now fails loudly at the call, instead of silently
+    configuring the empty default set and rejecting every request — or, worse,
+    being iterated character-by-character somewhere downstream.
+    """
+    if isinstance(tokens, (str, bytes)):
+        raise TypeError("tokens must be a SEQUENCE of tokens, not one string")
 
     class _Handler(StoreRequestHandler):
         pass
 
     _Handler.store_root = store_root
-    _Handler.expected_token = token
+    _Handler.expected_tokens = tuple(tokens)
+    _Handler.limiter = limiter if limiter is not None else RateLimiter()
     if audit is not None:
         _Handler.audit = staticmethod(audit)
     return ThreadingHTTPServer((host, port), _Handler)
@@ -518,8 +854,9 @@ def main(argv: list[str] | None = None) -> int:
         "--token-file",
         default=os.environ.get("SUBSYSTEM_STORE_TOKEN_FILE", DEFAULT_TOKEN_FILE),
         help=(
-            "file holding the bearer token (mode 0600). FILE FIRST: the agent exec "
-            "sandbox strips env vars, so $SUBSYSTEM_STORE_TOKEN is the fallback"
+            "file holding the bearer token SET, ONE PER LINE, current first "
+            "(mode 0600). FILE FIRST: the agent exec sandbox strips env vars, so "
+            "$SUBSYSTEM_STORE_TOKEN is the fallback"
         ),
     )
     args = p.parse_args(argv)
@@ -539,17 +876,30 @@ def main(argv: list[str] | None = None) -> int:
         token_file = None
 
     try:
-        token = load_token(token_file, dict(os.environ))
+        tokens = load_tokens(token_file, dict(os.environ))
+        max_failures, window_s, lockout_s = limiter_settings(dict(os.environ))
     except ValueError as exc:
         print(f"subsystem-store-api: {exc}", file=sys.stderr)
         return EXIT_CONFIG
 
-    httpd = build_server(
-        host=args.host, port=args.port, store_root=args.store, token=token
+    limiter = RateLimiter(
+        max_failures=max_failures, window_s=window_s, lockout_s=lockout_s
     )
+    httpd = build_server(
+        host=args.host,
+        port=args.port,
+        store_root=args.store,
+        tokens=tokens,
+        limiter=limiter,
+    )
+    # 🔴 The startup line prints every FINGERPRINT, in the order the file lists
+    # them, and never a token. It is what makes an overlap rotation checkable:
+    # the operator reads these ids, then greps the audit log for the one that
+    # should have stopped appearing before deleting its line from the secret.
     print(
         f"subsystem-store-api: listening on {args.host}:{args.port} "
-        f"store={args.store} token-id={token_id(token)}",
+        f"store={args.store} token-ids={','.join(token_id(t) for t in tokens)} "
+        f"lockout={max_failures}/{window_s:g}s->{lockout_s:g}s",
         flush=True,
     )
     try:

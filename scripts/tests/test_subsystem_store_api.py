@@ -44,7 +44,9 @@ status strings are all spelled again here by hand. Importing them would assert
 
 from __future__ import annotations
 
+import ast
 import hashlib
+import http.client
 import importlib.util
 import os
 import secrets
@@ -142,8 +144,16 @@ def store(tmp_path: Path) -> Path:
     return root
 
 
+# RFC 5737 TEST-NET-3, and three DISTINCT addresses: a test that used one
+# address for the client and the same one for the spoofed header could not tell
+# "keyed on CF-Connecting-IP" from "keyed on anything at all".
+CLIENT_IP = "203.0.113.7"
+OTHER_IP = "203.0.113.99"
+SPOOF_IP = "198.51.100.4"  # TEST-NET-2 — the value a forged XFF would carry
+
+
 @contextmanager
-def running(store_root, token=GOOD_TOKEN):
+def running(store_root, token=GOOD_TOKEN, *, tokens=None, limiter=None):
     """Bind a real server on :0 and drive it over a real socket.
 
     Deliberately not a handler-level unit test: the response CODE, the header
@@ -155,7 +165,8 @@ def running(store_root, token=GOOD_TOKEN):
         host="127.0.0.1",
         port=0,
         store_root=str(store_root),
-        token=token,
+        tokens=(token,) if tokens is None else tuple(tokens),
+        limiter=limiter,
         audit=audit.append,
     )
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
@@ -168,18 +179,82 @@ def running(store_root, token=GOOD_TOKEN):
         thread.join(timeout=10)
 
 
-def fetch(url: str, *, token: str | None = None, method: str = "GET", auth_header=None):
-    """Return (code, headers, body-bytes) without raising on 4xx/5xx."""
+def fetch(
+    url: str,
+    *,
+    token: str | None = None,
+    method: str = "GET",
+    auth_header=None,
+    client_ip: str | None = CLIENT_IP,
+    extra_headers: dict[str, str] | None = None,
+):
+    """Return (code, headers, body-bytes) without raising on 4xx/5xx.
+
+    🔴 `CF-Connecting-IP` is sent BY DEFAULT because the server requires it —
+    it is the rate limiter's key, and an absent one fails closed. Pass
+    `client_ip=None` to exercise exactly that.
+    """
     req = urllib.request.Request(url, method=method)
     if auth_header is not None:
         req.add_header("Authorization", auth_header)
     elif token is not None:
         req.add_header("Authorization", f"Bearer {token}")
+    if client_ip is not None:
+        req.add_header("CF-Connecting-IP", client_ip)
+    for key, value in (extra_headers or {}).items():
+        req.add_header(key, value)
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             return resp.status, dict(resp.headers), resp.read()
     except urllib.error.HTTPError as exc:
         return exc.code, dict(exc.headers), exc.read()
+
+
+def _raw_request(host: str, path: str, headers: list[tuple[str, str]]) -> int:
+    """GET `path` with headers put on the wire VERBATIM, duplicates included.
+
+    `urllib.request.Request.add_header` stores headers in a dict, so it silently
+    collapses a repeated header to one — which makes it structurally incapable
+    of expressing the "two `CF-Connecting-IP`s" case. `http.client.putheader`
+    can.
+    """
+    conn = http.client.HTTPConnection(host, timeout=15)
+    try:
+        conn.putrequest("GET", path, skip_host=True, skip_accept_encoding=True)
+        conn.putheader("Host", host)
+        for key, value in headers:
+            conn.putheader(key, value)
+        conn.endheaders()
+        resp = conn.getresponse()
+        resp.read()
+        return resp.status
+    finally:
+        conn.close()
+
+
+def _executable_tokens(path: Path) -> str:
+    """`path`'s source with COMMENTS and DOCSTRINGS removed, string literals kept.
+
+    A header name IS a string literal, so a scan that dropped strings could not
+    see one; a scan that kept comments would trip over the paragraphs explaining
+    why a header is refused. `ast` drops comments by construction and the walk
+    below drops docstrings, leaving exactly what executes.
+    """
+    tree = ast.parse(path.read_text())
+    for node in ast.walk(tree):
+        if not isinstance(
+            node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+        ):
+            continue
+        body = getattr(node, "body", None)
+        if (
+            body
+            and isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Constant)
+            and isinstance(body[0].value.value, str)
+        ):
+            node.body = body[1:] or [ast.Pass()]
+    return ast.unparse(tree)
 
 
 def _comparable(headers: dict) -> tuple:
@@ -206,7 +281,7 @@ def tree_hash(root: Path) -> str:
 
 
 class TestTokenLoadingGuards:
-    """`load_token` refuses to serve on a token that is absent, empty or weak.
+    """`load_tokens` refuses to serve on a token that is absent, empty or weak.
 
     🔴 Each case is built so that every EARLIER guard passes: the empty-token
     case uses a file that exists and is readable, and the too-short case uses a
@@ -216,14 +291,14 @@ class TestTokenLoadingGuards:
 
     def test_no_source_at_all_names_the_two_ways_to_supply_one(self):
         with pytest.raises(ValueError) as exc:
-            api.load_token(None, {})
+            api.load_tokens(None, {})
         assert "no token source" in str(exc.value)
         assert "--token-file" in str(exc.value)
         assert "SUBSYSTEM_STORE_TOKEN" in str(exc.value)
 
     def test_a_missing_file_is_not_confused_with_an_absent_one(self, tmp_path: Path):
         with pytest.raises(ValueError) as exc:
-            api.load_token(str(tmp_path / "nope"), {})
+            api.load_tokens(str(tmp_path / "nope"), {})
         assert "token file unreadable" in str(exc.value)
 
     def test_a_readable_file_of_whitespace_is_rejected_as_EMPTY(self, tmp_path: Path):
@@ -231,7 +306,7 @@ class TestTokenLoadingGuards:
         path = tmp_path / "tok"
         path.write_text("   \n\t\n")
         with pytest.raises(ValueError) as exc:
-            api.load_token(str(path), {})
+            api.load_tokens(str(path), {})
         assert "token is empty" in str(exc.value)
 
     def test_a_short_but_perfectly_valid_file_is_rejected_as_TOO_SHORT(
@@ -242,8 +317,11 @@ class TestTokenLoadingGuards:
         path = tmp_path / "tok"
         path.write_text("hunter2\n")
         with pytest.raises(ValueError) as exc:
-            api.load_token(str(path), {})
-        assert "token is too short" in str(exc.value)
+            api.load_tokens(str(path), {})
+        assert "is too short" in str(exc.value)
+        # The position is named even when there is only one — a message that
+        # said "the token" would have to change shape the day a second appears.
+        assert "token 1 of 1" in str(exc.value)
         # 43 chars = 256 bits base64url, pinned LITERALLY (§2b).
         assert "43" in str(exc.value)
 
@@ -254,7 +332,7 @@ class TestTokenLoadingGuards:
     def test_a_token_of_exactly_the_floor_is_accepted(self, tmp_path: Path):
         path = tmp_path / "tok"
         path.write_text("z" * 43 + "\n")
-        assert api.load_token(str(path), {}) == "z" * 43
+        assert api.load_tokens(str(path), {}) == ["z" * 43]
 
     def test_env_is_the_FALLBACK_not_the_primary(self, tmp_path: Path):
         # Both sources present: the FILE wins. The agent exec sandbox strips env
@@ -262,10 +340,12 @@ class TestTokenLoadingGuards:
         # mounted secret would make the deployed token unknowable.
         path = tmp_path / "tok"
         path.write_text("f" * 50)
-        assert api.load_token(str(path), {"SUBSYSTEM_STORE_TOKEN": "e" * 50}) == "f" * 50
+        assert api.load_tokens(str(path), {"SUBSYSTEM_STORE_TOKEN": "e" * 50}) == [
+            "f" * 50
+        ]
 
     def test_env_is_used_when_no_file_is_named(self):
-        assert api.load_token(None, {"SUBSYSTEM_STORE_TOKEN": "e" * 50}) == "e" * 50
+        assert api.load_tokens(None, {"SUBSYSTEM_STORE_TOKEN": "e" * 50}) == ["e" * 50]
 
 
 # =============================================================================
@@ -388,7 +468,7 @@ class TestConstantTimeComparison:
             return real(a, b)
 
         monkeypatch.setattr(api.hmac, "compare_digest", spy)
-        api.authorize(f"Bearer {GOOD_TOKEN}", GOOD_TOKEN)
+        api.authorize(f"Bearer {GOOD_TOKEN}", (GOOD_TOKEN,))
         assert len(seen) == 1
         # 🔴 And with the RIGHT arguments, in the right order: presented first,
         # expected second, both as bytes. A spy that only counted calls would be
@@ -396,15 +476,15 @@ class TestConstantTimeComparison:
         assert seen[0] == (GOOD_TOKEN.encode(), GOOD_TOKEN.encode())
 
     def test_BEHAVIOURAL_it_accepts_the_right_token_and_rejects_a_near_miss(self):
-        api.authorize(f"Bearer {GOOD_TOKEN}", GOOD_TOKEN)  # no raise
+        api.authorize(f"Bearer {GOOD_TOKEN}", (GOOD_TOKEN,))  # no raise
         with pytest.raises(api._Rejected):
-            api.authorize(f"Bearer {GOOD_TOKEN[:-1]}X", GOOD_TOKEN)
+            api.authorize(f"Bearer {GOOD_TOKEN[:-1]}X", (GOOD_TOKEN,))
         with pytest.raises(api._Rejected):
-            api.authorize(None, GOOD_TOKEN)
+            api.authorize(None, (GOOD_TOKEN,))
 
     def test_a_PREFIX_of_the_token_is_rejected(self):
         with pytest.raises(api._Rejected):
-            api.authorize(f"Bearer {GOOD_TOKEN[:10]}", GOOD_TOKEN)
+            api.authorize(f"Bearer {GOOD_TOKEN[:10]}", (GOOD_TOKEN,))
 
     def test_the_source_contains_no_equality_test_against_the_token(self):
         # A cheap second reading of the same property. It is NOT the guard —
@@ -1280,3 +1360,570 @@ class TestPhaseOneScope:
             text = path.read_text()
             assert "git push" not in text, f"{path.name} reaches for git push"
             assert "remote add" not in text, f"{path.name} configures a git remote"
+
+
+# =============================================================================
+# 14. PHASE 1.5 — the (B-required) hardening.
+#
+# 🔴 WHAT THESE ARE, HONESTLY. `server.py` EXISTS at the base ref, so unlike
+# every section above, some of these are real regressions: a request with no
+# `CF-Connecting-IP` and a valid token is served 200 at base and 401 here, and a
+# valid token after five failures is served 200 at base and refused here. Those
+# two are red at base for the RIGHT reason. The token-SET tests are NOT: they
+# call `build_server(tokens=…)` / `load_tokens`, which do not exist at base, so
+# their red is an API error and proves nothing. The PR body reports which is
+# which, and the mutation matrix is the evidence for the second group.
+# =============================================================================
+
+
+SECOND_TOKEN = "q" * 20 + "R" * 20 + "s" * 8  # 48 chars, disjoint from GOOD_TOKEN
+THIRD_TOKEN = "m" * 20 + "N" * 20 + "o" * 8
+
+
+class TestTokenSetAndOverlapRotation:
+    """§2b: "Token rotation must be a one-command operation and must be
+    exercised once before cutover." Overlap is what makes it one command: the
+    server accepts current AND previous, so no client is ever broken.
+    """
+
+    def _write(self, tmp_path: Path, *tokens: str) -> str:
+        path = tmp_path / "tokens"
+        path.write_text("\n".join(tokens) + "\n")
+        return str(path)
+
+    def test_two_tokens_load_as_a_set_IN_FILE_ORDER(self, tmp_path: Path):
+        path = self._write(tmp_path, GOOD_TOKEN, SECOND_TOKEN)
+        assert api.load_tokens(path, {}) == [GOOD_TOKEN, SECOND_TOKEN]
+
+    def test_a_duplicated_line_collapses_and_order_is_kept(self, tmp_path: Path):
+        path = self._write(tmp_path, SECOND_TOKEN, GOOD_TOKEN, SECOND_TOKEN)
+        assert api.load_tokens(path, {}) == [SECOND_TOKEN, GOOD_TOKEN]
+
+    def test_the_cap_is_FOUR(self):
+        # Literal, not `api.MAX_TOKENS` — importing it would assert x == x.
+        assert api.MAX_TOKENS == 4
+
+    def test_a_FIFTH_token_is_refused_at_startup(self, tmp_path: Path):
+        # Every earlier guard passes: the file exists, reads, is non-empty, and
+        # every one of the five tokens clears the length floor. Only the cap can
+        # reject this input.
+        five = [chr(ord("a") + i) * 48 for i in range(5)]
+        path = self._write(tmp_path, *five)
+        with pytest.raises(ValueError) as exc:
+            api.load_tokens(path, {})
+        assert "too many tokens" in str(exc.value)
+        assert "5" in str(exc.value)
+
+    def test_FOUR_tokens_are_accepted_the_boundary_is_not_off_by_one(
+        self, tmp_path: Path
+    ):
+        four = [chr(ord("a") + i) * 48 for i in range(4)]
+        path = self._write(tmp_path, *four)
+        assert api.load_tokens(path, {}) == four
+
+    def test_a_SHORT_SECOND_token_names_its_POSITION_and_never_the_token(
+        self, tmp_path: Path
+    ):
+        # 🔴 The reachable case that a "is the token long enough" check written
+        # against `raw.strip()` would wave straight through: the FIRST token is
+        # fine, so the file passes every earlier guard.
+        path = self._write(tmp_path, GOOD_TOKEN, "hunter2")
+        with pytest.raises(ValueError) as exc:
+            api.load_tokens(path, {})
+        message = str(exc.value)
+        assert "token 2 of 2 is too short" in message
+        assert "hunter2" not in message, "the secret was echoed into the error"
+        assert "43" in message
+
+    def test_BOTH_tokens_in_the_set_authorize_over_HTTP(self, store: Path):
+        with running(store, tokens=(GOOD_TOKEN, SECOND_TOKEN)) as (base, _):
+            for token in (GOOD_TOKEN, SECOND_TOKEN):
+                code, _h, body = fetch(f"{base}/api/v1/recall/{SCOPE}", token=token)
+                assert code == 200, f"{token[:3]}… was refused"
+                assert POINTER_LINE.encode() in body
+
+    def test_a_token_OUTSIDE_the_set_is_still_refused(self, store: Path):
+        with running(store, tokens=(GOOD_TOKEN, SECOND_TOKEN)) as (base, _):
+            code, _h, body = fetch(f"{base}/api/v1/recall/{SCOPE}", token=THIRD_TOKEN)
+        assert code == 401
+        assert body == b"unauthorized\n"
+
+    def test_the_audit_line_names_WHICH_fingerprint_matched(self, store: Path):
+        """🔴 THE ONE THING THAT MAKES OVERLAP ROTATION SAFE.
+
+        Without this, "nobody is using the old token any more" is a guess and
+        deleting it is a coin flip. A log that named the SERVER's token instead
+        of the MATCHED one would be green on a single-token deployment and
+        useless on the only deployment shape that needs it.
+        """
+        with running(store, tokens=(GOOD_TOKEN, SECOND_TOKEN)) as (base, audit):
+            fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
+            fetch(f"{base}/api/v1/recall/{SCOPE}", token=SECOND_TOKEN)
+        assert len(audit) == 2
+        first, second = api.token_id(GOOD_TOKEN), api.token_id(SECOND_TOKEN)
+        assert first != second
+        assert f"token={first}" in audit[0]
+        assert f"token={second}" in audit[1]
+        assert "auth=ok" in audit[0] and "auth=ok" in audit[1]
+        # And never the credential itself, on either line.
+        joined = "\n".join(audit)
+        assert GOOD_TOKEN not in joined and SECOND_TOKEN not in joined
+
+    def test_authorize_compares_against_EVERY_token_with_no_early_exit(
+        self, monkeypatch
+    ):
+        """A `break` on the first match would make "which token did you use"
+        measurable from outside — during an overlap window that is exactly the
+        fact an attacker wants. The FIRST token matches here, so a short-circuit
+        would show up as one call instead of three.
+        """
+        seen: list[tuple] = []
+        real = api.hmac.compare_digest
+
+        def spy(a, b):
+            seen.append((a, b))
+            return real(a, b)
+
+        monkeypatch.setattr(api.hmac, "compare_digest", spy)
+        got = api.authorize(
+            f"Bearer {GOOD_TOKEN}", (GOOD_TOKEN, SECOND_TOKEN, THIRD_TOKEN)
+        )
+        assert got == api.token_id(GOOD_TOKEN)
+        assert len(seen) == 3, f"short-circuited after {len(seen)} comparisons"
+
+    def test_authorize_REFUSES_a_bare_string_rather_than_iterating_CHARACTERS(self):
+        """🔴 `for token in "abc…"` yields "a", "b", "c". Without this guard, a
+        caller who passed one token as a `str` would authorize anybody who
+        presented a SINGLE CHARACTER of it — a total auth bypass that no
+        functional test with a correct caller would ever surface.
+        """
+        with pytest.raises(TypeError) as exc:
+            api.authorize(f"Bearer {GOOD_TOKEN}", GOOD_TOKEN)
+        assert "SEQUENCE" in str(exc.value)
+        # And the hazard it describes is real: one character is not the token.
+        with pytest.raises(api._Rejected):
+            api.authorize(f"Bearer {GOOD_TOKEN[0]}", (GOOD_TOKEN,))
+
+    def test_build_server_refuses_a_bare_string_too(self, store: Path):
+        with pytest.raises(TypeError):
+            api.build_server(
+                host="127.0.0.1", port=0, store_root=str(store), tokens=GOOD_TOKEN
+            )
+
+    def test_a_ROTATION_end_to_end_old_still_works_then_stops(self, store: Path):
+        """The proposal's pre-cutover requirement, in-band: add the new token,
+        watch BOTH work and the fingerprints diverge, then remove the old one
+        and watch it be REFUSED. A rotation path never run is not a rotation
+        path — and the last step is the one that is usually skipped.
+        """
+        # Step 1: only the old token exists.
+        with running(store, tokens=(GOOD_TOKEN,)) as (base, audit):
+            assert fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)[0] == 200
+            assert fetch(f"{base}/api/v1/recall/{SCOPE}", token=SECOND_TOKEN)[0] == 401
+        # Step 2: OVERLAP — both accepted, and the log tells them apart.
+        with running(store, tokens=(SECOND_TOKEN, GOOD_TOKEN)) as (base, audit):
+            assert fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)[0] == 200
+            assert fetch(f"{base}/api/v1/recall/{SCOPE}", token=SECOND_TOKEN)[0] == 200
+        assert f"token={api.token_id(GOOD_TOKEN)}" in audit[0]
+        assert f"token={api.token_id(SECOND_TOKEN)}" in audit[1]
+        # Step 3: the old token is REMOVED. 🔴 This is the assertion that makes
+        # the whole exercise mean something.
+        with running(store, tokens=(SECOND_TOKEN,)) as (base, _):
+            assert fetch(f"{base}/api/v1/recall/{SCOPE}", token=SECOND_TOKEN)[0] == 200
+            code, _h, body = fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
+        assert code == 401
+        assert body == b"unauthorized\n"
+
+    def test_the_startup_banner_prints_FINGERPRINTS_never_tokens(
+        self, tmp_path: Path, store: Path, capsys, monkeypatch
+    ):
+        path = self._write(tmp_path, GOOD_TOKEN, SECOND_TOKEN)
+        started: dict = {}
+
+        class _Fake:
+            def serve_forever(self_inner):
+                raise KeyboardInterrupt
+
+            def server_close(self_inner):
+                pass
+
+        def fake_build(**kwargs):
+            started.update(kwargs)
+            return _Fake()
+
+        monkeypatch.setattr(api, "build_server", fake_build)
+        rc = api.main(["--store", str(store), "--port", "0", "--token-file", path])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert api.token_id(GOOD_TOKEN) in out
+        assert api.token_id(SECOND_TOKEN) in out
+        assert GOOD_TOKEN not in out and SECOND_TOKEN not in out
+        assert started["tokens"] == [GOOD_TOKEN, SECOND_TOKEN]
+
+
+class TestClientIpIsCloudflareOnly:
+    """§0.2: `/api/*` has no edge auth, so the app is the only place a client can
+    be identified — and it can only be identified correctly.
+    """
+
+    def test_the_audit_line_carries_the_CF_Connecting_IP(self, store: Path):
+        with running(store) as (base, audit):
+            fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, client_ip=CLIENT_IP)
+        assert f"ip={CLIENT_IP}" in audit[0]
+
+    def test_a_spoofed_X_Forwarded_For_does_NOT_win(self, store: Path):
+        """🔴 Both headers present, DIFFERENT values. The CF one must be the one
+        that is recorded and keyed on; the forged one must not appear anywhere.
+        """
+        with running(store) as (base, audit):
+            code, _h, _b = fetch(
+                f"{base}/api/v1/recall/{SCOPE}",
+                token=GOOD_TOKEN,
+                client_ip=CLIENT_IP,
+                extra_headers={"X-Forwarded-For": SPOOF_IP},
+            )
+        assert code == 200
+        assert f"ip={CLIENT_IP}" in audit[0]
+        assert SPOOF_IP not in audit[0], "a caller-supplied address was trusted"
+
+    def test_X_Forwarded_For_ALONE_fails_CLOSED(self, store: Path):
+        """The header an attacker controls cannot substitute for the one
+        Cloudflare overwrites — not even as a fallback.
+        """
+        with running(store) as (base, audit):
+            code, _h, body = fetch(
+                f"{base}/api/v1/recall/{SCOPE}",
+                token=GOOD_TOKEN,
+                client_ip=None,
+                extra_headers={"X-Forwarded-For": SPOOF_IP},
+            )
+        assert code == 401
+        assert body == b"unauthorized\n"
+        assert "status=no-client-ip" in audit[0]
+        assert SPOOF_IP not in audit[0]
+
+    def test_a_MISSING_CF_Connecting_IP_fails_closed_even_with_a_VALID_token(
+        self, store: Path
+    ):
+        with running(store) as (base, audit):
+            code, _h, body = fetch(
+                f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, client_ip=None
+            )
+        assert code == 401
+        assert body == b"unauthorized\n"
+        assert "auth=fail" in audit[0] and "ip=-" in audit[0]
+
+    def test_a_MANGLED_CF_Connecting_IP_fails_closed(self, store: Path):
+        for value in ("not-an-ip", "", "203.0.113.7, 198.51.100.4", "999.1.1.1"):
+            with running(store) as (base, _):
+                code, _h, _b = fetch(
+                    f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, client_ip=value
+                )
+            assert code == 401, f"{value!r} was accepted as a client address"
+
+    def test_TWO_CF_Connecting_IP_headers_fail_closed(self, store: Path):
+        """A proxy that APPENDS rather than overwrites would let a caller smuggle
+        a second value past it. Refuse rather than pick one.
+        """
+        # 🔴 `urllib`'s `add_header` OVERWRITES, so it cannot express this at
+        # all — a test written with it would send ONE header and pass with the
+        # guard deleted. Raw `putheader` twice is the only way to put two on the
+        # wire, and the control below proves the shape reaches the server.
+        with running(store) as (base, _):
+            host = base.split("//", 1)[1]
+            two = _raw_request(
+                host,
+                f"/api/v1/recall/{SCOPE}",
+                [
+                    ("Authorization", f"Bearer {GOOD_TOKEN}"),
+                    ("CF-Connecting-IP", CLIENT_IP),
+                    ("CF-Connecting-IP", SPOOF_IP),
+                ],
+            )
+            # POSITIVE CONTROL on the harness: the same call shape with ONE
+            # header must be served, or the 401 above would prove only that
+            # `_raw_request` is broken.
+            one = _raw_request(
+                host,
+                f"/api/v1/recall/{SCOPE}",
+                [
+                    ("Authorization", f"Bearer {GOOD_TOKEN}"),
+                    ("CF-Connecting-IP", CLIENT_IP),
+                ],
+            )
+        assert one == 200, "the raw-request harness cannot reach a 200 at all"
+        assert two == 401
+
+    def test_unidentified_requests_are_NOT_bucketed_together(self, store: Path):
+        """🔴 THE HAZARD THE FAIL-CLOSED EXISTS TO AVOID. Bucketing every
+        unidentified caller under one shared key means one abuser locks out
+        everybody. Twenty rejected no-IP requests — four times the failure
+        budget — must leave an identified client completely unaffected.
+        """
+        with running(store) as (base, _):
+            for _ in range(20):
+                assert fetch(f"{base}/api/v1/recall/{SCOPE}", client_ip=None)[0] == 401
+            code, _h, body = fetch(
+                f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, client_ip=CLIENT_IP
+            )
+        assert code == 200, "an unidentifiable caller locked out an identified one"
+        assert POINTER_LINE.encode() in body
+
+    def test_the_address_is_NORMALISED_so_one_caller_is_one_bucket(self):
+        assert api.client_ip({"CF-Connecting-IP": "::FFFF:203.0.113.7"}) == api.client_ip(
+            {"CF-Connecting-IP": "::ffff:203.0.113.7"}
+        )
+        assert api.client_ip({"CF-Connecting-IP": " 203.0.113.7 "}) == "203.0.113.7"
+        assert api.client_ip({}) is None
+        assert api.client_ip({"CF-Connecting-IP": "nope"}) is None
+
+    def test_health_needs_NO_client_ip_because_the_kubelet_sends_none(
+        self, store: Path
+    ):
+        with running(store) as (base, audit):
+            code, _h, body = fetch(f"{base}/healthz", client_ip=None)
+        assert (code, body) == (200, b"ok\n")
+        assert audit == []
+
+    def test_the_source_never_reads_X_Forwarded_For(self):
+        """Secondary, not the guard — `test_a_spoofed_X_Forwarded_For_does_NOT_win`
+        is. A behavioural test alone would stay green if XFF were consulted only
+        when `CF-Connecting-IP` is absent, which this catches directly.
+
+        🔴 It reads CODE, not text. Comments and docstrings in `server.py`
+        discuss `X-Forwarded-For` at length — that is the documentation of why
+        it is refused — so a substring scan over the file would be red for the
+        wrong reason and get "fixed" by deleting the explanation. Tokenising and
+        dropping COMMENT/STRING tokens leaves only what actually executes.
+        """
+        code = _executable_tokens(SERVER_PATH)
+        assert "X-Forwarded-For" not in code
+        assert "x-forwarded-for" not in code.lower()
+        # POSITIVE CONTROL: the tokeniser CAN see a header string in real code —
+        # otherwise the assertion above is a fact about the tokeniser.
+        assert "CF-Connecting-IP" in code
+
+
+class TestRateLimiterUnit:
+    """Injected clock, so the WINDOW and the LOCKOUT are both watched to expire.
+
+    A limiter tested only in the "locks out" direction is half a guard: one that
+    never released would take the whole store down on a typo.
+    """
+
+    def _limiter(self, now: list[float], **kwargs):
+        return api.RateLimiter(clock=lambda: now[0], **kwargs)
+
+    def test_the_defaults_are_5_per_60s_then_900s(self):
+        # Literals (§: 5 failures / minute -> 15-minute lockout), never imported.
+        assert api.DEFAULT_MAX_FAILURES == 5
+        assert api.DEFAULT_FAILURE_WINDOW_S == 60.0
+        assert api.DEFAULT_LOCKOUT_S == 900.0
+
+    def test_four_failures_do_NOT_lock_and_the_fifth_DOES(self):
+        now = [1000.0]
+        lim = self._limiter(now)
+        for i in range(4):
+            assert lim.record_failure("a") is False, f"locked after {i + 1}"
+            assert lim.locked_out("a") is False
+        assert lim.record_failure("a") is True
+        assert lim.locked_out("a") is True
+
+    def test_failures_OUTSIDE_the_window_do_not_accumulate(self):
+        now = [1000.0]
+        lim = self._limiter(now)
+        for _ in range(4):
+            assert lim.record_failure("a") is False
+        now[0] += 61.0  # the four have aged out
+        for _ in range(4):
+            assert lim.record_failure("a") is False
+        assert lim.locked_out("a") is False
+
+    def test_the_lockout_EXPIRES(self):
+        now = [1000.0]
+        lim = self._limiter(now)
+        for _ in range(5):
+            lim.record_failure("a")
+        assert lim.locked_out("a") is True
+        now[0] += 899.0
+        assert lim.locked_out("a") is True, "released early"
+        now[0] += 2.0
+        assert lim.locked_out("a") is False
+
+    def test_a_lockout_is_PER_KEY_not_global(self):
+        now = [1000.0]
+        lim = self._limiter(now)
+        for _ in range(5):
+            lim.record_failure("a")
+        assert lim.locked_out("a") is True
+        assert lim.locked_out("b") is False
+
+    def test_a_success_clears_the_STREAK(self):
+        now = [1000.0]
+        lim = self._limiter(now)
+        for _ in range(4):
+            lim.record_failure("a")
+        lim.record_success("a")
+        for _ in range(4):
+            assert lim.record_failure("a") is False
+        assert lim.locked_out("a") is False
+
+    def test_a_success_does_NOT_clear_a_LIVE_lockout(self):
+        now = [1000.0]
+        lim = self._limiter(now)
+        for _ in range(5):
+            lim.record_failure("a")
+        lim.record_success("a")
+        assert lim.locked_out("a") is True
+
+    def test_the_thresholds_are_tunable(self):
+        now = [1000.0]
+        lim = self._limiter(now, max_failures=2, window_s=10.0, lockout_s=30.0)
+        assert lim.record_failure("a") is False
+        assert lim.record_failure("a") is True
+        now[0] += 31.0
+        assert lim.locked_out("a") is False
+
+
+class TestLimiterSettings:
+    def test_an_empty_env_yields_the_code_defaults(self):
+        assert api.limiter_settings({}) == (5, 60.0, 900.0)
+
+    def test_env_overrides_all_three(self):
+        env = {
+            "SUBSYSTEM_STORE_MAX_FAILURES": "9",
+            "SUBSYSTEM_STORE_FAILURE_WINDOW_S": "30",
+            "SUBSYSTEM_STORE_LOCKOUT_S": "120",
+        }
+        assert api.limiter_settings(env) == (9, 30.0, 120.0)
+
+    def test_a_TYPO_raises_rather_than_silently_defaulting(self):
+        with pytest.raises(ValueError) as exc:
+            api.limiter_settings({"SUBSYSTEM_STORE_MAX_FAILURES": "fve"})
+        assert "SUBSYSTEM_STORE_MAX_FAILURES" in str(exc.value)
+
+    def test_a_NON_POSITIVE_value_raises(self):
+        # Reachable past the parse guard: "0" parses fine and would disable the
+        # limiter — or lock everyone out on request one, depending on the
+        # comparison. Neither is a setting anybody meant.
+        with pytest.raises(ValueError) as exc:
+            api.limiter_settings({"SUBSYSTEM_STORE_LOCKOUT_S": "0"})
+        assert "positive" in str(exc.value)
+
+    def test_main_EXITS_78_on_a_bad_limiter_setting(
+        self, store: Path, tmp_path: Path, monkeypatch, capsys
+    ):
+        path = tmp_path / "tok"
+        path.write_text(GOOD_TOKEN)
+        monkeypatch.setenv("SUBSYSTEM_STORE_MAX_FAILURES", "lots")
+        rc = api.main(["--store", str(store), "--port", "0", "--token-file", str(path)])
+        assert rc == 78
+        assert "SUBSYSTEM_STORE_MAX_FAILURES" in capsys.readouterr().err
+
+
+class TestLockoutOverHTTP:
+    """The limiter wired into the router — the layer that knows an auth FAILED.
+
+    🔴 A genuine regression against the base ref: at base, a valid token after
+    five wrong ones is served a 200.
+    """
+
+    def test_five_failures_lock_out_a_VALID_token_from_the_same_client(
+        self, store: Path
+    ):
+        with running(store) as (base, audit):
+            for _ in range(5):
+                assert fetch(f"{base}/api/v1/recall/{SCOPE}", token="w" * 48)[0] == 401
+            code, _h, body = fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
+        assert code == 401, "a locked-out client was served with a valid token"
+        assert body == b"unauthorized\n"
+        assert "status=lockout-triggered" in audit[4]
+        assert "status=locked-out" in audit[5]
+
+    def test_FOUR_failures_do_not_lock_out_the_boundary_is_not_off_by_one(
+        self, store: Path
+    ):
+        with running(store) as (base, _):
+            for _ in range(4):
+                assert fetch(f"{base}/api/v1/recall/{SCOPE}", token="w" * 48)[0] == 401
+            code, _h, body = fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
+        assert code == 200
+        assert POINTER_LINE.encode() in body
+
+    def test_the_lockout_is_PER_CLIENT_not_a_global_kill_switch(self, store: Path):
+        """🔴 The failure the `CF-Connecting-IP` keying exists to prevent: one
+        abuser must not take the store down for everyone else.
+        """
+        with running(store) as (base, _):
+            for _ in range(6):
+                fetch(f"{base}/api/v1/recall/{SCOPE}", token="w" * 48, client_ip=CLIENT_IP)
+            locked = fetch(
+                f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, client_ip=CLIENT_IP
+            )
+            other = fetch(
+                f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, client_ip=OTHER_IP
+            )
+        assert locked[0] == 401
+        assert other[0] == 200, "an unrelated client was caught in someone else's lockout"
+
+    def test_a_LOCKED_OUT_response_is_BYTE_IDENTICAL_to_an_ordinary_401(
+        self, store: Path
+    ):
+        """The log discriminates; the wire must not. An attacker who could see
+        the lockout land would know exactly how to pace a stuffing run.
+        """
+        with running(store) as (base, audit):
+            ordinary = fetch(f"{base}/api/v1/recall/{SCOPE}", token="w" * 48)
+            for _ in range(5):
+                fetch(f"{base}/api/v1/recall/{SCOPE}", token="w" * 48)
+            locked = fetch(f"{base}/api/v1/recall/{SCOPE}", token="w" * 48)
+        assert ordinary[0] == locked[0] == 401
+        assert ordinary[2] == locked[2]
+        assert _comparable(ordinary[1]) == _comparable(locked[1])
+        # …and the audit log DOES tell them apart, or the property is vacuous.
+        assert "status=unauthorized" in audit[0]
+        assert "status=locked-out" in audit[-1]
+
+    def test_a_SUCCESS_clears_the_streak_over_HTTP(self, store: Path):
+        with running(store) as (base, _):
+            for _ in range(4):
+                fetch(f"{base}/api/v1/recall/{SCOPE}", token="w" * 48)
+            assert fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)[0] == 200
+            for _ in range(4):
+                fetch(f"{base}/api/v1/recall/{SCOPE}", token="w" * 48)
+            code, _h, _b = fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
+        assert code == 200, "a cleared streak still locked the client out"
+
+    def test_probing_NON_API_paths_also_counts_toward_the_lockout(self, store: Path):
+        """URL probing from one address is the same attack as token probing from
+        one address, and it hits the same uniform 401 — so it is counted too.
+        """
+        with running(store) as (base, _):
+            for path in ("/admin", "/.git/config", "/wp-login.php", "/", "/api"):
+                assert fetch(f"{base}{path}", token=GOOD_TOKEN)[0] == 401
+            code, _h, _b = fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
+        assert code == 401
+
+    def test_the_health_probe_is_never_rate_limited(self, store: Path):
+        with running(store) as (base, _):
+            for _ in range(10):
+                fetch(f"{base}/api/v1/recall/{SCOPE}", token="w" * 48)
+            code, _h, body = fetch(f"{base}/healthz", client_ip=None)
+        assert (code, body) == (200, b"ok\n"), "a lockout took the readiness probe down"
+
+    def test_POST_is_STILL_405_and_not_swallowed_by_the_new_ordering(
+        self, store: Path
+    ):
+        """Phase 3 owns writes. The 405 sits ahead of the client-IP and lockout
+        checks, so none of the phase-1.5 plumbing can turn a mutation into a
+        read — pinned here because that ordering is now load-bearing.
+        """
+        with running(store) as (base, audit):
+            for method in ("POST", "PUT", "PATCH", "DELETE"):
+                code, headers, body = fetch(
+                    f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, method=method
+                )
+                assert code == 405, f"{method} answered {code}"
+                assert body == b"read-only\n"
+                assert headers["Allow"] == "GET, HEAD"
+        assert all("status=method-not-allowed" in line for line in audit)
