@@ -148,14 +148,26 @@ The split is not novel here: Authelia's config already carries a path-scoped byp
 # left to Traefik's implicit longest-rule-wins ordering.
 - match: Host(`store.zacx.dev`) && PathPrefix(`/api/`)
   priority: 100
-  services: [{ name: homelab-subsystem-store, namespace: nebula, port: 8110 }]
+  services: [{ name: homelab-subsystem-store, namespace: nebula, port: 8102 }]
 
 # route 2 — everything else, behind the passkey chain.
 - match: Host(`store.zacx.dev`)
   priority: 1
   middlewares: [{ name: authelia, namespace: authelia }]
-  services: [{ name: homelab-subsystem-store, namespace: nebula, port: 8110 }]
+  services: [{ name: homelab-subsystem-store, namespace: nebula, port: 8102 }]
 ```
+
+> ⚠ **PORT CORRECTED 8110 → 8102 when phase 1 shipped, deliberately — not a typo.**
+> This document originally proposed 8110. It is taken: the homelab nebula gateway's own
+> config records it against another service (`gateway-nginx-config.yaml`, beside the
+> kubeclaw-broker block that already had to step around it to 8111). 8102 was picked
+> because it occurs **nowhere** under `clusters/` in any of the three clusters, so the
+> phase-1.5 gateway entry these two routes describe has a free host port to land on.
+> The pod, Service and manifests all ship on 8102.
+>
+> The rest of this document is a historical record and stays as written; a port in a
+> manifest sketch is not — it is a deployed-state claim, and it stopped being true the
+> day the deployment existed.
 
 Because route 1 carries no middleware, Authelia never sees `/api/*` and its config needs **no**
 bypass rule — only the `store.zacx.dev` → `one_factor` / `subject: user:zach` rule for route 2.
