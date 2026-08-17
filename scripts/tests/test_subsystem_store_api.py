@@ -2100,6 +2100,49 @@ def _free_port() -> int:
         return sock.getsockname()[1]
 
 
+#: 🔴 TWO LOOPBACK ADDRESSES, WHICH IS WHAT MAKES THE REGRESSION MEASURABLE.
+#: `127.0.0.0/8` is entirely local on Linux, so a client can BIND `127.0.0.2` as
+#: its source and reach a server listening on `127.0.0.1` — and the server sees
+#: a genuinely different peer. Without that, every request in a hermetic test
+#: comes from the same address, "trusted peer" and "untrusted peer" cannot both
+#: appear against ONE running process, and the victim's 401 is identical on both
+#: trees. That identical 401 is exactly what a first draft of this file asserted,
+#: and it passed at the base ref: a vacuous guard on the one defect that matters.
+TRUSTED_PEER = "127.0.0.1"
+UNTRUSTED_PEER = "127.0.0.2"
+
+
+def fetch_from(
+    source_ip: str,
+    base: str,
+    path: str,
+    *,
+    token: str | None = None,
+    client_ip: str | None = CLIENT_IP,
+) -> int:
+    """GET `path` with the TCP source address bound to `source_ip`. Returns the
+    status code.
+
+    `urllib` cannot express a source address; `http.client.HTTPConnection` can.
+    """
+    host, _, port = base.removeprefix("http://").partition(":")
+    conn = http.client.HTTPConnection(
+        host, int(port), timeout=15, source_address=(source_ip, 0)
+    )
+    try:
+        headers = {}
+        if token is not None:
+            headers["Authorization"] = f"Bearer {token}"
+        if client_ip is not None:
+            headers["CF-Connecting-IP"] = client_ip
+        conn.request("GET", path, headers=headers)
+        resp = conn.getresponse()
+        resp.read()
+        return resp.status
+    finally:
+        conn.close()
+
+
 def _child_env(trusted_proxies: str | None) -> dict[str, str]:
     """The spawned server's environment. `None` REMOVES the variable.
 
@@ -2117,7 +2160,11 @@ def _child_env(trusted_proxies: str | None) -> dict[str, str]:
 
 @contextmanager
 def running_subprocess(
-    store_root: Path, token_file: Path, *, trusted_proxies: str | None = LOOPBACK_PROXY
+    store_root: Path,
+    token_file: Path,
+    *,
+    trusted_proxies: str | None = LOOPBACK_PROXY,
+    host: str = "127.0.0.1",
 ):
     """Spawn the REAL `server.py` process and wait for it to answer /healthz.
 
@@ -2137,7 +2184,7 @@ def running_subprocess(
             "--store",
             str(store_root),
             "--host",
-            "127.0.0.1",
+            host,
             "--port",
             str(port),
             "--token-file",
@@ -2148,7 +2195,7 @@ def running_subprocess(
         text=True,
         env=_child_env(trusted_proxies),
     )
-    base = f"http://127.0.0.1:{port}"
+    base = f"http://{host}:{port}"
     try:
         deadline = time.time() + 20
         while time.time() < deadline:
@@ -3336,51 +3383,111 @@ class TestTrustedProxyOverTheRealProcess:
         """🔴 THE WHOLE POINT OF THIS BRANCH, and the one test whose red at base
         is the bug rather than the diff.
 
-        The attacker is the loopback client; the allowlist names TEST-NET-1,
-        which loopback is not in. It sends five bad tokens while claiming to be
-        `SPOOF_IP`. At base those five are charged to SPOOF_IP and the victim's
-        NEXT request — a valid token, its own address — is a 401 for fifteen
-        minutes. At HEAD not one of the five reaches the limiter, because the
-        header is never read from a peer that is not a named proxy.
+        ONE running process, TWO peers. `127.0.0.1` is the allowlisted proxy;
+        `127.0.0.2` is anything that can address the pod directly. The attacker
+        binds `127.0.0.2` and sends five bad tokens while CLAIMING, in the
+        header, to be `SPOOF_IP`. Then the legitimate proxy forwards a request
+        for that same `SPOOF_IP` client, with a VALID token.
+
+          base: the five are charged to SPOOF_IP -> the victim is 401 for 15 min
+          HEAD: not one of them reaches the limiter -> the victim gets its 200
+
+        🔴 THE FIRST DRAFT OF THIS TEST WAS VACUOUS AND PASSED AT BASE. It ran
+        every request from ONE address and asserted the victim saw a 401 — which
+        is true on both trees, because the wire deliberately does not
+        discriminate. A test of a lockout has to observe the VICTIM getting
+        through, and that needs a second peer.
         """
         with running_subprocess(
-            store, token_file, trusted_proxies=NOT_LOOPBACK_PROXY
+            store,
+            token_file,
+            trusted_proxies=f"{TRUSTED_PEER}/32",
+            host=TRUSTED_PEER,
         ) as (base, _proc):
             for _ in range(5):
-                attempt = fetch(
-                    f"{base}/api/v1/recall/{SCOPE}",
+                attempt = fetch_from(
+                    UNTRUSTED_PEER,
+                    base,
+                    f"/api/v1/recall/{SCOPE}",
                     token="w" * 48,
                     client_ip=SPOOF_IP,
                 )
-                assert attempt[0] == 401, attempt
-            victim = fetch(
-                f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, client_ip=SPOOF_IP
+                assert attempt == 401, attempt
+            victim = fetch_from(
+                TRUSTED_PEER,
+                base,
+                f"/api/v1/recall/{SCOPE}",
+                token=GOOD_TOKEN,
+                client_ip=SPOOF_IP,
             )
-        # 🔴 401 either way — the wire never discriminates. What differs between
-        # the trees is WHY, so the claim has to be made against the state the
-        # attacker created, which is what the next test reads out of the log.
-        assert victim[0] == 401, victim
+        assert victim == 200, (
+            f"the victim got {victim}: five requests from an UNTRUSTED peer, "
+            f"forging CF-Connecting-IP, locked out a third party"
+        )
+
+    def test_POSITIVE_CONTROL_the_same_five_from_a_TRUSTED_peer_DO_lock_out(
+        self, store: Path, token_file: Path
+    ):
+        """🔴 THE OTHER HALF, and without it the test above is satisfied by a
+        server with no lockout at all — including one where the limiter was
+        deleted outright. Identical shape, identical count, ONE difference: the
+        five bad tokens come from the ALLOWLISTED peer, so they are a real
+        client failing auth and the lockout must fire.
+        """
+        with running_subprocess(
+            store,
+            token_file,
+            trusted_proxies=f"{TRUSTED_PEER}/32",
+            host=TRUSTED_PEER,
+        ) as (base, _proc):
+            for _ in range(5):
+                fetch_from(
+                    TRUSTED_PEER,
+                    base,
+                    f"/api/v1/recall/{SCOPE}",
+                    token="w" * 48,
+                    client_ip=SPOOF_IP,
+                )
+            victim = fetch_from(
+                TRUSTED_PEER,
+                base,
+                f"/api/v1/recall/{SCOPE}",
+                token=GOOD_TOKEN,
+                client_ip=SPOOF_IP,
+            )
+        assert victim == 401, (
+            f"got {victim}: five FAILED AUTHS from a real client did not lock "
+            f"it out, so the test above proves nothing"
+        )
 
     def test_THE_DEFECT_the_five_forged_attempts_NEVER_REACH_the_limiter(
         self, store: Path, token_file: Path
     ):
-        """The half above cannot see: at base every one of the five is
-        `status=unauthorized` and the fifth is `status=lockout-triggered`; at
-        HEAD every one is `status=untrusted-peer` and no lockout exists. Read
-        off the process's real STDOUT, which is the stream Loki ingests.
+        """The status-code half cannot see WHY. At base the five forged attempts
+        are `status=unauthorized` and the fifth is `status=lockout-triggered`; at
+        HEAD every one is `status=untrusted-peer` and no lockout exists. Read off
+        the process's real STDOUT, which is the stream Loki ingests.
         """
         with running_subprocess(
-            store, token_file, trusted_proxies=NOT_LOOPBACK_PROXY
+            store,
+            token_file,
+            trusted_proxies=f"{TRUSTED_PEER}/32",
+            host=TRUSTED_PEER,
         ) as (base, proc):
             for _ in range(5):
-                fetch(f"{base}/api/v1/recall/{SCOPE}", token="w" * 48, client_ip=SPOOF_IP)
-            fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, client_ip=SPOOF_IP)
+                fetch_from(
+                    UNTRUSTED_PEER,
+                    base,
+                    f"/api/v1/recall/{SCOPE}",
+                    token="w" * 48,
+                    client_ip=SPOOF_IP,
+                )
             proc.terminate()
             stdout, _err = proc.communicate(timeout=15)
         lines = [ln for ln in stdout.splitlines() if ln.startswith("store-api audit ")]
-        assert len(lines) == 6, stdout
+        assert len(lines) == 5, stdout
         assert all("status=untrusted-peer" in ln for ln in lines), lines
-        # The two statuses that WOULD be there if the header had been read.
+        # The status that WOULD be there if the header had been read and counted.
         assert not any("status=lockout-triggered" in ln for ln in lines), lines
         # 🔴 And the forged address never becomes an identity: `ip=` stays `-`.
         # Without this, a fix that recorded the spoofed value but declined to
