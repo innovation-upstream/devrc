@@ -3824,23 +3824,40 @@ class TestTrustedProxyOverHTTP:
         site and not the other is the failure this file keeps finding — writes
         used to skip the client-IP and lockout checks entirely.
         """
-        with running(store, trusted_proxies=(NOT_LOOPBACK_PROXY,)) as (base, audit):
+        limiter = api.RateLimiter(max_failures=5, window_s=600.0, lockout_s=600.0)
+        with running(
+            store, limiter=limiter, trusted_proxies=(NOT_LOOPBACK_PROXY,)
+        ) as (base, audit):
             code, _h, body = fetch(
                 f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, method="POST"
             )
         assert code == 401, (code, body)
         assert body == b"unauthorized\n"
         assert "status=untrusted-peer" in audit[0]
+        # 🔴 EXACTLY ONE, AND NOTHING CHARGED — and this is a round-2 correction,
+        # not belt and braces. A mutant that refuses and then returns True (so
+        # the handler carries on past the gate it just failed) leaves the GET
+        # path raising on `assert ip is not None` — invisible — while THIS path
+        # sails on to `authorize`, answers a SECOND response, and charges the
+        # limiter under a `None` key. The sweep scored that mutant SURVIVED once
+        # the count assertion was dropped from another test.
+        assert len(audit) == 1, audit
+        assert limiter._failures == {} and limiter._locked_until == {}
 
     def test_an_UNKNOWN_VERB_from_an_untrusted_peer_is_gated_too(self, store: Path):
         """The third door: `send_error`, which every unhandled method reaches."""
-        with running(store, trusted_proxies=(NOT_LOOPBACK_PROXY,)) as (base, audit):
+        limiter = api.RateLimiter(max_failures=5, window_s=600.0, lockout_s=600.0)
+        with running(
+            store, limiter=limiter, trusted_proxies=(NOT_LOOPBACK_PROXY,)
+        ) as (base, audit):
             code, _h, body = fetch(
                 f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, method="FROBNICATE"
             )
         assert code == 401, (code, body)
         assert body == b"unauthorized\n"
         assert "status=untrusted-peer" in audit[0]
+        assert len(audit) == 1, audit
+        assert limiter._failures == {} and limiter._locked_until == {}
 
     def test_the_gate_runs_BEFORE_the_header_is_read_not_after(self, store: Path):
         """🔴 REACHABILITY, and it is the one ordering that can be wrong while

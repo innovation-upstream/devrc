@@ -1252,6 +1252,15 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         # peer's — keying the lockout on THAT is the "one abuser locks out the
         # world" failure this design rejects. The bound on an untrusted peer is
         # the connection close `_respond` performs on every non-200.
+        #
+        # ⚠ THE ORDERING IS RECORDED AS AN EQUIVALENT MUTANT, not left as an
+        # unexplained survivor. A sweep showed that moving `client_ip(...)`
+        # ABOVE this block changes no behaviour: `client_ip` is pure and total
+        # (garbage in, `None` out) and its result is discarded on the refusal
+        # path. The order is kept anyway — the day anything on that call
+        # acquires a side effect, "parsed the attacker's header before deciding
+        # whether to trust them" is not a sentence to be writing in a
+        # post-mortem.
         peer = peer_address(getattr(self, "client_address", None))
         if not peer_is_trusted(peer, self.trusted_proxies):
             self._refuse(path, "untrusted-peer")
