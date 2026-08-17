@@ -68,6 +68,12 @@ working pattern, so the source that cannot see it is the one that has to change.
     edits (a separate transcript — measured at 196 of 733 file-tool calls across
     the 40 most recent transcripts), files written by a Bash command rather than
     a file tool, and paths outside the session cwd (counted, never dropped).
+    🔴 THIS ENVIRONMENT'S TWO STANDING DEFAULTS — delegate to a subagent, isolate
+    that subagent in a worktree — hit two of those three AT ONCE, so the
+    preferred window is blind to the MANDATED workflow rather than to an
+    occasional one. When the outside count dominates, the report says so with the
+    run's own numbers and names the flags to run instead; see
+    `wrong_window_dominance` for the rule, the measurement and its cost.
   * PULL REQUESTS (`--pr <n>[,<n>...]`) — the only source that sees a SUBAGENT's
     work. The standing default in this environment is to DELEGATE non-trivial
     work to a subagent, and a subagent's turns are a separate transcript the
@@ -171,6 +177,7 @@ CONTRACT SUMMARY
                                               -> tuple[Nomination, ...]
     build_report(source, store_root, scope, *, today, ...)
                                               -> TouchReport
+    wrong_window_dominance(source)            -> (under, outside, pct) | None
     render_text(report) / report_json(report) -> str / dict
     census(store_root, now=None)              -> Census  (counts + write activity)
     main(argv)                                -> int
@@ -339,6 +346,8 @@ __all__ = [
     "caller_supplied",
     "nominate",
     "build_report",
+    "wrong_window_dominance",
+    "render_wrong_window",
     "render_text",
     "report_json",
     "new_entry_template",
@@ -958,6 +967,33 @@ class PathSource:
     much of its work the absolute subset represents.
     """
 
+    under_cwd: int | None = None
+    """Distinct paths this session named that ARE expressible under the session
+    cwd — i.e. the population the window below is drawn from.
+
+    🔴 STRUCTURED, NOT ONLY PROSE. These two counters were already computed and
+    already printed, inside a `note` string — which means the only consumer that
+    could act on them was a human reading the note. `wrong_window_dominance`
+    needs them as numbers, so they are carried as numbers; the note keeps
+    printing them and now quotes the same fields rather than re-deriving them.
+
+    `None` for every source that cannot produce the pair. See `outside_cwd`.
+    """
+
+    outside_cwd: int | None = None
+    """Distinct paths this session named that are NOT expressible under the
+    session cwd, and are therefore NOT in `paths`.
+
+    🔴 POPULATED FOR `window == "session"` ONLY, and that is a correctness
+    constraint rather than laziness. In the `session-absolute` window the same
+    two extractor counters are measured against the SESSION's own cwd, which is
+    another repo — so "outside it" there means "outside a tree this repo is not
+    reporting on anyway", and a dominance rule read off them would be answering a
+    different question. That window carries its own caveat, which already says
+    outright that its count is a FLOOR and that the relative paths are excluded
+    rather than counted.
+    """
+
     prs: tuple[int, ...] = ()
     """The pull requests read, when `kind == "pr"`. Part of the caveat."""
 
@@ -1074,6 +1110,20 @@ class PathSource:
             "git: uncommitted work only — HEAD has no branch window (on the base "
             "ref, or no base ref found), so committed work is NOT represented"
         )
+
+
+def _as_count(value: object) -> int | None:
+    """A non-negative `int` count, or None for anything that is not one.
+
+    🔴 `bool` IS EXCLUDED DELIBERATELY: `isinstance(True, int)` is True in
+    Python, and a counter that degraded to a flag would silently become the
+    count `1`. And a missing counter must stay None rather than becoming 0 —
+    `None or 0` is how "we could not measure it" turns into "there is nothing
+    outside", which is the reassuring half of the answer.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value >= 0 else None
 
 
 def caller_supplied(paths: Iterable[str]) -> PathSource:
@@ -1687,6 +1737,14 @@ def collect_session_paths(
         commands=(("git", "rev-parse", "--show-toplevel"),),
         notes=tuple(notes),
         session=label,
+        # 🔴 THE SAME TWO NUMBERS THE NOTE ABOVE PRINTS, carried as numbers so
+        # something other than a human eye can act on them. `_as_count` returns
+        # None for anything that is not a real integer count, so a future
+        # extractor that stops emitting a counter disables the dominance warning
+        # rather than firing it off a `None` coerced to 0 — which would read as
+        # "0 outside", i.e. the reassuring answer.
+        under_cwd=_as_count(total),
+        outside_cwd=_as_count(outside),
     )
 
 
@@ -3677,6 +3735,120 @@ def render_route_out(window: str) -> list[str]:
     return lines
 
 
+# --- The wrong-window warning --------------------------------------------------
+#
+# 🔴 THE PREFERRED WINDOW IS STRUCTURALLY BLIND TO THE MANDATED WORKFLOW — a
+# defect in the ROUTING, not in the extractor. MEASURED 2026-08-16, on the
+# session that designed, built, tested and deployed the `subsystem-store-api`
+# service across NINE merged PRs:
+#
+#     --session                       1 path under the session cwd, 5 outside
+#                                     -> status=no-match, "Propose no write"
+#     --pr over those same nine PRs   17 paths
+#                                     -> nominated `subsystem-store-api` at 7
+#                                        paths, above threshold
+#
+# ~94% of the work was invisible to the window the skill prefers, and the store
+# went without an entry for the largest thing that session produced. Nothing was
+# wrong with the report: it counted the 5 correctly and printed them. They were
+# simply not READ — a count sitting mid-note beside a plausible "1 path examined"
+# reads as an accounting detail rather than as the finding.
+#
+# 🔴 WHY THIS IS STRUCTURAL AND NOT OCCASIONAL. The standing default in this
+# environment is to DELEGATE non-trivial work to a subagent, and the standing
+# default for any file-modifying subagent is WORKTREE isolation. Those two
+# defaults land on opposite blind spots of this one window simultaneously: a
+# subagent's turns are a separate transcript (196 of 733 file-tool calls across
+# the 40 most recent transcripts, measured 2026-08-12), and a worktree is a
+# directory outside the session cwd. The better a session follows the rules, the
+# less of it this window can see.
+#
+# 🔴 IT IS COMPUTED FROM THIS RUN, AND THAT IS THE WHOLE DESIGN. A sentence that
+# printed unconditionally would be boilerplate on every run where it does not
+# apply and would therefore be skipped on the run where it does — which is not a
+# prediction: the `caveat:` line DOES print unconditionally, DOES name the
+# subagent blind spot in full, and was on screen throughout the measured failure.
+# This fires off the run's own two counters and quotes them, so it is a reading.
+
+
+def wrong_window_dominance(source: PathSource) -> tuple[int, int, int] | None:
+    """`(under, outside, percent_outside)` when OUTSIDE dominates — else None.
+
+    🔴 THE RULE IS `outside > under`: STRICTLY more of what this session named
+    lies outside the window than inside it. Three properties earned it over a
+    tuned fraction:
+
+      * It is the weakest claim the two counters can support on their own, and
+        the report can state it without hedging — "most of what this session
+        named is not below" is either true of the numbers or it is not.
+      * It carries NO constant to defend or to go stale. It IS the fraction rule
+        at exactly ½ (`outside/(under+outside) > 0.5` ⟺ `outside > under`), so ½
+        is chosen rather than tuned, and there is no threshold for a future
+        inconvenienced caller to move by one.
+      * The measured failure clears it by a distance rather than by a hair: 5 vs
+        1 is 83% outside, and the two other recorded cases were 12 vs 0 and 25 vs
+        0 — 100%. A rule that only just caught the motivating case would be
+        fitted to it.
+
+    What it deliberately does NOT do, stated because it is the cost: a run at 9
+    outside / 10 under (47% invisible) is silent. Firing there would need a
+    constant, and a warning tuned low enough to catch it fires often enough to
+    become the wallpaper this exists not to be. The unconditional `note:` line
+    still prints both counters on every session run, so that case is reported —
+    just not escalated.
+
+    ⚠ TIE GOES TO SILENCE, including 0 vs 0. Equal counts are not evidence of
+    dominance in either direction, and an empty window (0 and 0) is already
+    named by `looked-at-nothing` and routed by `ROUTE OUT`; adding a second
+    voice there would only make the block fire on runs it cannot inform.
+
+    Returns None for every source that carries no counters — see
+    `PathSource.outside_cwd` for why `session-absolute` is one of them.
+    """
+    under = source.under_cwd
+    outside = source.outside_cwd
+    if under is None or outside is None:
+        return None
+    if outside <= under:
+        return None
+    # `outside > under >= 0` ⇒ `outside >= 1` ⇒ the denominator is never 0.
+    return under, outside, round(100 * outside / (under + outside))
+
+
+def render_wrong_window(source: PathSource) -> list[str]:
+    """The escalation block, or NOTHING. Lines only; the caller owns placement.
+
+    Empty on every run that does not meet the condition — that emptiness is the
+    feature, not a degenerate case.
+    """
+    hit = wrong_window_dominance(source)
+    if hit is None:
+        return []
+    under, outside, percent = hit
+    total = under + outside
+    return [
+        "",
+        f"🔴 WRONG WINDOW? — {outside} of the {total} path(s) this session named "
+        f"({percent}%) are OUTSIDE the session cwd,",
+        f"  so they are NOT among the {under} this window reports. MOST of what this "
+        f"session named is not below.",
+        "  The two standing defaults here land on this window's two blind spots at "
+        "once: non-trivial work is DELEGATED to a",
+        "  subagent (whose turns are a SEPARATE transcript), and a file-modifying "
+        "subagent gets its own WORKTREE (which is",
+        "  a directory OUTSIDE the session cwd). So a well-run session is exactly the "
+        "one this window sees least of.",
+        "  🔴 READ A SECOND WINDOW BEFORE CONCLUDING ANYTHING FROM THE COUNT BELOW:",
+        f"    {_SOURCE_FLAG['pr']:<26} what the BRANCH landed — the only source that "
+        f"sees a SUBAGENT's work",
+        f"    {_SOURCE_FLAG['commit']:<26} what THOSE COMMITS changed — work that "
+        f"became a commit but no PR",
+        "  One at a time, and never merge the path sets. 🔴 Reading a second window is "
+        "NOT composing them: the rule",
+        "  forbids MERGING two path sets under one caveat, not reading two reports.",
+    ]
+
+
 def render_text(report: TouchReport) -> str:
     """The agent-facing brief.
 
@@ -3710,6 +3882,14 @@ def render_text(report: TouchReport) -> str:
         # `git` used to be hardcoded here, which made this line a false claim
         # the moment a source ran something else.
         out.append(f"  ran: {' '.join(cmd)}")
+
+    # 🔴 BEFORE EVERY STATUS BLOCK, ON EVERY STATUS. The measured failure was a
+    # `no-match` — but a run can equally clear the threshold on its 1 visible
+    # path and propose a bullet for a subsystem that was 6% of the session's
+    # work, so this is not a dead-end block and must not sit under
+    # `if not report.writes_proposed:` with `ROUTE OUT`. It is a fact about the
+    # WINDOW, and the window is the same whatever the store said about it.
+    out.extend(render_wrong_window(src))
 
     if report.status == "looked-at-nothing":
         out.append("")
@@ -3834,10 +4014,24 @@ def render_text(report: TouchReport) -> str:
                 f"reached; none strongly enough."
             )
         elif report.status == "no-match":
+            # 🔴 THE DISTINCTION IS KEPT AND THE MISREADING IS CLOSED. "A real
+            # zero, not an empty window" was true and load-bearing — the
+            # instrument RAN, which is a different fact from nothing being
+            # readable — but as a bare sentence it terminated two sessions:
+            # read as "there is nothing to record", when all it can support is
+            # "this window resolved nothing". The claim is now scoped to the
+            # window in the same breath as it is made, and the sentence that
+            # could be mistaken for a verdict on the SESSION says the opposite
+            # explicitly, because the reader who needs it is the one who has
+            # already stopped reading carefully.
             out.append(
                 f"NOTHING RESOLVED — {examined} and none named an entry in "
-                f"`{report.scope}`, and none clustered enough to nominate one. This is a "
-                f"real zero, not an empty window."
+                f"`{report.scope}`, and none clustered enough to nominate one. The "
+                f"instrument RAN: this is a real zero FOR THIS WINDOW, not an unread "
+                f"window. It is NOT a finding about the SESSION — the other windows are "
+                f"UNREAD, they are blind in different directions, and this run says "
+                f"nothing about what they would return. See ROUTE OUT below before "
+                f"concluding there is nothing to record."
             )
         else:
             out.append(f"NOTHING TO PROPOSE — {examined}; see the accounting above.")
@@ -3868,6 +4062,10 @@ def _journal_json(j: EntryJournal | None, today: str) -> dict | None:
 def report_json(report: TouchReport) -> dict:
     src = report.source
     assoc = report.association
+    # The same predicate the text renderer prints, not a second expression of it
+    # — one rule, one place. `None` means "did not fire"; a dict means it did and
+    # carries the numbers it fired on, so a consumer never re-derives them.
+    dominance = wrong_window_dominance(src)
     return {
         "status": report.status,
         "scope": report.scope,
@@ -3890,6 +4088,17 @@ def report_json(report: TouchReport) -> dict:
             "commands": [list(c) for c in src.commands],
             "path_count": len(src.paths),
             "paths": list(src.paths),
+            "under_cwd": src.under_cwd,
+            "outside_cwd": src.outside_cwd,
+            "wrong_window": (
+                None
+                if dominance is None
+                else {
+                    "under_cwd": dominance[0],
+                    "outside_cwd": dominance[1],
+                    "percent_outside": dominance[2],
+                }
+            ),
         },
         "known": [
             {
