@@ -23,7 +23,9 @@ The section numbering below maps 1:1 onto `claudedocs/kickoff-session-manager.md
 """
 from __future__ import annotations
 
+import ast
 import copy
+import glob
 import importlib.machinery
 import importlib.util
 import json
@@ -8081,7 +8083,9 @@ def test_a_MODAL_drawn_with_TWO_rules_is_still_no_input_box_not_a_draft():
     shape the repo modelled only in its easy form.
 
     KILLS: dropping the menu guard; keying it on the selected marker ALONE (a
-    lone `❯ 1.` is ordinary typing and must stay a draft).
+    lone `❯ 1.` is ordinary typing and must stay a draft). It does NOT kill the
+    other half — see `test_the_menu_guard_needs_the_MARKER_half_too_...` below,
+    which is where the marker check is pinned.
     """
     # INSTRUMENT: it really is a box pair, i.e. the span check does NOT already
     # answer this — otherwise the guard below is unreachable and untested.
@@ -8098,6 +8102,113 @@ def test_a_MODAL_drawn_with_TWO_rules_is_still_no_input_box_not_a_draft():
                  "  ctx: 5%")
     assert sm.detect_unsent_prompt(lone) == {
         "status": "ok", "text": "1. rewrite the intro paragraph"}
+
+
+def test_the_menu_guard_needs_the_MARKER_half_too_not_only_the_SECOND_OPTION():
+    """🔴 HALF THE GUARD'S CONJUNCTION WAS UNGUARDED, and it is the half with
+    the blast radius. Replacing `_MENU_SELECTED_RE.match(interior[0])` with a
+    tautology SURVIVED all 563 tests: every fixture that reaches the option
+    count either has a menu marker in the box (so the mutant agrees) or fewer
+    than two numbered lines (so the count decides). Nothing built the shape
+    where the two disagree.
+
+    That shape is COMMON, not exotic: an ordinary parked draft in a pane whose
+    transcript happens to hold two numbered lines — an agent listing options,
+    quoting a checklist, printing a `1.`/`2.` plan. With the marker check gone,
+    every one of those becomes `no_input_box`, i.e. the draft is silently
+    unmeasured, with a fully green suite. This is the guard on the behaviour
+    this PR exists to add, so it gets its own fixture.
+
+    KILLS: `_MENU_SELECTED_RE.match(interior[0])` -> `True` (or its deletion,
+    leaving the option count alone to decide).
+    """
+    drafting_below_a_quoted_list = _pane(
+        "● I was going to offer you these:",
+        "",
+        "  1. rebuild the index from scratch",
+        "  2. leave the stale entries alone",
+        "",
+        "  ...but you already said which one you wanted.",
+        "",
+        _RULE,
+        "❯ carry on with the second one",
+        _RULE,
+        "  ctx: 33%",
+    )
+    lines = drafting_below_a_quoted_list.splitlines()
+    # INSTRUMENT, both halves — or the mutant is unreachable and this is vacuous
+    span = sm._input_box_span(lines)
+    assert span is not None, "the box must be FOUND, or the guard never runs"
+    interior = lines[span[0] + 1:span[1]]
+    assert not sm._MENU_SELECTED_RE.match(interior[0]), (
+        "the box's first line must NOT look like a selected option, or the "
+        "mutant and the real code agree here and the kill proves nothing")
+    assert sum(1 for l in lines if sm._MENU_OPTION_RE.match(l)) >= 2, (
+        "two numbered lines must be in the capture, or the OTHER half of the "
+        "conjunction rejects this pane and the marker check is never reached")
+
+    # the behaviour: a draft, read whole, NOT swallowed as a modal
+    assert sm.detect_unsent_prompt(drafting_below_a_quoted_list) == {
+        "status": "ok", "text": "carry on with the second one"}
+
+
+def test_the_SECOND_OPTION_is_counted_ANYWHERE_in_the_capture_not_in_the_box():
+    """🔴 THE SCOPE OF THE OPTION COUNT IS A CLAIM, AND IT WAS UNMEASURED.
+    Narrowing `sum(... for l in lines ...)` to `... for l in interior ...`
+    SURVIVED all 563 — `PANE_MODAL_TWO_RULES` puts BOTH options inside the box,
+    so the two scopes agree on it and no other fixture reaches the count with a
+    marker in the box.
+
+    That narrowing is a real semantic change, not a refactor: it removes the
+    documented cost (a draft that really begins `1. …` beside another numbered
+    line reads as UNMEASURED) and it breaks the coupling the source comment
+    claims — that `detect_unsent_prompt` and `detect_waiting` use the SAME
+    definition of a menu, `selected marker + a second numbered option ANYWHERE
+    in the capture`, so the two signals cannot form independent opinions about
+    what a modal is. Both halves are asserted here rather than described.
+
+    KILLS: `lines` -> `interior` in the option count.
+    """
+    # A draft that really begins `1. …`, with the second numbered line OUTSIDE
+    # the box. This is the documented COST of the wide scope, so pinning it is
+    # pinning the scope.
+    cost = _pane(
+        "● Two things came up:",
+        "",
+        "  1. the index rebuild",
+        "  2. the stale worktrees",
+        "",
+        _RULE,
+        "❯ 1. rebuild the index",
+        _RULE,
+        "  ctx: 33%",
+    )
+    lines = cost.splitlines()
+    span = sm._input_box_span(lines)
+    assert span is not None
+    interior = lines[span[0] + 1:span[1]]
+    # INSTRUMENT: the two scopes must DISAGREE on this fixture, or narrowing the
+    # scope changes nothing here and a green is green for the wrong reason.
+    assert sum(1 for l in lines if sm._MENU_OPTION_RE.match(l)) >= 2
+    assert sum(1 for l in interior if sm._MENU_OPTION_RE.match(l)) < 2
+    assert sm._MENU_SELECTED_RE.match(interior[0]), (
+        "the marker half must be TRUE here, or the conjunction short-circuits "
+        "before the count and the scope is never exercised")
+
+    assert sm.detect_unsent_prompt(cost) == {
+        "status": "no_input_box", "text": None}
+    # 🔴 THE COUPLING, MEASURED RATHER THAN ASSERTED: `detect_waiting` reads the
+    # same two lines and reaches the same verdict about the same pane. If the
+    # scopes ever diverge, these two disagree and this line fails.
+    assert [s["signal"] for s in sm.detect_waiting(cost)["signals"]] == \
+        ["selection_menu"]
+    # ...and the `lone` control still holds under the wide scope: one numbered
+    # line in the whole capture is a draft, not a menu.
+    lone = _pane("● ok", "", _RULE, "❯ 1. rewrite the intro paragraph", _RULE,
+                 "  ctx: 5%")
+    assert sum(1 for l in lone.splitlines()
+               if sm._MENU_OPTION_RE.match(l)) == 1
+    assert sm.detect_unsent_prompt(lone)["status"] == "ok"
 
 
 def test_a_pane_tailing_another_sessions_RENDERED_BOX_reads_its_OWN_box():
@@ -8327,8 +8438,23 @@ def test_every_rollup_UNMEASURED_equals_the_sum_of_its_OWN_reason_histogram():
     reads as a bug in the tool, or worse, does not notice.
 
     The two roll-ups take their unmeasured set from DIFFERENT fields, so the
-    fixture is chosen to make the two numbers differ: cross-wiring either one to
-    the other's field breaks its own sum.
+    fixture is chosen to make the two numbers differ.
+
+    🔴 CORRECTED — THIS DOCSTRING CLAIMED A SYMMETRY THAT IS FALSE IN ONE
+    DIRECTION, and it was false as MEASURED, not as a quibble. It used to end
+    "cross-wiring either one to the other's field breaks its own sum". True of
+    `_unsent_rollup`, whose set and key are the SAME field. Not true of
+    `_waiting_rollup`: it FILTERS on `waiting_probable is None` and only KEYS on
+    `waiting_status`, so the row SET is field-independent and the sum holds
+    whichever field supplies the key. Cross-wiring that key to
+    `unsent_prompt_status` SURVIVES all 563 tests, this one included.
+
+    What it breaks is the VOCABULARY, not the arithmetic:
+    `summary.waiting.unmeasured_reasons` would report the other signal's status
+    names while the counts still add up. That is what
+    `test_each_rollups_unmeasured_reasons_are_keyed_by_its_OWN_status_field`
+    below pins, and it is where the cross-wire is killed — this test is an
+    invariant guard on the sum, and only on the sum.
     """
     # a modal locally (waiting CAN read it, unsent cannot) + a shell row
     rep = waiting_gather(local={"%11": PANE_MENU}, remote={"%21": PANE_IDLE})
@@ -8355,6 +8481,65 @@ def test_every_rollup_UNMEASURED_equals_the_sum_of_its_OWN_reason_histogram():
     # one bucket must break the equality, or `sum(...)` proves nothing here.
     broken = dict(u, unmeasured_reasons={"not_claude": 1})
     assert broken["unmeasured"] != sum(broken["unmeasured_reasons"].values())
+
+
+def test_each_rollups_unmeasured_reasons_are_keyed_by_its_OWN_status_field():
+    """🔴 THE SUM CANNOT SEE THIS, AND THE SUM IS ALL THERE WAS. `_waiting_
+    rollup` filters its unmeasured set on `waiting_probable is None` and keys
+    the histogram on `waiting_status` — two different fields — so swapping the
+    KEY to `unsent_prompt_status` leaves the row set, and therefore the sum,
+    identical. That mutant SURVIVED all 563 tests. The damage it does is a
+    histogram of the OTHER signal's status names printed under
+    `summary.waiting.unmeasured_reasons`, with a total that still adds up.
+
+    No pane can build the disagreement: `fold_windows` sets `waiting_status` and
+    `unsent_prompt_status` to the SAME value on every path where nothing was
+    scraped (`not_claude`/`uncaptured`/`skipped`/`error`), and the one status
+    that is unsent's alone — `no_input_box` — only occurs on rows where waiting
+    WAS measured, so they are absent from waiting's set entirely. The
+    disagreement lives exactly where the last two histogram bugs lived: a row
+    built OUTSIDE `fold_windows`, carrying one field and not the other. That is
+    not hypothetical — `cluster_row` used to be shaped that way, with
+    `waiting_status="not_tmux"` and no `unsent_prompt_status`, and that
+    asymmetry hid a `TypeError` for a whole PR.
+
+    So the fixture is one row of each asymmetry, and the assertion is on the
+    reason NAMES. Both directions, because a guard that pins one is half a
+    guard.
+
+    KILLS: `_waiting_rollup`'s histogram keyed on `unsent_prompt_status`;
+    `_unsent_rollup`'s keyed on `waiting_status`.
+    """
+    rep = with_cluster_rows(
+        mix_gather(),
+        # writer 3 set waiting's field and not unsent's — the real shape
+        cluster_row(waiting_status="not_tmux"),
+        # ...and the mirror, so neither direction is pinned alone
+        cluster_row(unsent_prompt_status="no_input_box"),
+    )
+    rep["summary"] = sm.summarize(rep)
+    w = rep["summary"]["waiting"]["unmeasured_reasons"]
+    u = rep["summary"]["unsent_prompt"]["unmeasured_reasons"]
+
+    # INSTRUMENT: the two vocabularies must be DISJOINT on this fixture, or a
+    # cross-wire produces the same histogram and the assertions below are
+    # vacuous. `not_tmux` is deliberately outside `UNSENT_STATUSES` and
+    # `no_input_box` is deliberately outside anything waiting can emit.
+    assert "not_tmux" not in sm.UNSENT_STATUSES
+    assert w.get("not_tmux") == 1, w
+    assert "not_tmux" not in u, u
+    assert u.get("no_input_box") == 1, u
+    assert "no_input_box" not in w, w
+    # the field-less halves land in `none` on the OTHER roll-up, loudly
+    assert w.get("none") == 1 and u.get("none") == 1, (w, u)
+
+    # ...and the sum invariant still holds, so this is a claim ABOUT the names
+    # and not a second copy of the test above
+    for key in ("waiting", "unsent_prompt"):
+        roll = rep["summary"][key]
+        assert roll["unmeasured"] == sum(roll["unmeasured_reasons"].values())
+    # the renderer survives a status outside either vocabulary
+    assert "unsent prompts:" in sm.render_table(rep)
 
 
 def test_the_parked_text_reaches_the_LEAN_view_untruncated():
@@ -8581,29 +8766,113 @@ def test_the_unsent_caveat_is_STRUCTURED_for_json_consumers_not_prose():
 # --------------------------------------------------------------------------- #
 # §C.4 — the drafts are INVENTED, and that is enforced rather than asserted
 # --------------------------------------------------------------------------- #
-_SKILL_DIR = os.path.normpath(
-    os.path.join(_HERE, "..", "..", "claude", "skills", "session-manager"))
-_SHIPPED_DOCS = (
-    os.path.join(_SKILL_DIR, "SKILL.md"),
-    os.path.join(_SKILL_DIR, "reference", "waiting-signal.md"),
-)
+_REPO_ROOT = os.path.normpath(os.path.join(_HERE, "..", ".."))
+_SKILL_DIR = os.path.join(_REPO_ROOT, "claude", "skills", "session-manager")
+
+# 🔴 DERIVED, NOT HAND-LISTED, because the hand-listed version could not see the
+# file that actually leaked. It named `SKILL.md` and `reference/waiting-signal.md`
+# only; `claudedocs/kickoff-waiting-signal.md` held two of the same real drafts
+# and was scrubbed by hand, outside the guard, while the rule the guard enforces
+# is scoped in prose to "any file that gets committed". Now: every `.md` under
+# the skill (a NEW `reference/*.md` is covered the day it is added) plus this
+# feature's kickoff doc, which lives outside the skill tree.
+#
+# 🔴 DELIBERATELY NOT THE WHOLE REPO. Measured 2026-08-17: `deploy it` and
+# `keep going` — two of the fixture drafts below — already occur as ordinary
+# prose in `scripts/mail-actions/`, `nix/system/` and three test files. A
+# repo-wide scope would fail on five files that never saw a draft, and a guard
+# that cries wolf gets deleted. The scope is "the docs this feature ships",
+# which is the route all six real drafts actually took.
+_SKILL_BODY = os.path.join(_SKILL_DIR, "SKILL.md")
+_WAITING_REF = os.path.join(_SKILL_DIR, "reference", "waiting-signal.md")
+_KICKOFF_DOC = os.path.join(_REPO_ROOT, "claudedocs", "kickoff-waiting-signal.md")
+# Six files at the time of writing, against the two the hand-list named. The
+# three above are NAMED as well as derived because the prose guard below asserts
+# a specific sentence in a specific one of them — a positional index into a
+# glob is a bug waiting for the next `reference/*.md`.
+_SHIPPED_DOCS = tuple(
+    sorted(glob.glob(os.path.join(_SKILL_DIR, "**", "*.md"), recursive=True))
+    + [_KICKOFF_DOC])
+
+
+def _derive_fixture_draft_strings(source: str) -> set:
+    """Every operator-typed line the `_pane(...)` fixtures in `source` carry.
+
+    🔴 DERIVED FROM THE FIXTURES THEMSELVES so the claim beside the tuple cannot
+    rot. The hand-listed version held 9 strings under a comment reading "every
+    draft string the fixtures in this file carry, whole and in halves" — the
+    file carried 29. Eleven of the twenty it missed are drafts (`deploy it`,
+    `keep going`, `start the refactor`, `yes and tag the release`, the
+    second/third-line halves of the multi-line fixtures, …), and a new fixture
+    added tomorrow would have been uncovered too, silently. A count of
+    DECLARATIONS is not a count of INSTANCES.
+
+    The extraction is the shape a draft has in a fixture: a string literal
+    argument to `_pane()` whose stripped form begins with the `❯` marker and has
+    text after it, plus the CONTINUATION lines that follow it inside the same
+    call — consecutive string literals that are neither blank nor a new `❯`
+    line. `_RULE` and `"    " + _RULE` are not string literals, so a box rule
+    ends a draft for free.
+    """
+    out = set()
+    for node in ast.walk(ast.parse(source)):
+        if not (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "_pane"):
+            continue
+        args, i = node.args, 0
+        while i < len(args):
+            arg = args[i]
+            if not (isinstance(arg, ast.Constant)
+                    and isinstance(arg.value, str)
+                    and arg.value.strip().startswith("❯")):
+                i += 1
+                continue
+            body = arg.value.strip()[1:].strip()
+            if not body:
+                i += 1
+                continue
+            out.add(body)
+            i += 1
+            while i < len(args):
+                nxt = args[i]
+                if not (isinstance(nxt, ast.Constant)
+                        and isinstance(nxt.value, str)):
+                    break
+                cont = nxt.value.strip()
+                if not cont or cont.startswith("❯"):
+                    break
+                out.add(cont)
+                i += 1
+    return out
+
+
+# 🔴 EXCLUDED, AND IT IS AN ENUMERATION RATHER THAN A PATTERN: these are labels
+# CLAUDE CODE DRAWS, not text an operator typed, and a shipped doc quotes them
+# legitimately — `2. No` is in `reference/waiting-signal.md` today, so deriving
+# without this list fails on a real, correct sentence. Excluding by shape
+# instead (anything matching `_MENU_OPTION_RE`) would also drop
+# `1. rewrite the intro paragraph`, which is a DRAFT built to look like an
+# option, and losing coverage of the ambiguous case is the wrong trade. An entry
+# here must be a label the UI renders; anything else is a draft by default.
+_MODAL_OPTION_LABELS_NOT_DRAFTS = frozenset((
+    "1. Resume from summary (recommended)",
+    "2. Resume the full session as-is",
+    "3. Do not ask me again",
+    "1. Retitle and post the nudge",
+    "1. Yes",
+    "2. No",
+))
 
 # Every draft string the fixtures in this file carry, whole and in halves.
 # 🔴 ALL INVENTED. Four REAL operator-typed drafts were quoted verbatim in
 # `reference/waiting-signal.md` and re-used as three of these fixtures, beneath
 # two headers that each asserted "every string is SYNTHETIC" — in a PUBLIC repo,
 # for a feature whose entire job is capturing what the operator types.
-_FIXTURE_DRAFT_STRINGS = (
-    "then open the PR",
-    "work out what caused",
-    "the queue backlog",
-    "been a couple of days, see whether the patch shipped",
-    "look at the nightly job",
-    "park 907 until review",
-    "the other window's own parked draft",
-    "typed after the chrome",
-    "first line of the draft",
-)
+_FIXTURE_DRAFT_STRINGS = tuple(sorted(
+    _derive_fixture_draft_strings(open(
+        os.path.join(_HERE, "test_session_manager.py"), encoding="utf-8").read())
+    - _MODAL_OPTION_LABELS_NOT_DRAFTS))
 
 
 def _draft_strings_found_in(text) -> set:
@@ -8626,6 +8895,13 @@ def test_no_FIXTURE_DRAFT_string_appears_in_a_shipped_doc():
 
     The prose guard lives beside it: both shipped docs must carry the
     never-paste rule, pinned whole in the test below.
+
+    🔴 BOTH SIDES ARE DERIVED NOW, and the file that leaked is the reason. The
+    needle list was hand-written and 9 long against 29 fixture drafts; the
+    haystack was two hand-named paths, and the third file holding two of the
+    same real drafts — `claudedocs/kickoff-waiting-signal.md` — was not one of
+    them, so the one file with a demonstrated leak was the one this guard could
+    not see. See `_derive_fixture_draft_strings` and `_SHIPPED_DOCS`.
     """
     for path in _SHIPPED_DOCS:
         assert os.path.isfile(path), path
@@ -8641,14 +8917,90 @@ def test_no_FIXTURE_DRAFT_string_appears_in_a_shipped_doc():
     # that DOES contain one and watch the number move.
     planted = "prose prose prose then open the PR prose prose"
     assert _draft_strings_found_in(planted) == {"then open the PR"}
-    # ...and the needles really are the fixtures' drafts, not a stale list
-    assert _draft_strings_found_in(PANE_TYPED_AT_PROMPT) == {"then open the PR"}
-    assert "work out what caused" in _draft_strings_found_in(
-        PANE_TWO_LINE_DRAFT)
+    # ...and the needles really are the fixtures' drafts, not a stale list.
+    # BOTH of this pane's drafts, because the derived set sees the scrollback
+    # echo the hand-written tuple missed.
+    assert _draft_strings_found_in(PANE_TYPED_AT_PROMPT) == {
+        "start the refactor", "then open the PR"}
+    assert _draft_strings_found_in(PANE_TWO_LINE_DRAFT) == {
+        "work out what caused", "the queue backlog"}
     assert _draft_strings_found_in(PANE_SHOWING_ANOTHER_TRANSCRIPT) == {
+        "tail the other window",
         "been a couple of days, see whether the patch shipped",
         "look at the nightly job",
         "park 907 until review"}
+
+
+def test_INSTRUMENT_the_leak_guards_NEEDLES_and_HAYSTACK_are_both_derived():
+    """🔴 VALIDATE THE INSTRUMENT BEFORE BELIEVING ITS ZERO. The test above
+    reports "no fixture draft is in a shipped doc". That sentence is
+    indistinguishable from "the needle list is empty" and from "the file list
+    walked nothing" — both of which were TRUE ENOUGH to matter: the needles
+    covered 9 of 29 fixture drafts, and the haystack omitted the file that
+    leaked. So both derivations are pinned here, and both are proven able to
+    move.
+
+    Four claims, none of which the guard above can make about itself:
+      1. the haystack really contains the three files, and every entry EXISTS;
+      2. the needle set really contains drafts the old hand-list missed, and is
+         far bigger than the 9 it held;
+      3. a NEW fixture draft is picked up automatically — the whole point of
+         deriving, and the fourth mutant an audit found surviving;
+      4. every excluded modal label is one the derivation actually produces, so
+         the exclusion list cannot rot into a silent hole.
+    """
+    # 1 — the haystack, including the file the hand-list could not see
+    names = {os.path.relpath(p, _REPO_ROOT) for p in _SHIPPED_DOCS}
+    assert {"claude/skills/session-manager/SKILL.md",
+            "claude/skills/session-manager/reference/waiting-signal.md",
+            "claudedocs/kickoff-waiting-signal.md"} <= names, sorted(names)
+    for path in _SHIPPED_DOCS:
+        assert os.path.isfile(path), path
+
+    # 2 — the needles, and eleven the hand-written tuple did not hold
+    assert len(_FIXTURE_DRAFT_STRINGS) >= 20, _FIXTURE_DRAFT_STRINGS
+    for missed in ("deploy it", "keep going", "start the refactor",
+                   "yes and tag the release", "show me that other window",
+                   "tail the other window", "first line of a long draft",
+                   "second line of a long draft", "second line of the draft",
+                   "can you double-check the fixture ordering?",
+                   "1. rewrite the intro paragraph"):
+        assert missed in _FIXTURE_DRAFT_STRINGS, missed
+
+    # 3 — POSITIVE CONTROL ON THE DERIVATION: a fixture that does not exist yet.
+    # This is the mutant "add a fixture draft with no guard coverage": under the
+    # old hand-list it survived by construction, because the list could not
+    # change without a human. Feed the extractor a fresh `_pane(...)` and watch
+    # BOTH the marker line and its continuation appear.
+    grown = _derive_fixture_draft_strings(
+        'x = _pane("● hi", "", _RULE,\n'
+        '          "❯ a brand new draft nobody guarded",\n'
+        '          "  and its second rendered line",\n'
+        '          _RULE, "  ctx: 7%")\n')
+    assert grown == {"a brand new draft nobody guarded",
+                     "and its second rendered line"}, grown
+    # ...and it does NOT invent needles out of chrome: an empty box, a rule and
+    # a footer yield nothing, or every doc would match something.
+    assert _derive_fixture_draft_strings(
+        'y = _pane(_RULE, "❯ ", _RULE, "  ctx: 9%")\n') == set()
+
+    # 4 — the exclusion ledger is pinned TWO-WAY against the fixtures. A label
+    # reworded in a fixture, or one deleted outright, must fail here rather than
+    # quietly widen the hole it was cut for.
+    raw = _derive_fixture_draft_strings(open(
+        os.path.join(_HERE, "test_session_manager.py"), encoding="utf-8").read())
+    assert _MODAL_OPTION_LABELS_NOT_DRAFTS <= raw, (
+        "an excluded label is no longer produced by any fixture — a stale "
+        "exclusion is a hole nobody can see: %r"
+        % sorted(_MODAL_OPTION_LABELS_NOT_DRAFTS - raw))
+    # ...and the exclusion is NARROW: it removes six labels, not the corpus.
+    assert len(raw) - len(_MODAL_OPTION_LABELS_NOT_DRAFTS) == \
+        len(_FIXTURE_DRAFT_STRINGS) >= 20, (len(raw), len(_FIXTURE_DRAFT_STRINGS))
+    # 🔴 AND IT DOES NOT SWALLOW THE AMBIGUOUS CASE: `1. rewrite the intro
+    # paragraph` is a DRAFT shaped like an option, and it stays a needle. An
+    # exclusion by SHAPE (`_MENU_OPTION_RE`) would have dropped it silently.
+    assert "1. rewrite the intro paragraph" not in \
+        _MODAL_OPTION_LABELS_NOT_DRAFTS
 
 
 def test_BOTH_shipped_docs_carry_the_NEVER_PASTE_A_CAPTURED_DRAFT_rule():
@@ -8668,9 +9020,13 @@ def test_BOTH_shipped_docs_carry_the_NEVER_PASTE_A_CAPTURED_DRAFT_rule():
     def _norm(text):
         return " ".join(text.split())
 
-    with open(_SHIPPED_DOCS[0], encoding="utf-8") as fh:
+    # 🔴 BY NAME, NEVER BY INDEX. These used to be `_SHIPPED_DOCS[0]` and
+    # `[1]`, which silently became `reference/clickhouse-queries.md` and
+    # `cross-host.md` the moment that tuple was derived from a glob — a guard
+    # asserting a sentence into whichever file sorted first.
+    with open(_SKILL_BODY, encoding="utf-8") as fh:
         skill = _norm(fh.read())
-    with open(_SHIPPED_DOCS[1], encoding="utf-8") as fh:
+    with open(_WAITING_REF, encoding="utf-8") as fh:
         ref = _norm(fh.read())
 
     assert ("🔴 **NEVER PASTE A CAPTURED DRAFT INTO A COMMITTED FILE.** "

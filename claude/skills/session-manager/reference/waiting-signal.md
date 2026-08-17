@@ -224,6 +224,21 @@ mutant forcing `text: None` — **died**, 12 tests. Negative control: a dict-key
 **survived**. Same hygiene as before, plus one mutant of my own that the AST diff caught as
 **inert** before its verdict was believed.
 
+### 🔴 …and a THIRD sweep found four the 16-mutant re-sweep scored clean
+
+Read that 16/16 as coverage and you repeat the mistake it was written to correct. A third
+independently-built sweep found **four more survivors** of a 563-green suite:
+
+| survivor | why it was invisible | killed by |
+|---|---|---|
+| `_MENU_SELECTED_RE.match(interior[0])` → a tautology | every fixture reaching the option count either HAS a menu marker in the box (mutant and original agree) or holds fewer than two numbered lines (the count decides). Blast radius: **any** draft in a pane whose transcript holds two numbered lines becomes `no_input_box` | `test_the_menu_guard_needs_the_MARKER_half_too_not_only_the_SECOND_OPTION` |
+| the option count narrowed from `lines` to `interior` | `PANE_MODAL_TWO_RULES` puts BOTH options inside the box, so the two scopes agree on it. A real semantic change: it removes the documented false-unmeasured cost and breaks the shared-definition coupling with `detect_waiting` | `test_the_SECOND_OPTION_is_counted_ANYWHERE_in_the_capture_not_in_the_box` |
+| `_waiting_rollup`'s reason histogram keyed on `unsent_prompt_status` | it FILTERS on `waiting_probable is None` and only KEYS on `waiting_status`, so the row set — and the sum — is field-independent. `fold_windows` sets both fields identically on every not-scraped path, so no pane can build the disagreement; only a row from another writer can | `test_each_rollups_unmeasured_reasons_are_keyed_by_its_OWN_status_field` |
+| a fixture draft reaching a shipped doc without the leak guard listing it | the guard's needles were hand-written (9 of 29 fixture drafts) and its haystack was two hand-named files — so `claudedocs/kickoff-waiting-signal.md`, the file with the demonstrated leak, was outside it. Both sides are DERIVED now: every `.md` under the skill plus the kickoff doc, and the drafts extracted from the fixtures by `ast` | `test_no_FIXTURE_DRAFT_string_appears_in_a_shipped_doc` + `test_INSTRUMENT_the_leak_guards_NEEDLES_and_HAYSTACK_are_both_derived` |
+
+Three sweeps, three sets of blind spots, each invisible to the one before it. **The count is
+not the measurement — how the sweep was BUILT is.** 567 passed (was 563).
+
 ### Live reproduction on the workbench, 2026-08-15 (counts only — this repo is PUBLIC)
 
 The 79-pane figures above are the **dogfood's**, on both hosts. Independently reproduced on
