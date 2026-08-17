@@ -444,6 +444,37 @@ def client_ip(headers: Any) -> str | None:
     return str(rate_limit_key(address))
 
 
+def trusted_network(item: Any) -> Any:
+    """Parse ONE allowlist entry into a network, or RAISE.
+
+    🔴 ONE RULE, ONE PLACE. Both `load_trusted_proxies` (the env string) and
+    `build_server` (a caller's sequence) need exactly this parse and exactly
+    this refusal, and a predicate open-coded at two call sites is wrong at one
+    of them — which is how `sole_header` came to exist twenty lines from a bare
+    `.get()`. A `/0` reaching the server through the programmatic door would be
+    just as total as one reaching it through the env door.
+    """
+    if isinstance(item, (ipaddress.IPv4Network, ipaddress.IPv6Network)):
+        network = item
+    else:
+        try:
+            # `strict=False` so `10.1.2.3/24` is accepted as the /24 it names,
+            # rather than refused for having host bits set — an operator writing
+            # a CIDR from memory means the network, and refusing here would push
+            # them towards the /0 the next guard exists to stop.
+            network = ipaddress.ip_network(str(item), strict=False)
+        except ValueError as exc:
+            raise ValueError(
+                f"{ENV_TRUSTED_PROXIES}: {item!r} is not an IP address or CIDR ({exc})"
+            ) from None
+    if network.prefixlen == 0:
+        raise ValueError(
+            f"{ENV_TRUSTED_PROXIES}: {item!r} trusts every peer, which is the "
+            f"defect this setting exists to close. Name the proxy's address"
+        )
+    return network
+
+
 def load_trusted_proxies(env: dict[str, str]) -> tuple[Any, ...]:
     """Resolve the peer allowlist that makes `CF-Connecting-IP` readable. OR RAISE.
 
@@ -479,26 +510,9 @@ def load_trusted_proxies(env: dict[str, str]) -> tuple[Any, ...]:
             f"{CLIENT_IP_HEADER} header is only read from those peers, and there "
             f"is deliberately no default"
         )
-    networks: list[Any] = []
-    for item in re.split(r"[,\s]+", raw.strip()):
-        if not item:
-            continue
-        try:
-            # `strict=False` so `10.1.2.3/24` is accepted as the /24 it names,
-            # rather than refused for having host bits set — an operator writing
-            # a CIDR from memory means the network, and refusing here would push
-            # them towards the /0 that guard 3 exists to stop.
-            network = ipaddress.ip_network(item, strict=False)
-        except ValueError as exc:
-            raise ValueError(
-                f"{ENV_TRUSTED_PROXIES}: {item!r} is not an IP address or CIDR ({exc})"
-            ) from None
-        if network.prefixlen == 0:
-            raise ValueError(
-                f"{ENV_TRUSTED_PROXIES}: {item!r} trusts every peer, which is the "
-                f"defect this setting exists to close. Name the proxy's address"
-            )
-        networks.append(network)
+    networks = [
+        trusted_network(item) for item in re.split(r"[,\s]+", raw.strip()) if item
+    ]
     if not networks:
         raise ValueError(
             f"no trusted proxies: ${ENV_TRUSTED_PROXIES} resolved to no entries"
@@ -1469,7 +1483,8 @@ def build_server(
     # An explicitly EMPTY sequence is refused here as a misconfiguration —
     # the class default is empty so that the *unreachable* path still fails
     # closed, but reaching it deliberately is a mistake worth naming.
-    if not tuple(trusted_proxies):
+    networks = tuple(trusted_network(item) for item in trusted_proxies)
+    if not networks:
         raise ValueError(
             "trusted_proxies is empty: no peer could ever be trusted, so every "
             f"request would be a 401. Set ${ENV_TRUSTED_PROXIES}"
@@ -1480,7 +1495,7 @@ def build_server(
 
     _Handler.store_root = store_root
     _Handler.expected_tokens = tuple(tokens)
-    _Handler.trusted_proxies = tuple(trusted_proxies)
+    _Handler.trusted_proxies = networks
     _Handler.limiter = limiter if limiter is not None else RateLimiter()
     if audit is not None:
         _Handler.audit = staticmethod(audit)

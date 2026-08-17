@@ -151,9 +151,26 @@ CLIENT_IP = "203.0.113.7"
 OTHER_IP = "203.0.113.99"
 SPOOF_IP = "198.51.100.4"  # TEST-NET-2 — the value a forged XFF would carry
 
+# The peer allowlist every in-process server below is built with. The harness
+# binds on loopback, so loopback IS the "trusted proxy" for these tests — and it
+# is spelled here rather than defaulted inside `build_server`, because a default
+# there would be the very hole `SUBSYSTEM_STORE_TRUSTED_PROXIES` exists to close.
+LOOPBACK_PROXY = "127.0.0.1/32"
+# A proxy allowlist that loopback is NOT in. Used to drive the untrusted-peer
+# path without needing a second network interface. TEST-NET-1, distinct from
+# every client address above.
+NOT_LOOPBACK_PROXY = "192.0.2.0/24"
+
 
 @contextmanager
-def running(store_root, token=GOOD_TOKEN, *, tokens=None, limiter=None):
+def running(
+    store_root,
+    token=GOOD_TOKEN,
+    *,
+    tokens=None,
+    limiter=None,
+    trusted_proxies=(LOOPBACK_PROXY,),
+):
     """Bind a real server on :0 and drive it over a real socket.
 
     Deliberately not a handler-level unit test: the response CODE, the header
@@ -166,6 +183,7 @@ def running(store_root, token=GOOD_TOKEN, *, tokens=None, limiter=None):
         port=0,
         store_root=str(store_root),
         tokens=(token,) if tokens is None else tuple(tokens),
+        trusted_proxies=tuple(trusted_proxies),
         limiter=limiter,
         audit=audit.append,
     )
@@ -1507,7 +1525,11 @@ class TestTokenSetAndOverlapRotation:
     def test_build_server_refuses_a_bare_string_too(self, store: Path):
         with pytest.raises(TypeError) as exc:
             api.build_server(
-                host="127.0.0.1", port=0, store_root=str(store), tokens=GOOD_TOKEN
+                host="127.0.0.1",
+                port=0,
+                store_root=str(store),
+                tokens=GOOD_TOKEN,
+                trusted_proxies=(LOOPBACK_PROXY,),
             )
         # 🔴 The MESSAGE, not just the type. At the base ref this call raises
         # `TypeError: unexpected keyword argument 'tokens'` — so a bare
@@ -1558,6 +1580,7 @@ class TestTokenSetAndOverlapRotation:
             return _Fake()
 
         monkeypatch.setattr(api, "build_server", fake_build)
+        monkeypatch.setenv("SUBSYSTEM_STORE_TRUSTED_PROXIES", LOOPBACK_PROXY)
         rc = api.main(["--store", str(store), "--port", "0", "--token-file", path])
         assert rc == 0
         out = capsys.readouterr().out
@@ -1895,6 +1918,9 @@ class TestLimiterSettings:
         path = tmp_path / "tok"
         path.write_text(GOOD_TOKEN)
         monkeypatch.setenv("SUBSYSTEM_STORE_MAX_FAILURES", "lots")
+        # Set, so the failure under test is the LIMITER setting and not the
+        # trusted-proxy one — two guards reaching one rc are indistinguishable.
+        monkeypatch.setenv("SUBSYSTEM_STORE_TRUSTED_PROXIES", LOOPBACK_PROXY)
         rc = api.main(["--store", str(store), "--port", "0", "--token-file", str(path)])
         assert rc == 78
         assert "SUBSYSTEM_STORE_MAX_FAILURES" in capsys.readouterr().err
@@ -2074,9 +2100,33 @@ def _free_port() -> int:
         return sock.getsockname()[1]
 
 
+def _child_env(trusted_proxies: str | None) -> dict[str, str]:
+    """The spawned server's environment. `None` REMOVES the variable.
+
+    🔴 It pops rather than skipping the set: `os.environ` is inherited, so a
+    developer who happens to export `SUBSYSTEM_STORE_TRUSTED_PROXIES` in their
+    shell would otherwise make the "unset" test pass for the wrong reason — and
+    on the day it mattered it would be the CI runner's environment deciding.
+    """
+    env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    env.pop("SUBSYSTEM_STORE_TRUSTED_PROXIES", None)
+    if trusted_proxies is not None:
+        env["SUBSYSTEM_STORE_TRUSTED_PROXIES"] = trusted_proxies
+    return env
+
+
 @contextmanager
-def running_subprocess(store_root: Path, token_file: Path):
-    """Spawn the REAL `server.py` process and wait for it to answer /healthz."""
+def running_subprocess(
+    store_root: Path, token_file: Path, *, trusted_proxies: str | None = LOOPBACK_PROXY
+):
+    """Spawn the REAL `server.py` process and wait for it to answer /healthz.
+
+    `trusted_proxies` goes in as `$SUBSYSTEM_STORE_TRUSTED_PROXIES`. It is a
+    string, not a list, so a test can pass a deliberately malformed value; pass
+    `None` to leave the variable UNSET, which is how the startup refusal is
+    exercised. 🔴 The base ref ignores this variable entirely, which is what
+    makes the tests below behavioural rather than AttributeErrors.
+    """
     import time
 
     port = _free_port()
@@ -2096,7 +2146,7 @@ def running_subprocess(store_root: Path, token_file: Path):
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        env={**os.environ, "PYTHONUNBUFFERED": "1"},
+        env=_child_env(trusted_proxies),
     )
     base = f"http://127.0.0.1:{port}"
     try:
@@ -3230,3 +3280,521 @@ class TestTheDrainLoopActuallyLOOPS:
         for segmented in (True, False):
             data = self._exchange(store, segmented=segmented, fill=16)
             assert data.count(b"ok\n") == 2, f"segmented={segmented}: {data[:140]!r}"
+
+
+# =============================================================================
+# 18. `CF-Connecting-IP` WAS TRUSTED FROM ANY PEER (phase 1.5b)
+#
+# 🔴 THIS SECTION IS THE ONE PLACE IN THIS FILE WITH REAL REGRESSION COVERAGE,
+# and only the `TestTrustedProxyOverTheRealProcess` half is. The distinction
+# matters and the file's header explains why: `server.py` did not exist before
+# phase 1, so everything else here is red at ITS base for a collection error.
+# Phase 1.5b's base ref is different — `server.py` exists, it parses the same
+# command line, and it IGNORES `$SUBSYSTEM_STORE_TRUSTED_PROXIES` completely.
+# So a test that spawns the real process with that variable set runs on BOTH
+# trees and its failure at base is a statement about BEHAVIOUR:
+#
+#   * base honours a `CF-Connecting-IP` from an untrusted peer, and locks the
+#     named third party out in five requests   <- THE DEFECT
+#   * base serves 200 to a valid token from an untrusted peer
+#   * base STARTS with the variable unset
+#
+# The in-process classes below are invariant guards. They are labelled as such
+# and their evidence is the mutation matrix in the PR body, not their red.
+# =============================================================================
+
+
+class TestTrustedProxyOverTheRealProcess:
+    """🔴 RED AT THE BASE REF BEHAVIOURALLY, not by AttributeError."""
+
+    @pytest.fixture
+    def token_file(self, tmp_path: Path) -> Path:
+        path = tmp_path / "token"
+        path.write_text(GOOD_TOKEN + "\n")
+        return path
+
+    def test_POSITIVE_CONTROL_a_TRUSTED_peer_still_gets_its_digest(
+        self, store: Path, token_file: Path
+    ):
+        """Before any 401 below is read as "the guard fired": this exact call
+        shape, against a process spawned exactly this way, CAN return a 200 with
+        store content. Without it a server that refused everything — including
+        one that failed to read its store at all — would pass every assertion in
+        this class.
+        """
+        with running_subprocess(store, token_file) as (base, _proc):
+            code, headers, body = fetch(
+                f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, client_ip=CLIENT_IP
+            )
+        assert code == 200, body
+        assert headers.get("X-Store-Status") == "recalled"
+        assert POINTER_LINE.encode() in body
+
+    def test_THE_DEFECT_a_forged_header_from_an_untrusted_peer_locks_out_a_victim(
+        self, store: Path, token_file: Path
+    ):
+        """🔴 THE WHOLE POINT OF THIS BRANCH, and the one test whose red at base
+        is the bug rather than the diff.
+
+        The attacker is the loopback client; the allowlist names TEST-NET-1,
+        which loopback is not in. It sends five bad tokens while claiming to be
+        `SPOOF_IP`. At base those five are charged to SPOOF_IP and the victim's
+        NEXT request — a valid token, its own address — is a 401 for fifteen
+        minutes. At HEAD not one of the five reaches the limiter, because the
+        header is never read from a peer that is not a named proxy.
+        """
+        with running_subprocess(
+            store, token_file, trusted_proxies=NOT_LOOPBACK_PROXY
+        ) as (base, _proc):
+            for _ in range(5):
+                attempt = fetch(
+                    f"{base}/api/v1/recall/{SCOPE}",
+                    token="w" * 48,
+                    client_ip=SPOOF_IP,
+                )
+                assert attempt[0] == 401, attempt
+            victim = fetch(
+                f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, client_ip=SPOOF_IP
+            )
+        # 🔴 401 either way — the wire never discriminates. What differs between
+        # the trees is WHY, so the claim has to be made against the state the
+        # attacker created, which is what the next test reads out of the log.
+        assert victim[0] == 401, victim
+
+    def test_THE_DEFECT_the_five_forged_attempts_NEVER_REACH_the_limiter(
+        self, store: Path, token_file: Path
+    ):
+        """The half above cannot see: at base every one of the five is
+        `status=unauthorized` and the fifth is `status=lockout-triggered`; at
+        HEAD every one is `status=untrusted-peer` and no lockout exists. Read
+        off the process's real STDOUT, which is the stream Loki ingests.
+        """
+        with running_subprocess(
+            store, token_file, trusted_proxies=NOT_LOOPBACK_PROXY
+        ) as (base, proc):
+            for _ in range(5):
+                fetch(f"{base}/api/v1/recall/{SCOPE}", token="w" * 48, client_ip=SPOOF_IP)
+            fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, client_ip=SPOOF_IP)
+            proc.terminate()
+            stdout, _err = proc.communicate(timeout=15)
+        lines = [ln for ln in stdout.splitlines() if ln.startswith("store-api audit ")]
+        assert len(lines) == 6, stdout
+        assert all("status=untrusted-peer" in ln for ln in lines), lines
+        # The two statuses that WOULD be there if the header had been read.
+        assert not any("status=lockout-triggered" in ln for ln in lines), lines
+        # 🔴 And the forged address never becomes an identity: `ip=` stays `-`.
+        # Without this, a fix that recorded the spoofed value but declined to
+        # count it would pass everything above.
+        assert all(f"ip={SPOOF_IP}" not in ln for ln in lines), lines
+
+    def test_a_VALID_token_from_an_untrusted_peer_is_still_refused(
+        self, store: Path, token_file: Path
+    ):
+        """Fail closed, not "downgrade to unauthenticated". At base this is a
+        200 carrying store content.
+        """
+        with running_subprocess(
+            store, token_file, trusted_proxies=NOT_LOOPBACK_PROXY
+        ) as (base, _proc):
+            code, headers, body = fetch(
+                f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, client_ip=CLIENT_IP
+            )
+        assert code == 401, (code, body)
+        assert body == b"unauthorized\n"
+        assert POINTER_LINE.encode() not in body
+        assert "X-Store-Status" not in headers
+
+    def test_healthz_is_answered_for_an_UNTRUSTED_peer_so_the_kubelet_probe_lives(
+        self, store: Path, token_file: Path
+    ):
+        """🔴 THE FAILURE MODE THAT GETS A SECURITY GUARD DELETED. The kubelet
+        probes from the node, sends no `CF-Connecting-IP`, and is not the
+        gateway — so if the peer gate ran before `/healthz` the pod would never
+        become Ready and the guard would be reverted within the hour.
+
+        `running_subprocess` already waits on `/healthz` to decide the server is
+        up, so an ordinary spawn would prove this by accident. This one spawns
+        with an allowlist that excludes loopback ENTIRELY and asserts the body.
+        """
+        with running_subprocess(
+            store, token_file, trusted_proxies=NOT_LOOPBACK_PROXY
+        ) as (base, _proc):
+            code, _headers, body = fetch(f"{base}{'/healthz'}", client_ip=None)
+        assert code == 200
+        assert body == b"ok\n"
+
+    def test_the_process_REFUSES_TO_START_with_the_variable_unset(
+        self, store: Path, token_file: Path
+    ):
+        """Exit 78, on stderr, naming the variable. At base the process starts
+        happily and serves — which is the whole reason this must not default.
+        """
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(SERVER_PATH),
+                "--store",
+                str(store),
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(_free_port()),
+                "--token-file",
+                str(token_file),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=_child_env(None),
+        )
+        assert proc.returncode == 78, (proc.returncode, proc.stdout, proc.stderr)
+        assert "SUBSYSTEM_STORE_TRUSTED_PROXIES" in proc.stderr
+        assert "no trusted proxies" in proc.stderr
+
+    def test_the_process_REFUSES_TO_START_on_a_DEFAULT_ROUTE(
+        self, store: Path, token_file: Path
+    ):
+        """`0.0.0.0/0` is the pre-fix behaviour spelled as configuration, and it
+        is the value an operator reaches for at 2am. Requiring the variable to
+        be SET does not catch it; only refusing the value does.
+        """
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(SERVER_PATH),
+                "--store",
+                str(store),
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(_free_port()),
+                "--token-file",
+                str(token_file),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=_child_env("0.0.0.0/0"),
+        )
+        assert proc.returncode == 78, (proc.returncode, proc.stdout, proc.stderr)
+        assert "trusts every peer" in proc.stderr
+
+    def test_the_startup_line_NAMES_the_trusted_proxies(
+        self, store: Path, token_file: Path
+    ):
+        """"Which peers may set the client identity" must be readable out of a
+        running pod. It is configuration, not a credential.
+        """
+        with running_subprocess(
+            store, token_file, trusted_proxies=NOT_LOOPBACK_PROXY
+        ) as (_base, proc):
+            proc.terminate()
+            stdout, _err = proc.communicate(timeout=15)
+        assert f"trusted-proxies={NOT_LOOPBACK_PROXY}" in stdout, stdout
+
+
+class TestTrustedProxyAllowlistParsing:
+    """Invariant guards on `trusted_network` / `load_trusted_proxies`.
+
+    Each guard below is reachable by an input no earlier guard rejects, which is
+    the property a mutation sweep can otherwise not distinguish from a guard
+    that never executes.
+    """
+
+    def test_an_UNSET_variable_raises_rather_than_defaulting(self):
+        with pytest.raises(ValueError) as exc:
+            api.load_trusted_proxies({})
+        assert "no trusted proxies" in str(exc.value)
+
+    def test_a_BLANK_variable_raises_too(self):
+        """Reachable past guard 1 only if guard 1 tests emptiness rather than
+        presence: the variable IS set, to whitespace.
+        """
+        with pytest.raises(ValueError) as exc:
+            api.load_trusted_proxies({"SUBSYSTEM_STORE_TRUSTED_PROXIES": "  \t "})
+        assert "no trusted proxies" in str(exc.value)
+
+    def test_a_NON_ADDRESS_entry_names_the_offending_item(self):
+        with pytest.raises(ValueError) as exc:
+            api.load_trusted_proxies(
+                {"SUBSYSTEM_STORE_TRUSTED_PROXIES": "192.0.2.1, gateway"}
+            )
+        message = str(exc.value)
+        assert "not an IP address or CIDR" in message
+        # 🔴 The POSITION is not enough — an operator with a five-entry list
+        # needs the value. And the VALID sibling must not be blamed.
+        assert "'gateway'" in message
+        assert "192.0.2.1'" not in message
+
+    def test_a_DEFAULT_ROUTE_is_refused_in_BOTH_families(self):
+        """The refusal is by PREFIX LENGTH, so it is one rule rather than a list
+        of spellings somebody has to extend. Both families, because a guard
+        written against `"0.0.0.0/0"` as a string passes the v4 case and lets
+        `::/0` straight through.
+        """
+        for spelling in ("0.0.0.0/0", "::/0"):
+            with pytest.raises(ValueError) as exc:
+                api.load_trusted_proxies(
+                    {"SUBSYSTEM_STORE_TRUSTED_PROXIES": spelling}
+                )
+            assert "trusts every peer" in str(exc.value), spelling
+
+    def test_a_NEARLY_default_route_is_ACCEPTED_so_the_guard_is_not_a_ban_on_CIDRs(self):
+        """The negative half. Without it, `raise` on every network with a prefix
+        would pass the test above — and the setting would be unusable for the
+        one deployment shape (a proxy subnet) it exists to serve.
+        """
+        assert api.load_trusted_proxies(
+            {"SUBSYSTEM_STORE_TRUSTED_PROXIES": "0.0.0.0/1"}
+        ) == (__import__("ipaddress").ip_network("0.0.0.0/1"),)
+
+    def test_COMMAS_AND_WHITESPACE_both_separate(self):
+        import ipaddress
+
+        assert api.load_trusted_proxies(
+            {"SUBSYSTEM_STORE_TRUSTED_PROXIES": "192.0.2.1,198.51.100.0/24  203.0.113.9"}
+        ) == (
+            ipaddress.ip_network("192.0.2.1/32"),
+            ipaddress.ip_network("198.51.100.0/24"),
+            ipaddress.ip_network("203.0.113.9/32"),
+        )
+
+    def test_a_CIDR_WITH_HOST_BITS_is_taken_as_the_network_it_names(self):
+        """`strict=False`, deliberately: refusing `198.51.100.7/24` would push an
+        operator towards the `/0` the guard above exists to stop.
+        """
+        import ipaddress
+
+        assert api.load_trusted_proxies(
+            {"SUBSYSTEM_STORE_TRUSTED_PROXIES": "198.51.100.7/24"}
+        ) == (ipaddress.ip_network("198.51.100.0/24"),)
+
+
+class TestPeerAddressNormalisation:
+    """`peer_address` turns a socket's `client_address` into an identity, or
+    `None` — and `None` means refuse.
+    """
+
+    def test_an_IPv4_MAPPED_peer_matches_its_IPv4_allowlist_entry(self):
+        """🔴 A dual-stack listener reports a v4 caller as `::ffff:198.51.100.4`.
+        Without unwrapping, an allowlist written the obvious way never matches
+        and the operator widens it until it does.
+        """
+        trusted = api.load_trusted_proxies(
+            {"SUBSYSTEM_STORE_TRUSTED_PROXIES": "198.51.100.4"}
+        )
+        peer = api.peer_address(("::ffff:198.51.100.4", 4242, 0, 0))
+        assert api.peer_is_trusted(peer, trusted) is True
+
+    def test_it_does_NOT_aggregate_IPv6_to_a_slash_64_the_way_rate_limit_key_does(self):
+        """🔴 THE SEAM BETWEEN TWO NORMALISERS. `rate_limit_key` collapses IPv6 to
+        its /64 on purpose — an attacker picks freely inside their allocation.
+        Reusing it here would trust 2**64 peers the operator never named. Two
+        addresses in ONE /64: one allowlisted, the other must NOT be trusted.
+        """
+        trusted = api.load_trusted_proxies(
+            {"SUBSYSTEM_STORE_TRUSTED_PROXIES": "2001:db8:1:2::1"}
+        )
+        assert api.peer_is_trusted(api.peer_address(("2001:db8:1:2::1", 1, 0, 0)), trusted)
+        sibling = api.peer_address(("2001:db8:1:2:ffff:ffff:ffff:ffff", 1, 0, 0))
+        assert api.peer_is_trusted(sibling, trusted) is False
+
+    def test_an_IPv6_SCOPE_ID_does_not_make_the_peer_unparseable(self):
+        """A link-local peer arrives as `fe80::1%eth0`, which `ip_address`
+        refuses. The zone is a local interface name, not part of the identity.
+        """
+        assert str(api.peer_address(("fe80::1%eth0", 1, 0, 0))) == "fe80::1"
+
+    @pytest.mark.parametrize(
+        "client_address",
+        [None, (), "127.0.0.1", ("not-an-address", 1), (127, 1), ({"a": 1}, 1)],
+    )
+    def test_every_shape_that_is_not_an_address_is_None_not_a_crash(self, client_address):
+        """This runs on the PRE-AUTH path, where an unhandled exception is a
+        cheaper log flood than any request that IS metered — the defect
+        `_request_path` already exists to prevent, one screen away.
+        """
+        assert api.peer_address(client_address) is None
+
+    def test_None_is_never_trusted(self):
+        trusted = api.load_trusted_proxies(
+            {"SUBSYSTEM_STORE_TRUSTED_PROXIES": "192.0.2.1"}
+        )
+        assert api.peer_is_trusted(None, trusted) is False
+
+    def test_a_v6_peer_against_a_v4_allowlist_is_False_not_a_TypeError(self):
+        """`IPv4Address in IPv6Network` raises. An allowlist holding one family
+        and a peer from the other is an ordinary deployment, not an error.
+        """
+        trusted = api.load_trusted_proxies(
+            {"SUBSYSTEM_STORE_TRUSTED_PROXIES": "192.0.2.0/24"}
+        )
+        assert api.peer_is_trusted(api.peer_address(("2001:db8::1", 1, 0, 0)), trusted) is False
+
+    def test_a_BARE_STRING_allowlist_is_refused_LOUDLY(self):
+        """Iterating a `str` yields characters, so `"192.0.2.1"` as an allowlist
+        would refuse every request — a misconfiguration wearing an attack's
+        clothes. A type annotation is not a code path; this check is.
+        """
+        with pytest.raises(TypeError) as exc:
+            api.peer_is_trusted(api.peer_address(("192.0.2.1", 1)), "192.0.2.1")
+        assert "SEQUENCE" in str(exc.value)
+
+
+class TestTrustedProxyOverHTTP:
+    """The gate as the wire sees it. Invariant guards: `build_server(trusted_
+    proxies=…)` does not exist at base, so their red there is an AttributeError.
+    """
+
+    def test_an_untrusted_peer_gets_the_SAME_uniform_401_as_a_bad_token(
+        self, store: Path
+    ):
+        """🔴 The wire must not discriminate. A distinct code, body or header set
+        would tell an attacker "your address is the problem, not your token" —
+        the enumeration surface §2b forbids, and a free oracle for finding the
+        one hop that IS trusted.
+        """
+        with running(store, trusted_proxies=(NOT_LOOPBACK_PROXY,)) as (base, _audit):
+            untrusted = fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
+        with running(store) as (base, _audit):
+            bad_token = fetch(f"{base}/api/v1/recall/{SCOPE}", token="w" * 48)
+        assert untrusted[0] == bad_token[0] == 401
+        assert untrusted[2] == bad_token[2] == b"unauthorized\n"
+        assert _comparable(untrusted[1]) == _comparable(bad_token[1])
+
+    def test_the_LOG_discriminates_even_though_the_wire_does_not(self, store: Path):
+        """The operator has to be able to tell "somebody is addressing the pod
+        directly" from "somebody is guessing tokens" — in a place the attacker
+        cannot read. Any `untrusted-peer` line at all is the alertable event.
+        """
+        with running(store, trusted_proxies=(NOT_LOOPBACK_PROXY,)) as (base, audit):
+            fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
+        assert len(audit) == 1
+        assert "status=untrusted-peer" in audit[0]
+        assert "auth=fail" in audit[0]
+        assert "result=401" in audit[0]
+
+    def test_a_WRITE_verb_from_an_untrusted_peer_is_gated_too(self, store: Path):
+        """🔴 ONE RULE, BOTH DOORS. `_reject_write` and `_handle` share
+        `_identify_and_meter` precisely because a check enforced at one call
+        site and not the other is the failure this file keeps finding — writes
+        used to skip the client-IP and lockout checks entirely.
+        """
+        with running(store, trusted_proxies=(NOT_LOOPBACK_PROXY,)) as (base, audit):
+            code, _h, body = fetch(
+                f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, method="POST"
+            )
+        assert code == 401, (code, body)
+        assert body == b"unauthorized\n"
+        assert "status=untrusted-peer" in audit[0]
+
+    def test_an_UNKNOWN_VERB_from_an_untrusted_peer_is_gated_too(self, store: Path):
+        """The third door: `send_error`, which every unhandled method reaches."""
+        with running(store, trusted_proxies=(NOT_LOOPBACK_PROXY,)) as (base, audit):
+            code, _h, body = fetch(
+                f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, method="FROBNICATE"
+            )
+        assert code == 401, (code, body)
+        assert body == b"unauthorized\n"
+        assert "status=untrusted-peer" in audit[0]
+
+    def test_the_gate_runs_BEFORE_the_header_is_read_not_after(self, store: Path):
+        """🔴 REACHABILITY, and it is the one ordering that can be wrong while
+        every test above stays green. A request from an untrusted peer sending
+        NO `CF-Connecting-IP` at all must be `untrusted-peer`, not
+        `no-client-ip`: if the header parse ran first the value would already
+        have been used to pick a bucket, which is the defect with an extra step.
+        """
+        with running(store, trusted_proxies=(NOT_LOOPBACK_PROXY,)) as (base, audit):
+            fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, client_ip=None)
+        assert "status=untrusted-peer" in audit[0], audit
+        assert "status=no-client-ip" not in audit[0], audit
+
+    def test_an_untrusted_peer_is_NOT_CHARGED_to_any_lockout_bucket(self, store: Path):
+        """It must not fall back to keying on the peer — that is "one abuser
+        locks out the world", arrived at by way of a security check. Six
+        refusals from the same untrusted peer, then the peer becomes trusted:
+        its very next valid request must be a 200, not a lockout.
+        """
+        limiter = api.RateLimiter(max_failures=5, window_s=600.0, lockout_s=600.0)
+        with running(
+            store, limiter=limiter, trusted_proxies=(NOT_LOOPBACK_PROXY,)
+        ) as (base, _audit):
+            for _ in range(6):
+                fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
+        # SAME limiter object, now behind a server that trusts loopback.
+        with running(store, limiter=limiter) as (base, _audit):
+            code, _h, body = fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
+        assert code == 200, (code, body)
+        assert limiter._locked_until == {}, limiter._locked_until
+        assert limiter._failures == {}, limiter._failures
+
+    def test_healthz_answers_an_untrusted_peer(self, store: Path):
+        with running(store, trusted_proxies=(NOT_LOOPBACK_PROXY,)) as (base, audit):
+            code, _h, body = fetch(f"{base}/healthz", client_ip=None)
+        assert (code, body) == (200, b"ok\n")
+        assert audit == [], "the probe path must not audit, or Loki fills with noise"
+
+    def test_a_CIDR_entry_admits_a_peer_INSIDE_it(self, store: Path):
+        """POSITIVE CONTROL for the CIDR arm. Every other test in this class
+        uses a /32-equivalent, so `return False` for any prefixed network would
+        pass all of them.
+        """
+        with running(store, trusted_proxies=("127.0.0.0/8",)) as (base, _audit):
+            code, _h, body = fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
+        assert code == 200, (code, body)
+
+    def test_build_server_REFUSES_an_empty_allowlist(self, store: Path):
+        with pytest.raises(ValueError) as exc:
+            api.build_server(
+                host="127.0.0.1",
+                port=0,
+                store_root=str(store),
+                tokens=(GOOD_TOKEN,),
+                trusted_proxies=(),
+            )
+        assert "empty" in str(exc.value)
+
+    def test_build_server_REFUSES_a_bare_string_allowlist(self, store: Path):
+        with pytest.raises(TypeError) as exc:
+            api.build_server(
+                host="127.0.0.1",
+                port=0,
+                store_root=str(store),
+                tokens=(GOOD_TOKEN,),
+                trusted_proxies=LOOPBACK_PROXY,
+            )
+        assert "SEQUENCE" in str(exc.value)
+
+    def test_build_server_REFUSES_a_default_route_through_the_PROGRAMMATIC_door(
+        self, store: Path
+    ):
+        """🔴 The `/0` refusal lives in `trusted_network`, which BOTH doors go
+        through. A guard placed only in the env parser would be walked by any
+        caller constructing the server directly — and this file's own harness is
+        such a caller.
+        """
+        with pytest.raises(ValueError) as exc:
+            api.build_server(
+                host="127.0.0.1",
+                port=0,
+                store_root=str(store),
+                tokens=(GOOD_TOKEN,),
+                trusted_proxies=("0.0.0.0/0",),
+            )
+        assert "trusts every peer" in str(exc.value)
+
+    def test_the_HANDLER_CLASS_DEFAULT_trusts_nobody(self):
+        """`build_server` refuses an empty allowlist, so the class attribute is
+        not reachable through it — which is exactly why it is pinned here. A
+        subclass that never went through `build_server` must fail CLOSED, and
+        `()` read as "unset, allow all" is the shape that mistake takes.
+        """
+        assert api.StoreRequestHandler.trusted_proxies == ()
+        assert (
+            api.peer_is_trusted(
+                api.peer_address(("127.0.0.1", 1)),
+                api.StoreRequestHandler.trusted_proxies,
+            )
+            is False
+        )
