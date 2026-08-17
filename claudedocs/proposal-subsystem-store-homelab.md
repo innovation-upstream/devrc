@@ -1,7 +1,15 @@
 # Proposal: move the subsystem store into homelab, behind an auth'd ingress
 
-**Status:** proposal, nothing built. Every number about the *current* store below was measured
-2026-08-16; every number about the *proposed* system is an estimate and is labelled as one.
+**Status: PHASE 1 SHIPPED 2026-08-16** — cluster-internal, no ingress. devrc #512 (the API over
+the existing reader) and homelab-infra #326 (manifests, Flux-adopted with no rollout) are merged;
+the pod runs on homelab in ns `subsystem-store`. **Phases 1.5–4 are still proposals.** The header
+formerly read *"proposal, nothing built"*, which stopped being true the day phase 1 shipped —
+the same deployed-state category as the port corrected in §2b.
+
+Every number about the *current* store below was measured 2026-08-16. Every number about the
+*unbuilt* phases is an estimate and is labelled as one. 🔴 **Nothing in §5's verification plan is
+satisfied by phase 1 for the phases that follow** — in particular no off-mesh control has ever
+run, and token rotation has never been exercised. Read §4 for what each phase still owes.
 
 **Goal (as stated):** make the store simple to reach from anywhere.
 
