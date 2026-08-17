@@ -1,0 +1,6 @@
+**
+!scripts/signal/requirements.txt
+!scripts/signal/consumer.py
+!scripts/signal/_signal_db.py
+!scripts/signal/_minio.py
+!scripts/signal/clawgate.py
