@@ -2920,31 +2920,64 @@ class TestSmugglingViaOtherFramings:
         assert data.count(b"HTTP/1.1 ") == 2, "the probe cannot see two responses"
 
     def test_a_DRIPPED_body_cannot_hold_a_thread_indefinitely(self, store: Path):
-        """`timeout` is per-recv, so a caller sending one byte every few seconds
-        satisfied it forever — measured holding a thread 60s for a SIX-byte
-        body. The read loop needed its own deadline.
+        """`timeout` is per-RECV, so a caller that sends a byte before each
+        timeout expires satisfies it forever — measured holding a thread 60s for
+        a SIX-byte body. The read loop needed its own total deadline.
+
+        🔴 THE FIRST VERSION OF THIS TEST WAS VACUOUS, and a mutation sweep said
+        so: it sent ONE byte and then waited, so the per-recv timeout ended the
+        connection at ~15s either way and the assertion (`< deadline + 15`) was
+        satisfied with the deadline deleted. A drip test has to actually DRIP —
+        fast enough that the per-recv timeout never fires — or it measures the
+        socket timeout and calls it the deadline.
         """
         import socket
+        import threading
         import time
 
         assert api.DRAIN_DEADLINE_S <= 30
+        interval = api.DRAIN_DEADLINE_S / 4
+        assert interval < api.StoreRequestHandler.timeout, (
+            "the drip must outpace the per-recv timeout, or this measures that"
+        )
         with running(store) as (base, _):
             name, port = base.split("//", 1)[1].split(":")
             sock = socket.create_connection((name, int(port)), timeout=10)
+            stop = threading.Event()
+
+            def drip():
+                # 200 bytes at `interval` apart would take 50 * DEADLINE if the
+                # deadline did not exist.
+                for _ in range(200):
+                    if stop.wait(interval):
+                        return
+                    try:
+                        sock.sendall(b"x")
+                    except OSError:
+                        return
+
             try:
                 sock.sendall(
                     f"POST /api/v1/recall/{SCOPE} HTTP/1.1\r\nHost: h\r\n"
-                    f"CF-Connecting-IP: {CLIENT_IP}\r\nContent-Length: 40\r\n\r\n".encode()
+                    f"CF-Connecting-IP: {CLIENT_IP}\r\n"
+                    f"Content-Length: 200\r\n\r\n".encode()
                 )
                 started = time.monotonic()
-                sock.settimeout(api.DRAIN_DEADLINE_S + 20)
-                sock.sendall(b"x")
-                data = sock.recv(65536)
+                dripper = threading.Thread(target=drip, daemon=True)
+                dripper.start()
+                sock.settimeout(api.DRAIN_DEADLINE_S * 6)
+                try:
+                    sock.recv(65536)
+                except (TimeoutError, OSError):
+                    pass
                 elapsed = time.monotonic() - started
             finally:
+                stop.set()
                 sock.close()
-        assert elapsed < api.DRAIN_DEADLINE_S + 15, f"held for {elapsed:.1f}s"
-        assert data == b"" or b"HTTP" in data
+        # Without the deadline the drip keeps the connection alive far past this.
+        assert elapsed < api.DRAIN_DEADLINE_S * 3, (
+            f"a dripped body held the thread for {elapsed:.1f}s"
+        )
 
 
 class TestTheLockoutCapDoesNotLIE:

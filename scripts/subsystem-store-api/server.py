@@ -846,7 +846,14 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             if time.monotonic() > deadline:
                 self.close_connection = True
                 return
-            chunk = self.rfile.read(min(remaining, 65536))
+            # 🔴 `read1`, NOT `read`. `rfile` is a BufferedReader and `read(n)`
+            # blocks until it has ALL n bytes (or EOF) — so the deadline check
+            # above never got control back and was decorative: a caller dripping
+            # a byte at a time inside the per-recv timeout still held the thread
+            # for the whole body. Found by the test for the deadline failing,
+            # which is the only reason it was found at all. `read1` returns after
+            # one underlying recv, which is what makes the loop a loop.
+            chunk = self.rfile.read1(min(remaining, 65536))
             if not chunk:
                 self.close_connection = True
                 return
@@ -927,6 +934,15 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         if getattr(self, "headers", None) is None:
             # The request line itself was unparseable, so there is no header to
             # identify anyone by. Answer, audit, and do not keep the connection.
+            #
+            # ⚠ PROVABLY REDUNDANT TODAY, AND KEPT ANYWAY. A mutation sweep
+            # showed deleting this line changes nothing: `_respond` sets
+            # `close_connection` for every non-200, so the 401 below already
+            # closes. It stays because it is one line of defence on a
+            # smuggling-adjacent property, and because a future edit to
+            # `_respond`'s rule must not silently turn an unidentifiable caller
+            # into a keep-alive channel. Recorded as an EQUIVALENT MUTANT rather
+            # than left as an unexplained survivor.
             self.close_connection = True
             self._unauthorized()
             self._audit(path, 401, "malformed-request")
