@@ -3460,13 +3460,19 @@ class TestTrustedProxyOverTheRealProcess:
             f"it out, so the test above proves nothing"
         )
 
-    def test_THE_DEFECT_the_five_forged_attempts_NEVER_REACH_the_limiter(
+    def test_THE_DEFECT_the_five_forged_attempts_are_CHARGED_TO_THE_FORGER(
         self, store: Path, token_file: Path
     ):
-        """The status-code half cannot see WHY. At base the five forged attempts
-        are `status=unauthorized` and the fifth is `status=lockout-triggered`; at
-        HEAD every one is `status=untrusted-peer` and no lockout exists. Read off
-        the process's real STDOUT, which is the stream Loki ingests.
+        """The status-code half cannot see WHO was charged. At base the five
+        forged attempts are booked against `ip=198.51.100.7` — the victim — and
+        the fifth is `status=lockout-triggered`. At HEAD every one is booked
+        against the forger's own address with `peer=untrusted`. Read off the
+        process's real STDOUT, which is the stream Loki ingests.
+
+        ⚠ THIS IS NOT "the attempts do not reach the limiter" ANY MORE. They do,
+        and they should: an untrusted caller failing auth five times is a real
+        failed auth and gets a real lockout — of ITSELF. The property is only
+        ever about WHOSE bucket.
         """
         with running_subprocess(
             store,
@@ -3486,30 +3492,101 @@ class TestTrustedProxyOverTheRealProcess:
             stdout, _err = proc.communicate(timeout=15)
         lines = [ln for ln in stdout.splitlines() if ln.startswith("store-api audit ")]
         assert len(lines) == 5, stdout
-        assert all("status=untrusted-peer" in ln for ln in lines), lines
-        # The status that WOULD be there if the header had been read and counted.
-        assert not any("status=lockout-triggered" in ln for ln in lines), lines
-        # 🔴 And the forged address never becomes an identity: `ip=` stays `-`.
-        # Without this, a fix that recorded the spoofed value but declined to
-        # count it would pass everything above.
+        # 🔴 THE ASSERTION THAT IS THE WHOLE DEFECT: the forged address never
+        # becomes an identity. A fix that recorded the spoofed value but declined
+        # to COUNT it would pass every status check and fail this one.
         assert all(f"ip={SPOOF_IP}" not in ln for ln in lines), lines
+        assert all(f"ip={UNTRUSTED_PEER}" in ln for ln in lines), lines
+        assert all("peer=untrusted" in ln for ln in lines), lines
+        # …and the forger locks out ITSELF, which is a rate limiter working.
+        assert "status=lockout-triggered" in lines[-1], lines[-1]
 
-    def test_a_VALID_token_from_an_untrusted_peer_is_still_refused(
+    def test_an_untrusted_peer_LOCKING_ITSELF_OUT_does_not_touch_the_victim(
         self, store: Path, token_file: Path
     ):
-        """Fail closed, not "downgrade to unauthenticated". At base this is a
-        200 carrying store content.
+        """The pair to the test above, and the one that stops "charge the peer"
+        from being a euphemism for "do not charge anything". The forger is
+        locked out — its own next request is refused — while the client it named
+        is served normally through the trusted proxy.
         """
         with running_subprocess(
-            store, token_file, trusted_proxies=NOT_LOOPBACK_PROXY
+            store,
+            token_file,
+            trusted_proxies=f"{TRUSTED_PEER}/32",
+            host=TRUSTED_PEER,
         ) as (base, _proc):
-            code, headers, body = fetch(
-                f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, client_ip=CLIENT_IP
+            for _ in range(5):
+                fetch_from(
+                    UNTRUSTED_PEER,
+                    base,
+                    f"/api/v1/recall/{SCOPE}",
+                    token="w" * 48,
+                    client_ip=SPOOF_IP,
+                )
+            forger = fetch_from(
+                UNTRUSTED_PEER,
+                base,
+                f"/api/v1/recall/{SCOPE}",
+                token=GOOD_TOKEN,
+                client_ip=SPOOF_IP,
             )
-        assert code == 401, (code, body)
-        assert body == b"unauthorized\n"
-        assert POINTER_LINE.encode() not in body
-        assert "X-Store-Status" not in headers
+            victim = fetch_from(
+                TRUSTED_PEER,
+                base,
+                f"/api/v1/recall/{SCOPE}",
+                token=GOOD_TOKEN,
+                client_ip=SPOOF_IP,
+            )
+        assert forger == 401, f"the forger was not locked out: {forger}"
+        assert victim == 200, f"the victim was collateral: {victim}"
+
+    def test_a_VALID_token_from_an_untrusted_peer_is_SERVED_but_bucketed_under_the_PEER(
+        self, store: Path, token_file: Path
+    ):
+        """🔴 THIS REPLACES A TEST THAT PINNED THE WRONG BEHAVIOUR. It used to
+        assert a 401, which was stricter than the security property needs and
+        broke the phase-1 acceptance procedure outright: `verify-byte-identity.sh`
+        runs through `kubectl port-forward`, which presents peer `127.0.0.1`
+        while the pod allowlists the node's Cilium internal address, so every
+        byte-identity run — THE phase-1 criterion — became a 401.
+
+        Serving it is safe because the header it sent is IGNORED: the request is
+        booked against the peer, so the caller can only ever spend its own
+        budget. Distrust is expressed by disbelieving the caller, not by hanging
+        up on them.
+
+        🔴 The replacement is NOT weaker than what it replaces. The property the
+        old test was reaching for — a forged header must never name a third
+        party — is pinned by
+        `test_THE_DEFECT_a_forged_header_from_an_untrusted_peer_locks_out_a_victim`
+        and by the `ip=` assertions above, both of which are still RED at base.
+        """
+        with running_subprocess(
+            store,
+            token_file,
+            trusted_proxies=f"{TRUSTED_PEER}/32",
+            host=TRUSTED_PEER,
+        ) as (base, proc):
+            code = fetch_from(
+                UNTRUSTED_PEER,
+                base,
+                f"/api/v1/recall/{SCOPE}",
+                token=GOOD_TOKEN,
+                client_ip=SPOOF_IP,
+            )
+            proc.terminate()
+            stdout, _err = proc.communicate(timeout=15)
+        assert code == 200, code
+        line = [ln for ln in stdout.splitlines() if ln.startswith("store-api audit ")][-1]
+        assert f"ip={UNTRUSTED_PEER}" in line, line
+        assert f"ip={SPOOF_IP}" not in line, line
+        assert "peer=untrusted" in line, line
+        # 🔴 AND IT IS NOT SPELLED AS AN AUTH FAILURE. The earlier shape emitted
+        # `status=untrusted-peer auth=fail`, which put every port-forward into
+        # the Loki auth-fail alert and trained the operator to ignore it.
+        assert "auth=ok" in line, line
+        assert "auth=fail" not in line, line
+        assert "status=untrusted-peer" not in line, line
 
     def test_healthz_is_answered_for_an_UNTRUSTED_peer_so_the_kubelet_probe_lives(
         self, store: Path, token_file: Path
@@ -3676,14 +3753,67 @@ class TestTrustedProxyAllowlistParsing:
                 )
             assert "trusts every peer" in str(exc.value), spelling
 
-    def test_a_NEARLY_default_route_is_ACCEPTED_so_the_guard_is_not_a_ban_on_CIDRs(self):
-        """The negative half. Without it, `raise` on every network with a prefix
-        would pass the test above — and the setting would be unusable for the
-        one deployment shape (a proxy subnet) it exists to serve.
+    def test_A_WIDE_PREFIX_IS_REFUSED_because_the_slash_zero_guard_reads_ONE_entry(self):
+        """🔴 THIS REPLACES A TEST THAT PINNED A WALK AS CORRECT. It used to
+        assert `0.0.0.0/1` was ACCEPTED — "the guard is not a ban on CIDRs" —
+        which is true and useless, because two of them (`0.0.0.0/1` plus
+        `128.0.0.0/1`) parse clean and trust every IPv4 peer. Refusing only `/0`
+        inspects one entry in isolation and cannot see the union.
+
+        The realistic misconfiguration is worse than the contrived one: a pod
+        CIDR is exactly the shape an operator reaches for, and it hands the
+        client identity to every pod in the cluster — verbatim the attacker in
+        this module's threat model.
         """
+        for spelling in (
+            "0.0.0.0/1,128.0.0.0/1",  # the union that covers everything
+            "10.244.0.0/16",  # a pod CIDR: every pod in the cluster
+            "2001:db8::/48",  # the v6 mirror, which a v4-only floor would miss
+        ):
+            with pytest.raises(ValueError) as exc:
+                api.load_trusted_proxies({"SUBSYSTEM_STORE_TRUSTED_PROXIES": spelling})
+            assert "too broad" in str(exc.value), spelling
+
+    def test_THE_FLOOR_ITSELF_IS_ACCEPTED_so_the_guard_is_not_a_ban_on_CIDRs(self):
+        """The negative half, at the BOUNDARY rather than somewhere comfortable.
+        Without it, `raise` on every network with a prefix would pass the test
+        above — and the setting would be unusable for the one deployment shape
+        (a proxy subnet) it exists to serve. Measured at both ends of both
+        families: the floor passes, one bit wider fails.
+        """
+        import ipaddress
+
         assert api.load_trusted_proxies(
-            {"SUBSYSTEM_STORE_TRUSTED_PROXIES": "0.0.0.0/1"}
-        ) == (__import__("ipaddress").ip_network("0.0.0.0/1"),)
+            {"SUBSYSTEM_STORE_TRUSTED_PROXIES": "198.51.100.0/24"}
+        ) == (ipaddress.ip_network("198.51.100.0/24"),)
+        assert api.load_trusted_proxies(
+            {"SUBSYSTEM_STORE_TRUSTED_PROXIES": "2001:db8::/64"}
+        ) == (ipaddress.ip_network("2001:db8::/64"),)
+        for one_bit_wider in ("198.51.100.0/23", "2001:db8::/63"):
+            with pytest.raises(ValueError) as exc:
+                api.load_trusted_proxies(
+                    {"SUBSYSTEM_STORE_TRUSTED_PROXIES": one_bit_wider}
+                )
+            assert "too broad" in str(exc.value), one_bit_wider
+
+    def test_the_TOO_BROAD_message_is_NOT_the_default_route_message(self):
+        """Two guards, two diagnostics, and they must not collapse into one: `/0`
+        is "you disabled it", a wide prefix is "you meant a smaller range". A
+        test asserting a phrase both emit could not tell them apart — which is
+        exactly how two mutants survived an earlier round of this file.
+        """
+        with pytest.raises(ValueError) as zero:
+            api.load_trusted_proxies({"SUBSYSTEM_STORE_TRUSTED_PROXIES": "0.0.0.0/0"})
+        with pytest.raises(ValueError) as wide:
+            api.load_trusted_proxies({"SUBSYSTEM_STORE_TRUSTED_PROXIES": "10.0.0.0/8"})
+        assert "trusts every peer" in str(zero.value)
+        assert "too broad" not in str(zero.value)
+        assert "too broad" in str(wide.value)
+        assert "trusts every peer" not in str(wide.value)
+        # And the wide one NAMES the entry and the floor, or the operator cannot
+        # act on it.
+        assert "'10.0.0.0/8'" in str(wide.value)
+        assert "/24" in str(wide.value)
 
     def test_COMMAS_AND_WHITESPACE_both_separate(self):
         import ipaddress
@@ -3790,39 +3920,63 @@ class TestTrustedProxyOverHTTP:
     proxies=…)` does not exist at base, so their red there is an AttributeError.
     """
 
-    def test_an_untrusted_peer_gets_the_SAME_uniform_401_as_a_bad_token(
+    def test_a_BAD_TOKEN_from_an_untrusted_peer_is_the_SAME_uniform_401(
         self, store: Path
     ):
-        """🔴 The wire must not discriminate. A distinct code, body or header set
-        would tell an attacker "your address is the problem, not your token" —
-        the enumeration surface §2b forbids, and a free oracle for finding the
-        one hop that IS trusted.
+        """🔴 The wire must not discriminate. Once a request DOES fail auth, the
+        401 an untrusted peer sees must be byte-identical to the one a trusted
+        peer sees — otherwise the response is an oracle for "which hop is
+        trusted", which is the enumeration surface §2b forbids.
         """
         with running(store, trusted_proxies=(NOT_LOOPBACK_PROXY,)) as (base, _audit):
-            untrusted = fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
+            untrusted = fetch(f"{base}/api/v1/recall/{SCOPE}", token="w" * 48)
         with running(store) as (base, _audit):
-            bad_token = fetch(f"{base}/api/v1/recall/{SCOPE}", token="w" * 48)
-        assert untrusted[0] == bad_token[0] == 401
-        assert untrusted[2] == bad_token[2] == b"unauthorized\n"
-        assert _comparable(untrusted[1]) == _comparable(bad_token[1])
+            trusted = fetch(f"{base}/api/v1/recall/{SCOPE}", token="w" * 48)
+        assert untrusted[0] == trusted[0] == 401
+        assert untrusted[2] == trusted[2] == b"unauthorized\n"
+        assert _comparable(untrusted[1]) == _comparable(trusted[1])
 
-    def test_the_LOG_discriminates_even_though_the_wire_does_not(self, store: Path):
-        """The operator has to be able to tell "somebody is addressing the pod
-        directly" from "somebody is guessing tokens" — in a place the attacker
-        cannot read. Any `untrusted-peer` line at all is the alertable event.
+    def test_the_LOG_ANNOTATES_the_peer_WITHOUT_calling_it_an_auth_failure(
+        self, store: Path
+    ):
+        """🔴 THIS REPLACES A TEST THAT PINNED THE WRONG SHAPE. It asserted
+        `status=untrusted-peer` together with `auth=fail` — which meant every
+        `kubectl port-forward` landed in the Loki auth-fail alert, and an alert
+        that fires on the documented acceptance procedure is one the operator
+        learns to ignore.
+
+        Direct-to-pod access must still be greppable, so it is its OWN field.
+        The request itself succeeds.
         """
         with running(store, trusted_proxies=(NOT_LOOPBACK_PROXY,)) as (base, audit):
-            fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
+            code, _h, _b = fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
+        assert code == 200, code
         assert len(audit) == 1
-        assert "status=untrusted-peer" in audit[0]
-        assert "auth=fail" in audit[0]
-        assert "result=401" in audit[0]
+        assert "peer=untrusted" in audit[0], audit[0]
+        assert "auth=ok" in audit[0], audit[0]
+        assert "result=200" in audit[0], audit[0]
+        assert "status=untrusted-peer" not in audit[0], audit[0]
 
-    def test_a_WRITE_verb_from_an_untrusted_peer_is_gated_too(self, store: Path):
+    def test_a_TRUSTED_peer_is_annotated_too_so_the_field_is_not_write_only(
+        self, store: Path
+    ):
+        """The other half. A field that only ever takes one value cannot tell a
+        reader that the OTHER case did not occur — `peer=trusted` is what makes
+        the absence of `peer=untrusted` mean something.
+        """
+        with running(store) as (base, audit):
+            fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
+        assert "peer=trusted" in audit[0], audit[0]
+        assert "peer=untrusted" not in audit[0], audit[0]
+
+    def test_a_WRITE_verb_from_an_untrusted_peer_is_METERED_under_the_peer(
+        self, store: Path
+    ):
         """🔴 ONE RULE, BOTH DOORS. `_reject_write` and `_handle` share
-        `_identify_and_meter` precisely because a check enforced at one call
-        site and not the other is the failure this file keeps finding — writes
-        used to skip the client-IP and lockout checks entirely.
+        `_identify_and_meter` precisely because a check enforced at one call site
+        and not the other is the failure this file keeps finding — writes used to
+        skip the client-IP and lockout checks entirely. A write from an untrusted
+        peer therefore gets the ordinary 405, annotated, exactly once.
         """
         limiter = api.RateLimiter(max_failures=5, window_s=600.0, lockout_s=600.0)
         with running(
@@ -3831,21 +3985,25 @@ class TestTrustedProxyOverHTTP:
             code, _h, body = fetch(
                 f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, method="POST"
             )
-        assert code == 401, (code, body)
-        assert body == b"unauthorized\n"
-        assert "status=untrusted-peer" in audit[0]
-        # 🔴 EXACTLY ONE, AND NOTHING CHARGED — and this is a round-2 correction,
-        # not belt and braces. A mutant that refuses and then returns True (so
-        # the handler carries on past the gate it just failed) leaves the GET
-        # path raising on `assert ip is not None` — invisible — while THIS path
-        # sails on to `authorize`, answers a SECOND response, and charges the
-        # limiter under a `None` key. The sweep scored that mutant SURVIVED once
-        # the count assertion was dropped from another test.
+        assert code == 405, (code, body)
+        assert body == b"read-only\n"
+        assert "peer=untrusted" in audit[0], audit[0]
+        assert f"ip={TRUSTED_PEER}" in audit[0], audit[0]
+        # 🔴 EXACTLY ONE LINE, AND NOTHING CHARGED for a request that AUTHENTICATED
+        # — a round-2 correction, not belt and braces. A mutant that mis-handles
+        # the identify step's return value answers a SECOND response here and
+        # charges the limiter under a `None` key; the GET path hides that on an
+        # internal assert.
         assert len(audit) == 1, audit
         assert limiter._failures == {} and limiter._locked_until == {}
 
-    def test_an_UNKNOWN_VERB_from_an_untrusted_peer_is_gated_too(self, store: Path):
-        """The third door: `send_error`, which every unhandled method reaches."""
+    def test_an_UNKNOWN_VERB_from_an_untrusted_peer_is_METERED_under_the_peer(
+        self, store: Path
+    ):
+        """The third door: `send_error`, which every unhandled method reaches.
+        An unknown verb never authenticates, so it IS a charged failure — under
+        the peer's own address, which is the whole point.
+        """
         limiter = api.RateLimiter(max_failures=5, window_s=600.0, lockout_s=600.0)
         with running(
             store, limiter=limiter, trusted_proxies=(NOT_LOOPBACK_PROXY,)
@@ -3855,40 +4013,50 @@ class TestTrustedProxyOverHTTP:
             )
         assert code == 401, (code, body)
         assert body == b"unauthorized\n"
-        assert "status=untrusted-peer" in audit[0]
+        assert "peer=untrusted" in audit[0], audit[0]
         assert len(audit) == 1, audit
-        assert limiter._failures == {} and limiter._locked_until == {}
+        assert list(limiter._failures) == [TRUSTED_PEER], limiter._failures
 
-    def test_the_gate_runs_BEFORE_the_header_is_read_not_after(self, store: Path):
-        """🔴 REACHABILITY, and it is the one ordering that can be wrong while
-        every test above stays green. A request from an untrusted peer sending
-        NO `CF-Connecting-IP` at all must be `untrusted-peer`, not
-        `no-client-ip`: if the header parse ran first the value would already
-        have been used to pick a bucket, which is the defect with an extra step.
+    def test_the_header_is_NOT_READ_AT_ALL_from_an_untrusted_peer(self, store: Path):
+        """🔴 THE ONE ORDERING THAT CAN BE WRONG WHILE EVERY TEST ABOVE STAYS
+        GREEN. Two requests from the same untrusted peer, one sending a forged
+        `CF-Connecting-IP` and one sending none at all, must be booked under the
+        SAME bucket — the peer's. If the header were consulted at all, the forged
+        request would land somewhere else and the forger would get a free second
+        budget by rotating the header.
         """
         with running(store, trusted_proxies=(NOT_LOOPBACK_PROXY,)) as (base, audit):
+            fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, client_ip=SPOOF_IP)
             fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, client_ip=None)
-        assert "status=untrusted-peer" in audit[0], audit
-        assert "status=no-client-ip" not in audit[0], audit
+        assert len(audit) == 2, audit
+        assert all(f"ip={TRUSTED_PEER}" in ln for ln in audit), audit
+        assert all(f"ip={SPOOF_IP}" not in ln for ln in audit), audit
+        # …and the absent header is NOT the `no-client-ip` refusal either: that
+        # rule applies only where the header IS the identity.
+        assert all("status=no-client-ip" not in ln for ln in audit), audit
 
-    def test_an_untrusted_peer_is_NOT_CHARGED_to_any_lockout_bucket(self, store: Path):
-        """It must not fall back to keying on the peer — that is "one abuser
-        locks out the world", arrived at by way of a security check. Six
-        refusals from the same untrusted peer, then the peer becomes trusted:
-        its very next valid request must be a 200, not a lockout.
+    def test_an_untrusted_peer_IS_charged_to_ITS_OWN_bucket(self, store: Path):
+        """🔴 THIS REPLACES A TEST THAT ASSERTED NOTHING WAS CHARGED. Under the
+        old refuse-outright design that was true; under this one it would mean an
+        untrusted peer had an unlimited budget, which is worse than the defect
+        being fixed. Five failed auths from one untrusted peer must lock out that
+        peer — and the bucket must be keyed on the PEER, never on the header.
         """
         limiter = api.RateLimiter(max_failures=5, window_s=600.0, lockout_s=600.0)
         with running(
             store, limiter=limiter, trusted_proxies=(NOT_LOOPBACK_PROXY,)
-        ) as (base, _audit):
-            for _ in range(6):
-                fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
-        # SAME limiter object, now behind a server that trusts loopback.
-        with running(store, limiter=limiter) as (base, _audit):
-            code, _h, body = fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
-        assert code == 200, (code, body)
-        assert limiter._locked_until == {}, limiter._locked_until
-        assert limiter._failures == {}, limiter._failures
+        ) as (base, audit):
+            for _ in range(5):
+                fetch(
+                    f"{base}/api/v1/recall/{SCOPE}", token="w" * 48, client_ip=SPOOF_IP
+                )
+            after = fetch(
+                f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, client_ip=SPOOF_IP
+            )
+        assert after[0] == 401, "an untrusted peer had an unlimited budget"
+        assert list(limiter._locked_until) == [TRUSTED_PEER], limiter._locked_until
+        assert SPOOF_IP not in limiter._locked_until, limiter._locked_until
+        assert "status=lockout-triggered" in audit[4], audit[4]
 
     def test_healthz_answers_an_untrusted_peer(self, store: Path):
         with running(store, trusted_proxies=(NOT_LOOPBACK_PROXY,)) as (base, audit):
@@ -3901,9 +4069,13 @@ class TestTrustedProxyOverHTTP:
         uses a /32-equivalent, so `return False` for any prefixed network would
         pass all of them.
         """
-        with running(store, trusted_proxies=("127.0.0.0/8",)) as (base, _audit):
+        # `/24`, not the `/8` this used to say: a /8 is now refused by the
+        # prefix floor, and a test that quietly relied on it would have turned
+        # into a fact about the floor rather than about the CIDR arm.
+        with running(store, trusted_proxies=("127.0.0.0/24",)) as (base, audit):
             code, _h, body = fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
         assert code == 200, (code, body)
+        assert "peer=trusted" in audit[0], audit[0]
 
     def test_build_server_REFUSES_an_empty_allowlist(self, store: Path):
         with pytest.raises(ValueError) as exc:
@@ -3959,3 +4131,75 @@ class TestTrustedProxyOverHTTP:
             )
             is False
         )
+        # …and "trusts nobody" now means "believes nobody's header", so the
+        # bucket falls back to the peer rather than to the forged value.
+        assert api.resolve_client(
+            {"CF-Connecting-IP": SPOOF_IP},
+            ("127.0.0.1", 1),
+            api.StoreRequestHandler.trusted_proxies,
+        ) == ("127.0.0.1", False)
+
+
+class TestResolveClientIsTheWholeRule:
+    """`resolve_client` is the one place the trusted/untrusted decision is made.
+    Extracted as a pure function precisely so the branches a real TCP socket
+    cannot produce are reachable here.
+    """
+
+    TRUSTED = ("198.51.100.9",)
+
+    def _trusted(self):
+        return api.load_trusted_proxies(
+            {"SUBSYSTEM_STORE_TRUSTED_PROXIES": self.TRUSTED[0]}
+        )
+
+    def test_a_TRUSTED_peer_is_bucketed_on_the_HEADER(self):
+        assert api.resolve_client(
+            {"CF-Connecting-IP": CLIENT_IP}, (self.TRUSTED[0], 9), self._trusted()
+        ) == (CLIENT_IP, True)
+
+    def test_an_UNTRUSTED_peer_is_bucketed_on_ITSELF_and_the_header_is_ignored(self):
+        """The two halves of one assertion: the answer IS the peer, and it is
+        NOT the header. Either alone is satisfied by a bug — returning `None`
+        satisfies "not the header", and echoing the header back satisfies
+        neither but would pass a test that only checked the flag.
+        """
+        key, trusted = api.resolve_client(
+            {"CF-Connecting-IP": SPOOF_IP}, (OTHER_IP, 9), self._trusted()
+        )
+        assert key == OTHER_IP
+        assert key != SPOOF_IP
+        assert trusted is False
+
+    def test_a_TRUSTED_peer_with_NO_header_still_FAILS_CLOSED(self):
+        """The fail-closed rule survives the redesign: where the header IS the
+        identity, its absence is still a refusal, not a fallback to the peer.
+        Otherwise a trusted proxy that stopped setting the header would silently
+        bucket the whole internet under one key.
+        """
+        assert api.resolve_client({}, (self.TRUSTED[0], 9), self._trusted()) == (
+            None,
+            True,
+        )
+
+    def test_a_PEER_THAT_IS_NOT_AN_ADDRESS_refuses_rather_than_crashing(self):
+        """🔴 REACHABLE ONLY HERE. A real TCP socket always yields an address, so
+        this branch cannot be driven over the wire — which is the argument for
+        extracting the function rather than leaving the logic inline where the
+        branch would be untestable and therefore unverified.
+        """
+        for bogus in (None, (), ("not-an-address", 9), (127, 9)):
+            assert api.resolve_client(
+                {"CF-Connecting-IP": SPOOF_IP}, bogus, self._trusted()
+            ) == (None, False), bogus
+
+    def test_an_UNTRUSTED_v6_peer_is_aggregated_to_its_slash_64(self):
+        """Both branches normalise through `rate_limit_key`, or the peer branch
+        would hand an IPv6 caller 2**64 free buckets — the exact hazard
+        `rate_limit_key` exists for, reintroduced through the new door.
+        """
+        key, trusted = api.resolve_client(
+            {}, ("2001:db8:1:2:ffff:ffff:ffff:ffff", 9, 0, 0), self._trusted()
+        )
+        assert key == "2001:db8:1:2::/64"
+        assert trusted is False
