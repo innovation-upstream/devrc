@@ -711,3 +711,73 @@ def test_a_skill_with_no_reference_dir_is_never_policed(tmp_path):
         f"{n}. **step {n}**\n\n" for n in range(1, 21)))
     a = sa.audit_one(d / "SKILL.md")
     assert a["corpus_n"] == 0
+
+
+# --- repo-root-relative sidecar spelling -----------------------------------------
+# A repo-local skill may route as `.claude/skills/<name>/reference/<topic>.md` — the
+# form prune-skill's sec 4 recommends, because a BARE relative path is resolved by the
+# reader against the CWD and not found. That spelling used to score as "not a sidecar",
+# so a freshly-split skill reported "no skill routes to a reference/ sidecar yet" with
+# five live routing lines, and a missing topic was reported by nobody. Measured on
+# datapacket-talos image-cacher 2026-08-17.
+
+REPO_ROOT_CORE = """# core
+
+| File | Load it when… |
+|---|---|
+| `.claude/skills/rr/reference/alpha.md` | alpha things |
+| `.claude/skills/rr/reference/beta.md` | beta things |
+"""
+
+
+def _rr_skill(tmp_path, core, refs):
+    d = tmp_path / "rr"
+    (d / "reference").mkdir(parents=True)
+    (d / "SKILL.md").write_text(core)
+    for r in refs:
+        (d / "reference" / r).write_text(f"# {r}\n")
+    return d / "SKILL.md"
+
+
+def test_a_repo_root_relative_routing_line_is_recognised(tmp_path):
+    a = sa.audit_one(_rr_skill(tmp_path, REPO_ROOT_CORE, ("alpha.md", "beta.md")))
+    assert len(a["refs"]) == 2, f"routing lines not seen as sidecars: {a['refs']}"
+    assert a["missing_refs"] == []
+    assert a["orphan_refs"] == []
+
+
+def test_positive_control_a_missing_repo_root_relative_topic_is_reported(tmp_path):
+    """THE control: before the fix this returned [] — a dead routing line, silently."""
+    a = sa.audit_one(_rr_skill(tmp_path, REPO_ROOT_CORE, ("alpha.md",)))
+    assert a["missing_refs"] == [".claude/skills/rr/reference/beta.md"], (
+        f"a dead repo-root-relative routing line went unreported: {a['missing_refs']}")
+
+
+def test_a_repo_root_relative_orphan_is_still_reported(tmp_path):
+    core = "# core\n\n| `.claude/skills/rr/reference/alpha.md` | alpha |\n"
+    a = sa.audit_one(_rr_skill(tmp_path, core, ("alpha.md", "nobody-routes-here.md")))
+    assert a["orphan_refs"] == ["reference/nobody-routes-here.md"]
+
+
+def test_another_repos_reference_path_is_still_not_a_sidecar(tmp_path):
+    """Regression guard: `apps/reference/manifest.md` is a page on a CLIENT's public
+    docs site, seen in two real datapacket skills. It names a directory that is not
+    this skill, so it must stay out — reporting it broken is a false alarm."""
+    core = "# core\n\nsee `apps/reference/manifest.md` on the docs site\n"
+    a = sa.audit_one(_rr_skill(tmp_path, core, ()))
+    assert a["refs"] == [] and a["missing_refs"] == []
+
+
+def test_two_spellings_of_one_topic_count_once(tmp_path):
+    """app-blocks names legacy-hackathon-ops.md both ways; counting spellings
+    reported 16 "reference file(s)" for 15 files.
+
+    🔴 INVARIANT GUARD, not a regression test — it passes at the pre-fix base too,
+    for the wrong reason: there the second spelling was not recognised at all, so
+    the count was 1 by blindness rather than by deduping. Nothing expressible as a
+    baseline test separates those, so do not read this as covering the dedupe.
+    """
+    core = ("# core\n\n`reference/alpha.md` in the table, and "
+            "`.claude/skills/rr/reference/alpha.md` in the repo-layout section\n")
+    a = sa.audit_one(_rr_skill(tmp_path, core, ("alpha.md",)))
+    assert len(a["refs"]) == 1, f"same file counted {len(a['refs'])}x: {a['refs']}"

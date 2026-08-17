@@ -250,39 +250,66 @@ def fat_lines(lines, limit=FAT_LINE):
     return [(len(ln.encode()), ln.rstrip("\n")) for ln in lines if len(ln.encode()) > limit]
 
 
-def resolve_ref(skill_dir, ref):
-    p = Path(os.path.expanduser(ref))
-    return p if p.is_absolute() else skill_dir / ref
+def _sidecar_tail(skill_dir, ref):
+    """This ref expressed RELATIVE TO the skill dir, or None if it is not a sidecar.
 
+    Three accepted spellings, because a core may legitimately use any of them:
+      1. bare              `reference/x.md`
+      2. absolute          `~/workspace/.../<name>/reference/x.md`
+      3. repo-root-relative `.claude/skills/<name>/reference/x.md`
 
-def _is_sidecar(skill_dir, ref):
-    """Is this path THIS skill's own reference sidecar?
+    🔴 (3) used to return False, so a repo-local skill written the way the
+    prune-skill guidance RECOMMENDS was scored as having no sidecars at all —
+    "no skill routes to a reference/ sidecar yet" on a freshly-split skill with
+    five routing lines, and a missing topic reported by nobody. Measured on
+    datapacket-talos image-cacher 2026-08-17, right after its 70 KB -> 8 KB split.
 
-    A bare `reference/x.md` is; an absolute path under the skill dir is. A
-    relative path rooted elsewhere (`apps/reference/manifest.md` — a page on a
+    A relative path rooted elsewhere (`apps/reference/manifest.md` — a page on a
     CLIENT's public developer-docs site, seen in two real datapacket skills) is
-    NOT, and reporting it as a broken sidecar is a false alarm about another
-    repo's docs site.
+    still NOT a sidecar: reporting it as broken is a false alarm about another
+    repo's docs site. (3) is distinguished from it by naming THIS skill's own
+    directory immediately before `reference/`.
     """
-    if ref.startswith("reference/") or ref.startswith("./reference/"):
-        return True
+    if ref.startswith("./"):
+        ref = ref[2:]
+    if ref.startswith("reference/"):
+        return ref
     p = Path(os.path.expanduser(ref))
-    if not p.is_absolute():
-        return False
-    try:
-        p.relative_to(skill_dir)
-        return True
-    except ValueError:
-        return False
+    if p.is_absolute():
+        try:
+            return p.relative_to(skill_dir).as_posix()
+        except ValueError:
+            return None
+    marker = f"{skill_dir.name}/reference/"
+    i = ref.find(marker)
+    if i != -1:
+        return ref[i + len(skill_dir.name) + 1:]
+    return None
+
+
+def resolve_ref(skill_dir, ref):
+    tail = _sidecar_tail(skill_dir, ref)
+    if tail is None:
+        p = Path(os.path.expanduser(ref))
+        return p if p.is_absolute() else skill_dir / ref
+    return skill_dir / tail
 
 
 def referenced_refs(text, skill_dir):
-    """This skill's own reference/*.md sidecars, deduped, in first-seen order."""
+    """This skill's own reference/*.md sidecars, deduped, in first-seen order.
+
+    Deduped by RESOLVED TARGET, not by the string as written: a core may name the
+    same topic twice in different accepted spellings (app-blocks routes to
+    legacy-hackathon-ops.md from its table as `reference/…` and from its Repo
+    layout as `.claude/skills/app-blocks/reference/…`). Counting the spellings
+    reported 16 "reference file(s)" for 15 files.
+    """
     seen, out = set(), []
     for m in REF_PATH.findall(text):
-        if m in seen or not _is_sidecar(skill_dir, m):
+        tail = _sidecar_tail(skill_dir, m)
+        if tail is None or tail in seen:
             continue
-        seen.add(m)
+        seen.add(tail)
         out.append(m)
     return out
 
