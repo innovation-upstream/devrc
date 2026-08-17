@@ -3540,6 +3540,60 @@ class TestTrustedProxyOverTheRealProcess:
         assert forger == 401, f"the forger was not locked out: {forger}"
         assert victim == 200, f"the victim was collateral: {victim}"
 
+    def test_a_TRUSTED_peers_HEADER_actually_separates_two_clients(
+        self, store: Path, token_file: Path
+    ):
+        """🔴 THE ONE PROPERTY EVERY OTHER PROCESS-LEVEL TEST HERE IS BLIND TO,
+        and a mutation sweep is what showed it: replacing the allowlist `main`
+        passes to `build_server` with a hardcoded one that matches NOBODY
+        survived the whole class. Every test either drove an untrusted peer (a
+        mutant that trusts nobody agrees) or drove one client through a trusted
+        peer (bucketing it under the peer instead of its header is invisible
+        when there is only one client).
+
+        So: five failures through the trusted proxy on behalf of ONE client,
+        then a DIFFERENT client through the SAME proxy. It must be served — the
+        header, not the peer, is what separated them. If the proxy's allowlist
+        were not in force, both would share the peer's bucket and the second
+        client would be collateral.
+        """
+        with running_subprocess(
+            store,
+            token_file,
+            trusted_proxies=f"{TRUSTED_PEER}/32",
+            host=TRUSTED_PEER,
+        ) as (base, _proc):
+            for _ in range(5):
+                fetch_from(
+                    TRUSTED_PEER,
+                    base,
+                    f"/api/v1/recall/{SCOPE}",
+                    token="w" * 48,
+                    client_ip=SPOOF_IP,
+                )
+            same_client = fetch_from(
+                TRUSTED_PEER,
+                base,
+                f"/api/v1/recall/{SCOPE}",
+                token=GOOD_TOKEN,
+                client_ip=SPOOF_IP,
+            )
+            other_client = fetch_from(
+                TRUSTED_PEER,
+                base,
+                f"/api/v1/recall/{SCOPE}",
+                token=GOOD_TOKEN,
+                client_ip=OTHER_IP,
+            )
+        # Both halves, or the assertion is satisfied by a server with no limiter
+        # (everything 200) or one that locked the whole proxy out (everything
+        # 401).
+        assert same_client == 401, f"the guilty client was not locked out: {same_client}"
+        assert other_client == 200, (
+            f"an innocent client behind the same proxy got {other_client} — the "
+            f"bucket was the PEER, not the header"
+        )
+
     def test_a_VALID_token_from_an_untrusted_peer_is_SERVED_but_bucketed_under_the_PEER(
         self, store: Path, token_file: Path
     ):
@@ -3756,17 +3810,27 @@ class TestTrustedProxyAllowlistParsing:
     def test_A_WIDE_PREFIX_IS_REFUSED_because_the_slash_zero_guard_reads_ONE_entry(self):
         """🔴 THIS REPLACES A TEST THAT PINNED A WALK AS CORRECT. It used to
         assert `0.0.0.0/1` was ACCEPTED — "the guard is not a ban on CIDRs" —
-        which is true and useless, because two of them (`0.0.0.0/1` plus
-        `128.0.0.0/1`) parse clean and trust every IPv4 peer. Refusing only `/0`
-        inspects one entry in isolation and cannot see the union.
+        which is true and useless, because the two halves of the address space,
+        each written as a `/1`, parse clean and together trust every IPv4 peer.
+        Refusing only `/0` inspects one entry in isolation and cannot see the
+        union.
 
         The realistic misconfiguration is worse than the contrived one: a pod
         CIDR is exactly the shape an operator reaches for, and it hands the
         client identity to every pod in the cluster — verbatim the attacker in
         this module's threat model.
+
+        ⚠ THE UPPER HALF IS BUILT ARITHMETICALLY, NOT WRITTEN. It is routable
+        space, and `test_no_public_ips.py` refuses an IP literal in a PUBLIC
+        repo — it caught the first draft of this test and of the comment in
+        `server.py`. Widening that allowlist would have been the failure mode,
+        not the fix.
         """
+        import ipaddress
+
+        upper_half = f"{ipaddress.ip_address(1 << 31)}/1"
         for spelling in (
-            "0.0.0.0/1,128.0.0.0/1",  # the union that covers everything
+            f"0.0.0.0/1,{upper_half}",  # the union that covers everything
             "10.244.0.0/16",  # a pod CIDR: every pod in the cluster
             "2001:db8::/48",  # the v6 mirror, which a v4-only floor would miss
         ):

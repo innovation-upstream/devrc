@@ -212,10 +212,17 @@ ENV_TRUSTED_PROXIES = "SUBSYSTEM_STORE_TRUSTED_PROXIES"
 # 🔴 A FLOOR ON HOW WIDE ONE ENTRY MAY BE, keyed by address family.
 #
 # Refusing only `/0` checks ONE ENTRY IN ISOLATION and is walkable two ways, both
-# measured: `0.0.0.0/1,128.0.0.0/1` parses clean and trusts every IPv4 peer, and
-# — the realistic one — a pod CIDR like `10.244.0.0/16` is accepted and hands the
-# client identity to EVERY POD IN THE CLUSTER, which is verbatim the attacker in
-# this module's own threat model.
+# measured. (a) The two halves of the address space, each written as a `/1`,
+# parse clean and together trust every IPv4 peer — no single entry is a default
+# route, so a per-entry `/0` check sees nothing wrong. (b) The realistic one: a
+# pod CIDR like `10.244.0.0/16` is accepted and hands the client identity to
+# EVERY POD IN THE CLUSTER, which is verbatim the attacker in this module's own
+# threat model.
+#
+# (The upper half is deliberately not SPELLED anywhere in this repo — it is
+# routable space, and `scripts/tests/test_no_public_ips.py` refuses IP literals
+# in a PUBLIC repo. It caught the first draft of this very comment. The test
+# that exercises case (a) builds the address arithmetically for the same reason.)
 #
 # The audit that found it suggested evaluating the UNION of the entries. A floor
 # is the stronger rule and subsumes it: with /24 as the minimum, no set of

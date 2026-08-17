@@ -218,11 +218,12 @@ is a manual step on a list nobody keeps.
 * `0.0.0.0/0` (and `::/0`) is **refused**: the pre-fix behaviour spelled as
   configuration.
 * **A prefix wider than `/24` (IPv4) or `/64` (IPv6) is refused too**, because
-  refusing only `/0` inspects one entry in isolation: `0.0.0.0/1,128.0.0.0/1`
-  parses clean and trusts everything, and — the realistic mistake — a pod CIDR
-  like `10.244.0.0/16` would hand the client identity to every pod in the
-  cluster, which is exactly the attacker this setting exists to stop. List
-  several narrower entries if you genuinely need a wide range.
+  refusing only `/0` inspects one entry in isolation: the two halves of the
+  address space, each written as a `/1`, parse clean and together trust
+  everything, and — the realistic mistake — a pod CIDR like `10.244.0.0/16`
+  would hand the client identity to every pod in the cluster, which is exactly
+  the attacker this setting exists to stop. List several narrower entries if you
+  genuinely need a wide range.
 * **Entries must be written in the same address family the peer arrives as.**
   `peer_address` unwraps an IPv4-mapped peer (`::ffff:10.0.0.1` → `10.0.0.1`)
   but the allowlist parser does not, so an entry spelled `::ffff:10.0.0.1` will
