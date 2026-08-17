@@ -1,4 +1,4 @@
-# Handoff: subsystem-store — 2026-08-13
+# Handoff: subsystem-store — 2026-08-16 (phase 1 shipped)
 
 ## Run this first — the index, one read-only command
 ```bash
@@ -13,19 +13,54 @@ stderr line and carry on. **Two measured sessions skipped this when it was only 
 `/resume`; it is here because reading this doc is the one thing both of them did first.**
 
 ## Goal
-A durable store for subsystem data + history with clean Claude Code integration.
-**Built, deployed, verified at the consumer on both hosts.** The read half is cheap enough to
-run every `/resume`, searchable, and survives a malformed entry. What remains is measurement,
-not a build.
+A durable store for subsystem data + history with clean Claude Code integration, **reachable
+from anywhere**. The local half is built, deployed and verified at the consumer on both hosts:
+the read half is cheap enough to run every `/resume`, searchable, and survives a malformed
+entry. The server half is at **phase 1 of 4** — see "State now".
 
-## State now
+⚠ The previous revision ended *"what remains is measurement, not a build"*. That stopped being
+true on 2026-08-16: phases 1.5–4 are builds, and 1.5 is the one that faces the internet.
 
-- **Branch:** `main` at `f522077`, clean tracked tree (untracked: `.envrc`, `.opencode/`, one `nix/system/*.LOCAL-preserved` — none are work). Base clone re-synced.
-- **Merged + SHIPPED + verified at the consumer on both hosts** (`ship.sh` rc=0, both per-host lines `✅ VERIFIED`; `~/.claude/skills/*` resolve to the SAME store path on workbench and laptop, so they are converged, not separately built):
-  - **`#503`** — preserved three untracked proposal doc sets that were one `checkout` from silent deletion (two opencode proposals, one 2026-08-06 rules-cut draft), plus a README saying the rules-cut must not be applied verbatim.
-  - **`#504`** — the `__pycache__` false-green rule in `claude/RULES.md` (34,268 → 35,152 B of 38,400).
-  - **`#505`** — `OPEN:` / `RESOLVED <sha>:` as SCHEMA on journal bullets, after five audit rounds.
-- **`drift-check.sh` rc=0** after the earlier ship: 245/210 managed symlinks examined, 0 dangling on both; parity differs only on the three allowlisted per-host keys.
+## State now — 🔴 THE STORE NOW HAS A SERVER. Phase 1 shipped 2026-08-16.
+
+- **devrc `main` at `6bc6518`; homelab-infra `trunk` at `4f6ced02`.** Both base clones re-synced,
+  both hosts at the same devrc commit. Only untracked leftover on the workbench is one
+  `nix/system/*.LOCAL-preserved` file.
+- 🔴 **A pod serves the store on homelab, ns `subsystem-store`, cluster-internal.**
+  ClusterIP on **8102** (not the proposal's original 8110 — taken). Flux-managed since #326
+  (`kustomize.toolkit.fluxcd.io/name: subsystem-store`). **No ingress, no public exposure,
+  no DNS, no Authelia rule** — that is phase 1.5 and it has NOT been done.
+- **The design doc is `claudedocs/proposal-subsystem-store-homelab.md`** and it is current:
+  its header says what is built vs still proposed, and its port matches the deployment.
+
+### Shipped this session (9 PRs)
+
+| PR | repo | what |
+|---|---|---|
+| `#507` | devrc | two stranded rule lessons rescued (mutation-isolation; Loki partial results) — shipped + verified at the consumer on both hosts |
+| `#508` | devrc | `.envrc` + `.opencode/` were unignored in a PUBLIC repo |
+| `#509` | devrc | the migration proposal |
+| `#510` | devrc | the laptop's logitech pair — applied on that host 2026-08-13, never committed |
+| `#512` | devrc | **phase 1: the HTTP API over the existing reader** + 1,282 lines of tests |
+| `#516` | devrc | the proposal header still said "nothing built" after phase 1 shipped |
+| `#326` | homelab-infra | **phase 1 manifests** — ns, Deployment, Service, PVC, SOPS secret |
+| `#327` | homelab-infra | the checker's rc 1 meant two things — a crash could spell a verdict |
+
+`#503`/`#504`/`#505` (previous session) remain shipped + verified at the consumer on both hosts.
+
+### 🔴 What phase 1 is NOT
+Read this before trusting anything above as coverage:
+- **Nothing has been tested off-mesh.** Phase 1 creates no route, so the control that matters
+  for exposure — a request from outside your network — has never run.
+- **The `(B-required)` hardening is not built**: no rate-limit, no lockout, no split
+  read/write tokens. **Token rotation has never been exercised once**, which the proposal
+  names as a pre-cutover requirement.
+- **88 of the 89 API tests are invariant guards, not regressions** — `server.py` did not
+  exist at base, so "red at base" is a collection error and proves nothing. The evidence
+  that they bite is the 22-mutant sweep, not the red-at-base matrix.
+- **`seed.sh --push` has no hermetic test** (needs a cluster); it was exercised live 3×.
+- **`--mode=full` / `--page` over HTTP** were never byte-compared against the pod; only the
+  default digest was.
 
 ### `#505` in one paragraph
 An entry proposed a one-line remedy at **15:00:18** on 2026-07-24; the remedy landed at **15:02:21** — 2m03s later — and the entry served it as outstanding for **22 days**. `/handoff` step 4 runs MID-session, so the writer is gone by the time the work finishes. Openness is now a typed prefix, not prose, because a prose detector is walkable by rewording. Six populations, one precedence source (`JournalBullet.openness_population`); `--validate` reports four of them and its VERDICT is deliberately unchanged (an entry with unfinished business is well-formed; failing it would be a permanently-red gate). Index rows gain `🔴 N OPEN`, conditional so the common case is byte-identical.
@@ -214,12 +249,66 @@ the day you ship.*
 
 ## Next steps (ranked)
 
-1. **Rotate the credential above and close its `OPEN:` bullet.** 33 days, security-relevant, and it is the only declared-open item in the store.
-2. **Items 3–5 of the store evaluation are unbuilt.** Ranked, with the trap named: a weekly drift deadman keyed on referenced paths would **NOT** have caught the motivating entry (its paths are brace-expanded outside backticks, so it scores zero exposure — measured). Then: the `cli` scope maps to no repo on this host; 21 of 40 entries carry no `created_by`.
-3. **`.envrc` and `.opencode/` are untracked AND absent from `.gitignore`** (`git check-ignore` non-zero for both) in a PUBLIC repo where `.envrc` can hold credentials. Small, separate PR.
-4. **The laptop has two `nix/system/*logitech*` files present on that host only, in no commit and no backup** (from `drift-check.sh`). Same stranded-work class `#503` fixed on the workbench.
+1. **Rotate the credential and close its `OPEN:` bullet.** Now **34 days** (2026-07-14),
+   security-relevant, still the only declared-`OPEN:` item in the store. Untouched this
+   session by explicit operator decision — *not* because it was checked and found fine.
+   `subsystem_recall.py --scope datapacket-talos --search "rotate"`.
+2. **Decide whether phase 1.5 happens at all, and do NOT let it start by accident.** It is the
+   step that puts client-confidential content on the public internet (exposure **B**, decided
+   2026-08-16). Its prerequisites are unbuilt *and* unmeasured — see "What phase 1 is NOT".
+   The IngressRoute is the last file, never the first.
+3. **Exercise token rotation once**, before any exposure. A rotation path that has never run
+   is not a rotation path, and it is cheap to prove now while nothing depends on it.
+4. **Give `seed.sh --push` a hermetic test.** It is the one piece of phase 1 with no
+   automated coverage, and it is the piece that writes to the pod.
+5. **Items 3–5 of the store evaluation are still unbuilt.** With the trap named: a weekly
+   drift deadman keyed on referenced paths would **NOT** have caught the motivating entry
+   (its paths are brace-expanded outside backticks, so it scores zero exposure — measured).
+   Then: the `cli` scope maps to no repo on this host; 21 of 40 entries carry no `created_by`.
+
+**Closed since the last revision** (do not re-open): `.envrc`/`.opencode/` gitignore (`#508`),
+the laptop logitech pair (`#510`) — both were stranded-work items, both now tracked.
 
 ## Gotchas / decisions / dead-ends
+
+### New 2026-08-16 (phase 1)
+- 🔴 **A CRASH can spell a VERDICT when an exit code means two things.** Python exits 1 on any
+  uncaught exception; the phase-1 checker used rc 1 for "an exposure object is present". Run
+  without PyYAML, `ModuleNotFoundError` exited 1 and the negative control printed
+  `✓ Middleware → rc=1` **while examining nothing**. Fixed by `#327` (rc 3 = the checker could
+  not run). Widest reading: **any process whose failure code collides with one of its verdict
+  codes**. Found only because a run happened to lack a dependency — so ask what your rc=1
+  *else* means.
+- 🔴 **`gh pr view --json mergeable` is NOT the check status, and `CLEAN` before checks
+  register is byte-identical to `CLEAN` after they pass.** An agent polled inside that window
+  and reported a PR clean whose gitleaks leg then failed. **Read `gh pr checks` too**, and
+  quote it. Corollary: `CLEAN` on a repo with **no** CI configured (devrc has no
+  `.github/workflows`) is a much weaker claim than `CLEAN` on one that ran a pipeline — say
+  which you mean.
+- 🔴 **A scanner run with the wrong flags is an instrument error wearing a zero's clothes.**
+  `gitleaks detect` without `--no-git --config --baseline-path` scans git *history*, so it
+  structurally cannot see a finding in a working-tree file, and returned a confident
+  "0 findings in my new files". **Copy the pipeline's flags verbatim**, then positive-control
+  it: reintroduce the offending string and watch the count move.
+- 🔴 **A fix's own explanatory comment can reintroduce the hazard it documents.** The first
+  draft of the gitleaks fix *quoted the offending URL to explain it*, turning 1 finding into
+  2. Caught only by re-scanning; reasoning said "a comment is inert."
+- 🔴 **Widening an allowlist to clear a red gate is the failure mode, not the fix** —
+  `.gitleaks.toml` says so in its own header. The fix was to the fixture. Then prove the
+  fixture still fails for its ORIGINAL reason (mutation: drop `Middleware` from
+  `FORBIDDEN_KINDS`, watch it go red), or you have traded a red gate for a vacuous one.
+- **`kubectl diff -k` shows a SOPS secret as differing even when it matches** — the manifest
+  holds ciphertext, the cluster holds plaintext. Decrypt with the age key and compare hashes
+  before concluding Flux would swap it. `sops -d --extract` needs `SOPS_AGE_KEY_FILE`, and
+  `.secrets/age.key` is gitignored so it does **not** come with a worktree — point it at the
+  base clone's copy.
+- ⚠ **`yq -r` on a missing path returns the literal string `null`, not empty** — an
+  `[ -z "$x" ]` guard does not catch it, and the resulting sha256
+  (`74234e98afe7498f…`) reads as a genuine mismatch. Check for `"null"` explicitly.
+- **Adopting hand-applied objects into Flux was a no-op here, and that was verified, not
+  assumed**: same pod, same `startTime`, `restarts=0`; Deployment generation moved 4→5 from
+  Flux adding its own labels, which is metadata and does not roll the pod template.
+
 
 - 🔴 **Never read an exit status through a pipe.** `cmd | tail; echo $?` gives tail's status.
   This reported `ship.sh` as green when it was **rc=12** — and that ignored rc=12 was a real
