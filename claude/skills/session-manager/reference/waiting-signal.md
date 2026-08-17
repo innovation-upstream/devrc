@@ -113,6 +113,36 @@ output. **To turn it on**, someone has to observe a live queued message and conf
 renders outside the box — then the discriminator is: box line non-empty and not `ESC[2m`
 (which needs `capture-pane -e`, i.e. dropping the plain capture).
 
+## 🔴 2026-08-15 — still excluded from `waiting`, but NO LONGER DISCARDED
+
+Every word above stands: this is **not** a `waiting` signal, and the three reasons are
+unchanged. What was wrong was the **disposal**. A blind dogfood hand-verified this tool
+against all 79 panes on both hosts and found **five** holding a draft one Enter from
+running — *"its been a few days, check if a fix released"*, *"check the renovate run"*, *"dig
+into what drove the redis node squeeze"*, *"hold 312 for review"* — and this tool reported
+none of them. The exclusion was correct; the silence was not.
+
+So the fact is now measured under its **own** name: row fields `unsent_prompt` (the text) and
+`unsent_prompt_status`, roll-up `summary.unsent_prompt`, `caveats.unsent_prompt`, and a
+`✎ UNSENT PROMPT` block in the table.
+
+**It is never mixed into `waiting_probable` and never summed into its counts.** The same 79-pane
+sweep measured `waiting_probable` at **11 flagged / 11 true positives / 0 false positives**,
+and that precision is exactly what folding a noisier signal into it would destroy — a reader
+who learns `waiting: YES` sometimes means "you typed something and wandered off" stops
+walking to the terminal for the ones that are a real block. `test_the_existing_WAITING_SET_is_
+byte_identical_after_the_fourth_signal` pins the whole waiting surface against values measured
+at the pre-change sha, and the two "fold it in" mutants are killed by that test alone.
+
+**What it reads, and why that is narrow on purpose.** Only the lines *between the two
+box-drawing rules* — the pane's own input box, located by `_input_box_span`, the one
+definition `last_assistant_line` also cuts at. Never "any `❯` line in the capture": a pane
+**displaying another session's transcript** is a live false-positive shape that already bit
+this scrape once, and every capture also contains the operator's own submitted prompts echoed
+into scrollback. A modal replaces the box, and a draft taller than the box is not recognised;
+both report `no_input_box` — **unmeasured**, never "nothing typed". Shell panes are never
+scraped: a half-typed shell command is a different, noisier thing.
+
 ## Known misses, stated rather than implied away
 
 - `Login successful. Press Enter to continue…` — a real hard block on 2 of 40 panes
@@ -120,6 +150,16 @@ renders outside the box — then the discriminator is: box line non-empty and no
 - An agent that offers rather than asks (*"Say the word and I'll open the PR"*) — no `?`.
 - A `claude` under a wrapper shell reads as `shell`, so it is never scraped
   (`caveat[claude_detection]`).
+- A parked draft is **not** a miss any more — it is a separate signal (`unsent_prompt`,
+  above). It is still not `waiting`, deliberately.
+
+### And what NEITHER signal can see
+
+Both are screen-scrapes of tmux panes, so both are blind to everything that is not one: open
+PRs and their conflict state, the mail queue, cluster alerts, the durable initiative board,
+and GUI windows outside tmux. That list is not left implicit — `report["not_measured"]`
+enumerates it with the owning skill for each, derived from the report's own keys so it stops
+claiming a population the day that population gains a measurement.
 
 ## Calibration, 2026-08-12
 
@@ -130,3 +170,16 @@ positives.
 
 Suite: **positive control 3 flagged of 5 realistic panes; negative control 0.** Twenty
 mutants, each killed on its own named assertion.
+
+## Calibration, 2026-08-15 (`unsent_prompt`)
+
+Blind dogfood across **79 panes on both hosts**, hand-verified pane by pane:
+`waiting_probable` **11 flagged / 11 true positives / 0 false positives**; **5** panes held a
+parked draft that no roll-up reported.
+
+Suite: **positive control 2 parked of 8 realistic panes** (including a pane whose body holds
+five *other* windows' `❯` lines and whose own box is empty — it must read as a measured
+zero); **negative control** a dict-key reorder, which survives. **21 mutants: 21 as expected,
+0 mismatches**, run with `PYTHONDONTWRITEBYTECODE=1` and `__pycache__` cleared between
+mutants, each proven applied by sha change **and** byte-equality and proven non-inert by an
+AST diff.

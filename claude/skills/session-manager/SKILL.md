@@ -1,6 +1,6 @@
 ---
 name: session-manager
-description: "Live cross-host view of every tmux window on workbench + laptop — which have Claude Code running, what each is doing, which ones are WAITING ON A HUMAN (asked a question / blocked on a modal / out of context), how stale it is, plus the clawgate approval queue and recent agent sessions from ClickHouse. JSON-first, read-only. Use for: is anything waiting on me, active sessions, what's running where, tmux state across both hosts, cross-host session status, tail a tmux window, which windows are stale/idle/busy/blocked."
+description: "Live cross-host view of every tmux window on workbench + laptop — which have Claude Code running, what each is doing, which ones are WAITING ON A HUMAN (asked a question / blocked on a modal / out of context), how stale it is, plus the clawgate approval queue and recent agent sessions from ClickHouse. JSON-first, read-only. Also reports UNSENT PROMPTS — text typed into a window and never sent — separately from the waiting signal. Use for: is anything waiting on me, active sessions, what's running where, tmux state across both hosts, cross-host session status, tail a tmux window, which windows are stale/idle/busy/blocked, did I leave anything half-typed / unsent."
 ---
 
 # session-manager — cross-host tmux + agent activity
@@ -15,8 +15,9 @@ python3 $DEVRC/scripts/session-manager tail scratch7:3 --plain     # scrollback,
 ```
 
 🔴 **Rows are at `report["hosts"][<"workbench"|"laptop">]["windows"]`** — not at the top
-level. Roll-ups: `summary.waiting`, `summary.status[bucket]`, `summary.kind`,
-`blocked_on_me`.
+level. Roll-ups: `summary.waiting`, `summary.unsent_prompt`, `summary.status[bucket]`,
+`summary.kind`, `blocked_on_me`. And `report["not_measured"]` for what this tool does **not**
+see at all.
 
 🔴 **`summary.status[bucket]` is one key per CLASS plus `total`** — `{claude, shell, total}`
 on every scan today. `claude` and `shell` are **always present** (pre-seeded, so a zero there
@@ -41,7 +42,7 @@ these rows. `kind` is never null; `runtime` frequently is, and means something e
 | `--host workbench\|laptop\|all` | default `all`; `tail` resolves `all` to LOCAL |
 | `--claude-only` | drop the **shell** rows (`CLASS=shell`) — a `cluster` dispatch is an agent and is KEPT. Every count then describes the FILTERED set; `summary.excluded_shells` says how many went and `summary.kinds_excluded_by_filter` names any kind removed entirely |
 | `--no-ch` | skip ClickHouse — the client is never constructed |
-| `--no-capture` | skip the pane scrape; **every** `waiting_probable` becomes `null` |
+| `--no-capture` | skip the pane scrape; **every** `waiting_probable` AND `unsent_prompt` becomes `null` (both roll-up numbers `null`, never `0`) |
 | `--fuzzyclaw` / `--no-fuzzyclaw` | the task-file join is **OFF by default** (see below) |
 | `--no-ledger` | skip the per-host agent-ledger read. Rows then have **no age and no session id** — the #419 view, reproducible on demand |
 | `--plain` | `tail` only: strip ANSI at the source instead of `sed`-ing it out |
@@ -58,6 +59,10 @@ by the operator 2026-08-14. An agent reads this, and pays by the token.
 | table (default) | ~3,280 tok | ❌ **lossy** — 73 truncated cells, 45 rows whose task exceeds the 25-char column |
 | `--json` | ~14,017 tok | ✅ |
 | `--json --lean` | ~9,629 tok | ✅ on what it keeps |
+
+⚠ Those three figures were measured on ONE 75-row scan on 2026-08-14 and **predate the
+`unsent_prompt` pair and `not_measured`**, which add to all three. The RANKING is what the
+table is for and that is unchanged; do not quote the absolute numbers as current.
 
 **Ask for `--json --lean` unless you need a dropped field.** It is cheaper than the full payload
 AND more faithful than the cheap one. `lean_row_fields` and `lean_host_fields` travel in the payload
@@ -99,6 +104,51 @@ ending in `?` would be a false positive), `uncaptured` (the batch ran, this pane
 it), `skipped` / `error`. `summary.waiting.probable` is likewise **`null`, never `0`**, when
 nothing was scraped — the one sentence this tool must never emit is "nothing is waiting on
 you" off a look that never happened.
+
+## 🔴 `unsent_prompt` — work PARKED one Enter away (a DIFFERENT question)
+
+Measured 2026-08-15 across all 79 panes on both hosts: **five** held text typed at the prompt
+and never sent — real work, some of it hours old — and the one-call answer reported none of
+them. So it is now measured, on the row as `unsent_prompt` (**the text**, so you can triage
+without opening the pane) plus `unsent_prompt_status`, and rolled up as
+`summary.unsent_prompt`.
+
+🔴 **It is NOT part of `waiting_probable` and is never summed into it.** The same sweep
+measured `waiting_probable` at **11 flagged, 11 true positives, ZERO false positives**. That
+precision is this tool's most valuable property and a noisier signal folded into it would
+destroy exactly that. Read both — they answer different questions:
+
+| | means | |
+|---|---|---|
+| `waiting_probable` | this window is **BLOCKED** and cannot proceed without you | go unblock it |
+| `unsent_prompt` | this window has **WORK PARKED** in its input box | send it, or clear it |
+
+🔴 **Scoped to the pane's OWN input line, not "any matching line in the capture."** Only the
+lines *between the two box-drawing rules* are read, so scrollback, an echoed prompt, and a
+pane **displaying another session's transcript** cannot trip it — a live false positive of
+exactly that class already bit the `waiting` scrape.
+
+🔴 **`unsent_prompt: null` is an empty box ONLY when `unsent_prompt_status == "ok"`.** The
+statuses are `ok`, `no_input_box`, `uncaptured`, `not_claude`, `skipped`, `error`;
+`summary.unsent_prompt.count` is **`null`, never `0`**, when no box was read. `no_input_box`
+is a modal (which replaces the box) or a draft taller than the box — **unmeasured**, never
+"nothing typed". Shell panes are **never** scraped (`not_claude`): a half-typed shell command
+is a different and noisier thing.
+
+## 🔴 `not_measured` — what this tool CANNOT see, and who owns it
+
+A blind dogfood found this tool "precise about what it measured but it does not tell a cold
+reader what it did **not** measure" — while **60 open PRs**, one conflicting for eleven days,
+sat outside every number it prints. `report["not_measured"]` names each such population and
+the **skill that answers it**: `pull_requests` → `standup`, `mail_queue` → `mailbox`,
+`cluster_alerts` → `standup`, `initiative_board` → `initiatives`,
+`gui_windows_outside_tmux` → `i3`.
+
+🔴 **It is DERIVED from the report's own keys, not a written-down list.** An entry is emitted
+only while the report carries no key for that population, so the day PR querying lands the
+claim stops being made with no edit anywhere. This file has shipped a constant masquerading
+as a measurement five times; a static list of "things we do not measure" is the same defect
+with a longer fuse. `blocked_on_me` (clawgate) is **not** listed — that one *is* measured.
 
 ## 🔴 `blocked_on_me` — the clawgate approval queue
 
@@ -156,7 +206,7 @@ predate it.
 
 ## The caveats are in the OUTPUT, not just in this file
 
-`report["caveats"]` (structured) + three footer lines in the table, printed
+`report["caveats"]` (structured) + one footer line each in the table, printed
 unconditionally — an agent that runs the script cold never reads this file:
 
 - `claude_detection` — `pane_current_command =~ /claude/`; a claude under a wrapper shell
@@ -167,7 +217,14 @@ unconditionally — an agent that runs the script cold never reads this file:
 - `ledger_scope` — `per_host`; `age_secs` / `claude_session_id` come from the agent ledger,
   read on EVERY scanned host, so a REMOTE row has both and **can** be `stale`.
 - `waiting_signal` — the enumerated signal set, the claude-rows-only scope, and the
-  prompt-text exclusion with its reason.
+  prompt-text exclusion with its reason. 🔴 That text is still excluded from `waiting` but is
+  **no longer discarded** — the caveat points at `unsent_prompt`, which now carries it.
+- `unsent_prompt` — the status vocabulary, the claude-rows-only scope, and `separate_from:
+  waiting_probable` as a FIELD rather than a sentence a consumer has to parse.
+
+…plus `report["not_measured"]` and a `▸ NOT MEASURED HERE` section, which are the same idea
+one level out: not a qualification on a number this tool produced, but the list of
+populations it produced nothing about.
 
 ## 🔴 Read the exit code — the two zeroes are different facts
 
