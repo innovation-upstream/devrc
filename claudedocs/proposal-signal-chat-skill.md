@@ -1,7 +1,8 @@
 # Proposal: Signal Chat Skill
 
 **Date:** 2026-08-15 (draft, opencode session) · **Revised:** 2026-08-16 after evaluation against the tree
-**Status:** Ready to dispatch — all three blocking decisions resolved 2026-08-16 (§Decisions)
+**Status:** Implemented (devrc half) in **PR #514** — see §Corrections from implementation, which
+records where this spec turned out to be wrong. Decisions resolved 2026-08-16 (§Decisions).
 
 ---
 
@@ -61,6 +62,38 @@ verified in-tree; the file:line evidence is in the bullets.
 Additionally, four **schema defects** found while reviewing the DDL — all now fixed in §4 and
 each one is a named test in §Test Plan: the `UNIQUE`/NULL idempotency hole, the reaction FK
 ordering trap, unconstrained attachment re-delivery, and the outbound sync echo.
+
+## Corrections from implementation (PR #514)
+
+🔴 **This spec was written from a review, not from having built the thing. Building it found
+four places where it was wrong.** Recorded here rather than silently fixed, because the point
+of the document is to be re-readable later — and because two of the four are the same class of
+error the review itself was correcting for: a claim stated slightly beyond what was checked.
+
+1. 🔴 **🔧#4 has an IDENTITY half this spec missed, and the timestamp fix alone does not
+   close it.** §4 says the outbound sync echo dedupes if the send path records the *server*
+   timestamp. That is necessary and **not sufficient**. The draft's sender is a synthetic
+   placeholder contact (minted from the account's own phone number); the echo's sender is the
+   real uuid. Those are two different rows in `signal.contacts`, so the composite key
+   `(source_contact_id, message_timestamp)` **differs**, and the echo dedupes against nothing
+   even with the timestamp handled perfectly. Closed in the implementation by
+   `_promote_placeholder()`. The review caught the timestamp half and stopped there.
+2. 🔴 **§7's send path had a latent bug**: a draft addressed to a **bare phone number** would
+   have transmitted to the synthetic placeholder uuid rather than the real recipient.
+3. 🔴 **The §4 DDL cannot express D3 at all.** It has no `send_state`, no `approval_ref`, no
+   `dest_contact_id` — so the approve-then-send lifecycle has nowhere to live. The
+   implementation adds them, and gives a pending draft a **negative provisional timestamp** so
+   it can never collide with a real message's. The DDL above is therefore the *pre-D3* shape;
+   read the migration in PR #514 for the real one.
+4. **"Sync/outbound" is not a fixture case, it is a full code path.** §Test Plan lists it as
+   one row in the `test_envelope_parse.py` corpus. `syncMessage.sentMessage` carries its own
+   timestamp and destination and needs its own handling, not a variant fixture.
+
+Also worth recording, because it is a result about the *method* rather than the code: the one
+mutant that survived the sweep (the D3 type check) survived because **the test asserted a
+string both guards' messages contain** — it passed for the wrong reason. The gate itself was
+never bypassable and no security hole was closed; what was defective was the evidence. That is
+the spelled-guard trap, and it is worth expecting again anywhere a test asserts on a message.
 
 ## Verified sound (checked, not assumed)
 
