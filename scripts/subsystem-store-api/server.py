@@ -79,6 +79,47 @@ and client-confidential content, and §2b's hardening stops being optional:
     one abuser locks out the world. An absent or unparseable `CF-Connecting-IP`
     therefore FAILS CLOSED (uniform 401), rather than being bucketed into a
     shared "unknown" that reproduces exactly that hazard.
+  * **…and the header is only READ when the TCP PEER is a trusted proxy**
+    (`load_trusted_proxies` / `peer_is_trusted`) — see the next section, which
+    is the defect that made the rest of this list forgeable.
+
+PHASE 1.5b — `CF-Connecting-IP` WAS TRUSTED FROM ANY PEER
+----------------------------------------------------------
+🔴 THE HEADER ABOVE IS CALLER-SUPPLIED DATA. Everything the previous section
+claims about it — "Cloudflare overwrites it on every request it proxies" — is
+true of requests that ARRIVE FROM CLOUDFLARE, and says nothing about a request
+that did not. The first version read it from whoever connected, so ANY peer that
+could address the pod on 8102 (a pod in the cluster, a `kubectl port-forward`, a
+second IngressRoute) could send a header naming a THIRD PARTY and five bad
+tokens, and that third party was locked out for fifteen minutes — seeing a 401
+indistinguishable from a wrong credential. Measured against the deployed pod
+before this fix: five forged requests, then the victim's own valid request.
+
+Fixing it in the network layer alone was rejected: a NetworkPolicy is a
+different repo, a different review, and cannot be exercised without a cluster.
+The rule this file lives by is that a guard you cannot watch fail is not a
+guard. So the primary fix is HERE, and it is hermetic:
+
+  * `SUBSYSTEM_STORE_TRUSTED_PROXIES` — an explicit allowlist of peer addresses
+    or CIDRs. **REQUIRED**: no default, and the process refuses to start
+    without it (`EXIT_CONFIG`), for the same reason a short token does. A
+    default would be a guess about somebody's cluster, and a guess that is
+    wrong in the permissive direction is exactly the defect.
+  * If the peer is not in the allowlist the request is REFUSED —
+    `status=untrusted-peer`, the same uniform 401 as everything else. 🔴 It
+    does NOT fall back to keying on the peer address: that is the "one abuser
+    locks out the world" failure the section above rejects, and arriving at it
+    by way of a *security* check would be worse, not better.
+  * `/healthz` is answered BEFORE any of this, so the kubelet probe — which
+    comes from the node and carries no `CF-Connecting-IP` — is untouched. A
+    readiness probe broken by a security guard is how the guard gets deleted.
+
+⚠ WHAT THIS CANNOT DO. The pod sees the address of whatever last hop connected
+to it — in this deployment the in-cluster gateway, never Cloudflare's own
+address. So this proves "the request came through the gateway", NOT "the
+request came through Cloudflare". Anything that can occupy that hop can still
+forge the header. Narrowing WHO can occupy it is the NetworkPolicy's job, and
+it is the second layer, not this one.
   * **Rate limit + lockout in the app** (`RateLimiter`): 5 failed auths per
     client IP per minute, then a 15-minute lockout. Defaults live here in code;
     all three are tunable by env. Cloudflare's WAF and the Traefik middleware
@@ -148,6 +189,12 @@ MAX_TOKENS = 4
 # overwrites it on every request it proxies. `X-Forwarded-For` is deliberately
 # absent from this file — see the module docstring.
 CLIENT_IP_HEADER = "CF-Connecting-IP"
+
+# 🔴 …AND IT IS ONLY READ FROM THESE PEERS. Caller-supplied data is only as
+# trustworthy as the hop that overwrote it, so the header is honoured only when
+# the TCP peer is one of the proxies the operator named. No default value: see
+# `load_trusted_proxies`.
+ENV_TRUSTED_PROXIES = "SUBSYSTEM_STORE_TRUSTED_PROXIES"
 
 # §2b: "Rate-limit + lock out on repeated 401s". The defaults are HERE, in code,
 # so a deployment that sets no env still gets them; each is overridable.
@@ -359,6 +406,13 @@ def sole_header(headers: Any, name: str) -> str | None:
 def client_ip(headers: Any) -> str | None:
     """The client's address, or `None` — and `None` means REFUSE, not "unknown".
 
+    🔴 THIS FUNCTION ASSUMES THE PEER WAS ALREADY CHECKED. It parses a header,
+    which is caller-supplied bytes; the thing that makes those bytes an identity
+    is `peer_is_trusted`, in `_identify_and_meter`, which runs BEFORE this and
+    refuses the request outright when the peer is not a named proxy. Calling
+    this on an unchecked peer reintroduces the whole phase-1.5b defect, so the
+    call site is the guard and there is exactly one.
+
     🔴 `CF-Connecting-IP` ONLY. Cloudflare sets it on every proxied request and
     overwrites whatever the caller sent, which is what makes it trustworthy —
     and it is trustworthy for that reason alone, so the moment Cloudflare stops
@@ -388,6 +442,124 @@ def client_ip(headers: Any) -> str | None:
     except ValueError:
         return None
     return str(rate_limit_key(address))
+
+
+def load_trusted_proxies(env: dict[str, str]) -> tuple[Any, ...]:
+    """Resolve the peer allowlist that makes `CF-Connecting-IP` readable. OR RAISE.
+
+    🔴 THERE IS NO DEFAULT, AND THAT IS THE POINT. A default would be a guess
+    about somebody else's network, and the only guess that keeps every
+    deployment working is a permissive one — which is the defect this function
+    exists to close, shipped as a constant. So an unset or empty variable is a
+    misconfiguration and exits `EXIT_CONFIG` at startup, visible in a
+    CrashLoopBackOff, exactly like a token file that is missing.
+
+    Accepts addresses and CIDRs, comma- or whitespace-separated:
+
+        SUBSYSTEM_STORE_TRUSTED_PROXIES=10.0.0.1,10.1.0.0/24
+
+    Guard order — each reachable by an input no earlier guard rejects:
+      1. the variable is set and non-blank -> "no trusted proxies"
+      2. every item parses as an address/CIDR -> "not an IP address or CIDR"
+      3. no item is a DEFAULT ROUTE -> "trusts every peer"
+
+    🔴 Guard 3 is the one that matters. `0.0.0.0/0` (or `::/0`) is "trust
+    anybody who can reach me" spelled as configuration — the pre-fix behaviour,
+    reachable by an operator who wanted to silence a 401 during a rollout and
+    never took it out. Requiring the variable to be SET would not catch it;
+    only refusing the value does. A `/0` is refused BY PREFIX LENGTH, not by
+    matching the two spellings, so `0.0.0.0/0`, `::/0` and any future
+    equivalent are one rule rather than a list somebody has to extend.
+    """
+    raw = env.get(ENV_TRUSTED_PROXIES)
+    if raw is None or not raw.strip():
+        raise ValueError(
+            f"no trusted proxies: set ${ENV_TRUSTED_PROXIES} to the address(es) "
+            f"or CIDR(s) of the proxy that terminates public traffic. The "
+            f"{CLIENT_IP_HEADER} header is only read from those peers, and there "
+            f"is deliberately no default"
+        )
+    networks: list[Any] = []
+    for item in re.split(r"[,\s]+", raw.strip()):
+        if not item:
+            continue
+        try:
+            # `strict=False` so `10.1.2.3/24` is accepted as the /24 it names,
+            # rather than refused for having host bits set — an operator writing
+            # a CIDR from memory means the network, and refusing here would push
+            # them towards the /0 that guard 3 exists to stop.
+            network = ipaddress.ip_network(item, strict=False)
+        except ValueError as exc:
+            raise ValueError(
+                f"{ENV_TRUSTED_PROXIES}: {item!r} is not an IP address or CIDR ({exc})"
+            ) from None
+        if network.prefixlen == 0:
+            raise ValueError(
+                f"{ENV_TRUSTED_PROXIES}: {item!r} trusts every peer, which is the "
+                f"defect this setting exists to close. Name the proxy's address"
+            )
+        networks.append(network)
+    if not networks:
+        raise ValueError(
+            f"no trusted proxies: ${ENV_TRUSTED_PROXIES} resolved to no entries"
+        )
+    return tuple(networks)
+
+
+def peer_address(client_address: Any) -> Any:
+    """The TCP peer, normalised, or `None` — and `None` means REFUSE.
+
+    🔴 IPv4-MAPPED IS UNWRAPPED, because a dual-stack listener reports a v4
+    caller as `::ffff:10.0.0.1` and an allowlist written as `10.0.0.1/32` would
+    then never match — a fail-CLOSED break rather than a hole, but a break that
+    reads as "the guard is wrong" and gets widened until it is.
+
+    🔴 IT DOES NOT GO THROUGH `rate_limit_key`, and must not. That function
+    aggregates IPv6 to its **/64** on purpose, because an attacker picks freely
+    inside their own allocation — the exact reasoning that makes it WRONG here:
+    a /64 of trusted proxies is 2**64 peers the operator did not name. Two
+    functions that both normalise an address, deliberately differently.
+    """
+    if not isinstance(client_address, (tuple, list)) or not client_address:
+        return None
+    raw = client_address[0]
+    if not isinstance(raw, str):
+        return None
+    try:
+        # An IPv6 link-local peer carries a scope id (`fe80::1%eth0`) that
+        # `ip_address` will not parse. The zone is a local interface name, not
+        # part of the identity being allowlisted.
+        address = ipaddress.ip_address(raw.split("%", 1)[0].strip())
+    except ValueError:
+        return None
+    mapped = getattr(address, "ipv4_mapped", None)
+    return mapped if mapped is not None else address
+
+
+def peer_is_trusted(peer: Any, trusted: Sequence[Any]) -> bool:
+    """Is this peer one of the proxies whose `CF-Connecting-IP` we will read?
+
+    🔴 A BARE STRING IS REFUSED, LOUDLY, for the same reason `authorize` refuses
+    one: iterating a `str` yields CHARACTERS, and every character would fail the
+    membership test — so a caller who passed `"10.0.0.1"` instead of
+    `("10.0.0.1",)` would get a server that refuses every request and a
+    misconfiguration that looks like an attack. Fail loudly at the call instead.
+    """
+    if isinstance(trusted, (str, bytes)):
+        raise TypeError(
+            "trusted must be a SEQUENCE of networks, not one string: iterating a "
+            "str yields characters, and no character is an address"
+        )
+    if peer is None:
+        return False
+    for network in trusted:
+        # 🔴 VERSION-GATED. `IPv4Address in IPv6Network` raises TypeError, so an
+        # allowlist holding both families would crash on the first mismatch —
+        # an unhandled exception on the pre-auth path, which is the log-flood
+        # `_request_path` already exists to prevent.
+        if peer.version == network.version and peer in network:
+            return True
+    return False
 
 
 def rate_limit_key(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> Any:
@@ -712,6 +884,11 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
     # Injected by `build_server`.
     store_root: str = DEFAULT_STORE
     expected_tokens: tuple[str, ...] = ()
+    # 🔴 EMPTY MEANS TRUST NOBODY, not "trust everybody". A subclass that never
+    # reaches `build_server` (and `build_server` refuses an empty set) inherits
+    # a server that answers 401 to everything — the safe direction. The
+    # dangerous default would be silent and would look like it worked.
+    trusted_proxies: tuple[Any, ...] = ()
     limiter: RateLimiter | None = None
     audit: Callable[[str], None] = staticmethod(lambda line: print(line, flush=True))
 
@@ -1045,6 +1222,21 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         enforced at one call site and not the other is the failure this whole
         file keeps finding: writes used to skip both checks entirely.
         """
+        # 🔴 THE PEER GATE COMES FIRST, BEFORE THE HEADER IS EVEN LOOKED AT.
+        # `CF-Connecting-IP` is caller-supplied bytes; what makes it an identity
+        # is that a proxy we trust overwrote it. Reading it from an untrusted
+        # peer and *then* deciding is the same bug with an extra step — the
+        # value would already have been used to pick a bucket.
+        #
+        # NOT COUNTED, for the same reason `no-client-ip` is not: charging the
+        # failure needs a bucket, and the only address on offer here is the
+        # peer's — keying the lockout on THAT is the "one abuser locks out the
+        # world" failure this design rejects. The bound on an untrusted peer is
+        # the connection close `_respond` performs on every non-200.
+        peer = peer_address(getattr(self, "client_address", None))
+        if not peer_is_trusted(peer, self.trusted_proxies):
+            self._refuse(path, "untrusted-peer")
+            return False
         ip = client_ip(self.headers)
         if ip is None:
             # 🔴 FAIL CLOSED. The alternative — bucketing every unidentified
@@ -1253,6 +1445,7 @@ def build_server(
     port: int,
     store_root: str,
     tokens: Sequence[str],
+    trusted_proxies: Sequence[Any],
     limiter: RateLimiter | None = None,
     audit: Callable[[str], None] | None = None,
 ) -> ThreadingHTTPServer:
@@ -1266,12 +1459,28 @@ def build_server(
     """
     if isinstance(tokens, (str, bytes)):
         raise TypeError("tokens must be a SEQUENCE of tokens, not one string")
+    if isinstance(trusted_proxies, (str, bytes)):
+        raise TypeError(
+            "trusted_proxies must be a SEQUENCE of networks, not one string"
+        )
+    # 🔴 REQUIRED, AND NON-EMPTY. `trusted_proxies` has no default in this
+    # signature on purpose: a caller that forgot it fails at the call rather
+    # than getting a server that 401s everything for a reason nobody can see.
+    # An explicitly EMPTY sequence is refused here as a misconfiguration —
+    # the class default is empty so that the *unreachable* path still fails
+    # closed, but reaching it deliberately is a mistake worth naming.
+    if not tuple(trusted_proxies):
+        raise ValueError(
+            "trusted_proxies is empty: no peer could ever be trusted, so every "
+            f"request would be a 401. Set ${ENV_TRUSTED_PROXIES}"
+        )
 
     class _Handler(StoreRequestHandler):
         pass
 
     _Handler.store_root = store_root
     _Handler.expected_tokens = tuple(tokens)
+    _Handler.trusted_proxies = tuple(trusted_proxies)
     _Handler.limiter = limiter if limiter is not None else RateLimiter()
     if audit is not None:
         _Handler.audit = staticmethod(audit)
@@ -1317,6 +1526,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         tokens = load_tokens(token_file, dict(os.environ))
+        trusted_proxies = load_trusted_proxies(dict(os.environ))
         max_failures, window_s, lockout_s = limiter_settings(dict(os.environ))
     except ValueError as exc:
         print(f"subsystem-store-api: {exc}", file=sys.stderr)
@@ -1330,6 +1540,7 @@ def main(argv: list[str] | None = None) -> int:
         port=args.port,
         store_root=args.store,
         tokens=tokens,
+        trusted_proxies=trusted_proxies,
         limiter=limiter,
     )
     # 🔴 The startup line prints every FINGERPRINT, in the order the file lists
@@ -1339,7 +1550,11 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"subsystem-store-api: listening on {args.host}:{args.port} "
         f"store={args.store} token-ids={','.join(token_id(t) for t in tokens)} "
-        f"lockout={max_failures}/{window_s:g}s->{lockout_s:g}s",
+        f"lockout={max_failures}/{window_s:g}s->{lockout_s:g}s "
+        # 🔴 PRINTED, so "which peers may set CF-Connecting-IP" is a fact in the
+        # pod log rather than a value nobody can read back out of a running
+        # container. It is configuration, not a credential.
+        f"trusted-proxies={','.join(str(n) for n in trusted_proxies)}",
         flush=True,
     )
     try:
