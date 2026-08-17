@@ -3060,3 +3060,173 @@ class TestEveryAuditFieldIsEscaped:
         assert audit, "no audit line was written"
         assert "\x1b" not in audit[0], "an escape sequence reached the log"
         assert "\n" not in audit[0]
+
+
+# =============================================================================
+# 18. THE FINAL AUDIT ROUND — a third framing, and the loop nothing looped.
+# =============================================================================
+
+
+class TestDuplicateContentLengthCannotSmuggle:
+    """🔴 A WORKING SMUGGLE, found by a final audit, in the function whose own
+    comment claimed no framing could walk it.
+
+    `Content-Length: 0` followed by `Content-Length: 154`: a bare `.get()` takes
+    the FIRST value, so nothing is drained and the body is served as the next
+    request — on a `/healthz` 200, where the connection legitimately stays open
+    and the close-on-non-200 belt does not apply.
+
+    The predicate that catches it already existed TWENTY LINES AWAY, in
+    `client_ip`, rejecting a duplicated `CF-Connecting-IP` for exactly this
+    reason. Open-coded twice, correct at one site and wrong at the other — which
+    is the shape a duplicated predicate always takes. It is now one function.
+    """
+
+    def _smuggled(self, host: str) -> bytes:
+        return (
+            f"GET /api/v1/recall/{SCOPE} HTTP/1.1\r\nHost: {host}\r\n"
+            f"Authorization: Bearer {GOOD_TOKEN}\r\n"
+            f"CF-Connecting-IP: {CLIENT_IP}\r\n\r\n"
+        ).encode()
+
+    def test_two_content_length_headers_cannot_smuggle_a_request(self, store: Path):
+        with running(store) as (base, _):
+            host = base.split("//", 1)[1]
+            body = self._smuggled(host)
+            payload = (
+                f"GET /healthz HTTP/1.1\r\nHost: {host}\r\n"
+                f"Content-Length: 0\r\nContent-Length: {len(body)}\r\n\r\n"
+            ).encode() + body
+            data = _speak(host, payload)
+        assert data.count(b"HTTP/1.1 ") <= 1, "a duplicated Content-Length smuggled"
+        assert POINTER_LINE.encode() not in data
+
+    def test_the_LARGER_value_first_is_refused_too(self, store: Path):
+        """Order must not matter — a guard that only looked at the first value
+        would pass the test above by accident if the smaller one came second.
+        """
+        with running(store) as (base, _):
+            host = base.split("//", 1)[1]
+            body = self._smuggled(host)
+            payload = (
+                f"GET /healthz HTTP/1.1\r\nHost: {host}\r\n"
+                f"Content-Length: {len(body)}\r\nContent-Length: 0\r\n\r\n"
+            ).encode() + body
+            data = _speak(host, payload)
+        assert data.count(b"HTTP/1.1 ") <= 1
+        assert POINTER_LINE.encode() not in data
+
+    def test_the_shared_predicate_is_used_by_BOTH_sites(self):
+        """Structural, and deliberately so: the behavioural tests above and the
+        duplicate-`CF-Connecting-IP` test elsewhere would both stay green if the
+        two sites drifted apart again into two correct-today copies. What is
+        being pinned is that there is ONE predicate.
+        """
+        code = _executable_tokens(SERVER_PATH)
+        assert code.count("get_all") <= 2, (
+            "header-multiplicity logic is open-coded again; it belongs in "
+            "sole_header()"
+        )
+        assert "sole_header" in code
+
+    def test_sole_header_directly(self):
+        assert api.sole_header({"X": "1"}, "X") == "1"
+        assert api.sole_header({}, "X") is None
+
+
+class TestTheDrainLoopActuallyLOOPS:
+    """🔴 A GAP THIS BRANCH CREATED. Under the old `read(n)` the drain consumed
+    the whole body in one call; `read1` is what made the loop bookkeeping
+    load-bearing — and every other smuggling test sends headers and body in ONE
+    `sendall`, so the body arrives in one segment, the loop runs once, and the
+    accumulator is never exercised. Two mutants survived the whole suite.
+
+    🔴 THE DELIVERY SHAPE DECIDES WHICH DIRECTION IS OBSERVABLE, and a first
+    version of these tests missed that. Under-consumption (a broken accumulator)
+    is only visible when the body arrives in SEVERAL segments; over-consumption
+    (a dropped `min(remaining, …)` clamp) is only visible when the body and the
+    NEXT request arrive in ONE segment, because `read1` can only over-read bytes
+    that are already buffered. One shape cannot see both.
+    """
+
+    def _exchange(self, store: Path, *, segmented: bool, fill: int = 4000) -> bytes:
+        import socket
+        import time
+
+        with running(store) as (base, _):
+            host = base.split("//", 1)[1]
+            name, port = host.split(":")
+            smuggled = (
+                f"GET /api/v1/recall/{SCOPE} HTTP/1.1\r\nHost: {host}\r\n"
+                f"Authorization: Bearer {GOOD_TOKEN}\r\n"
+                f"CF-Connecting-IP: {CLIENT_IP}\r\n\r\n"
+            ).encode()
+            body = b"F" * fill + smuggled
+            follow = f"GET /healthz HTTP/1.1\r\nHost: {host}\r\n\r\n".encode()
+            head = (
+                f"GET /healthz HTTP/1.1\r\nHost: {host}\r\n"
+                f"Content-Length: {len(body)}\r\n\r\n"
+            ).encode()
+            with socket.create_connection((name, int(port)), timeout=10) as sock:
+                if segmented:
+                    # Separate sends with gaps: each `read1` returns only what
+                    # has arrived, so the loop MUST iterate and accumulate.
+                    sock.sendall(head)
+                    time.sleep(0.05)
+                    for at in range(0, len(body), 512):
+                        sock.sendall(body[at : at + 512])
+                        time.sleep(0.01)
+                    time.sleep(0.05)
+                    sock.sendall(follow)
+                else:
+                    # One segment: everything is buffered at once, so a `read1`
+                    # without the clamp will swallow `follow` too.
+                    sock.sendall(head + body + follow)
+                sock.settimeout(4)
+                data = b""
+                try:
+                    while True:
+                        chunk = sock.recv(65536)
+                        if not chunk:
+                            break
+                        data += chunk
+                except (TimeoutError, OSError):
+                    pass
+        return data
+
+    def test_a_SEGMENTED_body_is_drained_WHOLE(self, store: Path):
+        """UNDER-consumption. A broken accumulator stops after the first
+        `read1`, leaving the tail to be parsed as the next request — which both
+        loses the caller's real next request and can serve the smuggled one.
+        """
+        data = self._exchange(store, segmented=True)
+        assert POINTER_LINE.encode() not in data, "a segmented body leaked store content"
+        assert data.count(b"HTTP/1.1 200") == 2, (
+            f"expected both /healthz answers, got {data.count(b'HTTP/1.1 200')}: "
+            f"{data[:140]!r}"
+        )
+
+    def test_a_SINGLE_SEGMENT_body_is_drained_NO_FURTHER(self, store: Path):
+        """OVER-consumption, the direction the segmented case structurally
+        cannot see. Without the `min(remaining, …)` clamp the drain reads the
+        following pipelined request out of the buffer and answers it never —
+        fail-safe for smuggling, but it silently breaks keep-alive, and "safe by
+        accident in one direction" is not a property to leave untested.
+        """
+        data = self._exchange(store, segmented=False)
+        assert POINTER_LINE.encode() not in data
+        assert data.count(b"HTTP/1.1 200") == 2, (
+            f"the drain ate the next request: {data.count(b'HTTP/1.1 200')} "
+            f"responses, {data[:140]!r}"
+        )
+
+    def test_POSITIVE_CONTROL_both_shapes_answer_TWICE_when_correct(
+        self, store: Path
+    ):
+        """Both assertions above are `== 2`, so a server that answered nothing
+        would fail them — but a HARNESS that could never see two would fail them
+        identically. This pins that the shapes themselves are well-formed.
+        """
+        for segmented in (True, False):
+            data = self._exchange(store, segmented=segmented, fill=16)
+            assert data.count(b"ok\n") == 2, f"segmented={segmented}: {data[:140]!r}"

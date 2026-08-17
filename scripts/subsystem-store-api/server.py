@@ -327,6 +327,35 @@ def authorize(header: str | None, expected: Sequence[str]) -> str:
     return token_id(matched)
 
 
+def sole_header(headers: Any, name: str) -> str | None:
+    """The value of `name` iff it appears EXACTLY ONCE. Otherwise `None`.
+
+    🔴 ONE RULE, ONE PLACE. This predicate existed twice, open-coded, and was
+    correct at one site and wrong at the other — which is the shape a duplicated
+    predicate always takes. `client_ip` rejected a duplicated `CF-Connecting-IP`
+    ("a caller trying to smuggle a second value past a proxy that appends rather
+    than overwrites"); twenty lines away `_drain_body` used a bare
+    `headers.get("Content-Length")`, which silently takes the FIRST value.
+
+    A final audit walked that with a working smuggle: `Content-Length: 0`
+    followed by `Content-Length: 154` on a request that answers 200 — so the
+    connection legitimately stays open, nothing is drained, and the body is
+    served as the next request with store content in the response. The
+    `_drain_body` comment claiming "any framing this function does not fully
+    understand ends the connection" was false while a third framing walked it.
+
+    `headers.get_all` returns None for absent, a list otherwise.
+    """
+    try:
+        values = headers.get_all(name)
+    except AttributeError:  # a plain dict, in a unit test
+        single = headers.get(name)
+        values = None if single is None else [single]
+    if not values or len(values) != 1:
+        return None
+    return values[0]
+
+
 def client_ip(headers: Any) -> str | None:
     """The client's address, or `None` — and `None` means REFUSE, not "unknown".
 
@@ -351,15 +380,11 @@ def client_ip(headers: Any) -> str | None:
     test_the_address_is_NORMALISED_so_one_caller_is_one_bucket`, which uses the
     RFC 5737 documentation range.)
     """
-    try:
-        values = headers.get_all(CLIENT_IP_HEADER)
-    except AttributeError:  # a plain dict, in a unit test
-        single = headers.get(CLIENT_IP_HEADER)
-        values = None if single is None else [single]
-    if not values or len(values) != 1:
+    raw = sole_header(headers, CLIENT_IP_HEADER)
+    if raw is None:
         return None
     try:
-        address = ipaddress.ip_address(values[0].strip())
+        address = ipaddress.ip_address(raw.strip())
     except ValueError:
         return None
     return str(rate_limit_key(address))
@@ -814,8 +839,15 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         if headers.get("Transfer-Encoding"):
             self.close_connection = True
             return
-        raw_length = headers.get("Content-Length")
+        if headers.get_all("Content-Length") is None:
+            return
+        # 🔴 EXACTLY ONE Content-Length, via the SAME predicate `client_ip` uses.
+        # A bare `.get()` takes the first value, so `Content-Length: 0` followed
+        # by `Content-Length: 154` drained nothing and smuggled the body — on a
+        # 200, where the close-on-non-200 belt does not apply. Measured.
+        raw_length = sole_header(headers, "Content-Length")
         if raw_length is None:
+            self.close_connection = True
             return
         try:
             length = int(raw_length)
