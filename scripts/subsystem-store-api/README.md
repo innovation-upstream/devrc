@@ -82,9 +82,12 @@ scripts/subsystem-store-api/verify-byte-identity.sh \
                      -o jsonpath='{.data.token}' | base64 -d)
 ```
 
-The verifier sends `CF-Connecting-IP: 127.0.0.1` (override with `$CLIENT_IP`)
-because the server requires one — see "Rate limit, lockout and the client
-address" below.
+The verifier sends `CF-Connecting-IP: 127.0.0.1` (override with `$CLIENT_IP`).
+⚠ **Over a port-forward that header is INERT** — the peer is `127.0.0.1`, which
+is not a trusted proxy, so the server ignores it and buckets the request under
+the peer. It is sent so the same invocation also works when `--url` points at
+the nebula gateway, where the peer *is* trusted and the header becomes the
+client identity. See "Rate limit, lockout and the client address" below.
 
 ⚠ `verify-byte-identity.sh` prints a `diff` on failure, and that diff is store
 content. Redirect it to a file on a shared terminal.
@@ -119,7 +122,7 @@ one the server was configured with. That is the whole safety of overlap
 rotation — without it, "nobody uses the old token any more" is a guess:
 
 ```
-store-api audit ts=… ip=203.0.113.7 method=GET path=/api/v1/recall/x \
+store-api audit ts=… ip=203.0.113.7 peer=trusted method=GET path=/api/v1/recall/x \
   token=dbb22a50030d auth=ok result=200 status=recalled
 ```
 
@@ -158,11 +161,118 @@ party by forging theirs. Behind Cloudflare + Traefik the TCP peer address is the
 gateway's for everybody, so keying on that is the mirror failure — one abuser
 locks out the world.
 
-An absent, unparseable or **duplicated** header therefore **fails closed**: a
-uniform 401, and nothing counted, because there is no bucket to count into.
-Anything reaching the pod directly (a port-forward, `verify-byte-identity.sh`)
-must send the header itself; that is not a hole, since addressing the pod
-directly already bypasses the edge.
+### 🔴 …and the header is only read from a TRUSTED PEER
+
+| knob | default | env |
+|---|---|---|
+| peers whose `CF-Connecting-IP` is read | **none — required** | `SUBSYSTEM_STORE_TRUSTED_PROXIES` |
+
+`CF-Connecting-IP` is caller-supplied bytes. "Cloudflare overwrites it" is true
+of a request that *arrived from Cloudflare* and says nothing about one that did
+not — so before this setting existed, anything able to address the pod on 8102
+(a pod in the cluster, a `kubectl port-forward`, a second IngressRoute) could
+name a **third party** in the header, send five bad tokens, and lock that third
+party out for fifteen minutes. The victim saw a 401 indistinguishable from a
+wrong credential.
+
+The rule is the standard reverse-proxy one:
+
+```
+client = CF-Connecting-IP   if the TCP peer is in the allowlist
+       = the TCP peer       otherwise (and the header is not read at all)
+```
+
+That is enough. The property that matters is **a forged header must never name a
+third party**, and bucketing the forger under its own address satisfies it
+completely — such a caller can only ever lock out itself.
+
+### 🔴 The value is NOT the address you would guess
+
+For the homelab deployment it is **`10.244.0.123/32`**, and none of the three
+obvious candidates are right:
+
+| candidate | what it actually is | right? |
+|---|---|---|
+| `10.42.0.10` | the homelab nebula gateway's **nebula mesh** IP, which is what its nginx *listens* on | ✗ |
+| `192.168.50.94` | the node's Kubernetes **InternalIP** | ✗ |
+| `10.244.0.123` | the node's **`cilium_host` router address** — what the gateway's traffic is SNAT'd to on the way into the pod | ✓ |
+
+**Derive it, do not guess it** — from inside the caller, which is the only
+perspective that can be wrong in a way you would notice:
+
+```bash
+kubectl -n nebula exec ds/nebula-gateway -c nginx-proxy -- \
+  ip route get "$(kubectl -n subsystem-store get pod -l app=subsystem-store-api \
+                    -o jsonpath='{.items[0].status.podIP}')"
+# 10.244.0.13 dev cilium_host  src 10.244.0.123
+#                                  ^^^^^^^^^^^^ this is the value
+```
+
+🔴 **It is Cilium-allocated per node and nothing reconciles it.** A node rebuild
+can hand out a different router address, and no controller will update this env
+var. ⚠ **And the failure is SILENT** — requests are still served, just all
+bucketed under one address, so `/healthz` keeps answering and the pod stays
+Ready (see below). An earlier revision of this line said "loud and fail-safe",
+which was true of the refuse-outright design this replaced and contradicted its
+own cross-reference two sections down. A degradation that keeps the health probe
+green is the anti-pattern this module names elsewhere; the only tell is
+`peer=untrusted` in the log, and it is a manual step on a list nobody keeps.
+
+### Rules on the value
+
+* **There is no default and the process exits 78 without one.** A default would
+  be a guess about somebody's network, and the only guess that keeps every
+  deployment working is the permissive one — which is the defect itself.
+* `0.0.0.0/0` (and `::/0`) is **refused**: the pre-fix behaviour spelled as
+  configuration.
+* **A prefix wider than `/24` (IPv4) or `/64` (IPv6) is refused too**, because
+  refusing only `/0` inspects one entry in isolation: the two halves of the
+  address space, each written as a `/1`, parse clean and together trust
+  everything, and — the realistic mistake — a pod CIDR like `10.244.0.0/16`
+  would hand the client identity to every pod in the cluster, which is exactly
+  the attacker this setting exists to stop. List several narrower entries if you
+  genuinely need a wide range.
+* **Entries must be written in the same address family the peer arrives as.**
+  `peer_address` unwraps an IPv4-mapped peer (`::ffff:10.0.0.1` → `10.0.0.1`)
+  but the allowlist parser does not, so an entry spelled `::ffff:10.0.0.1` will
+  **never match**. Fail-closed, so it is a config error rather than a hole —
+  write `10.0.0.1`.
+* A request from any other peer is **served normally, bucketed under the peer's
+  own address**, and annotated `peer=untrusted` in the audit log. It is *not*
+  refused: refusing was tried, and it broke the phase-1 acceptance procedure
+  outright (`verify-byte-identity.sh` runs through `kubectl port-forward`, whose
+  peer is `127.0.0.1`, not the allowlisted address) while turning one wrong
+  address into a total outage that `/healthz` hid.
+* `/healthz` is answered **before** any of this, so the kubelet probe (which
+  comes from the node and sends no `CF-Connecting-IP`) is untouched.
+* The startup line prints the allowlist, so "which peers may set the client
+  identity" is readable out of a running pod.
+
+**If the value is wrong**, every API request is served but keyed on the gateway's
+address — so one client's failures can lock out the others, and every line says
+`peer=untrusted`. That is the symptom to grep for; the pod stays Ready either
+way, so the probe will not tell you.
+
+⚠ **What it cannot do.** The pod sees whatever last hop connected to it — in
+the homelab deployment the in-cluster gateway, never Cloudflare's own address.
+So this proves *the request came through the gateway*, not *the request came
+through Cloudflare*.
+
+Narrowing who can occupy that hop is a NetworkPolicy's job — 🔴 **and that
+NetworkPolicy is NOT DEPLOYED YET.** `homelab-infra`
+`clusters/homelab/apps/subsystem-store/networkpolicy.yaml` exists only on the
+unmerged branch of **homelab-infra #330**; on `trunk` that kustomization still
+lists four resources (`namespace`, `pvc`, `secrets.enc`, `deployment`) and no
+policy. Until #330 merges, **any pod in the cluster can address this pod on
+8102** and the app-layer gate above is the only layer there is. Do not read this
+paragraph as a compensating control that is already in place — and see that
+file's header for why, even once it lands, the two layers overlap far more than
+they compose.
+
+An absent, unparseable or **duplicated** header **fails closed** for a TRUSTED
+peer: a uniform 401, and nothing counted, because there is no bucket to count
+into. (For an untrusted peer the header is never consulted, so its absence is
+not an error.)
 
 Every rejection is the same 401 on the wire — body, code and header set — and is
 told apart only in the audit log's `status=` field. The full vocabulary, which is
@@ -180,6 +290,21 @@ what the Loki rules select on:
 
 An error that discriminates is an enumeration API; a log that does not is a
 post-mortem with no evidence.
+
+🔴 **`peer=` is a SEPARATE field from `status=`, on purpose.**
+
+| `peer=` | meaning |
+|---|---|
+| `trusted` | the peer was in the allowlist, so `ip=` came from `CF-Connecting-IP` |
+| `untrusted` | **something addressed the pod directly** — `ip=` is the TCP peer and the header was never read |
+| `-` | the request line was too malformed to establish either |
+
+An earlier version of this feature spelled it `status=untrusted-peer` with
+`auth=fail`. That put every `kubectl port-forward` — including the documented
+byte-identity run — into the Loki auth-fail alert, which is how an alert gets
+ignored. Reaching the pod directly is worth **detecting**; it is not an
+authentication failure and must not be written as one. Grep it with
+`{namespace="subsystem-store"} |= "peer=untrusted"`.
 
 ⚠ **A wrong PATH is not a failed AUTH and is not counted.** Only a request that
 reaches the token check and fails it moves the lockout. Counting path probes
