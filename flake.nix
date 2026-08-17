@@ -234,7 +234,18 @@
             # nix-instantiate and opencode above. Hermetic — logrotate only ever
             # sees a pytest tmp_path, its own generated config and its own state
             # file; no network, no ambient /var/lib/logrotate.status.
-            nativeBuildInputs = [ pyEnv pkgs.bash pkgs.ripgrep pkgs.git pkgs.util-linux pkgs.jq pkgs.gnugrep pkgs.curl pkgs.nodejs pkgs.nix pkgs.opencode pkgs.logrotate ];
+            #
+            # rsync: MEASURED 2026-08-16 — scripts/tests/test_subsystem_store_api.py
+            # drives the REAL scripts/subsystem-store-api/seed.sh, whose one
+            # copy step is `rsync -a --delete "$STORE"/ "$STAGE"/`. Without the
+            # binary those tests fail with `rsync: command not found` (rc 127),
+            # which is a FAILURE and not a skip, deliberately: the property they
+            # pin is that seeding never writes to the local store, and that store
+            # is the only copy of client-confidential content. The same
+            # nix-shell-stripped-PATH method as the `nix` entry above reproduced
+            # it. Present on the workbench (`~/.nix-profile/bin/rsync`), so the
+            # pre-push tier is unaffected.
+            nativeBuildInputs = [ pyEnv pkgs.bash pkgs.ripgrep pkgs.git pkgs.util-linux pkgs.jq pkgs.gnugrep pkgs.curl pkgs.nodejs pkgs.nix pkgs.opencode pkgs.logrotate pkgs.rsync ];
           }
           ''
             cp -r ${./.} src
