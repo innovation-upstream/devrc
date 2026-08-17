@@ -215,6 +215,18 @@ runtime cost. (Cheap to A/B with this same harness by editing `recap.SYSTEM_PROM
 ---
 
 ### Reproduce
-Harness + this doc: `scripts/initiatives/dspy-eval/` (see its `README.md`). Raw outputs:
-`results-run{1,2,3}.json` (every recap + per-dim score), `variance.json`, `eval_set.json`,
-`scan-days30.json` (frozen input capture).
+🔴 **The harness was DELETED — this doc is now the whole record, and that is deliberate.**
+`scripts/initiatives/dspy-eval/` (harness + `results-run{1,2,3}.json`, `variance.json`,
+`eval_set.json`, `scan-days30.json`) was removed because its frozen input capture was
+**captured third-party text committed to a PUBLIC repo**: 1,452 string leaves, 333 of them
+`recent_messages[].text` message bodies, 262 under a single client repo. It survived #350 —
+the PR that scrubbed this repo's public IPs and client hostnames — because those gates look
+for IPs and hostnames, and a paragraph of captured prose is neither.
+
+The code was already dead independently: `dataset.py` called `recap.recap_context()`, which
+no longer exists (`recap.py` was refactored into the `identity_context`/`status_context`
+pair), so the eval set could not be rebuilt.
+
+The class is now gated by `scripts/tests/test_no_captured_text.py`. To redo this evaluation,
+re-capture inputs to a path OUTSIDE the repo and keep them there — the numbers above are the
+deliverable, the capture never was.
