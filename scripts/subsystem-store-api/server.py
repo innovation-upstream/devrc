@@ -567,11 +567,16 @@ def peer_is_trusted(peer: Any, trusted: Sequence[Any]) -> bool:
     if peer is None:
         return False
     for network in trusted:
-        # 🔴 VERSION-GATED. `IPv4Address in IPv6Network` raises TypeError, so an
-        # allowlist holding both families would crash on the first mismatch —
-        # an unhandled exception on the pre-auth path, which is the log-flood
-        # `_request_path` already exists to prevent.
-        if peer.version == network.version and peer in network:
+        # ⚠ NO VERSION GATE, AND THE FIRST DRAFT HAD ONE WITH A FALSE COMMENT
+        # BESIDE IT: `peer.version == network.version and peer in network`,
+        # explained as "`IPv4Address in IPv6Network` raises TypeError". It does
+        # not. `ipaddress._BaseNetwork.__contains__` returns False across
+        # families — measured on 3.12.13 and 3.14.7, both directions. The clause
+        # was therefore dead code, and a mutation sweep found it by surviving
+        # its removal. Removed rather than kept: two guards reaching one outcome
+        # cannot be told apart by any test, and the comment describing the one
+        # that never fires is what a maintainer would have believed.
+        if peer in network:
             return True
     return False
 

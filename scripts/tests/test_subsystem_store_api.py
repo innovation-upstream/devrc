@@ -3608,18 +3608,40 @@ class TestTrustedProxyAllowlistParsing:
     that never executes.
     """
 
+    # 🔴 THREE GUARDS REACH "no trusted proxies", SO THAT PHRASE CANNOT TELL
+    # THEM APART — and asserting it was how two mutants survived. Each test
+    # below pins the SENTENCE ITS OWN GUARD emits. Measured: with guard 1
+    # weakened to `if raw is None`, a blank value falls through to the
+    # empty-result guard and raises a message that still contains
+    # "no trusted proxies", so the sweep scored it SURVIVED.
+    UNSET_SENTENCE = "set $SUBSYSTEM_STORE_TRUSTED_PROXIES to the address(es)"
+    NO_ENTRIES_SENTENCE = "resolved to no entries"
+
     def test_an_UNSET_variable_raises_rather_than_defaulting(self):
         with pytest.raises(ValueError) as exc:
             api.load_trusted_proxies({})
-        assert "no trusted proxies" in str(exc.value)
+        assert self.UNSET_SENTENCE in str(exc.value)
 
-    def test_a_BLANK_variable_raises_too(self):
-        """Reachable past guard 1 only if guard 1 tests emptiness rather than
-        presence: the variable IS set, to whitespace.
+    def test_a_BLANK_variable_raises_from_THE_SAME_guard_not_a_later_one(self):
+        """Reachable past a presence-only guard 1: the variable IS set, to
+        whitespace. And it must be guard 1 that catches it — a fall-through to
+        the empty-result guard is a different message and a different bug.
         """
         with pytest.raises(ValueError) as exc:
             api.load_trusted_proxies({"SUBSYSTEM_STORE_TRUSTED_PROXIES": "  \t "})
-        assert "no trusted proxies" in str(exc.value)
+        assert self.UNSET_SENTENCE in str(exc.value)
+        assert self.NO_ENTRIES_SENTENCE not in str(exc.value)
+
+    def test_a_NON_BLANK_value_that_yields_NO_ENTRIES_raises_too(self):
+        """🔴 REACHABILITY for the empty-result guard, which nothing else here
+        reaches: `","` is not blank, so guard 1 passes it, and the split then
+        yields nothing but empty strings. Without this the guard is deletable
+        and the sweep says so — measured, it survived.
+        """
+        with pytest.raises(ValueError) as exc:
+            api.load_trusted_proxies({"SUBSYSTEM_STORE_TRUSTED_PROXIES": ",,"})
+        assert self.NO_ENTRIES_SENTENCE in str(exc.value)
+        assert self.UNSET_SENTENCE not in str(exc.value)
 
     def test_a_NON_ADDRESS_entry_names_the_offending_item(self):
         with pytest.raises(ValueError) as exc:
@@ -3627,10 +3649,18 @@ class TestTrustedProxyAllowlistParsing:
                 {"SUBSYSTEM_STORE_TRUSTED_PROXIES": "192.0.2.1, gateway"}
             )
         message = str(exc.value)
-        assert "not an IP address or CIDR" in message
-        # 🔴 The POSITION is not enough — an operator with a five-entry list
-        # needs the value. And the VALID sibling must not be blamed.
-        assert "'gateway'" in message
+        # 🔴 THE WHOLE COMPUTED PREFIX, PINNED AS ONE STRING — and that is a
+        # correction, not style. The first version asserted `"'gateway'" in
+        # message`, which SURVIVED a mutant that replaced the `{item!r}` slot
+        # with the literal word "an entry": `ip_network`'s own ValueError
+        # already contains `'gateway'`, so the assertion was reading the
+        # exception's static prose and never the computed slot at all. A guard
+        # on WORDS is walkable by a value that spells the same words somewhere
+        # else in the sentence.
+        assert message.startswith(
+            "SUBSYSTEM_STORE_TRUSTED_PROXIES: 'gateway' is not an IP address or CIDR ("
+        ), message
+        # And the VALID sibling must not be blamed.
         assert "192.0.2.1'" not in message
 
     def test_a_DEFAULT_ROUTE_is_refused_in_BOTH_families(self):
@@ -3730,8 +3760,15 @@ class TestPeerAddressNormalisation:
         assert api.peer_is_trusted(None, trusted) is False
 
     def test_a_v6_peer_against_a_v4_allowlist_is_False_not_a_TypeError(self):
-        """`IPv4Address in IPv6Network` raises. An allowlist holding one family
-        and a peer from the other is an ordinary deployment, not an error.
+        """An allowlist holding one family and a peer from the other is an
+        ordinary deployment, not an error.
+
+        ⚠ THE NAME RECORDS A CLAIM THAT WAS WRONG. `peer_is_trusted` used to
+        carry an explicit version gate, commented "`IPv4Address in IPv6Network`
+        raises TypeError". It does not — `ipaddress` compares versions itself
+        and returns False (measured on 3.12.13 and 3.14.7). The gate was dead
+        code; a mutation sweep found it by surviving its removal. The BEHAVIOUR
+        is still worth pinning, so the test stays and the guard is gone.
         """
         trusted = api.load_trusted_proxies(
             {"SUBSYSTEM_STORE_TRUSTED_PROXIES": "192.0.2.0/24"}

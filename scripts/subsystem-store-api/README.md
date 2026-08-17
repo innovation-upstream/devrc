@@ -158,6 +158,49 @@ party by forging theirs. Behind Cloudflare + Traefik the TCP peer address is the
 gateway's for everybody, so keying on that is the mirror failure — one abuser
 locks out the world.
 
+### 🔴 …and the header is only read from a TRUSTED PEER
+
+| knob | default | env |
+|---|---|---|
+| peers whose `CF-Connecting-IP` is read | **none — required** | `SUBSYSTEM_STORE_TRUSTED_PROXIES` |
+
+`CF-Connecting-IP` is caller-supplied bytes. "Cloudflare overwrites it" is true
+of a request that *arrived from Cloudflare* and says nothing about one that did
+not — so before this setting existed, anything able to address the pod on 8102
+(a pod in the cluster, a `kubectl port-forward`, a second IngressRoute) could
+name a **third party** in the header, send five bad tokens, and lock that third
+party out for fifteen minutes. The victim saw a 401 indistinguishable from a
+wrong credential.
+
+Set it to the address(es) or CIDR(s) of the proxy that terminates public
+traffic, comma- or whitespace-separated:
+
+```
+SUBSYSTEM_STORE_TRUSTED_PROXIES=10.0.0.1,10.1.0.0/24
+```
+
+* **There is no default and the process exits 78 without one.** A default would
+  be a guess about somebody's network, and the only guess that keeps every
+  deployment working is the permissive one — which is the defect itself.
+* `0.0.0.0/0` (and `::/0`) is **refused**: that is the pre-fix behaviour spelled
+  as configuration. The refusal is by prefix length, so it is one rule rather
+  than a list of spellings.
+* A request from any other peer is the same uniform 401,
+  `status=untrusted-peer`, and it is **not counted** against any lockout — there
+  is no bucket to count it into, and keying on the peer would be the "one abuser
+  locks out the world" failure above.
+* `/healthz` is answered **before** the gate, so the kubelet probe (which comes
+  from the node and sends no `CF-Connecting-IP`) is untouched.
+* The startup line prints the allowlist, so "which peers may set the client
+  identity" is readable out of a running pod.
+
+⚠ **What it cannot do.** The pod sees whatever last hop connected to it — in
+the homelab deployment the in-cluster gateway, never Cloudflare's own address.
+So this proves *the request came through the gateway*, not *the request came
+through Cloudflare*. Narrowing who can occupy that hop is a NetworkPolicy's job
+(homelab-infra `clusters/homelab/apps/subsystem-store/networkpolicy.yaml`), and
+it is the second layer, not this one.
+
 An absent, unparseable or **duplicated** header therefore **fails closed**: a
 uniform 401, and nothing counted, because there is no bucket to count into.
 Anything reaching the pod directly (a port-forward, `verify-byte-identity.sh`)
@@ -170,6 +213,7 @@ what the Loki rules select on:
 
 | `status=` | meaning |
 |---|---|
+| `untrusted-peer` | the TCP peer is not in `SUBSYSTEM_STORE_TRUSTED_PROXIES`, so `CF-Connecting-IP` was never read — **any line with this status means something is addressing the pod directly** |
 | `unauthorized` | no/!wrong token, or a path outside `/api/v1/` |
 | `no-client-ip` | absent, unparseable or duplicated `CF-Connecting-IP` — fails closed |
 | `locked-out` | this client is serving a lockout |
