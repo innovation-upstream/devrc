@@ -118,9 +118,10 @@ renders outside the box — then the discriminator is: box line non-empty and no
 Every word above stands: this is **not** a `waiting` signal, and the three reasons are
 unchanged. What was wrong was the **disposal**. A blind dogfood hand-verified this tool
 against all 79 panes on both hosts and found **five** holding a draft one Enter from
-running — five distinct multi-word instructions, 20–45 characters each, four of them
-imperative follow-ups to work already on screen — and this tool reported none of them. The
-exclusion was correct; the silence was not.
+running — short multi-word instructions, mostly imperative follow-ups to work already on
+screen — and this tool reported none of them. The exclusion was correct; the silence was not.
+(The four that used to be quoted here verbatim were **real**; see the rule below. The live
+reproduction further down reports draft LENGTHS, which is the most a public file should say.)
 
 So the fact is now measured under its **own** name: row fields `unsent_prompt` (the text) and
 `unsent_prompt_status`, roll-up `summary.unsent_prompt`, `caveats.unsent_prompt`, and a
