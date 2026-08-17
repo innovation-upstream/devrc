@@ -1651,6 +1651,44 @@ class TestSkillDocsArePinned:
             "run it separately, never merge the path sets",
             "the compose rule, restated for the third source",
         ),
+        # 🔴 THE ESCALATION. MEASURED 2026-08-16: the session that built and
+        # deployed a whole service across nine merged PRs got 1 path under the
+        # cwd and 5 outside from `--session`, reported "Propose no write", and
+        # never ran `--pr` — which saw 17 paths and nominated the service above
+        # threshold. Every sentence below carries one half of the fix; deleting
+        # any one restores the stop-at-the-first-window behaviour, silently.
+        (
+            "ESCALATE BEFORE CONCLUDING",
+            "🔴 a thin or empty session window is a prompt to read a second one",
+        ),
+        (
+            "run `--pr` (or `--commit`) NOW, in this same step, before you report anything",
+            "🔴 the escalation is an ACTION in this step, not advice for later",
+        ),
+        (
+            "\"a second window was read and also came back empty\"",
+            "🔴 the stop condition — never \"the first window was empty\"",
+        ),
+        (
+            "This does NOT violate \"the windows never compose.\"",
+            "🔴 the rule an executor would otherwise cite to justify stopping",
+        ),
+        (
+            "It says nothing about **reading** a second window",
+            "the distinction: merging path sets is forbidden, reading two reports is not",
+        ),
+        (
+            "Reading one window and stopping is not compliance with that rule",
+            "🔴 the misreading named as the failure it is",
+        ),
+        (
+            "The better the session followed the rules, the less of it `--session` can see",
+            "🔴 the preferred window is blind to the MANDATED workflow, not an odd one",
+        ),
+        (
+            "`WRONG WINDOW?`",
+            "the computed block exists and the step tells the agent to act on it",
+        ),
     ]
 
     def test_EVERY_emitted_status_has_a_bullet_in_the_skill(self) -> None:
@@ -2829,6 +2867,412 @@ class TestSessionCaveatIsAccuratePerSource:
         assert caveat in st.render_text(rep)
         assert st.report_json(rep)["source"]["caveat"] == caveat
         assert st.report_json(rep)["source"]["session"] is not None
+
+
+class TestWrongWindowWarning:
+    """🔴 THE PREFERRED WINDOW IS BLIND TO THE MANDATED WORKFLOW, and the report
+    now says so with THIS RUN's numbers.
+
+    MEASURED 2026-08-16 on the session that designed, built, tested and deployed
+    the `subsystem-store-api` service across NINE merged PRs:
+
+        --session   1 path under the session cwd, 5 outside  -> no-match,
+                                                                "Propose no write"
+        --pr  over those same nine PRs   17 paths            -> nominated at 7
+
+    ~94% of the work was invisible to the preferred window. Nothing was
+    mis-counted: the 5 were counted and printed, in a note, and were not read.
+
+    🔴 BOTH CONTROLS OR NEITHER (`claude/RULES.md` → "a warning that always fires
+    is noise"). A block asserted only on the firing case is indistinguishable
+    from one printed unconditionally — so every arm here is a PAIR, and
+    `test_the_NEGATIVE_control` is the half that makes the positive one mean
+    anything.
+    """
+
+    # Pairwise distinct, and distinct from every number the assertions name, so
+    # a mutant that hardcodes one of them cannot survive by coincidence.
+    ONE_UNDER = ["src/collector/a.py"]
+    FIVE_OUTSIDE = ["w/x.py", "w/y.py", "w/z.py", "w/p.py", "w/q.py"]
+
+    def _src(self, under: int | None, outside: int | None, paths=()) -> st.PathSource:
+        """A session source with the two counters set directly.
+
+        The boundary is a property of the two integers, and driving it through a
+        transcript would make each boundary case an exercise of the extractor as
+        well. The transcript-driven pair below proves REACHABILITY; this proves
+        the rule.
+        """
+        return st.PathSource(
+            kind="session",
+            window="session",
+            paths=tuple(paths),
+            session="s-boundary",
+            under_cwd=under,
+            outside_cwd=outside,
+        )
+
+    # --- the rule, at the boundary and on BOTH sides of it ---------------------
+
+    @pytest.mark.parametrize(
+        "under,outside,fires,why",
+        [
+            (3, 2, False, "below: more is visible than not"),
+            (2, 2, False, "ON the boundary: a tie is not dominance"),
+            (2, 3, True, "one path past the boundary"),
+            (0, 0, False, "the empty window: no evidence of dominance either way"),
+            (0, 1, True, "nothing visible at all"),
+            (1, 5, True, "THE MEASURED CASE"),
+            (9, 10, True, "a bare majority still fires"),
+            (10, 9, False, "47% invisible and SILENT — the documented cost"),
+        ],
+        ids=lambda v: str(v),
+    )
+    def test_the_boundary_is_outside_greater_than_under(
+        self, under: int, outside: int, fires: bool, why: str
+    ) -> None:
+        hit = st.wrong_window_dominance(self._src(under, outside))
+        assert (hit is not None) is fires, f"{under} under / {outside} outside: {why}"
+
+    def test_the_percentage_is_computed_from_THIS_run(self) -> None:
+        """Three inputs, three different answers. A constant cannot do this, and
+        a mutant that swaps the numerator lands on 17/40/0 instead."""
+        assert st.wrong_window_dominance(self._src(1, 5))[2] == 83
+        assert st.wrong_window_dominance(self._src(2, 3))[2] == 60
+        assert st.wrong_window_dominance(self._src(0, 1))[2] == 100
+
+    def test_the_counters_are_returned_unchanged_not_recomputed(self) -> None:
+        assert st.wrong_window_dominance(self._src(1, 5))[:2] == (1, 5)
+
+    # --- the block, and the pair that makes it readable ------------------------
+
+    def test_THE_POSITIVE_control_the_block_names_the_actual_numbers(self) -> None:
+        lines = "\n".join(st.render_wrong_window(self._src(1, 5, self.ONE_UNDER)))
+        assert "WRONG WINDOW?" in lines
+        # The numbers, all three, from this run and not a template.
+        assert "5 of the 6 path(s) this session named (83%)" in lines
+        assert "NOT among the 1 this window reports" in lines
+        # …and the exact flags to run instead, taken from the module's own map
+        # rather than re-spelled here.
+        assert st._SOURCE_FLAG["pr"] in lines
+        assert st._SOURCE_FLAG["commit"] in lines
+
+    def test_THE_NEGATIVE_control_a_mostly_visible_session_gets_NOTHING(self) -> None:
+        """🔴 The half that makes the positive control mean something. A block
+        that also printed here would be boilerplate, and boilerplate is what the
+        measured failure walked past."""
+        assert st.render_wrong_window(self._src(5, 1, self.FIVE_OUTSIDE)) == []
+        assert st.wrong_window_dominance(self._src(5, 1)) is None
+
+    def test_a_source_with_no_counters_never_fires(self) -> None:
+        """Every non-session window: the counters do not exist there, and `None`
+        must stay `None` rather than becoming a reassuring zero."""
+        assert st.wrong_window_dominance(st.caller_supplied(["a/b.py"])) is None
+        assert st.wrong_window_dominance(self._src(None, 5)) is None
+        assert st.wrong_window_dominance(self._src(1, None)) is None
+
+    # --- reachability: the same pair, driven through a real transcript ---------
+
+    def _transcripts(self, tmp_path: Path):
+        repo = _init_repo(tmp_path, SCOPE)
+        cwd = str(repo)
+        dominated = _write_transcript(
+            tmp_path / "dominated.jsonl",
+            cwd,
+            [f"{cwd}/{p}" for p in self.ONE_UNDER]
+            + [f"{tmp_path}/elsewhere/{p}" for p in self.FIVE_OUTSIDE],
+        )
+        visible = _write_transcript(
+            tmp_path / "visible.jsonl",
+            cwd,
+            [f"{cwd}/src/collector/{Path(p).name}" for p in self.FIVE_OUTSIDE]
+            + [f"{tmp_path}/elsewhere/{p}" for p in self.ONE_UNDER],
+        )
+        return repo, dominated, visible
+
+    def test_THE_PAIR_end_to_end_through_a_real_transcript(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """🔴 Reachable, not merely breakable. The extractor really produces the
+        two counters, `collect_session_paths` really carries them, and the
+        renderer really reads them — on the same code path, with the same shape,
+        differing only in which side the paths fell on."""
+        repo, dominated, visible = self._transcripts(tmp_path)
+        store = _make_store(tmp_path / "s")
+
+        dom = st.build_report(_session_source(repo, dominated), store, SCOPE, today=TODAY)
+        vis = st.build_report(_session_source(repo, visible), store, SCOPE, today=TODAY)
+
+        assert dom.source.under_cwd == 1 and dom.source.outside_cwd == 5
+        assert vis.source.under_cwd == 5 and vis.source.outside_cwd == 1
+
+        assert "WRONG WINDOW?" in st.render_text(dom)
+        assert "WRONG WINDOW?" not in st.render_text(vis)
+
+    def test_it_fires_on_a_RESOLVED_run_too_not_only_on_a_dead_end(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """🔴 NOT a `ROUTE OUT` sibling. A run can clear the threshold on the few
+        paths it CAN see and propose a bullet for a subsystem that was a sliver
+        of the session — the window is just as wrong there, and that run gets no
+        dead-end block at all."""
+        repo = _init_repo(tmp_path, SCOPE)
+        cwd = str(repo)
+        store = _make_store(tmp_path / "s")
+        t = _write_transcript(
+            tmp_path / "t.jsonl",
+            cwd,
+            [f"{cwd}/src/collector/a.py", f"{cwd}/src/collector/b.py"]
+            + [f"{tmp_path}/elsewhere/{p}" for p in self.FIVE_OUTSIDE],
+        )
+        rep = st.build_report(_session_source(repo, t), store, SCOPE, today=TODAY)
+        assert rep.status == "resolved"
+        rendered = st.render_text(rep)
+        assert "WRONG WINDOW?" in rendered
+        assert "5 of the 7 path(s) this session named (71%)" in rendered
+        assert "ROUTE OUT" not in rendered, "premise gone: this is not a dead end"
+
+    def test_the_cross_repo_window_carries_NO_counters(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """🔴 `session-absolute` measures the same two counters against ANOTHER
+        repo's cwd, so a dominance claim read off them would answer a different
+        question. It carries its own caveat instead — see `PathSource.outside_cwd`."""
+        repo = _init_repo(tmp_path, SCOPE)
+        other = tmp_path / "the-other-checkout"
+        other.mkdir()
+        t = _write_transcript(
+            tmp_path / "t.jsonl", str(other), [f"{repo}/src/collector/a.py"]
+        )
+        src = _session_source(repo, t)
+        assert src.window == "session-absolute"
+        assert src.under_cwd is None and src.outside_cwd is None
+        assert st.render_wrong_window(src) == []
+
+    # --- the JSON half reads the SAME predicate --------------------------------
+
+    def test_the_json_carries_the_dominance_and_its_numbers(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        repo, dominated, visible = self._transcripts(tmp_path)
+        store = _make_store(tmp_path / "s")
+        dom = st.report_json(
+            st.build_report(_session_source(repo, dominated), store, SCOPE, today=TODAY)
+        )["source"]
+        vis = st.report_json(
+            st.build_report(_session_source(repo, visible), store, SCOPE, today=TODAY)
+        )["source"]
+        assert dom["wrong_window"] == {
+            "under_cwd": 1,
+            "outside_cwd": 5,
+            "percent_outside": 83,
+        }
+        assert vis["wrong_window"] is None
+        assert (vis["under_cwd"], vis["outside_cwd"]) == (5, 1)
+
+    # --- and it is still READ-ONLY ---------------------------------------------
+
+    def test_rendering_the_warning_WRITES_NOTHING(
+        self, tmp_path: Path, tailer_cache
+    ) -> None:
+        """🔴 The module's contract is that no mode writes to the store. A new
+        render path is a new chance to break it, so it is hashed like every
+        other — `TestNeverWrites`' predicate, on the branch that did not exist
+        when that class was written."""
+        repo, dominated, _ = self._transcripts(tmp_path)
+        store = _make_store(tmp_path / "s")
+        before = _tree_hash(store)
+        rep = st.build_report(_session_source(repo, dominated), store, SCOPE, today=TODAY)
+        rendered = st.render_text(rep)
+        json.dumps(st.report_json(rep))
+        assert "WRONG WINDOW?" in rendered, "the write-free path under test never ran"
+        assert _tree_hash(store) == before
+
+
+class TestTheZeroIsSCOPEDToItsWindow:
+    """🔴 THE SENTENCE THAT ENDED TWO SESSIONS EARLY.
+
+    `--session` used to close a `no-match` with *"This is a real zero, not an
+    empty window."* The distinction it draws is real and worth keeping — the
+    instrument RAN, versus nothing was readable — but as written it reads as
+    "there is nothing to record", which is how two separate sessions stopped.
+
+    `claude/RULES.md` → "when the artifact under test IS prose, a guard on WORDS
+    is walkable by REWORDING — pin the WHOLE normalised string." So this pins the
+    whole sentence, not a phrase from it. A cosmetic reword fails this test on
+    purpose; that is the price of a machine-readable claim.
+    """
+
+    SCOPED = (
+        "The instrument RAN: this is a real zero FOR THIS WINDOW, not an unread "
+        "window. It is NOT a finding about the SESSION — the other windows are "
+        "UNREAD, they are blind in different directions, and this run says "
+        "nothing about what they would return. See ROUTE OUT below before "
+        "concluding there is nothing to record."
+    )
+
+    SUPERSEDED = "This is a real zero, not an empty window."
+
+    def _no_match(self, tmp_path: Path) -> str:
+        store = _make_store(tmp_path / "s")
+        rep = _report(["src/unlisted-widget/a.py"], store)
+        assert rep.status == "no-match", "premise gone: this is not the no-match branch"
+        return st.render_text(rep)
+
+    def test_the_whole_scoped_sentence_is_printed(self, tmp_path: Path) -> None:
+        assert self.SCOPED in self._no_match(tmp_path)
+
+    def test_the_misreadable_sentence_is_GONE(self, tmp_path: Path) -> None:
+        """Deliberate wording change: the old assertion pinned this string and was
+        updated in the same commit, not deleted."""
+        assert self.SUPERSEDED not in self._no_match(tmp_path)
+
+    def test_it_still_distinguishes_the_two_zeros(self, tmp_path: Path) -> None:
+        """The tightening must not cost the distinction it was tightening. A run
+        that looked at nothing still says something different from one that
+        looked and resolved nothing."""
+        store = _make_store(tmp_path / "s")
+        empty = st.render_text(_report([], store))
+        assert "NOTHING WAS LOOKED AT" in empty
+        assert "real zero FOR THIS WINDOW" not in empty
+
+
+class TestWrongWindowMutationKillMatrix:
+    """Break the NARROWEST expression that can be wrong, one at a time, and
+    require THIS guard's own symptom.
+
+    🔴 POSITIVE CONTROL FOR THE BATCH: `test_kills_the_render_call_site` — a
+    mutant that is certainly caught if the harness works at all. It runs in this
+    same class, through the same `_load_mutant`, so a batch where every other
+    mutant "survives" is distinguishable from a harness wired to nothing.
+    """
+
+    ONE_UNDER = TestWrongWindowWarning.ONE_UNDER
+    FIVE_OUTSIDE = TestWrongWindowWarning.FIVE_OUTSIDE
+
+    def _src(self, mod, under, outside):
+        return mod.PathSource(
+            kind="session", window="session", paths=(), session="s-m",
+            under_cwd=under, outside_cwd=outside,
+        )
+
+    def test_kills_the_render_call_site(self, tmp_path: Path) -> None:
+        """POSITIVE CONTROL. Without the call the computation is intact and
+        nothing reaches the reader — the exact shape of the measured failure,
+        where the numbers existed and were never surfaced."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_ww_callsite",
+            [("    out.extend(render_wrong_window(src))", "    pass")],
+        )
+        store = _make_store(tmp_path / "s")
+        src = self._src(mod, 1, 5)
+        rep = mod.build_report(src, store, SCOPE, today=TODAY)
+        assert mod.wrong_window_dominance(src) is not None  # still computed…
+        assert "WRONG WINDOW?" not in mod.render_text(rep)  # …and never printed
+        assert "WRONG WINDOW?" in st.render_text(
+            st.build_report(st.PathSource(**vars(src)), store, SCOPE, today=TODAY)
+        )
+
+    def test_kills_the_boundary_itself(self, tmp_path: Path) -> None:
+        """`<=` -> `<`: a TIE becomes dominance. The mutant is silent on every
+        case the real rule fires on, so only the boundary case can see it."""
+        mod = _load_mutant(
+            tmp_path, "m_ww_tie", [("    if outside <= under:", "    if outside < under:")]
+        )
+        assert mod.wrong_window_dominance(self._src(mod, 2, 2)) is not None
+        assert st.wrong_window_dominance(
+            st.PathSource(kind="session", window="session", paths=(), under_cwd=2, outside_cwd=2)
+        ) is None
+        # …and the cases either side are unchanged, so the mutation is the
+        # boundary and nothing else.
+        assert mod.wrong_window_dominance(self._src(mod, 2, 3)) is not None
+        assert mod.wrong_window_dominance(self._src(mod, 3, 2)) is None
+
+    def test_kills_the_condition_entirely(self, tmp_path: Path) -> None:
+        """`if False`: the block fires on a session that is MOSTLY visible —
+        i.e. it becomes the unconditional sentence this design exists not to
+        be. Caught by the negative control, which is the only test that can."""
+        mod = _load_mutant(
+            tmp_path, "m_ww_always", [("    if outside <= under:", "    if False:")]
+        )
+        assert mod.wrong_window_dominance(self._src(mod, 5, 1)) is not None
+        assert "WRONG WINDOW?" in "\n".join(
+            mod.render_wrong_window(self._src(mod, 5, 1))
+        )
+
+    def test_kills_the_absent_counter_guard(self, tmp_path: Path) -> None:
+        """Without it a source that carries no counters is compared anyway. The
+        symptom is THIS guard's: a TypeError from `None`, on a window that has
+        no business being judged — not a quietly wrong answer."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_ww_none",
+            [("    if under is None or outside is None:", "    if False:")],
+        )
+        with pytest.raises(TypeError):
+            mod.wrong_window_dominance(mod.caller_supplied(["a/b.py"]))
+        assert st.wrong_window_dominance(st.caller_supplied(["a/b.py"])) is None
+
+    def test_kills_the_percentage_numerator(self, tmp_path: Path) -> None:
+        """The number must be THIS run's invisible share. Swap the numerator and
+        it reports the visible one — 17% where the real module says 83%, which
+        is the reassuring direction."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_ww_pct",
+            [
+                (
+                    "    return under, outside, round(100 * outside / (under + outside))",
+                    "    return under, outside, round(100 * under / (under + outside))",
+                )
+            ],
+        )
+        assert mod.wrong_window_dominance(self._src(mod, 1, 5))[2] == 17
+        assert "(17%)" in "\n".join(mod.render_wrong_window(self._src(mod, 1, 5)))
+        assert st.wrong_window_dominance(
+            st.PathSource(kind="session", window="session", paths=(), under_cwd=1, outside_cwd=5)
+        )[2] == 83
+
+    @pytest.fixture()
+    def tailer(self, tailer_cache):
+        return st._session_tailer()
+
+    def test_kills_the_counter_wiring(self, tmp_path: Path, tailer) -> None:
+        """The collector must carry the extractor's counters. Pinned to 0 the
+        rule can never fire, and the report reads exactly as it did during the
+        measured failure: a plausible small count and no escalation.
+
+        ⚠ `_session_mutant`, not `_load_mutant`: a mutant written to `tmp_path`
+        cannot traverse to the real extractor, so every session-reaching mutant
+        would die of `ExtractorMissingError` and be green for the wrong reason.
+        The injection is not part of the mutation."""
+        mod = _session_mutant(
+            tmp_path,
+            "m_ww_wiring",
+            [("        outside_cwd=_as_count(outside),", "        outside_cwd=0,")],
+            tailer,
+        )
+        repo = _init_repo(tmp_path, SCOPE)
+        cwd = str(repo)
+        t = _write_transcript(
+            tmp_path / "t.jsonl",
+            cwd,
+            [f"{cwd}/{p}" for p in self.ONE_UNDER]
+            + [f"{tmp_path}/elsewhere/{p}" for p in self.FIVE_OUTSIDE],
+        )
+        store = _make_store(tmp_path / "s")
+        src = mod.collect_session_paths(repo, transcript=t)
+        assert src.outside_cwd == 0
+        assert "WRONG WINDOW?" not in mod.render_text(
+            mod.build_report(src, store, SCOPE, today=TODAY)
+        )
+        # the real module, same transcript, same store:
+        real = st.collect_session_paths(repo, transcript=t)
+        assert real.outside_cwd == 5
+        assert "WRONG WINDOW?" in st.render_text(
+            st.build_report(real, store, SCOPE, today=TODAY)
+        )
 
 
 class TestSessionCli:
@@ -5477,7 +5921,12 @@ class TestCommitPositiveControl:
         # zero uninformative.
         assert len(neg_rep.source.paths) == 3
         rendered = st.render_text(neg_rep)
-        assert "This is a real zero, not an empty window." in rendered
+        # 🔴 DELIBERATE WORDING UPDATE, not a weakened assertion. This pinned
+        # "This is a real zero, not an empty window." — true, and read by two
+        # sessions as "there is nothing to record". The claim is now scoped to
+        # the window in the same sentence; `TestTheZeroIsSCOPEDToItsWindow` pins
+        # the whole replacement and asserts the old one is gone.
+        assert "real zero FOR THIS WINDOW" in rendered
         assert "3 paths examined" in rendered
 
     def test_a_commit_OUTSIDE_every_subsystem_still_NOMINATES_when_it_clusters(
