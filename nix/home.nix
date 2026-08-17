@@ -2290,9 +2290,14 @@ in
       # NOTHING IS HIDDEN. The script still exits 16, still prints the
       # `ACTIONABLE (not drift)` verdict plus the READY block, and a hand-run
       # (`scripts/drift-check.sh`, or `systemctl --user start drift-check` then
-      # `journalctl --user -u drift-check`) surfaces both. `systemctl show
-      # drift-check -p ExecMainStatus` reads 16 on such a run even though the
-      # unit is `success`. Pinned by
+      # `journalctl --user -u drift-check`) surfaces both. 🔴 READ THE JOURNAL,
+      # NOT THE EXIT STATUS: systemd ZEROES `ExecMainStatus` for a code it has
+      # been told is a success, so `systemctl show drift-check
+      # -p ExecMainStatus` reads **0** on such a run, not 16 — measured on
+      # systemd 258.3, with the no-`SuccessExitStatus` control reading 16. An
+      # earlier revision of this comment asserted the opposite and would have
+      # led an operator to conclude the gate never opened. `journalctl --user
+      # -u drift-check | grep ACTIONABLE` is the check that works. Pinned by
       # `test_the_unit_does_not_fail_on_the_phase2_actionable_code`.
       SuccessExitStatus = 16;
       # Two `git fetch`es plus one ssh round trip. The ConnectTimeout inside the
