@@ -183,3 +183,21 @@ zero); **negative control** a dict-key reorder, which survives. **21 mutants: 21
 0 mismatches**, run with `PYTHONDONTWRITEBYTECODE=1` and `__pycache__` cleared between
 mutants, each proven applied by sha change **and** byte-equality and proven non-inert by an
 AST diff.
+
+### Live reproduction on the workbench, 2026-08-15 (counts only — this repo is PUBLIC)
+
+The 79-pane figures above are the **dogfood's**, on both hosts. Independently reproduced on
+the LOCAL host with the read-only scan (`--host workbench --no-ch --no-ledger`):
+
+- **52 rows**, 41 Claude panes scraped, 11 `not_claude` (shells, never scraped).
+- `waiting_probable` **7 flagged** — 5 `trailing_question`, 2 `context_exhausted`,
+  0 `selection_menu`.
+- `unsent_prompt` **9 parked**, draft lengths 10–87 chars.
+- **0 rows flagged BOTH.** The two signals were disjoint on live data — which is the
+  separation claim, measured rather than argued.
+- **0 chrome mis-parses**: no parked value contained `ctx:`, a box rule, `esc to interrupt`
+  or a token count, i.e. the box scope did not leak footer or rule text into a draft.
+
+🔴 **Scope of that run, stated:** local host only, one point in time. `no_input_box` did NOT
+occur on it, so that status is exercised by fixtures rather than by this observation — an
+unmeasured status here, not a measured zero.
