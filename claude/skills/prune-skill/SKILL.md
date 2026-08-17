@@ -22,7 +22,9 @@ Why this recurs: a `SKILL.md` costs **0 tokens until its trigger fires, then ALL
 python3 /home/zach/workspace/devrc/scripts/skill-audit.py            # $PWD/.claude/skills
 python3 /home/zach/workspace/devrc/scripts/skill-audit.py path/to/SKILL.md
 ```
-Prints: size vs budget per skill (worst first), per-section byte weights (H2, then H3 in the fattest H2), **dated-history blocks + projected saving**, fat lines (>500 B), **reference-file integrity both directions**, unclosed fences, and a one-line verdict. If it says "no prune needed", **stop** — report it, don't churn the file.
+Prints: size vs budget per skill (worst first), per-section byte weights (H2, then H3 in the fattest H2), **dated-history blocks + projected saving**, fat lines (>500 B), **reference-file integrity both directions**, **numbered-corpus integrity**, unclosed fences, and a one-line verdict. If it says "no prune needed", **stop** — report it, don't churn the file.
+
+🔴 **But a SMALL over-budget number does not mean a small defect — the auditor measures bytes, only a read finds rot.** app-blocks audited at 144 B over (1.2%), which reads as "trim a line"; the actual finding was a 1,931 B section titled *"direct mutations to ephemeral state… if the DB is rebuilt, they vanish"* in which **two of the four entries were retired**, one struck through and one marked `NO LONGER LOAD-BEARING`. Half a section headed *re-apply these* described state that must **not** be re-applied, and both entries were already stated in a reference file whose own banners pointed back at it. Read the fattest sections whatever the byte verdict says.
 
 ## 2. Back up first (the cut deletes/rewrites)
 ```bash
@@ -34,6 +36,8 @@ For a big pass, dispatch read-only classifier subagents (one per fat H2) checkin
 - **EVICT_HISTORY** — **work-status** narrative (`### Session …`, `Changelog`, "what we shipped") → a `claudedocs/` doc, leaving at most **one ≤200-char durable tell**. This is the `prune-memory` skill's "work-STATUS doesn't belong in the index", one level down.
   🔴 **A date in a heading is NOT this verdict.** `## Common silent-failure modes (from the 2026-05-22 audit)` is durable guidance citing a date; evicting it guts the skill. The auditor reports the two separately for that reason — across the 67-skill datapacket corpus **app-blocks holds 45 work-status headings and every other skill ZERO**, while carrying 8–17 dated-but-topical ones. Read its "dated lessons" as DEMOTE, never eviction, candidates.
 - **DEMOTE_TO_REFERENCE** — long-but-real procedures, tables, gotcha-depth → `reference/<topic>.md` beside the skill, with **ONE routing line** left in the core ("load it when…").
+  🔴 **If the block is NUMBERED and cited by number, the numbers are an API — FREEZE them.** Items cited as "gotcha #178" are referenced from the core, from sibling reference files and from OTHER skills, so a split that renumbers each file 1..n breaks every citation while leaving all PATHS valid — no path gate can see it. Keep the original global numbers (they will be non-contiguous inside each file, which is correct), say so in a banner at the top of every shard, and never renumber. app-blocks survives a 9-file split this way: 200 items, numbered 1–200 with zero gaps, 150 citations, zero dangling. Renumbering its shards strands **53** citations instantly.
+  🔴 **Do not put a COUNT in a routing line.** "(18 gotchas)" is a number no gate checks and every append invalidates — app-blocks' table labelled a 20-item file `(18)` and its headline said `198` for 200. Describe what the file is *for*, not how much is in it.
 - **DROP_REDUNDANT** — already in an always-loaded file or another skill; **cite where**, then delete.
 - **MERGE_DUP** — the same gotcha restated across N appended sections → one statement.
 - **KEEP_HOT** — the core: orientation, the hot commands, the 🔴 safety gotchas.
@@ -54,7 +58,16 @@ Reference files are reached **BY PATH from the core**; how you write it depends 
   `reference/` subtree — so those cores MUST use repo-absolute paths
   (`~/workspace/devrc/scripts/<subsystem>/reference/<topic>.md`), as browser's core does.
 - **Repo-local skills** (a project's own `.claude/skills/<name>/`) ship the whole
-  directory — relative `reference/<topic>.md` is fine.
+  directory, so the file is always THERE — but 🔴 **a bare `reference/<topic>.md`
+  is still resolved by the reader against the CWD, not against the skill's own
+  directory, and is simply not found** (measured on datapacket-talos app-blocks
+  2026-08-04). Write the repo-root-relative form
+  `.claude/skills/<name>/reference/<topic>.md`, **or** keep short table entries
+  and state the expansion once in a preamble above the table — which is what
+  app-blocks does. All three repo-local skills that have a `reference/` dir use
+  one of those two forms; **none** relies on a bare relative path. Shipping and
+  resolving are separate failures: the nix question below is about whether the
+  file exists at all, this one bites when it does.
 
 The auditor checks both directions, warning on relative paths with no absolute base.
 Independently of the auditor: every backticked repo path in a skill should EXIST. Write a
@@ -73,6 +86,8 @@ Rewrite `SKILL.md` as KEEP_HOT plus routing lines; create the `reference/*.md` f
 ```bash
 python3 /home/zach/workspace/devrc/scripts/skill-audit.py <SKILL_DIR>
 ```
-Confirm: under target (at least under the hard cap), **every routing path resolves**, no orphans, no unclosed fences. Report before/after bytes, what moved where, and the backup path.
+Confirm: under target (at least under the hard cap), **every routing path resolves**, no orphans, no unclosed fences, and — if you split a numbered corpus — **`numbered-corpus integrity` reports every citation resolving with no duplicates**. Duplicate numbers across shards are the signature of a per-file renumber; dangling citations are what that costs. Report before/after bytes, what moved where, and the backup path.
+
+🔴 **Open one demoted file and one routing line by hand before calling it done.** `skill-audit.py` resolves routing paths against the skill directory — which always succeeds — so its ✓ is not evidence that a reader following the core from a repo root will find the file. That is the §4 trap, and the audit cannot see it.
 
 Pair: the `prune-memory` skill (the same cut on the per-session `MEMORY.md` index); `test_skill_size.py` above is the precedent — once a skill is lean, a byte-cap test keeps it lean.

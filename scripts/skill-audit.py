@@ -100,6 +100,37 @@ REF_PATH = re.compile(r"[\w./~$@-]*reference/[\w.-]+\.md")
 # the deployment caveat below does not apply.
 ABS_REF_BASE = re.compile(r"(?:~|/)[\w./-]*/reference/")
 
+# --- numbered-corpus integrity --------------------------------------------------
+# A corpus of numbered items ("11. **ModelMetric is declared...**") that has been
+# DEMOTED across several reference files is cited BY NUMBER — from the core, from
+# sibling reference files, and from OTHER skills ("gotcha #178"). The numbers are
+# therefore an API, and a demote that renumbers per-file silently breaks every
+# citation: nothing in a repo-relative path gate can see it, because the paths are
+# all still fine. Measured on datapacket-talos app-blocks 2026-08-17: 200 items
+# spread over 9 files, numbered 1-200 with ZERO gaps, 150 distinct citations, zero
+# dangling — i.e. the scheme survives a split only because whoever split it froze
+# the numbers and said so in a banner on every file.
+CORPUS_ITEM = re.compile(r"^(\d+)\. ", re.M)
+# Only the EXPLICIT form. A bare `#N` is unusable here: across app-blocks it
+# matches 313 distinct numbers of which 189 exceed the corpus entirely (civitai
+# PRs, issues, line numbers), whereas `gotcha #N` matches 61, max 188 — every one
+# a real index. Bounding bare `#N` by the highest defined index was tried first
+# and is WORSE THAN USELESS: a demote that renumbers every shard to 1..n drops the
+# ceiling with it, so the citations that just broke fall below the bound and the
+# check goes silent at exactly the moment it should fire.
+CORPUS_CITE = re.compile(r"gotchas?\s+#(\d+)")
+# A SHARD of a split corpus vs an ordinary numbered list, decided by DENSITY: a
+# shard holds a scattered slice of one global sequence, a procedure holds 1..n.
+# Measured over app-blocks' 13 numbered files — the 9 shards score span/n 4.90 to
+# 12.00, and all 4 non-shards (a W-table, two step lists, the core) score exactly
+# 1.00. A 1.5 cut sits in a 3.4x-wide empty gap, so this is not a tuned constant.
+CORPUS_SPARSE = 1.5
+# Guards the degenerate end: 2 items numbered 1 and 9 are sparse by ratio and are
+# still just a list.
+CORPUS_FILE_MIN = 5
+# Below this many items across all shards, there is no corpus worth policing.
+CORPUS_MIN = 10
+
 
 def _bytes(lines):
     return sum(len(ln.encode()) for ln in lines)
@@ -277,6 +308,75 @@ def reference_integrity(skill_md, text):
     return refs, missing, orphans, len(relative), bool(ABS_REF_BASE.search(text))
 
 
+def _corpus_items(body):
+    """Top-level numbered items in one file, nested/restarting lists dropped.
+
+    Real corpus items ascend monotonically within a file (they are a slice of one
+    global sequence). A nested "1./2." list inside an item's body restarts, so
+    keeping only the strictly-ascending run is what separates the two — verified
+    against app-blocks, where it reproduced the core's own per-file counts on 8 of
+    9 files and exposed the 9th as genuinely stale (labelled 18, holds 20).
+    """
+    out, last = [], 0
+    for n in (int(m) for m in CORPUS_ITEM.findall(body)):
+        if n > last:
+            out.append(n)
+            last = n
+    return out
+
+
+def corpus_integrity(skill_md):
+    """(n_defined, dangling, dupes) over the skill's whole directory.
+
+    Reports ONLY on a corpus that is actually cited: a skill whose numbered lists
+    are procedures produces no citations, hence no findings, hence no noise.
+    """
+    skill_dir = skill_md.parent
+    ref_dir = skill_dir / "reference"
+    if not ref_dir.is_dir():
+        return 0, [], []  # nothing has been split, so nothing can have desynced
+    files = [skill_md] + sorted(ref_dir.rglob("*.md"))
+    bodies = {f: f.read_text(errors="replace") for f in files}
+
+    # DEFINED is every top-level numbered item, density irrelevant. Keeping the
+    # dense files in is what makes a total renumber detectable: after one, every
+    # shard reads 1..n, so a density-filtered view would hold nothing at all.
+    per_file = {f: _corpus_items(b) for f, b in bodies.items()}
+    defined = {}
+    for f, items in per_file.items():
+        for n in items:
+            defined.setdefault(n, f.name)
+    if len(defined) < CORPUS_MIN or sum(1 for i in per_file.values() if i) < 2:
+        return 0, [], []
+
+    cited = {int(n) for b in bodies.values() for n in CORPUS_CITE.findall(b)}
+    if not cited:
+        return 0, [], []
+    # Several skills cite ANOTHER skill's corpus ("gotchas #137" from
+    # manage-design-system, one in gitops-gate). Requiring a citation to land in
+    # this skill's own numbers was tried as the guard against policing those, and
+    # it REINTRODUCED the silent-renumber hole: when every shard is rewritten,
+    # nothing overlaps and the check disappears. The size gate above already
+    # excludes every borrowed case in the real corpus — measured across all 67
+    # datapacket skills, dropping this guard adds zero findings.
+
+    # DUPES are scored over sparse shards only: a dense 1..n list legitimately
+    # reuses low numbers that a shard also holds, and pairing those reported 15
+    # bogus collisions on a corpus that is provably intact.
+    seen, dupes = {}, []
+    for f, items in per_file.items():
+        if len(items) < CORPUS_FILE_MIN:
+            continue
+        if (max(items) - min(items) + 1) / len(items) <= CORPUS_SPARSE:
+            continue
+        for n in items:
+            if n in seen:
+                dupes.append((n, seen[n], f.name))
+            else:
+                seen[n] = f.name
+    return len(defined), sorted(cited - set(defined)), dupes
+
+
 def audit_one(skill_md):
     text = skill_md.read_text(errors="replace")
     lines = text.splitlines(keepends=True)
@@ -287,6 +387,7 @@ def audit_one(skill_md):
     lessons = dated_blocks(lines, heads, "dated_lesson")
     fat = fat_lines(lines)
     refs, missing, orphans, n_rel, abs_base = reference_integrity(skill_md, text)
+    corpus_n, corpus_dangling, corpus_dupes = corpus_integrity(skill_md)
     first_h2 = h2[0][1] if h2 else len(lines)
     fattest = max(h2, key=lambda s: s[3]) if h2 else None
     return {
@@ -313,6 +414,9 @@ def audit_one(skill_md):
         "orphan_refs": orphans,
         "relative_refs": n_rel,
         "abs_ref_base": abs_base,
+        "corpus_n": corpus_n,
+        "corpus_dangling": corpus_dangling,
+        "corpus_dupes": corpus_dupes,
         "fence_ok": fence_balanced(lines),
     }
 
@@ -446,7 +550,18 @@ def render(audits, show_all, n_sections, n_detail, out=sys.stdout):
               "exceptions — `browser` (scripts/browser-bridge/) and `dl-router` "
               "(scripts/dl-router/) link only SKILL.md plus their CLI — so THOSE "
               "cores must use repo-absolute paths. State the absolute source next "
-              "to the deployed path either way, so a reader can find it to edit.")
+              "to the deployed path either way, so a reader can find it to edit.\n"
+              "    🔴 That paragraph is about whether the file SHIPS. A REPO-LOCAL "
+              "skill (a project's own .claude/skills/<name>/) always ships its "
+              "reference/ dir, and still breaks here for a different reason: a "
+              "bare `reference/<topic>.md` is resolved by the reader against the "
+              "CWD, not against the skill's directory, so it is simply not found "
+              "(measured on datapacket-talos app-blocks 2026-08-04). Write the "
+              "repo-root-relative form `.claude/skills/<name>/reference/<topic>.md`, "
+              "or keep short table entries and state the expansion once in a "
+              "preamble — which is what app-blocks does, and why it does not warn "
+              "here. All 3 repo-local skills with a reference/ dir use one of "
+              "those two forms; none relies on a bare relative path.")
     if not any_ref_issue:
         n_refd = sum(len(a["refs"]) for a in audits)
         if n_refd:
@@ -454,6 +569,21 @@ def render(audits, show_all, n_sections, n_detail, out=sys.stdout):
         else:
             p("  no skill routes to a reference/ sidecar yet — DEMOTE_TO_REFERENCE is "
               "unused here, which is why the cores carry everything")
+
+    corpora = [a for a in audits if a["corpus_n"]]
+    if corpora:
+        p("\n## numbered-corpus integrity (the numbers are an API — never renumber)")
+        for a in corpora:
+            if a["corpus_dangling"]:
+                p(f"  🔴 {a['name']}: {len(a['corpus_dangling'])} CITED BUT UNDEFINED "
+                  f"— {', '.join('#' + str(n) for n in a['corpus_dangling'][:12])}")
+            if a["corpus_dupes"]:
+                p(f"  🔴 {a['name']}: {len(a['corpus_dupes'])} DUPLICATE number(s) "
+                  "— the hallmark of a demote that renumbered per file: "
+                  + ", ".join(f"#{n} in {x} and {y}" for n, x, y in a["corpus_dupes"][:6]))
+            if not a["corpus_dangling"] and not a["corpus_dupes"]:
+                p(f"  {a['name']}: {a['corpus_n']} numbered items, every citation "
+                  "resolves, no duplicates ✓")
 
     broken_fence = [a["name"] for a in audits if not a["fence_ok"]]
     if broken_fence:
