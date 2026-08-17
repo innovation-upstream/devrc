@@ -265,19 +265,48 @@ file with 130 lines of REAL CODE cost `+0.40 ms` (6/8) and 1300 lines cost `+4.2
 here and the first attempt at one was wrong: 1200 comment lines moved the number
 `+0.50 ms` with a stdev of 1.00, because a comment produces no AST node.
 
-The mechanism is compile time and nothing else. The tombstone check lives INSIDE
-`record_read`, which the fast path never reaches, so a session that has not read a
-clawgate task executes not one new statement — but `python3 <script>` never caches
-bytecode for `__main__`, so every invocation re-compiles the whole file and 158 more
-source lines are not free. Timed directly (200 `compile()` calls per sample, 10 paired
-samples), which has ~1000x the resolution of spawning processes:
+The dominant mechanism is compile time. The tombstone check lives INSIDE `record_read`,
+which the fast path never reaches, so a session that has not read a clawgate task
+executes not one new statement on that path — but `python3 <script>` never caches
+bytecode for `__main__`, so every invocation re-compiles the whole file and the added
+source is not free. Timed directly (200 `compile()` calls per sample, 10 paired
+samples), which has ~1000x the resolution of spawning processes. RE-MEASURED after the
+audit round that followed, against the same base (`4eabdb3`), at +290 source lines:
 
-    compile BASE  2.140 ms      compile NEW  2.324 ms
-    paired delta  +0.184 ms, stdev 0.038, higher in 10/10 samples
+    compile BASE  2.361 ms      compile NEW  2.696 ms
+    paired delta  +0.334 ms, stdev 0.057, higher in 10/10 samples
 
-i.e. ~1.1% of a ~16 ms call, paid by every tool call in every session, in exchange for
-`--dismiss` meaning what it says. Named rather than hidden — and it is the reason not to
-answer the next audit round with another page of prose in this docstring.
+🔴 AND IT IS THE CODE, NOT THE PROSE — SO TRIMMING THIS DOCSTRING WOULD NOT RECOVER IT.
+The control: strip every comment and every docstring from BOTH files and re-run. That
+removes 256 of the 290 added lines and leaves +0.252 ms of the +0.334 ms standing
+(10/10 samples) on 34 added lines of real code. Consistent with the padding calibration
+above, where comment lines moved nothing an AST node could account for. Anyone reading
+this docstring as the thing to cut has the wrong lever; the lever is the code, and the
+code is the fix.
+
+🔴 THE SECOND COST IS A STATE CHANGE, NOT A STATEMENT, AND THE "not one new statement"
+SENTENCE ABOVE DOES NOT COVER IT. `--dismiss` calls `makedirs` (see
+`write_dismissal_tombstone`), so a bare dismissal for a session that never read a card
+CREATES the session dir — and `post_tool_use`'s fast path keys on
+`os.path.exists(state_dir)`. That session is therefore off the one-stat fast path for
+the rest of its life, on every subsequent tool call. Measured directly on
+`post_tool_use` (2000 calls per sample, 8 interleaved paired samples, dir absent vs dir
+present-and-empty):
+
+    fast path 0.0038 ms/call   slow path 0.0288 ms/call
+    paired delta +0.025 ms/call, stdev 0.014, higher in 8/8 samples
+
+It never blocks: `tracked_ids` on that dir is empty, so the slow path reaches no verdict
+(pinned by `test_a_bare_dismiss_CREATES_the_session_dir_...`). Accepted rather than
+removed, because making the dir conditional would silently drop the PRE-EMPTIVE
+dismissal — "this session's work is not for card N", said before the first read — which
+is a case `dismiss` deliberately supports. Named here rather than hidden, which is the
+whole point of this section; and note that a process-level benchmark of the same effect
+read +0.43 ms, i.e. sat exactly on the ~0.4 ms floor that calibration above established
+for that instrument, and should not be believed over the direct measurement.
+
+Total: ~2.1% of a ~16 ms call for the compile, plus 0.025 ms per tool call for any
+session that dismissed something, in exchange for `--dismiss` meaning what it says.
 
 The earlier round's parity took one deliberate change, still in force: the three
 work-detection patterns are pattern STRINGS compiled on first use rather than
@@ -698,12 +727,21 @@ def record_read(state_dir, task_id, now=None):
     # missed it: every test drove `--dismiss` and then asserted silence, and none of
     # them read the card again afterwards.
     #
-    # One consultation point, deliberately. `tracked_ids` cannot return a dismissed
-    # task anyway (its `read-` file is gone and this line stops it coming back), so a
-    # second check in `stop_decision` would be a duplicate of a decision already made
-    # here — the shape this file has removed twice before, unkillable by any mutation
-    # and reading as a coverage gap when it is really a copy. Same reasoning as
-    # MAX_TASKS, which is enforced only at this writer.
+    # One consultation point, deliberately — but on a PRECONDITION, not on a structural
+    # impossibility, and the earlier wording here ("`tracked_ids` structurally cannot
+    # return a dismissed task") overstated it. What holds is: WHEN THE REMOVAL SUCCEEDED,
+    # `tracked_ids` cannot return a dismissed task — its `read-` file is gone and this
+    # line stops it coming back. When `os.remove` FAILED, `read-<id>` survives the
+    # dismissal and `tracked_ids` does still yield it, so the guard stays armed.
+    #
+    # That case is reported rather than papered over: `dismiss_report` re-measures the
+    # ledger off disk (`_ledger_residue`) and says the clear did not happen, instead of
+    # promising a silence the state cannot deliver. A second check in `stop_decision`
+    # would not rescue it either — it would silence a card whose ledger entry is still
+    # on disk, i.e. HIDE the failed removal rather than name it — and it would be the
+    # shape this file has removed twice before: unkillable by any mutation and reading
+    # as a coverage gap when it is really a copy. Same reasoning as MAX_TASKS, which is
+    # enforced only at this writer.
     #
     # AFTER the `exists` above, so a re-read of an already-tracked task still costs one
     # stat: this branch is reachable only on the FIRST read of a given task in a
@@ -796,7 +834,34 @@ def dismiss(state_dir, task_id, now=None):
     Tombstoning is unconditional, including for a task that was never read: a dismissal
     is the operator asserting this session's work is not for this card, and that is as
     true said before the first read as after it.
+
+    🔴 THE TOMBSTONE IS WRITTEN FIRST, AND THAT ORDER IS LOAD-BEARING — an earlier
+    revision of this function wrote it LAST and called the two orders equivalent. They
+    are not. See the comment on the call below for the state the other order can leave
+    behind.
     """
+    # 🔴 FIRST, NOT LAST. Between an `os.remove` and a later tombstone write the session
+    # sits in EXACTLY its pre-dismissal state — `read-<id>` gone, nothing on disk saying
+    # a dismissal is in flight — so a `record_read` landing in that window re-creates
+    # `read-<id>` and the tombstone then lands on TOP of it. The result is
+    # `dismissed-<id>` and `read-<id>` both present: `is_dismissed` True while
+    # `tracked_ids` still yields the task, so `stop_decision` returns `block` and the CLI
+    # prints the whole "It will not ask about task N again" promise over a guard that is
+    # armed. That is the precise false-promise shape this function exists to delete,
+    # reintroduced one statement later. Writing the tombstone first closes the window:
+    # `record_read` consults it and returns without writing.
+    #
+    # Reachability is narrow and is not the point — both files live in one directory, so
+    # nearly every permission failure hits both, and a session's hooks are sequential.
+    # The point is that the ORDER is a claim, and "equivalent" was the wrong one. Pinned
+    # two ways: `test_the_tombstone_is_written_BEFORE_the_removals_...` drives a read
+    # into the window and goes RED if these statements are swapped back, and
+    # `test_the_tombstone_WRITE_precedes_every_REMOVAL_...` pins the call sequence whole.
+    #
+    # Still best-effort in the failing direction: a tombstone that cannot be written
+    # NEVER changes what the removals below do. What it changes is what the caller is
+    # allowed to PROMISE — see `dismiss_report`.
+    write_dismissal_tombstone(state_dir, task_id, now=now)
     removed = []
     for name in ("read-%d" % int(task_id), "fires-%d" % int(task_id),
                  "unknown-%d" % int(task_id)):
@@ -805,11 +870,31 @@ def dismiss(state_dir, task_id, now=None):
             removed.append(name)
         except Exception:                 # noqa: BLE001 — absent is the common case
             pass
-    # Best-effort and last: a tombstone that cannot be written NEVER changes what the
-    # removals above already did. What it does change is what the caller is allowed to
-    # PROMISE — see `dismiss_report`.
-    write_dismissal_tombstone(state_dir, task_id, now=now)
     return removed
+
+
+def _ledger_residue(state_dir, task_id):
+    """Which of this task's ledger entries are STILL on disk. Sorted; usually empty.
+
+    🔴 THIS EXISTS BECAUSE `dismiss`'s `removed` LIST CANNOT ANSWER THE QUESTION THE
+    REPORT ASKS. `removed` is "which `os.remove` calls did not raise", so an unwritable
+    session dir makes it EMPTY — byte-identical to "there was nothing here to remove".
+    Reporting off that printed `nothing to dismiss — task N is not in session S's
+    ledger` while `read-N` was sitting in that ledger, measured against a `0o500` dir.
+    Only the disk distinguishes the two, so the head asks the disk.
+
+    Symmetry with the other half of the sentence is the point: the tombstone clause has
+    been re-measured off disk since it landed (`is_dismissed`, not the writer's return
+    value), and the ledger clause was still trusting a return value. Both now measure.
+
+    No try/except, for the same reason as `is_dismissed`: `os.path.exists` swallows
+    every OSError itself, the id is `%d`-formatted, and the only caller runs inside
+    `main()`'s backstop — a handler here could not be reached by any test.
+    """
+    return sorted(name for name in ("read-%d" % int(task_id),
+                                    "fires-%d" % int(task_id),
+                                    "unknown-%d" % int(task_id))
+                  if os.path.exists(os.path.join(state_dir, name)))
 
 
 def _dismissals_path():
@@ -1361,7 +1446,7 @@ def emit(kind, text):
         sys.stdout.write("\n")
 
 
-def dismiss_report(task_id, session_id, removed, tombstoned):
+def dismiss_report(task_id, session_id, removed, tombstoned, residue=()):
     """The ONE sentence `--dismiss` prints. A pure function of what actually happened,
     so the claim can be pinned as a whole string by a test rather than sampled for
     keywords — this repo has had four prose guards walked by rewording, and a
@@ -1375,9 +1460,26 @@ def dismiss_report(task_id, session_id, removed, tombstoned):
     🔴 The state dir is NOT printed. It is an absolute path containing $HOME, and
     everything this writes goes to stdout, which the model reads and may quote onward.
     The session id is the only part the caller needs to see.
+
+    🔴 BOTH HALVES ARE NOW MEASURED OFF DISK. `tombstoned` already was; `residue` is the
+    ledger half, and it was added because `removed` alone could not tell "there was
+    nothing to remove" apart from "the removal FAILED" — see `_ledger_residue`.
     """
     sess = _sanitize(session_id)
     tid = int(task_id)
+    # 🔴 THE RESIDUE BRANCH OWNS BOTH HALVES OF THE SENTENCE, AND COMES FIRST. A ledger
+    # entry that survived the dismissal falsifies both of the other halves at once: the
+    # head would report `nothing to dismiss` about a task that is demonstrably still in
+    # the ledger, and the promise would claim a silence `tracked_ids` will not honour —
+    # it still yields the task, so the very next Stop blocks. Emitting it as one branch
+    # is what makes it impossible for the two clauses to contradict each other, which is
+    # the defect being fixed: the previous text paired a head saying nothing happened
+    # with a tail warning that something had.
+    if residue:
+        return ("clawgate write-back guard: could NOT clear task %d from session %s's "
+                "ledger — %s still present. WARNING: nothing was dismissed and this "
+                "guard will still ask about task %d in session %s."
+                % (tid, sess, ", ".join(sorted(residue)), tid, sess))
     if removed:
         head = ("clawgate write-back guard: dismissed task %d for session %s "
                 "(cleared %s)." % (tid, sess, ", ".join(sorted(removed))))
@@ -1429,14 +1531,19 @@ def dismiss_main(argv):
         return
     removed = dismiss(state_dir, task_id)
     record_dismissal(task_id, sess, removed)
-    # 🔴 THE PROMISE IS RE-MEASURED OFF DISK, NOT TAKEN FROM THE WRITER'S RETURN VALUE.
-    # Two reasons, and the second is the one a `tombstoned = write_...()` would get
-    # wrong: a write that failed while an EARLIER dismissal's tombstone is still present
-    # leaves the promise TRUE, and only asking the filesystem sees that. The first is
-    # plainer — this sentence is a claim about the state of the world, so it should be
-    # read out of the world.
+    # 🔴 BOTH CLAIMS ARE RE-MEASURED OFF DISK, NOT TAKEN FROM A RETURN VALUE. For the
+    # tombstone, two reasons, and the second is the one a `tombstoned = write_...()`
+    # would get wrong: a write that failed while an EARLIER dismissal's tombstone is
+    # still present leaves the promise TRUE, and only asking the filesystem sees that.
+    # For the ledger, `removed` is empty both when there was nothing to remove and when
+    # the removal FAILED, which is how the head came to say `nothing to dismiss` over a
+    # `read-<id>` that was still on disk. The first reason is plainer and covers both —
+    # this sentence is a claim about the state of the world, so it is read out of the
+    # world. The `dismissals` ledger above deliberately keeps recording `removed`: that
+    # log is a record of what this invocation DELETED, not of what survived it.
     sys.stdout.write(dismiss_report(task_id, sess, removed,
-                                    is_dismissed(state_dir, task_id)) + "\n")
+                                    is_dismissed(state_dir, task_id),
+                                    _ledger_residue(state_dir, task_id)) + "\n")
 
 
 def main():

@@ -2350,11 +2350,100 @@ def test_the_tombstone_is_PER_TASK_a_neighbour_read_LATER_still_blocks(home):
     assert sorted(guard.tracked_ids(state_dir())) == [NEIGHBOUR_TASK]
 
 
+def test_the_tombstone_is_written_BEFORE_the_removals_so_a_racing_read_cannot_re_arm(
+        home, monkeypatch):
+    """🔴 THE WRITE ORDER IS NOT AN EQUIVALENT ORDER, AND THIS IS THE TEST THAT SAYS SO.
+
+    An earlier revision of `dismiss` wrote the tombstone AFTER the removals and labelled
+    the reverse an "equivalent order" negative control. No test distinguished them,
+    which is exactly why that label survived. This one does, behaviourally: it drives a
+    `record_read` into the window between the `os.remove` of `read-200` and the
+    tombstone write — the same 90 ms interleaving the production ledger recorded, here
+    made deterministic by a patched `os.remove` rather than by timing.
+
+    With the tombstone written FIRST the read is refused and the dismissal holds. With
+    the two statements swapped, `read-200` is re-created and the tombstone lands on top
+    of it, leaving `dismissed-200` and `read-200` BOTH present: `is_dismissed` True
+    while `stop_decision` returns `block`. The final assertion pins that as a
+    RELATIONSHIP between the two, not as two separate facts, because it is the pair
+    that is the false promise — the CLI prints the whole "It will not ask about task 200
+    again" sentence over a guard that is armed.
+
+    RED at base (`is_dismissed` does not exist at `4eabdb3`) and RED under the swapped
+    order, which is the mutation this test was written for.
+    """
+    sd = seed(task_id=DISMISSED_TASK, ts=READ_TS)     # read at 12:00, work at 12:30
+    assert os.path.exists(guard._read_path(sd, DISMISSED_TASK))
+    real_remove = guard.os.remove
+    landed = []
+
+    def remove_then_a_read_lands(path):
+        """Unlink as normal, then let the operator confirm the card — which is a read.
+
+        Stamped BEFORE the session's last work event (12:01 against 12:30) on purpose:
+        a read after the last work event is skipped by the per-task read anchor that
+        already shipped, so it could not re-arm anything and the test would pass under
+        both orders. Same reasoning as
+        `test_REGRESSION_the_re_read_alone_does_not_re_arm_it_either`.
+        """
+        real_remove(path)
+        if os.path.basename(path) == "read-%d" % DISMISSED_TASK:
+            landed.append(guard.record_read(sd, DISMISSED_TASK, now=READ_EPOCH + 60))
+
+    monkeypatch.setattr(guard.os, "remove", remove_then_a_read_lands)
+    guard.dismiss(sd, DISMISSED_TASK)
+    monkeypatch.undo()
+
+    # The instrument first: a test that never reached the window would pass vacuously
+    # under BOTH orders, which is the failure mode this whole test exists to end.
+    assert landed == [False], "the read never landed in the window, or was not refused"
+    assert not os.path.exists(guard._read_path(sd, DISMISSED_TASK))
+    assert guard.tracked_ids(sd) == {}
+    r = Reader(result=task(task_id=DISMISSED_TASK, comments=[]))
+    kind, _ = guard.stop_decision(payload("Stop"), reader=r)
+    assert (guard.is_dismissed(sd, DISMISSED_TASK), kind) == (True, "silent")
+    assert r.calls == []
+
+
+def test_the_tombstone_WRITE_precedes_every_REMOVAL_in_the_call_sequence(home,
+                                                                        monkeypatch):
+    """🔴 The structural companion to the test above, and it pins the ORDER ITSELF as a
+    whole sequence rather than leaving a reader to reconstruct it from a race.
+
+    Every removal is listed, including the one that raises (`unknown-200` is absent, and
+    the loop swallows that) — so this is a ledger of what `dismiss` touches and in which
+    order, and it fails if the set GROWS or SHRINKS as well as if it is reordered. A
+    check that the tombstone merely appears somewhere in the list would be satisfied by
+    the order this PR removed."""
+    sd = seed(task_id=DISMISSED_TASK, ts=READ_TS)
+    guard.bump_fires(sd, DISMISSED_TASK)
+    order = []
+    real_wdt, real_remove = guard.write_dismissal_tombstone, guard.os.remove
+
+    def spy_tombstone(*a, **kw):
+        order.append("tombstone")
+        return real_wdt(*a, **kw)
+
+    def spy_remove(path):
+        order.append("remove:" + os.path.basename(path))
+        return real_remove(path)
+
+    monkeypatch.setattr(guard, "write_dismissal_tombstone", spy_tombstone)
+    monkeypatch.setattr(guard.os, "remove", spy_remove)
+    guard.dismiss(sd, DISMISSED_TASK)
+    monkeypatch.undo()
+    assert order == ["tombstone", "remove:read-200", "remove:fires-200",
+                     "remove:unknown-200"]
+
+
 def test_the_tombstone_is_PER_SESSION_a_DIFFERENT_session_still_blocks(home):
-    """🔴 An INVARIANT GUARD on the scope decision — green at base, because at base the
-    tombstone did not exist at all. It exists to kill the implementation that would put
-    the tombstone in the shared state ROOT: a dismissal in session A must say nothing
-    about session B, which is what makes "a NEW session starts fresh" true."""
+    """🔴 A SCOPE GUARD, and RED at base — not because base scoped it differently but
+    because `guard.is_dismissed` does not exist at `4eabdb3` at all, so this test cannot
+    even be collected there. (An earlier docstring here claimed "green at base", which
+    was false; the PR body's table always had it right.) What it earns is not regression
+    coverage but the kill on the implementation that would put the tombstone in the
+    shared state ROOT: a dismissal in session A must say nothing about session B, which
+    is what makes "a NEW session starts fresh" true."""
     guard.dismiss(state_dir(), DISMISSED_TASK)
     assert guard.is_dismissed(state_dir(), DISMISSED_TASK) is True
     # ...and B, which never dismissed anything, is untouched.
@@ -2510,6 +2599,15 @@ DISMISS_MSG_NOTHING_NOT_TOMBSTONED = (
     "clawgate write-back guard: nothing to dismiss — task 200 is not in session "
     "sess-writeback-1's ledger. WARNING: the tombstone could NOT be written, so a "
     "later read of task 200 in session sess-writeback-1 will arm this guard again.")
+# 🔴 THE FIFTH SHAPE, AND THE ONE THE OLD MESSAGE COULD NOT SAY. A removal that FAILED
+# and a ledger that was already empty both leave `removed` empty, so the head used to
+# report "nothing to dismiss" over a `read-200` that was still sitting on disk. It is
+# one branch owning the WHOLE sentence, because the alternative — an honest head paired
+# with the tombstone tail — is a sentence that contradicts itself.
+DISMISS_MSG_RESIDUE = (
+    "clawgate write-back guard: could NOT clear task 200 from session "
+    "sess-writeback-1's ledger — read-200 still present. WARNING: nothing was dismissed "
+    "and this guard will still ask about task 200 in session sess-writeback-1.")
 
 # The block text's own version of the promise. Same reasoning, and it is read by the
 # MODEL rather than by a human, which is the reason it has to be true.
@@ -2518,15 +2616,20 @@ BLOCK_DISMISS_PROMISE = (
     "you read the card again, and a new session starts fresh:")
 
 
-@pytest.mark.parametrize("removed,tombstoned,want", [
-    (["read-200", "fires-200"], True, DISMISS_MSG_CLEARED_AND_TOMBSTONED),
-    ([], True, DISMISS_MSG_NOTHING_BUT_TOMBSTONED),
-    (["read-200", "fires-200"], False, DISMISS_MSG_CLEARED_NOT_TOMBSTONED),
-    ([], False, DISMISS_MSG_NOTHING_NOT_TOMBSTONED),
+@pytest.mark.parametrize("removed,tombstoned,residue,want", [
+    (["read-200", "fires-200"], True, [], DISMISS_MSG_CLEARED_AND_TOMBSTONED),
+    ([], True, [], DISMISS_MSG_NOTHING_BUT_TOMBSTONED),
+    (["read-200", "fires-200"], False, [], DISMISS_MSG_CLEARED_NOT_TOMBSTONED),
+    ([], False, [], DISMISS_MSG_NOTHING_NOT_TOMBSTONED),
+    # Residue wins over BOTH other axes, and the two rows say so independently: the
+    # tombstone flag moves and the sentence does not, so a mutant that let the tail
+    # through would have to walk two rows, not one.
+    ([], False, ["read-200"], DISMISS_MSG_RESIDUE),
+    ([], True, ["read-200"], DISMISS_MSG_RESIDUE),
 ])
-def test_every_dismiss_message_is_pinned_WHOLE(removed, tombstoned, want):
+def test_every_dismiss_message_is_pinned_WHOLE(removed, tombstoned, residue, want):
     assert _norm(guard.dismiss_report(DISMISSED_TASK, SESSION, removed,
-                                      tombstoned)) == want
+                                      tombstoned, residue)) == want
 
 
 def test_the_block_texts_promise_is_pinned_WHOLE_and_scoped_to_the_SESSION(home):
@@ -2611,6 +2714,81 @@ def test_an_UNWRITABLE_STATE_DIR_is_the_same_answer_by_the_other_route(home):
         assert _norm(p.stdout) == DISMISS_MSG_NOTHING_NOT_TOMBSTONED
     finally:
         os.chmod(sd, 0o700)
+
+
+def test_a_FAILED_REMOVAL_says_the_ledger_entry_SURVIVED_instead_of_nothing_to_dismiss(
+        home):
+    """🔴 THE HEAD IS RE-MEASURED OFF DISK, AND THIS IS THE CASE THAT FORCED IT. A
+    `0o500` session dir makes `os.remove` raise, so `dismiss` returns an EMPTY `removed`
+    list — byte-identical to the list it returns when there was genuinely nothing to
+    remove. Reporting off that printed "nothing to dismiss — task 200 is not in session
+    …'s ledger" while `read-200` was still in that ledger, and the tail then warned that
+    something had gone wrong: one sentence making two contradictory claims.
+
+    Asymmetric with the tombstone half until now — that half has been re-measured off
+    disk (`is_dismissed`) since the change landed. Both halves ask the disk now.
+
+    The ledger entry surviving is also the load-bearing part of the message: `read-200`
+    is still on disk, so `tracked_ids` still yields 200 and the very next Stop blocks.
+    The sentence has to say that, and the assertion below proves it rather than trusting
+    the wording."""
+    sd = seed(task_id=DISMISSED_TASK, ts=READ_TS, work=False)
+    os.chmod(sd, 0o500)                   # readable and listable, NOT writable
+    try:
+        if os.access(sd, os.W_OK):        # running as root: cannot occur
+            pytest.skip("cannot make a directory unwritable as this user")
+        assert guard._ledger_residue(sd, DISMISSED_TASK) == ["read-200"]
+        p = run_cli(["--dismiss", str(DISMISSED_TASK), "--session", SESSION], home)
+        assert p.returncode == 0
+        assert p.stderr == ""
+        assert "Traceback" not in p.stdout
+        assert _norm(p.stdout) == DISMISS_MSG_RESIDUE
+        # ...and the warning is TRUE, not defensive wording: the entry really is still
+        # tracked, which is precisely why "nothing to dismiss" was the wrong sentence.
+        assert sorted(guard.tracked_ids(sd)) == [DISMISSED_TASK]
+    finally:
+        os.chmod(sd, 0o700)
+
+
+def test_a_CLEAN_dismissal_reports_NO_residue_the_positive_control_for_that_branch(home):
+    """The negative half of the test above: the same code path with a WRITABLE dir must
+    take neither the residue branch nor the warning, or the branch would be firing on
+    every dismissal and the test above would prove nothing about permissions."""
+    sd = seed(task_id=DISMISSED_TASK, ts=READ_TS, work=False)
+    guard.bump_fires(sd, DISMISSED_TASK)
+    assert sorted(guard._ledger_residue(sd, DISMISSED_TASK)) == ["fires-200",
+                                                                 "read-200"]
+    p = run_cli(["--dismiss", str(DISMISSED_TASK), "--session", SESSION], home)
+    assert p.returncode == 0
+    assert _norm(p.stdout) == DISMISS_MSG_CLEARED_AND_TOMBSTONED
+    assert guard._ledger_residue(sd, DISMISSED_TASK) == []
+
+
+def test_a_bare_dismiss_CREATES_the_session_dir_and_that_costs_the_fast_path(home):
+    """🔴 A MEASURED SIDE EFFECT, PINNED RATHER THAN LEFT IMPLICIT. `--dismiss` for a
+    session that never read a card calls `makedirs` (deliberately — a pre-emptive
+    dismissal has to mean something), and `post_tool_use`'s fast path keys on
+    `os.path.exists(state_dir)`. So a bare dismissal permanently flips that session off
+    the one-stat fast path for the rest of its life.
+
+    It is a COST, not a defect: `tracked_ids` is empty, so the slow path reaches no
+    verdict and blocks nothing — which is the half this test proves, because the flip is
+    only acceptable if it stays silent. The timing half is named in the module docstring
+    beside the hot-path claim, where the "not one new statement" wording was true of the
+    code and false of the state it creates."""
+    sd = state_dir()
+    assert not os.path.exists(sd)
+    p = run_cli(["--dismiss", str(DISMISSED_TASK), "--session", SESSION], home)
+    assert p.returncode == 0
+    assert os.path.isdir(sd), "the dismissal did not create the session dir"
+    # The flip is real: `tracked` is now True where it was False...
+    assert guard.tracked_ids(sd) == {}
+    # ...and it still cannot block, on either the tool path or the Stop path.
+    guard.post_tool_use(payload(tool_name="Edit", tool_input={"file_path": "/x"}),
+                        now=WORK_EPOCH)
+    r = Reader(result=task(task_id=DISMISSED_TASK, comments=[]))
+    assert guard.stop_decision(payload("Stop"), reader=r) == ("silent", "")
+    assert r.calls == []
 
 
 def test_a_tombstone_path_that_is_a_DIRECTORY_still_silences_the_guard(home):
