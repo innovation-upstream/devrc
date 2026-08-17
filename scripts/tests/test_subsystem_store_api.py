@@ -1505,10 +1505,16 @@ class TestTokenSetAndOverlapRotation:
             api.authorize(f"Bearer {GOOD_TOKEN[0]}", (GOOD_TOKEN,))
 
     def test_build_server_refuses_a_bare_string_too(self, store: Path):
-        with pytest.raises(TypeError):
+        with pytest.raises(TypeError) as exc:
             api.build_server(
                 host="127.0.0.1", port=0, store_root=str(store), tokens=GOOD_TOKEN
             )
+        # 🔴 The MESSAGE, not just the type. At the base ref this call raises
+        # `TypeError: unexpected keyword argument 'tokens'` — so a bare
+        # `pytest.raises(TypeError)` is GREEN AT BASE for a completely different
+        # reason, which is a vacuous guard. Pinning the sentence makes the test
+        # a statement about the guard rather than about the signature.
+        assert "SEQUENCE" in str(exc.value)
 
     def test_a_ROTATION_end_to_end_old_still_works_then_stops(self, store: Path):
         """The proposal's pre-cutover requirement, in-band: add the new token,
@@ -1927,3 +1933,182 @@ class TestLockoutOverHTTP:
                 assert body == b"read-only\n"
                 assert headers["Allow"] == "GET, HEAD"
         assert all("status=method-not-allowed" in line for line in audit)
+
+
+# =============================================================================
+# 15. The REAL entrypoint, driven as a SUBPROCESS.
+#
+# 🔴 THIS SECTION EXISTS TO BE RED AT THE BASE REF FOR THE RIGHT REASON.
+# Everything in section 14 that touches the server calls `build_server(tokens=…)`
+# or `load_tokens`, neither of which exists at base — so its red is an
+# AttributeError, which is a collection error wearing a failure's clothes and
+# proves nothing (the same trap phase 1's header calls out).
+#
+# The COMMAND LINE, by contrast, is unchanged between the two refs:
+# `server.py --store --host --port --token-file` parses identically at base. So
+# a test that spawns the real process and drives it over a real socket runs on
+# BOTH trees, and its failure at base is a statement about BEHAVIOUR:
+#
+#   * base serves 200 to a valid token with no `CF-Connecting-IP` at all
+#   * base serves 200 to a valid token after five wrong ones from one address
+#   * base treats a TWO-LINE token file as ONE 97-character token, so neither
+#     line authorises anything — an overlap rotation is impossible
+#
+# It is also the only test here that reads the audit line off the process's
+# STDOUT, which is the stream Loki actually ingests. The in-process `audit`
+# callback used everywhere above is a different code path.
+# =============================================================================
+
+
+def _free_port() -> int:
+    import socket
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+@contextmanager
+def running_subprocess(store_root: Path, token_file: Path):
+    """Spawn the REAL `server.py` process and wait for it to answer /healthz."""
+    import time
+
+    port = _free_port()
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            str(SERVER_PATH),
+            "--store",
+            str(store_root),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--token-file",
+            str(token_file),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={**os.environ, "PYTHONUNBUFFERED": "1"},
+    )
+    base = f"http://127.0.0.1:{port}"
+    try:
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                out, err = proc.communicate()
+                raise AssertionError(f"server exited {proc.returncode}: {err or out}")
+            try:
+                if fetch(f"{base}/healthz", client_ip=None)[0] == 200:
+                    break
+            except Exception:
+                time.sleep(0.1)
+        else:
+            raise AssertionError("server never became healthy")
+        yield base, proc
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:  # pragma: no cover
+            proc.kill()
+            proc.wait(timeout=10)
+
+
+class TestTheDeployedEntrypoint:
+    """🔴 RED AT THE BASE REF BEHAVIOURALLY, not by AttributeError."""
+
+    @pytest.fixture
+    def token_file(self, tmp_path: Path) -> Path:
+        path = tmp_path / "token"
+        path.write_text(GOOD_TOKEN + "\n")
+        return path
+
+    @pytest.fixture
+    def rotating_token_file(self, tmp_path: Path) -> Path:
+        """Two tokens, one per line — the overlap-rotation shape."""
+        path = tmp_path / "tokens"
+        path.write_text(f"{SECOND_TOKEN}\n{GOOD_TOKEN}\n")
+        return path
+
+    def test_POSITIVE_CONTROL_the_spawned_process_serves_a_real_digest(
+        self, store: Path, token_file: Path
+    ):
+        """Before any zero or any 401 below is believed: this call shape CAN
+        return a 200 with content from a process spawned exactly this way.
+        """
+        with running_subprocess(store, token_file) as (base, _proc):
+            code, headers, body = fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
+        assert code == 200
+        assert headers["X-Store-Status"] == "recalled"
+        assert POINTER_LINE.encode() in body
+
+    def test_a_valid_token_with_NO_client_ip_is_REFUSED(
+        self, store: Path, token_file: Path
+    ):
+        """Base serves this 200. The store would be reachable by anything that
+        held the token, from anywhere, with no address recorded against it.
+        """
+        with running_subprocess(store, token_file) as (base, _proc):
+            code, _h, body = fetch(
+                f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN, client_ip=None
+            )
+        assert code == 401
+        assert body == b"unauthorized\n"
+
+    def test_five_wrong_tokens_LOCK_OUT_the_right_one(
+        self, store: Path, token_file: Path
+    ):
+        """Base serves the sixth request 200 — an unlimited online guessing
+        budget against the one credential protecting the whole store.
+        """
+        with running_subprocess(store, token_file) as (base, _proc):
+            for _ in range(5):
+                assert fetch(f"{base}/api/v1/recall/{SCOPE}", token="w" * 48)[0] == 401
+            code, _h, _b = fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
+        assert code == 401, "an unlimited guessing budget survived"
+
+    def test_a_TWO_LINE_token_file_authorises_BOTH_lines(
+        self, store: Path, rotating_token_file: Path
+    ):
+        """Base reads the whole file as ONE 97-character token, so NEITHER line
+        works and an overlap rotation cannot be performed at all.
+        """
+        with running_subprocess(store, rotating_token_file) as (base, _proc):
+            for token in (GOOD_TOKEN, SECOND_TOKEN):
+                code, _h, _b = fetch(f"{base}/api/v1/recall/{SCOPE}", token=token)
+                assert code == 200, f"{token[:3]}… was refused during overlap"
+            outside = fetch(f"{base}/api/v1/recall/{SCOPE}", token=THIRD_TOKEN)[0]
+        assert outside == 401, "the set accepted a token that is not in it"
+
+    def test_the_STDOUT_audit_stream_names_the_matched_fingerprint(
+        self, store: Path, rotating_token_file: Path
+    ):
+        """🔴 The stream Loki ingests, not the in-process callback — and the
+        field the `SubsystemStoreAuthFailSpike` rule keys on.
+
+        Base prints the CONFIGURED token's id on every line, so during an
+        overlap it cannot tell you which credential a client actually used,
+        which is the one fact that makes retiring the old one safe.
+        """
+        with running_subprocess(store, rotating_token_file) as (base, proc):
+            fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
+            fetch(f"{base}/api/v1/recall/{SCOPE}", token=SECOND_TOKEN)
+            fetch(f"{base}/api/v1/recall/{SCOPE}", token="w" * 48)
+            proc.terminate()
+            stdout, _stderr = proc.communicate(timeout=15)
+
+        lines = [ln for ln in stdout.splitlines() if ln.startswith("store-api audit ")]
+        assert len(lines) == 3, f"expected 3 audit lines, got {len(lines)}: {stdout}"
+        assert f"token={api.token_id(GOOD_TOKEN)}" in lines[0]
+        assert f"token={api.token_id(SECOND_TOKEN)}" in lines[1]
+        assert api.token_id(GOOD_TOKEN) != api.token_id(SECOND_TOKEN)
+        # The failure line: no fingerprint, `auth=fail`, and the client address —
+        # the three fields the Loki alert selects on.
+        assert "auth=fail" in lines[2] and "token=-" in lines[2]
+        assert f"ip={CLIENT_IP}" in lines[2]
+        assert "result=401" in lines[2]
+        # And never a credential, on any line.
+        assert GOOD_TOKEN not in stdout and SECOND_TOKEN not in stdout
+        assert "w" * 48 not in stdout
