@@ -1979,13 +1979,40 @@ class TestLockoutOverHTTP:
         assert code == 401, "a valid token reset the guessing budget"
         assert "status=lockout-triggered" in audit[5]
 
-    def test_probing_NON_API_paths_also_counts_toward_the_lockout(self, store: Path):
-        """URL probing from one address is the same attack as token probing from
-        one address, and it hits the same uniform 401 — so it is counted too.
+    def test_a_WRONG_PATH_does_NOT_lock_out_a_client_holding_the_RIGHT_token(
+        self, store: Path
+    ):
+        """🔴 INVERTED BY A DELTA AUDIT, which measured the previous behaviour
+        locking out a legitimate client. Counting path probes AND removing
+        success-forgiveness combined into: five ordinary wrong paths — one of
+        them `/api/v1`, a missing trailing slash from the real prefix — and a
+        client holding the correct token was dead for 15 minutes with nothing
+        able to forgive it.
+
+        The specification says five failed AUTHS per minute. A request that
+        never reaches the token check is not a failed auth. Volumetric probing
+        belongs to the Traefik (10/s) and Cloudflare layers.
+        """
+        with running(store) as (base, audit):
+            for path in ("/favicon.ico", "/", "/robots.txt", "/metrics", "/api/v1"):
+                assert fetch(f"{base}{path}", token=GOOD_TOKEN)[0] == 401
+            code, _h, body = fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
+        assert code == 200, "a valid client locked itself out on wrong paths"
+        assert POINTER_LINE.encode() in body
+        assert not any("locked-out" in line for line in audit)
+        # …and they are still REFUSED and logged, or this would be a hole.
+        assert sum("status=unauthorized" in line for line in audit) == 5
+
+    def test_a_WRONG_TOKEN_still_counts_even_on_a_path_that_does_not_exist(
+        self, store: Path
+    ):
+        """The other half: the exemption above is for the PATH check, not for
+        auth. An `/api/v1/...` request with a bad token is a failed auth no
+        matter how nonsensical the route.
         """
         with running(store) as (base, _):
-            for path in ("/admin", "/.git/config", "/wp-login.php", "/", "/api"):
-                assert fetch(f"{base}{path}", token=GOOD_TOKEN)[0] == 401
+            for _ in range(5):
+                assert fetch(f"{base}/api/v1/nonsense/x", token="w" * 48)[0] == 401
             code, _h, _b = fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
         assert code == 401
 
@@ -2717,3 +2744,279 @@ class TestSlowlorisCannotPinAThreadForever:
                 sock.close()
         assert data == b"", f"expected a close, got {data[:60]!r}"
         assert elapsed < api.StoreRequestHandler.timeout + 5
+
+
+# =============================================================================
+# 17. THE DELTA AUDIT ROUND — the fixes in section 16 introduced three
+# criticals, in the same commit that closed two.
+#
+# 🔴 THIS IS THE POINT OF RE-AUDITING THE DELTA, and it is not a formality:
+# every round in this repo's history has found a real defect in the PRECEDING
+# round's fix. Here the `send_error` override written to make unknown verbs
+# uniform reopened BOTH defects the rest of that commit closed — an unhandled
+# crash on a malformed request line, and a free unmetered channel — one screen
+# below the code that exists to prevent them.
+# =============================================================================
+
+
+def _speak(host: str, payload: bytes, *, wait: float = 3.0) -> bytes:
+    """Write raw bytes to a socket and read whatever comes back."""
+    import socket
+
+    name, port = host.split(":")
+    with socket.create_connection((name, int(port)), timeout=10) as sock:
+        sock.sendall(payload)
+        sock.settimeout(wait)
+        data = b""
+        try:
+            while True:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+        except (TimeoutError, OSError):
+            pass
+    return data
+
+
+class TestMalformedRequestLinesDoNotCrash:
+    """🔴 `parse_request` assigns `self.path` only AFTER five of its own
+    `send_error` calls, and `path` has no class-level default — so an override
+    that read `self.path` raised AttributeError on every malformed request LINE.
+    Measured: 6 of 7 probe shapes crashed, no audit record, ~25 lines of
+    traceback each, from a six-byte request.
+    """
+
+    # Each is a request LINE the stdlib rejects BEFORE assigning self.path.
+    SHAPES = [
+        b"GET /x HTTP/9.9.9.9\r\n\r\n",
+        b"GET /x HTTP/2.0\r\n\r\n",
+        b"GET\r\n\r\n",
+        b"POST /x\r\n\r\n",
+        b"GET /x y HTTP/1.1\r\n\r\n",
+    ]
+
+    @pytest.mark.parametrize("shape", SHAPES, ids=lambda s: s.split(b"\r\n")[0].decode())
+    def test_it_answers_instead_of_crashing(self, store: Path, shape: bytes):
+        with running(store) as (base, audit):
+            data = _speak(base.split("//", 1)[1], shape)
+        assert data, "the request got no response at all"
+        assert b"unauthorized\n" in data
+        # And it was RECORDED — a crash produces no audit line, which is what
+        # made this invisible to every wire-level assertion.
+        assert len(audit) == 1, f"{len(audit)} audit lines for one request"
+        assert "auth=fail" in audit[0]
+
+    def test_the_audit_line_survives_a_missing_request_path(self, store: Path):
+        with running(store) as (base, audit):
+            _speak(base.split("//", 1)[1], b"GET\r\n\r\n")
+        assert "path=-" in audit[0], audit[0]
+        assert "status=malformed-request" in audit[0]
+
+    def test_POSITIVE_CONTROL_a_WELL_FORMED_unknown_verb_still_works(
+        self, store: Path
+    ):
+        """The shape the previous round DID test — the one where `self.path`
+        happens to be set, which is exactly why the crash stayed invisible.
+        """
+        with running(store) as (base, audit):
+            data = _speak(
+                base.split("//", 1)[1],
+                f"FROBNICATE /api/v1/recall/{SCOPE} HTTP/1.1\r\n"
+                f"Host: h\r\nCF-Connecting-IP: {CLIENT_IP}\r\n\r\n".encode(),
+            )
+        assert b"401" in data.split(b"\r\n")[0]
+        assert len(audit) == 1
+
+
+class TestUnknownVerbsAreMeteredToo:
+    """The second half of the same regression: the override answered without
+    ever metering, so 30 `FROBNICATE`s wrote 30 audit lines and counted for
+    nothing — the free channel `_reject_write` had just been reordered to close,
+    widened to every verb that is not one of the six with a handler.
+    """
+
+    def _verb(self, base: str, verb: str, ip: str | None = CLIENT_IP) -> bytes:
+        headers = f"Host: h\r\n" + (f"CF-Connecting-IP: {ip}\r\n" if ip else "")
+        return _speak(
+            base.split("//", 1)[1],
+            f"{verb} /api/v1/recall/{SCOPE} HTTP/1.1\r\n{headers}\r\n".encode(),
+        )
+
+    def test_unknown_verb_probing_COUNTS_toward_the_lockout(self, store: Path):
+        with running(store) as (base, _):
+            for _ in range(5):
+                assert b"unauthorized" in self._verb(base, "FROBNICATE")
+            code, _h, _b = fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
+        assert code == 401, "unknown verbs were an unmetered channel"
+
+    def test_an_unknown_verb_with_NO_client_ip_fails_closed(self, store: Path):
+        with running(store) as (base, audit):
+            data = self._verb(base, "OPTIONS", ip=None)
+        assert b"unauthorized" in data
+        assert "status=no-client-ip" in audit[0]
+
+    def test_a_MALFORMED_request_line_cannot_be_a_keep_alive_channel(
+        self, store: Path
+    ):
+        """It cannot be metered — there are no headers to identify anyone by —
+        so it is bounded the only other way: one request per TCP handshake.
+        """
+        with running(store) as (base, _):
+            data = _speak(base.split("//", 1)[1], b"GET\r\n\r\n" + b"GET\r\n\r\n")
+        assert data.count(b"unauthorized\n") == 1, "the connection was reused"
+
+
+class TestSmugglingViaOtherFramings:
+    """🔴 The drain understood exactly ONE framing, and a delta audit walked it
+    with two others — each producing two responses on one socket with store
+    content in the second, on a 200 where the connection legitimately stays open
+    so the close-on-non-200 belt does not apply.
+    """
+
+    def _smuggled(self, host: str) -> bytes:
+        return (
+            f"GET /api/v1/recall/{SCOPE} HTTP/1.1\r\nHost: {host}\r\n"
+            f"Authorization: Bearer {GOOD_TOKEN}\r\n"
+            f"CF-Connecting-IP: {CLIENT_IP}\r\n\r\n"
+        ).encode()
+
+    def test_a_CHUNKED_body_cannot_smuggle_a_request(self, store: Path):
+        with running(store) as (base, _):
+            host = base.split("//", 1)[1]
+            body = self._smuggled(host)
+            payload = (
+                f"GET /healthz HTTP/1.1\r\nHost: {host}\r\n"
+                f"Transfer-Encoding: chunked\r\n\r\n"
+                f"{len(body):x}\r\n"
+            ).encode() + body + b"\r\n0\r\n\r\n"
+            data = _speak(host, payload)
+        assert data.count(b"HTTP/1.1 ") <= 1, "chunked framing smuggled a request"
+        assert POINTER_LINE.encode() not in data
+
+    def test_a_NEGATIVE_content_length_cannot_smuggle_a_request(self, store: Path):
+        with running(store) as (base, _):
+            host = base.split("//", 1)[1]
+            payload = (
+                f"GET /healthz HTTP/1.1\r\nHost: {host}\r\n"
+                f"Content-Length: -5\r\n\r\n"
+            ).encode() + self._smuggled(host)
+            data = _speak(host, payload)
+        assert data.count(b"HTTP/1.1 ") <= 1, "a negative length smuggled a request"
+        assert POINTER_LINE.encode() not in data
+
+    def test_POSITIVE_CONTROL_the_probe_CAN_see_a_second_response(self, store: Path):
+        with running(store) as (base, _):
+            host = base.split("//", 1)[1]
+            one = f"GET /healthz HTTP/1.1\r\nHost: {host}\r\n\r\n".encode()
+            data = _speak(host, one + one)
+        assert data.count(b"HTTP/1.1 ") == 2, "the probe cannot see two responses"
+
+    def test_a_DRIPPED_body_cannot_hold_a_thread_indefinitely(self, store: Path):
+        """`timeout` is per-recv, so a caller sending one byte every few seconds
+        satisfied it forever — measured holding a thread 60s for a SIX-byte
+        body. The read loop needed its own deadline.
+        """
+        import socket
+        import time
+
+        assert api.DRAIN_DEADLINE_S <= 30
+        with running(store) as (base, _):
+            name, port = base.split("//", 1)[1].split(":")
+            sock = socket.create_connection((name, int(port)), timeout=10)
+            try:
+                sock.sendall(
+                    f"POST /api/v1/recall/{SCOPE} HTTP/1.1\r\nHost: h\r\n"
+                    f"CF-Connecting-IP: {CLIENT_IP}\r\nContent-Length: 40\r\n\r\n".encode()
+                )
+                started = time.monotonic()
+                sock.settimeout(api.DRAIN_DEADLINE_S + 20)
+                sock.sendall(b"x")
+                data = sock.recv(65536)
+                elapsed = time.monotonic() - started
+            finally:
+                sock.close()
+        assert elapsed < api.DRAIN_DEADLINE_S + 15, f"held for {elapsed:.1f}s"
+        assert data == b"" or b"HTTP" in data
+
+
+class TestTheLockoutCapDoesNotLIE:
+    """At the cap, `record_failure` returned True regardless AND popped the
+    streak: the audit log claimed `lockout-triggered` for a client that was not
+    locked out, and no state accumulated at all — unlimited brute force for an
+    attacker who had first filled the table.
+
+    🔴 The cap is monkeypatched DOWN rather than filled. Filling the real one is
+    81,920 calls, which made the suite 45s slower and — worse — forced the
+    "a slot frees" case to advance the clock past the lockout, which also aged
+    out the attacker's own streak and tested nothing. A small cap reaches the
+    same branch with the states actually distinguishable.
+    """
+
+    CAP = 8
+
+    def _full(self, now: list[float], monkeypatch, **kwargs):
+        monkeypatch.setattr(api, "MAX_TRACKED_LOCKOUTS", self.CAP)
+        lim = api.RateLimiter(clock=lambda: now[0], **kwargs)
+        for i in range(self.CAP):
+            for _ in range(5):
+                lim.record_failure(f"filler{i}")
+            now[0] += 0.0001
+        assert len(lim._locked_until) == self.CAP
+        return lim
+
+    def test_at_the_cap_it_reports_FALSE_rather_than_a_lockout_it_did_not_make(
+        self, monkeypatch
+    ):
+        now = [1000.0]
+        lim = self._full(now, monkeypatch)
+        results = [lim.record_failure("attacker") for _ in range(5)]
+        assert results[-1] is False, "it claimed a lockout the table had no room for"
+        assert lim.locked_out("attacker") is False
+
+    def test_at_the_cap_the_streak_is_KEPT_so_state_still_accumulates(
+        self, monkeypatch
+    ):
+        """The half that matters for brute force: popping the streak meant every
+        five failures started over, so nothing ever accumulated. Keeping it holds
+        the client AT the threshold, so the lockout lands the moment a slot frees.
+
+        The lockout is deliberately SHORTER than the window here, so a filler can
+        expire while the attacker's streak is still live — the only arrangement
+        in which "a slot frees" is observable at all.
+        """
+        now = [1000.0]
+        lim = self._full(now, monkeypatch, lockout_s=5.0, window_s=600.0)
+        for _ in range(9):
+            lim.record_failure("attacker")
+        assert len(lim._failures.get("attacker", [])) >= 5, "the streak was reset"
+        now[0] += 6.0  # fillers expire; the attacker's streak is still in-window
+        assert lim.record_failure("attacker") is True
+        assert lim.locked_out("attacker") is True
+
+    def test_EXPIRED_lockouts_are_released_so_the_table_DRAINS(self, monkeypatch):
+        """🔴 The release loop had ZERO coverage — a surviving mutant in the
+        previous sweep — and it is the only thing that drains `_locked_until`,
+        i.e. the only reason the cap above is not permanent.
+        """
+        now = [1000.0]
+        lim = self._full(now, monkeypatch, lockout_s=5.0, window_s=600.0)
+        now[0] += 6.0
+        lim.record_failure("anyone")
+        assert len(lim._locked_until) < self.CAP, "the table never drained"
+
+
+class TestEveryAuditFieldIsEscaped:
+    def test_the_METHOD_is_escaped_not_just_the_path(self, store: Path):
+        """🔴 A surviving mutant with zero coverage: a verb can carry control
+        bytes, and the method field went into the record unescaped.
+        """
+        with running(store) as (base, audit):
+            _speak(
+                base.split("//", 1)[1],
+                f"FROB\x1b[31mNICATE /api/v1/recall/{SCOPE} HTTP/1.1\r\n"
+                f"Host: h\r\nCF-Connecting-IP: {CLIENT_IP}\r\n\r\n".encode(),
+            )
+        assert audit, "no audit line was written"
+        assert "\x1b" not in audit[0], "an escape sequence reached the log"
+        assert "\n" not in audit[0]

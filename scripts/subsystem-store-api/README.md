@@ -165,9 +165,27 @@ must send the header itself; that is not a hole, since addressing the pod
 directly already bypasses the edge.
 
 Every rejection is the same 401 on the wire — body, code and header set — and is
-told apart only in the audit log's `status=` field: `unauthorized`,
-`no-client-ip`, `locked-out`, `lockout-triggered`. An error that discriminates is
-an enumeration API; a log that does not is a post-mortem with no evidence.
+told apart only in the audit log's `status=` field. The full vocabulary, which is
+what the Loki rules select on:
+
+| `status=` | meaning |
+|---|---|
+| `unauthorized` | no/!wrong token, or a path outside `/api/v1/` |
+| `no-client-ip` | absent, unparseable or duplicated `CF-Connecting-IP` — fails closed |
+| `locked-out` | this client is serving a lockout |
+| `lockout-triggered` | this request is the one that started it |
+| `malformed-target` | a request target `urlsplit` could not parse |
+| `malformed-request` | the request LINE itself was unparseable — no headers exist |
+| `method-not-allowed` | a write verb from an authenticated caller (405, not 401) |
+
+An error that discriminates is an enumeration API; a log that does not is a
+post-mortem with no evidence.
+
+⚠ **A wrong PATH is not a failed AUTH and is not counted.** Only a request that
+reaches the token check and fails it moves the lockout. Counting path probes
+measured as a client holding the *right* token locking itself out with five
+ordinary 404-ish requests. Volumetric probing is the Traefik and Cloudflare
+layers' job; this layer is the only one that can see a wrong credential.
 
 ## Deferred, and why (not oversights)
 

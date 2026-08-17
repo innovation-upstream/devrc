@@ -172,6 +172,10 @@ MAX_TRACKED_LOCKOUTS = 16384
 # desynchronise a keep-alive connection (see `_drain_body`).
 MAX_DRAIN_BYTES = 1 << 20
 
+# …and how long it will spend doing so. A byte limit alone is not a bound: a
+# caller dripping one byte at a time satisfies it while holding a thread forever.
+DRAIN_DEADLINE_S = 10.0
+
 # A scope name, as it may appear in a URL path.
 #
 # 🔴 NO DOT. That makes traversal impossible BY CONSTRUCTION rather than by
@@ -504,14 +508,38 @@ class RateLimiter:
             recent = [t for t in self._failures.get(key, []) if t > now - self.window_s]
             recent.append(now)
             if len(recent) >= self.max_failures:
+                # 🔴 PRUNE EXPIRED LOCKOUTS BEFORE ASKING WHETHER THERE IS ROOM.
+                # Found by a test, not by reading: `_evict` ran AFTER this check,
+                # so a table full of ALREADY-EXPIRED entries reported "no room"
+                # and refused a lockout that should have been granted. Once the
+                # cap is reached once, that would persist for as long as new
+                # failures kept arriving — the cap turning into a permanent
+                # disable of the whole lockout mechanism.
+                for stale in [k for k, v in self._locked_until.items() if v <= now]:
+                    del self._locked_until[stale]
                 if (
                     key in self._locked_until
                     or len(self._locked_until) < MAX_TRACKED_LOCKOUTS
                 ):
                     self._locked_until[key] = now + self.lockout_s
-                self._failures.pop(key, None)
+                    self._failures.pop(key, None)
+                    self._evict(now)
+                    return True
+                # 🔴 THE TABLE IS FULL, SO NO LOCKOUT WAS CREATED — SAY SO.
+                # The first version returned True here regardless, and popped
+                # the streak. Measured consequences, both bad: the audit log
+                # wrote `status=lockout-triggered` for a client that was NOT
+                # locked out (the log lying about the one event the operator
+                # alerts on), and popping the streak every `max_failures`
+                # failures meant no state accumulated at all — unlimited brute
+                # force, for an attacker who had first filled the table.
+                #
+                # Keeping the streak is what makes this degrade safely: the
+                # client stays AT the threshold, so every subsequent failure
+                # retries the lockout and takes it the moment a slot frees.
+                self._failures[key] = recent
                 self._evict(now)
-                return True
+                return False
             self._failures[key] = recent
             self._evict(now)
             return False
@@ -770,25 +798,58 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         drain the declared body here, and `_respond` sets `close_connection` on
         every non-200 so a desynchronised connection cannot be reused at all.
         """
+        headers = getattr(self, "headers", None)
+        if headers is None:
+            return
+        # 🔴 ANY FRAMING THIS FUNCTION DOES NOT FULLY UNDERSTAND ENDS THE
+        # CONNECTION. A delta audit measured the first version being walked by
+        # two framings it silently ignored — `Transfer-Encoding: chunked` (no
+        # Content-Length at all, so the body stayed queued) and a NEGATIVE
+        # Content-Length — each producing two responses on one socket with store
+        # content in the second, on a 200 where the connection legitimately
+        # stays open so the close-on-non-200 belt does not apply. No endpoint
+        # here accepts a body, so refusing to reason about exotic framing costs
+        # nothing and is the only answer that cannot be walked by a third
+        # framing nobody has thought of yet.
+        if headers.get("Transfer-Encoding"):
+            self.close_connection = True
+            return
+        raw_length = headers.get("Content-Length")
+        if raw_length is None:
+            return
         try:
-            length = int(self.headers.get("Content-Length") or 0)
+            length = int(raw_length)
         except ValueError:
             # A malformed length means the framing is already unknowable. Do not
             # guess; `_respond` will close the connection.
             self.close_connection = True
             return
-        if length <= 0:
+        if length < 0:
+            # Negative lengths are not "no body" — they are a caller telling two
+            # different stories to two different parsers.
+            self.close_connection = True
+            return
+        if length == 0:
             return
         if length > MAX_DRAIN_BYTES:
             # Too big to swallow politely. Closing is the only safe answer —
             # leaving it queued is exactly the desync above.
             self.close_connection = True
             return
+        # 🔴 BOUNDED IN TIME, NOT JUST IN BYTES. `timeout` is per-recv, so a
+        # caller dripping one byte every 10s held a thread for as long as it
+        # liked — measured at 60s for a 6-byte body, i.e. months for a 1 MiB
+        # one. The read loop this fix introduced needed its own deadline.
+        deadline = time.monotonic() + DRAIN_DEADLINE_S
         remaining = length
         while remaining > 0:
+            if time.monotonic() > deadline:
+                self.close_connection = True
+                return
             chunk = self.rfile.read(min(remaining, 65536))
             if not chunk:
-                break
+                self.close_connection = True
+                return
             remaining -= len(chunk)
 
     def _reject_write(self) -> None:
@@ -841,11 +902,39 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         distinct shape for what the docstring calls "ONE 401 response,
         byte-identical for every rejection". `OPTIONS`, `TRACE` and any invented
         verb reached it. They now look exactly like a bad token.
+
+        🔴 THE FIRST VERSION OF THIS OVERRIDE REOPENED, IN THE SAME COMMIT, THE
+        TWO DEFECTS THE REST OF THAT COMMIT CLOSED. A delta audit measured both:
+
+          * it read `self.path`, which `parse_request` assigns only AFTER five of
+            its own `send_error` calls — so `GET\r\n\r\n` (six bytes), a bad
+            HTTP version, or a four-word request line raised an unhandled
+            AttributeError: no audit record, no response, a ~25-line traceback
+            per request. That is verbatim what `_request_path` exists to prevent,
+            reintroduced one screen below it, and made cheaper.
+          * it never metered, so 30 `FROBNICATE` requests wrote 30 audit lines
+            and counted for nothing — the same free channel `_reject_write` had
+            just been reordered to close, widened to every other verb.
+
+        So: `getattr` for everything, because on this path NOTHING is guaranteed
+        to exist; meter when there are headers to identify a client from; and
+        when there are not, refuse AND close, which bounds an unidentifiable
+        caller to one request per TCP handshake.
         """
         self._client_ip = None
         self._token_fp = None
-        self._unauthorized()
-        self._audit(self._raw_path(), code, "method-not-allowed")
+        path = self._raw_path()
+        if getattr(self, "headers", None) is None:
+            # The request line itself was unparseable, so there is no header to
+            # identify anyone by. Answer, audit, and do not keep the connection.
+            self.close_connection = True
+            self._unauthorized()
+            self._audit(path, 401, "malformed-request")
+            return
+        self._drain_body()
+        if not self._identify_and_meter(path):
+            return
+        self._refuse(path, self._count_failure(self.limiter, self._client_ip))
 
     # --- the router -------------------------------------------------------------
 
@@ -870,8 +959,16 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         self._audit(path, 401, status)
 
     def _raw_path(self) -> str:
-        """The request target, never parsed. Safe to log; safe on any input."""
-        return self.path if isinstance(self.path, str) else "-"
+        """The request target, never parsed. Safe to log; safe on any input.
+
+        🔴 `getattr`, NOT `self.path`. `path` is an INSTANCE attribute assigned
+        by `parse_request`, and five of that method's own `send_error` calls
+        happen BEFORE the assignment — so on a malformed request line the
+        attribute does not exist at all and `self.path` raises AttributeError.
+        There is no class-level default to fall back on.
+        """
+        raw = getattr(self, "path", None)
+        return raw if isinstance(raw, str) else "-"
 
     def _request_path(self) -> str | None:
         """The decoded path, or `None` having already answered.
@@ -944,10 +1041,23 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         if not path.startswith(API_PREFIX):
             # Not an API path and not health. Answered with the SAME uniform 401
             # as a bad token: a 404 here would let an unauthenticated caller map
-            # the URL space, which is the enumeration surface §2b forbids. It
-            # counts toward the lockout for the same reason — URL probing from
-            # one address is the same attack as token probing from one address.
-            self._refuse(path, self._count_failure(limiter, ip))
+            # the URL space, which is the enumeration surface §2b forbids.
+            #
+            # 🔴 BUT IT IS NOT COUNTED, AND THAT IS A CORRECTION. It used to be,
+            # on the reasoning that URL probing is the same attack as token
+            # probing. Combined with a success no longer forgiving a streak,
+            # that measured as a legitimate client HOLDING THE RIGHT TOKEN
+            # locking itself out for 15 minutes by requesting `/favicon.ico`,
+            # `/`, `/robots.txt`, `/metrics` and `/api/v1` — five ordinary wrong
+            # paths, one of them a missing trailing slash away from the real
+            # prefix, with nothing able to forgive it.
+            #
+            # The specification says five failed AUTHS per minute. A request to
+            # a path that never reaches the token check is not a failed auth.
+            # Volumetric URL probing is what the Traefik middleware (10/s) and
+            # the Cloudflare WAF rule are for; this layer is the only one that
+            # can see a WRONG CREDENTIAL, and that is what it counts.
+            self._refuse(path, "unauthorized")
             return
 
         try:
