@@ -82,9 +82,12 @@ scripts/subsystem-store-api/verify-byte-identity.sh \
                      -o jsonpath='{.data.token}' | base64 -d)
 ```
 
-The verifier sends `CF-Connecting-IP: 127.0.0.1` (override with `$CLIENT_IP`)
-because the server requires one — see "Rate limit, lockout and the client
-address" below.
+The verifier sends `CF-Connecting-IP: 127.0.0.1` (override with `$CLIENT_IP`).
+⚠ **Over a port-forward that header is INERT** — the peer is `127.0.0.1`, which
+is not a trusted proxy, so the server ignores it and buckets the request under
+the peer. It is sent so the same invocation also works when `--url` points at
+the nebula gateway, where the peer *is* trusted and the header becomes the
+client identity. See "Rate limit, lockout and the client address" below.
 
 ⚠ `verify-byte-identity.sh` prints a `diff` on failure, and that diff is store
 content. Redirect it to a file on a shared terminal.
@@ -207,8 +210,13 @@ kubectl -n nebula exec ds/nebula-gateway -c nginx-proxy -- \
 
 🔴 **It is Cilium-allocated per node and nothing reconciles it.** A node rebuild
 can hand out a different router address, and no controller will update this env
-var. The failure is loud and fail-safe rather than silent — see below — but it
-is a manual step on a list nobody keeps.
+var. ⚠ **And the failure is SILENT** — requests are still served, just all
+bucketed under one address, so `/healthz` keeps answering and the pod stays
+Ready (see below). An earlier revision of this line said "loud and fail-safe",
+which was true of the refuse-outright design this replaced and contradicted its
+own cross-reference two sections down. A degradation that keeps the health probe
+green is the anti-pattern this module names elsewhere; the only tell is
+`peer=untrusted` in the log, and it is a manual step on a list nobody keeps.
 
 ### Rules on the value
 
@@ -248,10 +256,18 @@ way, so the probe will not tell you.
 ⚠ **What it cannot do.** The pod sees whatever last hop connected to it — in
 the homelab deployment the in-cluster gateway, never Cloudflare's own address.
 So this proves *the request came through the gateway*, not *the request came
-through Cloudflare*. Narrowing who can occupy that hop is a NetworkPolicy's job
-(homelab-infra `clusters/homelab/apps/subsystem-store/networkpolicy.yaml`) —
-though see that file's header for why the two layers overlap far more than they
-compose.
+through Cloudflare*.
+
+Narrowing who can occupy that hop is a NetworkPolicy's job — 🔴 **and that
+NetworkPolicy is NOT DEPLOYED YET.** `homelab-infra`
+`clusters/homelab/apps/subsystem-store/networkpolicy.yaml` exists only on the
+unmerged branch of **homelab-infra #330**; on `trunk` that kustomization still
+lists four resources (`namespace`, `pvc`, `secrets.enc`, `deployment`) and no
+policy. Until #330 merges, **any pod in the cluster can address this pod on
+8102** and the app-layer gate above is the only layer there is. Do not read this
+paragraph as a compensating control that is already in place — and see that
+file's header for why, even once it lands, the two layers overlap far more than
+they compose.
 
 An absent, unparseable or **duplicated** header **fails closed** for a TRUSTED
 peer: a uniform 401, and nothing counted, because there is no bucket to count

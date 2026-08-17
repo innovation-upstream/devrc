@@ -1603,15 +1603,23 @@ def build_server(
         )
     # 🔴 REQUIRED, AND NON-EMPTY. `trusted_proxies` has no default in this
     # signature on purpose: a caller that forgot it fails at the call rather
-    # than getting a server that 401s everything for a reason nobody can see.
-    # An explicitly EMPTY sequence is refused here as a misconfiguration —
-    # the class default is empty so that the *unreachable* path still fails
-    # closed, but reaching it deliberately is a mistake worth naming.
+    # than getting a server whose client identity is silently wrong for a reason
+    # nobody can see. An explicitly EMPTY sequence is refused here as a
+    # misconfiguration — the class default is empty so that the *unreachable*
+    # path still fails safe (no header is believed), but reaching it
+    # deliberately is a mistake worth naming.
+    #
+    # ⚠ THE MESSAGE USED TO SAY "every request would be a 401". That was true of
+    # the refuse-outright design this replaced, and it is false now: with no
+    # trusted peers every request is SERVED and bucketed under its own address,
+    # so one client's failures can lock out the others and nothing looks broken.
+    # An operator-visible error string is a claim like any other.
     networks = tuple(trusted_network(item) for item in trusted_proxies)
     if not networks:
         raise ValueError(
-            "trusted_proxies is empty: no peer could ever be trusted, so every "
-            f"request would be a 401. Set ${ENV_TRUSTED_PROXIES}"
+            "trusted_proxies is empty: no peer could ever be trusted, so no "
+            "CF-Connecting-IP would ever be believed and every caller would be "
+            f"bucketed under the proxy's own address. Set ${ENV_TRUSTED_PROXIES}"
         )
 
     class _Handler(StoreRequestHandler):

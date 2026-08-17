@@ -108,14 +108,25 @@ for scope in "${SCOPES[@]}"; do
     fail=$((fail + 1)); continue
   fi
 
-  # 🔴 CF-Connecting-IP is REQUIRED by the server (phase 1.5): it keys the
-  # per-client rate limiter on the one header Cloudflare overwrites, and an
-  # absent one fails CLOSED rather than being bucketed with every other
-  # unidentified caller. This verifier reaches the pod directly (port-forward or
-  # in-cluster), so no proxy sets it and it must identify itself. That is not a
-  # hole: anything that can address the pod directly has already bypassed the
-  # edge, and the header is only ever TRUSTED because Cloudflare is the sole
-  # PUBLIC ingress.
+  # CF-Connecting-IP keys the server's per-client rate limiter — but ONLY when
+  # the request arrives from a peer in `$SUBSYSTEM_STORE_TRUSTED_PROXIES`.
+  #
+  # ⚠ ON THIS SCRIPT'S USUAL PATH IT IS INERT, AND AN EARLIER VERSION OF THIS
+  # COMMENT CLAIMED THE OPPOSITE ("REQUIRED by the server … it must identify
+  # itself"). A port-forward presents peer `127.0.0.1` — measured out of the
+  # pod's own /proc/net/tcp, both ends loopback, because the kubelet enters the
+  # pod's network namespace — which is not the allowlisted address, so the
+  # server ignores this header and buckets the request under the peer. Nothing
+  # here depends on it and omitting it would work exactly as well.
+  #
+  # It is still sent, deliberately: point `--url` at the nebula gateway instead
+  # of a port-forward and the peer IS trusted, at which point this header
+  # becomes the client identity and sending an explicit one is correct. One
+  # invocation that behaves the same on both paths beats two.
+  #
+  # 🔴 The header is only ever TRUSTED because Cloudflare is the sole PUBLIC
+  # ingress AND the peer is a named proxy. Neither half alone is enough — that
+  # was the phase-1.5b defect.
   code=$(curl -sS -o "$remote_out" -D "$tmp/hdr" -w '%{http_code}' \
            -H "Authorization: Bearer $TOKEN" \
            -H "CF-Connecting-IP: ${CLIENT_IP:-127.0.0.1}" \

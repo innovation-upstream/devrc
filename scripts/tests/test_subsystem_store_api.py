@@ -2916,6 +2916,18 @@ class TestMalformedRequestLinesDoNotCrash:
             _speak(base.split("//", 1)[1], b"GET\r\n\r\n")
         assert "path=-" in audit[0], audit[0]
         assert "status=malformed-request" in audit[0]
+        # 🔴 `peer=-`, THE THIRD VALUE OF THAT FIELD, AND THE ONLY ONE NOTHING
+        # ASSERTED. Six bytes is too little to have headers, so `send_error`
+        # answers before `_identify_and_meter` ever runs and `_peer_trusted` is
+        # still `None`. Found by a mutation sweep with NO `-k` selector:
+        # rendering that `None` as `trusted` survived a fully green suite —
+        # `peer=trusted|untrusted` were asserted eleven times and `peer=-` zero.
+        #
+        # The untested direction is the dangerous one. It makes the audit log
+        # assert TRUST about a request whose peer was never evaluated, which is
+        # the one claim this field exists to let an operator rely on.
+        assert "peer=-" in audit[0], audit[0]
+        assert "peer=trusted" not in audit[0], audit[0]
 
     def test_POSITIVE_CONTROL_a_WELL_FORMED_unknown_verb_still_works(
         self, store: Path
@@ -3390,7 +3402,16 @@ class TestTrustedProxyOverTheRealProcess:
         for that same `SPOOF_IP` client, with a VALID token.
 
           base: the five are charged to SPOOF_IP -> the victim is 401 for 15 min
-          HEAD: not one of them reaches the limiter -> the victim gets its 200
+          HEAD: the five are charged to 127.0.0.2, the forger's own address
+                -> the victim gets its 200
+
+        ⚠ "not one of them reaches the limiter" is what this line used to say,
+        and it described the refuse-outright design that was replaced. They DO
+        reach it now, and should: five failed auths from one caller is a real
+        lockout — of that caller. The property is only ever about WHOSE bucket,
+        which is what the sibling
+        `test_THE_DEFECT_the_five_forged_attempts_are_CHARGED_TO_THE_FORGER`
+        reads out of the audit line.
 
         🔴 THE FIRST DRAFT OF THIS TEST WAS VACUOUS AND PASSED AT BASE. It ran
         every request from ONE address and asserted the victim saw a 401 — which
