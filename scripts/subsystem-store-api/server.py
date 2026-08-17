@@ -1287,6 +1287,30 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         self._client_ip = None
         self._token_fp = None
         self._peer_trusted = None
+        # ⚠ THAT RESET IS AN EQUIVALENT MUTANT ON THIS PATH, RECORDED RATHER
+        # THAN LEFT AS AN UNEXPLAINED SURVIVOR. A no-selector sweep showed
+        # deleting it changes nothing observable, and the reason is worth
+        # knowing: either `headers` is absent, and the branch below answers with
+        # `_peer_trusted` still `None` (`peer=-`, which is now asserted), or
+        # `headers` is present and `_identify_and_meter` RECOMPUTES the field a
+        # few lines down. Kept because a future edit that stops recomputing must
+        # not silently inherit the previous request's value.
+        #
+        # 🔴 SEPARATE, PRE-EXISTING, AND NOT FIXED HERE — reported instead,
+        # because it predates this branch and fixing it means changing
+        # `_raw_path`'s base behaviour: on a KEEP-ALIVE connection whose SECOND
+        # request line is malformed, `self.headers` and `self.path` are still
+        # the FIRST request's instance attributes. Measured, one connection:
+        #
+        #   ip=203.0.113.7 peer=trusted … path=/api/v1/recall/sc auth=ok  result=200
+        #   ip=203.0.113.7 peer=trusted … path=/api/v1/recall/sc auth=fail result=401
+        #                                      ^ the PREVIOUS request's path,
+        #                                        and its CF-Connecting-IP
+        #
+        # The request is still refused, so this is log FIDELITY, not a bypass —
+        # but it attributes a malformed request to whatever the last good one
+        # claimed, on the log this design says is "the only thing that can
+        # answer it" if the store is ever suspected of leaking.
         path = self._raw_path()
         if getattr(self, "headers", None) is None:
             # The request line itself was unparseable, so there is no header to
