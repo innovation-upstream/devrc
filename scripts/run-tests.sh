@@ -801,7 +801,23 @@ TARGET_FLOORS=(
   # silently omits them.
   # ⚠ If main moves before this merges, re-run the gate on the MERGED tree and
   # copy what it prints. Do not reconcile the two sides by arithmetic.
-  "scripts/tests|3970"
+  #
+  # 2026-08-17, the captured-text gate's coverage round (#521): 3970 was still
+  # sitting under a 5026-test target — 1056 of SLACK against a drift ceiling of
+  # 4962, so the gate went RED on the ceiling check, which is what this line is
+  # for. Not computed and not reconciled against another branch: the gate was
+  # run on the MERGED tree (this branch + origin/main at 5565c33) and printed
+  #
+  #   run-tests: ERROR — scripts/tests collected 5026 tests but its floor is
+  #   only 3970. … Raise the TARGET_FLOORS entry to "scripts/tests|4976"
+  #
+  # and 4976 is copied verbatim from that line. The same run: TOTAL
+  # collected=11493 passed=11492 skipped=1 failed=0, every other target PASS —
+  # this floor was the ONLY red.
+  # ⚠ ZERO new skips on this target. NO new file lands under it (the gate's two
+  # files already existed on this branch); the +80 tests are all inside
+  # scripts/tests/test_no_captured_text.py.
+  "scripts/tests|4976"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
