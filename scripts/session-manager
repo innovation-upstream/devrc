@@ -138,7 +138,7 @@ which `kinds_produced` would attribute to this build an absence the filter
 caused.
 
 HONEST LIMITS (stated, not implied away — AND CARRIED IN THE OUTPUT as
-`report["caveats"]` plus two footer lines; see CAVEATS)
+`report["caveats"]` plus ONE FOOTER LINE PER CAVEAT; see CAVEATS)
 ----------------------------------------------------------------------
   * Claude detection is `pane_current_command =~ /claude/`, which is SHALLOWER
     than the `/proc` descendant walk in scripts/lib/claude_sessions.py. It
@@ -162,6 +162,15 @@ HONEST LIMITS (stated, not implied away — AND CARRIED IN THE OUTPUT as
     match", never "this window needs nothing" — measured 2026-08-12, a window
     parked on `Press Enter to continue…` matches none of them. See
     CAVEATS["waiting_signal"], carried in the output.
+  * `unsent_prompt` reads ONE place — the lines inside this pane's own input
+    box — so recall is bounded by that box being on screen. A modal replaces
+    it, and a draft taller than the box is not recognised; both report
+    `no_input_box`, which is UNMEASURED, never an empty draft. Shell panes are
+    never scraped at all. See CAVEATS["unsent_prompt"].
+  * PR review state, the mail queue, cluster alerts, the durable initiative
+    board and GUI windows outside tmux are NOT measured by this tool at all.
+    They are enumerated in `report["not_measured"]` with the skill that owns
+    each, because a tool that is silent about its own scope reads as complete.
 
 🔴 THE JSON SHAPE, because a consumer that has to guess it wastes a call
 --------------------------------------------------------------------------
@@ -173,15 +182,42 @@ and the roll-ups a caller usually wants are:
 
     report["summary"]["waiting"]        {"probable", "measured", "unmeasured",
                                          "per_signal", "unmeasured_reasons"}
+    report["summary"]["unsent_prompt"]  {"count", "measured", "unmeasured",
+                                         "unmeasured_reasons"} — SEPARATE from
+                                        `waiting`, never summed into it
     report["summary"]["status"][b]      class counts + "total" per bucket
     report["summary"]["kind"]           {"tmux": N} — the entity axis
     report["blocked_on_me"]             {"status", "count", ...}
+    report["not_measured"]              [{population, owner_skill, ...}] — the
+                                        populations this tool CANNOT see, and
+                                        which skill owns each
 
 Each row carries: kind, host, session, window_index, window_id, window_name,
 codename, label, label_source, hotkey, pane_id, path, command, task, claude,
 busy, age_secs, age_source, status, waiting_probable, waiting_signals,
-waiting_status, claude_session_id, runtime, ledger, fuzzyclaw, panes. The row ledger is
-pinned by a test.
+waiting_status, unsent_prompt, unsent_prompt_status, claude_session_id, runtime,
+ledger, fuzzyclaw, panes. The row ledger is pinned by a test.
+
+🔴 `waiting_probable` AND `unsent_prompt` ARE TWO SIGNALS, NOT ONE
+--------------------------------------------------------------------------
+`waiting_probable` says this window is BLOCKED and cannot proceed without you.
+`unsent_prompt` says this window has WORK PARKED in its input box — typed and
+never sent. Measured 2026-08-15 across 79 panes on both hosts: `waiting_probable`
+flagged 11 with ZERO false positives, and FIVE separate panes held a parked
+draft that no roll-up reported at all. Folding the second into the first would
+trade the first's precision for the second's recall; they are published side by
+side instead, so a consumer reads whichever question it is asking. See the
+comment block at `UNSENT_STATUSES`.
+
+🔴 WHAT THIS TOOL STRUCTURALLY CANNOT SEE IS NAMED IN THE OUTPUT
+--------------------------------------------------------------------------
+A blind dogfood found this tool "precise about what it measured, but it does not
+tell a cold reader what it did NOT measure" — while 60 open PRs, one CONFLICTING
+for eleven days, sat outside every number it prints. `report["not_measured"]`
+enumerates those populations and names the SKILL that owns each. It is DERIVED
+from the report's own keys, not written down as prose: see
+`NOT_MEASURED_POPULATIONS` and `measured_not_measured` for why a literal here
+would be the fifth constant in this file to masquerade as a measurement.
 
 🔴 `kind` IS THE ENTITY AXIS, AND IT IS WHY THE STATUS BUCKETS ARE NOT
 SIMPLY {claude, shell}.
@@ -459,6 +495,16 @@ BLOCKED_SCHEMA_NOTE = ("this cache predates the stuck-dispatch predicate "
 # Excluding costs RECALL, which is the safe direction and is stated in the
 # caveat. `reference/waiting-signal.md` carries the full evidence and the exact
 # observation that would justify turning it on.
+#
+# 🔴 UPDATE 2026-08-15 — STILL EXCLUDED FROM `waiting`, NO LONGER DISCARDED.
+# Every word above stands: this is not a `waiting` signal and the reasons are
+# unchanged. What was wrong was the DISPOSAL. A blind dogfood measured five of
+# 79 panes holding a draft one Enter from running, some hours old, and this tool
+# reported none of them — the exclusion was correct and the silence was not.
+# The fact is now measured and published under its OWN name (`unsent_prompt`,
+# `summary.unsent_prompt`), never mixed into `waiting_probable` and never summed
+# into its counts, so the 11/11-true-positive precision measured on the same
+# 79 panes is untouched. See the comment block at `UNSENT_STATUSES`.
 # --------------------------------------------------------------------------- #
 # A horizontal rule. Claude Code draws the input box with box-drawing rules, so
 # this is how the CHROME at the bottom of a pane is found structurally instead
@@ -473,6 +519,47 @@ _MENU_OPTION_RE = re.compile(r"^\s*(?:❯\s*)?\d+\.\s+\S")
 # `ctx: 10%` and `ctx: 0.4%` do not match.
 _CTX_ZERO_RE = re.compile(r"\bctx:\s*0%")
 WAITING_SIGNALS = ("selection_menu", "context_exhausted", "trailing_question")
+
+# --------------------------------------------------------------------------- #
+# 🔴 `unsent_prompt` — THE FOURTH SIGNAL, AND IT IS REPORTED SEPARATELY.
+#
+# MEASURED 2026-08-15 by a blind dogfood of this tool: of 79 panes across both
+# hosts, FIVE had text typed at the prompt and never sent — real work one Enter
+# from running, some of it hours old. The one-call answer missed all five; only
+# hand-enumerating every pane found them.
+#
+# 🔴 IT IS NOT FOLDED INTO `waiting_probable`, AND THAT IS NOT A STYLE CHOICE.
+# The same dogfood measured `waiting_probable` at 11 flagged, 11 TRUE POSITIVES,
+# ZERO false positives, verified pane by pane. That precision is the most
+# valuable property this tool has, and it is exactly what a noisier signal
+# destroys by being added to it — a reader who learns that `waiting: YES` is
+# sometimes "you typed something and wandered off" stops walking to the terminal
+# for the ones that are a real block. The exclusion documented in
+# CAVEATS["waiting_signal"] therefore STANDS, unchanged and for its original
+# reason: a window one Enter away from typing `no` must not read as "waiting on
+# you". What changes is only that the fact is no longer DISCARDED — it is
+# published under its own name, with the text, so an operator can triage without
+# opening the pane.
+#
+# The two answer different questions and a consumer should read both:
+#   waiting_probable  — this window is BLOCKED and cannot proceed without you.
+#   unsent_prompt     — this window has WORK PARKED in its input box.
+# --------------------------------------------------------------------------- #
+# The `❯` the input line begins with, plus its one following space. Deliberately
+# NOT `>` or `$`: this is only ever applied INSIDE a located Claude Code input
+# box (see `detect_unsent_prompt`), and widening it to shell-prompt characters
+# would buy nothing while making a mis-located box likelier to produce a draft.
+_PROMPT_MARK_RE = re.compile(r"^\s*❯[ \t]?")
+
+# 🔴 The status vocabulary, ENUMERATED and CLOSED, exactly like WAITING_SIGNALS.
+# Five of the six are the `waiting_status` values — the two signals share one
+# capture, so they share the reasons a capture did not happen — plus
+# `no_input_box`, which is this signal's own: the pane WAS captured and the
+# input box was not on screen (a modal replaces it, or the draft is taller than
+# the box pair), so nothing was measured. A test pins that `fold_windows` can
+# emit no status outside this tuple.
+UNSENT_STATUSES = ("ok", "no_input_box", "uncaptured", "not_claude",
+                   "skipped", "error")
 
 # 🔴 The per-pane capture batch. ONE tmux invocation per host captures every
 # Claude pane's visible screen, with a `display-message` marker between them —
@@ -723,7 +810,11 @@ CAVEATS = {
                 "(claude-code 2.1.220) and the queued case was never observed "
                 "live (0 hits across 29 panes), so keying on it would trust an "
                 "unobserved negative whose failure mode is a FALSE `waiting` "
-                "row. Excluded; costs recall, not precision."),
+                "row. Excluded; costs recall, not precision. 🔴 STILL EXCLUDED "
+                "FROM `waiting`, but NO LONGER DISCARDED: it is measured and "
+                "published separately as the row field `unsent_prompt` (with "
+                "the text) and `summary.unsent_prompt` — read BOTH. See "
+                "caveats.unsent_prompt."),
         },
         "note": ("`waiting_probable: false` means these signals were looked "
                  "for and none matched — NOT that the window needs nothing. "
@@ -732,7 +823,159 @@ CAVEATS = {
                  "matches none of them. `waiting_probable: null` means the "
                  "pane was never captured; read `waiting_status` for which."),
     },
+    # 🔴 THE FOURTH SIGNAL'S SCOPE, carried in the payload for the same reason
+    # as the three above: a `--json` consumer must be able to branch on what was
+    # looked at rather than infer it from a null. The two things a cold reader
+    # gets wrong here are (a) treating it as a kind of `waiting` and (b) reading
+    # a null as "nothing typed", so both are named structurally.
+    "unsent_prompt": {
+        "method": "capture_pane_input_box",
+        "scope": "claude_rows_only",
+        "statuses": list(UNSENT_STATUSES),
+        "separate_from": "waiting_probable",
+        "note": ("Text typed into a window's OWN input box and never sent — "
+                 "read from the lines BETWEEN the two box-drawing rules only, "
+                 "never from any matching line in the capture, so a pane "
+                 "displaying another session's transcript cannot trip it. It "
+                 "is NOT part of `waiting_probable` and is never summed into "
+                 "it: a parked draft means WORK IS PARKED HERE, not that the "
+                 "window is blocked on you. `unsent_prompt: null` is a MEASURED "
+                 "empty box ONLY when `unsent_prompt_status` is `ok`; every "
+                 "other status means it was not measured. Shell panes are never "
+                 "scraped (`not_claude`) — a half-typed shell command is a "
+                 "different and noisier thing. A draft taller than the input "
+                 "box, or a modal that replaces the box, reports "
+                 "`no_input_box`, i.e. UNMEASURED, never an empty draft."),
+    },
 }
+
+# --------------------------------------------------------------------------- #
+# 🔴 WHAT THIS TOOL STRUCTURALLY CANNOT SEE, AND WHICH SKILL OWNS EACH.
+#
+# MEASURED 2026-08-15: a blind dogfood asked this tool "what is being worked on
+# and what is waiting on me", got a precise answer, and was wrong — 60 open PRs
+# were invisible to it, one of them CONFLICTING for eleven days and one open
+# since February. Its verdict: the tool "is precise about what it MEASURED but
+# does not tell a cold reader what it did NOT measure". Every count here is
+# honest about null-vs-zero, and none of that helps a reader who does not know
+# the population exists at all — an unnamed population is not a null, it is a
+# silence, and a silence reads as coverage.
+#
+# 🔴 THIS IS A LEDGER, NOT THE OUTPUT. What ships is DERIVED — see
+# `measured_not_measured`, which emits an entry only while the report carries no
+# key for that population. THAT INDIRECTION IS THE WHOLE POINT AND IT IS PAID
+# FOR: this exact file has shipped a constant masquerading as a measurement FIVE
+# times. `kinds_produced` was a literal `["tmux"]` in `CAVEATS` that kept
+# asserting itself whatever the rows were; the third recurrence landed inside
+# the commit that fixed the second. A static list of "things we do not measure"
+# is the same defect with a longer fuse — it goes wrong on the day someone adds
+# the measurement, which is the one day a reader is most likely to trust it.
+#
+# `report_key` is the key that WOULD carry that population's measurement. It is
+# the only coupling: add PR querying that writes `report["pull_requests"]` and
+# the claim stops being made, with no edit here. `test_session_manager.py` pins
+# the relationship with an `ast` walk of `gather` — the same shape as
+# `test_drift_check.py`'s phase-2 reason-token ledger — so a new `report[...]`
+# key fails until it is accounted for.
+#
+# 🔴 THAT AST PIN GUARDS `gather`'s KEYS, NOT THIS SET'S MEMBERSHIP, and an
+# audit measured the difference: deleting the whole `cluster_alerts` entry left
+# the suite fully green, because the only count assertion was `1 +
+# len(NOT_MEASURED_POPULATIONS)` — derived from the very constant it claimed to
+# guard, the fixture-equals-the-constant trap this file has now hit six times.
+# So membership is pinned SEPARATELY, against a literal set living in the test
+# file: `test_the_not_measured_POPULATION_SET_cannot_silently_SHRINK`. Shrink
+# fails there; grow fails both there and on the AST pin.
+#
+# `owner_skill` is NOT decoration. A reader told only that a population is
+# unmeasured learns that this tool is incomplete; a reader told WHICH skill
+# answers can go get the answer in one hop. Each name is asserted by a test to
+# exist under `claude/skills/<name>/SKILL.md` — a pointer to a skill that is not
+# there is worse than no pointer, because it costs a hop to discover.
+#
+# 🔴 NOT LISTED HERE, DELIBERATELY: `opencode` panes classified as `shell`. That
+# is a MISCLASSIFICATION of a population this tool DOES measure, not a
+# population it cannot see, and it is already documented in
+# `CAVEATS["claude_detection"]` and on the row itself via `runtime`. Restating
+# it as an unmeasured population would tell a reader those windows are absent
+# from the table when they are present in it under the wrong class.
+# --------------------------------------------------------------------------- #
+NOT_MEASURED_POPULATIONS = {
+    "pull_requests": {
+        "report_key": "pull_requests",
+        "owner_skill": "standup",
+        "note": ("Open PRs, their review state and whether they CONFLICT are "
+                 "not read here at all. Measured 2026-08-15: 60 open, one "
+                 "conflicting for eleven days and one open since February, "
+                 "none of them visible in any number this tool prints. A "
+                 "window that is idle because its PR is blocked looks exactly "
+                 "like a window that is idle because the work is done."),
+    },
+    "mail_queue": {
+        "report_key": "mail_queue",
+        "owner_skill": "mailbox",
+        "note": ("Inbound mail and the extracted action-items queue are a "
+                 "separate store this tool never opens. `blocked_on_me` is the "
+                 "CLAWGATE approval queue only — it is not a general "
+                 "'everything waiting on you' number, and reading it as one is "
+                 "the misread this entry exists to prevent."),
+    },
+    "cluster_alerts": {
+        "report_key": "cluster_alerts",
+        "owner_skill": "standup",
+        "note": ("Firing alerts, in-flight deploys and rollout state on any "
+                 "cluster. A tmux pane scan cannot see work that is failing "
+                 "with nobody sitting in front of it, which is the failure "
+                 "mode that most needs a human."),
+    },
+    "initiative_board": {
+        "report_key": "initiative_board",
+        "owner_skill": "initiatives",
+        "note": ("The DURABLE record of what is in flight. These rows are live "
+                 "tmux windows only, so an initiative with no window open — "
+                 "stalled, or between sessions — contributes nothing here. "
+                 "'Nothing is running' is not 'nothing is in flight'."),
+    },
+    "gui_windows_outside_tmux": {
+        "report_key": "gui_windows",
+        "owner_skill": "i3",
+        "note": ("Browser, editor and any other GUI window. The scan is "
+                 "`tmux list-panes -a`, so anything not inside a tmux pane is "
+                 "outside this tool's reach entirely — not counted, not "
+                 "classified, and not represented by any null."),
+    },
+}
+
+
+def measured_not_measured(report, ledger=None) -> list:
+    """The populations this report does NOT cover, DERIVED from the report's own
+    keys. PURE — reads `report`, mutates nothing.
+
+    🔴 THE DERIVATION IS THE FEATURE. An entry is emitted only while the report
+    carries NO key for that population, so the day someone adds PR querying that
+    writes `report["pull_requests"]`, the claim "PRs are not measured here"
+    stops being made — automatically, in the same commit, with no chance for a
+    stale sentence to outlive the code it describes. That is the failure this
+    file has shipped five times (see `NOT_MEASURED_POPULATIONS`), and a literal
+    list here would have been the sixth.
+
+    🔴 `ledger` IS INJECTABLE FOR THE SAME REASON `measured_caveats` IS A
+    SEPARATE FUNCTION. Every real report is missing every one of these keys, so
+    a mutant that replaced this body with the module constant's own contents
+    would produce byte-identical output on every realistic fixture and SURVIVE a
+    green suite — a fixture whose value coincides with the constant cannot tell
+    "derived" from "hardcoded". The seam lets a test feed populations whose
+    names the constant does not contain, and watch the output move.
+    """
+    led = NOT_MEASURED_POPULATIONS if ledger is None else ledger
+    keys = set(report or {})
+    return [{"population": name,
+             "report_key": spec["report_key"],
+             "owner_skill": spec["owner_skill"],
+             "note": spec["note"]}
+            for name, spec in sorted(led.items())
+            if spec["report_key"] not in keys]
+
 
 # Claude Code renders a leading status glyph in the pane_title: a BRAILLE
 # spinner while working, a "sparkle" at rest. Same taxonomy as
@@ -1111,6 +1354,32 @@ def _is_status_line(line) -> bool:
     return t[0] in _STATUS_PREFIXES or _is_braille(t[0])
 
 
+def _input_box_span(lines):
+    """`(top_rule_index, bottom_rule_index)` of the pane's OWN input box, or
+    None when no such box is on screen.
+
+    🔴 THE ONE DEFINITION OF WHERE THE INPUT BOX IS. `last_assistant_line` cuts
+    the transcript at `top`, and `detect_unsent_prompt` reads the lines between
+    `top` and `bottom`; open-coding the rule pair at both sites would give the
+    two functions independent opinions about which lines are chrome, and the
+    first disagreement would be a draft attributed to the assistant or an
+    assistant sentence read as a draft.
+
+    The shape is Claude Code's: the input box is drawn between two box-drawing
+    rules a line or three apart. A LONE trailing rule is something else (a
+    modal's separator, and a modal REPLACES the input box), so it is not a box
+    and this returns None — which is why a modal pane reports `no_input_box`
+    rather than a measured-empty draft. `<= 3` is the pre-existing constant,
+    unchanged: it is what `last_assistant_line` has always used, and moving it
+    here is a refactor, not a retune.
+    """
+    lines = list(lines or ())
+    rules = [i for i, l in enumerate(lines) if _RULE_RE.match(l)]
+    if len(rules) >= 2 and rules[-1] - rules[-2] <= 3:
+        return rules[-2], rules[-1]
+    return None
+
+
 def last_assistant_line(text):
     """The last line of ASSISTANT PROSE in a captured pane, or None.
 
@@ -1133,16 +1402,104 @@ def last_assistant_line(text):
     lines = (text or "").splitlines()
     rules = [i for i, l in enumerate(lines) if _RULE_RE.match(l)]
     if rules:
-        cut = rules[-1]
         # Two rules a line or three apart are the input box, and the input line
         # between them is chrome. A lone trailing rule is something else (a
         # modal's separator), so only that last line is cut.
-        if len(rules) >= 2 and rules[-1] - rules[-2] <= 3:
-            cut = rules[-2]
+        span = _input_box_span(lines)
+        cut = span[0] if span is not None else rules[-1]
         lines = lines[:cut]
     while lines and _is_status_line(lines[-1]):
         lines.pop()
     return lines[-1] if lines else None
+
+
+def detect_unsent_prompt(text) -> dict:
+    """Text typed into THIS pane's own input box and never sent.
+
+    Returns `{"status": "ok"|"no_input_box", "text": str|None}`. `text` is the
+    typed draft; `None` under `ok` is a MEASURED empty box, and `None` under
+    `no_input_box` is "the box was never located", which is not a measurement.
+    That pairing is the whole contract — see the roll-up in `_unsent_rollup`.
+
+    🔴 IT IS SCOPED TO THE PANE'S OWN INPUT LINE, NOT TO "ANY MATCHING LINE IN
+    THE CAPTURE", AND THAT IS THE ENTIRE DESIGN. The scrape that this signal
+    most resembles already shipped a false positive of exactly this class: a
+    pane DISPLAYING ANOTHER SESSION'S TRANSCRIPT tripped a `waiting` signal on
+    text that was not its own state. Every capture contains `❯ …` lines that are
+    not a draft — the operator's own submitted prompts echoed into scrollback,
+    an agent quoting a prompt back, a pane tailing another window's transcript —
+    and a scan for "a `❯` line with text after it" flags all of them.
+
+    So the input line is located STRUCTURALLY: `_input_box_span` finds the pair
+    of box-drawing rules Claude Code draws its input box between, and only the
+    lines BETWEEN those two rules are read. Scrollback is above the box and the
+    `ctx:` footer is below it, so neither can contribute a character. The same
+    span is what `last_assistant_line` cuts at, so the two cannot disagree about
+    where the box is.
+
+    🔴 IT FIRES ON CLAUDE ROWS ONLY, AND NOT ON SHELL PANES. Two independent
+    reasons, both deliberate:
+
+      * `gather` captures Claude panes only, so a shell pane is never scraped at
+        all and its status is `not_claude` — a verdict about a pane nobody
+        looked at would be the silent-zero failure this tool exists to refuse;
+      * a half-typed shell command is a DIFFERENT THING and a noisier one. A
+        shell prompt is not a queue: a partially typed `git rebase -i` is the
+        operator's cursor, not work parked one Enter from running, and it is
+        left on screen for hours as a matter of course. Reporting it would
+        dilute a signal whose only value is precision.
+
+    Both are stated rather than implied: `unsent_prompt_status` says
+    `not_claude`, never a bare null.
+
+    🔴 STATED LIMIT — A DRAFT TALLER THAN THE BOX PAIR READS AS UNMEASURED, NOT
+    AS EMPTY. `_input_box_span` accepts a rule pair up to three lines apart (the
+    definition `last_assistant_line` has always used), so a draft occupying more
+    than two rendered lines makes the box taller than that and the span is not
+    recognised. The answer is then `no_input_box`, i.e. NOT MEASURED — never
+    `text: None` under `ok`. Under-reporting into the unmeasured bucket is the
+    safe direction; publishing "nothing typed" about a box we could not find is
+    the one that lies. The same applies if upstream restyles the `❯` marker.
+
+    🔴 AND A MODAL IS `no_input_box` WHETHER IT IS DRAWN WITH ONE RULE OR TWO.
+    The one-rule shape is rejected by `_input_box_span`; the two-rule shape
+    reaches this body with `❯ 1. Resume …` as its interior, which is a menu's
+    SELECTED OPTION and not a draft. It is rejected below by the same
+    selected-marker-plus-a-second-option pair `detect_waiting` calls a
+    `selection_menu`.
+    """
+    lines = (text or "").splitlines()
+    span = _input_box_span(lines)
+    if span is None:
+        return {"status": "no_input_box", "text": None}
+    top, bottom = span
+    interior = lines[top + 1:bottom]
+    if not interior or not _PROMPT_MARK_RE.match(interior[0]):
+        # A box we located but whose first line is not the input line. We do not
+        # know what we are looking at, so we do not report a measurement.
+        return {"status": "no_input_box", "text": None}
+    # 🔴 A MODAL DRAWN WITH TWO RULES IS STILL A MODAL. `❯ 1. …` is the SELECTED
+    # OPTION of a menu, not a draft — and `_PROMPT_MARK_RE` cannot tell them
+    # apart, because a menu row starts with the same marker. Claude Code's
+    # resume modal is usually drawn with ONE rule, which `_input_box_span`
+    # already rejects; a two-rule variant would have been read as a parked draft
+    # whose "text" is the option label. Not observed live (both live
+    # `selection_menu` panes reported `no_input_box`), which is exactly why it
+    # needed pinning rather than assuming.
+    #
+    # The discriminant is the SAME PAIR `detect_waiting` uses for
+    # `selection_menu` — the selected marker plus a SECOND numbered option
+    # anywhere in the capture — so the two signals cannot form independent
+    # opinions about what a menu is. A lone `❯ 1.` stays a draft: it occurs in
+    # ordinary typing, a two-option list does not. Cost is a draft that really
+    # begins `1. …` beside another numbered line, under-reported as UNMEASURED,
+    # which is the safe direction this whole detector is biased towards.
+    if (_MENU_SELECTED_RE.match(interior[0])
+            and sum(1 for l in lines if _MENU_OPTION_RE.match(l)) >= 2):
+        return {"status": "no_input_box", "text": None}
+    parts = [_PROMPT_MARK_RE.sub("", interior[0], count=1)] + list(interior[1:])
+    draft = " ".join(p.strip() for p in parts if p.strip()).strip()
+    return {"status": "ok", "text": draft or None}
 
 
 def detect_waiting(text) -> dict:
@@ -1600,17 +1957,30 @@ def fold_windows(panes, host, slots=None, task_index=None,
         lab = resolve_label(session, lead.get("path", ""), slots)
         # 🔴 The waiting fields, resolved through the None-vs-{} distinction
         # above. `probable` is None on every path where nothing was scraped.
+        #
+        # 🔴 `unsent_prompt` RIDES THE SAME CAPTURE AND THE SAME FOUR
+        # NOT-MEASURED PATHS, but is resolved into its OWN pair of fields. It is
+        # NEVER mixed into `w_probable` — see the comment block at
+        # `UNSENT_STATUSES` for the measurement that makes that load-bearing.
         if not is_claude:
             w_status, w_probable, w_signals = "not_claude", None, None
+            u_status, u_text = "not_claude", None
         elif captures is None:
             w_status, w_probable, w_signals = capture_status, None, None
+            u_status, u_text = capture_status, None
         elif lead.get("pane_id") not in captures:
             w_status, w_probable, w_signals = "uncaptured", None, None
+            u_status, u_text = "uncaptured", None
         else:
             det = detect_waiting(captures[lead.get("pane_id")])
             w_status = "ok"
             w_probable = det["probable"]
             w_signals = det["signals"]
+            # Its own status, because a pane that captured fine can still fail
+            # to yield an input box (`no_input_box`) while `waiting` measured
+            # that same text perfectly well.
+            uns = detect_unsent_prompt(captures[lead.get("pane_id")])
+            u_status, u_text = uns["status"], uns["text"]
         rows.append({
             # 🔴 WHAT KIND OF ENTITY THIS ROW IS. Always `tmux` here — this
             # function folds PANES, so by construction every row it builds has
@@ -1655,6 +2025,15 @@ def fold_windows(panes, host, slots=None, task_index=None,
             "waiting_probable": w_probable,
             "waiting_signals": w_signals,
             "waiting_status": w_status,
+            # 🔴 THE FOURTH SIGNAL, AND THE PAIR IS THE POINT. `unsent_prompt`
+            # is the TEXT so the operator can triage without opening the pane;
+            # `unsent_prompt_status` is what makes a null readable. `null` +
+            # `ok` is a MEASURED empty input box; `null` + anything else is
+            # "not measured", and collapsing the two would publish "nothing is
+            # parked here" about a pane nobody scraped — the same substitution
+            # `waiting_status` exists to refuse, one signal over.
+            "unsent_prompt": u_text,
+            "unsent_prompt_status": u_status,
             # Same precedence as `age_secs`, and for the same reason: this is the
             # ONE carrier of the session id into the ClickHouse join, so a stale
             # fuzzyclaw value overwriting a live ledger one would resolve a
@@ -1702,9 +2081,61 @@ def _waiting_rollup(rows) -> dict:
         "per_signal": per_signal if measured else None,
         # WHY a row went unmeasured, so "0 waiting" can be read against what
         # was skipped rather than against the row total.
+        #
+        # 🔴 `or "none"`, THE SAME COERCION AS `_unsent_rollup`'s, and it is
+        # here because the first version of that comment diagnosed the class
+        # ("a row built anywhere ELSE need not set the field") and then fixed
+        # exactly one of the two rollups that share the defect. Measured: a
+        # rows list holding one field-less row beside one `not_claude` row
+        # raises `TypeError: '<' not supported between instances of 'str' and
+        # 'NoneType'` in `render_table`, because a `None` key is unsortable
+        # beside the real string keys. One rule, one place — both places.
         "unmeasured_reasons": _count_by(
-            r.get("waiting_status") for r in rows
+            (r.get("waiting_status") or "none") for r in rows
             if r.get("waiting_probable") is None),
+    }
+
+
+def _unsent_rollup(rows) -> dict:
+    """The `unsent_prompt` roll-up — SEPARATE from `_waiting_rollup`, under the
+    identical null-vs-zero rule.
+
+    🔴 `count` IS None, NEVER 0, WHEN NOTHING WAS MEASURED. `--no-capture`, a
+    failed capture batch, a host of nothing but shells, or a screen full of
+    modals all produce zero measured input boxes, and publishing `count: 0` for
+    those says "I looked in every input box and none holds work" about a look
+    that never happened. That is the same sentence `_waiting_rollup` refuses,
+    and it is worth refusing twice: the dogfood that motivated this signal
+    missed five parked windows, so a fabricated zero here would re-create the
+    exact blind spot by asserting it had been checked.
+
+    `measured` counts the rows whose box was actually read (`status == "ok"`),
+    which is a STRICTER set than waiting's: a captured pane sitting on a modal
+    is `ok` for waiting and `no_input_box` here. `unmeasured_reasons` is the
+    histogram over every other status, so a small `measured` is always readable
+    against WHY.
+    """
+    measured = [r for r in rows if r.get("unsent_prompt_status") == "ok"]
+    return {
+        "count": (sum(1 for r in measured if r.get("unsent_prompt"))
+                  if measured else None),
+        "measured": len(measured),
+        "unmeasured": sum(1 for r in rows
+                          if r.get("unsent_prompt_status") != "ok"),
+        # 🔴 `or "none"`, the SAME coercion as `age_sources` and `row_kind`, and
+        # it is not cosmetic. `fold_windows` always sets this field, but a row
+        # built anywhere ELSE need not — a `cluster` row from writer 3 is the
+        # live example — and a `None` key here is two defects at once: it
+        # serialises to the string `"null"` and reads as a status called null,
+        # and it makes the histogram unsortable beside the real string keys, so
+        # the renderer raises `TypeError` on a report that is otherwise fine.
+        # Measured, not imagined: that crash is what the existing cluster-row
+        # fixtures produced before this coercion existed. A row missing the
+        # field is a BUG in whatever built it, so it is counted and named rather
+        # than dropped — loud, in the bucket that means "not measured".
+        "unmeasured_reasons": _count_by(
+            (r.get("unsent_prompt_status") or "none") for r in rows
+            if r.get("unsent_prompt_status") != "ok"),
     }
 
 
@@ -1854,6 +2285,12 @@ def summarize(report) -> dict:
         # the WAITING_SIGNALS tuple, so a signal cannot exist in
         # `detect_waiting` and be missing from the summary.
         "waiting": _waiting_rollup(rows),
+        # 🔴 THE FOURTH SIGNAL, AS ITS OWN ROLL-UP. Deliberately NOT a key
+        # inside `waiting`: nesting it there is one refactor away from being
+        # summed into `waiting.probable`, and that sum is the thing this design
+        # exists to prevent. `waiting_probable` measured 11/11 true positives on
+        # 79 live panes; a noisier signal must not be able to degrade it.
+        "unsent_prompt": _unsent_rollup(rows),
         # The clawgate approval queue, count + discriminant, never one alone.
         # 🔴 `stuck` rides along and is None (not 0) whenever the cache predates
         # the predicate — a roll-up reader must be able to tell "no wedged
@@ -2508,6 +2945,13 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
     # dict by reference, and writing through it would leak one scan's
     # measurement into every later caller in the process.
     report["caveats"] = measured_caveats(report)
+    # 🔴 LAST, and that ORDER is load-bearing. This reads the report's own top
+    # level to decide which populations went unmeasured, so it must run after
+    # every section that could have added one. Computed here rather than seeded
+    # in the skeleton above for the same reason: a key present in the skeleton
+    # is not evidence anything was measured, but a key ABSENT at the end is
+    # evidence nothing was.
+    report["not_measured"] = measured_not_measured(report)
     return report
 
 
@@ -2786,6 +3230,21 @@ def render_table(report) -> str:
                         r.get("host"), r.get("session"),
                         r.get("window_index"), sig.get("signal"),
                         _trunc(sig.get("line"), 90)))
+        # 🔴 ITS OWN BLOCK, UNDER ITS OWN HEADING, never merged into the one
+        # above. Five of 79 panes held a parked draft and the one-call answer
+        # showed none of them; printing the TEXT is what lets an operator decide
+        # which of the five matters without opening five panes. Merging the two
+        # lists would re-conflate the signals at the one surface where a human
+        # actually reads them.
+        parked = [r for r in rows if r.get("unsent_prompt")]
+        if parked:
+            out.append("")
+            out.append("  ✎ UNSENT PROMPT — typed and never sent; NOT "
+                       "'waiting on you', but work parked one Enter away:")
+            for r in parked:
+                out.append("    {}:{}:{}  {}".format(
+                    r.get("host"), r.get("session"), r.get("window_index"),
+                    _trunc(r.get("unsent_prompt"), 90)))
     out.append("")
 
     # 🔴 BLOCKED ON ME — printed ALWAYS, including when it was not measured.
@@ -2925,6 +3384,25 @@ def render_table(report) -> str:
         out.append("  by signal: " + "  ".join(
             "{}={}".format(s, (w.get("per_signal") or {}).get(s, 0))
             for s in WAITING_SIGNALS))
+    # 🔴 ON ITS OWN LINE, ALWAYS, AND ALLOWED TO SAY UNMEASURED. Same rule as
+    # `waiting` above: `count` is None whenever no input box was read, and
+    # printing `unsent: 0` there would answer "is any work parked" with a
+    # measurement nobody took — which is precisely how five parked windows went
+    # unreported. Printed unconditionally, because a line that appears only
+    # sometimes is one a reader learns not to expect.
+    u = summ.get("unsent_prompt") or {}
+    _u_reasons = ", ".join("{}={}".format(k, v) for k, v in
+                           sorted((u.get("unmeasured_reasons") or {}).items()))
+    if u.get("count") is None:
+        out.append("  unsent prompts: UNMEASURED — 0 of {} window(s) had an "
+                   "input box read ({})".format(
+                       u.get("measured", 0) + u.get("unmeasured", 0),
+                       _u_reasons or "no reason"))
+    else:
+        out.append("  unsent prompts: {} parked of {} box(es) read ({} not "
+                   "read: {})".format(u["count"], u.get("measured", 0),
+                                      u.get("unmeasured", 0),
+                                      _u_reasons or "none"))
     if summ.get("claude_only"):
         # The filter is stated where the counts are, because it changed them.
         # `shell window(s)`, not `non-claude window(s)`: the predicate drops the
@@ -2954,6 +3432,13 @@ def render_table(report) -> str:
         out.append("  WINDOW LIST UNMEASURED ON: " +
                    ", ".join(summ["windows_unmeasured"]))
     out.extend(render_caveats(report))
+    # 🔴 LAST, and BELOW the caveats, deliberately. The caveats qualify numbers
+    # this tool DID produce; this names populations it produced nothing about.
+    # A reader who stops at the caveats has still read every qualification that
+    # applies to what is on screen — and the last thing on screen is the list of
+    # what is not.
+    out.append("")
+    out.extend(render_not_measured(report))
     return "\n".join(out)
 
 
@@ -3077,6 +3562,14 @@ LEAN_ROW_FIELDS = (
     # whether it needs the operator — `waiting_status` is NOT optional, it is
     # the discriminant that makes `waiting_probable: null` readable
     "waiting_probable", "waiting_signals", "waiting_status",
+    # 🔴 whether work is PARKED here — a different question from `waiting`, and
+    # the field an agent reads to triage without opening the pane. Its status
+    # is as un-optional as `waiting_status`: it is the only thing that makes a
+    # null `unsent_prompt` readable as "measured, empty" rather than "never
+    # looked". Dropping the text to save bytes would leave the lean reader with
+    # a boolean it cannot act on, which is the LOSSY-table failure this view
+    # exists to replace.
+    "unsent_prompt", "unsent_prompt_status",
     # the carrier into ClickHouse
     "claude_session_id",
 )
@@ -3125,6 +3618,39 @@ def lean_report(report) -> dict:
     return out
 
 
+def render_not_measured(report) -> list:
+    """The `▸ NOT MEASURED HERE` section — one line per population, naming the
+    skill that owns it.
+
+    🔴 PRINTED UNCONDITIONALLY, in every state, for the same reason
+    `render_blocked_on_me` is: the reader this exists for is the one who does
+    not know the population exists. A section that appears only sometimes is one
+    a reader learns not to expect, and the run where it would have mattered is
+    exactly the run where everything else looked clean.
+
+    🔴 AND IT IS EMPTY-SAFE IN THE HONEST DIRECTION. If every population has
+    since gained a measurement the list is empty, and the section says the axis
+    is covered rather than printing a bare heading over nothing — a heading with
+    no rows reads as a failed render, not as an all-clear.
+    """
+    pops = (report or {}).get("not_measured")
+    if pops is None:
+        # No derivation ran. Not the same as "everything is measured", and the
+        # difference is the whole discipline of this file.
+        return ["▸ NOT MEASURED HERE: UNKNOWN — this report carries no "
+                "`not_measured` key, so the scope of what was left out was "
+                "never derived (this is NOT a claim that nothing was)"]
+    if not pops:
+        return ["▸ NOT MEASURED HERE: none — every enumerated population now "
+                "has a measurement in this report"]
+    out = ["▸ NOT MEASURED HERE — these are NOT zero, they were never looked "
+           "at; the owning skill has each:"]
+    for p in pops:
+        out.append("  {:<26} -> /{}".format(p.get("population"),
+                                            p.get("owner_skill")))
+    return out
+
+
 def render_caveats(report) -> list:
     """🔴 Every structured caveat, in the OUTPUT, unconditionally — one line
     each, and the count is whatever CAVEATS holds (a test pins the relationship
@@ -3138,7 +3664,12 @@ def render_caveats(report) -> list:
     detection rule to every row, the fuzzyclaw scope to every remote row —
     including the case where the remote host answered with zero rows).
 
-    Two lines, after the summary, so the per-row table is untouched.
+    ONE LINE PER ENTRY IN `CAVEATS`, after the summary, so the per-row table is
+    untouched. Deliberately NOT a number: this docstring said "two lines" for
+    months while the function emitted six, and a count restated in prose is a
+    second copy of a fact that only the code owns —
+    `test_the_caveat_footer_is_one_line_per_CAVEAT_pinned_both_ways` pins the
+    relationship instead.
     """
     cav = (report or {}).get("caveats") or CAVEATS
     det = cav.get("claude_detection") or {}
@@ -3146,6 +3677,7 @@ def render_caveats(report) -> list:
     led = cav.get("ledger_scope") or {}
     wt = cav.get("waiting_signal") or {}
     kd = cav.get("kind_scope") or {}
+    un = cav.get("unsent_prompt") or {}
     return [
         # 🔴 The signal set is ENUMERATED in the footer, because `WAIT: no` is
         # the cell a reader will over-trust. Naming the three things that were
@@ -3154,7 +3686,8 @@ def render_caveats(report) -> list:
         "  caveat[waiting_signal]: `waiting_probable` is a screen-scrape for "
         "{} ONLY, on claude rows only — `false` means none matched, NOT that "
         "the window needs nothing; text typed at the `❯` prompt is "
-        "deliberately EXCLUDED, so a window one Enter away reads `no` "
+        "deliberately EXCLUDED, so a window one Enter away reads `no` here and "
+        "is reported under `unsent_prompt` instead "
         "(reference/waiting-signal.md)".format(
             "/".join(wt.get("signals") or WAITING_SIGNALS)),
         # `CLASS`, matching the column header. It said `KIND`, which now names
@@ -3186,6 +3719,18 @@ def render_caveats(report) -> list:
         # in a sentence whose whole job is naming what is missing. A caveat
         # that degrades into a grammatically-broken half-claim is worse than
         # one that says nothing, because it still reads as a claim.
+        # 🔴 Printed directly under the `waiting_signal` line it completes. That
+        # line tells a reader the `❯` prompt is EXCLUDED; without this one
+        # beside it, the honest reading of the pair is "so nothing reports it",
+        # which is now false and would send an operator back to opening panes
+        # by hand — the exact cost the measurement was taken to remove.
+        "  caveat[unsent_prompt]: text typed at the `❯` prompt and never sent "
+        "IS measured, separately from `waiting` and never summed into it, on "
+        "{} — `unsent_prompt: null` is an EMPTY BOX only when "
+        "`unsent_prompt_status` is `ok` ({}); a shell pane is never scraped and "
+        "a modal reports `no_input_box`".format(
+            un.get("scope", "claude_rows_only"),
+            "/".join(un.get("statuses") or UNSENT_STATUSES)),
         "  caveat[kind_scope]: " + _fmt_kind_scope(kd),
     ]
 
