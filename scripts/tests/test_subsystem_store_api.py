@@ -1840,6 +1840,24 @@ class TestLimiterSettings:
     def test_main_EXITS_78_on_a_bad_limiter_setting(
         self, store: Path, tmp_path: Path, monkeypatch, capsys
     ):
+        """🔴 `build_server` IS STUBBED TO RAISE, AND THAT IS THE POINT, NOT
+        TIDINESS. Found by the mutation sweep: with the parse guard broken to
+        `return default`, `main` sails past the check and reaches
+        `serve_forever()` — so this test does not FAIL, it HANGS, forever, and
+        every test after it in the run is silently truncated (claude/RULES.md:
+        "a known-red slow test eats the suite budget"). A guard whose mutant
+        hangs the suite is worse than one with no test at all, because the
+        symptom reads as infrastructure. The stub turns that hang into an
+        immediate, named failure.
+        """
+
+        def _must_not_be_reached(**kwargs):
+            raise AssertionError(
+                "main() reached build_server on a bad SUBSYSTEM_STORE_MAX_FAILURES "
+                "— the limiter setting was accepted instead of exiting 78"
+            )
+
+        monkeypatch.setattr(api, "build_server", _must_not_be_reached)
         path = tmp_path / "tok"
         path.write_text(GOOD_TOKEN)
         monkeypatch.setenv("SUBSYSTEM_STORE_MAX_FAILURES", "lots")
