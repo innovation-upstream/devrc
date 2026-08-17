@@ -78,10 +78,11 @@ echoed into the scrollback as `❯ …?`.
 
 ## 🔴 Text typed at the `❯` prompt is EXCLUDED — the evidence
 
-A dogfood run saw four windows with dimmed text at the prompt (`merge 131`, `clean up the
-worktrees`, …) and read them as unsent instructions one Enter away, flagging honestly that it
-could not rule out placeholder text. Investigated against `claude-code 2.1.220` on
-2026-08-12.
+A dogfood run saw **four** windows with dimmed text at the prompt — each a short imperative
+instruction — and read them as unsent work one Enter away, flagging honestly that it could
+not rule out placeholder text. Investigated against `claude-code 2.1.220` on 2026-08-12.
+(Two of those four were quoted verbatim here until 2026-08-17. They were real, and the rule
+below now forbids it: a count and a shape is the whole of what a public file may say.)
 
 **Dimness is the wrong question.** What separates the readings is *position*, and
 `capture-pane` reports position perfectly well. From the bundle:
