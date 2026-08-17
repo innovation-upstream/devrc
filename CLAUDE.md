@@ -47,6 +47,21 @@ there. Only what's specific to this repo, where a working tree is also a **deplo
   block prompts for what the other allows, which is a real gap. Close it with
   `scripts/sync-claude-permissions.py` (idempotent, additive, **curated** — never copy the
   other host's block wholesale; #380 exists because that file accretes junk).
+  🔴 **rc 16 is NOT drift** — it is the fuzzyclaw phase-2 gate reporting that zero rows
+  still take their age from fuzzyclaw alone, i.e. the readers can now be deleted; the
+  final line says `ACTIONABLE (not drift)` and it is the least severe code, so it can
+  only ever be the verdict on an otherwise-clean run — which is also printed, since
+  "no drift" and "a cleanup is possible" are independent claims. It is a **success** to
+  systemd (`SuccessExitStatus = 16`): it stays set until the cleanup happens, so failing
+  the unit on it would fire the DND-defeating failure toast 4×/day forever. Every way
+  that gate can fail to measure prints `COULD NOT MEASURE` with a reason and sets **no**
+  rc — a `0` there is never a pass, because the answer it hands over is a deletion. That
+  last claim is **enforced, not asserted**: `test_drift_check.py::test_the_phase2_reason_
+  token_ledger_is_pinned_to_the_fields_read` pins the emitted reason-token set against
+  the report fields `lib/drift_phase2.py` reads, so consulting a new field without giving
+  its absence a token fails the suite. It exists because the prose version was false for
+  three days — `summary.age_sources` was read with no presence check, and a report
+  missing it printed a `READY` byte-identical to a real one.
 - **Recovering a diverged host** — preserve, verify, *then* move the pointer:
   `git branch <topic> HEAD && git push -u origin <topic>` on that host → confirm the shas are
   on origin **from a different host** → `git reset --keep origin/main` (`--keep` refuses

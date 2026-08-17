@@ -2252,6 +2252,13 @@ in
   # remote leg contributes nothing to the exit code — so a local rc 8 with the
   # laptop shut still exits 8, still fails the unit, and still toasts.
   #
+  # 🔴 THE SECOND THING THAT DOES **NOT** TOAST: rc 16, the fuzzyclaw phase-2
+  # gate. Same hazard, arrived at from the other direction — that code means a
+  # CLEANUP became possible and stays set until somebody does the cleanup, so
+  # failing the unit on it would fire the DND-bypassing toast 4× a day forever
+  # over a run where nothing is wrong. `SuccessExitStatus = 16` on the service
+  # below; the full argument is there.
+  #
   # The service is emitted UNCONDITIONALLY (any host can run it by hand); only the
   # TIMER's timers.target wiring is gated — see enableDriftDeadman above.
   systemd.user.services.drift-check = {
@@ -2263,6 +2270,36 @@ in
     };
     Service = {
       Type = "oneshot";
+      # 🔴 rc 16 IS A SUCCESS TO systemd, AND THIS LINE IS LOAD-BEARING. rc 16 is
+      # the fuzzyclaw phase-2 gate reporting that a CLEANUP became possible —
+      # ACTIONABLE, not drift, nothing broken, nothing to repair. Without this
+      # `Type = "oneshot"` fails the unit on any non-zero code, OnFailure above
+      # fires, and the toast is the ONE class deliberately wired to defeat
+      # do-not-disturb (`zz_notify_failure_bypass`, override_pause_level = 100).
+      #
+      # And it would not fire once: the gate stays open until somebody deletes
+      # the readers, and the timer runs every 6h — so the DND-bypassing alert
+      # would fire 4× a day, forever, on a run where nothing is wrong. The DND
+      # bypass is justified in this file by a MEASURED rate of ~1 firing in 9
+      # days; 4/day is three orders of magnitude past that, and it is exactly
+      # the "permanently-red gate trains you to click through the one alert that
+      # must keep its meaning" hazard the unreachable-remote note below already
+      # refuses. The script's own header refuses it for rc 13 for the same
+      # reason. Correct about a printed LINE, wrong about an EXIT CODE.
+      #
+      # NOTHING IS HIDDEN. The script still exits 16, still prints the
+      # `ACTIONABLE (not drift)` verdict plus the READY block, and a hand-run
+      # (`scripts/drift-check.sh`, or `systemctl --user start drift-check` then
+      # `journalctl --user -u drift-check`) surfaces both. 🔴 READ THE JOURNAL,
+      # NOT THE EXIT STATUS: systemd ZEROES `ExecMainStatus` for a code it has
+      # been told is a success, so `systemctl show drift-check
+      # -p ExecMainStatus` reads **0** on such a run, not 16 — measured on
+      # systemd 258.3, with the no-`SuccessExitStatus` control reading 16. An
+      # earlier revision of this comment asserted the opposite and would have
+      # led an operator to conclude the gate never opened. `journalctl --user
+      # -u drift-check | grep ACTIONABLE` is the check that works. Pinned by
+      # `test_the_unit_does_not_fail_on_the_phase2_actionable_code`.
+      SuccessExitStatus = 16;
       # Two `git fetch`es plus one ssh round trip. The ConnectTimeout inside the
       # script is 10s, so this ceiling only ever fires on a wedged fetch; the
       # cgroup is killed and the timer re-arms on the next OnUnitActiveSec.
@@ -2271,7 +2308,16 @@ in
         # iproute2 is load-bearing, not incidental: `ip -4 -o addr show` is how
         # local_ipv4s identifies WHICH host this is (both report hostname `nixos`).
         # Without it detection returns "unknown" and the script exits 6.
-        "PATH=${lib.makeBinPath [ pkgs.git pkgs.openssh pkgs.iproute2 pkgs.bash pkgs.coreutils pkgs.gawk pkgs.gnused pkgs.gnugrep ]}"
+        #
+        # 🔴 python3 AND tmux ARE FOR THE CHILD, NOT FOR drift-check.sh ITSELF.
+        # The fuzzyclaw phase-2 gate execs `scripts/session-manager`, whose
+        # shebang resolves `python3` from PATH and which shells out to `tmux
+        # list-panes`. Under systemd there is none of the login shell's PATH, so
+        # without these the gate reports COULD NOT MEASURE on every timer run
+        # forever — from a unit that looks correct, which is the exact shape the
+        # iproute2 note above records. Pinned by
+        # `test_the_phase2_child_binaries_are_on_the_unit_path`.
+        "PATH=${lib.makeBinPath [ pkgs.git pkgs.openssh pkgs.iproute2 pkgs.bash pkgs.coreutils pkgs.gawk pkgs.gnused pkgs.gnugrep pkgs.python3 pkgs.tmux ]}"
         "HOME=%h"
       ];
       ExecStart = "${pkgs.bash}/bin/bash %h/workspace/devrc/scripts/drift-check.sh";
@@ -2280,6 +2326,7 @@ in
       X-Restart-Triggers = [
         "${../scripts/drift-check.sh}"
         "${../scripts/lib/host-role.sh}"
+        "${../scripts/lib/drift_phase2.py}"
       ];
     };
   };

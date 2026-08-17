@@ -39,7 +39,7 @@ these rows. `kind` is never null; `runtime` frequently is, and means something e
 | `--json` | JSON (default is a table). Compact, not indented — 34% of the payload was whitespace for a reader that does not exist |
 | `--lean` | 🔴 **with `--json`, prefer this.** The agent-shaped view: rows trimmed to the fields that answer this tool's question, **untruncated**, with every measurement discriminator and the caveats kept |
 | `--host workbench\|laptop\|all` | default `all`; `tail` resolves `all` to LOCAL |
-| `--claude-only` | drop non-Claude rows; every count then describes the FILTERED set, and `summary.excluded_non_claude` says how many went |
+| `--claude-only` | drop the **shell** rows (`CLASS=shell`) — a `cluster` dispatch is an agent and is KEPT. Every count then describes the FILTERED set; `summary.excluded_shells` says how many went and `summary.kinds_excluded_by_filter` names any kind removed entirely |
 | `--no-ch` | skip ClickHouse — the client is never constructed |
 | `--no-capture` | skip the pane scrape; **every** `waiting_probable` becomes `null` |
 | `--fuzzyclaw` / `--no-fuzzyclaw` | the task-file join is **OFF by default** (see below) |

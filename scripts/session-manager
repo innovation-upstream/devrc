@@ -128,9 +128,14 @@ the deliberate removal of the flat `summary["idle"]` integer.
 not the same word: `kind` is `tmux`/`cluster` (WHAT the entity is), `CLASS` is
 `claude`/`shell`/`cluster` (how it is COUNTED).
 
-`--claude-only` drops the shells outright; the summary then describes the
-FILTERED set and carries `excluded_non_claude` so an empty table cannot read as
-an empty host.
+`--claude-only` drops the shells outright — the SHELL CLASS, decided by
+`row_class` through `dropped_by_claude_only`, so a `cluster` row (an agent with
+no pane, hence `claude: null`) is KEPT rather than silently reclassified as a
+shell and deleted. The summary then describes the FILTERED set and carries
+`excluded_shells` so an empty table cannot read as an empty host, plus
+`kinds_excluded_by_filter` naming any kind the flag removed ENTIRELY — without
+which `kinds_produced` would attribute to this build an absence the filter
+caused.
 
 HONEST LIMITS (stated, not implied away — AND CARRIED IN THE OUTPUT as
 `report["caveats"]` plus two footer lines; see CAVEATS)
@@ -563,6 +568,53 @@ def row_class(row) -> str:
         return kind
     return "unknown_kind"
 
+
+def row_kind(row) -> str:
+    """A row's `kind` AS COUNTED — THE ONE definition of the `None` coercion.
+
+    `"none"` rather than `None`, because a null JSON key serialises to the
+    string `"null"` and reads as a kind called null. A `kind` of `"none"`
+    appearing at all is a bug (see `KINDS`), which is exactly why it is counted
+    rather than coerced away.
+
+    🔴 IT IS A FUNCTION BECAUSE `r.get("kind") or "none"` WAS OPEN-CODED AT
+    THREE SITES — `summarize`'s histogram, `measured_caveats`' derivation, and
+    (once the filter learned to record what it removed) `gather`. Three copies
+    of one coercion is three chances to disagree about what a kind-less row is
+    called, and the disagreement would surface as a summary histogram and a
+    caveat naming different sets. One rule, one place.
+    """
+    return row.get("kind") or "none"
+
+
+def dropped_by_claude_only(row) -> bool:
+    """Whether `--claude-only` drops `row`. THE ONE definition of that flag.
+
+    🔴 IT IS `row_class(row) == "shell"`, NOT `not row.get("claude")`.
+
+    The flag's documented intent has always been "drop the shells". While every
+    row was a tmux pane, `r.get("claude")` was a correct SPELLING of that — and
+    it stopped being one the moment `kind` arrived. `row["claude"]` is
+    `pane_current_command =~ /claude/`, a fact about a PANE, so a `cluster` row
+    (a dispatch with NO pane) carries `claude: None`, which is FALSY. The old
+    predicate therefore reclassified every cluster agent as a shell and dropped
+    it — silently filing an agent under "nobody is working here" and then
+    deleting it, which is the identical defect `row_class` exists to prevent,
+    one operation further along.
+
+    So the flag is defined against the CLASS axis, through the same classifier
+    the roll-ups use. Three consequences, each deliberate:
+
+      * a `claude` tmux row is KEPT (unchanged);
+      * a `shell` tmux row is DROPPED (unchanged) — including one whose title
+        happens to contain the word "claude";
+      * a `cluster` row is KEPT, because it is an agent. So is an
+        `unknown_kind` row: a row whose kind nobody set is a BUG, and filtering
+        it out would delete the evidence rather than surface it.
+    """
+    return row_class(row) == "shell"
+
+
 # 🔴 THE TWO LIMITS THAT CHANGE WHAT THE OUTPUT MEANS, CARRIED IN THE OUTPUT.
 # Both were documented in the skill body only. An agent that runs this script
 # cold never reads the skill, and the failure mode of each is silent: a `claude`
@@ -624,10 +676,19 @@ CAVEATS = {
         # adjacent-fields-disagree failure `fuzzyclaw_scope` shipped in #471.
         # What is durable is the RELATIONSHIP: which kinds exist, that an
         # absence is not a measurement, and where clawgate actually lives.
+        # 🔴 THE NOTE NAMES `kinds_excluded_by_filter` BECAUSE `kinds_produced`
+        # ALONE IS AMBIGUOUS. Both are measured from the SURVIVING rows, so a
+        # kind a filter removed and a kind this build never emits look
+        # identical in `kinds_produced` — and the reader's whole question is
+        # which of those two happened. The relationship is durable, so it
+        # belongs here rather than in a per-scan string.
         "note": ("`kinds_produced` is MEASURED from this scan's rows — read it "
                  "rather than assuming. A kind that is enumerated but absent "
                  "from `kinds_produced` was NOT LOOKED FOR by this build, so "
-                 "its absence is NOT a measured absence of that work. For "
+                 "its absence is NOT a measured absence of that work — UNLESS "
+                 "it is named in `kinds_excluded_by_filter`, which is where a "
+                 "kind removed by a filter is reported instead of being "
+                 "silently attributed to the build. For "
                  "clawgate use report.blocked_on_me (tasks needing the "
                  "operator, and its `stuck_count` for wedged dispatches), a "
                  "different population from these rows that is never "
@@ -1750,19 +1811,33 @@ def summarize(report) -> dict:
         # 🔴 THE ENTITY AXIS, published as its own histogram and DERIVED from
         # the rows — never hardcoded — so a kind cannot exist on a row and be
         # missing from the summary. Same idiom, and same reason, as
-        # `age_sources`: `"none"` rather than `None`, because a null JSON key
-        # serialises to the string `"null"` and reads as a kind called null.
-        # A `kind` of `"none"` appearing at all is a bug (see `KINDS`), which
-        # is precisely why it is counted rather than coerced away.
-        "kind": _count_by(r.get("kind") or "none" for r in rows),
+        # `age_sources`: the `None` coercion is `row_kind`, ONE definition
+        # shared with `measured_caveats` and the `--claude-only` filter, so the
+        # histogram and the caveat cannot disagree about what a kind-less row
+        # is called.
+        "kind": _count_by(row_kind(r) for r in rows),
         # 🔴 The filter travels WITH the counts it changed. Under
         # `--claude-only` every number above describes the FILTERED set (see
         # `gather`), so a reader that does not know the filter ran would read a
         # real "0 agent windows" and a "0 because the shells were dropped"
-        # identically. `excluded_non_claude` is None — not 0 — when the filter
+        # identically. `excluded_shells` is None — not 0 — when the filter
         # never ran: nothing was excluded because nothing was ever counted.
+        #
+        # 🔴 IT IS `excluded_shells`, NOT `excluded_non_claude`. The old name
+        # was accurate only while the predicate was `r["claude"]` and every row
+        # was a tmux pane. `--claude-only` now drops the SHELL class and keeps
+        # `cluster` (see `dropped_by_claude_only`), so "non_claude" would name a
+        # set strictly larger than the one counted — a reader would take a
+        # cluster row to be inside it. Renamed rather than redefined in place:
+        # a KeyError is a better morning than an integer that quietly means
+        # something else, the same trade this summary already made for the flat
+        # per-status ints.
         "claude_only": bool(filters.get("claude_only")),
-        "excluded_non_claude": filters.get("excluded_non_claude"),
+        "excluded_shells": filters.get("excluded_shells"),
+        # WHICH kinds the filter removed ENTIRELY, so `summary["kind"]` cannot
+        # be read as a statement about what the scan produced when it is a
+        # statement about what survived. None — not [] — when no filter ran.
+        "kinds_excluded_by_filter": filters.get("kinds_excluded_by_filter"),
         "hosts_reachable": sorted(k for k, v in report["hosts"].items()
                                   if v["reachable"]),
         "hosts_unreachable": sorted(k for k, v in report["hosts"].items()
@@ -2145,8 +2220,12 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
         # The row set this report describes, and how it was narrowed. Present
         # on EVERY report, filtered or not, so a consumer branches on a field
         # rather than on whether a key exists.
+        # 🔴 Both counters are None, never 0/[]: the filter has not run yet, so
+        # nothing has been excluded BECAUSE nothing has been counted. A `[]`
+        # here would tell `measured_caveats` a filter ran and removed no kind.
         "filters": {"claude_only": bool(claude_only),
-                    "excluded_non_claude": None},
+                    "excluded_shells": None,
+                    "kinds_excluded_by_filter": None},
         # 🔴 The clawgate approval queue. Filled in below; the skeleton carries
         # a `status` from the first byte so no code path can publish a bare
         # count. See `read_blocked_on_me` for the four outcomes.
@@ -2342,14 +2421,52 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
     # table. Counting the filtered set makes that same run a real measured zero
     # (EXIT_EMPTY) — true, because zero AGENT windows is what was asked. The
     # dropped count keeps it from reading as "the host had nothing at all".
+    #
+    # 🔴 THE FILTER ALSO RECORDS WHICH *KINDS* IT REMOVED ENTIRELY, and that is
+    # not bookkeeping — it is the difference between two claims a reader cannot
+    # otherwise tell apart. This block runs BEFORE `summarize` and BEFORE
+    # `measured_caveats`, both of which derive from `report["hosts"][*]
+    # ["windows"]`, i.e. from the rows that SURVIVED. So on the day writer 3
+    # emits cluster rows, a run that filtered them out would publish
+    # `kinds_produced: ["tmux"]` and render "cluster is ENUMERATED but NOT
+    # PRODUCED, so no such row appears and its absence is NOT a measured zero".
+    # Every word of that sentence would be FALSE: cluster rows were produced,
+    # such rows did appear, and their absence is entirely the filter's doing.
+    # It attributes to THE BUILD what belongs to THE FILTER, and the reader most
+    # likely to be misled is the one reading that line to find out whether
+    # cluster rows exist yet.
+    #
+    # That is the same class as `fuzzyclaw_scope` in #471 — a machine-readable
+    # claim outliving the code it describes — and the `fuzzyclaw_scope` fix is
+    # what created this one, because it made `kinds_produced` measured from
+    # rows without asking WHICH rows.
+    #
+    # The fix keeps `kinds_produced` describing the RENDERED set, so the caveat
+    # line and the table above it still cannot disagree, and publishes the
+    # removed kinds as their OWN measured field. Deriving `kinds_produced` from
+    # the unfiltered rows instead would have swapped one disagreement for
+    # another: a line reading "rows in this scan are kind=cluster/tmux" printed
+    # over a table with no cluster row in it.
     if claude_only:
         excluded = 0
+        kinds_before, kinds_after = set(), set()
         for host in hosts:
             entry = report["hosts"][host]
-            kept = [r for r in entry["windows"] if r.get("claude")]
+            kinds_before |= {row_kind(r) for r in entry["windows"]}
+            kept = [r for r in entry["windows"]
+                    if not dropped_by_claude_only(r)]
+            kinds_after |= {row_kind(r) for r in kept}
             excluded += len(entry["windows"]) - len(kept)
             entry["windows"] = kept
-        report["filters"]["excluded_non_claude"] = excluded
+        report["filters"]["excluded_shells"] = excluded
+        # Sorted for a deterministic render, for the same reason as
+        # `kinds_produced`. `[]` — not absent — when the filter ran and removed
+        # no whole kind: the filter DID run, so "which kinds did it remove" is a
+        # measurement whose answer is none. The key is absent only when no
+        # filter ran, which is the honest shape for "never measured" and mirrors
+        # `excluded_shells` being None rather than 0 in that case.
+        report["filters"]["kinds_excluded_by_filter"] = sorted(
+            kinds_before - kinds_after)
 
     # --- 🔴 blocked-on-me: the clawgate approval queue ------------------------
     # A local file read, so it costs nothing and runs unconditionally. The
@@ -2424,8 +2541,21 @@ def measured_caveats(report) -> dict:
             for r in (h.get("windows") or [])]
     # Sorted for a deterministic render. `"none"` rather than dropping a row
     # with no `kind`: it is a bug, and the caveat is where it becomes visible.
-    cav["kind_scope"]["kinds_produced"] = sorted(
-        {r.get("kind") or "none" for r in rows})
+    cav["kind_scope"]["kinds_produced"] = sorted({row_kind(r) for r in rows})
+    # 🔴 WHAT A FILTER REMOVED, so `kinds_produced` cannot be read as a
+    # statement about the BUILD when it is a statement about the FILTER. See the
+    # `--claude-only` block in `gather`. Copied out of `report["filters"]`
+    # rather than recomputed here, because only the filter itself ever saw the
+    # unfiltered rows — by the time this function runs they are gone.
+    #
+    # 🔴 SET ONLY WHEN THE KEY IS PRESENT. A filter that never ran did not
+    # measure "no kinds were removed"; it measured nothing, and `[]` would be a
+    # fake measurement of exactly the kind this caveat exists to stop emitting.
+    # `_fmt_kind_scope` distinguishes the two the same way it already
+    # distinguishes a missing `kinds_produced` from an empty one.
+    excluded = (report.get("filters") or {}).get("kinds_excluded_by_filter")
+    if excluded is not None:
+        cav["kind_scope"]["kinds_excluded_by_filter"] = sorted(excluded)
     return cav
 
 
@@ -2797,11 +2927,26 @@ def render_table(report) -> str:
             for s in WAITING_SIGNALS))
     if summ.get("claude_only"):
         # The filter is stated where the counts are, because it changed them.
-        out.append("  FILTER --claude-only: {} non-claude window(s) excluded "
+        # `shell window(s)`, not `non-claude window(s)`: the predicate drops the
+        # SHELL class and KEEPS a cluster row, so the old wording named a set
+        # wider than the one counted (see `dropped_by_claude_only`).
+        out.append("  FILTER --claude-only: {} shell window(s) excluded "
                    "from every count above".format(
-                       summ.get("excluded_non_claude")
-                       if summ.get("excluded_non_claude") is not None
+                       summ.get("excluded_shells")
+                       if summ.get("excluded_shells") is not None
                        else "an unmeasured number of"))
+        # 🔴 AND WHICH KINDS WENT WITH THEM, printed only when a whole kind
+        # vanished. Without this the reader has `summary["kind"]` and the
+        # `kind_scope` caveat both describing the surviving rows, and no line
+        # anywhere saying an entire kind was removed by the flag rather than
+        # never produced. `[]` prints nothing: the filter ran and removed no
+        # whole kind, which needs no sentence.
+        gone = summ.get("kinds_excluded_by_filter")
+        if gone:
+            out.append("  FILTER --claude-only: it removed EVERY kind={} row "
+                       "this scan produced — their absence above is the "
+                       "FILTER's doing, not a measured absence".format(
+                           "/".join(gone)))
     if summ.get("hosts_unreachable"):
         out.append("  UNREACHABLE HOSTS: " +
                    ", ".join(summ["hosts_unreachable"]))
@@ -3059,8 +3204,37 @@ def _fmt_kind_scope(kd) -> str:
     downstream by an `or` that cannot tell "not supplied" from "measured none".
     So the two cases are separated explicitly, and only a MISSING key falls
     back.
+
+    🔴 `kinds_excluded_by_filter` IS READ IN EVERY MEASURED BRANCH. Without it
+    this sentence attributes to the BUILD what a filter did: `--claude-only`
+    runs before the derivation, so a scan that produced cluster rows and then
+    dropped them rendered "cluster is ENUMERATED but NOT PRODUCED" — false in
+    all three of its clauses.
+
+    🔴 AND IT IS **NOT** TREATED LIKE `kinds_produced`. That distinction is
+    load-bearing and this docstring used to get it backwards, claiming a MISSING
+    key and an EMPTY list "must not collapse" three lines above an `or []` that
+    collapses them. What differs is what the two keys are ASKED:
+
+      - `kinds_produced` is asked WHICH KINDS THE SCAN SAW, and missing vs empty
+        are different answers — "no scan happened, describe the build" vs "a
+        scan measured zero rows". Different sentences, so an `or` there is the
+        literal-masquerading-as-a-measurement bug above.
+      - `kinds_excluded_by_filter` is asked ONLY WHICH WHOLE KINDS A FILTER
+        TOOK, and every clause below is guarded on `if filtered:`. Missing ("no
+        filter ran") and `[]` ("one ran and took no whole kind") agree exactly
+        on that: no kind's absence is the filter's doing, so there is nothing
+        for the filter clause to say and the head/tails are identical. Rendering
+        them differently would mean inventing a sentence about a filter that
+        removed nothing.
+
+    The distinction survives where it is actually needed — `summary` publishes
+    `None` vs `[]` verbatim, and `test_session_manager.py` pins all three states
+    as distinguishable in every JSON surface. It is collapsed HERE, in prose
+    that only ever asks the yes/no question, deliberately.
     """
     produced = kd.get("kinds_produced")
+    filtered = list(kd.get("kinds_excluded_by_filter") or [])
     if produced is None:
         # 🔴 NO MEASUREMENT SUPPLIED — reached by any caveats dict without a
         # `kinds_produced` key, which is the bare CAVEATS constant (the key is
@@ -3087,16 +3261,31 @@ def _fmt_kind_scope(kd) -> str:
         # 🔴 ZERO ROWS. Naming any kind here would be inventing one. The reader
         # most likely to hit this is the one whose hosts are unreachable, and
         # the wrong thing to tell them is which kinds were "in this scan".
+        #
+        # 🔴 THE FILTERED ZERO IS A DIFFERENT FACT AND GETS A DIFFERENT
+        # SENTENCE. "NO rows were measured in this scan" is FALSE of a
+        # `--claude-only` run over a shell-only host: rows were measured, and
+        # then removed. Saying it anyway attributes an empty table to the hosts
+        # when it belongs to the flag — the same misattribution as the
+        # NOT-PRODUCED tail below, one branch over, and reachable TODAY with no
+        # cluster row anywhere.
+        if filtered:
+            return ("every row this scan measured was REMOVED BY A FILTER "
+                    "(kind={}), so no kind survives to be reported — rows were "
+                    "measured and dropped, NOT absent, and this says nothing "
+                    "about what an unfiltered scan holds; clawgate is reported "
+                    "separately under BLOCKED ON ME".format("/".join(filtered)))
         return ("NO rows were measured in this scan, so no kind was observed — "
                 "this is NOT a claim that any kind is absent, and the enumerated "
                 "kinds ({}) say nothing about what a reachable host holds; "
                 "clawgate is reported separately under BLOCKED ON ME".format(
                     "/".join(enumerated)))
     return _kind_scope_sentence("rows in this scan are kind={}", "this scan",
-                                produced, enumerated)
+                                produced, enumerated, filtered)
 
 
-def _kind_scope_sentence(head_fmt, subject, produced, enumerated) -> str:
+def _kind_scope_sentence(head_fmt, subject, produced, enumerated,
+                         filtered=()) -> str:
     """Build the non-empty `kind_scope` sentence. ONE builder for both the
     measured and the by-construction heads, so the two cannot drift into
     saying different things about the same relationship.
@@ -3110,19 +3299,50 @@ def _kind_scope_sentence(head_fmt, subject, produced, enumerated) -> str:
     i.e. exactly when writer 3 lands, which is what this caveat is FOR.
     Consolidating two strings is only safe where they say the same thing; the
     part that differed had to become a parameter, not a coincidence.
+
+    🔴 A KIND A FILTER REMOVED IS SUBTRACTED FROM `unproduced` BEFORE ANYTHING
+    IS SAID ABOUT IT. It is missing from `produced` for a reason that has
+    nothing to do with the build, so both of the tails below would be lies
+    about it: "ENUMERATED but NOT PRODUCED" denies rows that exist, and "every
+    enumerated kind IS produced" claims a coverage the render does not have.
+    It gets its own clause naming the filter as the cause.
     """
-    unproduced = [k for k in enumerated if k not in produced]
+    filtered = list(filtered)
+    unproduced = [k for k in enumerated
+                  if k not in produced and k not in filtered]
     head = head_fmt.format("/".join(produced))
-    if not unproduced:
+    clauses = []
+    if filtered:
+        clauses.append(
+            "a FILTER REMOVED every kind={} row this scan produced, so their "
+            "absence above is the FILTER's doing and NOT a measured absence of "
+            "that work".format("/".join(filtered)))
+    if unproduced:
+        clauses.append(
+            "{} is ENUMERATED but NOT PRODUCED, so no such row appears and its "
+            "absence is NOT a measured zero".format("/".join(unproduced)))
+    elif not filtered:
         # Every enumerated kind is present. Saying "NOT PRODUCED" here would be
         # false; saying nothing would drop the pointer to where clawgate lives.
-        return (head + " — every enumerated kind IS produced, so {} covers the "
-                "whole entity axis; clawgate approval state is still reported "
-                "separately under BLOCKED ON ME".format(subject))
-    return (head + " — {} is ENUMERATED but NOT PRODUCED, so no such row "
-            "appears and its absence is NOT a measured zero; clawgate is "
-            "reported separately under BLOCKED ON ME".format(
-                "/".join(unproduced)))
+        # 🔴 GUARDED ON `not filtered` TOO. A kind a filter removed is not
+        # "produced and present", so this coverage claim would be false printed
+        # beside the filter clause — and it is the claim a reader uses to decide
+        # the axis is fully covered.
+        clauses.append(
+            "every enumerated kind IS produced, so {} covers the whole entity "
+            "axis".format(subject))
+        # The one branch that says nothing is MISSING keeps the pointer's
+        # original, longer phrasing. Not consolidated with the shorter one
+        # below: both are pinned whole by the suite, and rewording either buys
+        # nothing while breaking a machine-readable claim.
+        clauses.append("clawgate approval state is still reported separately "
+                       "under BLOCKED ON ME")
+        return head + " — " + "; ".join(clauses)
+    # Every other branch names something absent, and ends with the pointer to
+    # where clawgate IS reported — or the reader concludes this tool cannot say
+    # anything about cluster work at all.
+    clauses.append("clawgate is reported separately under BLOCKED ON ME")
+    return head + " — " + "; ".join(clauses)
 
 
 def render_session_history(hist) -> str:
@@ -3299,10 +3519,12 @@ def build_parser():
                    help="tail: strip ANSI at the source (drops tmux's -e) "
                         "instead of making every caller sed it out")
     p.add_argument("--claude-only", action="store_true",
-                   help="scan/list/detail: drop non-Claude windows. Every "
-                        "summary count then describes the FILTERED set, and "
-                        "summary.excluded_non_claude says how many were "
-                        "dropped. No effect on `tail`.")
+                   help="scan/list/detail: drop the SHELL rows (CLASS=shell). "
+                        "A cluster dispatch is an agent, not a shell, so it is "
+                        "KEPT. Every summary count then describes the FILTERED "
+                        "set; summary.excluded_shells says how many were "
+                        "dropped and summary.kinds_excluded_by_filter names "
+                        "any kind removed entirely. No effect on `tail`.")
     p.add_argument("--lines", type=int, default=DEFAULT_TAIL_LINES,
                    help="tail: scrollback lines")
     return p
