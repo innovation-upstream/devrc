@@ -2789,7 +2789,14 @@ class TestMalformedRequestLinesDoNotCrash:
 
     # Each is a request LINE the stdlib rejects BEFORE assigning self.path.
     SHAPES = [
-        b"GET /x HTTP/9.9.9.9\r\n\r\n",
+        # A three-component version: `parse_request` raises on the split.
+        # ⚠ THREE components, deliberately not four. A four-component
+        # version string is indistinguishable from an IPv4 literal, and
+        # `test_no_public_ips` reads it as one — correctly, in a PUBLIC
+        # repo. This comment names the shape rather than quoting it, for
+        # the same reason: an explanation that quotes the banned value is
+        # the banned value.
+        b"GET /x HTTP/1.1.1\r\n\r\n",
         b"GET /x HTTP/2.0\r\n\r\n",
         b"GET\r\n\r\n",
         b"POST /x\r\n\r\n",
