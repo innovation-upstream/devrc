@@ -953,7 +953,26 @@ TARGET_FLOORS=(
   # alone and spliced into a block reason, and the `--dismiss` audit ledger. Read from
   # the gate's per-target line, then through the gate's OWN function:
   #   _suggested_floor 244 = 244 - min(50, max(1, 244/20 = 12)) = 244 - 12 = 232.
-  "scripts/claude-hooks/tests/test_clawgate_writeback_guard.py|232"
+  #
+  # 2026-08-16, THE `--dismiss` TOMBSTONE: 244 -> 273. `--dismiss` cleared the ledger
+  # entries and wrote nothing, so the NEXT read of the card re-armed the guard and it
+  # blocked again — measured in production twice, 90 ms apart in the SAME tool call,
+  # because the natural way to confirm a dismissal is to look at the card. Three audit
+  # rounds missed it: every existing test drove `--dismiss` and then asserted silence,
+  # and NONE of them read the card again afterwards. So +29 here are written the other
+  # way round — the read comes after the dismissal. Two are regression tests measured
+  # RED at the base sha (dismiss -> re-read -> work -> Stop, by two different routes),
+  # four are labelled invariant guards/controls that were already green at base, and
+  # one (the tombstone's file NAME) exists only because a mutation sweep found
+  # `int(task_id) + 1` SURVIVING everything else — writer and reader share one
+  # function, so an off-by-one is self-consistent. Read from the AUTHORITATIVE gate's
+  # own per-target line out of `nix log`, not from a local pytest run:
+  #   PASS  scripts/claude-hooks/tests/test_clawgate_writeback_guard.py  (collected=273 passed=273 skipped=0 floor=232)
+  # then through the gate's OWN function rather than arithmetic:
+  #   _suggested_floor 273 = 273 - min(50, max(1, 273/20 = 13)) = 273 - 13 = 260.
+  # ZERO new skips, so EXPECTED_SKIPS is untouched. If this line conflicts with a
+  # sibling branch, re-run the gate on the MERGED tree and copy what it prints.
+  "scripts/claude-hooks/tests/test_clawgate_writeback_guard.py|260"
   # 2026-08-14, writer 2 (opencode) arrives as a NEW target: 15 collected.
   #   _suggested_floor 15 = 15 - min(50, max(1, 15/20 = 0 -> 1)) = 14.
   "scripts/opencode/tests|14"
