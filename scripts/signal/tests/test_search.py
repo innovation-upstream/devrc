@@ -90,7 +90,7 @@ def test_search_finds_outbound_messages_too(db):
                              self_number="+15559090")
     db.approve_draft(draft["id"], approval_ref="cg-search")
     db.send_approved(draft["id"],
-                     transmit=lambda auth, recipient, body: {"timestamp": 1723300009999})
+                     transmit=lambda auth, recipient, body, number: {"timestamp": "1723300009999"})
     bodies = [h["body"] for h in db.search("permit")]
     assert "I filed the harbour permit" in bodies
     assert any(h["is_outbound"] for h in db.search("permit"))
@@ -142,3 +142,57 @@ def test_list_conversations_separates_a_group_from_its_members_dms(db):
 def test_list_conversations_respects_its_limit(db):
     _seed(db)
     assert len(db.list_conversations(limit=1)) == 1
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 A conversation is a PEER, not a sender
+# --------------------------------------------------------------------------- #
+def test_both_halves_of_a_dm_are_ONE_conversation(db):
+    """Grouping by `source_contact_id` splits a DM into two rows.
+
+    Alice's message and the reply to Alice are the same conversation. Keyed on
+    the sender they are two — and worse, every outbound message in the database
+    collapses into a single "me" row, so the list is useless the moment anything
+    is sent.
+    """
+    _seed(db)
+    before = len(db.list_conversations())
+
+    draft = db.draft_message(recipient="+15550101", body="replying to Alice",
+                             self_number="+15559090")
+    db.approve_draft(draft["id"], approval_ref="cg-conv")
+    db.send_approved(draft["id"],
+                     transmit=lambda a, **kw: {"timestamp": "1723300009001"})
+
+    convs = db.list_conversations()
+    assert len(convs) == before                # the reply joined Alice's thread
+    alice = [c for c in convs if c["phone_number"] == "+15550101"]
+    assert len(alice) == 1
+    assert alice[0]["message_count"] == 3      # her two, plus the reply
+
+
+def test_outbound_to_two_people_are_two_conversations(db):
+    """... and outbound does NOT collapse into one 'me' row."""
+    _seed(db)
+    for peer, ts in (("+15550101", "1723300009101"), ("+15550202", "1723300009202")):
+        draft = db.draft_message(recipient=peer, body=f"note to {peer}",
+                                 self_number="+15559090")
+        db.approve_draft(draft["id"], approval_ref=f"cg-{peer}")
+        db.send_approved(draft["id"], transmit=lambda a, **kw: {"timestamp": ts})
+
+    convs = db.list_conversations()
+    peers = {c["phone_number"] for c in convs}
+    assert {"+15550101", "+15550202"} <= peers
+    assert "+15559090" not in peers            # the account is never its own peer
+
+
+def test_a_group_is_its_own_conversation_regardless_of_who_spoke(db):
+    _seed(db)
+    for uuid, ts in ((ALICE, 1723300000501), (BOB, 1723300000502)):
+        db.upsert_message({"message_timestamp": ts, "source_uuid": uuid,
+                           "message_type": consumer.KIND_GROUP_MESSAGE,
+                           "body": "in the group", "group_id": b"group-one",
+                           "group_name": "Group One"})
+    groups = [c for c in db.list_conversations() if c["group_name"] == "Group One"]
+    assert len(groups) == 1
+    assert groups[0]["message_count"] == 2

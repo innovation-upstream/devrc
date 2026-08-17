@@ -62,7 +62,19 @@ PLACEHOLDER_NS = uuid.UUID("6f9c0d1e-2b3a-4c5d-8e7f-0a1b2c3d4e5f")
 # deleted, so it cannot be silently lost.
 STATE_PENDING = "pending"
 STATE_APPROVED = "approved"
+# 🔴 `sending` exists so a crash BETWEEN the POST and the write-back cannot cause
+# a RESEND. The row moves to `sending` and is committed BEFORE the POST; only
+# `approved` can mint a capability, so a draft found in `sending` is inert until a
+# human reconciles it against Signal. Fail-safe direction chosen deliberately:
+# "may need manual re-approval" beats "may send the same text twice".
+STATE_SENDING = "sending"
 STATE_SENT = "sent"
+
+# Must be present in the environment for `approve_draft()` to run. An operator-only
+# variable: absent from the consumer Deployment and from agent environments. A
+# speed bump against an agent approving its own draft, NOT a proof of humanity —
+# `approve_draft()`'s docstring says exactly how far it goes.
+APPROVAL_TOKEN_ENV = "SIGNAL_APPROVAL_TOKEN"
 
 
 # --------------------------------------------------------------------------- #
@@ -124,6 +136,7 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         group_id INTEGER REFERENCES signal.groups(id),
         is_outbound BOOLEAN DEFAULT false,
         send_state TEXT,
+        send_attempts INTEGER DEFAULT 0,
         approval_ref TEXT,
         raw_envelope JSONB,
         search tsvector GENERATED ALWAYS AS (to_tsvector('english', coalesce(body, ''))) STORED,
@@ -260,6 +273,41 @@ def spend_authorization(auth: object) -> None:
     _ISSUED_NONCES.discard(nonce)
 
 
+# `message_type` of a row whose sender retracted it. The row is KEPT (its
+# timestamp still has to dedupe redeliveries) but carries no content.
+TYPE_DELETED = "deleted"
+
+
+def _server_timestamp(result) -> int:
+    """The server-assigned send timestamp, coerced and sanity-checked (🔧 #4).
+
+    🔴 Upstream types this field as a **string** — `ds.SendMessageResponse`'s
+    `Timestamp string \\`json:"timestamp"\\`` — even though it holds epoch-ms. A
+    fake that returns an int would let a caller which only handles ints pass the
+    suite and fail against the real server, so both are accepted here and the
+    string form is what the tests feed.
+    """
+    if not isinstance(result, dict) or "timestamp" not in result:
+        raise ValueError(
+            f"the Signal API response carries no `timestamp`: {result!r}; without "
+            "it the sync echo cannot be deduped (🔧 #4)"
+        )
+    raw = result["timestamp"]
+    try:
+        server_ts = int(str(raw).strip())
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"the Signal API returned a non-numeric timestamp {raw!r}; storing it "
+            "would break sync-echo dedupe (🔧 #4)"
+        ) from exc
+    if server_ts <= 0:
+        raise ValueError(
+            f"the Signal API returned a non-positive timestamp {server_ts!r}; "
+            "storing it would break sync-echo dedupe (🔧 #4)"
+        )
+    return server_ts
+
+
 def _returned_id(cur, what: str) -> int:
     """The id from an `INSERT … RETURNING id`, or an error that NAMES the write.
 
@@ -365,6 +413,16 @@ class SignalDB:
 
     # -- lifecycle ---------------------------------------------------------
     def __enter__(self) -> "SignalDB":
+        self._connect()
+        return self
+
+    def _connect(self) -> None:
+        """Open (or RE-open) the connection. Called by `__enter__` and `recover()`.
+
+        Extracted so a dead socket can be replaced in place: a long-lived daemon
+        outlives any single connection, and `recover()` is the only thing standing
+        between a dropped socket and a pod that stores nothing forever.
+        """
         direct = _direct_target()
         if direct is not None:
             dsn = self._dsn or _read_dsn_from_secret()
@@ -372,9 +430,14 @@ class SignalDB:
             kwargs = _dsn_connect_kwargs(dsn, host=host_override, port=port_override)
             self.conn = psycopg2.connect(**kwargs)
             self.conn.autocommit = False
-            return self
+            return
 
         dsn = self._dsn or _read_dsn_from_secret()
+        if self._pf is not None:
+            # A reconnect through a dead port-forward needs a NEW forward.
+            with contextlib.suppress(Exception):
+                self._pf.terminate()
+            self._pf = None
         local_port = _free_local_port()
         self._pf = subprocess.Popen(
             [
@@ -388,7 +451,6 @@ class SignalDB:
         kwargs = _dsn_connect_kwargs(dsn, host="127.0.0.1", port=local_port)
         self.conn = psycopg2.connect(**kwargs)
         self.conn.autocommit = False
-        return self
 
     def __exit__(self, *_exc) -> None:
         with contextlib.suppress(Exception):
@@ -417,6 +479,41 @@ class SignalDB:
             time.sleep(0.25)
         raise TimeoutError(f"port-forward to {host}:{port} not ready in time")
 
+    # -- transaction recovery ----------------------------------------------
+    def rollback(self) -> None:
+        """Abandon the open transaction. Safe to call when there is nothing to undo."""
+        if self.conn is not None:
+            self.conn.rollback()
+
+    def recover(self) -> str:
+        """Make the connection usable again after a failed statement.
+
+        🔴 WHY THIS EXISTS. The connections here run `autocommit=False`, and in
+        Postgres the FIRST failed statement aborts the whole transaction: every
+        later statement then raises `InFailedSqlTransaction` until someone rolls
+        back. A daemon without this stores nothing for the rest of its life while
+        logging as though it were merely reconnecting.
+
+        Returns `rolled-back` or `reconnected` so the caller can count and log
+        which one happened — the two mean very different things about the pod.
+        """
+        conn = self.conn
+        if conn is None:
+            self._connect()
+            return "reconnected"
+        if getattr(conn, "closed", 0):
+            self._connect()
+            return "reconnected"
+        try:
+            conn.rollback()
+            return "rolled-back"
+        except Exception:
+            # The socket itself is gone — a rollback cannot fix that.
+            with contextlib.suppress(Exception):
+                conn.close()
+            self._connect()
+            return "reconnected"
+
     # -- schema ------------------------------------------------------------
     def ensure_schema(self) -> None:
         """Create the `signal` schema. Idempotent — every statement is IF NOT EXISTS."""
@@ -432,10 +529,25 @@ class SignalDB:
                        profile_name: str | None = None) -> int:
         """Insert-or-update one contact, returning its id.
 
-        🔧 #1: when the envelope carries NO uuid, a DETERMINISTIC placeholder is
-        derived from the phone number (or any other stable identifier) instead of
-        leaving the sender unresolved. That is what keeps `unique_message` able to
-        dedupe a redelivered envelope from an unknown sender.
+        🔴 ONE PERSON MUST RESOLVE TO ONE ROW IN BOTH ARRIVAL ORDERS. A Signal
+        identity reaches us two ways — as a bare phone number (what an agent
+        types into a draft) and as a uuid (what every envelope carries) — and
+        `unique_message` keys on `source_contact_id`, so two rows for one person
+        means the outbound sync echo (🔧 #4) never collides and EVERY sent message
+        is stored twice. The two orders are both real and both handled here:
+
+          draft-then-echo: the number makes a PLACEHOLDER, the uuid arrives later
+                           -> `_promote_placeholder()` gives that row the uuid.
+          echo-then-draft: the uuid row already exists (true from day two of any
+                           deployment), then a draft supplies only the number
+                           -> the phone LOOKUP below finds it. Without that
+                           lookup a second placeholder is created and promotion
+                           correctly declines (the uuid is taken), which is
+                           exactly the silent-duplicate case.
+
+        🔧 #1: only when NEITHER a uuid nor an existing row can be found is a
+        DETERMINISTIC placeholder derived, so a redelivered envelope from an
+        unresolved sender still lands on one row.
         """
         is_placeholder = False
         if not signal_uuid:
@@ -445,16 +557,17 @@ class SignalDB:
                     "upsert_contact needs a signal_uuid or some stable identifier; "
                     "an unidentifiable sender would break message dedupe (🔧 #1)"
                 )
+            if phone_number:
+                existing = self.contact_id_by_phone(phone_number)
+                if existing is not None:
+                    # A row for this number already exists — real or placeholder.
+                    # Reuse it rather than minting a rival identity.
+                    self._enrich_contact(existing, display_name=display_name,
+                                         profile_name=profile_name)
+                    return existing
             signal_uuid = placeholder_uuid(ident)
             is_placeholder = True
         elif phone_number:
-            # PLACEHOLDER PROMOTION. A draft addressed to a bare phone number
-            # created a placeholder contact; the same person's envelopes arrive
-            # carrying the REAL uuid. Without this the two are separate contact
-            # rows — and the outbound sync echo (🔧 #4) would then land under a
-            # DIFFERENT source_contact_id from the sent row, so `unique_message`
-            # would not catch it and every sent message would be stored twice.
-            # Promotion keeps the row IDENTITY, so the echo collides as intended.
             self._promote_placeholder(signal_uuid, phone_number)
         with self._c.cursor() as cur:
             cur.execute(
@@ -471,6 +584,38 @@ class SignalDB:
                 (signal_uuid, phone_number, display_name, profile_name, is_placeholder),
             )
             return _returned_id(cur, "upsert_contact")
+
+    def contact_id_by_phone(self, phone_number: str) -> int | None:
+        """The contact row for a phone number, preferring a REAL one over a placeholder.
+
+        `phone_number` is not UNIQUE (a placeholder and a promoted row could
+        briefly race), so the ordering is explicit rather than incidental: a
+        resolved contact wins, then the oldest row. Deterministic either way —
+        an arbitrary pick here would reintroduce split identities.
+        """
+        if not phone_number:
+            return None
+        with self._c.cursor() as cur:
+            cur.execute(
+                "SELECT id FROM signal.contacts WHERE phone_number = %s "
+                "ORDER BY is_placeholder, id LIMIT 1",
+                (phone_number,),
+            )
+            row = cur.fetchone()
+        return row[0] if row else None
+
+    def _enrich_contact(self, contact_id: int, *, display_name: str | None,
+                        profile_name: str | None) -> None:
+        """Fill in names we have learned WITHOUT blanking ones we already had."""
+        if display_name is None and profile_name is None:
+            return
+        with self._c.cursor() as cur:
+            cur.execute(
+                "UPDATE signal.contacts SET "
+                "display_name = COALESCE(%s, display_name), "
+                "profile_name = COALESCE(%s, profile_name) WHERE id = %s",
+                (display_name, profile_name, contact_id),
+            )
 
     def _promote_placeholder(self, signal_uuid: str, phone_number: str) -> int:
         """Give a placeholder contact its real uuid, preserving its row id.
@@ -687,24 +832,41 @@ class SignalDB:
 
     # -- reads -------------------------------------------------------------
     def list_conversations(self, limit: int = 50) -> list:
-        """One row per conversation (group, else the DM peer), newest first."""
+        """One row per CONVERSATION — a group, else the PEER of a DM.
+
+        🔴 Grouping by `source_contact_id` (the obvious thing) is wrong in two
+        directions at once: a DM comes back as TWO rows, one per direction, and
+        every outbound message in the whole database collapses into a single "me"
+        row. The conversation key is therefore the group when there is one, and
+        otherwise the OTHER PARTY — the destination for an outbound message, the
+        sender for an inbound one.
+        """
         with self._c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
                 SELECT
-                    m.group_id AS group_row_id,
+                    conv.group_row_id,
                     g.name AS group_name,
-                    m.source_contact_id AS contact_id,
+                    conv.contact_id,
                     c.display_name,
                     c.phone_number,
-                    max(m.message_timestamp) AS last_message_timestamp,
-                    count(*) AS message_count
-                FROM signal.messages m
-                LEFT JOIN signal.groups g ON g.id = m.group_id
-                LEFT JOIN signal.contacts c ON c.id = m.source_contact_id
-                GROUP BY m.group_id, g.name, m.source_contact_id, c.display_name,
-                         c.phone_number
-                ORDER BY last_message_timestamp DESC
+                    conv.last_message_timestamp,
+                    conv.message_count
+                FROM (
+                    SELECT
+                        m.group_id AS group_row_id,
+                        CASE WHEN m.group_id IS NOT NULL THEN NULL
+                             WHEN m.is_outbound THEN m.dest_contact_id
+                             ELSE m.source_contact_id
+                        END AS contact_id,
+                        max(m.message_timestamp) AS last_message_timestamp,
+                        count(*) AS message_count
+                    FROM signal.messages m
+                    GROUP BY 1, 2
+                ) conv
+                LEFT JOIN signal.groups g ON g.id = conv.group_row_id
+                LEFT JOIN signal.contacts c ON c.id = conv.contact_id
+                ORDER BY conv.last_message_timestamp DESC
                 LIMIT %s
                 """,
                 (limit,),
@@ -795,7 +957,30 @@ class SignalDB:
 
         Only a `pending` draft may be approved; approving anything else raises
         `SendGateError` so a `sent` draft cannot be re-armed.
+
+        🔴 HONEST LIMIT — READ THIS BEFORE TRUSTING D3. Nothing *inside this
+        process* can prove that a human, rather than the agent that wrote the
+        draft, called this method. What is enforced here is a speed bump, not a
+        proof: `SIGNAL_APPROVAL_TOKEN` must be present in the environment, and it
+        is deliberately NOT in the consumer Deployment's env or in any agent's —
+        it lives in the operator's shell. An agent that can read the operator's
+        environment has already won, and this does not pretend otherwise.
+
+        The part that IS structural is narrower and worth stating exactly:
+        composing and transmitting are separate calls with durable state in
+        between, so a send is always preceded by a recorded approval decision
+        that a human can audit after the fact.
         """
+        if not os.environ.get(APPROVAL_TOKEN_ENV):
+            raise SendGateError(
+                f"approval refused: {APPROVAL_TOKEN_ENV} is not set. Approval is "
+                f"the OPERATOR's step — it is deliberately unavailable to the "
+                f"consumer Deployment and to drafting agents (D3 approval gate)"
+            )
+        if not (approval_ref or "").strip():
+            raise SendGateError(
+                "approval refused: an empty approval_ref records nothing auditable "
+                "(D3 approval gate)")
         row = self._draft_or_raise(draft_id)
         if row["send_state"] != STATE_PENDING:
             raise SendGateError(
@@ -870,12 +1055,25 @@ class SignalDB:
         auth = _mint_send_authorization(draft)
         if transmit is None:
             from consumer import transmit_approved as transmit  # local import: no cycle
-        result = transmit(auth, recipient=draft["recipient"], body=draft["body"])
-        server_ts = int(result["timestamp"])
-        if server_ts <= 0:
-            raise ValueError(
-                f"the Signal API returned a non-positive timestamp {server_ts!r}; "
-                "storing it would break sync-echo dedupe (🔧 #4)"
+
+        # 🔴 CLAIM THE DRAFT BEFORE THE POST, and COMMIT that claim. Everything
+        # after the POST can fail — an odd response shape, a dropped connection,
+        # a pod kill between the reply and the UPDATE. If the row were still
+        # `approved` at that moment the gate would happily mint a fresh
+        # capability and SEND THE SAME TEXT AGAIN. `sending` cannot be minted
+        # from, so the worst case is a draft a human must reconcile, never a
+        # duplicate message. `send_attempts` records that it was tried.
+        self._claim_for_sending(draft_id)
+
+        result = transmit(auth, recipient=draft["recipient"], body=draft["body"],
+                          number=self.account_number(draft_id))
+        server_ts = _server_timestamp(result)
+        errors = (result or {}).get("errors")
+        if errors:
+            raise RuntimeError(
+                f"the Signal API reported per-recipient errors for draft "
+                f"{draft_id!r}: {errors!r}; the draft stays in {STATE_SENDING!r} "
+                f"for manual reconciliation"
             )
         with self._c.cursor() as cur:
             cur.execute(
@@ -885,6 +1083,64 @@ class SignalDB:
             )
         self._c.commit()
         return self._draft_or_raise(draft_id)
+
+    def _claim_for_sending(self, draft_id: int) -> None:
+        """Move an approved draft to `sending` and COMMIT, before anything is sent."""
+        with self._c.cursor() as cur:
+            cur.execute(
+                "UPDATE signal.messages SET send_state = %s, "
+                "send_attempts = COALESCE(send_attempts, 0) + 1 WHERE id = %s",
+                (STATE_SENDING, draft_id),
+            )
+        self._c.commit()
+
+    def account_number(self, draft_id: int) -> str:
+        """The SENDING account's phone number for a draft — required by `/v2/send`."""
+        with self._c.cursor() as cur:
+            cur.execute(
+                "SELECT c.phone_number FROM signal.messages m "
+                "JOIN signal.contacts c ON c.id = m.source_contact_id "
+                "WHERE m.id = %s",
+                (draft_id,),
+            )
+            row = cur.fetchone()
+        number = row[0] if row else None
+        if not number:
+            raise SendGateError(
+                f"draft {draft_id!r} has no sending phone number on its contact row; "
+                f"`/v2/send` requires `number` and would 400 (D3 approval gate)"
+            )
+        return number
+
+    # -- retention ---------------------------------------------------------
+    def apply_remote_delete(self, rd: dict) -> int:
+        """Honour a sender's remote delete: TOMBSTONE the target, keep no text.
+
+        Storing a `remoteDelete` as an ordinary (empty-bodied) message — which is
+        what happens if it is not recognised — leaves a ghost row AND leaves the
+        retracted text sitting in the row it was meant to retract. Returns the
+        number of rows tombstoned (0 when we never received the target).
+        """
+        author_id = self.upsert_contact(
+            signal_uuid=rd.get("target_author_uuid"),
+            phone_number=rd.get("target_author_number"),
+        )
+        with self._c.cursor() as cur:
+            cur.execute(
+                "UPDATE signal.messages SET body = NULL, raw_envelope = NULL, "
+                "message_type = %s WHERE source_contact_id = %s "
+                "AND message_timestamp = %s",
+                (TYPE_DELETED, author_id, rd["target_sent_timestamp"]),
+            )
+            deleted = cur.rowcount
+        with self._c.cursor() as cur:
+            cur.execute(
+                "DELETE FROM signal.attachments WHERE message_id IN "
+                "(SELECT id FROM signal.messages WHERE source_contact_id = %s "
+                " AND message_timestamp = %s)",
+                (author_id, rd["target_sent_timestamp"]),
+            )
+        return deleted
 
     def commit(self) -> None:
         self._c.commit()

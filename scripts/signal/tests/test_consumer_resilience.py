@@ -13,6 +13,7 @@ import psycopg2
 import pytest
 
 import consumer
+import fakepg
 
 ALICE = "11111111-1111-4111-8111-111111111111"
 
@@ -24,7 +25,7 @@ def _payload(ts, body="stream fixture", *, uuid=ALICE, attachments=()):
         "dataMessage": {"timestamp": ts, "message": body,
                         "attachments": list(attachments)},
     }
-    return "data: " + json.dumps({"method": "receive", "params": {"envelope": env}})
+    return json.dumps({"account": "+15559090", "envelope": env})
 
 
 class Streams:
@@ -96,7 +97,7 @@ def test_a_clean_stream_end_is_not_counted_as_a_reconnect(db):
 # --------------------------------------------------------------------------- #
 def test_malformed_event_is_skipped_and_the_stream_continues(db):
     streams = Streams([
-        "data: {this is not json",
+        "{this is not json",
         _payload(1723400000031, "after the bad one"),
     ])
     c = _consumer(db, streams)
@@ -107,10 +108,10 @@ def test_malformed_event_is_skipped_and_the_stream_continues(db):
 
 
 def test_unknown_kinds_are_counted_as_ignored_not_stored(db):
-    typing = json.dumps({"method": "receive", "params": {"envelope": {
+    typing = json.dumps({"account": "+15559090", "envelope": {
         "sourceUuid": ALICE, "timestamp": 1723400000041,
-        "typingMessage": {"action": "STARTED"}}}})
-    c = _consumer(db, Streams(["data: " + typing]))
+        "typingMessage": {"action": "STARTED"}}})
+    c = _consumer(db, Streams([typing]))
     c.run(max_connections=1)
     assert c.stats[consumer.STAT_IGNORED] == 1
     assert c.stats[consumer.STAT_STORED] == 0
@@ -154,7 +155,7 @@ def test_a_persistent_postgres_failure_is_not_swallowed(db):
     flaky = FlakyDB(db, failures=99)
     c = _consumer(flaky, Streams([_payload(1723400000061)]), db_retries=2)
     with pytest.raises(psycopg2.OperationalError):
-        c.handle_payload(_payload(1723400000061)[len("data: "):])
+        c.handle_payload(_payload(1723400000061))
     assert c.stats[consumer.STAT_DB_RETRIES] == 2
 
 
@@ -168,7 +169,7 @@ def test_a_programming_error_is_not_retried(db):
     broken = Broken(db, failures=0)
     c = _consumer(broken, Streams([]), db_retries=5)
     with pytest.raises(psycopg2.ProgrammingError):
-        c.handle_payload(_payload(1723400000071)[len("data: "):])
+        c.handle_payload(_payload(1723400000071))
     assert broken.upserts == 1
     assert c.stats[consumer.STAT_DB_RETRIES] == 0
 
@@ -184,7 +185,10 @@ class FakeMinio:
 
     def put_attachment(self, **kw):
         self.calls.append(kw)
-        return f"{kw['conversation']}/2026-01-01/{kw['filename']}"
+        # Mirrors the real key layout, INCLUDING the attachment id — a fake that
+        # dropped it would hide the collision the real one exists to prevent.
+        return (f"{kw['conversation']}/2026-01-01/"
+                f"{kw['attachment_id']}_{kw['filename']}")
 
 
 def _attachment_payload(ts, att_id="att-resilience"):
@@ -299,7 +303,7 @@ def test_zero_retries_propagates_the_real_database_error(db):
     flaky = FlakyDB(db, failures=1)
     c = _consumer(flaky, Streams([]), db_retries=0)
     with pytest.raises(psycopg2.OperationalError):
-        c.handle_payload(_payload(1723400000151)[len("data: "):])
+        c.handle_payload(_payload(1723400000151))
     assert flaky.upserts == 1
 
 
@@ -317,11 +321,191 @@ def test_run_without_a_stream_factory_fails_loudly_instead_of_spinning(db):
     assert c.stats[consumer.STAT_RECONNECTS] == 0      # not swallowed into a retry
 
 
+# --------------------------------------------------------------------------- #
+# 🔴 The aborted-transaction zombie. `autocommit=False` + one failed statement =
+# every later statement raises InFailedSqlTransaction until someone rolls back.
+# --------------------------------------------------------------------------- #
+def test_substrate_reproduces_postgres_transaction_abort(db):
+    """INSTRUMENT VALIDATION — without this the recovery tests are theatre.
+
+    sqlite alone happily continues after a failed statement. The substrate
+    emulates the Postgres rule, so the tests below can actually reach the bug.
+    """
+    import sqlite3
+
+    with pytest.raises(sqlite3.IntegrityError):
+        db.conn.cursor().execute(
+            "INSERT INTO signal.messages (message_timestamp, source_contact_id, "
+            "message_type) VALUES (1723500000001, NULL, 'message')")
+    # Every LATER statement now fails, on a connection that is otherwise fine.
+    with pytest.raises(psycopg2.errors.InFailedSqlTransaction):
+        db.conn.cursor().execute("SELECT 1 FROM signal.messages")
+    db.rollback()                                     # ... and recovery clears it
+    db.conn.cursor().execute("SELECT 1 FROM signal.messages")
+
+
+def test_in_failed_sql_transaction_is_classified_transient():
+    """It must be RETRIED, not escape into the reconnect handler.
+
+    Left out of `TRANSIENT_DB_ERRORS`, the event after any failure escapes into
+    `run()`'s broad `except`, is miscounted as a dropped stream, and the pod logs
+    "reconnecting" forever while storing nothing.
+    """
+    assert issubclass(psycopg2.errors.InFailedSqlTransaction, Exception)
+    assert any(issubclass(psycopg2.errors.InFailedSqlTransaction, cls)
+               for cls in consumer.TRANSIENT_DB_ERRORS)
+
+
+def test_a_failed_write_does_not_poison_the_next_event(db):
+    """END TO END: a bad frame, then a good one, on ONE connection.
+
+    This is the zombie-pod scenario. Before `recover()` existed, the good frame
+    raised `InFailedSqlTransaction`, escaped into the reconnect handler and was
+    counted as a dropped stream — for the life of the process.
+    """
+    import sqlite3
+
+    # A statement fails on this connection — exactly as a real write can.
+    with pytest.raises(sqlite3.IntegrityError):
+        db.conn.cursor().execute(
+            "INSERT INTO signal.messages (message_timestamp, source_contact_id, "
+            "message_type) VALUES (1723500000011, NULL, 'message')")
+
+    good = _payload(1723500000012, "stored after the failure")
+    c = _consumer(db, Streams([good]))
+    c.run(max_connections=1)
+
+    assert db.conn.count("messages") == 1
+    rows = db.conn.rows("SELECT body FROM signal.messages")
+    assert rows[0]["body"] == "stored after the failure"
+    assert c.stats[consumer.STAT_DB_RECOVERIES] >= 1
+    assert c.stats[consumer.STAT_RECONNECTS] == 0      # NOT miscounted as a drop
+
+
+def test_recover_rolls_back_rather_than_reconnecting_when_it_can(db):
+    db.conn.aborted = True
+    assert db.recover() == "rolled-back"
+    assert db.conn.rollbacks == 1
+    assert db.conn.aborted is False
+
+
+def test_recover_reconnects_when_the_socket_is_gone(monkeypatch):
+    """A rollback cannot fix a closed connection — recovery must re-open it."""
+    import _signal_db
+
+    fresh = fakepg.SqliteConn()
+    opened = []
+
+    class Dead:
+        closed = 1
+        rollbacks = 0
+
+        def rollback(self):  # pragma: no cover - must not be reached
+            raise AssertionError("rollback on a closed connection")
+
+    target = _signal_db.SignalDB(dsn="postgres://u:p@h/mailbox")
+    target.conn = Dead()
+
+    def fake_connect():
+        opened.append(True)
+        target.conn = fresh
+
+    monkeypatch.setattr(target, "_connect", fake_connect)
+    assert target.recover() == "reconnected"
+    assert opened == [True]
+    assert target.conn is fresh
+
+
+def test_recover_failure_is_counted_and_does_not_mask_the_cause(db):
+    """If recovery itself fails, the ORIGINAL error still surfaces."""
+    class Unrecoverable:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def recover(self):
+            raise RuntimeError("kubectl port-forward is gone")
+
+        def upsert_message(self, msg):
+            raise psycopg2.OperationalError("server closed the connection")
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    c = _consumer(Unrecoverable(db), Streams([]), db_retries=2)
+    with pytest.raises(psycopg2.OperationalError):
+        c.handle_payload(_payload(1723500000021))
+    assert c.stats[consumer.STAT_DB_RECOVERY_FAILURES] == 2
+    assert c.stats[consumer.STAT_DB_RECOVERIES] == 0
+
+
+def test_a_non_transient_error_still_recovers_the_connection(db):
+    """A programming error is NOT retried — but the transaction must still clear."""
+    class Broken:
+        def __init__(self, inner):
+            self._inner = inner
+            self.recoveries = 0
+
+        def recover(self):
+            self.recoveries += 1
+            return "rolled-back"
+
+        def upsert_message(self, msg):
+            raise psycopg2.ProgrammingError("column does not exist")
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    broken = Broken(db)
+    c = _consumer(broken, Streams([]), db_retries=3)
+    with pytest.raises(psycopg2.ProgrammingError):
+        c.handle_payload(_payload(1723500000031))
+    assert broken.recoveries == 1
+    assert c.stats[consumer.STAT_DB_RETRIES] == 0     # not retried ...
+    assert c.stats[consumer.STAT_DB_RECOVERIES] == 1  # ... but recovered
+
+
+def test_a_remote_delete_frame_tombstones_its_target_END_TO_END(db):
+    """🔴 Through the CONSUMER, not by calling the DB method directly.
+
+    A mutation sweep disabled the `remote_delete` branch in `store()` and nothing
+    failed: every retraction test called `apply_remote_delete()` itself, so the
+    dispatch — the part that decides whether a retraction is honoured at all —
+    was never exercised. Disabled, the frame falls through and is stored as an
+    ordinary empty message beside the text it was meant to retract.
+    """
+    target_ts = 1723600000001
+    original = _payload(target_ts, "please forget this")
+    retraction = json.dumps({"account": "+15559090", "envelope": {
+        "source": "+15550101", "sourceNumber": "+15550101", "sourceUuid": ALICE,
+        "timestamp": target_ts + 10,
+        "dataMessage": {"timestamp": target_ts + 10,
+                        "remoteDelete": {"targetSentTimestamp": target_ts}},
+    }})
+
+    c = _consumer(db, Streams([original, retraction]))
+    c.run(max_connections=1)
+
+    rows = db.conn.rows("SELECT body, message_type FROM signal.messages")
+    assert len(rows) == 1, "the retraction was stored as a message of its own"
+    assert rows[0]["body"] is None
+    assert rows[0]["message_type"] == "deleted"
+    assert c.stats[consumer.STAT_STORED] == 2      # the message and the retraction
+
+
+def test_positive_control_without_the_retraction_the_text_stays(db):
+    """The `None` above only means something because this leaves the body intact."""
+    c = _consumer(db, Streams([_payload(1723600000002, "kept on purpose")]))
+    c.run(max_connections=1)
+    assert db.conn.rows("SELECT body FROM signal.messages")[0]["body"] == \
+        "kept on purpose"
+
+
 def test_run_returns_its_counters(db):
     c = _consumer(db, Streams([_payload(1723400000131)]))
     stats = c.run(max_connections=1)
     assert set(stats) == {
         consumer.STAT_STORED, consumer.STAT_IGNORED, consumer.STAT_MALFORMED,
         consumer.STAT_RECONNECTS, consumer.STAT_DB_RETRIES,
+        consumer.STAT_DB_RECOVERIES, consumer.STAT_DB_RECOVERY_FAILURES,
         consumer.STAT_ATTACHMENT_FAILURES,
     }

@@ -20,7 +20,7 @@ import consumer
 from conftest import load_corpus
 
 CORPUS = load_corpus()
-MIN_FIXTURES = 12          # 15 today; a floor, not the contract
+MIN_FIXTURES = 12          # 16 today; a floor, not the contract
 
 
 def _kind_constants() -> set:
@@ -74,6 +74,19 @@ def test_fixture_message_fields(name):
             assert event.message["group_id"] == base64.b64decode(want)
         else:
             assert event.message[field] == want, f"{name}.{field}"
+
+
+@pytest.mark.parametrize("name", sorted(CORPUS))
+def test_fixture_remote_delete_fields(name):
+    case = CORPUS[name]
+    expected = case["expect"].get("remote_delete")
+    if expected is None:
+        return
+    event = consumer.parse_envelope(case["envelope"])
+    assert event.remote_delete is not None
+    assert event.message is None          # NOT stored as an empty-bodied message
+    for field, want in expected.items():
+        assert event.remote_delete[field] == want, f"{name}.{field}"
 
 
 @pytest.mark.parametrize("name", sorted(CORPUS))
@@ -147,17 +160,37 @@ def test_group_and_dm_are_distinguished():
     '{"method":"send","params":{"envelope":{}}}',
     '{"params":{}}',
 ])
-def test_malformed_sse_payloads_raise_malformed_event(bad):
+def test_malformed_receive_frames_raise_malformed_event(bad):
     with pytest.raises(consumer.MalformedEvent):
-        consumer.parse_sse_payload(bad)
+        consumer.parse_receive_frame(bad)
 
 
-def test_wellformed_sse_payload_positive_control():
+def test_wellformed_receive_frame_positive_control():
     """The rejections above are about the payloads, not a parser that says no to all."""
     import json
     ok = json.dumps({"method": "receive",
                      "params": {"envelope": CORPUS["dm"]["envelope"]}})
-    assert consumer.parse_sse_payload(ok)["timestamp"] == 1723000000101
+    assert consumer.parse_receive_frame(ok)["timestamp"] == 1723000000101
+
+
+def test_bbernhard_websocket_frame_shape_is_accepted():
+    """The shape the server we deploy ACTUALLY sends: `{account, envelope}`.
+
+    Read from upstream `src/api/api.go`: in json-rpc mode `/v1/receive/{number}`
+    upgrades to a websocket and writes the signal-cli params object per message.
+    An earlier revision parsed SSE `data:` lines from a DIFFERENT server, so
+    nothing would ever have been ingested.
+    """
+    import json
+    frame = json.dumps({"account": "+15559090",
+                        "envelope": CORPUS["dm"]["envelope"]})
+    assert consumer.parse_receive_frame(frame)["timestamp"] == 1723000000101
+
+
+def test_receive_frame_accepts_an_already_decoded_dict():
+    """The REST-array path decodes once and hands dicts straight through."""
+    env = consumer.parse_receive_frame({"envelope": CORPUS["group"]["envelope"]})
+    assert env["timestamp"] == 1723000000202
 
 
 @pytest.mark.parametrize("bad", [
@@ -170,7 +203,62 @@ def test_malformed_envelopes_raise_malformed_event(bad):
         consumer.parse_envelope(bad)
 
 
-def test_sse_events_skips_comments_and_blank_lines():
-    lines = [": keep-alive", "", "data: {\"a\": 1}", "event: message",
-             b"data: {\"b\": 2}"]
-    assert list(consumer.sse_events(lines)) == ['{"a": 1}', '{"b": 2}']
+def test_iter_frames_yields_one_item_per_message_for_both_transports():
+    """One websocket frame per message; one REST response holding MANY.
+
+    Both shapes reach `iter_frames`, and the consumer downstream only ever sees
+    "one message at a time" — which is why the same core serves json-rpc mode and
+    the plain REST drain.
+    """
+    ws_frames = ['{"envelope": {"timestamp": 1}}', b'{"envelope": {"timestamp": 2}}']
+    assert list(consumer.iter_frames(ws_frames)) == [
+        '{"envelope": {"timestamp": 1}}', '{"envelope": {"timestamp": 2}}']
+
+    rest_body = ['[{"envelope": {"timestamp": 3}}, {"envelope": {"timestamp": 4}}]']
+    out = list(consumer.iter_frames(rest_body))
+    assert len(out) == 2
+    assert [f["envelope"]["timestamp"] for f in out] == [3, 4]
+
+
+def test_iter_frames_skips_blank_frames_and_passes_junk_through_to_be_counted():
+    """A junk frame must reach `handle_payload` (which counts it), not vanish here."""
+    out = list(consumer.iter_frames(["", "   ", "not json", "[unclosed"]))
+    assert out == ["not json", "[unclosed"]
+
+
+def test_receive_url_is_per_account_and_upgrades_scheme_for_websockets():
+    base = "http://signal-api.signal.svc:8080"
+    assert (consumer.receive_url("+15559090", api_url=base)
+            == "http://signal-api.signal.svc:8080/v1/receive/+15559090")
+    assert (consumer.receive_url("+15559090", api_url=base, websocket=True)
+            == "ws://signal-api.signal.svc:8080/v1/receive/+15559090")
+    assert consumer.receive_url("+1", api_url="https://x.example",
+                                websocket=True).startswith("wss://")
+
+
+def test_receive_url_refuses_an_empty_account():
+    """There is no global stream on this server — the path carries the number."""
+    with pytest.raises(ValueError) as exc:
+        consumer.receive_url("")
+    assert "per-account" in str(exc.value)
+
+
+def test_the_module_targets_the_bbernhard_route_table_only():
+    """🔴 A ledger of the endpoints this module speaks, pinned to upstream's router.
+
+    Upstream `src/main.go` registers exactly `v1.GET("/receive/:number")`,
+    `v1.GET("/attachments/:attachment")` and `v2.POST("/send")`. There is no SSE
+    endpoint and no `/api/v1/events` — that path belongs to AsamK's native
+    daemon, a DIFFERENT server. This test fails if anyone reintroduces one.
+    """
+    src = Path(consumer.__file__).read_text(encoding="utf-8")
+    assert consumer.RECEIVE_PATH == "/v1/receive"
+    assert consumer.ATTACHMENT_PATH == "/v1/attachments"
+    assert consumer.SEND_PATH == "/v2/send"
+    # Scanned as CODE, not as prose: the module's own comment explains why
+    # `/api/v1/events` is wrong, and a naive substring check would trip on the
+    # explanation. Quoted string literals and identifiers are what would make it
+    # real again.
+    for foreign in ('"/api/v1/events"', "'/api/v1/events'", "text/event-stream",
+                    "EVENTS_PATH", "iter_lines("):
+        assert foreign not in src, f"{foreign!r} belongs to a different server"

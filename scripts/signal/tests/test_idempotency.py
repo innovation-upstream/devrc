@@ -133,6 +133,65 @@ def test_redelivery_does_not_erase_a_body_we_already_have(db):
     assert row["server_delivered_at"] == 1723100000099   # ... but late facts land
 
 
+def test_a_later_delivery_fact_overwrites_an_earlier_one(db):
+    """🔴 The distinguishing case for the OTHER conflict expression.
+
+    Same trap as the body one, caught by the same sweep: the test above has NULL
+    on one side of `COALESCE(EXCLUDED.server_delivered_at, messages.…)`, so
+    swapping the operands changed nothing and the mutant survived. Two DIFFERENT
+    non-null values are what make the orderings disagree.
+
+    Which wins: the INCOMING one. A delivery timestamp is a fact that arrives
+    after the message, so a redelivery carrying one is newer information — the
+    opposite of `body`, where the stored copy wins. The two expressions really
+    are ordered differently, and that is the point.
+    """
+    uid = "f4444444-0000-4000-8000-000000000064"
+    first = _dm(ts=1723100000064, uuid=uid, body="delivery facts")
+    first["server_delivered_at"] = 1723100000111
+    db.upsert_message(first)
+
+    second = _dm(ts=1723100000064, uuid=uid, body="delivery facts")
+    second["server_delivered_at"] = 1723100000222
+    db.upsert_message(second)
+
+    rows = db.conn.rows("SELECT server_delivered_at FROM signal.messages")
+    assert len(rows) == 1
+    assert rows[0]["server_delivered_at"] == 1723100000222
+
+
+def test_a_conflicting_write_with_a_DIFFERENT_body_keeps_the_stored_one(db):
+    """🔴 The distinguishing case — the one a NULL fixture cannot see.
+
+    A mutation sweep swapped the operands of `COALESCE(messages.body,
+    EXCLUDED.body)` and NOTHING failed, because the only test of this expression
+    redelivered a fixture whose body was `None`: with one value null, both
+    orderings collapse to the same answer. Two DIFFERENT non-null bodies are what
+    make the two orderings disagree, so this is the case that pins which one
+    wins.
+
+    Which one SHOULD win: the stored copy. A redelivery is the same message, so a
+    differing body is a downgrade or a truncation, never news. Genuine edits
+    arrive as their own `edit` row with their own timestamp.
+    """
+    uid = "f2222222-0000-4000-8000-000000000062"
+    db.upsert_message(_dm(ts=1723100000062, uuid=uid, body="FIRST stored text"))
+    db.upsert_message(_dm(ts=1723100000062, uuid=uid, body="SECOND arriving text"))
+    rows = db.conn.rows("SELECT body FROM signal.messages")
+    assert len(rows) == 1
+    assert rows[0]["body"] == "FIRST stored text"
+
+
+def test_a_conflicting_write_can_still_fill_a_body_we_never_had(db):
+    """The other direction, so the assertion above is not just 'never update'."""
+    uid = "f3333333-0000-4000-8000-000000000063"
+    db.upsert_message(_dm(ts=1723100000063, uuid=uid, body=None))
+    db.upsert_message(_dm(ts=1723100000063, uuid=uid, body="arrived later"))
+    rows = db.conn.rows("SELECT body FROM signal.messages")
+    assert len(rows) == 1
+    assert rows[0]["body"] == "arrived later"
+
+
 def test_contact_upsert_enriches_rather_than_blanks(db):
     uid = "01111111-0000-4000-8000-000000000071"
     first = db.upsert_contact(signal_uuid=uid, display_name="Nadia Okoro")

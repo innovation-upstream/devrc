@@ -115,16 +115,31 @@ def safe_segment(value: str, *, fallback: str = "unknown") -> str:
     return cleaned or fallback
 
 
-def object_key(*, conversation: str, timestamp_ms: int, filename: str) -> str:
-    """`{conversation}/{YYYY-MM-DD}/{filename}` — the documented layout.
+def object_key(*, conversation: str, timestamp_ms: int, filename: str,
+               attachment_id: str) -> str:
+    """`{conversation}/{YYYY-MM-DD}/{attachment_id}_{filename}` — the layout.
+
+    🔴 `attachment_id` IS PART OF THE KEY, and required. Keying on
+    `{conversation}/{date}/{filename}` alone collides for the commonest filename
+    there is: two `Screenshot.png` in one conversation on one day produce the
+    same key, `put_attachment` then sees the object already exists and SKIPS the
+    write, and the second attachment's DB row points at the first one's bytes
+    while its sidecar misattributes provenance. Silent, and unrecoverable once
+    the sender deletes the original.
 
     The date comes from the message's own timestamp (UTC), NOT from wall-clock
     now: a redelivered or backfilled attachment must land on the same key as the
     first delivery, or idempotency is decided by when the consumer happened to
-    run.
+    run. The Signal attachment id is stable across redelivery for the same
+    reason, so the key stays idempotent while becoming unique.
     """
+    if not attachment_id:
+        raise ValueError(
+            "object_key needs the signal attachment id: without it two files of "
+            "the same name in one day collide and the second is silently dropped")
     day = datetime.fromtimestamp(int(timestamp_ms) / 1000, tz=timezone.utc)
     return (f"{safe_segment(conversation)}/{day.strftime('%Y-%m-%d')}/"
+            f"{safe_segment(attachment_id, fallback='attachment')}_"
             f"{safe_segment(filename, fallback='attachment')}")
 
 
@@ -231,7 +246,7 @@ class MinioSignal:
             return False
 
     def put_attachment(self, *, conversation: str, timestamp_ms: int, filename: str,
-                       data: bytes, content_type: str,
+                       data: bytes, content_type: str, attachment_id: str,
                        sidecar: dict | None = None) -> str:
         """Upload one attachment + its sidecar. Returns the object key.
 
@@ -242,7 +257,7 @@ class MinioSignal:
             self.ensure_bucket()
             self._bucket_checked = True
         key = object_key(conversation=conversation, timestamp_ms=timestamp_ms,
-                         filename=filename)
+                         filename=filename, attachment_id=attachment_id)
         if not self.object_exists(key):
             self._c.put_object(
                 self.bucket, key, io.BytesIO(data), length=len(data),

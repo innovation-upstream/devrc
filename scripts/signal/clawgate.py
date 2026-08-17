@@ -37,13 +37,19 @@ def build_draft_payload(*, draft_id: int, recipient: str, body: str) -> dict:
     preview = (body or "").strip()
     if len(preview) > BODY_PREVIEW_MAX:
         preview = preview[:BODY_PREVIEW_MAX] + "…"
+    # 🔴 The card deliberately does NOT print the `approve` command. An earlier
+    # revision did, which handed the drafting agent — the one that just posted
+    # this card — the exact incantation to approve its own draft. The card's job
+    # is to tell a HUMAN a draft is waiting; approval is an operator step run
+    # from an operator shell (it needs `SIGNAL_APPROVAL_TOKEN`, which no agent
+    # environment carries).
     lines = [
         f"To: {recipient}",
         "",
         preview,
         "",
-        f"Approve: consumer.py approve {draft_id} --ref <clawgate-ref>",
-        f"Then send: consumer.py send {draft_id}",
+        f"Waiting for your approval — draft #{draft_id}.",
+        "Approve from your own shell; see the `signal` skill.",
     ]
     return {
         "directory": f"\U0001F5E8 signal draft #{draft_id} · {recipient}"[:TITLE_MAX],

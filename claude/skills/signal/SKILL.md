@@ -11,8 +11,8 @@ receive → store → query → automate. Same Postgres instance as the mailbox,
 
 ```
 Zach's phone (Signal)  ──linked secondary device──►  signal-cli-rest-api
-                                                     (ns signal, json-rpc-native)
-                                                          │ SSE /api/v1/events
+                                                     (ns signal, json-rpc mode)
+                                        │ WEBSOCKET  GET /v1/receive/{number}
                                                           ▼
                                              scripts/signal/consumer.py
                                           ├─► Postgres  signal.*  (mailbox-postgres-0)
@@ -31,8 +31,9 @@ code route and will raise `SendGateError`.
 | Tests | `scripts/signal/tests/` — hermetic (sqlite substrate + fixtures), in the pytest gate |
 | Manifests | `homelab-talos: clusters/homelab/apps/signal/`, parent ks `clusters/homelab/flux-system/root-kustomizations/system/signal.yaml` |
 | API | `signal-cli-rest-api`, ns `signal`, ClusterIP `signal-api.signal.svc:8080`, **pinned tag** (never `:latest`), `replicas: 1` |
+| Routes | the WHOLE surface this server has: `GET /v1/receive/{number}` (a **websocket** in json-rpc mode), `GET /v1/attachments/{id}`, `POST /v2/send`. There is **no SSE endpoint** — `/api/v1/events` belongs to AsamK's native daemon, a different server |
 | Postgres | `mailbox-postgres-0` in ns `mailbox`, schema **`signal`** (shares the instance + role with `mail`) |
-| Attachments | MinIO archive tenant, bucket `signal-attachments`, key `{conversation}/{YYYY-MM-DD}/{filename}` + a `.json` sidecar |
+| Attachments | MinIO archive tenant, bucket `signal-attachments`, key `{conversation}/{YYYY-MM-DD}/{attachment_id}_{filename}` + a `.json` sidecar. The id is in the key deliberately — see gotchas |
 | Tables | `signal.contacts`, `signal.groups`, `signal.messages`, `signal.attachments`, `signal.reactions` |
 | Search | `signal.messages.search` — a STORED `to_tsvector('english', body)` generated column with a GIN index |
 
@@ -78,14 +79,30 @@ composes and transmits**.
    **negative provisional timestamp**, then posts a clawgate Task card (a graceful
    no-op returning `False` when `CLAWGATE_HOOK_TOKEN` is unset — the draft is already
    durable, so a missing token costs the notification, never the record).
-2. Zach approves in clawgate; `approve <id> --ref <clawgate-ref>` records it.
-3. `send` mints a single-use `SendAuthorization` — which `_mint_send_authorization()`
-   refuses to produce unless the stored `send_state` is exactly `approved` — and
-   `consumer.transmit_approved()` refuses to post without one. The capability's
-   constructor refuses direct construction; a spent capability cannot be replayed.
+2. Zach approves in clawgate; `approve <id> --ref <clawgate-ref>` records it. **This
+   is the operator's command**, run from the operator's own shell — it needs
+   `SIGNAL_APPROVAL_TOKEN`, which no agent environment carries.
+3. `send` claims the draft (`send_state=sending`, committed **before** anything is
+   transmitted), then mints a single-use `SendAuthorization` — which
+   `_mint_send_authorization()` refuses to produce unless the stored `send_state` is
+   exactly `approved` — and `consumer.transmit_approved()` refuses to post without
+   one. The capability's constructor refuses direct construction; a spent capability
+   cannot be replayed.
 
 Every refusal raises **`SendGateError`**. `scripts/signal/tests/test_approval_gate.py`
 attempts six documented bypasses and requires each to fail with that error.
+
+🔴 **What D3 does and does not prove.** Structural: composing and transmitting are
+separate calls with durable state in between, an un-approved draft has no code route
+to the API, and a crash mid-send cannot resend. **Not** structural: nothing inside the
+process can prove a *human* called `approve` — the token is a speed bump, not a proof
+of humanity. Treat the approval record as an audit trail, and keep the token out of
+every agent environment.
+
+**A draft stuck in `sending`** means the POST was attempted and the outcome is
+unknown (crash, dropped connection, or per-recipient errors from the API). It is
+deliberately inert — nothing can mint from it — so it will never resend on its own.
+Check Signal, then reconcile by hand: `drafts --state sending`.
 
 ## Event kinds the consumer emits
 
@@ -99,6 +116,7 @@ attempts six documented bypasses and requires each to fail with that error.
 | `receipt_delivery` | a delivery receipt |
 | `receipt_read` | a read receipt |
 | `typing` | a typing indicator |
+| `remote_delete` | the sender RETRACTED a message — the target row is tombstoned (body and attachments removed), not stored as an empty message |
 | `unknown` | a handled envelope shape we do not model — counted and retained, never dropped |
 
 `message`, `group_message`, `edit`, `sync_outbound` and `reaction` are STORED; the rest
@@ -113,6 +131,8 @@ are counted only.
 | `malformed` | payloads skipped as unparseable — never fatal |
 | `reconnects` | SSE stream drops recovered from |
 | `db_retries` | transient Postgres faults retried rather than dropped |
+| `db_recoveries` | aborted transactions rolled back (or connections re-opened) so the next event can be written |
+| `db_recovery_failures` | recovery itself failed — the pod cannot write and needs looking at |
 | `attachment_failures` | attachment fetch/upload failures — the MESSAGE row still stands |
 
 ## Environment
@@ -124,7 +144,8 @@ are counted only.
 | `SIGNAL_PG_PORT` | port override for direct mode |
 | `SIGNAL_PG_DIRECT` | truthy → direct mode using the DSN's own host/port |
 | `SIGNAL_API_URL` | signal-cli-rest-api base URL (default `http://signal-api.signal.svc:8080`) |
-| `SIGNAL_ACCOUNT` | the account's own phone number, used as the sender of a draft |
+| `SIGNAL_ACCOUNT` | the account's own phone number. Required TWICE: the receive endpoint is per-account (`/v1/receive/{number}`) and `/v2/send` rejects a missing `number` with 400 |
+| `SIGNAL_APPROVAL_TOKEN` | must be set for `approve` to run. **Operator-only** — deliberately absent from the Deployment and from agent environments |
 | `CLAWGATE_HOOK_TOKEN` | clawgate hook token; unset → draft cards are a graceful no-op |
 | `MINIO_ARCHIVE_ENDPOINT` | explicit MinIO endpoint (skips the port-forward) |
 | `MINIO_ARCHIVE_ACCESS_KEY` | MinIO credentials; else read from `minio-archive-config` |
@@ -150,6 +171,22 @@ and tear it down on exit — exactly like `mail-actions`.
   `idx_rx_unresolved`. Unresolvable reactions are RETAINED, not dropped.
 - **Redelivery duplicates attachments** without `UNIQUE (message_id,
   signal_attachment_id)`.
+- **One person must be ONE contact row, in both arrival orders.** An identity arrives
+  as a bare number (a draft) or as a uuid (every envelope). `upsert_contact` looks up
+  by phone AND promotes a placeholder to its real uuid, because two rows for one
+  person means the echo lands under a different `source_contact_id` and dedupe never
+  fires — every agent-sent message stored twice.
+- **The attachment id is part of the MinIO key.** Without it, two `Screenshot.png` in
+  one conversation on one day collide, the second write is skipped as "already
+  there", and its row points at the first file's bytes.
+- **A failed statement poisons the whole transaction.** `autocommit=False` +
+  Postgres = every later statement raises `InFailedSqlTransaction` until a rollback.
+  The consumer recovers inside its retry (`db_recoveries`); without that the pod logs
+  "reconnecting" forever and stores nothing.
+- **Retention is NOT implemented.** `expires_in_seconds` and `view_once` are STORED
+  and never acted on: a disappearing message stays in Postgres forever. `remote_delete`
+  IS honoured (the target is tombstoned), but nothing sweeps expiry. If that matters,
+  it is a separate piece of work — do not assume the archive respects Signal's timers.
 - **Attachments are fetched AFTER the message row is committed** — a failed download
   must never roll back a message. `minio_key IS NULL` is the honest marker for "row
   stored, bytes not archived".

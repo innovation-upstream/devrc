@@ -834,22 +834,25 @@ TARGET_FLOORS=(
   "scripts/session-analysis/tests|367"
   "scripts/session-analysis/session_insight/tests|55"
   "scripts/mail-actions/tests|129"
-  # 2026-08-16, the Signal chat pipeline arrives as a NEW target: 266 collected
+  # 2026-08-16, the Signal chat pipeline arrives as a NEW target: 340 collected
   # (10 suites). MEASURED, never computed — the entry was pinned at 1 so the
   # AUTHORITATIVE gate would print its own replacement, and `nix build
   # .#checks.x86_64-linux.pytests` did:
-  #   Raise the TARGET_FLOORS entry to "scripts/signal/tests|253" — that number
-  #   is this run's own count put through [the documented allowance rule]
-  # It read 262/249 on the first pass; the pyright triage then added four tests
-  # (the zero-retry attempt floor and its DB-error case, the missing
-  # stream_factory refusal, and `_returned_id`'s named error), so the number was
-  # RE-MEASURED by the same gate rather than adjusted by hand.
+  #   FAIL  scripts/signal/tests  (collected=340 above drift ceiling 61, floor 1)
+  #   Raise the TARGET_FLOORS entry to "scripts/signal/tests|323"
+  # then the re-run with 323 in place read
+  #   PASS  scripts/signal/tests  (collected=340 passed=340 skipped=0 floor=323)
+  # It read 262/249 on the first pass and 266/253 after the pyright triage; the
+  # post-audit rework (bbernhard route table, transaction recovery, the `sending`
+  # claim, contact identity, MinIO key collisions, remote delete, conversation
+  # grouping) took it to 340. Re-MEASURED each time by the same gate, never
+  # adjusted by hand.
   # ZERO new skips, so EXPECTED_SKIPS is untouched, and GUARD 7 reported
   # `intercepted=0 systemctl-reads=0` for this target — the evidence the suite is
   # hermetic rather than merely asserted to be. If this line conflicts with a
   # sibling branch, re-run the gate on the MERGED tree and copy what it prints;
   # do not reconcile the two sides by hand.
-  "scripts/signal/tests|253"
+  "scripts/signal/tests|323"
   "scripts/initiatives/tests|745"
   "scripts/repo-cos/tests|315"
   "scripts/task-spec-drafter/tests|135"

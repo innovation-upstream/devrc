@@ -157,6 +157,68 @@ def test_reaction_requires_a_target_timestamp():
         consumer.parse_envelope(bad)
 
 
+# --------------------------------------------------------------------------- #
+# Remote delete — a retraction, not a message
+# --------------------------------------------------------------------------- #
+def test_remote_delete_tombstones_the_target_instead_of_storing_a_ghost(db):
+    """🔴 A `remoteDelete` is the SENDER RETRACTING a message.
+
+    Unrecognised, it falls through to the data-message path and is stored as an
+    empty-bodied message — a ghost row that also leaves the retracted text
+    sitting in the row it was meant to retract. Both halves are wrong.
+    """
+    db.upsert_message({**_message(uuid=ALICE, ts=TARGET_TS, body="please forget this"),
+                       "attachments": [{"id": "att-doomed", "content_type": "image/png",
+                                        "filename": "oops.png"}]})
+    assert db.conn.count("attachments") == 1
+
+    event = consumer.parse_envelope({
+        "sourceUuid": ALICE, "sourceNumber": "+15550101",
+        "timestamp": TARGET_TS + 50,
+        "dataMessage": {"timestamp": TARGET_TS + 50,
+                        "remoteDelete": {"targetSentTimestamp": TARGET_TS}},
+    })
+    assert event.kind == consumer.KIND_REMOTE_DELETE
+    assert db.apply_remote_delete(event.remote_delete) == 1
+
+    rows = db.conn.rows("SELECT body, message_type, raw_envelope FROM signal.messages")
+    assert len(rows) == 1                       # no ghost row was added
+    assert rows[0]["body"] is None              # the text is GONE
+    assert rows[0]["raw_envelope"] is None      # ... including from the raw copy
+    assert rows[0]["message_type"] == "deleted"
+    assert db.conn.count("attachments") == 0    # and its attachments with it
+
+
+def test_remote_delete_for_a_message_we_never_received_is_a_quiet_no_op(db):
+    event = consumer.parse_envelope({
+        "sourceUuid": ALICE, "timestamp": NEVER_SEEN_TS + 1,
+        "dataMessage": {"timestamp": NEVER_SEEN_TS + 1,
+                        "remoteDelete": {"targetSentTimestamp": NEVER_SEEN_TS}},
+    })
+    assert db.apply_remote_delete(event.remote_delete) == 0
+    assert db.conn.count("messages") == 0
+
+
+def test_remote_delete_does_not_touch_a_different_senders_message(db):
+    """POSITIVE CONTROL on the scoping: only the retractor's own row moves."""
+    db.upsert_message(_message(uuid=DANA, ts=TARGET_TS, body="someone else's message"))
+    event = consumer.parse_envelope({
+        "sourceUuid": ALICE, "timestamp": TARGET_TS + 60,
+        "dataMessage": {"timestamp": TARGET_TS + 60,
+                        "remoteDelete": {"targetSentTimestamp": TARGET_TS}},
+    })
+    assert db.apply_remote_delete(event.remote_delete) == 0
+    assert db.conn.rows("SELECT body FROM signal.messages")[0]["body"] == \
+        "someone else's message"
+
+
+def test_remote_delete_without_a_target_is_malformed():
+    with pytest.raises(consumer.MalformedEvent):
+        consumer.parse_envelope({
+            "sourceUuid": ALICE, "timestamp": 1,
+            "dataMessage": {"timestamp": 1, "remoteDelete": {}}})
+
+
 def test_reactions_unique_constraint_is_live(db):
     author = db.upsert_contact(signal_uuid=ALICE)
     reactor = db.upsert_contact(signal_uuid=CARL)

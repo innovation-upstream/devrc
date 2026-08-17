@@ -57,6 +57,18 @@ def recording():
 
 
 @pytest.fixture(autouse=True)
+def _operator_approval_env(monkeypatch):
+    """Most suites act AS THE OPERATOR, so the approval token is present.
+
+    `approve_draft()` refuses without `SIGNAL_APPROVAL_TOKEN` — the operator-only
+    variable that keeps a drafting agent from approving its own draft. Setting it
+    here keeps every other suite readable; `test_approval_gate.py` deletes it
+    explicitly and asserts the refusal, so the guard is still measured.
+    """
+    monkeypatch.setenv("SIGNAL_APPROVAL_TOKEN", "operator-shell-token")
+
+
+@pytest.fixture(autouse=True)
 def _no_live_network(monkeypatch):
     """Fail loudly if any test reaches for `requests`.
 

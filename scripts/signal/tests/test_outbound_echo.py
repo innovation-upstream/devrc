@@ -27,6 +27,11 @@ PEER_NUMBER = "+15550101"
 SERVER_TS = 1723000009090        # what the API assigns and the echo carries
 LOCAL_TS = 1723000007777         # deliberately DIFFERENT from SERVER_TS
 
+# 🔴 The API returns the timestamp as a STRING — upstream types it
+# `ds.SendMessageResponse.Timestamp string`. A fake returning an int would let a
+# caller that only handles ints pass here and fail against the real server, so
+# every fake below returns the string form.
+
 
 def _approved_draft(db, *, body="sent from my laptop"):
     draft = db.draft_message(recipient=PEER_NUMBER, body=body,
@@ -50,9 +55,10 @@ def _echo_envelope(*, timestamp, body="sent from my laptop"):
     }
 
 
-def _transmit_returning(ts):
-    def _t(auth, *, recipient, body):
-        return {"timestamp": ts}
+def _transmit_returning(ts, *, as_string=True):
+    def _t(auth, *, recipient, body, number):
+        assert number, "the server requires the sending `number` and 400s without it"
+        return {"timestamp": str(ts) if as_string else ts}
     return _t
 
 
@@ -161,6 +167,70 @@ def test_echo_of_a_message_sent_from_another_device_is_stored_once(db):
     row = db.conn.rows("SELECT is_outbound, body FROM signal.messages")[0]
     assert row["is_outbound"]
     assert row["body"] == "typed on the phone"
+
+
+def test_the_echo_then_draft_ORDER_also_resolves_to_one_contact(db):
+    """🔴 The ordering production actually takes, from day two.
+
+    The account's real uuid is already in `contacts` (any earlier sync echo put
+    it there). Then an agent drafts, supplying only the NUMBER. Without a lookup
+    by phone that mints a SECOND placeholder contact — and promotion correctly
+    declines, because the uuid is taken — so the send and the echo carry
+    different `source_contact_id`s and `unique_message` never fires. Every
+    agent-sent message would be stored twice.
+
+    The earlier test starts from an EMPTY contacts table, which is why it passed
+    while this case was broken.
+    """
+    # Day one: the account's own uuid is already known.
+    seed = _echo_envelope(timestamp=1723000003030, body="sent from the phone")
+    db.upsert_message(consumer.parse_envelope(seed).message)
+    contacts_after_seed = db.conn.count("contacts")
+    assert contacts_after_seed == 2                  # the account and the peer
+
+    # Day two: an agent drafts, knowing only the number.
+    draft = _approved_draft(db, body="drafted on day two")
+    assert db.conn.count("contacts") == contacts_after_seed   # NO rival identity
+    db.send_approved(draft["id"], transmit=_transmit_returning(SERVER_TS))
+
+    # And the echo of that send collapses onto the row it just wrote.
+    echo = _echo_envelope(timestamp=SERVER_TS, body="drafted on day two")
+    db.upsert_message(consumer.parse_envelope(echo).message)
+    assert db.conn.count("messages") == 2            # the seed and the sent one
+    assert db.conn.count("contacts") == contacts_after_seed
+
+
+def test_contact_lookup_by_phone_prefers_a_real_contact_over_a_placeholder(db):
+    """Deterministic, and in the right direction — an arbitrary pick would split."""
+    placeholder = db.upsert_contact(phone_number="+15557654321")
+    real = db.upsert_contact(signal_uuid="70707070-7070-4707-8707-707070707070",
+                             phone_number="+15557654321")
+    # The placeholder is PROMOTED rather than duplicated, so these are one row.
+    assert placeholder == real
+    assert db.contact_id_by_phone("+15557654321") == real
+
+
+def test_contact_lookup_is_deterministic_when_two_rows_share_a_number(db):
+    """Two rows CAN share a number, and the pick must not be arbitrary.
+
+    Reachable without contrivance: a real contact holds the number, then a second
+    real uuid arrives carrying the same number (a re-registration). Promotion
+    correctly declines — the first row is not a placeholder — so two rows exist.
+    An unordered `LIMIT 1` would then split the identity differently run to run.
+    """
+    first = db.upsert_contact(signal_uuid="60606060-6060-4606-8606-606060606060",
+                              phone_number="+15551239876")
+    second = db.upsert_contact(signal_uuid="61616161-6161-4616-8616-616161616161",
+                               phone_number="+15551239876")
+    assert first != second                      # genuinely two rows
+    assert db.conn.count("contacts") == 2
+    for _ in range(5):
+        assert db.contact_id_by_phone("+15551239876") == first   # stable, oldest
+
+
+def test_contact_lookup_by_phone_returns_none_for_an_unknown_number(db):
+    assert db.contact_id_by_phone("+15550000000") is None
+    assert db.contact_id_by_phone("") is None
 
 
 def test_raw_envelope_of_the_echo_is_retained(db):

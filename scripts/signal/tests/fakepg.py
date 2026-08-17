@@ -153,6 +153,22 @@ def _websearch_match(body, query) -> int:
 # --------------------------------------------------------------------------- #
 # Substrate 1 — a real engine
 # --------------------------------------------------------------------------- #
+class InFailedTransaction(Exception):
+    """Stands in for psycopg2's `InFailedSqlTransaction` inside the substrate.
+
+    Replaced at import time by the real psycopg2 class (see below) so the code
+    under test meets the exception it will actually meet in production.
+    """
+
+
+try:  # the real class, so `TRANSIENT_DB_ERRORS` membership is genuinely exercised
+    import psycopg2.errors
+
+    InFailedTransaction = psycopg2.errors.InFailedSqlTransaction  # noqa: F811
+except Exception:  # pragma: no cover - psycopg2 is a hard dep of the module anyway
+    pass
+
+
 class SqliteCursor:
     def __init__(self, conn: "SqliteConn", cursor_factory=None):
         self._conn = conn
@@ -171,6 +187,23 @@ class SqliteCursor:
         return self._cur.rowcount
 
     def execute(self, sql, params=None):
+        # 🔴 POSTGRES TRANSACTION SEMANTICS, emulated on purpose. sqlite is
+        # happy to keep going after a failed statement; Postgres is not — with
+        # `autocommit=False` the first failure ABORTS the transaction and every
+        # later statement raises `InFailedSqlTransaction` until a `rollback()`.
+        # Without this the substrate could not reach the zombie-pod bug at all,
+        # and the recovery tests would be theatre.
+        if self._conn.aborted:
+            raise InFailedTransaction(
+                "current transaction is aborted, commands ignored until end of "
+                "transaction block")
+        try:
+            return self._execute(sql, params)
+        except Exception:
+            self._conn.aborted = True
+            raise
+
+    def _execute(self, sql, params=None):
         self._conn.executed.append((" ".join(str(sql).split()), params))
         if _IS_DDL.match(str(sql).strip()):
             translated = translate_ddl(sql)
@@ -209,15 +242,28 @@ class SqliteConn:
         self.raw.create_function("pg_websearch_match", 2, _websearch_match)
         self.executed: list[tuple[str, object]] = []
         self.commits = 0
+        self.rollbacks = 0
+        self.aborted = False
+        self.closed = 0
 
     def cursor(self, cursor_factory=None):
         return SqliteCursor(self, cursor_factory)
 
     def commit(self):
+        if self.aborted:
+            raise InFailedTransaction(
+                "current transaction is aborted, commands ignored until end of "
+                "transaction block")
         self.commits += 1
         self.raw.commit()
 
+    def rollback(self):
+        self.rollbacks += 1
+        self.aborted = False
+        self.raw.rollback()
+
     def close(self):
+        self.closed = 1
         self.raw.close()
 
     # -- direct introspection for tests -----------------------------------
@@ -264,6 +310,8 @@ class RecordingConn:
     def __init__(self):
         self.executed: list[tuple[str, object]] = []
         self.commits = 0
+        self.rollbacks = 0
+        self.closed = 0
         self.next_rowcount = 0
         self.next_result: list = []
         self.result_queue: list[list] = []
@@ -273,6 +321,9 @@ class RecordingConn:
 
     def commit(self):
         self.commits += 1
+
+    def rollback(self):
+        self.rollbacks += 1
 
     def sqls(self) -> list[str]:
         return [sql for sql, _ in self.executed]

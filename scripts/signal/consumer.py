@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
-"""Signal consumer — SSE stream → parsed envelope → Postgres (+ MinIO attachments).
+"""Signal consumer — receive stream → parsed envelope → Postgres (+ MinIO attachments).
 
 Runs as a long-lived in-cluster Deployment next to `signal-cli-rest-api`
-(json-rpc-native mode). It consumes `GET /api/v1/events`, turns each JSON-RPC
-`receive` notification into a structured event, and stores it idempotently
-through `_signal_db.SignalDB`.
+(json-rpc mode). It consumes that server's per-account receive endpoint (see the
+route-table note below), turns each frame into a structured event, and stores it
+idempotently through `_signal_db.SignalDB`.
 
 WHAT IT MUST SURVIVE (each has a named test in tests/test_consumer_resilience.py)
 --------------------------------------------------------------------------------
-* an SSE disconnect/reconnect that REDELIVERS events — dedupe makes replay a
+* a disconnect/reconnect that REDELIVERS messages — dedupe makes replay a
   no-op, so nothing is lost and nothing is duplicated;
-* a malformed event — skipped and counted, never fatal;
+* a malformed frame — skipped and counted, never fatal;
 * Postgres briefly unavailable — retried with backoff, the event is not dropped;
+* a FAILED WRITE poisoning the connection — `autocommit=False` means one failed
+  statement aborts the transaction and every later one raises until a rollback,
+  so recovery is part of the retry, not an afterthought;
 * an attachment fetch failing — the MESSAGE write still stands (attachment
   bytes are fetched AFTER the row is committed, never inside its transaction).
 
@@ -47,14 +50,39 @@ import _signal_db  # noqa: E402
 from _signal_db import (  # noqa: E402
     STATE_APPROVED,
     STATE_PENDING,
+    STATE_SENDING,
     STATE_SENT,
     SendGateError,
     SignalDB,
     spend_authorization,
 )
 
+# --------------------------------------------------------------------------- #
+# THE SERVER WE TARGET IS bbernhard/signal-cli-rest-api. Its ENTIRE route table
+# was read from upstream `src/main.go` (2026-08-16) rather than recalled:
+#
+#     v1.GET("/receive/:number")        <- ingest. NOT SSE. See below.
+#     v1.GET("/attachments/:attachment")
+#     v2.POST("/send")
+#
+# There is NO `/api/v1/events` and no SSE endpoint anywhere in that router — that
+# path belongs to AsamK's NATIVE `signal-cli --http` daemon, a different server.
+# An earlier revision of this module mixed the two: SSE ingest from the native
+# daemon, send/attachments from bbernhard. Against the server we actually deploy
+# that is a 404 on every connect, which `run()`'s reconnect handler turns into a
+# silent infinite loop with zero rows ingested.
+#
+# In `json-rpc` mode (the mode we deploy) `GET /v1/receive/{number}` UPGRADES TO A
+# WEBSOCKET and writes one JSON TEXT FRAME per message — upstream
+# `src/api/api.go`: `connectionUpgrader.Upgrade(...)` then
+# `ws.WriteMessage(websocket.TextMessage, []byte(data))`, where `data` is the
+# signal-cli JSON-RPC params object `{"account": …, "envelope": {…}}`.
+# In non-json-rpc mode the same path is a one-shot GET returning a JSON ARRAY.
+# `iter_frames()` accepts both shapes so the consumer core is transport-agnostic.
+# --------------------------------------------------------------------------- #
 API_URL = os.environ.get("SIGNAL_API_URL", "http://signal-api.signal.svc:8080")
-EVENTS_PATH = "/api/v1/events"
+ACCOUNT = os.environ.get("SIGNAL_ACCOUNT", "")
+RECEIVE_PATH = "/v1/receive"
 ATTACHMENT_PATH = "/v1/attachments"
 SEND_PATH = "/v2/send"
 
@@ -71,6 +99,7 @@ KIND_SYNC_OUTBOUND = "sync_outbound"
 KIND_RECEIPT_DELIVERY = "receipt_delivery"
 KIND_RECEIPT_READ = "receipt_read"
 KIND_TYPING = "typing"
+KIND_REMOTE_DELETE = "remote_delete"
 KIND_UNKNOWN = "unknown"
 
 # Counters the daemon reports. Also derived + doc-checked by test_skill_doc.py.
@@ -79,6 +108,8 @@ STAT_IGNORED = "ignored"
 STAT_MALFORMED = "malformed"
 STAT_RECONNECTS = "reconnects"
 STAT_DB_RETRIES = "db_retries"
+STAT_DB_RECOVERIES = "db_recoveries"
+STAT_DB_RECOVERY_FAILURES = "db_recovery_failures"
 STAT_ATTACHMENT_FAILURES = "attachment_failures"
 
 # Kinds that are stored as rows; everything else is observed and counted only.
@@ -86,7 +117,18 @@ STORED_KINDS = (KIND_MESSAGE, KIND_GROUP_MESSAGE, KIND_EDIT, KIND_SYNC_OUTBOUND)
 
 # Transient Postgres faults worth retrying. NOT a bare `Exception`: a programming
 # error must fail loudly rather than be retried three times and swallowed.
-TRANSIENT_DB_ERRORS = (psycopg2.OperationalError, psycopg2.InterfaceError)
+#
+# `InFailedSqlTransaction` (SQLSTATE 25P02) is in the list because it is what
+# EVERY statement raises after one has failed inside an `autocommit=False`
+# transaction. It is genuinely transient — a `rollback()` clears it — and
+# `_recover()` issues exactly that between attempts. Left out, the second event
+# after any error escapes into the reconnect handler and the pod becomes a zombie
+# that logs "reconnecting" forever and stores nothing.
+TRANSIENT_DB_ERRORS = (
+    psycopg2.OperationalError,
+    psycopg2.InterfaceError,
+    psycopg2.errors.InFailedSqlTransaction,
+)
 
 
 @dataclass
@@ -97,6 +139,7 @@ class ParsedEvent:
     message: dict | None = None
     reaction: dict | None = None
     receipt: dict | None = None
+    remote_delete: dict | None = None
     raw_envelope: str | None = None
     notes: list[str] = field(default_factory=list)
 
@@ -207,6 +250,29 @@ def parse_envelope(envelope: dict) -> ParsedEvent:
     # -- data message (DM / group / reaction) ---------------------------------
     data = envelope.get("dataMessage") or {}
     if data:
+        # A remote delete is the SENDER RETRACTING a message. Storing it as a
+        # message with an empty body (what falling through to the data-message
+        # path does) leaves a ghost row AND keeps the retracted text, which is
+        # the opposite of what was asked for.
+        remote = data.get("remoteDelete")
+        if remote is not None:
+            # `is not None`, not truthiness: an EMPTY remoteDelete is malformed
+            # and must be reported as such, not silently fall through and get
+            # stored as an ordinary empty message.
+            target_ts = remote.get("targetSentTimestamp")
+            if target_ts is None:
+                raise MalformedEvent("remoteDelete has no targetSentTimestamp")
+            return ParsedEvent(
+                kind=KIND_REMOTE_DELETE,
+                remote_delete={
+                    "target_author_uuid": envelope.get("sourceUuid"),
+                    "target_author_number": (envelope.get("sourceNumber")
+                                             or envelope.get("source")),
+                    "target_sent_timestamp": target_ts,
+                },
+                raw_envelope=raw,
+            )
+
         reaction = data.get("reaction")
         if reaction:
             rx = {
@@ -259,42 +325,65 @@ def parse_envelope(envelope: dict) -> ParsedEvent:
                        notes=[f"unhandled envelope keys: {sorted(envelope)}"])
 
 
-def parse_sse_payload(payload: str) -> dict:
-    """One SSE `data:` payload → the envelope object inside it.
+def parse_receive_frame(payload) -> dict:
+    """One websocket frame (or one REST array element) → the envelope inside it.
 
-    signal-cli-rest-api wraps envelopes in a JSON-RPC notification
-    (`{"method":"receive","params":{"envelope":{…}}}`); a bare `{"envelope":{…}}`
-    is also accepted.
+    Accepts, deliberately, the three shapes this endpoint can hand back:
+      * bbernhard's json-rpc websocket frame — `{"account": …, "envelope": {…}}`;
+      * a signal-cli JSON-RPC notification — `{"method":"receive","params":{…}}`;
+      * an already-decoded dict (the REST-array path decodes once, up front).
     """
-    try:
-        obj = json.loads(payload)
-    except json.JSONDecodeError as exc:
-        raise MalformedEvent(f"payload is not JSON: {exc}") from exc
+    if isinstance(payload, (bytes, bytearray)):
+        payload = payload.decode("utf-8", "replace")
+    if isinstance(payload, str):
+        try:
+            obj = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            raise MalformedEvent(f"frame is not JSON: {exc}") from exc
+    else:
+        obj = payload
     if not isinstance(obj, dict):
-        raise MalformedEvent(f"payload is {type(obj).__name__}, not an object")
+        raise MalformedEvent(f"frame is {type(obj).__name__}, not an object")
     if obj.get("method") not in (None, "receive"):
         raise MalformedEvent(f"unexpected JSON-RPC method {obj.get('method')!r}")
-    params = obj.get("params") or obj
+    nested = obj.get("params")
+    params = nested if isinstance(nested, dict) else obj
     env = params.get("envelope")
     if env is None:
-        raise MalformedEvent("payload carries no `envelope`")
+        raise MalformedEvent("frame carries no `envelope`")
     return env
 
 
-def sse_events(lines) -> Iterator[str]:
-    """Yield the `data:` payloads of an SSE byte/text line stream.
+def iter_frames(source) -> Iterator[object]:
+    """Normalise whatever the receive transport yields into one item per message.
 
-    A generator over already-decoded lines, so the tests drive it with a plain
-    list and the daemon drives it with `requests`' `iter_lines`.
+    The websocket path yields one text frame per message; the REST path yields a
+    single JSON ARRAY holding many. Both arrive here, and a caller downstream
+    only ever sees "one message at a time".
     """
-    for line in lines:
-        if isinstance(line, bytes):
-            line = line.decode("utf-8", "replace")
-        line = line.rstrip("\n")
-        if not line or line.startswith(":"):
+    for item in source:
+        if isinstance(item, (bytes, bytearray)):
+            item = item.decode("utf-8", "replace")
+        if isinstance(item, str):
+            stripped = item.strip()
+            if not stripped:
+                continue
+            if stripped.startswith("["):
+                try:
+                    batch = json.loads(stripped)
+                except json.JSONDecodeError:
+                    yield stripped          # let handle_payload count it malformed
+                    continue
+                for element in batch:
+                    yield element
+                continue
+            yield stripped
             continue
-        if line.startswith("data:"):
-            yield line[len("data:"):].strip()
+        if isinstance(item, list):
+            for element in item:
+                yield element
+            continue
+        yield item
 
 
 # --------------------------------------------------------------------------- #
@@ -319,15 +408,17 @@ class SignalConsumer:
             STAT_MALFORMED: 0,
             STAT_RECONNECTS: 0,
             STAT_DB_RETRIES: 0,
+            STAT_DB_RECOVERIES: 0,
+            STAT_DB_RECOVERY_FAILURES: 0,
             STAT_ATTACHMENT_FAILURES: 0,
         }
 
     # -- one event ---------------------------------------------------------
-    def handle_payload(self, payload: str) -> str:
-        """Parse + store one SSE payload. Returns the resulting kind, or
-        `STAT_MALFORMED` when the payload was skipped."""
+    def handle_payload(self, payload) -> str:
+        """Parse + store one receive frame. Returns the resulting kind, or
+        `STAT_MALFORMED` when the frame was skipped."""
         try:
-            envelope = parse_sse_payload(payload)
+            envelope = parse_receive_frame(payload)
             event = parse_envelope(envelope)
         except MalformedEvent:
             self.stats[STAT_MALFORMED] += 1
@@ -335,6 +426,12 @@ class SignalConsumer:
         return self.store(event)
 
     def store(self, event: ParsedEvent) -> str:
+        if event.kind == KIND_REMOTE_DELETE and event.remote_delete is not None:
+            self._with_db_retry(
+                lambda: self.db.apply_remote_delete(event.remote_delete))
+            self._with_db_retry(self.db.commit)
+            self.stats[STAT_STORED] += 1
+            return event.kind
         if event.kind in STORED_KINDS and event.message is not None:
             message_id = self._with_db_retry(
                 lambda: self.db.upsert_message(event.message)
@@ -370,11 +467,37 @@ class SignalConsumer:
             except TRANSIENT_DB_ERRORS as exc:
                 last = exc
                 self.stats[STAT_DB_RETRIES] += 1
+                self._recover("transient")
                 self._sleep(self._backoff * (2 ** attempt))
+            except Exception:
+                # 🔴 NOT retried — but the connection still has to be made usable.
+                # `autocommit=False` means the FIRST failed statement aborts the
+                # transaction, and every later statement then raises
+                # `InFailedSqlTransaction`, which is a DIFFERENT error class: it
+                # would escape into run()'s reconnect handler and be miscounted
+                # as a dropped stream forever, storing nothing. Recover, then let
+                # the real error propagate.
+                self._recover("fatal")
+                raise
         if last is None:  # pragma: no cover - unreachable while attempts >= 1
             raise RuntimeError(
                 "_with_db_retry finished its loop without attempting the call")
         raise last
+
+    def _recover(self, why: str) -> str:
+        """Roll the aborted transaction back (reconnecting if that is not enough).
+
+        Returns what the DB layer says it did, for the counters and the log.
+        """
+        try:
+            outcome = self.db.recover()
+        except Exception as exc:  # noqa: BLE001 — recovery must not mask the cause
+            self.stats[STAT_DB_RECOVERY_FAILURES] += 1
+            print(f"signal-consumer: DB recovery after a {why} error failed: {exc}",
+                  file=sys.stderr)
+            return "failed"
+        self.stats[STAT_DB_RECOVERIES] += 1
+        return outcome
 
     # -- attachments -------------------------------------------------------
     def download_attachments(self, message_id: int, msg: dict) -> int:
@@ -398,6 +521,7 @@ class SignalConsumer:
                 key = minio.put_attachment(
                     conversation=conversation,
                     timestamp_ms=msg["message_timestamp"],
+                    attachment_id=att["id"],
                     filename=att.get("filename") or att["id"],
                     data=blob,
                     content_type=att.get("content_type") or "application/octet-stream",
@@ -443,7 +567,7 @@ class SignalConsumer:
         while max_connections is None or connections < max_connections:
             connections += 1
             try:
-                for payload in sse_events(self._stream_factory()):
+                for payload in iter_frames(self._stream_factory()):
                     self.handle_payload(payload)
             except Exception as exc:  # noqa: BLE001 — a dropped stream is normal
                 self.stats[STAT_RECONNECTS] += 1
@@ -467,8 +591,9 @@ def conversation_key(msg: dict) -> str:
 # --------------------------------------------------------------------------- #
 # The send path — the ONLY route to the Signal send endpoint (D3)
 # --------------------------------------------------------------------------- #
-def transmit_approved(auth, *, recipient: str, body: str, poster=None,
-                      api_url: str | None = None, timeout: float = 20.0) -> dict:
+def transmit_approved(auth, *, recipient: str, body: str, number: str,
+                      poster=None, api_url: str | None = None,
+                      timeout: float = 20.0) -> dict:
     """POST an approved draft to the Signal API. Requires a `SendAuthorization`.
 
     🔴 `spend_authorization()` runs BEFORE anything touches the network, and it
@@ -476,13 +601,24 @@ def transmit_approved(auth, *, recipient: str, body: str, poster=None,
     capability that has already been spent. There is no keyword that skips it and
     no other send-endpoint call site in `scripts/signal/`.
 
+    `number` is the SENDING account and is REQUIRED by the server: upstream
+    `SendV2` rejects an empty one with 400 `"Couldn't process request - please
+    provide a valid number"` (read from `src/api/api.go`, not recalled). An
+    earlier revision omitted it, so every send would have failed — safely, but
+    the whole send path was inert.
+
     Returns the API's response, from which the caller MUST take the
     server-assigned `timestamp` (🔧 #4 — the sync echo carries that value, and a
-    locally generated one would not dedupe).
+    locally generated one would not dedupe). Upstream types that field as a
+    STRING (`ds.SendMessageResponse.Timestamp string`), so the caller coerces.
     """
     spend_authorization(auth)
+    if not number:
+        raise SendGateError(
+            "transmit refused: no sending `number` — the server would reject this "
+            "with 400 'please provide a valid number' (D3 approval gate)")
     url = (api_url or API_URL).rstrip("/") + SEND_PATH
-    payload = {"message": body, "recipients": [recipient]}
+    payload = {"message": body, "number": number, "recipients": [recipient]}
     if poster is None:  # pragma: no cover - the live path; tests inject a poster
         import requests
         poster = requests.post
@@ -504,15 +640,67 @@ def http_attachment_fetcher(api_url: str | None = None, timeout: float = 30.0):
     return _fetch
 
 
-def http_stream_factory(api_url: str | None = None, timeout: float = 300.0):
-    """Return a `stream_factory() -> line iterator` bound to the live SSE endpoint."""
+def receive_url(account: str, *, api_url: str | None = None,
+                websocket: bool = False) -> str:
+    """The ingest URL for one account: `…/v1/receive/{number}`.
+
+    `websocket=True` swaps the scheme for `ws`/`wss`, which is what json-rpc mode
+    needs — the path is the same, the server upgrades the connection.
+    """
+    if not account:
+        raise ValueError(
+            "receive_url needs the account number: bbernhard's ingest endpoint is "
+            "per-account (`/v1/receive/{number}`), there is no global stream")
     base = (api_url or API_URL).rstrip("/")
+    if websocket:
+        if base.startswith("https://"):
+            base = "wss://" + base[len("https://"):]
+        elif base.startswith("http://"):
+            base = "ws://" + base[len("http://"):]
+    return f"{base}{RECEIVE_PATH}/{account}"
+
+
+def ws_stream_factory(account: str, api_url: str | None = None,
+                      timeout: float = 300.0):
+    """Ingest for `json-rpc` mode: a WEBSOCKET on `/v1/receive/{number}`.
+
+    Upstream upgrades the connection and writes one JSON text frame per message.
+    `websocket-client` is imported lazily so the hermetic suite (which injects
+    its own factory) never needs it installed.
+    """
+    url = receive_url(account, api_url=api_url, websocket=True)
+
+    def _open():  # pragma: no cover - live path
+        import websocket  # websocket-client
+        conn = websocket.create_connection(url, timeout=timeout)
+
+        def _frames():
+            try:
+                while True:
+                    yield conn.recv()
+            finally:
+                conn.close()
+
+        return _frames()
+
+    return _open
+
+
+def rest_poll_stream_factory(account: str, api_url: str | None = None,
+                             timeout: float = 60.0):
+    """Ingest for NON-json-rpc mode: one-shot `GET /v1/receive/{number}`.
+
+    Returns a JSON array of messages and drains the server-side queue, so the
+    caller loops. Kept because it is the documented behaviour of the same path in
+    the other mode, and it is the manual drain an operator reaches for.
+    """
+    url = receive_url(account, api_url=api_url)
 
     def _open():  # pragma: no cover - live path
         import requests
-        resp = requests.get(f"{base}{EVENTS_PATH}", stream=True, timeout=timeout)
+        resp = requests.get(url, timeout=timeout)
         resp.raise_for_status()
-        return resp.iter_lines()
+        return [resp.text]
 
     return _open
 
@@ -533,7 +721,10 @@ def build_parser() -> argparse.ArgumentParser:
         prog="consumer.py", description="Signal chat pipeline: consume, query, draft.")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("run", help="consume the SSE stream forever (the Deployment)")
+    r = sub.add_parser(
+        "run", help="consume /v1/receive/{number} forever (the Deployment)")
+    r.add_argument("--account", default=ACCOUNT,
+                   help="the account number to receive for (default $SIGNAL_ACCOUNT)")
 
     q = sub.add_parser("conversations", help="list conversations, newest first")
     q.add_argument("--limit", type=int, default=25)
@@ -545,10 +736,12 @@ def build_parser() -> argparse.ArgumentParser:
     d = sub.add_parser("draft", help="compose an outbound draft (transmits NOTHING)")
     d.add_argument("--to", required=True)
     d.add_argument("--body", required=True)
-    d.add_argument("--from-number", default=os.environ.get("SIGNAL_ACCOUNT"))
+    d.add_argument("--from-number", default=ACCOUNT,
+                   help="the sending account (default $SIGNAL_ACCOUNT)")
 
     ls = sub.add_parser("drafts", help="list drafts and their send_state")
-    ls.add_argument("--state", choices=[STATE_PENDING, STATE_APPROVED, STATE_SENT])
+    ls.add_argument("--state", choices=[STATE_PENDING, STATE_APPROVED,
+                                        STATE_SENDING, STATE_SENT])
 
     a = sub.add_parser("approve", help="record Zach's clawgate approval for a draft")
     a.add_argument("draft_id", type=int)
@@ -565,9 +758,14 @@ def main(argv=None) -> int:  # pragma: no cover - thin CLI shell over tested uni
     with SignalDB() as db:
         db.ensure_schema()
         if args.cmd == "run":
+            account = args.account or ACCOUNT
+            if not account:
+                print("run: set SIGNAL_ACCOUNT (or --account) — bbernhard's ingest "
+                      "endpoint is per-account", file=sys.stderr)
+                return 2
             consumer = SignalConsumer(
                 db,
-                stream_factory=http_stream_factory(),
+                stream_factory=ws_stream_factory(account),
                 fetch_attachment=http_attachment_fetcher(),
                 minio=_open_minio(),
             )
