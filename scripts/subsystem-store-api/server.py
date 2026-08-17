@@ -105,11 +105,24 @@ guard. So the primary fix is HERE, and it is hermetic:
     without it (`EXIT_CONFIG`), for the same reason a short token does. A
     default would be a guess about somebody's cluster, and a guess that is
     wrong in the permissive direction is exactly the defect.
-  * If the peer is not in the allowlist the request is REFUSED —
-    `status=untrusted-peer`, the same uniform 401 as everything else. 🔴 It
-    does NOT fall back to keying on the peer address: that is the "one abuser
-    locks out the world" failure the section above rejects, and arriving at it
-    by way of a *security* check would be worse, not better.
+  * `resolve_client` is the whole rule, and it is the standard reverse-proxy
+    one: **trusted peer -> the header is the client; untrusted peer -> the TCP
+    PEER is the client and the header is not read at all.** The property that
+    matters is "a forged header must never name a THIRD PARTY", and bucketing
+    the forger under its own address satisfies it exactly — such a caller can
+    only lock out itself.
+  * 🔴 An untrusted peer is NOT REFUSED, and an earlier version of this branch
+    got that wrong. Refusing is stricter than the property needs and it broke
+    the phase-1 acceptance procedure outright: `kubectl port-forward` presents
+    peer `127.0.0.1`, the pod allowlists the node's Cilium internal address, so
+    every byte-identity run became a 401 — the phase-1 criterion, with no
+    documented way left to run it. It also turned one wrong address in one env
+    var into a total outage that `/healthz` hid. **Distrust is expressed by
+    ignoring what the caller claims, not by hanging up on them.**
+  * The audit line carries `peer=trusted|untrusted` as its OWN field, so
+    direct-to-pod access stays greppable without being spelled as an
+    authentication failure. `status=untrusted-peer` + `auth=fail` — the earlier
+    shape — put every port-forward into the Loki auth-fail alert.
   * `/healthz` is answered BEFORE any of this, so the kubelet probe — which
     comes from the node and carries no `CF-Connecting-IP` — is untouched. A
     readiness probe broken by a security guard is how the guard gets deleted.
@@ -195,6 +208,27 @@ CLIENT_IP_HEADER = "CF-Connecting-IP"
 # the TCP peer is one of the proxies the operator named. No default value: see
 # `load_trusted_proxies`.
 ENV_TRUSTED_PROXIES = "SUBSYSTEM_STORE_TRUSTED_PROXIES"
+
+# 🔴 A FLOOR ON HOW WIDE ONE ENTRY MAY BE, keyed by address family.
+#
+# Refusing only `/0` checks ONE ENTRY IN ISOLATION and is walkable two ways, both
+# measured: `0.0.0.0/1,128.0.0.0/1` parses clean and trusts every IPv4 peer, and
+# — the realistic one — a pod CIDR like `10.244.0.0/16` is accepted and hands the
+# client identity to EVERY POD IN THE CLUSTER, which is verbatim the attacker in
+# this module's own threat model.
+#
+# The audit that found it suggested evaluating the UNION of the entries. A floor
+# is the stronger rule and subsumes it: with /24 as the minimum, no set of
+# entries an operator would plausibly type can cover the space, and the check
+# stays local to one entry so the error can NAME the offending one. Two guards
+# remain rather than one because their diagnostics differ — `/0` is "you
+# disabled it", a wide prefix is "you meant a smaller range".
+#
+# The numbers: a /24 is 256 addresses, generous for a proxy tier; a v6 /64 is one
+# LAN segment, which is the smallest unit an operator is given. An operator who
+# genuinely needs wider lists several entries, which is a deliberate act rather
+# than a typo.
+MIN_TRUSTED_PREFIX = {4: 24, 6: 64}
 
 # §2b: "Rate-limit + lock out on repeated 401s". The defaults are HERE, in code,
 # so a deployment that sets no env still gets them; each is overridable.
@@ -406,12 +440,13 @@ def sole_header(headers: Any, name: str) -> str | None:
 def client_ip(headers: Any) -> str | None:
     """The client's address, or `None` — and `None` means REFUSE, not "unknown".
 
-    🔴 THIS FUNCTION ASSUMES THE PEER WAS ALREADY CHECKED. It parses a header,
+    🔴 THIS FUNCTION IS ONLY CALLED FOR A TRUSTED PEER. It parses a header,
     which is caller-supplied bytes; the thing that makes those bytes an identity
-    is `peer_is_trusted`, in `_identify_and_meter`, which runs BEFORE this and
-    refuses the request outright when the peer is not a named proxy. Calling
-    this on an unchecked peer reintroduces the whole phase-1.5b defect, so the
-    call site is the guard and there is exactly one.
+    is `peer_is_trusted`, and `resolve_client` is the ONE place that asks. For
+    an untrusted peer this function is not called at all — not called and its
+    answer discarded, but never reached — so a forged `CF-Connecting-IP` cannot
+    become a bucket key by any path. There is exactly one call site, and that is
+    the guard.
 
     🔴 `CF-Connecting-IP` ONLY. Cloudflare sets it on every proxied request and
     overwrites whatever the caller sent, which is what makes it trustworthy —
@@ -471,6 +506,15 @@ def trusted_network(item: Any) -> Any:
         raise ValueError(
             f"{ENV_TRUSTED_PROXIES}: {item!r} trusts every peer, which is the "
             f"defect this setting exists to close. Name the proxy's address"
+        )
+    floor = MIN_TRUSTED_PREFIX[network.version]
+    if network.prefixlen < floor:
+        raise ValueError(
+            f"{ENV_TRUSTED_PROXIES}: {item!r} is too broad — /{network.prefixlen} "
+            f"covers {network.num_addresses} peers; the floor is /{floor}. A "
+            f"trusted proxy is a host or a small tier, and a wide range here "
+            f"hands the client identity to everything inside it. List the "
+            f"individual addresses, or several narrower CIDRs"
         )
     return network
 
@@ -579,6 +623,59 @@ def peer_is_trusted(peer: Any, trusted: Sequence[Any]) -> bool:
         if peer in network:
             return True
     return False
+
+
+def resolve_client(
+    headers: Any, client_address: Any, trusted: Sequence[Any]
+) -> tuple[str | None, bool]:
+    """Decide WHICH address this request is bucketed under, and whether the peer
+    was a trusted proxy. `(None, trusted?)` means refuse.
+
+    🔴 THIS IS THE WHOLE OF THE PHASE-1.5b RULE, AND IT IS THE STANDARD
+    REVERSE-PROXY ONE:
+
+        peer IS trusted     -> the bucket is `CF-Connecting-IP` (fail closed if
+                               it is absent, unparseable or duplicated)
+        peer is NOT trusted -> the bucket is the PEER'S OWN ADDRESS, and the
+                               header is not read AT ALL
+
+    The security property is *a forged header must never name a THIRD PARTY*.
+    The second line satisfies it completely: a caller whose header is ignored
+    can only ever lock out **itself**, which is the definition of a rate limit
+    working. Whoever forges from an untrusted peer is charged for their own
+    traffic and nobody else's.
+
+    🔴 AN EARLIER VERSION REFUSED THE UNTRUSTED PEER OUTRIGHT (a uniform 401,
+    `status=untrusted-peer`). That is stricter than the property requires and it
+    was a deploy blocker, for two measured reasons:
+
+      * it broke the PHASE-1 ACCEPTANCE PROCEDURE. `kubectl port-forward`
+        presents peer `127.0.0.1` while the deployment allowlists the node's
+        Cilium internal address, so every request through the documented
+        byte-identity flow became `401` — and byte-identity is *the* phase-1
+        criterion, so there was no documented way left to run it.
+      * it turned a plausible config mistake (one wrong address in one env var)
+        into a TOTAL OUTAGE, with `/healthz` still answering — so the pod stayed
+        Ready and the alert pointed at credentials rather than at configuration.
+
+    Being refused is not the same as being distrusted. Distrust is expressed by
+    ignoring what the caller claims, which is what this does.
+
+    ⚠ `None` PEER (a `client_address` that is not an address at all) still
+    refuses: there is no bucket to charge, which is exactly the `no-client-ip`
+    condition, so it is reported as that rather than as a fourth vocabulary
+    item. Unreachable over a real TCP socket; reachable, and tested, here.
+
+    Both branches normalise through `rate_limit_key`, so one caller is one
+    bucket whichever door it came in by — the same aggregation rule, not a
+    second copy of it.
+    """
+    peer = peer_address(client_address)
+    if peer_is_trusted(peer, trusted):
+        return client_ip(headers), True
+    if peer is None:
+        return None, False
+    return str(rate_limit_key(peer)), False
 
 
 def rate_limit_key(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> Any:
@@ -903,10 +1000,12 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
     # Injected by `build_server`.
     store_root: str = DEFAULT_STORE
     expected_tokens: tuple[str, ...] = ()
-    # 🔴 EMPTY MEANS TRUST NOBODY, not "trust everybody". A subclass that never
-    # reaches `build_server` (and `build_server` refuses an empty set) inherits
-    # a server that answers 401 to everything — the safe direction. The
-    # dangerous default would be silent and would look like it worked.
+    # 🔴 EMPTY MEANS BELIEVE NOBODY'S HEADER, not "believe everybody's". A
+    # subclass that never reaches `build_server` (and `build_server` refuses an
+    # empty set) inherits a server that ignores `CF-Connecting-IP` from every
+    # peer and buckets every caller under its own address — the safe direction,
+    # because no caller can then name another. The dangerous default would be
+    # silent and would look like it worked.
     trusted_proxies: tuple[Any, ...] = ()
     limiter: RateLimiter | None = None
     audit: Callable[[str], None] = staticmethod(lambda line: print(line, flush=True))
@@ -916,6 +1015,9 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
     # request's audit line.
     _client_ip: str | None = None
     _token_fp: str | None = None
+    # `None` = not established yet (a request line too malformed to get that
+    # far). Rendered as `peer=-`, never silently as "trusted".
+    _peer_trusted: bool | None = None
 
     # --- plumbing ---------------------------------------------------------------
 
@@ -978,11 +1080,29 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         it is deleted. Nothing here is derived from `authed` any more — the
         fingerprint's presence IS the authentication result, so the two cannot
         disagree.
+
+        🔴 `peer=` IS ITS OWN FIELD, AND THAT IS THE POINT. Reaching the pod
+        without going through the gateway is worth detecting, but it is NOT an
+        authentication failure and must not be spelled as one — an earlier
+        version emitted it as `status=untrusted-peer` with `auth=fail`, which
+        put every port-forward into the Loki auth-fail alert and taught the
+        operator to ignore it. Fixing that at the emitter is the fix; fixing it
+        in the alert query would leave the next consumer to rediscover it.
+
+        `peer=untrusted` also tells the reader how to interpret `ip=`: trusted
+        means the field came from `CF-Connecting-IP`, untrusted means it is the
+        TCP peer and the header was never read.
         """
+        peer_state = (
+            "-"
+            if self._peer_trusted is None
+            else ("trusted" if self._peer_trusted else "untrusted")
+        )
         self.audit(
             "store-api audit "
             f"ts={datetime.now(timezone.utc).isoformat(timespec='seconds')} "
             f"ip={audit_field(self._client_ip or '-')} "
+            f"peer={peer_state} "
             f"method={audit_field(self.command, limit=16)} "
             f"path={audit_field(path)} "
             f"token={audit_field(self._token_fp or '-', limit=16)} "
@@ -1106,6 +1226,7 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         """
         self._client_ip = None
         self._token_fp = None
+        self._peer_trusted = None
         path = self._request_path()
         if path is None:
             return
@@ -1158,6 +1279,7 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         """
         self._client_ip = None
         self._token_fp = None
+        self._peer_trusted = None
         path = self._raw_path()
         if getattr(self, "headers", None) is None:
             # The request line itself was unparseable, so there is no header to
@@ -1230,6 +1352,7 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         except ValueError:
             self._client_ip = None
             self._token_fp = None
+            self._peer_trusted = None
             self._unauthorized()
             self._audit(self._raw_path(), 401, "malformed-target")
             return None
@@ -1241,31 +1364,10 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         enforced at one call site and not the other is the failure this whole
         file keeps finding: writes used to skip both checks entirely.
         """
-        # 🔴 THE PEER GATE COMES FIRST, BEFORE THE HEADER IS EVEN LOOKED AT.
-        # `CF-Connecting-IP` is caller-supplied bytes; what makes it an identity
-        # is that a proxy we trust overwrote it. Reading it from an untrusted
-        # peer and *then* deciding is the same bug with an extra step — the
-        # value would already have been used to pick a bucket.
-        #
-        # NOT COUNTED, for the same reason `no-client-ip` is not: charging the
-        # failure needs a bucket, and the only address on offer here is the
-        # peer's — keying the lockout on THAT is the "one abuser locks out the
-        # world" failure this design rejects. The bound on an untrusted peer is
-        # the connection close `_respond` performs on every non-200.
-        #
-        # ⚠ THE ORDERING IS RECORDED AS AN EQUIVALENT MUTANT, not left as an
-        # unexplained survivor. A sweep showed that moving `client_ip(...)`
-        # ABOVE this block changes no behaviour: `client_ip` is pure and total
-        # (garbage in, `None` out) and its result is discarded on the refusal
-        # path. The order is kept anyway — the day anything on that call
-        # acquires a side effect, "parsed the attacker's header before deciding
-        # whether to trust them" is not a sentence to be writing in a
-        # post-mortem.
-        peer = peer_address(getattr(self, "client_address", None))
-        if not peer_is_trusted(peer, self.trusted_proxies):
-            self._refuse(path, "untrusted-peer")
-            return False
-        ip = client_ip(self.headers)
+        ip, trusted = resolve_client(
+            self.headers, getattr(self, "client_address", None), self.trusted_proxies
+        )
+        self._peer_trusted = trusted
         if ip is None:
             # 🔴 FAIL CLOSED. The alternative — bucketing every unidentified
             # request under one shared key — is the failure the whole
@@ -1287,6 +1389,7 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
     def _handle(self) -> None:
         self._client_ip = None
         self._token_fp = None
+        self._peer_trusted = None
         path = self._request_path()
         if path is None:
             return
