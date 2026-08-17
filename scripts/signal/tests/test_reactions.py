@@ -1,6 +1,6 @@
 """🔧 #3 — reactions can arrive BEFORE their target, or target nothing we have.
 
-SSE ordering is not guaranteed and history is not backfilled, so a hard FK at
+Delivery ordering is not guaranteed and history is not backfilled, so a hard FK
 insert time silently drops reactions. `message_id` is therefore NULLable and
 resolved later; the partial index `idx_rx_unresolved` is what keeps the
 resolution sweep from scanning the whole table.

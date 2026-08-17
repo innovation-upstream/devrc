@@ -1,6 +1,6 @@
 """🔧 #4 — the outbound sync echo. The single most likely thing to be silently wrong.
 
-A message sent through the REST API comes BACK through the SSE stream as a sync
+A message sent through `/v2/send` comes BACK on the receive stream as a sync
 message from the account's own linked devices. `unique_message` catches that echo
 only if the send path recorded the SAME `(source_contact_id, message_timestamp)`
 the echo will carry — i.e. the SERVER-assigned timestamp, not a locally generated

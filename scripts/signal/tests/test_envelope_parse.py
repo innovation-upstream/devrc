@@ -178,7 +178,7 @@ def test_bbernhard_websocket_frame_shape_is_accepted():
 
     Read from upstream `src/api/api.go`: in json-rpc mode `/v1/receive/{number}`
     upgrades to a websocket and writes the signal-cli params object per message.
-    An earlier revision parsed SSE `data:` lines from a DIFFERENT server, so
+    An earlier revision parsed event-stream `data:` lines from another server, so
     nothing would ever have been ingested.
     """
     import json
@@ -291,7 +291,7 @@ def test_the_module_targets_the_bbernhard_route_table_only():
     """🔴 A ledger of the endpoints this module speaks, pinned to upstream's router.
 
     Upstream `src/main.go` registers exactly `v1.GET("/receive/:number")`,
-    `v1.GET("/attachments/:attachment")` and `v2.POST("/send")`. There is no SSE
+    `v1.GET("/attachments/:attachment")` and `v2.POST("/send")`. There is no
     endpoint and no `/api/v1/events` — that path belongs to AsamK's native
     daemon, a DIFFERENT server. This test fails if anyone reintroduces one.
     """
@@ -306,3 +306,42 @@ def test_the_module_targets_the_bbernhard_route_table_only():
     for foreign in ('"/api/v1/events"', "'/api/v1/events'", "text/event-stream",
                     "EVENTS_PATH", "iter_lines("):
         assert foreign not in src, f"{foreign!r} belongs to a different server"
+
+
+def test_no_stale_event_stream_WORDING_survives_anywhere_in_the_package():
+    """🔴 The transport is documented in prose, and prose drifts silently.
+
+    The guard above bans the foreign IDENTIFIERS, which is why eleven stale "SSE"
+    mentions survived a purge and drifted for a whole round — including one in
+    `_signal_db.py` that told a reader the device-sync echo "carries back through
+    the SSE stream", a factual misstatement about the deployed transport sitting
+    in the same file as the dedupe design that depends on it.
+
+    Exactly ONE mention is allowed: the line in `consumer.py` that exists to say
+    the endpoint does NOT exist. Anything else is drift.
+    """
+    package = Path(consumer.__file__).parent
+    this_file = Path(__file__).name
+    offenders = []
+    for path in sorted(package.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        if path.name == this_file:
+            continue          # the guard must quote the token it bans
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if "SSE" not in line:
+                continue
+            if path.name == "consumer.py" and "no SSE endpoint anywhere" in line:
+                continue                      # the disclaimer, deliberately kept
+            offenders.append(f"{path.name}:{lineno}: {line.strip()[:80]}")
+    assert not offenders, "stale event-stream wording:\n" + "\n".join(offenders)
+
+
+def test_the_stale_wording_guard_can_actually_fire(tmp_path):
+    """POSITIVE CONTROL: the scan above is not passing because it reads nothing."""
+    (tmp_path / "drifted.py").write_text(
+        '"""consumes the SSE stream"""\n', encoding="utf-8")
+    hits = [line for path in tmp_path.rglob("*.py")
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if "SSE" in line]
+    assert len(hits) == 1

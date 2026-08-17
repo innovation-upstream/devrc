@@ -697,6 +697,151 @@ def test_reconcile_needs_the_operator_token(db, monkeypatch):
     assert _signal_db.APPROVAL_TOKEN_ENV in str(exc.value)
 
 
+def test_an_in_flight_sender_cannot_stamp_over_an_OPERATORS_reconcile(db):
+    """🔴 F1 — the terminal update needs the same predicate as the claim.
+
+    The operator reconciles a draft they believe was lost; the original sender
+    then completes. With an unconditional `WHERE id = %s` the sender silently
+    overwrote the operator's decision with its own timestamp and nobody read the
+    rowcount. Now the sender is TOLD it lost.
+    """
+    draft = _pending(db, body="whose timestamp wins")
+    db.approve_draft(draft["id"], approval_ref="cg-inflight")
+    operator_ts = 1723900000111
+    api_ts = 1723900000999
+
+    def transmit(auth, *, recipient, body, number):
+        # While this send is in flight, the operator reconciles it as sent.
+        db.reconcile_send(draft["id"], outcome=_signal_db.RECONCILE_SENT,
+                          server_timestamp=str(operator_ts))
+        return {"timestamp": str(api_ts)}
+
+    with pytest.raises(SendGateError) as exc:
+        db.send_approved(draft["id"], transmit=transmit)
+    assert "complete the send" in str(exc.value)
+
+    row = db.get_draft(draft["id"])
+    assert row["send_state"] == _signal_db.STATE_SENT
+    assert row["message_timestamp"] == operator_ts       # the operator's, not the API's
+
+
+def test_a_not_sent_reconcile_mid_flight_cannot_become_a_SECOND_transmit(db):
+    """🔴 F1 — the resend this round's own escape hatch would otherwise open.
+
+    `_claim_for_sending` promises "never a duplicate message". This round added
+    the supported path OUT of `sending`; without a predicate on the terminal
+    update, a `--not-sent` reconcile landing mid-flight could be re-approved and
+    the same body transmitted twice.
+    """
+    draft = _pending(db, body="exactly one on the wire")
+    db.approve_draft(draft["id"], approval_ref="cg-midflight")
+    poster = Poster()
+
+    def transmit(auth, *, recipient, body, number):
+        poster(f"http://x{consumer.SEND_PATH}", json={"message": body})
+        db.reconcile_send(draft["id"], outcome=_signal_db.RECONCILE_NOT_SENT,
+                          note="looked empty at the time")
+        return {"timestamp": str(SERVER_TS)}
+
+    with pytest.raises(SendGateError):
+        db.send_approved(draft["id"], transmit=transmit)
+
+    # Re-approved and sent again — the SECOND transmit is the hazard, so count it.
+    db.approve_draft(draft["id"], approval_ref="cg-midflight-2")
+    db.send_approved(draft["id"],
+                     transmit=lambda a, **kw: consumer.transmit_approved(
+                         a, poster=poster, **kw))
+    assert len(poster.calls) == 2, (
+        "one deliberate re-send after an explicit human decision is expected; "
+        "what must never happen is the FIRST attempt landing twice")
+    assert db.get_draft(draft["id"])["send_state"] == _signal_db.STATE_SENT
+
+
+def test_reconcile_refuses_when_the_row_moved_under_it(db):
+    """A second reconcile is refused — by the PYTHON precondition, note.
+
+    Labelled honestly: this exercises the read-then-check, not the SQL predicate.
+    A mutation sweep proved the difference — stripping `AND send_state = …` from
+    both reconcile writes left this test green, because the Python check
+    short-circuits first. The test below is the one that reaches the predicate.
+    """
+    draft = _stranded(db)
+    db.reconcile_send(draft["id"], outcome=_signal_db.RECONCILE_NOT_SENT)
+    with pytest.raises(SendGateError):
+        db.reconcile_send(draft["id"], outcome=_signal_db.RECONCILE_NOT_SENT)
+
+
+@pytest.mark.parametrize("outcome", [_signal_db.RECONCILE_SENT,
+                                     _signal_db.RECONCILE_NOT_SENT])
+def test_reconcile_refuses_when_the_row_MOVES_between_the_read_and_the_write(
+        db, monkeypatch, outcome):
+    """🔴 The TOCTOU window the SQL predicate exists for, made reachable.
+
+    `reconcile_send` reads the row, checks it in Python, then writes. Everything
+    interesting happens in the gap: another actor moving the row there is exactly
+    what the predicate catches and what the Python check cannot. Simulated by
+    making the READ report `sending` while the real row has already moved on —
+    with the predicate the write matches nothing and the caller is told; without
+    it the write lands and the loser silently overwrites the winner.
+    """
+    draft = _pending(db)                       # the REAL row is `pending`
+    stale = dict(draft, send_state=_signal_db.STATE_SENDING)
+    monkeypatch.setattr(type(db), "_draft_or_raise", lambda self, i: stale)
+
+    with pytest.raises(SendGateError) as exc:
+        db.reconcile_send(draft["id"], outcome=outcome,
+                          server_timestamp="1723900000333")
+    assert "no longer 'sending'" in str(exc.value)
+    # The row is untouched: the loser wrote nothing at all.
+    assert db.get_draft(draft["id"])["send_state"] == _signal_db.STATE_PENDING
+
+
+def test_reconcile_without_a_note_PRESERVES_the_approval_record(db):
+    """🔴 F2 — the audit record D3 stakes its claim on.
+
+    `--not-sent` used a bare `approval_ref = %s` while `--sent` nine lines up
+    used `COALESCE`, so reconciling without `--note` NULLed the reference to the
+    approval the attempt actually rode on — and the test only ever exercised the
+    with-`--note` case. `approve_draft`'s docstring stakes D3 on "a recorded
+    approval decision that a human can audit after the fact".
+    """
+    draft = _pending(db)
+    db.approve_draft(draft["id"], approval_ref="clawgate-task-4242")
+
+    def die(auth, **kw):
+        raise ConnectionResetError("dropped")
+
+    with pytest.raises(ConnectionResetError):
+        db.send_approved(draft["id"], transmit=die)
+
+    row = db.reconcile_send(draft["id"], outcome=_signal_db.RECONCILE_NOT_SENT)
+    assert row["approval_ref"] == "clawgate-task-4242"
+
+
+def test_reconcile_sent_without_a_note_also_preserves_it(db):
+    """Both branches, so the two cannot drift apart again."""
+    draft = _pending(db)
+    db.approve_draft(draft["id"], approval_ref="clawgate-task-5150")
+
+    def die(auth, **kw):
+        raise ConnectionResetError("dropped")
+
+    with pytest.raises(ConnectionResetError):
+        db.send_approved(draft["id"], transmit=die)
+
+    row = db.reconcile_send(draft["id"], outcome=_signal_db.RECONCILE_SENT,
+                            server_timestamp="1723900000222")
+    assert row["approval_ref"] == "clawgate-task-5150"
+
+
+def test_a_note_ADDS_to_the_record_rather_than_replacing_it(db):
+    """POSITIVE CONTROL: the preservation above is not "the note is ignored"."""
+    draft = _stranded(db)
+    row = db.reconcile_send(draft["id"], outcome=_signal_db.RECONCILE_NOT_SENT,
+                            note="checked the thread, nothing there")
+    assert row["approval_ref"] == "checked the thread, nothing there"
+
+
 def test_reconcile_rejects_an_unknown_outcome(db):
     draft = _stranded(db)
     with pytest.raises(ValueError):

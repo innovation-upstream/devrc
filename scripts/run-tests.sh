@@ -834,25 +834,26 @@ TARGET_FLOORS=(
   "scripts/session-analysis/tests|367"
   "scripts/session-analysis/session_insight/tests|55"
   "scripts/mail-actions/tests|129"
-  # 2026-08-16, the Signal chat pipeline arrives as a NEW target: 376 collected
+  # 2026-08-16, the Signal chat pipeline arrives as a NEW target: 387 collected
   # (10 suites). MEASURED, never computed — the entry was pinned at 1 so the
   # AUTHORITATIVE gate would print its own replacement, and `nix build
   # .#checks.x86_64-linux.pytests` did:
-  #   Raise the TARGET_FLOORS entry to "scripts/signal/tests|358"
-  # then the re-run with 358 in place read
-  #   PASS  scripts/signal/tests  (collected=376 passed=376 skipped=0 floor=358)
-  # Four measurements across three audit rounds, each re-read rather than
-  # adjusted by hand: 262/249 (first pass), 266/253 (pyright triage), 340/323
-  # (the bbernhard route table + transaction recovery + the `sending` claim +
-  # contact identity + MinIO keys + remote delete + conversation grouping), and
+  #   Raise the TARGET_FLOORS entry to "scripts/signal/tests|368"
+  # then the re-run with 368 in place read
+  #   PASS  scripts/signal/tests  (collected=387 passed=387 skipped=0 floor=368)
+  # Five measurements across four audit rounds, each RE-READ from the gate rather
+  # than adjusted by hand: 262/249 (first pass), 266/253 (pyright triage),
+  # 340/323 (the bbernhard route table, transaction recovery, the `sending`
+  # claim, contact identity, MinIO keys, remote delete, conversation grouping),
   # 376/358 (the commit-retry drop, the websocket import site, the atomic claim,
-  # the reconcile path, the own-device retraction).
+  # the reconcile path, the own-device retraction), and 387/368 (guarded state
+  # transitions, the preserved approval record, the clean CLI refusal).
   # ZERO new skips, so EXPECTED_SKIPS is untouched, and GUARD 7 reported
   # `intercepted=0 systemctl-reads=0` for this target — the evidence the suite is
   # hermetic rather than merely asserted to be. If this line conflicts with a
   # sibling branch, re-run the gate on the MERGED tree and copy what it prints;
   # do not reconcile the two sides by hand.
-  "scripts/signal/tests|358"
+  "scripts/signal/tests|368"
   "scripts/initiatives/tests|745"
   "scripts/repo-cos/tests|315"
   "scripts/task-spec-drafter/tests|135"

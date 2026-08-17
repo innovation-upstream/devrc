@@ -352,12 +352,12 @@ def parse_envelope(envelope: dict) -> ParsedEvent:
 
 
 def parse_receive_frame(payload) -> dict:
-    """One websocket frame (or one REST array element) → the envelope inside it.
+    """One received frame → the envelope inside it.
 
     Accepts, deliberately, the three shapes this endpoint can hand back:
       * bbernhard's json-rpc websocket frame — `{"account": …, "envelope": {…}}`;
       * a signal-cli JSON-RPC notification — `{"method":"receive","params":{…}}`;
-      * an already-decoded dict (the REST-array path decodes once, up front).
+      * an already-decoded dict, which `iter_frames` passes straight through.
     """
     if isinstance(payload, (bytes, bytearray)):
         payload = payload.decode("utf-8", "replace")
@@ -856,12 +856,21 @@ def main(argv=None) -> int:  # pragma: no cover - thin CLI shell over tested uni
                 print(f"refused: {exc}", file=sys.stderr)
                 return 3
         elif args.cmd == "reconcile":
+            # argparse cannot express "--timestamp is required WITH --sent", and
+            # `_server_timestamp` raises a plain ValueError — so without this the
+            # refusal arrived as a traceback and an exit code nobody scripts on.
+            if args.sent and not args.timestamp:
+                print("refused: --sent needs --timestamp, the SERVER timestamp "
+                      "read from the Signal conversation. Without it the sync "
+                      "echo cannot be deduped (🔧 #4), and guessing is worse "
+                      "than refusing.", file=sys.stderr)
+                return 3
             try:
                 print(json.dumps(db.reconcile_send(
                     args.draft_id,
                     outcome=RECONCILE_SENT if args.sent else RECONCILE_NOT_SENT,
                     server_timestamp=args.timestamp, note=args.note), default=str))
-            except SendGateError as exc:
+            except (SendGateError, ValueError) as exc:
                 print(f"refused: {exc}", file=sys.stderr)
                 return 3
     return 0

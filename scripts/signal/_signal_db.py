@@ -115,13 +115,13 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
 
     # 🔧 #1  `source_contact_id NOT NULL`. A UNIQUE over a NULLable column does
     # NOT dedupe in Postgres (NULLs compare distinct), so an envelope from an
-    # unresolved sender would insert a fresh row on EVERY SSE redelivery.
+    # unresolved sender would insert a fresh row on EVERY redelivery.
     # Unknown senders get a deterministic placeholder contact instead
     # (`placeholder_uuid()`), which is what makes `unique_message` bite.
     #
     # 🔧 #4 (behavioural half) lives here too: `message_timestamp` for an
     # outbound message MUST be the SERVER-assigned timestamp, because that is
-    # what the device-sync echo carries back through the SSE stream. Un-sent
+    # what the device-sync echo carries back on the receive stream. Un-sent
     # drafts hold a NEGATIVE provisional timestamp, which can never collide with
     # a real (positive, epoch-ms) server timestamp.
     """
@@ -148,7 +148,7 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     )
     """,
 
-    # 🔧 #2  Without `unique_attachment`, an SSE redelivery of the same message
+    # 🔧 #2  Without `unique_attachment`, a redelivery of the same message
     # duplicates every attachment row.
     """
     CREATE TABLE IF NOT EXISTS signal.attachments (
@@ -168,7 +168,7 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     """,
 
     # 🔧 #3  `message_id` is NULLable and resolved LATER: a reaction can arrive
-    # BEFORE its target message (out-of-order SSE), or target a message we never
+    # BEFORE its target message (delivery is not ordered), or target one we never
     # received at all. A hard FK at insert time drops those on the floor.
     """
     CREATE TABLE IF NOT EXISTS signal.reactions (
@@ -767,7 +767,7 @@ class SignalDB:
     def upsert_reaction(self, rx: dict) -> int:
         """Store one reaction, resolving its target message if we already have it.
 
-        🔧 #3 — the target may not exist yet (out-of-order SSE) or may never
+        🔧 #3 — the target may not exist yet (delivery is not ordered) or may never
         arrive. `message_id` stays NULL in that case and is filled in later by
         `resolve_pending_reactions()`; the reaction is RETAINED either way.
         """
@@ -1089,14 +1089,45 @@ class SignalDB:
                 f"for manual reconciliation — see `reconcile`"
             )
         server_ts = _server_timestamp(result)
-        with self._c.cursor() as cur:
-            cur.execute(
-                "UPDATE signal.messages SET message_timestamp = %s, send_state = %s, "
-                "message_type = 'message' WHERE id = %s",
-                (server_ts, STATE_SENT, draft_id),
-            )
-        self._c.commit()
+        # The terminal update carries the SAME state predicate as the claim. This
+        # sender owns the row only while it is still `sending`; if an operator
+        # reconciled it in the meantime, stamping over their decision silently is
+        # the wrong answer — the sender is the one that should be told.
+        self._transition(
+            draft_id,
+            "UPDATE signal.messages SET message_timestamp = %s, send_state = %s, "
+            "message_type = 'message' WHERE id = %s AND send_state = %s",
+            (server_ts, STATE_SENT, draft_id, STATE_SENDING),
+            expected=STATE_SENDING,
+            what="complete the send",
+        )
         return self._draft_or_raise(draft_id)
+
+    def _transition(self, draft_id: int, sql: str, params: tuple, *,
+                    expected: str, what: str) -> None:
+        """Run a guarded `send_state` transition and REFUSE if it did not apply.
+
+        🔴 Every write that moves `send_state` names the state it expects and
+        reads the rowcount, so a caller that lost the row is told instead of
+        overwriting whatever the winner decided. Without this an in-flight sender
+        completing after an operator reconciled would silently stamp its own
+        timestamp over the operator's, and a `--not-sent` reconcile landing
+        mid-flight could be re-approved into a SECOND transmit of the same body.
+        `_claim_for_sending`'s promise of "never a duplicate message" depends on
+        every one of these, not just on the claim.
+        """
+        with self._c.cursor() as cur:
+            cur.execute(sql, params)
+            changed = cur.rowcount
+        self._c.commit()
+        if changed != 1:
+            current = self.get_draft(draft_id)
+            raise SendGateError(
+                f"could not {what} for draft {draft_id!r}: it is no longer "
+                f"{expected!r} (now "
+                f"{(current or {}).get('send_state')!r}) — someone else moved it "
+                f"first. D3 approval gate."
+            )
 
     def _claim_for_sending(self, draft_id: int) -> None:
         """ATOMICALLY move an approved draft to `sending`, and COMMIT the claim.
@@ -1167,21 +1198,31 @@ class SignalDB:
             )
         if outcome == RECONCILE_SENT:
             server_ts = _server_timestamp({"timestamp": server_timestamp})
-            with self._c.cursor() as cur:
-                cur.execute(
-                    "UPDATE signal.messages SET message_timestamp = %s, "
-                    "send_state = %s, message_type = 'message', "
-                    "approval_ref = COALESCE(%s, approval_ref) WHERE id = %s",
-                    (server_ts, STATE_SENT, note, draft_id),
-                )
+            self._transition(
+                draft_id,
+                "UPDATE signal.messages SET message_timestamp = %s, "
+                "send_state = %s, message_type = 'message', "
+                "approval_ref = COALESCE(%s, approval_ref) "
+                "WHERE id = %s AND send_state = %s",
+                (server_ts, STATE_SENT, note, draft_id, STATE_SENDING),
+                expected=STATE_SENDING,
+                what="reconcile as sent",
+            )
         else:
-            with self._c.cursor() as cur:
-                cur.execute(
-                    "UPDATE signal.messages SET send_state = %s, "
-                    "approval_ref = %s WHERE id = %s",
-                    (STATE_PENDING, note, draft_id),
-                )
-        self._c.commit()
+            # COALESCE in BOTH branches. A bare `approval_ref = %s` here erased
+            # the recorded approval whenever the operator passed no `--note` —
+            # deleting the audit record of the very approval the attempt rode on,
+            # which is the thing `approve_draft`'s docstring stakes D3 on. A note
+            # ADDS to the record; it never replaces it.
+            self._transition(
+                draft_id,
+                "UPDATE signal.messages SET send_state = %s, "
+                "approval_ref = COALESCE(%s, approval_ref) "
+                "WHERE id = %s AND send_state = %s",
+                (STATE_PENDING, note, draft_id, STATE_SENDING),
+                expected=STATE_SENDING,
+                what="reconcile as not-sent",
+            )
         return self._draft_or_raise(draft_id)
 
     def account_number(self, draft_id: int) -> str:

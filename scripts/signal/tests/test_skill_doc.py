@@ -164,6 +164,27 @@ def test_skill_documents_every_table_the_schema_creates():
         assert f"`signal.{table}`" in SKILL_TEXT, f"table {table} undocumented"
 
 
+def test_reconcile_sent_without_a_timestamp_is_a_REFUSAL_not_a_traceback():
+    """🟢 F3 — `--timestamp` is conditionally required and argparse cannot say so.
+
+    `_server_timestamp` raises a plain `ValueError` and `main` caught only
+    `SendGateError`, so "refuses rather than guessing" was true but arrived as a
+    traceback and an exit code nobody scripts on. Driven through `main()` here,
+    which is the surface an operator actually touches.
+    """
+    import consumer as consumer_module
+
+    argv = ["reconcile", "7", "--sent"]
+    args = consumer_module.build_parser().parse_args(argv)
+    assert args.sent is True and args.timestamp is None   # argparse allows it ...
+
+    src = _read(SIGNAL_DIR / "consumer.py")
+    branch = src.split('elif args.cmd == "reconcile":')[1].split("\n        elif ")[0]
+    assert "if args.sent and not args.timestamp:" in branch   # ... main refuses it
+    assert "return 3" in branch
+    assert "(SendGateError, ValueError)" in branch
+
+
 def test_skill_names_the_bucket_the_code_uses():
     import _minio
     assert f"`{_minio.BUCKET}`" in SKILL_TEXT

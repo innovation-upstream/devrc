@@ -2,7 +2,7 @@
 
 The four hazards from the proposal, each measured rather than asserted about:
 
-* SSE disconnect → reconnect WITH redelivery: nothing lost, nothing duplicated;
+* a disconnect → reconnect WITH redelivery: nothing lost, nothing duplicated;
 * a malformed event: skipped and counted, the stream keeps going;
 * Postgres briefly unavailable: retried, the event is not dropped;
 * an attachment fetch failing: the MESSAGE row still stands.
@@ -32,7 +32,7 @@ class Streams:
     """A stream_factory that hands out a scripted sequence of connections.
 
     Each connection is a list of lines; a `RuntimeError` inside the list is
-    RAISED mid-iteration, which is what an SSE disconnect looks like from here.
+    RAISED mid-iteration, which is what a dropped websocket looks like here.
     """
 
     def __init__(self, *connections):

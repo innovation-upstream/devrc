@@ -1,6 +1,6 @@
-"""🔧 #1 + 🔧 #2 — SSE redelivery must be a no-op, including for unknown senders.
+"""🔧 #1 + 🔧 #2 — redelivery must be a no-op, including for unknown senders.
 
-The SSE stream redelivers on every reconnect, so "the same envelope twice" is the
+The receive stream redelivers on every reconnect, so "the same envelope twice" is
 NORMAL case, not an edge case. Three claims, each behavioural against the sqlite
 substrate rather than asserted about the SQL text:
 
