@@ -4391,7 +4391,7 @@ def test_the_caveats_are_printed_in_the_table_UNCONDITIONALLY(
     assert "caveat[fuzzyclaw_scope]:" in capsys.readouterr().out
 
 
-def test_the_caveat_footer_is_two_lines_and_does_not_touch_the_row_table():
+def test_the_caveat_footer_is_one_line_per_CAVEAT_pinned_both_ways():
     """Compactness is part of the requirement — a caveat that bloats the table
     gets deleted by the next person.
 
@@ -4427,6 +4427,15 @@ def test_the_caveat_footer_is_two_lines_and_does_not_touch_the_row_table():
 # 🔴 EVERY STRING IS SYNTHETIC. This repo is PUBLIC and the real panes hold
 # client work; the SHAPES are copied, the words are invented, and the values
 # are pairwise distinct so a test cannot pass by matching the wrong row.
+#
+# 🔴 THAT CLAIM WAS FALSE ONCE, AND SAYING IT LOUDER IS NOT THE FIX. Four REAL
+# operator-typed drafts were quoted verbatim in
+# `reference/waiting-signal.md` and re-used as fixtures below, under this very
+# header. The route they took is mechanical — a string that lands in the doc
+# recording the dogfood AND in the test reproducing it — so that route is what
+# is now checked, by `test_no_FIXTURE_DRAFT_string_appears_in_a_shipped_doc`.
+# NEVER PASTE A CAPTURED DRAFT INTO A COMMITTED FILE: report counts, lengths and
+# shapes instead.
 # =========================================================================== #
 _RULE = "─" * 60
 CAP_NONCE = "deadbeefcafe1234"
@@ -6734,12 +6743,23 @@ def test_a_CROSS_RUNTIME_conflict_names_the_runtimes_in_the_TABLE():
 def cluster_row(status="busy", **kw):
     """A row shaped the way spec §4 says a clawgate dispatch will be shaped:
     the tmux-only fields null, `claude` null because there is no pane whose
-    command could be read, `kind` the discriminant that says so."""
+    command could be read, `kind` the discriminant that says so.
+
+    🔴 IT SETS NEITHER `waiting_status` NOR `unsent_prompt_status`, AND THAT
+    SYMMETRY IS LOAD-BEARING. It used to set `waiting_status="not_tmux"` while
+    leaving `unsent_prompt_status` absent, and that asymmetry hid a real crash
+    for a whole PR: `_unsent_rollup` grew an `or "none"` coercion whose source
+    comment correctly generalised the diagnosis to "a row built anywhere ELSE
+    need not set the field", and `_waiting_rollup` — which has the identical
+    histogram over the identical class of row — was left uncoerced. No fixture
+    could see it, because this one always handed waiting a string. A row built
+    outside `fold_windows` carries NEITHER field, so this one carries neither.
+    """
     row = dict(kind="cluster", host=None, session=None, window_index=None,
                window_id=None, claude=None, busy=None, status=status,
                age_secs=42.0, age_source="clawgate", runtime="clawgate",
                claude_session_id=None, task="a wedged dispatch",
-               waiting_probable=None, waiting_status="not_tmux",
+               waiting_probable=None,
                waiting_signals=None, path="", command="", panes=0,
                label="cg", label_source="none", hotkey=None, codename=None,
                window_name="", pane_id=None, ledger=None, fuzzyclaw=None)
@@ -7621,7 +7641,11 @@ def test_the_kind_scope_caveat_MATCHES_what_the_code_actually_produces():
 # the new signal is published BESIDE `waiting` and never inside it. The first
 # test below is the guard on exactly that.
 #
-# Every fixture here is SYNTHETIC — this repo is PUBLIC.
+# Every fixture here is SYNTHETIC — this repo is PUBLIC. 🔴 Three of them were
+# NOT, for the length of this PR: they were real captured drafts, copied out of
+# `reference/waiting-signal.md` where the dogfood had quoted them verbatim. §C.4
+# below turns this sentence from an assertion into a check, and states the rule
+# it protects — NEVER PASTE A CAPTURED DRAFT INTO A COMMITTED FILE.
 # =========================================================================== #
 
 # 🔴 MEASURED AT THE BASE SHA (56c0a72), BEFORE `unsent_prompt` EXISTED, and
@@ -7792,9 +7816,9 @@ PANE_SHOWING_ANOTHER_TRANSCRIPT = _pane(
     "",
     "● Here is what that session has on screen:",
     "",
-    "    ❯ its been a few days, check if a fix released",
-    "    ❯ check the renovate run",
-    "    ❯ hold 312 for review",
+    "    ❯ been a couple of days, see whether the patch shipped",
+    "    ❯ look at the nightly job",
+    "    ❯ park 907 until review",
     "",
     "  That is the end of the captured region.",
     "",
@@ -7825,10 +7849,84 @@ PANE_TWO_LINE_DRAFT = _pane(
     "● Ready when you are.",
     "",
     _RULE,
-    "❯ dig into what drove",
-    "  the redis node squeeze",
+    "❯ work out what caused",
+    "  the queue backlog",
     _RULE,
     "  ctx: 12%",
+)
+
+# 🔴 THE BOUNDARY ITSELF, AND THE ONLY VALUE THAT MEASURES IT. `_input_box_span`
+# accepts `rules[-1] - rules[-2] <= 3`. The two fixtures above straddle it at 3
+# (in) and 5 (out), so `<= 3` and `<= 4` agree on BOTH of them — the mutant
+# survived a fully green suite. Here the rules are exactly 4 apart: the one
+# value where the two constants disagree.
+PANE_THREE_LINE_DRAFT = _pane(
+    "● Ready when you are.",
+    "",
+    _RULE,
+    "❯ first line of the draft",
+    "  second line of the draft",
+    "  third line of the draft",
+    _RULE,
+    "  ctx: 12%",
+)
+
+# 🔴 A MODAL DRAWN WITH **TWO** RULES. `PANE_MENU` models the shape seen live —
+# one rule — which `_input_box_span` rejects outright, so the two-rule variant
+# was never exercised: its `❯ 1. …` sits INSIDE a valid box pair and read as a
+# parked draft whose text was the option label. Not observed live (both live
+# `selection_menu` panes reported `no_input_box`), which is why it is a fixture
+# and not a bug report.
+PANE_MODAL_TWO_RULES = _pane(
+    "● I can take either route here.",
+    "",
+    "✻ Baked for 9m 41s",
+    "",
+    _RULE,
+    "❯ 1. Resume from summary (recommended)",
+    "  2. Resume the full session as-is",
+    _RULE,
+    "  Enter to confirm · Esc to cancel",
+)
+
+# 🔴 THE HARDEST VERSION OF THE "ANOTHER SESSION'S TRANSCRIPT" CLAIM.
+# `PANE_SHOWING_ANOTHER_TRANSCRIPT` carries five stray `❯` lines but no stray
+# box RULES, so it cannot see `_input_box_span` reading the wrong pair: swapping
+# `rules[-2], rules[-1]` for `rules[0], rules[1]` survived it. Here the tailed
+# session's own box is rendered too, so the capture holds FOUR rules and only
+# the LAST pair is this pane's own box.
+PANE_TAILING_A_RENDERED_BOX = _pane(
+    "❯ show me that other window",
+    "",
+    "● That session's screen, verbatim:",
+    "",
+    "    " + _RULE,
+    "    ❯ the other window's own parked draft",
+    "    " + _RULE,
+    "    ctx: 71%",
+    "",
+    "  That is the end of the captured region.",
+    "",
+    "✻ Baked for 3m 40s",
+    "",
+    _RULE,
+    "❯ ",
+    _RULE,
+    "  ctx: 44%",
+)
+
+# A located box whose FIRST interior line is chrome and whose SECOND is the
+# input line. `_PROMPT_MARK_RE.match(interior[0])` -> `any(...)` survived every
+# fixture, because the only box-we-cannot-read fixture has a ONE-line interior
+# and `any` and `match` agree on a single line.
+PANE_PROMPT_ON_THE_SECOND_INTERIOR_LINE = _pane(
+    "● done",
+    "",
+    _RULE,
+    "  some other chrome",
+    "❯ typed after the chrome",
+    _RULE,
+    "ctx: 9%",
 )
 
 
@@ -7905,7 +8003,7 @@ def test_the_detector_returns_the_TEXT_so_an_operator_can_triage():
     assert sm.detect_unsent_prompt(PANE_TYPED_AT_PROMPT)["text"] == \
         "then open the PR"
     assert sm.detect_unsent_prompt(PANE_TWO_LINE_DRAFT)["text"] == \
-        "dig into what drove the redis node squeeze"
+        "work out what caused the queue backlog"
 
 
 def test_a_MODAL_pane_is_no_input_box_and_NOT_a_measured_empty_draft():
@@ -7938,6 +8036,115 @@ def test_a_draft_TALLER_than_the_box_is_UNMEASURED_never_empty():
         "status": "no_input_box", "text": None}
     assert sm.detect_unsent_prompt(PANE_TWO_LINE_DRAFT)["status"] == "ok"
     assert sm.detect_unsent_prompt(PANE_TWO_LINE_DRAFT)["text"]
+
+
+def test_the_box_HEIGHT_boundary_is_pinned_AT_FOUR_the_only_value_that_moves():
+    """🔴 ONE MEASUREMENT IS NOT A CLAIM ABOUT A THRESHOLD, and this threshold
+    had two measurements that could not see it. `_input_box_span` accepts
+    `rules[-1] - rules[-2] <= 3`; the existing pair measures 3 (accepted) and 5
+    (rejected), and `<= 4` gives the SAME answer on both — so the mutant
+    survived 553 green tests.
+
+    Four is the boundary. It is pinned at BOTH consumers of the constant,
+    because the same span now decides where `last_assistant_line` cuts: a future
+    one-off edit here would silently retune `waiting_probable` too, and a test
+    that watched only the draft would not notice.
+    """
+    lines = PANE_THREE_LINE_DRAFT.splitlines()
+    rules = [i for i, l in enumerate(lines) if sm._RULE_RE.match(l)]
+    # INSTRUMENT: the fixture really is the boundary, or this proves nothing
+    assert len(rules) == 2 and rules[1] - rules[0] == 4, rules
+
+    assert sm._input_box_span(lines) is None
+    assert sm.detect_unsent_prompt(PANE_THREE_LINE_DRAFT) == {
+        "status": "no_input_box", "text": None}
+    # ...and the OTHER consumer moves with it. With no span the cut falls at the
+    # bottom rule, so the transcript still ends inside the unrecognised box;
+    # under `<= 4` the cut moves to the TOP rule and this becomes the assistant
+    # sentence above it. Two different strings, one constant.
+    assert sm.last_assistant_line(PANE_THREE_LINE_DRAFT) == \
+        "  third line of the draft"
+    # the three points, so the claim carries its own scope: 3 in, 4 out, 5 out
+    assert sm._input_box_span(PANE_TWO_LINE_DRAFT.splitlines()) is not None
+    assert sm._input_box_span(PANE_TALL_DRAFT.splitlines()) is None
+
+
+def test_a_MODAL_drawn_with_TWO_rules_is_still_no_input_box_not_a_draft():
+    """🔴 `❯ 1. Resume …` IS A MENU'S SELECTED OPTION, NOT TYPED WORK, and
+    `_PROMPT_MARK_RE` cannot tell them apart — a menu row opens with the same
+    marker. The live modal is drawn with ONE rule, which `_input_box_span`
+    rejects for free; a two-rule variant puts the option INSIDE a valid box pair
+    and it was read as a parked draft whose text was the option label.
+
+    Not observed live — both live `selection_menu` panes reported
+    `no_input_box`, as do bordered `│ ❯ …` modals — so this is a fixture for a
+    shape the repo modelled only in its easy form.
+
+    KILLS: dropping the menu guard; keying it on the selected marker ALONE (a
+    lone `❯ 1.` is ordinary typing and must stay a draft).
+    """
+    # INSTRUMENT: it really is a box pair, i.e. the span check does NOT already
+    # answer this — otherwise the guard below is unreachable and untested.
+    assert sm._input_box_span(PANE_MODAL_TWO_RULES.splitlines()) is not None
+    assert sm.detect_unsent_prompt(PANE_MODAL_TWO_RULES) == {
+        "status": "no_input_box", "text": None}
+    # ...and `waiting` still calls it what it is, from the same two lines
+    assert [s["signal"] for s in
+            sm.detect_waiting(PANE_MODAL_TWO_RULES)["signals"]] == \
+        ["selection_menu"]
+    # 🔴 THE CONTROL THE GUARD MUST NOT SWALLOW: a lone numbered line in the box
+    # with NO second option is a draft, and stays one.
+    lone = _pane("● ok", "", _RULE, "❯ 1. rewrite the intro paragraph", _RULE,
+                 "  ctx: 5%")
+    assert sm.detect_unsent_prompt(lone) == {
+        "status": "ok", "text": "1. rewrite the intro paragraph"}
+
+
+def test_a_pane_tailing_another_sessions_RENDERED_BOX_reads_its_OWN_box():
+    """🔴 THE SAME FALSE-POSITIVE CLASS AS `PANE_SHOWING_ANOTHER_TRANSCRIPT`, in
+    the version that fixture could not reach. That one carries five stray `❯`
+    lines and NO stray box rules, so it cannot see `_input_box_span` picking the
+    WRONG PAIR — `rules[-2], rules[-1]` -> `rules[0], rules[1]` survived it.
+
+    Here the tailed session's own input box is on screen, so the capture holds
+    FOUR rules. The real code handles this correctly today; this pins working
+    behaviour rather than reporting a bug.
+    """
+    lines = PANE_TAILING_A_RENDERED_BOX.splitlines()
+    rules = [i for i, l in enumerate(lines) if sm._RULE_RE.match(l)]
+    # INSTRUMENT: four rules, two candidate pairs, or the mutant is unreachable
+    assert len(rules) == 4, rules
+    assert rules[1] - rules[0] <= 3 and rules[3] - rules[2] <= 3, (
+        "BOTH pairs must look like a box, or picking the first is not a "
+        "temptation the code could fall for")
+    assert sm._input_box_span(lines) == (rules[2], rules[3])
+    assert sm.detect_unsent_prompt(PANE_TAILING_A_RENDERED_BOX) == {
+        "status": "ok", "text": None}
+    # the other window's draft text is REALLY in the capture, so "None" above is
+    # a scope decision and not an empty fixture
+    assert "the other window's own parked draft" in PANE_TAILING_A_RENDERED_BOX
+
+
+def test_the_prompt_marker_must_be_the_boxs_FIRST_interior_line_not_ANY_of_them():
+    """🔴 `match(interior[0])` -> `any(match(l) for l in interior)` SURVIVED,
+    because the only box-we-cannot-read fixture has a ONE-LINE interior, where
+    the two are the same function.
+
+    A two-line interior whose SECOND line carries the marker is the case that
+    separates them. It must be `no_input_box`: we located a box we do not
+    understand, and gluing its chrome to the text after the marker would publish
+    `some other chrome ❯ typed after the chrome` as a draft.
+    """
+    lines = PANE_PROMPT_ON_THE_SECOND_INTERIOR_LINE.splitlines()
+    span = sm._input_box_span(lines)
+    assert span is not None, "the box must be FOUND, or the guard is unreachable"
+    interior = lines[span[0] + 1:span[1]]
+    # INSTRUMENT: two lines, marker on the second only — the shape `any` needs
+    assert len(interior) == 2
+    assert not sm._PROMPT_MARK_RE.match(interior[0])
+    assert sm._PROMPT_MARK_RE.match(interior[1])
+    assert sm.detect_unsent_prompt(PANE_PROMPT_ON_THE_SECOND_INTERIOR_LINE) == {
+        "status": "no_input_box", "text": None}
 
 
 def test_a_box_whose_first_line_is_not_the_input_line_is_unmeasured():
@@ -8069,11 +8276,19 @@ def test_the_unsent_rollup_counts_only_boxes_it_READ_not_panes_it_captured():
 
 
 def test_a_row_MISSING_the_status_field_is_counted_loudly_not_crashed_on():
-    """🔴 REGRESSION, and it was a real crash. `_unsent_rollup` histograms the
-    status; a row built OUTSIDE `fold_windows` (a `cluster` row from writer 3 is
-    the live example) carries no such key, and a `None` histogram key is
-    unsortable beside the real string keys — `render_table` raised `TypeError`
-    on a report that was otherwise fine.
+    """🔴 REGRESSION, and it was a real crash — IN BOTH ROLL-UPS. `_unsent_
+    rollup` and `_waiting_rollup` each histogram a status field; a row built
+    OUTSIDE `fold_windows` (a `cluster` row from writer 3 is the live example)
+    carries neither key, and a `None` histogram key is unsortable beside the
+    real string keys — `render_table` raised `TypeError` on a report that was
+    otherwise fine.
+
+    🔴 THE FIRST FIX TOOK ONE OF THE TWO. Its own comment generalised the
+    diagnosis correctly ("a row built anywhere ELSE need not set the field") and
+    then coerced `_unsent_rollup` only; `_waiting_rollup` kept the identical
+    crash, invisible because `cluster_row` used to hand waiting a string while
+    leaving unsent's field absent. Both are asserted here, off ONE symmetric
+    fixture, so neither can be fixed alone again.
 
     Coerced to `"none"`, the same idiom as `age_sources` and `row_kind`: a row
     missing the field is a BUG in whatever built it, so it is COUNTED and NAMED
@@ -8081,11 +8296,65 @@ def test_a_row_MISSING_the_status_field_is_counted_loudly_not_crashed_on():
     """
     rep = with_cluster_rows(mix_gather(), cluster_row(status="busy"))
     rep["summary"] = sm.summarize(rep)
-    reasons = rep["summary"]["unsent_prompt"]["unmeasured_reasons"]
-    assert reasons.get("none") == 1, reasons
+    # INSTRUMENT: the injected row really carries NEITHER field, and the report
+    # really holds a string-keyed reason beside it — a histogram of `{None: 1}`
+    # alone sorts fine, so a fixture without the string key cannot crash.
+    injected = [r for r in rep["hosts"]["workbench"]["windows"]
+                if r.get("kind") == "cluster"]
+    assert len(injected) == 1
+    assert "waiting_status" not in injected[0]
+    assert "unsent_prompt_status" not in injected[0]
+    for key in ("waiting", "unsent_prompt"):
+        reasons = rep["summary"][key]["unmeasured_reasons"]
+        assert reasons.get("none") == 1, (key, reasons)
+        assert set(reasons) - {"none"}, (
+            "need a real string key beside `none`, or `sorted()` never has "
+            "two types to compare and this fixture cannot see the crash: %r"
+            % reasons)
     # and the renderer survives it — the actual regression
     text = sm.render_table(rep)
     assert "unsent prompts:" in text
+
+
+def test_every_rollup_UNMEASURED_equals_the_sum_of_its_OWN_reason_histogram():
+    """🔴 THE NUMBER AND THE HISTOGRAM BESIDE IT MUST AGREE, and nothing pinned
+    that. Computing `summary.unsent_prompt.unmeasured` off `waiting_status`
+    instead of `unsent_prompt_status` stayed green and rendered
+
+        0 parked of 1 box(es) read (1 not read: no_input_box=1, not_claude=1)
+
+    — "1 not read", two reasons — which is a self-contradicting line an operator
+    reads as a bug in the tool, or worse, does not notice.
+
+    The two roll-ups take their unmeasured set from DIFFERENT fields, so the
+    fixture is chosen to make the two numbers differ: cross-wiring either one to
+    the other's field breaks its own sum.
+    """
+    # a modal locally (waiting CAN read it, unsent cannot) + a shell row
+    rep = waiting_gather(local={"%11": PANE_MENU}, remote={"%21": PANE_IDLE})
+    w = rep["summary"]["waiting"]
+    u = rep["summary"]["unsent_prompt"]
+    # 🔴 THE TWO DIFFER ON PURPOSE (1 vs 2). A fixture where they coincide
+    # cannot see a roll-up reading the other's field — the fixture-equals-the-
+    # constant trap, in its cross-wiring form.
+    assert (w["unmeasured"], u["unmeasured"]) == (1, 2)
+    for key in ("waiting", "unsent_prompt"):
+        roll = rep["summary"][key]
+        assert roll["unmeasured"] == sum(roll["unmeasured_reasons"].values()), (
+            key, roll)
+    # ...and again on a scan whose unmeasured set is EVERYTHING, so the
+    # invariant is not pinned only at a small number
+    for rep2 in (base_gather(use_capture=False),
+                 with_cluster_rows(mix_gather(), cluster_row())):
+        rep2["summary"] = sm.summarize(rep2)
+        for key in ("waiting", "unsent_prompt"):
+            roll = rep2["summary"][key]
+            assert roll["unmeasured"] == sum(
+                roll["unmeasured_reasons"].values()), (key, roll)
+    # POSITIVE CONTROL ON THE INVARIANT: it CAN fail. A histogram that dropped
+    # one bucket must break the equality, or `sum(...)` proves nothing here.
+    broken = dict(u, unmeasured_reasons={"not_claude": 1})
+    assert broken["unmeasured"] != sum(broken["unmeasured_reasons"].values())
 
 
 def test_the_parked_text_reaches_the_LEAN_view_untruncated():
@@ -8106,6 +8375,25 @@ def test_the_parked_text_reaches_the_LEAN_view_untruncated():
 # --------------------------------------------------------------------------- #
 def _lines(text):
     return [l.strip() for l in text.splitlines()]
+
+
+_UNSENT_HEADING = ("✎ UNSENT PROMPT — typed and never sent; NOT 'waiting on "
+                   "you', but work parked one Enter away:")
+_WAITING_HEADING = "⚠ WAITING — the matched line, so you can disagree with it:"
+
+
+def _block_after(lines, heading):
+    """The rows of ONE rendered block: every line after `heading` up to the
+    first blank one. Returned WHOLE, so a membership claim about a block is an
+    equality and not an `in` — an `in` cannot see an extra row.
+    """
+    assert heading in lines, f"no such block: {heading!r}"
+    out = []
+    for line in lines[lines.index(heading) + 1:]:
+        if not line:
+            break
+        out.append(line)
+    return out
 
 
 def test_the_unsent_TABLE_SECTION_is_pinned_as_a_WHOLE_normalised_string():
@@ -8131,6 +8419,92 @@ def test_the_unsent_TABLE_SECTION_is_pinned_as_a_WHOLE_normalised_string():
     # an unparked scan prints no block at all
     assert not [l for l in _lines(sm.render_table(
         waiting_gather(local={"%11": PANE_IDLE}))) if "UNSENT PROMPT" in l]
+
+
+def test_the_unsent_TABLE_SECTION_excludes_a_WAITING_row_with_no_draft():
+    """🔴 THE HEADLINE GUARANTEE, AT THE ONE SURFACE A HUMAN ACTUALLY READS —
+    and it was untested there. Widening the row filter to
+    `r.get("unsent_prompt") or r.get("waiting_probable")` passed the ENTIRE
+    suite and rendered a waiting row, holding no draft at all, underneath a
+    heading that says "typed and never sent".
+
+    The pinned-whole-string test could not see it: its fixture is a single pane
+    with `waiting_probable: False`, so the `or` had nobody to add. This one uses
+    the scan that carries BOTH — a real waiting row on one host and a parked
+    draft on the other — and asserts the block WHOLE, so an extra row fails.
+
+    That is what separation means at this surface: not that the two never
+    co-occur (they may, and a row carrying both is correct), but that neither
+    list can be populated from the other's signal.
+    """
+    rep = _waiting_scan()
+    rows = [r for h in sorted(rep["hosts"]) for r in rep["hosts"][h]["windows"]]
+    # INSTRUMENT, both halves — a fixture missing either makes this vacuous
+    waiting_only = [r for r in rows
+                    if r.get("waiting_probable") and not r.get("unsent_prompt")]
+    parked_only = [r for r in rows
+                   if r.get("unsent_prompt") and not r.get("waiting_probable")]
+    assert len(waiting_only) == 1 and waiting_only[0]["session"] == "naida-dev"
+    assert len(parked_only) == 1 and parked_only[0]["session"] == "scratch7"
+
+    lines = _lines(sm.render_table(rep))
+    # 🔴 WHOLE-BLOCK EQUALITY, not `in`. The waiting row would render as a bare
+    # `laptop:naida-dev:1` with an empty draft column, which every `in` check in
+    # this file would step straight past.
+    assert _block_after(lines, _UNSENT_HEADING) == [
+        "workbench:scratch7:3  then open the PR"]
+    # ...and the mirror, so the guard is not one-directional: the parked-only
+    # row must not appear under the WAITING evidence either.
+    waiting_block = _block_after(lines, _WAITING_HEADING)
+    assert waiting_block == [
+        "laptop:naida-dev:1  [trailing_question]  Want me to run the "
+        "post-deploy check before I close this out?"]
+    # POSITIVE CONTROL ON THE BLOCK READER: it really can see a second row, so
+    # the two one-element results above are measurements, not a broken parser.
+    both = _block_after(
+        _lines(sm.render_table(waiting_gather(
+            local={"%11": PANE_TYPED_AT_PROMPT},
+            remote={"%21": PANE_TWO_LINE_DRAFT}))),
+        _UNSENT_HEADING)
+    assert len(both) == 2, both
+
+
+def test_a_row_carrying_BOTH_signals_is_listed_under_BOTH_headings():
+    """🔴 CO-OCCURRENCE IS CORRECT AND MUST NOT BE SUPPRESSED. The agent asked a
+    question and the operator half-typed a reply — that is one window with two
+    true facts about it, and a build that dropped either would be strictly worse
+    than one that prints both.
+
+    An earlier version of the reference doc promoted "0 rows flagged BOTH" on
+    one live run to the separation claim; the next run measured 1. Separation is
+    that neither signal can RAISE the other, which the tests above pin. This one
+    pins the other half: when a row genuinely has both, both blocks say so.
+    """
+    both = _pane(
+        "❯ deploy it",
+        "",
+        "● Deployed. The rollout finished and both replicas are ready.",
+        "",
+        "  Want me to run the post-deploy check before I close this out?",
+        "",
+        _RULE,
+        "❯ yes and tag the release",
+        _RULE,
+        "  ctx: 61%",
+    )
+    rep = waiting_gather(local={"%11": both})
+    row = _row(rep, "workbench", "scratch7", "3")
+    assert row["waiting_probable"] is True
+    assert row["unsent_prompt"] == "yes and tag the release"
+    # counted ONCE in each roll-up, never summed together
+    assert rep["summary"]["waiting"]["probable"] == 1
+    assert rep["summary"]["unsent_prompt"]["count"] == 1
+    lines = _lines(sm.render_table(rep))
+    assert _block_after(lines, _UNSENT_HEADING) == [
+        "workbench:scratch7:3  yes and tag the release"]
+    assert _block_after(lines, _WAITING_HEADING) == [
+        "workbench:scratch7:3  [trailing_question]  Want me to run the "
+        "post-deploy check before I close this out?"]
 
 
 def test_the_unsent_SUMMARY_LINE_is_pinned_whole_in_BOTH_states():
@@ -8204,6 +8578,123 @@ def test_the_unsent_caveat_is_STRUCTURED_for_json_consumers_not_prose():
     assert cav["method"] == "capture_pane_input_box"
 
 
+# --------------------------------------------------------------------------- #
+# §C.4 — the drafts are INVENTED, and that is enforced rather than asserted
+# --------------------------------------------------------------------------- #
+_SKILL_DIR = os.path.normpath(
+    os.path.join(_HERE, "..", "..", "claude", "skills", "session-manager"))
+_SHIPPED_DOCS = (
+    os.path.join(_SKILL_DIR, "SKILL.md"),
+    os.path.join(_SKILL_DIR, "reference", "waiting-signal.md"),
+)
+
+# Every draft string the fixtures in this file carry, whole and in halves.
+# 🔴 ALL INVENTED. Four REAL operator-typed drafts were quoted verbatim in
+# `reference/waiting-signal.md` and re-used as three of these fixtures, beneath
+# two headers that each asserted "every string is SYNTHETIC" — in a PUBLIC repo,
+# for a feature whose entire job is capturing what the operator types.
+_FIXTURE_DRAFT_STRINGS = (
+    "then open the PR",
+    "work out what caused",
+    "the queue backlog",
+    "been a couple of days, see whether the patch shipped",
+    "look at the nightly job",
+    "park 907 until review",
+    "the other window's own parked draft",
+    "typed after the chrome",
+    "first line of the draft",
+)
+
+
+def _draft_strings_found_in(text) -> set:
+    return {s for s in _FIXTURE_DRAFT_STRINGS if s in text}
+
+
+def test_no_FIXTURE_DRAFT_string_appears_in_a_shipped_doc():
+    """🔴 THE INVARIANT THE PROSE ASSERTED AND NOTHING CHECKED. Two headers in
+    this file claim every fixture string is synthetic ("the words are
+    invented"); both were FALSE, and the tell was mechanical — the same four
+    drafts appeared verbatim in `reference/waiting-signal.md` AND as fixtures
+    here. That is the shape a captured draft takes when it gets copied in: it
+    lands in the doc that records the dogfood and in the test that reproduces
+    it.
+
+    So the shape is what is banned. A string cannot be in both places. This does
+    not prove a string is invented — nothing can, from inside the repo — but it
+    fails on the exact route the four real ones took, and it is a deterministic
+    guard where the alternative is a sentence asking people to be careful.
+
+    The prose guard lives beside it: both shipped docs must carry the
+    never-paste rule, pinned whole in the test below.
+    """
+    for path in _SHIPPED_DOCS:
+        assert os.path.isfile(path), path
+        with open(path, encoding="utf-8") as fh:
+            doc = fh.read()
+        found = _draft_strings_found_in(doc)
+        assert not found, (
+            "%s quotes a fixture draft verbatim — a real captured draft copied "
+            "into a committed file takes exactly this shape, and this repo is "
+            "PUBLIC: %r" % (os.path.basename(path), sorted(found)))
+    # 🔴 POSITIVE CONTROL ON THE CHECKER, because a "0 matches" from a scanner
+    # wired to nothing is indistinguishable from a clean result. Feed it a doc
+    # that DOES contain one and watch the number move.
+    planted = "prose prose prose then open the PR prose prose"
+    assert _draft_strings_found_in(planted) == {"then open the PR"}
+    # ...and the needles really are the fixtures' drafts, not a stale list
+    assert _draft_strings_found_in(PANE_TYPED_AT_PROMPT) == {"then open the PR"}
+    assert "work out what caused" in _draft_strings_found_in(
+        PANE_TWO_LINE_DRAFT)
+    assert _draft_strings_found_in(PANE_SHOWING_ANOTHER_TRANSCRIPT) == {
+        "been a couple of days, see whether the patch shipped",
+        "look at the nightly job",
+        "park 907 until review"}
+
+
+def test_BOTH_shipped_docs_carry_the_NEVER_PASTE_A_CAPTURED_DRAFT_rule():
+    """🔴 THE MISSING GUARDRAIL. Neither the skill body nor the reference told
+    anyone not to paste a captured draft into a committed file — and this
+    feature hands operator-typed text to an agent, which writes it onward into
+    transcripts, commit messages and any `claudedocs/` note in this PUBLIC repo.
+    The rule has to be where a reader hits it, in BOTH places: the skill body is
+    what an agent loads to use the tool, the reference is what it loads to
+    change the tool.
+
+    Pinned as WHOLE normalised strings. A word check here is walkable by a
+    reword — four prose guards in this repo were walked exactly that way, one by
+    a synonym — and this claim is load-bearing enough to pay a cosmetic-reword
+    failure for.
+    """
+    def _norm(text):
+        return " ".join(text.split())
+
+    with open(_SHIPPED_DOCS[0], encoding="utf-8") as fh:
+        skill = _norm(fh.read())
+    with open(_SHIPPED_DOCS[1], encoding="utf-8") as fh:
+        ref = _norm(fh.read())
+
+    assert ("🔴 **NEVER PASTE A CAPTURED DRAFT INTO A COMMITTED FILE.** "
+            "`unsent_prompt` hands you **text the operator typed**, and devrc "
+            "is a **PUBLIC** repo — as is every `claudedocs/` note, commit "
+            "message, PR body, comment or test fixture an agent writes into "
+            "it. Report a draft as a **count, a length or a shape**, never "
+            "verbatim.") in skill
+    assert ("### 🔴 NEVER PASTE A CAPTURED DRAFT INTO A COMMITTED FILE") in ref
+    assert ("report a draft as a **count, a length or a shape**, never "
+            "verbatim, in any file that gets committed") in ref
+    # 🔴 AND THE CO-OCCURRENCE CORRECTION, in the same pass: the reference used
+    # to promote "0 rows flagged BOTH" on ONE live run to the separation claim.
+    # The next run measured 1, and suppressing co-occurrence would make the tool
+    # WORSE. The doc must now say what separation actually means.
+    assert "**Rows flagged BOTH: 0 on that run, 1 on the next.**" in ref
+    assert ("**Separation means the two signals are COUNTED separately and "
+            "neither can raise the other**") in ref
+    assert "The two signals were disjoint on live data" not in ref
+    # the skill body carries the same correction, for the reader who never
+    # opens the reference
+    assert ("🔴 **A row can carry BOTH, and that is correct**") in skill
+
+
 def test_the_docstring_documents_the_shell_pane_DECISION_not_just_the_behaviour():
     """🔴 THE BRIEF REQUIRED THE CHOICE BE STATED, and a decision recorded only
     in a test is a decision the next reader re-litigates. Both halves of the
@@ -8237,6 +8728,23 @@ _GATHER_REPORT_KEYS = {
     "ts", "local_host", "stale_threshold_secs", "hosts", "clickhouse",
     "fuzzyclaw", "ledger", "filters", "blocked_on_me", "caveats", "summary",
     "not_measured",
+}
+
+# 🔴 THE LEDGER'S MEMBERSHIP, AS A LITERAL THAT DOES NOT COME FROM THE LEDGER.
+# Measured by an audit: deleting the whole `cluster_alerts` entry left the suite
+# at 553 PASSED. GROW was genuinely pinned (a new `report[...]` key fails the
+# ast test), but SHRINK was not — only three of the five populations were named
+# anywhere, and the one count assertion read `1 + len(NOT_MEASURED_POPULATIONS)`,
+# derived from the very constant it claimed to guard. That is the
+# fixture-equals-the-constant trap this file has now hit SIX times, and the
+# control for it is mechanical: state the expected values somewhere the constant
+# cannot reach, and watch a deletion move them.
+_EXPECTED_NOT_MEASURED = {
+    "pull_requests": ("pull_requests", "standup"),
+    "mail_queue": ("mail_queue", "mailbox"),
+    "cluster_alerts": ("cluster_alerts", "standup"),
+    "initiative_board": ("initiative_board", "initiatives"),
+    "gui_windows_outside_tmux": ("gui_windows", "i3"),
 }
 
 
@@ -8289,8 +8797,13 @@ def test_the_not_measured_ledger_is_PINNED_to_the_keys_gather_actually_WRITES():
     Add PR querying that writes `report["pull_requests"]` and the first
     assertion fails; updating it to green then fails the second, whose only fix
     is deleting the `pull_requests` entry — which is exactly the step that does
-    not happen on its own. Delete a key and the first fails too, so the set
-    cannot silently shrink either.
+    not happen on its own. Delete a key `gather` writes and the first fails too.
+
+    🔴 WHAT IT DOES **NOT** GUARD, stated because the earlier version of this
+    docstring claimed it did: this test pins `gather`'s KEYS, not the ledger's
+    MEMBERSHIP. Deleting a whole ledger entry passes every assertion here — it
+    was measured, at 553 green. `test_the_not_measured_POPULATION_SET_cannot_
+    silently_SHRINK` is the one that fails on that.
 
     A static list of "things we do not measure" needs no such guard and is
     wrong the day someone adds the measurement — the one day a reader is most
@@ -8329,6 +8842,37 @@ def test_the_ast_key_extractor_can_SEE_a_key_it_is_supposed_to_catch():
     assert "not_measured" in keys, "missed a key from a later assignment"
     assert "pull_requests" not in keys, (
         "gather does not write this — if it now does, the ledger entry must go")
+
+
+def test_the_not_measured_POPULATION_SET_cannot_silently_SHRINK():
+    """🔴 THE HALF THE AST PIN DOES NOT COVER, and it was measured OPEN:
+    deleting the entire `cluster_alerts` entry left the suite at 553 PASSED,
+    while both the source comment and the PR body claimed "the set cannot drift
+    in either direction … deleting an entry fails too".
+
+    Three reasons it survived, all of them the same reason: only three of the
+    five populations were named by any test; the count assertion was `1 +
+    len(NOT_MEASURED_POPULATIONS)`, i.e. derived from the constant it guarded;
+    and the ast test pins `gather`'s keys, which a ledger deletion does not
+    touch.
+
+    So membership is pinned against `_EXPECTED_NOT_MEASURED` — a literal in THIS
+    file, which the module constant cannot influence. Deleting an entry fails
+    here. Adding one fails here AND on the ast test. Re-pointing an entry's
+    `report_key` or `owner_skill` fails here too, which nothing else saw.
+    """
+    got = {name: (spec["report_key"], spec["owner_skill"])
+           for name, spec in sm.NOT_MEASURED_POPULATIONS.items()}
+    assert got == _EXPECTED_NOT_MEASURED, (
+        "the not_measured ledger drifted:\n  only in source: %r\n"
+        "  only in this test: %r"
+        % (sorted(set(got) - set(_EXPECTED_NOT_MEASURED)),
+           sorted(set(_EXPECTED_NOT_MEASURED) - set(got))))
+    # 🔴 AND THE DERIVED OUTPUT MOVES WITH IT, against a LITERAL count. `5` is a
+    # number the constant cannot supply; `len(NOT_MEASURED_POPULATIONS)` is the
+    # trap this test exists to close, so it must not appear on this line.
+    assert len(base_gather()["not_measured"]) == 5
+    assert len(sm.render_not_measured(base_gather())) == 6  # heading + 5 rows
 
 
 def test_every_not_measured_population_names_a_skill_that_EXISTS():
@@ -8433,12 +8977,20 @@ def test_the_NOT_MEASURED_section_is_pinned_as_a_WHOLE_normalised_string():
     "these are NOT zero, they were never looked at" as "these are zero" is the
     reader this section exists for, and a word check is walkable by a reword.
     """
+    heading = ("▸ NOT MEASURED HERE — these are NOT zero, they were never "
+               "looked at; the owning skill has each:")
     lines = _lines(sm.render_table(base_gather()))
-    assert ("▸ NOT MEASURED HERE — these are NOT zero, they were never looked "
-            "at; the owning skill has each:") in lines
-    assert "pull_requests              -> /standup" in lines
-    assert "mail_queue                 -> /mailbox" in lines
-    assert "gui_windows_outside_tmux   -> /i3" in lines
+    assert heading in lines
+    # 🔴 EVERY population, as a WHOLE block. Naming three of five was how a
+    # deleted entry stayed green: the two nobody spelled were the two free to
+    # vanish. Equality, not `in` — an `in` per row cannot see one go missing.
+    assert _block_after(lines, heading) == [
+        "cluster_alerts             -> /standup",
+        "gui_windows_outside_tmux   -> /i3",
+        "initiative_board           -> /initiatives",
+        "mail_queue                 -> /mailbox",
+        "pull_requests              -> /standup",
+    ]
 
 
 def test_render_not_measured_tells_an_ABSENT_key_from_an_EMPTY_list():
@@ -8457,7 +9009,11 @@ def test_render_not_measured_tells_an_ABSENT_key_from_an_EMPTY_list():
                      "now has a measurement in this report"]
     assert absent != empty
     populated = sm.render_not_measured(base_gather())
-    assert len(populated) == 1 + len(sm.NOT_MEASURED_POPULATIONS)
+    # 🔴 A LITERAL, NOT `1 + len(sm.NOT_MEASURED_POPULATIONS)`. That expression
+    # was this assertion for the whole PR, and it is the reason deleting an
+    # entry stayed green: both sides shrank together. See
+    # `test_the_not_measured_POPULATION_SET_cannot_silently_SHRINK`.
+    assert len(populated) == 6
 
 
 def test_the_not_measured_section_is_printed_in_EVERY_state_including_empty():

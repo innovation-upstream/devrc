@@ -135,6 +135,18 @@ is a modal (which replaces the box) or a draft taller than the box — **unmeasu
 "nothing typed". Shell panes are **never** scraped (`not_claude`): a half-typed shell command
 is a different and noisier thing.
 
+🔴 **NEVER PASTE A CAPTURED DRAFT INTO A COMMITTED FILE.** `unsent_prompt` hands you **text
+the operator typed**, and devrc is a **PUBLIC** repo — as is every `claudedocs/` note, commit
+message, PR body, comment or test fixture an agent writes into it. Report a draft as a
+**count, a length or a shape**, never verbatim. Quoting one back to Zach in chat is fine;
+writing one to a file that gets committed is not. (Four real drafts were quoted verbatim in
+`reference/waiting-signal.md` and re-used as fixtures before this rule existed —
+`test_no_FIXTURE_DRAFT_string_appears_in_a_shipped_doc` now fails on that shape.)
+
+🔴 **A row can carry BOTH, and that is correct** — the agent asked a question and you
+half-typed a reply. Separation does **not** mean the two never co-occur; it means neither
+signal can raise or be summed into the other. Read both columns.
+
 ## 🔴 `not_measured` — what this tool CANNOT see, and who owns it
 
 A blind dogfood found this tool "precise about what it measured but it does not tell a cold

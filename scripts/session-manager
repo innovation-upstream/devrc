@@ -138,7 +138,7 @@ which `kinds_produced` would attribute to this build an absence the filter
 caused.
 
 HONEST LIMITS (stated, not implied away — AND CARRIED IN THE OUTPUT as
-`report["caveats"]` plus two footer lines; see CAVEATS)
+`report["caveats"]` plus ONE FOOTER LINE PER CAVEAT; see CAVEATS)
 ----------------------------------------------------------------------
   * Claude detection is `pane_current_command =~ /claude/`, which is SHALLOWER
     than the `/proc` descendant walk in scripts/lib/claude_sessions.py. It
@@ -874,10 +874,18 @@ CAVEATS = {
 # `report_key` is the key that WOULD carry that population's measurement. It is
 # the only coupling: add PR querying that writes `report["pull_requests"]` and
 # the claim stops being made, with no edit here. `test_session_manager.py` pins
-# the relationship two-way with an `ast` walk of `gather` — the same shape as
-# `test_drift_check.py`'s phase-2 reason-token ledger — so the set cannot drift
-# in either direction: a new `report[...]` key fails until it is accounted for,
-# and deleting an entry fails too.
+# the relationship with an `ast` walk of `gather` — the same shape as
+# `test_drift_check.py`'s phase-2 reason-token ledger — so a new `report[...]`
+# key fails until it is accounted for.
+#
+# 🔴 THAT AST PIN GUARDS `gather`'s KEYS, NOT THIS SET'S MEMBERSHIP, and an
+# audit measured the difference: deleting the whole `cluster_alerts` entry left
+# the suite fully green, because the only count assertion was `1 +
+# len(NOT_MEASURED_POPULATIONS)` — derived from the very constant it claimed to
+# guard, the fixture-equals-the-constant trap this file has now hit six times.
+# So membership is pinned SEPARATELY, against a literal set living in the test
+# file: `test_the_not_measured_POPULATION_SET_cannot_silently_SHRINK`. Shrink
+# fails there; grow fails both there and on the AST pin.
 #
 # `owner_skill` is NOT decoration. A reader told only that a population is
 # unmeasured learns that this tool is incomplete; a reader told WHICH skill
@@ -1452,6 +1460,13 @@ def detect_unsent_prompt(text) -> dict:
     `text: None` under `ok`. Under-reporting into the unmeasured bucket is the
     safe direction; publishing "nothing typed" about a box we could not find is
     the one that lies. The same applies if upstream restyles the `❯` marker.
+
+    🔴 AND A MODAL IS `no_input_box` WHETHER IT IS DRAWN WITH ONE RULE OR TWO.
+    The one-rule shape is rejected by `_input_box_span`; the two-rule shape
+    reaches this body with `❯ 1. Resume …` as its interior, which is a menu's
+    SELECTED OPTION and not a draft. It is rejected below by the same
+    selected-marker-plus-a-second-option pair `detect_waiting` calls a
+    `selection_menu`.
     """
     lines = (text or "").splitlines()
     span = _input_box_span(lines)
@@ -1462,6 +1477,25 @@ def detect_unsent_prompt(text) -> dict:
     if not interior or not _PROMPT_MARK_RE.match(interior[0]):
         # A box we located but whose first line is not the input line. We do not
         # know what we are looking at, so we do not report a measurement.
+        return {"status": "no_input_box", "text": None}
+    # 🔴 A MODAL DRAWN WITH TWO RULES IS STILL A MODAL. `❯ 1. …` is the SELECTED
+    # OPTION of a menu, not a draft — and `_PROMPT_MARK_RE` cannot tell them
+    # apart, because a menu row starts with the same marker. Claude Code's
+    # resume modal is usually drawn with ONE rule, which `_input_box_span`
+    # already rejects; a two-rule variant would have been read as a parked draft
+    # whose "text" is the option label. Not observed live (both live
+    # `selection_menu` panes reported `no_input_box`), which is exactly why it
+    # needed pinning rather than assuming.
+    #
+    # The discriminant is the SAME PAIR `detect_waiting` uses for
+    # `selection_menu` — the selected marker plus a SECOND numbered option
+    # anywhere in the capture — so the two signals cannot form independent
+    # opinions about what a menu is. A lone `❯ 1.` stays a draft: it occurs in
+    # ordinary typing, a two-option list does not. Cost is a draft that really
+    # begins `1. …` beside another numbered line, under-reported as UNMEASURED,
+    # which is the safe direction this whole detector is biased towards.
+    if (_MENU_SELECTED_RE.match(interior[0])
+            and sum(1 for l in lines if _MENU_OPTION_RE.match(l)) >= 2):
         return {"status": "no_input_box", "text": None}
     parts = [_PROMPT_MARK_RE.sub("", interior[0], count=1)] + list(interior[1:])
     draft = " ".join(p.strip() for p in parts if p.strip()).strip()
@@ -2047,8 +2081,17 @@ def _waiting_rollup(rows) -> dict:
         "per_signal": per_signal if measured else None,
         # WHY a row went unmeasured, so "0 waiting" can be read against what
         # was skipped rather than against the row total.
+        #
+        # 🔴 `or "none"`, THE SAME COERCION AS `_unsent_rollup`'s, and it is
+        # here because the first version of that comment diagnosed the class
+        # ("a row built anywhere ELSE need not set the field") and then fixed
+        # exactly one of the two rollups that share the defect. Measured: a
+        # rows list holding one field-less row beside one `not_claude` row
+        # raises `TypeError: '<' not supported between instances of 'str' and
+        # 'NoneType'` in `render_table`, because a `None` key is unsortable
+        # beside the real string keys. One rule, one place — both places.
         "unmeasured_reasons": _count_by(
-            r.get("waiting_status") for r in rows
+            (r.get("waiting_status") or "none") for r in rows
             if r.get("waiting_probable") is None),
     }
 
@@ -3621,7 +3664,12 @@ def render_caveats(report) -> list:
     detection rule to every row, the fuzzyclaw scope to every remote row —
     including the case where the remote host answered with zero rows).
 
-    Two lines, after the summary, so the per-row table is untouched.
+    ONE LINE PER ENTRY IN `CAVEATS`, after the summary, so the per-row table is
+    untouched. Deliberately NOT a number: this docstring said "two lines" for
+    months while the function emitted six, and a count restated in prose is a
+    second copy of a fact that only the code owns —
+    `test_the_caveat_footer_is_one_line_per_CAVEAT_pinned_both_ways` pins the
+    relationship instead.
     """
     cav = (report or {}).get("caveats") or CAVEATS
     det = cav.get("claude_detection") or {}
