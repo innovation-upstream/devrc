@@ -619,16 +619,47 @@ def build_url(backend: str, port: int, query: str, kind: str,
 # Transport (the only non-pure part; injectable for tests)
 # --------------------------------------------------------------------------- #
 def _free_port() -> int:
-    # KNOWN LIMITATION (TOCTOU): we pick a free port, close the socket, then hand
-    # the number to kubectl — a racing process could grab it in between. In
-    # practice the window is sub-ms and kubectl fails loudly (surfaced via the
-    # captured stderr on early-exit) if the port is taken, so this is left as a
-    # documented known limitation rather than a bind-and-hold handoff.
+    # TOCTOU by construction: we pick a free port, close the socket, then hand
+    # the number to kubectl — a racing process (another agent running obs-read
+    # concurrently) can grab it in between. We do NOT bind-and-hold (kubectl
+    # needs to bind it itself), so the race is closed one level up instead:
+    # PortForward.__enter__ RETRIES with a freshly-picked port when kubectl dies
+    # with a bind collision (see _is_port_collision / PF_ATTEMPTS). Any other
+    # kubectl failure still surfaces on the first attempt, unretried.
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.bind(("127.0.0.1", 0))
     port = s.getsockname()[1]
     s.close()
     return port
+
+
+# How many times PortForward.__enter__ will re-pick a local port and relaunch
+# kubectl when — and ONLY when — the previous attempt died on a bind collision.
+PF_ATTEMPTS = 3
+
+# Substrings of kubectl's own stderr that mean "the local port I was told to
+# bind was already taken". kubectl prints both lines on a collision:
+#   Unable to listen on port N: ... [unable to create listener: Error listen
+#     tcp4 127.0.0.1:N: bind: address already in use]
+#   error: unable to listen on any of the requested ports: [{N M}]
+# _drain_stderr keeps only the LAST non-empty line, so match either.
+_PORT_COLLISION_MARKERS = (
+    "unable to listen on any of the requested ports",
+    "address already in use",
+)
+
+
+def _is_port_collision(exc: BaseException) -> bool:
+    """True ONLY for a local-port bind collision — the one failure that a retry
+    on a different port can fix.
+
+    Everything else (service not found, wrong namespace, RBAC denial, backend
+    never became ready, SIGTERM) is a genuine failure: retrying it would mask a
+    real error and triple the time-to-error on the commonest misconfiguration,
+    so it must propagate on the FIRST attempt.
+    """
+    text = str(exc).lower()
+    return any(marker in text for marker in _PORT_COLLISION_MARKERS)
 
 
 def _http_get(url: str, timeout: float = 15.0) -> dict:
@@ -742,6 +773,12 @@ class PortForward:
     signal can never orphan the tunnel. popen/wait_ready are injectable so the
     whole lifecycle (incl. cleanup-on-error and the KUBECONFIG override) is
     unit-tested offline.
+
+    Local-port selection is racy by construction (_free_port closes its probe
+    socket before kubectl binds the number), so __enter__ retries up to
+    PF_ATTEMPTS times on a BIND COLLISION only — reaping each failed attempt's
+    kubectl first. Any other failure (missing service, RBAC denial, backend not
+    ready) propagates unchanged on the first attempt.
     """
 
     def __init__(self, kubeconfig: str, backend: Backend, *,
@@ -756,25 +793,42 @@ class PortForward:
         self.local_port = None
 
     def __enter__(self) -> int:
-        self.local_port = _free_port()
-        # The KUBECONFIG override IS the "can't hit the ambient/wrong cluster"
-        # guarantee: whatever KUBECONFIG is in the ambient env, this forces the
-        # named cluster's kubeconfig for the kubectl child. start_new_session
-        # puts kubectl in its own process group so _terminate can killpg it.
-        env = dict(os.environ, KUBECONFIG=self.kubeconfig)
-        argv = ["kubectl", "-n", self.backend.namespace, "port-forward",
-                "svc/%s" % self.backend.service,
-                "%d:%d" % (self.local_port, self.backend.remote_port)]
-        self.proc = self._popen(
-            argv, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=env,
-            start_new_session=True)
-        try:
-            self._wait_ready(self.local_port, self.backend.ready_path,
-                             self._startup_timeout, self.proc)
-        except BaseException:
-            self._terminate()
-            raise
-        return self.local_port
+        # Bounded retry that closes the _free_port() TOCTOU race: a port picked
+        # here can be stolen before kubectl binds it (concurrent obs-read runs).
+        # ONLY a bind collision is retried, on a freshly-picked port; every other
+        # failure is re-raised unchanged on the first attempt.
+        for attempt in range(1, PF_ATTEMPTS + 1):
+            self.local_port = _free_port()
+            # The KUBECONFIG override IS the "can't hit the ambient/wrong
+            # cluster" guarantee: whatever KUBECONFIG is in the ambient env,
+            # this forces the named cluster's kubeconfig for the kubectl child.
+            # start_new_session puts kubectl in its own process group so
+            # _terminate can killpg it.
+            env = dict(os.environ, KUBECONFIG=self.kubeconfig)
+            argv = ["kubectl", "-n", self.backend.namespace, "port-forward",
+                    "svc/%s" % self.backend.service,
+                    "%d:%d" % (self.local_port, self.backend.remote_port)]
+            self.proc = self._popen(
+                argv, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                env=env, start_new_session=True)
+            try:
+                self._wait_ready(self.local_port, self.backend.ready_path,
+                                 self._startup_timeout, self.proc)
+            except BaseException as exc:
+                # Reap THIS attempt's kubectl before doing anything else — a
+                # retry must never leave a port-forward process behind.
+                self._terminate()
+                if not _is_port_collision(exc):
+                    raise
+                if attempt >= PF_ATTEMPTS:
+                    raise RuntimeError(
+                        "kubectl port-forward: local port collision on all %d "
+                        "attempts — a freshly-picked free local port was taken "
+                        "before kubectl could bind it every time (last error: "
+                        "%s)" % (PF_ATTEMPTS, exc)) from exc
+                continue
+            return self.local_port
+        raise AssertionError("unreachable")  # pragma: no cover
 
     def __exit__(self, *exc):
         self._terminate()

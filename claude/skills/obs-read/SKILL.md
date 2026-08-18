@@ -85,7 +85,12 @@ validated preset; treat unvalidated ones as starting points.
 - `--since` applies to range/profile queries (Loki, Pyroscope, `--kind range`).
 - Signal-safe teardown: kubectl runs in its own session and is torn down by
   killing the process group on success/error/SIGINT/SIGTERM (no leaked tunnel).
-- Known limitations (documented, unchanged): a matched-nothing result still exits
-  0 (check the `--json` `matched_nothing`/`warning` fields to fail a pipeline);
-  `_free_port` has a sub-ms TOCTOU window (kubectl fails loudly, surfaced via its
-  captured stderr, if the port is taken).
+- Concurrency-safe local port: `_free_port` is TOCTOU by construction (the probe
+  socket closes before kubectl binds), so `PortForward.__enter__` RETRIES up to
+  `PF_ATTEMPTS` (3) times on a freshly-picked port when — and only when —
+  kubectl died with a bind collision, reaping each failed attempt's process
+  first. Concurrent obs-read runs no longer lose a race. Every other failure
+  (missing service, wrong namespace, RBAC denial, backend never ready) still
+  surfaces on the FIRST attempt with kubectl's own message unchanged.
+- Known limitation (documented, unchanged): a matched-nothing result still exits
+  0 — check the `--json` `matched_nothing`/`warning` fields to fail a pipeline.
