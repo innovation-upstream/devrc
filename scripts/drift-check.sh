@@ -902,9 +902,9 @@ for N in $S_NAMES; do
   fi
 
   # 🔴 The comparison is against the OWN upstream of whatever branch is checked
-  # out, never a hardcoded
-  # `main`. These repos do not agree on a default branch — homelab-talos works on
-  # `trunk` — and assuming one would be a guess printed as a measurement.
+  # out, never a hardcoded `main`. These repos do not agree on a default branch
+  # — homelab-talos works on `trunk` — and assuming one would be a guess printed
+  # as a measurement.
   UP=""
   if [ "$BR" != DETACHED ]; then
     UP="$(git -C "$SR" rev-parse -q --verify --symbolic-full-name "$BR@{upstream}" 2>/dev/null)"
@@ -954,14 +954,16 @@ echo "[$label] SRC-RC=$s_rc"
 '
 
 # The payload actually shipped to each host: the git CHECK in a SUBSHELL (so its
-# many `exit`s end the subshell and not the run) followed by the parity scan.
+# many `exit`s end the subshell and not the run) followed by the parity scan and
+# the source-repo scan.
 # Composed rather than run as two ssh legs so an unreachable host is still ONE
 # missed connection and ONE bump of the streak counter.
 #
 # The exit status is the GIT verdict, byte-for-byte what it always was — every
-# pinned rc in the suite is a statement about that number. The parity verdict
-# rides back on the PARITY-RC= line and is folded in by the driver through the
-# same severity() table, so there is exactly one severity ranking in this file.
+# pinned rc in the suite is a statement about that number. The parity and
+# source-repo verdicts ride back on the PARITY-RC= and SRC-RC= lines and are
+# folded in by the driver through the same severity() table, so there is exactly
+# one severity ranking in this file.
 PAYLOAD="(
 $CHECK
 )
