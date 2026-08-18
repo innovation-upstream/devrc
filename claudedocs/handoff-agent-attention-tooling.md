@@ -203,11 +203,23 @@ unmeasured: 25}` · `waiting {probable: 8, measured: 58}`.
 ## Next steps (ranked)
 1. **Nothing is blocking.** All six PRs are merged, shipped and consumer-verified. The items
    below are follow-ups that were deliberately filed rather than fixed.
-2. **The shared-function blind-spot class** — `_state_root()`'s two path components, `STATE_WORK`,
-   `_dismissals_path()` in `scripts/claude-hooks/clawgate-writeback-guard.py` each rename a live
-   on-disk artifact with **ZERO test movement**. Renaming the state root on a deploy would
-   silently orphan every in-flight session's read anchors. `_dismissed_path` is pinned; the fix
-   was applied to the instance found, not the class. One PR pinning every on-disk name literally.
+2. ~~**The shared-function blind-spot class**~~ — **DONE, PR #530.** Measuring it first widened it
+   from the 4 names filed here to **15 across 5 modules**: the guard's `.cache` ·
+   `claude-clawgate-writeback` · `s` · `work` · `dismissals` · `.tmp`; next-step-nudge's
+   `.cache` · `claude-next-step-nudge` · `s` · `fired`; shell-env-nudge's `.cache` ·
+   `claude-shell-env-nudge`; search-tool-nudge's session/agent `@`; agent_ledger's
+   `AGENT_LEDGER_V1` and `.ledger.`. Each renamed on its own against a **green 1,133-test
+   baseline**; controls (`dismissed-`, `read-`, `fires-`, `unknown-`, `agent-ledger`, the
+   `*.json` glob, every `claude-notify` name) went red in the same sweep.
+   `scripts/claude-hooks/tests/test_on_disk_artifact_names.py` now drives each module's real
+   writers against a throwaway `$HOME` and pins the **COMPLETE set** of relative paths, so a
+   rename is red and so is a NEW artifact; plus a two-sided module classification guard.
+   🔴 **A real defect fell out**: `record_read`'s temp file was `read-<id>.tmp`, INSIDE the
+   `read-` prefix both readers select on, so a leftover was parsed as a real tracked read and
+   counted toward `MAX_TASKS` (truncated ones too). Fixed to `.tmp-read-<id>`; RED at base,
+   GREEN at HEAD. ⚠ **`.ledger.` is deliberately pinned as a RELATIONSHIP, not a literal** —
+   removing EITHER protection (the leading `.` or the `.tmp` suffix) is an equivalent mutant and
+   stays green by design; only removing both is red. The four-row measurement is in the test.
 3. **#513 🟡B — `summary.rows_with_age` exists and is unused.** Adding it to `drift_phase2.py`
    closes the last theoretical `age_sources` gap in ~2 lines, and the reason-token ledger will
    FORCE the token. The invariant holds on live data: `rows_with_age == total_sessions -
@@ -219,6 +231,23 @@ unmeasured: 25}` · `waiting {probable: 8, measured: 58}`.
    middle path. **Operator judgement, not a defect.**
 
 ## Gotchas / decisions / dead-ends
+
+**From the #530 sweep — three harness failures, all mine, all caught:**
+- 🔴 **THE `.pyc` CACHE TRAP FIRES IN THE *OTHER* DIRECTION TOO — a false KILL.** RULES records
+  it as "a mutant that never ran is scored SURVIVED". The same staleness scored an **unmutated**
+  module as mutated: the sweep's import-check subprocess inherited an env without
+  `PYTHONDONTWRITEBYTECODE` and wrote `__pycache__`, and `STATE_TOKEN = "fired"` → `"burnt"` is a
+  **same-length** edit landing in the same second — so a later run of a RESTORED file imported the
+  mutant's bytecode. Result: a shell-env rename "killed" the next-step-nudge test, `0 survivors`,
+  and every attribution wrong. **Purge `__pycache__` before every scored run, and set the env on
+  EVERY subprocess the harness spawns, not just the scoring one.**
+- 🔴 **A seam test that RESTATES the writer's arguments validates its own copy.** The ledger
+  temp-file test hand-wrote `prefix=".ledger.", suffix=".tmp"`; the mutant that changed the
+  WRITER's suffix to `.json` — the entire hazard — survived it. Fixed by spying on the shipped
+  `mkstemp` call. `agent_ledger`'s own docstring names this trap for `read_command`; it recurred
+  one level up, in the test written to guard it.
+- **A sweep that dies mid-mutant leaves the mutation on disk**, and the NEXT sweep's "baseline"
+  then measures a mutated tree. Restore in a `finally`, and assert byte-identity after.
 
 **Instrument failures — every one produced a confident wrong zero:**
 - `readlink -f` **returns a path for a file that does not exist.** Bit me twice (`~/.tmux.conf`,
