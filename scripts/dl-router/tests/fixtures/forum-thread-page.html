@@ -9,6 +9,19 @@
        imghost.example.test   <- image-gallery host (thumbnail links)
        thumbs.example.test    <- inline thumbnail image CDN
        filehost.example.test  <- file host (album/file links)
+
+     🔴 THE ID CLAIM ABOVE IS NOW TRUE OF EVERY ID, WHICH IT WAS NOT.
+     Re-measured: the original sanitiser replaced `data-message-id` (4/4) and
+     `post-<id>` (6/6) but left 5 distinct 10-digit `data-timestamp` values, 2
+     distinct 8-digit `data-result-id` values, and a 10-digit cache-buster
+     (4 occurrences) verbatim, alongside 3 numeric person ids. All are now in
+     this file's own synthetic `1000…` block, digit widths preserved so the
+     structure stays faithful. Nothing references any of them — no selector, no
+     assertion, in any consumer.
+     The one non-synthetic literal left is the CSS colour `#666699`, which is a
+     style value and not a URL, id, filename, username, title or caption.
+     If you re-sanitise this file, re-run: `grep -oE '[0-9]{6,}'` must return
+     nothing outside the `1000…` block.
 -->
 <html><head><title>Sample Thread | Page 6 | Example Forums</title></head>
 <body>
@@ -68,7 +81,7 @@
 		<div class="message-avatar ">
 			<div class="message-avatar-wrapper">
 				<span class="simp-avatar-border-wrap" style="position:relative;display:inline-flex;vertical-align:top;ove"><a href="https://forum.example.test/members/SYNTH4465" class="avatar avatar--m" data-user-id="100031" data-xf-init="member-tooltip" id="js-XFUniqueId15">
-			<img src="https://thumbs.example.test/ID4x/data/ID5xxx/ID6/ID7/sample-file.jpg?1776037119=SYNTH_1776037119" alt="sample-alt" class="avatar-u100031-m" width="96" height="96" loading="lazy" itemprop="image"> 
+			<img src="https://thumbs.example.test/ID4x/data/ID5xxx/ID6/ID7/sample-file.jpg?1000000016=SYNTH_1000000016" alt="sample-alt" class="avatar-u100031-m" width="96" height="96" loading="lazy" itemprop="image"> 
 		</a><img src="https://forum.example.test/ID9xx/SYNTH5400/ID11.webp" class="simp-avatar-border" style="position:absolute;top:-10%;left:-10%;width:120%;height:120%;" loading="lazy" decoding="async" aria-hidden="true"></span>
 				
 			</div>
@@ -134,7 +147,7 @@
 			
 			<li class="u-concealed">
 				<a href="https://forum.example.test/threads/SYNTH9970/SYNTH2881" rel="nofollow" itemprop="url">
-					<time class="u-dt" dir="auto" datetime="2025-02-08T14:38:25-0600" data-timestamp="1739047105" data-date="Feb 8, 2025" data-time="2:38 PM" data-short="Feb '25" title="sample-title" itemprop="datePublished">Sample text</time>
+					<time class="u-dt" dir="auto" datetime="2025-02-08T14:38:25-0600" data-timestamp="1000000011" data-date="Feb 8, 2025" data-time="2:38 PM" data-short="Feb '25" title="sample-title" itemprop="datePublished">Sample text</time>
 				</a>
 			</li>
 			
@@ -364,7 +377,7 @@
 		<div class="message-avatar ">
 			<div class="message-avatar-wrapper">
 				<span class="simp-avatar-border-wrap" style="position:relative;display:inline-flex;vertical-align:top;ove"><a href="https://forum.example.test/members/SYNTH4465" class="avatar avatar--m" data-user-id="100031" data-xf-init="member-tooltip" id="js-XFUniqueId31">
-			<img src="https://thumbs.example.test/ID4x/data/ID5xxx/ID6/ID7/sample-file.jpg?1776037119=SYNTH_1776037119" alt="sample-alt" class="avatar-u100031-m" width="96" height="96" loading="lazy" itemprop="image"> 
+			<img src="https://thumbs.example.test/ID4x/data/ID5xxx/ID6/ID7/sample-file.jpg?1000000016=SYNTH_1000000016" alt="sample-alt" class="avatar-u100031-m" width="96" height="96" loading="lazy" itemprop="image"> 
 		</a><img src="https://forum.example.test/ID9xx/SYNTH5400/ID11.webp" class="simp-avatar-border" style="position:absolute;top:-10%;left:-10%;width:120%;height:120%;" loading="lazy" decoding="async" aria-hidden="true"></span>
 				
 			</div>
@@ -430,7 +443,7 @@
 			
 			<li class="u-concealed">
 				<a href="https://forum.example.test/threads/SYNTH9970/SYNTH6144" rel="nofollow" itemprop="url">
-					<time class="u-dt" dir="auto" datetime="2025-04-30T17:24:04-0500" data-timestamp="1746051844" data-date="Apr 30, 2025" data-time="5:24 PM" data-short="Apr '25" title="sample-title" itemprop="datePublished">Sample text</time>
+					<time class="u-dt" dir="auto" datetime="2025-04-30T17:24:04-0500" data-timestamp="1000000012" data-date="Apr 30, 2025" data-time="5:24 PM" data-short="Apr '25" title="sample-title" itemprop="datePublished">Sample text</time>
 				</a>
 			</li>
 			
@@ -733,7 +746,7 @@
 			
 			<li class="u-concealed">
 				<a href="https://forum.example.test/threads/SYNTH9970/SYNTH4736" rel="nofollow" itemprop="url">
-					<time class="u-dt" dir="auto" datetime="2025-05-20T23:50:05-0500" data-timestamp="1747803005" data-date="May 20, 2025" data-time="11:50 PM" data-short="May '25" title="sample-title" itemprop="datePublished">Sample text</time>
+					<time class="u-dt" dir="auto" datetime="2025-05-20T23:50:05-0500" data-timestamp="1000000013" data-date="May 20, 2025" data-time="11:50 PM" data-short="May '25" title="sample-title" itemprop="datePublished">Sample text</time>
 				</a>
 			</li>
 			
@@ -818,7 +831,7 @@
 
 	
 
-	<div class="bbCodeBlock bbCodeBlock--unfurl    js-unfurl fauxBlockLink" data-unfurl="true" data-result-id="17965004" data-url="https://other.example.test/ID37/ID38xxx" data-host="other.example.test" data-pending="false">
+	<div class="bbCodeBlock bbCodeBlock--unfurl    js-unfurl fauxBlockLink" data-unfurl="true" data-result-id="10000021" data-url="https://other.example.test/ID37/ID38xxx" data-host="other.example.test" data-pending="false">
 		<div class="contentRow">
 			
 				<div class="contentRow-figure contentRow-figure--fixedSmall js-unfurl-figure">
@@ -851,7 +864,7 @@
 
 	
 
-	<div class="bbCodeBlock bbCodeBlock--unfurl    js-unfurl fauxBlockLink" data-unfurl="true" data-result-id="17965186" data-url="https://filehost.example.test/f/SYNTH213" data-host="filehost.example.test" data-pending="false">
+	<div class="bbCodeBlock bbCodeBlock--unfurl    js-unfurl fauxBlockLink" data-unfurl="true" data-result-id="10000022" data-url="https://filehost.example.test/f/SYNTH213" data-host="filehost.example.test" data-pending="false">
 		<div class="contentRow">
 			
 				<div class="contentRow-figure contentRow-figure--fixedSmall js-unfurl-figure" style="display: none;">
@@ -903,7 +916,7 @@
 	
 		<div class="message-lastEdit">
 			
-				Sample text <time class="u-dt" dir="auto" datetime="2025-05-20T23:56:55-0500" data-timestamp="1747803415" data-date="May 20, 2025" data-time="11:56 PM" data-short="May '25" title="sample-title" itemprop="dateModified">Sample text</time>
+				Sample text <time class="u-dt" dir="auto" datetime="2025-05-20T23:56:55-0500" data-timestamp="1000000014" data-date="May 20, 2025" data-time="11:56 PM" data-short="May '25" title="sample-title" itemprop="dateModified">Sample text</time>
 			
 		</div>
 	
@@ -1102,7 +1115,7 @@
 			
 			<li class="u-concealed">
 				<a href="https://forum.example.test/threads/SYNTH9970/SYNTH8810" rel="nofollow" itemprop="url">
-					<time class="u-dt" dir="auto" datetime="2025-10-25T21:01:36-0500" data-timestamp="1761444096" data-date="Oct 25, 2025" data-time="9:01 PM" data-short="Oct '25" title="sample-title" itemprop="datePublished">Sample text</time>
+					<time class="u-dt" dir="auto" datetime="2025-10-25T21:01:36-0500" data-timestamp="1000000015" data-date="Oct 25, 2025" data-time="9:01 PM" data-short="Oct '25" title="sample-title" itemprop="datePublished">Sample text</time>
 				</a>
 			</li>
 			

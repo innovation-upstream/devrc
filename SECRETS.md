@@ -135,6 +135,16 @@ sha reference for no security gain. This is a decision, not an oversight.
 **Do not paste key material anywhere** — including into an issue explaining the
 finding. Reference by path and sha, as this table does.
 
+**The trade this section itself makes, stated so it is a decision and not an
+oversight:** publishing the exact paths and commit shas in a PUBLIC repo takes
+the cost of *rediscovering* these blobs to zero — anyone reading this file can
+`git show` them without searching. That is accepted because the adjudication
+above is that the keys are dead: there is nothing left to protect by obscurity,
+and the alternative — a finding that costs an hour every time someone stumbles
+on it — has already been paid at least twice. 🔴 **If any of these anchors ever
+turns out to be live, this section becomes the disclosure**, and the answer is
+rotation first, then editing this file — not the other way round.
+
 ### 🔴 The structural gap this exposed — every content gate reads HEAD only
 
 `scripts/tests/test_no_public_ips.py`, `test_no_client_hostnames.py`,
