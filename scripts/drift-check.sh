@@ -101,12 +101,15 @@
 #       installed there. A short, EXPLICITLY ENUMERATED set of settings.json keys
 #       is exempt from the key-set half — see "PER-HOST settings.json KEYS"
 #       below. Nothing else is, and an unknown key is never exempt.
-#   17  DRIFT — a SOURCE REPO devrc BUILDS A PACKAGE FROM is not current on that
-#       host: behind or ahead of its own upstream. 🔴 The SECOND thing git parity
-#       on devrc structurally cannot see. See "SOURCE-REPO PARITY" below. The
-#       number is high because 5/7/9/11 are reserved to ship.sh meanings this
-#       script does not take; its SEVERITY is set by the table, not by the digit,
-#       and it ranks between 8 and 14 — see severity() for why.
+#   17  DRIFT — the SOURCE SUBTREE a devrc package is BUILT FROM is not current
+#       on that host: behind or ahead of its branch's own upstream, counted with
+#       a PATHSPEC limited to that package's `srcDir`. 🔴 The SECOND thing git
+#       parity on devrc structurally cannot see — and 🔴 NOT the same thing as
+#       "the repo is behind", which is reported but never escalates. See
+#       "SOURCE-REPO PARITY" below. The number is high because 5/7/9/11 are
+#       reserved to ship.sh meanings this script does not take; its SEVERITY is
+#       set by the table, not by the digit, and it ranks between 8 and 14 — see
+#       severity() for why.
 #   16  ACTIONABLE, not drift — the fuzzyclaw PHASE-2 GATE has OPENED: zero rows
 #       still take their `age_secs` from fuzzyclaw alone, so the readers can be
 #       removed. See "THE FUZZYCLAW PHASE-2 GATE" below. It is the LEAST severe
@@ -137,22 +140,41 @@
 # fixed in nix/pkgs/tools/clawgatectl.nix (the version is now read out of the
 # compiled source); THIS is the other half — noticing the stale tree at all.
 #
+# 🔴 THE UNIT IS THE srcDir SUBTREE, NOT THE REPO — and getting that wrong makes
+# this a PERMANENTLY-RED GATE, which is worse than no gate because it trains
+# click-through on the one alert that has to keep its meaning. MEASURED
+# 2026-08-18 on the workbench: it was 1 commit behind `origin/trunk`, and that
+# commit was `2ce7cbdc fix(naida-ai-demo): raise memory limit 128Mi -> 512Mi` —
+# `git diff --name-only HEAD..origin/trunk -- containers/clawgate` is EMPTY, so it
+# cannot reach the built binary. Over the preceding 14 days that repo took 98
+# commits of which only 32 touched `containers/clawgate`; at ~7 commits/day the
+# host is behind almost continuously and roughly two thirds of those reds could
+# not affect any package devrc builds. So the verdict is computed with a PATHSPEC
+# limited to each package's own srcDir (`HEAD..@{u} -- <subtree>`, and the reverse
+# for ahead), and the repo-wide numbers are printed beside it as INFORMATION.
+#
 # 🔴 THE COVERED SET IS DERIVED, NEVER LISTED. The payload reads `nix/pkgs/**.nix`
-# out of the checkout it is examining and collects every `${workspace}/<name>` it
-# finds outside a comment, so a THIRD such package is covered the day it is
-# added. A hardcoded pair would have been correct on the day it was written and
-# silently incomplete afterwards, which is the same shape as the bug. The
-# derivation is pinned TWO-WAY by `test_drift_check.py::test_the_source_repo_set_
-# is_pinned_two_way_against_nix_pkgs` — it fails when the set GROWS or SHRINKS.
+# out of the checkout it is examining and collects every `${workspace}/<path>` it
+# finds outside a comment — the WHOLE path, so the repo and the subtree both fall
+# out of the same scan — and one repo may yield SEVERAL scopes. A THIRD such
+# package is covered the day it is added; a hardcoded pair would have been
+# correct on the day it was written and silently incomplete afterwards, which is
+# the same shape as the bug. The derivation is pinned TWO-WAY by
+# `test_drift_check.py::test_the_source_repo_set_is_pinned_two_way_against_nix_
+# pkgs` — it fails when the set GROWS or SHRINKS.
 #
 # 🔴 EXAMINED BESIDE STALE, again. `examined=N stale=M unmeasured=K` is the
-# claim; none of the three numbers means anything alone. A repo whose fetch
-# failed, whose branch has no upstream, or which is absent from this host is
-# UNMEASURED — never folded into "0 stale", because a checker wired to nothing
-# reports exactly that zero.
+# claim; none of the three numbers means anything alone, and the unit counted is
+# the BUILT-SOURCE SCOPE (repo count printed beside it). A scope whose repo is
+# absent, whose fetch failed, whose branch has no upstream, or whose pathspec
+# count will not parse is UNMEASURED — never folded into "0 stale", because a
+# checker wired to nothing reports exactly that zero.
 #
-# WHAT IS DRIFT HERE AND WHAT IS NOT — the line is "did we MEASURE a divergence":
-#   * behind / ahead of the branch's own upstream ................. rc 17
+# WHAT IS DRIFT HERE AND WHAT IS NOT — the line is "did we MEASURE a divergence
+# IN THE CODE THAT GETS COMPILED":
+#   * the package's own srcDir SUBTREE is behind / ahead of the branch's own
+#     upstream ..................................................... rc 17
+#   * the REPO is behind / ahead but the subtree is not .... reported, NOT drift.
 #   * repo ABSENT on this host ......... reported, NOT drift. The derivations
 #     guard on pathExists and simply omit the binary; a host without the checkout
 #     is a documented, tolerated state (see clawgatectl.nix's header).
@@ -169,13 +191,16 @@
 #     would be a permanently-red gate.
 #
 # 🔴 THE CROSS-HOST HALF IS INFORMATION ONLY, deliberately. The driver diffs the
-# two hosts' `FACT src-repos` lines and reports repos whose HEAD differs — the
-# most direct statement of "these two machines build different code" — but sets
-# NO rc, because whether a given HEAD is WRONG is already answered per host by
-# the upstream comparison, which has a defined correct answer. Two hosts sitting
-# on different branches of a shared development repo is normal, and a code that
-# fires on it would be a permanently-red gate. Like every cross-host claim here
-# it prints NOT COMPARED unless facts arrived from BOTH machines.
+# two hosts' `FACT src-repos` lines — 🔴 whose values are the srcDir SUBTREE's
+# TREE OID, not the repo HEAD, for the same reason the verdict is scoped: a repo
+# HEAD differs whenever the two hosts disagree about ANY commit, including cluster
+# manifests no package is built from. It reports scopes whose built tree differs —
+# the most direct statement of "these two machines compile different code" — but
+# sets NO rc, because whether a given tree is WRONG is already answered per host
+# by the upstream comparison, which has a defined correct answer. Two hosts
+# sitting on different branches of a shared development repo is normal, and a code
+# that fires on it would be a permanently-red gate. Like every cross-host claim
+# here it prints NOT COMPARED unless facts arrived from BOTH machines.
 #
 # READ-ONLY, like everything else in this file: `fetch`, `rev-parse`, `rev-list`,
 # `symbolic-ref`, `status`. It never pulls, never switches, never repairs.
@@ -792,6 +817,21 @@ echo "[$label] PARITY-RC=$p_rc"
 # nothing derived has to be interpolated into a payload that executes on the
 # other machine.
 #
+# 🔴 TWO UNITS, AND CONFLATING THEM MAKES THIS GATE PERMANENTLY RED.
+#   * a REPO is what gets FETCHED — one fetch, however many packages sit in it;
+#   * a SCOPE (`<repo>:<srcDir-subtree>`) is what gets JUDGED.
+# The scan therefore keeps the WHOLE `${workspace}/…` path, not just its first
+# component: `${workspace}/homelab-talos/containers/clawgate` is repo
+# `homelab-talos` with subtree `containers/clawgate`, while
+# `${workspace}/tmux-fuzzyclaw` is a repo whose srcDir IS its root — an empty
+# subtree, for which scope and repo coincide and behaviour is unchanged. One repo
+# may carry SEVERAL scopes and each is judged on its own.
+#
+# 🔴 NO `find`, for the same reason the parity walk avoids it: the laptop resolves
+# `find` to BUSYBOX, which does not implement `-xtype`, rejects it by printing
+# usage to stderr and EXITS 0 — a confident zero from a scan wired to nothing.
+# `shopt -s globstar` plus a glob is bash's own, and behaves identically on both.
+#
 # 🔴 COMMENTS ARE EXCLUDED BY TRUNCATION — each line is cut at its first `#`
 # before anything is read out of it, which covers a whole-line comment and a
 # trailing one with the same rule. clawgatectl.nix's own header discusses
@@ -802,11 +842,6 @@ echo "[$label] PARITY-RC=$p_rc"
 # stated rather than engineered away: a `#` inside a nix STRING would truncate
 # early. That direction UNDER-reports, and under-reporting is what the two-way
 # pin against the real nix/pkgs exists to catch.
-#
-# 🔴 NO `find`, for the same reason the parity walk avoids it: the laptop resolves
-# `find` to BUSYBOX, which does not implement `-xtype`, rejects it by printing
-# usage to stderr and EXITS 0 — a confident zero from a scan wired to nothing.
-# `shopt -s globstar` plus a glob is bash's own, and behaves identically on both.
 #
 # Loop and local variable names are UPPERCASE for the same reason they are in the
 # parity payload: the suite's reverse-PATH tokenizer reads a lowercase word in
@@ -823,23 +858,42 @@ repo="${DRIFT_REPO:-$HOME/workspace/devrc}"
 sfto="${DRIFT_SRC_FETCH_TIMEOUT:-30}"
 ssay() { echo "[$label] $*"; }
 
+# S_NAMES — deduped REPO roots, the unit that gets FETCHED.
+# S_SUBS  — deduped "<repo>:<subtree>" SCOPES, the unit that gets JUDGED. An
+#           empty subtree means that package srcDir IS the repo root.
 S_NAMES=""
-s_add() { # s_add <repo-name> — dedupe, as two derivations can share one repo
+S_SUBS=""
+
+s_add() { # s_add <repo> <subtree-or-empty>
   case " $S_NAMES " in
-    *" $1 "*) return 0 ;;
+    *" $1 "*) ;;
+    *) S_NAMES="$S_NAMES $1" ;;
   esac
-  S_NAMES="$S_NAMES $1"
+  case " $S_SUBS " in
+    *" $1:$2 "*) return 0 ;;
+  esac
+  S_SUBS="$S_SUBS $1:$2"
 }
 
-s_scan() { # s_scan <nix-file> — collect the workspace-relative repo names it uses
-  local LN REST NAME
+s_key() { # s_key <repo> <subtree-or-empty> — the scope name used in every message
+  if [ -z "$2" ]; then printf "%s" "$1"; else printf "%s/%s" "$1" "$2"; fi
+}
+
+s_scan() { # s_scan <nix-file> — collect the workspace-relative srcDir paths it names
+  local LN REST PP NAME SUB
   while IFS= read -r LN || [ -n "$LN" ]; do
     LN="${LN%%#*}"
     while : ; do
       case "$LN" in *\$\{workspace\}/*) ;; *) break ;; esac
       REST="${LN#*\$\{workspace\}/}"
-      NAME="${REST%%[!A-Za-z0-9._-]*}"
-      [ -n "$NAME" ] && s_add "$NAME"
+      PP="${REST%%[!A-Za-z0-9._/-]*}"
+      PP="${PP%/}"
+      NAME="${PP%%/*}"
+      case "$PP" in
+        */*) SUB="${PP#*/}" ;;
+        *)   SUB="" ;;
+      esac
+      [ -n "$NAME" ] && s_add "$NAME" "$SUB"
       LN="$REST"
     done
   done < "$1"
@@ -853,29 +907,47 @@ for F in "$repo"/nix/pkgs/**/*.nix; do
   s_scan "$F"
 done
 
+S_REPOS=0
 S_EXAMINED=0
 S_STALE=0
 S_UNMEASURED=0
 S_FACTS=""
 s_rc=0
 
+# 🔴 A repo we could not evaluate makes EVERY scope under it UNMEASURED — never
+# one silent pass hiding behind a repo whose fetch failed. The reason token also
+# becomes that scope FACT value, so the cross-host comparison cannot mistake
+# "we could not look" for agreement.
+s_unmeasured_scopes() { # s_unmeasured_scopes <repo> <reason-token>
+  local X SUBP K
+  for X in $S_SUBS; do
+    case "$X" in
+      "$1:"*) ;;
+      *) continue ;;
+    esac
+    SUBP="${X#*:}"
+    K="$(s_key "$1" "$SUBP")"
+    S_EXAMINED=$(( S_EXAMINED + 1 ))
+    S_UNMEASURED=$(( S_UNMEASURED + 1 ))
+    S_FACTS="$S_FACTS $K=$2"
+  done
+}
+
 for N in $S_NAMES; do
   SR="$HOME/workspace/$N"
-  S_EXAMINED=$(( S_EXAMINED + 1 ))
+  S_REPOS=$(( S_REPOS + 1 ))
 
   # A worktree checkout has .git as a FILE, a normal clone as a directory.
   if [ ! -e "$SR/.git" ]; then
     ssay "source repo $N: ABSENT at $SR — currency NOT evaluated."
     ssay "  nix/pkgs builds from it; this host cannot. Reported, NOT drift: the"
     ssay "  derivations guard on pathExists and simply omit the binary."
-    S_FACTS="$S_FACTS $N=ABSENT"
-    S_UNMEASURED=$(( S_UNMEASURED + 1 ))
+    s_unmeasured_scopes "$N" ABSENT
     continue
   fi
 
   SHA="$(git -C "$SR" rev-parse --short=12 HEAD 2>/dev/null)"
   [ -n "$SHA" ] || SHA=UNBORN
-  S_FACTS="$S_FACTS $N=$SHA"
   BR="$(git -C "$SR" symbolic-ref --quiet --short HEAD 2>/dev/null || echo DETACHED)"
 
   # DIRTY is reported for every present repo, INCLUDING a current one: these
@@ -897,7 +969,7 @@ for N in $S_NAMES; do
     printf "%s\n" "$FERR" | head -n 3 | sed "s|^|[$label]   git: |"
     ssay "  these repos are private and reached over ssh, and a systemd --user"
     ssay "  unit has no ssh-agent. NOT drift — and NOT a pass either."
-    S_UNMEASURED=$(( S_UNMEASURED + 1 ))
+    s_unmeasured_scopes "$N" FETCHFAILED
     continue
   fi
 
@@ -912,47 +984,82 @@ for N in $S_NAMES; do
   if [ -z "$UP" ]; then
     ssay "source repo $N: on branch $BR at $SHA — no upstream to compare against, currency NOT evaluated."
     ssay "  a detached HEAD or an untracked branch has no defined right answer."
-    S_UNMEASURED=$(( S_UNMEASURED + 1 ))
+    s_unmeasured_scopes "$N" NOUPSTREAM
     continue
   fi
 
+  # 🔴 REPO-WIDE COUNTS ARE INFORMATION, NEVER THE VERDICT. They are true and
+  # worth printing — but escalating on them made rc 17 fire on commits that
+  # cannot reach any built artefact, which is a permanently-red gate.
   CNT="$(git -C "$SR" rev-list --left-right --count "$UP...HEAD" 2>/dev/null)"
-  S_BEHIND="$(printf "%s" "$CNT" | awk "{print \$1}")"
-  S_AHEAD="$(printf "%s" "$CNT" | awk "{print \$2}")"
-  case "$S_BEHIND" in ""|*[!0-9]*) S_BEHIND=-1 ;; esac
-  case "$S_AHEAD" in ""|*[!0-9]*) S_AHEAD=-1 ;; esac
-  if [ "$S_BEHIND" = -1 ] || [ "$S_AHEAD" = -1 ]; then
-    ssay "source repo $N: could not compare $BR to $UP — currency NOT evaluated."
-    S_UNMEASURED=$(( S_UNMEASURED + 1 ))
-    continue
-  fi
+  R_BEHIND="$(printf "%s" "$CNT" | awk "{print \$1}")"
+  R_AHEAD="$(printf "%s" "$CNT" | awk "{print \$2}")"
+  case "$R_BEHIND" in ""|*[!0-9]*) R_BEHIND=-1 ;; esac
+  case "$R_AHEAD" in ""|*[!0-9]*) R_AHEAD=-1 ;; esac
+  ssay "source repo $N: on branch $BR at $SHA — repo-wide $R_BEHIND behind / $R_AHEAD ahead of $UP."
+  ssay "  repo-wide is INFORMATION ONLY. Only the built-source scope(s) below set the verdict."
 
-  if [ "$S_BEHIND" -gt 0 ] || [ "$S_AHEAD" -gt 0 ]; then
-    S_STALE=$(( S_STALE + 1 ))
-    ssay "🔴 DRIFT — source repo $N is NOT current: $S_BEHIND behind / $S_AHEAD ahead of $UP (on $BR at $SHA)."
-    ssay "  nix/pkgs builds a package from THIS TREE. Whatever version string that"
-    ssay "  package carries, the code in the binary is the code sitting here."
-    ssay "  fix (on that host): git -C $SR pull --ff-only   then a home-manager switch"
-    s_rc=17
-  else
-    ssay "source repo $N: current — $BR == $UP at $SHA."
-  fi
+  for X in $S_SUBS; do
+    case "$X" in
+      "$N:"*) ;;
+      *) continue ;;
+    esac
+    SUBP="${X#*:}"
+    K="$(s_key "$N" "$SUBP")"
+    S_EXAMINED=$(( S_EXAMINED + 1 ))
+
+    # The subtree TREE OID — what the two hosts are compared on, because it is
+    # what the derivation actually copies. A repo HEAD would report a difference
+    # for any commit anywhere in the repo.
+    TREE="$(git -C "$SR" rev-parse --short=12 "HEAD:$SUBP" 2>/dev/null)"
+    [ -n "$TREE" ] || TREE=NOSUBTREE
+    S_FACTS="$S_FACTS $K=$TREE"
+
+    if [ -z "$SUBP" ]; then
+      SB="$R_BEHIND"
+      SA="$R_AHEAD"
+    else
+      SB="$(git -C "$SR" rev-list --count "HEAD..$UP" -- "$SUBP" 2>/dev/null)"
+      SA="$(git -C "$SR" rev-list --count "$UP..HEAD" -- "$SUBP" 2>/dev/null)"
+    fi
+    case "$SB" in ""|*[!0-9]*) SB=-1 ;; esac
+    case "$SA" in ""|*[!0-9]*) SA=-1 ;; esac
+    if [ "$SB" = -1 ] || [ "$SA" = -1 ]; then
+      ssay "  BUILT SOURCE $K: could not compare $BR to $UP over that path — currency NOT evaluated."
+      S_UNMEASURED=$(( S_UNMEASURED + 1 ))
+      continue
+    fi
+
+    if [ "$SB" -gt 0 ] || [ "$SA" -gt 0 ]; then
+      S_STALE=$(( S_STALE + 1 ))
+      ssay "🔴 DRIFT — BUILT SOURCE $K is NOT current: $SB behind / $SA ahead of $UP (repo-wide $R_BEHIND behind / $R_AHEAD ahead)."
+      ssay "  nix/pkgs builds a package from THIS SUBTREE. Whatever version string"
+      ssay "  that package carries, the code in the binary is the code sitting here."
+      ssay "  fix (on that host): git -C $SR pull --ff-only   then a home-manager switch"
+      s_rc=17
+    elif [ "$R_BEHIND" -gt 0 ] || [ "$R_AHEAD" -gt 0 ]; then
+      ssay "  BUILT SOURCE $K is CURRENT ($SB behind / $SA ahead) — the repo-wide $R_BEHIND behind /"
+      ssay "  $R_AHEAD ahead touch nothing this package is built from. Information, NOT drift."
+    else
+      ssay "  BUILT SOURCE $K is CURRENT — $BR == $UP at $SHA."
+    fi
+  done
 done
 
 # 🔴 EXAMINED BESIDE STALE, and UNMEASURED beside both. A bare "0 stale" from a
-# scan that walked no repos, or one whose every fetch failed, is exactly what a
-# checker wired to nothing prints.
+# scan that walked no scopes, or one whose every fetch failed, is exactly what a
+# checker wired to nothing prints. The unit counted here is the BUILT-SOURCE
+# SCOPE, not the repo — the repo count is printed beside it.
 if [ "$S_EXAMINED" = 0 ]; then
   ssay "source repos: NOT EVALUATED — nix/pkgs under $repo names no \${workspace}/ source ($S_FILES nix file(s) scanned)."
   ssay "  a scan that examined nothing is not a clean scan; it is no scan."
 else
-  ssay "source repos: examined=$S_EXAMINED stale=$S_STALE unmeasured=$S_UNMEASURED ($S_FILES nix file(s) scanned)"
+  ssay "source repos: examined=$S_EXAMINED stale=$S_STALE unmeasured=$S_UNMEASURED built-source scope(s) over $S_REPOS repo(s) ($S_FILES nix file(s) scanned)"
 fi
 
 echo "[$label] FACT src-repos$S_FACTS"
 echo "[$label] SRC-RC=$s_rc"
 '
-
 # The payload actually shipped to each host: the git CHECK in a SUBSHELL (so its
 # many `exit`s end the subshell and not the run) followed by the parity scan and
 # the source-repo scan.
@@ -1362,7 +1469,8 @@ else
       echo "[srcrepo]   $N — named by nix/pkgs on only one host's checkout; not compared."
       S_DISAGREE=$(( S_DISAGREE + 1 ))
     elif [ "$LV" != "$RV" ]; then
-      echo "[srcrepo]   $N — $LOCAL_ROLE at $LV, $REMOTE_ROLE at $RV: the two hosts build DIFFERENT source."
+      echo "[srcrepo]   $N — $LOCAL_ROLE tree $LV, $REMOTE_ROLE tree $RV: the two hosts build DIFFERENT source."
+      echo "[srcrepo]     (srcDir subtree trees, not repo HEADs — a commit outside this path does not appear here.)"
       S_DISAGREE=$(( S_DISAGREE + 1 ))
     else
       S_AGREE=$(( S_AGREE + 1 ))
@@ -1527,7 +1635,8 @@ if [ "$rc" != 0 ]; then
   echo "  rc14=managed symlinks resolve to nothing (needs a home-manager switch on that host)"
   echo "  rc15=host parity: settings.json key sets / enabledPlugins differ, or enabled-but-not-installed"
   echo "  rc16=NOT drift: the fuzzyclaw phase-2 gate OPENED (0 rows depend on fuzzyclaw for an age)"
-  echo "  rc17=a SOURCE REPO nix/pkgs builds a package from is behind/ahead its upstream on that host"
+  echo "  rc17=the srcDir SUBTREE a nix/pkgs package is BUILT FROM is behind/ahead its own upstream"
+  echo "       on that host. A repo that is behind OUTSIDE every srcDir is reported, never rc 17."
   echo "       (ranks between rc8 and rc14 — the digit is not the severity; see severity() )"
 fi
 [ -n "$UNCHECKED" ] && echo "drift-check: NOT checked: $UNCHECKED"

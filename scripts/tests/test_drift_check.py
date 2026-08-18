@@ -3235,7 +3235,13 @@ def test_a_non_integer_phase2_timeout_is_rejected(fleet):
 #     makes "a third package is covered automatically" a fact instead of a hope.
 # --------------------------------------------------------------------------- #
 
-# 🔴 THE LEDGER. The set of repos devrc builds packages from, as of this commit.
+# 🔴 THE LEDGER. The BUILT-SOURCE SCOPES devrc compiles, as of this commit — the
+# full `${workspace}/…` path of each package's `srcDir`, NOT merely its repo. That
+# distinction is the whole point of the pathspec scoping: `homelab-talos` takes
+# ~7 commits a day of which only about a third touch `containers/clawgate`, so
+# escalating on the REPO made rc 17 a permanently-red gate (measured — see the
+# SOURCE-REPO PARITY block in drift-check.sh).
+#
 # Pinned as a LITERAL and cross-checked BOTH ways below — against an independent
 # Python extraction and against what the shell payload itself reports — so the
 # set fails the suite when it GROWS (a new source package nobody told the
@@ -3243,7 +3249,11 @@ def test_a_non_integer_phase2_timeout_is_rejected(fleet):
 # checker is now fetching a repo for no reason). Same discipline as
 # run-tests.sh's TARGET_FLOORS: a derived value, pinned two-way against the
 # thing it is derived from.
-EXPECTED_SOURCE_REPOS = {"homelab-talos", "tmux-fuzzyclaw"}
+EXPECTED_BUILT_SOURCE_SCOPES = {"homelab-talos/containers/clawgate", "tmux-fuzzyclaw"}
+
+# The repos those scopes live in — the unit that gets FETCHED (one fetch however
+# many packages sit in it), which is what the unit's time budget is a function of.
+EXPECTED_SOURCE_REPOS = {q.split("/", 1)[0] for q in EXPECTED_BUILT_SOURCE_SCOPES}
 
 NIX_PKGS = REPO_ROOT / "nix" / "pkgs"
 
@@ -3254,12 +3264,16 @@ def _oracle_source_repos():
     The payload walks with a bash glob and bash parameter expansion; this walks
     with pathlib.rglob and a regex. Two constructions that agree are evidence;
     one construction compared to itself is not (a shared blind spot survives).
+
+    Returns the FULL srcDir paths, because that — not the repo — is the unit the
+    verdict is computed over.
     """
     out = set()
     for p in sorted(NIX_PKGS.rglob("*.nix")):
         for ln in p.read_text().splitlines():
-            out.update(re.findall(r"\$\{workspace\}/([A-Za-z0-9._-]+)",
-                                  ln.split("#", 1)[0]))
+            for hit in re.findall(r"\$\{workspace\}/([A-Za-z0-9._/-]+)",
+                                  ln.split("#", 1)[0]):
+                out.add(hit.rstrip("/"))
     return out
 
 
@@ -3300,6 +3314,14 @@ def _nixpkg(fleet, filename, *names, repo=None):
     (d / filename).write_text("\n".join(body) + "\n")
 
 
+# The paths every fixture source repo carries. Two of them sit UNDER a srcDir a
+# package would be built from and one deliberately does not — that third path is
+# what makes "behind, but not in anything we compile" constructible, which is the
+# case the whole pathspec scoping exists for and which no single-file fixture can
+# express.
+SRC_FILES = ("f", "containers/clawgate/main.go", "clusters/naida/deploy.yaml")
+
+
 def _src_repo(fleet, name, *, branch="main", home=None):
     """A bare origin plus a clone at <home>/workspace/<name>, both on `branch`.
 
@@ -3311,9 +3333,13 @@ def _src_repo(fleet, name, *, branch="main", home=None):
     fleet._run(["git", "init", "-q", "--bare", "-b", branch, str(origin)])
     builder = fleet.root / ("srcbuild-%s-%s" % (home.name, name))
     fleet._run(["git", "clone", "-q", str(origin), str(builder)])
-    (builder / "f").write_text("base\n")
+    for rel in SRC_FILES:
+        f = builder / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("base\n")
     fleet.git(builder, "checkout", "-q", "-B", branch)
-    fleet.git(builder, "add", "f")
+    for rel in SRC_FILES:
+        fleet.git(builder, "add", rel)
     fleet.git(builder, "commit", "-q", "-m", "base")
     fleet.git(builder, "push", "-q", "-u", "origin", branch)
     clone = home / "workspace" / name
@@ -3323,10 +3349,21 @@ def _src_repo(fleet, name, *, branch="main", home=None):
     return clone, builder
 
 
-def _push_upstream(fleet, builder, branch="main", n=1):
+def _push_upstream(fleet, builder, branch="main", n=1, path="f"):
+    """Advance the upstream by `n` commits, each touching exactly `path`.
+
+    🔴 `path` is the load-bearing parameter. The verdict is computed with a
+    pathspec limited to the package's own srcDir, so "behind by N" is only
+    meaningful once you say WHERE — and a fixture that always writes the same
+    file cannot tell a commit that changes the built source from one that
+    cannot.
+    """
     for i in range(n):
-        (builder / "f").write_text("base\nupstream-%d\n" % i)
-        fleet.git(builder, "commit", "-q", "-am", "upstream %d" % i)
+        f = builder / path
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("base\nupstream-%d\n" % i)
+        fleet.git(builder, "add", path)
+        fleet.git(builder, "commit", "-q", "-m", "upstream %d (%s)" % (i, path))
     fleet.git(builder, "push", "-q", "origin", branch)
 
 
@@ -3341,7 +3378,7 @@ def test_a_source_repo_behind_its_upstream_is_rc17(fleet):
 
     rc, out = fleet.check("--no-remote")
     assert rc == 17, f"a stale source repo must be rc 17, got {rc}\n{out}"
-    assert "source repo homelab-talos is NOT current: 3 behind / 0 ahead" in out, out
+    assert "BUILT SOURCE homelab-talos is NOT current: 3 behind / 0 ahead" in out, out
     assert _src_counts(out) == (1, 1, 0), out
 
 
@@ -3373,7 +3410,7 @@ def test_a_current_source_repo_is_green(fleet):
 
     rc, out = fleet.check("--no-remote")
     assert rc == 0, f"a current source repo must not be drift, got {rc}\n{out}"
-    assert "source repo homelab-talos: current — trunk ==" in out, out
+    assert "BUILT SOURCE homelab-talos is CURRENT — trunk ==" in out, out
     assert _src_counts(out) == (1, 0, 0), out
 
 
@@ -3393,7 +3430,7 @@ def test_the_examined_count_is_reported_beside_the_stale_count(fleet):
     rc, out = fleet.check("--no-remote")
     assert rc == 17, out
     assert _src_counts(out) == (2, 1, 0), out
-    assert "source repo tmux-fuzzyclaw: current" in out, out
+    assert "BUILT SOURCE tmux-fuzzyclaw is CURRENT" in out, out
 
 
 def test_a_scan_that_found_no_source_packages_says_so_instead_of_reporting_zero(fleet):
@@ -3476,7 +3513,7 @@ def test_a_dirty_source_repo_is_reported_even_when_it_is_current(fleet):
     rc, out = fleet.check("--no-remote")
     assert rc == 0, f"a dirty source repo is not drift on its own, got {rc}\n{out}"
     assert "source repo homelab-talos: DIRTY — 2 path(s)" in out, out
-    assert "source repo homelab-talos: current" in out, out
+    assert "BUILT SOURCE homelab-talos is CURRENT" in out, out
     assert _src_counts(out) == (1, 0, 0), out
 
 
@@ -3514,14 +3551,21 @@ def test_the_source_repo_set_is_pinned_two_way_against_nix_pkgs(tmp_path):
     out = _run_srcrepo_payload(tmp_path, REPO_ROOT, home)
     reported = set(_src_facts(out))
 
-    assert _oracle_source_repos() == EXPECTED_SOURCE_REPOS, (
-        "nix/pkgs' `${workspace}/`-sourced repo set has CHANGED. Update "
-        "EXPECTED_SOURCE_REPOS — and check that the new repo is one the deadman "
-        "should be fetching on both hosts: %r" % (_oracle_source_repos(),)
+    assert _oracle_source_repos() == EXPECTED_BUILT_SOURCE_SCOPES, (
+        "nix/pkgs' `${workspace}/`-sourced SCOPE set has CHANGED. Update "
+        "EXPECTED_BUILT_SOURCE_SCOPES — and check that the new srcDir is one the "
+        "deadman should be judging on both hosts: %r" % (_oracle_source_repos(),)
     )
-    assert reported == EXPECTED_SOURCE_REPOS, (
+    assert reported == EXPECTED_BUILT_SOURCE_SCOPES, (
         "drift-check.sh's own scan disagrees with nix/pkgs: it reported %r\n%s"
         % (sorted(reported), out)
+    )
+    # 🔴 AND THE SUBTREE MUST SURVIVE THE ROUND TRIP. `homelab-talos` alone would
+    # satisfy a repo-level pin while silently restoring the whole-repo verdict
+    # that made this gate permanently red, so assert the path is still there.
+    assert any("/" in k for k in reported), (
+        "no scope carries a srcDir SUBTREE — the scan has collapsed back to repo "
+        "roots, which is the permanently-red-gate defect: %r" % sorted(reported)
     )
     # ...and it must have walked real files to get there. `0 scanned` producing
     # the right answer would mean the answer came from somewhere else.
@@ -3547,23 +3591,35 @@ def test_a_third_source_package_is_covered_with_no_change_to_the_checker(fleet):
 
     rc, out = fleet.check("--no-remote")
     assert rc == 17, f"the third package was not covered, got {rc}\n{out}"
-    assert "source repo some-new-repo is NOT current: 2 behind" in out, out
+    assert "BUILT SOURCE some-new-repo is NOT current: 2 behind" in out, out
     assert _src_counts(out) == (3, 1, 0), out
 
 
-def test_two_derivations_sharing_one_source_repo_are_fetched_once(fleet):
-    """clawgatectl's src is `${workspace}/homelab-talos/containers/clawgate` —
-    a SUBDIRECTORY. The repo root is what has a `.git`, and two derivations under
-    one repo must not be counted (or fetched) twice."""
+def test_two_subtrees_of_ONE_repo_are_judged_separately(fleet):
+    """clawgatectl's src is `${workspace}/homelab-talos/containers/clawgate` — a
+    SUBDIRECTORY. The repo root is what has a `.git` and gets fetched ONCE, but
+    each srcDir under it is its own verdict.
+
+    Here the upstream moves inside ONE of the two subtrees. A repo-level check
+    would call both stale (or, worse, one repo "stale" with no way to say which
+    package is affected); the scoped check must report exactly one.
+    """
     fleet.catch_up()
     _nixpkg(fleet, "a.nix", "homelab-talos/containers/clawgate")
-    _nixpkg(fleet, "b.nix", "homelab-talos/containers/other")
-    _src_repo(fleet, "homelab-talos", branch="trunk")
+    _nixpkg(fleet, "b.nix", "homelab-talos/clusters/naida")
+    _, b = _src_repo(fleet, "homelab-talos", branch="trunk")
+    _push_upstream(fleet, b, branch="trunk", n=2,
+                   path="containers/clawgate/main.go")
 
     rc, out = fleet.check("--no-remote")
-    assert rc == 0, out
-    assert _src_counts(out) == (1, 0, 0), out
-    assert set(_src_facts(out)) == {"homelab-talos"}, out
+    assert rc == 17, out
+    # ONE repo, TWO scopes, exactly ONE of them stale.
+    assert _src_counts(out) == (2, 1, 0), out
+    assert "over 1 repo(s)" in out, "the repo was walked more than once\n" + out
+    assert set(_src_facts(out)) == {
+        "homelab-talos/containers/clawgate", "homelab-talos/clusters/naida"}, out
+    assert "BUILT SOURCE homelab-talos/containers/clawgate is NOT current: 2 behind" in out, out
+    assert "BUILT SOURCE homelab-talos/clusters/naida is CURRENT" in out, out
 
 
 def test_two_source_repos_named_on_ONE_line_are_both_found(fleet):
@@ -3592,7 +3648,7 @@ def test_two_source_repos_named_on_ONE_line_are_both_found(fleet):
     rc, out = fleet.check("--no-remote")
     assert set(_src_facts(out)) == {"first-repo", "second-repo"}, out
     assert rc == 17, f"the SECOND repo on the line went unwatched, got {rc}\n{out}"
-    assert "source repo second-repo is NOT current: 4 behind" in out, out
+    assert "BUILT SOURCE second-repo is NOT current: 4 behind" in out, out
     assert _src_counts(out) == (2, 1, 0), out
 
 
@@ -3630,7 +3686,7 @@ def test_unpushed_devrc_commits_still_outrank_a_stale_source_repo(fleet):
 
     rc, out = fleet.check("--no-remote")
     assert rc == 8, f"rc 8 must outrank rc 17, got {rc}\n{out}"
-    assert "source repo homelab-talos is NOT current" in out, (
+    assert "BUILT SOURCE homelab-talos is NOT current" in out, (
         "the source-repo finding must still be PRINTED even when outranked\n" + out
     )
 
@@ -3665,7 +3721,7 @@ def test_the_rc17_legend_is_printed_with_the_verdict(fleet):
     rc, out = fleet.check("--no-remote")
     assert rc == 17, out
     assert "drift-check: DRIFT (rc=17)" in out, out
-    assert "rc17=a SOURCE REPO" in out, out
+    assert "rc17=the srcDir SUBTREE" in out, out
 
 
 # --- the cross-host half ----------------------------------------------------- #
@@ -3848,3 +3904,197 @@ def test_a_run_against_a_stale_source_repo_mutates_nothing(fleet):
     assert snapshot() == before, (
         "🔴 the deadman MUTATED a source repo — it may only fetch\n" + out
     )
+
+
+# --------------------------------------------------------------------------- #
+# 11b. THE VERDICT IS SCOPED TO THE srcDir SUBTREE, NOT THE REPO
+#
+# 🔴 rc 17 shipped escalating on WHOLE-REPO staleness, and that is a
+# permanently-red gate — the failure mode RULES.md names explicitly, because it
+# trains click-through on the one alert that has to keep its meaning. MEASURED on
+# the workbench 2026-08-18: it was 1 commit behind `origin/trunk`, and that commit
+# was `2ce7cbdc fix(naida-ai-demo): raise memory limit 128Mi -> 512Mi` —
+# `git diff --name-only HEAD..origin/trunk -- containers/clawgate` EMPTY, so it
+# cannot reach the built binary. Over the preceding 14 days that repo took 98
+# commits of which only 32 touched `containers/clawgate`; at ~7 commits/day the
+# host is behind nearly continuously and about two thirds of those reds could not
+# affect any package devrc builds.
+#
+# The two tests that matter are a PAIR, and neither is worth anything alone:
+#   * a commit OUTSIDE every srcDir must NOT escalate — the regression;
+#   * a commit INSIDE one still MUST — or the noise was "fixed" by breaking the
+#     detector, and every mutation would pass.
+# --------------------------------------------------------------------------- #
+def test_a_commit_OUTSIDE_every_srcDir_is_reported_but_is_NOT_rc17(fleet):
+    """🔴 THE REGRESSION, in the measured shape: the repo is behind, and not by
+    anything the package is compiled from.
+
+    The fixture mirrors the real one — a `containers/clawgate` srcDir and an
+    unrelated `clusters/naida` path — and the upstream commit lands only in the
+    latter. rc must stay 0, and the finding must still be legible: the repo-wide
+    count is printed, and the built source is stated to be CURRENT.
+    """
+    fleet.catch_up()
+    _nixpkg(fleet, "clawgatectl.nix", "homelab-talos/containers/clawgate")
+    _, b = _src_repo(fleet, "homelab-talos", branch="trunk")
+    _push_upstream(fleet, b, branch="trunk", n=1,
+                   path="clusters/naida/deploy.yaml")
+
+    rc, out = fleet.check("--no-remote")
+    assert rc == 0, (
+        "a commit that cannot reach the built binary escalated to rc %d — that is "
+        "the permanently-red gate\\n%s" % (rc, out))
+    # 🔴 Reported, not dropped: the repo-wide number is true and useful.
+    assert "repo-wide 1 behind / 0 ahead" in out, (
+        "the whole-repo count was silently dropped\\n" + out)
+    assert "repo-wide is INFORMATION ONLY" in out, out
+    assert "BUILT SOURCE homelab-talos/containers/clawgate is CURRENT (0 behind / 0 ahead)" in out, out
+    assert "touch nothing this package is built from" in out, out
+    assert _src_counts(out) == (1, 0, 0), out
+
+
+def test_a_commit_INSIDE_a_srcDir_is_still_rc17(fleet):
+    """🔴 THE OTHER HALF OF THE PAIR — and the guard against "fixing" the noise
+    by breaking the detector.
+
+    Byte-for-byte the fixture above except for WHICH path the upstream commit
+    touches. That is the only variable, so a green here plus a green above is a
+    statement about the pathspec and nothing else.
+    """
+    fleet.catch_up()
+    _nixpkg(fleet, "clawgatectl.nix", "homelab-talos/containers/clawgate")
+    _, b = _src_repo(fleet, "homelab-talos", branch="trunk")
+    _push_upstream(fleet, b, branch="trunk", n=1,
+                   path="containers/clawgate/main.go")
+
+    rc, out = fleet.check("--no-remote")
+    assert rc == 17, (
+        "a commit INSIDE the srcDir did not escalate — the detector is broken, "
+        "not merely quiet\\n%s" % out)
+    assert "BUILT SOURCE homelab-talos/containers/clawgate is NOT current: 1 behind / 0 ahead" in out, out
+    assert "repo-wide 1 behind / 0 ahead" in out, out
+    assert _src_counts(out) == (1, 1, 0), out
+
+
+def test_UNPUSHED_commits_inside_a_srcDir_still_escalate_and_outside_do_not(fleet):
+    """The AHEAD direction gets the same pathspec, in both directions.
+
+    Scoping only the behind half would leave un-pushed cluster manifests firing
+    rc 17 forever while un-pushed clawgate code was the case that mattered.
+    """
+    fleet.catch_up()
+    _nixpkg(fleet, "clawgatectl.nix", "homelab-talos/containers/clawgate")
+    clone, _ = _src_repo(fleet, "homelab-talos", branch="trunk")
+
+    # (a) un-pushed work OUTSIDE the srcDir — reported, not drift.
+    (clone / "clusters" / "naida" / "deploy.yaml").write_text("local edit\\n")
+    fleet.git(clone, "add", "clusters/naida/deploy.yaml")
+    fleet.git(clone, "commit", "-q", "-m", "local manifest tweak")
+    rc, out = fleet.check("--no-remote")
+    assert rc == 0, "un-pushed work outside every srcDir escalated\\n" + out
+    assert "repo-wide 0 behind / 1 ahead" in out, out
+    assert "BUILT SOURCE homelab-talos/containers/clawgate is CURRENT (0 behind / 0 ahead)" in out, out
+
+    # (b) now un-pushed work INSIDE it — same repo, same run shape, must fire.
+    (clone / "containers" / "clawgate" / "main.go").write_text("local code\\n")
+    fleet.git(clone, "add", "containers/clawgate/main.go")
+    fleet.git(clone, "commit", "-q", "-m", "un-pushed clawgate change")
+    rc, out = fleet.check("--no-remote")
+    assert rc == 17, "un-pushed work INSIDE the srcDir did not escalate\\n" + out
+    assert "BUILT SOURCE homelab-talos/containers/clawgate is NOT current: 0 behind / 1 ahead" in out, out
+
+
+def test_a_root_srcDir_package_is_unchanged_by_the_scoping(fleet):
+    """⚠ MOSTLY AN INVARIANT GUARD, and the distinction is worth stating.
+
+    MEASURED at b10c4ae: RED — but only on the message wording, which this commit
+    renamed. Its BEHAVIOURAL claim (rc 17 for a root-srcDir package that is one
+    commit behind) already held there, so this is not regression coverage for the
+    scoping defect. What it does hold is the boundary the fix could have broken:
+    tmux-fuzzyclaw's srcDir IS its repo root, its scope and its repo coincide, and
+    every commit anywhere in it genuinely does change what is built. A pathspec
+    accidentally applied to the root case would silence it, and that mutation is
+    in the battery.
+    """
+    fleet.catch_up()
+    _nixpkg(fleet, "tmux-fuzzyclaw.nix", "tmux-fuzzyclaw")
+    _, b = _src_repo(fleet, "tmux-fuzzyclaw")
+    _push_upstream(fleet, b, n=1, path="clusters/naida/deploy.yaml")
+
+    rc, out = fleet.check("--no-remote")
+    assert rc == 17, (
+        "a root-srcDir package stopped escalating — for it, EVERY commit is in "
+        "the built source\\n%s" % out)
+    assert "BUILT SOURCE tmux-fuzzyclaw is NOT current: 1 behind / 0 ahead" in out, out
+    assert set(_src_facts(out)) == {"tmux-fuzzyclaw"}, out
+
+
+def test_an_unmeasurable_repo_makes_EVERY_scope_under_it_unmeasured(fleet):
+    """🔴 One repo, several packages: a repo we could not evaluate must not let
+    any of its scopes read as a silent pass.
+
+    Without this, `examined` counted repos and a two-package repo whose fetch
+    failed contributed ONE unmeasured — leaving the second package accounted for
+    nowhere at all.
+    """
+    fleet.catch_up()
+    _nixpkg(fleet, "a.nix", "homelab-talos/containers/clawgate")
+    _nixpkg(fleet, "b.nix", "homelab-talos/clusters/naida")
+    clone, _ = _src_repo(fleet, "homelab-talos", branch="trunk")
+    fleet.git(clone, "remote", "set-url", "origin",
+              str(fleet.root / "definitely-not-a-repo"))
+
+    rc, out = fleet.check("--no-remote")
+    assert rc == 0, "an unreachable source remote is not drift\\n" + out
+    assert _src_counts(out) == (2, 0, 2), out
+    facts = _src_facts(out)
+    assert facts == {"homelab-talos/containers/clawgate": "FETCHFAILED",
+                     "homelab-talos/clusters/naida": "FETCHFAILED"}, out
+
+
+# --- the cross-host half, scoped the same way -------------------------------- #
+def _two_host_scoped(fleet, *, remote_path):
+    """Both hosts current with their own upstreams; the REMOTE carries one extra
+    pushed commit touching `remote_path`. The only variable is where it lands."""
+    fleet.catch_up()
+    _nixpkg(fleet, "clawgatectl.nix", "homelab-talos/containers/clawgate")
+    lstore = _mkhome(fleet.home, healthy=1)
+    _src_repo(fleet, "homelab-talos", branch="trunk")
+
+    rhome = fleet.root / "remote-home"
+    rhome.mkdir()
+    rstore = _mkhome(rhome, healthy=1, store=fleet.root / "remote-store")
+    rclone, _ = _src_repo(fleet, "homelab-talos", branch="trunk", home=rhome)
+    f = rclone / remote_path
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text("remote-only\\n")
+    fleet.git(rclone, "add", remote_path)
+    fleet.git(rclone, "commit", "-q", "-m", "remote work")
+    fleet.git(rclone, "push", "-q", "origin", "trunk")
+    _remote_running_the_real_payload(fleet, rhome, rstore)
+    return _parity(fleet, store=lstore, REMOTE_SSH="stub@example.invalid")
+
+
+def test_the_cross_host_comparison_ignores_divergence_OUTSIDE_every_srcDir(fleet):
+    """🔴 "The two hosts build DIFFERENT source" must mean DIFFERENT BUILT
+    SOURCE. Compared on repo HEADs it fired whenever the machines disagreed about
+    any commit at all — cluster manifests included — which is the same
+    permanently-noisy shape one level over.
+    """
+    rc, out = _two_host_scoped(fleet, remote_path="clusters/naida/deploy.yaml")
+    assert rc == 0, out
+    block = out.split("=== source-repo parity")[1]
+    assert "the two hosts build DIFFERENT source" not in block, (
+        "a divergence outside every srcDir was reported as different built "
+        "source\\n" + block)
+    assert "compared=1 same=1 differing=0" in block, block
+
+
+def test_the_cross_host_comparison_still_reports_a_differing_built_subtree(fleet):
+    """POSITIVE CONTROL for the test above — without it, `differing=0` is
+    indistinguishable from a comparator wired to nothing."""
+    rc, out = _two_host_scoped(fleet, remote_path="containers/clawgate/main.go")
+    block = out.split("=== source-repo parity")[1]
+    assert "the two hosts build DIFFERENT source" in block, block
+    assert "srcDir subtree trees, not repo HEADs" in block, block
+    assert "compared=1 same=0 differing=1" in block, block

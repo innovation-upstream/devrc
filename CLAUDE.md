@@ -56,10 +56,18 @@ there. Only what's specific to this repo, where a working tree is also a **deplo
   help and **exited 0**, and drift-check was green throughout. Both halves are now
   closed: `clawgatectl.nix` **reads its version out of the Go source it compiles**
   (never a literal — an unparseable source means no binary, not a wrong label), and
-  drift-check reports each source repo's currency per host. The covered set is
+  drift-check reports each package's source currency per host. The covered set is
   **derived from `nix/pkgs/` at scan time and pinned two-way by a test**, so a third
   such package is covered automatically. `absent` / `fetch failed` / `detached` are
   reported as **UNMEASURED**, never folded into a clean count.
+  🔴 **The unit is the package's own `srcDir` SUBTREE, not the repo** — escalating
+  on the repo made rc 17 a permanently-red gate. Measured: the workbench sat 18
+  commits behind `origin/trunk` with **0** of them touching `containers/clawgate`,
+  and over 14 days that repo took 98 commits of which only 32 could reach any
+  built artefact. So the verdict is a pathspec-limited count against the branch's
+  **own** upstream (never a hardcoded `main`/`trunk`), the repo-wide numbers are
+  printed beside it as information, and the cross-host comparison diffs **subtree
+  tree OIDs** rather than repo HEADs.
   🔴 **rc 16 is NOT drift** — it is the fuzzyclaw phase-2 gate reporting that zero rows
   still take their age from fuzzyclaw alone, i.e. the readers can now be deleted; the
   final line says `ACTIONABLE (not drift)` and it is the least severe code, so it can
