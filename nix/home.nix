@@ -2259,6 +2259,18 @@ in
   # over a run where nothing is wrong. `SuccessExitStatus = 16` on the service
   # below; the full argument is there.
   #
+  # 🔴 rc 17 DOES TOAST, and that is the point. It means a repo devrc BUILDS A
+  # PACKAGE FROM (`nix/pkgs/**` derivations with a `${workspace}/…` src) is not
+  # current on that host — so the binary it installs is old code under a
+  # current-looking version. Measured 2026-08-14: the laptop's homelab-talos was
+  # 24 commits behind, so its clawgatectl had no `task status`/`task comment`
+  # while devrc's version literal stamped 0.7.95 onto it; the command printed
+  # help and exited 0. This deadman was green on that host throughout. Unlike
+  # rc 13 and rc 16 this is a real divergence with a real fix (a pull plus a
+  # switch), so it must reach OnFailure like rc 8 does — it is NOT on
+  # SuccessExitStatus. It cannot become permanently red: `fetch failed`,
+  # `absent` and `detached` are all reported as UNMEASURED and set no code.
+  #
   # The service is emitted UNCONDITIONALLY (any host can run it by hand); only the
   # TIMER's timers.target wiring is gated — see enableDriftDeadman above.
   systemd.user.services.drift-check = {
@@ -2300,10 +2312,28 @@ in
       # -u drift-check | grep ACTIONABLE` is the check that works. Pinned by
       # `test_the_unit_does_not_fail_on_the_phase2_actionable_code`.
       SuccessExitStatus = 16;
-      # Two `git fetch`es plus one ssh round trip. The ConnectTimeout inside the
-      # script is 10s, so this ceiling only ever fires on a wedged fetch; the
-      # cgroup is killed and the timer re-arms on the next OnUnitActiveSec.
-      TimeoutStartSec = 180;
+      # 🔴 THE BUDGET IS A FUNCTION OF WHAT THE SCRIPT FETCHES, and that grew.
+      # It was 180 for "two `git fetch`es plus one ssh round trip" — the two
+      # devrc checkouts. The source-repo leg (rc 17) fetches EVERY repo nix/pkgs
+      # builds a package from, on BOTH hosts, so the worst case is now
+      #   2 hosts x N source repos x DRIFT_SRC_FETCH_TIMEOUT (30s)
+      # on top of the devrc fetches, the ssh round trip and the 60s phase-2 cap.
+      # At today's N=2 that is 120s of new worst case, which 180 could not
+      # absorb: the cgroup would be killed mid-run and the deadman would report
+      # NOTHING, on a schedule, looking like a unit that merely takes a while.
+      # 420 leaves headroom for one more source repo without another edit.
+      #
+      # This is a SEAM — the tunable lives in the script, the ceiling lives here,
+      # and neither file's tests owned their product. Pinned by
+      # `test_drift_check.py::test_the_unit_start_timeout_can_absorb_every_source
+      # _repo_fetch`, which recomputes it from both files and fails if either
+      # moves out from under the other.
+      #
+      # The ConnectTimeout inside the script is 10s and each source fetch is
+      # capped individually, so this ceiling only ever fires on several wedges at
+      # once; the cgroup is killed and the timer re-arms on the next
+      # OnUnitActiveSec.
+      TimeoutStartSec = 420;
       Environment = [
         # iproute2 is load-bearing, not incidental: `ip -4 -o addr show` is how
         # local_ipv4s identifies WHICH host this is (both report hostname `nixos`).

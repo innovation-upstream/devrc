@@ -109,6 +109,18 @@ is answered structurally, not by promising to keep it fresh: response bodies are
 prints a one-line `note: server X, clawgatectl built for Y` skew warning **to stderr** when the two
 disagree. What is NOT answered: a route the CLI has never heard of is still a route you must curl.
 
+🔴 **That skew note was MUTE for 19 hours on the laptop, and the argument above was wrong until
+2026-08-18.** `clawgatectl.nix` used to carry a hand-written `version` literal and stamp it with
+`-ldflags -X main.buildVersion=`, so on 2026-08-14 the laptop — whose `~/workspace/homelab-talos`
+was 24 commits behind — built a CLI with **no `task status` and no `task comment`** and the nix
+literal labelled it `0.7.95` anyway. `h.Version == buildVersion` compared equal, the note stayed
+silent, and `clawgatectl task status <id> in_progress` printed help and **exited 0**. The fix is
+in devrc: the version is now **read out of `cmd/clawgatectl/client.go`'s own `var buildVersion`**,
+so a stale checkout reports its real version and the skew note fires correctly. Two consequences
+worth knowing: **the note is only as good as the checkout's freshness** — `drift-check.sh` rc 17
+now reports a stale `homelab-talos` per host — and an **unparseable** `var buildVersion` line means
+the package is not installed at all (`clawgatectl: command not found`), never a guessed label.
+
 It reads `CLAWGATE_API_URL` + `CLAWGATE_HOOK_TOKEN` out of `~/.claude/clawgate.env` itself, so the
 `H="Authorization: Bearer $(grep '^CLAWGATE_HOOK_TOKEN=' … | cut -d= -f2)"` preamble that used to
 head every recipe in this skill **is gone** — the token never reaches argv (`/proc` is world
