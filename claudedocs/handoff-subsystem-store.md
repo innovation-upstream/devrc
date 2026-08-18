@@ -318,11 +318,32 @@ the day you ship.*
   `relay-firewall.sh` is not Flux-reconciled, so repo-green with a stale node is possible. Checked by
   hand on 2026-08-18 (`cmp`: node == `origin/trunk`; live kernel 39 rules, `dport 8102` present, unit
   active), which is a reading, not a control.
-- **Out of scope, measured and reported not acted on:** 12 further wildcard-bound listeners on that
-  node are reachable from off-mesh — node_exporter `9100`, kubelet `10250`, k0s `9443`, konnectivity
-  `8132`, MetalLB `9120`, calico `9091`, kube-proxy `10249`/`10256`, NodePort `30301`, bird BGP `179`,
-  dnsdist `853`/`5353`. The script's README has a follow-up table covering some; `9091`, `9120`,
-  `10249`, `10256`, `30301`, `5353` are **not** on it.
+- 🔴 **REACHABLE ≠ EXPOSED — and reporting them as one class overstated the finding.** 12 further
+  wildcard-bound listeners on that node answered from off-mesh, which I first wrote up as a single
+  exposure group. Probed individually, only **one** was an open door:
+  - `9100` node_exporter — **2,258 metric lines, no auth at all.** 🔴 **CLOSED 2026-08-18** by
+    homelab-infra **`#339`**: filesystem mounts, interfaces, kernel version, systemd unit names,
+    served to anyone who asked. Now dropped in v4 and v6; a plain `curl` times out where it
+    previously returned metrics.
+  - `10250` kubelet — `401` on `/metrics` **and** `/pods`; `9443` k0s — `404`. Reachable, gated.
+  - `853`/`5353` dnsdist — a real `LoadBalancer` (`nebula/dns-over-tls`), **deliberately public.**
+  - `9091` calico, `9120` MetalLB, `10249`/`10256` kube-proxy, `30301` a NodePort, `179` bird BGP —
+    still to review. Nothing in the production cluster declares `nodePort: 30301`, so identify what
+    holds it first; `179` peers over the private net, so it is likely droppable.
+- **The safe-to-close pattern `9100` established, worth reusing on the rest.** Find the consumer, read
+  the address it *actually* connects on, confirm it is not the public interface — **before** touching
+  the guard. Here: Prometheus Endpoints → `10.0.0.2:9100`/`10.0.0.4:9100`, `up=1` for both, with
+  `count(up)=25` as the query-shape control so the reading is a measurement and not an empty result
+  wearing a healthy face. Then verify AFTER against the unit's own `ActiveEnterTimestamp` — guard
+  applied `17:01:18Z`, scrapes at `17:02:18Z` and `17:02:48Z`, both `health=up`. 🔴 **"Still up" is
+  worthless without a before-reading and a timestamp proving the after-reading postdates the change.**
+- ⚠ **NOT A FLEET CLAIM, and this is the gap the `9100` work opened.** `relay-firewall` runs on
+  **`diffsona` only**. `tryonhaulcentral-k8s` has no `RELAY-GUARD` at all, and Prometheus scrapes a
+  node_exporter at `10.0.0.4:9100`, so the same unauthenticated daemon runs there. Its public exposure
+  is **unmeasured**: the repo records no public address for it, and reaching it needs either a host-key
+  decision (diffsona's `known_hosts` entry for `10.0.0.4` is stale — last written 2025-11-20, key since
+  changed) or a pod scheduled onto it. **Closing `9100` on one node reduces exposure; it does not close
+  the fleet.**
 - **Still unmeasured:** the **homelab** gateway's `:8102` (behind home NAT — a router port forward
   would be the equivalent hole), and the off-mesh probe from a production-cluster pod asserting
   `store.zacx.dev` resolves to a **Cloudflare** address (a hairpin or cluster DNS would otherwise hand
