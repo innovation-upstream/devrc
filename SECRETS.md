@@ -96,6 +96,75 @@ Do these **in order** relative to the first `home-manager switch`:
 
 ---
 
+## Dead credentials in reachable history — ALREADY ADJUDICATED, do not re-raise
+
+> **Read this before opening a 🔴 on `cmd/cluster/certs/`.** A credential-shaped
+> finding with no live trust costs an hour every time it is rediscovered. It has
+> been discovered at least twice. The determination below is the answer.
+
+**What is there.** Three genuine **P-256 (prime256v1) EC private keys**, in SEC1
+`EC PRIVATE KEY` PEM form, are present in this repo's **reachable history**:
+
+| path | added by | date |
+|---|---|---|
+| `cmd/cluster/certs/root.key` | `eb5d197b` | 2021-04-29 |
+| `cmd/cluster/certs/issuer.key` | `eb5d197b` (rotated in `d487dadb`) | 2021-04-29 |
+| `cmd/cluster/certs/ca-new.key` | `d487dadb` | 2022-03-16 |
+
+Because `issuer.key` was rotated rather than replaced in place, the two commits
+carry **four distinct key blobs** between them, all P-256. Both commits are
+**ancestors of `origin/main`** (`git merge-base --is-ancestor` — verified). The
+files are **absent from HEAD**.
+
+They are a **Linkerd** trust anchor, its identity issuer, and a rotated CA, added
+by `add scripts for dev cluster linkerd installation` and `rotate certs`
+respectively, for a shared **dev** cluster that no longer exists.
+
+**Why nothing is being done.** The operator has confirmed they do not use
+Linkerd, and that was verified independently rather than taken on trust:
+**0 Linkerd namespaces across all three reachable clusters** — homelab (50
+namespaces), workbench (25) and dpprod (143), 218 namespaces examined, measured
+2026-08-17. The non-zero namespace totals are the positive control: a scan
+returning 0/0/0 would be indistinguishable from a `kubectl` wired to nothing.
+
+So: **the anchors are dead, no rotation is required, and history is
+deliberately NOT being rewritten.** Rewriting it would not unpublish anything
+already cloned from a public repo, and would break every existing checkout and
+sha reference for no security gain. This is a decision, not an oversight.
+
+**Do not paste key material anywhere** — including into an issue explaining the
+finding. Reference by path and sha, as this table does.
+
+**The trade this section itself makes, stated so it is a decision and not an
+oversight:** publishing the exact paths and commit shas in a PUBLIC repo takes
+the cost of *rediscovering* these blobs to zero — anyone reading this file can
+`git show` them without searching. That is accepted because the adjudication
+above is that the keys are dead: there is nothing left to protect by obscurity,
+and the alternative — a finding that costs an hour every time someone stumbles
+on it — has already been paid at least twice. 🔴 **If any of these anchors ever
+turns out to be live, this section becomes the disclosure**, and the answer is
+rotation first, then editing this file — not the other way round.
+
+### 🔴 The structural gap this exposed — every content gate reads HEAD only
+
+`scripts/tests/test_no_public_ips.py`, `test_no_client_hostnames.py`,
+`test_no_captured_text.py` and `test_no_captured_markup.py` all enumerate tracked
+files via `git ls-files`. **None of them reads history.** That is exactly why
+these keys sat here for four to five years while every gate reported clean, and
+it means **a green run is a claim about HEAD and nothing else**.
+
+The limitation is not left as prose:
+`test_no_captured_markup.py::test_the_gate_is_blind_to_git_history` DRIVES it —
+it commits a finding, deletes it, and asserts the scan goes quiet while the
+content is still in the log. If someone later teaches these gates to read
+history, that test fails and this section is what must be updated.
+
+**Extending a gate to history is separate work** (different file enumeration,
+different allowlist keying, and a per-commit blob walk is not a per-run gate).
+It is deliberately not attempted here.
+
+---
+
 ## Source-of-truth items to verify (flagged for the owner)
 
 - `~/.config/bar/media.env` — the exact self-hosted service **URLs** (Prowlarr /

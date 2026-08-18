@@ -38,6 +38,15 @@ sits on a fixture whose own header says its content is invented. Adding one more
 message to any of them turns this gate red, and the fix is to re-read the new
 value, confirm it is invented too, and bump the count. That is the review this
 gate exists to force — not an inconvenience to route around by widening a pin.
+
+🔴 SCOPE — THIS GUARDS HEAD ONLY, and that blind spot has already cost something.
+This gate and all three siblings enumerate `git ls-files`; none reads history.
+Three genuine P-256 private keys sat in this repo's reachable history for four to
+five years while every gate reported clean. The determination (dead anchors, no
+rotation needed, history deliberately retained) is in `SECRETS.md` -> "Dead
+credentials in reachable history", and the blindness is DRIVEN rather than
+asserted by `test_no_captured_markup.py::test_the_gate_is_blind_to_git_history`.
+The `.html`/`.txt` half of this scan module is gated by that same file.
 """
 from __future__ import annotations
 

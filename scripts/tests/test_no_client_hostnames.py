@@ -23,6 +23,15 @@ Ask which of two kinds the value is.
 
 Adding an ALLOWLIST entry is the third option and it is the rare one — it is for
 a subdomain that is genuinely public and genuinely not topology.
+
+🔴 SCOPE — THIS GUARDS HEAD ONLY, and that has already cost something. Like all
+three of its siblings this enumerates `git ls-files` and never reads history;
+three genuine P-256 private keys sat in this repo's reachable history for four to
+five years while every gate reported clean. The determination (dead anchors, no
+rotation needed, history deliberately retained) is in `SECRETS.md` -> "Dead
+credentials in reachable history", and the blindness is DRIVEN rather than
+asserted by `test_no_captured_markup.py::test_the_gate_is_blind_to_git_history`.
+Extending a gate to history is SEPARATE work — read that section first.
 """
 from __future__ import annotations
 

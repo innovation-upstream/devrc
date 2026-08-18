@@ -154,7 +154,18 @@ from testlib.public_ip_scan import _is_skipped, repo_files  # noqa: E402
 __all__ = ["MESSAGE_KEYS", "CHAT_KEYS", "MIN_FREE_TEXT_CHARS",
            "MIN_CHAT_TEXT_CHARS", "JSONL_BARE_STRING_KEY", "min_chars_for",
            "is_free_text", "keypath_of", "scan_obj", "scan_file", "scan_repo",
-           "repo_files", "unparseable_files", "SCANNED_SUFFIXES"]
+           "repo_files", "unparseable_files", "SCANNED_SUFFIXES",
+           # --- the MARKUP half (`.html`/`.txt`); see its own banner below ---
+           "HTML_SUFFIXES", "TEXT_SUFFIXES", "MARKUP_SUFFIXES", "PERSON_ATTRS",
+           "PERSON_ITEMPROPS", "TEXT_ATTRS", "BLOCK_ELEMENTS",
+           "MIN_VOCABULARY_LINES", "MIN_VOCABULARY_PURITY", "MAX_RECORD_TOKENS",
+           "MIN_PROSE_RUNS", "DEPENDENCY_MANIFESTS",
+           "SIGNAL_HTML_TEXT", "SIGNAL_HTML_PROSE_RUNS",
+           "SIGNAL_HTML_UNTERMINATED_CODE",
+           "SIGNAL_TXT_LINE", "SIGNAL_TXT_VOCABULARY",
+           "visible_text_runs", "visible_text_blocks", "scan_html_file",
+           "scan_text_file", "scan_markup_file", "scan_markup_repo",
+           "markup_candidates", "markup_unparseable_files"]
 
 #: Only these are read. Captured prose arrives SERIALIZED; authored prose does
 #: not. Widening this to `.md` is the permanently-red gate described above.
@@ -568,4 +579,597 @@ def scan_repo(root: Path) -> list[tuple[str, str, int, int]]:
         rel = str(path.relative_to(root))
         for kp, count, max_len in scan_file(path):
             hits.append((rel, kp, count, max_len))
+    return sorted(hits)
+
+
+# =============================================================================
+# THE MARKUP HALF — `.html` and `.txt`
+# =============================================================================
+# 🔴 WHY THIS IS A SECOND SET OF RULES AND NOT A WIDER `SCANNED_SUFFIXES`.
+#
+# Everything above keys on `a MESSAGE-ISH KEY x a value that is FREE TEXT`, and
+# that conjunction is only available because JSON hands you keys. HTML and plain
+# text have no keys, so routing them through `SCANNED_SUFFIXES` would not widen
+# the gate — it would send them to `json.loads`, fail, and land every one of them
+# in `unparseable_files`. The suffix sets are therefore SEPARATE and the walk is
+# separate; what is SHARED is the part that must not fork: `repo_files`,
+# `_is_skipped` and `is_free_text`.
+#
+# WHY THESE TWO SUFFIXES, AND WHAT ACTUALLY OCCUPIES THEM
+# -------------------------------------------------------
+# Both were MEASURED against this tree before a rule was written, and the
+# measurement changed the design twice — the numbers are in
+# `scripts/tests/test_no_captured_markup.py`, which owns the pins.
+#
+#   * `.html` — the format a captured PAGE arrives in. This repo drives a real
+#     logged-in browser (`browser-bridge`) and files downloads by page context
+#     (`dl-router`), so a scraped page landing in a fixture directory is the
+#     likeliest future shape of this exposure, not a hypothetical.
+#
+#   * `.txt` — the format a captured LIST arrives in: a roster, a vocabulary, an
+#     export of names. 🔴 A ROSTER OF NAMES IS A MULTI-TOKEN SHAPE, and the first
+#     cut of this rule could not see it. MEASURED against that cut: 40 lines of
+#     `Firstname Lastname` -> 0 findings; 40 tab-separated `handle<TAB>email`
+#     rows -> 0; only 40 BARE handles fired. Every multi-token line broke the
+#     whitespace test (killing `<vocabulary>`) and sat under 60 chars (killing
+#     `<line>`), so the stated motivating case walked through. The unit is
+#     therefore a RECORD LINE — a data line that is not free text and carries at
+#     most `MAX_RECORD_TOKENS` whitespace-separated tokens — not a bare token.
+#
+# 🔴 THE PROSE RULE CANNOT SEE A LIST OF IDENTIFIERS, AND THAT IS WHY THERE ARE
+# TWO `.txt` RULES. `is_free_text` requires WHITESPACE, deliberately, so a path,
+# hash or token stays quiet. MEASURED: the one `.txt` in this tree that carries a
+# mined vocabulary — `scripts/repo-cos/tests/fixtures/initiatives_current_slugs.txt`
+# — has 144 data lines and **0 of them contain whitespace**. A line-oriented
+# free-text rule is structurally blind to it. Dropping the whitespace requirement
+# to reach it would fire on every `requirements.txt`, every lockfile and every
+# id list in the repo: the permanently-red gate `claude/RULES.md` forbids. So the
+# vocabulary rule keys on the SHAPE OF THE FILE (many distinct record lines)
+# instead of the shape of one value.
+#
+# 🔴 THE `.html` PROSE RULE KEYS ON A BLOCK, NOT ON A TEXT NODE — MEASURED WHY.
+# The first cut applied `is_free_text` to each whitespace-collapsed TEXT NODE, so
+# it keyed on the LONGEST UNINTERRUPTED RUN and was blind to prose the same size
+# delivered in pieces. MEASURED against that cut:
+#
+#     1 run  x 148 chars (total 148)  -> 1 finding
+#     3 runs x  70 chars (total 210)  -> 1 finding   (a single >60 run still fires)
+#     3 runs x  55 chars (total 165)  -> 0 findings
+#     5 runs x  40 chars (total 200)  -> 0 findings
+#     8 runs x  25 chars (total 200)  -> 0 findings
+#
+# One `<a>` mid-paragraph usually leaves a >60 run, so ordinary inline markup did
+# NOT generally defeat it — but a markup-rich post (several links, a `<br>`, an
+# `<em>`) fragments into runs that are ALL under the threshold, and then total
+# volume is irrelevant. MEASURED: a three-paragraph post of that shape, 105 chars
+# of prose per paragraph, scored 0 under the old rule and 3 under this one.
+#
+# So each text run is attributed to the INNERMOST enclosing `BLOCK_ELEMENTS`
+# element and the block's runs are re-joined before the threshold is applied.
+# Two consequences, both driven by tests rather than argued:
+#   * the old rule is a SUBSET — any run over the threshold sits inside a block
+#     at least that long — so nothing that used to fire stopped firing;
+#   * IDENTICAL repeated runs inside one block are DEDUPLICATED first. Re-joining
+#     exists to reassemble a sentence split by inline markup, and a split
+#     sentence yields DISTINCT fragments; a block that is one short label
+#     repeated is chrome. MEASURED on this tree without the dedupe: the forum
+#     fixture scored 5 and `embed-player-frame.html` 1, every one of them the
+#     placeholder `Sample text` repeated 5-7 times. With it: 1 and 0.
+#
+# The residue the block rule still cannot see is a page of SHORT STANDALONE
+# paragraphs — each its own block, each under the threshold. `SIGNAL_HTML_PROSE_RUNS`
+# is the second rule for exactly that shape; see `MIN_PROSE_RUNS`.
+#
+# WHAT THE MARKUP RULES DO **NOT** CATCH
+# ---------------------------------------
+# 🔴 NOT EXHAUSTIVE. A clean run means "no match for the shapes below".
+#
+#   * **Any other format.** `.md`, `.csv`, `.yaml`, `.tsv`, `.srt`/`.vtt`
+#     subtitles, a heredoc in a shell script, a Python list literal. `.md` is
+#     excluded for the same reason the JSON half excludes it: this repo is ~200
+#     files of authored markdown and a gate on it would be red forever.
+#   * **Short HTML prose, once BLOCK aggregation has been applied.** A block
+#     under `MIN_FREE_TEXT_CHARS` whose page has fewer than `MIN_PROSE_RUNS`
+#     wordy runs is not a finding, so a page of a handful of one-line chat
+#     messages still walks through both text rules. There is no `CHAT_KEYS`
+#     equivalent here because HTML gives no key to scope a lower threshold to,
+#     and applying 25 to every block in the tree fires on ordinary UI copy.
+#     MEASURED consequence: `forum-thread-page.html` has 108 visible text runs,
+#     the longest 48 chars and 102 of them the same 11-char placeholder; its one
+#     `<text>` finding is a BLOCK aggregate, and the file is otherwise seen by
+#     the ATTRIBUTE rules alone.
+#   * **A person attribute this enumeration does not name.** `PERSON_ATTRS` is an
+#     enumeration, not a pattern, for the same reason `MESSAGE_KEYS` is: a regex
+#     over `data-*` would drag in every framework hook in every fixture. The
+#     three major forum dialects (XenForo, Discourse, Reddit) are enumerated; a
+#     fourth is not.
+#   * **Text in an attribute not in `TEXT_ATTRS`**, and text inside `<script>` or
+#     `<style>` — a JSON-LD blob or an inlined state object is skipped as code.
+#     🔴 This is a real hole: `<script type="application/ld+json">` is exactly
+#     where a captured page puts its structured author metadata. Closing it means
+#     parsing embedded JSON, which is the JSON half's job on a file it never
+#     sees. Named, not fixed. What IS closed is the *unterminated* case: a
+#     `<script>` with no `</script>` puts `html.parser` in CDATA mode for the
+#     whole remainder of the document, which was a one-tag way to hide a captured
+#     page exactly as `<template>` would have been — it is now the
+#     `SIGNAL_HTML_UNTERMINATED_CODE` finding rather than silence.
+#   * **An HTML COMMENT.** Deliberate, not an oversight: `forum-thread-page.html`
+#     carries 7 documentation comments of its own and this repo's fixtures
+#     annotate themselves that way, so scanning comments would red the gate on
+#     its own documentation. The cost is that a 148-char sentence inside
+#     `<!-- ... -->` is invisible — MEASURED, and pinned in both directions.
+#   * **A `.txt` comment.** Everything from a `#` to end of line is treated as
+#     authored, so captured text pasted after a `#` is invisible.
+#   * **A `.txt` named as a dependency manifest** (`DEPENDENCY_MANIFESTS`): the
+#     vocabulary rule is a SHAPE rule and a 30-package `requirements.txt` has the
+#     shape of a roster exactly. Those basenames are exempted from the vocabulary
+#     rule so an ordinary dependency bump is not a gate review; the cost is that
+#     a captured roster committed under one of those literal names is invisible.
+#   * **A vocabulary below the size floor**, or one mixed with enough non-record
+#     lines to fall under the purity floor, or whose lines carry more than
+#     `MAX_RECORD_TOKENS` tokens.
+#   * **The VALUE**, always: like the JSON half, these functions return counts,
+#     lengths and enumerated signal tokens only. The RELPATH is echoed verbatim.
+#
+# A file this scan cannot DECODE or PARSE is NOT a silent pass: it is reported by
+# `markup_unparseable_files`, the exact analogue of the JSON half's
+# `unparseable_files`, and the gate pins that list at zero. MEASURED why it must
+# be: the same captured page saved UTF-8 scored 3 signals and saved windows-1252
+# scored 0, while still counting toward the candidates-walked floor.
+#
+# Like both siblings this guards HEAD only — see `test_no_captured_markup.py`,
+# which spells out what that structurally cannot see.
+
+import html as _html                                            # noqa: E402
+from html.parser import HTMLParser                              # noqa: E402
+
+#: The markup suffixes, kept apart from `SCANNED_SUFFIXES` (see the banner).
+HTML_SUFFIXES = frozenset({".html", ".htm"})
+TEXT_SUFFIXES = frozenset({".txt"})
+MARKUP_SUFFIXES = HTML_SUFFIXES | TEXT_SUFFIXES
+
+#: Element content that is CODE, not prose. Narrow on purpose: `<template>` is
+#: NOT here, because its contents are ordinary inert markup and skipping it would
+#: hand an author a one-tag way to hide a captured page from this gate. An
+#: UNTERMINATED one of these is the same hazard through a different door and is
+#: reported as `SIGNAL_HTML_UNTERMINATED_CODE` rather than skipped in silence.
+_NON_PROSE_ELEMENTS = frozenset({"script", "style"})
+
+#: 🔴 THE PROSE UNIT. A text run is attributed to the INNERMOST open element from
+#: this set, and the block's DISTINCT runs are re-joined before the free-text
+#: threshold is applied — see the banner for the measurement that forced it.
+#: These are the HTML block-level containers: an element from this set starts a
+#: new paragraph, everything else (`a`, `em`, `span`, `strong`, `code`, `br`, …)
+#: is inline and must NOT split a sentence. `body` is here so that stray text
+#: with no block wrapper is still aggregated instead of being lost.
+BLOCK_ELEMENTS = frozenset({
+    "address", "article", "aside", "blockquote", "body", "caption", "dd",
+    "details", "div", "dl", "dt", "fieldset", "figcaption", "figure", "footer",
+    "form", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hgroup", "li",
+    "main", "nav", "ol", "p", "pre", "section", "summary", "table", "tbody",
+    "td", "template", "tfoot", "th", "thead", "title", "tr", "ul",
+})
+
+#: 🔴 AN ENUMERATION, NOT A PATTERN. Each entry is an attribute whose VALUE
+#: identifies a person, and each says which markup dialect puts it there. The
+#: value is never reported — only that the attribute is present and how many
+#: times — because a user id IS the disclosure.
+PERSON_ATTRS: dict[str, str] = {
+    "data-user-id": "XenForo/Discourse/Reddit: the numeric account id of a poster",
+    "data-userid": "the same field under the unhyphenated spelling",
+    "data-user": "the same, carrying a handle rather than an id",
+    "data-username": "an account handle verbatim",
+    "data-author": "the post author, as a handle or a slug",
+    "data-author-id": "the author's numeric id",
+    "data-member-id": "the forum-member spelling of the same",
+    "data-poster-id": "the imageboard/forum spelling of the same",
+    "data-account-id": "the generic account spelling",
+    "data-profile-id": "a social-profile identifier",
+    "data-handle": "an @handle as a first-class attribute",
+    # --- the two dialects the XenForo-shaped list above could not see --------- #
+    # MEASURED: before these three entries a Discourse capture and a Reddit
+    # capture each produced NO person signal at all, and those are the other two
+    # major forum dialects a scrape in this repo would arrive in.
+    "data-user-card": "Discourse: the poster's handle, on every avatar and byline",
+    "data-author-fullname": "Reddit: the AUTHOR's account fullname (`t2_…`)",
+    "data-fullname": (
+        "Reddit: the thing fullname. On a profile capture it IS the account; on "
+        "a listing it names the post. Enumerated anyway — a page carrying it is "
+        "a Reddit capture either way, which is the disclosure this gate exists "
+        "to see"),
+    "rel": "only when it is `author` — see `_PERSON_REL_VALUES`",
+}
+
+#: `rel` is a finding ONLY for these values. `rel="stylesheet"` is on every page
+#: in this tree, so an unconditional `rel` entry would be red forever — the same
+#: scoping `_MANIFEST_SCOPED_KEYS` applies to `description` in the JSON half.
+_PERSON_REL_VALUES = frozenset({"author"})
+
+#: Microdata/RDFa `itemprop` values that name a PERSON. schema.org's `name`
+#: inside an `itemscope` of type Person is how a forum marks up its post authors,
+#: and it is the shape `forum-thread-page.html` actually carries.
+PERSON_ITEMPROPS: dict[str, str] = {
+    "name": "schema.org Person.name — the author's display name",
+    "alternatename": "schema.org Person.alternateName — a handle or nickname",
+    "givenname": "schema.org Person.givenName",
+    "familyname": "schema.org Person.familyName",
+    "author": "schema.org author, when spelled as an itemprop",
+    "creator": "the same under schema.org's other spelling",
+}
+
+#: Attributes whose value is PROSE rather than an identifier, so the free-text
+#: threshold applies to them exactly as it does to a text node. `content` is the
+#: one that matters: `<meta property="og:description">` is where a captured page
+#: keeps a post excerpt, and it is invisible to a text-node walk.
+TEXT_ATTRS: dict[str, str] = {
+    "content": "the `<meta>` payload — og:description/og:title carry page prose",
+    "alt": "alternative text for an image, written as a sentence",
+    "title": "the tooltip/advisory text, frequently a full caption",
+    "aria-label": "an accessible name, written as prose",
+    "placeholder": "form placeholder copy",
+    "data-caption": "a lightbox/gallery caption — verbatim page content",
+}
+
+#: Signal tokens. 🔴 Every token is drawn from an ENUMERATION in this module and
+#: never from the document, so a signal can no more leak data than a count can.
+SIGNAL_HTML_TEXT = "<text>"
+SIGNAL_HTML_PROSE_RUNS = "<prose-runs>"
+SIGNAL_HTML_UNTERMINATED_CODE = "<unterminated-code>"
+SIGNAL_TXT_LINE = "<line>"
+SIGNAL_TXT_VOCABULARY = "<vocabulary>"
+
+#: 🔴 The SECOND `.html` prose rule: how many DISTINCT wordy runs a page carries.
+#: The block rule keys on one paragraph's length, so a page of short standalone
+#: paragraphs — a chat or message export — is invisible to it whatever the
+#: volume. A run counts here when it holds whitespace and clears the SHARED
+#: `MIN_CHAT_TEXT_CHARS`; the floor is on the COUNT, which is what stops 25 from
+#: firing on ordinary UI copy the way a per-run threshold of 25 would.
+#:
+#: MEASURED over the 19 tracked `.html` in this tree: the maximum is 5, on the
+#: two extension options pages, whose help text is authored prose. 10 is DOUBLE
+#: that — those pages can grow by 100% before a pin is needed — and a captured
+#: chat or message dump of ten lines still fires. The forum fixture scores 2 and
+#: a three-poster Discourse capture 3, so this rule is not what sees either;
+#: that is deliberate, and the block rule and the attribute rules are.
+MIN_PROSE_RUNS = 10
+
+#: 🔴 The vocabulary floor. MEASURED on this tree: the slugs fixture has 144
+#: record data lines; the next-largest `.txt` has 23 data lines and 0 records.
+#: 25 sits in that gap with room on both sides — high enough that a short id list
+#: (a 4-line `requirements.txt`) is not a finding, low enough that a roster is. A
+#: floor set at the occupant's own count would red the gate the day a line is
+#: deleted.
+MIN_VOCABULARY_LINES = 25
+
+#: The fraction of data lines that must be RECORD lines for the file to be a LIST
+#: rather than a document that happens to contain some. MEASURED: the slugs
+#: fixture is 1.0; `MANIFEST.txt` is 0.0.
+MIN_VOCABULARY_PURITY = 0.9
+
+#: 🔴 The width of a RECORD line. A roster row is `Firstname Lastname`, a
+#: `handle<TAB>email` pair, or `name, city, role` — a small, fixed number of
+#: fields. A sentence is not. MEASURED: at 3 the three roster shapes in the
+#: banner all fire and nothing in this tree moves; the free-text test is applied
+#: FIRST regardless, so a 3-token line that is already prose (a 60-char
+#: `<line>` finding) is never counted as a record.
+MAX_RECORD_TOKENS = 3
+
+#: 🔴 AN ENUMERATION OF BASENAMES, NOT A PATTERN. A dependency manifest has the
+#: shape of a roster — many distinct short record lines — so without this a
+#: 30-package `requirements.txt` is 30 findings. MEASURED on the shape that would
+#: land next: 30 `package==1.0.n` lines scored `<vocabulary> 30` before this
+#: exemption and 0 after. The named cost is in the blind-spot list: a captured
+#: roster committed under one of these literal basenames is invisible.
+DEPENDENCY_MANIFESTS = frozenset({
+    "requirements.txt",         # pip, and the only one this tree carries today
+    "requirements-dev.txt",     # the conventional dev split of the same
+    "requirements-test.txt",    # and the test split
+    "constraints.txt",          # pip's version-pin companion file
+})
+
+#: Everything from a `#` to end of line is authored by convention.
+_TXT_COMMENT = re.compile(r"#.*$")
+
+
+class _VisibleText(HTMLParser):
+    """Collect text nodes outside `_NON_PROSE_ELEMENTS`, grouped into BLOCKS,
+    plus the attribute occurrences the rules above enumerate.
+
+    Built on `html.parser` rather than a regex split on `<[^>]*>`: an attribute
+    value containing `<` or `>` (a `title="a > b"` is ordinary) desynchronises a
+    regex split and silently moves the boundary between markup and text, which
+    would mean this gate reporting a number it cannot justify.
+
+    🔴 IT ALSO DEPENDS ON `html.parser` NORMALISING CASE. Tag names and attribute
+    NAMES arrive already lower-cased, which is why `tag in BLOCK_ELEMENTS` and
+    `name in PERSON_ATTRS` need no fold of their own — an added `.lower()` there
+    is dead code that reads like a guard. Attribute VALUES are NOT normalised, so
+    the two value comparisons below do fold explicitly. The dependency is pinned
+    by `test_html_parser_normalises_tag_and_attribute_NAMES`.
+    """
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.runs: list[str] = []
+        #: one entry per closed block element, its DISTINCT runs re-joined
+        self.blocks: list[str] = []
+        #: signal -> list of value LENGTHS (never the values)
+        self.attr_hits: dict[str, list[int]] = {}
+        self._skip = 0
+        #: accumulator stack; index 0 is the implicit document-level block
+        self._stack: list[list[str]] = [[]]
+
+    # -- elements ---------------------------------------------------------- #
+    def handle_starttag(self, tag, attrs):
+        if tag in _NON_PROSE_ELEMENTS:
+            self._skip += 1
+        if tag in BLOCK_ELEMENTS:
+            self._stack.append([])
+        self._note_attrs(attrs)
+
+    def handle_startendtag(self, tag, attrs):
+        self._note_attrs(attrs)
+
+    def handle_endtag(self, tag):
+        if tag in _NON_PROSE_ELEMENTS and self._skip:
+            self._skip -= 1
+        if tag in BLOCK_ELEMENTS and len(self._stack) > 1:
+            self._close_block()
+
+    # -- data -------------------------------------------------------------- #
+    def handle_data(self, data):
+        if self._skip:
+            return
+        run = " ".join(_html.unescape(data).split())
+        if run:
+            self.runs.append(run)
+            self._stack[-1].append(run)
+
+    # -- blocks ------------------------------------------------------------ #
+    def _close_block(self):
+        """Pop one accumulator and record its DISTINCT runs, in first-seen order.
+
+        The dedupe is the difference between "a paragraph split by inline markup"
+        and "a container holding the same short label seven times"; the banner
+        carries the measurement that made it necessary.
+        """
+        seen: set[str] = set()
+        kept = [r for r in self._stack.pop()
+                if not (r in seen or seen.add(r))]
+        if kept:
+            self.blocks.append(" ".join(kept))
+
+    def close(self):
+        super().close()
+        while self._stack:
+            self._close_block()
+
+    @property
+    def unterminated_code(self) -> bool:
+        """A `<script>`/`<style>` that never closed swallowed the rest of the
+        document. `html.parser` stays in CDATA mode to EOF, so every text node
+        and every attribute after it is invisible — the same one-tag hide that
+        keeping `<template>` out of `_NON_PROSE_ELEMENTS` refuses to allow."""
+        return self._skip > 0
+
+    # -- attributes -------------------------------------------------------- #
+    def _record(self, signal: str, length: int):
+        self.attr_hits.setdefault(signal, []).append(length)
+
+    def _note_attrs(self, attrs):
+        for name, raw_value in attrs:
+            value = _html.unescape(raw_value or "").strip()
+            if not value:
+                continue          # a bare or empty attribute carries nothing
+            if name in PERSON_ATTRS:
+                if name != "rel" or value.lower() in _PERSON_REL_VALUES:
+                    self._record(f"@person:{name}", len(value))
+            if name == "itemprop" and value.lower() in PERSON_ITEMPROPS:
+                self._record(f"@itemprop:{value.lower()}", len(value))
+            if name in TEXT_ATTRS and is_free_text(value):
+                self._record(f"@text:{name}", len(value))
+
+
+def _parsed(markup: str) -> _VisibleText | None:
+    """A fed-and-closed parser, or None if `html.parser` raised.
+
+    None is the markup half's `_parse(...) is None`: the file was NOT scanned,
+    and `markup_unparseable_files` reports it rather than the scan returning an
+    empty list that reads as clean.
+    """
+    p = _VisibleText()
+    try:
+        p.feed(markup)
+        p.close()
+    except Exception:            # a malformed page must not break CI for everyone
+        return None
+    return p
+
+
+def visible_text_runs(markup: str) -> list[str]:
+    """Whitespace-collapsed text nodes of `markup`, outside script/style.
+
+    Exposed because the `.html` text rule is the half most likely to be argued
+    about, and an argument about a number should be settleable by running the
+    function that produced it. `visible_text_blocks` is what the rule ACTUALLY
+    keys on; this is the finer unit the block aggregate is built from.
+    """
+    p = _parsed(markup)
+    return [] if p is None else p.runs
+
+
+def visible_text_blocks(markup: str) -> list[str]:
+    """The per-block aggregates the `.html` prose rule keys on.
+
+    One entry per block element that held text, its DISTINCT direct runs
+    re-joined with a space, in document order of block CLOSE.
+    """
+    p = _parsed(markup)
+    return [] if p is None else p.blocks
+
+
+def _wordy_runs(runs) -> set[str]:
+    """The DISTINCT runs that look like a sentence at the CHAT threshold.
+
+    Distinct, because a repeated label is one piece of copy however many times a
+    template emits it — the same reason `_close_block` deduplicates.
+    """
+    return {r for r in runs
+            if len(r) >= MIN_CHAT_TEXT_CHARS and any(c.isspace() for c in r)}
+
+
+def _scan_markup_html(markup: str) -> list[tuple[str, int, int]] | None:
+    """`(signal, count, max_len)` for one HTML document, or None if unparseable."""
+    p = _parsed(markup)
+    if p is None:
+        return None
+    found: dict[str, list[int]] = dict(p.attr_hits)
+    prose = [len(b) for b in p.blocks if is_free_text(b)]
+    if prose:
+        found[SIGNAL_HTML_TEXT] = prose
+    wordy = _wordy_runs(p.runs)
+    if len(wordy) >= MIN_PROSE_RUNS:
+        found[SIGNAL_HTML_PROSE_RUNS] = [len(r) for r in wordy]
+    if p.unterminated_code:
+        found[SIGNAL_HTML_UNTERMINATED_CODE] = [len(markup)]
+    return sorted((sig, len(lens), max(lens)) for sig, lens in found.items())
+
+
+def scan_html_file(path: Path) -> list[tuple[str, int, int]]:
+    """`(signal, count, max_len)` for one HTML file, sorted. NEVER a value.
+
+    An unreadable or unparseable file returns `[]` here and is named by
+    `markup_unparseable_files` — the empty list alone is not the report.
+    """
+    try:
+        markup = path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError):
+        return []
+    return _scan_markup_html(markup) or []
+
+
+def _txt_data_lines(text: str) -> list[str]:
+    """Non-blank, non-comment lines, stripped. The `.txt` unit of measurement."""
+    out = []
+    for line in text.splitlines():
+        body = _TXT_COMMENT.sub("", line).strip()
+        if body:
+            out.append(body)
+    return out
+
+
+def _is_record_line(line: str) -> bool:
+    """A roster ROW: not prose, and at most `MAX_RECORD_TOKENS` fields.
+
+    🔴 The free-text test runs FIRST and is what keeps this from swallowing the
+    `<line>` rule's occupant: a 60-char three-word sentence is prose, not a
+    record. Below that length the two rules genuinely overlap, and they are
+    independent by design — a short two-column export is a roster.
+    """
+    if is_free_text(line):
+        return False
+    return 1 <= len(line.split()) <= MAX_RECORD_TOKENS
+
+
+def _scan_markup_text(text: str, name: str) -> list[tuple[str, int, int]]:
+    """`(signal, count, max_len)` for one `.txt` body, sorted. NEVER a value.
+
+    Two independent rules, because one cannot see the other's occupant:
+
+      * `<line>`       — a data line that is free text (prose pasted into a txt)
+      * `<vocabulary>` — the FILE is a list of RECORD lines (a roster, an export)
+    """
+    data = _txt_data_lines(text)
+    found: list[tuple[str, int, int]] = []
+
+    prose = [len(line) for line in data if is_free_text(line)]
+    if prose:
+        found.append((SIGNAL_TXT_LINE, len(prose), max(prose)))
+
+    if data and name.lower() not in DEPENDENCY_MANIFESTS:
+        records = [line for line in data if _is_record_line(line)]
+        distinct = set(records)
+        if (len(distinct) >= MIN_VOCABULARY_LINES
+                and len(records) / len(data) >= MIN_VOCABULARY_PURITY):
+            found.append((SIGNAL_TXT_VOCABULARY, len(distinct),
+                          max(len(line) for line in distinct)))
+    return sorted(found)
+
+
+def scan_text_file(path: Path) -> list[tuple[str, int, int]]:
+    """`(signal, count, max_len)` for one `.txt`, sorted. NEVER a value.
+
+    An undecodable file returns `[]` here and is named by
+    `markup_unparseable_files` — the empty list alone is not the report.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError):
+        return []
+    return _scan_markup_text(text, path.name)
+
+
+def scan_markup_file(path: Path) -> list[tuple[str, int, int]]:
+    """Dispatch one path to the rule set its suffix selects."""
+    suffix = path.suffix.lower()
+    if suffix in HTML_SUFFIXES:
+        return scan_html_file(path)
+    if suffix in TEXT_SUFFIXES:
+        return scan_text_file(path)
+    return []
+
+
+def _markup_unreadable(path: Path) -> bool:
+    """True when this scan could not DECODE or PARSE `path` — i.e. did NOT scan it.
+
+    🔴 The exact analogue of the JSON half's `_parse(...) is None`, and it exists
+    because the markup half shipped without one. MEASURED: the same captured page
+    saved UTF-8 scored 3 signals and saved windows-1252 scored 0 — silently,
+    while still counting toward the candidates-walked floor. A one-byte re-encode
+    was a complete bypass of a gate whose sibling closes exactly this.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError):
+        return True
+    if path.suffix.lower() in HTML_SUFFIXES:
+        return _scan_markup_html(text) is None
+    return False
+
+
+def markup_unparseable_files(root: Path) -> list[str]:
+    """Tracked `.html`/`.txt` this scan could not read — i.e. did NOT scan.
+
+    Reported rather than swallowed, and pinned at zero by the gate, for the
+    reason `unparseable_files` is: a silent skip is indistinguishable from a
+    clean file.
+    """
+    return sorted(str(p.relative_to(root)) for p in markup_candidates(root)
+                  if _markup_unreadable(p))
+
+
+def markup_candidates(root: Path) -> list[Path]:
+    """Tracked `.html`/`.txt` this scan reads.
+
+    `_is_skipped` is re-applied after `repo_files` for exactly the reason
+    `_candidates` does it above — `repo_files` only filters on the
+    filesystem-walk tier, so on the `git ls-files` tier a tracked path under a
+    skip dir comes back.
+    """
+    return [p for p in repo_files(root)
+            if p.suffix.lower() in MARKUP_SUFFIXES and not _is_skipped(p, root)]
+
+
+def scan_markup_repo(root: Path) -> list[tuple[str, str, int, int]]:
+    """`(relpath, signal, count, max_len)` for every tracked `.html`/`.txt`.
+
+    🔴 COUNTS AND ENUMERATED SIGNAL TOKENS ONLY. No captured value, and no token
+    taken from the document, ever leaves this function. The relpath is not
+    redacted — same trade, and same warning, as `scan_repo`.
+    """
+    hits = []
+    for path in markup_candidates(root):
+        rel = str(path.relative_to(root))
+        for signal, count, max_len in scan_markup_file(path):
+            hits.append((rel, signal, count, max_len))
     return sorted(hits)

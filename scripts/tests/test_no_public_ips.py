@@ -35,7 +35,17 @@ genuinely routable address in 25/8 and was pre-approved repo-wide the same way.
 value ever committed, and rewriting history would not unpublish anything that has
 already been cloned or forked. This stops the NEXT one.
 
-Hostnames are a SEPARATE gate — `scripts/tests/test_no_client_hostnames.py`.
+🔴 AND THAT BLIND SPOT HAS ALREADY COST SOMETHING — read before extending this
+gate. Three genuine P-256 private keys sat in this repo's reachable history for
+four to five years while all four content gates reported clean, because every one
+of them enumerates `git ls-files`. The determination (dead anchors, no rotation
+needed, history deliberately retained) is in `SECRETS.md` -> "Dead credentials in
+reachable history", and the blindness itself is DRIVEN, not asserted, by
+`test_no_captured_markup.py::test_the_gate_is_blind_to_git_history`.
+
+Hostnames are a SEPARATE gate — `scripts/tests/test_no_client_hostnames.py`;
+captured free text is `test_no_captured_text.py` (JSON/JSONL) and
+`test_no_captured_markup.py` (`.html`/`.txt`).
 """
 from __future__ import annotations
 
