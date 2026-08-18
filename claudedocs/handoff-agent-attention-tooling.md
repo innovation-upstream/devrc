@@ -15,30 +15,33 @@ Make *"what is being worked on, and what is waiting on me"* answerable in one ca
 of 13 pane tails, and stop turns ending without a stated next step.
 
 ## State now
-- **Branch:** `main` at `423e79a` = `origin/main`. Both hosts converged, switched and
-  **verified at the consumer** (`ship.sh`: workbench 432 managed artifacts resolve / 0
-  dangling, laptop 393 / 0).
-- **Working tree:** untracked only (`.envrc`, `.opencode/`,
-  `nix/system/apply-nebula-443.sh.LOCAL-preserved-2026-08-02`). The two tracked files that
-  were dirty for days (`nix/i3/config.nix`, `scripts/tmux-scratch-status.sh`) are committed
-  (#486); the three stranded proposal docs were rescued by another session (#503).
-- ⚠ **This repo has concurrent sessions.** `main` moved six times mid-session (#495, #496,
-  #498, #502, #503, #504). Re-fetch before assuming anything, and gate the MERGED tree.
+- **Branch:** `main` at `5fe72e9` = `origin/main`. Both hosts converged + switched (`ship.sh`:
+  workbench 435 managed artifacts resolve / 0 dangling, laptop 396 / 0).
+- **Working tree:** `flake.lock`, `scripts/opencode/opencode.jsonc`,
+  `scripts/tests/test_opencode_config.py` modified by a CONCURRENT session — not mine, left alone.
+  Plus the long-standing untracked `nix/system/apply-nebula-443.sh.LOCAL-preserved-2026-08-02`.
+- ⚠ **Heavy concurrency.** `main` moved ~10× mid-session; the base clone was checked out onto
+  another session's branch (`docs/signal-chat-proposal-revision`) for hours. Re-fetch before
+  assuming anything, and gate the MERGED tree, not the branch.
 
-**Shipped and verified live this session** — 11 devrc PRs + 1 in `ZacxDev/homelab-infra`:
+**Shipped and verified live this session — 6 PRs, all merged AND deployed to both hosts:**
 
 | what | PR |
 |---|---|
-| `kind` — the entity axis on every row; roll-ups count by class, not by a falsy `claude` | **#482** |
-| six bar pills rendered a day-old cache as present tense; the deadman had no deadman | **#490**, **#492** |
-| agent-ops TUI retired; `/proc` detector extracted to `scripts/lib/claude_sessions.py` | **#501** |
-| `RULES.md` ceiling 35,200 → 38,400 after proving eviction exhausted | **#497** |
-| three measured lessons into `RULES.md` + an orphaned-anchor gate | **#489** |
-| clawgate DELETE/`retracted` semantics documented; the `jq` recipe that hid it fixed | **#499** |
-| `clawgatectl` false "lost a rune" warning on every heredoc comment | homelab-infra **#325** |
-| espanso float rule was case-sensitive and may never have matched | **#488** |
-| scratch-slot legend gains window counts | **#486** |
-| the `_SPAWN_IDLE_REF` stall constant was measured on one host in one tier | **#500** |
+| clawgate write-back guard — prose lost 2/2, so gate it on the READ | **#506** |
+| `--claude-only` blamed the BUILD for what the FILTER removed; fuzzyclaw phase-2 gate as rc 16 | **#513** |
+| `--dismiss` now writes a tombstone — verifying a dismissal re-armed it, twice, in production | **#515** |
+| unsent prompts as a FOURTH signal + `not_measured` names what the tool cannot see | **#519** |
+| delete the dspy-eval capture (captured text in a PUBLIC repo) + gate the class | **#521** |
+| the `.html`/`.txt` captured-content gate + the Linkerd determination written down | **#526** |
+
+**Deploy verified at the consumer, not inferred:** both hooks byte-identical to `origin/main`
+(`clawgate-writeback-guard.py` `2c63a4fd01e5`, `next-step-nudge.py` `ebc881d31e31`), registered on
+`PostToolUse` (no matcher) + `Stop`, 6 Stop owners. `SuccessExitStatus=16` live on both hosts.
+
+**Live readings at handoff time** (`session-manager --no-ch --fuzzyclaw --json`, 81 rows):
+`age_source {ledger: 43, fuzzyclaw: 6, None: 32}` · `unsent_prompt {count: 9, measured: 56,
+unmeasured: 25}` · `waiting {probable: 8, measured: 58}`.
 
 ## Open investigations — live diagnosis state
 
@@ -165,27 +168,55 @@ of 13 pane tails, and stop turns ending without a stated next step.
   so once cluster rows exist a filtered-out row is dropped **and** has its exclusion
   attributed to the build rather than to the filter.
 
-## Next steps (ranked)
-🔴 **Writer 3 is still GATED** — trigger unchanged: `in_progress` routinely non-zero AND
-`task.agent` non-null (#316 resolved). Both false. Design + measurements:
-`claudedocs/design-ledger-writer3-and-kind-2026-08-14.md`. spec §4's premise is wrong —
-clawgate has no agent-run entity, so cluster rows would come from `/api/tasks`, never
-`/api/agents`.
+### The fuzzyclaw phase-2 gate is OPEN-BUT-NOT-READY, and decaying on its own
+- **Observed:** `drift-check.sh` rc-16 block reads `fuzzyclaw-only ages: 6 of 49 row(s) EXAMINED`
+  → `NOT READY`. Was **7** earlier the same day, so the count is decaying as pre-deploy sessions
+  restart. Phase 2 (deleting the fuzzyclaw readers) is safe at **0**.
+- **Ruled out:** that this needs a human decision — it does not. It is now a machine check.
+- **Next probe:** none. Wait. `bash scripts/drift-check.sh` reports it every run, and the
+  `drift-check` systemd timer fires 4×/day.
 
-1. **Make the board write-back not optional.** The highest-value item, and the only one with
-   a measured 2/2 failure rate. Either the pickup ritual enforces it, or `in_progress`
-   stops being settable without a dispatch.
-2. **`agent_link_missing`** in `scripts/lib/clawgate_tasks.py` — gives #316 a real detector.
-   Note that module's docstring claim "`/api/agents` carries no `taskId` … no join key" is
-   **wrong**: the field is `noteId`, emitted unconditionally.
-3. **fuzzyclaw removal, phase 2.** `agent-ops` and `tmux-scratch-status.sh` are done.
-   Remaining readers: `session-manager`, `tmux-claude-counters.sh`, `verify-agent-work`,
-   `validation/{reconcile,refsources}.py`. Then phase 3 (a test that fails if a fuzzyclaw
-   read reappears), then phase 4 (remove the writers — never first).
-4. **`--claude-only`** (above), before any cluster row exists.
-5. Two pre-existing coverage gaps in the extracted detector, left deliberately, nil blast
-   radius today: `_read_proc`'s positional `/proc/stat` index (`rest[19]`→`rest[18]`
-   survives) and `CLAUDE_RE` losing `re.IGNORECASE`.
+### `waiting` false-positive on a pane showing ANOTHER session's output — STILL OPEN
+- **Symptom:** a pane displaying another session's transcript trips `trailing_question` /
+  `context_exhausted` on text that is not its own state. Originally seen as `Yarrow (Y)` window 1
+  matching on this session's own SSH probe output echoed into that pane.
+- **Observed this session:** the same *class* was independently re-derived while designing
+  `unsent_prompt` — which is why `detect_unsent_prompt` reads ONLY between the two box-drawing
+  rules (`_input_box_span`), and why `PANE_TAILING_A_RENDERED_BOX` exists as a fixture.
+  `waiting`'s own detector was NOT given that treatment.
+- **Leading hypothesis:** scope the waiting signals to the pane's own last assistant block, the
+  same way the unsent detector scopes to its own input box. The helper already exists.
+- **Next probe:** `python3 scripts/session-manager --no-ch --json | python3 -c 'import sys,json;
+  d=json.load(sys.stdin); print([(r["window"], r["waiting_signals"]) for hv in d["hosts"].values()
+  for r in (hv.get("windows") or []) if r.get("waiting_probable")])'` — then read each flagged
+  pane and check whether the matched line is its own output.
+
+### `idle`-with-no-age and `idle`-with-a-fresh-age render identically
+- **Observed:** 32 of 81 rows have `age_source: None`. Measured decisively earlier: **0** of them
+  are a join bug — every ageless row genuinely has no ledger record, because its Claude process
+  started BEFORE the ledger shipped (`2026-08-14T04:01:41Z` is the first record; those processes
+  date from Aug 5–12). Self-healing: the first tool call in such a window writes a record.
+- **Ruled out:** a read/join defect (0 ageless rows had a record present), and prune (TTL is 7d).
+- **Next probe:** none needed for correctness. The open question is presentational — `idle` with
+  no age and `idle` with a 2-minute age are different states rendered the same.
+
+## Next steps (ranked)
+1. **Nothing is blocking.** All six PRs are merged, shipped and consumer-verified. The items
+   below are follow-ups that were deliberately filed rather than fixed.
+2. **The shared-function blind-spot class** — `_state_root()`'s two path components, `STATE_WORK`,
+   `_dismissals_path()` in `scripts/claude-hooks/clawgate-writeback-guard.py` each rename a live
+   on-disk artifact with **ZERO test movement**. Renaming the state root on a deploy would
+   silently orphan every in-flight session's read anchors. `_dismissed_path` is pinned; the fix
+   was applied to the instance found, not the class. One PR pinning every on-disk name literally.
+3. **#513 🟡B — `summary.rows_with_age` exists and is unused.** Adding it to `drift_phase2.py`
+   closes the last theoretical `age_sources` gap in ~2 lines, and the reason-token ledger will
+   FORCE the token. The invariant holds on live data: `rows_with_age == total_sessions -
+   age_sources["none"]`.
+4. **Scope the `waiting` signals to the pane's own block** (investigation above).
+5. **`initiatives_current_slugs.txt`** — 171 lines / 165 distinct project slugs, ~124 appearing
+   nowhere else in the repo, in a PUBLIC repo. It is FUNCTIONAL (a routing vocabulary the tests
+   measure against), so removal has real cost. Gated and pinned; hashing or truncating is the
+   middle path. **Operator judgement, not a defect.**
 
 ## Gotchas / decisions / dead-ends
 
@@ -377,25 +408,70 @@ three comment lines and the function definition; 16 route wraps is right).
   `tekton/clawgate-ci`, and the workflow was cut to `workflow_dispatch` so it contributes no
   red check. Merging a `containers/clawgate` change does NOT redeploy clawgate.
 
+**Six audit rounds this session, and EVERY fix round created the next finding. None of it was
+visible to a green gate.**
+- 🔴 **A fix for a false positive made the guard INERT on the incident that motivated it.**
+  #506 round 2: refusing every `agent_id` event (to stop a subagent's READ arming the parent)
+  also stopped a subagent's WORK counting — and the handoff records that #193/#194's work ran in
+  local subagents. The guard would have been silent on its own motivating case. Fixed
+  **asymmetrically**: a subagent's read does not arm, its work does count.
+- 🔴 **"Equivalent mutant" hid a real one, twice.** #515: the tombstone write-order was labelled
+  an equivalent-order negative control; writing it AFTER the removals leaves a window where
+  `record_read` re-creates `read-<id>`, producing the exact false-promise state the PR existed to
+  remove. No test distinguished the orders.
+- 🔴 **A gate can be blind to its own motivating shape.** #526's `.txt` free-text rule could not
+  see the slugs fixture (all 144 data lines are single tokens, 0 have whitespace) and its `.html`
+  prose rule keys on the LONGEST UNINTERRUPTED TEXT RUN — measured: 5×40 and 8×25 char runs
+  totalling 200 chars of prose → **0 findings**. Fixed with block aggregation + a run-count rule.
+
+**Instrument failures — mine, and they produced confident WRONG zeros:**
+- 🔴 **A marker scan looked for the wrong vocabulary and I relayed its zero as fact.** The sweep
+  reported `forum-thread-page.html` as "a real scraped thread, 0 synthetic markers, 7 real
+  hostnames". Measured: **150 SYNTH tokens, 144 `example.test` refs, 0 other hosts**, and the
+  file's own first line declares it sanitised. Its positive control matched `html` in the same
+  file — proving the file was READABLE, not that the marker patterns could MATCH.
+- 🔴 **A fixture one character under a threshold.** Re-testing #526's prose rule, my runs were
+  `'word '` truncated to 25, which strips to **24** — one under `MIN_CHAT_TEXT_CHARS=25`. Every
+  cell read 0 and I nearly reported the fix as ineffective.
+- **`openssl ec -in -` does not accept `-` as stdin at all** — a freshly generated P-256 key
+  fails identically. Reading "unable to load Key" as "malformed key material" is available and
+  wrong; decode the DER instead.
+- **`nix build path:<worktree>#…` is a FALSE RED** — a worktree's `.git` is a *file*, `path:`
+  copies it, and five pre-existing tracked-ness tests then fail `git exit 128`. Use the git flake ref.
+- **`pgrep -f` self-match caught THREE agents this session**, one of them mid-PR. A loop
+  `until ! pgrep -f "<pat>"` matches its own command line and can only end by timeout.
+
+**Decisions:**
+- **Git history is NOT being rewritten** (operator, 2026-08-17). The dspy capture was 333 of the
+  operator's OWN truncated prompts (≤200 chars) — NOT third-party bodies, a mischaracterisation
+  that reached the #521 commit message. Credential sweep of all 3,444 reachable blobs: clean.
+- **Linkerd anchors: dead, no rotation** (operator: "we dont use linkerd"; measured 0 Linkerd
+  namespaces across 3 reachable clusters). Four P-256 keys remain in reachable history by
+  decision. Recorded in `SECRETS.md`.
+- **The client workspace path in 34 tracked files is an ACCEPTED disclosure** — the client's org
+  and flagship repo are both public, 141 files already carry the brand as prose, and a partial
+  scrub would be worse than none (~8 additional partial-fragment carriers a full-path scrub misses).
+- 🔴 **All four gates scan `git ls-files` only — none reads history.** That is what hid the
+  private keys for 4–5 years. Recorded as an EXECUTABLE limitation pin
+  (`test_no_captured_markup.py::test_the_gate_is_blind_to_git_history`), not prose.
+- **Two briefs of mine were substantially wrong and the agents that pushed back with measurements
+  were right both times.** Keep telling them to refute rather than implement.
+
 ## How to verify
 ```bash
-# the bar, every block, at the path i3status-rust invokes — all rc=0
-for b in claude-runs clawgate telemetry alerts civitai mail media airvpn; do
-  printf '%-14s rc=%s\n' "$b" "$(timeout 15 python3 ~/.config/i3status-rust/scripts/i3status-$b >/dev/null 2>&1; echo $?)"
-done
+# the write-back guard, deployed copy — the ORIGINAL failing path must block
+G=~/.claude/hooks/clawgate-writeback-guard.py
+S=verify-$$
+printf '%s\n' "{\"hook_event_name\":\"PostToolUse\",\"session_id\":\"$S\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"clawgatectl task get 200\"}}" | python3 "$G" >/dev/null
+printf '%s\n' "{\"hook_event_name\":\"PostToolUse\",\"session_id\":\"$S\",\"agent_id\":\"sub\",\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"/tmp/x\"}}" | python3 "$G" >/dev/null
+printf '%s\n' "{\"hook_event_name\":\"Stop\",\"session_id\":\"$S\"}" | python3 "$G"   # -> decision: block
+python3 "$G" --dismiss 200 --session "$S"                                             # durable: a re-read must NOT re-arm
+rm -rf ~/.cache/claude-clawgate-writeback/s/*verify-*
 
-# the freshness grammar, on a COPY of the real caches aged 24h (never write the live ones)
-#   fresh alarm -> `39` Critical ; frozen -> `39?` Critical ; quiet+frozen -> `?` Warning
-# the entity axis, live — every row tmux, and NO cluster key in any bucket
-python3 ~/workspace/devrc/scripts/session-manager --no-ch --json \
-  | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["summary"]["kind"], d["summary"]["status"]["idle"])'
+# the phase-2 gate + unsent prompts, live (rc 16 = ACTIONABLE, not drift)
+bash scripts/drift-check.sh | sed -n '/phase-2/,$p'
 
-# the gate (authoritative). 🔴 A CACHE HIT RETURNS EXIT 0 WITH NO OUTPUT — read the log.
-nix build ~/workspace/devrc#checks.x86_64-linux.pytests -L --no-link 2>&1 \
-  | grep -E 'TOTAL collected|RESULT:'
-
-# clawgate board + stuck detector, one call
-curl -s -H "Authorization: Bearer $CLAWGATE_HOOK_TOKEN" \
-  "${CLAWGATE_API_URL:-http://192.168.50.250:30302}/api/tasks?summary=1" \
-  | python3 -c 'import sys,json,collections; t=json.load(sys.stdin); print(collections.Counter(r["status"] for r in t)); print("agent non-null:", sum(1 for r in t if r.get("agent")))'
+# the four gates (siblings must stay 134)
+nix build .#checks.x86_64-linux.pytests --no-link && nix log .#checks.x86_64-linux.pytests | grep -E 'TOTAL collected|RESULT:'
+# 🔴 a cache hit returns exit 0 with NO output; never use `path:<worktree>` (false red)
 ```
