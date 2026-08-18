@@ -42,6 +42,9 @@ device; messages land in Postgres `signal` schema + attachments in MinIO.
   message, an inbound 1:1, and three `sync_outbound` echoes of messages sent from the phone.
   Reaction→target linkage resolves correctly (both reaction rows point at message 1).
   🔴 **Still NOT verified: the attachment/MinIO leg** (see below) and there are **no probes**.
+- ✅ **The outbound-reaction defect step 7 found is FIXED, MERGED and DEPLOYED** — devrc
+  #537 (squashed `8f2cedd`), consumer **0.1.1** digest `a3ef7385…`, homelab-infra
+  `897e837d`. 🔴 **Deployed, NOT verified in function** — see next steps item 1.
 
 ## Open investigations — live diagnosis state
 
@@ -108,29 +111,78 @@ device; messages land in Postgres `signal` schema + attachments in MinIO.
   record it as the fix.
 
 ## Next steps (ranked)
-1. **Land + DEPLOY the outbound-reaction fix.** The branch is green and mutation-tested, but
-   🔴 **merging changes nothing in the cluster** — the consumer runs a Harbor image pinned by
-   digest, so it needs `scripts/signal/build-push.sh <ver>` and a homelab digest bump. Until
-   that lands, every reaction Zach sends is still being dropped.
-2. **Send an image from the phone** and confirm `attachments` > 0 plus the object in MinIO.
-   The only leg of the pipeline that has never carried real traffic.
-3. **Backfill the one lost reaction** from `raw_envelope` on `signal.messages` id 3, and drop
-   the ghost row. Small, and the data is still there.
-4. **Add a liveness signal to the consumer.** Now evidenced, not theorised: 0 log lines in 20h
-   of successful work (above). It serves no HTTP and has no probes, so a pod reaching nothing
-   stays Running/Ready forever. Emit *something* on successful ingest at minimum.
-5. **Move the mutation harness into the repo.** Still lives only in scratchpads — the
-   reaction-fix battery included. Land it under `scripts/signal/tests/`.
-6. **Close `approve_draft`'s read-then-write TOCTOU** — last of the family whose three siblings
-   were fixed in #514 round 4. Benign, but the odd one out.
-7. **Bump cadence for the signal-cli image.** Stable lags: `0.100`/`:latest` shipped 0.14.5
-   while 0.14.6/0.14.7 existed. Tracking stable ALONE re-breaks linking.
 
-🔴 **The lesson worth keeping from step 7.** Six PRs, four audit rounds and 387 tests all
-passed while an entire message shape — the account's own reactions — was being dropped on the
-floor. Nothing found it but real traffic. The sync branch had *already* been patched once for
-exactly this asymmetry (`remoteDelete`), and the sibling case was still missed: **when you fix
-an own-device branch for one message shape, enumerate the others in that wrapper.**
+🔴 **BOTH REMAINING ITEMS NEED ZACH AT HIS PHONE — no agent can do them.**
+
+1. **Verify the reaction fix LIVE. React to any message from your phone, then run
+   the check below.** The fix is merged (devrc #537) and DEPLOYED (consumer 0.1.1,
+   digest `a3ef7385…`, rolled out 2026-08-18 20:5x UTC, pod reconnected to
+   signal-api + Postgres). 🔴 **That is a claim about the DEPLOY, not about the
+   FUNCTION.** Nothing has exercised the fixed path in production — the same
+   distinction that made step 7 necessary in the first place. Until a reaction
+   you sent appears in `signal.reactions` with YOUR contact id, this is unverified.
+2. **Send an IMAGE from the phone** — the attachment/MinIO leg has still never
+   carried real traffic (`attachments` = 0, attributable to input: no stored
+   envelope contains an attachment key). This exercises `_minio.py` and the
+   scoped `signal-consumer` credential end to end.
+3. **Backfill the one lost reaction and drop its ghost row.** `raw_envelope` on
+   `signal.messages` id 3 still holds the reaction; the fix stops NEW ghosts but
+   removes no existing one. Priced from the consumer, not the writer:
+   `list_conversations()` groups a bodyless outbound row with no `dest_contact_id`
+   and no `group_id` into **its own conversation with `display_name` NULL**, and
+   its timestamp sorts it to the **TOP** of the list. So it is user-visible, not
+   cosmetic.
+4. **The outbound-`editMessage` ghost — the SAME bug, still open.** Any unmodelled
+   `syncMessage.sentMessage` variant with `message: None` (nested `editMessage`,
+   `sticker`, `payment`, `groupCallUpdate`) still falls through to `_base_message()`
+   and leaves a bodyless ghost row. This is the next instance of this pipeline's own
+   lesson, found by the round-1 audit and deliberately left out of #537's scope.
+5. **Add a liveness signal to the consumer.** Evidenced, not theorised: **0 log
+   lines in 20h** of successful ingestion. No HTTP, no probes — a pod reaching
+   nothing stays Running/Ready forever, and row count is the only health signal
+   that exists. This is the failure mode the whole step-7 diagnosis talked itself
+   into and back out of.
+6. **Move the mutation harness into the repo.** Three batteries were run across
+   #537 and all of them live only in scratchpads. Land under `scripts/signal/tests/`.
+7. **Close `approve_draft`'s read-then-write TOCTOU** — last of the family whose
+   three siblings were fixed in #514 round 4.
+8. **Bump cadence for the signal-cli image.** Stable lags: `0.100`/`:latest` shipped
+   0.14.5 while 0.14.6/0.14.7 existed. Tracking stable ALONE re-breaks linking.
+
+## What #537 established, beyond the fix itself
+
+🔴 **Six PRs, four audit rounds and 387 green tests passed over an entire message
+shape being dropped on the floor.** Nothing found it but real traffic. And the sync
+branch had ALREADY been patched once for exactly this asymmetry (`remoteDelete`) —
+the sibling case was still missed. **When you fix an own-device branch for one
+message shape, enumerate the others in that wrapper** (item 4 above is the proof
+that lesson is still unfinished).
+
+🔴 **The count/identity trap, worth remembering verbatim.** The missing reaction
+nearly read as clean: two OTHER group members had reacted to the same message, so
+`signal.reactions` held **2 rows carrying that exact `target_sent_timestamp`** and a
+count check said "fine". The account's own contact appeared in none of them. **Only
+the reactor IDENTITY discriminates stored from lost; the count cannot.**
+
+🔴 **Four harness defects, each of which reported confident false coverage:**
+- a mutant reported **ANCHOR-MISS, not KILLED** — the anchor also matched an
+  unrelated branch, so it never landed. A mutant that never ran is not a survivor,
+  and it is not a pass either.
+- two **operand-order** mutants survived a green 416-test run because every fixture
+  set `source` and `sourceNumber` to the SAME value, collapsing both implementations
+  into identical output. Not equivalent mutants: signal-cli can put a UUID in
+  `source`, so the order decides whether a UUID is written into a phone column.
+- the fixture emoji equalled both the corpus value AND the asserted constant, so a
+  mutant hardcoding it survived 400 tests while corrupting every stored reaction.
+- the **seam**: parser and DB layer were each tested alone and each was clean. The
+  🔴 lived exactly between them, invisible until one fixture built both.
+
+🔴 **Consolidation is a bug-finding instrument.** The reaction dict was open-coded at
+two sites and that is WHY the sync site shipped without guards the inbound site
+already had. Unifying them closed a pre-existing inbound hole in the same change —
+and the *dispatch predicate* in front of the helper was still divergent after the
+first consolidation, caught only by the delta re-audit. One rule, one place, includes
+the `if`.
 
 ## Gotchas / decisions / dead-ends
 
@@ -195,6 +247,21 @@ export KUBECONFIG=$KC_HOMELAB
 kubectl -n signal get pods
 kubectl -n signal exec deploy/signal-api -- signal-cli --version          # expect 0.14.7
 kubectl -n signal exec deploy/signal-api -- cat /home/.local/share/signal-cli/data/accounts.json
+
+# 🔴 THE OUTSTANDING CHECK — react to a message FROM YOUR PHONE, then run this.
+# It must print a row whose reactor is YOUR OWN contact. A count alone cannot
+# answer it: other people's reactions on the same target are already in there.
+kubectl -n signal exec $CP -- python3 -c "
+import os,psycopg2; c=psycopg2.connect(os.environ['SIGNAL_PG_DSN']); cur=c.cursor()
+cur.execute('''select r.id, r.emoji, r.is_remove, (r.message_id is not null) resolved
+  from signal.reactions r join signal.contacts k on k.id = r.contact_id
+  where k.signal_uuid = %s''', (OWN_UUID,))
+rows = cur.fetchall()
+print('OWN reactions stored:', len(rows))
+for r in rows: print('  ', r)
+print('VERDICT:', 'FIX VERIFIED LIVE' if rows else 'NOT YET - react from the phone')"
+# (OWN_UUID = the account's own signal_uuid; read it from any sync_outbound row's
+#  raw_envelope ->> 'sourceUuid'.)
 
 # Row counts (step 7 PASSED 2026-08-18 — these are now NON-ZERO; a zero here is a REGRESSION):
 CP=$(kubectl -n signal get pod -l app=signal-consumer -o jsonpath='{.items[0].metadata.name}')
