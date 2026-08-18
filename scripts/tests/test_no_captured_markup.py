@@ -1029,6 +1029,10 @@ def test_html_parser_normalises_tag_and_attribute_NAMES():
     Attribute VALUES are deliberately NOT normalised by the parser — which is why
     the itemprop and `rel` comparisons in `_note_attrs` DO fold, and why deleting
     either of those is caught by a test rather than by nothing.
+
+    🔴 GREEN AT BASE AND AT HEAD. A DEPENDENCY PIN, not regression coverage — the
+    parser's behaviour did not change, the module's reliance on it merely stopped
+    being disguised by a dead `.lower()`.
     """
     seen = []
 
@@ -1049,6 +1053,9 @@ def test_a_rel_AUTHOR_link_is_matched_case_insensitively(tmp_path):
     A capture that spells it `REL="Author"` is the same byline. Without this the
     fold at that line is live code with no test: deleting it left the whole
     suite green, because every other `rel` fixture was already lowercase.
+
+    🔴 GREEN AT BASE AND AT HEAD. This closes a MUTATION survivor, not a bug —
+    the fold always worked; nothing exercised it.
     """
     _write(tmp_path / "post.html",
            '<html><body><a REL="Author" href="/u/someone">by</a></body></html>')
@@ -1065,6 +1072,9 @@ def test_max_len_is_the_LONGEST_occurrence_not_the_shortest(tmp_path):
     `.txt` `<vocabulary>`) SURVIVED the whole battery — every fixture happened to
     carry occurrences of one length, so the two agreed. Each half below therefore
     carries occurrences of DELIBERATELY DIFFERENT lengths, and asserts the larger.
+
+    🔴 GREEN AT BASE AND AT HEAD. Three MUTATION survivors closed, not a bug
+    fixed — `max_len` was already right, and nothing could tell.
     """
     short = "the follower has been lagging behind the primary since this morning"
     long_ = short + " and for the last three deploys as well"
@@ -1254,6 +1264,29 @@ def test_malformed_markup_degrades_to_no_hits_never_a_throw(tmp_path):
     assert C.markup_unparseable_files(tmp_path) == []
 
 
+def test_the_PROSE_of_a_torn_page_survives_to_end_of_document(tmp_path):
+    """🔴 A HALF-SAVED CAPTURE IS THE LIKELIEST TORN PAGE, and its prose is the
+    disclosure — the truncation is not a reason to stop looking.
+
+    A block element left open at EOF still has to be emitted, and nothing else in
+    this suite reaches that path: every other fixture closes its tags, so
+    dropping the end-of-document flush SURVIVED the whole battery. Three shapes
+    that only differ in how much of the closing markup made it to disk, plus a
+    bare fragment with no block element at all.
+
+    🔴 GREEN AT BASE AND AT HEAD — the per-run rule saw these too. It is a
+    MUTATION pin on the new aggregator, not regression coverage.
+    """
+    for label, markup in (
+        ("no-close-anything", f"<html><body><p>{_PROSE}"),
+        ("no-close-body", f"<html><body><p>{_PROSE}</p>"),
+        ("bare-fragment", _PROSE),
+    ):
+        _write(tmp_path / label / "torn.html", markup)
+        assert [(h[1], h[2], h[3]) for h in C.scan_markup_repo(tmp_path / label)] \
+            == [(C.SIGNAL_HTML_TEXT, 1, len(_PROSE))], label
+
+
 def test_an_unterminated_script_is_a_FINDING_not_silence(tmp_path):
     """🔴 THE `<template>` HAZARD THROUGH THE OTHER DOOR.
 
@@ -1292,6 +1325,9 @@ def test_html_COMMENTS_are_not_scanned_and_the_blindness_is_pinned(tmp_path):
     and the gate would then be red on its own documentation. The cost is that
     captured text pasted into a comment is invisible, which the module's
     blind-spot list names in those words and this pins.
+
+    🔴 GREEN AT BASE AND AT HEAD. A LIMITATION PIN, not regression coverage: the
+    behaviour is unchanged; what changed is that it is now a stated decision.
     """
     sentence = ("The council confirmed on Tuesday that the crossing will stay "
                 "shut until the replacement barriers arrive in the new year, "
