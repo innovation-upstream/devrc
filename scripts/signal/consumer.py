@@ -362,8 +362,14 @@ def parse_envelope(envelope: dict) -> ParsedEvent:
                 raw_envelope=raw,
             )
 
+        # `is not None`, NOT truthiness — the same predicate as the sync site
+        # above, deliberately. Consolidating only the parser BODY left this
+        # dispatch divergent: an inbound `reaction: {}` was stored as an ordinary
+        # message while the identical sync shape was reported malformed. A
+        # malformed frame counted as a successful message is the failure the
+        # remoteDelete branch documents; one rule, both sites.
         reaction = data.get("reaction")
-        if reaction:
+        if reaction is not None:
             rx = _reaction_from(envelope, reaction, where="inbound")
             return ParsedEvent(kind=KIND_REACTION, reaction=rx, raw_envelope=raw)
 

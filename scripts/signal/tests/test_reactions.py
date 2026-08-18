@@ -402,7 +402,10 @@ def test_a_sync_reaction_without_a_target_timestamp_is_malformed():
 
 def test_a_sync_reaction_with_NO_TARGET_AUTHOR_IDENTITY_is_malformed():
     """Neither uuid nor number -> upsert_contact would raise and wedge ingest."""
-    with pytest.raises(consumer.MalformedEvent):
+    # `match=` pins the site label: it is the ONLY forensic trail a skipped
+    # frame leaves, and it exists solely to say WHICH site rejected. A mutant
+    # swapping it to "inbound" survived an otherwise-green run.
+    with pytest.raises(consumer.MalformedEvent, match=r"^sync "):
         consumer.parse_envelope(_sync_reaction_envelope(
             target_ts=1723260000092,
             reaction={"targetAuthorUuid": None, "targetAuthor": None,
@@ -506,6 +509,41 @@ def test_targetAuthor_WINS_over_targetAuthorNumber_for_the_target_phone_number()
                          "targetAuthorNumber": "+15550109",   # DISTINCT
                          "targetSentTimestamp": 1723260000102}}}})
     assert event.reaction["target_author_number"] == "+15550101"
+
+
+def test_a_reactor_identified_ONLY_by_the_legacy_source_field_is_kept():
+    """The `or envelope.get("source")` fallback is now REJECT/ACCEPT logic.
+
+    Before the identity guard it merely nulled a stored column; now, dropping it
+    makes this envelope malformed and the reaction is lost. A mutant removing it
+    survived, because the other reactor test sets BOTH fields and so cannot see
+    which one carried the value.
+    """
+    event = consumer.parse_envelope({
+        "source": "+15559097",            # legacy field ONLY -- no sourceNumber
+        "sourceUuid": None, "timestamp": 1723260000105,
+        "syncMessage": {"sentMessage": {
+            "message": None, "timestamp": 1723260000105,
+            "reaction": {"emoji": SYNC_EMOJI, "isRemove": False,
+                         "targetAuthorUuid": ALICE, "targetAuthor": "+15550101",
+                         "targetSentTimestamp": 1723260000104}}}})
+    assert event.kind == consumer.KIND_REACTION
+    assert event.reaction["source_number"] == "+15559097"
+
+
+def test_an_EMPTY_INBOUND_reaction_object_is_malformed_too(db):
+    """One rule, BOTH sites — the dispatch predicate, not just the parser body.
+
+    Consolidating only `_reaction_from()` left inbound on truthiness, so an empty
+    `reaction: {}` was stored there as an ordinary message while the identical
+    sync shape was reported malformed. The argument for `is not None` does not
+    stop at the site that happened to get audited.
+    """
+    with pytest.raises(consumer.MalformedEvent, match=r"^inbound "):
+        consumer.parse_envelope({
+            "sourceUuid": CARL, "sourceNumber": "+15550303",
+            "timestamp": 1723260000107,
+            "dataMessage": {"timestamp": 1723260000107, "reaction": {}}})
 
 
 def test_an_ordinary_sync_message_is_STILL_an_outbound_message(db):
