@@ -301,8 +301,23 @@ the day you ship.*
   a *different file, in a different directory, applied by a third manual step* (`scp` + `systemctl`;
   it is **not** Flux-reconciled). Nothing diffs it against the `listen 0.0.0.0:<port>` set in
   `gateway-nginx-config.yaml`. Adding a relay port to nginx therefore **publishes it** until someone
-  remembers. `8102` is the proof it fails. `#337` records this in the README; a checker that pins the
-  two sets against each other is still owed.
+  remembers. `8102` is the proof it fails. `#337` records this in the README, and **homelab-infra
+  `#338` now pins the two sets**: `scripts/check-relay-guard.py` asserts
+  `{listen 0.0.0.0:<port>} − DELIBERATELY_UNGUARDED == {PORTS}`, with the allowlist an enumeration
+  carrying a reason per entry (today exactly `{25: MX}`) so an unknown unguarded port fails by
+  default. 28 controls, the headline one being **RED AT BASE** — run against the guard at
+  `11f67175^` it exits 1 and names `8102`, so it is a regression test for a defect that happened,
+  not an invariant guard. Its `rc 2` (nothing examined) and `rc 3` (checker could not run) exist
+  because `rc 1` means "a port is exposed" and neither an empty parse nor a crash may spell that.
+- 🔴 **What `#338` does NOT do, and both halves are still open work.** (a) **Nothing runs it
+  automatically.** GitHub Actions is **billing-blocked repo-wide** on homelab-infra — every run dies
+  in ~13s having executed zero steps, so a workflow there would be a permanently-red gate, worse
+  than none — and it is not on the Tekton `clawgate-ci` path. Three options, none chosen: a Tekton
+  pipeline, an rc in devrc's `drift-check.sh` (which already runs 4×/day as a passive deadman), or
+  leave it manual and say so. (b) **It compares two FILES in one repo and cannot see the node** —
+  `relay-firewall.sh` is not Flux-reconciled, so repo-green with a stale node is possible. Checked by
+  hand on 2026-08-18 (`cmp`: node == `origin/trunk`; live kernel 39 rules, `dport 8102` present, unit
+  active), which is a reading, not a control.
 - **Out of scope, measured and reported not acted on:** 12 further wildcard-bound listeners on that
   node are reachable from off-mesh — node_exporter `9100`, kubelet `10250`, k0s `9443`, konnectivity
   `8132`, MetalLB `9120`, calico `9091`, kube-proxy `10249`/`10256`, NodePort `30301`, bird BGP `179`,
