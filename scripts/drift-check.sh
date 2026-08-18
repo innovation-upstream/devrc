@@ -101,11 +101,84 @@
 #       installed there. A short, EXPLICITLY ENUMERATED set of settings.json keys
 #       is exempt from the key-set half — see "PER-HOST settings.json KEYS"
 #       below. Nothing else is, and an unknown key is never exempt.
+#   17  DRIFT — a SOURCE REPO devrc BUILDS A PACKAGE FROM is not current on that
+#       host: behind or ahead of its own upstream. 🔴 The SECOND thing git parity
+#       on devrc structurally cannot see. See "SOURCE-REPO PARITY" below. The
+#       number is high because 5/7/9/11 are reserved to ship.sh meanings this
+#       script does not take; its SEVERITY is set by the table, not by the digit,
+#       and it ranks between 8 and 14 — see severity() for why.
 #   16  ACTIONABLE, not drift — the fuzzyclaw PHASE-2 GATE has OPENED: zero rows
 #       still take their `age_secs` from fuzzyclaw alone, so the readers can be
 #       removed. See "THE FUZZYCLAW PHASE-2 GATE" below. It is the LEAST severe
 #       code this file owns, so it can only ever be the verdict when nothing
 #       else is wrong, and the final line says ACTIONABLE rather than DRIFT.
+#
+# ── SOURCE-REPO PARITY (rc 17) ────────────────────────────────────────────────
+# 🔴 A THIRD KIND OF PARITY, AND THE FIRST TWO ARE BLIND TO IT. devrc builds some
+# packages from a LOCAL WORKING TREE OF ANOTHER REPO — `nix/pkgs/**` derivations
+# whose `src` is `${workspace}/<repo>/…`. The devrc checkout can be byte-identical
+# to origin/main, every managed symlink can resolve, and the binary that gets
+# installed is still built from a source tree that is months old, because NOTHING
+# CONVERGES THOSE REPOS: ship.sh is scoped to $HOME/workspace/devrc and this file
+# used to have no idea they existed.
+#
+# MEASURED 2026-08-14, on clawgatectl:
+#   17:44  homelab-infra #323 added `task status`/`task comment` and set the Go
+#          source's own default buildVersion to "0.7.95".
+#   17:48  devrc #483 bumped clawgatectl.nix's hand-written version literal
+#          0.7.87 -> 0.7.95 and shipped to BOTH hosts.
+# The workbench's ~/workspace/homelab-talos was current, so it got a real 0.7.95.
+# The laptop's was frozen 24 commits back; its client.go correctly said "0.7.87"
+# and the nix ldflag OVERWROTE that with "0.7.95". The laptop then carried a
+# binary with neither subcommand, wearing the label of one that had both:
+# `clawgatectl task status <id> in_progress` printed help and exited 0 — a silent
+# no-op against a CLI whose write ritual the `clawgate` skill makes mandatory.
+# This deadman was FULLY GREEN on that laptop throughout. The version half is
+# fixed in nix/pkgs/tools/clawgatectl.nix (the version is now read out of the
+# compiled source); THIS is the other half — noticing the stale tree at all.
+#
+# 🔴 THE COVERED SET IS DERIVED, NEVER LISTED. The payload reads `nix/pkgs/**.nix`
+# out of the checkout it is examining and collects every `${workspace}/<name>` it
+# finds outside a comment, so a THIRD such package is covered the day it is
+# added. A hardcoded pair would have been correct on the day it was written and
+# silently incomplete afterwards, which is the same shape as the bug. The
+# derivation is pinned TWO-WAY by `test_drift_check.py::test_the_source_repo_set_
+# is_pinned_two_way_against_nix_pkgs` — it fails when the set GROWS or SHRINKS.
+#
+# 🔴 EXAMINED BESIDE STALE, again. `examined=N stale=M unmeasured=K` is the
+# claim; none of the three numbers means anything alone. A repo whose fetch
+# failed, whose branch has no upstream, or which is absent from this host is
+# UNMEASURED — never folded into "0 stale", because a checker wired to nothing
+# reports exactly that zero.
+#
+# WHAT IS DRIFT HERE AND WHAT IS NOT — the line is "did we MEASURE a divergence":
+#   * behind / ahead of the branch's own upstream ................. rc 17
+#   * repo ABSENT on this host ......... reported, NOT drift. The derivations
+#     guard on pathExists and simply omit the binary; a host without the checkout
+#     is a documented, tolerated state (see clawgatectl.nix's header).
+#   * `git fetch` FAILED ............... reported, NOT drift. These repos are
+#     private and reached over ssh, and a systemd --user unit has no ssh-agent.
+#     "We could not look" must never read as either a pass or a divergence.
+#   * DETACHED HEAD / branch with no upstream ... reported, NOT drift. There is
+#     no defined answer to compare against; inventing one (assume `main`) would
+#     be a guess presented as a measurement.
+#   * DIRTY TREE ....................... reported, NOT drift, and reported even
+#     when the repo is otherwise current: these derivations build the TREE, not
+#     the commit, so an uncommitted or untracked file IS in the binary. The
+#     workbench's homelab-talos is routinely dirty; making that fail the unit
+#     would be a permanently-red gate.
+#
+# 🔴 THE CROSS-HOST HALF IS INFORMATION ONLY, deliberately. The driver diffs the
+# two hosts' `FACT src-repos` lines and reports repos whose HEAD differs — the
+# most direct statement of "these two machines build different code" — but sets
+# NO rc, because whether a given HEAD is WRONG is already answered per host by
+# the upstream comparison, which has a defined correct answer. Two hosts sitting
+# on different branches of a shared development repo is normal, and a code that
+# fires on it would be a permanently-red gate. Like every cross-host claim here
+# it prints NOT COMPARED unless facts arrived from BOTH machines.
+#
+# READ-ONLY, like everything else in this file: `fetch`, `rev-parse`, `rev-list`,
+# `symbolic-ref`, `status`. It never pulls, never switches, never repairs.
 #
 # ── THE FUZZYCLAW PHASE-2 GATE (rc 16) ────────────────────────────────────────
 # "Is it safe to delete the fuzzyclaw readers yet?" was answered by somebody
@@ -174,7 +247,12 @@
 # is reading a timer's output, so the single number it hands to systemd must be
 # the worst thing found, or an un-pushed workbench could hide behind a merely
 # behind laptop. Severity order (worst first):
-#     8  >  14  >  13  >  6  >  4  >  3  >  12  >  15  >  10  >  16
+#     8  >  17  >  14  >  13  >  6  >  4  >  3  >  12  >  15  >  10  >  16
+# 🔴 THAT ORDER IS THE severity() TABLE, NOT THE DIGITS — it never was monotonic
+# (14 outranks 13 outranks 6 outranks 4), and 17 is not "less severe than 16"
+# because it is larger. Every code below 16 that is still free (5, 7, 9, 11) is
+# reserved to a ship.sh meaning this script does not take, so a new DRIFT code
+# has nowhere to go but upward; its rank is stated in severity() and here.
 # (6 is unreachable through this path today — the script exits 6 directly before
 # any per-host leg runs — but the order is documented for every code it owns,
 # and severity() ranks it rather than falling through to the unknown-code slot.)
@@ -203,6 +281,13 @@
 #                        "/nix/store/"). Exists so the test suite can build a
 #                        fixture tree; the default is the only correct value on
 #                        a real host, and is NOT forwarded over ssh.
+#   DRIFT_SRC_FETCH_TIMEOUT  seconds each SOURCE REPO's `git fetch` may take
+#                        (default 30, integer). These are private repos over ssh
+#                        and a user unit has no agent, so the failure mode to
+#                        avoid is a HANG, not an error — an error is reported.
+#                        Deliberately NOT forwarded over ssh: the remote host
+#                        uses the default, and every value sent across that hop
+#                        is one that has to be proved safe.
 #   DRIFT_UNREACHABLE_ESCALATE  consecutive unreachable runs before rc 13 (default 4)
 #   DRIFT_STATE_DIR  where the unreachable streak is persisted
 #                    (default ${XDG_STATE_HOME:-$HOME/.local/state}/drift-check)
@@ -244,6 +329,7 @@ DRIFT_UNREACHABLE_ESCALATE="${DRIFT_UNREACHABLE_ESCALATE:-4}"
 DRIFT_STATE_DIR="${DRIFT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/drift-check}"
 DRIFT_SESSION_MANAGER="${DRIFT_SESSION_MANAGER:-$_drift_dir/session-manager}"
 DRIFT_PHASE2_TIMEOUT="${DRIFT_PHASE2_TIMEOUT:-60}"
+DRIFT_SRC_FETCH_TIMEOUT="${DRIFT_SRC_FETCH_TIMEOUT:-30}"
 
 # 🔴 Both tunables are INTERPOLATED INTO A SCRIPT THAT RUNS ON THE OTHER HOST
 # (piped to `bash -s` over ssh), so a non-integer value is remote code execution
@@ -263,6 +349,9 @@ require_int DRIFT_UNREACHABLE_ESCALATE "$DRIFT_UNREACHABLE_ESCALATE"
 # non-integer would make the phase-2 scan fail in a way that reads as "the tool
 # is broken" rather than "you passed nonsense".
 require_int DRIFT_PHASE2_TIMEOUT "$DRIFT_PHASE2_TIMEOUT"
+# Same reasoning as DRIFT_PHASE2_TIMEOUT: not interpolated into a remote payload,
+# but handed to `timeout`, where a non-integer reads as "the tool is broken".
+require_int DRIFT_SRC_FETCH_TIMEOUT "$DRIFT_SRC_FETCH_TIMEOUT"
 
 DO_LOCAL=1
 DO_REMOTE=1
@@ -305,6 +394,17 @@ severity() {
   case "${1:-0}" in
     0)  echo 0 ;;
     8)  echo 70 ;;
+    # 17 (a source repo devrc BUILDS FROM is not current here) sits between 8
+    # and 14, and the digit says nothing about that — see the header.
+    #   BELOW 8, because a diverged devrc stops every future change to this host,
+    #   of which a stale source repo is one instance; and rc 8's rescue can
+    #   destroy work if done carelessly, while this one is a pull.
+    #   ABOVE 14, because a dangling managed symlink is LOUD at the moment of use
+    #   ("command not found") whereas this is SILENT: the measured failure shipped
+    #   a binary that ran, exited 0, and did nothing, wearing a version string
+    #   that said otherwise. It also carries the AHEAD case — un-pushed commits in
+    #   a repo whose code this host compiles — which is rc 8's loss class.
+    17) echo 67 ;;
     # 14 (a host's managed symlinks resolve to nothing) sits between 8 and 13.
     # It is BELOW 8 because rc 8 means work exists on exactly one machine and a
     # careless fix destroys it, whereas a broken deployment is repaired by a
@@ -678,6 +778,181 @@ echo "[$label] FACT installed-plugins $iplug"
 echo "[$label] PARITY-RC=$p_rc"
 '
 
+# ── The per-host SOURCE-REPO routine ──────────────────────────────────────────
+# 🔴 See "SOURCE-REPO PARITY (rc 17)" in the header for what this measures, what
+# counts as drift and what deliberately does not. Here: how it is derived, and
+# why it cannot be a list.
+#
+# devrc builds packages from LOCAL WORKING TREES of other repos — a `src` of
+# `${workspace}/<repo>/…` in nix/pkgs. Nothing converges those repos, so a host
+# with a perfect devrc checkout can still compile months-old code. The covered
+# set is read out of nix/pkgs ON THE HOST BEING EXAMINED rather than passed in
+# from here, for two reasons: a hardcoded pair goes stale the moment a third
+# package is added (the same shape as the bug), and deriving it locally means
+# nothing derived has to be interpolated into a payload that executes on the
+# other machine.
+#
+# 🔴 COMMENTS ARE EXCLUDED BY TRUNCATION — each line is cut at its first `#`
+# before anything is read out of it, which covers a whole-line comment and a
+# trailing one with the same rule. clawgatectl.nix's own header discusses
+# `~/workspace/homelab-talos` in prose repeatedly and this very file documents the
+# `${workspace}/` pattern it is looking for, so a whole-file grep would "find"
+# sources in the documentation. What survives is scanned for EVERY occurrence, not
+# just the first: one line may legitimately name two sources. The known bound,
+# stated rather than engineered away: a `#` inside a nix STRING would truncate
+# early. That direction UNDER-reports, and under-reporting is what the two-way
+# pin against the real nix/pkgs exists to catch.
+#
+# 🔴 NO `find`, for the same reason the parity walk avoids it: the laptop resolves
+# `find` to BUSYBOX, which does not implement `-xtype`, rejects it by printing
+# usage to stderr and EXITS 0 — a confident zero from a scan wired to nothing.
+# `shopt -s globstar` plus a glob is bash's own, and behaves identically on both.
+#
+# Loop and local variable names are UPPERCASE for the same reason they are in the
+# parity payload: the suite's reverse-PATH tokenizer reads a lowercase word in
+# command position (including inside `$(( … ))`) as a command, and an uppercase
+# one is dropped by its filter instead of needing a "this is prose" ledger entry.
+#
+# READ-ONLY BY CONSTRUCTION: git fetch / rev-parse / symbolic-ref / rev-list /
+# status, plus printf, wc, tr, sed, head, awk and shell builtins. It writes
+# nothing and creates nothing.
+SRCREPO='
+set -uo pipefail
+label="${DRIFT_LABEL:-host}"
+repo="${DRIFT_REPO:-$HOME/workspace/devrc}"
+sfto="${DRIFT_SRC_FETCH_TIMEOUT:-30}"
+ssay() { echo "[$label] $*"; }
+
+S_NAMES=""
+s_add() { # s_add <repo-name> — dedupe, as two derivations can share one repo
+  case " $S_NAMES " in
+    *" $1 "*) return 0 ;;
+  esac
+  S_NAMES="$S_NAMES $1"
+}
+
+s_scan() { # s_scan <nix-file> — collect the workspace-relative repo names it uses
+  local LN REST NAME
+  while IFS= read -r LN || [ -n "$LN" ]; do
+    LN="${LN%%#*}"
+    while : ; do
+      case "$LN" in *\$\{workspace\}/*) ;; *) break ;; esac
+      REST="${LN#*\$\{workspace\}/}"
+      NAME="${REST%%[!A-Za-z0-9._-]*}"
+      [ -n "$NAME" ] && s_add "$NAME"
+      LN="$REST"
+    done
+  done < "$1"
+}
+
+shopt -s nullglob globstar
+S_FILES=0
+for F in "$repo"/nix/pkgs/**/*.nix; do
+  [ -f "$F" ] || continue
+  S_FILES=$(( S_FILES + 1 ))
+  s_scan "$F"
+done
+
+S_EXAMINED=0
+S_STALE=0
+S_UNMEASURED=0
+S_FACTS=""
+s_rc=0
+
+for N in $S_NAMES; do
+  SR="$HOME/workspace/$N"
+  S_EXAMINED=$(( S_EXAMINED + 1 ))
+
+  # A worktree checkout has .git as a FILE, a normal clone as a directory.
+  if [ ! -e "$SR/.git" ]; then
+    ssay "source repo $N: ABSENT at $SR — currency NOT evaluated."
+    ssay "  nix/pkgs builds from it; this host cannot. Reported, NOT drift: the"
+    ssay "  derivations guard on pathExists and simply omit the binary."
+    S_FACTS="$S_FACTS $N=ABSENT"
+    S_UNMEASURED=$(( S_UNMEASURED + 1 ))
+    continue
+  fi
+
+  SHA="$(git -C "$SR" rev-parse --short=12 HEAD 2>/dev/null)"
+  [ -n "$SHA" ] || SHA=UNBORN
+  S_FACTS="$S_FACTS $N=$SHA"
+  BR="$(git -C "$SR" symbolic-ref --quiet --short HEAD 2>/dev/null || echo DETACHED)"
+
+  # DIRTY is reported for every present repo, INCLUDING a current one: these
+  # derivations copy the working TREE, so an uncommitted edit or an untracked
+  # .go file is in the binary while `git log` says nothing happened.
+  ST="$(git -C "$SR" status --porcelain 2>/dev/null)"
+  S_DIRTY=0
+  [ -n "$ST" ] && S_DIRTY="$(printf "%s\n" "$ST" | wc -l | tr -d " ")"
+  if [ "$S_DIRTY" != 0 ]; then
+    ssay "source repo $N: DIRTY — $S_DIRTY path(s) modified or untracked."
+    ssay "  the build reads this TREE, not the commit, so those paths are IN the"
+    ssay "  binary. Reported, never drift on its own."
+  fi
+
+  FERR="$(timeout "$sfto" git -C "$SR" fetch --quiet origin 2>&1)"
+  frc=$?
+  if [ "$frc" != 0 ]; then
+    ssay "source repo $N: on branch $BR at $SHA — git fetch FAILED (rc=$frc), currency NOT evaluated."
+    printf "%s\n" "$FERR" | head -n 3 | sed "s|^|[$label]   git: |"
+    ssay "  these repos are private and reached over ssh, and a systemd --user"
+    ssay "  unit has no ssh-agent. NOT drift — and NOT a pass either."
+    S_UNMEASURED=$(( S_UNMEASURED + 1 ))
+    continue
+  fi
+
+  # 🔴 The comparison is against the OWN upstream of whatever branch is checked
+  # out, never a hardcoded
+  # `main`. These repos do not agree on a default branch — homelab-talos works on
+  # `trunk` — and assuming one would be a guess printed as a measurement.
+  UP=""
+  if [ "$BR" != DETACHED ]; then
+    UP="$(git -C "$SR" rev-parse -q --verify --symbolic-full-name "$BR@{upstream}" 2>/dev/null)"
+  fi
+  if [ -z "$UP" ]; then
+    ssay "source repo $N: on branch $BR at $SHA — no upstream to compare against, currency NOT evaluated."
+    ssay "  a detached HEAD or an untracked branch has no defined right answer."
+    S_UNMEASURED=$(( S_UNMEASURED + 1 ))
+    continue
+  fi
+
+  CNT="$(git -C "$SR" rev-list --left-right --count "$UP...HEAD" 2>/dev/null)"
+  S_BEHIND="$(printf "%s" "$CNT" | awk "{print \$1}")"
+  S_AHEAD="$(printf "%s" "$CNT" | awk "{print \$2}")"
+  case "$S_BEHIND" in ""|*[!0-9]*) S_BEHIND=-1 ;; esac
+  case "$S_AHEAD" in ""|*[!0-9]*) S_AHEAD=-1 ;; esac
+  if [ "$S_BEHIND" = -1 ] || [ "$S_AHEAD" = -1 ]; then
+    ssay "source repo $N: could not compare $BR to $UP — currency NOT evaluated."
+    S_UNMEASURED=$(( S_UNMEASURED + 1 ))
+    continue
+  fi
+
+  if [ "$S_BEHIND" -gt 0 ] || [ "$S_AHEAD" -gt 0 ]; then
+    S_STALE=$(( S_STALE + 1 ))
+    ssay "🔴 DRIFT — source repo $N is NOT current: $S_BEHIND behind / $S_AHEAD ahead of $UP (on $BR at $SHA)."
+    ssay "  nix/pkgs builds a package from THIS TREE. Whatever version string that"
+    ssay "  package carries, the code in the binary is the code sitting here."
+    ssay "  fix (on that host): git -C $SR pull --ff-only   then a home-manager switch"
+    s_rc=17
+  else
+    ssay "source repo $N: current — $BR == $UP at $SHA."
+  fi
+done
+
+# 🔴 EXAMINED BESIDE STALE, and UNMEASURED beside both. A bare "0 stale" from a
+# scan that walked no repos, or one whose every fetch failed, is exactly what a
+# checker wired to nothing prints.
+if [ "$S_EXAMINED" = 0 ]; then
+  ssay "source repos: NOT EVALUATED — nix/pkgs under $repo names no \${workspace}/ source ($S_FILES nix file(s) scanned)."
+  ssay "  a scan that examined nothing is not a clean scan; it is no scan."
+else
+  ssay "source repos: examined=$S_EXAMINED stale=$S_STALE unmeasured=$S_UNMEASURED ($S_FILES nix file(s) scanned)"
+fi
+
+echo "[$label] FACT src-repos$S_FACTS"
+echo "[$label] SRC-RC=$s_rc"
+'
+
 # The payload actually shipped to each host: the git CHECK in a SUBSHELL (so its
 # many `exit`s end the subshell and not the run) followed by the parity scan.
 # Composed rather than run as two ssh legs so an unreachable host is still ONE
@@ -692,6 +967,7 @@ $CHECK
 )
 _drift_git_rc=\$?
 $PARITY
+$SRCREPO
 exit \$_drift_git_rc"
 
 rc=0
@@ -730,6 +1006,32 @@ parity_rc_of() { # parity_rc_of <host-output> -> that host's parity rc (0 if non
   local V
   V="$(printf '%s\n' "$1" | sed -n 's/^\[[^]]*\] PARITY-RC=//p' | head -n 1)"
   case "$V" in ''|*[!0-9]*) echo 0 ;; *) echo "$V" ;; esac
+}
+
+src_rc_of() { # src_rc_of <host-output> -> that host's source-repo rc (0 if none)
+  # Same contract as parity_rc_of, for the same reason: an ABSENT verdict (an
+  # older drift-check.sh on the far side, a truncated stream) must not invent a
+  # failure. The absence stays visible because the FACT line is missing too, and
+  # the cross-host block then reports NOT COMPARED.
+  local V
+  V="$(printf '%s\n' "$1" | sed -n 's/^\[[^]]*\] SRC-RC=//p' | head -n 1)"
+  case "$V" in ''|*[!0-9]*) echo 0 ;; *) echo "$V" ;; esac
+}
+
+src_names_of() { # src_names_of <name=head list> -> just the names
+  local X OUT=""
+  for X in $1; do OUT="$OUT ${X%%=*}"; done
+  printf '%s' "$OUT"
+}
+
+src_head_of() { # src_head_of <name=head list> <name> -> that repo's HEAD token
+  local X
+  for X in $1; do
+    case "$X" in
+      "$2="*) printf '%s' "${X#*=}"; return 0 ;;
+    esac
+  done
+  printf ''
 }
 
 only_in() { # only_in <set-a> <set-b> -> members of a absent from b
@@ -890,6 +1192,7 @@ if [ "$DO_LOCAL" = 1 ]; then
   note_rc "$?"
   [ -n "$LOCAL_OUT" ] && printf '%s\n' "$LOCAL_OUT"
   note_rc "$(parity_rc_of "$LOCAL_OUT")"
+  note_rc "$(src_rc_of "$LOCAL_OUT")"
   mark_checked "$LOCAL_ROLE (local)"
   echo
 else
@@ -939,6 +1242,7 @@ if [ "$DO_REMOTE" = 1 ]; then
     streak_reset "$REMOTE_ROLE"
     note_rc "$remrc"
     note_rc "$(parity_rc_of "$REMOTE_OUT")"
+    note_rc "$(src_rc_of "$REMOTE_OUT")"
     mark_checked "$REMOTE_ROLE (remote)"
   fi
   echo
@@ -1021,6 +1325,52 @@ else
       echo "[parity] enabledPlugins AGREE."
     fi
   fi
+fi
+echo
+
+# ── CROSS-HOST SOURCE-REPO COMPARISON ─────────────────────────────────────────
+# 🔴 INFORMATION ONLY — it sets no exit code, and that is a decision, not an
+# omission. Whether a given source-repo HEAD is WRONG has a defined answer and it
+# is measured PER HOST above, against that branch's own upstream. "The two hosts
+# are on different commits" has no such answer: these are shared development
+# repos and one machine sitting on a feature branch is normal. A code that fired
+# on it would be red most of the time, and a permanently-red gate is worse than
+# no gate — the same refusal this file already makes for an unreachable laptop.
+#
+# What it IS worth printing is the most direct statement available of "these two
+# machines compile different code", which no per-host line can make.
+#
+# 🔴 AND IT IS ONLY VISIBLE WITH BOTH. One host's facts is not "the hosts agree",
+# it is "agreement not looked for", and the two must never print the same way.
+echo "=== source-repo parity ($LOCAL_ROLE vs $REMOTE_ROLE) ==="
+L_SRC="$(fact_of "$LOCAL_OUT" src-repos)"
+R_SRC="$(fact_of "$REMOTE_OUT" src-repos)"
+if [ -z "$L_SRC" ] || [ -z "$R_SRC" ]; then
+  echo "[srcrepo] NOT COMPARED — needs a fact set from EACH host; obtained from: ${CHECKED:-none}."
+  echo "[srcrepo]   this is not 'the two machines build the same source'. Nothing was compared."
+else
+  L_SN="$(src_names_of "$L_SRC")"
+  R_SN="$(src_names_of "$R_SRC")"
+  S_AGREE=0
+  S_DISAGREE=0
+  for N in $L_SN $(only_in "$R_SN" "$L_SN"); do
+    LV="$(src_head_of "$L_SRC" "$N")"
+    RV="$(src_head_of "$R_SRC" "$N")"
+    if [ -z "$LV" ] || [ -z "$RV" ]; then
+      echo "[srcrepo]   $N — named by nix/pkgs on only one host's checkout; not compared."
+      S_DISAGREE=$(( S_DISAGREE + 1 ))
+    elif [ "$LV" != "$RV" ]; then
+      echo "[srcrepo]   $N — $LOCAL_ROLE at $LV, $REMOTE_ROLE at $RV: the two hosts build DIFFERENT source."
+      S_DISAGREE=$(( S_DISAGREE + 1 ))
+    else
+      S_AGREE=$(( S_AGREE + 1 ))
+    fi
+  done
+  # Counted into a variable first, never interpolated as `$(( … ))` inside the
+  # message: a command substitution ENDS the printer segment, leaving the rest of
+  # the sentence looking like a command line to the suite's tokenizer.
+  S_COMPARED=$(( S_AGREE + S_DISAGREE ))
+  echo "[srcrepo] compared=$S_COMPARED same=$S_AGREE differing=$S_DISAGREE — information only; the per-host lines above carry the verdict."
 fi
 echo
 
@@ -1175,6 +1525,8 @@ if [ "$rc" != 0 ]; then
   echo "  rc14=managed symlinks resolve to nothing (needs a home-manager switch on that host)"
   echo "  rc15=host parity: settings.json key sets / enabledPlugins differ, or enabled-but-not-installed"
   echo "  rc16=NOT drift: the fuzzyclaw phase-2 gate OPENED (0 rows depend on fuzzyclaw for an age)"
+  echo "  rc17=a SOURCE REPO nix/pkgs builds a package from is behind/ahead its upstream on that host"
+  echo "       (ranks between rc8 and rc14 — the digit is not the severity; see severity() )"
 fi
 [ -n "$UNCHECKED" ] && echo "drift-check: NOT checked: $UNCHECKED"
 exit "$rc"

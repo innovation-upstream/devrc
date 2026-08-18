@@ -149,12 +149,16 @@ def test_the_version_comes_from_the_go_source(tmp_path, declared):
 
 
 def test_the_stamped_ldflag_and_the_store_version_are_the_same_string(tmp_path):
-    """The two halves of the 08-14 failure are one value now.
+    """⚠ INVARIANT GUARD, not regression coverage — MEASURED GREEN AT a2707be.
+
+    The old file already stamped its own `version` literal, so these two agreed
+    before this change too; what they never did was describe the SOURCE. So this
+    pins the half of the contract that was already true and must stay true, and
+    the regression coverage is `test_the_version_comes_from_the_go_source`.
 
     `version` decides the store path; the ldflag decides what the binary says
-    about itself. They disagreed for ~19 hours on the laptop and nothing could
-    see it. Asserted as an EQUALITY between the two evaluated fields, not as the
-    presence of a substring in the nix file.
+    about itself. Asserted as an EQUALITY between the two evaluated fields, not
+    as the presence of a substring in the nix file.
     """
     ws = _tree(tmp_path, client_go=CLIENT_GO % "4.5.6")
     got = _eval(tmp_path, ws)
@@ -187,7 +191,10 @@ def test_an_unparseable_source_yields_NO_PACKAGE_not_a_fallback(tmp_path, client
 
 
 def test_a_checkout_too_old_to_have_main_go_still_yields_no_package(tmp_path):
-    """The pre-existing guard must survive the new one — a checkout predating
+    """⚠ INVARIANT GUARD, not regression coverage — MEASURED GREEN AT a2707be.
+
+    The main.go pathExists guard predates this change; this pins that the new
+    `&& parsedVersion != null` conjunct did not weaken it. A checkout predating
     cmd/clawgatectl would otherwise fail deep in the Go build and take the whole
     switch down with it (measured on the laptop 2026-08-13, c417af30)."""
     ws = _tree(tmp_path, client_go=CLIENT_GO % "9.9.9", main_go=None)
