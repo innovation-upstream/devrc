@@ -2155,31 +2155,107 @@ def test_the_clawgate_queue_and_the_tmux_WAITING_count_stay_SEPARATE_populations
     assert "waiting" not in top and "probable" not in proj
 
 
-def _payload_paths_in(text):
+# A near-miss arm is only granted to tokens and keys of at least this length.
+# Below it the distance-1 neighbourhood of a key stops being "a typo of a key"
+# and becomes ordinary short prose: the payload's 2-char key `ts` sits one edit
+# from `is`/`as`/`to`/`tsx`, and claiming those as payload pointers is the very
+# false-red this helper was narrowed to remove. Measured (see
+# `test_a_stale_SINGLE_WORD_pointer_is_caught_not_just_an_underscored_one`):
+# with the floor at 4, every ordinary word tried sits >=2 edits from every
+# top-level key, while every plausible drift of a real key sits at 1.
+_NEAR_MISS_MIN_LEN = 4
+
+
+def _within_one_edit(a, b):
+    """True iff `a` becomes `b` under at most one insert / delete / substitute."""
+    la, lb = len(a), len(b)
+    if abs(la - lb) > 1:
+        return False
+    if la == lb:
+        return sum(x != y for x, y in zip(a, b)) <= 1
+    if la > lb:                      # normalise so `a` is the shorter one
+        a, b, la, lb = b, a, lb, la
+    i = 0
+    while i < la and a[i] == b[i]:   # skip the common prefix...
+        i += 1
+    return a[i:] == b[i + 1:]        # ...the rest must match past one insert
+
+
+def _names_a_top_level_key(tok, top_keys):
+    """Is this bare word a pointer AT the payload — naming a top-level key, or
+    one edit away from naming one (a typo, a plural, a small rename)?"""
+    if tok in top_keys:
+        return True
+    if len(tok) < _NEAR_MISS_MIN_LEN:
+        return False
+    return any(len(k) >= _NEAR_MISS_MIN_LEN and _within_one_edit(tok, k)
+               for k in top_keys)
+
+
+def _payload_paths_in(text, report):
     """Backticked tokens in a note that CLAIM to be payload paths.
 
-    Structural, not lexical: a token qualifies only if it is a DOTTED
-    snake_case path, or a bare snake_case word carrying at least one
-    UNDERSCORE. Prose like `list-panes` (hyphen) and `--claude-only` (dashes)
-    is not mistaken for a key. What comes back is a list of things the note
-    tells a JSON reader to go and look at.
+    Structural, not lexical. A token qualifies if it is (a) a DOTTED snake_case
+    path, (b) a bare snake_case word carrying an UNDERSCORE, or (c) a bare word
+    that NAMES A TOP-LEVEL KEY of `report`, or sits one edit from naming one.
+    Prose like `list-panes` (hyphen) and `--claude-only` (dashes) is not
+    mistaken for a key. What comes back is a list of things the note tells a
+    JSON reader to go and look at.
 
-    🔴 THE UNDERSCORE IS THE DISCRIMINANT, and the rule it replaced
-    (`[a-z_]{3,}`) had none: it could not tell a payload key from a backticked
-    skill name or an ordinary lowercase word, so backticking `standup` or
-    `stalled` in a future note would have failed this gate with NO defect
-    present — and with 2 paths extracted against a floor of >1, there is no
-    margin to absorb one. An underscore keeps the case this guard exists for:
-    a key that was RENAMED AWAY still carries one (`blocked_on_me`), so a
-    stale pointer is still extracted and still goes red.
+    🔴 CLAUSE (c) IS DERIVED FROM THE REAL PAYLOAD, NEVER FROM A LITERAL LIST,
+    and `report` is REQUIRED for exactly that reason — an optional argument
+    would let a future call site silently drop back to the underscore-only rule
+    that this docstring used to describe. Measured against a real
+    `base_gather()` report: of its 12 top-level keys only 4 carry an
+    underscore, so (a)+(b) alone left `caveats`, `clickhouse`, `filters`,
+    `fuzzyclaw`, `hosts`, `ledger`, `summary` and `ts` unextractable — a note
+    misspelling any of them was NOT CHECKED AT ALL. With (c) that is 11 of 12
+    (all but the 2-char `ts`, below `_NEAR_MISS_MIN_LEN`).
+
+    🔴 WHY A NEAR MISS AND NOT AN EXACT MATCH: an exact-match-only clause (c)
+    is worthless as a guard. A token that exactly names a live key always
+    resolves, so it can never go red; the pointer this guard exists to catch is
+    by definition one that NO LONGER names a key. One edit covers the drift
+    shapes that actually occur — a typo (`summry`), a lost character
+    (`clickhous`), a plural gained or lost (`caveat`, `ledgers`). The price is
+    paid knowingly and it is one word wide: `host` is one edit from the key
+    `hosts`, so a future note backticking the ROW field `host` would be read as
+    a pointer at the top-level key and go red. Measured, that is the ONLY such
+    collision in the payload's 60 single-word segments, and no live note
+    backticks it — write `hosts.<name>.host` or reword.
+
+    🔴 WHY TOP-LEVEL KEYS AND NOT EVERY KEY SEGMENT — measured, not assumed.
+    The same report has 136 distinct key segments, 60 of them single words.
+    Anchoring on those instead is not a stricter version of this rule, it is a
+    different and much worse one: `count`, `note`, `open`, `path`, `stale`,
+    `status`, `waiting`, `error`, `task` and ~8 more are ordinary English that
+    the tool's OWN caveat prose already backticks, and none of them resolve
+    from the root, so every one would be a false red. Widening to one edit over
+    that vocabulary is worse still — it swallows `state`, `mode` and `node`.
+    Against the 12 TOP-LEVEL keys the separation is clean: every ordinary word
+    tried is >=2 edits away (`standup` 6, `stalled` 6), every real drift is 1.
+
+    🔴 WHAT THIS STILL DOES NOT CATCH — stated because the claim it replaces
+    ("an underscore keeps the case this guard exists for") was measurably
+    false. A WHOLESALE rename that leaves no similar key behind — `hosts`
+    becoming `by_host`, 4 edits — is invisible to any payload-derived rule,
+    because after the rename the old name is simply not in the payload to be
+    recognised. The predecessor rule (`[a-z_]{3,}`) caught that only by
+    treating EVERY bare word as a pointer, which is what made backticking
+    `standup` or `stalled` fail this gate with no defect present. This helper
+    buys back the typo/plural/small-rename population without buying back that
+    false red; the wholesale-rename case is a known, accepted gap.
     """
     import re as _re
+    top_keys = set(report)
     out = []
     for tok in _re.findall(r"`([^`]+)`", text):
         if _re.fullmatch(r"[a-z]+(?:_[a-z]+)*(?:\.[a-z]+(?:_[a-z]+)*)+", tok):
             out.append(tok)        # a dotted path is unambiguous on its own
         elif _re.fullmatch(r"[a-z]+(?:_[a-z]+)+", tok):
-            out.append(tok)        # a bare word needs the underscore
+            out.append(tok)        # a bare word may carry the underscore...
+        elif _re.fullmatch(r"[a-z]+", tok) and _names_a_top_level_key(tok, top_keys):
+            out.append(tok)        # ...or name (or nearly name) a real key
     return out
 
 
@@ -2219,7 +2295,7 @@ def test_every_payload_path_a_not_measured_NOTE_points_at_actually_EXISTS():
     notes = [p.get("note", "") for p in report["not_measured"]]
     assert notes, "no not_measured entries — nothing was checked"
 
-    found = [pth for n in notes for pth in _payload_paths_in(n)]
+    found = [pth for n in notes for pth in _payload_paths_in(n, report)]
     assert len(found) > 1, (
         "POSITIVE CONTROL FAILED — the extractor found %d payload paths across "
         "%d notes; a pointer guard that finds nothing passes vacuously"
@@ -2231,7 +2307,8 @@ def test_every_payload_path_a_not_measured_NOTE_points_at_actually_EXISTS():
         % broken)
 
     # NEGATIVE CONTROL: a planted bad pointer must be caught by the same code.
-    planted = _payload_paths_in("see `summary.waiting.probable` and `no_such_key`")
+    planted = _payload_paths_in(
+        "see `summary.waiting.probable` and `no_such_key`", report)
     assert "no_such_key" in planted, planted
     assert [p for p in planted if not _resolves(report, p)] == ["no_such_key"]
 
@@ -2241,13 +2318,129 @@ def test_every_payload_path_a_not_measured_NOTE_points_at_actually_EXISTS():
     # this gate red — the whole point of a delta guard is that it fires on a
     # defect, not on prose.
     assert _payload_paths_in(
-        "see `standup` for PRs, whether it is `stalled`, and `list-panes`") == []
+        "see `standup` for PRs, whether it is `stalled`, and `list-panes`",
+        report) == []
     # ...and the discriminant is not "no bare word ever counts": a key that was
     # RENAMED AWAY still carries its underscore, and a note still pointing at
     # it is exactly the stale pointer this guard exists to catch.
-    stale = _payload_paths_in("for approvals see `blocked_on_me`")
+    stale = _payload_paths_in("for approvals see `blocked_on_me`", report)
     assert stale == ["blocked_on_me"], stale
     assert not _resolves(report, "blocked_on_me")
+
+
+def test_a_stale_SINGLE_WORD_pointer_is_caught_not_just_an_underscored_one():
+    """\U0001f534 THE BLINDNESS ITSELF, pinned so it cannot silently come back.
+
+    The guard above was once narrowed to "a bare word needs an UNDERSCORE",
+    which removed a real false red but bought it with measured blindness: only
+    4 of this payload's 12 top-level keys carry an underscore, so a note
+    misspelling any of the other 8 was not merely un-caught, it was never even
+    extracted. The justification offered at the time — "a key that was RENAMED
+    AWAY still carries an underscore (`blocked_on_me`)" — is true of that one
+    key and false for 8 of the tool's own 12.
+
+    So this test asserts the property directly: a note pointing at a
+    NONEXISTENT SINGLE-WORD payload key must be caught. It derives both the
+    keys and the corruptions from a REAL report, so it cannot be satisfied by a
+    hardcoded list drifting alongside a hardcoded rule.
+    """
+    report = base_gather()
+    top = sorted(report)
+
+    # 1. POSITIVE CONTROL on the near-miss primitive itself, both directions —
+    #    a predicate nobody has watched return False is not a predicate.
+    assert _within_one_edit("summary", "summry")      # one deletion
+    assert _within_one_edit("ledger", "ledgers")      # one insertion
+    assert _within_one_edit("hosts", "hests")         # one substitution
+    assert not _within_one_edit("summary", "standup")
+    assert not _within_one_edit("stale", "stalled")   # two edits, not one
+
+    # 2. The literal pointers that SURVIVED the underscore-only rule. Each is
+    #    one edit from a real top-level key and resolves against nothing.
+    for bad, real in (("summry", "summary"), ("clickhous", "clickhouse"),
+                      ("caveat", "caveats"), ("ledgers", "ledger")):
+        assert real in report, (real, top)
+        got = _payload_paths_in("the rows are in `%s`" % bad, report)
+        assert got == [bad], (
+            "BLINDNESS RETURNED — `%s` (one edit from the real top-level key "
+            "`%s`) was not extracted as a payload pointer, so a note "
+            "misspelling that key would pass this gate unnoticed; got %r"
+            % (bad, real, got))
+        assert not _resolves(report, bad), bad
+
+    # 3. Now EVERY top-level key, enumerated — not a sample. Drop the last
+    #    character of each and record which corruptions the rule fails to
+    #    catch. The blind set is asserted EXACTLY, so it fails if it grows (a
+    #    new key the rule cannot see) or shrinks (`ts` renamed) — either way a
+    #    human re-reads `_NEAR_MISS_MIN_LEN` instead of inheriting it.
+    blind = []
+    for key in top:
+        corrupt = key[:-1]
+        if corrupt in report:
+            continue                 # a corruption that lands on another real
+                                     # key is not a stale pointer at all
+        caught = (_payload_paths_in("see `%s`" % corrupt, report) == [corrupt]
+                  and not _resolves(report, corrupt))
+        if not caught:
+            blind.append(key)
+    assert blind == ["ts"], (
+        "the set of top-level keys whose misspelling this gate CANNOT see "
+        "changed: expected exactly ['ts'] (2 chars, under the %d-char "
+        "near-miss floor), got %r out of %r"
+        % (_NEAR_MISS_MIN_LEN, blind, top))
+
+    # 4. THE CONTRAST THAT MAKES 3 A NUMBER AND NOT A VIBE. Under the
+    #    underscore-only rule — written out literally here, not read off the
+    #    implementation — 8 of those same corruptions were invisible: the 7
+    #    real keys clause (c) buys back, plus `ts`, which neither rule sees.
+    def _underscore_only(tok):
+        return bool(re.fullmatch(r"[a-z]+(?:_[a-z]+)*(?:\.[a-z]+(?:_[a-z]+)*)+",
+                                 tok)
+                    or re.fullmatch(r"[a-z]+(?:_[a-z]+)+", tok))
+
+    old_blind = [k for k in top
+                 if k[:-1] not in report and not _underscore_only(k[:-1])]
+    assert sorted(old_blind) == ["caveats", "clickhouse", "filters",
+                                 "fuzzyclaw", "hosts", "ledger", "summary",
+                                 "ts"], old_blind
+    assert len(old_blind) == 8 and len(blind) == 1, (old_blind, blind)
+
+    # 5. AND THE FALSE RED STAYS FIXED. The whole reason the underscore rule
+    #    existed: an ordinary backticked word must not become a pointer. These
+    #    sit 6 edits from the nearest top-level key, so the widened rule has
+    #    margin, not luck.
+    assert _payload_paths_in(
+        "see `standup`, whether it is `stalled`, run `list-panes`", report) == []
+    for word in ("standup", "stalled"):
+        assert not _names_a_top_level_key(word, set(top)), word
+
+    # 6. THE COST OF THE NEAR MISS, PINNED so the docstring's measurement
+    #    cannot rot. Widening to one edit necessarily drags in words that are
+    #    not top-level keys. Enumerate every single-word key segment at EVERY
+    #    depth and assert which ones the rule now claims: the top-level ones,
+    #    plus exactly `host` (one edit from `hosts`). If that set grows, a new
+    #    key has put an ordinary word inside a near-miss neighbourhood and the
+    #    false-red budget needs re-reading.
+    segments = set()
+
+    def _walk(node):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if isinstance(k, str):
+                    segments.add(k)
+                _walk(v)
+        elif isinstance(node, (list, tuple)):
+            for v in node:
+                _walk(v)
+
+    _walk(report)
+    single = sorted(s for s in segments if re.fullmatch(r"[a-z]+", s))
+    assert len(single) >= 50, len(single)      # the enumeration really ran
+    claimed = sorted(s for s in single if _payload_paths_in("`%s`" % s, report))
+    assert claimed == sorted(set(top) & set(single) | {"host"}), (
+        "the near-miss neighbourhood changed: the rule claims %r out of %d "
+        "single-word key segments; expected the top-level keys plus 'host'"
+        % (claimed, len(single)))
 
 
 # =========================================================================== #
