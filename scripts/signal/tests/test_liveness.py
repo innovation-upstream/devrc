@@ -194,15 +194,26 @@ def test_a_STALLED_POSTGRES_CANNOT_FREEZE_THE_LIVENESS_FILE(tmp_path):
                               path=path, interval=0.01)
     try:
         beat.start()
+
+        # 🔴 SNAPSHOT BEFORE WAITING, and snapshot the file and the tick count
+        # TOGETHER. The first version read `first` AFTER `entered.wait()`
+        # returned, by which time the 10ms file thread could already be past
+        # tick 3 — so `while beat.ticks < 3` never ran, `second` re-read the
+        # very same file, and `second > first` failed on an identical
+        # timestamp. Measured at 5/60 red on an IDLE machine (8%), so it was a
+        # genuine race and not a load artifact. A ~1-in-15 flake on the test
+        # that gates a deploy-blocker is how a red gate becomes something people
+        # click through.
+        n0 = beat.ticks
+        first = consumer.read_heartbeat_file(path)
         assert entered.wait(2), "the row thread never reached the database"
 
-        first = consumer.read_heartbeat_file(path)
-        deadline = time.time() + 2
-        while beat.ticks < 3 and time.time() < deadline:
+        deadline = time.time() + 5
+        while beat.ticks < n0 + 2 and time.time() < deadline:
             time.sleep(0.01)
 
         # 🔴 The file kept beating WHILE the database was wedged.
-        assert beat.ticks >= 3, "the stalled DB froze the liveness file"
+        assert beat.ticks >= n0 + 2, "the stalled DB froze the liveness file"
         assert beat.row_writes == 0, "the DB was supposed to be stuck"
         second = consumer.read_heartbeat_file(path)
         assert second["written_at"] > first["written_at"]
@@ -721,3 +732,102 @@ def test_a_NEGATIVE_age_is_not_fresh():
     """A backwards clock step must not make an arbitrarily stale beat healthy."""
     assert consumer.heartbeat_is_fresh(-5000.0, max_age=120) is False
     assert consumer.heartbeat_is_fresh(-0.001, max_age=120) is False
+
+
+# --------------------------------------------------------------------------- #
+# Coverage debt the delta re-audit found by mutation: each of these had a
+# surviving mutant against a fully green suite.
+
+def test_last_frame_at_is_stamped_in_MILLISECONDS_not_seconds(db):
+    """🟡 The UNIT is load-bearing and was unpinned.
+
+    Changing the stamp to `time.time()` (seconds) survived all 467 tests: the
+    only round-trip test INJECTED a value into a fake, and the real-stamping
+    test asserted only `is not None`. With seconds, `frame_age_seconds` reads
+    ~1.7 million — a diagnosis field lying by a factor of 1000, in the one field
+    that distinguishes "connected and fed nothing" from "working".
+
+    Epoch-ms is ~1.7e12 and epoch-s ~1.7e9, so the magnitude discriminates them
+    with no clock coupling.
+    """
+    c = _consumer(db, Streams([_payload(1723960000001, "one")]))
+    c.run(max_connections=1)
+
+    assert c.last_frame_at is not None
+    assert isinstance(c.last_frame_at, int), "the column is BIGINT epoch-ms"
+    assert c.last_frame_at > 1_000_000_000_000, (
+        "last_frame_at looks like epoch SECONDS; the column and every reader "
+        "expect epoch MILLISECONDS")
+
+
+def test_a_later_beat_WITHOUT_a_frame_time_PRESERVES_the_stored_one(db):
+    """🟢 The `COALESCE(EXCLUDED.last_frame_at, existing)` in the upsert.
+
+    Replacing it with a plain `EXCLUDED.last_frame_at` survived. It matters
+    across a pod restart: a fresh pod's first beats carry None, and without the
+    COALESCE they would WIPE the last known frame time — deleting the one
+    diagnostic that says when traffic was last seen, at exactly the moment
+    someone is asking.
+    """
+    with_frame = consumer.Heartbeat(FakeConsumer(last_frame_at=1723970000123),
+                                    path="/dev/null").payload()
+    db.record_heartbeat(with_frame)
+    assert db.read_heartbeat()["last_frame_at"] == 1723970000123
+
+    without = consumer.Heartbeat(FakeConsumer(last_frame_at=None),
+                                 path="/dev/null").payload()
+    db.record_heartbeat(without)
+    assert db.read_heartbeat()["last_frame_at"] == 1723970000123, (
+        "a beat with no frame time wiped the stored one")
+
+
+def test_stop_HALTS_both_loops(tmp_path):
+    """🟢 The shutdown path was essentially untested — `stop()` not setting the
+    event, `stop()` joining nothing, and `_row_loop` ignoring the stop event all
+    survived. A row loop that ignores it keeps beating after shutdown."""
+    class QuietDB:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def record_heartbeat(self, hb): pass
+        def commit(self): pass
+
+    beat = consumer.Heartbeat(FakeConsumer(), db_factory=QuietDB,
+                              path=_hb_path(tmp_path), interval=0.01)
+    beat.start()
+    deadline = time.time() + 2
+    while beat.row_writes < 2 and time.time() < deadline:
+        time.sleep(0.01)
+    assert beat.row_writes >= 2, "the row loop never ran"
+
+    beat.stop()
+    ticks_after_stop = beat.ticks
+    rows_after_stop = beat.row_writes
+    time.sleep(0.15)                      # >> interval
+
+    assert beat.ticks == ticks_after_stop, "the file loop kept beating after stop()"
+    assert beat.row_writes == rows_after_stop, "the row loop kept beating after stop()"
+    assert not (beat._thread and beat._thread.is_alive())
+    assert not (beat._row_thread and beat._row_thread.is_alive())
+
+
+def test_BOTH_threads_are_daemons(tmp_path):
+    """🟢 `daemon=True` on both survived being flipped.
+
+    It is load-bearing and the code says so: the row thread can be wedged inside
+    a stalled database call, and a non-daemon thread there would hang
+    interpreter exit for the same reason liveness used to freeze.
+    """
+    class QuietDB:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def record_heartbeat(self, hb): pass
+        def commit(self): pass
+
+    beat = consumer.Heartbeat(FakeConsumer(), db_factory=QuietDB,
+                              path=_hb_path(tmp_path), interval=0.01)
+    try:
+        beat.start()
+        assert beat._thread.daemon is True
+        assert beat._row_thread.daemon is True
+    finally:
+        beat.stop()

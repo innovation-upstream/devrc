@@ -175,6 +175,21 @@ kubectl -n signal exec deploy/signal-consumer -- python3 /app/scripts/signal/con
   the counters. Richer, and it is ALLOWED to fail — a DB outage degrades the row
   and leaves liveness intact.
 
+🔴 **NO MIGRATION EXISTS for `signal.consumer_health`, and `ensure_schema()`
+will not tell you.** It uses `CREATE TABLE IF NOT EXISTS`, which is silent about
+a table that already exists with the WRONG column types. A pre-release build
+declared `updated_at`/`last_frame_at` as `TIMESTAMPTZ`; the shipped code writes
+`BIGINT` epoch-ms. Against a database that ever ran that build, `ensure_schema()`
+reports success, **every beat then fails forever** with `column … is of type
+timestamp with time zone but expression is of type bigint`, and `health
+--from-db` reports no heartbeat while the FILE probe stays green — so nothing
+restarts and nothing alerts. Measured on real Postgres, not reasoned.
+**The live homelab database is NOT affected** — verified: the table did not
+exist there, so it is born `BIGINT`. If you hit this anywhere else (a dev box, a
+rolled-back image), the fix is `DROP TABLE signal.consumer_health;` and let the
+next beat recreate it — the table is a single disposable status row, so there is
+nothing to preserve.
+
 🔴 **DEPLOY PAIRING — the pod needs a WRITABLE heartbeat path or it will not
 start.** `consumer.py run` beats once synchronously before entering the loop, and
 an unwritable path is a configuration fault (loud, at startup) rather than
