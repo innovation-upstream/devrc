@@ -116,7 +116,7 @@ def test_hermeticity_fixture_is_actually_installed():
 def test_the_blocked_cache_seam_is_separate_from_the_general_file_reader():
     """🔴 The guard above is only real if the two seams are actually distinct.
 
-    If `read_blocked_on_me` were changed to call `_read_text` directly, the
+    If `read_clawgate_queue` were changed to call `_read_text` directly, the
     autouse raiser would stop covering it and every later test would be free to
     read the live machine again — with the suite still green, because the
     positive control above only proves the raiser is INSTALLED, not that the
@@ -124,10 +124,10 @@ def test_the_blocked_cache_seam_is_separate_from_the_general_file_reader():
     reader injected, the read must raise.
     """
     with pytest.raises(_Forbidden):
-        sm.read_blocked_on_me()
+        sm.read_clawgate_queue()
     # ...and an INJECTED reader must bypass the seam entirely, or every test
     # below is testing the raiser rather than the parser.
-    got = sm.read_blocked_on_me(path="/nope", reader=lambda p: None)
+    got = sm.read_clawgate_queue(path="/nope", reader=lambda p: None)
     assert got["status"] == "absent"
 
 
@@ -350,7 +350,7 @@ def base_gather(**kw):
         slots=SLOTS_FIXTURE,
         # The clawgate cache: absent by default, so no test inherits a value
         # that depends on the operator's real queue. Override per test.
-        blocked_reader=lambda p: None,
+        clawgate_reader=lambda p: None,
     )
     defaults.update(kw)
     return _REAL_GATHER(**defaults)
@@ -1707,7 +1707,7 @@ def test_json_golden_schema_and_values():
     assert blob["stale_threshold_secs"] == 3600
     assert set(blob) == {"ts", "local_host", "stale_threshold_secs", "hosts",
                          "clickhouse", "fuzzyclaw", "ledger", "filters",
-                         "caveats", "summary", "blocked_on_me",
+                         "caveats", "summary", "clawgate_queue",
                          # what this report contains NOTHING about, derived from
                          # the keys above rather than written down
                          "not_measured"}
@@ -1856,7 +1856,7 @@ def test_json_golden_schema_and_values():
         # fixture's environment), so the count is None with its discriminant —
         # and so is `stuck_count`, which is the same rule applied to the
         # stuck-dispatch half rather than a second, weaker one.
-        "blocked_on_me": {"count": None, "status": "absent",
+        "clawgate_queue": {"count": None, "status": "absent",
                           "stuck_count": None, "schema_ok": False},
         # 🔴 THE #419 METER, in the golden. One of these three windows has an
         # age and it came from fuzzyclaw — because this fixture runs
@@ -2026,6 +2026,168 @@ def test_stale_threshold_flows_from_the_argument_into_the_rows():
     # the row that moved is a CLAUDE row, so it moved on the claude half
     assert stale["summary"]["status"]["stale"] == {"claude": 1, "shell": 0,
                                                   "total": 1}
+
+
+# =========================================================================== #
+# §3.16b — the misnomer, banned structurally
+# =========================================================================== #
+def _all_keys(obj, out=None):
+    """Every dict key anywhere in a nested payload."""
+    if out is None:
+        out = set()
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            out.add(k)
+            _all_keys(v, out)
+    elif isinstance(obj, list):
+        for v in obj:
+            _all_keys(v, out)
+    return out
+
+
+def test_no_key_named_blocked_on_me_survives_at_ANY_depth():
+    """\U0001f534 THE MISNOMER, BANNED STRUCTURALLY, BECAUSE THE PROSE MITIGATION FAILED.
+
+    `report["blocked_on_me"]` held the CLAWGATE APPROVAL QUEUE, not "everything
+    waiting on you". This tool already carried a caveat saying exactly that,
+    whose own text called the wrong reading "the misread this entry exists to
+    prevent" — and a reader made that misread anyway, in a brief that then
+    shipped to three subagents. A field NAME is read a hundred times for every
+    once its caveat is. RULES.md: prefer the deterministic/structural fix over
+    the prose one. The name is now `clawgate_queue`; this is what stops the old
+    one coming back.
+
+    Walked over the WHOLE payload rather than the top level, because the
+    top-level key set is already pinned by the golden test while `lean_report`
+    is a SEPARATE builder — a key resurrected inside `summary` or inside the
+    lean projection would be invisible to that pin. Both surfaces here.
+
+    \U0001f534 POSITIVE CONTROL, and not decoration: a walker wired to nothing
+    returns an empty set, and `"blocked_on_me" not in set()` passes happily. The
+    control asserts the walker really finds the key that REPLACED the misnomer,
+    so an empty result cannot be read as a clean one.
+    """
+    report = base_gather()
+    for label, payload in (("full", report), ("lean", lean_of(report))):
+        keys = _all_keys(json.loads(json.dumps(payload, default=str)))
+        assert keys, "%s: the walker found NO keys — it is wired to nothing" % label
+        assert "clawgate_queue" in keys, (
+            "%s: POSITIVE CONTROL FAILED — the walker cannot see the key that "
+            "replaced the misnomer, so its verdict on the misnomer is worthless"
+            % label)
+        assert "blocked_on_me" not in keys, label
+
+
+def test_the_clawgate_queue_and_the_tmux_WAITING_count_stay_SEPARATE_populations():
+    """\U0001f534 A RELATIONSHIP, not a value. The rename fixes what the field is
+    CALLED; this pins what it must not BECOME.
+
+    The two answer different questions from different stores: `clawgate_queue`
+    is the approval queue read out of the bar-status cache, and
+    `summary.waiting.probable` is panes whose own tail looks like it is asking a
+    human something. Summing them, or sourcing either from the other, rebuilds
+    the exact conflation the rename removed.
+
+    🔴 DRIVEN OFF A POPULATED CACHE, and that is the whole point. The default
+    fixture leaves BOTH counts `None` — an earlier version of this test ran
+    against it and asserted a "separation" that a mutant aliasing one to the
+    other would have satisfied trivially, because `None == None`. `_cache()`
+    supplies 12 / stuck 1, values `waiting.probable` cannot produce here, so the
+    numbers have to disagree for this to pass.
+
+    🔴 `summary.clawgate_queue` IS a deliberate projection of the top-level
+    field, not a duplicate to be removed — the summary carries count WITH its
+    discriminant so a roll-up reader can tell "none pending" from "never
+    measured". So the invariant is that the projection MIRRORS, on every field
+    it republishes; a hardcoded value in either place breaks it.
+    """
+    report = base_gather(clawgate_reader=_cache())
+    top = report["clawgate_queue"]
+    proj = report["summary"]["clawgate_queue"]
+    waiting = report["summary"]["waiting"]
+
+    # The cache really did land — without this the mirror assertions below could
+    # be comparing None to None and pass with the reader unwired.
+    assert top["count"] == 12 and top["stuck_count"] == 1, top
+
+    # The projection mirrors, field for field.
+    for field in ("count", "status", "stuck_count", "schema_ok"):
+        assert proj[field] == top[field], (field, proj[field], top[field])
+
+    # ...and the tmux waiting population is untouched by any of it: a separate
+    # key, a separate shape, and a count that did NOT become 12.
+    assert set(waiting) >= {"probable", "measured", "unmeasured"}
+    assert waiting["probable"] != top["count"]
+    assert "waiting" not in top and "probable" not in proj
+
+
+def _payload_paths_in(text):
+    """Backticked tokens in a note that CLAIM to be payload paths.
+
+    Structural, not lexical: a token qualifies only if it is a dotted path or a
+    bare `snake_case` word, so prose like `list-panes` (hyphen) and
+    `--claude-only` (dashes) are not mistaken for keys. What comes back is a
+    list of things the note tells a JSON reader to go and look at.
+    """
+    import re as _re
+    out = []
+    for tok in _re.findall(r"`([^`]+)`", text):
+        if _re.fullmatch(r"[a-z_]+(?:\.[a-z_]+)+", tok):
+            out.append(tok)
+        elif _re.fullmatch(r"[a-z_]{3,}", tok):
+            out.append(tok)
+    return out
+
+
+def _resolves(report, path):
+    node = report
+    for part in path.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return False
+        node = node[part]
+    return True
+
+
+def test_every_payload_path_a_not_measured_NOTE_points_at_actually_EXISTS():
+    """\U0001f534 A CAVEAT IS A MACHINE-READABLE CLAIM, so its POINTERS are claims too.
+
+    These notes are what a `--json` consumer reads to find out what this tool did
+    not measure and where to look instead. This repo has already been bitten by a
+    caveat that went stale the moment the code changed
+    (`CAVEATS["fuzzyclaw_scope"]` told every consumer that remote rows carry null
+    `age_secs` — exactly the field the ledger had just started filling). A note
+    that says "see `summary.waiting.probable`" is worthless the day that key is
+    renamed, and nothing until now checked it.
+
+    Resolves each path against a REAL report rather than against a list of
+    expected names, so this cannot be satisfied by keeping a stale allowlist in
+    step with a stale note.
+
+    \U0001f534 BOTH CONTROLS. Positive: the extractor must find paths at all, and
+    they must be MORE than one, or a regex that quietly stopped matching would
+    read as "every pointer is valid". Negative: a note containing a path that
+    does NOT exist must be reported — otherwise `_resolves` returning True for
+    everything would look identical to a clean run.
+    """
+    report = base_gather()
+    notes = [p.get("note", "") for p in report["not_measured"]]
+    assert notes, "no not_measured entries — nothing was checked"
+
+    found = [pth for n in notes for pth in _payload_paths_in(n)]
+    assert len(found) > 1, (
+        "POSITIVE CONTROL FAILED — the extractor found %d payload paths across "
+        "%d notes; a pointer guard that finds nothing passes vacuously"
+        % (len(found), len(notes)))
+
+    broken = [pth for pth in found if not _resolves(report, pth)]
+    assert broken == [], (
+        "a not_measured note points at payload path(s) that do not exist: %s"
+        % broken)
+
+    # NEGATIVE CONTROL: a planted bad pointer must be caught by the same code.
+    planted = _payload_paths_in("see `summary.waiting.probable` and `no_such_key`")
+    assert "no_such_key" in planted, planted
+    assert [p for p in planted if not _resolves(report, p)] == ["no_such_key"]
 
 
 # =========================================================================== #
@@ -5217,7 +5379,7 @@ def _legacy_cache(**kw):
 
 
 def test_a_fresh_cache_is_ok_and_carries_the_count():
-    got = sm.read_blocked_on_me(reader=_cache(), now=NOW)
+    got = sm.read_clawgate_queue(reader=_cache(), now=NOW)
     assert got["status"] == "ok"
     assert got["count"] == 12
     assert got["cache_age_secs"] == 30
@@ -5230,7 +5392,7 @@ def test_a_fresh_cache_is_ok_and_carries_the_count():
 # one, plus the twin that must not.
 # --------------------------------------------------------------------------- #
 def test_a_schema2_cache_surfaces_the_stuck_dispatch_with_its_idle_time():
-    got = sm.read_blocked_on_me(reader=_cache(), now=NOW)
+    got = sm.read_clawgate_queue(reader=_cache(), now=NOW)
     assert got["schema_ok"] is True and got["schema_note"] is None
     assert got["stuck_count"] == 1
     assert got["stuck"] == [{"id": 173, "title": "wedged dispatch",
@@ -5244,7 +5406,7 @@ def test_a_schema2_cache_surfaces_the_stuck_dispatch_with_its_idle_time():
 def test_a_LEGACY_cache_reports_stuck_as_UNMEASURED_never_as_zero():
     """🔴 The exact substitution this whole script refuses, on the newest field.
     A poller that never looked for stuck dispatches did not find zero of them."""
-    got = sm.read_blocked_on_me(reader=_legacy_cache(), now=NOW)
+    got = sm.read_clawgate_queue(reader=_legacy_cache(), now=NOW)
     assert got["status"] == "ok", "the COUNT it does carry is still usable"
     assert got["count"] == 11
     assert got["schema"] is None and got["schema_ok"] is False
@@ -5260,7 +5422,7 @@ def test_a_LEGACY_cache_reports_stuck_as_UNMEASURED_never_as_zero():
 ])
 def test_the_schema_gate_is_measured_either_side_of_the_boundary(schema, ok):
     body = {} if schema is None else {"schema": schema}
-    got = sm.read_blocked_on_me(reader=_cache(**body) if schema is not None
+    got = sm.read_clawgate_queue(reader=_cache(**body) if schema is not None
                                 else _legacy_cache(), now=NOW)
     assert got["schema_ok"] is ok, schema
 
@@ -5268,9 +5430,9 @@ def test_the_schema_gate_is_measured_either_side_of_the_boundary(schema, ok):
 def test_a_schema2_cache_enumerates_ready_for_review_rather_than_folding_it_in():
     """🔴 Three finished tasks once appeared in NO list on any surface: the
     count moved and nothing said what had finished."""
-    got = sm.read_blocked_on_me(reader=_cache(), now=NOW)
+    got = sm.read_clawgate_queue(reader=_cache(), now=NOW)
     assert got["ready_for_review"] == [{"id": 172, "title": "finished item"}]
-    text = "\n".join(sm.render_blocked_on_me(got))
+    text = "\n".join(sm.render_clawgate_queue(got))
     assert "#172 REVIEW finished item" in text
     # and every open row is named too — not just the six the detail string caps
     for i in range(10):
@@ -5278,8 +5440,8 @@ def test_a_schema2_cache_enumerates_ready_for_review_rather_than_folding_it_in()
 
 
 def test_the_rendered_stuck_row_carries_the_idle_time_beside_the_flag():
-    text = "\n".join(sm.render_blocked_on_me(
-        sm.read_blocked_on_me(reader=_cache(), now=NOW)))
+    text = "\n".join(sm.render_clawgate_queue(
+        sm.read_clawgate_queue(reader=_cache(), now=NOW)))
     assert "1 STUCK dispatch(es)" in text
     assert "#173 idle 4h [agent_idle]" in text
     # 🔴 and it says what the measure cannot see, in the output itself
@@ -5292,8 +5454,8 @@ def test_a_stuck_row_at_sixteen_minutes_reads_differently_from_one_at_four_hours
     near = _cache(stuck=[{"id": 173, "title": "wedged dispatch",
                           "reasons": ["agent_idle"], "agent_idle_secs": 960}])
     far = _cache()
-    a = "\n".join(sm.render_blocked_on_me(sm.read_blocked_on_me(reader=near, now=NOW)))
-    b = "\n".join(sm.render_blocked_on_me(sm.read_blocked_on_me(reader=far, now=NOW)))
+    a = "\n".join(sm.render_clawgate_queue(sm.read_clawgate_queue(reader=near, now=NOW)))
+    b = "\n".join(sm.render_clawgate_queue(sm.read_clawgate_queue(reader=far, now=NOW)))
     assert "idle 16m" in a and "idle 4h" in b
     assert a != b
 
@@ -5306,7 +5468,7 @@ def test_a_schema2_cache_MISSING_the_stuck_key_is_still_None_not_empty():
     nothing was read."""
     body = {"schema": 2, "count": 3, "ts": NOW - 30, "state": "Warning",
             "detail": "3 need you"}
-    got = sm.read_blocked_on_me(reader=lambda p: json.dumps(body), now=NOW)
+    got = sm.read_clawgate_queue(reader=lambda p: json.dumps(body), now=NOW)
     assert got["status"] == "ok" and got["count"] == 3
     assert got["stuck"] is None and got["stuck_count"] is None
     assert got["ready_for_review"] is None and got["open"] is None
@@ -5314,7 +5476,7 @@ def test_a_schema2_cache_MISSING_the_stuck_key_is_still_None_not_empty():
 
 def test_the_RENDERER_also_says_UNMEASURED_for_a_schema2_cache_with_no_lists():
     """🔴 THE SAME BUG ONE LAYER DOWN, and the reason a reader test was not
-    enough. `read_blocked_on_me` preserves the None correctly (test above) — and
+    enough. `read_clawgate_queue` preserves the None correctly (test above) — and
     then `_render_blocked_rows` did `b.get("stuck") or []`, collapsing exactly
     the distinction the reader had just protected. Measured: this cache rendered
     a clean "3 clawgate task(s) needing you" with NO warning anywhere, while the
@@ -5325,8 +5487,8 @@ def test_the_RENDERER_also_says_UNMEASURED_for_a_schema2_cache_with_no_lists():
     """
     body = {"schema": 2, "count": 3, "ts": NOW - 30, "state": "Warning",
             "detail": "3 need you"}
-    got = sm.read_blocked_on_me(reader=lambda p: json.dumps(body), now=NOW)
-    text = "\n".join(sm.render_blocked_on_me(got))
+    got = sm.read_clawgate_queue(reader=lambda p: json.dumps(body), now=NOW)
+    text = "\n".join(sm.render_clawgate_queue(got))
     assert "NOT measured" in text or "NOT enumerated" in text, text
     assert "stuck" in text.lower()
     # …and it must not read as a measured all-clear.
@@ -5337,15 +5499,15 @@ def test_the_renderer_distinguishes_a_MEASURED_empty_queue_from_an_ABSENT_one():
     """🔴 THE DISCRIMINATING PAIR for the renderer. A measured-empty board and a
     cache that carries no lists at all must not produce the same text — that
     equality IS the bug."""
-    measured = sm.read_blocked_on_me(
+    measured = sm.read_clawgate_queue(
         reader=_cache(stuck=[], stuck_count=0, open=[], ready_for_review=[],
                       count=0), now=NOW)
-    absent_lists = sm.read_blocked_on_me(
+    absent_lists = sm.read_clawgate_queue(
         reader=lambda p: json.dumps({"schema": 2, "count": 3, "ts": NOW - 30,
                                      "state": "Warning", "detail": "3 need you"}),
         now=NOW)
-    a = "\n".join(sm.render_blocked_on_me(measured))
-    b = "\n".join(sm.render_blocked_on_me(absent_lists))
+    a = "\n".join(sm.render_clawgate_queue(measured))
+    b = "\n".join(sm.render_clawgate_queue(absent_lists))
     assert a != b
     assert "NOT measured" not in a and "NOT enumerated" not in a
     assert "NOT measured" in b or "NOT enumerated" in b
@@ -5370,8 +5532,8 @@ def test_EACH_absent_list_announces_itself_separately(missing):
         ready_for_review=[{"id": 192, "title": "queued beta"}],
         count=2, pending_count=2)("p"))
     del full[missing]
-    got = sm.read_blocked_on_me(reader=lambda p: json.dumps(full), now=NOW)
-    text = "\n".join(sm.render_blocked_on_me(got))
+    got = sm.read_clawgate_queue(reader=lambda p: json.dumps(full), now=NOW)
+    text = "\n".join(sm.render_clawgate_queue(got))
     assert missing in text, text
     assert "NOT measured" in text or "NOT enumerated" in text
 
@@ -5379,10 +5541,10 @@ def test_EACH_absent_list_announces_itself_separately(missing):
 def test_a_schema2_cache_with_zero_stuck_is_a_MEASURED_zero():
     """The other half of the discriminating control: `0` and `None` must not
     render the same, or the field is worthless."""
-    got = sm.read_blocked_on_me(
+    got = sm.read_clawgate_queue(
         reader=_cache(stuck=[], stuck_count=0, count=11), now=NOW)
     assert got["stuck_count"] == 0 and got["schema_ok"] is True
-    text = "\n".join(sm.render_blocked_on_me(got))
+    text = "\n".join(sm.render_clawgate_queue(got))
     assert "STUCK" not in text
     assert "UNMEASURED" not in text
 
@@ -5391,7 +5553,7 @@ def test_an_ABSENT_cache_is_None_and_NEVER_zero():
     """🔴 THE TOOL'S ENTIRE THESIS, applied to its newest source. A missing file
     rendering as "nothing is blocked on you" is the exact substitution every
     other section of this script exists to refuse."""
-    got = sm.read_blocked_on_me(reader=lambda p: None, now=NOW)
+    got = sm.read_clawgate_queue(reader=lambda p: None, now=NOW)
     assert got["status"] == "absent"
     assert got["count"] is None, "an unread queue is not an empty queue"
     assert got["error"] and "not measured" in got["error"].lower()
@@ -5400,7 +5562,7 @@ def test_an_ABSENT_cache_is_None_and_NEVER_zero():
 def test_an_UNPARSEABLE_cache_is_None_and_says_so():
     for body in ("{not json", "", "null", "[]", '{"state":"Warning"}',
                  '{"count":"12"}', '{"count":true}'):
-        got = sm.read_blocked_on_me(reader=lambda p, b=body: b, now=NOW)
+        got = sm.read_clawgate_queue(reader=lambda p, b=body: b, now=NOW)
         assert got["status"] == "unparseable", body
         assert got["count"] is None, body
 
@@ -5416,7 +5578,7 @@ def test_the_staleness_boundary_is_measured_at_more_than_one_point(age, status):
     """🔴 One measurement is not a claim about a threshold. Measured AT the
     boundary, one second either side, and well outside it — a comparison that
     is off by one is invisible from a single point."""
-    got = sm.read_blocked_on_me(reader=_cache(ts=NOW - age), now=NOW)
+    got = sm.read_clawgate_queue(reader=_cache(ts=NOW - age), now=NOW)
     assert got["status"] == status
     assert got["cache_age_secs"] == age
 
@@ -5424,7 +5586,7 @@ def test_the_staleness_boundary_is_measured_at_more_than_one_point(age, status):
 def test_a_STALE_cache_still_carries_its_number_but_never_calls_it_current():
     """The count is real, just possibly old — dropping it would lose signal,
     and publishing it as `ok` would fabricate freshness. Both, labelled."""
-    got = sm.read_blocked_on_me(reader=_cache(ts=NOW - 9999), now=NOW)
+    got = sm.read_clawgate_queue(reader=_cache(ts=NOW - 9999), now=NOW)
     assert got["status"] == "stale"
     assert got["count"] == 12
     assert "out of date" in got["error"]
@@ -5434,7 +5596,7 @@ def test_a_STALE_cache_still_carries_its_number_but_never_calls_it_current():
 def test_a_cache_whose_AGE_cannot_be_established_is_stale_not_ok(ts):
     """🔴 The conservative direction. A count whose freshness is unknowable is
     not a fresh count; calling it `ok` is a guess about the writer."""
-    got = sm.read_blocked_on_me(reader=_cache(ts=ts), now=NOW)
+    got = sm.read_clawgate_queue(reader=_cache(ts=ts), now=NOW)
     assert got["status"] == "stale"
     assert got["cache_age_secs"] is None
     assert "freshness" in got["error"]
@@ -5447,7 +5609,7 @@ def test_the_detail_string_is_NEVER_parsed_for_a_count():
     DISAGREES with itself: 11 pending, 6 named. Anything deriving the number
     from the string reports 6 and loses five tasks silently.
     """
-    got = sm.read_blocked_on_me(reader=_legacy_cache(), now=NOW)
+    got = sm.read_clawgate_queue(reader=_legacy_cache(), now=NOW)
     assert got["count"] == 11, "the count is the measurement, not the string"
     assert got["detail"].count("#") == 6, "fixture must actually be truncated"
     assert got["detail_truncated"] is True
@@ -5458,7 +5620,7 @@ def test_a_schema2_detail_string_STATES_its_own_truncation():
     """🔴 Item 5. The old string named six of eleven with no hint any were
     missing, and the dropped tail has included `ready_for_review` work. The new
     one says `(+N more)` AND the full sets travel structurally beside it."""
-    got = sm.read_blocked_on_me(reader=_cache(), now=NOW)
+    got = sm.read_clawgate_queue(reader=_cache(), now=NOW)
     assert "(+6 more)" in got["detail"]
     assert got["detail_shown"] == 6 and got["detail_total"] == 12
     # the note is gone precisely because the lists are present
@@ -5471,14 +5633,14 @@ def test_a_real_measured_zero_is_distinguishable_from_an_absent_cache():
     """🔴 THE DISCRIMINATING CONTROL. Both are "no pending approvals" to a
     careless reader; only one of them is a measurement, and the renderer must
     not spell them the same."""
-    zero = sm.read_blocked_on_me(
+    zero = sm.read_clawgate_queue(
         reader=_cache(count=0, pending_count=0, stuck_count=0, open=[],
                       ready_for_review=[], stuck=[], detail=None), now=NOW)
-    absent = sm.read_blocked_on_me(reader=lambda p: None, now=NOW)
+    absent = sm.read_clawgate_queue(reader=lambda p: None, now=NOW)
     assert zero["status"] == "ok" and zero["count"] == 0
     assert absent["status"] == "absent" and absent["count"] is None
-    a = "\n".join(sm.render_blocked_on_me(zero))
-    b = "\n".join(sm.render_blocked_on_me(absent))
+    a = "\n".join(sm.render_clawgate_queue(zero))
+    b = "\n".join(sm.render_clawgate_queue(absent))
     assert a != b
     assert "a measured zero" in a and "UNMEASURED" not in a
     assert "UNMEASURED" in b and "NOT zero pending" in b
@@ -5490,7 +5652,7 @@ def test_the_blocked_section_is_rendered_in_EVERY_state():
     is one nobody learns to look for."""
     for reader in (_cache(), _cache(count=0), _cache(ts=NOW - 9999),
                    lambda p: None, lambda p: "{broken"):
-        rep = base_gather(blocked_reader=reader, now=NOW)
+        rep = base_gather(clawgate_reader=reader, now=NOW)
         text = sm.render_table(rep)
         assert "▸ BLOCKED ON ME" in text
 
@@ -5527,7 +5689,7 @@ def test_the_rendered_queue_points_the_reader_AT_A_LIVE_SURFACE_for_the_full_lis
       * unmeasured -> a live surface MUST be named; that is the whole render.
     """
     live = ("clawgate API", "clawgate pill")
-    text = sm.render_table(base_gather(blocked_reader=_cache(), now=NOW))
+    text = sm.render_table(base_gather(clawgate_reader=_cache(), now=NOW))
     assert "12 clawgate task(s) needing you" in text
     assert "agent-ops" not in text, "the render points at a retired tool"
     # what this render owes instead of a pointer: the queue itself, enumerated
@@ -5535,56 +5697,56 @@ def test_the_rendered_queue_points_the_reader_AT_A_LIVE_SURFACE_for_the_full_lis
     assert "#173 idle 4h" in text, text
 
     # 🔴 the branch the mutant survived in: a real count whose detail truncates
-    legacy = sm.render_table(base_gather(blocked_reader=_legacy_cache(), now=NOW))
+    legacy = sm.render_table(base_gather(clawgate_reader=_legacy_cache(), now=NOW))
     assert "11 clawgate task(s) needing you" in legacy
     assert "agent-ops" not in legacy
     assert any(s in legacy for s in live), legacy
 
     # and the same when the count could NOT be read — that is exactly when a
     # reader most needs somewhere else to look
-    absent = sm.render_table(base_gather(blocked_reader=lambda p: None))
+    absent = sm.render_table(base_gather(clawgate_reader=lambda p: None))
     assert "agent-ops" not in absent
     assert any(s in absent for s in live), absent
 
 
 def test_the_summary_carries_the_count_WITH_its_discriminant():
     """The count never travels alone, in the roll-up any consumer reads first."""
-    ok = base_gather(blocked_reader=_cache(), now=NOW)
-    assert ok["summary"]["blocked_on_me"] == {"count": 12, "status": "ok",
+    ok = base_gather(clawgate_reader=_cache(), now=NOW)
+    assert ok["summary"]["clawgate_queue"] == {"count": 12, "status": "ok",
                                               "stuck_count": 1,
                                               "schema_ok": True}
-    gone = base_gather(blocked_reader=lambda p: None, now=NOW)
-    assert gone["summary"]["blocked_on_me"] == {"count": None,
+    gone = base_gather(clawgate_reader=lambda p: None, now=NOW)
+    assert gone["summary"]["clawgate_queue"] == {"count": None,
                                                 "status": "absent",
                                                 "stuck_count": None,
                                                 "schema_ok": False}
     # 🔴 And a legacy cache: a real count, but `stuck_count` None — a roll-up
     # reader must be able to tell "no wedged dispatches" from "never looked".
-    old = base_gather(blocked_reader=_legacy_cache(), now=NOW)
-    assert old["summary"]["blocked_on_me"] == {"count": 11, "status": "ok",
+    old = base_gather(clawgate_reader=_legacy_cache(), now=NOW)
+    assert old["summary"]["clawgate_queue"] == {"count": 11, "status": "ok",
                                                "stuck_count": None,
                                                "schema_ok": False}
 
 
 def test_the_blocked_reader_is_resolved_at_CALL_time_not_bound_as_a_default():
     """🔴 The same hole `ch_client_factory` had, on a new seam. A default of
-    `blocked_reader=_read_blocked_text` would capture the ORIGINAL function at
+    `clawgate_reader=_read_blocked_text` would capture the ORIGINAL function at
     def time, so the autouse hermeticity raiser would NOT be honoured on the
     one path with no injection point — `main()` -> `gather()` — and the suite
     would quietly read the operator's live queue while staying green."""
     import inspect
     params = inspect.signature(sm.gather).parameters
-    assert params["blocked_reader"].default is None
-    assert params["blocked_path"].default is None
+    assert params["clawgate_reader"].default is None
+    assert params["clawgate_path"].default is None
     with pytest.raises(_Forbidden):
-        base_gather(blocked_reader=None)
+        base_gather(clawgate_reader=None)
 
 
 def test_the_cache_path_is_the_bar_pollers_and_is_not_hardcoded_elsewhere():
     """One constant, so the poller and the reader cannot drift apart."""
     assert sm.BLOCKED_CACHE.endswith("/.cache/bar-status/clawgate.json")
     seen = {}
-    sm.read_blocked_on_me(reader=lambda p: seen.setdefault("path", p) and None,
+    sm.read_clawgate_queue(reader=lambda p: seen.setdefault("path", p) and None,
                           now=NOW)
     assert seen["path"] == sm.BLOCKED_CACHE
 
@@ -5640,7 +5802,7 @@ def test_fuzzyclaw_is_OFF_by_default_and_publishes_None_not_zero():
         is False
     rep = _REAL_GATHER(hosts=("workbench",), local_host="workbench",
                        runner=make_runner(), use_ch=False, now=NOW,
-                       slots={}, blocked_reader=lambda p: None)
+                       slots={}, clawgate_reader=lambda p: None)
     assert rep["fuzzyclaw"]["status"] == "skipped"
     assert rep["fuzzyclaw"]["files_seen"] is None
     assert rep["summary"]["fuzzyclaw_live"] is None
@@ -5666,7 +5828,7 @@ def test_the_fuzzyclaw_flags_compose_with_explicit_OFF_winning(
         seen.update(kw)
         return _REAL_GATHER(**dict(kw, runner=make_runner(),
                                    fuzzyclaw_texts=[], slots={},
-                                   blocked_reader=lambda p: None, now=NOW))
+                                   clawgate_reader=lambda p: None, now=NOW))
     monkeypatch.setattr(sm, "gather", fake_gather)
     sm.main(["scan", "--host", "workbench", "--no-ch", *argv])
     assert seen["use_fuzzyclaw"] is expect_on
@@ -5682,7 +5844,7 @@ def test_no_capture_flag_reaches_gather(monkeypatch, absent_blocked_cache):
     def fake_gather(**kw):
         seen.update(kw)
         return _REAL_GATHER(**dict(kw, runner=make_runner(), slots={},
-                                   blocked_reader=lambda p: None, now=NOW))
+                                   clawgate_reader=lambda p: None, now=NOW))
     monkeypatch.setattr(sm, "gather", fake_gather)
     sm.main(["scan", "--host", "workbench", "--no-ch", "--no-capture"])
     assert seen["use_capture"] is False
@@ -6318,7 +6480,7 @@ def test_the_lean_view_keeps_EVERY_null_vs_zero_discriminator():
                          ledger_outputs={"workbench": None})
     lean = lean_of(full)
 
-    for key in ("summary", "caveats", "blocked_on_me", "ledger", "fuzzyclaw",
+    for key in ("summary", "caveats", "clawgate_queue", "ledger", "fuzzyclaw",
                 "filters", "local_host", "ts"):
         assert key in lean, key
     # the caveats survive IN FULL, not as a pointer to somewhere else
@@ -6404,7 +6566,7 @@ def test_the_lean_view_shrinks_the_ROWS_which_is_where_the_payload_lives():
     """🔴 ASSERTED ON THE ROWS, not on the whole payload, and the first draft of
     this test got that wrong. Rows are 86% of a real payload (52,564 B of
     60,631 B on a 75-row scan) and are the only part lean trims — the fixed
-    sections (`caveats`, `blocked_on_me`, `summary`) are kept ON PURPOSE.
+    sections (`caveats`, `clawgate_queue`, `summary`) are kept ON PURPOSE.
 
     So whole-payload saving SCALES WITH ROW COUNT: 36% measured live at 75
     rows, but only ~12% on this 3-row fixture, where the retained fixed cost
@@ -6429,7 +6591,7 @@ def test_the_lean_view_shrinks_the_ROWS_which_is_where_the_payload_lives():
                                                    rowbytes(full))
     # ...and the retained fixed sections really are byte-identical, so the
     # saving above came from trimming rows and nothing else.
-    for key in ("caveats", "summary", "blocked_on_me"):
+    for key in ("caveats", "summary", "clawgate_queue"):
         assert enc(lean[key]) == enc(full[key]), key
 
 
@@ -6506,7 +6668,7 @@ def test_the_retained_TOP_LEVEL_set_is_pinned_in_both_directions():
         # dropped it would be a smaller payload that reads as more complete —
         # the exact trade this view's own rule forbids.
         "not_measured",
-        "blocked_on_me", "view", "lean_row_fields", "lean_host_fields",
+        "clawgate_queue", "view", "lean_row_fields", "lean_host_fields",
     }
 
 
@@ -7392,14 +7554,14 @@ def test_the_kind_scope_NOTE_names_NO_kind_at_all():
             f"will contradict the measured `kinds_produced` after writer 3")
     # ...and it must still do its job, or "names no kind" is satisfied by ""
     assert "MEASURED" in note and "kinds_produced" in note
-    assert "blocked_on_me" in note
+    assert "clawgate_queue" in note
     assert len(note) > 200
 
 
 def test_the_kind_scope_NOTE_is_pinned_WHOLE():
     """The structural guard above bans naming a kind; this pins everything
     else, so a reword that keeps the kinds out but drops the pointer to
-    `blocked_on_me` — or reintroduces a scope claim in other words — fails."""
+    `clawgate_queue` — or reintroduces a scope claim in other words — fails."""
     assert sm.CAVEATS["kind_scope"]["note"] == (
         "`kinds_produced` is MEASURED from this scan's rows — read it rather "
         "than assuming. A kind that is enumerated but absent from "
@@ -7407,7 +7569,7 @@ def test_the_kind_scope_NOTE_is_pinned_WHOLE():
         "NOT a measured absence of that work — UNLESS it is named in "
         "`kinds_excluded_by_filter`, which is where a kind removed by a filter "
         "is reported instead of being silently attributed to the build. For "
-        "clawgate use report.blocked_on_me (tasks needing the operator, and "
+        "clawgate use report.clawgate_queue (tasks needing the operator, and "
         "its `stuck_count` for wedged dispatches), a different population from "
         "these rows that is never double-counted with them.")
 
@@ -7456,7 +7618,7 @@ def test_the_kind_scope_NOTE_does_not_restate_the_measured_field():
     assert "cluster is ENUMERATED but NOT PRODUCED" not in note
     # it still has to say the durable part, or the field loses its meaning
     assert "NOT a measured absence" in note
-    assert "blocked_on_me" in note
+    assert "clawgate_queue" in note
 
 
 def _under_seed(seed, expr):
@@ -9082,7 +9244,7 @@ def test_the_docstring_documents_the_shell_pane_DECISION_not_just_the_behaviour(
 # =========================================================================== #
 _GATHER_REPORT_KEYS = {
     "ts", "local_host", "stale_threshold_secs", "hosts", "clickhouse",
-    "fuzzyclaw", "ledger", "filters", "blocked_on_me", "caveats", "summary",
+    "fuzzyclaw", "ledger", "filters", "clawgate_queue", "caveats", "summary",
     "not_measured",
 }
 
@@ -9321,7 +9483,7 @@ def test_the_not_measured_key_is_in_the_report_and_names_the_two_required_ones()
     # 🔴 the note carries the EVIDENCE, not just the label — a reader deciding
     # whether to spend a hop needs to know what is at stake behind the name
     assert "conflicting" in pops["pull_requests"]["note"].lower()
-    # and clawgate is NOT re-listed: `blocked_on_me` measures it
+    # and clawgate is NOT re-listed: `clawgate_queue` measures it
     assert "clawgate" not in pops
     # nor is the opencode misclassification, which is a measured population
     # reported under the wrong class, not an unmeasured one

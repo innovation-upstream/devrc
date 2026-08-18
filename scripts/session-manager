@@ -21,7 +21,7 @@ agent-ops showed, four of them credential-exposure or cross-user-data-leak. An
 accurate cross-reference steered a reader away from the highest-stakes signal on
 the machine. The fix that survived the retirement is the one that mattered:
 
-  * the pending count is read HERE (`report["blocked_on_me"]`, and a
+  * the pending count is read HERE (`report["clawgate_queue"]`, and a
     `▸ BLOCKED ON ME` section printed in every state including unmeasured), so
     the headline question does not depend on remembering another tool.
 
@@ -187,7 +187,7 @@ and the roll-ups a caller usually wants are:
                                         `waiting`, never summed into it
     report["summary"]["status"][b]      class counts + "total" per bucket
     report["summary"]["kind"]           {"tmux": N} — the entity axis
-    report["blocked_on_me"]             {"status", "count", ...}
+    report["clawgate_queue"]             {"status", "count", ...}
     report["not_measured"]              [{population, owner_skill, ...}] — the
                                         populations this tool CANNOT see, and
                                         which skill owns each
@@ -226,7 +226,7 @@ SIMPLY {claude, shell}.
 to. `cluster` is enumerated for a dispatch with NO pane (spec §4, writer 3)
 and is NOT produced yet — `caveats.kind_scope` says so in the payload, so an
 absence of cluster rows is never readable as a measured absence of cluster
-work. Clawgate is reported instead under `blocked_on_me`, a different
+work. Clawgate is reported instead under `clawgate_queue`, a different
 population that is never double-counted with these rows.
 
 The buckets count by `row_class`, not by `claude`-or-`shell`, because
@@ -776,7 +776,7 @@ CAVEATS = {
                  "it is named in `kinds_excluded_by_filter`, which is where a "
                  "kind removed by a filter is reported instead of being "
                  "silently attributed to the build. For "
-                 "clawgate use report.blocked_on_me (tasks needing the "
+                 "clawgate use report.clawgate_queue (tasks needing the "
                  "operator, and its `stuck_count` for wedged dispatches), a "
                  "different population from these rows that is never "
                  "double-counted with them."),
@@ -915,10 +915,10 @@ NOT_MEASURED_POPULATIONS = {
         "report_key": "mail_queue",
         "owner_skill": "mailbox",
         "note": ("Inbound mail and the extracted action-items queue are a "
-                 "separate store this tool never opens. `blocked_on_me` is the "
-                 "CLAWGATE approval queue only — it is not a general "
-                 "'everything waiting on you' number, and reading it as one is "
-                 "the misread this entry exists to prevent."),
+                 "separate store this tool never opens. For anything that is "
+                 "waiting on a human see `clawgate_queue` (approvals) and "
+                 "`summary.waiting.probable` (tmux panes) — two separate "
+                 "populations, never summed. Neither covers mail."),
     },
     "cluster_alerts": {
         "report_key": "cluster_alerts",
@@ -1539,7 +1539,7 @@ def detect_waiting(text) -> dict:
     return {"probable": bool(signals), "signals": signals}
 
 
-def read_blocked_on_me(path=None, reader=None, now=None,
+def read_clawgate_queue(path=None, reader=None, now=None,
                        max_age=BLOCKED_CACHE_MAX_AGE) -> dict:
     """The clawgate approval queue's pending COUNT, status-discriminated.
 
@@ -2296,11 +2296,11 @@ def summarize(report) -> dict:
         # the predicate — a roll-up reader must be able to tell "no wedged
         # dispatches" from "wedged dispatches were never looked for", which is
         # the distinction that made a four-hour-dead agent invisible here.
-        "blocked_on_me": {
-            "count": (report.get("blocked_on_me") or {}).get("count"),
-            "status": (report.get("blocked_on_me") or {}).get("status"),
-            "stuck_count": (report.get("blocked_on_me") or {}).get("stuck_count"),
-            "schema_ok": (report.get("blocked_on_me") or {}).get("schema_ok"),
+        "clawgate_queue": {
+            "count": (report.get("clawgate_queue") or {}).get("count"),
+            "status": (report.get("clawgate_queue") or {}).get("status"),
+            "stuck_count": (report.get("clawgate_queue") or {}).get("stuck_count"),
+            "schema_ok": (report.get("clawgate_queue") or {}).get("schema_ok"),
         },
         # Hosts whose `list-windows` did not answer even though `list-panes`
         # did. Their rows carry no window_id and, if local, no fuzzyclaw join.
@@ -2577,7 +2577,7 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
            ch_client_factory=None, fuzzyclaw_texts=None,
            slots=None, ch_sql=SQL_RECENT_SESSIONS,
            claude_only=False, use_capture=True, capture_nonce=None,
-           blocked_reader=None, blocked_path=None,
+           clawgate_reader=None, clawgate_path=None,
            use_ledger=True, ledger_outputs=None) -> dict:
     """Build the whole report. Every source is injectable, so this is the
     function the hermetic suite exercises end-to-end.
@@ -2665,8 +2665,8 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
                     "kinds_excluded_by_filter": None},
         # 🔴 The clawgate approval queue. Filled in below; the skeleton carries
         # a `status` from the first byte so no code path can publish a bare
-        # count. See `read_blocked_on_me` for the four outcomes.
-        "blocked_on_me": {"status": "skipped", "count": None,
+        # count. See `read_clawgate_queue` for the four outcomes.
+        "clawgate_queue": {"status": "skipped", "count": None,
                           "stuck_count": None, "schema_ok": False},
         # 🔴 The two limits that change what these rows MEAN, carried in the
         # payload rather than left in the skill body. See CAVEATS.
@@ -2910,8 +2910,8 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
     # reader is resolved AT CALL TIME (same reason as `ch_client_factory`
     # above): binding `_read_text` as a default would make the seam unpatchable
     # on the one path — `main()` -> `gather()` — with no injection point.
-    report["blocked_on_me"] = read_blocked_on_me(
-        path=blocked_path, reader=blocked_reader, now=now)
+    report["clawgate_queue"] = read_clawgate_queue(
+        path=clawgate_path, reader=clawgate_reader, now=now)
 
     # --- ClickHouse ----------------------------------------------------------
     if use_ch:
@@ -3099,7 +3099,7 @@ def _render_blocked_rows(b) -> list:
     return out
 
 
-def render_blocked_on_me(blocked) -> list:
+def render_clawgate_queue(queue) -> list:
     """🔴 The clawgate queue, with the count and its discriminant on one line.
 
     Printed unconditionally and in every state, because the failure this closes
@@ -3108,7 +3108,7 @@ def render_blocked_on_me(blocked) -> list:
     is blocked on you" is the exact substitution this script refuses everywhere
     else.
     """
-    b = blocked or {}
+    b = queue or {}
     st = b.get("status")
     count, out = b.get("count"), []
     if st == "ok":
@@ -3251,7 +3251,7 @@ def render_table(report) -> str:
     # This section exists because a dogfood agent, correctly reading that
     # `agent-ops` has no JSON API, never opened it and so missed 11 pending
     # approvals — four of them credential-exposure or cross-user-data-leak.
-    out.extend(render_blocked_on_me(report.get("blocked_on_me")))
+    out.extend(render_clawgate_queue(report.get("clawgate_queue")))
     out.append("")
 
     ch = report.get("clickhouse") or {}
@@ -3534,7 +3534,7 @@ def render_ledger(led) -> list:
 # should: a cheap payload that can LIE is worse than an expensive one. Every
 # null-vs-zero discriminator survives verbatim — `summary` (whose `waiting`
 # block carries the tri-state and `unmeasured_reasons`), `caveats` IN FULL,
-# `blocked_on_me`, `ledger`/`fuzzyclaw` section status, and per host
+# `clawgate_queue`, `ledger`/`fuzzyclaw` section status, and per host
 # `reachable`/`windows_measured`/`captures_status`. `caveats` costs ~586 tokens
 # and is the one thing standing between a cold agent and a fabricated zero; it
 # is the LAST thing to trim, not the first. What goes is duplication and
@@ -3623,7 +3623,7 @@ def render_not_measured(report) -> list:
     skill that owns it.
 
     🔴 PRINTED UNCONDITIONALLY, in every state, for the same reason
-    `render_blocked_on_me` is: the reader this exists for is the one who does
+    `render_clawgate_queue` is: the reader this exists for is the one who does
     not know the population exists. A section that appears only sometimes is one
     a reader learns not to expect, and the run where it would have mattered is
     exactly the run where everything else looked clean.
