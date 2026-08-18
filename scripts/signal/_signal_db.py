@@ -183,6 +183,36 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     )
     """,
 
+    """
+    -- 🔴 THE HEALTH ROW. This consumer serves no HTTP, has no probes, and emitted
+    -- ZERO log lines across 20h of successful ingestion — so "reaching nothing"
+    -- and "working perfectly" produced byte-identical observations, and row count
+    -- was the only health signal in existence. That is what made the step-7
+    -- diagnosis take hours: no upstream signal disagreed between the rival
+    -- explanations, so an empty table could not identify which was true.
+    --
+    -- ONE ROW, upserted on a timer (id is pinned to 1 by the primary key + the
+    -- upsert's ON CONFLICT). It is deliberately NOT a history table: the question
+    -- is "is it alive NOW", and an append-only log of heartbeats would need its
+    -- own retention story to answer it.
+    CREATE TABLE IF NOT EXISTS signal.consumer_health (
+        id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+        updated_at TIMESTAMPTZ NOT NULL,
+        pod TEXT,
+        stream_connected BOOLEAN NOT NULL,
+        -- 🔴 NOT a liveness input. An idle Signal account legitimately sends
+        -- nothing for hours, so "no frame recently" is NORMAL and must never
+        -- restart anything. It is here because it is the first thing a human
+        -- wants when diagnosing, and conflating it with liveness is precisely
+        -- the mistake that would make a probe flap on a quiet weekend.
+        last_frame_at TIMESTAMPTZ,
+        connections BIGINT NOT NULL DEFAULT 0,
+        reconnects BIGINT NOT NULL DEFAULT 0,
+        stored BIGINT NOT NULL DEFAULT 0,
+        malformed BIGINT NOT NULL DEFAULT 0
+    )
+    """,
+
     "CREATE INDEX IF NOT EXISTS idx_msg_ts ON signal.messages(message_timestamp DESC)",
     "CREATE INDEX IF NOT EXISTS idx_msg_dm ON signal.messages(source_contact_id, message_timestamp)",
     "CREATE INDEX IF NOT EXISTS idx_msg_group ON signal.messages(group_id, message_timestamp) WHERE group_id IS NOT NULL",
@@ -833,6 +863,60 @@ class SignalDB:
                 "contact_id, is_remove FROM signal.reactions WHERE message_id IS NULL"
             )
             return [dict(r) for r in cur.fetchall()]
+
+    # -- health ------------------------------------------------------------
+    def record_heartbeat(self, hb: dict) -> None:
+        """Upsert THE single health row.
+
+        🔴 Call this on a connection of its OWN, never the ingest connection.
+        These connections run `autocommit=False`, so a heartbeat issued from the
+        heartbeat thread on the shared connection would land inside whatever
+        transaction the ingest thread has open — committing a half-written
+        message batch, or being rolled back with it. `consumer.Heartbeat` opens
+        its own `SignalDB` for exactly this reason.
+        """
+        with self._c.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO signal.consumer_health
+                    (id, updated_at, pod, stream_connected, last_frame_at,
+                     connections, reconnects, stored, malformed)
+                VALUES (1, now(), %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    updated_at       = now(),
+                    pod              = EXCLUDED.pod,
+                    stream_connected = EXCLUDED.stream_connected,
+                    last_frame_at    = COALESCE(EXCLUDED.last_frame_at,
+                                                signal.consumer_health.last_frame_at),
+                    connections      = EXCLUDED.connections,
+                    reconnects       = EXCLUDED.reconnects,
+                    stored           = EXCLUDED.stored,
+                    malformed        = EXCLUDED.malformed
+                """,
+                (hb.get("pod"), bool(hb.get("stream_connected")),
+                 hb.get("last_frame_at"), int(hb.get("connections") or 0),
+                 int(hb.get("reconnects") or 0), int(hb.get("stored") or 0),
+                 int(hb.get("malformed") or 0)),
+            )
+
+    def read_heartbeat(self) -> dict | None:
+        """The health row, plus its age IN THE DATABASE'S OWN CLOCK.
+
+        🔴 `age_seconds` is computed by Postgres, not by the caller. A reader on a
+        host whose clock has drifted would otherwise compute a confident, wrong
+        age against a timestamp written by a different machine — and report a
+        LIVE consumer as dead, or a dead one as live.
+        """
+        with self._c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT pod, stream_connected, connections, reconnects, stored, "
+                "malformed, updated_at, last_frame_at, "
+                "EXTRACT(EPOCH FROM (now() - updated_at)) AS age_seconds, "
+                "EXTRACT(EPOCH FROM (now() - last_frame_at)) AS frame_age_seconds "
+                "FROM signal.consumer_health WHERE id = 1"
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
 
     # -- reads -------------------------------------------------------------
     def list_conversations(self, limit: int = 50) -> list:

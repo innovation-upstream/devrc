@@ -159,7 +159,10 @@ def test_skill_documents_every_table_the_schema_creates():
     import _signal_db
     tables = set(re.findall(r"CREATE TABLE IF NOT EXISTS signal\.(\w+)",
                             "\n".join(_signal_db.SCHEMA_STATEMENTS)))
-    assert len(tables) == 5, tables
+    # Bumped 5 -> 6 for signal.consumer_health (the liveness row). The literal
+    # is the POINT of this guard: a new table cannot appear without someone
+    # deciding, here, to document it.
+    assert len(tables) == 6, tables
     for table in tables:
         assert f"`signal.{table}`" in SKILL_TEXT, f"table {table} undocumented"
 
