@@ -1857,7 +1857,7 @@ def test_json_golden_schema_and_values():
         # and so is `stuck_count`, which is the same rule applied to the
         # stuck-dispatch half rather than a second, weaker one.
         "clawgate_queue": {"count": None, "status": "absent",
-                          "stuck_count": None, "schema_ok": False},
+                           "stuck_count": None, "schema_ok": False},
         # 🔴 THE #419 METER, in the golden. One of these three windows has an
         # age and it came from fuzzyclaw — because this fixture runs
         # `use_ledger=False`. The two `none` rows are the shape the SHIPPED
@@ -2088,12 +2088,25 @@ def test_the_clawgate_queue_and_the_tmux_WAITING_count_stay_SEPARATE_populations
     human something. Summing them, or sourcing either from the other, rebuilds
     the exact conflation the rename removed.
 
-    🔴 DRIVEN OFF A POPULATED CACHE, and that is the whole point. The default
-    fixture leaves BOTH counts `None` — an earlier version of this test ran
-    against it and asserted a "separation" that a mutant aliasing one to the
-    other would have satisfied trivially, because `None == None`. `_cache()`
-    supplies 12 / stuck 1, values `waiting.probable` cannot produce here, so the
-    numbers have to disagree for this to pass.
+    🔴 BOTH POPULATIONS ARE DRIVEN TO A REAL, MEASURED NUMBER, and that is the
+    whole point. The default fixture leaves BOTH counts `None`, and the first
+    version of this test asserted a "separation" that `None == None` satisfied
+    trivially. The SECOND version fixed only half of it: it populated the cache
+    (12 / stuck 1) but still ran on panes nobody scraped, so `waiting.probable`
+    was `None` and the closing assertion reduced to `None != 12` — true no
+    matter what. Measured: sourcing `summary.waiting.probable` from the clawgate
+    `stuck_count` SURVIVED it, and that is precisely the cross-population
+    conflation this test exists to ban.
+
+    So the panes are scraped too: `%11` sits on a modal and `%21` is out of
+    context, both Claude panes flag, and `waiting.probable` is a measured 2
+    against a queue of 12 / pending 11 / stuck 1. The values are pairwise
+    distinct AND the fixture-integrity loop below asserts that NO number this
+    queue publishes equals 2 — so a mutant sourcing `probable` from ANY field of
+    it moves the number and dies. (`schema=3` for exactly that reason: the
+    canonical `_cache()` ships `schema: 2`, which would have collided with the
+    expected count. 3 is a valid future bump — see
+    `test_the_schema_gate_is_measured_either_side_of_the_boundary`.)
 
     🔴 `summary.clawgate_queue` IS a deliberate projection of the top-level
     field, not a duplicate to be removed — the summary carries count WITH its
@@ -2101,7 +2114,9 @@ def test_the_clawgate_queue_and_the_tmux_WAITING_count_stay_SEPARATE_populations
     measured". So the invariant is that the projection MIRRORS, on every field
     it republishes; a hardcoded value in either place breaks it.
     """
-    report = base_gather(clawgate_reader=_cache())
+    report = waiting_gather(local={"%11": PANE_MENU},
+                            remote={"%21": PANE_CTX_ZERO},
+                            clawgate_reader=_cache(schema=3), now=NOW)
     top = report["clawgate_queue"]
     proj = report["summary"]["clawgate_queue"]
     waiting = report["summary"]["waiting"]
@@ -2109,14 +2124,33 @@ def test_the_clawgate_queue_and_the_tmux_WAITING_count_stay_SEPARATE_populations
     # The cache really did land — without this the mirror assertions below could
     # be comparing None to None and pass with the reader unwired.
     assert top["count"] == 12 and top["stuck_count"] == 1, top
+    assert top["pending_count"] == 11 and top["schema"] == 3, top
 
     # The projection mirrors, field for field.
     for field in ("count", "status", "stuck_count", "schema_ok"):
         assert proj[field] == top[field], (field, proj[field], top[field])
 
-    # ...and the tmux waiting population is untouched by any of it: a separate
-    # key, a separate shape, and a count that did NOT become 12.
+    # 🔴 The tmux waiting population is MEASURED — from the panes, not from the
+    # queue. Both Claude panes flag, so this is a real 2 and never a None that
+    # every inequality below would satisfy for free.
     assert set(waiting) >= {"probable", "measured", "unmeasured"}
+    assert waiting["measured"] == 2, waiting
+    assert waiting["probable"] == 2, waiting
+
+    # 🔴 FIXTURE-INTEGRITY LOOP — what makes the assertion above able to SEE a
+    # conflation mutant. No number the clawgate queue publishes may equal the
+    # expected waiting count, so `probable = <any field of the queue>` changes
+    # it and goes red. If a later fixture edit collapses that, this fails HERE,
+    # loudly, instead of quietly making the test vacuous again.
+    for field, value in sorted(top.items()):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        assert value != waiting["probable"], (
+            "FIXTURE COLLAPSE: clawgate `%s` == the expected waiting count "
+            "(%r), so a mutant sourcing one from the other would pass"
+            % (field, value))
+
+    # ...and the two stay structurally apart: a separate key, a separate shape.
     assert waiting["probable"] != top["count"]
     assert "waiting" not in top and "probable" not in proj
 
@@ -2124,18 +2158,28 @@ def test_the_clawgate_queue_and_the_tmux_WAITING_count_stay_SEPARATE_populations
 def _payload_paths_in(text):
     """Backticked tokens in a note that CLAIM to be payload paths.
 
-    Structural, not lexical: a token qualifies only if it is a dotted path or a
-    bare `snake_case` word, so prose like `list-panes` (hyphen) and
-    `--claude-only` (dashes) are not mistaken for keys. What comes back is a
-    list of things the note tells a JSON reader to go and look at.
+    Structural, not lexical: a token qualifies only if it is a DOTTED
+    snake_case path, or a bare snake_case word carrying at least one
+    UNDERSCORE. Prose like `list-panes` (hyphen) and `--claude-only` (dashes)
+    is not mistaken for a key. What comes back is a list of things the note
+    tells a JSON reader to go and look at.
+
+    🔴 THE UNDERSCORE IS THE DISCRIMINANT, and the rule it replaced
+    (`[a-z_]{3,}`) had none: it could not tell a payload key from a backticked
+    skill name or an ordinary lowercase word, so backticking `standup` or
+    `stalled` in a future note would have failed this gate with NO defect
+    present — and with 2 paths extracted against a floor of >1, there is no
+    margin to absorb one. An underscore keeps the case this guard exists for:
+    a key that was RENAMED AWAY still carries one (`blocked_on_me`), so a
+    stale pointer is still extracted and still goes red.
     """
     import re as _re
     out = []
     for tok in _re.findall(r"`([^`]+)`", text):
-        if _re.fullmatch(r"[a-z_]+(?:\.[a-z_]+)+", tok):
-            out.append(tok)
-        elif _re.fullmatch(r"[a-z_]{3,}", tok):
-            out.append(tok)
+        if _re.fullmatch(r"[a-z]+(?:_[a-z]+)*(?:\.[a-z]+(?:_[a-z]+)*)+", tok):
+            out.append(tok)        # a dotted path is unambiguous on its own
+        elif _re.fullmatch(r"[a-z]+(?:_[a-z]+)+", tok):
+            out.append(tok)        # a bare word needs the underscore
     return out
 
 
@@ -2163,11 +2207,13 @@ def test_every_payload_path_a_not_measured_NOTE_points_at_actually_EXISTS():
     expected names, so this cannot be satisfied by keeping a stale allowlist in
     step with a stale note.
 
-    \U0001f534 BOTH CONTROLS. Positive: the extractor must find paths at all, and
+    \U0001f534 THREE CONTROLS. Positive: the extractor must find paths at all, and
     they must be MORE than one, or a regex that quietly stopped matching would
     read as "every pointer is valid". Negative: a note containing a path that
     does NOT exist must be reported — otherwise `_resolves` returning True for
-    everything would look identical to a clean run.
+    everything would look identical to a clean run. And the OTHER direction: an
+    ordinary backticked word is not a pointer, so a future note that backticks
+    a skill name cannot fail this gate with no defect present.
     """
     report = base_gather()
     notes = [p.get("note", "") for p in report["not_measured"]]
@@ -2188,6 +2234,20 @@ def test_every_payload_path_a_not_measured_NOTE_points_at_actually_EXISTS():
     planted = _payload_paths_in("see `summary.waiting.probable` and `no_such_key`")
     assert "no_such_key" in planted, planted
     assert [p for p in planted if not _resolves(report, p)] == ["no_such_key"]
+
+    # 🔴 THE OTHER DIRECTION, and the failure the old `[a-z_]{3,}` rule was one
+    # wording away from: an ordinary backticked WORD is not a payload pointer.
+    # Backticking a skill name or a plain word in a future note must NOT turn
+    # this gate red — the whole point of a delta guard is that it fires on a
+    # defect, not on prose.
+    assert _payload_paths_in(
+        "see `standup` for PRs, whether it is `stalled`, and `list-panes`") == []
+    # ...and the discriminant is not "no bare word ever counts": a key that was
+    # RENAMED AWAY still carries its underscore, and a note still pointing at
+    # it is exactly the stale pointer this guard exists to catch.
+    stale = _payload_paths_in("for approvals see `blocked_on_me`")
+    assert stale == ["blocked_on_me"], stale
+    assert not _resolves(report, "blocked_on_me")
 
 
 # =========================================================================== #
@@ -4379,7 +4439,7 @@ def test_an_unfiltered_scan_still_renders_the_UNCHANGED_caveat_sentence():
         "  caveat[kind_scope]: rows in this scan are kind=tmux — cluster is "
         "ENUMERATED but NOT PRODUCED, so no such row appears and its absence "
         "is NOT a measured zero; clawgate is reported separately under "
-        "BLOCKED ON ME")
+        "CLAWGATE QUEUE")
 
 
 def test_the_FILTER_line_in_the_table_names_the_kind_it_removed():
@@ -5333,7 +5393,7 @@ def test_the_waiting_caveat_is_structured_for_json_consumers_not_prose():
 
 
 # =========================================================================== #
-# §B — BLOCKED ON ME (the clawgate approval queue)
+# §B — CLAWGATE QUEUE (the clawgate approval queue)
 #
 # 🔴 The failure this closes was MEASURED, not imagined: a dogfood agent read
 # an accurate line saying `agent-ops` has no JSON API, correctly preferred this
@@ -5423,7 +5483,7 @@ def test_a_LEGACY_cache_reports_stuck_as_UNMEASURED_never_as_zero():
 def test_the_schema_gate_is_measured_either_side_of_the_boundary(schema, ok):
     body = {} if schema is None else {"schema": schema}
     got = sm.read_clawgate_queue(reader=_cache(**body) if schema is not None
-                                else _legacy_cache(), now=NOW)
+                                 else _legacy_cache(), now=NOW)
     assert got["schema_ok"] is ok, schema
 
 
@@ -5646,7 +5706,7 @@ def test_a_real_measured_zero_is_distinguishable_from_an_absent_cache():
     assert "UNMEASURED" in b and "NOT zero pending" in b
 
 
-def test_the_blocked_section_is_rendered_in_EVERY_state():
+def test_the_clawgate_queue_section_is_rendered_in_EVERY_state():
     """Printed unconditionally, because the failure being closed is a reader
     who never learned the queue exists. A section that appears only sometimes
     is one nobody learns to look for."""
@@ -5654,7 +5714,12 @@ def test_the_blocked_section_is_rendered_in_EVERY_state():
                    lambda p: None, lambda p: "{broken"):
         rep = base_gather(clawgate_reader=reader, now=NOW)
         text = sm.render_table(rep)
-        assert "▸ BLOCKED ON ME" in text
+        assert "▸ CLAWGATE QUEUE" in text
+        # 🔴 and the RETIRED title is gone. `▸ BLOCKED ON ME` is the exact
+        # string that produced the misread the rename exists to close — a
+        # human reading "12 things are blocked on me" off the clawgate queue.
+        # Asserting only the new title would pass with both printed.
+        assert "BLOCKED ON ME" not in text
 
 
 def test_the_rendered_queue_points_the_reader_AT_A_LIVE_SURFACE_for_the_full_list():
@@ -5690,7 +5755,7 @@ def test_the_rendered_queue_points_the_reader_AT_A_LIVE_SURFACE_for_the_full_lis
     """
     live = ("clawgate API", "clawgate pill")
     text = sm.render_table(base_gather(clawgate_reader=_cache(), now=NOW))
-    assert "12 clawgate task(s) needing you" in text
+    assert "12 task(s) needing you" in text
     assert "agent-ops" not in text, "the render points at a retired tool"
     # what this render owes instead of a pointer: the queue itself, enumerated
     assert "#172 REVIEW finished item" in text, text
@@ -5698,7 +5763,7 @@ def test_the_rendered_queue_points_the_reader_AT_A_LIVE_SURFACE_for_the_full_lis
 
     # 🔴 the branch the mutant survived in: a real count whose detail truncates
     legacy = sm.render_table(base_gather(clawgate_reader=_legacy_cache(), now=NOW))
-    assert "11 clawgate task(s) needing you" in legacy
+    assert "11 task(s) needing you" in legacy
     assert "agent-ops" not in legacy
     assert any(s in legacy for s in live), legacy
 
@@ -5713,19 +5778,19 @@ def test_the_summary_carries_the_count_WITH_its_discriminant():
     """The count never travels alone, in the roll-up any consumer reads first."""
     ok = base_gather(clawgate_reader=_cache(), now=NOW)
     assert ok["summary"]["clawgate_queue"] == {"count": 12, "status": "ok",
-                                              "stuck_count": 1,
-                                              "schema_ok": True}
+                                               "stuck_count": 1,
+                                               "schema_ok": True}
     gone = base_gather(clawgate_reader=lambda p: None, now=NOW)
     assert gone["summary"]["clawgate_queue"] == {"count": None,
-                                                "status": "absent",
-                                                "stuck_count": None,
-                                                "schema_ok": False}
+                                                 "status": "absent",
+                                                 "stuck_count": None,
+                                                 "schema_ok": False}
     # 🔴 And a legacy cache: a real count, but `stuck_count` None — a roll-up
     # reader must be able to tell "no wedged dispatches" from "never looked".
     old = base_gather(clawgate_reader=_legacy_cache(), now=NOW)
     assert old["summary"]["clawgate_queue"] == {"count": 11, "status": "ok",
-                                               "stuck_count": None,
-                                               "schema_ok": False}
+                                                "stuck_count": None,
+                                                "schema_ok": False}
 
 
 def test_the_blocked_reader_is_resolved_at_CALL_time_not_bound_as_a_default():
@@ -5747,7 +5812,7 @@ def test_the_cache_path_is_the_bar_pollers_and_is_not_hardcoded_elsewhere():
     assert sm.BLOCKED_CACHE.endswith("/.cache/bar-status/clawgate.json")
     seen = {}
     sm.read_clawgate_queue(reader=lambda p: seen.setdefault("path", p) and None,
-                          now=NOW)
+                           now=NOW)
     assert seen["path"] == sm.BLOCKED_CACHE
 
 
@@ -7135,7 +7200,7 @@ def test_the_kind_scope_caveat_is_rendered_and_names_the_unproduced_kind():
     assert "NOT PRODUCED" in line
     # it must point at where clawgate IS reported, or the reader concludes the
     # tool cannot say anything about cluster work at all
-    assert "BLOCKED ON ME" in line
+    assert "CLAWGATE QUEUE" in line
 
 
 def test_the_kind_scope_caveat_SLOTS_ARE_LIVE_not_static_prose():
@@ -7165,7 +7230,7 @@ def test_the_caveat_does_not_degrade_when_EVERY_kind_is_produced():
     assert "  is ENUMERATED" not in line, "blank subject"
     assert "every enumerated kind IS produced" in line
     # the pointer to where clawgate lives survives BOTH branches
-    assert "BLOCKED ON ME" in line
+    assert "CLAWGATE QUEUE" in line
 
 
 def test_the_caveat_is_MEASURED_from_the_rows_not_asserted_from_the_constant():
@@ -7356,7 +7421,7 @@ def test_measured_caveats_detaches_EVERY_caveat_from_the_module_constant():
 # a cosmetic reword fails this test. That is the price of a guard a reword
 # cannot walk, and these four sentences are the tool's machine-readable claims
 # about what it did and did not measure.
-_CG = ("clawgate is reported separately under BLOCKED ON ME")
+_CG = ("clawgate is reported separately under CLAWGATE QUEUE")
 KIND_SCOPE_SENTENCES = {
     # no measurement supplied — the bare-constant render. MUST NOT say "scan".
     "missing": (
@@ -7380,12 +7445,12 @@ KIND_SCOPE_SENTENCES = {
         "this tool produces kind=tmux rows by construction (no scan measured "
         "here) — every enumerated kind IS produced, so this build covers the "
         "whole entity axis; clawgate approval state is still reported "
-        "separately under BLOCKED ON ME"),
+        "separately under CLAWGATE QUEUE"),
     # after writer 3
     "both": (
         "rows in this scan are kind=cluster/tmux — every enumerated kind IS "
         "produced, so this scan covers the whole entity axis; clawgate "
-        "approval state is still reported separately under BLOCKED ON ME"),
+        "approval state is still reported separately under CLAWGATE QUEUE"),
     # 🔴 A FILTER REMOVED A WHOLE KIND. Without its own clause this rendered
     # "tmux is ENUMERATED but NOT PRODUCED" — three false claims in one
     # sentence, about rows the scan had just measured and thrown away.
@@ -9535,7 +9600,7 @@ def test_render_not_measured_tells_an_ABSENT_key_from_an_EMPTY_list():
 
 
 def test_the_not_measured_section_is_printed_in_EVERY_state_including_empty():
-    """Same rule as BLOCKED ON ME: a section that appears only sometimes is one
+    """Same rule as CLAWGATE QUEUE: a section that appears only sometimes is one
     a reader learns not to expect, and the run where it matters is the run where
     everything else looked clean."""
     for rep in (base_gather(),
