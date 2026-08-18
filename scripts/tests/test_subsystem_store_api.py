@@ -3495,12 +3495,41 @@ class TestTrustedProxyOverTheRealProcess:
         failed auth and gets a real lockout — of ITSELF. The property is only
         ever about WHOSE bucket.
         """
+        import time
+
+        # 🔴 WAIT FOR THE AUDIT LINES; DO NOT ASSUME THE RESPONSE IMPLIES THEM.
+        # `_reject()` calls `self._unauthorized()` and only THEN `self._audit()`,
+        # and this is a ThreadingHTTPServer — so `fetch_from` returning means the
+        # response was written, NOT that the handler thread has reached its
+        # `print`. Terminating on the client's return therefore raced the 5th
+        # line and killed the process before it was emitted.
+        #
+        # Measured before this fix, on an UNMODIFIED tree: 3/20 red locally and
+        # two consecutive reds in the nix sandbox, always the same
+        # `assert 4 == 5` with four identical audit lines. It is a real race in
+        # the TEST, not in the server, and re-running it was the wrong answer:
+        # a ~15% flaky gate is the thing that teaches everyone to click through
+        # a red run.
+        #
+        # A reader thread drains stdout while the process runs, so the wait is
+        # on the OBSERVABLE condition. Draining also stops the pipe buffer from
+        # ever becoming a second timing dependency. Teardown in
+        # `running_subprocess` does the terminate/wait.
+        lines: list[str] = []
+
+        def _drain() -> None:
+            for raw in proc.stdout:                     # ends when the pipe closes
+                if raw.startswith("store-api audit "):
+                    lines.append(raw.rstrip("\n"))
+
         with running_subprocess(
             store,
             token_file,
             trusted_proxies=f"{TRUSTED_PEER}/32",
             host=TRUSTED_PEER,
         ) as (base, proc):
+            reader = threading.Thread(target=_drain, daemon=True)
+            reader.start()
             for _ in range(5):
                 fetch_from(
                     UNTRUSTED_PEER,
@@ -3509,10 +3538,10 @@ class TestTrustedProxyOverTheRealProcess:
                     token="w" * 48,
                     client_ip=SPOOF_IP,
                 )
-            proc.terminate()
-            stdout, _err = proc.communicate(timeout=15)
-        lines = [ln for ln in stdout.splitlines() if ln.startswith("store-api audit ")]
-        assert len(lines) == 5, stdout
+            deadline = time.time() + 15
+            while len(lines) < 5 and time.time() < deadline:
+                time.sleep(0.02)
+        assert len(lines) == 5, lines
         # 🔴 THE ASSERTION THAT IS THE WHOLE DEFECT: the forged address never
         # becomes an identity. A fix that recorded the spoofed value but declined
         # to COUNT it would pass every status check and fail this one.
