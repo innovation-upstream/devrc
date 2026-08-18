@@ -4098,3 +4098,550 @@ def test_the_cross_host_comparison_still_reports_a_differing_built_subtree(fleet
     assert "the two hosts build DIFFERENT source" in block, block
     assert "srcDir subtree trees, not repo HEADs" in block, block
     assert "compared=1 same=0 differing=1" in block, block
+
+
+# --------------------------------------------------------------------------- #
+# 13. rc 18 — A BUILT-SOURCE SCOPE THAT STAYS UNMEASURED
+#
+# 🔴 THE GAP rc 17 LEFT, and it is the same shape as the bug rc 17 was built to
+# catch. "We could not look" correctly sets no exit code — so it escalated NEVER,
+# and a scope whose currency is never evaluated read as a clean run forever.
+# Measured live on the workbench 2026-08-18: tmux-fuzzyclaw on a local branch
+# with no upstream, `unmeasured=1`, rc 0 — while concealing a genuinely divergent
+# build between the two hosts.
+#
+# The ladder is deliberately the rc-13 one: reported every run, escalated only
+# after N CONSECUTIVE runs, per (HOST, SCOPE), reset the moment it measures. So
+# these tests are written in the same two directions rc 13's are — the softening
+# must not make the deadman mute, AND the escalation must not fire on the normal
+# case (a scratch branch for an afternoon, a laptop that never had the checkout).
+# --------------------------------------------------------------------------- #
+def _blind(out):
+    """(hosts-reporting, scopes, unmeasured, escalated) off the rc-18 summary.
+
+    🔴 THE QUADRUPLE IS THE CLAIM, never `escalated=0` alone: a ladder walked
+    over no hosts, or over no scopes, prints exactly that zero. Raises when the
+    line is absent, because an absent summary and a clean one are the same value
+    to a comparison and only one of them is good news."""
+    m = re.search(r"\[srcblind\] hosts-reporting=(\d+) scopes=(\d+) "
+                  r"unmeasured=(\d+) escalated=(\d+)", out)
+    assert m, ("no hosts-reporting/scopes/unmeasured/escalated line — the "
+               "quadruple IS the claim:\n" + out)
+    return tuple(int(g) for g in m.groups())
+
+
+def _no_upstream(fleet, clone, branch="docs/tui-rendering-footguns"):
+    """Park the source clone on a local branch with NO upstream.
+
+    🔴 THE MEASURED SHAPE, not a synonym for it. A detached HEAD reaches the same
+    NOUPSTREAM branch in the checker, but the live instance was a NAMED branch
+    somebody was working on — the state that looks completely normal in
+    `git status` and that a human will leave in place for days.
+    """
+    fleet.git(clone, "checkout", "-q", "-b", branch)
+
+
+def _blind_state_files(fleet):
+    return sorted(p.name for p in fleet.state.glob("unmeasured-*"))
+
+
+# --- the softening, in both directions -------------------------------------- #
+def test_a_scope_with_no_upstream_below_the_threshold_does_not_fail_the_unit(fleet):
+    """🔴 A SCRATCH BRANCH FOR AN AFTERNOON MUST NOT LOOK LIKE DRIFT.
+
+    These are working repos and parking one on an unpushed branch is normal, so
+    a code that fired on the first run would be red most of the time — the
+    permanently-red gate this file refuses everywhere else. Reported loudly,
+    exit code unaffected.
+
+    RED AT BASE (15da9908) on the streak line: base reports the scope as
+    unmeasured and then says nothing further, forever. The rc==0 half is an
+    INVARIANT GUARD — base is green on it too — and is asserted here only
+    because "not escalated" is meaningless without it.
+    """
+    fleet.catch_up()
+    _nixpkg(fleet, "tmux-fuzzyclaw.nix", "tmux-fuzzyclaw")
+    clone, _ = _src_repo(fleet, "tmux-fuzzyclaw")
+    _no_upstream(fleet, clone)
+
+    rc, out = fleet.check("--no-remote")
+    assert rc == 0, f"one unmeasured run must not fail the unit, got {rc}\n{out}"
+    assert "tmux-fuzzyclaw: UNMEASURED (NOUPSTREAM) — 1/4 consecutive" in out, out
+    assert "NOT escalated" in out, out
+    assert "Still not a pass" in out, out          # and not sold as a green
+    assert _blind(out) == (1, 1, 1, 0), out
+
+
+def test_a_scope_with_no_upstream_escalates_after_n_consecutive_runs(fleet):
+    """🔴 THE OTHER DIRECTION: the softening must not make the deadman mute.
+
+    A scope whose currency has been unevaluable for the whole threshold window is
+    no longer "somebody is mid-branch" — it is a scope rc 17 CANNOT fire for, so
+    a stale built source there is invisible. At that point not alerting is the
+    deadman failing at its one job.
+
+    RED AT BASE (15da9908): the ladder there is [0, 0, 0, 0] — base never
+    escalates, which is the whole defect.
+    """
+    fleet.catch_up()
+    _nixpkg(fleet, "tmux-fuzzyclaw.nix", "tmux-fuzzyclaw")
+    clone, _ = _src_repo(fleet, "tmux-fuzzyclaw")
+    _no_upstream(fleet, clone)
+
+    codes = []
+    for _ in range(4):
+        rc, out = fleet.check("--no-remote", DRIFT_UNMEASURED_ESCALATE="3")
+        codes.append(rc)
+    assert codes == [0, 0, 18, 18], f"escalation ladder wrong: {codes}\n{out}"
+    # `out` is the FOURTH run's, so the streak reads 4 over a threshold of 3 —
+    # the ladder keeps counting past the threshold rather than latching, which is
+    # what makes "how long has this been true" legible in the journal.
+    assert ("workbench tmux-fuzzyclaw: UNMEASURED (NOUPSTREAM) for 4 CONSECUTIVE "
+            "runs (threshold 3)." in out), out
+    assert "rc 17 CANNOT fire for it" in out, out
+    assert _blind(out) == (1, 1, 1, 1), out
+
+
+def test_the_unmeasured_streak_resets_when_the_scope_measures(fleet):
+    """The streak counts CONSECUTIVE runs. One real measurement clears it —
+    otherwise a repo that is merely branchy every other day escalates anyway and
+    the threshold means nothing.
+
+    RED AT BASE (15da9908): no ladder exists there at all.
+    """
+    fleet.catch_up()
+    _nixpkg(fleet, "tmux-fuzzyclaw.nix", "tmux-fuzzyclaw")
+    clone, _ = _src_repo(fleet, "tmux-fuzzyclaw")
+    _no_upstream(fleet, clone)
+    for _ in range(2):
+        rc, out = fleet.check("--no-remote", DRIFT_UNMEASURED_ESCALATE="3")
+        assert rc == 0, out
+    assert "2/3 consecutive" in out, out
+
+    fleet.git(clone, "checkout", "-q", "main")      # back on a tracked branch
+    rc, out = fleet.check("--no-remote", DRIFT_UNMEASURED_ESCALATE="3")
+    assert rc == 0, out
+    assert _blind(out) == (1, 1, 0, 0), out         # measured: nothing unmeasured
+
+    _no_upstream(fleet, clone, branch="docs/again")  # ...and it goes away again
+    rc, out = fleet.check("--no-remote", DRIFT_UNMEASURED_ESCALATE="3")
+    assert rc == 0, f"the streak did not reset on a real measurement\n{out}"
+    assert "1/3 consecutive" in out, out
+
+
+def test_a_measured_fleet_reports_a_zero_over_a_REAL_denominator(fleet):
+    """🔴 POSITIVE CONTROL for the quadruple, and the partner of every red above.
+
+    `escalated=0` is the output of a ladder wired to nothing. It is only evidence
+    beside a non-zero `scopes=`: one scope was found, walked, and measured.
+    """
+    fleet.catch_up()
+    _nixpkg(fleet, "tmux-fuzzyclaw.nix", "tmux-fuzzyclaw")
+    _src_repo(fleet, "tmux-fuzzyclaw")
+
+    rc, out = fleet.check("--no-remote")
+    assert rc == 0, out
+    assert _blind(out) == (1, 1, 0, 0), out
+    blind_lines = [ln for ln in out.splitlines() if ln.startswith("[srcblind]")]
+    assert not [ln for ln in blind_lines if "UNMEASURED" in ln], blind_lines
+
+
+# --- the reasons are not one hazard ----------------------------------------- #
+def test_an_ABSENT_source_repo_never_escalates_however_many_runs(fleet):
+    """🔴 THE ONE EXEMPTION, and it must hold at every count.
+
+    `clawgatectl.nix` deliberately supports a host without the checkout: the
+    derivation guards on pathExists and omits the binary. Escalating on absence
+    would make that host permanently red for a package it correctly does not
+    ship — which is worse than no gate.
+
+    Driven at threshold 1, so a single shared counter would fire on run one.
+
+    RED AT BASE (15da9908) on the NEVER-escalates line and the counter-file
+    assertion. The rc==0 half is an INVARIANT GUARD — base never escalates
+    anything — and is the property that must survive, not new coverage.
+    """
+    fleet.catch_up()
+    _nixpkg(fleet, "clawgatectl.nix", "homelab-talos/containers/clawgate")
+
+    for _ in range(5):
+        rc, out = fleet.check("--no-remote", DRIFT_UNMEASURED_ESCALATE="1",
+                              DRIFT_UNMEASURED_FETCH_ESCALATE="1")
+        assert rc == 0, f"an absent source repo escalated: {rc}\n{out}"
+    assert "UNMEASURED (ABSENT) — reported, and it NEVER escalates" in out, out
+    assert _blind(out) == (1, 1, 1, 0), out
+    assert _blind_state_files(fleet) == [], (
+        "an ABSENT scope consulted the counter at all: %r"
+        % _blind_state_files(fleet))
+
+
+def test_a_FAILED_FETCH_takes_its_own_LONGER_ladder(fleet):
+    """🔴 THE REASONS DO NOT SHARE A COUNTER, and this is the pair that proves it.
+
+    A failed fetch has a plausibly transient cause (no ssh-agent under a user
+    unit, a key rotation, a remote that is down), so it gets more patience than
+    the structural reasons. Same fixture, both directions:
+
+      * 5 consecutive runs at the STRUCTURAL threshold of 4 -> still rc 0, i.e.
+        it is genuinely not on that ladder rather than merely slower;
+      * the same shape with its OWN threshold at 2 -> rc 18, i.e. it does still
+        escalate. A reason that can never escalate is the defect, one costume on.
+    """
+    fleet.catch_up()
+    _nixpkg(fleet, "tmux-fuzzyclaw.nix", "tmux-fuzzyclaw")
+    clone, _ = _src_repo(fleet, "tmux-fuzzyclaw")
+    fleet.git(clone, "remote", "set-url", "origin",
+              str(fleet.root / "definitely-not-a-repo"))
+
+    for _ in range(5):
+        rc, out = fleet.check("--no-remote", DRIFT_UNMEASURED_ESCALATE="4")
+        assert rc == 0, f"a failed fetch took the structural ladder: {rc}\n{out}"
+    assert "UNMEASURED (FETCHFAILED) — 5/12 consecutive" in out, out
+
+    rc, out = fleet.check("--no-remote", DRIFT_UNMEASURED_FETCH_ESCALATE="2")
+    assert rc == 18, f"a persistently failing fetch never escalates: {rc}\n{out}"
+    assert ("workbench tmux-fuzzyclaw: UNMEASURED (FETCHFAILED) for 6 CONSECUTIVE "
+            "runs (threshold 2)." in out), out
+
+
+def test_a_CHANGED_reason_restarts_the_ladder(fleet):
+    """The two ladders have different thresholds, so a FETCHFAILED streak must
+    not be spent on a NOUPSTREAM escalation — that would escalate on evidence
+    that was never about this hazard.
+
+    Fetch first (it runs before the upstream lookup), then the fetch is repaired
+    and the branch is left untracked: at threshold 3 a carried-over count would
+    be 3 and fire on that very run.
+    """
+    fleet.catch_up()
+    _nixpkg(fleet, "tmux-fuzzyclaw.nix", "tmux-fuzzyclaw")
+    clone, _ = _src_repo(fleet, "tmux-fuzzyclaw")
+    good = fleet.git(clone, "remote", "get-url", "origin")
+    fleet.git(clone, "remote", "set-url", "origin",
+              str(fleet.root / "definitely-not-a-repo"))
+    for _ in range(2):
+        rc, out = fleet.check("--no-remote", DRIFT_UNMEASURED_ESCALATE="3",
+                              DRIFT_UNMEASURED_FETCH_ESCALATE="3")
+        assert rc == 0, out
+    assert "(FETCHFAILED) — 2/3 consecutive" in out, out
+
+    fleet.git(clone, "remote", "set-url", "origin", good)
+    _no_upstream(fleet, clone)
+    rc, out = fleet.check("--no-remote", DRIFT_UNMEASURED_ESCALATE="3",
+                          DRIFT_UNMEASURED_FETCH_ESCALATE="3")
+    assert rc == 0, f"a FETCHFAILED streak was spent on a NOUPSTREAM ladder\n{out}"
+    assert "(NOUPSTREAM) — 1/3 consecutive" in out, out
+
+
+# --- per (HOST, SCOPE), never per run --------------------------------------- #
+def test_the_unmeasured_streak_is_kept_PER_SCOPE(fleet):
+    """🔴 TWO SCOPES ARE TWO LADDERS. Keyed per HOST alone, two unmeasured scopes
+    would bump one counter twice a run and reach a threshold of 4 in two runs —
+    an escalation manufactured by counting, on a fleet where nothing has been
+    unevaluable for long enough to matter.
+
+    Both directions in one fixture: two runs must stay green (no double
+    counting), and the same pair must still escalate on its own ladder at four.
+    """
+    fleet.catch_up()
+    _nixpkg(fleet, "a.nix", "homelab-talos/containers/clawgate")
+    _nixpkg(fleet, "b.nix", "tmux-fuzzyclaw")
+    c1, _ = _src_repo(fleet, "homelab-talos", branch="trunk")
+    c2, _ = _src_repo(fleet, "tmux-fuzzyclaw")
+    _no_upstream(fleet, c1)
+    _no_upstream(fleet, c2)
+
+    for _ in range(2):
+        rc, out = fleet.check("--no-remote")
+        assert rc == 0, f"two scopes shared one counter: {rc}\n{out}"
+    assert _blind(out) == (1, 2, 2, 0), out
+    assert "homelab-talos/containers/clawgate: UNMEASURED (NOUPSTREAM) — 2/4" in out, out
+    assert "tmux-fuzzyclaw: UNMEASURED (NOUPSTREAM) — 2/4" in out, out
+
+    for _ in range(2):
+        rc, out = fleet.check("--no-remote")
+    assert rc == 18, f"per-scope ladders never reach the threshold: {rc}\n{out}"
+    assert _blind(out) == (1, 2, 2, 2), out
+
+
+def test_one_scope_recovering_does_not_reset_ANOTHER_scopes_ladder(fleet):
+    """The complement of the test above, and the direction a shared counter
+    breaks the other way: the repo that recovered would clear the ladder of the
+    repo that did not, and the stuck one would never escalate."""
+    fleet.catch_up()
+    _nixpkg(fleet, "a.nix", "homelab-talos/containers/clawgate")
+    _nixpkg(fleet, "b.nix", "tmux-fuzzyclaw")
+    c1, _ = _src_repo(fleet, "homelab-talos", branch="trunk")
+    c2, _ = _src_repo(fleet, "tmux-fuzzyclaw")
+    _no_upstream(fleet, c1)
+    _no_upstream(fleet, c2)
+
+    for _ in range(2):
+        rc, out = fleet.check("--no-remote", DRIFT_UNMEASURED_ESCALATE="3")
+        assert rc == 0, out
+
+    fleet.git(c2, "checkout", "-q", "main")          # one of the two recovers
+    rc, out = fleet.check("--no-remote", DRIFT_UNMEASURED_ESCALATE="3")
+    assert rc == 18, (
+        "the recovered scope reset the stuck scope's ladder: %d\n%s" % (rc, out))
+    assert "homelab-talos/containers/clawgate: UNMEASURED (NOUPSTREAM) for 3 CONSECUTIVE" in out, out
+    assert _blind(out) == (1, 2, 1, 1), out
+
+
+def test_the_scope_counter_filename_is_INJECTIVE(fleet):
+    """🔴 `a/b` AND `a_b` MUST NOT SHARE A FILE. The scope alphabet includes both
+    `/` and `_`, so the obvious `/`->`_` sanitisation collides them — and two
+    scopes sharing a counter is a ladder that double-counts on one run and resets
+    itself on another, for reasons nothing in the output can explain.
+
+    Behavioural, not a filename assertion alone: at threshold 2 a collision
+    reaches 2 on the FIRST run and escalates. Both spellings are checked to exist
+    separately as well, because a green rc alone would not say which property
+    held.
+    """
+    fleet.catch_up()
+    _nixpkg(fleet, "a.nix", "talos/containers")
+    _nixpkg(fleet, "b.nix", "talos_containers")
+    c1, _ = _src_repo(fleet, "talos")
+    c2, _ = _src_repo(fleet, "talos_containers")
+    _no_upstream(fleet, c1)
+    _no_upstream(fleet, c2)
+
+    rc, out = fleet.check("--no-remote", DRIFT_UNMEASURED_ESCALATE="2")
+    assert rc == 0, f"two scopes collided onto one counter: {rc}\n{out}"
+    assert _blind(out) == (1, 2, 2, 0), out
+    assert _blind_state_files(fleet) == [
+        "unmeasured-workbench-talos__containers",
+        "unmeasured-workbench-talos_containers",
+    ], _blind_state_files(fleet)
+
+
+def test_the_unmeasured_streak_is_kept_PER_HOST(fleet):
+    """One host's blindness is not the other's. The remote runs the SAME payload
+    against its own $HOME, with its clone parked on an untracked branch while the
+    local clone is current: only the remote's scope may have a ladder."""
+    fleet.catch_up()
+    _nixpkg(fleet, "tmux-fuzzyclaw.nix", "tmux-fuzzyclaw")
+    lstore = _mkhome(fleet.home, healthy=1)
+    _src_repo(fleet, "tmux-fuzzyclaw")
+
+    rhome = fleet.root / "remote-home"
+    rhome.mkdir()
+    rstore = _mkhome(rhome, healthy=1, store=fleet.root / "remote-store")
+    rclone, _ = _src_repo(fleet, "tmux-fuzzyclaw", home=rhome)
+    _no_upstream(fleet, rclone)
+    _remote_running_the_real_payload(fleet, rhome, rstore)
+
+    rc, out = _parity(fleet, store=lstore, REMOTE_SSH="stub@example.invalid")
+    assert rc == 0, out
+    assert "laptop tmux-fuzzyclaw: UNMEASURED (NOUPSTREAM) — 1/4" in out, out
+    assert "workbench tmux-fuzzyclaw: UNMEASURED" not in out, out
+    assert _blind(out) == (2, 2, 1, 0), out
+    assert _blind_state_files(fleet) == ["unmeasured-laptop-tmux-fuzzyclaw"], (
+        _blind_state_files(fleet))
+
+
+def test_a_host_that_never_ANSWERED_accumulates_no_ladder(fleet):
+    """🔴 A HOST NOBODY LOOKED AT MUST NOT ACQUIRE A STREAK. An unreachable
+    laptop reports no scopes at all, and rc 13 already owns that finding; bumping
+    a scope ladder for it would escalate a second code off one missed ssh, and
+    would go on doing it while the machine is simply shut.
+
+    RED AT BASE (15da9908) on `_blind()` (no such summary exists there). The
+    rc==0 half is an INVARIANT GUARD."""
+    fleet.catch_up()
+    _nixpkg(fleet, "tmux-fuzzyclaw.nix", "tmux-fuzzyclaw")
+    _src_repo(fleet, "tmux-fuzzyclaw")
+    fleet.stub_ssh(255)
+
+    for _ in range(5):
+        rc, out = fleet.check(REMOTE_SSH="stub@example.invalid",
+                              DRIFT_UNMEASURED_ESCALATE="2",
+                              DRIFT_UNREACHABLE_ESCALATE="99")
+        assert rc == 0, f"an unreachable host grew a scope ladder: {rc}\n{out}"
+    assert _blind(out) == (1, 1, 0, 0), out          # only the local host walked
+    assert _blind_state_files(fleet) == [], _blind_state_files(fleet)
+
+
+# --- it cannot be satisfied by measuring nothing ---------------------------- #
+def test_a_ladder_over_ZERO_SCOPES_says_so_instead_of_printing_a_clean_line(fleet):
+    """🔴 `escalated=0` over no scopes is a checker wired to nothing wearing the
+    output of a clean fleet. Both refusals are asserted: the per-host line naming
+    WHY that host contributed nothing, and the withheld summary."""
+    fleet.catch_up()
+    rc, out = fleet.check("--no-remote")
+    assert rc == 0, out
+    blk = out.split("=== built-source scopes")[1]
+    assert "workbench: NOT EVALUATED" in blk, blk
+    assert "named no ${workspace}/" in blk, blk
+    assert "named ZERO" in blk, blk
+    assert "hosts-reporting=" not in blk, (
+        "a ladder over zero scopes printed a clean-looking summary:\n" + blk)
+
+
+def test_a_ladder_over_ZERO_HOSTS_says_so_instead_of_printing_a_clean_line(fleet):
+    """The same refusal one level up: a run that reached no host has no scopes to
+    have measured, and must not print a summary at all.
+
+    RED AT BASE (15da9908) on the block assertions; the rc==2 half is an
+    INVARIANT GUARD — that refusal predates this change."""
+    fleet.stub_ssh(255)
+    rc, out = fleet.check("--no-local", REMOTE_SSH="stub@example.invalid")
+    assert rc == 2, out                              # the existing checked-nothing rc
+    blk = out.split("=== built-source scopes")[1]
+    assert "no host returned a src-unmeasured fact set" in blk, blk
+    assert "hosts-reporting=" not in blk, blk
+
+
+def test_the_ladder_escalates_immediately_when_the_streak_cannot_be_persisted(fleet):
+    """If 'for how long' is unknowable the run must fail CLOSED, exactly as the
+    unreachable ladder does: a state dir that cannot be created is the one case
+    where the threshold logic has no input at all, and going quiet there is an
+    unbounded silent window."""
+    fleet.catch_up()
+    _nixpkg(fleet, "tmux-fuzzyclaw.nix", "tmux-fuzzyclaw")
+    clone, _ = _src_repo(fleet, "tmux-fuzzyclaw")
+    _no_upstream(fleet, clone)
+    blocked = fleet.root / "blocked-state"
+    blocked.write_text("not a directory\n")
+
+    rc, out = fleet.check("--no-remote", DRIFT_STATE_DIR=str(blocked))
+    assert rc == 18, f"expected an immediate escalation, got {rc}\n{out}"
+    assert "could not be persisted" in out, out
+    assert _blind(out) == (1, 1, 1, 1), out
+
+
+@pytest.mark.skipif(
+    os.geteuid() == 0, reason="root ignores directory write permissions"
+)
+def test_the_ladder_escalates_when_the_streak_FILE_cannot_be_written(fleet):
+    """🔴 THE SECOND FAIL-CLOSED LIMB, and the one the test above does NOT reach
+    — the identical blind spot the rc 13 ladder had.
+
+    `test_the_ladder_escalates_immediately_when_the_streak_cannot_be_persisted`
+    points DRIFT_STATE_DIR at a regular FILE, so `mkdir -p` fails and
+    u_streak_bump returns from its FIRST limb. The `printf … > "$f" || echo -1`
+    limb — an existing, readable, but UNWRITABLE state dir — is only reached
+    here, and mutating its `echo -1` to `echo 0` would otherwise leave the whole
+    suite green while the ladder went permanently mute: 0 is below every
+    threshold, forever.
+
+    BOTH permission changes are required, for the reason the rc 13 twin records:
+    a mode-500 directory does not stop a write to a file that already EXISTS
+    inside it, so without the read-only file this passes on the mutant and is a
+    vacuous guard.
+    """
+    fleet.catch_up()
+    _nixpkg(fleet, "tmux-fuzzyclaw.nix", "tmux-fuzzyclaw")
+    clone, _ = _src_repo(fleet, "tmux-fuzzyclaw")
+    _no_upstream(fleet, clone)
+
+    ro = fleet.root / "readonly-state"
+    ro.mkdir()
+    counter = ro / "unmeasured-workbench-tmux-fuzzyclaw"
+    counter.write_text("NOUPSTREAM 2\n")             # a streak already in flight
+    counter.chmod(0o400)
+    ro.chmod(0o500)
+    try:
+        rc, out = fleet.check("--no-remote", DRIFT_STATE_DIR=str(ro))
+    finally:
+        ro.chmod(0o700)                              # so tmp_path can be cleaned
+        counter.chmod(0o600)
+    assert rc == 18, (
+        "an unpersistable streak must escalate immediately — 'for how long' is "
+        f"unknowable, so going quiet is an unbounded silent window. got {rc}\n{out}"
+    )
+    assert "could not be persisted" in out, out
+    # ...and via the UNKNOWN-streak branch, not the threshold one: the counter on
+    # disk says 2, below the default threshold of 4. Without this the test would
+    # pass on a mutant that never reaches the write limb at all.
+    assert "CONSECUTIVE runs" not in out, (
+        "escalated through the threshold branch, so the cannot-persist limb was "
+        "never exercised\n" + out)
+    # The same journal-hygiene claim the rc 13 twin makes: `2>/dev/null > "$f"`
+    # (in that order) is what keeps the shell's own redirection error out of the
+    # journal, and it is only observable on this path.
+    stray = [
+        ln for ln in out.splitlines()
+        if ln.strip() and not ln.startswith(("[", "===", "drift-check: ", "  "))
+    ]
+    assert stray == [], (
+        "unprefixed output leaked into the journal between the [host] lines: %r" % stray
+    )
+
+
+# --- it must not outrank, or be outranked by, the wrong thing --------------- #
+def test_unpushed_devrc_commits_still_outrank_an_escalated_rc18(fleet):
+    """rc 8 is the code with the rescue-before-reset procedure and the one the
+    legend is read against. A scope nobody could measure must never displace it.
+
+    RED AT BASE (15da9908) only on the escalation line: base cannot produce an
+    rc 18 to be outranked, so the rc==8 half is an INVARIANT GUARD. It is the
+    property that must not break, not evidence of a fixed bug."""
+    fleet.catch_up()
+    fleet.add_local_commit("un-pushed while a source scope is unmeasurable")
+    _nixpkg(fleet, "tmux-fuzzyclaw.nix", "tmux-fuzzyclaw")
+    clone, _ = _src_repo(fleet, "tmux-fuzzyclaw")
+    _no_upstream(fleet, clone)
+
+    rc, out = fleet.check("--no-remote", DRIFT_UNMEASURED_ESCALATE="1")
+    assert rc == 8, f"an escalated rc 18 displaced rc 8: {rc}\n{out}"
+    assert "CONSECUTIVE runs" in out, out             # both are still reported
+
+
+def test_an_escalated_rc18_outranks_a_merely_BEHIND_host(fleet):
+    """The other side of the rank: 18 sits above 10 (and 12 and 15) because a
+    scope that cannot be measured hides an rc 17 indefinitely, while a behind
+    checkout is one `ship.sh` away and says exactly what it is."""
+    _nixpkg(fleet, "tmux-fuzzyclaw.nix", "tmux-fuzzyclaw")   # fleet is 1 BEHIND
+    clone, _ = _src_repo(fleet, "tmux-fuzzyclaw")
+    _no_upstream(fleet, clone)
+
+    rc, out = fleet.check("--no-remote", DRIFT_UNMEASURED_ESCALATE="1")
+    assert rc == 18, f"rc 18 lost to a behind checkout: {rc}\n{out}"
+    assert "is BEHIND origin/main" in out, out        # both are still reported
+
+
+def test_a_MEASURED_stale_source_still_outranks_an_unmeasurable_one(fleet):
+    """17 over 18: "we looked and it is wrong" beats "we could not look", the
+    same argument severity() already makes for 14 over 13.
+
+    RED AT BASE (15da9908) only on the escalation line — base has no rc 18 — so
+    the rc==17 half is an INVARIANT GUARD."""
+    fleet.catch_up()
+    _nixpkg(fleet, "a.nix", "homelab-talos/containers/clawgate")
+    _nixpkg(fleet, "b.nix", "tmux-fuzzyclaw")
+    _, b1 = _src_repo(fleet, "homelab-talos", branch="trunk")
+    _push_upstream(fleet, b1, branch="trunk", path="containers/clawgate/main.go")
+    c2, _ = _src_repo(fleet, "tmux-fuzzyclaw")
+    _no_upstream(fleet, c2)
+
+    rc, out = fleet.check("--no-remote", DRIFT_UNMEASURED_ESCALATE="1")
+    assert rc == 17, f"an unmeasurable scope displaced a measured one: {rc}\n{out}"
+    assert "CONSECUTIVE runs" in out, out
+
+
+def test_the_rc18_legend_is_printed_with_the_verdict(fleet):
+    """The journal is the only surface this unit has, so the code must arrive
+    with its meaning — including that ABSENT is not on the ladder."""
+    fleet.catch_up()
+    _nixpkg(fleet, "tmux-fuzzyclaw.nix", "tmux-fuzzyclaw")
+    clone, _ = _src_repo(fleet, "tmux-fuzzyclaw")
+    _no_upstream(fleet, clone)
+
+    rc, out = fleet.check("--no-remote", DRIFT_UNMEASURED_ESCALATE="1")
+    assert rc == 18, out
+    assert "drift-check: DRIFT (rc=18)" in out, out
+    assert "rc18=a built-source scope has been UNMEASURABLE" in out, out
+    assert "repo ABSENT never" in out, out
+
+
+@pytest.mark.parametrize("var", ["DRIFT_UNMEASURED_ESCALATE",
+                                 "DRIFT_UNMEASURED_FETCH_ESCALATE"])
+def test_a_non_integer_unmeasured_threshold_is_rejected(fleet, var):
+    """Both are compared with `-ge`, where a non-integer is a shell ERROR rather
+    than a false — and an erroring comparison is a ladder that goes quiet, which
+    is the direction this whole code exists to refuse."""
+    rc, out = fleet.check("--no-remote", **{var: "4; touch /tmp/pwned"})
+    assert rc == 2, out
+    assert "must be a non-negative integer" in out, out

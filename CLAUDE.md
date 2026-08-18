@@ -60,6 +60,22 @@ there. Only what's specific to this repo, where a working tree is also a **deplo
   **derived from `nix/pkgs/` at scan time and pinned two-way by a test**, so a third
   such package is covered automatically. `absent` / `fetch failed` / `detached` are
   reported as **UNMEASURED**, never folded into a clean count.
+  🔴 **UNMEASURED is not forever — rc 18.** Setting no code was right per run and
+  wrong forever: a scope that can never be evaluated escalated NEVER, so the run
+  read as clean while rc 17 was structurally unable to fire for it. Measured
+  2026-08-18: `tmux-fuzzyclaw` on a local branch with **no upstream**,
+  `unmeasured=1`, rc 0 — concealing a genuinely divergent build between the two
+  hosts. It now carries the rc 13 ladder — reported every run, escalated only
+  after N **consecutive** runs, **per (host, scope)**, reset the moment it
+  measures. The reasons are **not** one hazard: `no upstream` / an unparseable
+  count are structural (`DRIFT_UNMEASURED_ESCALATE`, default 4 ≈ 24h), a failed
+  `fetch` is plausibly transient so it gets a longer ladder
+  (`DRIFT_UNMEASURED_FETCH_ESCALATE`, default 12 ≈ 3 days), and **`repo ABSENT`
+  never escalates at any count** — a host without the checkout is a state
+  `clawgatectl.nix` deliberately supports. The block prints
+  `hosts-reporting=/scopes=/unmeasured=/escalated=` and **withholds that summary
+  entirely** when either count is zero: a ladder over no scopes is not a clean
+  ladder.
   🔴 **The unit is the package's own `srcDir` SUBTREE, not the repo** — escalating
   on the repo made rc 17 a permanently-red gate. Measured: the workbench sat 18
   commits behind `origin/trunk` with **0** of them touching `containers/clawgate`,

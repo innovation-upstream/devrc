@@ -2268,8 +2268,33 @@ in
   # help and exited 0. This deadman was green on that host throughout. Unlike
   # rc 13 and rc 16 this is a real divergence with a real fix (a pull plus a
   # switch), so it must reach OnFailure like rc 8 does — it is NOT on
-  # SuccessExitStatus. It cannot become permanently red: `fetch failed`,
-  # `absent` and `detached` are all reported as UNMEASURED and set no code.
+  # SuccessExitStatus. It cannot become permanently red off a single run:
+  # `fetch failed`, `absent` and `detached` are all reported as UNMEASURED and
+  # set no code on the run that observes them.
+  #
+  # 🔴 rc 18 DOES TOAST TOO, and it is the gap rc 17 left. "Reported as
+  # UNMEASURED and sets no code" is correct per run and was wrong forever: a
+  # scope whose currency can NEVER be evaluated escalated never, so the run kept
+  # reading as clean while rc 17 was structurally unable to fire for it.
+  # Measured 2026-08-18 on the workbench — tmux-fuzzyclaw parked on a local
+  # branch with no upstream, `unmeasured=1`, rc 0, concealing a genuinely
+  # divergent build between the two hosts. So an unmeasured scope now carries the
+  # rc 13 ladder: reported every run, escalated only after N CONSECUTIVE runs,
+  # per (host, scope), reset the moment it measures. `repo ABSENT` is exempt at
+  # every count — a host without the checkout is a state clawgatectl.nix
+  # deliberately supports — and a failed fetch gets a longer ladder than a branch
+  # with no upstream, because only one of those two is plausibly weather. Like rc
+  # 17 it is a real divergence with a real fix, so it is NOT excused on
+  # SuccessExitStatus (which `test_only_16_is_excused_from_failing_the_unit`
+  # pins to exactly one code).
+  #
+  # 🔴 AND IT DOES NOT MOVE TimeoutStartSec. The budget below is a function of
+  # what the script FETCHES; the rc 18 ladder adds no fetch and no ssh — it reads
+  # and writes one ~16-byte counter per (host, scope) in $XDG_STATE_HOME, four
+  # files at today's scope count. Left at 420 deliberately rather than bumped
+  # "to be safe": that number is asserted against the fetch cap by
+  # `test_the_unit_start_timeout_can_absorb_every_source_repo_fetch`, and moving
+  # it for a reason the test does not model would decouple it from its own pin.
   #
   # The service is emitted UNCONDITIONALLY (any host can run it by hand); only the
   # TIMER's timers.target wiring is gated — see enableDriftDeadman above.
