@@ -56,6 +56,7 @@ earlier revision restated a size, a growth figure, a percentage and a per-pass
 byte ledger that were all wrong, in the module that declares itself the single
 source of truth for them.
 """
+import os
 import re
 from pathlib import Path
 
@@ -91,17 +92,100 @@ SKILL_DIR = REPO_ROOT / "claude" / "skills" / "prune-skill"
 SKILL_MD = SKILL_DIR / "SKILL.md"
 REFERENCE_DIR = SKILL_DIR / "reference"
 
-# A routing PATH the core writes, with any prefix (`reference/x.md`,
-# `~/.claude/skills/prune-skill/reference/x.md`, `.claude/.../reference/x.md`).
-# Captures the basename, which is what resolves under REFERENCE_DIR. A
-# placeholder (`reference/<topic>.md`) deliberately does not match: `<topic>` is
-# not a filename, so it is not a route.
-ROUTING_PATH = re.compile(r"reference/([\w.-]+\.md)")
+# A routing PATH the core writes, captured WHOLE -- a maximal run of path
+# characters holding a `reference/` segment. The run ends at a backtick, a
+# paren (so a markdown link `[t](reference/x.md)` yields the bare path), a
+# quote or whitespace, and it keeps everything the author wrote on BOTH sides
+# of `reference/`.
+#
+# Capturing the whole token is the entire point. The previous shape,
+# `reference/([\w.-]+\.md)`, matched anywhere inside a token and kept only the
+# BASENAME, so four spellings that resolve to nothing were accepted -- each one
+# executed against that form, each reporting `4 passed`:
+# `reference/reference/x.md`, `~/.claude/skills/<other>/reference/x.md`,
+# `reference/x.mdx` (backtracks to a `.md` prefix of the real token) and
+# `reference/x.md.bak`.
+#
+# A placeholder (`reference/<topic>.md`) still does not match as a route: `<`
+# is not a path character, so the token ends at `reference/`, and _routing_paths
+# drops a token whose last segment has no dot.
+ROUTING_PATH = re.compile(r"[\w~@./+-]*reference/[\w~@./+-]*")
 
-# The block the core uses as its reference registry. Its rows are what a reader
-# loads from, so a cell that stops being a path is a real break even when the
+# What a routing path's PREFIX says its base is. `~/.claude/` is the DEPLOYED
+# tree, which nix populates recursively from this repo's `claude/` (the
+# `.claude/skills` home.file entry in `nix/home.nix`), and `~/workspace/devrc/`
+# is this repo's root -- so both absolute spellings are settled IN-TREE. Nothing
+# here reads the deployed copy: the gate must give the same verdict in a fresh
+# clone, in a worktree, and on a host that has never run `home-manager switch`.
+# The two mkOutOfStoreSymlink skills (`browser`, `dl-router`) are deployed from
+# `scripts/` instead and are deliberately NOT mapped -- this gate settles
+# prune-skill's own routes, and a route into one of those would read as dangling.
+PREFIX_BASES = (
+    ("~/workspace/devrc/", REPO_ROOT),
+    (f"{Path.home() / 'workspace' / 'devrc'}/", REPO_ROOT),
+    ("~/.claude/", REPO_ROOT / "claude"),
+    (".claude/", REPO_ROOT / "claude"),
+)
+
+# The block the core uses as its reference registry. Its lines are what a reader
+# loads from, so a line that stops being a path is a real break even when the
 # basename still appears in prose elsewhere.
 REGISTRY_MARKER = "**Reference topics**"
+
+
+def _routing_paths(text: str) -> list[str]:
+    """Every routing path in `text`, AS WRITTEN, de-duplicated in order.
+
+    A token counts as a route when `reference` is a whole path SEGMENT of it
+    (so `cross-reference/x.md` is prose, not a route) and its last segment
+    holds a dot (so the bare directory `~/.claude/skills/prune-skill/reference/`
+    and the placeholder `reference/<topic>.md`, whose token ends at `<`, are
+    not routes). Trailing sentence punctuation is stripped -- no file ends in
+    one -- so `see reference/x.md.` is the same route as `` `reference/x.md` ``.
+
+    A token preceded by `:` is a URL's authority, not a repo path: `:` is not a
+    path character, so `https://host/x/reference/y.md` reaches here as
+    `//host/x/reference/y.md`, and joining that onto a base yields an absolute
+    `//host/...` -- a dangling route reported for a link that was never a claim
+    about this tree.
+    """
+    found = []
+    for match in ROUTING_PATH.finditer(text):
+        if match.start() and text[match.start() - 1] == ":":
+            continue
+        token = match.group(0).rstrip(".,;:!?")
+        segments = token.split("/")
+        if "reference" not in segments[:-1] or "." not in segments[-1]:
+            continue
+        found.append(token)
+    return list(dict.fromkeys(found))
+
+
+def _resolve_routing_path(token: str) -> Path:
+    """Where the string the core wrote actually points -- resolved AS WRITTEN.
+
+    Each spelling is resolved against the base its own prefix names, never by
+    basename:
+
+      * `~/.claude/...` and `.claude/...`  -> this repo's `claude/` tree;
+      * `~/workspace/devrc/...`            -> this repo's root;
+      * a first segment that is a directory at the repo root
+        (`claude/skills/<name>/reference/<x>.md`) -> the repo root;
+      * anything else (`reference/<x>.md`) -> the skill's OWN directory, which
+        is what a reader following the core from there opens.
+
+    So a wrong prefix, a wrong skill segment or a wrong extension resolves to
+    a path that does not exist, instead of collapsing onto a basename that does.
+    An unmapped absolute path falls through to the last case and fails loudly
+    rather than passing quietly.
+    """
+    for prefix, base in PREFIX_BASES:
+        if token.startswith(prefix):
+            return Path(os.path.normpath(base / token[len(prefix):]))
+    head = token.split("/", 1)[0]
+    if head and (REPO_ROOT / head).is_dir():
+        return Path(os.path.normpath(REPO_ROOT / token))
+    return Path(os.path.normpath(SKILL_DIR / token))
 
 
 def _existing_topics() -> list[str]:
@@ -147,13 +231,20 @@ def test_skill_md_keeps_working_headroom():
     )
 
 
-def _routing_table_rows(body: str) -> list[str]:
-    """The core's reference routing table -- the registry a reader loads from.
+def _registry_block(body: str) -> str:
+    """The core's reference registry -- the block a reader loads from.
 
-    Located structurally rather than by column names: the markdown table rows
-    between the `**Reference topics**` marker and the next H2. If the marker is
-    gone the registry moved, and that is a loud failure by design -- re-point
-    this test at the new registry rather than deleting the assertion.
+    Located structurally rather than by column names: everything from the
+    `**Reference topics**` marker to the next H2. If the marker is gone the
+    registry moved, and that is a loud failure by design -- re-point this test
+    at the new registry rather than deleting the assertion.
+
+    The WHOLE block counts, not only markdown table rows. The skill's own §3
+    asks for "ONE routing line" per demoted topic, which is a bullet as often as
+    a table row, and a rows-only reader reported `Routed by the table: NOTHING`
+    for a registry rewritten as bullets while every route in it resolved. What
+    makes a line a route is that it holds a path that RESOLVES -- checked below
+    -- not the punctuation around it.
     """
     start = body.find(REGISTRY_MARKER)
     assert start != -1, (
@@ -161,8 +252,7 @@ def _routing_table_rows(body: str) -> list[str]:
         "the core's reference registry; if the registry moved, re-point the test."
     )
     end = body.find("\n## ", start)
-    block = body[start:] if end == -1 else body[start:end]
-    return [ln for ln in block.splitlines() if ln.lstrip().startswith("|")]
+    return body[start:] if end == -1 else body[start:end]
 
 
 def test_every_reference_topic_is_routed_from_the_core():
@@ -184,35 +274,57 @@ def test_every_reference_topic_is_routed_from_the_core():
         -- not a path at all, and it passed.
 
     The skill's own section 4 is entirely about routing paths that RESOLVE, so a
-    guard that a non-path satisfies is the defect that section warns about. It
-    now extracts the routing PATHS the core actually writes and resolves each
-    against the filesystem, in both directions.
+    guard that a non-path satisfies is the defect that section warns about.
+
+    RESOLVED AS WRITTEN, NOT BY BASENAME. The first structural version kept only
+    the basename out of `reference/<x>.md` and looked it up under REFERENCE_DIR,
+    which discards the prefix and the extension -- so four more spellings walked
+    through it, all executed, all reporting `4 passed`:
+
+      * `reference/reference/staleness-pass.md` -- the exact dead shape a
+        sibling finding of this PR had just removed from the core;
+      * `~/.claude/skills/browser/reference/staleness-pass.md` -- another
+        skill's directory;
+      * `reference/staleness-pass.mdx` and `reference/staleness-pass.md.bak` --
+        wrong extension, wrong suffix.
+
+    Each is now resolved by `_resolve_routing_path` against the base its own
+    prefix names, and must be a file there. LIMIT, stated rather than papered
+    over with an exception list: a route into ANOTHER repo's skill tree, e.g.
+    `.claude/skills/gitops-gate/reference/gate-catalog.md`, has no base inside
+    this repo, so it resolves under `claude/skills/` here and is reported
+    dangling even when it exists in that other repo.
     """
     body = SKILL_MD.read_text(encoding="utf-8")
     topics = _existing_topics()
     assert topics, f"no reference topics found under {REFERENCE_DIR}"
 
-    # Direction 1: no dangling route. Every `reference/<x>.md` path anywhere in
-    # the core must resolve to a file that exists.
+    # Direction 1: no dangling route. Every routing path the core writes must
+    # resolve AS WRITTEN -- prefix, skill segment and extension included -- to a
+    # file that exists. Resolving by basename instead is what accepted the four
+    # spellings named in the docstring.
     dangling = sorted(
-        {n for n in ROUTING_PATH.findall(body) if not (REFERENCE_DIR / n).is_file()}
+        {t for t in _routing_paths(body) if not _resolve_routing_path(t).is_file()}
     )
     assert not dangling, (
-        f"the core routes to reference topics that do not exist: {dangling}\n"
-        f"Nothing under {REFERENCE_DIR} answers those paths -- the reader follows "
-        "the pointer and lands nowhere. Fix the path or restore the file."
+        "the core writes routing paths that do not resolve to a file:\n"
+        + "\n".join(f"  {t}  ->  {_resolve_routing_path(t)}" for t in dangling)
+        + "\nA reader follows the pointer AS WRITTEN and lands nowhere. Fix the "
+        "path -- the prefix, the skill segment and the extension all count -- or "
+        "restore the file."
     )
 
     # Direction 2: no orphan. Every topic on disk must be reachable from the
-    # registry by a RESOLVING path, not merely name-dropped somewhere in prose.
-    routed = {n for row in _routing_table_rows(body) for n in ROUTING_PATH.findall(row)}
-    unrouted = [t for t in topics if t not in routed]
+    # registry by a path that RESOLVES TO IT, not merely name-dropped in prose
+    # and not by a path that resolves somewhere else.
+    routed = {_resolve_routing_path(t) for t in _routing_paths(_registry_block(body))}
+    unrouted = [t for t in topics if REFERENCE_DIR / t not in routed]
     assert not unrouted, (
-        f"reference topics exist but the core's routing table does not route to "
-        f"them by a resolving path: {unrouted}\n"
-        f"Routed by the table: {sorted(routed) or 'NOTHING'}.\n"
+        f"reference topics exist but the core's registry does not route to "
+        f"them by a path that resolves to them: {unrouted}\n"
+        f"Routed by the registry: {sorted(str(p) for p in routed) or 'NOTHING'}.\n"
         "A bare mention of the filename is NOT a route -- write "
-        "`reference/<topic>.md`. Either add the routing row (the default -- an "
+        "`reference/<topic>.md`. Either add the routing line (the default -- an "
         "orphan is usually a demoted topic that lost its pointer, not dead "
         "weight) or delete the file and say in the commit why it is dead."
     )
