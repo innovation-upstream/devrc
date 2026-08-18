@@ -85,12 +85,20 @@ validated preset; treat unvalidated ones as starting points.
 - `--since` applies to range/profile queries (Loki, Pyroscope, `--kind range`).
 - Signal-safe teardown: kubectl runs in its own session and is torn down by
   killing the process group on success/error/SIGINT/SIGTERM (no leaked tunnel).
-- Concurrency-safe local port: `_free_port` is TOCTOU by construction (the probe
-  socket closes before kubectl binds), so `PortForward.__enter__` RETRIES up to
-  `PF_ATTEMPTS` (3) times on a freshly-picked port when — and only when —
-  kubectl died with a bind collision, reaping each failed attempt's process
-  first. Concurrent obs-read runs no longer lose a race. Every other failure
-  (missing service, wrong namespace, RBAC denial, backend never ready) still
-  surfaces on the FIRST attempt with kubectl's own message unchanged.
+- Local-port race NARROWED, not closed: `_free_port` is TOCTOU by construction
+  (the probe socket closes before kubectl binds), so `PortForward.__enter__`
+  makes at most `PF_ATTEMPTS` (3) attempts **in total — 1 initial + 2 retries**,
+  re-picking the port when — and only when — kubectl died with a bind collision,
+  reaping each failed attempt's process first. Every other failure (missing
+  service, wrong namespace, RBAC denial, backend never ready) still surfaces on
+  the FIRST attempt with kubectl's own message unchanged.
+- 🔴 **Residual window (reproduced):** the retry fires only if our kubectl's
+  collision-exit is seen before the readiness probe gets *any* HTTP answer on
+  that port — so when the racing winner starts serving first, obs-read attaches
+  to **its** tunnel: cross-cluster that is a wrong-cluster answer the
+  silent-zero guard cannot catch (the result is non-empty). Don't fan out
+  concurrent obs-read runs across *different* clusters. Closing it properly
+  means parsing kubectl's own `Forwarding from 127.0.0.1:P` line (today
+  `DEVNULL`) instead of probing the port.
 - Known limitation (documented, unchanged): a matched-nothing result still exits
   0 — check the `--json` `matched_nothing`/`warning` fields to fail a pipeline.
