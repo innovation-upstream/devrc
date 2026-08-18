@@ -247,27 +247,69 @@ the day you ship.*
 - **Observed:** this session ran `subsystem_recall.py` at `/resume` step 4, i.e. because the SKILL told it to. `Skill` calls were non-zero (the `resume` skill loaded), so attribution to the doc is structurally impossible here.
 - **Unchanged:** parse the next few ORGANIC continuations; do not stage a probe.
 
+### `#329` is the on-switch and is deliberately unmerged
+- **State:** OPEN, base `trunk`, exactly 2 files (IngressRoute + kustomization line) after I rebased it
+  off the squashed parent. Merging it **is** deploying, and it is what makes a client-confidential
+  store internet-reachable.
+- **Blocking, and unmeasured:** the production node's host firewall on `:8102`. Both nebula gateways
+  forward `CF-Connecting-IP` **verbatim and deliberately** (`clusters/{homelab,production}/apps/nebula/
+  gateway/gateway-nginx-config.yaml` — "MUST SURVIVE THIS HOP … deliberately NOT re-set here"), so
+  anything reaching a gateway's `:8102` while bypassing Cloudflare arrives as the trusted peer
+  `10.244.0.123` and its header **is read**. Production's is `listen 0.0.0.0:8102` on a hostNetwork
+  DaemonSet.
+- **Ruled out:** that homelab Traefik would be denied by the NetworkPolicy. It is never in the path —
+  the IngressRoute lives in the **production** cluster and targets Endpoints `10.0.0.2:8102`, so
+  traffic arrives via the homelab nebula gateway (hostNetwork, same node, allowed).
+- **Next probe (verbatim):** audit the production node's firewall for `:8102` reachability from off-mesh,
+  then run the off-mesh probe from a production-cluster pod asserting `store.zacx.dev` resolves to a
+  **Cloudflare** address (a hairpin or cluster DNS would otherwise hand you a confident false pass).
+
+### Keep-alive audit-log misattribution — real, reported, NOT fixed
+- **Symptom:** on a keep-alive connection whose **second** request line is malformed, `self.headers`
+  and `self.path` still hold the **first** request's values, so the audit line reads:
+  `ip=203.0.113.7 peer=trusted … path=/api/v1/recall/sc auth=fail result=401` — the *previous*
+  request's path and `CF-Connecting-IP`.
+- **Observed:** measured on one connection during `#520`'s mutation sweep, while explaining why a
+  `send_error`-reset mutant was equivalent.
+- **Not a bypass:** the request is still refused. It is log **fidelity** — on the log this design calls
+  "the only thing that can answer it" if a leak is ever suspected.
+- **Why unfixed:** predates the branch; closing it means changing `_raw_path`'s base behaviour.
+- **Next probe:** decide whether it earns its own PR. Recorded in the source and in `#520`'s body.
+
+### `--exclude` over-reports the under-cwd counter
+- **Symptom:** `subsystem_touch.py` exclusion filters `paths` but **not** the `under_cwd` counter, so the
+  printed note over-reports after an exclusion (measured: counter stays 3 while `paths` drops to 2).
+- **Next probe:** one-line fix plus a test that pins counter and path-set together.
+
 ## Next steps (ranked)
 
-1. **Rotate the credential and close its `OPEN:` bullet.** Now **34 days** (2026-07-14),
-   security-relevant, still the only declared-`OPEN:` item in the store. Untouched this
-   session by explicit operator decision — *not* because it was checked and found fine.
-   `subsystem_recall.py --scope datapacket-talos --search "rotate"`.
-2. **Decide whether phase 1.5 happens at all, and do NOT let it start by accident.** It is the
-   step that puts client-confidential content on the public internet (exposure **B**, decided
-   2026-08-16). Its prerequisites are unbuilt *and* unmeasured — see "What phase 1 is NOT".
-   The IngressRoute is the last file, never the first.
-3. **Exercise token rotation once**, before any exposure. A rotation path that has never run
-   is not a rotation path, and it is cheap to prove now while nothing depends on it.
-4. **Give `seed.sh --push` a hermetic test.** It is the one piece of phase 1 with no
-   automated coverage, and it is the piece that writes to the pod.
-5. **Items 3–5 of the store evaluation are still unbuilt.** With the trap named: a weekly
-   drift deadman keyed on referenced paths would **NOT** have caught the motivating entry
-   (its paths are brace-expanded outside backticks, so it scores zero exposure — measured).
-   Then: the `cli` scope maps to no repo on this host; 21 of 40 entries carry no `created_by`.
-
-**Closed since the last revision** (do not re-open): `.envrc`/`.opencode/` gitignore (`#508`),
-the laptop logitech pair (`#510`) — both were stranded-work items, both now tracked.
+1. **QUEUED — a skill to audit recent index ENTRIES for fidelity.** Read recent entries *and their
+   source raw sessions*, then judge whether the entry faithfully captured what the session learned.
+   Nothing does this today: `--validate` checks **well-formedness** (parses, `OPEN:` grammar), never
+   **fidelity**. The manual prototype exists — the 2026-08-17 audit of session `e317505f` — and it
+   found real gaps, so the skill is a systematisation of a proven procedure, not a new idea.
+   **Carry forward:** parse `tool_use` structurally (never grep a transcript — a grep once reported
+   `recall=3 touch=60` against a true count of **0**); strip heredoc bodies; exact basename match;
+   reject `-c`/`-m`. Establish the entry's **before** state via `git -C ~/.claude/analyze-service-index/
+   <scope> log -- <entry>.md` or you credit the session for pre-existing bullets. Transcripts are
+   ~2 MB — parse, never `Read` raw.
+2. **QUEUED — what is stored vs what is not: does a generic JOURNAL belong?** The `e317505f` audit found
+   durable items that landed **nowhere** because they fit no surface: two checker-design lessons (a
+   threshold derived from the data it guards goes silent under the very failure it guards; a
+   discriminator is only trustworthy when its cut sits in an empty gap) lived only in a PR body, and two
+   in-session retractions lived only in assistant prose. The store is **subsystem-scoped**
+   (`<scope>/<service>.md`), so a lesson about *how to build a checker* maps to no subsystem; RULES.md is
+   byte-capped and gated; MEMORY.md is byte-capped; skills are domain ops. **The gap is real: cross-cutting
+   engineering lessons that are not yet rules and are not subsystem facts.**
+   🔴 **Design constraint learned the hard way today: a fourth surface that nothing routes to is invisible,
+   which is exactly the defect `#1081` just fixed.** Any journal must be named in the always-on docs and
+   reachable by `--search`, or it will repeat the 63%-never-opened outcome.
+3. **Decide `#329`** — after the host-firewall audit above. Merging is deploying and is irreversible in
+   perception even if reversible in fact.
+4. **Build and push image `0.2.0`**, then verify the trusted-proxy env is live at the consumer and
+   exercise token rotation end-to-end against the pod.
+5. **The credential rotation** — `github-pat-civitai`, still the only declared-`OPEN:` item in the store,
+   now **34 days**. Untouched **by operator decision**, not because it was checked and found fine.
 
 ## Gotchas / decisions / dead-ends
 
@@ -415,48 +457,105 @@ the laptop logitech pair (`#510`) — both were stranded-work items, both now tr
 - **Splice a comment with anchored `Edit`, not index arithmetic** — one such splice deleted a whole regex definition and turned 129 tests red.
 - **A new test file must be `git add`ed or the flake silently omits it** — the gate passed green without ever running it; caught only because `skipped=` did not move.
 
+### The structural finding (2026-08-17) — and the two technicalities that were NOT the cause
+- 🔴 **The store was reachable through exactly ONE door.** Measured over the 40 most recent
+  `datapacket-talos` sessions: `/handoff` ran in **12/40**; an index window ran **11** times when
+  `/handoff` ran and **2** when it did not. **20 of the 32 sessions that landed a commit or PR (63%)
+  never opened the store.** Cause: that repo's 92 KB always-on `CLAUDE.md` named two homes for durable
+  knowledge and contained **zero** occurrences of `analyze-service-index`/`subsystem_touch`/
+  `subsystem_recall`. Fixed by `#1081`.
+- 🔴 **The subtler half: a window that runs can answer about the WRONG REPO.** Scope follows `--repo`,
+  and that project dir is a dispatch hub — **7 of 13** window-running sessions left at least one PR's
+  repo unscoped. Fixed by `#527`.
+- ⚠ **Both technicalities investigated first were BENIGN, proven with controls** — do not re-derive them.
+  The 17-vs-7 path gap was 7 writes + 10 **reads** (inputs). `--exclude claudedocs` was a **complete
+  no-op** here, with a positive control showing the flag *is* live. The real cause was one level up and
+  invisible to the tooling itself.
+- **`--session` nominated an entry in 0 of 12 runs** across those 40 sessions. Not a bug to fix in the
+  window: worktree-isolated subagents are the standing default and are two of its three blind spots.
+  `#522` makes it say so with the run's own numbers.
+
+### Verification traps hit THIS session (each produced a confident wrong answer)
+- 🔴 **`nix build` returned a CACHED result — a 0-byte log with exit 0.** Hit twice. That is not a pass;
+  read the real output with `nix log <drv>`, and a valid store output is itself evidence since the
+  derivation fails on test failure.
+- 🔴 **A trailing `echo` destroyed a push's exit status** — my `git push … | tail; echo "pushed"` printed
+  `pushed` while the push had **failed**. Reading the content is what caught it.
+- 🔴 **`yq -r` returns the literal string `null` on a missing path**, which `[ -z ]` does not catch; the
+  resulting `sha256("null")` = `74234e98afe7498f…` read as a genuine token **MISMATCH**. It was an
+  instrument error.
+- 🔴 **A suite run without its dependency looked like a code failure** — `ModuleNotFoundError: yaml` gave
+  `pass=4 fail=11`, and one assertion (`rc=1`) passed *vacuously* because a Python crash also exits 1.
+  That accident is what exposed homelab `#327`.
+- 🔴 **A pre-push gate refused with `gate 9 could not RUN … pyyaml missing`** — the documented exit-3
+  environment case, **not** a violation. Supplying the dependency is the fix; `--no-verify` would have
+  bypassed that repo's PRIMARY gate (branch protection is unavailable there).
+- **`kubectl diff -k` shows a SOPS secret as differing even when it matches** (manifest holds ciphertext,
+  cluster holds plaintext). Decrypt and compare hashes; `.secrets/age.key` is gitignored and does **not**
+  come with a worktree — use the base clone's copy.
+- 🔴 **A squash merge makes a stacked child's diff show its parent's files again.** After merging a
+  stacked parent, `#329` listed **9** files whose content was byte-identical to `trunk`. Rebasing onto
+  `trunk` reduced it to the **2** it actually changes. Merge a stacked parent **without**
+  `--delete-branch`, or GitHub auto-closes the child and refuses to reopen it.
+
+### On the audits
+- **Two blind audits and two blind delta re-audits ran.** Every round found something the previous round's
+  fix had introduced — including a mutation sweep returning **24/24 green with two criticals in the file**,
+  and a `-k` selector that made a live mutant look SURVIVED (it dies to 8 tests when the whole file runs).
+- 🔴 **An auditor's reasoning can be wrong while its finding is right.** One claimed `homelab-infra` had no
+  subsystem-store app; `homelab-talos` *is* the local clone of `ZacxDev/homelab-infra`. The substantive
+  half — that the referenced NetworkPolicy was unmerged — was correct. **Acting on it as written would
+  have broken a correct path.**
+- 🔴 **A finding can be true and its framing exculpatory.** A re-audit called a red test "not
+  delta-introduced". It was green on `trunk` and red on the branch — i.e. **that PR's regression**,
+  merely present since its first commit.
+
 ## How to verify
 
 ```bash
 D=/home/zach/workspace/devrc
-# read half — digest, index, search, pagination (READ-ONLY, no network, no subprocess)
+# the store's read half (READ-ONLY, no network, no subprocess)
 python3 $D/scripts/lib/subsystem_recall.py --repo $D
-python3 $D/scripts/lib/subsystem_recall.py --scope datapacket-talos --list
-python3 $D/scripts/lib/subsystem_recall.py --scope datapacket-talos --search "nginx ratelimit"
-python3 $D/scripts/lib/subsystem_recall.py --scope datapacket-talos --search "zzz kryptonite"  # must print NO MATCH + closest candidate
+python3 $D/scripts/lib/subsystem_recall.py --ref subsystem-store-api
 
-# write windows — run separately, NEVER merge the path sets
-python3 $D/scripts/lib/subsystem_touch.py --repo $D --session <scratchpad-uuid>
-python3 $D/scripts/lib/subsystem_touch.py --repo $D --pr <n>[,...]
-python3 $D/scripts/lib/subsystem_touch.py --repo $D --commit <sha>[,...]
+# the LIVE service — cluster-internal only; there is no public route
+KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store get pod,networkpolicy
+KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store port-forward svc/subsystem-store-api 18102:8102 &
+TOK=$(KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store get secret subsystem-store-token -o jsonpath='{.data.token}' | base64 -d)
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $TOK" http://127.0.0.1:18102/api/v1/recall/devrc   # 200
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18102/api/v1/recall/devrc                                   # 401
+getent hosts store.zacx.dev || echo "not public — correct"
 
-# after ANY entry write, in the SAME turn
-python3 $D/scripts/lib/subsystem_touch.py --validate <path-just-written>
-
-# the OPEN:/RESOLVED marker end-to-end on the real store (READ-ONLY, added #505)
-python3 $D/scripts/lib/subsystem_touch.py --scope datapacket-talos --validate
-# ^ reports 4 populations: declared OPEN, attempted-but-unparsed, unmarked (a FLOOR),
-#   and sha-less RESOLVED. It NEVER changes the parse verdict — that is deliberate.
-
-# the leak guard (added #505) — the pytest half runs everywhere and compares SYNTHETIC
-# fixtures; only this LIVE half compares the real store, and only on the host that has it
-python3 $D/scripts/tests/test_store_content_not_copied.py   # exit 0 = compared and clean
-
-python3 $D/scripts/lib/subsystem_touch.py --census      # anchor was 21 / 1 scope / 21 unstamped
-# 🔴 read the ACTIVITY lines, not the total: every count is a CREATION event, so a week
-# of pure appends moves none of them and a worked store reads identical to a dead one.
-
-# every scope versioned, contained, NO remote
-for s in $(ls -d ~/.claude/analyze-service-index/*/ | xargs -n1 basename); do
-  T=~/.claude/analyze-service-index/$s
-  echo "$s: $(git -C $T rev-list --count HEAD) commits, $(git -C $T remote -v | wc -l) remotes"
-done
-
-# gate — read the CONTENT, never a piped exit code
-nix build .#checks.x86_64-linux.pytests --no-link --print-build-logs > /tmp/gate.log 2>&1; echo "rc=$?"
-grep -aE 'TOTAL +collected|RESULT: (PASS|FAIL)' /tmp/gate.log
-# last measured on the MERGED tree (main + #505): pytest 10380 passed / failed=0,
-# node 1116 pass / fail=0. A PR green on its OWN branch says nothing about the merge.
-
-scripts/drift-check.sh      # read-only deploy + host-parity deadman
+# the gate — read CONTENT, never a piped exit code; a cached drv prints a 0-byte log
+nix build .#checks.x86_64-linux.pytests --no-link --print-build-logs > /tmp/gate.log 2>&1
+grep -aE 'TOTAL +collected|RESULT: (PASS|FAIL)' /tmp/gate.log     # last: 11566 collected, failed=0
 ```
+## State now — phase 1 AND 1.5-hardening shipped; the store is a live service, still PRIVATE
+
+- **devrc `main` at `edd0ba3`; homelab-infra `trunk` at `9f89db49`; civitai/talos-infra `trunk` carries `126f412b6`.**
+- 🔴 **Live:** pod `subsystem-store-api-7fbb89cb5b-5f7m7` Running on `talos-jkj-deb`, ns `subsystem-store`,
+  ClusterIP **8102**, Flux-managed, plus `subsystem-store-default-deny-ingress`. **No ingress, no DNS —
+  `store.zacx.dev` does not resolve.** Verified 200 authed / 401 unauthed.
+- 🔴 **The deployment is PRIMED WITH AN INERT CONFIG.** It rolled once at **2026-08-17T23:26:46Z**
+  (generation 6) picking up `SUBSYSTEM_STORE_TRUSTED_PROXIES=10.244.0.123/32`. The image is still
+  `0.1.0`, which **ignores** that variable — the code that reads it is `#520`, merged to devrc `main`
+  with **no image built**. The moment a new image ships that value becomes load-bearing, and a wrong
+  one is `EXIT_CONFIG` (78) → CrashLoop on `Recreate`+`replicas:1`.
+  🔴 **The next image MUST be `0.2.0`** — re-pushing `0.1.0` is exactly the mutable-tag clobber
+  `deployment.yaml:56-57` forbids, and it is an easy mistake *because* this file's tag did not move.
+
+### Shipped (16 PRs, 3 repos — the rest in those repos' merge lists belong to other sessions)
+| theme | PRs |
+|---|---|
+| stranded work rescued | devrc `#507` `#508` `#509` `#510` |
+| the store as a service | devrc `#512` `#516` `#517` `#518` `#520` · homelab `#326` `#327` `#328` `#330` |
+| the structural routing fix | devrc `#522` `#527` · **talos-infra `#1081`** |
+
+Plus a store entry written by hand: **`devrc/subsystem-store-api.md`** — validated, committed, 0 remotes.
+
+### 🔴 What is NOT done
+- **Nothing has been tested off-mesh.** No route exists; the control that matters for exposure has never run.
+- **Token rotation has never been exercised** against the live pod (proven hermetically only).
+- **No image built or pushed.** `0.2.0` is owed as its own step.
+- **The production node's host firewall on `:8102` is UNAUDITED** — it decides whether the
+  CF-bypass residual is mesh-only or internet-reachable. **Prerequisite for `#329`.**
