@@ -635,10 +635,25 @@ def _free_port() -> int:
     # CONTENDED port and the query runs through the other process's tunnel:
     # cross-cluster that is a WRONG-CLUSTER answer the silent-zero guard cannot
     # catch (the result is non-empty); same-cluster the winner's teardown kills
-    # the tunnel mid-query. To CLOSE it properly one would stop discarding
-    # kubectl's stdout (currently DEVNULL) and parse its own
-    # "Forwarding from 127.0.0.1:P" line, so readiness is proven by OUR child
-    # rather than by whoever happens to answer on that port.
+    # the tunnel mid-query.
+    #
+    # SECOND MECHANISM, NOT A RACE (reproduced): our kubectl may never exit at
+    # all. We bind AF_INET only (below), but kubectl's --address defaults to
+    # "localhost" = BOTH 127.0.0.1 and [::1], and ANY successful listener counts
+    # as success. So a v4-only NON-kubectl thief makes kubectl's v4 bind fail and
+    # its v6 bind succeed: it prints "Forwarding from [::1]:P", writes NOTHING to
+    # stderr, and stays alive (measured: still running at 30s). There is no
+    # collision-exit to classify, so _is_port_collision is False and no retry
+    # happens; _wait_ready then probes 127.0.0.1 and reaches the INTERLOPER —
+    # a readiness timeout, or a wrong answer if it speaks HTTP. Two concurrent
+    # obs-read runs CANNOT produce this: the winner's kubectl holds both
+    # families, so the loser gets a clean total collision and the retry works.
+    #
+    # To CLOSE both properly one would stop discarding kubectl's stdout
+    # (currently DEVNULL) and parse its own "Forwarding from ..." line, so
+    # readiness is proven by OUR child rather than by whoever happens to answer
+    # on that port — requiring the 127.0.0.1 line specifically, since the
+    # v6-only case above would otherwise still read as success.
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.bind(("127.0.0.1", 0))
     port = s.getsockname()[1]

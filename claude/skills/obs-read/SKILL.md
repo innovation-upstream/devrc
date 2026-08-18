@@ -97,8 +97,19 @@ validated preset; treat unvalidated ones as starting points.
   that port — so when the racing winner starts serving first, obs-read attaches
   to **its** tunnel: cross-cluster that is a wrong-cluster answer the
   silent-zero guard cannot catch (the result is non-empty). Don't fan out
-  concurrent obs-read runs across *different* clusters. Closing it properly
-  means parsing kubectl's own `Forwarding from 127.0.0.1:P` line (today
-  `DEVNULL`) instead of probing the port.
+  concurrent obs-read runs across *different* clusters.
+- 🔴 **Second, non-racing mechanism (reproduced): our kubectl may never exit at
+  all.** `_free_port` binds **IPv4 only**, but kubectl's `--address` defaults to
+  `localhost` — both `127.0.0.1` and `[::1]` — and it counts *any* successful
+  listener as success. So a **v4-only, non-kubectl** thief makes kubectl's v4
+  bind fail, its v6 bind succeed: it prints `Forwarding from [::1]:P`, writes
+  **nothing to stderr, and never exits** (measured: alive at 30 s). There is no
+  collision-exit to classify, so no retry — the probe hits the *interloper* on
+  127.0.0.1, giving a readiness timeout, or a wrong answer if it speaks HTTP.
+  Two concurrent obs-read runs **cannot** produce this (the winner's kubectl
+  holds both families, so the loser gets a clean collision and the retry works).
+- Closing both properly means parsing kubectl's own `Forwarding from …` line
+  (today `DEVNULL`) instead of probing the port — and requiring the **127.0.0.1**
+  line specifically, or the v6-only case above still reads as success.
 - Known limitation (documented, unchanged): a matched-nothing result still exits
   0 — check the `--json` `matched_nothing`/`warning` fields to fail a pipeline.
