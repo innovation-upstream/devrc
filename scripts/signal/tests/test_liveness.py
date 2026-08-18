@@ -11,6 +11,7 @@ NOTHING ELSE IS HAPPENING. A heartbeat that only beats under traffic re-creates
 the exact blind spot it was built to close.
 """
 import json
+import threading
 import time
 
 import pytest
@@ -143,13 +144,7 @@ def test_a_MISSING_file_reads_as_absent(tmp_path):
 # 🔴 The two sinks answer different questions, and the DB one is ALLOWED to fail
 
 def test_a_POSTGRES_OUTAGE_DOES_NOT_BREAK_LIVENESS(tmp_path):
-    """🔴 THE anti-cascade property.
-
-    Keying a k8s restart on Postgres reachability turns a database blip into a
-    restart storm that takes down a consumer which was working fine. The file
-    is written FIRST and unconditionally; the row failure is counted, printed
-    and swallowed.
-    """
+    """A DB that fails FAST must not disturb the file."""
     path = _hb_path(tmp_path)
 
     def exploding_db():
@@ -157,19 +152,70 @@ def test_a_POSTGRES_OUTAGE_DOES_NOT_BREAK_LIVENESS(tmp_path):
 
     beat = consumer.Heartbeat(FakeConsumer(), db_factory=exploding_db,
                               path=path, clock=lambda: 500.0)
-    beat.tick()          # must NOT raise
+    beat.tick()          # the file sink
+    beat.tick_row()      # the row sink -- must NOT raise
 
     got = consumer.read_heartbeat_file(path, now=501.0)
     assert got is not None, "the liveness file must survive a DB outage"
     assert consumer.heartbeat_is_fresh(got["age_seconds"], max_age=60) is True
     assert beat.row_failures == 1
+    assert beat.row_writes == 0
+
+
+def test_a_STALLED_POSTGRES_CANNOT_FREEZE_THE_LIVENESS_FILE(tmp_path):
+    """🔴 THE REGRESSION, and the one the first version got wrong.
+
+    The original code wrote the file and then the row ON ONE THREAD, reasoning
+    that the file came first so a DB fault could not reach it. True only for a
+    database that fails FAST. A STALLED Postgres — partitioned after the socket
+    was established, storage hang, failover, another session holding the row
+    lock — blocks INSIDE the row write, and the next FILE write never happens.
+    The file then ages out and a k8s liveness probe kills a consumer that was
+    working perfectly, then kills its replacement, for the length of the
+    incident. The original test used a factory that raises instantly, which is
+    the one outage shape that was already safe.
+
+    Here the DB hangs and the file MUST keep advancing.
+    """
+    path = _hb_path(tmp_path)
+    release = threading.Event()
+    entered = threading.Event()
+
+    class StalledDB:
+        def __enter__(self):
+            entered.set()
+            release.wait(10)       # hang, like a partitioned server
+            return self
+        def __exit__(self, *a): return False
+        def record_heartbeat(self, hb): pass
+        def commit(self): pass
+
+    beat = consumer.Heartbeat(FakeConsumer(), db_factory=StalledDB,
+                              path=path, interval=0.01)
+    try:
+        beat.start()
+        assert entered.wait(2), "the row thread never reached the database"
+
+        first = consumer.read_heartbeat_file(path)
+        deadline = time.time() + 2
+        while beat.ticks < 3 and time.time() < deadline:
+            time.sleep(0.01)
+
+        # 🔴 The file kept beating WHILE the database was wedged.
+        assert beat.ticks >= 3, "the stalled DB froze the liveness file"
+        assert beat.row_writes == 0, "the DB was supposed to be stuck"
+        second = consumer.read_heartbeat_file(path)
+        assert second["written_at"] > first["written_at"]
+    finally:
+        release.set()
+        beat.stop()
 
 
 def test_the_row_IS_written_when_the_database_is_healthy(tmp_path):
-    """POSITIVE CONTROL for the test above.
+    """POSITIVE CONTROL for both tests above.
 
-    Without this, `row_failures == 1` is indistinguishable from a heartbeat
-    wired to nothing — the assertion would hold with the row write deleted.
+    Without this, `row_failures == 1` and `row_writes == 0` are indistinguishable
+    from a row sink wired to nothing — they would hold with the write deleted.
     """
     written = []
 
@@ -181,10 +227,25 @@ def test_the_row_IS_written_when_the_database_is_healthy(tmp_path):
 
     beat = consumer.Heartbeat(FakeConsumer(), db_factory=FakeDB,
                               path=_hb_path(tmp_path))
-    beat.tick()
+    beat.tick_row()
     assert beat.row_failures == 0
+    assert beat.row_writes == 1
     assert len(written) == 2 and written[1] == "commit"
     assert written[0]["stored"] == 11
+
+
+def test_the_file_loop_NEVER_touches_the_database(tmp_path):
+    """Structural: `tick()` is the liveness contract, so it must not be able to
+    block on a network. A db_factory that detonates proves it is never called."""
+    def detonate():
+        raise AssertionError("the FILE loop touched the database")
+
+    beat = consumer.Heartbeat(FakeConsumer(), db_factory=detonate,
+                              path=_hb_path(tmp_path))
+    beat.tick()
+    beat.tick()
+    assert beat.ticks == 2
+    assert beat.row_attempts == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -381,6 +442,13 @@ def test_a_factory_that_RAISES_never_claims_the_stream_was_connected(db):
         "the consumer claimed stream_connected before the stream existed")
     assert c.stream_connected is False
     assert c.stats[consumer.STAT_RECONNECTS] == 2
+    # 🔴 Asserted HERE because this is the only multi-connection case. The seam
+    # test runs max_connections=1 and asserts `== 1`, so a mutant hardcoding
+    # `self.connections = 1` was invisible there — a fixture that can only
+    # produce the constant's own value cannot see the constant. An operator
+    # diagnosing a reconnect storm would read connections=1 while reconnects
+    # climbed.
+    assert c.connections == 2
 
 
 # --------------------------------------------------------------------------- #
@@ -438,3 +506,218 @@ def test_health_exits_NONZERO_when_the_heartbeat_is_STALE(tmp_path, monkeypatch,
                        clock=lambda: time.time() - 9999).tick()
     assert consumer.main(["health"]) == 1
     assert "UNHEALTHY" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE SQL MUST ACTUALLY EXECUTE. Everything DB-shaped above this point used a
+# FakeDB that appends to a list — so `record_heartbeat`/`read_heartbeat` shipped
+# with ZERO executing tests, and the first version declared the timestamp columns
+# TIMESTAMPTZ while writing a Python float into them. The upsert therefore raised
+# on EVERY beat from the moment the first frame arrived: the row was correct only
+# while nothing worked, and broke the instant it did. A fake cannot see a type
+# error. These drive the real statements through the substrate.
+
+def test_the_heartbeat_row_ROUND_TRIPS_through_real_sql(db):
+    beat = consumer.Heartbeat(FakeConsumer(), path="/dev/null")
+    hb = beat.payload()
+    db.record_heartbeat(hb)
+
+    got = db.read_heartbeat(now_ms=hb["written_at_ms"] + 4000)
+    assert got is not None
+    assert got["age_seconds"] == pytest.approx(4.0)
+    assert got["stream_connected"] is True
+    assert got["connections"] == 3
+    assert got["reconnects"] == 7
+    assert got["stored"] == 11
+    assert got["malformed"] == 5
+
+
+def test_a_heartbeat_WITH_a_last_frame_at_round_trips(db):
+    """🔴 THE REGRESSION. A non-null `last_frame_at` is exactly what the broken
+    column rejected — an idle consumer (None) wrote fine, so the defect appeared
+    only once the pipeline started working."""
+    c = FakeConsumer(last_frame_at=1723999999123)
+    hb = consumer.Heartbeat(c, path="/dev/null").payload()
+    db.record_heartbeat(hb)
+
+    got = db.read_heartbeat(now_ms=1723999999123 + 7000)
+    assert got["last_frame_at"] == 1723999999123
+    assert got["frame_age_seconds"] == pytest.approx(7.0)
+
+
+def test_the_row_is_UPSERTED_not_appended(db):
+    """One row by construction — the id=1 CHECK plus ON CONFLICT."""
+    beat = consumer.Heartbeat(FakeConsumer(), path="/dev/null")
+    for _ in range(4):
+        db.record_heartbeat(beat.payload())
+    assert db.conn.count("consumer_health") == 1
+
+
+def test_a_LATER_beat_ADVANCES_updated_at(db):
+    """Pins the ON CONFLICT SET. A mutant writing the OLD updated_at back leaves
+    the row frozen — which reads exactly like a dead consumer, forever."""
+    c = FakeConsumer()
+    first = consumer.Heartbeat(c, path="/dev/null", clock=lambda: 1000.0).payload()
+    db.record_heartbeat(first)
+    second = consumer.Heartbeat(c, path="/dev/null", clock=lambda: 1600.0).payload()
+    db.record_heartbeat(second)
+
+    got = db.read_heartbeat(now_ms=1600_000)
+    assert got["updated_at"] == 1600_000
+    assert got["age_seconds"] == pytest.approx(0.0)
+
+
+def test_the_COUNTERS_advance_on_a_later_beat(db):
+    """A frozen counter set reads as a wedged consumer; pin that they move."""
+    c = FakeConsumer(stored=1, reconnects=0)
+    db.record_heartbeat(consumer.Heartbeat(c, path="/dev/null").payload())
+    c.stats[consumer.STAT_STORED] = 42
+    c.stats[consumer.STAT_RECONNECTS] = 9
+    db.record_heartbeat(consumer.Heartbeat(c, path="/dev/null").payload())
+
+    got = db.read_heartbeat()
+    assert got["stored"] == 42
+    assert got["reconnects"] == 9
+
+
+def test_reading_a_health_row_that_was_NEVER_written_returns_None(db):
+    """And None must not read as healthy — the `WHERE id = 1` has to match."""
+    assert db.read_heartbeat() is None
+    assert consumer.heartbeat_is_fresh(None) is False
+
+
+def test_a_DISCONNECTED_beat_round_trips_as_FALSE(db):
+    """A boolean that always reads True would advertise a dead stream as live."""
+    hb = consumer.Heartbeat(FakeConsumer(stream_connected=False),
+                            path="/dev/null").payload()
+    db.record_heartbeat(hb)
+    assert db.read_heartbeat()["stream_connected"] is False
+
+
+# --------------------------------------------------------------------------- #
+# Gaps the audit found: paths that shipped with no executing test at all.
+
+def test_a_connection_that_delivers_NO_FRAMES_leaves_last_frame_at_None(db):
+    """🔴 THE discriminator between per-FRAME and per-CONNECT stamping.
+
+    `last_frame_at` is the field that separates "connected and fed nothing" from
+    "working". Hoisting the assignment out of the frame loop — so it stamps once
+    per CONNECT — survived a green run, because the only assertion was
+    `is not None` on a fixture that DID deliver frames. A zombie reconnect loop
+    would then report a fresh last_frame_at while ingesting nothing: exactly the
+    lie this field exists to prevent, told by the field itself.
+
+    Three connections, ZERO frames. Nothing may stamp it.
+    """
+    c = _consumer(db, Streams([], [], []))
+    c.run(max_connections=3)
+
+    assert c.connections == 3, "the fixture did not actually connect"
+    assert c.last_frame_at is None, (
+        "last_frame_at was stamped by CONNECTING, not by receiving a frame")
+
+
+def test_last_frame_at_IS_stamped_once_a_frame_arrives(db):
+    """POSITIVE CONTROL for the test above: it must be able to become non-None,
+    or `is None` would hold with the assignment deleted entirely."""
+    c = _consumer(db, Streams([_payload(1723950000001, "one")]))
+    c.run(max_connections=1)
+    assert c.last_frame_at is not None
+
+
+def test_health_FROM_DB_goes_through_MAIN_and_reads_the_ROW(db, tmp_path, monkeypatch, capsys):
+    """🟡 `--from-db` was the only CLI branch with ZERO coverage — a mutant
+    dropping `and not args.from_db`, so the flag silently read the FILE instead,
+    survived.
+
+    🔴 This drives `main()`, not `_report_health`. An earlier version of this
+    test called the reporter directly, which cannot see the dispatch condition
+    at all — it would have passed with the mutant in place. The file is
+    deliberately FRESH and the row deliberately ABSENT, so the two sources give
+    opposite answers and only the right one matches.
+    """
+    path = str(tmp_path / "hb.json")
+    monkeypatch.setattr(consumer, "HEARTBEAT_PATH", path)
+    consumer.Heartbeat(FakeConsumer(), path=path).tick()
+    assert consumer.read_heartbeat_file(path) is not None      # file says HEALTHY
+    assert db.read_heartbeat() is None                          # row says nothing
+
+    monkeypatch.setattr(consumer, "SignalDB", lambda *a, **kw: _CtxDB(db))
+
+    rc = consumer.main(["health", "--from-db"])
+    out = capsys.readouterr().out
+    assert rc == 1, "--from-db reported healthy off the FILE, not the row"
+    assert "no heartbeat (db)" in out
+
+
+def test_health_from_the_FILE_still_wins_when_both_exist(db, tmp_path, monkeypatch, capsys):
+    """The mirror: default mode must read the FILE even when a row exists.
+
+    Without this pair, a dispatch that always chose one source would pass one
+    test or the other, never both.
+    """
+    path = str(tmp_path / "hb.json")
+    monkeypatch.setattr(consumer, "HEARTBEAT_PATH", path)
+    consumer.Heartbeat(FakeConsumer(), path=path).tick()
+    monkeypatch.setattr(consumer, "SignalDB",
+                        lambda *a, **kw: (_ for _ in ()).throw(
+                            AssertionError("default health opened the database")))
+
+    assert consumer.main(["health"]) == 0
+    assert "(connected=True" in capsys.readouterr().out
+
+
+class _CtxDB:
+    def __init__(self, db): self._db = db
+    def __enter__(self): return self._db
+    def __exit__(self, *a): return False
+
+
+def test_main_gives_the_heartbeat_its_OWN_connection_not_the_ingest_one(monkeypatch):
+    """🔴 The one line encoding the rule `_signal_db` warns about in capitals:
+    beating on the ingest connection lands inside its open transaction. `main()`
+    is `# pragma: no cover`, so a mutant passing `db_factory=lambda: db` — the
+    exact hazard — survived, and the constraint was asserted only in prose."""
+    captured = {}
+
+    class SentinelDB:
+        """Stands in for the LIVE ingest connection main() opens."""
+        def ensure_schema(self): pass
+
+    sentinel_db = SentinelDB()
+
+    class FakeSignalDB:
+        def __enter__(self): return sentinel_db
+        def __exit__(self, *a): return False
+
+    class FakeHeartbeat:
+        def __init__(self, _consumer, *, db_factory=None, **kw):
+            captured["factory"] = db_factory
+        def start(self): return self
+        def stop(self): pass
+
+    monkeypatch.setattr(consumer, "SignalDB", FakeSignalDB)
+    monkeypatch.setattr(consumer, "Heartbeat", FakeHeartbeat)
+    monkeypatch.setattr(consumer, "ws_stream_factory", lambda acct: (lambda: iter(())))
+    monkeypatch.setattr(consumer, "http_attachment_fetcher", lambda: None)
+    monkeypatch.setattr(consumer, "_open_minio", lambda: None)
+    monkeypatch.setattr(consumer.SignalConsumer, "run", lambda self, **kw: {})
+
+    consumer.main(["run", "--account", "+15550000"])
+
+    factory = captured["factory"]
+    assert factory is not None, "the heartbeat was given no database at all"
+    assert callable(factory)
+    # 🔴 Assert what the factory YIELDS, not what the factory IS. Checking
+    # `factory is not sentinel_db` passes for `db_factory=lambda: db` — the
+    # exact hazard — because a lambda is a different object that hands back the
+    # ingest connection anyway. That weaker assertion let the mutant survive.
+    assert factory() is not sentinel_db, (
+        "main handed the heartbeat the LIVE ingest connection; beating on it "
+        "lands inside the ingest transaction (see _signal_db.record_heartbeat)")
+
+
+def test_a_NEGATIVE_age_is_not_fresh():
+    """A backwards clock step must not make an arbitrarily stale beat healthy."""
+    assert consumer.heartbeat_is_fresh(-5000.0, max_age=120) is False
+    assert consumer.heartbeat_is_fresh(-0.001, max_age=120) is False

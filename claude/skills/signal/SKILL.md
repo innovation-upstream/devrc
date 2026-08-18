@@ -175,6 +175,17 @@ kubectl -n signal exec deploy/signal-consumer -- python3 /app/scripts/signal/con
   the counters. Richer, and it is ALLOWED to fail — a DB outage degrades the row
   and leaves liveness intact.
 
+🔴 **DEPLOY PAIRING — the pod needs a WRITABLE heartbeat path or it will not
+start.** `consumer.py run` beats once synchronously before entering the loop, and
+an unwritable path is a configuration fault (loud, at startup) rather than
+something laundered into a retry. The Deployment sets `readOnlyRootFilesystem:
+true` and originally mounted **no volumes at all** — its own comment recorded
+that the pod "writes nothing to the filesystem, which is what makes
+readOnlyRootFilesystem viable". That invariant is now false. The manifest must
+mount an `emptyDir` and point `SIGNAL_HEARTBEAT_PATH` at it **in the same
+rollout as the image that introduces the heartbeat**, or the first rebuild
+CrashLoopBackOffs a working consumer — before any probe is even wired.
+
 🔴 **`last_frame_at` is diagnosis, NEVER a liveness input.** An idle account
 legitimately sends nothing for hours; if silence fed the probe, a quiet weekend
 would restart the pod on a loop.

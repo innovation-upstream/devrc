@@ -89,3 +89,18 @@ def _no_live_network(monkeypatch):
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", guard)
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_heartbeat_env(monkeypatch):
+    """🔴 The suite must not read the AMBIENT heartbeat configuration.
+
+    Measured: `SIGNAL_HEARTBEAT_MAX_AGE=10 pytest` reds test_liveness, and
+    `SIGNAL_HEARTBEAT_INTERVAL=abc` fails COLLECTION outright (the module parses
+    it at import). A host or CI job that happens to export either turns the gate
+    red for a reason that has nothing to do with the code — a suite whose config
+    is decided by its environment is blind on exactly that dimension.
+    """
+    for var in ("SIGNAL_HEARTBEAT_PATH", "SIGNAL_HEARTBEAT_INTERVAL",
+                "SIGNAL_HEARTBEAT_MAX_AGE"):
+        monkeypatch.delenv(var, raising=False)

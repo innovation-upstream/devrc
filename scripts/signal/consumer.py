@@ -493,7 +493,15 @@ def heartbeat_is_fresh(age_seconds: float | None, max_age: float = None) -> bool
     """
     if age_seconds is None:
         return False
-    return age_seconds <= (HEARTBEAT_MAX_AGE if max_age is None else max_age)
+    limit = HEARTBEAT_MAX_AGE if max_age is None else max_age
+    # 🔴 A NEGATIVE age is not "very fresh", it is a BROKEN clock — the writer's
+    # wall clock stepped backwards (NTP correction, suspend/resume) after the
+    # beat was written. Treating it as fresh would let an arbitrarily stale
+    # heartbeat read as healthy, which is the one answer this predicate must
+    # never give by accident.
+    if age_seconds < 0:
+        return False
+    return age_seconds <= limit
 
 
 def write_heartbeat_file(payload: dict, path: str = None) -> None:
@@ -526,37 +534,60 @@ def read_heartbeat_file(path: str = None, now: float = None) -> dict | None:
 
 
 class Heartbeat:
-    """Ticks on its OWN thread, writing the file always and the row best-effort.
+    """Ticks the file and the row on SEPARATE threads.
 
-    🔴 It opens its OWN database connection. `SignalDB` runs `autocommit=False`,
+    🔴 IT OPENS ITS OWN DATABASE CONNECTION. `SignalDB` runs `autocommit=False`,
     so a heartbeat issued on the ingest connection would land inside whatever
     transaction the ingest loop has open — committing a partial batch or being
     rolled back with it. Sharing the connection is the bug, not an optimisation.
+
+    🔴 TWO THREADS, AND THAT IS THE WHOLE ANTI-CASCADE PROPERTY. The first cut
+    wrote the file and then the row on ONE thread, reasoning that the file came
+    first so a database fault could not affect it. That is true only for a
+    database that fails FAST. A STALLED Postgres — node partitioned after the
+    socket was established, storage I/O hang on the PV, failover, another
+    session holding the row lock — blocks inside the row write, and the next
+    FILE write never happens. Measured on real Postgres: with the row locked by
+    a second session the file aged past its max-age and the probe went unhealthy,
+    which under a k8s liveness probe kills a consumer that was working fine and
+    then kills its replacement 30s later, for the duration of the incident. The
+    outage shape the original test used — a factory that raises instantly — is
+    the one shape that was already safe.
+
+    So the file loop now touches nothing but the local filesystem, and the row
+    loop is free to block for as long as it likes without anyone caring.
     """
 
     def __init__(self, consumer, *, db_factory=None, interval: float = None,
-                 path: str = None, sleep=time.sleep, clock=time.time):
+                 path: str = None, clock=time.time):
         self._consumer = consumer
         self._db_factory = db_factory
         self._interval = HEARTBEAT_INTERVAL if interval is None else interval
         self._path = path or HEARTBEAT_PATH
-        self._sleep = sleep
         self._clock = clock
         self._stop = threading.Event()
         self._thread = None
-        self.row_failures = 0
+        self._row_thread = None
         #: beats ATTEMPTED vs beats that actually wrote the file. They differ
         #: precisely when the sink is failing, which is the one time an operator
         #: needs to tell "the thread is wedged" from "the thread is trying and
-        #: the disk is refusing" — the same working/dead distinction this whole
-        #: module exists to make, one level down.
+        #: the disk is refusing" — the same working/dead distinction this module
+        #: exists to make, one level down.
         self.attempts = 0
         self.ticks = 0
+        self.row_attempts = 0
+        self.row_writes = 0
+        self.row_failures = 0
 
     def payload(self) -> dict:
         c = self._consumer
+        written = self._clock()
         return {
-            "written_at": self._clock(),
+            "written_at": written,
+            # The row's columns are epoch-MS BIGINT (see the DDL comment). Carried
+            # alongside rather than converted inside the DB layer so there is one
+            # obvious place where the unit changes.
+            "written_at_ms": int(written * 1000),
             "pod": socket.gethostname(),
             "stream_connected": bool(getattr(c, "stream_connected", False)),
             "last_frame_at": getattr(c, "last_frame_at", None),
@@ -566,27 +597,39 @@ class Heartbeat:
             "malformed": int(c.stats.get(STAT_MALFORMED, 0)),
         }
 
+    # -- the liveness sink: local filesystem ONLY, never the network ---------
     def tick(self) -> dict:
-        """One beat. The FILE write is the liveness contract and comes first.
+        """One FILE beat. Touches nothing that can block on a network.
 
-        🔴 The row write is wrapped and its failure counted, never raised: a
-        Postgres blip must not kill the thread whose whole job is to prove this
-        process is alive. A thread that dies on the first outage is a liveness
-        signal that reports death for a fault it was supposed to survive.
+        This is the liveness contract. Keep it that way: anything added here
+        that can hang re-creates the cascade the two threads exist to prevent.
         """
         self.attempts += 1
         hb = self.payload()
         write_heartbeat_file(hb, self._path)
         self.ticks += 1
-        if self._db_factory is not None:
-            try:
-                with self._db_factory() as db:
-                    db.record_heartbeat(hb)
-                    db.commit()
-            except Exception as exc:  # noqa: BLE001 — see docstring
-                self.row_failures += 1
-                print(f"signal-consumer: heartbeat row failed ({exc})", file=sys.stderr)
         return hb
+
+    # -- the observability sink: allowed to be slow, allowed to fail ---------
+    def tick_row(self) -> None:
+        """One ROW beat, on its own thread.
+
+        🔴 Failures are counted and printed, never raised: a Postgres blip must
+        not kill the thread, and it must never reach the file loop. A thread
+        that dies on the first outage is a signal that reports death for exactly
+        the fault it was supposed to ride out.
+        """
+        if self._db_factory is None:
+            return
+        self.row_attempts += 1
+        try:
+            with self._db_factory() as db:
+                db.record_heartbeat(self.payload())
+                db.commit()
+            self.row_writes += 1
+        except Exception as exc:  # noqa: BLE001 — see docstring
+            self.row_failures += 1
+            print(f"signal-consumer: heartbeat row failed ({exc})", file=sys.stderr)
 
     def _loop(self) -> None:
         while not self._stop.is_set():
@@ -596,18 +639,36 @@ class Heartbeat:
                 print(f"signal-consumer: heartbeat failed ({exc})", file=sys.stderr)
             self._stop.wait(self._interval)
 
+    def _row_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self.tick_row()
+            except Exception as exc:  # noqa: BLE001 — belt and braces; tick_row swallows
+                print(f"signal-consumer: heartbeat row loop ({exc})", file=sys.stderr)
+            self._stop.wait(self._interval)
+
     def start(self) -> "Heartbeat":
         self.tick()                      # beat ONCE before the first wait, so a
                                          # probe has a reading immediately
         self._thread = threading.Thread(target=self._loop, name="signal-heartbeat",
                                         daemon=True)
         self._thread.start()
+        if self._db_factory is not None:
+            self._row_thread = threading.Thread(target=self._row_loop,
+                                                name="signal-heartbeat-row",
+                                                daemon=True)
+            self._row_thread.start()
         return self
 
     def stop(self) -> None:
         self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=5)
+        for t in (self._thread, self._row_thread):
+            if t is not None:
+                # 🔴 A SHORT join, and daemon=True, precisely because the row
+                # thread may be wedged inside a stalled database call. Waiting on
+                # it would make shutdown hang for the same reason liveness used
+                # to; the interpreter reaps a daemon thread regardless.
+                t.join(timeout=5)
 
 
 def iter_frames(source) -> Iterator[object]:
@@ -847,7 +908,7 @@ class SignalConsumer:
                 # health row assert a connection that does not exist.
                 self.stream_connected = True
                 for payload in iter_frames(stream):
-                    self.last_frame_at = time.time()
+                    self.last_frame_at = int(time.time() * 1000)
                     self.handle_payload(payload)
             except Exception as exc:  # noqa: BLE001 — a dropped stream is normal
                 self.stats[STAT_RECONNECTS] += 1
