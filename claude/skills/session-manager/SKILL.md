@@ -16,7 +16,7 @@ python3 $DEVRC/scripts/session-manager tail scratch7:3 --plain     # scrollback,
 
 🔴 **Rows are at `report["hosts"][<"workbench"|"laptop">]["windows"]`** — not at the top
 level. Roll-ups: `summary.waiting`, `summary.unsent_prompt`, `summary.status[bucket]`,
-`summary.kind`, `blocked_on_me`. And `report["not_measured"]` for what this tool does **not**
+`summary.kind`, `clawgate_queue`. And `report["not_measured"]` for what this tool does **not**
 see at all.
 
 🔴 **`summary.status[bucket]` is one key per CLASS plus `total`** — `{claude, shell, total}`
@@ -31,7 +31,7 @@ the top level (`summary.claude`/`summary.shell` always; others on demand).
 for a clawgate dispatch with no pane and is **not produced yet**, which
 `caveats.kind_scope` states in the payload (`kinds_produced` is **measured from the rows**,
 not asserted). So an absence of cluster rows is **not** a measured absence of cluster work —
-clawgate lives in `blocked_on_me`, a different population that is never double-counted with
+clawgate lives in `clawgate_queue`, a different population that is never double-counted with
 these rows. `kind` is never null; `runtime` frequently is, and means something else
 (**which agent software**, from the ledger).
 
@@ -67,7 +67,7 @@ table is for and that is unchanged; do not quote the absolute numbers as current
 **Ask for `--json --lean` unless you need a dropped field.** It is cheaper than the full payload
 AND more faithful than the cheap one. `lean_row_fields` and `lean_host_fields` travel in the payload
 naming exactly what this view CARRIES — so a key absent from a row was omitted by the view, never
-measured as null. `caveats`, `summary.waiting`'s tri-state, `blocked_on_me` and every per-host
+measured as null. `caveats`, `summary.waiting`'s tri-state, `clawgate_queue` and every per-host
 measurement status are kept in full, because a cheap payload that can lie is worse than an
 expensive one.
 
@@ -160,16 +160,27 @@ the **skill that answers it**: `pull_requests` → `standup`, `mail_queue` → `
 only while the report carries no key for that population, so the day PR querying lands the
 claim stops being made with no edit anywhere. This file has shipped a constant masquerading
 as a measurement five times; a static list of "things we do not measure" is the same defect
-with a longer fuse. `blocked_on_me` (clawgate) is **not** listed — that one *is* measured.
+with a longer fuse. `clawgate_queue` (clawgate) is **not** listed — that one *is* measured.
 
-## 🔴 `blocked_on_me` — the clawgate approval queue
+## 🔴 `clawgate_queue` — the clawgate approval queue
+
+🔴 **Renamed from `blocked_on_me` (2026-08-18).** The old name read as "everything waiting on
+you" and was measured doing exactly that damage: a caveat in this tool's own payload already
+said *"reading it as one is the misread this entry exists to prevent"*, and a reader made that
+misread anyway and shipped it into a brief for three subagents. A field name is read a hundred
+times for every once its caveat is, so the name changed rather than the wording.
+**For panes that look like they are waiting on a human, the field is `summary.waiting.probable`
+— a different population, never summed with this one.** No alias is kept: the old key is gone,
+and a test bans it at any depth in the payload, because a key that silently means something
+else is worse than a key that is absent.
 
 Read from the bar poller's cache. It is here because an accurate cross-reference once cost
 real signal: a dogfooding agent read that the (now retired) `agent-ops` TUI had no JSON API,
 correctly preferred this script, never opened agent-ops, and **missed 11 pending approvals —
 four of them credential-exposure or cross-user-data-leak.** 🔴 With that TUI gone this
 section is the ONLY place the queue surfaces outside the bar pill, so the lesson binds
-harder, not less: never answer a `blocked_on_me` question by pointing somewhere else.
+harder, not less: never answer an "is anything waiting for my approval" question by pointing
+somewhere else.
 
 - **`count` = pending + STUCK.** `pending_count` is the `{open, ready_for_review}` half;
   `stuck_count` is `in_progress` tasks whose agent looks dead. The two always travel with
