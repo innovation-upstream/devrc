@@ -105,3 +105,22 @@ prune agents:
   skills are still small in your tree.** A stale base silently reverts a sibling's prune — one
   agent's gate correctly blocked a commit that would have taken a skill from 9,271 back to
   60,266 B.
+
+## Landing the change — the per-repo git workflow
+
+Moved out of the core (§6), which now keeps only the two never-do rules.
+
+- **datapacket-talos**: a **throwaway worktree off `origin/trunk`**, never the primary clone (its `CLAUDE.md` rule #10); `git push origin HEAD:trunk`, verify `git show origin/trunk:<file> | head`.
+- **devrc**: feature branch + PR against `origin/main`.
+- 🔴 **Never `git stash`** in either — `refs/stash` is repo-GLOBAL and shared across every worktree. **Never `git add -A`** — stage explicit paths.
+- 🔴 **A push is not a saving — a body loads from the DEPLOYED copy, which may not be the clone.** `readlink -f ~/.claude/skills/<name>/SKILL.md` first: inside the repo ⇒ the clone is live; `/nix/store` ⇒ it is NOT, and a `home-manager switch` is required. **Re-measure the resolved path, never `wc -c` in the clone.** Staleness cases + the ff-merge blocker table: `reference/always-loaded-and-landing.md`. For a plain clone the failure is staleness: after five pushed prunes one was 160 commits behind, still serving the 92,270 B body. Re-sync (`fetch && merge --ff-only`), then re-measure at the resolved path. Expect the ff-merge to refuse on other sessions' in-flight docs; classify each blocker before touching it — procedure in `reference/always-loaded-and-landing.md`.
+
+## Routing-path forms by deployment (the §4 lookup table)
+
+Moved out of the core; the core keeps the imperative. Which form is correct depends on how the skill is deployed:
+
+| Deployment | Write the path as |
+|---|---|
+| **devrc skill** (`claude/skills/<name>/`) — `home.file … recursive`, so `reference/` DOES ship | BOTH forms: `` `reference/<topic>.md` `` at `~/.claude/skills/<name>/reference/`, source `~/workspace/devrc/claude/skills/<name>/reference/` |
+| **`mkOutOfStoreSymlink` exceptions** — `browser` → `scripts/browser-bridge/`, `dl-router` → `scripts/dl-router/`; only `SKILL.md` + the CLI are linked, **not** a `reference/` subtree | repo-absolute: `~/workspace/devrc/scripts/<subsystem>/reference/<topic>.md` |
+| **Repo-local skill** (a project's own `.claude/skills/<name>/`) — the whole dir ships | repo-root-relative: `.claude/skills/<name>/reference/<topic>.md`, **or** short table entries with the expansion stated once above the table |
