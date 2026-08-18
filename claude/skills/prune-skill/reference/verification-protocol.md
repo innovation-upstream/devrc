@@ -95,3 +95,17 @@ rarely concurrently edited, so their figures are usually safe; always-loaded fil
 are both about what is present, not about whether a reader can still do the task from the core
 alone. After a campaign of 9 prunes, not one core had been exercised end-to-end on a real task.
 If the skill matters, drive it once afterwards.
+
+## 7. The report — say it, do not leave it in the transcript
+
+The core's §7 requires a report, not just a verdict. Four things, all of which exist only in
+your own scrollback otherwise:
+
+- **before/after bytes** of the core, from the pushed blob (§5 above).
+- **What moved where** — each demoted block and the sidecar it landed in. This is what makes the
+  slicing auditable by someone who was not there, and it is the input to the next prune.
+- 🔴 **§2's backup path** (`/tmp/skill-prune-<epoch>`). §2 builds the rollback and echoes the
+  path once; if the report omits it, rolling a bad prune back means scrolling a transcript for a
+  timestamped directory name. State it even when nothing went wrong.
+- **The number each control produced** (§4 above) — the count, not the verdict. "The control
+  passed" is the sentence that hides an invalid control.
