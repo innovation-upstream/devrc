@@ -1,5 +1,14 @@
 """Deterministic byte-size gate for `claude/skills/prune-skill/SKILL.md`.
 
+Lives in `scripts/tests/` rather than beside the skill, mirroring
+`scripts/tests/test_rules_size.py` which gates `claude/RULES.md` the same way.
+Two reasons: `scripts/tests` is already a HERMETIC_TARGET, and every hermetic
+target must start with `scripts/` -- an invariant asserted by
+`test_run_tests_targets.py` as a POSITIVE CONTROL on its own parser, so bending
+it to admit a `claude/` target would weaken a vacuity guard. Keeping the test
+here also stops it shipping into `~/.claude/skills/prune-skill/` via
+`home.file recursive`, where it would be dead weight in the deployed tree.
+
 WHY THIS EXISTS
 ---------------
 `prune-skill` is the skill that tells everyone else to hold a byte budget, and it
@@ -57,8 +66,10 @@ MAX_BYTES = 13_056
 # ceiling rather than arriving as a surprise alongside it.
 MIN_HEADROOM_BYTES = 192
 
-SKILL_MD = Path(__file__).resolve().parent.parent / "SKILL.md"
-REFERENCE_DIR = SKILL_MD.parent / "reference"
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+SKILL_DIR = REPO_ROOT / "claude" / "skills" / "prune-skill"
+SKILL_MD = SKILL_DIR / "SKILL.md"
+REFERENCE_DIR = SKILL_DIR / "reference"
 
 
 def _existing_topics() -> list[str]:
