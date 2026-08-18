@@ -127,7 +127,7 @@ operator token as `approve`):
 |---|---|
 | `message` | a 1:1 message (attachments, quotes, view-once and expiring messages are all this kind, with fields set) |
 | `group_message` | a message carrying `groupInfo` |
-| `reaction` | an emoji reaction (may arrive BEFORE its target — see gotchas) |
+| `reaction` | an emoji reaction (may arrive BEFORE its target — see gotchas). Covers BOTH directions: someone reacting to you, and 🔴 **your own reactions sent from the phone**, which arrive in the `syncMessage.sentMessage` wrapper and are stored with **the account itself** as `reactions.contact_id` |
 | `edit` | an edit of an earlier message (`edit_target_timestamp` points at it) |
 | `sync_outbound` | a message Zach sent from another linked device, echoed back |
 | `receipt_delivery` | a delivery receipt |
@@ -186,6 +186,16 @@ and tear it down on exit — exactly like `mail-actions`.
 - **Reactions can precede their target message** (delivery is not ordered, and history is not
   backfilled). `reactions.message_id` is NULLable, resolved later, with the partial index
   `idx_rx_unresolved`. Unresolvable reactions are RETAINED, not dropped.
+- 🔴 **Filtering reactions to "what people sent me" must exclude the account's own
+  `contact_id`** — your own reactions live in the same table. Before 2026-08-18 they were
+  being DROPPED entirely, so any analysis over reactions predating that is missing them.
+- 🔴 **When you fix an own-device branch for one message shape, enumerate the others in
+  that wrapper.** `syncMessage.sentMessage` carries `remoteDelete`, `reaction` and a plain
+  `message`. The remote-delete case was fixed first and the reaction case was still missed
+  for weeks — dropped reaction plus a bodyless ghost row in `signal.messages`. Found only by
+  real traffic, after six PRs, four audit rounds and 387 green tests. Any UNMODELLED
+  `sentMessage` variant with `message: None` (e.g. a nested `editMessage`, `sticker`,
+  `payment`) still produces such a ghost row — that is open work, not a solved problem.
 - **Redelivery duplicates attachments** without `UNIQUE (message_id,
   signal_attachment_id)`.
 - **One person must be ONE contact row, in both arrival orders.** An identity arrives

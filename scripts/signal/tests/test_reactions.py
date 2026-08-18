@@ -291,8 +291,32 @@ def test_reactions_unique_constraint_is_live(db):
 # same message, so a count of reactions carrying that target timestamp said "2,
 # fine". Zach's own contact was absent from every one of them. Hence the reactor
 # identity assertion below: a count assertion here would not have caught this.
+#
+# 🔴 VALUES ARE DISTINCT FROM THE CORPUS AND FROM EVERY CONSTANT NAMED BELOW. The
+# first version of this file used 🔥 — the emoji the corpus `reaction` fixture
+# ALSO uses and the emoji the assertions name — so a mutant hardcoding
+# `"emoji": "🔥"` survived all 400 tests while corrupting every stored reaction.
+# Same for SELF_UUID/SELF_NUMBER, which were byte-identical to the corpus
+# `sync_outbound` fixture. See fixtures/envelopes.json `_README`.
 
-SELF_UUID = "90909090-9090-4909-8909-909090909090"
+SELF_UUID = "95959595-9595-4959-8959-959595959595"
+SELF_NUMBER = "+15559095"
+SYNC_EMOJI = "🎯"        # distinct from the corpus 🔥 / 😂 and from REMOVE_EMOJI
+REMOVE_EMOJI = "🧊"
+
+
+def _sync_reaction_envelope(*, target_ts, emoji=SYNC_EMOJI, remove=False, **over):
+    reaction = {"emoji": emoji, "isRemove": remove,
+                "targetAuthorUuid": ALICE, "targetAuthor": "+15550101",
+                "targetSentTimestamp": target_ts}
+    reaction.update(over.pop("reaction", {}))
+    env = {"source": SELF_NUMBER, "sourceUuid": SELF_UUID,
+           "sourceNumber": SELF_NUMBER, "timestamp": target_ts + 11,
+           "syncMessage": {"sentMessage": {
+               "message": None, "timestamp": target_ts + 11,
+               "reaction": reaction}}}
+    env.update(over)
+    return env
 
 
 def test_a_reaction_made_on_ZACHS_OWN_PHONE_is_stored_not_dropped(db):
@@ -301,20 +325,7 @@ def test_a_reaction_made_on_ZACHS_OWN_PHONE_is_stored_not_dropped(db):
     db.upsert_message(_message(uuid=ALICE, ts=target_ts))
     assert db.conn.count("messages") == 1
 
-    event = consumer.parse_envelope({
-        "source": "+15559090", "sourceUuid": SELF_UUID,
-        "sourceNumber": "+15559090", "timestamp": target_ts + 11,
-        "syncMessage": {"sentMessage": {
-            "message": None, "timestamp": target_ts + 11,
-            "destination": None, "destinationUuid": None,
-            "groupInfo": {"type": "DELIVER", "groupId": "Zm9vZ3JvdXA=",
-                          "revision": 3, "groupName": "a group"},
-            "reaction": {"emoji": "🔥", "isRemove": False,
-                         "targetAuthor": "+15550101",
-                         "targetAuthorUuid": ALICE,
-                         "targetAuthorNumber": None,
-                         "targetSentTimestamp": target_ts}}},
-    })
+    event = consumer.parse_envelope(_sync_reaction_envelope(target_ts=target_ts))
 
     # It is a REACTION, and it carries NO message -- so no ghost row can be written.
     assert event.kind == consumer.KIND_REACTION
@@ -324,9 +335,11 @@ def test_a_reaction_made_on_ZACHS_OWN_PHONE_is_stored_not_dropped(db):
     # This is the assertion the live data needed: other people's reactions on the
     # same target were present, so only the identity distinguishes stored from lost.
     assert event.reaction["source_uuid"] == SELF_UUID
+    assert event.reaction["source_number"] == SELF_NUMBER
     assert event.reaction["target_author_uuid"] == ALICE
+    assert event.reaction["target_author_number"] == "+15550101"
     assert event.reaction["target_sent_timestamp"] == target_ts
-    assert event.reaction["emoji"] == "🔥"
+    assert event.reaction["emoji"] == SYNC_EMOJI
     assert event.reaction["is_remove"] is False
 
     db.upsert_reaction(event.reaction)
@@ -336,43 +349,175 @@ def test_a_reaction_made_on_ZACHS_OWN_PHONE_is_stored_not_dropped(db):
     rows = db.conn.rows("SELECT message_id, emoji FROM signal.reactions")
     assert len(rows) == 1
     assert rows[0]["message_id"] is not None
-    assert rows[0]["emoji"] == "🔥"
+    assert rows[0]["emoji"] == SYNC_EMOJI
     assert db.unresolved_reactions() == []
 
 
 def test_an_own_phone_reaction_REMOVAL_is_stored_as_a_removal(db):
     """`isRemove` must survive the sync path, or un-reacting is invisible."""
-    target_ts = 1723260000088
-    db.upsert_message(_message(uuid=ALICE, ts=target_ts))
-    event = consumer.parse_envelope({
-        "sourceUuid": SELF_UUID, "sourceNumber": "+15559090",
-        "timestamp": target_ts + 12,
-        "syncMessage": {"sentMessage": {
-            "message": None, "timestamp": target_ts + 12,
-            "reaction": {"emoji": "🔥", "isRemove": True,
-                         "targetAuthorUuid": ALICE,
-                         "targetSentTimestamp": target_ts}}},
-    })
+    event = consumer.parse_envelope(_sync_reaction_envelope(
+        target_ts=1723260000088, emoji=REMOVE_EMOJI, remove=True))
     assert event.kind == consumer.KIND_REACTION
     assert event.message is None
+    assert event.reaction["emoji"] == REMOVE_EMOJI
     assert event.reaction["is_remove"] is True
 
 
-def test_a_sync_reaction_without_a_target_is_malformed():
-    """Mirrors the inbound guard: a targetless reaction must not be stored."""
+def test_a_TRUTHY_non_bool_isRemove_is_coerced_to_a_real_bool():
+    """`bool()` is load-bearing: the DB column is boolean, JSON is not typed."""
+    event = consumer.parse_envelope(_sync_reaction_envelope(
+        target_ts=1723260000089, reaction={"isRemove": "yes"}))
+    assert event.reaction["is_remove"] is True
+
+
+def test_an_own_phone_reaction_identified_only_by_targetAuthorNumber_is_kept():
+    """signal-cli exposes THREE identity fields; the first cut read only two.
+
+    A reaction carrying only `targetAuthorNumber` looked unidentifiable and would
+    have been rejected by the guard below — silently losing a real reaction.
+    """
+    event = consumer.parse_envelope(_sync_reaction_envelope(
+        target_ts=1723260000090,
+        reaction={"targetAuthorUuid": None, "targetAuthor": None,
+                  "targetAuthorNumber": "+15550102"}))
+    assert event.kind == consumer.KIND_REACTION
+    assert event.reaction["target_author_number"] == "+15550102"
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 The guards below are NOT about tidiness. `upsert_reaction` resolves BOTH the
+# target author and the reactor through `upsert_contact`, which raises ValueError
+# on an unidentifiable contact — and ValueError is neither MalformedEvent nor a
+# TRANSIENT_DB_ERROR, so it escapes store(), escapes handle_payload() (which
+# wraps only the PARSE) and lands in run()'s reconnect handler. Signal redelivers
+# on reconnect, so one such frame is an UNBOUNDED loop that stores nothing and
+# takes every later frame on that connection with it. See the seam test in
+# test_consumer_resilience.py, which drives that end-to-end.
+
+def test_a_sync_reaction_without_a_target_timestamp_is_malformed():
+    with pytest.raises(consumer.MalformedEvent):
+        consumer.parse_envelope(_sync_reaction_envelope(
+            target_ts=1723260000091, reaction={"targetSentTimestamp": None}))
+
+
+def test_a_sync_reaction_with_NO_TARGET_AUTHOR_IDENTITY_is_malformed():
+    """Neither uuid nor number -> upsert_contact would raise and wedge ingest."""
+    with pytest.raises(consumer.MalformedEvent):
+        consumer.parse_envelope(_sync_reaction_envelope(
+            target_ts=1723260000092,
+            reaction={"targetAuthorUuid": None, "targetAuthor": None,
+                      "targetAuthorNumber": None}))
+
+
+def test_a_sync_reaction_with_NO_REACTOR_IDENTITY_is_malformed():
+    """The reactor goes through upsert_contact too — same wedge, other side."""
+    env = _sync_reaction_envelope(target_ts=1723260000093)
+    env["sourceUuid"] = None
+    env["sourceNumber"] = None
+    env["source"] = None
+    with pytest.raises(consumer.MalformedEvent):
+        consumer.parse_envelope(env)
+
+
+def test_an_EMPTY_sync_reaction_object_is_malformed_not_silently_a_message():
+    """Pins `is not None` over truthiness — the two differ ONLY here.
+
+    With truthiness an empty `reaction: {}` is falsy, falls through, and is stored
+    as an ordinary `sync_outbound`; a malformed frame would then be invisible,
+    counted as a successful message. `is not None` reports it. Same reasoning the
+    remoteDelete branch above documents, and nothing else in the suite
+    distinguishes the two idioms — a mutant swapping them survived a green run.
+
+    The trade is deliberate: a hypothetical envelope carrying BOTH an empty
+    reaction and a real body loses the body. Signal does not emit that shape, and
+    a silently-swallowed malformed frame is the worse failure of the two.
+    """
     with pytest.raises(consumer.MalformedEvent):
         consumer.parse_envelope({
-            "sourceUuid": SELF_UUID, "timestamp": 1,
+            "sourceUuid": SELF_UUID, "sourceNumber": SELF_NUMBER, "timestamp": 1,
             "syncMessage": {"sentMessage": {
-                "message": None, "timestamp": 1,
-                "reaction": {"emoji": "🔥", "targetAuthorUuid": ALICE}}}})
+                "message": None, "timestamp": 1, "reaction": {}}}})
+
+
+def test_a_NON_DICT_sync_reaction_is_malformed_not_an_AttributeError():
+    """A non-object `reaction` took the same escape route as the identity hole."""
+    with pytest.raises(consumer.MalformedEvent):
+        consumer.parse_envelope({
+            "sourceUuid": SELF_UUID, "sourceNumber": SELF_NUMBER, "timestamp": 1,
+            "syncMessage": {"sentMessage": {
+                "message": None, "timestamp": 1, "reaction": "not-an-object"}}})
+
+
+def test_the_INBOUND_reaction_path_has_the_same_guards(db):
+    """One parser, both sites (🔴 consolidation).
+
+    The sync site shipped missing guards the inbound site had, because the dict
+    was open-coded twice. These pin that the shared helper protects BOTH — if the
+    inbound site is ever re-open-coded, this goes red.
+    """
+    for bad in (
+        {"targetAuthorUuid": None, "targetAuthor": None, "targetAuthorNumber": None},
+        {"targetSentTimestamp": None},
+    ):
+        reaction = {"emoji": SYNC_EMOJI, "targetAuthorUuid": ALICE,
+                    "targetAuthor": "+15550101",
+                    "targetSentTimestamp": 1723260000094}
+        reaction.update(bad)
+        with pytest.raises(consumer.MalformedEvent):
+            consumer.parse_envelope({
+                "sourceUuid": CARL, "sourceNumber": "+15550303",
+                "timestamp": 1723260000095,
+                "dataMessage": {"timestamp": 1723260000095, "reaction": reaction}})
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 FALLBACK ORDER. Both `or` chains below survived a fully green 416-test run
+# when their operands were SWAPPED, because every fixture set the two fields to
+# the SAME value — so the mutant could not change the output. Operand-order is a
+# mutation class that deletes nothing, and a fixture of equal values collapses
+# both implementations into identical results. These use pairwise-DISTINCT values
+# so the order is actually observable.
+
+def test_sourceNumber_WINS_over_source_for_the_reactor_phone_number():
+    """`source` is not always a phone number — newer signal-cli can put a UUID
+    there — so taking it first would write a UUID into a phone column."""
+    event = consumer.parse_envelope({
+        "source": "+15559096",            # deliberately DIFFERENT from sourceNumber
+        "sourceNumber": "+15559095",
+        "sourceUuid": SELF_UUID, "timestamp": 1723260000101,
+        "syncMessage": {"sentMessage": {
+            "message": None, "timestamp": 1723260000101,
+            "reaction": {"emoji": SYNC_EMOJI, "isRemove": False,
+                         "targetAuthorUuid": ALICE, "targetAuthor": "+15550101",
+                         "targetSentTimestamp": 1723260000100}}}})
+    assert event.reaction["source_number"] == "+15559095"
+
+
+def test_targetAuthor_WINS_over_targetAuthorNumber_for_the_target_phone_number():
+    """Pins which identity field is primary when signal-cli sends both."""
+    event = consumer.parse_envelope({
+        "sourceUuid": SELF_UUID, "sourceNumber": SELF_NUMBER,
+        "timestamp": 1723260000103,
+        "syncMessage": {"sentMessage": {
+            "message": None, "timestamp": 1723260000103,
+            "reaction": {"emoji": SYNC_EMOJI, "isRemove": False,
+                         "targetAuthorUuid": ALICE,
+                         "targetAuthor": "+15550101",
+                         "targetAuthorNumber": "+15550109",   # DISTINCT
+                         "targetSentTimestamp": 1723260000102}}}})
+    assert event.reaction["target_author_number"] == "+15550101"
 
 
 def test_an_ordinary_sync_message_is_STILL_an_outbound_message(db):
-    """Guard the narrowing: only reaction-bearing syncs change branch."""
+    """Guard the narrowing: only reaction-bearing syncs change branch.
+
+    ⚠ An INVARIANT guard, not regression coverage — it passes on the pre-fix code
+    too. It is here to catch the reaction branch growing too greedy, which is a
+    different failure from the one this file's other tests pin.
+    """
     ts = 1723260000099
     event = consumer.parse_envelope({
-        "sourceUuid": SELF_UUID, "sourceNumber": "+15559090", "timestamp": ts,
+        "sourceUuid": SELF_UUID, "sourceNumber": SELF_NUMBER, "timestamp": ts,
         "syncMessage": {"sentMessage": {
             "message": "an ordinary outbound message", "timestamp": ts,
             "destination": "+15550101", "destinationUuid": ALICE}},

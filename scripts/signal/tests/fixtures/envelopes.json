@@ -8,7 +8,6 @@
     "assertion names. A fixture that can only produce the expected constant's own",
     "value cannot catch a mutant that hardcodes that literal."
   ],
-
   "dm": {
     "envelope": {
       "source": "+15550101",
@@ -41,7 +40,6 @@
       }
     }
   },
-
   "group": {
     "envelope": {
       "source": "+15550202",
@@ -69,7 +67,6 @@
       }
     }
   },
-
   "reaction": {
     "envelope": {
       "source": "+15550303",
@@ -99,7 +96,6 @@
       }
     }
   },
-
   "reaction_remove": {
     "envelope": {
       "source": "+15550808",
@@ -126,7 +122,6 @@
       }
     }
   },
-
   "edit": {
     "envelope": {
       "source": "+15550404",
@@ -150,7 +145,6 @@
       }
     }
   },
-
   "attachment": {
     "envelope": {
       "source": "+15550505",
@@ -190,7 +184,6 @@
       ]
     }
   },
-
   "voice_note": {
     "envelope": {
       "source": "+15551212",
@@ -212,13 +205,19 @@
     },
     "expect": {
       "kind": "message",
-      "message": {"message_timestamp": 1723000001212, "body": null},
+      "message": {
+        "message_timestamp": 1723000001212,
+        "body": null
+      },
       "attachments": [
-        {"id": "attach-fixture-1212", "is_voice_note": true, "content_type": "audio/aac"}
+        {
+          "id": "attach-fixture-1212",
+          "is_voice_note": true,
+          "content_type": "audio/aac"
+        }
       ]
     }
   },
-
   "quote": {
     "envelope": {
       "source": "+15550606",
@@ -246,7 +245,6 @@
       }
     }
   },
-
   "receipt_delivery": {
     "envelope": {
       "source": "+15550707",
@@ -257,15 +255,21 @@
         "when": 1723000000717,
         "isDelivery": true,
         "isRead": false,
-        "timestamps": [1723000000101]
+        "timestamps": [
+          1723000000101
+        ]
       }
     },
     "expect": {
       "kind": "receipt_delivery",
-      "receipt": {"when": 1723000000717, "timestamps": [1723000000101]}
+      "receipt": {
+        "when": 1723000000717,
+        "timestamps": [
+          1723000000101
+        ]
+      }
     }
   },
-
   "receipt_read": {
     "envelope": {
       "source": "+15550909",
@@ -276,26 +280,41 @@
         "when": 1723000000919,
         "isDelivery": false,
         "isRead": true,
-        "timestamps": [1723000000202, 1723000000303]
+        "timestamps": [
+          1723000000202,
+          1723000000303
+        ]
       }
     },
     "expect": {
       "kind": "receipt_read",
-      "receipt": {"when": 1723000000919, "timestamps": [1723000000202, 1723000000303]}
+      "receipt": {
+        "when": 1723000000919,
+        "timestamps": [
+          1723000000202,
+          1723000000303
+        ]
+      }
     }
   },
-
   "typing": {
     "envelope": {
       "source": "+15551010",
       "sourceNumber": "+15551010",
       "sourceUuid": "10101010-1010-4101-8101-101010101010",
       "timestamp": 1723000001010,
-      "typingMessage": {"action": "STARTED", "timestamp": 1723000001010}
+      "typingMessage": {
+        "action": "STARTED",
+        "timestamp": 1723000001010
+      }
     },
-    "expect": {"kind": "typing", "receipt": {"action": "STARTED"}}
+    "expect": {
+      "kind": "typing",
+      "receipt": {
+        "action": "STARTED"
+      }
+    }
   },
-
   "sync_outbound": {
     "envelope": {
       "source": "+15559090",
@@ -324,7 +343,6 @@
       }
     }
   },
-
   "view_once": {
     "envelope": {
       "source": "+15551313",
@@ -339,11 +357,13 @@
     },
     "expect": {
       "kind": "message",
-      "message": {"message_timestamp": 1723000001313, "view_once": true,
-                  "body": "look quickly"}
+      "message": {
+        "message_timestamp": 1723000001313,
+        "view_once": true,
+        "body": "look quickly"
+      }
     }
   },
-
   "expiring": {
     "envelope": {
       "source": "+15551414",
@@ -358,11 +378,13 @@
     },
     "expect": {
       "kind": "message",
-      "message": {"message_timestamp": 1723000001414, "expires_in_seconds": 3600,
-                  "body": "this vanishes in an hour"}
+      "message": {
+        "message_timestamp": 1723000001414,
+        "expires_in_seconds": 3600,
+        "body": "this vanishes in an hour"
+      }
     }
   },
-
   "remote_delete": {
     "envelope": {
       "source": "+15551616",
@@ -372,7 +394,9 @@
       "dataMessage": {
         "timestamp": 1723000001616,
         "message": null,
-        "remoteDelete": {"targetSentTimestamp": 1723000001606}
+        "remoteDelete": {
+          "targetSentTimestamp": 1723000001606
+        }
       }
     },
     "expect": {
@@ -384,7 +408,6 @@
       }
     }
   },
-
   "sync_remote_delete": {
     "envelope": {
       "source": "+15559091",
@@ -395,7 +418,9 @@
         "sentMessage": {
           "timestamp": 1723000001717,
           "destination": "+15550101",
-          "remoteDelete": {"targetSentTimestamp": 1723000001707}
+          "remoteDelete": {
+            "targetSentTimestamp": 1723000001707
+          }
         }
       }
     },
@@ -408,15 +433,63 @@
       }
     }
   },
-
+  "sync_reaction": {
+    "envelope": {
+      "source": "+15559092",
+      "sourceNumber": "+15559092",
+      "sourceUuid": "92929292-9292-4929-8929-929292929292",
+      "sourceName": "me",
+      "timestamp": 1723000009292,
+      "syncMessage": {
+        "sentMessage": {
+          "timestamp": 1723000009292,
+          "message": null,
+          "destination": null,
+          "destinationUuid": null,
+          "groupInfo": {
+            "type": "DELIVER",
+            "groupId": "c3luY3JlYWN0Zml4dHVyZQ==",
+            "revision": 4,
+            "groupName": "corpus group"
+          },
+          "reaction": {
+            "emoji": "🤯",
+            "isRemove": false,
+            "targetAuthor": "+15550404",
+            "targetAuthorUuid": "44444444-4444-4444-8444-444444444444",
+            "targetAuthorNumber": null,
+            "targetSentTimestamp": 1723000009282
+          }
+        }
+      }
+    },
+    "expect": {
+      "kind": "reaction",
+      "reaction": {
+        "emoji": "🤯",
+        "target_author_uuid": "44444444-4444-4444-8444-444444444444",
+        "target_author_number": "+15550404",
+        "target_sent_timestamp": 1723000009282,
+        "is_remove": false,
+        "source_uuid": "92929292-9292-4929-8929-929292929292",
+        "source_number": "+15559092"
+      }
+    }
+  },
   "unknown_type": {
     "envelope": {
       "source": "+15551515",
       "sourceNumber": "+15551515",
       "sourceUuid": "15151515-1515-4151-8151-151515151515",
       "timestamp": 1723000001515,
-      "callMessage": {"offerMessage": {"id": 4242424242}}
+      "callMessage": {
+        "offerMessage": {
+          "id": 4242424242
+        }
+      }
     },
-    "expect": {"kind": "unknown"}
+    "expect": {
+      "kind": "unknown"
+    }
   }
 }
