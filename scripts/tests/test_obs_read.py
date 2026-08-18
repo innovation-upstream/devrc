@@ -511,6 +511,165 @@ def test_kill_process_group_noop_without_pid():
 
 
 # =========================================================================== #
+# Local-port TOCTOU — bounded retry on a BIND COLLISION only
+#
+# _free_port() closes its probe socket before kubectl binds the number, so a
+# concurrent obs-read can steal it. __enter__ re-picks and relaunches, but ONLY
+# for a collision: a genuine failure (RBAC, missing svc, backend never ready)
+# must surface on the FIRST attempt, unretried and unrewritten.
+# =========================================================================== #
+# Verbatim kubectl stderr for a local-port collision (it prints BOTH lines;
+# _drain_stderr keeps only the LAST non-empty one).
+KUBECTL_COLLISION_STDERR = (
+    "Unable to listen on port 45011: Listeners failed to create with the "
+    "following errors: [unable to create listener: Error listen tcp4 "
+    "127.0.0.1:45011: bind: address already in use]\n"
+    "error: unable to listen on any of the requested ports: [{45011 9090}]\n"
+)
+# A genuine, NON-retryable failure.
+KUBECTL_RBAC_STDERR = (
+    'error: services "kube-prometheus-stack-prometheus" is forbidden: User '
+    '"system:serviceaccount:default:default" cannot get resource "services" '
+    'in API group "" in the namespace "monitoring"\n'
+)
+
+
+class _PFAttempts:
+    """popen stub recording one FakeProc per attempt.
+
+    `stderrs[i]` scripts attempt i to die early with that kubectl stderr; any
+    attempt past the end of the list gets a LIVE proc (i.e. succeeds).
+    """
+
+    def __init__(self, stderrs):
+        self.stderrs = list(stderrs)
+        self.ports = []          # local port used by each attempt, in order
+        self.procs = []          # the FakeProc handed to each attempt
+
+    def popen(self, argv, **kw):
+        # argv's last element is the "<local>:<remote>" port mapping
+        self.ports.append(int(argv[-1].split(":")[0]))
+        i = len(self.procs)
+        if i < len(self.stderrs):
+            proc = FakeProc(alive=False, stderr_text=self.stderrs[i])
+        else:
+            proc = FakeProc()    # alive -> ready
+        self.procs.append(proc)
+        return proc
+
+
+def _wait_ready_faithful(port, ready_path, timeout, proc=None):
+    """Stand-in for _wait_ready that routes an early-exited proc through the
+    REAL _wait_ready — so the error TEXT the retry discriminates on is produced
+    by production code, not by the test. A live proc is treated as ready."""
+    if proc is not None and proc.poll() is not None:
+        obs._wait_ready(port, ready_path, 0.5, proc)   # raises RuntimeError
+    return None
+
+
+def _pf_with(handler, ports, monkeypatch, backend="prometheus"):
+    it = iter(ports)
+    monkeypatch.setattr(obs, "_free_port", lambda: next(it))
+    return obs.PortForward("/kc", obs.BACKENDS[backend],
+                           popen=handler.popen,
+                           wait_ready=_wait_ready_faithful)
+
+
+def test_is_port_collision_discriminates(monkeypatch):
+    # both shapes kubectl can leave as the last stderr line
+    assert obs._is_port_collision(RuntimeError(
+        "kubectl port-forward exited early: error: unable to listen on any of "
+        "the requested ports: [{45011 9090}]")) is True
+    assert obs._is_port_collision(RuntimeError(
+        "kubectl port-forward exited early: Unable to listen on port 45011: "
+        "... bind: address already in use]")) is True
+    # everything that a different port cannot fix
+    for other in (
+        'kubectl port-forward exited early: Error from server (NotFound): '
+        'services "pyroscope" not found',
+        "kubectl port-forward exited early: " + KUBECTL_RBAC_STDERR.strip(),
+        "backend not ready on 127.0.0.1:45011/ready in 10s (timed out)",
+        "kubectl port-forward exited early",
+    ):
+        assert obs._is_port_collision(RuntimeError(other)) is False
+    assert obs._is_port_collision(TimeoutError("never became ready")) is False
+
+
+def test_port_forward_retries_collision_on_a_different_port(monkeypatch):
+    # attempt 1 loses the race; attempt 2 must use a DIFFERENT port and win.
+    h = _PFAttempts([KUBECTL_COLLISION_STDERR])
+    pf = _pf_with(h, [45011, 45013, 45017], monkeypatch)
+    with pf as port:
+        assert port == 45013
+    assert h.ports == [45011, 45013]              # re-picked, not reused
+    assert len(set(h.ports)) == len(h.ports)      # pairwise distinct
+    assert h.procs[0].terminated is True          # failed attempt reaped
+    assert h.procs[1].terminated is True          # success torn down on exit
+
+
+def test_port_forward_does_not_retry_a_non_collision_failure(monkeypatch):
+    # An RBAC denial must fail on attempt 1 with kubectl's own message intact —
+    # retrying would mask a real error and triple the time-to-error.
+    h = _PFAttempts([KUBECTL_RBAC_STDERR] * 5)
+    pf = _pf_with(h, [45011, 45013, 45017, 45021], monkeypatch)
+    with pytest.raises(RuntimeError) as ei:
+        pf.__enter__()
+    assert len(h.procs) == 1                      # EXACTLY one attempt
+    assert h.ports == [45011]
+    # original error preserved verbatim — not rewritten into a retry message
+    assert str(ei.value) == ("kubectl port-forward exited early: "
+                             + KUBECTL_RBAC_STDERR.strip())
+    assert h.procs[0].terminated is True
+
+
+def test_port_forward_does_not_retry_a_readiness_timeout(monkeypatch):
+    # The backend never answering is not a port problem either.
+    calls = []
+    it = iter([45011, 45013, 45017])
+    monkeypatch.setattr(obs, "_free_port", lambda: next(it))
+
+    def never_ready(*a, **k):
+        calls.append(1)
+        raise TimeoutError("backend not ready on 127.0.0.1:45011/ready in 10s")
+
+    proc = FakeProc()
+    pf = obs.PortForward("/kc", obs.BACKENDS["loki"],
+                         popen=lambda *a, **k: proc, wait_ready=never_ready)
+    with pytest.raises(TimeoutError) as ei:
+        pf.__enter__()
+    assert len(calls) == 1
+    assert "backend not ready" in str(ei.value)
+    assert proc.terminated is True
+
+
+def test_port_forward_gives_up_after_exhausting_collision_retries(monkeypatch):
+    h = _PFAttempts([KUBECTL_COLLISION_STDERR] * 6)
+    pf = _pf_with(h, [45011, 45013, 45017, 45021], monkeypatch)
+    with pytest.raises(RuntimeError) as ei:
+        pf.__enter__()
+    msg = str(ei.value)
+    assert obs.PF_ATTEMPTS == 3
+    assert h.ports == [45011, 45013, 45017]       # bounded: exactly PF_ATTEMPTS
+    assert len(h.procs) == obs.PF_ATTEMPTS
+    # actionable: names the exhausted budget AND carries kubectl's last error
+    assert ("local port collision on all %d attempts" % obs.PF_ATTEMPTS) in msg
+    assert "unable to listen on any of the requested ports" in msg
+
+
+def test_port_forward_leaks_no_process_across_retries(monkeypatch):
+    # every failed attempt's kubectl is terminated AND reaped before the next
+    h = _PFAttempts([KUBECTL_COLLISION_STDERR] * 6)
+    pf = _pf_with(h, [45011, 45013, 45017, 45021], monkeypatch)
+    with pytest.raises(RuntimeError):
+        pf.__enter__()
+    assert len(h.procs) == obs.PF_ATTEMPTS
+    assert all(p.terminated for p in h.procs)
+    assert all(p.waited for p in h.procs)
+    assert pf.proc is None                        # no handle left dangling
+
+
+
+# =========================================================================== #
 # kubectl stderr surfaced on early exit (#4)
 # =========================================================================== #
 def test_wait_ready_surfaces_kubectl_stderr():
