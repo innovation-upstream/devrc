@@ -1,6 +1,6 @@
 # Staleness pass — axes, and the traps that manufacture false findings
 
-Routed from `prune-skill/SKILL.md` §0. Load this before running the pass. 🔴 **Read §"False
+Routed from the prune-skill core (§0) — `~/.claude/skills/prune-skill/SKILL.md`, source `~/workspace/devrc/claude/skills/prune-skill/SKILL.md`. Load this before running the pass. 🔴 **Read §"False
 findings" first — measured over four passes, this produced roughly SIX false findings for every
 ONE real in-skill finding.** Run without that discipline and it is a defect generator: two of its
 false findings would have "corrected" two *correct* metric names into wrong ones.

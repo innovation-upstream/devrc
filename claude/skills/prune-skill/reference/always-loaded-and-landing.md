@@ -1,6 +1,6 @@
 # Always-loaded files, the overshoot clause, landing, and multi-agent execution
 
-Routed from `prune-skill/SKILL.md` §Budgets / §3 / §6. The core carries the imperatives; this
+Routed from the prune-skill core (§Budgets / §3 / §6) — `~/.claude/skills/prune-skill/SKILL.md`, source `~/workspace/devrc/claude/skills/prune-skill/SKILL.md`. The core carries the imperatives; this
 carries the reasoning and the measured cases.
 
 ## Always-loaded files (`CLAUDE.md`, `claude/RULES.md`) — the playbook does not apply
@@ -48,15 +48,28 @@ written down. The target is not the thing that failed; the absence of an escape 
 
 ## Landing: a push is not a saving
 
-Skill bodies load from the **clone**, not from the ref you pushed. After five pushed prunes one
-primary clone was **160 commits behind and still serving the 92,270 B body** — every session
-still paying the old cost while every commit verified green. This is "a deploy reporting success
-is a claim about the DEPLOY, not about the CONSUMER", instantiated.
-
-Re-sync after every prune, then re-measure `wc -c` **in that clone**:
+A skill body loads from the **deployed copy**, not from the ref you pushed — and the deployed
+copy may not be the clone. This is "a deploy reporting success is a claim about the DEPLOY, not
+about the CONSUMER", instantiated. **Resolve the deployed path first:**
 
 ```bash
-git -C <repo> fetch origin && git -C <repo> merge --ff-only origin/<main>
+readlink -f ~/.claude/skills/<name>/SKILL.md
+```
+
+| Resolves to… | Meaning |
+|---|---|
+| a path **inside the repo** (`mkOutOfStoreSymlink`) | the clone IS live — re-sync it and you are done |
+| **`/nix/store/…`** (a `home.file` copy — the devrc default) | the clone is **NOT** live; a `home-manager switch` is required |
+
+🔴 **Measured on this very skill:** the clone held 14,918 B while `~/.claude/skills/prune-skill/SKILL.md` resolved into `/nix/store` and still served **11,083 B** — the pre-change body. Re-measure at the **resolved** path, never `wc -c` in the clone.
+
+For a plain clone the other failure is staleness: after five pushed prunes one was **160 commits
+behind, still serving the 92,270 B body** — every session paying the old cost while every commit
+verified green. Re-sync after every prune:
+
+```bash
+REPO=~/workspace/<the-repo>; MAIN=main   # set these first
+git -C "$REPO" fetch origin && git -C "$REPO" merge --ff-only "origin/$MAIN"
 ```
 
 `--ff-only` is the point: it cannot conflict or autostash — it fast-forwards or refuses.

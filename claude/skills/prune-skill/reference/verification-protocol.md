@@ -1,6 +1,6 @@
 # Verification protocol — content survival, gap audit, and control design
 
-Routed from `prune-skill/SKILL.md` §7. Load this when you are about to verify a prune. The core
+Routed from the prune-skill core (§7) — `~/.claude/skills/prune-skill/SKILL.md`, source `~/workspace/devrc/claude/skills/prune-skill/SKILL.md`. Load this when you are about to verify a prune. The core
 carries the rules; this carries the protocol, the measured failures behind each rule, and a
 working checker.
 
@@ -25,14 +25,15 @@ Union your slice ranges, subtract from `1..EOF`, read what is left. Only frontma
 that you deliberately carried into the core may be there.
 
 ```python
+EOF_LINE=580                                       # wc -l of the ORIGINAL
 sliced=[(14,120),(121,293),(294,441),(442,580)]     # your ranges
 cov=set()
 for a,b in sliced: cov.update(range(a,b+1))
 gaps=[]; run=None
-for i in range(1, EOF+1):
+for i in range(1, EOF_LINE+1):
     if i not in cov: run = run or i
     elif run: gaps.append((run,i-1)); run=None
-if run: gaps.append((run,EOF))
+if run: gaps.append((run,EOF_LINE))
 print("un-sliced:", gaps)
 ```
 
