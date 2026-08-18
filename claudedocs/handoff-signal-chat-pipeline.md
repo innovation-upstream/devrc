@@ -36,51 +36,65 @@ device; messages land in Postgres `signal` schema + attachments in MinIO.
   `accounts.json` on the PVC holds one LIVE account (was `{"accounts":[]}` before).
 - **Consumer is CONNECTED** — its own TCP table shows ESTABLISHED to Postgres `:5432` and
   signal-api `:8080`.
-- 🔴 **NOT VERIFIED: nothing has ever been ingested.** All four tables are **0 rows**. Step 7
-  (send a real message, watch a row land) is the only thing that verifies any of this and it
-  has NOT been done. Everything above is about deploys and connections, not about the
-  pipeline working.
+- ✅ **STEP 7 PASSED — 2026-08-18.** Real phone traffic lands in Postgres. Measured at 19:21
+  UTC: `messages` 5, `contacts` 5, `groups` 1, `reactions` 2, `attachments` 0. The five
+  messages span 18:04:57–18:48:28 UTC and cover **both directions** — an inbound group
+  message, an inbound 1:1, and three `sync_outbound` echoes of messages sent from the phone.
+  Reaction→target linkage resolves correctly (both reaction rows point at message 1).
+  🔴 **Still NOT verified: the attachment/MinIO leg** (see below) and there are **no probes**.
 
 ## Open investigations — live diagnosis state
 
-### Step 7 has never run — 0 rows, and the zero is NOT yet attributable
-- **Symptom:** `select count(*) from signal.messages` → **0**, several minutes after linking,
-  with the consumer Running/Ready and connected. Consumer log lines: **0**.
-- **Observed (values):** all of `signal.{messages,contacts,groups,attachments,reactions}` = 0.
-  `/proc/1/cmdline` = `python3 /app/scripts/signal/consumer.py run`. `PYTHONUNBUFFERED=1` set
-  (buffering ruled out). TCP table decoded: `10.244.0.220:34574 → 10.244.2.206:5432
-  ESTABLISHED` and `10.244.0.220:51400 → 10.244.2.14:8080 ESTABLISHED`.
-- **Ruled out — "the consumer never connected."** I read the absence of a `/v1/receive` line
-  in signal-api's gin log as proof it hadn't connected. **WRONG:** gin logs a request when the
-  handler RETURNS, and a websocket stays open — which is why an earlier 8-second probe *did*
-  appear (`200 | 8.0016s`) once it closed. **Absence of a log line means still-connected.**
-- **Ruled out — network.** From the consumer pod: Postgres, signal-api and MinIO all TCP OK.
-- **Ruled out — buffered stdout.** `PYTHONUNBUFFERED=1` is set in the image.
-- **Leading hypothesis:** nothing has been sent, so there is nothing to ingest. Unproven.
-- 🔴 **Next probe (verbatim) — send a Signal message from the phone (an image attachment too,
-  to exercise MinIO + the scoped credential), then:**
-  ```bash
-  export KUBECONFIG=$KC_HOMELAB
-  CP=$(kubectl -n signal get pod -l app=signal-consumer -o jsonpath='{.items[0].metadata.name}')
-  kubectl -n signal exec $CP -- python3 -c "
-  import os,psycopg2; c=psycopg2.connect(os.environ['SIGNAL_PG_DSN']); cur=c.cursor()
-  for t in ('messages','contacts','attachments'):
-      cur.execute(f'select count(*) from signal.{t}'); print(t, cur.fetchone()[0])"
-  kubectl -n signal logs deploy/signal-consumer --tail=30
-  ```
+### ✅ CLOSED — step 7 ran, and it found a live data-loss defect
+- **Resolved:** the leading hypothesis was right — nothing had been sent. Once real messages
+  were sent, rows landed with no intervention. The consumer had been working the whole time.
+- 🔴 **BUT step 7 was not a formality — it surfaced a real bug review had missed.**
+  **Outbound reactions were silently dropped.** A reaction Zach makes on his own phone arrives
+  as `syncMessage.sentMessage.reaction` with `message: None`. The sync branch in
+  `consumer.py` runs BEFORE the inbound `dataMessage` branch and handled only `remoteDelete`,
+  so the reaction fell through to `_base_message()` and produced **exactly the two defects the
+  remote-delete case exists to prevent**: the reaction dropped from `signal.reactions`, and a
+  bodyless ghost row left in `signal.messages` (that is live row **id 3**).
+- 🔴 **How it nearly read as clean — the trap to remember.** Two OTHER group members had
+  reacted to the same message, so `signal.reactions` held **2 rows carrying that exact
+  `target_sent_timestamp`** and a count check said "fine". Zach's own contact (id 5) appears in
+  **none** of them. **Only the reactor IDENTITY discriminates stored from lost here**; the
+  count cannot, and the regression test asserts identity for that reason.
+- **Fixed** in `fix/signal-outbound-reaction`: a `reaction` case in the sync branch mirroring
+  the `remoteDelete` one. Red at `origin/main` (3 failed, `sync_outbound` where `reaction`
+  belongs), green at HEAD (400 passed). Five-mutant battery, all KILLED under
+  `PYTHONDONTWRITEBYTECODE=1`, including a positive control; the identity mutant dies on its
+  own assertion.
+- 🔴 **The lost reaction is RECOVERABLE — `raw_envelope` on row id 3 still holds it.** A
+  backfill can replay it. Not yet done.
 
-### Does linking backfill conversation history? — UNRESOLVED, and the current zero cannot answer it
-- **Question:** does a newly linked device pull existing history?
-- **Observed:** 0 rows in every table after linking. **That zero is NOT evidence about
-  Signal's behaviour** — the pipeline has never ingested anything, so "no history is sent" and
-  "our consumer isn't working" produce an identical empty table.
-- **Ruled out:** nothing yet.
-- **Leading hypothesis:** forward-only. Signal is E2EE, so the servers hold nothing a new
-  device can fetch; any transfer must be pushed by the primary phone during linking. Signal
-  Desktop implements such a flow; **whether signal-cli participates is UNVERIFIED** —
-  upstream's FAQ does not cover it and the linking wiki page failed to load.
-- **Next probe:** settle step 7 first. Once a live message lands, the 0 becomes attributable
-  and the answer follows for free.
+### The attachment / MinIO leg has NEVER run — and the 0 IS attributable
+- **Observed:** `attachments` = 0.
+- 🔴 **That zero is attributable to INPUT, not to a defect** — I walked all five stored
+  envelopes for any key matching `attach`: **none has one**. No attachment has ever been sent,
+  so there is nothing to ingest. This is the discriminating check; the bare 0 alone could not
+  distinguish "never exercised" from "broken".
+- **Consequence:** the scoped MinIO credential and `_minio.py` remain **unexercised by real
+  traffic**. Both were verified by hand (positive: put+stat on its own bucket; negative: denied
+  on both other buckets) — but never end-to-end.
+- **Next probe:** send an image from the phone, then re-check `attachments` and the bucket.
+
+### 🔴 The consumer has emitted ZERO log lines in its entire life
+- **Observed:** `kubectl logs deploy/signal-consumer` → **0 lines**, across 20h, while
+  successfully ingesting 5 messages, 5 contacts, 1 group and 2 reactions.
+- **This is stronger than "no probes"** (next-steps item 2 below): there is no success output
+  either, so **row count is the only health signal that exists**. A consumer reaching nothing
+  and a consumer working perfectly produce byte-identical logs.
+
+### ✅ ANSWERED — linking does NOT backfill history; the pipeline is forward-only
+- **Answer: forward-only**, as hypothesised. The oldest stored row (18:04:57) postdates the
+  linking; nothing older than the link ever appeared, and the tables were populated purely by
+  traffic sent after it.
+- **This became answerable only once step 7 passed** — exactly as this section predicted. With
+  a working consumer, the continuing absence of history is now evidence about Signal's
+  behaviour rather than about our code.
+- **Consequence for the skill:** `signal` can only ever answer questions about messages
+  received *since* 2026-08-18. Say so rather than implying full history.
 
 ### Did the 0.14.5 → 0.14.7 bump fix anything? — attribution unproven, do not claim it did
 - **Observed:** on 0.14.5 `finishLink` returned `code -3 "Link request error: Connection
@@ -94,19 +108,29 @@ device; messages land in Postgres `signal` schema + attachments in MinIO.
   record it as the fix.
 
 ## Next steps (ranked)
-1. **Step 7 — send a real Signal message and confirm a row lands.** Nothing else matters until
-   this passes; every other claim in this doc is about plumbing, not function.
-2. **Add a liveness signal to the consumer.** It serves no HTTP and has **no probes**, so a pod
-   reaching nothing stays Running/Ready forever — row count is currently the only health
-   signal. This is exactly the failure mode I talked myself into and back out of above.
-3. **Move the mutation harness into the repo.** It lives only in a subagent's scratchpad, so
-   nobody can re-run or audit it — and it silently stopped testing two guards for a round
-   (ANCHOR-MISS). Land it under `scripts/signal/tests/`.
-4. **Close `approve_draft`'s read-then-write TOCTOU** — last member of the family whose three
-   siblings were fixed in #514 round 4. Benign (two racing approvals yield one row, never a
-   duplicate send), but it is the odd one out now.
-5. **Bump cadence for the signal-cli image.** Stable lags: `0.100`/`:latest` shipped 0.14.5
-   while 0.14.6/0.14.7 existed. Tracking stable ALONE re-breaks linking. Check the CI tags.
+1. **Land + DEPLOY the outbound-reaction fix.** The branch is green and mutation-tested, but
+   🔴 **merging changes nothing in the cluster** — the consumer runs a Harbor image pinned by
+   digest, so it needs `scripts/signal/build-push.sh <ver>` and a homelab digest bump. Until
+   that lands, every reaction Zach sends is still being dropped.
+2. **Send an image from the phone** and confirm `attachments` > 0 plus the object in MinIO.
+   The only leg of the pipeline that has never carried real traffic.
+3. **Backfill the one lost reaction** from `raw_envelope` on `signal.messages` id 3, and drop
+   the ghost row. Small, and the data is still there.
+4. **Add a liveness signal to the consumer.** Now evidenced, not theorised: 0 log lines in 20h
+   of successful work (above). It serves no HTTP and has no probes, so a pod reaching nothing
+   stays Running/Ready forever. Emit *something* on successful ingest at minimum.
+5. **Move the mutation harness into the repo.** Still lives only in scratchpads — the
+   reaction-fix battery included. Land it under `scripts/signal/tests/`.
+6. **Close `approve_draft`'s read-then-write TOCTOU** — last of the family whose three siblings
+   were fixed in #514 round 4. Benign, but the odd one out.
+7. **Bump cadence for the signal-cli image.** Stable lags: `0.100`/`:latest` shipped 0.14.5
+   while 0.14.6/0.14.7 existed. Tracking stable ALONE re-breaks linking.
+
+🔴 **The lesson worth keeping from step 7.** Six PRs, four audit rounds and 387 tests all
+passed while an entire message shape — the account's own reactions — was being dropped on the
+floor. Nothing found it but real traffic. The sync branch had *already* been patched once for
+exactly this asymmetry (`remoteDelete`), and the sibling case was still missed: **when you fix
+an own-device branch for one message shape, enumerate the others in that wrapper.**
 
 ## Gotchas / decisions / dead-ends
 
@@ -172,7 +196,7 @@ kubectl -n signal get pods
 kubectl -n signal exec deploy/signal-api -- signal-cli --version          # expect 0.14.7
 kubectl -n signal exec deploy/signal-api -- cat /home/.local/share/signal-cli/data/accounts.json
 
-# THE verification — send a Signal message from the phone first, then:
+# Row counts (step 7 PASSED 2026-08-18 — these are now NON-ZERO; a zero here is a REGRESSION):
 CP=$(kubectl -n signal get pod -l app=signal-consumer -o jsonpath='{.items[0].metadata.name}')
 kubectl -n signal exec $CP -- python3 -c "
 import os,psycopg2; c=psycopg2.connect(os.environ['SIGNAL_PG_DSN']); cur=c.cursor()
@@ -181,4 +205,18 @@ for t in ('messages','contacts','attachments'):
 
 # devrc suite (authoritative; 90 = could-not-vouch, read the log)
 scripts/gate.sh --tier pytest
+
+# The attachment leg — STILL UNVERIFIED. Send an IMAGE from the phone, then:
+kubectl -n signal exec $CP -- python3 -c "
+import os,psycopg2; c=psycopg2.connect(os.environ['SIGNAL_PG_DSN']); cur=c.cursor()
+cur.execute('select count(*) from signal.attachments'); print('attachments', cur.fetchone()[0])"
+
+# Is a zero attributable to INPUT rather than a defect? Walk the envelopes for an
+# attachment key -- a bare 0 cannot tell "never exercised" from "broken":
+kubectl -n signal exec $CP -- python3 -c "
+import os,json,psycopg2; c=psycopg2.connect(os.environ['SIGNAL_PG_DSN']); cur=c.cursor()
+cur.execute('select id, raw_envelope from signal.messages')
+for mid, env in cur.fetchall():
+    d = json.loads(env) if isinstance(env,str) else env
+    print(mid, 'attach' in json.dumps(d).lower())"
 ```
