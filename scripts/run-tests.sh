@@ -351,6 +351,14 @@ HERMETIC_TARGETS=(
   # contract and its exit-0-on-anything backstop are all gated here rather than left
   # to the ungated hand-rolled scripts beside it.
   scripts/claude-hooks/tests/test_clawgate_writeback_guard.py
+  # Same reason again — a FILE, not the directory. This one gates a CROSS-MODULE
+  # class rather than any single hook: the on-disk names every hook's cache is made
+  # of. Fifteen of them could be renamed with zero test movement, because writer and
+  # reader in each module share one function, so a rename is self-consistent and
+  # nothing behavioural can see it — while every in-flight session's state is
+  # orphaned by the switch that deploys it. Gated here because it is the only test
+  # that asserts a property ACROSS the hook modules, so no per-hook target owns it.
+  scripts/claude-hooks/tests/test_on_disk_artifact_names.py
   # Writer 2 of the agent activity ledger — the OPENCODE half. A Python suite
   # driving real `node`, mirroring scripts/collector/opencode/tests/test_plugin.py
   # (this repo's established way to test an opencode plugin; there is no node
@@ -1030,6 +1038,11 @@ TARGET_FLOORS=(
   #   PASS  scripts/claude-hooks/tests/test_clawgate_writeback_guard.py  (collected=280 passed=280 skipped=0 floor=260)
   #   _suggested_floor 280 = 280 - min(50, max(1, 280/20 = 14)) = 280 - 14 = 266.
   "scripts/claude-hooks/tests/test_clawgate_writeback_guard.py|266"
+  # 2026-08-18, the on-disk artifact-name registry arrives as a NEW target: 13
+  # collected. Deliberately small — one test per module whose names it pins, plus the
+  # two-sided classification guard that fails when a hook module appears or vanishes.
+  #   _suggested_floor 13 = 13 - min(50, max(1, 13/20 = 0 -> 1)) = 12.
+  "scripts/claude-hooks/tests/test_on_disk_artifact_names.py|12"
   # 2026-08-14, writer 2 (opencode) arrives as a NEW target: 15 collected.
   #   _suggested_floor 15 = 15 - min(50, max(1, 15/20 = 0 -> 1)) = 14.
   "scripts/opencode/tests|14"

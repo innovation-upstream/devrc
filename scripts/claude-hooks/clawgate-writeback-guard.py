@@ -598,6 +598,27 @@ def _read_path(state_dir, task_id):
     return os.path.join(state_dir, "read-%d" % int(task_id))
 
 
+def _read_tmp_name(task_id):
+    """`record_read`'s temp file, deliberately OUTSIDE the `read-` namespace.
+
+    🔴 IT USED TO BE `read-<id>.tmp`, AND THAT PREFIX IS THE SELECTOR BOTH READERS
+    OF THIS DIRECTORY USE. A temp file that outlived its `os.replace` — the CLI
+    kills a hook on its timeout, and a `home-manager switch` swaps this file
+    mid-run — was therefore not inert: `tracked_ids` parsed it and reported the
+    task as READ, so the Stop gate would demand a write-back for a card whose read
+    was never committed, and the `MAX_TASKS` census counted it, so garbage could
+    consume a session's tracking slots. Measured on the pre-fix code: one complete
+    leftover gave `tracked_ids() == {307: …}` and a census of 1; adding a truncated
+    one (which `tracked_ids` skips as unparseable) took the census to 2.
+
+    `lib/agent_ledger.py` already had this right — its temp files are
+    `.ledger.*.tmp`, deliberately outside its own `*.json` read glob — so this is
+    that design applied here. The leading `.` is what does the work; keep any
+    future scheme out of `read-`/`fires-`/`unknown-`/`dismissed-` too.
+    """
+    return ".tmp-read-%d" % int(task_id)
+
+
 def _dismissed_path(state_dir, task_id):
     return os.path.join(state_dir, "%s%d" % (DISMISSED_PREFIX, int(task_id)))
 
@@ -751,7 +772,7 @@ def record_read(state_dir, task_id, now=None):
     os.makedirs(state_dir, exist_ok=True)
     if len([n for n in os.listdir(state_dir) if n.startswith("read-")]) >= MAX_TASKS:
         return False
-    tmp = path + ".tmp"
+    tmp = os.path.join(state_dir, _read_tmp_name(task_id))
     with open(tmp, "w") as fh:
         json.dump({"task_id": int(task_id), "first_read_ts": now_iso(now)}, fh)
     os.replace(tmp, path)
