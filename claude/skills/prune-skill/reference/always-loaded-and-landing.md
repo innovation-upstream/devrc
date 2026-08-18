@@ -53,7 +53,8 @@ copy may not be the clone. This is "a deploy reporting success is a claim about 
 about the CONSUMER", instantiated. **Resolve the deployed path first:**
 
 ```bash
-readlink -f ~/.claude/skills/<name>/SKILL.md
+SKILL=prune-skill        # ← the skill you pruned
+readlink -f ~/.claude/skills/"$SKILL"/SKILL.md
 ```
 
 | Resolves to… | Meaning |
@@ -68,7 +69,7 @@ behind, still serving the 92,270 B body** — every session paying the old cost 
 verified green. Re-sync after every prune:
 
 ```bash
-REPO=~/workspace/<the-repo>; MAIN=main   # set these first
+REPO=~/workspace/devrc; MAIN=main        # ← set these two
 git -C "$REPO" fetch origin && git -C "$REPO" merge --ff-only "origin/$MAIN"
 ```
 

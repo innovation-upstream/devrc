@@ -51,8 +51,11 @@ If it says "no prune needed", **stop CUTTING** — don't churn the file for byte
 🔴 **Read the heading TREE before trusting the section weights** — they are a function of it. One skill had five of eleven documented actions filed as H3s *under an incident write-up's H2*, which is most of why that section scored fat.
 
 ## 2. Back up first (the cut deletes/rewrites)
+🔴 **Chain the success message with `&&`, and count the files.** `cp …; echo "backed up"` prints success even when the copy failed — a `;` runs the echo unconditionally, so a broken backup announces itself as a good one. This is the safety net for §5's destructive rewrite; verify it is non-empty.
 ```bash
-BK=/tmp/skill-prune-$(date +%s); mkdir -p "$BK"; cp -a <SKILL_DIR>/. "$BK"/; echo "backed up to $BK"
+SKILL_DIR=.claude/skills/gitops-gate          # ← set this to the skill you are pruning
+BK=/tmp/skill-prune-$(date +%s); mkdir -p "$BK"
+cp -a "$SKILL_DIR"/. "$BK"/ && echo "backed up to $BK: $(find "$BK" -type f | wc -l) file(s)"
 ```
 
 ## 3. Classify every over-budget block (the judgment cut)
@@ -101,7 +104,7 @@ Write evicted history to a dated `claudedocs/` doc. **Do not delete a reference 
 
 ## 7. Verify (don't trust — measure)
 ```bash
-python3 /home/zach/workspace/devrc/scripts/skill-audit.py <SKILL_DIR>
+python3 /home/zach/workspace/devrc/scripts/skill-audit.py "$SKILL_DIR"
 ```
 **Structural**: under target (at least under the hard cap), **every routing path resolves**, no orphans, no unclosed fences, and — if you split a numbered corpus — **`numbered-corpus integrity` reports every citation resolving with no duplicates**.
 
