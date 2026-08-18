@@ -251,18 +251,67 @@ the day you ship.*
 - **State:** OPEN, base `trunk`, exactly 2 files (IngressRoute + kustomization line) after I rebased it
   off the squashed parent. Merging it **is** deploying, and it is what makes a client-confidential
   store internet-reachable.
-- **Blocking, and unmeasured:** the production node's host firewall on `:8102`. Both nebula gateways
-  forward `CF-Connecting-IP` **verbatim and deliberately** (`clusters/{homelab,production}/apps/nebula/
-  gateway/gateway-nginx-config.yaml` — "MUST SURVIVE THIS HOP … deliberately NOT re-set here"), so
-  anything reaching a gateway's `:8102` while bypassing Cloudflare arrives as the trusted peer
-  `10.244.0.123` and its header **is read**. Production's is `listen 0.0.0.0:8102` on a hostNetwork
-  DaemonSet.
+- 🔴 **MEASURED + FIXED 2026-08-18 — the answer was THE INTERNET, and the hole was already live in
+  `trunk` before `#329`.** The production node's host firewall is `k0s/host-firewall/relay-firewall.sh`
+  (homelab-infra), a hand-maintained **deny-list**: an `iptables` `raw`-table chain `RELAY-GUARD`,
+  jumped from `PREROUTING` **for the public interface only**, holding one explicit `--dport N -j DROP`
+  per relay port. `ufw` inactive, `filter INPUT` policy **ACCEPT**, Calico `cali-from-host-endpoint`
+  **empty** — that chain is the only thing filtering, and **`8102` was not in it**. `#330` added the
+  nginx `listen 0.0.0.0:8102` block and Flux reconciled it into the live ConfigMap; nothing added the
+  matching DROP. Closed by homelab-infra **`#337`** (merged, applied to the node, verified below).
+- **The evidence, because "closed" and "no listener" look identical from outside.** Two distinct
+  failure signatures, measured off-mesh from the workbench against **both** public IPv4s on the node's
+  public interface (`ip route get` confirms the probe leaves via the ISP, not nebula), with `tcpdump`
+  running on the node so the host side is observed too:
+  - guarded port with a live socket (`9090`, `8113`) → **timeout**; SYN arrives, host emits **nothing**
+  - `:8102`, and unbound controls `8200`/`22222` → **refused**; SYN arrives, **host emits an RST 71 µs
+    later**. An RST is produced only after `raw` *and* `filter INPUT` accepted the packet and TCP found
+    no socket — so the port was open at the firewall and shut only for want of a listener.
+  - `22`, `6443` (deliberately public) → open. That pair is the instrument's positive control.
+- 🔴 **It was armed, not theoretical — the trigger was a pod restart.** The live gateway pod started
+  **2026-08-02**, predating the ConfigMap change, and mounts `nginx.conf` via **`subPath`**, which is
+  frozen at pod creation and never updates or reloads (live `grep 8102 /etc/nginx/nginx.conf` inside
+  the container: **0**). So the only thing keeping the port shut was pod age. Any recreation arms it —
+  including the DaemonSet's **own `tunnel-watchdog`**, which `DELETE`s its pod after 6 consecutive
+  tunnel health-check failures. Widest reading: **a `subPath` ConfigMap mount makes "what Flux
+  reconciled" and "what the process is running" independent facts — never read one off the other.**
+- **What the direct hop bypasses.** `internet → node:8102 → nginx → nebula → store pod` skips
+  Cloudflare, Traefik and the `subsystem-store-ratelimit` middleware **entirely** — none of them are
+  in that path. Both nebula gateways forward `CF-Connecting-IP` **verbatim and deliberately**
+  (`clusters/{homelab,production}/apps/nebula/gateway/gateway-nginx-config.yaml` — "MUST SURVIVE THIS
+  HOP … deliberately NOT re-set here"), so such a request arrives at the store as the trusted peer
+  `10.244.0.123` with its header **read**. The live image is still `0.1.0`, so `#520`'s "trust the
+  header only from a trusted peer" fix is **not running**: a direct caller could forge the header the
+  per-client lockout is keyed on. The bearer token was the only remaining gate.
 - **Ruled out:** that homelab Traefik would be denied by the NetworkPolicy. It is never in the path —
   the IngressRoute lives in the **production** cluster and targets Endpoints `10.0.0.2:8102`, so
   traffic arrives via the homelab nebula gateway (hostNetwork, same node, allowed).
-- **Next probe (verbatim):** audit the production node's firewall for `:8102` reachability from off-mesh,
-  then run the off-mesh probe from a production-cluster pod asserting `store.zacx.dev` resolves to a
-  **Cloudflare** address (a hairpin or cluster DNS would otherwise hand you a confident false pass).
+- **Ruled out — that the guard would break the intended edge path.** It is public-interface-only, and
+  the production Traefik runs on the *other* node, reaching `10.0.0.2:8102` over the **private**
+  interface. Control watched live: `auditloop.zacx.dev` returns **302** through **guarded** port
+  `8113` while `8113` is unreachable from off-mesh. Re-confirmed after the fix (auditloop + clawgate
+  both 302).
+- **Verified after applying `#337`:** node script sha == `origin/trunk` sha; 39 DROP rules (was 38);
+  `dport 8102` present in v4 **and** v6; the `PREROUTING` jump intact; `:8102` flipped
+  **refused → timed out on both public IPv4s**, while `8200`/`22222` stayed **refused** (so the guard
+  is still port-scoped, not a blanket drop) and `22`/`6443` stayed open. The reachability proof for a
+  port that *does* have a listener is `8113`, which is dropped by an identical rule in the same chain
+  — `raw/PREROUTING` runs before routing, so socket existence is irrelevant to it.
+- 🔴 **The structural defect, which is the durable half.** `PORTS` is a deny-list maintained by hand in
+  a *different file, in a different directory, applied by a third manual step* (`scp` + `systemctl`;
+  it is **not** Flux-reconciled). Nothing diffs it against the `listen 0.0.0.0:<port>` set in
+  `gateway-nginx-config.yaml`. Adding a relay port to nginx therefore **publishes it** until someone
+  remembers. `8102` is the proof it fails. `#337` records this in the README; a checker that pins the
+  two sets against each other is still owed.
+- **Out of scope, measured and reported not acted on:** 12 further wildcard-bound listeners on that
+  node are reachable from off-mesh — node_exporter `9100`, kubelet `10250`, k0s `9443`, konnectivity
+  `8132`, MetalLB `9120`, calico `9091`, kube-proxy `10249`/`10256`, NodePort `30301`, bird BGP `179`,
+  dnsdist `853`/`5353`. The script's README has a follow-up table covering some; `9091`, `9120`,
+  `10249`, `10256`, `30301`, `5353` are **not** on it.
+- **Still unmeasured:** the **homelab** gateway's `:8102` (behind home NAT — a router port forward
+  would be the equivalent hole), and the off-mesh probe from a production-cluster pod asserting
+  `store.zacx.dev` resolves to a **Cloudflare** address (a hairpin or cluster DNS would otherwise hand
+  you a confident false pass). That second one only becomes runnable once `#329` is merged.
 
 ### Keep-alive audit-log misattribution — real, reported, NOT fixed
 - **Symptom:** on a keep-alive connection whose **second** request line is malformed, `self.headers`
@@ -304,8 +353,14 @@ the day you ship.*
    🔴 **Design constraint learned the hard way today: a fourth surface that nothing routes to is invisible,
    which is exactly the defect `#1081` just fixed.** Any journal must be named in the always-on docs and
    reachable by `--search`, or it will repeat the 63%-never-opened outcome.
-3. **Decide `#329`** — after the host-firewall audit above. Merging is deploying and is irreversible in
-   perception even if reversible in fact.
+3. **Decide `#329`** — the host-firewall prerequisite is now **DONE** (audited, and the gap it found
+   closed by homelab-infra `#337`), so this is unblocked and is purely the operator's exposure call.
+   Merging is deploying and is irreversible in perception even if reversible in fact. What the audit
+   changes about the decision: the CF-bypass residual is now **shut at the firewall**, so `#329`
+   genuinely adds only the Cloudflare→Traefik→rate-limit path rather than a second unguarded one.
+   What it does **not** change: `/api/` still carries no edge auth by design, so the bearer token
+   remains the only gate on that path — and `#520`'s trusted-peer fix is still unshipped until the
+   `0.2.0` image lands (step 4), which is arguably the real prerequisite now.
 4. **Build and push image `0.2.0`**, then verify the trusted-proxy env is live at the consumer and
    exercise token rotation end-to-end against the pod.
 5. **The credential rotation** — `github-pat-civitai`, still the only declared-`OPEN:` item in the store,
@@ -526,6 +581,19 @@ curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $TOK" http://
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18102/api/v1/recall/devrc                                   # 401
 getent hosts store.zacx.dev || echo "not public — correct"
 
+# the production node's host firewall on :8102 (re-runnable; addresses are NOT
+# written down here — this repo is public. Resolve them first:)
+P=$HOMELAB/production-kubeconfig
+NODE=$(KUBECONFIG=$P kubectl get node diffsona -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')  # private; the PUBLIC one is in `ip -o -4 addr` on the node
+LB=$(KUBECONFIG=$P kubectl -n traefik get svc traefik -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+ssh root@<node-public-ip> 'iptables-save -t raw | grep -c "dport 8102"'   # 1 = guarded (was 0)
+# 🔴 read the SIGNATURE, not just "did it fail". `-v` is required or nc prints nothing:
+nc -z -w 5 -v <node-public-ip> 8102   # want "timed out" (DROP). "refused" = the host
+nc -z -w 5 -v $LB 8102                #   ACCEPTED it and only lacked a listener — NOT closed.
+nc -z -w 5 -v <node-public-ip> 8200   # control: must stay "refused" — else the guard went blanket
+nc -z -w 5 -v <node-public-ip> 22     # control: must stay open
+curl -s -o /dev/null -w '%{http_code}\n' https://auditloop.zacx.dev/   # 302 — edge path via a GUARDED port
+
 # the gate — read CONTENT, never a piped exit code; a cached drv prints a 0-byte log
 nix build .#checks.x86_64-linux.pytests --no-link --print-build-logs > /tmp/gate.log 2>&1
 grep -aE 'TOTAL +collected|RESULT: (PASS|FAIL)' /tmp/gate.log     # last: 11566 collected, failed=0
@@ -554,8 +622,14 @@ grep -aE 'TOTAL +collected|RESULT: (PASS|FAIL)' /tmp/gate.log     # last: 11566 
 Plus a store entry written by hand: **`devrc/subsystem-store-api.md`** — validated, committed, 0 remotes.
 
 ### 🔴 What is NOT done
-- **Nothing has been tested off-mesh.** No route exists; the control that matters for exposure has never run.
+- **The API has never been exercised off-mesh.** No route exists, so the end-to-end exposure control
+  has still never run. ⚠ Narrowed 2026-08-18: the **network** half now HAS been probed off-mesh — the
+  production node's `:8102` was measured from outside and is now dropped at the firewall (`#337`). That
+  is a claim about **reachability of the port**, not about the app, the token, or the CF header path.
 - **Token rotation has never been exercised** against the live pod (proven hermetically only).
 - **No image built or pushed.** `0.2.0` is owed as its own step.
-- **The production node's host firewall on `:8102` is UNAUDITED** — it decides whether the
-  CF-bypass residual is mesh-only or internet-reachable. **Prerequisite for `#329`.**
+- ~~**The production node's host firewall on `:8102` is UNAUDITED**~~ — **DONE 2026-08-18.** Audited;
+  the answer was *internet-reachable*, because the node's guard is a deny-list that never got an
+  `8102` rule. Closed by homelab-infra **`#337`** (merged + applied + verified: `:8102` flipped
+  refused → dropped on both public IPv4s). Full evidence under "`#329` is the on-switch" above.
+  🔴 **This one was live in `trunk` BEFORE `#329`** — the ingress PR was never what created it.
