@@ -1,4 +1,4 @@
-# Handoff: subsystem-store — 2026-08-16 (phase 1 shipped)
+# Handoff: subsystem-store — 2026-08-18 (🔴 THE STORE IS PUBLIC; cutover done)
 
 ## Run this first — the index, one read-only command
 ```bash
@@ -16,22 +16,30 @@ stderr line and carry on. **Two measured sessions skipped this when it was only 
 A durable store for subsystem data + history with clean Claude Code integration, **reachable
 from anywhere**. The local half is built, deployed and verified at the consumer on both hosts:
 the read half is cheap enough to run every `/resume`, searchable, and survives a malformed
-entry. The server half is at **phase 1 of 4** — see "State now".
+entry. The server half reached its cutover on 2026-08-18: **`store.zacx.dev` is live on the public
+internet**, Cloudflare-proxied, gated by a bearer token plus a mandatory `CF-Connecting-IP`. See
+"State now — 🔴🔴 THE STORE IS PUBLIC" (the SECOND such block; the first is historical).
 
-⚠ The previous revision ended *"what remains is measurement, not a build"*. That stopped being
-true on 2026-08-16: phases 1.5–4 are builds, and 1.5 is the one that faces the internet.
+⚠ Two earlier revisions each closed with a framing the next day falsified — *"what remains is
+measurement, not a build"*, then a phase table that outlived its own cutover. **The standing risk in
+this doc is a stale state claim read as current**, which is why the superseded block below is
+labelled rather than deleted.
 
-## State now — 🔴 THE STORE NOW HAS A SERVER. Phase 1 shipped 2026-08-16.
+## ⚠ SUPERSEDED — this block describes 2026-08-16. Jump to "State now — THE STORE IS PUBLIC".
 
-- **devrc `main` at `6bc6518`; homelab-infra `trunk` at `4f6ced02`.** Both base clones re-synced,
-  both hosts at the same devrc commit. Only untracked leftover on the workbench is one
-  `nix/system/*.LOCAL-preserved` file.
-- 🔴 **A pod serves the store on homelab, ns `subsystem-store`, cluster-internal.**
-  ClusterIP on **8102** (not the proposal's original 8110 — taken). Flux-managed since #326
-  (`kustomize.toolkit.fluxcd.io/name: subsystem-store`). **No ingress, no public exposure,
-  no DNS, no Authelia rule** — that is phase 1.5 and it has NOT been done.
-- **The design doc is `claudedocs/proposal-subsystem-store-homelab.md`** and it is current:
-  its header says what is built vs still proposed, and its port matches the deployment.
+🔴 **This doc has TWO "State now" sections and this is the OLD one.** It is kept because the
+open-investigations below reference it, but every exposure claim in it is now false: the store went
+public on 2026-08-18 (`#329`). The authoritative block is further down and titled
+**"State now — 🔴🔴 THE STORE IS PUBLIC"**. If you read only one, read that one.
+
+- **devrc `main` at `6bc6518`; homelab-infra `trunk` at `4f6ced02`.** ← both long superseded.
+- ~~**A pod serves the store on homelab, cluster-internal.** No ingress, no public exposure, no DNS,
+  no Authelia rule — that is phase 1.5 and it has NOT been done.~~ **All four halves of that
+  sentence are now wrong**: there IS an ingress, DNS resolves via Cloudflare, and there is
+  deliberately no Authelia (a forward-auth 302 is unusable from a CLI). The ClusterIP is still 8102.
+- **The design doc is `claudedocs/proposal-subsystem-store-homelab.md`.** ⚠ Its header states what
+  was built vs still proposed **as of phase 1** — it has not been updated for the cutover, so treat
+  its phase table as historical too.
 
 ### Shipped this session (9 PRs)
 
@@ -48,13 +56,15 @@ true on 2026-08-16: phases 1.5–4 are builds, and 1.5 is the one that faces the
 
 `#503`/`#504`/`#505` (previous session) remain shipped + verified at the consumer on both hosts.
 
-### 🔴 What phase 1 is NOT
-Read this before trusting anything above as coverage:
-- **Nothing has been tested off-mesh.** Phase 1 creates no route, so the control that matters
-  for exposure — a request from outside your network — has never run.
-- **The `(B-required)` hardening is not built**: no rate-limit, no lockout, no split
-  read/write tokens. **Token rotation has never been exercised once**, which the proposal
-  names as a pre-cutover requirement.
+### 🔴 What phase 1 was NOT (historical — several of these have since been closed)
+Read this before trusting the 2026-08-16 block above as coverage:
+- ~~**Nothing has been tested off-mesh.**~~ **CLOSED 2026-08-18** — tested over the public internet
+  via Cloudflare: 200 authed / 401 unauthed / 404 on `/`, client IP intact.
+- ~~**The `(B-required)` hardening is not built**: no rate-limit, no lockout, no split read/write
+  tokens. **Token rotation has never been exercised once.**~~ **MOSTLY CLOSED 2026-08-18** — the
+  rate limiter, the lockout and the mandatory client-IP all ship in `0.2.0` and are live; rotation
+  was exercised end to end (`#344`+`#345`). ⚠ **Split read/write tokens were NOT built** and remain
+  outstanding, as does the Cloudflare WAF rule (layer 1).
 - **88 of the 89 API tests are invariant guards, not regressions** — `server.py` did not
   exist at base, so "red at base" is a collection error and proves nothing. The evidence
   that they bite is the 22-mutant sweep, not the red-at-base matrix.
@@ -247,10 +257,12 @@ the day you ship.*
 - **Observed:** this session ran `subsystem_recall.py` at `/resume` step 4, i.e. because the SKILL told it to. `Skill` calls were non-zero (the `resume` skill loaded), so attribution to the doc is structurally impossible here.
 - **Unchanged:** parse the next few ORGANIC continuations; do not stage a probe.
 
-### `#329` is the on-switch and is deliberately unmerged
-- **State:** OPEN, base `trunk`, exactly 2 files (IngressRoute + kustomization line) after I rebased it
-  off the squashed parent. Merging it **is** deploying, and it is what makes a client-confidential
-  store internet-reachable.
+### `#329` WAS the on-switch — MERGED 2026-08-18 (kept for the evidence trail)
+- **State: MERGED** as `d27b0cc1`. Rebased onto current trunk first — it was **23 commits behind**, and
+  its only check was a day-old `COULD NOT RUN` evaluating a stale tree. Post-rebase the gate ran green
+  (including the new relay-guard leg), `merge-tree` exited 0, and the merged region of
+  `kustomization.yaml` — the file `#330` also rewrote — was read directly, because a clean textual
+  merge is not a clean merge.
 - 🔴 **MEASURED + FIXED 2026-08-18 — the answer was THE INTERNET, and the hole was already live in
   `trunk` before `#329`.** The production node's host firewall is `k0s/host-firewall/relay-firewall.sh`
   (homelab-infra), a hand-maintained **deny-list**: an `iptables` `raw`-table chain `RELAY-GUARD`,
@@ -634,19 +646,45 @@ curl -s -o /dev/null -w '%{http_code}\n' https://auditloop.zacx.dev/   # 302 —
 nix build .#checks.x86_64-linux.pytests --no-link --print-build-logs > /tmp/gate.log 2>&1
 grep -aE 'TOTAL +collected|RESULT: (PASS|FAIL)' /tmp/gate.log     # last: 11566 collected, failed=0
 ```
-## State now — phase 1 AND 1.5-hardening shipped; the store is a live service, still PRIVATE
+## State now — 🔴🔴 THE STORE IS PUBLIC. `#329` merged 2026-08-18T23:28:31Z.
 
-- **devrc `main` at `edd0ba3`; homelab-infra `trunk` at `9f89db49`; civitai/talos-infra `trunk` carries `126f412b6`.**
-- 🔴 **Live:** pod `subsystem-store-api-7fbb89cb5b-5f7m7` Running on `talos-jkj-deb`, ns `subsystem-store`,
-  ClusterIP **8102**, Flux-managed, plus `subsystem-store-default-deny-ingress`. **No ingress, no DNS —
-  `store.zacx.dev` does not resolve.** Verified 200 authed / 401 unauthed.
-- 🔴 **The deployment is PRIMED WITH AN INERT CONFIG.** It rolled once at **2026-08-17T23:26:46Z**
-  (generation 6) picking up `SUBSYSTEM_STORE_TRUSTED_PROXIES=10.244.0.123/32`. The image is still
-  `0.1.0`, which **ignores** that variable — the code that reads it is `#520`, merged to devrc `main`
-  with **no image built**. The moment a new image ships that value becomes load-bearing, and a wrong
-  one is `EXIT_CONFIG` (78) → CrashLoop on `Recreate`+`replicas:1`.
-  🔴 **The next image MUST be `0.2.0`** — re-pushing `0.1.0` is exactly the mutable-tag clobber
-  `deployment.yaml:56-57` forbids, and it is an easy mistake *because* this file's tag did not move.
+- **homelab-infra `trunk` at `d27b0cc1`.** The cutover happened; phases 1 → 1.5 are complete.
+- 🔴 **`store.zacx.dev` is LIVE on the public internet**, Cloudflare-proxied. Verified from off-mesh
+  over the real path (not a port-forward, not a hairpin):
+  - DNS resolves, via two independent public resolvers, to the **same Cloudflare anycast pair as the
+    `clawgate.zacx.dev` control** — and **not** to the Traefik LoadBalancer address the
+    `external-dns` annotation targets. (Addresses deliberately not written here: this repo is
+    PUBLIC. Compare them yourself with
+    `dig +short @<a-public-resolver> store.zacx.dev` against `kubectl -n traefik get svc traefik`.) That
+    comparison was the handoff's own "next probe (verbatim)" — a hairpin or cluster DNS would
+    otherwise hand you a confident false pass.
+  - `GET /api/v1/recall/devrc` **with** the token → **200**, 5251 bytes of real store content.
+  - **without** a token → **401**. `GET /` → **404** (single API route by design; no UI).
+  - The audit line proves the client-IP chain survives every hop:
+    `ip=<real client public IP> peer=trusted token=2481e4553f6c auth=ok result=200`.
+    `peer=trusted` is also the in-situ proof that `SUBSYSTEM_STORE_TRUSTED_PROXIES` is correct.
+  ⚠ **A local resolver may cache the old NXDOMAIN** — `getent` returned empty for ~10 min after the
+  record existed. Use `dig @<a-public-resolver>` or `curl --resolve`; an `http=000` is your resolver, not the
+  service.
+- ✅ **Image `0.2.0` is running** (homelab-infra `#343`), so `#520`'s trusted-peer fix is finally live
+  and `SUBSYSTEM_STORE_TRUSTED_PROXIES` is load-bearing rather than inert. Rolled with **0 restarts**.
+  🔴 **The next image MUST be `0.3.0`** — the mutable-tag clobber rule is unchanged.
+- ✅ **Token rotation has been exercised end to end** (homelab-infra `#344` + `#345`) — the proposal's
+  §4 pre-cutover requirement, met before the cutover rather than after. Overlap held (both tokens
+  200), then the old line was deleted and the retired token now returns **401 with `token=-`**.
+
+### 🔴 THE OUTERMOST LAYER MAY NOT EXIST — CHECK THIS FIRST
+`#329`'s own header names three guards in order. Layers 2 (the Traefik `subsystem-store-ratelimit`
+middleware, avg 10/s burst 20 keyed on `CF-Connecting-IP`) and 3 (the app: rotating token set,
+`hmac.compare_digest`, uniform 401, 5 failures/60s → 900s lockout, absent client-IP refused) are
+declarative, merged, and verified live. **Layer 1, the Cloudflare WAF rate rule, is console-managed
+and declared NOWHERE in the repo.** Nothing in this session created or confirmed it. Until someone
+opens the Cloudflare console and looks, treat the store as protected by layers 2 and 3 only.
+
+### The kill switch
+Delete the `- gateway/subsystem-store-ingress.yaml` line from
+`clusters/production/apps/nebula/kustomization.yaml`, commit, `flux reconcile kustomization nebula`.
+One line, and the route is gone. DNS lingers until external-dns prunes it.
 
 ### Shipped (16 PRs, 3 repos — the rest in those repos' merge lists belong to other sessions)
 | theme | PRs |
@@ -658,12 +696,20 @@ grep -aE 'TOTAL +collected|RESULT: (PASS|FAIL)' /tmp/gate.log     # last: 11566 
 Plus a store entry written by hand: **`devrc/subsystem-store-api.md`** — validated, committed, 0 remotes.
 
 ### 🔴 What is NOT done
-- **The API has never been exercised off-mesh.** No route exists, so the end-to-end exposure control
-  has still never run. ⚠ Narrowed 2026-08-18: the **network** half now HAS been probed off-mesh — the
-  production node's `:8102` was measured from outside and is now dropped at the firewall (`#337`). That
-  is a claim about **reachability of the port**, not about the app, the token, or the CF header path.
-- **Token rotation has never been exercised** against the live pod (proven hermetically only).
-- **No image built or pushed.** `0.2.0` is owed as its own step.
+- 🔴 **The Cloudflare WAF rate rule (layer 1 of 3) is UNVERIFIED** — console-managed, declared nowhere
+  in the repo, and nothing in this session created or checked it. This is now the top open item,
+  because the store is public and this is the outermost guard.
+- **No adversarial traffic has ever hit it.** The lockout, the rate limiter and the WAF have been
+  exercised only by my own well-formed probes. Nothing has been measured under abuse.
+- **`--mode=full` / `--page` over HTTP** were never byte-compared against the pod; only the default
+  digest was — and that comparison predates `0.2.0`.
+- ~~**The API has never been exercised off-mesh**~~ — **DONE 2026-08-18**, over the public internet
+  via Cloudflare: 200 authed / 401 unauthed / 404 on `/`, with the client IP arriving intact.
+- ~~**Token rotation has never been exercised**~~ — **DONE 2026-08-18** (`#344` + `#345`), both the
+  overlap and the retirement, the latter being the step the README says people skip.
+- ~~**No image built or pushed**~~ — **DONE 2026-08-18**: `0.2.0` built, pre-flighted against the
+  production env (good value starts and prints its banner; `not-a-cidr`, a `/99` prefix and EMPTY each
+  exit 78), pushed, rolled with 0 restarts.
 - ~~**The production node's host firewall on `:8102` is UNAUDITED**~~ — **DONE 2026-08-18.** Audited;
   the answer was *internet-reachable*, because the node's guard is a deny-list that never got an
   `8102` rule. Closed by homelab-infra **`#337`** (merged + applied + verified: `:8102` flipped
