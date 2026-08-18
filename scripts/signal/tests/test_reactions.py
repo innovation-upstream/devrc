@@ -275,3 +275,108 @@ def test_reactions_unique_constraint_is_live(db):
             "INSERT INTO signal.reactions (target_author_id, target_sent_timestamp, "
             "emoji, contact_id) VALUES (?, ?, '🎉', ?)",
             (author, TARGET_TS, reactor))
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 The own-device REACTION direction — the sibling the remote-delete fix missed.
+#
+# Found by step 7, from LIVE traffic: a reaction Zach sent from his phone arrived
+# as `syncMessage.sentMessage.reaction` with `message: None`. The sync branch runs
+# BEFORE the inbound `dataMessage` branch and handled only `remoteDelete`, so the
+# reaction fell through to `_base_message()` and produced exactly the two defects
+# the remote-delete branch exists to prevent: the reaction was DROPPED from
+# signal.reactions, and a bodyless ghost row was left in signal.messages.
+#
+# The live miss nearly read as clean — two OTHER group members had reacted to the
+# same message, so a count of reactions carrying that target timestamp said "2,
+# fine". Zach's own contact was absent from every one of them. Hence the reactor
+# identity assertion below: a count assertion here would not have caught this.
+
+SELF_UUID = "90909090-9090-4909-8909-909090909090"
+
+
+def test_a_reaction_made_on_ZACHS_OWN_PHONE_is_stored_not_dropped(db):
+    """Regression: outbound reaction -> a reactions row, NOT a ghost message."""
+    target_ts = 1723260000077
+    db.upsert_message(_message(uuid=ALICE, ts=target_ts))
+    assert db.conn.count("messages") == 1
+
+    event = consumer.parse_envelope({
+        "source": "+15559090", "sourceUuid": SELF_UUID,
+        "sourceNumber": "+15559090", "timestamp": target_ts + 11,
+        "syncMessage": {"sentMessage": {
+            "message": None, "timestamp": target_ts + 11,
+            "destination": None, "destinationUuid": None,
+            "groupInfo": {"type": "DELIVER", "groupId": "Zm9vZ3JvdXA=",
+                          "revision": 3, "groupName": "a group"},
+            "reaction": {"emoji": "🔥", "isRemove": False,
+                         "targetAuthor": "+15550101",
+                         "targetAuthorUuid": ALICE,
+                         "targetAuthorNumber": None,
+                         "targetSentTimestamp": target_ts}}},
+    })
+
+    # It is a REACTION, and it carries NO message -- so no ghost row can be written.
+    assert event.kind == consumer.KIND_REACTION
+    assert event.message is None
+
+    # The reactor is the ACCOUNT ITSELF, not the author of the reacted-to message.
+    # This is the assertion the live data needed: other people's reactions on the
+    # same target were present, so only the identity distinguishes stored from lost.
+    assert event.reaction["source_uuid"] == SELF_UUID
+    assert event.reaction["target_author_uuid"] == ALICE
+    assert event.reaction["target_sent_timestamp"] == target_ts
+    assert event.reaction["emoji"] == "🔥"
+    assert event.reaction["is_remove"] is False
+
+    db.upsert_reaction(event.reaction)
+
+    # Stored, resolved to its target, and still exactly one message row.
+    assert db.conn.count("messages") == 1
+    rows = db.conn.rows("SELECT message_id, emoji FROM signal.reactions")
+    assert len(rows) == 1
+    assert rows[0]["message_id"] is not None
+    assert rows[0]["emoji"] == "🔥"
+    assert db.unresolved_reactions() == []
+
+
+def test_an_own_phone_reaction_REMOVAL_is_stored_as_a_removal(db):
+    """`isRemove` must survive the sync path, or un-reacting is invisible."""
+    target_ts = 1723260000088
+    db.upsert_message(_message(uuid=ALICE, ts=target_ts))
+    event = consumer.parse_envelope({
+        "sourceUuid": SELF_UUID, "sourceNumber": "+15559090",
+        "timestamp": target_ts + 12,
+        "syncMessage": {"sentMessage": {
+            "message": None, "timestamp": target_ts + 12,
+            "reaction": {"emoji": "🔥", "isRemove": True,
+                         "targetAuthorUuid": ALICE,
+                         "targetSentTimestamp": target_ts}}},
+    })
+    assert event.kind == consumer.KIND_REACTION
+    assert event.message is None
+    assert event.reaction["is_remove"] is True
+
+
+def test_a_sync_reaction_without_a_target_is_malformed():
+    """Mirrors the inbound guard: a targetless reaction must not be stored."""
+    with pytest.raises(consumer.MalformedEvent):
+        consumer.parse_envelope({
+            "sourceUuid": SELF_UUID, "timestamp": 1,
+            "syncMessage": {"sentMessage": {
+                "message": None, "timestamp": 1,
+                "reaction": {"emoji": "🔥", "targetAuthorUuid": ALICE}}}})
+
+
+def test_an_ordinary_sync_message_is_STILL_an_outbound_message(db):
+    """Guard the narrowing: only reaction-bearing syncs change branch."""
+    ts = 1723260000099
+    event = consumer.parse_envelope({
+        "sourceUuid": SELF_UUID, "sourceNumber": "+15559090", "timestamp": ts,
+        "syncMessage": {"sentMessage": {
+            "message": "an ordinary outbound message", "timestamp": ts,
+            "destination": "+15550101", "destinationUuid": ALICE}},
+    })
+    assert event.kind == consumer.KIND_SYNC_OUTBOUND
+    assert event.message is not None
+    assert event.message["is_outbound"] is True

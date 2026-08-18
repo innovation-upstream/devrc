@@ -249,6 +249,35 @@ def parse_envelope(envelope: dict) -> ParsedEvent:
                 },
                 raw_envelope=raw,
             )
+        # 🔴 A REACTION MADE ON ZACH'S OWN PHONE arrives HERE too, in the same
+        # `syncMessage.sentMessage` wrapper and for the same reason as the
+        # retraction above: this branch runs BEFORE the inbound `dataMessage`
+        # branch. Without this case it fell through to `_base_message()` and hit
+        # BOTH defects the remote-delete case exists to prevent — the reaction
+        # dropped from signal.reactions, and a bodyless ghost row left in
+        # signal.messages (`message` is None on a reaction-only sync).
+        #
+        # Found in LIVE traffic, not by review: two OTHER members had reacted to
+        # the same message, so the reaction COUNT for that target looked right
+        # and only the reactor identity showed the account's own was missing.
+        sync_reaction = sent.get("reaction")
+        if sync_reaction is not None:
+            # The reactor is the ACCOUNT ITSELF — this envelope's source is the
+            # linked device — while targetAuthor is whoever wrote the message
+            # being reacted to. Same field mapping as the inbound branch.
+            rx = {
+                "source_uuid": envelope.get("sourceUuid"),
+                "source_number": envelope.get("sourceNumber") or envelope.get("source"),
+                "target_author_uuid": sync_reaction.get("targetAuthorUuid"),
+                "target_author_number": sync_reaction.get("targetAuthor"),
+                "target_sent_timestamp": sync_reaction.get("targetSentTimestamp"),
+                "emoji": sync_reaction.get("emoji"),
+                "is_remove": bool(sync_reaction.get("isRemove")),
+            }
+            if rx["target_sent_timestamp"] is None:
+                raise MalformedEvent("sync reaction has no targetSentTimestamp")
+            return ParsedEvent(kind=KIND_REACTION, reaction=rx, raw_envelope=raw)
+
         ts = sent.get("timestamp") or env_ts
         if ts is None:
             raise MalformedEvent("sync sentMessage has no timestamp")
