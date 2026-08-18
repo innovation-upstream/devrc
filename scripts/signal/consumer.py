@@ -205,6 +205,50 @@ def _base_message(env: dict, data: dict, *, timestamp: int) -> dict:
     }
 
 
+def _reaction_from(envelope: dict, reaction, *, where: str) -> dict:
+    """Build a reaction row from `reaction`, wherever in the envelope it sat.
+
+    🔴 ONE PLACE, because there are TWO sites — inbound `dataMessage.reaction`
+    and own-device `syncMessage.sentMessage.reaction` — and the second was added
+    only after live traffic showed outbound reactions being dropped. Open-coding
+    the same dict twice is what let the sync site ship missing the guards the
+    inbound site had; keeping it open-coded would guarantee the next divergence.
+
+    🔴 EVERY guard here exists because the alternative is NOT a skipped frame but
+    a WEDGED CONSUMER. `upsert_reaction` resolves BOTH the target author and the
+    reactor through `upsert_contact`, which raises `ValueError` on an
+    unidentifiable contact — and `ValueError` is neither `MalformedEvent` nor a
+    TRANSIENT_DB_ERROR, so it escapes `store()`, escapes `handle_payload()`
+    (which wraps only the PARSE), and lands in `run()`'s reconnect handler,
+    which counts it as a dropped stream. Signal then REDELIVERS the same frame
+    on reconnect: an unbounded loop that stores nothing and takes every later
+    frame on the connection down with it. Raising `MalformedEvent` here instead
+    keeps the module's promise — skipped and counted, never fatal.
+    """
+    if not isinstance(reaction, dict):
+        raise MalformedEvent(f"{where} reaction is not an object")
+    rx = {
+        "source_uuid": envelope.get("sourceUuid"),
+        "source_number": envelope.get("sourceNumber") or envelope.get("source"),
+        "target_author_uuid": reaction.get("targetAuthorUuid"),
+        # signal-cli exposes THREE identity fields and the first version of this
+        # read only two: `targetAuthorNumber` appears in real envelopes and was
+        # silently ignored, so a reaction carrying only it looked unidentifiable.
+        "target_author_number": (reaction.get("targetAuthor")
+                                 or reaction.get("targetAuthorNumber")),
+        "target_sent_timestamp": reaction.get("targetSentTimestamp"),
+        "emoji": reaction.get("emoji"),
+        "is_remove": bool(reaction.get("isRemove")),
+    }
+    if rx["target_sent_timestamp"] is None:
+        raise MalformedEvent(f"{where} reaction has no targetSentTimestamp")
+    if not (rx["target_author_uuid"] or rx["target_author_number"]):
+        raise MalformedEvent(f"{where} reaction has no target author identity")
+    if not (rx["source_uuid"] or rx["source_number"]):
+        raise MalformedEvent(f"{where} reaction has no reactor identity")
+    return rx
+
+
 def parse_envelope(envelope: dict) -> ParsedEvent:
     """Normalise one signal-cli envelope into a `ParsedEvent`.
 
@@ -249,6 +293,25 @@ def parse_envelope(envelope: dict) -> ParsedEvent:
                 },
                 raw_envelope=raw,
             )
+        # 🔴 A REACTION MADE ON ZACH'S OWN PHONE arrives HERE too, in the same
+        # `syncMessage.sentMessage` wrapper and for the same reason as the
+        # retraction above: this branch runs BEFORE the inbound `dataMessage`
+        # branch. Without this case it fell through to `_base_message()` and hit
+        # BOTH defects the remote-delete case exists to prevent — the reaction
+        # dropped from signal.reactions, and a bodyless ghost row left in
+        # signal.messages (`message` is None on a reaction-only sync).
+        #
+        # Found in LIVE traffic, not by review: two OTHER members had reacted to
+        # the same message, so the reaction COUNT for that target looked right
+        # and only the reactor identity showed the account's own was missing.
+        sync_reaction = sent.get("reaction")
+        if sync_reaction is not None:
+            # The reactor is the ACCOUNT ITSELF — this envelope's source is the
+            # linked device — while targetAuthor is whoever wrote the message
+            # being reacted to.
+            rx = _reaction_from(envelope, sync_reaction, where="sync")
+            return ParsedEvent(kind=KIND_REACTION, reaction=rx, raw_envelope=raw)
+
         ts = sent.get("timestamp") or env_ts
         if ts is None:
             raise MalformedEvent("sync sentMessage has no timestamp")
@@ -299,19 +362,15 @@ def parse_envelope(envelope: dict) -> ParsedEvent:
                 raw_envelope=raw,
             )
 
+        # `is not None`, NOT truthiness — the same predicate as the sync site
+        # above, deliberately. Consolidating only the parser BODY left this
+        # dispatch divergent: an inbound `reaction: {}` was stored as an ordinary
+        # message while the identical sync shape was reported malformed. A
+        # malformed frame counted as a successful message is the failure the
+        # remoteDelete branch documents; one rule, both sites.
         reaction = data.get("reaction")
-        if reaction:
-            rx = {
-                "source_uuid": envelope.get("sourceUuid"),
-                "source_number": envelope.get("sourceNumber") or envelope.get("source"),
-                "target_author_uuid": reaction.get("targetAuthorUuid"),
-                "target_author_number": reaction.get("targetAuthor"),
-                "target_sent_timestamp": reaction.get("targetSentTimestamp"),
-                "emoji": reaction.get("emoji"),
-                "is_remove": bool(reaction.get("isRemove")),
-            }
-            if rx["target_sent_timestamp"] is None:
-                raise MalformedEvent("reaction has no targetSentTimestamp")
+        if reaction is not None:
+            rx = _reaction_from(envelope, reaction, where="inbound")
             return ParsedEvent(kind=KIND_REACTION, reaction=rx, raw_envelope=raw)
 
         ts = data.get("timestamp") or env_ts

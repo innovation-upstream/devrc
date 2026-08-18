@@ -572,3 +572,71 @@ def test_run_returns_its_counters(db):
         consumer.STAT_DB_RECOVERIES, consumer.STAT_DB_RECOVERY_FAILURES,
         consumer.STAT_ATTACHMENT_FAILURES,
     }
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE SEAM. Both halves of the reaction path were tested in isolation and both
+# were clean: the parser had its own tests, the DB layer had its own tests, and
+# neither fixture ever built the combined state. The defect lived exactly there —
+# an unidentifiable contact parses FINE and only raises inside upsert_contact,
+# and that ValueError is neither MalformedEvent nor a TRANSIENT_DB_ERROR, so it
+# escapes store(), escapes handle_payload() (which wraps only the PARSE), and is
+# counted by run() as a DROPPED STREAM. Signal redelivers unacked frames on
+# reconnect: an unbounded loop storing nothing, taking every later frame with it.
+#
+# These drive parser + DB together through run(), which is the only place that
+# distinction is observable.
+
+def _sync_reaction_frame(*, target_ts, target_uuid, target_number=None):
+    return json.dumps({"account": "+15559095", "envelope": {
+        "source": "+15559095", "sourceUuid": "95959595-9595-4959-8959-959595959595",
+        "sourceNumber": "+15559095", "timestamp": target_ts + 11,
+        "syncMessage": {"sentMessage": {
+            "message": None, "timestamp": target_ts + 11,
+            "reaction": {"emoji": "🎯", "isRemove": False,
+                         "targetAuthorUuid": target_uuid,
+                         "targetAuthor": target_number,
+                         "targetSentTimestamp": target_ts}}}}})
+
+
+def test_an_unidentifiable_sync_reaction_is_SKIPPED_not_a_reconnect_loop(db):
+    """The wedge: one bad frame must not take the connection off the air."""
+    bad = _sync_reaction_frame(target_ts=1723800000010, target_uuid=None)
+    c = _consumer(db, Streams([bad]))
+    c.run(max_connections=1)
+
+    # Counted as malformed -- skipped, never fatal, exactly as the module promises.
+    assert c.stats[consumer.STAT_MALFORMED] == 1
+    # 🔴 The discriminating assertion: a reconnect here means the frame WEDGED the
+    # stream. Malformed and reconnect are the two mechanisms an empty table cannot
+    # tell apart, so the count is what identifies which one happened.
+    assert c.stats[consumer.STAT_RECONNECTS] == 0
+    assert db.conn.count("reactions") == 0
+    assert db.conn.count("messages") == 0
+
+
+def test_a_frame_AFTER_an_unidentifiable_reaction_still_gets_stored(db):
+    """The real cost of the wedge was every LATER frame on that connection."""
+    bad = _sync_reaction_frame(target_ts=1723800000020, target_uuid=None)
+    good = _sync_reaction_frame(target_ts=1723800000030, target_uuid=ALICE)
+    c = _consumer(db, Streams([bad, good]))
+    c.run(max_connections=1)
+
+    assert c.stats[consumer.STAT_MALFORMED] == 1
+    assert c.stats[consumer.STAT_RECONNECTS] == 0
+    assert db.conn.count("reactions") == 1     # the good frame survived the bad one
+
+
+def test_POSITIVE_CONTROL_a_well_formed_sync_reaction_does_store(db):
+    """Proves the two tests above can observe a stored reaction at all.
+
+    Without this, `reactions == 0` is indistinguishable from a harness wired to
+    nothing — the assertion would hold with the whole path deleted.
+    """
+    good = _sync_reaction_frame(target_ts=1723800000040, target_uuid=ALICE)
+    c = _consumer(db, Streams([good]))
+    c.run(max_connections=1)
+
+    assert c.stats[consumer.STAT_MALFORMED] == 0
+    assert c.stats[consumer.STAT_RECONNECTS] == 0
+    assert db.conn.count("reactions") == 1
