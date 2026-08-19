@@ -22,7 +22,7 @@ accurate cross-reference steered a reader away from the highest-stakes signal on
 the machine. The fix that survived the retirement is the one that mattered:
 
   * the pending count is read HERE (`report["clawgate_queue"]`, and a
-    `▸ BLOCKED ON ME` section printed in every state including unmeasured), so
+    `▸ CLAWGATE QUEUE` section printed in every state including unmeasured), so
     the headline question does not depend on remembering another tool.
 
 ⚠ What agent-ops had that nothing here replaces: the ENUMERATED queue with task
@@ -187,7 +187,7 @@ and the roll-ups a caller usually wants are:
                                         `waiting`, never summed into it
     report["summary"]["status"][b]      class counts + "total" per bucket
     report["summary"]["kind"]           {"tmux": N} — the entity axis
-    report["clawgate_queue"]             {"status", "count", ...}
+    report["clawgate_queue"]            {"status", "count", ...}
     report["not_measured"]              [{population, owner_skill, ...}] — the
                                         populations this tool CANNOT see, and
                                         which skill owns each
@@ -1540,7 +1540,7 @@ def detect_waiting(text) -> dict:
 
 
 def read_clawgate_queue(path=None, reader=None, now=None,
-                       max_age=BLOCKED_CACHE_MAX_AGE) -> dict:
+                        max_age=BLOCKED_CACHE_MAX_AGE) -> dict:
     """The clawgate approval queue's pending COUNT, status-discriminated.
 
     🔴 FOUR outcomes, never two. `absent` / `unparseable` publish `count: None`,
@@ -2667,7 +2667,7 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
         # a `status` from the first byte so no code path can publish a bare
         # count. See `read_clawgate_queue` for the four outcomes.
         "clawgate_queue": {"status": "skipped", "count": None,
-                          "stuck_count": None, "schema_ok": False},
+                           "stuck_count": None, "schema_ok": False},
         # 🔴 The two limits that change what these rows MEAN, carried in the
         # payload rather than left in the skill body. See CAVEATS.
         "caveats": CAVEATS,
@@ -2905,7 +2905,7 @@ def gather(hosts=HOST_NAMES, local_host=None, runner=None, use_ch=True,
         report["filters"]["kinds_excluded_by_filter"] = sorted(
             kinds_before - kinds_after)
 
-    # --- 🔴 blocked-on-me: the clawgate approval queue ------------------------
+    # --- 🔴 the clawgate approval queue ---------------------------------------
     # A local file read, so it costs nothing and runs unconditionally. The
     # reader is resolved AT CALL TIME (same reason as `ch_client_factory`
     # above): binding `_read_text` as a default would make the seam unpatchable
@@ -3113,22 +3113,22 @@ def render_clawgate_queue(queue) -> list:
     count, out = b.get("count"), []
     if st == "ok":
         if count:
-            out.append(f"▸ BLOCKED ON ME: {count} clawgate task(s) needing you")
+            out.append(f"▸ CLAWGATE QUEUE: {count} task(s) needing you")
             out.extend(_render_blocked_rows(b))
         else:
-            out.append("▸ BLOCKED ON ME: 0 clawgate tasks pending "
+            out.append("▸ CLAWGATE QUEUE: 0 tasks pending "
                        f"(cache {int(b.get('cache_age_secs') or 0)}s old — "
                        "a measured zero)")
             if not b.get("schema_ok"):
                 out.append("  ⚠ " + _trunc(b.get("schema_note"), 160))
     elif st == "stale":
-        out.append(f"▸ BLOCKED ON ME: UNMEASURED (stale cache) — last known "
+        out.append(f"▸ CLAWGATE QUEUE: UNMEASURED (stale cache) — last known "
                    f"count {count}")
         out.append(f"  {_trunc(b.get('error'), 110)}")
         out.append("  (this is NOT a current count; check the clawgate API or "
                    "the bar's clawgate pill)")
     else:
-        out.append(f"▸ BLOCKED ON ME: UNMEASURED [{st}]")
+        out.append(f"▸ CLAWGATE QUEUE: UNMEASURED [{st}]")
         out.append(f"  {_trunc(b.get('error') or 'unknown reason', 110)}")
         out.append("  (this is NOT zero pending approvals — the queue was "
                    "never read. The clawgate API has it live)")
@@ -3247,7 +3247,7 @@ def render_table(report) -> str:
                     _trunc(r.get("unsent_prompt"), 90)))
     out.append("")
 
-    # 🔴 BLOCKED ON ME — printed ALWAYS, including when it was not measured.
+    # 🔴 CLAWGATE QUEUE — printed ALWAYS, including when it was not measured.
     # This section exists because a dogfood agent, correctly reading that
     # `agent-ops` has no JSON API, never opened it and so missed 11 pending
     # approvals — four of them credential-exposure or cross-user-data-leak.
@@ -3819,11 +3819,11 @@ def _fmt_kind_scope(kd) -> str:
                     "(kind={}), so no kind survives to be reported — rows were "
                     "measured and dropped, NOT absent, and this says nothing "
                     "about what an unfiltered scan holds; clawgate is reported "
-                    "separately under BLOCKED ON ME".format("/".join(filtered)))
+                    "separately under CLAWGATE QUEUE".format("/".join(filtered)))
         return ("NO rows were measured in this scan, so no kind was observed — "
                 "this is NOT a claim that any kind is absent, and the enumerated "
                 "kinds ({}) say nothing about what a reachable host holds; "
-                "clawgate is reported separately under BLOCKED ON ME".format(
+                "clawgate is reported separately under CLAWGATE QUEUE".format(
                     "/".join(enumerated)))
     return _kind_scope_sentence("rows in this scan are kind={}", "this scan",
                                 produced, enumerated, filtered)
@@ -3881,12 +3881,12 @@ def _kind_scope_sentence(head_fmt, subject, produced, enumerated,
         # below: both are pinned whole by the suite, and rewording either buys
         # nothing while breaking a machine-readable claim.
         clauses.append("clawgate approval state is still reported separately "
-                       "under BLOCKED ON ME")
+                       "under CLAWGATE QUEUE")
         return head + " — " + "; ".join(clauses)
     # Every other branch names something absent, and ends with the pointer to
     # where clawgate IS reported — or the reader concludes this tool cannot say
     # anything about cluster work at all.
-    clauses.append("clawgate is reported separately under BLOCKED ON ME")
+    clauses.append("clawgate is reported separately under CLAWGATE QUEUE")
     return head + " — " + "; ".join(clauses)
 
 

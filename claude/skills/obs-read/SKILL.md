@@ -85,12 +85,37 @@ validated preset; treat unvalidated ones as starting points.
 - `--since` applies to range/profile queries (Loki, Pyroscope, `--kind range`).
 - Signal-safe teardown: kubectl runs in its own session and is torn down by
   killing the process group on success/error/SIGINT/SIGTERM (no leaked tunnel).
-- Concurrency-safe local port: `_free_port` is TOCTOU by construction (the probe
-  socket closes before kubectl binds), so `PortForward.__enter__` RETRIES up to
-  `PF_ATTEMPTS` (3) times on a freshly-picked port when — and only when —
-  kubectl died with a bind collision, reaping each failed attempt's process
-  first. Concurrent obs-read runs no longer lose a race. Every other failure
-  (missing service, wrong namespace, RBAC denial, backend never ready) still
-  surfaces on the FIRST attempt with kubectl's own message unchanged.
+- Local-port race NARROWED, not closed: `_free_port` is TOCTOU by construction
+  (the probe socket closes before kubectl binds), so `PortForward.__enter__`
+  makes at most `PF_ATTEMPTS` (3) attempts **in total — 1 initial + 2 retries**,
+  re-picking the port when — and only when — kubectl died with a bind collision,
+  reaping each failed attempt's process first. Every other failure (missing
+  service, wrong namespace, RBAC denial, backend never ready) still surfaces on
+  the FIRST attempt with kubectl's own message unchanged.
+- 🔴 **Residual window (reproduced):** the retry fires only if our kubectl's
+  collision-exit is seen before the readiness probe gets *any* HTTP answer on
+  that port — so when the racing winner starts serving first, obs-read attaches
+  to **its** tunnel: cross-cluster that is a wrong-cluster answer the
+  silent-zero guard cannot catch (the result is non-empty). Don't fan out
+  concurrent obs-read runs across *different* clusters.
+- 🔴 **Second, non-racing mechanism (reproduced): our kubectl may never exit at
+  all.** `_free_port` binds **IPv4 only**, but kubectl's `--address` defaults to
+  `localhost` — both `127.0.0.1` and `[::1]` — and it counts *any* successful
+  listener as success. So a **v4-only, non-kubectl** thief makes kubectl's v4
+  bind fail, its v6 bind succeed: it prints `Forwarding from [::1]:P`, writes
+  **nothing to stderr, and never exits** (measured: alive at 30 s). There is no
+  collision-exit to classify, so no retry — the probe hits the *interloper* on
+  127.0.0.1, giving a readiness timeout, or a wrong answer if it speaks HTTP.
+  Two concurrent obs-read runs are **unlikely but NOT immune**: kubectl's v4 and
+  v6 binds are separate calls and it fails only if *neither* succeeds, so if the
+  winner has taken 127.0.0.1 but not yet [::1], the loser binds v6 and both stay
+  alive and silent. Normally the winner holds both and the loser gets a clean
+  collision the retry handles.
+- Closing both properly means parsing kubectl's own `Forwarding from …` line
+  (today `DEVNULL`) **in addition to** the HTTP probe — the line proves *we* own
+  the port at bind time, not that the backend answers, so it does not replace
+  readiness. Require the **127.0.0.1** line for our own port, or the v6-only case
+  above still reads as success; and DRAIN that pipe (kubectl writes a
+  `Handling connection for P` line per connection and blocks at 64 KiB unread).
 - Known limitation (documented, unchanged): a matched-nothing result still exits
   0 — check the `--json` `matched_nothing`/`warning` fields to fail a pipeline.
