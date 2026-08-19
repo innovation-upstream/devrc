@@ -1225,3 +1225,580 @@ def test_the_prune_counters_are_all_published_every_run():
     assert set(out["prune"]) == {
         "kept_unobserved_host", "reset_not_waiting", "pruned_window_gone",
         "pruned_generation", "kept_generation_unknown"}
+
+
+# =========================================================================== #
+# §13 — THE HARNESS SESSION REGISTRY (`~/.claude/sessions/*.json`)
+#
+# MEASURED on this host 2026-08-19 before any of this was written:
+#   48 records, 24 carrying a `tmux` address, `statusUpdatedAt` present and an
+#   `int` on 24/24. In-state ages busy 0.00-1.47h, idle 0.03-24.76h, waiting
+#   0.01-0.06h. Against one session-manager report: 55 Claude rows, 24 joined —
+#   local host 24/48 (50%), REMOTE host 0/7 (0%).
+# Every constant below is synthetic; none of it is captured from that scan.
+# =========================================================================== #
+# Registry ages: distinct from each other, from THRESHOLD (7331), from 14400,
+# and from every AGE_* above, so no mutant can produce one from another.
+REG_AGE_BIG = 63997        # comfortably over THRESHOLD, under AGE_HUGE
+REG_AGE_TINY = 271         # the "harness says busy at ~0h" shape
+REG_NAME = "synthetic-harness-name-a1"
+REG_CWD = "/synthetic/harness/cwd"
+
+
+def ms(secs_before_now, now=NOW):
+    """An epoch-MILLISECOND integer, the shape the registry actually uses."""
+    return int((now - secs_before_now) * 1000)
+
+
+def regrec(session="sess-one", window_id=WID_1, *, status="idle",
+           waiting_for=None, age=REG_AGE_BIG, name=REG_NAME, cwd=REG_CWD,
+           pane="%9", raw_stamp=None, tmux=None):
+    """One registry record, in the on-disk shape."""
+    r = {
+        "status": status,
+        "waitingFor": waiting_for,
+        "name": name,
+        "cwd": cwd,
+        "tmux": "%s:%s.%s" % (session, window_id, pane) if tmux is None else tmux,
+        "sessionId": "synthetic-registry-%s" % window_id.lstrip("@"),
+        "pid": 424242,
+    }
+    if raw_stamp is not None:
+        r["statusUpdatedAt"] = raw_stamp
+    elif age is not None:
+        r["statusUpdatedAt"] = ms(age)
+    return r
+
+
+def registry_from(records, path="/synthetic/sessions"):
+    """Drive the REAL `read_registry` over injected records — never a
+    hand-built join table, so the parser is what the tests exercise."""
+    names = ["%d.json" % (1000 + i) for i in range(len(records))]
+    table = dict(zip(names, records))
+
+    def lister(_p):
+        return list(names)
+
+    def reader(_p, name):
+        obj = table[name]
+        if isinstance(obj, Exception):
+            raise obj
+        return obj
+
+    return ww.read_registry(path, lister=lister, reader=reader)
+
+
+def run_reg(rep, records, stamps=None, now=NOW, threshold=THRESHOLD):
+    return ww.reconcile(rep, dict(stamps or {}), now, threshold,
+                        registry=registry_from(records))
+
+
+# --------------------------------------------------------------------------- #
+# 13.1 the address parser and the millisecond clock
+# --------------------------------------------------------------------------- #
+def test_the_tmux_address_splits_into_session_and_window_id():
+    assert ww.split_tmux_address("sess-one:@307.%9") == ("sess-one", "@307")
+    # No pane suffix is still a window address.
+    assert ww.split_tmux_address("sess-one:@307") == ("sess-one", "@307")
+
+
+def test_a_tmux_address_without_a_window_id_is_REFUSED_not_guessed_at():
+    """A half-parsed address would join to the WRONG row, which is worse than
+    not joining at all. `4` is a window INDEX, not an id, and must not pass."""
+    for bad in ("sess-one:4.%9", "sess-one", "", "@307", None, 307, "sess-one:"):
+        assert ww.split_tmux_address(bad) is None, bad
+
+
+def test_the_clock_field_is_parsed_as_MILLISECONDS_not_seconds():
+    """🔴 The field is an epoch-ms INTEGER. Read as seconds it lands ~54,000
+    years in the future; the first parser written against this registry assumed
+    ISO strings and returned None for every record, which would have been
+    reported as the field being ABSENT rather than unparsed.
+
+    The assertion is exact, and the divisor cannot be recovered from the
+    fixture: 1786800000000 ms is 1786800000 s, and no other divisor gives that.
+    """
+    assert ww.parse_epoch_ms(1786800000000) == 1786800000.0
+    assert ww.parse_epoch_ms(1786800000000) != 1786800000000.0
+
+
+def test_a_non_numeric_clock_field_is_None_not_a_crash_and_not_a_zero():
+    for bad in ("1786800000000", None, "", [], {}, "not a time"):
+        assert ww.parse_epoch_ms(bad) is None
+
+
+def test_a_boolean_clock_field_is_refused_even_though_bool_is_an_int():
+    """`isinstance(True, int)` is True in Python, so an unguarded parser turns
+    `True` into a timestamp in 1970 — a 56-year wait, silently."""
+    assert ww.parse_epoch_ms(True) is None
+    assert ww.parse_epoch_ms(False) is None
+
+
+# --------------------------------------------------------------------------- #
+# 13.2 reading the registry
+# --------------------------------------------------------------------------- #
+def test_the_registry_reader_counts_what_it_saw():
+    reg = registry_from([
+        regrec(window_id=WID_1),
+        regrec(window_id=WID_2, session="sess-two"),
+        {"status": "idle", "statusUpdatedAt": ms(REG_AGE_BIG)},   # no tmux
+    ])
+    assert reg["status"] == "ok"
+    assert reg["records_total"] == 3
+    assert reg["records_with_tmux"] == 2
+    assert set(reg["by_key"]) == {("sess-one", WID_1), ("sess-two", WID_2)}
+
+
+def test_an_ABSENT_registry_directory_is_a_STATUS_not_an_empty_success():
+    """🔴 `joined: 0` from a directory that does not exist and `joined: 0` from
+    a directory of sessions that all exited are different facts. Only the status
+    tells them apart, and a consumer that reads the zero alone cannot."""
+    def lister(_p):
+        raise FileNotFoundError(2, "No such file or directory")
+    reg = ww.read_registry("/synthetic/absent", lister=lister)
+    assert reg["status"] == "missing"
+    assert reg["by_key"] == {}
+    assert reg["records_total"] == 0
+
+
+def test_an_UNREADABLE_registry_directory_reports_error_not_missing():
+    def lister(_p):
+        raise PermissionError(13, "Permission denied")
+    reg = ww.read_registry("/synthetic/denied", lister=lister)
+    assert reg["status"] == "error"
+    assert reg["by_key"] == {}
+
+
+def test_a_malformed_record_is_counted_and_the_rest_are_still_read():
+    """One bad file must not cost the whole registry."""
+    reg = registry_from([
+        regrec(window_id=WID_1),
+        ValueError("Expecting value: line 1 column 1"),
+        ["not", "a", "dict"],
+        regrec(window_id=WID_2, session="sess-two"),
+    ])
+    assert reg["status"] == "ok"
+    assert reg["records_unparseable"] == 2
+    assert set(reg["by_key"]) == {("sess-one", WID_1), ("sess-two", WID_2)}
+
+
+def test_a_record_with_a_bad_tmux_address_is_counted_and_NOT_joined():
+    reg = registry_from([regrec(tmux="sess-one:4.%9"),
+                         regrec(window_id=WID_2, session="sess-two")])
+    assert reg["records_with_tmux"] == 2
+    assert reg["records_bad_address"] == 1
+    assert set(reg["by_key"]) == {("sess-two", WID_2)}
+
+
+def test_a_record_with_an_unusable_clock_still_JOINS_and_is_counted_separately():
+    """🔴 'The registry saw this window' and 'the registry can date this window'
+    are two claims. A record whose `statusUpdatedAt` is a string still carries
+    `status`, `name` and `cwd`, which are worth having."""
+    reg = registry_from([regrec(raw_stamp="1786800000000")])
+    assert reg["records_unusable_clock"] == 1
+    rec = reg["by_key"][("sess-one", WID_1)]
+    assert rec["status_updated_at"] is None
+    assert rec["status"] == "idle"
+    assert rec["name"] == REG_NAME
+
+
+def test_a_record_with_a_MISSING_clock_field_still_joins():
+    reg = registry_from([regrec(age=None)])
+    assert reg["records_unusable_clock"] == 1
+    assert reg["by_key"][("sess-one", WID_1)]["status_updated_at"] is None
+
+
+# --------------------------------------------------------------------------- #
+# 13.3 the join
+# --------------------------------------------------------------------------- #
+def _local(rows, host=HOST_A, **kw):
+    """A report whose LOCAL host is `host` — the registry can only cover that."""
+    rep = report(rows, **kw)
+    rep["local_host"] = host
+    return rep
+
+
+def test_a_row_that_JOINS_takes_the_harness_clock_and_carries_its_fields():
+    rep = _local({HOST_A: [row(probable=True, signals=("trailing_question",),
+                               age=AGE_TINY)]})
+    out, _ = run_reg(rep, [regrec(status="waiting", waiting_for="input needed",
+                                  age=REG_AGE_BIG)])
+    r = out["rows"][0]
+    assert r["registry_joined"] is True
+    assert r["waited_source"] == "registry_status_updated"
+    assert r["waited_secs"] == REG_AGE_BIG
+    assert r["harness_status"] == "waiting"
+    assert r["harness_waiting_for"] == "input needed"
+    assert r["harness_name"] == REG_NAME
+    assert r["harness_cwd"] == REG_CWD
+    assert r["harness_status_age_secs"] == REG_AGE_BIG
+
+
+def test_a_row_that_does_NOT_join_falls_back_and_says_so_in_every_field():
+    rep = _local({HOST_A: [row(WID_3, probable=True, signals=("selection_menu",),
+                               age=AGE_BIG)]})
+    out, _ = run_reg(rep, [regrec(window_id=WID_1)])     # a DIFFERENT window
+    r = out["rows"][0]
+    assert r["registry_joined"] is False
+    assert r["harness_status"] is None
+    assert r["harness_name"] is None
+    assert r["harness_status_age_secs"] is None
+    assert r["waited_source"] == "ledger_age_fallback"
+    assert r["waited_secs"] == AGE_BIG
+
+
+def test_the_join_is_gated_on_the_LOCAL_HOST_even_when_the_key_matches():
+    """🔴 THE CORRECTNESS GUARD. The registry is a directory in the LOCAL host's
+    home, so it describes local windows only. tmux ids are per-server, so a
+    remote `sess-one:@307` can be a completely different window with the same
+    address — measured: the remote host joined 0 of 7 rows while the local host
+    joined 24 of 48.
+
+    Here BOTH hosts carry the identical `(session, window_id)` and the registry
+    has a record for it. Only the local row may take it; the remote row must
+    fall back, and its harness fields must stay null rather than showing another
+    machine's status and cwd.
+    """
+    rep = _local({
+        HOST_A: [row(WID_1, probable=True, signals=("selection_menu",),
+                     age=AGE_TINY)],
+        HOST_B: [row(WID_1, probable=True, signals=("selection_menu",),
+                     age=AGE_MID)],
+    }, host=HOST_A)
+    out, _ = run_reg(rep, [regrec(window_id=WID_1, age=REG_AGE_BIG)])
+    by_host = {r["host"]: r for r in out["rows"]}
+    assert by_host[HOST_A]["registry_joined"] is True
+    assert by_host[HOST_A]["waited_secs"] == REG_AGE_BIG
+    assert by_host[HOST_B]["registry_joined"] is False
+    assert by_host[HOST_B]["harness_cwd"] is None
+    assert by_host[HOST_B]["waited_secs"] == AGE_MID
+
+
+def test_a_report_with_no_local_host_joins_NOTHING_rather_than_guessing():
+    rep = report({HOST_A: [row(probable=True, signals=("selection_menu",),
+                               age=AGE_BIG)]})
+    rep.pop("local_host", None)
+    out, _ = run_reg(rep, [regrec(age=REG_AGE_BIG)])
+    assert out["rows"][0]["registry_joined"] is False
+    assert out["rows"][0]["waited_source"] == "ledger_age_fallback"
+
+
+# --------------------------------------------------------------------------- #
+# 13.4 the clock selection — the registry is a TERM, not an override
+# --------------------------------------------------------------------------- #
+def test_a_SMALLER_harness_clock_LOSES_and_does_not_shrink_the_wait():
+    """🔴 MEASURED IN LIVE DATA, and the reason the registry feeds `max()`
+    rather than overriding: a window session-manager flags as waiting can read
+    `busy` in the registry with a status age of minutes, because the harness's
+    'waiting' and the pane's 'is asking a human' are different predicates.
+    Overriding would report a live question as ~4 minutes old — the same class
+    of lie as `age_secs`' 2.5 seconds, from a new source.
+
+    REG_AGE_TINY (271) and AGE_HUGE (196103) share no digits and neither is a
+    multiple of the other.
+    """
+    rep = _local({HOST_A: [row(probable=True, signals=("trailing_question",),
+                               age=AGE_HUGE)]})
+    out, _ = run_reg(rep, [regrec(status="busy", age=REG_AGE_TINY)])
+    r = out["rows"][0]
+    assert r["registry_joined"] is True
+    assert r["harness_status"] == "busy"
+    assert r["harness_status_age_secs"] == REG_AGE_TINY
+    assert r["waited_secs"] == AGE_HUGE
+    assert r["waited_source"] == "ledger_age_fallback"
+
+
+def test_a_LARGER_harness_clock_WINS_over_both_other_terms():
+    rep = _local({HOST_A: [row(probable=True, signals=("selection_menu",),
+                               age=AGE_TINY)]})
+    _, stamps = run_reg(rep, [regrec(age=REG_AGE_BIG)], now=NOW)
+    out, _ = run_reg(rep, [regrec(age=REG_AGE_BIG)], stamps, now=NOW + 60)
+    assert out["rows"][0]["waited_source"] == "registry_status_updated"
+
+
+def test_a_TIE_resolves_to_the_harness_stamp():
+    """When the ledger and the harness agree to the second, the harness term is
+    the one reported — it is the more authoritative provenance for the same
+    number."""
+    rep = _local({HOST_A: [row(probable=True, signals=("selection_menu",),
+                               age=REG_AGE_BIG)]})
+    out, _ = run_reg(rep, [regrec(age=REG_AGE_BIG)])
+    assert out["rows"][0]["waited_secs"] == REG_AGE_BIG
+    assert out["rows"][0]["waited_source"] == "registry_status_updated"
+
+
+def test_the_clock_preference_order_is_pinned_STRUCTURALLY():
+    """⚠ WHY THIS IS A STRUCTURAL PIN AND NOT A BEHAVIOURAL ONE, stated rather
+    than glossed: the preference order currently COINCIDES with
+    reverse-alphabetical, so a mutant that drops the `key=` from the `max` and
+    compares bare `(value, name)` tuples produces the same answer on every tie
+    and SURVIVES the test above. That was measured, not assumed.
+
+    So the intent is pinned here instead. `WAITED_SOURCES` is the declared
+    order, most authoritative first, and this fails the day a rename makes the
+    alphabet disagree with the intent — which is exactly when the `key=` starts
+    doing work.
+    """
+    order = list(ww.WAITED_SOURCES)
+    assert order.index("registry_status_updated") < order.index("ledger_age_fallback")
+    assert order.index("ledger_age_fallback") < order.index("first_seen")
+    assert order[-1] == "unmeasured"
+
+
+def test_a_joined_row_with_no_usable_harness_clock_still_falls_back_cleanly():
+    rep = _local({HOST_A: [row(probable=True, signals=("selection_menu",),
+                               age=AGE_BIG)]})
+    out, _ = run_reg(rep, [regrec(raw_stamp="not a number")])
+    r = out["rows"][0]
+    assert r["registry_joined"] is True
+    assert r["harness_status_age_secs"] is None
+    assert r["waited_source"] == "ledger_age_fallback"
+    assert r["waited_secs"] == AGE_BIG
+
+
+def test_a_row_with_ONLY_a_harness_clock_is_measured_not_unmeasured():
+    """No ledger age and no prior stamp: without the registry this row would be
+    `unmeasured`. With it, it is dated."""
+    rep = _local({HOST_A: [row(probable=True, signals=("context_exhausted",),
+                               age=None)]})
+    out, _ = run_reg(rep, [regrec(age=REG_AGE_BIG)])
+    r = out["rows"][0]
+    assert r["waited_secs"] == REG_AGE_BIG
+    assert r["waited_source"] == "registry_status_updated"
+    assert r["over_threshold"] is True
+
+
+def test_waited_source_can_only_ever_be_a_value_from_the_pinned_vocabulary():
+    """A new clock added per-row and missing from `WAITED_SOURCES` would be
+    invisible in `waited_by_source`. Both directions in one assertion."""
+    rep = _local({HOST_A: [
+        row(WID_1, probable=True, signals=("selection_menu",), age=AGE_BIG),
+        row(WID_2, probable=True, signals=("selection_menu",), age=None),
+        row(WID_3, probable=True, signals=("selection_menu",), age=AGE_TINY),
+    ]})
+    out, _ = run_reg(rep, [regrec(window_id=WID_3, age=REG_AGE_BIG)])
+    seen = {r["waited_source"] for r in out["rows"]}
+    assert seen <= set(ww.WAITED_SOURCES)
+    assert seen == {"ledger_age_fallback", "unmeasured", "registry_status_updated"}
+
+
+# --------------------------------------------------------------------------- #
+# 13.5 coverage
+# --------------------------------------------------------------------------- #
+def test_the_registry_coverage_counts_the_rows_on_each_side_of_the_join():
+    rep = _local({
+        HOST_A: [row(WID_1, probable=True, signals=("selection_menu",)),
+                 row(WID_2, probable=True, signals=("selection_menu",))],
+        HOST_B: [row(WID_3, probable=True, signals=("selection_menu",))],
+    }, host=HOST_A)
+    out, _ = run_reg(rep, [regrec(window_id=WID_1)])
+    reg = out["coverage"]["registry"]
+    assert reg["status"] == "ok"
+    assert reg["rows_joined"] == 1
+    assert reg["rows_unjoined"] == 2
+    assert reg["records_total"] == 1
+
+
+def test_the_coverage_NAMES_the_hosts_the_registry_can_never_cover():
+    """🔴 Not left to be inferred from a low join count. The remote host is
+    excluded by CONSTRUCTION — a directory in the local home — not by processes
+    having exited, and those two gaps call for completely different reactions.
+    """
+    rep = _local({HOST_A: [row(probable=True, signals=("selection_menu",))],
+                  HOST_B: [row(WID_2, probable=True, signals=("selection_menu",))]},
+                 host=HOST_A)
+    out, _ = run_reg(rep, [])
+    reg = out["coverage"]["registry"]
+    assert reg["local_host"] == HOST_A
+    assert reg["hosts_covered"] == [HOST_A]
+    assert reg["hosts_not_covered"] == [HOST_B]
+
+
+def test_a_partial_registry_does_NOT_make_the_coverage_INCOMPLETE():
+    """🔴 A permanently-red flag is one everybody learns to ignore. The registry
+    can NEVER cover the remote host, so folding it into `complete` would pin
+    that flag to False forever. `complete` is about whether the waiting scan saw
+    every window; the registry only sharpens the CLOCK on the rows it reaches.
+    """
+    rep = _local({HOST_A: [row(probable=True, signals=("selection_menu",))],
+                  HOST_B: [row(WID_2, probable=True, signals=("selection_menu",))]},
+                 host=HOST_A)
+    out, _ = run_reg(rep, [])
+    assert out["coverage"]["registry"]["rows_joined"] == 0
+    assert out["coverage"]["complete"] is True
+    assert out["counts"]["counts_are_partial"] is False
+
+
+def test_the_per_clock_counts_publish_the_whole_vocabulary_even_at_zero():
+    rep = _local({HOST_A: [row(probable=True, signals=("selection_menu",),
+                               age=AGE_BIG)]})
+    out, _ = run_reg(rep, [])
+    assert set(out["counts"]["waited_by_source"]) == set(ww.WAITED_SOURCES)
+    assert out["counts"]["waited_by_source"]["ledger_age_fallback"] == 1
+    assert out["counts"]["waited_by_source"]["registry_status_updated"] == 0
+
+
+def test_the_per_clock_counts_sum_to_the_waiting_population():
+    rep = _local({HOST_A: [
+        row(WID_1, probable=True, signals=("selection_menu",), age=AGE_BIG),
+        row(WID_2, probable=True, signals=("selection_menu",), age=None),
+        row(WID_3, probable=True, signals=("selection_menu",), age=AGE_TINY),
+    ]})
+    out, _ = run_reg(rep, [regrec(window_id=WID_3, age=REG_AGE_BIG)])
+    assert sum(out["counts"]["waited_by_source"].values()) == len(out["rows"])
+
+
+def test_reconcile_works_with_NO_registry_at_all():
+    """The registry is an enhancement, not a dependency. Every pre-registry
+    caller and `--no-registry` take this path."""
+    out, _ = run(report({HOST_A: [row(probable=True, signals=("selection_menu",),
+                                      age=AGE_BIG)]}))
+    r = out["rows"][0]
+    assert r["registry_joined"] is False
+    assert r["waited_source"] == "ledger_age_fallback"
+    assert out["coverage"]["registry"]["status"] == "not_read"
+
+
+# --------------------------------------------------------------------------- #
+# 13.6 the semantic separation — the one that must never be papered over
+# --------------------------------------------------------------------------- #
+def test_the_threshold_fires_on_waiting_probable_ALONE_never_on_harness_status():
+    """🔴 MEASURED DISAGREEMENT, pinned. session-manager's `waiting_probable`
+    means 'this pane text is asking a human'; the harness's `status` means
+    'waiting on a turn'. At one instant, of 8 rows flagged `waiting_probable`,
+    4 were absent from the registry and the other 4 read idle / idle / waiting /
+    BUSY. Zero agreement.
+
+    So a `harness_status` of `waiting` must NOT put a row into the population,
+    and a `harness_status` of `busy` must NOT take one out. Both directions
+    here, with ages far over the threshold so nothing is decided by the clock.
+    """
+    # (a) harness says `waiting`, the pane does not -> NOT in the population.
+    rep = _local({HOST_A: [row(probable=False, busy=True, age=AGE_HUGE)]})
+    out, _ = run_reg(rep, [regrec(status="waiting", waiting_for="permission prompt",
+                                  age=REG_AGE_BIG)])
+    assert out["rows"] == []
+    assert out["counts"]["over_threshold"] == 0
+
+    # (b) harness says `busy`, the pane IS asking -> STILL in the population,
+    #     still over the threshold, with the harness status carried alongside.
+    rep = _local({HOST_A: [row(probable=True, signals=("trailing_question",),
+                               age=AGE_HUGE)]})
+    out, _ = run_reg(rep, [regrec(status="busy", age=REG_AGE_TINY)])
+    assert [r["kind"] for r in out["rows"]] == ["trailing_question"]
+    assert out["counts"]["over_threshold"] == 1
+    assert out["rows"][0]["harness_status"] == "busy"
+
+
+def test_harness_status_is_never_folded_into_the_kind_vocabulary():
+    """`waiting` and `busy` are registry words; `kind` must stay the four
+    session-manager-derived buckets, or a consumer bucketing by `kind` would
+    silently gain categories that mean something else."""
+    rep = _local({HOST_A: [row(probable=True, signals=("selection_menu",),
+                               age=AGE_BIG)]})
+    out, _ = run_reg(rep, [regrec(status="waiting", age=REG_AGE_BIG)])
+    assert out["rows"][0]["kind"] == "selection_menu"
+    assert set(out["counts"]["over_threshold_by_kind"]) == set(ww.ALL_KINDS)
+    assert "waiting" not in out["counts"]["over_threshold_by_kind"]
+    assert "busy" not in out["counts"]["over_threshold_by_kind"]
+
+
+# --------------------------------------------------------------------------- #
+# 13.7 on disk, and the human view
+# --------------------------------------------------------------------------- #
+def test_the_registry_dir_resolves_HOME_at_CALL_time(home):
+    assert ww.registry_dir() == os.path.join(str(home), ".claude", "sessions")
+
+
+def test_READING_the_registry_writes_NOTHING(home):
+    """🔴 The on-disk pin's other half: the registry is somebody else's state.
+    A read that created a cache, an index or a lock file beside it would be an
+    unpinned artifact in a directory this tool does not own. The complete set of
+    files under a throwaway $HOME is unchanged by a real read.
+    """
+    (home / ".claude" / "sessions").mkdir(parents=True)
+    (home / ".claude" / "sessions" / "4242.json").write_text(
+        json.dumps(regrec()), encoding="utf-8")
+    before = paths_under(home)
+    reg = ww.read_registry(ww.registry_dir())
+    assert reg["status"] == "ok"
+    assert reg["records_with_tmux"] == 1
+    assert paths_under(home) == before == [".claude/sessions/4242.json"]
+
+
+def test_a_real_registry_directory_that_does_not_exist_reads_as_missing(home):
+    """Drives the REAL `os.listdir` path, not the injected lister — the two
+    could diverge, and this is the one that runs in production."""
+    assert ww.read_registry(ww.registry_dir())["status"] == "missing"
+
+
+def test_the_human_view_prints_the_clock_split_and_the_join_count():
+    rep = _local({HOST_A: [row(WID_1, probable=True, signals=("selection_menu",),
+                               age=AGE_HUGE),
+                           row(WID_2, probable=True, signals=("selection_menu",),
+                               age=AGE_BIG)]})
+    out, _ = ww.build_report(rep, {}, NOW, THRESHOLD, "flag", "ok",
+                             "/synthetic/state.json",
+                             registry=registry_from([regrec(window_id=WID_2,
+                                                            age=REG_AGE_BIG)]))
+    text = ww.render_human(out)
+    assert "clocks: registry_status_updated=1, ledger_age_fallback=1" in text
+    assert "harness registry: status=ok  joined 1 of 2 row(s)" in text
+
+
+def test_the_human_view_NAMES_the_hosts_the_registry_cannot_cover():
+    rep = _local({HOST_A: [row(probable=True, signals=("selection_menu",),
+                               age=AGE_HUGE)],
+                  HOST_B: [row(WID_2, probable=True, signals=("selection_menu",),
+                               age=AGE_HUGE)]}, host=HOST_A)
+    out, _ = ww.build_report(rep, {}, NOW, THRESHOLD, "flag", "ok",
+                             "/synthetic/state.json", registry=registry_from([]))
+    text = ww.render_human(out)
+    assert ("⚠ CANNOT cover (registry is LOCAL-host only, by construction): %s"
+            % HOST_B) in text
+
+
+def test_the_human_view_prints_harness_status_under_its_OWN_name():
+    rep = _local({HOST_A: [row(probable=True, signals=("trailing_question",),
+                               age=AGE_HUGE)]})
+    out, _ = ww.build_report(rep, {}, NOW, THRESHOLD, "flag", "ok",
+                             "/synthetic/state.json",
+                             registry=registry_from([regrec(
+                                 status="busy", age=REG_AGE_TINY)]))
+    text = ww.render_human(out)
+    assert "harness_status: busy" in text
+    # It is NOT rendered as the kind, and does not replace it.
+    assert "trailing_question" in text
+
+
+def test_the_registry_caveat_is_carried_in_the_JSON_and_PRINTED():
+    """🔴 WHOLE STRING, both places — the local-host limit and the
+    harness-status-is-not-waiting_probable warning are the two things a reader
+    of this output must not miss, and a reworded guard is a walked guard."""
+    expected = (
+        "The harness session registry is a directory in the LOCAL host's home, "
+        "so it can never cover a window on a remote host — those rows are "
+        "excluded by construction, not by a process having exited. Read "
+        "coverage.registry.hosts_not_covered beside the join count. "
+        "harness_status is the harness's own notion of waiting and is NOT "
+        "session-manager's waiting_probable; the two were measured to disagree "
+        "on every joinable flagged row. The threshold fires on "
+        "waiting_probable alone."
+    )
+    assert ww.REGISTRY_CAVEAT == expected
+    rep = _local({HOST_A: [row(probable=True, signals=("selection_menu",))]})
+    out, _ = ww.build_report(rep, {}, NOW, THRESHOLD, "flag", "ok",
+                             "/synthetic/state.json", registry=registry_from([]))
+    assert out["caveats"]["registry"] == expected
+    assert expected in ww.render_human(out)
+
+
+def test_the_json_row_carries_every_harness_field_a_consumer_needs():
+    rep = _local({HOST_A: [row(probable=True, signals=("selection_menu",),
+                               age=AGE_BIG)]})
+    out, _ = run_reg(rep, [regrec(age=REG_AGE_BIG)])
+    r = out["rows"][0]
+    for k in ("harness_status", "harness_waiting_for", "harness_name",
+              "harness_cwd", "harness_status_age_secs", "registry_joined"):
+        assert k in r, k
+    assert json.loads(json.dumps(out)) == out
