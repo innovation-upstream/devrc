@@ -110,6 +110,14 @@ let
     chmod -R u+w "$out"
     ln -sT ${clickupNodeModules}/node_modules "$out/clickup/node_modules"
   '';
+  # opencode commands — auto-generated from skill frontmatter so that every
+  # skill appears as a /<name> command in the TUI with source="command" and
+  # non-empty hints, fixing the autocomplete gap where source="skill" entries
+  # get hints=[] and are excluded from the dropdown.
+  opencodeCommands = pkgs.runCommandLocal "devrc-opencode-commands" { } ''
+    mkdir -p "$out"
+    python3 ${../scripts/opencode/generate-commands.py} ${../claude/skills} "$out"
+  '';
   sessionVariables = import ./sessionVariables.nix {
     inherit pkgs;
     elixirLspPath = pkgs.vscode-extensions.elixir-lsp.vscode-elixir-ls;
@@ -1369,6 +1377,14 @@ in
   # (clickup's node_modules must be in the store copy, not at the deployed path).
   home.file.".config/opencode/skills" = {
     source = claudeSkills;
+    recursive = true;
+    force = true;
+  };
+  # opencode commands — generated from the same skill source so /<name> in the
+  # TUI autocomplete shows every skill. Commands get source="command" and
+  # non-empty hints, which is what the autocomplete dropdown filters on.
+  home.file.".config/opencode/commands" = {
+    source = opencodeCommands;
     recursive = true;
     force = true;
   };
