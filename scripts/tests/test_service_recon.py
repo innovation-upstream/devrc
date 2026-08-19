@@ -696,7 +696,6 @@ class TestGitLog:
         """`apps/x` and `apps/x/sub` are one pathspec entry, not two — otherwise
         the printed query misrepresents itself."""
         r = tmp_path / "r"
-        _git(r.parent, "init", "-q", "-b", "main") if False else None
         r.mkdir()
         _git(r, "init", "-q", "-b", "main")
         _write(r / "apps" / SERVICE / "a.yaml", "kind: X\n")
