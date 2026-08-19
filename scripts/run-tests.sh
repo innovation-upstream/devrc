@@ -898,7 +898,7 @@ TARGET_FLOORS=(
   "scripts/collector/browser-ext/tests|12"
   "scripts/collector/opencode/tests|162"
   "scripts/dl-router/tests|942"
-  "scripts/browser-bridge/tests|469"
+  "scripts/browser-bridge/tests|580"
   "scripts/validation/tests|97"
   # 2026-08-12, initiative-scan's `gh_available` honesty flag: 381 -> 386
   # collected, +5 for the flag's probe/report/render cases in
