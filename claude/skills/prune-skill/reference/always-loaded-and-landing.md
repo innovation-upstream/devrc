@@ -1,6 +1,6 @@
 # Always-loaded files, the overshoot clause, landing, and multi-agent execution
 
-Routed from the prune-skill core (§Budgets / §3 / §6) — `~/.claude/skills/prune-skill/SKILL.md`, source `~/workspace/devrc/claude/skills/prune-skill/SKILL.md`. The core carries the imperatives; this
+Routed from the prune-skill core (§Budgets / §3 / §4 / §6) — `~/.claude/skills/prune-skill/SKILL.md`, source `~/workspace/devrc/claude/skills/prune-skill/SKILL.md`. The core carries the imperatives; this
 carries the reasoning and the measured cases.
 
 ## Always-loaded files (`CLAUDE.md`, `claude/RULES.md`) — the playbook does not apply
@@ -108,12 +108,14 @@ prune agents:
 
 ## Landing the change — the per-repo git workflow
 
-Moved out of the core (§6), which now keeps only the two never-do rules.
+Moved out of the core (§6), which keeps three imperatives: never `git stash`, never `git add -A`,
+and re-measure the DEPLOYED copy. This section adds only what is per-repo — the deployed-copy
+rule, the 160-commit staleness case and the ff-merge blocker table are stated ONCE, in
+§"Landing: a push is not a saving" above, and are deliberately not restated here.
 
 - **datapacket-talos**: a **throwaway worktree off `origin/trunk`**, never the primary clone (its `CLAUDE.md` rule #10); `git push origin HEAD:trunk`, verify `git show origin/trunk:<file> | head`.
 - **devrc**: feature branch + PR against `origin/main`.
-- 🔴 **Never `git stash`** in either — `refs/stash` is repo-GLOBAL and shared across every worktree. **Never `git add -A`** — stage explicit paths.
-- 🔴 **A push is not a saving — a body loads from the DEPLOYED copy, which may not be the clone.** `readlink -f ~/.claude/skills/<name>/SKILL.md` first: inside the repo ⇒ the clone is live; `/nix/store` ⇒ it is NOT, and a `home-manager switch` is required. **Re-measure the resolved path, never `wc -c` in the clone.** Staleness cases + the ff-merge blocker table: `reference/always-loaded-and-landing.md`. For a plain clone the failure is staleness: after five pushed prunes one was 160 commits behind, still serving the 92,270 B body. Re-sync (`fetch && merge --ff-only`), then re-measure at the resolved path. Expect the ff-merge to refuse on other sessions' in-flight docs; classify each blocker before touching it — procedure in `reference/always-loaded-and-landing.md`.
+- 🔴 **Never `git add -A`** in either — stage explicit paths. (`git stash` is banned outright: see above.)
 
 ## Routing-path forms by deployment (the §4 lookup table)
 

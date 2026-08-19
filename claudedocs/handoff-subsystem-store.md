@@ -694,24 +694,32 @@ KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store logs deploy/subsystem-store-ap
 python3 ~/workspace/homelab-talos/scripts/check-relay-guard.py        # rc 0
 bash    ~/workspace/homelab-talos/scripts/tests/test-check-relay-guard.sh   # pass=47 fail=0
 
+# 🔴 SET THESE FIRST. An angle-bracket placeholder inside this fence is shell
+# REDIRECTION, not a blank to fill in: `nc -z -w 5 -v <node-public-ip> 8102` runs
+# `nc -z -w 5 -v` with its stdin/stdout redirected, and IF a file named
+# node-public-ip exists in the cwd it TRUNCATES ./8102 to 0 B (measured, not
+# theoretical) while printing an nc usage banner that reads as "wrong flags".
+# With no such file bash aborts on the failed input redirect and touches nothing
+# — so testing this in an empty dir will UNDERSTATE it. Addresses are never
+# written down here — this repo is PUBLIC — so resolve them into variables:
+NODE_PUB=                             # ← the node's primary public IPv4, from `ip -o -4 addr` on the node
+LB=$(KUBECONFIG=$HOMELAB/production-kubeconfig kubectl -n traefik get svc traefik \
+       -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+
 # the node itself — the repo checker CANNOT see it
-ssh root@<production-node> 'sha256sum /root/relay-firewall.sh; systemctl is-active relay-firewall'
+ssh root@"$NODE_PUB" 'sha256sum /root/relay-firewall.sh; systemctl is-active relay-firewall'
 #   compare that sha to: git -C ~/workspace/homelab-talos show origin/trunk:k0s/host-firewall/relay-firewall.sh | sha256sum
-ssh root@<production-node> 'iptables-save -t raw | grep -c "^-A RELAY-GUARD"'   # 44
+ssh root@"$NODE_PUB" 'iptables-save -t raw | grep -c "^-A RELAY-GUARD"'   # 44
 
 # 🔴 THE OFF-MESH PORT PROBE — read the SIGNATURE, not "did it fail".
 #    `-v` is REQUIRED or nc prints nothing and your parser silently sees an empty string.
-#    Resolve the addresses first (never written down here — this repo is PUBLIC):
-#      LB=$(KUBECONFIG=$HOMELAB/production-kubeconfig kubectl -n traefik get svc traefik \
-#             -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-#      the node's primary public address is in `ip -o -4 addr` on the node itself
-nc -z -w 5 -v <node-public-ip> 8102   # want "timed out" (DROP).
-nc -z -w 5 -v $LB              8102   # 🔴 "refused" would mean the host ACCEPTED it and merely
-                                      #    lacked a listener — that is OPEN AT THE FIREWALL, not closed
-nc -z -w 5 -v <node-public-ip> 9100   # want "timed out" — node_exporter, closed 2026-08-18
-nc -z -w 5 -v <node-public-ip> 8200   # control: must stay "refused", else the guard went blanket
-nc -z -w 5 -v <node-public-ip> 22     # control: must stay open
-nc -z -w 5 -v <node-public-ip> 179    # control: must stay OPEN — Calico's v6 mesh needs it
+nc -z -w 5 -v "$NODE_PUB" 8102   # want "timed out" (DROP).
+nc -z -w 5 -v "$LB"       8102   # 🔴 "refused" would mean the host ACCEPTED it and merely
+                                 #    lacked a listener — that is OPEN AT THE FIREWALL, not closed
+nc -z -w 5 -v "$NODE_PUB" 9100   # want "timed out" — node_exporter, closed 2026-08-18
+nc -z -w 5 -v "$NODE_PUB" 8200   # control: must stay "refused", else the guard went blanket
+nc -z -w 5 -v "$NODE_PUB" 22     # control: must stay open
+nc -z -w 5 -v "$NODE_PUB" 179    # control: must stay OPEN — Calico's v6 mesh needs it
 curl -s -o /dev/null -w '%{http_code}\n' https://auditloop.zacx.dev/   # 302 — edge path via a GUARDED port
 
 # THE KILL SWITCH — one line

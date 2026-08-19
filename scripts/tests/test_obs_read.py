@@ -558,6 +558,13 @@ class _PFAttempts:
         return proc
 
 
+# Deliberately LONGER than PF_ATTEMPTS (8 ports for a bound of 3): a mutant that
+# raises the retry bound must run out of ASSERTION, not out of fixture. A short
+# list makes such a mutant die on StopIteration from the _free_port iterator —
+# green for the wrong reason, and blind to the bound it claims to pin.
+_SPARE_PORTS = [45011, 45013, 45017, 45021, 45023, 45027, 45031, 45037]
+
+
 def _wait_ready_faithful(port, ready_path, timeout, proc=None):
     """Stand-in for _wait_ready that routes an early-exited proc through the
     REAL _wait_ready — so the error TEXT the retry discriminates on is produced
@@ -593,6 +600,60 @@ def test_is_port_collision_discriminates(monkeypatch):
     ):
         assert obs._is_port_collision(RuntimeError(other)) is False
     assert obs._is_port_collision(TimeoutError("never became ready")) is False
+
+
+def test_is_port_collision_ignores_a_client_side_address_in_use():
+    """A readiness TIMEOUT is not a bind collision even when its text carries
+    'address already in use'.
+
+    _wait_ready interpolates the LAST client-side connect error into its own
+    message, so a host out of ephemeral ports produces exactly this string. It
+    matches a collision marker; only the `exited early` prefix test keeps it out
+    of the retry path. Retrying it would burn 3 x startup_timeout and report
+    'local port collision on all 3 attempts' for an honest not-ready backend.
+    """
+    assert obs._is_port_collision(TimeoutError(
+        "backend not ready on 127.0.0.1:45011/-/ready in 10s "
+        "([Errno 98] Address already in use)")) is False
+    # same trap in the other marker's wording
+    assert obs._is_port_collision(TimeoutError(
+        "backend not ready on 127.0.0.1:45011/ready in 10s (unable to listen "
+        "on any of the requested ports)")) is False
+
+
+def test_is_port_collision_marker_is_specific_not_just_listen():
+    """The marker's SPECIFICITY is the property the prefix test rests on.
+
+    kubectl's per-port diagnostic (`Unable to listen on port N: Listeners failed
+    to create ...`) names listening for failures a different port cannot fix —
+    EADDRNOTAVAIL, EACCES. A predicate broadened to any mention of 'listen'
+    would retry those three times instead of surfacing them.
+    """
+    for not_a_collision in (
+        "kubectl port-forward exited early: Unable to listen on port 45011: "
+        "Listeners failed to create with the following errors: [unable to "
+        "create listener: Error listen tcp6 [::1]:45011: bind: cannot assign "
+        "requested address]",
+        "kubectl port-forward exited early: Unable to listen on port 443: "
+        "Listeners failed to create with the following errors: [unable to "
+        "create listener: Error listen tcp4 127.0.0.1:443: bind: permission "
+        "denied]",
+    ):
+        assert obs._is_port_collision(RuntimeError(not_a_collision)) is False, (
+            "a mention of listening is not a bind collision")
+
+
+def test_is_port_collision_is_case_insensitive():
+    """The `.lower()` normalisation is load-bearing: the marker text is not
+    always emitted lowercase (older kubectl capitalises the sentence, and a
+    Python-side OSError renders 'Address already in use')."""
+    assert obs._is_port_collision(RuntimeError(
+        "kubectl port-forward exited early: error: Unable to listen on any of "
+        "the requested ports: [{45011 9090}]")) is True
+    assert obs._is_port_collision(RuntimeError(
+        "kubectl port-forward exited early: Unable to listen on port 45011: "
+        "[unable to create listener: Error listen tcp4 127.0.0.1:45011: bind: "
+        "Address already in use]")) is True
 
 
 def test_port_forward_retries_collision_on_a_different_port(monkeypatch):
@@ -642,14 +703,47 @@ def test_port_forward_does_not_retry_a_readiness_timeout(monkeypatch):
     assert proc.terminated is True
 
 
+def test_port_forward_does_not_retry_a_timeout_naming_address_in_use():
+    # The behavioural half of test_is_port_collision_ignores_a_client_side_
+    # address_in_use: on a host out of ephemeral ports the readiness TimeoutError
+    # carries 'Address already in use' from the client side. It must still fail
+    # on attempt 1, with the message verbatim — not 3 x 10s and a bogus
+    # 'local port collision on all 3 attempts'.
+    msg = ("backend not ready on 127.0.0.1:45011/-/ready in 10s "
+           "([Errno 98] Address already in use)")
+    calls = []
+
+    def never_ready(*a, **k):
+        calls.append(1)
+        raise TimeoutError(msg)
+
+    procs = []
+
+    def popen(*a, **k):
+        procs.append(FakeProc())
+        return procs[-1]
+
+    pf = obs.PortForward("/kc", obs.BACKENDS["prometheus"],
+                         popen=popen, wait_ready=never_ready)
+    with pytest.raises(TimeoutError) as ei:
+        pf.__enter__()
+    assert len(calls) == 1, "a readiness timeout must not be retried"
+    assert len(procs) == 1
+    assert str(ei.value) == msg              # original error, not rewritten
+    assert procs[0].terminated is True
+
+
 def test_port_forward_gives_up_after_exhausting_collision_retries(monkeypatch):
-    h = _PFAttempts([KUBECTL_COLLISION_STDERR] * 6)
-    pf = _pf_with(h, [45011, 45013, 45017, 45021], monkeypatch)
+    h = _PFAttempts([KUBECTL_COLLISION_STDERR] * len(_SPARE_PORTS))
+    pf = _pf_with(h, _SPARE_PORTS, monkeypatch)
     with pytest.raises(RuntimeError) as ei:
         pf.__enter__()
     msg = str(ei.value)
+    # the retry BOUND, asserted first and against literals: a PF_ATTEMPTS>3
+    # mutant has spare ports left (see _SPARE_PORTS) so it dies HERE, on the
+    # observed launch sequence, not on the fixture running dry.
+    assert h.ports == [45011, 45013, 45017]       # bounded: exactly 3 launches
     assert obs.PF_ATTEMPTS == 3
-    assert h.ports == [45011, 45013, 45017]       # bounded: exactly PF_ATTEMPTS
     assert len(h.procs) == obs.PF_ATTEMPTS
     # actionable: names the exhausted budget AND carries kubectl's last error
     assert ("local port collision on all %d attempts" % obs.PF_ATTEMPTS) in msg
@@ -658,8 +752,8 @@ def test_port_forward_gives_up_after_exhausting_collision_retries(monkeypatch):
 
 def test_port_forward_leaks_no_process_across_retries(monkeypatch):
     # every failed attempt's kubectl is terminated AND reaped before the next
-    h = _PFAttempts([KUBECTL_COLLISION_STDERR] * 6)
-    pf = _pf_with(h, [45011, 45013, 45017, 45021], monkeypatch)
+    h = _PFAttempts([KUBECTL_COLLISION_STDERR] * len(_SPARE_PORTS))
+    pf = _pf_with(h, _SPARE_PORTS, monkeypatch)
     with pytest.raises(RuntimeError):
         pf.__enter__()
     assert len(h.procs) == obs.PF_ATTEMPTS

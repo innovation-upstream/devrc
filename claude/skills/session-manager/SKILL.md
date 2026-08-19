@@ -325,7 +325,7 @@ otherwise collide and hand the new window a dead session's id. Spec:
 | `scripts/tmux-scratch-slots.sh` | codename table |
 | `scripts/validation/chquery.py` | shared CH client — a LIBRARY, `sys.path`-inserted |
 | `~/.config/activity-collector/env` | CH endpoint + creds (never hardcoded) |
-| `~/.cache/bar-status/clawgate.json` | the blocked-on-me cache (`scripts/bar-status-poll`) |
+| `~/.cache/bar-status/clawgate.json` | the clawgate-queue cache (`scripts/bar-status-poll`) |
 | `~/.tmux/tasks/*.json` | fuzzyclaw task files (UNTRUSTED) |
 | `~/.cache/agent-ledger/*.json` | the agent activity ledger, one record per pane |
 | `scripts/lib/agent_ledger.py` | its record shape, read protocol and join filter |

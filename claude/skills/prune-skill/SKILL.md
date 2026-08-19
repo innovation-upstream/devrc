@@ -19,8 +19,8 @@ Stop a skill body from displacing the work it was loaded for: a `SKILL.md` costs
 
 ## Budgets (the contract)
 - Core **target 12 KB (12,288 B)**, **hard cap 40 KB (40,960 B)**. Past the cap a body is ~10k tokens before any work starts.
-- 12 KB is **proven and enforced**: a sidecar costs 0 until opened (verified — invoking a skill loads ONLY `SKILL.md`), and `scripts/browser-bridge/SKILL.md` routes ~11× its own weight from under it, gated by `scripts/browser-bridge/tests/test_skill_size.py`, which **owns** the ceiling and headroom floor — read the numbers there. In one 9-skill campaign **8 of 9 landed under target unaided**. 🔴 **A low core-to-reference ratio means you have not demoted enough — that is the tell, not the byte count.**
-- 🔴 **This skill is itself over target, pinned by a ratchet** — `tests/test_skill_size.py` OWNS the ceiling and the reason.
+- 12 KB is **proven and enforced**: a sidecar costs 0 until opened (verified — invoking a skill loads ONLY `SKILL.md`), and `scripts/browser-bridge/SKILL.md` routes ~11× its own weight from under it, gated by `scripts/browser-bridge/tests/test_skill_size.py`, which **owns** the ceiling and headroom floor — read the numbers there. 🔴 **A low core-to-reference ratio means you have not demoted enough — that is the tell, not the byte count.**
+- 🔴 **This skill is itself over target, pinned by a ratchet** — `scripts/tests/test_prune_skill_size.py` OWNS the ceiling and the reason.
 - 🔴 **Landing OVER target is allowed once, deliberately, and never by drift** — only when getting under it would cut the core's *routing value itself*; then stop under the hard cap and **record the reason and the number in the commit message**.
 - 🔴 **Check what governs THIS file first — 12 KB is a SKILL budget**, and a non-skill file may be under a different gate or none; where a gate exists it OWNS its numbers, so read them there. 🔴 **An eviction SINK (`claude/RULES-ARCHIVE.md`, a `claudedocs/` doc) is ungated and demand-loaded, so PRUNING IT DELETES WHAT A PRIOR PRUNE PUT THERE — never prune a sink**; §3's evict-bias does not apply to one.
 - 🔴 **ALWAYS-LOADED files (`CLAUDE.md`, `claude/RULES.md`) are a DIFFERENT problem — this playbook does not apply.** No trigger, so a sidecar saves **nothing**; the only levers are **migration into a trigger-gated owner** and **deleting what is wrong**, and migration can silently disarm an always-on rule. Correctness outranks bytes there: such a pass may legitimately end **larger**. 🔴 **Read `reference/always-loaded-and-landing.md` BEFORE touching one** — model, carve-outs and the re-sync procedure.
@@ -42,7 +42,7 @@ Prints: per-skill size vs budget, per-section byte weights, dated-history blocks
 
 If it says "no prune needed", **stop CUTTING** — it is a verdict about **BYTES only**: §0's staleness pass is still due.
 
-🔴 **A small over-budget number does not mean a small defect** — the auditor measures bytes, only a read finds rot (one skill audited 144 B over; the real finding was a *"re-apply these"* section with two of its four entries retired). 🔴 **Read the heading TREE before trusting the section weights** — they are a function of it.
+🔴 **A small over-budget number does not mean a small defect** — the auditor measures bytes, only a read finds rot (case: `reference/staleness-pass.md`). 🔴 **Read the heading TREE before trusting the section weights** — they are a function of it.
 
 ## 2. Back up first (the cut deletes/rewrites)
 🔴 **Chain the success message with `&&` and count the files** — `cp …; echo "backed up"` prints success even when the copy failed, so a broken backup announces itself as a good one. This is the safety net for §5.
@@ -97,7 +97,7 @@ python3 /home/zach/workspace/devrc/scripts/skill-audit.py "$SKILL_DIR"
 ```
 **Structural**: under target, every routing path resolves, no orphans, no unclosed fences, numbered-corpus integrity intact.
 
-🔴 **A structural PASS is not content survival — this bar has already missed two real losses.** **Read `reference/verification-protocol.md` and run all five**, none of which the auditor performs: the **un-sliced gap audit**; an **enumerated-population survival check (≥5 populations, one MUST be numbers)**; **two instruments** (whole-line survival is load-bearing, token membership alone is blind); 🔴 **controls that mutate a DESTINATION, never your new text** — *a control that passes is an invalid control, not a clean result*; and before/after bytes from the **pushed blob**, not the working tree.
+🔴 **A structural PASS is not content survival — this bar has already missed two real losses.** **Read `reference/verification-protocol.md` and run all six**, none of which the auditor performs: the **un-sliced gap audit**; an **enumerated-population survival check (≥5 populations, one MUST be numbers)**; **two instruments** (whole-line survival is load-bearing, token membership alone is blind); 🔴 **controls that mutate a DESTINATION, never your new text** — *a control that passes is an invalid control, not a clean result*; before/after bytes from the **pushed blob**, not the working tree; and a **report** — what moved where, §2's backup path, each control's number.
 
 🔴 **Open one demoted file and one routing line by hand before calling it done.** `skill-audit.py` resolves routing paths against the skill directory — which always succeeds — so its ✓ is not evidence a reader following the core from a repo root finds the file. That is the §4 trap; the audit cannot see it.
 
