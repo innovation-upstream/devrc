@@ -40,7 +40,7 @@ anything you wouldn't hand a third party. Nor **virtualised/lazy-loaded lists**.
 KNOW something from it → agent. Ambiguous → agent first: taking over is cheap, so
 agent-first wins even at a low success rate.
 
-🔴 Auto-`wake` covers a hidden `text`/`html` read but **never `eval`/`js`** — so
+🔴 The AGENT's auto-`wake` covers a hidden `text`/`html` read but **never `eval`/`js`** — so
 ASSERT a non-zero content count in any `js` measurement. Result handling
 (`blocked`/`partial`), why thin `evidence` is NOT protection, and the
 `--allow-domains` guardrail → `reference/agent.md`.
@@ -54,7 +54,7 @@ Result payloads land under `.result.data`.
 | command | does |
 |---|---|
 | `whoami` | **read-only identity** (global; no `--instance`/`--tab`) — host label (`laptop`/`workbench`), connected instances (active-tab **domain** only), bridge diagnostics, `extension_version_current` |
-| `health` / `instances` | connected instances + count (JSON: key, label, instanceId, tab url/title). `extension_stale` on `health` ONLY — ⚠ `null` is "undecidable", NOT "fine"; tri-state semantics → `reference/errors.md` |
+| `health` / `instances` | connected instances + count (JSON: key, label, instanceId, tab url/title). per-instance `extension_stale` (on `whoami` too) — ⚠ `null` is "undecidable", NOT "fine"; tri-state → `reference/errors.md` |
 | `ping` | **which extension CODE is loaded?** → `{pong,extensionVersion,buildMarker,id,ops}`; read `buildMarker` — version+id describe the DIRECTORY. Staleness is PER PROFILE |
 | `context` | **page metadata, no DOM read** — url/domain/path/query/title/tabId, tab-scoped. Cheapest read; ⚠ NOT a render check → `reference/read-envelopes.md` |
 | `open [url] [--wake[=MS]]` | open a NEW tab this session owns (default `about:blank`, **created in the BACKGROUND/hidden**), returns `tabId`. 🔴 A re-`open` does NOT navigate — it DISCARDS your url → `reference/tabs-instances.md` |
@@ -63,7 +63,7 @@ Result payloads land under `.result.data`.
 | `nav <url> [--wake[=MS]]` | navigate the owned/active tab; it lands hidden, so `--wake` un-throttles in the SAME call |
 | `text [selector] [--max-bytes N] [--annotated]` | **cheap read** — visible `innerText` (optional CSS selector), byte-capped by default. ~98% smaller than `html` — **prefer it**. `--annotated` swaps flat text for per-element extraction — use it when you need a SELECTOR to click/type; works with `--frame`. Byte cap, envelope fields, `--annotated` schema → `reference/read-envelopes.md` |
 | `html [--max-bytes N]` | `outerHTML`, same byte cap and same envelope. One uncapped `html` on a heavy SPA is ~100K tokens — the cap is ON by default |
-| `js '<expr>'` (alias: `eval`) | run JS in the tab, return its value; same op on the wire either way. **Prefer the `js` spelling** — Claude Code's isolation guard refuses any command containing the literal token `eval` |
+| `js '<expr>'` (alias: `eval`) | run JS in the tab, return its value; same op on the wire either way. **Prefer the `js` spelling in a worktree-isolated agent** — Claude Code's isolation guard refuses any command containing the literal token `eval` |
 | `screenshot [path] [--fullpage] [--data-url]` | CDP capture — **works on a BACKGROUND/occluded tab**. **Always writes a `.png`** (to `path`, else a 0600 temp) and prints `{ok,path,bytes,url,via}`; the base64 is **NEVER** printed — **`Read` the `.png`**. `--data-url` is the escape hatch |
 | `frames` | list the tab's frames (`frameId`/`url`/`parentFrameId`) **incl. cross-origin OOPIFs** — pick a numeric `frameId` for `--frame` |
 | `click <selector>` · `type <text> [--selector S]` · `key <Enter\|Tab\|Escape\|Backspace\|Delete\|Arrow*\|Home\|End\|Page*> [--selector S]` | the input ops — click the element's centre, type text, send one bounded keypress. All three: **TRUSTED** CDP on the top frame, **SYNTHETIC** inside `--frame` |
@@ -115,10 +115,10 @@ Result payloads land under `.result.data`.
 
 It's their real browser, not a scratch VM. Don't `nav` a tab that may hold unsaved
 work (a half-typed comment, a form) — `open` your own tab, or an obviously
-disposable one. 🔴 `activate` takes their screen. RECORD both axes first
-(`xdotool getactivewindow`; `i3-msg -t get_workspaces`), then RESTORE both at the
-end, failure included: `i3-msg '[id="<winid>"] focus'` **and** `i3-msg workspace
-<n>`. Focus alone leaves them on YOUR workspace — the axis actually taken.
+disposable one. 🔴 If ANYTHING takes their screen — `activate`, the X-fallback
+capture — RECORD focus AND workspace first, then restore BOTH at the end, on
+failure too. Focus alone leaves them on YOUR workspace, which is the axis that
+actually gets taken. Exact commands → `reference/spa-wake.md`.
 
 ## Reference files — load ONE only when its trigger fires
 
