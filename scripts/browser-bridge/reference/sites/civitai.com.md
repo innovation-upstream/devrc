@@ -46,8 +46,10 @@ account you need**. Enumerate; never assume:
 
 ```bash
 # every connected instance, then the session in each — read the pair, not the key
-$BB health          # -> .data.instances[].key
+$BB health          # -> TOP-LEVEL .instances[].key (health is NOT a /cmd op,
+                    #    so there is no .result.data wrapper here)
 $BB --instance <key> js '(async function(){ …the fetch above… })()'
+                    # -> the value lands at .result.data.value
 ```
 
 ### 🔴 `connected` ≠ drivable
@@ -164,14 +166,19 @@ Until then:
 
 ```bash
 BB=~/workspace/devrc/scripts/browser-bridge/browser
-for k in $("$BB" health | python3 -c 'import json,sys; print("\n".join(i["key"] for i in json.load(sys.stdin)["result"]["data"]["instances"]))'); do
+KEYS=$("$BB" health | python3 -c 'import json,sys
+print("\n".join(i["key"] for i in json.load(sys.stdin)["instances"]))')
+for k in ${=KEYS}; do          # ${=…} — zsh does NOT word-split a bare $VAR
   printf '%s → ' "$k"
   "$BB" --instance "$k" js '(async function(){
      const r = await fetch("/api/auth/session", {credentials:"include"});
      const j = await r.json();
      return (j?.user?.username ?? "ANON") + " → " + (j?.user?.id ?? "-") +
             " → " + (j?.user?.isModerator ?? false);
-   })()' 2>/dev/null || echo "UNKNOWN (connected but not drivable?)"
+   })()' 2>/dev/null \
+    | python3 -c 'import json,sys
+try: print(json.load(sys.stdin)["result"]["data"]["value"])
+except Exception: print("UNKNOWN (connected but not drivable?)")'
 done
 ```
 
