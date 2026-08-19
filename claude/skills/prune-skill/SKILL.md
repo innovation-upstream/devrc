@@ -84,6 +84,8 @@ The auditor checks both directions, warning on relative paths with no absolute b
 
 🔴 **The loss mode slicing does NOT cover: a block you SUMMARISE into the core and slice into no sidecar is silently gone — and it looks like good pruning.** That is what §7's gap audit is for. Happened twice.
 
+🔴 **And the loss mode slicing CAUSES: a warning demoted AWAY from the instruction it guards.** Content survives, paths resolve, gates pass — the PAIRING broke. **Ask what each moved block was PROTECTING; if its trigger stays in the core, the guard goes with it or leaves a cross-reference.** Case + the staleness amplifier: `reference/verification-protocol.md`.
+
 Write evicted history to a dated `claudedocs/` doc. **Do not delete a reference file to save bytes** — it saves 0 until opened. An **ORPHAN is usually a demoted topic that lost its routing line — adopt it by default** (one skill held 40 KB across three). Delete only after reading it, and say in the commit why it is dead.
 
 ## 6. Land the change
@@ -97,7 +99,7 @@ python3 /home/zach/workspace/devrc/scripts/skill-audit.py "$SKILL_DIR"
 ```
 **Structural**: under target, every routing path resolves, no orphans, no unclosed fences, numbered-corpus integrity intact.
 
-🔴 **A structural PASS is not content survival — this bar has already missed two real losses.** **Read `reference/verification-protocol.md` and run all six**, none of which the auditor performs: the **un-sliced gap audit**; an **enumerated-population survival check (≥5 populations, one MUST be numbers)**; **two instruments** (whole-line survival is load-bearing, token membership alone is blind); 🔴 **controls that mutate a DESTINATION, never your new text** — *a control that passes is an invalid control, not a clean result*; before/after bytes from the **pushed blob**, not the working tree; and a **report** — what moved where, §2's backup path, each control's number.
+🔴 **A structural PASS is not content survival — this bar has already missed two real losses.** **Read `reference/verification-protocol.md` and run all six (§1–§5, §7)**, none of which the auditor performs. The one most often got wrong: 🔴 **a control must mutate a DESTINATION, never your new text** — *a control that passes is an invalid control, not a clean result*.
 
 🔴 **Open one demoted file and one routing line by hand before calling it done.** `skill-audit.py` resolves routing paths against the skill directory — which always succeeds — so its ✓ is not evidence a reader following the core from a repo root finds the file. That is the §4 trap; the audit cannot see it.
 
