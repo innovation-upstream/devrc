@@ -926,8 +926,15 @@ TARGET_FLOORS=(
   #
   #   _suggested_floor 5810 = 5810 - min(50, max(1, 290)) = 5810 - 50 = 5760
   #
+  #
+  # 2026-08-19, the #558 round-4 fix (the partial-view caveat keyed on
+  # MEASURABLE rather than ANSWERED, plus the vacuous single-host test):
+  # 5810 -> 5814 collected, +4.
+  #
+  #   _suggested_floor 5814 = 5814 - min(50, max(1, 290)) = 5814 - 50 = 5764
+  #
   # ⚠ ZERO new skips from any contribution.
-  "scripts/tests|5760"
+  "scripts/tests|5764"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
