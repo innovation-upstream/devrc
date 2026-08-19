@@ -190,6 +190,26 @@ META = re.compile(r"""[<>{}*?\[\]$()|!=%@,"'\\…]""")
 # host instead of borrowing a verdict from whatever sits next to the checkout.
 OFF_TREE_MARKER = "<outside-this-repo>"
 
+# 🔴 RULE 1c. A BARE `reference/<file>.md` is a SPELLING defect, reported EVEN
+# WHEN THE FILE EXISTS -- which makes it the one rule here that is not about
+# existence at all.
+#
+# devrc skills are READ from `~/.claude/skills/<name>/` by an agent whose cwd is
+# some unrelated project. A bare `reference/x.md` therefore resolves against THAT
+# cwd and is not found; the repo-relative `claude/skills/<name>/reference/x.md`
+# resolves nowhere for that reader either. Only the DEPLOYED spelling opens.
+#
+# `reference` is not a ROOT, so such a token used to fail rule 2 and was neither
+# COUNTED nor CHECKED -- the same silent zero this gate exists to kill. Measured
+# 2026-08-19: 47 across 13 skills, 12 of them in prune-skill itself, the skill
+# that teaches the convention. The guidance was the cause: the routing-forms
+# table in prune-skill.s own sidecar SANCTIONED the bare form for devrc skills.
+#
+# Resolving it onto a marker rather than special-casing the report keeps ONE
+# classifier (`_resolve`) and makes the existing failure line self-explaining --
+# it already prints `-> {_resolve(t, d)}`.
+BARE_REF_MARKER = "<bare-ref-unopenable-write-the-deployed-~-.claude-path>"
+
 # --- the deployed tree -------------------------------------------------------
 # `nix/home.nix` populates `~/.claude/` from this repo, so a `~/.claude/...`
 # token IS a claim about this tree -- written in the spelling an agent sees at
@@ -286,6 +306,16 @@ def _resolve(token: str, doc: str) -> Path | None:
         return _under_repo(REPO_ROOT / (os.path.dirname(doc) or "."), token)
     if token.split("/", 1)[0] in ROOTS:
         return _under_repo(REPO_ROOT, token)
+    # Rule 1c: judged on SPELLING, so it is deliberately NOT resolved against the
+    # citing doc.s directory -- that would always succeed and reproduce exactly
+    # the false-clean this rule exists to kill (it is what skill-audit.py did).
+    # The bare DIRECTORY form (`reference/`) NAMES THE CONVENTION and is not a
+    # routing claim -- this corpus is full of prose saying "demote it into a
+    # `reference/` sidecar", including the sidecar that teaches it. Flagging it
+    # reds the guidance itself; only a token naming a FILE can send a reader
+    # nowhere. (Hit on the first run here AND in the talos port.)
+    if token.split("/", 1)[0] == "reference" and not token.endswith("/"):
+        return REPO_ROOT / BARE_REF_MARKER / token
     return None
 
 
@@ -867,9 +897,19 @@ def _dead_tokens(markdown: str, doc: str = PROBE_DOC):
         ("`~/.claude/hooks/no-such-hook.py`", "~/.claude/hooks/no-such-hook.py"),
         # `scripts/` extensionless affordance: a real class of executable here.
         ("`scripts/no-such-tool`", "scripts/no-such-tool"),
+        # 🔴 RULE 1c, AND THE CASE THAT DEFINES IT: the target EXISTS. PROBE_DOC
+        # lives in claude/skills/prune-skill/reference/, so staleness-pass.md is
+        # its real sibling -- resolve this against the citing doc.s directory and
+        # it passes, which is exactly the false-clean skill-audit.py produced.
+        # It must be reported anyway: the reader is not in that directory.
+        ("`reference/staleness-pass.md`", "reference/staleness-pass.md"),
+        # The same defect as a markdown LINK, which is how a routing-table row is
+        # usually written and is a machine-followable claim.
+        ("[topic](reference/staleness-pass.md)", "reference/staleness-pass.md"),
     ],
     ids=["backtick", "link-dest", "dotdot", "dotdot-escape", "fence", "deployed",
-         "deployed-hook", "extensionless"],
+         "deployed-hook", "extensionless",
+         "bare-ref-target-EXISTS", "bare-ref-link-dest"],
 )
 def test_planted_dead_path_is_reported(markdown, token):
     """NEGATIVE CONTROL: the gate must go red AND name the file and the token."""
@@ -906,6 +946,15 @@ def test_planted_dead_path_is_reported(markdown, token):
         # reported DEAD, so this shape is a REGRESSION case, not decoration.
         "`scripts/gate.sh:104:12`",
         "`claude/RULES.md:10:3`",
+        # Rule 1c NEGATIVE CONTROLS. The deployed spelling is the FIX the rule
+        # prescribes, so flagging it would make the rule unsatisfiable; the bare
+        # DIRECTORY form names the CONVENTION and appears throughout the prose
+        # that teaches it (it redded this gate on the first run); and the
+        # `<topic>` placeholder is how the guidance quotes the broken form in
+        # order to name it.
+        "`~/.claude/skills/prune-skill/reference/staleness-pass.md`",
+        "demote it into a `reference/` sidecar",
+        "`reference/<topic>.md`",
         # Placeholders and notation: skipped, never flagged.
         "`claude/skills/<name>/SKILL.md`",
         "`claude/skills/*/reference/*.md`",

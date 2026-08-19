@@ -66,7 +66,7 @@ i3-msg -t get_tree | jq '[recurse(.nodes[]?, .floating_nodes[]?) | select(.type 
 For `focus`, `move`, `workspace`, `layout`, `exec`, `mark`, `resize`, `scratch`:
 validate the target exists (query the tree first for focus/move), prefer criteria
 selectors (`i3-msg '[class="Firefox"] focus'`), and report the result — `i3-msg`
-returns `[{"success": true|false}]`. Command vocabulary → `reference/ipc.md`.
+returns `[{"success": true|false}]`. Command vocabulary → `~/.claude/skills/i3/reference/ipc.md`.
 
 ## 3. See
 Claude is multimodal, so a screenshot gives real visual awareness of the desktop.
@@ -83,7 +83,7 @@ GEOM=$(xdotool getwindowgeometry --shell "$WID")         # X, Y, WIDTH, HEIGHT
 **Always `rm /tmp/claude-i3-screenshot.png` once you have read it.**
 
 ## 4. Type / click / clipboard
-Full recipes and the safety protocols are in `reference/interaction.md`. The
+Full recipes and the safety protocols are in `~/.claude/skills/i3/reference/interaction.md`. The
 non-negotiables:
 - Confirm which window is focused **before** sending any keystroke; focus via i3-msg
   criteria and let X11 settle (`… && sleep 0.1 && …`) before typing.
