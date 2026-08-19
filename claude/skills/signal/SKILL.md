@@ -34,7 +34,7 @@ code route and will raise `SendGateError`.
 | Routes | the three this module speaks (the server has many more): `GET /v1/receive/{number}` (a **websocket** in json-rpc mode), `GET /v1/attachments/{id}`, `POST /v2/send`. It has **no event-stream endpoint** — `/api/v1/events` belongs to AsamK's native daemon, a different server |
 | Postgres | `mailbox-postgres-0` in ns `mailbox`, schema **`signal`** (shares the instance + role with `mail`) |
 | Attachments | MinIO archive tenant, bucket `signal-attachments`, key `{conversation}/{YYYY-MM-DD}/{attachment_id}_{filename}` + a `.json` sidecar. The id is in the key deliberately — see gotchas |
-| Tables | `signal.contacts`, `signal.groups`, `signal.messages`, `signal.attachments`, `signal.reactions` |
+| Tables | `signal.contacts`, `signal.groups`, `signal.messages`, `signal.attachments`, `signal.reactions`, `signal.consumer_health` |
 | Search | `signal.messages.search` — a STORED `to_tsvector('english', body)` generated column with a GIN index |
 
 ## Commands (`python3 scripts/signal/consumer.py <cmd>`)
@@ -42,6 +42,7 @@ code route and will raise `SendGateError`.
 | Command | What it does |
 |---|---|
 | `run` | consume `/v1/receive/{number}` forever — this is what the Deployment runs |
+| `health` | is the consumer alive? exit 0 healthy / 1 stale. Reads the local heartbeat FILE; `--from-db` reads the richer row instead (**not** for a probe — it depends on Postgres) |
 | `conversations` | list conversations (group, else the DM peer), newest first |
 | `search` | full-text search over message bodies (`websearch_to_tsquery`) |
 | `draft` | compose an outbound draft — **stores it, transmits nothing** |
@@ -152,6 +153,63 @@ are counted only.
 | `db_recovery_failures` | recovery itself failed — the pod cannot write and needs looking at |
 | `attachment_failures` | attachment fetch/upload failures — the MESSAGE row still stands |
 
+## Liveness — how to tell working from dead
+
+🔴 **Before this existed there was no such signal.** The consumer serves no HTTP,
+had no probes, and emitted **0 log lines** across 20h of successful ingestion —
+so a pod reaching nothing and a pod working perfectly were byte-identical from
+outside, and the row count was the only evidence available. That is what made the
+step-7 diagnosis take hours.
+
+```bash
+kubectl -n signal exec deploy/signal-consumer -- python3 /app/scripts/signal/consumer.py health
+kubectl -n signal exec deploy/signal-consumer -- python3 /app/scripts/signal/consumer.py health --from-db --json
+```
+
+🔴 **Two sinks, and they answer different questions — do not swap them.**
+- the **file** says "this process's thread is still scheduled". It depends on
+  nothing external, which is why it is the only safe input to a k8s liveness
+  probe. Keying a restart on Postgres reachability would turn a database blip
+  into a restart storm against a consumer that was working fine.
+- the **row** (`signal.consumer_health`) adds "…and Postgres is reachable", plus
+  the counters. Richer, and it is ALLOWED to fail — a DB outage degrades the row
+  and leaves liveness intact.
+
+🔴 **NO MIGRATION EXISTS for `signal.consumer_health`, and `ensure_schema()`
+will not tell you.** It uses `CREATE TABLE IF NOT EXISTS`, which is silent about
+a table that already exists with the WRONG column types. A pre-release build
+declared `updated_at`/`last_frame_at` as `TIMESTAMPTZ`; the shipped code writes
+`BIGINT` epoch-ms. Against a database that ever ran that build, `ensure_schema()`
+reports success, **every beat then fails forever** with `column … is of type
+timestamp with time zone but expression is of type bigint`, and `health
+--from-db` reports no heartbeat while the FILE probe stays green — so nothing
+restarts and nothing alerts. Measured on real Postgres, not reasoned.
+**The live homelab database is NOT affected** — verified: the table did not
+exist there, so it is born `BIGINT`. If you hit this anywhere else (a dev box, a
+rolled-back image), the fix is `DROP TABLE signal.consumer_health;` and let the
+next beat recreate it — the table is a single disposable status row, so there is
+nothing to preserve.
+
+🔴 **DEPLOY PAIRING — the pod needs a WRITABLE heartbeat path or it will not
+start.** `consumer.py run` beats once synchronously before entering the loop, and
+an unwritable path is a configuration fault (loud, at startup) rather than
+something laundered into a retry. The Deployment sets `readOnlyRootFilesystem:
+true` and originally mounted **no volumes at all** — its own comment recorded
+that the pod "writes nothing to the filesystem, which is what makes
+readOnlyRootFilesystem viable". That invariant is now false. The manifest must
+mount an `emptyDir` and point `SIGNAL_HEARTBEAT_PATH` at it **in the same
+rollout as the image that introduces the heartbeat**, or the first rebuild
+CrashLoopBackOffs a working consumer — before any probe is even wired.
+
+🔴 **`last_frame_at` is diagnosis, NEVER a liveness input.** An idle account
+legitimately sends nothing for hours; if silence fed the probe, a quiet weekend
+would restart the pod on a loop.
+
+⚠ **The probe restarts only a HUNG process** (stale heartbeat). It deliberately
+does not restart on a reconnect storm: that is visible in `reconnects` on the
+row, but automating a restart for it risks looping against an outage a restart
+cannot fix. Read the row when the numbers look wrong.
+
 ## Environment
 
 | Var | Purpose |
@@ -164,6 +222,9 @@ are counted only.
 | `SIGNAL_ACCOUNT` | the account's own phone number. Required TWICE: the receive endpoint is per-account (`/v1/receive/{number}`) and `/v2/send` rejects a missing `number` with 400 |
 | `SIGNAL_APPROVAL_TOKEN` | must be set for `approve` to run. **Operator-only** — deliberately absent from the Deployment and from agent environments |
 | `CLAWGATE_HOOK_TOKEN` | clawgate hook token; unset → draft cards are a graceful no-op |
+| `SIGNAL_HEARTBEAT_PATH` | where the consumer writes its liveness file (default `/tmp/signal-consumer-heartbeat.json`). The k8s probe reads THIS, never Postgres |
+| `SIGNAL_HEARTBEAT_INTERVAL` | seconds between heartbeats (default 30) |
+| `SIGNAL_HEARTBEAT_MAX_AGE` | seconds before a heartbeat is stale (default 4× the interval — less than a few ticks flaps on scheduling jitter) |
 | `MINIO_ARCHIVE_ENDPOINT` | explicit MinIO endpoint (skips the port-forward) |
 | `MINIO_ARCHIVE_ACCESS_KEY` | MinIO credentials; else read from `minio-archive-config` |
 | `MINIO_ARCHIVE_SECRET_KEY` | MinIO credentials; else read from `minio-archive-config` |

@@ -872,12 +872,23 @@ TARGET_FLOORS=(
   # 376/358 (the commit-retry drop, the websocket import site, the atomic claim,
   # the reconcile path, the own-device retraction), and 387/368 (guarded state
   # transitions, the preserved approval record, the clean CLI refusal).
+  # 2026-08-18, two more, both RE-READ from the gate: 400/368 stayed under the
+  # ceiling (the outbound-reaction fix, #537), then 467 tripped the DRIFT
+  # CEILING at 460 with every test PASSING — the floor had fallen 92 behind, so
+  # a whole suite could have vanished while the gate stayed green. The gate
+  # printed "scripts/signal/tests|444" and that is what is written below,
+  # copied not computed. The 67 new tests are the liveness heartbeat and the
+  # three deploy-blocking defects its audit found: a TIMESTAMPTZ column fed a
+  # Python float (the DB layer had no executing test at all — a FakeDB appended
+  # to a list), a STALLED Postgres freezing the liveness file because both
+  # sinks shared a thread, and a probe that read the database it was supposed
+  # to be independent of.
   # ZERO new skips, so EXPECTED_SKIPS is untouched, and GUARD 7 reported
   # `intercepted=0 systemctl-reads=0` for this target — the evidence the suite is
   # hermetic rather than merely asserted to be. If this line conflicts with a
   # sibling branch, re-run the gate on the MERGED tree and copy what it prints;
   # do not reconcile the two sides by hand.
-  "scripts/signal/tests|368"
+  "scripts/signal/tests|444"
   "scripts/initiatives/tests|745"
   "scripts/repo-cos/tests|315"
   "scripts/task-spec-drafter/tests|135"

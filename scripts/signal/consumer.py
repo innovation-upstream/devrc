@@ -35,7 +35,9 @@ import argparse
 import base64
 import json
 import os
+import socket
 import sys
+import threading
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -439,6 +441,236 @@ def parse_receive_frame(payload) -> dict:
     return env
 
 
+# --------------------------------------------------------------------------- #
+# Liveness — the signal this service did not have
+#
+# 🔴 WHY THIS EXISTS, measured not theorised. `signal-consumer` serves no HTTP,
+# declares no probes, and emitted **0 log lines** across 20h in which it
+# successfully ingested 5 messages, 5 contacts, a group and 2 reactions. So a pod
+# reaching NOTHING and a pod working perfectly produce byte-identical
+# observations, and the row count was the only health signal that existed. That
+# is not a gap in monitoring, it is the reason a diagnosis took hours: an empty
+# result cannot distinguish two mechanisms, and no upstream signal disagreed
+# between them.
+#
+# 🔴 THE HEARTBEAT MUST NOT LIVE IN THE FRAME LOOP. `run()` blocks in
+# `for payload in iter_frames(...)` — on an idle account that blocks for HOURS.
+# A heartbeat written per frame would therefore fire only when traffic exists,
+# i.e. only in the case that never needed a heartbeat. It runs on its own thread.
+#
+# 🔴 TWO SINKS, DELIBERATELY, AND THEY ANSWER DIFFERENT QUESTIONS.
+#   * the FILE  — "this process's thread is still scheduled". Depends on nothing
+#     external, so it is the only safe input to a k8s liveness probe: keying a
+#     restart on Postgres reachability would turn a database blip into a
+#     restart storm, taking down a consumer that was working fine.
+#   * the ROW   — "…and Postgres is reachable, and here are the counters". This
+#     is the human/deadman signal. It is richer and it is ALLOWED to fail.
+# A DB outage degrades the row and leaves the file (and therefore liveness)
+# intact. That asymmetry is the entire point of having two.
+
+#: Where the liveness file is written. Env-overridable so the probe and the
+#: consumer cannot disagree about the path by editing one of them.
+HEARTBEAT_PATH = os.environ.get("SIGNAL_HEARTBEAT_PATH", "/tmp/signal-consumer-heartbeat.json")
+
+#: How often the heartbeat thread ticks.
+HEARTBEAT_INTERVAL = float(os.environ.get("SIGNAL_HEARTBEAT_INTERVAL", "30"))
+
+#: How old a heartbeat may be and still mean "alive".
+#:
+#: 🔴 Derived from the interval, not chosen by taste: a probe that trips at less
+#: than a small multiple of the write period fires on ordinary scheduling jitter
+#: and restarts a healthy pod. Four ticks means four consecutive misses.
+HEARTBEAT_MAX_AGE = float(os.environ.get("SIGNAL_HEARTBEAT_MAX_AGE",
+                                         str(HEARTBEAT_INTERVAL * 4)))
+
+
+def heartbeat_is_fresh(age_seconds: float | None, max_age: float = None) -> bool:
+    """THE freshness predicate. One definition, every caller.
+
+    `None` (no heartbeat at all) is NOT fresh — a consumer that has never written
+    one is exactly the state this exists to catch, and defaulting a missing
+    reading to "fine" is how a dead measuring apparatus reports all-clear.
+    """
+    if age_seconds is None:
+        return False
+    limit = HEARTBEAT_MAX_AGE if max_age is None else max_age
+    # 🔴 A NEGATIVE age is not "very fresh", it is a BROKEN clock — the writer's
+    # wall clock stepped backwards (NTP correction, suspend/resume) after the
+    # beat was written. Treating it as fresh would let an arbitrarily stale
+    # heartbeat read as healthy, which is the one answer this predicate must
+    # never give by accident.
+    if age_seconds < 0:
+        return False
+    return age_seconds <= limit
+
+
+def write_heartbeat_file(payload: dict, path: str = None) -> None:
+    """Write the liveness file ATOMICALLY (tmp + rename).
+
+    A probe reading a half-written file would parse-fail and be scored as "no
+    heartbeat" — a restart caused purely by the instrument.
+    """
+    target = Path(path or HEARTBEAT_PATH)
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload), encoding="utf-8")
+    tmp.replace(target)
+
+
+def read_heartbeat_file(path: str = None, now: float = None) -> dict | None:
+    """The heartbeat file plus its age, or None if absent/unreadable/corrupt.
+
+    Every failure collapses to None on purpose: absent, truncated and garbage all
+    mean the same thing to a probe — "no current measurement" — and a caller that
+    had to distinguish them would grow its own freshness opinion.
+    """
+    try:
+        raw = Path(path or HEARTBEAT_PATH).read_text(encoding="utf-8")
+        payload = json.loads(raw)
+        written = float(payload["written_at"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    payload["age_seconds"] = (time.time() if now is None else now) - written
+    return payload
+
+
+class Heartbeat:
+    """Ticks the file and the row on SEPARATE threads.
+
+    🔴 IT OPENS ITS OWN DATABASE CONNECTION. `SignalDB` runs `autocommit=False`,
+    so a heartbeat issued on the ingest connection would land inside whatever
+    transaction the ingest loop has open — committing a partial batch or being
+    rolled back with it. Sharing the connection is the bug, not an optimisation.
+
+    🔴 TWO THREADS, AND THAT IS THE WHOLE ANTI-CASCADE PROPERTY. The first cut
+    wrote the file and then the row on ONE thread, reasoning that the file came
+    first so a database fault could not affect it. That is true only for a
+    database that fails FAST. A STALLED Postgres — node partitioned after the
+    socket was established, storage I/O hang on the PV, failover, another
+    session holding the row lock — blocks inside the row write, and the next
+    FILE write never happens. Measured on real Postgres: with the row locked by
+    a second session the file aged past its max-age and the probe went unhealthy,
+    which under a k8s liveness probe kills a consumer that was working fine and
+    then kills its replacement 30s later, for the duration of the incident. The
+    outage shape the original test used — a factory that raises instantly — is
+    the one shape that was already safe.
+
+    So the file loop now touches nothing but the local filesystem, and the row
+    loop is free to block for as long as it likes without anyone caring.
+    """
+
+    def __init__(self, consumer, *, db_factory=None, interval: float = None,
+                 path: str = None, clock=time.time):
+        self._consumer = consumer
+        self._db_factory = db_factory
+        self._interval = HEARTBEAT_INTERVAL if interval is None else interval
+        self._path = path or HEARTBEAT_PATH
+        self._clock = clock
+        self._stop = threading.Event()
+        self._thread = None
+        self._row_thread = None
+        #: beats ATTEMPTED vs beats that actually wrote the file. They differ
+        #: precisely when the sink is failing, which is the one time an operator
+        #: needs to tell "the thread is wedged" from "the thread is trying and
+        #: the disk is refusing" — the same working/dead distinction this module
+        #: exists to make, one level down.
+        self.attempts = 0
+        self.ticks = 0
+        self.row_attempts = 0
+        self.row_writes = 0
+        self.row_failures = 0
+
+    def payload(self) -> dict:
+        c = self._consumer
+        written = self._clock()
+        return {
+            "written_at": written,
+            # The row's columns are epoch-MS BIGINT (see the DDL comment). Carried
+            # alongside rather than converted inside the DB layer so there is one
+            # obvious place where the unit changes.
+            "written_at_ms": int(written * 1000),
+            "pod": socket.gethostname(),
+            "stream_connected": bool(getattr(c, "stream_connected", False)),
+            "last_frame_at": getattr(c, "last_frame_at", None),
+            "connections": int(getattr(c, "connections", 0)),
+            "reconnects": int(c.stats.get(STAT_RECONNECTS, 0)),
+            "stored": int(c.stats.get(STAT_STORED, 0)),
+            "malformed": int(c.stats.get(STAT_MALFORMED, 0)),
+        }
+
+    # -- the liveness sink: local filesystem ONLY, never the network ---------
+    def tick(self) -> dict:
+        """One FILE beat. Touches nothing that can block on a network.
+
+        This is the liveness contract. Keep it that way: anything added here
+        that can hang re-creates the cascade the two threads exist to prevent.
+        """
+        self.attempts += 1
+        hb = self.payload()
+        write_heartbeat_file(hb, self._path)
+        self.ticks += 1
+        return hb
+
+    # -- the observability sink: allowed to be slow, allowed to fail ---------
+    def tick_row(self) -> None:
+        """One ROW beat, on its own thread.
+
+        🔴 Failures are counted and printed, never raised: a Postgres blip must
+        not kill the thread, and it must never reach the file loop. A thread
+        that dies on the first outage is a signal that reports death for exactly
+        the fault it was supposed to ride out.
+        """
+        if self._db_factory is None:
+            return
+        self.row_attempts += 1
+        try:
+            with self._db_factory() as db:
+                db.record_heartbeat(self.payload())
+                db.commit()
+            self.row_writes += 1
+        except Exception as exc:  # noqa: BLE001 — see docstring
+            self.row_failures += 1
+            print(f"signal-consumer: heartbeat row failed ({exc})", file=sys.stderr)
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self.tick()
+            except Exception as exc:  # noqa: BLE001 — the thread must outlive a bad beat
+                print(f"signal-consumer: heartbeat failed ({exc})", file=sys.stderr)
+            self._stop.wait(self._interval)
+
+    def _row_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self.tick_row()
+            except Exception as exc:  # noqa: BLE001 — belt and braces; tick_row swallows
+                print(f"signal-consumer: heartbeat row loop ({exc})", file=sys.stderr)
+            self._stop.wait(self._interval)
+
+    def start(self) -> "Heartbeat":
+        self.tick()                      # beat ONCE before the first wait, so a
+                                         # probe has a reading immediately
+        self._thread = threading.Thread(target=self._loop, name="signal-heartbeat",
+                                        daemon=True)
+        self._thread.start()
+        if self._db_factory is not None:
+            self._row_thread = threading.Thread(target=self._row_loop,
+                                                name="signal-heartbeat-row",
+                                                daemon=True)
+            self._row_thread.start()
+        return self
+
+    def stop(self) -> None:
+        self._stop.set()
+        for t in (self._thread, self._row_thread):
+            if t is not None:
+                # 🔴 A SHORT join, and daemon=True, precisely because the row
+                # thread may be wedged inside a stalled database call. Waiting on
+                # it would make shutdown hang for the same reason liveness used
+                # to; the interpreter reaps a daemon thread regardless.
+                t.join(timeout=5)
+
+
 def iter_frames(source) -> Iterator[object]:
     """Normalise whatever the receive transport yields into one item per message.
 
@@ -487,6 +719,13 @@ class SignalConsumer:
             STAT_DB_RECOVERY_FAILURES: 0,
             STAT_ATTACHMENT_FAILURES: 0,
         }
+        # Stream state the heartbeat reports. Initialised HERE, not lazily in
+        # run(), so `Heartbeat.payload()` can never read a missing attribute off
+        # a consumer that has not started yet — a health writer that raises is a
+        # health writer that reports nothing.
+        self.stream_connected = False
+        self.connections = 0
+        self.last_frame_at = None
 
     # -- one event ---------------------------------------------------------
     def handle_payload(self, payload) -> str:
@@ -661,8 +900,15 @@ class SignalConsumer:
         connections = 0
         while max_connections is None or connections < max_connections:
             connections += 1
+            self.connections = connections
             try:
-                for payload in iter_frames(self._stream_factory()):
+                stream = self._stream_factory()
+                # Set only AFTER the factory returns: a factory that raises never
+                # opened anything, and reporting `connected` for it would make the
+                # health row assert a connection that does not exist.
+                self.stream_connected = True
+                for payload in iter_frames(stream):
+                    self.last_frame_at = int(time.time() * 1000)
                     self.handle_payload(payload)
             except Exception as exc:  # noqa: BLE001 — a dropped stream is normal
                 self.stats[STAT_RECONNECTS] += 1
@@ -670,6 +916,8 @@ class SignalConsumer:
                       file=sys.stderr)
                 self._sleep(self._backoff)
                 continue
+            finally:
+                self.stream_connected = False
         return dict(self.stats)
 
 
@@ -830,6 +1078,16 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--account", default=ACCOUNT,
                    help="the account number to receive for (default $SIGNAL_ACCOUNT)")
 
+    h = sub.add_parser(
+        "health",
+        help="is the consumer alive? (exit 0 healthy, 1 stale) — the k8s probe")
+    h.add_argument("--max-age", type=float, default=None,
+                   help=f"seconds before a heartbeat is stale (default {HEARTBEAT_MAX_AGE:g})")
+    h.add_argument("--from-db", action="store_true",
+                   help="read the health ROW instead of the local file. Richer, but "
+                        "depends on Postgres — do NOT use this as a liveness probe")
+    h.add_argument("--json", action="store_true", help="machine-readable output")
+
     q = sub.add_parser("conversations", help="list conversations, newest first")
     q.add_argument("--limit", type=int, default=25)
 
@@ -869,8 +1127,48 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _report_health(row, source: str, args) -> int:
+    """Format one health reading and return the PROCESS EXIT CODE.
+
+    Shared by both sources so the file and the row cannot drift into two
+    different opinions about what "healthy" means.
+    """
+    age = row.get("age_seconds") if row else None
+    report = dict(row) if row else {}
+    report["source"] = source
+    fresh = heartbeat_is_fresh(None if age is None else float(age), args.max_age)
+    report["age_seconds"] = None if age is None else round(float(age), 1)
+    report["healthy"] = fresh
+    if args.json:
+        print(json.dumps(report, default=str))
+    elif not row:
+        # 🔴 Say WHICH question came back empty. "no heartbeat" from the file
+        # means the process never wrote one; from the db it can ALSO mean
+        # Postgres is unreachable — different faults, and a bare "unhealthy"
+        # sends the reader hunting the wrong one.
+        print(f"UNHEALTHY: no heartbeat ({source})")
+    else:
+        print(f"{'HEALTHY' if fresh else 'UNHEALTHY'}: "
+              f"heartbeat {report['age_seconds']}s old "
+              f"(connected={row.get('stream_connected')}, "
+              f"reconnects={row.get('reconnects')}, "
+              f"stored={row.get('stored')}, pod={row.get('pod')})")
+    return 0 if fresh else 1
+
+
 def main(argv=None) -> int:  # pragma: no cover - thin CLI shell over tested units
     args = build_parser().parse_args(argv)
+
+    # 🔴 ANSWERED BEFORE ANY DATABASE CONNECTION EXISTS, and that is the whole
+    # point. Every other command runs inside `with SignalDB()`, which connects
+    # AND runs `ensure_schema()` — so routing the probe through it would make
+    # k8s liveness depend on Postgres being up, and a database blip would
+    # restart a consumer that was working perfectly. That is the exact cascade
+    # the two-sink design exists to prevent; it would have been reintroduced
+    # here, in the CLI, after being carefully avoided in the daemon.
+    if args.cmd == "health" and not args.from_db:
+        return _report_health(read_heartbeat_file(), "file", args)
+
     with SignalDB() as db:
         db.ensure_schema()
         if args.cmd == "run":
@@ -885,7 +1183,18 @@ def main(argv=None) -> int:  # pragma: no cover - thin CLI shell over tested uni
                 fetch_attachment=http_attachment_fetcher(),
                 minio=_open_minio(),
             )
-            print(json.dumps(consumer.run()))
+            # 🔴 `db_factory=SignalDB` — a NEW connection per beat, never `db`.
+            # See Heartbeat's docstring: autocommit=False makes a shared
+            # connection a transaction hazard, not a saving.
+            beat = Heartbeat(consumer, db_factory=SignalDB).start()
+            try:
+                print(json.dumps(consumer.run()))
+            finally:
+                beat.stop()
+        elif args.cmd == "health":
+            # Only reachable with --from-db; the file path returned above,
+            # before this connection was ever opened.
+            return _report_health(db.read_heartbeat(), "db", args)
         elif args.cmd == "conversations":
             for row in db.list_conversations(limit=args.limit):
                 print(f"{_fmt_ts(row['last_message_timestamp'])}  "

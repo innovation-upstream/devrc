@@ -183,6 +183,45 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     )
     """,
 
+    """
+    -- 🔴 THE HEALTH ROW. This consumer serves no HTTP, has no probes, and emitted
+    -- ZERO log lines across 20h of successful ingestion — so "reaching nothing"
+    -- and "working perfectly" produced byte-identical observations, and row count
+    -- was the only health signal in existence. That is what made the step-7
+    -- diagnosis take hours: no upstream signal disagreed between the rival
+    -- explanations, so an empty table could not identify which was true.
+    --
+    -- ONE ROW, upserted on a timer (id is pinned to 1 by the primary key + the
+    -- upsert's ON CONFLICT). It is deliberately NOT a history table: the question
+    -- is "is it alive NOW", and an append-only log of heartbeats would need its
+    -- own retention story to answer it.
+    -- 🔴 EPOCH-MS BIGINT, like message_timestamp and server_received_at, NOT
+    -- timestamptz. The first cut declared these TIMESTAMPTZ and wrote a Python
+    -- float into them, so the upsert raised `is of type timestamp with time zone
+    -- but expression is of type numeric` on EVERY beat once the first frame
+    -- arrived — the row was correct only while nothing worked, and broke the
+    -- moment it did. Nothing caught it because no test executed this SQL.
+    -- BIGINT also keeps the statement free of `now()`/`EXTRACT`, which the
+    -- sqlite substrate cannot translate; that is what makes it TESTABLE, and
+    -- untestable was the root cause, not the type.
+    CREATE TABLE IF NOT EXISTS signal.consumer_health (
+        id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+        updated_at BIGINT NOT NULL,
+        pod TEXT,
+        stream_connected BOOLEAN NOT NULL,
+        -- 🔴 NOT a liveness input. An idle Signal account legitimately sends
+        -- nothing for hours, so "no frame recently" is NORMAL and must never
+        -- restart anything. It is here because it is the first thing a human
+        -- wants when diagnosing, and conflating it with liveness is precisely
+        -- the mistake that would make a probe flap on a quiet weekend.
+        last_frame_at BIGINT,
+        connections BIGINT NOT NULL DEFAULT 0,
+        reconnects BIGINT NOT NULL DEFAULT 0,
+        stored BIGINT NOT NULL DEFAULT 0,
+        malformed BIGINT NOT NULL DEFAULT 0
+    )
+    """,
+
     "CREATE INDEX IF NOT EXISTS idx_msg_ts ON signal.messages(message_timestamp DESC)",
     "CREATE INDEX IF NOT EXISTS idx_msg_dm ON signal.messages(source_contact_id, message_timestamp)",
     "CREATE INDEX IF NOT EXISTS idx_msg_group ON signal.messages(group_id, message_timestamp) WHERE group_id IS NOT NULL",
@@ -833,6 +872,81 @@ class SignalDB:
                 "contact_id, is_remove FROM signal.reactions WHERE message_id IS NULL"
             )
             return [dict(r) for r in cur.fetchall()]
+
+    # -- health ------------------------------------------------------------
+    def record_heartbeat(self, hb: dict) -> None:
+        """Upsert THE single health row.
+
+        🔴 Call this on a connection of its OWN, never the ingest connection.
+        These connections run `autocommit=False`, so a heartbeat issued from the
+        heartbeat thread on the shared connection would land inside whatever
+        transaction the ingest thread has open — committing a half-written
+        message batch, or being rolled back with it. `consumer.Heartbeat` opens
+        its own `SignalDB` for exactly this reason.
+        """
+        with self._c.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO signal.consumer_health
+                    (id, updated_at, pod, stream_connected, last_frame_at,
+                     connections, reconnects, stored, malformed)
+                VALUES (1, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    updated_at       = EXCLUDED.updated_at,
+                    pod              = EXCLUDED.pod,
+                    stream_connected = EXCLUDED.stream_connected,
+                    last_frame_at    = COALESCE(EXCLUDED.last_frame_at,
+                                                signal.consumer_health.last_frame_at),
+                    connections      = EXCLUDED.connections,
+                    reconnects       = EXCLUDED.reconnects,
+                    stored           = EXCLUDED.stored,
+                    malformed        = EXCLUDED.malformed
+                """,
+                (int(hb["written_at_ms"]), hb.get("pod"),
+                 bool(hb.get("stream_connected")),
+                 None if hb.get("last_frame_at") is None else int(hb["last_frame_at"]),
+                 int(hb.get("connections") or 0),
+                 int(hb.get("reconnects") or 0), int(hb.get("stored") or 0),
+                 int(hb.get("malformed") or 0)),
+            )
+
+    def read_heartbeat(self, now_ms: int | None = None) -> dict | None:
+        """The health row, with `age_seconds` derived from `now_ms`.
+
+        🔴 No `now()`/`EXTRACT` in the statement, deliberately. Those are the
+        constructs the sqlite substrate refuses, and a statement no test can
+        execute is how the TIMESTAMPTZ/float mismatch shipped. Portable SQL here
+        buys an executing test, which is worth more than computing the age
+        server-side.
+
+        The trade is stated rather than hidden: `age_seconds` is measured against
+        the READER's clock, so a reader whose clock has drifted from the writer's
+        misjudges it. That is acceptable because the load-bearing liveness path
+        never comes through here — the probe reads the FILE, written and read in
+        the same process, where no skew is possible. This path is the human /
+        deadman view.
+        """
+        with self._c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT pod, stream_connected, connections, reconnects, stored, "
+                "malformed, updated_at, last_frame_at "
+                "FROM signal.consumer_health WHERE id = 1"
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            out = dict(row)
+            # 🔴 Normalise the boolean. psycopg2 hands back a real bool, sqlite
+            # hands back 0/1, and a caller writing `is True` would then be
+            # correct against one and silently wrong against the other. The
+            # substrate exposed this — the API's type must not depend on which
+            # driver answered.
+            out["stream_connected"] = bool(out["stream_connected"])
+            now = int(time.time() * 1000) if now_ms is None else int(now_ms)
+            out["age_seconds"] = (now - int(out["updated_at"])) / 1000.0
+            lf = out.get("last_frame_at")
+            out["frame_age_seconds"] = None if lf is None else (now - int(lf)) / 1000.0
+            return out
 
     # -- reads -------------------------------------------------------------
     def list_conversations(self, limit: int = 50) -> list:

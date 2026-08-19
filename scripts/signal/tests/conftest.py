@@ -6,10 +6,29 @@ suite imports the modules under test directly.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
 import pytest
+
+# 🔴 POPPED AT MODULE SCOPE, ABOVE EVERY IMPORT OF `consumer` — a fixture is far
+# too late. `HEARTBEAT_INTERVAL`/`MAX_AGE`/`PATH` are parsed at consumer.py
+# IMPORT time, and the test modules import consumer at their own module scope,
+# i.e. during collection. An autouse fixture runs after all of that, so the
+# first version of this cleanup was completely INERT while carrying a docstring
+# claiming it had been measured and closed — the failing claim was the
+# dangerous half, not the missing cleanup.
+#
+# Both symptoms, measured at the time this was written:
+#   SIGNAL_HEARTBEAT_MAX_AGE=10  -> 1 failed  (10.0 >= 2 * 30.0)
+#   SIGNAL_HEARTBEAT_INTERVAL=abc -> 10 COLLECTION ERRORS, suite interrupted
+# A suite whose configuration is decided by the ambient environment is blind on
+# exactly that dimension, and a host exporting either turns the gate red for a
+# reason that has nothing to do with the code.
+for _var in ("SIGNAL_HEARTBEAT_PATH", "SIGNAL_HEARTBEAT_INTERVAL",
+             "SIGNAL_HEARTBEAT_MAX_AGE"):
+    os.environ.pop(_var, None)
 
 SIGNAL_DIR = Path(__file__).resolve().parents[1]
 TESTS_DIR = Path(__file__).resolve().parent
