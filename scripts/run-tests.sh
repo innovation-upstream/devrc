@@ -841,11 +841,24 @@ TARGET_FLOORS=(
   #   scripts/tests  (collected=5394 …)
   #   _suggested_floor 5394 = 5394 - min(50, max(1, 269)) = 5394 - 50 = 5344
   #
+  # Re-measured again after the harness-session-registry clock landed on this
+  # same branch (+39 tests in test_waiting_windows.py, 91 -> 130):
+  #
+  #   scripts/tests  (collected=5433 passed=5432 …)
+  #   _suggested_floor 5433 = 5433 - min(50, max(1, 271)) = 5433 - 50 = 5383
+  #
+  # ⚠ A CONCURRENT BRANCH TOUCHES THIS SAME LINE (`scripts/session-resolve`,
+  # adding scripts/tests/test_session_resolve.py under this same directory
+  # target), so it WILL conflict. Resolve it the way the header says: re-run
+  # the gate on the MERGED tree and copy the number it prints. Do NOT add the
+  # two branches' deltas together — that is exactly the arithmetic-across-a-
+  # conflict that made the old single literal take eleven values in one day.
+  #
   # ⚠ ZERO new skips on this target — the new suite is fully hermetic (every
   # impure source injected; the only disk it touches is a pytest `tmp_path`
   # `$HOME` for the on-disk artifact-name pin), so EXPECTED_SKIPS is untouched.
   # Movement on THIS line is the evidence the gate runs the new file at all.
-  "scripts/tests|5344"
+  "scripts/tests|5383"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
