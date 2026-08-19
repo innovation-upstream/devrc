@@ -927,13 +927,14 @@ def _site_notes_path(host: str) -> str:
     """The reference-doc path for `host`, or "" when the host has none.
 
     🔴 HOST-SUFFIX matching, on LABEL BOUNDARIES — never a substring test. A key
-    `civitai.com` matches `civitai.com` and `www.civitai.com`, and must NOT match
-    `notcivitai.com` (a longer label ending in the same characters) nor
-    `civitai.com.evil.test` (the key as a PREFIX). A naive `key in host` gets
-    both of those wrong and hands an attacker-chosen host our operating notes.
+    A key `example.test` matches `example.test` and any subdomain of it, and
+    must NOT match `notexample.test` (a longer label ending in the same
+    characters) nor `example.test.evil.invalid` (the key as a PREFIX). A naive
+    `key in host` gets both of those wrong and hands an attacker-chosen host our
+    operating notes.
 
-    The LONGEST matching suffix wins, so a specific `foo.civitai.com` entry beats
-    a general `civitai.com` one regardless of dict order.
+    The LONGEST matching suffix wins, so a specific `sub.example.test` entry
+    beats a general `example.test` one regardless of dict order.
     """
     if not isinstance(host, str) or not host:
         return ""

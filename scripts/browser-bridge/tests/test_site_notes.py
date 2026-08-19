@@ -140,45 +140,73 @@ def test_the_real_index_parses_as_json():
 
 # --------------------------------------------------------------------------- #
 # Suffix matching
+#
+# 🔴 The matrix below runs against a SYNTHETIC `example.test` registry, not the
+# real one, and that is a constraint of this repo rather than a preference: this
+# is a PUBLIC repo and `scripts/testlib/client_host_scan.py` blocks any CLIENT
+# SUBDOMAIN literal in a tracked file. `www.<client>` in an assertion is exactly
+# the internal-topology leak that gate exists to stop — its own playbook says a
+# test-load-bearing host becomes a `*.example.test` one (RFC 6761). The apex is
+# permitted, so the real registry keeps the two assertions that need it.
+#
+# The semantics under test are identical, and the fixture is arguably better:
+# nothing here depends on which sites happen to be registered today.
 # --------------------------------------------------------------------------- #
-def test_exact_host_matches():
+KEY = "example.test"
+DOC = f"reference/sites/{KEY}.md"
+
+
+@pytest.fixture
+def synthetic(tmp_path, monkeypatch):
+    """A one-entry registry keyed on a reserved-TLD host."""
+    _point_at(monkeypatch, _write_index(
+        tmp_path / "syn", json.dumps({"sites": {KEY: f"{KEY}.md"}})))
+
+
+def test_exact_host_matches_in_the_real_registry():
+    """The one assertion that must run against the REAL registry: an apex, which
+    the client-host gate permits."""
     assert S._site_notes_path("civitai.com") == "reference/sites/civitai.com.md"
 
 
-def test_subdomain_matches():
-    """`www.civitai.com` and `civitai.com` must BOTH resolve — that is the whole
-    reason the match is a suffix and not an equality."""
-    assert S._site_notes_path("www.civitai.com") == "reference/sites/civitai.com.md"
-    assert S._site_notes_path("a.b.civitai.com") == "reference/sites/civitai.com.md"
+def test_unregistered_host_returns_empty_in_the_real_registry():
+    assert S._site_notes_path("example.com") == ""
+
+
+@pytest.mark.parametrize("host", ["www.example.test", "a.b.example.test"])
+def test_subdomain_matches(host, synthetic):
+    """A subdomain and the apex must BOTH resolve — that is the whole reason the
+    match is a suffix and not an equality."""
+    assert S._site_notes_path(host) == DOC
 
 
 @pytest.mark.parametrize("host", [
-    # 🔴 THE BUG THIS FILE EXISTS FOR. Every one of these CONTAINS "civitai.com"
-    # and none of them is civitai.com. A naive `key in host` returns a match for
-    # all five and hands an attacker-chosen host our operating notes.
-    "notcivitai.com.evil.test",   # key as an infix
-    "civitai.com.evil.test",      # key as a PREFIX — the classic suffix-check miss
-    "notcivitai.com",             # longer LABEL ending in the key's characters
-    "xcivitai.com",
-    "evil-civitai.com",
+    # 🔴 THE BUG THIS FILE EXISTS FOR. Every one of these CONTAINS the key
+    # "example.test" and none of them IS it. A naive `key in host` returns a
+    # match for all five and hands an attacker-chosen host our operating notes.
+    "notexample.test.evil.invalid",   # key as an infix
+    "example.test.evil.invalid",      # key as a PREFIX — the classic suffix miss
+    "notexample.test",                # longer LABEL ending in the key's chars
+    "xexample.test",
+    "evil-example.test",
 ])
-def test_a_host_merely_containing_the_key_does_not_match(host):
+def test_a_host_merely_containing_the_key_does_not_match(host, synthetic):
     assert S._site_notes_path(host) == "", (
-        f"{host!r} must NOT match the `civitai.com` entry — matching is on label "
+        f"{host!r} must NOT match the {KEY!r} entry — matching is on label "
         "boundaries (host == key, or host endswith '.'+key), never a substring."
     )
 
 
 @pytest.mark.parametrize("host", [
-    "CIVITAI.COM", "Www.CiviTai.CoM", "civitai.com.", "  civitai.com  ",
+    "EXAMPLE.TEST", "Www.ExAmple.TesT", "example.test.", "  example.test  ",
 ])
-def test_host_is_normalised_before_matching(host):
+def test_host_is_normalised_before_matching(host, synthetic):
     """Case, a trailing root dot, and surrounding whitespace are not identity."""
-    assert S._site_notes_path(host) == "reference/sites/civitai.com.md"
+    assert S._site_notes_path(host) == DOC
 
 
-@pytest.mark.parametrize("host", ["example.com", "", None, 0, [], "com"])
-def test_unregistered_or_junk_host_returns_empty(host):
+@pytest.mark.parametrize("host", ["other.invalid", "", None, 0, [], "test"])
+def test_unregistered_or_junk_host_returns_empty(host, synthetic):
     assert S._site_notes_path(host) == ""
 
 
@@ -203,7 +231,7 @@ def test_longest_matching_suffix_wins(tmp_path, monkeypatch):
 # The envelope
 # --------------------------------------------------------------------------- #
 def test_registered_host_gets_site_notes_on_the_envelope():
-    result = _roundtrip("https://www.civitai.com/models/1")
+    result = _roundtrip("https://civitai.com/models/1")
     assert result["site_notes"] == "reference/sites/civitai.com.md"
 
 
@@ -223,7 +251,7 @@ def test_unregistered_host_gets_NO_site_notes_KEY():
 def test_a_containing_host_gets_no_site_notes_on_the_wire():
     """The substring bug, asserted at the SEAM rather than on the helper — the
     helper being right does not prove the call site passes it the right host."""
-    result = _roundtrip("https://notcivitai.com.evil.test/x")
+    result = _roundtrip("https://notcivitai.com/x")
     assert "site_notes" not in result
 
 

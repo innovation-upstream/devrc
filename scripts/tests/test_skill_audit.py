@@ -247,6 +247,81 @@ def test_positive_control_orphan_reference_counter_moves(tmp_path):
     assert a["orphan_refs"] == ["reference/orphan.md"]
 
 
+# --- a DIRECTORY routed by a VARIABLE segment ----------------------------------
+# The third routing shape. A set that is expected to keep growing (browser's
+# per-site docs) cannot afford a row per member, because the body is loaded on
+# every task. A row naming the directory with a `<placeholder>` filename routes
+# to every member, because something at RUN TIME resolves the placeholder — so
+# those members are reachable, not dead. The four tests below pin that the
+# affordance is REAL, NARROW, and cannot be used to switch the counter off.
+
+_VAR_ROUTED = """\
+---
+name: varrouted
+description: A core that routes to a directory, not to each of its members.
+---
+
+## Reference
+
+| file | load it when… |
+|---|---|
+| `reference/errors.md` | any error you don't recognise |
+| `reference/sites/<host>.md` | you are driving a site that has one |
+"""
+
+
+def _var_routed(tmp_path, name="varrouted", body=_VAR_ROUTED, members=("a.test.md",)):
+    d = tmp_path / name
+    (d / "reference" / "sites").mkdir(parents=True)
+    (d / "SKILL.md").write_text(body)
+    (d / "reference" / "errors.md").write_text("# errors\n")
+    for m in members:
+        (d / "reference" / "sites" / m).write_text(f"# {m}\n")
+    return d / "SKILL.md"
+
+
+def test_a_member_of_a_placeholder_routed_directory_is_not_an_orphan(tmp_path):
+    """`reference/sites/<host>.md` in the body routes to every file in that
+    directory without naming one. None of them is dead."""
+    a = sa.audit_one(_var_routed(tmp_path, members=("a.test.md", "b.test.md")))
+    assert a["orphan_refs"] == [], (
+        "a directory routed with a variable segment must not report its members "
+        f"as orphans: {a['orphan_refs']}")
+    assert a["missing_refs"] == []
+
+
+def test_the_affordance_does_NOT_extend_to_a_sibling_directory(tmp_path):
+    """NARROW: only the directory the placeholder row actually names. A file in
+    a DIFFERENT subdirectory is still unreachable, and still an orphan."""
+    p = _var_routed(tmp_path, name="narrow")
+    (p.parent / "reference" / "other").mkdir()
+    (p.parent / "reference" / "other" / "lost.md").write_text("# lost\n")
+    assert sa.audit_one(p)["orphan_refs"] == ["reference/other/lost.md"]
+
+
+def test_a_toplevel_placeholder_cannot_switch_the_whole_counter_off(tmp_path):
+    """🔴 THE ABUSE CASE. A row spelled `reference/<topic>.md` would, on a naive
+    prefix rule, excuse EVERY file in reference/ — turning the orphan check off
+    repo-wide with one line. It must not: the affordance applies to a real
+    SUBdirectory only, never to reference/ itself."""
+    body = _VAR_ROUTED.replace("`reference/sites/<host>.md`", "`reference/<topic>.md`")
+    p = _var_routed(tmp_path, name="abuse", body=body)
+    (p.parent / "reference" / "orphan.md").write_text("# orphan\n")
+    assert "reference/orphan.md" in sa.audit_one(p)["orphan_refs"]
+
+
+def test_without_the_placeholder_row_the_members_ARE_orphans(tmp_path):
+    """MUTATION, in-suite: delete the routing row and the same files must go
+    back to being reported. Without this, the test above cannot distinguish
+    'the affordance works' from 'the orphan check stopped looking'."""
+    body = "\n".join(l for l in _VAR_ROUTED.splitlines()
+                     if "reference/sites/" not in l) + "\n"
+    p = _var_routed(tmp_path, name="unrouted", body=body,
+                    members=("a.test.md", "b.test.md"))
+    assert sa.audit_one(p)["orphan_refs"] == [
+        "reference/sites/a.test.md", "reference/sites/b.test.md"]
+
+
 def test_positive_control_over_budget_status_moves(tmp_path):
     p = bad(tmp_path)
     a = sa.audit_one(p)
