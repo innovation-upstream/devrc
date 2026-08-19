@@ -902,8 +902,16 @@ TARGET_FLOORS=(
   #
   #   _suggested_floor 5741 = 5741 - min(50, max(1, 287)) = 5741 - 50 = 5691
   #
-  # ⚠ ZERO new skips from any of the three contributions.
-  "scripts/tests|5691"
+  #
+  # 2026-08-19, the #558 audit fix round (the --host default that hid a whole
+  # host, the hermeticity hole, and main() coverage for both scripts):
+  # 5741 -> 5780 collected, +39 across test_session_resolve.py and
+  # test_waiting_windows.py.
+  #
+  #   _suggested_floor 5780 = 5780 - min(50, max(1, 289)) = 5780 - 50 = 5730
+  #
+  # ⚠ ZERO new skips from any contribution.
+  "scripts/tests|5730"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
