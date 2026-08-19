@@ -2437,9 +2437,14 @@ def test_i3_focus_argv_empty_title_returns_none():
 
 
 def test_activate_invokes_i3_msg_on_success(monkeypatch):
-    """On a successful activate the server runs i3-msg with the ARGV LIST
-    (shell=False), a class="Brave-browser" + re.escape'd-title criteria, and
-    `focus`; the result reports i3:"applied"."""
+    """On a CONSENTED (focus:true) successful activate the server runs i3-msg
+    with the ARGV LIST (shell=False), a class="Brave-browser" + re.escape'd-title
+    criteria, and `focus`; the result reports i3:"applied".
+
+    Every test in this i3-outcome block passes focus:true explicitly, because
+    the raise is consent-gated — without it i3_foreground is never reached and
+    these would all assert against "withheld" instead of the state they mean to
+    pin. The gate itself is covered separately (see the focus-consent block)."""
     calls = _enable_i3(monkeypatch, returncode=0)
     srv, _ = _serve()
     ext = FakeExtension(srv, executor=lambda c: {
@@ -2449,7 +2454,7 @@ def test_activate_invokes_i3_msg_on_success(monkeypatch):
     ext.start()
     try:
         assert _wait_connected(srv, want=True)
-        st, body = _req(srv, "POST", "/cmd", {"op": "activate"})
+        st, body = _req(srv, "POST", "/cmd", {"op": "activate", "focus": True})
         assert st == 200
         assert body["result"]["data"]["i3"] == "applied"
         assert len(calls) == 1
@@ -2480,7 +2485,7 @@ def test_activate_i3_skipped_when_unavailable(monkeypatch):
     ext.start()
     try:
         assert _wait_connected(srv, want=True)
-        st, body = _req(srv, "POST", "/cmd", {"op": "activate"})
+        st, body = _req(srv, "POST", "/cmd", {"op": "activate", "focus": True})
         assert st == 200
         assert body["result"]["data"]["i3"] == "skipped"
         assert body["result"]["data"]["tabId"] == 5  # Chrome-side result intact
@@ -2498,7 +2503,7 @@ def test_activate_i3_skipped_when_no_title(monkeypatch):
     ext.start()
     try:
         assert _wait_connected(srv, want=True)
-        st, body = _req(srv, "POST", "/cmd", {"op": "activate"})
+        st, body = _req(srv, "POST", "/cmd", {"op": "activate", "focus": True})
         assert st == 200
         assert body["result"]["data"]["i3"] == "skipped"
         assert calls == []
@@ -2517,7 +2522,7 @@ def test_activate_i3_failed_on_nonzero(monkeypatch):
     ext.start()
     try:
         assert _wait_connected(srv, want=True)
-        st, body = _req(srv, "POST", "/cmd", {"op": "activate"})
+        st, body = _req(srv, "POST", "/cmd", {"op": "activate", "focus": True})
         assert st == 200
         assert body["result"]["data"]["i3"] == "failed"
         assert body["result"]["data"]["tabId"] == 5
@@ -2536,7 +2541,7 @@ def test_activate_i3_failed_on_timeout(monkeypatch):
     ext.start()
     try:
         assert _wait_connected(srv, want=True)
-        st, body = _req(srv, "POST", "/cmd", {"op": "activate"})
+        st, body = _req(srv, "POST", "/cmd", {"op": "activate", "focus": True})
         assert st == 200
         assert body["result"]["data"]["i3"] == "failed"
     finally:
@@ -2544,9 +2549,10 @@ def test_activate_i3_failed_on_timeout(monkeypatch):
 
 
 def test_activate_i3_telemetry_stays_metadata_only(telemetry, monkeypatch):
-    """Even when i3 focusing is APPLIED, the activate telemetry event carries NO
-    page title — only op / outcome / bare domain (the title can hold page
-    content; the i3 step must not leak it into activity.events)."""
+    """Even when i3 focusing is APPLIED (focus:true — the consented path, which
+    is the only one that reaches i3_foreground at all), the activate telemetry
+    event carries NO page title — only op / outcome / bare domain (the title can
+    hold page content; the i3 step must not leak it into activity.events)."""
     spool_dir = telemetry
     _enable_i3(monkeypatch, returncode=0)
     srv, _ = _serve()
@@ -2557,7 +2563,7 @@ def test_activate_i3_telemetry_stays_metadata_only(telemetry, monkeypatch):
     ext.start()
     try:
         assert _wait_connected(srv, want=True)
-        st, _ = _req(srv, "POST", "/cmd", {"op": "activate"})
+        st, _ = _req(srv, "POST", "/cmd", {"op": "activate", "focus": True})
         assert st == 200
         e = _wait_events(spool_dir, 1)[0]
         p = json.loads(e["payload"])
@@ -2566,6 +2572,251 @@ def test_activate_i3_telemetry_stays_metadata_only(telemetry, monkeypatch):
         # No title anywhere in the emitted event.
         assert "SECRET" not in json.dumps(e)
         assert "title" not in p
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+# --- the focus-steal CONSENT gate (regression, #focus-steal) --------------- #
+# WHY THESE EXIST — the measurement, not a hunch. Correlating 55,003
+# `browser-bridge` cmd events in activity.events against `i3` window-focus
+# events (2026-07-29 .. 2026-08-18): `activate` is the ONLY op with a causal
+# signature — 111/166 calls (66.9%) have a Brave window-focus event within
+# +/-1s, against 1.7-7.3% for every other op, and only 5/166 land in the 1-5s
+# band (a WM raise is immediate; a human context-switch is not). `screenshot`
+# was the leading rival hypothesis (captureVisibleTab only grabs the focused
+# window) and is FLAT: 7.3% at +/-1s vs 8.5% across the 1-5s bands, n=531.
+#
+# Before this gate, `i3_foreground()` ran on EVERY successful activate. The two
+# prior mitigations were a PROSE nudge (HIDDEN_TAB_NOTE steering to `wake`) and
+# an op-allowlist in ONE caller (the sandboxed browser-agent tool) — so every
+# other caller of the `browser` CLI walked straight past both, which is what the
+# 166 activates are. The rule now lives in the single place the screen is
+# actually taken.
+#
+# Each test below is RED at the pre-fix commit (i3_foreground was
+# unconditional); none of them is an invariant guard.
+def test_activate_withholds_the_i3_raise_without_explicit_consent(monkeypatch):
+    """🔴 THE REGRESSION. An activate that does NOT carry focus:true must never
+    reach i3-msg: no subprocess call at all, and the result says so.
+
+    This is the measured focus steal, closed at its source. The assertion is on
+    the SUBPROCESS CALL LIST, not only on the reported state — a state string is
+    something a future refactor can set while still shelling out, and the thing
+    that actually takes the operator's screen is the exec."""
+    calls = _enable_i3(monkeypatch, returncode=0)
+    srv, _ = _serve()
+    ext = FakeExtension(srv, executor=lambda c: {
+        "tabId": 5, "windowId": 1, "active": True, "status": "complete",
+        "url": "https://model-benchmarking.example.test/run",
+        "title": "Model Benchmarking"})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, body = _req(srv, "POST", "/cmd", {"op": "activate"})
+        assert st == 200
+        assert calls == [], (
+            "activate without focus:true shelled out to i3-msg — the operator's "
+            f"screen was taken without consent (argv: {calls})"
+        )
+        assert body["result"]["data"]["i3"] == "withheld"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_activate_still_activates_the_tab_when_the_raise_is_withheld(monkeypatch):
+    """INVARIANT GUARD (green at origin/main — NOT regression coverage).
+
+    Withholding the RAISE must not break the OP. The Chrome-side tab activation
+    still happens (it is a no-op for real visibility under i3 and takes
+    nothing), so `activate` keeps working as a tab-state change — this is a gate
+    on the WM step alone, not a removal of the op. Base passes it because base
+    also activates the tab; its job is to stop a future "fix" from turning the
+    gate into a removal."""
+    _enable_i3(monkeypatch, returncode=0)
+    srv, _ = _serve()
+    ext = FakeExtension(srv, executor=lambda c: {
+        "tabId": 5, "windowId": 1, "active": True, "status": "complete",
+        "url": "https://model-benchmarking.example.test/run",
+        "title": "Model Benchmarking"})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, body = _req(srv, "POST", "/cmd", {"op": "activate"})
+        assert st == 200
+        data = body["result"]["data"]
+        assert data["active"] is True and data["tabId"] == 5
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_withheld_activate_names_wake_before_the_focus_override(monkeypatch):
+    """The note an agent READS is what it learns, so pin the whole normalised
+    string, not a keyword an unrelated sentence could spell.
+
+    Load-bearing ORDER: the non-intrusive remedy (`browser wake`) must appear
+    BEFORE the `--focus` override, or the note teaches the escape hatch as the
+    headline and the gate decays into a speed bump — which is exactly how the
+    prose-only mitigation in protocol.js's HIDDEN_TAB_NOTE half-failed."""
+    note = S.I3_WITHHELD_NOTE
+    assert "browser wake" in note
+    assert "--focus" in note
+    assert note.index("browser wake") < note.index("--focus"), (
+        "the note offers --focus before it offers `browser wake`; the "
+        "non-intrusive remedy must lead"
+    )
+    # The whole string, normalised — a reword has to come here and be read.
+    assert " ".join(note.split()) == (
+        "the tab is now the active tab of its window, but the Brave WINDOW was "
+        "NOT raised: taking the operator's screen needs explicit consent. If "
+        "you only needed the page to render, use 'browser wake' (un-throttles "
+        "via CDP, moves no focus). Pass --focus only if something genuinely "
+        "needs the real foreground."
+    )
+
+
+def test_withheld_activate_carries_the_note_and_applied_does_not(monkeypatch):
+    """The note rides on the WITHHELD result so the caller is told what did not
+    happen and what to do instead — and is ABSENT when the raise was applied
+    (a note on a successful raise would be noise the agent learns to ignore)."""
+    _enable_i3(monkeypatch, returncode=0)
+    srv, _ = _serve()
+    ext = FakeExtension(srv, executor=lambda c: {
+        "tabId": 5, "windowId": 1, "active": True, "status": "complete",
+        "url": "https://model-benchmarking.example.test/run",
+        "title": "Model Benchmarking"})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        _st, withheld = _req(srv, "POST", "/cmd", {"op": "activate"})
+        assert withheld["result"]["data"]["note"] == S.I3_WITHHELD_NOTE
+        _st, applied = _req(srv, "POST", "/cmd",
+                            {"op": "activate", "focus": True})
+        assert applied["result"]["data"]["i3"] == "applied"
+        assert "note" not in applied["result"]["data"]
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_activate_telemetry_records_the_consent_decision(telemetry, monkeypatch):
+    """`payload.focus` distinguishes a withheld activate from a consented one.
+
+    This is what makes the fix FALSIFIABLE with the same instrument that found
+    the bug. The focus-steal rate was measured per-op out of activity.events;
+    without this field a post-deploy re-run of that query cannot separate the
+    two cases, so "the steals stopped" would be a claim with no data behind it.
+
+    It is a bare boolean — no page content — so the PRIVACY contract is
+    unchanged, and `kind` stays "cmd" so the adoption-scan usage signal is
+    unchanged (both asserted here, because a telemetry addition is exactly where
+    those two contracts get broken by accident)."""
+    spool_dir = telemetry
+    _enable_i3(monkeypatch, returncode=0)
+    srv, _ = _serve()
+    ext = FakeExtension(srv, executor=lambda c: {
+        "tabId": 5, "windowId": 1, "active": True, "status": "complete",
+        "url": "https://model-benchmarking.example.test/run",
+        "title": "Model Benchmarking"})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, _ = _req(srv, "POST", "/cmd", {"op": "activate"})
+        assert st == 200
+        e = _wait_events(spool_dir, 1)[0]
+        p = json.loads(e["payload"])
+        assert p["op"] == "activate" and p["focus"] is False
+        assert e["kind"] == "cmd", "the usage signal must not change"
+
+        st, _ = _req(srv, "POST", "/cmd", {"op": "activate", "focus": True})
+        assert st == 200
+        e2 = _wait_events(spool_dir, 2)[1]
+        p2 = json.loads(e2["payload"])
+        assert p2["op"] == "activate" and p2["focus"] is True
+        # No page content rode along with the new field.
+        assert "title" not in p2 and "Model Benchmarking" not in json.dumps(e2)
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_focus_field_never_reaches_the_extension(monkeypatch):
+    """`focus` is a SERVER-side decision: it must be popped like target/tab and
+    never dispatched.
+
+    Two reasons this is pinned. (1) The extension's validateCommand is permissive
+    about unknown fields today, so a leak would be silent — and a future strict
+    validator would turn it into a hard failure of the one op this gate governs.
+    (2) It is what lets this fix deploy with NO extension rebuild and NO Brave
+    restart: the wire contract the extension sees is byte-identical."""
+    _enable_i3(monkeypatch, returncode=0)
+    srv, _ = _serve()
+    seen = []
+
+    def _exec(c):
+        seen.append(dict(c))
+        return {"tabId": 5, "windowId": 1, "active": True, "status": "complete",
+                "url": "https://model-benchmarking.example.test/run",
+                "title": "Model Benchmarking"}
+
+    ext = FakeExtension(srv, executor=_exec)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, _ = _req(srv, "POST", "/cmd", {"op": "activate", "focus": True})
+        assert st == 200
+        acts = [c for c in seen if c.get("op") == "activate"]
+        assert acts, "the activate never reached the fake extension"
+        assert all("focus" not in c for c in acts), (
+            f"the server forwarded the `focus` consent flag to the extension: {acts}"
+        )
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_focus_requested_accepts_only_a_literal_json_true():
+    """Consent is a literal `true`, never Python truthiness.
+
+    The dangerous direction is a STRING: a caller that builds the body by shell
+    interpolation can easily send "false", and `bool("false")` is True — which
+    would read a refusal as consent and hand back exactly the bug this gate
+    closes. Pinned pairwise-distinct: every value below is a different shape,
+    and the two that differ ONLY by type ("true" vs True) sit next to each other
+    so a truthiness mutant cannot pass by coincidence."""
+    assert S.focus_requested({"op": "activate", "focus": True}) is True
+    # Everything else is a refusal.
+    for value in ("true", "false", "1", 1, 0, "", [], {}, None, "yes"):
+        assert S.focus_requested({"op": "activate", "focus": value}) is False, (
+            f"focus={value!r} ({type(value).__name__}) was read as consent"
+        )
+    assert S.focus_requested({"op": "activate"}) is False   # absent → refuse
+    assert S.focus_requested(None) is False                 # not a dict → refuse
+
+
+def test_every_other_op_is_untouched_by_the_gate(monkeypatch):
+    """SCOPE GUARD / INVARIANT GUARD (green at origin/main — NOT regression
+    coverage). The gate must bind `activate` and nothing else: no other op has
+    ever reached i3_foreground, and a mutant that widened or moved the condition
+    would show up as a behaviour change here.
+
+    `wake` is the op that matters most — it is the sanctioned non-intrusive
+    remedy, so if it ever started shelling out to i3-msg the whole fix is moot.
+    Sending focus:true on these ops must ALSO change nothing (it is meaningless
+    outside activate), which is what the second pass pins."""
+    calls = _enable_i3(monkeypatch, returncode=0)
+    srv, _ = _serve()
+    ext = FakeExtension(srv, executor=lambda c: {
+        "tabId": 5, "windowId": 1, "active": True, "status": "complete",
+        "url": "https://model-benchmarking.example.test/run",
+        "title": "Model Benchmarking", "value": "x", "text": "x", "html": "x"})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        for op in ("wake", "screenshot", "text", "getHtml", "tabs"):
+            for extra in ({}, {"focus": True}):
+                st, _ = _req(srv, "POST", "/cmd", dict(op=op, **extra))
+                assert st == 200, f"{op} {extra} returned {st}"
+        assert calls == [], (
+            f"a non-activate op reached i3-msg — the gate is on the wrong "
+            f"condition (argv: {calls})"
+        )
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
 

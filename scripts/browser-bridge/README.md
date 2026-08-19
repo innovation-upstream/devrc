@@ -241,7 +241,7 @@ has not been exercised against a third-party authenticated API beyond that.)
 | `key`        | top frame: **CDP `Input.dispatchKeyEvent`** (trusted); `--frame`: **SYNTHETIC** key via `chrome.scripting`; one bounded key; `key` required | `{url,key,frame,trusted}` |
 | `wake`       | **UN-THROTTLE the tab WITHOUT touching focus** — CDP `Emulation.setFocusEmulationEnabled` (+ best-effort `Page.setWebLifecycleState`) held for a bounded settle (`waitMs`, default 1.5s, clamped ≤**6s**) so a background SPA gets real animation frames and renders, then **explicitly disables focus emulation** and detaches. Own-tab-scoped like every CDP op. **This is the remedy for a hidden/empty read — not `activate`.** ⚠ the un-throttled STATE ends at detach (measured); rendered DOM persists | `{tabId,url,title,woke,visibilityState,readyState,applied,skipped,settleMs,note}` |
 | `--wake` on `text`/`html`/`eval` | the SAME un-throttle applied **inside the same CDP session as the read**, for a read that must OBSERVE live un-throttled state (rather than the DOM `wake` left behind). Opt-in only — the default read path is unchanged (see below) | the read's normal shape + `{woke,wake:{applied,settleMs}}` |
-| `activate`   | **FOREGROUND the tab** — `chrome.tabs.update(tab,{active:true})` + `chrome.windows.update(windowId,{focused:true})`, then an OPTIONAL bounded wait-for-`status:"complete"` + paint settle (`waitMs`, clamped ≤8s; a discarded/never-completing tab returns promptly — no wedge). **⚠⚠ STEALS THE OPERATOR'S SCREEN** — the one intrusive op, and a **LAST RESORT**: use it only when something genuinely needs the REAL foreground (a permission prompt, a native picker, seeing it yourself). For a throttled/unrendered tab use `wake`. Needed at most **once per tab, never per read**. **Operator-only — absent from the autonomous agent's op set entirely.** **i3:** the server also raises the Brave window via `i3-msg` | `{tabId,windowId,url,title,active,status,i3}` |
+| `activate`   | **FOREGROUND the tab** — `chrome.tabs.update(tab,{active:true})` + `chrome.windows.update(windowId,{focused:true})`, then an OPTIONAL bounded wait-for-`status:"complete"` + paint settle (`waitMs`, clamped ≤8s; a discarded/never-completing tab returns promptly — no wedge). **⚠⚠ STEALS THE OPERATOR'S SCREEN** — the one intrusive op, and a **LAST RESORT**: use it only when something genuinely needs the REAL foreground (a permission prompt, a native picker, seeing it yourself). For a throttled/unrendered tab use `wake`. Needed at most **once per tab, never per read**. **Operator-only — absent from the autonomous agent's op set entirely.** **i3:** the server also raises the Brave window via `i3-msg`, but ONLY with explicit consent on the wire (`focus:true`; the CLI's `--focus`, defaulted on when stdout is a TTY) — otherwise the raise is `withheld` and the result carries a note | `{tabId,windowId,url,title,active,status,i3,note?}` |
 | `upload`     | **CDP `DOM.setFileInputFiles`** — resolve the `<input type=file>` at `selector` to a RemoteObject, VERIFY it is a file input, then hand Chrome the ABSOLUTE `path` (Chrome reads the file itself — **no bytes cross the bridge**); `--frame` routes into a same-process iframe OR a cross-origin OOPIF (incl. a **NESTED** one — same bounded cascade + caps as `eval --frame`). Own-tab, #189-bounded, NO raw-CDP passthrough. **Data-exfil-capable → the server AUDIT-LOGS every upload** (op + target domain + path) and it is **OPERATOR-ONLY — not in the autonomous agent's default op set** (`BROWSER_AGENT_ALLOWED_OPS` opt-in only). `selector`+`path` required | `{ok,selector,frame,url,files:[basename]}` |
 
 `open`/`close` are dispatched to the extension; `release` (drop ownership, don't
@@ -876,6 +876,65 @@ run `browser wake` on the tab, then re-issue the frame read.
 the real foreground (a permission prompt, a native picker, verifying with your own
 eyes). It just stops being the default advice, and it is now **operator-only**
 (absent from the agent's op set entirely).
+
+### The focus steal is now CONSENT-GATED, not merely discouraged (2026-08-18)
+
+The two mitigations above are a **prose** nudge (reword `HIDDEN_TAB_NOTE` so the
+model reaches for `wake`) and an **op-allowlist in one caller** (drop `activate`
+from `OP_TO_SERVER`). Re-measuring three weeks later says that combination only
+half-held, and says exactly why: the allowlist binds the sandboxed browser-agent
+tool and *nothing else*, so Claude Code's Bash tool, an opencode session's bash
+tool, and any script still reach `activate` through the ordinary `browser` CLI.
+
+Measured out of `activity.events` (55,003 `source='browser-bridge' kind='cmd'`
+rows, 2026-07-29 → 08-18, correlated against `source='i3' kind='window-focus'`
+rows for `app='Brave-browser'`):
+
+| op | n | focus event within ±1s | in the 1–5s bands |
+|---|---|---|---|
+| **`activate`** | 166 | **111 (66.9%)** | 5 |
+| `screenshot` | 531 | 39 (7.3%) | 45 |
+| `nav` | 661 | 34 (5.1%) | 52 |
+| `open` | 477 | 17 (3.6%) | 41 |
+| `eval` | 3,586 | 106 (3.0%) | 214 |
+| `text` | 2,396 | 43 (1.8%) | 103 |
+| `wake` | 1,101 | 19 (1.7%) | 52 |
+
+`activate` is the only op whose mass concentrates at ±1s while the 1–5s bands sit
+near empty — the shape a WM-driven raise makes, and the shape a human
+context-switch does not. Every other op is flat across both bands, i.e. at
+background. In particular **`screenshot` does not steal focus**: the leading rival
+hypothesis was that `chrome.tabs.captureVisibleTab` structurally needs the
+foreground, and it does — which is precisely why the extension only takes that
+fast path for a tab that is *already* visible and routes everything else through
+CDP.
+
+So the rule moved to the one place the screen is actually taken. `i3_foreground()`
+now runs only when the command carries `focus:true` (`focus_requested`, a literal
+JSON `true` — never Python truthiness, so a shell-interpolated `"false"` cannot
+read as consent). Without it the result reports `i3:"withheld"` plus a note naming
+`browser wake` *before* it names `--focus`. The `browser` CLI sends the flag
+explicitly on every activate and defaults it to **`[ -t 1 ]`** — a human typing
+`browser activate` in a terminal gets today's behaviour unchanged; an agent on a
+pipe does not. Over the same window all 166 activates came from non-interactive
+callers and 0 of the 9 interactive `browser` commands were an activate, so the
+default costs the operator nothing.
+
+Two deployment properties fall out of putting the gate here. The `focus` field is
+**popped before dispatch** like `target`/`tab`, so the extension's wire contract is
+byte-identical and the fix needs **no extension rebuild and no Brave restart** —
+only a `home-manager switch` for `server.py` (the CLI is an `mkOutOfStoreSymlink`
+and is live from the working tree). And `payload.focus` is recorded on the activate
+telemetry event, so the same query that established the bug can falsify the fix:
+after deploy, consented activates should still correlate and withheld ones should
+fall to background.
+
+**Trade-off, stated plainly:** a script or an agent that genuinely wanted the
+foreground now has to ask for it, and will silently not get it until someone reads
+the `withheld` note and adds `--focus`. That is the intended direction — a caller
+that wanted the screen can re-run, whereas a caller that did not want it cannot
+un-interrupt the operator — but it *is* a behaviour change for every existing
+non-interactive `browser activate` caller.
 
 **✅ LIVE-VERIFIED against the operator's real Brave** using the sequence in *Live
 verification* below: `WAKE-RIG-SHELL` → `WAKE-RIG-RENDERED`, `visibilityState`
@@ -1600,7 +1659,10 @@ field** (the CDP ops are bounded typed ops only; see the CDP security model abov
   interaction while the operator was working. The capability the agent actually
   needed was *un-throttling*, which `wake` now provides without touching focus.
   Focus theft is a decision only a human at the machine should make, so it stays
-  on the `browser` CLI. (Deliberately a stronger stance than `upload`'s opt-in:
+  on the `browser` CLI. 🔴 As of 2026-08-18 this exclusion is no longer the only
+  thing holding: the CLI path is consent-gated server-side too (see *The focus
+  steal is now CONSENT-GATED*), because an allowlist in one caller left every
+  other caller unguarded — which is what the re-measurement found. (Deliberately a stronger stance than `upload`'s opt-in:
   `upload` is a risk an operator can knowingly accept for one run, whereas a model
   stealing the screen has no legitimate autonomous use at all.)
 - **`upload` is NOT in the agent's op set** (11 ops, above — no `upload`). The

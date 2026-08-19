@@ -132,9 +132,9 @@
 #                               fast path would silently return the UN-emulated
 #                               view. `click` dispatches TOUCH events while touch
 #                               emulation is on, as DevTools does.
-#   browser activate [--wait MS | --no-wait]
+#   browser activate [--wait MS | --no-wait] [--focus | --no-focus]
 #                             — FOREGROUND the owned/active tab (--tab to target
-#                               one). ⚠⚠ STEALS THE OPERATOR'S SCREEN — the ONE
+#                               one). ⚠⚠ CAN STEAL THE OPERATOR'S SCREEN — the ONE
 #                               intrusive op. LAST RESORT: use it only when
 #                               something genuinely needs the REAL foreground (a
 #                               permission prompt, a native picker, seeing it with
@@ -143,8 +143,12 @@
 #                               per read. Waits (bounded, default ~3s, cap ~8s) for
 #                               load unless --no-wait; --wait MS overrides. On i3
 #                               the SERVER also runs `i3-msg` host-side to actually
-#                               raise the Brave window + switch workspace; the
-#                               result's `i3` field reports applied/skipped/failed.
+#                               raise the Brave window + switch workspace — but
+#                               ONLY with consent: --focus asks for it, --no-focus
+#                               refuses, and the DEFAULT is "yes iff stdout is a
+#                               TTY", so a human typing this gets the raise and an
+#                               agent on a pipe does not. The result's `i3` field
+#                               reports applied/skipped/failed/withheld.
 #   browser html              — outerHTML of the owned/active tab (+ url, title);
 #                               --max-bytes N caps it (default 32768, 0 = uncapped,
 #                               truncation appends a "…[truncated N bytes]" note).
@@ -1554,22 +1558,40 @@ sys.stdout.write(json.dumps(fields)[1:-1])
     fi
     ;;
   activate)
-    # browser [--tab <id>] activate [--wait MS | --no-wait]
-    # Foreground the owned/explicit/active tab (STEALS FOCUS — the one intrusive
-    # op) so a foreground-throttled SPA loads and can then be driven. Optional
-    # bounded wait-for-load: default a modest wait (server-clamped, cap ~8s);
-    # --wait MS overrides; --no-wait skips (waitMs:0). On i3, the SERVER then runs
-    # `i3-msg` host-side to actually raise the Brave window + switch workspace
-    # (Chrome-side focus alone is a no-op under i3); the result's `i3` field is
-    # applied/skipped/failed. Off a graphical/i3 host it is skipped (best-effort).
+    # browser [--tab <id>] activate [--wait MS | --no-wait] [--focus | --no-focus]
+    # Foreground the owned/explicit/active tab so a foreground-throttled SPA loads
+    # and can then be driven. Optional bounded wait-for-load: default a modest wait
+    # (server-clamped, cap ~8s); --wait MS overrides; --no-wait skips (waitMs:0).
+    #
+    # 🔴 --focus / --no-focus: whether to also RAISE the Brave X11 window via the
+    # server's host-side `i3-msg` — the one thing in this whole CLI that takes the
+    # operator's screen. Chrome-side focus alone is a no-op under i3, so the i3-msg
+    # step IS the focus steal; the result's `i3` field reports
+    # applied/skipped/failed/withheld.
+    #
+    # DEFAULT = "on iff stdout is a TTY". A human typing `browser activate` in a
+    # terminal means it and gets today's behaviour unchanged. An AGENT (Claude
+    # Code's Bash tool, an opencode bash tool, any script) runs with stdout on a
+    # pipe and gets the tab activated WITHOUT the raise — which is what the
+    # measurement says we want: over three weeks all 166 `activate` calls came
+    # from non-interactive callers, and 0 of the 9 interactive `browser` commands
+    # in the same telemetry were an activate. The default therefore costs the
+    # operator nothing and closes the agent path.
+    #
+    # This is a STRUCTURAL discriminator (a real property of the process's stdio),
+    # not a keyword/suffix heuristic — and it is overridable in both directions,
+    # so a script that genuinely wants the screen says --focus and says it out loud.
     wait=""
+    focus=""     # "" = undecided → fall back to the TTY default below
     while [ $# -gt 0 ]; do
       case "$1" in
         --wait) shift; [ $# -ge 1 ] || die "usage: browser activate [--wait MS]"; wait="$1"; shift ;;
         --wait=*) wait="${1#--wait=}"; shift ;;
         --no-wait) wait="0"; shift ;;
+        --focus) focus="true"; shift ;;
+        --no-focus) focus="false"; shift ;;
         --) shift; [ $# -eq 0 ] || die "browser activate takes no positional args (got: $1)"; break ;;
-        -*) die "browser activate: unknown flag: $1 (try: --wait MS | --no-wait)" ;;
+        -*) die "browser activate: unknown flag: $1 (try: --wait MS | --no-wait | --focus | --no-focus)" ;;
         *) die "browser activate takes no positional args (got: $1)" ;;
       esac
     done
@@ -1578,6 +1600,20 @@ sys.stdout.write(json.dumps(fields)[1:-1])
       case "$wait" in (*[!0-9]*) die "--wait must be a non-negative integer of ms (got: $wait)";; esac
       extra="\"waitMs\":${wait}"
     fi
+    # Resolve the default HERE, and always put an explicit boolean on the wire:
+    # the server default-denies, so an omitted field and `false` mean the same
+    # thing — but sending it explicitly makes the decision auditable in the
+    # request rather than inferred from an absence.
+    #
+    # 🔴 `[ -t 1 ]` MUST be evaluated HERE, not inside cmd_op. The dispatch below
+    # is `cmd_op activate … | pretty` — a pipeline, so cmd_op's own stdout is
+    # always a pipe and the test would read FALSE on a real terminal, silently
+    # turning the TTY default into a constant. Every other subcommand pipes to
+    # `pretty` the same way, so this trap is one refactor away at all times.
+    if [ -z "$focus" ]; then
+      if [ -t 1 ]; then focus="true"; else focus="false"; fi
+    fi
+    extra="${extra:+${extra},}\"focus\":${focus}"
     cmd_op activate "$extra" | pretty
     ;;
   html)

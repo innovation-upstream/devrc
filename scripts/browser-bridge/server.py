@@ -138,9 +138,13 @@ from urllib.parse import unquote, urlsplit
 # path can take the operator's screen.
 # `activate` foregrounds the owned/target tab (chrome.tabs.update{active} +
 # chrome.windows.update{focused}) AND (host-side, below) raises the Brave window
-# via i3-msg. It is the ONE op that STEALS the operator's screen and is a LAST
+# via i3-msg. It is the ONE op that can STEAL the operator's screen and is a LAST
 # RESORT — `wake` is the answer for throttling. Tab-scoped, dispatched like the
 # other tab-scoped ops (its optional `waitMs` is a passthrough field).
+# 🔴 The host-side raise is CONSENT-GATED: it happens only when the command
+# carries `focus:true` (the CLI's `--focus`, which it also defaults to when
+# stdout is a TTY, i.e. a human typed it). Without it the result reports
+# i3:"withheld" and the operator's screen is untouched. See focus_requested.
 # `upload` is a TYPED CDP op (DOM.setFileInputFiles): it populates an
 # <input type=file> with a local file whose ABSOLUTE path Chrome reads ITSELF
 # (same host) — so NO file bytes cross the bridge. It dispatches + tab-scopes
@@ -2134,10 +2138,79 @@ def _result_title(result) -> str:
 
 def _annotate_i3(result, state: str) -> None:
     """Record the i3-foregrounding outcome as a small metadata field on the
-    activate result's data ({...,"i3":"applied"|"skipped"|"failed"}) so the
-    caller knows whether the window was actually raised. Never emits the title."""
+    activate result's data
+    ({...,"i3":"applied"|"skipped"|"failed"|"withheld"}) so the caller knows
+    whether the window was actually raised. Never emits the title.
+
+    "withheld" is the CONSENT state, not a failure: the command did not carry
+    `focus:true`, so i3_foreground was never called (see focus_requested)."""
     if isinstance(result, dict) and isinstance(result.get("data"), dict):
         result["data"]["i3"] = state
+        if state == I3_WITHHELD:
+            # Assigning `note` outright cannot clobber anything: the extension's
+            # OPS.activate returns a FIXED shape — {tabId, windowId, url, title,
+            # active, status} — and never a note (unlike the read ops, whose
+            # annotateVisibility does set one). If a future activate path starts
+            # producing its own note, MERGE here rather than letting this
+            # overwrite it: the consent guidance is the thing the agent reads.
+            result["data"]["note"] = I3_WITHHELD_NOTE
+
+
+# --- consent gate for the host-side i3 focus steal (the ONE intrusive path) -- #
+# WHY THIS GATE EXISTS (measured, 2026-08-18, activity.events over 3 weeks):
+# `activate` is the ONLY bridge op that moves the operator's real WM focus, and
+# it did so UNCONDITIONALLY on every successful call. Correlating 55,003
+# `browser-bridge` cmd events against `i3` window-focus events, `activate` is
+# also the only op with a causal signature: 111/166 activates (66.9%) have a
+# Brave window-focus event within +/-1s, versus 1.7-7.3% for every other op —
+# and its 1-5s band is empty (5/166), the shape a WM-driven raise makes and a
+# human context-switch does not. `screenshot` (7.3% at +/-1s, 8.5% in the 1-5s
+# bands, n=531) is FLAT — captureVisibleTab does NOT steal focus here, because
+# the extension only takes the fast path for a tab that is ALREADY visible.
+#
+# The previous mitigation (#225) was PROSE: reword HIDDEN_TAB_NOTE so an agent
+# learns to reach for `wake` instead. claude/RULES.md: "Prefer deterministic/
+# structural fixes over prompt-tuning, prose instructions". Measurement says the
+# prose only half-held — 166 activates still landed in three weeks. The second
+# mitigation (#180-era) removed `activate` from the sandboxed browser-agent's
+# op allowlist, which is "one rule, one place" violated: it binds exactly ONE
+# caller. Every other caller of the `browser` CLI — Claude Code's Bash tool, an
+# opencode session's bash tool, a script — walks straight past it. 14 of those
+# 166 activates are positively attributable to opencode-driven bash.
+#
+# So the rule moves HERE, to the one place the screen is actually taken: taking
+# the operator's screen requires EXPLICIT CONSENT on the wire. No `focus:true`,
+# no i3-msg. The Chrome-side tab activation still happens (it is a no-op for
+# real visibility under i3 and takes nothing), so `activate` keeps working as a
+# tab-state change; only the WM raise is gated.
+I3_WITHHELD = "withheld"
+
+# Emitted on the result whenever the raise is withheld. It must name BOTH the
+# non-intrusive remedy and the explicit override, because this string is what an
+# agent reads and learns from (same load-bearing-wording property as
+# protocol.js's HIDDEN_TAB_NOTE — do not make `--focus` the headline).
+I3_WITHHELD_NOTE = (
+    "the tab is now the active tab of its window, but the Brave WINDOW was NOT "
+    "raised: taking the operator's screen needs explicit consent. If you only "
+    "needed the page to render, use 'browser wake' (un-throttles via CDP, moves "
+    "no focus). Pass --focus only if something genuinely needs the real "
+    "foreground."
+)
+
+
+def focus_requested(body) -> bool:
+    """Did this command EXPLICITLY ask to take the operator's screen?
+
+    True only for a literal JSON `true` on the `focus` field. Deliberately NOT
+    Python truthiness: a caller that sends the STRING "false" (a shell that
+    interpolated a variable without quoting it as JSON) must not be read as
+    consent. Absent/None/0/""/"false"/"true" all → False. Default-deny is the
+    safe direction — a caller that wanted the screen and did not get it re-runs
+    with --focus; a caller that did NOT want it cannot un-interrupt the
+    operator."""
+    if not isinstance(body, dict):
+        return False
+    return body.get("focus") is True
 
 
 # --------------------------------------------------------------------------- #
@@ -2460,6 +2533,13 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
             # gated this request in _guard).
             target = body.pop("target", None)
             tab = body.pop("tab", None)
+            # `focus` is the host-side consent flag for the i3 raise (see
+            # focus_requested). Read it BEFORE the pop, and pop it for the same
+            # reason as target/tab: it is a SERVER-side decision the extension
+            # has no part in. Popping it also means this fix needs no extension
+            # rebuild and no Brave restart to take effect.
+            want_focus = focus_requested(body)
+            body.pop("focus", None)
             if tab is not None:
                 # Guard a malformed `tab` from a raw token-holder (the CLI already
                 # validates --tab is numeric): a non-scalar would make an
@@ -2581,7 +2661,14 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                     # SPA un-throttles and renders. Best-effort + bounded; the
                     # title is UNTRUSTED (page-controlled) and handled shell=False
                     # + re.escape'd inside i3_foreground. Skipped gracefully off i3.
-                    state = i3_foreground(_result_title(result))
+                    #
+                    # ...but ONLY with explicit consent on the wire. Without it
+                    # the raise is WITHHELD and i3_foreground is never called —
+                    # the measured focus-steal path is closed at its one source.
+                    if want_focus:
+                        state = i3_foreground(_result_title(result))
+                    else:
+                        state = I3_WITHHELD
                     _annotate_i3(result, state)
                     log("activate_i3", state=state)
                 self._send(200, {"ok": True, "result": result})
@@ -2593,6 +2680,17 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
             # dedicated structured log line — this op is exfil-capable so EVERY
             # outcome is traceable (the path is local metadata, never file content).
             extra = {"path": upload_path} if op == "upload" else emulate_extra
+            if op == "activate":
+                # `activate` alone records the CONSENT decision (a bare boolean —
+                # no page content, so the PRIVACY contract is untouched). This is
+                # what makes the gate FALSIFIABLE in production rather than only
+                # in the suite: the focus-steal rate was measured per-op out of
+                # activity.events, and without this field a post-deploy re-run
+                # cannot tell a withheld activate from a consented one, so
+                # "the steals stopped" would be unprovable from the same data
+                # that established the bug.
+                extra = dict(extra or {})
+                extra["focus"] = bool(want_focus)
             if op == "upload":
                 log("upload", outcome=outcome, domain=domain, path=upload_path,
                     key=(target or ""))

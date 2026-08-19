@@ -73,7 +73,7 @@ Result payloads land under `.result.data`.
 | `key <Enter\|Tab\|Escape\|Backspace\|Delete\|Arrow*\|Home\|End\|Page*> [--selector S]` | one bounded keypress, same trust rules |
 | `upload <selector> <path>` | fill an `<input type=file>` via CDP — Chrome reads the file BY PATH, **no bytes cross the bridge**. AUDIT-LOGGED, **operator-only** (agent → `op_not_allowed:upload`) |
 | `wake [--wait MS]`, or `text\|html\|js\|nav\|open --wake[=MS]` | **UN-THROTTLE a hidden/background tab with NO focus movement** — the fix for an empty or `hidden` read. ~1.5s settle, cap **6s**. **Wake once per PAGE, not per read** — the un-throttled state ends at detach, but the DOM already rendered PERSISTS. `--wake` folds un-throttle+read into one session; refused with `--frame` (`wake_with_frame_unsupported`). ISOLATED-vs-MAIN world nuance → `reference/spa-wake.md` |
-| `activate` | **⚠⚠ STEALS THE OPERATOR'S SCREEN — the ONE intrusive op, a LAST RESORT.** It is **NOT** the fix for a hidden/unrendered tab — that is `wake`. Read `reference/spa-wake.md` BEFORE using it |
+| `activate` | **⚠⚠ TAKES THE OPERATOR'S SCREEN — the ONE intrusive op, a LAST RESORT.** The i3 raise is consent-gated: `withheld` unless `--focus` (auto-on only when stdout is a TTY). It is **NOT** the fix for a hidden/unrendered tab — that is `wake`. Read `reference/spa-wake.md` BEFORE using it |
 | `emulate <preset>\|--reset` | **device emulation** (mobile testing) on a tab you `open`ed; sticky, owned-tab-only. `--reset` undoes it, viewport included (#319); `--recreate` replaces the tab → `reference/emulation.md` |
 | `agent "<goal>"` | the autonomous browser-agent — see **FIRST DECISION** above, then `reference/agent.md` |
 
