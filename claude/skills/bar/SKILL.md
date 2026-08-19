@@ -10,8 +10,7 @@ home-manager** (PR #74). All bar config, block scripts, and the poller live in t
 and deploy via home-manager. Point-in-time history: memory `i3-bar-i3status-rust-migration` +
 `devrc/claudedocs/handoff-agent-facing-workbench-2026-07-11.md`.
 
-**AirVPN host tunnel + its pill → `~/.claude/skills/bar/reference/airvpn.md`** (`~/.claude/skills/bar/reference/airvpn.md`,
-source `~/workspace/devrc/claude/skills/bar/reference/airvpn.md`): the killswitch design, the
+**AirVPN host tunnel + its pill → `~/.claude/skills/bar/reference/airvpn.md`** (source `~/workspace/devrc/claude/skills/bar/reference/airvpn.md`): the killswitch design, the
 🔴 mandatory re-test protocol, apply/re-arm/bail procedures. Read it before touching anything AirVPN.
 
 ## Modernization stance (standing rule — applies whenever you touch this setup)

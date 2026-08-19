@@ -71,10 +71,10 @@ Bias aggressively toward EVICT/DEMOTE/DROP. A skill is a router, not an archive:
 🔴 **Prune (not classifier) subagents: one worktree each, ≤2–3 concurrent, PER-AGENT scratch paths, and before pushing assert siblings' commits are ancestors of your HEAD** — a stale base silently reverts a sibling's prune. Detail: `~/.claude/skills/prune-skill/reference/always-loaded-and-landing.md`.
 
 ## 4. 🔴 Routing paths — get these wrong and the core routes to files nobody can open
-A reference file is reached **BY PATH from the core**, and the correct form depends on deployment — **the lookup table is in `~/.claude/skills/prune-skill/reference/always-loaded-and-landing.md`**. The rules:
+A reference file is reached **BY PATH from the core**, and the correct form depends on deployment:
 
-- 🔴 **A bare `reference/<topic>.md` is resolved against the reader's CWD, not the skill's own directory, and is simply NOT FOUND** — measured in BOTH repos, and it is the defect a prune CAUSES most often (188 in talos, 47 in devrc). **Repo-local skill → `.claude/skills/<name>/reference/<topic>.md`. devrc skill → `~/.claude/skills/<name>/reference/<topic>.md`** (the deployed path; the repo-relative form does not resolve for a reader either). Exceptions and the full table: the sidecar above.
-- 🔴 **Shipping and resolving are separate failures** — whether the file exists at all, versus whether the reader can resolve the string you wrote. Gated in talos (gate 0 rule 1c) and devrc; both fire even when the file EXISTS.
+- 🔴 **A bare `reference/<topic>.md` is resolved against the reader's CWD, not the skill's own directory, and is simply NOT FOUND** — measured in both repos; the defect a prune CAUSES most often (188 talos, 47 devrc). **Repo-local skill → `.claude/skills/<name>/reference/<topic>.md`. devrc skill → `~/.claude/skills/<name>/reference/<topic>.md`** (the deployed path; the repo-relative form does not resolve for a reader either). 🔴 **EXCEPT `mkOutOfStoreSymlink` skills (`browser`, `dl-router`) — only `SKILL.md` + the CLI link, so no `reference/` ships: use `~/workspace/devrc/scripts/<subsystem>/reference/`. The GATE CANNOT SEE THIS** (the deployed spelling maps to a real source file and passes clean), so this line is the only guard. Full table: the sidecar.
+- 🔴 **Shipping and resolving are separate failures** — whether the file exists, versus whether the reader can resolve the string you wrote. Gated in both repos, and the gate fires even when the file EXISTS.
 
 Write a variable segment as `<var>` **in prose** and `$VAR` **inside a bash fence** (`<` is a redirect in shell); mark a cross-repo path as such.
 

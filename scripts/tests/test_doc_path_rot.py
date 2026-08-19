@@ -203,7 +203,7 @@ OFF_TREE_MARKER = "<outside-this-repo>"
 # COUNTED nor CHECKED -- the same silent zero this gate exists to kill. Measured
 # 2026-08-19: 47 across 13 skills, 12 of them in prune-skill itself, the skill
 # that teaches the convention. The guidance was the cause: the routing-forms
-# table in prune-skill.s own sidecar SANCTIONED the bare form for devrc skills.
+# table in prune-skill's own sidecar SANCTIONED the bare form for devrc skills.
 #
 # Resolving it onto a marker rather than special-casing the report keeps ONE
 # classifier (`_resolve`) and makes the existing failure line self-explaining --
@@ -897,11 +897,12 @@ def _dead_tokens(markdown: str, doc: str = PROBE_DOC):
         ("`~/.claude/hooks/no-such-hook.py`", "~/.claude/hooks/no-such-hook.py"),
         # `scripts/` extensionless affordance: a real class of executable here.
         ("`scripts/no-such-tool`", "scripts/no-such-tool"),
-        # 🔴 RULE 1c, AND THE CASE THAT DEFINES IT: the target EXISTS. PROBE_DOC
-        # lives in claude/skills/prune-skill/reference/, so staleness-pass.md is
-        # its real sibling -- resolve this against the citing doc.s directory and
-        # it passes, which is exactly the false-clean skill-audit.py produced.
-        # It must be reported anyway: the reader is not in that directory.
+        # 🔴 RULE 1c: reported even though a file of that name exists in the tree.
+        # NOTE these two cases plant at PROBE_DOC, which is itself inside
+        # `reference/`, so a doc-dir resolution here yields `reference/reference/…`
+        # and is dead ANYWAY -- they do NOT discriminate the rule's central design
+        # choice. `test_rule_1c_is_spelling_not_doc_relative_resolution` below is
+        # the case that does. Keeping both: these pin the reporting SHAPE.
         ("`reference/staleness-pass.md`", "reference/staleness-pass.md"),
         # The same defect as a markdown LINK, which is how a routing-table row is
         # usually written and is a machine-followable claim.
@@ -918,6 +919,37 @@ def test_planted_dead_path_is_reported(markdown, token):
         "gate that stays green on a planted dead path is testing nothing."
     )
     assert (PROBE_DOC, token) in _refs(markdown), "the reference was not attributed to its doc"
+
+
+def test_rule_1c_is_spelling_not_doc_relative_resolution():
+    """🔴 THE CONTROL FOR RULE 1c's CENTRAL DESIGN CHOICE, at the depth where it
+    is reachable.
+
+    The rule judges SPELLING and deliberately does NOT resolve against the citing
+    doc's directory, because that always succeeds for a core -- which is exactly
+    the false-clean skill-audit.py produced for years.
+
+    Every other 1c probe plants at PROBE_DOC, which lives INSIDE `reference/`, so
+    a doc-dir resolution there yields `reference/reference/staleness-pass.md` and
+    is dead for an unrelated reason. Measured: the doc-relative mutant
+    (`_under_repo(REPO_ROOT / dirname(doc), token)`) left the FULL suite green.
+    It is only distinguishable from a doc at SKILL.md depth -- where
+    `reference/staleness-pass.md` DOES exist -- and that is where 35 of the 47
+    real refs lived.
+    """
+    core_doc = "claude/skills/prune-skill/SKILL.md"
+    tok = "reference/staleness-pass.md"
+    # Precondition, or the case is vacuous: the doc-relative target must EXIST.
+    assert (REPO_ROOT / os.path.dirname(core_doc) / tok).exists(), (
+        f"fixture stale: {tok} from {core_doc} no longer names a real file, so "
+        "this control can no longer tell spelling-judgement from doc-relative "
+        "resolution"
+    )
+    assert _dead_tokens(f"`{tok}`", doc=core_doc) == [tok], (
+        "rule 1c did not report a bare ref whose doc-relative target EXISTS -- "
+        "the rule has silently become a doc-relative resolution, which is the "
+        "false-clean it was written to kill"
+    )
 
 
 @pytest.mark.parametrize(

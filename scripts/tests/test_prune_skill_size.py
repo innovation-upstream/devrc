@@ -30,7 +30,7 @@ WHY THE CEILING IS ABOVE THE 12,288 B TARGET, AND WHAT THAT COSTS
 -----------------------------------------------------------------
 The skill states a 12,288 B target and browser-bridge MEETS it (11,821 B while
 routing ~11x its own weight), so the target is achievable and is not in dispute.
-This file does not: it sits at 12,779 B (12.48 KiB) after being cut from 14,918 B
+This file does not: it sits at 12,861 B (12.56 KiB) after being cut from 14,918 B
 by demoting §6 (landing), §4's deployment table, §7's verification rationale, §0's
 axes and the always-loaded model to three sidecars, plus stripping evidence from
 every remaining section.
@@ -49,7 +49,7 @@ leaner is the intended direction of travel; raising it needs the same kind of
 justification recorded above.
 
 The honest accounting: the skill is 491 B -- 4.0% -- over the target it asks
-others to meet (12,779 against 12,288; `skill-audit.py` prints the same 491 B
+others to meet (12,861 against 12,288; `skill-audit.py` prints the same 573 B
 independently). That is disclosed in the body, in the PR that introduced it, and
 here. Every number in this docstring is re-measured, not carried forward: an
 earlier revision restated a size, a growth figure, a percentage and a per-pass
@@ -64,8 +64,8 @@ import pytest
 
 # The hard ceiling: SKILL.md must never exceed this many bytes.
 #
-# NOT a derivation -- a measured position. SKILL.md is 12,779 B (`stat -c %s` and
-# `git cat-file -s` agree), so 13,056 leaves 277 B of headroom, of which
+# NOT a derivation -- a measured position. SKILL.md is 12,861 B (`stat -c %s` and
+# `git cat-file -s` agree), so 13,056 leaves 195 B of headroom, of which
 # MIN_HEADROOM_BYTES (192) is the floor that must remain: ~85 B of true working
 # room before the headroom test fires. The comment here previously read
 # "12,864 B measured + 192 B headroom"; the file measured 12,834 at the time, so

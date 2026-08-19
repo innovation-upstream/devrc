@@ -907,6 +907,28 @@ def test_a_deployed_path_naming_ANOTHER_skill_is_not_this_skills_sidecar(tmp_pat
         f"a cross-skill deployed path was claimed as a local sidecar: {a}")
 
 
+def test_a_skill_whose_name_is_a_SUFFIX_of_another_is_not_claimed(tmp_path):
+    """🔴 THE SHAPE THAT ACTUALLY COLLIDES, and the one the test above cannot see.
+
+    `OTHER` shares no suffix with `rr`, so that case passes against a plain
+    substring `find()` too — it proves nothing about the real hazard. `mailbox`
+    and `vetr-mailbox` are BOTH real skills in this repo, and `mailbox/reference/`
+    is a substring of `vetr-mailbox/reference/`: before the segment-boundary fix,
+    resolving a `vetr-mailbox` route while auditing `mailbox` returned
+    'reference/gmail.md' — a legitimate cross-reference claimed as a local sidecar
+    and then reported as a phantom missing topic.
+
+    Kills a `find()`-without-boundary-check mutant; the OTHER case does not.
+    """
+    d = tmp_path / "mailbox"
+    (d / "reference").mkdir(parents=True)
+    (d / "SKILL.md").write_text(
+        "# core\n\nsee `~/.claude/skills/vetr-mailbox/reference/gmail.md`\n")
+    a = sa.audit_one(d / "SKILL.md")
+    assert a["refs"] == [] and a["missing_refs"] == [], (
+        f"a sibling skill whose name is a SUFFIX of this one was claimed: {a}")
+
+
 def test_two_spellings_of_one_topic_count_once(tmp_path):
     """app-blocks names legacy-hackathon-ops.md both ways; counting spellings
     reported 16 "reference file(s)" for 15 files.

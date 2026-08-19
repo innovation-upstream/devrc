@@ -291,14 +291,24 @@ def _sidecar_tail(skill_dir, ref):
             # ~/.claude/skills/ by an agent whose cwd is some unrelated project,
             # so it is the only one of the four a reader can actually open. Fall
             # through to the marker test, which is the same disambiguation (3)
-            # uses -- it names THIS skill.s own directory immediately before
-            # `reference/`, so another repo.s `apps/reference/manifest.md` still
+            # uses -- it names THIS skill's own directory immediately before
+            # `reference/`, so another repo's `apps/reference/manifest.md` still
             # does not match.
             pass
-    marker = f"{skill_dir.name}/reference/"
+    # 🔴 SEGMENT boundary, not substring. `find()` alone matches a skill whose
+    # name merely ENDS with this one: looking for `mailbox/reference/` hits
+    # `vetr-mailbox/reference/`, and BOTH are real skills here — so a legitimate
+    # cross-reference between them was claimed as `mailbox`'s own sidecar and then
+    # reported as a phantom `missing_refs`. Widening the resolver above newly
+    # exposed absolute/deployed refs to this, so the collision got bigger.
+    # The marker must start the string or be preceded by "/".
+    name = skill_dir.name
+    marker = f"{name}/reference/"
     i = ref.find(marker)
-    if i != -1:
-        return ref[i + len(skill_dir.name) + 1:]
+    while i != -1:
+        if i == 0 or ref[i - 1] == "/":
+            return ref[i + len(name) + 1:]
+        i = ref.find(marker, i + 1)
     return None
 
 

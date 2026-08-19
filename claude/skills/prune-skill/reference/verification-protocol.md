@@ -114,7 +114,7 @@ transcode/VFE, or deploy-time 502s"*. Nothing about a duration query sends you t
 agent wrote `le="5"`, got silence, and the rows vanished from a unioned table. **In one fat
 body you scroll past the warning and are immune.** 🔴 **Postscript (2026-08-19), and it is half
 the lesson: when that warning was finally lifted into the core, RE-MEASURING it showed the
-warning.s own EXAMPLE was wrong** — it named `"30.0"`/`"30"`, and there is no `le=30` on either
+warning's own EXAMPLE was wrong** — it named `"30.0"`/`"30"`, and there is no `le=30` on either
 image-cacher histogram (`count by (le)` → `0.0 5.0 10.0 25.0 50.0 …`; the nearest value anywhere
 is `le=300.0`, on a different metric). The RULE was load-bearing and correct; the example was
 fabricated. **Re-verify a documented EXAMPLE, not just the rule it illustrates** — an orphaned
