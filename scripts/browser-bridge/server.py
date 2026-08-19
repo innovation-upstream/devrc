@@ -358,9 +358,16 @@ HDR_SESSION_ID = "X-Session-Id"
 # version-skewed caller can send anything.
 SESSION_SRC_JOINABLE = "claude"
 SESSION_SRC_UNKNOWN = "unknown"
-# The CLOSED vocabulary of tier tags `derive_session_id` can emit. Pinned two-way
-# against the CLI by tests/test_browser_session_id.py, so a new tier fails there
-# until someone classifies it as joinable-or-not.
+# The CLOSED vocabulary of tier tags `derive_session_id` can emit. Pinned against
+# the tags PARSED OUT OF THE CLI SOURCE by test_browser_session_id.py::
+# test_the_server_validation_set_equals_the_tags_parsed_from_the_cli, so a new
+# tier fails there until it is added here too.
+# 🔴 Against the PARSE, not against a retyped literal. This comment previously
+# claimed a two-way pin that did not exist — each side was checked against its own
+# copy of the list, so a change touching both real files passed (measured: grow
+# the CLI by an `opencode:` tier and update its ledger, leave this alone → the
+# whole suite green). The failure that hides is silent and fail-closed: the new
+# tier normalises to SESSION_SRC_UNKNOWN, loses its id, and the column empties.
 #
 # 🔴 IT IS A VALIDATION SET, not documentation. The tag arrives on a
 # caller-supplied header: without this, `sess_src` is an unbounded-cardinality
@@ -1048,8 +1055,13 @@ def emit_cmd_event(op: str, key: str, outcome: str, duration_ms: int,
 
     SESSION ATTRIBUTION (see SESSION_SRC_JOINABLE / HDR_SESSION_ORIGIN):
       * `attribute_session=False` (the default) — this call site has no caller
-        session at all: the heartbeat, and the /whoami+/health diagnostics.
-        NOTHING is added; their records are byte-identical to before.
+        session at all. Exactly ONE emit is in that category: the heartbeat,
+        which a timer produces with no request behind it. NOTHING is added.
+        🔴 /whoami and /health are NOT in this category, though this docstring
+        said they were until the audit round that moved them: they are operator
+        subcommands (`browser whoami` / `browser health`) whose requests carry
+        the ordinary session headers, so they pass attribute_session=True like
+        any other command — see _emit_diag_event.
       * `attribute_session=True` — `payload.sess_src` ALWAYS records the tier
         parsed off `session_id`, so every row is self-describing about why it
         does or does not carry a key. The `session` COLUMN is filled with the

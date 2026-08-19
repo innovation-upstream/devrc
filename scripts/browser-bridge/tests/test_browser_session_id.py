@@ -470,6 +470,36 @@ def test_the_servers_joinable_tag_is_one_the_cli_actually_emits():
     assert S.SESSION_SRC_UNKNOWN not in CLI_TIER_TAGS
 
 
+def test_the_server_validation_set_equals_the_tags_parsed_from_the_cli():
+    """🔴 THE ACTUAL TWO-WAY PIN. server.py's SESSION_TIER_TAGS is compared against
+    the tags PARSED OUT OF THE CLI, not against a literal retyped beside it.
+
+    THIS TEST EXISTS BECAUSE THE PIN IT REPLACES WAS FICTIONAL. server.py said
+    SESSION_TIER_TAGS was "pinned two-way against the CLI by
+    test_browser_session_id.py" and the symbol appeared nowhere in this file: the
+    server set was checked against a literal in test_server.py, the CLI against a
+    separate literal here, and NOTHING compared the two. A delta audit measured
+    the consequence — grow the CLI by an `opencode:` tier and update
+    CLI_TIER_TAGS, leave server.py alone: 400 passed, 0 failed, SURVIVED.
+
+    That is not hypothetical. `browser`'s own FOLLOW-UP SLOT says an `opencode:`
+    tier is the next planned change, and the failure is silent and fail-closed:
+    the server normalises the unknown tag to `unknown`, drops the id, and the
+    column this PR exists to fill just re-empties.
+
+    Comparing against the PARSE is what makes it real — a literal can be updated
+    in lockstep with the thing it is supposed to be checking, which is precisely
+    how the fictional version passed.
+    """
+    parsed = _emitted_tags()
+    assert parsed, "the tag parser matched nothing — it is testing nothing"
+    assert set(S.SESSION_TIER_TAGS) == parsed, (
+        f"server.py SESSION_TIER_TAGS={sorted(S.SESSION_TIER_TAGS)} does not match "
+        f"the tags the CLI can actually emit {sorted(parsed)}. A tier present in "
+        f"one and not the other is silently normalised to "
+        f"{S.SESSION_SRC_UNKNOWN!r} and loses its id.")
+
+
 def test_the_throwaway_recreate_close_id_is_re_tagged_not_just_suffixed():
     """🔴 REGRESSION. `emulate --recreate` sends its close under a THROWAWAY id so
     the close cannot evict the ownership mapping it just created. That id was

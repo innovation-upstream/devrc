@@ -2403,18 +2403,22 @@ def test_a_whitespace_padded_tag_is_rejected_at_the_unit(padded):
     assert S._split_session_id(JOINABLE_ID) == ("claude", JOINABLE_UUID)
 
 
-def test_the_server_tier_vocabulary_matches_what_the_cli_can_emit():
-    """SEAM LEDGER, server side. The validation set must equal the tags the CLI
-    actually produces, or a legitimate tier gets silently normalised to `unknown`
-    and its rows lose their id. The CLI half of this pin lives in
-    test_browser_session_id.py; this is the half that fails if the SERVER list
-    drifts."""
+def test_the_tier_vocabulary_holds_its_internal_invariants():
+    """The SELF-CONSISTENCY half only. Whether the set matches the CLI is pinned
+    in test_browser_session_id.py::
+    test_the_server_validation_set_equals_the_tags_parsed_from_the_cli, which
+    compares it against tags PARSED from the CLI source.
+
+    🔴 The literal that used to live here has been DELETED, deliberately. It read
+    as a cross-file pin and was not one: retyping the CLI's tags beside the
+    server's meant a change touching both real files sailed through, and a delta
+    audit measured exactly that (grow the CLI + its own ledger, leave the server
+    alone -> 400 passed, SURVIVED). A literal that can be updated in lockstep
+    with the thing it checks is worse than no check, because it reads as one."""
     assert S.SESSION_SRC_JOINABLE in S.SESSION_TIER_TAGS
     assert S.SESSION_SRC_UNKNOWN not in S.SESSION_TIER_TAGS, (
         "the fallback marker must not also be a real tier -- an unparseable id "
         "and a genuine tier would become indistinguishable")
-    assert set(S.SESSION_TIER_TAGS) == {"claude", "tmux", "sid", "ppid",
-                                        "synthetic"}, S.SESSION_TIER_TAGS
 
 
 # --- nesting: the forwarded id is the causal PARENT, not the actor --------- #

@@ -1410,8 +1410,8 @@ to accept, and the opencode tool's own default is the literal `browser-agent`.
 as `X-Session-Id`. Right for routing and the audit trail; **wrong** for the
 `session` column, which means *the agent session that issued this command*. Left
 alone, one `browser agent "<goal>"` call would become N browser calls credited to
-the operator's own session — a fabricated usage number in the exact column
-`session` JOIN column (~581 nested rows in 14d, ~11% of bridge commands).
+the operator's own session — fabricated rows in the `session` JOIN column
+(~581 nested rows in 14d, ~11% of bridge commands).
 
 So the nested tool declares `X-Session-Origin: browser-agent`. When that header is
 present the server writes **no** `session`; the forwarded id is recorded as
@@ -1520,7 +1520,14 @@ any browser command exists. It says *who asked*, never *what was browsed*.
 
 ### What this makes answerable — and what it does not
 
-**Answerable now — which Claude sessions used the browser skill, and how much:**
+**Answerable once this ships — which Claude sessions used the browser skill, and
+how much:**
+
+🔴 *"Once this ships", not "now": `session` is filled by code that is not
+deployed yet, so this returns **0 of 6,166** browser-bridge `kind='cmd'` rows
+today (measured over 14d). Merged is not deployed — every `home.file` target here
+changes only on a `home-manager switch`, and reading these queries as live before
+that is the same silent-empty-result trap the replaced query fell into.*
 
 ```sql
 SELECT session, count() AS browser_calls,
