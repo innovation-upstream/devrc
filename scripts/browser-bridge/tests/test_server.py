@@ -2442,7 +2442,7 @@ def test_activate_invokes_i3_msg_on_success(monkeypatch):
     criteria, and `focus`; the result reports i3:"applied".
 
     Every test in this i3-outcome block passes focus:true explicitly, because
-    the raise is consent-gated — without it i3_foreground is never reached and
+    the raise is OPT-IN — without it i3_foreground is never reached and
     these would all assert against "withheld" instead of the state they mean to
     pin. The gate itself is covered separately (see the focus-consent block)."""
     calls = _enable_i3(monkeypatch, returncode=0)

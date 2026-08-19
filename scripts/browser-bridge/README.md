@@ -907,8 +907,10 @@ it "operator-only" or "requires explicit consent" would overstate it into a
 security claim it cannot support.
 
 Measured out of `activity.events` (55,003 `source='browser-bridge' kind='cmd'`
-rows, 2026-07-29 → 08-18, correlated against `source='i3' kind='window-focus'`
-rows for `app='Brave-browser'`):
+rows, **cut-off 2026-07-29 → 08-18**, correlated against `source='i3'
+kind='window-focus'` rows for `app='Brave-browser'`). ⚠ The PR body quotes
+**108/163 (66.3%)** for `activate`: same population, cut-off extended to 08-19.
+Both are right for their window; this table's numbers are the ones used below.
 
 | op | n | focus event within ±1s | in the 1–5s bands |
 |---|---|---|---|
@@ -950,18 +952,52 @@ after deploy, consented activates should still correlate and withheld ones shoul
 fall toward background.
 
 🔴 **Expect a RESIDUAL, and do not score it as the gate failing.** This change gates
-the host-side `i3-msg` raise only. The extension still calls
+the host-side `i3-msg` raise **only**. The extension also calls
 `chrome.windows.update(windowId,{focused:true})` unconditionally
-(`extension/service_worker.js:1403`), and `focus_on_window_activation` is **unset**
-in `nix/i3/config.nix`, so i3's default `smart` applies — under which a
-`_NET_ACTIVE_WINDOW` request from a window **on the currently visible workspace IS
-granted focus**. Both paths fired together on every pre-fix activate, so the
-measurement above cannot attribute the 66.3% between them. Therefore:
+(`extension/service_worker.js:1403`), and nothing here gates that.
+
+**What is ESTABLISHED** (cited, not inferred): `focus_on_window_activation` is
+**unset** in `nix/i3/config.nix`, so i3's documented default applies — i3 4.24
+userguide §4.30 *Focus on window activation*: "**smart** — This is the default
+behavior. If the window requesting focus is on an active workspace, it will receive
+the focus. Otherwise, the urgency hint will be set." i3's own example of a window
+requesting focus is `google-chrome www.google.com`. (Verified against the i3 actually
+running here: `readlink -f $(which i3)` and the userguide quoted above are the **same
+store path**, `…-i3-4.24`, so this is the doc for the binary in use, not a version
+guess. `grep -rn focus_on_window_activation nix/` returns nothing.) So a request from
+Brave **on the visible workspace would be granted focus**, and the older
+"Chrome-side focus is a no-op under i3" wording (since corrected in the CLI and
+`server.py`) was false as an unconditional claim — it holds only cross-workspace,
+which is the usual agent case and exactly why #196 needed `i3-msg`.
+
+**What is NOT established:** whether `chrome.windows.update({focused:true})`
+actually emits that X11 activation request. It is the standard mechanism and the
+extension's own comment says it "REQUESTS focus", but **nobody has measured it** —
+not this PR, not the audit. So the Chrome-side path's contribution is **unknown,
+not zero and not proven non-zero**.
+
+Both paths fired together on every pre-fix activate, so the table above cannot
+attribute its **111/166 (66.9%)** between them. Therefore, post-deploy:
 
 * **withheld activates should fall TOWARD background, not necessarily TO it**;
-* a non-zero ±1s residual on withheld activates is the Chrome-side path, **not**
-  evidence the gate leaked;
-* only a residual at or near the *pre-fix* rate would indicate the gate failed.
+* **the baseline to compare against is 66.9% (111/166)**, and background for a
+  non-focus-moving op is **~2–7%** (see `wake` 1.7%, `eval` 3.0%, `screenshot`
+  7.3% in the table). A withheld residual landing in that band is consistent with
+  the gate holding; only a residual **at or near 66.9%** indicates it leaked;
+* a residual **between** those — say 15–40% — is the interesting case and means
+  the Chrome-side path contributes materially. That is a finding, not a failure.
+
+🔴 **The discriminator, so this is decidable either way.** i3 focus events carry
+`payload.workspace`. Split withheld activates by whether Brave was **already on the
+visible workspace** at the time:
+
+* residual concentrated in the **same-workspace** subset → the Chrome-side path is
+  real, `smart` granted it, and the gate is working as designed;
+* residual spread across **both** subsets → something is still calling `i3-msg`,
+  i.e. the gate genuinely leaked.
+
+That split does not depend on knowing the answer in advance, which is why it is the
+check to run rather than either claim above.
 
 🔴 **And treat an absent `focus` field as UNKNOWN, never as pre-deploy.** Throttled
 (HTTP 429) activates return from their own branch *before* the `payload.focus`
@@ -1701,9 +1737,11 @@ field** (the CDP ops are bounded typed ops only; see the CDP security model abov
   needed was *un-throttling*, which `wake` now provides without touching focus.
   Focus theft is a decision only a human at the machine should make, so it stays
   on the `browser` CLI. 🔴 As of 2026-08-18 this exclusion is no longer the only
-  thing holding: the CLI path is consent-gated server-side too (see *The focus
-  steal is now CONSENT-GATED*), because an allowlist in one caller left every
-  other caller unguarded — which is what the re-measurement found. (Deliberately a stronger stance than `upload`'s opt-in:
+  thing holding: the host-side raise is now OPT-IN server-side too (see *The focus
+  steal is OPT-IN BY DEFAULT*), because an allowlist in one caller left every
+  other caller unguarded — which is what the re-measurement found. That is a
+  DEFAULT, not an authorization boundary — see that section's "what this IS and
+  what it is NOT". (Deliberately a stronger stance than `upload`'s opt-in:
   `upload` is a risk an operator can knowingly accept for one run, whereas a model
   stealing the screen has no legitimate autonomous use at all.)
 - **`upload` is NOT in the agent's op set** (11 ops, above — no `upload`). The

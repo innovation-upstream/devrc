@@ -1564,10 +1564,20 @@ sys.stdout.write(json.dumps(fields)[1:-1])
     # (server-clamped, cap ~8s); --wait MS overrides; --no-wait skips (waitMs:0).
     #
     # 🔴 --focus / --no-focus: whether to also RAISE the Brave X11 window via the
-    # server's host-side `i3-msg` — the one thing in this whole CLI that takes the
-    # operator's screen. Chrome-side focus alone is a no-op under i3, so the i3-msg
-    # step IS the focus steal; the result's `i3` field reports
-    # applied/skipped/failed/withheld.
+    # server's host-side `i3-msg` — the RELIABLE way this CLI takes the operator's
+    # screen; the result's `i3` field reports applied/skipped/failed/withheld.
+    #
+    # ⚠ It is NOT the only path, and the older wording here ("Chrome-side focus is
+    # a no-op under i3") was wrong as an unconditional claim. The extension also
+    # calls chrome.windows.update({focused:true}), which this flag does NOT gate.
+    # i3 4.24 userguide §4.30: `focus_on_window_activation` defaults to `smart`,
+    # under which "If the window requesting focus is on an active workspace, it
+    # will receive the focus. Otherwise, the urgency hint will be set." It is unset
+    # in nix/i3/config.nix, so `smart` applies. So Chrome-side focus is a no-op
+    # only when Brave is on ANOTHER workspace — which is the usual agent case, and
+    # why #196 needed i3-msg at all. Same workspace, it may well move focus.
+    # UNMEASURED: whether chrome.windows.update actually emits the X11 activation
+    # request. Do not read --no-focus as "nothing can move my screen".
     #
     # DEFAULT = "on iff stdout is a TTY". A human typing `browser activate` in a
     # terminal means it and gets today's behaviour unchanged. An AGENT (Claude

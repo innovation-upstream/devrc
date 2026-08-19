@@ -141,7 +141,9 @@ from urllib.parse import unquote, urlsplit
 # via i3-msg. It is the ONE op that can STEAL the operator's screen and is a LAST
 # RESORT — `wake` is the answer for throttling. Tab-scoped, dispatched like the
 # other tab-scoped ops (its optional `waitMs` is a passthrough field).
-# 🔴 The host-side raise is CONSENT-GATED: it happens only when the command
+# 🔴 The host-side raise is OPT-IN (a default, NOT an authorization boundary —
+# every caller that reaches the bridge can still ask for it): it happens only
+# when the command
 # carries `focus:true` (the CLI's `--focus`, which it also defaults to when
 # stdout is a TTY, i.e. a human typed it). Without it the result reports
 # i3:"withheld" and the operator's screen is untouched. See focus_requested.
@@ -2188,9 +2190,15 @@ def _annotate_i3(result, state: str) -> None:
 #
 # So the rule moves HERE, to the one place the screen is actually taken: taking
 # the operator's screen requires EXPLICIT CONSENT on the wire. No `focus:true`,
-# no i3-msg. The Chrome-side tab activation still happens (it is a no-op for
-# real visibility under i3 and takes nothing), so `activate` keeps working as a
-# tab-state change; only the WM raise is gated.
+# no i3-msg. The Chrome-side tab activation still happens, so `activate` keeps
+# working as a tab-state change; only the host-side WM raise is gated.
+# ⚠ "takes nothing" (the earlier wording here) OVERSTATED it. tabs.update{active}
+# alone is indeed a no-op for real visibility, but the extension also calls
+# windows.update{focused:true}, which this gate does NOT cover. Under i3's default
+# `smart` (unset in nix/i3 → default; i3 4.24 userguide §4.30) a focus request
+# from a window on an ACTIVE workspace "will receive the focus". So a withheld
+# activate may still move focus when Brave is already on the visible workspace.
+# See README "Expect a RESIDUAL" for what that means for the post-deploy check.
 I3_WITHHELD = "withheld"
 
 # The host CANNOT raise (no DISPLAY / no resolvable i3-msg / no usable title).
