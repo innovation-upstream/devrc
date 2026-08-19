@@ -20,7 +20,7 @@ WHY THE FIXTURES ARE HAND-AUTHORED AND NOT A SNAPSHOT OF THE REAL STORE
 -----------------------------------------------------------------------
 🔴 The real corpus MUST NOT be copied in here. `~/.claude/analyze-service-index/`
 carries client-identifying infrastructure detail; all 21 live entries lack a
-`sensitivity:` field, which `analyze-service/SKILL.md` defines as fail-safe
+`sensitivity:` field, which `analyze-service/reference/index-store.md` defines as fail-safe
 `client-confidential`. This repo is PUBLIC, and `scripts/testlib/
 client_host_scan.py` exists precisely because six client subdomains had already
 leaked into fixtures once (devrc `60e6d9d` scrubbed them retroactively) — several
@@ -80,6 +80,23 @@ MODULE_PATH = ROOT / "scripts" / "lib" / "subsystem_resolver.py"
 # `test_the_doc_path_is_the_deployed_one` below is what pins it to the file that
 # actually ships.
 SKILL_DOC = ROOT / "claude" / "skills" / "analyze-service" / "SKILL.md"
+
+# 🔴 THE PINNED PROSE MOVED, AND THE PINS MOVED WITH IT — same commit, which is
+# what `claude/RULES.md` demands of a location change. `SKILL.md` loads on every
+# `/analyze-service` invocation and was 17,476 bytes; the resolver rules and the
+# entry schema are detail that a recon run does not need in context, so both
+# HASHED BLOCKS moved INTACT into `reference/index-store.md` (which ships — every
+# file under `claude/skills/<name>/` becomes a store symlink under
+# `~/.claude/skills/<name>/`, `reference/` included).
+#
+# The move is PROVEN INTACT by the hashes below being UNCHANGED: a block that
+# had been reflowed, re-indented or edited in transit could not reproduce them.
+# That is the strongest available evidence that this was a move and not a
+# rewrite, and it is why the shas are not touched in the same commit as the move.
+STORE_DOC = (ROOT / "claude" / "skills" / "analyze-service"
+             / "reference" / "index-store.md")
+WRITEBACK_DOC = (ROOT / "claude" / "skills" / "analyze-service"
+                 / "reference" / "write-back.md")
 
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -156,7 +173,7 @@ ENTRIES: list[dict[str, object]] = [
         "filename": "bar-status-poll.md",
     },
     # 7 + 8. THE DELIBERATE AMBIGUITY, in a different scope so it cannot
-    #    contaminate the tests above. `analyze-service/SKILL.md`'s own example:
+    #    contaminate the tests above. The store reference doc's own example:
     #    `repo-cos.md` vs `repo-cos.process.md`.
     {
         "service": "repo-cos",
@@ -187,8 +204,10 @@ def index() -> sr.SubsystemIndex:
 
 @pytest.fixture(scope="module")
 def doc() -> str:
-    """The skill doc, read once — the other half of the one-predicate pair."""
-    return SKILL_DOC.read_text(encoding="utf-8")
+    """The STORE reference doc, read once — the other half of the one-predicate
+    pair. It was `SKILL.md` until the resolver rules and entry schema were
+    demoted out of the always-loaded body; see `STORE_DOC`."""
+    return STORE_DOC.read_text(encoding="utf-8")
 
 
 # =============================================================================
@@ -1506,7 +1525,8 @@ class TestFrontMatterParser:
 
 
 class TestCommandDocIsPinned:
-    """`claude/skills/analyze-service/SKILL.md` states these rules in prose because
+    """`claude/skills/analyze-service/reference/index-store.md` states these rules in
+    prose because
     its reader is an LLM. This module states them in Python. That is one
     predicate at two sites, which `claude/RULES.md` says regenerates the same bug
     at both — and here the drift is SILENT (a ref stops resolving, and the miss
@@ -1644,7 +1664,8 @@ class TestCommandDocIsPinned:
     )
     def test_sentence_still_present(self, doc: str, sentence: str, why: str) -> None:
         assert sentence in doc, (
-            f"analyze-service/SKILL.md no longer contains the sentence pinning {why}.\n"
+            f"analyze-service/reference/index-store.md no longer contains the sentence\n"
+            f"pinning {why}.\n"
             f"  missing: {sentence!r}\n"
             f"  Either restore it, or change scripts/lib/subsystem_resolver.py in the SAME\n"
             f"  commit and update this pin. The two are one predicate at two sites; the\n"
@@ -1669,10 +1690,10 @@ class TestCommandDocIsPinned:
         begin = f"<!-- {name}:begin"
         end = f"<!-- {name}:end"
         i = doc.find(begin)
-        assert i != -1, f"marker {begin!r} is missing from analyze-service/SKILL.md"
+        assert i != -1, f"marker {begin!r} is missing from analyze-service/reference/index-store.md"
         i = doc.index("-->", i) + len("-->")
         j = doc.find(end, i)
-        assert j != -1, f"marker {end!r} is missing from analyze-service/SKILL.md"
+        assert j != -1, f"marker {end!r} is missing from analyze-service/reference/index-store.md"
         body = doc[i:j].strip()
         assert body, f"region {name!r} is EMPTY — the hash would guard nothing"
         return body
@@ -1687,7 +1708,8 @@ class TestCommandDocIsPinned:
     ) -> None:
         actual = hashlib.sha256(self._region(doc, name).encode("utf-8")).hexdigest()
         assert actual == expected_sha, (
-            f"\nThe `{name}` block of claude/skills/analyze-service/SKILL.md CHANGED.\n"
+            f"\nThe `{name}` block of claude/skills/analyze-service/reference/index-store.md\n"
+            f"CHANGED.\n"
             f"  expected sha256 {expected_sha}\n"
             f"  actual   sha256 {actual}\n\n"
             f"This is not a formatting nit. That block is the PROSE HALF of a\n"
@@ -1718,7 +1740,7 @@ class TestCommandDocIsPinned:
         never silently hash the empty string."""
         with pytest.raises(AssertionError) as exc:
             self._region("no markers here at all\n", "resolver-rules")
-        assert "is missing from analyze-service/SKILL.md" in str(exc.value)
+        assert "is missing from analyze-service/reference/index-store.md" in str(exc.value)
 
     def test_an_empty_region_fails_loudly(self) -> None:
         with pytest.raises(AssertionError) as exc:
@@ -1733,7 +1755,7 @@ class TestCommandDocIsPinned:
 
         Without this, a `in doc` check against a doc that happened to contain
         everything is indistinguishable from a check pointed at the wrong file."""
-        sentinel = "a sentence that is deliberately not in analyze-service/SKILL.md"
+        sentinel = "a sentence deliberately absent from analyze-service/reference/index-store.md"
         assert sentinel not in doc
 
     def test_the_doc_path_is_the_deployed_one(self) -> None:
@@ -1744,14 +1766,19 @@ class TestCommandDocIsPinned:
         load-bearing half is the `nix/home.nix` check: it is what makes this a
         claim about DEPLOYMENT rather than about this file's own spelling.
 
-        This test earned its keep — it is what went red when the commands→skills
-        migration moved the doc out from under a pin written against the old
-        `claude/commands/analyze-service.md` path.
+        This test earned its keep TWICE — it is what went red when the
+        commands→skills migration moved the doc out from under a pin written
+        against the old `claude/commands/analyze-service.md` path, and again when
+        the resolver rules were demoted from `SKILL.md` into `reference/`.
         """
         assert SKILL_DOC.exists(), f"the pinned doc is gone: {SKILL_DOC}"
         assert SKILL_DOC.name == "SKILL.md"
         assert SKILL_DOC.parent.name == "analyze-service"
         assert SKILL_DOC.parent.parent.name == "skills"
+
+        assert STORE_DOC.exists(), f"the pinned store doc is gone: {STORE_DOC}"
+        assert STORE_DOC.parent.name == "reference"
+        assert STORE_DOC.parent.parent == SKILL_DOC.parent
 
         # The non-tautological half: nix must actually deploy the directory this
         # pin lives under. A pin under a directory home-manager does not ship is
@@ -1760,6 +1787,23 @@ class TestCommandDocIsPinned:
         # narrow one: the mapping is declared and not switched off. Whether its
         # source resolves to this tree is ship.sh/drift-check.sh's job.
         assert_skills_mapping_declared(ROOT / "nix" / "home.nix")
+
+    def test_the_demoted_reference_is_REACHABLE_from_the_skill_body(self) -> None:
+        """🔴 A reference nobody is told to open is a deletion with extra steps.
+
+        Demoting prose out of an always-loaded body only works if the body still
+        ROUTES to it — otherwise the rules are technically shipped and
+        operationally gone, which is strictly worse than the bloat it replaced.
+        So the skill body must name both reference files by path.
+        """
+        body = SKILL_DOC.read_text(encoding="utf-8")
+        for ref in (STORE_DOC, WRITEBACK_DOC):
+            rel = f"reference/{ref.name}"
+            assert rel in body, (
+                f"{SKILL_DOC.name} does not point at {rel}. The prose moved there is "
+                f"then unreachable: nothing loads a reference file it was not sent to."
+            )
+            assert ref.exists(), f"the skill body points at a missing file: {rel}"
 
     # --- the behavioural half: what each sentence ASSERTS ---------------------
 
