@@ -96,6 +96,37 @@ are both about what is present, not about whether a reader can still do the task
 alone. After a campaign of 9 prunes, not one core had been exercised end-to-end on a real task.
 If the skill matters, drive it once afterwards.
 
+### What driving one actually found (2026-08-19, n=2)
+
+Two pruned cores (`manage-postgres` 69,810→7,736 B; `image-cacher` 70,034→8,300 B) were each
+given a real read-only production diagnostic by a fresh agent. **The structure held**: routing
+was 4-for-4 and 3-of-5, neither agent listed the directory or grepped to find a file, and both
+correctly skipped sidecars they did not need. Keep the design. Two things to carry forward:
+
+🔴 **THE FAILURE MODE SLICING CAUSES — a warning demoted AWAY from the instruction it guards.**
+Content survives, the path resolves, every gate passes; the **PAIRING** broke, and nothing in
+this protocol measures pairings. `image-cacher`'s core (`SKILL.md:31`) prescribes gating on
+bucket fractions `<=5s / >10s / >25s` and states the buckets as `0,5,10,25`. The warning that
+Prometheus's labels are **`"30.0"`, not `"30"`** — and that a mistyped boundary "returns an
+empty result, which reads exactly like a passing gate" — sits in
+`reference/serve-original-transcode-and-deploys.md:37`, routed for *"serve-original,
+transcode/VFE, or deploy-time 502s"*. Nothing about a duration query sends you there. The
+agent wrote `le="5"`, got silence, and the rows vanished from a unioned table. **In one fat
+body you scroll past the warning and are immune.** Milder sibling in the same skill: the core's
+Redis hot-command prints saturation numbers with no interpretation, while the sidecar saying
+*"it is NOT a 503 lever, r = 0.029"* is a routing hop away — the agent nearly filed it as an
+availability contributor. **So: when you demote a block, ask what it was PROTECTING. If the
+trigger stays in the core, the guard goes with it or leaves a cross-reference.**
+
+🔴 **A lean core AMPLIFIES stale text.** Both agents said it independently: a wrong line in a
+7.7 KB curated core reads as deliberate in a way it never did inside 70 KB of everything. The
+prune does not cause the rot — a fat body carries it identically — but it removes the noise
+that made you doubt it. This is the argument for §0 being a **pass you EXERCISE, not one you
+read**: across the two runs, the defects that mattered (a role filter that misses the roles
+that matter, a rate 40× off, a container limit 25% low, a cluster count, a `le` label) were
+**every one of them findable only by measuring live**. Four rounds of adversarial doc audit on
+this very skill never found its own dead ceiling pointer; using it did.
+
 ## 7. The report — say it, do not leave it in the transcript
 
 The core's §7 requires a report, not just a verdict. Four things, all of which exist only in
