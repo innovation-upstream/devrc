@@ -43,8 +43,9 @@ device; messages land in Postgres `signal` schema + attachments in MinIO.
   Reaction→target linkage resolves correctly (both reaction rows point at message 1).
   🔴 **Still NOT verified: the attachment/MinIO leg** (see below) and there are **no probes**.
 - ✅ **The outbound-reaction defect step 7 found is FIXED, MERGED and DEPLOYED** — devrc
-  #537 (squashed `8f2cedd`), consumer **0.1.1** digest `a3ef7385…`, homelab-infra
-  `897e837d`. 🔴 **Deployed, NOT verified in function** — see next steps item 1.
+  #537 (squashed `8f2cedd`), now on consumer **0.1.2** digest `7ada2254…`,
+  homelab-infra `f4454452`. 🔴 **Deployed, NOT verified in function** — the fixed
+  branch has still never executed in production. See next steps item 1.
 
 ## Open investigations — live diagnosis state
 
@@ -112,42 +113,42 @@ device; messages land in Postgres `signal` schema + attachments in MinIO.
 
 ## Next steps (ranked)
 
-🔴 **BOTH REMAINING ITEMS NEED ZACH AT HIS PHONE — no agent can do them.**
+🔴 **ONE ITEM NEEDS ZACH AT HIS PHONE, AND IT IS THE ONLY UNVERIFIED CLAIM LEFT.**
 
-1. **Verify the reaction fix LIVE. React to any message from your phone, then run
-   the check below.** The fix is merged (devrc #537) and DEPLOYED (consumer 0.1.1,
-   digest `a3ef7385…`, rolled out 2026-08-18 20:5x UTC, pod reconnected to
-   signal-api + Postgres). 🔴 **That is a claim about the DEPLOY, not about the
-   FUNCTION.** Nothing has exercised the fixed path in production — the same
-   distinction that made step 7 necessary in the first place. Until a reaction
-   you sent appears in `signal.reactions` with YOUR contact id, this is unverified.
-2. **Send an IMAGE from the phone** — the attachment/MinIO leg has still never
-   carried real traffic (`attachments` = 0, attributable to input: no stored
-   envelope contains an attachment key). This exercises `_minio.py` and the
-   scoped `signal-consumer` credential end to end.
-3. **Backfill the one lost reaction and drop its ghost row.** `raw_envelope` on
-   `signal.messages` id 3 still holds the reaction; the fix stops NEW ghosts but
-   removes no existing one. Priced from the consumer, not the writer:
+1. **React to any message from your phone**, then run the check in "How to verify".
+   The outbound-reaction fix (#537) is MERGED and DEPLOYED and has **never executed
+   in production** — no reaction has been sent since it shipped, so the fixed branch
+   has not run. `OWN reactions: 0`. Everything else below is now closed.
+2. **Backfill the one lost reaction** and drop its ghost row. `raw_envelope` on
+   `signal.messages` id 3 still holds it. Priced from the consumer, not the writer:
    `list_conversations()` groups a bodyless outbound row with no `dest_contact_id`
-   and no `group_id` into **its own conversation with `display_name` NULL**, and
-   its timestamp sorts it to the **TOP** of the list. So it is user-visible, not
-   cosmetic.
-4. **The outbound-`editMessage` ghost — the SAME bug, still open.** Any unmodelled
+   and no `group_id` into its own conversation with `display_name` NULL, sorted to
+   the **top** of the list — user-visible, not cosmetic. Still 1 ghost row.
+3. **The outbound-`editMessage` ghost — the SAME bug, still open.** Any unmodelled
    `syncMessage.sentMessage` variant with `message: None` (nested `editMessage`,
    `sticker`, `payment`, `groupCallUpdate`) still falls through to `_base_message()`
-   and leaves a bodyless ghost row. This is the next instance of this pipeline's own
-   lesson, found by the round-1 audit and deliberately left out of #537's scope.
-5. **Add a liveness signal to the consumer.** Evidenced, not theorised: **0 log
-   lines in 20h** of successful ingestion. No HTTP, no probes — a pod reaching
-   nothing stays Running/Ready forever, and row count is the only health signal
-   that exists. This is the failure mode the whole step-7 diagnosis talked itself
-   into and back out of.
-6. **Move the mutation harness into the repo.** Three batteries were run across
-   #537 and all of them live only in scratchpads. Land under `scripts/signal/tests/`.
-7. **Close `approve_draft`'s read-then-write TOCTOU** — last of the family whose
+   and leaves a bodyless ghost. The next instance of this pipeline's own lesson.
+4. **Move the mutation harness into the repo.** Six batteries were run across #537
+   and #540 and every one lived only in a scratchpad. `scripts/signal/tests/`.
+5. **Close `approve_draft`'s read-then-write TOCTOU** — last of the family whose
    three siblings were fixed in #514 round 4.
-8. **Bump cadence for the signal-cli image.** Stable lags: `0.100`/`:latest` shipped
-   0.14.5 while 0.14.6/0.14.7 existed. Tracking stable ALONE re-breaks linking.
+6. **Bump cadence for the signal-cli image.** Stable lags; tracking it ALONE
+   re-breaks linking, and re-linking means fighting the 120s window again.
+
+### ✅ CLOSED since the last revision
+- **The attachment / MinIO leg — VERIFIED END TO END.** An image sent from the
+  phone landed: `attachments` 1, object present in MinIO at 391,546 bytes with
+  `image/jpeg`, and **both size and content-type match the Postgres row**. This
+  exercised the scoped `signal-consumer` credential against its own bucket with
+  real traffic for the first time.
+- **Liveness — SHIPPED AND VERIFIED IN FUNCTION** (devrc #540, #546; homelab
+  `f4454452`; consumer **0.1.2**, digest `7ada2254`). Measured in the running pod:
+  the probe command exits 0 `HEALTHY`; the heartbeat file is written into the
+  emptyDir; beats arrive at **exactly 30.0s** with max-age 120 (ratio 4.0); the
+  file advances on its own thread while `connected` flips True; the health ROW is
+  populated with `bigint` columns; `health --from-db` returns HEALTHY; the probe is
+  wired on the Deployment; 0 restarts.
+- **The `main` gate's ~15% flake — FIXED** (#544), not re-run around. See below.
 
 ## What #537 established, beyond the fix itself
 
