@@ -910,8 +910,16 @@ TARGET_FLOORS=(
   #
   #   _suggested_floor 5780 = 5780 - min(50, max(1, 289)) = 5780 - 50 = 5730
   #
+  #
+  # 2026-08-19, the #558 delta-audit fix round (the per-host status that
+  # replaced a positive false claim, the state-file test that could not fail,
+  # the welded tmux separator, and the consolidated hosts_not_covered):
+  # 5780 -> 5796 collected, +16.
+  #
+  #   _suggested_floor 5796 = 5796 - min(50, max(1, 289)) = 5796 - 50 = 5746
+  #
   # ⚠ ZERO new skips from any contribution.
-  "scripts/tests|5730"
+  "scripts/tests|5746"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
