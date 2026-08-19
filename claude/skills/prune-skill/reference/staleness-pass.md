@@ -73,6 +73,10 @@ findings were in the **always-loaded file** and in the **notes about the skills*
 of a hazard that did not exist. Budget the pass for refuting stale *notes* as much as for finding
 stale *docs*.
 
+🔴 **A small over-budget number does not mean a small defect** (the core's §1). Measured: one
+skill audited 144 B over; the real finding was a *"re-apply these"* section with two of its four
+entries retired. The auditor measures bytes; only a read finds rot.
+
 ## Disposition
 
 A finding that needs a **decision** is FLAGGED, not silently fixed. Findings go in the commit

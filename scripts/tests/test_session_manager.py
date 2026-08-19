@@ -1857,7 +1857,7 @@ def test_json_golden_schema_and_values():
         # and so is `stuck_count`, which is the same rule applied to the
         # stuck-dispatch half rather than a second, weaker one.
         "clawgate_queue": {"count": None, "status": "absent",
-                          "stuck_count": None, "schema_ok": False},
+                           "stuck_count": None, "schema_ok": False},
         # 🔴 THE #419 METER, in the golden. One of these three windows has an
         # age and it came from fuzzyclaw — because this fixture runs
         # `use_ledger=False`. The two `none` rows are the shape the SHIPPED
@@ -2088,12 +2088,25 @@ def test_the_clawgate_queue_and_the_tmux_WAITING_count_stay_SEPARATE_populations
     human something. Summing them, or sourcing either from the other, rebuilds
     the exact conflation the rename removed.
 
-    🔴 DRIVEN OFF A POPULATED CACHE, and that is the whole point. The default
-    fixture leaves BOTH counts `None` — an earlier version of this test ran
-    against it and asserted a "separation" that a mutant aliasing one to the
-    other would have satisfied trivially, because `None == None`. `_cache()`
-    supplies 12 / stuck 1, values `waiting.probable` cannot produce here, so the
-    numbers have to disagree for this to pass.
+    🔴 BOTH POPULATIONS ARE DRIVEN TO A REAL, MEASURED NUMBER, and that is the
+    whole point. The default fixture leaves BOTH counts `None`, and the first
+    version of this test asserted a "separation" that `None == None` satisfied
+    trivially. The SECOND version fixed only half of it: it populated the cache
+    (12 / stuck 1) but still ran on panes nobody scraped, so `waiting.probable`
+    was `None` and the closing assertion reduced to `None != 12` — true no
+    matter what. Measured: sourcing `summary.waiting.probable` from the clawgate
+    `stuck_count` SURVIVED it, and that is precisely the cross-population
+    conflation this test exists to ban.
+
+    So the panes are scraped too: `%11` sits on a modal and `%21` is out of
+    context, both Claude panes flag, and `waiting.probable` is a measured 2
+    against a queue of 12 / pending 11 / stuck 1. The values are pairwise
+    distinct AND the fixture-integrity loop below asserts that NO number this
+    queue publishes equals 2 — so a mutant sourcing `probable` from ANY field of
+    it moves the number and dies. (`schema=3` for exactly that reason: the
+    canonical `_cache()` ships `schema: 2`, which would have collided with the
+    expected count. 3 is a valid future bump — see
+    `test_the_schema_gate_is_measured_either_side_of_the_boundary`.)
 
     🔴 `summary.clawgate_queue` IS a deliberate projection of the top-level
     field, not a duplicate to be removed — the summary carries count WITH its
@@ -2101,7 +2114,9 @@ def test_the_clawgate_queue_and_the_tmux_WAITING_count_stay_SEPARATE_populations
     measured". So the invariant is that the projection MIRRORS, on every field
     it republishes; a hardcoded value in either place breaks it.
     """
-    report = base_gather(clawgate_reader=_cache())
+    report = waiting_gather(local={"%11": PANE_MENU},
+                            remote={"%21": PANE_CTX_ZERO},
+                            clawgate_reader=_cache(schema=3), now=NOW)
     top = report["clawgate_queue"]
     proj = report["summary"]["clawgate_queue"]
     waiting = report["summary"]["waiting"]
@@ -2109,33 +2124,236 @@ def test_the_clawgate_queue_and_the_tmux_WAITING_count_stay_SEPARATE_populations
     # The cache really did land — without this the mirror assertions below could
     # be comparing None to None and pass with the reader unwired.
     assert top["count"] == 12 and top["stuck_count"] == 1, top
+    assert top["pending_count"] == 11 and top["schema"] == 3, top
 
     # The projection mirrors, field for field.
     for field in ("count", "status", "stuck_count", "schema_ok"):
         assert proj[field] == top[field], (field, proj[field], top[field])
 
-    # ...and the tmux waiting population is untouched by any of it: a separate
-    # key, a separate shape, and a count that did NOT become 12.
+    # 🔴 The tmux waiting population is MEASURED — from the panes, not from the
+    # queue. Both Claude panes flag, so this is a real 2 and never a None that
+    # every inequality below would satisfy for free.
     assert set(waiting) >= {"probable", "measured", "unmeasured"}
+    assert waiting["measured"] == 2, waiting
+    assert waiting["probable"] == 2, waiting
+
+    # 🔴 FIXTURE-INTEGRITY LOOP — what makes the assertion above able to SEE a
+    # conflation mutant. No number the clawgate queue publishes may equal the
+    # expected waiting count, so `probable = <any field of the queue>` changes
+    # it and goes red. If a later fixture edit collapses that, this fails HERE,
+    # loudly, instead of quietly making the test vacuous again.
+    for field, value in sorted(top.items()):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        assert value != waiting["probable"], (
+            "FIXTURE COLLAPSE: clawgate `%s` == the expected waiting count "
+            "(%r), so a mutant sourcing one from the other would pass"
+            % (field, value))
+
+    # ...and the two stay structurally apart: a separate key, a separate shape.
     assert waiting["probable"] != top["count"]
     assert "waiting" not in top and "probable" not in proj
 
 
-def _payload_paths_in(text):
+# A near-miss arm is only granted to tokens and keys of at least this length.
+# Below it the distance-1 neighbourhood of a key stops being "a typo of a key"
+# and becomes ordinary short prose: the payload's 2-char key `ts` sits one edit
+# from `is`/`as`/`to`/`tsx`, and claiming those as payload pointers is the very
+# false-red this helper was narrowed to remove. Measured (see
+# `test_a_stale_SINGLE_WORD_pointer_is_caught_not_just_an_underscored_one`):
+# with the floor at 4, every ordinary word tried sits >=2 edits from every
+# top-level key, while every plausible drift of a real key sits at 1.
+_NEAR_MISS_MIN_LEN = 4
+
+
+def _within_one_edit(a, b):
+    """True iff `a` becomes `b` under at most ONE edit — insert, delete,
+    substitute, or TRANSPOSE two adjacent characters (restricted Damerau).
+
+    🔴 TRANSPOSITION IS PART OF THE RULE AND IS NOT FREE-RIDING ON THE OTHER
+    THREE. `sumamry`/`summary`, `hsots`/`hosts`, `ledegr`/`ledger`,
+    `caevats`/`caveats` and `clikchouse`/`clickhouse` are every one of them
+    Levenshtein distance TWO, so a plain-Levenshtein rule misses the single
+    commonest real typo shape while claiming to cover "the drift shapes that
+    actually occur" — measured, 5 of 5 transposition drifts tried were missed.
+    The widening is not speculative either: measured against cracklib-small
+    (50,692 entries matching `[a-z]+`), adding transposition to this payload's
+    key set drags in ZERO further ordinary English words — the transposition
+    neighbourhood of every key here is entirely non-words. Ledger and re-derive
+    recipe: `test_the_near_miss_arm_PRICES_the_false_reds_it_buys`.
+    """
+    la, lb = len(a), len(b)
+    if abs(la - lb) > 1:
+        return False
+    if la == lb:
+        diff = [i for i, (x, y) in enumerate(zip(a, b)) if x != y]
+        if len(diff) <= 1:
+            return True              # at most ONE substitution...
+        return (len(diff) == 2 and diff[1] == diff[0] + 1     # ...or exactly
+                and a[diff[0]] == b[diff[1]]                  # one ADJACENT
+                and a[diff[1]] == b[diff[0]])                 # transposition
+    if la > lb:                      # normalise so `a` is the shorter one
+        a, b, la, lb = b, a, lb, la
+    i = 0
+    while i < la and a[i] == b[i]:   # skip the common prefix...
+        i += 1
+    return a[i:] == b[i + 1:]        # ...the rest must match past one insert
+
+
+def _names_a_top_level_key(tok, top_keys):
+    """Is this bare word a pointer AT the payload — naming a top-level key, or
+    one edit away from naming one (a typo, a plural, a small rename)?
+
+    🔴 THE NEAR-MISS ARM IS OFFERED ONLY BY KEYS THAT CARRY NO UNDERSCORE,
+    and that restriction costs nothing while removing the sharpest false red
+    this rule had. Reasoning: the arm can only ever be reached by an
+    underscore-FREE token — twice over, because the clause of
+    `_payload_paths_in` that reaches it matches `[a-z]+` only, and anything
+    carrying an underscore is already extracted one clause earlier and
+    unconditionally. So against
+    an underscored key the arm's only reachable shape is UNDERSCORE DELETION —
+    and `localhost` is exactly one underscore-deletion from the key
+    `local_host`, i.e. the ordinary vocabulary of a note about hosts was being
+    read as a stale pointer. What is given up in exchange is the case of a note
+    writing a snake_case key with its underscore simply dropped
+    (`clawgatequeue` for `clawgate_queue`), which is not a typo shape that
+    occurs; a real stale pointer at an underscored key KEEPS its underscore and
+    is already caught outright by the earlier clause — those 4 keys were the
+    only ones the pre-near-miss rule could see at all. Measured: the blind set
+    stays exactly `['ts']` with the restriction in place.
+
+    The `len(k) >= _NEAR_MISS_MIN_LEN` clause below is DEFENCE, not live cover:
+    for this payload it is unreachable (the only sub-floor key is the 2-char
+    `ts`, which the token-length guard plus the length-difference test in
+    `_within_one_edit` already reject). It is kept so that a future 3-char key
+    cannot silently open a near-miss neighbourhood over short prose, and it is
+    made reachable — and mutation-killable — by a direct unit assertion in
+    `test_the_near_miss_arm_PINS_its_own_width_and_preconditions`.
+    """
+    if tok in top_keys:
+        return True
+    if len(tok) < _NEAR_MISS_MIN_LEN:
+        return False
+    return any("_" not in k and len(k) >= _NEAR_MISS_MIN_LEN
+               and _within_one_edit(tok, k)
+               for k in top_keys)
+
+
+def _payload_paths_in(text, report):
     """Backticked tokens in a note that CLAIM to be payload paths.
 
-    Structural, not lexical: a token qualifies only if it is a dotted path or a
-    bare `snake_case` word, so prose like `list-panes` (hyphen) and
-    `--claude-only` (dashes) are not mistaken for keys. What comes back is a
-    list of things the note tells a JSON reader to go and look at.
+    Structural, not lexical. A token qualifies if it is (a) a DOTTED snake_case
+    path, (b) a bare snake_case word carrying an UNDERSCORE, or (c) a bare word
+    that NAMES A TOP-LEVEL KEY of `report`, or sits one edit from naming one.
+    Prose like `list-panes` (hyphen) and `--claude-only` (dashes) is not
+    mistaken for a key. What comes back is a list of things the note tells a
+    JSON reader to go and look at.
+
+    🔴 CLAUSE (c) IS DERIVED FROM THE REAL PAYLOAD, NEVER FROM A LITERAL LIST,
+    and `report` is REQUIRED for exactly that reason — an optional argument
+    would let a future call site silently drop back to the underscore-only rule
+    that this docstring used to describe. Measured against a real
+    `base_gather()` report: of its 12 top-level keys only 4 carry an
+    underscore, so (a)+(b) alone left `caveats`, `clickhouse`, `filters`,
+    `fuzzyclaw`, `hosts`, `ledger`, `summary` and `ts` unextractable — a note
+    misspelling any of them was NOT CHECKED AT ALL. With (c) that is 11 of 12
+    (all but the 2-char `ts`, below `_NEAR_MISS_MIN_LEN`).
+
+    🔴 WHY A NEAR MISS AND NOT AN EXACT MATCH: an exact-match-only clause (c)
+    is worthless as a guard. A token that exactly names a live key always
+    resolves, so it can never go red; the pointer this guard exists to catch is
+    by definition one that NO LONGER names a key. One edit covers the drift
+    shapes that actually occur — a typo (`summry`), a lost character
+    (`clickhous`), a plural gained or lost (`caveat`, `ledgers`), a
+    transposition (`sumamry`, `hsots`).
+
+    🔴 THE PRICE, MEASURED AGAINST THE RIGHT POPULATION. An earlier wording
+    priced this at "one word wide — `host`, the ONLY such collision in the
+    payload's 60 single-word segments". That sentence is TRUE and it is the
+    wrong measurement: the population that can turn this gate red is the
+    ENGLISH PROSE a future note is written in, not the payload's own key
+    segments. Re-measured against cracklib-small (50,692 entries matching
+    `[a-z]+`), the distance-1 neighbourhood of this payload's non-underscored
+    top-level keys contains SEVENTEEN ordinary English words — `caveat`,
+    `costs`, `falters`, `fillers`, `filter`, `fitters`, `ghosts`, `hoists`,
+    `hoots`, `hoses`, `host`, `ledge`, `ledgers`, `ledges`, `leger`, `lodger`,
+    `posts` — an order of magnitude more than "one word". Six of them
+    (`caveat`, `costs`, `filter`, `ghosts`, `host`, `posts`) already occur in
+    this repo's own prose, and each of them, planted into a real not_measured
+    note, turns this gate red today. That ledger is pinned, tied to the key set
+    it was measured against, in
+    `test_the_near_miss_arm_PRICES_the_false_reds_it_buys` — so it cannot
+    silently grow, and a changed key set forces a human to re-measure.
+
+    🔴 THE TRADEOFF WAS TAKEN DELIBERATELY, NOT OVERLOOKED. The obvious
+    mitigation — denylist ordinary English — is REJECTED, because the two
+    populations overlap at exactly the words that matter: `caveat` is both an
+    ordinary English word AND the most plausible typo of the key `caveats`, and
+    so are `ledgers` for `ledger` and `filter` for `filters`. A denylist would
+    buy back false-red budget by reintroducing blindness at the drift shape
+    this rule was widened to catch. The asymmetry decides it: a false red costs
+    ONE reword by the author who is editing that very note (the failure message
+    names the token), while a false green ships a stale machine-readable
+    pointer to every `--json` consumer, which is the failure this gate exists
+    for. So the price is paid, stated, and pinned rather than reduced.
+
+    🔴 ONE SHAPE OF THE PRICE *WAS* OVERLOOKED AND IS NOW REMOVED: the arm
+    silently spanned UNDERSCORE DELETION from an underscored key, so
+    `localhost` — one deletion from `local_host`, and precisely the vocabulary
+    a note about hosts would use — was claimed. The near-miss arm is now
+    offered only by keys carrying no underscore; see `_names_a_top_level_key`
+    for why that costs nothing.
+
+    🔴 WHY TOP-LEVEL KEYS AND NOT EVERY KEY SEGMENT — measured, not assumed.
+    The same report has 136 distinct key segments, 60 of them single words.
+    Anchoring on those instead is not a stricter version of this rule, it is a
+    different and much worse one: `count`, `note`, `open`, `path`, `stale`,
+    `status`, `waiting`, `error`, `task` and ~8 more are ordinary English that
+    the tool's OWN caveat prose already backticks, and none of them resolve
+    from the root, so every one would be a false red. Widening to one edit over
+    that vocabulary is worse still — it swallows `state`, `mode` and `node`.
+    Against the 12 TOP-LEVEL keys the separation is clean: every ordinary word
+    tried is >=2 edits away (`standup` 6, `stalled` 6), every real drift is 1.
+
+    🔴 WHAT THIS STILL DOES NOT CATCH — stated because the claim it replaces
+    ("an underscore keeps the case this guard exists for") was measurably
+    false, and then restated because ITS OWN first version was incomplete too.
+    Three gaps, all measured:
+
+      1. A WHOLESALE rename that leaves no similar key behind — `hosts`
+         becoming `by_host`, 4 edits — is invisible to any payload-derived
+         rule, because after the rename the old name is simply not in the
+         payload to be recognised. The predecessor rule (`[a-z_]{3,}`) caught
+         that only by treating EVERY bare word as a pointer, which is what made
+         backticking `standup` or `stalled` fail this gate with no defect
+         present.
+      2. Any key shorter than `_NEAR_MISS_MIN_LEN`: `ts`, 2 chars. Pinned as
+         the exact blind set in the test below, so it fails if it grows.
+      3. TWO edits. One transposition IS covered (that gap was real and is
+         closed — see `_within_one_edit`), but `hoods` for `hosts` (two
+         substitutions), `clickhou` for `clickhouse` (two deletions) and a
+         transposition-plus-substitution are not. Widening to two edits is not
+         a free extension of the same argument: at distance 1 the separation
+         from ordinary prose is clean (`standup` and `stalled` sit 6 edits
+         out), and every additional edit multiplies the English neighbourhood
+         that the paragraph above already prices at seventeen words. The width
+         is pinned in
+         `test_the_near_miss_arm_PINS_its_own_width_and_preconditions`.
+
+    This helper buys back the typo/transposition/plural/small-rename population
+    without buying back the `standup`-goes-red false red; 1–3 are known,
+    accepted, and now asserted gaps rather than prose.
     """
     import re as _re
+    top_keys = set(report)
     out = []
     for tok in _re.findall(r"`([^`]+)`", text):
-        if _re.fullmatch(r"[a-z_]+(?:\.[a-z_]+)+", tok):
-            out.append(tok)
-        elif _re.fullmatch(r"[a-z_]{3,}", tok):
-            out.append(tok)
+        if _re.fullmatch(r"[a-z]+(?:_[a-z]+)*(?:\.[a-z]+(?:_[a-z]+)*)+", tok):
+            out.append(tok)        # a dotted path is unambiguous on its own
+        elif _re.fullmatch(r"[a-z]+(?:_[a-z]+)+", tok):
+            out.append(tok)        # a bare word may carry the underscore...
+        elif _re.fullmatch(r"[a-z]+", tok) and _names_a_top_level_key(tok, top_keys):
+            out.append(tok)        # ...or name (or nearly name) a real key
     return out
 
 
@@ -2163,17 +2381,19 @@ def test_every_payload_path_a_not_measured_NOTE_points_at_actually_EXISTS():
     expected names, so this cannot be satisfied by keeping a stale allowlist in
     step with a stale note.
 
-    \U0001f534 BOTH CONTROLS. Positive: the extractor must find paths at all, and
+    \U0001f534 THREE CONTROLS. Positive: the extractor must find paths at all, and
     they must be MORE than one, or a regex that quietly stopped matching would
     read as "every pointer is valid". Negative: a note containing a path that
     does NOT exist must be reported — otherwise `_resolves` returning True for
-    everything would look identical to a clean run.
+    everything would look identical to a clean run. And the OTHER direction: an
+    ordinary backticked word is not a pointer, so a future note that backticks
+    a skill name cannot fail this gate with no defect present.
     """
     report = base_gather()
     notes = [p.get("note", "") for p in report["not_measured"]]
     assert notes, "no not_measured entries — nothing was checked"
 
-    found = [pth for n in notes for pth in _payload_paths_in(n)]
+    found = [pth for n in notes for pth in _payload_paths_in(n, report)]
     assert len(found) > 1, (
         "POSITIVE CONTROL FAILED — the extractor found %d payload paths across "
         "%d notes; a pointer guard that finds nothing passes vacuously"
@@ -2185,9 +2405,409 @@ def test_every_payload_path_a_not_measured_NOTE_points_at_actually_EXISTS():
         % broken)
 
     # NEGATIVE CONTROL: a planted bad pointer must be caught by the same code.
-    planted = _payload_paths_in("see `summary.waiting.probable` and `no_such_key`")
+    planted = _payload_paths_in(
+        "see `summary.waiting.probable` and `no_such_key`", report)
     assert "no_such_key" in planted, planted
     assert [p for p in planted if not _resolves(report, p)] == ["no_such_key"]
+
+    # 🔴 THE OTHER DIRECTION, and the failure the old `[a-z_]{3,}` rule was one
+    # wording away from: an ordinary backticked WORD is not a payload pointer.
+    # Backticking a skill name or a plain word in a future note must NOT turn
+    # this gate red — the whole point of a delta guard is that it fires on a
+    # defect, not on prose.
+    assert _payload_paths_in(
+        "see `standup` for PRs, whether it is `stalled`, and `list-panes`",
+        report) == []
+    # ...and the discriminant is not "no bare word ever counts": a key that was
+    # RENAMED AWAY still carries its underscore, and a note still pointing at
+    # it is exactly the stale pointer this guard exists to catch.
+    stale = _payload_paths_in("for approvals see `blocked_on_me`", report)
+    assert stale == ["blocked_on_me"], stale
+    assert not _resolves(report, "blocked_on_me")
+
+
+def test_a_stale_SINGLE_WORD_pointer_is_caught_not_just_an_underscored_one():
+    """\U0001f534 THE BLINDNESS ITSELF, pinned so it cannot silently come back.
+
+    The guard above was once narrowed to "a bare word needs an UNDERSCORE",
+    which removed a real false red but bought it with measured blindness: only
+    4 of this payload's 12 top-level keys carry an underscore, so a note
+    misspelling any of the other 8 was not merely un-caught, it was never even
+    extracted. The justification offered at the time — "a key that was RENAMED
+    AWAY still carries an underscore (`blocked_on_me`)" — is true of that one
+    key and false for 8 of the tool's own 12.
+
+    So this test asserts the property directly: a note pointing at a
+    NONEXISTENT SINGLE-WORD payload key must be caught. It derives both the
+    keys and the corruptions from a REAL report, so it cannot be satisfied by a
+    hardcoded list drifting alongside a hardcoded rule.
+    """
+    report = base_gather()
+    top = sorted(report)
+
+    # 1. POSITIVE CONTROL on the near-miss primitive itself, both directions —
+    #    a predicate nobody has watched return False is not a predicate.
+    assert _within_one_edit("summary", "summry")      # one deletion
+    assert _within_one_edit("ledger", "ledgers")      # one insertion
+    assert _within_one_edit("hosts", "hests")         # one substitution
+    assert not _within_one_edit("summary", "standup")
+    assert not _within_one_edit("stale", "stalled")   # two edits, not one
+
+    # 2. The literal pointers that SURVIVED the underscore-only rule. Each is
+    #    one edit from a real top-level key and resolves against nothing.
+    for bad, real in (("summry", "summary"), ("clickhous", "clickhouse"),
+                      ("caveat", "caveats"), ("ledgers", "ledger")):
+        assert real in report, (real, top)
+        got = _payload_paths_in("the rows are in `%s`" % bad, report)
+        assert got == [bad], (
+            "BLINDNESS RETURNED — `%s` (one edit from the real top-level key "
+            "`%s`) was not extracted as a payload pointer, so a note "
+            "misspelling that key would pass this gate unnoticed; got %r"
+            % (bad, real, got))
+        assert not _resolves(report, bad), bad
+
+    # 3. Now EVERY top-level key, enumerated — not a sample. Drop the last
+    #    character of each and record which corruptions the rule fails to
+    #    catch. The blind set is asserted EXACTLY, so it fails if it grows (a
+    #    new key the rule cannot see) or shrinks (`ts` renamed) — either way a
+    #    human re-reads `_NEAR_MISS_MIN_LEN` instead of inheriting it.
+    blind = []
+    for key in top:
+        corrupt = key[:-1]
+        if corrupt in report:
+            continue                 # a corruption that lands on another real
+                                     # key is not a stale pointer at all
+        caught = (_payload_paths_in("see `%s`" % corrupt, report) == [corrupt]
+                  and not _resolves(report, corrupt))
+        if not caught:
+            blind.append(key)
+    assert blind == ["ts"], (
+        "the set of top-level keys whose misspelling this gate CANNOT see "
+        "changed: expected exactly ['ts'] (2 chars, under the %d-char "
+        "near-miss floor), got %r out of %r"
+        % (_NEAR_MISS_MIN_LEN, blind, top))
+
+    # 4. THE CONTRAST THAT MAKES 3 A NUMBER AND NOT A VIBE. Under the
+    #    underscore-only rule — written out literally here, not read off the
+    #    implementation — 8 of those same corruptions were invisible: the 7
+    #    real keys clause (c) buys back, plus `ts`, which neither rule sees.
+    def _underscore_only(tok):
+        return bool(re.fullmatch(r"[a-z]+(?:_[a-z]+)*(?:\.[a-z]+(?:_[a-z]+)*)+",
+                                 tok)
+                    or re.fullmatch(r"[a-z]+(?:_[a-z]+)+", tok))
+
+    old_blind = [k for k in top
+                 if k[:-1] not in report and not _underscore_only(k[:-1])]
+    assert sorted(old_blind) == ["caveats", "clickhouse", "filters",
+                                 "fuzzyclaw", "hosts", "ledger", "summary",
+                                 "ts"], old_blind
+    assert len(old_blind) == 8 and len(blind) == 1, (old_blind, blind)
+
+    # 5. AND THE FALSE RED STAYS FIXED. The whole reason the underscore rule
+    #    existed: an ordinary backticked word must not become a pointer. These
+    #    sit 6 edits from the nearest top-level key, so the widened rule has
+    #    margin, not luck.
+    assert _payload_paths_in(
+        "see `standup`, whether it is `stalled`, run `list-panes`", report) == []
+    for word in ("standup", "stalled"):
+        assert not _names_a_top_level_key(word, set(top)), word
+
+    # 6. THE COST OF THE NEAR MISS, PINNED so the docstring's measurement
+    #    cannot rot. Widening to one edit necessarily drags in words that are
+    #    not top-level keys. Enumerate every single-word key segment at EVERY
+    #    depth and assert which ones the rule now claims: the top-level ones,
+    #    plus exactly `host` (one edit from `hosts`). If that set grows, a new
+    #    key has put an ordinary word inside a near-miss neighbourhood and the
+    #    false-red budget needs re-reading.
+    segments = set()
+
+    def _walk(node):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if isinstance(k, str):
+                    segments.add(k)
+                _walk(v)
+        elif isinstance(node, (list, tuple)):
+            for v in node:
+                _walk(v)
+
+    _walk(report)
+    single = sorted(s for s in segments if re.fullmatch(r"[a-z]+", s))
+    assert len(single) >= 50, len(single)      # the enumeration really ran
+    claimed = sorted(s for s in single if _payload_paths_in("`%s`" % s, report))
+    assert claimed == sorted(set(top) & set(single) | {"host"}), (
+        "the near-miss neighbourhood changed: the rule claims %r out of %d "
+        "single-word key segments; expected the top-level keys plus 'host'"
+        % (claimed, len(single)))
+
+
+# The ordinary ENGLISH words that the near-miss arm claims as payload pointers,
+# measured -- not guessed -- against cracklib-small (50,692 entries matching
+# `[a-z]+`) over the non-underscored top-level keys of a real `base_gather()`
+# report. This is the gate's FALSE-RED BUDGET: backticking any of these in a
+# future not_measured note turns the pointer gate red with no defect present.
+# Re-derive after any change to the key set or to `_within_one_edit`:
+#     report = base_gather(); top = set(report)
+#     [w for w in open(DICT) if re.fullmatch(r"[a-z]+", w.strip())
+#      and _names_a_top_level_key(w.strip(), top) and w.strip() not in top]
+_MEASURED_ENGLISH_FALSE_REDS = (
+    "caveat", "costs", "falters", "fillers", "filter", "fitters", "ghosts",
+    "hoists", "hoots", "hoses", "host", "ledge", "ledgers", "ledges", "leger",
+    "lodger", "posts")
+
+# The key set those 17 were measured against. If this moves, the ledger above
+# is stale and a human must re-run the recipe -- that is the whole mechanism
+# that stops the false-red budget growing in silence.
+_LEDGER_KEY_SET = ("caveats", "clawgate_queue", "clickhouse", "filters",
+                   "fuzzyclaw", "hosts", "ledger", "local_host",
+                   "not_measured", "stale_threshold_secs", "summary", "ts")
+
+
+def test_the_near_miss_arm_PRICES_the_false_reds_it_buys():
+    """\U0001f534 THE COST OF CLAUSE (c), MEASURED OVER THE POPULATION THAT CAN PAY IT.
+
+    The near-miss arm was priced in prose at "one word wide -- `host`, the ONLY
+    such collision in the payload's 60 single-word segments". That sentence is
+    true and it is the wrong measurement: nothing forces a future note to be
+    written out of the payload's own key names. The population that can turn
+    this gate red is ENGLISH PROSE, and over English the neighbourhood is
+    SEVENTEEN words, not one -- an order of magnitude more.
+
+    The tradeoff was then taken deliberately rather than mitigated: a denylist
+    of "ordinary words" would buy false-red budget back by re-blinding the gate
+    at exactly the drift shapes it was widened to catch (`caveat` is both an
+    English word and the likeliest typo of the key `caveats`; so are `ledgers`
+    for `ledger` and `filter` for `filters`). A false red costs one reword by
+    the author editing that note; a false green ships a stale machine-readable
+    pointer to every `--json` consumer. So the price stays -- and this test
+    exists so that it is KNOWN and cannot grow unnoticed.
+    """
+    report = base_gather()
+    top = set(report)
+
+    # 1. THE LEDGER IS TIED TO THE KEY SET IT WAS MEASURED AGAINST. A new or
+    #    renamed top-level key moves the whole neighbourhood, so the 17 below
+    #    stop being a measurement and become a leftover -- fail loudly instead.
+    assert tuple(sorted(top)) == _LEDGER_KEY_SET, (
+        "the top-level key set changed, so the measured English false-red "
+        "ledger is STALE -- re-run the recipe above `_MEASURED_ENGLISH_FALSE_"
+        "REDS` and update it. expected %r, got %r"
+        % (list(_LEDGER_KEY_SET), sorted(top)))
+
+    # 2. EVERY LEDGER WORD IS REALLY CLAIMED, and really fails to resolve. An
+    #    aspirational list nobody executed is not a measurement; this is the
+    #    positive control on the ledger itself.
+    for word in _MEASURED_ENGLISH_FALSE_REDS:
+        assert _payload_paths_in("see `%s`" % word, report) == [word], (
+            "%r is in the measured false-red ledger but the rule no longer "
+            "claims it -- the ledger has drifted from the code" % word)
+        assert not _resolves(report, word), word
+    assert len(_MEASURED_ENGLISH_FALSE_REDS) == 17, (
+        "the ledger holds %d words, not the 17 that were measured -- it has "
+        "been edited without re-running the recipe above it: %r"
+        % (len(_MEASURED_ENGLISH_FALSE_REDS), _MEASURED_ENGLISH_FALSE_REDS))
+
+    # 3. NEGATIVE CONTROL on the same predicate, so 2 is not "it claims
+    #    everything". These sit >=2 edits from every key and stay prose.
+    for word in ("standup", "stalled", "session", "windows"):
+        assert _payload_paths_in("see `%s`" % word, report) == [], word
+
+    # 4. THE ONE FALSE RED THAT WAS NOT PRICED BUT REMOVED: `localhost` is a
+    #    single underscore-deletion from the key `local_host`, so the arm --
+    #    whose entire justification was written about single-WORD keys -- was
+    #    silently spanning underscore removal, and claiming the exact
+    #    vocabulary a note about hosts would use. The near-miss arm is now
+    #    offered only by keys with no underscore.
+    assert _payload_paths_in("reachable over `localhost`", report) == [], (
+        "`localhost` is claimed as a payload pointer again -- the near-miss "
+        "arm is spanning underscore-deletion from `local_host`")
+    assert "local_host" in report and "localhost" not in report
+    assert not _names_a_top_level_key("localhost", top)
+
+    # 5. ...and removing it cost no coverage: an underscored key's stale
+    #    pointer keeps its underscore, so clause (b) catches it outright,
+    #    near-miss arm or not.
+    for underscored in sorted(k for k in top if "_" in k):
+        corrupt = underscored + "s"
+        assert corrupt not in report
+        assert _payload_paths_in("see `%s`" % corrupt, report) == [corrupt], (
+            "clause (b) no longer catches a stale pointer at the underscored "
+            "key %r, so restricting the near-miss arm DID cost coverage"
+            % underscored)
+
+
+def test_the_near_miss_arm_PINS_its_own_width_and_preconditions():
+    """\U0001f534 HOW WIDE "ONE EDIT" IS -- asserted, because it was never exercised.
+
+    The only negative controls the near-miss primitive had were `summary` vs
+    `standup` (distance 6) and `stale` vs `stalled` (rejected by the LENGTH
+    guard, never reaching the substitution arm). So no same-length distance-2
+    pair was ever fed to it, and mutating `len(diff) <= 1` to `<= 2` -- i.e.
+    doubling the neighbourhood the test above prices at 17 English words --
+    survived the entire suite.
+
+    Also pins the two things the docstrings assert about the rule but nothing
+    executed: that a TRANSPOSITION is one edit (5 of 5 real transposition
+    drifts were previously missed, all being Levenshtein distance 2), and that
+    the `len(k) >= _NEAR_MISS_MIN_LEN` guard on the KEY side actually excludes
+    a short key -- unreachable for this payload, so it is exercised directly.
+    """
+    report = base_gather()
+    top = set(report)
+    qualifying = sorted(k for k in top
+                        if "_" not in k and len(k) >= _NEAR_MISS_MIN_LEN)
+    assert len(qualifying) >= 6, qualifying      # the enumeration really ran
+
+    # 1. TRANSPOSITION IS ONE EDIT. Every one of these is Levenshtein 2, so
+    #    before this they were invisible while the docstring claimed "one edit
+    #    covers the drift shapes that actually occur".
+    for bad, real in (("sumamry", "summary"), ("hsots", "hosts"),
+                      ("ledegr", "ledger"), ("caevats", "caveats"),
+                      ("clikchouse", "clickhouse")):
+        assert real in report, real
+        assert _within_one_edit(bad, real), (
+            "%r is one ADJACENT TRANSPOSITION from the real key %r and must "
+            "count as one edit" % (bad, real))
+        assert _payload_paths_in("the rows are in `%s`" % bad, report) == [bad]
+        assert not _resolves(report, bad), bad
+
+    # 2. ...AND STOPS THERE. Same length, two substitutions, no swap: these
+    #    must NOT be one edit. This is the assertion that a `<= 1` -> `<= 2`
+    #    mutant dies on.
+    for a, b in (("hoods", "hosts"), ("summers", "summary"),
+                 ("folders", "filters"), ("lodges", "ledger")):
+        assert not _within_one_edit(a, b), (
+            "%r is TWO substitutions from %r and must not count as one edit -- "
+            "the substitution arm has been widened past one edit, which "
+            "multiplies the measured English false-red neighbourhood" % (a, b))
+        assert _payload_paths_in("see `%s`" % a, report) == [], (a, b)
+
+    # 3. A TRANSPOSITION MUST BE ADJACENT. Swapping two characters that are not
+    #    neighbours is two edits, not one.
+    for key in qualifying:
+        chars = list(key)
+        for i in range(len(chars)):
+            for j in range(i + 2, len(chars)):
+                if chars[i] == chars[j]:
+                    continue
+                swapped = list(chars)
+                swapped[i], swapped[j] = swapped[j], swapped[i]
+                tok = "".join(swapped)
+                if any(_within_one_edit(tok, k) for k in qualifying):
+                    continue         # lands inside some other key's real D1
+                assert not _names_a_top_level_key(tok, top), (
+                    "%r is a NON-ADJACENT swap in %r -- two edits -- and must "
+                    "not be claimed" % (tok, key))
+
+    # 4. THE KEY-SIDE LENGTH FLOOR IS REAL, exercised directly because this
+    #    payload cannot reach it: its only sub-floor key is the 2-char `ts`,
+    #    which `_within_one_edit`'s length test already rejects against any
+    #    >=4-char token. Kept as defence against a future 3-char key opening a
+    #    near-miss neighbourhood over short prose.
+    assert _NEAR_MISS_MIN_LEN == 4, _NEAR_MISS_MIN_LEN
+    assert _within_one_edit("abcd", "abc"), "precondition: one deletion apart"
+    assert not _names_a_top_level_key("abcd", {"abc"}), (
+        "a 3-char key (< _NEAR_MISS_MIN_LEN) must not offer a near-miss arm; "
+        "the len(k) guard in _names_a_top_level_key has been dropped")
+    assert _names_a_top_level_key("abcd", {"abcd"}), (
+        "control: an EXACT match must still be claimed regardless of length")
+    assert not _names_a_top_level_key("tsx", top), "tsx / ts: below the floor"
+
+
+def test_the_near_miss_neighbourhood_is_EXACTLY_one_edit_by_construction():
+    """\U0001f534 THE NEIGHBOURHOOD ENUMERATED, NOT SAMPLED, IN BOTH DIRECTIONS.
+
+    The tests above feed the rule hand-picked tokens, which pins the shapes
+    someone thought of. This one generates the exact distance-1 neighbourhood
+    of every qualifying key -- delete, substitute, insert, adjacent-transpose,
+    over the whole alphabet -- and requires the rule to claim ALL of it, then
+    generates distance-2 tokens of each shape and requires it to claim NONE.
+    A rule quietly narrowed (some drift shape no longer covered) and a rule
+    quietly widened (the English false-red ledger silently doubling) are
+    different mutants, and this is the assertion that separates them.
+    """
+    report = base_gather()
+    top = set(report)
+    qualifying = sorted(k for k in top
+                        if "_" not in k and len(k) >= _NEAR_MISS_MIN_LEN)
+    alphabet = "abcdefghijklmnopqrstuvwxyz"
+
+    def _d1(word):
+        out = set()
+        for i in range(len(word)):
+            out.add(word[:i] + word[i + 1:])                      # delete
+            for c in alphabet:
+                if c != word[i]:
+                    out.add(word[:i] + c + word[i + 1:])          # substitute
+            if i + 1 < len(word) and word[i] != word[i + 1]:
+                out.add(word[:i] + word[i + 1] + word[i]          # transpose
+                        + word[i + 2:])
+        for i in range(len(word) + 1):
+            for c in alphabet:
+                out.add(word[:i] + c + word[i:])                  # insert
+        out.discard(word)
+        return out
+
+    near = set()
+    for key in qualifying:
+        near |= _d1(key)
+    near = {t for t in near if len(t) >= _NEAR_MISS_MIN_LEN}
+    assert len(near) > 1500, len(near)          # the construction really ran
+    unclaimed = sorted(t for t in near if not _names_a_top_level_key(t, top))
+    assert unclaimed == [], (
+        "%d of %d constructed distance-1 neighbours are NOT claimed, so the "
+        "near-miss arm is NARROWER than one edit and some real drift shape is "
+        "no longer covered: %r" % (len(unclaimed), len(near), unclaimed[:12]))
+
+    far = set()
+    for key in qualifying:
+        for i in range(len(key)):
+            for j in range(i + 1, len(key)):
+                if key[i] != "x" and key[j] != "x":
+                    far.add(key[:i] + "x" + key[i + 1:j] + "x" + key[j + 1:])
+                far.add(key[:i] + key[i + 1:j] + key[j + 1:])      # two deletes
+        far.add("qz" + key)                                        # two inserts
+        far.add(key + "qz")
+    far = {t for t in far
+           if len(t) >= _NEAR_MISS_MIN_LEN and t not in near and t not in top}
+    assert len(far) > 100, len(far)             # the construction really ran
+    claimed_far = sorted(t for t in far if _names_a_top_level_key(t, top))
+    assert claimed_far == [], (
+        "%d of %d constructed distance-2 tokens ARE claimed, so the rule is "
+        "WIDER than one edit and the measured 17-word English false-red ledger "
+        "no longer bounds the cost: %r"
+        % (len(claimed_far), len(far), claimed_far[:12]))
+
+
+def test_payload_paths_in_REQUIRES_a_report_and_cannot_default_to_none():
+    """\U0001f534 THE ARGUMENT THAT MAKES CLAUSE (c) PAYLOAD-DERIVED, PINNED IN CODE.
+
+    `_payload_paths_in`'s docstring says `report` is REQUIRED "for exactly that
+    reason -- an optional argument would let a future call site silently drop
+    back to the underscore-only rule". That was asserted in prose only:
+    mutating the signature to `report={}` survived the whole suite, because
+    every existing call site happens to pass one. A defaulted `report` gives an
+    empty `top_keys`, so clause (c) can never fire and the guard silently
+    reverts to the blindness it was widened to remove -- with no test failing.
+    """
+    import inspect
+
+    sig = inspect.signature(_payload_paths_in)
+    assert list(sig.parameters) == ["text", "report"], sig
+    assert sig.parameters["report"].default is inspect.Parameter.empty, (
+        "`report` acquired a default (%r) -- a call site that omits it would "
+        "get an empty key set, silently disabling clause (c) and reverting the "
+        "guard to the underscore-only rule with no test going red"
+        % (sig.parameters["report"].default,))
+    with pytest.raises(TypeError):
+        _payload_paths_in("see `summry`")
+
+    # ...and the reason it matters, executed: with an empty report the
+    # single-word arm is dead, which is exactly the pre-fix blindness.
+    report = base_gather()
+    assert _payload_paths_in("see `summry`", report) == ["summry"]
+    assert _payload_paths_in("see `summry`", {}) == []
+
 
 
 # =========================================================================== #
@@ -4379,7 +4999,7 @@ def test_an_unfiltered_scan_still_renders_the_UNCHANGED_caveat_sentence():
         "  caveat[kind_scope]: rows in this scan are kind=tmux — cluster is "
         "ENUMERATED but NOT PRODUCED, so no such row appears and its absence "
         "is NOT a measured zero; clawgate is reported separately under "
-        "BLOCKED ON ME")
+        "CLAWGATE QUEUE")
 
 
 def test_the_FILTER_line_in_the_table_names_the_kind_it_removed():
@@ -5333,7 +5953,7 @@ def test_the_waiting_caveat_is_structured_for_json_consumers_not_prose():
 
 
 # =========================================================================== #
-# §B — BLOCKED ON ME (the clawgate approval queue)
+# §B — CLAWGATE QUEUE (the clawgate approval queue)
 #
 # 🔴 The failure this closes was MEASURED, not imagined: a dogfood agent read
 # an accurate line saying `agent-ops` has no JSON API, correctly preferred this
@@ -5423,7 +6043,7 @@ def test_a_LEGACY_cache_reports_stuck_as_UNMEASURED_never_as_zero():
 def test_the_schema_gate_is_measured_either_side_of_the_boundary(schema, ok):
     body = {} if schema is None else {"schema": schema}
     got = sm.read_clawgate_queue(reader=_cache(**body) if schema is not None
-                                else _legacy_cache(), now=NOW)
+                                 else _legacy_cache(), now=NOW)
     assert got["schema_ok"] is ok, schema
 
 
@@ -5646,7 +6266,7 @@ def test_a_real_measured_zero_is_distinguishable_from_an_absent_cache():
     assert "UNMEASURED" in b and "NOT zero pending" in b
 
 
-def test_the_blocked_section_is_rendered_in_EVERY_state():
+def test_the_clawgate_queue_section_is_rendered_in_EVERY_state():
     """Printed unconditionally, because the failure being closed is a reader
     who never learned the queue exists. A section that appears only sometimes
     is one nobody learns to look for."""
@@ -5654,7 +6274,12 @@ def test_the_blocked_section_is_rendered_in_EVERY_state():
                    lambda p: None, lambda p: "{broken"):
         rep = base_gather(clawgate_reader=reader, now=NOW)
         text = sm.render_table(rep)
-        assert "▸ BLOCKED ON ME" in text
+        assert "▸ CLAWGATE QUEUE" in text
+        # 🔴 and the RETIRED title is gone. `▸ BLOCKED ON ME` is the exact
+        # string that produced the misread the rename exists to close — a
+        # human reading "12 things are blocked on me" off the clawgate queue.
+        # Asserting only the new title would pass with both printed.
+        assert "BLOCKED ON ME" not in text
 
 
 def test_the_rendered_queue_points_the_reader_AT_A_LIVE_SURFACE_for_the_full_list():
@@ -5690,7 +6315,7 @@ def test_the_rendered_queue_points_the_reader_AT_A_LIVE_SURFACE_for_the_full_lis
     """
     live = ("clawgate API", "clawgate pill")
     text = sm.render_table(base_gather(clawgate_reader=_cache(), now=NOW))
-    assert "12 clawgate task(s) needing you" in text
+    assert "12 task(s) needing you" in text
     assert "agent-ops" not in text, "the render points at a retired tool"
     # what this render owes instead of a pointer: the queue itself, enumerated
     assert "#172 REVIEW finished item" in text, text
@@ -5698,7 +6323,7 @@ def test_the_rendered_queue_points_the_reader_AT_A_LIVE_SURFACE_for_the_full_lis
 
     # 🔴 the branch the mutant survived in: a real count whose detail truncates
     legacy = sm.render_table(base_gather(clawgate_reader=_legacy_cache(), now=NOW))
-    assert "11 clawgate task(s) needing you" in legacy
+    assert "11 task(s) needing you" in legacy
     assert "agent-ops" not in legacy
     assert any(s in legacy for s in live), legacy
 
@@ -5713,19 +6338,19 @@ def test_the_summary_carries_the_count_WITH_its_discriminant():
     """The count never travels alone, in the roll-up any consumer reads first."""
     ok = base_gather(clawgate_reader=_cache(), now=NOW)
     assert ok["summary"]["clawgate_queue"] == {"count": 12, "status": "ok",
-                                              "stuck_count": 1,
-                                              "schema_ok": True}
+                                               "stuck_count": 1,
+                                               "schema_ok": True}
     gone = base_gather(clawgate_reader=lambda p: None, now=NOW)
     assert gone["summary"]["clawgate_queue"] == {"count": None,
-                                                "status": "absent",
-                                                "stuck_count": None,
-                                                "schema_ok": False}
+                                                 "status": "absent",
+                                                 "stuck_count": None,
+                                                 "schema_ok": False}
     # 🔴 And a legacy cache: a real count, but `stuck_count` None — a roll-up
     # reader must be able to tell "no wedged dispatches" from "never looked".
     old = base_gather(clawgate_reader=_legacy_cache(), now=NOW)
     assert old["summary"]["clawgate_queue"] == {"count": 11, "status": "ok",
-                                               "stuck_count": None,
-                                               "schema_ok": False}
+                                                "stuck_count": None,
+                                                "schema_ok": False}
 
 
 def test_the_blocked_reader_is_resolved_at_CALL_time_not_bound_as_a_default():
@@ -5747,7 +6372,7 @@ def test_the_cache_path_is_the_bar_pollers_and_is_not_hardcoded_elsewhere():
     assert sm.BLOCKED_CACHE.endswith("/.cache/bar-status/clawgate.json")
     seen = {}
     sm.read_clawgate_queue(reader=lambda p: seen.setdefault("path", p) and None,
-                          now=NOW)
+                           now=NOW)
     assert seen["path"] == sm.BLOCKED_CACHE
 
 
@@ -7135,7 +7760,7 @@ def test_the_kind_scope_caveat_is_rendered_and_names_the_unproduced_kind():
     assert "NOT PRODUCED" in line
     # it must point at where clawgate IS reported, or the reader concludes the
     # tool cannot say anything about cluster work at all
-    assert "BLOCKED ON ME" in line
+    assert "CLAWGATE QUEUE" in line
 
 
 def test_the_kind_scope_caveat_SLOTS_ARE_LIVE_not_static_prose():
@@ -7165,7 +7790,7 @@ def test_the_caveat_does_not_degrade_when_EVERY_kind_is_produced():
     assert "  is ENUMERATED" not in line, "blank subject"
     assert "every enumerated kind IS produced" in line
     # the pointer to where clawgate lives survives BOTH branches
-    assert "BLOCKED ON ME" in line
+    assert "CLAWGATE QUEUE" in line
 
 
 def test_the_caveat_is_MEASURED_from_the_rows_not_asserted_from_the_constant():
@@ -7356,7 +7981,7 @@ def test_measured_caveats_detaches_EVERY_caveat_from_the_module_constant():
 # a cosmetic reword fails this test. That is the price of a guard a reword
 # cannot walk, and these four sentences are the tool's machine-readable claims
 # about what it did and did not measure.
-_CG = ("clawgate is reported separately under BLOCKED ON ME")
+_CG = ("clawgate is reported separately under CLAWGATE QUEUE")
 KIND_SCOPE_SENTENCES = {
     # no measurement supplied — the bare-constant render. MUST NOT say "scan".
     "missing": (
@@ -7380,12 +8005,12 @@ KIND_SCOPE_SENTENCES = {
         "this tool produces kind=tmux rows by construction (no scan measured "
         "here) — every enumerated kind IS produced, so this build covers the "
         "whole entity axis; clawgate approval state is still reported "
-        "separately under BLOCKED ON ME"),
+        "separately under CLAWGATE QUEUE"),
     # after writer 3
     "both": (
         "rows in this scan are kind=cluster/tmux — every enumerated kind IS "
         "produced, so this scan covers the whole entity axis; clawgate "
-        "approval state is still reported separately under BLOCKED ON ME"),
+        "approval state is still reported separately under CLAWGATE QUEUE"),
     # 🔴 A FILTER REMOVED A WHOLE KIND. Without its own clause this rendered
     # "tmux is ENUMERATED but NOT PRODUCED" — three false claims in one
     # sentence, about rows the scan had just measured and thrown away.
@@ -9535,7 +10160,7 @@ def test_render_not_measured_tells_an_ABSENT_key_from_an_EMPTY_list():
 
 
 def test_the_not_measured_section_is_printed_in_EVERY_state_including_empty():
-    """Same rule as BLOCKED ON ME: a section that appears only sometimes is one
+    """Same rule as CLAWGATE QUEUE: a section that appears only sometimes is one
     a reader learns not to expect, and the run where it matters is the run where
     everything else looked clean."""
     for rep in (base_gather(),

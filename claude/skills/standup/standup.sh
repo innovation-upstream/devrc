@@ -257,7 +257,7 @@ scan_alerts(){
 # Any user unit in a FAILED state, plus the last-run result + age of the key
 # timer-backed services. Folded in from the retired `agent-ops` TUI: of that
 # dashboard's seven panels this was the only one with no other owner (live runs
-# and blocked-on-me went to `session-manager`, PRs and cluster alerts were
+# and the clawgate queue went to `session-manager`, PRs and cluster alerts were
 # already here, momentum to /initiative-scan, the mail and clawgate counts are
 # bar pills). It is LOCAL-only by nature — it describes the host you are on.
 #
