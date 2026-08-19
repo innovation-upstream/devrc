@@ -30,10 +30,10 @@ Select **structurally** instead:
   of a known ratio.
 
 ⚠ Only `data-testid` is targeted. **Non-`testid` data attributes are NOT stripped**,
-so a purpose-built one survives into prod and makes a reliable selector — civitai
-added `data-listing-cover-placeholder` for exactly this. If you own the app and
-need a stable hook for browser-driving, add a non-`testid` data attribute rather
-than fighting the strip.
+so a purpose-built one survives into prod and makes a reliable selector. If you own
+the app and need a stable hook for browser-driving, add a non-`testid` data
+attribute rather than fighting the strip. *Which* attribute a given site already
+ships is a SITE fact, not a mechanism one — see `reference/sites/<host>.md`.
 
 The bridge is the only way to see PAINT ORDER. Markup-level tests and `html` reads
 can't: an element can be present, correct, and completely covered. The sequence

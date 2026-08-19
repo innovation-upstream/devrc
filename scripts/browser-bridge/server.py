@@ -843,6 +843,130 @@ def _domain_from_result(result) -> str:
         return ""
 
 
+# --------------------------------------------------------------------------- #
+# Per-site reference docs
+#
+# Some sites carry hard-won operating facts that are true of THAT SITE ONLY (an
+# identity endpoint that must be re-read, a rail that renders stale entries, a
+# route whose 404 is a cohort fact). Those do not belong in a mechanism file —
+# `reference/spa-wake.md` is about the WEB — and they must not be pushed into
+# SKILL.md, which is loaded on every browser task and has a hard byte ceiling
+# (tests/test_skill_size.py). Putting a per-site ROW in SKILL.md would make the
+# always-loaded body grow linearly with the number of sites, so SKILL.md names
+# only the DIRECTORY and the bridge names the FILE, here, when it applies.
+#
+# The emission is deterministic and free of judgement: `_domain_from_result`
+# already extracts the bare hostname of a completed command (it has been doing so
+# for telemetry), and this looks that host up in a registry. A hit adds ONE
+# string field to the result envelope; a miss adds NOTHING AT ALL — the field is
+# ABSENT, not empty or null, so the common case costs zero bytes on the wire and
+# a consumer's `"site_notes" in result` is a true predicate.
+#
+# server.py is deployed as a FLAT single-file /nix/store symlink by home-manager,
+# so Path(__file__) does NOT sit next to reference/ — this resolves the directory
+# by the same stable ABSOLUTE repo path the spool emitter above uses, for exactly
+# the same reason. BROWSER_BRIDGE_SITES_DIR overrides it (tests).
+_SITES_DIR = Path(
+    os.environ.get("BROWSER_BRIDGE_SITES_DIR")
+    or (Path.home() / "workspace" / "devrc" / "scripts" / "browser-bridge"
+        / "reference" / "sites")
+)
+# The doc path a consumer is told to read is REPO-RELATIVE, matching how every
+# other reference file is named in SKILL.md's table.
+_SITES_REL_PREFIX = "reference/sites"
+# (resolved_dir, {host_suffix: filename}) — parsed at most once per directory.
+# Keyed on the directory so a test that repoints BROWSER_BRIDGE_SITES_DIR gets a
+# fresh load without needing a reset hook, while a normal run reads the file once
+# for the life of the process.
+_site_index_cache = None
+
+
+def _load_site_index() -> dict:
+    """The host-suffix → filename registry from `<sites dir>/_index.json`.
+
+    STRICTLY BEST-EFFORT, like every other optional input this server reads: a
+    missing file, unreadable file, malformed JSON, wrong top-level shape, or a
+    junk entry degrades to "no site notes" and can never raise into a browser
+    op. A browser command must not start failing because a doc registry got a
+    trailing comma.
+
+    Entries are validated rather than trusted: the key must be a non-empty
+    lowercase-able hostname with no scheme/slash/whitespace, and the value must
+    be a BARE filename — no `/`, no `..` — so a registry can only ever name a
+    file inside this directory. Junk entries are dropped individually; one bad
+    row does not discard the good ones.
+    """
+    global _site_index_cache
+    cached = _site_index_cache
+    if cached is not None and cached[0] == _SITES_DIR:
+        return cached[1]
+    mapping = {}
+    try:
+        raw = json.loads((_SITES_DIR / "_index.json").read_text("utf-8"))
+        sites = raw.get("sites") if isinstance(raw, dict) else None
+        if isinstance(sites, dict):
+            for key, val in sites.items():
+                if not isinstance(key, str) or not isinstance(val, str):
+                    continue
+                host = key.strip().lower().rstrip(".")
+                if not host or host.startswith("."):
+                    continue
+                if any(c in host for c in "/:\\") or any(c.isspace() for c in host):
+                    continue
+                name = val.strip()
+                if not name or "/" in name or "\\" in name or ".." in name:
+                    continue
+                mapping[host] = name
+    except Exception:  # noqa: BLE001 — an absent/broken registry is not an error.
+        mapping = {}
+    _site_index_cache = (_SITES_DIR, mapping)
+    return mapping
+
+
+def _site_notes_path(host: str) -> str:
+    """The reference-doc path for `host`, or "" when the host has none.
+
+    🔴 HOST-SUFFIX matching, on LABEL BOUNDARIES — never a substring test. A key
+    `civitai.com` matches `civitai.com` and `www.civitai.com`, and must NOT match
+    `notcivitai.com` (a longer label ending in the same characters) nor
+    `civitai.com.evil.test` (the key as a PREFIX). A naive `key in host` gets
+    both of those wrong and hands an attacker-chosen host our operating notes.
+
+    The LONGEST matching suffix wins, so a specific `foo.civitai.com` entry beats
+    a general `civitai.com` one regardless of dict order.
+    """
+    if not isinstance(host, str) or not host:
+        return ""
+    h = host.strip().lower().rstrip(".")
+    if not h:
+        return ""
+    index = _load_site_index()
+    best = ""
+    best_name = ""
+    for suffix, name in index.items():
+        if h == suffix or h.endswith("." + suffix):
+            if len(suffix) > len(best):
+                best, best_name = suffix, name
+    if not best:
+        return ""
+    return f"{_SITES_REL_PREFIX}/{best_name}"
+
+
+def _annotate_site_notes(result, host: str) -> None:
+    """Add `site_notes` to a result ENVELOPE when the host has a reference doc.
+
+    Additive and single-field, in the spirit of the extension's advisory `note:`
+    on a hidden-tab read. On a miss it does nothing whatsoever — no key, no
+    null — so every existing envelope field and every unregistered host's bytes
+    are unchanged.
+    """
+    if not isinstance(result, dict):
+        return
+    path = _site_notes_path(host)
+    if path:
+        result["site_notes"] = path
+
+
 def _session_hash(session_id) -> str:
     """A COARSE, non-reversible fingerprint of a session id: first 8 hex of its
     sha256. Used ONLY in the throttle telemetry event so a flood is attributable
@@ -2784,6 +2908,14 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                 self._send(504, {"ok": False, "error": "timeout"})
             else:
                 domain = _domain_from_result(result)
+                # The host is already in hand — `_domain_from_result` has been
+                # computing it here for telemetry — so routing to a per-site
+                # reference doc costs one dict lookup and no extra parsing on
+                # the completion path. Adds `site_notes` ONLY when
+                # this host is registered; an unregistered host gets no field at
+                # all, which is why SKILL.md can name the directory once and
+                # never grow again as sites are added. See _annotate_site_notes.
+                _annotate_site_notes(result, domain)
                 log("cmd_ok", op=op)
                 if op == "activate":
                     # Chrome-side activate only set the tab active WITHIN its

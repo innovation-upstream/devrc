@@ -134,3 +134,4 @@ exact path; only `SKILL.md` + the CLI are symlinked into `~/.claude/skills/brows
 | `reference/auth-pages.md` | an authenticated request; you were about to read a cookie; a read looks logged-OUT; `extension_connected:false` |
 | `reference/security-ops.md` | 🔴 **you are MODIFYING browser-bridge** (the live-verify-on-real-Brave gate is mandatory); the user asks whether/what it records; first-time setup or a second profile |
 | `reference/x-fallback.md` | CDP `screenshot` is unsatisfactory and you must capture the raw X window (`DISPLAY`/`XAUTHORITY`, xdotool/maim) |
+| `reference/sites/<host>.md` | you are driving a site that has one — the CLI names it in the result envelope |
