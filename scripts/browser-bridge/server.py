@@ -145,6 +145,9 @@ from urllib.parse import unquote, urlsplit
 # carries `focus:true` (the CLI's `--focus`, which it also defaults to when
 # stdout is a TTY, i.e. a human typed it). Without it the result reports
 # i3:"withheld" and the operator's screen is untouched. See focus_requested.
+# CAN-before-MAY: on a host with no i3 the result is "skipped", not "withheld",
+# whatever the consent flag says — there is no raise to withhold there, and the
+# withheld note's `--focus` advice would be a dead end. See the /cmd handler.
 # `upload` is a TYPED CDP op (DOM.setFileInputFiles): it populates an
 # <input type=file> with a local file whose ABSOLUTE path Chrome reads ITSELF
 # (same host) — so NO file bytes cross the bridge. It dispatches + tab-scopes
@@ -2102,17 +2105,17 @@ def i3_foreground(title, *, timeout: float = I3_MSG_TIMEOUT) -> str:
     shell=False + timeout-bounded, so a hostile title can at worst focus the
     wrong Brave window / none — never execute a command."""
     if not i3_available():
-        return "skipped"
+        return I3_SKIPPED
     argv = i3_focus_argv(title)
     if argv is None:
-        return "skipped"
+        return I3_SKIPPED
     # Resolve i3-msg to an ABSOLUTE path for argv[0] so the call works even when
     # i3-msg is not on the (minimal systemd --user) PATH. i3_available() above
     # already confirmed it resolves; re-check defensively. The criteria (argv[1])
     # is built + sanitized + re.escape'd by i3_focus_argv — UNCHANGED here.
     i3_msg = _resolve_i3_msg()
     if i3_msg is None:
-        return "skipped"
+        return I3_SKIPPED
     argv[0] = i3_msg
     try:
         proc = subprocess.run(argv, shell=False, capture_output=True,
@@ -2143,7 +2146,12 @@ def _annotate_i3(result, state: str) -> None:
     whether the window was actually raised. Never emits the title.
 
     "withheld" is the CONSENT state, not a failure: the command did not carry
-    `focus:true`, so i3_foreground was never called (see focus_requested)."""
+    `focus:true`, so i3_foreground was never called (see focus_requested).
+
+    It is reported ONLY on a host that could actually have raised. Where i3 is
+    unavailable the caller gets "skipped" regardless of consent, so "withheld"
+    always means "this host could have, and did not because you did not ask" —
+    which is what makes the note's `--focus` advice actionable."""
     if isinstance(result, dict) and isinstance(result.get("data"), dict):
         result["data"]["i3"] = state
         if state == I3_WITHHELD:
@@ -2184,6 +2192,12 @@ def _annotate_i3(result, state: str) -> None:
 # real visibility under i3 and takes nothing), so `activate` keeps working as a
 # tab-state change; only the WM raise is gated.
 I3_WITHHELD = "withheld"
+
+# The host CANNOT raise (no DISPLAY / no resolvable i3-msg / no usable title).
+# Declared here, beside its sibling, because the /cmd handler now has to answer
+# "can we?" before "may we?" and would otherwise carry a second hand-written
+# copy of this literal that could drift from i3_foreground's return value.
+I3_SKIPPED = "skipped"
 
 # Emitted on the result whenever the raise is withheld. It must name BOTH the
 # non-intrusive remedy and the explicit override, because this string is what an
@@ -2665,7 +2679,19 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                     # ...but ONLY with explicit consent on the wire. Without it
                     # the raise is WITHHELD and i3_foreground is never called —
                     # the measured focus-steal path is closed at its one source.
-                    if want_focus:
+                    #
+                    # 🔴 ORDER IS LOAD-BEARING: unavailability beats non-consent.
+                    # On a headless / non-i3 / server-mode host there is no raise
+                    # to consent TO, so reporting "withheld" there would be a lie
+                    # dressed as a policy — and the withheld note tells the caller
+                    # to pass --focus, which on that host fixes nothing and sends
+                    # them chasing a flag instead of the real answer ("this host
+                    # has no i3"). Checking consent first regressed exactly that:
+                    # pre-gate the same call truthfully said "skipped". So ask
+                    # CAN we raise before asking MAY we.
+                    if not i3_available():
+                        state = I3_SKIPPED
+                    elif want_focus:
                         state = i3_foreground(_result_title(result))
                     else:
                         state = I3_WITHHELD

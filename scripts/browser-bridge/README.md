@@ -241,7 +241,7 @@ has not been exercised against a third-party authenticated API beyond that.)
 | `key`        | top frame: **CDP `Input.dispatchKeyEvent`** (trusted); `--frame`: **SYNTHETIC** key via `chrome.scripting`; one bounded key; `key` required | `{url,key,frame,trusted}` |
 | `wake`       | **UN-THROTTLE the tab WITHOUT touching focus** — CDP `Emulation.setFocusEmulationEnabled` (+ best-effort `Page.setWebLifecycleState`) held for a bounded settle (`waitMs`, default 1.5s, clamped ≤**6s**) so a background SPA gets real animation frames and renders, then **explicitly disables focus emulation** and detaches. Own-tab-scoped like every CDP op. **This is the remedy for a hidden/empty read — not `activate`.** ⚠ the un-throttled STATE ends at detach (measured); rendered DOM persists | `{tabId,url,title,woke,visibilityState,readyState,applied,skipped,settleMs,note}` |
 | `--wake` on `text`/`html`/`eval` | the SAME un-throttle applied **inside the same CDP session as the read**, for a read that must OBSERVE live un-throttled state (rather than the DOM `wake` left behind). Opt-in only — the default read path is unchanged (see below) | the read's normal shape + `{woke,wake:{applied,settleMs}}` |
-| `activate`   | **FOREGROUND the tab** — `chrome.tabs.update(tab,{active:true})` + `chrome.windows.update(windowId,{focused:true})`, then an OPTIONAL bounded wait-for-`status:"complete"` + paint settle (`waitMs`, clamped ≤8s; a discarded/never-completing tab returns promptly — no wedge). **⚠⚠ STEALS THE OPERATOR'S SCREEN** — the one intrusive op, and a **LAST RESORT**: use it only when something genuinely needs the REAL foreground (a permission prompt, a native picker, seeing it yourself). For a throttled/unrendered tab use `wake`. Needed at most **once per tab, never per read**. **Operator-only — absent from the autonomous agent's op set entirely.** **i3:** the server also raises the Brave window via `i3-msg`, but ONLY with explicit consent on the wire (`focus:true`; the CLI's `--focus`, defaulted on when stdout is a TTY) — otherwise the raise is `withheld` and the result carries a note | `{tabId,windowId,url,title,active,status,i3,note?}` |
+| `activate`   | **FOREGROUND the tab** — `chrome.tabs.update(tab,{active:true})` + `chrome.windows.update(windowId,{focused:true})`, then an OPTIONAL bounded wait-for-`status:"complete"` + paint settle (`waitMs`, clamped ≤8s; a discarded/never-completing tab returns promptly — no wedge). **⚠⚠ STEALS THE OPERATOR'S SCREEN** — the one intrusive op, and a **LAST RESORT**: use it only when something genuinely needs the REAL foreground (a permission prompt, a native picker, seeing it yourself). For a throttled/unrendered tab use `wake`. Needed at most **once per tab, never per read**. **Absent from the autonomous agent's op set** (not reachable via `OP_TO_SERVER`). **i3:** the server also raises the Brave window via `i3-msg`, but only when the command asks for it (`focus:true`; the CLI's `--focus`, defaulted on when stdout is a TTY) — otherwise the raise is `withheld` and the result carries a note. On a host with no i3 the answer is `skipped` whatever the flag says. This is a **default**, not an authorization boundary — see *Opt-in by default* | `{tabId,windowId,url,title,active,status,i3,note?}` |
 | `upload`     | **CDP `DOM.setFileInputFiles`** — resolve the `<input type=file>` at `selector` to a RemoteObject, VERIFY it is a file input, then hand Chrome the ABSOLUTE `path` (Chrome reads the file itself — **no bytes cross the bridge**); `--frame` routes into a same-process iframe OR a cross-origin OOPIF (incl. a **NESTED** one — same bounded cascade + caps as `eval --frame`). Own-tab, #189-bounded, NO raw-CDP passthrough. **Data-exfil-capable → the server AUDIT-LOGS every upload** (op + target domain + path) and it is **OPERATOR-ONLY — not in the autonomous agent's default op set** (`BROWSER_AGENT_ALLOWED_OPS` opt-in only). `selector`+`path` required | `{ok,selector,frame,url,files:[basename]}` |
 
 `open`/`close` are dispatched to the extension; `release` (drop ownership, don't
@@ -874,10 +874,10 @@ run `browser wake` on the tab, then re-issue the frame read.
 
 **`activate` stays** — it is still the honest answer when something genuinely needs
 the real foreground (a permission prompt, a native picker, verifying with your own
-eyes). It just stops being the default advice, and it is now **operator-only**
-(absent from the agent's op set entirely).
+eyes). It just stops being the default advice, and it is absent from the
+autonomous agent's op set entirely.
 
-### The focus steal is now CONSENT-GATED, not merely discouraged (2026-08-18)
+### The focus steal is OPT-IN BY DEFAULT (2026-08-18)
 
 The two mitigations above are a **prose** nudge (reword `HIDDEN_TAB_NOTE` so the
 model reaches for `wake`) and an **op-allowlist in one caller** (drop `activate`
@@ -885,6 +885,26 @@ from `OP_TO_SERVER`). Re-measuring three weeks later says that combination only
 half-held, and says exactly why: the allowlist binds the sandboxed browser-agent
 tool and *nothing else*, so Claude Code's Bash tool, an opencode session's bash
 tool, and any script still reach `activate` through the ordinary `browser` CLI.
+
+🔴 **What this change IS, and what it is NOT.** It flips the **default** for the
+host-side raise from *always* to *only when asked*. That is the whole of it, and it
+is worth having: every one of the 166 measured activates came from a caller that
+never asked, so the default is what was costing the operator their screen.
+
+It is **not** an authorization boundary, and the README must not be read as
+claiming one. Any caller that can reach the bridge can still take the screen:
+
+* the refusal note names the flag (`--focus`) — deliberately, so a caller with a
+  real need is not stuck — which means an agent that reads its own error output can
+  simply retry with it;
+* the `browser` CLI is on `PATH` for every agent that has a shell;
+* and `/cmd` is plain loopback HTTP, so `curl` plus the token from
+  `~/.config/browser-bridge/token` bypasses the CLI entirely.
+
+The only *structural* barrier remains the sandboxed browser-agent's op allowlist,
+which binds that one tool. Everything else here is a well-chosen default. Calling
+it "operator-only" or "requires explicit consent" would overstate it into a
+security claim it cannot support.
 
 Measured out of `activity.events` (55,003 `source='browser-bridge' kind='cmd'`
 rows, 2026-07-29 → 08-18, correlated against `source='i3' kind='window-focus'`
@@ -927,7 +947,28 @@ only a `home-manager switch` for `server.py` (the CLI is an `mkOutOfStoreSymlink
 and is live from the working tree). And `payload.focus` is recorded on the activate
 telemetry event, so the same query that established the bug can falsify the fix:
 after deploy, consented activates should still correlate and withheld ones should
-fall to background.
+fall toward background.
+
+🔴 **Expect a RESIDUAL, and do not score it as the gate failing.** This change gates
+the host-side `i3-msg` raise only. The extension still calls
+`chrome.windows.update(windowId,{focused:true})` unconditionally
+(`extension/service_worker.js:1403`), and `focus_on_window_activation` is **unset**
+in `nix/i3/config.nix`, so i3's default `smart` applies — under which a
+`_NET_ACTIVE_WINDOW` request from a window **on the currently visible workspace IS
+granted focus**. Both paths fired together on every pre-fix activate, so the
+measurement above cannot attribute the 66.3% between them. Therefore:
+
+* **withheld activates should fall TOWARD background, not necessarily TO it**;
+* a non-zero ±1s residual on withheld activates is the Chrome-side path, **not**
+  evidence the gate leaked;
+* only a residual at or near the *pre-fix* rate would indicate the gate failed.
+
+🔴 **And treat an absent `focus` field as UNKNOWN, never as pre-deploy.** Throttled
+(HTTP 429) activates return from their own branch *before* the `payload.focus`
+augmentation runs, so a row can legitimately carry no `focus` key on the new server.
+A falsification query that buckets "no focus field" as "old server" will silently
+mix throttled new-server rows into the pre-deploy bucket. Bucket it as UNKNOWN and
+report its count separately.
 
 **Trade-off, stated plainly:** a script or an agent that genuinely wanted the
 foreground now has to ask for it, and will silently not get it until someone reads

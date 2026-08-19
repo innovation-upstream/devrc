@@ -2470,6 +2470,128 @@ def test_activate_invokes_i3_msg_on_success(monkeypatch):
         ext.stop(); srv.shutdown(); srv.server_close()
 
 
+# --- CAN-before-MAY: the i3-availability x consent matrix (audit #551) ------ #
+# THE REGRESSION THIS PINS. The consent gate originally asked "may we raise?"
+# before "can we?", so on a headless / non-i3 / server-mode host a
+# non-consented activate answered i3:"withheld" AND attached the withheld note,
+# whose remedy is "pass --focus". On that host --focus fixes nothing: there is
+# no i3 to raise with. Pre-gate the same call truthfully answered "skipped".
+#
+# The reason the existing suite could not see it: every i3-outcome test was
+# updated to pass focus:true when the gate landed, so "skipped" became reachable
+# only WITH consent — exactly one cell of a 2x2. A defect in a cell no fixture
+# builds is invisible however green the suite is. All four cells are asserted
+# here so the ORDER of the two checks is pinned rather than incidental.
+def test_i3_state_constants_match_the_literals_the_matrix_asserts():
+    """The matrix and the named regression test compare against LITERALS (so
+    they stay behavioural at a pre-fix baseline). That only stays honest while
+    the constants agree with them — otherwise the code could rename a state and
+    every literal-based assertion would quietly test nothing."""
+    assert S.I3_SKIPPED == "skipped"
+    assert S.I3_WITHHELD == "withheld"
+
+
+@pytest.mark.parametrize("i3_up,consent,want_state,want_note", [
+    (True,  True,  "applied",  False),   # can + may   -> raise
+    (True,  False, "withheld", True),    # can + won't -> the consent gate, note is useful
+    (False, True,  "skipped",  False),   # can't + may -> nothing to raise with
+    (False, False, "skipped",  False),   # can't + won't -> THE REGRESSION CELL
+], ids=["i3+consent", "i3+refused", "noi3+consent", "noi3+refused"])
+def test_activate_i3_state_matrix(monkeypatch, i3_up, consent, want_state, want_note):
+    """All four (i3 available x consent) cells, so the check ORDER is pinned.
+
+    `want_note` is asserted in BOTH directions: the note must appear exactly
+    where its `--focus` advice is actionable, and nowhere else. A note on a
+    non-i3 host is the bug; a missing note on a real withhold is a different
+    bug (the caller is refused with no way to learn why).
+    """
+    if i3_up:
+        calls = _enable_i3(monkeypatch, returncode=0)
+    else:
+        # The autouse _disable_i3 fixture already forces i3_available False.
+        # Make any subprocess.run a hard failure so "we never shelled out" is
+        # proven rather than inferred from the reported state.
+        calls = []
+
+        def _boom(*a, **k):
+            raise AssertionError("i3-msg must NOT run when i3 is unavailable")
+        monkeypatch.setattr(S.subprocess, "run", _boom)
+
+    srv, _ = _serve()
+    ext = FakeExtension(srv, executor=lambda c: {
+        "tabId": 5, "windowId": 1, "active": True, "status": "complete",
+        "url": "https://model-benchmarking.example.test/run",
+        "title": "Model Benchmarking"})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        cmd = {"op": "activate"}
+        if consent:
+            cmd["focus"] = True
+        st, body = _req(srv, "POST", "/cmd", cmd)
+        assert st == 200
+        data = body["result"]["data"]
+        assert data["i3"] == want_state, (
+            f"i3_available={i3_up} focus={consent} -> got i3={data['i3']!r}, "
+            f"want {want_state!r}"
+        )
+        assert ("note" in data) is want_note, (
+            f"i3_available={i3_up} focus={consent}: note present="
+            f"{'note' in data}, want {want_note}"
+        )
+        # The Chrome-side result survives in every cell — this gates the WM
+        # step only, never the op.
+        assert data["tabId"] == 5
+        # i3-msg runs in exactly one cell: can AND may.
+        assert (len(calls) == 1) is (i3_up and consent), (
+            f"i3_available={i3_up} focus={consent}: i3-msg calls={calls}"
+        )
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_non_consented_activate_on_a_non_i3_host_says_skipped_not_withheld(monkeypatch):
+    """🔴 THE REGRESSION, named. Unavailability must beat non-consent.
+
+    Separate from the matrix above because this is the cell that shipped wrong
+    and it is the one a mutant swapping the two checks must die on. The
+    assertion is on the NOTE as well as the state: reporting "withheld" is a
+    lie, but attaching advice to "pass --focus" on a host with no i3 is the part
+    that actually costs the reader time — it sends them after a flag instead of
+    the real answer, which is that this host cannot raise anything.
+    """
+    def _boom(*a, **k):
+        raise AssertionError("i3-msg must NOT run when i3 is unavailable")
+    monkeypatch.setattr(S.subprocess, "run", _boom)
+    srv, _ = _serve()
+    ext = FakeExtension(srv, executor=lambda c: {
+        "tabId": 5, "windowId": 1, "active": True, "status": "complete",
+        "url": "https://model-benchmarking.example.test/run",
+        "title": "Model Benchmarking"})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, body = _req(srv, "POST", "/cmd", {"op": "activate"})
+        assert st == 200
+        data = body["result"]["data"]
+        # Compared against the LITERAL, not S.I3_SKIPPED. At the pre-fix commit
+        # the constant does not exist, so referencing it would make this test
+        # red with an AttributeError — red for the wrong reason, which proves
+        # nothing about behaviour. The literal keeps the failure behavioural.
+        # Drift between the two is pinned separately, just below.
+        assert data["i3"] == "skipped", (
+            f"a non-consented activate on a host with NO i3 reported "
+            f"{data['i3']!r}; it must report 'skipped' — there is no raise to "
+            "withhold, and 'withheld' invites a pointless --focus retry"
+        )
+        assert "note" not in data, (
+            "the withheld note (which tells the caller to pass --focus) was "
+            f"attached on a host that cannot raise at all: {data.get('note')!r}"
+        )
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
 def test_activate_i3_skipped_when_unavailable(monkeypatch):
     """i3-msg unavailable (headless/non-i3) → SKIPPED gracefully; the activate
     still returns the Chrome-side result and NO subprocess is spawned."""
