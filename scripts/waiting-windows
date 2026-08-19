@@ -1285,7 +1285,13 @@ def render_human(out):
         L.append("    unmeasured because: %s"
                  % ", ".join("%s=%d" % kv for kv in
                              sorted(reg["rows_unmeasured_reasons"].items())))
-    if reg["hosts_not_covered"]:
+    # 🔴 THREE states, printed as three: a list, an empty list, or "could not
+    # tell". Publishing the unknown case in --json ONLY left the human view
+    # unable to distinguish "covers every host" from "could not tell".
+    if reg.get("hosts_not_covered_status", "ok") != "ok":
+        L.append("    ⚠ registry coverage UNMEASURED: local host unknown, so "
+                 "which hosts the registry cannot cover is unanswerable")
+    elif reg["hosts_not_covered"]:
         L.append("    ⚠ CANNOT cover (registry is LOCAL-host only, by "
                  "construction): %s" % ", ".join(reg["hosts_not_covered"]))
     L.append("")

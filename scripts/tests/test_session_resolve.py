@@ -1847,9 +1847,13 @@ def test_a_single_host_flag_really_does_hide_the_other_machine():
                        sm_payload=sm_payload_honouring_host(HOST))
     res = sr.resolve(REMOTE_CWD, src)
     assert res["status"] == sr.STATUS_UNMATCHED
-    not_attempted = [h for h in res["hosts_consulted"]
-                     if h["status"] == sr.HOST_NOT_ATTEMPTED]
-    assert not_attempted, res["hosts_consulted"]
+    # the remote machine's window is genuinely unreachable, and NOTHING in the
+    # report claims that host was read
+    read_hosts = [h["host"] for h in res["hosts_consulted"]
+                  if h["status"] == sr.HOST_READ]
+    assert REMOTE_HOST not in read_hosts, res["hosts_consulted"]
+    assert all(not h["contributed_targets"]
+               for h in res["hosts_consulted"] if h["host"] == REMOTE_HOST)
 
 
 def test_an_unmatched_result_names_the_hosts_it_consulted():
@@ -2135,27 +2139,97 @@ def test_the_unmatched_reason_separates_hosts_that_ANSWERED_from_those_that_did_
     assert REMOTE_HOST not in answered.split("ANSWERED")[-1]
 
 
-def test_the_human_view_marks_a_host_that_contributed_nothing():
+def _host_status_block(text):
+    """Just the renderer's own host block, so an assertion about it cannot be
+    satisfied by some OTHER line that happens to contain the same words.
+
+    🔴 BOTH of this test's original assertions were walkable: `"ssh: connect
+    timed out" in text` and `HOST_UNREACHABLE in text` were satisfied by the
+    pre-existing `DROPPED:` line, so blanking the renderer's own `reason`
+    SURVIVED. A substring test against a whole document tests the document, not
+    the code you changed.
+    """
+    lines = text.splitlines()
+    start = next(i for i, l in enumerate(lines) if "hosts consulted" in l)
+    out = []
+    for line in lines[start + 1:]:
+        if line.strip() and not line.startswith("      "):
+            break
+        out.append(line)
+    return "\n".join(out)
+
+
+def test_the_human_view_pairs_EACH_host_with_ITS_OWN_status():
+    """🔴 THE PAIRING, not the presence. The old assertion `"contributed
+    NOTHING" in text` passed whichever host carried the mark, so inverting the
+    condition SURVIVED — with one read and one unreachable host, the string is
+    present either way. Here the fixture makes the two hosts distinguishable and
+    the assertion names which line each fact must appear on."""
     text = sr.render(sr.resolve(
         "nothing-matches",
         base_sources(sm_payload=sm_payload_with_unreachable_remote())))
-    assert "contributed NOTHING" in text
-    assert sr.HOST_UNREACHABLE in text
-    assert "ssh: connect timed out" in text
+    block = _host_status_block(text)
+
+    by_host = {}
+    current = None
+    for line in block.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("why:"):
+            by_host[current]["why"] = stripped
+        else:
+            current = stripped.split()[0]
+            by_host[current] = {"line": stripped}
+
+    assert set(by_host) >= {HOST, REMOTE_HOST}, by_host
+
+    # the READ host: its own line carries `read` and NOT the nothing-mark
+    assert sr.HOST_READ in by_host[HOST]["line"]
+    assert "contributed NOTHING" not in by_host[HOST]["line"]
+
+    # the UNREACHABLE host: its own line carries `unreachable` AND the mark,
+    # and its own `why:` carries the source's reason
+    assert sr.HOST_UNREACHABLE in by_host[REMOTE_HOST]["line"]
+    assert "contributed NOTHING" in by_host[REMOTE_HOST]["line"]
+    assert "ssh: connect timed out" in by_host[REMOTE_HOST]["why"]
+
+    # 🔴 and the reason really came from the RENDERER, not from the DROPPED
+    # line further down: the DROPPED text is outside this block entirely.
+    assert "DROPPED" not in block
 
 
-def test_a_host_not_in_scope_is_reported_as_not_attempted():
-    """🔴 The shape that made the --host regression invisible: a host that was
-    never queried at all. It is now named with its own status rather than being
-    absent from the report entirely."""
+def test_the_unreachable_reason_is_rendered_by_the_host_block_itself():
+    """🔴 The DROPPED line already said "ssh: connect timed out", so a
+    whole-document assertion could not tell the two apart. This asserts the
+    string appears INSIDE the host block."""
+    res = sr.resolve("nothing-matches",
+                     base_sources(sm_payload=sm_payload_with_unreachable_remote()))
+    block = _host_status_block(sr.render(res))
+    assert "ssh: connect timed out" in block
+    # POSITIVE CONTROL that the extractor really isolates a subset
+    assert len(block) < len(sr.render(res))
+
+
+def test_a_host_the_source_never_mentioned_is_NOT_REPORTED_not_out_of_scope():
+    """🔴 ROUND 2'S BUG. A host that session-manager simply did not mention was
+    printed `not-attempted (not in scope for --host all)` — a claim about SCOPE
+    for a host that `--host all` had put squarely IN scope. The two are now
+    different states with different reasons."""
+    # a REAL host name, since a host no source mentions is one the tool has no
+    # way to know exists
+    unreported = sr.HOST_NAMES[1]
     payload = sm_payload_two_hosts()
-    del payload["hosts"][REMOTE_HOST]
-    res = sr.resolve("nothing-matches", base_sources(sm_payload=payload))
-    statuses = {h["host"]: h["status"] for h in res["hosts_consulted"]}
-    # every REAL host is accounted for, including ones this run never queried
+    payload["hosts"].pop(unreported, None)
+    res = sr.resolve("nothing-matches",
+                     base_sources(host=sr.HOST_ALL, sm_payload=payload))
+    by_host = {h["host"]: h for h in res["hosts_consulted"]}
     for name in sr.HOST_NAMES:
-        assert name in statuses, statuses
-    assert sr.HOST_NOT_ATTEMPTED in statuses.values()
+        assert name in by_host, by_host
+    entry = by_host[unreported]
+    assert entry["status"] == sr.HOST_NOT_REPORTED
+    assert "not in scope" not in entry["reason"]
+    assert "did not report" in entry["reason"]
 
 
 def test_every_host_entry_carries_a_status_from_the_pinned_vocabulary():
@@ -2163,9 +2237,13 @@ def test_every_host_entry_carries_a_status_from_the_pinned_vocabulary():
                      base_sources(sm_payload=sm_payload_with_unreachable_remote()))
     assert res["hosts_consulted"]
     for h in res["hosts_consulted"]:
-        assert set(h) == {"host", "status", "reason"}
+        assert set(h) == {"host", "status", "reason", "contributed_targets",
+                          "sources"}
         assert h["status"] in sr.ALL_HOST_STATUSES
-    assert len(set(sr.ALL_HOST_STATUSES)) == 3
+        assert set(h["sources"]) == set(sr.ALL_HOST_SOURCES)
+        for facts in h["sources"].values():
+            assert set(facts) == set(sr.HOST_FACTS)
+    assert len(set(sr.ALL_HOST_STATUSES)) == 5
 
 
 def test_json_output_carries_the_per_host_status():
@@ -2204,17 +2282,230 @@ def test_the_welded_split_still_permits_the_tools_own_calls():
         assert ";" not in fmt
 
 
-def test_the_shared_hosts_not_covered_predicate_is_identical_in_both_scripts():
-    """🔴 ONE RULE, ONE PLACE. session-resolve open-coded this and was wrong
-    about the unknown-local-host case; both now go through the same function,
-    pinned here so they cannot drift apart again."""
+#: 🔴 The shared behaviour table. BOTH suites exercise it against their OWN
+#: module — the previous version grepped waiting-windows for the function name
+#: and then only ever called session-resolve's copy, so it could not see
+#: waiting-windows drift at all.
+HOSTS_NOT_COVERED_TABLE = [
+    (["a", "b"], "a", ["b"]),
+    (["a"], "a", []),
+    (["a", "b"], None, None),
+    (["a", "b"], "", None),
+    ([], "a", []),
+    (["b", "a", "c"], "a", ["b", "c"]),      # sorted, local removed
+]
+
+
+def test_the_shared_hosts_not_covered_predicate_behaves_identically():
+    """🔴 ONE RULE, TWO CALLERS — pinned by BEHAVIOUR, in both directions.
+
+    The waiting-windows half of this table lives in that module's own suite
+    (`test_the_shared_hosts_not_covered_table_holds_for_this_module`), so each
+    copy is exercised by the suite that owns it and neither is inferred from a
+    grep for the other's function name.
+    """
+    for hosts, local, expected in HOSTS_NOT_COVERED_TABLE:
+        assert sr.hosts_not_covered(list(hosts), local) == expected, (hosts,
+                                                                      local)
     ww_src = open(os.path.join(_HERE, "..", "waiting-windows"),
                   encoding="utf-8").read()
-    assert "def hosts_not_covered(" in ww_src
-    for hosts, local, expected in [
-            (["a", "b"], "a", ["b"]),
-            (["a"], "a", []),
-            (["a", "b"], None, None),
-            ([], "a", []),
-    ]:
-        assert sr.hosts_not_covered(hosts, local) == expected
+    assert "def hosts_not_covered(" in ww_src, (
+        "waiting-windows no longer defines the shared predicate")
+
+
+# =========================================================================== #
+# §15  🔴 THE HOST-DISCLOSURE MATRIX
+#
+# This surface has been wrong three times, once in each direction — silent gap,
+# then false positive, then false negative — because each fix added the one
+# state the previous bug needed and nothing enumerated the rest. A targeted test
+# for the three known cases would buy exactly one more round.
+#
+# So: walk every CONSTRUCTIBLE combination of the dimensions and assert the
+# invariants that must hold across all of them. A new state that nobody modelled
+# fails here instead of shipping.
+#
+# 🔴 THE DIMENSION THE BRIEF MISSED IS THE **SOURCE**. The facts are not per
+# host, they are per (host, source): tmux covers the local host only and is read
+# regardless of --host, while session-manager covers whatever --host selects.
+# Round 2 derived the status from session-manager ALONE, which is exactly why a
+# local host that had supplied EVERY window was labelled from session-manager's
+# silence.
+# =========================================================================== #
+# 🔴 The matrix speaks the PRODUCTION host vocabulary deliberately. These are
+# not fixture values standing in for constants — the host names ARE the domain
+# under test, and a synthetic name is one the tool can never know about unless a
+# source mentions it, which would make half the matrix unreachable.
+MATRIX_LOCAL = sr.HOST_NAMES[0]
+MATRIX_REMOTE = sr.HOST_NAMES[1]
+
+
+def test_the_matrix_host_names_are_the_real_vocabulary():
+    assert MATRIX_LOCAL != MATRIX_REMOTE
+    assert {MATRIX_LOCAL, MATRIX_REMOTE} == set(sr.HOST_NAMES)
+
+
+def _matrix_sources(*, host_flag, sm_reports, sm_broken, tmux_ok,
+                    local_known=True):
+    """Build a Sources for one cell of the matrix.
+
+    `sm_reports` maps host -> True (reachable) / False (unreachable); a host
+    absent from it is one session-manager never mentioned.
+    """
+    if sm_broken:
+        payload = {"no_hosts_key": True}
+    else:
+        # 🔴 when the cell says the local host is unknown, session-manager must
+        # NOT supply the name either — otherwise the cell silently tests the
+        # known case and the unknown branch is never reached.
+        payload = {"hosts": {}}
+        if local_known:
+            payload["local_host"] = MATRIX_LOCAL
+        for name, reachable in sm_reports.items():
+            payload["hosts"][name] = (
+                {"reachable": True, "windows": []} if reachable
+                else {"reachable": False, "error": "synthetic unreachable",
+                      "windows": []})
+    return sr.Sources(
+        host=host_flag,
+        local_host=MATRIX_LOCAL if local_known else None,
+        runner=_stub_runner,
+        panes_raw=PANES_RAW if tmux_ok else "",
+        windows_raw=WINDOWS_RAW, clients_raw=CLIENTS_RAW,
+        slot_table_text=SLOT_TEXT, registry_records=[], sm_payload=payload)
+
+
+def _matrix_cells():
+    """Every constructible combination of the dimensions."""
+    for host_flag in (sr.HOST_ALL, MATRIX_LOCAL, MATRIX_REMOTE):
+        for sm_broken in (False, True):
+            for sm_reports in ({}, {MATRIX_LOCAL: True},
+                               {MATRIX_REMOTE: True},
+                               {MATRIX_LOCAL: True, MATRIX_REMOTE: True},
+                               {MATRIX_REMOTE: False},
+                               {MATRIX_LOCAL: True, MATRIX_REMOTE: False}):
+                for tmux_ok in (True, False):
+                    for local_known in (True, False):
+                        yield dict(host_flag=host_flag, sm_reports=sm_reports,
+                                   sm_broken=sm_broken, tmux_ok=tmux_ok,
+                                   local_known=local_known)
+
+
+def test_the_matrix_is_actually_large_enough_to_be_a_matrix():
+    """POSITIVE CONTROL on the generator itself — a matrix that yields two cells
+    proves nothing, and would be indistinguishable from a targeted test."""
+    cells = list(_matrix_cells())
+    assert len(cells) == 3 * 2 * 6 * 2 * 2 == 144
+    assert len({tuple(sorted(c["sm_reports"].items())) for c in cells}) == 6
+
+
+def test_every_matrix_cell_yields_a_status_from_the_pinned_vocabulary():
+    for cell in _matrix_cells():
+        built = sr.build_targets(_matrix_sources(**cell))
+        for entry in built["host_status"]:
+            assert entry["status"] in sr.ALL_HOST_STATUSES, (cell, entry)
+            assert entry["reason"], (cell, entry)
+
+
+def test_ONLY_out_of_scope_may_ever_blame_the_host_flag():
+    """🔴 THE ROUND-2 BUG AS AN INVARIANT. `not in scope for --host X` was
+    printed about hosts that were squarely in scope. No status other than
+    out-of-scope may mention scope, in ANY cell."""
+    for cell in _matrix_cells():
+        built = sr.build_targets(_matrix_sources(**cell))
+        for entry in built["host_status"]:
+            if entry["status"] not in sr.SCOPE_BLAMING_STATUSES:
+                assert "in scope" not in entry["reason"], (cell, entry)
+                assert "--host" not in entry["reason"], (cell, entry)
+
+
+def test_out_of_scope_is_only_reachable_when_the_host_really_is_out_of_scope():
+    """The other direction: the status must not fire for an in-scope host."""
+    for cell in _matrix_cells():
+        src = _matrix_sources(**cell)
+        built = sr.build_targets(src)
+        for entry in built["host_status"]:
+            if entry["status"] == sr.HOST_OUT_OF_SCOPE:
+                in_scope = any(f["in_scope"]
+                               for f in entry["sources"].values())
+                assert not in_scope, (cell, entry)
+
+
+def test_a_host_that_contributed_a_target_is_ALWAYS_read():
+    """🔴 CASE (a). A host that supplied windows cannot be reported as having
+    contributed nothing, whatever any single source did."""
+    for cell in _matrix_cells():
+        built = sr.build_targets(_matrix_sources(**cell))
+        contributing = {t["host"] for t in built["targets"]}
+        for entry in built["host_status"]:
+            if entry["host"] in contributing:
+                assert entry["status"] == sr.HOST_READ, (cell, entry)
+                assert entry["contributed_targets"] is True, (cell, entry)
+
+
+def test_every_host_that_produced_a_target_APPEARS_in_the_disclosure():
+    """🔴 CASE (c). Round 2 skipped LOCAL_HOST_UNKNOWN, deleting the row for the
+    machine that had actually answered while still asserting a status about one
+    that had not."""
+    for cell in _matrix_cells():
+        built = sr.build_targets(_matrix_sources(**cell))
+        listed = {e["host"] for e in built["host_status"]}
+        for target in built["targets"]:
+            assert target["host"] in listed, (cell, target["host"], listed)
+
+
+def test_no_host_is_listed_twice():
+    for cell in _matrix_cells():
+        built = sr.build_targets(_matrix_sources(**cell))
+        names = [e["host"] for e in built["host_status"]]
+        assert len(names) == len(set(names)), (cell, names)
+
+
+def test_the_matrix_actually_exercises_every_status():
+    """🔴 A vocabulary entry no cell can produce is dead, and a matrix that
+    never reaches a status cannot guard it. Every status must occur."""
+    seen = set()
+    for cell in _matrix_cells():
+        built = sr.build_targets(_matrix_sources(**cell))
+        seen.update(e["status"] for e in built["host_status"])
+    assert seen == set(sr.ALL_HOST_STATUSES), sorted(set(sr.ALL_HOST_STATUSES) - seen)
+
+
+def test_a_source_that_failed_is_never_reported_as_having_answered():
+    for cell in _matrix_cells():
+        built = sr.build_targets(_matrix_sources(**cell))
+        for entry in built["host_status"]:
+            for facts in entry["sources"].values():
+                if facts["measurable"]:
+                    assert facts["answered"], (cell, entry)
+                if facts["answered"]:
+                    assert facts["attempted"], (cell, entry)
+                if facts["attempted"]:
+                    assert facts["in_scope"], (cell, entry)
+
+
+def test_the_three_reproduced_regressions_each_have_their_own_cell():
+    """The named cases, kept alongside the matrix so a reader can see them."""
+    # (a) session-manager broken, tmux fine -> local host READ, remote not blamed on scope
+    built = sr.build_targets(_matrix_sources(
+        host_flag=sr.HOST_ALL, sm_reports={}, sm_broken=True, tmux_ok=True))
+    by = {e["host"]: e for e in built["host_status"]}
+    assert by[MATRIX_LOCAL]["status"] == sr.HOST_READ
+    assert by[MATRIX_REMOTE]["status"] == sr.HOST_SOURCE_FAILED
+    assert "not in scope" not in by[MATRIX_REMOTE]["reason"]
+
+    # (b) --host all, only one host reported
+    built = sr.build_targets(_matrix_sources(
+        host_flag=sr.HOST_ALL, sm_reports={MATRIX_LOCAL: True},
+        sm_broken=False, tmux_ok=True))
+    by = {e["host"]: e for e in built["host_status"]}
+    assert by[MATRIX_REMOTE]["status"] == sr.HOST_NOT_REPORTED
+
+    # (c) local host unknown -> the host that answered still appears
+    built = sr.build_targets(_matrix_sources(
+        host_flag=sr.HOST_ALL, sm_reports={}, sm_broken=False, tmux_ok=True,
+        local_known=False))
+    listed = {e["host"] for e in built["host_status"]}
+    assert sr.LOCAL_HOST_UNKNOWN in listed
+    assert [e for e in built["host_status"]
+            if e["host"] == sr.LOCAL_HOST_UNKNOWN][0]["status"] == sr.HOST_READ

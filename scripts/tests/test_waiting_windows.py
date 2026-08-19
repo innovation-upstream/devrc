@@ -132,6 +132,10 @@ def report(hosts=None, *, summary=None, ledger_pids=None, ts="synthetic-ts"):
             }
     return {
         "ts": ts,
+        # 🔴 Real session-manager ALWAYS emits `local_host`; the fixture omitting
+        # it meant every synthetic report modelled the rare unknown-local-host
+        # case by accident. Tests that want that case pop the key explicitly.
+        "local_host": HOST_A,
         "hosts": blocks,
         "ledger": {"hosts": {h: {"tmux_pid": pids.get(h)} for h in blocks}},
         "summary": summary or {"hosts_unreachable": [], "windows_unmeasured": []},
@@ -2405,6 +2409,43 @@ def test_the_threshold_env_var_name_is_the_one_the_module_publishes():
     assert ww.THRESHOLD_ENV == "WAITING_WINDOWS_THRESHOLD"
     secs, source = ww.resolve_threshold(None, {ww.THRESHOLD_ENV: "4242"})
     assert (secs, source) == (4242, "env")
+
+
+def test_the_shared_hosts_not_covered_table_holds_for_this_module():
+    """🔴 The waiting-windows half of the shared table. The session-resolve
+    suite carries the same rows against ITS copy; neither module's behaviour is
+    inferred from the other's source."""
+    for hosts, local, expected in [
+            (["a", "b"], "a", ["b"]),
+            (["a"], "a", []),
+            (["a", "b"], None, None),
+            (["a", "b"], "", None),
+            ([], "a", []),
+            (["b", "a", "c"], "a", ["b", "c"]),
+    ]:
+        assert ww.hosts_not_covered(list(hosts), local) == expected, (hosts,
+                                                                     local)
+
+
+def test_the_unknown_local_host_state_is_RENDERED_not_json_only(tmp_path):
+    """🔴 GREEN C. `hosts_not_covered_status` was published in --json and never
+    printed, so the human view could not distinguish "covers every host" from
+    "could not tell" — the same one-view-only disclosure gap this report exists
+    to close."""
+    rep = report({HOST_A: [row(probable=True, signals=("selection_menu",),
+                               age=AGE_BIG)]})
+    rep.pop("local_host", None)
+    out, _ = ww.build_report(rep, {}, NOW, THRESHOLD, "flag", "ok",
+                             str(tmp_path / "s.json"))
+    text = ww.render_human(out)
+    assert "registry coverage" in text
+    assert "local host unknown" in text.lower()
+    # POSITIVE CONTROL: with a known local host that line is NOT printed
+    rep2 = report({HOST_A: [row(probable=True, signals=("selection_menu",),
+                                age=AGE_BIG)]})
+    out2, _ = ww.build_report(rep2, {}, NOW, THRESHOLD, "flag", "ok",
+                              str(tmp_path / "s2.json"))
+    assert "local host unknown" not in ww.render_human(out2).lower()
 
 
 def test_hosts_not_covered_is_unmeasured_when_the_local_host_is_unknown():

@@ -216,10 +216,52 @@ LOCAL_HOST_UNKNOWN = "<local-host-unknown>"
 # dozen rows further down and by nothing at all in --json. The original bug was a
 # silent GAP; asserting a host was consulted when it was not is worse, because it
 # puts a false statement where there was previously only an absence.
-HOST_READ = "read"                    # answered, rows (if any) are its own
-HOST_UNREACHABLE = "unreachable"      # session-manager tried and failed
-HOST_NOT_ATTEMPTED = "not-attempted"  # never in scope for this run
-ALL_HOST_STATUSES = (HOST_READ, HOST_UNREACHABLE, HOST_NOT_ATTEMPTED)
+# 🔴 THIS SURFACE HAS BEEN WRONG THREE TIMES, ONCE IN EACH DIRECTION:
+#     original : SILENT GAP     — an unreachable host simply went unmentioned
+#     round 1  : FALSE POSITIVE — an unread host printed as `consulted`, `ok`
+#     round 2  : FALSE NEGATIVE — an ATTEMPTED host printed `not-attempted
+#                                 (not in scope for --host all)`, which is self-
+#                                 contradictory, while the host that had supplied
+#                                 EVERY window said the same thing
+# Each fix added the one state the previous bug needed and missed the next. That
+# is the incomplete-enumeration defect this whole module exists to fix, applied
+# to itself.
+#
+# So the status is DERIVED, never assigned, and the reason is GENERATED from the
+# same facts rather than hand-written — a hand-written reason is what let
+# "not in scope for --host all" be printed about a host that WAS in scope.
+#
+# 🔴 THE DIMENSION THAT WAS MISSING IS THE **SOURCE**. The facts are not per
+# host, they are per (host, SOURCE): a host's data can arrive from LOCAL TMUX
+# (the local host only, always read, independent of --host) or from
+# SESSION-MANAGER (whichever hosts --host selects). Round 2 derived the status
+# from session-manager ALONE, which is precisely why a local host that answered
+# via tmux was labelled from session-manager's silence.
+#
+# Per (host, source) we record four independent facts:
+#     in_scope   — could this source ever cover this host on this run?
+#     attempted  — was a read issued that could have covered it?
+#     answered   — did the source say anything about this host (including "I
+#                  could not reach it")?
+#     measurable — was that answer usable as data?
+# and the host-level status falls out of them. Add a source, or a fact, and the
+# derivation changes in ONE place.
+HOST_SOURCE_TMUX = "tmux"
+HOST_SOURCE_SM = "session-manager"
+ALL_HOST_SOURCES = (HOST_SOURCE_TMUX, HOST_SOURCE_SM)
+HOST_FACTS = ("in_scope", "attempted", "answered", "measurable")
+
+HOST_READ = "read"                    # some source answered WITH USABLE DATA
+HOST_UNREACHABLE = "unreachable"      # a source said it could not reach the host
+HOST_NOT_REPORTED = "not-reported"    # source succeeded and never mentioned it
+HOST_SOURCE_FAILED = "source-failed"  # the source itself could not be read
+HOST_OUT_OF_SCOPE = "out-of-scope"    # genuinely excluded by --host
+ALL_HOST_STATUSES = (HOST_READ, HOST_UNREACHABLE, HOST_NOT_REPORTED,
+                     HOST_SOURCE_FAILED, HOST_OUT_OF_SCOPE)
+
+#: 🔴 Only ONE status may blame --host. Round 2's bug was this sentence attached
+#: to a host that was in scope; a test pins the exclusivity.
+SCOPE_BLAMING_STATUSES = (HOST_OUT_OF_SCOPE,)
 
 DEFAULT_REGISTRY_DIR = os.path.expanduser("~/.claude/sessions")
 DEFAULT_SLOT_TABLE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -310,12 +352,127 @@ def unmeasured(reason: str) -> str:
     return _UNMEASURED_PREFIX + reason
 
 
+def derive_host_status(host, facts, host_flag, contributed):
+    """(status, reason) DERIVED from the per-source facts. Never assigned.
+
+    Precedence, and why each rung sits where it does:
+      1. ANY source produced usable data      -> read. This rung is first
+         because a host can be read by tmux while session-manager fails
+         entirely, which is the case round 2 got wrong.
+      2. a source said "unreachable"          -> unreachable (it answered, and
+         the answer was a failure it can explain).
+      3. a source in scope could not be read  -> source-failed (nothing could be
+         learned about this host, but NOT because of --host).
+      4. a source in scope answered, silently -> not-reported.
+      5. nothing had it in scope              -> out-of-scope. ONLY this rung is
+         allowed to blame --host.
+    """
+    if any(f["measurable"] for f in facts.values()):
+        answered_by = sorted(s for s, f in facts.items() if f["measurable"])
+        note = ""
+        broken = sorted(s for s, f in facts.items()
+                        if f["in_scope"] and not f["answered"])
+        if broken:
+            note = (f"; {', '.join(broken)} did NOT contribute, so this host's "
+                    "view may be partial")
+        return HOST_READ, f"read via {', '.join(answered_by)}{note}"
+
+    for source in ALL_HOST_SOURCES:
+        f = facts[source]
+        if f["answered"] and not f["measurable"] and f.get("unreachable"):
+            return HOST_UNREACHABLE, (
+                f"{source} reported this host unreachable: "
+                f"{f.get('detail') or 'no reason given'}")
+
+    for source in ALL_HOST_SOURCES:
+        f = facts[source]
+        if f["in_scope"] and f["attempted"] and not f["answered"] \
+                and f.get("source_failed"):
+            return HOST_SOURCE_FAILED, (
+                f"{source} could not be read, so nothing could be learned about "
+                f"this host: {f.get('detail') or 'no reason given'}")
+
+    for source in ALL_HOST_SOURCES:
+        f = facts[source]
+        if f["in_scope"] and f["attempted"] and not f["answered"]:
+            return HOST_NOT_REPORTED, (
+                f"{source} was read successfully but did not report this host")
+
+    return HOST_OUT_OF_SCOPE, f"not in scope for --host {host_flag}"
+
+
+def build_host_status(src, sm, tmux, local_host, target_hosts):
+    """One entry per host this run could conceivably have covered.
+
+    🔴 Every host that CONTRIBUTED a target must appear. Round 2 skipped
+    `LOCAL_HOST_UNKNOWN`, which deleted the row for the machine that had
+    actually answered while still asserting a status about one that had not.
+    """
+    sm_failed = is_unmeasured(sm["status"])
+    tmux_ok = tmux["panes"] is not None
+
+    names = set(HOST_NAMES) | set(sm["hosts_seen"]) | set(target_hosts)
+    if local_host:
+        names.add(local_host)
+
+    out = []
+    for name in sorted(names):
+        is_local = (name == local_host)
+        # tmux is read from THIS machine, so it covers the local host only —
+        # and it is attempted regardless of --host.
+        tmux_facts = {
+            "in_scope": is_local,
+            "attempted": is_local,
+            "answered": bool(is_local and tmux_ok),
+            "measurable": bool(is_local and tmux_ok),
+            "detail": None if tmux_ok else tmux["panes_status"],
+            "source_failed": bool(is_local and not tmux_ok),
+            "unreachable": False,
+        }
+        entry = sm["host_status"].get(name)
+        # 🔴 If the source ANSWERED about this host it covered it, whatever
+        # --host nominally selected. Deriving scope from the flag alone produced
+        # `answered=True, in_scope=False`, which is incoherent — and it is the
+        # same mistake as round 2's, one level down: a claim about scope
+        # contradicting what actually happened.
+        sm_in_scope = src.host in (HOST_ALL, name) or entry is not None
+        sm_facts = {
+            "in_scope": sm_in_scope,
+            "attempted": sm_in_scope,
+            "answered": entry is not None,
+            "measurable": bool(entry and entry["status"] == HOST_READ),
+            "detail": (entry or {}).get("reason") if entry else (
+                sm["status"] if sm_failed else None),
+            "source_failed": bool(sm_in_scope and sm_failed),
+            "unreachable": bool(entry and entry["status"] == HOST_UNREACHABLE),
+        }
+        facts = {HOST_SOURCE_TMUX: tmux_facts, HOST_SOURCE_SM: sm_facts}
+        contributed = name in target_hosts
+        status, reason = derive_host_status(name, facts, src.host, contributed)
+        out.append({
+            "host": name,
+            "status": status,
+            "reason": reason,
+            "contributed_targets": contributed,
+            "sources": {s: {k: f[k] for k in HOST_FACTS}
+                        for s, f in facts.items()},
+        })
+    return out
+
+
 def hosts_not_covered(hosts_seen, local_host):
-    """-> (list | None). 🔴 ONE RULE, ONE PLACE — byte-identical to
-    `waiting-windows`'s function of the same name, pinned against it by a seam
-    test. `None` when the local host is unknown: with no local host there is no
-    answer to "which hosts can the registry not cover", and an empty list would
-    read as "it covers them all".
+    """-> (list | None). 🔴 ONE RULE, TWO CALLERS.
+
+    `waiting-windows` has a function of the same name with the same BODY; the
+    docstrings differ, so they are not byte-identical and the earlier claim that
+    they were overstated it in both halves. What is actually pinned is their
+    BEHAVIOUR: each suite exercises its OWN copy against the same table, so a
+    divergence in either reddens that module's own test rather than being
+    inferred from the other's.
+
+    `None` when the local host is unknown: with no local host there is no answer
+    to "which hosts can the registry not cover", and an empty list would read as
+    "it covers them all".
     """
     if not local_host:
         return None
@@ -1249,15 +1406,8 @@ def build_targets(src: Sources) -> dict:
     # 🔴 Every host this run could have covered, each with what actually
     # happened to it — including the ones never put in scope, which is what made
     # the --host default regression invisible in the first place.
-    host_status = []
-    for name in sorted(set(hosts_seen) | set(HOST_NAMES)):
-        if name == LOCAL_HOST_UNKNOWN:
-            continue
-        entry = sm["host_status"].get(name)
-        if entry is None:
-            entry = {"status": HOST_NOT_ATTEMPTED,
-                     "reason": f"not in scope for --host {src.host}"}
-        host_status.append({"host": name, **entry})
+    host_status = build_host_status(
+        src, sm, tmux, local_host, {tgt["host"] for tgt in targets})
     coverage = _coverage(len(targets), n_slot, n_reg, n_sm, tmux,
                          slots_status, registry, sm,
                          hosts_seen=hosts_seen, local_host=local_host,
@@ -1614,9 +1764,12 @@ def _render_host_status(result: dict, indent: str = "  ") -> list:
         return [f"{indent}hosts consulted             : NONE"]
     out = [f"{indent}hosts consulted             :"]
     for e in entries:
-        mark = "" if e["status"] == HOST_READ else "   <- contributed NOTHING"
-        reason = f" ({e['reason']})" if e.get("reason") else ""
-        out.append(f"{indent}    {e['host']:<12} {e['status']}{reason}{mark}")
+        # 🔴 The mark is driven by whether this host actually CONTRIBUTED, which
+        # is a measured fact on the entry — not re-derived from the status here.
+        # A second derivation is a second thing to get wrong.
+        mark = "" if e.get("contributed_targets") else "   <- contributed NOTHING"
+        out.append(f"{indent}    {e['host']:<12} {e['status']:<15}{mark}")
+        out.append(f"{indent}        why: {e['reason']}")
     return out
 
 
