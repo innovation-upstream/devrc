@@ -458,25 +458,52 @@ the day you ship.*
    deleted because the *shape* of the finding outlived it: layer 1 is now a 10s throttle, not a
    gate, and it is declared in no repo so nothing will notice if it disappears. See the RESOLVED
    block above before treating "three layers" as three equal layers.
-1. **Split read/write tokens** — named in the proposal's `(B-required)` hardening, never built. The
-   single token is currently read-only by virtue of the API having no write route, not by design;
-   the first write route makes that silently false. **Now the top-ranked item.**
+1. 🔴 **DO NOT split read/write tokens yet — it would harden nothing, and the tripwire already
+   exists.** Earlier revisions of this doc ranked the split #1 on the reasoning that the store is
+   "read-only by virtue of the API having no write route, not by design". Re-examined 2026-08-19,
+   that reasoning is **backwards**: the read-only posture is *structural*, and structurally stronger
+   than a token scope. `server.py` carries
+   `do_POST = do_PUT = do_PATCH = do_DELETE = _reject_write` — every mutating method is `405
+   read-only` with `Allow: GET, HEAD`. That is not a policy a caller could satisfy; it is the
+   absence of a handler. (The 405 also sits *after* the client-IP and lockout checks, deliberately:
+   it used to short-circuit them and was a free unmetered channel — 31 anonymous POSTs produced 31
+   audit lines and counted for nothing.)
+   **The fear this item was written about is already covered by a test, not by prose.** Three pin it,
+   including a source-level one that reads the file:
+   `test_every_write_method_is_405_even_with_a_VALID_token`,
+   `assert "do_POST = do_PUT = do_PATCH = do_DELETE = _reject_write" in src` (which also asserts no
+   real `def do_POST` shadows the alias), and
+   `test_POST_is_STILL_405_and_not_swallowed_by_the_new_ordering`.
+   **So this is a TRIGGER, not a task.** The day phase 3 (§2c) adds a write route, those tests go
+   red — and the split belongs *in that PR*, where the routes and their scopes are decided together.
+   Building it now deploys a credential to be stored, rotated and SOPS-managed for months against a
+   design that is not yet written, and it would likely be stale by the time writes land.
 2. **Exercise the store under adversarial traffic.** The lockout, the rate limiter and the WAF have
    only ever seen my own well-formed probes. Nothing has been measured under abuse — and layer 1's
    real behaviour under load is now a live question rather than an assumption, since its mitigation
    window is 10s.
-3. **The store's own roadmap:** the entry-fidelity audit skill, and the "does a generic journal
-   belong" question. The latter argued for itself — roughly ten cross-cutting engineering lessons
-   were filed into *subsystem-scoped* entries for want of a better home, and several have nothing
-   to do with the subsystem-store.
-4. **The shape work `#550` proposed and `#560` half-built.** `#560` shipped items 2 and 1 (near-miss
-   and `missing_sections` on the index row, which immediately surfaced two real broken markers).
-   **Item 3 is the one still worth doing** — a shape population in `--validate`, so a renamed spine
-   is caught when an entry is *written* rather than only when it is read. Items 4 and 5 are
-   reporting polish. Also pending: `#560`'s own falsification clause — the `unverifiable` badge
-   fires on **0 of 53** entries today; if it is still never-green in a month, delete it rather than
-   keep an indicator that has never once been non-green.
-5. **PARKED by decision 2026-08-19:** move konnectivity + Calico v6 onto the private network.
+3. 🔴 **THE ACTUAL TOP TASK — `#550` item 3: a shape population in `--validate`.** `#560` shipped
+   items 2 and 1 (near-miss and `missing_sections` on the index row), and on its first contact with
+   the real store it surfaced **two genuinely broken markers written that same day** in
+   `datapacket-talos/tekton` — an em-dash `RESOLVED —` and a colon-less `OPEN`. `#560` made those
+   visible **on read**. Item 3 catches them **on write**, in `/handoff` step 4, which already runs
+   `--validate` on the file it just wrote. That is the difference between "someone eventually
+   notices" and "the writer is told immediately".
+   The gap is measured, not aesthetic: `--validate` today returns `OK` at exit 0 for a **renamed
+   spine, an absent spine, and a fully empty body**. The 53/53 spine is enforced by nothing.
+   Advisory only — the verdict must NOT change, for the reason `#550` states: an entry with
+   unfinished business is well-formed, and failing it would be a red gate nobody could turn green.
+   Items 4 and 5 are reporting polish; do them only if they fall out for free.
+4. **Two live near-misses to prune**, in `datapacket-talos/tekton` (above). Trivial, and fixing them
+   exercises the whole loop end to end — badge surfaced them, item 3 would have caught them, entry
+   gets corrected. Also pending: `#560`'s own falsification clause — the `unverifiable` badge fires
+   on **0 of 53** entries today; if still never-green in a month, **delete it** rather than keep an
+   indicator that has never once been non-green.
+5. **The store's own roadmap:** the entry-fidelity audit skill, and the "does a generic journal
+   belong" question — roughly ten cross-cutting engineering lessons were filed into
+   *subsystem-scoped* entries for want of a better home. That is a design decision to make, not
+   code to ship; do not start it as filler work.
+6. **PARKED by decision 2026-08-19:** move konnectivity + Calico v6 onto the private network.
    Root cause is now known and is one missing variable — `IP_AUTODETECTION_METHOD` pins v4 to
    `cidr=10.0.0.0/24` while **no `IP6_AUTODETECTION_METHOD` exists**, so v6 autodetect takes the
    first global address, which is public. Blocked on a prerequisite: the private NIC carries only
