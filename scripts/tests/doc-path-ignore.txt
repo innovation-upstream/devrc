@@ -1,0 +1,23 @@
+# doc-path-ignore.txt — explicit exceptions for scripts/tests/test_doc_path_rot.py.
+#
+# One literal token per line, matched against the token AS THE AUTHOR WROTE IT.
+# A line ending in "/" is a PREFIX and exempts everything beneath it.
+# "#" starts a comment.
+#
+# Use this ONLY when a token is genuinely path-shaped, resolves inside the
+# namespace the gate checks, and yet is not a claim that a file exists here —
+# for example a literal copy-paste command that must run inside a DIFFERENT
+# clone, or a file that is conditionally present by design.
+#
+# PREFER FIXING THE DOC. A variable segment written as <name> — e.g.
+# `claude/skills/<name>/SKILL.md` — is skipped automatically and needs no entry.
+# So does a glob, a brace expansion and a $VAR.
+#
+# EMPTY BY DESIGN, and that is a result, not an oversight: at the commit that
+# introduced the gate all 310 checked references were either live or genuine
+# rot (baselined), and everything unsettleable — another repo's relative paths,
+# per-host files under ~/.claude/ that nix does not deploy, absolute paths — is
+# excluded STRUCTURALLY by the resolver rather than by a hand-maintained list.
+# An entry here should be rare enough to argue for in review.
+#
+# --- entries ---------------------------------------------------------------
