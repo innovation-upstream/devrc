@@ -853,6 +853,16 @@ TARGET_FLOORS=(
   #   scripts/tests  (collected=5447)
   #   _suggested_floor 5447 = 5447 - min(50, max(1, 272)) = 5447 - 50 = 5397
   #
+  # 🔴 AND ONCE MORE, ON THE MERGED TREE. Merging origin/main (ecddbae, which
+  # adds scripts/tests/test_service_recon.py and grows two more suites under
+  # this target) merged CLEANLY in git and left 5397 sitting there — a number
+  # measured against a tree that no longer exists. That is the semantic
+  # conflict a clean merge does not raise: the line did not conflict, the
+  # MEANING of the line did. Re-measured on the merged tree:
+  #
+  #   scripts/tests  (collected=5532)
+  #   _suggested_floor 5532 = 5532 - min(50, max(1, 276)) = 5532 - 50 = 5482
+  #
   # ⚠ A CONCURRENT BRANCH TOUCHES THIS SAME LINE (`scripts/session-resolve`,
   # adding scripts/tests/test_session_resolve.py under this same directory
   # target), so it WILL conflict. Resolve it the way the header says: re-run
@@ -864,7 +874,7 @@ TARGET_FLOORS=(
   # impure source injected; the only disk it touches is a pytest `tmp_path`
   # `$HOME` for the on-disk artifact-name pin), so EXPECTED_SKIPS is untouched.
   # Movement on THIS line is the evidence the gate runs the new file at all.
-  "scripts/tests|5397"
+  "scripts/tests|5482"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
