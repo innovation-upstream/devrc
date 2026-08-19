@@ -36,16 +36,12 @@ anything you wouldn't hand a third party. Nor **virtualised/lazy-loaded lists**.
 KNOW something from it → agent. Ambiguous → agent first; taking over costs ~200
 tokens, so agent-first wins even at a low success rate.
 
-**Measured** 2026-07-31 (laptop, `deepseek-v4-flash`, n=1/goal): ≈0.9 correct,
-~$0.0025/run, ~20s — read as "≈0.9", **not** a rate. Numbers, guardrails, and what
-was NOT measured → `reference/agent.md`.
-
 `blocked` → non-zero exit, take over. `partial` → read `evidence`, drive the rest.
 Thin `evidence` is a weak smell, **NOT** protection against a wrong answer. What
-protects you: the agent tool's auto-`wake` on a hidden `text`/`html` read — **never
-`eval`/`js`, so ASSERT a non-zero content count in any `js` measurement** — and
-escalation: if the answer depends on rendered SPA state, ONE `text --wake`. Ignore
-`steps_used` (undercounted); keep `--allow-domains` TIGHT, incl. frame hosts.
+protects you: auto-`wake` on a hidden `text`/`html` read — **never `eval`/`js`, so
+ASSERT a non-zero content count in any `js` measurement** — and escalation: if the
+answer depends on rendered SPA state, ONE `text --wake`. Keep `--allow-domains`
+TIGHT, incl. frame hosts.
 
 ## Ops
 
@@ -77,7 +73,7 @@ Result payloads land under `.result.data`.
 | `emulate <preset>\|--reset` | **device emulation** (mobile testing) on a tab you `open`ed; sticky, owned-tab-only. `--reset` undoes it, viewport included (#319); `--recreate` replaces the tab → `reference/emulation.md` |
 | `agent "<goal>"` | the autonomous browser-agent — see **FIRST DECISION** above, then `reference/agent.md` |
 
-## 🔴 Three traps that return a WRONG answer SILENTLY
+## 🔴 Four traps that return a WRONG answer SILENTLY
 
 1. **`js`/`eval` evaluates ONE EXPRESSION, not a script.** A multi-statement body
    (`window.scrollBy(0,1400); "ok"`) returns **`null` with no error** — it looks
@@ -92,6 +88,11 @@ Result payloads land under `.result.data`.
    `activate`, and spoofing `visibilityState` does not recover the page.
    **A reload RE-throttles: re-`wake` or clicks go silently inert.**
    → `reference/spa-wake.md`
+4. **A JS `.click()` does not open a React/Mantine popover — and the read then
+   reports a confident ABSENCE.** Use the trusted **`click`** op; click **ONCE** —
+   it is a TOGGLE, so a stale earlier click makes the next read lie — and read
+   `aria-expanded` to prove it opened. Not selector-reachable? **`screenshot`** it.
+   → `reference/css-hit-test.md`
 
 ## When things look broken — triage
 
