@@ -827,20 +827,25 @@ TARGET_FLOORS=(
   # scripts/tests/test_no_captured_text.py.
   #
   # 2026-08-19, the waiting-windows report (`scripts/waiting-windows`): 5026 ->
-  # 5358 collected on this branch, +95 of which are the new
+  # 5394 collected, +91 of which are the new
   # scripts/tests/test_waiting_windows.py and the rest arrived with main since
   # the line above was written. `scripts/tests` is already a DIRECTORY target,
   # so the new file needed no HERMETIC_TARGETS entry — only this floor moves.
-  # Re-MEASURED by the gate, not computed from the old number:
   #
-  #   PASS  scripts/tests  (collected=5358 …)
-  #   _suggested_floor 5358 = 5358 - min(50, max(1, 267)) = 5358 - 50 = 5308
+  # 🔴 MEASURED ON THE MERGED TREE, not on the branch alone. The branch-only run
+  # said collected=5358; merging origin/main (72d3ea8, which grows
+  # test_session_manager.py, test_prune_skill_size.py and test_obs_read.py)
+  # moved it to 5394. Pinning 5358 would have been a number from a tree nobody
+  # will ever run. The gate's own function on the merged measurement:
+  #
+  #   scripts/tests  (collected=5394 …)
+  #   _suggested_floor 5394 = 5394 - min(50, max(1, 269)) = 5394 - 50 = 5344
   #
   # ⚠ ZERO new skips on this target — the new suite is fully hermetic (every
   # impure source injected; the only disk it touches is a pytest `tmp_path`
   # `$HOME` for the on-disk artifact-name pin), so EXPECTED_SKIPS is untouched.
   # Movement on THIS line is the evidence the gate runs the new file at all.
-  "scripts/tests|5308"
+  "scripts/tests|5344"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
