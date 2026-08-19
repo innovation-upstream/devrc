@@ -1411,7 +1411,7 @@ as `X-Session-Id`. Right for routing and the audit trail; **wrong** for the
 `session` column, which means *the agent session that issued this command*. Left
 alone, one `browser agent "<goal>"` call would become N browser calls credited to
 the operator's own session — a fabricated usage number in the exact column
-`adoption-scan.py` reads (~581 nested rows in 14d, ~11% of bridge commands).
+`session` JOIN column (~581 nested rows in 14d, ~11% of bridge commands).
 
 So the nested tool declares `X-Session-Origin: browser-agent`. When that header is
 present the server writes **no** `session`; the forwarded id is recorded as
@@ -1435,7 +1435,7 @@ assignment is therefore not specific to whichever of the two you land on.
 So inside opencode that variable names an **ancestor**, not the session issuing
 the command. A plain `opencode run …` whose bash tool shells out to `browser`
 would otherwise have the bridge credit the **outer** Claude session with browser
-usage it never performed — in the column `adoption-scan` and the deadman read.
+usage it never performed.
 
 **🔴 The id is indistinguishable from a direct call.** There is nothing in it to
 branch on: it *is* the outer session's id, correctly tagged `claude:`. So the
@@ -1490,8 +1490,25 @@ source.
   zero rows, which reads as a valid "no sessions matched" answer.
 - An id over 200 chars or carrying a control character is **dropped whole**, never
   truncated — a truncated join key is a *wrong* join key.
-- Server-originated events (the heartbeat, `/whoami`, `/health`) carry **none** of
-  these fields: they have no caller session to attribute.
+- **Only the heartbeat** is server-originated and carries none of these fields.
+  `/whoami` and `/health` are **operator** calls — `browser whoami` / `browser
+  health` are subcommands a person runs, and the CLI sends its ordinary session
+  headers on them because `_curl` is one code path — so they are attributed like
+  any other command. They were previously excluded on the stated grounds of
+  having "no caller session", which was false for these two and made ONE
+  operation have TWO outcomes: `whoami` via POST `/cmd` was attributed, the same
+  `whoami` via GET was not (125 rows, 2.0% of `kind='cmd'` over 14d).
+- Both header vocabularies are **validated closed sets**, not documentation. A
+  `sess_src` tag outside the tier list becomes `unknown` and carries no id; an
+  `origin` outside the two tokens is recorded as `invalid`. Both arrive on
+  caller-supplied headers, so without this each is an unbounded-cardinality
+  column.
+- **Origin suppression keys off header PRESENCE, never the value.** Any present
+  value — including empty, oversized or control-char — suppresses `session`.
+  Losing attribution beats fabricating it.
+- `origin_session` passes the **same tier gate** as `session`: a non-joinable
+  parent id (`tmux:`/`sid:`/`ppid:`) is not recorded, because a reader grouping by
+  it would merge unrelated sessions exactly as they would on `session`.
 - `kind='cmd'` is unchanged — it is the usage signal `adoption-scan.py` reads.
 - Best-effort is unchanged: every field above is written inside `emit_cmd_event`'s
   swallowing `try`, off the critical path.
@@ -1501,14 +1518,57 @@ one: the agent session's own opaque handle is not page content, is not derived
 from anything the browser saw, and is minted by the local agent harness before
 any browser command exists. It says *who asked*, never *what was browsed*.
 
-**Example — sessions that used both opencode and the browser skill:**
+### What this makes answerable — and what it does not
+
+**Answerable now — which Claude sessions used the browser skill, and how much:**
 
 ```sql
-SELECT session, count() AS browser_calls
+SELECT session, count() AS browser_calls,
+       min(ts) AS first_call, max(ts) AS last_call
 FROM activity.events
 WHERE source = 'browser-bridge' AND kind = 'cmd' AND session != ''
-  AND session IN (SELECT DISTINCT session FROM activity.events WHERE source = 'opencode')
-GROUP BY session ORDER BY browser_calls DESC
+GROUP BY session
+ORDER BY browser_calls DESC
+```
+
+`session` holds the bare Claude session uuid, so it joins straight against
+`source='claude'` rows — same column, same values, no transform:
+
+```sql
+SELECT count(DISTINCT session) AS joinable_browser_sessions
+FROM activity.events
+WHERE source = 'browser-bridge' AND kind = 'cmd' AND session != ''
+  AND session IN (SELECT DISTINCT session FROM activity.events WHERE source = 'claude')
+```
+
+🔴 **NOT answerable yet — "which sessions used opencode AND the browser skill".**
+That was this change's motivating question and it is still open, for two
+independent reasons, either of which alone is fatal:
+
+1. **The id spaces are disjoint.** `source='opencode'` sessions are `ses_`-prefixed
+   opencode ids; `source='claude'` sessions are uuids. Measured over 14 days: 406
+   distinct claude sessions, 183 distinct opencode sessions, **overlap 0**. A query
+   joining `browser-bridge.session` against opencode's `session` cannot match — and
+   it fails as a **silent empty result**, which reads exactly like a truthful
+   "no sessions matched".
+2. **Those calls deliberately carry no `session`.** A browser call issued from
+   inside opencode is the leak case above: it is marked with
+   `origin='opencode-inherited'` and attributed to nobody.
+
+An earlier draft of this README shipped exactly that broken join as its flagship
+example. It is replaced rather than annotated, because a wrong query that returns
+zero rows is worse than no query.
+
+**What would make it answerable:** the follow-up `shell.env` hook exporting
+`OPENCODE_SESSION_ID`, which gives nested runs a joinable `opencode:` tier of
+their own. Until then, use `origin='opencode-inherited'` to *count* opencode-driven
+browser usage — you can see how much there is, just not whose:
+
+```sql
+SELECT JSONExtractString(toString(payload), 'origin') AS origin, count()
+FROM activity.events
+WHERE source = 'browser-bridge' AND kind = 'cmd'
+GROUP BY origin ORDER BY count() DESC
 ```
 
 ## Session isolation (concurrent-session tab clobbering)

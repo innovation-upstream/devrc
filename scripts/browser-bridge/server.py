@@ -358,6 +358,17 @@ HDR_SESSION_ID = "X-Session-Id"
 # version-skewed caller can send anything.
 SESSION_SRC_JOINABLE = "claude"
 SESSION_SRC_UNKNOWN = "unknown"
+# The CLOSED vocabulary of tier tags `derive_session_id` can emit. Pinned two-way
+# against the CLI by tests/test_browser_session_id.py, so a new tier fails there
+# until someone classifies it as joinable-or-not.
+#
+# 🔴 IT IS A VALIDATION SET, not documentation. The tag arrives on a
+# caller-supplied header: without this, `sess_src` is an unbounded-cardinality
+# column filled from a string a raw token-holder chooses ("['claude", " claude",
+# "CLAUDE", "claud" were all measured landing verbatim). Anything not in here is
+# reported as SESSION_SRC_UNKNOWN and carries no id — a new tier needs a CLI
+# change, which the two-way pin already forces you to declare.
+SESSION_TIER_TAGS = ("claude", "tmux", "sid", "ppid", "synthetic")
 
 # ---- Nested runs: the forwarded id is the PARENT, not the actor ------------ #
 # `browser agent "<goal>"` shells out to an opencode agent, and browser-agent
@@ -367,7 +378,7 @@ SESSION_SRC_UNKNOWN = "unknown"
 # It is WRONG for the `session` column, which means "the agent session that
 # ISSUED this command": for a nested run the issuer is the opencode agent, whose
 # own id we do not have yet. Attributing those calls to the operator's session
-# would fabricate usage in the exact column adoption-scan reads (measured: ~581
+# would fabricate usage in the `session` JOIN column (measured: ~581
 # nested tool-call rows in 14d, ~11% of bridge commands).
 #
 # So the nested tool declares itself. When this header is present we record the
@@ -375,6 +386,20 @@ SESSION_SRC_UNKNOWN = "unknown"
 # can mistake it for the actor — and leave `session` EMPTY. Giving the nested
 # session an id of its own is a later change.
 HDR_SESSION_ORIGIN = "X-Session-Origin"
+# The CLOSED ledger of origin tokens, and the marker for a declaration that is
+# present but not one of them.
+#
+# 🔴 PRESENCE IS THE SIGNAL, NOT THE VALUE. Attribution is suppressed whenever the
+# header is THERE, whatever it says. An oversized, control-char, empty or unknown
+# value means a caller tried to disclaim authorship and we could not read it —
+# losing attribution beats fabricating it, so it fails CLOSED and is marked so the
+# case is visible in the data rather than silent. Validating the value only after
+# deciding to suppress is what keeps this from turning into the id-sanitiser bug
+# it mirrors: that one returned "" for a malformed value and fell through to
+# writing `session` with the PARENT's id — the exact fabrication this mechanism
+# exists to prevent.
+ORIGIN_TOKENS = ("browser-agent", "opencode-inherited")
+SESSION_ORIGIN_INVALID = "invalid"
 
 # Bound what a caller-supplied header can put on a telemetry row. A value that
 # fails this is dropped entirely, never truncated: a truncated join key is a
@@ -829,6 +854,19 @@ def log(event: str, **fields) -> None:
 # The tier gate and the origin gate are what keep this honest — see
 # SESSION_SRC_JOINABLE and HDR_SESSION_ORIGIN.
 #
+# 🔴 WHO ACTUALLY READS `session`, STATED CORRECTLY. An earlier draft of these
+# comments said "the column adoption-scan and the deadman read". That is FALSE
+# and was checked: adoption-scan's browser-bridge entry is `via="source"`, whose
+# query selects text/payload/exit_code/duration_ms/ts/host and never `session`;
+# the deadman consumes only a row's EXISTENCE. Every shipped `GROUP BY session`
+# filters `source='claude'` (or claude+opencode). So NO shipped consumer reads
+# this column for `source='browser-bridge'` today — precisely because it has
+# always been empty.
+# That makes the harm LATENT, not live, and it is still the reason for every
+# gate here: a wrong value corrupts the FIRST consumer that reads it, silently,
+# and a fabricated session key is indistinguishable from a real one after the
+# fact. Absent data is recoverable; wrong-and-plausible data is not.
+#
 # BEST-EFFORT CONTRACT (do not weaken): emitting must never affect command
 # handling. The emitter is discovered lazily by absolute path and every failure
 # mode (missing module, unwritable spool, any exception) is swallowed — the
@@ -956,6 +994,12 @@ def _split_session_id(session_id):
     tier, sep, bare = s.partition(":")
     if not sep or not tier or not bare:
         return SESSION_SRC_UNKNOWN, ""
+    # A tag we do not know is not reported verbatim: `sess_src` would otherwise be
+    # an unbounded column filled from a caller-supplied header. Both halves are
+    # dropped together — an unrecognised tier tells us nothing about what the
+    # remainder means, so it must not reach `session` OR `origin_session`.
+    if tier not in SESSION_TIER_TAGS:
+        return SESSION_SRC_UNKNOWN, ""
     return tier, bare
 
 
@@ -1052,12 +1096,26 @@ def emit_cmd_event(op: str, key: str, outcome: str, duration_ms: int,
                 payload.pop(reserved, None)
             tier, bare = _split_session_id(session_id)
             payload["sess_src"] = tier
-            origin = _clean_session_field(session_origin)
-            if origin:
-                # A NESTED run: the forwarded id is the causal PARENT, not the
-                # actor. Recorded where nothing can mistake it for one.
-                payload["origin"] = origin
-                if bare:
+            # 🔴 BRANCH ON PRESENCE, NEVER ON THE CLEANED VALUE'S TRUTHINESS.
+            # `session_origin is None` means the header was absent; ANY present
+            # value — including "" — is a caller disclaiming authorship, and must
+            # suppress `session` even when we cannot make sense of it. Keying this
+            # off `if origin:` instead let a 201-char or control-char origin fall
+            # through to the `elif` and write `session` with the PARENT's id.
+            if session_origin is not None:
+                declared = _clean_session_field(session_origin)
+                # The value decides only what we RECORD, never whether to suppress.
+                payload["origin"] = (declared if declared in ORIGIN_TOKENS
+                                     else SESSION_ORIGIN_INVALID)
+                # 🔴 THE SAME TIER GATE AS `session`, and for the same reason: a
+                # pane id is stable across many unrelated sessions, so a reader who
+                # groups by `origin_session` would merge them exactly as they would
+                # on `session`. REACHABLE, not theoretical — browser-agent forwards
+                # whatever --print-session-id produced and the opencode tool
+                # declares its origin unconditionally, so a `tmux:`/`sid:` parent
+                # id genuinely arrives here. The tier is on the row either way, so
+                # the suppressed population stays measurable.
+                if tier == SESSION_SRC_JOINABLE and bare:
                     payload["origin_session"] = bare
             elif tier == SESSION_SRC_JOINABLE and bare:
                 # 🔴 THE TIER GATE. Only the joinable tier may fill the `session`
@@ -1072,7 +1130,8 @@ def emit_cmd_event(op: str, key: str, outcome: str, duration_ms: int,
         pass
 
 
-def _emit_diag_event(op: str, t0: float) -> None:
+def _emit_diag_event(op: str, t0: float, session_id=None,
+                     session_origin=None) -> None:
     """One metadata-only event for a read-only DIAGNOSTIC GET (/whoami, /health).
 
     A thin, deliberately narrow wrapper over emit_cmd_event: op + outcome + latency
@@ -1080,10 +1139,20 @@ def _emit_diag_event(op: str, t0: float) -> None:
     they are global, describing every connected profile at once, so there is no
     single active domain to attribute and emitting per-profile domains would widen
     the privacy contract. Best-effort like every other emit: it cannot raise.
-    """
+
+    🔴 THESE ARE OPERATOR CALLS AND ARE ATTRIBUTED. `browser whoami` / `browser
+    health` are subcommands a person runs — the skill documents them as the FIRST
+    thing to run — and the CLI sends its ordinary session headers on them, because
+    `_curl` is one code path. They are NOT server-originated; only the heartbeat
+    is. Leaving them unattributed made ONE operation have TWO outcomes: `whoami`
+    reached via POST /cmd got a session, the same `whoami` via GET did not, for
+    125 rows / 2.0% of `kind='cmd'` over 14 days. That is a smaller copy of the
+    very bug this file's session work exists to fix, so they are attributed the
+    same way as any other operator command."""
     emit_cmd_event(op=op, key="", outcome="ok",
                    duration_ms=int((time.monotonic() - t0) * 1000),
-                   domain="", exit_code=0)
+                   domain="", exit_code=0, session_id=session_id,
+                   session_origin=session_origin, attribute_session=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -2560,7 +2629,14 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                 # emitting one per profile would widen the contract to "which sites
                 # are open in each of your browsers". `key` is likewise empty:
                 # these endpoints take no --instance.
-                _emit_diag_event("health", t0)
+                #
+                # The SESSION HEADERS are passed through, though: these are
+                # operator subcommands (`browser whoami` / `browser health`), not
+                # server-originated rows, so they attribute like any other command
+                # — see _emit_diag_event for why excluding them was wrong.
+                _emit_diag_event("health", t0,
+                                 self.headers.get(HDR_SESSION_ID),
+                                 self.headers.get(HDR_SESSION_ORIGIN))
                 return
             if path == "/instances":
                 insts = registry.snapshot()
@@ -2569,7 +2645,9 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                 return
             if path == "/whoami":
                 self._send(200, self._whoami())
-                _emit_diag_event("whoami", t0)   # see the /health emit above
+                _emit_diag_event("whoami", t0,
+                                 self.headers.get(HDR_SESSION_ID),
+                                 self.headers.get(HDR_SESSION_ORIGIN))   # see the /health emit above
                 return
             if path == "/poll":
                 (instance_id, label, active, ext_version,
@@ -2642,7 +2720,11 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
             # A nested `browser agent` run declares itself here so its forwarded
             # invoker id is never attributed to the invoker as usage. Absent for
             # every ordinary caller. See HDR_SESSION_ORIGIN.
-            session_origin = self.headers.get(HDR_SESSION_ORIGIN) or None
+            # 🔴 NO `or None` — that would collapse a PRESENT-but-empty header
+            # into "absent" and attribute a call whose caller explicitly
+            # disclaimed it. `.get()` returns None only when the header is really
+            # missing, which is the distinction the emitter branches on.
+            session_origin = self.headers.get(HDR_SESSION_ORIGIN)
             # The upload file PATH is captured for the AUDIT log/event (see the
             # ALLOWED_OPS note). It is local metadata (never file content); logging
             # it is acceptable and required for traceability of this exfil-capable
