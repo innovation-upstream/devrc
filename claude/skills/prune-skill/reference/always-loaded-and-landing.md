@@ -126,3 +126,7 @@ Moved out of the core; the core keeps the imperative. Which form is correct depe
 | **devrc skill** (`claude/skills/<name>/`) — `home.file … recursive`, so `reference/` DOES ship | `~/.claude/skills/<name>/reference/<topic>.md` — the DEPLOYED path. 🔴 **This row used to say "BOTH forms" and offer a bare `` `reference/<topic>.md` ``; that was WRONG and produced 47 unopenable refs across 13 devrc skills** (measured 2026-08-19). A devrc skill is read from `~/.claude/skills/` by an agent whose cwd is an unrelated project, so the bare form resolves against that cwd and the repo-relative `claude/skills/…` form resolves nowhere either — the deployed path is the ONLY one that opens. Cite the repo source separately if you need it. |
 | **`mkOutOfStoreSymlink` exceptions** — `browser` → `scripts/browser-bridge/`, `dl-router` → `scripts/dl-router/`; only `SKILL.md` + the CLI are linked, **not** a `reference/` subtree | repo-absolute: `~/workspace/devrc/scripts/<subsystem>/reference/<topic>.md` |
 | **Repo-local skill** (a project's own `.claude/skills/<name>/`) — the whole dir ships | repo-root-relative: `.claude/skills/<name>/reference/<topic>.md`, **or** short table entries with the expansion stated once above the table |
+
+## Placeholder spelling (evicted from the §4 core)
+
+Write a variable segment as `<var>` **in prose** and `$VAR` **inside a bash fence** (`<` is a redirect in shell, so a pasted `<name>/x.sh` truncates a file instead of running). Mark a cross-repo path as such.

@@ -48,7 +48,7 @@ because a permanently-red gate trains everyone to click through -- which
 leaner is the intended direction of travel; raising it needs the same kind of
 justification recorded above.
 
-The honest accounting: the skill is 491 B -- 4.0% -- over the target it asks
+The honest accounting: the skill is 573 B -- 4.66% -- over the target it asks
 others to meet (12,861 against 12,288; `skill-audit.py` prints the same 573 B
 independently). That is disclosed in the body, in the PR that introduced it, and
 here. Every number in this docstring is re-measured, not carried forward: an
@@ -66,8 +66,9 @@ import pytest
 #
 # NOT a derivation -- a measured position. SKILL.md is 12,861 B (`stat -c %s` and
 # `git cat-file -s` agree), so 13,056 leaves 195 B of headroom, of which
-# MIN_HEADROOM_BYTES (192) is the floor that must remain: ~85 B of true working
-# room before the headroom test fires. The comment here previously read
+# MIN_HEADROOM_BYTES (192) is the floor that must remain: 3 B of true working
+# room before the headroom test fires -- i.e. effectively none; the next edit
+# here must evict something. The comment here previously read
 # "12,864 B measured + 192 B headroom"; the file measured 12,834 at the time, so
 # the arithmetic was describing a size the file never had. Re-measure before
 # touching this number, and lower it as the file gets leaner -- never raise it.

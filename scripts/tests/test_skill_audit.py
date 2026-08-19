@@ -915,8 +915,15 @@ def test_a_skill_whose_name_is_a_SUFFIX_of_another_is_not_claimed(tmp_path):
     and `vetr-mailbox` are BOTH real skills in this repo, and `mailbox/reference/`
     is a substring of `vetr-mailbox/reference/`: before the segment-boundary fix,
     resolving a `vetr-mailbox` route while auditing `mailbox` returned
-    'reference/gmail.md' — a legitimate cross-reference claimed as a local sidecar
-    and then reported as a phantom missing topic.
+    'reference/gmail.md' — a cross-reference claimed as a local sidecar and then
+    reported as a phantom missing topic.
+
+    🔴 LATENT, NOT OBSERVED — the distinction is the point. Neither skill currently
+    references the other, and `skill-audit.py` output over the real corpus is
+    BYTE-IDENTICAL before and after the fix. This is a constructed probe of a
+    REACHABLE defect, not a field observation; an earlier revision of this
+    docstring wrote it in the past tense as if it had been seen in the corpus,
+    which is a stronger claim than the evidence supports.
 
     Kills a `find()`-without-boundary-check mutant; the OTHER case does not.
     """

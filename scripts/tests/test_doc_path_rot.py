@@ -307,7 +307,7 @@ def _resolve(token: str, doc: str) -> Path | None:
     if token.split("/", 1)[0] in ROOTS:
         return _under_repo(REPO_ROOT, token)
     # Rule 1c: judged on SPELLING, so it is deliberately NOT resolved against the
-    # citing doc.s directory -- that would always succeed and reproduce exactly
+    # citing doc's directory -- that would always succeed and reproduce exactly
     # the false-clean this rule exists to kill (it is what skill-audit.py did).
     # The bare DIRECTORY form (`reference/`) NAMES THE CONVENTION and is not a
     # routing claim -- this corpus is full of prose saying "demote it into a
