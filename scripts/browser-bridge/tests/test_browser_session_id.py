@@ -59,7 +59,15 @@ pytestmark = pytest.mark.skipif(
 
 # Env vars that would short-circuit the derivation before the fallback we are
 # testing. Cleared for every fallback test.
-HIGHER_PRECEDENCE = ("CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID", "TMUX_PANE")
+#
+# OPENCODE is in this list for a different reason than the rest, and it is the
+# harness-blindness one: opencode's CLI exports OPENCODE=1 for every subcommand,
+# so running THIS SUITE from inside an opencode session would silently change
+# what every `claude:`-expecting test below derives. Clearing it makes the
+# dimension explicit — the leak-guard tests set it themselves — instead of
+# letting the answer depend on which agent happened to launch pytest.
+HIGHER_PRECEDENCE = ("CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID", "TMUX_PANE",
+                     "OPENCODE")
 
 SID_RE = re.compile(r"^sid:([1-9][0-9]*):([0-9]+|x)$")
 
@@ -424,7 +432,7 @@ import server as S  # noqa: E402
 # Every tag `derive_session_id` (and the recreate-close re-tag) can put on the
 # wire. Pinned two-way: the parse below must find exactly this set, so a NEW tier
 # fails here until someone decides whether it is joinable.
-CLI_TIER_TAGS = {"claude", "tmux", "sid", "ppid", "synthetic"}
+CLI_TIER_TAGS = {"claude", "tmux", "sid", "ppid", "synthetic", "oc-inherited"}
 
 
 def _emitted_tags():
@@ -435,9 +443,12 @@ def _emitted_tags():
     matched nothing would make every claim below pass vacuously.
     """
     src = CLI.read_text()
-    tags = set(re.findall(r"printf '([a-z]+):%s", src))
-    tags |= set(re.findall(r'SESSION_ID="([a-z]+):', src))
-    tags |= set(re.findall(r'tok="([a-z]+):', src))
+    # `[a-z][a-z-]*` — a tag may contain a hyphen (`oc-inherited`). Widened WITH
+    # the ledger assertion above as its control: if this over-matched, the set
+    # comparison would fail rather than quietly absorb the extra.
+    tags = set(re.findall(r"printf '([a-z][a-z-]*):%s", src))
+    tags |= set(re.findall(r'SESSION_ID="([a-z][a-z-]*):', src))
+    tags |= set(re.findall(r'tok="([a-z][a-z-]*):', src))
     return tags
 
 
@@ -564,3 +575,84 @@ def test_an_ordinary_cli_call_declares_no_nested_origin(capture):
     h = capture.headers[0]
     assert h.get("X-Session-Id") == "claude:uuid-direct", h
     assert "X-Session-Origin" not in h, h
+
+
+# --------------------------------------------------------------------------- #
+# 8. THE OPENCODE LEAK. `CLAUDE_CODE_SESSION_ID` survives into opencode's tool
+#    shells, so inside opencode it names an ANCESTOR, not the caller.
+#
+# MEASURED TWO WAYS: (a) a live env dump from inside an opencode bash tool
+# carried the outer Claude session's CLAUDE_CODE_SESSION_ID; (b) opencode 1.18.18
+# sets `process.env.OPENCODE="1"` in a yargs TOP-LEVEL `.middleware()`, i.e. for
+# every subcommand, and hands its tool shells `{...process.env}`.
+#
+# Claiming the joinable `claude:` tier on that value would write the OUTER
+# session's uuid into the telemetry `session` column, where it is
+# indistinguishable from that session's own direct browser use. The column is
+# EMPTY today: empty is recoverable, plausible-but-wrong is not. So the id is
+# RE-TAGGED (not re-derived) — non-joinable, but the same underlying value, so
+# it stays stable and per-session tab ownership survives.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("var", ["CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID"])
+def test_a_leaked_claude_id_inside_opencode_is_not_claimed_as_joinable(tmp_path, var):
+    """Both spellings, because both feed the same joinable tier — a guard placed
+    on only the primary one would leave the alternate wide open."""
+    env = _env(tmp_path, OPENCODE="1", **{var: "uuid-leaked"})
+    assert _print_id(env) == "oc-inherited:uuid-leaked"
+
+
+def test_the_discriminating_pair_opencode_set_versus_unset(tmp_path):
+    """🔴 THE PAIR. The SAME uuid, derived twice, differing only in OPENCODE.
+
+    Asserted together on purpose: a guard that tagged EVERYTHING `oc-inherited`
+    would satisfy the leak test above on its own and silently empty the column
+    for ordinary Claude sessions — the very bug this PR fixes, restored. Only the
+    unset side may claim the joinable tier, and the two ids must differ so the
+    server can tell them apart at all.
+    """
+    same_uuid = "uuid-shared-by-both-arms"
+    inside = _print_id(_env(tmp_path, OPENCODE="1",
+                            CLAUDE_CODE_SESSION_ID=same_uuid))
+    outside = _print_id(_env(tmp_path, CLAUDE_CODE_SESSION_ID=same_uuid))
+    assert outside == "claude:" + same_uuid
+    assert inside == "oc-inherited:" + same_uuid
+    assert inside != outside
+    # The tier tags, specifically — that is what the server branches on.
+    assert outside.split(":", 1)[0] == S.SESSION_SRC_JOINABLE
+    assert inside.split(":", 1)[0] != S.SESSION_SRC_JOINABLE
+
+
+def test_an_empty_opencode_is_not_opencode(tmp_path):
+    """`OPENCODE=` (exported empty) is not an opencode session.
+
+    INVARIANT GUARD — green at f47be59 too, where no guard exists at all, so it
+    is not regression coverage. It pins the guard's BOUNDARY: `-n` vs `-z` is a
+    one-character difference that would turn every ordinary session into a
+    non-joinable one and silently re-empty the column. Proved reachable by
+    mutant M9 (condition inverted), which this test kills."""
+    env = _env(tmp_path, OPENCODE="", CLAUDE_CODE_SESSION_ID="uuid-A")
+    assert _print_id(env) == "claude:uuid-A"
+
+
+def test_the_re_tagged_id_is_still_stable_across_subshells(tmp_path):
+    """ROUTING MUST NOT BREAK. Per-session tab ownership needs one id across the
+    many `browser` calls a session makes, including through `$( ... )` — the exact
+    property the ppid fallback lost. Re-tagging preserves it because the
+    underlying value is untouched; minting a fresh id would not.
+
+    This runs the SAME probe as the joinable path's stability test, so the guard
+    is held to the same bar rather than a weaker one."""
+    r = _probe(tmp_path, _env(tmp_path, OPENCODE="1",
+                              CLAUDE_CODE_SESSION_ID="uuid-A"))
+    assert r["direct"] == r["subst"] == r["pipe"] == "oc-inherited:uuid-A", r
+
+
+def test_opencode_does_not_disturb_the_lower_tiers(tmp_path):
+    """With no Claude var to inherit there is nothing leaked to re-tag, so the
+    chain must fall through unchanged.
+
+    INVARIANT GUARD — green at f47be59 too. It pins that the guard cannot swallow
+    the tmux/posix tiers whenever it fires. Proved reachable by mutant M10 (the
+    inner non-empty check dropped), which this test kills."""
+    assert _print_id(_env(tmp_path, OPENCODE="1", TMUX_PANE="%9")) == "tmux:%9"
+    assert SID_RE.match(_print_id(_env(tmp_path, OPENCODE="1")))

@@ -356,6 +356,46 @@ _session_from_proc() {
 }
 
 derive_session_id() {
+  # ---- FOLLOW-UP SLOT: a REAL opencode session id ------------------------- #
+  # An opencode `shell.env` plugin hook will export OPENCODE_SESSION_ID. When it
+  # lands, check it HERE — above the leak guard — and emit `opencode:$…` as a
+  # JOINABLE tier (opencode rows in activity.events carry that id already). That
+  # gives nested runs a key of their OWN and RETIRES the guard below, which only
+  # exists because there is nothing better to attribute them to today.
+  #
+  # ---- LEAK GUARD: CLAUDE_CODE_SESSION_ID is INHERITED, not ours ---------- #
+  # 🔴 opencode's CLI sets `process.env.OPENCODE="1"` in a yargs top-level
+  # `.middleware()` registered before every `.command(...)`, so it is set for
+  # EVERY subcommand, and its tool shells get `{...process.env}` — VERIFIED in
+  # the 1.18.18 bundle, and separately by a live env dump from inside an
+  # opencode bash tool. That dump also carried the OUTER Claude session's
+  # CLAUDE_CODE_SESSION_ID: launching opencode from a Claude Code bash call
+  # leaks the variable down, and it is STILL SET several processes deep.
+  #
+  # So inside opencode, `CLAUDE_CODE_SESSION_ID` names an ANCESTOR, not the
+  # session issuing the command. Claiming the `claude:` tier on it would make
+  # the server write the outer session's uuid into the telemetry `session`
+  # column, and those rows would be indistinguishable from that session's own
+  # direct browser use — in the column adoption-scan and the deadman read. The
+  # column is EMPTY today; empty is recoverable, plausible-but-wrong is not.
+  #
+  # Re-TAG rather than re-derive: the underlying value is unchanged, so the id
+  # stays stable across the many `browser` calls one opencode session makes and
+  # per-session tab ownership still works. `oc-inherited:` is not a joinable
+  # tier, so the server writes no session key while `payload.sess_src` still
+  # records that this happened — the population stays MEASURABLE instead of
+  # silently reverting to invisible.
+  # KNOWN, UNCHANGED DEGRADATION: two concurrent opencode sessions launched from
+  # ONE Claude session still resolve to the same id and so share a tab. That is
+  # exactly today's behaviour, not a new one; `--tab` is the escape hatch.
+  # ROUTING CONSEQUENCE, stated plainly: an opencode-inner call no longer shares
+  # ownership with its OUTER Claude session (different id ⇒ different owner), so
+  # it falls back to the active tab instead of the outer session's owned tab.
+  # That separation is inherent to re-tagging and is the intended isolation.
+  if [ -n "${OPENCODE:-}" ]; then
+    local leaked="${CLAUDE_CODE_SESSION_ID:-${CLAUDE_SESSION_ID:-}}"
+    if [ -n "$leaked" ]; then printf 'oc-inherited:%s' "$leaked"; return; fi
+  fi
   if [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then printf 'claude:%s' "$CLAUDE_CODE_SESSION_ID"; return; fi
   if [ -n "${CLAUDE_SESSION_ID:-}" ];      then printf 'claude:%s' "$CLAUDE_SESSION_ID"; return; fi
   if [ -n "${TMUX_PANE:-}" ];              then printf 'tmux:%s' "$TMUX_PANE"; return; fi

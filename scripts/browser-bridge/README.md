@@ -1397,6 +1397,7 @@ would be, and is forbidden.
 | `sid:<sid>:<start>` | `sid` | no | no other source records it |
 | `ppid:<pid>:<rand>` | `ppid` | no | last-resort random token |
 | `synthetic:…` | `synthetic` | no | an id the CLI made up on purpose (the `emulate --recreate` close) |
+| `oc-inherited:<uuid>` | `oc-inherited` | no | a `CLAUDE_CODE_SESSION_ID` that **leaked into an opencode tool shell** — it names an ancestor, not the caller (see below) |
 | anything untagged, absent, or empty | `unknown` | no | fail closed |
 
 Only the **first** colon splits (a `sid:`/`ppid:` id contains more). An id with no
@@ -1417,6 +1418,49 @@ So the nested tool declares `X-Session-Origin: browser-agent`. When that header 
 present the server writes **no** `session`; the forwarded id is recorded as
 `payload.origin_session` (the causal **parent**) beside `payload.origin`. Giving
 the nested session an id of its own is a later change.
+
+### Hazard 3 — `CLAUDE_CODE_SESSION_ID` leaks into opencode
+
+opencode 1.18.18 sets `process.env.OPENCODE="1"` in a yargs **top-level
+`.middleware()`** — registered before every `.command(...)`, so it runs for every
+subcommand — and hands its tool shells `{...process.env}`. Launch opencode from a
+Claude Code bash call and the outer session's `CLAUDE_CODE_SESSION_ID` rides all
+the way down: a live env dump from inside an opencode bash tool still had it.
+
+So inside opencode that variable names an **ancestor**, not the session issuing
+the command. A plain `opencode run …` whose bash tool shells out to `browser`
+would otherwise hit the joinable tier on the leaked value, and the server would
+write the outer Claude session's uuid into `session` — where those rows are
+**indistinguishable from that session's own direct browser use**. There is no
+`X-Session-Origin` on that path; that header is only sent by
+`browser_tool_impl.mjs` on the browser-agent path.
+
+`derive_session_id` therefore **re-tags** a leaked id `oc-inherited:` whenever
+`OPENCODE` is set. Re-tagging, not re-deriving, is the point:
+
+- the underlying value is unchanged, so the id stays **stable** across the many
+  `browser` calls one opencode session makes and per-session tab ownership still
+  works (asserted through the same `$( … )` subshell probe as the joinable path);
+- the tier is not joinable, so `session` stays **empty** — exactly as it is today
+  for these rows. Empty is recoverable; plausible-but-wrong is not;
+- `payload.sess_src = "oc-inherited"` still records that it happened, so the
+  population is **measurable** rather than invisible.
+
+Two consequences, stated rather than buried:
+
+- **Unchanged degradation.** Two concurrent opencode sessions launched from one
+  Claude session still resolve to the same id and share a tab. That is today's
+  behaviour, not a new one; `--tab` is the escape hatch.
+- **Routing does change in one place.** An opencode-inner call no longer shares
+  tab ownership with its *outer* Claude session (different id ⇒ different owner),
+  so it falls back to the active tab rather than the outer session's owned tab.
+  That separation is inherent to any re-tagging fix, and is the intended
+  isolation.
+
+**This guard is temporary.** A follow-up adds an opencode `shell.env` plugin hook
+exporting `OPENCODE_SESSION_ID`; once nested runs have a key of their own,
+`derive_session_id` gains a joinable `opencode:` tier above the guard and the
+guard retires. The slot is marked in the source.
 
 ### Contract
 
