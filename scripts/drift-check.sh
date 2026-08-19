@@ -61,10 +61,13 @@
 # the local-checkout half of both holes, and closes it for shapes nobody has
 # enumerated. Neither layer covers a runtime-built mutation of the REMOTE host.
 #
-# THE ONE FILE THIS SCRIPT WRITES is the consecutive-unreachable counter under
-# $DRIFT_STATE_DIR (default $XDG_STATE_HOME/drift-check). It lives outside every
-# repo, and `test_the_only_files_the_deadman_writes_are_the_streak_counters`
-# holds that ledger.
+# THE ONLY FILES THIS SCRIPT WRITES are its streak counters under
+# $DRIFT_STATE_DIR (default $XDG_STATE_HOME/drift-check): the consecutive-
+# unreachable counter per remote role, and the consecutive-UNMEASURED counter per
+# (host, built-source scope) that rc 18 rides on. They live outside every repo,
+# and `test_the_only_files_the_deadman_writes_are_the_streak_counters` holds that
+# ledger — as an asserted set of REDIRECTION TARGETS, so it pins that nothing
+# else is written, not how many counter files exist.
 #
 # ── HOST IDENTITY ─────────────────────────────────────────────────────────────
 # Both machines report hostname `nixos`, so identity comes from local IPv4
@@ -110,6 +113,11 @@
 #       reserved to ship.sh meanings this script does not take; its SEVERITY is
 #       set by the table, not by the digit, and it ranks between 8 and 14 — see
 #       severity() for why.
+#   18  DRIFT — a BUILT-SOURCE SCOPE has been UNMEASURABLE for N CONSECUTIVE runs
+#       on that host, so its currency has never been evaluated and rc 17 cannot
+#       fire for it. 🔴 The gap rc 17 left: "we could not look" correctly set no
+#       code, and therefore escalated NEVER. See "UNMEASURED IS NOT FOREVER"
+#       below. Same ladder as rc 13, and it ranks just under it — see severity().
 #   16  ACTIONABLE, not drift — the fuzzyclaw PHASE-2 GATE has OPENED: zero rows
 #       still take their `age_secs` from fuzzyclaw alone, so the readers can be
 #       removed. See "THE FUZZYCLAW PHASE-2 GATE" below. It is the LEAST severe
@@ -175,15 +183,23 @@
 #   * the package's own srcDir SUBTREE is behind / ahead of the branch's own
 #     upstream ..................................................... rc 17
 #   * the REPO is behind / ahead but the subtree is not .... reported, NOT drift.
-#   * repo ABSENT on this host ......... reported, NOT drift. The derivations
-#     guard on pathExists and simply omit the binary; a host without the checkout
-#     is a documented, tolerated state (see clawgatectl.nix's header).
-#   * `git fetch` FAILED ............... reported, NOT drift. These repos are
-#     private and reached over ssh, and a systemd --user unit has no ssh-agent.
-#     "We could not look" must never read as either a pass or a divergence.
-#   * DETACHED HEAD / branch with no upstream ... reported, NOT drift. There is
-#     no defined answer to compare against; inventing one (assume `main`) would
-#     be a guess presented as a measurement.
+#   * repo ABSENT on this host ......... reported, NOT drift, EVER. The
+#     derivations guard on pathExists and simply omit the binary; a host without
+#     the checkout is a documented, tolerated state (see clawgatectl.nix's
+#     header), so it never escalates at any count.
+#   * `git fetch` FAILED ............... reported, NOT drift ON ANY ONE RUN.
+#     These repos are private and reached over ssh, and a systemd --user unit has
+#     no ssh-agent. "We could not look" must never read as either a pass or a
+#     divergence — but a fetch that keeps failing means the currency is never
+#     evaluated at all, so it escalates to rc 18 after a LONGER run of
+#     consecutive misses than the structural reasons get. See "UNMEASURED IS NOT
+#     FOREVER" below.
+#   * DETACHED HEAD / branch with no upstream ... reported, NOT drift on any one
+#     run. There is no defined answer to compare against; inventing one (assume
+#     `main`) would be a guess presented as a measurement. It is STRUCTURAL
+#     though — it never heals on its own — so it escalates to rc 18 after
+#     DRIFT_UNMEASURED_ESCALATE consecutive runs. This is the shape that was
+#     measured concealing a real divergence.
 #   * DIRTY TREE ....................... reported, NOT drift, and reported even
 #     when the repo is otherwise current: these derivations build the TREE, not
 #     the commit, so an uncommitted or untracked file IS in the binary. The
@@ -204,6 +220,73 @@
 #
 # READ-ONLY, like everything else in this file: `fetch`, `rev-parse`, `rev-list`,
 # `symbolic-ref`, `status`. It never pulls, never switches, never repairs.
+#
+# ── UNMEASURED IS NOT FOREVER (rc 18) ─────────────────────────────────────────
+# 🔴 THE GAP rc 17 LEFT. A scope that CANNOT be evaluated is reported UNMEASURED
+# and sets no code — deliberately, because "we could not look" must read as
+# neither a pass nor a divergence. But nothing ever escalated it, so a scope
+# could stay unevaluated FOREVER while the run kept reading as clean. That is the
+# same shape as the bug rc 17 was built to catch: a green that means "did not
+# look", not "looked and found nothing".
+#
+# MEASURED 2026-08-18 on the workbench: ~/workspace/tmux-fuzzyclaw sat on a local
+# branch `docs/tui-rendering-footguns` with NO UPSTREAM. The run reported
+# `unmeasured=1` and exited 0 — while CONCEALING a genuinely divergent build
+# between the two hosts, which is precisely what rc 17 exists to say out loud.
+#
+# So an unmeasured scope now carries the SAME ladder an unreachable remote does
+# (rc 13): reported on EVERY run, escalated to rc 18 only after N CONSECUTIVE
+# runs, with the streak persisted under $DRIFT_STATE_DIR and RESET the moment
+# that scope measures. Per (HOST, SCOPE), never per run: one repo recovering must
+# not clear another's ladder, and the laptop's blindness is not the workbench's.
+#
+# 🔴 THE REASONS ARE NOT ONE HAZARD, so they do not share one counter:
+#   * NOUPSTREAM (a branch with no upstream, or a detached HEAD) is STRUCTURAL.
+#     It never heals on its own, and it is the one measured concealing a real
+#     divergence. DRIFT_UNMEASURED_ESCALATE, default 4 ≈ 24h at the 6h cadence —
+#     the same patience an unreachable laptop gets. Deliberately not instant:
+#     parking on a scratch branch for an afternoon is normal, and a gate that
+#     fired on that would be red most of the time.
+#   * NOCOUNT (a rev-list over that pathspec that will not parse) is structural
+#     too — the identical command fails identically next run — so it takes the
+#     same threshold.
+#   * FETCHFAILED is the one with a plausibly TRANSIENT cause: no ssh-agent in a
+#     user unit, a key rotation, a network outage, a remote that is down. It gets
+#     its OWN, longer ladder (DRIFT_UNMEASURED_FETCH_ESCALATE, default 12 ≈ 3
+#     days) rather than being folded into the counter above. It still escalates:
+#     a fetch failing for three days is not weather, and a currency check that
+#     can never fetch is a checker wired to nothing.
+#   * ABSENT NEVER escalates, at any count. A host that simply lacks the checkout
+#     is a documented, tolerated state — nix/pkgs/tools/clawgatectl.nix guards on
+#     pathExists and omits the binary — so escalating would make a host
+#     permanently red for a package it correctly does not ship. It is still
+#     reported every run; the counter is not even consulted.
+#   * an UNKNOWN reason token takes the STRUCTURAL threshold. Like the
+#     settings.json allowlist below, this enumeration FAILS CLOSED: a reason
+#     nobody has argued about does not get an exemption by default.
+#
+# 🔴 AND IT CANNOT BE SATISFIED BY MEASURING NOTHING. A ladder is only as good as
+# the set it walks, so the block prints `hosts-reporting= scopes= unmeasured=
+# escalated=` and refuses to print that summary at all when the HOST count or the
+# SCOPE count is zero: a ladder over no scopes is not "nothing is stuck". A host
+# is walked only when it returned a `FACT src-unmeasured examined=N …` line of
+# its own, so an unreachable laptop bumps nothing — rc 13 already owns that
+# finding, and a host nobody looked at must not accumulate a streak.
+#
+# The state file is per (host, scope): $DRIFT_STATE_DIR/unmeasured-<role>-<scope>
+# with `/` escaped to `_` and a literal `_` doubled — injective over the whole
+# character set the scope scan can produce ([A-Za-z0-9._/-]), so two different
+# scopes can never share a counter. It holds `<reason> <count>`, and a CHANGED
+# reason restarts the count: the thresholds differ, so carrying a FETCHFAILED
+# streak into a NOUPSTREAM ladder would escalate on evidence that was never about
+# that hazard.
+#
+# KNOWN AND ACCEPTED BOUND, in the style of the two under the unreachable streak
+# below: nothing prunes these files (that would need a delete, and this script
+# does not delete), so a scope REMOVED from nix/pkgs and later RE-ADDED resumes
+# its old count instead of starting over. It errs toward escalating SOONER — but
+# only for a scope that was unevaluable before it left and is unevaluable again
+# for the SAME reason, which is a state worth saying out loud at whatever count.
 #
 # ── THE FUZZYCLAW PHASE-2 GATE (rc 16) ────────────────────────────────────────
 # "Is it safe to delete the fuzzyclaw readers yet?" was answered by somebody
@@ -272,10 +355,10 @@
 # is reading a timer's output, so the single number it hands to systemd must be
 # the worst thing found, or an un-pushed workbench could hide behind a merely
 # behind laptop. Severity order (worst first):
-#     8  >  17  >  14  >  13  >  6  >  4  >  3  >  12  >  15  >  10  >  16
+#     8 > 17 > 14 > 13 > 18 > 6 > 4 > 3 > 12 > 15 > 10 > 16
 # 🔴 THAT ORDER IS THE severity() TABLE, NOT THE DIGITS — it never was monotonic
-# (14 outranks 13 outranks 6 outranks 4), and 17 is not "less severe than 16"
-# because it is larger. Every code below 16 that is still free (5, 7, 9, 11) is
+# (14 outranks 13 outranks 18 outranks 6 outranks 4), and 17 is not "less severe
+# than 16" because it is larger. Every code below 16 that is still free (5, 7, 9, 11) is
 # reserved to a ship.sh meaning this script does not take, so a new DRIFT code
 # has nowhere to go but upward; its rank is stated in severity() and here.
 # (6 is unreachable through this path today — the script exits 6 directly before
@@ -314,7 +397,18 @@
 #                        uses the default, and every value sent across that hop
 #                        is one that has to be proved safe.
 #   DRIFT_UNREACHABLE_ESCALATE  consecutive unreachable runs before rc 13 (default 4)
-#   DRIFT_STATE_DIR  where the unreachable streak is persisted
+#   DRIFT_UNMEASURED_ESCALATE   consecutive runs a built-source scope may be
+#                        UNMEASURABLE FOR A STRUCTURAL REASON (no upstream /
+#                        detached HEAD / a pathspec count that will not parse)
+#                        before rc 18 (default 4 ≈ 24h at the 6h cadence).
+#                        Deliberately NOT forwarded over ssh: the ladder is kept
+#                        by the host running the driver, for both hosts' scopes.
+#   DRIFT_UNMEASURED_FETCH_ESCALATE  the same ladder for the one reason with a
+#                        plausibly TRANSIENT cause — a failed `git fetch`
+#                        (default 12 ≈ 3 days). Separate from the tunable above
+#                        because they are not the same hazard; see "UNMEASURED IS
+#                        NOT FOREVER". `repo ABSENT` is on NEITHER ladder.
+#   DRIFT_STATE_DIR  where the unreachable and unmeasured streaks are persisted
 #                    (default ${XDG_STATE_HOME:-$HOME/.local/state}/drift-check)
 #   DRIFT_SESSION_MANAGER  path to the session-manager used by the phase-2 gate
 #                    (default: the copy beside this script). Exists so the test
@@ -351,6 +445,11 @@ DRIFT_REPO="${DRIFT_REPO:-$HOME/workspace/devrc}"
 DRIFT_UNTRACKED_MAX="${DRIFT_UNTRACKED_MAX:-10}"
 DRIFT_DANGLING_MAX="${DRIFT_DANGLING_MAX:-10}"
 DRIFT_UNREACHABLE_ESCALATE="${DRIFT_UNREACHABLE_ESCALATE:-4}"
+# The two rc-18 ladders. Two tunables, not one, because "this branch has no
+# upstream" and "the fetch failed" are different hazards with different lifetimes
+# — see "UNMEASURED IS NOT FOREVER" in the header for the full argument.
+DRIFT_UNMEASURED_ESCALATE="${DRIFT_UNMEASURED_ESCALATE:-4}"
+DRIFT_UNMEASURED_FETCH_ESCALATE="${DRIFT_UNMEASURED_FETCH_ESCALATE:-12}"
 DRIFT_STATE_DIR="${DRIFT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/drift-check}"
 DRIFT_SESSION_MANAGER="${DRIFT_SESSION_MANAGER:-$_drift_dir/session-manager}"
 DRIFT_PHASE2_TIMEOUT="${DRIFT_PHASE2_TIMEOUT:-60}"
@@ -370,6 +469,11 @@ require_int() { # require_int <name> <value>
 require_int DRIFT_UNTRACKED_MAX "$DRIFT_UNTRACKED_MAX"
 require_int DRIFT_DANGLING_MAX "$DRIFT_DANGLING_MAX"
 require_int DRIFT_UNREACHABLE_ESCALATE "$DRIFT_UNREACHABLE_ESCALATE"
+# Not interpolated into a remote payload either — but a non-integer here would
+# make `[ "$STK" -ge "$THR" ]` an error rather than a comparison, and the ladder
+# would go quiet in exactly the direction this code exists to refuse.
+require_int DRIFT_UNMEASURED_ESCALATE "$DRIFT_UNMEASURED_ESCALATE"
+require_int DRIFT_UNMEASURED_FETCH_ESCALATE "$DRIFT_UNMEASURED_FETCH_ESCALATE"
 # Not interpolated into a remote payload — but it IS handed to `timeout`, where a
 # non-integer would make the phase-2 scan fail in a way that reads as "the tool
 # is broken" rather than "you passed nonsense".
@@ -437,6 +541,18 @@ severity() {
     # observe, saying something is wrong — 13 only says we could not look.
     14) echo 65 ;;
     13) echo 60 ;;
+    # 18 (a built-source scope has been UNMEASURABLE for N consecutive runs) sits
+    # between 13 and 6, and the digit says nothing about that either.
+    #   BELOW 13, because they are the same KIND of finding — a persistent
+    #   inability to look, escalated only after a run of consecutive misses — and
+    #   13 is that inability about an ENTIRE HOST (every check on it, including
+    #   the un-pushed-commits one) while this is one built-source scope.
+    #   ABOVE 6/4/3, because those are SINGLE-RUN "could not evaluate" outcomes
+    #   that may simply be gone next run, whereas 18 is persistent by
+    #   construction: it cannot be emitted until the same scope has failed to
+    #   measure N runs in a row. And what it hides is rc 17 (rank 67) — a stale
+    #   built source is INVISIBLE for as long as this is true.
+    18) echo 59 ;;
     # 6 cannot arrive here today (the script exits 6 before any host leg runs),
     # but it is a code this file OWNS, and an owned code with no case would rank
     # 99 — above rc 8 — which is the wrong answer for "I could not identify the
@@ -912,6 +1028,13 @@ S_EXAMINED=0
 S_STALE=0
 S_UNMEASURED=0
 S_FACTS=""
+# The SECOND fact line: "<scope>=<REASON>" for every scope this run could not
+# evaluate. It exists because the src-repos facts CANNOT answer the question rc
+# 18 asks — a scope that reaches the pathspec comparison and fails there has
+# already emitted a real tree OID as its fact, so "is this value a reason token?"
+# would read that one as measured. The reason belongs beside the scope, once,
+# from the payload that knows.
+S_UNMEAS_FACTS=""
 s_rc=0
 
 # 🔴 A repo we could not evaluate makes EVERY scope under it UNMEASURED — never
@@ -930,6 +1053,7 @@ s_unmeasured_scopes() { # s_unmeasured_scopes <repo> <reason-token>
     S_EXAMINED=$(( S_EXAMINED + 1 ))
     S_UNMEASURED=$(( S_UNMEASURED + 1 ))
     S_FACTS="$S_FACTS $K=$2"
+    S_UNMEAS_FACTS="$S_UNMEAS_FACTS $K=$2"
   done
 }
 
@@ -1027,6 +1151,11 @@ for N in $S_NAMES; do
     if [ "$SB" = -1 ] || [ "$SA" = -1 ]; then
       ssay "  BUILT SOURCE $K: could not compare $BR to $UP over that path — currency NOT evaluated."
       S_UNMEASURED=$(( S_UNMEASURED + 1 ))
+      # NOCOUNT, not the tree OID already in S_FACTS: this scope WAS reached and
+      # does have a tree, and only this line records that its currency was never
+      # decided. Without it the rc 18 ladder would read the OID and call it
+      # measured — a scope that can never be judged, wearing a measurement.
+      S_UNMEAS_FACTS="$S_UNMEAS_FACTS $K=NOCOUNT"
       continue
     fi
 
@@ -1058,6 +1187,14 @@ else
 fi
 
 echo "[$label] FACT src-repos$S_FACTS"
+# 🔴 THE DENOMINATOR IS PART OF THIS LINE, not something the driver may infer.
+# `examined=` is emitted unconditionally, INCLUDING as `examined=0`, so the
+# driver can tell three states apart that would otherwise collapse into one:
+# "this host never ran the payload" (no line at all), "it ran and found no
+# scopes" (examined=0) and "it ran and every scope measured" (examined=N with no
+# pairs after it). Read off the src-repos line those last two are both an empty
+# value, which is exactly the reassuring zero the rest of this file refuses.
+echo "[$label] FACT src-unmeasured examined=$S_EXAMINED$S_UNMEAS_FACTS"
 echo "[$label] SRC-RC=$s_rc"
 '
 # The payload actually shipped to each host: the git CHECK in a SUBSHELL (so its
@@ -1288,6 +1425,96 @@ streak_reset() { # streak_reset <role> — the host answered; the run of misses 
   printf '0\n' 2>/dev/null > "$f" || true
 }
 
+# --- Consecutive-UNMEASURED streaks, per (host, built-source scope) -----------
+# The rc 18 ladder. Same shape as the three functions above and deliberately so —
+# see "UNMEASURED IS NOT FOREVER" in the header for what it measures, why each
+# reason gets the threshold it gets, and the two bounds it inherits (a bump is a
+# non-atomic read-modify-write, and a hand-run shares the counter with the timer).
+#
+# Local variable names are UPPERCASE apart from `f`, for the same reason the
+# embedded payloads use uppercase throughout: the suite's reverse-PATH tokenizer
+# reads a lowercase word in command position — including inside `$(( … ))` — as a
+# command, and would need a ledger entry per operand declaring it prose. `f` is
+# lowercase on purpose: it is the redirection target the write-ledger asserts, and
+# that ledger is the pin that this script writes nothing else.
+
+u_threshold() { # u_threshold <reason-token> -> consecutive-run threshold, or NEVER
+  # 🔴 AN ENUMERATION THAT FAILS CLOSED, like perhost_reason below. ABSENT is the
+  # only exemption and it is spelled out; everything else — including a reason
+  # token added later and not thought about here — lands on the STRUCTURAL
+  # ladder rather than silently becoming exempt. Written as `if [ "$1" = X ]`
+  # rather than a `case` for the reason perhost_reason gives: it keeps every
+  # label in ARGUMENT position, where the suite's tokenizer cannot mistake it
+  # for a command word.
+  if [ "$1" = ABSENT ]; then
+    # A host that simply lacks the checkout is documented and tolerated: the
+    # derivations guard on pathExists and omit the binary. Escalating here would
+    # make that host permanently red for a package it correctly does not ship.
+    echo NEVER
+  elif [ "$1" = FETCHFAILED ]; then
+    # The one reason with a plausibly transient cause (no ssh-agent under a user
+    # unit, key rotation, a remote that is down), so it gets a longer ladder —
+    # but it does get one: a currency check that can never fetch is wired to
+    # nothing, and that is the whole finding.
+    echo "$DRIFT_UNMEASURED_FETCH_ESCALATE"
+  else
+    # NOUPSTREAM and NOCOUNT: structural, they do not heal on their own.
+    echo "$DRIFT_UNMEASURED_ESCALATE"
+  fi
+}
+
+_u_streak_file() { # _u_streak_file <role> <scope> -> that pair's counter path
+  # 🔴 INJECTIVE, not merely "sanitised". The scope scan can only produce
+  # [A-Za-z0-9._/-], so doubling `_` and then mapping `/` to `_` is reversible
+  # over that whole alphabet: `a/b` and `a_b` cannot land on one file. A plain
+  # `/`->`_` would collide them, and two scopes sharing a counter is a ladder
+  # that resets itself for reasons nobody can see.
+  local S
+  S="${2//_/__}"
+  S="${S//\//_}"
+  printf '%s\n' "$DRIFT_STATE_DIR/unmeasured-${1:-host}-$S"
+}
+
+u_streak_bump() { # u_streak_bump <role> <scope> <reason> -> new streak, or -1
+  local f PREV PREASON PCOUNT NEXT
+  f="$(_u_streak_file "$1" "$2")"
+  mkdir -p "$DRIFT_STATE_DIR" 2>/dev/null || { echo -1; return 0; }
+  PREV="$(cat "$f" 2>/dev/null || true)"
+  PREASON=""
+  PCOUNT=0
+  # 🔴 TWO FIELDS OR NOTHING. `${x%% *}` and `${x##* }` BOTH fall back to the
+  # WHOLE STRING when there is no space, so a one-field file would set the reason
+  # and the count from the same token — the exact shape that made the phase-2
+  # gate print `47 of 47` off a two-field line. Require the space before reading
+  # either, and treat anything else as "no prior state".
+  case "$PREV" in
+    *' '*) PREASON="${PREV%% *}"; PCOUNT="${PREV##* }" ;;
+  esac
+  case "$PCOUNT" in ''|*[!0-9]*) PCOUNT=0 ;; esac
+  # A CHANGED reason starts a NEW run of misses. The two ladders have different
+  # thresholds, so carrying a FETCHFAILED count into a NOUPSTREAM ladder would
+  # escalate on evidence that was never about that hazard — and the reset written
+  # by u_streak_reset ("MEASURED 0") clears the streak through this same rule.
+  [ "$PREASON" = "$3" ] || PCOUNT=0
+  NEXT=$(( PCOUNT + 1 ))
+  # `2>/dev/null` FIRST, then the target — see streak_bump for why the order of
+  # the redirections is load-bearing.
+  printf '%s %s\n' "$3" "$NEXT" 2>/dev/null > "$f" || { echo -1; return 0; }
+  echo "$NEXT"
+}
+
+u_streak_reset() { # u_streak_reset <role> <scope> — it MEASURED; the run ends
+  # Only ever rewrites a counter that already exists: a scope that has never been
+  # unmeasured needs no file, and creating one per scope per run would put state
+  # in the journal's way for no gain. The token is not a reason, so the reason
+  # comparison in u_streak_bump restarts the count from 0 whatever comes next.
+  local f
+  f="$(_u_streak_file "$1" "$2")"
+  [ -d "$DRIFT_STATE_DIR" ] || return 0
+  [ -f "$f" ] || return 0
+  printf 'MEASURED 0\n' 2>/dev/null > "$f" || true
+}
+
 if [ "$DO_LOCAL" = 1 ]; then
   echo "=== local ($LOCAL_ROLE) ==="
   # Captured rather than streamed so the FACT lines can be diffed against the
@@ -1484,6 +1711,118 @@ else
 fi
 echo
 
+# ── BUILT-SOURCE SCOPES THAT STAY UNMEASURED (rc 18) ──────────────────────────
+# 🔴 See "UNMEASURED IS NOT FOREVER" in the header for what this measures and why
+# each reason gets the ladder it gets. Here: how it refuses to be satisfied by
+# measuring nothing.
+#
+# It runs HERE, in the driver, and not in the per-host payload, for the reason
+# the rc 13 ladder is here too: the streak is PERSISTENT STATE, it belongs to the
+# machine keeping the record, and the payload is a stateless thing piped to
+# whichever host is being examined. A counter kept on the far side would be
+# invisible to the operator and would reset with the laptop's state dir.
+#
+# 🔴 A HOST IS WALKED ONLY IF IT ANSWERED. The `FACT src-unmeasured` line is the
+# proof it ran the payload; without it nothing is bumped and nothing is reset —
+# an unreachable laptop must not accumulate a streak nobody was looking at, and
+# rc 13 already owns that finding.
+echo "=== built-source scopes that stay UNMEASURED ($LOCAL_ROLE / $REMOTE_ROLE) ==="
+U_REPORTING=0
+U_SCOPES=0
+U_UNMEASURED=0
+U_ESCALATED=0
+for HROLE in "$LOCAL_ROLE" "$REMOTE_ROLE"; do
+  if [ "$HROLE" = "$LOCAL_ROLE" ]; then
+    U_LINE="$(fact_of "$LOCAL_OUT" src-unmeasured)"
+    U_SRC="$(fact_of "$LOCAL_OUT" src-repos)"
+  else
+    U_LINE="$(fact_of "$REMOTE_OUT" src-unmeasured)"
+    U_SRC="$(fact_of "$REMOTE_OUT" src-repos)"
+  fi
+  [ -n "$U_LINE" ] || continue
+  U_REPORTING=$(( U_REPORTING + 1 ))
+
+  U_SEEN="${U_LINE%% *}"
+  U_SEEN="${U_SEEN#examined=}"
+  case "$U_SEEN" in ''|*[!0-9]*) U_SEEN=-1 ;; esac
+  if [ "$U_SEEN" -le 0 ]; then
+    echo "[srcblind] $HROLE: NOT EVALUATED — that host's nix/pkgs named no \${workspace}/"
+    echo "[srcblind]   source, so there is no scope here to be stuck. Not 'nothing is unmeasured'."
+    continue
+  fi
+  U_SCOPES=$(( U_SCOPES + U_SEEN ))
+
+  # 🔴 THE WHOLE-STRING FALLBACK AGAIN: `${x#* }` returns x unchanged when there
+  # is no space, so a line with NO pairs (`examined=2`) would be read as the pair
+  # `examined=2` — a fabricated scope named `examined`, on the structural ladder.
+  # Require the space before taking the remainder.
+  U_PAIRS=""
+  case "$U_LINE" in *' '*) U_PAIRS="${U_LINE#* }" ;; esac
+
+  U_NAMES=""
+  for X in $U_PAIRS; do
+    KS="${X%%=*}"
+    RSN="${X#*=}"
+    U_NAMES="$U_NAMES $KS"
+    U_UNMEASURED=$(( U_UNMEASURED + 1 ))
+    THR="$(u_threshold "$RSN")"
+    if [ "$THR" = NEVER ]; then
+      echo "[srcblind] $HROLE $KS: UNMEASURED ($RSN) — reported, and it NEVER escalates."
+      echo "[srcblind]   A host without that checkout is a documented, tolerated state: the"
+      echo "[srcblind]   derivation guards on pathExists and simply omits the binary."
+      continue
+    fi
+    STK="$(u_streak_bump "$HROLE" "$KS" "$RSN")"
+    if [ "$STK" -lt 0 ]; then
+      echo "[srcblind] 🔴 $HROLE $KS: UNMEASURED ($RSN), and the streak under $DRIFT_STATE_DIR"
+      echo "[srcblind]   could not be persisted, so 'for how long' is unknowable — ESCALATING (rc 18)."
+      U_ESCALATED=$(( U_ESCALATED + 1 ))
+      note_rc 18
+    elif [ "$STK" -ge "$THR" ]; then
+      # The whole claim on ONE line — host, scope, reason, streak and threshold.
+      # Split across two it cannot be asserted as a single normalised string, and
+      # a guard on half a sentence is walkable by rewording the other half.
+      echo "[srcblind] 🔴 DRIFT — $HROLE $KS: UNMEASURED ($RSN) for $STK CONSECUTIVE runs (threshold $THR)."
+      echo "[srcblind]   Its currency has never been evaluated, so rc 17 CANNOT fire for it: a stale"
+      echo "[srcblind]   built source here is invisible for as long as this holds."
+      echo "[srcblind]   fix: give that branch an upstream (git -C ~/workspace/<repo> push -u origin HEAD)"
+      echo "[srcblind]   or restore the fetch on that host, then re-run."
+      U_ESCALATED=$(( U_ESCALATED + 1 ))
+      note_rc 18
+    else
+      echo "[srcblind] $HROLE $KS: UNMEASURED ($RSN) — $STK/$THR consecutive; NOT escalated."
+      echo "[srcblind]   Still not a pass: nothing has measured what this host compiles."
+    fi
+  done
+
+  # The complement — every scope this host DID measure — ends its run of misses.
+  # Derived from the src-repos fact minus the pairs above rather than from a
+  # second payload line: the two lines are emitted together, so a scope in one
+  # and not the other is a scope that measured.
+  for X in $(src_names_of "$U_SRC"); do
+    case " $U_NAMES " in
+      *" $X "*) ;;
+      *) u_streak_reset "$HROLE" "$X" ;;
+    esac
+  done
+done
+
+# 🔴 REPORTING BESIDE SCOPES BESIDE ESCALATED, and a refusal at either zero. A
+# ladder walked over no hosts, or over no scopes, produces `escalated=0` — the
+# identical output to a fleet where every scope measures. Neither number means
+# anything alone, and the summary is withheld entirely rather than printed as a
+# clean-looking triple over an empty set.
+if [ "$U_REPORTING" = 0 ]; then
+  echo "[srcblind] NOT EVALUATED — no host returned a src-unmeasured fact set; obtained from: ${CHECKED:-none}."
+  echo "[srcblind]   this is not 'nothing is stuck'. No scope on any host was counted."
+elif [ "$U_SCOPES" = 0 ]; then
+  echo "[srcblind] NOT EVALUATED — $U_REPORTING host(s) answered and between them named ZERO"
+  echo "[srcblind]   built-source scopes. A ladder over no scopes is not a clean ladder; it is no ladder."
+else
+  echo "[srcblind] hosts-reporting=$U_REPORTING scopes=$U_SCOPES unmeasured=$U_UNMEASURED escalated=$U_ESCALATED"
+fi
+echo
+
 # ── FUZZYCLAW PHASE-2 GATE ────────────────────────────────────────────────────
 # See "THE FUZZYCLAW PHASE-2 GATE" in the header for what this measures and why
 # it is local-only. Here: how it refuses to produce a silent zero.
@@ -1638,6 +1977,9 @@ if [ "$rc" != 0 ]; then
   echo "  rc17=the srcDir SUBTREE a nix/pkgs package is BUILT FROM is behind/ahead its own upstream"
   echo "       on that host. A repo that is behind OUTSIDE every srcDir is reported, never rc 17."
   echo "       (ranks between rc8 and rc14 — the digit is not the severity; see severity() )"
+  echo "  rc18=a built-source scope has been UNMEASURABLE for N consecutive runs on that host"
+  echo "       (no upstream / fetch failing), so rc17 cannot fire for it. repo ABSENT never"
+  echo "       escalates. (ranks just under rc13 — same 'could not look' class, smaller scope)"
 fi
 [ -n "$UNCHECKED" ] && echo "drift-check: NOT checked: $UNCHECKED"
 exit "$rc"
