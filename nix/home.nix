@@ -114,7 +114,8 @@ let
   # skill appears as a /<name> command in the TUI with source="command" and
   # non-empty hints, fixing the autocomplete gap where source="skill" entries
   # get hints=[] and are excluded from the dropdown.
-  opencodeCommands = pkgs.runCommandLocal "devrc-opencode-commands" { } ''
+  opencodeCommands = pkgs.runCommandLocal "devrc-opencode-commands"
+    { nativeBuildInputs = [ pkgs.python3 ]; } ''
     mkdir -p "$out"
     python3 ${../scripts/opencode/generate-commands.py} ${../claude/skills} "$out"
   '';
