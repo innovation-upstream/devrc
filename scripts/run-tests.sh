@@ -825,7 +825,18 @@ TARGET_FLOORS=(
   # ⚠ ZERO new skips on this target. NO new file lands under it (the gate's two
   # files already existed on this branch); the +80 tests are all inside
   # scripts/tests/test_no_captured_text.py.
-  "scripts/tests|4976"
+  #
+  # 2026-08-19, the session identity resolver (scripts/session-resolve): 5303 ->
+  # 5405 collected, +102 for scripts/tests/test_session_resolve.py. The target
+  # needs no HERMETIC_TARGETS entry — scripts/tests is already a directory
+  # target — so this ONE number is the whole registration. `_suggested_floor
+  # 5405` = 5405 - min(50, max(1, 270)) = 5355, the gate's own function applied
+  # to its own count, never arithmetic on two sides of a conflict.
+  # ⚠ ZERO new skips. ⚠ CONFLICT EXPECTED: a concurrent branch adds
+  # scripts/tests/test_waiting_windows.py under this same target, so this line
+  # will need a test-merge — re-run the gate on the MERGED tree and copy the
+  # number IT prints rather than adding the two branches' deltas together.
+  "scripts/tests|5355"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —

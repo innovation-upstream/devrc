@@ -195,6 +195,27 @@ LABEL_SOURCE_SESSION = "session"
 _UNMEASURED_PREFIX = "unmeasured:"
 MEASURED_OK = "ok"
 
+# --------------------------------------------------------------------------- #
+# 🔴 THE PRESENCE TRICHOTOMY — three states, three tokens, for EVERY optional
+# source. Two tokens is the bug: with only present/absent, "the registry could
+# not be read" and "the registry was read and this window has no record" collapse
+# into the same empty field, and an operator goes hunting a broken registry that
+# is working perfectly. Measured: 24 of 59 windows carried a harness record, so
+# ABSENT is the MAJORITY case and is a real measurement.
+#
+# The same trichotomy binds every other optional source — the session-manager
+# row, the git branch, and above all the `gh` PR lookup, where "no open PR for
+# this branch" (measured: the work is done) and "gh failed or was not run"
+# (unmeasured) mean opposite things to anyone deciding what to do next.
+#
+# Each carrier is a `<source>_presence` field holding exactly one of these, and
+# `<source>_measurement` carries the REASON whenever the value is UNMEASURED.
+# --------------------------------------------------------------------------- #
+PRESENCE_PRESENT = "present"
+PRESENCE_ABSENT = "absent"
+PRESENCE_UNMEASURED = "unmeasured"
+ALL_PRESENCE_STATES = (PRESENCE_PRESENT, PRESENCE_ABSENT, PRESENCE_UNMEASURED)
+
 
 def unmeasured(reason: str) -> str:
     """The ONLY spelling of a not-measured status. Never returns a bare 0/None.
@@ -711,7 +732,9 @@ def measure_git(cwd: Optional[str], src: Sources) -> dict:
     would assert the blocked-PR case is absent when it was simply not looked at.
     """
     out = {"branch": None, "branch_status": MEASURED_OK,
-           "pr": None, "pr_status": MEASURED_OK}
+           "branch_presence": PRESENCE_UNMEASURED,
+           "pr": None, "pr_status": MEASURED_OK,
+           "pr_presence": PRESENCE_UNMEASURED}
     if not cwd:
         out["branch_status"] = unmeasured("no-cwd")
         out["pr_status"] = unmeasured("no-cwd")
@@ -719,21 +742,32 @@ def measure_git(cwd: Optional[str], src: Sources) -> dict:
 
     runner = src.git_runner or src.runner
     if cwd in src.branch_cache:
-        branch, branch_status = src.branch_cache[cwd]
+        branch, branch_status, branch_presence = src.branch_cache[cwd]
     else:
         rc, stdout, stderr = runner(
             ["git", "-C", cwd, "branch", "--show-current"], timeout=15)
         if rc != 0:
-            branch, branch_status = None, unmeasured(
+            branch = None
+            branch_status = unmeasured(
                 f"git-branch-failed:rc={rc}:{(stderr or '').strip()[:120]}")
+            branch_presence = PRESENCE_UNMEASURED
         else:
             name = (stdout or "").strip()
             branch = name or None
-            branch_status = MEASURED_OK if name else unmeasured(
-                "detached-head-or-no-branch")
-        src.branch_cache[cwd] = (branch, branch_status)
-    out["branch"], out["branch_status"] = branch, branch_status
+            # 🔴 A DETACHED HEAD is a MEASURED absence of a branch: git answered,
+            # and there genuinely is no branch. It is ABSENT, not UNMEASURED —
+            # calling it unmeasured would send a reader looking for a broken git.
+            branch_status = MEASURED_OK
+            branch_presence = PRESENCE_PRESENT if name else PRESENCE_ABSENT
+        src.branch_cache[cwd] = (branch, branch_status, branch_presence)
+    out["branch"] = branch
+    out["branch_status"] = branch_status
+    out["branch_presence"] = branch_presence
 
+    # 🔴 THE TRICHOTOMY THAT MATTERS MOST. "No open PR for this branch" and "the
+    # gh call did not happen" are OPPOSITE answers to "is this window idle
+    # because its PR is blocked?", and a shared token makes them indistinguishable
+    # — which is precisely session-manager's documented blind spot, reintroduced.
     if not src.want_pr:
         out["pr_status"] = unmeasured("pr-lookup-not-requested")
         return out
@@ -743,7 +777,7 @@ def measure_git(cwd: Optional[str], src: Sources) -> dict:
 
     cache_key = (cwd, branch)
     if cache_key in src.pr_cache:
-        out["pr"], out["pr_status"] = src.pr_cache[cache_key]
+        out["pr"], out["pr_status"], out["pr_presence"] = src.pr_cache[cache_key]
         return out
 
     gh = src.gh_runner or src.runner
@@ -753,16 +787,21 @@ def measure_git(cwd: Optional[str], src: Sources) -> dict:
         timeout=45)
     if rc != 0:
         result = (None, unmeasured(
-            f"gh-failed:rc={rc}:{(stderr or '').strip()[:120]}"))
+            f"gh-failed:rc={rc}:{(stderr or '').strip()[:120]}"),
+            PRESENCE_UNMEASURED)
     else:
         try:
             prs = json.loads(stdout or "[]")
         except ValueError as exc:
-            result = (None, unmeasured(f"gh-bad-json:{exc}"))
+            result = (None, unmeasured(f"gh-bad-json:{exc}"),
+                      PRESENCE_UNMEASURED)
         else:
-            result = (prs, MEASURED_OK)
+            # gh answered. A NON-EMPTY list is PRESENT; an EMPTY list is a
+            # MEASURED absence — "this branch really has no open PR".
+            result = (prs, MEASURED_OK,
+                      PRESENCE_PRESENT if prs else PRESENCE_ABSENT)
     src.pr_cache[cache_key] = result
-    out["pr"], out["pr_status"] = result
+    out["pr"], out["pr_status"], out["pr_presence"] = result
     return out
 
 
@@ -806,19 +845,14 @@ def build_targets(src: Sources) -> dict:
         harness = None
         harness_status = None
         harness_status_field = MEASURED_OK
-        # 🔴 THREE STATES, NOT TWO. `harness_present` exists because None alone
-        # cannot tell "the registry was unreadable" from "the registry was read
-        # and this window legitimately has no record" — and 35 of 59 windows are
-        # the latter. Collapsing them is the null-is-not-zero bug in its most
-        # tempting form: both render as an empty status field.
-        #   None  -> UNMEASURED, reason in harness_status_measurement
-        #   False -> measured: no harness record for this window (NORMAL)
-        #   True  -> measured: record joined, harness_status carries its value
-        harness_present = None
+        # 🔴 See ALL_PRESENCE_STATES. UNMEASURED = the registry could not be
+        # read; ABSENT = it was read and this window has no record (the MAJORITY
+        # case, 35 of 59 measured); PRESENT = a record joined.
+        harness_presence = PRESENCE_UNMEASURED
         if is_unmeasured(registry["status"]):
             harness_status_field = registry["status"]
         elif reg_matches:
-            harness_present = True
+            harness_presence = PRESENCE_PRESENT
             n_reg += 1
             obj, pane_id = reg_matches[0]
             harness = shape_harness(obj, pane_id)
@@ -830,22 +864,29 @@ def build_targets(src: Sources) -> dict:
         else:
             # 🔴 A window with NO registry record is NORMAL — 35 of 59 measured.
             # It is a real measured absence, not an error and not a zero.
-            harness_present = False
+            harness_presence = PRESENCE_ABSENT
             harness_status_field = MEASURED_OK
 
         sm_matches = sm["by_key"].get((session, window_id)) or []
         sm_block = {f: None for f in SM_PASSTHROUGH_FIELDS}
         sm_status_field = sm["status"]
         sm_host = None
+        # 🔴 The same trichotomy. UNMEASURED = session-manager could not be run
+        # or parsed; ABSENT = it ran and reported no row for this window (so
+        # waiting_probable is genuinely UNKNOWN for it, never False); PRESENT =
+        # a row joined and every field below is session-manager's OWN value.
+        sm_presence = PRESENCE_UNMEASURED
         if is_unmeasured(sm["status"]):
             pass
         elif sm_matches:
+            sm_presence = PRESENCE_PRESENT
             n_sm += 1
             sm_host, row = sm_matches[0]
             for f in SM_PASSTHROUGH_FIELDS:
                 sm_block[f] = row.get(f)
             sm_status_field = MEASURED_OK
         else:
+            sm_presence = PRESENCE_ABSENT
             sm_status_field = unmeasured("no-session-manager-row-for-window")
 
         label, label_source = _label_for(slot, head.get("cwd"), session)
@@ -875,7 +916,7 @@ def build_targets(src: Sources) -> dict:
             # 🔴 TWO STATUSES, NEVER COLLAPSED. Distinct names, no mapping.
             "harness_status": harness_status,
             "harness_status_measurement": harness_status_field,
-            "harness_present": harness_present,
+            "harness_presence": harness_presence,
             "harness": harness,
 
             "waiting_probable": sm_block["waiting_probable"],
@@ -883,6 +924,7 @@ def build_targets(src: Sources) -> dict:
             "waiting_status": sm_block["waiting_status"],
             "session_manager_status": sm_block["status"],
             "session_manager_measurement": sm_status_field,
+            "session_manager_presence": sm_presence,
             "session_manager_host": sm_host,
             "unsent_prompt": sm_block["unsent_prompt"],
             "unsent_prompt_status": sm_block["unsent_prompt_status"],
@@ -1119,6 +1161,10 @@ def _fmt(value, status=None):
 HARNESS_NO_RECORD = ("no harness record for this window "
                      "(MEASURED absence — normal, most windows have none)")
 WAITING_NOT_MEASURED = "UNMEASURED (session-manager reported no value)"
+#: 🔴 The two PR strings that must never merge. `gh` ran and found nothing vs
+#: `gh` never ran. Pinned as whole strings so a reword cannot walk the guard.
+PR_NONE_MEASURED = "none — gh answered, this branch has NO open PR (MEASURED)"
+BRANCH_DETACHED = "none — detached HEAD, no branch (MEASURED)"
 
 
 def render_harness_status(t: dict) -> str:
@@ -1126,9 +1172,9 @@ def render_harness_status(t: dict) -> str:
     into the UNMEASURED wording — a window with no harness record has been
     measured, and saying otherwise would send an operator hunting a broken
     registry that is working perfectly."""
-    if is_unmeasured(t["harness_status_measurement"]):
+    if t["harness_presence"] == PRESENCE_UNMEASURED:
         return _fmt(None, t["harness_status_measurement"])
-    if t["harness_present"] is False:
+    if t["harness_presence"] == PRESENCE_ABSENT:
         return HARNESS_NO_RECORD
     if t["harness_status"] is None:
         return _fmt(None, unmeasured("registry-record-has-no-status-field"))
@@ -1139,7 +1185,7 @@ def render_waiting_probable(t: dict) -> str:
     """session-manager's value, or its OWN reason for not having one. Never
     renders a missing waiting_probable as False — `--no-capture` makes it null
     for every row, and False would assert 'measured, not waiting'."""
-    if is_unmeasured(t["session_manager_measurement"]):
+    if t["session_manager_presence"] != PRESENCE_PRESENT:
         return _fmt(None, t["session_manager_measurement"])
     if t["waiting_probable"] is None:
         detail = t.get("waiting_status") or "no reason given"
@@ -1219,11 +1265,15 @@ def render(result: dict) -> str:
         lines.append("")
         g = t["git"]
         lines.append("  -- git / PR --")
-        lines.append(f"  branch         : {_fmt(g['branch'], g['branch_status'])}")
-        if is_unmeasured(g["pr_status"]):
+        if g["branch_presence"] == PRESENCE_ABSENT:
+            lines.append(f"  branch         : {BRANCH_DETACHED}")
+        else:
+            lines.append(
+                f"  branch         : {_fmt(g['branch'], g['branch_status'])}")
+        if g["pr_presence"] == PRESENCE_UNMEASURED:
             lines.append(f"  open PR        : {_fmt(None, g['pr_status'])}")
-        elif not g["pr"]:
-            lines.append("  open PR        : none (measured)")
+        elif g["pr_presence"] == PRESENCE_ABSENT:
+            lines.append(f"  open PR        : {PR_NONE_MEASURED}")
         else:
             for pr in g["pr"]:
                 lines.append(f"  open PR        : #{pr.get('number')} "
