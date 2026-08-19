@@ -1808,15 +1808,48 @@ def test_the_host_vocabulary_is_pinned_against_session_manager():
         f"session-manager says {found}, session-resolve says {sr.HOST_NAMES}")
 
 
+def sm_payload_honouring_host(host):
+    """session-manager as it ACTUALLY behaves: `--host` decides which hosts come
+    back. `all` returns both; a single host returns only that one.
+
+    🔴 The previous version of the test below injected BOTH hosts regardless of
+    `--host`, so reverting the default to a single host changed nothing it could
+    observe — the test written to guard the 🔴 did not catch the 🔴. A fixture
+    that ignores the variable under test cannot see a regression in it.
+    """
+    payload = sm_payload_two_hosts()
+    if host == sr.HOST_ALL:
+        return payload
+    payload["hosts"] = {h: o for h, o in payload["hosts"].items() if h == host}
+    return payload
+
+
 def test_a_remote_window_resolves_under_the_DEFAULT_flags():
-    """🔴 THE AUDIT'S REPRODUCTION, as a test. With the default `--host`, a
-    window on the other machine must RESOLVE, not report UNMATCHED."""
+    """🔴 THE AUDIT'S REPRODUCTION, as a test. With the DEFAULT `--host`, a
+    window on the other machine must RESOLVE, not report UNMATCHED.
+
+    The fixture honours `--host`, so reverting the default to `workbench` makes
+    this go red — which is the whole point of the test.
+    """
     args = sr.build_parser().parse_args(["show", REMOTE_CWD])
     src = base_sources(host=args.host, local_host=HOST,
-                       sm_payload=sm_payload_two_hosts())
+                       sm_payload=sm_payload_honouring_host(args.host))
     res = sr.resolve(REMOTE_CWD, src)
     assert res["status"] == sr.STATUS_RESOLVED, res.get("reason")
     assert res["target"]["host"] == REMOTE_HOST
+
+
+def test_a_single_host_flag_really_does_hide_the_other_machine():
+    """The CONTROL that makes the test above meaningful: with `--host` naming
+    one machine, the other's window genuinely is unreachable — and the report
+    says so rather than reporting a bare UNMATCHED."""
+    src = base_sources(host=HOST, local_host=HOST,
+                       sm_payload=sm_payload_honouring_host(HOST))
+    res = sr.resolve(REMOTE_CWD, src)
+    assert res["status"] == sr.STATUS_UNMATCHED
+    not_attempted = [h for h in res["hosts_consulted"]
+                     if h["status"] == sr.HOST_NOT_ATTEMPTED]
+    assert not_attempted, res["hosts_consulted"]
 
 
 def test_an_unmatched_result_names_the_hosts_it_consulted():
@@ -1825,8 +1858,11 @@ def test_an_unmatched_result_names_the_hosts_it_consulted():
     res = sr.resolve("no-such-window-anywhere",
                      two_host_sources())
     assert res["status"] == sr.STATUS_UNMATCHED
-    assert set(res["hosts_consulted"]) == {HOST, REMOTE_HOST}
+    assert {h["host"] for h in res["hosts_consulted"]} >= {HOST, REMOTE_HOST}
     assert HOST in res["reason"] and REMOTE_HOST in res["reason"]
+    # 🔴 every entry states what ACTUALLY happened to that host
+    assert all(h["status"] in sr.ALL_HOST_STATUSES
+               for h in res["hosts_consulted"])
     text = sr.render(res)
     assert "hosts consulted" in text
     assert REMOTE_HOST in text
@@ -1837,7 +1873,8 @@ def test_every_outcome_carries_hosts_consulted():
     built = sr.build_targets(two_host_sources())
     for selector in (REMOTE_CWD, "alpha1", "nothing-matches"):
         res = sr.resolve(selector, two_host_sources(), built=built)
-        assert set(res["hosts_consulted"]) == {HOST, REMOTE_HOST}, selector
+        seen = {h["host"] for h in res["hosts_consulted"]}
+        assert seen >= {HOST, REMOTE_HOST}, selector
         assert "hosts consulted" in sr.render(res), selector
 
 
@@ -1944,6 +1981,18 @@ def test_a_long_unsent_prompt_is_truncated_before_reaching_scrollback():
     assert SM_UNSENT_A in sr.render(resolve(WIN_A_ID))
 
 
+def test_the_truncation_boundary_is_pinned_from_both_sides():
+    """🔴 `<=` -> `<` survives a one-sided test: an EXACTLY-limit prompt would
+    print `[+0 chars not shown]`, which is both wrong and absurd."""
+    limit = sr.UNSENT_PROMPT_MAX
+    exactly = "y" * limit
+    one_over = "y" * (limit + 1)
+    assert sr.truncate_captured(exactly) == exactly
+    assert "not shown" not in sr.truncate_captured(exactly)
+    assert sr.truncate_captured(one_over) != one_over
+    assert "[+1 chars not shown]" in sr.truncate_captured(one_over)
+
+
 def test_truncate_captured_reports_nothing_for_an_absent_value():
     assert sr.truncate_captured(None) == "-"
     assert sr.truncate_captured("") == "-"
@@ -2042,3 +2091,130 @@ def test_a_measured_absence_and_an_unmeasured_source_still_differ():
     assert unmeasured["session_manager_presence"] == sr.PRESENCE_UNMEASURED
     assert sr.is_unmeasured(unmeasured["session_manager_measurement"])
     assert sr.WAITING_NO_ROW not in sr.render_waiting_probable(unmeasured)
+
+
+# =========================================================================== #
+# §14  🔴 ROUND 2 — the fix for the 🔴 introduced a POSITIVE FALSE CLAIM
+# =========================================================================== #
+def sm_payload_with_unreachable_remote():
+    payload = sm_payload_two_hosts()
+    payload["hosts"][REMOTE_HOST] = {
+        "reachable": False,
+        "error": "ssh: connect timed out",
+        "windows": [],
+    }
+    return payload
+
+
+def test_an_unreachable_host_is_never_reported_as_read():
+    """🔴 THE ROUND-1 FIX'S OWN BUG. Naming a host as "consulted" says nothing
+    about whether it ANSWERED: with `laptop {reachable: false}` the report
+    printed `hosts consulted : laptop, workbench` and `session-manager: ok`,
+    disclosed only by a DROPPED line a dozen rows below and by NOTHING in
+    --json. The original defect was a silent gap; asserting a host was consulted
+    when it was not is worse — it puts a false statement where there was
+    previously only an absence.
+    """
+    res = sr.resolve("nothing-matches",
+                     base_sources(sm_payload=sm_payload_with_unreachable_remote()))
+    by_host = {h["host"]: h for h in res["hosts_consulted"]}
+    assert by_host[REMOTE_HOST]["status"] == sr.HOST_UNREACHABLE
+    assert by_host[REMOTE_HOST]["status"] != sr.HOST_READ
+    assert "timed out" in by_host[REMOTE_HOST]["reason"]
+    assert by_host[HOST]["status"] == sr.HOST_READ
+
+
+def test_the_unmatched_reason_separates_hosts_that_ANSWERED_from_those_that_did_not():
+    res = sr.resolve("nothing-matches",
+                     base_sources(sm_payload=sm_payload_with_unreachable_remote()))
+    assert res["status"] == sr.STATUS_UNMATCHED
+    assert "hosts that ANSWERED" in res["reason"]
+    answered, _, not_answered = res["reason"].partition("NOT answered")
+    assert HOST in answered
+    assert REMOTE_HOST in not_answered
+    assert REMOTE_HOST not in answered.split("ANSWERED")[-1]
+
+
+def test_the_human_view_marks_a_host_that_contributed_nothing():
+    text = sr.render(sr.resolve(
+        "nothing-matches",
+        base_sources(sm_payload=sm_payload_with_unreachable_remote())))
+    assert "contributed NOTHING" in text
+    assert sr.HOST_UNREACHABLE in text
+    assert "ssh: connect timed out" in text
+
+
+def test_a_host_not_in_scope_is_reported_as_not_attempted():
+    """🔴 The shape that made the --host regression invisible: a host that was
+    never queried at all. It is now named with its own status rather than being
+    absent from the report entirely."""
+    payload = sm_payload_two_hosts()
+    del payload["hosts"][REMOTE_HOST]
+    res = sr.resolve("nothing-matches", base_sources(sm_payload=payload))
+    statuses = {h["host"]: h["status"] for h in res["hosts_consulted"]}
+    # every REAL host is accounted for, including ones this run never queried
+    for name in sr.HOST_NAMES:
+        assert name in statuses, statuses
+    assert sr.HOST_NOT_ATTEMPTED in statuses.values()
+
+
+def test_every_host_entry_carries_a_status_from_the_pinned_vocabulary():
+    res = sr.resolve("nothing-matches",
+                     base_sources(sm_payload=sm_payload_with_unreachable_remote()))
+    assert res["hosts_consulted"]
+    for h in res["hosts_consulted"]:
+        assert set(h) == {"host", "status", "reason"}
+        assert h["status"] in sr.ALL_HOST_STATUSES
+    assert len(set(sr.ALL_HOST_STATUSES)) == 3
+
+
+def test_json_output_carries_the_per_host_status():
+    """🔴 --json carried NO per-host status at all before this."""
+    res = sr.resolve("nothing-matches",
+                     base_sources(sm_payload=sm_payload_with_unreachable_remote()))
+    blob = json.loads(json.dumps(res, default=str))
+    entry = [h for h in blob["hosts_consulted"] if h["host"] == REMOTE_HOST][0]
+    assert entry["status"] == sr.HOST_UNREACHABLE
+
+
+def test_a_write_verb_after_a_WELDED_separator_is_refused():
+    """🔴 The `;` split was SPELLED, not structural. MEASURED on tmux 3.7b:
+        tmux list-sessions -F 'x;' list-sessions   -> 44 lines (TWO commands)
+        tmux list-sessions -F 'x'  list-sessions   -> "too many arguments"
+    so a `;` welded to the previous token really is a separator, and a splitter
+    that only recognised a standalone ';' accepted the next command as an
+    argument."""
+    with pytest.raises(sr.ReadOnlyViolation) as exc:
+        sr._assert_read_only(["tmux", "list-panes", "-F", "#{window_id};",
+                              "send-keys", "-t", "x", "rm -rf /"])
+    assert "send-keys" in str(exc.value)
+
+    with pytest.raises(sr.ReadOnlyViolation):
+        sr._assert_read_only(["tmux", "list-windows", "-t", "sess;",
+                              "kill-session"])
+
+
+def test_the_welded_split_still_permits_the_tools_own_calls():
+    """POSITIVE CONTROL — none of the module's formats contains a `;`, and the
+    welded handling must not start refusing real reads."""
+    sr._assert_read_only(["tmux", "list-panes", "-a", "-F", sr.PANE_FORMAT])
+    sr._assert_read_only(["tmux", "list-windows", "-a", "-F", sr.WINDOW_FORMAT])
+    sr._assert_read_only(["tmux", "list-clients", "-F", sr.CLIENT_FORMAT])
+    for fmt in (sr.PANE_FORMAT, sr.WINDOW_FORMAT, sr.CLIENT_FORMAT):
+        assert ";" not in fmt
+
+
+def test_the_shared_hosts_not_covered_predicate_is_identical_in_both_scripts():
+    """🔴 ONE RULE, ONE PLACE. session-resolve open-coded this and was wrong
+    about the unknown-local-host case; both now go through the same function,
+    pinned here so they cannot drift apart again."""
+    ww_src = open(os.path.join(_HERE, "..", "waiting-windows"),
+                  encoding="utf-8").read()
+    assert "def hosts_not_covered(" in ww_src
+    for hosts, local, expected in [
+            (["a", "b"], "a", ["b"]),
+            (["a"], "a", []),
+            (["a", "b"], None, None),
+            ([], "a", []),
+    ]:
+        assert sr.hosts_not_covered(hosts, local) == expected

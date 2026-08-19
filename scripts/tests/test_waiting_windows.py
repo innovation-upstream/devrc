@@ -138,6 +138,47 @@ def report(hosts=None, *, summary=None, ledger_pids=None, ts="synthetic-ts"):
     }
 
 
+class _Forbidden(RuntimeError):
+    """Raised when a test reaches for the real world."""
+
+
+@pytest.fixture(autouse=True)
+def _no_real_world(monkeypatch, tmp_path):
+    """🔴 THIS FILE HAD NO AUTOUSE GUARD AT ALL.
+
+    The §15 `main()` tests were hermetic BY FLAG ONLY — `--no-state`
+    `--no-registry` `--json-file` — which is hermetic exactly as long as every
+    future test remembers all three. It did not hold even for the tests that
+    added it: `state_dir()` resolves to `~/.cache/…`, so a main() run without
+    `--no-state` wrote to the OPERATOR'S REAL CACHE, and the test asserting it
+    did not could never fail.
+
+    Two structural guards instead of three remembered flags:
+      * HOME is redirected under tmp_path, so `state_dir()` cannot reach the
+        real cache whatever flags a test passes;
+      * `subprocess.run` raises, so `fetch_report` cannot shell out to the real
+        session-manager.
+    """
+    # A name no other fixture in this file uses — several tests redirect HOME
+    # themselves and create their own `home/`, and they must keep winning.
+    hermetic_home = tmp_path / "_autouse_home"
+    hermetic_home.mkdir(exist_ok=True)
+    monkeypatch.setenv("HOME", str(hermetic_home))
+
+    def _boom(*a, **k):
+        raise _Forbidden(f"test reached subprocess.run: {a[:1]!r}")
+    monkeypatch.setattr(ww.subprocess, "run", _boom)
+
+
+def test_the_autouse_backstop_is_actually_installed(tmp_path):
+    """POSITIVE CONTROL on both halves — a guard nobody has watched work is not
+    a guard."""
+    assert str(tmp_path) in ww.state_dir(), ww.state_dir()
+    assert str(tmp_path) in ww.state_path()
+    with pytest.raises(_Forbidden):
+        ww.subprocess.run(["session-manager"])
+
+
 def run(rep, stamps=None, now=NOW, threshold=THRESHOLD):
     return ww.reconcile(rep, dict(stamps or {}), now, threshold)
 
@@ -2307,12 +2348,54 @@ def test_main_human_view_leads_with_the_actionable_total(tmp_path, capsys):
     assert out.index("ACTIONABLE:") < out.index("OVER THRESHOLD:")
 
 
+def _main_state(argv, tmp_path, capsys, state_file):
+    """main() with an EXPLICIT state path, so the assertion is about a file this
+    test controls rather than about the operator's cache."""
+    report_path = tmp_path / "report.json"
+    report_path.write_text(json.dumps(_ordering_report()), encoding="utf-8")
+    rc = ww.main(["--json", "--json-file", str(report_path), "--no-registry",
+                  "--threshold-secs", str(THRESHOLD), *argv],
+                 now=NOW, environ={}, state_file=str(state_file))
+    capsys.readouterr()
+    return rc
+
+
+def test_main_WRITES_the_state_file_when_not_told_otherwise(tmp_path, capsys):
+    """🔴 THE POSITIVE CONTROL, and the half that was missing. Without it, the
+    no-state assertion below passes for a writer that never writes at all —
+    which is exactly how `--no-state` survived being made a no-op."""
+    state = tmp_path / "written.json"
+    assert not state.exists()
+    rc = _main_state([], tmp_path, capsys, state)
+    assert rc == 0
+    assert state.exists(), "the state writer did not run at all"
+    assert json.loads(state.read_text(encoding="utf-8")) != {}
+
+
 def test_main_writes_no_state_file_when_told_not_to(tmp_path, capsys):
-    _main([], tmp_path, capsys)                       # creates report.json
-    before = set(str(p) for p in tmp_path.rglob("*"))
-    _main([], tmp_path, capsys)                       # must add NOTHING
-    after = set(str(p) for p in tmp_path.rglob("*"))
-    assert after - before == set()
+    """🔴 REWRITTEN. The previous version could not fail: it sampled `before`
+    AFTER a first run had already created everything, and pointed at
+    `~/.cache/…` rather than tmp_path, so making `--no-state` a no-op left all
+    174 tests green while the file was genuinely written.
+
+    Now the path is one this test owns and has verified is absent, and the
+    companion test above proves the writer works — so this going green means
+    `--no-state` suppressed a write that would otherwise have happened.
+    """
+    state = tmp_path / "must-not-appear.json"
+    assert not state.exists()
+    rc = _main_state(["--no-state"], tmp_path, capsys, state)
+    assert rc == 0
+    assert not state.exists(), (
+        "--no-state still wrote the state file — the flag is a no-op")
+
+
+def test_no_run_of_main_can_reach_the_real_cache(tmp_path, capsys):
+    """The class, not the instance: whatever flags a test passes, `state_dir()`
+    resolves under tmp_path rather than the operator's cache."""
+    _main_state([], tmp_path, capsys, tmp_path / "s.json")
+    assert str(tmp_path) in ww.state_dir()
+    assert "/home/zach/.cache" not in ww.state_dir()
 
 
 def test_the_threshold_env_var_name_is_the_one_the_module_publishes():
@@ -2322,3 +2405,24 @@ def test_the_threshold_env_var_name_is_the_one_the_module_publishes():
     assert ww.THRESHOLD_ENV == "WAITING_WINDOWS_THRESHOLD"
     secs, source = ww.resolve_threshold(None, {ww.THRESHOLD_ENV: "4242"})
     assert (secs, source) == (4242, "env")
+
+
+def test_hosts_not_covered_is_unmeasured_when_the_local_host_is_unknown():
+    """🔴 ONE RULE, TWO PLACES — this copy lacked the guard session-resolve had
+    just gained, so a report without `local_host` accused EVERY host of being
+    registry-excluded."""
+    assert ww.hosts_not_covered(["a", "b"], "a") == ["b"]
+    assert ww.hosts_not_covered(["a", "b"], None) is None
+    assert ww.hosts_not_covered(["a", "b"], "") is None
+    assert ww.hosts_not_covered([], "a") == []
+
+
+def test_a_report_without_local_host_does_not_accuse_every_host():
+    rep = report({HOST_A: [row(probable=True, signals=("selection_menu",),
+                               age=AGE_BIG)]})
+    rep.pop("local_host", None)
+    out, _ = ww.build_report(rep, {}, NOW, THRESHOLD, "flag", "ok",
+                             "/synthetic/state.json")
+    reg = out["coverage"]["registry"]
+    assert reg["hosts_not_covered"] is None
+    assert reg["hosts_not_covered_status"].startswith("unmeasured:")

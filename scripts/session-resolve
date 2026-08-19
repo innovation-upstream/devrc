@@ -168,10 +168,19 @@ FIELD_SEP = "\x1f"
 #: `_assert_read_only`, not by review. A write verb added to a call site raises.
 TMUX_READ_ONLY_SUBCOMMANDS = ("list-panes", "list-windows", "list-clients")
 
-#: tmux's own argv command separator. Allowed as a TOKEN (a format string may
-#: legitimately contain one), but it does NOT end the scan — everything after it
-#: is checked too, which is exactly the hole this closes.
+#: tmux's own argv command separator. It does NOT end the scan — everything
+#: after it is checked too, which is exactly the hole this closes.
+#:
+#: 🔴 tmux ALSO separates on a `;` WELDED to the end of the previous token, so
+#: splitting on the standalone token alone is a SPELLING, not a structure.
+#: MEASURED on tmux 3.7b:
+#:     tmux list-sessions -F 'x;' list-sessions   -> 44 lines (two commands ran)
+#:     tmux list-sessions -F 'x'  list-sessions   -> "too many arguments" error
+#: so an argv of [tmux, list-panes, -F, '#{window_id};', <write-verb>, ...] really
+#: is TWO commands to tmux, and a splitter that only recognises a bare ';'
+#: accepts the second one as an argument of the first.
 TMUX_SEPARATORS = (";",)
+TMUX_SEPARATOR_CHAR = ";"
 
 #: 🔴 session-manager flags. `--lean` is deliberately ABSENT — see the module
 #: docstring's refutation; the lean view does not carry `window_id`.
@@ -196,6 +205,21 @@ HOST_ALL = "all"
 #: compare equal to either — the bug that made `--host all` label local windows
 #: "all" and then exclude the real local host as if it were remote.
 LOCAL_HOST_UNKNOWN = "<local-host-unknown>"
+
+# --------------------------------------------------------------------------- #
+# 🔴 PER-HOST STATUS. Naming a host as "consulted" says nothing about whether it
+# ANSWERED, and the fix for the --host default turned that into a POSITIVE FALSE
+# CLAIM: with `laptop {reachable: false}` the report printed
+#     hosts consulted : laptop, workbench
+#     session-manager : ok
+# while laptop had contributed nothing, disclosed only by a `DROPPED:` line a
+# dozen rows further down and by nothing at all in --json. The original bug was a
+# silent GAP; asserting a host was consulted when it was not is worse, because it
+# puts a false statement where there was previously only an absence.
+HOST_READ = "read"                    # answered, rows (if any) are its own
+HOST_UNREACHABLE = "unreachable"      # session-manager tried and failed
+HOST_NOT_ATTEMPTED = "not-attempted"  # never in scope for this run
+ALL_HOST_STATUSES = (HOST_READ, HOST_UNREACHABLE, HOST_NOT_ATTEMPTED)
 
 DEFAULT_REGISTRY_DIR = os.path.expanduser("~/.claude/sessions")
 DEFAULT_SLOT_TABLE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -286,6 +310,18 @@ def unmeasured(reason: str) -> str:
     return _UNMEASURED_PREFIX + reason
 
 
+def hosts_not_covered(hosts_seen, local_host):
+    """-> (list | None). 🔴 ONE RULE, ONE PLACE — byte-identical to
+    `waiting-windows`'s function of the same name, pinned against it by a seam
+    test. `None` when the local host is unknown: with no local host there is no
+    answer to "which hosts can the registry not cover", and an empty list would
+    read as "it covers them all".
+    """
+    if not local_host:
+        return None
+    return sorted(h for h in hosts_seen if h != local_host)
+
+
 def registry_excluded_reason(host: str, local_host: str) -> str:
     """Why a target can NEVER carry a harness record.
 
@@ -310,19 +346,45 @@ class ReadOnlyViolation(RuntimeError):
 # Subprocess seam — the ONE impure entry point, replaced wholesale in tests.
 # --------------------------------------------------------------------------- #
 def _split_on_separators(tokens):
-    """Split a tmux argv tail into per-COMMAND segments on `;`.
+    """Split a tmux argv tail into per-COMMAND segments on tmux's `;`.
 
-    STATED LIMIT: a format string containing a bare `;` as its own argv token
-    would start a spurious segment. This module's formats are the constants at
-    the top of this file and contain none; and the failure direction is safe —
-    a spurious segment can only cause a REFUSAL, never an acceptance.
+    Handles BOTH shapes tmux accepts: the standalone `;` token, and a `;` welded
+    to the end of the previous token (measured on 3.7b — see TMUX_SEPARATORS).
+
+    🔴 STATED LIMIT, and it is a real one rather than a reassuring one. This is
+    a BEST-EFFORT reconstruction of tmux's own argv parsing, not a reimplementation
+    of it:
+
+      * a `;` that tmux would treat as literal (backslash-escaped, or one inside a
+        quoted argument that reached us pre-split) is treated here as a
+        separator. That direction is SAFE: it can only start a spurious segment
+        and cause a REFUSAL.
+      * conversely, any separator spelling tmux honours that is NOT covered here
+        would let a following command through. That direction is NOT safe, and
+        it is why the allowlist below re-checks EVERY segment rather than
+        trusting the split.
+
+    The guard's real backstop is not this function: it is that the only argv
+    this module ever constructs are the three read calls at the top of the file,
+    none of whose formats contain a `;`. `_assert_read_only` is defence in depth
+    for a caller that injects its own runner, and is documented as best-effort
+    rather than as a proof.
     """
     segments, current = [], []
     for token in tokens:
         if token in TMUX_SEPARATORS:
             segments.append(current)
             current = []
-        else:
+            continue
+        # a WELDED separator: `#{window_id};` ends this command and starts one.
+        while token.endswith(TMUX_SEPARATOR_CHAR):
+            token = token[:-1]
+            if token:
+                current.append(token)
+            segments.append(current)
+            current = []
+            token = ""
+        if token:
             current.append(token)
     segments.append(current)
     return [s for s in segments if s]
@@ -523,8 +585,7 @@ def parse_panes(raw: str) -> tuple:
     rows, malformed = _split_rows(raw, 7)
     panes = []
     for host, session, w_index, w_id, p_id, path, title in rows:
-        panes.append({"is_local": True,
-                      "tmux_host": host, "session": session,
+        panes.append({"tmux_host": host, "session": session,
                       "window_index": w_index, "window_id": w_id,
                       "pane_id": p_id, "cwd": path or None,
                       "pane_title": title or None})
@@ -742,7 +803,7 @@ def load_session_manager(src: Sources) -> dict:
     """
     out = {"by_key": {}, "status": MEASURED_OK, "rows_total": 0,
            "rows_unjoinable": 0, "unjoinable_reason": None, "dropped": [],
-           "hosts_seen": [], "local_host": None}
+           "hosts_seen": [], "local_host": None, "host_status": {}}
 
     payload = src.sm_payload
     if payload is None:
@@ -773,10 +834,12 @@ def load_session_manager(src: Sources) -> dict:
             continue
         out["hosts_seen"].append(host_name)
         if host_obj.get("reachable") is False:
-            out["dropped"].append(
-                f"host {host_name} unreachable: "
-                f"{host_obj.get('error') or 'no reason given'}")
+            reason = host_obj.get("error") or "no reason given"
+            out["host_status"][host_name] = {"status": HOST_UNREACHABLE,
+                                             "reason": reason}
+            out["dropped"].append(f"host {host_name} unreachable: {reason}")
             continue
+        out["host_status"][host_name] = {"status": HOST_READ, "reason": None}
         for row in host_obj.get("windows") or []:
             if not isinstance(row, dict):
                 continue
@@ -1027,7 +1090,6 @@ def build_targets(src: Sources) -> dict:
             continue
         row = rows[0][1]
         by_window[key] = [{
-            "is_local": False,
             "tmux_host": sm_host, "session": sm_session,
             "window_index": row.get("window_index"),
             "window_id": sm_window_id, "pane_id": None,
@@ -1051,8 +1113,16 @@ def build_targets(src: Sources) -> dict:
         # read and this window has no record (the MAJORITY case, 35 of 59
         # measured); PRESENT = a record joined.
         harness_presence = PRESENCE_UNMEASURED
-        is_local = head.get("is_local", True)
-        if not is_local:
+        # 🔴 Why this string comparison is safe, since it looks fragile:
+        # local tmux panes are keyed with `local_host` ITSELF a few lines above,
+        # so for them the two sides are the same object; and remote targets are
+        # only built when `local_host_known`, so `LOCAL_HOST_UNKNOWN` — which is
+        # not a legal host name and is refused by the parser's `choices` — can
+        # never equal a real host. An earlier revision carried a separate
+        # `is_local` flag; it was removed because it could not differ from this
+        # comparison in any state the code can construct, and a distinction the
+        # suite cannot see is one a reader will eventually "fix" the wrong way.
+        if host != local_host:
             harness_presence = PRESENCE_EXCLUDED
             harness_status_field = registry_excluded_reason(host, local_host)
         elif is_unmeasured(registry["status"]):
@@ -1103,7 +1173,7 @@ def build_targets(src: Sources) -> dict:
             sm_status_field = MEASURED_OK
 
         label, label_source = _label_for(slot, head.get("cwd"), session)
-        if not is_local:
+        if host != local_host:
             # tmux clients were read from THIS machine; they say nothing about
             # what is on screen over there.
             vis = {"clients": None, "attached_clients": None,
@@ -1117,7 +1187,7 @@ def build_targets(src: Sources) -> dict:
         # Running `git -C` on it locally would either fail or — far worse —
         # succeed against a same-named local path and report a branch that
         # belongs to a different checkout entirely.
-        if not is_local:
+        if host != local_host:
             git = {"branch": None,
                    "branch_status": unmeasured(
                        f"cwd-is-on-remote-host:{host}"),
@@ -1176,12 +1246,24 @@ def build_targets(src: Sources) -> dict:
 
     hosts_seen = sorted({tgt["host"] for tgt in targets}
                         | set(sm["hosts_seen"]))
+    # 🔴 Every host this run could have covered, each with what actually
+    # happened to it — including the ones never put in scope, which is what made
+    # the --host default regression invisible in the first place.
+    host_status = []
+    for name in sorted(set(hosts_seen) | set(HOST_NAMES)):
+        if name == LOCAL_HOST_UNKNOWN:
+            continue
+        entry = sm["host_status"].get(name)
+        if entry is None:
+            entry = {"status": HOST_NOT_ATTEMPTED,
+                     "reason": f"not in scope for --host {src.host}"}
+        host_status.append({"host": name, **entry})
     coverage = _coverage(len(targets), n_slot, n_reg, n_sm, tmux,
                          slots_status, registry, sm,
                          hosts_seen=hosts_seen, local_host=local_host,
                          targets=targets, local_host_known=local_host_known)
     return {"targets": targets, "coverage": coverage, "dropped": dropped,
-            "slots": slots}
+            "slots": slots, "host_status": host_status}
 
 
 def _label_for(slot, cwd, session) -> tuple:
@@ -1215,9 +1297,10 @@ def _coverage(n_windows, n_slot, n_reg, n_sm, tmux, slots_status, registry,
             # 🔴 UNMEASURED, not a list, when the local host is unknown. A list
             # would accuse EVERY host of being registry-excluded — the same
             # confident-wrong-zero this field exists to prevent, in the field
-            # itself.
-            "hosts_not_covered": ([h for h in hosts_seen if h != local_host]
-                                  if local_host_known else None),
+            # itself. ONE RULE, ONE PLACE: `hosts_not_covered` is the shared
+            # predicate, pinned against waiting-windows' copy by a seam test.
+            "hosts_not_covered": hosts_not_covered(
+                hosts_seen, local_host if local_host_known else None),
             "hosts_not_covered_status": (
                 MEASURED_OK if local_host_known
                 else unmeasured("local-host-name-unknown")),
@@ -1353,8 +1436,9 @@ def resolve(selector: str, src: Optional[Sources] = None,
         "target": None,
         "candidates": [],
         "candidate_count": len(matches),
-        # Unconditional: every outcome states which hosts were in scope.
-        "hosts_consulted": list(built["coverage"]["registry"]["hosts_seen"]),
+        # 🔴 Unconditional, and each entry says what ACTUALLY happened to that
+        # host — "consulted" alone was a claim the run could not support.
+        "hosts_consulted": list(built["host_status"]),
     }
 
     if not matches:
@@ -1365,13 +1449,20 @@ def resolve(selector: str, src: Optional[Sources] = None,
         # WHICH HOSTS is the confident wrong zero this module is built to avoid:
         # a real window on the other machine reported UNMATCHED while every
         # source read as consulted-and-fine.
-        result["hosts_consulted"] = list(reg["hosts_seen"])
+        # 🔴 Say which hosts ANSWERED, and name the ones that did not
+        # separately. "consulted laptop, workbench" while laptop was unreachable
+        # is the false claim this replaces.
+        answered = [h["host"] for h in built["host_status"]
+                    if h["status"] == HOST_READ]
+        silent = [f"{h['host']} ({h['status']})" for h in built["host_status"]
+                  if h["status"] != HOST_READ]
         result["reason"] = (
             f"no target matched {selector!r} under any of "
             f"{len(ALL_SELECTOR_KINDS)} selector kinds; consulted "
-            f"{', '.join(ALL_SOURCES)} across host(s) "
-            f"{', '.join(reg['hosts_seen']) or 'NONE'} "
-            f"({built['coverage']['windows_total']} window(s) known)")
+            f"{', '.join(ALL_SOURCES)}; hosts that ANSWERED: "
+            f"{', '.join(answered) or 'NONE'}"
+            + (f"; NOT answered: {', '.join(silent)}" if silent else "")
+            + f" ({built['coverage']['windows_total']} window(s) known)")
         return result
 
     if len(matches) > 1:
@@ -1511,6 +1602,24 @@ def render_waiting_probable(t: dict) -> str:
     return str(t["waiting_probable"])
 
 
+def _render_host_status(result: dict, indent: str = "  ") -> list:
+    """One line per host, each carrying its OWN verdict.
+
+    A bare "hosts consulted: laptop, workbench" is a claim the run cannot
+    support when one of them never answered — and it reads as reassurance
+    exactly where the gap is.
+    """
+    entries = result.get("hosts_consulted") or []
+    if not entries:
+        return [f"{indent}hosts consulted             : NONE"]
+    out = [f"{indent}hosts consulted             :"]
+    for e in entries:
+        mark = "" if e["status"] == HOST_READ else "   <- contributed NOTHING"
+        reason = f" ({e['reason']})" if e.get("reason") else ""
+        out.append(f"{indent}    {e['host']:<12} {e['status']}{reason}{mark}")
+    return out
+
+
 def render(result: dict) -> str:
     lines = []
     status = result["status"]
@@ -1521,8 +1630,7 @@ def render(result: dict) -> str:
         lines.append(f"  {result['reason']}")
         lines.append("  sources consulted: " +
                      ", ".join(result["sources_consulted"]))
-        lines.append("  hosts consulted  : " +
-                     (", ".join(result["hosts_consulted"]) or "NONE"))
+        lines.extend(_render_host_status(result, indent="  "))
         cov = result["coverage"]
         lines.append(f"    tmux           : {cov['tmux_panes_status']} "
                      f"({cov['windows_total']} windows)")
@@ -1618,9 +1726,9 @@ def render(result: dict) -> str:
     cov = result["coverage"]
     lines.append("")
     lines.append("  -- coverage (a window with no match is normal, not a zero) --")
-    # 🔴 Unconditional on EVERY outcome: which hosts were in scope at all.
-    lines.append("  hosts consulted             : "
-                 + (", ".join(result["hosts_consulted"]) or "NONE"))
+    # 🔴 Unconditional on EVERY outcome: which hosts were in scope, and what
+    # actually happened to each.
+    lines.extend(_render_host_status(result, indent="  "))
     lines.append(f"  windows                     : {cov['windows_total']}")
     lines.append(f"  with slot / without         : {cov['windows_with_slot']}"
                  f" / {cov['windows_without_slot']}")

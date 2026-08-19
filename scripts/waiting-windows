@@ -912,6 +912,25 @@ def prune_stamps(stamps, next_stamps, observed, generations, live_ids):
     return {"kept": kept, "counts": counts}
 
 
+def hosts_not_covered(hosts_seen, local_host):
+    """-> (list | None). 🔴 ONE RULE, ONE PLACE.
+
+    `session-resolve` open-coded this same predicate and was wrong about the
+    unknown-local-host case: with no `local_host` it returned a list naming
+    EVERY host as registry-excluded — the confident-wrong-zero these reports
+    exist to prevent, inside the field that exists to disclose it. This repo's
+    rule is that a predicate at N sites is wrong at N-1 of them, so both callers
+    now go through here.
+
+    `None` (not `[]`) when the local host is unknown: with no local host there is
+    no answer to "which hosts can the registry not cover", and an empty list
+    would read as "it covers them all".
+    """
+    if not local_host:
+        return None
+    return sorted(h for h in hosts_seen if h != local_host)
+
+
 def build_coverage(report, observed, generations,
                    unmeasured_rows, unmeasured_reasons, rows_without_window_id,
                    registry=None, reg_present=0, reg_absent=0,
@@ -949,7 +968,10 @@ def build_coverage(report, observed, generations,
         "status": registry.get("status"),
         "local_host": local_host,
         "hosts_covered": [local_host] if local_host in hosts_blk else [],
-        "hosts_not_covered": sorted(h for h in hosts_blk if h != local_host),
+        # 🔴 Guarded: a report lacking `local_host` used to accuse every host.
+        "hosts_not_covered": hosts_not_covered(hosts_blk, local_host),
+        "hosts_not_covered_status": (
+            "ok" if local_host else "unmeasured:local-host-unknown"),
         "records_total": registry.get("records_total"),
         "records_with_tmux": registry.get("records_with_tmux"),
         "records_unusable_clock": registry.get("records_unusable_clock"),
