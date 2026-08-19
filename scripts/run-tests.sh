@@ -894,7 +894,17 @@ TARGET_FLOORS=(
   # collected, +5 for the flag's probe/report/render cases in
   # test_initiative_scan.py. Gate's own count through the gate's own rule:
   #   _suggested_floor 386 = 386 - min(50, max(1, 19)) = 386 - 19 = 367.
-  "scripts/session-analysis/tests|367"
+  # 2026-08-19, the /analyze-service recon-cost harness: 386 -> 463 collected,
+  # +77 in the NEW scripts/session-analysis/tests/test_recon_cost.py (window
+  # boundary, classification, the never-a-clean-zero contract, the no-captured-
+  # text canaries, aggregation and --compare). That crossed the DRIFT CEILING,
+  # not the floor — the gate failed with
+  #   run-tests: ERROR — scripts/session-analysis/tests collected 463 tests but
+  #   its floor is only 367. … Raise the TARGET_FLOORS entry to
+  #   "scripts/session-analysis/tests|440"
+  # 440 is copied verbatim from that message, which is this run's own count put
+  # through the documented rule — never arithmetic done by hand here.
+  "scripts/session-analysis/tests|440"
   "scripts/session-analysis/session_insight/tests|55"
   "scripts/mail-actions/tests|129"
   # 2026-08-16, the Signal chat pipeline arrives as a NEW target: 387 collected
