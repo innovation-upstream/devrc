@@ -222,7 +222,6 @@
       "*kubectl*drain*": "ask",
       "*kubectl*edit*": "ask",
       "*kubectl*replace*": "ask",
-      "*kubectl*exec*": "ask",
       "*kubectl*cp*": "ask",
       "*kubectl*rollout undo*": "ask",
       // `get secret -o yaml` prints every value base64-encoded, i.e. plaintext.

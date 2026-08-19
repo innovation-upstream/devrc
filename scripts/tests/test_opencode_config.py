@@ -564,7 +564,6 @@ MUST_ASK = [
     "KUBECONFIG=$KC_HOMELAB kubectl apply -f x",
     "kubectl get secret x -o yaml",
     "KUBECONFIG=$KC_HOMELAB kubectl get secret x -o yaml",
-    "kubectl exec -it x -- sh",
     "kubectl cp a b",
     "kubectl edit deploy x",
     "kubectl rollout undo deploy/x",
@@ -781,6 +780,7 @@ MUST_ALLOW = [
     "rg foo",
     "flux get kustomizations -A",
     "kubectl rollout restart deploy/x",
+    "kubectl exec -it x -- sh",
 ]
 
 # Every agent that ships, plus the implicit primary. `None` == no agent block.
@@ -1004,12 +1004,11 @@ def test_all_asks_precede_all_denies():
     """
     items = list(load_config()["permission"]["bash"].items())[1:]
     asks = [k for k, v in items if v == "ask"]
-    assert len(asks) == 51, (
-        f"{len(asks)} `ask` rules in the bash block, pinned at 51 (50 after the "
-        f"1fb8c2b restoration, +1 for `*sudoedit*`). This is `==`, not `>=`, on "
-        f"purpose — see the docstring: a one-sided floor lets the cushion regrow "
-        f"silently until it is the same slack that let ten dangerous families be "
-        f"deleted with the gate green.\n"
+    assert len(asks) == 50, (
+        f"{len(asks)} `ask` rules in the bash block, pinned at 50. This is `==`, "
+        f"not `>=`, on purpose — see the docstring: a one-sided floor lets the "
+        f"cushion regrow silently until it is the same slack that let ten dangerous "
+        f"families be deleted with the gate green.\n"
         f"  FEWER: a collapse is the signature of a blanket ask->allow rewrite, "
         f"which ALSO makes this test's ordering assertion and the "
         f"prefix-tolerance test vacuous. If you pruned deliberately, lower this "
@@ -1060,7 +1059,7 @@ def test_every_dangerous_pattern_is_prefix_tolerant():
 DANGEROUS_FAMILIES = [
         "git stash", "git reset --hard", "git add -A", "rm -rf /x",
         "talosctl reset", "kubectl delete pod x", "kubectl apply -f x",
-        "kubectl exec -it x -- sh", "kubectl cp a b", "kubectl edit deploy x",
+        "kubectl cp a b", "kubectl edit deploy x",
         "kubectl replace -f x", "kubectl rollout undo deploy/x",
         "kubectl get secret x -o yaml", "flux delete source git x",
         "flux suspend kustomization x", "helm uninstall x",
