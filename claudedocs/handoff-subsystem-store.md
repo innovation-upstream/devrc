@@ -17,7 +17,8 @@ A durable store for subsystem data + history with clean Claude Code integration,
 from anywhere**. The local half is built, deployed and verified at the consumer on both hosts:
 the read half is cheap enough to run every `/resume`, searchable, and survives a malformed
 entry. The server half reached its cutover on 2026-08-18: **`store.zacx.dev` is live on the public
-internet**, Cloudflare-proxied, gated by a bearer token plus a mandatory `CF-Connecting-IP`. See
+internet**, proxied through Cloudflare and gated on two things — a bearer token, and a required
+`CF-Connecting-IP` header. See
 "State now — 🔴🔴 THE STORE IS PUBLIC" (the SECOND such block; the first is historical).
 
 ⚠ Two earlier revisions each closed with a framing the next day falsified — *"what remains is
@@ -265,9 +266,9 @@ the day you ship.*
   merge is not a clean merge.
 - 🔴 **MEASURED + FIXED 2026-08-18 — the answer was THE INTERNET, and the hole was already live in
   `trunk` before `#329`.** The production node's host firewall is `k0s/host-firewall/relay-firewall.sh`
-  (homelab-infra), a hand-maintained **deny-list**: an `iptables` `raw`-table chain `RELAY-GUARD`,
-  jumped from `PREROUTING` **for the public interface only**, holding one explicit `--dport N -j DROP`
-  per relay port. `ufw` inactive, `filter INPUT` policy **ACCEPT**, Calico `cali-from-host-endpoint`
+  (homelab-infra), a hand-maintained **deny-list**. It installs a dedicated chain in the `raw` table,
+  reached via a jump early in the packet path, restricted **only to the outward-facing NIC**, and
+  carrying a single explicit drop rule per relay port. `ufw` inactive, `filter INPUT` policy **ACCEPT**, Calico `cali-from-host-endpoint`
   **empty** — that chain is the only thing filtering, and **`8102` was not in it**. `#330` added the
   nginx `listen 0.0.0.0:8102` block and Flux reconciled it into the live ConfigMap; nothing added the
   matching DROP. Closed by homelab-infra **`#337`** (merged, applied to the node, verified below).
@@ -289,9 +290,11 @@ the day you ship.*
   reconciled" and "what the process is running" independent facts — never read one off the other.**
 - **What the direct hop bypasses.** `internet → node:8102 → nginx → nebula → store pod` skips
   Cloudflare, Traefik and the `subsystem-store-ratelimit` middleware **entirely** — none of them are
-  in that path. Both nebula gateways forward `CF-Connecting-IP` **verbatim and deliberately**
-  (`clusters/{homelab,production}/apps/nebula/gateway/gateway-nginx-config.yaml` — "MUST SURVIVE THIS
-  HOP … deliberately NOT re-set here"), so such a request arrives at the store as the trusted peer
+  in that path. Each nebula gateway passes `CF-Connecting-IP` through untouched, and that is an
+  intentional choice recorded in
+  `clusters/{homelab,production}/apps/nebula/gateway/gateway-nginx-config.yaml`, whose comment says
+  the value has to make it across this hop and must not be rewritten there. A request taking that
+  route therefore reaches the store wearing the trusted-peer address
   `10.244.0.123` with its header **read**. The live image is still `0.1.0`, so `#520`'s "trust the
   header only from a trusted peer" fix is **not running**: a direct caller could forge the header the
   per-client lockout is keyed on. The bearer token was the only remaining gate.
@@ -327,12 +330,14 @@ the day you ship.*
   than none — and it is not on the Tekton `clawgate-ci` path. Three options, none chosen: a Tekton
   pipeline, an rc in devrc's `drift-check.sh` (which already runs 4×/day as a passive deadman), or
   leave it manual and say so. (b) **It compares two FILES in one repo and cannot see the node** —
-  `relay-firewall.sh` is not Flux-reconciled, so repo-green with a stale node is possible. Checked by
+  `relay-firewall.sh` is not Flux-reconciled, so the repo can read green while the machine itself
+  lags behind. Checked by
   hand on 2026-08-18 (`cmp`: node == `origin/trunk`; live kernel 39 rules, `dport 8102` present, unit
   active), which is a reading, not a control.
 - 🔴 **REACHABLE ≠ EXPOSED — and reporting them as one class overstated the finding.** 12 further
-  wildcard-bound listeners on that node answered from off-mesh, which I first wrote up as a single
-  exposure group. Probed individually, only **one** was an open door:
+  services listening on the wildcard address responded to off-mesh probes, and my first write-up
+  lumped all of them into one exposure group. Testing each in turn, exactly **one** proved genuinely
+  reachable:
   - `9100` node_exporter — **2,258 metric lines, no auth at all.** 🔴 **CLOSED 2026-08-18** by
     homelab-infra **`#339`**: filesystem mounts, interfaces, kernel version, systemd unit names,
     served to anyone who asked. Now dropped in v4 and v6; a plain `curl` times out where it
@@ -343,12 +348,17 @@ the day you ship.*
     still to review. Nothing in the production cluster declares `nodePort: 30301`, so identify what
     holds it first; `179` peers over the private net, so it is likely droppable.
 - **The safe-to-close pattern `9100` established, worth reusing on the rest.** Find the consumer, read
-  the address it *actually* connects on, confirm it is not the public interface — **before** touching
-  the guard. Here: Prometheus Endpoints → `10.0.0.2:9100`/`10.0.0.4:9100`, `up=1` for both, with
+  which address it *actually* dials, and satisfy yourself that address is not the outward-facing
+  one — **before** touching
+  the guard. In this case Prometheus resolved the exporter to the two nodes' private-network
+  addresses on the node-exporter port, reporting healthy for each, with
   `count(up)=25` as the query-shape control so the reading is a measurement and not an empty result
-  wearing a healthy face. Then verify AFTER against the unit's own `ActiveEnterTimestamp` — guard
-  applied `17:01:18Z`, scrapes at `17:02:18Z` and `17:02:48Z`, both `health=up`. 🔴 **"Still up" is
-  worthless without a before-reading and a timestamp proving the after-reading postdates the change.**
+  wearing a healthy face. Afterwards, check your later sample against `ActiveEnterTimestamp` as the
+  unit itself reports it — guard
+  applied one minute before the first of two consecutive scrapes, each of which came back healthy.
+  🔴 **"Still up" is
+  worthless unless you also hold an earlier baseline plus a clock value showing your second sample
+  was taken once the change had landed.**
 - ⚠ **NOT A FLEET CLAIM, and this is the gap the `9100` work opened.** `relay-firewall` runs on
   **`diffsona` only**. `tryonhaulcentral-k8s` has no `RELAY-GUARD` at all, and Prometheus scrapes a
   node_exporter at `10.0.0.4:9100`, so the same unauthenticated daemon runs there. Its public exposure
@@ -394,9 +404,10 @@ the day you ship.*
 - **Symptom:** two control-plane protocols use the nodes' PUBLIC addresses even though both nodes
   share a private network (`10.0.0.0/24`) they already use for etcd, kubelet and metrics.
 - **Observed:** `konnectivity-agent` on both nodes carries
-  `--proxy-server-host=<the Traefik LB public IP> --proxy-server-port=8132`, and the agent on the
-  sibling node connects from its own public address. `projectcalico.org/IPv6Address` on **both**
-  nodes is their **public `/64`**, and `birdcl6 show protocols` reports
+  flags pointing it at the Traefik load-balancer's public address on the konnectivity port, and the
+  agent on the peer machine dials out using an address of its own that is publicly routable. Calico's
+  IPv6 address annotation, on each of the two nodes, likewise holds
+  that machine's **publicly routable `/64`**, and `birdcl6 show protocols` reports
   `Mesh_<peer> BGP … Established` since 2025-11-21.
 - **Ruled out:** that this is only IPv4-private. The v4 half *is* private
   (`IPv4Address = 10.0.0.x`, session `10.0.0.2:179 ← 10.0.0.4`) — which is exactly what made a
@@ -637,8 +648,9 @@ the day you ship.*
 
 ### The gateway bind change — scoped, then DECLINED
 Production's gateway binds `listen 0.0.0.0:<port>`; homelab's binds `10.42.0.10:<port>` (its nebula
-IP), which is why homelab's 39 relay ports were **never publicly exposed at all** — by construction,
-not by a firewall. Repointing production's bind would make new ports safe by default.
+IP), and that is the reason homelab's relay ports were **never reachable from outside** to begin
+with — a consequence of where the process binds, not of any filtering rule. Pointing production's
+bind at the same place would leave future ports closed unless something opened them.
 **Declined**, and the reasoning is worth keeping: it does **not** retire `RELAY-GUARD` (five
 non-nginx ports keep it alive), `#340` already makes the recurrence *detected* on the PR that
 introduces it, and the change costs 39 hand-edited listen lines, another gateway roll that blips
@@ -648,7 +660,7 @@ every public service, and a reboot bind-race. Revisit only if the gate proves in
 The tempting cheap fix — drop `8000-8199` / `9000-9099` on `eth0` with an allowlist, one small edit,
 no nginx changes, new ports closed by default — would have **severed konnectivity** (`8132` is inside
 that range and is configured to the public address) and also caught k0s-reserved `9099`.
-🔴 **A range is blind to what is inside it.**
+🔴 **A range tells you nothing about the individual ports it spans.**
 
 ### Instrument traps hit this session, each caught by a control
 - `docker manifest inspect` answers **"not found" for tags that plainly exist** on
@@ -664,9 +676,10 @@ that range and is configured to the public address) and also caught k0s-reserved
   `curl` then returns `http=000`, which is your resolver, not the service.
 
 ### The equivalent-mutant lesson
-Mutation-testing a fix that reordered two report blocks, the first mutant moved the `return` past
-both print blocks — output unchanged, suite green, **zero information**. The faithful mutant (early
-return placed *before* the first block, the real historical shape) killed 4 assertions. Also:
+While mutation-testing a fix that swapped the order of two report blocks, my opening mutant shifted
+the `return` beyond both print blocks — output identical, suite green, **zero information**. The
+faithful one, which put an early exit ahead of the opening block and so matched the real historical
+shape, killed 4 assertions. Also:
 asserting both findings' *strings* appear was too weak, because the buggy message contained the same
 token; the assertion that bites pins the **order**. **Check a mutant changes OUTPUT, not just control
 flow.**
@@ -730,7 +743,7 @@ curl -s -o /dev/null -w '%{http_code}\n' https://auditloop.zacx.dev/   # 302 —
 ## State now — 🔴🔴 THE STORE IS PUBLIC. `#329` merged 2026-08-18T23:28:31Z.
 
 🔴 **THE CUTOVER IS DONE. `store.zacx.dev` is live on the public internet** (homelab-infra
-`#329`, merged 2026-08-18T23:28:31Z as `d27b0cc1`), Cloudflare-proxied, gated by a bearer token
+`#329`, merged 2026-08-18T23:28:31Z as `d27b0cc1`), fronted by Cloudflare and gated on a bearer token
 plus a mandatory `CF-Connecting-IP`.
 
 - **homelab-infra `trunk` at `d27b0cc1`; devrc `main` at `268b49f`.** Both base clones re-synced;
