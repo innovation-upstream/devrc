@@ -847,6 +847,12 @@ TARGET_FLOORS=(
   #   scripts/tests  (collected=5433 passed=5432 …)
   #   _suggested_floor 5433 = 5433 - min(50, max(1, 271)) = 5433 - 50 = 5383
   #
+  # And once more after the three-state harness-presence split (+14 tests,
+  # 130 -> 144). Measured on this tree, not computed from the line above:
+  #
+  #   scripts/tests  (collected=5447)
+  #   _suggested_floor 5447 = 5447 - min(50, max(1, 272)) = 5447 - 50 = 5397
+  #
   # ⚠ A CONCURRENT BRANCH TOUCHES THIS SAME LINE (`scripts/session-resolve`,
   # adding scripts/tests/test_session_resolve.py under this same directory
   # target), so it WILL conflict. Resolve it the way the header says: re-run
@@ -858,7 +864,7 @@ TARGET_FLOORS=(
   # impure source injected; the only disk it touches is a pytest `tmp_path`
   # `$HOME` for the on-disk artifact-name pin), so EXPECTED_SKIPS is untouched.
   # Movement on THIS line is the evidence the gate runs the new file at all.
-  "scripts/tests|5383"
+  "scripts/tests|5397"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
