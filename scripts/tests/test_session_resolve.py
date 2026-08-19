@@ -77,6 +77,22 @@ def _no_real_subprocess(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_subprocess_module(monkeypatch):
+    """🔴 THE BACKSTOP, added because the seam guard above was reachable AROUND.
+
+    `_no_real_subprocess` replaces the module's runner symbol, but a dataclass
+    FIELD DEFAULT captured that symbol at class-creation time, so a
+    default-constructed `Sources()` sailed past it and really did spawn `git`.
+    This one patches `subprocess.run` ITSELF, which no binding can outrun — so
+    the next leak of this shape is red instead of silent, whatever route it
+    takes.
+    """
+    def _boom(*a, **k):
+        raise _Forbidden(f"test reached subprocess.run: {a[:1]!r}")
+    monkeypatch.setattr(sr.subprocess, "run", _boom)
+
+
+@pytest.fixture(autouse=True)
 def _no_real_registry(monkeypatch, tmp_path):
     """A bare `Sources()` must not see the operator's real files."""
     monkeypatch.setattr(sr, "DEFAULT_REGISTRY_DIR",
@@ -86,15 +102,42 @@ def _no_real_registry(monkeypatch, tmp_path):
 
 
 def test_hermeticity_fixtures_are_actually_installed(tmp_path):
-    """POSITIVE CONTROL: the raisers are in place AND they really raise.
+    """POSITIVE CONTROL — asserting what a DEFAULT-CONSTRUCTED `Sources()`
+    actually yields, not what the module globals say.
 
-    An autouse fixture that silently failed to apply would leave every other
-    test in this file free to shell out, and the suite would still be green.
+    🔴 THIS CONTROL USED TO BE UNABLE TO SEE THE THING IT GUARDED. It asserted
+    `sr.DEFAULT_REGISTRY_DIR` — a module global that nothing on the `Sources()`
+    path read, because `registry_dir` was a dataclass FIELD DEFAULT bound at
+    class-creation time. Under these very fixtures, `Sources().registry_dir` was
+    still `~/.claude/sessions` and `load_registry(Sources())` read 48 live
+    records off the operator's machine. A control that cannot observe the thing
+    is not a control. The defaults now resolve at CALL time, and this asserts
+    the resolved values.
     """
     with pytest.raises(_Forbidden):
         sr._default_runner(["tmux", "list-panes"], timeout=1)
-    assert not os.path.exists(sr.DEFAULT_REGISTRY_DIR)
-    assert not os.path.exists(sr.DEFAULT_SLOT_TABLE)
+
+    bare = sr.Sources()
+    assert bare.resolved_registry_dir() == sr.DEFAULT_REGISTRY_DIR
+    assert bare.resolved_slot_table_path() == sr.DEFAULT_SLOT_TABLE
+    assert not os.path.exists(bare.resolved_registry_dir())
+    assert not os.path.exists(bare.resolved_slot_table_path())
+
+    # the DECISIVE assertion: reading through a bare Sources() reaches NOTHING
+    # real. Before the fix this returned 48 records from the live machine.
+    loaded = sr.load_registry(bare)
+    assert loaded["records"] == []
+    assert sr.is_unmeasured(loaded["status"])
+
+    # and the runner default is reached too, not just the module global
+    with pytest.raises(_Forbidden):
+        bare.resolved_runner()(["tmux", "list-panes"], timeout=1)
+
+
+def test_a_bare_Sources_cannot_reach_the_real_machine_even_via_build_targets():
+    """The class-level claim, exercised through the top-level entry point."""
+    with pytest.raises(_Forbidden):
+        sr.build_targets(sr.Sources())
 
 
 # =========================================================================== #
@@ -276,9 +319,38 @@ def sm_payload():
     }
 
 
+#: The branch every hermetic fixture "measures". Distinct from every other
+#: string in this file so an assertion cannot pass by coincidence.
+STUB_BRANCH = "fixture-branch-a1"
+
+
+def _stub_runner(argv, timeout=None):
+    """🔴 The default runner for hermetic fixtures.
+
+    Before this existed, `base_sources()` injected NO runner, so `measure_git`
+    fell through to the dataclass FIELD DEFAULT — the real `_default_runner`,
+    captured at class-creation time and therefore beyond the autouse
+    monkeypatch. MEASURED on the audited tip: the raiser saw ZERO calls while a
+    real `subprocess.run(['git','-C','/w/repo-alpha','branch','--show-current'])`
+    executed on the operator's machine. Harmless in effect, but the suite was
+    NOT hermetic, and the control could not see it.
+
+    Answers `git branch` and refuses everything else, so an unexpected
+    subprocess is still loud.
+    """
+    if argv and argv[0] == "git":
+        return 0, STUB_BRANCH + "\n", ""
+    raise _Forbidden(f"fixture runner got an unexpected argv: {argv!r}")
+
+
 def base_sources(**over):
     kwargs = dict(
         host=HOST,
+        # 🔴 HOST is deliberately NOT one of the production HOST_NAMES, so the
+        # --host fallback cannot reach it. Injected explicitly: the fallback is
+        # exercised by its own tests, with a REAL host name, below.
+        local_host=HOST,
+        runner=_stub_runner,
         panes_raw=PANES_RAW,
         windows_raw=WINDOWS_RAW,
         clients_raw=CLIENTS_RAW,
@@ -566,7 +638,8 @@ def test_absent_slot_table_is_unmeasured_not_an_empty_mapping(tmp_path):
     """🔴 A missing slot table must not read as 'every session has no slot'."""
     missing = str(tmp_path / "gone.sh")
     res = sr.resolve(WIN_C_ID, sr.Sources(
-        host=HOST, panes_raw=PANES_RAW, windows_raw=WINDOWS_RAW,
+        host=HOST, local_host=HOST, runner=_stub_runner,
+        panes_raw=PANES_RAW, windows_raw=WINDOWS_RAW,
         clients_raw=CLIENTS_RAW, slot_table_text=None, slot_table_path=missing,
         registry_records=[], sm_payload=sm_payload()))
     t = res["target"]
@@ -580,7 +653,8 @@ def test_slot_table_is_read_from_disk_when_no_text_is_injected(tmp_path):
     path = tmp_path / "slots.sh"
     path.write_text(SLOT_TEXT, encoding="utf-8")
     res = sr.resolve(WIN_C_ID, sr.Sources(
-        host=HOST, panes_raw=PANES_RAW, windows_raw=WINDOWS_RAW,
+        host=HOST, local_host=HOST, runner=_stub_runner,
+        panes_raw=PANES_RAW, windows_raw=WINDOWS_RAW,
         clients_raw=CLIENTS_RAW, slot_table_text=None,
         slot_table_path=str(path), registry_records=[],
         sm_payload=sm_payload()))
@@ -651,7 +725,8 @@ def test_malformed_registry_json_is_counted_and_named_not_silently_skipped(
     (reg / "3333.json").write_text('["a list, not an object"]',
                                    encoding="utf-8")
     res = sr.resolve(WIN_B_ID, sr.Sources(
-        host=HOST, panes_raw=PANES_RAW, windows_raw=WINDOWS_RAW,
+        host=HOST, local_host=HOST, runner=_stub_runner,
+        panes_raw=PANES_RAW, windows_raw=WINDOWS_RAW,
         clients_raw=CLIENTS_RAW, slot_table_text=SLOT_TEXT,
         registry_records=None, registry_dir=str(reg), sm_payload=sm_payload()))
     cov = res["coverage"]
@@ -665,7 +740,8 @@ def test_malformed_registry_json_is_counted_and_named_not_silently_skipped(
 
 def test_an_absent_registry_directory_is_unmeasured_for_every_window(tmp_path):
     res = sr.resolve(WIN_B_ID, sr.Sources(
-        host=HOST, panes_raw=PANES_RAW, windows_raw=WINDOWS_RAW,
+        host=HOST, local_host=HOST, runner=_stub_runner,
+        panes_raw=PANES_RAW, windows_raw=WINDOWS_RAW,
         clients_raw=CLIENTS_RAW, slot_table_text=SLOT_TEXT,
         registry_records=None, registry_dir=str(tmp_path / "nope"),
         sm_payload=sm_payload()))
@@ -706,7 +782,8 @@ def test_harness_presence_present_absent_and_unmeasured_are_all_distinct(
     assert not sr.is_unmeasured(absent["harness_status_measurement"])
 
     unmeasured = sr.resolve(WIN_A_ID, sr.Sources(
-        host=HOST, panes_raw=PANES_RAW, windows_raw=WINDOWS_RAW,
+        host=HOST, local_host=HOST, runner=_stub_runner,
+        panes_raw=PANES_RAW, windows_raw=WINDOWS_RAW,
         clients_raw=CLIENTS_RAW, slot_table_text=SLOT_TEXT,
         registry_records=None, registry_dir=str(tmp_path / "gone"),
         sm_payload=sm_payload()))["target"]
@@ -725,7 +802,8 @@ def test_harness_absent_and_unmeasured_render_as_different_strings(tmp_path):
     assert "UNMEASURED" not in absent
 
     t = sr.resolve(WIN_A_ID, sr.Sources(
-        host=HOST, panes_raw=PANES_RAW, windows_raw=WINDOWS_RAW,
+        host=HOST, local_host=HOST, runner=_stub_runner,
+        panes_raw=PANES_RAW, windows_raw=WINDOWS_RAW,
         clients_raw=CLIENTS_RAW, slot_table_text=SLOT_TEXT,
         registry_records=None, registry_dir=str(tmp_path / "gone"),
         sm_payload=sm_payload()))["target"]
@@ -1635,12 +1713,47 @@ def test_an_explicit_local_host_overrides_session_managers_answer():
     assert built["coverage"]["registry"]["local_host"] == HOST
 
 
-def test_local_host_falls_back_to_the_host_argument_when_nothing_states_it():
+def test_local_host_falls_back_to_the_host_argument_only_for_a_REAL_host():
+    """🔴 The fallback is `--host`, but ONLY when it names a real host. The
+    previous fixture used a real-looking name for `--host`, so it could not
+    distinguish this implementation from one that accepts ANY string — including
+    the `all` sentinel."""
+    real = sr.HOST_NAMES[0]
     payload = sm_payload_two_hosts()
     payload.pop("local_host", None)
-    built = sr.build_targets(base_sources(host=HOST, local_host=None,
+    built = sr.build_targets(base_sources(host=real, local_host=None,
                                           sm_payload=payload))
-    assert built["coverage"]["registry"]["local_host"] == HOST
+    assert built["coverage"]["registry"]["local_host"] == real
+
+
+def test_the_all_sentinel_never_becomes_a_host_name():
+    """🔴 MEASURED BUG. With `--host all` and a payload lacking `local_host`,
+    `local_host` became "all"; the REAL local host was then != "all" and was
+    reported structurally excluded, and every physical window appeared TWICE —
+    once from local tmux labelled "all", once from session-manager under its
+    real name, with contradictory provenance."""
+    payload = sm_payload_two_hosts()
+    payload.pop("local_host", None)
+    built = sr.build_targets(base_sources(host=sr.HOST_ALL, local_host=None,
+                                          sm_payload=payload))
+    reg = built["coverage"]["registry"]
+    assert reg["local_host"] != sr.HOST_ALL
+    assert reg["local_host"] == sr.LOCAL_HOST_UNKNOWN
+    # 🔴 the real local host is NOT accused of being registry-excluded; with no
+    # local host name the question is UNANSWERABLE, so the field is UNMEASURED
+    # rather than a list naming every host it saw.
+    assert reg["hosts_not_covered"] is None
+    assert sr.is_unmeasured(reg["hosts_not_covered_status"])
+    # and no window is duplicated under two different host labels
+    addrs = [(t["host"], t["address"]) for t in built["targets"]]
+    assert len(addrs) == len(set(addrs))
+    plain = [a for _, a in addrs]
+    assert len(plain) == len(set(plain)), f"duplicate windows: {addrs}"
+    # local windows are STILL local by construction — never excluded
+    assert all(t["harness_presence"] != sr.PRESENCE_EXCLUDED
+               for t in built["targets"])
+    assert any("local host name could not be determined" in d
+               for d in built["dropped"])
 
 
 def test_a_missing_age_never_renders_a_unit_suffix():
@@ -1654,3 +1767,278 @@ def test_a_missing_age_never_renders_a_unit_suffix():
 
     local_text = sr.render(resolve(WIN_A_ID))
     assert f"{SM_AGE_A:.0f}s" in local_text
+
+
+# =========================================================================== #
+# §12  🔴 THE --host DEFAULT, AND main() — the audit's 🔴 plus 9 live mutants
+# =========================================================================== #
+def test_the_host_default_is_all_and_matches_session_manager():
+    """🔴 MEASURED BUG. It defaulted to the literal "workbench", so a real
+    window on the laptop reported UNMATCHED while every source read as
+    consulted-and-fine, and `hosts_not_covered` was EMPTY because only one host
+    had been seen — the disclosure mechanism disabled by the very bug it exists
+    to disclose."""
+    action = {a.dest: a for a in sr.build_parser()._actions}["host"]
+    assert action.default == sr.HOST_ALL == "all"
+    # 🔴 `choices` is not cosmetic: without it a typo'd host silently yields
+    # nothing, which is the same confident wrong zero one layer up.
+    assert action.choices is not None
+    assert set(action.choices) == {sr.HOST_ALL, *sr.HOST_NAMES}
+
+
+def test_an_unknown_host_is_rejected_by_the_parser():
+    with pytest.raises(SystemExit):
+        sr.build_parser().parse_args(["show", "x", "--host", "workbenhc"])
+
+
+def test_the_host_vocabulary_is_pinned_against_session_manager():
+    """🔴 SEAM PIN. A host added to session-manager and not here becomes
+    unreachable from this tool, silently."""
+    sm_src = open(os.path.join(_HERE, "..", "session-manager"),
+                  encoding="utf-8").read()
+    tree = ast.parse(sm_src)
+    found = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and any(
+                isinstance(x, ast.Name) and x.id == "HOST_NAMES"
+                for x in node.targets):
+            found = tuple(e.value for e in node.value.elts)
+    assert found is not None, "session-manager no longer defines HOST_NAMES"
+    assert tuple(sr.HOST_NAMES) == found, (
+        f"session-manager says {found}, session-resolve says {sr.HOST_NAMES}")
+
+
+def test_a_remote_window_resolves_under_the_DEFAULT_flags():
+    """🔴 THE AUDIT'S REPRODUCTION, as a test. With the default `--host`, a
+    window on the other machine must RESOLVE, not report UNMATCHED."""
+    args = sr.build_parser().parse_args(["show", REMOTE_CWD])
+    src = base_sources(host=args.host, local_host=HOST,
+                       sm_payload=sm_payload_two_hosts())
+    res = sr.resolve(REMOTE_CWD, src)
+    assert res["status"] == sr.STATUS_RESOLVED, res.get("reason")
+    assert res["target"]["host"] == REMOTE_HOST
+
+
+def test_an_unmatched_result_names_the_hosts_it_consulted():
+    """🔴 "consulted tmux, slot-table, harness-registry, session-manager" with
+    no host named is exactly the shape that hid the bug."""
+    res = sr.resolve("no-such-window-anywhere",
+                     two_host_sources())
+    assert res["status"] == sr.STATUS_UNMATCHED
+    assert set(res["hosts_consulted"]) == {HOST, REMOTE_HOST}
+    assert HOST in res["reason"] and REMOTE_HOST in res["reason"]
+    text = sr.render(res)
+    assert "hosts consulted" in text
+    assert REMOTE_HOST in text
+
+
+def test_every_outcome_carries_hosts_consulted():
+    """Unconditional — not only on the unmatched path."""
+    built = sr.build_targets(two_host_sources())
+    for selector in (REMOTE_CWD, "alpha1", "nothing-matches"):
+        res = sr.resolve(selector, two_host_sources(), built=built)
+        assert set(res["hosts_consulted"]) == {HOST, REMOTE_HOST}, selector
+        assert "hosts consulted" in sr.render(res), selector
+
+
+# --- main(): the arg -> Sources mapping, and the exit-code mapping --------- #
+def _main_capture(argv, monkeypatch, status=sr.STATUS_RESOLVED):
+    """Run main() with `resolve` stubbed, capturing the Sources it built."""
+    seen = {}
+
+    def fake_resolve(selector, src=None, built=None):
+        seen["selector"] = selector
+        seen["src"] = src
+        return {"status": status, "selector": selector,
+                "target": {"address": "a", "host": "h"}, "candidates": [],
+                "candidate_count": 0, "coverage": {}, "dropped": [],
+                "hosts_consulted": [], "matched_kinds": ["x"],
+                "sources_consulted": [], "reason": "r"}
+
+    monkeypatch.setattr(sr, "resolve", fake_resolve)
+    monkeypatch.setattr(sr, "render", lambda r: "rendered")
+    rc = sr.main(argv)
+    return rc, seen
+
+
+def test_main_passes_the_host_argument_into_Sources(monkeypatch):
+    _, seen = _main_capture(["show", "Gold", "--host", "laptop"], monkeypatch)
+    assert seen["src"].host == "laptop"
+
+
+def test_main_defaults_the_host_to_all(monkeypatch):
+    _, seen = _main_capture(["show", "Gold"], monkeypatch)
+    assert seen["src"].host == sr.HOST_ALL
+
+
+def test_main_passes_pr_and_registry_dir_into_Sources(monkeypatch):
+    _, seen = _main_capture(
+        ["show", "Gold", "--pr", "--registry-dir", "/synthetic/reg"],
+        monkeypatch)
+    assert seen["src"].want_pr is True
+    assert seen["src"].resolved_registry_dir() == "/synthetic/reg"
+
+
+def test_main_leaves_pr_off_by_default(monkeypatch):
+    _, seen = _main_capture(["show", "Gold"], monkeypatch)
+    assert seen["src"].want_pr is False
+
+
+def test_main_passes_the_slot_table_path(monkeypatch):
+    _, seen = _main_capture(["show", "G", "--slot-table", "/synthetic/slots.sh"],
+                            monkeypatch)
+    assert seen["src"].resolved_slot_table_path() == "/synthetic/slots.sh"
+
+
+def test_main_forwards_the_selector_verbatim(monkeypatch):
+    _, seen = _main_capture(["show", "scratch2:@81"], monkeypatch)
+    assert seen["selector"] == "scratch2:@81"
+
+
+@pytest.mark.parametrize("status,expected", [
+    (sr.STATUS_RESOLVED, sr.EXIT_RESOLVED),
+    (sr.STATUS_AMBIGUOUS, sr.EXIT_AMBIGUOUS),
+    (sr.STATUS_UNMATCHED, sr.EXIT_UNMATCHED),
+])
+def test_main_maps_each_outcome_to_ITS_OWN_exit_code(status, expected,
+                                                     monkeypatch):
+    """🔴 `test_resolution_exit_codes_are_distinct` only checked that the three
+    CONSTANTS differ — it never checked which outcome maps to which, so swapping
+    the ambiguous and unmatched entries of `_EXIT_FOR` survived two mutation
+    rounds. This pins the mapping."""
+    rc, _ = _main_capture(["show", "Gold"], monkeypatch, status=status)
+    assert rc == expected
+
+
+def test_the_exit_code_values_are_the_documented_ones():
+    assert (sr.EXIT_RESOLVED, sr.EXIT_AMBIGUOUS, sr.EXIT_UNMATCHED) == (0, 2, 3)
+
+
+def test_main_json_mode_emits_parseable_json(monkeypatch, capsys):
+    monkeypatch.setattr(sr, "resolve", lambda s, src=None, built=None: {
+        "status": sr.STATUS_RESOLVED, "selector": s, "target": None,
+        "candidates": [], "candidate_count": 0, "coverage": {},
+        "dropped": [], "hosts_consulted": ["h1"], "sources_consulted": [],
+        "matched_kinds": []})
+    rc = sr.main(["show", "Gold", "--json"])
+    assert rc == sr.EXIT_RESOLVED
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["selector"] == "Gold"
+    assert payload["hosts_consulted"] == ["h1"]
+
+
+def test_a_long_unsent_prompt_is_truncated_before_reaching_scrollback():
+    """🔴 `unsent_prompt` is captured pane text — literally what the operator
+    typed. Printing it untruncated three lines after SIGNAL_CAPTURED_TEXT_KEY
+    argues captured text must not reach scrollback was incoherent."""
+    long_text = "z" * (sr.UNSENT_PROMPT_MAX + 40)
+    payload = sm_payload()
+    for r in payload["hosts"][HOST]["windows"]:
+        if r["window_id"] == WIN_A_ID:
+            r["unsent_prompt"] = long_text
+    text = sr.render(resolve(WIN_A_ID, sm_payload=payload))
+    assert long_text not in text
+    assert "[+40 chars not shown]" in text
+    # POSITIVE CONTROL: a SHORT prompt is shown in full, so this is a truncation
+    # and not a blanket redaction.
+    assert SM_UNSENT_A in sr.render(resolve(WIN_A_ID))
+
+
+def test_truncate_captured_reports_nothing_for_an_absent_value():
+    assert sr.truncate_captured(None) == "-"
+    assert sr.truncate_captured("") == "-"
+
+
+def test_an_ambiguous_candidate_with_no_window_index_still_renders():
+    """Latent TypeError: `f"{None:<3}"` raises. All 86 live rows carry an index,
+    so this was one remote-row shape away from crashing the ambiguous path."""
+    payload = sm_payload_two_hosts()
+    payload["hosts"][REMOTE_HOST]["windows"][0]["window_index"] = None
+    built = sr.build_targets(two_host_sources(sm_payload=payload))
+    remote = [t for t in built["targets"] if t["host"] == REMOTE_HOST][0]
+    assert remote["window_index"] is None
+    text = sr.render({"status": sr.STATUS_AMBIGUOUS, "selector": "x",
+                      "reason": "r", "candidate_count": 1,
+                      "candidates": [sr._brief(remote, ["cwd"])],
+                      "coverage": built["coverage"], "dropped": [],
+                      "hosts_consulted": [], "sources_consulted": [],
+                      "target": None})
+    assert "idx=?" in text
+
+
+# =========================================================================== #
+# §13  🔴 THE REMAINING AUDIT FINDINGS, each with a test that can SEE it
+# =========================================================================== #
+def test_a_write_verb_after_a_command_separator_is_refused():
+    """🔴 The guard used to `return` after clearing the FIRST command, so a
+    write verb behind tmux's own `;` separator sailed through — a guard whose
+    entire claim is that it fails closed."""
+    with pytest.raises(sr.ReadOnlyViolation) as exc:
+        sr._assert_read_only(["tmux", "list-panes", "-a", "-F", "#{window_id}",
+                              ";", "send-keys", "-t", "x", "rm -rf /"])
+    assert "send-keys" in str(exc.value)
+
+
+def test_a_write_verb_in_the_THIRD_command_is_also_refused():
+    with pytest.raises(sr.ReadOnlyViolation) as exc:
+        sr._assert_read_only(["tmux", "list-panes", ";", "list-windows",
+                              ";", "kill-session"])
+    assert "kill-session" in str(exc.value)
+
+
+def test_the_tools_OWN_read_calls_survive_the_full_token_scan():
+    """🔴 POSITIVE CONTROL. Scanning every token naively would reject the tool's
+    own calls, because `-F <format>` and `-t <target>` are ARGUMENTS, not
+    commands. A guard that refuses everything is not a guard."""
+    sr._assert_read_only(["tmux", "list-panes", "-a", "-F", sr.PANE_FORMAT])
+    sr._assert_read_only(["tmux", "list-windows", "-a", "-F", sr.WINDOW_FORMAT])
+    sr._assert_read_only(["tmux", "list-clients", "-F", sr.CLIENT_FORMAT])
+    # a format string is not mistaken for a command even if it looks like one
+    sr._assert_read_only(["tmux", "list-panes", "-F", "send-keys"])
+
+
+def test_harness_excluded_names_the_REMOTE_host_not_this_one():
+    """🔴 The sentence said "a window on THIS host can never have a record" —
+    the exact inverse of the truth, since a window on this host is the only kind
+    that CAN. It is whole-string pinned, so the wrong sentence was load-bearing.
+    """
+    assert "REMOTE" in sr.HARNESS_EXCLUDED
+    assert "on this host can never" not in sr.HARNESS_EXCLUDED
+    remote, _ = remote_target()
+    assert sr.render_harness_status(remote) == sr.HARNESS_EXCLUDED
+
+
+def test_both_sources_encode_the_trichotomy_identically():
+    """🔴 A MEASURED absence used to be spelled `unmeasured:...` by the
+    session-manager source and `MEASURED_OK` by the harness source — the two
+    encoding the SAME trichotomy two different ways, in the exact thing this
+    module exists to get right. `is_unmeasured()` was true for a measured
+    absence.
+    """
+    payload = sm_payload()
+    payload["hosts"][HOST]["windows"] = [
+        r for r in payload["hosts"][HOST]["windows"]
+        if r["window_id"] != WIN_A_ID]
+    t_absent_sm = target_for(WIN_A_ID, sm_payload=payload)
+    t_absent_harness = target_for(WIN_A_ID)
+
+    assert t_absent_sm["session_manager_presence"] == sr.PRESENCE_ABSENT
+    assert t_absent_harness["harness_presence"] == sr.PRESENCE_ABSENT
+    # 🔴 the two spellings, pinned AGAINST EACH OTHER
+    assert (t_absent_sm["session_manager_measurement"]
+            == t_absent_harness["harness_status_measurement"]
+            == sr.MEASURED_OK)
+    assert not sr.is_unmeasured(t_absent_sm["session_manager_measurement"])
+    assert not sr.is_unmeasured(t_absent_harness["harness_status_measurement"])
+    # and the derived value is still UNKNOWN, never False
+    assert t_absent_sm["waiting_probable"] is None
+    assert sr.WAITING_NO_ROW in sr.render_waiting_probable(t_absent_sm)
+
+
+def test_a_measured_absence_and_an_unmeasured_source_still_differ():
+    """The consistency fix must not collapse absent INTO measured-ok for the
+    unmeasured case too."""
+    unmeasured = target_for(WIN_A_ID, sm_payload={"no_hosts_key": True})
+    assert unmeasured["session_manager_presence"] == sr.PRESENCE_UNMEASURED
+    assert sr.is_unmeasured(unmeasured["session_manager_measurement"])
+    assert sr.WAITING_NO_ROW not in sr.render_waiting_probable(unmeasured)

@@ -2202,3 +2202,123 @@ def test_the_idle_caveat_is_still_carried_verbatim_after_the_reorder():
     out = _filtered(None)
     assert out["caveats"]["idle_no_signal"] == ww.IDLE_NO_SIGNAL_CAVEAT
     assert ww.IDLE_NO_SIGNAL_CAVEAT in ww.render_human(out)
+
+
+# =========================================================================== #
+# §15 — 🔴 main() ITSELF. Four mutants survived two differently-constructed
+# rounds here, because nothing in this suite ever called main(): dropping
+# `kinds=kinds` from the build_report call, `parse_kinds(args.kind)` ->
+# `parse_kinds(None)`, `return 2` -> `return 0` on an unknown kind, and dropping
+# `--top` entirely. `--json-file` already makes main() hermetically testable, so
+# this was coverage, not refactoring.
+# =========================================================================== #
+def _main(argv, tmp_path, capsys, rep=None):
+    """Run main() end-to-end off a synthetic report, touching no real state."""
+    report_path = tmp_path / "report.json"
+    report_path.write_text(json.dumps(rep if rep is not None
+                                      else _ordering_report()),
+                           encoding="utf-8")
+    rc = ww.main(["--json", "--json-file", str(report_path), "--no-state",
+                  "--no-registry", "--threshold-secs", str(THRESHOLD), *argv],
+                 now=NOW, environ={})
+    captured = capsys.readouterr()
+    return rc, captured
+
+
+def test_main_runs_end_to_end_and_emits_the_json_report(tmp_path, capsys):
+    rc, cap = _main([], tmp_path, capsys)
+    assert rc == 0
+    payload = json.loads(cap.out)
+    assert payload["tool"] == "waiting-windows"
+    assert len(payload["over_threshold"]) == 4
+    assert payload["kind_filtered"] is None
+
+
+def test_main_THREADS_the_kind_filter_into_the_report(tmp_path, capsys):
+    """🔴 Kills the surviving mutant that dropped `kinds=kinds` from the
+    build_report call — the flag parsed fine and then did nothing."""
+    rc, cap = _main(["--kind", "context_exhausted"], tmp_path, capsys)
+    assert rc == 0
+    payload = json.loads(cap.out)
+    assert [r["window_id"] for r in payload["over_threshold"]] == [WID_2]
+    assert payload["kind_filtered"]["dropped"] == 3
+    assert payload["kind_filtered"]["kinds"] == ["context_exhausted"]
+
+
+def test_main_accepts_a_comma_separated_kind_list(tmp_path, capsys):
+    """🔴 Kills `parse_kinds(args.kind)` -> `parse_kinds(None)`."""
+    rc, cap = _main(["--kind", "trailing_question,selection_menu"],
+                    tmp_path, capsys)
+    payload = json.loads(cap.out)
+    assert {r["kind"] for r in payload["over_threshold"]} == {
+        "trailing_question", "selection_menu"}
+    assert payload["kind_filtered"]["shown"] == 2
+
+
+def test_main_accepts_a_repeated_kind_flag(tmp_path, capsys):
+    rc, cap = _main(["--kind", "trailing_question", "--kind", "selection_menu"],
+                    tmp_path, capsys)
+    payload = json.loads(cap.out)
+    assert payload["kind_filtered"]["shown"] == 2
+
+
+def test_main_EXITS_2_on_an_unknown_kind_and_says_so(tmp_path, capsys):
+    """🔴 Kills `return 2` -> `return 0`. The PR body sells this as a delivered
+    contract, so it needs a test that can see it."""
+    rc, cap = _main(["--kind", "selection_menu,not_a_kind"], tmp_path, capsys)
+    assert rc == 2
+    assert "unknown --kind not_a_kind" in cap.err
+    for k in ww.ALL_KINDS:
+        assert k in cap.err          # the message lists the valid choices
+
+
+def test_main_exit_0_on_a_VALID_kind_is_the_positive_control(tmp_path, capsys):
+    """A guard that returned 2 for everything would pass the test above."""
+    rc, _ = _main(["--kind", "selection_menu"], tmp_path, capsys)
+    assert rc == 0
+
+
+def test_main_THREADS_top_into_the_report(tmp_path, capsys):
+    """🔴 Kills the surviving mutant that dropped `--top` entirely."""
+    rc, cap = _main(["--top", "2"], tmp_path, capsys)
+    payload = json.loads(cap.out)
+    assert len(payload["over_threshold"]) == 2
+    assert payload["truncated"]["shown"] == 2
+    assert payload["truncated"]["dropped"] == 2
+
+
+def test_main_applies_kind_filter_BEFORE_top(tmp_path, capsys):
+    rc, cap = _main(["--kind", "trailing_question,selection_menu", "--top", "1"],
+                    tmp_path, capsys)
+    payload = json.loads(cap.out)
+    assert payload["truncated"]["total"] == 2      # the FILTERED set
+    assert payload["kind_filtered"]["dropped"] == 2
+
+
+def test_main_human_view_leads_with_the_actionable_total(tmp_path, capsys):
+    report_path = tmp_path / "r.json"
+    report_path.write_text(json.dumps(_ordering_report()), encoding="utf-8")
+    rc = ww.main(["--json-file", str(report_path), "--no-state",
+                  "--no-registry", "--threshold-secs", str(THRESHOLD)],
+                 now=NOW, environ={})
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "ACTIONABLE: 3 of 4 over threshold" in out
+    assert out.index("ACTIONABLE:") < out.index("OVER THRESHOLD:")
+
+
+def test_main_writes_no_state_file_when_told_not_to(tmp_path, capsys):
+    _main([], tmp_path, capsys)                       # creates report.json
+    before = set(str(p) for p in tmp_path.rglob("*"))
+    _main([], tmp_path, capsys)                       # must add NOTHING
+    after = set(str(p) for p in tmp_path.rglob("*"))
+    assert after - before == set()
+
+
+def test_the_threshold_env_var_name_is_the_one_the_module_publishes():
+    """A literal here would rot silently the day the constant is renamed — the
+    first spelling of these tests used `..._SECS` and every row fell under the
+    default threshold instead."""
+    assert ww.THRESHOLD_ENV == "WAITING_WINDOWS_THRESHOLD"
+    secs, source = ww.resolve_threshold(None, {ww.THRESHOLD_ENV: "4242"})
+    assert (secs, source) == (4242, "env")

@@ -278,9 +278,10 @@ def apply_kind_filter(rows, kinds):
         return rows, None
     wanted = tuple(kinds)
     kept = [r for r in rows if r["kind"] in wanted]
-    if len(kept) == len(rows):
-        return kept, {"kinds": list(wanted), "dropped": 0,
-                      "total": len(rows), "shown": len(kept)}
+    # One return, not two: the drop-nothing case computed `len(rows) - len(kept)`
+    # == 0 anyway, so the special-cased branch was dead. A filter that ran is
+    # always REPORTED, even when it dropped nothing — `None` means "no filter was
+    # requested", which is a different fact.
     return kept, {"kinds": list(wanted), "dropped": len(rows) - len(kept),
                   "total": len(rows), "shown": len(kept)}
 
