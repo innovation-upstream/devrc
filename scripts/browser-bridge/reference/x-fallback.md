@@ -32,9 +32,9 @@ nix-shell -p imagemagick --run 'magick out.png -crop WxH+X+Y +repage cropped.png
 `browser activate`. 🔴 RECORD both axes BEFORE step 3 (`xdotool getactivewindow`;
 `i3-msg -t get_workspaces | jq -r '.[]|select(.focused).num'`), then restore BOTH
 afterwards, on failure too: `i3-msg '[id="<prev-winid>"] focus'` **and**
-`i3-msg workspace <n>`. Focus alone leaves them on YOUR workspace — and step 3's
-own comment says focusing the workspace is what makes the window visible, so this
-path moves the workspace by construction.
+`i3-msg workspace <n>`. Focus alone leaves them on YOUR workspace — focusing a
+window that lives on ANOTHER workspace switches to that workspace, so step 3 moves
+the workspace by construction, not just the focus.
 
 Two traps that produce a confidently-wrong result:
 

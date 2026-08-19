@@ -54,7 +54,7 @@ Result payloads land under `.result.data`.
 | command | does |
 |---|---|
 | `whoami` | **read-only identity** (global; no `--instance`/`--tab`) — host label (`laptop`/`workbench`), connected instances (active-tab **domain** only), bridge diagnostics, `extension_version_current` |
-| `health` / `instances` | connected instances + count (JSON: key, label, instanceId, tab url/title). per-instance `extension_stale` (on `whoami` too) — ⚠ `null` is "undecidable", NOT "fine"; tri-state → `reference/errors.md` |
+| `health` / `instances` | connected instances + count (JSON: key, label, instanceId, tab url/title). per-instance `extension_stale` on `health` + `whoami`, NOT `instances` — ⚠ `null` is "undecidable", NOT "fine"; tri-state → `reference/errors.md` |
 | `ping` | **which extension CODE is loaded?** → `{pong,extensionVersion,buildMarker,id,ops}`; read `buildMarker` — version+id describe the DIRECTORY. Staleness is PER PROFILE |
 | `context` | **page metadata, no DOM read** — url/domain/path/query/title/tabId, tab-scoped. Cheapest read; ⚠ NOT a render check → `reference/read-envelopes.md` |
 | `open [url] [--wake[=MS]]` | open a NEW tab this session owns (default `about:blank`, **created in the BACKGROUND/hidden**), returns `tabId`. 🔴 A re-`open` does NOT navigate — it DISCARDS your url → `reference/tabs-instances.md` |
