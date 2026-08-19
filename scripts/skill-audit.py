@@ -320,6 +320,22 @@ def reference_integrity(skill_md, text):
     BOTH directions, mirroring test_eviction_playbook_lists_every_reference_topic:
     a referenced file that does not exist routes the reader nowhere, and a file
     on disk that nothing routes to is unreachable and therefore dead.
+
+    🔴 THE THIRD ROUTING SHAPE: a DIRECTORY routed with a VARIABLE segment.
+    Naming every reference file in the body is what keeps a skill honest, but it
+    also makes the body grow linearly with the corpus — which is unaffordable for
+    a set that is expected to keep growing (browser's per-site docs). A row
+    written with a placeholder segment,
+
+        | `reference/sites/<host>.md` | you are driving a site that has one … |
+
+    routes to EVERY member of that directory without naming one, because
+    something at RUN TIME resolves the placeholder (for browser, the bridge puts
+    the exact filename in the result envelope). The reachability claim the orphan
+    check exists to defend is therefore satisfied, so a member of such a
+    directory is NOT dead. Recognised structurally — `<dir>/<` in the body, the
+    repo's own documented placeholder convention — never by naming a directory
+    here. A file under a directory with NO placeholder route is still an orphan.
     """
     skill_dir = skill_md.parent
     refs = referenced_refs(text, skill_dir)
@@ -329,8 +345,12 @@ def reference_integrity(skill_md, text):
     if ref_dir.is_dir():
         for f in sorted(ref_dir.rglob("*.md")):
             rel = f.relative_to(skill_dir).as_posix()
-            if rel not in text and f.name not in text:
-                orphans.append(rel)
+            if rel in text or f.name in text:
+                continue
+            parent = f.parent.relative_to(skill_dir).as_posix()
+            if parent != "reference" and f"{parent}/<" in text:
+                continue  # routed by a variable segment — see the docstring
+            orphans.append(rel)
     relative = [r for r in refs if not (r.startswith("/") or r.startswith("~"))]
     return refs, missing, orphans, len(relative), bool(ABS_REF_BASE.search(text))
 
