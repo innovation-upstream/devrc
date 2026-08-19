@@ -65,7 +65,8 @@ Read this before trusting the 2026-08-16 block above as coverage:
   tokens. **Token rotation has never been exercised once.**~~ **MOSTLY CLOSED 2026-08-18** — the
   rate limiter, the lockout and the mandatory client-IP all ship in `0.2.0` and are live; rotation
   was exercised end to end (`#344`+`#345`). ⚠ **Split read/write tokens were NOT built** and remain
-  outstanding, as does the Cloudflare WAF rule (layer 1).
+  outstanding. The Cloudflare WAF rule (layer 1) **was missing entirely and has since been created**
+  — see the RESOLVED block below, including why it is the shallowest of the three layers.
 - **88 of the 89 API tests are invariant guards, not regressions** — `server.py` did not
   exist at base, so "red at base" is a collection error and proves nothing. The evidence
   that they bite is the 22-mutant sweep, not the red-at-base matrix.
@@ -388,17 +389,34 @@ the day you ship.*
   printed note over-reports after an exclusion (measured: counter stays 3 while `paths` drops to 2).
 - **Next probe:** one-line fix plus a test that pins counter and path-set together.
 
-### 🔴 The Cloudflare WAF rate rule (layer 1 of 3) has never been verified to exist
-- **Symptom:** `#329`'s header names three guards in order. Layers 2 (the Traefik
-  `subsystem-store-ratelimit` middleware) and 3 (the app: rotating token set, `compare_digest`,
-  uniform 401, 5 failures/60s → 900s lockout, absent client-IP refused) are declarative, merged and
-  verified live. **Layer 1 is console-managed and declared nowhere in the repo.**
-- **Observed:** `grep -rl cloudflare clusters/production` returns only ingress manifests; no WAF
-  rule object exists in git, by design — Cloudflare WAF rules are not declarative here.
-- **Ruled out:** that the Traefik middleware covers it. It does not: that is layer 2, avg 10/s
-  burst 20, and it is *inside* the origin. A volumetric flood never reaches it if layer 1 is absent.
-- **Next probe (verbatim):** open the Cloudflare dashboard for `zacx.dev` → Security → WAF → Rate
-  limiting rules, and confirm a rule scoped to `store.zacx.dev`. Nothing in this repo can answer it.
+### ✅ RESOLVED 2026-08-19 — layer 1 did NOT exist; it does now, and it is the SHALLOWEST of the three
+- **Answered.** The question below was open for a day and the answer was **no**: there was no rate
+  limiting configuration on the zone at all. Not a rule that failed to match — the `http_ratelimit`
+  phase had **no entrypoint ruleset**, API error `10003`. The legacy `/rate_limits` surface returned
+  **410 Gone**, and the one custom firewall rule on the zone was an unrelated `skip` naming a
+  different host. So `#329`'s header claimed three guards and there were **two**, from cutover until
+  this was closed.
+- **How it was measured, and why the zero is trustworthy:** the zone-wide ruleset list returned
+  **4** rulesets, so the API was reachable and correctly scoped — the absence in the ratelimit phase
+  was real, not a query wired to nothing. `store.zacx.dev` was confirmed `proxied: true`, so traffic
+  does traverse Cloudflare and the WAF *could* act; nothing was configured for it to do.
+- 🔴 **What now exists, and the caveat that matters more than its existence.** A rule scoped to
+  `http.host eq "store.zacx.dev"`, action `block`, counting on `(ip.src, cf.colo.id)`. Design intent
+  was 20/s sustained with a 1-hour ejection. **The zone's plan refused both knobs**: `period` is
+  entitled to `10` seconds only (not 60), and `mitigation_timeout` to `10` seconds only (not 3600).
+  Final shape: **200 requests / 10s, block for 10s.**
+- 🔴 **So layer 1 is a THROTTLE, not a gate.** A flooder that trips it is blocked for ten seconds and
+  then gets a fresh budget; sustained abuse is rate-limited to ~20/s rather than stopped. Against an
+  unbounded firehose reaching Traefik that is still the difference that matters, but **"three
+  layers" now means three of unequal depth, and this is the shallowest.** A real ejection needs a
+  paid plan — a decision, not a defect.
+- ⚠ **It is still declared nowhere in any repo.** Cloudflare WAF rules are not declarative here, so
+  nothing in git can assert its continued existence and no gate will notice if it is deleted. The
+  only check is a read against the Cloudflare API. Treat its presence as unverified on any future
+  session that has not re-read it.
+- **Ruled out, and still true:** that the Traefik middleware covers this. It does not — that is
+  layer 2, avg 10/s burst 20, and it sits *inside* the origin. It is also bypassed entirely by the
+  direct node hop, on which layer 1 does not exist either.
 
 ### 🔴 The cluster's control plane crosses the public internet, by configuration
 - **Symptom:** two control-plane protocols use the nodes' PUBLIC addresses even though both nodes
@@ -435,17 +453,36 @@ the day you ship.*
 
 ## Next steps (ranked)
 
-1. **Verify the Cloudflare WAF rate rule exists** (above). Two minutes in the console, and it is the
-   difference between three defensive layers and two on a now-public, client-confidential store.
-2. **Split read/write tokens** — named in the proposal's `(B-required)` hardening, never built. The
-   single token is currently read-only by virtue of the API having no write route, not by design.
-3. **Exercise the store under adversarial traffic.** The lockout, the rate limiter and the WAF have
-   only ever seen my own well-formed probes. Nothing has been measured under abuse.
-4. **The store's own roadmap, untouched all session:** the entry-fidelity audit skill, and the
-   "does a generic journal belong" question. The latter argued for itself here — roughly ten
-   cross-cutting engineering lessons from this session were filed into *subsystem-scoped* entries
-   for want of a better home, and several have nothing to do with the subsystem-store.
-5. **Optional, deferred by decision:** move konnectivity + Calico v6 onto the private network.
+0. ~~Verify the Cloudflare WAF rate rule exists~~ — **DONE 2026-08-19, and the answer was NO.**
+   It did not exist; it was created and verified by an independent read. Kept as item 0 rather than
+   deleted because the *shape* of the finding outlived it: layer 1 is now a 10s throttle, not a
+   gate, and it is declared in no repo so nothing will notice if it disappears. See the RESOLVED
+   block above before treating "three layers" as three equal layers.
+1. **Split read/write tokens** — named in the proposal's `(B-required)` hardening, never built. The
+   single token is currently read-only by virtue of the API having no write route, not by design;
+   the first write route makes that silently false. **Now the top-ranked item.**
+2. **Exercise the store under adversarial traffic.** The lockout, the rate limiter and the WAF have
+   only ever seen my own well-formed probes. Nothing has been measured under abuse — and layer 1's
+   real behaviour under load is now a live question rather than an assumption, since its mitigation
+   window is 10s.
+3. **The store's own roadmap:** the entry-fidelity audit skill, and the "does a generic journal
+   belong" question. The latter argued for itself — roughly ten cross-cutting engineering lessons
+   were filed into *subsystem-scoped* entries for want of a better home, and several have nothing
+   to do with the subsystem-store.
+4. **The shape work `#550` proposed and `#560` half-built.** `#560` shipped items 2 and 1 (near-miss
+   and `missing_sections` on the index row, which immediately surfaced two real broken markers).
+   **Item 3 is the one still worth doing** — a shape population in `--validate`, so a renamed spine
+   is caught when an entry is *written* rather than only when it is read. Items 4 and 5 are
+   reporting polish. Also pending: `#560`'s own falsification clause — the `unverifiable` badge
+   fires on **0 of 53** entries today; if it is still never-green in a month, delete it rather than
+   keep an indicator that has never once been non-green.
+5. **PARKED by decision 2026-08-19:** move konnectivity + Calico v6 onto the private network.
+   Root cause is now known and is one missing variable — `IP_AUTODETECTION_METHOD` pins v4 to
+   `cidr=10.0.0.0/24` while **no `IP6_AUTODETECTION_METHOD` exists**, so v6 autodetect takes the
+   first global address, which is public. Blocked on a prerequisite: the private NIC carries only
+   link-local v6, so a ULA must be assigned to both nodes first. Neither k0sctl config pins
+   `spec.k0s.version`, so `k0sctl apply` may attempt a k0s upgrade — fix that before applying
+   anything this way. Measured: BGP has **no MD5 auth on either family** (`password` directives: 0).
 
 ## Gotchas / decisions / dead-ends
 
