@@ -1234,8 +1234,14 @@ def test_cmd_ok_emits_one_metadata_event(telemetry):
         assert int(e["duration_ms"]) >= 0        # latency present
         assert e["text"] == "mail.google.com"    # text = bare domain
         p = json.loads(e["payload"])
+        # Exact equality on purpose: metadata-only is asserted POSITIVELY and
+        # NEGATIVELY — nothing may creep into this payload unnoticed. `sess_src`
+        # is here because every /cmd row now states which tier its session id
+        # came from; this request sends NO X-Session-Id, so the honest answer is
+        # `unknown` and no `session` key is written (asserted below).
         assert p == {"op": "getHtml", "key": "", "outcome": "ok",
-                     "domain": "mail.google.com"}
+                     "domain": "mail.google.com", "sess_src": "unknown"}
+        assert "session" not in e, e
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
 
@@ -2112,7 +2118,12 @@ def test_orientation_ops_emit_exactly_one_metadata_only_event(telemetry, path, o
         assert e["exit_code"] == "0"
         assert e["text"] == op                      # no domain → text is the op
         p = json.loads(e["payload"])
-        assert p == {"op": op, "key": "", "outcome": "ok"}, p
+        # Exact equality still, so nothing can creep in unnoticed. `sess_src` is
+        # here because these are OPERATOR calls and are now attributed like any
+        # other command (see test_only_the_heartbeat_is_server_originated); this
+        # request sends no X-Session-Id, so the honest tier is `unknown`.
+        assert p == {"op": op, "key": "", "outcome": "ok",
+                     "sess_src": "unknown"}, p
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
 
@@ -2150,6 +2161,826 @@ def test_load_spool_emit_missing_path_returns_none(monkeypatch, tmp_path):
     monkeypatch.setattr(S, "_spool_emit_mod", None)
     monkeypatch.setattr(S, "_spool_emit_tried", False)
     assert S._load_spool_emit() is None
+
+
+# --------------------------------------------------------------------------- #
+# The session JOIN KEY on browser-bridge telemetry rows.
+#
+# THE BUG (measured 2026-08-18): every `source='browser-bridge'` row had an EMPTY
+# `session` column — 0 of 6,937 over 14 days — while claude/opencode/keys/tmux/
+# zsh filled it 100%. The value already reached the server (X-Session-Id, used
+# for tab-ownership routing) and was simply never handed to emit_cmd_event, so
+# "which agent session made this browser call" was unanswerable from the one
+# structured source and had to be answered by scanning 1.5M transcript records.
+#
+# THE TWO HAZARDS THE FIX MUST NOT CREATE:
+#   1. TIER. The id is TAGGED with the fallback tier that produced it, and only
+#      `claude:` is a join key. `tmux:%3` is stable across many unrelated
+#      sessions in one pane, so recording it would silently merge them into one
+#      apparent session — worse than the empty column.
+#   2. NESTING. `browser agent` forwards its INVOKER's id, so a nested run's
+#      commands arrive wearing the operator's own `claude:` tag. Attributed
+#      naively, one `browser agent` call becomes N calls credited to the
+#      operator's session — fabricated rows in the `session` JOIN column. (NOT,
+#      as an earlier draft said, "the column adoption-scan reads": adoption-scan
+#      never selects `session` for this source, and the deadman reads only row
+#      existence. The harm is latent — it corrupts the first consumer that does
+#      read it.) The nested tool declares X-Session-Origin, and the
+#      forwarded id is then recorded as the causal PARENT, not the actor.
+#
+# FIXTURE DISCIPLINE: every id below is pairwise distinct AND distinct from every
+# constant the assertions name ("claude", "tmux", "unknown", "browser-agent", …),
+# so a mutant that hardcodes any of those literals cannot survive.
+# --------------------------------------------------------------------------- #
+JOINABLE_UUID = "6f1c9a20-1111-4bbb-8ccc-000000000001"
+JOINABLE_ID = "claude:" + JOINABLE_UUID
+NESTED_UUID = "8ab3d704-2222-4eee-9fff-000000000002"
+NESTED_ID = "claude:" + NESTED_UUID
+# A Claude session uuid that LEAKED into an opencode tool shell. It arrives
+# `claude:`-tagged and is INDISTINGUISHABLE from a direct call by inspection --
+# the id is genuinely the outer session's. Only the origin header separates them,
+# which is exactly why the fix is a header and not a tier. Distinct from both
+# uuids above so a mutant reusing either cannot satisfy its tests.
+LEAKED_UUID = "c05e17b6-3333-4aaa-8ddd-000000000003"
+LEAKED_ID = "claude:" + LEAKED_UUID
+# The complete set of origin tokens any caller may declare. Pinned as a LEDGER:
+# both mean "issued by something nested under origin_session", and both must
+# suppress the session key identically. A third one added without a test here
+# fails the ledger rather than silently getting a different behaviour.
+ORIGIN_TOKENS = ("browser-agent", "opencode-inherited")
+# tier tag -> (wire id, the bare id behind it). Mirrors derive_session_id's tags.
+TIER_IDS = {
+    "claude": (JOINABLE_ID, JOINABLE_UUID),
+    "tmux": ("tmux:%77", "%77"),
+    "sid": ("sid:424242:99887766", "424242:99887766"),
+    "ppid": ("ppid:31337:deadbeefcafef00d", "31337:deadbeefcafef00d"),
+    "synthetic": ("synthetic:" + JOINABLE_ID + "+recreate-close",
+                  JOINABLE_ID + "+recreate-close"),
+}
+
+
+def _cmd_sess(srv, body, sid=None, origin=None):
+    """POST /cmd with explicit session headers; None omits the header entirely."""
+    hdrs = {}
+    if sid is not None:
+        hdrs[S.HDR_SESSION_ID] = sid
+    if origin is not None:
+        hdrs[S.HDR_SESSION_ORIGIN] = origin
+    return _req(srv, "POST", "/cmd", body, headers=hdrs or None)
+
+
+@pytest.mark.parametrize("tier", sorted(TIER_IDS))
+def test_session_column_is_filled_for_the_joinable_tier_only(telemetry, tier):
+    """Each tier reports its own `sess_src`; ONLY `claude` fills `session`.
+
+    Both halves matter and are asserted together per tier:
+      * `sess_src` is always present, so a row is self-describing about WHY it
+        does or does not carry a key;
+      * `session` is the BARE id for the joinable tier and ABSENT for every other
+        — asserted as "the key is not in the record", not "it is empty", because
+        an empty column and a merged-sessions column are the two outcomes this
+        test exists to keep apart.
+    """
+    spool_dir = telemetry
+    wire_id, bare = TIER_IDS[tier]
+    srv, _ = _serve()
+    ext = FakeExtension(srv, instance_id="solo", label="only")
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _read_events(spool_dir) == [], "the negative control: 0 before"
+        st, body = _cmd_sess(srv, {"op": "tabs"}, sid=wire_id)
+        assert st == 200 and body["ok"] is True
+
+        evs = _wait_events(spool_dir, 1)
+        assert len(evs) == 1, evs
+        e = evs[0]
+        assert e["source"] == "browser-bridge"
+        # The USAGE signal (adoption-scan.py) is untouched by this change.
+        assert e["kind"] == "cmd"
+        p = json.loads(e["payload"])
+        assert p["sess_src"] == tier, p
+        if tier == "claude":
+            assert e.get("session") == bare, e
+        else:
+            assert "session" not in e, (
+                f"tier {tier!r} must NOT produce a join key; got {e.get('session')!r}")
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_the_session_column_carries_the_bare_id_not_the_wire_tag(telemetry):
+    """`session` must equal what `source='claude'` rows store — the BARE uuid.
+
+    The CLI tags its routing id `claude:<uuid>` so tiers cannot collide on the
+    wire. Storing that tag in the COLUMN would make browser-bridge the one source
+    needing a replaceOne() at every join site, and a forgotten one returns zero
+    rows — which reads as a valid "no sessions matched" answer.
+    """
+    spool_dir = telemetry
+    srv, _ = _serve()
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=JOINABLE_ID)[0] == 200
+        e = _wait_events(spool_dir, 1)[0]
+        assert e["session"] == JOINABLE_UUID
+        assert ":" not in e["session"], e["session"]
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_only_the_first_colon_splits_a_multi_colon_id(telemetry):
+    """`sid:` and `ppid:` ids contain further colons. Splitting on the LAST one
+    (or on every one) would report a tier of `424242` and mangle the id — this
+    pins that the tag is the FIRST field and the remainder is kept whole."""
+    spool_dir = telemetry
+    wire_id, bare = TIER_IDS["sid"]
+    srv, _ = _serve()
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=wire_id)[0] == 200
+        p = json.loads(_wait_events(spool_dir, 1)[0]["payload"])
+        assert p["sess_src"] == "sid"
+        assert S._split_session_id(wire_id) == ("sid", bare)
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+@pytest.mark.parametrize("untagged", ["", None])
+def test_an_absent_or_empty_id_fails_closed(telemetry, untagged):
+    """No id at all: the event still lands (usage is still usage), reports the
+    unknown tier, and carries no join key."""
+    spool_dir = telemetry
+    srv, _ = _serve()
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=untagged)[0] == 200
+        e = _wait_events(spool_dir, 1)[0]
+        assert e["kind"] == "cmd"
+        assert json.loads(e["payload"])["sess_src"] == "unknown"
+        assert "session" not in e, e
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_an_untagged_id_is_never_promoted_to_a_join_key(telemetry):
+    """🔴 THE FAIL-CLOSED CASE THAT LOOKS MOST LIKE A JOIN KEY. A bare uuid with
+    no tier tag is exactly the value it would be tempting to accept — and a
+    version-skewed or hand-rolled caller can send anything (the opencode tool's
+    own default is the literal "browser-agent"). Provenance is stated or it is
+    unknown; it is never inferred from the value's FORM."""
+    spool_dir = telemetry
+    srv, _ = _serve()
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=JOINABLE_UUID)[0] == 200
+        e = _wait_events(spool_dir, 1)[0]
+        p = json.loads(e["payload"])
+        assert p["sess_src"] == "unknown", p
+        assert p["sess_src"] not in TIER_IDS, "must not spell a real tier"
+        assert "session" not in e, e
+        # And the id itself is nowhere on the row, in any field.
+        assert JOINABLE_UUID not in _log_file(spool_dir).read_text()
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+@pytest.mark.parametrize("bogus_tag", [
+    "futuretier",      # a tier that does not exist yet
+    "CLAUDE",          # the joinable tag, wrong case
+    "claud",           # a near-miss
+    "['claude",        # the shape a mangled caller actually produced
+])
+def test_a_tag_outside_the_vocabulary_is_normalised_not_recorded(telemetry, bogus_tag):
+    """🔴 `sess_src` IS A CLOSED SET, NOT FREE TEXT. It arrives on a
+    caller-supplied header, so recording it verbatim makes it an
+    unbounded-cardinality column: every string below was measured landing in it
+    unchanged, and four of the five are near-misses of the joinable tag that a
+    reader skimming a GROUP BY would misread as the real thing.
+
+    Anything outside SESSION_TIER_TAGS collapses to `unknown` and carries NO id.
+    A genuinely new tier needs a CLI change, which the two-way vocabulary pin in
+    test_browser_session_id.py already forces someone to declare.
+    """
+    spool_dir = telemetry
+    srv, _ = _serve()
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _cmd_sess(srv, {"op": "tabs"},
+                         sid=bogus_tag + ":" + JOINABLE_UUID)[0] == 200
+        e = _wait_events(spool_dir, 1)[0]
+        p = json.loads(e["payload"])
+        assert p["sess_src"] == "unknown", p
+        assert "session" not in e, e
+        # Neither half of an unrecognised id may survive anywhere on the row.
+        assert JOINABLE_UUID not in _log_file(spool_dir).read_text()
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+@pytest.mark.parametrize("padded", [" claude", "claude ", "\tclaude"])
+def test_a_whitespace_padded_tag_is_rejected_at_the_unit(padded):
+    """Unit-level because these CANNOT travel: an HTTP header value is delimited
+    by the colon-space, so `X-Session-Id:  claude:<uuid>` arrives as
+    `claude:<uuid>` with the padding already gone -- measured, and it is why this
+    case is not in the HTTP table above. The validator is still what decides, and
+    a padded tag must not slip through if a future caller reaches the emitter by
+    another route.
+
+    Paired with its own control so a validator that rejected EVERYTHING would be
+    caught rather than looking correct."""
+    assert S._split_session_id(padded + ":" + JOINABLE_UUID) == ("unknown", "")
+    assert S._split_session_id(JOINABLE_ID) == ("claude", JOINABLE_UUID)
+
+
+def test_the_tier_vocabulary_holds_its_internal_invariants():
+    """The SELF-CONSISTENCY half only. Whether the set matches the CLI is pinned
+    in test_browser_session_id.py::
+    test_the_server_validation_set_equals_the_tags_parsed_from_the_cli, which
+    compares it against tags PARSED from the CLI source.
+
+    🔴 The literal that used to live here has been DELETED, deliberately. It read
+    as a cross-file pin and was not one: retyping the CLI's tags beside the
+    server's meant a change touching both real files sailed through, and a delta
+    audit measured exactly that (grow the CLI + its own ledger, leave the server
+    alone -> 400 passed, SURVIVED). A literal that can be updated in lockstep
+    with the thing it checks is worse than no check, because it reads as one."""
+    assert S.SESSION_SRC_JOINABLE in S.SESSION_TIER_TAGS
+    assert S.SESSION_SRC_UNKNOWN not in S.SESSION_TIER_TAGS, (
+        "the fallback marker must not also be a real tier -- an unparseable id "
+        "and a genuine tier would become indistinguishable")
+
+
+# --- nesting: the forwarded id is the causal PARENT, not the actor --------- #
+def test_a_nested_run_records_the_forwarded_id_as_origin_not_as_session(telemetry):
+    """`browser agent` forwards its INVOKER's `claude:` id. Attributed naively,
+    one agent call becomes N calls credited to the operator's own session —
+    fabricated rows in the `session` JOIN column (~11% of bridge commands over
+    14d). Not "the column adoption-scan reads" -- it does not read this one; the
+    harm is latent, landing on the first consumer that does. The origin declaration moves it to `origin_session`, where nothing
+    can mistake the parent for the actor.
+
+    The id is DISTINCT from the ordinary-request fixture below, so a mutant that
+    wrote whichever id it had lying around cannot satisfy both.
+    """
+    spool_dir = telemetry
+    srv, _ = _serve()
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=NESTED_ID,
+                         origin="browser-agent")[0] == 200
+        e = _wait_events(spool_dir, 1)[0]
+        p = json.loads(e["payload"])
+        assert "session" not in e, f"a nested run must not claim the session: {e}"
+        assert p["origin"] == "browser-agent", p
+        assert p["origin_session"] == NESTED_UUID, p
+        assert p["sess_src"] == "claude", p   # the tier of the forwarded id
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_an_ordinary_request_sets_session_and_declares_no_origin(telemetry):
+    """The other side of the nesting fork, on the SAME request shape: a direct
+    call fills `session` and adds NO origin fields. Without this pair, a change
+    that dropped attribution entirely would still satisfy the nested test."""
+    spool_dir = telemetry
+    srv, _ = _serve()
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=JOINABLE_ID)[0] == 200
+        e = _wait_events(spool_dir, 1)[0]
+        p = json.loads(e["payload"])
+        assert e["session"] == JOINABLE_UUID, e
+        assert "origin" not in p, p
+        assert "origin_session" not in p, p
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_an_origin_wins_over_the_joinable_tier_on_every_emit_site(telemetry):
+    """The three /cmd emit call sites are three places to forget the fork. All
+    three are exercised with a joinable tier PLUS an origin; none may write a
+    session key."""
+    spool_dir = telemetry
+    # 1. the `release` short-circuit (returns before submit).
+    srv, _ = _serve()
+    try:
+        assert _cmd_sess(srv, {"op": "release"}, sid=NESTED_ID,
+                         origin="browser-agent")[0] == 200
+        e = _wait_events(spool_dir, 1)[0]
+        assert "session" not in e, e
+        assert json.loads(e["payload"])["origin_session"] == NESTED_UUID
+    finally:
+        srv.shutdown(); srv.server_close()
+
+    # 2. the throttle path, and 3. the terminal emit.
+    reg = S.Registry(rate_per_sec=0.001, burst=1, max_queue=1000)
+    srv, _ = _serve(registry=reg)
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=NESTED_ID,
+                         origin="browser-agent")[0] == 200          # terminal
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=NESTED_ID,
+                         origin="browser-agent")[0] == 429          # throttled
+        evs = _wait_events(spool_dir, 3)[1:]
+        assert len(evs) == 2, evs
+        for e in evs:
+            assert "session" not in e, e
+            assert json.loads(e["payload"])["origin"] == "browser-agent"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_the_release_short_circuit_attributes_an_ordinary_session(telemetry):
+    """`release` returns BEFORE the submit path, from its own emit call site. A
+    second call site is a second place to forget the attribution — pin it."""
+    spool_dir = telemetry
+    srv, _ = _serve()
+    try:
+        st, body = _cmd_sess(srv, {"op": "release"}, sid=JOINABLE_ID)
+        assert st == 200 and body["ok"] is True
+        e = _wait_events(spool_dir, 1)[0]
+        assert json.loads(e["payload"])["sess_src"] == "claude"
+        assert e["session"] == JOINABLE_UUID
+    finally:
+        srv.shutdown(); srv.server_close()
+
+
+def test_the_throttle_path_carries_both_the_hash_and_the_join_key(telemetry):
+    """The throttle emit is the THIRD call site. `sess` (the coarse hash) is KEPT
+    on purpose beside the new `session` column: the column is filled for the
+    joinable tier and non-nested calls only, and a flood from a tmux/sid/unknown
+    tier or a nested agent run is exactly the case where you still need some
+    stable handle to tell one flooder from two."""
+    spool_dir = telemetry
+    reg = S.Registry(rate_per_sec=0.001, burst=1, max_queue=1000)
+    srv, _ = _serve(registry=reg)
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=JOINABLE_ID)[0] == 200
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=JOINABLE_ID)[0] == 429
+        evs = _wait_events(spool_dir, 2)
+        thr = [e for e in evs
+               if json.loads(e["payload"]).get("outcome") == "throttled"]
+        assert len(thr) == 1, evs
+        p = json.loads(thr[0]["payload"])
+        assert p["sess"] == hashlib.sha256(JOINABLE_ID.encode()).hexdigest()[:8]
+        assert p["sess_src"] == "claude"
+        assert thr[0]["session"] == JOINABLE_UUID
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_a_raising_emitter_still_lets_the_command_succeed(telemetry, monkeypatch):
+    """BEST-EFFORT CONTRACT, re-proved through the NEW code path: the attribution
+    branch runs inside emit_cmd_event's swallowing try, so an emitter that
+    explodes while attributing must still leave /cmd at 200.
+
+    Four header shapes are exercised — joinable, non-joinable, nested, and none
+    at all — because a guard that only holds on the path you thought about is not
+    a guard."""
+    class _Boom:
+        @staticmethod
+        def emit(_rec):
+            raise RuntimeError("spool exploded")
+
+    monkeypatch.setattr(S, "_load_spool_emit", lambda: _Boom)
+    srv, _ = _serve()
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        for sid, origin in ((JOINABLE_ID, None), (TIER_IDS["tmux"][0], None),
+                            (NESTED_ID, "browser-agent"), (None, None)):
+            st, body = _cmd_sess(srv, {"op": "tabs"}, sid=sid, origin=origin)
+            assert st == 200 and body["ok"] is True, (sid, origin)
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_an_oversized_id_is_dropped_whole_never_truncated(telemetry):
+    """A truncated join key is a WRONG join key — it silently attributes a call to
+    a different session. So an id past the sanity bound is dropped ENTIRELY.
+
+    The paired control is the point: the SAME request shape with a well-formed id
+    DOES produce a key, so this cannot pass by the emitter being wired to nothing.
+    """
+    spool_dir = telemetry
+    srv, _ = _serve()
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        # Positive control first: a good id on this exact path yields a key.
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=JOINABLE_ID)[0] == 200
+        good = _wait_events(spool_dir, 1)[0]
+        assert good["session"] == JOINABLE_UUID, "positive control: no key emitted"
+
+        over = "claude:" + ("x" * (S.MAX_SESSION_FIELD + 1))
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=over)[0] == 200
+        evs = _wait_events(spool_dir, 2)
+        assert "session" not in evs[1], evs[1]
+        assert json.loads(evs[1]["payload"])["sess_src"] == "unknown", evs[1]
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+@pytest.mark.parametrize("bad", ["has\ttab", "has\nnewline", "has\x00nul",
+                                 "has\x7fdel"])
+def test_a_control_character_id_is_dropped_at_the_unit(bad):
+    """Unit-level because these cannot travel: http.client refuses a header value
+    containing a newline, so the wire cannot deliver one. The sanitiser is still
+    what decides, and a control character in a column other tools compare with
+    `=` is an unreadable handle — drop it whole.
+
+    Paired with its own control, so a sanitiser that rejected EVERYTHING would be
+    caught rather than looking correct."""
+    assert S._clean_session_field(bad) == ""
+    assert S._split_session_id("claude:" + bad) == ("unknown", "")
+    assert S._split_session_id(JOINABLE_ID) == ("claude", JOINABLE_UUID)  # control
+
+
+def test_extra_cannot_overwrite_the_attribution(telemetry):
+    """The attribution fields are written AFTER the `extra` merge, so an internal
+    call site cannot smuggle a tier or an origin the headers did not send.
+    Unit-level: `extra` is not caller-reachable today, and this pins that it stays
+    uncontestable if it ever becomes so."""
+    spool_dir = telemetry
+    S.emit_cmd_event(op="tabs", key="", outcome="ok", duration_ms=1,
+                     extra={"sess_src": "claude", "origin": "spoofed"},
+                     session_id=TIER_IDS["tmux"][0], attribute_session=True)
+    e = _read_events(spool_dir)[0]
+    p = json.loads(e["payload"])
+    assert p["sess_src"] == "tmux", p
+    assert "origin" not in p, p
+    assert "session" not in e, e
+
+
+# --------------------------------------------------------------------------- #
+# The opencode leak, server side.
+#
+# `CLAUDE_CODE_SESSION_ID` survives into opencode's tool shells (opencode sets
+# OPENCODE=1 in a yargs top-level `.middleware()` and hands its tools
+# `{...process.env}` -- confirmed in the PINNED build, see PINNED_VERSION in
+# scripts/tests/test_opencode_engine.py; a live env dump showed the outer Claude
+# id still present). So a plain `opencode run …` whose bash tool shells out to
+# `browser` sends a genuinely `claude:`-tagged id that names an ANCESTOR.
+#
+# 🔴 THE ID IS INDISTINGUISHABLE FROM A DIRECT CALL. There is nothing in it to
+# branch on -- it IS the outer session's id, correctly tagged. That is precisely
+# why the fix is the ORIGIN HEADER and not a new tier: the server cannot tell
+# these apart by inspection, so the caller has to say so. It is the same question
+# `browser agent` already answers the same way, and one question gets one
+# mechanism.
+#
+# 🔴 HONEST LABEL: everything in this section is an INVARIANT GUARD, green at
+# BOTH f47be59 (which introduced the origin path) and 84bf324. The server needed
+# NO change for the opencode leak -- the origin path already did the right thing,
+# and reusing it rather than adding a parallel one is the entire point of this
+# round. These tests pin that BOTH origin tokens behave identically and that a
+# leaked-but-genuinely-claude-tagged id composes with the tier gate; they are not
+# regression coverage for a server bug. They ARE red against origin/main
+# (da33356), where the origin header does not exist. Reachability is proved by
+# mutants N7 (origin never detected) and N8 (the token collapsed to a constant).
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("token", ORIGIN_TOKENS)
+def test_every_origin_token_suppresses_the_session_key(telemetry, token):
+    """LEDGER + BEHAVIOUR. Both declared origins mean the same thing -- "issued by
+    something nested under this id" -- so both must suppress `session` and record
+    the id as the causal parent instead.
+
+    Parametrized over the ledger rather than written once per token: a third
+    token added to ORIGIN_TOKENS without server support fails here, and a token
+    that got special-cased into filling `session` fails here too.
+
+    The id is `claude:`-tagged on purpose. A non-joinable tier would suppress
+    `session` on its own, so the test would pass with the origin logic deleted --
+    the joinable tier is the only fixture that can distinguish the two.
+    """
+    spool_dir = telemetry
+    srv, _ = _serve()
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=LEAKED_ID, origin=token)[0] == 200
+        e = _wait_events(spool_dir, 1)[0]
+        p = json.loads(e["payload"])
+        assert "session" not in e, f"origin {token!r} must claim no session: {e}"
+        assert p["origin"] == token, p
+        assert p["origin_session"] == LEAKED_UUID, p
+        assert ":" not in p["origin_session"], p
+        # The tier is still reported honestly -- the id really is claude-tagged.
+        assert p["sess_src"] == "claude", p
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_the_same_id_fills_the_session_when_no_origin_is_declared(telemetry):
+    """🔴 THE CONTROL FOR THE WHOLE MECHANISM, and the reason the fixture above is
+    `claude:`-tagged. The EXACT SAME id on the EXACT SAME path, differing only in
+    whether the origin header is present, must fill `session`.
+
+    Without this pair, a server that had simply stopped writing `session`
+    altogether would satisfy every origin test in this file.
+    """
+    spool_dir = telemetry
+    srv, _ = _serve()
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=LEAKED_ID)[0] == 200
+        e = _wait_events(spool_dir, 1)[0]
+        assert e["session"] == LEAKED_UUID, e
+        assert "origin" not in json.loads(e["payload"])
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_the_two_origin_tokens_are_distinct_and_recorded_verbatim(telemetry):
+    """`origin` is a two-value enum and its VALUE carries the diagnosis: which
+    nesting mechanism produced the row. Recording one token under the other's
+    name would make the two populations unseparable in the column -- the same
+    class of harm as the session key itself.
+
+    Asserted as distinctness plus verbatim round-trip, so a mutant that collapsed
+    them to a single constant dies here rather than in a test that only checks
+    `origin` is truthy."""
+    spool_dir = telemetry
+    assert len(set(ORIGIN_TOKENS)) == len(ORIGIN_TOKENS), ORIGIN_TOKENS
+    srv, _ = _serve()
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        for token in ORIGIN_TOKENS:
+            assert _cmd_sess(srv, {"op": "tabs"}, sid=LEAKED_ID,
+                             origin=token)[0] == 200
+        evs = _wait_events(spool_dir, len(ORIGIN_TOKENS))
+        seen = [json.loads(e["payload"])["origin"] for e in evs]
+        assert seen == list(ORIGIN_TOKENS), seen
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+# --------------------------------------------------------------------------- #
+# The ORIGIN path, hardened. Three findings from the blind audit of #549, all one
+# shape: the origin path was more permissive than the id path beside it.
+#
+#   A1. The origin sanitiser failed OPEN. `if origin:` on the CLEANED value meant
+#       an oversized or control-char origin cleaned to "" and fell through to the
+#       `elif`, writing `session` WITH THE PARENT'S ID -- the exact fabrication
+#       the mechanism exists to prevent. Measured: a 201-char origin produced
+#       session='uuid-w'.
+#   A2. `origin` accepted anything. `totally-made-up`, `false`, `   ` were all
+#       recorded verbatim and all suppressed `session`. The "two-value enum" was
+#       documentation, not a contract.
+#   A3. `origin_session` bypassed the tier gate, and is REACHABLE: browser-agent
+#       forwards whatever --print-session-id produced and the opencode tool
+#       declares its origin unconditionally, so `tmux:%3` genuinely arrived and
+#       was recorded as `origin_session='%3'`.
+#
+# The fix is one rule: branch on header PRESENCE, validate the value against the
+# ledger, and put `origin_session` behind the SAME tier gate as `session`.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("bad_origin,label", [
+    ("x" * (S.MAX_SESSION_FIELD + 1), "oversized"),
+    ("", "empty"),
+    ("   ", "whitespace"),
+    ("totally-made-up", "unknown token"),
+    ("false", "a word that looks like a negative"),
+    ("unknown", "collides with the tier fallback marker"),
+    ("BROWSER-AGENT", "a real token, wrong case"),
+])
+def test_an_unreadable_origin_still_suppresses_the_session(telemetry, bad_origin,
+                                                           label):
+    """🔴 THE A1/A2 REGRESSION. A present-but-unreadable origin must STILL
+    suppress.
+
+    The id is `claude:`-tagged, so if suppression were keyed off the cleaned
+    value's truthiness -- as it was -- every row here would carry the PARENT's
+    uuid in `session`. Fail closed: a caller that tried to disclaim authorship and
+    could not be understood loses attribution rather than fabricating it.
+
+    `unknown` and `BROWSER-AGENT` are in the table on purpose: the first collides
+    with the tier fallback marker, the second is a real token in the wrong case --
+    both are near-misses a `value in LEDGER` check must still reject.
+
+    HONEST NOTE ON THE TABLE: over HTTP the `whitespace` row is NOT a distinct
+    case from `empty`. A header value is delimited by the colon-space and trailing
+    whitespace is stripped, so `X-Session-Origin:    ` arrives as `""`. Measured
+    via mutant P6, which kills both rows identically. The row is kept because it
+    documents what a caller writing whitespace actually gets, not because it
+    exercises a separate branch.
+    """
+    spool_dir = telemetry
+    srv, _ = _serve()
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=LEAKED_ID,
+                         origin=bad_origin)[0] == 200
+        e = _wait_events(spool_dir, 1)[0]
+        p = json.loads(e["payload"])
+        assert "session" not in e, (
+            f"{label}: a present origin must suppress the key; "
+            f"got {e.get('session')!r}")
+        assert p["origin"] == "invalid", p
+        assert p["origin"] not in ORIGIN_TOKENS, p
+        # The parent id is still recorded -- suppression is not amnesia.
+        assert p["origin_session"] == LEAKED_UUID, p
+        # And no session field reached the line at all, under any name.
+        assert "b64:session=" not in _log_file(spool_dir).read_text()
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_the_invalid_marker_is_distinguishable_from_every_real_token():
+    """The marker exists so the failure is VISIBLE in the data rather than silent.
+    It must not collide with a real token, or a malformed declaration would be
+    indistinguishable from a working one when someone groups by `origin`."""
+    assert S.SESSION_ORIGIN_INVALID == "invalid"
+    assert S.SESSION_ORIGIN_INVALID not in S.ORIGIN_TOKENS
+
+
+def test_the_origin_ledger_is_the_same_set_the_tests_pin():
+    """SEAM. The server's ledger and this suite's expectation are two lists that
+    nothing forces to agree; pin them, or a token added to one alone changes
+    behaviour with a green suite."""
+    assert tuple(S.ORIGIN_TOKENS) == ORIGIN_TOKENS, S.ORIGIN_TOKENS
+
+
+@pytest.mark.parametrize("tier", ["tmux", "sid", "ppid", "synthetic"])
+def test_origin_session_passes_the_same_tier_gate_as_session(telemetry, tier):
+    """🔴 THE A3 REGRESSION, and it is REACHABLE rather than theoretical.
+
+    browser-agent forwards whatever `--print-session-id` produced -- its own
+    opencode-tool test exercises `BROWSER_AGENT_SESSION_ID: "tmux:%41"` -- and the
+    tool declares the origin unconditionally. So a non-joinable parent id really
+    does arrive here. The tier gate's own rationale applies verbatim: a pane id is
+    stable across many unrelated sessions, so a reader grouping by
+    `origin_session` would merge them exactly as they would on `session`.
+
+    The tier is still recorded, so the suppressed population stays measurable --
+    that is the difference between a gate and a silent drop.
+    """
+    spool_dir = telemetry
+    wire_id, bare = TIER_IDS[tier]
+    srv, _ = _serve()
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=wire_id,
+                         origin="browser-agent")[0] == 200
+        e = _wait_events(spool_dir, 1)[0]
+        p = json.loads(e["payload"])
+        assert "session" not in e, e
+        assert "origin_session" not in p, (
+            f"tier {tier!r} is not joinable and must not be recorded as a parent "
+            f"key; got {p.get('origin_session')!r}")
+        assert p["origin"] == "browser-agent", p
+        assert p["sess_src"] == tier, p        # measurable, not silent
+        # The bare id must not have leaked onto the row under any other name.
+        assert bare not in _log_file(spool_dir).read_text()
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_a_joinable_parent_is_still_recorded(telemetry):
+    """The control for the gate above: the joinable tier still yields a parent
+    key. Without this, deleting `origin_session` entirely would pass every test
+    in this section."""
+    spool_dir = telemetry
+    srv, _ = _serve()
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=LEAKED_ID,
+                         origin="browser-agent")[0] == 200
+        p = json.loads(_wait_events(spool_dir, 1)[0]["payload"])
+        assert p["origin_session"] == LEAKED_UUID, p
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_an_absent_origin_header_is_not_the_same_as_an_empty_one(telemetry):
+    """PRESENCE vs VALUE, asserted as the pair that defines the rule.
+
+    Absent -> attribute normally (the ordinary case; regressing it would re-empty
+    the column this PR exists to fill). Present but empty -> suppress. They differ
+    ONLY in whether the header is on the request, which is exactly what
+    `session_origin is None` tests and what `or None` in the handler destroyed.
+    """
+    spool_dir = telemetry
+    srv, _ = _serve()
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=LEAKED_ID)[0] == 200
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=LEAKED_ID, origin="")[0] == 200
+        absent, empty = _wait_events(spool_dir, 2)
+        assert absent["session"] == LEAKED_UUID, absent
+        assert "origin" not in json.loads(absent["payload"])
+        assert "session" not in empty, empty
+        assert json.loads(empty["payload"])["origin"] == "invalid"
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_only_the_heartbeat_is_server_originated(telemetry):
+    """🔴 CATEGORY CORRECTION. This test used to assert that the heartbeat AND the
+    /whoami+/health diagnostics "have no caller session to attribute". That was
+    true of the heartbeat and FALSE of the other two, and the wrong half was
+    load-bearing: `browser whoami` / `browser health` are subcommands a person
+    runs, and the CLI sends its ordinary session headers on them because `_curl`
+    is one code path. 125 rows / 2.0% of `kind='cmd'` over 14d were being
+    de-attributed on a false premise, while the SAME `whoami` reached via POST
+    /cmd was attributed -- one operation, two outcomes.
+
+    So the category now contains exactly one member. The heartbeat is emitted by a
+    timer with no request behind it; a `sess_src` on it would be a claim about a
+    caller that does not exist.
+    """
+    spool_dir = telemetry
+    S.emit_heartbeat_event(S.Registry())
+    e = _wait_events(spool_dir, 1)[0]
+    assert e["kind"] == "heartbeat"
+    assert "session" not in e, e
+    p = json.loads(e["payload"])
+    assert "sess_src" not in p and "origin" not in p, e
+
+
+def test_the_diagnostic_gets_are_attributed_like_any_operator_command(telemetry):
+    """The other side of that correction: /whoami and /health are operator calls,
+    so they attribute exactly like a POST /cmd.
+
+    Asserted through the REAL HTTP path with real headers rather than by calling
+    the emitter directly -- the bug was that the handler never passed the headers
+    it already had, which a direct-call test cannot see.
+    """
+    spool_dir = telemetry
+    srv, _ = _serve()
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        for path in ("/whoami", "/health"):
+            st, _b = _req(srv, "GET", path,
+                          headers={S.HDR_SESSION_ID: JOINABLE_ID})
+            assert st == 200, path
+        evs = _wait_events(spool_dir, 2)
+        assert len(evs) == 2, evs
+        for e in evs:
+            assert e["session"] == JOINABLE_UUID, e
+            assert json.loads(e["payload"])["sess_src"] == "claude", e
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_a_diagnostic_get_from_a_nested_run_is_not_credited(telemetry):
+    """And they honour the origin header too -- otherwise `browser health` from
+    inside an opencode session would be the one command that still credited the
+    inherited id, which is the whole class this PR closes."""
+    spool_dir = telemetry
+    srv, _ = _serve()
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, _b = _req(srv, "GET", "/whoami",
+                      headers={S.HDR_SESSION_ID: LEAKED_ID,
+                               S.HDR_SESSION_ORIGIN: "opencode-inherited"})
+        assert st == 200
+        e = _wait_events(spool_dir, 1)[0]
+        p = json.loads(e["payload"])
+        assert "session" not in e, e
+        assert p["origin"] == "opencode-inherited", p
+        assert p["origin_session"] == LEAKED_UUID, p
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
 
 
 # --------------------------------------------------------------------------- #
@@ -3839,7 +4670,13 @@ def test_cmd_rate_limited_returns_429_and_emits_throttle(telemetry):
         # Attribution is a COARSE, non-reversible hash of X-Session-Id — NOT raw.
         assert p["sess"] == hashlib.sha256(b"floodsession").hexdigest()[:8]
         raw = _log_file(spool_dir).read_text()
-        assert "floodsession" not in raw          # raw session id NEVER stored
+        # This id carries no tier TAG, so it is `unknown` and no join key may be
+        # written — the raw id appears nowhere. (Since the session-key fix a
+        # `claude:`-tagged id DOES reach the `session` column, deliberately; see
+        # the join-key section below. The invariant here is the fail-closed one,
+        # not "never".)
+        assert "floodsession" not in raw
+        assert p["sess_src"] == "unknown"
         # No deadlock: the server still answers after shedding load.
         assert _req(srv, "GET", "/health")[0] == 200
     finally:

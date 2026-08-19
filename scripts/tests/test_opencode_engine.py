@@ -664,6 +664,14 @@ def test_engine_is_the_version_every_measurement_is_keyed_to():
 # behaviour means adding it here — nothing can detect that omission for you.
 PIN_SURFACE = (
     "scripts/browser-bridge/README.md",
+    # The CLI carries a LIVE structural claim about opencode's env (its
+    # X-Session-Origin guard turns on `OPENCODE`, and the comment says why).
+    # Added per the "surface only rots downward" rule above: it is not a dated
+    # "measured on <version>" record like browser-agent* and opencode/tools/,
+    # so it tracks the pin. It names PINNED_VERSION instead of copying it —
+    # nothing here to go stale, and the gate now covers it if anyone writes a
+    # literal later.
+    "scripts/browser-bridge/browser",
     "scripts/browser-bridge/reference/agent.md",
     "scripts/opencode/README.md",
     "scripts/opencode/opencode.jsonc",
