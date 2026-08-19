@@ -225,7 +225,11 @@ fi
 choices=$(docker run --rm --entrypoint python3 "$IMAGE" \
             /app/scripts/signal/consumer.py --help \
           | tr ' ' '\n' | grep -o '{[a-z,]*}' | head -1 | tr -d '{}' | tr ',' '\n' | sort | tr '\n' ' ')
-want_choices="approve conversations draft drafts reconcile run search send "
+# `health` added 2026-08-18 with the liveness heartbeat (#540). Acknowledged
+# deliberately, as this control demands: it is READ-ONLY — it reads the local
+# heartbeat file (or, with --from-db, the health row) and exits 0/1. It
+# transmits nothing, writes nothing, and is what the k8s liveness probe runs.
+want_choices="approve conversations draft drafts health reconcile run search send "
 if [[ "$choices" != "$want_choices" ]]; then
   echo "build-push: REFUSING TO PUSH — subcommand set is '$choices'," >&2
   echo "            expected '$want_choices'. Empty means the parse found no {…}" >&2

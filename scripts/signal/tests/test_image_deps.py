@@ -312,3 +312,59 @@ def test_tests_are_not_part_of_the_runtime_module_set():
     assert (SIGNAL_DIR / "tests").is_dir(), (
         "HARNESS BROKEN: there is no tests/ directory, so the exclusion above "
         "proves nothing")
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 The build's subcommand control and the CLI must agree — pinned BOTH ways.
+#
+# `build-push.sh` control 3 compares the image's argparse choices against a
+# hardcoded `want_choices` set, and REFUSES TO PUSH on any difference, including
+# an addition. That is the right design — a new operator subcommand is a
+# decision about what the pod can be told to do — but nothing kept the list in
+# sync with the parser, so the two could drift apart silently and the mismatch
+# only surfaced at BUILD time, after the code had merged. Adding `health` in
+# #540 hit exactly that: a green gate, then a refused push.
+#
+# This closes it at the gate instead. It fails when the CLI grows or loses a
+# subcommand without the control being updated, AND when the control lists one
+# the CLI does not have.
+
+def _build_push_want_choices() -> set[str]:
+    import re
+    text = (Path(__file__).resolve().parents[1] / "build-push.sh").read_text(
+        encoding="utf-8")
+    m = re.search(r'^want_choices="([^"]*)"', text, re.MULTILINE)
+    assert m, "build-push.sh has no want_choices line — the control was renamed"
+    return set(m.group(1).split())
+
+
+def _cli_subcommands() -> set[str]:
+    import consumer
+    parser = consumer.build_parser()
+    for action in parser._actions:
+        if getattr(action, "choices", None) and hasattr(action, "_name_parser_map"):
+            return set(action.choices)
+    raise AssertionError("no subparser action found on the CLI parser")
+
+
+def test_the_build_control_lists_EXACTLY_the_CLI_subcommands():
+    want = _build_push_want_choices()
+    have = _cli_subcommands()
+    assert want == have, (
+        f"build-push.sh control 3 and consumer.py disagree.\n"
+        f"  only in build-push.sh: {sorted(want - have)}\n"
+        f"  only in the CLI:       {sorted(have - want)}\n"
+        f"Update want_choices in build-push.sh — deliberately: that control "
+        f"exists so a new subcommand is an explicit decision about what the "
+        f"pod can be told to do.")
+
+
+def test_the_two_way_pin_is_reading_REAL_data_not_empty_sets():
+    """Positive control. Two empty sets compare equal, so the test above would
+    pass with both readers wired to nothing — the failure mode its own subject
+    (control 3) documents as 'Empty means the parse found no {…} token at all'."""
+    want = _build_push_want_choices()
+    have = _cli_subcommands()
+    assert len(want) >= 8, want
+    assert len(have) >= 8, have
+    assert "run" in have and "health" in have
