@@ -14,10 +14,12 @@ added.
 
 THE THREE THINGS THAT CAN GO SILENTLY WRONG, and the tests that pin them
 ------------------------------------------------------------------------
-1. **A substring match.** `"civitai.com" in host` is the obvious spelling and it
-   is the bug: it hands our operating notes to `notcivitai.com.evil.test`. The
-   match must be on LABEL BOUNDARIES. See the `test_suffix_*` block, and
-   especially `test_a_host_merely_containing_the_key_does_not_match`.
+1. **A substring match.** `key in host` is the obvious spelling and it is the
+   bug: for a key `example.test` it hands our operating notes to
+   `notexample.test.evil.invalid`. The match must be on LABEL BOUNDARIES. See
+   the suffix-matching block, especially
+   `test_a_host_merely_containing_the_key_does_not_match`. (That block uses
+   reserved-TLD hosts on purpose — see the 🔴 note above it.)
 2. **A miss that is not silent.** A `"site_notes": null` or `""` on every
    unregistered host would put a field on the wire for every command on the
    internet. The test asserts the key is ABSENT, not falsy — `not in`, never
