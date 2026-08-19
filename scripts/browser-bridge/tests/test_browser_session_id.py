@@ -44,6 +44,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -400,3 +401,166 @@ def test_not_owned_tab_without_a_tab_flag_says_open_first(refuser):
     assert "claude:uuid-under-test" in err, err
     # No --tab was passed, so nothing may accuse a tab id.
     assert "is not owned by THIS session" not in err, err
+
+
+# --------------------------------------------------------------------------- #
+# 6. The tier TAG is now load-bearing for TELEMETRY, not just for collision
+#    avoidance.
+#
+# server.py reads the tag before the FIRST `:` to decide whether the id is a
+# joinable key for the activity.events `session` column: `claude:` is Claude
+# Code's own session uuid (the same value `source='claude'` rows store, so it
+# JOINS), while `tmux:`/`sid:`/`ppid:` are not — a pane id like %3 is stable
+# across many UNRELATED sessions and recording it would silently merge them.
+#
+# That makes the tag a SEAM: the CLI writes it, a different file reads it, and
+# nothing in either file fails if they drift. A rename here would not break a
+# single existing test and would silently empty the column again.
+# --------------------------------------------------------------------------- #
+sys.path.insert(0, str(BB))
+import server as S  # noqa: E402
+
+
+# Every tag `derive_session_id` (and the recreate-close re-tag) can put on the
+# wire. Pinned two-way: the parse below must find exactly this set, so a NEW tier
+# fails here until someone decides whether it is joinable.
+CLI_TIER_TAGS = {"claude", "tmux", "sid", "ppid", "synthetic"}
+
+
+def _emitted_tags():
+    """Parse the tags the CLI can emit out of its own source.
+
+    Each is a literal at the START of a printf format or an assignment, followed
+    by `:`. The parser is asserted non-empty by its caller — a regex that silently
+    matched nothing would make every claim below pass vacuously.
+    """
+    src = CLI.read_text()
+    tags = set(re.findall(r"printf '([a-z]+):%s", src))
+    tags |= set(re.findall(r'SESSION_ID="([a-z]+):', src))
+    tags |= set(re.findall(r'tok="([a-z]+):', src))
+    return tags
+
+
+def test_the_cli_tier_tag_vocabulary_is_pinned():
+    """SEAM LEDGER. Fails when the set GROWS (a new tier nobody classified as
+    joinable-or-not) or SHRINKS (a tag renamed or dropped) — neither of which any
+    behavioural test in this file would notice, because they all assert the tag
+    they were written with."""
+    found = _emitted_tags()
+    assert found, "the tag parser matched nothing — it is testing nothing"
+    assert found == CLI_TIER_TAGS, f"CLI tier tags drifted: {found}"
+
+
+def test_the_servers_joinable_tag_is_one_the_cli_actually_emits():
+    """The other half of the seam: server.py's allowlist must name a tag this CLI
+    can produce. If either side renames alone, the `session` column silently goes
+    back to empty — the exact bug this whole change fixes, restored with a green
+    suite on both sides."""
+    assert S.SESSION_SRC_JOINABLE in CLI_TIER_TAGS
+    assert S.SESSION_SRC_JOINABLE in _emitted_tags()
+    # And the fail-closed token is NOT a tag anything can legitimately emit.
+    assert S.SESSION_SRC_UNKNOWN not in CLI_TIER_TAGS
+
+
+def test_the_throwaway_recreate_close_id_is_re_tagged_not_just_suffixed():
+    """🔴 REGRESSION. `emulate --recreate` sends its close under a THROWAWAY id so
+    the close cannot evict the ownership mapping it just created. That id was
+    built by APPENDING to the real one — which left the live session's `claude:`
+    tag on a value that is not that session's key, so the bridge would have
+    stored `<uuid>+recreate-close` in the `session` column as a near-duplicate of
+    the real key, inflating distinct-session counts with fabricated rows.
+
+    Structural because the behaviour needs a full recreate round-trip against a
+    real extension; what is pinned is the property that actually matters — the
+    throwaway is re-TAGGED with a tier the server does not join on."""
+    src = CLI.read_text()
+    m = re.search(r'SESSION_ID="([^"]*\+recreate-close)"', src)
+    assert m, "the recreate-close throwaway id assignment is gone or renamed"
+    throwaway = m.group(1)
+    tag = throwaway.split(":", 1)[0]
+    assert tag == "synthetic", f"throwaway id wears tier tag {tag!r}"
+    assert tag != S.SESSION_SRC_JOINABLE
+    assert throwaway.startswith("synthetic:${SESSION_ID}"), throwaway
+
+
+# --------------------------------------------------------------------------- #
+# 7. The WIRE. A stub bridge that RECORDS the request headers, so what is
+#    asserted is what the CLI actually sends — not what a reader of the source
+#    believes it sends.
+#
+# INVARIANT GUARDS: these pass at base too. They exist because server.py now
+# DEPENDS on the tagged form reaching it, and nothing else asserts that the tag
+# survives the transport rather than only the deriver.
+# --------------------------------------------------------------------------- #
+_CAPTURED = []
+
+
+class _Capture(BaseHTTPRequestHandler):
+    def _record(self):
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        _CAPTURED.append({k: v for k, v in self.headers.items()})
+        raw = json.dumps({"ok": False, "error": "not_owned_tab"}).encode()
+        self.send_response(409)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    do_POST = _record
+    do_GET = _record
+
+    def log_message(self, *a):
+        pass
+
+
+@pytest.fixture
+def capture(tmp_path):
+    _CAPTURED.clear()
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _Capture)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    tok = tmp_path / "token"
+    tok.write_text("test-token-abc123\n")
+    base = dict(BROWSER_BRIDGE_HOST="127.0.0.1",
+                BROWSER_BRIDGE_PORT=str(srv.server_address[1]),
+                BROWSER_BRIDGE_TOKEN_FILE=str(tok))
+
+    class _C:
+        headers = _CAPTURED
+
+        @staticmethod
+        def run(*args, **over):
+            env = _env(tmp_path, **{**base, **over})
+            return subprocess.run(["bash", str(CLI), *args], env=env,
+                                  capture_output=True, text=True, timeout=60)
+    try:
+        yield _C
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="the CLI uses curl")
+@pytest.mark.parametrize("envvars,want_id", [
+    ({"CLAUDE_CODE_SESSION_ID": "uuid-onwire"}, "claude:uuid-onwire"),
+    ({"TMUX_PANE": "%41"}, "tmux:%41"),
+])
+def test_the_tagged_id_survives_the_transport(capture, envvars, want_id):
+    """PIN THE WIRE FORMAT: the tag is on the header value the server receives.
+    Two tiers with pairwise-distinct ids, so a stub that hardcoded either literal
+    could not satisfy both rows."""
+    capture.run("emulate", "iphone-15", **envvars)
+    assert capture.headers, "the stub recorded no request at all"
+    h = capture.headers[0]
+    assert h.get("X-Session-Id") == want_id, h
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="the CLI uses curl")
+def test_an_ordinary_cli_call_declares_no_nested_origin(capture):
+    """X-Session-Origin marks a NESTED browser-agent run, whose forwarded id must
+    not be credited as usage. The direct CLI must never send it — if it did,
+    every ordinary command would stop filling the session column."""
+    capture.run("health", CLAUDE_CODE_SESSION_ID="uuid-direct")
+    assert capture.headers, "the stub recorded no request at all"
+    h = capture.headers[0]
+    assert h.get("X-Session-Id") == "claude:uuid-direct", h
+    assert "X-Session-Origin" not in h, h

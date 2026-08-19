@@ -268,7 +268,15 @@ die() { echo "browser: $*" >&2; exit 1; }
 # `bash` process, so it must come from the environment / process tree, not shell
 # state). Sent as X-Session-Id on every /cmd so the server can route this session
 # to its OWN owned tab. Namespaced by source so ids from different sources can't
-# collide. Fallback chain (most→least reliable), documented in README/SKILL:
+# collide.
+# 🔴 THAT NAMESPACE TAG — everything before the FIRST `:` — IS LOAD-BEARING
+# BEYOND COLLISION AVOIDANCE. server.py parses it to decide whether the id is a
+# joinable key for activity telemetry: `claude:` is Claude Code's own session
+# uuid (the same value `source='claude'` rows store, so it JOINS), while
+# `tmux:`/`sid:`/`ppid:` are not — a pane id like %3 is stable across many
+# UNRELATED sessions and recording it as a session key would silently merge
+# them. Do not add a tier without deciding which of those it is, and never emit
+# an id whose tag misdescribes it (see the recreate-close re-tag below). Fallback chain (most→least reliable), documented in README/SKILL:
 #   1. CLAUDE_CODE_SESSION_ID — Claude Code's own session UUID (present since the
 #      2.1.x CLI; verified stable across every Bash-tool call in a session). Best.
 #   2. CLAUDE_SESSION_ID — defensive alternate spelling, in case a CLI build
@@ -1194,8 +1202,17 @@ print(t)
   # both empty, the new tab id lost). The `$( … )` confines the exit to a
   # subshell, so `close_ok="false"` / `closeError` / `closedOldTab:false` are live
   # code paths rather than the dead ones they used to be.
+  #
+  # 🔴 THE THROWAWAY ID IS RE-TAGGED, not just suffixed. The id carries an
+  # explicit TIER TAG before its first `:` (claude:/tmux:/sid:/ppid: — see
+  # derive_session_id), and server.py reads that tag to decide whether the id is
+  # a joinable session key for activity telemetry. Appending alone would leave a
+  # fabricated value still wearing the live session's `claude:` tag, and the
+  # bridge would store it in the `session` column as a near-duplicate of the real
+  # key. `synthetic:` is not a joinable tier, so nothing is attributed. Routing is
+  # unaffected: all this id has to be is DIFFERENT from ours, which it still is.
   local close_ok="true" close_err="" saved_sid="$SESSION_ID" close_rc close_stderr
-  SESSION_ID="${SESSION_ID}+recreate-close"
+  SESSION_ID="synthetic:${SESSION_ID}+recreate-close"
   TAB="$old_tab"
   close_stderr="$( cmd_op close 2>&1 >/dev/null )"; close_rc=$?
   if [ "$close_rc" -ne 0 ]; then

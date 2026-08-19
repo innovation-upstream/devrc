@@ -1364,9 +1364,91 @@ unchanged.
 distinct `{"event":"throttled","key":…,"reason":…,"sess":…}` line AND emits a
 telemetry event (`outcome="throttled"`, `payload.reason`) into `activity.events`.
 `payload.sess` is a **coarse, non-reversible** fingerprint (first 8 hex of
-sha256 of the `X-Session-Id`) — enough to attribute a flood to a session without
-storing the raw id, kept metadata-only (no page content). This is the ONLY event
-that carries the session hash.
+sha256 of the `X-Session-Id`), kept metadata-only (no page content). This is the
+ONLY event that carries the session hash.
+
+`sess` was **kept** when the `session` join key landed (below) rather than
+replaced by it: the column is filled for the `claude:` tier and non-nested calls
+only, so a flood driven from a `tmux:`/`sid:`/`ppid:`/untagged id — or from a
+nested `browser agent` run — is exactly the case where you still need *some*
+stable handle to tell one flooder from two.
+
+## Session as a telemetry join key
+
+**The bug (measured 2026-08-18).** Every `source='browser-bridge'` row in
+`activity.events` had an **empty `session` column** — 0 of 6,937 over 14 days —
+while `claude`, `opencode`, `keys`, `tmux` and `zsh` filled it 100%. The value
+already reached the server (`X-Session-Id`, used for tab-ownership routing); it
+was simply never passed to `emit_cmd_event`. So a browser-skill call could not be
+joined to the agent session that made it, and "which sessions used the browser
+skill" had to be answered by scanning 1.5M transcript records.
+
+### Hazard 1 — only one tier is a join key
+
+The id is **tagged** with the tier that produced it (everything before the first
+`:`), and the server reads that tag. Reading a tag the CLI emits on purpose is not
+shape inference; deciding from the value's *form* ("looks like a uuid → claude")
+would be, and is forbidden.
+
+| `X-Session-Id` | `payload.sess_src` | fills `session`? | why |
+|---|---|---|---|
+| `claude:<uuid>` | `claude` | **yes** — the bare `<uuid>` | it IS Claude Code's session uuid, the same value `source='claude'` rows store |
+| `tmux:%3` | `tmux` | no | a pane id is stable across **many unrelated sessions**; storing it would silently merge them — worse than empty |
+| `sid:<sid>:<start>` | `sid` | no | no other source records it |
+| `ppid:<pid>:<rand>` | `ppid` | no | last-resort random token |
+| `synthetic:…` | `synthetic` | no | an id the CLI made up on purpose (the `emulate --recreate` close) |
+| anything untagged, absent, or empty | `unknown` | no | fail closed |
+
+Only the **first** colon splits (a `sid:`/`ppid:` id contains more). An id with no
+tag is **never** promoted — a bare uuid is exactly the value it would be tempting
+to accept, and the opencode tool's own default is the literal `browser-agent`.
+
+### Hazard 2 — a nested `browser agent` run is not its invoker
+
+`browser agent` captures the id of the session that **invoked** it
+(`--print-session-id`) and forwards it to the nested opencode tool, which sends it
+as `X-Session-Id`. Right for routing and the audit trail; **wrong** for the
+`session` column, which means *the agent session that issued this command*. Left
+alone, one `browser agent "<goal>"` call would become N browser calls credited to
+the operator's own session — a fabricated usage number in the exact column
+`adoption-scan.py` reads (~581 nested rows in 14d, ~11% of bridge commands).
+
+So the nested tool declares `X-Session-Origin: browser-agent`. When that header is
+present the server writes **no** `session`; the forwarded id is recorded as
+`payload.origin_session` (the causal **parent**) beside `payload.origin`. Giving
+the nested session an id of its own is a later change.
+
+### Contract
+
+- `payload.sess_src` is **always** set on a `/cmd` event, so every row is
+  self-describing about why it does or does not carry a key.
+- `session` holds the **bare** id (the tag stripped) so it compares `=` against
+  `source='claude'` rows with no `replaceOne()` at the join site.
+- Stored **raw, not hashed** — deliberately. A hash would make browser-bridge the
+  one source needing `hex(SHA256())` at query time, and a forgotten join returns
+  zero rows, which reads as a valid "no sessions matched" answer.
+- An id over 200 chars or carrying a control character is **dropped whole**, never
+  truncated — a truncated join key is a *wrong* join key.
+- Server-originated events (the heartbeat, `/whoami`, `/health`) carry **none** of
+  these fields: they have no caller session to attribute.
+- `kind='cmd'` is unchanged — it is the usage signal `adoption-scan.py` reads.
+- Best-effort is unchanged: every field above is written inside `emit_cmd_event`'s
+  swallowing `try`, off the critical path.
+
+**Privacy.** A deliberate widening of the metadata-only contract, and a narrow
+one: the agent session's own opaque handle is not page content, is not derived
+from anything the browser saw, and is minted by the local agent harness before
+any browser command exists. It says *who asked*, never *what was browsed*.
+
+**Example — sessions that used both opencode and the browser skill:**
+
+```sql
+SELECT session, count() AS browser_calls
+FROM activity.events
+WHERE source = 'browser-bridge' AND kind = 'cmd' AND session != ''
+  AND session IN (SELECT DISTINCT session FROM activity.events WHERE source = 'opencode')
+GROUP BY session ORDER BY browser_calls DESC
+```
 
 ## Session isolation (concurrent-session tab clobbering)
 
@@ -1389,6 +1471,10 @@ per-session (multi-step **workflow**) isolation did not.
   **routing only** and is **never** trusted for auth — bearer + Host still gate
   every request. If two sessions ever resolve the same id they share a tab
   (documented degradation — no worse than before).
+- 🔴 **The tier tag before the first `:` is load-bearing for telemetry too.**
+  `server.py` parses it to decide whether the id is a joinable session key — see
+  "Session as a telemetry join key" above. Adding a tier means deciding which it
+  is; never emit an id whose tag misdescribes it.
 - **⚠ Why the POSIX session id, and not `$PPID` (fixed 2026-08-01).** The
   PPID-keyed token was **not stable across a command substitution**: a `$( … )`
   that forks gives `browser` a different parent pid, so

@@ -105,6 +105,32 @@ test("buildRequest: forces the env tab + maps op names; headers carry the invari
   assert.equal(body.tab, 4242);                        // FORCED from env
 });
 
+// --- X-Session-Origin: a NESTED run must not be credited as the operator ---- //
+// browser-agent captures the id of the session that INVOKED it and forwards it
+// here, so every nested command arrives wearing the operator's own `claude:` tag.
+// The bridge fills activity.events' `session` column from that tag -- so without
+// this header one `browser agent "<goal>"` call would become N browser calls
+// attributed to the operator's own session, indistinguishable from direct use
+// (~11% of bridge commands over 14d). Declaring the origin makes the server
+// record the forwarded id as the causal PARENT (`origin_session`) instead.
+test("buildRequest: declares X-Session-Origin so the forwarded id is not credited as usage", () => {
+  const { headers } = buildRequest({ op: "html" }, baseEnv(), TOK);
+  assert.equal(headers["X-Session-Origin"], "browser-agent");
+  // Routing is untouched: the forwarded id still rides along, verbatim.
+  assert.equal(headers["X-Session-Id"], "claude:sess");
+});
+
+test("buildRequest: the origin is UNCONDITIONAL -- it does not depend on the env id", () => {
+  // Every request from this tool is nested, whatever id it was handed (including
+  // the "browser-agent" literal it falls back to). A header that appeared only
+  // when some env var happened to be set would silently mis-credit the rest.
+  for (const env of [baseEnv({ BROWSER_AGENT_SESSION_ID: "tmux:%41" }),
+    baseEnv({ BROWSER_AGENT_SESSION_ID: undefined })]) {
+    const { headers } = buildRequest({ op: "text" }, env, TOK);
+    assert.equal(headers["X-Session-Origin"], "browser-agent");
+  }
+});
+
 test("buildRequest: the model CANNOT override the forced tab (no tab arg exists)", () => {
   // Even if a hostile arg tried to smuggle a tab/target, buildRequest ignores it.
   const { body } = buildRequest({ op: "text", tab: 999, target: "other" },
