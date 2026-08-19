@@ -69,7 +69,15 @@ statuses come from `subsystem_recall.recall`, unchanged:
 | `index: scope-absent` | the store holds no directory for this repo yet |
 | `index: AMBIGUOUS in <scope> — a.md \| b.md` | 🔴 more than one candidate; **pick one, never guess** — no body is surfaced |
 | `index: store-missing` | the store root does not exist on this host |
-| `index: not-attempted` | 🔴 **no scope was derivable**, so the store was never asked. NOT a miss. |
+| `index: not-attempted` | 🔴 **no root could be examined**, so no scope was derivable and the store was never asked. NOT a miss. |
 
 That last row is the one to read carefully: `not-attempted` and `ref-absent` both
 show "nothing from the index", and only one of them is a finding.
+
+🔴 **The index is NOT gated on `locate` succeeding.** If nothing matched by path,
+the scope falls back to the searched root(s) and the store is asked anyway — a
+curated pointer sheet is worth *most* when the path heuristic missed, since
+"where does this live?" is what the index can answer and the matcher just failed.
+A hit reached that way is marked `[scope via searched root (nothing located)]`,
+because that scope was **not** confirmed to own the service. `not-attempted` now
+means only one thing: nothing was examined at all.

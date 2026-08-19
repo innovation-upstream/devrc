@@ -595,11 +595,80 @@ class TestIndexRead:
         assert b.index.pointers == "", "an ambiguous ref must surface NO body"
         assert "AMBIGUOUS" in sr.render_brief(b)
 
-    def test_no_owning_repo_means_the_index_was_NOT_ATTEMPTED(self, store: Path) -> None:
-        """Distinguished from `ref-absent`: no scope was derivable, so the store
-        was never asked. Reporting a miss would be a finding nobody measured."""
+    def test_nothing_EXAMINED_means_the_index_was_NOT_ATTEMPTED(self, store: Path) -> None:
+        """Distinguished from `ref-absent`: no root was readable, so no scope was
+        derivable and the store was never asked. Reporting a miss would be a
+        finding nobody measured."""
         b = sr.recon(SERVICE, repos=["/nonexistent/root"], store_root=store)
         assert b.index.status == "not-attempted"
+
+    # --- 🔴 the index is NOT gated on locate succeeding -----------------------
+
+    def test_a_LOCATE_MISS_still_asks_the_index(self, repo: Path, store: Path) -> None:
+        """🔴 THE INVERSION THE FIRST VERSION SHIPPED. The scope came from
+        `loc.owner`, so a path-heuristic miss reported "no owning repo located to
+        derive a scope from" over a scope whose entries were sitting right there.
+        Measured against the real store on a second repo.
+
+        A curated pointer sheet is worth MOST when the matcher missed — "where
+        does this live?" is exactly what the index can answer and locate just
+        failed at. The fixture reproduces that: the entry is named `roster` and
+        the repo has NO path component matching `alias-only-name`, but the entry
+        carries it as an alias, so the resolver reaches it and locate cannot.
+        """
+        (store / SCOPE / f"{SERVICE}.md").write_text(f"""\
+---
+service: {SERVICE}
+aliases: [alias-only-name]
+scope: {SCOPE}
+sensitivity: public
+---
+
+## Pointers
+- manage-* skill: manage-{SERVICE}
+""", encoding="utf-8")
+        b = sr.recon("alias-only-name", repos=[str(repo)], store_root=store)
+        assert b.locate.status == "no-match", "the fixture must MISS on locate"
+        assert b.index.status == "hit", b.index
+        assert "manage-roster" in b.index.pointers
+
+    def test_a_fallback_hit_says_SO_rather_than_implying_ownership(
+        self, repo: Path, store: Path
+    ) -> None:
+        """A scope reached by fallback was NOT confirmed to own the service."""
+        (store / SCOPE / f"{SERVICE}.md").write_text(
+            f"---\nservice: {SERVICE}\naliases: [alias-only-name]\nscope: {SCOPE}\n"
+            f"sensitivity: public\n---\n\n## Pointers\n- a\n", encoding="utf-8")
+        b = sr.recon("alias-only-name", repos=[str(repo)], store_root=store)
+        assert b.index.basis == "searched root (nothing located)"
+        assert "[scope via searched root (nothing located)]" in sr.render_brief(b)
+
+    def test_a_LOCATED_hit_carries_NO_fallback_marker(self, repo: Path, store: Path) -> None:
+        """The negative half — the marker must not print on the ordinary path, or
+        it becomes noise nobody reads."""
+        b = sr.recon(SERVICE, repos=[str(repo)], store_root=store)
+        assert b.index.status == "hit"
+        assert b.index.basis == "owning repo"
+        assert "scope via" not in sr.render_brief(b)
+
+    def test_index_scopes_prefers_the_owner_and_falls_back_to_searched_roots(self) -> None:
+        located = sr.LocateResult(
+            "hits", "x",
+            (sr.RootScan("/a", "searched", "--repo"), sr.RootScan("/b", "searched", "--repo")),
+            owner="/a",
+        )
+        assert sr.index_scopes(located) == (("/a", "owning repo"),)
+
+        missed = sr.LocateResult(
+            "no-match", "x",
+            (sr.RootScan("/a", "searched", "--repo"),
+             sr.RootScan("/b", "absent", "--repo"),     # never searched -> excluded
+             sr.RootScan("/c", "searched", "--repo")),
+        )
+        assert [p for p, _ in sr.index_scopes(missed)] == ["/a", "/c"]
+
+        blind = sr.LocateResult("not-searched", "x", (sr.RootScan("/a", "absent", "--repo"),))
+        assert sr.index_scopes(blind) == ()
 
     def test_the_sensitivity_fold_is_carried_through(self, repo: Path, tmp_path: Path) -> None:
         """🔴 Fail-safe: an entry with NO `sensitivity:` is client-confidential,

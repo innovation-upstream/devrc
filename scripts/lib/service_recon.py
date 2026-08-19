@@ -42,7 +42,8 @@ nothing" from "did not look":
 
     roots     `searched` / `absent` / `not-a-directory` / `walk-failed`
     locate    `hits` / `no-match` / `not-searched`
-    index     recall's own status (`ok`/`scope-absent`/`ref-absent`/`ref-ambiguous`/…)
+    index     recall's own status (`recalled`/`scope-absent`/`ref-absent`/…), plus
+              the BASIS naming which repo the scope was derived from
     config    `extracted` / `no-manifests` / `not-attempted`
     git       `commits` / `no-commits` / `not-attempted` / `git-failed`
     live      `off` / `no-context` / `no-namespace` / `ran` / `failed`
@@ -134,6 +135,7 @@ __all__ = [
     "search_roots",
     "scan_root",
     "locate",
+    "index_scopes",
     "read_index",
     "dotted_paths",
     "extract_knobs",
@@ -366,6 +368,11 @@ class IndexResult:
     nuance: str = ""
     candidates: tuple[str, ...] = ()
     sensitivity: str | None = None
+    basis: str = ""
+    """🔴 WHICH REPO THE SCOPE CAME FROM, in words — `owning repo` or
+    `searched root (nothing located)`. Printed, never implied: a hit found via
+    the fallback is answering about a scope the locate step did NOT confirm owns
+    the service, and a reader must be able to see that."""
     detail: str = ""
     report: RecallReport | None = None
 
@@ -631,8 +638,28 @@ def locate(
 # --- The index read ------------------------------------------------------------
 
 
+def index_scopes(loc: LocateResult) -> tuple[tuple[str, str], ...]:
+    """`(scope, basis)` pairs to ask the index about, in priority order.
+
+    🔴 THE INDEX MUST NOT BE GATED ON `locate` SUCCEEDING, and the first version
+    of this module got that backwards — it derived the scope from `loc.owner` and
+    reported `not-attempted` whenever nothing matched. Measured against the real
+    store: `externaldns` matched no path component in its repo, so the run said
+    "no owning repo located to derive a scope from" over a scope whose entries
+    were sitting right there. That is precisely inverted — a curated pointer
+    sheet is worth MOST when the path heuristic missed, because "where does this
+    live?" is the question the index can answer and the matcher just failed.
+
+    So: prefer the located owner, and fall back to EVERY root that was
+    successfully searched. The basis is carried and printed, never implied.
+    """
+    if loc.owner is not None:
+        return ((loc.owner, "owning repo"),)
+    return tuple((s.path, "searched root (nothing located)") for s in loc.roots if s.searched)
+
+
 def read_index(
-    owner: str | None,
+    loc: LocateResult | str | None,
     service: str,
     *,
     store_root: str | Path = DEFAULT_STORE_ROOT,
@@ -645,9 +672,40 @@ def read_index(
     typed, or misses), does not fold `sensitivity:` fail-safe, and returned 11 KB
     in one observed call. `recall` answers all four, and it is the SAME call
     `/resume` makes — one reader, not two.
+
+    Accepts a `LocateResult` (the real caller) or a bare repo path (tests and any
+    caller that already knows the repo).
     """
-    if owner is None:
-        return IndexResult("not-attempted", detail="no owning repo located to derive a scope from")
+    if isinstance(loc, LocateResult):
+        candidates = index_scopes(loc)
+        if not candidates:
+            return IndexResult(
+                "not-attempted",
+                detail="no root could be examined, so no scope could be derived",
+            )
+        # Ask each candidate; the FIRST hit wins and the rest are reported only
+        # if none hit — so a fallback can never silently shadow a real answer.
+        misses: list[IndexResult] = []
+        for repo, basis in candidates:
+            got = _read_index_one(repo, service, store_root=store_root, basis=basis)
+            if got.status in ("hit", "ref-ambiguous"):
+                return got
+            misses.append(got)
+        return misses[0]
+    if loc is None:
+        return IndexResult("not-attempted", detail="no repo given to derive a scope from")
+    return _read_index_one(loc, service, store_root=store_root, basis="owning repo")
+
+
+def _read_index_one(
+    owner: str,
+    service: str,
+    *,
+    store_root: str | Path = DEFAULT_STORE_ROOT,
+    basis: str = "owning repo",
+) -> IndexResult:
+    """One scope's answer. Split out so the multi-candidate loop above has a
+    single per-scope predicate rather than a copy of it per branch."""
     try:
         scope = scope_for_repo(owner)
     except Exception as exc:  # a non-repo root, or git unavailable
@@ -656,23 +714,24 @@ def read_index(
     try:
         rep = recall(store_root, scope, ref=service)
     except StoreMissingError as exc:
-        return IndexResult("store-missing", scope=scope, ref=normalize_ref(service), detail=str(exc))
+        return IndexResult("store-missing", scope=scope, ref=normalize_ref(service),
+                           basis=basis, detail=str(exc))
     except Exception as exc:
         return IndexResult("store-unreadable", scope=scope, ref=normalize_ref(service),
-                           detail=str(exc))
+                           basis=basis, detail=str(exc))
 
     ref = normalize_ref(service)
     if rep.status == "ref-ambiguous":
         cands = tuple(getattr(rep, "candidates", ()) or ())
         return IndexResult("ref-ambiguous", scope=scope, ref=ref, candidates=cands, report=rep,
-                           detail="the ref names more than one entry — pick one, never guess")
+                           basis=basis, detail="the ref names more than one entry — pick one, never guess")
 
     # 🔴 `RECALLED_STATUS` is imported, not spelled. A literal `"ok"` here would
     # have matched nothing recall ever returns and every hit would have rendered
     # as `nothing recorded under that ref yet` — a silent miss with the exact
     # shape the store's own docs warn about.
     if rep.status != RECALLED_STATUS or not rep.entries:
-        return IndexResult(rep.status, scope=scope, ref=ref, report=rep,
+        return IndexResult(rep.status, scope=scope, ref=ref, report=rep, basis=basis,
                            detail="nothing recorded under that ref yet")
 
     hit = rep.entries[0]
@@ -684,6 +743,7 @@ def read_index(
         pointers=(sections.get(POINTERS_HEADING) or "").strip(),
         nuance=(sections.get(NUANCE_HEADING) or "").strip(),
         sensitivity=hit.sensitivity,
+        basis=basis,
         report=rep,
     )
 
@@ -1000,7 +1060,7 @@ def recon(
     """Locate → index → config → git log (→ live, opt-in). One process, one brief."""
     roots = search_roots(repos, env=env, cwd=cwd)
     loc = locate(service, roots, file_cap=file_cap)
-    idx = read_index(loc.owner, service, store_root=store_root)
+    idx = read_index(loc, service, store_root=store_root)
     cfg = config_for(loc, file_limit=file_limit, knob_limit=knob_limit)
     log = git_log(loc, limit=log_limit)
     lv = live_state(cfg, enabled=live, context=context, namespace=namespace)
@@ -1084,9 +1144,12 @@ def render_brief(b: Brief, *, file_limit: int = DEFAULT_FILE_LIMIT) -> str:
     # --- index ---------------------------------------------------------------
     L.append("")
     i = b.index
+    # 🔴 The BASIS is printed on every branch that has one. A hit reached via the
+    # fallback answers about a scope `locate` did NOT confirm owns the service.
+    via = f" [scope via {i.basis}]" if i.basis and i.basis != "owning repo" else ""
     if i.status == "hit":
         sens = f" sensitivity={i.sensitivity}" if i.sensitivity else ""
-        L.append(f"index: {i.scope}/{i.ref} — HIT (from index){sens}")
+        L.append(f"index: {i.scope}/{i.ref} — HIT (from index){sens}{via}")
         if i.pointers:
             L.append(f"  {POINTERS_HEADING}")
             for ln in i.pointers.splitlines():
@@ -1099,10 +1162,11 @@ def render_brief(b: Brief, *, file_limit: int = DEFAULT_FILE_LIMIT) -> str:
             L.append("  (entry exists but carries neither section)")
     elif i.status == "ref-ambiguous":
         L.append(f"index: AMBIGUOUS in {i.scope} — {' | '.join(i.candidates) or '(candidates unlisted)'}"
-                 f" — pick one, never guess")
+                 f" — pick one, never guess{via}")
     else:
         L.append(f"index: {i.status}"
                  + (f" (scope {i.scope})" if i.scope else "")
+                 + via
                  + (f" — {i.detail}" if i.detail else ""))
 
     # --- config --------------------------------------------------------------
@@ -1186,7 +1250,8 @@ def brief_json(b: Brief) -> dict:
         },
         "index": {
             "status": b.index.status, "scope": b.index.scope, "ref": b.index.ref,
-            "sensitivity": b.index.sensitivity, "candidates": list(b.index.candidates),
+            "sensitivity": b.index.sensitivity, "basis": b.index.basis,
+            "candidates": list(b.index.candidates),
             "pointers": b.index.pointers, "nuance": b.index.nuance, "detail": b.index.detail,
         },
         "config": {
