@@ -2188,12 +2188,18 @@ JOINABLE_UUID = "6f1c9a20-1111-4bbb-8ccc-000000000001"
 JOINABLE_ID = "claude:" + JOINABLE_UUID
 NESTED_UUID = "8ab3d704-2222-4eee-9fff-000000000002"
 NESTED_ID = "claude:" + NESTED_UUID
-# A Claude session uuid that LEAKED into an opencode tool shell. The CLI re-tags
-# it `oc-inherited:` because inside opencode the variable names an ANCESTOR, not
-# the caller -- see the leak section at the bottom of this file. Distinct from
-# both uuids above so a mutant reusing either cannot satisfy its tests.
+# A Claude session uuid that LEAKED into an opencode tool shell. It arrives
+# `claude:`-tagged and is INDISTINGUISHABLE from a direct call by inspection --
+# the id is genuinely the outer session's. Only the origin header separates them,
+# which is exactly why the fix is a header and not a tier. Distinct from both
+# uuids above so a mutant reusing either cannot satisfy its tests.
 LEAKED_UUID = "c05e17b6-3333-4aaa-8ddd-000000000003"
-LEAKED_ID = "oc-inherited:" + LEAKED_UUID
+LEAKED_ID = "claude:" + LEAKED_UUID
+# The complete set of origin tokens any caller may declare. Pinned as a LEDGER:
+# both mean "issued by something nested under origin_session", and both must
+# suppress the session key identically. A third one added without a test here
+# fails the ledger rather than silently getting a different behaviour.
+ORIGIN_TOKENS = ("browser-agent", "opencode-inherited")
 # tier tag -> (wire id, the bare id behind it). Mirrors derive_session_id's tags.
 TIER_IDS = {
     "claude": (JOINABLE_ID, JOINABLE_UUID),
@@ -2202,7 +2208,6 @@ TIER_IDS = {
     "ppid": ("ppid:31337:deadbeefcafef00d", "31337:deadbeefcafef00d"),
     "synthetic": ("synthetic:" + JOINABLE_ID + "+recreate-close",
                   JOINABLE_ID + "+recreate-close"),
-    "oc-inherited": (LEAKED_ID, LEAKED_UUID),
 }
 
 
@@ -2573,39 +2578,43 @@ def test_extra_cannot_overwrite_the_attribution(telemetry):
 # --------------------------------------------------------------------------- #
 # The opencode leak, server side.
 #
-# `CLAUDE_CODE_SESSION_ID` survives into opencode's tool shells (opencode 1.18.18
-# sets OPENCODE=1 in a yargs top-level `.middleware()` and hands its tools
-# `{...process.env}`; a live env dump confirmed the outer Claude id was still
-# there). So the CLI re-tags the leaked value `oc-inherited:` and the server must
-# treat that tag as NON-joinable — otherwise a plain `opencode run …` whose bash
-# tool shells out to `browser` writes the OUTER Claude session's uuid into
-# `session`, indistinguishable from that session's own direct browser use.
+# `CLAUDE_CODE_SESSION_ID` survives into opencode's tool shells (opencode sets
+# OPENCODE=1 in a yargs top-level `.middleware()` and hands its tools
+# `{...process.env}` -- confirmed in the PINNED build, see PINNED_VERSION in
+# scripts/tests/test_opencode_engine.py; a live env dump showed the outer Claude
+# id still present). So a plain `opencode run …` whose bash tool shells out to
+# `browser` sends a genuinely `claude:`-tagged id that names an ANCESTOR.
 #
-# The tier itself is covered by the parametrized table above. What is left is the
-# interaction nobody owns: browser-agent invoked from INSIDE an opencode session,
-# where the leak guard and the nesting guard both apply at once.
+# 🔴 THE ID IS INDISTINGUISHABLE FROM A DIRECT CALL. There is nothing in it to
+# branch on -- it IS the outer session's id, correctly tagged. That is precisely
+# why the fix is the ORIGIN HEADER and not a new tier: the server cannot tell
+# these apart by inspection, so the caller has to say so. It is the same question
+# `browser agent` already answers the same way, and one question gets one
+# mechanism.
 #
-# 🔴 HONEST LABEL: every test in this section is an INVARIANT GUARD relative to
-# f47be59 (this PR's first commit), and green there. The whole leak fix lives in
-# the CLI — the server needed NO change, because its tier gate is an allowlist of
-# exactly one tag, so a tag it has never heard of was already non-joinable. These
-# tests are not regression coverage for a server bug; they pin that the generic
-# gate really does cover the new tag, and that the leak and nesting guards
-# compose. They ARE red against origin/main (da33356), where `sess_src` and the
-# origin header do not exist at all. Reachability is proved by mutant M11, which
-# widens the gate to admit `oc-inherited` and is killed here.
+# 🔴 HONEST LABEL: everything in this section is an INVARIANT GUARD, green at
+# BOTH f47be59 (which introduced the origin path) and 84bf324. The server needed
+# NO change for the opencode leak -- the origin path already did the right thing,
+# and reusing it rather than adding a parallel one is the entire point of this
+# round. These tests pin that BOTH origin tokens behave identically and that a
+# leaked-but-genuinely-claude-tagged id composes with the tier gate; they are not
+# regression coverage for a server bug. They ARE red against origin/main
+# (da33356), where the origin header does not exist. Reachability is proved by
+# mutants N7 (origin never detected) and N8 (the token collapsed to a constant).
 # --------------------------------------------------------------------------- #
-def test_a_nested_agent_run_inside_opencode_keeps_both_guards(telemetry):
-    """SEAM. `browser agent` normally derives its id BEFORE opencode starts, so
-    the id is `claude:`-tagged and only the ORIGIN guard stops the invoker being
-    credited. But when browser-agent is itself launched from inside an opencode
-    session, OPENCODE is already set at `--print-session-id` time, so the
-    forwarded id arrives `oc-inherited:`-tagged AND carries the origin header.
+@pytest.mark.parametrize("token", ORIGIN_TOKENS)
+def test_every_origin_token_suppresses_the_session_key(telemetry, token):
+    """LEDGER + BEHAVIOUR. Both declared origins mean the same thing -- "issued by
+    something nested under this id" -- so both must suppress `session` and record
+    the id as the causal parent instead.
 
-    Both guards must hold together, and the origin must still win: no `session`,
-    the tier reported honestly, and the bare id recorded as the causal parent —
-    a bare uuid, exactly as on the non-leaked nested path, so the two are
-    queryable the same way.
+    Parametrized over the ledger rather than written once per token: a third
+    token added to ORIGIN_TOKENS without server support fails here, and a token
+    that got special-cased into filling `session` fails here too.
+
+    The id is `claude:`-tagged on purpose. A non-joinable tier would suppress
+    `session` on its own, so the test would pass with the origin logic deleted --
+    the joinable tier is the only fixture that can distinguish the two.
     """
     spool_dir = telemetry
     srv, _ = _serve()
@@ -2613,41 +2622,63 @@ def test_a_nested_agent_run_inside_opencode_keeps_both_guards(telemetry):
     ext.start()
     try:
         assert _wait_connected(srv, want=True)
-        assert _cmd_sess(srv, {"op": "tabs"}, sid=LEAKED_ID,
-                         origin="browser-agent")[0] == 200
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=LEAKED_ID, origin=token)[0] == 200
         e = _wait_events(spool_dir, 1)[0]
         p = json.loads(e["payload"])
-        assert "session" not in e, f"a leaked+nested id must claim nothing: {e}"
-        assert p["sess_src"] == "oc-inherited", p
-        assert p["origin"] == "browser-agent", p
+        assert "session" not in e, f"origin {token!r} must claim no session: {e}"
+        assert p["origin"] == token, p
         assert p["origin_session"] == LEAKED_UUID, p
         assert ":" not in p["origin_session"], p
+        # The tier is still reported honestly -- the id really is claude-tagged.
+        assert p["sess_src"] == "claude", p
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
 
 
-def test_the_leaked_tier_is_not_the_joinable_one(telemetry):
-    """The blunt statement of the fix, asserted against the CONSTANT rather than
-    the spelling: whatever `SESSION_SRC_JOINABLE` is, the leak tier is not it, and
-    a leaked id on the ordinary (non-nested) path writes no key.
+def test_the_same_id_fills_the_session_when_no_origin_is_declared(telemetry):
+    """🔴 THE CONTROL FOR THE WHOLE MECHANISM, and the reason the fixture above is
+    `claude:`-tagged. The EXACT SAME id on the EXACT SAME path, differing only in
+    whether the origin header is present, must fill `session`.
 
-    Its control is the joinable id on the SAME path in the same test — so a
-    server that had simply stopped writing `session` at all could not pass."""
+    Without this pair, a server that had simply stopped writing `session`
+    altogether would satisfy every origin test in this file.
+    """
     spool_dir = telemetry
-    assert S.SESSION_SRC_JOINABLE != "oc-inherited"
     srv, _ = _serve()
     ext = FakeExtension(srv)
     ext.start()
     try:
         assert _wait_connected(srv, want=True)
         assert _cmd_sess(srv, {"op": "tabs"}, sid=LEAKED_ID)[0] == 200
-        assert _cmd_sess(srv, {"op": "tabs"}, sid=JOINABLE_ID)[0] == 200
-        leaked, direct = _wait_events(spool_dir, 2)
-        assert "session" not in leaked, leaked
-        assert json.loads(leaked["payload"])["sess_src"] == "oc-inherited"
-        assert direct["session"] == JOINABLE_UUID, "control: direct use still joins"
-        # The two uuids are different values, so this cannot pass by coincidence.
-        assert LEAKED_UUID not in _log_file(spool_dir).read_text()
+        e = _wait_events(spool_dir, 1)[0]
+        assert e["session"] == LEAKED_UUID, e
+        assert "origin" not in json.loads(e["payload"])
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_the_two_origin_tokens_are_distinct_and_recorded_verbatim(telemetry):
+    """`origin` is a two-value enum and its VALUE carries the diagnosis: which
+    nesting mechanism produced the row. Recording one token under the other's
+    name would make the two populations unseparable in the column -- the same
+    class of harm as the session key itself.
+
+    Asserted as distinctness plus verbatim round-trip, so a mutant that collapsed
+    them to a single constant dies here rather than in a test that only checks
+    `origin` is truthy."""
+    spool_dir = telemetry
+    assert len(set(ORIGIN_TOKENS)) == len(ORIGIN_TOKENS), ORIGIN_TOKENS
+    srv, _ = _serve()
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        for token in ORIGIN_TOKENS:
+            assert _cmd_sess(srv, {"op": "tabs"}, sid=LEAKED_ID,
+                             origin=token)[0] == 200
+        evs = _wait_events(spool_dir, len(ORIGIN_TOKENS))
+        seen = [json.loads(e["payload"])["origin"] for e in evs]
+        assert seen == list(ORIGIN_TOKENS), seen
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
 

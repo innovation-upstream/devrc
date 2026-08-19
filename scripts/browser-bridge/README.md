@@ -1397,7 +1397,6 @@ would be, and is forbidden.
 | `sid:<sid>:<start>` | `sid` | no | no other source records it |
 | `ppid:<pid>:<rand>` | `ppid` | no | last-resort random token |
 | `synthetic:…` | `synthetic` | no | an id the CLI made up on purpose (the `emulate --recreate` close) |
-| `oc-inherited:<uuid>` | `oc-inherited` | no | a `CLAUDE_CODE_SESSION_ID` that **leaked into an opencode tool shell** — it names an ancestor, not the caller (see below) |
 | anything untagged, absent, or empty | `unknown` | no | fail closed |
 
 Only the **first** colon splits (a `sid:`/`ppid:` id contains more). An id with no
@@ -1421,46 +1420,64 @@ the nested session an id of its own is a later change.
 
 ### Hazard 3 — `CLAUDE_CODE_SESSION_ID` leaks into opencode
 
-opencode 1.18.18 sets `process.env.OPENCODE="1"` in a yargs **top-level
-`.middleware()`** — registered before every `.command(...)`, so it runs for every
-subcommand — and hands its tool shells `{...process.env}`. Launch opencode from a
-Claude Code bash call and the outer session's `CLAUDE_CODE_SESSION_ID` rides all
-the way down: a live env dump from inside an opencode bash tool still had it.
+opencode sets `process.env.OPENCODE="1"` in a yargs **top-level `.middleware()`**
+— registered before every `.command(...)`, so it runs for every subcommand — and
+hands its tool shells `{...process.env}`. Launch opencode from a Claude Code bash
+call and the outer session's `CLAUDE_CODE_SESSION_ID` rides all the way down: a
+live env dump from inside an opencode bash tool still had it.
+
+Derived against the **pinned** build (`PINNED_VERSION` in
+`scripts/tests/test_opencode_engine.py`) — named rather than copied so it cannot
+go stale — and confirmed byte-identical in the newer build on this host's own
+profile, which is the one a real `opencode run` here actually executes. The
+assignment is therefore not specific to whichever of the two you land on.
 
 So inside opencode that variable names an **ancestor**, not the session issuing
 the command. A plain `opencode run …` whose bash tool shells out to `browser`
-would otherwise hit the joinable tier on the leaked value, and the server would
-write the outer Claude session's uuid into `session` — where those rows are
-**indistinguishable from that session's own direct browser use**. There is no
-`X-Session-Origin` on that path; that header is only sent by
-`browser_tool_impl.mjs` on the browser-agent path.
+would otherwise have the bridge credit the **outer** Claude session with browser
+usage it never performed — in the column `adoption-scan` and the deadman read.
 
-`derive_session_id` therefore **re-tags** a leaked id `oc-inherited:` whenever
-`OPENCODE` is set. Re-tagging, not re-deriving, is the point:
+**🔴 The id is indistinguishable from a direct call.** There is nothing in it to
+branch on: it *is* the outer session's id, correctly tagged `claude:`. So the
+server cannot tell the two apart by inspection — the caller has to say so.
 
-- the underlying value is unchanged, so the id stays **stable** across the many
-  `browser` calls one opencode session makes and per-session tab ownership still
-  works (asserted through the same `$( … )` subshell probe as the joinable path);
-- the tier is not joinable, so `session` stays **empty** — exactly as it is today
-  for these rows. Empty is recoverable; plausible-but-wrong is not;
-- `payload.sess_src = "oc-inherited"` still records that it happened, so the
-  population is **measurable** rather than invisible.
+That is the **same question** `browser agent` already answers (hazard 2), so it
+gets the **same mechanism**: `X-Session-Id` is left completely alone and the
+nested-run fact travels beside it.
 
-Two consequences, stated rather than buried:
+```
+X-Session-Id:     claude:<uuid>        # unchanged — routing, ownership, not_owned_tab
+X-Session-Origin: opencode-inherited   # this command was issued by something nested
+```
 
-- **Unchanged degradation.** Two concurrent opencode sessions launched from one
-  Claude session still resolve to the same id and share a tab. That is today's
-  behaviour, not a new one; `--tab` is the escape hatch.
-- **Routing does change in one place.** An opencode-inner call no longer shares
-  tab ownership with its *outer* Claude session (different id ⇒ different owner),
-  so it falls back to the active tab rather than the outer session's owned tab.
-  That separation is inherent to any re-tagging fix, and is the intended
-  isolation.
+`origin` is a two-value enum — `browser-agent` | `opencode-inherited` — both
+meaning "issued by something nested under `origin_session`", which is precisely
+true of both cases. The server needed **no change**: the origin path already
+suppresses `session` and records `payload.origin` + `payload.origin_session`.
 
-**This guard is temporary.** A follow-up adds an opencode `shell.env` plugin hook
-exporting `OPENCODE_SESSION_ID`; once nested runs have a key of their own,
-`derive_session_id` gains a joinable `opencode:` tier above the guard and the
-guard retires. The slot is marked in the source.
+Why this beats re-tagging the id, which was tried first and rejected:
+
+- **Routing is byte-identical.** Tab ownership, `--tab`, `not_owned_tab` and the
+  `$( … )` stability property are untouched, because the id is untouched. A
+  re-tagged id would have silently stopped an opencode-inner call from sharing
+  ownership with its outer session. The equivalence is now machine-checked: the
+  id is derived with and without `OPENCODE` and both must equal the same pinned
+  literal.
+- **One question, one mechanism.** Two ways to say "this is nested" inside one
+  system is a defect regardless of which is better in isolation.
+- It reuses a path that is already tested, rather than adding a parallel one.
+
+The origin is declared only when a Claude id was **actually inherited** — the
+condition reads the *derived* id (`claude:*`) rather than re-testing the env
+vars, so it cannot drift out of step with the precedence chain. An opencode
+session run interactively with no Claude ancestor derives `tmux:`/`sid:`/`ppid:`,
+declares nothing, and behaves exactly as it does today.
+
+**This is temporary.** A follow-up adds an opencode `shell.env` hook exporting
+`OPENCODE_SESSION_ID`; `derive_session_id` then gains a **joinable** `opencode:`
+tier, nested runs get a key of their own, the `claude:*` case stops matching on
+its own, and the token becomes dead code to delete. The slot is marked in the
+source.
 
 ### Contract
 
