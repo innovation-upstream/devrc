@@ -1185,7 +1185,10 @@ def test_the_json_report_carries_every_field_a_poller_needs():
     assert set(out) == {
         "tool", "now", "source_ts", "threshold_secs", "threshold_source",
         "counts", "coverage", "over_threshold", "waiting_population",
-        "truncated", "state", "caveats",
+        # `kind_filtered` arrived deliberately with --kind: None when no filter
+        # was requested, otherwise the shown/dropped/total counts, so a consumer
+        # can never mistake a filtered view for the whole set.
+        "truncated", "kind_filtered", "state", "caveats",
     }
     assert out["tool"] == "waiting-windows"
     assert out["threshold_secs"] == THRESHOLD
@@ -1996,3 +1999,206 @@ def test_an_absent_row_is_never_rendered_as_NOT_MEASURED():
     text = ww.render_human(out)
     assert "no record (registry read, none for this window)" in text
     assert "NOT MEASURED" not in text
+
+
+# =========================================================================== #
+# §14 — 🔴 KIND BAND ORDERING, AND THE --kind FILTER
+#
+# Measured live on the merged tool before this change: 24 rows over threshold
+# (population 46) — idle_no_signal=20, selection_menu=2, context_exhausted=2,
+# trailing_question=0 — sorted purely by waited time, putting the actionable
+# rows at RANK 8 and RANK 20 of 24. `--top` would have truncated them AWAY.
+# =========================================================================== #
+
+# 🔴 The ages are drawn FAR apart and pairwise distinct, and the OLDEST row is
+# deliberately the LEAST actionable kind. A mutant that drops the band key and
+# sorts on age alone therefore cannot pass: it would put ORDER_IDLE first.
+ORDER_IDLE_AGE = AGE_HUGE          # 196103 — by far the oldest
+ORDER_CTX_AGE = AGE_BIG            # 51217
+ORDER_MENU_AGE = AGE_MID           # 9973
+ORDER_QUESTION_AGE = 7817          # the YOUNGEST, and it must rank FIRST
+
+
+def _ordering_report():
+    return report({HOST_A: [
+        row(WID_1, probable=False, status="stale", age=ORDER_IDLE_AGE),
+        row(WID_2, probable=True, signals=("context_exhausted",),
+            age=ORDER_CTX_AGE),
+        row(WID_3, probable=True, signals=("selection_menu",),
+            age=ORDER_MENU_AGE),
+        row(WID_4, probable=True, signals=("trailing_question",),
+            age=ORDER_QUESTION_AGE),
+    ]})
+
+
+def test_the_youngest_actionable_row_outranks_the_oldest_idle_row():
+    """🔴 THE WHOLE POINT. The idle row waited 196103s and the trailing_question
+    row only 7817s — a 25x gap — and the question must still come FIRST. Sorting
+    on age alone is exactly what buried the actionable rows at rank 8 and 20."""
+    out, _ = run(_ordering_report())
+    order = [r["window_id"] for r in out["rows"]]
+    # band 0 holds BOTH asking-a-human kinds, oldest first inside it (menu 9973
+    # then question 7817); then context_exhausted; then idle last.
+    assert order == [WID_3, WID_4, WID_2, WID_1], order
+
+    kinds = [r["kind"] for r in out["rows"]]
+    assert kinds == ["selection_menu", "trailing_question",
+                     "context_exhausted", "idle_no_signal"]
+
+    # 🔴 THE CLAIM, stated as a comparison rather than a position: the YOUNGEST
+    # actionable row outranks BOTH older, less actionable ones. Age alone would
+    # invert all three of these.
+    rank = {r["window_id"]: i for i, r in enumerate(out["rows"])}
+    age = {r["window_id"]: r["waited_secs"] for r in out["rows"]}
+    assert age[WID_4] == min(age.values())
+    assert age[WID_1] == max(age.values())
+    assert rank[WID_4] < rank[WID_2] and age[WID_4] < age[WID_2]
+    assert rank[WID_4] < rank[WID_1] and age[WID_4] < age[WID_1]
+
+
+def test_within_a_band_the_order_is_still_oldest_first():
+    """Banding must not cost the property the tool exists for."""
+    out, _ = run(report({HOST_A: [
+        row(WID_1, probable=True, signals=("selection_menu",), age=AGE_MID),
+        row(WID_2, probable=True, signals=("selection_menu",), age=AGE_HUGE),
+        row(WID_3, probable=True, signals=("trailing_question",), age=AGE_BIG),
+    ]}))
+    # all three share band 0, so this is pure oldest-first
+    assert [r["window_id"] for r in out["rows"]] == [WID_2, WID_3, WID_1]
+
+
+def test_an_unmeasured_wait_sorts_last_WITHIN_its_band_not_globally():
+    """A `None` wait is not an old one — but it also must not be promoted above
+    a whole band it does not belong to."""
+    out, _ = run(report({HOST_A: [
+        row(WID_1, probable=True, signals=("selection_menu",), age=None),
+        row(WID_2, probable=True, signals=("selection_menu",), age=AGE_TINY),
+        row(WID_3, probable=False, status="stale", age=AGE_HUGE),
+    ]}))
+    order = [r["window_id"] for r in out["rows"]]
+    # band 0 (both menus, measured before unmeasured), then band 2 (idle)
+    assert order == [WID_2, WID_1, WID_3], order
+
+
+def test_idle_no_signal_is_REORDERED_never_filtered_out_by_default():
+    """🔴 The operator chose the wide population deliberately, and this bucket
+    is the one that cannot tell blocked from finished — dropping it would decide
+    that question silently. It is ranked last, not removed."""
+    out, _ = run(_ordering_report())
+    kinds = [r["kind"] for r in out["rows"]]
+    assert "idle_no_signal" in kinds
+    assert len(out["rows"]) == 4
+    assert kinds[-1] == "idle_no_signal"
+
+
+def test_the_display_bands_and_the_classification_precedence_disagree_on_purpose():
+    """🔴 A reader WILL assume these two tuples should match. They must not:
+    SIGNAL_PRECEDENCE ranks context_exhausted the hardest BLOCK, while the
+    display ranks it below the kinds where a human is actively being asked.
+    Pinned so the divergence is deliberate rather than a drift someone
+    'corrects'."""
+    assert ww.SIGNAL_PRECEDENCE[0] == "context_exhausted"
+    assert ww.KIND_BAND["context_exhausted"] > ww.KIND_BAND["trailing_question"]
+    assert ww.KIND_BAND["context_exhausted"] > ww.KIND_BAND["selection_menu"]
+    assert ww.KIND_BAND["idle_no_signal"] == max(ww.KIND_BAND.values())
+
+
+def test_every_kind_has_exactly_one_band_and_no_band_invents_a_kind():
+    """Two-way pin: a kind added to ALL_KINDS without a band would sort into a
+    silent bucket at the end; a band naming an unknown kind is dead config."""
+    assert set(ww.KIND_BAND) == set(ww.ALL_KINDS)
+    flat = [k for band in ww.KIND_DISPLAY_BANDS for k in band]
+    assert len(flat) == len(set(flat)) == len(ww.ALL_KINDS)
+
+
+def test_actionable_kinds_is_every_kind_except_idle_no_signal():
+    assert ww.IDLE_NO_SIGNAL not in ww.ACTIONABLE_KINDS
+    assert set(ww.ACTIONABLE_KINDS) == set(ww.ALL_KINDS) - {ww.IDLE_NO_SIGNAL}
+
+
+# --- the --kind filter ----------------------------------------------------- #
+def _filtered(kinds, top=None):
+    out, _ = ww.build_report(_ordering_report(), {}, NOW, THRESHOLD, "flag",
+                             "ok", "/synthetic/state.json", top=top,
+                             kinds=kinds)
+    return out
+
+
+def test_kind_filter_keeps_only_the_named_bands_and_reports_the_drop():
+    out = _filtered(("trailing_question", "selection_menu"))
+    assert [r["window_id"] for r in out["over_threshold"]] == [WID_3, WID_4]
+    kf = out["kind_filtered"]
+    assert kf["shown"] == 2 and kf["total"] == 4 and kf["dropped"] == 2
+    assert kf["kinds"] == ["trailing_question", "selection_menu"]
+    # 🔴 the full population is untouched — filtering the VIEW is not measuring
+    # a smaller set
+    assert len(out["waiting_population"]) == 4
+
+
+def test_kind_filter_excluding_a_band_is_visible_in_the_human_view():
+    out = _filtered(("context_exhausted",))
+    text = ww.render_human(out)
+    assert "KIND FILTER context_exhausted: showing 1 of 4; 3 NOT shown." in text
+    assert [r["window_id"] for r in out["over_threshold"]] == [WID_2]
+
+
+def test_no_kind_filter_leaves_the_field_null_not_a_zero_report():
+    """🔴 `None` (never asked) and a filter that happened to drop nothing are
+    different facts; a consumer must be able to tell a filtered view from a
+    whole one."""
+    out = _filtered(None)
+    assert out["kind_filtered"] is None
+    assert len(out["over_threshold"]) == 4
+
+
+def test_a_filter_that_drops_nothing_still_records_that_it_ran():
+    out = _filtered(tuple(ww.ALL_KINDS))
+    assert out["kind_filtered"] is not None
+    assert out["kind_filtered"]["dropped"] == 0
+    assert out["kind_filtered"]["shown"] == 4
+
+
+@pytest.mark.parametrize("kind", list(ww.ALL_KINDS))
+def test_every_single_band_can_be_selected_on_its_own(kind):
+    """POSITIVE CONTROL across the whole vocabulary — a filter that only ever
+    worked for one kind would pass a single-case test."""
+    out = _filtered((kind,))
+    assert {r["kind"] for r in out["over_threshold"]} == {kind}
+    assert out["kind_filtered"]["shown"] == 1
+
+
+def test_the_filter_runs_BEFORE_the_top_cap():
+    """🔴 The bug --top had: the actionable rows ranked 8th and 20th, so a cap
+    spent its whole budget on idle rows and truncated the actionable ones AWAY.
+    Filtering first means --top counts the rows the caller actually asked for."""
+    out = _filtered(("trailing_question", "selection_menu"), top=1)
+    assert [r["window_id"] for r in out["over_threshold"]] == [WID_3]
+    assert out["truncated"]["total"] == 2      # the FILTERED set, not 4
+    assert out["kind_filtered"]["dropped"] == 2
+
+
+def test_parse_kinds_accepts_repeated_and_comma_spellings():
+    assert ww.parse_kinds(None) is None
+    assert ww.parse_kinds([]) is None
+    assert ww.parse_kinds(["a,b", "c"]) == ("a", "b", "c")
+    assert ww.parse_kinds(["a", "a"]) == ("a",)          # de-duplicated
+    assert ww.parse_kinds([" a , b "]) == ("a", "b")     # whitespace tolerated
+
+
+def test_the_counts_line_leads_with_the_actionable_total():
+    """🔴 "OVER THRESHOLD: 24" reads as 24 things needing attention when 4 do.
+    Both numbers are printed; only the HEADLINE changed."""
+    out = _filtered(None)
+    text = ww.render_human(out)
+    assert "ACTIONABLE: 3 of 4 over threshold" in text
+    assert "(1 idle_no_signal" in text
+    assert "OVER THRESHOLD: 4" in text          # the total is still there
+    assert text.index("ACTIONABLE:") < text.index("OVER THRESHOLD:")
+
+
+def test_the_idle_caveat_is_still_carried_verbatim_after_the_reorder():
+    """🔴 The caveat is the right one and was already pinned as a whole string;
+    this change must not disturb it."""
+    out = _filtered(None)
+    assert out["caveats"]["idle_no_signal"] == ww.IDLE_NO_SIGNAL_CAVEAT
+    assert ww.IDLE_NO_SIGNAL_CAVEAT in ww.render_human(out)

@@ -196,6 +196,94 @@ SIGNAL_PRECEDENCE = ("context_exhausted", "selection_menu", "trailing_question")
 # because the code forgot it, look identical otherwise.
 ALL_KINDS = SIGNAL_PRECEDENCE + (IDLE_NO_SIGNAL,)
 
+# --------------------------------------------------------------------------- #
+# 🔴 DISPLAY ORDER — DELIBERATELY NOT `SIGNAL_PRECEDENCE`. Read this before
+# "fixing" the disagreement between the two tuples.
+#
+# `SIGNAL_PRECEDENCE` answers "which single signal is the hardest BLOCK", and is
+# pinned against session-manager's own vocabulary. It is a CLASSIFICATION order.
+# These bands answer a different question — "what should the operator look at
+# FIRST" — and the two genuinely disagree about `context_exhausted`:
+#
+#   classification: context_exhausted is the hardest block (nothing can run)
+#   display:        but nothing is ASKING; it needs a /compact or a resume,
+#                   which the operator can batch. A modal or a trailing question
+#                   has a human on the other end of it, right now.
+#
+# WHY THIS EXISTS AT ALL. Measured live on the merged tool: 24 rows over
+# threshold from a waiting population of 46 — idle_no_signal=20,
+# selection_menu=2, context_exhausted=2, trailing_question=0 — sorted purely by
+# waited time, which put the actionable rows at RANK 8 and RANK 20 of 24. Twenty
+# idle windows (titles like "Release deployed", i.e. finished work) buried the
+# two things actually asking a human. The 55-hour incident that motivated this
+# tool would today sit below seven rows of noise, and `--top` would have
+# truncated the actionable rows AWAY precisely because they rank 8th and 20th.
+#
+# 🔴 REORDER, DO NOT FILTER. `idle_no_signal` stays in the default view: the
+# operator chose the wide population deliberately, and this bucket is the one
+# that cannot tell "blocked" from "finished" — dropping it would silently decide
+# that question. It is ranked last, not removed.
+KIND_DISPLAY_BANDS = (
+    ("trailing_question", "selection_menu"),   # a human is being asked, NOW
+    ("context_exhausted",),                    # needs /compact or a resume
+    (IDLE_NO_SIGNAL,),                         # may simply be finished work
+)
+
+#: kind -> band index. Built from the bands so the two cannot drift.
+KIND_BAND = {k: i for i, band in enumerate(KIND_DISPLAY_BANDS) for k in band}
+
+#: 🔴 The kinds that carry a real signal — everything except `idle_no_signal`,
+#: which by the tool's own caveat cannot distinguish blocked from finished. This
+#: is the number the counts line leads with, because "OVER THRESHOLD: 24" reads
+#: as 24 things needing attention when 4 do.
+ACTIONABLE_KINDS = SIGNAL_PRECEDENCE
+# --------------------------------------------------------------------------- #
+
+
+def kind_sort_key(row):
+    """🔴 Band FIRST, then oldest-first WITHIN the band.
+
+    A `None` wait still sorts last inside its own band: an unmeasured wait is
+    not an old one. Host and window_id break ties so the order is total and the
+    output is byte-stable between runs.
+    """
+    return (KIND_BAND.get(row["kind"], len(KIND_DISPLAY_BANDS)),
+            row["waited_secs"] is None,
+            -(row["waited_secs"] or 0.0),
+            row["host"], row["window_id"])
+
+
+def parse_kinds(raw):
+    """`["a,b", "c"]` -> `("a", "b", "c")`; None/empty -> None.
+
+    Accepts both spellings because both are natural: repeated flags for shells
+    with completion, comma-separated for a one-liner. De-duplicated, order
+    preserved, so `--kind x --kind x` is not a different request from `--kind x`.
+    """
+    if not raw:
+        return None
+    out = []
+    for chunk in raw:
+        for name in str(chunk).split(","):
+            name = name.strip()
+            if name and name not in out:
+                out.append(name)
+    return tuple(out) or None
+
+
+def apply_kind_filter(rows, kinds):
+    """-> (kept, dropped_info). 🔴 Same contract as `apply_top`: what is dropped
+    is ALWAYS reported, never silently omitted."""
+    if not kinds:
+        return rows, None
+    wanted = tuple(kinds)
+    kept = [r for r in rows if r["kind"] in wanted]
+    if len(kept) == len(rows):
+        return kept, {"kinds": list(wanted), "dropped": 0,
+                      "total": len(rows), "shown": len(kept)}
+    return kept, {"kinds": list(wanted), "dropped": len(rows) - len(kept),
+                  "total": len(rows), "shown": len(kept)}
+
 # 🔴 The limit, stated in the OUTPUT rather than only in this docstring. A
 # consumer that renders the JSON and never reads this file still gets the
 # sentence. Pinned as a WHOLE STRING by a test: a guard on a couple of words
@@ -757,12 +845,10 @@ def reconcile(report, stamps, now, threshold_secs, registry=None):
     prune = prune_stamps(stamps, next_stamps, observed, generations, live_ids)
     next_stamps.update(prune["kept"])
 
-    # Oldest first — the whole reason this tool exists. `None` waits sort LAST:
-    # an unmeasured wait is not an old one, and putting it at the top would push
-    # a measured 54h row below a row we could not time at all.
-    out_rows.sort(key=lambda r: (r["waited_secs"] is None,
-                                 -(r["waited_secs"] or 0.0),
-                                 r["host"], r["window_id"]))
+    # 🔴 Kind band first, then oldest-first within the band — see
+    # KIND_DISPLAY_BANDS for why pure oldest-first made the report unusable for
+    # its own purpose. `None` waits still sort LAST within their band.
+    out_rows.sort(key=kind_sort_key)
 
     coverage = build_coverage(report, observed, generations,
                               unmeasured_rows, unmeasured_reasons,
@@ -1028,10 +1114,14 @@ def apply_top(rows, top):
 
 
 def build_report(report, stamps, now, threshold_secs, threshold_source,
-                 state_status, state_file, top=None, registry=None):
+                 state_status, state_file, top=None, registry=None,
+                 kinds=None):
     core, next_stamps = reconcile(report, stamps, now, threshold_secs,
                                   registry=registry)
     over = [r for r in core["rows"] if r["over_threshold"]]
+    # 🔴 Filter BEFORE truncating, so `--top` counts the rows the caller asked
+    # for rather than spending its budget on bands they excluded.
+    over, kind_filtered = apply_kind_filter(over, kinds)
     shown, truncation = apply_top(over, top)
     out = {
         "tool": "waiting-windows",
@@ -1044,6 +1134,7 @@ def build_report(report, stamps, now, threshold_secs, threshold_source,
         "over_threshold": shown,
         "waiting_population": core["rows"],
         "truncated": truncation,
+        "kind_filtered": kind_filtered,
         "state": {
             "path": state_file,
             "status": state_status,
@@ -1070,11 +1161,21 @@ def render_human(out):
     if total is None:
         L.append("OVER THRESHOLD: UNMEASURED — no host was observed this run.")
     else:
-        label = "OVER THRESHOLD: %d" % total
-        if counts["counts_are_partial"]:
-            label += "  ⚠ PARTIAL — some scopes were not measured (see COVERAGE)"
-        L.append(label)
         bk = counts["over_threshold_by_kind"] or {}
+        # 🔴 LEAD WITH THE ACTIONABLE COUNT. "OVER THRESHOLD: 24" reads as 24
+        # things needing attention when 4 do; the other 20 are `idle_no_signal`,
+        # the bucket that by this tool's own caveat cannot tell a blocked window
+        # from a finished one. Both numbers are printed — the total is not
+        # hidden, it is just no longer the headline.
+        actionable = sum(bk.get(k, 0) for k in ACTIONABLE_KINDS)
+        idle = bk.get(IDLE_NO_SIGNAL, 0)
+        head = "ACTIONABLE: %d of %d over threshold" % (actionable, total)
+        if counts["counts_are_partial"]:
+            head += "  ⚠ PARTIAL — some scopes were not measured (see COVERAGE)"
+        L.append(head)
+        L.append("  (%d idle_no_signal — ranked last; cannot tell blocked from "
+                 "finished, see CAVEATS)" % idle)
+        L.append("OVER THRESHOLD: %d" % total)
         L.append("  by kind: " + ", ".join("%s=%d" % (k, bk.get(k, 0))
                                            for k in ALL_KINDS))
     L.append("")
@@ -1113,6 +1214,12 @@ def render_human(out):
             L.append("      cwd: %s" % r["harness_cwd"])
         if r["task"]:
             L.append("      task: %s" % r["task"])
+    kf = out.get("kind_filtered")
+    if kf:
+        L.append("")
+        L.append("  ⚠ KIND FILTER %s: showing %d of %d; %d NOT shown."
+                 % (",".join(kf["kinds"]), kf["shown"], kf["total"],
+                    kf["dropped"]))
     if out["truncated"]:
         t = out["truncated"]
         L.append("")
@@ -1182,6 +1289,11 @@ def main(argv=None, environ=None, now=None, state_file=None):
                            humanize(DEFAULT_WAIT_THRESHOLD), THRESHOLD_ENV))
     p.add_argument("--top", type=int, default=None,
                    help="show at most N rows. What is dropped is ALWAYS printed.")
+    p.add_argument("--kind", action="append", default=None, metavar="KIND",
+                   help="show only these kinds. Repeatable, and/or "
+                        "comma-separated: --kind selection_menu,trailing_question. "
+                        "What is dropped is ALWAYS printed. Choices: "
+                        + ", ".join(ALL_KINDS))
     p.add_argument("--state-file", default=None, help="override the state file path")
     p.add_argument("--no-state", action="store_true",
                    help="do not read or write the state file. Every row then "
@@ -1215,9 +1327,20 @@ def main(argv=None, environ=None, now=None, state_file=None):
     else:
         registry = read_registry(args.registry_dir or registry_dir())
 
+    # 🔴 An unknown --kind must be an ERROR. Silently matching nothing would
+    # render an empty report that looks exactly like "nothing is waiting".
+    kinds = parse_kinds(args.kind)
+    if kinds is not None:
+        unknown = [k for k in kinds if k not in ALL_KINDS]
+        if unknown:
+            print("waiting-windows: unknown --kind %s; choices: %s"
+                  % (", ".join(unknown), ", ".join(ALL_KINDS)), file=sys.stderr)
+            return 2
+
     out, next_stamps = build_report(report, loaded["stamps"], now, threshold,
                                     source, loaded["status"], path,
-                                    top=args.top, registry=registry)
+                                    top=args.top, registry=registry,
+                                    kinds=kinds)
     if not args.no_state:
         save_state(path, next_stamps)
 
