@@ -17,35 +17,50 @@ device; messages land in Postgres `signal` schema + attachments in MinIO.
 
 ## State now
 
-- **Branches:** devrc `main`, homelab-talos `trunk` (behind 1 — unrelated). Both clean of my
-  work; the two dirty devrc files (`flake.lock`, `scripts/opencode/opencode.jsonc`) are
-  another session's, do not touch.
-- **Six PRs landed**, all merged and deployed:
+- **Branches:** devrc `main`, homelab-infra `trunk`. Nothing of mine in flight; every PR
+  below is merged. The dirty files in either checkout belong to other sessions — do not
+  touch. Both repos moved a lot overnight from other work; my changes were re-verified
+  present **by content** (not ancestry — a squash merge never makes the branch head an
+  ancestor).
+- **Shipped and merged:** devrc #537 (outbound-reaction fix), #540 + #546 (liveness
+  heartbeat + the build-control pairing), #544 (the `main` gate flake), #528/#538/#548
+  (handoffs). homelab-infra `f4454452` (consumer 0.1.2 + emptyDir + heartbeat path +
+  probe, all in one commit). Both hosts converged via `ship.sh`.
+- **Deployed:** consumer **0.1.2**, digest `7ada2254…`. Image built from a PRISTINE
+  worktree at `origin/main` and verified by running the pushed digest, because
+  `build-push.sh` uses the repo root as its Docker context and the base clone carries
+  other sessions' WIP.
 
-  | PR | repo | what |
-  |---|---|---|
-  | #511 | devrc | proposal revision + dispatch brief |
-  | #514 | devrc | consumer, DB layer, MinIO, clawgate gate, 387 tests (4 rounds) |
-  | #524 | devrc | Dockerfile + build-push + AST dependency test |
-  | #331 | homelab | signal-cli-rest-api + `signal` schema |
-  | #332 | homelab | signal-cli 0.14.5 → 0.14.7, pinned by digest |
-  | #333 | homelab | consumer Deployment (+ scoped MinIO credential) |
+### 🔴 The 16-hour soak — the strongest evidence in this doc
 
-- **LIVE and verified at the consumer:** `signal-api` 1/1 (signal-cli **0.14.7**),
-  `signal-consumer` 1/1, schema Job Complete (5 tables, 6 indexes). Phone **IS LINKED** —
-  `accounts.json` on the PVC holds one LIVE account (was `{"accounts":[]}` before).
-- **Consumer is CONNECTED** — its own TCP table shows ESTABLISHED to Postgres `:5432` and
-  signal-api `:8080`.
-- ✅ **STEP 7 PASSED — 2026-08-18.** Real phone traffic lands in Postgres. Measured at 19:21
-  UTC: `messages` 5, `contacts` 5, `groups` 1, `reactions` 2, `attachments` 0. The five
-  messages span 18:04:57–18:48:28 UTC and cover **both directions** — an inbound group
-  message, an inbound 1:1, and three `sync_outbound` echoes of messages sent from the phone.
-  Reaction→target linkage resolves correctly (both reaction rows point at message 1).
-  🔴 **Still NOT verified: the attachment/MinIO leg** (see below) and there are **no probes**.
-- ✅ **The outbound-reaction defect step 7 found is FIXED, MERGED and DEPLOYED** — devrc
-  #537 (squashed `8f2cedd`), now on consumer **0.1.2** digest `7ada2254…`,
-  homelab-infra `f4454452`. 🔴 **Deployed, NOT verified in function** — the fixed
-  branch has still never executed in production. See next steps item 1.
+Measured 2026-08-19, ~16h after the 0.1.2 rollout:
+
+| | |
+|---|---|
+| pod | 1/1 Running, **0 restarts**, 16h |
+| probe (`consumer.py health`) | `HEALTHY`, heartbeat 16.5s old, exit 0 |
+| heartbeat counters | `connected=True`, `stored=27` — advancing, not frozen |
+| messages / contacts / groups | 47 / 12 / 2 (were 25 / 5 / 1) |
+| attachments | **19**, across 9 messages (was 1) |
+| reactions | 7 (was 2) |
+
+**Zero restarts over 16h is the finding.** The round-1 audit's sharpest question was
+whether the probe would report unhealthy for a consumer that is fine — a full disk, a
+clock step, scheduling jitter, an idle account — because a false restart loop is worse
+than the silence it replaced. Sixteen hours of real traffic with no restart is the answer
+that no unit test could give.
+
+- ✅ **The attachment / MinIO leg is verified AT SCALE, not by one sample.** All **19/19**
+  objects are present in MinIO with **byte sizes matching the Postgres rows**; 0 missing,
+  0 mismatched. Spread over 9 messages, so multi-attachment messages work too.
+- ✅ **Inbound reactions work** — 2 → 7 with no intervention.
+- 🔴 **The outbound-reaction fix (#537) is STILL UNVERIFIED.** `OWN reactions: 0` after
+  16h. No reaction has been sent *from the phone* since it shipped, so the fixed branch
+  has still never executed in production. Deployed is not verified, and 16h of unrelated
+  green does not touch this claim.
+- **Ghost rows: still 1** (the pre-fix row id 3). No NEW ghost appeared across 22 further
+  messages — supportive, but NOT proof, since no outbound reaction occurred to exercise
+  the path.
 
 ## Open investigations — live diagnosis state
 
@@ -113,42 +128,25 @@ device; messages land in Postgres `signal` schema + attachments in MinIO.
 
 ## Next steps (ranked)
 
-🔴 **ONE ITEM NEEDS ZACH AT HIS PHONE, AND IT IS THE ONLY UNVERIFIED CLAIM LEFT.**
-
-1. **React to any message from your phone**, then run the check in "How to verify".
-   The outbound-reaction fix (#537) is MERGED and DEPLOYED and has **never executed
-   in production** — no reaction has been sent since it shipped, so the fixed branch
-   has not run. `OWN reactions: 0`. Everything else below is now closed.
-2. **Backfill the one lost reaction** and drop its ghost row. `raw_envelope` on
-   `signal.messages` id 3 still holds it. Priced from the consumer, not the writer:
-   `list_conversations()` groups a bodyless outbound row with no `dest_contact_id`
-   and no `group_id` into its own conversation with `display_name` NULL, sorted to
-   the **top** of the list — user-visible, not cosmetic. Still 1 ghost row.
+1. 🔴 **React to any message from your phone.** One action, ~5 seconds, and it is the only
+   unverified claim left in this whole effort. Then run the OWN-reaction check under
+   "How to verify". Everything else here is closed or is optional cleanup.
+2. **Backfill the one lost reaction and drop its ghost row.** `raw_envelope` on
+   `signal.messages` id 3 still holds it. Priced from the CONSUMER, not the writer:
+   `list_conversations()` groups a bodyless outbound row with no `dest_contact_id` and no
+   `group_id` into its own conversation with `display_name` NULL, and its timestamp sorts
+   it to the **top** of the list. User-visible, not cosmetic.
 3. **The outbound-`editMessage` ghost — the SAME bug, still open.** Any unmodelled
    `syncMessage.sentMessage` variant with `message: None` (nested `editMessage`,
-   `sticker`, `payment`, `groupCallUpdate`) still falls through to `_base_message()`
-   and leaves a bodyless ghost. The next instance of this pipeline's own lesson.
-4. **Move the mutation harness into the repo.** Six batteries were run across #537
-   and #540 and every one lived only in a scratchpad. `scripts/signal/tests/`.
-5. **Close `approve_draft`'s read-then-write TOCTOU** — last of the family whose
-   three siblings were fixed in #514 round 4.
-6. **Bump cadence for the signal-cli image.** Stable lags; tracking it ALONE
-   re-breaks linking, and re-linking means fighting the 120s window again.
-
-### ✅ CLOSED since the last revision
-- **The attachment / MinIO leg — VERIFIED END TO END.** An image sent from the
-  phone landed: `attachments` 1, object present in MinIO at 391,546 bytes with
-  `image/jpeg`, and **both size and content-type match the Postgres row**. This
-  exercised the scoped `signal-consumer` credential against its own bucket with
-  real traffic for the first time.
-- **Liveness — SHIPPED AND VERIFIED IN FUNCTION** (devrc #540, #546; homelab
-  `f4454452`; consumer **0.1.2**, digest `7ada2254`). Measured in the running pod:
-  the probe command exits 0 `HEALTHY`; the heartbeat file is written into the
-  emptyDir; beats arrive at **exactly 30.0s** with max-age 120 (ratio 4.0); the
-  file advances on its own thread while `connected` flips True; the health ROW is
-  populated with `bigint` columns; `health --from-db` returns HEALTHY; the probe is
-  wired on the Deployment; 0 restarts.
-- **The `main` gate's ~15% flake — FIXED** (#544), not re-run around. See below.
+   `sticker`, `payment`, `groupCallUpdate`) still falls through to `_base_message()` and
+   leaves a bodyless ghost row. This is the proof that this pipeline's own lesson —
+   *enumerate the other shapes in that wrapper* — is unfinished.
+4. **Move the mutation harness into the repo.** Six batteries ran across #537 and #540 and
+   every one lived only in a scratchpad that is now deleted. `scripts/signal/tests/`.
+5. **Close `approve_draft`'s read-then-write TOCTOU** — last of the family whose three
+   siblings were fixed in #514 round 4.
+6. **Bump cadence for the signal-cli image.** Stable lags; tracking it ALONE re-breaks
+   linking, and re-linking means fighting the 120s window again.
 
 ## What #537 established, beyond the fix itself
 
@@ -241,50 +239,113 @@ the `if`.
   written at `startLink` time so testing for its *existence* proved nothing. Both caught by the
   same tell — a result too uniform or too fast to be real.
 
+### 🔴 My INSTRUMENTS failed seven times; the code defects were ordinary
+
+Every one produced a confident WRONG answer, and not one was caught by looking harder at
+the same evidence — each needed a differently-constructed check. This was the dominant
+cost of the session, not the bugs.
+
+- **`nix build … | tail` returns TAIL's exit status.** Reported `exit 0` over a genuinely
+  RED gate. The repo documents this; knowing it did not stop me. Capture the status
+  directly (`cmd > log 2>&1; echo $?`) and read the `RESULT:` line.
+- **`nix build --rebuild` on a never-built derivation exits 1 with "some outputs are not
+  valid, so checking is not possible"** — that is "cannot check", NOT "tests failed". As a
+  control it would have proven `main` red when `main` was green.
+- **A mutation anchor that matched TWO sites reported ANCHOR-MISS, not KILLED** — the
+  mutant never landed. A mutant that never ran is not a survivor and is not a pass.
+- **Operand-order mutants survived because every fixture set both fields to the SAME
+  value**, collapsing the two implementations into identical output.
+- **A fixture emoji equal to the constant its own assertion named** let a hardcoding
+  mutant survive 400 tests while corrupting every stored reaction.
+- **An autouse fixture cannot unset env parsed at IMPORT time.** The hermetic-env fixture
+  was completely inert while its docstring claimed it had been measured. The false claim
+  is the dangerous half. Pop the vars at conftest MODULE scope, above every import.
+- **A regression test green by TIMING LUCK.** It asserted on a counter that only
+  increments on success, so once the sink was broken it could never grow; it passed
+  because a beat was in flight when the path was swapped. 5/60 red on an idle machine.
+
+### 🔴 A guard that only a BUILD can check is a declaration, not an invariant
+`build-push.sh` control 3 pins the CLI's subcommand set and refuses to push on any
+difference — correct, and it caught `health`. But nothing kept that list in sync with the
+parser, so the gate was green, #540 merged, and the mismatch surfaced only at BUILD time,
+after the decision point. #546 adds a two-way pin at the gate, with a positive control,
+because two empty sets compare equal.
+
+### The gate could not run at all for ~1h, and that is an environment fact worth knowing
+The workbench sat at **load 138–146** from other sessions. `nix build` takes >10 min
+there; the Bash tool caps foreground at 600s and the harness kills tracked background
+tasks. **The workaround that works: `setsid nohup … &` writing to a log**, then poll the
+log — a detached process survives where a tracked one is reaped. Also seen: 43 accumulated
+worktrees, and a `stash`-named process 7h old. Nothing was killed — at that granularity a
+sibling agent's live work is indistinguishable from an orphan.
+
+### Deploy pairing, and why it is four things in ONE commit
+`readOnlyRootFilesystem: true` + no volume + a SYNCHRONOUS first beat = CrashLoopBackOff
+on the first rebuild, **before any probe exists**. So image digest, `emptyDir`,
+`SIGNAL_HEARTBEAT_PATH` and the probe must land together; the manifest's own comment had
+recorded that this pod "writes nothing to the filesystem, which is what makes
+readOnlyRootFilesystem viable", and that invariant is now false with exactly one exception.
+
+### No migration exists for `signal.consumer_health`, and `ensure_schema()` will not say so
+`CREATE TABLE IF NOT EXISTS` is silent about a table that already exists with the WRONG
+types. Against a database that ever ran the pre-release TIMESTAMPTZ build, every beat
+fails forever while the FILE probe stays green — nothing restarts, nothing alerts.
+**Verified NOT to affect the live homelab DB** (the table did not exist, so it was born
+`bigint`). Recovery elsewhere: `DROP TABLE signal.consumer_health;` — it is a single
+disposable status row.
+
 ## How to verify
 
 ```bash
 export KUBECONFIG=$KC_HOMELAB
-kubectl -n signal get pods
-kubectl -n signal exec deploy/signal-api -- signal-cli --version          # expect 0.14.7
-kubectl -n signal exec deploy/signal-api -- cat /home/.local/share/signal-cli/data/accounts.json
-
-# 🔴 THE OUTSTANDING CHECK — react to a message FROM YOUR PHONE, then run this.
-# It must print a row whose reactor is YOUR OWN contact. A count alone cannot
-# answer it: other people's reactions on the same target are already in there.
-kubectl -n signal exec $CP -- python3 -c "
-import os,psycopg2; c=psycopg2.connect(os.environ['SIGNAL_PG_DSN']); cur=c.cursor()
-cur.execute('''select r.id, r.emoji, r.is_remove, (r.message_id is not null) resolved
-  from signal.reactions r join signal.contacts k on k.id = r.contact_id
-  where k.signal_uuid = %s''', (OWN_UUID,))
-rows = cur.fetchall()
-print('OWN reactions stored:', len(rows))
-for r in rows: print('  ', r)
-print('VERDICT:', 'FIX VERIFIED LIVE' if rows else 'NOT YET - react from the phone')"
-# (OWN_UUID = the account's own signal_uuid; read it from any sync_outbound row's
-#  raw_envelope ->> 'sourceUuid'.)
-
-# Row counts (step 7 PASSED 2026-08-18 — these are now NON-ZERO; a zero here is a REGRESSION):
 CP=$(kubectl -n signal get pod -l app=signal-consumer -o jsonpath='{.items[0].metadata.name}')
-kubectl -n signal exec $CP -- python3 -c "
-import os,psycopg2; c=psycopg2.connect(os.environ['SIGNAL_PG_DSN']); cur=c.cursor()
-for t in ('messages','contacts','attachments'):
-    cur.execute(f'select count(*) from signal.{t}'); print(t, cur.fetchone()[0])"
 
-# devrc suite (authoritative; 90 = could-not-vouch, read the log)
-scripts/gate.sh --tier pytest
+# 1. Liveness — the probe exactly as k8s runs it. Exit 0 = healthy.
+kubectl -n signal exec $CP -- python3 /app/scripts/signal/consumer.py health
+kubectl -n signal exec $CP -- python3 /app/scripts/signal/consumer.py health --from-db
+kubectl -n signal get pods -l app=signal-consumer     # RESTARTS must stay 0
 
-# The attachment leg — STILL UNVERIFIED. Send an IMAGE from the phone, then:
+# 2. 🔴 THE OUTSTANDING CHECK — react to a message FROM THE PHONE first, then:
+#    A COUNT CANNOT ANSWER THIS. Other people's reactions on the same target are
+#    already in the table; only the REACTOR IDENTITY separates stored from lost.
 kubectl -n signal exec $CP -- python3 -c "
-import os,psycopg2; c=psycopg2.connect(os.environ['SIGNAL_PG_DSN']); cur=c.cursor()
-cur.execute('select count(*) from signal.attachments'); print('attachments', cur.fetchone()[0])"
+import os,json,psycopg2
+c=psycopg2.connect(os.environ['SIGNAL_PG_DSN']); cur=c.cursor()
+cur.execute('select raw_envelope from signal.messages where is_outbound order by id desc limit 1')
+own=json.loads(cur.fetchone()[0]).get('sourceUuid') if 0 else None
+cur.execute('select raw_envelope from signal.messages where is_outbound order by id desc limit 1')
+r=cur.fetchone()[0]; d=json.loads(r) if isinstance(r,str) else r
+cur.execute('select id from signal.contacts where signal_uuid=%s',(d.get('sourceUuid'),))
+o=cur.fetchone()
+cur.execute('select count(*) from signal.reactions where contact_id=%s',(o[0] if o else -1,))
+n=cur.fetchone()[0]
+print('OWN reactions:', n, '->', 'FIX VERIFIED LIVE' if n else 'NOT YET')"
 
-# Is a zero attributable to INPUT rather than a defect? Walk the envelopes for an
-# attachment key -- a bare 0 cannot tell "never exercised" from "broken":
+# 3. Attachment integrity — every row's object must exist AND match its size.
 kubectl -n signal exec $CP -- python3 -c "
-import os,json,psycopg2; c=psycopg2.connect(os.environ['SIGNAL_PG_DSN']); cur=c.cursor()
-cur.execute('select id, raw_envelope from signal.messages')
-for mid, env in cur.fetchall():
-    d = json.loads(env) if isinstance(env,str) else env
-    print(mid, 'attach' in json.dumps(d).lower())"
+import os,sys,psycopg2; sys.path.insert(0,'/app/scripts/signal')
+import _minio
+c=psycopg2.connect(os.environ['SIGNAL_PG_DSN']); cur=c.cursor()
+cur.execute('select minio_bucket, minio_key, size_bytes from signal.attachments')
+rows=cur.fetchall(); ok=0
+with _minio.MinioSignal() as m:
+    for b,k,sz in rows:
+        try: ok += 1 if m.client.stat_object(b,k).size==sz else 0
+        except Exception: pass
+print('objects present AND size-matching:', ok, '/', len(rows))"
+
+# 4. Ghost rows — bodyless outbound with no attachment. Expect 1 (the pre-fix row).
+#    Any INCREASE means the reaction fix regressed.
+kubectl -n signal exec $CP -- python3 -c "
+import os,psycopg2
+c=psycopg2.connect(os.environ['SIGNAL_PG_DSN']); cur=c.cursor()
+cur.execute('''select count(*) from signal.messages m where m.is_outbound and m.body is null
+ and not exists (select 1 from signal.attachments a where a.message_id=m.id)''')
+print('ghost rows:', cur.fetchone()[0])"
+```
+
+```bash
+# devrc gate — AUTHORITATIVE, and read the CONTENT not the exit code.
+cd ~/workspace/devrc && nix build .#checks.x86_64-linux.pytests --no-link; echo "EXIT: $?"
+nix log /nix/store/<drv> | grep -E "^  FAIL|TOTAL|^RESULT"
 ```
