@@ -1,0 +1,869 @@
+#!/usr/bin/env python3
+"""🔴 WHICH WINDOWS HAVE BEEN WAITING ON THE OPERATOR TOO LONG — oldest first.
+
+WHY THIS EXISTS — THE MEASUREMENT
+--------------------------------------------------------------------------
+`session-manager` computes `waiting_probable` and NOTHING in this repo consumes
+it. Measured: two windows sat unanswered for 54.5h and 29.6h while the operator
+answered ~98 other prompts in the same 22 hours. That is not an attention
+problem — the operator was answering continuously. It is a SCHEDULING problem:
+nothing surfaces the waiting set oldest-first, so the two oldest were the two
+least likely to be seen.
+
+This tool adds exactly TWO things to `session-manager`: a CLOCK and a THRESHOLD.
+
+🔴 IT DOES NOT RE-DERIVE THE WAITING PREDICATE, AND THAT IS THE POINT
+--------------------------------------------------------------------------
+`waiting_probable` has a real false-positive history — a pane showing ANOTHER
+session's output tripping `trailing_question`, `context_exhausted` firing on a
+busy window. Every one of those bugs lives in the detector, and a second copy of
+the detector regenerates every one of them (RULES.md: "one rule, one place — a
+predicate duplicated across call sites regenerates the same bug at every site").
+So this file contains NO pane scraping, NO regex over captured text, and NO
+notion of what a question looks like. It consumes `waiting_probable`,
+`waiting_signals` and `waiting_status` as given.
+
+🔴 THE CLOCK — WHY `age_secs` IS NOT THE ANSWER
+--------------------------------------------------------------------------
+`age_secs` is time since the window's last LEDGER HEARTBEAT, not time since it
+asked. Measured: a row was flagged waiting while `busy` with an `age_secs` of
+2.5 SECONDS — its question was not 2.5s old. Read as "how long has this been
+waiting", `age_secs` is a number from a different question that happens to be in
+the same units, which is the most dangerous shape a wrong number can have.
+
+So this tool keeps its own clock. The FIRST time it observes a window in a
+waiting state it stamps `first_seen`; the threshold runs off that stamp. Each
+row publishes `waited_source` naming which term produced its number:
+
+    first_seen           — elapsed since our own stamp. A strict lower bound on
+                           the true wait, exact once the window has been
+                           observed across the whole wait.
+    ledger_age_fallback  — the ledger age observed AT stamp time. Used on the
+                           first observation (elapsed is 0 then and would report
+                           a 54h wait as "0s"), and thereafter whenever it is
+                           still the LARGER of the two.
+    unmeasured           — neither term is available. NEVER coerced to 0.
+
+🔴 WHY `max(elapsed, age_at_first_seen)` AND NOT SIMPLY THE STAMP.
+The naive rule — "stamp on first sight, then report elapsed" — has a hole that
+defeats the whole tool. A window already 54h into its wait when this tool first
+runs gets `first_seen = now`; ten minutes later it reports 600s and drops below
+the threshold it was ABOVE on the first run. The oldest window in the fleet
+would be surfaced once and then hidden, which is the exact failure mode this
+tool exists to remove. So the stamp records the ledger age observed at stamp
+time and the reported wait is the larger of the two terms. Each term's weakness
+is the other's strength: elapsed starts at 0 and only grows honestly; the ledger
+age can be wildly LOW (the 2.5s row) but is a good estimate when the last
+recorded turn IS the turn that asked. Taking the max never regresses, and
+`waited_source` says which term won, so no number is unlabelled.
+
+🔴 THE KEY IS `(host, tmux server pid, window_id)` — NOT `session:index`
+--------------------------------------------------------------------------
+Window INDEXES renumber when windows close, so a stamp keyed on `scratch2:3`
+silently transfers to whatever window slides into slot 3. `window_id` (`@41`) is
+stable for the life of a window — but tmux restarts them at `@0` when the SERVER
+restarts, so `@41` after a restart is a different window with the same name.
+`scripts/lib/agent_ledger.py` already solved this and its solution is reused
+rather than re-derived: `#{pid}` is the tmux SERVER pid, constant across every
+window of a server and different after a restart, so it is an exact generation
+check. `session-manager` already reads it per host and publishes it at
+`report["ledger"]["hosts"][<host>]["tmux_pid"]`.
+
+When that pid is absent (a `--no-ledger` report, a host whose ledger read
+failed) the generation CANNOT be checked. This tool then degrades LOUDLY: the
+stamps are kept under the sentinel generation, every affected row carries
+`generation_checked: false`, and `coverage.generation_unchecked_hosts` names the
+hosts, so a consumer can never read an unchecked stamp as a checked one.
+
+🔴 THE STATE FILE IS PRUNED, EVERY RUN
+--------------------------------------------------------------------------
+fuzzyclaw reached 401 files, ~90% stale, because nothing ever pruned. A stamp
+here is dropped when its window is no longer waiting (the RESET that stops an
+answered-then-re-asked window inheriting an ancient age), when its window no
+longer exists, and when its generation no longer matches the live server.
+
+🔴 A STAMP IS NEVER PRUNED ON A HOST WE DID NOT OBSERVE. An unreachable host
+produces no rows, and "no rows" is indistinguishable from "no windows" only if
+you forget which question you asked. Pruning there would destroy exactly the
+long-lived stamps this tool exists to accumulate, and it would do it silently.
+Those stamps are KEPT and counted as `kept_unobserved_host`.
+
+🔴 NULL IS NOT ZERO
+--------------------------------------------------------------------------
+An unreachable host, an unmeasured capture batch or a row whose `waiting_status`
+is not `ok` means that scope was NOT LOOKED AT. Its count is `null`, never `0`.
+A reassuring zero from a scan that walked nothing is the failure mode, not the
+all-clear. `per_host[<host>].over_threshold` is `null` for an unmeasured host,
+the global total is `null` when NO host was measured, and `counts_are_partial`
+is true whenever any scope went unmeasured.
+
+🔴 WHAT THE `idle_no_signal` BUCKET CANNOT TELL YOU — IN THE OUTPUT
+--------------------------------------------------------------------------
+`session-manager` does not read PRs. A window idle because its PR is blocked
+looks EXACTLY like a window idle because the work is done. Both land in
+`idle_no_signal`. That sentence is published in the JSON (`caveats`) and printed
+in the human view, because a report that presented finished work as needing
+attention would burn the operator's trust in the three precise buckets beside it.
+
+    run:  scripts/waiting-windows
+          scripts/waiting-windows --json
+          scripts/waiting-windows --json-file - < report.json
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import time
+
+# --------------------------------------------------------------------------- #
+# THE THRESHOLD
+# --------------------------------------------------------------------------- #
+# 🔴 4 HOURS, AND THE NUMBER IS DERIVED FROM THE MEASUREMENT, NOT PICKED.
+#
+# The observed distribution has two clean modes:
+#
+#   * the ANSWERED mode — ~98 prompts answered in 22 hours, i.e. a prompt every
+#     ~13.5 minutes on average. Sub-hour questions were being answered
+#     continuously and need no tool at all; anything that fires on them is
+#     noise, and a roll-up that cries wolf during an active working session is
+#     one the operator stops reading.
+#   * the STRANDED mode — 54.5h and 29.6h. Two windows, both far outside any
+#     plausible working gap.
+#
+# There is nothing in between, so the threshold only has to land in the empty
+# band. 4h sits ~18x above the observed answering cadence — comfortably past a
+# meal, an errand, a long meeting or a school run, none of which are a
+# scheduling failure — and ~7.4x below the SMALLER of the two outliers, so both
+# are caught with a wide margin on either side. A 1h threshold would fire during
+# ordinary work; a 24h threshold would have caught only one of the two.
+#
+# It is not a constant of nature. `--threshold-secs` and the
+# `WAITING_WINDOWS_THRESHOLD` environment variable override it, and the report
+# publishes `threshold_source` so a consumer can tell a tuned run from a default
+# one.
+#
+# 🔴 NEITHER NAME USES THE RESERVED SUFFIX, deliberately.
+# `test_clawgate_predicate_single_source.py` treats an assignment to any name
+# ending in that suffix, outside `scripts/lib/clawgate_tasks.py`, as a
+# re-spelling of clawgate's stuck-threshold constant — so it is reserved. This
+# threshold is a different quantity measured on a different population — how
+# long a tmux window has been waiting on the operator, not how long a clawgate
+# task has been stuck — and the repo already keeps unrelated thresholds off the
+# reserved suffix (`session-manager`'s `DEFAULT_STALE_THRESHOLD`). Renaming to
+# match that convention is the fix; adding this file to the guard's exemption
+# list would have been the workaround.
+DEFAULT_WAIT_THRESHOLD = 4 * 3600
+THRESHOLD_ENV = "WAITING_WINDOWS_THRESHOLD"
+
+# --------------------------------------------------------------------------- #
+# THE KIND VOCABULARY
+# --------------------------------------------------------------------------- #
+# 🔴 CLASSIFY, DO NOT LUMP. The operator chose the WIDE population, and the four
+# buckets need four different actions:
+#
+#   context_exhausted  — the window cannot proceed AT ALL without a human
+#                        (`/compact`, or a fresh session). Hardest block.
+#   selection_menu     — a modal is up. One keystroke unblocks it, but nothing
+#                        else in that window can run until it is answered.
+#   trailing_question  — the agent asked and stopped. It is blocked, but the
+#                        work it did is intact and re-readable.
+#   idle_no_signal     — no signal at all. See IDLE_NO_SIGNAL_CAVEAT: this
+#                        bucket is the one that cannot distinguish "blocked" from
+#                        "finished", and it must never be summed with the three
+#                        above into one undifferentiated number.
+#
+# A single undifferentiated count would tell the operator to walk to a terminal
+# without telling them what for, and would mix finished work into the total.
+IDLE_NO_SIGNAL = "idle_no_signal"
+
+# 🔴 PRECEDENCE, hardest block first. A row can carry several signals; `kind` is
+# the single most-blocking one so the report sorts and buckets deterministically,
+# and `kinds_all` carries the rest so the collapse is never lossy.
+#
+# 🔴 This tuple is pinned AGAINST `session-manager`'s own `WAITING_SIGNALS` by a
+# seam test that fails when that set GROWS OR SHRINKS. A signal added there and
+# not here would fall through to `unclassified_signals` and be reported as a
+# nameless block; the ledger makes that arrive as a red test instead.
+SIGNAL_PRECEDENCE = ("context_exhausted", "selection_menu", "trailing_question")
+
+# Every kind this tool can emit, so a per-kind roll-up publishes the whole
+# vocabulary rather than only the kinds that happened to occur. A bucket that is
+# absent from the output because it did not occur, and a bucket that is absent
+# because the code forgot it, look identical otherwise.
+ALL_KINDS = SIGNAL_PRECEDENCE + (IDLE_NO_SIGNAL,)
+
+# 🔴 The limit, stated in the OUTPUT rather than only in this docstring. A
+# consumer that renders the JSON and never reads this file still gets the
+# sentence. Pinned as a WHOLE STRING by a test: a guard on a couple of words
+# would be walkable by rewording it into something that no longer warns.
+IDLE_NO_SIGNAL_CAVEAT = (
+    "session-manager does not read PRs, so a window idle because its PR is "
+    "blocked looks exactly like a window idle because the work is done. The "
+    "idle_no_signal bucket carries both and cannot separate them. Do not read "
+    "it as a queue of work needing attention."
+)
+
+CLOCK_CAVEAT = (
+    "waited_secs is this tool's own clock, not session-manager's age_secs. "
+    "age_secs measures time since the window's last ledger heartbeat, which is "
+    "a different question in the same units: a row was measured waiting while "
+    "busy with an age_secs of 2.5 seconds. Read waited_source on every row."
+)
+
+GENERATION_CAVEAT = (
+    "Stamps are keyed on (host, tmux server pid, window_id). tmux restarts "
+    "window ids at @0 when the server restarts, so a stamp whose generation "
+    "cannot be checked may belong to a window that no longer exists. Rows with "
+    "generation_checked false are named in coverage.generation_unchecked_hosts."
+)
+
+# The sentinel generation for a host whose tmux server pid was not measured. It
+# is a value the real signal (a pid, always digits) cannot produce, so an
+# unchecked stamp can never collide with a checked one.
+GENERATION_UNKNOWN = "gen-unknown"
+
+# --------------------------------------------------------------------------- #
+# THE SOURCE
+# --------------------------------------------------------------------------- #
+# 🔴 NOT `--lean`. The lean view is the agent-shaped one and it DROPS
+# `window_id` (measured: `lean_row_fields` has `window_index` and no
+# `window_id`), which is the only stable key a stamp can use. `--no-ch` because
+# ClickHouse answers a question this tool never asks. NOT `--claude-only`,
+# because the full window census is what tells a prune "this window still
+# exists" — a row filtered out of the report is indistinguishable from a window
+# that closed, and the agent filter is applied here instead, on `row["claude"]`.
+SESSION_MANAGER_ARGV = ("--json", "--no-ch")
+
+STATE_DIR_NAME = "waiting-windows"
+STATE_FILE_NAME = "state.json"
+STATE_VERSION = 1
+
+
+# --------------------------------------------------------------------------- #
+# State file location + I/O. $HOME is read at CALL time, never at import time,
+# so a test can point it somewhere safe and so a long-lived process cannot bake
+# in a stale home.
+# --------------------------------------------------------------------------- #
+def state_dir() -> str:
+    return os.path.join(os.path.expanduser("~"), ".cache", STATE_DIR_NAME)
+
+
+def state_path() -> str:
+    return os.path.join(state_dir(), STATE_FILE_NAME)
+
+
+def load_state(path):
+    """-> {"stamps": {...}, "status": "ok"|"missing"|"malformed"|"error"}.
+
+    🔴 A malformed or unreadable state file degrades to an EMPTY stamp set with
+    the reason published, never to a crash and never silently. An empty set
+    means every row falls back to `ledger_age_fallback` this run, which is
+    correct and labelled — whereas a silent empty set would report the fleet's
+    oldest waits as brand new.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except FileNotFoundError:
+        return {"stamps": {}, "status": "missing"}
+    except (ValueError, UnicodeDecodeError):
+        return {"stamps": {}, "status": "malformed"}
+    except OSError:
+        return {"stamps": {}, "status": "error"}
+    if not isinstance(raw, dict) or not isinstance(raw.get("stamps"), dict):
+        return {"stamps": {}, "status": "malformed"}
+    stamps = {}
+    for key, val in raw["stamps"].items():
+        # A stamp missing `first_seen`, or carrying a non-numeric one, is not a
+        # clock — dropping it costs one run of `ledger_age_fallback`, keeping it
+        # would produce a wait computed from garbage.
+        if isinstance(val, dict) and isinstance(val.get("first_seen"), (int, float)):
+            stamps[key] = val
+    return {"stamps": stamps, "status": "ok"}
+
+
+def save_state(path, stamps) -> None:
+    """Atomic replace. The temp file is created in the state dir (same
+    filesystem, so `os.replace` is atomic) and is ALWAYS gone afterwards —
+    on success by the rename, on failure by the unlink — so it can never be
+    left behind to be read as a state file or counted as an artifact."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".state-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump({"version": STATE_VERSION, "stamps": stamps}, fh,
+                      indent=1, sort_keys=True)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+# --------------------------------------------------------------------------- #
+# Pure classification
+# --------------------------------------------------------------------------- #
+def stamp_key(host, generation, window_id) -> str:
+    """`host|generation|window_id`. `|` cannot occur in any of the three: hosts
+    are `session-manager`'s own host names, a generation is digits or the
+    sentinel, and a tmux window id is `@<n>`."""
+    return "%s|%s|%s" % (host, generation, window_id)
+
+
+def row_signals(row):
+    """The signal NAMES on a row, deduplicated, in the row's own order."""
+    out = []
+    for sig in (row.get("waiting_signals") or ()):
+        if not isinstance(sig, dict):
+            continue
+        name = sig.get("signal")
+        if name and name not in out:
+            out.append(name)
+    return out
+
+
+# The three answers a row can get. 🔴 `UNMEASURED` is a THIRD state, not a
+# flavour of "not waiting": a row whose `waiting_status` is not `ok` is neither
+# waiting nor not-waiting, and collapsing it into either one turns "we did not
+# look" into a measured observation.
+TRIAGE_WAITING = "waiting"
+TRIAGE_NOT_IN_POPULATION = "not_in_population"
+TRIAGE_UNMEASURED = "unmeasured"
+
+
+def classify(row):
+    """-> (state, kind, kinds_all, unclassified).
+
+    🔴 THIS IS THE ONLY PLACE THE POPULATION IS DECIDED. An earlier revision
+    also tested `waiting_status != "ok"` in `reconcile`, one line before calling
+    this function — and a mutation sweep caught it: deleting the check HERE
+    changed nothing, because the copy in the caller always won, so the guard was
+    UNREACHABLE and its coverage was an illusion. One rule, one place; `reconcile`
+    now asks this function and branches on the state it returns.
+    """
+    if not row.get("claude"):
+        return TRIAGE_NOT_IN_POPULATION, None, [], []
+    if row.get("waiting_status") != "ok":
+        return TRIAGE_UNMEASURED, None, [], []
+    if row.get("busy"):
+        # A busy window is working, not waiting. This is also the row shape that
+        # made `age_secs` untrustworthy (measured waiting while busy at 2.5s).
+        return TRIAGE_NOT_IN_POPULATION, None, [], []
+    if not row.get("waiting_probable"):
+        return TRIAGE_WAITING, IDLE_NO_SIGNAL, [IDLE_NO_SIGNAL], []
+    names = row_signals(row)
+    known = [n for n in SIGNAL_PRECEDENCE if n in names]
+    unclassified = sorted(n for n in names if n not in SIGNAL_PRECEDENCE)
+    if known:
+        return TRIAGE_WAITING, known[0], known + unclassified, unclassified
+    if unclassified:
+        # `waiting_probable` is true on a signal this build does not know. Say
+        # so under its own name rather than filing it as one of ours.
+        return TRIAGE_WAITING, unclassified[0], unclassified, unclassified
+    # Probable with no signals at all: still a block, but an unnamed one.
+    return TRIAGE_WAITING, "waiting_unclassified", ["waiting_unclassified"], []
+
+
+def host_generations(report):
+    """-> {host: generation}. `GENERATION_UNKNOWN` for any host whose tmux
+    server pid was not measured, which is the loud-degradation path."""
+    ledger_hosts = ((report.get("ledger") or {}).get("hosts") or {})
+    out = {}
+    for host in (report.get("hosts") or {}):
+        pid = (ledger_hosts.get(host) or {}).get("tmux_pid")
+        out[host] = str(pid) if pid else GENERATION_UNKNOWN
+    return out
+
+
+def host_observed(report):
+    """-> {host: bool}. A host is OBSERVED when it was reachable AND its window
+    list was actually measured. Both, because `list-panes` succeeding says
+    nothing about `list-windows`, and a host that answered but returned no
+    window list gives us no liveness facts to prune against."""
+    out = {}
+    for host, blk in (report.get("hosts") or {}).items():
+        blk = blk or {}
+        out[host] = bool(blk.get("reachable")) and bool(blk.get("windows_measured"))
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# THE CORE — pure. Takes a report, a stamp set and a clock; returns the report
+# and the next stamp set. Touches no disk, no network and no tmux, which is what
+# makes every test of it hermetic.
+# --------------------------------------------------------------------------- #
+def reconcile(report, stamps, now, threshold_secs):
+    generations = host_generations(report)
+    observed = host_observed(report)
+    hosts_blk = report.get("hosts") or {}
+
+    live_ids = {h: set() for h in hosts_blk}
+    rows_by_host = {h: [] for h in hosts_blk}
+    for host, blk in hosts_blk.items():
+        for row in ((blk or {}).get("windows") or []):
+            wid = row.get("window_id")
+            if wid:
+                live_ids[host].add(wid)
+            rows_by_host[host].append(row)
+
+    next_stamps = {}
+    out_rows = []
+    unmeasured_rows = 0
+    unmeasured_reasons = {}
+    rows_without_window_id = 0
+
+    for host, rows in rows_by_host.items():
+        gen = generations.get(host, GENERATION_UNKNOWN)
+        for row in rows:
+            state, kind, kinds_all, unclassified = classify(row)
+            if state == TRIAGE_UNMEASURED:
+                unmeasured_rows += 1
+                reason = row.get("waiting_status") or "none"
+                unmeasured_reasons[reason] = unmeasured_reasons.get(reason, 0) + 1
+                continue
+            if state != TRIAGE_WAITING:
+                continue
+            wid = row.get("window_id")
+            if not wid:
+                # 🔴 No stable key -> no clock. Counted and published rather than
+                # dropped, because a report that silently omits rows it could not
+                # key would under-count the very population it exists to surface.
+                rows_without_window_id += 1
+                continue
+            key = stamp_key(host, gen, wid)
+            age = row.get("age_secs")
+            age = float(age) if isinstance(age, (int, float)) else None
+            prior = stamps.get(key)
+            if prior is None:
+                first_seen = float(now)
+                age_at_first_seen = age
+            else:
+                first_seen = float(prior["first_seen"])
+                stored = prior.get("age_at_first_seen")
+                age_at_first_seen = float(stored) if isinstance(stored, (int, float)) else None
+            next_stamps[key] = {
+                "first_seen": first_seen,
+                "age_at_first_seen": age_at_first_seen,
+                "host": host,
+                "window_id": wid,
+                "generation": gen,
+                "kind": kind,
+                "last_seen": float(now),
+            }
+
+            elapsed = float(now) - first_seen
+            # 🔴 max(), and `waited_source` names the term that WON. See the
+            # module docstring for why the stamp alone regresses a 54h window to
+            # 600s on the second run.
+            if age_at_first_seen is not None and age_at_first_seen > elapsed:
+                waited, source = age_at_first_seen, "ledger_age_fallback"
+            elif prior is not None or age_at_first_seen is not None:
+                waited, source = elapsed, "first_seen"
+            else:
+                # First observation AND no ledger age: elapsed is 0, which would
+                # be a measured-looking zero for a window we have never timed.
+                waited, source = None, "unmeasured"
+
+            out_rows.append({
+                "host": host,
+                "session": row.get("session"),
+                "window_index": row.get("window_index"),
+                "window_id": wid,
+                "label": row.get("label"),
+                "hotkey": row.get("hotkey"),
+                "path": row.get("path"),
+                "task": row.get("task"),
+                "claude_session_id": row.get("claude_session_id"),
+                "status": row.get("status"),
+                "kind": kind,
+                "kinds_all": kinds_all,
+                "unclassified_signals": unclassified,
+                "waited_secs": waited,
+                "waited_source": source,
+                "over_threshold": (waited is not None and waited > threshold_secs),
+                "age_secs": age,
+                "age_source": row.get("age_source"),
+                "generation": gen,
+                "generation_checked": gen != GENERATION_UNKNOWN,
+                "unsent_prompt_status": row.get("unsent_prompt_status"),
+                "has_unsent_prompt": bool(row.get("unsent_prompt")),
+            })
+
+    prune = prune_stamps(stamps, next_stamps, observed, generations, live_ids)
+    next_stamps.update(prune["kept"])
+
+    # Oldest first — the whole reason this tool exists. `None` waits sort LAST:
+    # an unmeasured wait is not an old one, and putting it at the top would push
+    # a measured 54h row below a row we could not time at all.
+    out_rows.sort(key=lambda r: (r["waited_secs"] is None,
+                                 -(r["waited_secs"] or 0.0),
+                                 r["host"], r["window_id"]))
+
+    coverage = build_coverage(report, observed, generations,
+                              unmeasured_rows, unmeasured_reasons,
+                              rows_without_window_id)
+    counts = build_counts(out_rows, observed, coverage)
+    return {
+        "rows": out_rows,
+        "counts": counts,
+        "coverage": coverage,
+        "prune": prune["counts"],
+    }, next_stamps
+
+
+def prune_stamps(stamps, next_stamps, observed, generations, live_ids):
+    """🔴 THE PRUNE. fuzzyclaw reached 401 files, ~90% stale, because nothing
+    ever pruned. Four distinct outcomes, each counted under its own name so the
+    report can say WHY a stamp went rather than only that the file shrank:
+
+      kept_unobserved_host  — the host was not observed this run. NOT pruned:
+                              absence of rows from an unreachable host is not
+                              evidence the windows are gone, and pruning there
+                              would silently destroy the oldest stamps we have.
+      reset_not_waiting     — the window exists and is no longer waiting. This
+                              is the RESET: an answered-then-re-asked window
+                              must not inherit its previous wait.
+      pruned_window_gone    — the window id is not in the live set.
+      pruned_generation     — the stamp's generation is not the host's live one,
+                              i.e. the tmux server restarted. Those window ids
+                              have been reissued to different windows.
+    """
+    counts = {"kept_unobserved_host": 0, "reset_not_waiting": 0,
+              "pruned_window_gone": 0, "pruned_generation": 0,
+              "kept_generation_unknown": 0}
+    kept = {}
+    for key, stamp in stamps.items():
+        if key in next_stamps:
+            continue
+        host = stamp.get("host")
+        if not observed.get(host):
+            counts["kept_unobserved_host"] += 1
+            kept[key] = stamp
+            continue
+        live_gen = generations.get(host, GENERATION_UNKNOWN)
+        if live_gen == GENERATION_UNKNOWN:
+            # 🔴 Cannot check the generation, so cannot justify dropping it as a
+            # different generation's window. Kept, and counted under its own
+            # name so "we kept it" is never read as "we verified it".
+            counts["kept_generation_unknown"] += 1
+            kept[key] = stamp
+            continue
+        if stamp.get("generation") != live_gen:
+            counts["pruned_generation"] += 1
+            continue
+        if stamp.get("window_id") in live_ids.get(host, set()):
+            counts["reset_not_waiting"] += 1
+            continue
+        counts["pruned_window_gone"] += 1
+    return {"kept": kept, "counts": counts}
+
+
+def build_coverage(report, observed, generations,
+                   unmeasured_rows, unmeasured_reasons, rows_without_window_id):
+    """🔴 NULL IS NOT ZERO — everything this run could NOT see, propagated."""
+    summary = report.get("summary") or {}
+    hosts_blk = report.get("hosts") or {}
+    per_host = {}
+    for host, blk in hosts_blk.items():
+        blk = blk or {}
+        per_host[host] = {
+            "observed": bool(observed.get(host)),
+            "reachable": blk.get("reachable"),
+            "windows_measured": blk.get("windows_measured"),
+            "captures_measured": blk.get("captures_measured"),
+            "captures_status": blk.get("captures_status"),
+            "error": blk.get("error") or blk.get("windows_error"),
+            "generation": generations.get(host),
+            "generation_checked": generations.get(host) != GENERATION_UNKNOWN,
+        }
+    unobserved = sorted(h for h, ok in observed.items() if not ok)
+    gen_unchecked = sorted(h for h, g in generations.items()
+                           if g == GENERATION_UNKNOWN)
+    captures_unmeasured = sorted(
+        h for h, blk in hosts_blk.items()
+        if (blk or {}).get("captures_measured") is not True)
+    return {
+        "per_host": per_host,
+        "hosts_unobserved": unobserved,
+        "hosts_unreachable": list(summary.get("hosts_unreachable") or []),
+        "hosts_captures_unmeasured": captures_unmeasured,
+        "generation_unchecked_hosts": gen_unchecked,
+        "windows_unmeasured": list(summary.get("windows_unmeasured") or []),
+        "rows_unmeasured": unmeasured_rows,
+        "rows_unmeasured_reasons": unmeasured_reasons,
+        "rows_without_window_id": rows_without_window_id,
+        # 🔴 The single boolean a consumer must branch on before believing a
+        # zero. A field that merely EXISTS is not a guard; this one is read by
+        # `build_counts` and by the human renderer, and both are tested.
+        "complete": (not unobserved and not gen_unchecked
+                     and not captures_unmeasured
+                     and unmeasured_rows == 0 and rows_without_window_id == 0
+                     and not (summary.get("windows_unmeasured") or [])),
+    }
+
+
+def build_counts(rows, observed, coverage):
+    """Per-kind and per-host counts. 🔴 `null`, never `0`, for any scope that
+    was not measured — and `null` for the TOTAL when NO host was observed at
+    all, because "0 windows are overdue" from a scan that walked nothing is the
+    one sentence this tool must never emit."""
+    any_observed = any(observed.values())
+    over = [r for r in rows if r["over_threshold"]]
+
+    by_kind = {k: 0 for k in ALL_KINDS}
+    pop_by_kind = {k: 0 for k in ALL_KINDS}
+    for r in rows:
+        pop_by_kind[r["kind"]] = pop_by_kind.get(r["kind"], 0) + 1
+    for r in over:
+        by_kind[r["kind"]] = by_kind.get(r["kind"], 0) + 1
+
+    per_host = {}
+    for host, ok in observed.items():
+        if not ok:
+            per_host[host] = {"over_threshold": None, "waiting_population": None,
+                              "measured": False}
+        else:
+            per_host[host] = {
+                "over_threshold": sum(1 for r in over if r["host"] == host),
+                "waiting_population": sum(1 for r in rows if r["host"] == host),
+                "measured": True,
+            }
+    return {
+        "over_threshold": len(over) if any_observed else None,
+        "over_threshold_by_kind": by_kind if any_observed else None,
+        "waiting_population": len(rows) if any_observed else None,
+        "waiting_population_by_kind": pop_by_kind if any_observed else None,
+        "waited_unmeasured": sum(1 for r in rows if r["waited_secs"] is None),
+        "per_host": per_host,
+        # 🔴 True whenever ANY scope went unmeasured. A consumer that renders
+        # `over_threshold` without reading this is rendering a partial count as
+        # a total.
+        "counts_are_partial": not coverage["complete"],
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Fetching the report
+# --------------------------------------------------------------------------- #
+def default_runner(argv, timeout=300):
+    return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+
+
+def fetch_report(script_path, runner=default_runner, extra_argv=()):
+    """Invoke `session-manager` and parse its JSON. Read-only: this is the only
+    subprocess this tool ever launches, it mutates no tmux state, and no
+    pattern is ever handed to a process-killing command."""
+    argv = [sys.executable, script_path] + list(SESSION_MANAGER_ARGV) + list(extra_argv)
+    proc = runner(argv)
+    if proc.returncode != 0:
+        raise RuntimeError("session-manager exited %s: %s"
+                           % (proc.returncode, (proc.stderr or "").strip()[:400]))
+    return json.loads(proc.stdout)
+
+
+def read_report_file(path):
+    if path == "-":
+        return json.load(sys.stdin)
+    with open(path, "r", encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def resolve_threshold(flag_value, environ):
+    """-> (secs, source). Flag beats env beats default, and the SOURCE is
+    published so a tuned run is never mistaken for a default one."""
+    if flag_value is not None:
+        return flag_value, "flag"
+    raw = environ.get(THRESHOLD_ENV)
+    if raw not in (None, ""):
+        try:
+            val = int(raw)
+        except ValueError:
+            return DEFAULT_WAIT_THRESHOLD, "default (env %s not an integer: %r)" % (
+                THRESHOLD_ENV, raw)
+        if val <= 0:
+            return DEFAULT_WAIT_THRESHOLD, "default (env %s not positive: %r)" % (
+                THRESHOLD_ENV, raw)
+        return val, "env"
+    return DEFAULT_WAIT_THRESHOLD, "default"
+
+
+def humanize(secs):
+    if secs is None:
+        return "unmeasured"
+    secs = int(secs)
+    if secs < 60:
+        return "%ds" % secs
+    if secs < 3600:
+        return "%dm" % (secs // 60)
+    if secs < 86400:
+        return "%dh%02dm" % (secs // 3600, (secs % 3600) // 60)
+    return "%dd%02dh" % (secs // 86400, (secs % 86400) // 3600)
+
+
+def apply_top(rows, top):
+    """🔴 NO SILENT CAPS. Returns (shown, truncation) where `truncation` is
+    `None` only when nothing was dropped; otherwise it names the counts, and
+    every renderer prints it."""
+    if top is None or top <= 0 or len(rows) <= top:
+        return rows, None
+    return rows[:top], {"shown": top, "dropped": len(rows) - top,
+                        "total": len(rows)}
+
+
+def build_report(report, stamps, now, threshold_secs, threshold_source,
+                 state_status, state_file, top=None):
+    core, next_stamps = reconcile(report, stamps, now, threshold_secs)
+    over = [r for r in core["rows"] if r["over_threshold"]]
+    shown, truncation = apply_top(over, top)
+    out = {
+        "tool": "waiting-windows",
+        "now": now,
+        "source_ts": report.get("ts"),
+        "threshold_secs": threshold_secs,
+        "threshold_source": threshold_source,
+        "counts": core["counts"],
+        "coverage": core["coverage"],
+        "over_threshold": shown,
+        "waiting_population": core["rows"],
+        "truncated": truncation,
+        "state": {
+            "path": state_file,
+            "status": state_status,
+            "stamps_total": len(next_stamps),
+            "prune": core["prune"],
+        },
+        "caveats": {
+            "idle_no_signal": IDLE_NO_SIGNAL_CAVEAT,
+            "clock": CLOCK_CAVEAT,
+            "generation": GENERATION_CAVEAT,
+        },
+    }
+    return out, next_stamps
+
+
+def render_human(out):
+    L = []
+    thr = out["threshold_secs"]
+    L.append("waiting-windows — threshold %s (%ss, %s)"
+             % (humanize(thr), thr, out["threshold_source"]))
+    counts = out["counts"]
+    total = counts["over_threshold"]
+    if total is None:
+        L.append("OVER THRESHOLD: UNMEASURED — no host was observed this run.")
+    else:
+        label = "OVER THRESHOLD: %d" % total
+        if counts["counts_are_partial"]:
+            label += "  ⚠ PARTIAL — some scopes were not measured (see COVERAGE)"
+        L.append(label)
+        bk = counts["over_threshold_by_kind"] or {}
+        L.append("  by kind: " + ", ".join("%s=%d" % (k, bk.get(k, 0))
+                                           for k in ALL_KINDS))
+    L.append("")
+    rows = out["over_threshold"]
+    if not rows:
+        L.append("  (nothing over the threshold in the measured scope)")
+    for r in rows:
+        L.append("  %-9s %-18s %s:%s (%s%s)"
+                 % (humanize(r["waited_secs"]), r["kind"],
+                    r["session"], r["window_index"], r["window_id"],
+                    "" if r["generation_checked"] else " gen-UNCHECKED"))
+        L.append("      %s%s  [waited_source=%s, age_secs=%s]"
+                 % (r["label"] or "?",
+                    " (%s)" % r["hotkey"] if r["hotkey"] else "",
+                    r["waited_source"],
+                    "null" if r["age_secs"] is None else int(r["age_secs"])))
+        if r["task"]:
+            L.append("      task: %s" % r["task"])
+    if out["truncated"]:
+        t = out["truncated"]
+        L.append("")
+        L.append("  ⚠ TRUNCATED: showing %d of %d; %d NOT shown."
+                 % (t["shown"], t["total"], t["dropped"]))
+    L.append("")
+    cov = out["coverage"]
+    L.append("COVERAGE: %s" % ("complete" if cov["complete"]
+                               else "INCOMPLETE — counts above are partial"))
+    if cov["hosts_unobserved"]:
+        L.append("  hosts NOT observed (their counts are null, not 0): %s"
+                 % ", ".join(cov["hosts_unobserved"]))
+    if cov["hosts_captures_unmeasured"]:
+        L.append("  hosts whose pane captures were NOT measured: %s"
+                 % ", ".join(cov["hosts_captures_unmeasured"]))
+    if cov["generation_unchecked_hosts"]:
+        L.append("  hosts with NO tmux server pid — generation UNCHECKED: %s"
+                 % ", ".join(cov["generation_unchecked_hosts"]))
+    if cov["rows_unmeasured"]:
+        L.append("  rows whose waiting signal was not measured: %d (%s)"
+                 % (cov["rows_unmeasured"],
+                    ", ".join("%s=%d" % kv for kv in
+                              sorted(cov["rows_unmeasured_reasons"].items()))))
+    if cov["rows_without_window_id"]:
+        L.append("  rows with no window_id, so no clock could be kept: %d"
+                 % cov["rows_without_window_id"])
+    if cov["windows_unmeasured"]:
+        L.append("  windows unmeasured upstream: %d" % len(cov["windows_unmeasured"]))
+    L.append("")
+    L.append("CAVEAT (idle_no_signal): %s" % IDLE_NO_SIGNAL_CAVEAT)
+    L.append("CAVEAT (clock): %s" % CLOCK_CAVEAT)
+    return "\n".join(L)
+
+
+def main(argv=None, environ=None, now=None, state_file=None):
+    environ = os.environ if environ is None else environ
+    p = argparse.ArgumentParser(
+        prog="waiting-windows",
+        description="Windows that have been waiting on the operator longer than "
+                    "a threshold, oldest first. Read-only. Consumes "
+                    "session-manager's waiting predicate; never re-derives it.")
+    p.add_argument("--json", action="store_true", help="JSON output")
+    p.add_argument("--json-file", metavar="PATH",
+                   help="read the session-manager report from PATH ('-' for "
+                        "stdin) instead of invoking session-manager")
+    p.add_argument("--threshold-secs", type=int, default=None,
+                   help="override the threshold (default %d = %s; env %s)"
+                        % (DEFAULT_WAIT_THRESHOLD,
+                           humanize(DEFAULT_WAIT_THRESHOLD), THRESHOLD_ENV))
+    p.add_argument("--top", type=int, default=None,
+                   help="show at most N rows. What is dropped is ALWAYS printed.")
+    p.add_argument("--state-file", default=None, help="override the state file path")
+    p.add_argument("--no-state", action="store_true",
+                   help="do not read or write the state file. Every row then "
+                        "reports waited_source=ledger_age_fallback.")
+    args = p.parse_args(argv)
+
+    threshold, source = resolve_threshold(args.threshold_secs, environ)
+    now = time.time() if now is None else now
+    path = state_file or args.state_file or state_path()
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    if args.json_file:
+        report = read_report_file(args.json_file)
+    else:
+        report = fetch_report(os.path.join(here, "session-manager"))
+
+    if args.no_state:
+        loaded = {"stamps": {}, "status": "disabled"}
+    else:
+        loaded = load_state(path)
+
+    out, next_stamps = build_report(report, loaded["stamps"], now, threshold,
+                                    source, loaded["status"], path, top=args.top)
+    if not args.no_state:
+        save_state(path, next_stamps)
+
+    if args.json:
+        json.dump(out, sys.stdout, indent=1, sort_keys=True)
+        sys.stdout.write("\n")
+    else:
+        sys.stdout.write(render_human(out) + "\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

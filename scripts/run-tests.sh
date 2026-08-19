@@ -825,7 +825,22 @@ TARGET_FLOORS=(
   # ⚠ ZERO new skips on this target. NO new file lands under it (the gate's two
   # files already existed on this branch); the +80 tests are all inside
   # scripts/tests/test_no_captured_text.py.
-  "scripts/tests|4976"
+  #
+  # 2026-08-19, the waiting-windows report (`scripts/waiting-windows`): 5026 ->
+  # 5358 collected on this branch, +95 of which are the new
+  # scripts/tests/test_waiting_windows.py and the rest arrived with main since
+  # the line above was written. `scripts/tests` is already a DIRECTORY target,
+  # so the new file needed no HERMETIC_TARGETS entry — only this floor moves.
+  # Re-MEASURED by the gate, not computed from the old number:
+  #
+  #   PASS  scripts/tests  (collected=5358 …)
+  #   _suggested_floor 5358 = 5358 - min(50, max(1, 267)) = 5358 - 50 = 5308
+  #
+  # ⚠ ZERO new skips on this target — the new suite is fully hermetic (every
+  # impure source injected; the only disk it touches is a pytest `tmp_path`
+  # `$HOME` for the on-disk artifact-name pin), so EXPECTED_SKIPS is untouched.
+  # Movement on THIS line is the evidence the gate runs the new file at all.
+  "scripts/tests|5308"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
