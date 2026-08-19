@@ -116,9 +116,9 @@ Result payloads land under `.result.data`.
 It's their real browser, not a scratch VM. Don't `nav` a tab that may hold unsaved
 work (a half-typed comment, a form) — `open` your own tab, or an obviously
 disposable one. 🔴 If ANYTHING takes their screen — `activate`, the X-fallback
-capture — RECORD focus AND workspace first, then restore BOTH at the end, on
-failure too. Focus alone leaves them on YOUR workspace, which is the axis that
-actually gets taken. Exact commands → `reference/spa-wake.md`.
+capture — RECORD focus AND workspace first, restore BOTH at the end, on failure
+too. Restoring focus usually carries the workspace, but not always — restore it
+explicitly. Why, and the commands → `reference/spa-wake.md`.
 
 ## Reference files — load ONE only when its trigger fires
 
