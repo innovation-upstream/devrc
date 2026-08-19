@@ -144,11 +144,17 @@
 #                               load unless --no-wait; --wait MS overrides. On i3
 #                               the SERVER also runs `i3-msg` host-side to actually
 #                               raise the Brave window + switch workspace — but
-#                               ONLY with consent: --focus asks for it, --no-focus
+#                               ONLY on request: --focus asks for it, --no-focus
 #                               refuses, and the DEFAULT is "yes iff stdout is a
 #                               TTY", so a human typing this gets the raise and an
 #                               agent on a pipe does not. The result's `i3` field
-#                               reports applied/skipped/failed/withheld.
+#                               reports applied/skipped/failed/withheld, and
+#                               `i3_detail` says WHY (focused / no_match /
+#                               not_focused / unavailable / no_title /
+#                               not_requested / …).
+#                               🔴 `applied` means a window was FOUND and CONFIRMED
+#                               focused — i3-msg exits 0 even matching nothing, so
+#                               it is not inferred from an exit code.
 #   browser html              — outerHTML of the owned/active tab (+ url, title);
 #                               --max-bytes N caps it (default 32768, 0 = uncapped,
 #                               truncation appends a "…[truncated N bytes]" note).
@@ -1565,10 +1571,14 @@ sys.stdout.write(json.dumps(fields)[1:-1])
     #
     # 🔴 --focus / --no-focus: whether to also RAISE the Brave X11 window via the
     # server's host-side `i3-msg` — the RELIABLE way this CLI takes the operator's
-    # screen; the result's `i3` field reports applied/skipped/failed/withheld.
+    # screen. The result's `i3` reports applied/skipped/failed/withheld and
+    # `i3_detail` says why. 🔴 `applied` is EARNED (#557): i3-msg exits 0 even for
+    # a criteria that matched NOTHING, so the server confirms via `get_tree` that
+    # a window was found and ended up focused before it says "applied".
+    # A withheld raise never makes that round trip at all.
     #
-    # ⚠ It is NOT the only path, and the older wording here ("Chrome-side focus is
-    # a no-op under i3") was wrong as an unconditional claim. The extension also
+    # ⚠ i3-msg is NOT the only path, and the older wording here ("Chrome-side focus
+    # is a no-op under i3") was wrong as an unconditional claim. The extension also
     # calls chrome.windows.update({focused:true}), which this flag does NOT gate.
     # i3 4.24 userguide §4.30: `focus_on_window_activation` defaults to `smart`,
     # under which "If the window requesting focus is on an active workspace, it

@@ -2388,131 +2388,302 @@ def _enable_i3(monkeypatch, returncode=0, raise_exc=None):
 _FAKE_I3_MSG = "/run/current-system/sw/bin/i3-msg"
 
 
-def test_i3_focus_argv_hostile_title_is_safe():
-    """KEY SECURITY TEST: a hostile, page-controlled title (i3-criteria breakout
-    attempt, regex metachars, quotes, `;`, newlines, `$()`, backticks, very long)
-    can NEVER break out of the `title="..."` value into an i3 command. The argv is
-    a 2-element LIST (→ shell=False), constrained to class="Brave-browser", and
-    the criteria has EXACTLY the 4 structural `"`, one `[`, one `]` — a hostile
-    `"`/`]` would add more. Worst case is "wrong Brave window or none"."""
-    hostile = (
-        'evil"] exec xterm [title="pwn'      # try to close value → i3 `exec`
-        + '; rm -rf ~ | cat `id` $(whoami)'  # shell metachars (irrelevant, no shell)
-        + '\n\r\tmore .*+?[]{}^$\\ '          # control chars + regex metachars
-        + "A" * 500                             # length bomb
-    )
-    argv = S.i3_focus_argv(hostile)
-    assert isinstance(argv, list) and len(argv) == 2
-    assert argv[0] == "i3-msg"
-    crit = argv[1]
-    # Structural integrity: exactly one criteria bracket pair + the 2 quoted
-    # attribute values (class + title) → 4 double-quotes, and NO breakout.
-    assert crit.startswith('[class="Brave-browser" title="')
-    assert crit.endswith('"] focus')
-    assert crit.count('"') == 4, crit
-    assert crit.count("[") == 1 and crit.count("]") == 1, crit
-    assert "\n" not in crit and "\r" not in crit and "\t" not in crit
-    # `exec` cannot be a standalone i3 command — it only survives as inert text
-    # INSIDE the quoted title value (still between title=" and "]).
-    title_frag = crit[len('[class="Brave-browser" title="'):-len('"] focus')]
-    assert '"' not in title_frag and "]" not in title_frag and "[" not in title_frag
-    # Length is capped (the 500-char bomb cannot bloat the criteria unbounded).
-    assert len(title_frag) <= len(re.escape("A" * S.I3_TITLE_MAX)) + 40
+# --- a FAKE of the `i3-msg` boundary --------------------------------------- #
+# 🔴 NEVER a real i3. Every test below stubs subprocess.run, so the suite cannot
+# switch a workspace, raise a window or otherwise take the operator's screen.
+#
+# 🔴 THE FAKE'S ONE LOAD-BEARING FIDELITY REQUIREMENT: real `i3-msg` exits 0 and
+# replies `[{"success":true}]` for a command whose criteria matched ZERO windows —
+# byte-identical to a real raise. That is the entire defect. A fake that returned
+# nonzero on a miss would make the buggy implementation look correct and every
+# test here would be vacuous, so the fake reproduces the lie faithfully and
+# test_fake_i3_mirrors_real_i3_success_on_zero_match pins that it does.
+_I3_SUCCESS_REPLY = b'[{"success":true}]'
+_TITLE_CRITERIA_RE = re.compile(r'^\[class="([^"]*)" title="(.*)"\] focus$')
+_ID_CRITERIA_RE = re.compile(r'^\[id="(\d+)"\] focus$')
 
 
-def test_i3_focus_argv_escapes_regex_metacharacters():
-    """A plain title with regex metacharacters is re.escape'd so it matches
-    literally (never alters i3's regex matching)."""
-    argv = S.i3_focus_argv("Model Benchmarking")
-    assert argv == ["i3-msg",
-                    '[class="Brave-browser" title="%s"] focus'
-                    % re.escape("Model Benchmarking")]
+class _FakeI3:
+    """An in-memory i3 that answers `-t get_tree` and `… focus`.
+
+    windows: list of (x11_window_id, wm_class, wm_name). `focused` is the id of
+    the currently focused window (None = none). Understands BOTH command shapes
+    so one test file can be run against the pre-fix implementation (which focuses
+    by a `title="…"` criteria) and the fixed one (which focuses by `id="…"`)."""
+
+    def __init__(self, windows=(), focused=None):
+        self.windows = [list(w) for w in windows]
+        self.focused = focused
+        self.calls = []            # every argv, in order
+        self.tree_rc = 0
+        self.tree_stdout = None    # not None → return this instead of a tree
+        self.focus_rc = 0
+        # False → focus is ACCEPTED (rc 0, success:true) but changes nothing.
+        # This is not hypothetical: an id that vanished between the tree read and
+        # the focus answers exactly this way.
+        self.focus_effective = True
+        self.on_call = None        # hook(fake, call_index) run BEFORE each reply
+
+    # -- test-facing helpers ------------------------------------------------ #
+    def set_title(self, window_id, name):
+        for w in self.windows:
+            if w[0] == window_id:
+                w[2] = name
+
+    def _is_tree(self, argv):
+        return argv[1:] == ["-t", "get_tree"]
+
+    @property
+    def tree_calls(self):
+        return [a for a in self.calls if self._is_tree(a)]
+
+    @property
+    def focus_calls(self):
+        return [a for a in self.calls if not self._is_tree(a)]
+
+    # -- the i3 model ------------------------------------------------------- #
+    def tree(self):
+        nodes = [{"type": "con", "window": wid, "name": name,
+                  "window_properties": {"class": cls, "instance": "brave-browser"},
+                  "focused": wid == self.focused,
+                  "nodes": [], "floating_nodes": []}
+                 for wid, cls, name in self.windows]
+        return {"type": "root", "name": "root", "window": None, "focused": False,
+                "floating_nodes": [],
+                "nodes": [{"type": "workspace", "name": "1", "window": None,
+                           "focused": False, "floating_nodes": [],
+                           "nodes": nodes}]}
+
+    def _focus(self, window_id):
+        if not self.focus_effective:
+            return
+        if any(w[0] == window_id for w in self.windows):
+            self.focused = window_id
+
+    def run(self, argv, **kw):
+        argv = list(argv)
+        self.calls.append(argv)
+        if self.on_call is not None:
+            self.on_call(self, len(self.calls) - 1)
+        if self._is_tree(argv):
+            if self.tree_stdout is not None:
+                return _FakeProcOut(self.tree_rc, self.tree_stdout)
+            return _FakeProcOut(self.tree_rc,
+                                json.dumps(self.tree()).encode("utf-8"))
+        cmd = argv[1] if len(argv) > 1 else ""
+        m = _ID_CRITERIA_RE.match(cmd)
+        if m:
+            self._focus(int(m.group(1)))
+        else:
+            m = _TITLE_CRITERIA_RE.match(cmd)
+            if m:
+                cls, pat = m.group(1), m.group(2)
+                try:
+                    rx = re.compile(pat)
+                except re.error:
+                    rx = None
+                if rx is not None:
+                    for wid, wcls, name in self.windows:
+                        if wcls == cls and rx.search(name):
+                            self._focus(wid)
+                            break
+        # 🔴 UNCONDITIONAL success — matched or not. This is what real i3 does.
+        return _FakeProcOut(self.focus_rc, _I3_SUCCESS_REPLY)
 
 
-def test_i3_focus_argv_empty_title_returns_none():
-    """No usable title (empty / only structural+control chars) → None → skip."""
-    assert S.i3_focus_argv("") is None
-    assert S.i3_focus_argv(None) is None
-    assert S.i3_focus_argv('"[]\\\n\t ') is None
+class _FakeProcOut:
+    def __init__(self, returncode, stdout):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = b""
 
 
-def test_activate_invokes_i3_msg_on_success(monkeypatch):
-    """On a CONSENTED (focus:true) successful activate the server runs i3-msg
-    with the ARGV LIST (shell=False), a class="Brave-browser" + re.escape'd-title
-    criteria, and `focus`; the result reports i3:"applied".
+def _enable_fake_i3(monkeypatch, windows=(), focused=None, match_wait=0.0):
+    """Turn the i3 path ON, routed at a _FakeI3. `match_wait` 0 = one tree read
+    (keeps the suite fast); the settle-race tests raise it deliberately."""
+    fake = _FakeI3(windows=windows, focused=focused)
+    monkeypatch.setattr(S, "i3_available", lambda: True)
+    monkeypatch.setattr(S, "_resolve_i3_msg", lambda: _FAKE_I3_MSG)
+    monkeypatch.setattr(S, "I3_MATCH_WAIT", match_wait, raising=False)
+    monkeypatch.setattr(S, "I3_MATCH_POLL", 0.01, raising=False)
+    monkeypatch.setattr(S.subprocess, "run",
+                        lambda argv, **kw: fake.run(argv, **kw))
+    return fake
 
-    Every test in this i3-outcome block passes focus:true explicitly, because
-    the raise is OPT-IN — without it i3_foreground is never reached and
-    these would all assert against "withheld" instead of the state they mean to
-    pin. The gate itself is covered separately (see the focus-consent block)."""
-    calls = _enable_i3(monkeypatch, returncode=0)
+
+# The live pair measured 2026-08-19, reproduced as a fixture: `activate` is
+# answered by Chrome with the NEW tab title while the Brave X11 window's WM_NAME
+# still advertises the OLD one.
+_NEW_TITLE = "Model Benchmarking"
+_OLD_TITLE = "New Tab"
+_BRAVE = "Brave-browser"
+
+
+def _activate_with_fake_i3(fake_windows, focused=None, match_wait=0.0,
+                           title=_NEW_TITLE, monkeypatch=None, mutate=None):
+    """Drive ONE real `activate` through the HTTP surface against a fake i3.
+    Returns (response_body, fake)."""
+    fake = _enable_fake_i3(monkeypatch, windows=fake_windows, focused=focused,
+                           match_wait=match_wait)
+    if mutate is not None:
+        mutate(fake)
     srv, _ = _serve()
     ext = FakeExtension(srv, executor=lambda c: {
         "tabId": 5, "windowId": 1, "active": True, "status": "complete",
-        "url": "https://model-benchmarking.example.test/run",
-        "title": "Model Benchmarking"})
+        "url": "https://model-benchmarking.example.test/run", "title": title})
     ext.start()
     try:
         assert _wait_connected(srv, want=True)
         st, body = _req(srv, "POST", "/cmd", {"op": "activate", "focus": True})
         assert st == 200
-        assert body["result"]["data"]["i3"] == "applied"
-        assert len(calls) == 1
-        argv, kw = calls[0]
-        # argv[0] is the RESOLVED ABSOLUTE i3-msg path (not the bare name) so the
-        # call works even under the minimal systemd --user service PATH.
-        assert argv[0] == _FAKE_I3_MSG
-        assert argv[1] == ('[class="Brave-browser" title="%s"] focus'
-                           % re.escape("Model Benchmarking"))
-        assert kw.get("shell", False) is False  # NEVER a shell string
-        assert kw.get("timeout")  # bounded
+        return body, fake
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
 
 
-# --- CAN-before-MAY: the i3-availability x consent matrix (audit #551) ------ #
-# THE REGRESSION THIS PINS. The consent gate originally asked "may we raise?"
-# before "can we?", so on a headless / non-i3 / server-mode host a
-# non-consented activate answered i3:"withheld" AND attached the withheld note,
-# whose remedy is "pass --focus". On that host --focus fixes nothing: there is
-# no i3 to raise with. Pre-gate the same call truthfully answered "skipped".
-#
-# The reason the existing suite could not see it: every i3-outcome test was
-# updated to pass focus:true when the gate landed, so "skipped" became reachable
-# only WITH consent — exactly one cell of a 2x2. A defect in a cell no fixture
-# builds is invisible however green the suite is. All four cells are asserted
-# here so the ORDER of the two checks is pinned rather than incidental.
-def test_i3_state_constants_match_the_literals_the_matrix_asserts():
-    """The matrix and the named regression test compare against LITERALS (so
-    they stay behavioural at a pre-fix baseline). That only stays honest while
-    the constants agree with them — otherwise the code could rename a state and
-    every literal-based assertion would quietly test nothing."""
+_HOSTILE_TITLE = (
+    'evil"] exec xterm [title="pwn'      # try to close value → i3 `exec`
+    + '; rm -rf ~ | cat `id` $(whoami)'  # shell metachars (irrelevant, no shell)
+    + '\n\r\tmore .*+?[]{}^$\\ '          # control chars + regex metachars
+    + "A" * 500                             # length bomb
+)
+
+
+def test_i3_title_pattern_hostile_title_is_inert():
+    """KEY SECURITY TEST (was: the criteria-breakout test). A hostile,
+    page-controlled title is reduced to a LITERAL regex — every metacharacter
+    re.escape'd, every i3-structural char stripped, length capped. It is matched
+    in-process against i3's get_tree reply, so a `"`/`]` has nothing to break out
+    of; the escaping also means the compiled pattern is a literal (no ReDoS)."""
+    pat = S.i3_title_pattern(_HOSTILE_TITLE)
+    assert isinstance(pat, str) and pat
+    assert '"' not in pat and "\n" not in pat and "\r" not in pat and "\t" not in pat
+    # A LITERAL: the compiled pattern matches its own unescaped text and nothing
+    # a metacharacter would have let through.
+    lit = S._sanitize_i3_title(_HOSTILE_TITLE)
+    assert re.compile(pat).search(lit)
+    assert not re.compile(pat).search("totally unrelated window title")
+    # Length is capped (the 500-char bomb cannot bloat the pattern unbounded).
+    assert len(lit) <= S.I3_TITLE_MAX
+
+
+def test_i3_title_pattern_escapes_regex_metacharacters():
+    """A plain title with regex metacharacters is re.escape'd so it matches
+    literally (never alters the match)."""
+    assert S.i3_title_pattern("Model Benchmarking") == re.escape("Model Benchmarking")
+
+
+def test_i3_title_pattern_empty_title_returns_none():
+    """No usable title (empty / only structural+control chars) → None → skip."""
+    assert S.i3_title_pattern("") is None
+    assert S.i3_title_pattern(None) is None
+    assert S.i3_title_pattern('"[]\\\n\t ') is None
+
+
+def test_activate_invokes_i3_msg_on_success(monkeypatch):
+    """On a successful activate the server talks to i3 with ARGV LISTS
+    (shell=False), reads the tree, focuses the matched window, and reports
+    i3:"applied" / i3_detail:"focused"."""
+    body, fake = _activate_with_fake_i3(
+        [(4242, _BRAVE, _NEW_TITLE)], focused=None, monkeypatch=monkeypatch)
+    assert body["result"]["data"]["i3"] == "applied"
+    assert body["result"]["data"]["i3_detail"] == "focused"
+    # argv[0] is the RESOLVED ABSOLUTE i3-msg path (not the bare name) so the
+    # call works even under the minimal systemd --user service PATH.
+    assert all(a[0] == _FAKE_I3_MSG for a in fake.calls), fake.calls
+    assert fake.tree_calls, "the raise must be decided from a get_tree read"
+    assert fake.focus_calls == [[_FAKE_I3_MSG, '[id="4242"] focus']]
+    assert fake.focused == 4242
+
+
+def test_activate_i3_calls_are_shell_false_and_bounded(monkeypatch):
+    """Every i3-msg invocation is an argv LIST with shell=False and a timeout."""
+    seen = []
+    fake = _FakeI3(windows=[(7, _BRAVE, _NEW_TITLE)])
+    monkeypatch.setattr(S, "i3_available", lambda: True)
+    monkeypatch.setattr(S, "_resolve_i3_msg", lambda: _FAKE_I3_MSG)
+
+    def _run(argv, **kw):
+        seen.append((argv, kw))
+        return fake.run(argv, **kw)
+
+    monkeypatch.setattr(S.subprocess, "run", _run)
+    assert S.i3_foreground(_NEW_TITLE, match_wait=0) == ("applied", "focused")
+    assert seen, "positive control: at least one i3-msg call was made"
+    for argv, kw in seen:
+        assert isinstance(argv, list)          # NEVER a shell string
+        assert kw.get("shell", False) is False
+        assert kw.get("timeout")               # bounded
+
+
+def test_i3_state_and_detail_constants_match_the_literals_the_matrix_asserts():
+    """The matrix compares against LITERALS (so it stays behavioural at a pre-fix
+    baseline). That only stays honest while the constants agree with them."""
     assert S.I3_SKIPPED == "skipped"
     assert S.I3_WITHHELD == "withheld"
+    assert S.I3_DETAIL_UNAVAILABLE == "unavailable"
+    assert S.I3_DETAIL_NOT_REQUESTED == "not_requested"
 
 
-@pytest.mark.parametrize("i3_up,consent,want_state,want_note", [
-    (True,  True,  "applied",  False),   # can + may   -> raise
-    (True,  False, "withheld", True),    # can + won't -> the consent gate, note is useful
-    (False, True,  "skipped",  False),   # can't + may -> nothing to raise with
-    (False, False, "skipped",  False),   # can't + won't -> THE REGRESSION CELL
-], ids=["i3+consent", "i3+refused", "noi3+consent", "noi3+refused"])
-def test_activate_i3_state_matrix(monkeypatch, i3_up, consent, want_state, want_note):
-    """All four (i3 available x consent) cells, so the check ORDER is pinned.
+def test_call_site_unavailable_detail_matches_i3_foreground(monkeypatch):
+    """🔴 SEAM GUARD. The REFUSED path reports "i3 is not here" WITHOUT going
+    through i3_foreground (calling it would cost a get_tree round trip we must
+    not make when no raise was asked for). So the same fact is produced in two
+    places and can drift. Pin them to each other by ASKING i3_foreground.
 
-    `want_note` is asserted in BOTH directions: the note must appear exactly
-    where its `--focus` advice is actionable, and nowhere else. A note on a
-    non-i3 host is the bug; a missing note on a real withhold is a different
-    bug (the caller is refused with no way to learn why).
+    This is the ledger-style check `claude/RULES.md` asks for at a seam: it fails
+    if either side renames its detail, not merely if the call site does."""
+    monkeypatch.setattr(S, "i3_available", lambda: False)
+    state, detail = S.i3_foreground("anything")
+    assert state == S.I3_SKIPPED
+    assert detail == S.I3_DETAIL_UNAVAILABLE, (
+        f"i3_foreground says {detail!r} when i3 is absent, but the /cmd refused "
+        f"path reports {S.I3_DETAIL_UNAVAILABLE!r}; the two have drifted"
+    )
+
+
+# --- the (consent x availability x match) matrix, re-derived against #557 ---- #
+# WHAT CHANGED WHEN #557 LANDED. `applied` is now EARNED: i3-msg exits 0 even for
+# a criteria that matched NOTHING, so the server confirms via `get_tree` that a
+# window exists and ended up focused. Two consequences for this matrix:
+#
+#   * the cells' MEANING is unchanged for skipped/withheld — they changed only
+#     their FIXTURE (a bare `subprocess.run`→rc0 stub can no longer produce
+#     `applied`, because rc 0 with empty stdout is now `failed`/`tree_unreadable`);
+#   * the consented x available cell SPLIT IN TWO. "i3 is there and a window
+#     matches" → applied/focused; "i3 is there and nothing matches" →
+#     failed/no_match, a state that did not exist before and that used to be
+#     reported as `applied`. That new cell is included below.
+#
+# Every cell also asserts `data["i3"]` is a STRING. #557 changed i3_foreground to
+# return a (state, detail) TUPLE, so a call site that forgets to unpack puts a
+# tuple in the JSON — silently wrong rather than a crash. That is the single
+# highest-value regression guard in this block.
+@pytest.mark.parametrize(
+    "i3_up,consent,window_matches,want_state,want_detail,want_note", [
+        (True,  True,  True,  "applied",  "focused",      False),
+        (True,  True,  False, "failed",   "no_match",     False),
+        (True,  False, None,  "withheld", "not_requested", True),
+        (False, True,  None,  "skipped",  "unavailable",  False),
+        (False, False, None,  "skipped",  "unavailable",  False),
+    ],
+    ids=["i3+consent+match", "i3+consent+nomatch", "i3+refused",
+         "noi3+consent", "noi3+refused"])
+def test_activate_i3_state_matrix(monkeypatch, i3_up, consent, window_matches,
+                                  want_state, want_detail, want_note):
+    """All (availability x consent x match) cells, so ORDER and SHAPE are pinned.
+
+    `want_note` is asserted BOTH ways: the withheld note must appear exactly
+    where its `--focus` advice is actionable, and nowhere else.
     """
+    fake = None
     if i3_up:
-        calls = _enable_i3(monkeypatch, returncode=0)
+        windows = [(77, _BRAVE, _NEW_TITLE if window_matches else "Something Else")]
+        fake = _enable_fake_i3(monkeypatch, windows=windows, focused=None)
     else:
-        # The autouse _disable_i3 fixture already forces i3_available False.
-        # Make any subprocess.run a hard failure so "we never shelled out" is
-        # proven rather than inferred from the reported state.
-        calls = []
-
+        # autouse _disable_i3 already forces i3_available False; make ANY
+        # subprocess a hard failure so "we never shelled out" is proven, not
+        # inferred from the reported state.
         def _boom(*a, **k):
             raise AssertionError("i3-msg must NOT run when i3 is unavailable")
         monkeypatch.setattr(S.subprocess, "run", _boom)
@@ -2521,7 +2692,7 @@ def test_activate_i3_state_matrix(monkeypatch, i3_up, consent, want_state, want_
     ext = FakeExtension(srv, executor=lambda c: {
         "tabId": 5, "windowId": 1, "active": True, "status": "complete",
         "url": "https://model-benchmarking.example.test/run",
-        "title": "Model Benchmarking"})
+        "title": _NEW_TITLE})
     ext.start()
     try:
         assert _wait_connected(srv, want=True)
@@ -2531,35 +2702,78 @@ def test_activate_i3_state_matrix(monkeypatch, i3_up, consent, want_state, want_
         st, body = _req(srv, "POST", "/cmd", cmd)
         assert st == 200
         data = body["result"]["data"]
+
+        # 🔴 TUPLE GUARD (#557 made i3_foreground return a pair).
+        assert isinstance(data["i3"], str), (
+            f"data['i3'] is {type(data['i3']).__name__} {data['i3']!r} — a call "
+            "site forgot to unpack i3_foreground's (state, detail) pair"
+        )
+        assert isinstance(data.get("i3_detail", ""), str)
+
         assert data["i3"] == want_state, (
-            f"i3_available={i3_up} focus={consent} -> got i3={data['i3']!r}, "
-            f"want {want_state!r}"
+            f"i3_up={i3_up} consent={consent} match={window_matches} -> "
+            f"i3={data['i3']!r}, want {want_state!r}"
+        )
+        assert data.get("i3_detail") == want_detail, (
+            f"i3_up={i3_up} consent={consent} match={window_matches} -> "
+            f"i3_detail={data.get('i3_detail')!r}, want {want_detail!r}"
         )
         assert ("note" in data) is want_note, (
-            f"i3_available={i3_up} focus={consent}: note present="
-            f"{'note' in data}, want {want_note}"
+            f"note present={'note' in data}, want {want_note}"
         )
-        # The Chrome-side result survives in every cell — this gates the WM
-        # step only, never the op.
+        # The Chrome-side result survives in every cell — this gates the WM step
+        # only, never the op.
         assert data["tabId"] == 5
-        # i3-msg runs in exactly one cell: can AND may.
-        assert (len(calls) == 1) is (i3_up and consent), (
-            f"i3_available={i3_up} focus={consent}: i3-msg calls={calls}"
-        )
+
+        # 🔴 A REFUSED raise must not even LOOK at i3: no get_tree, no focus.
+        if fake is not None and not consent:
+            assert fake.calls == [], (
+                f"a refused activate talked to i3 anyway: {fake.calls}"
+            )
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+def test_refused_activate_makes_no_i3_round_trip_at_all(monkeypatch):
+    """🔴 The consent gate must sit AHEAD of #557's confirmation step.
+
+    #557 made a consented activate do a `get_tree` read (and a re-read to confirm
+    focus). None of that may happen for a raise nobody asked for — not because it
+    would move focus (a tree read does not), but because the gate's promise is
+    that a refusal touches the WM path not at all. Asserted on the fake's own call
+    log rather than on the reported state, since a state string cannot tell you
+    whether a subprocess ran."""
+    fake = _enable_fake_i3(monkeypatch,
+                           windows=[(77, _BRAVE, _NEW_TITLE)], focused=None)
+    srv, _ = _serve()
+    ext = FakeExtension(srv, executor=lambda c: {
+        "tabId": 5, "windowId": 1, "active": True, "status": "complete",
+        "url": "https://model-benchmarking.example.test/run",
+        "title": _NEW_TITLE})
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        st, body = _req(srv, "POST", "/cmd", {"op": "activate"})
+        assert st == 200
+        # LITERAL, not S.I3_WITHHELD: at a baseline without the gate the constant
+        # does not exist, and an AttributeError here would be red for the wrong
+        # reason — it would prove nothing about whether a round trip happened.
+        assert body["result"]["data"]["i3"] == "withheld"
+        assert fake.tree_calls == [], f"get_tree ran for a refused raise: {fake.tree_calls}"
+        assert fake.focus_calls == [], f"focus ran for a refused raise: {fake.focus_calls}"
+        # …and the window really was left alone.
+        assert fake.focused is None
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
 
 
 def test_non_consented_activate_on_a_non_i3_host_says_skipped_not_withheld(monkeypatch):
-    """🔴 THE REGRESSION, named. Unavailability must beat non-consent.
+    """🔴 Unavailability must beat non-consent.
 
-    Separate from the matrix above because this is the cell that shipped wrong
-    and it is the one a mutant swapping the two checks must die on. The
-    assertion is on the NOTE as well as the state: reporting "withheld" is a
-    lie, but attaching advice to "pass --focus" on a host with no i3 is the part
-    that actually costs the reader time — it sends them after a flag instead of
-    the real answer, which is that this host cannot raise anything.
-    """
+    Compared against the LITERAL "skipped", not S.I3_SKIPPED: at the pre-fix
+    commit the constant did not exist, so referencing it made this red with an
+    AttributeError — red for the wrong reason, which proves nothing about
+    behaviour. Drift is pinned separately, above."""
     def _boom(*a, **k):
         raise AssertionError("i3-msg must NOT run when i3 is unavailable")
     monkeypatch.setattr(S.subprocess, "run", _boom)
@@ -2567,18 +2781,13 @@ def test_non_consented_activate_on_a_non_i3_host_says_skipped_not_withheld(monke
     ext = FakeExtension(srv, executor=lambda c: {
         "tabId": 5, "windowId": 1, "active": True, "status": "complete",
         "url": "https://model-benchmarking.example.test/run",
-        "title": "Model Benchmarking"})
+        "title": _NEW_TITLE})
     ext.start()
     try:
         assert _wait_connected(srv, want=True)
         st, body = _req(srv, "POST", "/cmd", {"op": "activate"})
         assert st == 200
         data = body["result"]["data"]
-        # Compared against the LITERAL, not S.I3_SKIPPED. At the pre-fix commit
-        # the constant does not exist, so referencing it would make this test
-        # red with an AttributeError — red for the wrong reason, which proves
-        # nothing about behaviour. The literal keeps the failure behavioural.
-        # Drift between the two is pinned separately, just below.
         assert data["i3"] == "skipped", (
             f"a non-consented activate on a host with NO i3 reported "
             f"{data['i3']!r}; it must report 'skipped' — there is no raise to "
@@ -2610,6 +2819,7 @@ def test_activate_i3_skipped_when_unavailable(monkeypatch):
         st, body = _req(srv, "POST", "/cmd", {"op": "activate", "focus": True})
         assert st == 200
         assert body["result"]["data"]["i3"] == "skipped"
+        assert body["result"]["data"]["i3_detail"] == "unavailable"
         assert body["result"]["data"]["tabId"] == 5  # Chrome-side result intact
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
@@ -2628,6 +2838,7 @@ def test_activate_i3_skipped_when_no_title(monkeypatch):
         st, body = _req(srv, "POST", "/cmd", {"op": "activate", "focus": True})
         assert st == 200
         assert body["result"]["data"]["i3"] == "skipped"
+        assert body["result"]["data"]["i3_detail"] == "no_title"
         assert calls == []
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
@@ -2647,6 +2858,7 @@ def test_activate_i3_failed_on_nonzero(monkeypatch):
         st, body = _req(srv, "POST", "/cmd", {"op": "activate", "focus": True})
         assert st == 200
         assert body["result"]["data"]["i3"] == "failed"
+        assert body["result"]["data"]["i3_detail"] == "tree_unreadable"
         assert body["result"]["data"]["tabId"] == 5
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
@@ -2666,8 +2878,255 @@ def test_activate_i3_failed_on_timeout(monkeypatch):
         st, body = _req(srv, "POST", "/cmd", {"op": "activate", "focus": True})
         assert st == 200
         assert body["result"]["data"]["i3"] == "failed"
+        assert body["result"]["data"]["i3_detail"] == "tree_unreadable"
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
+
+
+# ======================================================================== #
+# 🔴 `i3: applied` MUST MEAN A WINDOW WAS RAISED
+#
+# Live pair, 2026-08-19: `activate` #1 (right after `open`) reported
+# i3:"applied" while raising NOTHING — the tab stayed `hidden` — because the
+# Brave window's WM_NAME still held the OLD title, the `title="…"` criteria
+# matched zero windows, and `i3-msg` exits 0 with `[{"success":true}]` anyway.
+# `activate` #2, once the title had settled, reported the SAME "applied" and
+# really did raise it. One signal, two opposite realities.
+#
+# Downstream that is the dominant live cause of a capture tool exiting 11 "the
+# app never booted": it never booted because nothing was ever raised, and the
+# only status said everything was fine.
+# ======================================================================== #
+
+def test_fake_i3_mirrors_real_i3_success_on_zero_match():
+    """INSTRUMENT VALIDATION — pin the fake's fidelity to the ONE real i3
+    behaviour every test below depends on: a `focus` whose criteria matched ZERO
+    windows still exits 0 with `[{"success":true}]`.
+
+    If this ever stops holding, the fake has become kinder than i3 and every
+    zero-match test below would pass against the BUGGY implementation."""
+    fake = _FakeI3(windows=[(1, _BRAVE, _OLD_TITLE)])
+    miss = fake.run([_FAKE_I3_MSG,
+                     '[class="%s" title="%s"] focus' % (_BRAVE, re.escape(_NEW_TITLE))])
+    assert miss.returncode == 0                     # ← the trap, faithfully
+    assert miss.stdout == b'[{"success":true}]'
+    assert fake.focused is None                     # …and nothing was raised
+    # POSITIVE CONTROL: the same reply shape for a criteria that DOES match, so
+    # the assertion above is about the MATCH, not about the fake refusing to work.
+    hit = fake.run([_FAKE_I3_MSG,
+                    '[class="%s" title="%s"] focus' % (_BRAVE, re.escape(_OLD_TITLE))])
+    assert hit.returncode == 0 and hit.stdout == b'[{"success":true}]'
+    assert fake.focused == 1                        # this one really raised
+
+
+def test_activate_i3_zero_match_is_never_reported_as_applied(monkeypatch):
+    """🔴 THE REGRESSION TEST. RED on the pre-fix implementation.
+
+    The exact live race: Chrome answers `activate` with the NEW title while the
+    only Brave window still advertises the OLD one. i3 matches nothing and exits
+    0 — so the pre-fix code reported i3:"applied" with the tab still hidden.
+    `applied` must be unreachable here."""
+    body, fake = _activate_with_fake_i3(
+        [(4242, _BRAVE, _OLD_TITLE)], monkeypatch=monkeypatch)
+    data = body["result"]["data"]
+    assert data["i3"] != "applied", (
+        "zero windows matched — `applied` is a lie the caller acts on")
+    assert data["i3"] == "failed"
+    assert data["i3_detail"] == "no_match"
+    # Ground truth from the fake: nothing was ever focused.
+    assert fake.focused is None
+    # The Chrome-side result is untouched (the i3 step is non-fatal metadata).
+    assert data["tabId"] == 5
+
+
+def test_activate_i3_real_match_is_reported_as_applied(monkeypatch):
+    """POSITIVE CONTROL for the test above — the SAME fixture with the SAME code
+    path, differing only in the window's title. Reported pair:
+      window title OLD (no match) → i3="failed"  / detail="no_match"
+      window title NEW (a match)  → i3="applied" / detail="focused"
+    Without this, "never applied" could be satisfied by a check wired to nothing."""
+    body, fake = _activate_with_fake_i3(
+        [(4242, _BRAVE, _NEW_TITLE)], monkeypatch=monkeypatch)
+    data = body["result"]["data"]
+    assert data["i3"] == "applied"
+    assert data["i3_detail"] == "focused"
+    assert fake.focused == 4242          # ground truth: it really was raised
+
+
+def test_activate_i3_zero_match_issues_no_focus_command(monkeypatch):
+    """A raise that cannot match must not fire a focus at all — and the ZERO is
+    reported WITH its positive control (0 focus calls on a miss, 1 on a hit), so
+    a harness wired to nothing cannot masquerade as the finding."""
+    miss_body, miss = _activate_with_fake_i3(
+        [(1, _BRAVE, _OLD_TITLE)], monkeypatch=monkeypatch)
+    hit_body, hit = _activate_with_fake_i3(
+        [(1, _BRAVE, _NEW_TITLE)], monkeypatch=monkeypatch)
+    assert len(miss.focus_calls) == 0, miss.focus_calls
+    assert len(hit.focus_calls) == 1, hit.focus_calls   # ← the positive control
+    assert miss_body["result"]["data"]["i3"] == "failed"
+    assert hit_body["result"]["data"]["i3"] == "applied"
+    # Both arms DID talk to i3 — the miss is a real read, not a skipped step.
+    assert miss.tree_calls and hit.tree_calls
+
+
+def test_activate_i3_focus_is_keyed_on_stable_window_id(monkeypatch):
+    """The focus is keyed on the X11 window ID from i3's own reply, not on the
+    racy title — the id cannot change underneath us while WM_NAME settles."""
+    body, fake = _activate_with_fake_i3(
+        [(9, _BRAVE, "Some Other Tab"), (77, _BRAVE, _NEW_TITLE)],
+        monkeypatch=monkeypatch)
+    assert body["result"]["data"]["i3"] == "applied"
+    assert fake.focus_calls == [[_FAKE_I3_MSG, '[id="77"] focus']]
+    assert fake.focused == 77            # the RIGHT window, not the first one
+
+
+def test_activate_i3_untrusted_title_never_reaches_any_argv(monkeypatch):
+    """SECURITY: with the title out of the criteria entirely, no fragment of the
+    page-controlled title appears in ANY i3-msg argv. The window is named with
+    the sanitized title so the match SUCCEEDS — the positive control that proves
+    this assertion is made over a run that really did find and focus a window."""
+    lit = S._sanitize_i3_title(_HOSTILE_TITLE)
+    body, fake = _activate_with_fake_i3(
+        [(31337, _BRAVE, "prefix " + lit + " suffix")],
+        title=_HOSTILE_TITLE, monkeypatch=monkeypatch)
+    assert body["result"]["data"]["i3"] == "applied"      # ← positive control
+    assert fake.focused == 31337
+    flat = " ".join(" ".join(a) for a in fake.calls)
+    for probe in ("exec", "xterm", "rm -rf", "whoami", "pwn", "AAAA"):
+        assert probe not in flat, (probe, flat)
+    assert fake.focus_calls == [[_FAKE_I3_MSG, '[id="31337"] focus']]
+
+
+def test_activate_i3_focus_accepted_but_not_focused_is_failed(monkeypatch):
+    """VERIFY step: i3 accepting the focus (rc 0, success:true) is not proof. A
+    window that does not end up focused → failed/not_focused, never applied.
+
+    Reported pair — same window, same command, only the effect differs:
+      focus takes effect     → applied / focused
+      focus is a no-op       → failed  / not_focused"""
+    eff_body, eff = _activate_with_fake_i3(
+        [(5, _BRAVE, _NEW_TITLE)], monkeypatch=monkeypatch)
+    noop_body, noop = _activate_with_fake_i3(
+        [(5, _BRAVE, _NEW_TITLE)], monkeypatch=monkeypatch,
+        mutate=lambda f: setattr(f, "focus_effective", False))
+    assert eff_body["result"]["data"]["i3"] == "applied"          # control
+    assert noop_body["result"]["data"]["i3"] == "failed"
+    assert noop_body["result"]["data"]["i3_detail"] == "not_focused"
+    # Both arms issued the focus and got rc 0 — the difference is only the EFFECT.
+    assert len(eff.focus_calls) == 1 and len(noop.focus_calls) == 1
+    assert eff.focused == 5 and noop.focused is None
+
+
+def test_activate_i3_focus_nonzero_is_failed(monkeypatch):
+    """The focus command itself erroring → failed/focus_error (not applied)."""
+    body, fake = _activate_with_fake_i3(
+        [(5, _BRAVE, _NEW_TITLE)], monkeypatch=monkeypatch,
+        mutate=lambda f: setattr(f, "focus_rc", 2))
+    assert body["result"]["data"]["i3"] == "failed"
+    assert body["result"]["data"]["i3_detail"] == "focus_error"
+    assert len(fake.focus_calls) == 1     # positive control: it WAS attempted
+
+
+def test_activate_i3_unparseable_tree_is_failed(monkeypatch):
+    """A get_tree reply that is not JSON → failed/tree_unreadable, and NO focus
+    is attempted (we cannot know what would match). Positive control: the same
+    fixture with a parseable tree focuses exactly once."""
+    bad_body, bad = _activate_with_fake_i3(
+        [(5, _BRAVE, _NEW_TITLE)], monkeypatch=monkeypatch,
+        mutate=lambda f: setattr(f, "tree_stdout", b"not json at all"))
+    good_body, good = _activate_with_fake_i3(
+        [(5, _BRAVE, _NEW_TITLE)], monkeypatch=monkeypatch)
+    assert bad_body["result"]["data"]["i3"] == "failed"
+    assert bad_body["result"]["data"]["i3_detail"] == "tree_unreadable"
+    assert len(bad.focus_calls) == 0
+    assert good_body["result"]["data"]["i3"] == "applied"     # ← control
+    assert len(good.focus_calls) == 1
+
+
+def test_activate_i3_ignores_non_brave_windows(monkeypatch):
+    """A same-titled window of ANOTHER application must not be raised or counted
+    as a match — the class constraint survived the move out of the criteria."""
+    body, fake = _activate_with_fake_i3(
+        [(8, "Alacritty", _NEW_TITLE)], monkeypatch=monkeypatch)
+    assert body["result"]["data"]["i3"] == "failed"
+    assert body["result"]["data"]["i3_detail"] == "no_match"
+    assert fake.focused is None
+    assert len(fake.focus_calls) == 0
+    # POSITIVE CONTROL: identical title, class Brave → matched and raised.
+    body2, fake2 = _activate_with_fake_i3(
+        [(8, _BRAVE, _NEW_TITLE)], monkeypatch=monkeypatch)
+    assert body2["result"]["data"]["i3"] == "applied" and fake2.focused == 8
+
+
+def test_i3_foreground_waits_out_the_title_settling_race(monkeypatch):
+    """THE OTHER HALF OF THE LIVE PAIR: a bounded re-read of the tree turns the
+    first post-`open` activate — the one that used to match nothing — into a real
+    raise once WM_NAME catches up.
+
+    Reported pair:
+      title settles on the 3rd tree read → applied / focused, >1 tree read
+      title never settles                → failed  / no_match, >1 tree read
+    (the second arm is the control proving the loop actually re-read and did not
+    simply succeed on its first look)."""
+    monkeypatch.setattr(S, "i3_available", lambda: True)
+    monkeypatch.setattr(S, "_resolve_i3_msg", lambda: _FAKE_I3_MSG)
+    monkeypatch.setattr(S, "I3_MATCH_POLL", 0.001)
+
+    settling = _FakeI3(windows=[(4242, _BRAVE, _OLD_TITLE)])
+
+    def _settle(fake, idx):
+        if len(fake.tree_calls) >= 2:      # this call is the 3rd tree read
+            fake.set_title(4242, _NEW_TITLE)
+
+    settling.on_call = _settle
+    monkeypatch.setattr(S.subprocess, "run",
+                        lambda argv, **kw: settling.run(argv, **kw))
+    assert S.i3_foreground(_NEW_TITLE, match_wait=1.0) == ("applied", "focused")
+    assert len(settling.tree_calls) > 1, "it must have re-read the tree"
+    assert settling.focused == 4242
+
+    stuck = _FakeI3(windows=[(4242, _BRAVE, _OLD_TITLE)])
+    monkeypatch.setattr(S.subprocess, "run",
+                        lambda argv, **kw: stuck.run(argv, **kw))
+    assert S.i3_foreground(_NEW_TITLE, match_wait=0.05) == ("failed", "no_match")
+    assert len(stuck.tree_calls) > 1, "the wait must have polled, not given up"
+    assert stuck.focused is None
+
+
+def test_i3_foreground_state_vocabulary_is_closed(monkeypatch):
+    """LEDGER: `result.data.i3` keeps EXACTLY the three values consumers branch
+    on, and "applied" pairs with exactly one detail. A new state added without
+    updating the consumer contract fails here."""
+    monkeypatch.setattr(S, "i3_available", lambda: True)
+    monkeypatch.setattr(S, "_resolve_i3_msg", lambda: _FAKE_I3_MSG)
+    monkeypatch.setattr(S, "I3_MATCH_POLL", 0.001)
+
+    def _outcome(windows, **attrs):
+        fake = _FakeI3(windows=windows)
+        for k, v in attrs.items():
+            setattr(fake, k, v)
+        monkeypatch.setattr(S.subprocess, "run",
+                            lambda argv, **kw: fake.run(argv, **kw))
+        return S.i3_foreground(_NEW_TITLE, match_wait=0)
+
+    seen = {
+        _outcome([(1, _BRAVE, _NEW_TITLE)]),
+        _outcome([(1, _BRAVE, _OLD_TITLE)]),
+        _outcome([(1, _BRAVE, _NEW_TITLE)], focus_effective=False),
+        _outcome([(1, _BRAVE, _NEW_TITLE)], focus_rc=3),
+        _outcome([(1, _BRAVE, _NEW_TITLE)], tree_rc=1),
+        _outcome([(1, _BRAVE, _NEW_TITLE)], tree_stdout=b"{"),
+    }
+    monkeypatch.setattr(S, "i3_available", lambda: False)
+    seen.add(S.i3_foreground(_NEW_TITLE, match_wait=0))
+    monkeypatch.setattr(S, "i3_available", lambda: True)
+    seen.add(S.i3_foreground("", match_wait=0))
+
+    # Positive control: the enumeration really did exercise every branch.
+    assert len(seen) >= 7, seen
+    assert {s for s, _ in seen} == {"applied", "skipped", "failed"}, seen
+    assert {d for s, d in seen if s == "applied"} == {"focused"}, seen
+    assert all(d for _, d in seen), "every outcome carries a reason"
 
 
 def test_activate_i3_telemetry_stays_metadata_only(telemetry, monkeypatch):
@@ -2676,7 +3135,8 @@ def test_activate_i3_telemetry_stays_metadata_only(telemetry, monkeypatch):
     event carries NO page title — only op / outcome / bare domain (the title can
     hold page content; the i3 step must not leak it into activity.events)."""
     spool_dir = telemetry
-    _enable_i3(monkeypatch, returncode=0)
+    _enable_fake_i3(monkeypatch,
+                    windows=[(5, _BRAVE, "SECRET PAGE CONTENT IN TITLE")])
     srv, _ = _serve()
     ext = FakeExtension(srv, executor=lambda c: {
         "tabId": 5, "active": True, "status": "complete",
@@ -2685,8 +3145,13 @@ def test_activate_i3_telemetry_stays_metadata_only(telemetry, monkeypatch):
     ext.start()
     try:
         assert _wait_connected(srv, want=True)
-        st, _ = _req(srv, "POST", "/cmd", {"op": "activate", "focus": True})
+        st, body = _req(srv, "POST", "/cmd",
+                        {"op": "activate", "focus": True})
         assert st == 200
+        # POSITIVE CONTROL: the i3 step really RAN and raised the window, so the
+        # "no title in telemetry" assertion below is made over a live i3 path —
+        # a skipped/failed i3 step would leak nothing for trivial reasons.
+        assert body["result"]["data"]["i3"] == "applied"
         e = _wait_events(spool_dir, 1)[0]
         p = json.loads(e["payload"])
         assert p["op"] == "activate" and p["outcome"] == "ok"
@@ -2799,22 +3264,37 @@ def test_withheld_activate_names_wake_before_the_focus_override(monkeypatch):
 def test_withheld_activate_carries_the_note_and_applied_does_not(monkeypatch):
     """The note rides on the WITHHELD result so the caller is told what did not
     happen and what to do instead — and is ABSENT when the raise was applied
-    (a note on a successful raise would be noise the agent learns to ignore)."""
-    _enable_i3(monkeypatch, returncode=0)
+    (a note on a successful raise would be noise the agent learns to ignore).
+
+    FIXTURE CHANGED BY #557, meaning unchanged. `applied` is now EARNED via a
+    `get_tree` confirmation, so the old `_enable_i3` stub (bare subprocess.run →
+    rc 0, empty stdout) can no longer reach it — it now parses as an unreadable
+    tree and yields failed/tree_unreadable. The assertion this test exists to
+    make is identical; only the i3 it is told to imagine is real now."""
+    fake = _enable_fake_i3(monkeypatch,
+                           windows=[(77, _BRAVE, _NEW_TITLE)], focused=None)
     srv, _ = _serve()
     ext = FakeExtension(srv, executor=lambda c: {
         "tabId": 5, "windowId": 1, "active": True, "status": "complete",
         "url": "https://model-benchmarking.example.test/run",
-        "title": "Model Benchmarking"})
+        "title": _NEW_TITLE})
     ext.start()
     try:
         assert _wait_connected(srv, want=True)
         _st, withheld = _req(srv, "POST", "/cmd", {"op": "activate"})
+        assert withheld["result"]["data"]["i3"] == S.I3_WITHHELD
         assert withheld["result"]["data"]["note"] == S.I3_WITHHELD_NOTE
+        # POSITIVE CONTROL for the "absent when applied" half: the second call
+        # must genuinely reach `applied`, or "no note" would hold for the boring
+        # reason that the raise failed.
         _st, applied = _req(srv, "POST", "/cmd",
                             {"op": "activate", "focus": True})
-        assert applied["result"]["data"]["i3"] == "applied"
+        assert applied["result"]["data"]["i3"] == "applied", (
+            f"expected a real raise; got {applied['result']['data']['i3']!r}/"
+            f"{applied['result']['data'].get('i3_detail')!r}"
+        )
         assert "note" not in applied["result"]["data"]
+        assert fake.focused == 77
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
 

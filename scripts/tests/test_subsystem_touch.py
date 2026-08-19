@@ -61,6 +61,17 @@ ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT / "scripts" / "lib" / "subsystem_touch.py"
 HANDOFF_DOC = ROOT / "claude" / "skills" / "handoff" / "SKILL.md"
 ANALYZE_DOC = ROOT / "claude" / "skills" / "analyze-service" / "SKILL.md"
+# 🔴 THE PINNED PROSE MOVED OUT OF THE ALWAYS-LOADED BODY, and these pins moved
+# with it in the SAME commit. `SKILL.md` was 17,476 bytes and loads on every
+# `/analyze-service` run; the entry schema and the write-back protocol are
+# detail a recon run does not need in context. Both `reference/` files ship —
+# every file under `claude/skills/<name>/` becomes a store symlink under
+# `~/.claude/skills/<name>/` — and `test_the_pinned_docs_are_the_DEPLOYED_ones`
+# below is what keeps that a claim about DEPLOYMENT rather than about spelling.
+ANALYZE_STORE_DOC = (ROOT / "claude" / "skills" / "analyze-service"
+                     / "reference" / "index-store.md")
+ANALYZE_WRITEBACK_DOC = (ROOT / "claude" / "skills" / "analyze-service"
+                         / "reference" / "write-back.md")
 
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -1755,6 +1766,17 @@ class TestSkillDocsArePinned:
             assert d.exists(), f"the pinned doc is gone: {d}"
             assert d.name == "SKILL.md"
             assert d.parent.parent.name == "skills"
+        # The demoted halves ship from the same skill directory, under
+        # `reference/` — and the body must still ROUTE to them, or the prose is
+        # technically shipped and operationally gone.
+        body = ANALYZE_DOC.read_text(encoding="utf-8")
+        for d in (ANALYZE_STORE_DOC, ANALYZE_WRITEBACK_DOC):
+            assert d.exists(), f"the pinned reference doc is gone: {d}"
+            assert d.parent.name == "reference"
+            assert d.parent.parent == ANALYZE_DOC.parent
+            assert f"reference/{d.name}" in body, (
+                f"analyze-service/SKILL.md no longer points at reference/{d.name}"
+            )
         # Shared predicate — declared-and-not-switched-off only; see
         # testlib/skills_mapping.py for what it does NOT check, and why.
         assert_skills_mapping_declared(ROOT / "nix" / "home.nix")
@@ -1767,7 +1789,7 @@ class TestEntrySchemaAgreement:
     nothing is the one way to make that guard worthless."""
 
     def test_the_field_is_declared_in_the_schema(self) -> None:
-        doc = ANALYZE_DOC.read_text(encoding="utf-8")
+        doc = ANALYZE_STORE_DOC.read_text(encoding="utf-8")
         assert "`created_by:` — which writer created the entry" in doc
         assert "absent means the entry predates the stamp" in doc
 
@@ -1783,14 +1805,14 @@ class TestEntrySchemaAgreement:
         assert sr.SubsystemEntry.from_mapping({**without, "filename": "roster.md"}) == entry
 
     def test_both_writer_ids_are_named_in_the_schema(self) -> None:
-        doc = ANALYZE_DOC.read_text(encoding="utf-8")
+        doc = ANALYZE_STORE_DOC.read_text(encoding="utf-8")
         for writer in st.KNOWN_WRITERS:
             assert f"`{writer}`" in doc, f"the schema does not name the writer {writer!r}"
 
     def test_analyze_service_stamps_itself_on_a_new_file(self) -> None:
         """Otherwise the census could not tell "created before the stamp" from
         "created by the other writer", and the experiment would not resolve."""
-        doc = ANALYZE_DOC.read_text(encoding="utf-8")
+        doc = ANALYZE_WRITEBACK_DOC.read_text(encoding="utf-8")
         assert "stamp `created_by: analyze-service` in the front matter" in doc
 
 
@@ -1810,7 +1832,7 @@ class TestNoRealStoreIsRead:
     def test_the_default_points_where_the_skill_says_it_does(self) -> None:
         assert st.DEFAULT_STORE_ROOT.name == "analyze-service-index"
         assert st.DEFAULT_STORE_ROOT.parent.name == ".claude"
-        assert f"~/.claude/{st.DEFAULT_STORE_ROOT.name}" in ANALYZE_DOC.read_text(
+        assert f"~/.claude/{st.DEFAULT_STORE_ROOT.name}" in ANALYZE_STORE_DOC.read_text(
             encoding="utf-8"
         )
 
