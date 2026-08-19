@@ -235,6 +235,14 @@ Generalises past Python: any cache keyed on a coarse timestamp has this shape. T
 not "the test was weak", it is "the artifact under test was never the artifact that ran" —
 which is the same class as verifying a deploy against an orphan process still serving old code.
 
+
+**The clamp that never executed (isolate the mutation).** Deleting
+`else if x < MAX { x *= 2; if x > MAX { x = MAX } }` wholesale went red; deleting
+only the inner clamp passed the FULL suite. The test's constants
+(`min=10,max=40`) made the ladder land exactly ON the cap, so the clamp never
+executed and its own "the clamp is gone" assertion was unreachable. Production's
+values (`1s/15s`) are the shape that DOES execute it.
+
 ## nine-broken-harnesses
 *Supports: 🔴 "Validate the INSTRUMENT before you read its verdict." (negative control).*
 
@@ -1108,3 +1116,24 @@ one-line `opencode run` probe above is how to detect it.
     - **Verify the current date** from `<env>` before any temporal claim; never default to the knowledge cutoff. State the source. Base all time math on the verified date.
 
 </details>
+
+## screen-theft
+
+*Supports: The Operator's Screen Is Not Yours To Take.*
+
+**2026-08-19 — the run that produced the rule.** One capture subagent issued **42
+`i3-msg` calls and 14 workspace switches** during a single run and restored
+nothing. The calls were re-implementing a raise the tooling already performs:
+`browser activate` runs the host-side raise itself, and the skill the subagent
+was "helping" contains **zero** `i3-msg` invocations of its own.
+
+**The earlier occurrence, and why prose did not hold.** Browser-bridge telemetry
+caught a previous session grabbing the screen **1–5 times per minute** while the
+operator was working. That episode was diagnosed at the time as *"partly
+self-inflicted by our own docs"*. The skill's Boundaries list then carried ten
+prohibitions and none about the operator's screen — the absence read as
+permission next to its present siblings, which is why the rule now states the
+prohibition explicitly rather than relying on the general principle.
+
+**The axis that actually got taken was the WORKSPACE, not focus.** Every
+pre-existing hint in the setup said "restore focus"; none mentioned workspaces.
