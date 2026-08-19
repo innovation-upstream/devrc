@@ -37,6 +37,7 @@ kills it WITH ITS OWN ASSERTION.
 """
 from __future__ import annotations
 
+import ast
 import importlib.machinery
 import importlib.util
 import json
@@ -677,8 +678,16 @@ def test_an_absent_registry_directory_is_unmeasured_for_every_window(tmp_path):
 # =========================================================================== #
 # §6  🔴 THE PRESENCE TRICHOTOMY — three states pinned APART, per source
 # =========================================================================== #
-def test_presence_tokens_are_three_distinct_values():
-    assert len(set(sr.ALL_PRESENCE_STATES)) == 3
+def test_presence_tokens_are_four_distinct_values():
+    """🔴 FOUR, not three. `structurally_excluded` was the state with no name:
+    a REMOTE window can never carry a harness record, because the registry is
+    read off the LOCAL filesystem. Collapsing it into `absent` tells a caller
+    "none (normal)" and invites it to re-check for a clock that never arrives.
+    """
+    assert len(set(sr.ALL_PRESENCE_STATES)) == 4
+    assert sr.PRESENCE_EXCLUDED in sr.ALL_PRESENCE_STATES
+    assert sr.PRESENCE_EXCLUDED != sr.PRESENCE_ABSENT
+    assert sr.PRESENCE_EXCLUDED != sr.PRESENCE_UNMEASURED
     assert sr.PRESENCE_PRESENT != sr.PRESENCE_ABSENT != sr.PRESENCE_UNMEASURED
     assert sr.PRESENCE_PRESENT != sr.PRESENCE_UNMEASURED
 
@@ -1326,4 +1335,322 @@ def test_render_of_an_unslotted_session_says_none_rather_than_inventing_a_key():
 # 15 | a missing timestamp yields epoch 0 instead of None | test_a_missing_timestamp_
 #    |                                                    |   is_unmeasured_absent
 #
-MUTATION_MATRIX_MUTANTS = 15
+# 16 | a REMOTE window reports ABSENT instead of      | test_a_remote_window_is_
+#    |    EXCLUDED (the collapse this state exists for)| structurally_excluded_
+#    |                                                 | not_measured_absent
+# 17 | the session-manager join key drops its HOST      | test_the_join_key_carries_
+#    |                                                 | the_host_so_two_machines_
+#    |                                                 | cannot_collide
+# 18 | git runs against a REMOTE cwd locally           | test_a_remote_target_never_
+#    |                                                 | runs_git_against_the_local_
+#    |                                                 | filesystem
+# 19 | hosts_not_covered stops excluding the local host | test_coverage_names_the_
+#    |                                                 | hosts_the_registry_cannot_
+#    |                                                 | cover
+# 20 | EXCLUDED spelled with unmeasured()               | test_a_remote_window_is_
+#    |    ("cannot ever" reads as "did not this time")  | structurally_excluded_...
+# 21 | remote visibility reports measured instead of    | test_a_remote_target_
+#    |    UNMEASURED                                    | reports_visibility_as_
+#    |                                                 | unmeasured
+#
+MUTATION_MATRIX_MUTANTS = 20
+
+
+# =========================================================================== #
+# §11  🔴 THE FOURTH STATE — a remote window is EXCLUDED, not ABSENT
+# =========================================================================== #
+REMOTE_HOST = "laptophost"
+REMOTE_SESSION = "alpha1"          # SAME session name as the local host has
+REMOTE_WINDOW_ID = WIN_A_ID        # 🔴 SAME window id as a LOCAL window (@501)
+REMOTE_WINDOW_INDEX = "3"
+REMOTE_CWD = "/w/repo-remote"
+REMOTE_TASK = "task text on the other machine"
+REMOTE_STATUS = "stale"
+
+
+def sm_payload_two_hosts():
+    """Local rows plus a remote host whose (session, window_id) COLLIDES.
+
+    🔴 The collision is the point. Measured across the real pair at one instant:
+    14 session NAMES and 11 window_ids exist on BOTH machines, and laptop's id
+    range (@4–@31) sits inside workbench's — so a full-pair collision is one
+    window-open away. A host-less join key would attach this remote row to the
+    LOCAL @501 window.
+    """
+    payload = sm_payload()
+    payload["hosts"][REMOTE_HOST] = {
+        "reachable": True,
+        "windows": [_sm_row(REMOTE_SESSION, REMOTE_WINDOW_ID,
+                            REMOTE_WINDOW_INDEX,
+                            status=REMOTE_STATUS, task=REMOTE_TASK,
+                            path=REMOTE_CWD, waiting_probable=False)],
+    }
+    return payload
+
+
+def two_host_sources(**over):
+    kwargs = dict(sm_payload=sm_payload_two_hosts(), local_host=HOST)
+    kwargs.update(over)
+    return base_sources(**kwargs)
+
+
+def remote_target(**over):
+    built = sr.build_targets(two_host_sources(**over))
+    hits = [t for t in built["targets"] if t["host"] == REMOTE_HOST]
+    assert len(hits) == 1, [t["address"] for t in built["targets"]]
+    return hits[0], built
+
+
+def test_a_remote_window_is_structurally_excluded_not_measured_absent():
+    """🔴 The fixture CANNOT be satisfied by the measured-absence path: the
+    registry is read successfully in this very same call (the LOCAL @502 window
+    joins a record, and the LOCAL @501 window reports a genuine ABSENT). Only
+    the host dimension can produce EXCLUDED here.
+    """
+    remote, built = remote_target()
+    assert remote["harness_presence"] == sr.PRESENCE_EXCLUDED
+    assert remote["harness"] is None
+    assert remote["harness_status"] is None
+    reason = remote["harness_status_measurement"]
+    assert "registry-is-local-host-only" in reason
+    assert REMOTE_HOST in reason and HOST in reason
+    # 🔴 EXCLUDED is NOT spelled with unmeasured() — "cannot look, ever" must
+    # not read as "did not look this time".
+    assert not sr.is_unmeasured(reason)
+
+    locals_ = {t["window_id"]: t for t in built["targets"]
+               if t["host"] == HOST}
+    assert locals_[WIN_B_ID]["harness_presence"] == sr.PRESENCE_PRESENT
+    assert locals_[WIN_A_ID]["harness_presence"] == sr.PRESENCE_ABSENT
+
+
+def test_all_four_harness_presence_states_occur_in_one_measurement(tmp_path):
+    remote, built = remote_target()
+    seen = {t["harness_presence"] for t in built["targets"]}
+    assert sr.PRESENCE_PRESENT in seen
+    assert sr.PRESENCE_ABSENT in seen
+    assert sr.PRESENCE_EXCLUDED in seen
+
+    unmeasured = sr.build_targets(two_host_sources(
+        registry_records=None, registry_dir=str(tmp_path / "gone")))
+    local_states = {t["harness_presence"] for t in unmeasured["targets"]
+                    if t["host"] == HOST}
+    assert local_states == {sr.PRESENCE_UNMEASURED}
+    # …and the REMOTE one stays EXCLUDED even when the registry is unreadable:
+    # a broken local registry does not make a remote window merely unmeasured.
+    remote_states = {t["harness_presence"] for t in unmeasured["targets"]
+                     if t["host"] == REMOTE_HOST}
+    assert remote_states == {sr.PRESENCE_EXCLUDED}
+
+
+def test_excluded_and_absent_render_as_different_strings():
+    """🔴 Whole-string pins. ABSENT invites a re-check; EXCLUDED must not."""
+    remote, built = remote_target()
+    local_absent = [t for t in built["targets"]
+                    if t["host"] == HOST and t["window_id"] == WIN_A_ID][0]
+    excluded_text = sr.render_harness_status(remote)
+    absent_text = sr.render_harness_status(local_absent)
+    assert excluded_text == sr.HARNESS_EXCLUDED
+    assert absent_text == sr.HARNESS_NO_RECORD
+    assert excluded_text != absent_text
+    assert "never" in excluded_text
+    assert "UNMEASURED" not in excluded_text
+
+
+def test_coverage_names_the_hosts_the_registry_cannot_cover():
+    """🔴 Spelled `coverage.registry.hosts_not_covered` to MATCH the
+    waiting-windows report. Two PRs disagreeing on the vocabulary for one fact
+    is its own defect."""
+    _, built = remote_target()
+    reg = built["coverage"]["registry"]
+    assert reg["hosts_not_covered"] == [REMOTE_HOST]
+    assert reg["local_host"] == HOST
+    assert set(reg["hosts_seen"]) == {HOST, REMOTE_HOST}
+    assert reg["windows_structurally_excluded"] == 1
+    assert reg["windows_covered"] == 1
+
+
+def test_hosts_not_covered_is_empty_when_everything_is_local():
+    """The POSITIVE CONTROL on the field: it must be able to be empty, or it is
+    just a constant that happens to look right in the interesting case."""
+    built = sr.build_targets(base_sources())
+    reg = built["coverage"]["registry"]
+    assert reg["hosts_not_covered"] == []
+    assert reg["windows_structurally_excluded"] == 0
+    assert not any(t["harness_presence"] == sr.PRESENCE_EXCLUDED
+                   for t in built["targets"])
+
+
+def test_the_render_flags_a_remote_target_and_names_the_excluded_hosts():
+    res = sr.resolve(REMOTE_CWD, two_host_sources())
+    assert res["status"] == sr.STATUS_RESOLVED
+    text = sr.render(res)
+    assert "REMOTE" in text
+    assert "registry CANNOT cover" in text
+    assert REMOTE_HOST in text
+
+
+# --- the host must be part of the join key -------------------------------- #
+def test_the_join_key_carries_the_host_so_two_machines_cannot_collide():
+    """🔴 Local @501 and remote @501 are the SAME (session, window_id). Only the
+    host separates them; without it one machine's row lands on the other's
+    window."""
+    _, built = remote_target()
+    by_host = {t["host"]: t for t in built["targets"]
+               if t["window_id"] == WIN_A_ID}
+    assert set(by_host) == {HOST, REMOTE_HOST}
+    # each kept ITS OWN session-manager row — pairwise-distinct values, so a
+    # crossed join cannot pass
+    assert by_host[HOST]["task"] == SM_TASK_A
+    assert by_host[HOST]["waiting_probable"] is True
+    assert by_host[REMOTE_HOST]["task"] == REMOTE_TASK
+    assert by_host[REMOTE_HOST]["waiting_probable"] is False
+    assert by_host[REMOTE_HOST]["session_manager_status"] == REMOTE_STATUS
+    assert by_host[HOST]["task"] != by_host[REMOTE_HOST]["task"]
+
+
+def test_a_remote_target_never_runs_git_against_the_local_filesystem():
+    """🔴 A remote window's cwd is a path on the OTHER machine. Running `git -C`
+    on it locally could SUCCEED against a same-named local checkout and report a
+    branch belonging to something else entirely."""
+    calls = []
+
+    def git_spy(argv, timeout=None):
+        calls.append(argv)
+        return 0, "should-never-be-used\n", ""
+
+    remote, built = remote_target(git_runner=git_spy, want_pr=True,
+                                  gh_runner=git_spy)
+    assert remote["git"]["branch"] is None
+    assert remote["git"]["branch_presence"] == sr.PRESENCE_EXCLUDED
+    assert remote["git"]["pr_presence"] == sr.PRESENCE_EXCLUDED
+    assert "cwd-is-on-remote-host" in remote["git"]["branch_status"]
+    assert not any(REMOTE_CWD in " ".join(c) for c in calls), calls
+    # POSITIVE CONTROL: the spy IS wired up — local targets did call it.
+    assert any(CWD_A in " ".join(c) for c in calls), calls
+
+
+def test_a_remote_target_reports_visibility_as_unmeasured():
+    """tmux clients were read from THIS machine; they say nothing about what is
+    on screen over there. Never False, which would assert 'not visible'."""
+    remote, _ = remote_target()
+    vis = remote["visibility"]
+    assert sr.is_unmeasured(vis["status"])
+    assert "tmux-read-is-local-only" in vis["status"]
+    assert vis["visible"] is None
+    assert vis["covered"] is None
+
+
+def test_a_remote_window_is_still_selectable_by_every_shared_selector():
+    """The remote target is a first-class target, not a stub."""
+    built = sr.build_targets(two_host_sources())
+    for selector in (REMOTE_CWD, "repo-remote"):
+        res = sr.resolve(selector, two_host_sources(), built=built)
+        assert res["status"] == sr.STATUS_RESOLVED, selector
+        assert res["target"]["host"] == REMOTE_HOST
+
+
+# --- the registry's own waitingFor ---------------------------------------- #
+WAITING_FOR_VALUE = "input needed"
+
+
+def test_the_registry_waiting_for_reason_is_carried_verbatim():
+    """Measured: the registry has THREE status values (idle/busy/waiting) and
+    `waitingFor` rides along on the waiting ones. Carried beside the status,
+    never used to derive waiting_probable."""
+    rec = dict(REGISTRY_RECORD_B, status="waiting",
+               waitingFor=WAITING_FOR_VALUE)
+    t = target_for(WIN_B_ID, registry_records=[rec])
+    assert t["harness"]["waiting_for"] == WAITING_FOR_VALUE
+    assert t["harness_status"] == "waiting"
+    # 🔴 STILL not merged into session-manager's verdict, which disagrees.
+    assert t["waiting_probable"] is False
+
+
+def test_a_record_without_waiting_for_carries_none_not_a_placeholder():
+    t = target_for(WIN_B_ID)
+    assert t["harness"]["waiting_for"] is None
+
+
+def test_no_registry_status_value_is_branched_on_in_the_source():
+    """🔴 The registry's status vocabulary is NOT stable — two snapshots hours
+    apart differed (`shell` present, then gone; `waiting` throughout, and
+    `waitingFor` riding along). So the module must pass `status` through and
+    never BRANCH on its value.
+
+    Structural, via the syntax tree, not a substring scan: "busy" is also a
+    legitimate session-manager FIELD NAME in SM_PASSTHROUGH_FIELDS, and a text
+    search cannot tell a dict key from a comparison. What must not exist is a
+    COMPARISON against one of these literals.
+    """
+    tree = ast.parse(open(_SCRIPT, encoding="utf-8").read())
+    vocabulary = {"idle", "busy", "shell", "waiting"}
+    offenders = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Compare):
+            operands = [node.left, *node.comparators]
+            for operand in operands:
+                for sub in ast.walk(operand):
+                    if isinstance(sub, ast.Constant) and sub.value in vocabulary:
+                        offenders.append((node.lineno, sub.value))
+    assert not offenders, (
+        f"the source BRANCHES on registry status value(s) {offenders}; that "
+        "vocabulary is unstable and must be passed through, not matched")
+
+
+def test_the_status_branch_guard_can_actually_fire():
+    """POSITIVE CONTROL on the guard above — a scan that can never find
+    anything is indistinguishable from a clean tree."""
+    tree = ast.parse('x = 1\nif s == "idle":\n    pass\n')
+    hits = [c for n in ast.walk(tree) if isinstance(n, ast.Compare)
+            for o in [n.left, *n.comparators]
+            for c in ast.walk(o)
+            if isinstance(c, ast.Constant) and c.value == "idle"]
+    assert len(hits) == 1
+
+
+def test_local_host_comes_from_session_manager_not_the_host_argument():
+    """🔴 `--host all` is not a host NAME. Inferring the local host from the
+    argument would label every local window "all" and mark BOTH real machines
+    remote — silently excluding the local registry from its own windows.
+    session-manager states which box it ran on; that is authoritative.
+    """
+    payload = sm_payload_two_hosts()
+    payload["local_host"] = HOST
+    built = sr.build_targets(base_sources(host="all", local_host=None,
+                                          sm_payload=payload))
+    reg = built["coverage"]["registry"]
+    assert reg["local_host"] == HOST
+    assert reg["hosts_not_covered"] == [REMOTE_HOST]
+    local = [t for t in built["targets"] if t["host"] == HOST]
+    assert local and all(
+        t["harness_presence"] != sr.PRESENCE_EXCLUDED for t in local)
+
+
+def test_an_explicit_local_host_overrides_session_managers_answer():
+    payload = sm_payload_two_hosts()
+    payload["local_host"] = REMOTE_HOST      # deliberately disagrees
+    built = sr.build_targets(base_sources(local_host=HOST,
+                                          sm_payload=payload))
+    assert built["coverage"]["registry"]["local_host"] == HOST
+
+
+def test_local_host_falls_back_to_the_host_argument_when_nothing_states_it():
+    payload = sm_payload_two_hosts()
+    payload.pop("local_host", None)
+    built = sr.build_targets(base_sources(host=HOST, local_host=None,
+                                          sm_payload=payload))
+    assert built["coverage"]["registry"]["local_host"] == HOST
+
+
+def test_a_missing_age_never_renders_a_unit_suffix():
+    """A unit welded to a missing value ("UNMEASUREDs") reads like a
+    measurement. Pinned in both directions so the numeric path still works."""
+    remote, _ = remote_target()
+    assert remote["age_secs"] is None
+    text = sr.render(sr.resolve(REMOTE_CWD, two_host_sources()))
+    assert "UNMEASUREDs" not in text
+    assert "age            : UNMEASURED" in text
+
+    local_text = sr.render(resolve(WIN_A_ID))
+    assert f"{SM_AGE_A:.0f}s" in local_text

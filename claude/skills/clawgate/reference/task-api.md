@@ -14,7 +14,7 @@ Routes registered in `internal/api/server.go` `registerNotesRoutes`, handlers in
 | **edit** | `PATCH /api/tasks/{id}` | content + dispatch config + `tags` (replace) / `addTags` / `removeTags` (merge); **status/provenance/created_at immutable**; `tags`+merge together → 400 (0.7.73/0.7.75). ⚠ **The `in_progress` 409 is REFINED, not blanket**: a **descriptive-tag-only** edit SUCCEEDS while in progress (a label is not a spec change). 409 fires only when a non-tag field is present, or any touched tag is a ROUTING tag — and a `tags` **replace** counts the CURRENT set as touched, so it 409s on any task that already has one |
 | **set-status** | `PATCH /api/tasks/{id}/status` | ANY status incl. `complete`; **NO `in_progress` guard**; broadcasts `task.changed` + fires the `ready_for_review` push (0.7.74) |
 | **delete** | `DELETE /api/tasks/{id}` | ⚠ shares `dismissTask`, so it **TEARS DOWN a live dispatched agent pod** (`Provisioner.Destroy`, background best-effort). **No in-progress guard — deliberately** (`TestAPITaskDeleteInProgressAllowed`). Delete a dispatched task only if you mean to kill its agent. `404` if absent — the existence probe is load-bearing, since `DELETE … WHERE id=$1` succeeds with 0 rows (0.7.76) |
-| **comment (write)** | `POST /api/tasks/{id}/comments` | `{body}` only; author from the bounded `X-Clawgate-Source` allowlist (`{extension, api, drafter, repo-cos, claude-code}`, unknown → `api`), **NEVER from the body** — `user`/`operator` are structurally unreachable. Markdown; coalesced push on the machine path only (0.7.78). ⚠ **The body is `strings.TrimSpace`d before storage**, so it comes back shorter than you sent it whenever it had surrounding whitespace — normalisation, NOT truncation. The real cap is `maxTaskBodyLen` = **200,000 runes** (truncate-never-reject). `clawgatectl` ≤ 2026-08-15 misreported the trimmed newline every heredoc/`--body-file` produces as *"sent N runes, stored N-1 … not recoverable"* (homelab-infra #325) |
+| **comment (write)** | `POST /api/tasks/{id}/comments` | `{body}` only; author from the bounded `X-Clawgate-Source` allowlist (`{extension, api, drafter, repo-cos, claude-code}`, unknown → `api`), **NEVER from the body** — `user`/`operator` are structurally unreachable. 🔴 **`clickup` is a SIXTH member in trunk SOURCE (PR #346, 2026-08-19) that is NOT in any released image** — probed live on **0.7.96**, `X-Clawgate-Source: clickup` still comes back `author: "api"`. This is the skill drifting in BOTH directions at once, so treat the set as *five live, six in source* until a release lands, and **probe rather than assume**: post a throwaway comment and read the author back. A producer that keys an echo guard on `author == "clickup"` today is silently inert — clickup-mirror keys on its own ledger for exactly this reason. This entry is the authoritative copy; `internals.md` defers to it. Markdown; coalesced push on the machine path only (0.7.78). ⚠ **The body is `strings.TrimSpace`d before storage**, so it comes back shorter than you sent it whenever it had surrounding whitespace — normalisation, NOT truncation. The real cap is `maxTaskBodyLen` = **200,000 runes** (truncate-never-reject). `clawgatectl` ≤ 2026-08-15 misreported the trimmed newline every heredoc/`--body-file` produces as *"sent N runes, stored N-1 … not recoverable"* (homelab-infra #325) |
 | **comment (delete)** | `DELETE /api/tasks/{id}/comments/{cid}` | 🔴 **SOFT — it redacts, it does not remove** (migration 0021, shipped 0.7.90). Sets `note_comments.deleted_at`; the ROW SURVIVES and still appears in both embeds with `body: ""` + `"retracted": true`. Recoverable by a one-column `UPDATE`. Task-scoped: a `cid` on a different task is a 404, not a cross-thread hit. **Idempotent-by-404** — a repeat is `404 {"error":"comment not found"}`, exactly as a repeat task delete answers. Bad id → 400 · unknown/**dismissed** task → 404 `task not found` · store failure → 500. Broadcasts `task.changed`. There is **no bulk/undelete route** |
 | **tag vocab** | `GET /api/tags` | `[{tag,count}]` |
 | **projects** | `GET /api/projects` | ⚠ an **OBJECT**, not an array: `{"projects":[{"name","count"}]}` — and keyed `name`, unlike `/api/tags`'s `[{"tag","count"}]`. Derives from the `project:` tag namespace (0.7.81) |
@@ -115,7 +115,8 @@ disagree. What is NOT answered: a route the CLI has never heard of is still a ro
 was 24 commits behind — built a CLI with **no `task status` and no `task comment`** and the nix
 literal labelled it `0.7.95` anyway. `h.Version == buildVersion` compared equal, the note stayed
 silent, and `clawgatectl task status <id> in_progress` printed help and **exited 0**. The fix is
-in devrc: the version is now **read out of `cmd/clawgatectl/client.go`'s own `var buildVersion`**,
+in devrc: the version is now **read out of
+`<homelab-talos>/containers/clawgate/cmd/clawgatectl/client.go`'s own `var buildVersion`**,
 so a stale checkout reports its real version and the skew note fires correctly. Two consequences
 worth knowing: **the note is only as good as the checkout's freshness** — `drift-check.sh` rc 17
 now reports a stale `homelab-talos` per host — and an **unparseable** `var buildVersion` line means
@@ -219,7 +220,8 @@ adjacent text → selector → accessible name. Full procedure, worked example, 
 `/home/zach/workspace/devrc/claude/skills/clawgate/reference/element-references.md`.
 
 ## Card producers — all share `CLAWGATE_HOOK_TOKEN`
-⚠ **Rotation coupling: rotating the token means updating all three, or they fail silently.**
+⚠ **Rotation coupling: rotating the token means updating all three of 1–3 below, or they fail
+silently.** (4 is exempt — it reads clawgate's own secret rather than holding a copy.)
 1. The two local hooks (token in `~/.claude/clawgate.env`).
 2. The **task-spec drafter** — a homelab kubeclaw CronJob POSTing one daily `type:"permission"`
    digest card to `/api/send`, tool=`Task-spec drafter`, project=`task-drafter-agent`. It reads the
@@ -230,6 +232,19 @@ adjacent text → selector → accessible name. Full procedure, worked example, 
 3. **repo-cos** (`devrc/scripts/repo-cos/clawgate.py`) — on an "approve" reply it POSTs the proposal
    as a durable Task via `POST /api/tasks`. Reads the token from **`~/.claude/clawgate.env`** on the
    workbench (NOT a k8s secret). See the `repo-cos` skill.
+4. **clickup-mirror** (`homelab-talos/scripts/clickup-mirror/`, CronJob in
+   `clusters/workbench/apps/clickup-mirror/`) — mirrors Zach's assigned ClickUp tickets into Tasks
+   and writes agent progress back. 🔴 **The first producer that is not write-only**: it also
+   `GET`s `/api/tasks`, `PATCH`es content/tags/status and POSTs comments, so it is a *consumer* of
+   this whole surface, not just `POST /api/tasks`. Two consequences worth knowing before you change
+   a route's semantics: it depends on **comments being EMBEDDED** in the task read (there is no
+   comment GET), and on a **descriptive-tag-only `PATCH` succeeding while `in_progress`**.
+   Correlation key is the descriptive tag **`clickup:<ticket-id>`** (+ `clickup-list:<slug>`); a
+   durable ledger in Postgres schema `clickup_mirror` (inside clawgate's own DB) is what stops a
+   dismissed ticket being resurrected — **it deliberately does NOT dedupe by tag**, so tasks created
+   outside that ledger get duplicated on the next run. Reads `CLAWGATE_HOOK_TOKEN` from clawgate's
+   **own `clawgate-secrets`** (same namespace, never copied — hence exempt from the rotation
+   coupling above). As of 2026-08-19 it ships **suspended**, dry-run, with write-back disabled.
 
 ## Auth / access (0.7.37 — clawgate has NO human auth of its own)
 No magic-link `/login?token=`, no session cookie, no `CLAWGATE_AUTH_TOKEN` /

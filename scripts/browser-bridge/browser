@@ -144,7 +144,12 @@
 #                               load unless --no-wait; --wait MS overrides. On i3
 #                               the SERVER also runs `i3-msg` host-side to actually
 #                               raise the Brave window + switch workspace; the
-#                               result's `i3` field reports applied/skipped/failed.
+#                               result's `i3` field reports applied/skipped/failed
+#                               and `i3_detail` says WHY (focused / no_match /
+#                               not_focused / unavailable / no_title / …).
+#                               🔴 `applied` means a window was FOUND and CONFIRMED
+#                               focused — i3-msg exits 0 even matching nothing, so
+#                               it is not inferred from an exit code.
 #   browser html              — outerHTML of the owned/active tab (+ url, title);
 #                               --max-bytes N caps it (default 32768, 0 = uncapped,
 #                               truncation appends a "…[truncated N bytes]" note).
@@ -1561,7 +1566,11 @@ sys.stdout.write(json.dumps(fields)[1:-1])
     # --wait MS overrides; --no-wait skips (waitMs:0). On i3, the SERVER then runs
     # `i3-msg` host-side to actually raise the Brave window + switch workspace
     # (Chrome-side focus alone is a no-op under i3); the result's `i3` field is
-    # applied/skipped/failed. Off a graphical/i3 host it is skipped (best-effort).
+    # applied/skipped/failed and `i3_detail` says why. Off a graphical/i3 host it
+    # is skipped (best-effort). 🔴 `applied` is only reported when the server SAW
+    # the window in `i3-msg -t get_tree` and confirmed it focused afterwards —
+    # `i3-msg … focus` exits 0 even when its criteria matched ZERO windows, so a
+    # zero-match now reports i3:"failed" / i3_detail:"no_match" instead of lying.
     wait=""
     while [ $# -gt 0 ]; do
       case "$1" in

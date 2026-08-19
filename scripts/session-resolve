@@ -93,6 +93,31 @@ unknown, and inventing one now would repeat the `blocked_on_me` mistake this
 repo just finished fixing.
 
 
+🔴 THE REGISTRY IS LOCAL-HOST ONLY — A FOURTH STATE, NOT A COVERAGE GAP
+-----------------------------------------------------------------------
+Records live at `~/.claude/sessions/<pid>.json` on the machine this process runs
+on. There is no host dimension in that path, so a window on ANOTHER host cannot
+carry a record — not "does not yet", but CANNOT, by construction. Measured by
+the waiting-windows work: remote 0/7 rows, local 24/48.
+
+Calling that "partial coverage" hides the distinction that matters:
+
+    a LOCAL window with no record   -> ABSENT     (measured; may gain one later)
+    a REMOTE window                 -> EXCLUDED   (never, on any future run)
+
+so `harness_presence` carries FOUR states, and the excluded hosts are named in
+`coverage.registry.hosts_not_covered` — spelled to MATCH the waiting-windows
+report, because two PRs disagreeing on the vocabulary for one fact is its own
+defect. The same exclusion applies to every other local-only source: a remote
+target's git branch, PR and tmux visibility are all EXCLUDED/UNMEASURED, never
+measured against this machine's filesystem.
+
+🔴 The registry `status` vocabulary is UNSTABLE — two snapshots hours apart gave
+{busy, idle, shell, waiting} then {busy, idle, waiting}, with `waitingFor`
+riding along on the waiting ones. So `status` is passed through and NEVER
+branched on; a test enforces that structurally, over the syntax tree.
+
+
 🔴 NULL IS NOT ZERO
 -------------------
 An unreachable host, an absent registry directory, a failed `gh`, a tmux call
@@ -214,7 +239,19 @@ MEASURED_OK = "ok"
 PRESENCE_PRESENT = "present"
 PRESENCE_ABSENT = "absent"
 PRESENCE_UNMEASURED = "unmeasured"
-ALL_PRESENCE_STATES = (PRESENCE_PRESENT, PRESENCE_ABSENT, PRESENCE_UNMEASURED)
+# 🔴 THE FOURTH STATE, and the same class of defect the other three fixed: a
+# real state with no name in the schema. The harness session registry is read
+# off the LOCAL filesystem (`~/.claude/sessions/<pid>.json`) — there is no host
+# dimension in that path at all. So a window on a REMOTE host can never carry a
+# record: not "does not yet", but CANNOT, by construction. Measured by the
+# waiting-windows work: remote 0/7 rows, local 24/48.
+#
+# Collapsing this into ABSENT tells a caller "no record (normal)" for a laptop
+# window and invites it to keep re-checking for a clock that can never arrive.
+# EXCLUDED says the question is not answerable for this target, ever.
+PRESENCE_EXCLUDED = "structurally_excluded"
+ALL_PRESENCE_STATES = (PRESENCE_PRESENT, PRESENCE_ABSENT, PRESENCE_UNMEASURED,
+                       PRESENCE_EXCLUDED)
 
 
 def unmeasured(reason: str) -> str:
@@ -228,6 +265,18 @@ def unmeasured(reason: str) -> str:
         raise ValueError("unmeasured() requires a reason — a bare 'unmeasured' "
                          "is indistinguishable from a measured zero")
     return _UNMEASURED_PREFIX + reason
+
+
+def registry_excluded_reason(host: str, local_host: str) -> str:
+    """Why a target can NEVER carry a harness record.
+
+    Deliberately NOT spelled with `unmeasured()`: "I could not look" and "there
+    is nothing to look at, on any run, forever" are different answers, and a
+    caller that retries on the first would spin forever on the second.
+    """
+    return (f"registry-is-local-host-only: records live on {local_host}'s "
+            f"filesystem (~/.claude/sessions), so a window on {host} cannot "
+            f"have one")
 
 
 def is_unmeasured(status: Optional[str]) -> bool:
@@ -287,6 +336,11 @@ class Sources:
     corresponding subprocess is never spawned.
     """
     host: str = "workbench"
+    #: 🔴 The host whose FILESYSTEM the harness registry is read from — i.e. the
+    #: machine this process runs on. A target on any OTHER host is structurally
+    #: excluded from registry coverage (see PRESENCE_EXCLUDED). None means "same
+    #: as `host`", which is the local-only default and changes nothing.
+    local_host: Optional[str] = None
     runner: Callable[..., Any] = _default_runner
 
     panes_raw: Optional[str] = None
@@ -582,6 +636,10 @@ def shape_harness(obj: dict, pane: Optional[str]) -> dict:
         "cwd": obj.get("cwd"),
         "kind": obj.get("kind"),
         "entrypoint": obj.get("entrypoint"),
+        # The registry's OWN reason, carried verbatim beside its status. Present
+        # only on `waiting` rows (measured: 2 of 48, value "input needed").
+        # Never synthesised, and never used to derive waiting_probable.
+        "waiting_for": obj.get("waitingFor"),
         "tmux": obj.get("tmux"),
         "pane_id": pane,
         "times": times,
@@ -605,7 +663,8 @@ def load_session_manager(src: Sources) -> dict:
     attaching every harness record to the wrong window.
     """
     out = {"by_key": {}, "status": MEASURED_OK, "rows_total": 0,
-           "rows_unjoinable": 0, "unjoinable_reason": None, "dropped": []}
+           "rows_unjoinable": 0, "unjoinable_reason": None, "dropped": [],
+           "hosts_seen": [], "local_host": None}
 
     payload = src.sm_payload
     if payload is None:
@@ -621,6 +680,10 @@ def load_session_manager(src: Sources) -> dict:
             out["status"] = unmeasured(f"session-manager-bad-json:{exc}")
             return out
 
+    # session-manager states WHICH host it is running on. That is the
+    # authoritative answer to "whose filesystem is the registry on", and it is
+    # far better than inferring it from a --host argument that may be "all".
+    out["local_host"] = (payload or {}).get("local_host")
     hosts = (payload or {}).get("hosts")
     if not isinstance(hosts, dict):
         out["status"] = unmeasured("session-manager-no-hosts-key")
@@ -629,6 +692,7 @@ def load_session_manager(src: Sources) -> dict:
     for host_name, host_obj in hosts.items():
         if not isinstance(host_obj, dict):
             continue
+        out["hosts_seen"].append(host_name)
         if host_obj.get("reachable") is False:
             out["dropped"].append(
                 f"host {host_name} unreachable: "
@@ -647,7 +711,16 @@ def load_session_manager(src: Sources) -> dict:
                     "window_index (indexes renumber when windows close); is "
                     "this the --lean view?")
                 continue
-            out["by_key"].setdefault((session, window_id), []).append(
+            # 🔴 THE KEY IS (host, session, window_id) — the host is NOT
+            # decorative. Measured across both hosts at one instant: 14 session
+            # NAMES and 11 window_ids exist on BOTH machines (laptop `scratch6`
+            # holds `@16`; workbench `scratch12` also holds `@16`). No full
+            # PAIR collided that instant, but laptop's id range (@4–@31) sits
+            # inside workbench's, so a collision is one window-open away — and
+            # a host-less key would then attach one machine's row to the other
+            # machine's window. "Zero collisions today" is an empty result, not
+            # a proof the key is safe.
+            out["by_key"].setdefault((host_name, session, window_id), []).append(
                 (host_name, row))
     if out["rows_unjoinable"]:
         out["dropped"].append(
@@ -821,21 +894,48 @@ def build_targets(src: Sources) -> dict:
 
     panes = tmux["panes"]
     targets: list = []
+    # The machine whose filesystem the registry was read from, in order of
+    # authority: an explicit override, then session-manager's OWN `local_host`
+    # (it knows which box it ran on), then the --host argument as a last resort.
+    # The argument is the weakest because `--host all` is not a host name.
+    local_host = src.local_host or sm.get("local_host") or src.host
 
     if panes is None:
-        coverage = _coverage(0, 0, 0, 0, tmux, slots_status, registry, sm)
-        return {"targets": targets, "coverage": coverage, "dropped": dropped,
-                "slots": slots}
+        panes = []
+        # NOT a silent zero: collect_tmux already recorded the reason in
+        # tmux["panes_status"], and _coverage carries it through. Remote rows
+        # below are still resolvable, because they never needed local tmux.
 
-    # One target per WINDOW. A window's first pane supplies cwd/title; extra
-    # panes are recorded so a multi-pane window is not silently reduced to one.
+    # One target per WINDOW, keyed WITH ITS HOST. A window's first pane supplies
+    # cwd/title; extra panes are recorded so a multi-pane window is not silently
+    # reduced to one.
     by_window: dict = {}
     for pane in panes:
-        key = (pane["session"], pane["window_id"])
+        # tmux was read from THIS machine, so its panes are local by
+        # construction — labelled with local_host, never the --host argument.
+        key = (local_host, pane["session"], pane["window_id"])
         by_window.setdefault(key, []).append(pane)
 
+    # 🔴 REMOTE WINDOWS. session-manager sees both machines; local tmux sees only
+    # this one. Without this, a laptop window is not a target at all and the
+    # EXCLUDED state below is unreachable — a state with no code path is a state
+    # no test can honestly pin.
+    for (sm_host, sm_session, sm_window_id), rows in sm["by_key"].items():
+        if sm_host == local_host:
+            continue
+        key = (sm_host, sm_session, sm_window_id)
+        if key in by_window:
+            continue
+        row = rows[0][1]
+        by_window[key] = [{
+            "tmux_host": sm_host, "session": sm_session,
+            "window_index": row.get("window_index"),
+            "window_id": sm_window_id, "pane_id": None,
+            "cwd": row.get("path"), "pane_title": row.get("window_name"),
+        }]
+
     n_slot = n_reg = n_sm = 0
-    for (session, window_id), pane_list in by_window.items():
+    for (host, session, window_id), pane_list in sorted(by_window.items()):
         head = pane_list[0]
         slot = slots.get(session)
         if slot:
@@ -845,11 +945,16 @@ def build_targets(src: Sources) -> dict:
         harness = None
         harness_status = None
         harness_status_field = MEASURED_OK
-        # 🔴 See ALL_PRESENCE_STATES. UNMEASURED = the registry could not be
-        # read; ABSENT = it was read and this window has no record (the MAJORITY
-        # case, 35 of 59 measured); PRESENT = a record joined.
+        # 🔴 See ALL_PRESENCE_STATES. EXCLUDED = this target is on another host
+        # and the registry is local-filesystem-only, so no record can EVER
+        # exist; UNMEASURED = the registry could not be read; ABSENT = it was
+        # read and this window has no record (the MAJORITY case, 35 of 59
+        # measured); PRESENT = a record joined.
         harness_presence = PRESENCE_UNMEASURED
-        if is_unmeasured(registry["status"]):
+        if host != local_host:
+            harness_presence = PRESENCE_EXCLUDED
+            harness_status_field = registry_excluded_reason(host, local_host)
+        elif is_unmeasured(registry["status"]):
             harness_status_field = registry["status"]
         elif reg_matches:
             harness_presence = PRESENCE_PRESENT
@@ -867,7 +972,7 @@ def build_targets(src: Sources) -> dict:
             harness_presence = PRESENCE_ABSENT
             harness_status_field = MEASURED_OK
 
-        sm_matches = sm["by_key"].get((session, window_id)) or []
+        sm_matches = sm["by_key"].get((host, session, window_id)) or []
         sm_block = {f: None for f in SM_PASSTHROUGH_FIELDS}
         sm_status_field = sm["status"]
         sm_host = None
@@ -890,17 +995,40 @@ def build_targets(src: Sources) -> dict:
             sm_status_field = unmeasured("no-session-manager-row-for-window")
 
         label, label_source = _label_for(slot, head.get("cwd"), session)
-        vis = compute_visibility(session, window_id, tmux["windows"],
-                                 tmux["clients"])
-        git = measure_git(head.get("cwd"), src)
+        if host != local_host:
+            # tmux clients were read from THIS machine; they say nothing about
+            # what is on screen over there.
+            vis = {"clients": None, "attached_clients": None,
+                   "base_terminal": None, "popups": None,
+                   "window_active": None, "visible": None, "covered": None,
+                   "status": unmeasured(f"tmux-read-is-local-only:{host}")}
+        else:
+            vis = compute_visibility(session, window_id, tmux["windows"],
+                                     tmux["clients"])
+        # 🔴 The cwd of a remote window is a path on the OTHER machine.
+        # Running `git -C` on it locally would either fail or — far worse —
+        # succeed against a same-named local path and report a branch that
+        # belongs to a different checkout entirely.
+        if host != local_host:
+            git = {"branch": None,
+                   "branch_status": unmeasured(
+                       f"cwd-is-on-remote-host:{host}"),
+                   "branch_presence": PRESENCE_EXCLUDED,
+                   "pr": None,
+                   "pr_status": unmeasured(f"cwd-is-on-remote-host:{host}"),
+                   "pr_presence": PRESENCE_EXCLUDED}
+        else:
+            git = measure_git(head.get("cwd"), src)
 
         targets.append({
-            "host": src.host,
+            "host": host,
             "session": session,
             "window_id": window_id,
             "window_index": head.get("window_index"),
             "pane_id": head.get("pane_id"),
-            "panes": [p["pane_id"] for p in pane_list],
+            # A remote window is known only through session-manager, which
+            # reports no pane ids. Empty, never [None].
+            "panes": [p["pane_id"] for p in pane_list if p.get("pane_id")],
             "cwd": head.get("cwd"),
             "repo": os.path.basename(head["cwd"]) if head.get("cwd") else None,
             "pane_title": head.get("pane_title"),
@@ -938,8 +1066,12 @@ def build_targets(src: Sources) -> dict:
             "git": git,
         })
 
+    hosts_seen = sorted({tgt["host"] for tgt in targets}
+                        | set(sm["hosts_seen"]))
     coverage = _coverage(len(targets), n_slot, n_reg, n_sm, tmux,
-                         slots_status, registry, sm)
+                         slots_status, registry, sm,
+                         hosts_seen=hosts_seen, local_host=local_host,
+                         targets=targets)
     return {"targets": targets, "coverage": coverage, "dropped": dropped,
             "slots": slots}
 
@@ -955,11 +1087,28 @@ def _label_for(slot, cwd, session) -> tuple:
     return session, LABEL_SOURCE_SESSION
 
 
-def _coverage(n_windows, n_slot, n_reg, n_sm, tmux, slots_status, registry, sm):
+def _coverage(n_windows, n_slot, n_reg, n_sm, tmux, slots_status, registry,
+              sm, hosts_seen=(), local_host=None, targets=()):
     """🔴 Coverage is REPORTED, not asserted. 'Registry matched 24 of 59
     windows' is the honest statement; a bare 24 hides the denominator and a
     silent 0 for the other 35 would invent an absence."""
+    excluded = [t for t in targets
+                if t["harness_presence"] == PRESENCE_EXCLUDED]
     return {
+        # 🔴 Nested under `registry` and spelled `hosts_not_covered` to MATCH the
+        # waiting-windows report's vocabulary. Two PRs disagreeing on the name
+        # for one fact is its own defect, so the shared spelling is worth more
+        # than a marginally better private name.
+        "registry": {
+            "status": registry["status"],
+            "local_host": local_host,
+            "hosts_seen": list(hosts_seen),
+            "hosts_not_covered": [h for h in hosts_seen if h != local_host],
+            "windows_covered": n_reg,
+            "windows_structurally_excluded": len(excluded),
+            "records": len(registry["records"]),
+            "records_with_tmux": registry["with_tmux"],
+        },
         "windows_total": n_windows,
         "tmux_panes_status": tmux["panes_status"],
         "tmux_windows_status": tmux["windows_status"],
@@ -1160,11 +1309,21 @@ def _fmt(value, status=None):
 #: reword cannot walk.
 HARNESS_NO_RECORD = ("no harness record for this window "
                      "(MEASURED absence — normal, most windows have none)")
+#: 🔴 The FOURTH string, and the one that must never read like the third. ABSENT
+#: invites "check again later"; EXCLUDED says later will never differ.
+HARNESS_EXCLUDED = ("N/A — the harness registry is LOCAL-HOST ONLY, so a window "
+                    "on this host can never have a record (not 'none yet')")
 WAITING_NOT_MEASURED = "UNMEASURED (session-manager reported no value)"
 #: 🔴 The two PR strings that must never merge. `gh` ran and found nothing vs
 #: `gh` never ran. Pinned as whole strings so a reword cannot walk the guard.
 PR_NONE_MEASURED = "none — gh answered, this branch has NO open PR (MEASURED)"
 BRANCH_DETACHED = "none — detached HEAD, no branch (MEASURED)"
+#: 🔴 The remote pair. Neither may read like "measured, and there is none": the
+#: cwd lives on another machine, so a LOCAL git/gh answer about it would be
+#: about a DIFFERENT checkout that happens to share the path.
+GIT_REMOTE_EXCLUDED = ("N/A — cwd is on another host; a local git would answer "
+                       "about a DIFFERENT checkout")
+PR_REMOTE_EXCLUDED = "N/A — cwd is on another host, so no local branch to query"
 
 
 def render_harness_status(t: dict) -> str:
@@ -1172,6 +1331,8 @@ def render_harness_status(t: dict) -> str:
     into the UNMEASURED wording — a window with no harness record has been
     measured, and saying otherwise would send an operator hunting a broken
     registry that is working perfectly."""
+    if t["harness_presence"] == PRESENCE_EXCLUDED:
+        return HARNESS_EXCLUDED
     if t["harness_presence"] == PRESENCE_UNMEASURED:
         return _fmt(None, t["harness_status_measurement"])
     if t["harness_presence"] == PRESENCE_ABSENT:
@@ -1222,10 +1383,12 @@ def render(result: dict) -> str:
         t = result["target"]
         lines.append(f"RESOLVED   {sel!r} -> {t['address']}  "
                      f"(matched: {', '.join(result['matched_kinds'])})")
-        lines.append(f"  host/session   : {t['host']} / {t['session']}")
+        lines.append(f"  host/session   : {t['host']} / {t['session']}"
+                     + ("   [REMOTE — local-only sources are N/A]"
+                        if t["harness_presence"] == PRESENCE_EXCLUDED else ""))
         lines.append(f"  window         : {t['window_id']} "
                      f"(index {t['window_index']}, panes "
-                     f"{', '.join(t['panes'])})")
+                     f"{', '.join(t['panes']) or 'UNMEASURED (remote)'})")
         lines.append(f"  label          : {t['label']}  "
                      f"(source: {t['label_source']})")
         lines.append(f"  codename/hotkey: "
@@ -1243,8 +1406,15 @@ def render(result: dict) -> str:
             lines.append(f"    signals      : "
                          f"{', '.join(signal_names(t['waiting_signals']))}")
         lines.append(f"  unsent_prompt  : {t['unsent_prompt'] or '-'}")
-        lines.append(f"  age            : {_fmt(t['age_secs'])}s "
-                     f"(source: {t['age_source'] or 'UNMEASURED'})")
+        # Never "UNMEASUREDs" — a unit suffix welded to a missing value reads
+        # like a measurement.
+        if t["age_secs"] is None:
+            lines.append("  age            : UNMEASURED "
+                         f"(session-manager gave no age; source: "
+                         f"{t['age_source'] or 'none'})")
+        else:
+            lines.append(f"  age            : {t['age_secs']:.0f}s "
+                         f"(source: {t['age_source'] or 'UNMEASURED'})")
         lines.append("")
         vis = t["visibility"]
         lines.append("  -- terminal vs popup --")
@@ -1265,12 +1435,16 @@ def render(result: dict) -> str:
         lines.append("")
         g = t["git"]
         lines.append("  -- git / PR --")
-        if g["branch_presence"] == PRESENCE_ABSENT:
+        if g["branch_presence"] == PRESENCE_EXCLUDED:
+            lines.append(f"  branch         : {GIT_REMOTE_EXCLUDED}")
+        elif g["branch_presence"] == PRESENCE_ABSENT:
             lines.append(f"  branch         : {BRANCH_DETACHED}")
         else:
             lines.append(
                 f"  branch         : {_fmt(g['branch'], g['branch_status'])}")
-        if g["pr_presence"] == PRESENCE_UNMEASURED:
+        if g["pr_presence"] == PRESENCE_EXCLUDED:
+            lines.append(f"  open PR        : {PR_REMOTE_EXCLUDED}")
+        elif g["pr_presence"] == PRESENCE_UNMEASURED:
             lines.append(f"  open PR        : {_fmt(None, g['pr_status'])}")
         elif g["pr_presence"] == PRESENCE_ABSENT:
             lines.append(f"  open PR        : {PR_NONE_MEASURED}")
@@ -1287,9 +1461,17 @@ def render(result: dict) -> str:
     lines.append(f"  windows                     : {cov['windows_total']}")
     lines.append(f"  with slot / without         : {cov['windows_with_slot']}"
                  f" / {cov['windows_without_slot']}")
+    reg = cov["registry"]
     lines.append(f"  with registry match / without: "
                  f"{cov['windows_with_registry_match']}"
                  f" / {cov['windows_without_registry_match']}")
+    lines.append(f"  registry local_host         : {reg['local_host']}")
+    if reg["hosts_not_covered"]:
+        lines.append(
+            f"  🔴 registry CANNOT cover     : "
+            f"{', '.join(reg['hosts_not_covered'])} "
+            f"({reg['windows_structurally_excluded']} window(s) structurally "
+            f"excluded — not a measured absence)")
     lines.append(f"  with session-manager / without: "
                  f"{cov['windows_with_session_manager_row']}"
                  f" / {cov['windows_without_session_manager_row']}")
