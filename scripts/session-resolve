@@ -1,0 +1,1299 @@
+#!/usr/bin/env python3
+"""session-resolve — turn ANY human- or agent-shaped selector into ONE target.
+
+    session-resolve show <selector> [--json]
+    session-resolve resolve <selector> [--json]      # alias of `show`
+
+READ-ONLY BY CONSTRUCTION. This module never runs a tmux write verb. The only
+tmux subcommands it will ever pass to a runner are the three listed in
+`TMUX_READ_ONLY_SUBCOMMANDS`, and `_assert_read_only` enforces that at the seam
+rather than asserting it in a comment — `select-window`, `send-keys`,
+`switch-client`, `detach-client`, `kill-*` cannot leave this file. Write verbs
+are a later PR.
+
+
+🔴 A MEASURED REFUTATION OF THE ORIGINAL BRIEF — READ BEFORE CHANGING THE JOIN
+------------------------------------------------------------------------------
+The brief for this module said to consume `session-manager --json --lean` and to
+join on `(host, session, window_id)`, never on `window_index`. Those two
+instructions are incompatible, and the incompatibility is measured, not argued:
+
+    $ python3 scripts/session-manager --json --lean --no-ch --host workbench
+      lean_row_fields: [... 'session', 'window_index', ...]      # no window_id
+    $ python3 scripts/session-manager --json      --no-ch --host workbench
+      row keys:        [... 'session', 'window_id', 'window_index', ...]
+
+`--lean` DROPS `window_id`. It carries `window_index` only, as a string ("1").
+So the lean view cannot supply the join key the brief (correctly) mandates, and
+the only way to use it would be the `window_index` join the brief (correctly)
+forbids — indexes renumber when windows close.
+
+Resolution: this module consumes the FULL `--json` view. That view is a strict
+superset of the lean one for every field the brief asked for (`waiting_probable`,
+`waiting_signals`, `unsent_prompt`, `age_secs`, `age_source`, `runtime`,
+`claude_session_id`, `status`), so nothing is lost and the mandated join key is
+present. `SM_ARGV` pins the flags; `test_session_resolve.py` pins the absence of
+`--lean` so a future edit cannot quietly reintroduce the unjoinable view.
+
+The join was then verified end-to-end rather than assumed. Measured 2026-08-19 on
+the workbench: 59 session-manager rows, 59 distinct `(session, window_id)` pairs,
+48 registry records of which 24 carry a `tmux` address — and **24 of 24 joined**,
+zero unmatched, zero duplicate addresses. 35 windows had no registry record. That
+is normal, and it is reported as a coverage count, never as an error or a zero.
+
+
+THE FOUR SOURCES, AND THE ONE KEY THAT JOINS THEM
+-------------------------------------------------
+The join key is `(host, session, window_id)`. `window_id` is tmux's `@N`, which
+is stable for the life of a window; `window_index` is a display ordinal that
+RENUMBERS when a neighbour closes. Joining on the index silently reattaches a
+harness record to whichever window slid into the vacated slot.
+
+  1. tmux — `list-panes` / `list-windows` / `list-clients`. Supplies host,
+     session, window_index, window_id (@N), pane_id (%N), cwd, pane title, and
+     which windows are active.
+
+  2. The slot table — `scripts/tmux-scratch-slots.sh`, entries shaped
+     `scratch2:G:#d79921:Gold` = session:key:colour:codename. PARSED, never
+     re-hardcoded: the tmux bindings are generated from this same file at
+     home-manager build time, so a private copy would drift silently. A session
+     with no slot entry (`datapacket-talos`) has NO hotkey and NO codename —
+     its label falls back to the cwd, and none is invented.
+
+  3. The harness session registry — `~/.claude/sessions/<pid>.json`, joined via
+     its `tmux` field, which is `session:@window_id.%pane_id`.
+     🔴 Its timestamps are epoch MILLISECOND INTEGERS, not ISO strings. A parser
+     that handles only ISO returns None for every record and reads exactly like
+     an absent field. `parse_epoch_ms` accepts int/float only and reports a
+     reason for anything else — a string timestamp is UNMEASURED, never 0 and
+     never silently dropped.
+
+  4. session-manager — the observed status bucket, `waiting_probable` and its
+     signals, `unsent_prompt`, `age_secs`/`age_source`, `runtime`,
+     `claude_session_id`.
+     🔴 CONSUMED, NEVER RE-DERIVED. Its waiting detector has a real
+     false-positive history; a second copy of the predicate would regenerate
+     every one of those bugs. This module reads its output and does not
+     reimplement one line of it.
+
+
+🔴 TWO STATUSES, NEVER COLLAPSED
+--------------------------------
+`harness_status` (registry) and `waiting_probable` (session-manager) are
+DIFFERENT MEASUREMENTS OF DIFFERENT THINGS, and they disagree. Measured at one
+instant: session-manager reported 3 waiting windows; the registry view reported
+1, a disjoint one, and called one of session-manager's three `idle`. Zero
+overlap.
+
+The registry `status` means "this harness process is waiting on a turn". The
+session-manager `waiting_probable` means "the pane TEXT looks like it is asking
+a human". Both are carried, under those distinct names. They are never merged,
+never summed, and NO MAPPING BETWEEN THEM IS WRITTEN — the correct mapping is
+unknown, and inventing one now would repeat the `blocked_on_me` mistake this
+repo just finished fixing.
+
+
+🔴 NULL IS NOT ZERO
+-------------------
+An unreachable host, an absent registry directory, a failed `gh`, a tmux call
+that errored — each yields None plus a `*_status` of `unmeasured:<reason>`, never
+0, never False, never an absent key. `unmeasured()` is the only way to spell it.
+A measured-but-empty result (tmux answered, and no client is attached) is a real
+zero and is reported as one; the two are distinguishable by the status field.
+
+NO SILENT CAPS: anything dropped is counted and named in `dropped`.
+
+ON-DISK ARTIFACTS: this module creates NONE. The `gh` PR lookup is opt-in and
+memoised in a plain dict for the life of the process, deliberately not written to
+`~/.cache` — see `test_session_resolve.py::test_module_creates_no_on_disk_
+artifacts` and `scripts/claude-hooks/tests/test_on_disk_artifact_names.py` for
+why an on-disk name is a liability that no behavioural test can see move.
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as _dt
+import glob
+import json
+import os
+import subprocess
+import sys
+from dataclasses import dataclass, field
+from typing import Any, Callable, Optional
+
+# --------------------------------------------------------------------------- #
+# Constants — every literal a caller or a test might need to name.
+# --------------------------------------------------------------------------- #
+
+#: tmux `-F` formats. Kept as module constants so the tests can build fixture
+#: output from the SAME format string the production code parses; a fixture
+#: built from a hand-copied format is a fixture that stops matching silently.
+PANE_FORMAT = (
+    "#{host}\x1f#{session_name}\x1f#{window_index}\x1f#{window_id}"
+    "\x1f#{pane_id}\x1f#{pane_current_path}\x1f#{pane_title}"
+)
+WINDOW_FORMAT = "#{session_name}\x1f#{window_id}\x1f#{window_active}"
+CLIENT_FORMAT = (
+    "#{client_tty}\x1f#{client_termname}\x1f#{client_width}"
+    "\x1f#{client_height}\x1f#{client_session}\x1f#{client_flags}"
+)
+FIELD_SEP = "\x1f"
+
+#: 🔴 The ONLY tmux subcommands this module may ever run. Enforced by
+#: `_assert_read_only`, not by review. A write verb added to a call site raises.
+TMUX_READ_ONLY_SUBCOMMANDS = ("list-panes", "list-windows", "list-clients")
+
+#: 🔴 session-manager flags. `--lean` is deliberately ABSENT — see the module
+#: docstring's refutation; the lean view does not carry `window_id`.
+SM_ARGV = ("--json", "--no-ch")
+
+#: A client whose TERM is tmux's own is, structurally, a client running INSIDE
+#: tmux — i.e. a `display-popup` overlay created by the Alt-key bindings, not a
+#: terminal emulator. Measured: the base terminal reports `alacritty` at 312x64;
+#: the two popups report `tmux-256color` at 247x49 and 195x37. The discriminator
+#: is the TERM NAME, not the size — sizes are recorded as evidence only, because
+#: a resized terminal must not be reclassified as a popup.
+POPUP_TERM_PREFIX = "tmux"
+
+DEFAULT_REGISTRY_DIR = os.path.expanduser("~/.claude/sessions")
+DEFAULT_SLOT_TABLE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  "tmux-scratch-slots.sh")
+SLOT_ARRAY_NAME = "SCRATCH_SLOTS"
+
+#: Modifier tokens stripped from a hotkey selector so `Alt+Shift+G` and `G` are
+#: the same request. The KEY ITSELF KEEPS ITS CASE — `g` is grove, `G` is Gold.
+HOTKEY_SEPARATOR = "+"
+
+SOURCE_TMUX = "tmux"
+SOURCE_SLOTS = "slot-table"
+SOURCE_REGISTRY = "harness-registry"
+SOURCE_SM = "session-manager"
+ALL_SOURCES = (SOURCE_TMUX, SOURCE_SLOTS, SOURCE_REGISTRY, SOURCE_SM)
+
+STATUS_RESOLVED = "resolved"
+STATUS_AMBIGUOUS = "ambiguous"
+STATUS_UNMATCHED = "unmatched"
+
+SELECTOR_CODENAME = "codename"
+SELECTOR_HOTKEY = "hotkey"
+SELECTOR_SESSION_INDEX = "session:index"
+SELECTOR_ADDRESS = "session:@window_id"
+SELECTOR_WINDOW_ID = "window_id"
+SELECTOR_HARNESS_NAME = "harness_name"
+SELECTOR_CWD = "cwd"
+SELECTOR_SESSION = "session"
+ALL_SELECTOR_KINDS = (
+    SELECTOR_CODENAME, SELECTOR_HOTKEY, SELECTOR_SESSION_INDEX,
+    SELECTOR_ADDRESS, SELECTOR_WINDOW_ID, SELECTOR_HARNESS_NAME,
+    SELECTOR_CWD, SELECTOR_SESSION,
+)
+
+LABEL_SOURCE_SLOT = "slot"
+LABEL_SOURCE_CWD = "cwd"
+LABEL_SOURCE_SESSION = "session"
+
+_UNMEASURED_PREFIX = "unmeasured:"
+MEASURED_OK = "ok"
+
+
+def unmeasured(reason: str) -> str:
+    """The ONLY spelling of a not-measured status. Never returns a bare 0/None.
+
+    A status string is `ok` or `unmeasured:<reason>`; `is_unmeasured` is the only
+    predicate that reads it, so a typo in one place cannot make a failure read as
+    a success anywhere else.
+    """
+    if not reason:
+        raise ValueError("unmeasured() requires a reason — a bare 'unmeasured' "
+                         "is indistinguishable from a measured zero")
+    return _UNMEASURED_PREFIX + reason
+
+
+def is_unmeasured(status: Optional[str]) -> bool:
+    return bool(status) and str(status).startswith(_UNMEASURED_PREFIX)
+
+
+class ReadOnlyViolation(RuntimeError):
+    """Raised when a tmux write verb reaches the subprocess seam."""
+
+
+# --------------------------------------------------------------------------- #
+# Subprocess seam — the ONE impure entry point, replaced wholesale in tests.
+# --------------------------------------------------------------------------- #
+def _assert_read_only(argv) -> None:
+    """🔴 Structural enforcement of the READ-ONLY contract.
+
+    Checks the tmux SUBCOMMAND against an allowlist rather than scanning for
+    banned words: a denylist of `select-window`/`send-keys`/… is walkable by any
+    verb nobody thought to ban, and this module's whole promise is that no such
+    verb exists. An allowlist fails closed.
+    """
+    argv = list(argv)
+    if not argv or os.path.basename(argv[0]) != "tmux":
+        return
+    for token in argv[1:]:
+        if token.startswith("-"):
+            continue
+        if token not in TMUX_READ_ONLY_SUBCOMMANDS:
+            raise ReadOnlyViolation(
+                f"session-resolve is READ-ONLY: refusing tmux subcommand "
+                f"{token!r}; allowed: {', '.join(TMUX_READ_ONLY_SUBCOMMANDS)}")
+        return
+
+
+def _default_runner(argv, timeout: int = 20):
+    """Run argv, return (rc, stdout, stderr). Never raises on non-zero rc."""
+    _assert_read_only(argv)
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True,
+                              timeout=timeout, check=False)
+    except FileNotFoundError as exc:
+        return 127, "", f"not found: {exc}"
+    except subprocess.TimeoutExpired:
+        return 124, "", f"timed out after {timeout}s"
+    except OSError as exc:  # pragma: no cover - defensive
+        return 1, "", str(exc)
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+@dataclass
+class Sources:
+    """Every impure input, injectable. Nothing here touches the live machine
+    when all four raw fields are supplied — which is how the whole test suite
+    runs, and why `conftest`-style raisers can prove it.
+
+    A `*_raw` / `*_payload` field that is not None is used VERBATIM and the
+    corresponding subprocess is never spawned.
+    """
+    host: str = "workbench"
+    runner: Callable[..., Any] = _default_runner
+
+    panes_raw: Optional[str] = None
+    windows_raw: Optional[str] = None
+    clients_raw: Optional[str] = None
+
+    #: None -> read DEFAULT_SLOT_TABLE from disk. A str is the file's TEXT.
+    slot_table_text: Optional[str] = None
+    slot_table_path: str = DEFAULT_SLOT_TABLE
+
+    registry_dir: str = DEFAULT_REGISTRY_DIR
+    #: None -> scan registry_dir. A list is the already-loaded records.
+    registry_records: Optional[list] = None
+
+    #: None -> shell out to session-manager. A dict is its parsed JSON.
+    sm_payload: Optional[dict] = None
+    sm_script: str = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  "session-manager")
+
+    #: Opt-in. The `gh` call is the slowest and least reliable source, so it is
+    #: OFF unless asked for, and its failure degrades to UNMEASURED — never to
+    #: "no PR", which would read as a measured absence of a blocked PR.
+    want_pr: bool = False
+    git_runner: Optional[Callable[..., Any]] = None
+    gh_runner: Optional[Callable[..., Any]] = None
+    #: Process-lifetime memo. Deliberately in memory: this module writes no
+    #: on-disk artifact, so there is no cache filename to rot or to rename.
+    pr_cache: dict = field(default_factory=dict)
+    branch_cache: dict = field(default_factory=dict)
+
+
+# --------------------------------------------------------------------------- #
+# 2. The slot table
+# --------------------------------------------------------------------------- #
+def parse_slot_table(text: str) -> dict:
+    """Parse `SCRATCH_SLOTS=( "session:key:colour:name" ... )` -> {session: slot}.
+
+    Parses the ARRAY, not the whole file: the table is a sourced shell fragment
+    whose comments contain `scratch4` and `$mod+Shift+V` in prose, so a
+    line-oriented grep for `scratch` picks up documentation as data.
+    """
+    slots: dict = {}
+    if not text:
+        return slots
+    in_array = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not in_array:
+            if stripped.startswith(SLOT_ARRAY_NAME + "=("):
+                in_array = True
+            continue
+        if stripped.startswith(")"):
+            break
+        if not stripped or stripped.startswith("#"):
+            continue
+        entry = stripped.strip().strip(",").strip()
+        if entry.startswith('"') and entry.endswith('"'):
+            entry = entry[1:-1]
+        elif entry.startswith("'") and entry.endswith("'"):
+            entry = entry[1:-1]
+        parts = entry.split(":")
+        if len(parts) != 4:
+            continue
+        session, key, colour, name = (p.strip() for p in parts)
+        if not session:
+            continue
+        slots[session] = {"session": session, "hotkey": key,
+                          "colour": colour, "codename": name}
+    return slots
+
+
+def load_slots(src: Sources) -> tuple:
+    """-> (slots, status, dropped_note_or_None)."""
+    if src.slot_table_text is not None:
+        return parse_slot_table(src.slot_table_text), MEASURED_OK, None
+    try:
+        with open(src.slot_table_path, "r", encoding="utf-8") as fh:
+            text = fh.read()
+    except FileNotFoundError:
+        return {}, unmeasured(f"slot-table-absent:{src.slot_table_path}"), None
+    except OSError as exc:
+        return {}, unmeasured(f"slot-table-unreadable:{exc}"), None
+    return parse_slot_table(text), MEASURED_OK, None
+
+
+# --------------------------------------------------------------------------- #
+# 1. tmux
+# --------------------------------------------------------------------------- #
+def _split_rows(raw: str, arity: int):
+    """-> (rows, malformed_count). A short row is DROPPED and COUNTED, never
+    padded — a padded row would join against the wrong window."""
+    rows, malformed = [], 0
+    for line in (raw or "").splitlines():
+        if not line.strip():
+            continue
+        parts = line.split(FIELD_SEP)
+        if len(parts) < arity:
+            malformed += 1
+            continue
+        rows.append(parts[:arity])
+    return rows, malformed
+
+
+def parse_panes(raw: str) -> tuple:
+    rows, malformed = _split_rows(raw, 7)
+    panes = []
+    for host, session, w_index, w_id, p_id, path, title in rows:
+        panes.append({"tmux_host": host, "session": session,
+                      "window_index": w_index, "window_id": w_id,
+                      "pane_id": p_id, "cwd": path or None,
+                      "pane_title": title or None})
+    return panes, malformed
+
+
+def parse_windows(raw: str) -> tuple:
+    """-> ({(session, window_id): active_bool}, malformed)."""
+    rows, malformed = _split_rows(raw, 3)
+    out = {}
+    for session, w_id, active in rows:
+        out[(session, w_id)] = (active.strip() == "1")
+    return out, malformed
+
+
+def parse_clients(raw: str) -> tuple:
+    """-> (clients, malformed). Each client is classified base-terminal vs popup.
+
+    🔴 The classification is STRUCTURAL, on TERM name: a client whose TERM is
+    tmux's own is by construction nested inside tmux, i.e. a `display-popup`
+    overlay. Width/height are carried as EVIDENCE so an operator can see the
+    measurement, but they are not the discriminator — classifying on size would
+    turn a resized terminal into a popup.
+    """
+    rows, malformed = _split_rows(raw, 6)
+    clients = []
+    for tty, term, width, height, session, flags in rows:
+        is_popup = term.startswith(POPUP_TERM_PREFIX)
+        clients.append({
+            "tty": tty, "term": term,
+            "width": _int_or_none(width), "height": _int_or_none(height),
+            "size": f"{width}x{height}",
+            "session": session,
+            "flags": [f for f in flags.split(",") if f],
+            "popup": is_popup,
+            "base_terminal": not is_popup,
+        })
+    return clients, malformed
+
+
+def _int_or_none(v):
+    try:
+        return int(str(v).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def collect_tmux(src: Sources) -> dict:
+    """Gather the three tmux reads. Any failure is UNMEASURED with a reason;
+    an unreachable tmux server yields None lists, never empty ones."""
+    out = {"panes": None, "windows": None, "clients": None,
+           "panes_status": MEASURED_OK, "windows_status": MEASURED_OK,
+           "clients_status": MEASURED_OK, "dropped": []}
+
+    def _read(raw, argv, key, parser, arity_label):
+        if raw is None:
+            rc, stdout, stderr = src.runner(argv, timeout=20)
+            if rc != 0:
+                out[key + "_status"] = unmeasured(
+                    f"tmux-{arity_label}-failed:rc={rc}:"
+                    f"{(stderr or '').strip()[:120]}")
+                return
+            raw = stdout
+        parsed, malformed = parser(raw)
+        out[key] = parsed
+        if malformed:
+            out["dropped"].append(
+                f"{malformed} malformed tmux {arity_label} line(s) dropped")
+
+    _read(src.panes_raw,
+          ["tmux", "list-panes", "-a", "-F", PANE_FORMAT],
+          "panes", parse_panes, "list-panes")
+    _read(src.windows_raw,
+          ["tmux", "list-windows", "-a", "-F", WINDOW_FORMAT],
+          "windows", parse_windows, "list-windows")
+    _read(src.clients_raw,
+          ["tmux", "list-clients", "-F", CLIENT_FORMAT],
+          "clients", parse_clients, "list-clients")
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# 3. The harness session registry
+# --------------------------------------------------------------------------- #
+def parse_epoch_ms(value) -> tuple:
+    """-> (iso_utc_str | None, reason | None).
+
+    🔴 The registry's `startedAt` / `updatedAt` / `statusUpdatedAt` are epoch
+    MILLISECOND INTEGERS (e.g. 1787117530032). A parser that accepts only ISO
+    strings returns None for EVERY record and is indistinguishable from the
+    field being absent — which is exactly how this field was nearly reported as
+    missing from all 48 records.
+
+    A bool is rejected explicitly: `isinstance(True, int)` is True in Python, so
+    without the check `"status": true` would silently become 1970-01-01.
+    """
+    if value is None:
+        return None, "absent"
+    if isinstance(value, bool):
+        return None, f"not-epoch-ms:bool:{value!r}"
+    if not isinstance(value, (int, float)):
+        return None, f"not-epoch-ms:{type(value).__name__}:{str(value)[:40]}"
+    try:
+        dt = _dt.datetime.fromtimestamp(value / 1000.0, tz=_dt.timezone.utc)
+    except (OverflowError, OSError, ValueError) as exc:
+        return None, f"epoch-ms-out-of-range:{exc}"
+    return dt.isoformat().replace("+00:00", "Z"), None
+
+
+def parse_tmux_address(addr) -> tuple:
+    """`scratch18:@73.%73` -> (('scratch18', '@73'), '%73') | (None, None).
+
+    The join key is (session, window_id). The pane suffix is carried for
+    display but is NOT part of the key.
+    """
+    if not isinstance(addr, str) or ":" not in addr:
+        return None, None
+    session, rest = addr.split(":", 1)
+    win = rest.split(".", 1)[0]
+    pane = rest.split(".", 1)[1] if "." in rest else None
+    if not session or not win.startswith("@"):
+        return None, None
+    return (session, win), pane
+
+
+def load_registry(src: Sources) -> dict:
+    """-> {records, by_key, status, stats, dropped}.
+
+    A malformed JSON file is COUNTED and NAMED, never silently skipped: a
+    registry half of whose files fail to parse must not look like a registry
+    with half as many sessions.
+    """
+    out = {"records": [], "by_key": {}, "status": MEASURED_OK,
+           "unparseable": 0, "unparseable_files": [], "with_tmux": 0,
+           "dropped": []}
+
+    records = src.registry_records
+    if records is None:
+        if not os.path.isdir(src.registry_dir):
+            out["status"] = unmeasured(f"registry-absent:{src.registry_dir}")
+            return out
+        records = []
+        for path in sorted(glob.glob(os.path.join(src.registry_dir, "*.json"))):
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    obj = json.load(fh)
+            except (OSError, ValueError):
+                out["unparseable"] += 1
+                out["unparseable_files"].append(os.path.basename(path))
+                continue
+            if isinstance(obj, dict):
+                records.append(obj)
+            else:
+                out["unparseable"] += 1
+                out["unparseable_files"].append(os.path.basename(path))
+    if out["unparseable"]:
+        out["dropped"].append(
+            f"{out['unparseable']} unparseable registry file(s): "
+            + ", ".join(out["unparseable_files"]))
+
+    out["records"] = records
+    for obj in records:
+        key, pane = parse_tmux_address(obj.get("tmux"))
+        if key is None:
+            continue
+        out["with_tmux"] += 1
+        out["by_key"].setdefault(key, []).append((obj, pane))
+    return out
+
+
+def shape_harness(obj: dict, pane: Optional[str]) -> dict:
+    """Project one registry record into the Target's `harness` block."""
+    times = {}
+    for field_name in ("startedAt", "updatedAt", "statusUpdatedAt", "nameSince"):
+        iso, reason = parse_epoch_ms(obj.get(field_name))
+        times[field_name] = obj.get(field_name)
+        times[field_name + "_iso"] = iso
+        times[field_name + "_status"] = MEASURED_OK if iso else unmeasured(
+            f"{field_name}:{reason}")
+    return {
+        "pid": obj.get("pid"),
+        "session_id": obj.get("sessionId"),
+        "name": obj.get("name"),
+        "name_source": obj.get("nameSource"),
+        "cwd": obj.get("cwd"),
+        "kind": obj.get("kind"),
+        "entrypoint": obj.get("entrypoint"),
+        "tmux": obj.get("tmux"),
+        "pane_id": pane,
+        "times": times,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# 4. session-manager
+# --------------------------------------------------------------------------- #
+def load_session_manager(src: Sources) -> dict:
+    """-> {by_key, status, rows_total, rows_unjoinable, dropped}.
+
+    🔴 CONSUMES session-manager. Re-derives NOTHING — no waiting predicate, no
+    staleness bucket, no age. Every such field is copied through under the name
+    session-manager gave it.
+
+    🔴 A row WITHOUT `window_id` is recorded as UNJOINABLE and named. It is NOT
+    joined on `window_index`. This is the guard that makes the `--lean` view's
+    missing key loud instead of catastrophic: `--lean` rows would ALL land here,
+    and the resolver reports "0 of 59 rows joinable" rather than confidently
+    attaching every harness record to the wrong window.
+    """
+    out = {"by_key": {}, "status": MEASURED_OK, "rows_total": 0,
+           "rows_unjoinable": 0, "unjoinable_reason": None, "dropped": []}
+
+    payload = src.sm_payload
+    if payload is None:
+        argv = [sys.executable, src.sm_script, *SM_ARGV, "--host", src.host]
+        rc, stdout, stderr = src.runner(argv, timeout=240)
+        if rc != 0:
+            out["status"] = unmeasured(
+                f"session-manager-failed:rc={rc}:{(stderr or '').strip()[:120]}")
+            return out
+        try:
+            payload = json.loads(stdout)
+        except ValueError as exc:
+            out["status"] = unmeasured(f"session-manager-bad-json:{exc}")
+            return out
+
+    hosts = (payload or {}).get("hosts")
+    if not isinstance(hosts, dict):
+        out["status"] = unmeasured("session-manager-no-hosts-key")
+        return out
+
+    for host_name, host_obj in hosts.items():
+        if not isinstance(host_obj, dict):
+            continue
+        if host_obj.get("reachable") is False:
+            out["dropped"].append(
+                f"host {host_name} unreachable: "
+                f"{host_obj.get('error') or 'no reason given'}")
+            continue
+        for row in host_obj.get("windows") or []:
+            if not isinstance(row, dict):
+                continue
+            out["rows_total"] += 1
+            session = row.get("session")
+            window_id = row.get("window_id")
+            if not session or not window_id:
+                out["rows_unjoinable"] += 1
+                out["unjoinable_reason"] = (
+                    "row carries no window_id — refusing to join on "
+                    "window_index (indexes renumber when windows close); is "
+                    "this the --lean view?")
+                continue
+            out["by_key"].setdefault((session, window_id), []).append(
+                (host_name, row))
+    if out["rows_unjoinable"]:
+        out["dropped"].append(
+            f"{out['rows_unjoinable']} session-manager row(s) had no "
+            f"window_id and were NOT joined: {out['unjoinable_reason']}")
+    return out
+
+
+#: Fields copied verbatim out of a session-manager row. Named as a constant so
+#: the test can pin the ledger — a field added to the copy must be added here.
+SM_PASSTHROUGH_FIELDS = (
+    "status", "waiting_probable", "waiting_signals", "waiting_status",
+    "unsent_prompt", "unsent_prompt_status", "age_secs", "age_source",
+    "runtime", "claude", "busy", "task", "claude_session_id", "label",
+    "label_source", "window_name",
+)
+
+
+# --------------------------------------------------------------------------- #
+# Visibility — real terminal vs popup
+# --------------------------------------------------------------------------- #
+def compute_visibility(session: str, window_id: str, windows, clients) -> dict:
+    """Is this target on screen, and is it COVERED by a popup overlay?
+
+    The case this exists for, measured: the operator asked for a window that was
+    ALREADY current on the base terminal and merely COVERED by two
+    `display-popup` overlays. Nothing in this repo could express the difference
+    between "not showing it" and "showing it underneath two popups", so "open
+    it" was the wrong action and looked like the right one.
+
+    Definitions, stated so they can be argued with:
+      * `visible`  — this window is the ACTIVE window of its session AND some
+                     attached client is displaying that session.
+      * `covered`  — visible, the client showing it is the BASE TERMINAL, and at
+                     least one popup client is attached (a popup overlays the
+                     screen). A target shown BY a popup is on top, not covered.
+    """
+    out = {"clients": None, "attached_clients": None, "base_terminal": None,
+           "popups": None, "window_active": None, "visible": None,
+           "covered": None, "status": MEASURED_OK}
+
+    if clients is None or windows is None:
+        missing = []
+        if clients is None:
+            missing.append("clients")
+        if windows is None:
+            missing.append("windows")
+        out["status"] = unmeasured("tmux-" + "+".join(missing) + "-unmeasured")
+        return out
+
+    active = windows.get((session, window_id))
+    if active is None:
+        out["status"] = unmeasured(
+            f"window-not-in-list-windows:{session}:{window_id}")
+        return out
+
+    attached = [c for c in clients if c["session"] == session]
+    popups_all = [c for c in clients if c["popup"]]
+    base_all = [c for c in clients if c["base_terminal"]]
+
+    out["clients"] = clients
+    out["attached_clients"] = attached
+    out["base_terminal"] = base_all[0] if base_all else None
+    out["popups"] = popups_all
+    out["window_active"] = active
+
+    out["visible"] = bool(active and attached)
+    shown_by_base = any(c["base_terminal"] for c in attached)
+    out["covered"] = bool(out["visible"] and shown_by_base and popups_all)
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# git branch + PR state
+# --------------------------------------------------------------------------- #
+def measure_git(cwd: Optional[str], src: Sources) -> dict:
+    """Branch of the cwd, and the open PR for it.
+
+    🔴 Closes session-manager's own documented blind spot: "a window idle because
+    its PR is blocked looks exactly like a window idle because the work is
+    done." A failed `gh` degrades to UNMEASURED, NEVER to "no PR" — the latter
+    would assert the blocked-PR case is absent when it was simply not looked at.
+    """
+    out = {"branch": None, "branch_status": MEASURED_OK,
+           "pr": None, "pr_status": MEASURED_OK}
+    if not cwd:
+        out["branch_status"] = unmeasured("no-cwd")
+        out["pr_status"] = unmeasured("no-cwd")
+        return out
+
+    runner = src.git_runner or src.runner
+    if cwd in src.branch_cache:
+        branch, branch_status = src.branch_cache[cwd]
+    else:
+        rc, stdout, stderr = runner(
+            ["git", "-C", cwd, "branch", "--show-current"], timeout=15)
+        if rc != 0:
+            branch, branch_status = None, unmeasured(
+                f"git-branch-failed:rc={rc}:{(stderr or '').strip()[:120]}")
+        else:
+            name = (stdout or "").strip()
+            branch = name or None
+            branch_status = MEASURED_OK if name else unmeasured(
+                "detached-head-or-no-branch")
+        src.branch_cache[cwd] = (branch, branch_status)
+    out["branch"], out["branch_status"] = branch, branch_status
+
+    if not src.want_pr:
+        out["pr_status"] = unmeasured("pr-lookup-not-requested")
+        return out
+    if branch is None:
+        out["pr_status"] = unmeasured("no-branch-to-query")
+        return out
+
+    cache_key = (cwd, branch)
+    if cache_key in src.pr_cache:
+        out["pr"], out["pr_status"] = src.pr_cache[cache_key]
+        return out
+
+    gh = src.gh_runner or src.runner
+    rc, stdout, stderr = gh(
+        ["gh", "pr", "list", "--head", branch, "--state", "open",
+         "--json", "number,title,state,isDraft,url,mergeStateStatus"],
+        timeout=45)
+    if rc != 0:
+        result = (None, unmeasured(
+            f"gh-failed:rc={rc}:{(stderr or '').strip()[:120]}"))
+    else:
+        try:
+            prs = json.loads(stdout or "[]")
+        except ValueError as exc:
+            result = (None, unmeasured(f"gh-bad-json:{exc}"))
+        else:
+            result = (prs, MEASURED_OK)
+    src.pr_cache[cache_key] = result
+    out["pr"], out["pr_status"] = result
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Building targets
+# --------------------------------------------------------------------------- #
+def build_targets(src: Sources) -> dict:
+    """Join all four sources on (host, session, window_id) -> targets + coverage."""
+    dropped: list = []
+    tmux = collect_tmux(src)
+    dropped.extend(tmux["dropped"])
+    slots, slots_status, _ = load_slots(src)
+    registry = load_registry(src)
+    dropped.extend(registry["dropped"])
+    sm = load_session_manager(src)
+    dropped.extend(sm["dropped"])
+
+    panes = tmux["panes"]
+    targets: list = []
+
+    if panes is None:
+        coverage = _coverage(0, 0, 0, 0, tmux, slots_status, registry, sm)
+        return {"targets": targets, "coverage": coverage, "dropped": dropped,
+                "slots": slots}
+
+    # One target per WINDOW. A window's first pane supplies cwd/title; extra
+    # panes are recorded so a multi-pane window is not silently reduced to one.
+    by_window: dict = {}
+    for pane in panes:
+        key = (pane["session"], pane["window_id"])
+        by_window.setdefault(key, []).append(pane)
+
+    n_slot = n_reg = n_sm = 0
+    for (session, window_id), pane_list in by_window.items():
+        head = pane_list[0]
+        slot = slots.get(session)
+        if slot:
+            n_slot += 1
+
+        reg_matches = registry["by_key"].get((session, window_id)) or []
+        harness = None
+        harness_status = None
+        harness_status_field = MEASURED_OK
+        # 🔴 THREE STATES, NOT TWO. `harness_present` exists because None alone
+        # cannot tell "the registry was unreadable" from "the registry was read
+        # and this window legitimately has no record" — and 35 of 59 windows are
+        # the latter. Collapsing them is the null-is-not-zero bug in its most
+        # tempting form: both render as an empty status field.
+        #   None  -> UNMEASURED, reason in harness_status_measurement
+        #   False -> measured: no harness record for this window (NORMAL)
+        #   True  -> measured: record joined, harness_status carries its value
+        harness_present = None
+        if is_unmeasured(registry["status"]):
+            harness_status_field = registry["status"]
+        elif reg_matches:
+            harness_present = True
+            n_reg += 1
+            obj, pane_id = reg_matches[0]
+            harness = shape_harness(obj, pane_id)
+            harness_status = obj.get("status")
+            if len(reg_matches) > 1:
+                dropped.append(
+                    f"{len(reg_matches)} registry records claim "
+                    f"{session}:{window_id}; used pid={obj.get('pid')}")
+        else:
+            # 🔴 A window with NO registry record is NORMAL — 35 of 59 measured.
+            # It is a real measured absence, not an error and not a zero.
+            harness_present = False
+            harness_status_field = MEASURED_OK
+
+        sm_matches = sm["by_key"].get((session, window_id)) or []
+        sm_block = {f: None for f in SM_PASSTHROUGH_FIELDS}
+        sm_status_field = sm["status"]
+        sm_host = None
+        if is_unmeasured(sm["status"]):
+            pass
+        elif sm_matches:
+            n_sm += 1
+            sm_host, row = sm_matches[0]
+            for f in SM_PASSTHROUGH_FIELDS:
+                sm_block[f] = row.get(f)
+            sm_status_field = MEASURED_OK
+        else:
+            sm_status_field = unmeasured("no-session-manager-row-for-window")
+
+        label, label_source = _label_for(slot, head.get("cwd"), session)
+        vis = compute_visibility(session, window_id, tmux["windows"],
+                                 tmux["clients"])
+        git = measure_git(head.get("cwd"), src)
+
+        targets.append({
+            "host": src.host,
+            "session": session,
+            "window_id": window_id,
+            "window_index": head.get("window_index"),
+            "pane_id": head.get("pane_id"),
+            "panes": [p["pane_id"] for p in pane_list],
+            "cwd": head.get("cwd"),
+            "repo": os.path.basename(head["cwd"]) if head.get("cwd") else None,
+            "pane_title": head.get("pane_title"),
+            "address": f"{session}:{window_id}",
+
+            "label": label,
+            "label_source": label_source,
+            "codename": slot["codename"] if slot else None,
+            "hotkey": slot["hotkey"] if slot else None,
+            "colour": slot["colour"] if slot else None,
+            "slot_status": slots_status,
+
+            # 🔴 TWO STATUSES, NEVER COLLAPSED. Distinct names, no mapping.
+            "harness_status": harness_status,
+            "harness_status_measurement": harness_status_field,
+            "harness_present": harness_present,
+            "harness": harness,
+
+            "waiting_probable": sm_block["waiting_probable"],
+            "waiting_signals": sm_block["waiting_signals"],
+            "waiting_status": sm_block["waiting_status"],
+            "session_manager_status": sm_block["status"],
+            "session_manager_measurement": sm_status_field,
+            "session_manager_host": sm_host,
+            "unsent_prompt": sm_block["unsent_prompt"],
+            "unsent_prompt_status": sm_block["unsent_prompt_status"],
+            "age_secs": sm_block["age_secs"],
+            "age_source": sm_block["age_source"],
+            "runtime": sm_block["runtime"],
+            "task": sm_block["task"],
+            "claude_session_id": sm_block["claude_session_id"],
+
+            "visibility": vis,
+            "git": git,
+        })
+
+    coverage = _coverage(len(targets), n_slot, n_reg, n_sm, tmux,
+                         slots_status, registry, sm)
+    return {"targets": targets, "coverage": coverage, "dropped": dropped,
+            "slots": slots}
+
+
+def _label_for(slot, cwd, session) -> tuple:
+    """🔴 A session with no slot entry has NO codename and NO hotkey. The label
+    falls back to the cwd basename, then to the session name. None is invented.
+    """
+    if slot and slot.get("codename"):
+        return slot["codename"], LABEL_SOURCE_SLOT
+    if cwd:
+        return os.path.basename(cwd), LABEL_SOURCE_CWD
+    return session, LABEL_SOURCE_SESSION
+
+
+def _coverage(n_windows, n_slot, n_reg, n_sm, tmux, slots_status, registry, sm):
+    """🔴 Coverage is REPORTED, not asserted. 'Registry matched 24 of 59
+    windows' is the honest statement; a bare 24 hides the denominator and a
+    silent 0 for the other 35 would invent an absence."""
+    return {
+        "windows_total": n_windows,
+        "tmux_panes_status": tmux["panes_status"],
+        "tmux_windows_status": tmux["windows_status"],
+        "tmux_clients_status": tmux["clients_status"],
+        "slot_table_status": slots_status,
+        "windows_with_slot": n_slot,
+        "windows_without_slot": n_windows - n_slot,
+        "registry_status": registry["status"],
+        "registry_records": len(registry["records"]),
+        "registry_records_with_tmux": registry["with_tmux"],
+        "registry_unparseable_files": registry["unparseable"],
+        "windows_with_registry_match": n_reg,
+        "windows_without_registry_match": n_windows - n_reg,
+        "session_manager_status": sm["status"],
+        "session_manager_rows": sm["rows_total"],
+        "session_manager_rows_unjoinable": sm["rows_unjoinable"],
+        "windows_with_session_manager_row": n_sm,
+        "windows_without_session_manager_row": n_windows - n_sm,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Selector matching
+# --------------------------------------------------------------------------- #
+def normalise_hotkey(selector: str) -> Optional[str]:
+    """`Alt+Shift+G` / `$mod+Shift+G` / `G` -> `G`; anything else -> None.
+
+    🔴 CASE IS PRESERVED. `g` is grove (scratch) and `G` is Gold (scratch2);
+    lower-casing the key would merge ten pairs of distinct slots.
+    """
+    if not selector:
+        return None
+    tail = selector.split(HOTKEY_SEPARATOR)[-1].strip()
+    return tail if len(tail) == 1 else None
+
+
+def match_kinds(selector: str, target: dict) -> list:
+    """Which selector KINDS does `selector` match this target under?
+
+    All kinds are tried and the matches are UNIONED. A selector that names two
+    different targets under two different kinds is ambiguous, and saying which
+    kinds fired is what makes the refusal actionable.
+    """
+    kinds = []
+    sel = (selector or "").strip()
+    if not sel:
+        return kinds
+
+    codename = target.get("codename")
+    if codename and sel.lower() == codename.lower():
+        kinds.append(SELECTOR_CODENAME)
+
+    key = normalise_hotkey(sel)
+    if key is not None and target.get("hotkey") and key == target["hotkey"]:
+        kinds.append(SELECTOR_HOTKEY)
+
+    if ":" in sel:
+        head, tail = sel.split(":", 1)
+        if head == target["session"]:
+            if tail.startswith("@") and tail == target["window_id"]:
+                kinds.append(SELECTOR_ADDRESS)
+            elif tail.isdigit() and tail == str(target.get("window_index")):
+                kinds.append(SELECTOR_SESSION_INDEX)
+
+    if sel.startswith("@") and sel == target["window_id"]:
+        kinds.append(SELECTOR_WINDOW_ID)
+
+    harness = target.get("harness") or {}
+    if harness.get("name") and sel == harness["name"]:
+        kinds.append(SELECTOR_HARNESS_NAME)
+
+    if sel == target["session"]:
+        kinds.append(SELECTOR_SESSION)
+
+    if target.get("cwd") and (sel == target["cwd"] or sel == target.get("repo")):
+        kinds.append(SELECTOR_CWD)
+
+    return kinds
+
+
+def _brief(target: dict, kinds) -> dict:
+    """The candidate line shown when a selector is ambiguous — enough to pick."""
+    return {
+        "address": target["address"],
+        "host": target["host"],
+        "session": target["session"],
+        "window_id": target["window_id"],
+        "window_index": target["window_index"],
+        "label": target["label"],
+        "label_source": target["label_source"],
+        "codename": target["codename"],
+        "hotkey": target["hotkey"],
+        "cwd": target["cwd"],
+        "harness_status": target["harness_status"],
+        "waiting_probable": target["waiting_probable"],
+        "matched_kinds": kinds,
+    }
+
+
+def resolve(selector: str, src: Optional[Sources] = None,
+            built: Optional[dict] = None) -> dict:
+    """Resolve `selector` to exactly ONE target, or refuse.
+
+    🔴 AMBIGUITY IS A FIRST-CLASS OUTCOME. More than one match returns
+    STATUS_AMBIGUOUS with every candidate listed. It NEVER picks the first —
+    silently picking is how an operator's "open Gold" lands in the wrong window
+    and nobody finds out.
+    """
+    src = src or Sources()
+    built = built if built is not None else build_targets(src)
+    targets = built["targets"]
+
+    matches = []
+    for t in targets:
+        kinds = match_kinds(selector, t)
+        if kinds:
+            matches.append((t, kinds))
+
+    result = {
+        "selector": selector,
+        "selector_kinds_supported": list(ALL_SELECTOR_KINDS),
+        "sources_consulted": list(ALL_SOURCES),
+        "coverage": built["coverage"],
+        "dropped": built["dropped"],
+        "target": None,
+        "candidates": [],
+        "candidate_count": len(matches),
+    }
+
+    if not matches:
+        result["status"] = STATUS_UNMATCHED
+        result["reason"] = (
+            f"no target matched {selector!r} under any of "
+            f"{len(ALL_SELECTOR_KINDS)} selector kinds; consulted "
+            f"{', '.join(ALL_SOURCES)} "
+            f"({built['coverage']['windows_total']} window(s) known)")
+        return result
+
+    if len(matches) > 1:
+        result["status"] = STATUS_AMBIGUOUS
+        result["candidates"] = [_brief(t, k) for t, k in matches]
+        result["reason"] = (
+            f"{len(matches)} targets match {selector!r} — refusing to pick. "
+            f"Disambiguate with an address (session:@window_id) or "
+            f"session:index.")
+        return result
+
+    target, kinds = matches[0]
+    result["status"] = STATUS_RESOLVED
+    result["matched_kinds"] = kinds
+    result["target"] = target
+    return result
+
+
+# --------------------------------------------------------------------------- #
+# Rendering
+# --------------------------------------------------------------------------- #
+#: The key holding the signal's NAME inside a session-manager waiting signal.
+SIGNAL_NAME_KEY = "signal"
+#: 🔴 The key holding the raw CAPTURED PANE LINE. Measured shape of one signal:
+#: `{"line": "<text scraped off the operator's screen>", "signal":
+#: "selection_menu"}`. This repo is PUBLIC and forbids captured text in any
+#: committed artifact, and a rendered line lands in scrollback, logs and pasted
+#: PR bodies. `signal_names` therefore projects the NAME ONLY and this key is
+#: named here so the omission is deliberate and greppable rather than an
+#: oversight. The full signal object is still present in `--json` for a caller
+#: that genuinely needs it and knows where the output is going.
+SIGNAL_CAPTURED_TEXT_KEY = "line"
+
+
+def signal_names(signals) -> list:
+    """Project session-manager waiting signals to their NAMES.
+
+    Tolerates both shapes because the field is another tool's output, not ours:
+    a dict yields `signal[SIGNAL_NAME_KEY]`, a bare string yields itself. It
+    NEVER yields `SIGNAL_CAPTURED_TEXT_KEY` — see that constant.
+    """
+    out = []
+    for s in signals or []:
+        if isinstance(s, dict):
+            out.append(str(s.get(SIGNAL_NAME_KEY) or "unnamed-signal"))
+        else:
+            out.append(str(s))
+    return out
+
+
+def _fmt(value, status=None):
+    if status is not None and is_unmeasured(status):
+        return f"UNMEASURED ({status.split(':', 1)[1]})"
+    if value is None:
+        return "UNMEASURED (no value and no reason recorded)"
+    return str(value)
+
+
+#: The exact rendered strings for the three harness states. Pinned as constants
+#: because "no record" and "not measured" are the two the operator must never
+#: confuse, and a whole-string assertion on a constant is the only guard a
+#: reword cannot walk.
+HARNESS_NO_RECORD = ("no harness record for this window "
+                     "(MEASURED absence — normal, most windows have none)")
+WAITING_NOT_MEASURED = "UNMEASURED (session-manager reported no value)"
+
+
+def render_harness_status(t: dict) -> str:
+    """🔴 Three states, three distinct strings. Never collapses the middle one
+    into the UNMEASURED wording — a window with no harness record has been
+    measured, and saying otherwise would send an operator hunting a broken
+    registry that is working perfectly."""
+    if is_unmeasured(t["harness_status_measurement"]):
+        return _fmt(None, t["harness_status_measurement"])
+    if t["harness_present"] is False:
+        return HARNESS_NO_RECORD
+    if t["harness_status"] is None:
+        return _fmt(None, unmeasured("registry-record-has-no-status-field"))
+    return str(t["harness_status"])
+
+
+def render_waiting_probable(t: dict) -> str:
+    """session-manager's value, or its OWN reason for not having one. Never
+    renders a missing waiting_probable as False — `--no-capture` makes it null
+    for every row, and False would assert 'measured, not waiting'."""
+    if is_unmeasured(t["session_manager_measurement"]):
+        return _fmt(None, t["session_manager_measurement"])
+    if t["waiting_probable"] is None:
+        detail = t.get("waiting_status") or "no reason given"
+        return f"{WAITING_NOT_MEASURED} [{detail}]"
+    return str(t["waiting_probable"])
+
+
+def render(result: dict) -> str:
+    lines = []
+    status = result["status"]
+    sel = result["selector"]
+
+    if status == STATUS_UNMATCHED:
+        lines.append(f"UNMATCHED  {sel!r}")
+        lines.append(f"  {result['reason']}")
+        lines.append("  sources consulted: " +
+                     ", ".join(result["sources_consulted"]))
+        cov = result["coverage"]
+        lines.append(f"    tmux           : {cov['tmux_panes_status']} "
+                     f"({cov['windows_total']} windows)")
+        lines.append(f"    slot table     : {cov['slot_table_status']}")
+        lines.append(f"    registry       : {cov['registry_status']} "
+                     f"({cov['registry_records_with_tmux']} addressed records)")
+        lines.append(f"    session-manager: {cov['session_manager_status']} "
+                     f"({cov['session_manager_rows']} rows)")
+    elif status == STATUS_AMBIGUOUS:
+        lines.append(f"AMBIGUOUS  {sel!r} -> {result['candidate_count']} targets")
+        lines.append(f"  {result['reason']}")
+        for c in result["candidates"]:
+            lines.append(
+                f"    {c['address']:<24} idx={c['window_index']:<3} "
+                f"{c['label']:<22} matched={','.join(c['matched_kinds'])}")
+    else:
+        t = result["target"]
+        lines.append(f"RESOLVED   {sel!r} -> {t['address']}  "
+                     f"(matched: {', '.join(result['matched_kinds'])})")
+        lines.append(f"  host/session   : {t['host']} / {t['session']}")
+        lines.append(f"  window         : {t['window_id']} "
+                     f"(index {t['window_index']}, panes "
+                     f"{', '.join(t['panes'])})")
+        lines.append(f"  label          : {t['label']}  "
+                     f"(source: {t['label_source']})")
+        lines.append(f"  codename/hotkey: "
+                     f"{t['codename'] or 'NONE (no slot entry)'} / "
+                     f"{t['hotkey'] or 'NONE (no slot entry)'}")
+        lines.append(f"  cwd            : {t['cwd'] or 'UNMEASURED'}")
+        lines.append(f"  task           : {t['task'] or '-'}")
+        lines.append("")
+        lines.append("  -- two statuses, never collapsed --")
+        lines.append(f"  harness_status : {render_harness_status(t)}"
+                     f"   [registry: waiting on a turn]")
+        lines.append(f"  waiting_probable: {render_waiting_probable(t)}"
+                     f"   [session-manager: pane text looks like a question]")
+        if t["waiting_signals"]:
+            lines.append(f"    signals      : "
+                         f"{', '.join(signal_names(t['waiting_signals']))}")
+        lines.append(f"  unsent_prompt  : {t['unsent_prompt'] or '-'}")
+        lines.append(f"  age            : {_fmt(t['age_secs'])}s "
+                     f"(source: {t['age_source'] or 'UNMEASURED'})")
+        lines.append("")
+        vis = t["visibility"]
+        lines.append("  -- terminal vs popup --")
+        if is_unmeasured(vis["status"]):
+            lines.append(f"  visibility     : {_fmt(None, vis['status'])}")
+        else:
+            lines.append(f"  window_active  : {vis['window_active']}")
+            lines.append(f"  visible        : {vis['visible']}")
+            lines.append(f"  covered        : {vis['covered']}"
+                         + ("   <- ON SCREEN BUT UNDER A POPUP"
+                            if vis["covered"] else ""))
+            for c in vis["clients"]:
+                role = "POPUP " if c["popup"] else "BASE  "
+                here = " *attached to this session*" \
+                    if c["session"] == t["session"] else ""
+                lines.append(f"    {role} {c['tty']:<12} {c['term']:<16} "
+                             f"{c['size']:<10} sess={c['session']}{here}")
+        lines.append("")
+        g = t["git"]
+        lines.append("  -- git / PR --")
+        lines.append(f"  branch         : {_fmt(g['branch'], g['branch_status'])}")
+        if is_unmeasured(g["pr_status"]):
+            lines.append(f"  open PR        : {_fmt(None, g['pr_status'])}")
+        elif not g["pr"]:
+            lines.append("  open PR        : none (measured)")
+        else:
+            for pr in g["pr"]:
+                lines.append(f"  open PR        : #{pr.get('number')} "
+                             f"{pr.get('mergeStateStatus') or ''} "
+                             f"{'DRAFT ' if pr.get('isDraft') else ''}"
+                             f"{pr.get('title') or ''}")
+
+    cov = result["coverage"]
+    lines.append("")
+    lines.append("  -- coverage (a window with no match is normal, not a zero) --")
+    lines.append(f"  windows                     : {cov['windows_total']}")
+    lines.append(f"  with slot / without         : {cov['windows_with_slot']}"
+                 f" / {cov['windows_without_slot']}")
+    lines.append(f"  with registry match / without: "
+                 f"{cov['windows_with_registry_match']}"
+                 f" / {cov['windows_without_registry_match']}")
+    lines.append(f"  with session-manager / without: "
+                 f"{cov['windows_with_session_manager_row']}"
+                 f" / {cov['windows_without_session_manager_row']}")
+    if cov["session_manager_rows_unjoinable"]:
+        lines.append(f"  🔴 session-manager rows NOT joined: "
+                     f"{cov['session_manager_rows_unjoinable']}")
+    for d in result["dropped"]:
+        lines.append(f"  DROPPED: {d}")
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
+# CLI
+# --------------------------------------------------------------------------- #
+EXIT_RESOLVED = 0
+EXIT_AMBIGUOUS = 2
+EXIT_UNMATCHED = 3
+
+_EXIT_FOR = {STATUS_RESOLVED: EXIT_RESOLVED,
+             STATUS_AMBIGUOUS: EXIT_AMBIGUOUS,
+             STATUS_UNMATCHED: EXIT_UNMATCHED}
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="session-resolve",
+        description="Resolve a selector to ONE tmux/harness target. READ-ONLY.")
+    p.add_argument("command", choices=("show", "resolve"),
+                   help="both print the resolved target; `resolve` is an alias")
+    p.add_argument("selector",
+                   help="codename (Gold) | hotkey (G, Alt+Shift+G) | "
+                        "session:index (scratch2:2) | address (scratch2:@81) | "
+                        "window id (@81) | harness name | cwd/repo")
+    p.add_argument("--json", action="store_true", help="JSON output")
+    p.add_argument("--host", default="workbench")
+    p.add_argument("--pr", action="store_true",
+                   help="also query `gh pr list` for each cwd's branch "
+                        "(slow; degrades to UNMEASURED, never to 'no PR')")
+    p.add_argument("--registry-dir", default=DEFAULT_REGISTRY_DIR)
+    p.add_argument("--slot-table", default=DEFAULT_SLOT_TABLE)
+    return p
+
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
+    src = Sources(host=args.host, registry_dir=args.registry_dir,
+                  slot_table_path=args.slot_table, want_pr=args.pr)
+    result = resolve(args.selector, src)
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True, default=str))
+    else:
+        print(render(result))
+    return _EXIT_FOR[result["status"]]
+
+
+if __name__ == "__main__":  # pragma: no cover
+    sys.exit(main())
