@@ -168,3 +168,21 @@ would have been wrong.
 
 ⚠ `innerText` depends on layout, so it needs a rendered tab: **`wake` first**, or a
 throttled background tab returns a shell and both numbers lie.
+
+## A JS `.click()` cannot open a React/Mantine popover — and the read reports ABSENCE
+
+`SKILL.md` trap 4 carries the instruction; this is the evidence behind it.
+
+`element.click()` inside a `js` payload left `aria-expanded="false"` and found only
+**empty `.mantine-Popover-dropdown` shells** — indistinguishable from "the menu entry
+isn't there", which is what makes it a silent wrong answer rather than an error.
+
+The trusted **`click`** op (real CDP input on the top frame) does open it. Two things
+that still bite after switching:
+
+- It is a **TOGGLE**. Two clicks open then close it, so a stale earlier click makes the
+  next read report a confident absence. Click **once**, and read `aria-expanded` in the
+  same breath so the read carries its own proof.
+- On some builds the dropdown's links are **not reachable** via
+  `.mantine-Popover-dropdown a` even once open. **`screenshot` it** rather than
+  selector-hunting — a selector that matches nothing looks exactly like missing content.
