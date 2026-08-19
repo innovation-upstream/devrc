@@ -44,7 +44,7 @@
 // patterns has known bypasses, which is the whole reason layer 2 exists.
 //
 // ==========================================================================
-// Mechanics of layer 1 (measured on v1.18.16 — do not re-derive)
+// Mechanics of layer 1 (measured on v1.18.18 — do not re-derive)
 // ==========================================================================
 //
 // 🔴 PERMISSION ORDERING IS LOAD-BEARING AND IS THE INVERSE OF CLAUDE CODE.
@@ -70,24 +70,33 @@
 // that fires too often on a mutation family is a far better failure than an
 // `ask` that never fires on the spelling an operator actually types.
 //
-// Other measured facts baked into this file (v1.18.16):
-//   * `opencode run` AUTO-REJECTS an `ask` (it prints "auto-rejecting"); only
-//     the interactive TUI turns one into a prompt. `opencode debug agent
+// Other measured facts baked into this file (v1.18.18, EXCEPT where a bullet
+// says otherwise — the 2026-08-19 re-derivation could not reach three of them,
+// and a claim relabelled to a version nothing measured it on is worse than a
+// stale one, because it looks fresh):
+//   * `ask` SEMANTICS (NOT re-derived at the pin — last measured on v1.18.16;
+//     observing it needs a run that EXECUTES, which the engine tests refuse to
+//     do): `opencode run` AUTO-REJECTS an `ask` (it prints "auto-rejecting");
+//     only the interactive TUI turns one into a prompt. `opencode debug agent
 //     --tool` AUTO-APPROVES it. So `ask` means "friction for a human", never
 //     "a control on an unattended agent".
 //   * only a `"*": "deny"` removes a tool from the request schema; a narrow
 //     deny does not, and `"ask"` costs exactly what `"allow"` costs.
-//   * `small_model` drives TITLE GENERATION ONLY — not compaction. The real
-//     cheap-model lever is pinning the hidden title/summary/compaction agents
-//     in the `agent` block below.
+//   * `small_model` SCOPE (NOT re-derived at the pin, v1.18.16): it drives
+//     TITLE GENERATION ONLY — not compaction. The real cheap-model lever is
+//     pinning the hidden title/summary/compaction agents in the `agent` block
+//     below.
 //   * a tool listed in this global `permission` block is re-enabled on the
 //     HIDDEN title/summary/compaction agents too, whose stock tool set is
 //     EMPTY. Hence the explicit `"*": "deny"` on each of them below.
-//   * DEPRECATED in 1.18.16, deliberately absent: agent-level `tools`, `mode`
-//     (at config level), `layout`, `autoshare`, `reference` (now `references`),
-//     `maxSteps` (now `steps`). `theme`/`keybinds`/`tui` moved to a separate
-//     ~/.config/opencode/tui.json and are NOT set here.
-//   * there is NO `list` tool and NO `websearch` tool on 1.18.16. The real set is
+//   * DEPRECATED, deliberately absent — a config-SCHEMA claim about keys this
+//     file does NOT set, which the resolved `debug agent` dumps structurally
+//     cannot see, so it was carried forward at v1.18.16 rather than relabelled:
+//     agent-level `tools`, `mode` (at config level), `layout`, `autoshare`,
+//     `reference` (now `references`), `maxSteps` (now `steps`).
+//     `theme`/`keybinds`/`tui` moved to a separate ~/.config/opencode/tui.json
+//     and are NOT set here.
+//   * there is NO `list` tool and NO `websearch` tool on 1.18.18. The real set is
 //     exactly {bash, edit, glob, grep, invalid, question, read, skill, task,
 //     todowrite, webfetch, write}. Naming a nonexistent tool here is a no-op.
 {
@@ -178,7 +187,7 @@
     // — a blanket `"read": "allow"` here lands AFTER those and silently defeats
     // the `.env` guard on every agent. The default already allows everything
     // except `.env`, so there is nothing to add.
-    // `list` and `websearch` are absent because NO SUCH TOOLS EXIST on 1.18.16.
+    // `list` and `websearch` are absent because NO SUCH TOOLS EXIST on 1.18.18.
     "glob": "allow",
     "grep": "allow",
     "edit": "allow",

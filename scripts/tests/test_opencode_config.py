@@ -44,7 +44,7 @@ WHAT IS UNDER TEST (see scripts/opencode/README.md for the measurements):
      manual sweep into a standing assertion — after them, 10 of 77 survive, and
      all ten are non-bash tool rows.
 
-  3. The resolver model itself. opencode 1.18.16 resolves a permission by
+  3. The resolver model itself. opencode 1.18.18 resolves a permission by
      `findLast` over a FLAT ORDERED array (built-in defaults, then agent rules,
      then user config — later wins), matching with a hand-rolled glob→regex:
 
@@ -223,7 +223,7 @@ def agent_permission(name: str) -> dict:
 # --------------------------------------------------------------------------- #
 # 🔴 the resolver model
 #
-# Faithful port of opencode 1.18.16's `Wildcard.match` + the `findLast` resolver.
+# Faithful port of opencode 1.18.18's `Wildcard.match` + the `findLast` resolver.
 # See the module docstring for the verbatim source it was ported from and for
 # how it was validated against the real engine.
 # --------------------------------------------------------------------------- #
@@ -899,7 +899,12 @@ def test_no_agent_reopens_the_bash_wildcard_with_allow():
 
     An agent-level `bash: {"*": allow}` is appended AFTER the entire global
     block, so last-match-wins makes it nullify every global deny at a stroke.
-    Measured on 1.18.16: it landed at index 74 after all 30 global rules and left
+    Measured on 1.18.16 — a dated incident record, NOT re-derived at the pin:
+    the counts below describe a tree with 30 global bash rules and there are 65
+    today, so no fresh measurement could confirm this sentence. The STRUCTURAL
+    claim under it — an agent block is appended AFTER the whole global block —
+    IS re-derived, by test_opencode_engine.py's engine-vs-model conformance
+    tests. What was measured: it landed at index 74 after all 30 global rules and left
     only the 4 agent-local rules standing — `git stash`, `git reset --hard`,
     `rm -rf ~…`, `sops -d`, `nixos-rebuild` and `home-manager switch` were all
     plain ALLOW on the k8s agent.
@@ -1596,12 +1601,12 @@ def test_tool_level_permissions_are_pinned_exactly():
 
 @pytest.mark.parametrize("dead", ["list", "websearch"])
 def test_no_nonexistent_tools_in_permission_block(dead):
-    """There is no `list` and no `websearch` tool on 1.18.16. The resolved tool
+    """There is no `list` and no `websearch` tool on 1.18.18. The resolved tool
     map is exactly {bash, edit, glob, grep, invalid, question, read, skill,
     task, todowrite, webfetch, write}. Naming a nonexistent tool is a silent
     no-op that reads like configuration."""
     assert dead not in load_config()["permission"], (
-        f"{dead!r} is not a tool on opencode 1.18.16 — the key does nothing"
+        f"{dead!r} is not a tool on opencode 1.18.18 — the key does nothing"
     )
 
 
@@ -1649,9 +1654,17 @@ def test_plan_agent_is_genuinely_read_only():
 
 
 def test_no_deprecated_keys():
+    # 🔴 CARRIED FORWARD, not re-derived at the pin. Deprecation is a config-
+    # SCHEMA claim about keys this repo does not set, which the resolved
+    # `debug agent` dumps the engine tests compare are structurally unable to
+    # see. Relabelling it to the current pin would have made it look freshly
+    # measured; the version below is the one it was actually measured on.
     cfg = load_config()
     for dead in ("mode", "layout", "autoshare", "reference", "maxSteps", "theme", "keybinds", "tui"):
-        assert dead not in cfg, f"{dead!r} is deprecated on 1.18.16 and must not be set"
+        assert dead not in cfg, (
+            f"{dead!r} is deprecated (last measured on opencode 1.18.16, carried "
+            f"forward at the pin) and must not be set"
+        )
 
 
 def test_core_settings():
@@ -1802,7 +1815,7 @@ def test_nav_has_no_shell():
 def test_nav_is_kept_lean():
     """nav must not carry the skill catalogue or be able to recurse.
 
-    VERIFIED against `opencode debug agent nav` on 1.18.16: with these denies the
+    VERIFIED against `opencode debug agent nav` on 1.18.18: with these denies the
     resolved tool set is exactly {glob, grep, read} (+ the internal `invalid`).
     Without `skill: deny` it also carries {skill, task, todowrite, webfetch} —
     and `skill` alone injects the whole catalogue, measured at ~3,730 tokens on
@@ -1817,7 +1830,7 @@ def test_nav_is_kept_lean():
 
 
 def test_no_agent_promises_a_list_tool():
-    """There is NO `list` tool on opencode 1.18.16."""
+    """There is NO `list` tool on opencode 1.18.18."""
     targets = [AGENT_DIR / f"{n}.md" for n in EXPECTED_AGENTS] + [ADDENDUM]
     bad = []
     for p in targets:

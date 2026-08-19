@@ -6,7 +6,7 @@ temperature: 0.1
 permission:
   edit: deny
   write: deny
-  # MEASURED on 1.18.16 (`opencode debug agent review`): the agent's bash rules
+  # MEASURED on 1.18.18 (`opencode debug agent review`): the agent's bash rules
   # are APPENDED AFTER the global block, so the resolved list is
   #   [0] allow *   … global asks/denies …   [N] deny *   [N+1…] these allows
   # Last-match-wins therefore makes [N] the effective default: any command that

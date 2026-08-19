@@ -11,7 +11,7 @@ duplicate of it).
   That is a real gap, and it is exactly the gap the version pin exists to cover:
   a config whose keys are unchanged can have its RESOLVED MEANING changed by the
   binary underneath it. opencode.jsonc's header documents a large set of
-  behaviours annotated "measured on v1.18.16 — do not re-derive" — last-match-
+  behaviours annotated "measured on v1.18.18 — do not re-derive" — last-match-
   wins ordering, hidden agents inheriting the global permission block, the exact
   tool set. A static test cannot see any of those change. This file runs the
   real engine and checks them.
@@ -44,7 +44,8 @@ front, not a silent skip deep in the run. `_opencode_bin()` below calls
 pytest.fail(), never pytest.skip() — the same choice, for the same reason, as
 `nix_eval()` in test_opencode_config.py. This file adds 22 tests and 0 skips
 (MEASURED 2026-08-11, `pytest -q`: "22 passed", ~7 s, in BOTH tiers — the
-dev-host nix-shell and `nix build .#checks.x86_64-linux.pytests`).
+dev-host nix-shell and `nix build .#checks.x86_64-linux.pytests`). Still 0 skips;
+the count is 25 as of 2026-08-19.
 
 🔴 STDOUT IS READ FROM A FILE, NEVER A PIPE. opencode loses the tail of a large
 stdout write when stdout is a pipe, silently and with exit 0. That cost this file
@@ -90,10 +91,55 @@ ROOT = Path(__file__).resolve().parents[2]
 OC_DIR = ROOT / "scripts" / "opencode"
 TOOLS_NIX = ROOT / "nix" / "pkgs" / "tools" / "default.nix"
 
-# 🔴 THE PIN. Every "measured on v1.18.16" claim in opencode.jsonc's header, in
+# 🔴 THE PIN. Every "measured on v1.18.18" claim in opencode.jsonc's header, in
 # scripts/opencode/README.md and in test_opencode_config.py's docstrings is keyed
 # to this exact version. It is pinned declaratively by nix/pkgs/tools/default.nix
 # resolving `pkgs.opencode` out of flake.lock's nixpkgs.
+#
+# 🔴 RE-DERIVED AGAIN 1.18.16 -> 1.18.18 (2026-08-19), by the SAME method as the
+# 2026-08-13 pass below, after `chore(flake): bump nixpkgs and home-manager`
+# moved the lock underneath the pin. What was measured:
+#
+#   * `debug agent <a> --pure` dumped for ALL SEVEN agents under BOTH the
+#     outgoing and the incoming binary, from a config dir seeded out of this
+#     repo, canonicalised, with the harness's OWN per-run TMPDIR normalised out
+#     of the generated `external_directory` rules. IDENTICAL on every agent
+#     except `compaction`, whose `prompt` — opencode's own built-in text, which
+#     nothing in this repo sets — moved upstream. Permissions (as a set AND in
+#     ORDER), the resolved tool map INCLUDING its key set, and the model:
+#     identical on all seven.
+#   * The four primaries' ORDERED bash rule arrays, compared position by
+#     position: equal, at 65 / 66 / 67 / 92 rules. Last-match-wins ordering is
+#     exactly what that comparison pins, and it did not move.
+#   * CONTROLS, reported as a PAIR rather than as a bare "identical":
+#       - same-binary control — two runs of the incoming binary collapse to
+#         identical for all seven agents. Before the TMPDIR normalisation they
+#         did NOT, and that is what proved the only cross-version "difference"
+#         was harness noise rather than a resolver change.
+#       - comparator negative control — flipping one boolean in one dump makes
+#         the comparator report a difference, so "identical" is not a comparator
+#         wired to nothing.
+#   * The browser-only tool-set gate (scripts/browser-bridge/browser-agent's
+#     fail-closed `debug agent browser-agent` check) replicated against BOTH
+#     binaries and on BOTH hosts: exactly one enabled tool, `browser`, with
+#     every host tool present and false.
+#   * Both hosts verified AT THE CONSUMER on 2026-08-19: `readlink -f $(command
+#     -v opencode)` resolves to the same incoming store path on each.
+#
+# NOT covered by the 2026-08-19 pass, and deliberately still keyed to the
+# OUTGOING version. Each carries its own in-place marker and a
+# HISTORICAL_VERSION_CLAIMS entry, so none of them was silently relabelled:
+#   * `ask` semantics under `opencode run` / `debug agent --tool` — observing
+#     them needs a run that EXECUTES, which this file refuses to do (see the
+#     `--tool` note in the module docstring).
+#   * `small_model` drives title generation only.
+#   * the DEPRECATED-key list — a config-SCHEMA claim about keys this repo does
+#     not set, which the resolved dumps cannot see.
+#   * the k8s "index 74 after all 30 global rules" incident record, whose counts
+#     describe a tree that no longer exists (65 global bash rules today), so no
+#     fresh measurement could confirm that sentence. The STRUCTURAL claim under
+#     it — agent rules are appended AFTER the whole global block — IS re-derived,
+#     by the engine-vs-model conformance tests below.
 #
 # 🔴 RE-DERIVED 1.18.4 -> 1.18.16 (2026-08-13), not merely re-spelled. What was
 # actually measured, and how, so a future bump can repeat it rather than trust it:
@@ -121,9 +167,9 @@ TOOLS_NIX = ROOT / "nix" / "pkgs" / "tools" / "default.nix"
 # hook-behaviour claims (`permission.ask` never fires, `tool.execute.before` does)
 # in scripts/opencode/README.md and scripts/opencode/plugin/guard.js. Those need
 # a running hook to observe and were not re-measured here.
-PINNED_VERSION = "1.18.16"
+PINNED_VERSION = "1.18.18"
 
-# MEASURED via `opencode debug agent nav --pure` at 1.18.16. This is the cost AND
+# MEASURED via `opencode debug agent nav --pure` at 1.18.18. This is the cost AND
 # blast-radius pin that test_opencode_config.py's `test_nav_is_kept_lean` only
 # asserts about the CONFIG KEYS; here it is read off the engine's resolved tool
 # map. `skill` alone injects the ~3,730-token catalogue on every request.
@@ -708,8 +754,19 @@ assert PINNED_VERSION.rsplit(".", 1)[0] in OPENCODE_SERIES, (
     "surviving claim in the previous series invisible on the same day the pin stops "
     "matching it."
 )
+# 🔴 THE TRAILING-DOT BLIND SPOT, found by the 2026-08-19 bump. The lookahead
+# used to be `(?![\d.])`, which rejects a version at the END OF A SENTENCE,
+# because the full stop is itself a `.`. That is not a corner case: it hid FIVE
+# stale claims in the pin's own surface across four files, including the store
+# path in nix/pkgs/tools/default.nix — i.e. exactly the class this test exists to
+# catch, in exactly the file that implements the pin. `(?!\d|\.\d)` keeps both
+# jobs the old form was doing — it still refuses to match a version that is only
+# a PREFIX of a longer number — while admitting terminal punctuation. Both
+# directions are pinned by
+# test_the_version_scanner_sees_a_version_at_the_end_of_a_sentence below, whose
+# fixtures are BUILT rather than spelled for exactly the reason this comment is.
 _VERSION_RE = re.compile(
-    r"(?<![\d.])(?:" + "|".join(re.escape(s) + r"\.\d+" for s in OPENCODE_SERIES) + r")(?![\d.])"
+    r"(?<![\d.])(?:" + "|".join(re.escape(s) + r"\.\d+" for s in OPENCODE_SERIES) + r")(?!\d|\.\d)"
 )
 
 # (path, snippet on the SAME LINE as the version, why it does not track the pin)
@@ -741,8 +798,20 @@ HISTORICAL_VERSION_CLAIMS = (
      "heads the hook-behaviour block; deliberately not re-derived"),
     ("scripts/opencode/README.md", 'startup files" is **FALSE on this host**',
      "zsh-startup-files claim — not re-derived"),
-    ("scripts/tests/test_opencode_engine.py", "RE-DERIVED",
-     "names the transition itself"),
+    # 🔴 Newly VISIBLE, not newly stale: this line ends its sentence with the
+    # version, and the scanner's old lookahead could not see a version followed
+    # by a full stop. It was always a historical claim; it just never reached the
+    # ledger. See the TRAILING-DOT BLIND SPOT note on _VERSION_RE.
+    ("scripts/opencode/README.md", "Treat them as last confirmed on",
+     "hook-behaviour claims — need a running hook to observe, not re-derived"),
+    # 🔴 This snippet used to be the bare word "RE-DERIVED", which stopped being
+    # unique the moment a SECOND re-derivation record was added above it — and
+    # `test_every_historical_version_claim_still_exists` requires exactly one
+    # match. Both entries are now keyed on text only their own line carries.
+    ("scripts/tests/test_opencode_engine.py", "not merely re-spelled",
+     "names the 2026-08-13 transition itself"),
+    ("scripts/tests/test_opencode_engine.py", "RE-DERIVED AGAIN",
+     "names the 2026-08-19 transition itself"),
     ("scripts/tests/test_opencode_engine.py", "deliberately still keyed to",
      "the pin's own note naming the not-re-derived subset"),
     ("scripts/tests/test_opencode_engine.py", "MEASURED 2026-08-11 on the workbench, opencode",
@@ -786,6 +855,8 @@ HISTORICAL_VERSION_CLAIMS = (
     # nothing re-derived it, because it needs an all-tools-denied agent making a
     # real model call. Reverted to the version it was actually measured on. Fixing
     # a consistency complaint by making a claim FALSE is the worse trade.
+    ("scripts/tests/test_opencode_engine.py", "on the first audit's consistency advice",
+     "this ledger's own account of the version that claim was wrongly re-spelled to"),
     ("claude/opencode-addendum.md", "NOT re-derived",
      "@-import claim — needs a live model call, never re-measured"),
     ("nix/home.nix", "NOT re-derived since — it needs a live model call",
@@ -794,13 +865,35 @@ HISTORICAL_VERSION_CLAIMS = (
      "@-import claim, third copy"),
     ("scripts/tests/test_opencode_config.py", "NOT re-derived since — needs a live model call",
      "@-import claim, fourth copy"),
+    # 🔴 CARRIED FORWARD AT THE 2026-08-19 BUMP, not re-derived. Each of these
+    # was left at the OUTGOING version on purpose, with an in-place marker on the
+    # same line saying so. An unverifiable claim relabelled to a new version is
+    # WORSE than a stale one, because it looks fresh — that is the trade the
+    # @-import entries above already record, and these are the same trade.
+    ("scripts/opencode/opencode.jsonc", "`ask` SEMANTICS (NOT re-derived at the pin",
+     "`ask` semantics under `opencode run` — needs a run that EXECUTES"),
+    ("scripts/opencode/opencode.jsonc", "`small_model` SCOPE (NOT re-derived at the pin",
+     "which code path `small_model` drives — not observable in a resolved dump"),
+    ("scripts/opencode/opencode.jsonc", "cannot see, so it was carried forward at v",
+     "the DEPRECATED-key list — a config-SCHEMA claim the dumps cannot see"),
+    ("scripts/opencode/README.md", "carried forward at the bump rather than relabelled; last measured on",
+     "the DEPRECATED-key list, second copy"),
+    ("scripts/opencode/README.md", "and the 2026-08-19 one that followed it,",
+     "names the transitions whose hook claims were NOT re-derived"),
+    ("scripts/opencode/plugin/guard.js", "and the 2026-08-19 one after it, covered resolved",
+     "same, in the plugin's own copy of that note"),
+    ("scripts/tests/test_opencode_config.py", "a dated incident record, NOT re-derived at the pin",
+     "the k8s index-74 record; its counts describe a tree that no longer exists"),
+    ("scripts/tests/test_opencode_config.py", "is deprecated (last measured on opencode",
+     "the DEPRECATED-key list, third copy — in the assertion message"),
     # 🔴 THE DEPLOYED-STATE EXEMPTIONS ARE GONE, and their absence is the record.
     # Five lines said "both hosts run 1.18.4" — TRUE while the lock pinned 1.18.16
     # and the hosts had not converged, which is exactly why they were exempt
-    # rather than wrong. `ship.sh` converged both on 2026-08-15, verified at the
-    # CONSUMER (both `readlink -f $(command -v opencode)` resolve to the same
-    # …-opencode-1.18.16 store path), so those lines now carry the pinned version
-    # and need no exemption.
+    # rather than wrong. `ship.sh` converged both on 2026-08-15, and the lock's
+    # move to the CURRENT pin had reached both before this PR — re-verified at the
+    # CONSUMER on 2026-08-19 (both `readlink -f $(command -v opencode)` resolve to
+    # the same …-opencode-1.18.18 store path), so those lines now carry the pinned
+    # version and need no exemption.
     #
     # The ledger caught its own obsolescence: the moment the lines were updated,
     # all five entries orphaned and the suite went red. That is the SHRINK
@@ -866,6 +959,44 @@ def test_every_historical_version_claim_still_exists():
         "HISTORICAL_VERSION_CLAIMS is a LEDGER and it no longer matches the tree "
         "one-for-one:\n" + "\n".join(orphans)
     )
+
+
+def test_the_version_scanner_sees_a_version_at_the_end_of_a_sentence():
+    """🔴 REGRESSION. `_VERSION_RE` is the INSTRUMENT the two ledger tests above
+    read their verdict from, so it gets validated before either verdict is
+    believed — a scanner that cannot see a whole shape reports a confident clean.
+
+    Its lookahead used to be `(?![\\d.])`, which silently REFUSED to match a
+    version followed by a full stop. Measured at the bump this test was written
+    for: FIVE stale claims inside the pin's own surface were invisible to it,
+    across four files, including the store path in nix/pkgs/tools/default.nix.
+
+    Both directions are asserted together, so this cannot be satisfied by
+    widening the pattern until everything matches: terminal punctuation must be
+    seen, and a version that is a PREFIX of a longer number must not be.
+
+    🔴 The fixtures are BUILT from PINNED_VERSION and the series constant, never
+    spelled. A literal here would be scanned as a stale claim by the very test
+    above, and an allowlist exemption for a test fixture is a hole nobody should
+    have to reason about later.
+    """
+    v = PINNED_VERSION
+    old = OPENCODE_SERIES[0] + ".0"      # in-series, and never the pin
+    assert old != v
+    for text, expected in ((f"measured on {old}.", old),        # end of sentence
+                           (f"…-opencode-{old}. (It was", old),  # the store-path line
+                           (f"on v{v} with", v),                 # leading `v`
+                           (f"({old})", old),                    # closing paren
+                           (f"{v},", v)):                        # comma
+        assert _VERSION_RE.findall(text) == [expected], (
+            f"the scanner does not see {expected!r} in {text!r} — while that is "
+            f"true, every claim it reports clean is unproven"
+        )
+    for text in (f"{v}6", f"{v}.2", f"1{v}"):
+        assert v not in _VERSION_RE.findall(text), (
+            f"the scanner matched {v!r} as a PREFIX inside {text!r}; widening "
+            f"the lookahead must not cost the prefix rejection"
+        )
 
 
 def test_opencode_is_declared_in_the_nix_package_set():
@@ -940,7 +1071,7 @@ def test_engine_and_model_agree_on_every_pinned_command(engine_name, model_agent
 # --------------------------------------------------------------------------- #
 def test_engine_resolves_navs_tool_set_to_exactly_the_pinned_four():
     """test_opencode_config.py's `test_nav_is_kept_lean` docstring says "VERIFIED
-    against `opencode debug agent nav` on 1.18.16: the resolved tool set is
+    against `opencode debug agent nav` on 1.18.18: the resolved tool set is
     exactly {glob, grep, read} (+ the internal `invalid`)" — but that file
     asserts only the CONFIG KEYS, so the verification was a one-off nobody
     re-ran. This re-runs it every gate.
