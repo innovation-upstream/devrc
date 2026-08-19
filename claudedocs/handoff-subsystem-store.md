@@ -378,41 +378,63 @@ the day you ship.*
   printed note over-reports after an exclusion (measured: counter stays 3 while `paths` drops to 2).
 - **Next probe:** one-line fix plus a test that pins counter and path-set together.
 
+### 🔴 The Cloudflare WAF rate rule (layer 1 of 3) has never been verified to exist
+- **Symptom:** `#329`'s header names three guards in order. Layers 2 (the Traefik
+  `subsystem-store-ratelimit` middleware) and 3 (the app: rotating token set, `compare_digest`,
+  uniform 401, 5 failures/60s → 900s lockout, absent client-IP refused) are declarative, merged and
+  verified live. **Layer 1 is console-managed and declared nowhere in the repo.**
+- **Observed:** `grep -rl cloudflare clusters/production` returns only ingress manifests; no WAF
+  rule object exists in git, by design — Cloudflare WAF rules are not declarative here.
+- **Ruled out:** that the Traefik middleware covers it. It does not: that is layer 2, avg 10/s
+  burst 20, and it is *inside* the origin. A volumetric flood never reaches it if layer 1 is absent.
+- **Next probe (verbatim):** open the Cloudflare dashboard for `zacx.dev` → Security → WAF → Rate
+  limiting rules, and confirm a rule scoped to `store.zacx.dev`. Nothing in this repo can answer it.
+
+### 🔴 The cluster's control plane crosses the public internet, by configuration
+- **Symptom:** two control-plane protocols use the nodes' PUBLIC addresses even though both nodes
+  share a private network (`10.0.0.0/24`) they already use for etcd, kubelet and metrics.
+- **Observed:** `konnectivity-agent` on both nodes carries
+  `--proxy-server-host=<the Traefik LB public IP> --proxy-server-port=8132`, and the agent on the
+  sibling node connects from its own public address. `projectcalico.org/IPv6Address` on **both**
+  nodes is their **public `/64`**, and `birdcl6 show protocols` reports
+  `Mesh_<peer> BGP … Established` since 2025-11-21.
+- **Ruled out:** that this is only IPv4-private. The v4 half *is* private
+  (`IPv4Address = 10.0.0.x`, session `10.0.0.2:179 ← 10.0.0.4`) — which is exactly what made a
+  v4-only check produce a confident, wrong "179 is safe to close".
+- **Consequence already acted on:** `179` and `8132` are deliberately NOT in `RELAY-GUARD`; closing
+  either would break pod-network routing or the API tunnel. Recorded in
+  `k0s/host-firewall/README.md`.
+- **Leading hypothesis:** Calico IPv6 autodetection picked the public `/64`, and konnectivity was
+  configured against the LB address for convenience. Both are probably movable to `10.0.0.x`.
+- **Next probe:** confirm whether the private network carries IPv6 at all before assuming Calico can
+  be repointed — if it does not, the v6 mesh has nowhere else to go and the question becomes whether
+  to disable the v6 mesh rather than move it. konnectivity is TLS; BGP is not.
+
+### `render-diff` errors on other people's PRs
+- **Symptom:** `gitops-validate` run `gitops-validate-7t5fm` (2026-08-18T22:37) reported
+  `COULD NOT RUN: render-diff` on commit `d3a68308` — not my change; `relay-guard` passed there.
+- **Not investigated.** Flagged only because a `COULD NOT RUN` leg is a broken guard, and this gate
+  is the repo's real pre-merge check.
+
+### `30301` is a NodePort nothing declares
+- **Observed:** kube-proxy holds `:30301` on the production node, but no Service in the cluster
+  declares that nodePort — the seven real ones are `30276 30587 31612 31754 32327 32341 32503`.
+- **Deliberately left open:** guarding it is almost certainly harmless, and "almost certainly" about
+  a listener nobody can account for is a reason to identify it first.
+
 ## Next steps (ranked)
 
-1. **QUEUED — a skill to audit recent index ENTRIES for fidelity.** Read recent entries *and their
-   source raw sessions*, then judge whether the entry faithfully captured what the session learned.
-   Nothing does this today: `--validate` checks **well-formedness** (parses, `OPEN:` grammar), never
-   **fidelity**. The manual prototype exists — the 2026-08-17 audit of session `e317505f` — and it
-   found real gaps, so the skill is a systematisation of a proven procedure, not a new idea.
-   **Carry forward:** parse `tool_use` structurally (never grep a transcript — a grep once reported
-   `recall=3 touch=60` against a true count of **0**); strip heredoc bodies; exact basename match;
-   reject `-c`/`-m`. Establish the entry's **before** state via `git -C ~/.claude/analyze-service-index/
-   <scope> log -- <entry>.md` or you credit the session for pre-existing bullets. Transcripts are
-   ~2 MB — parse, never `Read` raw.
-2. **QUEUED — what is stored vs what is not: does a generic JOURNAL belong?** The `e317505f` audit found
-   durable items that landed **nowhere** because they fit no surface: two checker-design lessons (a
-   threshold derived from the data it guards goes silent under the very failure it guards; a
-   discriminator is only trustworthy when its cut sits in an empty gap) lived only in a PR body, and two
-   in-session retractions lived only in assistant prose. The store is **subsystem-scoped**
-   (`<scope>/<service>.md`), so a lesson about *how to build a checker* maps to no subsystem; RULES.md is
-   byte-capped and gated; MEMORY.md is byte-capped; skills are domain ops. **The gap is real: cross-cutting
-   engineering lessons that are not yet rules and are not subsystem facts.**
-   🔴 **Design constraint learned the hard way today: a fourth surface that nothing routes to is invisible,
-   which is exactly the defect `#1081` just fixed.** Any journal must be named in the always-on docs and
-   reachable by `--search`, or it will repeat the 63%-never-opened outcome.
-3. **Decide `#329`** — the host-firewall prerequisite is now **DONE** (audited, and the gap it found
-   closed by homelab-infra `#337`), so this is unblocked and is purely the operator's exposure call.
-   Merging is deploying and is irreversible in perception even if reversible in fact. What the audit
-   changes about the decision: the CF-bypass residual is now **shut at the firewall**, so `#329`
-   genuinely adds only the Cloudflare→Traefik→rate-limit path rather than a second unguarded one.
-   What it does **not** change: `/api/` still carries no edge auth by design, so the bearer token
-   remains the only gate on that path — and `#520`'s trusted-peer fix is still unshipped until the
-   `0.2.0` image lands (step 4), which is arguably the real prerequisite now.
-4. **Build and push image `0.2.0`**, then verify the trusted-proxy env is live at the consumer and
-   exercise token rotation end-to-end against the pod.
-5. **The credential rotation** — `github-pat-civitai`, still the only declared-`OPEN:` item in the store,
-   now **34 days**. Untouched **by operator decision**, not because it was checked and found fine.
+1. **Verify the Cloudflare WAF rate rule exists** (above). Two minutes in the console, and it is the
+   difference between three defensive layers and two on a now-public, client-confidential store.
+2. **Split read/write tokens** — named in the proposal's `(B-required)` hardening, never built. The
+   single token is currently read-only by virtue of the API having no write route, not by design.
+3. **Exercise the store under adversarial traffic.** The lockout, the rate limiter and the WAF have
+   only ever seen my own well-formed probes. Nothing has been measured under abuse.
+4. **The store's own roadmap, untouched all session:** the entry-fidelity audit skill, and the
+   "does a generic journal belong" question. The latter argued for itself here — roughly ten
+   cross-cutting engineering lessons from this session were filed into *subsystem-scoped* entries
+   for want of a better home, and several have nothing to do with the subsystem-store.
+5. **Optional, deferred by decision:** move konnectivity + Calico v6 onto the private network.
 
 ## Gotchas / decisions / dead-ends
 
@@ -613,105 +635,113 @@ the day you ship.*
   delta-introduced". It was green on `trunk` and red on the branch — i.e. **that PR's regression**,
   merely present since its first commit.
 
+### The gateway bind change — scoped, then DECLINED
+Production's gateway binds `listen 0.0.0.0:<port>`; homelab's binds `10.42.0.10:<port>` (its nebula
+IP), which is why homelab's 39 relay ports were **never publicly exposed at all** — by construction,
+not by a firewall. Repointing production's bind would make new ports safe by default.
+**Declined**, and the reasoning is worth keeping: it does **not** retire `RELAY-GUARD` (five
+non-nginx ports keep it alive), `#340` already makes the recurrence *detected* on the PR that
+introduces it, and the change costs 39 hand-edited listen lines, another gateway roll that blips
+every public service, and a reboot bind-race. Revisit only if the gate proves insufficient.
+
+### A range-based default-deny was REJECTED BY MEASUREMENT, not by taste
+The tempting cheap fix — drop `8000-8199` / `9000-9099` on `eth0` with an allowlist, one small edit,
+no nginx changes, new ports closed by default — would have **severed konnectivity** (`8132` is inside
+that range and is configured to the public address) and also caught k0s-reserved `9099`.
+🔴 **A range is blind to what is inside it.**
+
+### Instrument traps hit this session, each caught by a control
+- `docker manifest inspect` answers **"not found" for tags that plainly exist** on
+  `harbor.homelab.lan` — it reported `0.1.0` missing while the running pod was pulling it. Use
+  `docker pull` and watch the control: pull a tag you know exists, then pull the candidate.
+- `build-push.sh` builds from the **working tree, not git**. Check the four files the Dockerfile
+  copies are clean before claiming an image matches a commit.
+- My own ad-hoc IP grep filtered the two well-known public DNS resolver addresses out as "obviously
+  benign"; the repo's IP gate does not share that assumption and failed the commit. **The gate is the
+  authority, not your grep.** (Writing this very line tripped it a second time — the gate flags *any*
+  routable literal, including one quoted to explain the lesson. Describe them, don't type them.)
+- A **local resolver caches the old NXDOMAIN** for ~10 min after `external-dns` creates a record.
+  `curl` then returns `http=000`, which is your resolver, not the service.
+
+### The equivalent-mutant lesson
+Mutation-testing a fix that reordered two report blocks, the first mutant moved the `return` past
+both print blocks — output unchanged, suite green, **zero information**. The faithful mutant (early
+return placed *before* the first block, the real historical shape) killed 4 assertions. Also:
+asserting both findings' *strings* appear was too weak, because the buggy message contained the same
+token; the assertion that bites pins the **order**. **Check a mutant changes OUTPUT, not just control
+flow.**
+
 ## How to verify
 
 ```bash
-D=/home/zach/workspace/devrc
-# the store's read half (READ-ONLY, no network, no subprocess)
-python3 $D/scripts/lib/subsystem_recall.py --repo $D
-python3 $D/scripts/lib/subsystem_recall.py --ref subsystem-store-api
+# the store, from off-mesh over the real path (this repo is PUBLIC — no literal addresses here)
+TOK=$(KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store get secret subsystem-store-token \
+        -o jsonpath='{.data.token}' | base64 -d | sed -n 1p)
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $TOK" \
+     https://store.zacx.dev/api/v1/recall/devrc          # 200
+curl -s -o /dev/null -w '%{http_code}\n' https://store.zacx.dev/api/v1/recall/devrc   # 401
+curl -s -o /dev/null -w '%{http_code}\n' https://store.zacx.dev/                      # 404
+# ⚠ http=000 means YOUR RESOLVER, not the service — dig @<a-public-resolver>, or curl --resolve
 
-# the LIVE service — cluster-internal only; there is no public route
-KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store get pod,networkpolicy
-KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store port-forward svc/subsystem-store-api 18102:8102 &
-TOK=$(KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store get secret subsystem-store-token -o jsonpath='{.data.token}' | base64 -d)
-curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $TOK" http://127.0.0.1:18102/api/v1/recall/devrc   # 200
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18102/api/v1/recall/devrc                                   # 401
-getent hosts store.zacx.dev || echo "not public — correct"
+# the client-IP chain survived every hop, and the trusted-proxy value is right
+KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store logs deploy/subsystem-store-api | grep audit | tail -3
+#   want: ip=<your public IP> peer=trusted token=<fp> auth=ok result=200
+#   report the PAIR, never a bare zero:
+KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store logs deploy/subsystem-store-api \
+  | grep -c "peer=untrusted"   # 0 …and peer=trusted must be NON-zero, or the log is wired to nothing
 
-# the production node's host firewall on :8102 (re-runnable; addresses are NOT
-# written down here — this repo is public. Resolve them first:)
-P=$HOMELAB/production-kubeconfig
-NODE=$(KUBECONFIG=$P kubectl get node diffsona -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')  # private; the PUBLIC one is in `ip -o -4 addr` on the node
-LB=$(KUBECONFIG=$P kubectl -n traefik get svc traefik -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-ssh root@<node-public-ip> 'iptables-save -t raw | grep -c "dport 8102"'   # 1 = guarded (was 0)
-# 🔴 read the SIGNATURE, not just "did it fail". `-v` is required or nc prints nothing:
-nc -z -w 5 -v <node-public-ip> 8102   # want "timed out" (DROP). "refused" = the host
-nc -z -w 5 -v $LB 8102                #   ACCEPTED it and only lacked a listener — NOT closed.
-nc -z -w 5 -v <node-public-ip> 8200   # control: must stay "refused" — else the guard went blanket
+# the host firewall parity gate (runs in CI on every homelab-infra PR; also runnable by hand)
+python3 ~/workspace/homelab-talos/scripts/check-relay-guard.py        # rc 0
+bash    ~/workspace/homelab-talos/scripts/tests/test-check-relay-guard.sh   # pass=47 fail=0
+
+# the node itself — the repo checker CANNOT see it
+ssh root@<production-node> 'sha256sum /root/relay-firewall.sh; systemctl is-active relay-firewall'
+#   compare that sha to: git -C ~/workspace/homelab-talos show origin/trunk:k0s/host-firewall/relay-firewall.sh | sha256sum
+ssh root@<production-node> 'iptables-save -t raw | grep -c "^-A RELAY-GUARD"'   # 44
+
+# 🔴 THE OFF-MESH PORT PROBE — read the SIGNATURE, not "did it fail".
+#    `-v` is REQUIRED or nc prints nothing and your parser silently sees an empty string.
+#    Resolve the addresses first (never written down here — this repo is PUBLIC):
+#      LB=$(KUBECONFIG=$HOMELAB/production-kubeconfig kubectl -n traefik get svc traefik \
+#             -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+#      the node's primary public address is in `ip -o -4 addr` on the node itself
+nc -z -w 5 -v <node-public-ip> 8102   # want "timed out" (DROP).
+nc -z -w 5 -v $LB              8102   # 🔴 "refused" would mean the host ACCEPTED it and merely
+                                      #    lacked a listener — that is OPEN AT THE FIREWALL, not closed
+nc -z -w 5 -v <node-public-ip> 9100   # want "timed out" — node_exporter, closed 2026-08-18
+nc -z -w 5 -v <node-public-ip> 8200   # control: must stay "refused", else the guard went blanket
 nc -z -w 5 -v <node-public-ip> 22     # control: must stay open
+nc -z -w 5 -v <node-public-ip> 179    # control: must stay OPEN — Calico's v6 mesh needs it
 curl -s -o /dev/null -w '%{http_code}\n' https://auditloop.zacx.dev/   # 302 — edge path via a GUARDED port
 
-# the gate — read CONTENT, never a piped exit code; a cached drv prints a 0-byte log
-nix build .#checks.x86_64-linux.pytests --no-link --print-build-logs > /tmp/gate.log 2>&1
-grep -aE 'TOTAL +collected|RESULT: (PASS|FAIL)' /tmp/gate.log     # last: 11566 collected, failed=0
+# THE KILL SWITCH — one line
+#   delete `- gateway/subsystem-store-ingress.yaml` from
+#   clusters/production/apps/nebula/kustomization.yaml, commit, then:
+#   flux reconcile kustomization nebula
 ```
 ## State now — 🔴🔴 THE STORE IS PUBLIC. `#329` merged 2026-08-18T23:28:31Z.
 
-- **homelab-infra `trunk` at `d27b0cc1`.** The cutover happened; phases 1 → 1.5 are complete.
-- 🔴 **`store.zacx.dev` is LIVE on the public internet**, Cloudflare-proxied. Verified from off-mesh
-  over the real path (not a port-forward, not a hairpin):
-  - DNS resolves, via two independent public resolvers, to the **same Cloudflare anycast pair as the
-    `clawgate.zacx.dev` control** — and **not** to the Traefik LoadBalancer address the
-    `external-dns` annotation targets. (Addresses deliberately not written here: this repo is
-    PUBLIC. Compare them yourself with
-    `dig +short @<a-public-resolver> store.zacx.dev` against `kubectl -n traefik get svc traefik`.) That
-    comparison was the handoff's own "next probe (verbatim)" — a hairpin or cluster DNS would
-    otherwise hand you a confident false pass.
-  - `GET /api/v1/recall/devrc` **with** the token → **200**, 5251 bytes of real store content.
-  - **without** a token → **401**. `GET /` → **404** (single API route by design; no UI).
-  - The audit line proves the client-IP chain survives every hop:
-    `ip=<real client public IP> peer=trusted token=2481e4553f6c auth=ok result=200`.
-    `peer=trusted` is also the in-situ proof that `SUBSYSTEM_STORE_TRUSTED_PROXIES` is correct.
-  ⚠ **A local resolver may cache the old NXDOMAIN** — `getent` returned empty for ~10 min after the
-  record existed. Use `dig @<a-public-resolver>` or `curl --resolve`; an `http=000` is your resolver, not the
-  service.
-- ✅ **Image `0.2.0` is running** (homelab-infra `#343`), so `#520`'s trusted-peer fix is finally live
-  and `SUBSYSTEM_STORE_TRUSTED_PROXIES` is load-bearing rather than inert. Rolled with **0 restarts**.
-  🔴 **The next image MUST be `0.3.0`** — the mutable-tag clobber rule is unchanged.
-- ✅ **Token rotation has been exercised end to end** (homelab-infra `#344` + `#345`) — the proposal's
-  §4 pre-cutover requirement, met before the cutover rather than after. Overlap held (both tokens
-  200), then the old line was deleted and the retired token now returns **401 with `token=-`**.
+🔴 **THE CUTOVER IS DONE. `store.zacx.dev` is live on the public internet** (homelab-infra
+`#329`, merged 2026-08-18T23:28:31Z as `d27b0cc1`), Cloudflare-proxied, gated by a bearer token
+plus a mandatory `CF-Connecting-IP`.
 
-### 🔴 THE OUTERMOST LAYER MAY NOT EXIST — CHECK THIS FIRST
-`#329`'s own header names three guards in order. Layers 2 (the Traefik `subsystem-store-ratelimit`
-middleware, avg 10/s burst 20 keyed on `CF-Connecting-IP`) and 3 (the app: rotating token set,
-`hmac.compare_digest`, uniform 401, 5 failures/60s → 900s lockout, absent client-IP refused) are
-declarative, merged, and verified live. **Layer 1, the Cloudflare WAF rate rule, is console-managed
-and declared NOWHERE in the repo.** Nothing in this session created or confirmed it. Until someone
-opens the Cloudflare console and looks, treat the store as protected by layers 2 and 3 only.
+- **homelab-infra `trunk` at `d27b0cc1`; devrc `main` at `268b49f`.** Both base clones re-synced;
+  both hosts converged and switched (441 / 402 managed artifacts, 0 dangling).
+- **Live, re-read at handoff time:** pod on image `0.2.0`, ready, **restarts=0**; the public
+  authed GET returns **200**; the production node's `RELAY-GUARD` carries **44** DROP rules.
+- ✅ `0.2.0` running — `#520`'s trusted-peer fix is finally executing, and
+  `SUBSYSTEM_STORE_TRUSTED_PROXIES` is load-bearing rather than inert. **Next tag MUST be `0.3.0`.**
+- ✅ Token rotation exercised end to end (`#344` overlap, `#345` retirement) — the proposal's §4
+  pre-cutover requirement, met *before* the cutover.
+- ✅ A CI gate now catches the defect class that started this: `scripts/check-relay-guard.py` runs
+  as a `relay-guard` leg on `gitops-validate` for every homelab-infra PR (`#338` + `#340`).
 
-### The kill switch
-Delete the `- gateway/subsystem-store-ingress.yaml` line from
-`clusters/production/apps/nebula/kustomization.yaml`, commit, `flux reconcile kustomization nebula`.
-One line, and the route is gone. DNS lingers until external-dns prunes it.
-
-### Shipped (16 PRs, 3 repos — the rest in those repos' merge lists belong to other sessions)
+### Shipped this session — 12 PRs, 2 repos
 | theme | PRs |
 |---|---|
-| stranded work rescued | devrc `#507` `#508` `#509` `#510` |
-| the store as a service | devrc `#512` `#516` `#517` `#518` `#520` · homelab `#326` `#327` `#328` `#330` |
-| the structural routing fix | devrc `#522` `#527` · **talos-infra `#1081`** |
+| the exposure closed | homelab `#337` `#339` `#341` `#342` |
+| the recurrence gated | homelab `#338` `#340` |
+| the service completed | homelab `#343` `#344` `#345` `#329` |
+| the record | devrc `#529` `#532` `#533` `#543` |
 
-Plus a store entry written by hand: **`devrc/subsystem-store-api.md`** — validated, committed, 0 remotes.
-
-### 🔴 What is NOT done
-- 🔴 **The Cloudflare WAF rate rule (layer 1 of 3) is UNVERIFIED** — console-managed, declared nowhere
-  in the repo, and nothing in this session created or checked it. This is now the top open item,
-  because the store is public and this is the outermost guard.
-- **No adversarial traffic has ever hit it.** The lockout, the rate limiter and the WAF have been
-  exercised only by my own well-formed probes. Nothing has been measured under abuse.
-- **`--mode=full` / `--page` over HTTP** were never byte-compared against the pod; only the default
-  digest was — and that comparison predates `0.2.0`.
-- ~~**The API has never been exercised off-mesh**~~ — **DONE 2026-08-18**, over the public internet
-  via Cloudflare: 200 authed / 401 unauthed / 404 on `/`, with the client IP arriving intact.
-- ~~**Token rotation has never been exercised**~~ — **DONE 2026-08-18** (`#344` + `#345`), both the
-  overlap and the retirement, the latter being the step the README says people skip.
-- ~~**No image built or pushed**~~ — **DONE 2026-08-18**: `0.2.0` built, pre-flighted against the
-  production env (good value starts and prints its banner; `not-a-cidr`, a `/99` prefix and EMPTY each
-  exit 78), pushed, rolled with 0 restarts.
-- ~~**The production node's host firewall on `:8102` is UNAUDITED**~~ — **DONE 2026-08-18.** Audited;
-  the answer was *internet-reachable*, because the node's guard is a deny-list that never got an
-  `8102` rule. Closed by homelab-infra **`#337`** (merged + applied + verified: `:8102` flipped
-  refused → dropped on both public IPv4s). Full evidence under "`#329` is the on-switch" above.
-  🔴 **This one was live in `trunk` BEFORE `#329`** — the ingress PR was never what created it.
+Store entries updated in two scopes: `devrc/subsystem-store-api` and `homelab-talos/subsystem-store`.
