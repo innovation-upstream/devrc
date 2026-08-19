@@ -877,6 +877,12 @@ the real foreground (a permission prompt, a native picker, verifying with your o
 eyes). It just stops being the default advice, and it is absent from the
 autonomous agent's op set entirely.
 
+**✅ LIVE-VERIFIED against the operator's real Brave** using the sequence in *Live
+verification* below: `WAKE-RIG-SHELL` → `WAKE-RIG-RENDERED`, `visibilityState`
+`"visible"` during the wake and back to `"hidden"` after detach, and
+`xdotool getactivewindow` **unchanged** before/after — the page rendered and the
+operator's focus never moved.
+
 ### The focus steal is OPT-IN BY DEFAULT (2026-08-18)
 
 The two mitigations above are a **prose** nudge (reword `HIDDEN_TAB_NOTE` so the
@@ -1013,11 +1019,25 @@ that wanted the screen can re-run, whereas a caller that did not want it cannot
 un-interrupt the operator — but it *is* a behaviour change for every existing
 non-interactive `browser activate` caller.
 
-**✅ LIVE-VERIFIED against the operator's real Brave** using the sequence in *Live
-verification* below: `WAKE-RIG-SHELL` → `WAKE-RIG-RENDERED`, `visibilityState`
-`"visible"` during the wake and back to `"hidden"` after detach, and
-`xdotool getactivewindow` **unchanged** before/after — the page rendered and the
-operator's focus never moved.
+🔴 **VERIFICATION STATUS OF THIS SECTION — read it against the ✅ badge above, which
+is NOT about `activate`.** That badge covers the **`wake`** rig (`open` → `text` →
+`wake` → `text`); its cited sequence contains no `activate` call at all. For the
+consent gate:
+
+* **`browser activate --focus` has never been run against a real i3 — by anyone.**
+  Not in this PR (no live reproduction was performed: reproducing the bug means
+  taking the operator's screen), and not in #557, whose own commit message says
+  nothing was checked against a live i3 either. **The escape hatch is the
+  unverified surface.**
+* The **withheld** path is the half that *was* observed, and it is unverified in a
+  much weaker sense: it never enters `i3_foreground` at all, so there is no i3
+  interaction to get wrong. That is asserted on the fake's call log
+  (`test_refused_activate_makes_no_i3_round_trip_at_all`), not inferred.
+* Everything else rests on 55,003 telemetry rows plus the code path — see the table
+  above — and on the suite, not on a live run.
+
+So: the path this change **closes** is well evidenced; the path it **leaves open for
+a human who types `--focus`** is the one nobody has watched work end to end.
 
 ### Real false-outage report — a hidden tab that looked like a production outage
 

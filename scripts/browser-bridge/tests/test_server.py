@@ -3094,9 +3094,18 @@ def test_i3_foreground_waits_out_the_title_settling_race(monkeypatch):
 
 
 def test_i3_foreground_state_vocabulary_is_closed(monkeypatch):
-    """LEDGER: `result.data.i3` keeps EXACTLY the three values consumers branch
-    on, and "applied" pairs with exactly one detail. A new state added without
-    updating the consumer contract fails here."""
+    """LEDGER over `i3_foreground`'s OWN RETURNS: exactly {applied, skipped,
+    failed}, and "applied" pairs with exactly one detail.
+
+    🔴 SCOPE, corrected. This used to claim it guarded `result.data.i3` — "the
+    three values consumers branch on". That was false the moment the consent gate
+    added a FOURTH value: `withheld` is produced at the /cmd CALL SITE and never
+    passes through this function, so this enumeration cannot observe it and stayed
+    green while the field it claimed to close gained a value. A ledger that names a
+    RELATIONSHIP but pins a COMPONENT is the failure `claude/RULES.md` describes.
+
+    The field-level ledger it pretended to be now exists separately, and covers
+    both producers — see test_data_i3_value_set_is_a_closed_ledger."""
     monkeypatch.setattr(S, "i3_available", lambda: True)
     monkeypatch.setattr(S, "_resolve_i3_msg", lambda: _FAKE_I3_MSG)
     monkeypatch.setattr(S, "I3_MATCH_POLL", 0.001)
@@ -3127,6 +3136,103 @@ def test_i3_foreground_state_vocabulary_is_closed(monkeypatch):
     assert {s for s, _ in seen} == {"applied", "skipped", "failed"}, seen
     assert {d for s, d in seen if s == "applied"} == {"focused"}, seen
     assert all(d for _, d in seen), "every outcome carries a reason"
+
+
+# The COMPLETE value set of `result.data.i3`, across BOTH producers: whatever
+# `i3_foreground` returns, plus whatever the /cmd activate branch assigns without
+# calling it. Adding a value to either side without updating this line fails.
+DATA_I3_VALUES = {"applied", "skipped", "failed", "withheld"}
+
+
+def _call_site_state_values():
+    """Every value the /cmd activate branch can put in `state`, read STRUCTURALLY
+    from server.py's AST — not from running it.
+
+    Structural on purpose: a behavioural sweep can only see states some fixture
+    happens to produce, so a fifth value added on a branch no test exercises would
+    sail past it. Parsing the assignments sees it whether or not it is reachable,
+    which is the half a ledger has to have to fail when the set GROWS.
+    """
+    import ast
+    import pathlib as _pl
+    tree = ast.parse(_pl.Path(S.__file__).read_text())
+    out = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        for tgt in node.targets:
+            if not (isinstance(tgt, ast.Tuple) and len(tgt.elts) == 2):
+                continue
+            names = [e.id for e in tgt.elts if isinstance(e, ast.Name)]
+            if names[:1] != ["state"]:
+                continue
+            val = node.value
+            if isinstance(val, ast.Tuple) and val.elts:
+                first = val.elts[0]
+                if isinstance(first, ast.Constant):
+                    out.add(first.value)
+                elif isinstance(first, ast.Name):
+                    out.add(getattr(S, first.id))
+            # `state, detail = i3_foreground(...)` contributes that function's
+            # returns, which the sibling ledger above pins.
+    return out
+
+
+def _i3_foreground_return_values():
+    """The state half of every literal `return` in i3_foreground, from the AST."""
+    import ast
+    import pathlib as _pl
+    tree = ast.parse(_pl.Path(S.__file__).read_text())
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "i3_foreground")
+    out = set()
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Return) and isinstance(node.value, ast.Tuple):
+            first = node.value.elts[0]
+            if isinstance(first, ast.Constant):
+                out.add(first.value)
+            elif isinstance(first, ast.Name):
+                out.add(getattr(S, first.id))
+    return out
+
+
+def test_data_i3_value_set_is_a_closed_ledger():
+    """🔴 THE FIELD-LEVEL LEDGER: `result.data.i3` takes EXACTLY DATA_I3_VALUES.
+
+    Fails when the set GROWS *or* SHRINKS, and covers BOTH producers — the
+    `i3_foreground` returns and the call-site assignments that bypass it. The
+    predecessor of this test enumerated only the former while claiming the latter,
+    which is how a fourth value was added to this field with the suite green.
+
+    Structural rather than behavioural on the GROW side by design: a fifth value
+    added on a branch nothing exercises is exactly the case a driven sweep cannot
+    see, and exactly the case a ledger must catch.
+    """
+    produced = _i3_foreground_return_values() | _call_site_state_values()
+    assert produced == DATA_I3_VALUES, (
+        "the set of values `result.data.i3` can take has changed.\n"
+        f"  produced by the code: {sorted(produced)}\n"
+        f"  declared here:        {sorted(DATA_I3_VALUES)}\n"
+        f"  added:   {sorted(produced - DATA_I3_VALUES)}\n"
+        f"  removed: {sorted(DATA_I3_VALUES - produced)}\n"
+        "If this is a deliberate contract change, update DATA_I3_VALUES *and* the "
+        "docs that publish the vocabulary (README op table, browser CLI usage "
+        "block, _annotate_i3's docstring) in the SAME commit."
+    )
+
+
+def test_data_i3_ledger_is_not_vacuous():
+    """POSITIVE CONTROL for the ledger above: both halves must actually find
+    something. A parser that silently matched nothing would make the ledger a
+    tautology (empty == empty is false here, but a HALF that returns empty would
+    still let the other half carry it and hide a whole producer)."""
+    fg = _i3_foreground_return_values()
+    cs = _call_site_state_values()
+    assert fg, "the i3_foreground return parser found no states — it is wired to nothing"
+    assert cs, "the call-site parser found no states — it is wired to nothing"
+    # The call site must contribute at least the value i3_foreground CANNOT.
+    assert "withheld" in cs, cs
+    assert "withheld" not in fg, fg
 
 
 def test_activate_i3_telemetry_stays_metadata_only(telemetry, monkeypatch):
