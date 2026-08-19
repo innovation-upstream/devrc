@@ -388,7 +388,7 @@ second.
 
 The wrong theory is *why the bug survived four recurrences from 2026-06-06*: every fix targeted
 stash behaviour, so nobody looked for the actual writer. Fixed in `homelab-infra` (generator
-removed, stale template deleted, `scripts/check-sops-rules.sh` gates it). A checksum guard
+removed, stale template deleted, `<homelab-infra>/scripts/check-sops-rules.sh` gates it). A checksum guard
 wrapped around the suspected operation proves nothing if the real write happens elsewhere — that
 one compared hashes around the stash while the overwrite landed on the next `cd` into the repo.
 
