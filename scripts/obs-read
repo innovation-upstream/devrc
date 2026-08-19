@@ -646,14 +646,20 @@ def _free_port() -> int:
     # collision-exit to classify, so _is_port_collision is False and no retry
     # happens; _wait_ready then probes 127.0.0.1 and reaches the INTERLOPER —
     # a readiness timeout, or a wrong answer if it speaks HTTP. Two concurrent
-    # obs-read runs CANNOT produce this: the winner's kubectl holds both
-    # families, so the loser gets a clean total collision and the retry works.
+    # obs-read runs are UNLIKELY but NOT IMMUNE: kubectl's v4 and v6 binds are
+    # separate calls and it fails only if NEITHER succeeds, so if the winner has
+    # taken 127.0.0.1 but not yet [::1], the loser binds v6 and both stay alive
+    # and silent. Normally the winner holds both and the loser gets a clean total
+    # collision the retry handles — but "normally", not "cannot".
     #
     # To CLOSE both properly one would stop discarding kubectl's stdout
-    # (currently DEVNULL) and parse its own "Forwarding from ..." line, so
-    # readiness is proven by OUR child rather than by whoever happens to answer
-    # on that port — requiring the 127.0.0.1 line specifically, since the
-    # v6-only case above would otherwise still read as success.
+    # (currently DEVNULL) and parse its own "Forwarding from ..." line IN
+    # ADDITION TO the HTTP probe — the line proves OUR child owns the port at
+    # bind time, NOT that the backend answers, so it does not replace readiness.
+    # Match the 127.0.0.1 line for OUR port specifically, since the v6-only case
+    # above would otherwise still read as success — and DRAIN the pipe: kubectl
+    # writes a "Handling connection for P" line per connection and blocks once
+    # 64 KiB accumulates unread.
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.bind(("127.0.0.1", 0))
     port = s.getsockname()[1]

@@ -106,10 +106,16 @@ validated preset; treat unvalidated ones as starting points.
   **nothing to stderr, and never exits** (measured: alive at 30 s). There is no
   collision-exit to classify, so no retry — the probe hits the *interloper* on
   127.0.0.1, giving a readiness timeout, or a wrong answer if it speaks HTTP.
-  Two concurrent obs-read runs **cannot** produce this (the winner's kubectl
-  holds both families, so the loser gets a clean collision and the retry works).
+  Two concurrent obs-read runs are **unlikely but NOT immune**: kubectl's v4 and
+  v6 binds are separate calls and it fails only if *neither* succeeds, so if the
+  winner has taken 127.0.0.1 but not yet [::1], the loser binds v6 and both stay
+  alive and silent. Normally the winner holds both and the loser gets a clean
+  collision the retry handles.
 - Closing both properly means parsing kubectl's own `Forwarding from …` line
-  (today `DEVNULL`) instead of probing the port — and requiring the **127.0.0.1**
-  line specifically, or the v6-only case above still reads as success.
+  (today `DEVNULL`) **in addition to** the HTTP probe — the line proves *we* own
+  the port at bind time, not that the backend answers, so it does not replace
+  readiness. Require the **127.0.0.1** line for our own port, or the v6-only case
+  above still reads as success; and DRAIN that pipe (kubectl writes a
+  `Handling connection for P` line per connection and blocks at 64 KiB unread).
 - Known limitation (documented, unchanged): a matched-nothing result still exits
   0 — check the `--json` `matched_nothing`/`warning` fields to fail a pipeline.

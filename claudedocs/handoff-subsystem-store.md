@@ -695,10 +695,13 @@ python3 ~/workspace/homelab-talos/scripts/check-relay-guard.py        # rc 0
 bash    ~/workspace/homelab-talos/scripts/tests/test-check-relay-guard.sh   # pass=47 fail=0
 
 # 🔴 SET THESE FIRST. An angle-bracket placeholder inside this fence is shell
-# REDIRECTION, not a blank to fill in: `nc -z -w 5 -v <node-public-ip> 8102` runs an
-# empty command and TRUNCATES ./8102 to 0 B (measured, not theoretical), while printing
-# an nc usage banner that reads as "wrong flags". Addresses are never written down here
-# — this repo is PUBLIC — so resolve them into variables:
+# REDIRECTION, not a blank to fill in: `nc -z -w 5 -v <node-public-ip> 8102` runs
+# `nc -z -w 5 -v` with its stdin/stdout redirected, and IF a file named
+# node-public-ip exists in the cwd it TRUNCATES ./8102 to 0 B (measured, not
+# theoretical) while printing an nc usage banner that reads as "wrong flags".
+# With no such file bash aborts on the failed input redirect and touches nothing
+# — so testing this in an empty dir will UNDERSTATE it. Addresses are never
+# written down here — this repo is PUBLIC — so resolve them into variables:
 NODE_PUB=                             # ← the node's primary public IPv4, from `ip -o -4 addr` on the node
 LB=$(KUBECONFIG=$HOMELAB/production-kubeconfig kubectl -n traefik get svc traefik \
        -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
