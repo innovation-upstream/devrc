@@ -112,6 +112,16 @@ These rules live HERE (managed, shipped to every host), not in `~/.claude/CLAUDE
 - **`gh secret set` has NO `--body-file`** — omit `--body` entirely and it reads from **stdin** (`gh secret set NAME < file`). That is also the safe way: a secret in `--body` is exposed in argv/history.
 - **GitHub sudo-mode re-auth cannot be automated** — creating a PAT (or any sudo-mode action) always stops at a passkey/TOTP/password gate. Hand that step to the user with exact instructions instead of burning turns trying to drive it.
 
+## The Operator's Screen Is Not Yours To Take 🔴
+**Triggers**: any command that raises a window, switches a workspace, or moves focus — `i3-msg`, `xdotool windowactivate`, `wmctrl`, `browser activate`
+
+- 🔴 **Switching a workspace, raising or focusing a window changes what a human is looking at RIGHT NOW.** It is a `pkill`-class action, not a read. Never as a side effect of another task; never more than once per run; **never alternately** (ping-ponging between your window and theirs is the version that makes a machine unusable). Measured 2026-08-19: one capture subagent issued **42 `i3-msg` calls and 14 workspace switches** during a single run, restoring nothing.
+- 🔴 **If a tool already performs the raise, do NOT run `i3-msg` by hand — that is a second theft, not a fix.** `browser activate` runs the host-side raise itself; the 42 calls above were re-implementing a step the tooling already did, and the skill they were "helping" contains **zero** `i3-msg` invocations.
+- **Record before you raise; restore before you finish, including on failure.** `PREV_WIN=$(xdotool getactivewindow)` and `PREV_WS=$(i3-msg -t get_workspaces | jq -r '.[]|select(.focused).num')` BEFORE the first raise — by the time you want them back the values are gone. Restore both at the end. If you cannot restore, say so in your report.
+- 🔴 **A restore rule about FOCUS does not cover a WORKSPACE.** Every pre-existing hint in this setup said "restore focus" and none mentioned workspaces — which is the axis that actually got taken. Name both.
+- **On a single-output host, "park on its own workspace" cannot mean zero switches** — every raise pulls the visible workspace. The achievable goal is *no ping-pong*: raise once, stay there for the run, restore at the end. Say which of the two you achieved; they are different claims.
+- 🔴 **This has already happened twice, and prose alone did not stop it.** Bridge telemetry caught an earlier session grabbing the screen **1–5 times per minute** while the operator was working, diagnosed then as *"partly self-inflicted by our own docs"*. A skill whose Boundaries list has ten prohibitions and none about the operator's screen reads as permission — absence next to present siblings is not neutral.
+
 ## Files, Workspace & Safety 🟡
 **Triggers**: file creation, library use, codebase changes
 
