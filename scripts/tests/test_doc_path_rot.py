@@ -47,6 +47,49 @@ how you write a placeholder that does not trip the gate.
 Escape hatch for a genuine exception: `IGNORE_FILE`, one token per line, exact
 or a `/`-terminated prefix.
 
+🔴 RESIDUAL FALSE-RED CLASS: A CROSS-REPO PATH WHOSE FIRST SEGMENT IS A LOCAL ROOT
+----------------------------------------------------------------------------------
+`ROOTS` is `claude claudedocs cmd docs githooks nix scripts` -- among the
+commonest top-level directory names in existence -- and this is a CROSS-REPO
+skill corpus: the skills here operate homelab-talos, datapacket-talos, vetr-app
+and others, and quote THOSE repos' paths. `scripts/foo.sh` written about another
+repo is byte-identical to local rot, so the gate calls it dead. Measured by
+planting: all six of `scripts/gitops-delta-gate.sh`,
+`scripts/validate-skill-paths.sh`, `docs/architecture/overview.md`,
+`nix/modules/server.nix`, `cmd/server/main.go` and
+`claudedocs/handoff-foo-2026-01-01.md` go RED. It is not hypothetical -- THREE
+entries in the first cut of `BASELINE_FILE` were this mistake rather than rot,
+and the baseline header claimed all of them had been hand-confirmed absent.
+
+THE AUTHOR'S FIX IS ONE TOKEN: name the repo in angle brackets --
+`<homelab-talos>/scripts/check-gitleaks-baseline.py`. Rule 3 already skips any
+token containing `<`, so the reference goes invisible to the gate AND becomes
+more informative to the agent reading the skill, which is the outcome we want
+either way. Pinned by `test_a_cross_repo_path_named_with_its_repo_is_invisible`.
+
+This limitation is STATED, not solved. Until the corpus adopts the convention
+everywhere, a colliding first segment stays indistinguishable from local rot;
+migrating the whole corpus is separate work.
+
+TWO TIERS -- THIS MODULE MUST RUN WHERE IT ACTUALLY GATES
+----------------------------------------------------------
+`scripts/tests` is in `scripts/run-tests.sh`'s `HERMETIC_TARGETS`, and
+`flake.nix` `checks.pytests` runs that set over a COPY OF THE FLAKE SOURCE --
+tracked files only, and NO `.git`. An unguarded `git ls-files` blows up there
+with exit 128: measured 6 failures, the gate itself among them, i.e. the gate
+was dev-host-only in the tier that actually blocks a merge.
+
+So the corpus and the top-level-directory set FALL BACK TO A FILESYSTEM WALK
+when `.git` is absent -- they do not skip. The two populations coincide in that
+tree by construction (it holds only tracked files), and
+`test_index_and_filesystem_corpora_agree` asserts they coincide HERE too, where
+both are computable. Nothing is skipped in either tier: `_uncorpused_docs` is
+the one function whose answer is weaker without an index ("untracked" is not a
+filesystem property), and rather than skip it -- a skip that fires in one tier
+and not the other is the exact defect `run-tests.sh`'s EXPECTED_SKIPS header
+describes -- it is driven against a REAL temp git repo by
+`test_the_uncorpused_probe_can_actually_fire`, in both tiers.
+
 RELATIVE PATHS RESOLVE AGAINST THE CITING DOC'S OWN DIRECTORY
 --------------------------------------------------------------
 A token starting with `..` is normalised against `dirname(<the doc>)`. This
@@ -91,15 +134,28 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+# The same root with symlinks AND `..` collapsed, for containment assertions:
+# `pathlib` never normalises `..`, so a lexical `in target.parents` check passes
+# for a route that resolves outside the tree. See
+# `test_no_resolution_ever_leaves_the_repo`.
+REPO_ROOT_REAL = Path(os.path.realpath(REPO_ROOT))
 HERE = Path(__file__).resolve().parent
-BASELINE_FILE = HERE / "doc-path-baseline.txt"
-IGNORE_FILE = HERE / "doc-path-ignore.txt"
+# 🔴 NOT `.txt`. `test_no_captured_markup.py` gates every tracked `.txt` for
+# pasted prose, and this file's own explanatory header -- 16 lines of it, longest
+# 98 chars -- tripped that gate the day the baseline landed, turning a green
+# repo-wide guard red. The suffixes are honest rather than evasive: the baseline
+# IS tab-separated, the ignore file IS a token list. Pinning a count in the
+# markup gate's allowlist was the alternative and it is count-pinned, so any
+# later reword of the header would red it again.
+BASELINE_FILE = HERE / "doc-path-baseline.tsv"
+IGNORE_FILE = HERE / "doc-path-ignore.list"
 
 # The corpus. Built from the INDEX (`git ls-files`), not the working tree, so
 # the same commit validates identically for everyone -- and so an untracked
@@ -310,10 +366,18 @@ def _candidate_tokens(text: str):
 
 
 # A SELECTOR appended to a real path: a pytest node id (`file.py::TestCase`) or
-# a line/range citation (`file.sh:28-34`, `file.py:120`). Both name a file that
-# exists and both were reported DEAD by the first draft of this gate -- a
-# correct reference the gate called rot, which is a defect in the gate.
-_SELECTOR = re.compile(r"(::.*|:\d+(-\d+)?)$")
+# a line/range citation (`file.sh:28-34`, `file.py:120`, `file.sh:12:5`). All
+# name a file that exists and all were reported DEAD by an earlier draft of this
+# gate -- a correct reference the gate called rot, which is a defect in the gate.
+#
+# 🔴 The `:N` group REPEATS. `file:line:col` is the standard compiler / ripgrep /
+# LSP citation format, and a single-`:N` pattern strips only the column, leaving
+# `scripts/run-tests.sh:12` -- which then collects the `scripts/` extensionless
+# affordance below and is reported DEAD. Measured before the fix:
+# `scripts/run-tests.sh:12:5` -> dead. (Outside `scripts/` the same token was
+# merely invisible, because `.sh:12` is not a known extension -- so the defect
+# bit exactly the paths this repo cites most.)
+_SELECTOR = re.compile(r"(::.*|(?::\d+(?:-\d+)?)+)$")
 
 
 def _normalise(token: str) -> str:
@@ -383,17 +447,112 @@ def _ignored(token: str, ignores: list[str]) -> bool:
 # --- the gate ----------------------------------------------------------------
 
 
-def _git(*args: str) -> list[str]:
+def _has_index(root: Path = REPO_ROOT) -> bool:
+    """Is there a git index to read here?
+
+    `.git` is a DIRECTORY in a clone and a FILE in a worktree, so `.exists()`
+    rather than `.is_dir()`. Deliberately re-evaluated per call, never cached at
+    import: the probes point these helpers at a temp tree that acquires and
+    loses its `.git` mid-test.
+    """
+    return (root / ".git").exists()
+
+
+def _git(*args: str, root: Path = REPO_ROOT) -> list[str]:
     out = subprocess.run(
-        ["git", "-C", str(REPO_ROOT), *args],
+        ["git", "-C", str(root), *args],
         capture_output=True, text=True, check=True,
     ).stdout
     return [p for p in out.split("\0") if p]
 
 
+def _corpus_from_index(root: Path = REPO_ROOT) -> list[str]:
+    """Corpus docs from the INDEX -- the authoritative population."""
+    return sorted(
+        p for p in _git("ls-files", "-z", "--", *CORPUS_DIRS, root=root) if p.endswith(".md")
+    )
+
+
+def _corpus_from_filesystem(root: Path = REPO_ROOT) -> list[str]:
+    """Corpus docs by WALKING THE TREE -- the no-index fallback.
+
+    Not a skip. The tier that actually gates a merge (`flake.nix`
+    `checks.pytests`, over a copy of the flake source) has no `.git`, and a gate
+    that stands down there is a gate on the dev host only. That copy contains
+    exactly the tracked files, so this walk and the index agree by construction
+    -- and `test_index_and_filesystem_corpora_agree` asserts they agree here too.
+
+    Dot-prefixed segments are dropped so a `.git`/`.venv`/`.pytest_cache` copy of
+    a doc cannot enter the corpus. `Path.rglob` does not descend symlinked
+    directories, which keeps the walk inside the tree.
+    """
+    out: list[str] = []
+    for entry in CORPUS_DIRS:
+        p = root / entry
+        if p.is_file():
+            if entry.endswith(".md"):
+                out.append(entry)
+            continue
+        if not p.is_dir():
+            continue
+        for f in p.rglob("*.md"):
+            rel = f.relative_to(root)
+            if any(seg.startswith(".") for seg in rel.parts):
+                continue
+            if f.is_file():
+                out.append(str(rel))
+    return sorted(out)
+
+
+def _corpus_docs(root: Path = REPO_ROOT) -> list[str]:
+    return _corpus_from_index(root) if _has_index(root) else _corpus_from_filesystem(root)
+
+
 def _corpus() -> list[str]:
-    """Tracked markdown docs in the corpus, repo-relative, from the INDEX."""
-    return sorted(p for p in _git("ls-files", "-z", "--", *CORPUS_DIRS) if p.endswith(".md"))
+    """The corpus of this repo: tracked markdown docs, repo-relative."""
+    return _corpus_docs(REPO_ROOT)
+
+
+def _uncorpused_docs(root: Path = REPO_ROOT) -> list[str]:
+    """Corpus-SHAPED docs on disk that the corpus does not contain.
+
+    With an index that is exactly the untracked (and ignored) set, which is the
+    silent zero this reports on: a doc created and not `git add`ed is not merely
+    unchecked, it is UNCOUNTED. Without an index both sides are the same walk and
+    the answer is structurally empty -- honest, because that tier is a copy of
+    the flake source and cannot contain an untracked file. Driven against a REAL
+    temp git repo by `test_the_uncorpused_probe_can_actually_fire`, so the zero
+    reported here comes from a function known to be able to fire.
+    """
+    return sorted(set(_corpus_from_filesystem(root)) - set(_corpus_docs(root)))
+
+
+def _tracked_top_level(root: Path = REPO_ROOT) -> set[str]:
+    """The repo's real top-level directories.
+
+    🔴 NOT `root.iterdir()`. A working tree carries gitignored build output and
+    sibling checkouts -- `result` from any `nix build`, and (measured on the
+    author's clone) a `tmux-fuzzyclaw/` directory -- so an iterdir-derived set
+    makes an ORDINARY tree fail this module, reported as a doc-path problem whose
+    remedy reads "delete your build output". A permanently-red gate is worse than
+    no gate.
+
+    From the INDEX where there is one; from the filesystem otherwise, where the
+    tree is the flake source and therefore tracked-only anyway.
+
+    DOT-PREFIXED entries are excluded on BOTH sides -- `.config/` and `.serena/`
+    are tracked, and `ROOTS` has never included them. A token whose first
+    segment starts with a dot is not a claim this gate settles (`.claude/…`
+    always names ANOTHER repo's in-tree config here; see `_resolve`), so the two
+    definitions agree.
+    """
+    if _has_index(root):
+        return {
+            p.split("/", 1)[0]
+            for p in _git("ls-files", "-z", root=root)
+            if "/" in p and not p.startswith(".")
+        }
+    return {p.name for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")}
 
 
 def _references(docs: dict[str, str] | None = None) -> list[tuple[str, int, str]]:
@@ -443,13 +602,33 @@ def _baseline() -> set[tuple[str, str]]:
 # --- tests: positive controls ------------------------------------------------
 
 
+# 🔴 BOTH FLOORS ARE COLLAPSE DETECTORS, NOT A CENSUS -- and each is HALF the
+# measured value, by a stated rule rather than by taste.
+#
+# MEASURED at the commit that fixed this module: 80 corpus docs, 310 checked
+# references (not "~330"; the earlier figure in this docstring was never the
+# measurement). The failure these guard against is the extractor BREAKING, which
+# drives the count to ~0 -- not gradual drift.
+#
+# The floors used to be 70 and 300, i.e. 12% and 3.2% slack. That is far too
+# tight for THIS repo, whose headline workflow is PRUNING documentation: NINE
+# docs hold more than 10 references each (`CLAUDE.md` 40,
+# `claude/skills/activity/SKILL.md` 21, `claude/skills/bar/SKILL.md` 17), so
+# deleting any one of the top three breached the 300 floor -- and the failure
+# message says "the extractor broke", sending the reader to look for a bug that
+# is not there. Half is comfortably below any plausible prune and still an order
+# of magnitude above a broken extractor.
+CORPUS_DOC_FLOOR = 40      # measured 80
+REFERENCE_FLOOR = 155      # measured 310
+
+
 def test_corpus_is_not_empty():
     """POSITIVE CONTROL on the corpus builder. A reassuring zero here is
     indistinguishable from a gate wired to nothing."""
     docs = _corpus()
-    assert len(docs) >= 70, (
-        f"only {len(docs)} corpus doc(s) found -- expected the ~80 tracked "
-        f"markdown files under {CORPUS_DIRS}. The corpus builder has broken."
+    assert len(docs) >= CORPUS_DOC_FLOOR, (
+        f"only {len(docs)} corpus doc(s) found -- 80 were measured under "
+        f"{CORPUS_DIRS}. The corpus builder has broken."
     )
 
 
@@ -458,27 +637,41 @@ def test_reference_count_is_in_the_hundreds():
 
     A gate that checks 0 references passes forever and means nothing. This
     corpus is ~700 KB of operational prose densely written in backticked paths;
-    if the count collapses, the extractor broke, not the corpus. The floor is
-    set well under the measured value (300 vs ~330) so ordinary doc churn does
-    not red it, and it is a FLOOR -- raise it, never lower it.
+    if the count collapses, the extractor broke, not the corpus. See the
+    `REFERENCE_FLOOR` header for why the floor sits at half the measured 310 and
+    not just under it.
     """
     n = len(_references())
-    assert n >= 300, (
-        f"the extractor found only {n} path reference(s) in the corpus. That is "
-        "far below what this corpus contains -- the fence tracker, the code-span "
-        "reader or the namespace test has broken, and a PASS from this module "
-        "would be a claim about the extractor, not about the docs."
+    assert n >= REFERENCE_FLOOR, (
+        f"the extractor found only {n} path reference(s) in the corpus, against "
+        f"310 measured and a floor of {REFERENCE_FLOOR}. A drop that large is "
+        "the fence tracker, the code-span reader or the namespace test breaking, "
+        "and a PASS from this module would be a claim about the extractor, not "
+        "about the docs."
     )
 
 
 # --- tests: the gate ---------------------------------------------------------
 
 
+def _new_dead(refs, baseline) -> list[tuple[str, int, str]]:
+    """Dead references `baseline` does not license.
+
+    🔴 The key is `(doc, token)`, NOT the token alone: a baseline entry licenses
+    the dead path IN THE DOC THAT CITES IT and nowhere else. Otherwise one
+    grandfathered line silently grandfathers the same rot in every doc that
+    copies it -- which is how a stale pointer spreads through a skill corpus in
+    the first place. Pinned by
+    `test_a_baseline_entry_licenses_only_the_doc_it_names`, which is what turns
+    the doc half of this key from a comment into a tested property (dropping it
+    survived the whole 56-test suite before that probe existed).
+    """
+    return [(d, n, t) for d, n, t in _dead(refs) if (d, t) not in baseline]
+
+
 def test_no_new_dead_paths():
     """THE GATE. A pre-existing dead reference warns; a new one blocks."""
-    dead = _dead(_references())
-    baseline = _baseline()
-    new = [(d, n, t) for d, n, t in dead if (d, t) not in baseline]
+    new = _new_dead(_references(), _baseline())
     assert not new, (
         f"{len(new)} NEW dead path reference(s) -- a doc claims a file that does "
         "not exist:\n"
@@ -511,33 +704,44 @@ def test_baseline_only_shrinks():
 
 
 def test_no_untracked_corpus_candidates():
-    """THE SILENT ZERO. The corpus is `git ls-files`, i.e. the INDEX, so a doc
+    """THE SILENT ZERO. Where there is an index the corpus IS the index, so a doc
     created and not yet `git add`ed is not merely unchecked -- it is UNCOUNTED,
     and the only tell would be a reference count that fails to move.
 
-    Reported rather than checked, because widening the corpus to the working
+    Reported rather than absorbed, because widening the corpus to the working
     tree would make the same commit validate differently for two people.
+
+    In a tree with no index the two populations are the same walk and this is
+    structurally empty; see `_uncorpused_docs`, and
+    `test_the_uncorpused_probe_can_actually_fire` for the positive control that
+    keeps the zero meaningful in both tiers.
     """
-    untracked = sorted(
-        p for p in _git("ls-files", "-z", "--others", "--exclude-standard", "--", *CORPUS_DIRS)
-        if p.endswith(".md")
-    )
+    untracked = _uncorpused_docs()
     assert not untracked, (
-        "untracked corpus candidate doc(s) -- NOT CHECKED, NOT COUNTED:\n"
+        "corpus candidate doc(s) on disk that the corpus does NOT contain -- "
+        "NOT CHECKED, NOT COUNTED:\n"
         + "\n".join(f"  {p}" for p in untracked)
-        + "\n`git add` them and re-run so their path claims are actually checked."
+        + "\n`git add` them and re-run so their path claims are actually checked "
+        "(or, if one is deliberately gitignored, move it out of the corpus dirs)."
     )
 
 
 def test_roots_are_the_real_top_level_directories():
     """ROOTS is a claim about the tree; pin it so a new top-level directory is a
-    visible decision rather than a silently unchecked namespace."""
-    actual = {p.name for p in REPO_ROOT.iterdir() if p.is_dir() and not p.name.startswith(".")}
+    visible decision rather than a silently unchecked namespace.
+
+    🔴 Against the TRACKED tree, not the working tree. See `_tracked_top_level`:
+    an iterdir-derived set made this assertion FALSE on the author's own clone
+    (`only on disk: ['tmux-fuzzyclaw']`) and on any clone where someone has run
+    `nix build` and left a `result` symlink -- both gitignored, both ordinary.
+    """
+    actual = _tracked_top_level()
     assert ROOTS == actual, (
-        f"ROOTS disagrees with the tree.\n  only in ROOTS: {sorted(ROOTS - actual)}"
-        f"\n  only on disk: {sorted(actual - ROOTS)}\n"
+        f"ROOTS disagrees with the tracked tree.\n  only in ROOTS: {sorted(ROOTS - actual)}"
+        f"\n  only in the tree: {sorted(actual - ROOTS)}\n"
         "A directory missing from ROOTS means every path claim into it is "
-        "silently unchecked."
+        "silently unchecked. (Gitignored build output and sibling checkouts are "
+        "deliberately invisible here and must never appear in this list.)"
     )
 
 
@@ -696,6 +900,12 @@ def test_planted_dead_path_is_reported(markdown, token):
         "`docs/no-such-thing`",
         "`scripts/tests/test_prune_skill_size.py::test_skill_md_exists`",  # pytest node id
         "`scripts/gate.sh:1-40`",                       # line-range citation
+        "`scripts/gate.sh:104`",                        # line citation
+        # file:LINE:COL -- the standard compiler / ripgrep / LSP citation. The
+        # `scripts/` extensionless affordance meant a half-stripped selector was
+        # reported DEAD, so this shape is a REGRESSION case, not decoration.
+        "`scripts/gate.sh:104:12`",
+        "`claude/RULES.md:10:3`",
         # Placeholders and notation: skipped, never flagged.
         "`claude/skills/<name>/SKILL.md`",
         "`claude/skills/*/reference/*.md`",
@@ -867,9 +1077,18 @@ def test_no_resolution_ever_leaves_the_repo(tmp_path):
         target = _resolve(token, PROBE_DOC)
         if target is None:
             continue
-        assert REPO_ROOT in target.parents or target == REPO_ROOT, (
-            f"{token} resolved to {target}, OUTSIDE the repo -- the gate is "
-            "reading the host filesystem and its verdict depends on the machine."
+        # 🔴 NORMALISE FIRST. `pathlib` does not collapse `..`, so
+        # `REPO_ROOT in target.parents` is a LEXICAL claim: a route that still
+        # carries `..` segments passes containment while the OS -- which
+        # resolves `..` at stat time -- would walk straight out of the tree.
+        # Measured: mutant M23 (keeping the `..` segments in `_under_repo`'s
+        # off-tree redirect) SURVIVED this assertion in its lexical form. The
+        # runtime guard was correct; the test was spelled, not structural.
+        resolved = Path(os.path.realpath(target))
+        assert resolved == REPO_ROOT_REAL or REPO_ROOT_REAL in resolved.parents, (
+            f"{token} resolved to {target} (-> {resolved}), OUTSIDE the repo -- "
+            "the gate is reading the host filesystem and its verdict depends on "
+            "the machine."
         )
 
 
@@ -902,7 +1121,8 @@ def test_home_expanded_spelling_is_not_a_claim():
 def test_ignore_matcher_handles_both_forms():
     """POSITIVE CONTROL on the escape hatch.
 
-    `doc-path-ignore.txt` is EMPTY today, so nothing in the corpus exercises
+    `doc-path-ignore.list` is nearly empty, so almost nothing in the corpus
+    exercises
     `_ignored` — a matcher wired to nothing would look identical. Graded here
     directly, on both documented forms, so the hatch is known to work the day
     someone needs it.
@@ -930,8 +1150,17 @@ def test_ignore_matcher_handles_both_forms():
         # A path with no directory part: one segment, indistinguishable from
         # prose (`README.md`, `flake.nix` are also ordinary words in a sentence).
         "`no-such-file.md`",
+        # An extension the gate does not know: rule 4 says a last segment is a
+        # file only if it carries a KNOWN extension, so this is prose. Written
+        # OUTSIDE `scripts/` on purpose -- inside it the extensionless
+        # affordance would claim the token whatever its suffix. Relaxing
+        # `ext.group(1) in EXTS` to `bool(ext)` -- which SURVIVED the whole
+        # suite before this case existed -- turns every `foo.example`,
+        # `v1.2` and `Deployment.spec` shaped token in the corpus into a claim.
+        "`claude/skills/no-such-skill/notes.unknownext`",
     ],
-    ids=["non-root-first-segment", "misspelt-above-the-mapped-prefix", "single-segment"],
+    ids=["non-root-first-segment", "misspelt-above-the-mapped-prefix", "single-segment",
+         "unknown-extension"],
 )
 def test_stated_limit_a_non_root_first_segment_is_invisible(markdown):
     """STATED LIMITS, pinned so they stay KNOWN limits rather than surprises.
@@ -944,3 +1173,194 @@ def test_stated_limit_a_non_root_first_segment_is_invisible(markdown):
     test is where the decision was recorded.
     """
     assert _refs(markdown) == []
+
+
+# --- the cross-repo collision, and its one-token escape hatch ----------------
+
+# Written about ANOTHER repo, first segment collides with one of ours. Every one
+# of these was planted and went RED before the `<repo>/` convention was
+# documented; they are the residual false-red class named in the module
+# docstring.
+CROSS_REPO_SHAPES = [
+    "scripts/gitops-delta-gate.sh",
+    "scripts/validate-skill-paths.sh",
+    "docs/architecture/overview.md",
+    "nix/modules/server.nix",
+    "cmd/server/main.go",
+    "claudedocs/handoff-foo-2026-01-01.md",
+]
+
+
+@pytest.mark.parametrize("bare", CROSS_REPO_SHAPES, ids=lambda v: v[:40])
+def test_a_cross_repo_path_named_with_its_repo_is_invisible(bare):
+    """THE ESCAPE HATCH, pinned in BOTH arms.
+
+    Arm 1 -- the hazard is real: written bare, a path about another repo is
+    indistinguishable from local rot and the gate calls it dead. This half is
+    graded as a FACT ABOUT THE GATE, not as an aspiration; if it ever stops
+    being true, the docstring's stated limitation is stale and must be rewritten.
+
+    Arm 2 -- the remedy costs one token: `<repo>/…` contains `<`, which rule 3
+    already skips, AND its first segment is not a `ROOTS` entry, which rule 2
+    already skips. Two independent mechanisms, so this arm cannot tell you WHICH
+    one fired -- deliberate: the hatch survives either being narrowed, and the
+    `<name>` placeholder cases above still pin `META` on its own. An author who
+    hits the false red gets a one-token fix instead of a block, and the
+    resulting doc tells the reader WHICH repo, which is strictly better prose.
+    Graded as INVISIBLE (`_refs == []`), not merely
+    not-dead: a token that is still counted would come back the moment someone
+    widened the resolver.
+    """
+    assert _dead_tokens(f"`{bare}`") == [bare], (
+        f"`{bare}` no longer reads as local rot. If the resolver learned to tell "
+        "cross-repo paths apart, delete the stated limitation from the module "
+        "docstring and this arm with it."
+    )
+    named = f"<some-other-repo>/{bare}"
+    assert _refs(f"`{named}`") == [], (
+        f"`{named}` was counted. The `<repo>/…` escape hatch documented in the "
+        "module docstring and in the ignore file no longer works, so an author "
+        "hitting the false red above has no cheap fix."
+    )
+
+
+# --- probes on the delta contract and the two tiers --------------------------
+
+
+def test_a_baseline_entry_licenses_only_the_doc_it_names():
+    """M6: the baseline key is `(doc, token)`, and that half is TESTED.
+
+    Dropping the doc from the key survived all 56 tests before this probe
+    existed -- the property was a comment. Both arms are graded: the citing doc
+    keeps its licence, and any OTHER doc citing the same dead token is reported
+    as NEW. Otherwise one grandfathered line grandfathers the same rot corpus-
+    wide, which is precisely how a stale pointer propagates through skills.
+    """
+    baseline = _baseline()
+    # Deterministic, and root-relative so resolution does not depend on the
+    # citing doc -- a `../` entry would resolve differently from PROBE_DOC and
+    # the probe would pass for the wrong reason.
+    doc_a, token = sorted((d, t) for d, t in baseline if not t.startswith(".."))[0]
+    assert doc_a != PROBE_DOC
+
+    licensed = _new_dead(_references({doc_a: f"`{token}`"}), baseline)
+    assert licensed == [], (
+        f"{doc_a}\t{token} is in the baseline but was still reported as NEW in "
+        "its own doc -- the delta contract is broken."
+    )
+
+    elsewhere = _new_dead(_references({PROBE_DOC: f"`{token}`"}), baseline)
+    assert elsewhere == [(PROBE_DOC, 1, token)], (
+        f"a baseline entry for {doc_a} licensed the same dead token cited from "
+        f"{PROBE_DOC}. The baseline key must be (doc, token), not token."
+    )
+
+
+def _init_probe_repo(root: Path) -> None:
+    """A minimal real git repo with one TRACKED and one UNTRACKED corpus doc."""
+    (root / "claude" / "skills" / "ghost").mkdir(parents=True)
+    (root / "claude" / "kept.md").write_text("`claude/kept.md`\n", encoding="utf-8")
+    (root / "claude" / "skills" / "ghost" / "SKILL.md").write_text("ghost\n", encoding="utf-8")
+    subprocess.run(["git", "-c", "init.defaultBranch=main", "init", "-q", str(root)],
+                   check=True, capture_output=True, text=True)
+    subprocess.run(["git", "-C", str(root), "add", "claude/kept.md"],
+                   check=True, capture_output=True, text=True)
+
+
+def test_the_uncorpused_probe_can_actually_fire(tmp_path):
+    """N11: the POSITIVE CONTROL the untracked check never had.
+
+    `test_no_untracked_corpus_candidates` reports a reassuring zero, and a
+    reassuring zero is indistinguishable from a probe wired to nothing --
+    replacing its enumeration with `[]` SURVIVED the whole suite. So drive the
+    enumerator against a REAL temp git repo where the answer must be non-zero,
+    and watch the number move.
+
+    The second half is the two-TIER pin: delete `.git` and the same tree reports
+    nothing missing -- because both sides become the same filesystem walk -- while
+    the corpus still CONTAINS both docs. That is the honest shape of the
+    fallback: it does not skip, it does not under-count, and the one thing it
+    cannot do is tell tracked from untracked.
+    """
+    _init_probe_repo(tmp_path)
+
+    assert _corpus_from_index(tmp_path) == ["claude/kept.md"]
+    assert _corpus_from_filesystem(tmp_path) == [
+        "claude/kept.md", "claude/skills/ghost/SKILL.md",
+    ]
+    assert _uncorpused_docs(tmp_path) == ["claude/skills/ghost/SKILL.md"], (
+        "the untracked-doc enumerator did not fire on a tree that definitely "
+        "has one -- every zero it reports on the real repo means nothing."
+    )
+    assert _has_index(tmp_path)
+
+    # The NO-INDEX tier, executed rather than reasoned about.
+    shutil.rmtree(tmp_path / ".git")
+    assert not _has_index(tmp_path)
+    assert _corpus_docs(tmp_path) == [
+        "claude/kept.md", "claude/skills/ghost/SKILL.md",
+    ], "the filesystem fallback lost a doc -- it must never check LESS than the index"
+    assert _uncorpused_docs(tmp_path) == []
+
+
+def test_index_and_filesystem_corpora_agree(tmp_path):
+    """SEAM GUARD across the two tiers.
+
+    The dev host reads the INDEX; the nix-sandbox tier walks the FILESYSTEM. Two
+    populations nobody owns together, and a divergence is invisible in EITHER
+    tier alone, because each is internally consistent.
+
+    TWO ARMS, so this asserts something real wherever it runs:
+
+      * a temp repo in which every doc is tracked -- the state both builders are
+        supposed to agree on. Runs in both tiers, since it brings its own `.git`;
+      * THIS repo, whenever it has an index. That arm cannot run in the sandbox
+        (there is no index to compare against), which is exactly why the first
+        arm exists rather than a bare `if`.
+
+    A failure of the second arm means either an untracked corpus doc (see
+    `test_no_untracked_corpus_candidates`, which will also be red) or a
+    gitignored one -- the nastier case, since it would be CHECKED in the gating
+    tier and invisible on the dev host.
+    """
+    _init_probe_repo(tmp_path)
+    subprocess.run(["git", "-C", str(tmp_path), "add", "claude/skills/ghost/SKILL.md"],
+                   check=True, capture_output=True, text=True)
+    both = ["claude/kept.md", "claude/skills/ghost/SKILL.md"]
+    assert _corpus_from_index(tmp_path) == both
+    assert _corpus_from_filesystem(tmp_path) == both
+    shutil.rmtree(tmp_path / ".git")
+    assert _corpus_docs(tmp_path) == both, (
+        "with everything tracked, dropping the index must change nothing"
+    )
+
+    if _has_index():
+        assert set(_corpus_from_index()) == set(_corpus_from_filesystem()), (
+            "the index and the filesystem disagree about this repo's corpus, so "
+            "the dev host and the nix-sandbox tier are checking different sets "
+            "of docs."
+        )
+
+
+def test_the_top_level_set_ignores_untracked_build_output(tmp_path):
+    """`_tracked_top_level` reads the INDEX, so ordinary local clutter is
+    invisible.
+
+    Executed against a real repo carrying exactly the two shapes that made the
+    old iterdir-based assertion FALSE on the author's clone: a gitignored
+    sibling checkout (`tmux-fuzzyclaw/`) and a `nix build` `result` symlink.
+    """
+    _init_probe_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text("/tmux-fuzzyclaw\n/result\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", ".gitignore"],
+                   check=True, capture_output=True, text=True)
+    (tmp_path / "tmux-fuzzyclaw").mkdir()
+    (tmp_path / "tmux-fuzzyclaw" / "flake.nix").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "build-output").mkdir()
+    (tmp_path / "result").symlink_to(tmp_path / "build-output", target_is_directory=True)
+
+    assert _tracked_top_level(tmp_path) == {"claude"}, (
+        "gitignored build output or a sibling checkout reached the top-level "
+        "set. That reds the whole gate on an ordinary working tree, with a "
+        "message about doc paths."
+    )

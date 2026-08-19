@@ -1,0 +1,44 @@
+# doc-path-ignore.list — explicit exceptions for scripts/tests/test_doc_path_rot.py.
+#
+# One literal token per line, matched against the token AFTER `_normalise`
+# (a leading `./` and a trailing `:12`/`:12:5`/`::node_id` selector are already
+# stripped). A line ending in "/" is a PREFIX and exempts everything beneath it.
+# "#" starts a comment.
+#
+# 🔴 NOT a `.txt`. test_no_captured_markup.py gates every tracked `.txt` for
+# pasted prose, and this file's sibling baseline tripped it the day it landed.
+# The suffix says what the file is: a list of tokens.
+#
+# Use this ONLY when a token is genuinely path-shaped, resolves inside the
+# namespace the gate checks, and yet is not a claim that a file exists here —
+# for example a literal copy-paste command that must run inside a DIFFERENT
+# clone, or a file that is conditionally present by design.
+#
+# PREFER FIXING THE DOC — two one-token fixes cover almost every case:
+#   * a VARIABLE segment written as <name>, e.g. `claude/skills/<name>/SKILL.md`
+#   * a CROSS-REPO path written `<repo>/…`, e.g.
+#     `<homelab-talos>/scripts/check-gitleaks-baseline.py`
+# Both are skipped automatically, and both leave the doc MORE informative than
+# a silent exemption here. So do a glob, a brace expansion and a $VAR.
+#
+# 🔴 THE CROSS-REPO CASE IS THE COMMON ONE, and it is why the second bullet
+# exists. `ROOTS` is `claude claudedocs cmd docs githooks nix scripts` — among
+# the commonest top-level directory names anywhere — while this is a CROSS-REPO
+# skill corpus. Another repo's `scripts/foo.sh` is byte-identical to local rot,
+# and EIGHT entries in the first cut of doc-path-baseline.tsv were exactly that
+# mistake, mislabelled as rot. Name the repo and the false red disappears.
+#
+# AN ENTRY HERE IS GLOBAL — it matches the token in EVERY doc, so it also
+# exempts a future doc that wrongly claims the file is live. A dead reference
+# that is scoped to one doc belongs in doc-path-baseline.tsv instead, which
+# keys on (doc, token).
+#
+# EMPTY BY DESIGN, and that is a result, not an oversight: at the commit that
+# introduced the gate every checked reference was either live, genuine rot
+# (baselined), or a cross-repo path fixable in the doc — and everything
+# unsettleable (another repo's relative paths, per-host files under ~/.claude/
+# that nix does not deploy, absolute paths) is excluded STRUCTURALLY by the
+# resolver rather than by a hand-maintained list. An entry here should be rare
+# enough to argue for in review.
+#
+# --- entries ---------------------------------------------------------------

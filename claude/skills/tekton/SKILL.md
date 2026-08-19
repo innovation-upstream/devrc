@@ -99,7 +99,8 @@ kustomize + kubeconform + gitleaks + helm render-diff + sops-rules.
   `BASELINE DRIFT: gitleaks` instead of masquerading as `FAILED: gitleaks`. That masquerade
   is what made the gate look permanently broken. (Drift still sets the commit state to
   `failure` — only the description distinguishes it.) Third class: `COULD NOT RUN: <leg>`.
-- **`scripts/check-gitleaks-baseline.py`** (+ `scripts/tests/test-check-gitleaks-baseline.sh`).
+- **`<homelab-talos>/scripts/check-gitleaks-baseline.py`**
+  (+ `<homelab-talos>/scripts/tests/test-check-gitleaks-baseline.sh`).
   rc: `0` clean · `1` drift ONLY · `2` usage/environment error · `3` drift **AND** a finding
   with no baseline counterpart. 🔴 **It fails CLOSED** — `die()` is `NoReturn`/rc=2 for a
   missing, empty, unreadable or malformed baseline. An earlier revision let an `OSError`

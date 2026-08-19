@@ -1,0 +1,111 @@
+# doc-path-baseline.tsv — the KNOWN-dead path references that PREDATE the gate.
+#
+# Read by scripts/tests/test_doc_path_rot.py. One entry per line:
+#
+#     <citing doc><TAB><token exactly as the author wrote it>
+#
+# 🔴 NOT a `.txt`. test_no_captured_markup.py gates every tracked `.txt` for
+# pasted prose, and this header tripped it on day one (16 findings, longest 98
+# chars) — a new gate turning an existing green gate red. The suffix is honest:
+# the entries below really are tab-separated.
+#
+# WHAT THIS IS FOR. A doc-rot gate that goes red on day one gets bypassed, and
+# then ignored — claude/RULES.md names a permanently-red gate as worse than no
+# gate. So the gate is a DELTA gate: a dead reference listed here WARNS (it is
+# simply not failed), and any dead reference NOT listed here BLOCKS.
+#
+# 🔴 THIS FILE MAY ONLY SHRINK.
+#   * Fixing rot means DELETING a line. `test_baseline_only_shrinks` FAILS on an
+#     entry that no longer names a dead reference, so a stale line cannot sit
+#     here re-licensing a path someone later reintroduces.
+#   * An entry licenses the token IN THE DOC IT NAMES and nowhere else — the key
+#     is (doc, token). Pinned by
+#     `test_a_baseline_entry_licenses_only_the_doc_it_names`.
+#   * Adding a line is an explicit, visible edit to a tracked file, reviewed in
+#     the diff like any other change. Nothing appends to it automatically.
+#   * A NEW dead path is never baselined. Fix the prose, or — if the token is a
+#     genuine exception rather than rot — put it in doc-path-ignore.list with a
+#     stated reason.
+#
+# No line numbers on purpose: they churn on every unrelated edit and would turn
+# this into merge-conflict bait, which is how a delta baseline stops being
+# maintained.
+#
+# ── WHAT THESE 12 ENTRIES ARE, honestly classified ──────────────────────────
+#
+# 🔴 The first cut of this file said "Every one was read by hand and confirmed
+# genuinely absent from the tree — none is a gate defect." That was FALSE for
+# EIGHT of the twenty entries, i.e. 40% of the file, and a false claim in a
+# gate's own data file is the exact defect class this gate exists to catch. The
+# eight were CROSS-REPO references — correct paths whose first segment happens
+# to collide with one of ours (`scripts/`, `docs/`, `cmd/`, `claudedocs/`); see
+# the RESIDUAL FALSE-RED CLASS section of the module docstring. They have been
+# rewritten in their citing docs as `<repo>/…`, which the gate skips, and their
+# lines deleted from here. Each was verified by `ls` at the resolved location:
+#
+#   claude/skills/tekton/SKILL.md            scripts/check-gitleaks-baseline.py
+#     -> <homelab-talos>/scripts/check-gitleaks-baseline.py
+#   claude/skills/tekton/SKILL.md            scripts/tests/test-check-gitleaks-baseline.sh
+#     -> <homelab-talos>/scripts/tests/test-check-gitleaks-baseline.sh
+#   claude/skills/ux-audit-loops/SKILL.md    scripts/e2e-hermetic-nixos.sh
+#     -> <vetr-app>/scripts/e2e-hermetic-nixos.sh
+#   claude/skills/clawgate/reference/extension.md
+#                                            claudedocs/handoff-clawgate-ext-2026-07-30.md
+#     -> <homelab-talos>/claudedocs/handoff-clawgate-ext-2026-07-30.md
+#   claude/skills/clawgate/reference/extension.md
+#                                            scripts/tests/test-sync-clawgate-extension.sh
+#     -> <homelab-talos>/… (deleted from its trunk in a39ed0c5, as the prose says)
+#   claude/skills/clawgate/reference/task-api.md   cmd/clawgatectl/client.go
+#     -> <homelab-talos>/containers/clawgate/cmd/clawgatectl/client.go
+#   claude/skills/resume/SKILL.md            claudedocs/SESSION-HANDOFF.md
+#     -> <civitai-manager>/claudedocs/SESSION-HANDOFF.md
+#   claude/RULES-ARCHIVE.md                  scripts/check-sops-rules.sh
+#     -> the prose names `homelab-infra`; the file is present in the
+#        homelab-talos clone on this host and NOT in the homelab-infra one, so
+#        the token now reads `<homelab-infra>/…` to match the sentence and the
+#        repo attribution in that sentence is left as the author wrote it.
+#
+# What REMAINS below is three classes. Only the first is unambiguously rot:
+#
+#   (A) GENUINE ROT — a doc claims a live file that is not there. THREE entries.
+#       The classic shape is `claude/session-tailer.py`: a REAL file described
+#       by a path that resolves nowhere (it lives at
+#       scripts/collector/claude/session-tailer.py). The other two are the same
+#       shape at `claude/skills/devrc-dx/reference/config-stack.md`, which
+#       describes `scripts/tmux-claude-counters.sh` as rendering the tmux
+#       status-right today and `scripts/tmux-task-dashboard.sh` as "dead code
+#       still symlinked by home.nix" — both files are gone.
+#
+#   (B) PROSE THAT DELIBERATELY NAMES AN ABSENT FILE, and says so in the same
+#       sentence. FOUR entries. `CLAUDE.md` says "🔴 `claude/commands/` NO
+#       LONGER EXISTS"; two docs say `scripts/agent-ops` "is RETIRED … the
+#       script is deleted"; `claude/skills/sglang/SKILL.md` says "⚠ There is no
+#       toggle script" about `./scripts/toggle-homelab-sglang.sh`. The gate
+#       cannot read "this does not exist" out of prose, so it flags a doc for
+#       being CORRECT. That is a false red — kept HERE rather than in
+#       doc-path-ignore.list on purpose: a baseline entry is scoped to the
+#       citing doc, while an ignore entry is global and would also exempt a
+#       FUTURE doc that wrongly claims the file is live.
+#
+#   (C) CROSS-REPO AND ROTTEN THERE TOO. FIVE entries, all under `auditloop`,
+#       a skill that operates the separate `naida-ai` repo. The four distinct
+#       `claudedocs/…` docs are absent HERE and in `naida-ai` (checked
+#       2026-08-19), so rewriting them as `<naida-ai>/…` would replace a false
+#       "devrc rot" label with an unverifiable claim. Left as-is.
+#
+# Fixing class (A) is deliberately NOT part of the change that added the gate:
+# mixing a corpus rewrite into a new gate makes both impossible to review.
+#
+# --- entries ---------------------------------------------------------------
+CLAUDE.md	claude/commands/
+CLAUDE.md	scripts/agent-ops
+claude/skills/activity/reference/session-insights.md	claude/session-tailer.py
+claude/skills/auditloop/SKILL.md	claudedocs/design-system-audit-2026-07-19.md
+claude/skills/auditloop/SKILL.md	claudedocs/evaluator-meta-audit-naida-outreach-2026-07-24.md
+claude/skills/auditloop/SKILL.md	claudedocs/scoping-dom-a11y-evaluator-grounding-2026-07-24.md
+claude/skills/auditloop/reference/ui-and-meta-run.md	claudedocs/design-system-audit-2026-07-19.md
+claude/skills/auditloop/reference/ui-and-meta-run.md	claudedocs/meta-run-ux-findings-2026-07-18.md
+claude/skills/devrc-dx/reference/config-stack.md	scripts/agent-ops
+claude/skills/devrc-dx/reference/config-stack.md	scripts/tmux-claude-counters.sh
+claude/skills/devrc-dx/reference/config-stack.md	scripts/tmux-task-dashboard.sh
+claude/skills/sglang/SKILL.md	scripts/toggle-homelab-sglang.sh

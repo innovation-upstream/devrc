@@ -115,7 +115,8 @@ disagree. What is NOT answered: a route the CLI has never heard of is still a ro
 was 24 commits behind — built a CLI with **no `task status` and no `task comment`** and the nix
 literal labelled it `0.7.95` anyway. `h.Version == buildVersion` compared equal, the note stayed
 silent, and `clawgatectl task status <id> in_progress` printed help and **exited 0**. The fix is
-in devrc: the version is now **read out of `cmd/clawgatectl/client.go`'s own `var buildVersion`**,
+in devrc: the version is now **read out of
+`<homelab-talos>/containers/clawgate/cmd/clawgatectl/client.go`'s own `var buildVersion`**,
 so a stale checkout reports its real version and the skew note fires correctly. Two consequences
 worth knowing: **the note is only as good as the checkout's freshness** — `drift-check.sh` rc 17
 now reports a stale `homelab-talos` per host — and an **unparseable** `var buildVersion` line means
