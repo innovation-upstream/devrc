@@ -1841,19 +1841,31 @@ def test_a_remote_window_resolves_under_the_DEFAULT_flags():
 
 def test_a_single_host_flag_really_does_hide_the_other_machine():
     """The CONTROL that makes the test above meaningful: with `--host` naming
-    one machine, the other's window genuinely is unreachable — and the report
-    says so rather than reporting a bare UNMATCHED."""
-    src = base_sources(host=HOST, local_host=HOST,
-                       sm_payload=sm_payload_honouring_host(HOST))
+    one machine, the other is reported OUT-OF-SCOPE rather than silently absent.
+
+    🔴 THIS TEST WAS VACUOUS. It named the synthetic `laptophost`, which never
+    appears in `hosts_consulted` under a single `--host` — no source mentions it
+    and it is not in HOST_NAMES — so `REMOTE_HOST not in read_hosts` and the
+    `all(...)` both ranged over an EMPTY set and could not fail. It now names a
+    host the tool always knows about and asserts the subset is NON-EMPTY before
+    asserting anything about it.
+    """
+    local, other = sr.HOST_NAMES[0], sr.HOST_NAMES[1]
+    payload = {"local_host": local, "hosts": {local: {
+        "reachable": True,
+        "windows": [_sm_row("alpha1", WIN_A_ID, WIN_A_INDEX)]}}}
+    src = base_sources(host=local, local_host=local, sm_payload=payload)
     res = sr.resolve(REMOTE_CWD, src)
     assert res["status"] == sr.STATUS_UNMATCHED
-    # the remote machine's window is genuinely unreachable, and NOTHING in the
-    # report claims that host was read
-    read_hosts = [h["host"] for h in res["hosts_consulted"]
-                  if h["status"] == sr.HOST_READ]
-    assert REMOTE_HOST not in read_hosts, res["hosts_consulted"]
-    assert all(not h["contributed_targets"]
-               for h in res["hosts_consulted"] if h["host"] == REMOTE_HOST)
+
+    entries = [h for h in res["hosts_consulted"] if h["host"] == other]
+    # 🔴 the guard the previous version lacked: without this every assertion
+    # below is vacuously true.
+    assert entries, res["hosts_consulted"]
+    assert entries[0]["status"] == sr.HOST_OUT_OF_SCOPE
+    assert entries[0]["contributed_targets"] is False
+    assert other not in [h["host"] for h in res["hosts_consulted"]
+                         if h["status"] == sr.HOST_READ]
 
 
 def test_an_unmatched_result_names_the_hosts_it_consulted():
@@ -2509,3 +2521,65 @@ def test_the_three_reproduced_regressions_each_have_their_own_cell():
     assert sr.LOCAL_HOST_UNKNOWN in listed
     assert [e for e in built["host_status"]
             if e["host"] == sr.LOCAL_HOST_UNKNOWN][0]["status"] == sr.HOST_READ
+
+
+# =========================================================================== #
+# §16  🔴 THE PARTIAL-VIEW CAVEAT — previously UNASSERTED entirely
+# (deleting it survived, and so did retargeting it to `answered`)
+# =========================================================================== #
+def _one_source_unreachable():
+    """session-manager reports the LOCAL host unreachable while tmux reads it.
+
+    The decisive shape: session-manager ANSWERED (with "unreachable"), so a
+    caveat keyed on `answered` stays silent — while that host's session-manager
+    view really is missing.
+    """
+    return base_sources(
+        host=sr.HOST_ALL, local_host=HOST,
+        sm_payload={"local_host": HOST, "hosts": {
+            HOST: {"reachable": False, "error": "ssh: connect timed out",
+                   "windows": []}}})
+
+
+def _entry(built, host):
+    return [e for e in built["host_status"] if e["host"] == host][0]
+
+
+def test_a_read_host_whose_OTHER_source_failed_carries_the_partial_view_caveat():
+    """🔴 The caveat must fire on NOT-MEASURABLE, not on NOT-ANSWERED. A source
+    that answered "unreachable" has answered — so the old predicate printed
+    `read via tmux` with no warning while session-manager's view of that host
+    was entirely missing."""
+    entry = _entry(sr.build_targets(_one_source_unreachable()), HOST)
+    assert entry["status"] == sr.HOST_READ
+    assert "may be partial" in entry["reason"], entry["reason"]
+    assert sr.HOST_SOURCE_SM in entry["reason"]
+    assert "did NOT contribute" in entry["reason"]
+
+
+def test_the_partial_view_caveat_is_SILENT_when_every_source_contributed():
+    """POSITIVE CONTROL — a caveat that always fires warns about nothing."""
+    entry = _entry(sr.build_targets(base_sources(
+        host=sr.HOST_ALL, local_host=HOST,
+        sm_payload=sm_payload())), HOST)
+    assert entry["status"] == sr.HOST_READ
+    assert "may be partial" not in entry["reason"], entry["reason"]
+    assert entry["reason"].startswith("read via")
+
+
+def test_the_partial_view_caveat_reaches_the_HUMAN_view_not_only_json():
+    """🔴 The fact survived only in --json `sources` before. A one-view-only
+    disclosure is the gap this PR closes elsewhere."""
+    res = sr.resolve("nothing-matches", _one_source_unreachable())
+    block = _host_status_block(sr.render(res))
+    assert "may be partial" in block, block
+
+
+def test_a_source_that_answered_unreachable_is_not_counted_as_contributing():
+    """The fact underneath the caveat, asserted directly so the caveat's wording
+    is not the only thing pinning it."""
+    entry = _entry(sr.build_targets(_one_source_unreachable()), HOST)
+    sm_facts = entry["sources"][sr.HOST_SOURCE_SM]
+    assert sm_facts["answered"] is True
+    assert sm_facts["measurable"] is False
+    assert entry["sources"][sr.HOST_SOURCE_TMUX]["measurable"] is True

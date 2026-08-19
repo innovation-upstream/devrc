@@ -370,8 +370,15 @@ def derive_host_status(host, facts, host_flag, contributed):
     if any(f["measurable"] for f in facts.values()):
         answered_by = sorted(s for s, f in facts.items() if f["measurable"])
         note = ""
+        # 🔴 MEASURABLE, not ANSWERED — the fourth variant of this surface's
+        # recurring bug. A source that ANSWERED "unreachable" has answered, so
+        # keying on `answered` produced NO caveat: with session-manager
+        # reporting a host unreachable while tmux read it, the row printed
+        # `read | read via tmux` with that host's remote windows silently
+        # dropped, and the fact surviving only in --json `sources`. That is the
+        # one-view-only disclosure gap this PR closes elsewhere.
         broken = sorted(s for s, f in facts.items()
-                        if f["in_scope"] and not f["answered"])
+                        if f["in_scope"] and not f["measurable"])
         if broken:
             note = (f"; {', '.join(broken)} did NOT contribute, so this host's "
                     "view may be partial")
