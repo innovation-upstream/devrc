@@ -15,7 +15,11 @@ $BB --instance <key> --tab <id> text   # cheap read of a specific tab
 🔴 **Run `whoami` first on every fresh browser task.** Both hosts are hostname
 `nixos` and this bridge could be either, with several Brave profiles — confirm the
 host and pick the right `--instance` before acting. Architecture / security model:
-`scripts/browser-bridge/README.md`.
+`~/workspace/devrc/scripts/browser-bridge/README.md`.
+
+🔴 **Every `reference/<file>.md` named below lives at
+`~/workspace/devrc/scripts/browser-bridge/reference/`** — that exact path; only
+`SKILL.md` + the CLI are symlinked into `~/.claude/skills/browser/`.
 
 ## FIRST DECISION: agent or direct?
 
@@ -33,15 +37,13 @@ order) · **secret** — agent-read pages go to
 **OpenRouter/DeepSeek**: never banking, private mail, credential managers, or
 anything you wouldn't hand a third party. Nor **virtualised/lazy-loaded lists**.
 
-KNOW something from it → agent. Ambiguous → agent first; taking over costs ~200
-tokens, so agent-first wins even at a low success rate.
+KNOW something from it → agent. Ambiguous → agent first: taking over is cheap, so
+agent-first wins even at a low success rate.
 
-`blocked` → non-zero exit, take over. `partial` → read `evidence`, drive the rest.
-Thin `evidence` is a weak smell, **NOT** protection against a wrong answer. What
-protects you: auto-`wake` on a hidden `text`/`html` read — **never `eval`/`js`, so
-ASSERT a non-zero content count in any `js` measurement** — and escalation: if the
-answer depends on rendered SPA state, ONE `text --wake`. Keep `--allow-domains`
-TIGHT, incl. frame hosts.
+🔴 Auto-`wake` covers a hidden `text`/`html` read but **never `eval`/`js`** — so
+ASSERT a non-zero content count in any `js` measurement. Result handling
+(`blocked`/`partial`), why thin `evidence` is NOT protection, and the
+`--allow-domains` guardrail → `reference/agent.md`.
 
 ## Ops
 
@@ -52,25 +54,23 @@ Result payloads land under `.result.data`.
 | command | does |
 |---|---|
 | `whoami` | **read-only identity** (global; no `--instance`/`--tab`) — host label (`laptop`/`workbench`), connected instances (active-tab **domain** only), bridge diagnostics, `extension_version_current` |
-| `health` / `instances` | connected instances + count (JSON: key, label, instanceId, tab url/title). `extension_stale` on `health` ONLY (`false` is MARKER-backed; version MISMATCH → `true`; `null` = undecidable) |
+| `health` / `instances` | connected instances + count (JSON: key, label, instanceId, tab url/title). `extension_stale` on `health` ONLY — ⚠ `null` is "undecidable", NOT "fine"; tri-state semantics → `reference/errors.md` |
 | `ping` | **which extension CODE is loaded?** → `{pong,extensionVersion,buildMarker,id,ops}`; read `buildMarker` — version+id describe the DIRECTORY. Staleness is PER PROFILE |
 | `context` | **page metadata, no DOM read** — url/domain/path/query/title/tabId, tab-scoped. Cheapest read; ⚠ NOT a render check → `reference/read-envelopes.md` |
-| `open [url] [--wake[=MS]]` | open a NEW tab this session owns (default `about:blank`, **created in the BACKGROUND/hidden**), returns `tabId`. Idempotent — a re-`open` does NOT navigate (url DISCARDED). Use for multi-step work |
+| `open [url] [--wake[=MS]]` | open a NEW tab this session owns (default `about:blank`, **created in the BACKGROUND/hidden**), returns `tabId`. 🔴 A re-`open` does NOT navigate — it DISCARDS your url → `reference/tabs-instances.md` |
 | `close` / `release` | close this session's owned tab / drop ownership without closing it |
 | `tabs` | list open tabs (`.data.ownedTabId` flags yours) |
 | `nav <url> [--wake[=MS]]` | navigate the owned/active tab; it lands hidden, so `--wake` un-throttles in the SAME call |
-| `text [selector] [--max-bytes N] [--annotated]` | **cheap read** — visible `innerText` (optional CSS selector), whitespace-normalized, byte-capped (default 32768; `0`=uncapped). ~98% smaller than `html` — **prefer it**. `--annotated` swaps flat text for per-element extraction — use it when you need a SELECTOR to click/type; works with `--frame` (frame-relative CSS paths). Envelope fields + `--annotated` schema → `reference/read-envelopes.md` |
+| `text [selector] [--max-bytes N] [--annotated]` | **cheap read** — visible `innerText` (optional CSS selector), byte-capped by default. ~98% smaller than `html` — **prefer it**. `--annotated` swaps flat text for per-element extraction — use it when you need a SELECTOR to click/type; works with `--frame`. Byte cap, envelope fields, `--annotated` schema → `reference/read-envelopes.md` |
 | `html [--max-bytes N]` | `outerHTML`, same byte cap and same envelope. One uncapped `html` on a heavy SPA is ~100K tokens — the cap is ON by default |
-| `js '<expr>'` (alias: `eval`) | run JS in the tab, return its value; same op on the wire either way. **Prefer `js` in a worktree-isolated agent** — Claude Code's isolation guard refuses any command containing the literal token `eval` (it matches the WORD, not the behaviour) |
-| `screenshot [path] [--fullpage] [--data-url]` | CDP capture — **works on a BACKGROUND/occluded tab**. **Always writes a `.png`** (to `path`, else a mode-0600 temp auto-pruned after 24h) and prints `{ok,path,bytes,url,via}`; the base64 is **NEVER** printed (it cost 133K–890K tokens/call) — **`Read` the `.png`**. `--data-url` is the escape hatch |
+| `js '<expr>'` (alias: `eval`) | run JS in the tab, return its value; same op on the wire either way. **Prefer the `js` spelling** — Claude Code's isolation guard refuses any command containing the literal token `eval` |
+| `screenshot [path] [--fullpage] [--data-url]` | CDP capture — **works on a BACKGROUND/occluded tab**. **Always writes a `.png`** (to `path`, else a 0600 temp) and prints `{ok,path,bytes,url,via}`; the base64 is **NEVER** printed — **`Read` the `.png`**. `--data-url` is the escape hatch |
 | `frames` | list the tab's frames (`frameId`/`url`/`parentFrameId`) **incl. cross-origin OOPIFs** — pick a numeric `frameId` for `--frame` |
-| `click <selector>` | click the element's center — **TRUSTED** CDP on the top frame, **SYNTHETIC** inside `--frame` |
-| `type <text> [--selector S]` | text input — TRUSTED CDP top frame, SYNTHETIC in-frame |
-| `key <Enter\|Tab\|Escape\|Backspace\|Delete\|Arrow*\|Home\|End\|Page*> [--selector S]` | one bounded keypress, same trust rules |
+| `click <selector>` · `type <text> [--selector S]` · `key <Enter\|Tab\|Escape\|Backspace\|Delete\|Arrow*\|Home\|End\|Page*> [--selector S]` | the input ops — click the element's centre, type text, send one bounded keypress. All three: **TRUSTED** CDP on the top frame, **SYNTHETIC** inside `--frame` |
 | `upload <selector> <path>` | fill an `<input type=file>` via CDP — Chrome reads the file BY PATH, **no bytes cross the bridge**. AUDIT-LOGGED, **operator-only** (agent → `op_not_allowed:upload`) |
-| `wake [--wait MS]`, or `text\|html\|js\|nav\|open --wake[=MS]` | **UN-THROTTLE a hidden/background tab with NO focus movement** — the fix for an empty or `hidden` read. ~1.5s settle, cap **6s**. **Wake once per PAGE, not per read** — the un-throttled state ends at detach, but the DOM already rendered PERSISTS. `--wake` folds un-throttle+read into one session; refused with `--frame` (`wake_with_frame_unsupported`). ISOLATED-vs-MAIN world nuance → `reference/spa-wake.md` |
+| `wake [--wait MS]`, or `text\|html\|js\|nav\|open --wake[=MS]` | **UN-THROTTLE a hidden/background tab with NO focus movement** — the fix for an empty or `hidden` read. **Wake once per PAGE, not per read.** `--wake` folds un-throttle+read into one call; refused with `--frame`. Settle/cap, the once-per-page rule, ISOLATED-vs-MAIN world → `reference/spa-wake.md` |
 | `activate` | **⚠⚠ STEALS THE OPERATOR'S SCREEN — the ONE intrusive op, a LAST RESORT.** It is **NOT** the fix for a hidden/unrendered tab — that is `wake`. Read `reference/spa-wake.md` BEFORE using it |
-| `emulate <preset>\|--reset` | **device emulation** (mobile testing) on a tab you `open`ed; sticky, owned-tab-only. `--reset` undoes it, viewport included (#319); `--recreate` replaces the tab → `reference/emulation.md` |
+| `emulate <preset>\|--reset` | **device emulation** (mobile testing) on a tab you `open`ed; sticky, owned-tab-only. Presets, `--reset`, `--recreate` → `reference/emulation.md` |
 | `agent "<goal>"` | the autonomous browser-agent — see **FIRST DECISION** above, then `reference/agent.md` |
 
 ## 🔴 Four traps that return a WRONG answer SILENTLY
@@ -98,9 +98,10 @@ Result payloads land under `.result.data`.
 
 1. **A call that WORKED now fails, errors, or returns nothing** → re-run `browser
    health` BEFORE debugging the page or the CLI; the extension drops mid-session
-   (`extension_connected:false`) with no user action and no error. ⚠ ↻ **in the
-   profile you are driving** (`brave://extensions` is per-profile) — and ↻ is
-   UNRELIABLE, so prefer a full Brave restart. → `reference/errors.md`
+   (`extension_connected:false`) with no user action and no error. Fix: ↻ **in the
+   profile you are driving** (`brave://extensions` is per-profile). A STALE BUILD is
+   a DIFFERENT failure — a Brave restart does NOT clear it; that needs per-profile
+   Remove + Load unpacked. → `reference/errors.md`
 2. **A read is empty / half-built / `data.hidden:true`** → the tab is throttled.
    `browser wake`, then re-read. → `reference/spa-wake.md`
 3. **`null` from `js`/`eval`** → trap 1, then trap 2. Fall back to `text`/`html`
@@ -114,13 +115,14 @@ Result payloads land under `.result.data`.
 
 It's their real browser, not a scratch VM. Don't `nav` a tab that may hold unsaved
 work (a half-typed comment, a form) — `open` your own tab, or an obviously
-disposable one. If anything moved their focus, **restore it**
-(`i3-msg '[id="<prev-winid>"] focus'`).
+disposable one. 🔴 `activate` takes their screen. RECORD both axes first
+(`xdotool getactivewindow`; `i3-msg -t get_workspaces`), then RESTORE both at the
+end, failure included: `i3-msg '[id="<winid>"] focus'` **and** `i3-msg workspace
+<n>`. Focus alone leaves them on YOUR workspace — the axis actually taken.
 
 ## Reference files — load ONE only when its trigger fires
 
-**Read them at `~/workspace/devrc/scripts/browser-bridge/reference/<file>`** — that
-exact path; only `SKILL.md` + the CLI are symlinked into `~/.claude/skills/browser/`.
+Paths as stated in Quick start.
 
 | file | load it when… |
 |---|---|
