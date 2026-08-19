@@ -1,0 +1,1975 @@
+#!/usr/bin/env python3
+"""session-resolve — turn ANY human- or agent-shaped selector into ONE target.
+
+    session-resolve show <selector> [--json]
+    session-resolve resolve <selector> [--json]      # alias of `show`
+
+READ-ONLY BY CONSTRUCTION. This module never runs a tmux write verb. The only
+tmux subcommands it will ever pass to a runner are the three listed in
+`TMUX_READ_ONLY_SUBCOMMANDS`, and `_assert_read_only` enforces that at the seam
+rather than asserting it in a comment — `select-window`, `send-keys`,
+`switch-client`, `detach-client`, `kill-*` cannot leave this file. Write verbs
+are a later PR.
+
+
+🔴 A MEASURED REFUTATION OF THE ORIGINAL BRIEF — READ BEFORE CHANGING THE JOIN
+------------------------------------------------------------------------------
+The brief for this module said to consume `session-manager --json --lean` and to
+join on `(host, session, window_id)`, never on `window_index`. Those two
+instructions are incompatible, and the incompatibility is measured, not argued:
+
+    $ python3 scripts/session-manager --json --lean --no-ch --host workbench
+      lean_row_fields: [... 'session', 'window_index', ...]      # no window_id
+    $ python3 scripts/session-manager --json      --no-ch --host workbench
+      row keys:        [... 'session', 'window_id', 'window_index', ...]
+
+`--lean` DROPS `window_id`. It carries `window_index` only, as a string ("1").
+So the lean view cannot supply the join key the brief (correctly) mandates, and
+the only way to use it would be the `window_index` join the brief (correctly)
+forbids — indexes renumber when windows close.
+
+Resolution: this module consumes the FULL `--json` view. That view is a strict
+superset of the lean one for every field the brief asked for (`waiting_probable`,
+`waiting_signals`, `unsent_prompt`, `age_secs`, `age_source`, `runtime`,
+`claude_session_id`, `status`), so nothing is lost and the mandated join key is
+present. `SM_ARGV` pins the flags; `test_session_resolve.py` pins the absence of
+`--lean` so a future edit cannot quietly reintroduce the unjoinable view.
+
+The join was then verified end-to-end rather than assumed. Measured 2026-08-19 on
+the workbench: 59 session-manager rows, 59 distinct `(session, window_id)` pairs,
+48 registry records of which 24 carry a `tmux` address — and **24 of 24 joined**,
+zero unmatched, zero duplicate addresses. 35 windows had no registry record. That
+is normal, and it is reported as a coverage count, never as an error or a zero.
+
+
+THE FOUR SOURCES, AND THE ONE KEY THAT JOINS THEM
+-------------------------------------------------
+The join key is `(host, session, window_id)`. `window_id` is tmux's `@N`, which
+is stable for the life of a window; `window_index` is a display ordinal that
+RENUMBERS when a neighbour closes. Joining on the index silently reattaches a
+harness record to whichever window slid into the vacated slot.
+
+  1. tmux — `list-panes` / `list-windows` / `list-clients`. Supplies host,
+     session, window_index, window_id (@N), pane_id (%N), cwd, pane title, and
+     which windows are active.
+
+  2. The slot table — `scripts/tmux-scratch-slots.sh`, entries shaped
+     `scratch2:G:#d79921:Gold` = session:key:colour:codename. PARSED, never
+     re-hardcoded: the tmux bindings are generated from this same file at
+     home-manager build time, so a private copy would drift silently. A session
+     with no slot entry (`datapacket-talos`) has NO hotkey and NO codename —
+     its label falls back to the cwd, and none is invented.
+
+  3. The harness session registry — `~/.claude/sessions/<pid>.json`, joined via
+     its `tmux` field, which is `session:@window_id.%pane_id`.
+     🔴 Its timestamps are epoch MILLISECOND INTEGERS, not ISO strings. A parser
+     that handles only ISO returns None for every record and reads exactly like
+     an absent field. `parse_epoch_ms` accepts int/float only and reports a
+     reason for anything else — a string timestamp is UNMEASURED, never 0 and
+     never silently dropped.
+
+  4. session-manager — the observed status bucket, `waiting_probable` and its
+     signals, `unsent_prompt`, `age_secs`/`age_source`, `runtime`,
+     `claude_session_id`.
+     🔴 CONSUMED, NEVER RE-DERIVED. Its waiting detector has a real
+     false-positive history; a second copy of the predicate would regenerate
+     every one of those bugs. This module reads its output and does not
+     reimplement one line of it.
+
+
+🔴 TWO STATUSES, NEVER COLLAPSED
+--------------------------------
+`harness_status` (registry) and `waiting_probable` (session-manager) are
+DIFFERENT MEASUREMENTS OF DIFFERENT THINGS, and they disagree. Measured at one
+instant: session-manager reported 3 waiting windows; the registry view reported
+1, a disjoint one, and called one of session-manager's three `idle`. Zero
+overlap.
+
+The registry `status` means "this harness process is waiting on a turn". The
+session-manager `waiting_probable` means "the pane TEXT looks like it is asking
+a human". Both are carried, under those distinct names. They are never merged,
+never summed, and NO MAPPING BETWEEN THEM IS WRITTEN — the correct mapping is
+unknown, and inventing one now would repeat the `blocked_on_me` mistake this
+repo just finished fixing.
+
+
+🔴 THE REGISTRY IS LOCAL-HOST ONLY — A FOURTH STATE, NOT A COVERAGE GAP
+-----------------------------------------------------------------------
+Records live at `~/.claude/sessions/<pid>.json` on the machine this process runs
+on. There is no host dimension in that path, so a window on ANOTHER host cannot
+carry a record — not "does not yet", but CANNOT, by construction. Measured by
+the waiting-windows work: remote 0/7 rows, local 24/48.
+
+Calling that "partial coverage" hides the distinction that matters:
+
+    a LOCAL window with no record   -> ABSENT     (measured; may gain one later)
+    a REMOTE window                 -> EXCLUDED   (never, on any future run)
+
+so `harness_presence` carries FOUR states, and the excluded hosts are named in
+`coverage.registry.hosts_not_covered` — spelled to MATCH the waiting-windows
+report, because two PRs disagreeing on the vocabulary for one fact is its own
+defect. The same exclusion applies to every other local-only source: a remote
+target's git branch, PR and tmux visibility are all EXCLUDED/UNMEASURED, never
+measured against this machine's filesystem.
+
+🔴 The registry `status` vocabulary is UNSTABLE — two snapshots hours apart gave
+{busy, idle, shell, waiting} then {busy, idle, waiting}, with `waitingFor`
+riding along on the waiting ones. So `status` is passed through and NEVER
+branched on; a test enforces that structurally, over the syntax tree.
+
+
+🔴 NULL IS NOT ZERO
+-------------------
+An unreachable host, an absent registry directory, a failed `gh`, a tmux call
+that errored — each yields None plus a `*_status` of `unmeasured:<reason>`, never
+0, never False, never an absent key. `unmeasured()` is the only way to spell it.
+A measured-but-empty result (tmux answered, and no client is attached) is a real
+zero and is reported as one; the two are distinguishable by the status field.
+
+NO SILENT CAPS: anything dropped is counted and named in `dropped`.
+
+ON-DISK ARTIFACTS: this module creates NONE. The `gh` PR lookup is opt-in and
+memoised in a plain dict for the life of the process, deliberately not written to
+`~/.cache` — see `test_session_resolve.py::test_module_creates_no_on_disk_
+artifacts` and `scripts/claude-hooks/tests/test_on_disk_artifact_names.py` for
+why an on-disk name is a liability that no behavioural test can see move.
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as _dt
+import glob
+import json
+import os
+import subprocess
+import sys
+from dataclasses import dataclass, field
+from typing import Any, Callable, Optional
+
+# --------------------------------------------------------------------------- #
+# Constants — every literal a caller or a test might need to name.
+# --------------------------------------------------------------------------- #
+
+#: tmux `-F` formats. Kept as module constants so the tests can build fixture
+#: output from the SAME format string the production code parses; a fixture
+#: built from a hand-copied format is a fixture that stops matching silently.
+PANE_FORMAT = (
+    "#{host}\x1f#{session_name}\x1f#{window_index}\x1f#{window_id}"
+    "\x1f#{pane_id}\x1f#{pane_current_path}\x1f#{pane_title}"
+)
+WINDOW_FORMAT = "#{session_name}\x1f#{window_id}\x1f#{window_active}"
+CLIENT_FORMAT = (
+    "#{client_tty}\x1f#{client_termname}\x1f#{client_width}"
+    "\x1f#{client_height}\x1f#{client_session}\x1f#{client_flags}"
+)
+FIELD_SEP = "\x1f"
+
+#: 🔴 The ONLY tmux subcommands this module may ever run. Enforced by
+#: `_assert_read_only`, not by review. A write verb added to a call site raises.
+TMUX_READ_ONLY_SUBCOMMANDS = ("list-panes", "list-windows", "list-clients")
+
+#: tmux's own argv command separator. It does NOT end the scan — everything
+#: after it is checked too, which is exactly the hole this closes.
+#:
+#: 🔴 tmux ALSO separates on a `;` WELDED to the end of the previous token, so
+#: splitting on the standalone token alone is a SPELLING, not a structure.
+#: MEASURED on tmux 3.7b:
+#:     tmux list-sessions -F 'x;' list-sessions   -> 44 lines (two commands ran)
+#:     tmux list-sessions -F 'x'  list-sessions   -> "too many arguments" error
+#: so an argv of [tmux, list-panes, -F, '#{window_id};', <write-verb>, ...] really
+#: is TWO commands to tmux, and a splitter that only recognises a bare ';'
+#: accepts the second one as an argument of the first.
+TMUX_SEPARATORS = (";",)
+TMUX_SEPARATOR_CHAR = ";"
+
+#: 🔴 session-manager flags. `--lean` is deliberately ABSENT — see the module
+#: docstring's refutation; the lean view does not carry `window_id`.
+SM_ARGV = ("--json", "--no-ch")
+
+#: A client whose TERM is tmux's own is, structurally, a client running INSIDE
+#: tmux — i.e. a `display-popup` overlay created by the Alt-key bindings, not a
+#: terminal emulator. Measured: the base terminal reports `alacritty` at 312x64;
+#: the two popups report `tmux-256color` at 247x49 and 195x37. The discriminator
+#: is the TERM NAME, not the size — sizes are recorded as evidence only, because
+#: a resized terminal must not be reclassified as a popup.
+POPUP_TERM_PREFIX = "tmux"
+
+#: 🔴 The host vocabulary, and the `all` sentinel that is NOT a host name.
+#: Mirrors session-manager's own `HOST_NAMES`; a seam test pins the two together
+#: so a host added there and not here cannot silently become unreachable.
+HOST_NAMES = ("workbench", "laptop")
+HOST_ALL = "all"
+
+#: 🔴 Used as a host LABEL only when the real local host name could not be
+#: determined. Deliberately not a legal host name and not `all`, so it can never
+#: compare equal to either — the bug that made `--host all` label local windows
+#: "all" and then exclude the real local host as if it were remote.
+LOCAL_HOST_UNKNOWN = "<local-host-unknown>"
+
+# --------------------------------------------------------------------------- #
+# 🔴 PER-HOST STATUS. Naming a host as "consulted" says nothing about whether it
+# ANSWERED, and the fix for the --host default turned that into a POSITIVE FALSE
+# CLAIM: with `laptop {reachable: false}` the report printed
+#     hosts consulted : laptop, workbench
+#     session-manager : ok
+# while laptop had contributed nothing, disclosed only by a `DROPPED:` line a
+# dozen rows further down and by nothing at all in --json. The original bug was a
+# silent GAP; asserting a host was consulted when it was not is worse, because it
+# puts a false statement where there was previously only an absence.
+# 🔴 THIS SURFACE HAS BEEN WRONG THREE TIMES, ONCE IN EACH DIRECTION:
+#     original : SILENT GAP     — an unreachable host simply went unmentioned
+#     round 1  : FALSE POSITIVE — an unread host printed as `consulted`, `ok`
+#     round 2  : FALSE NEGATIVE — an ATTEMPTED host printed `not-attempted
+#                                 (not in scope for --host all)`, which is self-
+#                                 contradictory, while the host that had supplied
+#                                 EVERY window said the same thing
+# Each fix added the one state the previous bug needed and missed the next. That
+# is the incomplete-enumeration defect this whole module exists to fix, applied
+# to itself.
+#
+# So the status is DERIVED, never assigned, and the reason is GENERATED from the
+# same facts rather than hand-written — a hand-written reason is what let
+# "not in scope for --host all" be printed about a host that WAS in scope.
+#
+# 🔴 THE DIMENSION THAT WAS MISSING IS THE **SOURCE**. The facts are not per
+# host, they are per (host, SOURCE): a host's data can arrive from LOCAL TMUX
+# (the local host only, always read, independent of --host) or from
+# SESSION-MANAGER (whichever hosts --host selects). Round 2 derived the status
+# from session-manager ALONE, which is precisely why a local host that answered
+# via tmux was labelled from session-manager's silence.
+#
+# Per (host, source) we record four independent facts:
+#     in_scope   — could this source ever cover this host on this run?
+#     attempted  — was a read issued that could have covered it?
+#     answered   — did the source say anything about this host (including "I
+#                  could not reach it")?
+#     measurable — was that answer usable as data?
+# and the host-level status falls out of them. Add a source, or a fact, and the
+# derivation changes in ONE place.
+HOST_SOURCE_TMUX = "tmux"
+HOST_SOURCE_SM = "session-manager"
+ALL_HOST_SOURCES = (HOST_SOURCE_TMUX, HOST_SOURCE_SM)
+HOST_FACTS = ("in_scope", "attempted", "answered", "measurable")
+
+HOST_READ = "read"                    # some source answered WITH USABLE DATA
+HOST_UNREACHABLE = "unreachable"      # a source said it could not reach the host
+HOST_NOT_REPORTED = "not-reported"    # source succeeded and never mentioned it
+HOST_SOURCE_FAILED = "source-failed"  # the source itself could not be read
+HOST_OUT_OF_SCOPE = "out-of-scope"    # genuinely excluded by --host
+ALL_HOST_STATUSES = (HOST_READ, HOST_UNREACHABLE, HOST_NOT_REPORTED,
+                     HOST_SOURCE_FAILED, HOST_OUT_OF_SCOPE)
+
+#: 🔴 Only ONE status may blame --host. Round 2's bug was this sentence attached
+#: to a host that was in scope; a test pins the exclusivity.
+SCOPE_BLAMING_STATUSES = (HOST_OUT_OF_SCOPE,)
+
+DEFAULT_REGISTRY_DIR = os.path.expanduser("~/.claude/sessions")
+DEFAULT_SLOT_TABLE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  "tmux-scratch-slots.sh")
+DEFAULT_SM_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "session-manager")
+SLOT_ARRAY_NAME = "SCRATCH_SLOTS"
+
+#: Modifier tokens stripped from a hotkey selector so `Alt+Shift+G` and `G` are
+#: the same request. The KEY ITSELF KEEPS ITS CASE — `g` is grove, `G` is Gold.
+HOTKEY_SEPARATOR = "+"
+
+SOURCE_TMUX = "tmux"
+SOURCE_SLOTS = "slot-table"
+SOURCE_REGISTRY = "harness-registry"
+SOURCE_SM = "session-manager"
+ALL_SOURCES = (SOURCE_TMUX, SOURCE_SLOTS, SOURCE_REGISTRY, SOURCE_SM)
+
+STATUS_RESOLVED = "resolved"
+STATUS_AMBIGUOUS = "ambiguous"
+STATUS_UNMATCHED = "unmatched"
+
+SELECTOR_CODENAME = "codename"
+SELECTOR_HOTKEY = "hotkey"
+SELECTOR_SESSION_INDEX = "session:index"
+SELECTOR_ADDRESS = "session:@window_id"
+SELECTOR_WINDOW_ID = "window_id"
+SELECTOR_HARNESS_NAME = "harness_name"
+SELECTOR_CWD = "cwd"
+SELECTOR_SESSION = "session"
+ALL_SELECTOR_KINDS = (
+    SELECTOR_CODENAME, SELECTOR_HOTKEY, SELECTOR_SESSION_INDEX,
+    SELECTOR_ADDRESS, SELECTOR_WINDOW_ID, SELECTOR_HARNESS_NAME,
+    SELECTOR_CWD, SELECTOR_SESSION,
+)
+
+LABEL_SOURCE_SLOT = "slot"
+LABEL_SOURCE_CWD = "cwd"
+LABEL_SOURCE_SESSION = "session"
+
+_UNMEASURED_PREFIX = "unmeasured:"
+MEASURED_OK = "ok"
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE PRESENCE TRICHOTOMY — three states, three tokens, for EVERY optional
+# source. Two tokens is the bug: with only present/absent, "the registry could
+# not be read" and "the registry was read and this window has no record" collapse
+# into the same empty field, and an operator goes hunting a broken registry that
+# is working perfectly. Measured: 24 of 59 windows carried a harness record, so
+# ABSENT is the MAJORITY case and is a real measurement.
+#
+# The same trichotomy binds every other optional source — the session-manager
+# row, the git branch, and above all the `gh` PR lookup, where "no open PR for
+# this branch" (measured: the work is done) and "gh failed or was not run"
+# (unmeasured) mean opposite things to anyone deciding what to do next.
+#
+# Each carrier is a `<source>_presence` field holding exactly one of these, and
+# `<source>_measurement` carries the REASON whenever the value is UNMEASURED.
+# --------------------------------------------------------------------------- #
+PRESENCE_PRESENT = "present"
+PRESENCE_ABSENT = "absent"
+PRESENCE_UNMEASURED = "unmeasured"
+# 🔴 THE FOURTH STATE, and the same class of defect the other three fixed: a
+# real state with no name in the schema. The harness session registry is read
+# off the LOCAL filesystem (`~/.claude/sessions/<pid>.json`) — there is no host
+# dimension in that path at all. So a window on a REMOTE host can never carry a
+# record: not "does not yet", but CANNOT, by construction. Measured by the
+# waiting-windows work: remote 0/7 rows, local 24/48.
+#
+# Collapsing this into ABSENT tells a caller "no record (normal)" for a laptop
+# window and invites it to keep re-checking for a clock that can never arrive.
+# EXCLUDED says the question is not answerable for this target, ever.
+PRESENCE_EXCLUDED = "structurally_excluded"
+ALL_PRESENCE_STATES = (PRESENCE_PRESENT, PRESENCE_ABSENT, PRESENCE_UNMEASURED,
+                       PRESENCE_EXCLUDED)
+
+
+def unmeasured(reason: str) -> str:
+    """The ONLY spelling of a not-measured status. Never returns a bare 0/None.
+
+    A status string is `ok` or `unmeasured:<reason>`; `is_unmeasured` is the only
+    predicate that reads it, so a typo in one place cannot make a failure read as
+    a success anywhere else.
+    """
+    if not reason:
+        raise ValueError("unmeasured() requires a reason — a bare 'unmeasured' "
+                         "is indistinguishable from a measured zero")
+    return _UNMEASURED_PREFIX + reason
+
+
+def derive_host_status(host, facts, host_flag, contributed):
+    """(status, reason) DERIVED from the per-source facts. Never assigned.
+
+    Precedence, and why each rung sits where it does:
+      1. ANY source produced usable data      -> read. This rung is first
+         because a host can be read by tmux while session-manager fails
+         entirely, which is the case round 2 got wrong.
+      2. a source said "unreachable"          -> unreachable (it answered, and
+         the answer was a failure it can explain).
+      3. a source in scope could not be read  -> source-failed (nothing could be
+         learned about this host, but NOT because of --host).
+      4. a source in scope answered, silently -> not-reported.
+      5. nothing had it in scope              -> out-of-scope. ONLY this rung is
+         allowed to blame --host.
+    """
+    if any(f["measurable"] for f in facts.values()):
+        answered_by = sorted(s for s, f in facts.items() if f["measurable"])
+        note = ""
+        # 🔴 MEASURABLE, not ANSWERED — the fourth variant of this surface's
+        # recurring bug. A source that ANSWERED "unreachable" has answered, so
+        # keying on `answered` produced NO caveat: with session-manager
+        # reporting a host unreachable while tmux read it, the row printed
+        # `read | read via tmux` with that host's remote windows silently
+        # dropped, and the fact surviving only in --json `sources`. That is the
+        # one-view-only disclosure gap this PR closes elsewhere.
+        broken = sorted(s for s, f in facts.items()
+                        if f["in_scope"] and not f["measurable"])
+        if broken:
+            note = (f"; {', '.join(broken)} did NOT contribute, so this host's "
+                    "view may be partial")
+        return HOST_READ, f"read via {', '.join(answered_by)}{note}"
+
+    for source in ALL_HOST_SOURCES:
+        f = facts[source]
+        if f["answered"] and not f["measurable"] and f.get("unreachable"):
+            return HOST_UNREACHABLE, (
+                f"{source} reported this host unreachable: "
+                f"{f.get('detail') or 'no reason given'}")
+
+    for source in ALL_HOST_SOURCES:
+        f = facts[source]
+        if f["in_scope"] and f["attempted"] and not f["answered"] \
+                and f.get("source_failed"):
+            return HOST_SOURCE_FAILED, (
+                f"{source} could not be read, so nothing could be learned about "
+                f"this host: {f.get('detail') or 'no reason given'}")
+
+    for source in ALL_HOST_SOURCES:
+        f = facts[source]
+        if f["in_scope"] and f["attempted"] and not f["answered"]:
+            return HOST_NOT_REPORTED, (
+                f"{source} was read successfully but did not report this host")
+
+    return HOST_OUT_OF_SCOPE, f"not in scope for --host {host_flag}"
+
+
+def build_host_status(src, sm, tmux, local_host, target_hosts):
+    """One entry per host this run could conceivably have covered.
+
+    🔴 Every host that CONTRIBUTED a target must appear. Round 2 skipped
+    `LOCAL_HOST_UNKNOWN`, which deleted the row for the machine that had
+    actually answered while still asserting a status about one that had not.
+    """
+    sm_failed = is_unmeasured(sm["status"])
+    tmux_ok = tmux["panes"] is not None
+
+    names = set(HOST_NAMES) | set(sm["hosts_seen"]) | set(target_hosts)
+    if local_host:
+        names.add(local_host)
+
+    out = []
+    for name in sorted(names):
+        is_local = (name == local_host)
+        # tmux is read from THIS machine, so it covers the local host only —
+        # and it is attempted regardless of --host.
+        tmux_facts = {
+            "in_scope": is_local,
+            "attempted": is_local,
+            "answered": bool(is_local and tmux_ok),
+            "measurable": bool(is_local and tmux_ok),
+            "detail": None if tmux_ok else tmux["panes_status"],
+            "source_failed": bool(is_local and not tmux_ok),
+            "unreachable": False,
+        }
+        entry = sm["host_status"].get(name)
+        # 🔴 If the source ANSWERED about this host it covered it, whatever
+        # --host nominally selected. Deriving scope from the flag alone produced
+        # `answered=True, in_scope=False`, which is incoherent — and it is the
+        # same mistake as round 2's, one level down: a claim about scope
+        # contradicting what actually happened.
+        sm_in_scope = src.host in (HOST_ALL, name) or entry is not None
+        sm_facts = {
+            "in_scope": sm_in_scope,
+            "attempted": sm_in_scope,
+            "answered": entry is not None,
+            "measurable": bool(entry and entry["status"] == HOST_READ),
+            "detail": (entry or {}).get("reason") if entry else (
+                sm["status"] if sm_failed else None),
+            "source_failed": bool(sm_in_scope and sm_failed),
+            "unreachable": bool(entry and entry["status"] == HOST_UNREACHABLE),
+        }
+        facts = {HOST_SOURCE_TMUX: tmux_facts, HOST_SOURCE_SM: sm_facts}
+        contributed = name in target_hosts
+        status, reason = derive_host_status(name, facts, src.host, contributed)
+        out.append({
+            "host": name,
+            "status": status,
+            "reason": reason,
+            "contributed_targets": contributed,
+            "sources": {s: {k: f[k] for k in HOST_FACTS}
+                        for s, f in facts.items()},
+        })
+    return out
+
+
+def hosts_not_covered(hosts_seen, local_host):
+    """-> (list | None). 🔴 ONE RULE, TWO CALLERS.
+
+    `waiting-windows` has a function of the same name with the same BODY; the
+    docstrings differ, so they are not byte-identical and the earlier claim that
+    they were overstated it in both halves. What is actually pinned is their
+    BEHAVIOUR: each suite exercises its OWN copy against the same table, so a
+    divergence in either reddens that module's own test rather than being
+    inferred from the other's.
+
+    `None` when the local host is unknown: with no local host there is no answer
+    to "which hosts can the registry not cover", and an empty list would read as
+    "it covers them all".
+    """
+    if not local_host:
+        return None
+    return sorted(h for h in hosts_seen if h != local_host)
+
+
+def registry_excluded_reason(host: str, local_host: str) -> str:
+    """Why a target can NEVER carry a harness record.
+
+    Deliberately NOT spelled with `unmeasured()`: "I could not look" and "there
+    is nothing to look at, on any run, forever" are different answers, and a
+    caller that retries on the first would spin forever on the second.
+    """
+    return (f"registry-is-local-host-only: records live on {local_host}'s "
+            f"filesystem (~/.claude/sessions), so a window on {host} cannot "
+            f"have one")
+
+
+def is_unmeasured(status: Optional[str]) -> bool:
+    return bool(status) and str(status).startswith(_UNMEASURED_PREFIX)
+
+
+class ReadOnlyViolation(RuntimeError):
+    """Raised when a tmux write verb reaches the subprocess seam."""
+
+
+# --------------------------------------------------------------------------- #
+# Subprocess seam — the ONE impure entry point, replaced wholesale in tests.
+# --------------------------------------------------------------------------- #
+def _split_on_separators(tokens):
+    """Split a tmux argv tail into per-COMMAND segments on tmux's `;`.
+
+    Handles BOTH shapes tmux accepts: the standalone `;` token, and a `;` welded
+    to the end of the previous token (measured on 3.7b — see TMUX_SEPARATORS).
+
+    🔴 STATED LIMIT, and it is a real one rather than a reassuring one. This is
+    a BEST-EFFORT reconstruction of tmux's own argv parsing, not a reimplementation
+    of it:
+
+      * a `;` that tmux would treat as literal (backslash-escaped, or one inside a
+        quoted argument that reached us pre-split) is treated here as a
+        separator. That direction is SAFE: it can only start a spurious segment
+        and cause a REFUSAL.
+      * conversely, any separator spelling tmux honours that is NOT covered here
+        would let a following command through. That direction is NOT safe, and
+        it is why the allowlist below re-checks EVERY segment rather than
+        trusting the split.
+
+    The guard's real backstop is not this function: it is that the only argv
+    this module ever constructs are the three read calls at the top of the file,
+    none of whose formats contain a `;`. `_assert_read_only` is defence in depth
+    for a caller that injects its own runner, and is documented as best-effort
+    rather than as a proof.
+    """
+    segments, current = [], []
+    for token in tokens:
+        if token in TMUX_SEPARATORS:
+            segments.append(current)
+            current = []
+            continue
+        # a WELDED separator: `#{window_id};` ends this command and starts one.
+        while token.endswith(TMUX_SEPARATOR_CHAR):
+            token = token[:-1]
+            if token:
+                current.append(token)
+            segments.append(current)
+            current = []
+            token = ""
+        if token:
+            current.append(token)
+    segments.append(current)
+    return [s for s in segments if s]
+
+
+def _assert_read_only(argv) -> None:
+    """🔴 Structural enforcement of the READ-ONLY contract.
+
+    Checks the tmux SUBCOMMAND against an allowlist rather than scanning for
+    banned words: a denylist of `select-window`/`send-keys`/… is walkable by any
+    verb nobody thought to ban, and this module's whole promise is that no such
+    verb exists. An allowlist fails closed.
+    """
+    argv = list(argv)
+    if not argv or os.path.basename(argv[0]) != "tmux":
+        return
+    # 🔴 EVERY COMMAND, not just the first. This used to `return` after clearing
+    # the first non-dash token, so
+    #     tmux list-panes -a -F <fmt> ';' send-keys …
+    # was ACCEPTED — tmux treats a bare `;` argv token as a command separator, so
+    # that is a real write verb smuggled past a guard whose whole claim is that
+    # it fails closed. No call site does this; the guard is now true anyway.
+    #
+    # Segmenting on the separator (rather than checking every token) is what
+    # keeps flag VALUES out of it: `-F <format>` and `-t <target>` are arguments,
+    # not commands, and a scanner that demanded every non-dash token be an
+    # allowlisted subcommand would reject the tool's own read calls.
+    for segment in _split_on_separators(argv[1:]):
+        for token in segment:
+            if token.startswith("-"):
+                continue
+            if token not in TMUX_READ_ONLY_SUBCOMMANDS:
+                raise ReadOnlyViolation(
+                    f"session-resolve is READ-ONLY: refusing tmux command "
+                    f"{token!r}; allowed: "
+                    f"{', '.join(TMUX_READ_ONLY_SUBCOMMANDS)}")
+            break       # the rest of THIS segment is that command's arguments
+
+
+def _default_runner(argv, timeout: int = 20):
+    """Run argv, return (rc, stdout, stderr). Never raises on non-zero rc."""
+    _assert_read_only(argv)
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True,
+                              timeout=timeout, check=False)
+    except FileNotFoundError as exc:
+        return 127, "", f"not found: {exc}"
+    except subprocess.TimeoutExpired:
+        return 124, "", f"timed out after {timeout}s"
+    except OSError as exc:  # pragma: no cover - defensive
+        return 1, "", str(exc)
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+@dataclass
+class Sources:
+    """Every impure input, injectable. Nothing here touches the live machine
+    when all four raw fields are supplied — which is how the whole test suite
+    runs, and why `conftest`-style raisers can prove it.
+
+    A `*_raw` / `*_payload` field that is not None is used VERBATIM and the
+    corresponding subprocess is never spawned.
+    """
+    host: str = "workbench"
+    #: 🔴 The host whose FILESYSTEM the harness registry is read from — i.e. the
+    #: machine this process runs on. A target on any OTHER host is structurally
+    #: excluded from registry coverage (see PRESENCE_EXCLUDED). None means "same
+    #: as `host`", which is the local-only default and changes nothing.
+    local_host: Optional[str] = None
+    #: `None` -> use `_default_runner` at call time, so a test that replaces the
+    #: module-level runner actually reaches a default-constructed `Sources()`.
+    runner: Optional[Callable[..., Any]] = None
+
+    panes_raw: Optional[str] = None
+    windows_raw: Optional[str] = None
+    clients_raw: Optional[str] = None
+
+    #: None -> read DEFAULT_SLOT_TABLE from disk. A str is the file's TEXT.
+    slot_table_text: Optional[str] = None
+    #: `None` -> resolve DEFAULT_SLOT_TABLE at call time (see registry_dir).
+    slot_table_path: Optional[str] = None
+
+    # 🔴 `None` means "resolve DEFAULT_REGISTRY_DIR when used", NOT "no
+    # registry". A dataclass FIELD DEFAULT is bound once at class-creation time,
+    # so `monkeypatch.setattr(module, "DEFAULT_REGISTRY_DIR", ...)` could not
+    # reach it — a hermeticity fixture claimed to redirect this path and did
+    # not, and `Sources()` read 48 live records off the operator's machine.
+    # Resolving at call time makes the module global the single source of truth
+    # and makes the fixture able to work.
+    registry_dir: Optional[str] = None
+    #: None -> scan registry_dir. A list is the already-loaded records.
+    registry_records: Optional[list] = None
+
+    #: None -> shell out to session-manager. A dict is its parsed JSON.
+    sm_payload: Optional[dict] = None
+    sm_script: Optional[str] = None
+
+    def resolved_runner(self):
+        return self.runner if self.runner is not None else _default_runner
+
+    def resolved_registry_dir(self) -> str:
+        return (self.registry_dir if self.registry_dir is not None
+                else DEFAULT_REGISTRY_DIR)
+
+    def resolved_slot_table_path(self) -> str:
+        return (self.slot_table_path if self.slot_table_path is not None
+                else DEFAULT_SLOT_TABLE)
+
+    def resolved_sm_script(self) -> str:
+        return self.sm_script if self.sm_script is not None else DEFAULT_SM_SCRIPT
+
+    #: Opt-in. The `gh` call is the slowest and least reliable source, so it is
+    #: OFF unless asked for, and its failure degrades to UNMEASURED — never to
+    #: "no PR", which would read as a measured absence of a blocked PR.
+    want_pr: bool = False
+    git_runner: Optional[Callable[..., Any]] = None
+    gh_runner: Optional[Callable[..., Any]] = None
+    #: Process-lifetime memo. Deliberately in memory: this module writes no
+    #: on-disk artifact, so there is no cache filename to rot or to rename.
+    pr_cache: dict = field(default_factory=dict)
+    branch_cache: dict = field(default_factory=dict)
+
+
+# --------------------------------------------------------------------------- #
+# 2. The slot table
+# --------------------------------------------------------------------------- #
+def parse_slot_table(text: str) -> dict:
+    """Parse `SCRATCH_SLOTS=( "session:key:colour:name" ... )` -> {session: slot}.
+
+    Parses the ARRAY, not the whole file: the table is a sourced shell fragment
+    whose comments contain `scratch4` and `$mod+Shift+V` in prose, so a
+    line-oriented grep for `scratch` picks up documentation as data.
+    """
+    slots: dict = {}
+    if not text:
+        return slots
+    in_array = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not in_array:
+            if stripped.startswith(SLOT_ARRAY_NAME + "=("):
+                in_array = True
+            continue
+        if stripped.startswith(")"):
+            break
+        if not stripped or stripped.startswith("#"):
+            continue
+        entry = stripped.strip().strip(",").strip()
+        if entry.startswith('"') and entry.endswith('"'):
+            entry = entry[1:-1]
+        elif entry.startswith("'") and entry.endswith("'"):
+            entry = entry[1:-1]
+        parts = entry.split(":")
+        if len(parts) != 4:
+            continue
+        session, key, colour, name = (p.strip() for p in parts)
+        if not session:
+            continue
+        slots[session] = {"session": session, "hotkey": key,
+                          "colour": colour, "codename": name}
+    return slots
+
+
+def load_slots(src: Sources) -> tuple:
+    """-> (slots, status, dropped_note_or_None)."""
+    if src.slot_table_text is not None:
+        return parse_slot_table(src.slot_table_text), MEASURED_OK, None
+    try:
+        with open(src.resolved_slot_table_path(), "r", encoding="utf-8") as fh:
+            text = fh.read()
+    except FileNotFoundError:
+        return {}, unmeasured(
+            f"slot-table-absent:{src.resolved_slot_table_path()}"), None
+    except OSError as exc:
+        return {}, unmeasured(f"slot-table-unreadable:{exc}"), None
+    return parse_slot_table(text), MEASURED_OK, None
+
+
+# --------------------------------------------------------------------------- #
+# 1. tmux
+# --------------------------------------------------------------------------- #
+def _split_rows(raw: str, arity: int):
+    """-> (rows, malformed_count). A short row is DROPPED and COUNTED, never
+    padded — a padded row would join against the wrong window."""
+    rows, malformed = [], 0
+    for line in (raw or "").splitlines():
+        if not line.strip():
+            continue
+        parts = line.split(FIELD_SEP)
+        if len(parts) < arity:
+            malformed += 1
+            continue
+        rows.append(parts[:arity])
+    return rows, malformed
+
+
+def parse_panes(raw: str) -> tuple:
+    rows, malformed = _split_rows(raw, 7)
+    panes = []
+    for host, session, w_index, w_id, p_id, path, title in rows:
+        panes.append({"tmux_host": host, "session": session,
+                      "window_index": w_index, "window_id": w_id,
+                      "pane_id": p_id, "cwd": path or None,
+                      "pane_title": title or None})
+    return panes, malformed
+
+
+def parse_windows(raw: str) -> tuple:
+    """-> ({(session, window_id): active_bool}, malformed)."""
+    rows, malformed = _split_rows(raw, 3)
+    out = {}
+    for session, w_id, active in rows:
+        out[(session, w_id)] = (active.strip() == "1")
+    return out, malformed
+
+
+def parse_clients(raw: str) -> tuple:
+    """-> (clients, malformed). Each client is classified base-terminal vs popup.
+
+    🔴 The classification is STRUCTURAL, on TERM name: a client whose TERM is
+    tmux's own is by construction nested inside tmux, i.e. a `display-popup`
+    overlay. Width/height are carried as EVIDENCE so an operator can see the
+    measurement, but they are not the discriminator — classifying on size would
+    turn a resized terminal into a popup.
+    """
+    rows, malformed = _split_rows(raw, 6)
+    clients = []
+    for tty, term, width, height, session, flags in rows:
+        is_popup = term.startswith(POPUP_TERM_PREFIX)
+        clients.append({
+            "tty": tty, "term": term,
+            "width": _int_or_none(width), "height": _int_or_none(height),
+            "size": f"{width}x{height}",
+            "session": session,
+            "flags": [f for f in flags.split(",") if f],
+            "popup": is_popup,
+            "base_terminal": not is_popup,
+        })
+    return clients, malformed
+
+
+def _int_or_none(v):
+    try:
+        return int(str(v).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def collect_tmux(src: Sources) -> dict:
+    """Gather the three tmux reads. Any failure is UNMEASURED with a reason;
+    an unreachable tmux server yields None lists, never empty ones."""
+    out = {"panes": None, "windows": None, "clients": None,
+           "panes_status": MEASURED_OK, "windows_status": MEASURED_OK,
+           "clients_status": MEASURED_OK, "dropped": []}
+
+    def _read(raw, argv, key, parser, arity_label):
+        if raw is None:
+            rc, stdout, stderr = src.resolved_runner()(argv, timeout=20)
+            if rc != 0:
+                out[key + "_status"] = unmeasured(
+                    f"tmux-{arity_label}-failed:rc={rc}:"
+                    f"{(stderr or '').strip()[:120]}")
+                return
+            raw = stdout
+        parsed, malformed = parser(raw)
+        out[key] = parsed
+        if malformed:
+            out["dropped"].append(
+                f"{malformed} malformed tmux {arity_label} line(s) dropped")
+
+    _read(src.panes_raw,
+          ["tmux", "list-panes", "-a", "-F", PANE_FORMAT],
+          "panes", parse_panes, "list-panes")
+    _read(src.windows_raw,
+          ["tmux", "list-windows", "-a", "-F", WINDOW_FORMAT],
+          "windows", parse_windows, "list-windows")
+    _read(src.clients_raw,
+          ["tmux", "list-clients", "-F", CLIENT_FORMAT],
+          "clients", parse_clients, "list-clients")
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# 3. The harness session registry
+# --------------------------------------------------------------------------- #
+def parse_epoch_ms(value) -> tuple:
+    """-> (iso_utc_str | None, reason | None).
+
+    🔴 The registry's `startedAt` / `updatedAt` / `statusUpdatedAt` are epoch
+    MILLISECOND INTEGERS (e.g. 1787117530032). A parser that accepts only ISO
+    strings returns None for EVERY record and is indistinguishable from the
+    field being absent — which is exactly how this field was nearly reported as
+    missing from all 48 records.
+
+    A bool is rejected explicitly: `isinstance(True, int)` is True in Python, so
+    without the check `"status": true` would silently become 1970-01-01.
+    """
+    if value is None:
+        return None, "absent"
+    if isinstance(value, bool):
+        return None, f"not-epoch-ms:bool:{value!r}"
+    if not isinstance(value, (int, float)):
+        return None, f"not-epoch-ms:{type(value).__name__}:{str(value)[:40]}"
+    try:
+        dt = _dt.datetime.fromtimestamp(value / 1000.0, tz=_dt.timezone.utc)
+    except (OverflowError, OSError, ValueError) as exc:
+        return None, f"epoch-ms-out-of-range:{exc}"
+    return dt.isoformat().replace("+00:00", "Z"), None
+
+
+def parse_tmux_address(addr) -> tuple:
+    """`scratch18:@73.%73` -> (('scratch18', '@73'), '%73') | (None, None).
+
+    The join key is (session, window_id). The pane suffix is carried for
+    display but is NOT part of the key.
+    """
+    if not isinstance(addr, str) or ":" not in addr:
+        return None, None
+    session, rest = addr.split(":", 1)
+    win = rest.split(".", 1)[0]
+    pane = rest.split(".", 1)[1] if "." in rest else None
+    if not session or not win.startswith("@"):
+        return None, None
+    return (session, win), pane
+
+
+def load_registry(src: Sources) -> dict:
+    """-> {records, by_key, status, stats, dropped}.
+
+    A malformed JSON file is COUNTED and NAMED, never silently skipped: a
+    registry half of whose files fail to parse must not look like a registry
+    with half as many sessions.
+    """
+    out = {"records": [], "by_key": {}, "status": MEASURED_OK,
+           "unparseable": 0, "unparseable_files": [], "with_tmux": 0,
+           "dropped": []}
+
+    records = src.registry_records
+    if records is None:
+        if not os.path.isdir(src.resolved_registry_dir()):
+            out["status"] = unmeasured(
+                f"registry-absent:{src.resolved_registry_dir()}")
+            return out
+        records = []
+        for path in sorted(glob.glob(
+                os.path.join(src.resolved_registry_dir(), "*.json"))):
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    obj = json.load(fh)
+            except (OSError, ValueError):
+                out["unparseable"] += 1
+                out["unparseable_files"].append(os.path.basename(path))
+                continue
+            if isinstance(obj, dict):
+                records.append(obj)
+            else:
+                out["unparseable"] += 1
+                out["unparseable_files"].append(os.path.basename(path))
+    if out["unparseable"]:
+        out["dropped"].append(
+            f"{out['unparseable']} unparseable registry file(s): "
+            + ", ".join(out["unparseable_files"]))
+
+    out["records"] = records
+    for obj in records:
+        key, pane = parse_tmux_address(obj.get("tmux"))
+        if key is None:
+            continue
+        out["with_tmux"] += 1
+        out["by_key"].setdefault(key, []).append((obj, pane))
+    return out
+
+
+def shape_harness(obj: dict, pane: Optional[str]) -> dict:
+    """Project one registry record into the Target's `harness` block."""
+    times = {}
+    for field_name in ("startedAt", "updatedAt", "statusUpdatedAt", "nameSince"):
+        iso, reason = parse_epoch_ms(obj.get(field_name))
+        times[field_name] = obj.get(field_name)
+        times[field_name + "_iso"] = iso
+        times[field_name + "_status"] = MEASURED_OK if iso else unmeasured(
+            f"{field_name}:{reason}")
+    return {
+        "pid": obj.get("pid"),
+        "session_id": obj.get("sessionId"),
+        "name": obj.get("name"),
+        "name_source": obj.get("nameSource"),
+        "cwd": obj.get("cwd"),
+        "kind": obj.get("kind"),
+        "entrypoint": obj.get("entrypoint"),
+        # The registry's OWN reason, carried verbatim beside its status. Present
+        # only on `waiting` rows (measured: 2 of 48, value "input needed").
+        # Never synthesised, and never used to derive waiting_probable.
+        "waiting_for": obj.get("waitingFor"),
+        "tmux": obj.get("tmux"),
+        "pane_id": pane,
+        "times": times,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# 4. session-manager
+# --------------------------------------------------------------------------- #
+def load_session_manager(src: Sources) -> dict:
+    """-> {by_key, status, rows_total, rows_unjoinable, dropped}.
+
+    🔴 CONSUMES session-manager. Re-derives NOTHING — no waiting predicate, no
+    staleness bucket, no age. Every such field is copied through under the name
+    session-manager gave it.
+
+    🔴 A row WITHOUT `window_id` is recorded as UNJOINABLE and named. It is NOT
+    joined on `window_index`. This is the guard that makes the `--lean` view's
+    missing key loud instead of catastrophic: `--lean` rows would ALL land here,
+    and the resolver reports "0 of 59 rows joinable" rather than confidently
+    attaching every harness record to the wrong window.
+    """
+    out = {"by_key": {}, "status": MEASURED_OK, "rows_total": 0,
+           "rows_unjoinable": 0, "unjoinable_reason": None, "dropped": [],
+           "hosts_seen": [], "local_host": None, "host_status": {}}
+
+    payload = src.sm_payload
+    if payload is None:
+        argv = [sys.executable, src.resolved_sm_script(), *SM_ARGV,
+                "--host", src.host]
+        rc, stdout, stderr = src.resolved_runner()(argv, timeout=240)
+        if rc != 0:
+            out["status"] = unmeasured(
+                f"session-manager-failed:rc={rc}:{(stderr or '').strip()[:120]}")
+            return out
+        try:
+            payload = json.loads(stdout)
+        except ValueError as exc:
+            out["status"] = unmeasured(f"session-manager-bad-json:{exc}")
+            return out
+
+    # session-manager states WHICH host it is running on. That is the
+    # authoritative answer to "whose filesystem is the registry on", and it is
+    # far better than inferring it from a --host argument that may be "all".
+    out["local_host"] = (payload or {}).get("local_host")
+    hosts = (payload or {}).get("hosts")
+    if not isinstance(hosts, dict):
+        out["status"] = unmeasured("session-manager-no-hosts-key")
+        return out
+
+    for host_name, host_obj in hosts.items():
+        if not isinstance(host_obj, dict):
+            continue
+        out["hosts_seen"].append(host_name)
+        if host_obj.get("reachable") is False:
+            reason = host_obj.get("error") or "no reason given"
+            out["host_status"][host_name] = {"status": HOST_UNREACHABLE,
+                                             "reason": reason}
+            out["dropped"].append(f"host {host_name} unreachable: {reason}")
+            continue
+        out["host_status"][host_name] = {"status": HOST_READ, "reason": None}
+        for row in host_obj.get("windows") or []:
+            if not isinstance(row, dict):
+                continue
+            out["rows_total"] += 1
+            session = row.get("session")
+            window_id = row.get("window_id")
+            if not session or not window_id:
+                out["rows_unjoinable"] += 1
+                out["unjoinable_reason"] = (
+                    "row carries no window_id — refusing to join on "
+                    "window_index (indexes renumber when windows close); is "
+                    "this the --lean view?")
+                continue
+            # 🔴 THE KEY IS (host, session, window_id) — the host is NOT
+            # decorative. Measured across both hosts at one instant: 14 session
+            # NAMES and 11 window_ids exist on BOTH machines (laptop `scratch6`
+            # holds `@16`; workbench `scratch12` also holds `@16`). No full
+            # PAIR collided that instant, but laptop's id range (@4–@31) sits
+            # inside workbench's, so a collision is one window-open away — and
+            # a host-less key would then attach one machine's row to the other
+            # machine's window. "Zero collisions today" is an empty result, not
+            # a proof the key is safe.
+            out["by_key"].setdefault((host_name, session, window_id), []).append(
+                (host_name, row))
+    if out["rows_unjoinable"]:
+        out["dropped"].append(
+            f"{out['rows_unjoinable']} session-manager row(s) had no "
+            f"window_id and were NOT joined: {out['unjoinable_reason']}")
+    return out
+
+
+#: Fields copied verbatim out of a session-manager row. Named as a constant so
+#: the test can pin the ledger — a field added to the copy must be added here.
+SM_PASSTHROUGH_FIELDS = (
+    "status", "waiting_probable", "waiting_signals", "waiting_status",
+    "unsent_prompt", "unsent_prompt_status", "age_secs", "age_source",
+    "runtime", "claude", "busy", "task", "claude_session_id", "label",
+    "label_source", "window_name",
+)
+
+
+# --------------------------------------------------------------------------- #
+# Visibility — real terminal vs popup
+# --------------------------------------------------------------------------- #
+def compute_visibility(session: str, window_id: str, windows, clients) -> dict:
+    """Is this target on screen, and is it COVERED by a popup overlay?
+
+    The case this exists for, measured: the operator asked for a window that was
+    ALREADY current on the base terminal and merely COVERED by two
+    `display-popup` overlays. Nothing in this repo could express the difference
+    between "not showing it" and "showing it underneath two popups", so "open
+    it" was the wrong action and looked like the right one.
+
+    Definitions, stated so they can be argued with:
+      * `visible`  — this window is the ACTIVE window of its session AND some
+                     attached client is displaying that session.
+      * `covered`  — visible, the client showing it is the BASE TERMINAL, and at
+                     least one popup client is attached (a popup overlays the
+                     screen). A target shown BY a popup is on top, not covered.
+    """
+    out = {"clients": None, "attached_clients": None, "base_terminal": None,
+           "popups": None, "window_active": None, "visible": None,
+           "covered": None, "status": MEASURED_OK}
+
+    if clients is None or windows is None:
+        missing = []
+        if clients is None:
+            missing.append("clients")
+        if windows is None:
+            missing.append("windows")
+        out["status"] = unmeasured("tmux-" + "+".join(missing) + "-unmeasured")
+        return out
+
+    active = windows.get((session, window_id))
+    if active is None:
+        out["status"] = unmeasured(
+            f"window-not-in-list-windows:{session}:{window_id}")
+        return out
+
+    attached = [c for c in clients if c["session"] == session]
+    popups_all = [c for c in clients if c["popup"]]
+    base_all = [c for c in clients if c["base_terminal"]]
+
+    out["clients"] = clients
+    out["attached_clients"] = attached
+    out["base_terminal"] = base_all[0] if base_all else None
+    out["popups"] = popups_all
+    out["window_active"] = active
+
+    out["visible"] = bool(active and attached)
+    shown_by_base = any(c["base_terminal"] for c in attached)
+    out["covered"] = bool(out["visible"] and shown_by_base and popups_all)
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# git branch + PR state
+# --------------------------------------------------------------------------- #
+def measure_git(cwd: Optional[str], src: Sources) -> dict:
+    """Branch of the cwd, and the open PR for it.
+
+    🔴 Closes session-manager's own documented blind spot: "a window idle because
+    its PR is blocked looks exactly like a window idle because the work is
+    done." A failed `gh` degrades to UNMEASURED, NEVER to "no PR" — the latter
+    would assert the blocked-PR case is absent when it was simply not looked at.
+    """
+    out = {"branch": None, "branch_status": MEASURED_OK,
+           "branch_presence": PRESENCE_UNMEASURED,
+           "pr": None, "pr_status": MEASURED_OK,
+           "pr_presence": PRESENCE_UNMEASURED}
+    if not cwd:
+        out["branch_status"] = unmeasured("no-cwd")
+        out["pr_status"] = unmeasured("no-cwd")
+        return out
+
+    runner = src.git_runner or src.resolved_runner()
+    if cwd in src.branch_cache:
+        branch, branch_status, branch_presence = src.branch_cache[cwd]
+    else:
+        rc, stdout, stderr = runner(
+            ["git", "-C", cwd, "branch", "--show-current"], timeout=15)
+        if rc != 0:
+            branch = None
+            branch_status = unmeasured(
+                f"git-branch-failed:rc={rc}:{(stderr or '').strip()[:120]}")
+            branch_presence = PRESENCE_UNMEASURED
+        else:
+            name = (stdout or "").strip()
+            branch = name or None
+            # 🔴 A DETACHED HEAD is a MEASURED absence of a branch: git answered,
+            # and there genuinely is no branch. It is ABSENT, not UNMEASURED —
+            # calling it unmeasured would send a reader looking for a broken git.
+            branch_status = MEASURED_OK
+            branch_presence = PRESENCE_PRESENT if name else PRESENCE_ABSENT
+        src.branch_cache[cwd] = (branch, branch_status, branch_presence)
+    out["branch"] = branch
+    out["branch_status"] = branch_status
+    out["branch_presence"] = branch_presence
+
+    # 🔴 THE TRICHOTOMY THAT MATTERS MOST. "No open PR for this branch" and "the
+    # gh call did not happen" are OPPOSITE answers to "is this window idle
+    # because its PR is blocked?", and a shared token makes them indistinguishable
+    # — which is precisely session-manager's documented blind spot, reintroduced.
+    if not src.want_pr:
+        out["pr_status"] = unmeasured("pr-lookup-not-requested")
+        return out
+    if branch is None:
+        out["pr_status"] = unmeasured("no-branch-to-query")
+        return out
+
+    cache_key = (cwd, branch)
+    if cache_key in src.pr_cache:
+        out["pr"], out["pr_status"], out["pr_presence"] = src.pr_cache[cache_key]
+        return out
+
+    gh = src.gh_runner or src.resolved_runner()
+    rc, stdout, stderr = gh(
+        ["gh", "pr", "list", "--head", branch, "--state", "open",
+         "--json", "number,title,state,isDraft,url,mergeStateStatus"],
+        timeout=45)
+    if rc != 0:
+        result = (None, unmeasured(
+            f"gh-failed:rc={rc}:{(stderr or '').strip()[:120]}"),
+            PRESENCE_UNMEASURED)
+    else:
+        try:
+            prs = json.loads(stdout or "[]")
+        except ValueError as exc:
+            result = (None, unmeasured(f"gh-bad-json:{exc}"),
+                      PRESENCE_UNMEASURED)
+        else:
+            # gh answered. A NON-EMPTY list is PRESENT; an EMPTY list is a
+            # MEASURED absence — "this branch really has no open PR".
+            result = (prs, MEASURED_OK,
+                      PRESENCE_PRESENT if prs else PRESENCE_ABSENT)
+    src.pr_cache[cache_key] = result
+    out["pr"], out["pr_status"], out["pr_presence"] = result
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Building targets
+# --------------------------------------------------------------------------- #
+def build_targets(src: Sources) -> dict:
+    """Join all four sources on (host, session, window_id) -> targets + coverage."""
+    dropped: list = []
+    tmux = collect_tmux(src)
+    dropped.extend(tmux["dropped"])
+    slots, slots_status, _ = load_slots(src)
+    registry = load_registry(src)
+    dropped.extend(registry["dropped"])
+    sm = load_session_manager(src)
+    dropped.extend(sm["dropped"])
+
+    panes = tmux["panes"]
+    targets: list = []
+    # The machine whose filesystem the registry was read from, in order of
+    # authority: an explicit override, then session-manager's OWN `local_host`
+    # (it knows which box it ran on), then the --host argument — but ONLY when
+    # that argument is a real host name.
+    #
+    # 🔴 `all` MUST NOT become a host name. It did: with `--host all` and a
+    # payload lacking `local_host`, `local_host` became "all", the real local
+    # host was then != "all" and got reported as structurally excluded, and every
+    # physical window appeared TWICE — once from local tmux labelled "all" and
+    # once from session-manager labelled with its real host, with contradictory
+    # provenance.
+    local_host = src.local_host or sm.get("local_host")
+    if not local_host and src.host in HOST_NAMES:
+        local_host = src.host
+    local_host_known = local_host is not None
+    if not local_host_known:
+        local_host = LOCAL_HOST_UNKNOWN
+        dropped.append(
+            "local host name could not be determined (session-manager reported "
+            "no `local_host` and --host is not a single host); windows read from "
+            "LOCAL tmux are still local by construction, but no remote target "
+            "was built and no host can be named as registry-excluded")
+
+    if panes is None:
+        panes = []
+        # NOT a silent zero: collect_tmux already recorded the reason in
+        # tmux["panes_status"], and _coverage carries it through. Remote rows
+        # below are still resolvable, because they never needed local tmux.
+
+    # One target per WINDOW, keyed WITH ITS HOST. A window's first pane supplies
+    # cwd/title; extra panes are recorded so a multi-pane window is not silently
+    # reduced to one.
+    by_window: dict = {}
+    for pane in panes:
+        # tmux was read from THIS machine, so its panes are local BY
+        # CONSTRUCTION — that fact does not depend on knowing the host's name.
+        key = (local_host, pane["session"], pane["window_id"])
+        by_window.setdefault(key, []).append(pane)
+
+    # 🔴 REMOTE WINDOWS. session-manager sees both machines; local tmux sees only
+    # this one. Without this, a laptop window is not a target at all and the
+    # EXCLUDED state below is unreachable — a state with no code path is a state
+    # no test can honestly pin.
+    for (sm_host, sm_session, sm_window_id), rows in sm["by_key"].items():
+        # 🔴 With the local host name unknown we cannot tell a remote row from a
+        # local one, so we build NO remote targets rather than guessing — which
+        # is what produced duplicate windows with contradictory provenance.
+        if not local_host_known or sm_host == local_host:
+            continue
+        key = (sm_host, sm_session, sm_window_id)
+        if key in by_window:
+            continue
+        row = rows[0][1]
+        by_window[key] = [{
+            "tmux_host": sm_host, "session": sm_session,
+            "window_index": row.get("window_index"),
+            "window_id": sm_window_id, "pane_id": None,
+            "cwd": row.get("path"), "pane_title": row.get("window_name"),
+        }]
+
+    n_slot = n_reg = n_sm = 0
+    for (host, session, window_id), pane_list in sorted(by_window.items()):
+        head = pane_list[0]
+        slot = slots.get(session)
+        if slot:
+            n_slot += 1
+
+        reg_matches = registry["by_key"].get((session, window_id)) or []
+        harness = None
+        harness_status = None
+        harness_status_field = MEASURED_OK
+        # 🔴 See ALL_PRESENCE_STATES. EXCLUDED = this target is on another host
+        # and the registry is local-filesystem-only, so no record can EVER
+        # exist; UNMEASURED = the registry could not be read; ABSENT = it was
+        # read and this window has no record (the MAJORITY case, 35 of 59
+        # measured); PRESENT = a record joined.
+        harness_presence = PRESENCE_UNMEASURED
+        # 🔴 Why this string comparison is safe, since it looks fragile:
+        # local tmux panes are keyed with `local_host` ITSELF a few lines above,
+        # so for them the two sides are the same object; and remote targets are
+        # only built when `local_host_known`, so `LOCAL_HOST_UNKNOWN` — which is
+        # not a legal host name and is refused by the parser's `choices` — can
+        # never equal a real host. An earlier revision carried a separate
+        # `is_local` flag; it was removed because it could not differ from this
+        # comparison in any state the code can construct, and a distinction the
+        # suite cannot see is one a reader will eventually "fix" the wrong way.
+        if host != local_host:
+            harness_presence = PRESENCE_EXCLUDED
+            harness_status_field = registry_excluded_reason(host, local_host)
+        elif is_unmeasured(registry["status"]):
+            harness_status_field = registry["status"]
+        elif reg_matches:
+            harness_presence = PRESENCE_PRESENT
+            n_reg += 1
+            obj, pane_id = reg_matches[0]
+            harness = shape_harness(obj, pane_id)
+            harness_status = obj.get("status")
+            if len(reg_matches) > 1:
+                dropped.append(
+                    f"{len(reg_matches)} registry records claim "
+                    f"{session}:{window_id}; used pid={obj.get('pid')}")
+        else:
+            # 🔴 A window with NO registry record is NORMAL — 35 of 59 measured.
+            # It is a real measured absence, not an error and not a zero.
+            harness_presence = PRESENCE_ABSENT
+            harness_status_field = MEASURED_OK
+
+        sm_matches = sm["by_key"].get((host, session, window_id)) or []
+        sm_block = {f: None for f in SM_PASSTHROUGH_FIELDS}
+        sm_status_field = sm["status"]
+        sm_host = None
+        # 🔴 The same trichotomy. UNMEASURED = session-manager could not be run
+        # or parsed; ABSENT = it ran and reported no row for this window (so
+        # waiting_probable is genuinely UNKNOWN for it, never False); PRESENT =
+        # a row joined and every field below is session-manager's OWN value.
+        sm_presence = PRESENCE_UNMEASURED
+        if is_unmeasured(sm["status"]):
+            pass
+        elif sm_matches:
+            sm_presence = PRESENCE_PRESENT
+            n_sm += 1
+            sm_host, row = sm_matches[0]
+            for f in SM_PASSTHROUGH_FIELDS:
+                sm_block[f] = row.get(f)
+            sm_status_field = MEASURED_OK
+        else:
+            sm_presence = PRESENCE_ABSENT
+            # 🔴 MEASURED_OK, matching the harness source EXACTLY. This used to
+            # be `unmeasured("no-session-manager-row-for-window")`, so
+            # `is_unmeasured()` was TRUE for a MEASURED absence — the two sources
+            # encoded the same trichotomy two different ways, in the very thing
+            # this module exists to get right. The measurement string answers
+            # "was the source readable"; `<source>_presence` answers "did it have
+            # an entry". A test pins the two spellings against each other.
+            sm_status_field = MEASURED_OK
+
+        label, label_source = _label_for(slot, head.get("cwd"), session)
+        if host != local_host:
+            # tmux clients were read from THIS machine; they say nothing about
+            # what is on screen over there.
+            vis = {"clients": None, "attached_clients": None,
+                   "base_terminal": None, "popups": None,
+                   "window_active": None, "visible": None, "covered": None,
+                   "status": unmeasured(f"tmux-read-is-local-only:{host}")}
+        else:
+            vis = compute_visibility(session, window_id, tmux["windows"],
+                                     tmux["clients"])
+        # 🔴 The cwd of a remote window is a path on the OTHER machine.
+        # Running `git -C` on it locally would either fail or — far worse —
+        # succeed against a same-named local path and report a branch that
+        # belongs to a different checkout entirely.
+        if host != local_host:
+            git = {"branch": None,
+                   "branch_status": unmeasured(
+                       f"cwd-is-on-remote-host:{host}"),
+                   "branch_presence": PRESENCE_EXCLUDED,
+                   "pr": None,
+                   "pr_status": unmeasured(f"cwd-is-on-remote-host:{host}"),
+                   "pr_presence": PRESENCE_EXCLUDED}
+        else:
+            git = measure_git(head.get("cwd"), src)
+
+        targets.append({
+            "host": host,
+            "session": session,
+            "window_id": window_id,
+            "window_index": head.get("window_index"),
+            "pane_id": head.get("pane_id"),
+            # A remote window is known only through session-manager, which
+            # reports no pane ids. Empty, never [None].
+            "panes": [p["pane_id"] for p in pane_list if p.get("pane_id")],
+            "cwd": head.get("cwd"),
+            "repo": os.path.basename(head["cwd"]) if head.get("cwd") else None,
+            "pane_title": head.get("pane_title"),
+            "address": f"{session}:{window_id}",
+
+            "label": label,
+            "label_source": label_source,
+            "codename": slot["codename"] if slot else None,
+            "hotkey": slot["hotkey"] if slot else None,
+            "colour": slot["colour"] if slot else None,
+            "slot_status": slots_status,
+
+            # 🔴 TWO STATUSES, NEVER COLLAPSED. Distinct names, no mapping.
+            "harness_status": harness_status,
+            "harness_status_measurement": harness_status_field,
+            "harness_presence": harness_presence,
+            "harness": harness,
+
+            "waiting_probable": sm_block["waiting_probable"],
+            "waiting_signals": sm_block["waiting_signals"],
+            "waiting_status": sm_block["waiting_status"],
+            "session_manager_status": sm_block["status"],
+            "session_manager_measurement": sm_status_field,
+            "session_manager_presence": sm_presence,
+            "session_manager_host": sm_host,
+            "unsent_prompt": sm_block["unsent_prompt"],
+            "unsent_prompt_status": sm_block["unsent_prompt_status"],
+            "age_secs": sm_block["age_secs"],
+            "age_source": sm_block["age_source"],
+            "runtime": sm_block["runtime"],
+            "task": sm_block["task"],
+            "claude_session_id": sm_block["claude_session_id"],
+
+            "visibility": vis,
+            "git": git,
+        })
+
+    hosts_seen = sorted({tgt["host"] for tgt in targets}
+                        | set(sm["hosts_seen"]))
+    # 🔴 Every host this run could have covered, each with what actually
+    # happened to it — including the ones never put in scope, which is what made
+    # the --host default regression invisible in the first place.
+    host_status = build_host_status(
+        src, sm, tmux, local_host, {tgt["host"] for tgt in targets})
+    coverage = _coverage(len(targets), n_slot, n_reg, n_sm, tmux,
+                         slots_status, registry, sm,
+                         hosts_seen=hosts_seen, local_host=local_host,
+                         targets=targets, local_host_known=local_host_known)
+    return {"targets": targets, "coverage": coverage, "dropped": dropped,
+            "slots": slots, "host_status": host_status}
+
+
+def _label_for(slot, cwd, session) -> tuple:
+    """🔴 A session with no slot entry has NO codename and NO hotkey. The label
+    falls back to the cwd basename, then to the session name. None is invented.
+    """
+    if slot and slot.get("codename"):
+        return slot["codename"], LABEL_SOURCE_SLOT
+    if cwd:
+        return os.path.basename(cwd), LABEL_SOURCE_CWD
+    return session, LABEL_SOURCE_SESSION
+
+
+def _coverage(n_windows, n_slot, n_reg, n_sm, tmux, slots_status, registry,
+              sm, hosts_seen=(), local_host=None, targets=(),
+              local_host_known=True):
+    """🔴 Coverage is REPORTED, not asserted. 'Registry matched 24 of 59
+    windows' is the honest statement; a bare 24 hides the denominator and a
+    silent 0 for the other 35 would invent an absence."""
+    excluded = [t for t in targets
+                if t["harness_presence"] == PRESENCE_EXCLUDED]
+    return {
+        # 🔴 Nested under `registry` and spelled `hosts_not_covered` to MATCH the
+        # waiting-windows report's vocabulary. Two PRs disagreeing on the name
+        # for one fact is its own defect, so the shared spelling is worth more
+        # than a marginally better private name.
+        "registry": {
+            "status": registry["status"],
+            "local_host": local_host,
+            "hosts_seen": list(hosts_seen),
+            # 🔴 UNMEASURED, not a list, when the local host is unknown. A list
+            # would accuse EVERY host of being registry-excluded — the same
+            # confident-wrong-zero this field exists to prevent, in the field
+            # itself. ONE RULE, ONE PLACE: `hosts_not_covered` is the shared
+            # predicate, pinned against waiting-windows' copy by a seam test.
+            "hosts_not_covered": hosts_not_covered(
+                hosts_seen, local_host if local_host_known else None),
+            "hosts_not_covered_status": (
+                MEASURED_OK if local_host_known
+                else unmeasured("local-host-name-unknown")),
+            "windows_covered": n_reg,
+            "windows_structurally_excluded": len(excluded),
+            "records": len(registry["records"]),
+            "records_with_tmux": registry["with_tmux"],
+        },
+        "windows_total": n_windows,
+        "tmux_panes_status": tmux["panes_status"],
+        "tmux_windows_status": tmux["windows_status"],
+        "tmux_clients_status": tmux["clients_status"],
+        "slot_table_status": slots_status,
+        "windows_with_slot": n_slot,
+        "windows_without_slot": n_windows - n_slot,
+        "registry_status": registry["status"],
+        "registry_records": len(registry["records"]),
+        "registry_records_with_tmux": registry["with_tmux"],
+        "registry_unparseable_files": registry["unparseable"],
+        "windows_with_registry_match": n_reg,
+        "windows_without_registry_match": n_windows - n_reg,
+        "session_manager_status": sm["status"],
+        "session_manager_rows": sm["rows_total"],
+        "session_manager_rows_unjoinable": sm["rows_unjoinable"],
+        "windows_with_session_manager_row": n_sm,
+        "windows_without_session_manager_row": n_windows - n_sm,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Selector matching
+# --------------------------------------------------------------------------- #
+def normalise_hotkey(selector: str) -> Optional[str]:
+    """`Alt+Shift+G` / `$mod+Shift+G` / `G` -> `G`; anything else -> None.
+
+    🔴 CASE IS PRESERVED. `g` is grove (scratch) and `G` is Gold (scratch2);
+    lower-casing the key would merge ten pairs of distinct slots.
+    """
+    if not selector:
+        return None
+    tail = selector.split(HOTKEY_SEPARATOR)[-1].strip()
+    return tail if len(tail) == 1 else None
+
+
+def match_kinds(selector: str, target: dict) -> list:
+    """Which selector KINDS does `selector` match this target under?
+
+    All kinds are tried and the matches are UNIONED. A selector that names two
+    different targets under two different kinds is ambiguous, and saying which
+    kinds fired is what makes the refusal actionable.
+    """
+    kinds = []
+    sel = (selector or "").strip()
+    if not sel:
+        return kinds
+
+    codename = target.get("codename")
+    if codename and sel.lower() == codename.lower():
+        kinds.append(SELECTOR_CODENAME)
+
+    key = normalise_hotkey(sel)
+    if key is not None and target.get("hotkey") and key == target["hotkey"]:
+        kinds.append(SELECTOR_HOTKEY)
+
+    if ":" in sel:
+        head, tail = sel.split(":", 1)
+        if head == target["session"]:
+            if tail.startswith("@") and tail == target["window_id"]:
+                kinds.append(SELECTOR_ADDRESS)
+            elif tail.isdigit() and tail == str(target.get("window_index")):
+                kinds.append(SELECTOR_SESSION_INDEX)
+
+    if sel.startswith("@") and sel == target["window_id"]:
+        kinds.append(SELECTOR_WINDOW_ID)
+
+    harness = target.get("harness") or {}
+    if harness.get("name") and sel == harness["name"]:
+        kinds.append(SELECTOR_HARNESS_NAME)
+
+    if sel == target["session"]:
+        kinds.append(SELECTOR_SESSION)
+
+    if target.get("cwd") and (sel == target["cwd"] or sel == target.get("repo")):
+        kinds.append(SELECTOR_CWD)
+
+    return kinds
+
+
+def _brief(target: dict, kinds) -> dict:
+    """The candidate line shown when a selector is ambiguous — enough to pick."""
+    return {
+        "address": target["address"],
+        "host": target["host"],
+        "session": target["session"],
+        "window_id": target["window_id"],
+        "window_index": target["window_index"],
+        "label": target["label"],
+        "label_source": target["label_source"],
+        "codename": target["codename"],
+        "hotkey": target["hotkey"],
+        "cwd": target["cwd"],
+        "harness_status": target["harness_status"],
+        "waiting_probable": target["waiting_probable"],
+        "matched_kinds": kinds,
+    }
+
+
+def resolve(selector: str, src: Optional[Sources] = None,
+            built: Optional[dict] = None) -> dict:
+    """Resolve `selector` to exactly ONE target, or refuse.
+
+    🔴 AMBIGUITY IS A FIRST-CLASS OUTCOME. More than one match returns
+    STATUS_AMBIGUOUS with every candidate listed. It NEVER picks the first —
+    silently picking is how an operator's "open Gold" lands in the wrong window
+    and nobody finds out.
+    """
+    src = src or Sources()
+    built = built if built is not None else build_targets(src)
+    targets = built["targets"]
+
+    matches = []
+    for t in targets:
+        kinds = match_kinds(selector, t)
+        if kinds:
+            matches.append((t, kinds))
+
+    result = {
+        "selector": selector,
+        "selector_kinds_supported": list(ALL_SELECTOR_KINDS),
+        "sources_consulted": list(ALL_SOURCES),
+        "coverage": built["coverage"],
+        "dropped": built["dropped"],
+        "target": None,
+        "candidates": [],
+        "candidate_count": len(matches),
+        # 🔴 Unconditional, and each entry says what ACTUALLY happened to that
+        # host — "consulted" alone was a claim the run could not support.
+        "hosts_consulted": list(built["host_status"]),
+    }
+
+    if not matches:
+        result["status"] = STATUS_UNMATCHED
+        reg = built["coverage"]["registry"]
+        # 🔴 NAME THE HOSTS. An UNMATCHED result that says "consulted
+        # tmux, slot-table, harness-registry, session-manager" and nothing about
+        # WHICH HOSTS is the confident wrong zero this module is built to avoid:
+        # a real window on the other machine reported UNMATCHED while every
+        # source read as consulted-and-fine.
+        # 🔴 Say which hosts ANSWERED, and name the ones that did not
+        # separately. "consulted laptop, workbench" while laptop was unreachable
+        # is the false claim this replaces.
+        answered = [h["host"] for h in built["host_status"]
+                    if h["status"] == HOST_READ]
+        silent = [f"{h['host']} ({h['status']})" for h in built["host_status"]
+                  if h["status"] != HOST_READ]
+        result["reason"] = (
+            f"no target matched {selector!r} under any of "
+            f"{len(ALL_SELECTOR_KINDS)} selector kinds; consulted "
+            f"{', '.join(ALL_SOURCES)}; hosts that ANSWERED: "
+            f"{', '.join(answered) or 'NONE'}"
+            + (f"; NOT answered: {', '.join(silent)}" if silent else "")
+            + f" ({built['coverage']['windows_total']} window(s) known)")
+        return result
+
+    if len(matches) > 1:
+        result["status"] = STATUS_AMBIGUOUS
+        result["candidates"] = [_brief(t, k) for t, k in matches]
+        result["reason"] = (
+            f"{len(matches)} targets match {selector!r} — refusing to pick. "
+            f"Disambiguate with an address (session:@window_id) or "
+            f"session:index.")
+        return result
+
+    target, kinds = matches[0]
+    result["status"] = STATUS_RESOLVED
+    result["matched_kinds"] = kinds
+    result["target"] = target
+    return result
+
+
+# --------------------------------------------------------------------------- #
+# Rendering
+# --------------------------------------------------------------------------- #
+#: The key holding the signal's NAME inside a session-manager waiting signal.
+SIGNAL_NAME_KEY = "signal"
+#: 🔴 The key holding the raw CAPTURED PANE LINE. Measured shape of one signal:
+#: `{"line": "<text scraped off the operator's screen>", "signal":
+#: "selection_menu"}`. This repo is PUBLIC and forbids captured text in any
+#: committed artifact, and a rendered line lands in scrollback, logs and pasted
+#: PR bodies. `signal_names` therefore projects the NAME ONLY and this key is
+#: named here so the omission is deliberate and greppable rather than an
+#: oversight. The full signal object is still present in `--json` for a caller
+#: that genuinely needs it and knows where the output is going.
+SIGNAL_CAPTURED_TEXT_KEY = "line"
+
+#: 🔴 `unsent_prompt` is ALSO captured text — it is literally what the operator
+#: typed into a pane. Printing it untruncated three lines after the constant
+#: above argues captured text must not reach scrollback was incoherent.
+#: session-manager truncates to 90; matching that rather than inventing a
+#: second number.
+UNSENT_PROMPT_MAX = 90
+
+
+def truncate_captured(text, limit=UNSENT_PROMPT_MAX):
+    """Bound captured pane text before it reaches scrollback, and SAY when it
+    was cut — a silent truncation is a silent cap."""
+    if not text:
+        return "-"
+    text = str(text)
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}… [+{len(text) - limit} chars not shown]"
+
+
+def signal_names(signals) -> list:
+    """Project session-manager waiting signals to their NAMES.
+
+    Tolerates both shapes because the field is another tool's output, not ours:
+    a dict yields `signal[SIGNAL_NAME_KEY]`, a bare string yields itself. It
+    NEVER yields `SIGNAL_CAPTURED_TEXT_KEY` — see that constant.
+    """
+    out = []
+    for s in signals or []:
+        if isinstance(s, dict):
+            out.append(str(s.get(SIGNAL_NAME_KEY) or "unnamed-signal"))
+        else:
+            out.append(str(s))
+    return out
+
+
+def _fmt(value, status=None):
+    if status is not None and is_unmeasured(status):
+        return f"UNMEASURED ({status.split(':', 1)[1]})"
+    if value is None:
+        return "UNMEASURED (no value and no reason recorded)"
+    return str(value)
+
+
+#: The exact rendered strings for the three harness states. Pinned as constants
+#: because "no record" and "not measured" are the two the operator must never
+#: confuse, and a whole-string assertion on a constant is the only guard a
+#: reword cannot walk.
+HARNESS_NO_RECORD = ("no harness record for this window "
+                     "(MEASURED absence — normal, most windows have none)")
+#: 🔴 The FOURTH string, and the one that must never read like the third. ABSENT
+#: invites "check again later"; EXCLUDED says later will never differ.
+#: 🔴 This sentence previously said "a window on THIS host can never have a
+#: record" — the exact inverse of the truth, since a window on this host is the
+#: only kind that CAN. It is whole-string pinned so a reword cannot walk it,
+#: which made the wrong sentence load-bearing.
+HARNESS_EXCLUDED = ("N/A — the harness registry is LOCAL-HOST ONLY and this "
+                    "window is on a REMOTE host, so it can never have a record "
+                    "(not 'none yet')")
+WAITING_NOT_MEASURED = "UNMEASURED (session-manager reported no value)"
+#: The MEASURED-absence wording, mirroring HARNESS_NO_RECORD. session-manager
+#: answered and simply has no row for this window, so waiting_probable is
+#: UNKNOWN for it — never False.
+WAITING_NO_ROW = ("no session-manager row for this window (MEASURED absence; "
+                  "waiting_probable is therefore UNKNOWN, not False)")
+#: 🔴 The two PR strings that must never merge. `gh` ran and found nothing vs
+#: `gh` never ran. Pinned as whole strings so a reword cannot walk the guard.
+PR_NONE_MEASURED = "none — gh answered, this branch has NO open PR (MEASURED)"
+BRANCH_DETACHED = "none — detached HEAD, no branch (MEASURED)"
+#: 🔴 The remote pair. Neither may read like "measured, and there is none": the
+#: cwd lives on another machine, so a LOCAL git/gh answer about it would be
+#: about a DIFFERENT checkout that happens to share the path.
+GIT_REMOTE_EXCLUDED = ("N/A — cwd is on another host; a local git would answer "
+                       "about a DIFFERENT checkout")
+PR_REMOTE_EXCLUDED = "N/A — cwd is on another host, so no local branch to query"
+
+
+def render_harness_status(t: dict) -> str:
+    """🔴 Three states, three distinct strings. Never collapses the middle one
+    into the UNMEASURED wording — a window with no harness record has been
+    measured, and saying otherwise would send an operator hunting a broken
+    registry that is working perfectly."""
+    if t["harness_presence"] == PRESENCE_EXCLUDED:
+        return HARNESS_EXCLUDED
+    if t["harness_presence"] == PRESENCE_UNMEASURED:
+        return _fmt(None, t["harness_status_measurement"])
+    if t["harness_presence"] == PRESENCE_ABSENT:
+        return HARNESS_NO_RECORD
+    if t["harness_status"] is None:
+        return _fmt(None, unmeasured("registry-record-has-no-status-field"))
+    return str(t["harness_status"])
+
+
+def render_waiting_probable(t: dict) -> str:
+    """session-manager's value, or its OWN reason for not having one. Never
+    renders a missing waiting_probable as False — `--no-capture` makes it null
+    for every row, and False would assert 'measured, not waiting'."""
+    if t["session_manager_presence"] == PRESENCE_ABSENT:
+        return WAITING_NO_ROW
+    if t["session_manager_presence"] != PRESENCE_PRESENT:
+        return _fmt(None, t["session_manager_measurement"])
+    if t["waiting_probable"] is None:
+        detail = t.get("waiting_status") or "no reason given"
+        return f"{WAITING_NOT_MEASURED} [{detail}]"
+    return str(t["waiting_probable"])
+
+
+def _render_host_status(result: dict, indent: str = "  ") -> list:
+    """One line per host, each carrying its OWN verdict.
+
+    A bare "hosts consulted: laptop, workbench" is a claim the run cannot
+    support when one of them never answered — and it reads as reassurance
+    exactly where the gap is.
+    """
+    entries = result.get("hosts_consulted") or []
+    if not entries:
+        return [f"{indent}hosts consulted             : NONE"]
+    out = [f"{indent}hosts consulted             :"]
+    for e in entries:
+        # 🔴 The mark is driven by whether this host actually CONTRIBUTED, which
+        # is a measured fact on the entry — not re-derived from the status here.
+        # A second derivation is a second thing to get wrong.
+        mark = "" if e.get("contributed_targets") else "   <- contributed NOTHING"
+        out.append(f"{indent}    {e['host']:<12} {e['status']:<15}{mark}")
+        out.append(f"{indent}        why: {e['reason']}")
+    return out
+
+
+def render(result: dict) -> str:
+    lines = []
+    status = result["status"]
+    sel = result["selector"]
+
+    if status == STATUS_UNMATCHED:
+        lines.append(f"UNMATCHED  {sel!r}")
+        lines.append(f"  {result['reason']}")
+        lines.append("  sources consulted: " +
+                     ", ".join(result["sources_consulted"]))
+        lines.extend(_render_host_status(result, indent="  "))
+        cov = result["coverage"]
+        lines.append(f"    tmux           : {cov['tmux_panes_status']} "
+                     f"({cov['windows_total']} windows)")
+        lines.append(f"    slot table     : {cov['slot_table_status']}")
+        lines.append(f"    registry       : {cov['registry_status']} "
+                     f"({cov['registry_records_with_tmux']} addressed records)")
+        lines.append(f"    session-manager: {cov['session_manager_status']} "
+                     f"({cov['session_manager_rows']} rows)")
+    elif status == STATUS_AMBIGUOUS:
+        lines.append(f"AMBIGUOUS  {sel!r} -> {result['candidate_count']} targets")
+        lines.append(f"  {result['reason']}")
+        for c in result["candidates"]:
+            lines.append(
+                f"    {c['address']:<24} "
+                f"idx={(c['window_index'] or '?'):<3} "
+                f"{c['label']:<22} matched={','.join(c['matched_kinds'])}")
+    else:
+        t = result["target"]
+        lines.append(f"RESOLVED   {sel!r} -> {t['address']}  "
+                     f"(matched: {', '.join(result['matched_kinds'])})")
+        lines.append(f"  host/session   : {t['host']} / {t['session']}"
+                     + ("   [REMOTE — local-only sources are N/A]"
+                        if t["harness_presence"] == PRESENCE_EXCLUDED else ""))
+        lines.append(f"  window         : {t['window_id']} "
+                     f"(index {t['window_index']}, panes "
+                     f"{', '.join(t['panes']) or 'UNMEASURED (remote)'})")
+        lines.append(f"  label          : {t['label']}  "
+                     f"(source: {t['label_source']})")
+        lines.append(f"  codename/hotkey: "
+                     f"{t['codename'] or 'NONE (no slot entry)'} / "
+                     f"{t['hotkey'] or 'NONE (no slot entry)'}")
+        lines.append(f"  cwd            : {t['cwd'] or 'UNMEASURED'}")
+        lines.append(f"  task           : {t['task'] or '-'}")
+        lines.append("")
+        lines.append("  -- two statuses, never collapsed --")
+        lines.append(f"  harness_status : {render_harness_status(t)}"
+                     f"   [registry: waiting on a turn]")
+        lines.append(f"  waiting_probable: {render_waiting_probable(t)}"
+                     f"   [session-manager: pane text looks like a question]")
+        if t["waiting_signals"]:
+            lines.append(f"    signals      : "
+                         f"{', '.join(signal_names(t['waiting_signals']))}")
+        lines.append(f"  unsent_prompt  : {truncate_captured(t['unsent_prompt'])}")
+        # Never "UNMEASUREDs" — a unit suffix welded to a missing value reads
+        # like a measurement.
+        if t["age_secs"] is None:
+            lines.append("  age            : UNMEASURED "
+                         f"(session-manager gave no age; source: "
+                         f"{t['age_source'] or 'none'})")
+        else:
+            lines.append(f"  age            : {t['age_secs']:.0f}s "
+                         f"(source: {t['age_source'] or 'UNMEASURED'})")
+        lines.append("")
+        vis = t["visibility"]
+        lines.append("  -- terminal vs popup --")
+        if is_unmeasured(vis["status"]):
+            lines.append(f"  visibility     : {_fmt(None, vis['status'])}")
+        else:
+            lines.append(f"  window_active  : {vis['window_active']}")
+            lines.append(f"  visible        : {vis['visible']}")
+            lines.append(f"  covered        : {vis['covered']}"
+                         + ("   <- ON SCREEN BUT UNDER A POPUP"
+                            if vis["covered"] else ""))
+            for c in vis["clients"]:
+                role = "POPUP " if c["popup"] else "BASE  "
+                here = " *attached to this session*" \
+                    if c["session"] == t["session"] else ""
+                lines.append(f"    {role} {c['tty']:<12} {c['term']:<16} "
+                             f"{c['size']:<10} sess={c['session']}{here}")
+        lines.append("")
+        g = t["git"]
+        lines.append("  -- git / PR --")
+        if g["branch_presence"] == PRESENCE_EXCLUDED:
+            lines.append(f"  branch         : {GIT_REMOTE_EXCLUDED}")
+        elif g["branch_presence"] == PRESENCE_ABSENT:
+            lines.append(f"  branch         : {BRANCH_DETACHED}")
+        else:
+            lines.append(
+                f"  branch         : {_fmt(g['branch'], g['branch_status'])}")
+        if g["pr_presence"] == PRESENCE_EXCLUDED:
+            lines.append(f"  open PR        : {PR_REMOTE_EXCLUDED}")
+        elif g["pr_presence"] == PRESENCE_UNMEASURED:
+            lines.append(f"  open PR        : {_fmt(None, g['pr_status'])}")
+        elif g["pr_presence"] == PRESENCE_ABSENT:
+            lines.append(f"  open PR        : {PR_NONE_MEASURED}")
+        else:
+            for pr in g["pr"]:
+                lines.append(f"  open PR        : #{pr.get('number')} "
+                             f"{pr.get('mergeStateStatus') or ''} "
+                             f"{'DRAFT ' if pr.get('isDraft') else ''}"
+                             f"{pr.get('title') or ''}")
+
+    cov = result["coverage"]
+    lines.append("")
+    lines.append("  -- coverage (a window with no match is normal, not a zero) --")
+    # 🔴 Unconditional on EVERY outcome: which hosts were in scope, and what
+    # actually happened to each.
+    lines.extend(_render_host_status(result, indent="  "))
+    lines.append(f"  windows                     : {cov['windows_total']}")
+    lines.append(f"  with slot / without         : {cov['windows_with_slot']}"
+                 f" / {cov['windows_without_slot']}")
+    reg = cov["registry"]
+    lines.append(f"  with registry match / without: "
+                 f"{cov['windows_with_registry_match']}"
+                 f" / {cov['windows_without_registry_match']}")
+    lines.append(f"  registry local_host         : {reg['local_host']}")
+    if is_unmeasured(reg.get("hosts_not_covered_status") or MEASURED_OK):
+        lines.append(f"  🔴 registry coverage        : "
+                     f"{_fmt(None, reg['hosts_not_covered_status'])}")
+    elif reg["hosts_not_covered"]:
+        lines.append(
+            f"  🔴 registry CANNOT cover     : "
+            f"{', '.join(reg['hosts_not_covered'])} "
+            f"({reg['windows_structurally_excluded']} window(s) structurally "
+            f"excluded — not a measured absence)")
+    lines.append(f"  with session-manager / without: "
+                 f"{cov['windows_with_session_manager_row']}"
+                 f" / {cov['windows_without_session_manager_row']}")
+    if cov["session_manager_rows_unjoinable"]:
+        lines.append(f"  🔴 session-manager rows NOT joined: "
+                     f"{cov['session_manager_rows_unjoinable']}")
+    for d in result["dropped"]:
+        lines.append(f"  DROPPED: {d}")
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
+# CLI
+# --------------------------------------------------------------------------- #
+EXIT_RESOLVED = 0
+EXIT_AMBIGUOUS = 2
+EXIT_UNMATCHED = 3
+
+_EXIT_FOR = {STATUS_RESOLVED: EXIT_RESOLVED,
+             STATUS_AMBIGUOUS: EXIT_AMBIGUOUS,
+             STATUS_UNMATCHED: EXIT_UNMATCHED}
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="session-resolve",
+        description="Resolve a selector to ONE tmux/harness target. READ-ONLY.")
+    p.add_argument("command", choices=("show", "resolve"),
+                   help="both print the resolved target; `resolve` is an alias")
+    p.add_argument("selector",
+                   help="codename (Gold) | hotkey (G, Alt+Shift+G) | "
+                        "session:index (scratch2:2) | address (scratch2:@81) | "
+                        "window id (@81) | harness name | cwd/repo")
+    p.add_argument("--json", action="store_true", help="JSON output")
+    # 🔴 `all` by DEFAULT, matching session-manager. It defaulted to
+    # "workbench", so a real window on the laptop reported UNMATCHED while every
+    # source said consulted-and-fine — and `hosts_not_covered` was EMPTY because
+    # only one host had been seen, i.e. the disclosure mechanism was disabled by
+    # the very bug it exists to disclose. `choices` is not cosmetic either: a
+    # typo'd host silently yielded nothing.
+    p.add_argument("--host", default=HOST_ALL,
+                   choices=(HOST_ALL, *HOST_NAMES),
+                   help="which host(s) session-manager should report "
+                        "(default: all). tmux and the registry are ALWAYS read "
+                        "locally regardless.")
+    p.add_argument("--pr", action="store_true",
+                   help="also query `gh pr list` for each cwd's branch "
+                        "(slow; degrades to UNMEASURED, never to 'no PR')")
+    p.add_argument("--registry-dir", default=DEFAULT_REGISTRY_DIR)
+    p.add_argument("--slot-table", default=DEFAULT_SLOT_TABLE)
+    return p
+
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
+    src = Sources(host=args.host, registry_dir=args.registry_dir,
+                  slot_table_path=args.slot_table, want_pr=args.pr)
+    result = resolve(args.selector, src)
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True, default=str))
+    else:
+        print(render(result))
+    return _EXIT_FOR[result["status"]]
+
+
+if __name__ == "__main__":  # pragma: no cover
+    sys.exit(main())

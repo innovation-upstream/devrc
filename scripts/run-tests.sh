@@ -874,7 +874,67 @@ TARGET_FLOORS=(
   # impure source injected; the only disk it touches is a pytest `tmp_path`
   # `$HOME` for the on-disk artifact-name pin), so EXPECTED_SKIPS is untouched.
   # Movement on THIS line is the evidence the gate runs the new file at all.
-  "scripts/tests|5482"
+  # 2026-08-19, the session identity resolver (scripts/session-resolve): 5303 ->
+  # 5405 collected, +102 for scripts/tests/test_session_resolve.py. The target
+  # needs no HERMETIC_TARGETS entry — scripts/tests is already a directory
+  # target — so this ONE number is the whole registration. `_suggested_floor
+  # 5405` = 5405 - min(50, max(1, 270)) = 5355, the gate's own function applied
+  # to its own count, never arithmetic on two sides of a conflict.
+  # ⚠ ZERO new skips. ⚠ CONFLICT EXPECTED: a concurrent branch adds
+  # scripts/tests/test_waiting_windows.py under this same target, so this line
+  # will need a test-merge — re-run the gate on the MERGED tree and copy the
+  # number IT prints rather than adding the two branches' deltas together.
+  #
+  # 🔴 AND ONCE MORE, ON THE TREE THIS MERGE CREATES. The two branches above
+  # both edited THIS line from the same 4976 base — 5482 (waiting-windows)
+  # and 5355 (session-resolve) — so NEITHER number describes the tree that
+  # now exists, and adding their deltas is precisely the arithmetic-across-a-
+  # conflict this header forbids. Re-measured by the gate on the MERGED tree:
+  #
+  #   scripts/tests  (collected=5722)
+  #   _suggested_floor 5722 = 5722 - min(50, max(1, 286)) = 5672
+  #
+  # 2026-08-19, the waiting-windows kind-band ordering + --kind filter folded
+  # into this same branch (see the PR body: it is a fix to a script this branch
+  # does not own, landed here to avoid a THIRD conflict on this very line):
+  # 5722 -> 5741 collected, +19 for the ordering/filter section of
+  # scripts/tests/test_waiting_windows.py.
+  #
+  #   _suggested_floor 5741 = 5741 - min(50, max(1, 287)) = 5741 - 50 = 5691
+  #
+  #
+  # 2026-08-19, the #558 audit fix round (the --host default that hid a whole
+  # host, the hermeticity hole, and main() coverage for both scripts):
+  # 5741 -> 5780 collected, +39 across test_session_resolve.py and
+  # test_waiting_windows.py.
+  #
+  #   _suggested_floor 5780 = 5780 - min(50, max(1, 289)) = 5780 - 50 = 5730
+  #
+  #
+  # 2026-08-19, the #558 delta-audit fix round (the per-host status that
+  # replaced a positive false claim, the state-file test that could not fail,
+  # the welded tmux separator, and the consolidated hosts_not_covered):
+  # 5780 -> 5796 collected, +16.
+  #
+  #   _suggested_floor 5796 = 5796 - min(50, max(1, 289)) = 5796 - 50 = 5746
+  #
+  #
+  # 2026-08-19, the #558 round-3 fix (the host-disclosure MODEL and its
+  # 144-cell matrix, replacing a hand-written status): 5796 -> 5810 collected,
+  # +14 net -- the matrix replaced several targeted tests rather than adding to
+  # them.
+  #
+  #   _suggested_floor 5810 = 5810 - min(50, max(1, 290)) = 5810 - 50 = 5760
+  #
+  #
+  # 2026-08-19, the #558 round-4 fix (the partial-view caveat keyed on
+  # MEASURABLE rather than ANSWERED, plus the vacuous single-host test):
+  # 5810 -> 5814 collected, +4.
+  #
+  #   _suggested_floor 5814 = 5814 - min(50, max(1, 290)) = 5814 - 50 = 5764
+  #
+  # ⚠ ZERO new skips from any contribution.
+  "scripts/tests|5764"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —

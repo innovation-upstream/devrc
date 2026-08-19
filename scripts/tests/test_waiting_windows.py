@@ -132,10 +132,55 @@ def report(hosts=None, *, summary=None, ledger_pids=None, ts="synthetic-ts"):
             }
     return {
         "ts": ts,
+        # 🔴 Real session-manager ALWAYS emits `local_host`; the fixture omitting
+        # it meant every synthetic report modelled the rare unknown-local-host
+        # case by accident. Tests that want that case pop the key explicitly.
+        "local_host": HOST_A,
         "hosts": blocks,
         "ledger": {"hosts": {h: {"tmux_pid": pids.get(h)} for h in blocks}},
         "summary": summary or {"hosts_unreachable": [], "windows_unmeasured": []},
     }
+
+
+class _Forbidden(RuntimeError):
+    """Raised when a test reaches for the real world."""
+
+
+@pytest.fixture(autouse=True)
+def _no_real_world(monkeypatch, tmp_path):
+    """🔴 THIS FILE HAD NO AUTOUSE GUARD AT ALL.
+
+    The §15 `main()` tests were hermetic BY FLAG ONLY — `--no-state`
+    `--no-registry` `--json-file` — which is hermetic exactly as long as every
+    future test remembers all three. It did not hold even for the tests that
+    added it: `state_dir()` resolves to `~/.cache/…`, so a main() run without
+    `--no-state` wrote to the OPERATOR'S REAL CACHE, and the test asserting it
+    did not could never fail.
+
+    Two structural guards instead of three remembered flags:
+      * HOME is redirected under tmp_path, so `state_dir()` cannot reach the
+        real cache whatever flags a test passes;
+      * `subprocess.run` raises, so `fetch_report` cannot shell out to the real
+        session-manager.
+    """
+    # A name no other fixture in this file uses — several tests redirect HOME
+    # themselves and create their own `home/`, and they must keep winning.
+    hermetic_home = tmp_path / "_autouse_home"
+    hermetic_home.mkdir(exist_ok=True)
+    monkeypatch.setenv("HOME", str(hermetic_home))
+
+    def _boom(*a, **k):
+        raise _Forbidden(f"test reached subprocess.run: {a[:1]!r}")
+    monkeypatch.setattr(ww.subprocess, "run", _boom)
+
+
+def test_the_autouse_backstop_is_actually_installed(tmp_path):
+    """POSITIVE CONTROL on both halves — a guard nobody has watched work is not
+    a guard."""
+    assert str(tmp_path) in ww.state_dir(), ww.state_dir()
+    assert str(tmp_path) in ww.state_path()
+    with pytest.raises(_Forbidden):
+        ww.subprocess.run(["session-manager"])
 
 
 def run(rep, stamps=None, now=NOW, threshold=THRESHOLD):
@@ -1185,7 +1230,10 @@ def test_the_json_report_carries_every_field_a_poller_needs():
     assert set(out) == {
         "tool", "now", "source_ts", "threshold_secs", "threshold_source",
         "counts", "coverage", "over_threshold", "waiting_population",
-        "truncated", "state", "caveats",
+        # `kind_filtered` arrived deliberately with --kind: None when no filter
+        # was requested, otherwise the shown/dropped/total counts, so a consumer
+        # can never mistake a filtered view for the whole set.
+        "truncated", "kind_filtered", "state", "caveats",
     }
     assert out["tool"] == "waiting-windows"
     assert out["threshold_secs"] == THRESHOLD
@@ -1996,3 +2044,426 @@ def test_an_absent_row_is_never_rendered_as_NOT_MEASURED():
     text = ww.render_human(out)
     assert "no record (registry read, none for this window)" in text
     assert "NOT MEASURED" not in text
+
+
+# =========================================================================== #
+# §14 — 🔴 KIND BAND ORDERING, AND THE --kind FILTER
+#
+# Measured live on the merged tool before this change: 24 rows over threshold
+# (population 46) — idle_no_signal=20, selection_menu=2, context_exhausted=2,
+# trailing_question=0 — sorted purely by waited time, putting the actionable
+# rows at RANK 8 and RANK 20 of 24. `--top` would have truncated them AWAY.
+# =========================================================================== #
+
+# 🔴 The ages are drawn FAR apart and pairwise distinct, and the OLDEST row is
+# deliberately the LEAST actionable kind. A mutant that drops the band key and
+# sorts on age alone therefore cannot pass: it would put ORDER_IDLE first.
+ORDER_IDLE_AGE = AGE_HUGE          # 196103 — by far the oldest
+ORDER_CTX_AGE = AGE_BIG            # 51217
+ORDER_MENU_AGE = AGE_MID           # 9973
+ORDER_QUESTION_AGE = 7817          # the YOUNGEST, and it must rank FIRST
+
+
+def _ordering_report():
+    return report({HOST_A: [
+        row(WID_1, probable=False, status="stale", age=ORDER_IDLE_AGE),
+        row(WID_2, probable=True, signals=("context_exhausted",),
+            age=ORDER_CTX_AGE),
+        row(WID_3, probable=True, signals=("selection_menu",),
+            age=ORDER_MENU_AGE),
+        row(WID_4, probable=True, signals=("trailing_question",),
+            age=ORDER_QUESTION_AGE),
+    ]})
+
+
+def test_the_youngest_actionable_row_outranks_the_oldest_idle_row():
+    """🔴 THE WHOLE POINT. The idle row waited 196103s and the trailing_question
+    row only 7817s — a 25x gap — and the question must still come FIRST. Sorting
+    on age alone is exactly what buried the actionable rows at rank 8 and 20."""
+    out, _ = run(_ordering_report())
+    order = [r["window_id"] for r in out["rows"]]
+    # band 0 holds BOTH asking-a-human kinds, oldest first inside it (menu 9973
+    # then question 7817); then context_exhausted; then idle last.
+    assert order == [WID_3, WID_4, WID_2, WID_1], order
+
+    kinds = [r["kind"] for r in out["rows"]]
+    assert kinds == ["selection_menu", "trailing_question",
+                     "context_exhausted", "idle_no_signal"]
+
+    # 🔴 THE CLAIM, stated as a comparison rather than a position: the YOUNGEST
+    # actionable row outranks BOTH older, less actionable ones. Age alone would
+    # invert all three of these.
+    rank = {r["window_id"]: i for i, r in enumerate(out["rows"])}
+    age = {r["window_id"]: r["waited_secs"] for r in out["rows"]}
+    assert age[WID_4] == min(age.values())
+    assert age[WID_1] == max(age.values())
+    assert rank[WID_4] < rank[WID_2] and age[WID_4] < age[WID_2]
+    assert rank[WID_4] < rank[WID_1] and age[WID_4] < age[WID_1]
+
+
+def test_within_a_band_the_order_is_still_oldest_first():
+    """Banding must not cost the property the tool exists for."""
+    out, _ = run(report({HOST_A: [
+        row(WID_1, probable=True, signals=("selection_menu",), age=AGE_MID),
+        row(WID_2, probable=True, signals=("selection_menu",), age=AGE_HUGE),
+        row(WID_3, probable=True, signals=("trailing_question",), age=AGE_BIG),
+    ]}))
+    # all three share band 0, so this is pure oldest-first
+    assert [r["window_id"] for r in out["rows"]] == [WID_2, WID_3, WID_1]
+
+
+def test_an_unmeasured_wait_sorts_last_WITHIN_its_band_not_globally():
+    """A `None` wait is not an old one — but it also must not be promoted above
+    a whole band it does not belong to."""
+    out, _ = run(report({HOST_A: [
+        row(WID_1, probable=True, signals=("selection_menu",), age=None),
+        row(WID_2, probable=True, signals=("selection_menu",), age=AGE_TINY),
+        row(WID_3, probable=False, status="stale", age=AGE_HUGE),
+    ]}))
+    order = [r["window_id"] for r in out["rows"]]
+    # band 0 (both menus, measured before unmeasured), then band 2 (idle)
+    assert order == [WID_2, WID_1, WID_3], order
+
+
+def test_idle_no_signal_is_REORDERED_never_filtered_out_by_default():
+    """🔴 The operator chose the wide population deliberately, and this bucket
+    is the one that cannot tell blocked from finished — dropping it would decide
+    that question silently. It is ranked last, not removed."""
+    out, _ = run(_ordering_report())
+    kinds = [r["kind"] for r in out["rows"]]
+    assert "idle_no_signal" in kinds
+    assert len(out["rows"]) == 4
+    assert kinds[-1] == "idle_no_signal"
+
+
+def test_the_display_bands_and_the_classification_precedence_disagree_on_purpose():
+    """🔴 A reader WILL assume these two tuples should match. They must not:
+    SIGNAL_PRECEDENCE ranks context_exhausted the hardest BLOCK, while the
+    display ranks it below the kinds where a human is actively being asked.
+    Pinned so the divergence is deliberate rather than a drift someone
+    'corrects'."""
+    assert ww.SIGNAL_PRECEDENCE[0] == "context_exhausted"
+    assert ww.KIND_BAND["context_exhausted"] > ww.KIND_BAND["trailing_question"]
+    assert ww.KIND_BAND["context_exhausted"] > ww.KIND_BAND["selection_menu"]
+    assert ww.KIND_BAND["idle_no_signal"] == max(ww.KIND_BAND.values())
+
+
+def test_every_kind_has_exactly_one_band_and_no_band_invents_a_kind():
+    """Two-way pin: a kind added to ALL_KINDS without a band would sort into a
+    silent bucket at the end; a band naming an unknown kind is dead config."""
+    assert set(ww.KIND_BAND) == set(ww.ALL_KINDS)
+    flat = [k for band in ww.KIND_DISPLAY_BANDS for k in band]
+    assert len(flat) == len(set(flat)) == len(ww.ALL_KINDS)
+
+
+def test_actionable_kinds_is_every_kind_except_idle_no_signal():
+    assert ww.IDLE_NO_SIGNAL not in ww.ACTIONABLE_KINDS
+    assert set(ww.ACTIONABLE_KINDS) == set(ww.ALL_KINDS) - {ww.IDLE_NO_SIGNAL}
+
+
+# --- the --kind filter ----------------------------------------------------- #
+def _filtered(kinds, top=None):
+    out, _ = ww.build_report(_ordering_report(), {}, NOW, THRESHOLD, "flag",
+                             "ok", "/synthetic/state.json", top=top,
+                             kinds=kinds)
+    return out
+
+
+def test_kind_filter_keeps_only_the_named_bands_and_reports_the_drop():
+    out = _filtered(("trailing_question", "selection_menu"))
+    assert [r["window_id"] for r in out["over_threshold"]] == [WID_3, WID_4]
+    kf = out["kind_filtered"]
+    assert kf["shown"] == 2 and kf["total"] == 4 and kf["dropped"] == 2
+    assert kf["kinds"] == ["trailing_question", "selection_menu"]
+    # 🔴 the full population is untouched — filtering the VIEW is not measuring
+    # a smaller set
+    assert len(out["waiting_population"]) == 4
+
+
+def test_kind_filter_excluding_a_band_is_visible_in_the_human_view():
+    out = _filtered(("context_exhausted",))
+    text = ww.render_human(out)
+    assert "KIND FILTER context_exhausted: showing 1 of 4; 3 NOT shown." in text
+    assert [r["window_id"] for r in out["over_threshold"]] == [WID_2]
+
+
+def test_no_kind_filter_leaves_the_field_null_not_a_zero_report():
+    """🔴 `None` (never asked) and a filter that happened to drop nothing are
+    different facts; a consumer must be able to tell a filtered view from a
+    whole one."""
+    out = _filtered(None)
+    assert out["kind_filtered"] is None
+    assert len(out["over_threshold"]) == 4
+
+
+def test_a_filter_that_drops_nothing_still_records_that_it_ran():
+    out = _filtered(tuple(ww.ALL_KINDS))
+    assert out["kind_filtered"] is not None
+    assert out["kind_filtered"]["dropped"] == 0
+    assert out["kind_filtered"]["shown"] == 4
+
+
+@pytest.mark.parametrize("kind", list(ww.ALL_KINDS))
+def test_every_single_band_can_be_selected_on_its_own(kind):
+    """POSITIVE CONTROL across the whole vocabulary — a filter that only ever
+    worked for one kind would pass a single-case test."""
+    out = _filtered((kind,))
+    assert {r["kind"] for r in out["over_threshold"]} == {kind}
+    assert out["kind_filtered"]["shown"] == 1
+
+
+def test_the_filter_runs_BEFORE_the_top_cap():
+    """🔴 The bug --top had: the actionable rows ranked 8th and 20th, so a cap
+    spent its whole budget on idle rows and truncated the actionable ones AWAY.
+    Filtering first means --top counts the rows the caller actually asked for."""
+    out = _filtered(("trailing_question", "selection_menu"), top=1)
+    assert [r["window_id"] for r in out["over_threshold"]] == [WID_3]
+    assert out["truncated"]["total"] == 2      # the FILTERED set, not 4
+    assert out["kind_filtered"]["dropped"] == 2
+
+
+def test_parse_kinds_accepts_repeated_and_comma_spellings():
+    assert ww.parse_kinds(None) is None
+    assert ww.parse_kinds([]) is None
+    assert ww.parse_kinds(["a,b", "c"]) == ("a", "b", "c")
+    assert ww.parse_kinds(["a", "a"]) == ("a",)          # de-duplicated
+    assert ww.parse_kinds([" a , b "]) == ("a", "b")     # whitespace tolerated
+
+
+def test_the_counts_line_leads_with_the_actionable_total():
+    """🔴 "OVER THRESHOLD: 24" reads as 24 things needing attention when 4 do.
+    Both numbers are printed; only the HEADLINE changed."""
+    out = _filtered(None)
+    text = ww.render_human(out)
+    assert "ACTIONABLE: 3 of 4 over threshold" in text
+    assert "(1 idle_no_signal" in text
+    assert "OVER THRESHOLD: 4" in text          # the total is still there
+    assert text.index("ACTIONABLE:") < text.index("OVER THRESHOLD:")
+
+
+def test_the_idle_caveat_is_still_carried_verbatim_after_the_reorder():
+    """🔴 The caveat is the right one and was already pinned as a whole string;
+    this change must not disturb it."""
+    out = _filtered(None)
+    assert out["caveats"]["idle_no_signal"] == ww.IDLE_NO_SIGNAL_CAVEAT
+    assert ww.IDLE_NO_SIGNAL_CAVEAT in ww.render_human(out)
+
+
+# =========================================================================== #
+# §15 — 🔴 main() ITSELF. Four mutants survived two differently-constructed
+# rounds here, because nothing in this suite ever called main(): dropping
+# `kinds=kinds` from the build_report call, `parse_kinds(args.kind)` ->
+# `parse_kinds(None)`, `return 2` -> `return 0` on an unknown kind, and dropping
+# `--top` entirely. `--json-file` already makes main() hermetically testable, so
+# this was coverage, not refactoring.
+# =========================================================================== #
+def _main(argv, tmp_path, capsys, rep=None):
+    """Run main() end-to-end off a synthetic report, touching no real state."""
+    report_path = tmp_path / "report.json"
+    report_path.write_text(json.dumps(rep if rep is not None
+                                      else _ordering_report()),
+                           encoding="utf-8")
+    rc = ww.main(["--json", "--json-file", str(report_path), "--no-state",
+                  "--no-registry", "--threshold-secs", str(THRESHOLD), *argv],
+                 now=NOW, environ={})
+    captured = capsys.readouterr()
+    return rc, captured
+
+
+def test_main_runs_end_to_end_and_emits_the_json_report(tmp_path, capsys):
+    rc, cap = _main([], tmp_path, capsys)
+    assert rc == 0
+    payload = json.loads(cap.out)
+    assert payload["tool"] == "waiting-windows"
+    assert len(payload["over_threshold"]) == 4
+    assert payload["kind_filtered"] is None
+
+
+def test_main_THREADS_the_kind_filter_into_the_report(tmp_path, capsys):
+    """🔴 Kills the surviving mutant that dropped `kinds=kinds` from the
+    build_report call — the flag parsed fine and then did nothing."""
+    rc, cap = _main(["--kind", "context_exhausted"], tmp_path, capsys)
+    assert rc == 0
+    payload = json.loads(cap.out)
+    assert [r["window_id"] for r in payload["over_threshold"]] == [WID_2]
+    assert payload["kind_filtered"]["dropped"] == 3
+    assert payload["kind_filtered"]["kinds"] == ["context_exhausted"]
+
+
+def test_main_accepts_a_comma_separated_kind_list(tmp_path, capsys):
+    """🔴 Kills `parse_kinds(args.kind)` -> `parse_kinds(None)`."""
+    rc, cap = _main(["--kind", "trailing_question,selection_menu"],
+                    tmp_path, capsys)
+    payload = json.loads(cap.out)
+    assert {r["kind"] for r in payload["over_threshold"]} == {
+        "trailing_question", "selection_menu"}
+    assert payload["kind_filtered"]["shown"] == 2
+
+
+def test_main_accepts_a_repeated_kind_flag(tmp_path, capsys):
+    rc, cap = _main(["--kind", "trailing_question", "--kind", "selection_menu"],
+                    tmp_path, capsys)
+    payload = json.loads(cap.out)
+    assert payload["kind_filtered"]["shown"] == 2
+
+
+def test_main_EXITS_2_on_an_unknown_kind_and_says_so(tmp_path, capsys):
+    """🔴 Kills `return 2` -> `return 0`. The PR body sells this as a delivered
+    contract, so it needs a test that can see it."""
+    rc, cap = _main(["--kind", "selection_menu,not_a_kind"], tmp_path, capsys)
+    assert rc == 2
+    assert "unknown --kind not_a_kind" in cap.err
+    for k in ww.ALL_KINDS:
+        assert k in cap.err          # the message lists the valid choices
+
+
+def test_main_exit_0_on_a_VALID_kind_is_the_positive_control(tmp_path, capsys):
+    """A guard that returned 2 for everything would pass the test above."""
+    rc, _ = _main(["--kind", "selection_menu"], tmp_path, capsys)
+    assert rc == 0
+
+
+def test_main_THREADS_top_into_the_report(tmp_path, capsys):
+    """🔴 Kills the surviving mutant that dropped `--top` entirely."""
+    rc, cap = _main(["--top", "2"], tmp_path, capsys)
+    payload = json.loads(cap.out)
+    assert len(payload["over_threshold"]) == 2
+    assert payload["truncated"]["shown"] == 2
+    assert payload["truncated"]["dropped"] == 2
+
+
+def test_main_applies_kind_filter_BEFORE_top(tmp_path, capsys):
+    rc, cap = _main(["--kind", "trailing_question,selection_menu", "--top", "1"],
+                    tmp_path, capsys)
+    payload = json.loads(cap.out)
+    assert payload["truncated"]["total"] == 2      # the FILTERED set
+    assert payload["kind_filtered"]["dropped"] == 2
+
+
+def test_main_human_view_leads_with_the_actionable_total(tmp_path, capsys):
+    report_path = tmp_path / "r.json"
+    report_path.write_text(json.dumps(_ordering_report()), encoding="utf-8")
+    rc = ww.main(["--json-file", str(report_path), "--no-state",
+                  "--no-registry", "--threshold-secs", str(THRESHOLD)],
+                 now=NOW, environ={})
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "ACTIONABLE: 3 of 4 over threshold" in out
+    assert out.index("ACTIONABLE:") < out.index("OVER THRESHOLD:")
+
+
+def _main_state(argv, tmp_path, capsys, state_file):
+    """main() with an EXPLICIT state path, so the assertion is about a file this
+    test controls rather than about the operator's cache."""
+    report_path = tmp_path / "report.json"
+    report_path.write_text(json.dumps(_ordering_report()), encoding="utf-8")
+    rc = ww.main(["--json", "--json-file", str(report_path), "--no-registry",
+                  "--threshold-secs", str(THRESHOLD), *argv],
+                 now=NOW, environ={}, state_file=str(state_file))
+    capsys.readouterr()
+    return rc
+
+
+def test_main_WRITES_the_state_file_when_not_told_otherwise(tmp_path, capsys):
+    """🔴 THE POSITIVE CONTROL, and the half that was missing. Without it, the
+    no-state assertion below passes for a writer that never writes at all —
+    which is exactly how `--no-state` survived being made a no-op."""
+    state = tmp_path / "written.json"
+    assert not state.exists()
+    rc = _main_state([], tmp_path, capsys, state)
+    assert rc == 0
+    assert state.exists(), "the state writer did not run at all"
+    assert json.loads(state.read_text(encoding="utf-8")) != {}
+
+
+def test_main_writes_no_state_file_when_told_not_to(tmp_path, capsys):
+    """🔴 REWRITTEN. The previous version could not fail: it sampled `before`
+    AFTER a first run had already created everything, and pointed at
+    `~/.cache/…` rather than tmp_path, so making `--no-state` a no-op left all
+    174 tests green while the file was genuinely written.
+
+    Now the path is one this test owns and has verified is absent, and the
+    companion test above proves the writer works — so this going green means
+    `--no-state` suppressed a write that would otherwise have happened.
+    """
+    state = tmp_path / "must-not-appear.json"
+    assert not state.exists()
+    rc = _main_state(["--no-state"], tmp_path, capsys, state)
+    assert rc == 0
+    assert not state.exists(), (
+        "--no-state still wrote the state file — the flag is a no-op")
+
+
+def test_no_run_of_main_can_reach_the_real_cache(tmp_path, capsys):
+    """The class, not the instance: whatever flags a test passes, `state_dir()`
+    resolves under tmp_path rather than the operator's cache."""
+    _main_state([], tmp_path, capsys, tmp_path / "s.json")
+    assert str(tmp_path) in ww.state_dir()
+    assert "/home/zach/.cache" not in ww.state_dir()
+
+
+def test_the_threshold_env_var_name_is_the_one_the_module_publishes():
+    """A literal here would rot silently the day the constant is renamed — the
+    first spelling of these tests used `..._SECS` and every row fell under the
+    default threshold instead."""
+    assert ww.THRESHOLD_ENV == "WAITING_WINDOWS_THRESHOLD"
+    secs, source = ww.resolve_threshold(None, {ww.THRESHOLD_ENV: "4242"})
+    assert (secs, source) == (4242, "env")
+
+
+def test_the_shared_hosts_not_covered_table_holds_for_this_module():
+    """🔴 The waiting-windows half of the shared table. The session-resolve
+    suite carries the same rows against ITS copy; neither module's behaviour is
+    inferred from the other's source."""
+    for hosts, local, expected in [
+            (["a", "b"], "a", ["b"]),
+            (["a"], "a", []),
+            (["a", "b"], None, None),
+            (["a", "b"], "", None),
+            ([], "a", []),
+            (["b", "a", "c"], "a", ["b", "c"]),
+    ]:
+        assert ww.hosts_not_covered(list(hosts), local) == expected, (hosts,
+                                                                     local)
+
+
+def test_the_unknown_local_host_state_is_RENDERED_not_json_only(tmp_path):
+    """🔴 GREEN C. `hosts_not_covered_status` was published in --json and never
+    printed, so the human view could not distinguish "covers every host" from
+    "could not tell" — the same one-view-only disclosure gap this report exists
+    to close."""
+    rep = report({HOST_A: [row(probable=True, signals=("selection_menu",),
+                               age=AGE_BIG)]})
+    rep.pop("local_host", None)
+    out, _ = ww.build_report(rep, {}, NOW, THRESHOLD, "flag", "ok",
+                             str(tmp_path / "s.json"))
+    text = ww.render_human(out)
+    assert "registry coverage" in text
+    assert "local host unknown" in text.lower()
+    # POSITIVE CONTROL: with a known local host that line is NOT printed
+    rep2 = report({HOST_A: [row(probable=True, signals=("selection_menu",),
+                                age=AGE_BIG)]})
+    out2, _ = ww.build_report(rep2, {}, NOW, THRESHOLD, "flag", "ok",
+                              str(tmp_path / "s2.json"))
+    assert "local host unknown" not in ww.render_human(out2).lower()
+
+
+def test_hosts_not_covered_is_unmeasured_when_the_local_host_is_unknown():
+    """🔴 ONE RULE, TWO PLACES — this copy lacked the guard session-resolve had
+    just gained, so a report without `local_host` accused EVERY host of being
+    registry-excluded."""
+    assert ww.hosts_not_covered(["a", "b"], "a") == ["b"]
+    assert ww.hosts_not_covered(["a", "b"], None) is None
+    assert ww.hosts_not_covered(["a", "b"], "") is None
+    assert ww.hosts_not_covered([], "a") == []
+
+
+def test_a_report_without_local_host_does_not_accuse_every_host():
+    rep = report({HOST_A: [row(probable=True, signals=("selection_menu",),
+                               age=AGE_BIG)]})
+    rep.pop("local_host", None)
+    out, _ = ww.build_report(rep, {}, NOW, THRESHOLD, "flag", "ok",
+                             "/synthetic/state.json")
+    reg = out["coverage"]["registry"]
+    assert reg["hosts_not_covered"] is None
+    assert reg["hosts_not_covered_status"].startswith("unmeasured:")

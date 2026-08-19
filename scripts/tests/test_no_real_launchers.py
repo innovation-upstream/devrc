@@ -148,8 +148,8 @@ ACKNOWLEDGED_UNSTUBBED = {
         "justification cannot rot into a claim about a file that has changed"),
     "home-manager": (
         {"bar-status-poll", "drift-check.sh", "keylog-spin-capture.sh",
-         "notify-failure.sh", "playwright-nixos", "session-manager", "ship.sh",
-         "tmux-post-save.sh"},
+         "notify-failure.sh", "playwright-nixos", "session-manager",
+         "session-resolve", "ship.sh", "tmux-post-save.sh"},
         "MEASURED unreachable: a whole-tier run under a recording interceptor "
         "logged ZERO calls. TWO of these are executed by scripts/tests and "
         "neither can reach the binary: notify-failure.sh names home-manager in "
@@ -160,7 +160,18 @@ ACKNOWLEDGED_UNSTUBBED = {
         "a TEXT scan (launcher_scan.hazard_hits regexes the file body), so a "
         "prose mention is a hit; verified by grep that the file carries no "
         "call site, and re-justified here rather than reworded to dodge the "
-        "scanner"),
+        "scanner. session-resolve (added 2026-08-19) is the THIRD of exactly "
+        "this shape and is re-justified the same way: its single occurrence "
+        "is one word of module-docstring prose, explaining that the tmux "
+        "bindings are generated from the slot table at home-manager build "
+        "time and therefore that the table must be PARSED rather than "
+        "re-hardcoded. It is not a call site. The complete set of argv[0] "
+        "literals the script can spawn is `tmux`, `git` and `gh` (plus "
+        "sys.executable for session-manager), and its tmux seam is further "
+        "narrowed by an ALLOWLIST of list-panes/list-windows/list-clients "
+        "that raises on anything else — test_session_resolve.py pins that "
+        "allowlist in both directions, so this justification cannot rot into "
+        "a claim about a file that has grown a launcher"),
     "nixos-rebuild": (
         {"airvpn-sudo", "ship.sh"},
         "MEASURED unreachable in the same whole-tier run; both call sites are "
