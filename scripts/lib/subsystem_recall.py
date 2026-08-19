@@ -252,6 +252,7 @@ import difflib
 import json
 import re
 import sys
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -337,6 +338,7 @@ __all__ = [
     "focus_paths_from_text",
     "focus_window",
     "select_featured",
+    "short_heading",
     "listing_line",
     "recall",
     "render_text",
@@ -562,7 +564,14 @@ def caveat_text(scope: str) -> str:
         f"a current reading. `🔴 N OPEN` on an index row means N bullets DECLARE "
         f"unfinished business — re-check each against the repo, because a remedy that "
         f"has since landed reads exactly like one that has not; the absence of that "
-        f"marker means nothing was declared, NOT that nothing is open. Sensitivity is "
+        f"marker means nothing was declared, NOT that nothing is open. Three further "
+        f"badges say the row's own numbers cannot be trusted: `🔴 N NEAR-MISS` — N "
+        f"bullets TRIED to write a marker and missed the grammar, so they declare "
+        f"nothing and `N OPEN` is short by up to N; `⚠ N UNVERIFIABLE` — N `RESOLVED:` "
+        f"bullets name no sha, so the closure cannot be checked; and `🔴 NO <heading>` "
+        f"— that heading is absent or renamed, so `N nuance` and every openness count "
+        f"on that row are 0 BY PARSE FAILURE and not by measurement, and the entry's "
+        f"content is on disk but invisible to this read. Sensitivity is "
         f"marked per entry; absent means `{SENSITIVITY_FAIL_SAFE}` — never copy an "
         f"entry's content into a public repo."
     )
@@ -767,6 +776,44 @@ class RecalledEntry:
     quietly promote the field to a completeness claim.
     """
 
+    near_miss_count: int = 0
+    """Bullets that TRIED to write an openness marker and missed the grammar.
+
+    🔴 THE POPULATION MOST LIKELY TO HOLD A STALE OPEN ACTION, and until this
+    field existed it was byte-identical to "no marker" on the read surface: the
+    writer's `RESOLVED <sha> (<repo>):` or `**OPEN:**` declared nothing, the
+    badge simply did not render, and the vanishing badge LOOKS like success.
+
+    Measured over the live store on 2026-08-19 — 53 entries, 323 top-level
+    nuance bullets: **8 declare `OPEN:` and parse, 11 declare `RESOLVED <sha>:`,
+    and 2 attempted a marker and missed** (one `OPEN`-shaped, one
+    `RESOLVED`-shaped). The advisory that reported those 2 lived only in
+    `subsystem_touch --validate`, which `/resume` never runs.
+
+    ⚠ The proposal this closes states "2 of 10 textual `OPEN:` markers do not
+    parse". The near-miss count of 2 reproduces exactly; the denominator does
+    not — a raw `grep -o 'OPEN:'` over the store returns **11**, not 10, and not
+    every occurrence leads a top-level bullet. The rate is quoted here as the
+    two populations rather than as a ratio, because the ratio's denominator is
+    the part that moved.
+
+    Counted from `JournalBullet.openness_population`, never from the raw
+    `near_miss_marker` predicate, so this surface and `--validate` can never
+    disagree about which population a bullet belongs to.
+    """
+
+    unverifiable_count: int = 0
+    """`RESOLVED:` bullets naming no sha — closed, but the closure is unprovable.
+
+    ⚠ Advisory, not a defect: closing an action is the point, and a sha-less
+    `RESOLVED` is a real closure that simply cannot be checked with
+    `git cat-file -e`. It rides the same row as `near_miss_count` because both
+    are "the marker did not fully land" and a reader who sees one wants the
+    other. Measured 2026-08-19: **0** across all 53 live entries, so this badge
+    does not fire on the store today — it is here because a sha-less `RESOLVED`
+    is one hurried write away, not because the corpus is full of them.
+    """
+
     mtime: float = 0.0
     """The entry file's mtime. Used ONLY as the featured-entry fallback, and
     deliberately NOT rendered or emitted in JSON — `render_text` must produce
@@ -781,6 +828,16 @@ class RecalledEntry:
     writer's own `new_entry_template` ships a stub. What is not ordinary is a
     reader that shows nothing and lets a caller conclude the entry is empty when
     the extractor missed, so the two are told apart in the output.
+
+    🔴 IT REACHES THE INDEX ROW, not only a printed body. It was computed here
+    and rendered ONLY under an entry the digest printed in full — and the digest
+    prints exactly ONE body out of N, so for every other entry the field existed
+    and was discarded. Measured differential control (two synthetic entries
+    differing in NOTHING but the nuance heading): the renamed one reported
+    `0 nuance`, lost its `🔴 1 OPEN` badge entirely, and `--validate` called it
+    `OK` at exit 0 — rendering byte-identical to a well-formed entry with an
+    empty work-history. Heading matching is exact-string at column 0, so a
+    rename, a trailing colon or an indent all land here.
     """
 
     @property
@@ -811,6 +868,14 @@ def read_entry(store_root: str | Path, entry: SubsystemEntry) -> RecalledEntry:
     except OSError:  # pragma: no cover - the read above already succeeded
         mtime = 0.0
     bullets = parse_journal_bullets(sections.get(NUANCE_HEADING, ""))
+    # 🔴 ONE PASS, ONE PREDICATE. Every count on the index row is read off
+    # `openness_population` — the resolver's single source of the precedence
+    # order — rather than off `is_open` / `near_miss_marker` / `resolved_by`
+    # separately. A delta audit already caught two surfaces disagreeing about
+    # one bullet because each decided membership for itself; the index row is
+    # now the third consumer, and it branches on the same thing `--validate`
+    # does, so the two can never report different populations for one file.
+    populations = Counter(b.openness_population for b in bullets)
     return RecalledEntry(
         ref=entry.ref,
         filename=entry.filename,
@@ -818,7 +883,9 @@ def read_entry(store_root: str | Path, entry: SubsystemEntry) -> RecalledEntry:
         declared_sensitivity=discarded_sensitivity(fm.get("sensitivity")),
         sections=sections,
         bullet_count=len(bullets),
-        open_count=sum(1 for b in bullets if b.is_open),
+        open_count=populations["open"],
+        near_miss_count=populations["near-miss"],
+        unverifiable_count=populations["unverifiable"],
         mtime=mtime,
         missing_sections=tuple(h for h in SURFACED_HEADINGS if h not in sections),
     )
@@ -1404,8 +1471,19 @@ def sensitivity_label(effective: str, declared: str | None) -> str:
     return f"{effective} (declared: {declared})"
 
 
+def short_heading(heading: str) -> str:
+    """`## Nuance / work-history` → `Nuance / work-history`. ONE spelling.
+
+    The index row names a heading in ~60 B of budget, so it drops the ATX
+    marker the printed body keeps. It still names the heading in FULL — `NO
+    Pointers` and `NO Nuance / work-history` are different facts with different
+    next actions, and a badge that said only `NO SECTION` would make them one.
+    """
+    return heading.lstrip("#").strip()
+
+
 def listing_line(entry: RecalledEntry, width: int) -> str:
-    """ONE index line: `  <ref>   N nuance  <sensitivity>[  🔴 N OPEN]`. ~60 B.
+    """ONE index line: `  <ref>   N nuance  <sensitivity>[  <badges>]`. ~60 B.
 
     The ref is what `--ref` takes, the count is the size signal that says whether
     a `--ref` is worth spending, and the sensitivity has to travel WITH the entry
@@ -1430,11 +1508,55 @@ def listing_line(entry: RecalledEntry, width: int) -> str:
     deliberately not entry size: pointers are durable and do not grow, while
     work-history is what the store's prune-on-resolve discipline is denominated
     in, so it is the number that predicts whether a `--ref` is worth spending.
+
+    🔴 THREE MORE BADGES, AND THE BAR ABOVE IS WHY THEY CLEAR IT — every one
+    reports a state in which the NUMBERS TO THEIR LEFT ARE NOT MEASUREMENTS:
+
+      `🔴 N NEAR-MISS`  N bullets tried to write a marker and missed the
+                        grammar. They declare nothing, so `N OPEN` is short by
+                        up to N and the reader cannot tell. Measured
+                        2026-08-19: 2 such bullets across 53 entries, against
+                        8 that declare `OPEN:` and parse.
+      `⚠ N UNVERIFIABLE` N `RESOLVED:` bullets name no sha. Advisory — closing
+                        is the point — but the closure cannot be checked.
+      `🔴 NO <heading>` the heading is absent or renamed, so the section was
+                        never parsed: `0 nuance` and a missing `OPEN` badge on
+                        that row mean PARSE FAILURE, not an empty entry. This
+                        one used to render only under a printed BODY, and the
+                        digest prints one body out of N — so on every other row
+                        it was computed and thrown away.
+
+    All three are CONDITIONAL, like `OPEN` and for the same reason: measured
+    over the live store on 2026-08-19, 1 entry of 53 would carry a near-miss
+    badge and 0 would carry either of the other two, so the other 52 rows stay
+    byte-identical to what they render today.
+
+    ⚠ ORDER IS `--validate`'S ORDER (declared → near-miss → unverifiable), so a
+    reader who has seen one surface can read the other without re-learning it.
+    The `NO <heading>` badge sits last because it is not a bullet population at
+    all — it says the parser never reached the bullets.
+
+    ⚠ THE BADGES ARE TEXT-ROW ONLY, deliberately, following `open_count`: the
+    JSON `listing` rows carry `ref`/`file`/`sensitivity`/`nuance_bullets` and no
+    openness field of any kind. A JSON consumer that wants the populations
+    reads `entries[].missing_sections` or runs `--validate`; splitting the row's
+    vocabulary across two payloads is how the two start to disagree.
     """
     base = f"  {entry.ref.ljust(width)}  {entry.bullet_count:>3} nuance   {sensitivity_label(entry.sensitivity, entry.declared_sensitivity)}"
-    if not entry.open_count:
+    badges: list[str] = []
+    if entry.open_count:
+        badges.append(f"🔴 {entry.open_count} OPEN")
+    if entry.near_miss_count:
+        badges.append(f"🔴 {entry.near_miss_count} NEAR-MISS")
+    if entry.unverifiable_count:
+        badges.append(f"⚠ {entry.unverifiable_count} UNVERIFIABLE")
+    if entry.missing_sections:
+        badges.append(
+            "🔴 NO " + ", ".join(short_heading(h) for h in entry.missing_sections)
+        )
+    if not badges:
         return base
-    return f"{base}   🔴 {entry.open_count} OPEN"
+    return base + "   " + "   ".join(badges)
 
 
 def _render_listing(report: RecallReport) -> list[str]:

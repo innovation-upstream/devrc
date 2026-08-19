@@ -114,7 +114,8 @@ The marker is a **prefix the writer types**, which cannot be walked by rewording
 ### Where each half surfaces
 
 - **`--validate`** reports both populations, separately, and **does not change its verdict**: an entry with unfinished business is well-formed, and failing it would be a gate nobody could turn green by fixing the file.
-- **The index line** gains `🔴 N OPEN` — declared bullets only, conditional, so entries with nothing open render byte-identical to before.
+- **The index line** gains `🔴 N OPEN` — declared bullets only, conditional, so entries with nothing open render byte-identical to before. It also gains `🔴 N NEAR-MISS` and `⚠ N UNVERIFIABLE`, on the same conditional terms and in `--validate`'s own order, because *"your marker did not parse"* is a fact the writer needs on the surface that runs every session. The **unmarked-action floor is still absent from the row**, deliberately: it has unknown recall and the line cannot carry that caveat.
+- **The index line also says when the section itself is missing** — `🔴 NO <heading>`. A renamed `## Nuance / work-history` zeroes the bullet count *and* deletes the `OPEN` badge while `--validate` returns `OK` at exit 0, so before this the entry rendered exactly like a well-formed empty one. Measured with a differential control: two entries identical but for the heading, the same `OPEN:` marker in both, and only one of them showed a badge.
 - **Step 4's own output** prints the open block with an age, addressed to the writer, because the next write is the only moment anyone is looking.
 
 ### 🔴 Never copy store prose into a public repo — and do not verify that by grep

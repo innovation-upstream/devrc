@@ -39,6 +39,7 @@ actually observed — including the half of the original claim that is FALSE.
 
 from __future__ import annotations
 
+import collections
 import hashlib
 import importlib.util
 import json
@@ -3037,6 +3038,23 @@ class TestSkillDocsArePinned:
             "the fail-safe overrode it",
             "🔴 an overridden sensitivity marker is shown, never silently rewritten",
         ),
+        # --- the three badges added with items 2 and 1 of the entry-shape
+        #     proposal. Each pins the CONSEQUENCE, not the glyph: a step that
+        #     lists a badge without saying what it implies about the numbers
+        #     beside it has documented a decoration.
+        (
+            "`N OPEN` is **short by up to N**",
+            "🔴 what a NEAR-MISS badge implies about the OPEN count on the same row",
+        ),
+        (
+            "the closure cannot be checked",
+            "what UNVERIFIABLE means — a real closure, just not a checkable one",
+        ),
+        (
+            "0 by parse failure, not by measurement",
+            "🔴 a `NO <heading>` row's counts are not readings, and the step must not "
+            "report such an entry as empty",
+        ),
     ]
 
     def test_the_RETRACTED_cost_claim_is_not_reasserted(self) -> None:
@@ -4571,17 +4589,35 @@ class TestDegradationMutationKills:
 # =============================================================================
 
 
-def _recalled(nuance: list[str], ref: str = "svc") -> rc.RecalledEntry:
+def _recalled(
+    nuance: list[str], ref: str = "svc", nuance_heading: str = sr.NUANCE_HEADING
+) -> rc.RecalledEntry:
+    """A `RecalledEntry` built the way `read_entry` builds one — EVERY field the
+    index row can render, not just the ones a given test is about.
+
+    🔴 The omission mattered. This helper used to populate `open_count` and
+    nothing else, so the byte-identical pin below was silently asserting about
+    an entry whose near-miss/unverifiable/missing-section fields were all at
+    their dataclass defaults — it could not have caught a badge that renders
+    unconditionally. `nuance_heading` is a parameter so a test can rename the
+    heading and watch the section stop being found, which is the §2.2 bug.
+    """
     text = "\n".join(
         ["---", f"service: {ref}", "sensitivity: public", "---", "",
-         "## Pointers", "- a", "", "## Nuance / work-history", *nuance, ""]
+         "## Pointers", "- a", "", nuance_heading, *nuance, ""]
     )
     sections = sr.extract_sections(text, (sr.POINTERS_HEADING, sr.NUANCE_HEADING))
     bullets = sr.parse_journal_bullets(sections.get(sr.NUANCE_HEADING, ""))
+    pops = collections.Counter(b.openness_population for b in bullets)
     return rc.RecalledEntry(
         ref=ref, filename=f"{ref}.md", sensitivity="public", sections=sections,
         bullet_count=len(bullets),
-        open_count=sum(1 for b in bullets if b.is_open),
+        open_count=pops["open"],
+        near_miss_count=pops["near-miss"],
+        unverifiable_count=pops["unverifiable"],
+        missing_sections=tuple(
+            h for h in (sr.POINTERS_HEADING, sr.NUANCE_HEADING) if h not in sections
+        ),
     )
 
 
@@ -4676,3 +4712,333 @@ class TestReadEntryOpenCountIsNotFixtureCollapsed:
             "counted something other than the OPEN bullet — a predicate of "
             "'declared anything' gives 2 here, and 'any bullet' gives 3"
         )
+
+
+# =============================================================================
+# The index row's three ADDITIONAL badges: near-miss, unverifiable, and the
+# missing-section note. Items 2 and 1 of
+# `claudedocs/proposal-entry-shape-explicit.md` §4.2.
+#
+# 🔴 WHAT THESE CLOSE, MEASURED, NOT READ OFF THE SOURCE. Two silent-failure
+# paths shared one observable — a row that reads `0 nuance` with no badge:
+#
+#   §2.4  2 bullets in the live store attempted an openness marker and missed
+#         the grammar, against 8 that declare `OPEN:` and parse (re-measured
+#         2026-08-19 over 53 entries / 323 nuance bullets; the proposal's
+#         "2 of 10 textual `OPEN:`" denominator did NOT reproduce — a raw grep
+#         returns 11 — but its near-miss count of 2 did).
+#         A near-miss was byte-identical to no marker on the read surface, so
+#         the population MOST likely to hold a stale open action was the one
+#         no routine surface reported. `--validate` reported it; `/resume`
+#         does not run `--validate`.
+#   §2.2  A renamed `## Nuance / work-history` heading zeroes the bullet count
+#         AND deletes the `🔴 N OPEN` badge, and `--validate` returns `OK` at
+#         exit 0. `missing_sections` already existed and was rendered ONLY
+#         under a printed body — and the digest prints one body out of N.
+#
+# The store was NOT touched to produce any of this: every fixture below is
+# synthetic, under `tmp_path`, with invented names. This repo is PUBLIC.
+# =============================================================================
+
+
+class TestNearMissAndUnverifiableReachTheIndexRow:
+    """§2.4 — a marker that was ATTEMPTED and missed is not "no marker"."""
+
+    def test_a_near_miss_bullet_is_annotated_with_its_COUNT(self):
+        """The regression. Before this badge the line below rendered exactly as
+        an entry with two ordinary lessons: the emphasis-wrapped `**OPEN:**` and
+        the parenthetical `RESOLVED <sha> (repo):` both declare nothing."""
+        line = rc.listing_line(
+            _recalled([
+                "- 2026-08-02: **OPEN:** an emphasis-wrapped marker.",
+                "- 2026-08-03: RESOLVED abc1234 (repo): a parenthetical first.",
+            ]), 12,
+        )
+        assert "🔴 2 NEAR-MISS" in line, line
+        assert "OPEN" not in line.replace("NEAR-MISS", ""), (
+            "a near-miss was counted as a declared OPEN — it declares nothing"
+        )
+
+    def test_a_near_miss_does_not_render_as_a_CLEAN_row(self):
+        """The differential the badge exists for: identical bullets, one of them
+        spelled so the marker parses. The two rows must not be the same string."""
+        parses = rc.listing_line(_recalled(["- 2026-08-02: OPEN: the retry budget."]), 12)
+        misses = rc.listing_line(_recalled(["- 2026-08-02: **OPEN:** the retry budget."]), 12)
+        clean = rc.listing_line(_recalled(["- 2026-08-02: an ordinary lesson."]), 12)
+        assert parses != misses, "the two spellings still render identically"
+        assert misses != clean, (
+            "a bullet that TRIED to declare an action is still byte-identical to "
+            "one that never tried — which is the §2.4 bug, unfixed"
+        )
+
+    def test_an_unverifiable_closure_is_annotated_with_its_COUNT(self):
+        line = rc.listing_line(
+            _recalled(["- 2026-08-04: RESOLVED: closed, no sha named."]), 12
+        )
+        assert "⚠ 1 UNVERIFIABLE" in line, line
+
+    def test_a_RESOLVED_WITH_a_sha_carries_NO_unverifiable_badge(self):
+        """The sha is the whole point of the marker: naming one has to be
+        visible, or nobody is rewarded for making the claim checkable."""
+        line = rc.listing_line(
+            _recalled(["- 2026-08-05: RESOLVED b83bfb584: closed and checkable."]), 12
+        )
+        assert "UNVERIFIABLE" not in line, line
+        assert "NEAR-MISS" not in line, line
+
+    def test_an_unmarked_action_still_does_NOT_reach_the_index_row(self):
+        """Unchanged, and deliberately so. The unmarked-action detector is a
+        FLOOR with unknown recall over two measured phrasings; a guess that
+        cannot state its own recall does not belong on a line with no room for a
+        caveat. `--validate` reports it, and can say so."""
+        line = rc.listing_line(
+            _recalled(["- 2026-07-24: FIX (1 line): widen the widget timeout."]), 12
+        )
+        for badge in ("OPEN", "NEAR-MISS", "UNVERIFIABLE", "NO "):
+            assert badge not in line, (badge, line)
+
+    def test_the_badges_are_in_VALIDATE_order_and_count_DISTINCT_populations(self):
+        """🔴 PAIRWISE-DISTINCT COUNTS, so no two badges can be swapped and stay
+        green. 1 open, 2 near-miss, 3 unverifiable: any assignment that reads the
+        wrong population moves a printed number.
+
+        The order is `--validate`'s (declared → near-miss → unverifiable) and is
+        asserted as one whole string, not three `in` checks — a substring set is
+        satisfied by any permutation.
+        """
+        line = rc.listing_line(
+            _recalled([
+                "- 2026-08-01: OPEN: still outstanding.",
+                "- 2026-08-02: **OPEN:** emphasis-wrapped, declares nothing.",
+                "- 2026-08-03: RESOLVED abc1234 (repo): parenthetical, declares nothing.",
+                "- 2026-08-04: RESOLVED: no sha (a).",
+                "- 2026-08-05: RESOLVED: no sha (b).",
+                "- 2026-08-06: RESOLVED: no sha (c).",
+                "- 2026-08-07: RESOLVED b83bfb584: closed and checkable.",
+                "- 2026-08-08: an ordinary durable lesson.",
+            ]), 12,
+        )
+        assert line == (
+            "  " + "svc".ljust(12) + "  " + f"{8:>3}" + " nuance   public"
+            + "   🔴 1 OPEN   🔴 2 NEAR-MISS   ⚠ 3 UNVERIFIABLE"
+        ), line
+
+    def test_read_entry_populates_the_counts_FROM_DISK(self, tmp_path):
+        """The renderer tests above build a `RecalledEntry` by hand. This one
+        goes through the real disk path, because a field the renderer prints and
+        `read_entry` never sets is a badge that can only ever be zero."""
+        store = tmp_path / "s"
+        (store / "sc").mkdir(parents=True)
+        (store / "sc" / "svc.md").write_text(
+            "\n".join(["---", "service: svc", "scope: sc", "---", "",
+                       "## Nuance / work-history",
+                       "- 2026-08-01: OPEN: still outstanding.",
+                       "- 2026-08-02: **OPEN:** emphasis-wrapped.",
+                       "- 2026-08-03: RESOLVED abc1234 (repo): parenthetical.",
+                       "- 2026-08-04: RESOLVED: no sha (a).",
+                       "- 2026-08-05: RESOLVED: no sha (b).",
+                       "- 2026-08-06: RESOLVED: no sha (c).",
+                       "- 2026-08-07: RESOLVED b83bfb584: checkable.",
+                       "- 2026-08-08: an ordinary durable lesson.", ""]),
+            encoding="utf-8",
+        )
+        index = sr.load_index(store)
+        got = rc.read_entry(store, index.entries("sc")[0])
+        assert (got.bullet_count, got.open_count) == (8, 1)
+        assert got.near_miss_count == 2, (
+            "read_entry did not count the near-miss population — 'any bullet with "
+            "no marker' gives 4 here and counting every bullet gives 8"
+        )
+        assert got.unverifiable_count == 3, (
+            "read_entry did not count sha-less RESOLVED bullets — counting all "
+            "RESOLVED gives 4 and counting none gives 0"
+        )
+
+    def test_the_counts_reach_the_RENDERED_index_block(self, tmp_path):
+        """End to end: disk → `read_entry` → `render_text`. A badge that only
+        appears when a test calls `listing_line` directly is a badge `/resume`
+        never sees."""
+        store = tmp_path / "s"
+        (store / "sc").mkdir(parents=True)
+        (store / "sc" / "svc.md").write_text(
+            "\n".join(["---", "service: svc", "scope: sc", "sensitivity: public", "---", "",
+                       "## Pointers", "- a", "",
+                       "## Nuance / work-history",
+                       "- 2026-08-02: **OPEN:** emphasis-wrapped.", ""]),
+            encoding="utf-8",
+        )
+        text = rc.render_text(rc.recall(store, "sc", mode="list"))
+        row = next(l for l in text.splitlines() if l.strip().startswith("svc "))
+        assert "🔴 1 NEAR-MISS" in row, row
+
+
+class TestAMissingSurfacedSectionReachesTheIndexRow:
+    """§2.2 — the differential control, as a test.
+
+    Two entries differing in EXACTLY ONE variable (the nuance heading) and
+    carrying the same `OPEN:` marker. Before this badge the renamed one rendered
+    `0 nuance` with no badge at all, which is what a well-formed entry with an
+    empty work-history renders — so `/resume`, which consumes exactly this row,
+    could not tell a curated entry with an open action from an empty one.
+    """
+
+    NUANCE = [
+        "- 2026-08-01: OPEN: the retry budget is still unset.",
+        "- 2026-08-02: an ordinary lesson.",
+    ]
+
+    def _store(self, tmp_path, heading: str, ref: str = "payments-api"):
+        store = tmp_path / "s"
+        (store / "example-scope").mkdir(parents=True, exist_ok=True)
+        (store / "example-scope" / f"{ref}.md").write_text(
+            "\n".join(["---", f"service: {ref}", "scope: example-scope",
+                       "sensitivity: public", "---", "",
+                       "## What it is", "", "A synthetic fixture.", "",
+                       "## Pointers", "- `some/path` — a pointer.", "",
+                       heading, *self.NUANCE, ""]),
+            encoding="utf-8",
+        )
+        return store
+
+    def _row(self, store, ref):
+        rep = rc.recall(store, "example-scope", mode="list")
+        return rc.listing_line(next(e for e in rep.listing if e.ref == ref), 14)
+
+    def test_the_renamed_heading_is_ANNOUNCED_on_the_row(self, tmp_path):
+        store = self._store(tmp_path, "## Nuance and work history")
+        row = self._row(store, "payments-api")
+        assert "🔴 NO Nuance / work-history" in row, row
+
+    def test_the_renamed_row_no_longer_matches_a_WELL_FORMED_EMPTY_one(self, tmp_path):
+        """🔴 THE ACTUAL BUG, stated as a difference rather than as a substring.
+        A word-level check would pass on a row that merely happened to spell
+        something; this compares the two renders that used to be equal."""
+        renamed = self._row(self._store(tmp_path / "a", "## Nuance and work history"),
+                            "payments-api")
+        store_empty = tmp_path / "b" / "s"
+        (store_empty / "example-scope").mkdir(parents=True)
+        (store_empty / "example-scope" / "payments-api.md").write_text(
+            "\n".join(["---", "service: payments-api", "scope: example-scope",
+                       "sensitivity: public", "---", "",
+                       "## Pointers", "- `some/path` — a pointer.", "",
+                       "## Nuance / work-history", ""]),
+            encoding="utf-8",
+        )
+        empty = self._row(store_empty, "payments-api")
+        assert renamed != empty, (
+            "an entry whose OPEN marker the parser never reached still renders "
+            "byte-identically to a genuinely empty one — §2.2 unfixed"
+        )
+
+    def test_the_CORRECT_heading_renders_the_row_UNCHANGED(self, tmp_path):
+        """The other half of the differential: the conforming entry keeps its
+        badge and grows nothing."""
+        row = self._row(self._store(tmp_path, sr.NUANCE_HEADING), "payments-api")
+        assert row == (
+            "  " + "payments-api".ljust(14) + "  " + f"{2:>3}" + " nuance   public"
+            + "   🔴 1 OPEN"
+        ), row
+
+    def test_a_missing_POINTERS_section_names_POINTERS(self, tmp_path):
+        """The badge names WHICH heading. `NO Pointers` and `NO Nuance /
+        work-history` are different facts with different next actions, and a
+        badge that said only `NO SECTION` would collapse them."""
+        store = tmp_path / "s"
+        (store / "sc").mkdir(parents=True)
+        (store / "sc" / "svc.md").write_text(
+            "\n".join(["---", "service: svc", "scope: sc", "sensitivity: public", "---", "",
+                       "## Nuance / work-history",
+                       "- 2026-08-01: OPEN: outstanding.", ""]),
+            encoding="utf-8",
+        )
+        row = rc.listing_line(rc.recall(store, "sc", mode="list").listing[0], 12)
+        assert row.endswith("🔴 1 OPEN   🔴 NO Pointers"), row
+
+    def test_BOTH_missing_sections_are_named_in_the_stored_order(self, tmp_path):
+        store = tmp_path / "s"
+        (store / "sc").mkdir(parents=True)
+        (store / "sc" / "svc.md").write_text(
+            "\n".join(["---", "service: svc", "scope: sc", "sensitivity: public", "---", "",
+                       "## What it is", "", "prose only, no spine.", ""]),
+            encoding="utf-8",
+        )
+        row = rc.listing_line(rc.recall(store, "sc", mode="list").listing[0], 12)
+        assert row.endswith("🔴 NO Pointers, Nuance / work-history"), row
+
+    def test_short_heading_drops_the_ATX_marker_and_nothing_else(self):
+        assert rc.short_heading(sr.NUANCE_HEADING) == "Nuance / work-history"
+        assert rc.short_heading(sr.POINTERS_HEADING) == "Pointers"
+
+
+class TestTheCommonCaseRowIsUnchanged:
+    """🔴 THE INDEX PRINTS FOR EVERY ENTRY ON EVERY READ. Measured over the live
+    store on 2026-08-19: of 53 entries, 1 would carry a near-miss badge, 0 an
+    unverifiable badge and 0 a missing-section badge. So 52 rows must render
+    byte-identically to what they rendered before this change, or three rare
+    signals have taxed the common case forever to describe them.
+    """
+
+    def test_a_conforming_entry_with_nothing_flagged_renders_the_BARE_row(self):
+        """The pre-change format, SPELLED OUT rather than lifted from the
+        renderer — a literal copied from the implementation agrees with it by
+        construction and cannot detect the format moving."""
+        expected = "  " + "svc".ljust(12) + "  " + f"{2:>3}" + " nuance   public"
+        line = rc.listing_line(
+            _recalled([
+                "- 2026-08-15: an ordinary lesson.",
+                "- 2026-08-16: RESOLVED b83bfb584: closed and checkable.",
+            ]), 12,
+        )
+        assert line == expected, line
+
+    def test_the_whole_index_BLOCK_is_unchanged_for_a_conforming_scope(
+        self, store: Path
+    ) -> None:
+        """Not one row — every row of the shared fixture store, which no test in
+        this file wrote a near-miss or a renamed heading into."""
+        rows = [
+            rc.listing_line(e, 16)
+            for e in rc.recall(store, SCOPE, mode="list").listing
+        ]
+        assert rows
+        for row in rows:
+            for badge in ("NEAR-MISS", "UNVERIFIABLE", "NO Pointers", "NO Nuance"):
+                assert badge not in row, (
+                    f"a conforming entry grew a `{badge}` badge — the new signals "
+                    f"are supposed to be conditional"
+                )
+
+
+class TestTheCaveatExplainsEveryBadgeItPrints:
+    """🔴 A BADGE THE CAVEAT DOES NOT NAME IS A GLYPH THE READER GUESSES AT, and
+    the caveat is the one place this tool states what it can and cannot see. The
+    `🔴 N OPEN` clause has been there since the badge shipped; these three
+    arrived with the same obligation.
+    """
+
+    def test_the_caveat_names_the_NEAR_MISS_badge_and_what_it_costs(self, store: Path):
+        caveat = rc.recall(store, SCOPE).caveat
+        assert "NEAR-MISS" in caveat
+        assert "missed the grammar" in caveat
+        assert "short by up to N" in caveat, (
+            "the caveat names the badge without saying what it implies about the "
+            "OPEN count beside it — which is the whole reason it is on the row"
+        )
+
+    def test_the_caveat_names_the_UNVERIFIABLE_badge(self, store: Path):
+        caveat = rc.recall(store, SCOPE).caveat
+        assert "UNVERIFIABLE" in caveat
+        assert "name no sha" in caveat
+
+    def test_the_caveat_says_a_missing_heading_makes_the_counts_PARSE_FAILURES(
+        self, store: Path
+    ):
+        """The claim that matters: `0 nuance` on such a row is not a reading."""
+        caveat = rc.recall(store, SCOPE).caveat
+        assert "NO <heading>" in caveat
+        assert "0 BY PARSE FAILURE and not by measurement" in caveat
+
+    def test_the_caveat_is_still_ONE_spelling_on_every_surface(self, store: Path):
+        rep = rc.recall(store, SCOPE)
+        assert rep.caveat in rc.render_text(rep)
+        assert rc.report_json(rep)["caveat"] == rep.caveat
