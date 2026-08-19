@@ -1594,8 +1594,12 @@ def test_the_registry_coverage_counts_the_rows_on_each_side_of_the_join():
     out, _ = run_reg(rep, [regrec(window_id=WID_1)])
     reg = out["coverage"]["registry"]
     assert reg["status"] == "ok"
-    assert reg["rows_joined"] == 1
-    assert reg["rows_unjoined"] == 2
+    assert reg["rows_present"] == 1
+    # 🔴 The two non-present rows are NOT one number: one is a local window the
+    # registry read and had no record for (a measurement), the other is on a
+    # host it can never reach. See §14.
+    assert reg["rows_absent"] == 1
+    assert reg["rows_unmeasured"] == 1
     assert reg["records_total"] == 1
 
 
@@ -1743,7 +1747,7 @@ def test_the_human_view_prints_the_clock_split_and_the_join_count():
                                                             age=REG_AGE_BIG)]))
     text = ww.render_human(out)
     assert "clocks: registry_status_updated=1, ledger_age_fallback=1" in text
-    assert "harness registry: status=ok  joined 1 of 2 row(s)" in text
+    assert "harness registry: status=ok  present=1 absent=1 unmeasured=0" in text
 
 
 def test_the_human_view_NAMES_the_hosts_the_registry_cannot_cover():
@@ -1779,11 +1783,14 @@ def test_the_registry_caveat_is_carried_in_the_JSON_and_PRINTED():
         "The harness session registry is a directory in the LOCAL host's home, "
         "so it can never cover a window on a remote host — those rows are "
         "excluded by construction, not by a process having exited. Read "
-        "coverage.registry.hosts_not_covered beside the join count. "
-        "harness_status is the harness's own notion of waiting and is NOT "
-        "session-manager's waiting_probable; the two were measured to disagree "
-        "on every joinable flagged row. The threshold fires on "
-        "waiting_probable alone."
+        "coverage.registry.hosts_not_covered beside the join count. Read "
+        "harness_presence, never the nullness of harness_status: absent means "
+        "the registry was read and had no record for this window, which is a "
+        "real measurement, while unmeasured means we could not look and "
+        "carries the reason. harness_status is the harness's own notion of "
+        "waiting and is NOT session-manager's waiting_probable; the two were "
+        "measured to disagree on every joinable flagged row. The threshold "
+        "fires on waiting_probable alone."
     )
     assert ww.REGISTRY_CAVEAT == expected
     rep = _local({HOST_A: [row(probable=True, signals=("selection_menu",))]})
@@ -1802,3 +1809,190 @@ def test_the_json_row_carries_every_harness_field_a_consumer_needs():
               "harness_cwd", "harness_status_age_secs", "registry_joined"):
         assert k in r, k
     assert json.loads(json.dumps(out)) == out
+
+
+# =========================================================================== #
+# §14 — MEASURED ABSENCE IS NOT UNMEASURED
+#
+# 🔴 A single `joined: false` collapsed three different facts into one token
+# that reads as the middle one. Measured on a real report: of 30 rows that did
+# not join, 7 were on a host the registry can NEVER reach and 23 were rows it
+# read and genuinely had no record for. "We could not look" rendering as "we
+# looked and found nothing" is the exact failure this whole tool refuses.
+# =========================================================================== #
+def test_the_presence_vocabulary_is_closed_and_has_exactly_three_states():
+    assert ww.HARNESS_PRESENCE == ("present", "absent", "unmeasured")
+    assert len(set(ww.HARNESS_PRESENCE)) == 3
+
+
+def test_a_row_the_registry_READ_and_HAD_is_present():
+    rep = _local({HOST_A: [row(probable=True, signals=("selection_menu",),
+                               age=AGE_BIG)]})
+    out, _ = run_reg(rep, [regrec(age=REG_AGE_BIG)])
+    r = out["rows"][0]
+    assert r["harness_presence"] == "present"
+    assert r["harness_presence_reason"] is None
+    assert r["harness_status"] == "idle"
+
+
+def test_a_row_the_registry_READ_and_did_NOT_have_is_ABSENT_not_unmeasured():
+    """🔴 A REAL MEASUREMENT, and the majority case. The registry was read
+    successfully and has no record for this window — the process exited, or the
+    session predates the registry. That is actionable information, and it must
+    not render as 'we did not look'."""
+    rep = _local({HOST_A: [row(WID_3, probable=True, signals=("selection_menu",),
+                               age=AGE_BIG)]})
+    out, _ = run_reg(rep, [regrec(window_id=WID_1)])
+    r = out["rows"][0]
+    assert r["harness_presence"] == "absent"
+    assert r["harness_presence_reason"] is None
+    assert r["harness_status"] is None
+
+
+def test_a_row_on_a_host_the_registry_CANNOT_REACH_is_UNMEASURED_with_a_reason():
+    """🔴 THE ONE THE OLD SINGLE TOKEN GOT WRONG. A remote row was never
+    lookable; counting it beside a locally-absent one turns a structural blind
+    spot into a measured absence."""
+    rep = _local({HOST_A: [row(WID_1, probable=True, signals=("selection_menu",),
+                               age=AGE_BIG)],
+                  HOST_B: [row(WID_2, probable=True, signals=("selection_menu",),
+                               age=AGE_BIG)]}, host=HOST_A)
+    out, _ = run_reg(rep, [regrec(window_id=WID_1)])
+    by_host = {r["host"]: r for r in out["rows"]}
+    assert by_host[HOST_A]["harness_presence"] == "present"
+    assert by_host[HOST_B]["harness_presence"] == "unmeasured"
+    assert by_host[HOST_B]["harness_presence_reason"] == "remote_host"
+
+
+def test_an_UNREADABLE_registry_makes_every_row_unmeasured_never_absent():
+    """🔴 The registry failing must not make the whole fleet look measured-and-
+    empty. Every row carries the registry's own status as its reason."""
+    def lister(_p):
+        raise PermissionError(13, "Permission denied")
+    reg = ww.read_registry("/synthetic/denied", lister=lister)
+    rep = _local({HOST_A: [row(probable=True, signals=("selection_menu",),
+                               age=AGE_BIG)]})
+    out, _ = ww.reconcile(rep, {}, NOW, THRESHOLD, registry=reg)
+    r = out["rows"][0]
+    assert r["harness_presence"] == "unmeasured"
+    assert r["harness_presence_reason"] == "registry_error"
+
+
+def test_a_MISSING_registry_directory_is_distinguishable_from_an_unreadable_one():
+    """The two reasons must not share a token either — one is 'the harness has
+    never run here', the other is 'something is wrong with this machine'."""
+    def lister(_p):
+        raise FileNotFoundError(2, "No such file or directory")
+    reg = ww.read_registry("/synthetic/absent", lister=lister)
+    rep = _local({HOST_A: [row(probable=True, signals=("selection_menu",),
+                               age=AGE_BIG)]})
+    out, _ = ww.reconcile(rep, {}, NOW, THRESHOLD, registry=reg)
+    assert out["rows"][0]["harness_presence_reason"] == "registry_missing"
+
+
+def test_a_report_with_no_local_host_is_unmeasured_under_its_OWN_reason():
+    rep = report({HOST_A: [row(probable=True, signals=("selection_menu",),
+                               age=AGE_BIG)]})
+    rep.pop("local_host", None)
+    out, _ = run_reg(rep, [regrec(age=REG_AGE_BIG)])
+    r = out["rows"][0]
+    assert r["harness_presence"] == "unmeasured"
+    assert r["harness_presence_reason"] == "local_host_unknown"
+
+
+def test_not_reading_the_registry_at_all_is_unmeasured_not_absent():
+    out, _ = run(report({HOST_A: [row(probable=True, signals=("selection_menu",),
+                                      age=AGE_BIG)]}))
+    r = out["rows"][0]
+    assert r["harness_presence"] == "unmeasured"
+    assert r["harness_presence_reason"] == "registry_not_read"
+
+
+def test_every_row_carries_a_presence_from_the_pinned_vocabulary():
+    rep = _local({HOST_A: [row(WID_1, probable=True, signals=("selection_menu",)),
+                           row(WID_2, probable=True, signals=("selection_menu",))],
+                  HOST_B: [row(WID_3, probable=True, signals=("selection_menu",))]},
+                 host=HOST_A)
+    out, _ = run_reg(rep, [regrec(window_id=WID_1)])
+    assert {r["harness_presence"] for r in out["rows"]} <= set(ww.HARNESS_PRESENCE)
+    assert {r["harness_presence"] for r in out["rows"]} == {
+        "present", "absent", "unmeasured"}
+
+
+def test_the_coverage_counts_present_absent_and_unmeasured_SEPARATELY():
+    """🔴 Three numbers, and they are not two. `rows_absent` is a measurement;
+    `rows_unmeasured` is the absence of one, with its reasons."""
+    rep = _local({HOST_A: [row(WID_1, probable=True, signals=("selection_menu",)),
+                           row(WID_2, probable=True, signals=("selection_menu",))],
+                  HOST_B: [row(WID_3, probable=True, signals=("selection_menu",))]},
+                 host=HOST_A)
+    out, _ = run_reg(rep, [regrec(window_id=WID_1)])
+    reg = out["coverage"]["registry"]
+    assert reg["rows_present"] == 1
+    assert reg["rows_absent"] == 1
+    assert reg["rows_unmeasured"] == 1
+    assert reg["rows_unmeasured_reasons"] == {"remote_host": 1}
+    assert reg["rows_joined"] == reg["rows_present"]
+
+
+def test_the_three_coverage_counts_sum_to_the_waiting_population():
+    """The positive control for the split: nothing may be lost or double-counted
+    between the three buckets."""
+    rep = _local({HOST_A: [row(WID_1, probable=True, signals=("selection_menu",)),
+                           row(WID_2, probable=True, signals=("selection_menu",)),
+                           row(WID_4, probable=True, signals=("selection_menu",))],
+                  HOST_B: [row(WID_3, probable=True, signals=("selection_menu",))]},
+                 host=HOST_A)
+    out, _ = run_reg(rep, [regrec(window_id=WID_1)])
+    reg = out["coverage"]["registry"]
+    assert (reg["rows_present"] + reg["rows_absent"]
+            + reg["rows_unmeasured"]) == len(out["rows"])
+
+
+def test_the_human_view_renders_all_THREE_presence_states_differently():
+    """🔴 A guard on the JSON alone would let the rendered output collapse them
+    again. All three strings are asserted, and asserted to be distinct from
+    each other."""
+    rep = _local({HOST_A: [row(WID_1, probable=True, signals=("selection_menu",),
+                               age=AGE_HUGE),
+                           row(WID_2, probable=True, signals=("selection_menu",),
+                               age=AGE_HUGE)],
+                  HOST_B: [row(WID_3, probable=True, signals=("selection_menu",),
+                               age=AGE_HUGE)]}, host=HOST_A)
+    out, _ = ww.build_report(rep, {}, NOW, THRESHOLD, "flag", "ok",
+                             "/synthetic/state.json",
+                             registry=registry_from([regrec(window_id=WID_1)]))
+    text = ww.render_human(out)
+    assert "harness_status: idle" in text
+    assert "harness_status: no record (registry read, none for this window)" in text
+    assert "harness_status: NOT MEASURED (remote_host)" in text
+
+
+def test_the_human_view_prints_the_three_counts_and_the_unmeasured_reasons():
+    rep = _local({HOST_A: [row(WID_1, probable=True, signals=("selection_menu",),
+                               age=AGE_HUGE),
+                           row(WID_2, probable=True, signals=("selection_menu",),
+                               age=AGE_HUGE)],
+                  HOST_B: [row(WID_3, probable=True, signals=("selection_menu",),
+                               age=AGE_HUGE)]}, host=HOST_A)
+    out, _ = ww.build_report(rep, {}, NOW, THRESHOLD, "flag", "ok",
+                             "/synthetic/state.json",
+                             registry=registry_from([regrec(window_id=WID_1)]))
+    text = ww.render_human(out)
+    assert "harness registry: status=ok  present=1 absent=1 unmeasured=1" in text
+    assert "unmeasured because: remote_host=1" in text
+    # 🔴 The old conflated wording must not come back.
+    assert "joined 1 of" not in text
+
+
+def test_an_absent_row_is_never_rendered_as_NOT_MEASURED():
+    """The mirror image of the test above, as its own assertion: a fleet where
+    every row is a measured absence must print no NOT-MEASURED line at all."""
+    rep = _local({HOST_A: [row(WID_3, probable=True, signals=("selection_menu",),
+                               age=AGE_HUGE)]})
+    out, _ = ww.build_report(rep, {}, NOW, THRESHOLD, "flag", "ok",
+                             "/synthetic/state.json",
+                             registry=registry_from([regrec(window_id=WID_1)]))
+    text = ww.render_human(out)
+    assert "no record (registry read, none for this window)" in text
+    assert "NOT MEASURED" not in text

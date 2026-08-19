@@ -292,15 +292,34 @@ SESSION_MANAGER_ARGV = ("--json", "--no-ch")
 WAITED_SOURCES = ("registry_status_updated", "ledger_age_fallback",
                   "first_seen", "unmeasured")
 
+# 🔴 THREE STATES, NOT TWO. "this window has no registry record" and "the
+# registry could not be read" are OPPOSITE answers, and a single `joined: false`
+# collapses them into one token that reads as the first. So does a remote row,
+# which was never lookable at all — measured, that is 7 of the 30 non-joining
+# rows, and folding them together turns "we could not look" into "we looked and
+# found nothing", which is the whole failure mode this tool exists to refuse.
+#
+#   present     — the registry was read and has a record for this window.
+#   absent      — the registry was read and has NO record for this window. A
+#                 real MEASUREMENT, and the majority case (measured 24 present
+#                 of 48 local rows). Not an error and not a zero.
+#   unmeasured  — we did not look, with a REASON: the registry could not be
+#                 read, or this row is on a host the registry structurally
+#                 cannot cover.
+HARNESS_PRESENCE = ("present", "absent", "unmeasured")
+
 REGISTRY_DIR_NAME = "sessions"
 REGISTRY_CAVEAT = (
     "The harness session registry is a directory in the LOCAL host's home, so "
     "it can never cover a window on a remote host — those rows are excluded by "
     "construction, not by a process having exited. Read "
-    "coverage.registry.hosts_not_covered beside the join count. harness_status "
-    "is the harness's own notion of waiting and is NOT session-manager's "
-    "waiting_probable; the two were measured to disagree on every joinable "
-    "flagged row. The threshold fires on waiting_probable alone."
+    "coverage.registry.hosts_not_covered beside the join count. Read "
+    "harness_presence, never the nullness of harness_status: absent means the "
+    "registry was read and had no record for this window, which is a real "
+    "measurement, while unmeasured means we could not look and carries the "
+    "reason. harness_status is the harness's own notion of waiting and is NOT "
+    "session-manager's waiting_probable; the two were measured to disagree on "
+    "every joinable flagged row. The threshold fires on waiting_probable alone."
 )
 
 STATE_DIR_NAME = "waiting-windows"
@@ -567,7 +586,9 @@ def reconcile(report, stamps, now, threshold_secs, registry=None):
     # collide with a local one and would otherwise be handed another machine's
     # clock, status and cwd.
     local_host = report.get("local_host")
-    reg_joined = reg_unjoined = 0
+    reg_status = registry.get("status")
+    reg_present = reg_absent = reg_unmeasured = 0
+    reg_unmeasured_reasons = {}
 
     live_ids = {h: set() for h in hosts_blk}
     rows_by_host = {h: [] for h in hosts_blk}
@@ -623,15 +644,32 @@ def reconcile(report, stamps, now, threshold_secs, registry=None):
                 "last_seen": float(now),
             }
 
-            # THE REGISTRY JOIN. Local host only — see the comment at the top of
-            # `reconcile` for why the host gate is a correctness guard.
+            # THE REGISTRY JOIN, in THREE states. Local host only — see the
+            # comment at the top of `reconcile` for why the host gate is a
+            # correctness guard, and `HARNESS_PRESENCE` for why a measured
+            # absence must not share a token with an unmeasured one.
             rec = None
-            if local_host is not None and host == local_host:
-                rec = reg_by_key.get((row.get("session"), wid))
-            if rec is None:
-                reg_unjoined += 1
+            if reg_status != "ok":
+                presence = "unmeasured"
+                presence_reason = "registry_%s" % (reg_status or "unknown")
+            elif local_host is None:
+                presence = "unmeasured"
+                presence_reason = "local_host_unknown"
+            elif host != local_host:
+                presence = "unmeasured"
+                presence_reason = "remote_host"
             else:
-                reg_joined += 1
+                rec = reg_by_key.get((row.get("session"), wid))
+                presence = "present" if rec is not None else "absent"
+                presence_reason = None
+            if presence == "present":
+                reg_present += 1
+            elif presence == "absent":
+                reg_absent += 1
+            else:
+                reg_unmeasured += 1
+                reg_unmeasured_reasons[presence_reason] = \
+                    reg_unmeasured_reasons.get(presence_reason, 0) + 1
             reg_age = None
             if rec is not None and rec.get("status_updated_at") is not None:
                 reg_age = float(now) - float(rec["status_updated_at"])
@@ -686,6 +724,11 @@ def reconcile(report, stamps, now, threshold_secs, registry=None):
                 "harness_name": (rec or {}).get("name"),
                 "harness_cwd": (rec or {}).get("cwd"),
                 "harness_status_age_secs": reg_age,
+                # 🔴 `harness_presence` is the DISCRIMINANT — read it, not the
+                # nullness of `harness_status`. A null status means `absent` OR
+                # `unmeasured`, and those call for opposite reactions.
+                "harness_presence": presence,
+                "harness_presence_reason": presence_reason,
                 "registry_joined": rec is not None,
                 "host": host,
                 "session": row.get("session"),
@@ -724,7 +767,8 @@ def reconcile(report, stamps, now, threshold_secs, registry=None):
     coverage = build_coverage(report, observed, generations,
                               unmeasured_rows, unmeasured_reasons,
                               rows_without_window_id,
-                              registry, reg_joined, reg_unjoined, local_host)
+                              registry, reg_present, reg_absent, reg_unmeasured,
+                              reg_unmeasured_reasons, local_host)
     counts = build_counts(out_rows, observed, coverage)
     return {
         "rows": out_rows,
@@ -783,7 +827,9 @@ def prune_stamps(stamps, next_stamps, observed, generations, live_ids):
 
 def build_coverage(report, observed, generations,
                    unmeasured_rows, unmeasured_reasons, rows_without_window_id,
-                   registry=None, reg_joined=0, reg_unjoined=0, local_host=None):
+                   registry=None, reg_present=0, reg_absent=0,
+                   reg_unmeasured=0, reg_unmeasured_reasons=None,
+                   local_host=None):
     """🔴 NULL IS NOT ZERO — everything this run could NOT see, propagated."""
     summary = report.get("summary") or {}
     hosts_blk = report.get("hosts") or {}
@@ -822,8 +868,17 @@ def build_coverage(report, observed, generations,
         "records_unusable_clock": registry.get("records_unusable_clock"),
         "records_unparseable": registry.get("records_unparseable"),
         "records_bad_address": registry.get("records_bad_address"),
-        "rows_joined": reg_joined,
-        "rows_unjoined": reg_unjoined,
+        # 🔴 THREE COUNTS, NOT TWO. An earlier revision published a single
+        # `rows_unjoined`, which folded 7 rows on a host the registry can never
+        # cover in with 23 rows it read and genuinely had no record for — "we
+        # could not look" rendered as "we looked and found nothing".
+        "rows_present": reg_present,
+        "rows_absent": reg_absent,
+        "rows_unmeasured": reg_unmeasured,
+        "rows_unmeasured_reasons": dict(reg_unmeasured_reasons or {}),
+        # Kept as the plain name for `present`, since "joined" is what the
+        # operation is called. It is NOT the complement of `rows_absent`.
+        "rows_joined": reg_present,
     }
     return {
         "per_host": per_host,
@@ -1037,14 +1092,23 @@ def render_human(out):
                     "  ~%s" % r["harness_name"] if r["harness_name"] else "",
                     r["waited_source"],
                     "null" if r["age_secs"] is None else int(r["age_secs"])))
-        if r["registry_joined"]:
-            # 🔴 Printed under its OWN name. This is the HARNESS's notion of
+        # 🔴 All THREE presence states render differently. `no record` is a
+        # measurement the operator can act on; `not measured` is not, and it
+        # carries the reason it was not.
+        if r["harness_presence"] == "present":
+            # Printed under its OWN name. This is the HARNESS's notion of
             # waiting, measured to disagree with `waiting_probable` on every
             # joinable flagged row — never folded into the kind or the count.
             L.append("      harness_status: %s%s"
                      % (r["harness_status"],
                         " (%s)" % r["harness_waiting_for"]
                         if r["harness_waiting_for"] else ""))
+        elif r["harness_presence"] == "absent":
+            L.append("      harness_status: no record (registry read, none for "
+                     "this window)")
+        else:
+            L.append("      harness_status: NOT MEASURED (%s)"
+                     % r["harness_presence_reason"])
         if r["harness_cwd"]:
             L.append("      cwd: %s" % r["harness_cwd"])
         if r["task"]:
@@ -1081,9 +1145,16 @@ def render_human(out):
     by_src = counts["waited_by_source"]
     L.append("  clocks: " + ", ".join("%s=%d" % (s, by_src.get(s, 0))
                                       for s in WAITED_SOURCES))
-    L.append("  harness registry: status=%s  joined %d of %d row(s)"
-             % (reg["status"], reg["rows_joined"],
-                reg["rows_joined"] + reg["rows_unjoined"]))
+    # 🔴 `absent` and `unmeasured` are printed as SEPARATE numbers. A window the
+    # registry read and had no record for is a MEASUREMENT; a window on a host
+    # it cannot reach is not. One combined "unjoined" reads as the first.
+    L.append("  harness registry: status=%s  present=%d absent=%d unmeasured=%d"
+             % (reg["status"], reg["rows_present"], reg["rows_absent"],
+                reg["rows_unmeasured"]))
+    if reg["rows_unmeasured_reasons"]:
+        L.append("    unmeasured because: %s"
+                 % ", ".join("%s=%d" % kv for kv in
+                             sorted(reg["rows_unmeasured_reasons"].items())))
     if reg["hosts_not_covered"]:
         L.append("    ⚠ CANNOT cover (registry is LOCAL-host only, by "
                  "construction): %s" % ", ".join(reg["hosts_not_covered"]))
