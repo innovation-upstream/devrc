@@ -97,6 +97,12 @@ Config (env):
                                  (default 900; 0 → disabled). See
                                  HEARTBEAT_INTERVAL_S for why the source needs a
                                  cadence at all.
+    BROWSER_BRIDGE_I3_TIMEOUT    seconds each host-side `i3-msg` call may take
+                                 (default 1.5). See I3_MSG_TIMEOUT.
+    BROWSER_BRIDGE_I3_MATCH_WAIT seconds `activate` keeps re-reading the i3 tree
+                                 waiting for the Brave window's WM_NAME to catch
+                                 up with the activated tab's title (default 1.5;
+                                 0 → one read, no wait). See I3_MATCH_WAIT.
 """
 from __future__ import annotations
 
@@ -371,9 +377,26 @@ HEARTBEAT_INTERVAL_S = float(os.environ.get("BROWSER_BRIDGE_HEARTBEAT_S", "900")
 # raises it + switches workspace, un-throttling the tab. Bounded by this timeout;
 # any failure is non-fatal (the Chrome-side activate result still returns).
 I3_MSG_TIMEOUT = float(os.environ.get("BROWSER_BRIDGE_I3_TIMEOUT", "1.5"))
-# Cap on the UNTRUSTED (page-controlled) tab-title fragment used in the i3
-# criteria — bounds a pathological title before it is re.escape'd.
+# Cap on the UNTRUSTED (page-controlled) tab-title fragment matched against the
+# i3 tree — bounds a pathological title before it is re.escape'd.
 I3_TITLE_MAX = 80
+# How long to keep re-reading the i3 tree waiting for the Brave window's X11
+# WM_NAME to catch up with the tab title Chrome just activated.
+#
+# 🔴 THE RACE THIS EXISTS FOR. `activate` returns the tab's title from Chrome the
+# instant the tab goes active, but the X11 window's WM_NAME is updated by the
+# browser process AFTERWARDS. Immediately after an `open` the window therefore
+# still advertises the OLD title, so a title-keyed match finds nothing. Measured
+# live 2026-08-19: activate #1 (issued right after `open`) matched no window and
+# the tab stayed `hidden`; activate #2, once the title had settled, raised it.
+# A bounded re-read turns that "unreliable by construction" first activate into a
+# normal success — and when the window genuinely is not there, the wait expires
+# and the caller is told `no_match` instead of being lied to.
+I3_MATCH_WAIT = _env_float("BROWSER_BRIDGE_I3_MATCH_WAIT", 1.5)
+# Gap between those re-reads. Each poll is one `i3-msg -t get_tree` (a READ-ONLY
+# IPC query — it cannot focus/move/switch anything), so the whole wait costs at
+# most ~I3_MATCH_WAIT/I3_MATCH_POLL cheap queries.
+I3_MATCH_POLL = 0.2
 
 # Synthetic routing key for a legacy extension that polls without a handshake
 # (no X-Bridge-Instance-Id). All such polls collapse onto one unnamed instance.
@@ -1993,29 +2016,40 @@ def _coerce_tab(tab):
 # then focuses THAT Brave window via `i3-msg` so i3 actually raises it + switches
 # workspace — the step that turns activation from a no-op into real visibility.
 #
+# 🔴 THE SHAPE OF THIS CODE IS DICTATED BY ONE FACT: `i3-msg [criteria] focus`
+# EXITS 0 AND REPLIES `[{"success":true}]` WHEN THE CRITERIA MATCHED NOTHING.
+# There is no way to tell a real raise from a total miss by reading the exit code
+# or that reply, and the previous implementation did exactly that — reporting
+# i3:"applied" for zero windows raised. So the flow is FIND (read-only
+# `-t get_tree`) → RAISE (focus by the STABLE X11 window id found there) →
+# VERIFY (read the tree back and require i3 to agree it is focused). See
+# i3_foreground for the state/detail table.
+#
 # SECURITY — the title is UNTRUSTED (page-controlled; a hostile page the agent
 # visited can set `document.title` to ANYTHING). The bound MUST be: the worst
 # outcome is "focuses the wrong Brave window or no window", NEVER command
 # execution and NEVER focusing a non-Brave window. That is enforced by:
 #   * subprocess with an ARGV LIST + shell=False (no shell → no `;`/`|`/`$()`/
 #     redirection surface at all). NEVER os.system / shell=True.
-#   * The i3 criteria `title=` value is a REGEX delimited by double-quotes inside
-#     the criteria. re.escape() neutralises regex metacharacters but does NOT
-#     escape the `"`/`[`/`]`/`\` that STRUCTURE an i3 criteria — a `"` could close
-#     the quoted value early and let trailing text be read as an i3 command
-#     (e.g. `exec`). So we STRIP those structural chars (and control chars) BEFORE
-#     re.escape. After that the value cannot break out of `title="..."`.
+#   * 🔴 The title is no longer interpolated into an i3 command AT ALL. It is
+#     compiled to a local Python regex (re.escape → a literal, so no ReDoS) and
+#     matched against i3's `get_tree` reply in-process. The only two argvs issued
+#     are the constant `["i3-msg","-t","get_tree"]` and a focus keyed on an
+#     INTEGER window id taken from i3's own reply. The old criteria-breakout
+#     surface (a `"` closing the `title="…"` value so trailing text is read as an
+#     i3 command such as `exec`) is therefore gone by construction — the strip of
+#     the structural chars below is kept as defence in depth.
 #   * A `class="Brave-browser"` constraint so a matched window is always Brave.
 #   * A length cap + a bounded timeout; failure/timeout is swallowed (non-fatal).
 # i3-only chars that i3 uses to delimit a criteria/value. Stripped from the
-# UNTRUSTED title BEFORE re.escape so the value cannot escape its `title="..."`
-# quoting (re.escape does not touch `"`). Removing them at worst makes the title
-# match a different window or none — never a breakout.
+# UNTRUSTED title BEFORE re.escape as belt-and-braces (see above: the title never
+# reaches a criteria any more). Removing them at worst makes the title match a
+# different window or none — never a breakout.
 _I3_STRUCTURAL = str.maketrans("", "", '"[]\\')
 
 
 def _sanitize_i3_title(title) -> str:
-    """Reduce an UNTRUSTED tab title to a safe i3 criteria fragment.
+    """Reduce an UNTRUSTED tab title to a safe match fragment.
 
     Strips control chars / newlines AND the i3-criteria structural chars
     (``"[]\\``), then caps length. The remaining text is re.escape'd by the
@@ -2029,19 +2063,106 @@ def _sanitize_i3_title(title) -> str:
     return cleaned.strip()[:I3_TITLE_MAX]
 
 
-def i3_focus_argv(title):
-    """Build the argv LIST for `i3-msg` to focus the Brave window whose title
-    matches `title`, or None when there is no usable title (→ skip).
+def i3_title_pattern(title):
+    """The REGEX used to find the Brave window for an (UNTRUSTED) tab `title`,
+    or None when nothing usable remains (→ skip).
 
-    shell=False BY CONSTRUCTION (a list, never a shell string). The criteria is
-    `[class="Brave-browser" title="<re.escape'd fragment>"] focus`, so the worst
-    case is "focuses the wrong Brave window or none" — never a non-Brave window,
-    never code execution. See the module block above for the threat model."""
+    This is `re.escape(sanitized)`, matched with `re.search` — an unanchored
+    literal substring match, which is exactly what i3's own `title="…"` criteria
+    (an unanchored PCRE) used to do. The difference is WHERE it is evaluated:
+    HERE, in-process, against i3's `get_tree` reply — never interpolated into an
+    i3 command.
+
+    🔴 That is a strict security IMPROVEMENT over the criteria this replaced. The
+    page-controlled title no longer reaches ANY argv at all: the only two commands
+    issued are a constant `-t get_tree` and a focus keyed on an INTEGER X11 window
+    id taken from i3's own reply. The structural-char strip + length cap in
+    _sanitize_i3_title are kept anyway (defence in depth), and re.escape means the
+    compiled pattern is a literal — no metacharacter survives, so no ReDoS."""
     safe = _sanitize_i3_title(title)
     if not safe:
         return None
-    criteria = '[class="Brave-browser" title="%s"] focus' % re.escape(safe)
-    return ["i3-msg", criteria]
+    return re.escape(safe)
+
+
+def i3_get_tree_argv():
+    """argv LIST for `i3-msg -t get_tree` — the READ-ONLY IPC query that tells us
+    what windows EXIST.
+
+    🔴 THIS IS THE ONLY THING THAT CAN ANSWER "DID ANYTHING MATCH?". Issuing
+    `focus` and reading its exit code CANNOT: i3 answers a criteria that matched
+    ZERO windows with `[{"success":true}]` and rc 0, byte-identical to a real
+    raise. `-t get_tree` is a query — it cannot focus, move or switch anything,
+    so calling it never touches the operator's screen."""
+    return ["i3-msg", "-t", "get_tree"]
+
+
+def i3_focus_by_id_argv(window_id):
+    """argv LIST for `i3-msg [id="<x11-window-id>"] focus`.
+
+    Keyed on the X11 window id — a STABLE handle. WM_NAME changes while the title
+    settles (that is the whole bug); a window id does not, so the window we
+    matched in the tree is provably the window we focus. `window_id` comes from
+    i3's own reply and is re-validated as an int here, so this argv can never
+    carry page-controlled text."""
+    return ["i3-msg", '[id="%d"] focus' % int(window_id)]
+
+
+# The X11 WM_CLASS i3 reports for Brave windows. A match is constrained to this
+# so the worst case stays "the wrong BRAVE window, or none" — never some other
+# application's window.
+_I3_BRAVE_CLASSES = ("Brave-browser",)
+
+
+def _i3_walk(node):
+    """Yield every node of an i3 `get_tree` reply, depth-first (tiled + floating)."""
+    if not isinstance(node, dict):
+        return
+    yield node
+    for key in ("nodes", "floating_nodes"):
+        kids = node.get(key)
+        if isinstance(kids, list):
+            for kid in kids:
+                yield from _i3_walk(kid)
+
+
+def _i3_node_class(node) -> str:
+    props = node.get("window_properties")
+    if isinstance(props, dict) and isinstance(props.get("class"), str):
+        return props["class"]
+    return ""
+
+
+def i3_find_windows(tree, pattern):
+    """Every Brave window in `tree` whose title matches `pattern`.
+
+    Returns a list of (x11_window_id, focused) tuples. An EMPTY list is the state
+    `i3-msg … focus` reports as success and this function reports as itself: i3
+    has no such window."""
+    out = []
+    try:
+        rx = re.compile(pattern)
+    except re.error:
+        return out
+    for node in _i3_walk(tree):
+        wid = node.get("window")
+        if not isinstance(wid, int) or isinstance(wid, bool):
+            continue  # containers/workspaces carry window=None
+        if _i3_node_class(node) not in _I3_BRAVE_CLASSES:
+            continue
+        name = node.get("name")
+        if not isinstance(name, str) or not rx.search(name):
+            continue
+        out.append((wid, bool(node.get("focused"))))
+    return out
+
+
+def _i3_is_focused(tree, window_id) -> bool:
+    """True when the window with X11 id `window_id` is the focused one in `tree`."""
+    for node in _i3_walk(tree):
+        if node.get("window") == window_id:
+            return bool(node.get("focused"))
+    return False
 
 
 # Well-known absolute locations for `i3-msg`, tried IN ORDER when it is not on
@@ -2085,41 +2206,124 @@ def i3_available() -> bool:
     return _resolve_i3_msg() is not None
 
 
-def i3_foreground(title, *, timeout: float = I3_MSG_TIMEOUT) -> str:
-    """Best-effort host-side i3 foregrounding of the Brave window matching the
-    (UNTRUSTED) `title`. Returns a small metadata state for the caller:
+def _i3_run(argv, *, timeout):
+    """Run an i3-msg argv (shell=False, timeout-bounded). Returns
+    (returncode, stdout_bytes), or None when it could not be run at all
+    (i3-msg unresolvable, timeout, any exception) — all non-fatal.
 
-      * "skipped" — no graphical/i3 session (i3-msg absent or no DISPLAY), or no
-        usable title. NOT an error — the Chrome-side activate still returns.
-      * "applied" — i3-msg ran and exited 0.
-      * "failed"  — i3-msg errored, timed out, or exited nonzero (non-fatal).
-
-    The title is sanitized + re.escape'd (see i3_focus_argv) and the call is
-    shell=False + timeout-bounded, so a hostile title can at worst focus the
-    wrong Brave window / none — never execute a command."""
-    if not i3_available():
-        return "skipped"
-    argv = i3_focus_argv(title)
-    if argv is None:
-        return "skipped"
-    # Resolve i3-msg to an ABSOLUTE path for argv[0] so the call works even when
-    # i3-msg is not on the (minimal systemd --user) PATH. i3_available() above
-    # already confirmed it resolves; re-check defensively. The criteria (argv[1])
-    # is built + sanitized + re.escape'd by i3_focus_argv — UNCHANGED here.
+    Resolves i3-msg to an ABSOLUTE path for argv[0] so the call works even under
+    the minimal systemd --user service PATH."""
     i3_msg = _resolve_i3_msg()
     if i3_msg is None:
-        return "skipped"
+        return None
+    argv = list(argv)
     argv[0] = i3_msg
     try:
         proc = subprocess.run(argv, shell=False, capture_output=True,
                               timeout=timeout)
     except Exception:  # noqa: BLE001 — best-effort; any failure is non-fatal.
-        log("activate_i3_failed", reason="exception")
-        return "failed"
-    if getattr(proc, "returncode", 1) == 0:
-        return "applied"
-    log("activate_i3_failed", reason="nonzero", rc=getattr(proc, "returncode", None))
-    return "failed"
+        return None
+    return getattr(proc, "returncode", 1), (getattr(proc, "stdout", b"") or b"")
+
+
+def _i3_tree(*, timeout):
+    """The parsed `i3-msg -t get_tree` reply, or None when it could not be read
+    (i3-msg missing/timed out/nonzero, or the reply was not a JSON object)."""
+    got = _i3_run(i3_get_tree_argv(), timeout=timeout)
+    if got is None:
+        return None
+    rc, out = got
+    if rc != 0:
+        return None
+    try:
+        tree = json.loads(out.decode("utf-8", "replace"))
+    except Exception:  # noqa: BLE001 — a malformed reply is "unreadable".
+        return None
+    return tree if isinstance(tree, dict) else None
+
+
+def i3_foreground(title, *, timeout: float = None, match_wait: float = None):
+    """Host-side i3 foregrounding of the Brave window matching the (UNTRUSTED)
+    `title`. Returns a **(state, detail)** pair.
+
+    🔴 `state` MUST reflect WHAT HAPPENED, not whether a command was accepted.
+    The bug this replaced: it ran `i3-msg [class="Brave-browser" title="…"] focus`
+    and reported "applied" on rc 0 — but i3 exits 0 and replies
+    `[{"success":true}]` for a criteria that matched ZERO windows, so "applied"
+    was reachable with nothing raised at all. Downstream that read as "the window
+    is up", and the only failure signal anyone had said everything was fine.
+
+    So the sequence is now FIND → RAISE → VERIFY, and every step can say no:
+
+      state       detail              meaning
+      ─────────── ─────────────────── ─────────────────────────────────────────
+      "skipped"   "unavailable"       no DISPLAY / no i3-msg (headless, non-i3)
+      "skipped"   "no_title"          nothing usable left of the tab title
+      "applied"   "focused"           matched → focused → CONFIRMED focused
+      "failed"    "no_match"          i3 has NO Brave window with that title
+      "failed"    "tree_unreadable"   `-t get_tree` failed/timed out/unparseable
+      "failed"    "focus_error"       the focus command itself errored
+      "failed"    "not_focused"       focus accepted, window still not focused
+
+    "applied" is now reachable ONLY via a get_tree that listed the window AND a
+    second get_tree that confirms it is focused. `state` keeps the exact three
+    values callers already branch on ("applied"/"skipped"/"failed"), with
+    not-raised now correctly landing in "failed"; `detail` is additive.
+
+    Non-fatal throughout — the Chrome-side activate result still returns."""
+    if timeout is None:
+        timeout = I3_MSG_TIMEOUT
+    if match_wait is None:
+        match_wait = I3_MATCH_WAIT
+    if not i3_available():
+        return "skipped", "unavailable"
+    pattern = i3_title_pattern(title)
+    if pattern is None:
+        return "skipped", "no_title"
+
+    # 1. FIND. A READ-ONLY get_tree is the only thing that can distinguish
+    #    "matched one window" from "matched nothing" — see i3_get_tree_argv.
+    #    Re-read for up to match_wait while there is no match: right after an
+    #    `open` the window's WM_NAME still holds the OLD title (see I3_MATCH_WAIT).
+    #    A tree that cannot be READ is not a race — bail immediately, no retry.
+    tree = _i3_tree(timeout=timeout)
+    if tree is None:
+        log("activate_i3_failed", reason="tree_unreadable")
+        return "failed", "tree_unreadable"
+    matches = i3_find_windows(tree, pattern)
+    deadline = time.monotonic() + max(0.0, match_wait)
+    while not matches and time.monotonic() < deadline:
+        time.sleep(min(I3_MATCH_POLL, max(0.0, deadline - time.monotonic())))
+        tree = _i3_tree(timeout=timeout)
+        if tree is None:
+            log("activate_i3_failed", reason="tree_unreadable")
+            return "failed", "tree_unreadable"
+        matches = i3_find_windows(tree, pattern)
+    if not matches:
+        # The old code's silent lie. Nothing was raised; say so.
+        log("activate_i3_failed", reason="no_match")
+        return "failed", "no_match"
+
+    # 2. RAISE by STABLE X11 window id — immune to the title settling underneath
+    #    us between the tree read and the focus.
+    window_id = matches[0][0]
+    got = _i3_run(i3_focus_by_id_argv(window_id), timeout=timeout)
+    if got is None or got[0] != 0:
+        log("activate_i3_failed", reason="focus_error",
+            rc=(got[0] if got is not None else None))
+        return "failed", "focus_error"
+
+    # 3. VERIFY. rc 0 from `focus` still proves nothing (an id that vanished
+    #    between the two calls also answers success:true), so read the tree back
+    #    and require i3 to agree the window is focused.
+    tree = _i3_tree(timeout=timeout)
+    if tree is None:
+        log("activate_i3_failed", reason="tree_unreadable")
+        return "failed", "tree_unreadable"
+    if not _i3_is_focused(tree, window_id):
+        log("activate_i3_failed", reason="not_focused")
+        return "failed", "not_focused"
+    return "applied", "focused"
 
 
 def _result_title(result) -> str:
@@ -2132,12 +2336,20 @@ def _result_title(result) -> str:
     return ""
 
 
-def _annotate_i3(result, state: str) -> None:
-    """Record the i3-foregrounding outcome as a small metadata field on the
-    activate result's data ({...,"i3":"applied"|"skipped"|"failed"}) so the
-    caller knows whether the window was actually raised. Never emits the title."""
+def _annotate_i3(result, state: str, detail: str = "") -> None:
+    """Record the i3-foregrounding outcome on the activate result's data:
+
+        {..., "i3": "applied"|"skipped"|"failed", "i3_detail": "<why>"}
+
+    `i3` keeps EXACTLY the three values callers already branch on — a consumer
+    that treats "failed" as fatal keeps working, and now correctly sees a raise
+    that matched nothing (which used to report "applied"). `i3_detail` is the
+    additive field that separates "I asked and nothing matched" ("no_match")
+    from "i3 is not there" ("unavailable") from a real raise ("focused"); see
+    i3_foreground for the full table. Never emits the title."""
     if isinstance(result, dict) and isinstance(result.get("data"), dict):
         result["data"]["i3"] = state
+        result["data"]["i3_detail"] = detail
 
 
 # --------------------------------------------------------------------------- #
@@ -2579,11 +2791,14 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                     # document.hidden). Focus the matching Brave X11 WINDOW via
                     # i3-msg so i3 raises it + switches workspace → the throttled
                     # SPA un-throttles and renders. Best-effort + bounded; the
-                    # title is UNTRUSTED (page-controlled) and handled shell=False
-                    # + re.escape'd inside i3_foreground. Skipped gracefully off i3.
-                    state = i3_foreground(_result_title(result))
-                    _annotate_i3(result, state)
-                    log("activate_i3", state=state)
+                    # title is UNTRUSTED (page-controlled) and never reaches an
+                    # i3 command (see i3_title_pattern). Skipped gracefully off i3.
+                    # 🔴 `state` is EARNED, not assumed: i3-msg exits 0 even when
+                    # the criteria matched nothing, so i3_foreground confirms the
+                    # window exists and ends up focused before saying "applied".
+                    state, detail = i3_foreground(_result_title(result))
+                    _annotate_i3(result, state, detail)
+                    log("activate_i3", state=state, detail=detail)
                 self._send(200, {"ok": True, "result": result})
             # Off the critical path: the HTTP response is already sent. Metadata-
             # only + best-effort — cannot delay or break the command (the key is
