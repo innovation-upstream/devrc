@@ -185,6 +185,49 @@ class TestReconNeverWrites:
         sr.recon(SERVICE, repos=[str(repo)], store_root=store)
         assert _tree_hash(repo) == before
 
+    def test_EVERY_subprocess_a_full_recon_makes_is_read_only(
+        self, repo: Path, store: Path, monkeypatch
+    ) -> None:
+        """🔴 AN ASSERTED LEDGER OVER THE SEAM, not over one component.
+
+        The two guards above are behavioural: they prove THESE inputs wrote
+        nothing. That is a claim about the paths exercised, and a `git` verb
+        reachable only on some other input would pass both — a tree hash cannot
+        see a `git fetch`, a `git gc` or a `git config --global`, none of which
+        touch the working tree at all.
+
+        So this pins the RELATIONSHIP: capture every argv the recon hands to a
+        subprocess and assert the whole set. It fails when the set GROWS (a new
+        command appeared) or SHRINKS (a step stopped running), which is the shape
+        `claude/RULES.md` asks for at a seam nobody owns.
+        """
+        seen: list[tuple[str, ...]] = []
+        real = sr._run
+
+        def spy(argv, **kw):
+            seen.append(tuple(argv))
+            return real(argv, **kw)
+
+        monkeypatch.setattr(sr, "_run", spy)
+        sr.recon(SERVICE, repos=[str(repo)], store_root=store)
+
+        assert seen, "no subprocess ran at all — the spy is wired to nothing"
+        verbs = {a[0] for a in seen}
+        assert verbs == {"git"}, f"a non-git binary was invoked: {verbs}"
+
+        # The exact command set, both directions.
+        subcommands = sorted({a[3] for a in seen if a[1] == "-C"})
+        assert subcommands == ["log", "ls-files"], subcommands
+
+        WRITING = {
+            "add", "commit", "push", "fetch", "pull", "merge", "rebase", "reset",
+            "checkout", "switch", "restore", "stash", "clean", "gc", "prune",
+            "config", "remote", "tag", "branch", "worktree", "apply", "am", "mv",
+            "rm", "cherry-pick", "revert", "init", "clone", "update-ref", "notes",
+        }
+        for argv in seen:
+            assert not (WRITING & set(argv)), f"a writing git verb reached argv: {argv}"
+
 
 # =============================================================================
 # 🔴 NEVER A SILENT ZERO — "did not look" vs "looked and found nothing"
