@@ -894,8 +894,16 @@ TARGET_FLOORS=(
   #   scripts/tests  (collected=5722)
   #   _suggested_floor 5722 = 5722 - min(50, max(1, 286)) = 5672
   #
-  # ⚠ ZERO new skips from either side.
-  "scripts/tests|5672"
+  # 2026-08-19, the waiting-windows kind-band ordering + --kind filter folded
+  # into this same branch (see the PR body: it is a fix to a script this branch
+  # does not own, landed here to avoid a THIRD conflict on this very line):
+  # 5722 -> 5741 collected, +19 for the ordering/filter section of
+  # scripts/tests/test_waiting_windows.py.
+  #
+  #   _suggested_floor 5741 = 5741 - min(50, max(1, 287)) = 5741 - 50 = 5691
+  #
+  # ⚠ ZERO new skips from any of the three contributions.
+  "scripts/tests|5691"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
