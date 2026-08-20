@@ -38,12 +38,14 @@ WHAT THIS FILE IS FOR
 Fixtures are synthetic. This repo is public: no real paths, hostnames or task titles.
 """
 import ast
+import atexit
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -54,10 +56,35 @@ HOME_NIX = ROOT / "nix" / "home.nix"
 BASH = shutil.which("bash") or "/bin/bash"
 
 # The interpreter the registrant writes into every managed hook command. Pinned
-# to a synthetic literal via $DEVRC_HOOK_PYTHON so the expectations below do not
+# to a synthetic path via $DEVRC_HOOK_PYTHON so the expectations below do not
 # depend on whichever interpreter happens to run pytest; the UNPINNED resolution
 # is covered behaviourally by its own test at the bottom of section 1.
-HOOK_PY = "/nix/store/0000000000000000000000000000000-python3-3.12.14/bin/python3.12"
+#
+# 🔴 It must be a REAL, executable file. $DEVRC_HOOK_PYTHON is a test seam with
+# PRODUCTION REACH — activation inherits the operator's environment — so the
+# registrant validates it (absolute / exists / executable / one `python*` token)
+# and falls back to its own sys.executable with a warning when it is not. The
+# file is created under a private temp dir, never at a path that exists on this
+# host, so nothing here can pass by accident of the environment.
+_FAKE_STORE = tempfile.mkdtemp(prefix="devrc-fake-store-")
+atexit.register(shutil.rmtree, _FAKE_STORE, True)
+
+
+def fake_python(store_name):
+    """A stand-in for a /nix/store python: real file, executable, `python*` name.
+
+    The registrant only stat()s it (`isfile` + `access(X_OK)`); nothing execs it,
+    so it deliberately carries NO shebang — a runtime-written executable stub is
+    what `scripts/tests/test_runtime_shebangs.py` gates repo-wide.
+    """
+    p = Path(_FAKE_STORE) / store_name / "bin" / "python3.12"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("stand-in for an interpreter binary: stat()ed, never executed\n")
+    p.chmod(0o755)
+    return str(p)
+
+
+HOOK_PY = fake_python("0000000000000000000000000000000-python3-3.12.14")
 
 NEXT_STEP = HOOK_PY + " ~/.claude/hooks/next-step-nudge.py"
 NOTIFY = HOOK_PY + " ~/.claude/hooks/claude-notify.py"

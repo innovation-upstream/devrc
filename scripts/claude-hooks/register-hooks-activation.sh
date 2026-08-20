@@ -20,20 +20,31 @@
 #      "failed switch" incident class (CLAUDE.md → Git discipline). Every
 #      failure path therefore warns on stderr and returns 0.
 #   2. IT SAYS WHAT IT DID. The registrar's own report ("registered hooks: …"
-#      / "… no change") is echoed line by line, prefixed. A silent activation
-#      step is how the original failure went unnoticed for a full deploy cycle.
+#      / "removed duplicate hook registrations: …" / "… no change") is echoed
+#      line by line, prefixed. A silent activation step is how the original
+#      failure went unnoticed for a full deploy cycle. 🔴 The capture is
+#      `2>&1`, which is load-bearing: the registrar sends its WARNINGs to
+#      stderr — a rejected $DEVRC_HOOK_PYTHON, a managed hook command in a
+#      shape it cannot pin, a duplicate registration it declined to remove —
+#      and this is the only thing that puts them in the switch log. Never
+#      split the streams here or those warnings become invisible again.
 #   3. IT DECIDES NOTHING ABOUT settings.json. Every read/merge/write belongs
-#      to the registrar. That registrar has TWO surfaces of different widths —
+#      to the registrar. That registrar has THREE surfaces of different widths:
 #      an APPEND surface (its own command tables, never touching a hook it does
-#      not own, so the clawgate Stop hook that drives remote approval survives)
-#      and, since 2026-08-20, a narrow REWRITE surface that normalises the
-#      INTERPRETER TOKEN of a devrc-managed hook command to an absolute
-#      /nix/store python. Read its module docstring before changing either; the
-#      claim this file used to make — "strictly APPEND-ONLY" — is no longer
-#      true and deleting the rewrite path would silently reopen the failure it
-#      closes (a hook firing mid-switch dies with `python3: command not found`,
-#      and bash-guard fails OPEN when it does). This wrapper adds no second
-#      writer — it must never grow one.
+#      not own, so the clawgate Stop hook that drives remote approval survives);
+#      a wide REWRITE surface that normalises the INTERPRETER TOKEN of a
+#      devrc-managed hook command to an absolute /nix/store python; and a
+#      narrow DE-DUP surface that deletes a second registration of a script it
+#      owns on the same event under the same matcher, keeping the first. Read
+#      its module docstring before changing any of them; the claim this file
+#      used to make — "strictly APPEND-ONLY" — is no longer true and deleting
+#      the rewrite path would silently reopen the failure it closes (a hook
+#      firing mid-switch dies with `python3: command not found`, and bash-guard
+#      fails OPEN when it does). The de-dup path is what makes a
+#      `home-manager rollback` — which re-runs an OLDER registrar that cannot
+#      see the pinned spelling and appends a second copy of everything —
+#      recoverable rather than permanent. This wrapper adds no second writer —
+#      it must never grow one.
 #
 #      🔴 The interpreter the registrar writes is derived from its OWN
 #      sys.executable, so the `[python]` argument below is load-bearing beyond

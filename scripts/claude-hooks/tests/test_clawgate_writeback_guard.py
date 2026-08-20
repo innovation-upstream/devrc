@@ -1676,6 +1676,29 @@ def test_the_dismiss_command_from_the_block_text_RUNS_and_ENDS_the_nagging(home,
     assert again.stdout == ""
 
 
+def test_the_dismiss_command_names_an_absolute_interpreter(home, tmp_path):
+    """🔴 THE 127 WINDOW, on the one command that clears a block.
+
+    `home-manager switch` updates ~/.nix-profile as remove-then-install, so for ~1s
+    the live generation is a partial closure with NO python3 on it, and anything
+    resolved from PATH dies with `command not found`. #609 pinned every hook
+    REGISTRATION in ~/.claude/settings.json to an absolute /nix/store interpreter;
+    this string — advertised to the model as its escape — was the last bare
+    `python3` spelling of a managed hook left in the tree. The hook is already
+    running under the pinned interpreter, so writing `sys.executable` costs nothing.
+
+    Asserted on the STATE (absolute, and equal to the running interpreter), not on
+    the absence of the word python3 — the store path contains it.
+    """
+    cmd = guard.dismiss_cmd(193, SESSION)
+    interpreter = cmd.split(" ", 1)[0]
+    assert interpreter == sys.executable, cmd
+    assert os.path.isabs(interpreter), cmd
+    # Anti-vacuity: it is still the same command, with the same flags, that the
+    # extraction test above drives as a real subprocess.
+    assert "--dismiss 193 --session %s" % SESSION in cmd, cmd
+
+
 def test_the_positive_control_for_that_dismissal(home, tmp_path):
     """Without the dismiss step the same sequence blocks a SECOND time — so the
     silence above is the mechanism working, not a session that had gone quiet anyway
