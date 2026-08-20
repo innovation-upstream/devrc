@@ -169,6 +169,48 @@ def _decode_group_id(raw) -> bytes | None:
         return str(raw).encode()
 
 
+def _decode_internal_id(text: str) -> bytes:
+    """An OPERATOR-typed base64 group id → bytes, refusing anything ambiguous.
+
+    Deliberately stricter than `_decode_group_id`, which serves a different
+    requirement: on the ingest path a group id that will not decode must never
+    kill the frame, so it falls back to the raw bytes. Applied to operator input
+    that same fallback turns a typo into a mute of some other 32 bytes that
+    matches nothing — a filter that reports success and hides no rows.
+
+    So: decode through the ONE decoder, then require that re-encoding reproduces
+    the input exactly. The round-trip is what rejects the fallback path and any
+    non-canonical spelling, without this function owning a second base64 reader.
+    """
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("group id is empty")
+    s = text.strip().replace("-", "+").replace("_", "/")   # tolerate urlsafe
+    raw = _decode_group_id(s)
+    if not raw or base64.b64encode(raw).decode() != s:
+        raise ValueError(
+            f"{text!r} is not a canonical base64 group id. Copy `internal_id` "
+            "verbatim from GET /v1/groups/<account> — not `id` (which is the "
+            "`group.`-prefixed double encoding) and not the display name.")
+    # 🔴 LENGTH IS THE ONLY THING THAT REJECTS A SHORT WORD. The round-trip above
+    # is satisfied by any string that is valid base64, and plenty of display
+    # names are: `Team` decodes to 3 bytes and `deadbeef` to 6, both round-trip
+    # perfectly, and both were ACCEPTED — muting nothing while printing success.
+    # GroupV2 ids are 32 bytes and legacy GroupV1 ids 16; nothing else is a
+    # group id, so anything else is a typo caught here instead of at 3am.
+    if len(raw) not in (16, 32):
+        raise ValueError(
+            f"{text!r} decodes to {len(raw)} bytes; a Signal group id is 32 "
+            "(GroupV2) or 16 (legacy GroupV1). This is almost certainly a "
+            "display name or a truncated paste — muting it would hide nothing "
+            "and report success.")
+    return raw
+
+
+def _fmt_group_id(raw) -> str:
+    """A BYTEA group id back to the base64 an operator can paste."""
+    return base64.b64encode(bytes(raw)).decode()
+
+
 def _attachments(data: dict) -> list[dict]:
     out = []
     for a in data.get("attachments") or []:
@@ -199,7 +241,17 @@ def _base_message(env: dict, data: dict, *, timestamp: int) -> dict:
         "view_once": bool(data.get("viewOnce")),
         "edit_target_timestamp": None,
         "group_id": _decode_group_id(group.get("groupId")),
-        "group_name": group.get("name"),
+        # 🔴 `groupName`, not `name`. Measured on the live store 2026-08-19: 34
+        # of 34 stored group envelopes carry a NON-EMPTY `groupInfo.groupName`
+        # and NONE carries `groupInfo.name`, so this read `None` every time and
+        # `upsert_group` stored `''` for every group that has ever arrived. The
+        # consequence was invisible because nothing asserted on a group name —
+        # `conversations` just printed the DM peer or `?`, and it took wanting
+        # to filter a group BY NAME to notice that no name had ever been stored.
+        # Both spellings are read (the field was renamed upstream at some point
+        # and an older server may still send `name`); `groupName` wins because
+        # that is the one real envelopes carry.
+        "group_name": group.get("groupName") or group.get("name"),
         "quote_timestamp": quote.get("id"),
         "quote_author": quote.get("authorUuid") or quote.get("author"),
         "attachments": _attachments(data),
@@ -1095,6 +1147,25 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("query")
     s.add_argument("--limit", type=int, default=25)
 
+    sub.add_parser("muted", help="list muted groups and how many rows each hides")
+
+    mu = sub.add_parser(
+        "mute",
+        help="hide a group from every read (stores and deletes NOTHING)")
+    mu.add_argument("internal_id",
+                    help="the group's base64 `internal_id` from "
+                         "GET /v1/groups/<account> — NOT the display name, which "
+                         "this pipeline does not capture")
+    mu.add_argument("--note", help="why, recorded on the row")
+    mu.add_argument("--allow-unseen", action="store_true",
+                    help="accept a group id that matches nothing stored yet. "
+                         "Without this, muting an unknown id EXITS 4 — a typo "
+                         "and a deliberate mute-before-first-message look "
+                         "identical otherwise, and one of them hides nothing")
+
+    um = sub.add_parser("unmute", help="un-hide a muted group; restores it entirely")
+    um.add_argument("internal_id")
+
     d = sub.add_parser("draft", help="compose an outbound draft (transmits NOTHING)")
     d.add_argument("--to", required=True)
     d.add_argument("--body", required=True)
@@ -1205,6 +1276,56 @@ def main(argv=None) -> int:  # pragma: no cover - thin CLI shell over tested uni
                 print(f"{_fmt_ts(row['message_timestamp'])}  "
                       f"{row.get('display_name') or row.get('phone_number') or '?'}: "
                       f"{(row.get('body') or '')[:120]}")
+        elif args.cmd == "muted":
+            rows = db.list_excluded_groups()
+            if not rows:
+                print("no groups are muted")
+            for row in rows:
+                print(f"{_fmt_group_id(row['group_id'])}  "
+                      f"row={row['group_row_id'] if row['group_row_id'] is not None else '-'}  "
+                      f"hides={row['hidden_message_count'] or 0}  "
+                      f"{row.get('note') or ''}")
+        elif args.cmd in ("mute", "unmute"):
+            try:
+                gid = _decode_internal_id(args.internal_id)
+            except ValueError as exc:
+                print(f"refused: {exc}", file=sys.stderr)
+                return 3
+            if args.cmd == "mute":
+                db.exclude_group(gid, note=args.note)
+                db.commit()
+                # 🔴 REPORT WHAT WAS MATCHED, never a bare "muted". A mistyped
+                # base64 id still decodes to a perfectly valid 32 bytes, so no
+                # length or alphabet check can catch it — the only thing that
+                # discriminates a real id from a plausible one is whether it
+                # joins to a stored group, and how many rows it now hides.
+                hit = next((r for r in db.list_excluded_groups()
+                            if bytes(r["group_id"]) == gid), None)
+                if hit and hit["group_row_id"] is not None:
+                    print(f"muted group row {hit['group_row_id']} — now hiding "
+                          f"{hit['hidden_message_count'] or 0} stored message(s)")
+                elif args.allow_unseen:
+                    print("muted an as-yet-unseen group; it applies from the "
+                          "first message that arrives.")
+                else:
+                    # 🔴 NON-ZERO. The prose above used to say all this and exit
+                    # 0 — the same code as a mute that hid 18 messages — so no
+                    # script, hook or agent could tell a working mute from one
+                    # that matched nothing. The report has to carry in the exit
+                    # status, not only in the text a human might read.
+                    print("REFUSING to report success: no stored group has this "
+                          "id, so this mute hides NOTHING. Either the id is "
+                          "wrong (check `internal_id` from GET /v1/groups/"
+                          "<account>), or you meant to mute a group not yet "
+                          "seen — in which case pass --allow-unseen. The row "
+                          "HAS been written either way; `unmute` removes it.",
+                          file=sys.stderr)
+                    return 4
+            else:
+                removed = db.unexclude_group(gid)
+                db.commit()
+                print(f"unmuted ({removed} row(s) removed)" if removed
+                      else "that group was not muted — nothing changed")
         elif args.cmd == "draft":
             import clawgate
             draft = db.draft_message(

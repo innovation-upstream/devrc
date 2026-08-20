@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 import socket
 import subprocess
 import time
@@ -222,6 +223,31 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     )
     """,
 
+    """
+    -- 🔴 THE MUTE LIST. Rows named here are HIDDEN FROM READS, never dropped
+    -- from ingest and never deleted — see `not_excluded()` for the one predicate
+    -- that enforces it. Hiding rather than dropping is what makes the decision
+    -- REVERSIBLE: delete a row here and the whole conversation reappears, which
+    -- is impossible if the consumer had refused to store it (the pipeline is
+    -- forward-only, so nothing can re-fetch history it declined).
+    --
+    -- 🔴 KEYED ON THE SIGNAL BINARY GROUP ID, not on `signal.groups.id` and NOT
+    -- on the name. Two measured reasons, either one fatal on its own:
+    --   * `signal.groups.name` is EMPTY ('') for every group this consumer has
+    --     stored — it never captured names — so a name predicate matches nothing
+    --     and would read as a working filter that silently hides zero rows.
+    --   * the exclusion must be settable BEFORE the group has ever been seen;
+    --     a FK to `signal.groups(id)` cannot express "mute this from now on"
+    --     for a group with no row yet.
+    -- The binary id is the stable Signal identity and is what `signal.groups`
+    -- itself is UNIQUE on, so the join in `not_excluded()` is exact.
+    CREATE TABLE IF NOT EXISTS signal.excluded_groups (
+        group_id BYTEA PRIMARY KEY,
+        note TEXT,
+        created_at TIMESTAMPTZ DEFAULT now()
+    )
+    """,
+
     "CREATE INDEX IF NOT EXISTS idx_msg_ts ON signal.messages(message_timestamp DESC)",
     "CREATE INDEX IF NOT EXISTS idx_msg_dm ON signal.messages(source_contact_id, message_timestamp)",
     "CREATE INDEX IF NOT EXISTS idx_msg_group ON signal.messages(group_id, message_timestamp) WHERE group_id IS NOT NULL",
@@ -230,6 +256,46 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     # The partial index that makes the unresolved-reaction sweep cheap (🔧 #3).
     "CREATE INDEX IF NOT EXISTS idx_rx_unresolved ON signal.reactions(target_author_id, target_sent_timestamp) WHERE message_id IS NULL",
 )
+
+
+# --------------------------------------------------------------------------- #
+# The mute predicate — ONE PLACE
+# --------------------------------------------------------------------------- #
+# 🔴 EVERY read that can surface message CONTENT must apply this, and it exists
+# exactly once so it cannot diverge between call sites. This pipeline has already
+# paid for the alternative: the reaction dict was open-coded at two sites and
+# that is WHY the sync site shipped without the guards the inbound site had.
+# A filter open-coded at three read sites would be wrong at two of them, in the
+# same direction, and the failure is SILENT — a leaked conversation looks
+# exactly like a conversation you meant to keep.
+#
+# `test_group_exclusions.py` pins the ledger of read methods against this
+# predicate and fails when that set GROWS or SHRINKS, so a new read surface
+# added without the filter is a red test rather than a quiet leak.
+_SAFE_ALIAS = re.compile(r"^[a-z][a-z0-9_]{0,15}$")
+
+
+def not_excluded(alias: str = "m") -> str:
+    """SQL predicate: `alias` is a `signal.messages` row NOT in a muted group.
+
+    Written as `NOT EXISTS` and never as `alias.group_id IS NULL OR ...` — the
+    OR form needs parenthesising at every call site to survive being ANDed onto
+    an existing WHERE clause, and forgetting those brackets at ONE site silently
+    widens that query to every row in the database. `NOT EXISTS` composes with
+    `AND` unconditionally and is already correct for a DM (`group_id IS NULL`
+    matches no exclusion row, so the predicate is true).
+
+    `alias` is interpolated, so it is validated against a strict whitelist — it
+    is always a literal from this module, and the whitelist keeps it that way.
+    Every VALUE in these queries is still a bound parameter.
+    """
+    if not _SAFE_ALIAS.match(alias):
+        raise ValueError(f"unsafe SQL alias: {alias!r}")
+    return (
+        "NOT EXISTS (SELECT 1 FROM signal.excluded_groups x "
+        "JOIN signal.groups gx ON gx.group_id = x.group_id "
+        f"WHERE gx.id = {alias}.group_id)"
+    )
 
 
 class SendGateError(RuntimeError):
@@ -685,7 +751,18 @@ class SignalDB:
                 INSERT INTO signal.groups (group_id, name, revision)
                 VALUES (%s, %s, %s)
                 ON CONFLICT (group_id) DO UPDATE SET
-                    name = COALESCE(EXCLUDED.name, groups.name),
+                    -- 🔴 NULLIF, not a bare COALESCE. The bind below is
+                    -- `name or ""` because the column is NOT NULL, so
+                    -- `EXCLUDED.name` is NEVER NULL — it is `''` — and the
+                    -- COALESCE that was here could therefore never fire. It was
+                    -- dead code that READ as protection: a later envelope for a
+                    -- known group carrying no name (a sync echo, an edit, a
+                    -- plain DELIVER frame with only `groupId`) overwrote the
+                    -- stored name with `''`, so a name would appear and then
+                    -- silently revert. Measured: a mutant deleting the whole
+                    -- COALESCE survived all 508 tests, because nothing could
+                    -- tell the two apart.
+                    name = COALESCE(NULLIF(EXCLUDED.name, ''), groups.name),
                     revision = GREATEST(EXCLUDED.revision, groups.revision)
                 RETURNING id
                 """,
@@ -948,6 +1025,58 @@ class SignalDB:
             out["frame_age_seconds"] = None if lf is None else (now - int(lf)) / 1000.0
             return out
 
+    # -- the mute list -----------------------------------------------------
+    def exclude_group(self, group_id: bytes, *, note: str | None = None) -> None:
+        """Mute a group by its Signal binary id. Idempotent; stores nothing else.
+
+        Accepts a group that has never been seen — the row is the intent, and
+        `not_excluded()` joins it to `signal.groups` only when one exists.
+        """
+        if not isinstance(group_id, (bytes, bytearray, memoryview)):
+            raise TypeError("group_id must be the raw Signal group id as bytes")
+        if not bytes(group_id):
+            raise ValueError("group_id is empty — that would mute nothing, silently")
+        with self._c.cursor() as cur:
+            cur.execute(
+                "INSERT INTO signal.excluded_groups (group_id, note) VALUES (%s, %s) "
+                # COALESCE, not a bare assignment: `mute <id>` with no --note is
+                # the natural way to re-issue a mute, and a bare assignment made
+                # that WIPE the recorded reason — destroying the only record of
+                # why, as a side effect of a command that changes nothing else.
+                # Pass a new --note to replace it; omit it to keep what is there.
+                "ON CONFLICT (group_id) DO UPDATE SET "
+                "note = COALESCE(EXCLUDED.note, excluded_groups.note)",
+                (bytes(group_id), note),   # raw bytes, exactly like upsert_group
+            )
+
+    def unexclude_group(self, group_id: bytes) -> int:
+        """Un-mute. Returns rows removed (0 when it was not muted).
+
+        This is the whole rollback story: the messages were never deleted, so
+        removing the row restores the conversation exactly.
+        """
+        with self._c.cursor() as cur:
+            cur.execute("DELETE FROM signal.excluded_groups WHERE group_id = %s",
+                        (bytes(group_id),))
+            return cur.rowcount
+
+    def list_excluded_groups(self) -> list:
+        """Muted groups, joined to `signal.groups` when the group is known.
+
+        `group_row_id` is None for a group muted before it was ever seen — an
+        ordinary state, not a dangling reference.
+        """
+        with self._c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT x.group_id, x.note, gx.id AS group_row_id, gx.name AS group_name, "
+                "(SELECT count(*) FROM signal.messages m WHERE m.group_id = gx.id) "
+                "AS hidden_message_count "
+                "FROM signal.excluded_groups x "
+                "LEFT JOIN signal.groups gx ON gx.group_id = x.group_id "
+                "ORDER BY gx.id"
+            )
+            return [dict(r) for r in cur.fetchall()]
+
     # -- reads -------------------------------------------------------------
     def list_conversations(self, limit: int = 50) -> list:
         """One row per CONVERSATION — a group, else the PEER of a DM.
@@ -958,10 +1087,15 @@ class SignalDB:
         row. The conversation key is therefore the group when there is one, and
         otherwise the OTHER PARTY — the destination for an outbound message, the
         sender for an inbound one.
+
+        Muted groups are filtered INSIDE the inner aggregate, so their rows never
+        reach `count(*)`/`max(timestamp)` at all. Filtering the outer query would
+        give the same visible answer today and would quietly stop doing so the
+        first time the grouping key widens.
         """
         with self._c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
-                """
+                f"""
                 SELECT
                     conv.group_row_id,
                     g.name AS group_name,
@@ -980,6 +1114,7 @@ class SignalDB:
                         max(m.message_timestamp) AS last_message_timestamp,
                         count(*) AS message_count
                     FROM signal.messages m
+                    WHERE {not_excluded('m')}
                     GROUP BY 1, 2
                 ) conv
                 LEFT JOIN signal.groups g ON g.id = conv.group_row_id
@@ -995,15 +1130,17 @@ class SignalDB:
         """Full-text search over message bodies (the STORED tsvector + GIN index).
 
         The query text is a BOUND PARAMETER — never interpolated into SQL.
+        Muted groups (`signal.excluded_groups`) never appear in results.
         """
         with self._c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
-                """
+                f"""
                 SELECT m.id, m.message_timestamp, m.body, m.is_outbound,
                        c.display_name, c.phone_number
                 FROM signal.messages m
                 LEFT JOIN signal.contacts c ON c.id = m.source_contact_id
                 WHERE m.search @@ websearch_to_tsquery('english', %s)
+                  AND {not_excluded('m')}
                 ORDER BY m.message_timestamp DESC
                 LIMIT %s
                 """,
@@ -1012,11 +1149,21 @@ class SignalDB:
             return [dict(r) for r in cur.fetchall()]
 
     def get_message(self, message_id: int) -> dict | None:
+        """One message by id, or None — including when it is MUTED.
+
+        🔴 A muted message is indistinguishable from a nonexistent one here, and
+        that is deliberate: "filter it out entirely" has to mean the id route
+        too, or `search` hiding a row while `get_message` serves it in full is a
+        filter with a hole in the shape of anyone who knows an id. The cost is
+        that a muted id reads as "no such message"; the mute list is the place
+        to look when that is surprising.
+        """
         with self._c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
-                "SELECT id, message_timestamp, source_contact_id, dest_contact_id, "
-                "message_type, body, is_outbound, send_state, approval_ref "
-                "FROM signal.messages WHERE id = %s",
+                "SELECT m.id, m.message_timestamp, m.source_contact_id, "
+                "m.dest_contact_id, m.message_type, m.body, m.is_outbound, "
+                "m.send_state, m.approval_ref "
+                f"FROM signal.messages m WHERE m.id = %s AND {not_excluded('m')}",
                 (message_id,),
             )
             row = cur.fetchone()
@@ -1127,6 +1274,19 @@ class SignalDB:
         return row
 
     def get_draft(self, draft_id: int) -> dict | None:
+        """One DRAFT by id — and `is_outbound` alone does not mean "draft".
+
+        🔴 `send_state IS NOT NULL` is what makes this a draft surface. Without
+        it the predicate was `m.is_outbound` alone, which also matches every
+        device-sync ECHO of a message sent from the phone — and those DO carry a
+        `group_id`, so this method returned a muted group's body in full while
+        `get_message` correctly returned None for the same row. Nothing exploited
+        it (every caller goes through `_draft_or_raise`, and the D3 gate rejects
+        `send_state=None` before printing), but the mute ledger EXEMPTS this
+        method on the stated grounds that drafts carry no group — and that reason
+        was false until this line existed. A guard whose justification the code
+        contradicts is one refactor away from being a real leak.
+        """
         with self._c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
@@ -1137,7 +1297,7 @@ class SignalDB:
                        END AS recipient
                 FROM signal.messages m
                 LEFT JOIN signal.contacts d ON d.id = m.dest_contact_id
-                WHERE m.id = %s AND m.is_outbound
+                WHERE m.id = %s AND m.is_outbound AND m.send_state IS NOT NULL
                 """,
                 (draft_id,),
             )
