@@ -62,10 +62,24 @@ def _pytest(*args, cwd=None):
 # ---------------------------------------------------------------------------
 
 def test_the_hook_tests_directory_collects_without_an_internal_error():
-    """RED at a29b97b (INTERNALERROR + 'no tests ran'), GREEN at HEAD.
+    """RED at a29b97b, GREEN at HEAD — but only ONE of its three assertions is
+    regression coverage, and the split is measured, not assumed.
 
     Asserted on --collect-only so this stays cheap: the bug was in COLLECTION,
-    and running the ~1900 real tests here would just be the gate again.
+    and running the ~1900 real tests here would just be the gate again. That
+    choice has a consequence worth naming rather than glossing:
+
+        MEASURED at a29b97b under --collect-only:
+            "INTERNALERROR>"  105 occurrences
+            "no tests ran"      0 occurrences
+
+    So the INTERNALERROR assertion is what fails on pre-change code -- it is the
+    REGRESSION. The "no tests ran" assertion is an INVARIANT GUARD riding along
+    inside this test: the phrase belongs to a full run (which is how the defect
+    was originally reported), and --collect-only never prints it, so that
+    assertion has never been red and pins the reassuring-zero wording rather
+    than proving anything about the bug. The collected-count check below is a
+    positive control. Three assertions, three different jobs.
     """
     proc = _pytest(str(HOOK_TESTS_DIR), "-q", "--collect-only")
     out = proc.stdout + proc.stderr
@@ -130,6 +144,51 @@ def test_a_module_that_exits_at_import_is_a_named_error_not_no_tests_ran(tmp_pat
         "the failure is not the named, actionable one conftest.py raises:\n\n"
         + out[-4000:]
     )
+
+
+@pytest.mark.parametrize("exit_code, want_outcome", [(0, "passed"), (1, "failed")])
+def test_a_script_suites_exit_code_decides_its_verdict(tmp_path, exit_code, want_outcome):
+    """The verdict mapping, pinned in BOTH directions.
+
+    Without this nothing ever RAN a script suite through conftest.py -- the
+    directory test uses --collect-only, which builds the item but never executes
+    it. A mutant that made `runtest` ignore the subprocess's return code (so
+    every script suite passes, forever, including a genuinely broken one) would
+    therefore have SURVIVED the whole battery. Measured, and it did: that is why
+    this test exists.
+
+    Parametrized rather than asserted one-way on purpose. A test that only pins
+    "exit 1 fails" is satisfied by a runtest that fails EVERYTHING; a test that
+    only pins "exit 0 passes" is satisfied by one that passes everything. The
+    pair is what makes the mapping, not either half.
+
+    Runs in a tmp sandbox, which also exercises `_find_repo_root`'s copy path:
+    the positional `parents[2]` this replaced produced a garbage root here.
+    """
+    sandbox = tmp_path / "tests"
+    sandbox.mkdir()
+    shutil.copy(CONFTEST, sandbox / "conftest.py")
+    # Script-shaped: no top-level `def test_*`, so the classifier must route it
+    # to the subprocess path rather than importing it.
+    (sandbox / "test_script_suite.py").write_text(
+        "import sys\n"
+        "print('the suite ran and is reporting its own verdict')\n"
+        f"sys.exit({exit_code})\n"
+    )
+
+    proc = _pytest(str(sandbox), "-q", cwd=tmp_path)
+    out = proc.stdout + proc.stderr
+
+    assert f"1 {want_outcome}" in out, (
+        f"a script suite exiting {exit_code} should be reported {want_outcome!r}, "
+        f"and was not.\n\n{out[-4000:]}"
+    )
+    if want_outcome == "failed":
+        # The script's own output must reach the report, or a failing suite is
+        # undiagnosable from the gate log.
+        assert "the suite ran and is reporting its own verdict" in out, (
+            "the failing script suite's stdout was swallowed:\n\n" + out[-4000:]
+        )
 
 
 # ---------------------------------------------------------------------------

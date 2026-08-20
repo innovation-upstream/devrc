@@ -68,15 +68,50 @@ from pathlib import Path
 import pytest
 
 _THIS_DIR = Path(__file__).resolve().parent
-# scripts/claude-hooks/tests -> scripts/claude-hooks -> scripts -> <repo root>.
+
+
+def _find_repo_root(start: Path) -> Path:
+    """Repo root by LANDMARK, with a positional fallback.
+
+    🔴 This used to be a bare `_THIS_DIR.parents[2]` -- correct in the real tree
+    (tests -> claude-hooks -> scripts -> root) and GARBAGE in a copy. That is not
+    hypothetical: this file is deliberately `shutil.copy`d into a tmp dir by
+    scripts/tests/test_hook_tests_dir_collects.py, and `repr_failure` below
+    calls `relative_to(_REPO_ROOT)`. A wrong root makes that raise ValueError
+    *inside the failure-reporting path*, which would mask the real failure with
+    an unrelated traceback -- the worst place to put a landmine.
+
+    Walking up for `scripts/run-tests.sh` finds the true root wherever this file
+    is copied to, and the positional value is kept only as a last resort so this
+    can never raise on its own.
+    """
+    for candidate in (start, *start.parents):
+        if (candidate / "scripts" / "run-tests.sh").is_file():
+            return candidate
+    return start.parents[2] if len(start.parents) > 2 else start
+
+
 # The script suites are invoked with cwd=<repo root> because that is what
 # run-tests.sh does (it cd's to the git toplevel first), and at least one of
 # them resolves repo-relative paths.
-_REPO_ROOT = _THIS_DIR.parents[2]
+_REPO_ROOT = _find_repo_root(_THIS_DIR)
 
 # A script suite that hangs must fail loudly rather than wedge the session.
 # Generous: the slowest of these forks a dozen subprocesses of its own.
 _SCRIPT_TIMEOUT_SECONDS = 900
+
+
+def _display_path(path: Path) -> str:
+    """Repo-relative if we can, absolute if we cannot -- but NEVER raise.
+
+    Belt to `_find_repo_root`'s braces. This runs only while REPORTING a
+    failure, so an exception here replaces a real diagnosis with an unrelated
+    one; there is no error worth raising from a path-prettifier.
+    """
+    try:
+        return str(path.relative_to(_REPO_ROOT))
+    except ValueError:
+        return str(path)
 
 
 def has_toplevel_test_functions(path: Path) -> bool:
@@ -131,7 +166,7 @@ class ScriptSuiteItem(pytest.Item):
         )
         if proc.returncode != 0:
             raise ScriptSuiteFailure(
-                f"{self.path.relative_to(_REPO_ROOT)} exited {proc.returncode} "
+                f"{_display_path(self.path)} exited {proc.returncode} "
                 f"(this is a hand-rolled script suite; it prints its own PASS/FAIL "
                 f"lines).\n\n--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
             )
