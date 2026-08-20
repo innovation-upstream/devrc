@@ -688,13 +688,209 @@ def test_the_outcome_token_ledger_matches_what_the_SOURCE_actually_emits():
                         and isinstance(t.slice, ast.Constant)
                         and t.slice.value == "outcome"):
                     emitted.add(node.value.value)
-    emitted = {t for t in emitted if isinstance(t, str) and ":" in t}
+    raw = {t for t in emitted if isinstance(t, str)}
+    emitted = {t for t in raw if ":" in t}
+    # 🔴 THE FILTER MUST REMOVE NOTHING. It exists only to drop a hypothetical
+    # bare token, and a bare token is precisely what this ledger cannot see —
+    # so if the filter ever starts doing work, the ledger has a blind spot.
+    # `_refuse` now REQUIRES its token (see the test below); this is the
+    # measurement that says the requirement is holding.
+    assert raw == emitted, (
+        f"colon-less outcome token(s) the ledger cannot see: "
+        f"{sorted(raw - emitted)}")
     # POSITIVE CONTROL: the scan must actually have found something.
     assert len(emitted) > 20, f"the AST scan found only {sorted(emitted)}"
     assert emitted == set(sw.OUTCOME_TOKENS), (
         f"\n  emitted but unledgered: {sorted(emitted - set(sw.OUTCOME_TOKENS))}"
         f"\n  ledgered but unemitted: "
         f"{sorted(set(sw.OUTCOME_TOKENS) - emitted)}")
+
+
+def test_every_refusal_NAMES_its_gate():
+    """🔴 THE LEDGER'S OWN BLIND SPOT, CLOSED.
+
+    `_refuse` used to take `outcome` as an ordinary keyword defaulting to the
+    bare token `"refused"` — and the ledger test above filters the scanned
+    tokens on `":" in t`, so that fallback was the ONE token the ledger was
+    structurally unable to see. Every call site passed a token anyway; nothing
+    pinned that they must, so a new gate that forgot one would have emitted an
+    unbranchable name past a fully green suite and an intact ledger.
+
+    Two assertions, because either alone is walkable:
+
+      * `outcome` is a REQUIRED, KEYWORD-ONLY parameter, so a missing one is a
+        TypeError rather than a silent downgrade — but a TypeError only fires
+        on a path some test actually walks;
+      * every `_refuse(...)` call in the SOURCE really passes it, which covers
+        the paths no test walks. That is the structural half.
+    """
+    import inspect
+    param = inspect.signature(sw._refuse).parameters["outcome"]
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY, param.kind
+    assert param.default is inspect.Parameter.empty, (
+        "a default here is exactly the fallback the OUTCOME_TOKENS ledger "
+        "cannot see")
+
+    tree = ast.parse(open(_SW_PATH, encoding="utf-8").read())
+    calls = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+             and n.func.id == "_refuse"]
+    # POSITIVE CONTROL on the scan: a scanner wired to nothing finds no
+    # offenders and passes vacuously.
+    assert len(calls) > 20, f"the scan found only {len(calls)} _refuse calls"
+    without = sorted(c.lineno for c in calls
+                     if not any(kw.arg == "outcome" for kw in c.keywords))
+    assert without == [], (
+        f"_refuse called with no outcome token at line(s) {without}")
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE PAYLOAD-SITE LEDGER — every place a `send-keys` argv is built
+#
+# Nothing asserted that a payload site is preceded by validation. There are
+# exactly two literal-payload sites today and both validate, but a THIRD — a
+# fifth verb, a retry path, a "resend" convenience — would have passed the
+# entire suite unvalidated, which is the wrapper's whole reason to exist
+# rebuilt one function later.
+#
+# The ledger fails when the set GROWS or SHRINKS. It is a sorted TUPLE and not
+# a set, deliberately: a DUPLICATED site is a growth too, and a set would
+# collapse it into the row that was already there.
+# --------------------------------------------------------------------------- #
+SEND_KEYS_SITES = (
+    ("verb_send", "keys", "'Enter'"),
+    ("verb_send", "literal", "args.text"),
+    ("verb_type", "literal", "args.text"),
+)
+
+
+def _send_keys_sites(source=None):
+    """AST-scan for every `["tmux", "send-keys", ...]` argv list.
+
+    -> a sorted tuple of (enclosing function, kind, source of the LAST argv
+    element). `kind` is "literal" when the argv carries `-l` (a caller-shaped
+    payload) and "keys" otherwise (tmux KEY NAMES, e.g. a bare Enter).
+    """
+    src = source if source is not None else open(_SW_PATH,
+                                                 encoding="utf-8").read()
+    tree = ast.parse(src)
+    funcs = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]
+    rows = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.List) or len(node.elts) < 2:
+            continue
+        head = [e.value if isinstance(e, ast.Constant) else None
+                for e in node.elts[:2]]
+        if head != ["tmux", "send-keys"]:
+            continue
+        consts = [e.value for e in node.elts if isinstance(e, ast.Constant)]
+        owners = [f for f in funcs
+                  if f.lineno <= node.lineno <= (f.end_lineno or f.lineno)]
+        owner = min(owners, key=lambda f: (f.end_lineno or f.lineno) - f.lineno,
+                    default=None)
+        rows.append((owner.name if owner is not None else "(module level)",
+                     "literal" if "-l" in consts else "keys",
+                     ast.unparse(node.elts[-1])))
+    return tuple(sorted(rows))
+
+
+def test_the_send_keys_scanner_can_actually_see_a_site():
+    """🔴 BOTH CONTROLS ON THE SCANNER, before its verdict is read anywhere.
+
+    POSITIVE: fed a synthetic source that HAS a site, it must find exactly that
+    row — otherwise a scanner wired to nothing returns `()` and the ledger test
+    below passes vacuously against an empty set, which is the reassuring zero
+    this repo's rules single out.
+
+    NEGATIVE: fed a source with no `send-keys` at all, it must find nothing —
+    a scanner that matches everything would also make the ledger meaningless.
+    """
+    positive = (
+        "def some_new_verb(ws, args, pane):\n"
+        "    _issue(ws, ['tmux', 'send-keys', '-t', pane, '-l', '--',\n"
+        "                args.text], args.dry_run)\n"
+        "    _issue(ws, ['tmux', 'send-keys', '-t', pane, 'Enter'],\n"
+        "           args.dry_run)\n")
+    assert _send_keys_sites(positive) == (
+        ("some_new_verb", "keys", "'Enter'"),
+        ("some_new_verb", "literal", "args.text"))
+
+    negative = ("def f(ws, args):\n"
+                "    return ['tmux', 'list-panes', '-a']\n")
+    assert _send_keys_sites(negative) == ()
+
+
+def test_every_send_keys_payload_site_is_LEDGERED():
+    """🔴 THE STRUCTURAL LEDGER, failing in BOTH directions.
+
+    A new payload site cannot arrive unreviewed, and a site cannot quietly
+    disappear (which would mean a verb stopped writing and every behavioural
+    test still passed because it asserts a refusal).
+    """
+    sites = _send_keys_sites()
+    assert sites == SEND_KEYS_SITES, (
+        f"\n  new/changed site(s): "
+        f"{sorted(set(sites) - set(SEND_KEYS_SITES))}"
+        f"\n  ledgered but gone:   "
+        f"{sorted(set(SEND_KEYS_SITES) - set(sites))}"
+        f"\n  full scan:           {sites}")
+
+
+def test_every_LITERAL_payload_site_is_preceded_by_validate_text():
+    """🔴 THE RELATIONSHIP, not the components. RULES.md: a seam guard must pin
+    a RELATIONSHIP, and every component here is individually tested already.
+
+    For each ledgered site that carries `-l` (a caller-shaped payload), the
+    enclosing function must call `validate_text` at a line STRICTLY BEFORE the
+    argv is built. A site that validated afterwards would still refuse — and
+    would already have typed the payload.
+    """
+    tree = ast.parse(open(_SW_PATH, encoding="utf-8").read())
+    funcs = {n.name: n for n in ast.walk(tree)
+             if isinstance(n, ast.FunctionDef)}
+    literal_owners = sorted({f for f, kind, _ in SEND_KEYS_SITES
+                             if kind == "literal"})
+    assert literal_owners, "the ledger names no literal-payload site at all"
+
+    for name in literal_owners:
+        fn = funcs[name]
+        validations = [n.lineno for n in ast.walk(fn)
+                       if isinstance(n, ast.Call)
+                       and isinstance(n.func, ast.Name)
+                       and n.func.id == "validate_text"]
+        assert validations, (
+            f"{name} builds a literal `send-keys` payload and never calls "
+            f"validate_text — that is the Bash-classifier bypass rebuilt")
+        sites = [n.lineno for n in ast.walk(fn)
+                 if isinstance(n, ast.List) and len(n.elts) >= 2
+                 and [e.value if isinstance(e, ast.Constant) else None
+                      for e in n.elts[:2]] == ["tmux", "send-keys"]
+                 and "-l" in [e.value for e in n.elts
+                              if isinstance(e, ast.Constant)]]
+        assert sites, f"the ledger claims {name} has a literal site; it has none"
+        assert min(validations) < min(sites), (
+            f"{name} validates at line {min(validations)} but builds its "
+            f"payload at line {min(sites)} — validation must come FIRST")
+
+
+@pytest.mark.parametrize("verb", sorted({f.replace("verb_", "")
+                                         for f, kind, _ in SEND_KEYS_SITES
+                                         if kind == "literal"}))
+def test_every_ledgered_payload_verb_REFUSES_an_unvalidatable_payload(verb):
+    """🔴 THE BEHAVIOURAL HALF. A structural check type-checks past a wrong
+    argument: `validate_text(something_else)` satisfies every assertion above
+    while validating nothing the verb is about to send.
+
+    So each ledgered literal-payload verb is driven with the audited execution
+    character and must refuse with nothing reaching tmux. Derived from the
+    ledger rather than hardcoded, so a fifth verb added to the ledger is
+    exercised here automatically.
+    """
+    assert verb in sw.ALL_VERBS, verb
+    outcome, ws = run_verb(verb, ADDR_TARGET, "--text",
+                           "audit" + EXECUTING_CHAR)
+    assert outcome.code == sw.EXIT_BAD_TEXT, outcome.lines
+    assert ws.stub.writes == [], "nothing may reach tmux"
 
 
 def test_every_verb_is_classified_pane_or_client():
@@ -1444,8 +1640,6 @@ assert EXECUTING_CHAR not in sw.SUBMITTING_CHARS, (
     ("\x7f", "DEL"),
     ("\x1a", "Ctrl-Z — suspends the foreground job"),
     ("", "U+E000 private use — renders INVISIBLE in a diff or a grep"),
-    ("​", "U+200B zero-width space — invisible, category Cf"),
-    ("\xa0", "U+00A0 no-break space — category Zs, not ASCII space"),
 ])
 def test_a_character_outside_the_allowlist_is_refused_by_codepoint(ch, why):
     """🔴 THE AUDITED BYPASS, and the class it belongs to.
@@ -1467,6 +1661,184 @@ def test_a_character_outside_the_allowlist_is_refused_by_codepoint(ch, why):
     assert_message_is(outcome, sw.MSG_TEXT_NOT_PRINTABLE,
                       codepoint=f"{ord(text[idx]):04X}",
                       category=unicodedata.category(text[idx]), offset=idx)
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 OFFSET 0 — the one position every other fixture in this file avoids
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("ch,template,slots,why", [
+    (EXECUTING_CHAR, "MSG_TEXT_NOT_PRINTABLE",
+     {"codepoint": "000F", "category": "Cc", "offset": 0},
+     "the audited execution event, at the position the scan could not see"),
+    ("\x1b", "MSG_TEXT_NOT_PRINTABLE",
+     {"codepoint": "001B", "category": "Cc", "offset": 0},
+     "ESC — the other control character with an accept-line binding"),
+    ("\x00", "MSG_TEXT_NUL", {"offset": 0},
+     "the NUL diagnosis is reachable from offset 0 too"),
+    ("\n", "MSG_TEXT_SUBMITS", {"name": "a newline", "offset": 0},
+     "a LEADING newline submits the pane's existing buffer"),
+    ("\xa0", "MSG_TEXT_INVISIBLE",
+     {"name": "NO-BREAK SPACE", "codepoint": "00A0", "category": "Zs",
+      "offset": 0},
+     "the invisible diagnosis, likewise"),
+])
+def test_a_disallowed_character_at_offset_ZERO_is_refused(ch, template, slots,
+                                                          why):
+    """🔴 THE HOLE THE REST OF THIS SECTION LEAVES OPEN — AND IT IS THE
+    EXPLOIT'S OWN POSITION.
+
+    Every other disallowed-character fixture here puts the character after a
+    printable prefix, and two of them deliberately ASSERT `offset != 0` in order
+    to kill a mutant that hardcodes the reported offset. The price of that
+    choice was that the FIRST codepoint of `--text` was never scanned by any
+    test: MEASURED on this branch against the shipped file,
+
+        for idx, ch in enumerate(text):  ->  enumerate(text[1:], 1)
+
+    SURVIVED all 161 tests AND the committed 52-mutant sweep, leaving `type`
+    able to deliver a LEADING Ctrl-O — the exact deploy blocker #582 was
+    reopened for, one character earlier in the string.
+
+    🔴 BOTH ASSERTIONS ARE KEPT. This one covers offset 0; the `offset != 0`
+    ones still kill the hardcoded-0 mutant. They are different mutants and they
+    need different fixtures — weakening either to serve the other trades one
+    blind spot for the other.
+
+    All four diagnosis branches are exercised here, because "the scan starts at
+    1" is invisible in whichever branch happens to be untested.
+    """
+    if slots.get("sep") is None and template == "MSG_TEXT_INVISIBLE":
+        slots = dict(slots, sep=sw.TMUX_ARGV_SEPARATOR)
+    outcome, ws = run_verb("type", ADDR_TARGET, "--text", ch + "audit")
+    assert outcome.code == sw.EXIT_BAD_TEXT, why
+    assert ws.stub.writes == [], "nothing may reach tmux"
+    assert_message_is(outcome, getattr(sw, template), **slots)
+
+
+def test_the_offset_zero_and_nonzero_fixtures_are_BOTH_load_bearing():
+    """🔴 The two fixtures kill DIFFERENT mutants, and this says which.
+
+    A future reader looking at `assert idx != 0` above and at the offset-0 test
+    here will reasonably ask why both exist. Because:
+
+      * a mutant that hardcodes `offset=0` passes any fixture whose character
+        IS at 0, and is caught only by a non-zero fixture;
+      * a mutant that starts the scan at 1 passes any fixture whose character
+        is NOT at 0, and is caught only by a zero fixture.
+
+    Asserted here rather than left as a comment, because a comment is a claim
+    too and this one is the reason a later cleanup must not merge the two.
+    """
+    text_at_zero = EXECUTING_CHAR + "audit"
+    text_at_nonzero = "audit" + EXECUTING_CHAR
+    assert not sw.TEXT_IS_ALLOWED(EXECUTING_CHAR)
+
+    # Fixture 1 lands at 0; fixture 2 does not. Both are refused today.
+    assert min(i for i, c in enumerate(text_at_zero)
+               if not sw.TEXT_IS_ALLOWED(c)) == 0
+    assert min(i for i, c in enumerate(text_at_nonzero)
+               if not sw.TEXT_IS_ALLOWED(c)) != 0
+    assert sw.validate_text(text_at_zero) is not None
+    assert sw.validate_text(text_at_nonzero) is not None
+
+    # And the offsets they REPORT differ, which is what makes a hardcoded
+    # constant visible to exactly one of them.
+    assert (sw.validate_text(text_at_zero).record["message"] !=
+            sw.validate_text(text_at_nonzero).record["message"])
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE INVISIBLE / LOOK-ALIKE CLASS — refused, and now with a REMEDY
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("ch,name,category,why", [
+    ("\xa0", "NO-BREAK SPACE", "Zs",
+     "what a web page or a model's answer leaves in text the operator pastes"),
+    ("\u202f", "NARROW NO-BREAK SPACE", "Zs", "the French-typography one"),
+    ("\u2003", "EM SPACE", "Zs", "a rendered-width space from a copied doc"),
+    ("\u00ad", "SOFT HYPHEN", "Cf", "invisible until the line wraps"),
+    ("\u200b", "ZERO WIDTH SPACE", "Cf", "invisible always"),
+    ("\u200f", "RIGHT-TO-LEFT MARK", "Cf", "a bidi control"),
+    ("\u200d", "ZERO WIDTH JOINER", "Cf",
+     "the character every ZWJ emoji sequence is built from"),
+    ("\ufeff", "ZERO WIDTH NO-BREAK SPACE", "Cf", "the BOM"),
+    ("\u2028", "LINE SEPARATOR", "Zl", "a Unicode line break"),
+    ("\u2029", "PARAGRAPH SEPARATOR", "Zp", "a Unicode paragraph break"),
+])
+def test_an_invisible_or_lookalike_character_is_refused_WITH_A_REMEDY(
+        ch, name, category, why):
+    """🔴 THE DECISION, PINNED — and it is a decision, not an oversight.
+
+    Measured against the shipped predicate: every character above is REFUSED,
+    and the refusal used to be headlined "the non-printable character", which
+    for a SPACE reads as nonsense and — unlike NUL, the submitting characters
+    and the trailing separator — offered no next step.
+
+    The allowlist is NOT widened. Measured in a real bash pane on a private
+    `-L` server, `touch<U+00A0>/tmp/f` delivered by `send-keys -l` produced
+
+        bash: touch\\xa0/tmp/f: No such file or directory
+
+    — the payload collapsed into ONE word and failed later, wearing a
+    diagnosis about a PATH. That is the same silent-corruption class as the
+    trailing `;` this file already refuses, so refusing is right; normalising
+    it to U+0020 behind the caller's back is the payload mutation this file
+    refuses to do anywhere else. What was missing was the REMEDY, and the
+    whole-string assertion below is what pins it.
+    """
+    assert unicodedata.category(ch) == category, ch
+    assert unicodedata.name(ch) == name, ch
+    text = "audit" + ch + "queue"
+    outcome, ws = run_verb("type", ADDR_TARGET, "--text", text)
+    assert outcome.code == sw.EXIT_BAD_TEXT, why
+    assert ws.stub.writes == [], "nothing may reach tmux"
+    assert_message_is(outcome, sw.MSG_TEXT_INVISIBLE, name=name,
+                      codepoint=f"{ord(ch):04X}", category=category,
+                      offset=len("audit"), sep=sw.TMUX_ARGV_SEPARATOR)
+
+
+def test_the_invisible_diagnosis_is_a_DIAGNOSIS_not_a_gate():
+    """🔴 The same structural claim the three older messages carry, extended to
+    the new one: deleting this branch must weaken the WORDS and not the guard.
+
+    The boundary is measured at BOTH points, and it is the interesting one:
+    U+0020 and U+00A0 are BOTH category Zs, so a branch that decided anything
+    on the category would refuse the ordinary space and break every payload.
+    It decides nothing — `str.isprintable()` special-cases U+0020, so the
+    ordinary space never reaches the diagnosis at all.
+    """
+    assert unicodedata.category(" ") == "Zs"
+    assert "Zs" in sw.TEXT_INVISIBLE_CATEGORIES
+    assert sw.TEXT_IS_ALLOWED(" "), "the ASCII space must stay allowed"
+    assert sw.validate_text("a b") is None
+
+    for cat in sw.TEXT_INVISIBLE_CATEGORIES:
+        assert cat in ("Cf", "Zl", "Zp", "Zs"), cat
+    for ch in ("\xa0", "\u200b", "\u2028", "\u2029", "\u200d"):
+        assert not sw.TEXT_IS_ALLOWED(ch), (
+            f"{ch!r} must be refused by the ALLOWLIST, not by its message "
+            f"branch — otherwise deleting the branch reopens the hole")
+
+
+def test_a_ZWJ_emoji_sequence_is_refused_and_the_message_names_the_JOINER():
+    """A measured consequence of the decision above, stated here rather than
+    left to be discovered in production: the family and flag emoji — any
+    sequence built with a ZERO WIDTH JOINER — are REFUSED, because the joiner
+    between the glyphs is U+200D, category Cf.
+
+    The bare non-BMP emoji and a VS16 variation selector are still ACCEPTED. A
+    mutant that refused those too would be a different bug, so this pins both
+    directions rather than only the refusal.
+    """
+    family = "\U0001f468\u200d\U0001f469\u200d\U0001f467"
+    assert sw.validate_text(family) is not None
+    outcome, _ws = run_verb("type", ADDR_TARGET, "--text", family)
+    assert outcome.code == sw.EXIT_BAD_TEXT
+    assert_message_is(outcome, sw.MSG_TEXT_INVISIBLE,
+                      name="ZERO WIDTH JOINER", codepoint="200D",
+                      category="Cf", offset=1, sep=sw.TMUX_ARGV_SEPARATOR)
+    # BOTH directions: the unjoined emoji, and VS16, are still ACCEPTED.
+    for good in ("\U0001f389", "❤️", "\U0001f468 and \U0001f469"):
+        assert sw.validate_text(good) is None, good
 
 
 def test_the_refusal_names_the_COMPUTED_codepoint_not_the_one_in_its_own_prose():
@@ -1501,13 +1873,14 @@ def test_the_named_text_messages_are_DIAGNOSES_not_the_gate():
     """🔴 THE STRUCTURAL CLAIM, and the one that says this is not a denylist
     wearing an allowlist's name.
 
-    NUL, `\\n` and `\\r` still get their own sentences — a specific diagnosis
-    beats a generic one. But they are refused BY THE ALLOWLIST; the named
-    branches only choose better words. Proven by removing the branches from the
-    question entirely and asking the predicate directly: if any of the three
-    were allowed, deleting its message branch would silently reopen it.
+    NUL, `\\n`, `\\r` and the invisible/look-alike class still get their own
+    sentences — a specific diagnosis beats a generic one. But they are refused
+    BY THE ALLOWLIST; the named branches only choose better words. Proven by
+    removing the branches from the question entirely and asking the predicate
+    directly: if any of them were allowed, deleting its message branch would
+    silently reopen it.
     """
-    for ch in ("\x00",) + tuple(sw.SUBMITTING_CHARS):
+    for ch in ("\x00", "\xa0", "​") + tuple(sw.SUBMITTING_CHARS):
         assert not sw.TEXT_IS_ALLOWED(ch), (
             f"{ch!r} must be refused by the ALLOWLIST, not only by its message "
             f"branch — otherwise deleting the branch reopens the hole")
@@ -1883,6 +2256,46 @@ def test_a_symlink_planted_inside_the_root_cannot_point_out_of_it(tmp_path):
     assert refusal.code == sw.EXIT_BAD_LOG_PATH
 
 
+def test_the_ROOT_is_realpathed_too_not_only_the_candidate_path(tmp_path):
+    """🔴 THE OTHER HALF OF `realpath`, AND IT WAS ASSERTED IN PROSE ONLY.
+
+    `validate_log_path`'s docstring states this exact case — "comparing a
+    resolved path against an unresolved root fails whenever the root itself
+    contains a symlink (`~` behind one is ordinary)" — and the committed sweep
+    mutated only the PATH side (`realpath` -> `abspath`). MEASURED on this
+    branch: `real_root = os.path.realpath(root)` -> `real_root = root`
+    SURVIVED all 161 tests and the whole 52-mutant sweep.
+
+    🔴 THE FAILURE DIRECTION IS OVER-REFUSAL, NOT A HOLE. On a host whose
+    `$HOME` sits behind a symlink, every single invocation would refuse with
+    EXIT_BAD_LOG_PATH before resolving anything — an availability failure of
+    the entire tool, arriving as a confident security refusal. That is why it
+    is worth a guard even though it cannot leak a write.
+
+    The fixture is a symlinked ROOT with a real directory behind it, which is
+    the shape `~` behind a link produces. Both points are measured: the path
+    under the link must be ACCEPTED, and a path genuinely outside must still be
+    REFUSED — a mutant that accepted everything would pass the first alone.
+    """
+    real = tmp_path / "real-root"
+    real.mkdir()
+    link = tmp_path / "linked-root"
+    link.symlink_to(real, target_is_directory=True)
+    assert os.path.realpath(str(link)) == os.path.realpath(str(real)) != str(
+        link), "the fixture must really be a symlink, or it proves nothing"
+
+    # A path INSIDE the symlinked root: accepted, because both sides resolve.
+    inside = link / "sub" / "audit.log"
+    assert sw.validate_log_path(str(inside), str(link)) is None, (
+        "a log path under a SYMLINKED root must be accepted — refusing it "
+        "would take the whole tool down on a host with a symlinked $HOME")
+
+    # ...and the confinement still holds through the link.
+    outside = tmp_path / "not-the-root" / "audit.log"
+    refusal = sw.validate_log_path(str(outside), str(link))
+    assert refusal is not None and refusal.code == sw.EXIT_BAD_LOG_PATH
+
+
 def test_a_sibling_directory_sharing_the_roots_PREFIX_is_outside_it(tmp_path):
     """🔴 `commonpath`, never `startswith`: `~/.claudeX` starts with
     `~/.claude` and is a different directory."""
@@ -2242,6 +2655,14 @@ def test_json_output_is_the_same_record_that_is_logged(tmp_path, capsys):
 #: SURVIVE). The second is the one that distinguishes a working harness from
 #: one that reports everything as killed.
 #:
+#: 🔴 IT MUTATES A DISPOSABLE COPY OF `scripts/`, never the live allowlisted
+#: script — for the duration of a run the in-place version left
+#: `scripts/session-write` carrying deliberately disabled guards at exactly the
+#: path `Bash(scripts/session-write:*)` names. It re-asserts the live file's
+#: SHA-256 at the end, and
+#: `test_the_mutation_sweep_never_WRITES_the_LIVE_allowlisted_script` pins the
+#: property structurally.
+#:
 #: The real-pane check is its companion, and covers what no stub can:
 #:
 #:     python3 scripts/session-write-harness/real_pane_check.py
@@ -2264,6 +2685,47 @@ def test_the_committed_harnesses_exist_and_are_runnable():
         path = os.path.join(root, rel)
         assert os.path.exists(path), f"{rel} is referenced but missing"
         ast.parse(open(path, encoding="utf-8").read())
+
+
+def test_the_mutation_sweep_never_WRITES_the_LIVE_allowlisted_script():
+    """🔴 THE SWEEP MUTATES A COPY, AND THIS IS WHAT SAYS SO.
+
+    It patches the file it tests — deliberately disabling `TEXT_IS_ALLOWED`,
+    `validate_log_path` and the screen gate in turn, for one full suite run
+    each. The first version did that IN PLACE, in the checkout it was run
+    from, and its usage line told you to run it from the repo root: for
+    minutes at a time the exact path `Bash(scripts/session-write:*)` names
+    carried disabled guards, and a crash between apply and the `finally`
+    restore left it that way silently.
+
+    The fix is structural, so this pin is structural too: every `open(..., "w")`
+    in the sweep must name `_SRC` — the path inside the disposable copy — and
+    `_LIVE_SRC` must never be a write target. A comment saying so is a claim; an
+    AST scan is a measurement.
+    """
+    root = os.path.normpath(os.path.join(_HERE, "..", ".."))
+    tree = ast.parse(open(os.path.join(root, MUTATION_HARNESS),
+                          encoding="utf-8").read())
+    write_targets = []
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "open" and len(node.args) >= 2
+                and isinstance(node.args[1], ast.Constant)
+                and "w" in str(node.args[1].value)):
+            arg = node.args[0]
+            write_targets.append(
+                arg.id if isinstance(arg, ast.Name) else ast.unparse(arg))
+    # POSITIVE CONTROL: a scan that found no writes would pass vacuously, and
+    # the sweep certainly writes.
+    assert write_targets, "the scan found no write at all in the sweep"
+    assert set(write_targets) == {"_SRC"}, (
+        f"the sweep writes to {sorted(set(write_targets))}; only the copy "
+        f"(_SRC) may ever be written")
+
+    src = open(os.path.join(root, MUTATION_HARNESS), encoding="utf-8").read()
+    assert "_LIVE_SRC" in src, "the sweep must still know the live path exists"
+    assert "def _prepare_tree(" in src, (
+        "the copy step is what makes the assertion above meaningful")
 
 
 def test_the_mutation_table_names_only_tests_that_EXIST_in_this_file():

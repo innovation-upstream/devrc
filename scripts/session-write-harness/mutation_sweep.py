@@ -44,9 +44,39 @@ swaps, branch inversions, comment-outs (text still present, clause dead), stale
 rebinds, off-by-one and constant renumbering all survive a deletions-only sweep.
 Each mutant below carries its CLASS so the coverage of the classes is legible.
 
+
+🔴 IT MUTATES A COPY. IT MUST NEVER MUTATE THE LIVE `scripts/session-write`.
+------------------------------------------------------------------------------
+The first version of this file patched the source IN PLACE, in the checkout it
+was run from — and its own usage line told you to run it from the repo root.
+For the duration of a run (minutes: the full suite, once per mutant) the exact
+path the `Bash(scripts/session-write:*)` permission entry names carried
+DELIBERATELY DISABLED GUARDS: an always-permit `TEXT_IS_ALLOWED`, `validate_
+log_path` returning None, the screen gate forced off. Any concurrent agent or
+human invoking `scripts/session-write` during that window got the mutant. A
+crash, a `kill`, or a full disk between `apply_mutant` and the `finally`
+restore left it that way with nothing to say so.
+
+So the tree under test is now a COPY of `scripts/` in a tempdir, made before
+the first mutant and removed after the last; `_SRC` and `_TESTS` point into it
+and pytest runs with that tempdir as its cwd. The live file is read exactly
+once, to copy it and to record its SHA-256, and that hash is re-asserted at the
+end — the run FAILS if the live script moved at all, whoever moved it.
+
+🔴 The copy is of `scripts/` only, so no `.git` comes with it: a worktree's
+`.git` is a POINTER FILE, and a `cp -a` copy of one shares the ORIGINAL's git
+dir, index and refs. Nothing here copies a repo root, and `_prepare_tree`
+asserts the copy contains no `.git` rather than trusting that.
+
+There is deliberately NO in-place mode. A copy of the WORKING TREE (not a `git
+archive`) is what the sweep needs — uncommitted edits are exactly what one is
+usually run against — so an in-place flag would buy nothing and could only ever
+re-open the window above.
+
     usage:  python3 scripts/session-write-harness/mutation_sweep.py [-k SUBSTR]
     exit:   0 = every mutant killed and both controls behaved
-            1 = a survivor, an unearned kill, or a broken control
+            1 = a survivor, an unearned kill, a broken control, or the LIVE
+                script changed during the run
 """
 from __future__ import annotations
 
@@ -57,12 +87,21 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_ROOT = os.path.normpath(os.path.join(_HERE, "..", ".."))
-_SRC = os.path.join(_ROOT, "scripts", "session-write")
-_TESTS = os.path.join(_ROOT, "scripts", "tests", "test_session_write.py")
+_REPO = os.path.normpath(os.path.join(_HERE, "..", ".."))
+
+#: 🔴 THE LIVE, ALLOWLISTED SCRIPT. Read twice — once to copy it, once at the
+#: end to prove it is byte-identical — and NEVER written.
+_LIVE_SRC = os.path.join(_REPO, "scripts", "session-write")
+
+#: Set by `_prepare_tree()` to the paths INSIDE the disposable copy. They are
+#: the only paths this file ever opens for writing.
+_ROOT = None
+_SRC = None
+_TESTS = None
 
 #: A mutant failing more of the suite than this did not isolate anything.
 BLAST_LIMIT = 0.5
@@ -120,13 +159,51 @@ MUTANTS = [
       "    for idx, ch in enumerate(text[:1]):",
       "test_a_character_outside_the_allowlist_is_refused_by_codepoint"),
     M("G13", NUM, "the reported codepoint hardcoded",
-      'codepoint=f"{ord(ch):04X}"', 'codepoint="0000"',
+      'MSG_TEXT_NOT_PRINTABLE.format(codepoint=f"{ord(ch):04X}"',
+      'MSG_TEXT_NOT_PRINTABLE.format(codepoint="0000"',
       "test_the_refusal_names_the_COMPUTED_codepoint_not_the_one_in_its_own_prose"),
     M("G13", NUM, "the reported offset hardcoded to 0 — the fixture never puts "
                   "the character first, so this is visible",
       "                                          offset=idx),",
       "                                          offset=0),",
       "test_a_character_outside_the_allowlist_is_refused_by_codepoint"),
+    M("G13", OBO, "🔴 THE SCAN STARTS AT 1, so the FIRST codepoint of --text is "
+                  "never examined and a LEADING Ctrl-O is delivered. Measured a "
+                  "SURVIVOR of all 161 tests AND of this sweep's own 52 mutants "
+                  "before test_a_disallowed_character_at_offset_ZERO existed — "
+                  "every fixture put the character at a non-zero offset and two "
+                  "ASSERTED it",
+      "    for idx, ch in enumerate(text):",
+      "    for idx, ch in enumerate(text[1:], 1):",
+      "test_a_disallowed_character_at_offset_ZERO_is_refused"),
+    M("G13", DEL, "the invisible/look-alike DIAGNOSIS removed, so an NBSP is "
+                  "refused as 'the non-printable character' again, with no "
+                  "remedy. The refusal is unchanged — only the words move, "
+                  "which is exactly what a whole-string assertion is for",
+      "        if category in TEXT_INVISIBLE_CATEGORIES:",
+      "        if False and category in TEXT_INVISIBLE_CATEGORIES:",
+      "test_an_invisible_or_lookalike_character_is_refused_WITH_A_REMEDY"),
+    M("G13", WID, "the invisible-category set widened to swallow Cc, so a "
+                  "CONTROL character is diagnosed as a look-alike space and "
+                  "told to replace it with U+0020",
+      'TEXT_INVISIBLE_CATEGORIES = ("Cf", "Zl", "Zp", "Zs")',
+      'TEXT_INVISIBLE_CATEGORIES = ("Cc", "Cf", "Zl", "Zp", "Zs")',
+      "test_a_character_outside_the_allowlist_is_refused_by_codepoint"),
+    M("G13", DEL, "Cf dropped from the invisible set, so the ZERO WIDTH JOINER "
+                  "every emoji sequence carries loses its remedy and is "
+                  "reported as a non-printable control character again",
+      'TEXT_INVISIBLE_CATEGORIES = ("Cf", "Zl", "Zp", "Zs")',
+      'TEXT_INVISIBLE_CATEGORIES = ("Zl", "Zp", "Zs")',
+      "test_a_ZWJ_emoji_sequence_is_refused_and_the_message_names_the_JOINER"),
+    M("G13", WID, "🔴 THE ALLOWLIST SILENTLY WIDENED TO ADMIT EVERY UNICODE "
+                  "SPACE — the change this PR explicitly declined to make. An "
+                  "NBSP then reaches the pane and, MEASURED in a real bash "
+                  "pane, collapses the command into one word that fails "
+                  "wearing a diagnosis about a path",
+      "    return ch in TEXT_EXTRA_ALLOWED or ch.isprintable()",
+      "    return (ch in TEXT_EXTRA_ALLOWED or ch.isprintable()\n"
+      '            or unicodedata.category(ch) == "Zs")',
+      "test_the_invisible_diagnosis_is_a_DIAGNOSIS_not_a_gate"),
     M("G13", CMT, "the trailing-separator refusal made dead code",
       "    if text.endswith(TMUX_ARGV_SEPARATOR):",
       "    if False and text.endswith(TMUX_ARGV_SEPARATOR):",
@@ -152,6 +229,13 @@ MUTANTS = [
       "    resolved = os.path.realpath(path)",
       "    resolved = os.path.abspath(path)",
       "test_a_symlink_planted_inside_the_root_cannot_point_out_of_it"),
+    M("G14", SWP, "🔴 THE ROOT SIDE not realpath'd — the case validate_log_path's "
+                  "own docstring names, and a measured SURVIVOR of all 161 "
+                  "tests and of this sweep's original 52: it mutated only the "
+                  "PATH side. On a host with a symlinked $HOME every single "
+                  "invocation would refuse with EXIT_BAD_LOG_PATH",
+      "    real_root = os.path.realpath(root)", "    real_root = root",
+      "test_the_ROOT_is_realpathed_too_not_only_the_candidate_path"),
     M("G14", DEL, "the root itself accepted as a log path",
       "    if inside and resolved != real_root:",
       "    if inside:",
@@ -335,6 +419,72 @@ MUTANTS = [
       "    if False:",
       "test_a_dry_run_is_never_logged_as_a_write"),
 
+    # ---- the payload-site ledger and the validation ORDER ------------------
+    M("sites", WID, "🔴 A THIRD, UNVALIDATED `send-keys -l --` PAYLOAD SITE — "
+                    "the shape the ledger exists for: a fifth verb or a retry "
+                    "path emitting a payload nothing put through validate_text",
+      '    pane = target["pane_id"]\n    if args.text is not None:\n'
+      '        failed = _issue(ws, ["tmux", "send-keys", "-t", pane, "-l", "--",',
+      '    pane = target["pane_id"]\n'
+      '    _issue(ws, ["tmux", "send-keys", "-t", pane, "-l", "--",\n'
+      '                "injected"], args.dry_run)\n'
+      '    if args.text is not None:\n'
+      '        failed = _issue(ws, ["tmux", "send-keys", "-t", pane, "-l", "--",',
+      "test_every_send_keys_payload_site_is_LEDGERED"),
+    M("sites", DEL, "type's payload site LOSES its literal flag, so the ledger "
+                    "row changes kind. A SHRINK of the literal set is as much a "
+                    "regression as a growth, and a set-valued ledger would see "
+                    "neither",
+      '    failed = _issue(ws, ["tmux", "send-keys", "-t", pane, "-l", "--",\n'
+      "                         args.text], args.dry_run)\n    if failed:\n"
+      "        return failed\n    msg = (f\"typed:",
+      '    failed = _issue(ws, ["tmux", "send-keys", "-t", pane, "--",\n'
+      "                         args.text], args.dry_run)\n    if failed:\n"
+      "        return failed\n    msg = (f\"typed:",
+      "test_every_send_keys_payload_site_is_LEDGERED"),
+    M("sites", REB, "validate_text moved AFTER the payload is issued — it still "
+                    "refuses, having already typed the text. Only an ORDER "
+                    "assertion can distinguish that from a correct wrapper",
+      "    refusal = validate_text(args.text)\n    if refusal:\n"
+      "        return refusal\n    refusal = gate_unsent_prompt(target, "
+      "args.append)\n    if refusal:\n        return refusal\n\n"
+      '    pane = target["pane_id"]\n'
+      '    failed = _issue(ws, ["tmux", "send-keys", "-t", pane, "-l", "--",\n'
+      "                         args.text], args.dry_run)\n",
+      "    refusal = gate_unsent_prompt(target, args.append)\n"
+      "    if refusal:\n        return refusal\n\n"
+      '    pane = target["pane_id"]\n'
+      '    failed = _issue(ws, ["tmux", "send-keys", "-t", pane, "-l", "--",\n'
+      "                         args.text], args.dry_run)\n"
+      "    refusal = validate_text(args.text)\n    if refusal:\n"
+      "        return refusal\n",
+      "test_every_LITERAL_payload_site_is_preceded_by_validate_text"),
+
+    # ---- the outcome token every refusal must carry ------------------------
+    M("tokens", WID, "🔴 `_refuse` regains its fallback `outcome=\"refused\"` — "
+                     "the token the OUTCOME_TOKENS ledger is structurally "
+                     "unable to see, because it filters on a colon. NOTHING "
+                     "else in the suite moves",
+      "def _refuse(code: int, message: str, *, outcome: str, **record)",
+      'def _refuse(code: int, message: str, *, outcome: str = "refused", '
+      "**record)",
+      "test_every_refusal_NAMES_its_gate"),
+    M("tokens", DEL, "a call site stops naming its gate. With the fallback "
+                     "gone this is a TypeError on that path — but only on a "
+                     "path some test walks, which is why the AST half exists",
+      "        return _refuse(EXIT_BAD_TEXT, MSG_TYPE_NEEDS_TEXT,\n"
+      '                       outcome="refused:no-text")',
+      "        return _refuse(EXIT_BAD_TEXT, MSG_TYPE_NEEDS_TEXT,\n"
+      "                       **{})",
+      "test_every_refusal_NAMES_its_gate"),
+    M("tokens", NUM, "a gate downgraded to the BARE token `refused` — the one "
+                     "spelling the ledger's own `\":\" in t` filter throws away "
+                     "before comparing, so without the filter-removes-nothing "
+                     "assertion this is invisible from that side too",
+      '                       outcome="refused:no-text")',
+      '                       outcome="refused")',
+      "test_the_outcome_token_ledger_matches_what_the_SOURCE_actually_emits"),
+
     # ---- the client summary: the three the AUDIT found surviving -----------
     M("summary", SWP, "tty and session swapped in the client summary. 🔴 A "
                       "SURVIVOR of the original sweep — the expectations were "
@@ -420,6 +570,33 @@ def sha256(path) -> str:
         return hashlib.sha256(fh.read()).hexdigest()
 
 
+def _prepare_tree() -> str:
+    """Copy `scripts/` into a tempdir and point `_SRC`/`_TESTS`/`_ROOT` at it.
+
+    🔴 The mutants are applied HERE, never to the live allowlisted script. See
+    the module docstring for the window this closes.
+    """
+    global _ROOT, _SRC, _TESTS
+    work = tempfile.mkdtemp(prefix="session-write-sweep-")
+    shutil.copytree(os.path.join(_REPO, "scripts"),
+                    os.path.join(work, "scripts"),
+                    ignore=shutil.ignore_patterns("__pycache__", ".git"),
+                    symlinks=False)
+    # 🔴 Asserted, not assumed: a `.git` riding along would be a POINTER FILE
+    # in a worktree, and a commit made inside the copy would land on the REAL
+    # branch. Nothing here copies a repo root, and this is what says so.
+    stowaways = [os.path.join(b, n)
+                 for b, dirs, files in os.walk(work)
+                 for n in list(dirs) + list(files) if n == ".git"]
+    assert not stowaways, f"the copy carries a git dir: {stowaways}"
+
+    _ROOT = work
+    _SRC = os.path.join(work, "scripts", "session-write")
+    _TESTS = os.path.join(work, "scripts", "tests", "test_session_write.py")
+    assert os.path.isfile(_SRC) and os.path.isfile(_TESTS)
+    return work
+
+
 def purge_pycache() -> None:
     """🔴 Before EVERY mutant. CPython validates a cached module on source
     mtime-in-whole-SECONDS + size, so a same-length edit in the same second is
@@ -467,11 +644,20 @@ def main() -> int:
                     help="only mutants whose guard/description matches")
     args = ap.parse_args()
 
+    #: 🔴 Recorded BEFORE anything else and re-asserted in the `finally`. The
+    #: sweep never writes here; this is what turns "it does not" into a
+    #: measurement rather than a promise.
+    live_sha = sha256(_LIVE_SRC)
+
+    work = _prepare_tree()
     original = open(_SRC, encoding="utf-8").read()
     baseline_sha = sha256(_SRC)
 
-    print(f"source      : {_SRC}")
+    print(f"live source : {_LIVE_SRC}")
+    print(f"live sha256 : {live_sha}   (NEVER written by this sweep)")
+    print(f"mutating    : {_SRC}")
     print(f"sha256      : {baseline_sha}")
+    assert baseline_sha == live_sha, "the copy is not a copy of the live file"
     print()
 
     # ---- BASELINE. An unmutated red suite makes every kill meaningless. -----
@@ -548,10 +734,20 @@ def main() -> int:
     finally:
         open(_SRC, "w", encoding="utf-8").write(original)
         final = sha256(_SRC)
+        live_final = sha256(_LIVE_SRC)
         print()
         print(f"restored    : sha256 {final} "
               f"({'IDENTICAL' if final == baseline_sha else '🔴 DIFFERENT'})")
+        print(f"live source : sha256 {live_final} "
+              f"({'UNTOUCHED' if live_final == live_sha else '🔴 CHANGED'})")
+        shutil.rmtree(work, ignore_errors=True)
+        print(f"removed     : {work}")
         assert final == baseline_sha
+        # 🔴 Not "should not have changed" — asserted. A sweep that mutated the
+        # allowlisted script is the one failure that must never be reported as
+        # a pass, whatever the mutants did.
+        assert live_final == live_sha, (
+            f"🔴 THE LIVE SCRIPT {_LIVE_SRC} CHANGED DURING THE SWEEP")
 
     print()
     print(f"{'#':>3}  {'guard':<8} {'class':<18} verdict")
