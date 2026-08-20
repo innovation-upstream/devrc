@@ -31,6 +31,15 @@ The two halves share one search helper on purpose — the assertion that the
 marker IS in tmp is the positive control for the search that must find nothing
 in production, so a broken decoder reds the test instead of passing it
 vacuously.
+
+🔴 WHAT THESE TWO TESTS STRUCTURALLY CANNOT SEE, so nobody reads them as wider
+than they are: the LATE EMIT. `emit_cmd_event()` runs after the HTTP response is
+sent, so a lingering handler thread can write its row after the test body — and
+therefore after every assertion here — has finished. That row escapes through
+the per-test fixture's TEARDOWN, not through anything either test inspects. It
+is closed by `conftest.py`'s session-scoped `_session_spool_backstop`, which
+makes the value teardown restores to safe; the evidence for it is a repeat-run
+leak count, not an assertion in this file.
 """
 from __future__ import annotations
 
@@ -41,6 +50,8 @@ import sys
 import uuid
 from pathlib import Path
 from unittest import mock
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import server as S  # noqa: E402
@@ -100,6 +111,36 @@ def _decoded_lines(path: Path, only_source: str | None = None) -> list[str]:
             parts.append(field)
         out.append("\t".join(parts))
     return out
+
+
+@pytest.fixture(scope="session")
+def session_backstop_value(_session_spool_backstop):
+    """The ACTIVITY_SPOOL_DIR the SESSION backstop installed — i.e. the value a
+    per-test teardown restores to. Requested by NAME so it is ordered after the
+    conftest fixture that sets it."""
+    return os.environ.get("ACTIVITY_SPOOL_DIR")
+
+
+def test_the_value_a_per_test_teardown_restores_to_is_not_production(
+        session_backstop_value):
+    """The session backstop's invariant, as far as it is checkable in-suite.
+
+    🔴 SCOPE, stated so nobody reads this as wider than it is: this catches the
+    backstop being DELETED or pointed somewhere unsafe. It does NOT catch the
+    regression that actually bit — a `yield` + `mp.undo()` in the backstop,
+    which restores the ambient value at SESSION teardown and so leaks a
+    post-session late emit to production while this assertion, running mid-
+    session, stays perfectly green. That one is held by the deterministic probe
+    recorded in the conftest docstring, not by any assertion here.
+    """
+    assert session_backstop_value is not None, (
+        "no ACTIVITY_SPOOL_DIR at session scope — conftest.py's "
+        "`_session_spool_backstop` did not run, so a late emit arriving between "
+        "tests or after the last one falls through to the production spool.")
+    restored = Path(session_backstop_value).resolve()
+    assert restored != _production_spool_dir().resolve(), (
+        f"the session backstop points AT the production spool ({restored}).")
+    assert not restored.exists() or restored.is_dir()
 
 
 def test_the_effective_spool_dir_is_under_this_test_s_own_tmp_path(tmp_path):
