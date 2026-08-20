@@ -33,8 +33,10 @@ live logged-in Brave.
 RAILS (standing browser-validation contract):
 1 ORIENT: run `whoami` first; the wrong profile is the commonest wasted run.
   If extension_stale is true, say so in the report rather than fighting it.
-2 OWN TAB: `open` a tab this session owns. Never `nav` a tab the operator may
-  be using -- it can hold unsaved work.
+2 STAY IN YOUR OWN TAB: whatever dispatched you already put you in a tab --
+  stay in it, and do not try to acquire another. Never `nav` a tab the
+  operator may be using, and never `nav` away to something unrelated: a tab
+  can hold unsaved work.
 3 READ-ONLY: no Connect/Follow/Message/Invite/Save/Subscribe/Send. No form
   submit except the one named in WRITES ALLOWED. Change no account, privacy or
   notification setting. NEVER log out. Never click a control that spends money
@@ -51,8 +53,8 @@ RAILS (standing browser-validation contract):
 7 A HIDDEN TAB IS A CONFOUND, NOT A RESULT: an empty or half-built read from a
   background tab is throttling, not a broken site. `wake` and re-read, and
   re-`wake` after a reload. Never `activate` -- it takes the operator's screen.
-8 CLEAN UP: close the tab you opened, delete throwaway records you created,
-  and confirm they are gone.
+8 CLEAN UP: delete throwaway records you created and confirm they are gone.
+  Do not try to close your tab -- whatever opened it closes it for you.
 9 REPORT HONESTLY: quote verbatim rather than summarising away the raw ids,
   counts and strings. State the sample size and what it cannot support. Say
   what you could NOT check. Do not round toward a conclusion.
@@ -86,8 +88,8 @@ BUDGET: <N> pages / <N> ops — a live account, so do not paginate deeply.
 
 Follow the standing browser-validation contract at
 ~/workspace/devrc/scripts/browser-bridge/reference/validation-prompt.md
-— all nine rails: orient, own tab, read-only, blast radius, failure-is-a-
-finding, reads, hidden-tab confound, clean up, report honestly.
+— all nine rails: orient, own tab, read-only, blast radius,
+failure-is-a-finding, reads, hidden-tab confound, clean up, report honestly.
 (Cannot read that path? Say so and stop — do not proceed unrailed.)
 
 WRITES ALLOWED — nothing else: <e.g. the search box + its Submit; or: none>

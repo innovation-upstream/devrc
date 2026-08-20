@@ -121,32 +121,139 @@ TEMPLATE_SLOTS = [
     "DO NOT TOUCH:", "OBSERVE", "THE DISCRIMINATOR", "REPORT",
 ]
 
-# The operative content the INLINE block must carry -- the copy that ships to a
-# reader which cannot open the file. Substrings, because the inline block is
-# compressed prose whose wording should stay tunable; the whole-block pin lives
-# on the canonical rails above. Each entry is the part whose ABSENCE would let a
-# delegated run do real damage.
-INLINE_MUST_CARRY = [
-    "`whoami` first",
-    "Never `nav` a tab the operator may be using",
-    "no Connect/Follow/Message/Invite/Save/Subscribe/Send",
-    "NEVER log out",
-    "Generate/Render/Create/Buy/Publish",
-    "DO NOT TOUCH is a hard",
-    "report it and STOP",
-    "you cannot see images",
-    "throttling, not a broken site",
-    "Never `activate`",
-    "close the tab you opened",
-    "Do not round toward a conclusion",
+# 🔴 The INLINE rails, pinned as WHOLE normalised blocks -- exactly like the
+# canonical nine above, and for the same reason.
+#
+# A round-2 audit showed why a substring list is not enough here. The inline
+# block had 12 pinned substrings, and every one of these SURVIVED a fully green
+# suite: "Never `activate`" -> "Never `activate` WITHOUT ASKING; if the read is
+# stuck, `activate` is fine" (a 🔴 RULES.md screen-theft hazard, permitted);
+# "NEVER log out" -> "NEVER log out MID-RUN (logging out at the end is fine)";
+# rail 3 prefixed with "READ-ONLY (relaxed for this run, the following no longer
+# applies):". Every one keeps the pinned substring while inverting the rail.
+# `claude/RULES.md`: a guard on WORDS is walkable by REWORDING.
+#
+# This block is the HIGHER-risk copy, not the lower one: it is the entire safety
+# payload for a reader that cannot open this file -- a model holding
+# click/type/key/nav/eval on the operator's live logged-in Brave.
+# The fence's header line, pinned separately because the rail parser starts at
+# the first numbered line. Measured: folding "EXCEPT rails 3, 4 and 7 which are
+# suspended for this run" into this line suspended three rails with a green
+# suite -- every numbered rail still matched its pin.
+INLINE_HEADER = "RAILS (standing browser-validation contract):"
+
+INLINE_RAILS = [
+    '1 ORIENT: run `whoami` first; the wrong profile is the commonest wasted run. If extension_stale is true, say so in the report rather than fighting it.',
+    '2 STAY IN YOUR OWN TAB: whatever dispatched you already put you in a tab -- stay in it, and do not try to acquire another. Never `nav` a tab the operator may be using, and never `nav` away to something unrelated: a tab can hold unsaved work.',
+    '3 READ-ONLY: no Connect/Follow/Message/Invite/Save/Subscribe/Send. No form submit except the one named in WRITES ALLOWED. Change no account, privacy or notification setting. NEVER log out. Never click a control that spends money or quota -- Generate/Render/Create/Buy/Publish -- however obvious it looks.',
+    '4 BLAST RADIUS: touch only what WRITES ALLOWED permits. DO NOT TOUCH is a hard list. Anything you create for the test is yours to delete.',
+    '5 A FAILURE IS A FINDING: report it and STOP. Do not retry aggressively or engineer around it. A 429, a throttle notice, a permission wall or an unexpected redirect is DATA. If a selector misses, try ONE alternative, then report the miss.',
+    '6 READS: you cannot see images -- your tool never returns pixels. Read with `text [selector]` and with `js` returning JSON. Do not plan around writing files you intend to read back.',
+    "7 A HIDDEN TAB IS A CONFOUND, NOT A RESULT: an empty or half-built read from a background tab is throttling, not a broken site. `wake` and re-read, and re-`wake` after a reload. Never `activate` -- it takes the operator's screen.",
+    '8 CLEAN UP: delete throwaway records you created and confirm they are gone. Do not try to close your tab -- whatever opened it closes it for you.',
+    '9 REPORT HONESTLY: quote verbatim rather than summarising away the raw ids, counts and strings. State the sample size and what it cannot support. Say what you could NOT check. Do not round toward a conclusion.',
 ]
 
-# The soft ceiling. Raised from 8,192 when the inline block landed: that block
-# is the artifact that replaces a 3-5.6 KB retyped preamble for readers which
-# cannot open the file, so it earns its bytes. Still a ceiling, because a
-# contract that grows into a second copy of SKILL.md regenerates the very
-# duplication it exists to remove. Fails only on a wholesale paste.
-MAX_DOC_BYTES = 10_240
+# The reader-capability split, pinned as whole normalised blocks.
+#
+# Its previous guard was `("browser agent", "CANNOT", "INLINE") in <the whole
+# section>`, and the audit inverted the split while keeping all three tokens:
+# "used to be listed as CANNOT read files; it now has a shell and reads the path
+# fine, so CITE it and skip the INLINE block" -- green. That is verbatim the
+# failure this section exists to prevent.
+CAPABILITY_BULLETS = [
+    "- **A Claude Code subagent, or you** -- can `Read` the path. **CITE** it: use the template's citation line and keep the prompt short.",
+    "- **`browser agent`** -- **CANNOT.** Its model is given exactly one typed tool with an 11-op browser-only surface (`text`/`html`/`eval`/`nav`/`screenshot`/ `frames`/`click`/`type`/`key`/`wake`/`whoami`), and the agent def denies `bash`/`read`/`edit`/`write`/`webfetch` -- enforced at runtime by a fail-closed gate before the model is invoked (`~/workspace/devrc/scripts/browser-bridge/reference/agent.md`). A citation reaches it as an unreadable string. **INLINE the block below instead.** Getting this backwards is the failure this file could otherwise cause: a cited prompt to `browser agent` ships with **zero** rails while still reading complete, and that model has `click`/`type`/`key`/`nav`/`eval` on the operator's live logged-in Brave.",
+]
+
+# The template's own enumeration of the nine rails -- a THIRD copy of the
+# contract inside this file, and the audit found it unguarded: gutting it to
+# three labels survived a green suite. It is the only rail summary that reaches
+# a reader who follows the citation, so a short one under-promises what the
+# prompt is actually asking for.
+TEMPLATE_RAIL_LABELS = [
+    "orient", "own tab", "read-only", "blast radius", "failure-is-a-finding",
+    "reads", "hidden-tab confound", "clean up", "report honestly",
+]
+
+# Ops the inline block is allowed to NAME because it only ever forbids them,
+# mapped to the exact prohibitive phrasing that must be present. Prohibiting an
+# op the reader cannot reach is harmless; INSTRUCTING one aborts the run.
+INLINE_OPS_NAMED_ONLY_TO_PROHIBIT = {
+    "activate": "Never `activate`",
+}
+
+# Operative tokens each CANONICAL rail contributes that its INLINE counterpart
+# must also carry. This is the correspondence ledger: two copies of one contract
+# is the defect this whole file exists to remove, and nothing previously stopped
+# them drifting. Measured: adding a prohibition to canonical rail 3 AND updating
+# RAILS[2] in the same commit -- exactly what the ledger's failure message tells
+# you to do -- left the inline copy stale, green.
+#
+# Keyed by rail number. A rail absent from this map is one whose two copies are
+# deliberately NOT parallel; that must be declared in INLINE_DIVERGENCES with a
+# reason, so an UNintentional divergence is distinguishable from a designed one.
+INLINE_CORRESPONDENCE = {
+    1: ["whoami", "extension_stale"],
+    2: ["nav", "unsaved work"],
+    3: ["Connect", "Follow", "Message", "Invite", "Save", "Subscribe", "Send",
+        "WRITES ALLOWED", "log out", "Generate", "Render", "Create", "Buy",
+        "Publish"],
+    4: ["WRITES ALLOWED", "DO NOT TOUCH"],
+    5: ["429", "ONE alternative", "STOP"],
+    7: ["throttling", "wake", "activate"],
+    9: ["verbatim", "sample size", "NOT check", "round toward a conclusion"],
+}
+
+# 🔴 WHAT THE CORRESPONDENCE LEDGER CANNOT DO, stated rather than left to be
+# discovered. It requires each listed token to be present in BOTH copies, so it
+# catches a token DELETED from one side. It cannot catch a token ADDED to one
+# side: a NEW prohibition written into a canonical rail is not mechanically
+# knowable as something the inline copy also needs, and an audit demonstrated
+# exactly that -- adding "never accept a cookie banner's Accept all" to
+# canonical rail 3 and updating RAILS[2] in the same commit left the inline copy
+# stale, green.
+#
+# Two prose copies cannot be proven semantically equivalent by a test, and
+# pretending otherwise is worse than declaring it: `claude/RULES.md` -- an
+# incomplete UNGATED dict "advertises a completeness it does not have". So the
+# procedural half is carried where the editor actually is: BOTH whole-block
+# pins live in this module, so any canonical edit already forces a change here,
+# and the ledger's failure message says to check the other copy. If you add a
+# prohibition to a rail, add it to the other copy AND to
+# INLINE_CORRESPONDENCE -- that entry is what makes the next deletion catchable.
+UNGATED_CORRESPONDENCE = (
+    "a prohibition ADDED to one copy is not required in the other; only "
+    "listed tokens are, and only against deletion."
+)
+
+# Rails whose two copies deliberately differ, each with the reason. Anything not
+# named here must correspond; anything named here is a reviewed exception.
+INLINE_DIVERGENCES = {
+    6: "canonical rail 6 tells an OPERATOR to probe whether the delegate can "
+       "Read a .png; the inline copy is read BY the delegate, which cannot run "
+       "that probe on itself -- it is simply told it has no pixels.",
+    8: "canonical rail 8 says 'close the tab you opened' and 'restore the "
+       "operator's screen'; `browser agent` has neither `open`/`close` nor "
+       "`activate` in its 11-op surface and its wrapper closes the tab on every "
+       "exit path, so the inline copy must NOT instruct either.",
+}
+
+# The soft ceiling, with its budget stated so the next editor knows the move.
+#
+# The file is now ~5.3 KB of rails in TWO deliberate copies (canonical +
+# inline), plus a template. There is no mechanism detail left to evict -- the
+# previous version of this message told the reader to move mechanism detail to
+# agent.md/spa-wake.md/frames-cdp.md, which by then was not actionable advice,
+# and a red gate with no valid move is a permanently-red gate.
+#
+# So the budget is explicit: 12,288 B leaves room for roughly four more rails
+# across both copies at the measured ~500 B/rail. Changing an EXISTING rail is
+# expected to be roughly byte-neutral. Adding a tenth rail is a deliberate act
+# that should be reviewed on its merits, not smuggled past a ceiling -- which
+# is what this number is for.
+MAX_DOC_BYTES = 12_288
+BYTES_PER_RAIL = 500  # measured across the two copies
 
 
 def _norm(text: str) -> str:
@@ -216,6 +323,38 @@ def _reference_table_rows(skill_text: str) -> list[tuple[str, str]]:
     return rows
 
 
+def _one_fence(doc_text: str, heading_prefix: str) -> str:
+    """The single ```text fence of one section, asserted to be single.
+
+    Asserted rather than indexed: `_fences(...)[0]` raises IndexError when the
+    fence is deleted, which is red for the right reason with the wrong message.
+    """
+    section = _section(doc_text, heading_prefix)
+    assert section, f"{DOC} has no '## {heading_prefix}…' section."
+    fences = _fences(section)
+    assert len(fences) == 1, (
+        f"expected exactly ONE ```text fence in {DOC}'s '{heading_prefix}…' "
+        f"section, found {len(fences)}. Joining several fences is how a check "
+        "gets satisfied by an unrelated example block while the real one is "
+        "gutted -- measured on an earlier revision."
+    )
+    return fences[0]
+
+
+def _inline_rails(doc_text: str) -> list[str]:
+    """Each numbered rail of the INLINE block, whole and normalised."""
+    fence = _one_fence(doc_text, "The inline rails")
+    blocks = re.split(r"^(?=\d+ [A-Z])", fence, flags=re.M)
+    return [_norm(b) for b in blocks if re.match(r"^\d+ [A-Z]", b)]
+
+
+def _capability_bullets(doc_text: str) -> list[str]:
+    """The `- **…**` bullets of the reader-capability section."""
+    section = _section(doc_text, "FIRST: can your reader")
+    blocks = re.split(r"^(?=- \*\*)", section, flags=re.M)
+    return [_norm(b) for b in blocks if b.startswith("- **")]
+
+
 def _rail_blocks(doc_text: str) -> list[str]:
     """Each numbered rail's WHOLE normalised block from the standing contract."""
     section = _section(doc_text, "The standing contract")
@@ -239,7 +378,7 @@ def test_reference_table_parser_finds_a_plausible_table():
         "few means the parser lost the table (heading reworded? table moved?), "
         "and the route assertions below would pass for the wrong reason."
     )
-    assert all(f.endswith(".md") or f.endswith("/") or ">" in f for f, _ in rows), (
+    assert all(f.endswith(".md") or ">" in f for f, _ in rows), (
         f"reference-table file column holds a non-path cell: {[r[0] for r in rows]}"
     )
 
@@ -379,7 +518,8 @@ def test_every_standing_rail_matches_its_pinned_block():
             "revision pinned only the headline and an audit inverted three "
             "rails with a fully green suite. If the change is intended, paste "
             "the new block into RAILS IN THE SAME COMMIT; that paste is the "
-            "review."
+            "review. Then check the INLINE copy -- the correspondence ledger "
+            f"cannot tell you: {UNGATED_CORRESPONDENCE}"
         )
     assert len(blocks) == len(RAILS)
 
@@ -416,30 +556,173 @@ def test_the_file_tells_the_reader_browser_agent_cannot_read_it():
     )
 
 
-@pytest.mark.parametrize("must_carry", INLINE_MUST_CARRY)
-def test_the_inline_block_carries_the_operative_prohibitions(must_carry):
-    """The inline block is the copy that ships to a reader which cannot read
-    files. Anything missing here is missing from those runs entirely."""
-    fences = _fences(_section(_doc_text(), "The inline rails"))
-    assert len(fences) == 1, (
-        f"expected exactly one ```text fence in {DOC}'s inline-rails section, "
-        f"found {len(fences)}. Joining several fences is how a check gets "
-        "satisfied by an unrelated example block."
+def test_the_inline_fence_header_carries_no_suspension_clause():
+    """Everything inside the fence is instruction, including line one.
+
+    The rail pins start at the first numbered line, so an override folded into
+    the header was invisible to them -- and an override is the single most
+    dangerous edit this block can carry, because it disables rails without
+    touching one.
+    """
+    fence = _one_fence(_doc_text(), "The inline rails")
+    header = _norm(fence.split("\n", 1)[0])
+    assert header == INLINE_HEADER, (
+        f"\n\nthe inline block's header line changed.\n"
+        f"  in the file: {header!r}\n"
+        f"  pinned here: {INLINE_HEADER!r}\n\n"
+        "This line sits inside the fence, so it is pasted as instruction "
+        "alongside the rails. A clause here can suspend rails without editing "
+        "any of them."
     )
-    assert must_carry in _norm(fences[0]), (
-        f"the inline rails block no longer carries {must_carry!r}. That text is "
-        "the operative half of a rail; without it a delegated run that cannot "
-        "read the contract file proceeds without that protection."
-    )
+
+
+def test_every_inline_rail_matches_its_pinned_block():
+    """🔴 The inline block is pinned whole, exactly like the canonical nine.
+
+    A substring list was walked by four rewordings that each kept the pinned
+    words while inverting the rail -- see the comment on INLINE_RAILS.
+    """
+    blocks = _inline_rails(_doc_text())
+    for i, (found, pinned) in enumerate(zip(blocks, INLINE_RAILS), start=1):
+        assert found == pinned, (
+            f"\n\ninline rail {i} no longer matches its pinned block.\n"
+            f"  in the file: {found}\n"
+            f"  pinned here: {pinned}\n\n"
+            "This block is the ENTIRE safety payload for a reader that cannot "
+            "open this file. If the change is intended, paste the new block "
+            "into INLINE_RAILS in the same commit, and check whether the "
+            "CANONICAL rail needs the same change -- the ledger cannot tell "
+            f"you: {UNGATED_CORRESPONDENCE}"
+        )
+    assert len(blocks) == len(INLINE_RAILS)
 
 
 def test_the_inline_block_numbers_all_nine_rails():
-    fence = _fences(_section(_doc_text(), "The inline rails"))[0]
-    numbered = re.findall(r"^(\d+) ", fence, re.M)
+    blocks = _inline_rails(_doc_text())
+    numbered = [b.split(" ", 1)[0] for b in blocks]
     assert numbered == [str(i) for i in range(1, len(RAILS) + 1)], (
         f"the inline rails block numbers {numbered}, expected 1..{len(RAILS)}. "
         "It is the whole contract for readers that cannot open this file, so a "
-        "missing number is a missing rail."
+        "missing number is a missing rail -- and an EXTRA leading entry is how "
+        "an override clause gets smuggled in."
+    )
+
+
+@pytest.mark.parametrize("rail_no", sorted(INLINE_CORRESPONDENCE))
+def test_each_inline_rail_carries_its_canonical_rail_s_operative_tokens(rail_no):
+    """🔴 The correspondence ledger: the two copies must not drift apart.
+
+    Two copies of one contract is the exact defect this file exists to remove.
+    Pinning each copy separately stops a SILENT edit but not a one-sided one:
+    an audit changed canonical rail 3 and RAILS[2] together -- the workflow the
+    ledger's own message prescribes -- and the inline copy went stale, green.
+    """
+    inline = _inline_rails(_doc_text())[rail_no - 1]
+    missing = [t for t in INLINE_CORRESPONDENCE[rail_no] if t not in inline]
+    assert not missing, (
+        f"inline rail {rail_no} no longer carries {missing}, which its "
+        f"canonical counterpart does. Either update the inline copy, or -- if "
+        "the two are deliberately not parallel for this rail -- move it into "
+        "INLINE_DIVERGENCES with the reason, so a future accidental drift is "
+        "still distinguishable from a designed one."
+    )
+
+
+def test_every_rail_is_either_corresponded_or_declared_divergent():
+    """No rail may be silently absent from BOTH maps.
+
+    That is the gap through which an unintentional divergence would look
+    exactly like a designed one -- `claude/RULES.md`: an incomplete UNGATED
+    dict is worse than none, because it advertises a completeness it does not
+    have.
+    """
+    covered = set(INLINE_CORRESPONDENCE) | set(INLINE_DIVERGENCES)
+    expected = set(range(1, len(RAILS) + 1))
+    assert covered == expected, (
+        f"rails {sorted(expected - covered)} appear in neither "
+        "INLINE_CORRESPONDENCE nor INLINE_DIVERGENCES, and rails "
+        f"{sorted(covered - expected)} are in a map but do not exist. Every "
+        "rail must either correspond across the two copies or have its "
+        "divergence declared with a reason."
+    )
+    for rail_no, reason in INLINE_DIVERGENCES.items():
+        assert len(reason) > 40, (
+            f"the declared divergence for rail {rail_no} has no real reason "
+            "attached. A bare exemption is how a defect gets filed as a design."
+        )
+
+
+def test_the_inline_block_names_no_op_the_agent_does_not_have():
+    """🔴 The regression guard for the round-2 audit's deploy-blocking find.
+
+    The inline block told `browser agent` to `open` a tab and to `close` it.
+    Neither is in its op surface -- the wrapper forces the tab and closes it on
+    every exit path -- so its first instruction would have returned
+    `op_not_allowed:open`, and inline rail 5 says a failure is a finding and to
+    STOP. The recommended paste could abort the run it exists to protect.
+
+    The allowed set is PARSED out of `reference/agent.md` rather than restated
+    here, so widening the agent's surface there cannot leave this stale.
+    """
+    agent_md = (REFERENCE_DIR / "agent.md").read_text(encoding="utf-8")
+    m = re.search(r"op set\s*\n?\s*is \*\*(\d+) ops\*\*\s*\(([^)]*)\)",
+                  agent_md, re.S)
+    assert m, (
+        "could not parse the agent's op set out of reference/agent.md -- this "
+        "guard would be vacuous. The sentence it reads is 'The autonomous "
+        "model's op set is **N ops** (`a`/`b`/…)'; if that was reworded, "
+        "update this pattern rather than dropping the check."
+    )
+    allowed = set(re.findall(r"`([a-z]+)`", m.group(2)))
+    assert len(allowed) == int(m.group(1)) and len(allowed) > 5, (
+        f"parsed {sorted(allowed)} but agent.md declares {m.group(1)} ops -- "
+        "the parse disagrees with the prose, so neither can be trusted."
+    )
+
+    inline = "\n".join(_inline_rails(_doc_text()))
+    # Ops the CLI has that the agent does not. Derived by difference, so an op
+    # promoted into the agent's set stops being flagged automatically.
+    forbidden = {"open", "close", "release", "tabs", "upload", "activate",
+                 "emulate", "agent", "health", "instances", "ping",
+                 "context"} - allowed
+    named = sorted(op for op in forbidden if f"`{op}`" in inline)
+    # Declared exceptions: an op the block may NAME because it only ever
+    # FORBIDS it. Each carries the exact prohibitive phrasing, so an
+    # "exception" cannot quietly become an instruction -- a bare exemption is
+    # how a defect gets filed as a design.
+    for op, phrasing in INLINE_OPS_NAMED_ONLY_TO_PROHIBIT.items():
+        if op in named and phrasing in inline:
+            named.remove(op)
+    assert not named, (
+        f"\n\nthe inline rails block instructs a reader to use {named}, which "
+        f"is NOT in `browser agent`'s {len(allowed)}-op surface "
+        f"({sorted(allowed)}).\nThis block is pasted verbatim to a model that "
+        "has no other instructions; an op it cannot call returns "
+        "`op_not_allowed:<op>`, and inline rail 5 tells it a failure is a "
+        "finding and to STOP. Rephrase so the rail does not require the op "
+        "(the wrapper already owns tab lifecycle), or prohibit it explicitly."
+    )
+
+
+@pytest.mark.parametrize("index", range(len(CAPABILITY_BULLETS)))
+def test_the_capability_split_bullets_match_their_pinned_blocks(index):
+    """The three-token version of this check passed on a fully INVERTED split
+    ("used to be listed as CANNOT … it now has a shell and reads the path fine,
+    so CITE it and skip the INLINE block"). Pinned whole, like the rails."""
+    bullets = _capability_bullets(_doc_text())
+    assert len(bullets) == len(CAPABILITY_BULLETS), (
+        f"the reader-capability section has {len(bullets)} bullets, expected "
+        f"{len(CAPABILITY_BULLETS)}. Each names one audience and what it can "
+        "do; a missing one is an audience with no routing."
+    )
+    assert bullets[index] == CAPABILITY_BULLETS[index], (
+        f"\n\ncapability bullet {index} no longer matches its pinned block.\n"
+        f"  in the file: {bullets[index]}\n"
+        f"  pinned here: {CAPABILITY_BULLETS[index]}\n\n"
+        "This is the split that decides whether a prompt CITES the rails or "
+        "INLINES them. Getting it backwards ships a prompt with zero rails to "
+        "the highest-risk audience, which is what this section exists to "
+        "prevent -- so its wording is a reviewed edit, not free prose."
     )
 
 
@@ -457,6 +740,25 @@ def test_the_template_offers_every_slot(slot):
         "slot is a dimension every future prompt silently omits: BUDGET and DO "
         "NOT TOUCH bound blast radius, THE DISCRIMINATOR is what makes the "
         "report able to settle anything."
+    )
+
+
+def test_the_template_enumerates_all_nine_rails():
+    """The third copy. Gutting this enumeration to three labels survived a
+    green suite, and it is what a citing prompt actually shows its reader."""
+    fence = _one_fence(_doc_text(), "The template")
+    norm = _norm(fence).lower()
+    missing = [lab for lab in TEMPLATE_RAIL_LABELS if lab not in norm]
+    assert not missing, (
+        f"the template's rail enumeration no longer names {missing}. It is the "
+        "summary a citing prompt puts in front of its reader; a short one "
+        "under-promises what the contract actually asks for. Keep it at "
+        f"{len(TEMPLATE_RAIL_LABELS)} labels, one per rail."
+    )
+    assert "all nine rails" in norm, (
+        "the template no longer says it is asking for ALL NINE rails, so a "
+        "reader can take the enumeration as the complete list rather than as "
+        "an index into the contract."
     )
 
 
@@ -482,8 +784,9 @@ def test_the_template_cites_a_path_that_resolves_to_this_file():
     # reason. The suffix still catches a rename; the prefix still catches a
     # citation pointed at some other checkout.
     rel = DOC.relative_to(BB.parent.parent).as_posix()
-    matching = [c for c in cited
-                if c.endswith(rel) and c.startswith("~/workspace/devrc/")]
+    # Exact equality, not endswith+startswith: an inserted middle segment
+    # (~/workspace/devrc/OLD-2025/scripts/…) satisfied the split form.
+    matching = [c for c in cited if c == "~/workspace/devrc/" + rel]
     assert matching, (
         f"the template cites {cited}, none of which is the canonical "
         f"'~/workspace/devrc/{rel}'. Every prompt built from this template "
@@ -527,9 +830,14 @@ def test_contract_does_not_restate_what_skill_md_owns():
     """The file's value is that it is short enough to cite or paste."""
     size = len(DOC.read_bytes())
     assert size <= MAX_DOC_BYTES, (
-        f"{DOC} is {size:,} bytes, over the {MAX_DOC_BYTES:,} B ceiling. It "
-        "exists to replace a 3-5.6 KB preamble; past this it is cheaper to "
-        "retype the rails than to load it. Move mechanism detail to the "
-        "reference file that owns it (agent.md, spa-wake.md, frames-cdp.md) "
-        "and leave a pointer."
+        f"{DOC} is {size:,} bytes, over the {MAX_DOC_BYTES:,} B ceiling "
+        f"(over by {size - MAX_DOC_BYTES:,}).\n"
+        "There is no mechanism detail left to evict -- the file is two "
+        f"deliberate copies of the rails plus a template, at ~{BYTES_PER_RAIL} "
+        "B per rail across both. So the move is one of:\n"
+        "  * make the change byte-neutral (the usual case for editing a rail);\n"
+        "  * fold two rails into one if they genuinely are one rule;\n"
+        "  * or raise this ceiling deliberately, in a commit that says which "
+        "rail was added and why it earns its bytes.\n"
+        "Do NOT reach for it by trimming a rail's meaning to fit."
     )
