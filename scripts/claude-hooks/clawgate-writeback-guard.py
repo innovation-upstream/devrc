@@ -337,6 +337,14 @@ WHAT THIS STRUCTURALLY CANNOT SEE (say it here, not in a report nobody re-reads)
     nothing distinguishes them (see SCOPE OF THE WORK FLAG above);
   * the `in_progress` flip, which it does not require: it gates the WRITE-BACK, which
     is the thing that was measured missing;
+  * 🔴 A CARD WHOSE DISPATCHED AGENT IS STILL ALIVE — deliberately, see
+    LIVE_AGENT_STATUSES. The write-back is owed by that agent; nagging the dispatching
+    session asks it to pre-empt a close-out that has not happened yet. Scoped to
+    pending/provisioning/running ONLY, so an agent that DIED without writing back is
+    still reported, and the card leaves the window by itself when the agent's close-out
+    sets `ready_for_review`. The residual blind spot is narrow and real: an agent that
+    is alive but has silently given up looks the same as one still working, and this
+    hook cannot tell them apart — the devpod reaper is what bounds that, not this;
   * 🔴 ANY LATER WORK ON A TASK THIS SESSION HAS DISMISSED. The tombstone is ABSOLUTE
     for the session: dismiss task N, then genuinely pick N up and work on it in the
     SAME session, and this guard stays silent for N until the session ends. That is a
@@ -415,6 +423,25 @@ AGENT_AUTHOR = "claude-code"
 # A card in either of these is already handed over — someone closed it, and nagging
 # about a missing comment on a card that is out for review is noise.
 CLOSED_STATUSES = ("ready_for_review", "complete")
+
+# 🔴 A card with a LIVE DISPATCHED AGENT owes its write-back to that AGENT, not to this
+# session. Dispatching is what clawgate is FOR, so this fired on every session that
+# dispatched — and its prescribed remedy (comment as `claude-code`, flip to
+# `ready_for_review`) is the WRONG action there: it pre-empts the agent's own close-out
+# and fires a push to the operator. Measured 2026-08-20 on tasks 241/294 while agents
+# `bright-fox`/`brave-finch` were still running; in that session the guard would have
+# manufactured the very signal the run was measuring.
+#
+# 🔴 ALIVE ONLY, and that is the whole safety argument. `stopped` and `error` are
+# DELIBERATELY absent: an agent that died without writing back is exactly the #193/#194
+# case this guard exists for, and suppressing those would reintroduce it. The card also
+# leaves this window on its own — the agent's close-out sets `ready_for_review`, which
+# CLOSED_STATUSES already absorbs — so `delegated` cannot become a permanent silence.
+#
+# The vocabulary is the CLOSED SET read from the server, not a guess:
+# `containers/clawgate/internal/agents/store.go:14-19` defines exactly
+# pending/provisioning/running/stopped/error.
+LIVE_AGENT_STATUSES = frozenset(("pending", "provisioning", "running"))
 
 # Per session, per task id. See the ladder in the module docstring; both are read
 # out of the CLI bundle's own cap of 8, which this is deliberately stricter than.
@@ -1157,9 +1184,30 @@ def live_task(task_id, timeout=PER_TASK_TIMEOUT_SECS, env_path=CLAWGATE_ENV):
         raise LiveReadError("%s: %s" % (type(e).__name__, e))
 
 
+def has_live_agent(task):
+    """True when a dispatched agent is still alive on this card, so the write-back is
+    OWED BY THAT AGENT and not by this session.
+
+    Costs nothing extra: `agent` already rides along in the `/api/tasks/{id}` payload
+    `live_task` fetches, so this reads a field that was paid for either way.
+
+    Anything that is not a dict with a live status is False — a card with no agent
+    (`"agent": null`, the common case), a payload shape this hook does not recognise,
+    or a dead one. False is the LOUD direction: it leaves the verdict at "missing".
+    """
+    agent = task.get("agent") if isinstance(task, dict) else None
+    if not isinstance(agent, dict):
+        return False
+    return agent.get("status") in LIVE_AGENT_STATUSES
+
+
 def writeback_state(task, first_read_ts, skew=CLOCK_SKEW_ALLOWANCE_SECS,
                     work_ts=None):
-    """"closed" | "written" | "missing" | "unknown" for one live task payload.
+    """"closed" | "written" | "delegated" | "missing" | "unknown" for one live task.
+
+    🔴 "delegated" is checked LAST, after the comment scan — never before it. A card
+    can have both a live agent AND a real write-back, and that is "written"; ordering
+    the agent check first would relabel a satisfied card and lose that distinction.
 
     🔴 THE CUTOFF IS THE LATER OF THE FIRST READ AND THE LAST WORK EVENT. Anchoring on
     the read alone is what let the skill's own pre-start "Starting" comment — posted
@@ -1198,6 +1246,8 @@ def writeback_state(task, first_read_ts, skew=CLOCK_SKEW_ALLOWANCE_SECS,
         ts = parse_ts(c.get("createdAt"))
         if ts is None or ts >= cutoff:
             return "written"
+    if has_live_agent(task):
+        return "delegated"
     return "missing"
 
 
@@ -1417,7 +1467,10 @@ def stop_decision(data, reader=None, budget=STOP_BUDGET_SECS,
             state, err = "unknown", e
         except Exception as e:            # noqa: BLE001 — a reader that raises anything
             state, err = "unknown", e
-        if state in ("closed", "written"):
+        # "delegated" rides with closed/written: silent, and it spends NO counter.
+        # Burning a fire here would let a long agent run climb the ladder and then
+        # block on a genuinely missing write-back with its budget already gone.
+        if state in ("closed", "written", "delegated"):
             continue
         if state == "unknown":
             # 🔴 NEVER blocks, and spends its OWN counter. Cannot-measure is reported,
