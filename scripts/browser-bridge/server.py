@@ -351,6 +351,13 @@ HDR_SESSION_ID = "X-Session-Id"
 #   claude:<uuid>          CLAUDE_CODE_SESSION_ID / CLAUDE_SESSION_ID — Claude
 #                          Code's own session uuid, which is EXACTLY what
 #                          `source='claude'` rows already store. JOINABLE.
+#   opencode:<id>          OPENCODE_SESSION_ID, exported per bash-tool call by
+#                          scripts/opencode/plugin/session-env.js's `shell.env`
+#                          hook. It is EXACTLY what `source='opencode'` rows
+#                          already store: activity-plugin.js emits
+#                          `session: input.sessionID` from `tool.execute.after`,
+#                          and `shell.env` receives the same sessionID for the
+#                          same call. JOINABLE.
 #   tmux:%<n>              $TMUX_PANE. A pane id is stable across MANY unrelated
 #                          sessions, so writing it into `session` would silently
 #                          merge them into one apparent session — strictly worse
@@ -371,7 +378,18 @@ HDR_SESSION_ID = "X-Session-Id"
 # particular an UNPREFIXED value is never treated as a bare claude id — the
 # opencode browser tool's own default is the literal "browser-agent", and a
 # version-skewed caller can send anything.
-SESSION_SRC_JOINABLE = "claude"
+# 🔴 A SET, NOT A SCALAR — and the scalar `SESSION_SRC_JOINABLE` it replaces is
+# DELETED rather than kept beside it. Two spellings of one predicate is how the
+# second call site gets missed: the joinability question is asked at exactly two
+# places below (`session` and `origin_session`) and both must answer the same
+# way, so they both go through `_is_joinable`.
+#
+# Membership here is a claim that the BARE half of such an id is the same string
+# another activity.events source writes into `session` — i.e. that the two
+# populations really JOIN. Adding a tier without that being true produces rows
+# that look attributable and match nothing, which is worse than the empty column
+# this mechanism exists to fill.
+SESSION_JOINABLE_TIERS = ("claude", "opencode")
 SESSION_SRC_UNKNOWN = "unknown"
 # The CLOSED vocabulary of tier tags `derive_session_id` can emit. Pinned against
 # the tags PARSED OUT OF THE CLI SOURCE by test_browser_session_id.py::
@@ -390,7 +408,7 @@ SESSION_SRC_UNKNOWN = "unknown"
 # "CLAUDE", "claud" were all measured landing verbatim). Anything not in here is
 # reported as SESSION_SRC_UNKNOWN and carries no id — a new tier needs a CLI
 # change, which the two-way pin already forces you to declare.
-SESSION_TIER_TAGS = ("claude", "tmux", "sid", "ppid", "synthetic")
+SESSION_TIER_TAGS = ("claude", "opencode", "tmux", "sid", "ppid", "synthetic")
 
 # ---- Nested runs: the forwarded id is the PARENT, not the actor ------------ #
 # `browser agent "<goal>"` shells out to an opencode agent, and browser-agent
@@ -405,8 +423,18 @@ SESSION_TIER_TAGS = ("claude", "tmux", "sid", "ppid", "synthetic")
 #
 # So the nested tool declares itself. When this header is present we record the
 # forwarded id as `payload.origin_session` — the causal PARENT, somewhere nothing
-# can mistake it for the actor — and leave `session` EMPTY. Giving the nested
-# session an id of its own is a later change.
+# can mistake it for the actor — and leave `session` EMPTY.
+#
+# 🔴 STATUS UPDATE, replacing "Giving the nested session an id of its own is a
+# later change": for the `opencode-inherited` population that change has LANDED
+# (the `opencode:` tier above). Those calls now normally carry the opencode
+# session's own key and never reach this path at all — the token survives only as
+# the fallback for the ways `OPENCODE_SESSION_ID` can be missing (deploy skew, an
+# opencode process started before the plugin was deployed, the PTY path, a
+# plugin-load failure), enumerated in the CLI beside the guard that emits it.
+# The `browser-agent` population is UNCHANGED and still has no id of its own: its
+# tool sends the wrapper-captured PARENT id, so suppression is still the only
+# honest answer there.
 HDR_SESSION_ORIGIN = "X-Session-Origin"
 # The CLOSED ledger of origin tokens, and the marker for a declaration that is
 # present but not one of them.
@@ -891,7 +919,7 @@ def log(event: str, **fields) -> None:
 # hex(SHA256()) at query time, and a forgotten join silently returns zero rows,
 # which reads as a valid "no sessions matched" answer.
 # The tier gate and the origin gate are what keep this honest — see
-# SESSION_SRC_JOINABLE and HDR_SESSION_ORIGIN.
+# SESSION_JOINABLE_TIERS and HDR_SESSION_ORIGIN.
 #
 # 🔴 WHO ACTUALLY READS `session`, STATED CORRECTLY. An earlier draft of these
 # comments said "the column adoption-scan and the deadman read". That is FALSE
@@ -1132,6 +1160,20 @@ def _clean_session_field(value) -> str:
     return s
 
 
+def _is_joinable(tier, bare) -> bool:
+    """May this (tier, bare id) pair be written into a JOIN column?
+
+    ONE predicate for the two places that ask — `session` and `origin_session`.
+    They were open-coded as `tier == SESSION_SRC_JOINABLE and bare` at both
+    sites; widening the joinable set from one tag to several is exactly the edit
+    that gets applied to one copy and not the other, and the failure is silent
+    in both directions (a tier that stops joining empties the column; a tier that
+    joins on only one of the two sites makes the same id attributable in one
+    field and not the other).
+    """
+    return tier in SESSION_JOINABLE_TIERS and bool(bare)
+
+
 def _split_session_id(session_id):
     """`X-Session-Id` -> (tier, bare id), reading the tag the CLI put there.
 
@@ -1210,7 +1252,7 @@ def emit_cmd_event(op: str, key: str, outcome: str, duration_ms: int,
     throttle path for {reason, sess} — a fixed reason string + a coarse session
     hash, never page content).
 
-    SESSION ATTRIBUTION (see SESSION_SRC_JOINABLE / HDR_SESSION_ORIGIN):
+    SESSION ATTRIBUTION (see SESSION_JOINABLE_TIERS / HDR_SESSION_ORIGIN):
       * `attribute_session=False` (the default) — this call site has no caller
         session at all. Exactly ONE emit is in that category: the heartbeat,
         which a timer produces with no request behind it. NOTHING is added.
@@ -1222,7 +1264,7 @@ def emit_cmd_event(op: str, key: str, outcome: str, duration_ms: int,
       * `attribute_session=True` — `payload.sess_src` ALWAYS records the tier
         parsed off `session_id`, so every row is self-describing about why it
         does or does not carry a key. The `session` COLUMN is filled with the
-        BARE id only when that tier is SESSION_SRC_JOINABLE **and** no
+        BARE id only when `_is_joinable` accepts that tier **and** no
         `session_origin` was declared.
       * `session_origin` set — a NESTED run forwarding its invoker's id. `session`
         stays empty; the bare id is recorded as `payload.origin_session` (the
@@ -1284,9 +1326,9 @@ def emit_cmd_event(op: str, key: str, outcome: str, duration_ms: int,
                 # declares its origin unconditionally, so a `tmux:`/`sid:` parent
                 # id genuinely arrives here. The tier is on the row either way, so
                 # the suppressed population stays measurable.
-                if tier == SESSION_SRC_JOINABLE and bare:
+                if _is_joinable(tier, bare):
                     payload["origin_session"] = bare
-            elif tier == SESSION_SRC_JOINABLE and bare:
+            elif _is_joinable(tier, bare):
                 # 🔴 THE TIER GATE. Only the joinable tier may fill the `session`
                 # JOIN column; any other tier would merge unrelated sessions
                 # under one apparent key. Never widen this to a test on the id's

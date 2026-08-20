@@ -1259,6 +1259,28 @@ in
   home.file.".config/opencode/agent_ledger.py".source =
     ../scripts/lib/agent_ledger.py;
 
+  # 🔴 THE OPENCODE SESSION ID, exported into every bash tool as
+  # `OPENCODE_SESSION_ID` — what gives a nested opencode run an identity of its
+  # own. Without it anything opencode shells out to sees only the OUTER Claude
+  # Code session's `CLAUDE_CODE_SESSION_ID` (opencode inherits it and hands it
+  # to its tool shells verbatim), so `browser` could do nothing but fail closed
+  # and drop the attribution. With it, `derive_session_id` emits an
+  # `opencode:<id>` tier and the bridge writes a session key that JOINS the
+  # `source='opencode'` rows activity-plugin.js emits from the SAME sessionID.
+  #
+  # 🔴 A SEPARATE FILE from activity.js on purpose. `shell.env` is in the bash
+  # tool's pre-spawn critical path; the telemetry plugin is fire-and-forget and
+  # runs after a call completes. #298 is why those failure domains stay apart —
+  # one bad edit to activity-plugin.js killed ALL opencode telemetry on both
+  # hosts for ~11 hours. The file's own header carries the full argument.
+  #
+  # Same deployment constraints as guard.js/ledger.js/env.js: directly in
+  # `plugin/`, `.js` only, non-recursive glob, and NEVER also in `plugins/`.
+  # 🔴 A NEW file — it must be `git add`ed or the flake silently omits it and
+  # the switch succeeds with the variable simply never set.
+  home.file.".config/opencode/plugin/session-env.js".source =
+    ../scripts/opencode/plugin/session-env.js;
+
   # `shell.env` plugin — the only supported seam for putting environment into
   # opencode's bash tool (there is no `env` config key; setting one is silently
   # ignored). NOTE the bash tool DOES source .zshenv on this host — see the
