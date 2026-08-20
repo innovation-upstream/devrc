@@ -650,6 +650,93 @@ class TestBehindRemoteWritesNothing:
         assert "reset --keep" in err
         assert "ship.sh" in err, "the consequence is what makes this worth obeying"
 
+    # --- the remedy DEPENDS on the tree, and a dirty tree gets a different one ---
+    #
+    # 🔴 MEASURED 2026-08-19. An agent hit this refusal in a shared clone that was
+    # 90 commits behind with 38 uncommitted paths belonging to at least three
+    # sessions. It correctly declined the `merge --ff-only` this message printed —
+    # that repo's own rules forbid committing, adding, stashing, checking out or
+    # switching in the primary clone precisely because the tree is shared. The
+    # tool was recommending an operation the target repo bans, and the message's
+    # `ship.sh` framing (devrc-specific) was repeated back as fact about a repo
+    # `ship.sh` does not converge.
+
+    def _dirty_the_tree(self, repo: Path) -> str:
+        """Leave an uncommitted path that is NOT the handoff doc — i.e. the shape
+        of someone else's in-progress work."""
+        other = repo / "SOMEONE_ELSES_WIP.md"
+        other.write_text("another session is mid-edit here\n", encoding="utf-8")
+        return other.name
+
+    def test_a_DIRTY_checkout_is_NOT_told_to_fast_forward(
+        self, repo: Path, update_file: Path, tmp_path: Path
+    ) -> None:
+        """🔴 The load-bearing half. `merge --ff-only` into a tree holding another
+        session's work either refuses or overwrites it."""
+        self._advance_remote(repo, tmp_path)
+        self._dirty_the_tree(repo)
+        res = run_tool(repo, "--confirm", "--push", update=update_file)
+        assert res.returncode == 6, (res.returncode, res.stderr)
+        err = res.stderr
+        # 🔴 The property is "no PASTEABLE COMMAND", not "the string never
+        # appears". The dirty branch NAMES `merge --ff-only` inside the sentence
+        # explaining why not to run it, which is correct and must stay legal —
+        # an earlier version of this assertion forbade the string outright and
+        # would have banned explaining the hazard at all.
+        assert f"git -C {repo} merge --ff-only" not in err, (
+            "the tool handed over a runnable fast-forward for a tree that holds "
+            "uncommitted work"
+        )
+        assert "merge --ff-only" in err, (
+            "it should still NAME the operation it is warning against"
+        )
+        assert "THIS CHECKOUT IS DIRTY" in err
+        assert "worktree add" in err, "it must name the remedy, not just refuse one"
+        assert "HEAD:" in err, "the push must go HEAD->branch from the worktree"
+
+    def test_the_dirty_message_NAMES_the_paths_it_is_protecting(
+        self, repo: Path, update_file: Path, tmp_path: Path
+    ) -> None:
+        """A refusal that does not say WHAT it saw is one the caller second-guesses."""
+        self._advance_remote(repo, tmp_path)
+        name = self._dirty_the_tree(repo)
+        err = run_tool(repo, "--confirm", "--push", update=update_file).stderr
+        assert name in err, "the dirty path is the evidence for the whole branch"
+        assert "uncommitted path(s)" in err
+
+    def test_the_dirty_message_gates_worktree_REMOVAL_on_the_push(
+        self, repo: Path, update_file: Path, tmp_path: Path
+    ) -> None:
+        """Removing a worktree after a FAILED push deletes the branch ref and
+        orphans the commit — the recipe is incomplete without this."""
+        self._advance_remote(repo, tmp_path)
+        self._dirty_the_tree(repo)
+        err = run_tool(repo, "--confirm", "--push", update=update_file).stderr
+        assert "AFTER the push succeeds" in err
+        assert "orphans the commit" in err
+
+    def test_a_CLEAN_checkout_still_gets_the_fast_forward(
+        self, repo: Path, update_file: Path, tmp_path: Path
+    ) -> None:
+        """🔴 The negative control. Without it, "never suggest ff-only" would pass
+        every test above while making the clean case needlessly heavy — the
+        fast-forward is correct there and is the cheaper remedy."""
+        self._advance_remote(repo, tmp_path)
+        err = run_tool(repo, "--confirm", "--push", update=update_file).stderr
+        assert "merge --ff-only" in err
+        assert "This checkout is CLEAN" in err
+        assert "THIS CHECKOUT IS DIRTY" not in err
+
+    def test_the_ship_sh_claim_is_SCOPED_not_asserted_of_every_repo(
+        self, repo: Path, update_file: Path, tmp_path: Path
+    ) -> None:
+        """`ship.sh` converges devrc only. Stating it flatly taught a reader that a
+        stranded commit in an unrelated repo blocks it — they repeated the claim."""
+        self._advance_remote(repo, tmp_path)
+        err = run_tool(repo, "--confirm", "--push", update=update_file).stderr
+        assert "In a devrc checkout" in err, "the ship.sh consequence must be scoped"
+        assert "elsewhere" in err, "and the other case must be stated, not implied"
+
     def test_it_does_not_fire_when_the_remote_has_not_moved(
         self, repo: Path, update_file: Path
     ) -> None:
