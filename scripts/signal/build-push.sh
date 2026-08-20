@@ -229,7 +229,14 @@ choices=$(docker run --rm --entrypoint python3 "$IMAGE" \
 # deliberately, as this control demands: it is READ-ONLY — it reads the local
 # heartbeat file (or, with --from-db, the health row) and exits 0/1. It
 # transmits nothing, writes nothing, and is what the k8s liveness probe runs.
-want_choices="approve conversations draft drafts health reconcile run search send "
+#
+# `mute`/`unmute`/`muted` added 2026-08-19 with the group mute list. Acknowledged
+# deliberately, as this control demands. They write to ONE table
+# (`signal.excluded_groups`) that nothing else reads except the read predicate,
+# transmit nothing, and — the property that made this the chosen design — DELETE
+# nothing: `unmute` restores the conversation in full, because the messages were
+# never removed. `muted` is read-only.
+want_choices="approve conversations draft drafts health mute muted reconcile run search send unmute "
 if [[ "$choices" != "$want_choices" ]]; then
   echo "build-push: REFUSING TO PUSH — subcommand set is '$choices'," >&2
   echo "            expected '$want_choices'. Empty means the parse found no {…}" >&2
