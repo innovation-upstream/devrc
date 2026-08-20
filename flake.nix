@@ -63,6 +63,43 @@
         inherit system;
         config.allowUnfree = true;
       };
+
+      # ---------------------------------------------------------------------
+      # THE GATE'S TOOLCHAIN — ONE list, TWO consumers.
+      #
+      # `scripts/run-tests.sh` asserts a REQUIRED_TOOLS precondition and exits 2
+      # when a binary is missing, because the suites `skipif` on these and a
+      # missing one would take the run GREEN while testing less. That
+      # precondition is correct and stays. What it lacked was a discoverable way
+      # to SATISFY it: the FATAL named `flake.nix checks.pytests
+      # nativeBuildInputs`, which is a derivation you cannot stand in, so a
+      # contributor's only route was to reverse-engineer the list into an ad-hoc
+      # `nix-shell -p ...`. Getting that list wrong reads as a red gate that
+      # looks like a code failure.
+      #
+      # So the same list now also backs `devShells.default`, and the FATAL names
+      # `nix develop` (see run-tests.sh's GUARD 1). Hoisted to ONE binding
+      # rather than copied: two hand-maintained copies is how the shell that is
+      # supposed to satisfy the precondition drifts out of satisfying it, and
+      # that drift would resurface as exactly the message this fixes.
+      # `scripts/tests/test_devshell_satisfies_required_tools.py` pins the
+      # relationship in the other direction -- every REQUIRED_TOOLS entry must
+      # be reachable from this list.
+      # ---------------------------------------------------------------------
+      gatePyEnv = pkgs.python312.withPackages (ps: with ps; [
+        pytest
+        requests
+        psycopg2
+        minio
+        pyyaml
+      ]);
+      # Read the per-entry justifications on checks.pytests' nativeBuildInputs
+      # below before adding or removing anything here.
+      gateTools = [
+        gatePyEnv pkgs.bash pkgs.ripgrep pkgs.git pkgs.util-linux pkgs.jq
+        pkgs.gnugrep pkgs.curl pkgs.nodejs pkgs.nix pkgs.opencode pkgs.logrotate
+        pkgs.rsync
+      ];
     in
     {
       # ---------------------------------------------------------------------
@@ -119,17 +156,27 @@
       # Deps below cover the modules-under-test's import-time requirements
       # (requests/psycopg2/minio/pyyaml); the tests themselves mock the I/O.
       # ---------------------------------------------------------------------
+      # ---------------------------------------------------------------------
+      # `nix develop` — the environment `scripts/run-tests.sh` demands, by name.
+      #
+      # Built from the SAME `gateTools` list as checks.pytests below, so the
+      # shell a contributor is told to enter cannot drift out of satisfying the
+      # precondition that told them to enter it.
+      #
+      # This is a shell, NOT a second gate: `nix flake check` remains the
+      # hermetic authority (no network, no /home). The shell just makes the
+      # authoritative runner runnable by hand.
+      # ---------------------------------------------------------------------
+      devShells.${system}.default = pkgs.mkShell {
+        name = "devrc-gate";
+        packages = gateTools;
+        shellHook = ''
+          echo "devrc: gate toolchain ready — bash scripts/run-tests.sh ." >&2
+        '';
+      };
+
       checks.${system} = {
         pytests =
-        let
-          pyEnv = pkgs.python312.withPackages (ps: with ps; [
-            pytest
-            requests
-            psycopg2
-            minio
-            pyyaml
-          ]);
-        in
         pkgs.runCommandLocal "devrc-pytests"
           {
             # ripgrep: one repo-cos prescan test skipif's without it on PATH.
@@ -245,7 +292,12 @@
             # nix-shell-stripped-PATH method as the `nix` entry above reproduced
             # it. Present on the workbench (`~/.nix-profile/bin/rsync`), so the
             # pre-push tier is unaffected.
-            nativeBuildInputs = [ pyEnv pkgs.bash pkgs.ripgrep pkgs.git pkgs.util-linux pkgs.jq pkgs.gnugrep pkgs.curl pkgs.nodejs pkgs.nix pkgs.opencode pkgs.logrotate pkgs.rsync ];
+            # `gateTools` is defined in the outer `let` and is SHARED verbatim
+            # with devShells.default — see the block that defines it. Adding a
+            # tool there is what makes `nix develop` able to run this same
+            # runner by hand; adding it only here would put the gate and the
+            # shell back out of sync.
+            nativeBuildInputs = gateTools;
           }
           ''
             cp -r ${./.} src

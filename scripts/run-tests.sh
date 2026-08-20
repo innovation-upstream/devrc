@@ -216,6 +216,12 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 #           pytest.FAIL, not skip, when absent: this is the ONLY file that can
 #           see a resolver-semantics change under an unchanged config, so a skip
 #           there is precisely the silent green the version pin exists to stop.
+#   rsync   scripts/tests/test_subsystem_store_api.py, which drives the real
+#           scripts/subsystem-store-api/seed.sh — its copy step is
+#           `rsync -a --delete "$STORE"/ "$STAGE"/`. Without the binary those
+#           tests fail with rc 127 rather than skipping, deliberately: the
+#           property they pin is that seeding never writes to the local store,
+#           and that store is the only copy of client-confidential content.
 # logrotate: scripts/tests/test_claude_log_rotate.py drives the REAL binary
 # against a temp directory (rotation, truncation, generation cap, and the .bak
 # scope fence). Those tests FAIL rather than skip when it is absent — a skipped
@@ -238,9 +244,21 @@ fi
 if [ "${#missing_tools[@]}" -gt 0 ]; then
   echo "run-tests: FATAL — required tool(s) missing from PATH: ${missing_tools[*]}" >&2
   echo "  The suites SKIP the tests that need these, so the run would go green while" >&2
-  echo "  testing less. Add them to the caller's inputs (flake.nix checks.pytests" >&2
-  echo "  nativeBuildInputs / the pre-push nix-shell) — do NOT drop them from" >&2
-  echo "  REQUIRED_TOOLS to make this pass." >&2
+  echo "  testing less. This is a MISSING ENVIRONMENT, not a code failure — nothing" >&2
+  echo "  in the repo is broken and no test has run yet." >&2
+  echo >&2
+  echo "  FIX — enter the repo's own dev shell, which carries exactly this list," >&2
+  echo "  and re-run from there:" >&2
+  echo >&2
+  echo "      nix develop \"$ROOT\" --command bash \"$ROOT/scripts/run-tests.sh\" \"$ROOT\"" >&2
+  echo >&2
+  echo "  (or \`nix develop\` once, then \`bash scripts/run-tests.sh .\` as often as" >&2
+  echo "  you like). That shell is built from the SAME flake.nix \`gateTools\` list" >&2
+  echo "  as the \`nix flake check\` gate, so it cannot drift out of satisfying this" >&2
+  echo "  precondition." >&2
+  echo >&2
+  echo "  Do NOT drop entries from REQUIRED_TOOLS to make this pass — each one is" >&2
+  echo "  justified in the comment block directly above it." >&2
   exit 2
 fi
 
@@ -933,8 +951,30 @@ TARGET_FLOORS=(
   #
   #   _suggested_floor 5814 = 5814 - min(50, max(1, 290)) = 5814 - 50 = 5764
   #
+  #
+  # 2026-08-20, the gate-harness DX fix (the hook-tests directory that reported
+  # "no tests ran" over an INTERNALERROR, and the missing-tool FATAL that read
+  # as a broken gate), re-measured after a rebase onto fc1f581:
+  # 6201 -> 6219 collected, +18 across test_hook_tests_dir_collects.py and
+  # test_devshell_satisfies_required_tools.py.
+  #
+  # BOTH numbers MEASURED with `--collect-only` on scripts/tests, one in a clean
+  # detached worktree of origin/main and one on the rebased branch — not
+  # inferred, and not carried over from the earlier round of this same entry
+  # (which read 5947 -> 5962 against a29b97b and is now superseded: main moved
+  # four times while this branch was in review).
+  #
+  # 🔴 The pin this REPLACES was 5912, against a real count of 6201 on main
+  # alone — 289 of drift, none of it from here. The same thing happened to the
+  # entry before it (5764 pinned against 5947). Tests keep landing without the
+  # floor being re-pinned, so this table's sensitivity decays continuously
+  # between the contributions that happen to notice. Re-measure before trusting
+  # a number here; do not assume the last entry describes the current tree.
+  #
+  #   _suggested_floor 6219 = 6219 - min(50, max(1, 310)) = 6219 - 50 = 6169
+  #
   # ⚠ ZERO new skips from any contribution.
-  "scripts/tests|5764"
+  "scripts/tests|6169"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
