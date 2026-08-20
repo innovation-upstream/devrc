@@ -66,6 +66,7 @@ the last revision before the core/archive split.
 - [sibling-agent-kill](#sibling-agent-kill)
 
 **Shell & Tooling**
+- [grep-gitignore-blind](#grep-gitignore-blind)
 - [readlink-arbiter](#readlink-arbiter)
 - [zsh-unbraced-var](#zsh-unbraced-var)
 
@@ -801,6 +802,42 @@ absent, in the same tree, and produced the same 12 errors — correctly answerin
 these?" (no) and being misread as also answering "is the base red?" (it does not). Both arms
 shared the empty submodule, so the control was blind to the variable that mattered. Same shape as
 "a probe that fires identically on its own CONTROL attributes nothing".
+
+## grep-gitignore-blind
+*Supports: 🔴 "`grep` here is a FUNCTION wrapping ugrep, and `-r` HONOURS `.gitignore`."*
+
+Measured 2026-08-20 on the workbench. `type grep` resolves to a **shell function** defined in
+the Claude shell snapshot, wrapping **ugrep 7.5.0** — not GNU grep. ugrep's recursive mode
+honours `.gitignore`, so `grep -r` silently skips exactly the directories generated artefacts
+live in.
+
+Isolated with a controlled fixture rather than inferred:
+
+    mkdir -p D/sub && echo MARKER > D/sub/file.txt
+    grep -rl MARKER D            -> 1 file          # control: no .gitignore
+    printf '*\n' > D/.gitignore
+    grep -rl MARKER D            -> 0 files         # same tree, same pattern
+    find D -type f -print0 | xargs -0 grep -l MARKER -> 1 file
+
+The `.gitignore` is the whole variable; GNU grep finds it either way. Two rival theories were
+raised and **refuted**: `CACHEDIR.TAG`, and hidden-directory status — neither changes the
+result.
+
+**How it actually bit.** An agent auditing skip-lists ran `grep -r` for `.pytest_cache` and
+got a confident `0 hits` — for a directory it had *already watched a test fail on minutes
+earlier*. Every zero in that report about `.venv` / `.serena` / `.opencode` had to be
+re-measured with `find -print0 | xargs -0 grep`, using `.pytest_cache`'s non-zero count as the
+positive control.
+
+**Why it is worse than an ordinary wrong answer.** The failure is silent, directional (only
+ever under-reports), and lands precisely on the question agents ask most often about generated
+state — "is this artefact present anywhere?" It also inverts the usual advice: the more
+"correct" the invocation looks (`grep -r` over a repo), the more blind it is. A `0` here is
+indistinguishable from a real absence without a second, differently-built instrument.
+
+Related in kind: the repo's own content gates (`test_no_captured_text.py` et al.) read
+`git ls-files` and are blind to git history — same shape, different axis. An enumerator's
+blind spot is a property of the enumerator, never of the tree.
 
 ## sibling-agent-kill
 *Supports: 🔴 "With parallel agents this widens: also confirm `/proc/<pid>/cwd` is your OWN
