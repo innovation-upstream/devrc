@@ -117,11 +117,21 @@ DEMAND_TEXTS = {
     # pre-rewrite text and the eviction-half rewrite, because transcripts from
     # earlier in any window still carry the old wording.
     ":eos":     ["may need updating", "write the handoff first"],
-    ":acq":     ["recommend anything you think would be useful to include"],
+    # :acq's probe was "recommend anything you think would be useful to
+    # include", which matched NEITHER the pre- nor the post-2026-08-19
+    # expansion — a silent UNPROBED on the config's second-busiest snippet.
+    # Match the opener instead: it is the half that has never been reworded.
+    ":acq":     ["dispatch subagent to process feedback"],
     ":kickoff": ["kickoff message to copy paste to next session"],
     ":rna":     ["recommend next actions"],
     ":lr":      ["limit restored, resume agent"],
     ":mt":      ["tee up what we can do in the meantime"],
+    # Added 2026-08-19 with the snippets themselves. Without these the next
+    # /espanso-audit reports them UNPROBED and cannot re-measure the transcript
+    # demand that justified adding them in the first place.
+    ":alo":     ["left open or unaddressed from this session"],
+    ":pdt":     ["proceed, dispatch, include complete test coverage"],
+    ":cgt":     ["clawgate task to pick up the issues"],
 }
 # Substrings that DISQUALIFY a demand hit (one expansion containing another).
 DEMAND_EXCLUDE = {":cdp": ["prod-kubeconfig"]}
@@ -746,11 +756,23 @@ def declared_terms(ts, trig):
 def lint(ts):
     """Offline findings, worst first.
 
-    `unreachable` is the one that matters: `_attribute` returns None whenever a
-    term matches >=2 snippets, so a snippet with NO uniquely-resolving term
-    cannot be reached through the search UI AT ALL — which is how the four
-    :ssh* snippets read as dead while being searched for weekly. The old
-    "no trigger is a prefix of another" check is kept, but it has never fired.
+    🔴 EVERY finding here is about ATTRIBUTION, never about reachability.
+    espanso's search UI lists EVERY match as a row and the user picks one, so a
+    term matching >=2 snippets shows two rows — it does NOT fail. What breaks is
+    `_attribute`, which returns None on >=2 matches, so the fire is recorded
+    UNATTRIBUTED (`_close_search` emits the row either way). A snippet with no
+    uniquely-resolving term is therefore INVISIBLE TO THIS TOOL, not unreachable
+    to the user.
+
+    This docstring used to say such a snippet "cannot be reached through the
+    search UI AT ALL". That is false, and on 2026-08-19 an audit acted on it:
+    it stripped `label`+`search_terms` from the two nebula :ssh* snippets to
+    force uniqueness, which took 'nebula'/'mesh'/'remote' from 2 picker rows to
+    ZERO and made those rows render as their raw `ssh zach@...` expansion
+    (espanso falls back to the replacement text when a label is absent).
+    Fix ambiguity by changing which WORDS a snippet spells — never by removing
+    its label. The old "no trigger is a prefix of another" check is kept, but it
+    has never fired.
     """
     findings = []
     det = EspansoDetector(ts)
@@ -788,8 +810,11 @@ def lint(ts):
         if terms and not unique:
             findings.append({"kind": "unreachable", "trigger": trig,
                              "message": "NO declared term resolves uniquely to it — "
-                                        "every search that reaches it is ambiguous, "
-                                        "so it can never fire from the search UI"})
+                                        "every search that reaches it is ambiguous, so "
+                                        "its fires are recorded UNATTRIBUTED. It is "
+                                        "still reachable: espanso lists it as one row "
+                                        "among several. Fix by changing which WORDS it "
+                                        "spells — NEVER by removing its label"})
     for term in sorted(owners):
         m = _matches(term)
         if len(m) > 1:
@@ -804,10 +829,14 @@ _LINT_ORDER = {"unreachable": 0, "self-miss": 1, "undiscoverable": 2,
 
 
 def render_lint(findings, config_path):
-    out = [f"## LINT — offline discoverability check ({config_path})", "",
-           "   `_attribute` returns None when a term matches >=2 snippets, so an",
-           "   AMBIGUOUS term is a search that silently fires nothing — and a",
-           "   snippet with no unique term is UNREACHABLE from the search UI.", ""]
+    out = [f"## LINT — offline ATTRIBUTION check ({config_path})", "",
+           "   🔴 AMBIGUOUS IS NOT DEAD. espanso lists EVERY match as a row and",
+           "   the user picks one, so an ambiguous term still fires. What breaks",
+           "   is `_attribute` (None on >=2 matches), so the fire is logged",
+           "   UNATTRIBUTED — these findings are about TELEMETRY, not reach.",
+           "   Fix one by changing which WORDS a snippet spells. NEVER by",
+           "   removing its label: espanso then shows the raw expansion as the",
+           "   row text, and the snippet loses the picker entirely.", ""]
     if not findings:
         out.append("  (no findings)")
         out.append("")

@@ -563,7 +563,10 @@ def test_live_scraper_observes_the_real_config():
     # Multi-word entries: the case a naive whitespace split would shred.
     assert "in the meantime" in by_trig[":mt"]["search_terms"]
     assert "what can we do" in by_trig[":mt"]["search_terms"]
-    assert len(by_trig[":mt"]["search_terms"]) == 13
+    # `>=` not `==`: an exact count reds on adding an unrelated :mt term, which
+    # breaks nothing this control is about (it exists to prove the list-splitting
+    # regex works, and the two multi-word asserts above carry that).
+    assert len(by_trig[":mt"]["search_terms"]) >= 13
     assert by_trig[":kickoff"]["label"] == "Kickoff message for next session"
     # 🔴 Every snippet must keep a LABEL. espanso's picker falls back to showing
     # the raw `replace` text as the row description when a label is absent, and
@@ -571,10 +574,13 @@ def test_live_scraper_observes_the_real_config():
     # stripped the label+search_terms from :sshwn/:sshln — which blanked the
     # picker for 'nebula'/'mesh'/'remote' entirely. `dashbaord` is the one
     # deliberate exception (a typo-correction fired by typing it verbatim).
+    # `<=` not `==`: `dashbaord` is a zero-fire typo-correction and pruning it is
+    # a legitimate outcome of /espanso-audit, which `==` would turn red.
     labelless = sorted(t for t, m in by_trig.items() if not m["label"])
-    assert labelless == ["dashbaord"], (
+    assert set(labelless) <= {"dashbaord"}, (
         "these snippets have no label, so espanso will show their raw expansion "
-        "as the picker row and most queries cannot reach them: " + repr(labelless)
+        "as the picker row and most queries cannot reach them: "
+        + repr([t for t in labelless if t != "dashbaord"])
     )
 
 
@@ -590,6 +596,9 @@ _MT_TERMS = [
 
 
 def test_live_mt_search_terms_all_resolve_to_mt():
+    # ANTI-VACUITY: emptying the table below left this test green (measured
+    # 2026-08-19). A floor, not an exact count — adding terms is fine.
+    assert len(_MT_TERMS) >= 14, "_MT_TERMS shrank; this guard weakens silently"
     d = _live_det()
     unresolved = {}
     for term in _MT_TERMS:
@@ -628,6 +637,14 @@ _EXISTING_RESOLUTIONS = [
 
 
 def test_live_existing_resolutions_not_made_ambiguous():
+    # ANTI-VACUITY: emptying _EXISTING_RESOLUTIONS left this green (measured
+    # 2026-08-19), so the cheap way to "fix" a future failure is to delete the
+    # row that broke — which is exactly the regression this guard exists to
+    # catch. A floor, not an exact count.
+    assert len(_EXISTING_RESOLUTIONS) >= 20, (
+        "_EXISTING_RESOLUTIONS shrank — a pinned resolution was deleted rather "
+        "than fixed; that is the failure mode, not the fix"
+    )
     d = _live_det()
     bad = {}
     for term, want in _EXISTING_RESOLUTIONS:
@@ -645,10 +662,16 @@ def test_live_existing_resolutions_not_made_ambiguous():
 # that both spelled the host), so the fire was recorded UNATTRIBUTED. RED at
 # merge-base a29b97b, green here — not an invariant guard.
 #
-# 🔴 Each trailing entry pins a term the snippet's LABEL does NOT contain, so
-# deleting its search_terms kills the test. The first version pinned
+# 🔴 The LAST THREE pin a term the snippet's LABEL does NOT contain, so deleting
+# its search_terms kills the test. The first version pinned
 # 'unaddressed'/'proceed'/'clawgate', every one of which is spelled in its own
 # label — deleting all three snippets' search_terms left the suite fully green.
+# ('rig', ':sshwn') and ('portable', ':sshln') resolve via their LABEL by
+# design: for those two the label IS the interface, and their search_terms hold
+# no unique word at all. They pin the RESOLUTION, not the search_terms — an
+# earlier version of this comment claimed every entry was label-independent,
+# and a mutation sweep showed these two survive deleting the entry they were
+# supposed to guard. Do not count them as search_terms coverage.
 _AUDIT_2026_08_19_RESOLUTIONS = [
     ("lap", ":sshll"), ("ssh lap", ":sshll"), ("ssh wor", ":sshwl"),
     ("rig", ":sshwn"), ("portable", ":sshln"),
@@ -661,6 +684,10 @@ _AUDIT_2026_08_19_RESOLUTIONS = [
 
 
 def test_live_audit_2026_08_19_resolutions():
+    # ANTI-VACUITY: emptying the table left this green (measured 2026-08-19).
+    assert len(_AUDIT_2026_08_19_RESOLUTIONS) >= 8, (
+        "_AUDIT_2026_08_19_RESOLUTIONS shrank; this guard weakens silently"
+    )
     d = _live_det()
     bad = {}
     for term, want in _AUDIT_2026_08_19_RESOLUTIONS:
@@ -690,7 +717,20 @@ _PICKER_ROWS = [
 
 
 def test_live_picker_rows_stay_reachable():
-    """A query that listed rows must keep listing them, unique or not."""
+    """A query that listed rows must keep listing them, unique or not.
+
+    ANTI-VACUITY first: the relation below is `issubset`, deliberately (rows are
+    additive — a new snippet spelling 'nebula' is not a regression), but that
+    makes the cheap way to green a future failure "shrink `want`", degrading the
+    guard to nothing. Emptying the table, or any one expectation, must fail
+    HERE rather than pass silently.
+    """
+    assert _PICKER_ROWS, "_PICKER_ROWS is empty — this guard would pass vacuously"
+    empty = [term for term, want in _PICKER_ROWS if not want]
+    assert not empty, (
+        "these _PICKER_ROWS entries expect no rows, so they assert nothing "
+        "(set().issubset(x) is always True): " + repr(empty)
+    )
     d = _live_det()
     bad = {}
     for term, want in _PICKER_ROWS:

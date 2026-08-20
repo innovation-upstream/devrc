@@ -80,8 +80,9 @@ prune anything from a run that printed one.
   used snippet reachable only by an ambiguous query reads as 0. On
   2026-08-19 every observed ssh query was host-only (`lap`, `ssh wor`), which I
   read as "he doesn't care about the network axis" and proposed collapsing the
-  four `:ssh*` to nebula-only. Wrong: those queries fired nothing, so he fell
-  back to hand-typing — and `activity.events` showed all four endpoints live
+  four `:ssh*` to nebula-only. Wrong twice over: those queries were AMBIGUOUS,
+  not dead — they listed two picker rows and their fires were logged with no
+  trigger — and `activity.events` showed all four endpoints live
   with **LAN ahead of nebula** (laptop-LAN 4 shell invocations, workbench-LAN 3,
   workbench-nebula 1, laptop-nebula 0). The proposal would have deleted the two
   most-used. **0 fires is equally consistent with "unused" and "used constantly

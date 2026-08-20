@@ -186,9 +186,18 @@ in
           # prefix universe, checking BOTH picker rows and attribution — a
           # change that improves attribution while blanking picker rows is a
           # regression, and only the two-sided diff shows it.
-          { trigger = ":sshwn"; replace = "ssh zach@10.42.0.30"; label = "SSH rig via nebula mesh"; search_terms = ["nebula" "mesh" "remote" "rig"]; }
+          # 'rig' / 'portable' are deliberately NOT repeated in search_terms —
+          # they are already label words, and _token_matches reads labels, so a
+          # duplicate entry is dead config that only looks like a guard.
+          # They are COINED disambiguators, not measured queries: the repo says
+          # "rig" for the workbench (scripts/rig-control.sh, the rig-control bar
+          # button) but has no existing word for the laptop other than "laptop",
+          # which is the one word this snippet may not spell. Both nebula rows
+          # are found in practice via 'nebula'/'mesh'/'remote' + the picker;
+          # these words only stop the two rows reading identically.
+          { trigger = ":sshwn"; replace = "ssh zach@10.42.0.30"; label = "SSH rig via nebula mesh"; search_terms = ["nebula" "mesh" "remote"]; }
           { trigger = ":sshwl"; replace = "ssh zach@192.168.50.250"; label = "SSH workbench (LAN)"; search_terms = ["ssh" "workbench" "wb" "lan" "local"]; }
-          { trigger = ":sshln"; replace = "ssh zach@10.42.0.100"; label = "SSH portable via nebula mesh"; search_terms = ["nebula" "mesh" "remote" "portable"]; }
+          { trigger = ":sshln"; replace = "ssh zach@10.42.0.100"; label = "SSH portable via nebula mesh"; search_terms = ["nebula" "mesh" "remote"]; }
           { trigger = ":sshll"; replace = "ssh zach@192.168.50.155"; label = "SSH laptop (LAN)"; search_terms = ["ssh" "laptop" "lan" "local"]; }
 
           # hot singles
