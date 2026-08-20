@@ -234,7 +234,7 @@ export function hostDenied(host, allowList, denyList) {
 }
 
 // BROWSER_AGENT_ALLOWED_OPS — the operator's explicit op-set override (a space/
-// comma separated list). Unset/empty → ALLOWED_OPS_DEFAULT (the 11-op browser-only
+// comma separated list). Unset/empty → ALLOWED_OPS_DEFAULT (the 13-op browser-only
 // set). Set → it REPLACES the default wholesale, so it can both narrow the agent
 // (`"text,html"`) and deliberately re-enable an off-by-default op such as `upload`.
 // It is read from the wrapper's environment, which the MODEL cannot influence.
