@@ -392,12 +392,23 @@ def test_this_modules_own_stated_figures_are_re_measured():
     row_bytes = sum(len(ln.encode()) + 1 for ln in rows)
     bb = (REPO_ROOT / "scripts" / "browser-bridge" / "SKILL.md").stat().st_size
 
-    # Figures deliberately left hand-maintained, named so the gap is DECLARED:
+    # Figures deliberately left hand-maintained, named so the gap is DECLARED.
+    # 🔴 A round-5 audit found this dict INCOMPLETE on its first outing: six
+    # numeric claims were neither gated nor named, and corrupting all six at once
+    # left the suite green. The contract this dict exists to keep is that a gap is
+    # a DECLARATION, never a silence — so an incomplete UNGATED is worse than none,
+    # because it advertises a completeness it does not have. Five of the six are
+    # now gated below; the remainder is named here with its reason.
     UNGATED = {
         "§3 verdict-bullet mean (9 lines, 1,739 B, mean 193)":
             "extracting '§3 verdict bullets' needs a heading-and-bullet parser whose "
             "own drift would be invisible; the figure only sizes MIN_HEADROOM_BYTES, "
             "which this gate pins directly via 'true working room'",
+        "browser-bridge routes '~11x its own weight' (:32)":
+            "measured 11.05x today, but deriving it means summing that skill's whole "
+            "reference/ tree, which makes this gate depend on a SECOND skill's layout; "
+            "the load-bearing half of that sentence (browser-bridge MEETS the target) "
+            "is gated via 'browser-bridge size'",
     }
 
     # (label, regex with ONE capturing group, expected literal)
@@ -415,6 +426,18 @@ def test_this_modules_own_stated_figures_are_re_measured():
         ("routing-table bytes",      r"routing table \(3 rows, ([\d,]+) B",       f"{row_bytes:,}"),
         ("routing-table mean",       r"routing table \(3 rows, [\d,]+ B -> mean ([\d,]+) B/row", f"{row_bytes // len(rows):,}"),
         ("browser-bridge size",      r"browser-bridge MEETS it \(([\d,]+) B",     f"{bb:,}"),
+        # The three hand-maintained restatements of the target, in the module whose
+        # headline fix was "it pinned the cross-check against its own copy of the
+        # number". Each is a separate sentence, so each needs its own anchor.
+        ("target in the heading",    r"CEILING IS ABOVE THE ([\d,]+) B TARGET",   f"{target:,}"),
+        ("target in the preamble",   r"The skill states a ([\d,]+) B target",     f"{target:,}"),
+        ("target in the ratchet note", r"deliberately NOT set to ([\d,]+),",      f"{target:,}"),
+        # A SECOND copy of the routing-table mean, and a figure derived from it.
+        # This is the "second literal restating a gated figure" shape that rounds
+        # 2 and 3 both found stale, so gating one copy and not the other is the
+        # same defect with an extra step.
+        ("routing mean, restated",   r"at the real ([\d,]+) B/row",               f"{row_bytes // len(rows):,}"),
+        ("two mean routing rows",    r"two rows are ([\d,]+) B > ",               f"{2 * (row_bytes // len(rows)):,}"),
     ]
     problems = []
     for label, pattern, expected in checks:
