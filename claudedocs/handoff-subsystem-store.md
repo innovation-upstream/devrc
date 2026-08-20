@@ -483,10 +483,30 @@ verified against the live remote with `branch -r --contains`, not stale remote-t
 is an operator call: `git branch <topic> <sha> && git push -u origin <topic>`, confirm from another
 host, then decide whether the content is still wanted.
 
-### Two broken markers in the live store, now visible and still unfixed
-`datapacket-talos/tekton` carries an em-dash `RESOLVED —` and a colon-less `OPEN`, both written
-2026-08-19. `#560` made them visible on the index row; `#574` makes the class catchable at write
-time. Fixing the two bullets is a one-line edit each and closes the loop end to end.
+### ✅ RESOLVED 2026-08-20 — the two broken markers, and the third defect fixing them exposed
+**Both were an em-dash `RESOLVED —`.** ⚠ The "colon-less `OPEN`" this line named through several
+revisions **never existed** — the audit finding four paragraphs up ("100% (2/2) of the live
+near-misses are attempted `RESOLVED —` lines") was the accurate one, and the two claims sat in this
+same doc disagreeing. Each bullet now reads `RESOLVED <sha>:` naming the merge sha of the PR that
+landed it, each confirmed on that repo's default branch **before** being written: a bare `RESOLVED:`
+parses, but only trades the `NEAR-MISS` badge for `UNVERIFIABLE` (controlled — all four forms run
+through `openness_population`).
+
+🔴 **The half worth keeping is what the fix exposed.** One of those two bullets carried a SECOND
+marker, typed several lines into the bullet body instead of at its head. `_bullet_openness` reads a
+bullet's opening line and nothing else, so a correctly-spelled marker further down is simply
+unreachable — that declaration showed on no openness surface at all, and had only ever raised a
+badge **by accident**, through the broken `RESOLVED —` sitting above it. **So fixing the marker
+would otherwise have SILENCED a real open action** — re-verified against that repo the same day,
+still open. It is now its own top-level `OPEN:` bullet, and the index row reads `🔴 1 OPEN` where it
+read `🔴 2 NEAR-MISS`.
+**Input to `#574`'s shape population: this is a THIRD shape, not a near-miss.** A near-miss is a
+marker mis-spelled where the parser looks; this is a marker spelled correctly where the parser never
+looks — so it raises neither badge, and no surface today reads past a bullet's opening line.
+
+**The loop ran end to end** — badge → `--validate` → edit → re-validate — and the 2→0 near-miss move
+is a PAIR, not a bare zero: the pre-fix file was replayed through `--store <copy>` on the same
+command and printed `🔴 2 NEAR-MISS`, so the clean row is a measurement, not a wiring failure.
 
 ## Next steps (ranked)
 
@@ -495,10 +515,14 @@ time. Fixing the two bullets is a one-line edit each and closes the loop end to 
 1. 🔴 **DO NOT split read/write tokens yet — a TRIGGER, not a task.** Unchanged and still correct:
    the read-only posture is structural (`do_POST = do_PUT = do_PATCH = do_DELETE = _reject_write`),
    three tests pin it, and the split belongs in the phase-3 PR that adds a write route.
-2. **Fix the two broken markers** in `datapacket-talos/tekton` (above). Smallest item here and it
-   exercises the whole badge → validate → prune loop that shipped this week.
+2. ~~Fix the two broken markers in `datapacket-talos/tekton`~~ — **DONE 2026-08-20.** Both were
+   `RESOLVED —`, not the `RESOLVED —` + `OPEN` pair this doc claimed; and fixing them exposed a
+   third shape (a marker on a CONTINUATION line, invisible to every surface) that would have been
+   silenced by the fix. See the RESOLVED block above before designing item 3's shape population.
 3. **The four audit findings** (above), in the order listed. All measured, all reproducible, none
-   urgent.
+   urgent. 🔴 The `NEAR-MISS`-legend one is now measured over a live population of **zero** — the
+   2/2 it was derived from are the two just fixed. The finding stands; its sample no longer exists,
+   so do not re-derive the percentage from today's store.
 4. **Exercise the store under adversarial traffic.** Unchanged: the lockout, rate limiter and WAF
    have only seen well-formed probes — and layer 1's 10s mitigation window makes its behaviour under
    abuse a live question rather than an assumption.
