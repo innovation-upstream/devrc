@@ -939,8 +939,9 @@ def verb_dismiss(target, ws, fresh, args) -> Outcome:
 
 
 def verb_focus(target, ws, fresh, args) -> Outcome:
-    """Raise the target on the operator's screen. G5 is enforced in `main`
-    before this is ever called, so this function cannot fire as a side effect.
+    """Raise the target on the operator's screen. G5 is enforced at the top of
+    `run`, before resolution and before this is ever called, so this function
+    cannot fire as a side effect of another verb.
 
     RECORD -> RAISE -> RESTORE, with the restore covering BOTH tmux dimensions.
     """
