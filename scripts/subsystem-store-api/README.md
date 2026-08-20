@@ -50,8 +50,34 @@ GET /api/v1/search/{scope}?q=…[&threshold=&max_hits=&context=&all_scopes=]
 ```
 
 Every `/api/*` response carries `X-Store-Status`, `X-Store-Exit` (the CLI's own
-exit code, from the CLI's own `_exit_for`) and `X-Store-Revision` (the scope's
-git HEAD, or `unknown` — never a fabricated sha).
+exit code, from the CLI's own `_exit_for`), `X-Store-Revision` (the scope's
+git HEAD, or `unknown` — never a fabricated sha) and `X-Store-Snapshot`.
+
+🔴 **This server does NOT serve the authoritative store — it serves a COPY, and
+nothing syncs that copy.** `seed.sh` pushes it by hand; there is no CronJob and
+no timer. Yet every report opens with `ALL N entries in <scope>/, none omitted`
+— a completeness claim that is *true of this disk* and says nothing about the
+source. MEASURED 2026-08-20, four days after cutover: the public endpoint
+answered `200` with `ALL 5 entries in devrc/` while the source held **9**, and
+one served entry was a 40-day-old version of a file edited that morning.
+Reachability, auth, the client-IP chain and the firewall all verified green
+throughout, because none of them compares served bytes to the source.
+
+So every report now **dates itself**, in the body (first, before the claim it
+qualifies) and in `X-Store-Snapshot`:
+
+```
+seeded=<when seed.sh took the stage> newest=<newest entry mtime> entry-files=<N>
+```
+
+Two independent facts, because each covers the other's blind spot — a quiet week
+makes `newest` old while the copy is current; a forgotten re-seed makes `seeded`
+old while `newest` merely lags. **Each failure is its own name, never an
+omission**: `seeded=UNSTAMPED` (no stamp), `seeded=UNREADABLE` (present but
+empty/unreadable), `newest=UNREADABLE` (the walk hit an error) — all distinct
+from a genuinely empty store, which reads `newest=NONE entry-files=0`. The walk
+uses `os.walk(onerror=…)` rather than `Path.rglob` precisely because `rglob`
+swallows a permission error and would report an unreadable store as an empty one.
 
 🔴 **`scope-empty` and `store-unreachable` do not render alike.** Reached the
 store and found nothing → `200` + `X-Store-Status: scope-empty`. Read nothing at
