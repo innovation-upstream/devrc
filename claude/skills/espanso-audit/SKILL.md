@@ -60,9 +60,24 @@ prune anything from a run that printed one.
 - **~97% of fires go through the Ctrl+Space SEARCH UI**, so `label` +
   `search_terms` ARE the interface. A zero-fire snippet is usually a
   discoverability bug, not a content one (`:acq`, 2026-08-05).
-- 🔴 **The SEARCH stream only records searches that FAILED — never infer what he
-  USES from it.** `--terms` shows queries that resolved to nothing, so it is a
-  sample of failures, and reading a preference off it inverts the meaning. On
+- 🔴 **AMBIGUOUS IS NOT DEAD. `--lint`'s "can never fire from the search UI" is
+  about the TELEMETRY, not about espanso** — and acting on it literally makes
+  the snippets worse. espanso's picker lists EVERY match and the user arrows to
+  one, so two matches means two rows. The only thing uniqueness buys is
+  `_attribute` being able to NAME the snippet; without it the fire is still a
+  fire, just recorded UNATTRIBUTED (`_close_search` emits a row either way).
+  A snippet with no `label` is worse off, not better: espanso falls back to
+  showing its raw expansion as the row text. On 2026-08-19 a pass stripped
+  `label`+`search_terms` from the two nebula ssh snippets to force uniqueness
+  and took `'nebula'`/`'mesh'`/`'remote'` from 2 picker rows to **0**. **Fix
+  ambiguity by changing which WORDS a snippet spells, never by removing its
+  label.** And judge any candidate on BOTH axes — picker rows *and* attribution;
+  a diff that improves attribution while blanking rows is a regression.
+- 🔴 **A zero-fire snippet is not an unused one — never infer USE from the
+  search stream.** `--terms` does report attributed searches (it prints an
+  `### attributed` section, so it is *not* only a sample of failures), but the
+  fires it cannot attribute vanish into an UNATTRIBUTED bucket, so a heavily
+  used snippet reachable only by an ambiguous query reads as 0. On
   2026-08-19 every observed ssh query was host-only (`lap`, `ssh wor`), which I
   read as "he doesn't care about the network axis" and proposed collapsing the
   four `:ssh*` to nebula-only. Wrong: those queries fired nothing, so he fell
@@ -93,6 +108,14 @@ prune anything from a run that printed one.
   list caught it. **Always also run
   `pytest scripts/collector/keylog/tests/test_espanso_detect.py`**, which pins
   `_EXISTING_RESOLUTIONS` — and add the new snippet's own terms to it.
+  **Pin a term the snippet's LABEL does not spell**, or the guard passes with
+  every `search_terms` entry deleted (three such pins shipped on 2026-08-19).
+  🔴 **Neither gate sweeps the whole input space — diff the WHOLE PREFIX
+  UNIVERSE.** Enumerate every prefix of every word in both configs' triggers,
+  labels and terms, resolve each against both, and report four buckets: picker
+  rows lost, attribution lost, attribution gained, resolution moved. That is
+  what surfaced the 8 blanked nebula prefixes AND 17 newly-ambiguous ones that
+  both the replay diff and the pinned list called clean.
   🔴 That file's `test_live_scraper_observes_the_real_config` is a POSITIVE
   CONTROL pinned to a LONG `search_terms` list, so a scraper regex matching
   nothing cannot make the other guards vacuously true. If your edit strips the

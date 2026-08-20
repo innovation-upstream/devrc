@@ -565,14 +565,17 @@ def test_live_scraper_observes_the_real_config():
     assert "what can we do" in by_trig[":mt"]["search_terms"]
     assert len(by_trig[":mt"]["search_terms"]) == 13
     assert by_trig[":kickoff"]["label"] == "Kickoff message for next session"
-    # The 2026-08-19 strip is itself pinned: :sshwn/:sshln are deliberately
-    # direct-trigger-only so the LAN pair owns the searchable host word. If a
-    # future edit re-adds terms here, the four ssh resolutions below go
-    # ambiguous again — which is the bug this shape exists to prevent.
-    assert by_trig[":sshwn"]["search_terms"] == []
-    assert by_trig[":sshwn"]["label"] == ""
-    assert by_trig[":sshln"]["search_terms"] == []
-    assert by_trig[":sshln"]["label"] == ""
+    # 🔴 Every snippet must keep a LABEL. espanso's picker falls back to showing
+    # the raw `replace` text as the row description when a label is absent, and
+    # a label is also the main thing a query can match. A 2026-08-19 pass
+    # stripped the label+search_terms from :sshwn/:sshln — which blanked the
+    # picker for 'nebula'/'mesh'/'remote' entirely. `dashbaord` is the one
+    # deliberate exception (a typo-correction fired by typing it verbatim).
+    labelless = sorted(t for t, m in by_trig.items() if not m["label"])
+    assert labelless == ["dashbaord"], (
+        "these snippets have no label, so espanso will show their raw expansion "
+        "as the picker row and most queries cannot reach them: " + repr(labelless)
+    )
 
 
 # The queries the 2026-08-05 /espanso-audit measured him actually typing (plus
@@ -613,6 +616,11 @@ _EXISTING_RESOLUTIONS = [
     ("rit", ":eos"), ("kick", ":kickoff"), ("kic", ":kickoff"),
     ("recom", ":rna"), ("recommend", ":rna"),
     ("limit", ":lr"), ("resume", ":lr"), ("restored", ":lr"),
+    # 'ask' is the HIGHEST-traffic term in the whole config (58 fires in the
+    # 2026-08-06..19 window) and was the one term not pinned here. A snippet
+    # labelled with the word "task" silently takes it, because 'ask' ⊂ 'task'
+    # — that exact mutant survived a full green suite on 2026-08-19.
+    ("ask", ":acq"),
     ("feedback", ":acq"), ("dispatch", ":acq"), ("process", ":acq"),
     ("cc", ":cc"), ("kubecl", ":kuc"), ("spine", ":csc"), ("orch", ":cmo"),
     ("home", ":hlt"), ("prod", ":cpk"), ("datap", ":cdp"), ("civit prod", ":cpk"),
@@ -632,14 +640,19 @@ def test_live_existing_resolutions_not_made_ambiguous():
     )
 
 
-# REGRESSION coverage for the 2026-08-19 /espanso-audit. Each of the four ssh
-# terms was measured firing NOTHING on the pre-change config (`_attribute` ->
-# None, because two snippets per host both spelled that host), so this list is
-# RED at the parent commit and green here — not an invariant guard.
-# The three trailing entries pin the snippets added in the same commit.
+# REGRESSION coverage for the 2026-08-19 /espanso-audit. On the pre-change
+# config each ssh term was AMBIGUOUS (`_attribute` -> None over two snippets
+# that both spelled the host), so the fire was recorded UNATTRIBUTED. RED at
+# merge-base a29b97b, green here — not an invariant guard.
+#
+# 🔴 Each trailing entry pins a term the snippet's LABEL does NOT contain, so
+# deleting its search_terms kills the test. The first version pinned
+# 'unaddressed'/'proceed'/'clawgate', every one of which is spelled in its own
+# label — deleting all three snippets' search_terms left the suite fully green.
 _AUDIT_2026_08_19_RESOLUTIONS = [
     ("lap", ":sshll"), ("ssh lap", ":sshll"), ("ssh wor", ":sshwl"),
-    ("unaddressed", ":alo"), ("proceed", ":pdt"), ("clawgate", ":cgt"),
+    ("rig", ":sshwn"), ("portable", ":sshln"),
+    ("loose", ":alo"), ("tests", ":pdt"), ("pick up", ":cgt"),
 ]
 # NOT listed: bare "wor". It stays ambiguous with :mt, whose label says
 # "parallel WORK while that runs" — and it was never a query he typed (the
@@ -657,6 +670,36 @@ def test_live_audit_2026_08_19_resolutions():
     assert not bad, (
         "the 2026-08-19 audit's resolutions regressed "
         "(term -> (expected, actual, matching snippets)): " + repr(bad)
+    )
+
+
+# 🔴 PICKER coverage — a DIFFERENT question from attribution above.
+# espanso lists EVERY match as a row and the user picks one; ambiguity means
+# "two rows", NOT a dead query. Only `_attribute` needs uniqueness, and only so
+# telemetry can name the snippet. Conflating the two is what led a 2026-08-19
+# pass to STRIP these labels to force uniqueness — which blanked the picker for
+# every word that describes the nebula endpoints ('nebula'/'mesh'/'remote' went
+# from 2 rows to 0). Assert the rows stay REACHABLE; do not demand uniqueness.
+_PICKER_ROWS = [
+    ("nebula", {":sshwn", ":sshln"}),
+    ("mesh", {":sshwn", ":sshln"}),
+    ("remote", {":sshwn", ":sshln"}),
+    ("lan", {":sshwl", ":sshll"}),
+    ("ssh", {":sshwn", ":sshwl", ":sshln", ":sshll"}),
+]
+
+
+def test_live_picker_rows_stay_reachable():
+    """A query that listed rows must keep listing them, unique or not."""
+    d = _live_det()
+    bad = {}
+    for term, want in _PICKER_ROWS:
+        got = {t for t in d.ts.triggers if d._term_matches(term, t)}
+        if not want.issubset(got):
+            bad[term] = {"expected at least": sorted(want), "actual": sorted(got)}
+    assert not bad, (
+        "these queries no longer reach snippets they used to list in the "
+        "espanso picker (term -> rows): " + repr(bad)
     )
 
 

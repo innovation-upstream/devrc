@@ -157,32 +157,38 @@ in
           { trigger = ":hlt"; replace = "${workspace}/homelab-talos "; label = "homelab-talos path"; search_terms = ["infra"]; }
           { trigger = ":kuc"; replace = "${workspace}/kubeclaw "; label = "kubeclaw path"; search_terms = ["kubeclaw"]; }
 
-          # SSH connect — 2026-08-19 /espanso-audit. All four were `unreachable`
-          # in --lint: `_token_matches` tests a token as a SUBSTRING of the
-          # trigger, of any LABEL word, or of any search_term, so while two
-          # snippets per host both spell that host, a bare host query matches
-          # both and `_attribute` returns None. Measured: 'lap', 'lap ',
-          # 'ssh lap', 'ssh wor' all fired NOTHING.
-          # No search_terms edit can fix that — the label collides on its own.
-          # So the LAN variants keep the searchable host word and the nebula
-          # ones become direct-trigger-only (the `dashbaord` shape, which is the
-          # one shape with proven direct traffic). That costs nothing they had:
-          # --lint proves they were ALREADY unreachable from search, 0 fires.
-          # LAN owns the word because LAN is the MORE-USED endpoint — over the
-          # 13-day window, real `ssh` invocations in activity.events were
-          # laptop-LAN 4, workbench-LAN 3, workbench-nebula 1, laptop-nebula 0.
-          # 🔴 Do NOT "simplify" this by deleting the LAN or the nebula pair:
-          # all four endpoints are in live use. An earlier pass in this audit
-          # proposed collapsing to nebula-only after reasoning from the SEARCH
-          # stream alone — which only records searches that FAILED to resolve,
-          # so it cannot see the endpoints being hand-typed instead. It would
-          # have deleted the two most-used ones. Query the usage signal, not the
-          # search signal, before touching this block.
-          # Gate: `espanso-usage.py --replay --config <candidate>` — 0 regressions,
-          # 4 newly-resolving searches, unreachable 4 -> 0.
-          { trigger = ":sshwn"; replace = "ssh zach@10.42.0.30"; }
+          # SSH connect — 2026-08-19 /espanso-audit, CORRECTED after review.
+          # 🔴 READ THIS BEFORE TRUSTING `--lint`: an AMBIGUOUS search is NOT a
+          # failed one. espanso's search UI lists EVERY match and the user picks
+          # a row; two matches means two rows, not a dead query. What breaks on
+          # ambiguity is only `espanso_detect._attribute`, which returns None
+          # when a term hits >=2 snippets and so records the fire as
+          # UNATTRIBUTED. `--lint`'s wording ("can never fire from the search
+          # UI") describes the TELEMETRY, not espanso, and overclaims.
+          # The first pass here read that literally, concluded 'lap'/'ssh wor'
+          # "fired nothing", and STRIPPED the nebula pair's label+search_terms.
+          # That traded the user's discoverability for tidier telemetry and was
+          # strictly worse: 'nebula', 'mesh' and 'remote' went from 2 picker
+          # rows to ZERO, and with no label espanso falls back to showing the
+          # raw `ssh zach@10.42.0.30` as the row's description.
+          # So: labels stay. The nebula pair simply stops SPELLING the host
+          # word, which is what made the bare host query ambiguous — `rig` and
+          # `portable` carry the host sense instead. Net effect:
+          #   'lap' / 'ssh lap' -> :sshll, 'ssh wor' -> :sshwl   (now unique)
+          #   'nebula'/'mesh'/'remote'   -> both nebula rows     (picker, kept)
+          # All four endpoints are in live use — real `ssh` invocations in
+          # activity.events over the window were laptop-LAN 4, workbench-LAN 3,
+          # workbench-nebula 1, laptop-nebula 0 — so do NOT "simplify" by
+          # deleting either pair. An earlier pass proposed collapsing to
+          # nebula-only by reasoning from the search stream; that would have
+          # deleted the two most-used endpoints. Query the USAGE signal.
+          # Gate: build both configs and diff resolutions across the whole
+          # prefix universe, checking BOTH picker rows and attribution — a
+          # change that improves attribution while blanking picker rows is a
+          # regression, and only the two-sided diff shows it.
+          { trigger = ":sshwn"; replace = "ssh zach@10.42.0.30"; label = "SSH rig via nebula mesh"; search_terms = ["nebula" "mesh" "remote" "rig"]; }
           { trigger = ":sshwl"; replace = "ssh zach@192.168.50.250"; label = "SSH workbench (LAN)"; search_terms = ["ssh" "workbench" "wb" "lan" "local"]; }
-          { trigger = ":sshln"; replace = "ssh zach@10.42.0.100"; }
+          { trigger = ":sshln"; replace = "ssh zach@10.42.0.100"; label = "SSH portable via nebula mesh"; search_terms = ["nebula" "mesh" "remote" "portable"]; }
           { trigger = ":sshll"; replace = "ssh zach@192.168.50.155"; label = "SSH laptop (LAN)"; search_terms = ["ssh" "laptop" "lan" "local"]; }
 
           # hot singles
@@ -263,7 +269,7 @@ in
           # `espanso-usage.py --replay --config <candidate>` after ANY edit here
           # and diff it against the deployed config: 0 regressions is the gate.
           { trigger = ":alo"; replace = "determine if anything is left open or unaddressed from this session and overall thread"; label = "Anything left open or unaddressed - session and thread"; search_terms = ["open" "left open" "loose" "outstanding" "remaining" "unfinished" "unaddressed"]; }
-          { trigger = ":pdt"; replace = "proceed, dispatch, include complete test coverage"; label = "Proceed with complete test coverage"; search_terms = ["proceed" "coverage" "test coverage" "complete"]; }
+          { trigger = ":pdt"; replace = "proceed, dispatch, include complete test coverage"; label = "Proceed with complete test coverage"; search_terms = ["proceed" "coverage" "test coverage" "complete" "tests"]; }
           { trigger = ":cgt"; replace = "create a /clawgate task to pick up the issues"; label = "Create a clawgate ticket for the issues"; search_terms = ["clawgate" "ticket" "issues" "pick up"]; }
           # Removed 2026-07-25 via /espanso-audit — all keylog-evidence-backed:
           #  ZERO-FIRE set — 0 keylog fires + short-form hand-typing; steering already in
