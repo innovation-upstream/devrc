@@ -19,6 +19,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -3345,3 +3346,87 @@ def test_the_fallback_state_set_MATCHES_the_deadman_it_stands_in_for():
             "bar-status-poll never mentions the %r state — its fallback set "
             "cannot contain it" % state)
 
+
+
+# ---------------------------------------------------------------------------
+# 🔴 THE BLOCK/SCRIPT GATE SEAM — a block and the script it commands are
+# declared in two places that nothing forced to agree.
+# ---------------------------------------------------------------------------
+
+_SCRIPTS_DIR_CMD = re.compile(r'command\s*=\s*"\$\{scriptsDir\}/([\w.-]+)')
+_BLOCK_DEF = re.compile(r'^  (\w+Block) = \{\n(.*?)^  \};', re.S | re.M)
+_HOME_FILE = re.compile(
+    r'^\s*home\.file\."\.config/i3status-rust/scripts/([\w.-]+)"\s*=\s*(.*)$', re.M)
+
+
+def _graphical_nix():
+    return (SCRIPTS.parent / "nix" / "graphical.nix").read_text()
+
+
+def _block_gates(nix):
+    """blockName -> True if it reaches the bar on EVERY host (ungated)."""
+    body = nix.split("  blocks =", 1)[1].split("\nin\n", 1)[0]
+    gates = {}
+    for line in body.splitlines():
+        if "Block" not in line:
+            continue
+        ungated = "isLaptop" not in line
+        for name in re.findall(r"\b(\w+Block)\b", line):
+            # a block listed twice keeps the WIDEST gate it appears under
+            gates[name] = gates.get(name, False) or ungated
+    return gates
+
+
+def test_every_custom_block_script_is_DEPLOYED_UNDER_A_COMPATIBLE_GATE():
+    """🔴 A block and its script are declared in two places, and nothing made
+    them agree. `loadBlock` shipped in the UNCONDITIONAL half of `blocks` while
+    its `home.file` carried `lib.mkIf (!isLaptop)` — so the laptop rendered a
+    `custom` block whose command did not exist. Every other workbench-only
+    block (airvpn, clawgate, mail, ...) is gated in BOTH places; this one was
+    gated in one, and no test could see the difference.
+
+    The sibling guard above only covers blocks that load `bar_freshness.py`.
+    This one covers EVERY scriptsDir-backed custom block:
+
+      1. a block commanding `${scriptsDir}/X` must have a `home.file` for X;
+      2. `../scripts/X` must EXIST (a flake silently omits an untracked file,
+         so in the nix check an un-`git add`ed script is simply absent here);
+      3. a block that reaches EVERY host must not have its script deployed
+         under a NARROWER gate than the block itself.
+    """
+    nix = _graphical_nix()
+    gates = _block_gates(nix)
+    deployed = dict(_HOME_FILE.findall(nix))
+
+    problems = []
+    checked = 0
+    for block, body in _BLOCK_DEF.findall(nix):
+        m = _SCRIPTS_DIR_CMD.search(body)
+        if not m:
+            continue  # not a scriptsDir-backed custom block
+        script = m.group(1)
+        checked += 1
+        if script not in deployed:
+            problems.append(
+                "%s commands %s but has no home.file entry — the block would "
+                "render with a missing command on every host" % (block, script))
+            continue
+        if not (SCRIPTS / script).exists():
+            problems.append(
+                "%s is deployed by home.file but ../scripts/%s does not exist "
+                "(un-`git add`ed? a flake omits untracked files silently)"
+                % (block, script))
+        if gates.get(block) and "mkIf" in deployed[script]:
+            problems.append(
+                "%s reaches the bar on EVERY host but %s is deployed under "
+                "`%s` — the ungated hosts get a block whose command is absent"
+                % (block, script, deployed[script].strip()))
+
+    # positive control: a zero here would make every assertion below vacuous.
+    assert checked >= 8, (
+        "only %d scriptsDir-backed blocks matched — the block/home.file "
+        "regexes stopped matching, so this test is checking nothing" % checked)
+    assert not problems, (
+        "block/script gate seam broken:\n  " + "\n  ".join(problems)
+        + "\n\nGate the block and its script the SAME way, in both places."
+    )

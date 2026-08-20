@@ -91,6 +91,24 @@ let
       { button = "left"; cmd = btopCmd; }
     ];
   };
+  # load: 1-minute load average, read straight from /proc/loadavg (no cache, no
+  # poller, no `bar_freshness` sibling — nothing here can go stale). Invisible
+  # below the warning threshold; Warning at the core count (matching
+  # cpu-monitor's alert threshold); Critical at 2x cores. Left-click → btop.
+  #
+  # 🔴 UNCONDITIONAL on purpose, in BOTH places — this entry and the `home.file`
+  # below. /proc/loadavg exists on every host, so there is no reason to gate it;
+  # gating only ONE of the two is what ships a block pointing at a script that
+  # was never deployed. `test_bar_status.py` now enforces that pairing.
+  loadBlock = {
+    block = "custom";
+    command = "${scriptsDir}/i3status-load";
+    json = true;
+    interval = 5;
+    click = [
+      { button = "left"; cmd = btopCmd; }
+    ];
+  };
   # temperature: per-host chip. Workbench is AMD (k10temp; Tctl = CPU package temp).
   # Laptop is Intel (coretemp). Validated on workbench via `sensors -u k10temp-*`.
   temperatureBlock = {
@@ -333,7 +351,7 @@ let
   };
 
   blocks =
-    [ memoryBlock diskBlock netBlock cpuBlock temperatureBlock ]
+    [ memoryBlock diskBlock netBlock cpuBlock loadBlock temperatureBlock ]
     ++ lib.optional (!isLaptop) gpuBlock
     ++ lib.optional isLaptop batteryBlock
     ++ [ soundBlock ]
@@ -415,6 +433,13 @@ lib.mkIf isNixOS {
   };
   home.file.".config/i3status-rust/scripts/i3status-claude-runs" = {
     source = ../scripts/i3status-claude-runs;
+    executable = true;
+  };
+  # load: see `loadBlock` above. UNCONDITIONAL, matching the block's presence in
+  # the unconditional half of `blocks` — a narrower gate here than there means a
+  # host renders a `custom` block whose command does not exist.
+  home.file.".config/i3status-rust/scripts/i3status-load" = {
+    source = ../scripts/i3status-load;
     executable = true;
   };
   # 🔴 claude_sessions.py is a CO-LOCATED SIBLING MODULE, not a block — the same

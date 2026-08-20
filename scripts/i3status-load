@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+"""i3status-rust custom block: 1-minute load average.
+
+Reads /proc/loadavg DIRECTLY — no cache file, no poller, no network. Unlike the
+count pills this block has no `bar_freshness` sibling to load and no
+`--red-above` plumbing: load is a purely local, always-available reading, so
+there is nothing that can go stale and nothing to intercept.
+
+CALM rendering (colour == "look at me"):
+  load <  warning    -> empty text, Idle  (hide-at-zero: not yet actionable)
+  load >= warning    -> `N.N`, Warning
+  load >= critical   -> `N.N`, Critical
+
+Thresholds come from the ENVIRONMENT, not from argv — this block parses no
+arguments. `LOAD_WARNING` defaults to the core count (matching cpu-monitor's
+alert threshold); `LOAD_CRITICAL` defaults to twice it.
+
+🔴 `warning` is the SOLE visibility threshold, deliberately. An earlier draft
+gated visibility on the core count *before* consulting `warning`, which meant
+lowering LOAD_WARNING below the core count silently did nothing — the knob was
+inert in the only direction anyone would turn it. Lowering it must make the
+block appear EARLIER, or it is not a warning threshold.
+
+The left-click opens btop (wired in nix/graphical.nix).
+"""
+import json
+import os
+import sys
+
+ICON = "utilities-system-monitor"
+_EMPTY = {"text": "", "state": "Idle"}
+
+
+def read_load():
+    """Read the 1-minute load average from /proc/loadavg. Returns float or None."""
+    try:
+        with open("/proc/loadavg") as f:
+            return float(f.read().split()[0])
+    except Exception:
+        return None
+
+
+def render(load_val, warning, critical):
+    """Pure: load value -> i3status-rust block dict.
+
+    Takes no `cores` argument on purpose — the core count is only ever the
+    DEFAULT for `warning`, resolved by the caller. Threading it in here is what
+    let it override the explicit threshold.
+    """
+    if load_val is None:
+        return {"icon": ICON, "text": "?", "short_text": "?", "state": "Warning"}
+    if load_val >= critical:
+        state = "Critical"
+    elif load_val >= warning:
+        state = "Warning"
+    else:
+        return dict(_EMPTY)
+    text = "%.1f" % load_val
+    return {"icon": ICON, "text": text, "short_text": text, "state": state}
+
+
+def threshold(env_name, default):
+    """Read a float threshold from the environment, falling back to `default`.
+
+    A malformed value raises, so it surfaces as the visible `?` pill rather
+    than silently reverting to the default and pretending it was configured.
+    """
+    raw = os.environ.get(env_name)
+    return default if raw is None or raw == "" else float(raw)
+
+
+def main():
+    cores = os.cpu_count() or 1
+    warning = threshold("LOAD_WARNING", float(cores))
+    critical = threshold("LOAD_CRITICAL", float(cores) * 2)
+    out = render(read_load(), warning, critical)
+    sys.stdout.write(json.dumps(out) + "\n")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception:
+        # Last-resort: a visible `?` pill, never the invisible empty one — a
+        # silently blank block is indistinguishable from "load is fine".
+        sys.stdout.write(
+            '{"icon": "%s", "text": "?", "short_text": "?", '
+            '"state": "Warning"}\n' % ICON)
+        sys.exit(0)
