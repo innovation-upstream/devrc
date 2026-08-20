@@ -27,6 +27,20 @@ let
   alertsRedAbove = 34;
   civitaiRedAbove = 340;
 
+  # Load-pill thresholds. 🔴 `loadWarnAbove` MUST equal `CPU_MON_THRESHOLD` in
+  # nix/home.nix — the pill and cpu-monitor's toast are two renderings of ONE
+  # decision, and the same drift already bit the alerts pill (34 vs 30, see
+  # above). Pinned two-way by
+  # `test_bar_status.py::test_the_load_pill_threshold_MATCHES_cpu_monitors`.
+  #
+  # NOT the core count. cpu-monitor was deliberately raised to a flat 48 on
+  # 2026-08-05 to cut toast volume (measured: 123-267/day -> 11-32/day, see
+  # nix/home.nix:298). Keying the pill off `nproc` instead would warn at 24 on
+  # the workbench — which idles in the twenties — re-creating exactly the noise
+  # that change removed.
+  loadWarnAbove = 48;
+  loadCritAbove = 72;   # 1.5x the alert threshold: worse than "we already told you"
+
   # Floating btop for the vitals-block left-clicks (memory/cpu/temperature/gpu).
   # `float,float` matches the existing i3 float rule so it opens as a float.
   # Explicit dimensions are REQUIRED — btop refuses to render ("terminal size too
@@ -87,6 +101,30 @@ let
     info_cpu = 85;
     warning_cpu = 85;
     critical_cpu = 95;
+    click = [
+      { button = "left"; cmd = btopCmd; }
+    ];
+  };
+  # load: 1-minute load average, read straight from /proc/loadavg (no cache, no
+  # poller, no `bar_freshness` sibling — nothing here can go stale). Invisible
+  # below `loadWarnAbove`; Warning at it (the SAME number cpu-monitor toasts
+  # on); Critical at `loadCritAbove`. Both come from the single source at the
+  # top of this file — see the 🔴 there for why it is not the core count.
+  # Left-click → btop.
+  #
+  # 🔴 UNCONDITIONAL on purpose, in BOTH places — this entry and the `home.file`
+  # below. /proc/loadavg exists on every host, so there is no reason to gate it;
+  # gating only ONE of the two is what ships a block pointing at a script that
+  # was never deployed. `test_bar_status.py` now enforces that pairing.
+  loadBlock = {
+    block = "custom";
+    command = "${scriptsDir}/i3status-load --warning ${toString loadWarnAbove} --critical ${toString loadCritAbove}";
+    json = true;
+    # 15s, not 5s. This spawns a python process every tick forever on every
+    # host; at 5s that is ~17k spawns/day for a value that is a ONE-MINUTE
+    # average and cannot move meaningfully faster. The sibling custom blocks
+    # are 15-30s.
+    interval = 15;
     click = [
       { button = "left"; cmd = btopCmd; }
     ];
@@ -333,7 +371,7 @@ let
   };
 
   blocks =
-    [ memoryBlock diskBlock netBlock cpuBlock temperatureBlock ]
+    [ memoryBlock diskBlock netBlock cpuBlock loadBlock temperatureBlock ]
     ++ lib.optional (!isLaptop) gpuBlock
     ++ lib.optional isLaptop batteryBlock
     ++ [ soundBlock ]
@@ -415,6 +453,13 @@ lib.mkIf isNixOS {
   };
   home.file.".config/i3status-rust/scripts/i3status-claude-runs" = {
     source = ../scripts/i3status-claude-runs;
+    executable = true;
+  };
+  # load: see `loadBlock` above. UNCONDITIONAL, matching the block's presence in
+  # the unconditional half of `blocks` — a narrower gate here than there means a
+  # host renders a `custom` block whose command does not exist.
+  home.file.".config/i3status-rust/scripts/i3status-load" = {
+    source = ../scripts/i3status-load;
     executable = true;
   };
   # 🔴 claude_sessions.py is a CO-LOCATED SIBLING MODULE, not a block — the same
