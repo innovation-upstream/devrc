@@ -508,32 +508,58 @@ looks — so it raises neither badge, and no surface today reads past a bullet's
 is a PAIR, not a bare zero: the pre-fix file was replayed through `--store <copy>` on the same
 command and printed `🔴 2 NEAR-MISS`, so the clean row is a measurement, not a wiring failure.
 
+### 🔴 DECISION PENDING — the skills do NOT read the hosted store, and "just point them at it" is wrong
+- **Symptom:** operator asked to "ensure the skill is updated to use the hosted store".
+  **Measured: `store.zacx.dev` appears in ZERO files** under `claude/` and `scripts/lib/`
+  (`grep -rn`); all seven skill files that reference the reader use the local filesystem.
+- **Why the literal request is a REGRESSION on these two hosts, and this is the argument
+  to re-read before acting:** the hosted copy is a snapshot that drifts — that is the
+  defect `#607` exists to make *visible*, so routing the read path through it means
+  consuming it deliberately. `subsystem_recall` documents its no-subprocess/no-network
+  property as load-bearing for the `/resume` hot path; hosted adds network + bearer token
+  + Cloudflare + a 10s-window rate limiter to every session start, to read data that is by
+  construction no fresher than local and usually staler.
+- **Ruled out:** that this is a false economy about latency — the objection is
+  *correctness*, not speed. Local is authoritative and free; hosted is a copy.
+- **Leading hypothesis (the design that is actually wanted):** **prefer local, fall back to
+  hosted only when there is no local store** — a phone, a cloud session, a host without the
+  checkout, which is this project's own stated "reachable from anywhere" goal. On fallback,
+  print the snapshot stamp `#607` just added: that stamp is precisely what makes reading a
+  copy safe, and it did not exist until today.
+- **Next probe (verbatim):** decide fallback-vs-switch with the operator first. If
+  fallback: add `SUBSYSTEM_STORE_URL` + token resolution to `subsystem_recall.py`, try
+  local first, and on fallback surface `X-Store-Snapshot` verbatim in the caveat line.
+  Not started — no code was written for this.
+
+### 18 PRs are open across the two repos and their CI state is UNREAD
+- **Observed:** devrc **10** open, homelab-infra **8**. Most report `mergeable=UNKNOWN`,
+  which means GitHub has not computed it — *not* that they are fine. One is
+  `#355 🔴 DO-NOT-MERGE-YET: airvpn killswitch`. Four are Renovate dep bumps.
+- **Not acted on, deliberately.** An instruction to "merge the prs" was ambiguous between
+  this session's three (already merged) and these 18; mass-merging across a repo that
+  reconciles to a live cluster is not a move to make on an ambiguous instruction.
+- **Next probe (verbatim):** per PR, `gh pr checks <n>` **and** a merged-tree run — never
+  `mergeable=CLEAN` alone, which on a repo with no CI is a much weaker claim and on one
+  with CI is byte-identical before and after the checks register (measured again today:
+  homelab `#362` read `CLEAN` with `no checks reported`, then `tekton/gitops-validate`
+  registered and passed).
+
 ## Next steps (ranked)
 
-0. ~~Verify the Cloudflare WAF rate rule exists~~ — **DONE 2026-08-19, answer was NO.** Layer 1 now
-   exists as a 10s throttle, declared in no repo. See the RESOLVED block above.
-1. 🔴 **DO NOT split read/write tokens yet — a TRIGGER, not a task.** Unchanged and still correct:
-   the read-only posture is structural (`do_POST = do_PUT = do_PATCH = do_DELETE = _reject_write`),
-   three tests pin it, and the split belongs in the phase-3 PR that adds a write route.
-2. ~~Fix the two broken markers in `datapacket-talos/tekton`~~ — **DONE 2026-08-20.** Both were
-   `RESOLVED —`, not the `RESOLVED —` + `OPEN` pair this doc claimed; and fixing them exposed a
-   third shape (a marker on a CONTINUATION line, invisible to every surface) that would have been
-   silenced by the fix. See the RESOLVED block above before designing item 3's shape population.
-3. **The four audit findings** (above), in the order listed. All measured, all reproducible, none
-   urgent. 🔴 The `NEAR-MISS`-legend one is now measured over a live population of **zero** — the
-   2/2 it was derived from are the two just fixed. The finding stands; its sample no longer exists,
-   so do not re-derive the percentage from today's store.
-4. **Exercise the store under adversarial traffic.** Unchanged: the lockout, rate limiter and WAF
-   have only seen well-formed probes — and layer 1's 10s mitigation window makes its behaviour under
-   abuse a live question rather than an assumption.
-5. **The store's own roadmap:** the entry-fidelity audit skill, and the "does a generic journal
-   belong" question. A design decision to make, not code to ship — do not start it as filler work.
-6. **PARKED by decision 2026-08-19:** move konnectivity + Calico v6 onto the private network.
-   Root cause known and unchanged (`IP_AUTODETECTION_METHOD` pins v4 to the private CIDR; **no
-   `IP6_AUTODETECTION_METHOD` exists**, so v6 autodetect takes the first global address). Blocked on
-   a prerequisite: the private NIC carries only link-local v6, so a ULA must be assigned to both
-   nodes first. Neither k0sctl config pins `spec.k0s.version`, so `k0sctl apply` may attempt a k0s
-   upgrade — fix that before applying anything that way. BGP has **no MD5 auth on either family**.
+1. 🔴 **Decide the hosted-store read path** (above). It is a design question, not code:
+   fallback-when-no-local, or switch outright. Nothing should be built until that is answered.
+2. **Triage the 18 open PRs** (above) — gated on `gh pr checks` plus a merged-tree run.
+3. **Do NOT build a scheduled re-seed.** Measured: the endpoint has served **16 requests
+   from ONE client IP, all of them mine**, over its whole life. A sync timer would be
+   automation for a service with no consumers — the `do-we-need-it-before-hardening` case.
+   The stamp makes drift self-announcing, which is sufficient until a second IP appears.
+   **Re-check the audit log before revisiting this**, and quote the pair.
+4. **The question worth answering before more hardening:** `store.zacx.dev` has been public
+   since 08-18, cost a cutover, a firewall incident, a WAF rule, token rotation and three
+   gating layers — and has served 16 requests, all mine. Whether it should be public *yet*
+   is a better question than anything else on this list. Operator's call, not an agent's.
+5. **`/audit-pr` was NOT run** on `#602`, `#607` or `#362`. All three are merged and
+   deployed; rollback for the deploy is one manifest line back to `0.2.0`.
 
 ## Gotchas / decisions / dead-ends
 
@@ -813,61 +839,105 @@ That is the class to hunt first in this surface, not logic errors.
 - **A grep can forbid discussion.** A test asserting `"merge --ff-only" not in err` would have
   banned *naming* the operation being warned against. Assert the command form, not the substring.
 
+### New 2026-08-20 — the staleness work
+- 🔴 **A COMPLETENESS claim over a snapshot is the dangerous shape, not a wrong answer.**
+  The endpoint never lied: `none omitted` was true *of that disk*. Off-mesh there was no
+  way to tell that disk from the source, and every reachability/auth/firewall check passed
+  throughout. **Ask what your green checks structurally cannot compare.**
+- 🔴 **`Path.rglob` SWALLOWS a permission error and yields nothing** — so an unreadable
+  store reported `newest=NONE entry-files=0`, a confident zero from a walk that saw
+  nothing. My own function committed the exact confusion it was written to prevent; a test
+  caught it. Use `os.walk(onerror=…)`, which can be *told* to report.
+- 🔴 **A guard written next to the optional half of a script is absent from every hermetic
+  test.** The seed stamp was written beside `--push`, which returns early when not asked
+  for — so no stage-only run produced it, which is exactly how the omission would have
+  gone unnoticed. Moved into staging, where it also more honestly dates the *content
+  snapshot* rather than the transfer.
+- 🔴 **My change broke two EXISTING tests that were right, and both were restated, not
+  loosened.** One asserted the stage was a byte-copy (now: extra-path set pinned to exactly
+  `{.seed-stamp}`, failing if it GROWS *or* SHRINKS, plus a byte-hash with the stamp
+  removed). The other's **NAME** went false, not just its constant —
+  `..._the_only_permitted_difference` — so bumping `raw-diff-lines=2` to `=4` would have
+  left a test whose name lies and whose constant passes on the wrong tree. Rewritten to
+  assert the difference is fully decomposed (`raw == store_root + 2*snapshot`) so an
+  *unexplained* line still fails, plus presence assertions, since the identity alone is
+  satisfied by a run that compared nothing.
+- 🔴 **Coverage stated honestly: 3 regressions, not 11.** All 11 new tests fail at base,
+  but **eight fail with `AttributeError`** — the symbol not existing, which proves nothing.
+  Only three fail on behaviour. Same standard this doc already applies to `server.py`.
+- 🔴 **A seam found by LOOKING, not by a failure.** `verify-byte-identity.sh` cmps the
+  local CLI render against the remote body, so the body prepend would have failed it on
+  every scope. Nothing pointed at it; grepping for consumers of the response did.
+- 🔴 **The store-content gate went RED on my own first draft** — I had duplicated the
+  store bullet's own wording into this PUBLIC repo while writing *about* it. The live half
+  (`python3 scripts/tests/test_store_content_not_copied.py`) is the one that catches this;
+  the pytest half is synthetic-only and passed throughout, exactly as its docstring warns.
+  **Writing about a client-confidential entry is itself a way to copy it.**
+- 🔴 **THE STORE-CONTENT GATE IS RED ON `main` RIGHT NOW, and it is a DIRECTION-BLIND match, not
+  a leak.** It was green on pristine `main` at ~12:05 today and red by ~19:30. The one site is
+  `scripts/tests/test_prune_skill_size.py` ↔ `datapacket-talos/gitops-gate.md`, and the shared
+  phrase is *"a permanently red gate trains everyone to click through"* — a paraphrase of
+  **`claude/RULES.md`'s own aphorism**. The store entry was written today at 13:31 by another
+  session; the public test file dates from 01:43 (`144722d`). **Both sides are quoting the shared
+  rulebook, so nothing confidential moved.** 🔴 The gate cannot tell WHICH DIRECTION a phrase
+  travelled, and that is inherent — a store entry quoting the public repo trips it identically to a
+  public file quoting the store. **Do not "fix" it by rewording the public test**, which
+  legitimately quotes RULES; the newer side is the store entry. **Not fixed here — it is another
+  session's entry, and editing someone else's store bullet to clear a gate is how the real signal
+  gets trained away.** ⚠ It does NOT red CI: only the LIVE half catches this and it must be run by
+  hand (`python3 scripts/tests/test_store_content_not_copied.py`); the pytest half is
+  synthetic-only. So this will sit red, silently, until someone runs it.
+- ⚠ **`gh pr merge` from a WORKTREE exits 1 on a merge that SUCCEEDED** —
+  `fatal: 'main' is already used by worktree at …` is its local post-merge checkout step,
+  not the merge. Read the PR's own `state`/`mergedAt`, never gh's exit code.
+- ⚠ **My own background-command shape laundered three exit codes today** — `nix build … ;
+  echo; cat` makes the compound return the last command's status, so two task
+  notifications said "exit code 0" over `RESULT: FAIL`. Reading the log content caught it
+  every time. Write `NIX_RC=$?` **into the log file**, not to stdout after a `cat`.
+- **Instrument note that held up:** `docker manifest inspect` lies about this registry;
+  `docker pull` with a known-good control is the check. `0.2.0` pulled, `0.3.0` returned
+  `artifact … not found` — so the "free tag" answer came from an instrument proven able to
+  find a tag, not from an auth failure wearing a zero's clothes.
+
 ## How to verify
 
 ```bash
-# the store, from off-mesh over the real path (this repo is PUBLIC — no literal addresses here)
+# 🔴 THE STAMP — the deploy verification is the TRANSITION, not the rollout status.
 TOK=$(KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store get secret subsystem-store-token \
         -o jsonpath='{.data.token}' | base64 -d | sed -n 1p)
-curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $TOK" \
-     https://store.zacx.dev/api/v1/recall/devrc          # 200
-curl -s -o /dev/null -w '%{http_code}\n' https://store.zacx.dev/api/v1/recall/devrc   # 401
-curl -s -o /dev/null -w '%{http_code}\n' https://store.zacx.dev/                      # 404
-# ⚠ http=000 means YOUR RESOLVER, not the service — dig @<a-public-resolver>, or curl --resolve
+curl -s -o /dev/null -D - -H "Authorization: Bearer $TOK" \
+     https://store.zacx.dev/api/v1/recall/devrc | grep -i '^x-store-snapshot:'
+#   want: seeded=<ISO ts> staged_entries=<N> host=<h> newest=<ISO ts> entry-files=<N>
+#   `seeded=UNSTAMPED` is CORRECT and expected on a /data that predates a re-seed.
+#   UNSTAMPED / UNREADABLE / NONE each mean the fact could not be established — never "fine".
 
-# the client-IP chain survived every hop, and the trusted-proxy value is right
-KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store logs deploy/subsystem-store-api | grep audit | tail -3
-#   want: ip=<your public IP> peer=trusted token=<fp> auth=ok result=200
-#   report the PAIR, never a bare zero:
-KUBECONFIG=$KC_HOMELAB kubectl -n subsystem-store logs deploy/subsystem-store-api \
-  | grep -c "peer=untrusted"   # 0 …and peer=trusted must be NON-zero, or the log is wired to nothing
+# hosted vs local, the comparison no other check makes. These must AGREE.
+find ~/.claude/analyze-service-index -mindepth 2 -maxdepth 2 -name '*.md' | wc -l   # entry-files
+find ~/.claude/analyze-service-index -mindepth 2 -maxdepth 2 -name '*.md' -printf '%T@\n' \
+  | sort -rn | head -1 | xargs -I{} date -u -d @{} +%Y-%m-%dT%H:%M:%SZ              # newest
+# ⚠ the store-root README.md is NOT counted by the server — `find` without -mindepth 2
+#   over-reports by exactly 1 and reads as drift that is not there (I nearly reported it).
 
-# the host firewall parity gate (runs in CI on every homelab-infra PR; also runnable by hand)
-python3 ~/workspace/homelab-talos/scripts/check-relay-guard.py        # rc 0
-bash    ~/workspace/homelab-talos/scripts/tests/test-check-relay-guard.sh   # pass=47 fail=0
+# re-seed, and watch the stamp move — a value that cannot move is indistinguishable
+# from a hardcoded string
+~/workspace/devrc/scripts/subsystem-store-api/seed.sh \
+  --store ~/.claude/analyze-service-index --stage /tmp/seed-stage \
+  --push subsystem-store/subsystem-store-api      # want: STAMPED, then PUSHED n==n, then OK
 
-# 🔴 SET THESE FIRST. An angle-bracket placeholder inside this fence is shell
-# REDIRECTION, not a blank to fill in: `nc -z -w 5 -v <node-public-ip> 8102` runs
-# `nc -z -w 5 -v` with its stdin/stdout redirected, and IF a file named
-# node-public-ip exists in the cwd it TRUNCATES ./8102 to 0 B (measured, not
-# theoretical) while printing an nc usage banner that reads as "wrong flags".
-# With no such file bash aborts on the failed input redirect and touches nothing
-# — so testing this in an empty dir will UNDERSTATE it. Addresses are never
-# written down here — this repo is PUBLIC — so resolve them into variables:
-NODE_PUB=                             # ← the node's primary public IPv4, from `ip -o -4 addr` on the node
-LB=$(KUBECONFIG=$HOMELAB/production-kubeconfig kubectl -n traefik get svc traefik \
-       -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+# is new work still landing in the index at all?
+for d in ~/.claude/analyze-service-index/*/; do
+  printf '%-24s %s\n' "$(basename "$d")" "$(git -C "$d" log --oneline --since='7 days ago' | wc -l)"
+done          # 2026-08-20: 109 commits across 9 scopes; 50 of 76 entries touched in 3d
 
-# the node itself — the repo checker CANNOT see it
-ssh root@"$NODE_PUB" 'sha256sum /root/relay-firewall.sh; systemctl is-active relay-firewall'
-#   compare that sha to: git -C ~/workspace/homelab-talos show origin/trunk:k0s/host-firewall/relay-firewall.sh | sha256sum
-ssh root@"$NODE_PUB" 'iptables-save -t raw | grep -c "^-A RELAY-GUARD"'   # 44
+# the image really carries the code — with the OLD tag as the control
+docker run --rm --entrypoint sh harbor.homelab.lan/library/subsystem-store-api:0.3.0 \
+  -c 'grep -c "def snapshot_freshness" /app/scripts/subsystem-store-api/server.py'   # 1
+docker run --rm --entrypoint sh harbor.homelab.lan/library/subsystem-store-api:0.2.0 \
+  -c 'grep -c "def snapshot_freshness" /app/scripts/subsystem-store-api/server.py'   # 0
 
-# 🔴 THE OFF-MESH PORT PROBE — read the SIGNATURE, not "did it fail".
-#    `-v` is REQUIRED or nc prints nothing and your parser silently sees an empty string.
-nc -z -w 5 -v "$NODE_PUB" 8102   # want "timed out" (DROP).
-nc -z -w 5 -v "$LB"       8102   # 🔴 "refused" would mean the host ACCEPTED it and merely
-                                 #    lacked a listener — that is OPEN AT THE FIREWALL, not closed
-nc -z -w 5 -v "$NODE_PUB" 9100   # want "timed out" — node_exporter, closed 2026-08-18
-nc -z -w 5 -v "$NODE_PUB" 8200   # control: must stay "refused", else the guard went blanket
-nc -z -w 5 -v "$NODE_PUB" 22     # control: must stay open
-nc -z -w 5 -v "$NODE_PUB" 179    # control: must stay OPEN — Calico's v6 mesh needs it
-curl -s -o /dev/null -w '%{http_code}\n' https://auditloop.zacx.dev/   # 302 — edge path via a GUARDED port
-
-# THE KILL SWITCH — one line
-#   delete `- gateway/subsystem-store-ingress.yaml` from
-#   clusters/production/apps/nebula/kustomization.yaml, commit, then:
-#   flux reconcile kustomization nebula
+# ROLLBACK: one line in
+#   homelab-infra clusters/homelab/apps/subsystem-store/deployment.yaml  -> 0.2.0
+#   then: flux reconcile kustomization subsystem-store --with-source
 ```
 ## State now — 🔴🔴 THE STORE IS PUBLIC. `#329` merged 2026-08-18T23:28:31Z.
 
@@ -924,3 +994,31 @@ devrc `main`**, all gate-green, plus homelab-infra `#354` applied and verified o
 | the handoff writer stopped hiding things | `#588` `#599` |
 | recall got cheaper | `#575` |
 | gates unbroken | `#581` `#570` `#571` |
+## State now — 🔴 THE STAMP IS DEPLOYED. `0.3.0` live 2026-08-20T19:06Z.
+
+🔴 **The store was serving a STALE SNAPSHOT and nothing could tell you.** Measured this
+session over the public internet, four days after cutover: an authed GET returned **200**
+with `ALL 5 entries in devrc/, none omitted` while the source held **9**; 47 of 72 entry
+files; one served entry was a **40-day-old** version of a file edited that morning.
+Nothing was broken — pod ready on `0.2.0`, restarts=0, auth correct, client-IP chain
+intact, firewall right, and **this doc's entire "How to verify" block passed** — because
+not one of those checks compares served bytes to the source. Closed by `#607` + `#362`.
+
+- **devrc `main` at `8659547`; homelab-infra `trunk` at `792e2701`.** Both base clones
+  re-synced; both this session's worktrees removed and both branches deleted.
+- **Live, re-read at handoff time:** pod on image **`0.3.0`**, ready, **restarts=0**, new
+  code confirmed *inside* the running container; public authed GET **200** via Cloudflare
+  (`server: cloudflare` + `cf-ray`).
+- ✅ **Hosted and local are in EXACT sync right now** — `entry-files 75 == 75` (76 total
+  minus the store-root README, which the walk skips by design) and
+  `newest 2026-08-20T18:55:31Z` on both sides. Re-seeded at `19:07:26Z`.
+- ✅ **The index is actively written.** 50 of 76 entry files touched in 3 days; 109
+  autocommits across 9 scope repos in 7 days; a new scope (`flipt-state`) appeared today
+  and the hosted copy already serves it. New work IS landing.
+
+### Shipped this session — 3 PRs, 2 repos
+| PR | repo | what |
+|---|---|---|
+| `#602` | devrc | the two broken markers fixed, and the third defect fixing them exposed |
+| `#607` | devrc | **every report dates the COPY it serves** — `snapshot_freshness` + 11 tests |
+| `#362` | homelab-infra | `0.3.0` — the deploy, with the manifest carrying its own rollback line |
