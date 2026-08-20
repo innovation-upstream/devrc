@@ -5009,15 +5009,48 @@ class TestTheCommonCaseRowIsUnchanged:
                 )
 
 
+def _store_with(tmp_path: Path, name: str, nuance: list[str],
+                heading: str = sr.NUANCE_HEADING) -> Path:
+    """A one-entry store whose single row carries whatever badge `nuance` earns.
+
+    🔴 The badge explanations are CONDITIONAL, so a test that wants to see one
+    must PUT one on a row. Asserting against the shared `store` fixture is what
+    these tests used to do, and it worked only while the caveat named every badge
+    unconditionally — i.e. it was asserting about prose, not about a badge.
+    """
+    root = tmp_path / "condstore"
+    (root / SCOPE).mkdir(parents=True, exist_ok=True)
+    (root / SCOPE / f"{name}.md").write_text(
+        "\n".join(["---", f"service: {name}", "sensitivity: public", "---", "",
+                    "## Pointers", "- a", "", heading, *nuance, ""]),
+        encoding="utf-8",
+    )
+    return root
+
+
 class TestTheCaveatExplainsEveryBadgeItPrints:
     """🔴 A BADGE THE CAVEAT DOES NOT NAME IS A GLYPH THE READER GUESSES AT, and
     the caveat is the one place this tool states what it can and cannot see. The
     `🔴 N OPEN` clause has been there since the badge shipped; these three
     arrived with the same obligation.
+
+    🔴 STRENGTHENED when the explanations became conditional. These used to assert
+    against a fixture store that contains NO near-miss and NO renamed heading — so
+    they passed on prose alone and could not have told you whether the caveat
+    matched the ROWS. Each now puts the badge on a row first, which is what the
+    class name claims to test, and the complementary "no badge ⇒ no clause" half
+    lives in `TestCaveatBadgeClausesAreConditional`.
     """
 
-    def test_the_caveat_names_the_NEAR_MISS_badge_and_what_it_costs(self, store: Path):
-        caveat = rc.recall(store, SCOPE).caveat
+    def test_the_caveat_names_the_NEAR_MISS_badge_and_what_it_costs(
+        self, tmp_path: Path
+    ):
+        root = _store_with(tmp_path, "svc", ["- 2026-08-19: OPEN gaps found here."])
+        rep = rc.recall(root, SCOPE)
+        assert any("NEAR-MISS" in rc.listing_line(e, 16) for e in rep.listing), (
+            "fixture must actually earn the badge, or this asserts about prose"
+        )
+        caveat = rep.caveat
         assert "NEAR-MISS" in caveat
         assert "missed the grammar" in caveat
         assert "short by up to N" in caveat, (
@@ -5025,16 +5058,23 @@ class TestTheCaveatExplainsEveryBadgeItPrints:
             "OPEN count beside it — which is the whole reason it is on the row"
         )
 
-    def test_the_caveat_names_the_UNVERIFIABLE_badge(self, store: Path):
-        caveat = rc.recall(store, SCOPE).caveat
+    def test_the_caveat_names_the_UNVERIFIABLE_badge(self, tmp_path: Path):
+        root = _store_with(tmp_path, "svc", ["- 2026-08-19: RESOLVED: closed, no sha."])
+        rep = rc.recall(root, SCOPE)
+        assert any("UNVERIFIABLE" in rc.listing_line(e, 16) for e in rep.listing)
+        caveat = rep.caveat
         assert "UNVERIFIABLE" in caveat
         assert "name no sha" in caveat
 
     def test_the_caveat_says_a_missing_heading_makes_the_counts_PARSE_FAILURES(
-        self, store: Path
+        self, tmp_path: Path
     ):
         """The claim that matters: `0 nuance` on such a row is not a reading."""
-        caveat = rc.recall(store, SCOPE).caveat
+        root = _store_with(tmp_path, "svc", ["- 2026-08-19: a note."],
+                           heading="## Nuance and work history")
+        rep = rc.recall(root, SCOPE)
+        assert any("NO " in rc.listing_line(e, 16) for e in rep.listing)
+        caveat = rep.caveat
         assert "NO <heading>" in caveat
         assert "0 BY PARSE FAILURE and not by measurement" in caveat
 
@@ -5042,3 +5082,184 @@ class TestTheCaveatExplainsEveryBadgeItPrints:
         rep = rc.recall(store, SCOPE)
         assert rep.caveat in rc.render_text(rep)
         assert rc.report_json(rep)["caveat"] == rep.caveat
+
+
+# --- the caveat's badge explanations are CONDITIONAL ----------------------------
+#
+# Measured on the first real session to use the resume→recall flow: the caveat is
+# ~1.5 KB and is paid PER CALL, so a targeted `--ref` lookup — the cheap operation
+# the design encourages — spent 27% of its output explaining NEAR-MISS,
+# UNVERIFIABLE and NO <heading> while showing NONE of them. The badges already
+# render conditionally; the prose explaining them did not.
+
+
+class TestBadgesPresent:
+    """`badges_present` reports what the OUTPUT will render, nothing wider."""
+
+    def test_no_entries_yields_an_empty_set(self) -> None:
+        assert rc.badges_present(()) == frozenset()
+
+    def test_a_clean_entry_yields_an_empty_set(self) -> None:
+        """POSITIVE CONTROL's partner: an entry with every count at zero must not
+        claim a badge, or the conditional degenerates to unconditional."""
+        e = _recalled(["- 2026-08-19: a plain dated bullet."])
+        assert e.near_miss_count == 0 and e.unverifiable_count == 0
+        assert rc.badges_present((e,)) == frozenset()
+
+    def test_a_near_miss_bullet_yields_only_NEAR_MISS(self) -> None:
+        e = _recalled(["- 2026-08-19: OPEN gaps found while fixing the above."])
+        assert e.near_miss_count > 0, "fixture must actually produce a near-miss"
+        assert rc.badges_present((e,)) == frozenset({rc.BADGE_NEAR_MISS})
+
+    def test_an_unverifiable_bullet_yields_only_UNVERIFIABLE(self) -> None:
+        e = _recalled(["- 2026-08-19: RESOLVED: closed it, no sha named."])
+        assert e.unverifiable_count > 0, "fixture must actually produce one"
+        assert rc.badges_present((e,)) == frozenset({rc.BADGE_UNVERIFIABLE})
+
+    def test_a_renamed_heading_yields_only_MISSING_HEADING(self) -> None:
+        e = _recalled(["- 2026-08-19: a note."], nuance_heading="## Nuance and work history")
+        assert e.missing_sections, "fixture must actually lose the section"
+        assert rc.badges_present((e,)) == frozenset({rc.BADGE_MISSING_HEADING})
+
+    def test_the_set_is_a_UNION_across_entries_not_the_first_hit(self) -> None:
+        """The index renders many rows; one row's badge must not mask another's."""
+        near = _recalled(["- 2026-08-19: OPEN gaps found."], ref="a")
+        unver = _recalled(["- 2026-08-19: RESOLVED: no sha."], ref="b")
+        gone = _recalled(["- 2026-08-19: x."], ref="c", nuance_heading="## Renamed")
+        got = rc.badges_present((near, unver, gone))
+        assert got == frozenset(
+            {rc.BADGE_NEAR_MISS, rc.BADGE_UNVERIFIABLE, rc.BADGE_MISSING_HEADING}
+        )
+
+
+class TestCaveatBadgeClausesAreConditional:
+    SCOPE = "example-scope/"
+
+    # --- what must NEVER be gated -------------------------------------------------
+
+    def test_the_UNCONDITIONAL_contract_survives_an_empty_badge_set(self) -> None:
+        """🔴 The half that makes this safe rather than merely cheaper. These
+        sentences are the anti-confabulation contract and apply to every read."""
+        text = rc.caveat_text(self.SCOPE, frozenset())
+        assert "RECALL, NOT LIVE OBSERVATION" in text
+        assert "This window CANNOT see" in text
+        assert "POINTER to verify" in text
+        assert rc.SENSITIVITY_FAIL_SAFE in text
+        assert "never copy an" in text
+
+    def test_the_OPEN_ABSENCE_warning_is_NOT_gated(self) -> None:
+        """🔴 The asymmetry, pinned. The OPEN clause ends "the absence of that
+        marker means nothing was declared, NOT that nothing is open" — a warning
+        about a MISSING badge. Gating it on a badge being PRESENT would delete it
+        in exactly the case it was written for."""
+        for badges in (frozenset(), frozenset({rc.BADGE_NEAR_MISS}), None):
+            text = rc.caveat_text(self.SCOPE, badges)
+            assert "NOT that nothing is open" in text, badges
+
+    # --- what must be gated -------------------------------------------------------
+
+    def test_an_empty_badge_set_drops_ALL_THREE_explanations(self) -> None:
+        text = rc.caveat_text(self.SCOPE, frozenset())
+        for absent in ("N NEAR-MISS", "N UNVERIFIABLE", "NO <heading>"):
+            assert absent not in text, absent
+
+    def test_each_badge_brings_ONLY_its_own_clause(self) -> None:
+        """Killed separately, so no clause can hide behind another."""
+        cases = {
+            rc.BADGE_NEAR_MISS: ("N NEAR-MISS", ("N UNVERIFIABLE", "NO <heading>")),
+            rc.BADGE_UNVERIFIABLE: ("N UNVERIFIABLE", ("N NEAR-MISS", "NO <heading>")),
+            rc.BADGE_MISSING_HEADING: ("NO <heading>", ("N NEAR-MISS", "N UNVERIFIABLE")),
+        }
+        for badge, (present, absent) in cases.items():
+            text = rc.caveat_text(self.SCOPE, frozenset({badge}))
+            assert present in text, f"{badge} should explain {present}"
+            for a in absent:
+                assert a not in text, f"{badge} should NOT explain {a}"
+
+    def test_all_three_badges_reproduce_the_FULL_prose(self) -> None:
+        """The unconditional text is the ceiling, not a different text: with every
+        badge present the caveat must equal the `badges=None` rendering."""
+        every = frozenset(
+            {rc.BADGE_NEAR_MISS, rc.BADGE_UNVERIFIABLE, rc.BADGE_MISSING_HEADING}
+        )
+        assert rc.caveat_text(self.SCOPE, every) == rc.caveat_text(self.SCOPE, None)
+
+    def test_the_lead_phrase_AGREES_with_the_clause_count(self) -> None:
+        """Prose that says "Three further badges" above one clause is the kind of
+        near-miss this module exists to complain about."""
+        one = rc.caveat_text(self.SCOPE, frozenset({rc.BADGE_NEAR_MISS}))
+        assert "One further badge says" in one and "Three further" not in one
+        two = rc.caveat_text(
+            self.SCOPE, frozenset({rc.BADGE_NEAR_MISS, rc.BADGE_UNVERIFIABLE})
+        )
+        assert "Two further badges say" in two
+        three = rc.caveat_text(
+            self.SCOPE,
+            frozenset({rc.BADGE_NEAR_MISS, rc.BADGE_UNVERIFIABLE, rc.BADGE_MISSING_HEADING}),
+        )
+        assert "Three further badges say" in three
+
+    def test_badges_None_is_FAIL_SAFE_toward_saying_more(self) -> None:
+        """A caller that computed nothing gets the full text, never a silent trim."""
+        full = rc.caveat_text(self.SCOPE, None)
+        for clause in ("N NEAR-MISS", "N UNVERIFIABLE", "NO <heading>"):
+            assert clause in full, clause
+
+    def test_it_is_SHORTER_when_nothing_is_badged(self) -> None:
+        """The point of the change, asserted as a relation rather than a constant
+        so a reword cannot make it vacuous and cannot pin a number that drifts."""
+        assert len(rc.caveat_text(self.SCOPE, frozenset())) < len(
+            rc.caveat_text(self.SCOPE, None)
+        )
+
+
+class TestTheCaveatDescribesTHISReportsRows:
+    """🔴 The regression test for the bug this change shipped with once.
+
+    `badges_present` was first wired to `RecallReport.entries` — which holds only
+    the FEATURED bodies — while badges are rendered by `listing_line` over
+    `report.listing`. On a real index whose visible `🔴 2 NEAR-MISS` row was not
+    among the featured entries, the explanation silently vanished. It read
+    correctly and was wrong; only running it caught it.
+    """
+
+    def test_a_badge_in_LISTING_but_not_in_ENTRIES_is_still_explained(self) -> None:
+        badged = _recalled(["- 2026-08-19: OPEN gaps found."], ref="badged")
+        featured = _recalled(["- 2026-08-19: a clean bullet."], ref="featured")
+        assert badged.near_miss_count > 0
+        assert featured.near_miss_count == 0
+        report = rc.RecallReport(
+            status="recalled", scope="example-scope", store_root="/nowhere",
+            entries=(featured,), listing=(badged, featured), total_in_scope=2,
+        )
+        assert "N NEAR-MISS" in report.caveat, (
+            "the caveat must describe the rows the INDEX renders, not the featured subset"
+        )
+
+    def test_a_clean_listing_gets_no_badge_prose(self) -> None:
+        clean = _recalled(["- 2026-08-19: a clean bullet."], ref="clean")
+        report = rc.RecallReport(
+            status="recalled", scope="example-scope", store_root="/nowhere",
+            entries=(clean,), listing=(clean,), total_in_scope=1,
+        )
+        for absent in ("N NEAR-MISS", "N UNVERIFIABLE", "NO <heading>"):
+            assert absent not in report.caveat, absent
+        assert "NOT that nothing is open" in report.caveat
+
+
+class TestTheSearchReportCaveat:
+    def test_search_explains_no_badges_because_it_renders_none(self) -> None:
+        """Search prints matched Hunks, never an index row, so no badge can appear
+        in its output. It also has no `entries` field at all — asking for one was
+        an AttributeError waiting to happen."""
+        report = rc.SearchReport(
+            status="searched", scope="example-scope", store_root="/nowhere",
+            query="anything", scopes_searched=("example-scope",),
+        )
+        assert not hasattr(report, "entries")
+        text = report.caveat
+        for absent in ("N NEAR-MISS", "N UNVERIFIABLE", "NO <heading>"):
+            assert absent not in text, absent
+        # …but the contract still ships.
+        assert "RECALL, NOT LIVE OBSERVATION" in text
+        assert "NOT that nothing is open" in text
