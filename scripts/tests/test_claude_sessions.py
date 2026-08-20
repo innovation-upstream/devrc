@@ -24,11 +24,15 @@ import json
 import os
 import pathlib
 import subprocess
+import sys
 import time
 
 import pytest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(_HERE))  # scripts/
+from testlib import skip_dirs  # noqa: E402
+
 _MODULE = os.path.join(_HERE, "..", "lib", "claude_sessions.py")
 
 _spec = importlib.util.spec_from_loader(
@@ -731,6 +735,10 @@ _MENTION_ONLY = {
     # because the /proc walk is not reachable over SSH and session-manager has
     # to report both hosts by ONE rule.
     "scripts/session-manager":                   "names it in a caveat, on purpose",
+    # Imports THIS SUITE (not the detector) to read `_SKIP_DIRS` and pin it
+    # against the three sibling walkers. It names this module because that is
+    # the import; it never loads `scripts/lib/`.
+    "scripts/tests/test_skip_dirs_ledger.py":    "pins this suite's skip set",
 }
 
 _DOC_SUFFIXES = {".md", ".txt", ".org"}
@@ -739,8 +747,28 @@ _DOC_SUFFIXES = {".md", ".txt", ".org"}
 def _is_doc(rel) -> bool:
     return os.path.splitext(rel)[1].lower() in _DOC_SUFFIXES
 
-_SKIP_DIRS = {".git", "node_modules", "__pycache__", ".direnv", "result",
-              ".claude", "claudedocs"}
+#: 🔴 SHARED BASE + THIS SITE'S OWN ADDITIONS, spelled here so the effective set
+#: is readable where it is used. The base is `testlib/skip_dirs.GENERATED` —
+#: machine-generated directories no walker should read. Before the four skip
+#: sets were consolidated this one was missing `.pytest_cache`, so an
+#: ordinary `pytest` run wrote `.pytest_cache/v/cache/nodeids` — a JSON list of
+#: every collected node id, naming `claude_sessions` 29 times — into the tree
+#: this ledger walks, and the ledger went red on an artefact nobody wrote. The
+#: operator's checkout was in exactly that state when this was fixed.
+#:
+#: The two additions are NOT in the base, because the base is also what the two
+#: PUBLIC-repo security gates use and neither may inherit them:
+#:   .claude      per-host Claude Code state; gitignored, ~41k files locally,
+#:                and it is where agent worktrees (full repo copies) live.
+#:   claudedocs   committed handoff prose. Excluded HERE only because the
+#:                mention scan is scoped to code — `_is_doc` already drops
+#:                `.md`, and this makes the walk skip the directory outright.
+#:                🔴 `public_ip_scan` / `client_host_scan` MUST keep reading it.
+#: `VIRTUALENVS` is granted because this walker has no `git ls-files` tier: it
+#: reads whatever is on disk, and `.venv/` is 476 files of vendored pip source
+#: in the operator's checkout today.
+_SKIP_DIRS = set(skip_dirs.GENERATED | skip_dirs.VIRTUALENVS) | {
+    ".claude", "claudedocs"}
 
 
 def _repo_files():
