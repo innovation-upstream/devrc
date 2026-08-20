@@ -508,8 +508,75 @@ looks — so it raises neither badge, and no surface today reads past a bullet's
 is a PAIR, not a bare zero: the pre-fix file was replayed through `--store <copy>` on the same
 command and printed `🔴 2 NEAR-MISS`, so the clean row is a measurement, not a wiring failure.
 
+### ✅ DECIDED 2026-08-20 — hosted is a per-SCOPE fallback, never the primary read
+
+The open question was: should the skills read the hosted store outright, or fall back to it only
+when there is no local one? **Answer: neither as posed. Local first ALWAYS, and the fallback
+trigger is a missing SCOPE, not a missing STORE** — "no local store" measured FALSE on both hosts,
+so that trigger would never fire on either machine that exists today.
+
+All three copies read within the same minute, 2026-08-20:
+
+| copy | scopes | entry files | written by |
+|---|---|---|---|
+| workbench local | 9 | 71 | `/handoff`, `/analyze-service` on that host |
+| laptop local | 11 | 21 | the same tools, on that host |
+| hosted (`store.zacx.dev`) | 9 | 75 staged | `seed.sh --push`, BY HAND — nothing syncs it |
+
+🔴 **The two local stores are DISJOINT — the overlap is ZERO entries.** This is not "the laptop is
+behind". Every one of the laptop's 21 entry files is absent from the workbench, *including inside
+the four scope names both hosts hold*: the laptop's `devrc` scope holds one entry the workbench
+does not have, and none of the workbench's nine are present there. Seven of the laptop's scopes
+exist on no other copy. And the laptop is a LIVE writer — its newest entry was written 14:57 that
+day, two hours before this measurement.
+
+🔴 **Hosted mirrors the workbench pile only.** It answers `scope-absent` for every laptop-only
+scope, and its shared-scope counts track the workbench's (`ALL 9 entries in devrc/`,
+`ALL 36 entries in datapacket-talos/`), `seeded=2026-08-20T19:07:26Z`.
+
+- **Read hosted outright — REJECTED, and it is a regression on BOTH hosts, not just the writer's.**
+  On the workbench hosted is a subset that goes stale at the next `/handoff` write with nothing
+  syncing it. On the laptop it would trade 21 entries that exist NOWHERE ELSE for `scope-absent`.
+  It also puts network + token + a 10s WAF throttle on the hot path of a read that runs every
+  `/resume` and today cannot fail.
+- **Fall back only when there is no local store — REJECTED as INERT.** Both hosts have one, so it
+  fires on a brand-new host and nowhere else. Right instinct, wrong granularity.
+- **DECIDED: local first; consult hosted when the LOCAL read returns `scope-absent` / `scope-empty`
+  for the scope actually asked about.** That is where the measured loss is.
+
+The shape it has to have — each item is the measured failure it prevents, not a preference:
+1. `--source local|hosted|auto`, default `auto` = the above. Hosted is never the default.
+2. A hosted answer is LABELLED as one and carries the server's `X-Store-Snapshot`
+   (`seeded=`/`newest=`/`entry-files=`) into the body. The server already dates every report
+   because a stale copy could not otherwise be told from the source — it served 5 entries against
+   a source of 9 for four days with auth, reachability and firewall all green throughout.
+3. Hosted unreachable / `401` / `503` must NOT render as "nothing recorded yet". The server already
+   separates `503 store-unreachable` from `200 scope-empty`; the client has to preserve that split,
+   or an outage reads as a clean bill of health.
+4. Short timeout; a hosted failure is never fatal. `/resume` step 4's contract is "print the stderr
+   line, note recall was unavailable, and continue" — a network hop must not turn that into an exit 3.
+5. `scope-absent` already prints every scope the LOCAL store holds. Under `auto` it should name
+   hosted's too: "you typo'd the scope" and "it was recorded on the other host" are the two
+   questions that message exists to answer, and today it can only answer one.
+
+🔴 **What this decision does NOT fix, and must not be read as fixing.** A read-side fallback lets
+the laptop SEE the workbench's 71. It does nothing in the other direction — the laptop's 21 reach
+no other copy, because seeding is a manual push from the workbench and there is no write path until
+phase 3. The corpus stays split; this only stops one host being blind to the other's half.
+**The thin-scope case is also still open**: a local scope holding 1 entry against hosted's 9 is
+`recalled`, not `scope-absent`, so `auto` will not consult hosted there. Deliberate — merging two
+copies raises dedupe, which-is-newer, and a completeness claim (`ALL N entries in <scope>/`) spanning
+two disks with different mtimes. That is a design question of its own; name it, do not fold it in.
+
+⚠ **A defect found while measuring this: `X-Store-Snapshot`'s `host=` cannot discriminate the two
+writers.** Both hosts' `hostname` is `nixos`, so the stamp reads `host=nixos` whichever one seeded
+it. Harmless while only the workbench seeds; it is a confidently wrong answer the moment the laptop can.
+
 ## Next steps (ranked)
 
+0. ~~Decide the hosted-vs-local read policy~~ — **DONE 2026-08-20**, see the DECIDED block directly
+   above. Building it (the phase-2 CLI wrapper) is unstarted; the decision is the prerequisite, and
+   the doc's item 5 roadmap question is unaffected by it.
 0. ~~Verify the Cloudflare WAF rate rule exists~~ — **DONE 2026-08-19, answer was NO.** Layer 1 now
    exists as a 10s throttle, declared in no repo. See the RESOLVED block above.
 1. 🔴 **DO NOT split read/write tokens yet — a TRIGGER, not a task.** Unchanged and still correct:
