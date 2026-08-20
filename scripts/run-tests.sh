@@ -958,6 +958,29 @@ TARGET_FLOORS=(
   "scripts/collector/browser-ext/tests|12"
   "scripts/collector/opencode/tests|162"
   "scripts/dl-router/tests|942"
+  # 2026-08-19, the DRIFT CEILING fired and #570 re-pinned this line to 622 as
+  # part of the opencode-pin fix, landing the VALUE with no accounting. This is
+  # that accounting. The gate had reported: 654 collected against a floor of
+  # only 469 — 185 above the FLOOR and 68 above the ceiling of
+  # 469 + max(60, 469/4) = 469 + 117 = 586. That is the ceiling doing its job,
+  # not a suite defect: every one of the 654 passes.
+  #
+  #   _suggested_floor 654 = 654 - min(50, max(1, 654/20)) = 654 - 32 = 622
+  #
+  # WHY IT DRIFTED: 469 was set at #397 (e1219d4), when the suite collected
+  # exactly 493. It grew 161 tests across the emulation, context/annotated-read,
+  # surface-parity, session-id and SKILL.md-size work — most recently #562's
+  # per-site `site_notes` routing and its ledger test — and was never re-pinned
+  # on the way, so the gap widened one PR at a time. At 469 a collapse of a
+  # QUARTER of this suite would have fitted under the floor and reported green.
+  # A floor that has fallen far behind is not a weak guard; it is an absent one
+  # that still prints a number.
+  #
+  # ⚠ ZERO new skips on this target (collected=654 passed=654 skipped=0).
+  # ⚠ Open PR #551 edits THIS line to 580 and is already CONFLICTING. Whoever
+  #   rebases it must re-run the gate on the MERGED tree and copy what it
+  #   prints — do NOT pick between 580 and 622, and do not reconcile the two by
+  #   arithmetic.
   "scripts/browser-bridge/tests|622"
   "scripts/validation/tests|97"
   # 2026-08-12, initiative-scan's `gh_available` honesty flag: 381 -> 386
