@@ -1,7 +1,23 @@
 #!/usr/bin/env bash
 # Canonical scratchpad slot table — THE single source of truth for the
-# session <-> hotkey <-> color <-> codename mapping, mirroring the tmux/i3
-# scratchpad bindings ($mod+Shift+V -> tmux session `scratch4` -> codename `Vapor`).
+# session <-> hotkey <-> color <-> codename mapping. The tmux `bind -n M-<key>`
+# popup toggles are GENERATED from this table at home-manager build time
+# (nix/programs/tmux/default.nix), so this file is the source, not a mirror.
+# Example: `Alt+Shift+V` -> tmux session `scratch4` -> codename `Vapor`.
+#
+# 🔴 The binding is tmux's ROOT key table, NOT i3. There is no i3 binding for any
+# slot — measured: `grep -rE 'mod\+Shift\+(V|G|P)' nix/i3/` -> 0, against 79 live
+# `bindsym` lines in nix/i3/config.nix, and 22 `M-<key>` entries in
+# `tmux list-keys -T root`. A previous version of this comment spelled the hotkey
+# `$mod+Shift+V` (i3 syntax); a reader following it presses a chord that is bound
+# to nothing.
+#
+# 🔴 CASE IS SIGNIFICANT and is not a shift-modifier convention: `M-v` -> scratch3
+# (`violet`) and `M-V` -> scratch4 (`Vapor`) are DIFFERENT sessions. Never
+# lowercase a key when quoting it.
+#
+# Each binding is a TOGGLE: if the client is already in that session it runs
+# `detach-client` (dismissing the popup); otherwise it opens `display-popup`.
 #
 # This file is SOURCED (not executed). Consumers — keep in sync by reading THIS,
 # never a private copy:
@@ -11,7 +27,8 @@
 #
 # Field order per entry:  session:key:color:name
 #   session — tmux session name (also the emit key)
-#   key     — hotkey letter ($mod+Shift+<key>)
+#   key     — hotkey letter; the binding is tmux `bind -n M-<key>` (Alt+<key>),
+#             case-sensitive. NOT an i3 chord.
 #   color   — hex, matches the popup border color in .tmux.conf
 #   name    — human codename shown in the HUD / ledger
 # Consumers source this by looking in their own dir for the deployed name first,
