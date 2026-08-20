@@ -176,6 +176,27 @@ ACKNOWLEDGED_UNSTUBBED = {
         {"airvpn-sudo", "ship.sh"},
         "MEASURED unreachable in the same whole-tier run; both call sites are "
         "behind sudo and neither script is executed by scripts/tests"),
+    "wmctrl": (
+        {"session-write"},
+        "The FOURTH occurrence of the prose-mention shape already justified "
+        "three times under `home-manager` above, and justified here rather "
+        "than reworded away — this scan is a TEXT scan "
+        "(launcher_scan.hazard_hits regexes the file body), so naming a binary "
+        "in order to promise you never call it is indistinguishable from "
+        "calling it. session-write (added 2026-08-19) names `wmctrl` in ONE "
+        "line of module-docstring prose, in the sentence declaring that the "
+        "i3 workspace is OUT OF SCOPE for its `focus` verb: the tool is "
+        "tmux-only, so it changes a tmux client's session and a tmux session's "
+        "active window and NOTHING a window manager owns. Deleting the word to "
+        "get green would delete the guarantee. Verified by grep that the file "
+        "carries no call site: the complete set of argv[0] literals it can "
+        "spawn is `tmux` alone, and even that is narrowed by an ALLOWLIST "
+        "(send-keys / select-window / switch-client / detach-client, plus "
+        "session-resolve's three read verbs) that RAISES on anything else — "
+        "test_session_write.py pins that allowlist in both directions, so this "
+        "justification cannot rot into a claim about a file that has grown a "
+        "launcher. `i3-msg` and `xdotool` appear in the same sentence and need "
+        "no entry: both are in HOST_LAUNCHERS and therefore stubbed."),
 }
 
 

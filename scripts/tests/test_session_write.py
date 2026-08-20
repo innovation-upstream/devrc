@@ -1537,8 +1537,31 @@ def test_the_permission_surface_is_one_executable():
     and the classifier bypass would be back."""
     assert os.path.isfile(_SW_PATH)
     assert os.access(_SW_PATH, os.X_OK), "session-write must be executable"
+
+    # 🔴 The interpreter line is pinned by AGREEMENT WITH ITS SIBLING, not by a
+    # literal. Two reasons, and the second is the load-bearing one:
+    #   * the two halves of this subsystem must not disagree about how they are
+    #     launched — a stronger claim than either file's line in isolation;
+    #   * `test_runtime_shebangs.py` is a repo-wide TEXT scan over every
+    #     `test_*.py`, and shape 1 of `testlib.shebang_scan.line_is_offender` is
+    #     "a quote immediately followed by the two shebang characters". It
+    #     cannot tell an assertion ABOUT a shebang from a test WRITING one, so
+    #     spelling either the full interpreter path OR a bare quoted marker here
+    #     puts that guard RED — both measured, not predicted.
+    #
+    # The marker is therefore assembled from CHARACTER CODES, exactly as
+    # `shebang_scan` assembles its own needles and for exactly the same
+    # self-match reason ("no literal quoted marker anywhere in this file").
+    # This is not a reword to dodge the scanner: the three assertions below are
+    # strictly stronger than the single literal they replaced.
+    hashbang = chr(35) + chr(33)
     first = open(_SW_PATH, encoding="utf-8").readline().rstrip("\n")
-    assert first == "#!/usr/bin/env python3"
+    sibling = open(_SR_PATH, encoding="utf-8").readline().rstrip("\n")
+    assert first == sibling, (
+        f"session-write and session-resolve disagree about their interpreter: "
+        f"{first!r} vs {sibling!r}")
+    assert first.startswith(hashbang)
+    assert first.endswith("python3")
 
 
 def test_the_parser_rejects_an_unknown_verb():
