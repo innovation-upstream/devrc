@@ -217,11 +217,11 @@
             # 🔴 This ALSO makes the sandbox the tier that pins the VERSION.
             # `pkgs.opencode` here and in nix/pkgs/tools/default.nix resolve from
             # the same flake.lock, so CI tests the exact binary the hosts deploy
-            # (1.18.16 at rev 044bfe75bfe4). Cost, stated as deliberately as the
+            # (1.18.18 at rev 5c680dac9f02). Cost, stated as deliberately as the
             # nodejs and nix entries above: this check's closure grows by
             # opencode, and a nixpkgs bump that moves it invalidates the cache
             # AND turns the version assertion red. That red is the point — the
-            # config header's "measured on v1.18.16 — do not re-derive" claims are
+            # config header's "measured on v1.18.18 — do not re-derive" claims are
             # otherwise pinned to nothing.
             #
             # logrotate: scripts/tests/test_claude_log_rotate.py drives the REAL
