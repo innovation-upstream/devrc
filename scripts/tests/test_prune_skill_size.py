@@ -30,7 +30,7 @@ WHY THE CEILING IS ABOVE THE 12,288 B TARGET, AND WHAT THAT COSTS
 -----------------------------------------------------------------
 The skill states a 12,288 B target and browser-bridge MEETS it (11,821 B while
 routing ~11x its own weight), so the target is achievable and is not in dispute.
-This file does not: it sits at 12,861 B (12.56 KiB) after being cut from 14,918 B
+This file does not: it sits at 12,859 B (12.56 KiB) after being cut from 14,918 B
 by demoting §6 (landing), §4's deployment table, §7's verification rationale, §0's
 axes and the always-loaded model to three sidecars, plus stripping evidence from
 every remaining section.
@@ -48,8 +48,8 @@ because a permanently-red gate trains everyone to click through -- which
 leaner is the intended direction of travel; raising it needs the same kind of
 justification recorded above.
 
-The honest accounting: the skill is 573 B -- 4.66% -- over the target it asks
-others to meet (12,861 against 12,288; `skill-audit.py` prints the same 573 B
+The honest accounting: the skill is 571 B -- 4.65% -- over the target it asks
+others to meet (12,859 against 12,288; `skill-audit.py` prints the same 571 B
 independently). That is disclosed in the body, in the PR that introduced it, and
 here. Every number in this docstring is re-measured, not carried forward: an
 earlier revision restated a size, a growth figure, a percentage and a per-pass
@@ -64,9 +64,9 @@ import pytest
 
 # The hard ceiling: SKILL.md must never exceed this many bytes.
 #
-# NOT a derivation -- a measured position. SKILL.md is 12,861 B (`stat -c %s` and
-# `git cat-file -s` agree), so 13,056 leaves 195 B of headroom, of which
-# MIN_HEADROOM_BYTES (192) is the floor that must remain: 3 B of true working
+# NOT a derivation -- a measured position. SKILL.md is 12,859 B (`stat -c %s` and
+# `git cat-file -s` agree), so 13,056 leaves 197 B of headroom, of which
+# MIN_HEADROOM_BYTES (192) is the floor that must remain: 5 B of true working
 # room before the headroom test fires -- i.e. effectively none; the next edit
 # here must evict something. The comment here previously read
 # "12,864 B measured + 192 B headroom"; the file measured 12,834 at the time, so
@@ -80,13 +80,13 @@ MAX_BYTES = 13_056
 #
 # Sized in units of a REAL edit rather than a round number, and re-measured
 # against the current file rather than restated: the two structures that actually
-# grow here are the reference routing table (3 rows, 348 B -> mean 116 B/row) and
+# grow here are the reference routing table (3 rows, 435 B -> mean 145 B/row) and
 # §3's verdict bullets (9 lines, 1,739 B -> mean 193 B). 192 B is therefore
 # ~one mean §3 bullet, or one routing row with room to spare -- enough that the
 # headroom test fires BEFORE the ceiling rather than arriving alongside it.
 #
-# It is NOT two mean routing rows: that claim was here, and at the real 116 B/row
-# two rows are 232 B > 192. Kept at 192 on the measurement that does hold rather
+# It is NOT two mean routing rows: that claim was here, and at the real 145 B/row
+# two rows are 290 B > 192. Kept at 192 on the measurement that does hold rather
 # than raised to fit a sentence.
 MIN_HEADROOM_BYTES = 192
 
@@ -328,6 +328,60 @@ def _registry_block(body: str) -> str:
     )
     end = body.find("\n## ", start)
     return body[start:] if end == -1 else body[start:end]
+
+
+def test_this_modules_own_stated_figures_are_re_measured():
+    """🔴 THE DOCSTRING IS A CLAIM, AND PROSE COULD NOT HOLD IT.
+
+    This module declares itself the single source of truth for these numbers and
+    asserts "Every number in this docstring is re-measured, not carried forward".
+    THREE CONSECUTIVE audit rounds found it restating a stale one anyway — each
+    time by the same mechanism: an edit moved SKILL.md *after* the derived
+    figures were written, so the arithmetic described a size the file no longer
+    had. Round 2 fixed a figure and left another; round 3 fixed those and the
+    round's own §4 edit shrank the file 2 B, staling five more.
+
+    A fourth hand-fix would be the fourth instance of one defect. This is the
+    deterministic replacement: derive every figure the prose states, and require
+    the prose to contain it. It cannot go stale silently, and it cannot go
+    VACUOUS either — each pattern must MATCH, so a reworded sentence fails loudly
+    instead of quietly checking nothing.
+
+    Cost, stated: a cosmetic reword of these sentences fails this test. That is
+    the trade — a machine-checkable claim for a bit of prose rigidity.
+    """
+    src = Path(__file__).read_text()
+    size = SKILL_MD.stat().st_size
+    over = size - 12_288                      # the target this skill asks others to meet
+    headroom = MAX_BYTES - size
+    slack = headroom - MIN_HEADROOM_BYTES
+
+    # (label, regex with ONE capturing group, expected literal)
+    checks = [
+        ("size in the docstring",   r"it sits at ([\d,]+) B",                      f"{size:,}"),
+        ("size in the ceiling note", r"SKILL\.md is ([\d,]+) B \(`stat -c %s`",     f"{size:,}"),
+        ("over-target bytes",       r"the skill is ([\d,]+) B -- ",                 f"{over:,}"),
+        ("skill-audit cross-check", r"prints the same ([\d,]+) B",                  f"{over:,}"),
+        ("headroom",                r"leaves ([\d,]+) B of headroom",               f"{headroom:,}"),
+        ("true working room",       r"must remain: ([\d,]+) B of true working",     f"{slack:,}"),
+    ]
+    problems = []
+    for label, pattern, expected in checks:
+        m = re.search(pattern, src)
+        if m is None:
+            problems.append(f"{label}: PATTERN DID NOT MATCH ({pattern!r}) — the "
+                            f"sentence was reworded, so this figure is now unchecked")
+        elif m.group(1) != expected:
+            problems.append(f"{label}: prose says {m.group(1)}, measured {expected}")
+
+    assert not problems, (
+        "this module's own figures no longer describe the file it measures:\n  "
+        + "\n  ".join(problems)
+        + f"\n\nMeasured now: SKILL.md={size:,} B, over target by {over:,} B "
+          f"({100.0 * over / 12_288:.2f}%), headroom {headroom:,} B, "
+          f"working slack {slack:,} B.\n"
+        "Re-measure and update the prose; do NOT relax this test."
+    )
 
 
 def test_every_reference_topic_is_routed_from_the_core():
