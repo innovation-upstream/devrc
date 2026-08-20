@@ -1177,9 +1177,40 @@ class TestSeedIsNonDestructive:
         assert not (stage / "leftover-from-an-older-run.md").exists()
         assert tree_hash(store) == before
 
-    def test_the_stage_is_a_faithful_copy(self, store: Path, tmp_path: Path):
+    def test_the_stage_is_a_faithful_copy_APART_FROM_THE_STAMP(
+        self, store: Path, tmp_path: Path
+    ):
+        """The stage mirrors the source byte-for-byte, plus EXACTLY one file.
+
+        🔴 THIS ASSERTION GOT NARROWER, NOT WEAKER, AND THAT IS THE POINT.
+        It used to be a bare `tree_hash(stage) == tree_hash(store)`, which
+        `.seed-stamp` breaks: the stage is deliberately no longer a pure
+        byte-copy, because a copy that cannot say when it was taken is the
+        entire defect the stamp exists to fix (`server.snapshot_freshness`, and
+        the incident in the README). RULES.md — "when a test documents a
+        contract, ask whether the contract is right": the contract changed, so
+        the test states the NEW one exactly rather than being loosened to
+        "mostly the same", which would have surrendered the property actually
+        worth keeping — that nothing ELSE ever appears in the stage.
+
+        So: the extra-path set is pinned to exactly `{.seed-stamp}` (it fails if
+        that set GROWS *or* SHRINKS), and with the stamp removed the remaining
+        tree is still hashed byte-for-byte against the source.
+        """
         stage = tmp_path / "stage"
         assert run_seed("--store", str(store), "--stage", str(stage)).returncode == 0
+
+        stamp = stage / ".seed-stamp"
+        assert stamp.exists(), "the stage carries no stamp — seed.sh did not date it"
+
+        staged = {p.relative_to(stage) for p in stage.rglob("*") if p.is_file()}
+        source = {p.relative_to(store) for p in store.rglob("*") if p.is_file()}
+        assert staged - source == {Path(".seed-stamp")}, (
+            f"unexpected extra path(s) in the stage: {staged - source}"
+        )
+        assert not source - staged, f"the stage is MISSING: {source - staged}"
+
+        stamp.unlink()
         assert tree_hash(stage) == tree_hash(store)
 
     def test_the_summary_prints_the_COUNT_beside_what_produced_it(
@@ -1374,12 +1405,31 @@ class TestByteIdentityVerifier:
         assert "verify: scopes=4" in r.stdout
         assert "pass=3 fail=1" in r.stdout
 
-    def test_the_STORE_ROOT_line_is_the_only_permitted_difference(
+    def test_every_permitted_difference_is_ACCOUNTED_FOR_not_merely_small(
         self, store: Path, tmp_path: Path, token_file: Path
     ):
-        """The pod serves `/data`; the workbench serves `~/.claude/…`. The
-        verifier canonicalises exactly one line — and proves it was exactly one,
-        by counting the RAW differing lines too."""
+        """The pod serves `/data`; the workbench serves `~/.claude/…`.
+
+        🔴 RENAMED, BECAUSE THE OLD NAME BECAME FALSE. This was
+        `test_the_STORE_ROOT_line_is_the_only_permitted_difference`, asserting a
+        flat `raw-diff-lines=2 store-root-lines=2`. The snapshot block
+        (`server.snapshot_freshness`) is a SECOND legitimate difference — the
+        remote dates the copy it serves and the local CLI, reading the
+        authoritative store, correctly does not — so "the only permitted
+        difference" stopped being true the moment that shipped. RULES.md: "a
+        comment is a claim too"; a name is louder than a comment.
+
+        The replacement is STRONGER than a bumped constant. It asserts the raw
+        difference is FULLY DECOMPOSED by its two named causes:
+
+            raw == store_root_lines + 2 * snapshot_lines
+
+        (the block contributes its prose line AND its blank separator, and both
+        appear one-sided in the diff). An unexplained differing line therefore
+        still fails — which a hardcoded `raw-diff-lines=4` would not, since it
+        would go on passing if a store-root line vanished and some other
+        difference appeared in its place.
+        """
         served = tmp_path / "served-elsewhere"
         subprocess.run(
             ["cp", "-a", str(store), str(served)], check=True, capture_output=True
@@ -1389,8 +1439,21 @@ class TestByteIdentityVerifier:
                 "--store", str(store), "--url", base, "--token-file", str(token_file)
             )
         assert r.returncode == 0, r.stdout + r.stderr
-        # 2 raw differing lines: one `<`, one `>`, both the store-root line.
-        assert "raw-diff-lines=2 store-root-lines=2" in r.stdout
+
+        rows = re.findall(
+            r"raw-diff-lines=(\d+) store-root-lines=(\d+) snapshot-line=(\d+)",
+            r.stdout,
+        )
+        assert rows, f"the verifier printed no evidence triples:\n{r.stdout}"
+        for raw, store_root, snapshot in rows:
+            assert int(raw) == int(store_root) + 2 * int(snapshot), (
+                f"unaccounted differing lines: raw={raw} "
+                f"store-root={store_root} snapshot={snapshot}"
+            )
+        # …and the two causes are each genuinely PRESENT, or the identity above
+        # is satisfiable by a run that compared nothing (0 == 0 + 2*0).
+        assert any(int(s) == 1 for _r, _sr, s in rows), "no snapshot line observed"
+        assert any(int(sr) == 2 for _r, sr, _s in rows), "no store-root line observed"
 
     def test_an_UNREACHABLE_pod_FAILS_rather_than_comparing_nothing(
         self, store: Path, token_file: Path
