@@ -85,6 +85,20 @@ prune anything from a run that printed one.
   it against the deployed config for REGRESSIONS**, not just for new
   resolutions. Validate that diff with a planted mutant before believing a
   clean result.
+  🔴 **The replay diff is NECESSARY, NOT SUFFICIENT — it only replays terms he
+  ACTUALLY TYPED in the window.** A term he never happened to search is
+  invisible to it, so "0 regressions" from `--replay` is a claim about the
+  observed stream, not about the config. On 2026-08-19 it reported 0 while a new
+  `:pdt` label had taken `'dispatch'` away from `:acq`; the repo's own pinned
+  list caught it. **Always also run
+  `pytest scripts/collector/keylog/tests/test_espanso_detect.py`**, which pins
+  `_EXISTING_RESOLUTIONS` — and add the new snippet's own terms to it.
+  🔴 That file's `test_live_scraper_observes_the_real_config` is a POSITIVE
+  CONTROL pinned to a LONG `search_terms` list, so a scraper regex matching
+  nothing cannot make the other guards vacuously true. If your edit strips the
+  pinned snippet's terms, **MOVE the pin to another long list — never relax it
+  to `== []`**, which exercises no list-splitting and silently disarms the
+  control.
 - DEMAND reads the LOCAL transcripts only; re-run on the other host if you need
   its demand. Retune-vs-prune is a judgement call, so the tool never edits
   `nix/home.nix`. The keystroke expansion itself can only be checked by the user
