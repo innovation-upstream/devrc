@@ -24,6 +24,7 @@ import shutil
 import subprocess
 import sys
 import time
+import warnings
 from pathlib import Path
 
 import pytest
@@ -3367,6 +3368,11 @@ _HOME_FILE = re.compile(
 #: silently stops matching fails loudly instead of vacuously passing. Raise it
 #: when you add a block; the failure message prints the number it saw.
 _EXPECTED_SCRIPT_BLOCKS = 11
+#: ALL block definitions, MEASURED — including the ones with no scriptsDir
+#: command. Pins the `^  }` terminator: with `^  };`, `temperatureBlock`'s
+#: `} // (if isLaptop …)` idiom swallowed `gpuBlock` whole and only 19 were
+#: found. Nothing else notices, because the swallowed block has no command.
+_EXPECTED_BLOCK_DEFS = 20
 #: Ungated/gated split, MEASURED. Guards `_block_gates` itself: if gate parsing
 #: collapses to all-True or all-False (a stray `isLaptop` in a comment, the list
 #: reflowed onto one line), `checked` stays correct while the gate assertion
@@ -3378,18 +3384,59 @@ def _graphical_nix():
     return (SCRIPTS.parent / "nix" / "graphical.nix").read_text()
 
 
+def _split_top_level(text, sep="++"):
+    """Split on `sep` only at bracket/paren depth 0.
+
+    🔴 A naive `text.split("++")` produces a FALSE POSITIVE on a legitimate
+    reformat: `lib.optionals (!isLaptop) ([a b] ++ [c d])` splits into a tail
+    segment `[c d])` that no longer contains `isLaptop`, so genuinely gated
+    blocks read as ungated and the seam test fails on correct code. A gate that
+    goes red on a harmless edit is worse than no gate — it trains people to
+    click through.
+    """
+    parts, depth, start = [], 0, 0
+    i = 0
+    while i < len(text):
+        c = text[i]
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif depth == 0 and text.startswith(sep, i):
+            parts.append(text[start:i])
+            i += len(sep)
+            start = i
+            continue
+        i += 1
+    parts.append(text[start:])
+    return parts
+
+
+def _strip_nix_comments(text):
+    """Drop `#` comments without eating a `#` inside a string literal."""
+    out = []
+    for line in text.splitlines():
+        in_str, cut = False, None
+        for i, c in enumerate(line):
+            if c == '"' and (i == 0 or line[i - 1] != "\\"):
+                in_str = not in_str
+            elif c == "#" and not in_str:
+                cut = i
+                break
+        out.append(line if cut is None else line[:cut])
+    return "\n".join(out)
+
+
 def _block_gates(nix):
     """blockName -> True if it reaches the bar on EVERY host (ungated).
 
-    Splits on `++` rather than on NEWLINES: the list is a nix expression, not a
-    line-oriented format, so a reflow onto one line made a line-based parser
-    read every block as ungated. Comments are stripped first — a `# ...isLaptop`
-    aside on a list line otherwise reads as a host gate.
+    Splits on top-level `++` rather than on NEWLINES: the list is a nix
+    expression, not a line-oriented format, so a reflow onto one line made a
+    line-based parser read every block as ungated.
     """
     body = nix.split("  blocks =", 1)[1].split("\nin\n", 1)[0]
-    body = "\n".join(re.sub(r"#.*$", "", ln) for ln in body.splitlines())
     gates = {}
-    for segment in body.split("++"):
+    for segment in _split_top_level(_strip_nix_comments(body)):
         ungated = "isLaptop" not in segment
         for name in re.findall(r"\b(\w+Block)\b", segment):
             # a block listed twice keeps the WIDEST gate it appears under
@@ -3418,9 +3465,15 @@ def test_every_custom_block_script_is_DEPLOYED_UNDER_A_COMPATIBLE_GATE():
     gates = _block_gates(nix)
     deployed = dict(_HOME_FILE.findall(nix))
 
+    all_defs = _BLOCK_DEF.findall(nix)
+    assert len(all_defs) >= _EXPECTED_BLOCK_DEFS, (
+        "found %d block definitions, expected >= %d — the terminator regex "
+        "regressed and is swallowing a block into its predecessor's body"
+        % (len(all_defs), _EXPECTED_BLOCK_DEFS))
+
     problems = []
     checked = 0
-    for block, body in _BLOCK_DEF.findall(nix):
+    for block, body in all_defs:
         m = _SCRIPTS_DIR_CMD.search(body)
         if not m:
             continue  # not a scriptsDir-backed custom block
@@ -3465,9 +3518,18 @@ def test_every_custom_block_script_is_DEPLOYED_UNDER_A_COMPATIBLE_GATE():
 #: moment to check it is a real key, with
 #:   grep '^<name> *=' <i3status-rust>/share/icons/material-nf.toml
 #: The set has 76 keys; these 4 are all that this repo's blocks reference.
-_KNOWN_GOOD_ICONS = {"cogs", "mail", "net_vpn", "tasks"}
+_KNOWN_GOOD_ICONS = {"cogs", "mail", "net_vpn", "tasks", "net_down"}
 
-_ICON_CONST = re.compile(r'^ICON\w*\s*=\s*"([^"]+)"', re.M)
+#: Two spellings, because the blocks use two. `^ICON… = "x"` is the module
+#: constant; `"icon": "x"` is the inline literal `i3status-media` and
+#: `bar-status-poll` use. Matching only the first made the guard's name
+#: ("every block icon") an overclaim — a new block written in the media style
+#: could reproduce the exact bug this guard exists to catch, invisibly.
+_ICON_CONST = re.compile(r'^\w*ICON\w*\s*=\s*"([^"]+)"', re.M)
+_ICON_INLINE = re.compile(r'"icon"\s*:\s*"([^"]+)"')
+#: Scripts scanned for icons. `bar-status-poll` is here deliberately: it is not
+#: an `i3status-*` block but it writes an icon into the cache the blocks render.
+_ICON_SCAN_GLOBS = ("i3status-*", "bar-status-poll")
 
 
 def _material_nf_keys():
@@ -3503,7 +3565,20 @@ def test_every_block_ICON_is_a_REAL_i3status_rust_icon_key():
     an expectation derived from the code it tests can never disagree with it.
     """
     keys = _material_nf_keys()
-    if keys is not None:
+    if keys is None:
+        # 🔴 SAY SO. Measured: inside the nix build sandbox /nix/store holds
+        # only the derivation closure (~50 paths) and i3status-rust is not one
+        # of them, so in the AUTHORITATIVE gate this lookup always returns None
+        # and the allowlist is the entire check. A green run in that mode is
+        # weaker than a green run here, and used to be indistinguishable from
+        # it. The warning makes the difference visible instead of silent.
+        warnings.warn(
+            "i3status-rust not reachable in /nix/store: icon names checked "
+            "against the in-file allowlist ONLY, not against the real icon "
+            "set. Expected inside the nix check sandbox; if you see this on a "
+            "workstation, the strong half of this guard is not running.",
+            stacklevel=2)
+    else:
         stale = _KNOWN_GOOD_ICONS - keys
         assert not stale, (
             "the allowlist in this file names icons that are NOT in the real "
@@ -3511,12 +3586,25 @@ def test_every_block_ICON_is_a_REAL_i3status_rust_icon_key():
             "the icon set" % sorted(stale))
 
     found = {}
-    for script in sorted(SCRIPTS.glob("i3status-*")):
-        for icon in _ICON_CONST.findall(script.read_text(errors="replace")):
-            found.setdefault(icon, []).append(script.name)
+    for pattern in _ICON_SCAN_GLOBS:
+        for script in sorted(SCRIPTS.glob(pattern)):
+            src = script.read_text(errors="replace")
+            for rx in (_ICON_CONST, _ICON_INLINE):
+                for icon in rx.findall(src):
+                    # `"icon": "%s"` in the `?`-pill fallbacks is a format
+                    # placeholder interpolated with the real constant, which
+                    # this scan already picked up from its own definition.
+                    if "%" in icon:
+                        continue
+                    found.setdefault(icon, []).append(script.name)
 
-    # positive control: zero icons found would pass every assertion below.
-    assert found, "no ICON constant found in any block script — regex is dead"
+    # Positive controls: zero icons, or only the one this file already names,
+    # would make every assertion below pass while covering nothing.
+    assert found, "no icon literal found in any block script — both regexes are dead"
+    assert len(found) >= len(_KNOWN_GOOD_ICONS), (
+        "found only %d distinct icons (%s) but the allowlist names %d — the "
+        "scan is missing scripts it used to reach"
+        % (len(found), sorted(found), len(_KNOWN_GOOD_ICONS)))
 
     bad = {i: v for i, v in found.items() if i not in _KNOWN_GOOD_ICONS}
     assert not bad, (
@@ -3563,7 +3651,17 @@ def test_the_load_pill_threshold_MATCHES_cpu_monitors():
 
     # The block must actually be PASSED them — a constant nothing reads is not
     # a single source, it is a decoration.
-    assert "--warning ${toString loadWarnAbove}" in nix, \
-        "loadWarnAbove is defined but never passed to the block"
-    assert "--critical ${toString loadCritAbove}" in nix, \
-        "loadCritAbove is defined but never passed to the block"
+    #
+    # 🔴 Pinned to the `command =` STRING, not to the file. `"…" in nix` was
+    # satisfied by the flags sitting in a `#` comment beside a command that no
+    # longer passed them: the pill would silently fall back to os.cpu_count()
+    # (warn at 24 on the workbench) while this very test stayed green. Measured
+    # as a SURVIVING mutant.
+    cmd = re.search(
+        r'command\s*=\s*"\$\{scriptsDir\}/i3status-load([^"]*)"', nix)
+    assert cmd, "the load block's `command =` line was renamed or removed"
+    passed = cmd.group(1)
+    assert "--warning ${toString loadWarnAbove}" in passed, (
+        "loadWarnAbove is not passed on the command line (got: %r)" % passed)
+    assert "--critical ${toString loadCritAbove}" in passed, (
+        "loadCritAbove is not passed on the command line (got: %r)" % passed)
