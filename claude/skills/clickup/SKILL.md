@@ -70,36 +70,15 @@ node query.mjs edit-page <doc_id> <page_id> --file /tmp/page.md
 - **Internal-API commands** (`inbox-*`, `doc-comments`) need a JWT in the account, not
   just a token — see setup below.
 
-## Going deeper
+## Going deeper — load ONE only when its trigger fires
 
-Paths below are relative to this skill directory. Like every other skill, it is
-**deployed by home-manager from `~/workspace/devrc/claude/skills/clickup/`**: edit
-THERE, then `home-manager switch --flake ~/workspace/devrc --impure` (or
-`scripts/ship.sh` for both hosts). What lands at `~/.claude/skills/clickup/` is a
-tree of read-only `/nix/store` symlinks — editing it directly is impossible, and a
-`git pull` alone changes nothing until you switch.
-
-- **All mutable state lives in `$XDG_STATE_HOME/clickup`** (fallback
-  `~/.local/state/clickup`) — credentials included. A write next to the code is
-  `EROFS`. Setup, `accounts.json`, multi-account and the JWT fields →
-  `~/.claude/skills/clickup/reference/setup.md`.
-- **`node_modules` is BUILT by nix**, not installed: `nix/pkgs/clickup-node-modules.nix`
-  materialises it from `package-lock.json` and links it in at the skill root. To
-  change a dependency, edit `package.json` + `package-lock.json`, set `npmDepsHash`
-  to `lib.fakeHash`, build, copy the `got:` hash back — never guess it.
+- **Credentials, `accounts.json`, multi-account, the JWT fields, first-time setup**
+  → `~/.claude/skills/clickup/reference/setup.md`. State lives in
+  `$XDG_STATE_HOME/clickup` (fallback `~/.local/state/clickup`), never next to the
+  code — a write there is `EROFS`.
 - **Hand-rolling raw `api.clickup.com` requests** → `~/.claude/skills/clickup/reference/raw-api.md` — read it
   first: a view id is not a list id, dashboard views can't be queried for tasks, and
   both task endpoints paginate (a single-page read made a 67-ticket queue look like 30).
-
-## Tests
-
-The hermetic gates are `node:test` suites, run by devrc's node gate
-(`bash scripts/run-node-tests.sh .` from the devrc checkout, and
-`nix build .#checks.x86_64-linux.nodetests` in CI). Standalone still works:
-
-```bash
-node test/help-coverage.test.mjs      # hermetic; pins showUsage() completeness
-node test/state-paths.test.mjs        # hermetic; pins state OUT of the skill dir
-node test/js-source.test.mjs          # hermetic; controls for the source scanner
-node test/smoke-test.mjs --readonly   # live API, needs credentials — NOT in any gate
-```
+- **CHANGING this skill** — where to edit so the change deploys, the nix-built
+  `node_modules` + `npmDepsHash`, and the test suites →
+  `~/.claude/skills/clickup/reference/maintaining.md`.

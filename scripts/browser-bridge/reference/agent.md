@@ -190,8 +190,11 @@ browser agent "go to news.ycombinator.com and report the top 3 story titles" \
   that your `banking` profile is on chase.com, then `nav` that to an attacker.) The
   `browser whoami` CLI you run by hand is unchanged and still shows everything.
 - **No `upload` and no `activate` for the agent.** The autonomous model's op set
-  is **11 ops** (`text`/`html`/`eval`/`nav`/`screenshot`/`frames`/`click`/`type`/
-  `key`/`wake`/`whoami`). `upload` is operator-only — you can still `browser
+  is **13 ops** (`text`/`html`/`eval`/`nav`/`screenshot`/`frames`/`click`/`type`/
+  `key`/`wake`/`context`/`emulate`/`whoami`) — read off `ALLOWED_OPS_DEFAULT` in
+  `opencode/tools/browser_tool_impl.mjs`, which `tests/browser_tool.test.mjs`
+  pins; this sentence said **11** and omitted `context`/`emulate` from #321 until
+  2026-08-20, so trust the constant, not a restatement of it. `upload` is operator-only — you can still `browser
   upload` by hand; the model gets `op_not_allowed:upload`, and it is re-enabled
   only by an explicit `BROWSER_AGENT_ALLOWED_OPS` opt-in. **`activate` is stricter
   still: it is not reachable by the model at ALL**, not even via that opt-in,
