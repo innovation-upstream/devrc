@@ -886,6 +886,33 @@ HISTORICAL_VERSION_CLAIMS = (
      "the k8s index-74 record; its counts describe a tree that no longer exists"),
     ("scripts/tests/test_opencode_config.py", "is deprecated (last measured on opencode",
      "the DEPRECATED-key list, third copy — in the assertion message"),
+    # 🔴 A CROSS-VERSION COMPARISON. These are not claims about what the pinned
+    # engine does — the older versions ARE the evidence, and the comparison
+    # BETWEEN them is the whole finding: a prompt-cache hit rate measured at each
+    # engine in the series is what refutes the theory that caching arrived with a
+    # recent one. Re-deriving these against the pin is not "updating a stale
+    # number", it is deleting the control and leaving a single data point that
+    # cannot support the conclusion drawn from it. Newly VISIBLE rather than
+    # newly stale in one respect too: several end their sentence on the version,
+    # which the pre-#570 `_VERSION_RE` could not see.
+    #
+    # (This comment deliberately spells NO version literal. The first draft
+    # enumerated the series and the scanner flagged it — correctly, since this
+    # file is itself in PIN_SURFACE. Naming them here would also have needed a
+    # ledger entry exempting the ledger's own commentary, which is circular.)
+    ("scripts/opencode/README.md", "Fleet-wide over engines",
+     "spans two engines by design — the window the 2.7%-cold figure was counted over"),
+    ("scripts/opencode/README.md", "Grouped by version, the cached fraction is",
+     "per-version cache rates; each number is a measurement OF that version"),
+    ("scripts/opencode/README.md", "so **caching was already working on",
+     "same series, second line — the older rates are the control, not a stale claim"),
+    ("scripts/opencode/README.md", "it was never engine-version-dependent",
+     "the conclusion the older versions exist to support; re-keying it to the pin "
+     "would assert the opposite of what was measured"),
+    ("scripts/opencode/README.md", "is real and slightly larger than the 7.7k once measured on",
+     "cites the PRIOR measurement as the before-value of a then-vs-now comparison"),
+    ("nix/home.nix", "only 60 (2.7%) were cold",
+     "the same two-engine counting window, in the generator's own summary"),
     # 🔴 THE DEPLOYED-STATE EXEMPTIONS ARE GONE, and their absence is the record.
     # Five lines said "both hosts run 1.18.4" — TRUE while the lock pinned 1.18.16
     # and the hosts had not converged, which is exactly why they were exempt

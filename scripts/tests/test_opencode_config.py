@@ -2043,7 +2043,7 @@ def test_browser_agent_config_dir_is_not_the_live_one():
                 if ln.startswith("OC_CONFIG_DIR="))
     assert ".config/opencode" not in line, (
         "the isolated config dir must NOT be the live ~/.config/opencode — that "
-        "re-imports the ~37 KB AGENTS.md this mechanism exists to shed, and puts "
+        "re-imports the ~43 KB AGENTS.md this mechanism exists to shed, and puts "
         "the warm step's `rm -rf` on the managed directory"
     )
 
