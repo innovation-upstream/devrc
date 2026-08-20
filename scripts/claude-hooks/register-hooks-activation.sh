@@ -23,10 +23,24 @@
 #      / "… no change") is echoed line by line, prefixed. A silent activation
 #      step is how the original failure went unnoticed for a full deploy cycle.
 #   3. IT DECIDES NOTHING ABOUT settings.json. Every read/merge/write belongs
-#      to the registrar, which is strictly APPEND-ONLY and never clobbers a
-#      hook it does not own (the clawgate Stop hook drives remote approval;
-#      losing it would silently break that). This wrapper adds no second
+#      to the registrar. That registrar has TWO surfaces of different widths —
+#      an APPEND surface (its own command tables, never touching a hook it does
+#      not own, so the clawgate Stop hook that drives remote approval survives)
+#      and, since 2026-08-20, a narrow REWRITE surface that normalises the
+#      INTERPRETER TOKEN of a devrc-managed hook command to an absolute
+#      /nix/store python. Read its module docstring before changing either; the
+#      claim this file used to make — "strictly APPEND-ONLY" — is no longer
+#      true and deleting the rewrite path would silently reopen the failure it
+#      closes (a hook firing mid-switch dies with `python3: command not found`,
+#      and bash-guard fails OPEN when it does). This wrapper adds no second
 #      writer — it must never grow one.
+#
+#      🔴 The interpreter the registrar writes is derived from its OWN
+#      sys.executable, so the `[python]` argument below is load-bearing beyond
+#      "something that can run python": home.nix passes
+#      ${pkgs.python312}/bin/python3, and that store path is what ends up in
+#      settings.json. Passing a blinking profile path here would pin the hooks
+#      to a blinking path.
 #
 # The registrar path defaults to the DEPLOYED copy rather than the store
 # source deliberately: if the `home.file` entry for it ever stops landing,
