@@ -233,7 +233,7 @@ in
           # contained none of the words he actually types: feedback, dispatch,
           # process. Lead the label with "feedback" and add those three terms.
           { trigger = ":acq"; replace = "dispatch subagent to process feedback\nask clarifying questions and recommend improvements and anything useful to include before dispatching (include complete test coverage)"; label = "Process feedback: dispatch subagent + ask clarifying questions"; search_terms = ["feedback" "dispatch" "process" "ask" "clarify" "clarifying" "questions" "elicit" "scope" "include"]; }
-          { trigger = ":alo"; replace = "anything left outstanding from this thread?"; label = "Anything left outstanding?"; search_terms = ["anything" "left" "outstanding" ]; }
+          { trigger = ":alo"; replace = "anything left outstanding from this thread?"; label = "Anything left outstanding?"; search_terms = ["anything" "left" "outstanding" "loose" ]; }
           { trigger = ":kickoff"; replace = "give me the kickoff message to copy paste to next session"; label = "Kickoff message for next session"; search_terms = ["kickoff" "kick off" "next session" "copy paste" "handoff" "message"]; }
           # Added 2026-08-05 via /espanso-audit — both are WHOLE-STANDALONE-MESSAGE
           # shaped, the one shape that has stuck (:eos 72 fires, :kickoff 38); every
@@ -277,7 +277,6 @@ in
           # rather than "dispatch" on :pdt. Re-run
           # `espanso-usage.py --replay --config <candidate>` after ANY edit here
           # and diff it against the deployed config: 0 regressions is the gate.
-          { trigger = ":alo"; replace = "determine if anything is left open or unaddressed from this session and overall thread"; label = "Anything left open or unaddressed - session and thread"; search_terms = ["open" "left open" "loose" "outstanding" "remaining" "unfinished" "unaddressed"]; }
           { trigger = ":pdt"; replace = "proceed, dispatch, include complete test coverage"; label = "Proceed with complete test coverage"; search_terms = ["proceed" "coverage" "test coverage" "complete" "tests"]; }
           { trigger = ":cgt"; replace = "create a /clawgate task to pick up the issues"; label = "Create a clawgate ticket for the issues"; search_terms = ["clawgate" "ticket" "issues" "pick up"]; }
           # Removed 2026-07-25 via /espanso-audit — all keylog-evidence-backed:
