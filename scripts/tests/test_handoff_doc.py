@@ -186,6 +186,46 @@ def run_tool(repo: Path, *extra: str, update: Path | None = None, advanced: str 
     )
 
 
+def advance_remote(tmp_path: Path) -> None:
+    """Push a commit to origin from a SECOND clone — the other session."""
+    # Clone the BARE origin, not the working repo — pushing into a non-bare
+    # checkout's current branch is refused, which would fail for a reason
+    # that has nothing to do with what the callers are testing.
+    other = tmp_path / "other"
+    _sh("git", "clone", "-q", str(tmp_path / "origin.git"), str(other), cwd=tmp_path)
+    for k, v in (("user.name", "Other"), ("user.email", "o@example.invalid"),
+                 ("commit.gpgsign", "false")):
+        _sh("git", "config", k, v, cwd=other)
+    (other / "OTHER.md").write_text("other session\n", encoding="utf-8")
+    _sh("git", "add", "--", "OTHER.md", cwd=other)
+    _sh("git", "commit", "-q", "-m", "another session's work", cwd=other)
+    _sh("git", "push", "-q", "origin", "main", cwd=other)
+
+
+_SHA40 = re.compile(r"\b[0-9a-f]{40}\b")
+_SHA12 = re.compile(r"\b[0-9a-f]{12}\b")
+
+
+def normalised_run(res, repo: Path, update: Path) -> str:
+    """`rc` + stdout + stderr, with every varying path and sha tokenised.
+
+    🔴 THE INSTRUMENT FOR THE BYTE-IDENTITY PINS, and the first version of it was
+    WRONG in the direction that matters. It replaced only the repo path — but
+    git's own error text quotes SIBLING paths beside the repo (`…/sibling`,
+    `…/nope.git`), so two genuinely unchanged exit paths compared DIFFERENT
+    purely because the scratch directory was named differently. Replace the
+    parent too, and always AFTER the more specific paths or the specific ones
+    stop matching.
+
+    Its positive control is that failure: before the parent was tokenised the
+    comparison DID report a difference, so it is not a check that can only pass.
+    """
+    text = f"rc={res.returncode}\n--- stdout\n{res.stdout}--- stderr\n{res.stderr}"
+    text = text.replace(str(repo), "<REPO>").replace(str(update), "<UPDATE>")
+    text = text.replace(str(repo.parent), "<TMP>")
+    return _SHA12.sub("<SHA12>", _SHA40.sub("<SHA40>", text))
+
+
 def doc_of(repo: Path) -> str:
     return (repo / "claudedocs" / "handoff-sample-topic.md").read_text(encoding="utf-8")
 
@@ -345,8 +385,14 @@ class TestAcceptLandsExactlyWhatWasShown:
         assert touched == ["claudedocs/handoff-sample-topic.md"]
 
     def test_confirm_alone_does_not_push(self, repo: Path, update_file: Path) -> None:
-        """Rule (b): the write is local and reversible; only the push is the
-        act that needs consent, and it takes its own flag."""
+        """Rule (b): only the push is the act that needs consent, and it takes
+        its own flag.
+
+        ⚠ The FILE write is local and reversible; the COMMIT this also makes is
+        not "cheap" in the sense that phrasing implied — see
+        `TestALocalCommitDoesNotGoUNANNOUNCED`, which is why that path now states
+        what it left behind.
+        """
         remote = Path(_sh("git", "remote", "get-url", "origin", cwd=repo).strip())
         before = _sh("git", "-C", str(remote), "log", "--format=%H", cwd=repo)
         run_tool(repo, "--confirm", update=update_file)
@@ -582,6 +628,14 @@ SKILL_PINS: list[tuple[str, str]] = [
         "Do NOT forbid updating the handoff",
         "rule (a): the fix is a safe update, never a suppressed one",
     ),
+    (
+        "NOT PUSHED",
+        "🔴 the executor is told that --confirm without --push LEAVES A COMMIT",
+    ),
+    (
+        "Do NOT retry by re-running with `--push`",
+        "🔴 …and that the obvious retry duplicates the findings instead",
+    ),
 ]
 
 
@@ -602,19 +656,7 @@ class TestBehindRemoteWritesNothing:
     """
 
     def _advance_remote(self, repo: Path, tmp_path: Path) -> None:
-        """Push a commit to origin from a SECOND clone — the other session."""
-        # Clone the BARE origin, not the working repo — pushing into a non-bare
-        # checkout's current branch is refused, which would fail for a reason
-        # that has nothing to do with what this class is testing.
-        other = tmp_path / "other"
-        _sh("git", "clone", "-q", str(tmp_path / "origin.git"), str(other), cwd=tmp_path)
-        for k, v in (("user.name", "Other"), ("user.email", "o@example.invalid"),
-                     ("commit.gpgsign", "false")):
-            _sh("git", "config", k, v, cwd=other)
-        (other / "OTHER.md").write_text("other session\n", encoding="utf-8")
-        _sh("git", "add", "--", "OTHER.md", cwd=other)
-        _sh("git", "commit", "-q", "-m", "another session's work", cwd=other)
-        _sh("git", "push", "-q", "origin", "main", cwd=other)
+        return advance_remote(tmp_path)
 
     def test_behind_remote_writes_NOTHING(
         self, repo: Path, update_file: Path, tmp_path: Path
@@ -985,6 +1027,383 @@ class TestPushFailureHandsOverTheRecovery:
         res = run_tool(repo, "--confirm", "--push", update=update_file)
         assert "status=behind" not in res.stderr
         assert "status=written" in res.stdout, "the write must have happened first"
+
+
+class TestALocalCommitDoesNotGoUNANNOUNCED:
+    """🔴 THE DEFECT, MEASURED. `--confirm` WITHOUT `--push` made a commit and
+    said, in full: `status=written commit=<sha40>`. Not the branch it landed on,
+    and not one word about the commit existing only in this checkout.
+
+    That end state is IDENTICAL to the one `status=push-failed` spends nine
+    alarmed lines on — "🔴 THE COMMIT … EXISTS LOCALLY … and is NOT on
+    <remote>" plus a preserve→verify→`reset --keep` recovery — because it is the
+    same state, reached by the ordinary SUCCESS path instead of a failure.
+    `claude/RULES.md` calls docs written into a working tree UNSAVED WORK; this
+    repo's `CLAUDE.md` records the un-pushed-commit incident twice.
+
+    The corpus: 69 distinct shas came out of `status=written commit=`, from 58
+    transcripts, of which only 19 ever printed `status=pushed`. Of the handoff
+    commits still in this repo's object store, roughly a third are contained by
+    NO remote branch — every one of them on a feature branch, none on `main`,
+    which is why the feature-branch remedy is the DEFAULT below and the shared
+    branch is the special case, not the other way round.
+
+    🔴 EXIT CODE UNCHANGED. This is information, not a refusal: a local write is
+    a legitimate thing to want, and turning it into a failure would push callers
+    toward `--push` on a shared branch, which is worse.
+    """
+
+    def test_it_names_the_commit_the_BRANCH_and_that_it_is_not_pushed(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 THE HEADLINE REGRESSION. Red at base: the old output was exactly
+        `status=written commit=<sha>` and stopped there."""
+        res = run_tool(repo, "--confirm", update=update_file)
+        assert res.returncode == 0, res.stderr
+        sha = commit_shas(repo)[0]
+        assert f"status=written commit={sha} branch=main" in res.stdout, res.stdout
+        assert (
+            "NOT PUSHED — the commit exists only in this checkout; push it or "
+            "open a PR in THIS session." in res.stdout
+        ), res.stdout
+
+    def test_the_PUSHED_path_says_nothing_about_not_being_pushed(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 THE NEGATIVE CONTROL, and the whole reason to bother with one: a
+        warning printed on the path where it is false is wallpaper, and the next
+        reader learns to skip the line on the path where it is true."""
+        res = run_tool(repo, "--confirm", "--push", update=update_file)
+        assert res.returncode == 0, res.stderr
+        assert "status=pushed" in res.stdout
+        assert "NOT PUSHED" not in res.stdout + res.stderr
+        assert "branch <topic>" not in res.stdout
+        assert "no-change" not in res.stdout
+
+    def test_a_feature_branch_gets_the_PASTEABLE_push_command(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """Pasteable beats descriptive, and `git push` is safe to paste in a way
+        the `behind` path's `merge --ff-only` is not: a push that should not
+        happen is REJECTED, never destructive, so this needs no dirty-tree check."""
+        _sh("git", "checkout", "-q", "-b", "docs/handoff-sample", cwd=repo)
+        res = run_tool(repo, "--confirm", update=update_file)
+        assert res.returncode == 0, res.stderr
+        assert "branch=docs/handoff-sample" in res.stdout
+        assert (
+            f"    git -C {repo} push -u origin HEAD:refs/heads/docs/handoff-sample"
+            in res.stdout
+        ), res.stdout
+        # 🔴 The retry note belongs on THIS arm too. A mutation that deleted it
+        # from the feature-branch arm alone SURVIVED the whole suite, because
+        # both retry tests happened to run on `main` — the shared arm — so the
+        # note they read came from the other branch of the same function.
+        assert "Do NOT retry by re-running this tool with --push" in res.stdout
+
+    def test_a_SHARED_branch_is_NOT_handed_a_push_command_it_must_not_run(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 A WRONG pasteable command is worse than a descriptive one. devrc's
+        own rules forbid committing to `main` in either host checkout, so
+        printing `push … HEAD:refs/heads/main` would be the tool recommending an
+        operation the target repo refuses — the shape that already shipped once
+        in a `behind` message. The topic-branch route is what this repo's
+        diverged-host recipe and `status=push-failed` both already name."""
+        res = run_tool(repo, "--confirm", update=update_file)
+        assert "push -u origin HEAD:refs/heads/main" not in res.stdout, res.stdout
+        assert (
+            f"    git -C {repo} branch <topic> HEAD && "
+            f"git -C {repo} push -u origin <topic>" in res.stdout
+        ), res.stdout
+
+    def test_the_ship_sh_claim_is_SCOPED_here_too(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """`ship.sh` converges devrc only. The `behind` message learned this the
+        hard way — stating it flatly taught a reader that a stranded commit in an
+        unrelated repo blocks it, and they repeated the claim — so the same
+        scoping is required of the new message rather than re-derived."""
+        out = run_tool(repo, "--confirm", update=update_file).stdout
+        assert "In a devrc checkout" in out, "the ship.sh consequence must be scoped"
+        assert "elsewhere" in out, "and the other case must be stated, not implied"
+
+    def test_a_feature_branch_is_NOT_told_it_is_shared(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 NEGATIVE CONTROL on the classifier. A `branch_is_shared` that
+        always returned True would satisfy every shared-branch assertion above
+        while burying the ordinary case — measured as the COMMON case — under a
+        `ship.sh` warning that is false for it."""
+        _sh("git", "checkout", "-q", "-b", "docs/handoff-sample", cwd=repo)
+        out = run_tool(repo, "--confirm", update=update_file).stdout
+        assert "SHARED branch" not in out, out
+        assert "ship.sh" not in out, out
+
+    def test_the_STRUCTURAL_signal_catches_a_shared_branch_the_NAME_LIST_misses(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 The name list is a fallback, not the answer. A remote whose default
+        branch is not called main/master/trunk is not hypothetical — this
+        module's own history records a concurrent `git fetch origin stable` — and
+        a name-only classifier calls that branch a feature branch and hands over
+        a push command the repo may forbid."""
+        _sh("git", "checkout", "-q", "-b", "stable", cwd=repo)
+        _sh("git", "push", "-q", "origin", "stable", cwd=repo)
+        _sh("git", "symbolic-ref", "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/stable", cwd=repo)
+        out = run_tool(repo, "--confirm", update=update_file).stdout
+        assert "`stable` is a SHARED branch" in out, out
+        assert "push -u origin HEAD:refs/heads/stable" not in out
+
+    def test_the_retry_the_message_RULES_OUT_is_ruled_out_for_a_REPLACE_delta(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE CLAIM IN THE PROSE, MEASURED — point A of two.
+
+        The message tells the caller not to retry with `--push`. That is the
+        single most likely next action, so an unverified claim there would be
+        worse than silence. Point A: a delta that only REPLACES sections leaves
+        the doc equal to the merge result, so the no-change guard fires first.
+        """
+        replace_only = tmp_path / "replace-only.md"
+        replace_only.write_text(
+            "## State now\n- Branch / PR: `feat/sample` / #99\n", encoding="utf-8"
+        )
+        first = run_tool(repo, "--confirm", update=replace_only)
+        assert first.returncode == 0
+        assert "Do NOT retry by re-running this tool with --push" in first.stdout
+        remote = Path(_sh("git", "remote", "get-url", "origin", cwd=repo).strip())
+        before = _sh("git", "-C", str(remote), "log", "--format=%H", cwd=repo)
+        again = run_tool(repo, "--confirm", "--push", update=replace_only)
+        assert again.returncode == 5, (again.returncode, again.stdout, again.stderr)
+        assert "status=no-change" in again.stderr
+        assert _sh("git", "-C", str(remote), "log", "--format=%H", cwd=repo) == before
+
+    def test_the_retry_is_ruled_out_for_an_APPEND_delta_TOO_and_differently(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 POINT B, and it is the one that FOUND THE BUG IN THIS MESSAGE.
+
+        The note's first draft said the retry "will NOT land it: … it exits 5
+        `no-change`". That was one measurement on a replace-only fixture stated
+        as a general claim. A delta carrying an APPEND section — which the
+        canonical `## Open investigations` block IS, and which every real handoff
+        update carries — appends a SECOND copy under rule (c), so the retry
+        exits 0, pushes, and silently duplicates the findings.
+
+        Both halves are ruled out, for different reasons, and the message now
+        says so. Exit code 0 is why this half is invisible without the test.
+        """
+        first = run_tool(repo, "--confirm", update=update_file)
+        assert first.returncode == 0
+        again = run_tool(repo, "--confirm", "--push", update=update_file)
+        assert again.returncode == 0, (again.returncode, again.stderr)
+        marker = "### the at-max reading was misread"
+        assert doc_of(repo).count(marker) == 2, (
+            "the retry appended the update a SECOND time — that is the hazard "
+            "the note names, and if this ever becomes 1 the note is stale"
+        )
+        assert "APPENDS your findings a second time" in first.stdout
+
+    def test_a_detached_HEAD_still_SUCCEEDS_and_names_no_bogus_target(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 `resolve_branch` is now called unconditionally, and it RAISES on a
+        detached HEAD. That must not turn a working local write into a refusal:
+        without `--push` there is no push to be wrong about, so the failure costs
+        a NAME, never the write. And with no branch there is no push target, so
+        no push command may be printed — a `HEAD:refs/heads/<unresolved>` would
+        be exactly the wrong-pasteable-command failure."""
+        shas_before = commit_shas(repo)
+        _sh("git", "checkout", "-q", "--detach", cwd=repo)
+        res = run_tool(repo, "--confirm", update=update_file)
+        assert res.returncode == 0, (res.returncode, res.stderr)
+        assert len(commit_shas(repo)) == len(shas_before) + 1
+        assert "branch=<unresolved>" in res.stdout, res.stdout
+        assert "detached HEAD, no --branch" in res.stdout
+        assert "refs/heads/" not in res.stdout, res.stdout
+        assert f"git -C {repo} branch <topic> HEAD" in res.stdout
+
+    def test_a_detached_HEAD_still_REFUSES_under_push(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """The other half of the pair: deferring the resolve error must not have
+        smuggled a detached-HEAD push past the refusal that used to catch it."""
+        doc_before, shas_before = doc_of(repo), commit_shas(repo)
+        _sh("git", "checkout", "-q", "--detach", cwd=repo)
+        res = run_tool(repo, "--confirm", "--push", update=update_file)
+        assert res.returncode == 3, (res.returncode, res.stderr)
+        assert "detached HEAD and no --branch given" in res.stderr
+        assert doc_of(repo) == doc_before
+        assert commit_shas(repo) == shas_before
+
+    def test_branch_is_shared_predicate(self, repo: Path) -> None:
+        """The predicate in one place, so the message and the tests agree — and
+        so the UNION of the two signals is pinned rather than assumed. Neither
+        may veto the other: a false True costs a line of prose, a false False
+        costs the louder half of the warning exactly where it matters."""
+        # No refs/remotes/origin/HEAD in this fixture (git init + remote add
+        # never creates one) — so these exercise the NAME fallback alone.
+        assert hd.branch_is_shared(repo, "origin", "main") is True
+        assert hd.branch_is_shared(repo, "origin", "trunk") is True
+        assert hd.branch_is_shared(repo, "origin", "master") is True
+        assert hd.branch_is_shared(repo, "origin", "docs/handoff-x") is False
+        assert hd.branch_is_shared(repo, "origin", "stable") is False
+        # …and now the structural signal alone, on a name the list does not know.
+        _sh("git", "checkout", "-q", "-b", "stable", cwd=repo)
+        _sh("git", "push", "-q", "origin", "stable", cwd=repo)
+        _sh("git", "symbolic-ref", "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/stable", cwd=repo)
+        assert hd.branch_is_shared(repo, "origin", "stable") is True
+        assert hd.branch_is_shared(repo, "origin", "docs/handoff-x") is False
+        # The name list still wins where they disagree — union, not override.
+        assert hd.branch_is_shared(repo, "origin", "main") is True
+
+
+# --------------------------------------------------------------------------
+# 🔴 the property most likely to regress: every OTHER exit path, byte for byte
+# --------------------------------------------------------------------------
+
+# Full normalised `rc` + stdout + stderr for the exits that carry NO git-authored
+# text. Pinned WHOLE, not by keyword: when the artifact under test is prose, a
+# keyword guard is walkable by rewording, and these messages are the entire
+# product of their code paths. A cosmetic reword must fail here — that is the
+# cost of a machine-readable claim that they did not change.
+PIN_NO_ADVANCE = """rc=4
+--- stdout
+--- stderr
+status=no-advance
+This session did not state what changed since the handoff was written, so no update is offered: no diff, no write, no commit.
+  If state DID advance, re-run with --advanced '<what changed>'.
+  If it did not, say so plainly and write nothing — a handoff that still describes reality is not stale.
+"""
+
+PIN_NO_CHANGE = """rc=5
+--- stdout
+--- stderr
+status=no-change
+The merge of <UPDATE> into claudedocs/handoff-sample-topic.md changes nothing. No diff, no commit — an empty commit is not a handoff update.
+"""
+
+PIN_BEHIND_CLEAN_STDERR = """status=behind remote=origin branch=main
+NOTHING WRITTEN — not the doc, not a commit, not a ref.
+  origin/main has commit(s) this checkout does not, so the push would be rejected and the commit would be left behind on a shared branch. In a devrc checkout that is the state that silently blocks `ship.sh`; elsewhere it is a stranded commit on a branch other people push to.
+  This checkout is CLEAN, so a fast-forward is safe. Run it, then re-run this exact command:
+    git -C <REPO> merge --ff-only origin/main
+  🔴 If `--branch main` is not the branch you are ON, do NOT run that merge — it would merge an unrelated branch into your checkout. Push from a checkout of main instead.
+  If the merge refuses, this checkout has DIVERGED — preserve, verify, then move the pointer, in that order:
+    git -C <REPO> branch <topic> HEAD && git -C <REPO> push -u origin <topic>
+    git -C <REPO> ls-remote --heads origin <topic>
+    git -C <REPO> reset --keep origin/main
+"""
+
+PIN_BEHIND_DIRTY_STDERR = """status=behind remote=origin branch=main
+NOTHING WRITTEN — not the doc, not a commit, not a ref.
+  origin/main has commit(s) this checkout does not, so the push would be rejected and the commit would be left behind on a shared branch. In a devrc checkout that is the state that silently blocks `ship.sh`; elsewhere it is a stranded commit on a branch other people push to.
+  🔴 THIS CHECKOUT IS DIRTY — 2 uncommitted path(s): README.md, other-wip.txt
+  DO NOT fast-forward it. Some or all of that work is probably another session's, and `merge --ff-only` would either refuse or overwrite it. Several repos forbid committing in a shared primary clone for exactly this reason.
+  Commit and push from a THROWAWAY WORKTREE off the remote branch instead, leaving this tree untouched:
+    git -C <REPO> worktree add /tmp/handoff-wt origin/main
+    # write the doc there, commit it path-limited, then:
+    git -C /tmp/handoff-wt push origin HEAD:main
+  🔴 Remove the worktree only AFTER the push succeeds — removing it after a failed push deletes the branch ref and orphans the commit.
+  Verify by CONTENT, never ancestry: a squash merge never makes your head an ancestor of main.
+"""
+
+# push-failed interleaves git's OWN stderr, whose wording is a git-version
+# dependency this suite must not pin. So its two tool-authored halves are pinned
+# instead — the head token and everything from the 🔴 line to the end.
+PIN_PUSH_FAILED_TAIL = """🔴 THE COMMIT <SHA12> EXISTS LOCALLY on `main` and is NOT on origin. On a shared branch that is the state `ship.sh` skips over silently.
+  Preserve, verify, then move the pointer — in that order:
+    git -C <REPO> branch <topic> HEAD && git -C <REPO> push -u origin <topic>
+    git -C <REPO> ls-remote --heads origin <topic>   # confirm it landed
+    git -C <REPO> reset --keep origin/main   # --keep refuses rather than destroys
+"""
+
+
+class TestTheOtherExITSDidNotMove:
+    """🔴 Adding a line to ONE exit path is exactly how the neighbouring paths
+    get edited by accident, and nothing else in this suite reads their messages
+    whole — the existing tests check for keywords, which a reword walks straight
+    past. These pin the bytes.
+
+    Verified against the pre-change module by extracting it with `git show` and
+    running all seven exit paths through the same normaliser: 7/7 identical. The
+    normaliser's positive control is recorded in `normalised_run`.
+    """
+
+    def _noop_update(self, tmp_path: Path) -> Path:
+        p = tmp_path / "noop.md"
+        p.write_text("## Goal\nMake the sample subsystem stop dropping work "
+                     "under load.\n", encoding="utf-8")
+        return p
+
+    def test_no_advance_is_byte_identical(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        res = run_tool(repo, "--confirm", update=update_file, advanced=None)
+        assert normalised_run(res, repo, update_file) == PIN_NO_ADVANCE
+
+    def test_no_change_is_byte_identical(self, repo: Path, tmp_path: Path) -> None:
+        noop = self._noop_update(tmp_path)
+        res = run_tool(repo, "--confirm", update=noop)
+        assert normalised_run(res, repo, noop) == PIN_NO_CHANGE
+
+    def test_behind_CLEAN_is_byte_identical(
+        self, repo: Path, update_file: Path, tmp_path: Path
+    ) -> None:
+        advance_remote(tmp_path)
+        res = run_tool(repo, "--confirm", "--push", update=update_file)
+        assert res.returncode == 6
+        assert normalised_run(res, repo, update_file).split("--- stderr\n")[1] == (
+            PIN_BEHIND_CLEAN_STDERR
+        )
+        assert "status=" not in res.stdout, "nothing was written; no status on stdout"
+
+    def test_behind_DIRTY_is_byte_identical(
+        self, repo: Path, update_file: Path, tmp_path: Path
+    ) -> None:
+        advance_remote(tmp_path)
+        (repo / "README.md").write_text("someone else's WIP\n", encoding="utf-8")
+        (repo / "other-wip.txt").write_text("wip\n", encoding="utf-8")
+        res = run_tool(repo, "--confirm", "--push", update=update_file)
+        assert res.returncode == 6
+        assert normalised_run(res, repo, update_file).split("--- stderr\n")[1] == (
+            PIN_BEHIND_DIRTY_STDERR
+        )
+
+    def test_push_failed_is_byte_identical(
+        self, repo: Path, update_file: Path, tmp_path: Path
+    ) -> None:
+        sibling = tmp_path / "sibling"
+        _sh("git", "clone", "-q", str(tmp_path / "origin.git"), str(sibling),
+            cwd=tmp_path)
+        _sh("git", "remote", "set-url", "origin", str(sibling), cwd=repo)
+        res = run_tool(repo, "--confirm", "--push", update=update_file)
+        assert res.returncode == 3
+        norm = normalised_run(res, repo, update_file)
+        err = norm.split("--- stderr\n")[1]
+        assert err.startswith("status=push-failed\n")
+        assert err[err.index("🔴 THE COMMIT"):] == PIN_PUSH_FAILED_TAIL
+        # 🔴 And the stdout half: `status=written` on the push path must NOT have
+        # grown the `branch=` token, or the not-pushed change reached a path it
+        # has no business on.
+        assert norm.rstrip("\n").endswith("status=written commit=<SHA40>") is False
+        assert "status=written commit=<SHA40>\n--- stderr" in norm, norm
+
+    def test_the_pins_can_report_a_difference(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 NEGATIVE CONTROL on the four pins above. A normaliser that
+        tokenised too much — or an equality that compared something constant —
+        would make every one of them vacuous. Feed it a run whose output is
+        genuinely different and watch it NOT match."""
+        res = run_tool(repo, "--confirm", update=update_file)
+        text = normalised_run(res, repo, update_file)
+        assert text != PIN_NO_ADVANCE
+        assert text != PIN_NO_CHANGE
+        assert "<SHA40>" in text, "the sha WAS tokenised — the instrument works"
+        assert str(repo) not in text, "the repo path WAS tokenised"
 
 
 class TestSkillAndModuleAgree:

@@ -18,7 +18,7 @@ explicit confirm, diff first … on decline, discard"). The gap was underneath:
 the handoff DOC's own write+push carried no equivalent gate, and a session
 running after a resume inherited no constraint at all.
 
-FOUR RULES, and this module is what makes three of them structural rather than
+FIVE RULES, and this module is what makes four of them structural rather than
 prose an agent can read and then not follow:
 
 a. UPDATING IS NOT FORBIDDEN. The incident's update was correct and valuable;
@@ -62,8 +62,17 @@ whose trunk is the deploy branch is a per-repo policy question, not this
 module's. It pushes only when asked to, only to the remote and branch it is
 given, and only together with `--confirm`.
 
+e. A LOCAL COMMIT IS NOT A CHEAP LOCAL STATE, AND MUST NOT BE SILENT. `--confirm`
+   without `--push` is a legitimate thing to want and stays exit 0 — but it makes
+   a real commit, and that end state is IDENTICAL to the one `status=push-failed`
+   spends nine alarmed lines on. Reaching it by the ordinary success path used to
+   print one line and say nothing about the commit's fate: not the branch, not
+   that it was unpushed. So that path now states the fact — without the alarm,
+   because it is information, not a refusal. See `not_pushed_report`.
+
 EXIT CODES
-  0  proposed (diff shown, nothing written) — or written/pushed under --confirm
+  0  proposed (diff shown, nothing written) — or written/pushed under --confirm.
+     `written` WITHOUT `--push` also reports the branch and that it is not pushed
   2  usage
   3  operational failure (unreadable input, git refused) — nothing written
   4  no-advance      — rule (d), no diff printed
@@ -303,13 +312,132 @@ class GitError(RuntimeError):
 
 
 def resolve_branch(repo: Path, override: str | None) -> str:
-    """The branch a push would land on. Resolved BEFORE the write, not after."""
+    """The branch a push would land on. Resolved BEFORE the write, not after.
+
+    Called UNCONDITIONALLY by `main()`, not only under `--push`: the not-pushed
+    report below names the branch, and a local commit whose branch is not stated
+    is a commit the next session cannot find. Under `--push` a failure here still
+    refuses; without it a failure is only a missing NAME, never a refusal — see
+    `main()`.
+    """
     if override:
         return override
     branch = git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
     if branch == "HEAD":
         raise GitError("detached HEAD and no --branch given; refusing to guess")
     return branch
+
+
+# The branch names a converger fast-forwards. A FALLBACK, not the primary
+# signal — see `branch_is_shared`.
+SHARED_BRANCH_NAMES: frozenset[str] = frozenset({"main", "master", "trunk"})
+
+
+def branch_is_shared(repo: Path, remote: str, branch: str) -> bool:
+    """Is `branch` one other people push to — i.e. does an un-pushed commit on
+    it become the `ship.sh`-skip hazard rather than merely unsaved work?
+
+    It decides only WHICH REMEDY the not-pushed report names, and the two cases
+    genuinely differ: on a feature branch `git push` is the answer, while several
+    repos (devrc among them) forbid committing to their shared branch at all, so
+    printing `push … HEAD:refs/heads/main` there would be a pasteable command the
+    target repo's own rules refuse. A wrong pasteable command is worse than a
+    descriptive one.
+
+    TWO SIGNALS, UNIONED, because either alone is wrong somewhere:
+
+      * the NAME list — right for the overwhelming majority, blind to a repo
+        whose shared branch is called something else (this module's own history
+        records a concurrent `git fetch origin stable`);
+      * `refs/remotes/<remote>/HEAD` — structural and exact where it is set, but
+        `git init` + `git remote add` never creates it, so it is simply absent in
+        many checkouts (and in this suite's fixture repo).
+
+    Unioned rather than layered so neither can VETO the other: a false `True`
+    costs one extra line of prose, a false `False` costs the louder half of the
+    warning on exactly the branch where it matters most. That is the fail-safe
+    direction.
+
+    Read-only: `symbolic-ref` on a remote-tracking ref reads a local ref file and
+    writes nothing, so this adds no side effect to a path whose whole property is
+    that it touches nothing it was not asked to.
+    """
+    if branch in SHARED_BRANCH_NAMES:
+        return True
+    head = git_allow(repo, "symbolic-ref", "--quiet", f"refs/remotes/{remote}/HEAD")
+    return head.code == 0 and head.out.strip() == f"refs/remotes/{remote}/{branch}"
+
+
+# 🔴 The headline, and it is deliberately ONE line without alarm punctuation.
+# `--confirm` without `--push` is a SUCCESS — this is information, not a refusal
+# — so it must not read like `status=push-failed`, whose nine-line 🔴 block
+# describes the IDENTICAL end state reached by a failure. What was missing was
+# never the alarm; it was the fact.
+NOT_PUSHED_HEADLINE = (
+    "NOT PUSHED — the commit exists only in this checkout; push it or open a "
+    "PR in THIS session."
+)
+
+# 🔴 MEASURED AT TWO POINTS, and it is why a COMMAND is named at all rather than
+# a re-run. The obvious retry — the identical command plus `--push` — does not do
+# what a caller expects, and WHICH way it fails depends on the delta's sections:
+#
+#   A. a delta that only REPLACES ("## State now") — the doc on disk now equals
+#      the merge result, the no-change guard fires first: exit 5, remote unmoved.
+#   B. a delta carrying an APPEND section ("## Findings") — rule (c) appends a
+#      SECOND copy, so the run succeeds and pushes a doc with the update in it
+#      twice, plus an extra commit. Silently. This is the worse half and it is
+#      invisible from the exit code, which is 0.
+#
+# The first draft of this note asserted only case A, from a single measurement on
+# a replace-only fixture. `test_the_retry_…` caught it by running case B.
+NOT_PUSHED_RETRY_NOTE = (
+    "  Do NOT retry by re-running this tool with --push — the doc on disk "
+    "already carries this update, so a second run either exits 5 `no-change` (a "
+    "delta that only replaces sections) or APPENDS your findings a second time "
+    "and pushes the duplicate. Push the commit you already have."
+)
+
+
+def not_pushed_report(repo: Path, remote: str, branch: str | None) -> str:
+    """What `--confirm` without `--push` owes its caller, in three or four lines.
+
+    🔴 A COMMAND, NOT A DESCRIPTION — but only a command that is safe in its
+    widest reading. `git push` is safe by construction: one that should not
+    happen is REJECTED, so it cannot damage a tree the way the `behind` path's
+    `merge --ff-only` can, which is why this report needs no dirty-tree check.
+    On a shared branch the safe command is not a push at all (see
+    `branch_is_shared`), and with no resolvable branch there is no push target,
+    so both of those get the preserve-on-a-topic-branch route instead — the same
+    one `status=push-failed` and this repo's diverged-host recipe already name.
+    """
+    topic = (
+        f"    git -C {repo} branch <topic> HEAD && "
+        f"git -C {repo} push -u {remote} <topic>"
+    )
+    if branch is None:
+        why = (
+            "  There is no branch to push from (detached HEAD, no --branch), so "
+            "the commit is reachable only from HEAD. Give it a name first:"
+        )
+    elif branch_is_shared(repo, remote, branch):
+        # 🔴 The `ship.sh` consequence is SCOPED, never asserted of every repo —
+        # stating it flatly once taught a reader that a stranded commit in an
+        # unrelated repo blocks it, and they repeated the claim.
+        why = (
+            f"  `{branch}` is a SHARED branch. In a devrc checkout an un-pushed "
+            f"commit there is the state `ship.sh` skips over silently; elsewhere "
+            f"it is a commit on a branch other people push to. Several repos "
+            f"forbid committing to `{branch}` at all, so do NOT push from here — "
+            f"preserve it on a topic branch and open a PR:"
+        )
+    else:
+        return (
+            f"{NOT_PUSHED_HEADLINE}\n"
+            f"    git -C {repo} push -u {remote} HEAD:refs/heads/{branch}\n"
+            f"{NOT_PUSHED_RETRY_NOTE}"
+        )
+    return f"{NOT_PUSHED_HEADLINE}\n{why}\n{topic}\n{NOT_PUSHED_RETRY_NOTE}"
 
 
 def uncommitted_paths(repo: Path) -> list[str]:
@@ -540,10 +668,23 @@ def main(argv: list[str] | None = None) -> int:
         )
         return EXIT_OK
 
+    # 🔴 Resolved for EVERY confirmed write, not only for `--push`, because the
+    # not-pushed report names the branch. A failure is DEFERRED rather than
+    # raised: `--confirm` without `--push` on a detached HEAD commits and exits 0
+    # today and must keep doing so — this is information, not a new refusal — so
+    # only the push path below re-raises it, which keeps that refusal byte-identical.
+    push_branch = ""
+    branch_error: GitError | None = None
+    try:
+        push_branch = resolve_branch(repo, args.branch)
+    except GitError as exc:
+        branch_error = exc
+
     if args.push:
         # 🔴 BEFORE the write, not after. See EXIT_BEHIND.
         try:
-            push_branch = resolve_branch(repo, args.branch)
+            if branch_error is not None:
+                raise branch_error
             behind = remote_has_commits_we_lack(repo, args.remote, push_branch)
         except (GitError, ValueError) as exc:
             print(
@@ -634,9 +775,17 @@ def main(argv: list[str] | None = None) -> int:
         print(f"status=failed\n{exc}", file=sys.stderr)
         return EXIT_FAIL
 
-    print(f"status=written commit={sha}")
-
-    if not args.push:
+    if args.push:
+        # No `branch=` here: the line that follows on either push outcome already
+        # names it (`status=pushed remote= branch=`, or the push-failed recovery
+        # which spells it in every command). Adding it twice would also make this
+        # change alter output on paths it has no business altering.
+        print(f"status=written commit={sha}")
+    else:
+        # 🔴 The ONE outcome where the branch was never stated anywhere, and the
+        # one that leaves a commit behind with no further line about its fate.
+        print(f"status=written commit={sha} branch={push_branch or '<unresolved>'}")
+        print(not_pushed_report(repo, args.remote, push_branch or None))
         return EXIT_OK
 
     try:
