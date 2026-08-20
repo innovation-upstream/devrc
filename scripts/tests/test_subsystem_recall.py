@@ -1623,11 +1623,9 @@ class TestSearchFixtureCorpus:
         q = rc.tokenize("quill scheduler")
         line_a = "- 2026-03-05: the quill worker drops a job when the"
         line_b = "  scheduler restarts mid-batch."
-        assert rc.score_unit(q, rc.tokenize(line_a)) < rc.DEFAULT_SEARCH_THRESHOLD
-        assert rc.score_unit(q, rc.tokenize(line_b)) < rc.DEFAULT_SEARCH_THRESHOLD
-        assert rc.score_unit(q, rc.tokenize(line_a + "\n" + line_b)) >= (
-            rc.DEFAULT_SEARCH_THRESHOLD
-        )
+        assert rc.score_unit(q, line_a) < rc.DEFAULT_SEARCH_THRESHOLD
+        assert rc.score_unit(q, line_b) < rc.DEFAULT_SEARCH_THRESHOLD
+        assert rc.score_unit(q, line_a + "\n" + line_b) >= rc.DEFAULT_SEARCH_THRESHOLD
 
     def test_the_name_only_hit_SAYS_it_is_one(self, search_store: Path) -> None:
         """A hunk shown because the ENTRY was named must not read as a hunk whose
@@ -1670,40 +1668,54 @@ class TestSearchScorer:
             assert rc.tokenize(spelling) == ("rate", "limit"), spelling
 
     def test_the_concatenation_is_what_makes_a_COMPOUND_query_exact(self) -> None:
-        """🔴 Deliberate, and not a lowered cutoff — but be precise about what it
-        buys, because the prefix rule already reaches `rate` from `ratelimit` at
-        0.92. TWO things, both measured below:
+        """🔴 Deliberate, and not a lowered cutoff. TWO things it buys, both
+        measured below:
 
-          1. RANKING. The joined token scores 1.00, so the block that really says
-             `rate-limit` out-ranks every block that merely contains `rate`.
-          2. REACH. When a compound's parts are shorter than `MIN_INEXACT_LEN`
-             (`k8s`+`api`) the concatenation is the ONLY rule that can match at
-             all — every other rung is closed to a 3-character token.
+          1. REACH FOR THE WHOLE COMPOUND. The inexact rungs are DIRECTIONAL, so
+             `rate` — a FRAGMENT of the query — scores 0.00, and the
+             concatenation is the only thing that can match a corpus writing
+             `rate-limit` at all. (It used to be phrased as "the joined form
+             out-RANKS the bare half"; the bare half scored 0.92 and had no
+             business on the screen. See `TestSearchDirectionality`.)
+          2. REACH WHEN THE PARTS ARE SHORT. When a compound's parts are below
+             `MIN_INEXACT_LEN` (`k8s`+`api`) every other rung is closed to a
+             3-character token, join or no join.
         """
-        cands = rc.candidate_tokens(rc.tokenize("the rate-limit cap"))
+        cands = rc.candidate_tokens("the rate-limit cap")
         assert "ratelimit" in cands
         assert rc.pair_strength("ratelimit", "ratelimit") == 1.0
-        # (1) the joined form outranks the bare half the prefix rule reaches.
-        assert rc.pair_strength("ratelimit", "rate") == rc.PREFIX_STRENGTH < 1.0
+        # (1) the bare halves are FRAGMENTS of the query and no longer score.
+        assert rc.pair_strength("ratelimit", "rate") == 0.0
+        assert rc.pair_strength("ratelimit", "limit") == 0.0
+        assert rc.score_unit(rc.tokenize("ratelimit"), "the rate-limit cap") == 1.0
         # (2) the reach case: nothing but the join gets there.
-        short = rc.tokenize("the k8s api server")
-        assert all(rc.pair_strength("k8sapi", t) == 0.0 for t in short)
+        short = "the k8s api server"
+        assert all(rc.pair_strength("k8sapi", t) == 0.0 for t in rc.tokenize(short))
         assert "k8sapi" in rc.candidate_tokens(short)
         assert rc.score_unit(rc.tokenize("k8sapi"), short) == 1.0
 
-    def test_the_compound_hit_OUT_RANKS_the_bare_half(self, search_store: Path) -> None:
-        """The ranking half of the claim above, end to end and with the
-        distractor present — otherwise the compound fixture would pass on a
-        scorer that joins nothing."""
+    def test_the_compound_hit_is_the_ONLY_hit_the_bare_half_is_GONE(
+        self, search_store: Path
+    ) -> None:
+        """End to end, with the distractor still in the store. `mailer` carries a
+        bare `rate`; under the old symmetric prefix rule it rode along at 0.92
+        for a query it does not contain. It must now be absent — and the fixture
+        is still a genuine kill for the join, because with the join removed
+        `ratelimit` reaches NOTHING (asserted in the mutation matrix)."""
         hunks = rc.search(search_store, SEARCH_SCOPE, "ratelimit").hunks
         assert hunks[0].ref == "edge-proxy"
         assert hunks[0].score == 1.0
-        assert "mailer" in {h.ref for h in hunks}, "the distractor stopped matching"
-        assert next(h for h in hunks if h.ref == "mailer").score == rc.PREFIX_STRENGTH
+        assert "mailer" not in {h.ref for h in hunks}, (
+            "the bare-`rate` distractor is back on the screen — the reverse "
+            "direction has reopened in `pair_strength`"
+        )
 
-    def test_the_reverse_direction_is_covered_by_prefix_and_substring(self) -> None:
+    def test_a_query_the_candidate_EXTENDS_still_matches_both_rungs(self) -> None:
+        """The direction that is KEPT, named as the two documented motivating
+        cases. If a directional fix breaks either of these the fix is wrong."""
         assert rc.pair_strength("rate", "ratelimit") == rc.PREFIX_STRENGTH
         assert rc.pair_strength("limit", "ratelimit") == rc.SUBSTRING_STRENGTH
+        assert rc.pair_strength("postgres", "postgresql") == rc.PREFIX_STRENGTH
 
     def test_a_short_token_must_match_EXACTLY(self) -> None:
         """🔴 ONE length rule guarding all three inexact rungs. Short tokens are
@@ -1723,15 +1735,283 @@ class TestSearchScorer:
     def test_an_absent_TERM_costs_its_share_because_the_score_is_a_MEAN(self) -> None:
         """🔴 The reason a multi-token query cannot be as loose as its loosest
         word. A max would have scored this 1.00."""
-        block = rc.tokenize("the edge-proxy rate-limit cap is global")
+        block = "the edge-proxy rate-limit cap is global"
         assert rc.score_unit(rc.tokenize("edge kryptonite"), block) == pytest.approx(0.5)
         assert rc.score_unit(rc.tokenize("edge kryptonite"), block) < (
             rc.DEFAULT_SEARCH_THRESHOLD
         )
 
     def test_an_empty_query_matches_NOTHING_rather_than_everything(self) -> None:
-        assert rc.score_unit((), rc.tokenize("anything at all")) == 0.0
-        assert rc.score_unit(rc.tokenize("anything"), ()) == 0.0
+        assert rc.score_unit((), "anything at all") == 0.0
+        assert rc.score_unit(rc.tokenize("anything"), "") == 0.0
+
+
+# =============================================================================
+# DIRECTIONALITY: the inexact rungs are ONE-WAY, and the join stops at a clause.
+# =============================================================================
+#
+# 🔴 EVERY ENTRY BELOW IS INVENTED, like the corpus above it. The real store is
+# client-confidential and this repo is public.
+
+DIRECTIONAL_SCOPE = "widget-yard"
+
+
+def _make_directional_store(root: Path) -> Path:
+    """A synthetic scope carrying one BAIT for each way an inexact rung can lie.
+
+    Each bait is a word the corpus really writes, chosen so that a query which
+    STRICTLY CONTAINS it has no honest business matching here."""
+    store = root / "directional-store"
+    d = store / DIRECTIONAL_SCOPE
+    d.mkdir(parents=True)
+
+    def w(name: str, **kw) -> None:
+        (d / f"{name}.md").write_text(
+            _entry(name, DIRECTIONAL_SCOPE, **kw), encoding="utf-8"
+        )
+
+    # SUBSTRING BAIT — and THE HEADLINE CASE. The corpus writes `rotate`; nothing
+    # anywhere writes `logrotate`. `rotate` is not a PREFIX of `logrotate`, so
+    # this bait can only ever be taken by the substring rung.
+    w(
+        "spin-drive",
+        pointers="- the drum will rotate once per cycle.",
+        nuance="- 2026-04-01: a stalled drum reports ready for a further 20s.",
+    )
+    # PREFIX BAIT. `drain` IS a prefix of `drainage`, so a symmetric prefix rung
+    # takes this at 0.92 while a symmetric substring rung takes it at 0.85 — two
+    # different numbers, which is what lets the two mutants be told apart.
+    w(
+        "relay-hub",
+        pointers="- drain that node, port-forward the admin socket first.",
+        nuance="- 2026-04-04: draining twice in a minute wedges the queue.",
+    )
+    # POSITIVE CONTROL, prefix rung: the query is a PREFIX of what the corpus
+    # writes. This direction is KEPT and must not regress.
+    w(
+        "ledger-store",
+        pointers="- the postgresql primary is the only writer.",
+        nuance="- 2026-04-02: failover promotes a stale replica when the vip lags.",
+    )
+    # POSITIVE CONTROL, substring rung: the query is CONTAINED BY what the corpus
+    # writes. Also kept.
+    w(
+        "edge-gate",
+        pointers="- one listener per tenant.",
+        nuance="- 2026-04-03: the ratelimit cap is global and not per-tenant.",
+    )
+    # WITHIN-CLAUSE JOIN, so the clause rule cannot be satisfied by deleting the
+    # join outright — that mutant has to stay separately killable.
+    w(
+        "mesh-probe",
+        pointers="- the health check runs every 30s.",
+        nuance="- 2026-04-05: a failed check is retried three times before it counts.",
+    )
+    return store
+
+
+@pytest.fixture()
+def directional_store(tmp_path: Path) -> Path:
+    return _make_directional_store(tmp_path)
+
+
+class TestSearchDirectionality:
+    """🔴 THE INEXACT RUNGS ASK ONE QUESTION: does the candidate spell MORE than
+    the query? Never the reverse.
+
+    A symmetric rung ("either is a prefix/substring of the other") accepts a
+    candidate that is a FRAGMENT of the query. `score_unit` is a mean over the
+    QUERY's tokens, so a ONE-TOKEN query then took FULL coverage from a single
+    incidental short word, and every hit on the page carried a 0.85 or 0.92 that
+    nothing in the entry justified — on real single-token queries a MAJORITY of
+    the hunks served did not contain the query anywhere, and some first pages
+    were fabricated end to end. No fraction is quoted: it is a property of a
+    store that changes daily. This class pins the BEHAVIOUR instead."""
+
+    def test_the_fixture_still_carries_its_BAIT(self, directional_store: Path) -> None:
+        """🔴 The positive control on the corpus itself. Every assertion below is
+        an ABSENCE, and an absence is worthless if the bait quietly left the
+        fixture — the store would then be silent for the wrong reason."""
+        corpus = "\n".join(
+            p.read_text(encoding="utf-8")
+            for p in sorted((directional_store / DIRECTIONAL_SCOPE).glob("*.md"))
+        ).lower()
+        for bait in ("rotate", "drain", "node", "port"):
+            assert bait in corpus, f"the `{bait}` bait left the fixture"
+        for absent in ("logrotate", "drainage", "nodeport"):
+            assert absent not in corpus, f"`{absent}` is IN the corpus — no bait left"
+
+    def test_a_FRAGMENT_of_the_query_is_NOT_a_match(
+        self, directional_store: Path
+    ) -> None:
+        """THE HEADLINE. A corpus that only ever writes `rotate` must be SILENT
+        for `logrotate` — the whole word is absent, and a searcher that answers
+        anyway has invented its answer.
+
+        The end-to-end claim is asserted FIRST, so the red this test throws on
+        pre-change code is the symptom a CALLER sees and not only a number."""
+        rep = rc.search(directional_store, DIRECTIONAL_SCOPE, "logrotate")
+        assert rep.status == "search-no-match", (
+            f"a corpus that never writes `logrotate` served {len(rep.hunks)} hunks "
+            f"for it, top score {rep.hunks[0].score if rep.hunks else 0:.2f}"
+        )
+        assert rep.hunks == ()
+        # …and the rung that used to take the bait, at its own number (0.85).
+        assert rc.pair_strength("logrotate", "rotate") == 0.0
+
+    def test_the_prefix_FRAGMENT_is_not_a_match_either(
+        self, directional_store: Path
+    ) -> None:
+        """The other rung's bait, end to end: `drain` prefixes `drainage`, so
+        this one used to be taken at 0.92 rather than 0.85."""
+        rep = rc.search(directional_store, DIRECTIONAL_SCOPE, "drainage")
+        assert rep.status == "search-no-match", (
+            f"a corpus that never writes `drainage` served {len(rep.hunks)} hunks "
+            f"for it, top score {rep.hunks[0].score if rep.hunks else 0:.2f}"
+        )
+        assert rc.pair_strength("drainage", "drain") == 0.0
+
+    def test_the_POSITIVE_CONTROLS_the_fix_must_not_break(
+        self, directional_store: Path
+    ) -> None:
+        """🔴 The direction that is KEPT, as the two cases `pair_strength` names
+        as motivating. If a directional fix breaks either of these the FIX is
+        wrong, not the test."""
+        pg = rc.search(directional_store, DIRECTIONAL_SCOPE, "postgres")
+        assert pg.status == "search-hit"
+        assert pg.hunks[0].ref == "ledger-store"
+        assert pg.hunks[0].score == rc.PREFIX_STRENGTH
+        assert "postgresql" in "\n".join(pg.hunks[0].lines)
+
+        lim = rc.search(directional_store, DIRECTIONAL_SCOPE, "limit")
+        assert lim.status == "search-hit"
+        assert lim.hunks[0].ref == "edge-gate"
+        assert lim.hunks[0].score == rc.SUBSTRING_STRENGTH
+        assert "ratelimit" in "\n".join(lim.hunks[0].lines)
+
+    def test_an_EXACT_hit_still_outranks_every_inexact_rung(
+        self, directional_store: Path
+    ) -> None:
+        """The narrowing control at the top of the ladder: a whole-word query
+        still lands at 1.00 and still beats the 0.92 the same store can offer."""
+        rep = rc.search(directional_store, DIRECTIONAL_SCOPE, "rotate")
+        assert rep.status == "search-hit"
+        assert rep.hunks[0].ref == "spin-drive"
+        assert rep.hunks[0].score == 1.0
+        assert rep.hunks[0].score > rc.PREFIX_STRENGTH
+
+    def test_a_MULTI_token_query_still_covers_across_the_block(
+        self, directional_store: Path
+    ) -> None:
+        """The token-set path, so a fix that narrowed matching in general is
+        caught here and not only at the rung it touched."""
+        rep = rc.search(directional_store, DIRECTIONAL_SCOPE, "stalled drum")
+        assert rep.status == "search-hit"
+        assert rep.hunks[0].ref == "spin-drive"
+        assert rep.hunks[0].score == 1.0
+        # …and the mean still charges for a word that is not there.
+        half = rc.search(directional_store, DIRECTIONAL_SCOPE, "stalled kryptonite")
+        assert half.status == "search-no-match"
+
+    def test_the_NONSENSE_query_control_AND_the_no_match_affordance(
+        self, directional_store: Path
+    ) -> None:
+        """🔴 THE `NO MATCH` BRANCH, PROVEN REACHABLE IN BOTH ITS SHAPES.
+
+        They are reached differently and neither may be assumed. A ONE-TOKEN
+        query can never produce a NEAR MISS at the default threshold — its score
+        IS its single token's strength, and every non-zero rung (0.85 and up)
+        already clears 0.60 — so the near-miss shape is reached by raising the
+        threshold, exactly as the flag's own help says. The advice is then
+        EXECUTED, because an affordance nobody runs is decoration."""
+        gone = rc.search(directional_store, DIRECTIONAL_SCOPE, "kryptonite")
+        assert gone.status == "search-no-match"
+        assert gone.best_below is None
+        n = len(list((directional_store / DIRECTIONAL_SCOPE).glob("*.md")))
+        assert gone.entries_searched == n > 1
+        absent_text = rc.render_search(gone)
+        assert "No candidate scored above zero at all" in absent_text
+        assert "closest candidate" not in absent_text
+
+        near = rc.search(
+            directional_store, DIRECTIONAL_SCOPE, "postgres", threshold=0.95
+        )
+        assert near.status == "search-no-match"
+        assert near.best_below == ("ledger-store", rc.PREFIX_STRENGTH)
+        near_text = rc.render_search(near)
+        assert "closest candidate was `ledger-store` at 0.92" in near_text
+        assert "`--threshold 0.91`" in near_text
+        # The advertised flag, RUN.
+        again = rc.search(
+            directional_store, DIRECTIONAL_SCOPE, "postgres", threshold=0.91
+        )
+        assert again.status == "search-hit"
+        assert again.hunks[0].ref == "ledger-store"
+
+
+class TestCandidateJoinStopsAtAClause:
+    """🔴 The join may cross the four ways ONE term is spelled, and nothing else.
+
+    Joining `node`+`port` across a comma manufactured a PERFECT 1.00 for
+    `nodeport` in an entry that does not contain the word — the worst shape this
+    scorer can emit, because 1.00 out-ranks every genuine match on the page."""
+
+    def test_a_COMMA_is_not_part_of_a_compound(self, directional_store: Path) -> None:
+        assert "nodeport" not in rc.candidate_tokens("drain that node, port-forward it")
+        assert "nodeport" in rc.candidate_tokens("drain that node port-forward it")
+        rep = rc.search(directional_store, DIRECTIONAL_SCOPE, "nodeport")
+        assert rep.status == "search-no-match"
+
+    def test_every_clause_BREAKER_is_reachable(self) -> None:
+        """Each character in the class, exercised — a set nobody probes is a set
+        whose members can be wrong one at a time."""
+        assert "alphabeta" in rc.candidate_tokens("one alpha beta two"), (
+            "the positive control failed: the join is not happening at all, so "
+            "every absence below would pass for the wrong reason"
+        )
+        for ch in ",;:!?()[]":
+            assert "alphabeta" not in rc.candidate_tokens(f"one alpha{ch} beta two"), ch
+
+    def test_a_SENTENCE_stop_breaks_it_but_a_DOTTED_identifier_does_not(self) -> None:
+        """🔴 The `.` rule is the narrow one, and this is why: a dotted
+        identifier is a single term whose halves must keep joining, so the break
+        fires only when the `.` is followed by whitespace or end-of-text."""
+        assert "alphabeta" not in rc.candidate_tokens("one alpha. Beta follows")
+        assert "alphabeta" not in rc.candidate_tokens("it ends in alpha.")
+        assert "alphabeta" in rc.candidate_tokens("the alpha.beta key")
+
+    def test_the_join_still_crosses_every_spelling_of_ONE_compound(
+        self, directional_store: Path
+    ) -> None:
+        """🔴 THE COST SIDE, MEASURED SEPARATELY. A hyphen, an underscore, a
+        space and a dot inside an identifier are the four ways one term gets
+        written; a clause rule that broke on any of them would trade one false
+        positive for a lost match."""
+        for spelling in ("health-check", "health_check", "health check", "health.check"):
+            assert "healthcheck" in rc.candidate_tokens(f"the {spelling} runs"), spelling
+        rep = rc.search(directional_store, DIRECTIONAL_SCOPE, "healthcheck")
+        assert rep.status == "search-hit"
+        assert rep.hunks[0].ref == "mesh-probe"
+        assert rep.hunks[0].score == 1.0
+
+    def test_clause_FREE_text_yields_EXACTLY_the_old_candidate_set(self) -> None:
+        """🔴 THE NARROWING CONTROL. Where there is no clause punctuation the new
+        rule must produce precisely the tokens-plus-every-adjacent-join set the
+        old one did — same members, same order — or the fix has quietly shrunk
+        real matching everywhere instead of only at the boundary it targets."""
+        text = "the readiness probe lies for 40s after a reload"
+        toks = rc.tokenize(text)
+        old = tuple(toks) + tuple(a + b for a, b in zip(toks, toks[1:]))
+        assert rc.candidate_tokens(text) == old
+
+    def test_candidate_tokens_takes_TEXT_so_the_guard_cannot_be_BYPASSED(
+        self,
+    ) -> None:
+        """🔴 One rule, one place. If it accepted a token sequence, a caller that
+        tokenized first would silently lose the clause boundary — which is the
+        exact shape of the defect. Passing tokens must FAIL, loudly."""
+        with pytest.raises(TypeError):
+            rc.candidate_tokens(rc.tokenize("drain that node, port-forward it"))
 
 
 class TestEntryBlocks:
@@ -3911,18 +4191,97 @@ class TestMutationKillMatrix:
 
     def test_kills_the_concatenation(self, tmp_path: Path) -> None:
         """Without it a compound whose parts are shorter than MIN_INEXACT_LEN is
-        unreachable — every other rung is closed to a 3-character token."""
+        unreachable — every other rung is closed to a 3-character token — and,
+        now that the rungs are directional, so is a compound whose parts are LONG
+        (`ratelimit` against a corpus writing `rate-limit`)."""
         mod = _load_mutant(
             tmp_path,
             "m_concat",
-            [("    return tuple(tokens) + tuple(a + b for a, b in zip(tokens, tokens[1:]))",
-              "    return tuple(tokens)")],
+            [("        joined.extend(a + b for a, b in zip(toks, toks[1:]))",
+              "        joined.extend(())")],
         )
         store = _make_search_store(tmp_path / "s")
         assert mod.search(store, SEARCH_SCOPE, "k8sapi").status == "search-no-match"
+        assert mod.search(store, SEARCH_SCOPE, "ratelimit").status == "search-no-match"
         real = rc.search(store, SEARCH_SCOPE, "k8sapi")
         assert real.hunks[0].ref == "beacon"
         assert real.hunks[0].score == 1.0
+        assert rc.search(store, SEARCH_SCOPE, "ratelimit").hunks[0].score == 1.0
+
+    def test_kills_the_PREFIX_rung_DIRECTION(self, tmp_path: Path) -> None:
+        """🔴 ONE RUNG, ISOLATED. Only the prefix `if` is reverted to the
+        symmetric form — the substring rung below it is untouched, so a green
+        here could not be a neighbour's doing.
+
+        The kill is asserted on THIS rung's own number. Both mutants take the
+        same bait (`drain` prefixes `drainage`, and therefore is also contained
+        by it), but the prefix rung answers 0.92 and the substring rung 0.85, so
+        the score IS the discriminator."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_prefix_dir",
+            [("    if t.startswith(q):", "    if t.startswith(q) or q.startswith(t):")],
+        )
+        assert mod.pair_strength("drainage", "drain") == mod.PREFIX_STRENGTH
+        assert mod.pair_strength("drainage", "drain") != mod.SUBSTRING_STRENGTH
+        assert rc.pair_strength("drainage", "drain") == 0.0
+        store = _make_directional_store(tmp_path / "s")
+        mutant = mod.search(store, DIRECTIONAL_SCOPE, "drainage")
+        assert mutant.status == "search-hit"
+        assert mutant.hunks[0].score == mod.PREFIX_STRENGTH
+        assert "drainage" not in "\n".join(mutant.hunks[0].lines).lower()
+        assert rc.search(store, DIRECTIONAL_SCOPE, "drainage").status == "search-no-match"
+        # …and the rung it must NOT have touched still answers as itself.
+        assert mod.pair_strength("logrotate", "rotate") == 0.0
+
+    def test_kills_the_SUBSTRING_rung_DIRECTION(self, tmp_path: Path) -> None:
+        """🔴 The other rung, isolated the same way — and reached by a bait the
+        PREFIX rung structurally cannot take: `rotate` is contained by
+        `logrotate` but does not begin it. Without this rung's direction the
+        headline defect is back: a corpus that only writes `rotate` answers a
+        `logrotate` query at 0.85."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_substr_dir",
+            [("    if q in t:", "    if q in t or t in q:")],
+        )
+        assert mod.pair_strength("logrotate", "rotate") == mod.SUBSTRING_STRENGTH
+        assert rc.pair_strength("logrotate", "rotate") == 0.0
+        store = _make_directional_store(tmp_path / "s")
+        mutant = mod.search(store, DIRECTIONAL_SCOPE, "logrotate")
+        assert mutant.status == "search-hit"
+        assert mutant.hunks[0].score == mod.SUBSTRING_STRENGTH
+        assert "logrotate" not in "\n".join(mutant.hunks[0].lines).lower()
+        assert rc.search(store, DIRECTIONAL_SCOPE, "logrotate").status == "search-no-match"
+        # …and the rung above it stayed directional, at ITS own number.
+        assert mod.pair_strength("drainage", "drain") == mod.SUBSTRING_STRENGTH
+        assert mod.pair_strength("drainage", "drain") != mod.PREFIX_STRENGTH
+
+    def test_kills_the_CLAUSE_boundary_on_the_join(self, tmp_path: Path) -> None:
+        """🔴 The join's boundary, mutated NARROWLY: the break class is emptied
+        to a pattern that matches nothing, leaving the join itself intact — a
+        mutant that deleted both would die for the concatenation's reason and
+        prove nothing about the boundary.
+
+        Its symptom is specific and is the worst one available: a PERFECT 1.00
+        for a query the winning entry does not contain anywhere."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_clause",
+            [(r'_CLAUSE_BREAK = re.compile(r"[,;:!?()\[\]]|\.(?=\s|$)")',
+              '_CLAUSE_BREAK = re.compile(r"(?!x)x")')],
+        )
+        assert "nodeport" in mod.candidate_tokens("drain that node, port-forward it")
+        assert "nodeport" not in rc.candidate_tokens("drain that node, port-forward it")
+        store = _make_directional_store(tmp_path / "s")
+        mutant = mod.search(store, DIRECTIONAL_SCOPE, "nodeport")
+        assert mutant.status == "search-hit"
+        assert mutant.hunks[0].score == 1.0
+        assert "nodeport" not in "\n".join(mutant.hunks[0].lines).lower()
+        assert rc.search(store, DIRECTIONAL_SCOPE, "nodeport").status == "search-no-match"
+        # …and the legitimate join is still there in the mutant, so this kill is
+        # about the BOUNDARY and not about the join having vanished.
+        assert mod.search(store, DIRECTIONAL_SCOPE, "healthcheck").hunks[0].score == 1.0
 
     def test_kills_the_short_token_exactness_rule(self, tmp_path: Path) -> None:
         """🔴 Without it short tokens fuzzily reach anything they prefix, which is

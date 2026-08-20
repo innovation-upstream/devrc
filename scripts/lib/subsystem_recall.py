@@ -165,7 +165,7 @@ CONTRACT SUMMARY
     recall(store_root, scope, *, ref=…, limit=…, mode=…, page=…, focus_paths=…)
                                               -> RecallReport
     render_text(report) / report_json(report) -> str / dict
-    tokenize(text) / pair_strength(a, b) / score_unit(q_tokens, unit_tokens)
+    tokenize(text) / pair_strength(q, t) / score_unit(q_tokens, unit_TEXT)
     entry_blocks(text)                        -> tuple[Block, ...]
     search(store_root, scope, query, *, context=…, threshold=…, …)
                                               -> SearchReport
@@ -2011,37 +2011,100 @@ def tokenize(text: str) -> tuple[str, ...]:
     return tuple(_TOKEN.findall(text.lower()))
 
 
-def candidate_tokens(tokens: Sequence[str]) -> tuple[str, ...]:
-    """A unit's tokens PLUS every adjacent pair joined.
+# Punctuation that ENDS a compound instead of spelling one, so `candidate_tokens`
+# must not join across it. `-`, `_` and a plain space are deliberately ABSENT:
+# those are the three ways the store actually writes one compound term, and
+# `tokenize` already folds them together.
+#
+# 🔴 A `.` counts ONLY at a sentence end — followed by whitespace or end-of-text.
+# A dotted identifier (`activity.events`, `nginx.conf`, a dotted config key) is a
+# single term whose halves must keep joining, and a rule that broke on every `.`
+# would silently stop reaching them.
+_CLAUSE_BREAK = re.compile(r"[,;:!?()\[\]]|\.(?=\s|$)")
 
-    🔴 THIS IS THE COMPOUND-TERM FIX, and it is deliberate rather than a lowered
-    cutoff. `ratelimit` never clears a fuzzy threshold against `rate` or `limit`
-    — it is not a typo of either — so the corpus side grows the concatenation and
-    the match becomes EXACT (1.00) instead of fuzzy-and-arguable. The other
-    direction (`rate limit` searched against a corpus that writes `ratelimit`) is
-    covered by the prefix/substring rules in `pair_strength`.
+
+def candidate_tokens(text: str) -> tuple[str, ...]:
+    """Every token a unit's TEXT offers as a match candidate: its own tokens,
+    PLUS every adjacent pair joined WITHIN one clause.
+
+    🔴 THE JOIN IS THE COMPOUND-TERM FIX, and it is deliberate rather than a
+    lowered cutoff. `ratelimit` never clears a fuzzy threshold against `rate` or
+    `limit` — it is not a typo of either — so the corpus side grows the
+    concatenation and the match becomes EXACT (1.00) instead of
+    fuzzy-and-arguable. The other direction (`rate limit` searched against a
+    corpus that writes `ratelimit`) is covered by `pair_strength`'s prefix and
+    substring rungs.
+
+    🔴 IT TAKES TEXT AND NOT TOKENS, because the clause boundary is exactly the
+    information tokenizing throws away — and the join is unsafe without it. A
+    bullet of the shape "drain that node, port-forward the socket" joins
+    `node`+`port` across the comma and scores a PERFECT 1.00 for `nodeport` in an
+    entry that never says the word — two facts glued into a term neither of them
+    spells. A 1.00 with no evidence behind it is the worst shape this scorer can
+    emit, because it out-ranks every genuine match on the page, so the clause
+    boundary is a hard stop. Taking text also removes the bypass: a caller cannot
+    tokenize first and lose the guard, because there is nothing to pass but the
+    text. The trade is measured in `TestCandidateJoinStopsAtAClause` — every
+    spelling of one compound still joins.
 
     Adjacent PAIRS only. Triples were not added: nothing in the corpus or the
     fixture set needs them, and each extra join widens the false-match surface.
+
+    Plain tokens first, then the joins — `score_unit` scans in order and stops at
+    1.00, so this keeps a whole-token exact hit cheaper than a joined one.
     """
-    return tuple(tokens) + tuple(a + b for a, b in zip(tokens, tokens[1:]))
+    plain: list[str] = []
+    joined: list[str] = []
+    for clause in _CLAUSE_BREAK.split(text):
+        toks = tokenize(clause)
+        plain.extend(toks)
+        joined.extend(a + b for a, b in zip(toks, toks[1:]))
+    return tuple(plain) + tuple(joined)
 
 
 def pair_strength(q: str, t: str) -> float:
-    """How strongly one query token matches one candidate token, in [0, 1].
+    """How strongly one query token `q` matches one candidate token `t`, in [0, 1].
 
     The ladder, each rung strictly below the one above so an exact match always
     wins and a weak hit PRINTS as weak:
 
         1.00  identical
-        0.92  one is a prefix of the other   (`postgres` → `postgresql`)
-        0.85  one contains the other         (`limit` → `ratelimit`)
-        ratio a `difflib` ratio ≥ FUZZY_FLOOR (`conection` → `connection`, 0.95)
+        0.92  the candidate EXTENDS the query   (`postgres` → `postgresql`)
+        0.85  the candidate CONTAINS the query  (`limit` → `ratelimit`)
+        ratio a `difflib` ratio ≥ FUZZY_FLOOR   (`conection` → `connection`, 0.95)
         0.00  otherwise
+
+    🔴 THE TWO MIDDLE RUNGS ARE DIRECTIONAL, AND THAT IS THE WHOLE POINT. They
+    ask whether the candidate spells MORE than the query, never the reverse. A
+    symmetric rule ("either is a prefix of the other") scores a candidate that is
+    a FRAGMENT of the query just as highly, and because `score_unit` is a mean
+    over the QUERY's tokens, a single-token query then takes FULL coverage from
+    one incidental short word: `logrotate` scores 0.85 off a bare `rotate`,
+    `kubeconfig` 0.92 off `kube`, `nodeport` 0.92 off `node`. The symmetric form
+    put a MAJORITY of every above-threshold hunk on the screen for queries whose
+    word appeared nowhere in them, some pages entirely fabricated, and each one
+    wearing a 0.85 or 0.92 that nothing in the entry justified.
+
+    🔴 DO NOT QUOTE A FRACTION HERE — it is a property of a store that changes
+    daily, and a stale one reads as a live claim. MEASURE IT: run single-token
+    queries with `--all-scopes --json` and count the hunks whose `lines` do not
+    contain the query. The behaviour itself is pinned by
+    `TestSearchDirectionality` and the labelled fixture corpus.
+
+    Both documented motivating cases are query ⊂ candidate and are UNCHANGED:
+    `postgres` → `postgresql`, `limit` → `ratelimit`. The reverse direction buys
+    no recall the join and the fuzzy rung do not already cover, and it is where
+    the false positives lived.
 
     🔴 Tokens shorter than `MIN_INEXACT_LEN` take the first rung or nothing. One
     length rule guarding all three inexact rungs, not three — a per-rung length
-    constant is how a predicate ends up wrong at N−1 of its sites.
+    constant is how a predicate ends up wrong at N−1 of its sites. A length
+    RATIO floor (`len(q)/len(t)`) was considered as a SECOND guard and REJECTED
+    on measurement: once the rungs are directional it moves almost nothing —
+    every pair it would reject is already one the candidate legitimately extends
+    — while at 0.5 it refuses `rate` → `ratelimit` (4/9), a case this module
+    names as motivating. A guard that costs a documented match to buy a rounding
+    error is taste, not a rule.
 
     The `difflib` call is gated on a length window as well as on the floor: a
     ratio can only reach `FUZZY_FLOOR` when the lengths are close, so the window
@@ -2051,9 +2114,9 @@ def pair_strength(q: str, t: str) -> float:
         return 1.0
     if len(q) < MIN_INEXACT_LEN or len(t) < MIN_INEXACT_LEN:
         return 0.0
-    if t.startswith(q) or q.startswith(t):
+    if t.startswith(q):
         return PREFIX_STRENGTH
-    if q in t or t in q:
+    if q in t:
         return SUBSTRING_STRENGTH
     if abs(len(q) - len(t)) > 2:
         return 0.0
@@ -2061,7 +2124,7 @@ def pair_strength(q: str, t: str) -> float:
     return ratio if ratio >= FUZZY_FLOOR else 0.0
 
 
-def score_unit(query_tokens: Sequence[str], unit_tokens: Sequence[str]) -> float:
+def score_unit(query_tokens: Sequence[str], unit_text: str) -> float:
     """COVERAGE of the query by the unit: the mean best strength per query token.
 
     🔴 A MEAN AND NOT A MAX, which is the whole reason an absent term is
@@ -2074,10 +2137,15 @@ def score_unit(query_tokens: Sequence[str], unit_tokens: Sequence[str]) -> float
     An empty query scores 0 everywhere rather than matching everything: "the user
     asked for nothing" and "everything matches" are different answers and only one
     of them is honest.
+
+    🔴 THE CANDIDATE SIDE IS TEXT, NOT TOKENS. `candidate_tokens` needs the clause
+    boundaries to decide what it may join, so handing it a pre-tokenized sequence
+    would silently disable that guard at whichever call site did it. There is one
+    way in, and it carries the punctuation.
     """
     if not query_tokens:
         return 0.0
-    cands = candidate_tokens(unit_tokens)
+    cands = candidate_tokens(unit_text)
     if not cands:
         return 0.0
     total = 0.0
@@ -2310,8 +2378,8 @@ def _entry_hunks(
     text = path.read_text(encoding="utf-8", errors="replace")
     raw = text.splitlines()
 
-    name_tokens = tokenize(" ".join((entry.ref, entry.slug, *entry.aliases)))
-    name_score = score_unit(query_tokens, name_tokens)
+    name_text = " ".join((entry.ref, entry.slug, *entry.aliases))
+    name_score = score_unit(query_tokens, name_text)
 
     def make(block: Block, score: float, basis: str) -> Hunk:
         if context == CONTEXT_BULLET:
@@ -2337,7 +2405,7 @@ def _entry_hunks(
             name_score=name_score,
         )
 
-    scored =[(score_unit(query_tokens, tokenize(b.text)), b) for b in entry_blocks(text)]
+    scored = [(score_unit(query_tokens, b.text), b) for b in entry_blocks(text)]
     cleared = [make(b, s, "line") for s, b in scored if s >= threshold]
     if cleared:
         return cleared, []
@@ -2664,7 +2732,10 @@ def _build_parser() -> argparse.ArgumentParser:
             "whole is affordable. Fuzzy and stdlib-only: it shells out to nothing. Every "
             "hunk carries its own scope/ref, section and sensitivity=, plus its score and "
             "the threshold, so a weak match is visibly weak. A query term that matches "
-            "nothing costs its share of the score, so a two-word query needs both words."
+            "nothing costs its share of the score, so a two-word query needs both words. "
+            "Matching is one-way: a term is matched by corpus words that EXTEND it "
+            "(`postgres` finds `postgresql`), never by ones it merely contains — so "
+            "type the SHORTER form when you are unsure, not the longer."
         ),
     )
     p.add_argument(
