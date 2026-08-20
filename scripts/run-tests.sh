@@ -216,6 +216,12 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 #           pytest.FAIL, not skip, when absent: this is the ONLY file that can
 #           see a resolver-semantics change under an unchanged config, so a skip
 #           there is precisely the silent green the version pin exists to stop.
+#   rsync   scripts/tests/test_subsystem_store_api.py, which drives the real
+#           scripts/subsystem-store-api/seed.sh — its copy step is
+#           `rsync -a --delete "$STORE"/ "$STAGE"/`. Without the binary those
+#           tests fail with rc 127 rather than skipping, deliberately: the
+#           property they pin is that seeding never writes to the local store,
+#           and that store is the only copy of client-confidential content.
 # logrotate: scripts/tests/test_claude_log_rotate.py drives the REAL binary
 # against a temp directory (rotation, truncation, generation cap, and the .bak
 # scope fence). Those tests FAIL rather than skip when it is absent — a skipped
@@ -238,9 +244,21 @@ fi
 if [ "${#missing_tools[@]}" -gt 0 ]; then
   echo "run-tests: FATAL — required tool(s) missing from PATH: ${missing_tools[*]}" >&2
   echo "  The suites SKIP the tests that need these, so the run would go green while" >&2
-  echo "  testing less. Add them to the caller's inputs (flake.nix checks.pytests" >&2
-  echo "  nativeBuildInputs / the pre-push nix-shell) — do NOT drop them from" >&2
-  echo "  REQUIRED_TOOLS to make this pass." >&2
+  echo "  testing less. This is a MISSING ENVIRONMENT, not a code failure — nothing" >&2
+  echo "  in the repo is broken and no test has run yet." >&2
+  echo >&2
+  echo "  FIX — enter the repo's own dev shell, which carries exactly this list," >&2
+  echo "  and re-run from there:" >&2
+  echo >&2
+  echo "      nix develop \"$ROOT\" --command bash \"$ROOT/scripts/run-tests.sh\" \"$ROOT\"" >&2
+  echo >&2
+  echo "  (or \`nix develop\` once, then \`bash scripts/run-tests.sh .\` as often as" >&2
+  echo "  you like). That shell is built from the SAME flake.nix \`gateTools\` list" >&2
+  echo "  as the \`nix flake check\` gate, so it cannot drift out of satisfying this" >&2
+  echo "  precondition." >&2
+  echo >&2
+  echo "  Do NOT drop entries from REQUIRED_TOOLS to make this pass — each one is" >&2
+  echo "  justified in the comment block directly above it." >&2
   exit 2
 fi
 
