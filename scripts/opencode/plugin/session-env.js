@@ -63,7 +63,23 @@ export const SessionEnvPlugin = async () => ({
     // every bash call opencode makes; losing an attribution is recoverable,
     // breaking the bash tool is not.
     try {
-      if (!output || typeof output.env !== "object" || output.env === null) return;
+      // 🔴 NO EXPLICIT SHAPE GUARD ON `output`, DELIBERATELY, AND MEASURED. An
+      // earlier draft opened with
+      //     if (!output || typeof output.env !== "object" || output.env === null) return;
+      // which reads as defence-in-depth and has NO observable effect: every
+      // shape it rejects (`undefined`, `null`, no `env`, `env: null`) makes the
+      // assignment below throw, and the catch turns that into exactly the same
+      // outcome — nothing written, nothing propagated. Deleting the whole line
+      // SURVIVED a 7-case battery of malformed inputs precisely because it could
+      // not change any answer. A guard nothing can distinguish from its absence
+      // is not a guard; worse, it invites someone to conclude the catch is
+      // redundant. The catch IS the control here, and removing it kills all 7.
+      //
+      // `input &&` below is NOT in that category and must stay: with no input
+      // object, reading `.sessionID` throws and the catch would leave an
+      // ANCESTOR's id standing in the overlay. That one IS observable, and
+      // test_an_unidentifiable_call_sets_the_variable_empty_not_stale's
+      // undefined/null rows are what kill its removal.
       const id = input && input.sessionID;
       // 🔴 THE PTY PATH FIRES THIS HOOK WITH `{cwd}` ONLY — no sessionID. Set
       // the variable to the EMPTY STRING there rather than leaving it alone:

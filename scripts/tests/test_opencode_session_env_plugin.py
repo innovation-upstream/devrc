@@ -164,6 +164,12 @@ def test_a_second_call_overwrites_a_parents_inherited_id():
     ('{ sessionID: "" }', "an empty-string sessionID"),
     ('{ sessionID: null }', "an explicit null"),
     ('{ sessionID: 12345 }', "a non-string sessionID"),
+    # 🔴 These two are what make the `input &&` guard REACHABLE. Without it,
+    # reading `.sessionID` off undefined/null throws, the catch swallows it, and
+    # the ancestor's id SURVIVES in the overlay — the one shape where "does not
+    # throw" and "does not misattribute" are different claims.
+    ("undefined", "no input object at all"),
+    ("null", "a null input object"),
 ])
 def test_an_unidentifiable_call_sets_the_variable_empty_not_stale(inp, why):
     """🔴 FAIL CLOSED, AND ACTIVELY. `output.env` is an OVERLAY, so "leave it
