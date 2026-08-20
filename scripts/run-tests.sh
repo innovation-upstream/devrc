@@ -1204,7 +1204,23 @@ TARGET_FLOORS=(
   "scripts/claude-hooks/tests/test_on_disk_artifact_names.py|12"
   # 2026-08-14, writer 2 (opencode) arrives as a NEW target: 15 collected.
   #   _suggested_floor 15 = 15 - min(50, max(1, 15/20 = 0 -> 1)) = 14.
-  "scripts/opencode/tests|14"
+  #
+  # 2026-08-20, the opencode-dispatch skill (#583) lands in this target:
+  # 15 -> 90 collected. +75 for scripts/opencode/tests/test_dispatch.py, which is
+  # a NEW FILE in an existing directory target — so HERMETIC_TARGETS needs no
+  # entry and this line is the only evidence the gate runs it at all. ZERO new
+  # skips, so EXPECTED_SKIPS is untouched.
+  #
+  # 🔴 COPIED FROM THE AUTHORITATIVE GATE'S OWN DRIFT MESSAGE on the MERGED
+  # integration tree (main + #578 + #580 + #583 + #584), not computed here and
+  # not derived from this branch alone — this line is a churn magnet, `rerere`
+  # has replayed a stale resolution onto its neighbours before, and arithmetic
+  # across two sides of a conflict is what gave the old global literal eleven
+  # values in one day:
+  #   run-tests: ERROR — scripts/opencode/tests collected 90 tests but its floor
+  #   is only 14. Raise the TARGET_FLOORS entry to "scripts/opencode/tests|86"
+  # (which is `_suggested_floor 90` = 90 - min(50, max(1, 90/20 = 4)) = 86.)
+  "scripts/opencode/tests|86"
 )
 
 # The allowance rule, in one place, used by BOTH the drift message and anyone

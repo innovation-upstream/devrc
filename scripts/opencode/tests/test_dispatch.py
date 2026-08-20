@@ -63,6 +63,30 @@ import brief_scan  # noqa: E402
 import oc_permissions  # noqa: E402
 
 
+# 🔴 A `/usr/…` path used as TEST DATA — an argument to a pure string predicate,
+# never an interpreter and never written to a file.
+#
+# It deliberately does NOT spell `/usr/bin/env`. `scripts/tests/
+# test_runtime_shebangs.py` scans every `test_*.py` for that literal and flagged
+# the earlier spelling here. Two routes were open and this is the chosen one:
+#
+#   * ALLOWLIST the hit — CLOSED by that file's own 🔴: "Nothing here may be
+#     `/usr/bin/env`". Taking it would mean changing the rule, not satisfying it,
+#     and its docstring names adding an entry to go green as the anti-pattern.
+#   * RESTRUCTURE — taken. The assertion never needed that specific string: it
+#     proves "an enumerated /usr prefix returns a reason", which ANY /usr path
+#     demonstrates. Narrowing my own fixture is strictly cheaper and lower-risk
+#     than widening a repo-wide gate.
+#
+# The scanner IS over-broad in the narrow sense that it cannot tell a path being
+# *mentioned* from one being *written as a shebang* — but making it able to
+# would mean parsing Python, which is the trap guard_core's DESIGN NOTE records
+# (three rounds of a regex "is this inert text?" helper, each with a fresh hole).
+# A fixed-string gate that fails closed for one retype is the better trade, and
+# it is the same stance guard_core takes about quoted commit messages.
+ALLOWLISTED_USR_PATH = "/usr/share/doc/example/readme"
+
+
 def _load_cli():
     """Import the extensionless executable as a module."""
     spec = importlib.util.spec_from_loader(
@@ -285,7 +309,7 @@ def test_the_system_allowlist_is_judged_lexically_not_by_realpath(tmp_path):
     d = tmp_path / "proj"
     d.mkdir()
     assert brief_scan.is_allowlisted("/etc/hosts") is None
-    assert brief_scan.is_allowlisted("/usr/bin/env") is not None
+    assert brief_scan.is_allowlisted(ALLOWLISTED_USR_PATH) is not None
     assert [o.text for o in brief_scan.scan_paths("edit /etc/hosts", d)] == \
         ["/etc/hosts"]
 
@@ -300,7 +324,8 @@ def test_scan_paths_accepts_the_in_dir_control(tmp_path):
 def test_scan_paths_ignores_the_enumerated_system_prefixes(tmp_path):
     d = tmp_path / "proj"
     d.mkdir()
-    assert brief_scan.scan_paths("pipe it to /dev/null with /usr/bin/env", d) == []
+    assert brief_scan.scan_paths(
+        f"pipe it to /dev/null and read {ALLOWLISTED_USR_PATH}", d) == []
 
 
 def test_tmp_is_deliberately_not_allowlisted(tmp_path):
@@ -754,19 +779,169 @@ def test_telemetry_never_changes_the_exit_code(monkeypatch, tmp_path):
 # --------------------------------------------------------------------------- #
 # 7. deployment: git-tracked + declared in home.nix
 # --------------------------------------------------------------------------- #
-@pytest.mark.parametrize("rel", [
+SHIPPED_FILES = [
     "scripts/opencode/SKILL.md",
     "scripts/opencode/opencode-dispatch",
     "scripts/opencode/lib/oc_permissions.py",
     "scripts/opencode/lib/brief_scan.py",
     "scripts/opencode/tests/test_dispatch.py",
-])
-def test_every_new_file_is_git_tracked(rel):
+]
+
+# 🔴 THE TWO TIERS RUN THIS FILE IN DIFFERENT TREES, AND ONLY ONE HAS A `.git`.
+# `nix build .#checks.x86_64-linux.pytests` builds from `/build/src`, a copy with
+# no git dir at all — so `git ls-files` exits **128** ("not a git repository"),
+# and an assertion that reads that as "not tracked" turns a required gate
+# permanently red on a message that is FALSE. Measured on the integration tree:
+# five failures, all reporting a tracking problem that did not exist.
+def git_dir_present(root: Path) -> bool:
+    """Which tier are we in? A FUNCTION of the tree, not a constant.
+
+    🔴 Written as a helper so both answers are reachable from either tier. As a
+    bare module-level `(ROOT / ".git").exists()` the obvious pin —
+    `assert GIT_DIR_PRESENT == (ROOT / ".git").exists()` — is a fixture that can
+    only ever produce the value the assertion names, so a mutant hardcoding it
+    to `True` passes on a dev host and the tier switch goes unpinned exactly
+    where it matters.
+
+    🔴 `.git` is a FILE, not a directory, inside a git worktree (it holds
+    `gitdir: …`), and this repo is developed in worktrees. Hence `.exists()`
+    rather than `.is_dir()`: the latter would report "no git" in every worktree
+    and silently disable the tracking half on the tier that has it.
+    """
+    return (root / ".git").exists()
+
+
+# 🔴 There is deliberately NO `GIT_DIR_PRESENT = git_dir_present(ROOT)` module
+# constant. One existed and a mutation sweep hardcoded it to `True`, which
+# SURVIVED — on a dev host the probe returns True anyway, so any assertion about
+# its value is a fixture that can only produce the constant it names. Removing
+# the constant removes the thing that can be hardcoded; every caller computes
+# the tier from the tree it is actually looking at.
+#
+# The use-site wiring is verified by running this whole file in a `.git`-free
+# copy of the tree (the sandbox tier reproduced faithfully) — no unit test on a
+# dev host can distinguish a correct flag from a hardcoded `True`, because both
+# tiers agree there whenever the files really are tracked.
+
+
+def file_ship_problems(rel: str, root: Path, git_present: bool) -> list[str]:
+    """Reasons `rel` would be silently absent from the flake. Empty == fine.
+
+    🔴 TWO INDEPENDENT CHECKS, because neither alone covers both tiers, and the
+    git one is made CONDITIONAL rather than skipped outright so it cannot go
+    quietly vacuous on the tier that does have a git dir:
+
+      * EXISTENCE is what means something INSIDE the nix sandbox. The store copy
+        is built from tracked files only, so an untracked file would simply not
+        be there — which this check sees, and `git` could not.
+      * TRACKEDNESS is what means something on a DEV HOST, where the file exists
+        on disk whether or not git has ever heard of it. That is the actual
+        hazard: the switch succeeds and the file is not deployed.
+
+    `git_present` is a PARAMETER rather than a module-level read so both branches
+    are exercisable from either tier — see the three control tests below.
+    """
+    problems = []
+    if not (root / rel).is_file():
+        problems.append(f"{rel} is missing from this tree")
+        return problems          # trackedness of an absent file is not a claim
+    if not git_present:
+        return problems          # nix sandbox tier: no .git, nothing more to check
+    p = subprocess.run(["git", "-C", str(root), "ls-files", "--error-unmatch", rel],
+                       capture_output=True, text=True)
+    if p.returncode != 0:
+        problems.append(f"{rel} is not git-tracked — `git add` it")
+    return problems
+
+
+@pytest.mark.parametrize("rel", SHIPPED_FILES)
+def test_every_new_file_ships(rel):
     """🔴 A new file that is not `git add`ed is silently omitted from the flake.
     The switch SUCCEEDS and the file is simply not there."""
-    p = subprocess.run(["git", "-C", str(ROOT), "ls-files", "--error-unmatch", rel],
-                       capture_output=True, text=True)
-    assert p.returncode == 0, f"{rel} is not tracked — `git add` it"
+    assert file_ship_problems(rel, ROOT, git_dir_present(ROOT)) == []
+
+
+def test_the_tier_probe_answers_BOTH_ways_from_either_tier(tmp_path):
+    """🔴 The pin on the tier switch, built so it cannot agree with itself.
+
+    Both fixtures are constructed here, so this runs identically in the nix
+    sandbox and on a dev host, and a mutant hardcoding the probe to either
+    constant dies in one of the two arms.
+    """
+    (tmp_path / "with").mkdir()
+    (tmp_path / "with" / ".git").write_text("gitdir: /elsewhere\n")   # worktree shape
+    (tmp_path / "without").mkdir()
+    assert git_dir_present(tmp_path / "with") is True
+    assert git_dir_present(tmp_path / "without") is False
+
+
+# --- the three controls on the tier guard ---------------------------------- #
+# 🔴 These build their own fixtures, so they run identically in BOTH tiers —
+# which is the point: a guard that can only be exercised on a dev host is a
+# guard nobody re-checks after the sandbox breaks it.
+def test_a_missing_file_is_reported_in_either_tier(tmp_path):
+    """Positive control. Without this, every `== []` above is indistinguishable
+    from a helper wired to nothing."""
+    assert file_ship_problems("nope.md", tmp_path, False) == \
+        ["nope.md is missing from this tree"]
+    assert file_ship_problems("nope.md", tmp_path, True) == \
+        ["nope.md is missing from this tree"]
+
+
+def test_a_DIRECTORY_at_the_path_is_not_a_shipped_file(tmp_path):
+    """🔴 Found by a SURVIVING mutant: weakening `is_file()` to `exists()` passed
+    the whole suite, because nothing ever put a non-file at a shipped path.
+
+    The claim these entries make is "this FILE ships". A directory standing where
+    `SKILL.md` should be satisfies `exists()` and would be reported clean while
+    the deploy has no skill — the same silent-absence failure, one level in.
+    """
+    (tmp_path / "SKILL.md").mkdir()
+    assert file_ship_problems("SKILL.md", tmp_path, False) == \
+        ["SKILL.md is missing from this tree"]
+
+
+def test_an_untracked_file_is_reported_when_git_is_present(tmp_path):
+    """The check the sandbox CANNOT make, made here against a real git repo.
+
+    This is what proves the dev-host tier still catches the real hazard — the
+    thing the `.git` guard must not have thrown away.
+    """
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True,
+                   capture_output=True)
+    (tmp_path / "tracked.md").write_text("x")
+    (tmp_path / "untracked.md").write_text("x")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "tracked.md"], check=True,
+                   capture_output=True)
+    assert file_ship_problems("tracked.md", tmp_path, True) == []
+    assert file_ship_problems("untracked.md", tmp_path, True) == \
+        ["untracked.md is not git-tracked — `git add` it"]
+
+
+def test_a_present_file_in_a_git_free_tree_reports_NOTHING(tmp_path):
+    """🔴 THE REGRESSION CASE, and it fails in an ORDINARY checkout if the
+    `.git` guard is ever deleted.
+
+    It reproduces the sandbox tier exactly — a real file in a tree with no git
+    dir — so `git ls-files` would exit 128 here just as it does at `/build/src`.
+    With the guard: no problems. Without it: `128 != 0`, and the suite goes red
+    on a dev host instead of only in CI, which is where this defect hid.
+    """
+    (tmp_path / "shipped.md").write_text("x")
+    assert not (tmp_path / ".git").exists()
+    assert file_ship_problems("shipped.md", tmp_path, False) == []
+
+
+def test_the_tier_guard_short_circuits_before_invoking_git(tmp_path, monkeypatch):
+    """…and it must not merely SWALLOW git's failure — it must not call git at
+    all. A helper that ran git and ignored rc 128 would pass the test above
+    while still paying for, and depending on, a binary the sandbox may not have.
+    """
+    def explode(*a, **k):
+        raise AssertionError("git was invoked despite git_present=False")
+    monkeypatch.setattr(subprocess, "run", explode)
+    (tmp_path / "shipped.md").write_text("x")
+    assert file_ship_problems("shipped.md", tmp_path, False) == []
 
 
 def test_home_nix_deploys_the_skill_as_an_out_of_store_symlink():
