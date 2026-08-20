@@ -7,8 +7,19 @@
 "red at origin/main, green at HEAD" matrix to report and none is claimed: every
 test here pins an invariant of a brand-new file, and the honest statement is
 "these guards were mutation-tested against deliberate breakage of the code they
-guard", which is what MUTATION_MATRIX at the bottom records. Calling them
-regression coverage would be a false claim about what has been observed to fail.
+guard", which is what the COMMITTED sweep at
+`scripts/session-write-harness/mutation_sweep.py` records — reproducibly, which
+the first version's uncommitted one did not. Calling them regression coverage
+would be a false claim about what has been observed to fail.
+
+🔴 AND A GREEN RUN HERE IS STRUCTURALLY BLIND TO ONE WHOLE CLASS. Every test in
+this file stubs the tmux seam, so no test here can disagree with a PREMISE about
+what tmux and readline DO with a payload — and that is exactly where the audited
+`type` bypass lived: 117 tests green while `session-write type` executed
+arbitrary commands in any shell pane. The companion
+`scripts/session-write-harness/real_pane_check.py` is what covers it, driving
+the real CLI against a real bash pane in a private `-L` server and reading the
+answer off the FILESYSTEM. Run it after any change to `validate_text`.
 
 
 🔴 HERMETIC BY CONSTRUCTION, AND PROVEN SO
@@ -81,6 +92,7 @@ import os
 import re
 import subprocess
 import sys
+import unicodedata
 
 import pytest
 
@@ -139,6 +151,14 @@ def _no_real_subprocess(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _no_real_log(monkeypatch, tmp_path):
+    """🔴 BOTH halves, and the ROOT is the load-bearing one. G14 confines every
+    log write under `sw.LOG_ROOT`; repointing only the env var would leave the
+    suite's `tmp_path` outside the root and every test would refuse with
+    EXIT_BAD_LOG_PATH — a suite that is red for a reason unrelated to what it
+    tests. Repointing the root is also what keeps the confinement honest here:
+    the tests exercise the real predicate against a real root, just not the
+    operator's."""
+    monkeypatch.setattr(sw, "LOG_ROOT", str(tmp_path))
     monkeypatch.setenv(sw.LOG_PATH_ENV, str(tmp_path / "session-write.log"))
 
 
@@ -169,6 +189,11 @@ def test_hermeticity_fixtures_are_actually_installed(tmp_path):
     log = bare.resolved_log_path()
     assert log == str(tmp_path / "session-write.log")
     assert log != sw.DEFAULT_LOG_PATH
+    # G14's root is repointed too, or the line above would be REFUSED rather
+    # than written — and the suite would be red for the wrong reason.
+    assert bare.resolved_log_root() == str(tmp_path)
+    assert sw.LOG_ROOT == str(tmp_path) != os.path.join(
+        os.path.expanduser("~"), ".claude")
     assert sr.Sources().resolved_registry_dir() == str(
         tmp_path / "no-such-registry")
 
@@ -218,6 +243,36 @@ UNATTACHED_TTY = "/dev/pts/45"
 
 BASE_TERM = "alacritty"
 POPUP_TERM = sr.POPUP_TERM_PREFIX + "-256color"
+
+# --------------------------------------------------------------------------- #
+# 🔴 LITERAL client summaries. RULES.md: "Never derive a test's expectation from
+# the implementation it tests."
+#
+# These were `sw._client_summary(...)` calls — the function under test computing
+# its own expected value, so every assertion using them read
+# `f(x) == f(x)` and was TRUE FOR ANY f. An independent 21-mutant sweep found
+# three survivors of a fully green 117-test suite, all here and all invisible
+# for that reason:
+#
+#     tty and session swapped                 -> both sides swap, still equal
+#     the popup/base label inverted           -> both sides invert, still equal
+#     every client rendered as the string
+#       "none" (the empty-list fallback)      -> both sides collapse, still equal
+#
+# Spelled out, each of those three is a diff. The cost is that changing
+# `clients_raw` now breaks these — which is the trade: a fixture change should
+# be a deliberate act, and the whole-string discipline this file claims is only
+# real if the string is written down somewhere the implementation cannot reach.
+# --------------------------------------------------------------------------- #
+SUMMARY_TWO_POPUPS_ONLY = (
+    "/dev/pts/43 (annex9, popup), /dev/pts/44 (workshop4, popup)")
+
+SUMMARY_ALL_FOUR_CLIENTS = (
+    "/dev/pts/41 (workshop4, base), /dev/pts/42 (annex9, base), "
+    "/dev/pts/43 (annex9, popup), /dev/pts/44 (workshop4, popup)")
+
+#: With `base=0` the whole attached list IS the two popups.
+SUMMARY_NO_BASE_TERMINAL = SUMMARY_TWO_POPUPS_ONLY
 
 #: SYNTHETIC. This repo is PUBLIC and forbids captured text; this stands in for
 #: text the operator typed and never sent. Its LENGTH is what the refusal
@@ -408,6 +463,13 @@ def run_verb(*argv, ws=None):
     return sw.run(parse_args(*argv), ws), ws
 
 
+#: 🔴 G5's acknowledgement, spelled ONCE. Both screen-changing verbs need it, so
+#: every test below that is exercising something OTHER than G5 has to pass it —
+#: and a literal repeated twenty times is a literal that gets half-updated.
+AT_KB = "--i-am-at-the-keyboard"
+assert AT_KB in sw.build_parser().format_help()
+
+
 ADDR_TARGET = f"{SESSION_TARGET}:{WIN_TARGET_ID}"
 ADDR_SHELL = f"{SESSION_CLIENT}:{WIN_SHELL_ID}"
 ADDR_REMOTE = f"{SESSION_REMOTE}:{WIN_REMOTE_ID}"
@@ -567,8 +629,72 @@ def test_exit_codes_are_pairwise_distinct_and_reuse_session_resolves():
     assert sw.EXIT_TMUX_FAILED == 10
     assert sw.EXIT_BAD_TEXT == 11
     assert sw.EXIT_RESTORE_FAILED == 12
+    assert sw.EXIT_BAD_LOG_PATH == 13
     # 1 is left free for an uncaught interpreter error, as everywhere else.
     assert 1 not in sw.ALL_EXIT_CODES
+
+
+def test_an_exit_code_names_a_CLASS_and_the_outcome_token_names_the_GATE():
+    """🔴 THE CLAIM THIS FILE USED TO MAKE WAS FALSE. The exit-code comment read
+    "every refusal has its own code so a caller can branch on WHICH gate stopped
+    it". It never did: `EXIT_AMBIGUOUS_CLIENT` covers five distinct refusals and
+    `EXIT_REMOTE_HOST` two.
+
+    Rather than renumber into one-code-per-refusal (a table every caller would
+    have to keep), the per-gate discriminator is the `outcome` TOKEN, which is
+    emitted on every run into the audit log and into `--json`. This test pins
+    the corrected claim so the false one cannot come back as prose.
+    """
+    # The collisions are real, and are named rather than denied.
+    per_code = {}
+    for token in sw.OUTCOME_TOKENS:
+        per_code.setdefault(token.split(":", 1)[0], []).append(token)
+    assert len(sw.OUTCOME_TOKENS) > len(sw.ALL_EXIT_CODES), (
+        "if tokens ever became as coarse as codes they would add nothing")
+    # Tokens are unique — they are the thing a caller branches on.
+    assert len(set(sw.OUTCOME_TOKENS)) == len(sw.OUTCOME_TOKENS)
+    assert set(per_code) == {"refused", "failed", "noop", "written"}
+
+
+def test_the_outcome_token_ledger_matches_what_the_SOURCE_actually_emits():
+    """🔴 A LEDGER PINNED TWO WAYS, failing when the set GROWS or SHRINKS.
+
+    AST-scan every `outcome=` keyword and every `"outcome": <literal>` in
+    session-write and compare the set against `OUTCOME_TOKENS`. A new gate
+    cannot arrive without a name, and a name cannot linger after its gate is
+    deleted — either direction is a red.
+
+    The `dry-run:` prefix is excluded: `build_record` REWRITES a `written:*`
+    token when `--dry-run` is set, so those are derived rather than emitted.
+    """
+    src = open(_SW_PATH, encoding="utf-8").read()
+    tree = ast.parse(src)
+    emitted = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            for kw in node.keywords:
+                if kw.arg == "outcome" and isinstance(kw.value, ast.Constant):
+                    emitted.add(kw.value.value)
+        if isinstance(node, ast.Dict):
+            for k, v in zip(node.keys, node.values):
+                if (isinstance(k, ast.Constant) and k.value == "outcome"
+                        and isinstance(v, ast.Constant)):
+                    emitted.add(v.value)
+        # `record["outcome"] = "..."` rebinds
+        if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)):
+            for t in node.targets:
+                if (isinstance(t, ast.Subscript)
+                        and isinstance(t.slice, ast.Constant)
+                        and t.slice.value == "outcome"):
+                    emitted.add(node.value.value)
+    emitted = {t for t in emitted if isinstance(t, str) and ":" in t}
+    # POSITIVE CONTROL: the scan must actually have found something.
+    assert len(emitted) > 20, f"the AST scan found only {sorted(emitted)}"
+    assert emitted == set(sw.OUTCOME_TOKENS), (
+        f"\n  emitted but unledgered: {sorted(emitted - set(sw.OUTCOME_TOKENS))}"
+        f"\n  ledgered but unemitted: "
+        f"{sorted(set(sw.OUTCOME_TOKENS) - emitted)}")
 
 
 def test_every_verb_is_classified_pane_or_client():
@@ -645,8 +771,8 @@ def test_a_remote_target_is_refused_by_name():
 @pytest.mark.parametrize("verb,extra", [
     ("type", ["--text", WRITE_TEXT]),
     ("send", ["--text", WRITE_TEXT]),
-    ("focus", ["--i-am-at-the-keyboard"]),
-    ("dismiss", []),
+    ("focus", [AT_KB]),
+    ("dismiss", [AT_KB]),
 ])
 def test_every_verb_refuses_a_remote_target(verb, extra):
     """The guard belongs to the pipeline, not to one verb. A per-verb copy is
@@ -734,7 +860,7 @@ def test_a_client_verb_does_not_require_the_pane_to_survive():
     surviving = "\n".join(l for l in panes_raw().splitlines()
                           if PANE_TARGET not in l)
     stub = TmuxStub(panes=surviving, clients=clients_raw(popups=1))
-    outcome, ws = run_verb("dismiss", ADDR_TARGET, ws=make_ws(stub=stub))
+    outcome, ws = run_verb("dismiss", ADDR_TARGET, AT_KB, ws=make_ws(stub=stub))
     assert outcome.code == sw.EXIT_OK, outcome.lines
     assert ws.stub.writes == [["tmux", "detach-client", "-t", POPUP_ONE_TTY]]
 
@@ -776,15 +902,68 @@ def test_the_focus_refusal_is_exactly_the_agreed_wording():
         "  re-run with --i-am-at-the-keyboard")
 
 
+def test_dismiss_refuses_without_the_flag_and_touches_nothing():
+    """🔴 G5 NOW COVERS `dismiss`, AND IT DID NOT. The first version gated only
+    `focus`, on the reading that taking an overlay DOWN is not the same act as
+    raising a window. Two things are wrong with that:
+
+      * RULES.md names the hazard as "changes what a human is looking at RIGHT
+        NOW", and an overlay vanishing does exactly that;
+      * per G6 this tool cannot PROVE the client it detaches is an overlay —
+        "popup" is a statement about the client's TERM. Measured, tmux refuses
+        an ordinary same-server nested attach ("unset $TMUX to force"), so the
+        misclassification needs a second server or a deliberate force — narrow,
+        but the consequence is detaching a REAL session, not closing an overlay.
+
+    Checked BEFORE resolution, like focus: a refused dismiss does not read the
+    world either.
+    """
+    stub = TmuxStub(clients=clients_raw(popups=1))
+    outcome, ws = run_verb("dismiss", ADDR_TARGET, ws=make_ws(stub=stub))
+    assert outcome.code == sw.EXIT_SCREEN_NOT_YOURS
+    assert ws.stub.calls == [], "not even a read before the gate"
+    assert_message_is(outcome, sw.MSG_DISMISS_NEEDS_FLAG)
+
+
+def test_the_two_screen_refusals_are_DIFFERENT_STRINGS():
+    """🔴 One shared message would let a mutant move the gate between the two
+    verbs with every whole-string assertion still green. They are different
+    actions with different consequences and are spelled separately."""
+    assert sw.MSG_FOCUS_NEEDS_FLAG != sw.MSG_DISMISS_NEEDS_FLAG
+    assert set(sw.SCREEN_VERBS) == {"focus", "dismiss"}
+    assert len(set(sw.SCREEN_VERBS.values())) == 2
+    # Both must actually name the flag, or the refusal is a dead end.
+    for msg in sw.SCREEN_VERBS.values():
+        assert AT_KB in msg
+
+
+def test_the_screen_verbs_are_exactly_the_client_directed_verbs():
+    """🔴 A LEDGER, failing when the set GROWS or SHRINKS. Every client-directed
+    verb issues `detach-client`, `select-window` or `switch-client`, and all
+    three change the screen — so a fifth verb that addresses a client cannot
+    arrive without either taking the gate or forcing this line to be edited."""
+    assert set(sw.SCREEN_VERBS) == set(sw.CLIENT_VERBS)
+    assert set(sw.SCREEN_VERBS).isdisjoint(sw.PANE_VERBS)
+
+
 @pytest.mark.parametrize("verb,extra", [
     ("type", ["--text", WRITE_TEXT]),
     ("send", ["--text", WRITE_TEXT]),
-    ("dismiss", []),
+    ("dismiss", [AT_KB]),
 ])
-def test_no_other_verb_ever_changes_the_screen(verb, extra):
+def test_no_other_verb_ever_changes_the_screen_THE_WAY_FOCUS_DOES(verb, extra):
     """🔴 focus must never fire as a SIDE EFFECT. No other verb may emit
-    select-window or switch-client, whatever else it does."""
-    _outcome, ws = run_verb(verb, ADDR_TARGET, *extra)
+    select-window or switch-client, whatever else it does.
+
+    `dismiss` carries the keyboard flag here DELIBERATELY: without it the run is
+    refused at G5 before issuing anything, and this assertion would pass over an
+    empty list — vacuously green, and green for a reason that has nothing to do
+    with what it claims. The `calls` assertion below is the control that makes
+    the pass mean something.
+    """
+    stub = TmuxStub(clients=clients_raw(popups=1))
+    _outcome, ws = run_verb(verb, ADDR_TARGET, *extra, ws=make_ws(stub=stub))
+    assert ws.stub.calls, "the verb must have RUN, or this proves nothing"
     for argv in ws.stub.calls:
         assert argv[1] not in ("select-window", "switch-client"), argv
 
@@ -935,9 +1114,8 @@ def test_focus_refuses_when_no_base_terminal_is_attached():
                            ws=make_ws(stub=stub))
     assert outcome.code == sw.EXIT_AMBIGUOUS_CLIENT
     assert ws.stub.writes == []
-    clients, _ = sr.parse_clients(clients_raw(popups=2, base=0))
     assert_message_is(outcome, sw.MSG_NO_BASE_TERMINAL,
-                      attached=sw._client_summary(clients))
+                      attached=SUMMARY_NO_BASE_TERMINAL)
 
 
 def test_focus_accepts_an_explicit_client():
@@ -962,7 +1140,7 @@ def test_dismiss_with_no_popups_is_a_noop_that_writes_nothing():
     """Exit 0 and NO write. The requested end state already holds; a caller that
     retried on non-zero would loop forever against a correct machine."""
     stub = TmuxStub(clients=clients_raw(popups=0, base=2))
-    outcome, ws = run_verb("dismiss", ADDR_TARGET, ws=make_ws(stub=stub))
+    outcome, ws = run_verb("dismiss", ADDR_TARGET, AT_KB, ws=make_ws(stub=stub))
     assert outcome.code == sw.EXIT_OK
     assert ws.stub.writes == []
     assert_message_is(outcome, sw.MSG_NO_POPUPS, address=ADDR_TARGET)
@@ -970,7 +1148,7 @@ def test_dismiss_with_no_popups_is_a_noop_that_writes_nothing():
 
 def test_dismiss_with_exactly_one_popup_detaches_it():
     stub = TmuxStub(clients=clients_raw(popups=1))
-    outcome, ws = run_verb("dismiss", ADDR_TARGET, ws=make_ws(stub=stub))
+    outcome, ws = run_verb("dismiss", ADDR_TARGET, AT_KB, ws=make_ws(stub=stub))
     assert outcome.code == sw.EXIT_OK, outcome.lines
     assert ws.stub.writes == [["tmux", "detach-client", "-t", POPUP_ONE_TTY]]
 
@@ -980,19 +1158,37 @@ def test_dismiss_with_two_popups_refuses_rather_than_guessing():
     is the default state, not an edge case. Picking one is a coin flip on which
     of the operator's overlays disappears."""
     stub = TmuxStub(clients=clients_raw(popups=2))
-    outcome, ws = run_verb("dismiss", ADDR_TARGET, ws=make_ws(stub=stub))
+    outcome, ws = run_verb("dismiss", ADDR_TARGET, AT_KB, ws=make_ws(stub=stub))
     assert outcome.code == sw.EXIT_AMBIGUOUS_CLIENT
     assert ws.stub.writes == []
-    clients, _ = sr.parse_clients(clients_raw(popups=2))
-    popups = [c for c in clients if c["popup"]]
-    assert len(popups) == 2
     assert_message_is(outcome, sw.MSG_AMBIGUOUS_POPUP, count=2,
-                      candidates=sw._client_summary(popups))
+                      candidates=SUMMARY_TWO_POPUPS_ONLY)
+
+
+def test_the_dismiss_RESULT_states_how_the_popup_was_CLASSIFIED():
+    """🔴 A SAFETY CLAIM, pinned so it cannot be quietly dropped as verbosity.
+
+    Per G6, "popup" is decided on the client's TERM and is NOT proof of a
+    `display-popup` overlay. An operator whose session just vanished has to be
+    able to read, from the line this tool printed, that it may have been
+    DETACHED rather than closed — and which client it was. That sentence is the
+    only thing standing between "the overlay closed" and a silent wrong model,
+    so it is asserted rather than left to review.
+    """
+    stub = TmuxStub(clients=clients_raw(popups=1))
+    outcome, _ws = run_verb("dismiss", ADDR_TARGET, AT_KB,
+                            ws=make_ws(stub=stub))
+    assert outcome.code == sw.EXIT_OK, outcome.lines
+    line = _norm(" ".join(outcome.lines))
+    assert POPUP_ONE_TTY in line, "the client detached must be named"
+    assert POPUP_TERM in line, "the TERM the decision was made on must be shown"
+    assert "classified as a popup on its TERM" in line
+    assert "not proof of a display-popup overlay" in line
 
 
 def test_dismiss_with_two_popups_and_an_explicit_client_detaches_that_one():
     stub = TmuxStub(clients=clients_raw(popups=2))
-    outcome, ws = run_verb("dismiss", ADDR_TARGET, "--client", POPUP_TWO_TTY,
+    outcome, ws = run_verb("dismiss", ADDR_TARGET, AT_KB, "--client", POPUP_TWO_TTY,
                            ws=make_ws(stub=stub))
     assert outcome.code == sw.EXIT_OK, outcome.lines
     assert ws.stub.writes == [["tmux", "detach-client", "-t", POPUP_TWO_TTY]]
@@ -1005,12 +1201,61 @@ def test_dismiss_refuses_to_detach_a_base_terminal(tty):
     is REACHABLE — a chooser that only ever looked at popups would make it
     unreachable, and an unreachable guard is one no test can honestly pin."""
     stub = TmuxStub(clients=clients_raw(popups=2, base=2))
-    outcome, ws = run_verb("dismiss", ADDR_TARGET, "--client", tty,
+    outcome, ws = run_verb("dismiss", ADDR_TARGET, AT_KB, "--client", tty,
                            ws=make_ws(stub=stub))
     assert outcome.code == sw.EXIT_AMBIGUOUS_CLIENT
     assert ws.stub.writes == [], "no detach may be issued for a base terminal"
     session = (SESSION_TARGET if tty == BASE_UNFOCUSED_TTY else SESSION_CLIENT)
     assert_message_is(outcome, sw.MSG_BASE_TERMINAL, tty=tty, session=session)
+
+
+def test_focus_refuses_an_explicit_client_that_is_a_POPUP():
+    """🔴 THE MIRROR OF G6, AND IT WAS OPEN. `pick_base_terminal` returned
+    `pick_named_client(...)` unconditionally when `--client` was given, so the
+    base-terminal derivation — the only thing that made the chosen client a
+    real screen — was skipped entirely whenever the caller named one. Result:
+    `focus --client <popup tty>` was ACCEPTED and `switch-client -c <popup>`
+    steered an overlay, moving a transient client while the screen the operator
+    is actually looking at never moved.
+
+    Exactly the shape G6 was built to avoid in the other direction, which is why
+    `pick_named_client` deliberately searches ALL clients: so both assertions
+    are REACHABLE from the explicit path.
+    """
+    stub = TmuxStub(clients=clients_raw(popups=2, base=2))
+    outcome, ws = run_verb("focus", ADDR_TARGET, AT_KB,
+                           "--client", POPUP_ONE_TTY, ws=make_ws(stub=stub))
+    assert outcome.code == sw.EXIT_AMBIGUOUS_CLIENT
+    assert ws.stub.writes == [], "no switch-client may steer an overlay"
+    assert not any(a[1] == "switch-client" for a in ws.stub.writes)
+    assert_message_is(outcome, sw.MSG_NOT_BASE_TERMINAL, tty=POPUP_ONE_TTY,
+                      session=SESSION_CLIENT)
+
+
+def test_the_two_client_assertions_are_mirrors_and_neither_accepts_the_others_client():
+    """🔴 A RELATIONSHIP, not two components. Each verb's assertion must refuse
+    exactly the client kind the OTHER verb requires — a structural check that
+    stays true even if `popup`/`base_terminal` stop being complements.
+
+    Pinned as a table so a third client kind cannot arrive unclassified.
+    """
+    popup = {"tty": POPUP_ONE_TTY, "session": SESSION_CLIENT,
+             "popup": True, "base_terminal": False}
+    base = {"tty": BASE_FOCUSED_TTY, "session": SESSION_CLIENT,
+            "popup": False, "base_terminal": True}
+
+    # dismiss's assertion: refuses the base terminal, admits the popup.
+    assert sw._assert_not_base_terminal(popup) is None
+    assert sw._assert_not_base_terminal(base) is not None
+    # focus's assertion: exactly the other way round.
+    assert sw._assert_is_base_terminal(base) is None
+    assert sw._assert_is_base_terminal(popup) is not None
+
+    # ...and they refuse with DIFFERENT messages, or a mutant could swap them.
+    a = sw._assert_not_base_terminal(base)
+    b = sw._assert_is_base_terminal(popup)
+    assert a.lines[0] != b.lines[0]
+    assert a.record["outcome"] != b.record["outcome"]
 
 
 def test_the_base_terminal_guard_is_the_last_word_on_any_chosen_client():
@@ -1027,13 +1272,12 @@ def test_the_base_terminal_guard_is_the_last_word_on_any_chosen_client():
 
 def test_dismiss_refuses_an_unattached_client():
     stub = TmuxStub(clients=clients_raw(popups=2))
-    outcome, ws = run_verb("dismiss", ADDR_TARGET, "--client", UNATTACHED_TTY,
+    outcome, ws = run_verb("dismiss", ADDR_TARGET, AT_KB, "--client", UNATTACHED_TTY,
                            ws=make_ws(stub=stub))
     assert outcome.code == sw.EXIT_AMBIGUOUS_CLIENT
     assert ws.stub.writes == []
-    clients, _ = sr.parse_clients(clients_raw(popups=2))
     assert_message_is(outcome, sw.MSG_NO_SUCH_CLIENT, tty=UNATTACHED_TTY,
-                      attached=sw._client_summary(clients))
+                      attached=SUMMARY_ALL_FOUR_CLIENTS)
 
 
 def test_dismiss_uses_the_FRESH_client_list_not_the_resolution_time_one():
@@ -1043,7 +1287,7 @@ def test_dismiss_uses_the_FRESH_client_list_not_the_resolution_time_one():
     refuse as ambiguous) and detach the survivor."""
     src_over = {"clients_raw": clients_raw(popups=2)}
     stub = TmuxStub(clients=clients_raw(popups=1))
-    outcome, ws = run_verb("dismiss", ADDR_TARGET,
+    outcome, ws = run_verb("dismiss", ADDR_TARGET, AT_KB,
                            ws=make_ws(stub=stub, src_over=src_over))
     assert outcome.code == sw.EXIT_OK, outcome.lines
     assert ws.stub.writes == [["tmux", "detach-client", "-t", POPUP_ONE_TTY]]
@@ -1058,7 +1302,7 @@ def test_dismiss_does_not_require_the_target_to_be_covered():
                                                                        base=0)))
     assert res["target"]["visibility"]["covered"] is False
     stub = TmuxStub(clients=clients_raw(popups=1, base=0))
-    outcome, _ws = run_verb("dismiss", ADDR_TARGET, ws=make_ws(stub=stub))
+    outcome, _ws = run_verb("dismiss", ADDR_TARGET, AT_KB, ws=make_ws(stub=stub))
     assert outcome.code == sw.EXIT_OK, outcome.lines
 
 
@@ -1171,6 +1415,165 @@ def test_validate_text_accepts_ordinary_payloads():
 
 
 # =========================================================================== #
+# G13 — the --text ALLOWLIST (the audited bypass, and why it is not a denylist)
+# =========================================================================== #
+#: 🔴 THE MEASURED EXECUTION EVENT. Ctrl-O is readline `operate-and-get-next`, a
+#: BASH DEFAULT. Reproduced twice independently in a private `-L` tmux server:
+#:
+#:   send-keys -t %0 -l -- "touch <d>/EXECUTED\x0f"   (no Enter) -> file CREATED
+#:   the same payload without it            (no Enter) -> nothing ran
+#:
+#: The second line is the negative control: the rig can tell the two apart, so
+#: the first line is a measurement and not an artefact.
+EXECUTING_CHAR = "\x0f"
+assert not EXECUTING_CHAR.isprintable()
+assert EXECUTING_CHAR not in sw.SUBMITTING_CHARS, (
+    "the whole point is that this character was NOT on the old denylist")
+
+
+#: Codepoints that must be refused, and WHY each is in the list. Every one of
+#: these was ACCEPTED by the denylist this allowlist replaced.
+@pytest.mark.parametrize("ch,why", [
+    ("\x0f", "Ctrl-O — readline operate-and-get-next, measured to EXECUTE"),
+    ("\x1b", "ESC — starts every terminal escape sequence"),
+    ("\x1ba", "ESC a — zsh emacs accept-and-hold, another execution event"),
+    ("\x16", "Ctrl-V — readline quoted-insert, smuggles the next byte"),
+    ("\x03", "Ctrl-C — sends SIGINT to the foreground job"),
+    ("\x04", "Ctrl-D — EOF, can close the operator's shell"),
+    ("\x07", "BEL"),
+    ("\x7f", "DEL"),
+    ("\x1a", "Ctrl-Z — suspends the foreground job"),
+    ("", "U+E000 private use — renders INVISIBLE in a diff or a grep"),
+    ("​", "U+200B zero-width space — invisible, category Cf"),
+    ("\xa0", "U+00A0 no-break space — category Zs, not ASCII space"),
+])
+def test_a_character_outside_the_allowlist_is_refused_by_codepoint(ch, why):
+    """🔴 THE AUDITED BYPASS, and the class it belongs to.
+
+    None of these is on any denylist this file ever had; all of them are refused
+    now because the question asked is "is this character ALLOWED", not "is it
+    one of the ones we thought of". `why` is carried so a future reader can see
+    that the list is a sample of a class rather than a new denylist — adding
+    `\\x0f` alone was the fix explicitly rejected.
+    """
+    text = "audit the queue" + ch
+    outcome, ws = run_verb("type", ADDR_TARGET, "--text", text)
+    assert outcome.code == sw.EXIT_BAD_TEXT, why
+    assert ws.stub.writes == [], "nothing may reach tmux"
+    # The offset is COMPUTED — a mutant hardcoding 0 cannot pass, because the
+    # offending character is never first.
+    idx = min(i for i, c in enumerate(text) if not sw.TEXT_IS_ALLOWED(c))
+    assert idx != 0
+    assert_message_is(outcome, sw.MSG_TEXT_NOT_PRINTABLE,
+                      codepoint=f"{ord(text[idx]):04X}",
+                      category=unicodedata.category(text[idx]), offset=idx)
+
+
+def test_the_refusal_names_the_COMPUTED_codepoint_not_the_one_in_its_own_prose():
+    """A refusal that printed the character itself would print nothing visible
+    for exactly the characters this guard exists for, so it prints the NUMBER.
+
+    🔴 THIS TEST WAS WALKABLE BY THE MESSAGE'S OWN STATIC PROSE, and the
+    mutation sweep is what found it. The first version asserted `"U+000F" in
+    lines` after sending a Ctrl-O — but `MSG_TEXT_NOT_PRINTABLE` NAMES U+000F in
+    its explanatory sentence, so the assertion was satisfied by the template
+    regardless of what the computed slot rendered. A mutant hardcoding
+    `codepoint="0000"` passed it. Exactly the failure RULES.md describes: "a
+    two-word check satisfied by the sentence's own static prose while neither
+    computed slot was ever read."
+
+    Fixed two ways at once: probe with a character the prose does NOT mention,
+    and assert the WHOLE normalised string rather than a substring.
+    """
+    probe = "\x16"                       # Ctrl-V — U+0016
+    assert f"U+{ord(probe):04X}" not in sw.MSG_TEXT_NOT_PRINTABLE, (
+        "the probe must be a codepoint the static prose does not already spell")
+    assert "U+000F" in sw.MSG_TEXT_NOT_PRINTABLE, (
+        "...and the prose really does spell U+000F, which is what made the "
+        "original assertion vacuous")
+
+    outcome, _ws = run_verb("type", ADDR_TARGET, "--text", "xy" + probe)
+    assert_message_is(outcome, sw.MSG_TEXT_NOT_PRINTABLE, codepoint="0016",
+                      category="Cc", offset=2)
+
+
+def test_the_named_text_messages_are_DIAGNOSES_not_the_gate():
+    """🔴 THE STRUCTURAL CLAIM, and the one that says this is not a denylist
+    wearing an allowlist's name.
+
+    NUL, `\\n` and `\\r` still get their own sentences — a specific diagnosis
+    beats a generic one. But they are refused BY THE ALLOWLIST; the named
+    branches only choose better words. Proven by removing the branches from the
+    question entirely and asking the predicate directly: if any of the three
+    were allowed, deleting its message branch would silently reopen it.
+    """
+    for ch in ("\x00",) + tuple(sw.SUBMITTING_CHARS):
+        assert not sw.TEXT_IS_ALLOWED(ch), (
+            f"{ch!r} must be refused by the ALLOWLIST, not only by its message "
+            f"branch — otherwise deleting the branch reopens the hole")
+
+
+def test_the_allowlist_is_the_predicate_every_character_actually_goes_through():
+    """🔴 ONE RULE, ONE PLACE. `validate_text` must agree with `TEXT_IS_ALLOWED`
+    on every codepoint, or there are two rules and one of them is wrong.
+
+    Swept over the whole BMP plus the ASCII range explicitly. A disagreement
+    means either the scan skips characters the predicate rejects (a hole) or
+    refuses ones it permits (a false refusal).
+    """
+    probe = [chr(c) for c in range(0x00, 0x100)]
+    probe += [chr(c) for c in (0x200b, 0x2028, 0x2029, 0xe000, 0xfeff,
+                               0x1f600, 0x0301, 0x3042)]
+    disagreed = []
+    for ch in probe:
+        if ch == "\x00":
+            continue        # cannot ride in an argv at all; covered separately
+        allowed = sw.TEXT_IS_ALLOWED(ch)
+        # `X` around it so a trailing-separator refusal cannot be confused for
+        # an allowlist one, and so the character is never at offset 0.
+        refused = sw.validate_text("X" + ch + "X") is not None
+        if allowed == refused:
+            disagreed.append((hex(ord(ch)), allowed, refused))
+    assert disagreed == [], f"scan and predicate disagree: {disagreed[:10]}"
+
+
+def test_the_allowlist_admits_the_payloads_an_agent_actually_sends():
+    """🔴 POSITIVE CONTROL, and the one that stops this guard from being
+    "refuse everything" — which would pass every test above.
+
+    An allowlist that rejected ordinary prose would be discovered in production,
+    not here. These are the shapes a real caller sends.
+    """
+    for good in [
+        "restart the poller and report back",
+        "run: git -C /home/x log --oneline -3 | head",
+        "answer 'yes' to the prompt; then stop",
+        "path/with-dashes_and.dots:8080",
+        "tab\tseparated\tfields",
+        "unicode ✓ ± é 漢字 🎉",
+        '{"json": ["payload", 1, null]}',
+        "--flag=value --other='quoted string'",
+    ]:
+        assert sw.validate_text(good) is None, good
+        outcome, ws = run_verb("type", ADDR_TARGET, "--text", good)
+        assert outcome.code == sw.EXIT_OK, (good, outcome.lines)
+        assert ws.stub.writes[0][-1] == good
+
+
+def test_tab_is_the_ONE_control_character_re_permitted_and_it_is_explicit():
+    """Tab is category Cc, so the printable test alone would refuse it. It is
+    re-permitted by name because it has an ordinary typographic use and cannot
+    accept a line — and a mutant that widens `TEXT_EXTRA_ALLOWED` to admit a
+    second control character has to say so here."""
+    assert sw.TEXT_EXTRA_ALLOWED == ("\t",)
+    assert unicodedata.category("\t") == "Cc"
+    assert not "\t".isprintable()
+    assert sw.TEXT_IS_ALLOWED("\t")
+    for other in ("\n", "\r", "\x0b", "\x0c", "\x0f", "\x1b"):
+        assert not sw.TEXT_IS_ALLOWED(other), other
+
+
+# =========================================================================== #
 # G8 — the shell-execution gate
 # =========================================================================== #
 def test_the_agent_runtime_allowlist_is_exactly_the_two_measured_runtimes():
@@ -1224,15 +1627,44 @@ def test_send_to_an_agent_runtime_is_not_gated(runtime, addr, pane):
     assert ws.stub.writes[-1] == ["tmux", "send-keys", "-t", pane, "Enter"]
 
 
-def test_type_is_NOT_shell_gated():
-    """🔴 THE GATE IS ON `send` ONLY, and this is the control that pins the
-    scope. Enter is the execution event; `type` never sends one (which is what
-    the `\\n` refusal above makes true). A mutant that moved the gate into the
-    shared pipeline would be invisible without this."""
+def test_type_is_ungated_ONLY_because_the_allowlist_makes_it_safe():
+    """🔴 REPLACES `test_type_is_NOT_shell_gated`, which pinned a FALSE premise
+    and would have defended the hole this test now closes.
+
+    That test's docstring read: "Enter is the execution event; `type` never
+    sends one." Measured on tmux 3.7b in a private -L server, that is wrong — a
+    payload ending in U+000F (Ctrl-O, readline operate-and-get-next, a bash
+    default) EXECUTED the pane's buffer with no Enter sent, while the same
+    payload without it did not (the negative control). So `type` on a shell pane
+    was an arbitrary-command executor, and the old test asserted that as
+    intended behaviour.
+
+    🔴 THIS IS A SEAM GUARD, NOT A SCOPE CONTROL. It pins the RELATIONSHIP
+    between the two halves rather than either alone, because either alone is
+    green while the pair is broken:
+
+        half A  — type on a shell runtime is NOT gated by G8
+        half B  — and the G13 allowlist is what makes that safe
+
+    A future edit that keeps A and weakens B reopens exactly the audited hole,
+    and a test asserting only A would stay green through it.
+    """
+    # --- half A: no shell gate on `type`, on a runtime `send` WOULD refuse. ---
+    target = sr.resolve(ADDR_SHELL, make_sources())["target"]
+    assert target["runtime"] is None, "fixture must be a non-agent runtime"
+    assert sw.gate_shell_exec(target, False) is not None, (
+        "the fixture must be one `send` refuses, or half A is vacuous")
+
     outcome, ws = run_verb("type", ADDR_SHELL, "--text", WRITE_TEXT)
     assert outcome.code == sw.EXIT_OK, outcome.lines
     assert ws.stub.writes == [
         ["tmux", "send-keys", "-t", PANE_SHELL, "-l", "--", WRITE_TEXT]]
+
+    # --- half B: and the payload that made A dangerous is REFUSED. -----------
+    outcome, ws = run_verb("type", ADDR_SHELL, "--text",
+                           WRITE_TEXT + EXECUTING_CHAR)
+    assert outcome.code == sw.EXIT_BAD_TEXT, outcome.lines
+    assert ws.stub.writes == [], "the executing payload must not reach tmux"
 
 
 def test_gate_shell_exec_reads_the_runtime_and_nothing_else():
@@ -1283,10 +1715,53 @@ def test_append_allows_writing_onto_unsent_text():
     assert len(ws.stub.writes) == 1
 
 
-def test_bare_send_is_not_unsent_gated():
-    """`send` with no --text is how you submit text that is ALREADY there —
-    gating it on that text existing would refuse its only purpose."""
+def test_bare_send_IS_unsent_gated_and_says_it_would_SUBMIT():
+    """🔴 REPLACES `test_bare_send_is_not_unsent_gated`, which pinned the gap as
+    intended behaviour and would have defended it against this fix.
+
+    That test's reasoning was: bare `send` exists to submit text that is already
+    in the pane, so gating it on that text existing refuses its only purpose.
+    The error is in "text that is already there" — `unsent_prompt` is not
+    neutral leftover text, it is specifically what a HUMAN typed and chose not
+    to send. Bare send dispatches it verbatim, unread, with no agent text
+    involved. That is G9's hazard by a shorter route, and the exemption made the
+    shorter route the unguarded one.
+
+    The refusal must also be the SUBMIT wording, not the concatenate wording:
+    nothing is appended here, and telling the operator otherwise misdescribes
+    what they are about to authorise.
+    """
     outcome, ws = run_verb("send", ADDR_TARGET, ws=_unsent_ws())
+    assert outcome.code == sw.EXIT_UNSENT_PROMPT
+    assert ws.stub.writes == [], "no Enter may be issued"
+    assert_message_is(outcome, sw.MSG_UNSENT_PROMPT_SUBMIT,
+                      address=ADDR_TARGET, length=UNSENT_LENGTH)
+
+
+def test_the_two_unsent_refusals_are_DIFFERENT_STRINGS():
+    """🔴 A shared message would make a mutant that moves the gate between the
+    --text and bare shapes invisible to every whole-string assertion — both
+    would read the same sentence and both would pass. They describe different
+    consequences (CONCATENATE vs SUBMIT) and must stay separately spelled."""
+    assert sw.MSG_UNSENT_PROMPT != sw.MSG_UNSENT_PROMPT_SUBMIT
+    a = _norm(sw.MSG_UNSENT_PROMPT.format(address="z:@0", length=1))
+    b = _norm(sw.MSG_UNSENT_PROMPT_SUBMIT.format(address="z:@0", length=1))
+    assert a != b
+
+
+def test_bare_send_with_append_submits_the_operators_unsent_text():
+    """POSITIVE CONTROL on the gate above — it must be passable, or bare send
+    has simply been deleted rather than gated."""
+    outcome, ws = run_verb("send", ADDR_TARGET, "--append", ws=_unsent_ws())
+    assert outcome.code == sw.EXIT_OK, outcome.lines
+    assert ws.stub.writes == [["tmux", "send-keys", "-t", PANE_TARGET, "Enter"]]
+
+
+def test_bare_send_on_a_pane_with_NO_unsent_text_needs_no_flag():
+    """The gate keys on the unsent text EXISTING, not on the verb shape. With an
+    empty prompt bare send is unimpeded — a mutant that refuses every bare send
+    would pass the gate test above and fail here."""
+    outcome, ws = run_verb("send", ADDR_TARGET)
     assert outcome.code == sw.EXIT_OK, outcome.lines
     assert ws.stub.writes == [["tmux", "send-keys", "-t", PANE_TARGET, "Enter"]]
 
@@ -1320,6 +1795,166 @@ def test_the_log_path_resolves_at_call_time_not_as_a_field_default(monkeypatch,
     explicit = tmp_path / "explicit.log"
     assert sw.WriteSources(log_path=str(explicit)).resolved_log_path() == str(
         explicit)
+
+
+# =========================================================================== #
+# G14 — the log path is CONFINED, because it is a filesystem write primitive
+# =========================================================================== #
+#: 🔴 What `--log-path` actually is, and why an audit called it deploy-blocking:
+#: `log_record` calls `os.makedirs(dirname, exist_ok=True)` and then APPENDS a
+#: JSON line whose contents the caller shapes (`selector`, `text`, the argv).
+#: Reachable from the ONE allowlisted Bash entry, that is "create nested
+#: directories anywhere and append attacker-chosen bytes" — granted on the
+#: premise that this file constrains what it does. `$SESSION_WRITE_LOG` is the
+#: same surface by another route.
+def test_a_log_path_outside_the_root_is_REFUSED_before_anything_resolves(
+        tmp_path):
+    outside = tmp_path.parent / "escaped" / "nested" / "deep" / "evil.log"
+    # 🔴 Through `make_ws`, not a bare `--log-path` on `run_verb`: `run` reads
+    # the path off `ws`, and it is `main` that copies argv onto it. A test that
+    # passed the flag to `run_verb` alone would exercise the ENV default and
+    # pass while proving nothing — it did, before this comment existed.
+    outcome, ws = run_verb("type", ADDR_TARGET, "--text", WRITE_TEXT,
+                           ws=make_ws(log_path=str(outside)))
+    assert outcome.code == sw.EXIT_BAD_LOG_PATH
+    assert ws.stub.calls == [], "nothing may even be READ before this gate"
+    assert ws.stub.writes == []
+    assert not outside.parent.exists(), (
+        "the refused path's directories must not have been created")
+    assert_message_is(outcome, sw.MSG_BAD_LOG_PATH, path=str(outside),
+                      resolved=os.path.realpath(str(outside)),
+                      root=os.path.realpath(str(tmp_path)))
+
+
+def test_the_env_var_is_the_SAME_surface_and_is_confined_too(monkeypatch,
+                                                             tmp_path):
+    """🔴 Two routes to one hazard. Constraining only the flag would move the
+    bypass, not close it — and the env route is the quieter of the two."""
+    outside = tmp_path.parent / "via-env" / "evil.log"
+    monkeypatch.setenv(sw.LOG_PATH_ENV, str(outside))
+    outcome, ws = run_verb("type", ADDR_TARGET, "--text", WRITE_TEXT)
+    assert outcome.code == sw.EXIT_BAD_LOG_PATH
+    assert ws.stub.writes == []
+    assert not outside.parent.exists()
+
+
+def test_a_refused_log_path_is_still_JOURNALLED_but_never_to_that_path(
+        tmp_path):
+    """🔴 The refusal is the interesting record (G10), so it must still be
+    written — and the one place it must NOT be written is the path just
+    refused. `resolved_log_path` falls back inside the root for exactly this."""
+    outside = tmp_path.parent / "escaped2" / "evil.log"
+    ws = make_ws(log_path=str(outside))
+    code = sw.main(["type", ADDR_TARGET, "--text", WRITE_TEXT], ws=ws)
+    assert code == sw.EXIT_BAD_LOG_PATH
+    assert not outside.exists() and not outside.parent.exists()
+    landed = tmp_path / os.path.basename(sw.DEFAULT_LOG_PATH)
+    assert landed.exists(), "the refusal must still be audited"
+    rec = json.loads(landed.read_text().strip())
+    assert rec["outcome"] == "refused:bad-log-path"
+    assert rec["exit_code"] == sw.EXIT_BAD_LOG_PATH
+
+
+@pytest.mark.parametrize("relative", [
+    "../escape.log",
+    "sub/../../escape.log",
+    "./sub/./../../escape.log",
+])
+def test_dot_dot_cannot_climb_out_of_the_root(tmp_path, relative):
+    """🔴 `realpath` BEFORE comparing, never a prefix test on the raw string.
+    A `..` inside an otherwise-legal-looking path is the oldest way out."""
+    candidate = str(tmp_path / relative)
+    refusal = sw.validate_log_path(candidate, str(tmp_path))
+    assert refusal is not None, candidate
+    assert refusal.code == sw.EXIT_BAD_LOG_PATH
+
+
+def test_a_symlink_planted_inside_the_root_cannot_point_out_of_it(tmp_path):
+    """🔴 The reason the check resolves rather than normalises. A caller who can
+    create one file inside the root could otherwise redirect every subsequent
+    append anywhere on the filesystem."""
+    outside_dir = tmp_path.parent / "symlink-target-dir"
+    outside_dir.mkdir(exist_ok=True)
+    link = tmp_path / "innocent"
+    if not link.exists():
+        link.symlink_to(outside_dir, target_is_directory=True)
+    refusal = sw.validate_log_path(str(link / "evil.log"), str(tmp_path))
+    assert refusal is not None
+    assert refusal.code == sw.EXIT_BAD_LOG_PATH
+
+
+def test_a_sibling_directory_sharing_the_roots_PREFIX_is_outside_it(tmp_path):
+    """🔴 `commonpath`, never `startswith`: `~/.claudeX` starts with
+    `~/.claude` and is a different directory."""
+    sibling = str(tmp_path) + "X"
+    refusal = sw.validate_log_path(os.path.join(sibling, "a.log"),
+                                   str(tmp_path))
+    assert refusal is not None
+    assert refusal.code == sw.EXIT_BAD_LOG_PATH
+
+
+def test_the_root_ITSELF_is_not_a_legal_log_path(tmp_path):
+    """Appending to the directory would fail anyway, but it must be a REFUSAL
+    with a reason rather than an OSError swallowed by `log_record`."""
+    assert sw.validate_log_path(str(tmp_path), str(tmp_path)) is not None
+
+
+@pytest.mark.parametrize("inside", [
+    "session-write.log",
+    "nested/deeper/audit.log",
+    "./also-fine.log",
+])
+def test_paths_INSIDE_the_root_are_accepted_and_actually_written(tmp_path,
+                                                                 inside):
+    """🔴 POSITIVE CONTROL on G14 — a check that refused every path would pass
+    every test above while breaking the audit log entirely, which is the failure
+    mode this repo names "a permanently-red gate"."""
+    path = tmp_path / inside
+    assert sw.validate_log_path(str(path), str(tmp_path)) is None
+    ws = make_ws(log_path=str(path))
+    code = sw.main(["type", ADDR_TARGET, "--text", WRITE_TEXT], ws=ws)
+    assert code == sw.EXIT_OK
+    assert path.exists() and json.loads(path.read_text().strip())["outcome"] \
+        == "written:type"
+
+
+def test_the_SHIPPED_default_log_path_is_inside_the_SHIPPED_root():
+    """🔴 The shipped default must satisfy its own guard, or the tool refuses
+    every invocation on a real machine — a permanently-red gate.
+
+    Read from `DEFAULT_LOG_PATH`, which is computed at IMPORT time and so still
+    carries the real values; `sw.LOG_ROOT` is monkeypatched to `tmp_path` by the
+    hermeticity fixture, and asserting against it here would only prove the
+    fixture is installed."""
+    real_root = os.path.join(os.path.expanduser("~"), ".claude")
+    assert sw.DEFAULT_LOG_PATH == os.path.join(real_root, "session-write.log")
+    assert sw.validate_log_path(sw.DEFAULT_LOG_PATH, real_root) is None
+
+
+def test_the_root_is_NOT_reachable_from_argv_or_the_environment():
+    """🔴 A confinement a caller can relocate is not a confinement. `log_root`
+    is an in-process seam only: no CLI flag sets it, and no environment variable
+    is read for it."""
+    help_text = sw.build_parser().format_help()
+    assert "--log-root" not in help_text
+    dests = {a.dest for a in sw.build_parser()._actions}
+    assert "log_root" not in dests
+    src = open(_SW_PATH, encoding="utf-8").read()
+    tree = ast.parse(src)
+    # The only environment key this module reads for logging is the path one.
+    env_keys = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "get"
+                and isinstance(node.func.value, ast.Attribute)
+                and node.func.value.attr == "environ"):
+            for a in node.args[:1]:
+                if isinstance(a, ast.Name):
+                    env_keys.add(a.id)
+                elif isinstance(a, ast.Constant):
+                    env_keys.add(a.value)
+    assert env_keys <= {"LOG_PATH_ENV"}, env_keys
 
 
 @pytest.mark.parametrize("argv,expected_code", [
@@ -1582,84 +2217,75 @@ def test_json_output_is_the_same_record_that_is_logged(tmp_path, capsys):
 # =========================================================================== #
 # 🔴 THE MUTATION MATRIX
 # =========================================================================== #
-MUTATION_MATRIX = """
-Each row: a deliberate break of ONE guard in scripts/session-write, and the test
-that killed it. MEASURED 2026-08-19 — 36 mutants, 36 KILLED, and every one of
-the 36 was killed BY THE TEST NAMED HERE (checked mechanically: the harness
-matched the expected test id against the FAILED set, so "something went red" was
-never accepted as a kill).
+#: 🔴 THE SWEEP LIVES IN THE REPO NOW — DO NOT RESTATE ITS RESULTS HERE.
+#:
+#: This constant used to hold a hand-maintained matrix of 36 mutations. Two
+#: things were wrong with that, and an audit found both:
+#:
+#:   * the harness that produced it was never committed, so the claim was not
+#:     reproducible. An auditor's INDEPENDENT 21-mutant sweep then found seven
+#:     survivors of a fully green 117-test suite — including the deploy-blocking
+#:     `type` shell-exec bypass. A sweep nobody else can run is not evidence;
+#:   * the matrix skipped number 11 with no explanation while the prose claimed
+#:     36, so the list and the count disagreed and neither could be checked.
+#:
+#: Both are closed by `scripts/session-write-harness/mutation_sweep.py`: the
+#: table IS the matrix, the numbering is derived from position so it cannot
+#: develop a gap, and the run prints its own results. Read the numbers THERE,
+#: never from a copy here — a copy is exactly what went stale.
+#:
+#:     python3 scripts/session-write-harness/mutation_sweep.py
+#:
+#: It refuses to score anything unless the unmutated baseline is green, kills a
+#: mutant only when the NAMED test fails, and carries TWO controls: a mutation
+#: known to be caught (must be KILLED) and a semantically null edit (must
+#: SURVIVE). The second is the one that distinguishes a working harness from
+#: one that reports everything as killed.
+#:
+#: The real-pane check is its companion, and covers what no stub can:
+#:
+#:     python3 scripts/session-write-harness/real_pane_check.py
+#:
+MUTATION_HARNESS = "scripts/session-write-harness/mutation_sweep.py"
+REAL_PANE_HARNESS = "scripts/session-write-harness/real_pane_check.py"
 
-🔴 THESE ARE INVARIANT GUARDS, NOT REGRESSION TESTS. session-write did not exist
-at origin/main, so "red at base, green at HEAD" is meaningless for it and is not
-claimed. What WAS observed is that each guard, broken on purpose, produces a red
-that names that guard.
 
-🔴 HOW THE SWEEP WAS RUN, because a sweep is an instrument and an instrument is
-a claim:
-  * `__pycache__` purged before EVERY mutant, and `PYTHONDONTWRITEBYTECODE=1`
-    on every spawned process. CPython validates cached bytecode on whole-second
-    mtime + size, so a same-length edit landing in the same second is invisible:
-    the test imports the ORIGINAL bytecode and the mutant scores SURVIVED
-    without ever executing.
-  * The original bytes are restored in a `finally` and SHA-256 byte-identity is
-    asserted after every mutant, and again at the end.
-  * Each mutant asserts its pattern occurs EXACTLY ONCE before applying, so a
-    `count=1` replace cannot hit an occurrence nobody pictured.
-  * The FULL test file runs for each mutant — no `-k` filter, which is how a
-    sweep reports SURVIVED because it excluded the killing test.
-  * PC rides along as the POSITIVE CONTROL: a mutation known to be caught. If
-    the harness ever reports it SURVIVED, the harness is broken, not the code.
+def test_the_committed_harnesses_exist_and_are_runnable():
+    """🔴 A pointer that rots is worse than no pointer — it reads as a claim
+    that the sweep is reproducible while naming a file that is gone. Both paths
+    are checked to exist, to be executable, and to parse."""
+    root = os.path.normpath(os.path.join(_HERE, "..", ".."))
+    for rel in (MUTATION_HARNESS, REAL_PANE_HARNESS):
+        path = os.path.join(root, rel)
+        assert os.path.exists(path), f"{rel} is referenced but missing"
+        ast.parse(open(path, encoding="utf-8").read())
 
-  #   mutation                                              killed by
-  --  ----------------------------------------------------  --------------------
-  PC  POSITIVE CONTROL: focus refusal reworded              test_the_focus_refusal_is_exactly_the_agreed_wording
-  1   G2: `if target_host != local_host` -> `if False`      test_a_remote_target_is_refused_by_name
-  2   G2: local_host hardcoded to "workbench"               test_a_local_target_is_not_refused
-  3   G2: LOCAL_HOST_UNKNOWN branch removed                 test_an_unknown_local_host_is_refused_rather_than_assumed
-  4   G3: window-existence check removed                    test_a_window_that_vanished_between_resolve_and_write_is_refused
-  5   G3: need_pane forced True for every verb              test_a_client_verb_does_not_require_the_pane_to_survive
-  6   G3: reverify moved AFTER the verb runs                test_the_reverify_runs_before_any_write
-  7   G4: "kill-pane" added to the write allowlist          test_the_seam_refuses_a_destructive_verb[kill-pane]
-  8   G4: seam `break` -> `return` (first command only)     test_the_seam_checks_every_command_not_just_the_first
-  9   G4: run_tmux skips _assert_allowed                    test_run_tmux_asserts_the_allowlist_even_on_a_dry_run
-  10  G5: `not args.at_keyboard` -> `False`                 test_focus_refuses_without_the_flag_and_touches_nothing
-  12  G6: _assert_not_base_terminal always returns None     test_dismiss_refuses_to_detach_a_base_terminal[/dev/pts/41]
-  13  G6 REACHABILITY: pick_named_client searches popups    test_dismiss_refuses_to_detach_a_base_terminal[/dev/pts/41]
-        only, making the guard unreachable. 🔴 The exit CODE is unchanged
-        (both refusals are EXIT_AMBIGUOUS_CLIENT) — only the WHOLE-STRING
-        message assertion can see it. That is the argument for pinning whole
-        strings rather than codes or keywords.
-  14  G7: `elif len(popups) > 1` -> `elif False`            test_dismiss_with_two_popups_refuses_rather_than_guessing
-  15  G8: AGENT_RUNTIMES -> ("claude",)                     test_send_to_an_agent_runtime_is_not_gated[opencode-...]
-  16  G8: gate keyed on `runtime is not None`               test_gate_shell_exec_reads_the_runtime_and_nothing_else
-        🔴 The end-to-end test SURVIVES this one (the fixture's shell pane has
-        runtime None, which both spellings refuse). It is killed only by the
-        unit test that feeds "bash" — a value the constant CANNOT equal. A
-        fixture that can only produce the constant's own value cannot see this
-        mutant.
-  17  G8: shell gate also applied to `type`                 test_type_is_NOT_shell_gated
-  18  G8: shell gate skipped when --text is absent          test_bare_send_to_an_unrecorded_runtime_is_also_refused
-  19  G9: unsent-prompt gate disabled                       test_writing_onto_unsent_operator_text_is_refused[type]
-  20  G9: refusal reports the CONTENT, not the length       test_the_unsent_prompt_CONTENT_never_reaches_the_output
-  21  focus: pick_base_terminal returns base[0]             test_focus_picks_the_focused_base_terminal_not_the_first_one
-  22  focus: restore never runs                             test_focus_records_and_restores_both_tmux_dimensions
-  23  focus: restore covers the window but not the session  test_focus_records_and_restores_both_tmux_dimensions
-  24  focus: a failed restore returns EXIT_OK               test_a_failed_restore_is_reported_and_changes_the_exit_code
-  25  focus: early return on a half-completed raise         test_a_half_completed_raise_still_restores_what_it_moved
-  26  text: SUBMITTING_CHARS -> ()                          test_text_containing_a_submitting_character_is_refused[\\n-a newline-type]
-  27  text: `endswith(sep)` -> `sep in text`                test_a_separator_in_the_MIDDLE_of_the_text_is_allowed
-  28  text: the reported offset hardcoded to 0              test_text_containing_a_submitting_character_is_refused[\\n-a newline-type]
-        (the fixture puts the character at offset 15, never 0 — a fixture that
-        placed it first could not see this)
-  29  type: the `-l` literal flag dropped                   test_type_sends_literal_text_and_no_enter
-  30  type: an Enter appended after the literal text        test_type_sends_literal_text_and_no_enter
-  31  G1: the raw selector passed straight to tmux -t       test_a_raw_address_is_re_resolved_not_passed_through_to_tmux
-  32  G1: ambiguity treated as a normal resolution          test_an_ambiguous_selector_is_refused_with_session_resolves_exit_code
-  33  log: log_record made a no-op                          test_every_run_writes_exactly_one_log_line[argv0-0]
-  34  log: the on-disk artifact name renamed                test_the_log_path_is_pinned
-  35  seam: session-write starts reading target["claude"]   test_every_target_key_session_write_reads_is_emitted_by_session_resolve
-  36  EXIT_REMOTE_HOST renumbered 4 -> 40                   test_exit_codes_are_pairwise_distinct_and_reuse_session_resolves
-        🔴 Every OTHER test compares `outcome.code == sw.EXIT_REMOTE_HOST` —
-        both sides move together, so none of them can see a renumber. Only the
-        test that pins the LITERAL can.
-"""
+
+def test_the_mutation_table_names_only_tests_that_EXIST_in_this_file():
+    """🔴 A mutant whose killer name is a typo can never be KILLED, and the
+    sweep would report it as a survivor forever — or, worse, the name could
+    match nothing and a future rename would silently turn a real kill into an
+    unexplained red. Cross-check the table against this file's own test names.
+
+    This is the ledger direction that matters: the sweep proves the tests catch
+    the mutants; this proves the sweep is pointing at tests that are really here.
+    """
+    root = os.path.normpath(os.path.join(_HERE, "..", ".."))
+    tree = ast.parse(open(os.path.join(root, MUTATION_HARNESS),
+                          encoding="utf-8").read())
+    named = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "M"):
+            # M(guard, cls, desc, find, repl, killer)
+            if len(node.args) >= 6 and isinstance(node.args[5], ast.Constant):
+                if isinstance(node.args[5].value, str):
+                    named.add(node.args[5].value)
+    assert len(named) > 30, f"the scan found only {len(named)} killer names"
+
+    here = {n.name for n in ast.walk(ast.parse(open(__file__,
+                                                    encoding="utf-8").read()))
+            if isinstance(n, ast.FunctionDef)}
+    missing = sorted(k for k in named if k not in here)
+    assert not missing, (
+        f"the mutation table names tests that do not exist here: {missing}")

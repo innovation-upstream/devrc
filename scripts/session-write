@@ -94,10 +94,12 @@ the code below follows the measurement, not the brief.
    `covered` is NOT the precondition for `dismiss` — see the dismiss section.
 
 
-🔴 TWO tmux BEHAVIOURS THAT SILENTLY CORRUPT THE PAYLOAD
----------------------------------------------------------
+🔴 THREE tmux BEHAVIOURS THAT SILENTLY CORRUPT — OR EXECUTE — THE PAYLOAD
+--------------------------------------------------------------------------
 Measured on tmux 3.7b in a PRIVATE `-L` server (never the operator's), because
-both are payload-integrity bugs that no amount of reading the man page reveals:
+all three are payload-integrity bugs that no amount of reading the man page
+reveals. (c) was found by an adversarial audit AFTER the first version of this
+file shipped a denylist, and it is the reason `--text` is now an ALLOWLIST.
 
   a) A TRAILING `;` ON THE TEXT ARGUMENT IS EATEN.
 
@@ -120,6 +122,32 @@ both are payload-integrity bugs that no amount of reading the man page reveals:
      Both verbs refuse `\n`/`\r` in `--text`; `send` presses Enter with its own
      separate `send-keys <pane> Enter` argv, so the submit is one auditable act
      rather than a character hidden inside a payload.
+
+  c) 🔴 ENTER IS NOT THE ONLY EXECUTION EVENT. A CONTROL CHARACTER EXECUTES.
+
+         tmux send-keys -t %0 -l -- $'touch /tmp/d/EXECUTED\x0f'   # NO Enter
+             ->  /tmp/d/EXECUTED was CREATED
+         same payload without the \x0f, still no Enter
+             ->  nothing ran      (negative control: the rig discriminates)
+
+     `\x0f` is Ctrl-O, readline's `operate-and-get-next` — a BASH DEFAULT, not
+     an exotic rebinding. `\x1ba` is zsh emacs `accept-and-hold`. Any keymap
+     entry bound to an accept-line variant is another one, and the set is a
+     property of the OPERATOR'S shell config, which this file cannot read.
+
+     🔴 This REFUTES the premise the first version of this file was built on —
+     that "`type` cannot execute because it never sends Enter". It can. The
+     first version enforced a DENYLIST of exactly NUL/`\n`/`\r`/trailing-`;`,
+     so `\x0f` sailed through and `session-write type` was an arbitrary-command
+     executor in any shell pane: precisely the Bash-permission-classifier
+     bypass this wrapper exists to prevent.
+
+     Adding `\x0f` to the denylist would have been the same mistake one
+     codepoint later — the next keybinding walks it. `--text` is therefore
+     validated against an ALLOWLIST (printable characters plus tab); every
+     other codepoint is refused BY NUMBER. NUL, `\n` and `\r` are non-printable
+     too, so the allowlist is what actually refuses them; their named messages
+     survive only because a specific diagnosis beats a generic one.
 
 
 THE GUARDS, AND WHY EACH IS SHAPED THAT WAY
@@ -153,9 +181,16 @@ G4  A WRITE-SUBCOMMAND ALLOWLIST AT THE SUBPROCESS SEAM. `_assert_allowed`
     own `_split_on_separators`, so a welded `;` cannot smuggle a second one
     past). `kill-session`, `kill-pane`, `respawn-pane` cannot leave this file.
 
-G5  FOCUS IS A pkill-CLASS ACTION. It refuses without
-    `--i-am-at-the-keyboard`, and it is never a side effect of another verb —
-    no other verb constructs a `select-window` or `switch-client` argv at all.
+G5  CHANGING THE OPERATOR'S SCREEN IS A pkill-CLASS ACTION. BOTH `focus` and
+    `dismiss` refuse without `--i-am-at-the-keyboard`, and neither is ever a
+    side effect of another verb — no other verb constructs a `select-window`,
+    `switch-client` or `detach-client` argv at all.
+
+    🔴 `dismiss` was NOT behind this gate in the first version, on the reading
+    that taking an overlay DOWN is not the same as raising a window. That is
+    wrong twice: RULES.md names the hazard as "changes what a human is looking
+    at RIGHT NOW", which a disappearing overlay does; and see G6 — the client
+    it detaches is not provably an overlay at all.
 
 G6  DISMISS NEVER DETACHES A BASE TERMINAL. That would drop the operator out of
     tmux entirely. Note `popup` and `base_terminal` are exact complements in
@@ -164,15 +199,42 @@ G6  DISMISS NEVER DETACHES A BASE TERMINAL. That would drop the operator out of
     `--client` resolves against ALL attached clients and the assertion runs
     afterwards, on the single line every dismiss path funnels through.
 
+    🔴 BUT "POPUP" IS A HEURISTIC, AND IT CANNOT PROVE AN OVERLAY.
+    `session-resolve` classifies any client whose TERM starts with `tmux` as a
+    popup. That is sound for the clients `display-popup -E "tmux attach …"`
+    creates — measured, they report `tmux-256color` — but it is a statement
+    about TERM, not about provenance. A client that is a genuine nested
+    `tmux attach` reports the same TERM and would be detached as though it were
+    an overlay, dropping a REAL session.
+
+    Measured, tmux 3.7b, private `-L` server — how reachable that actually is:
+        same server, `$TMUX` set   -> tmux REFUSES ("sessions should be nested
+                                      with care, unset $TMUX to force")
+        a DIFFERENT tmux server    -> ATTACHES, TERM `tmux-256color`
+        `$TMUX` unset, forced      -> attaches
+    So it is not "any nested attach" — the ordinary case is refused by tmux
+    itself. It takes a second server or a deliberate `unset TMUX`. That is a
+    narrow residual, not a common one, but it is not zero: hence G5 over
+    `dismiss`, and hence every dismiss result SAYS which client it detached and
+    that the classification was made on TERM.
+
 G7  AMBIGUITY IS REFUSED, NEVER GUESSED — matching session-resolve's own stance
     on multiple matches. Two popups (the measured state) or two focused base
     terminals is a refusal naming the candidates, not a coin flip.
 
-G8  THE SHELL-EXECUTION GATE, on `send` only. `send` presses Enter; Enter is the
-    execution event. `type` cannot execute because it never sends Enter (and
-    (b) above is why the `\n` refusal is load-bearing for that claim). On an
-    agent runtime Enter submits a prompt to a harness that will show it to a
-    human; on a shell it runs a command. See the three-state reading in (1).
+G8  THE SHELL-EXECUTION GATE, on `send` only — `send` presses Enter, and on a
+    shell that runs a command while on an agent runtime it submits a prompt to
+    a harness a human will read. See the three-state reading in (1).
+
+    🔴 THE SCOPE OF THIS GATE RESTS ON G13, NOT ON "type NEVER SENDS ENTER".
+    The first version justified leaving `type` ungated by asserting that Enter
+    is the only execution event. Measurement (c) refuted that: a Ctrl-O in the
+    payload executed the pane's buffer with no Enter sent. `type` is ungated
+    because the G13 ALLOWLIST makes an execution event unrepresentable in
+    `--text` — not because of anything intrinsic to `send-keys -l`. The two are
+    ONE mechanism: weaken G13 and `type` silently becomes a shell executor
+    again. `test_type_is_ungated_ONLY_because_the_allowlist_makes_it_safe` pins
+    that relationship rather than either half alone.
 
 G9  THE UNSENT-PROMPT GATE. `unsent_prompt` is text the operator typed and never
     sent. Writing into that pane CONCATENATES onto it — the agent's text fuses
@@ -181,6 +243,26 @@ G9  THE UNSENT-PROMPT GATE. `unsent_prompt` is text the operator typed and never
     and never logged: this repo is PUBLIC and that string is captured text off
     the operator's screen (session-resolve carries the same rule at
     `SIGNAL_CAPTURED_TEXT_KEY`). Only its presence and length leave this file.
+
+    🔴 BARE `send` IS GATED TOO, and in the first version it was not. The
+    reading then was that submitting text already in the pane is bare send's
+    only purpose, so gating it would refuse the whole verb. But the text
+    already in the pane is exactly what G9 is about: `unsent_prompt` is a
+    HUMAN's half-finished sentence, and bare `send` submits it verbatim with
+    nobody having read it. That is the same hazard the `--text` path is gated
+    for, arriving by a shorter route. `--append` acknowledges it either way.
+
+G13 THE `--text` ALLOWLIST — printable characters plus tab, everything else
+    refused BY CODEPOINT. See measurement (c): this is the guard that makes
+    `type` safe, and a denylist provably could not.
+
+G14 THE LOG PATH IS CONFINED TO ONE ROOT. `--log-path` and `$SESSION_WRITE_LOG`
+    name a file this process CREATES (with `makedirs`) and APPENDS
+    caller-influenced JSON to, and both are reachable from the single
+    `Bash(scripts/session-write:*)` allowlist entry — an unconstrained
+    create-and-append anywhere on the filesystem, from an entry granted on the
+    premise that this file constrains what it does. Both are now resolved with
+    `realpath` and refused unless they land under `LOG_ROOT`.
 
 G10 EVERY WRITE IS LOGGED, including refusals — a refusal is the interesting
     record. See LOG_PATH below.
@@ -242,6 +324,7 @@ import json
 import os
 import subprocess
 import sys
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
@@ -302,8 +385,15 @@ AGENT_RUNTIMES = ("claude", "opencode")
 #: carry it too, so it is never used to pick a client across the whole list.
 CLIENT_FLAG_FOCUSED = "focused"
 
-DEFAULT_LOG_PATH = os.path.join(os.path.expanduser("~"), ".claude",
-                                "session-write.log")
+#: 🔴 G14. The ONLY directory tree this process will create or append a log
+#: under. `--log-path` and `$SESSION_WRITE_LOG` are both caller-influenced and
+#: both reachable from the one allowlisted Bash entry; without this they are an
+#: unconstrained "create nested directories anywhere and append a line I shaped"
+#: primitive. Resolved through `realpath` at CHECK time, so neither `..` nor a
+#: symlink planted inside the root can point out of it.
+LOG_ROOT = os.path.join(os.path.expanduser("~"), ".claude")
+
+DEFAULT_LOG_PATH = os.path.join(LOG_ROOT, "session-write.log")
 LOG_PATH_ENV = "SESSION_WRITE_LOG"
 
 #: The character whose trailing occurrence tmux EATS off an argv token — see the
@@ -311,13 +401,52 @@ LOG_PATH_ENV = "SESSION_WRITE_LOG"
 TMUX_ARGV_SEPARATOR = sr.TMUX_SEPARATOR_CHAR
 
 #: Characters that `send-keys -l` delivers as a real Enter (measured).
+#: 🔴 NOT THE GATE — these two are non-printable, so `TEXT_IS_ALLOWED` already
+#: refuses them. This tuple exists only to give them a message that names the
+#: hazard. Deleting it weakens the DIAGNOSIS, never the refusal; that is the
+#: whole point of replacing the denylist, and a test pins it.
 SUBMITTING_CHARS = ("\n", "\r")
+
+#: 🔴 G13. The `--text` ALLOWLIST. Every codepoint not permitted here is refused
+#: by number — see measurement (c): a Ctrl-O executed a pane's buffer with no
+#: Enter sent, and the set of characters bound to an accept-line variant is a
+#: property of the OPERATOR'S shell config, which this process cannot read. So
+#: the question asked is "is this character safe to deliver", never "is this one
+#: of the dangerous ones we thought of".
+#:
+#: `str.isprintable()` is False for exactly the Unicode categories that make a
+#: byte a control or an invisible: Cc (NUL, `\n`, `\r`, `\x0f`, ESC, DEL), Cf,
+#: Cs, Co (private use — the U+E000 that once rendered a diff identical to an
+#: unedited line), Cn, Zl, Zp and Zs-except-ASCII-space. Tab is Cc and so must
+#: be re-permitted explicitly; it is the one control character with an ordinary
+#: typographic use and it cannot accept a line.
+TEXT_EXTRA_ALLOWED = ("\t",)
+
+
+def TEXT_IS_ALLOWED(ch: str) -> bool:
+    """🔴 THE allowlist predicate, ONE place. Every `--text` codepoint passes
+    through exactly this function; there is no second copy to disagree with."""
+    return ch in TEXT_EXTRA_ALLOWED or ch.isprintable()
 
 
 # --------------------------------------------------------------------------- #
 # Exit codes. 0/2/3 are session-resolve's OWN vocabulary, imported rather than
-# re-spelled; everything above is this module's, and every refusal has its own
-# code so a caller can branch on WHICH gate stopped it.
+# re-spelled; everything above is this module's.
+#
+# 🔴 AN EXIT CODE NAMES A CLASS OF REFUSAL, NOT AN INDIVIDUAL GATE. An earlier
+# version of this comment claimed "every refusal has its own code so a caller
+# can branch on WHICH gate stopped it", and that was simply false:
+# `EXIT_AMBIGUOUS_CLIENT` covers five distinct refusals (no such client, base
+# terminal, not a base terminal, no base terminal attached, two base terminals,
+# two popups) and `EXIT_REMOTE_HOST` covers two (remote target, unknown local
+# host). Widening the codes to one-per-refusal was rejected: a caller branching
+# on "which client problem" wants a token, not a number it must keep a table for.
+#
+# The per-gate discriminator is `record["outcome"]` — a stable string token
+# (`refused:base-terminal`, `refused:no-such-client`, …) emitted on EVERY run
+# into the audit log and into `--json`. `OUTCOME_TOKENS` below enumerates them
+# and a test pins that ledger against the tokens the source actually emits, so a
+# new gate cannot arrive without a name.
 # --------------------------------------------------------------------------- #
 EXIT_OK = sr.EXIT_RESOLVED                  # 0
 EXIT_AMBIGUOUS = sr.EXIT_AMBIGUOUS          # 2
@@ -331,13 +460,53 @@ EXIT_AMBIGUOUS_CLIENT = 9
 EXIT_TMUX_FAILED = 10
 EXIT_BAD_TEXT = 11
 EXIT_RESTORE_FAILED = 12
+EXIT_BAD_LOG_PATH = 13
 
 #: Every refusal code, so a test can assert they are pairwise distinct and that
 #: none collides with session-resolve's three.
 ALL_EXIT_CODES = (EXIT_OK, EXIT_AMBIGUOUS, EXIT_UNMATCHED, EXIT_REMOTE_HOST,
                   EXIT_SCREEN_NOT_YOURS, EXIT_SHELL_EXEC, EXIT_UNSENT_PROMPT,
                   EXIT_TARGET_VANISHED, EXIT_AMBIGUOUS_CLIENT,
-                  EXIT_TMUX_FAILED, EXIT_BAD_TEXT, EXIT_RESTORE_FAILED)
+                  EXIT_TMUX_FAILED, EXIT_BAD_TEXT, EXIT_RESTORE_FAILED,
+                  EXIT_BAD_LOG_PATH)
+
+#: 🔴 THE PER-GATE DISCRIMINATOR — see the exit-code note above. Exit codes name
+#: a CLASS; these name the individual gate, and they are what a caller should
+#: branch on. Pinned two-way by a test against the `outcome=` literals the
+#: source actually emits, so neither a new gate without a token nor a token
+#: nothing emits can survive the suite.
+OUTCOME_TOKENS = (
+    "refused:ambiguous",
+    "refused:ambiguous-base-terminal",
+    "refused:ambiguous-popup",
+    "refused:bad-log-path",
+    "refused:base-terminal",
+    "refused:local-host-unknown",
+    "refused:no-base-terminal",
+    "refused:no-such-client",
+    "refused:no-text",
+    "refused:not-base-terminal",
+    "refused:pane-vanished",
+    "refused:remote-host",
+    "refused:reverify-unreadable",
+    "refused:screen-not-yours",
+    "refused:shell-exec",
+    "refused:text-not-printable",
+    "refused:text-nul",
+    "refused:text-submits",
+    "refused:text-trailing-separator",
+    "refused:unmatched",
+    "refused:unsent-prompt",
+    "refused:window-vanished",
+    "failed:tmux",
+    "noop:no-popups",
+    "written:dismiss",
+    "written:focus",
+    "written:focus-restore-failed",
+    "written:focus-stay",
+    "written:send",
+    "written:type",
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -352,6 +521,16 @@ ALL_EXIT_CODES = (EXIT_OK, EXIT_AMBIGUOUS, EXIT_UNMATCHED, EXIT_REMOTE_HOST,
 # --------------------------------------------------------------------------- #
 MSG_FOCUS_NEEDS_FLAG = (
     "REFUSED: focus changes your screen.\n"
+    "  re-run with --i-am-at-the-keyboard")
+
+#: 🔴 A SEPARATE STRING FROM focus's, deliberately. They are two different
+#: actions with two different consequences, and one shared message would let a
+#: mutant move the gate between the verbs invisibly.
+MSG_DISMISS_NEEDS_FLAG = (
+    "REFUSED: dismiss detaches a client, which changes what is on your screen "
+    "RIGHT NOW — and the 'popup' classification is made on the client's TERM, "
+    "so a nested tmux attach is indistinguishable from an overlay and would be "
+    "DETACHED rather than closed.\n"
     "  re-run with --i-am-at-the-keyboard")
 
 MSG_REMOTE_HOST = (
@@ -380,6 +559,17 @@ MSG_VANISHED = (
 MSG_BASE_TERMINAL = (
     "REFUSED: client {tty} on session {session!r} is the BASE TERMINAL, not a "
     "popup. Detaching it would drop the operator out of tmux entirely.")
+
+#: 🔴 The MIRROR of MSG_BASE_TERMINAL, and the gap it closes: `focus` steers a
+#: client with `switch-client -c`, and `--client <popup tty>` was ACCEPTED
+#: because naming a client explicitly skipped the base-terminal derivation
+#: entirely. Steering an overlay is not raising a window on the operator's
+#: screen — the overlay is transient and the screen underneath never moves.
+MSG_NOT_BASE_TERMINAL = (
+    "REFUSED: client {tty} on session {session!r} is a POPUP, not the base "
+    "terminal. focus steers the screen the operator is looking at; pointing it "
+    "at an overlay moves a transient client and leaves the real screen "
+    "untouched. Name a base terminal, or omit --client to let focus derive it.")
 
 MSG_NO_SUCH_CLIENT = (
     "REFUSED: no client is attached at {tty}. Attached clients: {attached}")
@@ -414,6 +604,17 @@ MSG_UNSENT_PROMPT = (
     "with --append to write onto it anyway. (The text itself is deliberately "
     "not printed.)")
 
+#: 🔴 Bare `send` has a DIFFERENT consequence and so gets a different sentence:
+#: nothing is concatenated, the operator's half-finished sentence is SUBMITTED
+#: exactly as they left it. Sharing one message across the two shapes would make
+#: a mutant that moves the gate between them invisible to a whole-string check.
+MSG_UNSENT_PROMPT_SUBMIT = (
+    "REFUSED: {address} holds {length} character(s) of UNSENT text the operator "
+    "typed and never sent, and send with no --text would SUBMIT exactly that — "
+    "a human's half-finished sentence, dispatched unread and unedited. Re-run "
+    "with --append to submit it anyway. (The text itself is deliberately not "
+    "printed.)")
+
 MSG_TEXT_SUBMITS = (
     "REFUSED: --text contains {name} at offset {offset}, which tmux "
     "`send-keys -l` delivers as a real Enter — measured, it SUBMITS. Split the "
@@ -427,6 +628,25 @@ MSG_TEXT_TRAILING_SEP = (
 MSG_TEXT_NUL = (
     "REFUSED: --text contains a NUL byte at offset {offset}; it cannot be "
     "passed through an argv.")
+
+#: 🔴 G13's own refusal — the one that is reached by every codepoint the two
+#: named messages above do NOT cover. It reports the codepoint BY NUMBER because
+#: the offending character is by definition one that cannot be displayed.
+MSG_TEXT_NOT_PRINTABLE = (
+    "REFUSED: --text contains the non-printable character U+{codepoint} "
+    "(Unicode category {category}) at offset {offset}. --text is validated "
+    "against an ALLOWLIST of printable characters plus tab, not a denylist of "
+    "the ones we thought of: MEASURED, `send-keys -l` of a payload ending in "
+    "U+000F (Ctrl-O, readline operate-and-get-next, a bash default) EXECUTED "
+    "the pane's buffer with no Enter sent. Which control characters accept a "
+    "line is a property of your shell's keymap, which this tool cannot read.")
+
+MSG_BAD_LOG_PATH = (
+    "REFUSED: the log path {path!r} resolves to {resolved!r}, which is outside "
+    "{root!r}. session-write CREATES missing directories at this path and "
+    "APPENDS a JSON line shaped by its own arguments to it, so an unconstrained "
+    "path is a write primitive rather than an audit trail. Nothing was "
+    "resolved and nothing was written.")
 
 MSG_TYPE_NEEDS_TEXT = (
     "REFUSED: type requires --text. To press Enter without typing anything, "
@@ -509,6 +729,12 @@ class WriteSources:
     resolver_src: Optional[Any] = None
     #: None -> `$SESSION_WRITE_LOG`, else DEFAULT_LOG_PATH, resolved at call time.
     log_path: Optional[str] = None
+    #: 🔴 G14's root, and DELIBERATELY NOT REACHABLE FROM argv OR THE ENVIRONMENT
+    #: — `main` never sets it, so the only way to move it is to construct a
+    #: `WriteSources` in-process, which only the test suite does. A root a caller
+    #: could relocate is not a confinement. `None` -> `LOG_ROOT` at call time,
+    #: never as a field default (see the class docstring's scar).
+    log_root: Optional[str] = None
     #: None -> `resolve()`. Injectable so a test can pin a resolution without
     #: reconstructing four sources.
     resolver: Optional[Callable[..., Any]] = None
@@ -525,11 +751,29 @@ class WriteSources:
     def resolved_runner(self):
         return self.runner if self.runner is not None else _default_runner
 
-    def resolved_log_path(self) -> str:
+    def resolved_log_root(self) -> str:
+        return self.log_root if self.log_root is not None else LOG_ROOT
+
+    def requested_log_path(self) -> str:
+        """What the CALLER asked for — argv, then env, then the default. May be
+        anywhere on the filesystem; `validate_log_path` is what decides."""
         if self.log_path is not None:
             return self.log_path
         env = os.environ.get(LOG_PATH_ENV)
         return env if env else DEFAULT_LOG_PATH
+
+    def resolved_log_path(self) -> str:
+        """🔴 The path actually WRITTEN, and it is inside the root by
+        construction. `run` refuses the whole invocation when the requested path
+        fails G14, but `main` still has to journal that refusal somewhere — and
+        the one place it must not journal it is the path the caller was just
+        refused. So this falls back to the default INSIDE the root rather than
+        honouring a rejected request."""
+        requested = self.requested_log_path()
+        root = self.resolved_log_root()
+        if validate_log_path(requested, root) is None:
+            return requested
+        return os.path.join(root, os.path.basename(DEFAULT_LOG_PATH))
 
     def resolved_resolver(self):
         return self.resolver if self.resolver is not None else sr.resolve
@@ -744,6 +988,24 @@ def _assert_not_base_terminal(client: dict) -> Optional[Outcome]:
     return None
 
 
+def _assert_is_base_terminal(client: dict) -> Optional[Outcome]:
+    """🔴 The MIRROR of `_assert_not_base_terminal`, and the ONE place focus's
+    client is required to be a real screen.
+
+    Checks `popup` rather than `not base_terminal` for the same reason its twin
+    checks `base_terminal`: the hazard has a name and the assertion should say
+    it. `parse_clients` makes the two exact complements today; if they ever stop
+    being complements, each assertion still refuses the thing it is named for.
+    """
+    if client.get("popup"):
+        return _refuse(
+            EXIT_AMBIGUOUS_CLIENT,
+            MSG_NOT_BASE_TERMINAL.format(tty=client.get("tty"),
+                                         session=client.get("session")),
+            outcome="refused:not-base-terminal")
+    return None
+
+
 def pick_named_client(clients, tty: str) -> tuple:
     """-> (client, refusal|None). Searches ALL attached clients, deliberately.
 
@@ -771,7 +1033,17 @@ def pick_base_terminal(clients, tty: Optional[str]) -> tuple:
     than guessing which screen belongs to the human.
     """
     if tty is not None:
-        return pick_named_client(clients, tty)
+        client, refusal = pick_named_client(clients, tty)
+        if refusal:
+            return None, refusal
+        # 🔴 THE ASSERTION MUST RUN ON THE EXPLICIT PATH TOO. It did not: naming
+        # a client skipped straight past the base-terminal derivation, so
+        # `focus --client <popup tty>` was accepted and `switch-client -c` was
+        # pointed at an overlay. The mirror of G6, which had the same hole in
+        # the other direction and is why `pick_named_client` searches ALL
+        # clients rather than only the ones the verb expects.
+        refusal = _assert_is_base_terminal(client)
+        return (None, refusal) if refusal else (client, None)
 
     base = [c for c in clients if c.get("base_terminal")]
     if not base:
@@ -801,26 +1073,40 @@ def pick_base_terminal(clients, tty: Optional[str]) -> tuple:
 # --text validation (the two measured tmux payload hazards)
 # --------------------------------------------------------------------------- #
 def validate_text(text: str) -> Optional[Outcome]:
-    """G13/G14. Refuse a payload tmux would corrupt or over-deliver.
+    """G13. An ALLOWLIST over `--text`, plus the trailing-separator refusal.
 
-    Order matters and is deliberate: NUL first (it cannot even reach argv), then
-    the SUBMITTING characters (the dangerous one — it executes), then the eaten
-    separator (the merely-wrong one). Each refusal names a COMPUTED offset so a
-    mutant that drops the scan and hardcodes a message cannot pass.
+    🔴 THIS IS ONE SCAN, NOT FOUR CHECKS. Every codepoint is put to
+    `TEXT_IS_ALLOWED` and the FIRST one that fails is refused. The three named
+    messages below do not decide anything — they only choose better WORDS for a
+    character the allowlist has already rejected. That ordering is the whole
+    correction: the previous version asked "is this character one of the four we
+    banned", so U+000F (Ctrl-O) passed and `type` executed arbitrary commands in
+    any shell pane. `test_the_named_text_messages_are_DIAGNOSES_not_the_gate`
+    pins that the allowlist alone still refuses all three, so a future edit that
+    deletes a named branch weakens the message and not the guard.
+
+    The offset in every refusal is COMPUTED from the scan, so a mutant that
+    drops the scan and hardcodes a message cannot pass.
     """
-    nul = text.find("\x00")
-    if nul != -1:
-        return _refuse(EXIT_BAD_TEXT, MSG_TEXT_NUL.format(offset=nul),
-                       outcome="refused:text-nul")
-
-    for ch in SUBMITTING_CHARS:
-        idx = text.find(ch)
-        if idx != -1:
+    for idx, ch in enumerate(text):
+        if TEXT_IS_ALLOWED(ch):
+            continue
+        # --- Rejected. Everything below only picks the wording. --------------
+        if ch == "\x00":
+            return _refuse(EXIT_BAD_TEXT, MSG_TEXT_NUL.format(offset=idx),
+                           outcome="refused:text-nul")
+        if ch in SUBMITTING_CHARS:
             name = "a newline" if ch == "\n" else "a carriage return"
             return _refuse(
                 EXIT_BAD_TEXT,
                 MSG_TEXT_SUBMITS.format(name=name, offset=idx),
                 outcome="refused:text-submits")
+        return _refuse(
+            EXIT_BAD_TEXT,
+            MSG_TEXT_NOT_PRINTABLE.format(codepoint=f"{ord(ch):04X}",
+                                          category=unicodedata.category(ch),
+                                          offset=idx),
+            outcome="refused:text-not-printable")
 
     if text.endswith(TMUX_ARGV_SEPARATOR):
         return _refuse(
@@ -828,6 +1114,33 @@ def validate_text(text: str) -> Optional[Outcome]:
             MSG_TEXT_TRAILING_SEP.format(sep=TMUX_ARGV_SEPARATOR),
             outcome="refused:text-trailing-separator")
     return None
+
+
+# --------------------------------------------------------------------------- #
+# G14 — the log path
+# --------------------------------------------------------------------------- #
+def validate_log_path(path: str, root: str) -> Optional[Outcome]:
+    """G14. -> a refusal, or None. Refuse a log path outside `root`.
+
+    🔴 `realpath` BOTH SIDES before comparing. A prefix test on the raw strings
+    is walkable by `..` and by a symlink planted inside the root, and comparing
+    a resolved path against an unresolved root fails whenever the root itself
+    contains a symlink (`~` behind one is ordinary).
+
+    `commonpath`, never `startswith`: `~/.claudeX` starts with `~/.claude`.
+    """
+    resolved = os.path.realpath(path)
+    real_root = os.path.realpath(root)
+    try:
+        inside = os.path.commonpath([resolved, real_root]) == real_root
+    except ValueError:          # different drives / a relative-absolute mix
+        inside = False
+    if inside and resolved != real_root:
+        return None
+    return _refuse(
+        EXIT_BAD_LOG_PATH,
+        MSG_BAD_LOG_PATH.format(path=path, resolved=resolved, root=real_root),
+        outcome="refused:bad-log-path")
 
 
 # --------------------------------------------------------------------------- #
@@ -848,17 +1161,23 @@ def gate_shell_exec(target: dict, allow: bool) -> Optional[Outcome]:
         outcome="refused:shell-exec")
 
 
-def gate_unsent_prompt(target: dict, append: bool) -> Optional[Outcome]:
-    """G9. 🔴 The prompt's CONTENT never leaves this function — only its length."""
+def gate_unsent_prompt(target: dict, append: bool,
+                       submitting_only: bool = False) -> Optional[Outcome]:
+    """G9. 🔴 The prompt's CONTENT never leaves this function — only its length.
+
+    `submitting_only` selects the wording for bare `send`, where the operator's
+    text is SUBMITTED rather than written onto. Same gate, same token, same exit
+    code — a different consequence deserves a different sentence.
+    """
     if append:
         return None
     prompt = target.get("unsent_prompt")
     if not prompt:
         return None
+    template = MSG_UNSENT_PROMPT_SUBMIT if submitting_only else MSG_UNSENT_PROMPT
     return _refuse(
         EXIT_UNSENT_PROMPT,
-        MSG_UNSENT_PROMPT.format(address=target.get("address"),
-                                 length=len(prompt)),
+        template.format(address=target.get("address"), length=len(prompt)),
         outcome="refused:unsent-prompt")
 
 
@@ -929,9 +1248,15 @@ def verb_dismiss(target, ws, fresh, args) -> Outcome:
     if failed:
         return failed
 
-    msg = (f"dismissed: detached popup client {client['tty']} "
-           f"(session {client['session']!r}); {len(popups)} popup(s) were "
-           f"attached")
+    # 🔴 The result SAYS how the classification was made. "popup" is a statement
+    # about the client's TERM (`session-resolve.POPUP_TERM_PREFIX`), not proof
+    # of a `display-popup` overlay — see G6. An operator whose session just
+    # vanished needs to be able to read, from this line, that it may have been
+    # detached rather than closed, and which client it was.
+    msg = (f"dismissed: detached client {client['tty']} "
+           f"(session {client['session']!r}, TERM {client.get('term')!r}, "
+           f"classified as a popup on its TERM — not proof of a display-popup "
+           f"overlay); {len(popups)} popup(s) were attached")
     return Outcome(code=EXIT_OK, lines=[msg],
                    record={"outcome": "written:dismiss", "message": msg,
                            "client_tty": client["tty"],
@@ -1061,7 +1386,17 @@ def verb_focus(target, ws, fresh, args) -> Outcome:
 
 
 def verb_type(target, ws, fresh, args) -> Outcome:
-    """Literal text, NO Enter. `validate_text` is what makes "no Enter" true."""
+    """Literal text, NOT submitted.
+
+    🔴 `validate_text` IS THE ONLY REASON THIS VERB IS SAFE, and the only reason
+    it is exempt from G8. "No Enter" is not a property of `send-keys -l` — an
+    earlier version of this docstring claimed it was, and measurement (c)
+    refuted it: a Ctrl-O in the payload executed the pane's buffer with no Enter
+    sent, which made this verb an arbitrary-command executor in any shell pane.
+    What makes "not submitted" true is the G13 ALLOWLIST refusing every
+    codepoint that is not printable-or-tab. Weaken that and this verb becomes a
+    shell again — the two are one mechanism, not a guard and a nicety.
+    """
     refusal = validate_text(args.text)
     if refusal:
         return refusal
@@ -1089,6 +1424,14 @@ def verb_send(target, ws, fresh, args) -> Outcome:
     the submit is an auditable act rather than a character buried in a payload.
     Without `--text`: press Enter ONLY, submitting whatever is already sitting
     in the pane. Both shapes press Enter, so both pass through G8.
+
+    🔴 AND BOTH SHAPES PASS THROUGH G9. The first version exempted bare `send`,
+    reasoning that submitting text already in the pane is its only purpose. But
+    `unsent_prompt` is not "text already in the pane" in the neutral sense — it
+    is specifically a HUMAN's half-finished sentence, and bare `send` submits it
+    verbatim, unread, with no agent text involved at all. That is G9's exact
+    hazard reached by a shorter route, and the exemption made the shorter route
+    the UNGUARDED one. `--append` acknowledges it, as it does on the --text path.
     """
     if args.text is not None:
         refusal = validate_text(args.text)
@@ -1097,10 +1440,10 @@ def verb_send(target, ws, fresh, args) -> Outcome:
     refusal = gate_shell_exec(target, args.allow_shell_exec)
     if refusal:
         return refusal
-    if args.text is not None:
-        refusal = gate_unsent_prompt(target, args.append)
-        if refusal:
-            return refusal
+    refusal = gate_unsent_prompt(target, args.append,
+                                 submitting_only=args.text is None)
+    if refusal:
+        return refusal
 
     pane = target["pane_id"]
     if args.text is not None:
@@ -1129,6 +1472,16 @@ def verb_send(target, ws, fresh, args) -> Outcome:
 PANE_VERBS = ("type", "send")
 CLIENT_VERBS = ("dismiss", "focus")
 ALL_VERBS = CLIENT_VERBS + PANE_VERBS
+
+#: 🔴 G5's ledger: the verbs that change what a human is looking at RIGHT NOW,
+#: each mapped to its OWN refusal wording. A dict rather than a tuple precisely
+#: so the two messages cannot be shared — a mutant that swaps them is visible to
+#: the whole-string assertions, and one shared message would make the swap
+#: invisible. Pinned against `CLIENT_VERBS` by a test: every client-directed
+#: verb issues `detach-client`, `select-window` or `switch-client`, and all
+#: three change the screen, so the two sets must stay equal.
+SCREEN_VERBS = {"focus": MSG_FOCUS_NEEDS_FLAG,
+                "dismiss": MSG_DISMISS_NEEDS_FLAG}
 
 _VERB_FUNCS = {"dismiss": verb_dismiss, "focus": verb_focus,
                "type": verb_type, "send": verb_send}
@@ -1206,14 +1559,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--text", default=None,
                    help="literal text (type: required; send: optional)")
     p.add_argument("--append", action="store_true",
-                   help="write even though the pane holds UNSENT operator text")
+                   help="write to — or, for bare send, SUBMIT — a pane that "
+                        "holds UNSENT operator text")
     p.add_argument("--allow-shell-exec", action="store_true",
                    help="send: press Enter even though the runtime is not one "
                         "of " + ", ".join(AGENT_RUNTIMES))
     p.add_argument("--i-am-at-the-keyboard", dest="at_keyboard",
                    action="store_true",
-                   help="focus: required acknowledgement that this changes the "
-                        "operator's screen")
+                   help="focus and dismiss: required acknowledgement that this "
+                        "changes the operator's screen")
     p.add_argument("--stay", action="store_true",
                    help="focus: do NOT restore the previous session/window")
     p.add_argument("--client", default=None, metavar="TTY",
@@ -1223,7 +1577,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="run every guard and the re-verify, print the tmux "
                         "argv that WOULD be issued, write nothing")
     p.add_argument("--json", action="store_true")
-    p.add_argument("--log-path", default=None)
+    p.add_argument("--log-path", default=None,
+                   help="the JSONL audit log. MUST resolve inside " + LOG_ROOT +
+                        " (G14); anything else is refused before the selector "
+                        "is even resolved")
     p.add_argument("--host", default=sr.HOST_ALL,
                    choices=(sr.HOST_ALL, *sr.HOST_NAMES))
     p.add_argument("--registry-dir", default=None)
@@ -1234,10 +1591,24 @@ def build_parser() -> argparse.ArgumentParser:
 def run(args, ws: WriteSources) -> Outcome:
     """The whole pipeline, injectable end to end. `main` only does argv, I/O
     and the exit code."""
-    # G5 FIRST — before resolution, so a refused focus cannot even read the
-    # world, and cannot be reached by any other verb's code path.
-    if args.verb == "focus" and not args.at_keyboard:
-        return _refuse(EXIT_SCREEN_NOT_YOURS, MSG_FOCUS_NEEDS_FLAG,
+    # G14 FIRST OF ALL. The log write happens in `main` AFTER this returns, so a
+    # refusal here is still journalled — but to the DEFAULT path, never to the
+    # one being refused. Ordering it ahead of G5 is deliberate: a bad log path
+    # is a property of the invocation, not of the verb, and every verb reaches
+    # the log.
+    refusal = validate_log_path(ws.requested_log_path(), ws.resolved_log_root())
+    if refusal:
+        return refusal
+
+    # G5 — before resolution, so a refused screen-changing verb cannot even read
+    # the world, and cannot be reached by any other verb's code path.
+    #
+    # 🔴 BOTH screen verbs, and with SEPARATE messages. `dismiss` was outside
+    # this gate in the first version; detaching a client changes what the
+    # operator is looking at just as raising a window does, and G6 records why
+    # "it is only an overlay" is not something this tool can prove.
+    if args.verb in SCREEN_VERBS and not args.at_keyboard:
+        return _refuse(EXIT_SCREEN_NOT_YOURS, SCREEN_VERBS[args.verb],
                        outcome="refused:screen-not-yours")
 
     if args.verb == "type" and args.text is None:
