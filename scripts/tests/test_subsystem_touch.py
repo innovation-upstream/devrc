@@ -10008,7 +10008,15 @@ class TestScanEntryShape:
     ) -> None:
         """The seam between this checker and the reader. Both are views over one
         walker, so a fenced `#` must be invisible to BOTH — otherwise the
-        validator predicts a read the reader will not perform."""
+        validator predicts a read the reader will not perform.
+
+        🔴 BOTH HALVES OF THE NAME ARE ASSERTED, and the second half needs its
+        own fixture. An `== ()` on a conforming entry is satisfied by a scanner
+        that reports nothing at all — measured: it survived a stub returning `()`
+        — so it can only witness "does not end a section". The inventory is
+        printed only beside an ABSENT finding, so proving the fenced `#` never
+        ENTERS it takes an entry that is missing a heading.
+        """
         store = _shape_store(
             tmp_path,
             SHAPE_FM + "\n## Pointers\n- p\n\n## Nuance / work-history\n"
@@ -10016,11 +10024,34 @@ class TestScanEntryShape:
         )
         assert st.scan_entry_shape([store / SCOPE / "payments-unit.md"]) == ()
 
+        # ... and the inventory half, which the row above structurally cannot see.
+        bare = _shape_store(
+            tmp_path / "inv",
+            SHAPE_FM + "\n## Pointers\n- p\n\n```\n## not a heading\n```\n",
+        )
+        rows = st.scan_entry_shape([bare / SCOPE / "payments-unit.md"])
+        assert [(s.heading, s.kind) for s in rows] == [
+            (sr.NUANCE_HEADING, st.SHAPE_ABSENT)
+        ]
+        assert rows[0].found == (sr.POINTERS_HEADING,), rows[0].found
+
     def test_an_unreadable_path_is_skipped_rather_than_raising(self, tmp_path) -> None:
         """It runs BESIDE the parse check, never in front of it: a malformed
         file's own rejection is the finding that matters, and this must never be
-        the thing that turns a validation run into a crash."""
+        the thing that turns a validation run into a crash.
+
+        🔴 SKIPPED, NOT ABANDONED — asserted with a readable entry AFTER the
+        unreadable one. `== ()` over the missing path alone is green for a
+        scanner that gives up on the first `OSError`, and for one that reports
+        nothing ever; only a later file's finding tells the two apart.
+        """
         assert st.scan_entry_shape([tmp_path / "does-not-exist.md"]) == ()
+
+        store = _shape_store(tmp_path, _S3_SPINE_RENAMED)
+        rows = st.scan_entry_shape(
+            [tmp_path / "does-not-exist.md", store / SCOPE / "payments-unit.md"]
+        )
+        assert sorted(s.kind for s in rows) == [st.SHAPE_ABSENT, st.SHAPE_RENAMED]
 
     def test_scan_entry_shape_WRITES_NOTHING(self, tmp_path) -> None:
         """The store is curated, client-confidential and unbacked. Hashed, not
