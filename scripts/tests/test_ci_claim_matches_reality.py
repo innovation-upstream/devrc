@@ -1,33 +1,47 @@
-"""CLAUDE.md's description of the merge gate must match what the repo actually has.
+"""CLAUDE.md's merge-gate marker must match what the repo actually has.
 
 WHY THIS EXISTS
 ---------------
 For an unknown span, `CLAUDE.md` asserted "**CI gates both suites**: `nix build
-.#checks…`". There is no CI in this repo: no `.github/workflows`, no pre-push
-hook, no Tekton trigger, and `statusCheckRollup` is empty on every PR including
-merged ones. Nothing has ever gated a devrc merge except a human or agent
+.#checks…`". No CI has ever run on a devrc PR: no `.github/workflows`, no branch
+protection, no ruleset, no Tekton trigger, and `statusCheckRollup` is empty on
+every PR including merged ones. Every merge has rested on a human or agent
 running the suite by hand.
 
-That is the worst shape a false claim can take. It sits in the always-loaded
-project instructions, it is reassuring, and it is precisely the sort of sentence
-nobody re-derives: an agent reads "CI gates both suites", concludes the merge is
-protected, and skips the run it was supposed to do.
+That is the worst shape a false claim can take. It lives in the always-loaded
+project instructions, it is reassuring, and it is exactly the sort of sentence
+nobody re-derives: an agent reads it, concludes the merge is protected, and
+skips the run it was supposed to do.
 
-The fix is not to reword it once — prose rots back. This test makes the claim a
-FUNCTION of the repo, checked every run, in BOTH directions:
+WHY A MARKER, NOT A PROSE MATCH
+-------------------------------
+The first version of this test regex-matched the prose ("CI gates ..."). An
+audit walked it in five ways in one pass — `**CI** gates both suites` (bold on
+the word, not the phrase), `CI *now* gates ...`, "Merges are blocked until the
+CI pipeline passes", "GitHub Actions will run ...", "Branch protection requires
+..." — and it ALSO produced false positives on legitimate unrelated prose
+("clawgate-ci gates this repo" matches `\\bci\\b`; `CLAUDE.md` discusses
+pipelines and timers routinely). A guard that reds on an innocent edit gets
+deleted; one that misses the reword it exists to catch is theatre.
 
-  * no automated gate present  -> CLAUDE.md must not claim one
-  * automated gate present     -> CLAUDE.md must not still say there is none
+So the pinned claim is a MACHINE-READABLE MARKER — `<!-- merge-gate: none -->`
+— and the surrounding prose is free. Rewording costs nothing; changing what
+gates a merge forces the marker. This is the "pin the whole normalised claim,
+not a feature of it" rule: a machine-readable claim is worth a cosmetic cost.
 
-So wiring up real CI is what makes it safe to claim CI, and removing CI forces
-the doc back. Neither drifts silently.
-
-DELIBERATELY STRUCTURAL, NOT SPELLED
-------------------------------------
-Detection reads the FILESYSTEM (do workflow files exist?), never prose. The
-doc-side check looks for the specific refuted assertion rather than the word
-"CI" — `CLAUDE.md` legitimately discusses CI in other registers, and a guard
-that trips on any mention would be un-satisfiable and get deleted.
+SCOPE — WHAT THIS CANNOT SEE, STATED SO NOBODY OVER-TRUSTS IT
+--------------------------------------------------------------
+It detects **GitHub Actions workflow files that trigger on push/pull_request**.
+It deliberately does NOT claim to detect:
+  * branch protection / rulesets / required checks from a GitHub App (API-only,
+    unavailable in the hermetic test sandbox),
+  * Tekton triggers (they live in another repo entirely),
+  * git hooks — `githooks/` ships a real blocking pre-push gate here, installed
+    by pointing `core.hooksPath` elsewhere, which is per-clone and untracked, so
+    no test in the sandbox can pin it.
+`CLAUDE.md` names all three and says they are not machine-checked. A guard whose
+advertised reach exceeds its detector is how the original false claim happened;
+do not widen the promise without widening the code.
 """
 from __future__ import annotations
 
@@ -36,111 +50,131 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent.parent
 CLAUDE_MD = REPO / "CLAUDE.md"
-
-# An automated, server-side or push-side gate. Extend this list if a real gate
-# is added by some other mechanism — that is the point of the two-way check.
 WORKFLOW_DIR = REPO / ".github" / "workflows"
 
-# The refuted assertion: a claim that something OTHER than the reader runs the
-# suite. Matched on normalised whitespace so a reflow cannot walk it.
-CLAIMS_AUTOMATED_GATE = re.compile(
-    r"\b(CI|GitHub Actions|the pipeline|a pre-push hook)\s+"
-    r"(gates|runs|enforces|blocks)\b",
-    re.IGNORECASE,
-)
+# The machine-readable claim. `none` = nothing automated gates a merge;
+# `github-actions` = at least one workflow triggers on push/pull_request.
+MARKER_RE = re.compile(r"<!--\s*merge-gate:\s*(?P<value>[a-z0-9-]+)\s*-->")
+VALID_MARKERS = {"none", "github-actions"}
 
-# The correction: an explicit statement that the gate is manual. Required
-# whenever no automated gate exists, so deleting the paragraph fails too — a
-# silent deletion is how the original claim would have been "fixed" cheaply.
-STATES_MANUAL_GATE = re.compile(
-    r"NOTHING gates a merge in this repo", re.IGNORECASE
-)
-
-
-def _normalised(text: str) -> str:
-    """Collapse whitespace, and drop inline code spans.
-
-    A backtick span is a CITATION, not an assertion — the corrected paragraph
-    quotes the refuted sentence so a reader grepping for the old wording still
-    lands on the retraction. Without this, the doc's own retraction trips the
-    guard (it did, on the first run).
-
-    KNOWN LIMIT: a genuine claim written inside backticks would be invisible
-    here. Accepted — prose asserts in prose; the alternative is a guard that
-    can never be satisfied by a paragraph that explains itself, and an
-    un-satisfiable guard gets deleted.
-    """
-    return re.sub(r"\s+", " ", re.sub(r"`[^`]*`", " ", text))
+# A workflow only gates if it runs on push or pull_request. A stale-bot or a
+# release-on-tag workflow is not a merge gate, and treating any *.yml as one
+# would force CLAUDE.md to delete a TRUE warning.
+GATING_TRIGGER_RE = re.compile(r"^\s*on:.*", re.MULTILINE)
+TRIGGER_WORDS = ("pull_request", "push")
 
 
 def _workflow_files() -> list[Path]:
+    """GitHub Actions only reads *.yml/*.yaml at the TOP level of this dir."""
     if not WORKFLOW_DIR.is_dir():
         return []
     return sorted(
         p for p in WORKFLOW_DIR.iterdir()
-        if p.suffix in (".yml", ".yaml") and p.is_file()
+        if p.is_file() and p.suffix in (".yml", ".yaml")
     )
 
 
-def test_claude_md_exists_and_is_readable() -> None:
-    """POSITIVE CONTROL: the file this whole test reasons about must be there.
+def _gating_workflows() -> list[Path]:
+    out = []
+    for p in _workflow_files():
+        try:
+            text = p.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if GATING_TRIGGER_RE.search(text) and any(w in text for w in TRIGGER_WORDS):
+            out.append(p)
+    return out
 
-    Without this, a moved/renamed CLAUDE.md would make every assertion below
-    operate on an empty string and pass vacuously.
-    """
+
+def _marker(body: str) -> str | None:
+    m = MARKER_RE.search(body)
+    return m.group("value") if m else None
+
+
+def test_claude_md_exists_and_is_substantial() -> None:
+    """POSITIVE CONTROL: without this, a moved/renamed CLAUDE.md would make
+    every assertion below operate on an empty string and pass vacuously."""
     assert CLAUDE_MD.is_file(), f"CLAUDE.md not found at {CLAUDE_MD}"
-    body = CLAUDE_MD.read_text(encoding="utf-8")
-    assert len(body) > 2000, (
-        f"CLAUDE.md is only {len(body)} bytes — suspiciously small; the checks "
-        "below would be near-vacuous against it"
+    assert len(CLAUDE_MD.read_text(encoding="utf-8")) > 2000, (
+        "CLAUDE.md is suspiciously small; the checks below would be near-vacuous"
     )
 
 
-def test_the_regexes_can_actually_match() -> None:
-    """POSITIVE CONTROL for the instruments themselves.
+def test_the_detectors_can_actually_observe_things(tmp_path) -> None:
+    """POSITIVE CONTROLS for both detectors.
 
-    A regex that matches nothing would make the real assertions below report a
-    reassuring pass regardless of what CLAUDE.md says. Feed each pattern a
-    string it MUST match, and one it must NOT.
+    A reassuring zero from `_gating_workflows()` is indistinguishable from a
+    detector wired to nothing — this repo's own RULES.md names that trap, and an
+    audit confirmed the earlier version had no such control (neutering
+    `_workflow_files` to `return []` survived a fully green suite, even with a
+    real workflow file present). Prove each detector CAN see its subject.
     """
-    assert CLAIMS_AUTOMATED_GATE.search("CI gates both suites")
-    assert CLAIMS_AUTOMATED_GATE.search("GitHub Actions runs the pytest check")
-    assert not CLAIMS_AUTOMATED_GATE.search(
-        "Run the gate yourself; there is no CI in this repo"
+    # Marker parser: must read a value, and must not invent one.
+    assert _marker("x <!-- merge-gate: none --> y") == "none"
+    assert _marker("x <!-- merge-gate:github-actions--> y") == "github-actions"
+    assert _marker("no marker here at all") is None
+
+    # Workflow detector: plant a real gating workflow and a non-gating one,
+    # and prove it separates them. Exercises the same functions the assertion
+    # below uses, via a redirected WORKFLOW_DIR.
+    wf = tmp_path / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    (wf / "gate.yml").write_text("name: gate\non: [pull_request]\njobs: {}\n")
+    (wf / "stale.yml").write_text("name: stale\non:\n  schedule:\n    - cron: '0 0 * * *'\n")
+    (wf / "notes.md").write_text("not a workflow\n")
+    (wf / "nested").mkdir()
+    (wf / "nested" / "ignored.yml").write_text("name: x\non: [push]\n")
+
+    global WORKFLOW_DIR
+    original = WORKFLOW_DIR
+    try:
+        WORKFLOW_DIR = wf
+        found = {p.name for p in _workflow_files()}
+        gating = {p.name for p in _gating_workflows()}
+    finally:
+        WORKFLOW_DIR = original
+
+    assert found == {"gate.yml", "stale.yml"}, (
+        f"workflow detector is wrong: {found} (must ignore non-YAML and "
+        "subdirectories, which GitHub Actions itself ignores)"
     )
-    assert STATES_MANUAL_GATE.search("NOTHING gates a merge in this repo")
-    assert not STATES_MANUAL_GATE.search("CI gates both suites")
-    # The code-span strip must hide a CITATION but not a bare assertion.
-    assert not CLAIMS_AUTOMATED_GATE.search(_normalised("used to read `CI gates both suites`"))
-    assert CLAIMS_AUTOMATED_GATE.search(_normalised("CI gates both suites"))
-    # ...and must not swallow the whole document via an unbalanced backtick.
-    assert "kept" in _normalised("`quoted` kept `also quoted`")
+    assert gating == {"gate.yml"}, (
+        f"gating detector is wrong: {gating} — a scheduled-only workflow is not "
+        "a merge gate, and calling it one would force CLAUDE.md to delete a "
+        "warning that is still true"
+    )
 
 
-def test_claude_md_gate_description_matches_the_repo() -> None:
+def test_claude_md_marker_matches_the_repo() -> None:
     """The load-bearing assertion, checked in BOTH directions."""
-    body = _normalised(CLAUDE_MD.read_text(encoding="utf-8"))
-    workflows = _workflow_files()
+    body = CLAUDE_MD.read_text(encoding="utf-8")
+    marker = _marker(body)
 
-    if not workflows:
-        claim = CLAIMS_AUTOMATED_GATE.search(body)
-        assert not claim, (
-            "CLAUDE.md claims an automated gate "
-            f"({claim.group(0)!r}) but this repo has none: "
-            f"{WORKFLOW_DIR} contains no workflow files. An agent reading that "
-            "sentence will believe the merge is protected and skip running the "
-            "suite. Either add real CI, or state that the gate is manual."
-        )
-        assert STATES_MANUAL_GATE.search(body), (
-            "CLAUDE.md no longer states that nothing gates a merge, but this "
-            f"repo still has no automated gate ({WORKFLOW_DIR} is empty or "
-            "absent). Deleting the warning does not make the gate exist — "
-            "restore it, or add the CI it describes."
+    assert marker is not None, (
+        "CLAUDE.md has no `<!-- merge-gate: ... -->` marker. It is the "
+        "machine-readable statement of what gates a merge here; without it the "
+        "claim reverts to unverifiable prose, which is how "
+        "'CI gates both suites' survived while no CI existed. Restore it."
+    )
+    assert marker in VALID_MARKERS, (
+        f"unknown merge-gate marker {marker!r}; expected one of "
+        f"{sorted(VALID_MARKERS)}"
+    )
+
+    gating = [p.name for p in _gating_workflows()]
+
+    if gating:
+        assert marker == "github-actions", (
+            f"CLAUDE.md's marker says {marker!r}, but workflows that trigger on "
+            f"push/pull_request now exist ({gating}). A stale 'nothing gates a "
+            "merge' warning trains readers to ignore this file — update the "
+            "marker and the paragraph."
         )
     else:
-        assert not STATES_MANUAL_GATE.search(body), (
-            "CLAUDE.md says NOTHING gates a merge, but workflow files now "
-            f"exist ({[p.name for p in workflows]}). Update the doc: the "
-            "warning is now false in the other direction, and a stale warning "
-            "trains readers to ignore this file."
+        assert marker == "none", (
+            f"CLAUDE.md's marker says {marker!r}, but no GitHub Actions "
+            f"workflow in {WORKFLOW_DIR} triggers on push/pull_request. An "
+            "agent reading that believes the merge is protected and skips "
+            "running the suite. Either add real CI, or set the marker to "
+            "'none'."
         )
