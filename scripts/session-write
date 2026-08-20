@@ -422,6 +422,27 @@ SUBMITTING_CHARS = ("\n", "\r")
 #: typographic use and it cannot accept a line.
 TEXT_EXTRA_ALLOWED = ("\t",)
 
+#: 🔴 THE CATEGORIES THAT ARE REFUSED BUT ARE NOT CONTROL CHARACTERS — a
+#: DIAGNOSIS set, never a gate (`TEXT_IS_ALLOWED` has already rejected every
+#: member before this is consulted; a test pins that).
+#:
+#: Zs is every Unicode space EXCEPT the ASCII one (`" ".isprintable()` is True,
+#: so U+0020 never reaches here); Zl/Zp are the line and paragraph separators;
+#: Cf is the format characters — ZWSP, ZWJ, the soft hyphen, the bidi marks,
+#: the BOM. Measured against the shipped predicate: U+00A0, U+202F, U+2003,
+#: U+00AD, U+200B, U+200F, U+FEFF and every ZWJ emoji sequence land here.
+#:
+#: 🔴 THEY STAY REFUSED, AND THE ALLOWLIST IS NOT WIDENED. Two measurements say
+#: so. (a) In a real bash pane on a private `-L` server, `touch<U+00A0>/tmp/f`
+#: sent with `send-keys -l` was delivered verbatim and bash answered
+#: `bash: touch\xa0/tmp/f: No such file or directory` — the payload became ONE
+#: word and failed wearing a diagnosis about a PATH. That is the same class as
+#: the trailing `;` this file already refuses: a payload silently corrupted
+#: somewhere the caller will not look. (b) Normalising it to U+0020 behind the
+#: caller's back is the mutation this file refuses on principle everywhere else.
+#: So the fix is a REMEDY IN THE MESSAGE, not a wider gate.
+TEXT_INVISIBLE_CATEGORIES = ("Cf", "Zl", "Zp", "Zs")
+
 
 def TEXT_IS_ALLOWED(ch: str) -> bool:
     """🔴 THE allowlist predicate, ONE place. Every `--text` codepoint passes
@@ -491,6 +512,7 @@ OUTCOME_TOKENS = (
     "refused:reverify-unreadable",
     "refused:screen-not-yours",
     "refused:shell-exec",
+    "refused:text-invisible",
     "refused:text-not-printable",
     "refused:text-nul",
     "refused:text-submits",
@@ -629,7 +651,29 @@ MSG_TEXT_NUL = (
     "REFUSED: --text contains a NUL byte at offset {offset}; it cannot be "
     "passed through an argv.")
 
-#: 🔴 G13's own refusal — the one that is reached by every codepoint the two
+#: 🔴 THE REMEDY MESSAGE, and why a "non-printable character" headline was the
+#: wrong words for a SPACE.
+#:
+#: Measured against the shipped predicate: NBSP (U+00A0), narrow NBSP (U+202F),
+#: em space (U+2003), soft hyphen, ZWSP, RLM and every ZWJ emoji sequence are
+#: all refused — and NBSP is what a web page or a model's answer puts in text
+#: the operator then pastes. The old message headlined it "the non-printable
+#: character", which for a space reads as nonsense, and unlike its three
+#: siblings it offered no next step. Both halves are the complaint; the gate
+#: itself is correct and is NOT widened (see TEXT_INVISIBLE_CATEGORIES).
+MSG_TEXT_INVISIBLE = (
+    "REFUSED: --text contains {name} (U+{codepoint}, Unicode category "
+    "{category}) at offset {offset}. That is not the ASCII space — it is an "
+    "invisible or look-alike character, and it is REFUSED rather than silently "
+    "replaced for the same reason a trailing {sep!r} is: MEASURED in a real "
+    "bash pane, `touch<U+00A0>/tmp/f` was delivered verbatim and the shell "
+    "answered `No such file or directory` for the whole thing as ONE word — a "
+    "corrupted payload failing later, wearing a diagnosis about a path. "
+    "REMEDY: replace it with an ordinary space (U+0020), or delete it, then "
+    "re-run. If you pasted this out of a web page or a model's answer, that is "
+    "where it came from.")
+
+#: 🔴 G13's own refusal — the one that is reached by every codepoint the three
 #: named messages above do NOT cover. It reports the codepoint BY NUMBER because
 #: the offending character is by definition one that cannot be displayed.
 MSG_TEXT_NOT_PRINTABLE = (
@@ -814,9 +858,24 @@ class Outcome:
         return self.code == EXIT_OK
 
 
-def _refuse(code: int, message: str, **record) -> Outcome:
+def _refuse(code: int, message: str, *, outcome: str, **record) -> Outcome:
+    """🔴 `outcome` IS REQUIRED AND KEYWORD-ONLY, and that is the whole point.
+
+    It used to default to the bare token `"refused"`, and that fallback was
+    INVISIBLE to its own ledger: `test_the_outcome_token_ledger_matches_what_
+    the_SOURCE_actually_emits` filters the scanned tokens on `":" in t`, so a
+    call site that forgot its token would emit a name the ledger was
+    structurally unable to notice — a gate with no per-gate discriminator,
+    passing the very test that exists to make that impossible. Every call site
+    passed one anyway; nothing pinned that they must.
+
+    Now a missing token is a `TypeError` at the call site rather than a silent
+    downgrade, and `test_every_refusal_NAMES_its_gate` AST-pins that every call
+    in this file really does pass one — the structural half, since a TypeError
+    only fires on a path a test actually walks.
+    """
     record = dict(record)
-    record["outcome"] = record.get("outcome") or "refused"
+    record["outcome"] = outcome
     record["message"] = message
     return Outcome(code=code, lines=[message], record=record)
 
@@ -1075,18 +1134,22 @@ def pick_base_terminal(clients, tty: Optional[str]) -> tuple:
 def validate_text(text: str) -> Optional[Outcome]:
     """G13. An ALLOWLIST over `--text`, plus the trailing-separator refusal.
 
-    🔴 THIS IS ONE SCAN, NOT FOUR CHECKS. Every codepoint is put to
-    `TEXT_IS_ALLOWED` and the FIRST one that fails is refused. The three named
+    🔴 THIS IS ONE SCAN, NOT FIVE CHECKS. Every codepoint is put to
+    `TEXT_IS_ALLOWED` and the FIRST one that fails is refused. The four named
     messages below do not decide anything — they only choose better WORDS for a
     character the allowlist has already rejected. That ordering is the whole
     correction: the previous version asked "is this character one of the four we
     banned", so U+000F (Ctrl-O) passed and `type` executed arbitrary commands in
     any shell pane. `test_the_named_text_messages_are_DIAGNOSES_not_the_gate`
-    pins that the allowlist alone still refuses all three, so a future edit that
-    deletes a named branch weakens the message and not the guard.
+    pins that the allowlist alone still refuses every one of them, so a future
+    edit that deletes a named branch weakens the message and not the guard.
 
-    The offset in every refusal is COMPUTED from the scan, so a mutant that
-    drops the scan and hardcodes a message cannot pass.
+    The offset in every refusal is COMPUTED from the scan — INCLUDING offset 0,
+    which is the position the audited exploit itself occupied in one shape and
+    which `test_a_disallowed_character_at_offset_ZERO_is_refused` now covers:
+    every other fixture deliberately puts the character later, and until that
+    test existed `enumerate(text[1:], 1)` survived the whole suite AND the
+    committed sweep.
     """
     for idx, ch in enumerate(text):
         if TEXT_IS_ALLOWED(ch):
@@ -1101,10 +1164,19 @@ def validate_text(text: str) -> Optional[Outcome]:
                 EXIT_BAD_TEXT,
                 MSG_TEXT_SUBMITS.format(name=name, offset=idx),
                 outcome="refused:text-submits")
+        category = unicodedata.category(ch)
+        if category in TEXT_INVISIBLE_CATEGORIES:
+            return _refuse(
+                EXIT_BAD_TEXT,
+                MSG_TEXT_INVISIBLE.format(
+                    name=unicodedata.name(ch, "an unnamed character"),
+                    codepoint=f"{ord(ch):04X}", category=category, offset=idx,
+                    sep=TMUX_ARGV_SEPARATOR),
+                outcome="refused:text-invisible")
         return _refuse(
             EXIT_BAD_TEXT,
             MSG_TEXT_NOT_PRINTABLE.format(codepoint=f"{ord(ch):04X}",
-                                          category=unicodedata.category(ch),
+                                          category=category,
                                           offset=idx),
             outcome="refused:text-not-printable")
 
