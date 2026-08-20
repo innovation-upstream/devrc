@@ -1,4 +1,26 @@
-# Handoff: signal-chat-pipeline — 2026-08-17
+# Handoff: signal-chat-pipeline — 2026-08-20
+
+## 🔴 READ THIS BEFORE RUNNING THE OWN-REACTION CHECK — its discriminator is CONTAMINATED
+
+The check under "How to verify" counts reactions whose reactor is the account and
+prints `FIX VERIFIED LIVE` on any non-zero. **It now returns 1, and that 1 is a
+BACKFILL, not the live path.** On 2026-08-20 the reaction that #537 originally
+dropped was replayed out of `raw_envelope` on the (now deleted) ghost row 3 —
+through the fixed parser, but by calling `upsert_reaction` directly, NOT by the
+consumer storing a frame off the websocket.
+
+So the original claim is still open, and a stale copy of that check will tell you
+otherwise. **The corrected discriminator is `id > 16`:**
+
+```sql
+select count(*) from signal.reactions where contact_id = 5 and id > 16;
+```
+
+Row 16 is the backfill. Anything above it came from the live path. This is the
+same trap the original bug hid behind, one layer up: a COUNT could not tell a
+stored reaction from a lost one then, and cannot tell a live one from a
+backfilled one now. Only identity — here, the row id — discriminates.
+
 
 ## Run this first — the index, one read-only command
 ```bash
@@ -54,13 +76,14 @@ that no unit test could give.
   objects are present in MinIO with **byte sizes matching the Postgres rows**; 0 missing,
   0 mismatched. Spread over 9 messages, so multi-attachment messages work too.
 - ✅ **Inbound reactions work** — 2 → 7 with no intervention.
-- 🔴 **The outbound-reaction fix (#537) is STILL UNVERIFIED.** `OWN reactions: 0` after
-  16h. No reaction has been sent *from the phone* since it shipped, so the fixed branch
-  has still never executed in production. Deployed is not verified, and 16h of unrelated
-  green does not touch this claim.
-- **Ghost rows: still 1** (the pre-fix row id 3). No NEW ghost appeared across 22 further
-  messages — supportive, but NOT proof, since no outbound reaction occurred to exercise
-  the path.
+- 🔴 **The outbound-reaction fix (#537) is STILL UNVERIFIED on the live path.** As of
+  2026-08-20 no reaction has been sent *from the phone* since it shipped, so the fixed
+  branch has still never executed in production. The one own-reaction row in the table is
+  a hand-replayed BACKFILL (see the warning at the top). Deployed is not verified, and
+  days of unrelated green do not touch this claim.
+- **Ghost rows: 0** as of 2026-08-20 — the pre-fix row 3 was deleted after its reaction
+  was recovered from `raw_envelope`. No NEW ghost has appeared, which is supportive but
+  NOT proof, since no outbound reaction has occurred to exercise the path.
 
 ## Open investigations — live diagnosis state
 
@@ -126,27 +149,43 @@ that no unit test could give.
   every failure. Keep the bump on its own merits (two releases of protocol fixes) — do not
   record it as the fix.
 
+## What changed on 2026-08-20
+
+- **Consumer 0.1.3 deployed** — digest `d882a55f…`, `homelab-infra` trunk `abd062e9`.
+  Rollout clean, 0 restarts, probes green, receive stream connected.
+- **A group MUTE LIST shipped (#573).** Query-time filter, hides without deleting;
+  `signal.excluded_groups`, one predicate `not_excluded()` on `list_conversations` /
+  `search` / `get_message`, CLI `mute` / `unmute` / `muted`. One group is muted.
+- 🔴 **A real bug found while writing a comment.** `parse_envelope` read
+  `groupInfo.name`; real envelopes carry **`groupInfo.groupName`** (34 of 34 measured).
+  Every group had been stored with an EMPTY name since day one — which is why
+  `conversations` printed `?`. Fixed, and the two existing names were backfilled from
+  already-stored envelopes. **Merging did NOT deploy this**: `parse_envelope` runs only
+  in the pod, so it took the 0.1.3 rollout to take effect. The mute half was live on
+  merge, because reads run from the operator's checkout. Two halves, two activation
+  conditions.
+- **The mutation battery is IN THE REPO (#606)** — `scripts/signal/tests/mutation_battery.py`,
+  20 mutants, plus 72 gate-safe guards that mutate nothing.
+- **Ghost row 3 is gone** and its reaction recovered — see the contamination warning at
+  the top of this doc before trusting the own-reaction check.
+
 ## Next steps (ranked)
 
-1. 🔴 **React to any message from your phone.** One action, ~5 seconds, and it is the only
-   unverified claim left in this whole effort. Then run the OWN-reaction check under
-   "How to verify". Everything else here is closed or is optional cleanup.
-2. **Backfill the one lost reaction and drop its ghost row.** `raw_envelope` on
-   `signal.messages` id 3 still holds it. Priced from the CONSUMER, not the writer:
-   `list_conversations()` groups a bodyless outbound row with no `dest_contact_id` and no
-   `group_id` into its own conversation with `display_name` NULL, and its timestamp sorts
-   it to the **top** of the list. User-visible, not cosmetic.
-3. **The outbound-`editMessage` ghost — the SAME bug, still open.** Any unmodelled
+1. 🔴 **React to any message from your phone.** Still the only unverified claim in this
+   whole effort, and now four days old. Use the CORRECTED check (`id > 16`) — see the
+   warning at the top of this doc.
+2. **The outbound-`editMessage` ghost — the SAME bug, still open.** Any unmodelled
    `syncMessage.sentMessage` variant with `message: None` (nested `editMessage`,
    `sticker`, `payment`, `groupCallUpdate`) still falls through to `_base_message()` and
    leaves a bodyless ghost row. This is the proof that this pipeline's own lesson —
-   *enumerate the other shapes in that wrapper* — is unfinished.
-4. **Move the mutation harness into the repo.** Six batteries ran across #537 and #540 and
-   every one lived only in a scratchpad that is now deleted. `scripts/signal/tests/`.
-5. **Close `approve_draft`'s read-then-write TOCTOU** — last of the family whose three
+   *enumerate the other shapes in that wrapper* — is unfinished. **Add each new shape to
+   `mutation_battery.py` as you close it**, which is now a place that survives the session.
+3. **Close `approve_draft`'s read-then-write TOCTOU** — last of the family whose three
    siblings were fixed in #514 round 4.
-6. **Bump cadence for the signal-cli image.** Stable lags; tracking it ALONE re-breaks
+4. **Bump cadence for the signal-cli image.** Stable lags; tracking it ALONE re-breaks
    linking, and re-linking means fighting the 120s window again.
+5. **A revert of #573 leaves `signal.excluded_groups` rows behind** and silently
+   un-filters every read, with no detector. Low, but nothing watches for it.
 
 ## What #537 established, beyond the fix itself
 
@@ -317,9 +356,16 @@ cur.execute('select raw_envelope from signal.messages where is_outbound order by
 r=cur.fetchone()[0]; d=json.loads(r) if isinstance(r,str) else r
 cur.execute('select id from signal.contacts where signal_uuid=%s',(d.get('sourceUuid'),))
 o=cur.fetchone()
-cur.execute('select count(*) from signal.reactions where contact_id=%s',(o[0] if o else -1,))
+# 🔴 `id > 16` EXCLUDES THE BACKFILL. Row 16 was replayed by hand out of the
+#    ghost row's raw_envelope on 2026-08-20; a bare count returns 1 for it and
+#    would report a fix that has still never executed on the live path.
+cur.execute('select count(*) from signal.reactions where contact_id=%s and id>16',
+            (o[0] if o else -1,))
 n=cur.fetchone()[0]
-print('OWN reactions:', n, '->', 'FIX VERIFIED LIVE' if n else 'NOT YET')"
+cur.execute('select count(*) from signal.reactions where contact_id=%s',(o[0] if o else -1,))
+total=cur.fetchone()[0]
+print('OWN reactions: %d live (+%d backfilled) -> %s'
+      % (n, total-n, 'FIX VERIFIED LIVE' if n else 'NOT YET'))"
 
 # 3. Attachment integrity — every row's object must exist AND match its size.
 kubectl -n signal exec $CP -- python3 -c "
