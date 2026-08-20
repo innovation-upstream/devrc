@@ -44,12 +44,32 @@ Now each session can own its own tab:
   with `owned_tab_gone` and the bridge drops your ownership — your NEXT command
   automatically falls back to the active tab. `browser close` always clears the
   mapping, even if the tab was already gone.
-- **Session id source (precedence):** `CLAUDE_CODE_SESSION_ID` → `CLAUDE_SESSION_ID`
+- **Session id source (precedence):** `OPENCODE_SESSION_ID` → `CLAUDE_CODE_SESSION_ID`
+  → `CLAUDE_SESSION_ID`
   → `$TMUX_PANE` → the **POSIX session id** (`sid:<sid>:<leader-starttime>`, from
   `/proc/self/stat`) → (no procfs only) a PPID-keyed cached token. It is
   routing-only, never trusted for auth. If two drivers ever resolve the same id
   they share a tab (degrades to the old behaviour — no worse).
   `browser --print-session-id` prints the derived id.
+- **⚠ Inside opencode the id is the OPENCODE session's, not the Claude parent's
+  (changed 2026-08-19).** `~/.config/opencode/plugin/session-env.js` exports
+  `OPENCODE_SESSION_ID` into every bash-tool call and it is checked **first**,
+  because `CLAUDE_CODE_SESSION_ID` leaks into opencode's tool shells and names an
+  *ancestor*. Three consequences for tabs, all routing rather than telemetry:
+  - a nested opencode run **no longer inherits its Claude parent's ownership**.
+    It owns nothing until it runs `browser open`.
+  - **nothing refuses in the meantime.** `emulate` is the only owned-tab-only op;
+    `nav`/`click`/`type`/`key` with no owned tab and no `--tab` fall back to the
+    **active** tab — the one the human is looking at. `open` first.
+  - **`browser --tab <the parent's tab> emulate` now fails `not_owned_tab`** from
+    inside opencode, because `emulate` requires the resolved tab to be one *this*
+    session owns. The explicit-`--tab` recipe below still works for every other
+    op; for `emulate`, the driver must `open` its own tab.
+  - an opencode **`task` subagent gets its own id** (measured: `TaskTool` creates
+    a child session and the shell tool passes the child's `sessionID`), so parent
+    and subagent own **different** tabs. That is the mirror of the Claude Code
+    case in the next bullet, where siblings share one id — read each for the
+    runtime it names.
 - **⚠ The subshell hazard (fixed 2026-08-01 — read this if you script `open`).**
   Capturing a tab id is naturally written inside a command substitution:
 

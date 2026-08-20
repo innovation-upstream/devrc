@@ -282,11 +282,18 @@ die() { echo "browser: $*" >&2; exit 1; }
 # 🔴 THAT NAMESPACE TAG — everything before the FIRST `:` — IS LOAD-BEARING
 # BEYOND COLLISION AVOIDANCE. server.py parses it to decide whether the id is a
 # joinable key for activity telemetry: `claude:` is Claude Code's own session
-# uuid (the same value `source='claude'` rows store, so it JOINS), while
-# `tmux:`/`sid:`/`ppid:` are not — a pane id like %3 is stable across many
+# uuid (the same value `source='claude'` rows store, so it JOINS) and
+# `opencode:` is opencode's own session id (the same value `source='opencode'`
+# rows store, so it JOINS too), while `tmux:`/`sid:`/`ppid:` are not — a pane id
+# like %3 is stable across many
 # UNRELATED sessions and recording it as a session key would silently merge
 # them. Do not add a tier without deciding which of those it is, and never emit
 # an id whose tag misdescribes it (see the recreate-close re-tag below). Fallback chain (most→least reliable), documented in README/SKILL:
+#   0. OPENCODE_SESSION_ID — the id of the opencode session whose bash tool is
+#      running this command, exported per call by the `shell.env` hook in
+#      scripts/opencode/plugin/session-env.js. FIRST because it is the only one
+#      of these that is re-written on every tool call: the claude vars below can
+#      be a stale value inherited from an ancestor process.
 #   1. CLAUDE_CODE_SESSION_ID — Claude Code's own session UUID (present since the
 #      2.1.x CLI; verified stable across every Bash-tool call in a session). Best.
 #   2. CLAUDE_SESSION_ID — defensive alternate spelling, in case a CLI build
@@ -325,6 +332,14 @@ die() { echo "browser: $*" >&2; exit 1; }
 # drivers that may share a session id should each `open` and then pass the
 # returned `--tab <id>` explicitly on every subsequent op — an explicit --tab
 # overrides owned-tab routing entirely, so they never collide. See SKILL.md.
+# 🔴 THAT PARAGRAPH IS ABOUT CLAUDE CODE ONLY, and opencode is now its MIRROR.
+# Measured in the shipped 1.18.18 binary: `TaskTool.execute` creates a CHILD
+# session and `ShellTool` passes that child's `sessionID` to `shell.env`, so an
+# opencode `task` subagent exports a DIFFERENT `OPENCODE_SESSION_ID` and lands on
+# tier 0 with an id of its own. Claude siblings SHARE identity and collide on one
+# tab; opencode siblings have DISTINCT identities and fragment across tabs. Same
+# escape hatch works for both (`open`, then thread `--tab`), for opposite reasons
+# — but do not read the Claude sentence above as describing opencode.
 
 # _session_from_proc — `sid:<session-id>:<leader-starttime>` from procfs, or
 # non-zero if procfs is unreadable. WHY the POSIX session id and not $PPID/$$:
@@ -366,6 +381,25 @@ _session_from_proc() {
 }
 
 derive_session_id() {
+  # 🔴 TIER 0, ABOVE THE CLAUDE TIERS ON PURPOSE — this ordering IS the fix.
+  # `OPENCODE_SESSION_ID` is exported per bash-tool call by
+  # scripts/opencode/plugin/session-env.js's `shell.env` hook, and opencode
+  # merges its tool environment as `{...process.env, ...pluginEnv}` — plugin
+  # wins — so the value present here was written by the opencode session
+  # ISSUING this command. `CLAUDE_CODE_SESSION_ID`, by contrast, may be a value
+  # opencode INHERITED from a Claude Code ancestor several processes up (see the
+  # WHY block below). Reading the claude vars first would credit that ancestor.
+  # JOINABLE: the bare id is exactly what `source='opencode'` rows in
+  # activity.events carry (activity-plugin.js emits `session: input.sessionID`
+  # from `tool.execute.after`, the same id `shell.env` receives).
+  #
+  # 🔴 KNOWN RESIDUAL, deliberately not fixed here: the MIRROR nesting — a
+  # Claude Code session launched FROM an opencode bash tool — inherits
+  # OPENCODE_SESSION_ID and would be credited to that outer opencode session.
+  # No environment variable separates the two directions (both ids are equally
+  # inheritable), and the common shape by far is the one this branch fixes.
+  # Recorded so nobody re-derives it as a discovery; see the PR.
+  if [ -n "${OPENCODE_SESSION_ID:-}" ]; then printf 'opencode:%s' "$OPENCODE_SESSION_ID"; return; fi
   if [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then printf 'claude:%s' "$CLAUDE_CODE_SESSION_ID"; return; fi
   if [ -n "${CLAUDE_SESSION_ID:-}" ];      then printf 'claude:%s' "$CLAUDE_SESSION_ID"; return; fi
   if [ -n "${TMUX_PANE:-}" ];              then printf 'tmux:%s' "$TMUX_PANE"; return; fi
@@ -437,13 +471,32 @@ SESSION_ID="$(derive_session_id)"
 # bridge then records the id as `payload.origin_session` (the causal parent)
 # instead of as the issuing `session`. See server.py's HDR_SESSION_ORIGIN.
 #
-# ---- FOLLOW-UP SLOT: a REAL opencode session id ------------------------- #
-# An opencode `shell.env` plugin hook will export OPENCODE_SESSION_ID. When it
-# lands, `derive_session_id` gains a JOINABLE `opencode:` tier above its claude
-# branches (opencode rows in activity.events already carry that id), nested runs
-# get a key of their OWN, and the token below RETIRES — the `claude:*` case stops
-# matching on its own, so this becomes dead code to delete rather than logic to
-# unpick.
+# ---- THE FOLLOW-UP LANDED, AND THE TOKEN DID *NOT* RETIRE --------------- #
+# The `opencode:` tier now exists (tier 0 in `derive_session_id`), fed by
+# scripts/opencode/plugin/session-env.js. In the ordinary case the `claude:*`
+# case below therefore stops matching on its own — the derived id is
+# `opencode:<id>`, no origin is declared, and the row carries a REAL session key.
+#
+# 🔴 BUT THE TOKEN STAYS, CORRECTING THE COMMENT THIS REPLACES, WHICH SAID IT
+# WOULD BECOME "dead code to delete". It is not dead: it is now the FALLBACK for
+# every way `OPENCODE_SESSION_ID` can be absent while `OPENCODE` is set, and each
+# of those is reachable rather than theoretical —
+#   * DEPLOY SKEW. This CLI is a mkOutOfStoreSymlink (edits are live on `git
+#     pull`), while the plugin is a `home.file` copy that only appears on a
+#     `home-manager switch`. The window where the new CLI runs without the new
+#     plugin is the normal state of affairs between a merge and a switch.
+#   * A RUNNING opencode does not pick up a newly deployed plugin — it needs a
+#     restart. Long-lived sessions keep the old environment for as long as they
+#     live.
+#   * THE PTY PATH fires `shell.env` with `{cwd}` only, no sessionID, so the hook
+#     sets the variable EMPTY there by design (a stale inherited id would be
+#     worse than none).
+#   * VERSION SKEW / a plugin-load failure, which opencode reports only in its
+#     own logs.
+# In every one of those the derived id falls back to `claude:<inherited uuid>`
+# and the leak below is live again, so deleting the token would restore exactly
+# the fabrication it was added to prevent. Empty is recoverable;
+# plausible-but-wrong is not.
 #
 # ---- WHY: CLAUDE_CODE_SESSION_ID is INHERITED inside opencode ----------- #
 # 🔴 opencode's CLI sets `process.env.OPENCODE="1"` in a yargs TOP-LEVEL
@@ -464,19 +517,57 @@ SESSION_ID="$(derive_session_id)"
 # session's own direct browser use. The column is EMPTY today: empty is
 # recoverable, plausible-but-wrong is not.
 #
-# 🔴 THE ID ITSELF IS NOT TOUCHED — that is the whole point of using the origin
-# header rather than a new tier. X-Session-Id stays byte-identical to what this
-# environment produced before any of this existed, so routing, per-session tab
-# ownership and the `not_owned_tab` semantics are unchanged. The nested-run fact
-# travels beside the id, exactly as it does for `browser agent`
-# (X-Session-Origin: browser-agent, sent by opencode/tools/browser_tool_impl.mjs)
-# — ONE mechanism for one question.
+# 🔴 SCOPE OF THAT CLAIM, CORRECTED. It used to read "THE ID ITSELF IS NOT
+# TOUCHED … routing, per-session tab ownership and the `not_owned_tab` semantics
+# are unchanged", full stop. That is still exactly true of `OPENCODE` — setting
+# it perturbs nothing, and test_routing_equivalence_opencode_does_not_change_the_id
+# machine-checks it. It is NOT true once `OPENCODE_SESSION_ID` is present: the id
+# then becomes `opencode:<id>` and ROUTING MOVES WITH IT. Stated plainly because
+# it is a real behaviour change, not a side effect to discover later:
+#   * an opencode session that used to inherit its Claude parent's id and drive
+#     that parent's OWNED TAB now owns a tab of its own, and must `open` one —
+#     which is the documented per-session model, and the same DEGRADATION note
+#     above already called shared identity a trade rather than a feature.
+#     🔴 SAY THE FAILURE MODE, NOT JUST THE HAPPY PATH: "must `open` one" is what
+#     a well-behaved run does; NOTHING REFUSES when it doesn't. `emulate` is the
+#     only op in server.py's OWNED_TAB_ONLY_OPS, so for `nav`/`click`/`type`/`key`
+#     an unowned session resolves to no tab and the extension drives the ACTIVE
+#     tab — the one the operator is looking at. Before this change that same run
+#     inherited the parent's ownership and landed on the parent's tab instead. So
+#     a nested opencode run that starts interacting WITHOUT `open`ing first now
+#     types into the human's screen. See the matching note on OWNED_TAB_ONLY_OPS.
+#   * 🔴 `browser --tab <the parent's tab> emulate` from inside opencode now
+#     RAISES `not_owned_tab` where it used to work: `emulate` requires
+#     `owned is not None and resolved == owned`, and the nested run no longer
+#     owns that tab. Narrow — `emulate` alone — but it regresses the explicit
+#     `--tab` workaround reference/tabs-instances.md teaches for concurrent
+#     drivers. The fix is for each driver to `open` its own tab, which that
+#     section already tells you to do; the doc now says so for this case too.
+#   * 🔴 An opencode `task` SUBAGENT gets a DIFFERENT id, not its parent's:
+#     measured in the 1.18.18 binary, `TaskTool.execute` creates a child session
+#     and `ShellTool` passes that child's `sessionID`. Telemetry stays coherent
+#     (each row names the session that really ran the tool) but ROUTING
+#     FRAGMENTS — parent and subagent own different tabs. That is the exact
+#     mirror of the Claude Code case in the DEGRADATION note above, where
+#     siblings SHARE identity: the note is true for Claude and false for
+#     opencode, and each needs the opposite remedy.
+#   * `browser agent` is UNAFFECTED. Its opencode agent runs with `"*": deny`
+#     (scripts/browser-bridge/opencode/browser-agent.md) — no shell at all — so
+#     it cannot reach this CLI; it drives a FORCED tab through the custom tool,
+#     which sends the wrapper-captured parent id and its own
+#     `X-Session-Origin: browser-agent`. Neither value comes from here.
+# The nested-run fact still travels beside the id for the FALLBACK case, exactly
+# as it does for `browser agent` — ONE mechanism for one question.
 #
 # The `claude:*` case is what keeps this honest, and it is read off the DERIVED
 # id rather than re-testing the env vars, so it cannot drift out of step with the
-# precedence chain above. An opencode session with NO Claude ancestor (run
-# interactively) derives `tmux:`/`sid:`/`ppid:` — nothing was inherited, so no
-# origin is declared and the row behaves exactly as it does today.
+# precedence chain above — including the new tier 0. That is why this case needs
+# NO edit to self-retire: when `OPENCODE_SESSION_ID` is present the derived id is
+# `opencode:…`, the pattern simply stops matching, and the session is attributed.
+# When it is absent the pattern matches again and the suppression is back. An
+# opencode session with NO Claude ancestor (run interactively) derives
+# `tmux:`/`sid:`/`ppid:` — nothing was inherited, so no origin is declared and the
+# row behaves exactly as it does today.
 SESSION_ORIGIN=""
 case "$SESSION_ID" in
   claude:*) if [ -n "${OPENCODE:-}" ]; then SESSION_ORIGIN="opencode-inherited"; fi ;;

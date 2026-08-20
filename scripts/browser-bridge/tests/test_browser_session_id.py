@@ -66,8 +66,16 @@ pytestmark = pytest.mark.skipif(
 # what every `claude:`-expecting test below derives. Clearing it makes the
 # dimension explicit — the leak-guard tests set it themselves — instead of
 # letting the answer depend on which agent happened to launch pytest.
-HIGHER_PRECEDENCE = ("CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID", "TMUX_PANE",
-                     "OPENCODE")
+#
+# 🔴 OPENCODE_SESSION_ID is here for the SAME harness-blindness reason, and it is
+# the sharper case: once scripts/opencode/plugin/session-env.js is deployed, an
+# opencode bash tool exports it on EVERY call, so this suite run from inside
+# opencode would derive `opencode:<id>` for every test that expects `claude:` —
+# and, being tier 0, it would do so even where the test sets a claude var
+# explicitly. Left unlisted, the whole file's meaning would depend on which agent
+# launched pytest.
+HIGHER_PRECEDENCE = ("OPENCODE_SESSION_ID", "CLAUDE_CODE_SESSION_ID",
+                     "CLAUDE_SESSION_ID", "TMUX_PANE", "OPENCODE")
 
 SID_RE = re.compile(r"^sid:([1-9][0-9]*):([0-9]+|x)$")
 
@@ -432,7 +440,15 @@ import server as S  # noqa: E402
 # Every tag `derive_session_id` (and the recreate-close re-tag) can put on the
 # wire. Pinned two-way: the parse below must find exactly this set, so a NEW tier
 # fails here until someone decides whether it is joinable.
-CLI_TIER_TAGS = {"claude", "tmux", "sid", "ppid", "synthetic"}
+CLI_TIER_TAGS = {"claude", "opencode", "tmux", "sid", "ppid", "synthetic"}
+
+# The tiers server.py will write into a JOIN column. A LEDGER, not a copy of the
+# server's tuple: it is held against the server's set below, so growing one side
+# alone fails. `opencode` is joinable because the bare half is the same
+# `sessionID` that `source='opencode'` rows in activity.events carry — see
+# scripts/collector/opencode/activity-plugin.js, which emits
+# `session: input.sessionID`.
+CLI_JOINABLE_TAGS = {"claude", "opencode"}
 
 
 def _emitted_tags():
@@ -459,15 +475,48 @@ def test_the_cli_tier_tag_vocabulary_is_pinned():
     assert found == CLI_TIER_TAGS, f"CLI tier tags drifted: {found}"
 
 
-def test_the_servers_joinable_tag_is_one_the_cli_actually_emits():
-    """The other half of the seam: server.py's allowlist must name a tag this CLI
-    can produce. If either side renames alone, the `session` column silently goes
-    back to empty — the exact bug this whole change fixes, restored with a green
-    suite on both sides."""
-    assert S.SESSION_SRC_JOINABLE in CLI_TIER_TAGS
-    assert S.SESSION_SRC_JOINABLE in _emitted_tags()
+def test_the_servers_joinable_tags_are_ones_the_cli_actually_emits():
+    """The other half of the seam: EVERY tag in server.py's joinable set must be
+    one this CLI can produce. If either side renames alone, the `session` column
+    silently goes back to empty — the exact bug this whole change fixes, restored
+    with a green suite on both sides.
+
+    Against the PARSE, not against a retyped literal — the same reason the
+    vocabulary pin below is. A joinable tier the CLI cannot emit is dead
+    allowlist entry; a tier the CLI emits and the server will not join is a
+    silently empty column.
+    """
+    emitted = _emitted_tags()
+    assert emitted, "the tag parser matched nothing — it is testing nothing"
+    assert set(S.SESSION_JOINABLE_TIERS) <= CLI_TIER_TAGS
+    assert set(S.SESSION_JOINABLE_TIERS) <= emitted, (
+        f"server.py joins on {sorted(set(S.SESSION_JOINABLE_TIERS) - emitted)} "
+        f"which the CLI never emits")
     # And the fail-closed token is NOT a tag anything can legitimately emit.
     assert S.SESSION_SRC_UNKNOWN not in CLI_TIER_TAGS
+
+
+def test_the_joinable_set_is_pinned_and_is_a_strict_subset_of_the_vocabulary():
+    """🔴 THE JOINABILITY DECISION IS ITS OWN LEDGER. The vocabulary pin above
+    fails when a tier is ADDED, which forces someone to notice a new tier. It
+    does NOT force a decision about whether that tier may fill a JOIN column —
+    `SESSION_TIER_TAGS` and the joinable set are different questions, and adding
+    a tier to both at once is a one-line change nothing else would catch.
+
+    STRICT subset, deliberately: `tmux:`/`sid:`/`ppid:`/`synthetic:` exist
+    precisely because they must never join. A joinable set that had grown to
+    equal the vocabulary would mean that distinction had been erased.
+    """
+    joinable = set(S.SESSION_JOINABLE_TIERS)
+    assert joinable == CLI_JOINABLE_TAGS, (
+        f"the joinable tier set changed to {sorted(joinable)}. Every member is a "
+        f"claim that the BARE id joins some other activity.events source's "
+        f"`session` values. Update CLI_JOINABLE_TAGS only with that evidence.")
+    assert joinable < set(S.SESSION_TIER_TAGS), (
+        "the joinable set must stay a STRICT subset of the tier vocabulary — the "
+        "non-joinable tiers are the whole point of the gate")
+    # No duplicates: a tuple that says "claude" twice reads as two decisions.
+    assert len(S.SESSION_JOINABLE_TIERS) == len(joinable)
 
 
 def test_the_server_validation_set_equals_the_tags_parsed_from_the_cli():
@@ -517,7 +566,7 @@ def test_the_throwaway_recreate_close_id_is_re_tagged_not_just_suffixed():
     throwaway = m.group(1)
     tag = throwaway.split(":", 1)[0]
     assert tag == "synthetic", f"throwaway id wears tier tag {tag!r}"
-    assert tag != S.SESSION_SRC_JOINABLE
+    assert tag not in S.SESSION_JOINABLE_TIERS
     assert throwaway.startswith("synthetic:${SESSION_ID}"), throwaway
 
 
@@ -769,3 +818,179 @@ def test_the_cli_declares_the_token_the_server_tests_pin(tmp_path):
     # The other producer of an origin token is the opencode tool, not this CLI;
     # the two must stay distinct or the populations merge in the column.
     assert "browser-agent" not in declared
+
+
+# --------------------------------------------------------------------------- #
+# 9. THE OPENCODE SESSION GETS AN ID OF ITS OWN.
+#
+# `scripts/opencode/plugin/session-env.js` registers a `shell.env` hook that
+# exports OPENCODE_SESSION_ID into every bash-tool invocation. opencode builds
+# the tool environment as `{...process.env, ...pluginEnv}` — PLUGIN WINS — so
+# when the variable is present it was written for THIS tool call by the session
+# issuing it. That is why it is tier 0, ABOVE the claude tiers: the claude vars
+# can be a stale value inherited from an ancestor process, and section 8 is the
+# whole story of what that cost.
+#
+# The bare half JOINS: activity-plugin.js emits `session: input.sessionID` on
+# `source='opencode'` rows from `tool.execute.after`, and `shell.env` receives
+# the same sessionID for the same call.
+#
+# BASELINE for everything below: RED at origin/main (4740e40) — the CLI has no
+# `opencode:` tier there, so every id assertion gets `claude:…`/`tmux:…` instead,
+# and every "no origin header" assertion gets `opencode-inherited`.
+# --------------------------------------------------------------------------- #
+OC_ID = "ses_7f3a91c0d2"          # distinct from every uuid literal in this file
+
+# Both claude spellings, so a precedence check placed on only the primary one
+# would leave the alternate reading the ancestor. Pairwise-distinct values, and
+# distinct from OC_ID, so a mutant returning whichever id it had cannot satisfy
+# the pair.
+INHERITED_CLAUDE_VARS = [
+    ("CLAUDE_CODE_SESSION_ID", "uuid-outer-primary"),
+    ("CLAUDE_SESSION_ID", "uuid-outer-alternate"),
+]
+
+
+@pytest.mark.parametrize("var,inherited", INHERITED_CLAUDE_VARS)
+def test_the_opencode_id_outranks_an_inherited_claude_id(tmp_path, var, inherited):
+    """🔴 THE PRECEDENCE, which IS the fix. Inside an opencode bash tool BOTH are
+    set: the opencode id was written for this call, the claude id rode down from
+    an ancestor. Reading the claude var first credits the ancestor — the exact
+    fabrication section 8's origin header exists to prevent, and the reason that
+    header can now stand down for this population.
+
+    The inherited uuid must appear NOWHERE in the result, not merely 'not be the
+    whole answer': a tier that concatenated both would satisfy a prefix check.
+    """
+    got = _print_id(_env(tmp_path, OPENCODE="1", OPENCODE_SESSION_ID=OC_ID,
+                         **{var: inherited}))
+    assert got == f"opencode:{OC_ID}", got
+    assert inherited not in got, got
+
+
+def test_an_interactive_opencode_session_uses_its_own_id(tmp_path):
+    """No claude ancestor at all — the tier still fires, and does not fall through
+    to `tmux:`/`sid:`. This is the population that was previously indistinguishable
+    from a plain shell."""
+    got = _print_id(_env(tmp_path, OPENCODE="1", OPENCODE_SESSION_ID=OC_ID,
+                         TMUX_PANE="%41"))
+    assert got == f"opencode:{OC_ID}", got
+
+
+def test_the_opencode_tier_does_not_require_the_opencode_marker(tmp_path):
+    """The id is derived from the id VARIABLE, never from `OPENCODE`. Two vars for
+    one fact would be a second predicate to keep in step; the plugin that sets the
+    id is the only evidence the tier needs.
+
+    Also a boundary: `OPENCODE` is what the FALLBACK guard keys on, and the two
+    must not be confused for each other."""
+    got = _print_id(_env(tmp_path, OPENCODE_SESSION_ID=OC_ID,
+                         CLAUDE_CODE_SESSION_ID="uuid-no-marker"))
+    assert got == f"opencode:{OC_ID}", got
+
+
+@pytest.mark.parametrize("empty", ["", " "])
+def test_an_unset_or_empty_opencode_id_falls_back_and_still_disclaims(tmp_path, empty):
+    """🔴 THE FAIL-CLOSED HALF, and the reason the `opencode-inherited` token was
+    NOT deleted with this change.
+
+    `shell.env` fires on opencode's PTY path with `{cwd}` only — no sessionID —
+    and the hook writes the variable EMPTY there rather than letting a parent's
+    stale id survive in the overlay. The same empty-or-absent state covers deploy
+    skew (this CLI is a live mkOutOfStoreSymlink; the plugin is a `home.file`
+    copy that needs a switch), an opencode process older than the plugin, and a
+    plugin-load failure.
+
+    In every one of those the derived id is the INHERITED claude uuid again, so
+    the suppression must come back. A ' ' row is included because the tier's test
+    is `-n`, which a single space passes — proving the fallback is chosen by
+    emptiness, not by a strip() nobody wrote.
+
+    BASELINES DIFFER PER ROW, so read them per row: the `''` row is an INVARIANT
+    GUARD (green at origin/main, where no tier exists so the id is `claude:`
+    anyway) pinning the fallback DIRECTION; the `' '` row is RED there.
+    """
+    env = _env(tmp_path, OPENCODE="1", OPENCODE_SESSION_ID=empty,
+               CLAUDE_CODE_SESSION_ID="uuid-fallback")
+    got = _print_id(env)
+    if empty == "":
+        assert got == "claude:uuid-fallback", got
+    else:
+        # A non-empty value is a real id as far as the CLI is concerned; what is
+        # pinned is that it does NOT silently become a claude attribution.
+        assert got.startswith("opencode:"), got
+
+
+def test_two_invocations_in_one_opencode_session_derive_the_same_id(tmp_path):
+    """ROUTING. Per-session tab ownership only works if the id is stable across
+    the many separate `browser` processes one session runs — including across a
+    command substitution, which is the drift that created this whole file."""
+    env = _env(tmp_path, OPENCODE="1", OPENCODE_SESSION_ID=OC_ID)
+    first = _print_id(env)
+    second = subprocess.run(
+        ["bash", "-c", f'echo "$(bash {CLI} --print-session-id)"'],
+        env=env, capture_output=True, text=True, timeout=60)
+    assert second.returncode == 0, second.stderr
+    assert first == second.stdout.strip() == f"opencode:{OC_ID}"
+
+
+def test_the_opencode_tier_deliberately_moves_the_routing_id(tmp_path):
+    """🔴 THE BEHAVIOUR CHANGE, ASSERTED RATHER THAN DISCOVERED. Section 8 pins
+    that `OPENCODE` alone must NOT perturb the id (routing stayed byte-identical),
+    and that still holds. This test pins the opposite for the id VARIABLE: it DOES
+    move the routing id, so an opencode session that used to inherit its parent's
+    tab now owns its own and must `open` one.
+
+    Both halves in one test on purpose — a reader who saw only the section 8
+    equivalence tests would conclude routing never changes, and that is now false
+    in exactly one way, which this names.
+    """
+    over = {"CLAUDE_CODE_SESSION_ID": "uuid-routing"}
+    without = _print_id(_env(tmp_path, OPENCODE="1", **over))
+    with_id = _print_id(_env(tmp_path, OPENCODE="1", OPENCODE_SESSION_ID=OC_ID,
+                             **over))
+    assert without == "claude:uuid-routing", without
+    assert with_id == f"opencode:{OC_ID}", with_id
+    assert with_id != without
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="the CLI uses curl")
+def test_the_opencode_run_is_attributed_on_the_wire(capture):
+    """🔴 THE POINT OF THE WHOLE CHANGE, at the transport. The tagged opencode id
+    reaches the server AND no origin header is sent, which is what lets
+    emit_cmd_event fill the `session` column instead of suppressing it.
+
+    Asserted on the request the stub actually received — the CLI could derive the
+    right id and still declare an origin, and that combination writes nothing.
+    """
+    capture.run("emulate", "iphone-15", OPENCODE="1", OPENCODE_SESSION_ID=OC_ID,
+                CLAUDE_CODE_SESSION_ID="uuid-outer-wire")
+    assert capture.headers, "the stub recorded no request at all"
+    h = capture.headers[0]
+    assert h.get("X-Session-Id") == f"opencode:{OC_ID}", h
+    assert "X-Session-Origin" not in h, h
+
+
+@pytest.mark.skipif(shutil.which("curl") is None, reason="the CLI uses curl")
+def test_the_discriminating_pair_for_the_opencode_id_on_the_wire(capture):
+    """🔴 THE PAIR. Same opencode session, same inherited claude ancestor; the
+    ONLY difference is whether the plugin's variable made it through. With it the
+    call is attributed to the opencode session; without it the call falls back and
+    is DISCLAIMED, never credited to the ancestor.
+
+    Both directions in one test because each alone is satisfiable by a wrong
+    implementation: a CLI that always declared the origin passes the second half,
+    and one that never did passes the first.
+    """
+    capture.run("emulate", "iphone-15", OPENCODE="1", OPENCODE_SESSION_ID=OC_ID,
+                CLAUDE_CODE_SESSION_ID="uuid-pair-outer")
+    with_id = capture.headers[0]
+    capture.headers.clear()
+    capture.run("emulate", "iphone-15", OPENCODE="1",
+                CLAUDE_CODE_SESSION_ID="uuid-pair-outer")
+    without = capture.headers[0]
+
+    assert with_id.get("X-Session-Id") == f"opencode:{OC_ID}", with_id
+    assert "X-Session-Origin" not in with_id, with_id
+    assert without.get("X-Session-Id") == "claude:uuid-pair-outer", without
+    assert without.get("X-Session-Origin") == "opencode-inherited", without

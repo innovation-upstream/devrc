@@ -2208,9 +2208,19 @@ LEAKED_ID = "claude:" + LEAKED_UUID
 # suppress the session key identically. A third one added without a test here
 # fails the ledger rather than silently getting a different behaviour.
 ORIGIN_TOKENS = ("browser-agent", "opencode-inherited")
+# An opencode session id, exported into the bash tool by
+# scripts/opencode/plugin/session-env.js's `shell.env` hook. It JOINS for the
+# same reason the claude one does: `source='opencode'` rows in activity.events
+# store exactly this string (activity-plugin.js emits `session: input.sessionID`
+# from `tool.execute.after`, the same id `shell.env` receives). Deliberately NOT
+# uuid-shaped — the tag is what makes it joinable, never the form, and a
+# differently-shaped id is the fixture that would catch a shape check sneaking in.
+OC_SESSION = "ses_5d9e2b71a4"
+OC_ID = "opencode:" + OC_SESSION
 # tier tag -> (wire id, the bare id behind it). Mirrors derive_session_id's tags.
 TIER_IDS = {
     "claude": (JOINABLE_ID, JOINABLE_UUID),
+    "opencode": (OC_ID, OC_SESSION),
     "tmux": ("tmux:%77", "%77"),
     "sid": ("sid:424242:99887766", "424242:99887766"),
     "ppid": ("ppid:31337:deadbeefcafef00d", "31337:deadbeefcafef00d"),
@@ -2229,9 +2239,17 @@ def _cmd_sess(srv, body, sid=None, origin=None):
     return _req(srv, "POST", "/cmd", body, headers=hdrs or None)
 
 
+# The tiers that MAY fill the join column, as a LITERAL contract — never read off
+# `S.SESSION_JOINABLE_TIERS`, which would make every row below assert whatever
+# the implementation currently believes. Whether the server's set equals this one
+# is a separate question, pinned in test_browser_session_id.py against tags
+# PARSED from the CLI.
+JOINABLE_TIERS_EXPECTED = {"claude", "opencode"}
+
+
 @pytest.mark.parametrize("tier", sorted(TIER_IDS))
-def test_session_column_is_filled_for_the_joinable_tier_only(telemetry, tier):
-    """Each tier reports its own `sess_src`; ONLY `claude` fills `session`.
+def test_session_column_is_filled_for_the_joinable_tiers_only(telemetry, tier):
+    """Each tier reports its own `sess_src`; only a JOINABLE tier fills `session`.
 
     Both halves matter and are asserted together per tier:
       * `sess_src` is always present, so a row is self-describing about WHY it
@@ -2260,7 +2278,7 @@ def test_session_column_is_filled_for_the_joinable_tier_only(telemetry, tier):
         assert e["kind"] == "cmd"
         p = json.loads(e["payload"])
         assert p["sess_src"] == tier, p
-        if tier == "claude":
+        if tier in JOINABLE_TIERS_EXPECTED:
             assert e.get("session") == bare, e
         else:
             assert "session" not in e, (
@@ -2415,10 +2433,13 @@ def test_the_tier_vocabulary_holds_its_internal_invariants():
     audit measured exactly that (grow the CLI + its own ledger, leave the server
     alone -> 400 passed, SURVIVED). A literal that can be updated in lockstep
     with the thing it checks is worse than no check, because it reads as one."""
-    assert S.SESSION_SRC_JOINABLE in S.SESSION_TIER_TAGS
+    assert set(S.SESSION_JOINABLE_TIERS) <= set(S.SESSION_TIER_TAGS), (
+        "a joinable tier that is not in the vocabulary can never be reached — "
+        "_split_session_id normalises it to unknown before the gate is asked")
     assert S.SESSION_SRC_UNKNOWN not in S.SESSION_TIER_TAGS, (
         "the fallback marker must not also be a real tier -- an unparseable id "
         "and a genuine tier would become indistinguishable")
+    assert S.SESSION_SRC_UNKNOWN not in S.SESSION_JOINABLE_TIERS
 
 
 # --- nesting: the forwarded id is the causal PARENT, not the actor --------- #
@@ -2865,6 +2886,71 @@ def test_origin_session_passes_the_same_tier_gate_as_session(telemetry, tier):
         assert bare not in _log_file(spool_dir).read_text()
     finally:
         ext.stop(); srv.shutdown(); srv.server_close()
+
+
+@pytest.mark.parametrize("tier", sorted(JOINABLE_TIERS_EXPECTED))
+def test_both_join_sites_answer_the_same_way_for_every_joinable_tier(telemetry, tier):
+    """🔴 THE CONSOLIDATION GUARD. Joinability is asked at TWO places — `session`
+    (no origin) and `origin_session` (origin declared) — and they were open-coded
+    as the same comparison twice. Widening the joinable set from one tag to
+    several is exactly the edit that lands on one copy and not the other, and the
+    result is an id that is attributable in one field and silently dropped in the
+    neighbouring one.
+
+    Driven by the LEDGER, not by the server's own tuple, and it runs both arms
+    for each tier IN ONE TEST, so a mutant that widens only `session` (or only
+    `origin_session`) dies on whichever arm it did not touch. Distinct ids per
+    tier, so nothing can pass by echoing a constant.
+
+    BASELINES DIFFER PER ROW: `[opencode]` is RED at origin/main; `[claude]` is
+    an INVARIANT GUARD there (base already answers both sites the same way for
+    that one tier) and is what makes the widening measurable rather than assumed.
+    """
+    spool_dir = telemetry
+    wire_id, bare = TIER_IDS[tier]
+    srv, _ = _serve()
+    ext = FakeExtension(srv)
+    ext.start()
+    try:
+        assert _wait_connected(srv, want=True)
+        # ARM 1 — no origin: the actor is this session, so `session` is filled.
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=wire_id)[0] == 200
+        direct = _wait_events(spool_dir, 1)[0]
+        assert direct.get("session") == bare, direct
+        assert "origin_session" not in json.loads(direct["payload"]), direct
+
+        # ARM 2 — origin declared: the same id is now a causal PARENT, so it
+        # moves to `origin_session` and `session` stays empty.
+        assert _cmd_sess(srv, {"op": "tabs"}, sid=wire_id,
+                         origin="browser-agent")[0] == 200
+        nested = _wait_events(spool_dir, 2)[1]
+        assert "session" not in nested, nested
+        p = json.loads(nested["payload"])
+        assert p["origin_session"] == bare, p
+        assert p["origin"] == "browser-agent", p
+        assert p["sess_src"] == tier, p
+    finally:
+        ext.stop(); srv.shutdown(); srv.server_close()
+
+
+@pytest.mark.parametrize("tier,bare,want", [
+    ("claude", JOINABLE_UUID, True),
+    ("opencode", OC_SESSION, True),
+    ("tmux", "%77", False),
+    ("sid", "424242:99887766", False),
+    ("ppid", "31337:deadbeefcafef00d", False),
+    ("synthetic", "whatever-the-cli-made-up", False),
+    ("unknown", "", False),
+    # A joinable TAG with an empty bare half is not a key. Both halves are
+    # required, and this is the row that keeps the `and bare` conjunct alive.
+    ("claude", "", False),
+    ("opencode", "", False),
+])
+def test_the_joinability_predicate_at_the_unit(tier, bare, want):
+    """The predicate both emit sites go through, exercised directly so the
+    boundary rows (empty bare half; every non-joinable tier) are cheap to keep.
+    Paired True/False rows so a predicate stuck at either constant dies."""
+    assert S._is_joinable(tier, bare) is want
 
 
 def test_a_joinable_parent_is_still_recorded(telemetry):

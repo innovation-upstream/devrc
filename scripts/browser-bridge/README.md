@@ -1539,7 +1539,7 @@ was simply never passed to `emit_cmd_event`. So a browser-skill call could not b
 joined to the agent session that made it, and "which sessions used the browser
 skill" had to be answered by scanning 1.5M transcript records.
 
-### Hazard 1 — only one tier is a join key
+### Hazard 1 — only some tiers are join keys
 
 The id is **tagged** with the tier that produced it (everything before the first
 `:`), and the server reads that tag. Reading a tag the CLI emits on purpose is not
@@ -1549,6 +1549,7 @@ would be, and is forbidden.
 | `X-Session-Id` | `payload.sess_src` | fills `session`? | why |
 |---|---|---|---|
 | `claude:<uuid>` | `claude` | **yes** — the bare `<uuid>` | it IS Claude Code's session uuid, the same value `source='claude'` rows store |
+| `opencode:<id>` | `opencode` | **yes** — the bare `<id>` | it IS opencode's session id, the same value `source='opencode'` rows store (`activity-plugin.js` emits `session: input.sessionID`); exported per bash-tool call by `scripts/opencode/plugin/session-env.js` |
 | `tmux:%3` | `tmux` | no | a pane id is stable across **many unrelated sessions**; storing it would silently merge them — worse than empty |
 | `sid:<sid>:<start>` | `sid` | no | no other source records it |
 | `ppid:<pid>:<rand>` | `ppid` | no | last-resort random token |
@@ -1629,11 +1630,76 @@ vars, so it cannot drift out of step with the precedence chain. An opencode
 session run interactively with no Claude ancestor derives `tmux:`/`sid:`/`ppid:`,
 declares nothing, and behaves exactly as it does today.
 
-**This is temporary.** A follow-up adds an opencode `shell.env` hook exporting
-`OPENCODE_SESSION_ID`; `derive_session_id` then gains a **joinable** `opencode:`
-tier, nested runs get a key of their own, the `claude:*` case stops matching on
-its own, and the token becomes dead code to delete. The slot is marked in the
-source.
+### Hazard 3, resolved — the opencode session now has an id of its own
+
+`scripts/opencode/plugin/session-env.js` registers a `shell.env` hook that
+exports `OPENCODE_SESSION_ID` into every bash-tool invocation. opencode builds
+the tool environment as `{...process.env, ...pluginEnv}` — **plugin wins** — so a
+value present there was written for *that* call by the session issuing it.
+`derive_session_id` reads it as **tier 0, above the claude tiers**, because the
+claude variables may be an ancestor's. The bare half joins `source='opencode'`
+rows, which carry the same `sessionID`.
+
+```
+X-Session-Id:  opencode:<id>     # attributed — no origin header is sent
+```
+
+Two consequences, both deliberate:
+
+- **🔴 The token did NOT retire.** An earlier version of this section said the
+  `opencode-inherited` token would "become dead code to delete". That is wrong,
+  and it is kept as the **fallback** for every way `OPENCODE_SESSION_ID` can be
+  absent while `OPENCODE` is set — deploy skew (the CLI is a live
+  `mkOutOfStoreSymlink`, the plugin a `home.file` copy needing a switch), an
+  opencode process started before the plugin was deployed, opencode's **PTY**
+  path (which fires `shell.env` with `{cwd}` only, so the hook writes the
+  variable empty rather than letting a parent's stale id survive), and a
+  plugin-load failure. In each of those the derived id is the inherited claude
+  uuid again and the suppression must come back. The `claude:*` case needed no
+  edit to do this: with the new tier present it simply stops matching.
+- **🔴 Routing DOES move for this population** — the one place the "the id is
+  never touched" claim above no longer holds. An opencode session that used to
+  inherit its Claude parent's id and drive that parent's owned tab now owns a tab
+  of its own and must `open` one. `browser agent` is unaffected: its agent runs
+  with `"*": deny` (no shell), drives a forced tab through the custom tool, and
+  that tool sends the wrapper-captured parent id plus its own
+  `X-Session-Origin: browser-agent`.
+
+  🔴 **"Must `open` one" is the happy path; nothing refuses when it doesn't.**
+  `emulate` is the only member of `OWNED_TAB_ONLY_OPS`, so a session owning no
+  tab and passing no `--tab` resolves to `None` for `nav`/`click`/`type`/`key`
+  and **the extension drives the ACTIVE tab — the operator's screen**. Before
+  this change the nested run inherited the parent's ownership and landed on the
+  parent's tab instead. Not widened blind: the same fallback is the documented
+  one-shot "read the tab I have open" idiom, and the four writes are the part
+  that matters. `open` first inside opencode.
+
+  🔴 **`browser --tab <parent's tab> emulate` now raises `not_owned_tab`** from
+  inside opencode — `emulate` requires the resolved tab to be one *this* session
+  owns. Narrow (that one op) but it regresses the explicit-`--tab` workaround
+  `reference/tabs-instances.md` teaches for concurrent drivers; that file now
+  says so, and the remedy is for each driver to `open` its own tab.
+
+  ⚠ **An opencode `task` subagent gets a DIFFERENT id, not its parent's.**
+  Measured in the shipped 1.18.18 binary: `TaskTool.execute` creates a child
+  session and the shell tool passes that child's `sessionID`. Telemetry stays
+  coherent — each row names the session that really ran the tool — but **routing
+  fragments**: parent and subagent own different tabs. This is the exact mirror
+  of Claude Code, where sibling subagents *share* one id and collide on one tab.
+  Same remedy (`open`, then thread `--tab`), opposite cause.
+
+**Known residual, not fixed here.** The mirror nesting — a Claude Code session
+launched *from* an opencode bash tool — inherits `OPENCODE_SESSION_ID` and is
+credited to that outer opencode session. No environment variable separates the
+two directions (both ids are equally inheritable by descendants), and the shape
+this fixes is by far the common one.
+
+**Known follow-up, not fixed here.** `browser-agent` still forwards its
+*caller's* id with `X-Session-Origin: browser-agent`, so a nested agent run is
+still suppressed rather than attributed to its own (now-identifiable) opencode
+session. Fixing it means the tool sending its own id in a *new* field —
+`X-Session-Id` must keep carrying the parent's, because that is what routes the
+run to the forced tab.
 
 ### Contract
 
@@ -1704,35 +1770,58 @@ WHERE source = 'browser-bridge' AND kind = 'cmd' AND session != ''
   AND session IN (SELECT DISTINCT session FROM activity.events WHERE source = 'claude')
 ```
 
-🔴 **NOT answerable yet — "which sessions used opencode AND the browser skill".**
-That was this change's motivating question and it is still open, for two
-independent reasons, either of which alone is fatal:
+✅ **"Which sessions used opencode AND the browser skill" — now answerable, but
+read the caveat.** That was the motivating question, and it was blocked by two
+independent reasons. **One is fixed; the other never was a bug.**
 
-1. **The id spaces are disjoint.** `source='opencode'` sessions are `ses_`-prefixed
-   opencode ids; `source='claude'` sessions are uuids. Measured over 14 days: 406
-   distinct claude sessions, 183 distinct opencode sessions, **overlap 0**. A query
-   joining `browser-bridge.session` against opencode's `session` cannot match — and
-   it fails as a **silent empty result**, which reads exactly like a truthful
-   "no sessions matched".
-2. **Those calls deliberately carry no `session`.** A browser call issued from
-   inside opencode is the leak case above: it is marked with
-   `origin='opencode-inherited'` and attributed to nobody.
+1. **The id spaces are disjoint, and that is correct, not broken.**
+   `source='opencode'` sessions are `ses_`-prefixed opencode ids;
+   `source='claude'` sessions are uuids. Measured over 14 days: 406 distinct
+   claude sessions, 183 distinct opencode sessions, **overlap 0**. So you must
+   join a browser-bridge row against **its own runtime's** rows — which is what
+   the tier tag on `payload.sess_src` is for. A query that joins
+   `browser-bridge.session` against the wrong runtime's `session` cannot match,
+   and it fails as a **silent empty result** that reads exactly like a truthful
+   "no sessions matched". Always filter on `sess_src`.
+2. ~~**Those calls deliberately carry no `session`.**~~ **Fixed.** An opencode
+   bash tool now exports `OPENCODE_SESSION_ID`, so those calls carry a joinable
+   `opencode:` id of their own and `origin='opencode-inherited'` is only the
+   fallback (see "Hazard 3, resolved" above).
 
-An earlier draft of this README shipped exactly that broken join as its flagship
-example. It is replaced rather than annotated, because a wrong query that returns
-zero rows is worse than no query.
-
-**What would make it answerable:** the follow-up `shell.env` hook exporting
-`OPENCODE_SESSION_ID`, which gives nested runs a joinable `opencode:` tier of
-their own. Until then, use `origin='opencode-inherited'` to *count* opencode-driven
-browser usage — you can see how much there is, just not whose:
+An earlier draft of this README shipped a broken cross-runtime join as its
+flagship example. It is replaced rather than annotated, because a wrong query
+that returns zero rows is worse than no query.
 
 ```sql
-SELECT JSONExtractString(toString(payload), 'origin') AS origin, count()
+-- opencode sessions that used the browser skill. Note the sess_src filter: it is
+-- what keeps this from silently matching nothing across the two id spaces.
+SELECT count(DISTINCT b.session) AS joinable_opencode_sessions
+FROM activity.events AS b
+WHERE b.source = 'browser-bridge' AND b.kind = 'cmd' AND b.session != ''
+  AND JSONExtractString(toString(b.payload), 'sess_src') = 'opencode'
+  AND b.session IN (SELECT DISTINCT session FROM activity.events
+                    WHERE source = 'opencode')
+```
+
+⚠ **Two populations are still unattributed, and both are `origin`-marked rather
+than silent.** `browser-agent` runs forward their *caller's* id (hazard 2 — not
+fixed, and not fixable without a new header), and the `opencode-inherited`
+fallback still fires wherever `OPENCODE_SESSION_ID` is absent. Count them:
+
+```sql
+SELECT JSONExtractString(toString(payload), 'sess_src') AS tier,
+       JSONExtractString(toString(payload), 'origin')   AS origin, count()
 FROM activity.events
 WHERE source = 'browser-bridge' AND kind = 'cmd'
-GROUP BY origin ORDER BY count() DESC
+GROUP BY tier, origin ORDER BY count() DESC
 ```
+
+⚠ **A large `sess_src='unknown'` population is NOT evidence of a stale
+`server.py`.** Measured on the workbench after #549 deployed: 504 `unknown` /
+217 `claude`, with **zero** rows carrying any `origin` key at all — 493 of the
+504 `op=text`, all with an empty instance key. That predates the `opencode:`
+tier and is **undiagnosed**; do not read `unknown` as "the switch did not take"
+on this host until it is.
 
 ## Session isolation (concurrent-session tab clobbering)
 
@@ -1746,7 +1835,11 @@ per-session (multi-step **workflow**) isolation did not.
 **Fix — a per-session owned tab:**
 
 - **Per-session id.** The `browser` skill sends a stable `X-Session-Id` on every
-  `/cmd`, derived (in order) from `CLAUDE_CODE_SESSION_ID` (Claude Code's own
+  `/cmd`, derived (in order) from `OPENCODE_SESSION_ID` (the opencode session
+  whose bash tool is running the command, exported per call by
+  `scripts/opencode/plugin/session-env.js`; **first** because it is the only one
+  of these rewritten on every tool call, while the claude variables can be an
+  ancestor's) → `CLAUDE_CODE_SESSION_ID` (Claude Code's own
   session UUID — identical across every Bash-tool call in a session, verified on
   the 2.1.x CLI) → `CLAUDE_SESSION_ID` (defensive alternate) → `$TMUX_PANE` (each
   session runs in its own tmux pane) → the **POSIX session id**
