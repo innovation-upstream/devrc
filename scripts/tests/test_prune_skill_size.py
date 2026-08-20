@@ -28,7 +28,7 @@ is exactly how the drift regrows.
 
 WHY THE CEILING IS ABOVE THE 12,288 B TARGET, AND WHAT THAT COSTS
 -----------------------------------------------------------------
-The skill states a 12,288 B target and browser-bridge MEETS it (11,821 B while
+The skill states a 12,288 B target and browser-bridge MEETS it (11,942 B while
 routing ~11x its own weight), so the target is achievable and is not in dispute.
 This file does not: it sits at 12,859 B (12.56 KiB) after being cut from 14,918 B
 by demoting §6 (landing), §4's deployment table, §7's verification rationale, §0's
@@ -56,6 +56,7 @@ earlier revision restated a size, a growth figure, a percentage and a per-pass
 byte ledger that were all wrong, in the module that declares itself the single
 source of truth for them.
 """
+import importlib.util
 import os
 import re
 from pathlib import Path
@@ -349,37 +350,94 @@ def test_this_modules_own_stated_figures_are_re_measured():
 
     Cost, stated: a cosmetic reword of these sentences fails this test. That is
     the trade — a machine-checkable claim for a bit of prose rigidity.
+
+    🔴 Three refinements a round-4 audit forced, each closing a way this gate
+    could have been decorative:
+      - THE TARGET IS IMPORTED, NOT RESTATED. It used to hard-code 12,288 —
+        which made the check labelled "skill-audit cross-check" pin the sentence
+        against this test's OWN copy of the number rather than against the tool
+        it names. Setting `TARGET` in skill-audit.py to 12,000 made the tool
+        print 859 while the prose still claimed 571, and this gate said PASSED.
+        That is the exact defect (F2) the gate was written to close, reproduced
+        inside its own fix.
+      - EXACTLY ONE MATCH IS REQUIRED, not the first. `re.search` takes the
+        earliest hit, so an added sentence quoting a HISTORICAL figure shadows
+        the live one — and this module already quotes historical figures in
+        near-identical phrasing two lines below `MAX_BYTES`. Proven: a decoy
+        sentence let a 99,999 B claim ship green.
+      - COVERAGE IS ENUMERATED. The first version gated 6 of ~12 numeric claims;
+        corrupting the other six left the suite green, and three of those six
+        were the exact shapes rounds 2 and 3 found stale (a percentage beside a
+        re-measured byte count, a second literal in the same sentence, the
+        routing-table arithmetic). Every figure below is now derived. Any figure
+        deliberately NOT gated must be named in `UNGATED` with its reason, so a
+        gap is a declaration rather than a silence.
     """
     src = Path(__file__).read_text()
     size = SKILL_MD.stat().st_size
-    over = size - 12_288                      # the target this skill asks others to meet
+
+    # The canonical target lives in the tool this docstring cites. Importing it
+    # is what makes "skill-audit.py prints the same N" a real cross-check.
+    spec = importlib.util.spec_from_file_location(
+        "_sa_target", REPO_ROOT / "scripts" / "skill-audit.py")
+    _sa = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(_sa)
+    target = _sa.TARGET
+
+    over = size - target
     headroom = MAX_BYTES - size
     slack = headroom - MIN_HEADROOM_BYTES
+    rows = [ln for ln in SKILL_MD.read_text().splitlines()
+            if ln.startswith("| ") and "reference/" in ln and "Load it when" not in ln]
+    row_bytes = sum(len(ln.encode()) + 1 for ln in rows)
+    bb = (REPO_ROOT / "scripts" / "browser-bridge" / "SKILL.md").stat().st_size
+
+    # Figures deliberately left hand-maintained, named so the gap is DECLARED:
+    UNGATED = {
+        "§3 verdict-bullet mean (9 lines, 1,739 B, mean 193)":
+            "extracting '§3 verdict bullets' needs a heading-and-bullet parser whose "
+            "own drift would be invisible; the figure only sizes MIN_HEADROOM_BYTES, "
+            "which this gate pins directly via 'true working room'",
+    }
 
     # (label, regex with ONE capturing group, expected literal)
     checks = [
-        ("size in the docstring",   r"it sits at ([\d,]+) B",                      f"{size:,}"),
-        ("size in the ceiling note", r"SKILL\.md is ([\d,]+) B \(`stat -c %s`",     f"{size:,}"),
-        ("over-target bytes",       r"the skill is ([\d,]+) B -- ",                 f"{over:,}"),
-        ("skill-audit cross-check", r"prints the same ([\d,]+) B",                  f"{over:,}"),
-        ("headroom",                r"leaves ([\d,]+) B of headroom",               f"{headroom:,}"),
-        ("true working room",       r"must remain: ([\d,]+) B of true working",     f"{slack:,}"),
+        ("size in the docstring",    r"it sits at ([\d,]+) B",                    f"{size:,}"),
+        ("size in KiB",              r"it sits at [\d,]+ B \(([\d.]+) KiB\)",     f"{size / 1024:.2f}"),
+        ("size in the ceiling note", r"SKILL\.md is ([\d,]+) B \(`stat -c %s`",   f"{size:,}"),
+        ("size in the accounting",   r"\(([\d,]+) against [\d,]+;",               f"{size:,}"),
+        ("the target it cites",      r"\([\d,]+ against ([\d,]+);",               f"{target:,}"),
+        ("over-target bytes",        r"the skill is ([\d,]+) B -- ",              f"{over:,}"),
+        ("over-target percent",      r"the skill is [\d,]+ B -- ([\d.]+)% -- ",   f"{100.0 * over / target:.2f}"),
+        ("skill-audit cross-check",  r"prints the same ([\d,]+) B",               f"{over:,}"),
+        ("headroom",                 r"leaves ([\d,]+) B of headroom",            f"{headroom:,}"),
+        ("true working room",        r"must remain: ([\d,]+) B of true working",  f"{slack:,}"),
+        ("routing-table bytes",      r"routing table \(3 rows, ([\d,]+) B",       f"{row_bytes:,}"),
+        ("routing-table mean",       r"routing table \(3 rows, [\d,]+ B -> mean ([\d,]+) B/row", f"{row_bytes // len(rows):,}"),
+        ("browser-bridge size",      r"browser-bridge MEETS it \(([\d,]+) B",     f"{bb:,}"),
     ]
     problems = []
     for label, pattern, expected in checks:
-        m = re.search(pattern, src)
-        if m is None:
+        found = re.findall(pattern, src)
+        if not found:
             problems.append(f"{label}: PATTERN DID NOT MATCH ({pattern!r}) — the "
                             f"sentence was reworded, so this figure is now unchecked")
-        elif m.group(1) != expected:
-            problems.append(f"{label}: prose says {m.group(1)}, measured {expected}")
+        elif len(found) > 1:
+            problems.append(f"{label}: pattern matched {len(found)}x ({found}) — an "
+                            "added sentence can shadow the live figure; make the "
+                            "pattern name exactly one sentence")
+        elif found[0] != expected:
+            problems.append(f"{label}: prose says {found[0]}, measured {expected}")
 
     assert not problems, (
-        "this module's own figures no longer describe the file it measures:\n  "
+        "this module's own figures no longer describe what they measure:\n  "
         + "\n  ".join(problems)
-        + f"\n\nMeasured now: SKILL.md={size:,} B, over target by {over:,} B "
-          f"({100.0 * over / 12_288:.2f}%), headroom {headroom:,} B, "
-          f"working slack {slack:,} B.\n"
+        + f"\n\nMeasured now: SKILL.md={size:,} B ({size / 1024:.2f} KiB), target "
+          f"{target:,} (imported from skill-audit.py), over by {over:,} B "
+          f"({100.0 * over / target:.2f}%), headroom {headroom:,} B, working slack "
+          f"{slack:,} B, routing table {row_bytes:,} B over {len(rows)} rows, "
+          f"browser-bridge {bb:,} B.\n"
+        f"Deliberately ungated: {list(UNGATED)}\n"
         "Re-measure and update the prose; do NOT relax this test."
     )
 
