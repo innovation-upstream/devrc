@@ -3354,9 +3354,24 @@ def test_the_fallback_state_set_MATCHES_the_deadman_it_stands_in_for():
 # ---------------------------------------------------------------------------
 
 _SCRIPTS_DIR_CMD = re.compile(r'command\s*=\s*"\$\{scriptsDir\}/([\w.-]+)')
-_BLOCK_DEF = re.compile(r'^  (\w+Block) = \{\n(.*?)^  \};', re.S | re.M)
+# 🔴 Terminates on `^  }`, NOT `^  };`. `temperatureBlock` closes with the house
+# `} // (if isLaptop then {...} else {...});` idiom, so a `};`-anchored pattern
+# ran past it and swallowed the WHOLE of `gpuBlock` into its body — that block
+# was invisible to this guard, and a swallowed block's command gets attributed
+# to the swallower's gate. Measured: 19 block defs found with `};`, 20 with `}`.
+_BLOCK_DEF = re.compile(r'^  (\w+Block) = \{\n(.*?)^  \}', re.S | re.M)
 _HOME_FILE = re.compile(
     r'^\s*home\.file\."\.config/i3status-rust/scripts/([\w.-]+)"\s*=\s*(.*)$', re.M)
+
+#: scriptsDir-backed custom blocks, MEASURED. The floor exists so a regex that
+#: silently stops matching fails loudly instead of vacuously passing. Raise it
+#: when you add a block; the failure message prints the number it saw.
+_EXPECTED_SCRIPT_BLOCKS = 11
+#: Ungated/gated split, MEASURED. Guards `_block_gates` itself: if gate parsing
+#: collapses to all-True or all-False (a stray `isLaptop` in a comment, the list
+#: reflowed onto one line), `checked` stays correct while the gate assertion
+#: goes silently vacuous. Two survivors were found this way.
+_MIN_UNGATED, _MIN_GATED = 5, 5
 
 
 def _graphical_nix():
@@ -3364,14 +3379,19 @@ def _graphical_nix():
 
 
 def _block_gates(nix):
-    """blockName -> True if it reaches the bar on EVERY host (ungated)."""
+    """blockName -> True if it reaches the bar on EVERY host (ungated).
+
+    Splits on `++` rather than on NEWLINES: the list is a nix expression, not a
+    line-oriented format, so a reflow onto one line made a line-based parser
+    read every block as ungated. Comments are stripped first — a `# ...isLaptop`
+    aside on a list line otherwise reads as a host gate.
+    """
     body = nix.split("  blocks =", 1)[1].split("\nin\n", 1)[0]
+    body = "\n".join(re.sub(r"#.*$", "", ln) for ln in body.splitlines())
     gates = {}
-    for line in body.splitlines():
-        if "Block" not in line:
-            continue
-        ungated = "isLaptop" not in line
-        for name in re.findall(r"\b(\w+Block)\b", line):
+    for segment in body.split("++"):
+        ungated = "isLaptop" not in segment
+        for name in re.findall(r"\b(\w+Block)\b", segment):
             # a block listed twice keeps the WIDEST gate it appears under
             gates[name] = gates.get(name, False) or ungated
     return gates
@@ -3422,11 +3442,128 @@ def test_every_custom_block_script_is_DEPLOYED_UNDER_A_COMPATIBLE_GATE():
                 "`%s` — the ungated hosts get a block whose command is absent"
                 % (block, script, deployed[script].strip()))
 
-    # positive control: a zero here would make every assertion below vacuous.
-    assert checked >= 8, (
-        "only %d scriptsDir-backed blocks matched — the block/home.file "
-        "regexes stopped matching, so this test is checking nothing" % checked)
+    # Positive controls. Without these a regex that stops matching reports a
+    # confident pass over nothing.
+    assert checked >= _EXPECTED_SCRIPT_BLOCKS, (
+        "only %d scriptsDir-backed blocks matched, expected >= %d — the block "
+        "or command regex stopped matching, so this test is checking less than "
+        "it claims" % (checked, _EXPECTED_SCRIPT_BLOCKS))
+    ungated = sum(1 for v in gates.values() if v)
+    gated = len(gates) - ungated
+    assert ungated >= _MIN_UNGATED and gated >= _MIN_GATED, (
+        "gate parsing collapsed (%d ungated / %d gated, expected >= %d/%d) — "
+        "the third assertion below can only fire when BOTH kinds are detected, "
+        "so it is now vacuous" % (ungated, gated, _MIN_UNGATED, _MIN_GATED))
     assert not problems, (
         "block/script gate seam broken:\n  " + "\n  ".join(problems)
         + "\n\nGate the block and its script the SAME way, in both places."
     )
+
+
+#: Icons the block scripts use, MEASURED against i3status-rust's material-nf
+#: icon set. This is an ALLOWLIST, not documentation: adding an entry is the
+#: moment to check it is a real key, with
+#:   grep '^<name> *=' <i3status-rust>/share/icons/material-nf.toml
+#: The set has 76 keys; these 4 are all that this repo's blocks reference.
+_KNOWN_GOOD_ICONS = {"cogs", "mail", "net_vpn", "tasks"}
+
+_ICON_CONST = re.compile(r'^ICON\w*\s*=\s*"([^"]+)"', re.M)
+
+
+def _material_nf_keys():
+    """The real icon-set keys, if i3status-rust is reachable in the store.
+
+    Opportunistic: the pytest check does not depend on i3status-rust, so in the
+    hermetic sandbox this returns None and the allowlist above is the whole
+    gate. It never SKIPS the test — it only adds a stronger check when it can.
+    """
+    for toml in sorted(Path("/nix/store").glob(
+            "*-i3status-rust-*/share/icons/material-nf.toml")):
+        try:
+            return set(re.findall(r'^([\w_]+)\s*=', toml.read_text(), re.M))
+        except OSError:
+            continue
+    return None
+
+
+def test_every_block_ICON_is_a_REAL_i3status_rust_icon_key():
+    """🔴 An icon name that is not a key in the icon set does NOT degrade
+    gracefully — i3status-rust renders the whole block as a red
+    `Failed to render full text`. `utilities-system-monitor` is a plausible
+    XDG desktop-icon name, is not a material-nf key, and shipped a block whose
+    every VISIBLE state was that error string; only its hidden state worked.
+
+    Measured against i3status-rs 0.36.1 with the production theme/icon config:
+      {"icon":"cpu",...}                      -> ' \\uf04c5 9.9 '   (renders)
+      {"icon":"utilities-system-monitor",...} -> 'Failed to render full text'
+      {"icon":"cogs",...}                     -> ' \\uf0493 9.9 '   (renders)
+
+    No test could see this before, because the block's own test asserted
+    `out["icon"] == ICON` against a constant copied from the implementation —
+    an expectation derived from the code it tests can never disagree with it.
+    """
+    keys = _material_nf_keys()
+    if keys is not None:
+        stale = _KNOWN_GOOD_ICONS - keys
+        assert not stale, (
+            "the allowlist in this file names icons that are NOT in the real "
+            "icon set (%s) — the allowlist has gone stale, fix it rather than "
+            "the icon set" % sorted(stale))
+
+    found = {}
+    for script in sorted(SCRIPTS.glob("i3status-*")):
+        for icon in _ICON_CONST.findall(script.read_text(errors="replace")):
+            found.setdefault(icon, []).append(script.name)
+
+    # positive control: zero icons found would pass every assertion below.
+    assert found, "no ICON constant found in any block script — regex is dead"
+
+    bad = {i: v for i, v in found.items() if i not in _KNOWN_GOOD_ICONS}
+    assert not bad, (
+        "block icon(s) not on the verified allowlist: %s\nAn unknown icon name "
+        "renders as a red 'Failed to render full text', not as a missing glyph."
+        % {i: v for i, v in sorted(bad.items())})
+
+    if keys is not None:
+        unreal = {i: v for i, v in found.items() if i not in keys}
+        assert not unreal, (
+            "block icon(s) absent from material-nf: %s" % sorted(unreal))
+
+
+def test_the_load_pill_threshold_MATCHES_cpu_monitors():
+    """🔴 The pill and cpu-monitor's toast are two renderings of ONE decision.
+
+    `CPU_MON_THRESHOLD` was deliberately raised to a flat 48 on 2026-08-05 to
+    cut toast volume (measured 123-267/day -> 11-32/day). A pill keyed off the
+    core count instead would warn at 24 on the workbench — which idles in the
+    twenties — reinstating exactly the noise that change removed, in a second
+    place. This is the same drift the alerts pill already suffered (34 vs 30),
+    which is why `alertsRedAbove` exists; this pins the load pair the same way.
+    """
+    nix = _graphical_nix()
+    home = (SCRIPTS.parent / "nix" / "home.nix").read_text()
+
+    warn = re.search(r'^  loadWarnAbove = (\d+);', nix, re.M)
+    crit = re.search(r'^  loadCritAbove = (\d+);', nix, re.M)
+    mon = re.search(r'"CPU_MON_THRESHOLD=(\d+)"', home)
+    assert warn and crit and mon, (
+        "could not locate all three constants (loadWarnAbove=%s, "
+        "loadCritAbove=%s, CPU_MON_THRESHOLD=%s) — one was renamed, so this "
+        "test is no longer comparing anything"
+        % (bool(warn), bool(crit), bool(mon)))
+
+    assert warn.group(1) == mon.group(1), (
+        "load pill warns at %s but cpu-monitor toasts at %s — the pill and the "
+        "toast must be the same number, or one of them is lying about when the "
+        "box is busy" % (warn.group(1), mon.group(1)))
+    assert int(crit.group(1)) > int(warn.group(1)), (
+        "loadCritAbove (%s) must exceed loadWarnAbove (%s); the block evaluates "
+        "critical FIRST, so an inverted pair paints a hidden load red"
+        % (crit.group(1), warn.group(1)))
+
+    # The block must actually be PASSED them — a constant nothing reads is not
+    # a single source, it is a decoration.
+    assert "--warning ${toString loadWarnAbove}" in nix, \
+        "loadWarnAbove is defined but never passed to the block"
+    assert "--critical ${toString loadCritAbove}" in nix, \
+        "loadCritAbove is defined but never passed to the block"

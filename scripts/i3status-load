@@ -2,39 +2,53 @@
 """i3status-rust custom block: 1-minute load average.
 
 Reads /proc/loadavg DIRECTLY — no cache file, no poller, no network. Unlike the
-count pills this block has no `bar_freshness` sibling to load and no
-`--red-above` plumbing: load is a purely local, always-available reading, so
-there is nothing that can go stale and nothing to intercept.
+count pills this block has no `bar_freshness` sibling to load: load is a purely
+local, always-available reading, so there is nothing that can go stale.
 
 CALM rendering (colour == "look at me"):
   load <  warning    -> empty text, Idle  (hide-at-zero: not yet actionable)
   load >= warning    -> `N.N`, Warning
   load >= critical   -> `N.N`, Critical
 
-Thresholds come from the ENVIRONMENT, not from argv — this block parses no
-arguments. `LOAD_WARNING` defaults to the core count (matching cpu-monitor's
-alert threshold); `LOAD_CRITICAL` defaults to twice it.
+Thresholds come from `--warning` / `--critical`, matching the house idiom
+(`i3status-alerts --red-above`). nix/graphical.nix passes both from a single
+constant pinned to cpu-monitor's own alert threshold by a test, so the pill and
+the toast cannot drift apart. Absent the flags they fall back to the core count,
+which is only a sane default — NOT parity with anything.
 
-🔴 `warning` is the SOLE visibility threshold, deliberately. An earlier draft
-gated visibility on the core count *before* consulting `warning`, which meant
-lowering LOAD_WARNING below the core count silently did nothing — the knob was
-inert in the only direction anyone would turn it. Lowering it must make the
-block appear EARLIER, or it is not a warning threshold.
+🔴 `warning` is the SOLE visibility threshold. An earlier draft gated visibility
+on the core count *before* consulting `warning`, so lowering the threshold below
+the core count silently did nothing — the knob was inert in the only direction
+anyone would turn it. Lowering it must make the block appear EARLIER.
+
+🔴 The icon must be a key in i3status-rust's icon set (material-nf), NOT an XDG
+desktop-icon name. `utilities-system-monitor` looks plausible, is not a key, and
+makes i3status-rust render a red `Failed to render full text` in EVERY visible
+state — measured against i3status-rs 0.36.1, where the same payload with `cogs`
+rendered ` 󰒓 9.9 `. `test_bar_status.py` now pins every block icon to the real
+icon set.
+
+Why not i3status-rust's built-in `load` block: it has no hide-below-threshold
+behaviour, and an always-visible number that is uninteresting most of the day is
+exactly the bar noise this repo keeps designing out. That is the only reason —
+if the built-in grows a hide option, delete this script.
 
 The left-click opens btop (wired in nix/graphical.nix).
 """
+import argparse
 import json
+import math
 import os
 import sys
 
-ICON = "utilities-system-monitor"
+ICON = "cogs"
 _EMPTY = {"text": "", "state": "Idle"}
 
 
-def read_load():
-    """Read the 1-minute load average from /proc/loadavg. Returns float or None."""
+def read_load(path="/proc/loadavg"):
+    """Read the 1-minute load average. Returns float, or None if unreadable."""
     try:
-        with open("/proc/loadavg") as f:
+        with open(path) as f:
             return float(f.read().split()[0])
     except Exception:
         return None
@@ -43,8 +57,8 @@ def read_load():
 def render(load_val, warning, critical):
     """Pure: load value -> i3status-rust block dict.
 
-    Takes no `cores` argument on purpose — the core count is only ever the
-    DEFAULT for `warning`, resolved by the caller. Threading it in here is what
+    Takes no `cores` argument on purpose — the core count is only ever a
+    fallback for `warning`, resolved by the caller. Threading it in here is what
     let it override the explicit threshold.
     """
     if load_val is None:
@@ -59,28 +73,50 @@ def render(load_val, warning, critical):
     return {"icon": ICON, "text": text, "short_text": text, "state": state}
 
 
-def threshold(env_name, default):
-    """Read a float threshold from the environment, falling back to `default`.
+def check_thresholds(warning, critical):
+    """Reject thresholds that would silently disable the block.
 
-    A malformed value raises, so it surfaces as the visible `?` pill rather
-    than silently reverting to the default and pretending it was configured.
+    NaN loses every comparison, so a NaN threshold hides the pill FOREVER with
+    no error — the exact silent-blank state this block exists to avoid. An
+    infinite `critical` disables the red state the same way. Both parse cleanly
+    through float(), so they must be rejected explicitly rather than left to
+    the parser. A `critical` below `warning` is incoherent too: the critical
+    branch is evaluated first, so it would paint a load the table above calls
+    hidden bright red.
     """
-    raw = os.environ.get(env_name)
-    return default if raw is None or raw == "" else float(raw)
+    for name, val in (("--warning", warning), ("--critical", critical)):
+        if not math.isfinite(val):
+            raise ValueError("%s must be a finite number, got %r" % (name, val))
+    if critical < warning:
+        raise ValueError(
+            "--critical (%g) is below --warning (%g); the critical branch is "
+            "evaluated first, so this paints a hidden load red"
+            % (critical, warning))
 
 
-def main():
-    cores = os.cpu_count() or 1
-    warning = threshold("LOAD_WARNING", float(cores))
-    critical = threshold("LOAD_CRITICAL", float(cores) * 2)
-    out = render(read_load(), warning, critical)
-    sys.stdout.write(json.dumps(out) + "\n")
+def main(argv=None):
+    cores = float(os.cpu_count() or 1)
+    p = argparse.ArgumentParser(add_help=False)
+    p.add_argument("--warning", type=float, default=cores)
+    p.add_argument("--critical", type=float, default=cores * 2)
+    # argparse exits 2 on a bad value, which would skip the `?` pill entirely
+    # and leave the bar with no block at all. Convert it into the same failure
+    # every other malformed input takes.
+    try:
+        args = p.parse_args(argv)
+    except SystemExit:
+        raise ValueError("could not parse threshold arguments: %r" % (argv,))
+    check_thresholds(args.warning, args.critical)
+    sys.stdout.write(
+        json.dumps(render(read_load(), args.warning, args.critical)) + "\n")
     return 0
 
 
 if __name__ == "__main__":
     try:
         sys.exit(main())
+    except SystemExit:
+        raise
     except Exception:
         # Last-resort: a visible `?` pill, never the invisible empty one — a
         # silently blank block is indistinguishable from "load is fine".
