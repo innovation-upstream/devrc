@@ -56,8 +56,9 @@ updating safe rather than rare, and why there is no "don't update" path in
 
 ## Why the gate is on the PUSH and not the write
 
-Writing locally is cheap and reversible. Pushing to a shared branch as a side
-effect of unrelated work is the act that needs consent. So the tool's default
+Writing the FILE locally is cheap and reversible — `git checkout -- <path>`
+undoes it. Pushing to a shared branch as a side effect of unrelated work is the
+act that needs consent. So the tool's default
 mode writes nothing at all — not the doc, not a commit, not a ref — and landing
 it takes a second invocation carrying `--confirm` (and `--push`), which is the
 action that happens after the `y`. A decline is therefore not a code path that
@@ -66,6 +67,32 @@ has to behave correctly; it is the absence of one.
 `scripts/tests/test_handoff_doc.py` hashes the whole repo tree either side of a
 default-mode run, because a gate that has only ever been watched to accept is
 not a gate.
+
+### …and the half of that sentence that was FALSE
+
+"Cheap and reversible" was written of the **file** and read as if it covered the
+**commit**. It does not. `--confirm` without `--push` makes a real commit, and an
+un-pushed commit is not a cheap local state: no reviewer can see it, on a shared
+branch it is precisely what `ship.sh` skips over silently (this repo's
+`CLAUDE.md` records that incident twice), and on a feature branch it is a handoff
+nobody outside this one checkout can read — what `claude/RULES.md` calls UNSAVED
+WORK. The tool's own `status=push-failed` path spends nine alarmed lines on that
+exact end state; reaching it by the ordinary success path used to earn a
+one-line `status=written commit=<sha>` and nothing else.
+
+Measured 2026-08-20: across the transcript corpus, 69 distinct shas came out of
+`status=written commit=`, from 58 transcripts, and only 19 of those transcripts
+ever printed `status=pushed`. Of the handoff commits still in this repo's object
+store, roughly a third are contained by **no** remote branch — every one of them
+on a feature branch, none on `main`.
+
+So the gate did not move: `--confirm` without `--push` is still a SUCCESS, still
+ungated, still exit 0. What changed is that it now says what it left behind —
+`status=written commit=<sha> branch=<b>`, a one-line `NOT PUSHED`, and the
+command to land it. On a shared branch that command is deliberately **not** a
+push to that branch: several repos (devrc among them) forbid committing there at
+all, so it names the preserve-on-a-topic-branch route instead. A wrong pasteable
+command is worse than a descriptive one.
 
 ## Why findings append and the status header does not
 
