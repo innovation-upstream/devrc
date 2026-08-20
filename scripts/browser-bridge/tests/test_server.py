@@ -124,14 +124,12 @@ def _wait_events(spool_dir, n=1, timeout=3.0) -> list:
     return _read_events(spool_dir)
 
 
-@pytest.fixture(autouse=True)
-def _isolate_activity_spool(tmp_path, monkeypatch):
-    """Protect the REAL activity spool: EVERY test's telemetry writes go to a
-    per-test temp dir, and the lazy emitter cache is reset so each test loads it
-    fresh under the current env."""
-    monkeypatch.setenv("ACTIVITY_SPOOL_DIR", str(tmp_path / "activity-spool"))
-    monkeypatch.setattr(S, "_spool_emit_mod", None)
-    monkeypatch.setattr(S, "_spool_emit_tried", False)
+# NOTE: `_isolate_activity_spool` — the autouse fixture that points
+# ACTIVITY_SPOOL_DIR at a per-test tmp dir — now lives in `conftest.py`, one
+# directory-wide definition instead of this module-scoped copy. It was scoped to
+# this file only, while its docstring claimed it covered EVERY test; the five
+# sibling modules were writing real rows into the production activity pipeline.
+# Every fixture below (`telemetry` especially) still depends on it having run.
 
 
 @pytest.fixture(autouse=True)

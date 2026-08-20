@@ -1,0 +1,152 @@
+"""THE regression guard for the production-telemetry leak.
+
+WHY THIS IS ITS OWN FILE
+------------------------
+The bug was not a missing fixture — the fixture existed, was `autouse`, and its
+docstring said it covered "EVERY test". It was declared inside `test_server.py`,
+so pytest scoped it to that module and the five sibling files went on appending
+real rows to `<ACTIVITY_SPOOL_DIR>/current.log`, which the activity collector
+ships to the production ClickHouse `activity.events` (`test_site_notes.py`
+alone: +17 production rows per run, reproduced twice).
+
+A guard for that living in `test_server.py` would be worthless: it would pass
+for exactly the reason the bug existed. Its VALUE IS ITS LOCATION — this file
+imports no fixture, declares no isolation of its own, and can only pass if
+`conftest.py`'s `_isolate_activity_spool` reaches a module other than
+`test_server.py`. Do not move these tests into another file.
+
+WHAT IS ASSERTED, AND WHY IT IS THE RELATIONSHIP AND NOT THE SPELLING
+--------------------------------------------------------------------
+"`ACTIVITY_SPOOL_DIR` is set" is walkable: a developer (or CI, or the
+`scripts/gate.sh` wrapper) with the variable exported in the ambient shell
+satisfies it while every test in the run still shares ONE directory outside the
+tmp tree. So the structural test asserts the EFFECTIVE dir — what
+`spool_emit.default_spool_dir()` actually returns — is under *this test's own*
+`tmp_path`. An ambient value cannot satisfy that; only the per-test fixture can.
+
+And a structural check type-checks past a wrong argument, so the second test is
+behavioural: drive the real `server.emit_cmd_event()` writer, prove the row
+landed in the temp spool, and prove the same row is NOT in the production spool.
+The two halves share one search helper on purpose — the assertion that the
+marker IS in tmp is the positive control for the search that must find nothing
+in production, so a broken decoder reds the test instead of passing it
+vacuously.
+"""
+from __future__ import annotations
+
+import base64
+import importlib.util
+import os
+import sys
+import uuid
+from pathlib import Path
+from unittest import mock
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import server as S  # noqa: E402
+
+# The in-repo emitter — same path `test_server.py` pins, and the same reason:
+# `server._SPOOL_EMIT_PATH` otherwise points at the operator's ~/workspace
+# checkout, which does not exist in the nix check sandbox (telemetry would
+# silently disable itself and the behavioural test would assert nothing).
+SPOOL_EMIT_PY = (Path(__file__).resolve().parent.parent.parent
+                 / "collector" / "keylog" / "spool_emit.py")
+
+
+def _spool_emit_module():
+    """Load the real `spool_emit` fresh, by path (never from sys.modules)."""
+    spec = importlib.util.spec_from_file_location(
+        "spool_emit_under_isolation_test", str(SPOOL_EMIT_PY))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _production_spool_dir() -> Path:
+    """Where `default_spool_dir()` lands with ACTIVITY_SPOOL_DIR UNSET — i.e. the
+    real spool the collector ships. Computed by calling the production function
+    with the variable removed, not by re-spelling `~/.local/state/...` here, so
+    the guard follows the fallback (XDG_STATE_HOME included) rather than a copy
+    of it that could drift."""
+    with mock.patch.dict(os.environ):
+        os.environ.pop("ACTIVITY_SPOOL_DIR", None)
+        return _spool_emit_module().default_spool_dir()
+
+
+def _decoded_lines(path: Path, only_source: str | None = None) -> list[str]:
+    """Spool lines with their `b64:` fields decoded, so a plaintext marker can be
+    found. `only_source` pre-filters on the PLAIN `source=` field before any
+    decoding — the production spool also carries keylog rows, and this guard has
+    no business decoding those."""
+    if not path.exists():
+        return []
+    out = []
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not raw.strip():
+            continue
+        if only_source is not None and f"source={only_source}" not in raw:
+            continue
+        parts = []
+        for field in raw.split("\t"):
+            if field.startswith("b64:") and "=" in field:
+                key, _, val = field[4:].partition("=")
+                try:
+                    parts.append(
+                        key + "=" + base64.b64decode(val).decode("utf-8",
+                                                                 "replace"))
+                    continue
+                except Exception:  # noqa: BLE001 — undecodable stays verbatim.
+                    pass
+            parts.append(field)
+        out.append("\t".join(parts))
+    return out
+
+
+def test_the_effective_spool_dir_is_under_this_test_s_own_tmp_path(tmp_path):
+    """STRUCTURAL. Not "the env var is set" — an ambient export satisfies that."""
+    effective = _spool_emit_module().default_spool_dir().resolve()
+    root = tmp_path.resolve()
+    assert effective.is_relative_to(root), (
+        "ACTIVITY SPOOL IS NOT ISOLATED TO THIS TEST.\n"
+        f"  spool_emit.default_spool_dir() -> {effective}\n"
+        f"  this test's tmp_path           -> {root}\n"
+        f"  the production spool           -> {_production_spool_dir()}\n"
+        "The autouse `_isolate_activity_spool` fixture in "
+        "scripts/browser-bridge/tests/conftest.py did not run for THIS file. "
+        "If it was moved back into a test module, pytest scoped it to that "
+        "module and every other file in this directory is writing real rows "
+        "into the production activity pipeline.")
+
+
+def test_a_real_emit_lands_in_tmp_and_never_in_the_production_spool(
+        tmp_path, monkeypatch):
+    """BEHAVIOURAL. Drives the actual production writer, `emit_cmd_event()`."""
+    production = _production_spool_dir()
+    production_existed = production.exists()
+    marker = "spool-isolation-guard-" + uuid.uuid4().hex
+
+    monkeypatch.setattr(S, "_SPOOL_EMIT_PATH", SPOOL_EMIT_PY)
+    monkeypatch.setattr(S, "_spool_emit_mod", None)
+    monkeypatch.setattr(S, "_spool_emit_tried", False)
+    S.emit_cmd_event("read", marker, "ok", 1, domain="")
+
+    tmp_log = tmp_path / "activity-spool" / "current.log"
+    written = _decoded_lines(tmp_log)
+    assert any(marker in ln for ln in written), (
+        f"emit_cmd_event() did not write into the per-test spool {tmp_log} "
+        f"({len(written)} line(s) found there). Either the isolation fixture "
+        "did not run for this file, or the emit path is broken — in the first "
+        "case the row went to the PRODUCTION spool instead.")
+
+    production_log = production / _spool_emit_module().CURRENT_NAME
+    leaked = _decoded_lines(production_log, only_source="browser-bridge")
+    # Marker only — the failure message must never quote a production row.
+    assert not any(marker in ln for ln in leaked), (
+        f"A TEST EMIT REACHED THE PRODUCTION ACTIVITY SPOOL ({production_log}). "
+        f"The marker {marker} written by this test is present there; the "
+        "collector ships that spool to ClickHouse activity.events.")
+    if not production_existed:
+        assert not production.exists(), (
+            f"A TEST EMIT CREATED THE PRODUCTION ACTIVITY SPOOL {production}. "
+            "It did not exist before this test ran, so the emitter's "
+            "mkdir(parents=True) resolved to the real path, not tmp_path.")
