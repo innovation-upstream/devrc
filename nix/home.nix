@@ -979,6 +979,26 @@ in
     config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/browser-bridge/SKILL.md";
   home.file.".claude/skills/browser/browser".source =
     config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/browser-bridge/browser";
+  # `opencode` skill — the SAME deliberate exception as `browser`/`dl-router`
+  # above, for the same reason: its source of truth is the opencode subsystem in
+  # THIS repo (scripts/opencode/), not devrc/claude/skills/, and the CLI reads
+  # scripts/opencode/opencode.jsonc + scripts/opencode/lib/ + scripts/claude-hooks/
+  # relative to its own resolved __file__. A store copy would resolve those into
+  # /nix/store and read a FROZEN permission block — so preflight would answer
+  # from whatever config was current at the last switch, which is exactly the
+  # stale-artifact failure mode CLAUDE.md warns about. Out-of-store keeps the
+  # resolver and the config it resolves against as one live tree.
+  #
+  # 🔴 Only these two paths are symlinked; `lib/` is NOT deployed and must not
+  # be. The CLI reaches it through the repo checkout via `__file__`, which is
+  # the same way `dl-route` reaches its siblings.
+  home.file.".claude/skills/opencode/SKILL.md".source =
+    config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/opencode/SKILL.md";
+  home.file.".claude/skills/opencode/opencode-dispatch".source =
+    config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/opencode/opencode-dispatch";
+  # …and on PATH, like dl-route, so the skill body's commands are copy-pasteable.
+  home.file.".local/bin/opencode-dispatch".source =
+    config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/opencode/opencode-dispatch";
   # Claude Code hooks managed here (the script only — the settings.json
   # registration is per-host/unmanaged, as for bash-guard.py above, whose script
   # is likewise managed now). audit-pr-nudge fires

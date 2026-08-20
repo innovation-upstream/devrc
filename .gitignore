@@ -47,6 +47,17 @@ __pycache__/
 # committable.
 .envrc
 
+# Briefs and run logs written by `opencode-dispatch`. The brief is deliberately
+# placed INSIDE --dir (that is what makes an external-directory auto-reject
+# structurally impossible), so in devrc it lands in the working tree. It is
+# scratch work: it quotes task detail, paths and hostnames that belong to no
+# repo, and this repo is PUBLIC.
+#
+# Unanchored on purpose — `--dir` can be any subdirectory. The tool also writes
+# a self-ignoring `.gitignore` into the subdir on first use, so a target repo
+# that is not devrc is covered too; this line is the belt to that's braces.
+.opencode-dispatch/
+
 # opencode's per-repo runtime dir: node_modules, a generated package.json, and
 # a `commands` symlink into the gitignored .claude/. Its own inner .gitignore
 # covers the generated files but not the directory itself, so without this line
