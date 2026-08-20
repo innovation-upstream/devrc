@@ -11,10 +11,12 @@ Core: `~/workspace/devrc/scripts/browser-bridge/SKILL.md`.
 ## Why this file exists
 
 Measured over 2026-08-16..19 (`activity.events`, `source='opencode'`,
-`kind='prompt'`): 17 of 114 prompts drove the browser, and the heavy ones ran
-**3.0–5.6 KB each**. The task-specific part of each was a few hundred bytes. The
-rest was the SAME safety scaffolding retyped every time — READ-ONLY
-prohibitions, "don't log out", "report and stop, don't retry", "don't
+`kind='prompt'`): of 125 prompts, **8** named the bridge, the `browser` skill or
+`browser agent` — and **7 of those 8 ran 3.0–5.6 KB**. (A lower bound: the count
+is what that literal filter matched, and a handful of shorter `Goal:` prompts
+drove the browser by another spelling.) The task-specific part of each was a few
+hundred bytes. The rest was the SAME safety scaffolding retyped every time —
+READ-ONLY prohibitions, "don't log out", "report and stop, don't retry", "don't
 screenshot", a step budget, a report format.
 
 Retyping it is not just cost, it is drift: each copy was slightly different, and
@@ -76,11 +78,14 @@ a task needs an exception, name it in the prompt.
    do not engineer around it. A 429, a throttle notice, a permission wall or an
    unexpected redirect is DATA about the system under test. If a selector
    misses, try ONE alternative, then report the miss; do not grind.
-6. **INLINE READS ONLY, WHEN DELEGATING.** A dispatched subagent commonly
-   cannot read a file back out of `/tmp/*`, and `browser agent` is
-   **structurally blind** — the tool layer never puts pixels in its context
-   (`reference/agent.md`). So a delegated run must not screenshot and must not
-   write files: read with `text [selector]` and with `js` returning JSON.
+6. **INLINE READS ONLY, WHEN DELEGATING.** `browser agent` is **structurally
+   blind** — its tool layer never puts pixels in the model's context, on any
+   model (`reference/agent.md`). A dispatched subagent may additionally be
+   unable to read a file back out of `/tmp/*`: one run in the corpus died
+   exactly there. Not every sandbox behaves that way, so treat it as a risk you
+   cannot check from outside — which is reason enough to keep a delegated run
+   off screenshots and off written files. Read with `text [selector]` and with
+   `js` returning JSON.
    ⚠ This rail is about DELEGATION. Driving the browser yourself, `screenshot`
    then `Read` the `.png` is the correct and documented path (SKILL.md ops
    table) — do not let this line talk you out of the one op that can see.
