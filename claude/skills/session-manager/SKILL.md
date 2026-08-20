@@ -96,7 +96,7 @@ scraped (one batched `capture-pane` per host) for three signals, and every row c
 "this window needs nothing."** Recall is partial by construction: measured on 40 live panes
 2026-08-12, a window parked on `Press Enter to continue…` matches none of them, and text
 typed at the `❯` prompt is deliberately **excluded** (a window one Enter away reads `no` —
-see `reference/waiting-signal.md` for the evidence and what would justify turning it on).
+see `~/.claude/skills/session-manager/reference/waiting-signal.md` for the evidence and what would justify turning it on).
 
 🔴 **`waiting_probable: null` is not `false`.** Read `waiting_status`: `ok` (scraped),
 `not_claude` (never scraped — the signals are Claude-TUI shapes and a shell's last line
@@ -140,7 +140,7 @@ the operator typed**, and devrc is a **PUBLIC** repo — as is every `claudedocs
 message, PR body, comment or test fixture an agent writes into it. Report a draft as a
 **count, a length or a shape**, never verbatim. Quoting one back to Zach in chat is fine;
 writing one to a file that gets committed is not. (Four real drafts were quoted verbatim in
-`reference/waiting-signal.md` and re-used as fixtures before this rule existed —
+`~/.claude/skills/session-manager/reference/waiting-signal.md` and re-used as fixtures before this rule existed —
 `test_no_FIXTURE_DRAFT_string_appears_in_a_shipped_doc` now fails on that shape.)
 
 🔴 **A row can carry BOTH, and that is correct** — the agent asked a question and you
@@ -259,7 +259,7 @@ populations it produced nothing about.
 | `4` | **no** host could be reached — the zero is unmeasured, not measured |
 | `5` | **`tail` only**: the host answered and there is **no tmux server** on it |
 
-Rationale, and why 5 had to be split out of 3: `reference/exit-codes.md`.
+Rationale, and why 5 had to be split out of 3: `~/.claude/skills/session-manager/reference/exit-codes.md`.
 
 Same discipline inside the payload: `hosts.<n>.reachable`/`.error` describe the
 **`list-panes`** call, `.windows_measured`/`.windows_error` the **`list-windows`** call, and
@@ -279,7 +279,7 @@ The intersection guard is unchanged and still runs when you opt in — a task fi
 only when its `window_id` is live **and** that live window's real `(session, index)` equals
 the one the file recorded. Why that relationship (not mere existence) is the guard, what the
 slot-conflict drop does and does not still catch, and the field ledger:
-`reference/fuzzyclaw-guard.md`.
+`~/.claude/skills/session-manager/reference/fuzzyclaw-guard.md`.
 
 ## The agent activity ledger — where age / `stale` / `claude_session_id` come from
 

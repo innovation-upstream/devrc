@@ -73,12 +73,12 @@ Needs chart 0.4.0+'s `agent.auth.provider: openrouter`, which writes the api_key
 
 ## Agent `git push` fails with an empty password
 Expected if something reverted to `$GITHUB_TOKEN` — openclaw's exec sandbox strips it. The helper
-must read `/root/.gh-token`. See `reference/architecture.md` → Repos tab.
+must read `/root/.gh-token`. See `~/.claude/skills/clawgate/reference/architecture.md` → Repos tab.
 
 ## Mass e2e failure
 🔴 More often the **CSS-cwd trap** or the box than a regression. Build `app.css` from inside
 `containers/clawgate/`, then run the **pristine-`origin/trunk` baseline**, before theorising. See
-the core SKILL.md deploy section, and `reference/architecture.md` → e2e for the flake specifics and
+the core SKILL.md deploy section, and `~/.claude/skills/clawgate/reference/architecture.md` → e2e for the flake specifics and
 the `clawgate-e2e-pg-*` container leak.
 
 ## Resolved — do not re-derive

@@ -126,7 +126,7 @@ DB-ping as the readinessProbe (liveness stays `/health`); DB `statement_timeout=
 (migration 0007); version via ldflags (`/health` JSON + startup log); **htmx error toasts** so
 failed mutations are no longer silent.
 
-**Wave 2 = CI + observability** — see `reference/telemetry.md`.
+**Wave 2 = CI + observability** — see `~/.claude/skills/clawgate/reference/telemetry.md`.
 
 **Roadmap (Wave 2 remaining)**: resilience reconciler (stuck-`provisioning` zombies + retryable
 kickoff), scale (N+1s / pagination / retention), durability (PITR vs accepting the 24h dump

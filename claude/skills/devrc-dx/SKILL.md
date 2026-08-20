@@ -129,7 +129,7 @@ grep -q CDPATH ~/.config/zsh/.zshrc 2>/dev/null; ok "CDPATH set" $?
 grep -q "duration = 0" ~/.config/alacritty/alacritty.toml 2>/dev/null; ok "alacritty bell off" $?
 ```
 
-Report the table. For any FAIL, drop into `reference/verification.md` for that category.
+Report the table. For any FAIL, drop into `~/.claude/skills/devrc-dx/reference/verification.md` for that category.
 
 ## Boundaries
 **Will:** analyze all layers holistically · find cross-cutting issues (theme drift, binding

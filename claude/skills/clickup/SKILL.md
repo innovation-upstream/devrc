@@ -82,12 +82,12 @@ tree of read-only `/nix/store` symlinks — editing it directly is impossible, a
 - **All mutable state lives in `$XDG_STATE_HOME/clickup`** (fallback
   `~/.local/state/clickup`) — credentials included. A write next to the code is
   `EROFS`. Setup, `accounts.json`, multi-account and the JWT fields →
-  `reference/setup.md`.
+  `~/.claude/skills/clickup/reference/setup.md`.
 - **`node_modules` is BUILT by nix**, not installed: `nix/pkgs/clickup-node-modules.nix`
   materialises it from `package-lock.json` and links it in at the skill root. To
   change a dependency, edit `package.json` + `package-lock.json`, set `npmDepsHash`
   to `lib.fakeHash`, build, copy the `got:` hash back — never guess it.
-- **Hand-rolling raw `api.clickup.com` requests** → `reference/raw-api.md` — read it
+- **Hand-rolling raw `api.clickup.com` requests** → `~/.claude/skills/clickup/reference/raw-api.md` — read it
   first: a view id is not a list id, dashboard views can't be queried for tasks, and
   both task endpoints paginate (a single-page read made a 67-ticket queue look like 30).
 
