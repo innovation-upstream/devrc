@@ -941,8 +941,13 @@ in
   # to displace a hand-placed regular file at this path — the switch returns
   # rc=0 and silently leaves it unmanaged. `dropStaleClaudeHooks` below is what
   # actually removes it; see the measurement in that comment. Registration in
-  # ~/.claude/settings.json stays per-host and needs no change — it already
-  # invokes `python3 ~/.claude/hooks/bash-guard.py`, which this symlink backs.
+  # ~/.claude/settings.json stays per-host — register-nudge-hook.py deliberately
+  # does NOT own it and will never create a bash-guard entry. What it DOES own is
+  # that entry's INTERPRETER: a bare `python3` there dies with `command not found`
+  # during the ~1s window where the switch's intermediate profile generation has
+  # no python3, and a PreToolUse hook exiting 127 is non-blocking — i.e. the guard
+  # FAILS OPEN mid-switch. The registrar rewrites the token to an absolute
+  # /nix/store python; see its module docstring.
   home.file.".claude/hooks/bash-guard.py" = {
     source = ../scripts/claude-hooks/bash-guard.py;
     force = true;
@@ -1004,7 +1009,9 @@ in
   # is likewise managed now). audit-pr-nudge fires
   # PostToolUse on `gh pr create` and injects context so Claude reflexively offers
   # `/audit-pr` (transcript audit: that request was hand-typed ≥14x while the skill
-  # sat unused). Registered as `python3 ~/.claude/hooks/audit-pr-nudge.py`.
+  # sat unused). Registered by register-nudge-hook.py, which writes an ABSOLUTE
+  # /nix/store interpreter into the command — never a bare `python3`, which is
+  # missing from the profile for ~1s of every switch.
   home.file.".claude/hooks/audit-pr-nudge.py" = {
     source = ../scripts/claude-hooks/audit-pr-nudge.py;
   };
@@ -1063,8 +1070,8 @@ in
   # 🔴 THE AGENT ACTIVITY LEDGER — writer 1 (Claude Code), plus the shared module
   # it and `scripts/session-manager` BOTH read the record shape from.
   #
-  # Why the module ships here and not only in the repo: the hook runs as
-  # `python3 ~/.claude/hooks/agent-ledger-hook.py`, and Python puts the SCRIPT's
+  # Why the module ships here and not only in the repo: the hook is invoked with
+  # the .claude/hooks/ copy as its script argument, and Python puts the SCRIPT's
   # directory on sys.path — so `agent_ledger.py` must sit beside it, exactly the
   # arrangement bash-guard.py already has with guard_core.py. Same source file as
   # `scripts/lib/agent_ledger.py`, which session-manager loads by explicit path,
@@ -1159,6 +1166,12 @@ in
   # The wrapper never returns non-zero, so this cannot abort a switch under
   # activation's `set -eu -o pipefail`; see the contract in its header.
   # $DRY_RUN_CMD keeps `home-manager build`/dry-run read-only.
+  #
+  # 🔴 ${pkgs.python312}/bin/python3 is not merely "an interpreter that works" —
+  # the registrar writes `os.path.realpath(sys.executable)` into every managed
+  # hook command, so THIS path is what lands in settings.json and pins the hooks
+  # to an immutable, GC-rooted store closure. Swapping it for a profile path
+  # would silently reopen the mid-switch `python3: command not found` window.
   home.activation.registerClaudeHooks =
     lib.hm.dag.entryAfter [ "writeBoundary" "linkGeneration" ] ''
       $DRY_RUN_CMD ${pkgs.bash}/bin/bash ${../scripts/claude-hooks/register-hooks-activation.sh} \
