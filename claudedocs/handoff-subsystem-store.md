@@ -569,9 +569,13 @@ consultation of existing behaviour. Measured against `server.py`:
   NOT rendered anywhere** — `listing_line` emits ref/count/sensitivity/badges only
   (`subsystem_recall.py:1560`), and mtime is used for ordering. The single time signal is one
   **store-wide** `newest=` in `X-Store-Snapshot`.
-- **"Cheap" was an assumption.** Building the manifest from today's API is one authenticated
-  round-trip per scope: 9 scopes measured at **3,231 ms / 22 KB**, against a whole local read at
-  ~480 ms — while item 4 below prescribes a short timeout.
+- **"Cheap" was an assumption, and measuring it is worse than the audit reported.** Building the
+  manifest from today's API is one authenticated round-trip per scope: 9 scopes at **3,370 ms /
+  22,153 bytes**, a single scope at **285 ms**, against a whole local read at **57/60/57 ms** over
+  three warm runs. That is **~58×**, not the ~7× implied by the `~480 ms` figure the audit reported
+  for the local side — which I quoted here before measuring it myself, and which is wrong. (The
+  9-scope number reproduced: 3,370 ms against the audit's 3,231 ms, byte count identical.) Item 4
+  below prescribes a short timeout; 3.4 s is not it.
 
 Two consequences, both binding. **Phase 2 needs a SERVER-side manifest endpoint**, not just the CLI
 wrapper the README names. And until per-entry mtimes are served, **identity is by REF NAME only**:
