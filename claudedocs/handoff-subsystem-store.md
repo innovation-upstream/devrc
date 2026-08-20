@@ -451,65 +451,65 @@ the day you ship.*
 - **Deliberately left open:** guarding it is almost certainly harmless, and "almost certainly" about
   a listener nobody can account for is a reason to identify it first.
 
+### Four audit findings, measured and unfixed — ranked, all reproducible today
+A read-only audit of the whole subsystem-knowledge surface produced ten findings; six are fixed
+(above). These four remain, in descending value. Each was **run, not read**.
+
+- **`service_recon`'s `recent changes` collapses the pathspec to its shallowest ancestor.**
+  Measured over 7 services: **21 of 56 shown commits (37.5%)** touch a located file; three services
+  scored **0 of 8**. `{scripts, scripts/tests}` prunes to `{scripts}`, which in devrc is ~the whole
+  repo. 🔴 **The `MULTI-DIRECTORY` guard is ANTI-CORRELATED with the damage** — pruning drives the
+  directory count *down*, so the two worst cases print no warning while two clean 8/8 cases do.
+  **Next probe:** run the same `git log` a second time restricted to the located files and print
+  `N of 8 shown commits touch a located file`.
+- **`recall --ref <name>` misses in-scope and reports it as a fact about the whole store.**
+  `--ref minio` from devrc says *"Nothing recorded under that name yet"*; `minio` is recorded in two
+  other scopes. The whole index is already loaded in that process. Same shape as `#598`, on the read
+  path an agent reaches for by hand. **Next probe:** on `ref-absent`, check the loaded index for the
+  ref in other scopes and either name them or say `not recorded in ANY of the N scopes`.
+- **The `NEAR-MISS` legend describes the opposite of the live population.** The caveat says a
+  near-miss means unfinished business you cannot see; **100% (2/2)** of the live near-misses are
+  attempted **`RESOLVED —`** lines — bullets trying to declare something *closed*. The regex already
+  captures which word was attempted (`_NEAR_MISS_MARKER`); `near_miss_marker` throws it away and
+  returns a bool. **Next probe:** keep the captured word, render `🔴 2 NEAR-MISS (RESOLVED)`.
+- **`resume/SKILL.md` restates store measurements that have gone stale** — asserts "53 entries,
+  8 OPEN"; measured 2026-08-20: **65 entries, 12 OPEN**. Fourth stale-figure instance in one day.
+  **Next probe:** delete the digits, keep the imperative, point at `--validate` which computes them.
+
+### Two handoff commits are stranded, right now
+`0d1a616b2c8e` (2026-08-15) and `50a13e60550b` (2026-08-13) exist on **zero remote branches** —
+verified against the live remote with `branch -r --contains`, not stale remote-tracking refs.
+`#599` stops the *next* one being stranded; it deliberately does not rescue these. Recovering them
+is an operator call: `git branch <topic> <sha> && git push -u origin <topic>`, confirm from another
+host, then decide whether the content is still wanted.
+
+### Two broken markers in the live store, now visible and still unfixed
+`datapacket-talos/tekton` carries an em-dash `RESOLVED —` and a colon-less `OPEN`, both written
+2026-08-19. `#560` made them visible on the index row; `#574` makes the class catchable at write
+time. Fixing the two bullets is a one-line edit each and closes the loop end to end.
+
 ## Next steps (ranked)
 
-0. ~~Verify the Cloudflare WAF rate rule exists~~ — **DONE 2026-08-19, and the answer was NO.**
-   It did not exist; it was created and verified by an independent read. Kept as item 0 rather than
-   deleted because the *shape* of the finding outlived it: layer 1 is now a 10s throttle, not a
-   gate, and it is declared in no repo so nothing will notice if it disappears. See the RESOLVED
-   block above before treating "three layers" as three equal layers.
-1. 🔴 **DO NOT split read/write tokens yet — it would harden nothing, and the tripwire already
-   exists.** Earlier revisions of this doc ranked the split #1 on the reasoning that the store is
-   "read-only by virtue of the API having no write route, not by design". Re-examined 2026-08-19,
-   that reasoning is **backwards**: the read-only posture is *structural*, and structurally stronger
-   than a token scope. `server.py` carries
-   `do_POST = do_PUT = do_PATCH = do_DELETE = _reject_write` — every mutating method is `405
-   read-only` with `Allow: GET, HEAD`. That is not a policy a caller could satisfy; it is the
-   absence of a handler. (The 405 also sits *after* the client-IP and lockout checks, deliberately:
-   it used to short-circuit them and was a free unmetered channel — 31 anonymous POSTs produced 31
-   audit lines and counted for nothing.)
-   **The fear this item was written about is already covered by a test, not by prose.** Three pin it,
-   including a source-level one that reads the file:
-   `test_every_write_method_is_405_even_with_a_VALID_token`,
-   `assert "do_POST = do_PUT = do_PATCH = do_DELETE = _reject_write" in src` (which also asserts no
-   real `def do_POST` shadows the alias), and
-   `test_POST_is_STILL_405_and_not_swallowed_by_the_new_ordering`.
-   **So this is a TRIGGER, not a task.** The day phase 3 (§2c) adds a write route, those tests go
-   red — and the split belongs *in that PR*, where the routes and their scopes are decided together.
-   Building it now deploys a credential to be stored, rotated and SOPS-managed for months against a
-   design that is not yet written, and it would likely be stale by the time writes land.
-2. **Exercise the store under adversarial traffic.** The lockout, the rate limiter and the WAF have
-   only ever seen my own well-formed probes. Nothing has been measured under abuse — and layer 1's
-   real behaviour under load is now a live question rather than an assumption, since its mitigation
-   window is 10s.
-3. 🔴 **THE ACTUAL TOP TASK — `#550` item 3: a shape population in `--validate`.** `#560` shipped
-   items 2 and 1 (near-miss and `missing_sections` on the index row), and on its first contact with
-   the real store it surfaced **two genuinely broken markers written that same day** in
-   `datapacket-talos/tekton` — an em-dash `RESOLVED —` and a colon-less `OPEN`. `#560` made those
-   visible **on read**. Item 3 catches them **on write**, in `/handoff` step 4, which already runs
-   `--validate` on the file it just wrote. That is the difference between "someone eventually
-   notices" and "the writer is told immediately".
-   The gap is measured, not aesthetic: `--validate` today returns `OK` at exit 0 for a **renamed
-   spine, an absent spine, and a fully empty body**. The 53/53 spine is enforced by nothing.
-   Advisory only — the verdict must NOT change, for the reason `#550` states: an entry with
-   unfinished business is well-formed, and failing it would be a red gate nobody could turn green.
-   Items 4 and 5 are reporting polish; do them only if they fall out for free.
-4. **Two live near-misses to prune**, in `datapacket-talos/tekton` (above). Trivial, and fixing them
-   exercises the whole loop end to end — badge surfaced them, item 3 would have caught them, entry
-   gets corrected. Also pending: `#560`'s own falsification clause — the `unverifiable` badge fires
-   on **0 of 53** entries today; if still never-green in a month, **delete it** rather than keep an
-   indicator that has never once been non-green.
+0. ~~Verify the Cloudflare WAF rate rule exists~~ — **DONE 2026-08-19, answer was NO.** Layer 1 now
+   exists as a 10s throttle, declared in no repo. See the RESOLVED block above.
+1. 🔴 **DO NOT split read/write tokens yet — a TRIGGER, not a task.** Unchanged and still correct:
+   the read-only posture is structural (`do_POST = do_PUT = do_PATCH = do_DELETE = _reject_write`),
+   three tests pin it, and the split belongs in the phase-3 PR that adds a write route.
+2. **Fix the two broken markers** in `datapacket-talos/tekton` (above). Smallest item here and it
+   exercises the whole badge → validate → prune loop that shipped this week.
+3. **The four audit findings** (above), in the order listed. All measured, all reproducible, none
+   urgent.
+4. **Exercise the store under adversarial traffic.** Unchanged: the lockout, rate limiter and WAF
+   have only seen well-formed probes — and layer 1's 10s mitigation window makes its behaviour under
+   abuse a live question rather than an assumption.
 5. **The store's own roadmap:** the entry-fidelity audit skill, and the "does a generic journal
-   belong" question — roughly ten cross-cutting engineering lessons were filed into
-   *subsystem-scoped* entries for want of a better home. That is a design decision to make, not
-   code to ship; do not start it as filler work.
+   belong" question. A design decision to make, not code to ship — do not start it as filler work.
 6. **PARKED by decision 2026-08-19:** move konnectivity + Calico v6 onto the private network.
-   Root cause is now known and is one missing variable — `IP_AUTODETECTION_METHOD` pins v4 to
-   `cidr=10.0.0.0/24` while **no `IP6_AUTODETECTION_METHOD` exists**, so v6 autodetect takes the
-   first global address, which is public. Blocked on a prerequisite: the private NIC carries only
-   link-local v6, so a ULA must be assigned to both nodes first. Neither k0sctl config pins
-   `spec.k0s.version`, so `k0sctl apply` may attempt a k0s upgrade — fix that before applying
-   anything this way. Measured: BGP has **no MD5 auth on either family** (`password` directives: 0).
+   Root cause known and unchanged (`IP_AUTODETECTION_METHOD` pins v4 to the private CIDR; **no
+   `IP6_AUTODETECTION_METHOD` exists**, so v6 autodetect takes the first global address). Blocked on
+   a prerequisite: the private NIC carries only link-local v6, so a ULA must be assigned to both
+   nodes first. Neither k0sctl config pins `spec.k0s.version`, so `k0sctl apply` may attempt a k0s
+   upgrade — fix that before applying anything that way. BGP has **no MD5 auth on either family**.
 
 ## Gotchas / decisions / dead-ends
 
@@ -748,6 +748,47 @@ asserting both findings' *strings* appear was too weak, because the buggy messag
 token; the assertion that bites pins the **order**. **Check a mutant changes OUTPUT, not just control
 flow.**
 
+### 2026-08-19/20 — what this week's defects had in common
+🔴 **The tools computed the right thing and communicated it badly.** Six separate defects, one
+shape: the information existed and was absent, mistimed, or worded so the reader inferred something
+false. Four of them cost *multiple* sessions each independently reaching the same wrong conclusion.
+That is the class to hunt first in this surface, not logic errors.
+
+- **A guard can encode the bug it should catch.** THREE found this week: an assertion pinning
+  `pair_strength('ratelimit','rate') == PREFIX_STRENGTH` (the defect, written down as intent); one
+  pinning "`index_scopes` returns ONLY the owner"; and two guards asserting `== ()`, which a null
+  scanner satisfies. All passed forever. **When a test documents a contract, ask whether the
+  contract is right — passing tests are not evidence the behaviour is.**
+- **A message becomes belief.** The `WRONG WINDOW` block was read as "the window is structurally
+  dead" by four runs; the `behind` message's devrc-only `ship.sh` claim was repeated back as fact
+  about a repo `ship.sh` does not converge. **Counterweights belong in the text the reader is
+  looking at, not in a doc they will open later.**
+- **Stale figures, four times in one day** (opencode pin, browser-bridge floor, browser-bridge size,
+  `resume/SKILL.md`). Every one was prose asserting a measurement of an artifact someone later
+  edited; every one was caught by a gate built for it. **If a fifth appears, derive the figure at
+  test time rather than restating and pinning it** — `TARGET_FLOORS` already works that way.
+
+### Instrument traps hit this session — each produced a confident WRONG answer
+- 🔴 **Never read a gate verdict through a pipe.** `nix build … | tail` reports the *tail's* status;
+  a background build printed `[exited with code 0]` for a run that FAILED. Bit **three times**. Get
+  the drv (`nix eval --raw .#checks.x86_64-linux.pytests.drvPath`), then `nix log <drv>`, and read
+  `TOTAL collected=… passed=… failed=…` from the CONTENT.
+- 🔴 **A check you do not BRANCH on is not a gate.** The store-content check was run, returned 1,
+  and an unconditional `git commit` in the same command block ran anyway — pushing past a red gate.
+  Run the check in its own block and gate on `$?`.
+- 🔴 **Two-dot `git diff main..HEAD` renders other people's landed work as YOUR deletions.** Read as
+  an agent deleting 1,266 lines of unrelated tests. Use three dots.
+- 🔴 **Uniformity is not agreement.** A verdict-comparison harness returned IDENTICAL on 8/8
+  fixtures because every fixture failed identically for an unrelated reason (`git command failed`,
+  the tool resolves a repo from cwd). A comparison needs a case that DIFFERS before its "same"
+  means anything.
+- 🔴 **The base clone serves stale files that look authoritative.** It is frequently on another
+  session's branch. A merged fix appeared not to have landed because it was read from there; the
+  same clone refused a `--ff-only` that would have merged `main` into a teammate's feature branch.
+  **Check `git -C <repo> branch --show-current` before reading OR writing.**
+- **A grep can forbid discussion.** A test asserting `"merge --ff-only" not in err` would have
+  banned *naming* the operation being warned against. Assert the command form, not the substring.
+
 ## How to verify
 
 ```bash
@@ -830,3 +871,32 @@ plus a mandatory `CF-Connecting-IP`.
 | the record | devrc `#529` `#532` `#533` `#543` |
 
 Store entries updated in two scopes: `devrc/subsystem-store-api` and `homelab-talos/subsystem-store`.
+## State now
+
+🔴 **The store SERVICE is unchanged since the cutover. What moved on 2026-08-19/20 is the TOOLING
+around it** — the read half, the write half, recon, and the handoff writer. **18 PRs merged to
+devrc `main`**, all gate-green, plus homelab-infra `#354` applied and verified on the node.
+
+- **devrc `main` at `fc1f581`**; full suite green (`13081 collected, 0 failed`), and the
+  store-content gate green after **two separate live leaks were closed today**.
+- **The service itself:** pod `0.2.0`, ready, restarts 0; public authed GET returns 200; auth
+  verified live (no token → 401, bad token → byte-identical 401, valid → 200, positive control
+  passed). `SUBSYSTEM_STORE_TRUSTED_PROXIES` is set, so `#520`'s trusted-peer fix is executing.
+- **Layer 1 exists** (created 2026-08-19) but is a **10s throttle, not a gate** — the Free plan
+  refused both design knobs. See the RESOLVED block above; do not read "three layers" as three
+  equal layers.
+- **Host firewall:** both production nodes now carry `RELAY-GUARD` (the second never had one).
+  Applied by hand and verified on the node — chain + jump present on **v4 and v6**, five ports,
+  `9100` went from serving 1,769 unauthenticated metric lines to timing out from off-node.
+
+### Shipped 2026-08-19/20 — 18 PRs, devrc
+| theme | PRs |
+|---|---|
+| the two leaks closed | `#556` (handoff doc) `#587` (prune-skill reference) |
+| the record corrected | `#565` `#568` |
+| analyze-service made cheap | `#552` (recon 22.5 tool calls → 1) `#550` (proposal) |
+| the index tells the truth | `#560` `#574` `#589` `#598` |
+| search stopped inventing matches | `#594` |
+| the handoff writer stopped hiding things | `#588` `#599` |
+| recall got cheaper | `#575` |
+| gates unbroken | `#581` `#570` `#571` |
