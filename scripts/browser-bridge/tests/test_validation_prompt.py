@@ -50,7 +50,7 @@ WHAT ELSE IS CHECKED, AND WHY EACH FAILS INDEPENDENTLY
      mere existence.
   3. THE RAILS. All nine, in order, whole blocks.
   4. THE READER-CAPABILITY SPLIT. `browser agent` is given ONE typed tool with
-     an 11-op browser-only surface and the agent def denies bash/read/edit/
+     a 13-op browser-only surface and the agent def denies bash/read/edit/
      write/webfetch, enforced by a fail-closed runtime gate. It CANNOT open the
      path that carries the rails. A cited prompt therefore reaches it with ZERO
      rails while still reading complete -- and that model has click/type/key/
@@ -183,6 +183,18 @@ CAPABILITY_BULLETS = [
 # template fence was satisfiable from unrelated prose: an audit gutted the
 # line to "-- all nine rails." and scattered the nine labels through the
 # REPORT block, green.
+# 🔴 The WHOLE template fence, pinned. Everything inside a fence is pasted
+# as instruction -- the rule this module established for the INLINE fence,
+# and this one is copy-pasted into every CITE-path prompt. It was left
+# unpinned apart from one line, and an audit walked it five ways, all green:
+# a suspension clause inserted after BUDGET and again at the end; "Follow
+# the standing ... contract at" softened to "Optionally skim" (which guts
+# the delivery mechanism itself); "WRITES ALLOWED -- nothing else:" widened
+# to "anything you judge useful, including logging out:"; and an
+# "If a read looks empty, `activate` the tab." line, which the op scan did
+# not cover because it only read the inline fence.
+TEMPLATE_FENCE = 'TASK: <one sentence -- what to find out, and why it matters> SITE: <url> INSTANCE: <profile key, or: pick the one logged in as Zach> BUDGET: <N> pages / <N> ops -- a live account, so do not paginate deeply. Follow the standing browser-validation contract at ~/workspace/devrc/scripts/browser-bridge/reference/validation-prompt.md -- all nine rails: orient, own tab, read-only, blast radius, failure-is-a-finding, reads, hidden-tab confound, clean up, report honestly. (Cannot read that path? Say so and stop -- do not proceed unrailed.) WRITES ALLOWED -- nothing else: <e.g. the search box + its Submit; or: none> DO NOT TOUCH: <records/entities that are not ours> OBSERVE 1. <specific observation> 2. <specific observation> THE DISCRIMINATOR <the ONE observation that changes the conclusion -- and what each outcome would mean. Without this the report comes back agreeable and useless.> REPORT 1. <deliverable> 2. <deliverable> 3. anything that errored, surprised you, or that you could NOT check'
+
 TEMPLATE_RAIL_ENUMERATION = '-- all nine rails: orient, own tab, read-only, blast radius, failure-is-a-finding, reads, hidden-tab confound, clean up, report honestly. (Cannot read that path? Say so and stop -- do not proceed unrailed.)'
 
 TEMPLATE_RAIL_LABELS = [
@@ -210,6 +222,13 @@ INLINE_OPS_NAMED_ONLY_TO_PROHIBIT = {
 # reason, so an UNintentional divergence is distinguishable from a designed one.
 INLINE_CORRESPONDENCE = {
     1: ["whoami", "extension_stale"],
+    # Rail 2 is ALSO in INLINE_DIVERGENCES: only its `open` half diverges, and
+    # these two tokens are live in both copies. The maps are unioned, not
+    # exclusive, so a partially-divergent rail belongs in both -- filing it only
+    # as divergent silently dropped a passing correspondence AND falsified
+    # test_each_canonical_rail_carries_its_own_operative_tokens' own docstring,
+    # which cites rail 2's token deletion as the case it exists to catch.
+    2: ["nav", "unsaved work"],
     3: ["Connect", "Follow", "Message", "Invite", "Save", "Subscribe", "Send",
         "WRITES ALLOWED", "log out", "Generate", "Render", "Create", "Buy",
         "Publish"],
@@ -250,7 +269,7 @@ INLINE_DIVERGENCES = {
        "that probe on itself -- it is simply told it has no pixels.",
     8: "canonical rail 8 says 'close the tab you opened' and 'restore the "
        "operator's screen'; `browser agent` has neither `open`/`close` nor "
-       "`activate` in its 11-op surface and its wrapper closes the tab on every "
+       "`activate` in its op surface and its wrapper closes the tab on every "
        "exit path, so the inline copy must NOT instruct either.",
 }
 
@@ -322,9 +341,14 @@ def _section(doc_text: str, heading_prefix: str) -> str:
     # and the suite stayed green. Placed BEFORE the real one it was caught, so
     # the gap was purely positional.
     assert len(hits) <= 1, (
-        f"{DOC} has {len(hits)} sections whose heading contains "
-        f"{heading_prefix!r}. A second copy shadows the pinned one for every "
-        "reader who scrolls past the first; there must be exactly one."
+        f"{DOC} has {len(hits)} sections whose heading CONTAINS "
+        f"{heading_prefix!r}:\n  "
+        + "\n  ".join(h.split("\n", 1)[0] for h in hits)
+        + "\n\nEither one of them is a duplicate that shadows the pinned "
+        "section for every reader who does not scroll past the first -- which "
+        "is what this check exists to catch -- or a legitimate sibling heading "
+        "merely starts with the same words. If it is the latter, rename the "
+        "sibling or narrow the prefix passed here; do not drop the check."
     )
     return hits[0] if hits else ""
 
@@ -574,7 +598,7 @@ def test_every_standing_rail_matches_its_pinned_block():
 def test_the_file_tells_the_reader_browser_agent_cannot_read_it():
     """🔴 The rails ride on a filesystem path; `browser agent` has no file tool.
 
-    Its model gets ONE typed tool with an 11-op browser-only surface, and the
+    Its model gets ONE typed tool with a 13-op browser-only surface, and the
     agent def denies bash/read/edit/write/webfetch -- enforced by a fail-closed
     runtime gate before the model is invoked (reference/agent.md). A prompt that
     CITES this path therefore reaches it carrying ZERO rails while still reading
@@ -729,8 +753,11 @@ def test_the_inline_block_names_no_op_the_agent_does_not_have():
     `op_not_allowed:open`, and inline rail 5 says a failure is a finding and to
     STOP. The recommended paste could abort the run it exists to protect.
 
-    The allowed set is PARSED out of `reference/agent.md` rather than restated
-    here, so widening the agent's surface there cannot leave this stale.
+    The allowed set is PARSED out of the runtime constant
+    `ALLOWED_OPS_DEFAULT` (opencode/tools/browser_tool_impl.mjs), and the
+    forbidden set out of `server.py`, so neither is a restatement that can
+    drift. An earlier version read prose in `reference/agent.md` and inherited
+    that prose's staleness.
     """
     # 🔴 Parsed from the CODE, not from prose about the code.
     #
@@ -765,11 +792,24 @@ def test_the_inline_block_names_no_op_the_agent_does_not_have():
 
     preamble, rails = _inline_split(_doc_text())
     inline = preamble + "\n" + "\n".join(rails)
-    # Ops the CLI has that the agent does not. Derived by difference, so an op
-    # promoted into the agent's set stops being flagged automatically.
-    forbidden = {"open", "close", "release", "tabs", "upload", "activate",
-                 "emulate", "agent", "health", "instances", "ping",
-                 "context"} - allowed
+    # Ops the WIRE has that the agent does not, derived from server.py so the
+    # set is closed in BOTH directions: an op promoted into the agent's set
+    # stops being flagged, and a NEW server op starts being flagged. The
+    # previous hand-maintained list was closed only in the first direction --
+    # a new `scroll` op, and the existing `getHtml`, were invisible to it.
+    srv = (BB / "server.py").read_text(encoding="utf-8")
+    wire = set()
+    for const in ("ALLOWED_OPS", "SERVER_OPS"):
+        mm = re.search(rf"^{const}\s*=\s*\((.*?)\)", srv, re.S | re.M)
+        assert mm, f"could not parse {const} from server.py -- guard vacuous."
+        wire |= set(re.findall(r'"([A-Za-z_]+)"', mm.group(1)))
+    assert len(wire) >= 15, (
+        f"parsed only {sorted(wire)} as the wire op set -- too few to be real, "
+        "so the difference below would flag almost nothing."
+    )
+    # `js` is the CLI's spelling of op="eval", not a wire op, and inline rail 6
+    # names it deliberately; it is allowed by virtue of `eval` being allowed.
+    forbidden = wire - allowed - {"js"}
     # 🔴 Match the BARE word too, not just the backticked spelling. The
     # backtick-only version was a spelled guard: an audit reintroduced the
     # round-2 defect as plain prose -- "open a new tab this session owns, then
@@ -777,7 +817,12 @@ def test_the_inline_block_names_no_op_the_agent_does_not_have():
     # died. A maintainer writing the instruction without code formatting must
     # not slip past the test built to catch exactly that instruction.
     def _mentions(op: str) -> int:
-        return len(re.findall(rf"`?\b{re.escape(op)}\b`?", inline))
+        # 🔴 case-INSENSITIVE. The bare-word matcher replaced one spelling with
+        # another: "Close your tab yourself when you are done." at the start of
+        # a rail SURVIVED green while lowercase `close` died -- and these rails
+        # start sentences, so the capitalised form is the likelier spelling of
+        # exactly the instruction this guard exists to stop.
+        return len(re.findall(rf"`?\b{re.escape(op)}\b`?", inline, re.I))
 
     named = sorted(op for op in forbidden if _mentions(op))
     # Declared exceptions: an op the block may NAME because it only ever
@@ -790,7 +835,7 @@ def test_the_inline_block_names_no_op_the_agent_does_not_have():
     for op, phrasing in INLINE_OPS_NAMED_ONLY_TO_PROHIBIT.items():
         if op not in named:
             continue
-        if _mentions(op) == len(re.findall(re.escape(phrasing), inline)):
+        if _mentions(op) == len(re.findall(re.escape(phrasing), inline, re.I)):
             named.remove(op)
     assert not named, (
         f"\n\nthe inline rails block instructs a reader to use {named}, which "
@@ -845,6 +890,38 @@ def test_the_capability_split_bullets_match_their_pinned_blocks(index):
         "INLINES them. Getting it backwards ships a prompt with zero rails to "
         "the highest-risk audience, which is what this section exists to "
         "prevent -- so its wording is a reviewed edit, not free prose."
+    )
+
+
+def test_the_whole_template_fence_matches_its_pin():
+    """🔴 The template fence is instruction too, and it ships on the CITE path.
+
+    Pinning only its slots and its rail-enumeration line left the rest free:
+    the citation imperative could be softened to "optionally skim", WRITES
+    ALLOWED widened to permit logging out, and a suspension clause inserted --
+    all green. Same rule as the inline fence: everything inside the fence is
+    pasted, so all of it is pinned.
+    """
+    fence = _norm(_one_fence(_doc_text(), "The template"))
+    assert fence == TEMPLATE_FENCE, (
+        f"\n\nthe template fence changed.\n  in the file: {fence}\n"
+        f"  pinned here: {TEMPLATE_FENCE}\n\n"
+        "This block is copy-pasted into every prompt that CITES the contract, "
+        "so a clause added here rides into every one of those runs. If the "
+        "change is intended, paste the new fence into TEMPLATE_FENCE in the "
+        "same commit; that paste is the review."
+    )
+
+
+def test_the_template_fence_names_no_op_the_agent_should_not_be_told_to_use():
+    """The op scan covered the inline fence only, so `activate` could be
+    instructed from the template -- which is read by an operator or a subagent
+    driving the CLI, where `activate` IS reachable and DOES take the screen."""
+    fence = _one_fence(_doc_text(), "The template")
+    assert not re.search(r"`?\bactivate\b`?", fence, re.I), (
+        "the template fence names `activate`. It takes the operator's screen "
+        "(RULES.md 🔴), and unlike the inline block this fence is read by "
+        "callers for whom `activate` is actually reachable."
     )
 
 
