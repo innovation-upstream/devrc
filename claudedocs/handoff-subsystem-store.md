@@ -571,41 +571,53 @@ consultation of existing behaviour. Measured against `server.py`:
   NOT rendered anywhere** — `listing_line` emits ref/count/sensitivity/badges only
   (`subsystem_recall.py:1560`), and mtime is used for ordering. The single time signal is one
   **store-wide** `newest=` in `X-Store-Snapshot`.
-- **"Cheap" was an assumption. Measured at MATCHED scope it is ~5–7×, and the two attempts to state
-  it before this one were both wrong.** Building the manifest from today's API is one authenticated
-  round-trip per scope. Warm, on the workbench, against one seeded snapshot:
+- **"Cheap" was an assumption. THREE revisions have now argued about the ratio and every one was an
+  artifact of PROCESS COUNT, so here are absolute costs with the units named instead.** Warm,
+  workbench, one seeded snapshot, each figure over three runs:
 
-  | | hosted | local | ratio |
-  |---|---|---|---|
-  | all 9 scopes | 2.6–3.4 s / 22,153 B | 0.47–0.50 s | ~6× |
-  | one scope | 0.26–0.29 s | 0.05–0.06 s | ~5× |
+  | building this manifest | cost | how |
+  |---|---|---|
+  | local, all 9 scopes / 71 refs | **46–49 ms** | ONE process; work proven by a `refs=71` assertion |
+  | local, one scope | 50–60 ms | ONE process |
+  | local, all 9 scopes | 466–500 ms | **NINE CLI invocations** — this is the artifact, not a cost |
+  | hosted, one scope `?mode=list` | 0.26–0.34 s | one authenticated round-trip |
+  | hosted, all 9 scopes | 2.6–3.4 s / 22,153 B | **nine** round-trips; there is no batch route |
 
-  🔴 **The `~58×` a previous revision printed here was a UNIT MISMATCH — 9 scopes of hosted over 1
-  scope of local — and the `~480 ms` local figure it "corrected" was right all along.** I rejected
-  an auditor's number for the good reason (it was not mine) and then divided by the wrong
-  denominator, which is worse than quoting it unverified. A local single-scope read is **invariant
-  to scope size** (52 ms for a 1-entry scope, 56 ms for a 36-entry one): that is interpreter
-  startup, so no single-scope read is ever ~480 ms and the reading that would have rescued the
-  claim does not exist either. **Reproduce before quoting**: loop the 9 scopes through
-  `subsystem_recall.py --scope <s>` and through `curl …?mode=list`, and compare like for like.
-  ⚠ These are warm workbench numbers over one snapshot, not a general cost — the laptop and a cold
-  cache are unmeasured, and the network side moved 20% across three runs an hour apart.
-- **What survives the correction, and what does not.** The cost argument does NOT carry the weight
-  the previous revision gave it: the designed read asks about ONE scope (~0.27 s) against a cached
-  manifest, so item 4's short timeout is entirely feasible and "3.4 s is not it" was reasoning from
-  the mismatched figure. **The structural argument is untouched and is the real one** — there is no
-  scope-list endpoint and no per-entry mtime, so a manifest built from today's API is N round-trips
-  reconstructing something the server could answer in one, and can carry no per-entry freshness at
-  all. Phase 2 needs the server endpoint for THAT reason, not because the sweep is slow.
+  🔴 **Read the local rows against each other: the whole store costs the SAME as one scope.**
+  Interpreter startup dominates completely, so locally there is no meaningful per-scope cost at all
+  — while hosted pays ~0.29 s *per scope* because no endpoint answers more than one. That asymmetry
+  is the finding; the ratio was never the point. Both earlier figures are withdrawn: `~58×`
+  (9 hosted round-trips ÷ a whole-store local read) and `~6×` (÷ nine spawned interpreters) each
+  divided by a different denominator, and the second was printed while "correcting" the first.
+  ⚠ Warm workbench numbers over one snapshot, not a general cost — the laptop and a cold cache are
+  unmeasured, and the network side moved ~31% across runs an hour apart. **Reproduce before
+  quoting**, and label the process count.
+- **What this does and does not license.** The **structural** argument is the load-bearing one and
+  is untouched: no scope-list endpoint and no per-entry mtime, so a client manifest is N round-trips
+  reconstructing what one endpoint could answer, carrying no per-entry freshness at all. The cost
+  argument survives only in that shape — *no batch route*, not *the sweep is slow*. ⚠ And the warm
+  path is not the whole story: a **cold** manifest (first laptop run, cache expiry, a new scope)
+  pays the full 2.6–3.4 s, which is exactly what item 4's short timeout would kill. The warm read
+  asks about one scope against a cache and is comfortably inside any sane timeout; the build behind
+  it is not, and those are different events that an earlier revision merged into one sentence.
 
 Two consequences, both binding. **Phase 2 needs a SERVER-side manifest endpoint**, not just the CLI
 wrapper the README names. And until per-entry mtimes are served, **identity is by REF NAME only**:
 the advisory may say *hosted holds refs local does not*, and may not say *hosted's copy is newer*.
 ⚠ **The NEGATIVE direction is available and an earlier revision wrongly foreclosed it.** The
 store-wide `newest=` is a valid one-sided bound: when hosted's `newest=` predates a local entry's
-mtime, hosted's copy of that ref provably is **not** newer. Measured — hosted `newest=18:55:31Z`
-against the laptop's newest entry at 19:57Z. Affirmative freshness needs per-entry mtimes; a
-staleness signal does not, and it is the half worth carrying.
+mtime, hosted's copy of that ref provably is **not** newer. Affirmative freshness needs per-entry
+mtimes; a staleness signal does not.
+🔴 **But the example first offered for it was VACUOUS, and the bound's reach is host-dependent.** It
+compared hosted's `newest=` against the laptop's newest entry — an entry in a scope hosted answers
+`scope-absent` for. "Hosted's copy is not newer" about a copy that does not exist is not a
+demonstration. Worse, hosted holds **zero** of the laptop's 21 refs (hosted ⊆ workbench, and the two
+local stores are disjoint), so **on the laptop the bound fires on nothing at all today** — it
+becomes reachable only after phase-3 write-back.
+✅ **Where it does fire is the WORKBENCH**, which shares 70 refs with hosted: measured against
+`newest=18:55:31Z`, **3 refs hosted holds** have a local copy modified after that stamp, so hosted's
+copies are provably stale. That is the non-vacuous instance; state the bound with the host it
+applies to.
 
 The shape it has to have — each item is a measured failure, not a preference:
 1. `--source local|hosted|auto`, default `auto`. Hosted is never primary and never merged in.
@@ -643,7 +655,9 @@ The shape it has to have — each item is a measured failure, not a preference:
    scopes, only `devrc` and `homelab-talos` have a checkout on the laptop — `datapacket-talos` and
    `civitai` do not — so the sizes an ordinary run meets there are **9 and 6**. The 36 arrives via
    an explicit `--scope`, or the day that repo is cloned. Design for 36; do not claim a run hits it.
-   (The laptop has ~40 other repos; this is a statement about these four, not about that host.)
+   (Measured: that host's workspace holds **132 directories, 69 of them git repos** — an earlier
+   revision guessed "~40" in a paragraph whose own thesis is *reproduce before quoting*. The claim
+   is about these four scopes, not about that host.)
 
 **Prerequisites this decision creates, none of them optional.** (a) **No client credential exists on
 either host** — no `~/.config/subsystem-store*`, nothing in `.zshenv`; the only documented path is a
@@ -656,24 +670,27 @@ reasoning does not cover — re-read it as a read-token exposure question before
 🔴 **What this does NOT fix.** The advisory tells the laptop what the workbench holds; it moves
 nothing in the other direction — the laptop's 21 entries reach no other copy, because seeding is a
 manual push from the workbench and there is no write path until phase 3. **And merge is NOT
-deferred-because-hypothetical: it is already live.** The workbench's `datapacket-talos/monitoring.md`
-carries `prometheus-stack` in its `aliases:` — the exact filename of a laptop entry, same scope.
+deferred-because-hypothetical: it is already live.** In one client scope, a workbench entry carries
+in its `aliases:` the **exact filename of a laptop entry in that same scope**. (Named here as `W`
+and `L`; this repo is PUBLIC, and a rationale for redacting one entry filename does not survive
+naming three others 40 lines away — an inconsistency this PR introduced and this revision closes.
+`subsystem_touch.py --scope <s> --validate` will show you which.)
 Zero PATH overlap is not zero SUBJECT overlap.
 
 🔴 **But the mechanism is SILENT SHADOWING, not `ref-ambiguous` — an earlier revision of this block
 asserted the loud failure and the loud one is the one that cannot happen.** `resolve_ref_tiered`
 documents it in its own docstring: *an alias can never outrank a filename*, and the alias tier is
 consulted **only if the filename tier returned zero hits** (`subsystem_resolver.py:687-733`). So in
-a merged corpus `prometheus-stack` resolves to the laptop's FILE, `tier=filename`, `status=recalled`
-— and the workbench's entry becomes unreachable under that ref **with no signal of any kind**. A
-badge you never see beats a badge that fires.
+a merged corpus that ref resolves to `L`, the laptop's FILE, `tier=filename`, `status=recalled` —
+and `W` becomes unreachable under that ref **with no signal of any kind**. A badge you never see
+beats a badge that fires.
 
 ⚠ **And the advisory inherits this, so "needs none of the merge semantics" was an overclaim.** To
 say "hosted holds X that local does not" you must decide identity across two disks, and today's only
-available key is the ref NAME (no per-entry mtimes are served). A name-based diff reports hosted's
-`monitoring` as hosted-only while the laptop already holds that subject as `prometheus-stack.md`. The
-advisory needs no MERGE, but it does need an identity rule, and the one rule available is already
-wrong in the one case measured. Say `refs`, not `entries`, until that is answered.
+available key is the ref NAME (no per-entry mtimes are served). A name-based diff reports `W` as
+hosted-only while the laptop already holds that subject as `L`. The advisory needs no MERGE, but it
+does need an identity rule, and the one rule available is already wrong in the one case measured.
+Say `refs`, not `entries`, until that is answered.
 
 ⚠ **A defect found while measuring: `X-Store-Snapshot`'s `host=` cannot discriminate the two
 writers.** Both hosts' `hostname` is `nixos`, so the stamp reads `host=nixos` whichever seeded it.
