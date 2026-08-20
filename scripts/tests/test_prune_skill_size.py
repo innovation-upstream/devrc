@@ -28,12 +28,17 @@ is exactly how the drift regrows.
 
 WHY THE CEILING IS ABOVE THE 12,288 B TARGET, AND WHAT THAT COSTS
 -----------------------------------------------------------------
-The skill states a 12,288 B target and browser-bridge MEETS it (11,990 B while
-routing ~11x its own weight), so the target is achievable and is not in dispute.
+The skill states a 12,288 B target and browser-bridge MEETS it while routing ~11x
+its own weight, so the target is achievable and is not in dispute.
 This file does not: it sits at 12,859 B (12.56 KiB) after being cut from 14,918 B
 by demoting §6 (landing), §4's deployment table, §7's verification rationale, §0's
 axes and the always-loaded model to three sidecars, plus stripping evidence from
 every remaining section.
+
+(The browser-bridge sentence states no byte count on purpose. That count belongs
+to ANOTHER skill's file: restating it here made this gate red for someone else's
+cosmetic churn, and -- worse -- walkable by a one-number edit. The claim it
+carries is a RELATIONSHIP, and is gated as one; see `BB_CLAIM` below.)
 
 The residual is the classification taxonomy (§3) and the rule NAMES in §0/§7.
 Demoting those was considered and rejected on the record: §3 is consulted at the
@@ -404,11 +409,13 @@ def test_this_modules_own_stated_figures_are_re_measured():
             "extracting '§3 verdict bullets' needs a heading-and-bullet parser whose "
             "own drift would be invisible; the figure only sizes MIN_HEADROOM_BYTES, "
             "which this gate pins directly via 'true working room'",
-        "browser-bridge routes '~11x its own weight' (:32)":
+        "browser-bridge routes '~11x its own weight'":
             "measured 11.05x today, but deriving it means summing that skill's whole "
             "reference/ tree, which makes this gate depend on a SECOND skill's layout; "
             "the load-bearing half of that sentence (browser-bridge MEETS the target) "
-            "is gated via 'browser-bridge size'",
+            "is gated as a relationship by BB_CLAIM + the bb <= target assertion "
+            "below, and the phrase itself can no longer be reworded away because the "
+            "whole normalised sentence is pinned",
     }
 
     # (label, regex with ONE capturing group, expected literal)
@@ -425,7 +432,8 @@ def test_this_modules_own_stated_figures_are_re_measured():
         ("true working room",        r"must remain: ([\d,]+) B of true working",  f"{slack:,}"),
         ("routing-table bytes",      r"routing table \(3 rows, ([\d,]+) B",       f"{row_bytes:,}"),
         ("routing-table mean",       r"routing table \(3 rows, [\d,]+ B -> mean ([\d,]+) B/row", f"{row_bytes // len(rows):,}"),
-        ("browser-bridge size",      r"browser-bridge MEETS it \(([\d,]+) B",     f"{bb:,}"),
+        # NOTE: browser-bridge is NOT gated by a restated byte count any more.
+        # See BB_CLAIM below for the walk that made the literal indefensible.
         # The three hand-maintained restatements of the target, in the module whose
         # headline fix was "it pinned the cross-check against its own copy of the
         # number". Each is a separate sentence, so each needs its own anchor.
@@ -451,6 +459,57 @@ def test_this_modules_own_stated_figures_are_re_measured():
                             "pattern name exactly one sentence")
         elif found[0] != expected:
             problems.append(f"{label}: prose says {found[0]}, measured {expected}")
+
+    # ── The one figure this module does NOT own ──────────────────────────────
+    # Every other gated figure derives from something this module's own change
+    # set owns: prune-skill/SKILL.md, skill-audit.py's TARGET, this file. `bb`
+    # does not -- it measures `scripts/browser-bridge/SKILL.md`, which unrelated
+    # PRs edit. That coupling turned `main` RED for a 48 B cosmetic edit (#551
+    # grew the file, #581 was the one-line re-measure), the fourth stale-figure
+    # failure in a day; #581's own message asked for exactly this fix, to derive
+    # the claim at test time instead of restating a literal.
+    #
+    # 🔴 But brittleness was the lesser half. The literal form was WALKABLE, and
+    # the walk is executed rather than argued: pad browser-bridge to 12,388 B --
+    # over the target -- then update the prose literal to 12,388 to clear the
+    # pin, and this test reports `1 passed` while the sentence it guards asserts
+    # that browser-bridge MEETS a target it now breaches. The gate CERTIFIED a
+    # falsehood, and the repair that silences it is the one that installs it.
+    # That is `claude/RULES.md`'s SPELLED-not-STRUCTURAL guard: the byte count is
+    # a spelling of the claim; `bb <= target` IS the claim.
+    #
+    # Not vacuous despite browser-bridge's own ceiling being this same TARGET
+    # (skill-audit.py:40 defines TARGET as that skill's PROVEN ceiling). That
+    # constant is independent and raisable: raise browser-bridge's MAX_BYTES and
+    # grow the file, and its own gate stays GREEN while this sentence turns
+    # false. This assertion is the only thing watching that seam.
+    #
+    # Pinned as the WHOLE normalised sentence, not a phrase, so a reword cannot
+    # walk it -- and built from the imported `target`, never a second hand-copy
+    # of 12,288, which is the F2 defect this module was written to close.
+    BB_CLAIM = (
+        f"The skill states a {target:,} B target and browser-bridge MEETS it "
+        "while routing ~11x its own weight, so the target is achievable and is "
+        "not in dispute."
+    )
+    if " ".join(src.split()).count(BB_CLAIM) != 1:
+        problems.append(
+            "browser-bridge claim: the sentence asserting that browser-bridge "
+            f"meets the target is not present exactly once as written.\n    "
+            f"Expected verbatim (whitespace-normalised):\n      {BB_CLAIM}\n    "
+            "A reword makes this figure unchecked, so restore the wording or "
+            "re-point this pin deliberately."
+        )
+    if bb > target:
+        problems.append(
+            f"browser-bridge claim: prose says browser-bridge MEETS the "
+            f"{target:,} B target, but it measures {bb:,} B -- over by "
+            f"{bb - target:,} B. The sentence is now FALSE, and this module's "
+            "whole 'the target is achievable and is not in dispute' argument "
+            "rests on it. Fix browser-bridge or rewrite the argument -- do NOT "
+            "restate the new number, which is how the literal form of this "
+            "check certified the same falsehood."
+        )
 
     assert not problems, (
         "this module's own figures no longer describe what they measure:\n  "
