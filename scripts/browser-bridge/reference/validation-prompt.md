@@ -1,12 +1,62 @@
 # The browser VALIDATION-PROMPT contract — cite it, don't retype it
 
 **Load this when:** you are about to WRITE or DISPATCH a browser validation /
-audit / "go check X on the live site" prompt — for a subagent, for `browser
-agent`, or for yourself · you are about to type a wall of READ-ONLY safety rails
-into a prompt · someone handed you a prompt and you want to know which rails it
-is already standing on.
+audit / "go check X on the live site" prompt · you are about to type a wall of
+READ-ONLY safety rails into a prompt · someone handed you a prompt and you want
+to know which rails it is already standing on.
 
 Core: `~/workspace/devrc/scripts/browser-bridge/SKILL.md`.
+
+## 🔴 FIRST: can your reader open this file?
+
+The rails below are carried by a filesystem path. That works only for a reader
+with a file-read tool.
+
+- **A Claude Code subagent, or you** — can `Read` the path. **CITE** it: use the
+  template's citation line and keep the prompt short.
+- **`browser agent`** — **CANNOT.** Its model is given exactly one typed tool
+  with an 11-op browser-only surface (`text`/`html`/`eval`/`nav`/`screenshot`/
+  `frames`/`click`/`type`/`key`/`wake`/`whoami`), and the agent def denies
+  `bash`/`read`/`edit`/`write`/`webfetch` — enforced at runtime by a fail-closed
+  gate before the model is invoked
+  (`~/workspace/devrc/scripts/browser-bridge/reference/agent.md`). A citation
+  reaches it as an unreadable string. **INLINE the block below instead.**
+
+Getting this backwards is the failure this file could otherwise cause: a cited
+prompt to `browser agent` ships with **zero** rails while still reading
+complete, and that model has `click`/`type`/`key`/`nav`/`eval` on the operator's
+live logged-in Brave.
+
+## The inline rails — paste this when the reader cannot read files
+
+```text
+RAILS (standing browser-validation contract):
+1 ORIENT: run `whoami` first; the wrong profile is the commonest wasted run.
+  If extension_stale is true, say so in the report rather than fighting it.
+2 OWN TAB: `open` a tab this session owns. Never `nav` a tab the operator may
+  be using -- it can hold unsaved work.
+3 READ-ONLY: no Connect/Follow/Message/Invite/Save/Subscribe/Send. No form
+  submit except the one named in WRITES ALLOWED. Change no account, privacy or
+  notification setting. NEVER log out. Never click a control that spends money
+  or quota -- Generate/Render/Create/Buy/Publish -- however obvious it looks.
+4 BLAST RADIUS: touch only what WRITES ALLOWED permits. DO NOT TOUCH is a hard
+  list. Anything you create for the test is yours to delete.
+5 A FAILURE IS A FINDING: report it and STOP. Do not retry aggressively or
+  engineer around it. A 429, a throttle notice, a permission wall or an
+  unexpected redirect is DATA. If a selector misses, try ONE alternative, then
+  report the miss.
+6 READS: you cannot see images -- your tool never returns pixels. Read with
+  `text [selector]` and with `js` returning JSON. Do not plan around writing
+  files you intend to read back.
+7 A HIDDEN TAB IS A CONFOUND, NOT A RESULT: an empty or half-built read from a
+  background tab is throttling, not a broken site. `wake` and re-read, and
+  re-`wake` after a reload. Never `activate` -- it takes the operator's screen.
+8 CLEAN UP: close the tab you opened, delete throwaway records you created,
+  and confirm they are gone.
+9 REPORT HONESTLY: quote verbatim rather than summarising away the raw ids,
+  counts and strings. State the sample size and what it cannot support. Say
+  what you could NOT check. Do not round toward a conclusion.
+```
 
 ## Why this file exists
 
@@ -21,12 +71,12 @@ screenshot", a step budget, a report format.
 
 Retyping it is not just cost, it is drift: each copy was slightly different, and
 one copy's omission is invisible. **One rule, one place** — so the rails live
-HERE, once, and a prompt CITES them.
+HERE, once, and a prompt either cites them or pastes the block above.
 
 ## The template
 
 Fill the `<slots>`. Everything not in a slot is already covered by the contract
-below and does not belong in your prompt.
+and does not belong in your prompt.
 
 ```text
 TASK: <one sentence — what to find out, and why it matters>
@@ -36,7 +86,9 @@ BUDGET: <N> pages / <N> ops — a live account, so do not paginate deeply.
 
 Follow the standing browser-validation contract at
 ~/workspace/devrc/scripts/browser-bridge/reference/validation-prompt.md
-(orient, own tab, read-only, report-and-stop, inline reads, cleanup, honesty).
+— all nine rails: orient, own tab, read-only, blast radius, failure-is-a-
+finding, reads, hidden-tab confound, clean up, report honestly.
+(Cannot read that path? Say so and stop — do not proceed unrailed.)
 
 WRITES ALLOWED — nothing else: <e.g. the search box + its Submit; or: none>
 DO NOT TOUCH: <records/entities that are not ours>
@@ -80,19 +132,20 @@ a task needs an exception, name it in the prompt.
    misses, try ONE alternative, then report the miss; do not grind.
 6. **INLINE READS ONLY, WHEN DELEGATING.** `browser agent` is **structurally
    blind** — its tool layer never puts pixels in the model's context, on any
-   model (`reference/agent.md`). A dispatched subagent may additionally be
-   unable to read a file back out of `/tmp/*`: one run in the corpus died
-   exactly there. Not every sandbox behaves that way, so treat it as a risk you
-   cannot check from outside — which is reason enough to keep a delegated run
-   off screenshots and off written files. Read with `text [selector]` and with
-   `js` returning JSON.
+   model (`~/workspace/devrc/scripts/browser-bridge/reference/agent.md`). A
+   dispatched subagent MAY also be unable to read a file back out of `/tmp/*`;
+   one run in the corpus died exactly there, and others read `/tmp` fine — so
+   **probe it, do not assume it**: have the delegate `screenshot` once and
+   `Read` the `.png`, and report-and-stop if that fails. Absent a passing probe,
+   read with `text [selector]` and with `js` returning JSON.
    ⚠ This rail is about DELEGATION. Driving the browser yourself, `screenshot`
    then `Read` the `.png` is the correct and documented path (SKILL.md ops
    table) — do not let this line talk you out of the one op that can see.
 7. **A HIDDEN TAB IS A CONFOUND, NOT A RESULT.** An empty or half-built read
    from a background tab is throttling, not a broken site — `wake` and re-read
    before concluding anything, and re-`wake` after a reload. Never `activate` to
-   fix it: that takes the operator's screen. `reference/spa-wake.md`.
+   fix it: that takes the operator's screen.
+   `~/workspace/devrc/scripts/browser-bridge/reference/spa-wake.md`.
 8. **CLEAN UP.** Close the tab you opened. Delete throwaway records you created,
    and confirm they are gone. If anything took the operator's screen, restore
    BOTH the focused window and the workspace — including on failure.
@@ -106,8 +159,8 @@ a task needs an exception, name it in the prompt.
 - **INSTANCE** — the profile matters more than it looks: access differs per
   profile, and the wrong one returns a plausible 404 rather than an error.
 - **BUDGET** — a live logged-in account throttles on unusual activity. Bound the
-  run in the prompt; `browser agent`'s own `--steps` is a separate, later bound
-  (`reference/agent.md`), and its `steps_used` is not trustworthy.
+  run in the prompt; `browser agent`'s own `--steps` is a separate, later bound,
+  and its `steps_used` is not trustworthy.
 - **THE DISCRIMINATOR** — the highest-value slot. Name the observation whose two
   outcomes point at different conclusions, and say what each would mean. A
   prompt without one gets a report that agrees with whatever you implied.
@@ -122,5 +175,6 @@ These are already true and restating them only adds bytes and drift surface:
 - that `js` evaluates ONE expression — SKILL.md trap 1
 - that GitHub-class CSP blocks injection so `text`/`html` are the way — trap 2
 - the `browser agent` output envelope, guardrails or privacy boundary —
-  `reference/agent.md`
-- iframe / `--frame` mechanics — `reference/frames-cdp.md`
+  `~/workspace/devrc/scripts/browser-bridge/reference/agent.md`
+- iframe / `--frame` mechanics —
+  `~/workspace/devrc/scripts/browser-bridge/reference/frames-cdp.md`

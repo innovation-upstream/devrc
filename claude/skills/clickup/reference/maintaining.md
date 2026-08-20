@@ -45,6 +45,5 @@ node test/js-source.test.mjs          # hermetic; controls for the source scanne
 node test/smoke-test.mjs --readonly   # live API, needs credentials — NOT in any gate
 ```
 
-**Adding a command? Add it to `showUsage()`** — `test/help-coverage.test.mjs`
-fails if any dispatchable command is missing from the help, or if any printed
-command cannot dispatch. That test is why `SKILL.md` does not list commands.
+Adding a command is governed by `SKILL.md` → "Finding a command", not restated
+here — one rule, one place.
