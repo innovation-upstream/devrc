@@ -312,6 +312,44 @@ def resolve_branch(repo: Path, override: str | None) -> str:
     return branch
 
 
+def uncommitted_paths(repo: Path) -> list[str]:
+    """Paths with uncommitted changes in `repo`'s working tree, staged or not.
+
+    🔴 THIS DECIDES WHICH REMEDY THE `behind` MESSAGE OFFERS, and the hazard it
+    measures is NOT "which repo is this". `merge --ff-only` into a tree holding
+    someone else's uncommitted work either refuses or overwrites it, and in a
+    shared clone that work is routinely not yours: measured in `$DATAPACKET`
+    2026-08-19, **38 dirty paths** across at least three sessions while the clone
+    sat **90 commits behind**. That repo's own rules forbid `commit`, `add`,
+    `stash`, `checkout` and `switch` in the primary clone for exactly this reason.
+
+    So the tool measures the tree instead of enumerating repos — an enumeration
+    would be wrong for the next shared checkout nobody added to it.
+
+    UNREADABLE ⇒ TREAT AS DIRTY. A tree we cannot inspect is one we must not
+    recommend mutating; the fail-safe direction is the cautious remedy.
+
+    🔴 `--no-optional-locks`, AND IT IS NOT OPTIONAL HERE. A plain `git status`
+    REFRESHES THE INDEX and writes `.git/index` — on a shared gitdir that is a
+    side effect on every other worktree, and this module already forbids exactly
+    that. The existing no-write guard caught this the first time the check
+    shipped, which is the guard doing its job. The flag makes the read take no
+    lock and write nothing; the cost is that a stat-dirty file can be reported
+    as modified when its content matches, which errs toward the cautious remedy
+    and is the right direction for this decision.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "--no-optional-locks", "-C", str(repo), "status", "--porcelain"],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ["<could not read the working tree>"]
+    if out.returncode != 0:
+        return ["<could not read the working tree>"]
+    return [ln[3:].strip() for ln in out.stdout.splitlines() if ln.strip()]
+
+
 def remote_has_commits_we_lack(repo: Path, remote: str, branch: str) -> bool:
     """Would a push to `<remote>/<branch>` be rejected non-fast-forward?
 
@@ -521,15 +559,54 @@ def main(argv: list[str] | None = None) -> int:
             # 🔴 The RESOLVED branch in every line. An earlier version printed
             # `HEAD` and a literal `<branch>`, so the recovery could not be
             # pasted — and this message is the entire second half of the fix.
+            dirty = uncommitted_paths(repo)
             ff = f"git -C {repo} merge --ff-only {args.remote}/{push_branch}"
-            print(
+            head = (
                 f"status=behind remote={args.remote} branch={push_branch}\n"
                 f"NOTHING WRITTEN — not the doc, not a commit, not a ref.\n"
                 f"  {args.remote}/{push_branch} has commit(s) this checkout does "
                 f"not, so the push would be rejected and the commit would be left "
-                f"behind on a shared branch. That is the state that silently "
-                f"blocks `ship.sh`.\n"
-                f"  Fast-forward, then re-run this exact command:\n"
+                f"behind on a shared branch. In a devrc checkout that is the state "
+                f"that silently blocks `ship.sh`; elsewhere it is a stranded commit "
+                f"on a branch other people push to.\n"
+            )
+            if dirty:
+                # 🔴 A DIRTY TREE CHANGES THE REMEDY, and this is the branch that
+                # matters. `merge --ff-only` here either refuses or overwrites work
+                # that is very often NOT the caller's: measured in a shared clone
+                # 2026-08-19, 38 dirty paths across three sessions at 90 behind.
+                # Repos with a shared primary clone forbid mutating it at all, so
+                # the tool must not print that command as if it were the fix.
+                shown = ", ".join(sorted(dirty)[:4])
+                more = f" (+{len(dirty) - 4} more)" if len(dirty) > 4 else ""
+                print(
+                    f"{head}"
+                    f"  🔴 THIS CHECKOUT IS DIRTY — {len(dirty)} uncommitted "
+                    f"path(s): {shown}{more}\n"
+                    f"  DO NOT fast-forward it. Some or all of that work is "
+                    f"probably another session's, and `merge --ff-only` would "
+                    f"either refuse or overwrite it. Several repos forbid "
+                    f"committing in a shared primary clone for exactly this "
+                    f"reason.\n"
+                    f"  Commit and push from a THROWAWAY WORKTREE off the remote "
+                    f"branch instead, leaving this tree untouched:\n"
+                    f"    git -C {repo} worktree add /tmp/handoff-wt "
+                    f"{args.remote}/{push_branch}\n"
+                    f"    # write the doc there, commit it path-limited, then:\n"
+                    f"    git -C /tmp/handoff-wt push {args.remote} "
+                    f"HEAD:{push_branch}\n"
+                    f"  🔴 Remove the worktree only AFTER the push succeeds — "
+                    f"removing it after a failed push deletes the branch ref and "
+                    f"orphans the commit.\n"
+                    f"  Verify by CONTENT, never ancestry: a squash merge never "
+                    f"makes your head an ancestor of {push_branch}.",
+                    file=sys.stderr,
+                )
+                return EXIT_BEHIND
+            print(
+                f"{head}"
+                f"  This checkout is CLEAN, so a fast-forward is safe. Run it, "
+                f"then re-run this exact command:\n"
                 f"    {ff}\n"
                 f"  🔴 If `--branch {push_branch}` is not the branch you are ON, "
                 f"do NOT run that merge — it would merge an unrelated branch into "
