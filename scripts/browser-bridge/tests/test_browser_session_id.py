@@ -905,6 +905,10 @@ def test_an_unset_or_empty_opencode_id_falls_back_and_still_disclaims(tmp_path, 
     the suppression must come back. A ' ' row is included because the tier's test
     is `-n`, which a single space passes — proving the fallback is chosen by
     emptiness, not by a strip() nobody wrote.
+
+    BASELINES DIFFER PER ROW, so read them per row: the `''` row is an INVARIANT
+    GUARD (green at origin/main, where no tier exists so the id is `claude:`
+    anyway) pinning the fallback DIRECTION; the `' '` row is RED there.
     """
     env = _env(tmp_path, OPENCODE="1", OPENCODE_SESSION_ID=empty,
                CLAUDE_CODE_SESSION_ID="uuid-fallback")

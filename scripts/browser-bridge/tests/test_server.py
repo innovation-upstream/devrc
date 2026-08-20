@@ -2901,6 +2901,10 @@ def test_both_join_sites_answer_the_same_way_for_every_joinable_tier(telemetry, 
     for each tier IN ONE TEST, so a mutant that widens only `session` (or only
     `origin_session`) dies on whichever arm it did not touch. Distinct ids per
     tier, so nothing can pass by echoing a constant.
+
+    BASELINES DIFFER PER ROW: `[opencode]` is RED at origin/main; `[claude]` is
+    an INVARIANT GUARD there (base already answers both sites the same way for
+    that one tier) and is what makes the widening measurable rather than assumed.
     """
     spool_dir = telemetry
     wire_id, bare = TIER_IDS[tier]
