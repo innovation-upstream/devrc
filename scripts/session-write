@@ -1147,7 +1147,15 @@ def validate_log_path(path: str, root: str) -> Optional[Outcome]:
 # G8 / G9 — the two write gates
 # --------------------------------------------------------------------------- #
 def gate_shell_exec(target: dict, allow: bool) -> Optional[Outcome]:
-    """G8. Applies to `send` ONLY — Enter is the execution event."""
+    """G8. Applies to `send` ONLY.
+
+    🔴 Not because Enter is THE execution event — it is not, see measurement
+    (c); a control character in `--text` is another one. It is because `send` is
+    the verb that presses Enter, and G13 is what stops `type` from carrying an
+    execution event of its own. Phrased carelessly ("Enter is the execution
+    event") this sentence is the false premise that shipped the bypass, so it is
+    spelled out here rather than abbreviated.
+    """
     if allow:
         return None
     runtime = target.get("runtime")
