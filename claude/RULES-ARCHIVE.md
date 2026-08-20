@@ -772,6 +772,31 @@ not `git checkout --`" — is what tells an agent to make these copies in the fi
 at all, which is what a scratch tree should have: `git status` inside it errors loudly instead
 of silently operating on the parent.
 
+## worktree-submodules
+*Supports: 🔴 "its SUBMODULES" (the fifth worktree surface).*
+
+`git worktree add` does not populate submodules and prints nothing about it. The directory is
+created and left **empty**, so the tree looks complete.
+
+Measured 2026-08-19 in `civitai/civitai`, fixing an unrelated dev-server bug. A fresh worktree
+had `event-engine-common/` present with 0 entries against 13 in the base clone. `pnpm typecheck`
+returned **12 errors**: 9 × `TS2307 Cannot find module '../../../event-engine-common/…'` and 3 ×
+`TS7006 … implicitly has an 'any' type` downstream of them, all in
+`src/server/services/image.service.ts` and `src/pages/api/internal/bitdex-stats.ts` — two files
+the branch never touched. `git submodule update --init event-engine-common` took it to **0
+errors**. CI was green throughout, because CI runs that init and a worktree does not.
+
+**Why it is expensive out of proportion to the fix.** The errors name files the change did not
+touch, which is exactly the signature of a broken base branch — so it was reported as one, in a
+user-facing claim and in a PR description, before anyone checked. The tell that separates the two
+is cheap and was skipped: **the module the error names EXISTS in the base clone.**
+
+🔴 **A control ran and did not catch it.** Typecheck was re-run on the base ref with the commit
+absent, in the same tree, and produced the same 12 errors — correctly answering "did I introduce
+these?" (no) and being misread as also answering "is the base red?" (it does not). Both arms
+shared the empty submodule, so the control was blind to the variable that mattered. Same shape as
+"a probe that fires identically on its own CONTROL attributes nothing".
+
 ## sibling-agent-kill
 *Supports: 🔴 "With parallel agents this widens: also confirm `/proc/<pid>/cwd` is your OWN
 worktree — the EXACT path."*
