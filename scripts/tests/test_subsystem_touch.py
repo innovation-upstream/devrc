@@ -2979,6 +2979,36 @@ class TestWrongWindowWarning:
         assert st._SOURCE_FLAG["pr"] in lines
         assert st._SOURCE_FLAG["commit"] in lines
 
+    def test_the_block_PRE_EMPTS_the_generalisation_four_runs_have_now_made(self) -> None:
+        """🔴 The block must say the zero is THIN, not structural — measured.
+
+        Four separate runs have read this block, concluded "the session window is
+        structurally empty here because I worked in a worktree", and reported it
+        as a finding. Three were recorded in the store and refuted by a two-minute
+        scan: over 14 devrc sessions only ONE had an empty in-cwd set and 41 of 232
+        paths (17.7%) landed under cwd. The blindness this block describes is about
+        a SUBAGENT's separate transcript, not about the reader's own edits.
+
+        The refutation lived only in a store bullet the reader does not open at the
+        moment it forms the belief — it reads THIS text. So the counterweight has to
+        be here, and it has to survive a reword, which is why the numbers are pinned
+        rather than a phrase.
+        """
+        lines = "\n".join(st.render_wrong_window(self._src(1, 5, self.ONE_UNDER)))
+        assert "THIN, NOT PROOF THE WINDOW IS DEAD" in lines
+        # The measurement, not an adjective — a reader can check these.
+        assert "14 devrc sessions" in lines
+        assert "41 of 232 paths (17.7%)" in lines
+        # It must name the claim it is refuting, or it reads as generic hedging.
+        assert "REFUTED" in lines
+        # …and say what to DO, since the correct action is escalate-and-move-on.
+        assert "do not file a finding about this" in lines.lower()
+
+    def test_the_pre_emption_is_ABSENT_when_the_block_does_not_fire(self) -> None:
+        """The negative half: a mostly-visible session must not be lectured about
+        a generalisation it is in no position to make."""
+        assert st.render_wrong_window(self._src(5, 1, self.FIVE_OUTSIDE)) == []
+
     def test_THE_NEGATIVE_control_a_mostly_visible_session_gets_NOTHING(self) -> None:
         """🔴 The half that makes the positive control mean something. A block
         that also printed here would be boilerplate, and boilerplate is what the

@@ -3838,6 +3838,16 @@ def render_wrong_window(source: PathSource) -> list[str]:
         "subagent gets its own WORKTREE (which is",
         "  a directory OUTSIDE the session cwd). So a well-run session is exactly the "
         "one this window sees least of.",
+        "  ⚠ THIS RUN IS THIN, NOT PROOF THE WINDOW IS DEAD — and the difference has "
+        "been measured, so do not re-derive it",
+        "  from this one reading. Over 14 devrc sessions only 1 had an empty in-cwd "
+        "set and 41 of 232 paths (17.7%)",
+        "  landed under cwd. \"Structurally empty here because of the worktree rule\" "
+        "is REFUTED: the blindness above is",
+        "  about a SUBAGENT's separate transcript, not about your own edits. Three "
+        "prior runs generalised a single 0",
+        "  into a claim about the host and were wrong. Escalate the window; do not "
+        "file a finding about this.",
         "  🔴 READ A SECOND WINDOW BEFORE CONCLUDING ANYTHING FROM THE COUNT BELOW:",
         f"    {_SOURCE_FLAG['pr']:<26} what the BRANCH landed — the only source that "
         f"sees a SUBAGENT's work",
