@@ -157,10 +157,32 @@ in
           { trigger = ":hlt"; replace = "${workspace}/homelab-talos "; label = "homelab-talos path"; search_terms = ["infra"]; }
           { trigger = ":kuc"; replace = "${workspace}/kubeclaw "; label = "kubeclaw path"; search_terms = ["kubeclaw"]; }
 
-          # SSH connect
-          { trigger = ":sshwn"; replace = "ssh zach@10.42.0.30"; label = "SSH workbench (nebula)"; search_terms = ["ssh" "workbench" "wb" "nebula" "mesh" "remote"]; }
+          # SSH connect — 2026-08-19 /espanso-audit. All four were `unreachable`
+          # in --lint: `_token_matches` tests a token as a SUBSTRING of the
+          # trigger, of any LABEL word, or of any search_term, so while two
+          # snippets per host both spell that host, a bare host query matches
+          # both and `_attribute` returns None. Measured: 'lap', 'lap ',
+          # 'ssh lap', 'ssh wor' all fired NOTHING.
+          # No search_terms edit can fix that — the label collides on its own.
+          # So the LAN variants keep the searchable host word and the nebula
+          # ones become direct-trigger-only (the `dashbaord` shape, which is the
+          # one shape with proven direct traffic). That costs nothing they had:
+          # --lint proves they were ALREADY unreachable from search, 0 fires.
+          # LAN owns the word because LAN is the MORE-USED endpoint — over the
+          # 13-day window, real `ssh` invocations in activity.events were
+          # laptop-LAN 4, workbench-LAN 3, workbench-nebula 1, laptop-nebula 0.
+          # 🔴 Do NOT "simplify" this by deleting the LAN or the nebula pair:
+          # all four endpoints are in live use. An earlier pass in this audit
+          # proposed collapsing to nebula-only after reasoning from the SEARCH
+          # stream alone — which only records searches that FAILED to resolve,
+          # so it cannot see the endpoints being hand-typed instead. It would
+          # have deleted the two most-used ones. Query the usage signal, not the
+          # search signal, before touching this block.
+          # Gate: `espanso-usage.py --replay --config <candidate>` — 0 regressions,
+          # 4 newly-resolving searches, unreachable 4 -> 0.
+          { trigger = ":sshwn"; replace = "ssh zach@10.42.0.30"; }
           { trigger = ":sshwl"; replace = "ssh zach@192.168.50.250"; label = "SSH workbench (LAN)"; search_terms = ["ssh" "workbench" "wb" "lan" "local"]; }
-          { trigger = ":sshln"; replace = "ssh zach@10.42.0.100"; label = "SSH laptop (nebula)"; search_terms = ["ssh" "laptop" "nebula" "mesh" "remote"]; }
+          { trigger = ":sshln"; replace = "ssh zach@10.42.0.100"; }
           { trigger = ":sshll"; replace = "ssh zach@192.168.50.155"; label = "SSH laptop (LAN)"; search_terms = ["ssh" "laptop" "lan" "local"]; }
 
           # hot singles
@@ -226,6 +248,23 @@ in
           # queries ("in the meantime", "what can we do") tokenize onto this
           # snippet (see espanso_detect._term_matches).
           { trigger = ":mt"; replace = "tee up what we can do in the meantime: identify work that is INDEPENDENT of what is currently running — nothing touching the same files — then dispatch it in parallel with complete test coverage. if we are actually blocked until that finishes, say so plainly instead of inventing filler work."; label = "Meantime: tee up independent parallel work while that runs"; search_terms = ["meantime" "in the meantime" "while" "while that runs" "parallel" "queue" "queue up" "tee" "tee up" "wait" "blocked" "idle" "what can we do"]; }
+          # Added 2026-08-19 via /espanso-audit — all three WHOLE-STANDALONE-MESSAGE
+          # shaped, the only shape that has ever stuck here. Transcript demand over
+          # the 13-day window: "anything left open from this thread/session?" 13,
+          # "proceed, dispatch(, include complete test coverage)" 29+3, "create a
+          # /clawgate task to pick up the issues" 3.
+          # 🔴 The search_terms below are NOT free-form — `_token_matches` is a
+          # SUBSTRING test over trigger + label words + search_terms, so a new
+          # label can silently STEAL an existing snippet's searches. The obvious
+          # term for :cgt was "task", and 'ask' ⊂ 'task' would have hijacked all
+          # 58 of :acq's 'ask' fires — caught by replaying the real search stream,
+          # not by reading the list. Hence "ticket" here, and "coverage"/"proceed"
+          # rather than "dispatch" on :pdt. Re-run
+          # `espanso-usage.py --replay --config <candidate>` after ANY edit here
+          # and diff it against the deployed config: 0 regressions is the gate.
+          { trigger = ":alo"; replace = "anything left open from this thread?"; label = "Anything left open from this thread?"; search_terms = ["open" "left open" "loose" "outstanding" "remaining" "unfinished"]; }
+          { trigger = ":pdt"; replace = "proceed, dispatch, include complete test coverage"; label = "Proceed - dispatch with complete test coverage"; search_terms = ["proceed" "coverage" "test coverage" "complete"]; }
+          { trigger = ":cgt"; replace = "create a /clawgate task to pick up the issues"; label = "Create a clawgate ticket for the issues"; search_terms = ["clawgate" "ticket" "issues" "pick up"]; }
           # Removed 2026-07-25 via /espanso-audit — all keylog-evidence-backed:
           #  ZERO-FIRE set — 0 keylog fires + short-form hand-typing; steering already in
           #   RULES.md / slash-commands: :rnx, :pst ("proceed, dispatch" typed 40+×),
