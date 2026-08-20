@@ -285,10 +285,85 @@ def test_the_plugin_is_tracked_by_git():
     an untracked `source = ../…` file makes the switch SUCCEED with the plugin
     simply absent, and the only symptom is a variable that is never set. The
     file existing on disk (the test above) is a different claim from the flake
-    being able to read it."""
+    being able to read it.
+
+    🔴 THE `.git` GUARD IS NOT OPTIONAL, and `shutil.which("git")` does not
+    stand in for it. In the `checks.pytests` sandbox git IS on PATH
+    (flake.nix nativeBuildInputs) but the source it runs against is a
+    `/nix/store/…-source` copy with **no `.git` at all** — so
+    `ls-files --error-unmatch` returns rc 128 ("not a git repository") and this
+    test fails permanently, on a tree where the file is demonstrably present
+    because the flake copied it. The assertion message would then be actively
+    false and send a reader hunting an untracked file that is not untracked.
+    It also cannot be skipped away: run-tests.sh's EXPECTED_SKIPS requires the
+    skip total to EQUAL its one entry.
+
+    So the two tiers get the check that means something in each, which is the
+    same split scripts/tests/test_clawgate_predicate_single_source.py already
+    uses: EXISTENCE (the test above) is the sandbox's evidence — the store copy
+    is built from tracked files only, so an untracked file simply would not be
+    there — and TRACKEDNESS is the dev host's, where the file exists whether or
+    not git knows about it. Returning early rather than skipping keeps the skip
+    ledger intact.
+    """
+    if not (ROOT / ".git").exists():
+        return
     rc = subprocess.run(["git", "-C", str(ROOT), "ls-files", "--error-unmatch",
                          "scripts/opencode/plugin/session-env.js"],
                         capture_output=True, text=True, timeout=30)
     assert rc.returncode == 0, (
         "scripts/opencode/plugin/session-env.js is not tracked by git — the "
         "flake will silently omit it from the deploy")
+
+
+PLUGIN_REL = "scripts/opencode/plugin/session-env.js"
+
+
+def _fake_tree(tmp_path, *, git: bool, tracked: bool) -> Path:
+    """A minimal tree carrying the plugin at its real relative path."""
+    root = tmp_path / "tree"
+    (root / "scripts" / "opencode" / "plugin").mkdir(parents=True)
+    (root / PLUGIN_REL).write_text("// stand-in\n")
+    if git:
+        subprocess.run(["git", "-C", str(root), "init", "-q"], check=True,
+                       capture_output=True, timeout=30)
+        if tracked:
+            subprocess.run(["git", "-C", str(root), "add", PLUGIN_REL],
+                           check=True, capture_output=True, timeout=30)
+    return root
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+@pytest.mark.parametrize("git,tracked,should_raise,why", [
+    # 🔴 THE ROW THAT WOULD HAVE CAUGHT THE BUG. The `checks.pytests` sandbox
+    # runs against a /nix/store/…-source copy with NO `.git`, while git IS on
+    # PATH. The pre-fix guard (`skipif(which("git") is None)` only) therefore
+    # RAN, got rc 128 "not a git repository", and turned the flake check
+    # permanently red with a message claiming an untracked file.
+    (False, False, False, "no .git at all — the nix sandbox's shape"),
+    # The dev-host shape, both ways round. Present so the early return above
+    # cannot quietly become an unconditional one: if the guard widened to
+    # 'always return', this row goes green-when-it-should-fail and is caught.
+    (True, True, False, "a real repo where the file is tracked"),
+    (True, False, True, "a real repo where the file is NOT tracked"),
+])
+def test_the_tracked_by_git_guard_behaves_in_a_git_free_tree(
+        tmp_path, monkeypatch, git, tracked, should_raise, why):
+    """🔴 MUTATION-PROOF THE GUARD ITSELF, in the environment that broke it.
+
+    The check above reads the module-level ROOT, so pointing ROOT at a
+    fabricated tree exercises the real function body against each tier's actual
+    shape — rather than asserting that it happens to pass in THIS checkout,
+    which is the observation that missed the bug in the first place.
+
+    Three rows, and the pair is the point: a guard that returned early
+    unconditionally would satisfy the .git-free row and DIE on the untracked
+    row, so neither direction can pass alone. Case: %s
+    """ % why
+    monkeypatch.setitem(globals(), "ROOT", _fake_tree(tmp_path, git=git,
+                                                      tracked=tracked))
+    if should_raise:
+        with pytest.raises(AssertionError):
+            test_the_plugin_is_tracked_by_git()
+    else:
+        test_the_plugin_is_tracked_by_git()

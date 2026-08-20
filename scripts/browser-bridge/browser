@@ -332,6 +332,14 @@ die() { echo "browser: $*" >&2; exit 1; }
 # drivers that may share a session id should each `open` and then pass the
 # returned `--tab <id>` explicitly on every subsequent op — an explicit --tab
 # overrides owned-tab routing entirely, so they never collide. See SKILL.md.
+# 🔴 THAT PARAGRAPH IS ABOUT CLAUDE CODE ONLY, and opencode is now its MIRROR.
+# Measured in the shipped 1.18.18 binary: `TaskTool.execute` creates a CHILD
+# session and `ShellTool` passes that child's `sessionID` to `shell.env`, so an
+# opencode `task` subagent exports a DIFFERENT `OPENCODE_SESSION_ID` and lands on
+# tier 0 with an id of its own. Claude siblings SHARE identity and collide on one
+# tab; opencode siblings have DISTINCT identities and fragment across tabs. Same
+# escape hatch works for both (`open`, then thread `--tab`), for opposite reasons
+# — but do not read the Claude sentence above as describing opencode.
 
 # _session_from_proc — `sid:<session-id>:<leader-starttime>` from procfs, or
 # non-zero if procfs is unreadable. WHY the POSIX session id and not $PPID/$$:
@@ -519,7 +527,30 @@ SESSION_ID="$(derive_session_id)"
 #   * an opencode session that used to inherit its Claude parent's id and drive
 #     that parent's OWNED TAB now owns a tab of its own, and must `open` one —
 #     which is the documented per-session model, and the same DEGRADATION note
-#     above already called shared identity a trade rather than a feature;
+#     above already called shared identity a trade rather than a feature.
+#     🔴 SAY THE FAILURE MODE, NOT JUST THE HAPPY PATH: "must `open` one" is what
+#     a well-behaved run does; NOTHING REFUSES when it doesn't. `emulate` is the
+#     only op in server.py's OWNED_TAB_ONLY_OPS, so for `nav`/`click`/`type`/`key`
+#     an unowned session resolves to no tab and the extension drives the ACTIVE
+#     tab — the one the operator is looking at. Before this change that same run
+#     inherited the parent's ownership and landed on the parent's tab instead. So
+#     a nested opencode run that starts interacting WITHOUT `open`ing first now
+#     types into the human's screen. See the matching note on OWNED_TAB_ONLY_OPS.
+#   * 🔴 `browser --tab <the parent's tab> emulate` from inside opencode now
+#     RAISES `not_owned_tab` where it used to work: `emulate` requires
+#     `owned is not None and resolved == owned`, and the nested run no longer
+#     owns that tab. Narrow — `emulate` alone — but it regresses the explicit
+#     `--tab` workaround reference/tabs-instances.md teaches for concurrent
+#     drivers. The fix is for each driver to `open` its own tab, which that
+#     section already tells you to do; the doc now says so for this case too.
+#   * 🔴 An opencode `task` SUBAGENT gets a DIFFERENT id, not its parent's:
+#     measured in the 1.18.18 binary, `TaskTool.execute` creates a child session
+#     and `ShellTool` passes that child's `sessionID`. Telemetry stays coherent
+#     (each row names the session that really ran the tool) but ROUTING
+#     FRAGMENTS — parent and subagent own different tabs. That is the exact
+#     mirror of the Claude Code case in the DEGRADATION note above, where
+#     siblings SHARE identity: the note is true for Claude and false for
+#     opencode, and each needs the opposite remedy.
 #   * `browser agent` is UNAFFECTED. Its opencode agent runs with `"*": deny`
 #     (scripts/browser-bridge/opencode/browser-agent.md) — no shell at all — so
 #     it cannot reach this CLI; it drives a FORCED tab through the custom tool,

@@ -35,19 +35,34 @@
 //   * PRECEDENT: guard.js and ledger.js are already single-purpose plugin files
 //     in this directory.
 //
-// ⚠ ONE THING HERE IS INFERRED, NOT MEASURED BY THE AUTHOR OF THIS FILE: that
-// opencode runs EVERY plugin registering a given hook key, rather than the first
-// one it finds. env.js already registers `shell.env`, so this file is the second
-// to do so. The inference is from the same repo's `tool.execute.before`, which
-// guard.js and activity-plugin.js both register and which both are recorded as
-// working simultaneously (the guard hard-blocks a denied command; the telemetry
-// rows carry real durations, 188/188 with a session — see their headers). If the
-// inference is wrong, the SYMPTOM IS BENIGN AND VISIBLE: `OPENCODE_SESSION_ID`
-// is simply never set, `derive_session_id` falls through to its documented
-// fallback, and browser-bridge keeps declaring `opencode-inherited` exactly as it
-// does today — no misattribution either way. The post-deploy check is one
-// command: from inside an opencode bash tool, `echo "$OPENCODE_SESSION_ID"`
-// (non-empty) and `echo "$DEVRC"` (non-empty — proves env.js still fires too).
+// --------------------------------------------------------------------------- #
+// THE RUNTIME CONTRACT — READ OUT OF THE SHIPPED 1.18.18 BINARY, not inferred.
+// An earlier version of this header carried these as "⚠ INFERRED"; they were
+// then read directly from /nix/store/…-opencode-1.18.18 and are quoted here so
+// nobody re-derives them from behaviour:
+//
+//   * `Plugin.trigger`:
+//         for (let H of B.hooks) { let M = H[W]; if (!M) continue;
+//                                  yield* promise(async () => M(K, U)) }
+//     EVERY loaded plugin's hook for the key runs, in load order. env.js also
+//     registers `shell.env`; both fire. This is what makes a second file legal.
+//   * `ShellTool.shellEnv`:
+//         trigger("shell.env", { cwd, sessionID, callID }, { env: {} })
+//     then `return { ...process.env, ...b.env }`. So sessionID IS passed on the
+//     bash-tool path, and the plugin overlay WINS over the inherited process
+//     environment — the two facts the `opencode:` tier depends on.
+//   * `PluginPtyEnvironment` / `PtyHttpApi.create` fire `shell.env` with `{cwd}`
+//     ONLY. The empty-write below is justified by the binary, not by caution.
+//   * `uk()` iterates `Object.values(mod)` and throws
+//     `TypeError("Plugin export is not a function")` on a non-function export
+//     (the #298 shape) — but each module's load is individually
+//     `tryPromise(...).catch(() => void)`, so a broken plugin CANNOT take down
+//     env.js or activity-plugin.js. The one-export rule below still stands for
+//     THIS file's own sake.
+//   * The try/catch in the hook is STILL load-bearing despite that isolation:
+//     `trigger` invokes hooks through `Effect.promise`, where a rejection is a
+//     DEFECT — it would kill the whole `shell.env` trigger, taking env.js's
+//     handle injection with it.
 //
 // --------------------------------------------------------------------------- #
 // 🔴 DO NOT ADD A NAMED EXPORT. opencode's loader iterates EVERY named export of
@@ -98,8 +113,15 @@ export const SessionEnvPlugin = async () => ({
       // the misattribution this file exists to prevent. Empty is falsy to the
       // consumer's `[ -n "${OPENCODE_SESSION_ID:-}" ]` test, so it degrades to
       // the same fail-closed path as no plugin at all.
-      output.env.OPENCODE_SESSION_ID =
-        typeof id === "string" && id.length > 0 ? id : "";
+      //
+      // 🔴 NO `&& id.length > 0` — it was there, and it was the SAME
+      // unobservable class this file's header claims was audited out. The only
+      // zero-length string is `""`, which the true arm would return anyway, so
+      // both spellings answer identically for every input. MEASURED: dropping
+      // it SURVIVED (74 passed) against a positive control in the same battery
+      // that KILLED (11 failed). Kept out rather than kept in, so the header's
+      // claim about this file stays true of this file.
+      output.env.OPENCODE_SESSION_ID = typeof id === "string" ? id : "";
     } catch {
       // best-effort — never break the bash tool
     }

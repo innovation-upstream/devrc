@@ -209,6 +209,20 @@ TAB_SCOPED_OPS = frozenset({"getHtml", "text", "eval", "nav", "screenshot",
 #
 # Kept as a SET rather than an `if op == "emulate"` because the next op with this
 # property must land here and not grow a second copy of the predicate.
+#
+# 🔴 THE ASYMMETRY GOT SHARPER WHEN OPENCODE SESSIONS GAINED THEIR OWN ID, and
+# the honest reading is that "degrades gracefully" is doing some work above.
+# `nav`, `click`, `type` and `key` are in TAB_SCOPED_OPS but NOT here, so with no
+# `--tab` and no owned tab they resolve to `None` and the extension drives the
+# ACTIVE tab — the one the human is looking at. Those four are not reads.
+# Until the `opencode:` tier existed, a nested opencode run inherited its Claude
+# parent's id and therefore its ownership, so it landed on the parent's tab; now
+# it owns nothing until it `open`s, and the fallback is what catches it. Nothing
+# REFUSES — "it must `open` a tab first" is the happy path, not an enforcement.
+# Recorded here rather than left implicit because it is a screen-stealing shape,
+# and widening this set is the fix if it ever bites (it would also break the
+# documented one-shot "read the tab I have open" idiom, which is why it is not
+# being widened blind).
 OWNED_TAB_ONLY_OPS = frozenset({"emulate"})
 
 # Per-op required fields (skill-supplied). Absent → 400 bad_request. NOTE: `close`
@@ -1329,10 +1343,11 @@ def emit_cmd_event(op: str, key: str, outcome: str, duration_ms: int,
                 if _is_joinable(tier, bare):
                     payload["origin_session"] = bare
             elif _is_joinable(tier, bare):
-                # 🔴 THE TIER GATE. Only the joinable tier may fill the `session`
-                # JOIN column; any other tier would merge unrelated sessions
-                # under one apparent key. Never widen this to a test on the id's
-                # form, and never let an origin-declaring caller reach it.
+                # 🔴 THE TIER GATE. Only a tier in SESSION_JOINABLE_TIERS — it is
+                # a SET, not the single tag this comment used to name — may fill
+                # the `session` JOIN column; any other tier would merge unrelated
+                # sessions under one apparent key. Never widen this to a test on
+                # the id's form, and never let an origin-declaring caller reach it.
                 rec["session"] = bare
         rec["payload"] = json.dumps(payload, ensure_ascii=False,
                                     separators=(",", ":"))
