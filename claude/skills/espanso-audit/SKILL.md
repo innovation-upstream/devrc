@@ -60,10 +60,37 @@ prune anything from a run that printed one.
 - **~97% of fires go through the Ctrl+Space SEARCH UI**, so `label` +
   `search_terms` ARE the interface. A zero-fire snippet is usually a
   discoverability bug, not a content one (`:acq`, 2026-08-05).
+- 🔴 **The SEARCH stream only records searches that FAILED — never infer what he
+  USES from it.** `--terms` shows queries that resolved to nothing, so it is a
+  sample of failures, and reading a preference off it inverts the meaning. On
+  2026-08-19 every observed ssh query was host-only (`lap`, `ssh wor`), which I
+  read as "he doesn't care about the network axis" and proposed collapsing the
+  four `:ssh*` to nebula-only. Wrong: those queries fired nothing, so he fell
+  back to hand-typing — and `activity.events` showed all four endpoints live
+  with **LAN ahead of nebula** (laptop-LAN 4 shell invocations, workbench-LAN 3,
+  workbench-nebula 1, laptop-nebula 0). The proposal would have deleted the two
+  most-used. **0 fires is equally consistent with "unused" and "used constantly
+  but unreachable" — both predict zero.** Before touching a snippet, query the
+  USAGE signal for what it expands to:
+  `SELECT countIf(text LIKE '%<expansion>%') FROM activity.events WHERE
+  source IN ('zsh','claude','opencode') AND kind IN ('command','prompt')`.
+- 🔴 **`search_terms` are not free-form — a new snippet can STEAL an existing
+  one's searches.** `espanso_detect._token_matches` is a SUBSTRING test over the
+  trigger, every **label word**, and every `search_term`, so `'bench'` ⊂
+  `'workbench'`, `'la'` ⊂ `'nebula'`, `'ask'` ⊂ `'task'`. A `:cgt` labelled
+  "task" would have silently hijacked all 58 of `:acq`'s `'ask'` fires. Two
+  consequences: (a) when two snippets both spell the same word, **no**
+  `search_terms` edit makes a bare query resolve — one of them must stop
+  spelling it; (b) always gate with `--replay --config <candidate>` and **diff
+  it against the deployed config for REGRESSIONS**, not just for new
+  resolutions. Validate that diff with a planted mutant before believing a
+  clean result.
 - DEMAND reads the LOCAL transcripts only; re-run on the other host if you need
   its demand. Retune-vs-prune is a judgement call, so the tool never edits
   `nix/home.nix`. The keystroke expansion itself can only be checked by the user
-  typing a trigger.
+  typing a trigger. **Path snippets read as huge demand with near-zero fires
+  (`:cdp` 300/3) — that is the `$DEVRC`/`$CIVITAI` env handles doing the job,
+  not a discoverability bug. Do not retune them on demand alone.**
 
 Notes:
 - Edit `claude/skills/<name>/SKILL.md` + `nix/home.nix` in the repo, NOT `~/.claude/*`
