@@ -28,8 +28,6 @@ A cheap autonomous model works in its OWN isolated tab and returns a compact
 `{answer,evidence,steps_used,status}` — the page HTML (10K–100K tokens on a heavy
 page) never enters YOUR context.
 
-    browser agent "go to news.ycombinator.com and report the top 3 story titles"
-
 **Drive ops directly when** the task is **precise** (URL + selector/JS known, 1–3
 ops) · **interactive** (click/type/submit/upload) · **diagnostic** (the agent is
 BLIND — its tool returns no pixels; you must SEE a screenshot, or hit-test paint
@@ -122,10 +120,9 @@ explicitly. Why, and the commands → `reference/spa-wake.md`.
 
 ## Reference files — load ONE only when its trigger fires
 
-Paths as stated in Quick start.
-
 | file | load it when… |
 |---|---|
+| `reference/validation-prompt.md` | writing or dispatching a browser validation prompt — the standing rails, cited not retyped |
 | `reference/spa-wake.md` | a read came back empty/half-built, `data.hidden:true`, an SPA is stuck "Loading…", or you're about to call a site broken |
 | `reference/read-envelopes.md` | a read's exact envelope fields; `context` vs `text`; `text --annotated` + the `attrs` it returns; getting a SELECTOR out of a read |
 | `reference/errors.md` | any op returned an error string you don't recognise; `unknown_op`; a reload ↻ didn't take |
