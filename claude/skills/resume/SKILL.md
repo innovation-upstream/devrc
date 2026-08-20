@@ -15,7 +15,15 @@ Topic argument (optional): `$ARGUMENTS`.
 
 1. **Locate the handoff**: if a topic is given, read `claudedocs/handoff-<topic>.md`; otherwise find the most recently modified `claudedocs/handoff-*.md` in the active repo (`ls -t claudedocs/handoff-*.md | head`). **Not every repo uses that lowercase shape** — civitai-manager names its handoff `<civitai-manager>/claudedocs/SESSION-HANDOFF.md` — so if the glob comes back empty, fall back to `ls -t claudedocs/*HANDOFF*.md | head` before concluding there is no handoff (`resume-state.sh` resolves it in exactly that order). If BOTH come back empty, say so and offer to reconstruct state from git/PRs instead — and say plainly that nothing was reconciled, rather than reporting the absence of drift as a clean bill of health.
 
-2. **Read it fully.**
+2. **Read it fully — but treat its "Open investigations" section as RECALL, not live state.**
+
+   🔴 **A handoff's open-investigation block is exactly as stale-able as an index bullet, and nothing marks it.** The status header is obviously dated; a mid-diagnosis block reads as current forever, because it is written in the present tense by someone who was mid-diagnosis. MEASURED 2026-08-19: a doc's leading hypothesis for an intermittent CI failure was **superseded one day after the doc was written** — root-caused, with a classifier, tests and a PR-comment integration already shipped in the same repo — and a session re-derived the retracted hypothesis, refuted a variant of it, measured a failure rate, and was about to build a capture mechanism **that already existed**. The predecessor doc for *that* root-cause opens with "Three corrections to the handoff that framed this task", so it is a repeating shape, not a one-off.
+
+   **Before working any open item, check whether the repo moved under it:**
+   ```bash
+   git -C <repo> log --since=<doc-date> --oneline -- <the pipeline/script/dir the item is about>
+   ```
+   A hit means read those commits before re-deriving anything. The cost is one command; the cost of skipping it is a whole session.
 
 3. **Re-verify against live state — run the deterministic reconciler, don't hand-roll it:**
    ```bash
@@ -46,7 +54,7 @@ Topic argument (optional): `$ARGUMENTS`.
 
    **The index is capped at 100 lines per page, newest-first by entry-file mtime.** Below that cap (every scope today — the largest holds 25) nothing changes and the header still says `none omitted`. Above it the header switches to `entries 1–100 of N` and a notice names the remainder and the flag: `--page 2`, `--page 3`, … reach the older ones, oldest last. The order is stated in the output on purpose — cutting an *alphabetical* index hides entries by an accident of their names, cutting a *recency* index hides the stale ones.
 
-   **`--search <query>` reads by MATCH instead of by whole entry** — reach for it when you want one fact rather than an orientation, and as scopes grow past the point where a body is affordable. It prints HUNKS, each carrying its own `scope/ref`, section, `file:line`, `sensitivity=`, and its **score beside the threshold**, so a weak match is visibly weak. 🔴 **Matching is ONE-WAY** — a query term is matched by corpus words that EXTEND it (`postgres` → `postgresql`), never by ones it merely contains, so type the SHORTER form when unsure: `kube`, not `kubeconfig`. A no-match then means the term really is absent, and the printed near-miss + `--threshold` tells you which. Measured on `datapacket-talos`: `--search minio` 5,267 B / ~1,316 tok, `--search 'nginx ratelimit'` 1,711 B / ~427 tok, and a full-store scan of all 29 entries takes ~40 ms (stdlib only — it shells out to nothing).
+   **`--search <query>` reads by MATCH instead of by whole entry** — reach for it when you want one fact rather than an orientation, and as scopes grow past the point where a body is affordable. It prints HUNKS, each carrying its own `scope/ref`, section, `file:line`, `sensitivity=`, and its **score beside the threshold**, so a weak match is visibly weak. Measured on `datapacket-talos`: `--search minio` 5,267 B / ~1,316 tok, `--search 'nginx ratelimit'` 1,711 B / ~427 tok, and a full-store scan of all 29 entries takes ~40 ms (stdlib only — it shells out to nothing).
 
    - Matching is fuzzy and **coverage-based**: each query term contributes its share, so a two-word query needs both words and `nginx kryptonite` returns nothing rather than `nginx`'s hits. Typos are tolerated (`conection` → `connection`); concatenations work (`ratelimit` finds `rate-limit`); tokens shorter than 4 characters must match exactly.
    - 🔴 **A no-match is not an empty screen.** It says how many entries were scanned, and either names the closest sub-threshold candidate with the exact `--threshold` that would surface it, or says plainly that nothing scored above zero — i.e. an *absent* term, not a weak one. Read which of the two you got before rephrasing.
