@@ -687,6 +687,11 @@ purely cosmetic reword now fails the test, and someone has to update the expecte
 is the cost of having a machine-readable claim about prose at all. A guard that survives every
 reword is a guard that was never checking the claim.
 
+
+**Two more walkable spellings (2026-08).** A two-word check was satisfied by the
+sentence's own STATIC prose — neither computed slot was ever read. A banned phrasing
+was walked by rewording it, and a banned term by a SYNONYM.
+
 ## worktree-not-session
 *Supports: 🔴 "a worktree isolates a working DIRECTORY only" — the SESSION surface: "subagents
 share ONE scratchpad path and the branch namespace".*
@@ -1137,3 +1142,38 @@ prohibition explicitly rather than relying on the general principle.
 
 **The axis that actually got taken was the WORKSPACE, not focus.** Every
 pre-existing hint in the setup said "restore focus"; none mentioned workspaces.
+
+## guards-narrower
+
+*Supports: A guard's DESCRIPTION is a claim about its COVERAGE.*
+
+Six instances surfaced across three independent audits of two PRs in one session,
+and **not one was a logic bug** — every one was a guard or a claim whose wording
+was wider than what it actually did.
+
+1. **The fictional two-way pin.** `server.py` said a tier vocabulary was "pinned
+   two-way against the CLI by tests/test_browser_session_id.py". That symbol
+   appeared nowhere in that file: each side was pinned against its own retyped
+   literal and nothing compared them. A mutant that grew the CLI vocabulary *and*
+   its own literal, leaving the server untouched, **survived 400 passed / 0 failed**.
+2. **The ledger that could not see its own field.** `test_i3_foreground_state_
+   vocabulary_is_closed` promised `result.data.i3` "keeps EXACTLY the three values
+   consumers branch on" and that a new state "fails here" — but it enumerated a
+   *different function's* returns, so a fourth value landed and the test stayed green.
+3. **The migrating badge.** A `LIVE-VERIFIED` paragraph describing the `wake` rig
+   ended up directly under a new heading about the focus gate, because 136 lines
+   were inserted above it — asserting a live verification of a path nobody had run.
+4. **Comments naming consumers that do not consume.** Shipped source and README said
+   `adoption-scan` and the deadman "read this column". Neither does: adoption-scan's
+   browser-bridge entry is `via="source"` and its query never selects `session`;
+   `deadman.py` never references it.
+5. **The query that returns nothing, forever.** A README's flagship example joined a
+   Claude uuid against `ses_`-prefixed opencode ids — measured overlap zero — and
+   failed as a silent empty result, the exact mode the surrounding prose argued against.
+6. **The regex blind at end-of-sentence.** A version-pin scanner's `(?![\d.])`
+   lookahead could not match a version terminating a sentence, hiding **five** stale
+   claims across four files — inside the very surface it existed to police.
+
+The common shape: the sentence describes a relationship; the code inspects one side.
+Each read as coverage while providing none, which is what makes them worse than an
+absent guard — a declared guard stops anyone looking.
