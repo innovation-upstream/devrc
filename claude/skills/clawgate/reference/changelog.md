@@ -75,7 +75,7 @@ FAB** (per-agent unread → session); session-id-in-URL; a consolidated **auto-a
 
 ## 0.7.31–0.7.35 (2026-06-24)
 - **Usage telemetry** — Grafana **Faro RUM** + new Prometheus metrics + the `clawgate-usage`
-  dashboard. See `reference/telemetry.md`.
+  dashboard. See `~/.claude/skills/clawgate/reference/telemetry.md`.
 - RUM-surfaced **error-toast fix**: `toast` was IIFE-local, now `window.toast`.
 - **Per-project auto-approve now PERSISTS** — **migration 0013** + `internal/autoapprove`;
   survives restarts; 1h/8h/24h/indefinite windows.
@@ -172,10 +172,10 @@ FAB** (per-agent unread → session); session-id-in-URL; a consolidated **auto-a
 - **0.7.75 task TAGS** as a routing key + the `title` companion fix (**migration 0018**:
   `tags TEXT[]` GIN-indexed + `title TEXT`). Normalized / sorted / deduped tags;
   `GET /api/tasks?tag=` AND-filter; `GET /api/tags` vocabulary. Full grammar and the reserved
-  namespaces: `reference/internals.md`.
+  namespaces: `~/.claude/skills/clawgate/reference/internals.md`.
 - **0.7.76** machine `DELETE /api/tasks/{id}`.
 - **0.7.77** fixed the **markdown renderer re-parsing its own output** — see
-  `reference/internals.md` (the vault fix, the 33.5s→0.7s quadratic, and the rule "fix the
+  `~/.claude/skills/clawgate/reference/internals.md` (the vault fix, the 33.5s→0.7s quadratic, and the rule "fix the
   RENDERER, not the client").
 - **0.7.78** machine `POST /api/tasks/{id}/comments`.
 - **0.7.79** = two fixes. (a) `ui.taskTitle` **exported as `ui.TaskTitle`**

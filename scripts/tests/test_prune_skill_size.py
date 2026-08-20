@@ -28,9 +28,9 @@ is exactly how the drift regrows.
 
 WHY THE CEILING IS ABOVE THE 12,288 B TARGET, AND WHAT THAT COSTS
 -----------------------------------------------------------------
-The skill states a 12,288 B target and browser-bridge MEETS it (11,821 B while
+The skill states a 12,288 B target and browser-bridge MEETS it (11,942 B while
 routing ~11x its own weight), so the target is achievable and is not in dispute.
-This file does not: it sits at 12,779 B (12.48 KiB) after being cut from 14,918 B
+This file does not: it sits at 12,859 B (12.56 KiB) after being cut from 14,918 B
 by demoting §6 (landing), §4's deployment table, §7's verification rationale, §0's
 axes and the always-loaded model to three sidecars, plus stripping evidence from
 every remaining section.
@@ -48,14 +48,15 @@ because a permanently-red gate trains everyone to click through -- which
 leaner is the intended direction of travel; raising it needs the same kind of
 justification recorded above.
 
-The honest accounting: the skill is 491 B -- 4.0% -- over the target it asks
-others to meet (12,779 against 12,288; `skill-audit.py` prints the same 491 B
+The honest accounting: the skill is 571 B -- 4.65% -- over the target it asks
+others to meet (12,859 against 12,288; `skill-audit.py` prints the same 571 B
 independently). That is disclosed in the body, in the PR that introduced it, and
 here. Every number in this docstring is re-measured, not carried forward: an
 earlier revision restated a size, a growth figure, a percentage and a per-pass
 byte ledger that were all wrong, in the module that declares itself the single
 source of truth for them.
 """
+import importlib.util
 import os
 import re
 from pathlib import Path
@@ -64,10 +65,11 @@ import pytest
 
 # The hard ceiling: SKILL.md must never exceed this many bytes.
 #
-# NOT a derivation -- a measured position. SKILL.md is 12,779 B (`stat -c %s` and
-# `git cat-file -s` agree), so 13,056 leaves 277 B of headroom, of which
-# MIN_HEADROOM_BYTES (192) is the floor that must remain: ~85 B of true working
-# room before the headroom test fires. The comment here previously read
+# NOT a derivation -- a measured position. SKILL.md is 12,859 B (`stat -c %s` and
+# `git cat-file -s` agree), so 13,056 leaves 197 B of headroom, of which
+# MIN_HEADROOM_BYTES (192) is the floor that must remain: 5 B of true working
+# room before the headroom test fires -- i.e. effectively none; the next edit
+# here must evict something. The comment here previously read
 # "12,864 B measured + 192 B headroom"; the file measured 12,834 at the time, so
 # the arithmetic was describing a size the file never had. Re-measure before
 # touching this number, and lower it as the file gets leaner -- never raise it.
@@ -79,13 +81,13 @@ MAX_BYTES = 13_056
 #
 # Sized in units of a REAL edit rather than a round number, and re-measured
 # against the current file rather than restated: the two structures that actually
-# grow here are the reference routing table (3 rows, 348 B -> mean 116 B/row) and
+# grow here are the reference routing table (3 rows, 435 B -> mean 145 B/row) and
 # §3's verdict bullets (9 lines, 1,739 B -> mean 193 B). 192 B is therefore
 # ~one mean §3 bullet, or one routing row with room to spare -- enough that the
 # headroom test fires BEFORE the ceiling rather than arriving alongside it.
 #
-# It is NOT two mean routing rows: that claim was here, and at the real 116 B/row
-# two rows are 232 B > 192. Kept at 192 on the measurement that does hold rather
+# It is NOT two mean routing rows: that claim was here, and at the real 145 B/row
+# two rows are 290 B > 192. Kept at 192 on the measurement that does hold rather
 # than raised to fit a sentence.
 MIN_HEADROOM_BYTES = 192
 
@@ -327,6 +329,140 @@ def _registry_block(body: str) -> str:
     )
     end = body.find("\n## ", start)
     return body[start:] if end == -1 else body[start:end]
+
+
+def test_this_modules_own_stated_figures_are_re_measured():
+    """🔴 THE DOCSTRING IS A CLAIM, AND PROSE COULD NOT HOLD IT.
+
+    This module declares itself the single source of truth for these numbers and
+    asserts "Every number in this docstring is re-measured, not carried forward".
+    THREE CONSECUTIVE audit rounds found it restating a stale one anyway — each
+    time by the same mechanism: an edit moved SKILL.md *after* the derived
+    figures were written, so the arithmetic described a size the file no longer
+    had. Round 2 fixed a figure and left another; round 3 fixed those and the
+    round's own §4 edit shrank the file 2 B, staling five more.
+
+    A fourth hand-fix would be the fourth instance of one defect. This is the
+    deterministic replacement: derive every figure the prose states, and require
+    the prose to contain it. It cannot go stale silently, and it cannot go
+    VACUOUS either — each pattern must MATCH, so a reworded sentence fails loudly
+    instead of quietly checking nothing.
+
+    Cost, stated: a cosmetic reword of these sentences fails this test. That is
+    the trade — a machine-checkable claim for a bit of prose rigidity.
+
+    🔴 Three refinements a round-4 audit forced, each closing a way this gate
+    could have been decorative:
+      - THE TARGET IS IMPORTED, NOT RESTATED. It used to hard-code 12,288 —
+        which made the check labelled "skill-audit cross-check" pin the sentence
+        against this test's OWN copy of the number rather than against the tool
+        it names. Setting `TARGET` in skill-audit.py to 12,000 made the tool
+        print 859 while the prose still claimed 571, and this gate said PASSED.
+        That is the exact defect (F2) the gate was written to close, reproduced
+        inside its own fix.
+      - EXACTLY ONE MATCH IS REQUIRED, not the first. `re.search` takes the
+        earliest hit, so an added sentence quoting a HISTORICAL figure shadows
+        the live one — and this module already quotes historical figures in
+        near-identical phrasing two lines below `MAX_BYTES`. Proven: a decoy
+        sentence let a 99,999 B claim ship green.
+      - COVERAGE IS ENUMERATED. The first version gated 6 of ~12 numeric claims;
+        corrupting the other six left the suite green, and three of those six
+        were the exact shapes rounds 2 and 3 found stale (a percentage beside a
+        re-measured byte count, a second literal in the same sentence, the
+        routing-table arithmetic). Every figure below is now derived. Any figure
+        deliberately NOT gated must be named in `UNGATED` with its reason, so a
+        gap is a declaration rather than a silence.
+    """
+    src = Path(__file__).read_text()
+    size = SKILL_MD.stat().st_size
+
+    # The canonical target lives in the tool this docstring cites. Importing it
+    # is what makes "skill-audit.py prints the same N" a real cross-check.
+    spec = importlib.util.spec_from_file_location(
+        "_sa_target", REPO_ROOT / "scripts" / "skill-audit.py")
+    _sa = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(_sa)
+    target = _sa.TARGET
+
+    over = size - target
+    headroom = MAX_BYTES - size
+    slack = headroom - MIN_HEADROOM_BYTES
+    rows = [ln for ln in SKILL_MD.read_text().splitlines()
+            if ln.startswith("| ") and "reference/" in ln and "Load it when" not in ln]
+    row_bytes = sum(len(ln.encode()) + 1 for ln in rows)
+    bb = (REPO_ROOT / "scripts" / "browser-bridge" / "SKILL.md").stat().st_size
+
+    # Figures deliberately left hand-maintained, named so the gap is DECLARED.
+    # 🔴 A round-5 audit found this dict INCOMPLETE on its first outing: six
+    # numeric claims were neither gated nor named, and corrupting all six at once
+    # left the suite green. The contract this dict exists to keep is that a gap is
+    # a DECLARATION, never a silence — so an incomplete UNGATED is worse than none,
+    # because it advertises a completeness it does not have. Five of the six are
+    # now gated below; the remainder is named here with its reason.
+    UNGATED = {
+        "§3 verdict-bullet mean (9 lines, 1,739 B, mean 193)":
+            "extracting '§3 verdict bullets' needs a heading-and-bullet parser whose "
+            "own drift would be invisible; the figure only sizes MIN_HEADROOM_BYTES, "
+            "which this gate pins directly via 'true working room'",
+        "browser-bridge routes '~11x its own weight' (:32)":
+            "measured 11.05x today, but deriving it means summing that skill's whole "
+            "reference/ tree, which makes this gate depend on a SECOND skill's layout; "
+            "the load-bearing half of that sentence (browser-bridge MEETS the target) "
+            "is gated via 'browser-bridge size'",
+    }
+
+    # (label, regex with ONE capturing group, expected literal)
+    checks = [
+        ("size in the docstring",    r"it sits at ([\d,]+) B",                    f"{size:,}"),
+        ("size in KiB",              r"it sits at [\d,]+ B \(([\d.]+) KiB\)",     f"{size / 1024:.2f}"),
+        ("size in the ceiling note", r"SKILL\.md is ([\d,]+) B \(`stat -c %s`",   f"{size:,}"),
+        ("size in the accounting",   r"\(([\d,]+) against [\d,]+;",               f"{size:,}"),
+        ("the target it cites",      r"\([\d,]+ against ([\d,]+);",               f"{target:,}"),
+        ("over-target bytes",        r"the skill is ([\d,]+) B -- ",              f"{over:,}"),
+        ("over-target percent",      r"the skill is [\d,]+ B -- ([\d.]+)% -- ",   f"{100.0 * over / target:.2f}"),
+        ("skill-audit cross-check",  r"prints the same ([\d,]+) B",               f"{over:,}"),
+        ("headroom",                 r"leaves ([\d,]+) B of headroom",            f"{headroom:,}"),
+        ("true working room",        r"must remain: ([\d,]+) B of true working",  f"{slack:,}"),
+        ("routing-table bytes",      r"routing table \(3 rows, ([\d,]+) B",       f"{row_bytes:,}"),
+        ("routing-table mean",       r"routing table \(3 rows, [\d,]+ B -> mean ([\d,]+) B/row", f"{row_bytes // len(rows):,}"),
+        ("browser-bridge size",      r"browser-bridge MEETS it \(([\d,]+) B",     f"{bb:,}"),
+        # The three hand-maintained restatements of the target, in the module whose
+        # headline fix was "it pinned the cross-check against its own copy of the
+        # number". Each is a separate sentence, so each needs its own anchor.
+        ("target in the heading",    r"CEILING IS ABOVE THE ([\d,]+) B TARGET",   f"{target:,}"),
+        ("target in the preamble",   r"The skill states a ([\d,]+) B target",     f"{target:,}"),
+        ("target in the ratchet note", r"deliberately NOT set to ([\d,]+),",      f"{target:,}"),
+        # A SECOND copy of the routing-table mean, and a figure derived from it.
+        # This is the "second literal restating a gated figure" shape that rounds
+        # 2 and 3 both found stale, so gating one copy and not the other is the
+        # same defect with an extra step.
+        ("routing mean, restated",   r"at the real ([\d,]+) B/row",               f"{row_bytes // len(rows):,}"),
+        ("two mean routing rows",    r"two rows are ([\d,]+) B > ",               f"{2 * (row_bytes // len(rows)):,}"),
+    ]
+    problems = []
+    for label, pattern, expected in checks:
+        found = re.findall(pattern, src)
+        if not found:
+            problems.append(f"{label}: PATTERN DID NOT MATCH ({pattern!r}) — the "
+                            f"sentence was reworded, so this figure is now unchecked")
+        elif len(found) > 1:
+            problems.append(f"{label}: pattern matched {len(found)}x ({found}) — an "
+                            "added sentence can shadow the live figure; make the "
+                            "pattern name exactly one sentence")
+        elif found[0] != expected:
+            problems.append(f"{label}: prose says {found[0]}, measured {expected}")
+
+    assert not problems, (
+        "this module's own figures no longer describe what they measure:\n  "
+        + "\n  ".join(problems)
+        + f"\n\nMeasured now: SKILL.md={size:,} B ({size / 1024:.2f} KiB), target "
+          f"{target:,} (imported from skill-audit.py), over by {over:,} B "
+          f"({100.0 * over / target:.2f}%), headroom {headroom:,} B, working slack "
+          f"{slack:,} B, routing table {row_bytes:,} B over {len(rows)} rows, "
+          f"browser-bridge {bb:,} B.\n"
+        f"Deliberately ungated: {list(UNGATED)}\n"
+        "Re-measure and update the prose; do NOT relax this test."
+    )
 
 
 def test_every_reference_topic_is_routed_from_the_core():

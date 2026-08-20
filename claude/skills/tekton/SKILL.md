@@ -74,7 +74,7 @@ debugging, changing or copying a specific pipeline.
 Path: GitHub → Cloudflare → **prod Traefik** → prod nginx `0.0.0.0:19100` →
 `10.42.0.10:19100` → **homelab nginx** → `el-github-listener:8080`.
 
-## Pipelines (detail in `reference/pipelines.md`)
+## Pipelines (detail in `~/.claude/skills/tekton/reference/pipelines.md`)
 
 | Pipeline | Trigger / scope | Gate + commit status |
 |---|---|---|

@@ -257,6 +257,7 @@ def _sidecar_tail(skill_dir, ref):
       1. bare              `reference/x.md`
       2. absolute          `~/workspace/.../<name>/reference/x.md`
       3. repo-root-relative `.claude/skills/<name>/reference/x.md`
+      4. deployed          `~/.claude/skills/<name>/reference/x.md`
 
     🔴 (3) used to return False, so a repo-local skill written the way the
     prune-skill guidance RECOMMENDS was scored as having no sidecars at all —
@@ -279,11 +280,35 @@ def _sidecar_tail(skill_dir, ref):
         try:
             return p.relative_to(skill_dir).as_posix()
         except ValueError:
-            return None
-    marker = f"{skill_dir.name}/reference/"
+            # 🔴 (4) THE DEPLOYED SPELLING. `~/.claude/skills/<name>/reference/x.md`
+            # expands to an absolute path under the HOME deploy root, not under
+            # the SOURCE skill_dir, so relative_to() raises -- and returning None
+            # here scored a skill with three sidecars and eleven routing lines as
+            # "no skill routes to a reference/ sidecar yet". Measured on devrc
+            # prune-skill 2026-08-19.
+            #
+            # This is not a niche spelling: devrc skills are READ from
+            # ~/.claude/skills/ by an agent whose cwd is some unrelated project,
+            # so it is the only one of the four a reader can actually open. Fall
+            # through to the marker test, which is the same disambiguation (3)
+            # uses -- it names THIS skill's own directory immediately before
+            # `reference/`, so another repo's `apps/reference/manifest.md` still
+            # does not match.
+            pass
+    # 🔴 SEGMENT boundary, not substring. `find()` alone matches a skill whose
+    # name merely ENDS with this one: looking for `mailbox/reference/` hits
+    # `vetr-mailbox/reference/`, and BOTH are real skills here — so a legitimate
+    # cross-reference between them was claimed as `mailbox`'s own sidecar and then
+    # reported as a phantom `missing_refs`. Widening the resolver above newly
+    # exposed absolute/deployed refs to this, so the collision got bigger.
+    # The marker must start the string or be preceded by "/".
+    name = skill_dir.name
+    marker = f"{name}/reference/"
     i = ref.find(marker)
-    if i != -1:
-        return ref[i + len(skill_dir.name) + 1:]
+    while i != -1:
+        if i == 0 or ref[i - 1] == "/":
+            return ref[i + len(name) + 1:]
+        i = ref.find(marker, i + 1)
     return None
 
 
@@ -589,7 +614,10 @@ def render(audits, show_all, n_sections, n_detail, out=sys.stdout):
             p(f"  {a['name']}: " + "; ".join(bits))
         if a["relative_refs"] and not a["abs_ref_base"]:
             p(f"  {a['name']}: {a['relative_refs']} RELATIVE reference path(s) and "
-              "no absolute base stated. Usually FINE: nix/home.nix maps "
+              "no absolute base stated. 🔴 NOT 'usually fine' — this line said so "
+              "until 2026-08-19 and that framing PRODUCED 47 unopenable refs "
+              "across 13 devrc skills. SHIPPING and RESOLVING are separate: "
+              "nix/home.nix maps "
               "devrc/claude/skills with `recursive = true`, so `reference/` DOES "
               "ship to ~/.claude/skills/<name>/reference/ (verified live on "
               "activity, clawgate, initiatives, mailbox, tekton, auditloop, bar, "
@@ -598,6 +626,14 @@ def render(audits, show_all, n_sections, n_detail, out=sys.stdout):
               "(scripts/dl-router/) link only SKILL.md plus their CLI — so THOSE "
               "cores must use repo-absolute paths. State the absolute source next "
               "to the deployed path either way, so a reader can find it to edit.\n"
+              "    🔴 SHIPPING IS NOT RESOLVING, AND A DEVRC SKILL IS NOT EXEMPT. "
+              "A devrc skill is READ from ~/.claude/skills/<name>/ by an agent "
+              "whose cwd is some unrelated project, so a bare `reference/x.md` "
+              "resolves against THAT cwd and the repo-relative "
+              "`claude/skills/<name>/reference/x.md` resolves nowhere either — "
+              "only `~/.claude/skills/<name>/reference/<topic>.md` opens. Gated "
+              "since 2026-08-19 by scripts/tests/test_doc_path_rot.py (rule 1c), "
+              "which fires EVEN WHEN THE FILE EXISTS.\n"
               "    🔴 That paragraph is about whether the file SHIPS. A REPO-LOCAL "
               "skill (a project's own .claude/skills/<name>/) always ships its "
               "reference/ dir, and still breaks here for a different reason: a "

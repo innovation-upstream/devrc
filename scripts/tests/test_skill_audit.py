@@ -843,6 +843,99 @@ def test_another_repos_reference_path_is_still_not_a_sidecar(tmp_path):
     assert a["refs"] == [] and a["missing_refs"] == []
 
 
+# --- deployed (`~/.claude/…`) sidecar spelling -----------------------------------
+# 🔴 THE SPELLING A DEVRC READER ACTUALLY USES. devrc skills are READ from
+# ~/.claude/skills/ (home-manager copies) by an agent whose cwd is some unrelated
+# project, so neither a bare `reference/x.md` nor a repo-relative
+# `claude/skills/<n>/reference/x.md` resolves for that reader — only this one does.
+#
+# It expands to an absolute path under the HOME deploy root rather than under the
+# SOURCE skill_dir, so `Path.relative_to(skill_dir)` raises and the resolver used
+# to give up and return None. Measured on devrc prune-skill 2026-08-19: three
+# sidecars and eleven routing lines scored as "no skill routes to a reference/
+# sidecar yet". Converting the corpus to this spelling WITHOUT this fix would have
+# traded one blindness for another.
+
+DEPLOYED_CORE = """# core
+
+| File | Load it when… |
+|---|---|
+| `~/.claude/skills/rr/reference/alpha.md` | alpha things |
+| `~/.claude/skills/rr/reference/beta.md` | beta things |
+"""
+
+
+def test_a_deployed_spelling_routing_line_is_recognised(tmp_path):
+    a = sa.audit_one(_rr_skill(tmp_path, DEPLOYED_CORE, ("alpha.md", "beta.md")))
+    assert len(a["refs"]) == 2, f"deployed routing lines not seen as sidecars: {a['refs']}"
+    assert a["missing_refs"] == []
+    assert a["orphan_refs"] == []
+
+
+def test_positive_control_a_missing_deployed_topic_is_reported(tmp_path):
+    """THE control: at the pre-fix base this returned [] — a dead routing line in
+    the ONLY spelling a devrc reader can follow, reported by nobody."""
+    a = sa.audit_one(_rr_skill(tmp_path, DEPLOYED_CORE, ("alpha.md",)))
+    assert a["missing_refs"] == ["~/.claude/skills/rr/reference/beta.md"], (
+        f"a dead deployed routing line went unreported: {a['missing_refs']}")
+
+
+def test_a_deployed_spelling_orphan_is_still_reported(tmp_path):
+    """🔴 INVARIANT GUARD, not regression coverage — VERIFIED to survive the
+    mutation (fall-through -> `return None`), because orphan detection does not
+    depend on ref RESOLUTION. Only the two tests above are killed by that mutant.
+    Kept because it pins the opposite failure: a fall-through that claimed every
+    deployed path would make the routed file itself look orphaned."""
+    core = "# core\n\n| `~/.claude/skills/rr/reference/alpha.md` | alpha |\n"
+    a = sa.audit_one(_rr_skill(tmp_path, core, ("alpha.md", "nobody-routes-here.md")))
+    assert a["orphan_refs"] == ["reference/nobody-routes-here.md"]
+
+
+def test_a_deployed_path_naming_ANOTHER_skill_is_not_this_skills_sidecar(tmp_path):
+    """The fall-through must keep (3)'s disambiguation: the marker names THIS
+    skill's own directory. A cross-skill deployed path is a real, common shape —
+    prune-skill cites other skills — and must not be scored as a local sidecar,
+    or every cross-reference becomes a phantom missing topic.
+
+    🔴 INVARIANT GUARD, not regression coverage — VERIFIED to survive the
+    mutation, and it must: a resolver that recognises NOTHING trivially claims
+    nothing. It pins the over-reach the fix could have introduced, which is the
+    failure only the FIXED resolver can reach."""
+    core = "# core\n\nsee `~/.claude/skills/OTHER/reference/alpha.md` in the other skill\n"
+    a = sa.audit_one(_rr_skill(tmp_path, core, ()))
+    assert a["refs"] == [] and a["missing_refs"] == [], (
+        f"a cross-skill deployed path was claimed as a local sidecar: {a}")
+
+
+def test_a_skill_whose_name_is_a_SUFFIX_of_another_is_not_claimed(tmp_path):
+    """🔴 THE SHAPE THAT ACTUALLY COLLIDES, and the one the test above cannot see.
+
+    `OTHER` shares no suffix with `rr`, so that case passes against a plain
+    substring `find()` too — it proves nothing about the real hazard. `mailbox`
+    and `vetr-mailbox` are BOTH real skills in this repo, and `mailbox/reference/`
+    is a substring of `vetr-mailbox/reference/`: before the segment-boundary fix,
+    resolving a `vetr-mailbox` route while auditing `mailbox` returned
+    'reference/gmail.md' — a cross-reference claimed as a local sidecar and then
+    reported as a phantom missing topic.
+
+    🔴 LATENT, NOT OBSERVED — the distinction is the point. Neither skill currently
+    references the other, and `skill-audit.py` output over the real corpus is
+    BYTE-IDENTICAL before and after the fix. This is a constructed probe of a
+    REACHABLE defect, not a field observation; an earlier revision of this
+    docstring wrote it in the past tense as if it had been seen in the corpus,
+    which is a stronger claim than the evidence supports.
+
+    Kills a `find()`-without-boundary-check mutant; the OTHER case does not.
+    """
+    d = tmp_path / "mailbox"
+    (d / "reference").mkdir(parents=True)
+    (d / "SKILL.md").write_text(
+        "# core\n\nsee `~/.claude/skills/vetr-mailbox/reference/gmail.md`\n")
+    a = sa.audit_one(d / "SKILL.md")
+    assert a["refs"] == [] and a["missing_refs"] == [], (
+        f"a sibling skill whose name is a SUFFIX of this one was claimed: {a}")
+
+
 def test_two_spellings_of_one_topic_count_once(tmp_path):
     """app-blocks names legacy-hackathon-ops.md both ways; counting spellings
     reported 16 "reference file(s)" for 15 files.

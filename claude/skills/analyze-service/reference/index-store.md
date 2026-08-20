@@ -30,7 +30,7 @@ never live state, never re-derived config values.
 <!-- resolver-rules:end — deliberately AFTER the last bullet of this list, not before it: an editor appending a rule appends at the END, and a boundary that stops short of the append point leaves the likeliest drift outside the hash. -->
 
 ⚠ The last bullet above says "see `## Write-back (opt-in)`" — that section is now
-`reference/write-back.md`, in this same directory. The reference is **inside the
+`~/.claude/skills/analyze-service/reference/write-back.md`, in this same directory. The reference is **inside the
 hashed region**, so correcting the wording would change a sha that is pinned to
 the resolver's code; the redirect is stated here instead, deliberately.
 

@@ -10,8 +10,7 @@ home-manager** (PR #74). All bar config, block scripts, and the poller live in t
 and deploy via home-manager. Point-in-time history: memory `i3-bar-i3status-rust-migration` +
 `devrc/claudedocs/handoff-agent-facing-workbench-2026-07-11.md`.
 
-**AirVPN host tunnel + its pill → `reference/airvpn.md`** (`~/.claude/skills/bar/reference/airvpn.md`,
-source `~/workspace/devrc/claude/skills/bar/reference/airvpn.md`): the killswitch design, the
+**AirVPN host tunnel + its pill → `~/.claude/skills/bar/reference/airvpn.md`** (source `~/workspace/devrc/claude/skills/bar/reference/airvpn.md`): the killswitch design, the
 🔴 mandatory re-test protocol, apply/re-arm/bail procedures. Read it before touching anything AirVPN.
 
 ## Modernization stance (standing rule — applies whenever you touch this setup)
@@ -111,7 +110,7 @@ X — your call"). Leave the setup a little more modern than you found it; never
 | DND | `i3status-dnd` | 15 | — | dunst paused indicator; `$mod+Shift+n` toggles |
 | media | `i3status-media` | 16 | n/a | qBit-POD AirVPN pill (net_down), **state-driven**: neutral=connected, **RED**=firewalled (tunnel/port-fwd broken), soft-yellow=stale. poller `parse_media`/`fetch_media` read creds from `~/.config/bar/media.env` (0600) — the same `media.env` also feeds `deep-search`, a media release search/grab CLI on PATH (workbench) after `home-manager switch`. **left → `media-menu`**; **right → qBit WebUI** |
 | telemetry deadman | `i3status-telemetry` | 17 | n/a | `tlm N` = N activity-telemetry (host, source) pairs have STOPPED emitting into ClickHouse. 🔴 **`tlm ?` now means ALL FOUR ways of not knowing**, not just one: the deadman evaluated and could not tell (grace-gated >30 min in `parse_telemetry`), OR the poller wrote a `stale`/`error` marker, OR the cache is missing/corrupt, OR the poller stopped refreshing it. They render alike on purpose — the operator's action is the same. `tlm N?` = N were dead as of the last readable poll and this is not current (Critical; a measurement outage never downgrades a known alarm). ⚠ On the MARKER path `stale()` zeroes the count, so that shape is a bare `tlm ?`. Measures BOTH hosts from the workbench poller (it reads the shared table). Logic + the per-source budget table: `scripts/collector/deadman.py` (run it bare for the table; left-click floats it). See the `activity` skill. |
-| airvpn (host) | `i3status-airvpn` | 10 | n/a | **HOST** AirVPN WireGuard pill (net_vpn), **state-driven**, default-OFF. **left → `airvpn-menu`**; **right → `airvpn-detail` float**. 🔴 Full detail + the killswitch re-test protocol: **`reference/airvpn.md`** |
+| airvpn (host) | `i3status-airvpn` | 10 | n/a | **HOST** AirVPN WireGuard pill (net_vpn), **state-driven**, default-OFF. **left → `airvpn-menu`**; **right → `airvpn-detail` float**. 🔴 Full detail + the killswitch re-test protocol: **`~/.claude/skills/bar/reference/airvpn.md`** |
 
 Bars differ by host (`isLaptop` in `graphical.nix`): laptop gets `batteryBlock` and **omits** GPU
 + all count blocks + poller (nebula-only, no LAN path to homelab endpoints); workbench gets GPU

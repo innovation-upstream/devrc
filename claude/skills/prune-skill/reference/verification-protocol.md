@@ -107,12 +107,18 @@ correctly skipped sidecars they did not need. Keep the design. Two things to car
 Content survives, the path resolves, every gate passes; the **PAIRING** broke, and nothing in
 this protocol measures pairings. `image-cacher`'s core (`SKILL.md:31`) prescribes gating on
 bucket fractions `<=5s / >10s / >25s` and states the buckets as `0,5,10,25`. The warning that
-Prometheus's labels are **`"30.0"`, not `"30"`** — and that a mistyped boundary "returns an
-empty result, which reads exactly like a passing gate" — sits in
-`reference/serve-original-transcode-and-deploys.md:37`, routed for *"serve-original,
+Prometheus's `le` labels carry a **decimal suffix — `"5.0"`, not `"5"`** — and that a mistyped
+boundary "returns an empty result, which reads exactly like a passing gate" — sits in
+`<talos-infra>/.claude/skills/image-cacher/reference/serve-original-transcode-and-deploys.md:37`, routed for *"serve-original,
 transcode/VFE, or deploy-time 502s"*. Nothing about a duration query sends you there. The
 agent wrote `le="5"`, got silence, and the rows vanished from a unioned table. **In one fat
-body you scroll past the warning and are immune.** Milder sibling in the same skill: the core's
+body you scroll past the warning and are immune.** 🔴 **Postscript (2026-08-19), and it is half
+the lesson: when that warning was finally lifted into the core, RE-MEASURING it showed the
+warning's own EXAMPLE was wrong** — it named `"30.0"`/`"30"`, and there is no `le=30` on either
+image-cacher histogram (`count by (le)` → `0.0 5.0 10.0 25.0 50.0 …`; the nearest value anywhere
+is `le=300.0`, on a different metric). The RULE was load-bearing and correct; the example was
+fabricated. **Re-verify a documented EXAMPLE, not just the rule it illustrates** — an orphaned
+warning is unread, so nothing corrects its details either. Milder sibling in the same skill: the core's
 Redis hot-command prints saturation numbers with no interpretation, while the sidecar saying
 *"it is NOT a 503 lever, r = 0.029"* is a routing hop away — the agent nearly filed it as an
 availability contributor. **So: when you demote a block, ask what it was PROTECTING. If the
