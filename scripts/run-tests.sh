@@ -1076,7 +1076,16 @@ TARGET_FLOORS=(
   # hermetic rather than merely asserted to be. If this line conflicts with a
   # sibling branch, re-run the gate on the MERGED tree and copy what it prints;
   # do not reconcile the two sides by hand.
-  "scripts/signal/tests|444"
+  # 2026-08-20: 582 tripped the ceiling at 555 with every test PASSING. The gate
+  # printed "scripts/signal/tests|553" and that is what is below, copied not
+  # computed. The 66 new tests guard the MUTATION BATTERY, now kept in-repo at
+  # scripts/signal/tests/mutation_battery.py after eight successive batteries
+  # were written into scratchpads and thrown away. They mutate nothing — they
+  # pin the battery's ANCHORS and killer-test NAMES, because the way a battery
+  # rots is silent: an anchor stops matching, the mutant never lands, and the
+  # run prints ANCHOR-MISS, which reads like a hiccup rather than "this mutant
+  # tested nothing". That has already happened here once.
+  "scripts/signal/tests|553"
   "scripts/initiatives/tests|745"
   "scripts/repo-cos/tests|315"
   "scripts/task-spec-drafter/tests|135"
