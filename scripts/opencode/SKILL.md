@@ -46,6 +46,10 @@ bare word is a usage error, not a silent pass-through.
 `--dir` 18 · `--title` 7 · `--file` 7 (extra attachments; the brief is attached
 automatically) · `-m` 6 · `--auto` 4 · `-c` 2 (continue the last session).
 
+**`--file` attachments are containment-checked too** — each must resolve under
+`--dir`, exactly like a path named in the brief. `preflight` accepts `--file`
+as well, so you can check them without dispatching.
+
 ## Check a brief without dispatching
 
 ```bash
@@ -85,8 +89,10 @@ tail -n 60 <the log path printed on dispatch>
 
 ## When preflight refuses
 
-It refused because a path in the brief is not under `--dir`. Fix the **brief or
-the `--dir`**, never the check — three options, in order of preference:
+It refused because a path — in the brief, or a `--file` attachment — does not
+resolve under `--dir`. The offender is printed as written *and* resolved, tagged
+`[brief]` or `[attachment]`. Fix the **brief or the `--dir`**, never the check —
+three options, in order of preference:
 
 1. move the file under `--dir`;
 2. widen `--dir` to a directory containing both;
@@ -94,6 +100,14 @@ the `--dir`**, never the check — three options, in order of preference:
 
 There is no override flag. The failure it prevents is a silent exit 0, which is
 the one shape nobody notices.
+
+Read the three verdict lines literally — they are different claims:
+
+- `external paths : none — all N examined resolve under --dir` — checked, clean.
+- `external paths : NOT EXAMINED — no resolvable path in the brief, and no
+  attachments` — **not** an all-clear. Nothing was there to check.
+- `UNMEASURED paths : N` — variable-built paths that cannot be decided
+  statically. Neither blocked nor cleared; check them yourself.
 
 A `⚠ WARN` line is different — it is advisory and the dispatch proceeds. It goes
 through a parser that deliberately over-matches, so blocking on it would build a
@@ -110,8 +124,16 @@ gate people learn to click through.
 ## Writing a brief that lands
 
 - State the goal, the acceptance check, and where the code is — **relative to
-  `--dir`**.
+  `--dir`, and never with a `..` segment**. `../other-repo/x` escapes just as
+  surely as an absolute path (opencode runs with `cwd=--dir`), and preflight
+  refuses it.
 - Put commands in fenced ```bash blocks so preflight can see them.
+- **Avoid `$VAR/path` and `${VAR}/path`.** A variable-built path cannot be
+  resolved statically, so preflight reports it as `UNMEASURED` — neither
+  blocked nor cleared — and you have to check it yourself. Write the literal
+  relative path instead.
+- The brief must not be empty. An empty one is refused (rc 2), because a dropped
+  heredoc otherwise dispatches a run that does nothing and exits 0.
 - Assume no follow-up questions are possible. opencode is unattended; every
   `ask` is an auto-reject, not a prompt.
 

@@ -204,11 +204,45 @@ def emit(outcome: str, dims: dict | None = None, exit_code: int | None = None,
 # --------------------------------------------------------------------------- #
 # I/O helpers
 # --------------------------------------------------------------------------- #
+class BriefError(Exception):
+    """A brief that cannot be used. Carries its own operator-facing message.
+
+    🔴 It exists so an unreadable `--brief` lands in the DOCUMENTED rc vocabulary
+    with telemetry attached. Before it, a missing file raised an uncaught
+    `FileNotFoundError` -> rc 1 (a code this tool never documents) and emitted
+    NOTHING, so adoption-scan's `error` bucket undercounted exactly the failures
+    an operator hits most.
+    """
+
+
 def read_brief(source: str | None) -> str:
-    """Brief text from a file, or from stdin when `source` is `-` or omitted."""
+    """Brief text from a file, or from stdin when `source` is `-` or omitted.
+
+    🔴 An EMPTY brief is refused, not dispatched. Measured before this check:
+    `printf '' | … run --dir <d>` wrote a 0-byte brief, returned rc 0, printed
+    `DISPATCHED` and emitted `outcome=dispatched`. A dropped heredoc is the
+    single most likely operator error, and a tool whose entire purpose is to
+    kill exit-0-having-done-nothing must not manufacture a fresh instance of it.
+    Whitespace-only counts as empty — `</dev/null` and a stray newline are the
+    same mistake.
+    """
     if source in (None, "-"):
-        return sys.stdin.read()
-    return Path(source).read_text(encoding="utf-8")
+        text = sys.stdin.read()
+        where = "stdin"
+    else:
+        try:
+            text = Path(source).read_text(encoding="utf-8")
+        except OSError as e:
+            raise BriefError(f"cannot read --brief {source!r}: {e}") from e
+        where = f"--brief {source}"
+    if not text.strip():
+        raise BriefError(
+            f"the brief read from {where} is EMPTY. Refusing to dispatch: an "
+            "empty brief is a dropped heredoc or a closed stdin, and opencode "
+            "would run, do nothing, and exit 0 — the exact failure this tool "
+            "exists to prevent. Pipe the brief in, or pass --brief <file>."
+        )
+    return text
 
 
 def install_brief(directory: Path, text: str, slug: str) -> tuple[Path, Path]:
@@ -239,69 +273,120 @@ def resolve_dir(raw: str):
 # --------------------------------------------------------------------------- #
 # preflight
 # --------------------------------------------------------------------------- #
-def preflight(text: str, directory: Path) -> dict:
-    """The full report. Pure w.r.t. the filesystem apart from path resolution."""
-    offenders = brief_scan.scan_paths(text, directory)
+def preflight(text: str, directory: Path, attachments=()) -> dict:
+    """The full report. Pure w.r.t. the filesystem apart from path resolution.
+
+    🔴 `attachments` is not optional in spirit. `--file` is the #3 most-used flag
+    and SKILL.md advertises it; leaving it out of the scan is what let
+    `run --dir <proj> --file <outside>/extra.md` print an all-clear.
+    """
+    offenders = (brief_scan.scan_paths(text, directory)
+                 + brief_scan.scan_attachments(attachments, directory))
     warnings = brief_scan.scan_commands(text, directory)
+    unresolved = brief_scan.extract_unresolved_paths(text)
     return {
         "dir": str(directory),
         "blocked": bool(offenders),
         "external_paths": [
-            {"as_written": o.text, "resolved": o.resolved} for o in offenders
+            {"as_written": o.text, "resolved": o.resolved, "kind": o.kind}
+            for o in offenders
         ],
+        "unresolved_paths": unresolved,
         "command_warnings": [
             {"command": v.command, "action": v.action, "rule": v.pattern,
              "guard": v.guard_reason}
             for v in warnings
         ],
         "paths_examined": len(brief_scan.extract_paths(text)),
+        "attachments_examined": len(attachments),
         "commands_examined": sum(
             len(brief_scan.block_commands(b)) for b in brief_scan.shell_blocks(text)
         ),
     }
 
 
+# 🔴 THE VERDICT SENTENCES, AS WHOLE NORMALISED STRINGS.
+#
+# They are constants because the tests pin them ENTIRE rather than by substring:
+# a guard on words is walkable by rewording, and these three sentences are the
+# tool's central CLAIM about what it checked. A cosmetic reword failing the
+# suite is the price of a machine-readable claim, and it is worth paying.
+#
+# 🔴 The `NOT EXAMINED` line is the finding that produced this block. The report
+# used to print "external paths : none — every path is under --dir"
+# UNCONDITIONALLY, including beside `paths examined : 0` — which is precisely a
+# guard whose description is wider than its implementation. "I found nothing"
+# and "there was nothing to find" are different claims and now read differently.
+VERDICT_NOT_EXAMINED = ("  external paths    : NOT EXAMINED — no resolvable path "
+                        "in the brief, and no attachments")
+VERDICT_CLEAN = "  external paths    : none — all {n} examined resolve under --dir"
+
+
 def print_report(rep: dict) -> None:
     # 🔴 Always print what was EXAMINED beside what was found. A bare "0
     # external paths" from a scan that walked nothing is the failure, not the
     # all-clear (same reasoning as drift-check's "links examined" line).
+    examined = rep["paths_examined"] + rep["attachments_examined"]
     print(f"preflight  dir={rep['dir']}")
-    print(f"  paths examined    : {rep['paths_examined']}")
-    print(f"  commands examined : {rep['commands_examined']}")
+    print(f"  paths examined       : {rep['paths_examined']}")
+    print(f"  attachments examined : {rep['attachments_examined']}")
+    print(f"  commands examined    : {rep['commands_examined']}")
 
     if rep["external_paths"]:
         print()
-        print("🔴 BLOCKED — the brief names paths OUTSIDE --dir. `opencode run` "
-              "auto-rejects the")
+        print("🔴 BLOCKED — paths OUTSIDE --dir. `opencode run` auto-rejects the")
         print("   external-directory prompt and exits 0 having done nothing "
               "(measured twice).")
         for p in rep["external_paths"]:
             shown = p["as_written"]
             extra = "" if shown == p["resolved"] else f"   -> {p['resolved']}"
-            print(f"     {shown}{extra}")
+            print(f"     [{p['kind']}] {shown}{extra}")
         print()
         print("   Fix one of these, not this check:")
         print("     * move the file under --dir, or")
         print("     * widen --dir to a directory that contains both, or")
         print("     * inline the content into the brief instead of pointing at it.")
+    elif examined == 0:
+        print(VERDICT_NOT_EXAMINED)
     else:
-        print("  external paths    : none — every path is under --dir")
+        print(VERDICT_CLEAN.format(n=examined))
+
+    # 🔴 UNMEASURED is its own category and is never folded into either verdict
+    # above — the same discipline drift-check applies to `absent`/`fetch failed`.
+    if rep["unresolved_paths"]:
+        print()
+        print(f"  UNMEASURED paths     : {len(rep['unresolved_paths'])} — built "
+              "from a variable, so containment")
+        print("                         cannot be decided statically. Check "
+              "these yourself:")
+        for tok in rep["unresolved_paths"]:
+            print(f"     {tok}")
 
     if rep["command_warnings"]:
+        rows = rep["command_warnings"]
         print()
-        print("⚠ WARN — these commands would meet friction. `opencode run` "
-              "AUTO-REJECTS an `ask`,")
-        print("  so the dispatch stalls MID-RUN rather than prompting. "
-              "Not blocking: this parser")
-        print("  deliberately over-matches.")
-        for w in rep["command_warnings"]:
+        # The header names the mechanism that actually applies. It used to
+        # assert "auto-rejects an `ask`" even when every row was a `deny`.
+        if any(w["action"] == "ask" for w in rows):
+            print("⚠ WARN — these commands would meet friction. `opencode run` "
+                  "AUTO-REJECTS an `ask`,")
+            print("  so the dispatch stalls MID-RUN rather than prompting. "
+                  "Not blocking: this parser")
+            print("  deliberately over-matches.")
+        else:
+            print("⚠ WARN — these commands are DENIED outright and will fail "
+                  "mid-run. Not blocking:")
+            print("  this parser deliberately over-matches.")
+        for w in rows:
             rule = f" (rule {w['rule']!r})" if w["rule"] else ""
             print(f"     [{w['action']}]{rule}  {w['command']}")
             if w["guard"]:
-                print(f"        🔴 guard_core would HARD-DENY this: "
-                      f"{w['guard'].splitlines()[0]}")
+                lead = ("⚠ guard_core could not judge this"
+                        if w["guard"].startswith(brief_scan.GUARD_UNMEASURED)
+                        else "🔴 guard_core would HARD-DENY this")
+                print(f"        {lead}: {w['guard'].splitlines()[0]}")
     else:
-        print("  command warnings  : none")
+        print(f"  command warnings     : none of {rep['commands_examined']} examined")
 
 
 # --------------------------------------------------------------------------- #
@@ -313,15 +398,23 @@ def cmd_preflight(args) -> int:
         print(f"--dir {args.dir!r} is not a directory", file=sys.stderr)
         emit("error", {"stage": "preflight", "reason": "bad-dir"}, exit_code=RC_DIR)
         return RC_DIR
-    text = read_brief(args.brief)
-    rep = preflight(text, directory)
+    try:
+        text = read_brief(args.brief)
+    except BriefError as e:
+        print(str(e), file=sys.stderr)
+        emit("error", {"stage": "preflight", "reason": "bad-brief"},
+             exit_code=RC_USAGE)
+        return RC_USAGE
+    rep = preflight(text, directory, attachments=args.file or [])
     if args.json:
         print(json.dumps(rep, indent=2))
     else:
         print_report(rep)
     dims = {"external_paths": len(rep["external_paths"]),
+            "unresolved_paths": len(rep["unresolved_paths"]),
             "command_warnings": len(rep["command_warnings"]),
             "paths_examined": rep["paths_examined"],
+            "attachments_examined": rep["attachments_examined"],
             "commands_examined": rep["commands_examined"]}
     # 🔴 Two literal call sites, not one ternary. The outcome ledger in
     # tests/test_dispatch.py is a GREP over these call sites — a computed
@@ -348,14 +441,24 @@ def cmd_run(args) -> int:
         emit("error", {"stage": "run", "reason": "bad-model"}, exit_code=RC_USAGE)
         return RC_USAGE
 
-    text = read_brief(args.brief)
-    rep = preflight(text, directory)
+    try:
+        text = read_brief(args.brief)
+    except BriefError as e:
+        print(str(e), file=sys.stderr)
+        emit("error", {"stage": "run", "reason": "bad-brief"}, exit_code=RC_USAGE)
+        return RC_USAGE
+
+    # 🔴 The attachments are preflighted BEFORE the brief is installed, so a bad
+    # `--file` cannot leave a stray brief in the target directory.
+    rep = preflight(text, directory, attachments=args.file or [])
     print_report(rep)
     if rep["blocked"]:
         print()
         print("NOT DISPATCHED.")
         emit("preflight-blocked",
              {"stage": "run", "external_paths": len(rep["external_paths"]),
+              "attachments_examined": rep["attachments_examined"],
+              "unresolved_paths": len(rep["unresolved_paths"]),
               "command_warnings": len(rep["command_warnings"]),
               "model_alias": args.model or "default"},
              exit_code=RC_PATH_ESCAPE)
@@ -439,6 +542,12 @@ def build_parser() -> argparse.ArgumentParser:
                              "INSIDE it and every path it names must be under it.")
         sp.add_argument("--brief", default="-",
                         help="brief file, or `-` for stdin (default).")
+        # On BOTH subcommands: an attachment is subject to the same containment
+        # check as the brief, so `preflight` must be able to see it too.
+        sp.add_argument("--file", action="append", default=[],
+                        help="extra attachment; repeatable. The brief is "
+                             "attached automatically. Each one must resolve "
+                             "under --dir.")
 
     pf = sub.add_parser("preflight", help="check a brief; never dispatches")
     common(pf)
@@ -453,9 +562,6 @@ def build_parser() -> argparse.ArgumentParser:
     rn.add_argument("--auto", action="store_true")
     rn.add_argument("-c", "--continue", dest="continue_session",
                     action="store_true", help="continue the last session")
-    rn.add_argument("--file", action="append", default=[],
-                    help="extra attachment; repeatable. The brief is attached "
-                         "automatically.")
     rn.add_argument("--binary", default=os.environ.get("OPENCODE_BIN", "opencode"),
                     help=argparse.SUPPRESS)
     rn.set_defaults(func=cmd_run)

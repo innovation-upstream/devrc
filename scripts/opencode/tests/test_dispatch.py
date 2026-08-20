@@ -194,6 +194,100 @@ def test_scan_paths_refuses_a_path_outside_dir(tmp_path):
     outside = tmp_path / "elsewhere" / "brief.md"
     offenders = brief_scan.scan_paths(f"Start from {outside}.", d)
     assert [o.text for o in offenders] == [str(outside)]
+    assert offenders[0].kind == "brief"
+
+
+# --------------------------------------------------------------------------- #
+# 2b. the three "claims wider than what it checked" findings
+# --------------------------------------------------------------------------- #
+def test_a_relative_path_with_a_dotdot_segment_escapes_and_is_caught(tmp_path):
+    """🔴 opencode runs with `cwd=--dir`, so `../outside/x` genuinely leaves it —
+    and SKILL.md used to tell the brief's author to name locations relative to
+    `--dir`, which invited exactly this. Measured before the fix:
+    `paths examined : 0` plus an unconditional all-clear."""
+    d = tmp_path / "proj"
+    d.mkdir()
+    (tmp_path / "outside").mkdir()
+    offenders = brief_scan.scan_paths("Read ../outside/extra.md and apply it.", d)
+    assert [o.text for o in offenders] == ["../outside/extra.md"]
+
+
+def test_a_relative_path_that_stays_inside_is_not_an_offender(tmp_path):
+    """The in-dir control for the rule above. `a/../b` resolves back inside, so
+    a blanket 'any `..` is an offender' rule would be wrong."""
+    d = tmp_path / "proj"
+    d.mkdir()
+    assert brief_scan.scan_paths("Edit sub/../src/x.py then stop.", d) == []
+
+
+@pytest.mark.parametrize("prose", [
+    "compare v1..v2 for the delta",
+    "run git log origin/main..HEAD",
+    "and then... it stops",
+    "the range HEAD~2..HEAD is what changed",
+])
+def test_the_dotdot_scanner_does_not_fire_on_prose_or_git_ranges(prose, tmp_path):
+    """The negative control. A `..` between two words is not a path, and a
+    scanner that thinks it is blocks every brief mentioning a git range."""
+    d = tmp_path / "proj"
+    d.mkdir()
+    assert brief_scan.scan_paths(prose, d) == []
+
+
+@pytest.mark.parametrize("token", [
+    "${pkgs.python312}/bin/python3",
+    "${DEVRC}/scripts/tests",
+    "$DEVRC/scripts/tests",
+    "{base}/sub/file.py",
+])
+def test_a_variable_built_path_is_UNMEASURED_never_blocked_and_never_clean(token, tmp_path):
+    """🔴 Both spellings were wrong, in OPPOSITE directions, and both are the
+    likeliest content of a brief written in this repo.
+
+    `${X}/y` FALSE-BLOCKED (the `}` is not in the lookbehind's excluded class,
+    so `/y` was read as an absolute path); `$X/y` SILENTLY PASSED (the `/`
+    follows a letter, which is excluded) — and CLAUDE.md tells agents to use the
+    `$DEVRC`/`$HOMELAB` handles. With no override flag, a false block leaves
+    'reword or abandon the tool'.
+    """
+    d = tmp_path / "proj"
+    d.mkdir()
+    text = f"Run the thing at {token} when ready."
+    assert brief_scan.scan_paths(text, d) == [], "must not BLOCK an unresolvable path"
+    assert brief_scan.extract_paths(text) == [], "must not count it as examined"
+    assert brief_scan.extract_unresolved_paths(text) == [token], \
+        "must be reported UNMEASURED, not silently dropped"
+
+
+def test_an_attachment_outside_dir_is_an_offender(tmp_path):
+    """🔴 `--file` is the #3 most-used flag and SKILL.md advertises it. Measured
+    before this: `run --dir <proj> --file <outside>/extra.md` printed
+    'external paths : none — every path is under --dir' and handed opencode the
+    outside file."""
+    d = tmp_path / "proj"
+    d.mkdir()
+    outside = tmp_path / "elsewhere" / "extra.md"
+    offenders = brief_scan.scan_attachments([str(outside)], d)
+    assert [(o.text, o.kind) for o in offenders] == [(str(outside), "attachment")]
+
+
+def test_an_attachment_inside_dir_is_accepted(tmp_path):
+    d = tmp_path / "proj"
+    d.mkdir()
+    assert brief_scan.scan_attachments([str(d / "notes.md")], d) == []
+
+
+def test_the_system_allowlist_is_judged_lexically_not_by_realpath(tmp_path):
+    """🔴 The comment claimed `/etc` and `/var` are deliberately absent. On NixOS
+    `/etc/hosts` realpaths into `/nix/store/…-hosts`, hit the `/nix/store` entry
+    and passed — so every `/etc` path the list claimed to block was silently
+    allowed. Under-blocking, invisible, and the comment asserted the opposite."""
+    d = tmp_path / "proj"
+    d.mkdir()
+    assert brief_scan.is_allowlisted("/etc/hosts") is None
+    assert brief_scan.is_allowlisted("/usr/bin/env") is not None
+    assert [o.text for o in brief_scan.scan_paths("edit /etc/hosts", d)] == \
+        ["/etc/hosts"]
 
 
 def test_scan_paths_accepts_the_in_dir_control(tmp_path):
@@ -256,6 +350,150 @@ def test_preflight_json_reports_examined_beside_found(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# 2c. 🔴 THE PRINTED CLAIM. Pinned as WHOLE NORMALISED LINES, not substrings —
+#     a guard on words is walkable by rewording, and these sentences ARE the
+#     tool's central claim about what it checked.
+# --------------------------------------------------------------------------- #
+def _lines(out: str) -> list[str]:
+    return [ln.rstrip() for ln in out.split("\n")]
+
+
+# 🔴 THE LITERAL SENTENCES, WRITTEN OUT HERE — deliberately NOT imported from
+# the CLI. A mutation sweep caught the earlier version doing
+# `D.VERDICT_CLEAN.format(n=2) in lines`: mutating the constant mutated the
+# expectation with it, so a reworded claim SURVIVED a fully green suite. That is
+# RULES.md's "never derive a test's expectation from the implementation it
+# tests", in the one place where the implementation IS a claim about itself.
+#
+# A cosmetic reword now fails this file. That is the price of a machine-readable
+# claim and it is worth paying.
+LINE_NOT_EXAMINED = ("  external paths    : NOT EXAMINED — no resolvable path "
+                     "in the brief, and no attachments")
+LINE_CLEAN_2 = "  external paths    : none — all 2 examined resolve under --dir"
+
+
+def test_the_verdict_constants_match_the_sentences_pinned_here():
+    """The two-way pin. The literals above are the source of truth; this asserts
+    the CLI still emits exactly them, so the other tests can use either."""
+    assert D.VERDICT_NOT_EXAMINED == LINE_NOT_EXAMINED
+    assert D.VERDICT_CLEAN.format(n=2) == LINE_CLEAN_2
+
+
+def test_an_empty_scan_says_NOT_EXAMINED_not_an_all_clear(tmp_path):
+    """🔴 THE finding. The report used to print
+    'external paths : none — every path is under --dir' UNCONDITIONALLY, right
+    beside 'paths examined : 0'. "I found nothing" and "there was nothing to
+    find" are different claims."""
+    d = tmp_path / "proj"
+    d.mkdir()
+    p = _run_cli(["preflight", "--dir", str(d)], "Just tidy the code up.")
+    lines = _lines(p.stdout)
+    assert LINE_NOT_EXAMINED in lines, p.stdout
+    assert "  paths examined       : 0" in lines
+    assert "  attachments examined : 0" in lines
+    # …and the clean sentence must be ABSENT, in every arity it can take.
+    assert not any(ln.startswith("  external paths    : none") for ln in lines)
+    assert p.returncode == D.RC_OK
+
+
+def test_a_real_clean_scan_says_how_many_it_examined(tmp_path):
+    d = tmp_path / "proj"
+    d.mkdir()
+    (d / "a.md").write_text("x")
+    p = _run_cli(["preflight", "--dir", str(d), "--file", str(d / "a.md")],
+                 f"Edit {d / 'src.py'} please.")
+    lines = _lines(p.stdout)
+    assert LINE_CLEAN_2 in lines, p.stdout
+    assert LINE_NOT_EXAMINED not in lines
+    assert p.returncode == D.RC_OK
+
+
+def test_the_report_never_claims_containment_for_an_unchecked_attachment(tmp_path):
+    """The end-to-end shape of finding 1: an out-of-dir attachment must BLOCK,
+    and the clean sentence must not appear anywhere in the output."""
+    d = tmp_path / "proj"
+    d.mkdir()
+    outside = tmp_path / "elsewhere" / "extra.md"
+    outside.parent.mkdir()
+    outside.write_text("x")
+    p = _run_cli(["run", "--dir", str(d), "--file", str(outside)], "do a thing")
+    lines = _lines(p.stdout)
+    assert p.returncode == D.RC_PATH_ESCAPE, p.stdout + p.stderr
+    assert not any(ln.startswith("  external paths    : none") for ln in lines)
+    assert LINE_NOT_EXAMINED not in lines
+    assert f"     [attachment] {outside}" in lines
+    assert "NOT DISPATCHED." in lines
+
+
+def test_unresolved_paths_are_reported_separately_from_both_verdicts(tmp_path):
+    d = tmp_path / "proj"
+    d.mkdir()
+    p = _run_cli(["preflight", "--dir", str(d)], "run ${DEVRC}/scripts/tests now")
+    lines = _lines(p.stdout)
+    assert p.returncode == D.RC_OK
+    # Not blocked, not counted as clean, and named.
+    assert LINE_NOT_EXAMINED in lines
+    assert "     ${DEVRC}/scripts/tests" in lines
+    assert any(ln.startswith("  UNMEASURED paths     : 1") for ln in lines)
+
+
+def test_the_warn_header_names_the_mechanism_that_applies(tmp_path):
+    """The header asserted "`opencode run` AUTO-REJECTS an `ask`" even when every
+    row was a `deny` — a claim about a mechanism that did not fire."""
+    d = tmp_path / "proj"
+    d.mkdir()
+    deny_only = "```bash\ngit stash push -m wip\n```\n"
+    p = _run_cli(["preflight", "--dir", str(d)], deny_only)
+    assert "[deny]" in p.stdout, p.stdout
+    assert "AUTO-REJECTS an `ask`" not in p.stdout
+    ask_case = "```bash\nkubectl -n d exec p -- sh\n```\n"
+    q = _run_cli(["preflight", "--dir", str(d)], ask_case)
+    assert "AUTO-REJECTS an `ask`" in q.stdout
+
+
+# --------------------------------------------------------------------------- #
+# 2d. an EMPTY brief must never dispatch
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("text", ["", "\n", "   \n\t\n"])
+def test_an_empty_brief_is_refused_and_never_dispatches(text, tmp_path):
+    """🔴 Measured before this check: a 0-byte brief returned rc 0, printed
+    DISPATCHED and emitted outcome=dispatched. A dropped heredoc is the single
+    most likely operator error, and this tool exists to kill
+    exit-0-having-done-nothing — it was manufacturing a fresh instance."""
+    d = tmp_path / "proj"
+    d.mkdir()
+    p = _run_cli(["run", "--dir", str(d)], text)
+    assert p.returncode == D.RC_USAGE == 2, p.stdout + p.stderr
+    assert "DISPATCHED" not in p.stdout
+    assert "EMPTY" in p.stderr
+    assert not (d / D.BRIEF_SUBDIR).exists(), "an empty brief was still installed"
+
+
+def test_a_missing_brief_file_lands_in_the_documented_rc_vocabulary(tmp_path):
+    """It raised an uncaught FileNotFoundError -> rc 1, a code this tool never
+    documents, and emitted NO telemetry — so adoption-scan's `error` bucket
+    undercounted the failure an operator hits most."""
+    d = tmp_path / "proj"
+    d.mkdir()
+    p = _run_cli(["preflight", "--dir", str(d), "--brief",
+                  str(tmp_path / "nope.md")], "")
+    assert p.returncode == D.RC_USAGE, p.stdout + p.stderr
+    assert "Traceback" not in p.stderr
+    assert "cannot read --brief" in p.stderr
+
+
+def test_the_brief_error_path_emits_telemetry(tmp_path, monkeypatch):
+    """The other half: rc alone is not the fix — the `error` bucket has to see it."""
+    seen = []
+    monkeypatch.setattr(D, "emit", lambda o, *a, **k: seen.append(o))
+    monkeypatch.setattr(D.sys, "stdin", _Stdin(""))
+    d = tmp_path / "proj"
+    d.mkdir()
+    assert D.main(["run", "--dir", str(d)]) == D.RC_USAGE
+    assert seen == ["error"]
+
+
+# --------------------------------------------------------------------------- #
 # 3b. the command scanner's positive control
 # --------------------------------------------------------------------------- #
 KUBECTL_BRIEF = """\
@@ -277,6 +515,31 @@ def test_scan_commands_positive_control_names_the_glob(tmp_path):
     asks = [w for w in warnings if w.action == "ask"]
     assert asks, "the ask scanner produced ZERO on a brief that must produce one"
     assert any(w.pattern == "*kubectl*exec*" for w in asks), [w.pattern for w in asks]
+
+
+def test_the_guard_core_channel_positive_control(tmp_path):
+    """🔴 The channel used to sit behind a bare `except: guard_reason = None`,
+    and a mutant making `evaluate` raise SURVIVED all 717 tests — a broken
+    channel and a clean brief printed identically. `evaluate` raises on an
+    unknown policy name BY DESIGN, so renaming the "opencode" policy is exactly
+    the shape that would have gone dark forever."""
+    brief = "```bash\nrm -rf /\n```\n"
+    reasons = [w.guard_reason for w in brief_scan.scan_commands(brief, tmp_path)]
+    assert any(r for r in reasons), \
+        "positive control: guard_core produced ZERO verdicts on `rm -rf /`"
+    assert not any(r.startswith(brief_scan.GUARD_UNMEASURED) for r in reasons if r)
+
+
+def test_a_broken_guard_core_channel_reports_COULD_NOT_MEASURE(tmp_path, monkeypatch):
+    """…and when it genuinely cannot judge, it says so instead of returning the
+    same None a clean brief produces."""
+    def boom(*a, **k):
+        raise TypeError("evaluate() got an unexpected keyword argument 'cwd'")
+    monkeypatch.setattr(brief_scan.guard_core, "evaluate", boom)
+    verdicts = brief_scan.scan_commands("```bash\nrm -rf /\n```\n", tmp_path)
+    assert verdicts, "a broken guard channel silently produced no rows at all"
+    assert all(v.guard_reason.startswith(brief_scan.GUARD_UNMEASURED)
+               for v in verdicts)
 
 
 def test_scan_commands_is_silent_on_a_read_only_brief(tmp_path):
@@ -399,10 +662,29 @@ def test_preflight_resolves_through_the_same_object_the_config_suite_pins():
     assert cfg.strip_jsonc is oc_permissions.strip_jsonc
 
 
-def test_the_base_ruleset_is_the_config_file_itself():
-    rules = oc_permissions.base_bash_rules()
-    assert rules[0] == ("*", "allow")
-    assert ("*kubectl*exec*", "ask") in rules
+def test_the_base_ruleset_prepends_the_builtin_catch_all():
+    """🔴 The fixture must be able to DISAGREE with the constant.
+
+    The previous version asserted `rules[0] == ("*", "allow")` against the real
+    config — whose own first bash key IS `"*": "allow"` — so the fixture could
+    only ever produce the value the assertion named, and a mutant dropping the
+    built-in prepend SURVIVED. Feed it a config whose first key cannot equal the
+    constant, and the prepend becomes observable.
+    """
+    synthetic = {"permission": {"bash": {"*never*": "deny", "ls*": "allow"}}}
+    rules = oc_permissions.base_bash_rules(synthetic)
+    assert rules[0] == ("*", "allow"), "the built-in catch-all is not prepended"
+    assert rules[1] == ("*never*", "deny"), "config order is not preserved"
+    assert len(rules) == 3
+    # …and without the prepend, an unmatched command would fall through to
+    # opencode's `ask` fallback instead of `allow`. That is the behaviour the
+    # constant exists for, so assert it rather than the tuple alone.
+    assert oc_permissions.resolve(rules, "echo hi") == "allow"
+    assert oc_permissions.resolve(rules[1:], "echo hi") == "ask"
+
+
+def test_the_base_ruleset_reads_the_real_config_file():
+    assert ("*kubectl*exec*", "ask") in oc_permissions.base_bash_rules()
 
 
 # --------------------------------------------------------------------------- #
