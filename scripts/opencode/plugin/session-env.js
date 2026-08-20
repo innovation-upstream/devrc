@@ -33,11 +33,21 @@
 //     string literal cannot be exercised as a real file by the python suite, and
 //     mixes generated data with logic.
 //   * PRECEDENT: guard.js and ledger.js are already single-purpose plugin files
-//     in this directory. Two plugins may register the SAME hook key and both
-//     run — guard.js and activity-plugin.js both register
-//     `tool.execute.before` and both demonstrably work in production (the guard
-//     blocks; the telemetry rows carry real durations). env.js + this file are
-//     the same arrangement for `shell.env`.
+//     in this directory.
+//
+// ⚠ ONE THING HERE IS INFERRED, NOT MEASURED BY THE AUTHOR OF THIS FILE: that
+// opencode runs EVERY plugin registering a given hook key, rather than the first
+// one it finds. env.js already registers `shell.env`, so this file is the second
+// to do so. The inference is from the same repo's `tool.execute.before`, which
+// guard.js and activity-plugin.js both register and which both are recorded as
+// working simultaneously (the guard hard-blocks a denied command; the telemetry
+// rows carry real durations, 188/188 with a session — see their headers). If the
+// inference is wrong, the SYMPTOM IS BENIGN AND VISIBLE: `OPENCODE_SESSION_ID`
+// is simply never set, `derive_session_id` falls through to its documented
+// fallback, and browser-bridge keeps declaring `opencode-inherited` exactly as it
+// does today — no misattribution either way. The post-deploy check is one
+// command: from inside an opencode bash tool, `echo "$OPENCODE_SESSION_ID"`
+// (non-empty) and `echo "$DEVRC"` (non-empty — proves env.js still fires too).
 //
 // --------------------------------------------------------------------------- #
 // 🔴 DO NOT ADD A NAMED EXPORT. opencode's loader iterates EVERY named export of
