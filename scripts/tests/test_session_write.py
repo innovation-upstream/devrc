@@ -2252,8 +2252,13 @@ REAL_PANE_HARNESS = "scripts/session-write-harness/real_pane_check.py"
 
 def test_the_committed_harnesses_exist_and_are_runnable():
     """🔴 A pointer that rots is worse than no pointer — it reads as a claim
-    that the sweep is reproducible while naming a file that is gone. Both paths
-    are checked to exist, to be executable, and to parse."""
+    that the sweep is reproducible while naming a file that is gone.
+
+    Both paths are checked to EXIST and to PARSE. Deliberately not "and to
+    run": each spawns a real tmux server or a full pytest sweep, which is not
+    something a unit suite may do. Saying so, rather than letting the docstring
+    imply a stronger check than the assertions make — a comment is a claim too.
+    """
     root = os.path.normpath(os.path.join(_HERE, "..", ".."))
     for rel in (MUTATION_HARNESS, REAL_PANE_HARNESS):
         path = os.path.join(root, rel)
