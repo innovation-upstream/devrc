@@ -540,9 +540,15 @@ def test_live_scraper_observes_the_real_config():
     The pinned metadata is READ OFF nix/home.nix, never off the scraper's own
     output — deriving it from the implementation is exactly what would make this
     control vacuous. (`:date` used to be the metadata pin; #351 pruned that
-    snippet, so the pin moved to `:sshwn`, added in #134 and untouched since,
-    whose `search_terms` list is longer and therefore a stricter test of the
-    list-splitting regex.)
+    snippet, so the pin moved to `:sshwn`, whose `search_terms` list was longer
+    and therefore a stricter test of the list-splitting regex. The 2026-08-19
+    audit then STRIPPED `:sshwn` to direct-trigger-only to make the search UI
+    unambiguous, which would have left this control asserting `== []` — i.e.
+    exactly the vacuous state the paragraph above forbids, since an empty list
+    exercises no splitting at all. So the pin moved again, to `:eos` for a long
+    single-word list and `:mt` for MULTI-WORD entries, which are the strictest
+    case for the regex. Whenever a pinned snippet's terms are removed, MOVE this
+    pin to another long list — never relax it to the empty one.)
     """
     base = _live_base()
     trigs = [m["trigger"] for m in base["matches"]]
@@ -550,10 +556,23 @@ def test_live_scraper_observes_the_real_config():
     assert len(set(trigs)) == len(trigs), "duplicate trigger in nix/home.nix"
     assert ":sshwn" in trigs and "dashbaord" in trigs
     by_trig = {m["trigger"]: m for m in base["matches"]}
-    assert by_trig[":sshwn"]["search_terms"] == [
-        "ssh", "workbench", "wb", "nebula", "mesh", "remote"]
-    assert by_trig[":sshwn"]["label"] == "SSH workbench (nebula)"
+    assert by_trig[":eos"]["search_terms"] == [
+        "end", "session", "wrap", "handoff", "skills", "review", "update",
+        "docs", "ritual", "prune", "evict", "bloat"]
+    assert by_trig[":eos"]["label"].startswith("End-of-session ritual")
+    # Multi-word entries: the case a naive whitespace split would shred.
+    assert "in the meantime" in by_trig[":mt"]["search_terms"]
+    assert "what can we do" in by_trig[":mt"]["search_terms"]
+    assert len(by_trig[":mt"]["search_terms"]) == 13
     assert by_trig[":kickoff"]["label"] == "Kickoff message for next session"
+    # The 2026-08-19 strip is itself pinned: :sshwn/:sshln are deliberately
+    # direct-trigger-only so the LAN pair owns the searchable host word. If a
+    # future edit re-adds terms here, the four ssh resolutions below go
+    # ambiguous again — which is the bug this shape exists to prevent.
+    assert by_trig[":sshwn"]["search_terms"] == []
+    assert by_trig[":sshwn"]["label"] == ""
+    assert by_trig[":sshln"]["search_terms"] == []
+    assert by_trig[":sshln"]["label"] == ""
 
 
 # The queries the 2026-08-05 /espanso-audit measured him actually typing (plus
@@ -610,6 +629,34 @@ def test_live_existing_resolutions_not_made_ambiguous():
     assert not bad, (
         "search terms regressed (term -> (expected, actual, matching snippets)): "
         + repr(bad)
+    )
+
+
+# REGRESSION coverage for the 2026-08-19 /espanso-audit. Each of the four ssh
+# terms was measured firing NOTHING on the pre-change config (`_attribute` ->
+# None, because two snippets per host both spelled that host), so this list is
+# RED at the parent commit and green here — not an invariant guard.
+# The three trailing entries pin the snippets added in the same commit.
+_AUDIT_2026_08_19_RESOLUTIONS = [
+    ("lap", ":sshll"), ("ssh lap", ":sshll"), ("ssh wor", ":sshwl"),
+    ("unaddressed", ":alo"), ("proceed", ":pdt"), ("clawgate", ":cgt"),
+]
+# NOT listed: bare "wor". It stays ambiguous with :mt, whose label says
+# "parallel WORK while that runs" — and it was never a query he typed (the
+# measured one is the two-token "ssh wor"). Asserting it would have been an
+# expectation invented from the fix rather than read off the search stream.
+
+
+def test_live_audit_2026_08_19_resolutions():
+    d = _live_det()
+    bad = {}
+    for term, want in _AUDIT_2026_08_19_RESOLUTIONS:
+        got = d._attribute(term)
+        if got != want:
+            bad[term] = (want, got, [t for t in d.ts.triggers if d._term_matches(term, t)])
+    assert not bad, (
+        "the 2026-08-19 audit's resolutions regressed "
+        "(term -> (expected, actual, matching snippets)): " + repr(bad)
     )
 
 
