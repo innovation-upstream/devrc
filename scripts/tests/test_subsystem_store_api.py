@@ -49,13 +49,16 @@ import hashlib
 import http.client
 import importlib.util
 import os
+import re
 import secrets
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -893,6 +896,190 @@ class TestScopeRevision:
             "1111111111111111111111111111111111111111 refs/heads/main\n"
         )
         assert api.scope_revision(store, SCOPE) == "1" * 40
+
+
+# =============================================================================
+# 8b. The snapshot stamp — every report dates the COPY it is serving.
+#
+# 🔴 REGRESSION, NOT AN INVARIANT GUARD. Measured on the live public endpoint
+# 2026-08-20, four days after cutover: an authed GET returned 200 with
+# `ALL 5 entries in devrc/, none omitted` while the source held 9, and one
+# served entry was a 40-day-old copy of a file edited that morning. Every
+# existing check passed — reachability, auth, client-IP chain, firewall — because
+# none of them compares the served bytes to the source. The defect was that a
+# stale snapshot and the live source produce byte-identical-looking answers.
+#
+# 🔴 WHICH OF THESE ARE REGRESSION TESTS, HONESTLY — 3 of 11, not 11.
+# Measured by running this class against `main` at `19756d5`: 11 failed, but
+# only THREE failed on BEHAVIOUR. The other eight raise `AttributeError: module
+# has no attribute 'snapshot_freshness' / 'SEED_STAMP_NAME'`, which is the
+# symbol not existing, not the defect being caught — the same "red at base is a
+# collection error and proves nothing" this file's own header records about
+# `server.py`. Those eight are INVARIANT GUARDS on the four-state contract; they
+# are worth having and they are not evidence.
+#
+# The three that genuinely bite, each with an assertion failure at base:
+#   * test_a_report_that_does_not_date_itself_is_the_regression  (body undated)
+#   * test_the_stamp_is_on_search_too_not_only_recall            (body undated)
+#   * test_seed_sh_writes_a_stamp_and_puts_it_IN_THE_ARCHIVE     (no stamp)
+# =============================================================================
+
+
+class TestSnapshotStamp:
+    def _fresh(self, store: Path):
+        return api.snapshot_freshness(store)
+
+    def test_a_report_that_does_not_date_itself_is_the_regression(self, store: Path):
+        """The whole point: the body — not just a header — must say SNAPSHOT.
+
+        Asserted on the BODY because the measured failure was an agent reading
+        rendered text; a caller that pipes the body never sees a header.
+        """
+        with running(store) as (base, _):
+            _c, _h, body = fetch(f"{base}/api/v1/recall/{SCOPE}", token=GOOD_TOKEN)
+        text = body.decode()
+        assert "SNAPSHOT, NOT THE SOURCE" in text
+        # It must come BEFORE the completeness claim it qualifies.
+        assert text.index("SNAPSHOT, NOT THE SOURCE") < text.index("none omitted")
+
+    def test_the_stamp_is_on_search_too_not_only_recall(self, store: Path):
+        """Both routes go through `_serve_report`; pin that they both stamp.
+
+        If a future route stamps only recall, the copy it serves is undated on
+        exactly the surface a caller reaches for when an entry seems missing.
+        """
+        with running(store) as (base, _):
+            _c, headers, body = fetch(
+                f"{base}/api/v1/search/{SCOPE}?q=alpha", token=GOOD_TOKEN
+            )
+        assert "SNAPSHOT, NOT THE SOURCE" in body.decode()
+        assert "X-Store-Snapshot" in headers
+
+    def test_newest_entry_is_the_newest_mtime_and_MOVES_when_content_changes(
+        self, store: Path
+    ):
+        """A value that cannot move is indistinguishable from a hardcoded string.
+
+        Feeds a timestamp the fixture CANNOT already equal and watches the
+        output follow it (RULES.md: the mechanical control for a constant).
+        """
+        header_before, _ = self._fresh(store)
+        target = time.time() + 86_400  # a day ahead: no fixture file can hold it
+        os.utime(store / SCOPE / "thing-alpha.md", (target, target))
+        header_after, _ = self._fresh(store)
+
+        assert header_before != header_after
+        stamp = datetime.fromtimestamp(target, timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        assert f"newest={stamp}" in header_after
+
+    def test_entry_files_counts_entries_and_not_the_stamp_file(self, store: Path):
+        """The count must be of *.md, or it drifts against seed.sh's own number.
+
+        `.seed-stamp` is not an entry; counting it would make the API and the
+        seeder disagree by exactly one and read as a lost file.
+        """
+        header_before, _ = self._fresh(store)
+        assert "entry-files=3" in header_before
+        (store / api.SEED_STAMP_NAME).write_text("2026-08-20T00:00:00Z\n")
+        header_after, _ = self._fresh(store)
+        assert "entry-files=3" in header_after
+
+    def test_a_seeded_stamp_is_read_and_reported(self, store: Path):
+        (store / api.SEED_STAMP_NAME).write_text(
+            "2026-08-20T17:30:00Z staged_entries=71 host=box\n"
+        )
+        header, prose = self._fresh(store)
+        assert "seeded=2026-08-20T17:30:00Z staged_entries=71 host=box" in header
+        assert "UNSTAMPED" not in header
+
+    def test_an_ABSENT_stamp_is_named_never_omitted(self, store: Path):
+        """The failure this whole block exists to prevent is a SILENT absence."""
+        header, prose = self._fresh(store)
+        assert "seeded=UNSTAMPED" in header
+        assert "SNAPSHOT, NOT THE SOURCE" in prose
+
+    def test_an_EMPTY_stamp_is_UNREADABLE_and_distinct_from_absent(
+        self, store: Path
+    ):
+        """Two mechanisms, two names — an empty file is not a missing one."""
+        (store / api.SEED_STAMP_NAME).write_text("   \n")
+        header, _ = self._fresh(store)
+        assert "seeded=UNREADABLE" in header
+        assert "UNSTAMPED" not in header
+
+    def test_an_EMPTY_store_says_NONE_and_zero_not_a_fabricated_date(
+        self, tmp_path: Path
+    ):
+        """`newest=NONE entry-files=0` must be distinguishable from UNREADABLE."""
+        empty = tmp_path / "empty-store"
+        empty.mkdir()
+        header, _ = self._fresh(empty)
+        assert "newest=NONE" in header
+        assert "entry-files=0" in header
+        assert "UNREADABLE" not in header
+
+    def test_an_UNREADABLE_scope_is_UNREADABLE_not_an_empty_store(
+        self, store: Path
+    ):
+        """🔴 The two zeros that must never be confused.
+
+        A store that cannot be WALKED and a store that is genuinely EMPTY both
+        yield "no entries". This file's own header calls that out; the stamp
+        would be worthless if it collapsed them.
+        """
+        if os.geteuid() == 0:
+            pytest.skip("root ignores directory permissions; the case is unreachable")
+        locked = store / SCOPE
+        mode = locked.stat().st_mode
+        locked.chmod(0o000)
+        try:
+            header, _ = self._fresh(store)
+        finally:
+            locked.chmod(mode)
+        assert "UNREADABLE" in header
+        assert "newest=NONE" not in header
+
+    def test_the_header_and_the_prose_carry_the_SAME_facts(self, store: Path):
+        """One derivation, two renderings — they must not drift apart.
+
+        A header saying `seeded=UNSTAMPED` beside prose implying a known date is
+        the shape where a reader believes whichever they happened to read.
+        """
+        (store / api.SEED_STAMP_NAME).write_text("2026-08-20T17:30:00Z\n")
+        header, prose = self._fresh(store)
+        for field in ("2026-08-20T17:30:00Z", "entry-files=3"):
+            assert field in header
+            assert field.replace("entry-files=", "entry-files=") in prose
+
+    def test_seed_sh_writes_a_stamp_and_puts_it_IN_THE_ARCHIVE(
+        self, tmp_path: Path, store: Path
+    ):
+        """🔴 The member list globs `*/` — directories only.
+
+        A top-level stamp file is silently dropped from the tar unless named,
+        which would push undated content while reporting OK. Drives the real
+        script's stage half, then asserts the stamp is both written and listed
+        as a tar member by the script's own source.
+        """
+        stage = tmp_path / "stage"
+        seed = API_DIR / "seed.sh"
+        proc = subprocess.run(
+            [str(seed), "--store", str(store), "--stage", str(stage)],
+            capture_output=True,
+            text=True,
+        )
+        assert proc.returncode == 0, proc.stderr
+        stamp = stage / ".seed-stamp"
+        assert stamp.exists(), "seed.sh staged no .seed-stamp"
+        assert re.match(
+            r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z staged_entries=\d+ host=",
+            stamp.read_text().strip(),
+        ), stamp.read_text()
+        # The stage half never tars; pin the member list from the source, since
+        # this is exactly the line whose omission is silent.
+        assert 'members+=(".seed-stamp")' in seed.read_text()
 
 
 # =============================================================================

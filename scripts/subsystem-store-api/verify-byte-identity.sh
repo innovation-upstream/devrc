@@ -158,8 +158,21 @@ for scope in "${SCOPES[@]}"; do
   raw=$(diff "$local_out" "$remote_out" | grep -c '^[<>]' || true)
   store_lines=$(diff "$local_out" "$remote_out" | grep -c '^[<>]   store: ' || true)
 
+  # 🔴 THE SNAPSHOT BLOCK IS A TRANSPORT ANNOTATION, NOT PART OF THE REPORT.
+  # The server prepends one line dating the COPY it serves (plus a blank
+  # separator) to every report — see `server.snapshot_freshness`, and the README
+  # for the measured incident that put it there. The local CLI reads the
+  # authoritative store and correctly emits no such line, so leaving it in would
+  # make this script FAIL on every scope for a difference that is not about the
+  # render at all — the same excuse the `store:` line above already earns.
+  #
+  # Stripped from the REMOTE only, and by an anchored two-line delete, so it
+  # cannot reach into a report body. An image WITHOUT the stamp is unaffected
+  # (the sed matches nothing), which is what keeps this runnable against 0.2.0.
+  snapshot_lines=$(grep -c '^🔴 SNAPSHOT, NOT THE SOURCE' "$remote_out" || true)
   sed "s|^  store: .*|$CANON|" "$local_out"  > "$tmp/l.canon"
-  sed "s|^  store: .*|$CANON|" "$remote_out" > "$tmp/r.canon"
+  sed -e '/^🔴 SNAPSHOT, NOT THE SOURCE/,+1d' \
+      -e "s|^  store: .*|$CANON|" "$remote_out" > "$tmp/r.canon"
 
   rev=$(awk 'tolower($1)=="x-store-revision:"{print $2}' "$tmp/hdr" | tr -d '\r' | tail -1)
 
@@ -167,7 +180,12 @@ for scope in "${SCOPES[@]}"; do
   # The two counts ride along as evidence: 0/0 is the case where both sides read
   # the SAME root (a local self-check), 2/2 is pod-vs-workbench.
   if cmp -s "$tmp/l.canon" "$tmp/r.canon"; then
-    echo "PASS scope=$scope bytes=$(wc -c <"$tmp/l.canon") raw-diff-lines=$raw store-root-lines=$store_lines revision=${rev:-unknown}"
+    # `snapshot-line` rides along as EVIDENCE, exactly like the two counts above
+    # and gated for the same reason they are not: a `0` here means the remote
+    # served no stamp, which is true and expected against a pre-0.3.0 image, so
+    # failing on it would make this script permanently red until a deploy lands
+    # (RULES.md). Printed so a reader can see WHICH of the two the green means.
+    echo "PASS scope=$scope bytes=$(wc -c <"$tmp/l.canon") raw-diff-lines=$raw store-root-lines=$store_lines snapshot-line=$snapshot_lines revision=${rev:-unknown}"
     pass=$((pass + 1))
   else
     echo "FAIL scope=$scope canonicalised-cmp=$(cmp -s "$tmp/l.canon" "$tmp/r.canon" && echo same || echo differs) raw-diff-lines=$raw store-lines=$store_lines"
