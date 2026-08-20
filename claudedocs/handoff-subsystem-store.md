@@ -564,42 +564,30 @@ Anchor to an absolute time.)
 🔴 **THE MANIFEST DOES NOT EXIST YET, AND THIS IS THEREFORE NOT A CLIENT-ONLY PHASE 2.** An earlier
 revision of this block said "a cheap manifest (scope → entry names + mtimes)" as though it were
 consultation of existing behaviour. Measured against `server.py`:
-- **Two API routes exist**, `recall` and `search` (`server.py:1621-1626`). There is **no manifest
-  and no scope-list endpoint.** Hosted's scope list is obtainable only as a side effect of asking
-  for a scope it lacks and reading `scopes the store does hold:` off the `scope-absent` body.
-- **Ref names are available** per scope via `?mode=list` (~60 B/line), but **per-entry mtimes are
-  NOT rendered anywhere** — `listing_line` emits ref/count/sensitivity/badges only
-  (`subsystem_recall.py:1560`), and mtime is used for ordering. The single time signal is one
-  **store-wide** `newest=` in `X-Store-Snapshot`.
-- **"Cheap" was an assumption. THREE revisions have now argued about the ratio and every one was an
-  artifact of PROCESS COUNT, so here are absolute costs with the units named instead.** Warm,
-  workbench, one seeded snapshot, each figure over three runs:
+- **Two API routes exist**, `recall` and `search` (`server.py:1621-1626`), and **neither
+  enumerates.** The listing route is one round-trip **per scope** (`?mode=list`, ~60 B/line):
+  0.26–0.34 s for one, 2.6–3.4 s / 22,153 B for all nine, warm from the workbench.
+- 🔴 **There IS a cross-scope route and an earlier revision of this block denied it.**
+  `?all_scopes=1` on `search` answers over the whole store in ONE round-trip — measured, `492 ms`,
+  `X-Store-Status: search-hit`, `scope=(all scopes)`. But it is a **SEARCH**: it needs a query, it
+  is capped by `max_hits`, and it therefore cannot be relied on to ENUMERATE. That, not "there is
+  no batch route", is why phase 2 still needs a server-side manifest endpoint.
+- **Per-entry mtimes are served nowhere** — `listing_line` emits ref/count/sensitivity/badges only
+  (`subsystem_recall.py:1560`); mtime merely orders. The one time signal is the store-wide `newest=`
+  in `X-Store-Snapshot`. No cross-scope route changes this.
+- **The local side is interpreter-startup-dominated**, so scope count barely moves it: reading the
+  whole store in one process is ~50 ms with the read work itself only a few ms. Hosted's per-scope
+  round-trip is the asymmetry that matters.
+- 🔴 **A COLD manifest build cannot fit a short timeout.** First laptop run, cache expiry, or a new
+  scope pays the full multi-second build — and on the laptop, the host this whole advisory exists
+  for, *every* first run is cold. The warm read (one scope against a cache) fits any sane timeout;
+  the build behind it does not. **These are different events and item 4 must say which it bounds.**
 
-  | building this manifest | cost | how |
-  |---|---|---|
-  | local, all 9 scopes / 71 refs | **46–49 ms** | ONE process; work proven by a `refs=71` assertion |
-  | local, one scope | 50–60 ms | ONE process |
-  | local, all 9 scopes | 466–500 ms | **NINE CLI invocations** — this is the artifact, not a cost |
-  | hosted, one scope `?mode=list` | 0.26–0.34 s | one authenticated round-trip |
-  | hosted, all 9 scopes | 2.6–3.4 s / 22,153 B | **nine** round-trips; there is no batch route |
-
-  🔴 **Read the local rows against each other: the whole store costs the SAME as one scope.**
-  Interpreter startup dominates completely, so locally there is no meaningful per-scope cost at all
-  — while hosted pays ~0.29 s *per scope* because no endpoint answers more than one. That asymmetry
-  is the finding; the ratio was never the point. Both earlier figures are withdrawn: `~58×`
-  (9 hosted round-trips ÷ a whole-store local read) and `~6×` (÷ nine spawned interpreters) each
-  divided by a different denominator, and the second was printed while "correcting" the first.
-  ⚠ Warm workbench numbers over one snapshot, not a general cost — the laptop and a cold cache are
-  unmeasured, and the network side moved ~31% across runs an hour apart. **Reproduce before
-  quoting**, and label the process count.
-- **What this does and does not license.** The **structural** argument is the load-bearing one and
-  is untouched: no scope-list endpoint and no per-entry mtime, so a client manifest is N round-trips
-  reconstructing what one endpoint could answer, carrying no per-entry freshness at all. The cost
-  argument survives only in that shape — *no batch route*, not *the sweep is slow*. ⚠ And the warm
-  path is not the whole story: a **cold** manifest (first laptop run, cache expiry, a new scope)
-  pays the full 2.6–3.4 s, which is exactly what item 4's short timeout would kill. The warm read
-  asks about one scope against a cache and is comfortably inside any sane timeout; the build behind
-  it is not, and those are different events that an earlier revision merged into one sentence.
+⚠ **The ratio archaeology that stood here has been CUT, deliberately.** Three revisions argued about
+a hosted-vs-local multiple (`~58×`, then `~6×`, then a three-row table) and each was an artifact of
+how the command was invoked — every audit round but the first found its new defect inside that
+paragraph, and each fix grew the surface for the next. The five facts above are what was ever
+load-bearing. **A number nobody needs is a place for the next error to live.**
 
 Two consequences, both binding. **Phase 2 needs a SERVER-side manifest endpoint**, not just the CLI
 wrapper the README names. And until per-entry mtimes are served, **identity is by REF NAME only**:
@@ -632,14 +620,20 @@ The shape it has to have — each item is a measured failure, not a preference:
    `-A "Python-urllib/3.13"` returns **`403`, `error code: 1010`, no `X-Store-*` at all** — a
    Cloudflare bot-signature block the origin never sees, i.e. the first failure a Python client
    meets. The 10s WAF throttle presumably answers the same header-less way.
-4. Short timeout, disk-cached manifest, non-fatal. `/resume` step 4's contract is "print the stderr
-   line, note recall was unavailable, and continue" — a network hop must not make that an exit 3.
+4. Non-fatal, disk-cached manifest, and 🔴 **TWO timeouts, not one — the READ and the BUILD are
+   different events and a single short bound silently kills the feature.** The warm read (one scope
+   against a cache) gets the short timeout. The cold BUILD — first laptop run, cache expiry, a new
+   scope — takes seconds and must be given its own longer bound, run in the background, or be
+   allowed to complete across runs. Bound both by the read's timeout and the laptop's *every* first
+   run is cold, so the manifest never builds and the advisory never fires — item 5's hazard reached
+   by design instead of by network failure, which is the worse way to reach it.
+   `/resume` step 4's contract is "print the stderr line, note recall was unavailable, and continue"
+   — a network hop must not make that an exit 3.
    ⚠ This **proposes** reading the README's phase-2 "read-through cache" as the manifest cache and
    nothing more — a cached ENTRY would be a third copy nobody syncs.
    `scripts/subsystem-store-api/README.md:18` still says "the CLI wrapper + read-through cache",
-   so **that file is the artifact
-   to update in the phase-2 PR**; a handoff doc narrowing a scope the README states differently is
-   the two-artifacts-disagreeing shape this same file records above.
+   so **that file is the artifact to update in the phase-2 PR**; a handoff doc narrowing a scope the
+   README states differently is the two-artifacts-disagreeing shape this same file records above.
    ⚠ And `?mode=list` sits in the bucket this doc already flags at the top: `--mode=full`/`--page`
    over HTTP were **never byte-compared against the pod**; only the default digest was. The manifest
    and `--source hosted` both live there, so byte-comparing them is part of building this.
@@ -655,9 +649,10 @@ The shape it has to have — each item is a measured failure, not a preference:
    scopes, only `devrc` and `homelab-talos` have a checkout on the laptop — `datapacket-talos` and
    `civitai` do not — so the sizes an ordinary run meets there are **9 and 6**. The 36 arrives via
    an explicit `--scope`, or the day that repo is cloned. Design for 36; do not claim a run hits it.
-   (Measured: that host's workspace holds **132 directories, 69 of them git repos** — an earlier
-   revision guessed "~40" in a paragraph whose own thesis is *reproduce before quoting*. The claim
-   is about these four scopes, not about that host.)
+   (Measured: that host's workspace holds **69 git repos** — an earlier revision guessed "~40", and
+   the revision correcting it then reported a count of `ls` ENTRIES as a count of DIRECTORIES. Two
+   wrong numbers in a paragraph whose own thesis is *reproduce before quoting*; the surviving figure
+   is the one an unambiguous command produces. The claim is about these four scopes, not that host.)
 
 **Prerequisites this decision creates, none of them optional.** (a) **No client credential exists on
 either host** — no `~/.config/subsystem-store*`, nothing in `.zshenv`; the only documented path is a
@@ -673,8 +668,13 @@ manual push from the workbench and there is no write path until phase 3. **And m
 deferred-because-hypothetical: it is already live.** In one client scope, a workbench entry carries
 in its `aliases:` the **exact filename of a laptop entry in that same scope**. (Named here as `W`
 and `L`; this repo is PUBLIC, and a rationale for redacting one entry filename does not survive
-naming three others 40 lines away — an inconsistency this PR introduced and this revision closes.
-`subsystem_touch.py --scope <s> --validate` will show you which.)
+naming others elsewhere in this file. ⚠ **That inconsistency is PRE-EXISTING, and this revision does
+NOT close it** — the previous revision claimed both halves and both were false: the file already
+carried a redaction rationale beside client entry names at the PR base, and more still stand further
+down. This paragraph redacts its OWN pair; the file-wide question is open.
+To reproduce the collision: list the laptop's entries per scope, then grep the workbench entries'
+`aliases:` lines for those names. `--validate` renders no alias information and cannot see the other
+host's store, so it will NOT show you this — a pointer an earlier revision offered without running.)
 Zero PATH overlap is not zero SUBJECT overlap.
 
 🔴 **But the mechanism is SILENT SHADOWING, not `ref-ambiguous` — an earlier revision of this block
