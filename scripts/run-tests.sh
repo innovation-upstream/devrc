@@ -976,11 +976,17 @@ TARGET_FLOORS=(
   # A floor that has fallen far behind is not a weak guard; it is an absent one
   # that still prints a number.
   #
-  # ⚠ ZERO new skips on this target (collected=654 passed=654 skipped=0).
-  # ⚠ Open PR #551 edits THIS line to 580 and is already CONFLICTING. Whoever
-  #   rebases it must re-run the gate on the MERGED tree and copy what it
-  #   prints — do NOT pick between 580 and 622, and do not reconcile the two by
-  #   arithmetic.
+  # ⚠ ZERO new skips on this target (collected=654 passed=654 skipped=0 at the
+  #   time of this measurement).
+  #
+  # 2026-08-20 FOLLOW-UP: #551 has since MERGED and did NOT re-pin this line —
+  # its own 469->580 edit was dropped on rebase, which is exactly what the
+  # merged-tree rule produces once 622 is already in main. It did add tests:
+  # this target now collects 680, still inside the 622/777 band, so the gate is
+  # green and no re-pin is owed. Left at 622 deliberately — the convention here
+  # is to re-pin when the gate FIRES and to copy the number it prints, not to
+  # tighten a band that is holding. (For reference only, not applied:
+  # _suggested_floor 680 = 646.)
   "scripts/browser-bridge/tests|622"
   "scripts/validation/tests|97"
   # 2026-08-12, initiative-scan's `gh_available` honesty flag: 381 -> 386
