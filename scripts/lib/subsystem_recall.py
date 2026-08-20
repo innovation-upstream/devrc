@@ -544,14 +544,89 @@ STATUS_PRECEDENCE: tuple[str, ...] = (
 UNREADABLE_STATUSES: tuple[str, ...] = ("scope-unreadable", "search-unreadable")
 
 
-def caveat_text(scope: str) -> str:
+#: Badge kinds whose EXPLANATION is emitted only when that badge is on screen.
+#: `OPEN` is deliberately NOT here — see `caveat_text`.
+BADGE_NEAR_MISS = "near-miss"
+BADGE_UNVERIFIABLE = "unverifiable"
+BADGE_MISSING_HEADING = "missing-heading"
+
+
+def badges_present(entries: "Sequence[RecalledEntry]") -> frozenset[str]:
+    """Which conditional badge kinds this report will actually render.
+
+    🔴 READ OFF THE ENTRIES THE REPORT IS ABOUT, never off the store. A caveat
+    that described the store rather than this output would explain a badge the
+    reader cannot see, which is the whole defect this exists to fix.
+    """
+    kinds: set[str] = set()
+    for e in entries:
+        if getattr(e, "near_miss_count", 0):
+            kinds.add(BADGE_NEAR_MISS)
+        if getattr(e, "unverifiable_count", 0):
+            kinds.add(BADGE_UNVERIFIABLE)
+        if getattr(e, "missing_sections", ()):
+            kinds.add(BADGE_MISSING_HEADING)
+    return frozenset(kinds)
+
+
+def caveat_text(scope: str, badges: "frozenset[str] | None" = None) -> str:
     """What every window this module opens can and cannot see. ONE spelling.
 
     🔴 A MODULE-LEVEL FUNCTION rather than a property on one report, because
     there are now TWO report types and a caveat spelled twice is wrong in one of
     them. `/analyze-service` words the provenance as `from index`; this reuses
     that exact label.
+
+    🔴 THE BADGE EXPLANATIONS ARE CONDITIONAL; EVERY WARNING ABOUT AN ABSENCE IS
+    NOT. Measured on the first real session to use this flow: the caveat is 1,513
+    chars (~378 tokens) and is paid PER CALL, so a targeted `--ref` lookup — the
+    cheap operation this design encourages — spent 27% of its output explaining
+    `NEAR-MISS`, `UNVERIFIABLE` and `NO <heading>` when its output contained NONE
+    of them. The badges themselves already render conditionally so the common row
+    stays byte-identical; the prose explaining them did not, which made the text
+    grow with every badge added while the reader's need for it did not.
+
+    🔴 `OPEN` STAYS UNCONDITIONAL, and the asymmetry is the point. Its clause is
+    not "here is what this badge means" — it ends "the absence of that marker
+    means nothing was declared, NOT that nothing is open." That is a warning
+    about a MISSING badge, so gating it on a badge being present would delete it
+    in exactly the case it was written for. Same test for anything added later:
+    if the sentence is only true when the reader can see the badge, gate it; if
+    it warns about what the reader CANNOT see, it is unconditional.
+
+    `badges=None` means "caller did not compute a set" and yields the full text —
+    fail-safe toward saying MORE, never less.
     """
+    show_all = badges is None
+    if badges is None:
+        badges = frozenset()
+
+    optional = ""
+    clauses = []
+    if show_all or BADGE_NEAR_MISS in badges:
+        clauses.append(
+            "`🔴 N NEAR-MISS` — N bullets TRIED to write a marker and missed the "
+            "grammar, so they declare nothing and `N OPEN` is short by up to N"
+        )
+    if show_all or BADGE_UNVERIFIABLE in badges:
+        clauses.append(
+            "`⚠ N UNVERIFIABLE` — N `RESOLVED:` bullets name no sha, so the "
+            "closure cannot be checked"
+        )
+    if show_all or BADGE_MISSING_HEADING in badges:
+        clauses.append(
+            "`🔴 NO <heading>` — that heading is absent or renamed, so `N nuance` "
+            "and every openness count on that row are 0 BY PARSE FAILURE and not "
+            "by measurement, and the entry's content is on disk but invisible to "
+            "this read"
+        )
+    if clauses:
+        lead = (
+            "Three further badges say" if len(clauses) == 3
+            else ("Two further badges say" if len(clauses) == 2 else "One further badge says")
+        )
+        optional = f" {lead} the row's own numbers cannot be trusted: " + "; ".join(clauses) + "."
+
     return (
         f"{RECALL_LABEL} — RECALL, NOT LIVE OBSERVATION. These are notes curated by "
         f"PAST sessions in the local store under `{scope}`. Nothing here was "
@@ -564,14 +639,8 @@ def caveat_text(scope: str) -> str:
         f"a current reading. `🔴 N OPEN` on an index row means N bullets DECLARE "
         f"unfinished business — re-check each against the repo, because a remedy that "
         f"has since landed reads exactly like one that has not; the absence of that "
-        f"marker means nothing was declared, NOT that nothing is open. Three further "
-        f"badges say the row's own numbers cannot be trusted: `🔴 N NEAR-MISS` — N "
-        f"bullets TRIED to write a marker and missed the grammar, so they declare "
-        f"nothing and `N OPEN` is short by up to N; `⚠ N UNVERIFIABLE` — N `RESOLVED:` "
-        f"bullets name no sha, so the closure cannot be checked; and `🔴 NO <heading>` "
-        f"— that heading is absent or renamed, so `N nuance` and every openness count "
-        f"on that row are 0 BY PARSE FAILURE and not by measurement, and the entry's "
-        f"content is on disk but invisible to this read. Sensitivity is "
+        f"marker means nothing was declared, NOT that nothing is open."
+        f"{optional} Sensitivity is "
         f"marked per entry; absent means `{SENSITIVITY_FAIL_SAFE}` — never copy an "
         f"entry's content into a public repo."
     )
@@ -1158,7 +1227,13 @@ class RecallReport:
         sentence duplicated per branch is one edit away from a branch that
         promises more than the store can support.
         """
-        return caveat_text(f"{self.scope}/")
+        # 🔴 `listing`, NOT `entries`. Badges are rendered by `listing_line`, which
+        # iterates `report.listing`; `entries` holds only the FEATURED bodies and is
+        # a different, usually smaller set. Reading `entries` here looked right and
+        # was silently wrong — the explanation vanished on an index whose visible
+        # `🔴 2 NEAR-MISS` row simply was not among the featured entries. Caught by
+        # running it, not by reading it.
+        return caveat_text(f"{self.scope}/", badges_present(self.listing))
 
 
 def load_store(store_root: str | Path, *, verb: str) -> tuple[Path, SubsystemIndex]:
@@ -2206,7 +2281,14 @@ class SearchReport:
         # The label is handed over UNQUOTED — `caveat_text` owns the backticks, so
         # quoting here too would print them twice and is exactly the kind of
         # near-miss a second spelling of one string produces.
-        return caveat_text(self.label)
+        #
+        # 🔴 EMPTY badge set, and that is a claim about THIS renderer, not a
+        # shortcut: search prints `Hunk`s — matched excerpts — and never an index
+        # row, so no badge can appear in its output and no badge explanation can
+        # apply to it. `SearchReport` has no `entries` at all; asking it for one
+        # would be an AttributeError, which is the loud version of the same fact.
+        # If search ever grows an index-row view, compute the set here.
+        return caveat_text(self.label, frozenset())
 
 
 def _entry_hunks(
