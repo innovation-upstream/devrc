@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import inspect
 import re
+import signal as _signal
 import subprocess
 
 import pytest
@@ -180,17 +181,32 @@ def test_the_verdict_requires_the_NAMED_test(rc, failures, expected):
     assert verdict == expected
 
 
-def test_the_runner_handles_SIGTERM_so_the_restore_still_runs():
+def test_the_runner_INSTALLS_a_SIGTERM_handler_so_the_restore_still_runs(
+        tmp_path, monkeypatch):
     """`finally` covers exceptions and Ctrl-C, but NOT a default-handled SIGTERM.
 
     Measured before the fix: `timeout -s TERM` left `_signal_db.py` modified in
     the tree, while `timeout -s INT` restored cleanly. In a shared checkout that
-    silently hands the next session a mutated production module. Plausible
-    senders: `timeout`, an agent harness killing a long command, session
-    teardown.
+    silently hands the next session a mutated production module.
+
+    🔴 This assertion reads the PROCESS's signal disposition, not the source.
+    The first version of this test asserted `"SIGTERM" in getsource(main)` and
+    was walked immediately: deleting the handler leaves the word behind in the
+    COMMENT that explains it, so the guard passed against a runner with no
+    handler at all. That is the third time in this file's short history that a
+    guard on words survived removal of the behaviour — the reason every guard
+    here is now behavioural.
     """
-    src = inspect.getsource(battery.main)
-    assert "SIGTERM" in src, "the SIGTERM handler is gone; a kill leaks a mutant"
+    previous = _signal.getsignal(_signal.SIGTERM)
+    try:
+        monkeypatch.setattr(battery, "REPO", tmp_path)     # refuses immediately
+        battery.main([])
+        installed = _signal.getsignal(_signal.SIGTERM)
+        assert callable(installed) and installed is not previous, (
+            f"SIGTERM disposition is still {installed!r} — no handler was "
+            "installed, so a kill mid-run leaves a mutant in the tree")
+    finally:
+        _signal.signal(_signal.SIGTERM, previous)
 
 
 def test_the_audit_found_mutants_are_still_present():

@@ -329,12 +329,35 @@ def test_no_stale_event_stream_WORDING_survives_anywhere_in_the_package():
         if path.name == this_file:
             continue          # the guard must quote the token it bans
         for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            if "SSE" not in line:
+            # 🔴 WORD BOUNDARIES. A bare `"SSE" not in line` is a substring test,
+            # and `PASSED` contains SSE — so an ordinary sentence about a test
+            # passing was reported as stale transport wording. Measured: this
+            # guard went red on `# … EVERY NAMED KILLER ACTUALLY RAN AND PASSED`
+            # in an unrelated file. A guard that fires on a different word is the
+            # mirror image of one satisfied by a different word: both make the
+            # verdict a fact about spelling rather than about the hazard.
+            if not re.search(r"\bSSE\b", line):
                 continue
             if path.name == "consumer.py" and "no SSE endpoint anywhere" in line:
                 continue                      # the disclaimer, deliberately kept
             offenders.append(f"{path.name}:{lineno}: {line.strip()[:80]}")
     assert not offenders, "stale event-stream wording:\n" + "\n".join(offenders)
+
+
+def test_the_stale_wording_guard_does_not_fire_on_a_WORD_CONTAINING_sse():
+    """🔴 NEGATIVE CONTROL, added because the guard did exactly this.
+
+    `PASSED` contains SSE. A substring test therefore reported an ordinary
+    sentence about a test passing as stale transport wording — and the pressure
+    that creates is to reword the innocent line, which leaves the guard wrong
+    and teaches the next person to route around it. Words that would trip it:
+    PASSED, ASSESS, GLASSES, PASSENGER.
+    """
+    for innocent in ("            if \" PASSED\" in ln:",
+                     "    # we ASSESS the result", "he wore GLASSES"):
+        assert not re.search(r"\bSSE\b", innocent), (
+            f"the guard's pattern fires on {innocent!r}, which is not about the "
+            "transport at all")
 
 
 def test_the_stale_wording_guard_can_actually_fire(tmp_path):
