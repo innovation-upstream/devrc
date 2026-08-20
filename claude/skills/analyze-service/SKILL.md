@@ -48,12 +48,12 @@ Pass the script's output through, tightened, in this order. Do NOT re-run its
 steps by hand; if something is missing, raise the matching limit and re-run.
 
 - **Service** + one-line "what it is".
-- **Pointers / nuance** (`from index`) — surfaced by the script's `index:` block. Omit if it missed.
+- **Pointers / nuance** (`from index`) — surfaced by the script's `index:` block. Omit if it missed, and when the line carries a `[scope via …]` marker say WHICH scope answered: that scope was not confirmed to own the service.
 - **Lives at** — repo + paths, namespace, owning kustomization.
 - **Config** — the load-bearing knobs (version, scale, resources, key values, routes, deps).
 - **Live** — only if `--live` ran and returned `ran`; otherwise say `unverified (static recon)`.
 - **Recent changes** — the log, calling out anything marked `⚠ MOVED` (a revert/bump is usually why you're looking).
-- **Gotchas** — anything non-obvious you hit, plus any `⚠` note the script emitted (`MULTI-DIRECTORY`, an ownership tie, a capped walk).
+- **Gotchas** — anything non-obvious you hit, plus any `⚠` note the script emitted (`MULTI-DIRECTORY`, an ownership tie, a `THIN MARGIN` under `lives at:`, a capped walk).
 
 **Provenance honesty:** nuance/pointers are `from index`; roots/locate/config/log
 are `re-derived live`; cluster state is `live @ <context>` or `unverified`. Never

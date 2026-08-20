@@ -651,13 +651,24 @@ sensitivity: public
         assert b.index.basis == "owning repo"
         assert "scope via" not in sr.render_brief(b)
 
-    def test_index_scopes_prefers_the_owner_and_falls_back_to_searched_roots(self) -> None:
+    def test_index_scopes_asks_EVERY_searched_root_owner_ranked_FIRST(self) -> None:
+        """🔴 THE CONTRACT THAT CHANGED, and why.
+
+        This used to return ONLY the owner whenever locate found one. The
+        fallback below therefore covered the case where locate found NOTHING and
+        left uncovered the case where locate found the WRONG thing — which is the
+        case a thin margin between two repos produces every time. The owner is
+        still asked FIRST, so nothing can shadow it; the rest are asked after it.
+        """
         located = sr.LocateResult(
             "hits", "x",
-            (sr.RootScan("/a", "searched", "--repo"), sr.RootScan("/b", "searched", "--repo")),
+            (sr.RootScan("/a", "searched", "--repo", matches=("a/x.yaml", "a/x2.yaml")),
+             sr.RootScan("/b", "searched", "--repo", matches=("b/x.yaml",))),
             owner="/a",
         )
-        assert sr.index_scopes(located) == (("/a", "owning repo"),)
+        assert [p for p, _ in sr.index_scopes(located)] == ["/a", "/b"]
+        assert sr.index_scopes(located)[0][1] == sr.OWNER_BASIS
+        assert "1 path matched" in sr.index_scopes(located)[1][1]
 
         missed = sr.LocateResult(
             "no-match", "x",
@@ -680,6 +691,393 @@ sensitivity: public
         b = sr.recon(SERVICE, repos=[str(repo)], store_root=s)
         assert b.index.sensitivity == rc.SENSITIVITY_FAIL_SAFE
         assert b.index.sensitivity != "public"
+
+
+# =============================================================================
+# 🔴 THE INDEX IS ASKED AT EVERY SEARCHED ROOT, NOT AT THE ONE THAT "WON"
+# =============================================================================
+
+#: Pairwise-distinct and distinct from every constant these tests assert against:
+#: no scope word is a service word, and neither is `ledger-repo`/`roster`/`paging`
+#: from the fixtures above — so a wrong-field bug yields nothing, not a plausible
+#: answer. `BIG_ROOT` is the repo that WINS the path count; `SMALL_ROOT` loses it.
+BIG_ROOT = "atlas-repo"
+SMALL_ROOT = "harbor-repo"
+WIDGET = "turnstile"     # the service under test
+DECOY = "flywheel"       # an unrelated entry, so a store hit cannot be a store artefact
+
+
+def _repo_carrying(tmp_path: Path, name: str, token: str, n: int) -> Path:
+    """A committed git repo whose tracked paths carry `token` exactly `n` times.
+
+    All `n` files live under ONE directory: the match COUNT is the dimension
+    under test, and spreading them over directories would additionally trip the
+    umbrella note and change the brief for a reason unrelated to the claim.
+    """
+    r = tmp_path / name
+    r.mkdir()
+    _git(r, "init", "-q", "-b", "main")
+    for i in range(n):
+        _write(r / "apps" / token / f"m{i}.yaml", DEPLOYMENT.replace(SERVICE, token))
+    _write(r / "README.md", "synthetic\n")
+    _git(r, "add", "apps", "README.md")
+    _git(r, "commit", "-qm", f"feat({token}): seed")
+    return r
+
+
+def _entry(store: Path, scope: str, service: str) -> None:
+    """One synthetic, PUBLIC-marked entry. Nothing here comes from a real store."""
+    _write(store / scope / f"{service}.md", f"""\
+---
+service: {service}
+scope: {scope}
+sensitivity: public
+---
+
+## Pointers
+- manage-* skill: manage-{service}
+
+## Nuance / work-history
+- 2026-03-04 the {service} queue drains out of order under retry
+""")
+
+
+def _empty_store(tmp_path: Path, name: str = "two-scope-store") -> Path:
+    s = tmp_path / name
+    s.mkdir()
+    return s
+
+
+def _index_line(text: str) -> str:
+    return next(ln for ln in text.splitlines() if ln.startswith("index: "))
+
+
+class TestEveryScopeIsAsked:
+    """🔴 THE DEFECT: a four-path margin between two repos sent the lookup to the
+    loser's neighbour and rendered `ref-absent` over a curated entry in the cwd's
+    own scope.
+
+    The cost is not a wasted read. `claude/skills/analyze-service/SKILL.md` says
+    of the pointer/nuance block "Omit if it missed", so the curated knowledge is
+    silently DROPPED — and the next `/handoff` in that repo sees `ref-absent` and
+    may write a DUPLICATE entry into the wrong scope. A miss here ends in a store
+    WRITE.
+    """
+
+    @pytest.fixture
+    def roots(self, tmp_path: Path) -> tuple[Path, Path]:
+        """Two repos, a clear (33%) margin — wide enough that the tie-break plays
+        no part, so this class's assertions are about scope COVERAGE alone."""
+        return (_repo_carrying(tmp_path, BIG_ROOT, WIDGET, 3),
+                _repo_carrying(tmp_path, SMALL_ROOT, WIDGET, 2))
+
+    # --- the headline regression ---------------------------------------------
+
+    def test_an_entry_in_the_RUNNER_UP_scope_is_FOUND_not_reported_absent(
+        self, roots: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        big, small = roots
+        store = _empty_store(tmp_path)
+        _entry(store, SMALL_ROOT, WIDGET)        # ONLY the loser carries it
+        b = sr.recon(WIDGET, repos=[str(big), str(small)], store_root=store)
+
+        assert b.locate.owner == str(big), "the fixture must locate the OTHER repo"
+        assert b.index.status == "hit", b.index
+        assert b.index.scope == SMALL_ROOT
+        assert "manage-turnstile" in b.index.pointers
+        assert "drains out of order" in b.index.nuance
+
+    def test_the_brief_SAYS_which_scope_answered_and_on_what_basis(
+        self, roots: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        """A hit from a scope locate did NOT confirm owns the service is a
+        different claim from a hit in the owner's scope, and the reader has to be
+        able to see which one they are holding."""
+        big, small = roots
+        store = _empty_store(tmp_path)
+        _entry(store, SMALL_ROOT, WIDGET)
+        text = sr.render_brief(sr.recon(WIDGET, repos=[str(big), str(small)], store_root=store))
+
+        assert f"index: {SMALL_ROOT}/{WIDGET} — HIT" in text
+        assert "[scope via a searched root (2 paths matched)]" in text
+        assert "ref-absent" not in text
+
+    # --- the positive control -------------------------------------------------
+
+    def test_the_OWNER_scope_still_answers_and_prints_NOTHING_extra(
+        self, roots: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        """🔴 The common case must be untouched. A second scope carrying an
+        unrelated entry is present precisely so the extra lookups DO happen and
+        still change nothing a reader sees."""
+        big, small = roots
+        store = _empty_store(tmp_path)
+        _entry(store, BIG_ROOT, WIDGET)
+        _entry(store, SMALL_ROOT, DECOY)
+        b = sr.recon(WIDGET, repos=[str(big), str(small)], store_root=store)
+        text = sr.render_brief(b)
+
+        assert b.index.status == "hit"
+        assert b.index.scope == BIG_ROOT
+        assert b.index.basis == sr.OWNER_BASIS
+        for marker in ("scope via", "checked ", "THIN MARGIN"):
+            assert marker not in text, f"the common case grew a {marker!r} line"
+
+    def test_a_lower_ranked_scope_can_never_SHADOW_the_owner(
+        self, roots: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        """Both scopes carry the ref. First hit wins, and the owner is asked
+        first — so widening the search cannot move an answer that already worked.
+        """
+        big, small = roots
+        store = _empty_store(tmp_path)
+        _entry(store, BIG_ROOT, WIDGET)
+        _entry(store, SMALL_ROOT, WIDGET)
+        b = sr.recon(WIDGET, repos=[str(big), str(small)], store_root=store)
+        assert b.index.scope == BIG_ROOT
+        assert b.index.basis == sr.OWNER_BASIS
+
+    # --- the negative control -------------------------------------------------
+
+    def test_a_ref_in_NO_scope_is_still_ABSENT_and_names_its_denominator(
+        self, roots: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        """🔴 "Nothing recorded anywhere" is a claim about EVERY scope asked, so
+        it has to carry how many that was. Asking one scope and asking three are
+        indistinguishable outputs otherwise — the empty-result trap in
+        `claude/RULES.md`."""
+        big, small = roots
+        store = _empty_store(tmp_path)
+        _entry(store, BIG_ROOT, DECOY)      # the store is populated, just not for WIDGET
+        b = sr.recon(WIDGET, repos=[str(big), str(small)], store_root=store)
+        text = sr.render_brief(b)
+
+        assert b.index.status != "hit"
+        assert b.index.scopes_checked == (BIG_ROOT, SMALL_ROOT)
+        assert f"checked 2 scope(s): {BIG_ROOT}, {SMALL_ROOT}" in _index_line(text)
+
+    def test_the_denominator_is_a_MEASUREMENT_not_the_root_count(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 Two roots, ONE scope. A worktree and its base clone are different
+        directories that `scope_for_repo` maps to the same store scope; counting
+        roots would report `checked 2 scope(s)` naming one scope twice and
+        overstate how wide the search was."""
+        big = _repo_carrying(tmp_path, BIG_ROOT, WIDGET, 3)
+        wt = tmp_path / "a-worktree-of-it"
+        _git(big, "worktree", "add", "-q", str(wt), "-b", "side")
+        store = _empty_store(tmp_path)
+
+        b = sr.recon(WIDGET, repos=[str(big), str(wt)], store_root=store)
+        assert len(b.locate.roots) == 2, "the fixture must supply TWO roots"
+        assert b.index.scopes_checked == (BIG_ROOT,)
+        assert "checked 1 scope(s)" in _index_line(sr.render_brief(b))
+
+    # --- determinism ----------------------------------------------------------
+
+    def test_the_ORDER_scopes_are_asked_in_does_not_depend_on_the_ROOT_order(
+        self, roots: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        """Same inputs, same answer — asserted, not assumed. The rank key is
+        content-derived (matches desc, then path), so the configured order of
+        `--repo` cannot reach it."""
+        big, small = roots
+        store = _empty_store(tmp_path)
+        _entry(store, BIG_ROOT, DECOY)
+        forward = sr.recon(WIDGET, repos=[str(big), str(small)], store_root=store)
+        reverse = sr.recon(WIDGET, repos=[str(small), str(big)], store_root=store)
+        assert forward.index.scopes_checked == reverse.index.scopes_checked
+        assert forward.index.scopes_checked == (BIG_ROOT, SMALL_ROOT)
+        assert _index_line(sr.render_brief(forward)) == _index_line(sr.render_brief(reverse))
+
+    def test_the_candidate_order_is_stable_under_a_PERMUTED_scan_list(self) -> None:
+        """The unit form of the same claim, over `index_scopes` directly."""
+        scans = [
+            sr.RootScan("/one", "searched", "--repo", matches=("a", "b", "c")),
+            sr.RootScan("/two", "searched", "--repo", matches=("d", "e")),
+            sr.RootScan("/three", "searched", "--repo", matches=("f",)),
+        ]
+        expected = ["/one", "/two", "/three"]
+        for order in ((0, 1, 2), (2, 1, 0), (1, 2, 0), (2, 0, 1)):
+            loc = sr.LocateResult("hits", "x", tuple(scans[i] for i in order), owner="/one")
+            assert [p for p, _ in sr.index_scopes(loc)] == expected, order
+
+    def test_an_EQUAL_match_count_is_broken_by_PATH_never_by_arrival(self) -> None:
+        """Two roots with identical counts still need a total order, or the same
+        inputs answer differently on different hosts."""
+        a = sr.RootScan("/zulu", "searched", "--repo", matches=("x", "y"))
+        c = sr.RootScan("/alpha", "searched", "--repo", matches=("x", "y"))
+        for pair in ((a, c), (c, a)):
+            loc = sr.LocateResult("hits", "x", pair, owner="/zulu")
+            assert [p for p, _ in sr.index_scopes(loc)] == ["/alpha", "/zulu"]
+
+    # --- the store is still never written ------------------------------------
+
+    def test_a_MULTI_SCOPE_lookup_leaves_the_store_byte_identical(
+        self, roots: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        """The read-only contract, re-asserted on the path that now reads MORE of
+        the store than any previously-covered one."""
+        big, small = roots
+        store = _empty_store(tmp_path)
+        _entry(store, BIG_ROOT, DECOY)
+        _entry(store, SMALL_ROOT, WIDGET)
+        before = _tree_hash(store)
+        sr.recon(WIDGET, repos=[str(big), str(small)], store_root=store)
+        assert _tree_hash(store) == before
+
+
+# =============================================================================
+# 🔴 A THIN LEAD IS A RANKING, NOT OWNERSHIP
+# =============================================================================
+
+
+class TestThinMargin:
+    """`lives at:` is the sentence a reader turns into a belief. A lead of a few
+    paths does not support it, and the same number decides which scope the index
+    is asked FIRST.
+    """
+
+    @staticmethod
+    def _loc(*counts: int, origins: tuple[str, ...] = ()) -> sr.LocateResult:
+        scans = tuple(
+            sr.RootScan(f"/r{i}", "searched",
+                        origins[i] if i < len(origins) else "--repo",
+                        matches=tuple(f"p{i}-{j}" for j in range(n)))
+            for i, n in enumerate(counts)
+        )
+        ranked = sorted(scans, key=lambda s: (-len(s.matches), s.path))
+        top = len(ranked[0].matches)
+        tied = tuple(s.path for s in ranked[1:] if len(s.matches) == top)
+        return sr.LocateResult("hits", "x", scans, owner=ranked[0].path, owner_tied_with=tied)
+
+    # 🔴 MEASURED AT THREE POINTS on the margin dimension — under, exactly ON the
+    # threshold, and well over — because a predicate tested at one point cannot
+    # distinguish `<` from `<=` from "always true". The counts deliberately do
+    # not land on a round multiple of the threshold except at the boundary case,
+    # which is the point of the boundary case.
+    @pytest.mark.parametrize(
+        "counts, expect_runner_up",
+        [
+            ((6, 5), True),    # 16.7% — under the threshold
+            ((5, 4), False),   # exactly 20% — AT it, and therefore not thin
+            ((6, 4), False),   # 33% — well over
+            ((9, 8), True),    # 11.1% — the shape the real defect had
+        ],
+    )
+    def test_the_margin_predicate_moves_with_the_margin(
+        self, counts: tuple[int, int], expect_runner_up: bool
+    ) -> None:
+        got = sr.thin_runner_up(self._loc(*counts))
+        assert (got is not None) is expect_runner_up, got
+
+    def test_the_percent_it_reports_is_the_ACTUAL_lead(self) -> None:
+        runner, pct = sr.thin_runner_up(self._loc(9, 8))
+        assert pct == 11
+        assert len(runner.matches) == 8
+
+    def test_an_EXACT_TIE_is_left_to_the_TIE_note_not_reported_twice(self) -> None:
+        """A 0% lead is thinner than thin, and already has its own note. Two
+        wordings for one finding is two wordings to keep in agreement."""
+        loc = self._loc(4, 4)
+        assert loc.owner_tied_with, "the fixture must be a tie"
+        assert sr.thin_runner_up(loc) is None
+
+    def test_a_SINGLE_root_has_no_runner_up(self) -> None:
+        assert sr.thin_runner_up(self._loc(7)) is None
+
+    def test_the_LIVES_AT_line_names_the_runner_up_when_the_lead_is_thin(
+        self, tmp_path: Path
+    ) -> None:
+        big = _repo_carrying(tmp_path, BIG_ROOT, WIDGET, 6)
+        small = _repo_carrying(tmp_path, SMALL_ROOT, WIDGET, 5)
+        store = _empty_store(tmp_path)
+        text = sr.render_brief(sr.recon(WIDGET, repos=[str(big), str(small)], store_root=store))
+        assert f"THIN MARGIN — {SMALL_ROOT} matched 5 paths, only 17% behind" in text
+
+    def test_a_CLEAR_winner_prints_no_such_line(self, tmp_path: Path) -> None:
+        """The negative half — a marker that prints on the ordinary case is noise
+        nobody reads, and would make the common-case output non-identical."""
+        big = _repo_carrying(tmp_path, BIG_ROOT, WIDGET, 6)
+        small = _repo_carrying(tmp_path, SMALL_ROOT, WIDGET, 2)
+        store = _empty_store(tmp_path)
+        text = sr.render_brief(sr.recon(WIDGET, repos=[str(big), str(small)], store_root=store))
+        assert "THIN MARGIN" not in text
+
+    def test_the_JSON_surface_carries_the_runner_up_too(self, tmp_path: Path) -> None:
+        big = _repo_carrying(tmp_path, BIG_ROOT, WIDGET, 6)
+        small = _repo_carrying(tmp_path, SMALL_ROOT, WIDGET, 5)
+        store = _empty_store(tmp_path)
+        payload = sr.brief_json(sr.recon(WIDGET, repos=[str(big), str(small)], store_root=store))
+        assert payload["locate"]["thin_runner_up"]["lead_percent"] == 17
+        assert payload["locate"]["thin_runner_up"]["matches"] == 5
+
+
+class TestTheCwdWinsANearTie:
+    """🔴 When the path evidence cannot separate two repos, the one the human is
+    standing in is the better guess — and it is the one the defect's real case
+    hid an entry in. The tie-break only ever decides which scope answers when
+    MORE THAN ONE carries the ref; it never suppresses a lookup.
+    """
+
+    def _both_scopes(self, tmp_path: Path, big_n: int, small_n: int):
+        big = _repo_carrying(tmp_path, BIG_ROOT, WIDGET, big_n)
+        small = _repo_carrying(tmp_path, SMALL_ROOT, WIDGET, small_n)
+        store = _empty_store(tmp_path)
+        _entry(store, BIG_ROOT, WIDGET)
+        _entry(store, SMALL_ROOT, WIDGET)
+        # `repos=` stamps origin `--repo`; the cwd handle is what carries `cwd`.
+        return sr.recon(WIDGET, repos=[], env={"HOMELAB": str(big)},
+                        cwd=str(small), store_root=store)
+
+    def test_a_NEAR_TIE_is_answered_by_the_cwds_own_scope(self, tmp_path: Path) -> None:
+        b = self._both_scopes(tmp_path, 6, 5)          # 16.7% — under the threshold
+        assert b.locate.owner.endswith(BIG_ROOT), "locate must still rank the other repo first"
+        assert b.index.scope == SMALL_ROOT
+        assert b.index.basis == "the cwd repo (5 paths matched)"
+
+    def test_a_CLEAR_lead_is_answered_by_the_OWNER_not_the_cwd(self, tmp_path: Path) -> None:
+        """🔴 The control that makes the test above mean something. Measured at a
+        second point on the same dimension: if the cwd won here too, the
+        tie-break would be "always prefer the cwd" wearing a margin's clothes."""
+        b = self._both_scopes(tmp_path, 6, 3)          # 50% — well over
+        assert b.index.scope == BIG_ROOT
+        assert b.index.basis == sr.OWNER_BASIS
+
+    def test_when_NOTHING_matched_anywhere_the_cwd_is_still_asked_FIRST(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 The zero-denominator branch, which a percentage cannot express. A
+        total locate miss ranks every root at zero, so there is no margin to be
+        within — and the cwd is exactly where the alias-only case this fallback
+        was built for tends to live."""
+        big = _repo_carrying(tmp_path, BIG_ROOT, DECOY, 3)
+        small = _repo_carrying(tmp_path, SMALL_ROOT, DECOY, 2)
+        store = _empty_store(tmp_path)
+        b = sr.recon(WIDGET, repos=[], env={"HOMELAB": str(big)},
+                     cwd=str(small), store_root=store)
+        assert b.locate.status == "no-match", "the fixture must match NOTHING"
+        assert b.index.scopes_checked == (SMALL_ROOT, BIG_ROOT)
+
+    def test_an_EXPLICIT_repo_set_is_never_reordered(self, tmp_path: Path) -> None:
+        """`--repo` roots carry no `cwd` origin, so an operator who named the
+        roots gets exactly the ranking their counts imply."""
+        big = _repo_carrying(tmp_path, BIG_ROOT, WIDGET, 6)
+        small = _repo_carrying(tmp_path, SMALL_ROOT, WIDGET, 5)
+        store = _empty_store(tmp_path)
+        _entry(store, BIG_ROOT, WIDGET)
+        _entry(store, SMALL_ROOT, WIDGET)
+        b = sr.recon(WIDGET, repos=[str(big), str(small)], store_root=store)
+        assert b.index.scope == BIG_ROOT
+
+    def test_the_cwd_promotion_does_not_move_the_LOCATE_owner(self, tmp_path: Path) -> None:
+        """🔴 A deliberate limit, stated. `loc.owner` also selects which repo's
+        manifests are read and whose `git log` is shown — a far larger claim than
+        which scope to ask first, and one the match counts genuinely do decide.
+        The index read is cheap and non-exclusive; those are not."""
+        b = self._both_scopes(tmp_path, 6, 5)
+        assert Path(b.locate.owner).name == BIG_ROOT
+        assert b.git.repo is not None and Path(b.git.repo).name == BIG_ROOT
 
 
 # =============================================================================

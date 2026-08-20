@@ -31,6 +31,15 @@ and no sensitivity fold. A second reader of that store would be a second matcher
 free to drift from the resolver, and its failure mode is a miss that reads as
 "no index yet".
 
+🔴 THE INDEX IS ASKED AT EVERY SEARCHED ROOT, NOT AT THE ONE THAT "WON". Root
+ranking is a path-name heuristic — a lead of a few paths between two repos is a
+naming convention, not ownership — and asking only the leader reported a curated
+entry in the cwd's own scope as `ref-absent`. Every searched root is asked in
+rank order, de-duplicated by SCOPE, first hit wins, and the brief prints WHICH
+scope answered and on what BASIS. A miss then names every scope it checked, so
+"nothing recorded anywhere" is a claim with a denominator. See `index_scopes`
+for why a miss here is a store WRITE and not merely a wasted read.
+
 🔴 LIVE CLUSTER STATE IS OPT-IN AND OFF BY DEFAULT (`--live`). It was 124 of the
 359 measured Bash calls, it is the half that can be wrong by the time you read
 it, and it is the half a static question never needed. Static recon — locate,
@@ -73,7 +82,7 @@ import os
 import re
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as _dc_replace
 from pathlib import Path
 from typing import Iterable, Sequence
 
@@ -115,6 +124,10 @@ __all__ = [
     "DEFAULT_KNOBS_PER_FILE",
     "PATHSPEC_SHOWN",
     "UMBRELLA_PATHS",
+    "THIN_OWNERSHIP_MARGIN",
+    "CWD_ORIGIN",
+    "OWNER_BASIS",
+    "UNLOCATED_BASIS",
     "MAX_VALUE_CHARS",
     "WALK_FILE_CAP",
     "LIVE_TIMEOUT_SECONDS",
@@ -135,6 +148,7 @@ __all__ = [
     "search_roots",
     "scan_root",
     "locate",
+    "thin_runner_up",
     "index_scopes",
     "read_index",
     "dotted_paths",
@@ -287,6 +301,39 @@ PATHSPEC_SHOWN = 3
 #: ordinary two-directory shape and is not an umbrella.
 UMBRELLA_PATHS = 3
 
+#: 🔴 A LEAD THIS THIN IS A RANKING, NOT A FINDING. `locate` orders the roots by
+#: how many paths carry the token and prints the winner as `lives at:` — a
+#: sentence every reader takes as ownership. Two roots whose counts differ by a
+#: hair have established no such thing; that difference is one directory naming
+#: convention, or one repo that happens to keep more handoff docs. ONE number
+#: drives two behaviours, deliberately, so there is one rule to reason about:
+#:
+#:   1. `lives at:` NAMES THE RUNNER-UP when the lead is under it, so the claim
+#:      carries its own scope instead of reading as settled.
+#:   2. THE CWD'S ROOT IS ASKED FIRST when it is within this of the leader. The
+#:      index is asked at every root either way (see `index_scopes`), so this
+#:      only decides which scope wins when TWO of them carry an entry — and when
+#:      the path evidence cannot separate two repos, the one the human is
+#:      standing in is the better guess.
+#:
+#: A POLICY value, not a measurement: nothing observed is restated here, and
+#: `thin_runner_up` computes the margin from the scan at run time.
+THIN_OWNERSHIP_MARGIN = 0.20
+
+#: The `origin` `search_roots` stamps on the cwd's own toplevel. Spelled ONCE:
+#: the producer and the two consumers below must agree, and a literal that
+#: drifted would silently disable the cwd tie-break with no error anywhere.
+CWD_ORIGIN = "cwd"
+
+#: The basis string for the located owner. Also spelled once — `render_brief`
+#: suppresses the `[scope via …]` marker on exactly this value, so a mismatch
+#: would print the fallback marker over every ordinary hit.
+OWNER_BASIS = "owning repo"
+
+#: The basis for a root that was searched and matched NOTHING. Pinned by
+#: `test_a_fallback_hit_says_SO_rather_than_implying_ownership`.
+UNLOCATED_BASIS = "searched root (nothing located)"
+
 #: Values are truncated, and a truncation is MARKED (`…`). An un-truncated brief
 #: is one embedded cert away from being the dump this module exists to replace.
 MAX_VALUE_CHARS = 96
@@ -369,10 +416,19 @@ class IndexResult:
     candidates: tuple[str, ...] = ()
     sensitivity: str | None = None
     basis: str = ""
-    """🔴 WHICH REPO THE SCOPE CAME FROM, in words — `owning repo` or
-    `searched root (nothing located)`. Printed, never implied: a hit found via
-    the fallback is answering about a scope the locate step did NOT confirm owns
-    the service, and a reader must be able to see that."""
+    """🔴 WHICH REPO THE SCOPE CAME FROM, in words — `owning repo`, `the cwd repo
+    (N paths matched)`, `a searched root (N paths matched)` or
+    `searched root (nothing located)`. Printed, never implied: a hit found
+    anywhere but the owner is answering about a scope the locate step did NOT
+    confirm owns the service, and a reader must be able to see that."""
+    scopes_checked: tuple[str, ...] = ()
+    """🔴 EVERY SCOPE THIS LOOKUP ASKED, in the order asked, de-duplicated.
+
+    A `ref-absent` is a claim of the form "nothing recorded ANYWHERE", and until
+    this field exists the reader cannot tell it apart from "nothing recorded in
+    the one scope I happened to ask". The render prints the count beside the
+    names, so the claim carries its own denominator (`claude/RULES.md` → never a
+    silent zero)."""
     detail: str = ""
     report: RecallReport | None = None
 
@@ -495,7 +551,7 @@ def search_roots(
     if not explicit:
         for handle in ENV_ROOT_HANDLES:
             add(env.get(handle, ""), f"env:{handle}")
-        add(str(cwd) if cwd is not None else "", "cwd")
+        add(str(cwd) if cwd is not None else "", CWD_ORIGIN)
     return tuple(out)
 
 
@@ -623,10 +679,7 @@ def locate(
     if not any(s.searched for s in scans):
         return LocateResult("not-searched", token, tuple(scans))
 
-    ranked = sorted(
-        (s for s in scans if s.searched and s.matches),
-        key=lambda s: (-len(s.matches), s.path),
-    )
+    ranked = [s for s in _rank(scans) if s.matches]
     if not ranked:
         return LocateResult("no-match", token, tuple(scans))
 
@@ -635,27 +688,114 @@ def locate(
     return LocateResult("hits", token, tuple(scans), owner=ranked[0].path, owner_tied_with=tied)
 
 
+# --- Ranking the roots ---------------------------------------------------------
+
+
+def _n_paths(n: int) -> str:
+    """`1 path` / `N paths` — the basis string is read by a human."""
+    return f"{n} path" if n == 1 else f"{n} paths"
+
+
+def _rank(scans: Iterable[RootScan]) -> list[RootScan]:
+    """Searched roots, most matches first, ties broken by path.
+
+    🔴 THE KEY IS TOTAL AND CONTENT-DERIVED, so the order does not depend on the
+    order the roots were configured in. `locate`, `index_scopes` and
+    `thin_runner_up` all rank through here rather than each spelling the key —
+    three copies of a sort key is three chances for the brief to name one root as
+    the owner and ask a different one for its index entry.
+    """
+    return sorted((s for s in scans if s.searched), key=lambda s: (-len(s.matches), s.path))
+
+
+def thin_runner_up(loc: LocateResult) -> tuple[RootScan, int] | None:
+    """`(runner-up root, the winner's lead in percent)` when that lead is under
+    `THIN_OWNERSHIP_MARGIN`, else None.
+
+    🔴 AN EXACT TIE RETURNS None, and that is not an oversight. A tie already has
+    its own `OWNERSHIP IS TIED` note; reporting it here as well would print the
+    same finding twice in one brief, and the two wordings would then have to be
+    kept in agreement forever. The two cases are mutually exclusive by
+    construction: `second >= top` leaves here, `second == top` is the tie.
+    """
+    ranked = [s for s in _rank(loc.roots) if s.matches]
+    if len(ranked) < 2:
+        return None
+    top, second = len(ranked[0].matches), len(ranked[1].matches)
+    if top <= 0 or second >= top:
+        return None
+    lead = (top - second) / top
+    if lead >= THIN_OWNERSHIP_MARGIN:
+        return None
+    return ranked[1], round(lead * 100)
+
+
 # --- The index read ------------------------------------------------------------
 
 
 def index_scopes(loc: LocateResult) -> tuple[tuple[str, str], ...]:
-    """`(scope, basis)` pairs to ask the index about, in priority order.
+    """`(repo, basis)` pairs to ask the index about, in priority order.
 
     🔴 THE INDEX MUST NOT BE GATED ON `locate` SUCCEEDING, and the first version
     of this module got that backwards — it derived the scope from `loc.owner` and
     reported `not-attempted` whenever nothing matched. Measured against the real
-    store: `externaldns` matched no path component in its repo, so the run said
+    store: a service that matched no path component in its repo made the run say
     "no owning repo located to derive a scope from" over a scope whose entries
     were sitting right there. That is precisely inverted — a curated pointer
     sheet is worth MOST when the path heuristic missed, because "where does this
     live?" is the question the index can answer and the matcher just failed.
 
-    So: prefer the located owner, and fall back to EVERY root that was
-    successfully searched. The basis is carried and printed, never implied.
+    🔴 AND THE SECOND VERSION GOT THE OTHER HALF WRONG, which is why this asks
+    EVERY searched root rather than just the owner. The fallback above fired only
+    when `loc.owner is None` — it covered the case where locate found NOTHING and
+    left uncovered the case where locate found the WRONG thing. Reproduced on a
+    real run: a four-path margin between two repos handed the lookup to the
+    loser's neighbour and rendered `ref-absent` over a curated entry in the cwd's
+    own scope. That is worse than a wasted read — `claude/skills/analyze-service`
+    tells the agent to OMIT the pointer/nuance block when the index missed, so
+    the curated knowledge is silently dropped, and the next `/handoff` in that
+    repo sees `ref-absent` and may write a DUPLICATE entry into the wrong scope.
+    A miss here is a store WRITE, not just a bad read.
+
+    Reads are local and the whole store answers in tens of milliseconds, so there
+    is nothing to buy by asking one scope. Every searched root is asked, ranked
+    by match count, and `read_index` takes the FIRST HIT — so a lower-ranked
+    scope can only ever answer a question the higher-ranked ones did not.
+
+    The cwd's root is promoted to the front when it is within
+    `THIN_OWNERSHIP_MARGIN` of the leader: that only changes which scope wins
+    when more than one carries an entry, and the human's own repo is the better
+    guess when the path evidence cannot separate them. `--repo` roots carry no
+    `cwd` origin, so an explicit root set is never reordered.
+
+    The basis is carried and printed, never implied.
     """
-    if loc.owner is not None:
-        return ((loc.owner, "owning repo"),)
-    return tuple((s.path, "searched root (nothing located)") for s in loc.roots if s.searched)
+    ranked = _rank(loc.roots)
+    if not ranked:
+        return ()
+
+    top = len(ranked[0].matches)
+    for i, s in enumerate(ranked):
+        if s.origin != CWD_ORIGIN:
+            continue
+        if i:
+            lead = (top - len(s.matches)) / top if top else 0.0
+            if lead < THIN_OWNERSHIP_MARGIN:
+                ranked.insert(0, ranked.pop(i))
+        break
+
+    out: list[tuple[str, str]] = []
+    for s in ranked:
+        if s.path == loc.owner:
+            basis = OWNER_BASIS
+        elif not s.matches:
+            basis = UNLOCATED_BASIS
+        elif s.origin == CWD_ORIGIN:
+            basis = f"the cwd repo ({_n_paths(len(s.matches))} matched)"
+        else:
+            basis = f"a searched root ({_n_paths(len(s.matches))} matched)"
+        out.append((s.path, basis))
+    return tuple(out)
 
 
 def read_index(
@@ -684,17 +824,58 @@ def read_index(
                 detail="no root could be examined, so no scope could be derived",
             )
         # Ask each candidate; the FIRST hit wins and the rest are reported only
-        # if none hit — so a fallback can never silently shadow a real answer.
+        # if none hit — so a lower-ranked scope can never silently shadow a real
+        # answer, and the winner always carries the basis it was reached by.
+        #
+        # 🔴 DE-DUPLICATED BY SCOPE, NOT BY PATH. Two roots routinely derive to
+        # ONE scope — a worktree and its base clone are different directories and
+        # `scope_for_repo` maps both through `--git-common-dir` to the same name.
+        # Without this the store is read twice for the same answer and, worse,
+        # `checked 3 scope(s)` would name a scope twice and overstate how wide
+        # the search actually was.
         misses: list[IndexResult] = []
+        seen: set[str] = set()
+        checked: list[str] = []
         for repo, basis in candidates:
-            got = _read_index_one(repo, service, store_root=store_root, basis=basis)
+            scope, failure = _scope_of(repo)
+            key = scope if scope is not None else f"\0path:{repo}"
+            if key in seen:
+                continue
+            seen.add(key)
+            if failure is not None:
+                misses.append(failure)
+                continue
+            checked.append(scope or "")
+            got = _read_index_one(repo, service, store_root=store_root,
+                                  basis=basis, scope=scope)
             if got.status in ("hit", "ref-ambiguous"):
-                return got
+                return _dc_replace(got, scopes_checked=tuple(checked))
             misses.append(got)
-        return misses[0]
+        if not misses:  # pragma: no cover — `candidates` non-empty implies one
+            return IndexResult("not-attempted", detail="no candidate scope was reachable")
+        # The primary miss is the first one that actually REACHED a scope. A root
+        # git cannot name (a plain directory searched by the walk) yields
+        # `not-attempted`, which says nothing about the store; letting it outrank
+        # a genuine `ref-absent` would replace a measurement with a shrug.
+        primary = next((m for m in misses if m.scope), misses[0])
+        return _dc_replace(primary, scopes_checked=tuple(checked))
     if loc is None:
         return IndexResult("not-attempted", detail="no repo given to derive a scope from")
-    return _read_index_one(loc, service, store_root=store_root, basis="owning repo")
+    got = _read_index_one(loc, service, store_root=store_root, basis=OWNER_BASIS)
+    return _dc_replace(got, scopes_checked=(got.scope,) if got.scope else ())
+
+
+def _scope_of(repo: str | Path) -> tuple[str | None, IndexResult | None]:
+    """`(scope, failure)` — exactly one is not None.
+
+    Extracted so the candidate loop can de-duplicate BEFORE paying for a recall,
+    without re-spelling the failure wording that `_read_index_one` reports.
+    """
+    try:
+        return scope_for_repo(repo), None
+    except Exception as exc:  # a non-repo root, or git unavailable
+        return None, IndexResult(
+            "not-attempted", detail=f"scope not derivable from {repo}: {exc}")
 
 
 def _read_index_one(
@@ -702,14 +883,19 @@ def _read_index_one(
     service: str,
     *,
     store_root: str | Path = DEFAULT_STORE_ROOT,
-    basis: str = "owning repo",
+    basis: str = OWNER_BASIS,
+    scope: str | None = None,
 ) -> IndexResult:
     """One scope's answer. Split out so the multi-candidate loop above has a
-    single per-scope predicate rather than a copy of it per branch."""
-    try:
-        scope = scope_for_repo(owner)
-    except Exception as exc:  # a non-repo root, or git unavailable
-        return IndexResult("not-attempted", detail=f"scope not derivable from {owner}: {exc}")
+    single per-scope predicate rather than a copy of it per branch.
+
+    `scope` is accepted already-derived: the loop needs it to de-duplicate, and
+    deriving it twice would run `git rev-parse` twice per candidate.
+    """
+    if scope is None:
+        scope, failure = _scope_of(owner)
+        if failure is not None:
+            return failure
 
     try:
         rep = recall(store_root, scope, ref=service)
@@ -1135,6 +1321,16 @@ def render_brief(b: Brief, *, file_limit: int = DEFAULT_FILE_LIMIT) -> str:
         shown = list(scan.matches[:file_limit]) if scan else []
         L.append(f"lives at: {owner.name}  ({len(scan.matches) if scan else 0} paths matched, "
                  f"{b.locate.files_examined} files examined)")
+        # 🔴 THE CLAIM CARRIES ITS OWN SCOPE. A lead of a few paths is a ranking,
+        # not ownership, and it is printed HERE — beside the sentence the reader
+        # believes — rather than only in a note at the top of the brief.
+        thin = thin_runner_up(b.locate)
+        if thin is not None:
+            other, pct = thin
+            L.append(f"  ⚠ THIN MARGIN — {Path(other.path).name} matched "
+                     f"{_n_paths(len(other.matches))}, "
+                     f"only {pct}% behind. That is a RANKING, not a finding of ownership; "
+                     f"the index was asked in both.")
         for rel in shown:
             L.append(f"  {rel}")
         rest = (len(scan.matches) - len(shown)) if scan else 0
@@ -1144,9 +1340,15 @@ def render_brief(b: Brief, *, file_limit: int = DEFAULT_FILE_LIMIT) -> str:
     # --- index ---------------------------------------------------------------
     L.append("")
     i = b.index
-    # 🔴 The BASIS is printed on every branch that has one. A hit reached via the
-    # fallback answers about a scope `locate` did NOT confirm owns the service.
-    via = f" [scope via {i.basis}]" if i.basis and i.basis != "owning repo" else ""
+    # 🔴 The BASIS is printed on every branch that has one. A hit reached anywhere
+    # but the owner answers about a scope `locate` did NOT confirm owns the
+    # service, and the reader has to be able to see WHICH scope answered.
+    via = f" [scope via {i.basis}]" if i.basis and i.basis != OWNER_BASIS else ""
+    # 🔴 A `ref-absent` is a claim about EVERY scope asked, so it prints the
+    # denominator. Without it, "nothing recorded under that ref yet" is
+    # indistinguishable from "I asked one scope out of three".
+    checked = (f" — checked {len(i.scopes_checked)} scope(s): "
+               + ", ".join(i.scopes_checked)) if i.scopes_checked else ""
     if i.status == "hit":
         sens = f" sensitivity={i.sensitivity}" if i.sensitivity else ""
         L.append(f"index: {i.scope}/{i.ref} — HIT (from index){sens}{via}")
@@ -1167,7 +1369,8 @@ def render_brief(b: Brief, *, file_limit: int = DEFAULT_FILE_LIMIT) -> str:
         L.append(f"index: {i.status}"
                  + (f" (scope {i.scope})" if i.scope else "")
                  + via
-                 + (f" — {i.detail}" if i.detail else ""))
+                 + (f" — {i.detail}" if i.detail else "")
+                 + checked)
 
     # --- config --------------------------------------------------------------
     L.append("")
@@ -1229,6 +1432,7 @@ def render_brief(b: Brief, *, file_limit: int = DEFAULT_FILE_LIMIT) -> str:
 
 
 def brief_json(b: Brief) -> dict:
+    thin = thin_runner_up(b.locate)
     return {
         "service": b.service,
         "token": b.token,
@@ -1239,6 +1443,11 @@ def brief_json(b: Brief) -> dict:
             "status": b.locate.status,
             "owner": b.locate.owner,
             "owner_tied_with": list(b.locate.owner_tied_with),
+            "thin_runner_up": (
+                None if thin is None
+                else {"path": thin[0].path, "matches": len(thin[0].matches),
+                      "lead_percent": thin[1]}
+            ),
             "files_examined": b.locate.files_examined,
             "total_matches": b.locate.total_matches,
             "roots": [
@@ -1251,6 +1460,7 @@ def brief_json(b: Brief) -> dict:
         "index": {
             "status": b.index.status, "scope": b.index.scope, "ref": b.index.ref,
             "sensitivity": b.index.sensitivity, "basis": b.index.basis,
+            "scopes_checked": list(b.index.scopes_checked),
             "candidates": list(b.index.candidates),
             "pointers": b.index.pointers, "nuance": b.index.nuance, "detail": b.index.detail,
         },

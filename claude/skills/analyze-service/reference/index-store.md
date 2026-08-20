@@ -14,7 +14,7 @@ X" instead of re-discovering every gotcha. It holds **pointers + nuance only** �
 never live state, never re-derived config values.
 
 - **Location:** `~/.claude/analyze-service-index/<scope>/<slug>.md` — local, never inside a cluster repo or `devrc`. But **not "outside git": each `<scope>/` is its own remote-less git repo** (the store root is not one) — see 🔴 **Store safety** below before running any git command there.
-- **`<scope>`** defaults to the basename of the owning repo root the service resolved into: `datapacket-talos`, `homelab-talos`, else the current working repo's basename — derived from the locate step, no separate assumption. A scope **need not be a repo**: a ritual owned by no repo, or a client spanning several, may use a plain scope word — a deliberate choice, so say so in the brief.
+- **`<scope>`** defaults to the basename of the owning repo root the service resolved into: `datapacket-talos`, `homelab-talos`, else the current working repo's basename — derived from the locate step, no separate assumption. 🔴 **On READ, recon asks every searched root's scope, not only that one** — see "The index is NOT gated on `locate`" below; a WRITE still lands in exactly one scope, so check which scope already answered before creating an entry. A scope **need not be a repo**: a ritual owned by no repo, or a client spanning several, may use a plain scope word — a deliberate choice, so say so in the brief.
 
 ## Resolution rules
 
@@ -65,7 +65,7 @@ statuses come from `subsystem_recall.recall`, unchanged:
 | line | meaning |
 |---|---|
 | `index: <scope>/<ref> — HIT (from index) sensitivity=<s>` | resolved; `## Pointers` + `## Nuance / work-history` follow |
-| `index: ref-absent (scope <s>)` | the scope was read; nothing is recorded under that ref yet |
+| `index: ref-absent (scope <s>) … — checked N scope(s): …` | every scope named was read; nothing is recorded under that ref in any of them |
 | `index: scope-absent` | the store holds no directory for this repo yet |
 | `index: AMBIGUOUS in <scope> — a.md \| b.md` | 🔴 more than one candidate; **pick one, never guess** — no body is surfaced |
 | `index: store-missing` | the store root does not exist on this host |
@@ -74,10 +74,27 @@ statuses come from `subsystem_recall.recall`, unchanged:
 That last row is the one to read carefully: `not-attempted` and `ref-absent` both
 show "nothing from the index", and only one of them is a finding.
 
-🔴 **The index is NOT gated on `locate` succeeding.** If nothing matched by path,
-the scope falls back to the searched root(s) and the store is asked anyway — a
-curated pointer sheet is worth *most* when the path heuristic missed, since
-"where does this live?" is what the index can answer and the matcher just failed.
-A hit reached that way is marked `[scope via searched root (nothing located)]`,
-because that scope was **not** confirmed to own the service. `not-attempted` now
-means only one thing: nothing was examined at all.
+🔴 **EVERY searched root's scope is asked — not just the one that "won".** Root
+ranking is a path-name heuristic, so it answers two different questions badly:
+it can find NOTHING (and a curated pointer sheet is worth *most* exactly then,
+since "where does this live?" is what the index can answer and the matcher just
+failed), and it can find the WRONG thing (a lead of a few paths between two repos
+is a naming convention, not ownership). Both are covered the same way: the roots
+are asked in rank order, de-duplicated by SCOPE — a worktree and its base clone
+are one scope — and the FIRST hit wins, so widening the search can never move an
+answer the owner's scope already gave.
+
+The line says which scope answered and how it was reached:
+
+- no marker → the owning repo's scope, the ordinary case;
+- `[scope via the cwd repo (N paths matched)]` → the repo you are standing in;
+- `[scope via a searched root (N paths matched)]` → a root locate ranked lower;
+- `[scope via searched root (nothing located)]` → locate matched nothing at all.
+
+Anything but the first means that scope was **not** confirmed to own the service
+— treat the entry as a pointer to verify, and check the `lives at:` line's own
+`⚠ THIN MARGIN` note if it carries one.
+
+A miss prints `— checked N scope(s): …`, so "nothing recorded anywhere" arrives
+with its denominator. `not-attempted` still means only one thing: nothing was
+examined at all.
