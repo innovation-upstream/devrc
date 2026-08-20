@@ -28,7 +28,7 @@ is exactly how the drift regrows.
 
 WHY THE CEILING IS ABOVE THE 12,288 B TARGET, AND WHAT THAT COSTS
 -----------------------------------------------------------------
-The skill states a 12,288 B target and browser-bridge MEETS it (11,942 B while
+The skill states a 12,288 B target and browser-bridge MEETS it (11,990 B while
 routing ~11x its own weight), so the target is achievable and is not in dispute.
 This file does not: it sits at 12,859 B (12.56 KiB) after being cut from 14,918 B
 by demoting §6 (landing), §4's deployment table, §7's verification rationale, §0's
