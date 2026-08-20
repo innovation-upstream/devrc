@@ -71,8 +71,10 @@ Read this before trusting the 2026-08-16 block above as coverage:
   exist at base, so "red at base" is a collection error and proves nothing. The evidence
   that they bite is the 22-mutant sweep, not the red-at-base matrix.
 - **`seed.sh --push` has no hermetic test** (needs a cluster); it was exercised live 3×.
-- **`--mode=full` / `--page` over HTTP** were never byte-compared against the pod; only the
-  default digest was.
+- **`--mode=full` / `--page` / `?mode=list` over HTTP** were never byte-compared against the pod;
+  only the default digest was. (`verify-byte-identity.sh` passes no `mode` param at all, so the
+  uncompared set is *every* mode but the default — `list` included, which the phase-2 manifest
+  would depend on.)
 
 ### `#505` in one paragraph
 An entry proposed a one-line remedy at **15:00:18** on 2026-07-24; the remedy landed at **15:02:21** — 2m03s later — and the entry served it as outstanding for **22 days**. `/handoff` step 4 runs MID-session, so the writer is gone by the time the work finishes. Openness is now a typed prefix, not prose, because a prose detector is walkable by rewording. Six populations, one precedence source (`JournalBullet.openness_population`); `--validate` reports four of them and its VERDICT is deliberately unchanged (an entry with unfinished business is well-formed; failing it would be a permanently-red gate). Index rows gain `🔴 N OPEN`, conditional so the common case is byte-identical.
@@ -569,17 +571,41 @@ consultation of existing behaviour. Measured against `server.py`:
   NOT rendered anywhere** — `listing_line` emits ref/count/sensitivity/badges only
   (`subsystem_recall.py:1560`), and mtime is used for ordering. The single time signal is one
   **store-wide** `newest=` in `X-Store-Snapshot`.
-- **"Cheap" was an assumption, and measuring it is worse than the audit reported.** Building the
-  manifest from today's API is one authenticated round-trip per scope: 9 scopes at **3,370 ms /
-  22,153 bytes**, a single scope at **285 ms**, against a whole local read at **57/60/57 ms** over
-  three warm runs. That is **~58×**, not the ~7× implied by the `~480 ms` figure the audit reported
-  for the local side — which I quoted here before measuring it myself, and which is wrong. (The
-  9-scope number reproduced: 3,370 ms against the audit's 3,231 ms, byte count identical.) Item 4
-  below prescribes a short timeout; 3.4 s is not it.
+- **"Cheap" was an assumption. Measured at MATCHED scope it is ~5–7×, and the two attempts to state
+  it before this one were both wrong.** Building the manifest from today's API is one authenticated
+  round-trip per scope. Warm, on the workbench, against one seeded snapshot:
+
+  | | hosted | local | ratio |
+  |---|---|---|---|
+  | all 9 scopes | 2.6–3.4 s / 22,153 B | 0.47–0.50 s | ~6× |
+  | one scope | 0.26–0.29 s | 0.05–0.06 s | ~5× |
+
+  🔴 **The `~58×` a previous revision printed here was a UNIT MISMATCH — 9 scopes of hosted over 1
+  scope of local — and the `~480 ms` local figure it "corrected" was right all along.** I rejected
+  an auditor's number for the good reason (it was not mine) and then divided by the wrong
+  denominator, which is worse than quoting it unverified. A local single-scope read is **invariant
+  to scope size** (52 ms for a 1-entry scope, 56 ms for a 36-entry one): that is interpreter
+  startup, so no single-scope read is ever ~480 ms and the reading that would have rescued the
+  claim does not exist either. **Reproduce before quoting**: loop the 9 scopes through
+  `subsystem_recall.py --scope <s>` and through `curl …?mode=list`, and compare like for like.
+  ⚠ These are warm workbench numbers over one snapshot, not a general cost — the laptop and a cold
+  cache are unmeasured, and the network side moved 20% across three runs an hour apart.
+- **What survives the correction, and what does not.** The cost argument does NOT carry the weight
+  the previous revision gave it: the designed read asks about ONE scope (~0.27 s) against a cached
+  manifest, so item 4's short timeout is entirely feasible and "3.4 s is not it" was reasoning from
+  the mismatched figure. **The structural argument is untouched and is the real one** — there is no
+  scope-list endpoint and no per-entry mtime, so a manifest built from today's API is N round-trips
+  reconstructing something the server could answer in one, and can carry no per-entry freshness at
+  all. Phase 2 needs the server endpoint for THAT reason, not because the sweep is slow.
 
 Two consequences, both binding. **Phase 2 needs a SERVER-side manifest endpoint**, not just the CLI
 wrapper the README names. And until per-entry mtimes are served, **identity is by REF NAME only**:
-the advisory may say *hosted holds refs local does not*, and may never say *hosted's copy is newer*.
+the advisory may say *hosted holds refs local does not*, and may not say *hosted's copy is newer*.
+⚠ **The NEGATIVE direction is available and an earlier revision wrongly foreclosed it.** The
+store-wide `newest=` is a valid one-sided bound: when hosted's `newest=` predates a local entry's
+mtime, hosted's copy of that ref provably is **not** newer. Measured — hosted `newest=18:55:31Z`
+against the laptop's newest entry at 19:57Z. Affirmative freshness needs per-entry mtimes; a
+staleness signal does not, and it is the half worth carrying.
 
 The shape it has to have — each item is a measured failure, not a preference:
 1. `--source local|hosted|auto`, default `auto`. Hosted is never primary and never merged in.
@@ -597,8 +623,9 @@ The shape it has to have — each item is a measured failure, not a preference:
 4. Short timeout, disk-cached manifest, non-fatal. `/resume` step 4's contract is "print the stderr
    line, note recall was unavailable, and continue" — a network hop must not make that an exit 3.
    ⚠ This **proposes** reading the README's phase-2 "read-through cache" as the manifest cache and
-   nothing more — a cached ENTRY would be a third copy nobody syncs. `scripts/subsystem-store-api/
-   README.md:18` still says "the CLI wrapper + read-through cache", so **that file is the artifact
+   nothing more — a cached ENTRY would be a third copy nobody syncs.
+   `scripts/subsystem-store-api/README.md:18` still says "the CLI wrapper + read-through cache",
+   so **that file is the artifact
    to update in the phase-2 PR**; a handoff doc narrowing a scope the README states differently is
    the two-artifacts-disagreeing shape this same file records above.
    ⚠ And `?mode=list` sits in the bucket this doc already flags at the top: `--mode=full`/`--page`
@@ -610,9 +637,13 @@ The shape it has to have — each item is a measured failure, not a preference:
    copy of scopes written on other hosts, in the text the reader is looking at.
 
 6. **Size it before calling it a line.** Hosted-not-on-laptop, per shared scope: `datapacket-talos`
-   **36**, `civitai` 10, `devrc` 9, `homelab-talos` 6. A laptop `/resume` in the datapacket repo has
-   36 refs to name, so the advisory is a COUNT plus a bounded sample plus how to read the rest —
-   never "one line", which an earlier revision of this block asserted against its own numbers.
+   **36**, `civitai` 10, `devrc` 9, `homelab-talos` 6 — so the advisory is a COUNT plus a bounded
+   sample plus how to read the rest, never "one line", which an earlier revision asserted against
+   its own numbers. ⚠ **The worst case is not reachable by a `/resume` today**: of the four shared
+   scopes, only `devrc` and `homelab-talos` have a checkout on the laptop — `datapacket-talos` and
+   `civitai` do not — so the sizes an ordinary run meets there are **9 and 6**. The 36 arrives via
+   an explicit `--scope`, or the day that repo is cloned. Design for 36; do not claim a run hits it.
+   (The laptop has ~40 other repos; this is a statement about these four, not about that host.)
 
 **Prerequisites this decision creates, none of them optional.** (a) **No client credential exists on
 either host** — no `~/.config/subsystem-store*`, nothing in `.zshenv`; the only documented path is a
@@ -1061,8 +1092,9 @@ devrc `main`**, all gate-green, plus homelab-infra `#354` applied and verified o
 - **devrc `main` at `fc1f581`**; full suite green (`13081 collected, 0 failed`), and the
   store-content gate green after **two separate live leaks were closed today**.
   🔴 **That last clause is NO LONGER TRUE — re-measured 2026-08-20 later the same day: the live
-  store-content gate exits 1, naming one site, `scripts/tests/test_prune_skill_size.py` against the
-  `datapacket-talos/gitops-gate.md` entry.** A THIRD leak, on `main`, unrelated to and untouched by
+  store-content gate exits 1, naming one site: `scripts/tests/test_prune_skill_size.py`, against an
+  entry in the `datapacket-talos` scope** (the gate names which — this repo is public, so it is not
+  repeated here). A THIRD leak, on `main`, unrelated to and untouched by
   the hosted-fallback PR; that test file was last written by `#595`. 🔴 **And it is invisible to
   `pytest`**: the file's 6 collected tests are all `tmp_path` fixtures, so the repo-wide scan lives
   in its `__main__` CLI — `python3 scripts/tests/test_prune_skill_size.py`-style invocation of
