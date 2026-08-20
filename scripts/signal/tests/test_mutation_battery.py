@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import inspect
 import re
+import subprocess
 
 import pytest
 
@@ -74,6 +75,14 @@ def test_every_named_killer_test_EXISTS(mutant):
     The battery would report SURVIVED (the suite stays green because the named
     test is absent, not because the code is fine), which inverts the meaning of
     its own output.
+
+    🔴 SCOPE: this checks the killer EXISTS, not that it RUNS. An audit walked it
+    by adding `@pytest.mark.skip` to a killer — still collected, still greps as
+    `def <name>`, 66 tests green, and its mutant would have been scored SURVIVED.
+    Existence is all a static check can see. "It actually ran and passed" is
+    enforced at RUNTIME instead, in the runner's baseline phase, which refuses to
+    start when any named killer did not PASS. Two checks, different questions;
+    neither substitutes for the other.
     """
     suite = (battery.REPO / mutant.suite)
     if suite.is_dir():
@@ -87,35 +96,101 @@ def test_every_named_killer_test_EXISTS(mutant):
         f"battery would score it SURVIVED for the wrong reason.")
 
 
-def test_the_runner_refuses_a_dirty_tree():
-    """It edits files in place; a crash mid-run would destroy uncommitted work.
+# --------------------------------------------------------------------------- #
+# 🔴 The three guards below were SPELLED before an audit walked all three.
+#
+# Each was a substring check over `inspect.getsource(...)`: `"--porcelain" in
+# src`, `"PYTHONDONTWRITEBYTECODE" in src`, `"m.killer in failures" in src`. All
+# three passed a fully green 66-test suite against a runner whose BEHAVIOUR had
+# been removed while the WORDS stayed — `if dirty:` → `if False:`,
+# `="1"` → `="0"`, `elif m.killer in failures or True:`. That is the exact
+# shape the rules name: a guard on words is walkable by rewording.
+#
+# These replacements exercise the behaviour and still mutate nothing: a
+# throwaway git repo for the refusal, an injected `subprocess.run` for the env,
+# and a pure function for the verdict.
+# --------------------------------------------------------------------------- #
+def test_the_runner_REFUSES_a_dirty_tree(tmp_path, monkeypatch):
+    """Behavioural: point it at a dirty throwaway repo and require exit 2."""
+    repo = tmp_path / "repo"
+    (repo / "scripts" / "signal" / "tests").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "UNCOMMITTED.txt").write_text("someone else's work\n", encoding="utf-8")
 
-    Pinned structurally rather than by running it, because running it would mean
-    mutating this very checkout. This repo is a SHARED clone whose dirty files
-    usually belong to another session, which is what makes the refusal
-    load-bearing rather than tidy.
+    monkeypatch.setattr(battery, "REPO", repo)
+    monkeypatch.setattr(battery, "_run", lambda *a, **k: pytest.fail(
+        "the runner reached the test phase on a DIRTY tree"))
+    assert battery.main([]) == 2
+
+
+def test_the_runner_refuses_when_git_status_CANNOT_BE_READ(tmp_path, monkeypatch):
+    """🔴 Fails CLOSED. An unreadable answer is not a clean one.
+
+    Both git checks used to read `.stdout` and ignore the return code, so any
+    git failure produced `""` — indistinguishable from a clean tree. Measured
+    with git broken: the runner did not refuse, mutated a module in a tree
+    holding uncommitted work, and printed `tree restored: clean`.
+    """
+    monkeypatch.setattr(battery, "REPO", tmp_path)          # not a git repo
+    monkeypatch.setattr(battery, "_run", lambda *a, **k: pytest.fail(
+        "the runner proceeded despite an unreadable git status"))
+    assert battery.main([]) == 2
+
+
+def test_the_runner_DISABLES_the_bytecode_cache(monkeypatch):
+    """Behavioural: capture the env actually handed to the subprocess.
+
+    Without this a mutant can be scored SURVIVED without ever executing —
+    CPython validates cached bytecode on mtime-in-whole-SECONDS + size, so a
+    same-LENGTH edit in the same second imports the ORIGINAL module. Several
+    mutants here are exactly same-length, so it is not theoretical.
+    """
+    seen = {}
+
+    class _Done:
+        returncode, stdout, stderr = 0, "", ""
+
+    def fake_run(cmd, **kw):
+        seen.update(kw.get("env") or {})
+        return _Done()
+
+    monkeypatch.setattr(battery.subprocess, "run", fake_run)
+    battery._run("scripts/signal/tests/")
+    assert seen.get("PYTHONDONTWRITEBYTECODE") == "1", (
+        f"the subprocess env carried PYTHONDONTWRITEBYTECODE="
+        f"{seen.get('PYTHONDONTWRITEBYTECODE')!r}")
+
+
+@pytest.mark.parametrize("rc, failures, expected", [
+    (0, set(), "SURVIVED"),                       # green suite = not killed
+    (1, {"the_killer"}, "KILLED"),                # the named test fired
+    (1, {"some_other_test"}, "KILLED-WRONG-REASON"),   # green for the wrong reason
+    (1, set(), "KILLED-WRONG-REASON"),            # red but no parseable failure
+    (1, {"the_killer", "other"}, "KILLED"),       # killer among several
+])
+def test_the_verdict_requires_the_NAMED_test(rc, failures, expected):
+    """"Some test failed" is not a kill.
+
+    A different guard's error is green for the wrong reason and stays green with
+    the guard under test deleted. Table-tested against the pure `_verdict`,
+    because the substring check this replaced was satisfied by
+    `elif m.killer in failures or True:` — which scores everything KILLED.
+    """
+    verdict, _ = battery._verdict(rc, failures, "the_killer")
+    assert verdict == expected
+
+
+def test_the_runner_handles_SIGTERM_so_the_restore_still_runs():
+    """`finally` covers exceptions and Ctrl-C, but NOT a default-handled SIGTERM.
+
+    Measured before the fix: `timeout -s TERM` left `_signal_db.py` modified in
+    the tree, while `timeout -s INT` restored cleanly. In a shared checkout that
+    silently hands the next session a mutated production module. Plausible
+    senders: `timeout`, an agent harness killing a long command, session
+    teardown.
     """
     src = inspect.getsource(battery.main)
-    assert "--porcelain" in src and "REFUSING" in src, (
-        "the dirty-tree refusal is gone from the runner")
-
-
-def test_the_runner_disables_the_BYTECODE_CACHE():
-    """🔴 Without this a mutant can be scored SURVIVED without ever executing.
-
-    CPython validates a cached module on source mtime-in-whole-SECONDS + size, so
-    a same-LENGTH edit landing in the same second as the last import imports the
-    ORIGINAL bytecode. Several mutants here are exactly same-length (a digit
-    swap, an operand reorder), so this is not a theoretical concern for this
-    battery specifically.
-    """
-    assert "PYTHONDONTWRITEBYTECODE" in inspect.getsource(battery._run)
-
-
-def test_the_runner_requires_the_NAMED_test_to_be_the_killer():
-    """"Some test failed" is not a kill — it can be green for the wrong reason."""
-    src = inspect.getsource(battery.main)
-    assert "KILLED-WRONG-REASON" in src and "m.killer in failures" in src
+    assert "SIGTERM" in src, "the SIGTERM handler is gone; a kill leaks a mutant"
 
 
 def test_the_audit_found_mutants_are_still_present():

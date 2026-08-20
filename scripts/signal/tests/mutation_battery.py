@@ -3,7 +3,12 @@
 
     python3 scripts/signal/tests/mutation_battery.py            # run them all
     python3 scripts/signal/tests/mutation_battery.py --list      # show the ledger
-    python3 scripts/signal/tests/mutation_battery.py --only A1 R4
+    python3 scripts/signal/tests/mutation_battery.py --only A1 M4
+
+Exit codes: 0 every mutant killed by its named test · 1 at least one SURVIVED,
+ANCHOR-MISSed or was KILLED-WRONG-REASON · 2 refused to start (dirty tree, an
+unreadable `git status`, a red baseline, a named killer that did not run) ·
+3 a mutant was left in the tree, or that could not be determined.
 
 🔴 WHY THIS FILE EXISTS AT ALL. Eight mutation batteries have been run against
 this module across #514, #537, #540, #546 and #573. Every one of them lived in a
@@ -44,6 +49,7 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import signal as _signal
 import subprocess
 import sys
 import tempfile
@@ -56,7 +62,6 @@ BP = "scripts/signal/build-push.sh"
 
 SUITE_EXCL = "scripts/signal/tests/test_group_exclusions.py"
 SUITE_IMAGE = "scripts/signal/tests/test_image_deps.py"
-SUITE_ALL = "scripts/signal/tests/"
 
 
 class Mutant:
@@ -162,8 +167,10 @@ MUTANTS: list[Mutant] = [
            "                WHERE m.id = %s AND m.is_outbound",
            "test_get_draft_refuses_a_device_sync_ECHO_not_just_a_draft", SUITE_EXCL),
 
-    Mutant("M10", "the mute table re-keyed on a NAME column — which would match nothing, "
-                  "because no group name was stored for months", DB,
+    Mutant("M10", "a NAME column ADDED to the mute table — the shape a name-keyed mute "
+                  "list would take, which would have matched nothing because no group "
+                  "name was stored for months. The killer pins the COLUMN LIST, not the "
+                  "primary key, so that is what this breaks", DB,
            "        group_id BYTEA PRIMARY KEY,\n        note TEXT,",
            "        group_id BYTEA PRIMARY KEY,\n        name TEXT,\n        note TEXT,",
            "test_the_mute_table_is_keyed_on_the_binary_id_not_the_name", SUITE_EXCL),
@@ -237,11 +244,11 @@ def anchor_report() -> list[tuple[Mutant, int]]:
     return out
 
 
-def _run(suite: str) -> tuple[int, str]:
+def _run(suite: str, *, verbose: bool = False) -> tuple[int, str]:
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
     p = subprocess.run(
-        [sys.executable, "-m", "pytest", suite, "-q", "--no-header",
-         "-p", "no:cacheprovider"],
+        [sys.executable, "-m", "pytest", suite, "-v" if verbose else "-q",
+         "--no-header", "-p", "no:cacheprovider"],
         cwd=REPO, env=env, capture_output=True, text=True)
     return p.returncode, p.stdout + p.stderr
 
@@ -251,10 +258,46 @@ def _failed(out: str) -> set[str]:
             for ln in out.splitlines() if ln.startswith(("FAILED ", "ERROR "))}
 
 
+def _verdict(rc: int, failures: set[str], killer: str) -> tuple[str, str]:
+    """(verdict, detail) for one mutant. PURE — no I/O, so it is table-testable.
+
+    Extracted from `main` on an audit finding: while this logic was inline, the
+    only guard on it was a test asserting the STRING `"m.killer in failures"`
+    appeared in the source. That is satisfied by `elif m.killer in failures or
+    True:` — which scores every mutant KILLED regardless of which test fired,
+    i.e. exactly the green-for-the-wrong-reason this battery exists to prevent,
+    with the guard's own words still present. A guard on WORDS is walkable by
+    rewording; the fix is to make the behaviour reachable from a test.
+    """
+    if rc == 0:
+        return "SURVIVED", "the suite stayed GREEN"
+    if killer in failures:
+        return "KILLED", f"by {killer} (+{len(failures) - 1} other)"
+    return "KILLED-WRONG-REASON", f"expected {killer}, got {sorted(failures)}"
+
+
+def _git_status(repo: Path) -> tuple[int, str]:
+    """`git status --porcelain`, returning the STATUS as well as the output.
+
+    🔴 FAIL CLOSED. Both callers used to read `.stdout` and ignore the return
+    code, so any git failure produced an empty string — which reads as "clean".
+    Measured: with `git status` broken (rc 128, empty stdout) the runner did not
+    refuse, mutated a module in a tree holding uncommitted work, and finished by
+    printing `tree restored: clean` — a positive claim about a check that never
+    ran. Real ways to get rc≠0 with empty stdout: git's `safe.directory`
+    ownership refusal, a concurrent `index.lock`, a `cp -a` copy of a worktree
+    (whose `.git` is a FILE — a manoeuvre this repo's rules tell agents to make),
+    an extracted tarball, a misconfigured `GIT_DIR`.
+    """
+    p = subprocess.run(["git", "-C", str(repo), "status", "--porcelain"],
+                       capture_output=True, text=True)
+    return p.returncode, p.stdout.strip()
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--list", action="store_true", help="print the ledger and exit")
-    ap.add_argument("--only", nargs="*", metavar="ID", help="run just these mutant ids")
+    ap.add_argument("--only", nargs="+", metavar="ID", help="run just these mutant ids")
     args = ap.parse_args(argv)
 
     if args.list:
@@ -263,11 +306,24 @@ def main(argv=None) -> int:
             print(f"{m.id:4} {m.path:30} -> {m.killer}{flag}\n     {m.why}\n")
         return 0
 
+    # 🔴 A SIGTERM used to leave a mutant in the tree. `finally` covers exceptions
+    # and Ctrl-C (KeyboardInterrupt) but NOT a default-handled SIGTERM, which
+    # kills the process outright. Measured: `timeout -s TERM` left
+    # `_signal_db.py` modified; `timeout -s INT` restored cleanly. In a shared
+    # checkout that silently hands the next session a mutated production module.
+    # Turning it into SystemExit lets the `finally` run.
+    _signal.signal(_signal.SIGTERM, lambda *_: sys.exit(1))
+
     # 🔴 REFUSE A DIRTY TREE. This mutates files in place. A crash mid-run would
     # take uncommitted work with it, and in this shared checkout that work is
-    # usually somebody else's.
-    dirty = subprocess.run(["git", "-C", str(REPO), "status", "--porcelain"],
-                           capture_output=True, text=True).stdout.strip()
+    # usually somebody else's. Fails CLOSED — see `_git_status`.
+    rc_git, dirty = _git_status(REPO)
+    if rc_git != 0:
+        print(f"REFUSING: `git status` exited {rc_git} in {REPO}, so the "
+              "dirty-tree check COULD NOT MEASURE. An unreadable answer is not "
+              "a clean one, and this battery edits files in place.",
+              file=sys.stderr)
+        return 2
     if dirty:
         print("REFUSING: the tree is dirty and this battery edits files in place.\n"
               "Commit, or run it in a clean worktree:\n"
@@ -282,14 +338,32 @@ def main(argv=None) -> int:
 
     # Baseline. Without it a "kill" is unattributable — it might have been red
     # before the mutant landed.
+    #
+    # 🔴 AND IT PROVES EVERY NAMED KILLER ACTUALLY RAN AND PASSED. A killer that
+    # merely EXISTS is not enough: mark one `@pytest.mark.skip` and it is still
+    # collected, still greps as `def <name>`, and its mutant is then scored
+    # SURVIVED — inverting the meaning of this tool's own output. Verified by
+    # doing exactly that. Existence is checked statically in the gate; that it
+    # RAN can only be observed here, in the run that happens anyway.
+    baseline_passed: set[str] = set()
     for suite in {m.suite for m in selected}:
-        rc, out = _run(suite)
-        last = out.strip().splitlines()[-1] if out.strip() else "(no output)"
-        print(f"BASELINE {suite}: rc={rc}  {last}")
+        rc, out = _run(suite, verbose=True)
+        summary = [ln for ln in out.strip().splitlines() if " passed" in ln or " failed" in ln]
+        print(f"BASELINE {suite}: rc={rc}  {summary[-1] if summary else '(no verdict)'}")
         if rc != 0:
             print("  !! baseline RED — aborting; nothing below would be attributable",
                   file=sys.stderr)
             return 2
+        for ln in out.splitlines():
+            if " PASSED" in ln and "::" in ln:
+                baseline_passed.add(ln.split("::")[-1].split()[0].split("[")[0])
+
+    unrun = sorted({m.killer for m in selected} - baseline_passed)
+    if unrun:
+        print("REFUSING: these named killer tests did not PASS in the baseline, so "
+              "any mutant they guard would be scored SURVIVED for the wrong "
+              f"reason (skipped? renamed? deselected?): {unrun}", file=sys.stderr)
+        return 2
 
     results = []
     for m in selected:
@@ -305,14 +379,7 @@ def main(argv=None) -> int:
         try:
             target.write_text(original.replace(m.old, m.new, 1), encoding="utf-8")
             rc, out = _run(m.suite)
-            failures = _failed(out)
-            if rc == 0:
-                verdict, detail = "SURVIVED", "the suite stayed GREEN"
-            elif m.killer in failures:
-                verdict, detail = "KILLED", f"by {m.killer} (+{len(failures) - 1} other)"
-            else:
-                verdict, detail = ("KILLED-WRONG-REASON",
-                                   f"expected {m.killer}, got {sorted(failures)}")
+            verdict, detail = _verdict(rc, _failed(out), m.killer)
             results.append((m, verdict, detail))
             print(f"{m.id}: {verdict} — {detail}")
         finally:
@@ -327,8 +394,12 @@ def main(argv=None) -> int:
     for m, verdict, detail in bad:
         print(f"  !! {verdict}: {m.id} — {detail}", file=sys.stderr)
 
-    after = subprocess.run(["git", "-C", str(REPO), "status", "--porcelain"],
-                           capture_output=True, text=True).stdout.strip()
+    rc_git, after = _git_status(REPO)
+    if rc_git != 0:
+        print(f"\n🔴 COULD NOT MEASURE whether a mutant was left behind — "
+              f"`git status` exited {rc_git}. Check the tree by hand; this is "
+              "NOT a clean report.", file=sys.stderr)
+        return 3
     if after:
         print(f"\n🔴 THE TREE IS DIRTY AFTER THE RUN — a mutant was left behind:\n{after}",
               file=sys.stderr)
