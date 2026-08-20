@@ -2213,6 +2213,88 @@ class TestEntryMarkdownShape:
         assert sr.NUANCE_HEADING not in sr.extract_sections("## Pointers\n- p\n", HEADINGS)
 
 
+class TestScanHeadings:
+    """The heading INVENTORY — what `extract_sections` structurally cannot say.
+
+    `extract_sections` answers only about the headings it was asked for, so
+    "this entry has no `## Pointers`" and "the writer typed `## pointers`" are
+    the same answer there, and a heading written twice is merged before anyone
+    could see it. `scan_headings` is the other view over the same walker, and
+    it is what `subsystem_touch --validate`'s shape advisory is built on.
+    """
+
+    def test_POSITIVE_CONTROL_a_real_shaped_entry_yields_its_headings(self) -> None:
+        """A zero from this is only a reading once it has been watched to find
+        something — the same pairing `TestJournalBullets` opens with."""
+        got = sr.scan_headings(
+            "# alpha-unit\n\n## What it is\nprose\n\n## Pointers\n- p\n"
+            "\n## Nuance / work-history\n- n\n\n### A sub-heading\n"
+        )
+        assert got == (
+            "# alpha-unit",
+            "## What it is",
+            "## Pointers",
+            "## Nuance / work-history",
+            "### A sub-heading",
+        )
+
+    def test_NEGATIVE_PAIR_a_body_with_no_headings_yields_none(self) -> None:
+        assert sr.scan_headings("just prose\nand more prose\n") == ()
+        assert sr.scan_headings("") == ()
+
+    def test_a_REPEATED_heading_appears_ONCE_PER_OCCURRENCE(self) -> None:
+        """🔴 The only reason duplicate detection is possible at all. This
+        function is the sole surface on which a duplicate is still visible —
+        `extract_sections` concatenates the two blocks under one key and drops
+        whatever sat between them, silently."""
+        text = "## Pointers\n- a\n\n## Nuance / work-history\n- mid\n\n## Pointers\n- b\n"
+        assert sr.scan_headings(text).count(sr.POINTERS_HEADING) == 2
+        merged = sr.extract_sections(text, HEADINGS)
+        assert "- a" in merged[sr.POINTERS_HEADING]
+        assert "- b" in merged[sr.POINTERS_HEADING]
+        assert "- mid" not in merged[sr.POINTERS_HEADING]
+
+    def test_a_heading_inside_a_FENCE_is_not_a_heading(self) -> None:
+        """The RELATIONSHIP, not the component: the two views over the walker
+        must agree about what a heading IS. If `scan_headings` counted a fenced
+        `#` the validator would report a section that ends nowhere, while
+        `extract_sections` — reading the same file — would report it intact."""
+        text = (
+            "## Nuance / work-history\n- 2026-01-01: run this:\n"
+            "```\n## not a heading\n```\n- 2026-01-02: after the fence\n"
+        )
+        assert sr.scan_headings(text) == (sr.NUANCE_HEADING,)
+        assert "after the fence" in sr.extract_sections(text, HEADINGS)[sr.NUANCE_HEADING]
+
+    def test_a_hash_that_is_NOT_at_column_zero_is_not_a_heading(self) -> None:
+        """Same rule `extract_sections` matches on, stated where a reader of the
+        inventory will look for it. An indented `#` is a list continuation."""
+        assert sr.scan_headings("  ## indented\n\t## tabbed\n") == ()
+
+    def test_headings_are_VERBATIM_and_UNNORMALIZED(self) -> None:
+        """The caller reporting a near-miss has to print what the writer
+        actually typed. A folded form would turn "you wrote `## pointers`" back
+        into "the section is absent", which is the finding it exists to replace.
+        """
+        got = sr.scan_headings("##Pointers\n\n## Pointers:\n\n##  POINTERS  \n")
+        assert got == ("##Pointers", "## Pointers:", "##  POINTERS")
+
+    def test_the_two_views_never_disagree_about_a_heading_they_BOTH_see(self) -> None:
+        """One parser, pinned as a relationship. Every heading `extract_sections`
+        returns a body for must appear in the inventory, and the inventory must
+        contain no requested heading `extract_sections` called absent — the
+        disagreement `--validate` would render as "the section is absent"
+        directly beside "the heading is right there"."""
+        text = (
+            "---\nservice: alpha-unit\n---\n\n## What it is\nprose\n\n"
+            "## Pointers\n- p\n\n## Nuance / work-history\n```\n## fenced\n```\n- n\n"
+        )
+        inventory = sr.scan_headings(text)
+        sections = sr.extract_sections(text, HEADINGS)
+        for h in HEADINGS:
+            assert (h in sections) == (h in inventory), h
+
+
 class TestJournalBullets:
     """🔴 THE POSITIVE CONTROL COMES FIRST, and its pair with it. An empty
     result is indistinguishable from a parser wired to nothing, so "it found
@@ -2300,15 +2382,24 @@ class TestEntryMarkdownMutationKills:
 
     def test_kills_the_section_fence_skip(self, tmp_path: Path) -> None:
         """Relocated. Without it a `#` inside a fence ends the section early —
-        HALF an entry's nuance, looking exactly like a complete read."""
+        HALF an entry's nuance, looking exactly like a complete read.
+
+        🔴 THE ANCHOR MOVED, and the anchor-uniqueness assert is what said so.
+        When `extract_sections`' inline walker became `_heading_blocks` — one
+        parser, two views — this mutant's old anchor stopped existing and the
+        test went RED with `mutation anchor occurs 0x` rather than quietly
+        passing. That is the harness working: a mutation kill re-anchored by
+        hand is a kill; one that silently stops applying is a coverage claim
+        with nothing behind it.
+        """
         mod = _load_mutant(
             tmp_path,
             "m_sec_fence",
             [(
                 "        if _is_fence(line):\n            in_fence = not in_fence\n"
-                "            if current is not None:",
+                "            blocks[-1][1].append(line)",
                 "        if False:\n            in_fence = not in_fence\n"
-                "            if current is not None:",
+                "            blocks[-1][1].append(line)",
             )],
         )
         text = "## Nuance / work-history\n- a\n```\n## not a heading\n```\n- the SECOND bullet\n"
@@ -2316,19 +2407,45 @@ class TestEntryMarkdownMutationKills:
         assert "the SECOND bullet" not in got.get(sr.NUANCE_HEADING, "")
 
     def test_kills_the_present_but_empty_tracking(self, tmp_path: Path) -> None:
-        """Relocated. Without it presence is derived from content, so an empty
-        section mid-file reads ABSENT while the same section at EOF reads
-        present — two answers to one question."""
+        """Relocated, then re-anchored onto `_heading_blocks`. Without it
+        presence is derived from content, so an empty section mid-file reads
+        ABSENT while the same section at EOF reads present — two answers to one
+        question."""
         mod = _load_mutant(
             tmp_path,
             "m_seen",
-            [("            if current is not None:\n                seen.add(current)",
-              "            if False:\n                seen.add(current)")],
+            [("        seen.add(heading)\n        wanted[heading].extend(body)",
+              "        wanted[heading].extend(body)")],
         )
         got = mod.extract_sections(
             "## Pointers\n- p\n## Nuance / work-history\n- n\n", HEADINGS
         )
         assert got == {}, "the presence tracking was not what produced the keys"
+
+    def test_kills_the_heading_REPEAT_that_makes_duplicates_visible(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 `scan_headings` keeping repeats is load-bearing, not incidental.
+
+        `extract_sections` MERGES a duplicated heading, so it is structurally
+        unable to report one; `subsystem_touch --validate`'s DUPLICATED finding
+        exists only because this walker emits a separate block per occurrence.
+        The mutant de-duplicates — the shape a reasonable refactor would reach
+        for — and the duplicate becomes invisible while `extract_sections` keeps
+        working, i.e. green everywhere except the one caller that needed it.
+        """
+        mod = _load_mutant(
+            tmp_path,
+            "m_repeat",
+            [("    return tuple(h for h, _ in _heading_blocks(text) if h is not None)",
+              "    return tuple(dict.fromkeys("
+              "h for h, _ in _heading_blocks(text) if h is not None))")],
+        )
+        text = "## Pointers\n- a\n\n## Pointers\n- b\n"
+        assert sr.scan_headings(text).count(sr.POINTERS_HEADING) == 2
+        assert mod.scan_headings(text).count(sr.POINTERS_HEADING) == 1, (
+            "the mutant must collapse the repeat this finding is built on"
+        )
 
     def test_kills_the_bullet_fence_skip(self, tmp_path: Path) -> None:
         """Without it a `- ` line inside a fence is promoted to a bullet and the

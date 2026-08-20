@@ -9710,3 +9710,755 @@ class TestNearMissShapesAgainstTheCommittedMatrix:
         # reaches the regex) and that it comes back at all.
         assert [b.near_miss_marker for b in sr.parse_journal_bullets(line)] == [False]
         assert _time.perf_counter() - started < 1.0
+
+
+# =============================================================================
+# 🔴 THE SHAPE POPULATION — `--validate` was a front-matter parser, not a shape
+# checker. Everything below is synthetic; nothing reads the real store.
+# =============================================================================
+#
+# MEASURED (proposal §2.1, 2026-08-19, eight synthetic fixtures through
+# `--validate`): a file with ALL THREE spine headings renamed, a file with NO
+# headings at all, and a file with a perfect spine and every section EMPTY were
+# each reported `OK — 1 of 1 parse` at exit 0 — byte-indistinguishable from the
+# conforming positive control. The 53/53 spine every consumer depends on was
+# enforced by nothing.
+#
+# 🔴 AND THE VERDICT MUST STAY EXACTLY WHERE IT IS. That is not a caveat, it is
+# the property most likely to regress: `handoff/SKILL.md` step 4 branches on the
+# exit code alone, and a non-zero there means "write NOTHING" — the wrong
+# response to a file already on disk whose heading needs one edit. So the tests
+# that pin `OK`/0 over a shape-broken entry come FIRST, and the mutation matrix
+# at the bottom breaks the invariant on purpose to prove they can see it.
+
+SHAPE_FM = (
+    "---\nservice: payments-unit\nscope: " + SCOPE + "\n"
+    "sensitivity: public\ncreated_by: a-synthetic-writer\n---\n"
+)
+SHAPE_SPINE = (
+    "\n## What it is\nA synthetic fixture.\n"
+    "\n## Pointers\n- `example/path` — synthetic.\n"
+    "\n## Nuance / work-history\n- 2026-08-01: OPEN: synthetic.\n"
+)
+
+
+def _shape_store(tmp_path: Path, body: str, name: str = "payments-unit.md") -> Path:
+    store = tmp_path / "s"
+    (store / SCOPE).mkdir(parents=True, exist_ok=True)
+    (store / SCOPE / name).write_text(body, encoding="utf-8")
+    return store
+
+
+def _shape_kinds(store: Path, name: str = "payments-unit.md") -> list[tuple[str, str]]:
+    rows = st.scan_entry_shape([store / SCOPE / name])
+    return sorted((s.heading, s.kind) for s in rows)
+
+
+# --- the §2.1 table, reproduced as the regression base -----------------------
+#
+# Each row: (label, body, expected exit, expected verdict fragment, expected
+# {(heading, kind)} set). The two controls are named as such and kept in the
+# table rather than beside it — a table whose negative control lives elsewhere
+# can go all-green while the instrument is wired to nothing.
+_S1_CONFORMING = SHAPE_FM + SHAPE_SPINE
+_S2_NO_FRONT_MATTER = "# payments-unit\n" + SHAPE_SPINE
+_S3_SPINE_RENAMED = SHAPE_FM + (
+    "\n## Overview\nA synthetic fixture.\n"
+    "\n## pointers\n- `example/path` — synthetic.\n"
+    "\n## Nuance / work history\n- 2026-08-01: OPEN: synthetic.\n"
+)
+_S4_NO_HEADINGS = SHAPE_FM + "\nJust prose, and not a heading anywhere in it.\n"
+_S5_LEGACY_REPO = (
+    "---\nservice: payments-unit\nrepo: " + SCOPE + "\n---\n" + SHAPE_SPINE
+)
+_S6_RESOLVED_NO_SHA = SHAPE_FM + (
+    "\n## What it is\nA synthetic fixture.\n"
+    "\n## Pointers\n- `example/path` — synthetic.\n"
+    "\n## Nuance / work-history\n- 2026-08-01: RESOLVED: no sha on this one.\n"
+)
+_S7_UNDATED_ONLY = SHAPE_FM + (
+    "\n## What it is\nA synthetic fixture.\n"
+    "\n## Pointers\n- `example/path` — synthetic.\n"
+    "\n## Nuance / work-history\n- an undated durable lesson.\n"
+)
+_S8_SECTIONS_EMPTY = SHAPE_FM + (
+    "\n## What it is\n\n## Pointers\n\n## Nuance / work-history\n"
+)
+
+SHAPE_TABLE = [
+    ("1 conforming (POSITIVE CONTROL)", _S1_CONFORMING, 0, "OK — 1 of 1", []),
+    ("2 no front matter (NEGATIVE CONTROL)", _S2_NO_FRONT_MATTER, 3, "🔴 MALFORMED", []),
+    ("3 spine headings renamed", _S3_SPINE_RENAMED, 0, "OK — 1 of 1", [
+        (sr.NUANCE_HEADING, st.SHAPE_ABSENT),
+        (sr.POINTERS_HEADING, st.SHAPE_RENAMED),
+    ]),
+    ("4 no headings at all", _S4_NO_HEADINGS, 0, "OK — 1 of 1", [
+        (sr.NUANCE_HEADING, st.SHAPE_ABSENT),
+        (sr.POINTERS_HEADING, st.SHAPE_ABSENT),
+    ]),
+    ("5 legacy repo:, no sensitivity", _S5_LEGACY_REPO, 0, "OK — 1 of 1", []),
+    ("6 RESOLVED: with no sha", _S6_RESOLVED_NO_SHA, 0, "OK — 1 of 1", []),
+    ("7 undated bullets only", _S7_UNDATED_ONLY, 0, "OK — 1 of 1", []),
+    ("8 perfect spine, sections empty", _S8_SECTIONS_EMPTY, 0, "OK — 1 of 1", [
+        (sr.NUANCE_HEADING, st.SHAPE_EMPTY),
+        (sr.POINTERS_HEADING, st.SHAPE_EMPTY),
+    ]),
+]
+
+
+class TestTheEightFixtureTableIsTheRegressionBASE:
+    """🔴 THE VERDICT AND THE EXIT CODE DID NOT MOVE — every row, both controls.
+
+    This is the table from proposal §2.1 that MEASURED the gap, re-run as a
+    guard. Rows 3, 4 and 8 are the finding: they returned `OK` at 0 before this
+    change and they must STILL return `OK` at 0 after it. The only thing that
+    may differ is the advisory.
+    """
+
+    @pytest.mark.parametrize(
+        "label,body,rc,verdict,_kinds",
+        SHAPE_TABLE,
+        ids=[r[0] for r in SHAPE_TABLE],
+    )
+    def test_the_verdict_and_exit_code_are_UNCHANGED(
+        self, label, body, rc, verdict, _kinds, tmp_path, capsys
+    ) -> None:
+        store = _shape_store(tmp_path, body)
+        got = st.main(["--store", str(store), "--scope", SCOPE, "--validate"])
+        out = capsys.readouterr().out
+        assert got == rc, label
+        assert verdict in out, label
+
+    @pytest.mark.parametrize(
+        "label,body,_rc,_verdict,kinds",
+        SHAPE_TABLE,
+        ids=[r[0] for r in SHAPE_TABLE],
+    )
+    def test_the_shape_population_reports_exactly_these_findings(
+        self, label, body, _rc, _verdict, kinds, tmp_path
+    ) -> None:
+        """The other half: an advisory that changes no verdict is only worth
+        having if it SAYS something, and the rows that say nothing are named
+        here too — five of the eight, which is what stops this from being a
+        detector that fires on everything."""
+        store = _shape_store(tmp_path, body)
+        assert _shape_kinds(store) == sorted(kinds), label
+
+
+class TestTheAdvisoryNeverTouchesTheVERDICT:
+    """🔴 The property the whole change is constrained by, pinned on its own.
+
+    Advisory only, exactly like the open-actions population. Failing a
+    shape-broken entry would be the permanently-red gate `claude/RULES.md`
+    forbids — and worse than useless, since `/handoff` step 4 reads a non-zero
+    exit as "write NOTHING".
+    """
+
+    def test_an_entry_broken_in_SHAPE_but_parsing_is_OK_at_exit_0(
+        self, tmp_path, capsys
+    ) -> None:
+        store = _shape_store(tmp_path, _S3_SPINE_RENAMED)
+        rc = st.main(["--store", str(store), "--scope", SCOPE, "--validate"])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "OK — 1 of 1 entry file(s) parse, 0 malformed" in out
+        assert "🔴 MALFORMED" not in out
+        # and it is not silent about it either — the advisory is the ONLY
+        # difference from the conforming control
+        assert "RENAMED" in out
+
+    def test_the_report_property_that_drives_the_exit_code_ignores_shape(self) -> None:
+        """Structural half. `clean` answers ONE question — would the loader
+        accept this file — and the loader accepts a file whose sections it
+        cannot find. A `shape` term in this property is the regression."""
+        rep = st.ValidationReport(
+            store_root="/nowhere", target="`x/`", scope="x",
+            checked=("a.md",), malformed=(),
+            shape=(st.ShapeFinding(filename="a.md", heading=sr.POINTERS_HEADING,
+                                   kind=st.SHAPE_ABSENT),),
+        )
+        assert rep.clean is True
+
+    def _render(self, tmp_path, capsys, sub: str, body: str) -> list[str]:
+        store = _shape_store(tmp_path / sub, body)
+        st.main(["--store", str(store), "--scope", SCOPE, "--validate"])
+        # the store root differs between the two fixtures by construction
+        return [
+            l for l in capsys.readouterr().out.splitlines() if str(tmp_path) not in l
+        ]
+
+    def test_everything_up_to_and_INCLUDING_the_verdict_is_byte_identical(
+        self, tmp_path, capsys
+    ) -> None:
+        """🔴 The strongest form of "the verdict did not change": render a
+        conforming entry and a shape-broken one and compare the whole region
+        that ENDS at the verdict line, byte for byte.
+
+        A keyword check ("is `OK` still in the output") would pass while the
+        sentence around it moved; this cannot. The advisory blocks below the
+        verdict are excluded deliberately — they are the part that is ALLOWED
+        to differ, and `test_the_advisory_blocks_are_the_ONLY_thing_that_moved`
+        is what says nothing else hides down there.
+        """
+        a = self._render(tmp_path, capsys, "g", _S1_CONFORMING)
+        b = self._render(tmp_path, capsys, "b", _S3_SPINE_RENAMED)
+        verdict = "OK — 1 of 1 entry file(s) parse, 0 malformed."
+        ia = next(i for i, l in enumerate(a) if l.startswith(verdict))
+        ib = next(i for i, l in enumerate(b) if l.startswith(verdict))
+        assert a[: ia + 1] == b[: ib + 1]
+
+    def test_the_advisory_blocks_are_the_ONLY_thing_that_moved(
+        self, tmp_path, capsys
+    ) -> None:
+        """🔴 AND THE OPEN-ACTION BLOCK MOVED TOO — which is the finding, not an
+        exception to it.
+
+        The first draft of this test asserted every differing line belonged to
+        the SHAPE block and went red on `open actions across 1 entry file(s):`.
+        It is right to: renaming `## Nuance / work-history` is precisely what
+        makes `scan_open_actions` find nothing, so the open-action block flips
+        from reporting one declared `OPEN:` to reporting a zero — over a section
+        the parser never reached. That is §2.2's silent data loss showing up in
+        this tool's own output, and it is exactly why the shape block is
+        rendered ABOVE it rather than below.
+
+        So the claim is the accurate one: every differing line sits at or after
+        the start of the advisory region, and none of them is a verdict line.
+        """
+        a = self._render(tmp_path, capsys, "g", _S1_CONFORMING)
+        b = self._render(tmp_path, capsys, "b", _S3_SPINE_RENAMED)
+        first_advisory = next(i for i, l in enumerate(b) if "entry shape" in l)
+        moved = [l for l in b if l not in a]
+        assert moved, "positive control: the two renderings must actually differ"
+        for line in moved:
+            assert b.index(line) >= first_advisory, f"a pre-verdict line moved: {line!r}"
+            assert "MALFORMED" not in line and "OK — " not in line
+        # the pair that proves the ordering is not cosmetic
+        assert any("declared `OPEN:`" in l for l in a)
+        assert any("0 declared across" in l for l in b)
+
+
+class TestScanEntryShape:
+    """The four kinds, each on its own, and each DISJOINT from the others."""
+
+    def test_a_RENAMED_heading_names_what_the_writer_ACTUALLY_TYPED(
+        self, tmp_path
+    ) -> None:
+        """The difference between a finding fixable in one edit and one that
+        sends the writer looking for prose already on disk."""
+        store = _shape_store(
+            tmp_path,
+            SHAPE_FM + "\n## pointers\n- p\n\n## Nuance / work-history\n- n\n",
+        )
+        (row,) = [s for s in st.scan_entry_shape([store / SCOPE / "payments-unit.md"])]
+        assert row.kind == st.SHAPE_RENAMED
+        assert row.heading == sr.POINTERS_HEADING, "the SCHEMA heading, never the typo"
+        assert row.found == ("## pointers",)
+
+    @pytest.mark.parametrize(
+        "written",
+        ["## pointers", "#Pointers", "### Pointers", "## Pointers:", "##   Pointers  "],
+    )
+    def test_each_documented_NEAR_MISS_folds_to_renamed_not_absent(
+        self, written, tmp_path
+    ) -> None:
+        """The three folds `_heading_key` names — level, case/whitespace, a
+        trailing colon — measured one shape at a time so a fold that stopped
+        working could not hide behind a sibling."""
+        store = _shape_store(
+            tmp_path,
+            SHAPE_FM + f"\n{written}\n- p\n\n## Nuance / work-history\n- n\n",
+        )
+        (row,) = st.scan_entry_shape([store / SCOPE / "payments-unit.md"])
+        assert row.kind == st.SHAPE_RENAMED, written
+
+    def test_the_LOOSE_key_never_ACCEPTS_a_heading(self, tmp_path) -> None:
+        """🔴 The fold exists to REPORT, never to admit. If `## pointers` were
+        accepted the store would quietly widen to whatever a writer typed —
+        the opposite of what this change is for. `extract_sections` stays exact.
+        """
+        text = SHAPE_FM + "\n## pointers\n- p\n"
+        assert sr.POINTERS_HEADING not in sr.extract_sections(
+            text, (sr.POINTERS_HEADING,)
+        )
+
+    def test_an_ABSENT_heading_prints_the_files_whole_INVENTORY(
+        self, tmp_path
+    ) -> None:
+        """Because "it is not there" is only actionable beside what IS."""
+        store = _shape_store(
+            tmp_path, SHAPE_FM + "\n## Somewhere Else Entirely\n- p\n"
+        )
+        rows = st.scan_entry_shape([store / SCOPE / "payments-unit.md"])
+        assert {r.kind for r in rows} == {st.SHAPE_ABSENT}
+        assert all("## Somewhere Else Entirely" in r.found for r in rows)
+
+    def test_a_DUPLICATED_heading_is_reported_with_its_COUNT(self, tmp_path) -> None:
+        """`extract_sections` merges the two blocks and drops what sat between
+        them; this is the only surface on which that is visible."""
+        store = _shape_store(
+            tmp_path,
+            SHAPE_FM + "\n## Pointers\n- a\n\n## Nuance / work-history\n- n\n"
+            "\n## Pointers\n- b\n",
+        )
+        (row,) = [
+            s for s in st.scan_entry_shape([store / SCOPE / "payments-unit.md"])
+            if s.kind == st.SHAPE_DUPLICATED
+        ]
+        assert row.heading == sr.POINTERS_HEADING
+        assert row.count == 2
+
+    def test_an_EMPTY_section_is_its_own_kind_not_ABSENT(self, tmp_path) -> None:
+        """`extract_sections` tracks presence separately from content precisely
+        so this distinction survives: the reader FINDS this section and prints a
+        blank, which is a different remedy from a heading that is not there."""
+        store = _shape_store(
+            tmp_path, SHAPE_FM + "\n## Pointers\n\n## Nuance / work-history\n- n\n"
+        )
+        (row,) = st.scan_entry_shape([store / SCOPE / "payments-unit.md"])
+        assert row.kind == st.SHAPE_EMPTY
+        assert row.heading == sr.POINTERS_HEADING
+
+    def test_DUPLICATED_and_EMPTY_can_both_be_true_of_ONE_heading(
+        self, tmp_path
+    ) -> None:
+        """Neither branch excludes the other, and they are different remedies:
+        fold the sections AND fill them."""
+        store = _shape_store(
+            tmp_path,
+            SHAPE_FM + "\n## Pointers\n\n## Nuance / work-history\n- n\n\n## Pointers\n",
+        )
+        kinds = {
+            s.kind for s in st.scan_entry_shape([store / SCOPE / "payments-unit.md"])
+        }
+        assert kinds == {st.SHAPE_DUPLICATED, st.SHAPE_EMPTY}
+
+    def test_a_FENCED_hash_neither_ends_a_section_nor_enters_the_inventory(
+        self, tmp_path
+    ) -> None:
+        """The seam between this checker and the reader. Both are views over one
+        walker, so a fenced `#` must be invisible to BOTH — otherwise the
+        validator predicts a read the reader will not perform.
+
+        🔴 BOTH HALVES OF THE NAME ARE ASSERTED, and the second half needs its
+        own fixture. An `== ()` on a conforming entry is satisfied by a scanner
+        that reports nothing at all — measured: it survived a stub returning `()`
+        — so it can only witness "does not end a section". The inventory is
+        printed only beside an ABSENT finding, so proving the fenced `#` never
+        ENTERS it takes an entry that is missing a heading.
+        """
+        store = _shape_store(
+            tmp_path,
+            SHAPE_FM + "\n## Pointers\n- p\n\n## Nuance / work-history\n"
+            "- run:\n```\n## not a heading\n```\n- after the fence\n",
+        )
+        assert st.scan_entry_shape([store / SCOPE / "payments-unit.md"]) == ()
+
+        # ... and the inventory half, which the row above structurally cannot see.
+        bare = _shape_store(
+            tmp_path / "inv",
+            SHAPE_FM + "\n## Pointers\n- p\n\n```\n## not a heading\n```\n",
+        )
+        rows = st.scan_entry_shape([bare / SCOPE / "payments-unit.md"])
+        assert [(s.heading, s.kind) for s in rows] == [
+            (sr.NUANCE_HEADING, st.SHAPE_ABSENT)
+        ]
+        assert rows[0].found == (sr.POINTERS_HEADING,), rows[0].found
+
+    def test_an_unreadable_path_is_skipped_rather_than_raising(self, tmp_path) -> None:
+        """It runs BESIDE the parse check, never in front of it: a malformed
+        file's own rejection is the finding that matters, and this must never be
+        the thing that turns a validation run into a crash.
+
+        🔴 SKIPPED, NOT ABANDONED — asserted with a readable entry AFTER the
+        unreadable one. `== ()` over the missing path alone is green for a
+        scanner that gives up on the first `OSError`, and for one that reports
+        nothing ever; only a later file's finding tells the two apart.
+        """
+        assert st.scan_entry_shape([tmp_path / "does-not-exist.md"]) == ()
+
+        store = _shape_store(tmp_path, _S3_SPINE_RENAMED)
+        rows = st.scan_entry_shape(
+            [tmp_path / "does-not-exist.md", store / SCOPE / "payments-unit.md"]
+        )
+        assert sorted(s.kind for s in rows) == [st.SHAPE_ABSENT, st.SHAPE_RENAMED]
+
+    def test_scan_entry_shape_WRITES_NOTHING(self, tmp_path) -> None:
+        """The store is curated, client-confidential and unbacked. Hashed, not
+        grepped — a grep for `open(..., "w")` passes while a different spelling
+        writes."""
+        store = _shape_store(tmp_path, _S3_SPINE_RENAMED)
+        before = _tree_hash(store)
+        st.scan_entry_shape([store / SCOPE / "payments-unit.md"])
+        assert _tree_hash(store) == before
+
+
+class TestTheShapeBlockActuallyREACHESValidateOutput:
+    """🔴 THE SEAM. `_render_validation_shape` exercised alone proves nothing
+    about `--validate`; `claude/RULES.md` — "verified in isolation is the new
+    vacuous green: the defect lives in the SEAM nobody owns". Every assertion
+    here runs the CLI.
+    """
+
+    def test_the_scope_mode_carries_it(self, tmp_path, capsys) -> None:
+        store = _shape_store(tmp_path, _S4_NO_HEADINGS)
+        st.main(["--store", str(store), "--scope", SCOPE, "--validate"])
+        assert "ABSENT" in capsys.readouterr().out
+
+    def test_the_SINGLE_FILE_mode_carries_it_too(self, tmp_path, capsys) -> None:
+        """`--validate <path>` is the mode `/handoff` step 4 runs on the file it
+        just wrote — the whole reason this catches the class ON WRITE."""
+        store = _shape_store(tmp_path, _S4_NO_HEADINGS)
+        st.main([
+            "--store", str(store), "--scope", SCOPE,
+            "--validate", str(store / SCOPE / "payments-unit.md"),
+        ])
+        assert "ABSENT" in capsys.readouterr().out
+
+    def test_a_MALFORMED_run_still_reports_malformed_FIRST(
+        self, tmp_path, capsys
+    ) -> None:
+        """The advisory must never displace the finding that actually blocks a
+        read — and it must not vanish on that path either."""
+        store = _shape_store(tmp_path, _S2_NO_FRONT_MATTER)
+        rc = st.main(["--store", str(store), "--scope", SCOPE, "--validate"])
+        out = capsys.readouterr().out
+        assert rc == 3
+        assert "🔴 MALFORMED" in out
+        assert out.index("MALFORMED") < out.index("entry shape")
+
+    def test_the_shape_block_comes_BEFORE_the_open_action_block(
+        self, tmp_path, capsys
+    ) -> None:
+        """🔴 Not cosmetic. A renamed `## Nuance / work-history` makes
+        `scan_open_actions` find nothing, so the open-action block's `0
+        declared` is a fact about a section the parser never reached. Read in
+        the other order it is simply false."""
+        store = _shape_store(tmp_path, _S3_SPINE_RENAMED)
+        st.main(["--store", str(store), "--scope", SCOPE, "--validate"])
+        out = capsys.readouterr().out
+        assert out.index("entry shape") < out.index("open actions")
+
+    def test_a_ZERO_carries_its_denominator_AND_the_SET_it_looked_at(
+        self, tmp_path, capsys
+    ) -> None:
+        """🔴 A reassuring zero is indistinguishable from an instrument wired to
+        nothing unless it carries the size of what it looked at — and here also
+        the SET, because a reader who assumed the third spine heading was
+        checked would take this zero as a claim about a heading nothing
+        examined.
+
+        The whole normalised sentence is pinned, not a keyword: `claude/RULES.md`
+        — when the artifact under test IS prose, a guard on words is walkable by
+        rewording. A cosmetic reword fails this test on purpose.
+        """
+        store = _shape_store(tmp_path, _S1_CONFORMING)
+        st.main(["--store", str(store), "--scope", SCOPE, "--validate"])
+        out = " ".join(capsys.readouterr().out.split())
+        assert (
+            "entry shape: 1 entry file(s) checked for `## Pointers`, "
+            "`## Nuance / work-history` — each present exactly once and non-empty. "
+            "🔴 `## What it is` is NOT checked: no reader parses it, so its absence "
+            "changes nothing this zero is about."
+        ) in out
+
+    def test_the_json_keeps_FOUR_populations_and_never_sums_them(
+        self, tmp_path, capsys
+    ) -> None:
+        """`renamed` and `absent` are the same missing section at two
+        resolutions and only one is actionable from the number alone;
+        `duplicated` and `empty` are sections the reader DOES find. A single
+        `shape_finding_count` would let a machine consumer treat "you typo'd a
+        heading" and "the section is there but blank" as one quantity."""
+        store = _shape_store(
+            tmp_path,
+            SHAPE_FM + "\n## pointers\n- p\n\n## Nuance / work-history\n"
+            "\n## Nuance / work-history\n",
+        )
+        st.main(["--store", str(store), "--scope", SCOPE, "--validate", "--json"])
+        p = json.loads(capsys.readouterr().out)
+        assert "shape_finding_count" not in p, "a summed count is back"
+        assert "shape_count" not in p
+        assert p["shape_renamed_count"] == 1
+        assert p["shape_absent_count"] == 0
+        assert p["shape_duplicated_count"] == 1
+        assert p["shape_empty_count"] == 1
+        assert p["shape_headings_checked"] == list(st.SHAPE_HEADINGS)
+        assert {r["kind"] for r in p["shape"]} == {
+            st.SHAPE_RENAMED, st.SHAPE_DUPLICATED, st.SHAPE_EMPTY
+        }
+
+    def test_the_inventory_beside_an_ABSENT_finding_is_CAPPED_and_says_so(
+        self, tmp_path, capsys
+    ) -> None:
+        """A bound, not a filter — the remainder is counted in the line, like
+        every other display cap in this module."""
+        extra = "".join(f"\n## Section {i}\n- x\n" for i in range(12))
+        store = _shape_store(tmp_path, SHAPE_FM + extra)
+        st.main(["--store", str(store), "--scope", SCOPE, "--validate"])
+        out = capsys.readouterr().out
+        line = next(l for l in out.splitlines() if "the file's headings are" in l)
+        assert line.count("`## Section") == st.SHAPE_INVENTORY_SHOWN
+        assert f"… {12 - st.SHAPE_INVENTORY_SHOWN} more" in line
+
+
+class TestShapeHeadingsIsPinnedToTheDISPLAYChoiceNotMergedWithIt:
+    """🔴 The claim `SHAPE_HEADINGS`' own docstring makes, enforced.
+
+    The tuple coincides today with `subsystem_recall.SURFACED_HEADINGS` and is
+    deliberately not imported from it — `subsystem_recall` imports THIS module,
+    so the direction is impossible, and the two answer different questions: that
+    one is a DISPLAY choice ("which sections does the reader print"), this one is
+    a CHECK ("which must exist for any reader to find anything"). Pinned rather
+    than merged, so a display decision cannot silently become a validation rule
+    — and so that a change to either is a deliberate, visible edit to both.
+    """
+
+    def test_the_two_tuples_agree_TODAY(self) -> None:
+        import subsystem_recall as srec  # noqa: PLC0415
+
+        assert tuple(st.SHAPE_HEADINGS) == tuple(srec.SURFACED_HEADINGS)
+
+    def test_the_checked_set_is_exactly_the_two_the_CODE_parses(self) -> None:
+        """🔴 `## What it is` is written by 53/53 entries and read by NOTHING.
+        Flagging it would report a convention with no consequence beside two
+        whose consequence is measured, and a writer cannot tell those apart in a
+        list. It is a documentation gap, not a validator finding."""
+        assert st.SHAPE_HEADINGS == (sr.POINTERS_HEADING, sr.NUANCE_HEADING)
+        assert "## What it is" not in st.SHAPE_HEADINGS
+
+    def test_an_entry_missing_ONLY_what_it_is_produces_NO_finding(
+        self, tmp_path
+    ) -> None:
+        """The behavioural half — a structural check type-checks past a wrong
+        argument."""
+        store = _shape_store(
+            tmp_path, SHAPE_FM + "\n## Pointers\n- p\n\n## Nuance / work-history\n- n\n"
+        )
+        assert st.scan_entry_shape([store / SCOPE / "payments-unit.md"]) == ()
+
+
+class TestShapeMutationKills:
+    """One kill per new guard. Each mutates the SMALLEST sub-expression capable
+    of being incorrect — never a guard together with its enclosing condition,
+    which dies for the wrong reason — and each asserts THIS guard's own symptom
+    rather than a neighbour's error.
+    """
+
+    def test_kills_the_renamed_vs_absent_split(self, tmp_path: Path) -> None:
+        """With the near-miss lookup collapsed, a writer who typo'd a heading is
+        told the section is absent and goes looking for prose already on disk —
+        the finding degrades to the one it exists to replace, silently, with the
+        count unchanged."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_shape_renamed",
+            [("kind=SHAPE_RENAMED if near else SHAPE_ABSENT", "kind=SHAPE_ABSENT")],
+        )
+        store = _shape_store(
+            tmp_path, SHAPE_FM + "\n## pointers\n- p\n\n## Nuance / work-history\n- n\n"
+        )
+        p = store / SCOPE / "payments-unit.md"
+        assert st.scan_entry_shape([p])[0].kind == st.SHAPE_RENAMED
+        assert mod.scan_entry_shape([p])[0].kind == mod.SHAPE_ABSENT
+
+    def test_kills_the_trailing_colon_fold(self, tmp_path: Path) -> None:
+        """One fold at a time. `## Pointers:` is the near-miss the schema doc
+        names explicitly; without the fold it reports ABSENT."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_shape_colon",
+            [('heading.lstrip("#").strip().rstrip(":").strip()',
+              'heading.lstrip("#").strip()')],
+        )
+        store = _shape_store(
+            tmp_path, SHAPE_FM + "\n## Pointers:\n- p\n\n## Nuance / work-history\n- n\n"
+        )
+        p = store / SCOPE / "payments-unit.md"
+        assert st.scan_entry_shape([p])[0].kind == st.SHAPE_RENAMED
+        assert mod.scan_entry_shape([p])[0].kind == mod.SHAPE_ABSENT
+
+    def test_kills_the_case_fold(self, tmp_path: Path) -> None:
+        """The second fold, killed separately from the first so neither can hide
+        behind the other. Case is the near-miss `extract_sections` refuses by
+        design — `## POINTERS` reaches no reader — and without the fold the
+        writer is told the section is absent instead of being shown their own
+        heading."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_shape_case",
+            [('.strip()).lower()', ".strip())")],
+        )
+        store = _shape_store(
+            tmp_path, SHAPE_FM + "\n## POINTERS\n- p\n\n## Nuance / work-history\n- n\n"
+        )
+        p = store / SCOPE / "payments-unit.md"
+        assert st.scan_entry_shape([p])[0].kind == st.SHAPE_RENAMED
+        assert mod.scan_entry_shape([p])[0].kind == mod.SHAPE_ABSENT
+
+    def test_kills_the_duplicate_detection(self, tmp_path: Path) -> None:
+        """🔴 Reachable by construction: the heading is PRESENT, so it is past
+        the absent/renamed branch's `continue` and this is the only check that
+        can fire on it. The `> 1` is mutated alone — deleting the enclosing
+        block would take the count with it and die for the wrong reason."""
+        mod = _load_mutant(
+            tmp_path, "m_shape_dup", [("            if n > 1:", "            if False:")]
+        )
+        store = _shape_store(
+            tmp_path,
+            SHAPE_FM + "\n## Pointers\n- a\n\n## Nuance / work-history\n- n\n"
+            "\n## Pointers\n- b\n",
+        )
+        p = store / SCOPE / "payments-unit.md"
+        assert [s.kind for s in st.scan_entry_shape([p])] == [st.SHAPE_DUPLICATED]
+        assert mod.scan_entry_shape([p]) == ()
+
+    def test_kills_the_OFF_BY_ONE_in_duplicate_detection(self, tmp_path: Path) -> None:
+        """The narrower mutation the test above cannot see: `>= 1` fires on
+        every single correct heading in the store and the advisory becomes noise
+        nobody reads. A guard that only survives `if False:` is half-tested."""
+        mod = _load_mutant(
+            tmp_path, "m_shape_dup1", [("            if n > 1:", "            if n >= 1:")]
+        )
+        store = _shape_store(tmp_path, _S1_CONFORMING)
+        p = store / SCOPE / "payments-unit.md"
+        assert st.scan_entry_shape([p]) == ()
+        assert [s.kind for s in mod.scan_entry_shape([p])] == [
+            mod.SHAPE_DUPLICATED, mod.SHAPE_DUPLICATED
+        ]
+
+    def test_kills_the_empty_section_detection(self, tmp_path: Path) -> None:
+        mod = _load_mutant(
+            tmp_path,
+            "m_shape_empty",
+            [("            if not present[h].strip():", "            if False:")],
+        )
+        store = _shape_store(tmp_path, _S8_SECTIONS_EMPTY)
+        p = store / SCOPE / "payments-unit.md"
+        assert [s.kind for s in st.scan_entry_shape([p])] == [
+            st.SHAPE_EMPTY, st.SHAPE_EMPTY
+        ]
+        assert mod.scan_entry_shape([p]) == ()
+
+    def test_kills_the_CALL_SITE_the_whole_feature_hangs_from(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        """🔴 THE SEAM MUTATION. Replacing one argument in `main` leaves the
+        scanner, the renderer and every unit test above completely green while
+        `--validate` reports nothing — the feature one refactor from inert
+        behind a green gate."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_shape_seam",
+            [("                shape=scan_entry_shape(scanned),", "                shape=(),")],
+        )
+        store = _shape_store(tmp_path, _S3_SPINE_RENAMED)
+        argv = ["--store", str(store), "--scope", SCOPE, "--validate"]
+        assert mod.main(argv) == 0
+        assert "RENAMED" not in capsys.readouterr().out
+        assert st.main(argv) == 0
+        assert "RENAMED" in capsys.readouterr().out
+
+    def test_kills_the_RENDERER_call_on_the_clean_path(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        """The second half of the seam: the scan can run and the block still not
+        print. Anchored on the `OK` branch specifically — the malformed branch
+        has its own identical call and mutating both at once would not say which
+        one was load-bearing."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_shape_render",
+            [("        return \"\\n\".join(\n"
+              "            out + _render_validation_shape(report) "
+              "+ _render_validation_open_actions(report)\n"
+              "        )\n"
+              "    n = len(report.malformed)",
+              "        return \"\\n\".join(\n"
+              "            out + _render_validation_open_actions(report)\n"
+              "        )\n"
+              "    n = len(report.malformed)")],
+        )
+        store = _shape_store(tmp_path, _S3_SPINE_RENAMED)
+        argv = ["--store", str(store), "--scope", SCOPE, "--validate"]
+        assert mod.main(argv) == 0
+        out = capsys.readouterr().out
+        assert "entry shape" not in out
+        assert "open actions" in out, "the neighbouring block must be untouched"
+
+    def test_kills_the_ADVISORY_ONLY_invariant_itself(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        """🔴 The positive control for `TestTheAdvisoryNeverTouchesTheVERDICT`.
+        A guard asserting "the exit code did NOT change" is exactly the shape
+        that passes vacuously; this builds the regression it claims to catch —
+        `clean` taking a `shape` term — and confirms the fixture goes to 3.
+        Without this, "the verdict is unchanged" is an untested claim about an
+        untested claim.
+        """
+        mod = _load_mutant(
+            tmp_path,
+            "m_shape_verdict",
+            [("    @property\n    def clean(self) -> bool:\n        return not self.malformed",
+              "    @property\n    def clean(self) -> bool:\n"
+              "        return not self.malformed and not self.shape")],
+        )
+        store = _shape_store(tmp_path, _S3_SPINE_RENAMED)
+        argv = ["--store", str(store), "--scope", SCOPE, "--validate"]
+        assert mod.main(argv) == 3, "the mutant must break the invariant"
+        capsys.readouterr()
+        assert st.main(argv) == 0, "and the real module must not"
+        assert "OK — 1 of 1" in capsys.readouterr().out
+
+
+class TestStep4IsTOLDToReadTheShapeBlock:
+    """🔴 THE CONSUMER SEAM. A block nobody is told to read is inert.
+
+    `/handoff` step 4 already runs `--validate` on the file it just wrote — that
+    is the entire reason this advisory catches the class ON WRITE rather than
+    hours later on read. But the advisory deliberately does NOT move the exit
+    code, and step 4's own prose previously described the command as "exits 0 …
+    or 3": a writer following it literally branches on the exit code and never
+    looks at the block. The feature would then be measurably present and
+    behaviourally absent, which is `claude/RULES.md`'s "a field that exists is
+    not a guard — only a BRANCH on it is", one level up.
+
+    So the pin is DERIVED from the code, not from a remembered sentence: every
+    kind the scanner can emit and every heading it checks must be named in the
+    step-4 prose. A fifth kind added without documenting it fails here.
+    """
+
+    KINDS = (st.SHAPE_ABSENT, st.SHAPE_RENAMED, st.SHAPE_DUPLICATED, st.SHAPE_EMPTY)
+
+    def test_the_kind_vocabulary_is_pinned_two_way_to_the_constants(self) -> None:
+        """The ledger half: this tuple must BE the module's kinds — failing when
+        the set grows *or* shrinks, so the doc pin below cannot go stale by
+        quietly checking a subset."""
+        emitted = {
+            v for k, v in vars(st).items()
+            if k.startswith("SHAPE_") and isinstance(v, str) and not k.endswith("HEADINGS")
+        }
+        assert emitted == set(self.KINDS)
+
+    def test_step_4_names_every_kind_the_scanner_can_emit(self) -> None:
+        doc = HANDOFF_DOC.read_text(encoding="utf-8")
+        for kind in self.KINDS:
+            assert kind.upper() in doc, (
+                f"`{kind}` can be reported by --validate and step 4 never mentions it; "
+                f"a writer branching on the exit code alone will not see it"
+            )
+
+    def test_step_4_names_the_headings_the_shape_block_CHECKS(self) -> None:
+        """And only those: a writer told the spine is checked would read the
+        zero as a claim about `## What it is`, which nothing examines."""
+        doc = HANDOFF_DOC.read_text(encoding="utf-8")
+        for heading in st.SHAPE_HEADINGS:
+            assert heading in doc, heading
+
+    def test_step_4_says_the_block_does_NOT_move_the_verdict(self) -> None:
+        """The one fact that makes the instruction necessary rather than
+        redundant. Without it "run --validate and read the output" is advice a
+        reader discharges by checking `rc == 0`."""
+        doc = " ".join(HANDOFF_DOC.read_text(encoding="utf-8").split())
+        assert "advisory and deliberately does **not** move the verdict" in doc
+        assert "still exits 0" in doc

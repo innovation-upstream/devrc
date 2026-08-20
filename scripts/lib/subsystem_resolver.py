@@ -107,6 +107,7 @@ __all__ = [
     "OPENNESS_RESOLVED",
     "JournalBullet",
     "extract_sections",
+    "scan_headings",
     "parse_journal_bullets",
     "SubsystemEntry",
     "SubsystemIndex",
@@ -1171,6 +1172,67 @@ def _is_fence(line: str) -> bool:
     return s.startswith("```") or s.startswith("~~~")
 
 
+def _heading_blocks(text: str) -> list[tuple[str | None, list[str]]]:
+    """Split `text` into `(heading, body-lines)` blocks, in document order.
+
+    🔴 THE ONE HEADING PARSER, and the reason it exists as its own function is
+    that it now has TWO views over it: `extract_sections` ("which of these
+    sections does the entry have, and what is in them") and `scan_headings`
+    ("what headings does it have at all"). A second walker would be free to
+    disagree with the first about what a heading IS — and `subsystem_touch
+    --validate` prints both answers in the SAME block, where the disagreement
+    would render as "the section is absent" directly beside "the heading is
+    right there". `claude/RULES.md` → "One rule, one place".
+
+    A heading is a line beginning with `#` at COLUMN 0, outside a fence; the
+    block key is that line `rstrip()`ed and otherwise verbatim. Every line that
+    is not such a heading — fence lines included — belongs to the block it sits
+    in. The FIRST block's heading is `None` whenever the text opens with
+    anything other than a heading (front matter, prose), so a caller can tell
+    "before the first heading" from any real section.
+
+    🔴 FENCED BLOCKS ARE SKIPPED. A `#` line inside a code fence is not a
+    heading, and treating it as one would END the section early — surfacing
+    HALF an entry's nuance while looking exactly like a complete read. That is a
+    silent under-report, the failure class this whole module is built against,
+    so it is handled rather than left to "entries probably don't contain
+    fences".
+
+    A REPEATED heading yields a SEPARATE block each time. That is deliberate and
+    it is the only reason duplicate detection is possible at all: the sections
+    are merged by `extract_sections` (see there), so a walker that merged them
+    here would destroy the evidence before anyone could report it.
+    """
+    blocks: list[tuple[str | None, list[str]]] = [(None, [])]
+    in_fence = False
+    for line in text.splitlines():
+        if _is_fence(line):
+            in_fence = not in_fence
+            blocks[-1][1].append(line)
+            continue
+        if not in_fence and line.startswith("#"):
+            blocks.append((line.rstrip(), []))
+            continue
+        blocks[-1][1].append(line)
+    return blocks
+
+
+def scan_headings(text: str) -> tuple[str, ...]:
+    """Every ATX heading in `text`, in document order, REPEATS INCLUDED.
+
+    The inventory `extract_sections` cannot give you: it answers only about the
+    headings you asked for, so "the entry has no `## Pointers`" and "the writer
+    called it `## pointers`" are the same answer there. This is what separates
+    them — and what makes a duplicate visible, since `extract_sections` merges
+    duplicates by design.
+
+    Verbatim and unnormalized, for the same reason matching is exact: the caller
+    reporting a near-miss must be able to print the heading the writer actually
+    typed, not a folded form of it.
+    """
+    return tuple(h for h, _ in _heading_blocks(text) if h is not None)
+
+
 def extract_sections(text: str, headings: Sequence[str]) -> dict[str, str]:
     """Return `{heading: body}` for each requested heading found in `text`.
 
@@ -1181,19 +1243,18 @@ def extract_sections(text: str, headings: Sequence[str]) -> dict[str, str]:
     facts about a curated entry).
 
     A section runs from its heading to the next ATX heading of any level, or to
-    end of file.
-
-    🔴 FENCED BLOCKS ARE SKIPPED. A `#` line inside a code fence is not a
-    heading, and treating it as one would END the section early — surfacing
-    HALF an entry's nuance while looking exactly like a complete read. That is a
-    silent under-report, the failure class this whole module is built against,
-    so it is handled rather than left to "entries probably don't contain
-    fences".
+    end of file. Fenced blocks are skipped — see `_heading_blocks`, which is the
+    parser this is a view over.
 
     Matching is on the EXACT heading string, not a normalized one: these are
     schema headings from `analyze-service/SKILL.md`, not user refs. Normalizing
     them would fold `## Pointers` and `## pointers!` together and quietly widen
     what the store is allowed to look like.
+
+    A heading written TWICE has its blocks CONCATENATED under the one key, and
+    whatever sat under an intervening heading is dropped. That is a silent merge
+    and it is why `subsystem_touch --validate` reports duplicates from
+    `scan_headings` rather than from this mapping, which cannot show them.
     """
     wanted: dict[str, list[str]] = {h: [] for h in headings}
     # 🔴 PRESENCE IS TRACKED SEPARATELY FROM CONTENT. A heading that appears with
@@ -1205,22 +1266,11 @@ def extract_sections(text: str, headings: Sequence[str]) -> dict[str, str]:
     # read as absent while the same empty section at end-of-file read as
     # present, purely because of what came after it.
     seen: set[str] = set()
-    current: str | None = None
-    in_fence = False
-    for line in text.splitlines():
-        if _is_fence(line):
-            in_fence = not in_fence
-            if current is not None:
-                wanted[current].append(line)
+    for heading, body in _heading_blocks(text):
+        if heading is None or heading not in wanted:
             continue
-        if not in_fence and line.startswith("#"):
-            stripped = line.rstrip()
-            current = stripped if stripped in wanted else None
-            if current is not None:
-                seen.add(current)
-            continue
-        if current is not None:
-            wanted[current].append(line)
+        seen.add(heading)
+        wanted[heading].extend(body)
     return {h: "\n".join(wanted[h]).strip("\n") for h in headings if h in seen}
 
 

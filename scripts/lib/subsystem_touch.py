@@ -250,6 +250,7 @@ import argparse
 import collections.abc as _abc
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -263,6 +264,7 @@ from subsystem_resolver import (  # noqa: E402
     DEFAULT_MIN_PATHS,
     NUANCE_HEADING,
     ON_MALFORMED_COLLECT,
+    POINTERS_HEADING,
     AmbiguousRefError,
     Association,
     EntryUnreadableError,
@@ -282,6 +284,7 @@ from subsystem_resolver import (  # noqa: E402
     parse_journal_bullets,
     path_refs,
     resolve_ref_tiered,
+    scan_headings,
 )
 
 __all__ = [
@@ -329,6 +332,13 @@ __all__ = [
     "TouchReport",
     "Census",
     "ValidationReport",
+    "SHAPE_HEADINGS",
+    "SHAPE_ABSENT",
+    "SHAPE_RENAMED",
+    "SHAPE_DUPLICATED",
+    "SHAPE_EMPTY",
+    "ShapeFinding",
+    "scan_entry_shape",
     "POLICY_SCOPE",
     "POLICY_STORE_ROOT",
     "POLICY_NONE",
@@ -4395,6 +4405,145 @@ class OpenAction:
     """
 
 
+# --- The entry's SHAPE, as opposed to whether its front matter parses ----------
+#
+# 🔴 WHY A SHAPE CHECK EXISTS AT ALL. Measured 2026-08-19 over eight synthetic
+# fixtures, `--validate` returned `OK` at exit 0 for an entry with all three spine
+# headings renamed, for one with no headings at all, and for one whose sections
+# were all empty. Only a missing `service:` went red. So the spine every consumer
+# depends on — 56 of 56 real entries carry it, measured the same day — was
+# enforced by NOTHING: it held because two skills happen to describe it and one
+# template happens to emit it.
+#
+# 🔴 AND IT IS NOT COSMETIC. `subsystem_recall` computes an entry's bullet count
+# and its `🔴 N OPEN` badge from `extract_sections(...)[NUANCE_HEADING]`, so a
+# heading that is renamed — or given a trailing colon, or shifted off column 0 —
+# yields an empty body, and the index row `/resume` consumes renders an entry with
+# genuine open actions as a well-formed empty one. `#560` put `🔴 NO <heading>` on
+# that row, which catches it ON READ. This catches the same thing ON WRITE, in the
+# turn that wrote it, which is the difference between "someone eventually notices"
+# and "the writer is told".
+#
+# 🔴 WHICH HEADINGS, AND WHY NOT `## What it is`. The checked set is the set the
+# CODE PARSES. `## What it is` is written by 56 of 56 entries and read by nothing
+# — `SURFACED_HEADINGS` excludes it deliberately, so its absence changes no read,
+# no count and no badge. Flagging it would report a convention with no consequence
+# beside two whose consequence is measured, and a writer cannot tell those apart
+# in a list. It is a documentation gap, not a validator finding.
+SHAPE_HEADINGS: tuple[str, ...] = (POINTERS_HEADING, NUANCE_HEADING)
+"""The schema headings whose absence has a MEASURED consequence on the read path.
+
+⚠ It coincides today with `subsystem_recall.SURFACED_HEADINGS` and is deliberately
+not imported from it: `subsystem_recall` imports THIS module, so the direction is
+impossible, and the two tuples answer different questions anyway — that one is a
+DISPLAY choice ("which sections does the reader print"), this one is a CHECK
+("which sections must exist for any reader to find anything"). They are pinned
+against each other by `test_subsystem_touch.py` rather than merged, so a display
+decision cannot silently become a validation rule.
+"""
+
+SHAPE_ABSENT = "absent"
+SHAPE_RENAMED = "renamed"
+SHAPE_DUPLICATED = "duplicated"
+SHAPE_EMPTY = "empty"
+
+# Cap on the heading inventory printed beside an ABSENT finding. A bound, not a
+# filter — the remainder is always counted in the line, following every other
+# display cap in this module.
+SHAPE_INVENTORY_SHOWN = 6
+
+
+def _heading_key(heading: str) -> str:
+    """The LOOSE form, used ONLY to pair a heading with the schema one it missed.
+
+    🔴 IT NEVER ACCEPTS A HEADING. `extract_sections` matches the exact string and
+    keeps doing so; folding `## Pointers` and `## pointers` together there would
+    quietly widen what the store is allowed to look like, which is the opposite of
+    what this change is for. This exists so the report can say "you wrote
+    `## pointers`" instead of "the section is absent" — the difference between a
+    finding a writer can act on in one edit and one that sends them looking for
+    prose that is already on disk.
+
+    Folds exactly the three near-misses the schema doc names: the `#` level, the
+    case and surrounding whitespace, and a trailing colon.
+    """
+    return re.sub(r"\s+", " ", heading.lstrip("#").strip().rstrip(":").strip()).lower()
+
+
+@dataclass(frozen=True)
+class ShapeFinding:
+    """One way an entry's spine departs from the schema. FOUR DISJOINT KINDS.
+
+    They are never summed, for the same reason `OpenAction`'s populations are not:
+    they are different facts with different remedies. `renamed` and `absent` are
+    the same missing section reported at different resolutions — the writer typed
+    something we can show them, or they did not — and collapsing them would throw
+    away the only half that is actionable. `duplicated` is a section that IS
+    parsed, twice, silently merged. `empty` is a section present and unfilled,
+    which `extract_sections` tracks separately from absent precisely so this can.
+    """
+
+    filename: str
+    heading: str
+    """The SCHEMA heading this finding is about, always — never the typo."""
+
+    kind: str
+    found: tuple[str, ...] = ()
+    """For `renamed`, the near-miss heading(s) actually written; for `absent`, the
+    file's whole heading inventory, so the writer sees what they wrote instead."""
+
+    count: int = 0
+    """For `duplicated`, how many times the exact heading appears."""
+
+
+def scan_entry_shape(paths: Iterable[str | Path]) -> tuple[ShapeFinding, ...]:
+    """Report each entry's spine against `SHAPE_HEADINGS`. READ-ONLY.
+
+    Tolerant in exactly the way `scan_open_actions` is: a file that cannot be read
+    contributes nothing rather than raising, because this runs BESIDE the parse
+    check and never in front of it — a malformed file's own rejection is the
+    finding that matters.
+
+    🔴 IT REUSES `extract_sections` AND `scan_headings` AND PARSES NOTHING ITSELF.
+    Both are views over one walker in `subsystem_resolver`, so this cannot come to
+    a different conclusion about what a heading is than the reader does — which
+    would be the worst possible defect in a checker whose entire job is to predict
+    what the reader will see.
+    """
+    out: list[ShapeFinding] = []
+    for p in paths:
+        path = Path(p)
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        present = extract_sections(text, SHAPE_HEADINGS)
+        headings = scan_headings(text)
+        for h in SHAPE_HEADINGS:
+            if h not in present:
+                near = tuple(x for x in headings if _heading_key(x) == _heading_key(h))
+                out.append(
+                    ShapeFinding(
+                        filename=path.name,
+                        heading=h,
+                        kind=SHAPE_RENAMED if near else SHAPE_ABSENT,
+                        found=near or headings,
+                    )
+                )
+                continue
+            # Both of the remaining kinds can be true of ONE heading at once (a
+            # duplicated heading whose merged body is still empty), so neither
+            # branch excludes the other.
+            n = sum(1 for x in headings if x == h)
+            if n > 1:
+                out.append(
+                    ShapeFinding(filename=path.name, heading=h, kind=SHAPE_DUPLICATED, count=n)
+                )
+            if not present[h].strip():
+                out.append(ShapeFinding(filename=path.name, heading=h, kind=SHAPE_EMPTY))
+    return tuple(out)
+
+
 @dataclass(frozen=True)
 class ValidationReport:
     """What `--validate` checked, and what it found. Counts on EVERY path.
@@ -4425,6 +4574,21 @@ class ValidationReport:
     live entries for a reason that is not a schema violation, and a gate that goes
     red for something the author cannot fix by fixing the file is the
     permanently-red gate `claude/RULES.md` forbids.
+    """
+
+    shape: tuple[ShapeFinding, ...] = ()
+    """How the files that PARSED depart from the section spine. Advisory only.
+
+    🔴 IT DOES NOT AFFECT `clean` EITHER, AND FOR A DIFFERENT REASON THAN
+    `open_actions`. An entry whose `## Nuance / work-history` is renamed is not
+    unfinished — it is genuinely, silently broken. It still must not fail the
+    verdict, because the verdict answers ONE question ("would the loader accept
+    this file?") and the loader accepts it: every other reader will happily index
+    it, list it and reach it by `--ref`. Changing the answer to that question
+    would make `--validate` mean two things at once, and `handoff/SKILL.md` step 4
+    branches on the exit code alone — a non-zero there means "write NOTHING",
+    which is exactly the wrong response to a file already written whose heading
+    needs one edit.
     """
 
     @property
@@ -4471,6 +4635,30 @@ class ValidationReport:
                     "first_line": a.first_line,
                 }
                 for a in self.open_actions
+            ],
+            # 🔴 FOUR COUNTS, NEVER A SUM, on the same reasoning as the open-action
+            # populations one screen up: `renamed` and `absent` are the same
+            # missing section at two resolutions and only one of them can be acted
+            # on from the number alone, while `duplicated` and `empty` are sections
+            # the reader DOES find. A single `shape_finding_count` would let a
+            # machine consumer treat "you typo'd a heading" and "the section is
+            # there but blank" as one quantity.
+            "shape_absent_count": sum(1 for s in self.shape if s.kind == SHAPE_ABSENT),
+            "shape_renamed_count": sum(1 for s in self.shape if s.kind == SHAPE_RENAMED),
+            "shape_duplicated_count": sum(
+                1 for s in self.shape if s.kind == SHAPE_DUPLICATED
+            ),
+            "shape_empty_count": sum(1 for s in self.shape if s.kind == SHAPE_EMPTY),
+            "shape_headings_checked": list(SHAPE_HEADINGS),
+            "shape": [
+                {
+                    "file": s.filename,
+                    "heading": s.heading,
+                    "kind": s.kind,
+                    "found": list(s.found),
+                    "count": s.count,
+                }
+                for s in self.shape
             ],
             "policy_file": self.policy_path,
             "policy_basis": self.policy_basis,
@@ -4707,7 +4895,9 @@ def render_validation(report: ValidationReport) -> str:
             f"OK — {len(report.checked)} of {len(report.checked)} entry file(s) parse, "
             f"0 malformed. They will load, be listed, and be reachable by `--ref`."
         )
-        return "\n".join(out + _render_validation_open_actions(report))
+        return "\n".join(
+            out + _render_validation_shape(report) + _render_validation_open_actions(report)
+        )
     n = len(report.malformed)
     out.append(
         f"🔴 MALFORMED — {n} of {len(report.checked)} entry file(s) could NOT be indexed. "
@@ -4721,7 +4911,89 @@ def render_validation(report: ValidationReport) -> str:
         "across two physical lines — an `aliases: [...]` list in particular must be on ONE "
         "line, or the parser reads an unterminated bare string.)"
     )
-    return "\n".join(out + _render_validation_open_actions(report))
+    return "\n".join(
+        out + _render_validation_shape(report) + _render_validation_open_actions(report)
+    )
+
+
+def _render_validation_shape(report: ValidationReport) -> list[str]:
+    """The SHAPE advisory. Prints on every path that CHECKED something.
+
+    🔴 IT PRINTS ITS DENOMINATOR EVEN WHEN IT FINDS NOTHING, and it prints WHICH
+    HEADINGS it looked for. `claude/RULES.md`: a reassuring zero is
+    indistinguishable from an instrument wired to nothing unless it carries the
+    size of what it looked at — and here it must also carry the SET it looked at,
+    because a reader who assumes the third spine heading was checked would take
+    this zero as a claim about a heading nothing examined.
+
+    🔴 IT COMES BEFORE THE OPEN-ACTION BLOCK, deliberately. A renamed
+    `## Nuance / work-history` makes `scan_open_actions` find nothing, so that
+    block's "0 declared" is a fact about a section the parser never reached. Read
+    in the other order it is simply false.
+    """
+    n_files = len(report.checked)
+    spine = ", ".join(f"`{h}`" for h in SHAPE_HEADINGS)
+    absent = [s for s in report.shape if s.kind == SHAPE_ABSENT]
+    renamed = [s for s in report.shape if s.kind == SHAPE_RENAMED]
+    duplicated = [s for s in report.shape if s.kind == SHAPE_DUPLICATED]
+    empty = [s for s in report.shape if s.kind == SHAPE_EMPTY]
+    out = [""]
+    if not report.shape:
+        out.append(
+            f"entry shape: {n_files} entry file(s) checked for {spine} — each present "
+            f"exactly once and non-empty. 🔴 `## What it is` is NOT checked: no reader "
+            f"parses it, so its absence changes nothing this zero is about."
+        )
+        return out
+    out.append(f"entry shape across {n_files} entry file(s), checked for {spine}:")
+    if renamed:
+        out.append(
+            f"  🔴 {len(renamed)} section(s) RENAMED — the heading is close but not "
+            f"exact, so NO reader reaches the section. Matching is exact-string after "
+            f"`rstrip()`, case-sensitive, at column 0. On that entry's index row this "
+            f"reads as `0 nuance` with no `OPEN` badge: PARSE FAILURE, not an empty "
+            f"entry."
+        )
+        for s in renamed:
+            wrote = ", ".join(f"`{h}`" for h in s.found)
+            out.append(f"    {s.filename}: `{s.heading}` is written as {wrote}")
+    if absent:
+        out.append(
+            f"  🔴 {len(absent)} section(s) ABSENT — the heading is not in the file at "
+            f"all, under any spelling this tool can pair with it. Whatever the entry "
+            f"says on that subject is invisible to every default read. Read the "
+            f"inventory below against the schema heading: a section retitled far "
+            f"enough that no folding pairs it lands here rather than under RENAMED."
+        )
+        for s in absent:
+            shown = list(s.found[:SHAPE_INVENTORY_SHOWN])
+            rest = len(s.found) - len(shown)
+            inventory = ", ".join(f"`{h}`" for h in shown) if shown else "(none at all)"
+            if rest > 0:
+                inventory += f", … {rest} more"
+            out.append(f"    {s.filename}: no `{s.heading}`; the file's headings are {inventory}")
+    if duplicated:
+        out.append(
+            f"  🔴 {len(duplicated)} heading(s) DUPLICATED — the sections silently MERGE "
+            f"into one body and anything written under a heading BETWEEN them is dropped "
+            f"from the read entirely. Fold them into one section."
+        )
+        for s in duplicated:
+            out.append(f"    {s.filename}: `{s.heading}` appears {s.count} times")
+    if empty:
+        out.append(
+            f"  ⚠ {len(empty)} section(s) PRESENT AND EMPTY — the heading is there with "
+            f"nothing under it. Not a parse failure and not the same as absent: the "
+            f"reader finds the section and prints a blank."
+        )
+        for s in empty:
+            out.append(f"    {s.filename}: `{s.heading}`")
+    out.append(
+        "  (Advisory, and it changes no verdict: the loader accepts a file whose "
+        "sections it cannot find, which is precisely the silent failure this block "
+        "exists to make loud. Fix the heading, not the exit code.)"
+    )
+    return out
 
 
 def _render_validation_open_actions(report: ValidationReport) -> list[str]:
@@ -5007,6 +5279,7 @@ def main(argv: Sequence[str] | None = None, *, today: str | None = None) -> int:
                 policy_path=path,
                 policy_basis=basis,
                 open_actions=scan_open_actions(scanned),
+                shape=scan_entry_shape(scanned),
             )
             print(
                 json.dumps(report.to_json(), indent=2)
