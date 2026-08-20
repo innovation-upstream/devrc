@@ -564,20 +564,30 @@ Anchor to an absolute time.)
 🔴 **THE MANIFEST DOES NOT EXIST YET, AND THIS IS THEREFORE NOT A CLIENT-ONLY PHASE 2.** An earlier
 revision of this block said "a cheap manifest (scope → entry names + mtimes)" as though it were
 consultation of existing behaviour. Measured against `server.py`:
-- **Two API routes exist**, `recall` and `search` (`server.py:1621-1626`), and **neither
-  enumerates.** The listing route is one round-trip **per scope** (`?mode=list`, ~60 B/line):
-  0.26–0.34 s for one, 2.6–3.4 s / 22,153 B for all nine, warm from the workbench.
-- 🔴 **There IS a cross-scope route and an earlier revision of this block denied it.**
-  `?all_scopes=1` on `search` answers over the whole store in ONE round-trip — measured, `492 ms`,
-  `X-Store-Status: search-hit`, `scope=(all scopes)`. But it is a **SEARCH**: it needs a query, it
-  is capped by `max_hits`, and it therefore cannot be relied on to ENUMERATE. That, not "there is
-  no batch route", is why phase 2 still needs a server-side manifest endpoint.
-- **Per-entry mtimes are served nowhere** — `listing_line` emits ref/count/sensitivity/badges only
-  (`subsystem_recall.py:1560`); mtime merely orders. The one time signal is the store-wide `newest=`
-  in `X-Store-Snapshot`. No cross-scope route changes this.
+- **Two API routes exist**, `recall` and `search` (`server.py:1621-1626`). The listing route is one
+  round-trip **per scope** (`?mode=list`, ~60 B/line): sub-second for one, a few seconds for all
+  nine (22,153 B), warm from the workbench.
+- 🔴 **`?all_scopes=1` on `search` DOES enumerate the whole store in ONE round-trip — and THREE
+  successive revisions of this block were wrong about it, each under-crediting it further.** First
+  it was "no batch route"; then "a search, capped by `max_hits`, so it cannot be relied on to
+  enumerate". Both false. Measured with `threshold=0.0&max_hits=5000`: `search-hit`, ~426 KB,
+  **`872 of 872 hunks`, 0 omitted, all 9 scopes and 70 of the 70 refs hosted holds** — and two
+  controls: a **nonsense query** returns the same 70 (at `threshold=0.0` the query is irrelevant),
+  and a **non-existent scope in the path** still returns all 70 (it needs no prior scope
+  knowledge). `max_hits` has no server-side ceiling and the report self-declares truncation via
+  `omitted`, so it is a paging signal, not a barrier.
+- **So scope → ref names are ALREADY free in one round-trip, and the manifest endpoint is not
+  needed for them.** What it must add is (a) **per-entry mtimes, which are served nowhere** —
+  `listing_line` emits ref/count/sensitivity/badges only (`subsystem_recall.py:1560`), `mtime`
+  merely orders, and neither `render_search` nor `search_json` renders it, so the one time signal
+  is the store-wide `newest=`; and (b) **a proportionate payload** — enumerating this way costs
+  ~426 KB of hunk bodies to learn names that 22 KB of listings carry. That is the honest ground for
+  the directive. **Do not restate the enumeration claim without re-running the two controls above.**
 - **The local side is interpreter-startup-dominated**, so scope count barely moves it: reading the
-  whole store in one process is ~50 ms with the read work itself only a few ms. Hosted's per-scope
-  round-trip is the asymmetry that matters.
+  whole store in one process is ~50 ms with the read work itself only a few ms.
+- ⚠ **Timings here are indicative, not pinned.** Re-measured across hosts and hours, the same
+  requests moved ~2–3× (one cross-scope call has been seen from ~0.5 s to ~1.4 s). Quote a shape,
+  never a point value, and re-run before relying on one.
 - 🔴 **A COLD manifest build cannot fit a short timeout.** First laptop run, cache expiry, or a new
   scope pays the full multi-second build — and on the laptop, the host this whole advisory exists
   for, *every* first run is cold. The warm read (one scope against a cache) fits any sane timeout;
@@ -624,11 +634,12 @@ The shape it has to have — each item is a measured failure, not a preference:
    different events and a single short bound silently kills the feature.** The warm read (one scope
    against a cache) gets the short timeout. The cold BUILD — first laptop run, cache expiry, a new
    scope — takes seconds and must be given its own longer bound, run in the background, or be
-   allowed to complete across runs. Bound both by the read's timeout and the laptop's *every* first
-   run is cold, so the manifest never builds and the advisory never fires — item 5's hazard reached
-   by design instead of by network failure, which is the worse way to reach it.
-   `/resume` step 4's contract is "print the stderr line, note recall was unavailable, and continue"
-   — a network hop must not make that an exit 3.
+   allowed to complete across runs. **Bind both to the read's short timeout and the build never
+   completes on the laptop, where every first run is cold** — so the advisory never fires. That
+   reaches item 5's hazard by DESIGN rather than by network failure, which is the worse way to
+   reach it. `/resume` step 4's contract is "print the stderr line, note recall was unavailable,
+   and continue" — a network hop must not make that an exit 3, and a build that gave up must say
+   so out loud rather than resolve to a silent empty advisory.
    ⚠ This **proposes** reading the README's phase-2 "read-through cache" as the manifest cache and
    nothing more — a cached ENTRY would be a third copy nobody syncs.
    `scripts/subsystem-store-api/README.md:18` still says "the CLI wrapper + read-through cache",
@@ -649,10 +660,11 @@ The shape it has to have — each item is a measured failure, not a preference:
    scopes, only `devrc` and `homelab-talos` have a checkout on the laptop — `datapacket-talos` and
    `civitai` do not — so the sizes an ordinary run meets there are **9 and 6**. The 36 arrives via
    an explicit `--scope`, or the day that repo is cloned. Design for 36; do not claim a run hits it.
-   (Measured: that host's workspace holds **69 git repos** — an earlier revision guessed "~40", and
-   the revision correcting it then reported a count of `ls` ENTRIES as a count of DIRECTORIES. Two
-   wrong numbers in a paragraph whose own thesis is *reproduce before quoting*; the surviving figure
-   is the one an unambiguous command produces. The claim is about these four scopes, not that host.)
+   (That host holds **dozens** of other repos — the exact count is not load-bearing and three
+   successive revisions got it wrong anyway: a guessed "~40", then a count of `ls` ENTRIES reported
+   as DIRECTORIES, then a repo count that two defensible commands disagree about by three because
+   worktree `.git` FILES are not `.git` directories. **A number that changes nothing should not be
+   in the record at all.** The claim is about these four scopes, not about that host.)
 
 **Prerequisites this decision creates, none of them optional.** (a) **No client credential exists on
 either host** — no `~/.config/subsystem-store*`, nothing in `.zshenv`; the only documented path is a
