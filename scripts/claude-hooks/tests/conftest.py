@@ -27,11 +27,12 @@ directory invocation did, and got a reassuring zero over a crash.
 
 THE FIX, in two layers:
 
-  1. CLASSIFY STRUCTURALLY, then never import a script suite. `pytest_collect_
-     file` claims each script suite BEFORE pytest's python collector can import
-     it, and runs it the way run-tests.sh does -- as a subprocess, one pytest
-     item, exit 0 is pass. So the directory now runs ALL eleven suites instead
-     of crashing on the first script.
+  1. CLASSIFY STRUCTURALLY, then never import a script suite.
+     `pytest_pycollect_makemodule` REPLACES the Module pytest would have built
+     for a script suite, so the import never happens, and runs it the way
+     run-tests.sh does -- as a subprocess, one pytest item, exit 0 is pass. So
+     the directory now runs ALL eleven suites instead of crashing on the first
+     script.
 
      The classifier is STRUCTURAL, not a hard-coded list: a file is a script
      suite iff it has no top-level `def test_*` / `class Test*`, read with
@@ -54,9 +55,10 @@ THE FIX, in two layers:
      offending file -- never again as "no tests ran".
 
 Both layers are inert for the gate: it targets the six collectable files by
-path, and for those `pytest_collect_file` returns None (normal collection) and
-the Module subclass behaves exactly like `pytest.Module`. Per-target collected
-counts are unchanged, so no TARGET_FLOORS entry moves.
+path, and for those the hook returns the Module subclass, whose collect() is a
+passthrough on the success path. MEASURED across all six targets, HEAD vs
+a29b97b: 1442/130/17/40/296/13 collected on both. No TARGET_FLOORS entry for a
+hook-test target moves.
 """
 import ast
 import subprocess

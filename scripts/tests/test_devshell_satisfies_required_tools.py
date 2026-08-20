@@ -76,15 +76,29 @@ def test_the_missing_tool_fatal_names_a_runnable_invocation():
     """
     block = _fatal_block()
 
-    assert "nix develop" in block, (
-        "the missing-tool FATAL does not name `nix develop`. A contributor "
-        "hitting this gets a red gate and no runnable remedy, which reads as "
-        "'the gate is broken'."
+    # 🔴 Asserted on a SINGLE LINE carrying BOTH halves, not on the two strings
+    # appearing anywhere in the block. The first version of this guard checked
+    # `"nix develop" in block` and `"run-tests.sh" in block` separately, and a
+    # mutation SURVIVED it: deleting the copy-pasteable invocation line entirely
+    # still left the prose sentence "(or `nix develop` once, then `bash
+    # scripts/run-tests.sh .` ...)" spelling both words, so the guard passed
+    # while the actionable remedy was gone. A word another sentence can spell is
+    # not a guard; what makes the message useful is one runnable line.
+    invocations = [
+        ln for ln in block.splitlines()
+        if "nix develop" in ln and "run-tests.sh" in ln
+    ]
+    assert invocations, (
+        "the missing-tool FATAL has no single line that both enters the dev "
+        "shell AND runs the gate. A contributor hitting this gets a red gate "
+        "and no copy-pasteable remedy, which reads as 'the gate is broken'.\n\n"
+        f"FATAL block was:\n{block}"
     )
-    # It must name the RUNNER too, or `nix develop` alone still leaves the
-    # reader to reconstruct what to run inside it.
-    assert "run-tests.sh" in block, (
-        "the FATAL names a shell to enter but not the command to run in it"
+    # The line must be parameterised by the resolved repo root, not a literal
+    # relative path that only works from one cwd.
+    assert any("$ROOT" in ln for ln in invocations), (
+        "the invocation line hardcodes a path instead of using the runner's "
+        f"own resolved $ROOT:\n{invocations}"
     )
     # And it must say this is an environment problem, not a code failure --
     # that misreading is the whole defect.

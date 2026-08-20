@@ -951,8 +951,24 @@ TARGET_FLOORS=(
   #
   #   _suggested_floor 5814 = 5814 - min(50, max(1, 290)) = 5814 - 50 = 5764
   #
+  #
+  # 2026-08-20, the gate-harness DX fix (the hook-tests directory that reported
+  # "no tests ran" over an INTERNALERROR, and the missing-tool FATAL that read
+  # as a broken gate): 5947 -> 5962 collected, +15 across
+  # test_hook_tests_dir_collects.py and test_devshell_satisfies_required_tools.py.
+  #
+  # 🔴 The previous entry documented 5814, not 5947. The 5814 -> 5947 difference
+  # (+133) is NOT this contribution — it landed on main between that entry and
+  # a29b97b without the floor being re-pinned, so the pin had drifted 183 below
+  # the real count and its sensitivity had decayed accordingly. Both counts were
+  # MEASURED here rather than inferred: `--collect-only` on scripts/tests at a
+  # pristine a29b97b worktree gave 5947, and the gate's own line at HEAD gave
+  #   PASS  scripts/tests  (collected=5962 passed=5962 skipped=0 floor=5764)
+  #
+  #   _suggested_floor 5962 = 5962 - min(50, max(1, 298)) = 5962 - 50 = 5912
+  #
   # ⚠ ZERO new skips from any contribution.
-  "scripts/tests|5764"
+  "scripts/tests|5912"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
