@@ -34,7 +34,7 @@ code route and will raise `SendGateError`.
 | Routes | the three this module speaks (the server has many more): `GET /v1/receive/{number}` (a **websocket** in json-rpc mode), `GET /v1/attachments/{id}`, `POST /v2/send`. It has **no event-stream endpoint** — `/api/v1/events` belongs to AsamK's native daemon, a different server |
 | Postgres | `mailbox-postgres-0` in ns `mailbox`, schema **`signal`** (shares the instance + role with `mail`) |
 | Attachments | MinIO archive tenant, bucket `signal-attachments`, key `{conversation}/{YYYY-MM-DD}/{attachment_id}_{filename}` + a `.json` sidecar. The id is in the key deliberately — see gotchas |
-| Tables | `signal.contacts`, `signal.groups`, `signal.messages`, `signal.attachments`, `signal.reactions`, `signal.consumer_health` |
+| Tables | `signal.contacts`, `signal.groups`, `signal.messages`, `signal.attachments`, `signal.reactions`, `signal.consumer_health`, `signal.excluded_groups` |
 | Search | `signal.messages.search` — a STORED `to_tsvector('english', body)` generated column with a GIN index |
 
 ## Commands (`python3 scripts/signal/consumer.py <cmd>`)
@@ -50,6 +50,9 @@ code route and will raise `SendGateError`.
 | `approve` | record Zach's clawgate approval for one pending draft |
 | `send` | transmit an **approved** draft (refuses anything else) |
 | `reconcile` | resolve a draft stranded in `sending`, after checking Signal yourself |
+| `muted` | list muted groups and how many stored rows each one hides |
+| `mute` | hide a group from every read — **stores and deletes nothing** |
+| `unmute` | un-hide a muted group; restores it in full |
 
 ```bash
 cd ~/workspace/devrc/scripts/signal
@@ -66,14 +69,55 @@ python3 consumer.py reconcile 42 --sent --timestamp 1723000009090   # it did go 
 python3 consumer.py reconcile 42 --not-sent --note "no message in the thread"
 ```
 
+## Muted groups
+
+Some conversations are deliberately filtered out of every read. `signal.excluded_groups`
+holds the mute list; **the rows are still there** — muting hides, it never deletes, so
+`unmute` restores a conversation exactly. That is why it is the default: this pipeline is
+forward-only, so a deleted message can never be re-fetched.
+
+🔴 **It is keyed on the group's BINARY id, never the name** — `signal.groups.name` is
+empty (`''`) for every group this consumer has stored, so a name-based filter would match
+nothing while looking like it worked.
+
+```bash
+python3 consumer.py muted
+python3 consumer.py mute <internal_id> --note "why"     # base64, from the API below
+python3 consumer.py unmute <internal_id>
+```
+
+Get `internal_id` (base64) — the pipeline does not store group names, so this is the only
+way to go from a name you recognise to the id the mute list wants:
+```bash
+kubectl -n signal exec deploy/signal-consumer -- python3 -c "
+import os,json,urllib.request
+api=os.environ['SIGNAL_API_URL'].rstrip('/'); acct=os.environ['SIGNAL_ACCOUNT']
+for g in json.load(urllib.request.urlopen(api+'/v1/groups/'+acct,timeout=20)):
+    print(g['internal_id'], repr(g['name']))"
+```
+Pass `internal_id`, **not** `id` — `id` is the same value wrapped in a `group.`-prefixed
+second encoding, and `mute` refuses it rather than muting 32 bytes that match nothing.
+
+🔴 **The filter lives in `SignalDB`'s read methods, so RAW `psql` BYPASSES IT COMPLETELY** —
+an application predicate cannot bind a statement typed at a shell. So the body-printing
+one-liners below **carry the predicate inline**, as `$MUTED`; a warning above them would
+just be prose you scroll past while copying the query. Paste `$MUTED` into any new query
+that selects a body. Muting also does **not** stop ingest: the consumer keeps storing that
+group's messages, reactions and attachment bytes — it only stops READS returning them.
+
 Direct SQL (the store is authoritative):
 ```bash
 export KUBECONFIG=~/workspace/homelab-talos/homelab-kubeconfig
 PSQL='kubectl -n mailbox exec mailbox-postgres-0 -- psql -U mailbox -d mailbox -c'
-$PSQL "select count(*), max(message_timestamp) from signal.messages;"
+MUTED='not exists (select 1 from signal.excluded_groups x
+        join signal.groups gx on gx.group_id=x.group_id where gx.id=m.group_id)'
+
+$PSQL "select count(*), max(message_timestamp) from signal.messages;"   -- counts: unfiltered on purpose
 $PSQL "select m.message_timestamp, c.display_name, left(m.body,60) from signal.messages m
-       join signal.contacts c on c.id=m.source_contact_id order by m.message_timestamp desc limit 20;"
-$PSQL "select id, body from signal.messages where search @@ websearch_to_tsquery('english','permit');"
+       join signal.contacts c on c.id=m.source_contact_id
+       where ${MUTED} order by m.message_timestamp desc limit 20;"
+$PSQL "select m.id, m.body from signal.messages m
+       where m.search @@ websearch_to_tsquery('english','permit') and ${MUTED};"
 $PSQL "select count(*) from signal.reactions where message_id is null;"   -- unresolved
 ```
 
