@@ -163,9 +163,22 @@ def seed(task_id=193, ts=READ_TS, work=True, work_ts=WORK_EPOCH, session=SESSION
     return sd
 
 
-def task(status="open", comments=(), task_id=193):
+def task(status="open", comments=(), task_id=193, agent=None):
     return {"id": task_id, "status": status, "title": "t", "body": "b",
-            "comments": list(comments)}
+            "comments": list(comments), "agent": agent}
+
+
+def agent_obj(status="running", name="bright-fox"):
+    """A dispatched-agent object shaped like the one `/api/tasks/{id}` really returns.
+
+    🔴 The name is NOT "test-agent": it is a real name from the 2026-08-20 run this
+    case was found in, and the surrounding fields are the ones the live payload
+    carries, so a shape change at the far end shows up here rather than passing on a
+    fixture invented to fit the assertion.
+    """
+    return {"id": 59, "name": name, "namespace": "devpod-" + name,
+            "status": status, "noteId": 193, "repo": "civitai/civitai",
+            "kickedOff": False, "errorMessage": ""}
 
 
 def comment(author="claude-code", created="2026-08-15T13:00:00.000000Z", **kw):
@@ -600,6 +613,76 @@ def test_a_card_someone_already_closed_is_left_alone(status):
     assert guard.writeback_state(task(status=status, comments=[]), READ_TS) == "closed"
 
 
+# --------------------------------------------------------------------------- #
+# 4b. A card with a LIVE DISPATCHED AGENT is DELEGATED, not missing
+#
+# Regression for the 2026-08-20 false positive: a session that DISPATCHED agents at
+# tasks 241/294 was told to comment as `claude-code` and flip both to
+# `ready_for_review` while `bright-fox`/`brave-finch` were still running. That
+# remedy pre-empts the agent's own close-out and fires a push to the operator.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("status", ["pending", "provisioning", "running"])
+def test_a_live_dispatched_agent_owes_the_writeback_not_this_session(status):
+    t = task(comments=[], agent=agent_obj(status=status))
+    assert guard.writeback_state(t, READ_TS) == "delegated"
+
+
+@pytest.mark.parametrize("status", ["stopped", "error"])
+def test_a_DEAD_agent_still_reports_missing(status):
+    """🔴 The safety half, and the reason `delegated` is scoped to LIVE statuses only.
+
+    An agent that died without writing back is EXACTLY the #193/#194 case this guard
+    exists for. If this ever goes green as "delegated", the fix has eaten the guard.
+    """
+    t = task(comments=[], agent=agent_obj(status=status))
+    assert guard.writeback_state(t, READ_TS) == "missing"
+
+
+def test_the_status_vocabulary_is_partitioned_with_nothing_left_over():
+    """🔴 A LEDGER over the server's closed set (agents/store.go:14-19). It fails when
+    the set GROWS (a new status nobody classified) or SHRINKS, rather than silently
+    treating an unknown status as dead. Without this, a future `paused` would land on
+    the noisy side by accident and nobody would notice."""
+    server_statuses = {"pending", "provisioning", "running", "stopped", "error"}
+    live = set(guard.LIVE_AGENT_STATUSES)
+    assert live <= server_statuses, "a LIVE status the server does not define"
+    dead = server_statuses - live
+    assert dead == {"stopped", "error"}
+    for s in sorted(live):
+        assert guard.writeback_state(task(comments=[], agent=agent_obj(s)),
+                                     READ_TS) == "delegated", s
+    for s in sorted(dead):
+        assert guard.writeback_state(task(comments=[], agent=agent_obj(s)),
+                                     READ_TS) == "missing", s
+
+
+def test_no_agent_on_the_card_is_unchanged():
+    """The common case — `"agent": null`. Must stay exactly as loud as it was."""
+    assert guard.writeback_state(task(comments=[], agent=None), READ_TS) == "missing"
+
+
+@pytest.mark.parametrize("junk", ["running", ["running"], 7, {}, {"status": "bogus"}])
+def test_an_UNRECOGNISED_agent_shape_fails_LOUD(junk):
+    """🔴 Fails toward "missing", never toward silence. A payload shape this hook does
+    not understand must not be able to switch the guard off — including the near-miss
+    where `agent` is the STATUS STRING rather than the object."""
+    assert guard.writeback_state(task(comments=[], agent=junk), READ_TS) == "missing"
+
+
+def test_a_real_writeback_still_wins_over_a_live_agent():
+    """🔴 Pins the ORDER. `delegated` is checked after the comment scan, so a card that
+    has both a live agent and a genuine write-back reports "written" — the stronger,
+    more specific fact. Reordering the two makes this red."""
+    c = comment(created="2026-08-15T13:00:00.000000Z")
+    t = task(comments=[c], agent=agent_obj())
+    assert guard.writeback_state(t, READ_TS) == "written"
+
+
+def test_a_closed_card_with_a_live_agent_is_still_closed():
+    t = task(status="ready_for_review", comments=[], agent=agent_obj())
+    assert guard.writeback_state(t, READ_TS) == "closed"
+
+
 @pytest.mark.parametrize("status", ["open", "in_progress"])
 def test_an_open_or_in_progress_card_is_still_measured(status):
     assert guard.writeback_state(task(status=status, comments=[]), READ_TS) == "missing"
@@ -679,6 +762,38 @@ def test_a_read_and_evaluate_only_session_NEVER_fires(home):
     kind, text = guard.stop_decision(payload("Stop"), reader=r)
     assert (kind, text) == ("silent", "")
     assert r.calls == []
+
+
+def test_a_delegated_card_is_silent_END_TO_END(home):
+    """The false positive itself, driven through `stop_decision`.
+
+    🔴 The board IS read — unlike the no-work case, which asserts the absence of the
+    read. A `delegated` verdict is a MEASURED one, so a mutation that reaches silence
+    by skipping the live read instead of by classifying the agent is visible here.
+    """
+    seed(work=True)
+    r = Reader(result=task(comments=[], agent=agent_obj(status="running")))
+    assert guard.stop_decision(payload("Stop"), reader=r) == ("silent", "")
+    assert [c[0] for c in r.calls] == [193]
+
+
+def test_a_delegated_card_SPENDS_NO_COUNTER(home):
+    """🔴 Asserted through the LADDER, not by reading the counter file: a long agent
+    run must not exhaust the budget a genuinely missing write-back will need.
+
+    Four delegated Stops is strictly more than MAX_FIRES (3) and MAX_BLOCKS (2) — and
+    4 equals neither constant, so this cannot pass by construction. If `delegated`
+    burned a fire, the ladder would be spent and the final Stop — where the agent has
+    DIED with no write-back — would come back silent instead of blocking.
+    """
+    seed(work=True)
+    alive = Reader(result=task(comments=[], agent=agent_obj(status="running")))
+    for _ in range(4):
+        assert guard.stop_decision(payload("Stop"), reader=alive) == ("silent", "")
+    dead = Reader(result=task(comments=[], agent=agent_obj(status="error")))
+    kind, text = guard.stop_decision(payload("Stop"), reader=dead)
+    assert kind == "block"
+    assert "193" in text
 
 
 def test_the_positive_control_for_that_absence(home):

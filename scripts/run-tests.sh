@@ -1196,7 +1196,23 @@ TARGET_FLOORS=(
   # RED at the base sha. Read from the AUTHORITATIVE gate's own per-target line:
   #   PASS  scripts/claude-hooks/tests/test_clawgate_writeback_guard.py  (collected=280 passed=280 skipped=0 floor=260)
   #   _suggested_floor 280 = 280 - min(50, max(1, 280/20 = 14)) = 280 - 14 = 266.
-  "scripts/claude-hooks/tests/test_clawgate_writeback_guard.py|266"
+  #
+  # 2026-08-20, the `delegated` state: 280 -> 296. A card whose DISPATCHED AGENT is
+  # still alive owes its write-back to that AGENT, so nagging the dispatching session
+  # asked it to pre-empt a close-out that had not happened — measured on tasks 241/294
+  # while `bright-fox`/`brave-finch` were running, where following the guard's own
+  # remedy would have manufactured the signal that run was measuring.
+  # +6 are RED at the base sha (3 live statuses, the two-way status ledger, and the two
+  # end-to-end cases). The other +10 are INVARIANT GUARDS and are NOT regression
+  # coverage — they pin behaviour that was already correct and that the fix must not
+  # eat: dead agents still `missing`, `"agent": null` unchanged, four junk shapes
+  # (incl. `agent` as the status STRING), the comment-scan-wins ordering, and closed
+  # beating delegated. Each was mutation-checked to die for its OWN reason; the
+  # safety-critical inversion (dead treated as live) is killed three independent ways.
+  # ZERO new skips, so EXPECTED_SKIPS is untouched. Read from the AUTHORITATIVE gate:
+  #   PASS  scripts/claude-hooks/tests/test_clawgate_writeback_guard.py  (collected=296 passed=296 skipped=0 floor=266)
+  #   _suggested_floor 296 = 296 - min(50, max(1, 296/20 = 14)) = 296 - 14 = 282.
+  "scripts/claude-hooks/tests/test_clawgate_writeback_guard.py|282"
   # 2026-08-18, the on-disk artifact-name registry arrives as a NEW target: 13
   # collected. Deliberately small — one test per module whose names it pins, plus the
   # two-sided classification guard that fails when a hook module appears or vanishes.

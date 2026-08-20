@@ -149,7 +149,8 @@ ACKNOWLEDGED_UNSTUBBED = {
     "home-manager": (
         {"bar-status-poll", "drift-check.sh", "keylog-spin-capture.sh",
          "notify-failure.sh", "playwright-nixos", "session-manager",
-         "session-resolve", "ship.sh", "tmux-post-save.sh"},
+         "session-resolve", "ship.sh", "tmux-post-save.sh",
+         "tmux-scratch-slots.sh"},
         "MEASURED unreachable: a whole-tier run under a recording interceptor "
         "logged ZERO calls. TWO of these are executed by scripts/tests and "
         "neither can reach the binary: notify-failure.sh names home-manager in "
@@ -171,7 +172,25 @@ ACKNOWLEDGED_UNSTUBBED = {
         "narrowed by an ALLOWLIST of list-panes/list-windows/list-clients "
         "that raises on anything else — test_session_resolve.py pins that "
         "allowlist in both directions, so this justification cannot rot into "
-        "a claim about a file that has grown a launcher"),
+        "a claim about a file that has grown a launcher. "
+        "tmux-scratch-slots.sh (added 2026-08-19) is the FOURTH of this shape "
+        "and carries the STRONGEST form of the justification: the other three "
+        "merely lack a call site, whereas this file has no executable "
+        "statement at all. It is the slot table that session-resolve's entry "
+        "above refers to, and its entire non-comment body is a single "
+        "`SCRATCH_SLOTS=( ... )` array literal of 20 quoted "
+        "session:key:colour:name strings — measured with "
+        "`grep -vE '^\\s*#|^\\s*$'`, which returns the array and nothing else. "
+        "There is no command substitution, pipe, exec or eval anywhere in it, "
+        "and it is SOURCED rather than executed. Its single `home-manager` "
+        "occurrence is one word of comment prose at line 4, recording that the "
+        "tmux `bind -n M-<key>` popup toggles are GENERATED from this table by "
+        "nix/programs/tmux/default.nix (`builtins.readFile`) and that the "
+        "table is therefore the source of truth rather than a mirror. That "
+        "sentence was added to correct a comment which had documented the "
+        "hotkey as a `$mod+Shift+<key>` i3 chord bound to nothing; the "
+        "correction is what put the file in this scanner's sights, and it is "
+        "re-justified here rather than reworded to dodge the scanner"),
     "nixos-rebuild": (
         {"airvpn-sudo", "ship.sh"},
         "MEASURED unreachable in the same whole-tier run; both call sites are "

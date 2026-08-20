@@ -3975,6 +3975,33 @@ def render_text(report: TouchReport) -> str:
         )
         for m in report.below_threshold:
             out.append(f"  - {m.entry.ref}  ({m.path_count} path)")
+        # 🔴 THESE ARE EXISTING ENTRIES, AND THE HEADING DOES NOT SAY SO.
+        # `below_threshold` items carry `.entry` by construction — a ref only
+        # lands here after RESOLVING to a real file. "reported, not proposed"
+        # describes what the tool will do (not auto-propose a write), and five
+        # separate runs read it as "this is a dead end" and went looking for the
+        # right entry by hand — after which every one of them found exactly the
+        # entry named here.
+        #
+        # The sibling summary that says "Entries WERE reached" lives under
+        # `if not report.writes_proposed:` below, so a run that nominates
+        # ANYTHING suppresses it — which is precisely the run where a proposal to
+        # CREATE something sits next to an existing entry the reader should
+        # probably append to instead. Measured 2026-08-19 on `--pr 1146,1149`:
+        # `tests` (5 paths) was proposed for creation while `tekton-builds`
+        # (1 path, 18 KB, 15 bullets, already on disk) sat here unexplained.
+        one = len(report.below_threshold) == 1
+        out.append(
+            f"  ⇢ {'This entry EXISTS' if one else 'These entries EXIST'} — too few"
+            f" paths to auto-propose, NOT a dead end. If this session's subject is"
+            f" {'it' if one else 'one of them'}, APPEND there rather than creating"
+            f" anything below."
+        )
+        out.append(
+            "  ⇢ Paths cannot carry a subject: work ABOUT one subsystem often lands in"
+            " files under another (tests/, scripts/, a shared manifest dir). A low path"
+            " count is weak evidence about the FILES, not about the SUBJECT."
+        )
 
     if report.ambiguous:
         out.append("")

@@ -114,14 +114,16 @@ transcode/VFE, or deploy-time 502s"*. Nothing about a duration query sends you t
 agent wrote `le="5"`, got silence, and the rows vanished from a unioned table. **In one fat
 body you scroll past the warning and are immune.** 🔴 **Postscript (2026-08-19), and it is half
 the lesson: when that warning was finally lifted into the core, RE-MEASURING it showed the
-warning's own EXAMPLE was wrong** — it named `"30.0"`/`"30"`, and there is no `le=30` on either
-image-cacher histogram (`count by (le)` → `0.0 5.0 10.0 25.0 50.0 …`; the nearest value anywhere
-is `le=300.0`, on a different metric). The RULE was load-bearing and correct; the example was
-fabricated. **Re-verify a documented EXAMPLE, not just the rule it illustrates** — an orphaned
-warning is unread, so nothing corrects its details either. Milder sibling in the same skill: the core's
-Redis hot-command prints saturation numbers with no interpretation, while the sidecar saying
-*"it is NOT a 503 lever, r = 0.029"* is a routing hop away — the agent nearly filed it as an
-availability contributor. **So: when you demote a block, ask what it was PROTECTING. If the
+warning's own EXAMPLE was wrong** — it quoted a specific histogram bucket that the metric in
+question does not define at all. Enumerating the real buckets showed the quoted one missing
+entirely, with the nearest similar value belonging to an unrelated series. The RULE was
+load-bearing and correct; the illustration attached to it had been invented. **An EXAMPLE earns
+its own re-measurement — the rule holding tells you nothing about whether the numbers beside it
+still do.** A warning nobody reads is also a warning nobody corrects, so a fabricated detail
+inside one survives indefinitely. Milder sibling in the same skill: the core printed saturation
+figures with no interpretation, while the sidecar that said those figures were NOT the lever —
+citing a near-zero correlation — sat a routing hop away, and the reader nearly filed them as a
+cause. **So: when you demote a block, ask what it was PROTECTING. If the
 trigger stays in the core, the guard goes with it or leaves a cross-reference.**
 
 🔴 **A lean core AMPLIFIES stale text.** Both agents said it independently: a wrong line in a
