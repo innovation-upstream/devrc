@@ -212,7 +212,34 @@ ARCHIVE_MD = REPO_ROOT / "claude" / "RULES-ARCHIVE.md"
 # three heavy days at the observed rate, which is a working margin without
 # removing the pressure the gate exists to apply. A bigger jump would make the
 # gate decorative; a smaller one puts the next author back here immediately.
-MAX_BYTES = 38_400
+#
+# 2026-08-20: 38,400 -> 38,800 (+400 B). The rule that would not fit was the
+# FIFTH worktree surface -- "its SUBMODULES", 349 B -- which the 2026-08-13 entry
+# above explicitly left open ("a fifth surface is still unmeasured"). It costs
+# the same shape as the fourth: one sub-bullet reusing the frame, the "list is
+# not closed" clause and the silent-failure framing, so 349 B against that
+# entry's measured 394 B.
+#
+# 🔴 THE PREVIOUS ENTRY'S "there is nothing left to move" WAS OVERSTATED, and
+# that is the reusable part. Before bumping, 206 B came out of the mutation
+# bullet WITHOUT narrowing it, because that text was DUPLICATED: the sweep
+# blind-spot narrative and the "(three in one PR)" count both already sat in
+# `mutation-sweep-blind-spots` in the archive, in more detail. Every imperative
+# survives verbatim -- "Vary how the sweep is built, not just the mutant count",
+# the pairwise-distinct fixture clause, and the mechanical control.
+#
+# The prior audit measured which bullets CARRY a `-> archive:` tag and concluded
+# their evidence was already demoted. A tag means evidence was demoted ONCE; it
+# does not mean the inline copy was deleted, and here it had not been. So the
+# check that was missing is a DUPLICATION check -- diff each tagged bullet
+# against the anchor it names -- and it is cheaper than a bump. Run it before
+# raising this number again; this pass did not run it to completion, so the vein
+# is not known to be exhausted.
+#
+# The +400 matches the 2026-08-11 precedent's modesty rather than the sizing
+# formula above, which would give ~41,500 and make the gate decorative. It
+# leaves 1,208 B of headroom, i.e. one large rule above the floor.
+MAX_BYTES = 38_800
 
 # Required working margin below the ceiling.
 #
