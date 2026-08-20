@@ -70,10 +70,16 @@ CLAUDE_MD = REPO / "CLAUDE.md"
 WORKFLOW_DIR = REPO / ".github" / "workflows"
 
 MARKER_RE = re.compile(r"<!--\s*merge-gate:\s*(?P<value>[a-z0-9-]+)\s*-->")
-VALID_MARKERS = {"none", "github-actions"}
+# `other` exists so this test can never FORCE a false claim: if a Tekton trigger
+# or an installed `githooks/` pre-push gate ever starts gating devrc, neither of
+# which this test can see, the honest marker is `other` — and a check that
+# accepted only {none, github-actions} would demand a machine-readable
+# "nothing gates a merge" that is untrue. A guard must not compel the very
+# falsehood it exists to prevent.
+VALID_MARKERS = {"none", "github-actions", "other"}
 
-# Events that make a workflow run on a pull request. `push` is deliberately
-# ABSENT: it fires after the merge and gates nothing.
+# Events that make a workflow run before a merge lands. `push` is deliberately
+# ABSENT: it fires AFTER the merge and gates nothing.
 GATING_EVENTS = {"pull_request", "pull_request_target", "merge_group"}
 
 # The marker must sit on a line that still says something to a HUMAN. An HTML
@@ -112,7 +118,11 @@ def _on_events(doc: object) -> set[str]:
     """
     if not isinstance(doc, dict):
         return set()
-    for key in (True, "on", "On", "ON"):
+    # Only two spellings are reachable: PyYAML resolves unquoted `on:`, `On:`
+    # and `ON:` all to the boolean True, and GitHub Actions requires the key
+    # lowercase, so a quoted `"On":` is a file GitHub rejects. Listing more
+    # spellings would advertise coverage that does not exist.
+    for key in (True, "on"):
         if key in doc:
             spec = doc[key]
             break
@@ -125,6 +135,24 @@ def _on_events(doc: object) -> set[str]:
     if isinstance(spec, dict):
         return {k for k in spec if isinstance(k, str)}
     return set()
+
+
+def _acceptable_markers(gating: bool) -> set[str]:
+    """Which marker values are honest, given detected GitHub Actions gating.
+
+    Extracted as a PURE function on purpose. `.github/workflows` is empty in
+    this repo, so the `gating=True` branch can never execute against the real
+    tree — an audit confirmed that inverting the comparison inline survived a
+    fully green suite. That is the dangerous direction (real CI lands while the
+    always-loaded doc keeps saying nothing gates a merge), so the comparison
+    must be reachable from a fixture. See test_the_marker_comparison_is_correct.
+    """
+    if gating:
+        return {"github-actions"}
+    # No GitHub Actions gate. The marker must not CLAIM one — but `other` stays
+    # legal, because Tekton or an installed githooks pre-push gate are invisible
+    # here and forbidding them would force a false `none`.
+    return {"none", "other"}
 
 
 def _gating_workflows() -> list[Path]:
@@ -166,9 +194,9 @@ def test_the_detectors_can_actually_observe_things(tmp_path) -> None:
     WRONG at some point in this PR's history; they are regression coverage, not
     decoration.
     """
-    assert VALID_MARKERS == {"none", "github-actions"}, (
-        "VALID_MARKERS changed; a new value needs a branch in the assertion "
-        "below, or it will be accepted while meaning nothing"
+    assert VALID_MARKERS == {"none", "github-actions", "other"}, (
+        "VALID_MARKERS changed; a new value needs a branch in "
+        "_acceptable_markers, or it will be accepted while meaning nothing"
     )
     # Pin the guard's OWN constant. Without this, the cheapest way to silence a
     # failure is to lower the threshold — a mutation battery caught exactly
@@ -185,9 +213,14 @@ def test_the_detectors_can_actually_observe_things(tmp_path) -> None:
 
     wf = tmp_path / ".github" / "workflows"
     wf.mkdir(parents=True)
-    # DOES gate a PR
+    # DOES gate. Every entry is a spelling a mutation sweep found UNCOVERED —
+    # dropping merge_group, pull_request_target, the scalar branch, or the
+    # .yaml suffix each survived a fully green suite before these existed.
     (wf / "pr.yml").write_text("name: ci\non: [pull_request]\njobs: {}\n")
     (wf / "quoted.yml").write_text('name: ci\n"on":\n  pull_request:\njobs: {}\n')
+    (wf / "scalar.yaml").write_text("name: ci\non: pull_request\njobs: {}\n")
+    (wf / "queue.yml").write_text("name: ci\non:\n  merge_group:\njobs: {}\n")
+    (wf / "fork.yml").write_text("name: ci\non: [pull_request_target]\njobs: {}\n")
     # Does NOT gate a merge, each a measured false positive of the old detector
     (wf / "tags.yml").write_text("name: rel\non:\n  push:\n    tags: ['v*']\njobs: {}\n")
     (wf / "dispatch.yml").write_text("name: x\non: workflow_dispatch\njobs:\n  push-image:\n    runs-on: x\n")
@@ -207,17 +240,68 @@ def test_the_detectors_can_actually_observe_things(tmp_path) -> None:
     finally:
         WORKFLOW_DIR = original
 
-    assert found == {"pr.yml", "quoted.yml", "tags.yml", "dispatch.yml",
-                     "comment.yml", "sched.yml"}, (
-        f"workflow detector wrong: {found} (must ignore non-YAML and "
-        "subdirectories, which GitHub Actions itself ignores)"
+    assert found == {"pr.yml", "quoted.yml", "scalar.yaml", "queue.yml",
+                     "fork.yml", "tags.yml", "dispatch.yml", "comment.yml",
+                     "sched.yml"}, (
+        f"workflow detector wrong: {found} (must read BOTH .yml and .yaml, and "
+        "ignore non-YAML plus subdirectories, which GitHub Actions itself "
+        "ignores)"
     )
-    assert gating == {"pr.yml", "quoted.yml"}, (
-        f"gating detector wrong: {gating}. It must count ONLY workflows that "
-        "run on a pull request — including the quoted `\"on\":` spelling — and "
-        "must not be fooled by release-on-tag, a job named push-*, the word "
-        "'push' in a comment, or a schedule."
+    assert gating == {"pr.yml", "quoted.yml", "scalar.yaml", "queue.yml",
+                      "fork.yml"}, (
+        f"gating detector wrong: {gating}. It must count every spelling that "
+        "runs before a merge — list, quoted `\"on\":`, bare scalar, "
+        "merge_group, pull_request_target — and must not be fooled by "
+        "release-on-tag, a job named push-*, 'push' in a comment, or a schedule."
     )
+
+
+def test_an_unreadable_workflow_is_loud_not_a_silent_no_gate(tmp_path) -> None:
+    """REGRESSION coverage for the fix that made read failures raise.
+
+    Before it, an unreadable workflow was `continue`d past — so a file that
+    genuinely declared `on: [pull_request]` read as "no gate" and the suite
+    printed a reassuring green. Reverting to a silent `continue` survived every
+    other test in this file, which is why this one exists separately.
+    """
+    wf = tmp_path / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    (wf / "bad.yml").write_bytes(b"name: \xff\xfe\non: [pull_request]\n")
+
+    global WORKFLOW_DIR
+    original = WORKFLOW_DIR
+    try:
+        WORKFLOW_DIR = wf
+        try:
+            _gating_workflows()
+        except AssertionError as exc:
+            assert "bad.yml" in str(exc), (
+                f"the failure must NAME the file it could not read: {exc}"
+            )
+        else:
+            raise AssertionError(
+                "an unreadable workflow was swallowed and read as 'no gate' — "
+                "the reassuring zero this test exists to prevent"
+            )
+    finally:
+        WORKFLOW_DIR = original
+
+
+def test_the_marker_comparison_is_correct_in_both_directions() -> None:
+    """`.github/workflows` is empty here, so the gating=True arm NEVER runs
+    against the real tree — an audit showed inverting the comparison inline
+    survived a fully green suite. Exercise the pure function directly."""
+    assert _acceptable_markers(True) == {"github-actions"}, (
+        "with a GitHub Actions gate detected, only 'github-actions' is honest"
+    )
+    assert _acceptable_markers(False) == {"none", "other"}, (
+        "with no GitHub Actions gate, 'github-actions' must be rejected — but "
+        "'other' must stay legal, or a future Tekton/githooks gate would be "
+        "forced to declare 'none', a falsehood this test would be creating"
+    )
+    # The property that matters, stated so an inversion cannot pass:
+    assert "github-actions" not in _acceptable_markers(False)
+    assert "none" not in _acceptable_markers(True)
 
 
 def test_claude_md_marker_matches_the_repo() -> None:
@@ -252,18 +336,21 @@ def test_claude_md_marker_matches_the_repo() -> None:
     )
 
     gating = [p.name for p in _gating_workflows()]
+    acceptable = _acceptable_markers(bool(gating))
 
-    if gating:
-        assert value == "github-actions", (
-            f"CLAUDE.md's marker says {value!r}, but workflows that run on pull "
-            f"requests now exist ({gating}). A stale 'nothing gates a merge' "
-            "warning trains readers to ignore this file — update the marker and "
-            "the paragraph."
+    assert value in acceptable, (
+        f"CLAUDE.md's merge-gate marker says {value!r}, but "
+        + (
+            f"workflows that run before a merge now exist ({gating}), so only "
+            f"{sorted(acceptable)} is honest. A stale 'nothing gates a merge' "
+            "warning trains readers to ignore this file — update the marker "
+            "and the paragraph."
+            if gating else
+            f"no GitHub Actions workflow in {WORKFLOW_DIR} runs before a merge, "
+            f"so only {sorted(acceptable)} is honest. An agent reading a CI "
+            "claim believes the merge is protected and skips running the "
+            "suite. Add real CI, or set the marker to 'none' (or 'other' if "
+            "something this test cannot see — Tekton, an installed githooks "
+            "pre-push gate — now gates it)."
         )
-    else:
-        assert value == "none", (
-            f"CLAUDE.md's marker says {value!r}, but no GitHub Actions workflow "
-            f"in {WORKFLOW_DIR} runs on a pull request. An agent reading that "
-            "believes the merge is protected and skips running the suite. "
-            "Either add real CI, or set the marker to 'none'."
-        )
+    )

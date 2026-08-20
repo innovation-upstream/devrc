@@ -170,12 +170,15 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
   the repo. **Reword this prose freely — but keep a sentence on the marker's line and do not
   add a second marker anywhere** (the test requires exactly one, and that its line still says
   something to a human: an HTML comment renders as nothing, so a lone marker would leave you
-  reading no warning at all). Change the marker only when a workflow that **runs on a pull
-  request** appears or disappears — a `push`, tag, `schedule` or `workflow_dispatch` workflow
-  gates no merge and must leave it at `none`. It pins that one thing: whether such a run
-  actually BLOCKS a merge is branch protection, which — along with Tekton and git hooks — is
-  named above but NOT machine-checked from here. Re-verify those by hand rather than trusting
-  this paragraph's age.
+  reading no warning at all). Change the marker only when a workflow triggering on
+  **`pull_request`, `pull_request_target` or `merge_group`** appears or disappears — a `push`,
+  tag, `schedule` or `workflow_dispatch` workflow runs after or outside the merge, gates
+  nothing, and must leave it at `none`. Values: `none`, `github-actions`, or **`other`** if
+  something this test cannot see starts gating (Tekton, an installed `githooks/` pre-push
+  gate) — `other` exists so the test can never force you to write a false `none`. It pins that
+  one thing: whether such a run actually BLOCKS a merge is branch protection, which — along
+  with Tekton and git hooks — is named above but NOT machine-checked from here. Re-verify
+  those by hand rather than trusting this paragraph's age.
 - 🔴 **There is no hand-written test TOTAL any more.** `run-tests.sh` carries a **per-target** floor table (`TARGET_FLOORS`, pinned two-way against the target list) and derives the global floor as their sum. The old single `MIN_TESTS` literal was base-dependent and took **eleven values across eight PRs in one day**; `rerere` replayed a resolution from a different merge and silently wrote a four-way total onto a two-way tree. A floor is now a function of the current measurement — `m - min(50, max(1, m/20))` — and the gate PRINTS the exact replacement number when one drifts. Resolve a conflict here by re-running the gate and copying what it says, never by arithmetic on the two sides.
 - 🔴 **This repo is PUBLIC.** Never commit a real media-library path, directory name, filename, route log, or a real third-party hostname used as an example. **Nor CAPTURED TEXT — anyone's message bodies, prompts, transcripts or chat content, or a model's summaries of them — however it arrives** (an eval capture, a fixture, a debug dump). A test needs the SHAPE; regenerate it synthetic. Gated for JSON/JSONL/JSONC by `scripts/tests/test_no_captured_text.py` and for `.html`/`.txt` by `scripts/tests/test_no_captured_markup.py`; each owns its ledgers, thresholds, pinned allowlist and blind spots — read them there, never restate them. 🔴 All four content gates (these two plus the IP and hostname ones) read `git ls-files` and are **blind to git history** — see `SECRETS.md` → "Dead credentials in reachable history" before treating a green run as "the repo is clean".
 
