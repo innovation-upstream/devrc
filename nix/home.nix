@@ -262,7 +262,7 @@ in
           # rather than "dispatch" on :pdt. Re-run
           # `espanso-usage.py --replay --config <candidate>` after ANY edit here
           # and diff it against the deployed config: 0 regressions is the gate.
-          { trigger = ":alo"; replace = "anything left open from this thread?"; label = "Anything left open from this thread?"; search_terms = ["open" "left open" "loose" "outstanding" "remaining" "unfinished"]; }
+          { trigger = ":alo"; replace = "determine if anything is left open or unaddressed from this session and overall thread"; label = "Anything left open or unaddressed - session and thread"; search_terms = ["open" "left open" "loose" "outstanding" "remaining" "unfinished" "unaddressed"]; }
           { trigger = ":pdt"; replace = "proceed, dispatch, include complete test coverage"; label = "Proceed - dispatch with complete test coverage"; search_terms = ["proceed" "coverage" "test coverage" "complete"]; }
           { trigger = ":cgt"; replace = "create a /clawgate task to pick up the issues"; label = "Create a clawgate ticket for the issues"; search_terms = ["clawgate" "ticket" "issues" "pick up"]; }
           # Removed 2026-07-25 via /espanso-audit — all keylog-evidence-backed:
