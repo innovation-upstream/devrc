@@ -1,0 +1,471 @@
+#!/usr/bin/env python3
+"""opencode-dispatch — hand a task to opencode without spending this session's
+context on it, and without the four measured ways a dispatch quietly does
+nothing.
+
+    opencode-dispatch preflight --dir DIR [--brief FILE|-] [--json]
+    opencode-dispatch run       --dir DIR [--brief FILE|-] [--title T]
+                                [-m flash|mimo|pro|<full/model/id>]
+                                [--auto] [-c] [--file F]...
+
+WHY A WRAPPER AND NOT JUST `opencode run`
+-----------------------------------------
+Four failure modes, all measured over 17 days of real dispatches, and THREE of
+them success-shaped — the dispatch exits 0 and nothing happened:
+
+  1. 🔴 `external_directory: "ask"` -> headless AUTO-REJECT -> exit 0, no work.
+     The brief named a path outside `--dir`. `opencode run` auto-rejects an
+     `ask` (only the interactive TUI prompts). Fingerprint in opencode's own
+     store: 10 of 321 sessions with `model IS NULL` and 0 tokens. Happened
+     twice, in both directions (a read, then a write).
+     CLOSED TWO WAYS here: the brief is WRITTEN INTO `--dir` (so its own
+     location can never be the problem), and `preflight` refuses — rc 3 — if the
+     brief's text names any absolute path outside `--dir`.
+
+  2. `--file` is an ARRAY option and greedily swallowed the message as a second
+     filename: `Error: File not found: Execute the task described in …`. Only
+     message-positional-FIRST worked. `build_argv` pins that order and a test
+     asserts the emitted index.
+
+  3. `permission.bash` `ask` -> AUTO-REJECT mid-run. opencode needed
+     `kubectl exec … psql`, was auto-rejected, and the dispatch was abandoned
+     half-done. `preflight` WARNS (never blocks) when a command in the brief's
+     fenced blocks resolves to `ask`, naming the glob.
+
+  4. 20% of opencode sessions exceed the Bash tool's hard 600,000 ms ceiling
+     (p90 2508s, p95 9119s); one measured dispatch died at exactly 600s with
+     `Exit code 143`. So this tool NEVER runs opencode in the foreground and
+     offers no flag to. It detaches into its own session, tees to a log file
+     inside `--dir`, and returns immediately.
+
+🔴 WHY THE PATH CHECK BLOCKS AND THE GLOB CHECK ONLY WARNS.
+The path check is EXACT — a path is under `--dir` or it is not — and the failure
+it prevents is a silent exit 0, the one shape a human never notices. The glob
+check runs through a parser that deliberately OVER-MATCHES, so blocking on it
+would build a permanently-red gate, which RULES.md says is worse than no gate.
+
+NOT BUILT, deliberately (stage 1):
+  * `status` / `watch` — they need opencode's internal SQLite schema, which has
+    no stability guarantee. Worth taking only once this skill is proven to get
+    used. Read the log file instead; its path is printed on dispatch.
+  * result-capture, auto-retry, a model router — each considered and rejected on
+    measured grounds. Retries in particular are CORRECTIVE, not transient:
+    re-running a known-bad brief is not a fix.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+_HERE = Path(__file__).resolve().parent
+for _p in (_HERE / "lib", _HERE.parent / "collector"):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
+
+import brief_scan  # noqa: E402
+
+TOOL = "opencode-dispatch"
+
+# Every outcome this tool can emit. Pinned three ways by
+# tests/test_dispatch.py: against the literals at the `emit(` call sites,
+# against adoption-scan's REGISTRY row, and against a check that no call site
+# passes a COMPUTED outcome (which the call-site grep could not see).
+OUTCOMES = ("dispatched", "preflight-ok", "preflight-blocked", "error")
+
+# --------------------------------------------------------------------------- #
+# Exit codes. Each failure gets its OWN code so a caller can branch, and rc 3 in
+# particular is the one that means "I refused; the brief is wrong", as distinct
+# from "opencode is missing" or "you typed it wrong".
+# --------------------------------------------------------------------------- #
+RC_OK = 0
+RC_USAGE = 2
+RC_PATH_ESCAPE = 3      # 🔴 failure 1: the brief names a path outside --dir
+RC_DIR = 4              # --dir missing / not a directory
+RC_LAUNCH = 5           # opencode could not be started
+
+# --------------------------------------------------------------------------- #
+# Model aliases — ONLY the three that actually get retyped. No router, no
+# defaulting: with no `-m` the argv omits the flag entirely and opencode uses
+# the config default, which is what 18 of 24 measured dispatches did.
+# --------------------------------------------------------------------------- #
+MODEL_ALIASES = {
+    "flash": "openrouter/deepseek/deepseek-v4-flash",
+    "mimo": "openrouter/xiaomi/mimo-v2.5",
+    "pro": "openrouter/deepseek/deepseek-v4-pro",
+}
+
+# Where the brief lands, INSIDE --dir. This is the structural half of failure 1:
+# a brief that lives in the project directory cannot be an external-directory
+# read, regardless of what any scanner concludes.
+BRIEF_SUBDIR = ".opencode-dispatch"
+
+# 🔴 The subdir ignores ITSELF, in whatever repo it lands in. devrc's own
+# .gitignore covers devrc; every other target repo is covered by this file,
+# written on first use. A brief is scratch work and must never be stageable.
+BRIEF_GITIGNORE = (
+    "# Written by opencode-dispatch. Briefs and run logs are scratch work and\n"
+    "# must never be committed — they routinely quote paths, hostnames and\n"
+    "# task detail that belong to no repo.\n"
+    "*\n"
+)
+
+# 🔴 THE CANONICAL ARGV ORDER. The message is the POSITIONAL and it comes FIRST,
+# at this index, because `--file` is an ARRAY option: with the message after it,
+# opencode consumed the message as a second filename and died with
+# `Error: File not found: Execute the task described in the attached brief…`.
+MESSAGE_ARGV_INDEX = 2
+
+
+# --------------------------------------------------------------------------- #
+# Pure builders — the parts a test can pin without running anything
+# --------------------------------------------------------------------------- #
+def resolve_model(value: str | None) -> str | None:
+    """Alias -> full model id. A full id (contains `/`) passes through.
+
+    An unknown bare word is a USAGE ERROR, never a pass-through: silently
+    forwarding a typo'd alias would hand opencode a nonexistent model and turn a
+    typo into a failed dispatch discovered minutes later.
+    """
+    if value is None:
+        return None
+    if value in MODEL_ALIASES:
+        return MODEL_ALIASES[value]
+    if "/" in value:
+        return value
+    raise ValueError(
+        f"unknown model alias {value!r}. Known aliases: "
+        + ", ".join(f"{k} -> {v}" for k, v in MODEL_ALIASES.items())
+        + ". Pass a full provider/vendor/model id to use anything else."
+    )
+
+
+def build_argv(message: str, directory, model=None, title=None, auto=False,
+               continue_session=False, files=(), binary="opencode") -> list[str]:
+    """The exact argv `run` executes. Pure, so the ORDER is testable.
+
+    🔴 `message` is argv[MESSAGE_ARGV_INDEX] and precedes every `--file`. That is
+    not style — see failure 2 in the module docstring.
+    """
+    argv = [binary, "run", message, "--dir", str(directory)]
+    if title:
+        argv += ["--title", title]
+    if model:
+        argv += ["-m", model]
+    if auto:
+        argv += ["--auto"]
+    if continue_session:
+        argv += ["-c"]
+    for f in files:
+        argv += ["--file", str(f)]
+    return argv
+
+
+_SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+def slugify(text: str, fallback: str = "brief") -> str:
+    s = _SLUG_RE.sub("-", (text or "").lower()).strip("-")
+    return (s[:48].strip("-") or fallback)
+
+
+def brief_message(rel_brief_path: str) -> str:
+    """The message positional. It names the brief by a path RELATIVE to `--dir`.
+
+    Relative on purpose: an absolute path in the message is the same
+    external-directory hazard the whole tool exists to prevent, and a relative
+    one cannot be outside `--dir` by construction.
+    """
+    return (
+        f"Read {rel_brief_path} first — it is the complete task specification — "
+        "then carry it out. Everything you need is inside this directory; do not "
+        "read or write outside it."
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Telemetry — best-effort, never changes this process's exit code
+# --------------------------------------------------------------------------- #
+def emit(outcome: str, dims: dict | None = None, exit_code: int | None = None,
+         duration_ms: int | None = None) -> None:
+    try:
+        from invocation import emit_invocation
+        emit_invocation(TOOL, outcome, dims=dims or {},
+                        exit_code=exit_code, duration_ms=duration_ms)
+    except Exception:  # noqa: BLE001 — telemetry must never break its caller
+        pass
+
+
+# --------------------------------------------------------------------------- #
+# I/O helpers
+# --------------------------------------------------------------------------- #
+def read_brief(source: str | None) -> str:
+    """Brief text from a file, or from stdin when `source` is `-` or omitted."""
+    if source in (None, "-"):
+        return sys.stdin.read()
+    return Path(source).read_text(encoding="utf-8")
+
+
+def install_brief(directory: Path, text: str, slug: str) -> tuple[Path, Path]:
+    """Write the brief INSIDE `--dir` and return `(brief_path, log_path)`.
+
+    🔴 This is the structural half of failure 1. The brief is not merely CHECKED
+    for external paths — it is placed where an external-directory read is not
+    possible in the first place. Nothing here ever writes to Claude's scratchpad.
+    """
+    subdir = directory / BRIEF_SUBDIR
+    subdir.mkdir(parents=True, exist_ok=True)
+    ignore = subdir / ".gitignore"
+    if not ignore.exists():
+        ignore.write_text(BRIEF_GITIGNORE, encoding="utf-8")
+    stem = f"{time.strftime('%Y%m%d-%H%M%S')}-{slug}"
+    brief = subdir / f"{stem}.md"
+    brief.write_text(text, encoding="utf-8")
+    return brief, subdir / f"{stem}.log"
+
+
+def resolve_dir(raw: str):
+    d = Path(raw).expanduser()
+    if not d.is_dir():
+        return None
+    return d.resolve()
+
+
+# --------------------------------------------------------------------------- #
+# preflight
+# --------------------------------------------------------------------------- #
+def preflight(text: str, directory: Path) -> dict:
+    """The full report. Pure w.r.t. the filesystem apart from path resolution."""
+    offenders = brief_scan.scan_paths(text, directory)
+    warnings = brief_scan.scan_commands(text, directory)
+    return {
+        "dir": str(directory),
+        "blocked": bool(offenders),
+        "external_paths": [
+            {"as_written": o.text, "resolved": o.resolved} for o in offenders
+        ],
+        "command_warnings": [
+            {"command": v.command, "action": v.action, "rule": v.pattern,
+             "guard": v.guard_reason}
+            for v in warnings
+        ],
+        "paths_examined": len(brief_scan.extract_paths(text)),
+        "commands_examined": sum(
+            len(brief_scan.block_commands(b)) for b in brief_scan.shell_blocks(text)
+        ),
+    }
+
+
+def print_report(rep: dict) -> None:
+    # 🔴 Always print what was EXAMINED beside what was found. A bare "0
+    # external paths" from a scan that walked nothing is the failure, not the
+    # all-clear (same reasoning as drift-check's "links examined" line).
+    print(f"preflight  dir={rep['dir']}")
+    print(f"  paths examined    : {rep['paths_examined']}")
+    print(f"  commands examined : {rep['commands_examined']}")
+
+    if rep["external_paths"]:
+        print()
+        print("🔴 BLOCKED — the brief names paths OUTSIDE --dir. `opencode run` "
+              "auto-rejects the")
+        print("   external-directory prompt and exits 0 having done nothing "
+              "(measured twice).")
+        for p in rep["external_paths"]:
+            shown = p["as_written"]
+            extra = "" if shown == p["resolved"] else f"   -> {p['resolved']}"
+            print(f"     {shown}{extra}")
+        print()
+        print("   Fix one of these, not this check:")
+        print("     * move the file under --dir, or")
+        print("     * widen --dir to a directory that contains both, or")
+        print("     * inline the content into the brief instead of pointing at it.")
+    else:
+        print("  external paths    : none — every path is under --dir")
+
+    if rep["command_warnings"]:
+        print()
+        print("⚠ WARN — these commands would meet friction. `opencode run` "
+              "AUTO-REJECTS an `ask`,")
+        print("  so the dispatch stalls MID-RUN rather than prompting. "
+              "Not blocking: this parser")
+        print("  deliberately over-matches.")
+        for w in rep["command_warnings"]:
+            rule = f" (rule {w['rule']!r})" if w["rule"] else ""
+            print(f"     [{w['action']}]{rule}  {w['command']}")
+            if w["guard"]:
+                print(f"        🔴 guard_core would HARD-DENY this: "
+                      f"{w['guard'].splitlines()[0]}")
+    else:
+        print("  command warnings  : none")
+
+
+# --------------------------------------------------------------------------- #
+# commands
+# --------------------------------------------------------------------------- #
+def cmd_preflight(args) -> int:
+    directory = resolve_dir(args.dir)
+    if directory is None:
+        print(f"--dir {args.dir!r} is not a directory", file=sys.stderr)
+        emit("error", {"stage": "preflight", "reason": "bad-dir"}, exit_code=RC_DIR)
+        return RC_DIR
+    text = read_brief(args.brief)
+    rep = preflight(text, directory)
+    if args.json:
+        print(json.dumps(rep, indent=2))
+    else:
+        print_report(rep)
+    dims = {"external_paths": len(rep["external_paths"]),
+            "command_warnings": len(rep["command_warnings"]),
+            "paths_examined": rep["paths_examined"],
+            "commands_examined": rep["commands_examined"]}
+    # 🔴 Two literal call sites, not one ternary. The outcome ledger in
+    # tests/test_dispatch.py is a GREP over these call sites — a computed
+    # argument is invisible to it, and an outcome the ledger cannot see is one
+    # adoption-scan silently buckets as "unknown".
+    if rep["blocked"]:
+        emit("preflight-blocked", dims, exit_code=RC_PATH_ESCAPE)
+        return RC_PATH_ESCAPE
+    emit("preflight-ok", dims, exit_code=RC_OK)
+    return RC_OK
+
+
+def cmd_run(args) -> int:
+    started = time.time()
+    directory = resolve_dir(args.dir)
+    if directory is None:
+        print(f"--dir {args.dir!r} is not a directory", file=sys.stderr)
+        emit("error", {"stage": "run", "reason": "bad-dir"}, exit_code=RC_DIR)
+        return RC_DIR
+    try:
+        model = resolve_model(args.model)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        emit("error", {"stage": "run", "reason": "bad-model"}, exit_code=RC_USAGE)
+        return RC_USAGE
+
+    text = read_brief(args.brief)
+    rep = preflight(text, directory)
+    print_report(rep)
+    if rep["blocked"]:
+        print()
+        print("NOT DISPATCHED.")
+        emit("preflight-blocked",
+             {"stage": "run", "external_paths": len(rep["external_paths"]),
+              "command_warnings": len(rep["command_warnings"]),
+              "model_alias": args.model or "default"},
+             exit_code=RC_PATH_ESCAPE)
+        return RC_PATH_ESCAPE
+
+    brief_path, log_path = install_brief(
+        directory, text, slugify(args.title or "", "brief"))
+    rel = brief_path.relative_to(directory).as_posix()
+    argv = build_argv(
+        brief_message(rel), directory,
+        model=model, title=args.title, auto=args.auto,
+        continue_session=args.continue_session,
+        files=[str(brief_path)] + list(args.file or []),
+        binary=args.binary,
+    )
+
+    # 🔴 NEVER IN THE FOREGROUND, and no flag to make it so. 20% of opencode
+    # sessions exceed the Bash tool's hard 600,000 ms ceiling; one measured
+    # dispatch died at exactly 600s with `Exit code 143`. `start_new_session`
+    # puts it in its own process group so killing the calling shell — which is
+    # what a Bash-tool timeout does — cannot reach it.
+    try:
+        log = open(log_path, "wb")
+    except OSError as e:
+        print(f"cannot open log {log_path}: {e}", file=sys.stderr)
+        emit("error", {"stage": "run", "reason": "log-open"}, exit_code=RC_LAUNCH)
+        return RC_LAUNCH
+    try:
+        proc = subprocess.Popen(
+            argv, cwd=str(directory), stdin=subprocess.DEVNULL,
+            stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
+        )
+    except OSError as e:
+        log.close()
+        print(f"could not start {args.binary!r}: {e}", file=sys.stderr)
+        emit("error", {"stage": "run", "reason": "spawn"}, exit_code=RC_LAUNCH)
+        return RC_LAUNCH
+    finally:
+        try:
+            log.close()
+        except OSError:
+            pass
+
+    print()
+    print(f"DISPATCHED  pid={proc.pid}")
+    print(f"  brief : {brief_path}")
+    print(f"  log   : {log_path}")
+    print(f"  argv  : {' '.join(argv)}")
+    print()
+    print("It is DETACHED — this call has already returned and the run is not")
+    print("bounded by any tool timeout. Check on it with:")
+    print(f"  tail -n 40 {log_path}")
+    emit("dispatched",
+         {"model_alias": args.model or "default",
+          "model": model or "config-default",
+          "auto": bool(args.auto), "continued": bool(args.continue_session),
+          "extra_files": len(args.file or []),
+          "command_warnings": len(rep["command_warnings"]),
+          "paths_examined": rep["paths_examined"],
+          "commands_examined": rep["commands_examined"]},
+         exit_code=RC_OK, duration_ms=int((time.time() - started) * 1000))
+    return RC_OK
+
+
+def build_parser() -> argparse.ArgumentParser:
+    epilog = (
+        "model aliases:\n  "
+        + "\n  ".join(f"{k:<6} {v}" for k, v in MODEL_ALIASES.items())
+        + "\n  (no -m)  the opencode.jsonc default\n\n"
+        "There is deliberately NO foreground mode: 20% of opencode sessions\n"
+        "outlive the Bash tool's 600,000 ms ceiling.\n"
+    )
+    p = argparse.ArgumentParser(
+        prog=TOOL, description=__doc__.split("\n\n")[0],
+        epilog=epilog, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    def common(sp):
+        sp.add_argument("--dir", required=True,
+                        help="opencode's project directory. The brief is written "
+                             "INSIDE it and every path it names must be under it.")
+        sp.add_argument("--brief", default="-",
+                        help="brief file, or `-` for stdin (default).")
+
+    pf = sub.add_parser("preflight", help="check a brief; never dispatches")
+    common(pf)
+    pf.add_argument("--json", action="store_true")
+    pf.set_defaults(func=cmd_preflight)
+
+    rn = sub.add_parser("run", help="preflight, then dispatch in the background")
+    common(rn)
+    rn.add_argument("--title", help="opencode session title")
+    rn.add_argument("-m", "--model", dest="model",
+                    help="flash | mimo | pro | a full provider/vendor/model id")
+    rn.add_argument("--auto", action="store_true")
+    rn.add_argument("-c", "--continue", dest="continue_session",
+                    action="store_true", help="continue the last session")
+    rn.add_argument("--file", action="append", default=[],
+                    help="extra attachment; repeatable. The brief is attached "
+                         "automatically.")
+    rn.add_argument("--binary", default=os.environ.get("OPENCODE_BIN", "opencode"),
+                    help=argparse.SUPPRESS)
+    rn.set_defaults(func=cmd_run)
+    return p
+
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

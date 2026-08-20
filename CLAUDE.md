@@ -132,6 +132,7 @@ is preserved verbatim in `docs/LAYOUT.md` (not auto-loaded, and stale by design)
 | `scripts/mail-actions/` | `mailbox` | email-automation layer over the self-hosted inbox (**separate from activity telemetry**) |
 | `scripts/repo-cos/` | `repo-cos` | weekly repo "chief-of-staff" proposal digest + reply-driven exclusions |
 | `nix/i3/`, `nix/graphical.nix`, `scripts/bar-status-poll` | `bar` | i3 + i3status-rust bar, count blocks, dunst toasts |
+| `scripts/opencode/` | `opencode` | dispatch a task to the headless opencode agent (`opencode-dispatch`), + its config/agents/guard plugin |
 
 Repo-level facts that are NOT in any skill — they live here on purpose:
 - 🔴 **A NEW file must be `git add`ed or the flake silently omits it from the deploy.** Applies to every managed path: a new skill, a new `reference/*.md` inside one, an extension file, a hook or a test. The switch succeeds and the file simply is not there.

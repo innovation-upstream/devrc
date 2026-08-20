@@ -144,6 +144,15 @@ REGISTRY = [
         "outcomes": [], "impact_outcomes": [], "impact_label": "",
     },
     {
+        "id": "opencode-dispatch",
+        "label": "opencode-dispatch — preflighted, detached opencode dispatch",
+        "via": "tool", "tool": "opencode-dispatch", "opt_in": True,
+        "outcomes": ["dispatched", "preflight-ok", "preflight-blocked", "error"],
+        "impact_outcomes": ["preflight-blocked"],
+        "impact_label": ("silent no-op dispatches prevented (brief named a path "
+                         "outside --dir; `opencode run` auto-rejects and exits 0)"),
+    },
+    {
         "id": "browser-bridge",
         "label": "browser — drive live Brave",
         "via": "source", "source": "browser-bridge", "kind": "cmd",

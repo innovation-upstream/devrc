@@ -138,56 +138,32 @@ def generated_agents_md() -> str:
     )
 
 
-def strip_jsonc(text: str) -> str:
-    """Strip `//` and `/* */` comments, leaving string literals untouched.
-
-    Hand-rolled rather than regex because opencode.jsonc contains `https://`
-    inside a string — a naive `//`-to-end-of-line regex would eat the rest of
-    the `$schema` line and the file would not parse. Validated by
-    test_strip_jsonc_preserves_urls_in_strings below.
-    """
-    out = []
-    i, n = 0, len(text)
-    in_str = False
-    while i < n:
-        c = text[i]
-        if in_str:
-            out.append(c)
-            if c == "\\" and i + 1 < n:
-                out.append(text[i + 1])
-                i += 2
-                continue
-            if c == '"':
-                in_str = False
-            i += 1
-            continue
-        if c == '"':
-            in_str = True
-            out.append(c)
-            i += 1
-            continue
-        if c == "/" and i + 1 < n and text[i + 1] == "/":
-            while i < n and text[i] != "\n":
-                i += 1
-            continue
-        if c == "/" and i + 1 < n and text[i + 1] == "*":
-            i += 2
-            while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
-                i += 1
-            i += 2
-            continue
-        out.append(c)
-        i += 1
-    return "".join(out)
+# 🔴 `strip_jsonc`, `load_config`, `wildcard_match` and the resolution loop
+# USED to be defined in this file. They now live in
+# `scripts/opencode/lib/oc_permissions.py` and are imported, because
+# `opencode-dispatch preflight` needs the same predicate to answer "would this
+# command in the brief resolve to `ask`, i.e. be AUTO-REJECTED mid-run?" — and
+# RULES.md 🔴 "One rule, one place" says a second copy of a resolver is a
+# predicate that will disagree eventually and silently. The names below are
+# re-exported unchanged so every assertion in this file still reads the same.
+sys.path.insert(0, str(OC_DIR / "lib"))
+from oc_permissions import (  # noqa: E402
+    base_bash_rules,
+    load_config as _load_config,
+    resolve as _resolve_over,
+    strip_jsonc,
+    wildcard_match,
+)
 
 
 def load_config() -> dict:
     """Parse scripts/opencode/opencode.jsonc, PRESERVING key order.
 
-    json.loads yields a dict, and dicts preserve insertion order — which is what
-    makes the resolver model below possible at all.
+    Thin wrapper over the shared loader so this file's ~30 call sites keep their
+    zero-argument spelling. Deliberately UNCACHED and MUTABLE — see the loader's
+    docstring for the caller that mutates the result in place.
     """
-    return json.loads(strip_jsonc((OC_DIR / "opencode.jsonc").read_text()))
+    return _load_config(OC_DIR / "opencode.jsonc")
 
 
 def parse_frontmatter(text: str):
@@ -225,26 +201,12 @@ def agent_permission(name: str) -> dict:
 #
 # Faithful port of opencode 1.18.18's `Wildcard.match` + the `findLast` resolver.
 # See the module docstring for the verbatim source it was ported from and for
-# how it was validated against the real engine.
+# how it was validated against the real engine. THE PORT ITSELF now lives in
+# scripts/opencode/lib/oc_permissions.py (imported above) so that
+# `opencode-dispatch preflight` resolves commands through the SAME code these
+# ~500 assertions pin. Everything below composes on top of it and is genuinely
+# test-only: the agent-frontmatter ruleset and the deletion mutants.
 # --------------------------------------------------------------------------- #
-_GLOB_ESCAPE = re.compile(r"[.+^${}()|\[\]\\]")
-
-
-@functools.lru_cache(maxsize=None)
-def wildcard_match(text: str, pattern: str) -> bool:
-    # Memoised: pure function of (text, pattern), and the ledgers below resolve
-    # ~50 rules x ~115 commands x ~65 patterns per pass, once per detector
-    # control. Without this the file took 46 s; with it, ~5 s.
-    t = text.replace("\\", "/")
-    p = _GLOB_ESCAPE.sub(lambda m: "\\" + m.group(0), pattern.replace("\\", "/"))
-    p = p.replace("*", ".*").replace("?", ".")
-    # opencode special case: a pattern ending in " *" also matches without it,
-    # so `rg *` matches a bare `rg`.
-    if p.endswith(" .*"):
-        p = p[:-3] + "( .*)?"
-    return re.match("^" + p + "$", t, re.S) is not None
-
-
 @functools.lru_cache(maxsize=None)
 def bash_ruleset(agent: str | None = None) -> tuple:
     """The ORDERED (pattern, action) list opencode resolves a bash command against.
@@ -263,8 +225,9 @@ def bash_ruleset(agent: str | None = None) -> tuple:
         `add_trailing_git_allow`). `load_config()` is deliberately left UNCACHED
         for exactly that caller.
     """
-    rules = [("*", "allow")]  # built-in catch-all
-    rules += list(load_config()["permission"]["bash"].items())
+    # The built-in catch-all + the global config block come from the shared
+    # library, so preflight and this suite cannot drift on the base ruleset.
+    rules = list(base_bash_rules(load_config()))
     if agent:
         perm = agent_permission(agent).get("bash")
         if isinstance(perm, str):
@@ -274,21 +237,15 @@ def bash_ruleset(agent: str | None = None) -> tuple:
     return tuple(rules)
 
 
-def _resolve_over(rules, command: str) -> str:
-    """LAST match wins, over an EXPLICIT ordered ruleset.
-
-    🔴 THE ONLY implementation of the resolution loop in this file. It briefly
-    had two — `_ask_ledger` carried a private copy so it could run against a
-    synthetic ruleset — and two copies with nothing pinning them together is a
-    predicate that will disagree eventually and silently. They agreed on all 51
-    ask rules at the time, which is exactly how a duplicate survives review.
-    Everything that resolves a command goes through here.
-    """
-    action = "ask"  # opencode's fallback when nothing matches
-    for pattern, act in rules:
-        if wildcard_match(command, pattern):
-            action = act
-    return action
+# `_resolve_over` is `oc_permissions.resolve`, imported above.
+#
+# 🔴 THE ONLY implementation of the resolution loop in this repo. It briefly had
+# two inside THIS FILE — `_ask_ledger` carried a private copy so it could run
+# against a synthetic ruleset — and two copies with nothing pinning them
+# together is a predicate that will disagree eventually and silently. They
+# agreed on all 51 ask rules at the time, which is exactly how a duplicate
+# survives review. When `opencode-dispatch preflight` needed the same predicate,
+# the loop moved to the library rather than being copied a third time.
 
 
 def _rules_without(rules, drop: str):
