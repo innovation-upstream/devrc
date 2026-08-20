@@ -954,21 +954,27 @@ TARGET_FLOORS=(
   #
   # 2026-08-20, the gate-harness DX fix (the hook-tests directory that reported
   # "no tests ran" over an INTERNALERROR, and the missing-tool FATAL that read
-  # as a broken gate): 5947 -> 5962 collected, +15 across
-  # test_hook_tests_dir_collects.py and test_devshell_satisfies_required_tools.py.
+  # as a broken gate), re-measured after a rebase onto fc1f581:
+  # 6201 -> 6219 collected, +18 across test_hook_tests_dir_collects.py and
+  # test_devshell_satisfies_required_tools.py.
   #
-  # 🔴 The previous entry documented 5814, not 5947. The 5814 -> 5947 difference
-  # (+133) is NOT this contribution — it landed on main between that entry and
-  # a29b97b without the floor being re-pinned, so the pin had drifted 183 below
-  # the real count and its sensitivity had decayed accordingly. Both counts were
-  # MEASURED here rather than inferred: `--collect-only` on scripts/tests at a
-  # pristine a29b97b worktree gave 5947, and the gate's own line at HEAD gave
-  #   PASS  scripts/tests  (collected=5962 passed=5962 skipped=0 floor=5764)
+  # BOTH numbers MEASURED with `--collect-only` on scripts/tests, one in a clean
+  # detached worktree of origin/main and one on the rebased branch — not
+  # inferred, and not carried over from the earlier round of this same entry
+  # (which read 5947 -> 5962 against a29b97b and is now superseded: main moved
+  # four times while this branch was in review).
   #
-  #   _suggested_floor 5962 = 5962 - min(50, max(1, 298)) = 5962 - 50 = 5912
+  # 🔴 The pin this REPLACES was 5912, against a real count of 6201 on main
+  # alone — 289 of drift, none of it from here. The same thing happened to the
+  # entry before it (5764 pinned against 5947). Tests keep landing without the
+  # floor being re-pinned, so this table's sensitivity decays continuously
+  # between the contributions that happen to notice. Re-measure before trusting
+  # a number here; do not assume the last entry describes the current tree.
+  #
+  #   _suggested_floor 6219 = 6219 - min(50, max(1, 310)) = 6219 - 50 = 6169
   #
   # ⚠ ZERO new skips from any contribution.
-  "scripts/tests|5912"
+  "scripts/tests|6169"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
