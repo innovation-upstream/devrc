@@ -80,17 +80,28 @@ die() { echo "browser-agent: $*" >&2; exit 2; }
 command -v "$OPENCODE_BIN" >/dev/null 2>&1 || die "opencode not found on PATH ('$OPENCODE_BIN') — install it or set BROWSER_AGENT_OPENCODE"
 
 # --- isolated opencode CONFIG dir (token containment) ------------------------ #
-# devrc now deploys a ~37 KB global ~/.config/opencode/AGENTS.md (PRINCIPLES +
+# devrc now deploys a ~43 KB global ~/.config/opencode/AGENTS.md (PRINCIPLES +
 # RULES + addendum). MEASURED on 1.18.4: that file IS injected into a run whose
 # --dir is an unrelated scratch project — a tool-less probe in a scratch dir
 # quoted a passphrase planted at the END of the file, so it arrives in FULL.
 #
 # Cost here: 8,343 input tokens vs 631 with an isolated config dir = ~7.7k
-# EXTRA PER REQUEST. `cache.read`/`cache.write` were 0 in every run, so it is
-# not amortised — it is multiplied by the agent-loop step count ($STEPS,
-# default 12), i.e. up to ~90k tokens per browser-agent run. For an agent whose
-# every host tool is DENIED (no shell, no file access), 100% of that is rules it
-# can neither use nor act on.
+# EXTRA PER REQUEST (re-measured 2026-08-19 on 1.18.18: 8,329 — the file grew,
+# the number did not really move). It is multiplied by the agent-loop step count
+# ($STEPS, default 12), i.e. up to ~100k tokens per browser-agent run. For an
+# agent whose every host tool is DENIED (no shell, no file access), 100% of that
+# is rules it can neither use nor act on.
+#
+# 🔴 SCOPE OF THE "not amortised" CLAIM. `cache.read`/`cache.write` were 0 in
+# every run measured HERE, and that is a fact about THIS harness's shape, not
+# about the engine: browser-agent runs are single-shot against a fresh scratch
+# project, so the prefix is cold every time. It does NOT generalise — across
+# 2,218 billed requests of ordinary opencode use on this box, only 60 (2.7%)
+# were cold and cache reads bill ~50x under input tokens, which makes the same
+# file ~7% of spend there rather than a per-request tax. So this dir is the
+# right call for browser-agent and the WRONG one as a general fix (it also drops
+# plugin/guard.js). Working: scripts/opencode/README.md → "Size, and what it
+# actually costs".
 #
 # Neither mitigation that looks obvious works: OPENCODE_DISABLE_CLAUDE_CODE=1
 # had ZERO effect (byte-identical token count), and a project-local AGENTS.md

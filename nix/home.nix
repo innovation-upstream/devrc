@@ -1162,9 +1162,22 @@ in
   # wins), so this is the file opencode really reads.
   #
   # Concatenating at switch time means it can never drift from the sources
-  # Claude Code reads. Measured result: 38,363 B / 37.5 KB ≈ 8.9k tokens (at the
-  # 4.31 B/token measured on this exact content) — safe. (For scale: a 331 KB
-  # AGENTS.md causes a permanent compaction loop.)
+  # Claude Code reads.
+  #
+  # COST — re-measured 2026-08-19 on engine 1.18.18 / openrouter/xiaomi/mimo-v2.5.
+  # The file is 43,676 B = 8,329 input tokens (A/B pair: one trivial prompt in an
+  # empty scratch project, under two config dirs identical in every byte except
+  # this file — 22,019 input tok with it, 13,690 without).
+  # 🔴 That is NOT a per-request tax, and the note that used to stand here
+  # implied it was. The file sits at the HEAD of the prompt prefix, which is
+  # exactly what a provider prefix-cache retains: of the 2,218 billed requests
+  # this box logged on 1.18.16+1.18.18, only 60 (2.7%) were cold, and a cached
+  # token bills ~50x under an input token. Attributed cost of this file over that
+  # window: ~$0.12 of $1.77 total spend (~7%). A COLD first request does pay the
+  # full 8,329 — that, not the steady state, is what browser-agent's isolated
+  # config dir sheds (every one of its runs is single-shot).
+  # Full working: scripts/opencode/README.md → "Size, and what it actually costs".
+  # (For scale: a 331 KB AGENTS.md causes a permanent compaction loop.)
   # scripts/tests/test_opencode_config.py pins the content and a 100 KB ceiling.
   home.file.".config/opencode/AGENTS.md".text =
     builtins.readFile ../claude/PRINCIPLES.md
