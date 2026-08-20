@@ -91,6 +91,31 @@ if [[ ${staged_scopes} -eq 0 ]]; then
   exit 5
 fi
 
+# 🔴 DATE THE COPY, IN THE COPY. The server cannot otherwise know how old the
+# tree it serves is, and it renders "ALL N entries ... none omitted" over it —
+# a completeness claim that reads identically whether the content was copied
+# this minute or four days ago. MEASURED 2026-08-20: the public endpoint served
+# `ALL 5 entries in devrc/` against a source holding 9, with nothing in the
+# payload able to say so. `server.snapshot_freshness` reads this file, and
+# reports its ABSENCE as `seeded=UNSTAMPED` rather than omitting the line, so an
+# unstamped store is loud rather than indistinguishable from a current one.
+#
+# 🔴 WRITTEN IN THE STAGING HALF, DELIBERATELY — not next to the push. Two
+# reasons, and the first is a bug this was moved to fix:
+#   * `--push` is optional and returns early, so a stamp written down there is
+#     absent from every stage-only run — including the hermetic tests, which is
+#     how the omission would have gone unnoticed;
+#   * it dates the CONTENT SNAPSHOT, which is the honest thing for it to date.
+#     The tar is built from the stage, so stamp and content are consistent even
+#     if the push happens later; stamping at transfer time would claim currency
+#     the bytes do not have.
+#
+# Into the STAGE, never the source — the source is read-only here (see header).
+printf '%s staged_entries=%s host=%s\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$staged_entries" "${HOSTNAME:-unknown}" \
+  > "$STAGE/.seed-stamp"
+echo "seed: STAMPED $STAGE/.seed-stamp"
+
 if [[ -z "$PUSH" ]]; then
   echo "seed: PUSH skipped (no --push given). This run proves nothing about any pod."
   exit 0
@@ -117,8 +142,14 @@ echo "seed: pushing $STAGE -> $ns/$pod:$DEST"
 # — after the CONTENT has already landed. That is the worst possible shape: a
 # non-zero exit on a push that mostly worked, which reads as "nothing was
 # seeded" and invites a retry that changes nothing.
+# 🔴 THE STAMP MUST BE NAMED EXPLICITLY. This member list is built from
+# `"$STAGE"/*/` — DIRECTORIES ONLY — so a top-level file is silently left out
+# of the archive, and the push would land content with no date on it while
+# reporting OK. It is not `*.md`, so it does not disturb the entry counts the
+# mismatch guard below compares.
 members=()
 for d in "$STAGE"/*/; do members+=("$(basename "$d")"); done
+members+=(".seed-stamp")
 tar -C "$STAGE" -cf - -- "${members[@]}" \
   | kubectl -n "$ns" exec -i "$pod" -- \
       tar -C "$DEST" --no-same-owner --no-same-permissions -xf -

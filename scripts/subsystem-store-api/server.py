@@ -963,6 +963,132 @@ def scope_revision(store_root: str | Path, scope: str) -> str:
     return "unknown"
 
 
+SEED_STAMP_NAME = ".seed-stamp"
+
+# How deep to walk when dating the served copy. Deliberately the SAME depth
+# `seed.sh` uses for its own `remote_entries` count (`find -maxdepth 2 -name
+# '*.md'`), so the two numbers are answers to the same question and a
+# disagreement between them means something real rather than a units mismatch.
+_FRESHNESS_MAXDEPTH = 2
+
+
+def snapshot_freshness(store_root: str | Path) -> tuple[str, str]:
+    """`(header_value, prose_line)` dating the copy this process is serving.
+
+    🔴 WHY THIS EXISTS, AND IT IS NOT A NICETY. This server does not serve the
+    authoritative store — it serves a COPY pushed into a PVC by `seed.sh`, and
+    NOTHING syncs that copy continuously (no CronJob, no timer; measured
+    2026-08-20). Yet every report it renders opens with a line of the form
+    "ALL N entries in `<scope>/`, none omitted" — a COMPLETENESS assertion, and
+    a truthful one *about the bytes on this disk*. Off-mesh there is no way to
+    tell that disk from the source.
+
+    That combination was measured live on 2026-08-20, four days after cutover:
+    the public endpoint answered 200 with `ALL 5 entries in devrc/, none
+    omitted` while the source held **9**, and one served entry was a 40-day-old
+    version of a file edited that morning. Nothing in the payload, the headers
+    or the status was wrong; nothing in it was current either. `claude/RULES.md`
+    → "a reassuring zero from a check that could not see anything".
+
+    So every response now dates itself. Two INDEPENDENT facts, because each
+    covers the other's blind spot:
+
+      * `seeded` — when `seed.sh` last pushed, read from a stamp file it writes.
+        Answers "how old is this COPY", which is the question a caller has.
+      * `newest` — the newest entry mtime on this disk, derived from the files
+        themselves and owing nothing to the stamp. Answers "how old is this
+        CONTENT", and survives a store seeded by any other means.
+
+    A quiet week makes `newest` old while the copy is perfectly current; a
+    forgotten re-seed makes `seeded` old while `newest` merely lags. Neither
+    alone is the answer, which is why both are printed and neither is derived
+    from the other.
+
+    🔴 EVERY FAILURE IS ITS OWN NAMED STATE — never a silent omission and never
+    a fabricated date, for the same reason `scope_revision` returns "unknown"
+    rather than inventing a sha. A missing stamp says `seeded=UNSTAMPED`, an
+    unreadable one says `seeded=UNREADABLE`, and a walk that hit an error says
+    `newest=UNREADABLE` — each distinguishable from the genuinely empty store,
+    which says `newest=NONE entry-files=0`. An absent block would read as "this
+    is the source"; that is the exact confusion the block exists to remove.
+    """
+    root = Path(store_root)
+
+    seeded = "UNSTAMPED"
+    try:
+        text = (root / SEED_STAMP_NAME).read_text(encoding="utf-8").strip()
+        seeded = text.splitlines()[0].strip() if text else "UNREADABLE"
+    except FileNotFoundError:
+        seeded = "UNSTAMPED"
+    except OSError:
+        seeded = "UNREADABLE"
+
+    newest: float | None = None
+    count = 0
+    walk_failed = False
+
+    def _walk_error(_exc: OSError) -> None:
+        nonlocal walk_failed
+        walk_failed = True
+
+    # 🔴 `os.walk(onerror=...)`, NOT `Path.rglob`, AND THAT IS THE WHOLE POINT.
+    # `rglob` swallows a permission error and yields nothing, so an UNREADABLE
+    # scope is indistinguishable from an EMPTY one — it would report
+    # `newest=NONE entry-files=0`, a confident zero from a walk that saw
+    # nothing. That is the precise failure this function was written to stop it
+    # committing itself, and the first draft committed it: caught by
+    # `test_an_UNREADABLE_scope_is_UNREADABLE_not_an_empty_store`, which passed
+    # only after this rewrite. `os.walk` is the one that can be TOLD to report.
+    try:
+        scopes = sorted(
+            p for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")
+        )
+    except OSError:
+        scopes, walk_failed = [], True
+
+    for scope in scopes:
+        for dirpath, _dirnames, filenames in os.walk(scope, onerror=_walk_error):
+            # Depth relative to the store root: `<scope>/<entry>.md` is 2.
+            depth = len(Path(dirpath).relative_to(root).parts) + 1
+            if depth > _FRESHNESS_MAXDEPTH:
+                continue
+            for name in filenames:
+                if not name.endswith(".md"):
+                    continue
+                try:
+                    mtime = os.stat(os.path.join(dirpath, name)).st_mtime
+                except OSError:
+                    walk_failed = True
+                    continue
+                count += 1
+                if newest is None or mtime > newest:
+                    newest = mtime
+
+    if walk_failed:
+        newest_text = "UNREADABLE"
+    elif newest is None:
+        newest_text = "NONE"
+    else:
+        newest_text = (
+            datetime.fromtimestamp(newest, timezone.utc)
+            .strftime("%Y-%m-%dT%H:%M:%SZ")
+        )
+
+    header = f"seeded={seeded} newest={newest_text} entry-files={count}"
+    prose = (
+        f"🔴 SNAPSHOT, NOT THE SOURCE — seeded={seeded} newest-entry={newest_text} "
+        f"entry-files={count}. This host serves a COPY of the authoritative store, "
+        f"pushed by `seed.sh`; nothing syncs it continuously, so it can be "
+        f"arbitrarily behind and it CANNOT KNOW BY HOW MUCH. The "
+        f"\"none omitted\" below is true of THIS DISK and says nothing about the "
+        f"source. Before trusting an absence — a missing entry, a missing badge, "
+        f"a zero — re-run the read against the local store, or re-seed. "
+        f"UNSTAMPED/UNREADABLE/NONE each mean the stated fact could not be "
+        f"established, never that it is fine."
+    )
+    return header, prose
+
+
 def _int_param(params: dict[str, list[str]], name: str) -> int | None:
     """Parse an optional int query param, or raise ValueError with the param name.
 
@@ -1538,7 +1664,16 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
         # and it needs the REAL malformed tuple, or that sentence would count 0
         # rejects on the one status that exists to report them.
         code = rc._exit_for(status, label, malformed)
-        body = (text + "\n").encode("utf-8")
+        # 🔴 THE STAMP GOES IN THE BODY, NOT ONLY THE HEADER, AND IT GOES FIRST.
+        # `_serve_report` is the one place every report — recall AND search —
+        # passes through, so stamping here cannot be forgotten by a future route
+        # (RULES.md: one rule, one place). A header alone would not do: the
+        # measured failure was an AGENT reading the rendered text and believing
+        # its "none omitted" line, and an agent that pipes the body never sees a
+        # header. It precedes the report because a caveat printed after the
+        # thing it qualifies has already been believed.
+        fresh_header, fresh_prose = snapshot_freshness(self.store_root)
+        body = (fresh_prose + "\n\n" + text + "\n").encode("utf-8")
         self._respond(
             200,
             body,
@@ -1546,6 +1681,7 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
                 "X-Store-Status": status,
                 "X-Store-Exit": str(code),
                 "X-Store-Revision": scope_revision(self.store_root, scope),
+                "X-Store-Snapshot": fresh_header,
             },
         )
         self._audit(path, 200, status)
