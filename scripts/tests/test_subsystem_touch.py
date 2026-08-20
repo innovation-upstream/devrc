@@ -816,6 +816,60 @@ class TestBelowThreshold:
         assert "NOTHING RESOLVED" in other
         assert "NOTHING CLEARED THE THRESHOLD" not in other
 
+    # --- the below-threshold block must stand on its own ------------------------
+    #
+    # 🔴 MEASURED 2026-08-19 on `--pr 1146,1149`. `tests` (5 paths) was proposed
+    # for CREATION while `tekton-builds` — 1 path, already on disk at 18 KB with
+    # 15 bullets — sat under "reported, not proposed" with no explanation. The
+    # "Entries WERE reached" tail lives under `if not report.writes_proposed:`,
+    # so ANY nomination suppresses it: exactly the run where a create-proposal
+    # sits beside an existing entry the reader should append to instead.
+    # Five separate runs read that heading as a dead end and re-found the entry
+    # by hand. Every one of them landed on the entry already named here.
+
+    def test_the_block_says_the_entry_EXISTS_even_when_something_is_nominated(
+        self, store: Path
+    ) -> None:
+        """🔴 The load-bearing case: a nomination present, so the tail is gone."""
+        rep = _report(
+            ["src/collector/only.py", "tests/a.py", "tests/b.py", "tests/c.py"], store
+        )
+        assert [m.entry.ref for m in rep.below_threshold] == ["collector"]
+        assert rep.nominations, "fixture must nominate, or this tests the wrong branch"
+        text = st.render_text(rep)
+        assert "NOTHING CLEARED THE THRESHOLD" not in text, (
+            "fixture assumption changed: the tail is supposed to be suppressed here"
+        )
+        assert "EXISTS" in text
+        assert "NOT a dead end" in text
+        assert "APPEND there" in text
+
+    def test_it_says_paths_cannot_carry_a_SUBJECT(self, store: Path) -> None:
+        """The reason the count is weak evidence, not just that it is weak. Work
+        ABOUT one subsystem routinely lands in files under another."""
+        text = st.render_text(_report(["src/collector/only.py", "docs/other.md"], store))
+        assert "Paths cannot carry a subject" in text
+        assert "weak evidence about the FILES, not about the SUBJECT" in text
+
+    def test_the_guidance_is_ABSENT_when_nothing_is_below_threshold(
+        self, store: Path
+    ) -> None:
+        """🔴 The negative control. Printed unconditionally it becomes wallpaper —
+        and would be actively wrong on a run that reached no entry at all."""
+        rep = _report(["docs/a.md", "notes/b.md"], store)
+        assert rep.below_threshold == (), "fixture must reach no entry"
+        text = st.render_text(rep)
+        assert "NOT a dead end" not in text
+        assert "Paths cannot carry a subject" not in text
+
+    def test_singular_and_plural_AGREE_with_the_count(self, store: Path) -> None:
+        """Prose that says "This entry EXISTS ... is one of them" is the kind of
+        near-miss this module complains about elsewhere."""
+        one = st.render_text(_report(["src/collector/only.py", "docs/other.md"], store))
+        assert "This entry EXISTS" in one
+        assert "subject is it," in one
+        assert "one of them" not in one
+
 
 # =============================================================================
 # 🔴 The store is never written.
