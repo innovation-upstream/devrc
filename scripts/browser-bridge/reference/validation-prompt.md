@@ -15,8 +15,9 @@ with a file-read tool.
 - **A Claude Code subagent, or you** — can `Read` the path. **CITE** it: use the
   template's citation line and keep the prompt short.
 - **`browser agent`** — **CANNOT.** Its model is given exactly one typed tool
-  with an 11-op browser-only surface (`text`/`html`/`eval`/`nav`/`screenshot`/
-  `frames`/`click`/`type`/`key`/`wake`/`whoami`), and the agent def denies
+  with a 13-op browser-only surface (`text`/`html`/`eval`/`nav`/`screenshot`/
+  `frames`/`click`/`type`/`key`/`wake`/`context`/`emulate`/`whoami`), and the
+  agent def denies
   `bash`/`read`/`edit`/`write`/`webfetch` — enforced at runtime by a fail-closed
   gate before the model is invoked
   (`~/workspace/devrc/scripts/browser-bridge/reference/agent.md`). A citation
