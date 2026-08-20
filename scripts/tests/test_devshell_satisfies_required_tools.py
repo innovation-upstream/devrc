@@ -87,6 +87,21 @@ def emitted_fatal(tmp_path_factory):
     (stub / "bash").symlink_to(bash)
     home = tmp_path_factory.mktemp("home")
 
+    # 🔴 This REPLACES PATH rather than prepending, so it is a registered entry
+    # in test_no_real_launchers.py's PINNED_PATH_CLOBBERS ledger -- the guard
+    # that stops a new clobber from silently dropping the launcher-stub dir.
+    # Replacing is correct here (a precondition about ABSENT binaries cannot be
+    # tested by prepending), and that ledger entry justifies it by ENUMERATING
+    # this directory's contents. The assertion below is what makes the
+    # enumeration a live invariant instead of a claim in a comment: if anything
+    # ever lands in this dir besides the bash symlink, this fails here rather
+    # than quietly widening what the subprocess can reach.
+    assert sorted(p.name for p in stub.iterdir()) == ["bash"], (
+        "the stub PATH dir must hold exactly one entry (a bash symlink); it "
+        f"holds {sorted(p.name for p in stub.iterdir())}. PINNED_PATH_CLOBBERS "
+        "justifies this clobber by enumerating those contents."
+    )
+
     proc = subprocess.run(
         [bash, str(RUN_TESTS), str(REPO_ROOT)],
         env={"PATH": str(stub), "HOME": str(home)},

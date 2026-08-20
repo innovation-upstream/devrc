@@ -931,6 +931,25 @@ PINNED_PATH_CLOBBERS = {
         "SC_FAIL_ALL/SC_FAIL_SHOW modes of the stub, with systemctl very much "
         "on PATH. No launcher in HAZARD_VOCABULARY is reachable "
         "from it: no systemctl, kubectl, gh, ssh, home-manager or pkill"),
+    "test_devshell_satisfies_required_tools.py": (
+        '{"PATH"' + ': str(stub)',
+        "the SECOND clobber justified by ENUMERATION rather than emptiness, and "
+        "the stronger case of the two: the replacement directory is created by "
+        "the fixture itself two lines above the clobber "
+        "(`tmp_path_factory.mktemp(\"only-bash\")`, then one "
+        "`(stub / \"bash\").symlink_to(bash)`), so its contents are not merely "
+        "audited but CONSTRUCTED — it holds exactly one entry, a bash symlink, "
+        "and nothing else can appear in a freshly-minted tmp dir. No "
+        "HAZARD_VOCABULARY name is reachable from it: no systemd-run, "
+        "systemctl, notify-send, rofi, yad, xdotool, i3-msg, openrgb, espanso, "
+        "home-manager or nixos-rebuild. 🔴 REPLACING is the point, not an "
+        "oversight: the fixture drives run-tests.sh's tool precondition, whose "
+        "whole job is to react to binaries being ABSENT, and no amount of "
+        "PREPENDING can make a binary unfindable — inside the nix sandbox every "
+        "REQUIRED_TOOLS binary IS present, so a prepending version would "
+        "measure the environment instead of the code. The fixture ASSERTS the "
+        "one-entry contents itself, so this justification is a live invariant "
+        "rather than prose that can rot"),
 }
 
 
