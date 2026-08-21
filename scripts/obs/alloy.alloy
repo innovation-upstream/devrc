@@ -216,26 +216,59 @@ loki.process "scrub" {
   //    b. `["']?` on BOTH sides of the separator — a quoted JSON key put a `"`
   //       between the keyword and the `:`, so `{"password": "hunter2xyz"}` did
   //       not match AT ALL and shipped byte-identical.
-  //    c. The value class EXCLUDES quote, comma, semicolon and `&` rather than
-  //       being `\S+`. `\S+` swallowed the rest of a JSON object and the rest of
-  //       a URL query string: a request log became
-  //       `?token=[REDACTED] HTTP/1.1` with `&user=&page=` eaten. Now only the
-  //       value dies:  `?token=[REDACTED]&user=bob&page=2`.
+  //    c. There are TWO rules, split by SHAPE — quoted value, then unquoted.
+  //       One rule cannot serve both, and trying cost a real leak:
   //
-  //    KNOWN AND ACCEPTED OVER-REDACTION: a keyword followed by a separator
-  //    redacts the next token whatever it is, so prose like `the token: is
-  //    missing` becomes `the token: [REDACTED] missing`. That direction is the
-  //    safe one — a missed secret is unrecoverable, a mangled sentence is not —
-  //    and it is asserted in the tests so it stays a decision, not a surprise.
+  //       A single rule with value class `[^\s"',;&]+` (chosen to stop eating
+  //       URL query tails) TRUNCATED any secret containing one of those
+  //       characters. Measured:
+  //         password=p@ss;w0rd          -> password=[REDACTED];w0rd
+  //         password=a&b&c              -> password=[REDACTED]&b&c
+  //         SECRET_KEY='django-...ab,cd'-> SECRET_KEY='[REDACTED],cd'
+  //       `&` and `;` are in most password alphabets — Django's own
+  //       get_random_secret_key() includes `&`. That is the same partial-leak
+  //       class as the AKIA prefix bug above, reintroduced while fixing a
+  //       COSMETIC over-redaction. Under-redaction is a security cost;
+  //       over-redaction is a usability cost. They are not interchangeable.
+  //
+  //       So: the quoted rule takes everything between the quotes (commas,
+  //       semicolons and spaces included), and the unquoted rule runs to
+  //       whitespace, excluding only quotes so it stays idempotent over the
+  //       output of the first.
+  //
+  //    KNOWN AND ACCEPTED OVER-REDACTION, both asserted in the tests so they
+  //    stay decisions rather than surprises:
+  //      * a keyword plus separator redacts the next token whatever it is, so
+  //        `the token: is missing` -> `the token: [REDACTED] missing`;
+  //      * a URL query tail is eaten: `?token=abc&user=bob&page=2` ->
+  //        `?token=[REDACTED]`. Deliberately reverted to this: preserving the
+  //        tail is what required the leaky value class above.
+
+  // 2a. Quoted value — JSON, YAML, config dumps, and any secret containing a
+  //     comma, semicolon or space.
   stage.replace {
-    expression = "(?i)(?:access[_-]?key|secret[_-]?key|api[_-]?key|secret|token|password|passwd|authorization)[\"']?\\s*[=:]\\s*[\"']?(?:bearer\\s+|basic\\s+)?([^\\s\"',;&]+)"
+    expression = "(?i)(?:access[_-]?key|secret[_-]?key|api[_-]?key|secret|token|password|passwd|authorization)[\"']?\\s*[=:]\\s*(?:bearer\\s+|basic\\s+)?['\"]([^'\"]*)['\"]"
+    replace    = "[REDACTED]"
+  }
+
+  // 2b. Unquoted value — runs to whitespace. Excluding quotes keeps it
+  //     idempotent over 2a's output instead of re-eating `", "user": ...`.
+  stage.replace {
+    expression = "(?i)(?:access[_-]?key|secret[_-]?key|api[_-]?key|secret|token|password|passwd|authorization)[\"']?\\s*[=:]\\s*(?:bearer\\s+|basic\\s+)?([^\\s\"']+)"
     replace    = "[REDACTED]"
   }
 
   // 3. A bare `Bearer <token>` / `Basic <creds>` with no `:` or `=` separator,
-  //    which rule 2 cannot match because it requires one.
+  //    which the rules above cannot match because they require one.
+  //
+  //    OVER-REDACTS ENGLISH PROSE containing "basic ". Quantified against this
+  //    host's real journal (100,609 lines over 7 days): 8 lines altered, 7 of
+  //    them `Reached target Basic System.` -> `Reached target Basic [REDACTED]`.
+  //    0.008%, and nothing under scripts/ parses `Reached target`. Kept because
+  //    `Authorization: Basic` with no separator is a real credential shape and
+  //    missing it is the costlier error. Asserted in the tests.
   stage.replace {
-    expression = "(?i)\\b(?:bearer|basic)\\s+([^\\s\"',;&]+)"
+    expression = "(?i)\\b(?:bearer|basic)\\s+([^\\s\"']+)"
     replace    = "[REDACTED]"
   }
 

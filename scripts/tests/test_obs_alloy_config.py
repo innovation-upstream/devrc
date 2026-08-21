@@ -148,6 +148,8 @@ def test_every_replace_stage_in_the_config_is_parsed():
     the new rule entirely unasserted. Counting the literal blocks makes an
     unparsed rule fail here instead of passing invisibly.
     """
+    import re
+
     text = CONFIG.read_text()
     # Count LIVE blocks only: this config discusses `stage.replace` in its
     # comments, and counting those too made the pin fail 3-vs-5 on its first
@@ -155,9 +157,15 @@ def test_every_replace_stage_in_the_config_is_parsed():
     live = "\n".join(
         ln for ln in text.splitlines() if not ln.strip().startswith("//")
     )
-    declared = live.count("stage.replace {")
+    # 🔴 A REGEX, not `live.count("stage.replace {")`. The literal missed
+    # `stage.replace{` (no space) — measured: alloy accepts it, the rule FIRES
+    # in a real run, and the pin still reported 3-of-3 PASS with that rule
+    # asserted by nothing. One absent space reopened the exact hole this closes.
+    # It was also brittle the other way: `stage.replace  {` failed with a
+    # message describing the opposite problem.
+    declared = len(re.findall(r"^\s*stage\.replace\s*\{", live, re.M))
     stages = _replace_stages(text)
-    assert declared >= 3, f"expected the redaction rules, found {declared} live blocks"
+    assert declared >= 4, f"expected the redaction rules, found {declared} live blocks"
     assert len(stages) == declared, (
         f"parsed {len(stages)} of {declared} live stage.replace blocks — "
         "an unparsed rule is asserted by nothing")
@@ -182,15 +190,26 @@ MEASURED_REDACTIONS = [
      "app: password: [REDACTED] done"),
     ("app: PASSWORD=hunter2xyz done",
      "app: PASSWORD=[REDACTED] done"),
-    ("req: Authorization: Bearer HEADERJWTaaa.bbb.ccc done",
+    # --- secrets containing delimiter characters -------------------------
+    # These were PARTIALLY redacted by a value class that stopped at , ; & " '
+    # — the same partial-leak class as the AKIA prefix bug. `&` and `;` are in
+    # most password alphabets; Django's get_random_secret_key() includes `&`.
+    ("app: password=p@ss;w0rd done",
+     "app: password=[REDACTED] done"),
+    ("app: password=a&b&c done",
+     "app: password=[REDACTED] done"),
+    ("app: password='sq;uote' done",
+     "app: password='[REDACTED]' done"),
+    ("env: SECRET_KEY='django-insecure-ab,cd' done",
+     "env: SECRET_KEY='[REDACTED]' done"),
+    ("app: password: \"two words here\" done",
+     "app: password: \"[REDACTED]\" done"),
+    # --- schemes ----------------------------------------------------------
+    ("req: Authorization: Bearer JWTaaa.bbb.ccc done",
      "req: Authorization: Bearer [REDACTED] done"),
-    ("req: authorization header bearer BAREJWTxxx.yyy.zzz done",
-     "req: authorization header bearer [REDACTED] done"),
-    # `Basic` as well as `Bearer`: handling only bearer leaked the base64.
     ("req: authorization: Basic dXNlcjpwdw== done",
      "req: authorization: Basic [REDACTED] done"),
-    # A quoted JSON key put a `"` between keyword and `:`, so this once did not
-    # match AT ALL and shipped byte-identical.
+    # --- structured shapes ------------------------------------------------
     ('app: {"password": "hunter2xyz", "user": "bob"}',
      'app: {"password": "[REDACTED]", "user": "bob"}'),
     ("mc: The Access Key Id you provided: access_key=KEYVALUE99",
@@ -199,21 +218,29 @@ MEASURED_REDACTIONS = [
      "mc: api_key: [REDACTED] rejected"),
     ("mc: error key AKIAIOSFODNN7EXAMPLE not found",
      "mc: error key [REDACTED-KEYID] not found"),
-    # The value class stops at `&`, so the rest of the query string survives.
-    # With `\\S+` this became `?token=[REDACTED] HTTP/1.1`, eating user and page.
-    ("nginx: GET /v1/items?token=abc123&user=bob&page=2 HTTP/1.1 200 1234",
-     "nginx: GET /v1/items?token=[REDACTED]&user=bob&page=2 HTTP/1.1 200 1234"),
-    # NEGATIVE CONTROLS — these must pass through untouched.
+    ("http: token=abc123; Path=/; HttpOnly",
+     "http: token=[REDACTED] Path=/; HttpOnly"),
+    # --- NEGATIVE CONTROLS: must pass through untouched --------------------
     ("app: ordinary line about a password policy with no value",
      "app: ordinary line about a password policy with no value"),
     ("systemd: Started foo.service key=value other=thing",
      "systemd: Started foo.service key=value other=thing"),
     ('app: {"password_reset": true, "user": "bob"}',
      'app: {"password_reset": true, "user": "bob"}'),
-    # ACCEPTED OVER-REDACTION, asserted so it stays a decision rather than a
-    # surprise: a keyword plus separator redacts the next token whatever it is.
+    # --- ACCEPTED OVER-REDACTION, asserted so it stays a decision ----------
+    # (a) keyword + separator redacts the next token whatever it is
     ("app: the token: is missing entirely",
      "app: the token: [REDACTED] missing entirely"),
+    # (b) a URL query tail is eaten. Preserving it is what required the leaky
+    #     value class, so this is the deliberate trade.
+    ("nginx: GET /v1/items?token=abc123&user=bob&page=2 HTTP/1.1 200",
+     "nginx: GET /v1/items?token=[REDACTED] HTTP/1.1 200"),
+    # (c) rule 3 eats the word after "basic" in English prose. 8 lines in
+    #     100,609 of this host's journal; 7 are `Reached target Basic System.`
+    ("systemd: Reached target Basic System.",
+     "systemd: Reached target Basic [REDACTED]"),
+    ("kernel: basic block device error",
+     "kernel: basic [REDACTED] device error"),
 ]
 
 
