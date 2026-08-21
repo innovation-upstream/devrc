@@ -577,7 +577,8 @@ ship_self_check() {
   # `source` returns 2 and execution continues with every function defined
   # after the error MISSING. Measured on a superseded lib: an error near the
   # END yields rc 0 and `ship: converged + verified` — a GREEN VERDICT OVER A
-  # BROKEN DEPLOY, with the diagnosis only on stderr after the verdict; an
+  # BROKEN DEPLOY, with the diagnosis on stderr only — on a terminal the
+  # operator sees bash's complaint FIRST and a green verdict overriding it; an
   # error near the TOP yields rc 6 ("could not identify this host"), returned
   # after the local host was already fast-forwarded and switched. That is the
   # same false-ledger-entry shape rc 20 exists to close, one code over.
