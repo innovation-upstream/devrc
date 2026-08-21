@@ -3669,6 +3669,7 @@ class TestSkillDocsArePinned:
         """Structural, not a phrase: recall is context for a doc already read,
         not a substitute for reading it.
 
+<<<<<<< HEAD
         ⚠ RED ON `main` FROM #643 UNTIL THIS COMMIT, and nothing caught it — the
         repo has no automated merge gate. #643 extended step 2's imperative from
         `**Read it fully.**` to `**Read it fully — but treat its "Open
@@ -3679,20 +3680,36 @@ class TestSkillDocsArePinned:
         step and let the rest of the sentence evolve. The sentence's WORDING is
         somebody else's pin (`_assert_rationale_pin` above); this one is about
         position. Asserted unique below so the index cannot silently move.
+        ⚠ THE RECONCILE STEP MOVED, DELIBERATELY, AND THIS TEST ASSERTED THE OLD
+        ORDER. It used to require `read_it < reconcile`. `resume-state.sh` now
+        compares the handoff against `origin/<default-branch>` and decides which
+        copy is authoritative, so it has to run BEFORE the doc is read —
+        otherwise the agent reads the working-tree copy first, which is the
+        stale-handoff defect (a clone served one 276 lines behind origin/trunk,
+        and the whole session was framed on it).
+
+        So the order is now reconcile < read_it, pinned here so the swap cannot
+        be silently undone. The invariant this test is named for is untouched:
+        recall still comes after the doc is read.
         """
         doc = RESUME_DOC.read_text(encoding="utf-8")
-        assert doc.count("**Read it fully") == 1, (
+        # Anchor on the imperative that OPENS the step, never the full sentence:
+        # this test asserts an ORDERING, so the rest of the sentence must be free
+        # to evolve (a reword inside the bold span turned `main` RED once).
+        # Uniqueness is asserted because `.index()` would otherwise return
+        # whichever occurrence came first and the ordering claim could invert.
+        assert doc.count("**Read the handoff in full") == 1, (
             "the ordering anchor is no longer unique — `.index()` would return "
             "whichever came first and the ordering claim could invert"
         )
-        read_it = doc.index("**Read it fully")
+        read_it = doc.index("**Read the handoff in full")
         # The INVOCATION, not the bare filename: `resume-state.sh` is also named
         # in step 1's prose, so `.index()` on the bare name finds a point BEFORE
         # the handoff is read and the ordering claim inverts.
         reconcile = doc.index("bash ~/workspace/devrc/scripts/resume-state.sh")
         step = doc.index("subsystem_recall.py")
         report = doc.index("**Report**")
-        assert read_it < reconcile < step < report
+        assert reconcile < read_it < step < report
 
     def test_the_pin_can_report_absence(self) -> None:
         """Negative control on the pin: a check against a doc that happens to
