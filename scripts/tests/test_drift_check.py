@@ -5094,6 +5094,101 @@ def test_a_non_regular_file_at_a_managed_path_is_blocking_not_self_healing(
     )
 
 
+_BLOCK_SUMMARY = (
+    "%d of them are NOT a regular file (BLOCKING above). Those do not "
+    "self-heal and are not reclaimed: ln cannot overwrite a directory, so the "
+    "next switch ABORTS on them. Look at each one by hand."
+)
+
+
+def _normalised(out):
+    """The output with the `[role] ` prefixes and line breaks folded away, so a
+    sentence the script wraps across three `psay` calls can be asserted as ONE
+    string. A guard on half a wrapped sentence is walkable by rewording the other
+    half; this is the whole-normalised-string form the rules ask for."""
+    lines = [re.sub(r"^\[[^\]]*\]\s*", "", ln).strip() for ln in out.splitlines()]
+    return re.sub(r"\s+", " ", " ".join(lines))
+
+
+def test_the_blocking_SUMMARY_names_its_count_and_is_absent_when_there_is_none(
+        fleet, tmp_path):
+    """🔴 THE OPERATOR-FACING SENTENCE, which nothing was reading.
+
+    The per-path `(BLOCKING: a <kind>…)` label is pinned next door. The
+    three-line SUMMARY under the drift block — the part that tells the operator
+    these do NOT clear on the next switch and a human has to look — was covered
+    by nothing: mutating its `[ "$W_BLOCK" -gt 0 ]` to `-gt 99999` left the
+    whole suite green (313 passed). That is the sentence a reader acts on, and
+    it is also the one that contradicts the `fix: home-manager switch …` advice
+    printed immediately below it — so with it suppressed the run says "this
+    clears on the next switch" about paths where the switch ABORTS.
+
+    Both directions in one test, because either alone is walkable:
+      * blocking=2  -> the sentence appears WITH ITS COMPUTED COUNT. Pinning the
+        count (not the prose) is what kills `-gt 99999`; the wording alone would
+        also be killed, but the count slot cannot be satisfied by static prose.
+      * blocking=0  -> the sentence is ABSENT. Without this half, `-gt -1`
+        (always true) survives and the run prints "0 of them are NOT a regular
+        file" on a host where none are — the reassuring-zero inversion.
+
+    The wrong-writer count is deliberately >0 in BOTH halves, so the enclosing
+    `[ "$W_WRONG" -gt 0 ]` block is entered either way and the difference
+    measured is `$W_BLOCK` alone.
+    """
+    fleet.catch_up()
+
+    # --- blocking=2 out of wrong-writer=3 -----------------------------------
+    gen = tmp_path / "gen1"
+    manifest = _mkmanifest(gen, fleet.home, linked=1, wrong_identical=1)
+    for rel in ("blockdir", "blockfifo"):
+        src = gen / "fakestore" / rel
+        src.write_text("store side\n")
+        (manifest / ".config" / "app" / rel).symlink_to(src)
+    t = Path(fleet.home) / ".config" / "app"
+    (t / "blockdir").mkdir(parents=True, exist_ok=True)
+    os.mkfifo(t / "blockfifo")
+
+    rc, out = bounded_check(fleet, "--no-remote", DRIFT_HOME_FILES=str(manifest))
+    assert rc == 19, out
+    assert _wrong(out)[1] == 3, out
+    assert _blocking(out) == 2, out
+    assert (_BLOCK_SUMMARY % 2) in _normalised(out), (
+        "the blocking SUMMARY is missing, or does not carry the computed count. "
+        "Without it the run's only remaining advice is 'this clears on the next "
+        "switch', which is false for these paths — the switch aborts on them.\n"
+        + out
+    )
+
+
+def test_the_blocking_summary_is_ABSENT_when_every_wrong_writer_is_a_file(
+        fleet, tmp_path):
+    """The other half of the test above, in its own fleet because the fixture
+    writes into a single $HOME and the two shapes cannot share one.
+
+    wrong-writer=2, blocking=0. The enclosing `[ "$W_WRONG" -gt 0 ]` block IS
+    entered — the drift lines are asserted present — so what this measures is
+    `$W_BLOCK` alone. It kills the always-true mutants (`-gt -1`, `-ge 0`) that
+    the count assertion next door cannot see: those print "0 of them are NOT a
+    regular file" and send the operator hunting for paths that are fine.
+    """
+    fleet.catch_up()
+    manifest = _mkmanifest(tmp_path / "gen1", fleet.home, linked=1,
+                           wrong_identical=2)
+    rc, out = bounded_check(fleet, "--no-remote", DRIFT_HOME_FILES=str(manifest))
+    assert rc == 19, out
+    assert _wrong(out)[1] == 2, out
+    assert _blocking(out) == 0, out
+    assert "managed path(s) are NOT the link nix intended" in out, (
+        "the drift block was not entered at all, so this test measures nothing "
+        "about the blocking summary inside it\n" + out
+    )
+    assert "NOT a regular file (BLOCKING above)" not in _normalised(out), (
+        "the blocking summary was printed on a scan with blocking=0 — the "
+        "operator is told to inspect by hand paths that the next switch does "
+        "in fact repair\n" + out
+    )
+
+
 def test_a_fifo_at_a_managed_path_does_not_hang_the_scan(fleet, tmp_path):
     """🔴 A TIMER THAT NEVER RETURNS. `cmp -s` on a FIFO blocks in open(2)
     forever, and this walk runs 4x/day from a systemd timer AND inside the
@@ -5270,6 +5365,35 @@ def test_the_wrong_writer_listing_cap_says_how_many_it_withheld(fleet, tmp_path)
     assert "... and 3 more" in out, (
         "the listing was truncated SILENTLY — a reader cannot tell 2 findings "
         "from 5\n" + out
+    )
+
+
+def test_a_wrong_writer_listing_EXACTLY_at_the_cap_claims_no_withheld_lines(
+        fleet, tmp_path):
+    """🔴 THE BOUNDARY THE TEST ABOVE STRUCTURALLY CANNOT SEE — same shape as
+    test_a_listing_EXACTLY_at_the_cap_says_nothing_about_withheld_lines in
+    test_reclaim_managed_paths.py, for this script's copy of the same predicate.
+
+    5-against-2 is comfortably over the cap, so `-gt "$maxd"` and `-ge "$maxd"`
+    agree there and the `-ge` mutant survives. At `W_WRONG == maxd` they
+    diverge and `-ge` prints `... and 0 more` — a claim that something was
+    withheld, on a listing that printed everything. The cap line exists so a
+    truncation is never silent; a false truncation notice is that same defect
+    inverted, and it is the one a reader cannot check.
+    """
+    fleet.catch_up()
+    manifest = _mkmanifest(tmp_path, fleet.home, linked=1, wrong_identical=2)
+    rc, out = _parity(fleet, "--no-remote", DRIFT_HOME_FILES=str(manifest),
+                      DRIFT_DANGLING_MAX="2")
+    assert rc == 19, out
+    assert _wrong(out)[1] == 2, out
+    listed = [ln for ln in out.splitlines() if "     x " in ln]
+    assert len(listed) == 2, (
+        "a 2-finding listing at DRIFT_DANGLING_MAX=2 printed %d line(s); the "
+        "fixture is no longer sitting ON the boundary\n%s" % (len(listed), out)
+    )
+    assert "... and" not in out, (
+        "a listing that withheld NOTHING still claims it did:\n" + out
     )
 
 

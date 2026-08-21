@@ -1085,6 +1085,43 @@ def test_the_listing_is_capped_but_the_repair_is_not(tmp_path):
         assert not (home / (".config/app/same-%d.md" % i)).exists(), out
 
 
+def test_a_listing_EXACTLY_at_the_cap_says_nothing_about_withheld_lines(tmp_path):
+    """🔴 THE BOUNDARY THE TEST ABOVE STRUCTURALLY CANNOT SEE. It measures 7
+    against a cap of 3 — comfortably over — so `[ "$n" -gt "$LIST_MAX" ]` and
+    `-ge` behave identically there and the `-ge` mutant SURVIVED a full suite.
+
+    At `n == LIST_MAX` they diverge, and `-ge` is wrong in the direction that
+    lies to the reader: `head -n 3` has already printed all three findings, and
+    the script then adds `... and 0 more`, which asserts there is something it
+    withheld when there is not. The cap line exists precisely so a truncation is
+    never silent; a false one is the same defect inverted.
+
+    Two files against a cap of two, so `head` prints exactly the cap and the
+    remainder is exactly zero. `-gt` is the correct operator and stays; this is
+    the case that makes it observable.
+    """
+    home, manifest = build(tmp_path, identical=2)
+    env = dict(os.environ)
+    env["RECLAIM_LIST_MAX"] = "2"
+    p = subprocess.run(
+        ["bash", str(RECLAIM), "--home", str(home), str(manifest), "--apply"],
+        capture_output=True, text=True, env=env, timeout=30)
+    out = p.stdout + p.stderr
+    assert p.returncode == 0, out
+    assert counts(out) == (2, 2, 0, 0), out
+
+    listed = [ln for ln in out.splitlines() if ln.strip().startswith("x ")]
+    assert len(listed) == 2, (
+        "a 2-file finding at RECLAIM_LIST_MAX=2 printed %d line(s); the fixture "
+        "is no longer sitting ON the boundary and this test measures nothing\n%s"
+        % (len(listed), out)
+    )
+    assert "... and" not in out, (
+        "a listing that withheld NOTHING still claims it did:\n" + out
+    )
+    assert "reclaimed 2 of 2" in out, out
+
+
 def test_the_unknown_kind_fallback_cannot_impersonate_a_real_kind():
     """🔴 THE ONE LABEL NO FIXTURE CAN REACH, GUARDED STRUCTURALLY BECAUSE OF IT.
 

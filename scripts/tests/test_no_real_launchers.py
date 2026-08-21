@@ -988,7 +988,9 @@ PINNED_PATH_CLOBBERS = {
         'env["PATH"]' + ' = str(fleet.bin) + os.pathsep + str(nocmp)',
         "the FOURTH enumeration case — same condition (`cmp` absent), same "
         "REPLACING-is-the-point argument, same constructed-and-asserted "
-        "directory (`_nocmp_bin` in that file, sixteen names in `_NOCMP_TOOLS`, "
+        "directory (`_nocmp_bin` in that file, fifteen names in `_NOCMP_TOOLS` "
+        "(bash, git, sed, grep, head, tr, sort, cut, wc, awk, readlink, "
+        "dirname, mkdir, cat, timeout), "
         "contents asserted a subset and `cmp` asserted unresolvable). Two "
         "differences from its sibling, both in the SAFER direction: (1) the "
         "fleet fixture's own stub bin is PREPENDED, so every stubbed launcher "
@@ -1028,6 +1030,71 @@ def test_every_path_clobbering_site_is_pinned():
         assert any(needle in line for _ln, line in by_file[name]), (
             f"{name} still clobbers PATH but not in the pinned shape: "
             f"{by_file[name]}")
+
+
+_NUMBER_WORDS = {
+    1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six",
+    7: "seven", 8: "eight", 9: "nine", 10: "ten", 11: "eleven", 12: "twelve",
+    13: "thirteen", 14: "fourteen", 15: "fifteen", 16: "sixteen",
+    17: "seventeen", 18: "eighteen", 19: "nineteen", 20: "twenty",
+}
+
+
+def test_every_nocmp_justification_names_the_list_it_describes():
+    """🔴 A JUSTIFICATION IS A CLAIM, AND THIS ONE WAS ALREADY FALSE.
+
+    Two entries in PINNED_PATH_CLOBBERS describe their file's `_NOCMP_TOOLS`
+    tuple in prose — the count and, for one of them, the names. An adversarial
+    read found `test_drift_check.py`'s saying "sixteen names" over a tuple of
+    fifteen: written correctly at some size, stale at the next edit, and nothing
+    could see it because the reviewer of the tuple never reads this dict.
+
+    Restating the fix in prose would buy one correct reading and then rot the
+    same way, so the claim is DERIVED here instead: both halves are parsed out
+    of the justification and compared against the tuple actually declared in
+    that file. Adding a tool to either `_NOCMP_TOOLS` now fails HERE, naming the
+    sentence to update.
+
+    The names are compared as an ORDERED tuple, not a set: the prose reads as a
+    transcription of the source, and a reordered transcription is a reader
+    hazard even when the membership matches.
+    """
+    checked = 0
+    for name, (_needle, why) in PINNED_PATH_CLOBBERS.items():
+        if "_NOCMP_TOOLS" not in why:
+            continue
+        checked += 1
+        src = (SCRIPTS / "tests" / name).read_text()
+        dm = re.search(r"_NOCMP_TOOLS\s*=\s*\((.*?)\)\s*\n", src, re.S)
+        assert dm, "%s no longer declares a _NOCMP_TOOLS tuple, but its "\
+                   "justification still describes one" % name
+        actual = tuple(re.findall(r'"([^"]*)"', dm.group(1)))
+        assert actual, "%s's _NOCMP_TOOLS parsed empty — the reader is broken, "\
+                       "and an empty tuple would make every check below "\
+                       "vacuous" % name
+
+        wm = re.search(r"(\w+) names in `_NOCMP_TOOLS`", why)
+        assert wm, ("%s's justification mentions _NOCMP_TOOLS but not in the "
+                    "'<count> names in `_NOCMP_TOOLS`' shape this pin reads. "
+                    "Keep the shape or drop the claim." % name)
+        assert wm.group(1) == _NUMBER_WORDS[len(actual)], (
+            "%s's justification says %r names in `_NOCMP_TOOLS`; the tuple holds "
+            "%d (%s). This is the exact defect the entry was written to prevent "
+            "elsewhere: a count in prose that nobody re-reads."
+            % (name, wm.group(1), len(actual), ", ".join(actual)))
+
+        nm = re.search(r"names in `_NOCMP_TOOLS`\s*\(([^)]*)\)", why)
+        if nm:
+            claimed = tuple(x.strip() for x in nm.group(1).split(",") if x.strip())
+            assert claimed == actual, (
+                "%s's justification lists %s; the tuple is %s"
+                % (name, list(claimed), list(actual)))
+
+    assert checked == 2, (
+        "expected exactly two justifications describing a `_NOCMP_TOOLS` tuple "
+        "(test_reclaim_managed_paths.py and test_drift_check.py); found %d. A "
+        "third one must be covered here, and a vanished one unpinned — "
+        "otherwise this test silently stops checking anything." % checked)
 
 
 # 🔴 Every one of these was MISSED by the line-based scan this replaced, and each
