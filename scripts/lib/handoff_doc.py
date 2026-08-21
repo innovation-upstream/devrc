@@ -968,6 +968,15 @@ def not_pushed_report(repo: Path, remote: str, branch: str | None) -> str:
     return f"{NOT_PUSHED_HEADLINE}\n{why}\n{topic}\n{NOT_PUSHED_RETRY_NOTE}"
 
 
+COMMIT_LANDED_NOTE = (
+    "\n🔴 THE COMMIT LANDED — a later step failed, so nothing was rolled back "
+    "(rolling back here would DISCARD a committed change). This is the one "
+    "`status=failed` that does NOT mean 'nothing happened': the commit exists "
+    "locally and is un-pushed. Find it with `git log -1` and push it or open a "
+    "PR; do not re-run this tool, which would append the update a second time."
+)
+
+
 def _undo_write(
     repo: Path, doc: Path, relpath: str, original: bytes | None
 ) -> str:
@@ -989,12 +998,12 @@ def _undo_write(
         # clean, because a staged path is the half that another session's
         # `git commit` picks up.
         git(repo, "restore", "--staged", "--", relpath)
-    except GitError:
+    except (GitError, OSError):
         # `git restore` predates nothing we support, but a very old git or a
         # path git no longer knows about can still refuse.
         try:
             git(repo, "reset", "--quiet", "HEAD", "--", relpath)
-        except GitError:
+        except (GitError, OSError):
             left.append(f"still STAGED: {relpath}")
     try:
         if original is None:
@@ -1004,18 +1013,40 @@ def _undo_write(
     except OSError:
         left.append(f"still MODIFIED: {relpath}")
     if left:
+        # 🔴 DO NOT name `restore --source=HEAD --worktree` here. It is wrong in
+        # BOTH shapes this can print for: if the doc had UNCOMMITTED local edits
+        # — exactly what `original` exists to preserve — it discards them; and if
+        # the doc did not exist at HEAD (a first-ever handoff) it fails outright
+        # (`pathspec … did not match any file(s) known to git`). Advice printed
+        # on an already-degraded path must not be the thing that loses the work.
+        index_fix = f"    git -C {repo} restore --staged -- {relpath}"
+        worktree_fix = (
+            f"    # the doc did not exist before this run — delete it:\n"
+            f"    rm -f -- {doc}"
+            if original is None
+            else
+            "    # its previous CONTENT was never committed, so no git command "
+            "can\n    # recover it — the bytes are only in this process. Restore "
+            "by hand."
+        )
         return (
             "\n🔴 ROLLBACK INCOMPLETE — the commit did not happen, but this tree "
             "was left changed: " + "; ".join(left) + "\n"
-            "  Restore it before doing anything else; in a shared checkout a "
-            "staged path is one `git commit` away from being swept into "
-            "someone else's commit:\n"
-            f"    git -C {repo} restore --source=HEAD --staged --worktree -- {relpath}"
+            "  Fix it before doing anything else; in a shared checkout a staged "
+            "path is one `git commit` away from being swept into someone else's "
+            "commit.\n"
+            f"{index_fix}\n{worktree_fix}"
         )
+    # 🔴 Deliberately NOT "byte-identical": two measured exceptions. If the doc
+    # was STAGED-modified before the run, `restore --staged` resets its index
+    # entry to HEAD rather than to that staged content; and a `claudedocs/`
+    # directory this run created is not removed. Both are harmless, and neither
+    # is what the sentence would be claiming. A comment is a claim — say the
+    # thing that is true, which is the thing the caller actually needs.
     return (
-        "\n(no trace left: the doc was restored and unstaged, so this tree is "
-        "byte-identical to before the run — re-running is safe and will not "
-        "append the update twice.)"
+        "\n(rolled back: the doc was restored and unstaged, so nothing from this "
+        "run is left staged or written — re-running is safe and will not append "
+        "the update twice.)"
     )
 
 
@@ -1380,7 +1411,10 @@ def main(argv: list[str] | None = None) -> int:
         # Only roll back what did NOT happen. If the commit landed and only
         # `rev-parse` failed, the tree is already correct and restoring the file
         # would DISCARD a committed change — the opposite of the fix.
-        note = "" if committed else _undo_write(repo, doc, relpath, original)
+        note = (
+            COMMIT_LANDED_NOTE if committed
+            else _undo_write(repo, doc, relpath, original)
+        )
         print(f"status=failed\n{exc}{note}", file=sys.stderr)
         return EXIT_FAIL
 

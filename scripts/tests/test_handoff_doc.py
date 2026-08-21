@@ -26,6 +26,7 @@ import hashlib
 import importlib.util
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -33,6 +34,10 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+
+from testlib.mockbin import write_exec  # noqa: E402
+
 TOOL = REPO_ROOT / "scripts" / "lib" / "handoff_doc.py"
 HANDOFF_SKILL = REPO_ROOT / "claude" / "skills" / "handoff" / "SKILL.md"
 
@@ -2182,10 +2187,11 @@ class TestBlockedCommitLeavesNoTrace:
     @staticmethod
     def _block_commits(repo: Path) -> None:
         """Refuse every commit, the way a real guard hook does."""
-        hook = repo / ".git" / "hooks" / "pre-commit"
-        hook.write_text("#!/bin/sh\necho 'blocked by guard' >&2\nexit 1\n",
-                        encoding="utf-8")
-        hook.chmod(0o755)
+        # write_exec owns the shebang — a call site that supplies its own
+        # trips scripts/tests/test_runtime_shebangs.py, a REPO-WIDE scan that a
+        # three-file test run structurally cannot see.
+        write_exec(repo / ".git" / "hooks" / "pre-commit",
+                   "echo 'blocked by guard' >&2\nexit 1\n")
 
     def test_the_hook_actually_blocks(self, repo: Path) -> None:
         """POSITIVE CONTROL for the fixture itself.
@@ -2239,4 +2245,128 @@ class TestBlockedCommitLeavesNoTrace:
         staged = _sh("git", "diff", "--cached", "--name-only", cwd=repo).split()
         assert staged == ["OTHER.md"], (
             f"the rollback must leave unrelated staged work alone; staged={staged}"
+        )
+
+    def test_a_LANDED_commit_is_never_rolled_back(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 THE HIGHEST-CONSEQUENCE BRANCH, and it had no test.
+
+        The `committed` flag exists so a commit that LANDED and then hit a later
+        failure is left alone. Roll back there and the tool DISCARDS a committed
+        change — strictly worse than the defect it was written to fix.
+
+        🔴 THE FIRST VERSION OF THIS TEST WAS VACUOUS and only mutation testing
+        found it: it used a failing `post-commit` hook, and git IGNORES that
+        hook's exit status (measured: `git commit` rc=0, commit created). The
+        except-branch was never reached, so deleting the guard still passed.
+        A `git` shim that fails `rev-parse` ONLY AFTER a commit has run is the
+        real shape — the commit lands, then a later git step errors.
+        """
+        real_git = shutil.which("git")
+        assert real_git, "git not on PATH"
+        shim = repo / "gitshim-revparse"
+        shim.mkdir()
+        marker = shim / "committed.marker"
+        # `git()` invokes ["git", "-C", <repo>, *args] — the SUBCOMMAND is $3,
+        # not $1. Scan all args instead of indexing, which is what the earlier
+        # broken shim got wrong.
+        write_exec(
+            shim / "git",
+            f'for a in "$@"; do [ "$a" = "commit" ] && : > "{marker}"; done\n'
+            f'for a in "$@"; do\n'
+            f'  if [ "$a" = "rev-parse" ] && [ -f "{marker}" ]; then exit 7; fi\n'
+            f'done\n'
+            f'exec {real_git} "$@"\n',
+        )
+        shas_before = commit_shas(repo)
+        env = dict(os.environ, **GIT_ENV)
+        env["PATH"] = f"{shim}:{env['PATH']}"
+
+        subprocess.run(
+            [sys.executable, str(TOOL), "--repo", str(repo), "--topic",
+             "sample-topic", "--update", str(update_file), "--advanced",
+             "a landed commit must survive a later failure", "--confirm"],
+            capture_output=True, text=True, env=env,
+        )
+
+        assert commit_shas(repo) != shas_before, (
+            "fixture inert: no commit was made, so the guard was never exercised"
+        )
+        head_doc = _sh("git", "show", "HEAD:claudedocs/handoff-sample-topic.md",
+                       cwd=repo)
+        assert doc_of(repo) == head_doc, (
+            "the worktree was rolled back even though the commit LANDED — that "
+            "discards committed work"
+        )
+
+    def test_first_ever_handoff_leaves_no_untracked_file_behind(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """The `original is None` -> `unlink` branch, which had no fixture.
+
+        Every other fixture pre-creates the doc, so the first-ever-handoff path
+        was never exercised: dropping the `unlink` survived the suite. A doc left
+        behind here is an UNTRACKED file in a shared checkout — invisible to
+        `git status -s` habits that scan for ` M`, and it makes a re-run append
+        to a doc the caller believes was never written."""
+        doc = repo / "claudedocs" / "handoff-brand-new-topic.md"
+        assert not doc.exists()
+        self._block_commits(repo)
+
+        res = subprocess.run(
+            [sys.executable, str(TOOL), "--repo", str(repo), "--topic",
+             "brand-new-topic", "--update", str(update_file), "--advanced",
+             "a first-ever handoff for this topic", "--confirm"],
+            capture_output=True, text=True, env=dict(os.environ, **GIT_ENV),
+        )
+
+        assert res.returncode == 3, f"expected EXIT_FAIL, got {res.returncode}"
+        assert not doc.exists(), (
+            "the doc the run CREATED was left behind after the commit was refused"
+        )
+        untracked = _sh("git", "status", "--porcelain", "--untracked-files=all",
+                        cwd=repo).strip()
+        assert untracked == "", f"left untracked residue: {untracked!r}"
+
+    def test_the_reset_FALLBACK_is_also_path_limited(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """The fallback arm had no test — only the primary `restore` arm did.
+
+        `git reset` without `-- <path>` unstages EVERYTHING, so a co-worker's
+        staged file would be unstaged by our failure. Forcing the fallback by
+        making `git restore` unavailable proves the second arm carries the same
+        path limit as the first."""
+        # 🔴 Resolve the real git ABSOLUTELY. `exec /usr/bin/env git` searches
+        # PATH — which this shim is prepended to — so the shim re-execs itself
+        # forever. (Measured: the run had to be killed.)
+        real_git = shutil.which("git")
+        assert real_git, "git not on PATH"
+        shim = repo / "gitshim"
+        shim.mkdir()
+        # 🔴 `git()` invokes ["git", "-C", <repo>, *args], so the subcommand is
+        # $3 — an earlier version tested $1, never intercepted anything, and the
+        # fallback arm was never exercised (the mutant survived). Scan all args.
+        write_exec(shim / "git",
+                   f'for a in "$@"; do\n'
+                   f'  [ "$a" = "restore" ] && exit 129\n'
+                   f'done\n'
+                   f'exec {real_git} "$@"\n')
+        (repo / "OTHER.md").write_text("someone else's staged work\n", encoding="utf-8")
+        _sh("git", "add", "--", "OTHER.md", cwd=repo)
+        self._block_commits(repo)
+
+        env = dict(os.environ, **GIT_ENV)
+        env["PATH"] = f"{shim}:{env['PATH']}"
+        subprocess.run(
+            [sys.executable, str(TOOL), "--repo", str(repo), "--topic",
+             "sample-topic", "--update", str(update_file), "--advanced",
+             "forcing the reset fallback", "--confirm"],
+            capture_output=True, text=True, env=env,
+        )
+
+        staged = _sh("git", "diff", "--cached", "--name-only", cwd=repo).split()
+        assert staged == ["OTHER.md"], (
+            f"the reset fallback must be path-limited too; staged={staged}"
         )
