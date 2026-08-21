@@ -28,3 +28,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # scripts/
 # the whole file: one implementation, two entry points (this import and the
 # runner's `-p` flag), no duplicated logic to drift.
 from testlib.nolaunch_plugin import STUB_DIR_ENV, no_real_launchers  # noqa: E402,F401
+
+# 🔴 The SAME shape for the activity spool (GUARD 8). `testlib/spool_plugin.py`
+# is the implementation and `scripts/run-tests.sh` loads it for EVERY target;
+# this import is the second entry point, so a bare `pytest scripts/tests`
+# outside the runner cannot append rows to `~/.local/state/activity/spool` —
+# which the collector ships to the production ClickHouse `activity.events`.
+#
+# It is NOT a per-directory copy, and the difference matters: adding the fixture
+# to N conftests is exactly what #399 and #614 both did and what left 1 target
+# of 17 (and 1 directory of 13) protected. The rule lives in one module; this
+# line only registers it. The per-test `monkeypatch.setenv(ACTIVITY_SPOOL_DIR…)`
+# calls scattered through this directory stay as defence in depth — they narrow
+# the spool per test, which this session-wide floor deliberately does not.
+from testlib.spool_plugin import no_real_activity_spool  # noqa: E402,F401
