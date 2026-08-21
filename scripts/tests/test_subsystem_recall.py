@@ -3638,9 +3638,25 @@ class TestSkillDocsArePinned:
 
     def test_the_recall_step_comes_AFTER_the_handoff_is_read(self) -> None:
         """Structural, not a phrase: recall is context for a doc already read,
-        not a substitute for reading it."""
+        not a substitute for reading it.
+
+        ⚠ RED ON `main` FROM #643 UNTIL THIS COMMIT, and nothing caught it — the
+        repo has no automated merge gate. #643 extended step 2's imperative from
+        `**Read it fully.**` to `**Read it fully — but treat its "Open
+        investigations" section as RECALL, not live state.**`, a legitimate
+        reword, and this pin was anchored on the sentence INCLUDING its full
+        stop. That is the wrong anchor for this test: what it asserts is an
+        ORDERING of four steps, so it should hold the imperative that opens the
+        step and let the rest of the sentence evolve. The sentence's WORDING is
+        somebody else's pin (`_assert_rationale_pin` above); this one is about
+        position. Asserted unique below so the index cannot silently move.
+        """
         doc = RESUME_DOC.read_text(encoding="utf-8")
-        read_it = doc.index("**Read it fully.**")
+        assert doc.count("**Read it fully") == 1, (
+            "the ordering anchor is no longer unique — `.index()` would return "
+            "whichever came first and the ordering claim could invert"
+        )
+        read_it = doc.index("**Read it fully")
         # The INVOCATION, not the bare filename: `resume-state.sh` is also named
         # in step 1's prose, so `.index()` on the bare name finds a point BEFORE
         # the handoff is read and the ordering claim inverts.
