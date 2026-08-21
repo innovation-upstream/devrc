@@ -41,6 +41,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -4930,3 +4931,378 @@ def test_a_non_integer_unmeasured_threshold_is_rejected(fleet, var):
     rc, out = fleet.check("--no-remote", **{var: "4; touch /tmp/pwned"})
     assert rc == 2, out
     assert "must be a non-negative integer" in out, out
+
+
+# --------------------------------------------------------------------------- #
+# rc 19, round two: the three ways the wrong-writer scan can fail to MEASURE,
+# and the one class of target `cmp` cannot answer for.
+#
+# Every case below was measured against the payload at PR head before the fix,
+# and every one of them printed a confident, WRONG classification rather than an
+# error. That is the shape this whole subsystem exists to refuse, and it had
+# reappeared inside the code that refuses it.
+# --------------------------------------------------------------------------- #
+
+# 🔴 THE TOOLS THE CHECKER NEEDS BESIDES `cmp`, ENUMERATED. The two tests below
+# REPLACE $PATH, and replacing is the point rather than an oversight: no amount
+# of PREPENDING can make a binary unfindable, and "cmp is absent" is the whole
+# condition under test. The enumeration is what makes the replacement safe, and
+# it is ASSERTED at construction instead of described, so it cannot rot — plus a
+# positive control that `cmp` really is unresolvable from it, without which a
+# typo in the list would produce a PATH that still has `cmp` and both tests would
+# pass having measured nothing.
+# 🔴 `ssh` IS DELIBERATELY NOT IN THIS LIST. It is a HAZARD_VOCABULARY name, and
+# both tests using this directory run with `--no-remote`, so the remote leg is
+# never entered and no ssh is needed. Leaving it out means the clobbered PATH
+# cannot reach a real ssh AT ALL — a stronger property than relying on the
+# fleet's stub to shadow it, and one that survives a future test forgetting
+# `--no-remote` (the run would fail loudly instead of touching the network).
+_NOCMP_TOOLS = ("bash", "git", "sed", "grep", "head", "tr", "sort", "cut", "wc",
+                "awk", "readlink", "dirname", "mkdir", "cat", "timeout")
+
+
+def _nocmp_bin(root, name):
+    """A $PATH directory holding _NOCMP_TOOLS and provably no `cmp`."""
+    d = root / name
+    d.mkdir()
+    for t in _NOCMP_TOOLS:
+        w = shutil.which(t)
+        if w:
+            (d / t).symlink_to(w)
+    assert {q.name for q in d.iterdir()} <= set(_NOCMP_TOOLS), (
+        "the stub bin holds something outside the enumeration: %s"
+        % sorted(q.name for q in d.iterdir()))
+    assert shutil.which("cmp", path=str(d)) is None, (
+        "the stub PATH still resolves `cmp` — the fixture is broken and both "
+        "tests using it would pass while proving nothing")
+    return d
+
+
+def bounded_check(fleet, *args, timeout=60, **envextra):
+    """`fleet.check`, with a wall-clock bound AND a process-group kill.
+
+    🔴 `fleet.check` HAS NO TIMEOUT, and every other test in this file is fine
+    with that because none of them can hang. These can: `cmp` blocks forever on a
+    FIFO, so a regression in the walk's `-f` test does not fail one test — it
+    WEDGES THE SUITE, which reports no verdict at all. Measured during this PR's
+    own mutation sweep: the mutant that removes that test hung the run for
+    minutes until an outer timeout killed it.
+
+    The group kill is the second half. `subprocess.run(timeout=…)` signals only
+    the DIRECT child (bash); the `cmp` blocked on the FIFO is a GRANDchild and
+    survives as an orphan holding the fixture open — four such orphans, still
+    blocked and reparented to init, were left behind by that same sweep.
+    """
+    env = fleet.env(
+        SHIP_ROLE="workbench",
+        DRIFT_REPO=str(fleet.work),
+        DRIFT_SESSION_MANAGER=str(fleet.bin / "session-manager"),
+        DRIFT_STATE_DIR=str(fleet.state),
+    )
+    env.update(envextra)
+    proc = subprocess.Popen(["bash", str(DRIFT), *args], stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, env=env,
+                            start_new_session=True)
+    try:
+        out, _ = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        proc.communicate()
+        raise AssertionError(
+            "the scan did not finish within %ds. `cmp` blocks forever on a FIFO, "
+            "so this is the hang shape, not a slow machine — and the remote leg "
+            "of this payload runs over ssh with no command timeout at all."
+            % timeout)
+    return proc.returncode, out
+
+
+def _blocking(out):
+    m = re.search(r"managed paths: examined=\d+ wrong-writer=\d+ "
+                  r"self-healing=\d+ blocking=(\d+)", out)
+    assert m, "no blocking count on the summary line:\n" + out
+    return int(m.group(1))
+
+
+@pytest.mark.parametrize("kind", ["directory", "fifo", "socket"])
+def test_a_non_regular_file_at_a_managed_path_is_blocking_not_self_healing(
+        fleet, tmp_path, kind):
+    """🔴 THE MOST SEVERE FINDING WORE THE LABEL OF THE BENIGN ONE.
+
+    The walk read ANY non-zero `cmp` exit as "content differs", and a directory
+    makes `cmp` exit non-zero. So a directory at a managed path was reported
+    `self-healing: differs, the next switch relinks it`. Measured at PR head on a
+    one-leaf fixture: `examined=1 wrong-writer=1 self-healing=1`, plus a raw
+    `cmp: …: Is a directory` on stderr.
+
+    Both halves false. Upstream's link slow path is `run ln -Tsf … || exit 1`,
+    and `ln` will not overwrite a directory, so the next switch ABORTS on this
+    path. An operator reading "self-healing" waits for a repair that cannot
+    happen, and rc 19's whole self-clearing argument is void for this leaf.
+
+    Asserted on the `blocking=` COUNT — its own field — rather than on a word in
+    the message, so a reword cannot walk it.
+    """
+    fleet.catch_up()
+    manifest = _mkmanifest(tmp_path, fleet.home, linked=1)
+    src = tmp_path / "fakestore" / "occupied"
+    src.write_text("store side\n")
+    (manifest / ".config" / "app" / "occupied").symlink_to(src)
+
+    t = Path(fleet.home) / ".config" / "app" / "occupied"
+    if kind == "directory":
+        t.mkdir(parents=True, exist_ok=True)
+    elif kind == "fifo":
+        t.parent.mkdir(parents=True, exist_ok=True)
+        os.mkfifo(t)
+    else:
+        import socket
+        t.parent.mkdir(parents=True, exist_ok=True)
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.bind(str(t))
+
+    rc, out = bounded_check(fleet, "--no-remote",
+                            DRIFT_HOME_FILES=str(manifest),
+                            DRIFT_MANAGED_PREFIX=str(tmp_path / "nostore") + "/")
+    assert rc == 19, out
+    examined, wrong, healing = _wrong(out)
+    assert (examined, wrong, healing) == (2, 1, 0), out
+    assert _blocking(out) == 1, (
+        "a %s at a managed path was not counted as blocking\n%s" % (kind, out)
+    )
+    # 🔴 THE WHOLE LABEL, NOT A WORD IN IT — and this assertion started life as
+    # the walkable version. `assert kind in out` looked fine and SURVIVED a
+    # mutant that replaced the computed `w_kind` with the literal "unknown",
+    # because the block's own STATIC prose two lines further down already says
+    # "ln cannot overwrite a directory". The guard was satisfied by a sentence
+    # that never reads the computed value. Pinning the assembled line makes the
+    # computed slot load-bearing.
+    assert ("BLOCKING: a %s, not a file — the next switch ABORTS on it" % kind
+            ) in out, (
+        "the finding does not name WHAT is in the way, in the computed slot. A "
+        "check for the bare word is walkable: the surrounding static prose "
+        "spells 'directory' on its own.\n" + out
+    )
+    assert "self-healing: differs" not in out, (
+        "a %s was labelled with the benign classification; the next switch "
+        "ABORTS on it\n%s" % (kind, out)
+    )
+
+
+def test_a_fifo_at_a_managed_path_does_not_hang_the_scan(fleet, tmp_path):
+    """🔴 A TIMER THAT NEVER RETURNS. `cmp -s` on a FIFO blocks in open(2)
+    forever, and this walk runs 4x/day from a systemd timer AND inside the
+    remote payload piped over ssh — where there is no command timeout at all.
+    Measured at PR head: `timeout 8` -> rc 124, with the `managed paths:` line
+    never printed, so the scan produced no output whatsoever.
+
+    The bound is the assertion. 60s is orders of magnitude above the observed
+    runtime of every other case in this file, so it cannot flake on load; a
+    regression does not take 60s, it takes forever.
+    """
+    fleet.catch_up()
+    manifest = _mkmanifest(tmp_path, fleet.home, linked=1)
+    src = tmp_path / "fakestore" / "pipe"
+    src.write_text("store side\n")
+    (manifest / ".config" / "app" / "pipe").symlink_to(src)
+    t = Path(fleet.home) / ".config" / "app" / "pipe"
+    t.parent.mkdir(parents=True, exist_ok=True)
+    os.mkfifo(t)
+
+    _, out = bounded_check(fleet, "--no-remote", DRIFT_HOME_FILES=str(manifest))
+    assert "managed paths:" in out, (
+        "the scan produced no managed-paths line at all — it hung or died\n" + out
+    )
+    assert _blocking(out) == 1, out
+
+
+def test_a_missing_cmp_is_could_not_measure_never_a_relabelling(fleet, tmp_path):
+    """🔴 THE INSTRUMENT, AND THE WINDOW IN WHICH IT IS GENUINELY ABSENT.
+
+    `cmp` is the ONLY thing separating a PERMANENT finding from a self-healing
+    one. Missing, every `cmp` returns 127 and every permanent case is relabelled
+    `self-healing: differs, the next switch relinks it` — the exact INVERSE of
+    the truth, with no distinct code and nothing on screen to say so.
+
+    Measured 2026-08-21 on a fixture with one permanent and one differing leaf:
+    with `cmp`, `self-healing=1`; under a PATH with no diffutils, `self-healing=2`.
+
+    🔴 AND THIS IS REACHABLE ON A REAL HOST, WHICH IS WHY IT IS NOT PARANOIA.
+    `cmp` lives in diffutils, not coreutils. The unit's `Environment=PATH`
+    (nix/home.nix) REPLACES the login PATH and only gained diffutils in this
+    change — but `ExecStart` runs the WORKING-TREE copy of the script, so the
+    script goes live on `git pull` while its new PATH entry arrives only on the
+    next `home-manager switch`. On any host `ship.sh` skips, that window never
+    closes. Verified against the deployed unit on 2026-08-21: no diffutils in
+    `Environment=PATH=`.
+    """
+    fleet.catch_up()
+    manifest = _mkmanifest(tmp_path, fleet.home, wrong_identical=1,
+                           wrong_differing=1)
+
+    nocmp = _nocmp_bin(tmp_path, "nocmp")
+
+    env = fleet.env(
+        SHIP_ROLE="workbench",
+        DRIFT_REPO=str(fleet.work),
+        DRIFT_SESSION_MANAGER=str(fleet.bin / "session-manager"),
+        DRIFT_STATE_DIR=str(fleet.state),
+        DRIFT_HOME_FILES=str(manifest),
+    )
+    env["PATH"] = str(fleet.bin) + os.pathsep + str(nocmp)
+    proc = subprocess.run(["bash", str(DRIFT), "--no-remote"],
+                          capture_output=True, text=True, env=env, timeout=60)
+    out = proc.stdout + proc.stderr
+
+    assert "managed paths: COULD NOT MEASURE" in out, out
+    assert "reason=no-cmp" in out, (
+        "no machine-readable reason token, so a reader cannot tell 'install "
+        "diffutils' from 'your manifest path is wrong'\n" + out
+    )
+    assert "self-healing" not in out, (
+        "a run that could not compare anything still classified findings — the "
+        "exact relabelling this guard exists to stop\n" + out
+    )
+    assert "wrong-writer=0" not in out, (
+        "an unmeasured run printed the zero-valued count\n" + out
+    )
+    assert proc.returncode != 19, (
+        "a scan that measured nothing set the drift code anyway (%d)\n%s"
+        % (proc.returncode, out)
+    )
+
+
+def test_an_empty_manifest_directory_is_could_not_measure(fleet, tmp_path):
+    """🔴 "A WALK OF NOTHING IS NOT A CLEAN WALK" ONLY COVERED A *MISSING*
+    MANIFEST. `[ -d ]` says nothing about a directory that exists and holds
+    nothing, and `examined=0 wrong-writer=0 self-healing=0` with `PARITY-RC=0`
+    out of one is byte-identical to a healthy host. Measured at PR head: exactly
+    that, rc 0.
+
+    A real generation has hundreds of leaves (488 on the workbench), so zero
+    means the path is wrong, the tree is half-built, or it is not a manifest.
+    """
+    fleet.catch_up()
+    empty = tmp_path / "empty-generation"
+    empty.mkdir()
+    rc, out = _parity(fleet, "--no-remote", DRIFT_HOME_FILES=str(empty))
+    assert "managed paths: COULD NOT MEASURE" in out, out
+    assert "reason=empty-manifest" in out, out
+    assert "wrong-writer=0" not in out, (
+        "a walk that examined nothing printed the zero-valued count\n" + out
+    )
+    assert rc != 19, out
+
+
+def test_the_unevaluated_branches_never_spell_the_zero_valued_count(fleet, tmp_path):
+    """🔴 THE GUARD THAT THE ORIGINAL NOT-EVALUATED MESSAGE WAS WRITTEN AROUND,
+    now that there are THREE such branches instead of one.
+
+    Each of them denies a measurement. A message that spells `wrong-writer=0` —
+    even to deny it — is indistinguishable from an all-clear to anything reading
+    this journal, human or grep. Driven across all three, from runs that actually
+    produced them, rather than read off the source.
+    """
+    fleet.catch_up()
+    empty = tmp_path / "empty-gen-2"
+    empty.mkdir()
+
+    outs = {}
+    _, outs["no-manifest"] = _parity(
+        fleet, "--no-remote",
+        DRIFT_HOME_FILES=str(tmp_path / "no" / "such" / "generation"))
+    _, outs["empty-manifest"] = _parity(
+        fleet, "--no-remote", DRIFT_HOME_FILES=str(empty))
+
+    nocmp = _nocmp_bin(tmp_path, "nocmp2")
+    manifest = _mkmanifest(tmp_path, fleet.home, wrong_identical=1)
+    env = fleet.env(
+        SHIP_ROLE="workbench", DRIFT_REPO=str(fleet.work),
+        DRIFT_SESSION_MANAGER=str(fleet.bin / "session-manager"),
+        DRIFT_STATE_DIR=str(fleet.state), DRIFT_HOME_FILES=str(manifest))
+    env["PATH"] = str(fleet.bin) + os.pathsep + str(nocmp)
+    proc = subprocess.run(["bash", str(DRIFT), "--no-remote"],
+                          capture_output=True, text=True, env=env, timeout=60)
+    outs["no-cmp"] = proc.stdout + proc.stderr
+
+    for name, out in outs.items():
+        assert "wrong-writer=0" not in out, (
+            "the %s branch spells the zero-valued count\n%s" % (name, out)
+        )
+        assert "self-healing=0" not in out, (
+            "the %s branch spells a zero-valued classification count\n%s"
+            % (name, out)
+        )
+        assert ("COULD NOT MEASURE" in out or "NOT EVALUATED" in out), (
+            "the %s branch claims neither — so a reader cannot tell it apart "
+            "from a measured run\n%s" % (name, out)
+        )
+
+
+def test_the_wrong_writer_listing_cap_says_how_many_it_withheld(fleet, tmp_path):
+    """🔴 DRIFT_DANGLING_MAX NOW CAPS THIS LISTING TOO, and its name only says
+    "dangling". One knob is the right call — an operator tuning "how many
+    per-path lines may a run print" means all of them — but the truncation must
+    be AUDIBLE, and the COUNT must never be capped.
+
+    The fixture size (5) is not a multiple of the cap (2), so an off-by-one in
+    either direction moves both numbers.
+    """
+    fleet.catch_up()
+    manifest = _mkmanifest(tmp_path, fleet.home, linked=1, wrong_identical=5)
+    rc, out = _parity(fleet, "--no-remote", DRIFT_HOME_FILES=str(manifest),
+                      DRIFT_DANGLING_MAX="2")
+    assert rc == 19, out
+    examined, wrong, _ = _wrong(out)
+    assert (examined, wrong) == (6, 5), (
+        "the cap reached the COUNT, not just the listing\n" + out
+    )
+    listed = [ln for ln in out.splitlines() if "     x " in ln]
+    assert len(listed) == 2, (
+        "the listing was not capped at DRIFT_DANGLING_MAX=2 (%d lines)\n%s"
+        % (len(listed), out)
+    )
+    assert "... and 3 more" in out, (
+        "the listing was truncated SILENTLY — a reader cannot tell 2 findings "
+        "from 5\n" + out
+    )
+
+
+def test_the_manifest_probe_honours_xdg_state_home_and_gcroots(fleet, tmp_path):
+    """🔴 ONE RULE, THREE READERS — the wiring half.
+
+    ship.sh's `ma_manifest`, scripts/reclaim-managed-paths.sh and this payload
+    all answer "where is this host's home-files tree", and they render three
+    verdicts about ONE tree. At PR head this one hardcoded
+    `$HOME/.local/state/nix/profiles/…`: it honoured neither XDG_STATE_HOME nor
+    the gcroots location that ship.sh probes FIRST, so on any host setting that
+    variable the detector and the repair read different trees — and since the
+    output names the manifest it read, the disagreement would have looked like a
+    resolved bug.
+
+    Driven with no DRIFT_HOME_FILES at all, which is the only way to exercise the
+    default probe; every other rc-19 test here passes the path explicitly.
+    """
+    fleet.catch_up()
+    state = tmp_path / "xdgstate"
+    manifest = state / "home-manager" / "gcroots" / "current-home" / "home-files"
+    manifest.mkdir(parents=True)
+    src = tmp_path / "fakestore2" / "leaf"
+    src.parent.mkdir(parents=True, exist_ok=True)
+    src.write_text("deployed\n")
+    (manifest / "leaf.md").symlink_to(src)
+    (Path(fleet.home) / "leaf.md").write_text("deployed\n")
+
+    env = fleet.env(
+        SHIP_ROLE="workbench", DRIFT_REPO=str(fleet.work),
+        DRIFT_SESSION_MANAGER=str(fleet.bin / "session-manager"),
+        DRIFT_STATE_DIR=str(fleet.state))
+    env["XDG_STATE_HOME"] = str(state)
+    env.pop("DRIFT_HOME_FILES", None)
+    proc = subprocess.run(["bash", str(DRIFT), "--no-remote"],
+                          capture_output=True, text=True, env=env, timeout=60)
+    out = proc.stdout + proc.stderr
+    assert str(manifest) in out, (
+        "the default probe did not find the gcroots manifest under "
+        "XDG_STATE_HOME\n" + out
+    )
+    assert _wrong(out)[:2] == (1, 1), out

@@ -901,10 +901,44 @@ fi
 # "$HOME looks wrong" rule would (~/.claude/settings.json, a nested checkout, an
 # editor backup — none of them are manifest leaves). It also covers every
 # managed path, not just the two roots the dangling scan walks.
-hfiles="${DRIFT_HOME_FILES:-$HOME/.local/state/nix/profiles/home-manager/home-files}"
+#
+# 🔴 WHERE THE MANIFEST LIVES — ONE RULE, THREE READERS. ship.sh'"'"'s ma_manifest,
+# scripts/reclaim-managed-paths.sh and this payload all answer "where is this
+# host'"'"'s home-files tree", and they MUST agree: this one reports a finding, the
+# reclaim script repairs it, ship.sh verifies the result. They cannot share a
+# function — this payload is piped to `bash -s` over ssh and can source nothing —
+# so the probe is duplicated deliberately and pinned by
+# test_reclaim_managed_paths.py::test_all_three_manifest_probes_agree.
+# Two candidates because home-manager has used both; first existing wins.
+# The trailing slash on -d is BELT-AND-BRACES, not load-bearing: MEASURED
+# 2026-08-21 under bash 5.3, `[ -d X ]` and `[ -d X/ ]` agree on a real
+# directory, a symlink to one (`-d` follows) and a dangling symlink. ship.sh
+# calls it load-bearing "because home-files is itself a SYMLINK into the store";
+# that reason is wrong. Kept because strict POSIX resolution does require a
+# directory for a trailing slash and not every /bin/sh is bash — so a sweep
+# reporting its removal as an EQUIVALENT MUTANT is correct, not a gap.
+# This line used to hardcode $HOME/.local/state, which disagreed with the other
+# two readers on any host that sets XDG_STATE_HOME.
+#
+# Written as two explicit tests rather than a `for … in` over a continuation
+# line, because the suite'"'"'s reverse PATH guard tokenizes this file and reads a
+# loop VARIABLE — and the second element of a wrapped list — as a command word.
+# It would have to be declared prose, which is a worse trade than one `elif`.
+hfiles="${DRIFT_HOME_FILES:-}"
+w_state="${XDG_STATE_HOME:-$HOME/.local/state}"
+w_gc="$w_state/home-manager/gcroots/current-home/home-files"
+w_pr="$w_state/nix/profiles/home-manager/home-files"
+if [ -n "$hfiles" ]; then
+  :
+elif [ -d "$w_gc/" ]; then
+  hfiles="$w_gc"
+else
+  hfiles="$w_pr"
+fi
 W_EXAMINED=0
 W_WRONG=0
 W_DIFFER=0
+W_BLOCK=0
 w_list=""
 
 w_walk() { # w_walk <manifest-dir> <relative-prefix>
@@ -926,7 +960,25 @@ w_walk() { # w_walk <manifest-dir> <relative-prefix>
         :
       elif [ -e "$TGT" ]; then
         W_WRONG=$(( W_WRONG + 1 ))
-        if cmp -s "$E" "$TGT"; then
+        if [ ! -f "$TGT" ]; then
+          # 🔴 NOT A REGULAR FILE — the SEVERE case, and before the `-f` test it
+          # wore the label of the benign one. `cmp` exits non-zero on a directory,
+          # so a directory at a managed path was reported "self-healing: differs,
+          # the next switch relinks it". Both halves false: upstream'"'"'s link slow
+          # path runs `ln -Tsf … || exit 1`, and ln cannot overwrite a directory,
+          # so the next switch ABORTS. A FIFO was worse — `cmp` BLOCKS on open(2),
+          # hanging this walk with no timeout on the remote ssh leg and only the
+          # unit'"'"'s TimeoutStartSec on the local one. Measured 2026-08-21: timeout
+          # 8 -> rc 124, nothing printed at all.
+          W_BLOCK=$(( W_BLOCK + 1 ))
+          w_kind="unknown"
+          [ -d "$TGT" ] && w_kind="directory"
+          [ -p "$TGT" ] && w_kind="fifo"
+          [ -S "$TGT" ] && w_kind="socket"
+          { [ -b "$TGT" ] || [ -c "$TGT" ]; } && w_kind="device"
+          w_list="$w_list$REL (BLOCKING: a $w_kind, not a file — the next switch ABORTS on it)
+"
+        elif cmp -s "$E" "$TGT"; then
           w_list="$w_list$REL (PERMANENT: identical, no switch will take it back)
 "
         else
@@ -943,16 +995,75 @@ w_walk() { # w_walk <manifest-dir> <relative-prefix>
 
 # 🔴 SAME PAIR RULE AS THE DANGLING SCAN. wrong-writer=0 out of 0 examined is a
 # scanner wired to nothing, not a healthy host, so the examined count is printed
-# beside it always — and an absent manifest is NOT EVALUATED, never a zero.
-if [ -d "$hfiles" ]; then
+# beside it always — and an unevaluated run is COULD NOT MEASURE with a reason
+# token, never a zero. THREE ways this can fail to measure, each with its own
+# token, because a repair this hands over must never be read off a bare 0:
+#   no-cmp           the instrument is missing
+#   no-manifest      nothing at $hfiles
+#   empty-manifest   $hfiles exists and holds no leaves
+# 🔴 The words "wrong" and "writer" are deliberately NOT adjacent in ANY of the
+# three, and not because prose is precious: a test asserts the zero-valued count
+# string never appears on an unevaluated run, and a message that spells it — even
+# to deny it — walks that guard.
+if ! command -v cmp >/dev/null 2>&1; then
+  # 🔴 THE INSTRUMENT, NOT THE CODE UNDER TEST. `cmp` is the ONLY thing that
+  # separates a PERMANENT finding from a self-healing one. Missing, every `cmp`
+  # returns 127 and every permanent case is relabelled "self-healing: differs,
+  # the next switch relinks it" — the exact inverse of the truth, with no
+  # distinct code and nothing on screen to say the classifier was blind.
+  #
+  # 🔴 THIS IS NOT HYPOTHETICAL AND IT IS NOT SELF-CLEARING. The unit'"'"'s PATH is
+  # declared in nix/home.nix and REPLACES the login PATH; `cmp` lives in
+  # diffutils, not coreutils. But ExecStart runs the WORKING-TREE copy of this
+  # script, so the script goes live on `git pull` while the PATH carrying its new
+  # dependency only arrives on the next `home-manager switch`. On any host
+  # ship.sh skips, that window never closes. Measured 2026-08-21 on a fixture
+  # with one genuine permanent case: with cmp, self-healing=1; without it,
+  # self-healing=2.
+  psay "managed paths: COULD NOT MEASURE — reason=no-cmp (\`cmp\` is not on PATH)"
+  psay "  \`cmp\` is the only thing that separates a permanent finding from one the next"
+  psay "  switch repairs. Nothing was classified, so no count is claimed and no code is"
+  psay "  set. cmp ships in diffutils, not coreutils; if this host has pulled but not"
+  psay "  switched, the unit PATH predates the check — run a home-manager switch."
+elif [ ! -d "$hfiles/" ]; then
+  psay "managed paths: NOT EVALUATED — no home-files manifest at $hfiles"
+  psay "  a walk of nothing is not a clean walk. Nothing was counted, so no count is claimed."
+else
   w_walk "$hfiles" ""
-  psay "managed paths: examined=$W_EXAMINED wrong-writer=$W_WRONG self-healing=$W_DIFFER (manifest: $hfiles)"
+  if [ "$W_EXAMINED" = 0 ]; then
+    # 🔴 AN EMPTY MANIFEST IS UNMEASURED TOO. The -d test above catches a MISSING
+    # manifest and says nothing about one that exists and holds nothing — and
+    # `examined=0` out of a real generation is impossible (488 leaves on the
+    # workbench), so zero means the path is wrong, the tree is half-built, or it
+    # is not a manifest. Printed with the same reason-token shape, and it sets no
+    # code, because the finding it would otherwise deny is a repair.
+    psay "managed paths: COULD NOT MEASURE — reason=empty-manifest (examined=0 at $hfiles)"
+    psay "  the directory exists but has no leaves. A walk of nothing is not a clean walk;"
+    psay "  a real generation has hundreds, so this is not an all-clear."
+  else
+  psay "managed paths: examined=$W_EXAMINED wrong-writer=$W_WRONG self-healing=$W_DIFFER blocking=$W_BLOCK (manifest: $hfiles)"
   if [ "$W_WRONG" -gt 0 ]; then
     psay "🔴 DRIFT — $W_WRONG of $W_EXAMINED managed path(s) are NOT the link nix intended."
     psay "  home-manager declares each of these. Something else owns them now."
+    # 🔴 DRIFT_DANGLING_MAX CAPS THIS LISTING TOO, and its name only says
+    # "dangling". Kept as one knob on purpose — an operator tuning "how many
+    # per-path lines may a run print" means all of them — but documented here
+    # because a reader of the name alone would not expect it, and a silent
+    # truncation is exactly what the "... and N more" line below exists to
+    # refuse. Both listings are capped; neither count is.
     printf "%s" "$w_list" | head -n "$maxd" | sed "s|^|[$label]     x |"
     if [ "$W_WRONG" -gt "$maxd" ]; then
-      psay "    ... and $(( W_WRONG - maxd )) more"
+      # The remainder is computed into a variable rather than inlined, because
+      # `_walk` in the suite splits a line at `$(` — `$((` included — and the
+      # rest of the sentence then parses as a command line. Same reason the
+      # dangling scan'"'"'s message next door is shaped this way.
+      w_more=$(( W_WRONG - maxd ))
+      psay "    ... and $w_more more (DRIFT_DANGLING_MAX caps the LISTING only, not the count)"
+    fi
+    if [ "$W_BLOCK" -gt 0 ]; then
+      psay "  🔴 $W_BLOCK of them are NOT a regular file (BLOCKING above). Those do not"
+      psay "  self-heal and are not reclaimed: ln cannot overwrite a directory, so the"
+      psay "  next switch ABORTS on them. Look at each one by hand."
     fi
     psay "  fix (on that host): home-manager switch --flake ~/workspace/devrc --impure"
     psay "  home.activation.reclaimManagedPaths reclaims the identical ones on the way"
@@ -960,13 +1071,7 @@ if [ -d "$hfiles" ]; then
     psay "    scripts/reclaim-managed-paths.sh"
     [ "$p_rc" = 0 ] && p_rc=19
   fi
-else
-  psay "managed paths: NOT EVALUATED — no home-files manifest at $hfiles"
-  # 🔴 The words "wrong" and "writer" are deliberately NOT adjacent here, and
-  # not because prose is precious: a test asserts the zero-valued count string
-  # never appears on an unevaluated run, and a message that spells it — even to
-  # deny it — walks that guard.
-  psay "  a walk of nothing is not a clean walk. Nothing was counted, so no count is claimed."
+  fi
 fi
 
 # --- settings.json: KEY NAMES ONLY --------------------------------------------

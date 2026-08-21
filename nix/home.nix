@@ -1599,13 +1599,14 @@ in
   # enumerated is covered the day something overwrites it.
   #
   # It removes a managed target only when it is a REGULAR FILE whose content is
-  # BYTE-IDENTICAL to the store source — which is provably lossless (the bytes
-  # are already in the store) and is exactly the population home-manager leaks:
-  # `force = true` suppresses only the collision CHECK, and the link step
-  # deliberately skips an identical non-symlink target ("Skipping '$targetPath'
-  # as it is identical"), so that file stays owned by the wrong writer across
-  # arbitrarily many switches. A target whose content DIFFERS is relinked by the
-  # very next switch anyway and is deliberately left alone — see the script.
+  # BYTE-IDENTICAL to the store source, which is exactly the population
+  # home-manager leaks: `force = true` suppresses only the collision CHECK, and
+  # the link step deliberately skips an identical non-symlink target ("Skipping
+  # '$targetPath' as it is identical"), so that file stays owned by the wrong
+  # writer across arbitrarily many switches. A target whose content DIFFERS is
+  # relinked by the very next switch anyway and is deliberately left alone — see
+  # the script, which also states the exact scope of "lossless" (bytes only, and
+  # for a mkOutOfStoreSymlink leaf the bytes live in the working tree).
   #
   # Measured on the workbench 2026-08-20: 488 manifest leaves, 19 reclaimable —
   # 18 command files an agent wrote over on 2026-08-19 by running
@@ -1614,10 +1615,37 @@ in
   # a completely unrelated subsystem. Two independent instances is why this is a
   # class and not a fourth enumerated list.
   #
-  # BEFORE checkLinkTargets for the same reason the entries below are: the
-  # collision check runs first, and a path this reclaims must already be gone by
-  # the time linkGeneration decides what to do with it.
-  home.activation.reclaimManagedPaths = lib.hm.dag.entryBefore ["checkLinkTargets"] ''
+  # 🔴 IMMEDIATELY BEFORE linkGeneration, AND NOT BEFORE checkLinkTargets — the
+  # placement IS the safety property, because between the delete and the relink
+  # this entry's population exists NOWHERE on disk. Every activation step in that
+  # window can abort the switch and strand it.
+  #
+  # An earlier revision of this entry ran before checkLinkTargets and justified
+  # it with "the collision check runs first, and a path this reclaims must
+  # already be gone by the time linkGeneration decides what to do with it". That
+  # justification was FALSE, and it is worth keeping the refutation because it
+  # reads so plausibly. Read `checkCollision()` in upstream check-link-targets.sh:
+  # its FIRST branch is `if cmp -s "$sourcePath" "$targetPath"; then warnEcho …`.
+  # Identical content is a WARNING. Only a target that DIFFERS can ever reach
+  # `collisionErrors+=`, and a differing target is precisely what this entry
+  # refuses to touch. So this population cannot make checkLinkTargets fail —
+  # forced prefix or not — and running early bought nothing while opening a real
+  # window. The three `dropStale*` entries below DO handle differing content, so
+  # the same sentence is true of them and false of this one.
+  #
+  # Measured on the built activation script (nix build .#homeConfigurations.zach
+  # .activationPackage, then read `activate`): with the old ordering the window
+  # spanned `checkNewGenCollision || exit 1`, writeBoundary, browserBridgeExtension
+  # and installPackages — the last of which is `nix-env --set`, which this repo's
+  # memory records failing outright on an imperative-profile conflict. A switch
+  # that aborted there left the reclaimed files deleted and unlinked: strictly
+  # worse than the bug. entryBetween pins BOTH ends; `entryBefore ["linkGeneration"]`
+  # alone leaves the entry with no lower bound and the topological sort free to
+  # emit it early again. The resulting gap is pinned by
+  # test_reclaim_managed_paths.py::test_the_activation_entry_runs_immediately_
+  # before_linkGeneration, which reads the BUILT script, not this expression.
+  home.activation.reclaimManagedPaths =
+    lib.hm.dag.entryBetween ["linkGeneration"] ["installPackages"] ''
     reclaimFiles="$(readlink -e "$newGenPath/home-files" 2>/dev/null || true)"
     if [ -n "$reclaimFiles" ]; then
       $DRY_RUN_CMD ${pkgs.bash}/bin/bash ${../scripts/reclaim-managed-paths.sh} \

@@ -262,3 +262,101 @@ def test_the_two_failure_modes_have_DIFFERENT_exit_codes(tmp_path):
         "%d, got %d — anything reading for it will now miss it\n%s"
         % (EXIT_MANAGED_OUTPUT, rc_managed, log_managed)
     )
+
+
+# --- the DEFAULT store prefix, which no test pinned ------------------------- #
+#
+# 🔴 EVERY OTHER TEST IN THIS FILE OVERRIDES `GENERATE_COMMANDS_STORE_PREFIX`.
+# That variable exists only so a fixture can control the prefix, and the
+# consequence was that the production DEFAULT was covered by nothing: an
+# independent mutation sweep changed it from "/nix/store/" to "/" and the mutant
+# SURVIVED the full suite. drift-check.sh has the sibling guard
+# (`test_the_managed_prefix_defaults_to_the_nix_store`); this file had none.
+#
+# Both directions matter, and each is a different live bug:
+#   * WIDENING (-> "/") makes every absolute symlink look like a nix deployment,
+#     so the generator refuses ordinary output directories — the guard becomes an
+#     outage, and the nix build calls this on every switch.
+#   * NARROWING (-> a longer or wrong prefix) silently disables the on-disk
+#     fallback, which exists precisely for the host whose profile is unreadable
+#     and where the manifest signal cannot fire. That failure is invisible: the
+#     generator happily overwrites the live deploy path, which is the exact
+#     2026-08-19 incident this file was written for.
+#
+# So the default is pinned twice: as a literal (any change fails) and
+# BEHAVIOURALLY in both directions (a store-prefixed link is refused, a
+# non-store absolute link is not). The behavioural pair is what makes this more
+# than a restatement of the source — a structural check on a constant type-checks
+# past a wrong value, and the value IS the guard here.
+
+def _default_prefix():
+    """STORE_PREFIX as the script computes it with the variable UNSET."""
+    env = dict(os.environ)
+    env.pop("GENERATE_COMMANDS_STORE_PREFIX", None)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    p = subprocess.run(
+        [sys.executable, "-c",
+         "import importlib.util,importlib.machinery,sys;"
+         "s=importlib.util.spec_from_loader('g',"
+         "  importlib.machinery.SourceFileLoader('g', sys.argv[1]));"
+         "m=importlib.util.module_from_spec(s);s.loader.exec_module(m);"
+         "print(m.STORE_PREFIX)",
+         str(GEN)],
+        capture_output=True, text=True, env=env)
+    assert p.returncode == 0, p.stdout + p.stderr
+    return p.stdout.strip()
+
+
+def test_the_store_prefix_defaults_to_the_nix_store():
+    """The literal half. Read out of the module with the env var UNSET, so it is
+    the value production uses and not one the test supplied."""
+    assert _default_prefix() == "/nix/store/", (
+        "the default store prefix is %r. It decides whether an existing symlink "
+        "in the output directory counts as home-manager's handwriting: widen it "
+        "and the generator refuses ordinary directories, narrow it and the "
+        "on-disk fallback silently stops firing." % _default_prefix()
+    )
+
+
+def test_the_default_prefix_refuses_a_store_link_and_allows_a_foreign_one(tmp_path):
+    """🔴 THE BEHAVIOURAL PAIR, run with NO prefix override — the only test here
+    that exercises the production default end to end.
+
+    One fixture each side of the boundary, in the same test, because either
+    assertion alone is walkable:
+      * a symlink to /nix/store/… MUST be refused — kills any narrowing mutant.
+      * a symlink to an absolute path that is NOT under /nix/store MUST NOT be
+        refused — kills the widening mutant ("/") that survived the sweep.
+
+    The store target does not exist and does not need to: the check reads the
+    link's TARGET STRING (`os.readlink`), which is what makes this hermetic —
+    nothing here writes to a real /nix/store, and the operator's real store is
+    never consulted.
+    """
+    src = skills_tree(tmp_path)
+    home = tmp_path / "empty-home"           # no manifest: signal 2 alone
+    home.mkdir()
+
+    refused = tmp_path / "looks-managed"
+    refused.mkdir()
+    (refused / "activity.md").symlink_to("/nix/store/deadbeef-hm_activity.md")
+    rc, log = run(src, refused, home=home)
+    assert rc == EXIT_MANAGED_OUTPUT, (
+        "a symlink into /nix/store/ was NOT refused under the default prefix "
+        "(exit %d) — the on-disk fallback is off, and it is the only signal on a "
+        "host whose profile is unreadable\n%s" % (rc, log)
+    )
+    assert not (refused / "alpha.md").exists(), "it wrote anyway\n" + log
+
+    allowed = tmp_path / "ordinary"
+    allowed.mkdir()
+    (allowed / "activity.md").symlink_to(tmp_path / "somewhere" / "else.md")
+    rc, log = run(src, allowed, home=home)
+    assert rc == 0, (
+        "an absolute symlink that is NOT under /nix/store was refused (exit %d). "
+        "The prefix has been widened; the guard is now an outage, and the nix "
+        "build calls this on every switch.\n%s" % (rc, log)
+    )
+    assert (allowed / "alpha.md").exists(), (
+        "the run was allowed but produced nothing\n" + log
+    )

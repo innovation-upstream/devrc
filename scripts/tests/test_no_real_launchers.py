@@ -967,6 +967,42 @@ PINNED_PATH_CLOBBERS = {
         "measure the environment instead of the code. The fixture ASSERTS the "
         "one-entry contents itself, so this justification is a live invariant "
         "rather than prose that can rot"),
+    "test_reclaim_managed_paths.py": (
+        'env["PATH"]' + ' = str(bindir)',
+        "the THIRD enumeration case, and the same REPLACING-is-the-point "
+        "argument as the two above: the condition under test is that `cmp` is "
+        "ABSENT — which is reachable on a real host, because `cmp` lives in "
+        "diffutils rather than coreutils and the drift-check unit's PATH lacked "
+        "it — and no amount of PREPENDING can make a binary unfindable. The "
+        "directory is built by `_nocmp_bin`, which symlinks exactly the seven "
+        "names in `_NOCMP_TOOLS` (bash, sed, head, grep, readlink, rm, cat) and "
+        "then ASSERTS both halves: that the directory's contents are a subset "
+        "of that list, and — the positive control — that `cmp` is not "
+        "resolvable from it, without which a typo in the list would yield a "
+        "PATH that still has `cmp` and both tests would pass having measured "
+        "nothing. No HAZARD_VOCABULARY name is reachable from it: no "
+        "systemctl, kubectl, gh, ssh, home-manager, nixos-rebuild, pkill, "
+        "systemd-run, notify-send, rofi, yad, xdotool, i3-msg, openrgb or "
+        "espanso"),
+    "test_drift_check.py": (
+        'env["PATH"]' + ' = str(fleet.bin) + os.pathsep + str(nocmp)',
+        "the FOURTH enumeration case — same condition (`cmp` absent), same "
+        "REPLACING-is-the-point argument, same constructed-and-asserted "
+        "directory (`_nocmp_bin` in that file, sixteen names in `_NOCMP_TOOLS`, "
+        "contents asserted a subset and `cmp` asserted unresolvable). Two "
+        "differences from its sibling, both in the SAFER direction: (1) the "
+        "fleet fixture's own stub bin is PREPENDED, so every stubbed launcher "
+        "this suite relies on still shadows the real one and the clobber "
+        "removes only the inherited system PATH; (2) `ssh` — the one "
+        "HAZARD_VOCABULARY name the checker would otherwise want — is "
+        "DELIBERATELY absent from the enumeration, because both tests run "
+        "`--no-remote` and never enter the remote leg. So no real ssh is "
+        "reachable from the clobbered PATH at all, rather than merely shadowed, "
+        "and a future test that forgot `--no-remote` would fail loudly instead "
+        "of touching the network. No other HAZARD_VOCABULARY name is reachable "
+        "either: no systemctl, kubectl, gh, home-manager, nixos-rebuild, "
+        "pkill, systemd-run, notify-send, rofi, yad, xdotool, i3-msg, openrgb "
+        "or espanso"),
 }
 
 

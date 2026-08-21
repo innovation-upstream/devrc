@@ -308,7 +308,15 @@ warn_ignored_overwrites() {
 # home-manager generation, i.e. the authoritative list of every path
 # home-manager deployed here. Two locations are probed because home-manager has
 # used both; the first that exists wins. The trailing slash on the -d test is
-# load-bearing: home-files is itself a SYMLINK into the store.
+# BELT-AND-BRACES, NOT load-bearing, and this comment used to claim otherwise
+# ("home-files is itself a SYMLINK into the store"). That reason is wrong: `-d`
+# already resolves a symlink. MEASURED 2026-08-21 under bash 5.3 — `[ -d X ]`
+# and `[ -d X/ ]` agree on a real directory (both true), on a symlink to one
+# (both true) and on a dangling symlink (both false), so the slash changes
+# nothing here. It is kept because strict POSIX pathname resolution does require
+# a directory for a trailing slash and not every /bin/sh is bash. A mutation
+# sweep that removes it and reports SURVIVED is right; it is an equivalent
+# mutant, not a coverage gap.
 ma_manifest() {
   ma_state="${XDG_STATE_HOME:-$HOME/.local/state}"
   for ma_c in "$ma_state/home-manager/gcroots/current-home/home-files" \
