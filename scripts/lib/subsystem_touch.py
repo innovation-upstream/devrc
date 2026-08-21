@@ -4451,22 +4451,29 @@ class OpenAction:
 # turn that wrote it, which is the difference between "someone eventually notices"
 # and "the writer is told".
 #
-# 🔴 WHICH HEADINGS, AND WHY NOT `## What it is`. The checked set is the set the
-# CODE PARSES. `## What it is` is written by 56 of 56 entries and read by nothing
-# — `SURFACED_HEADINGS` excludes it deliberately, so its absence changes no read,
-# no count and no badge. Flagging it would report a convention with no consequence
-# beside two whose consequence is measured, and a writer cannot tell those apart
-# in a list. It is a documentation gap, not a validator finding.
+# 🔴 WHICH HEADINGS, AND WHY STILL NOT `## What it is`. The checked set is the set
+# whose absence makes a NUMBER wrong. `## What it is` IS read now —
+# `subsystem_recall` surfaces it in every printed body since 2026-08-20, and
+# before that nothing on any path printed it — but it feeds no bullet count and no
+# index badge, so a missing one cannot turn a parse failure into a well-formed
+# empty entry the way a missing `## Nuance / work-history` can. Flagging it would
+# report a convention with no numeric consequence beside two whose consequence is
+# measured, and a writer cannot tell those apart in a list. The reader names its
+# absence under the entry's own body, where the person reading that entry is
+# already looking.
 SHAPE_HEADINGS: tuple[str, ...] = (POINTERS_HEADING, NUANCE_HEADING)
-"""The schema headings whose absence has a MEASURED consequence on the read path.
+"""The schema headings whose absence makes a COUNT or a BADGE wrong on the read
+path.
 
-⚠ It coincides today with `subsystem_recall.SURFACED_HEADINGS` and is deliberately
-not imported from it: `subsystem_recall` imports THIS module, so the direction is
-impossible, and the two tuples answer different questions anyway — that one is a
-DISPLAY choice ("which sections does the reader print"), this one is a CHECK
-("which sections must exist for any reader to find anything"). They are pinned
-against each other by `test_subsystem_touch.py` rather than merged, so a display
-decision cannot silently become a validation rule.
+⚠ Pinned against `subsystem_recall.COUNTED_HEADINGS` — NOT its `SURFACED_HEADINGS`,
+which is wider — and deliberately not imported from either: `subsystem_recall`
+imports THIS module, so the direction is impossible. The tuples answer different
+questions: `SURFACED_HEADINGS` is a DISPLAY choice ("which sections does a printed
+body render"), `COUNTED_HEADINGS` and this one are a CHECK ("which sections must
+exist before any number this tool prints is a measurement"). Pinned by
+`test_subsystem_touch.py` rather than merged, so a display decision cannot
+silently become a validation rule — and, since the two now genuinely differ, so
+that widening the display set does not drag the validator along behind it.
 """
 
 SHAPE_ABSENT = "absent"
@@ -4968,8 +4975,10 @@ def _render_validation_shape(report: ValidationReport) -> list[str]:
     if not report.shape:
         out.append(
             f"entry shape: {n_files} entry file(s) checked for {spine} — each present "
-            f"exactly once and non-empty. 🔴 `## What it is` is NOT checked: no reader "
-            f"parses it, so its absence changes nothing this zero is about."
+            f"exactly once and non-empty. 🔴 `## What it is` is NOT checked here: the "
+            f"reader DOES surface it, but it feeds no count and no badge, so its "
+            f"absence changes nothing this zero is about — `subsystem_recall` names a "
+            f"missing one under that entry's own body instead."
         )
         return out
     out.append(f"entry shape across {n_files} entry file(s), checked for {spine}:")

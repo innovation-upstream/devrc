@@ -85,7 +85,7 @@ import subsystem_touch as st  # noqa: E402
 SCOPE = "workbench-cfg"
 OTHER_SCOPE = "hardware-notes"
 
-WHAT_IT_IS = "A durable thing that must NEVER appear in a recall block."
+WHAT_IT_IS = "A durable thing a recall block MUST say the identity of."
 POINTER_LINE = "- ops skill `manage-widget` — invoke it for restarts"
 NUANCE_LINE = "- 2026-01-02: the readiness probe lies for 40s after a reload."
 
@@ -97,10 +97,14 @@ def _entry(
     aliases=(),
     kind=None,
     sensitivity=None,
+    what: str | None = WHAT_IT_IS,
     pointers: str | None = POINTER_LINE,
     nuance: str | None = NUANCE_LINE,
     extra_body: str = "",
 ) -> str:
+    """`what=None` omits the `## What it is` HEADING entirely; `what=""` writes
+    the heading with an empty body. They are different on-disk states (absent vs
+    present-but-empty) and the reader has to degrade cleanly on both."""
     lines = ["---", f"service: {service}", f"scope: {scope}"]
     if aliases:
         lines.append("aliases: [" + ", ".join(aliases) + "]")
@@ -108,7 +112,9 @@ def _entry(
         lines.append(f"kind: {kind}")
     if sensitivity is not None:
         lines.append(f"sensitivity: {sensitivity}")
-    lines += ["---", "", "## What it is", WHAT_IT_IS, ""]
+    lines += ["---", ""]
+    if what is not None:
+        lines += ["## What it is", what, ""]
     if pointers is not None:
         lines += ["## Pointers", pointers, ""]
     if nuance is not None:
@@ -394,25 +400,38 @@ class TestNegativeControls:
 
 
 # =============================================================================
-# WHAT IS SURFACED — the two sections, and NOTHING else.
+# WHAT IS SURFACED — the three schema sections, and NOTHING else.
 # =============================================================================
 
 
-class TestSurfacesOnlyTheTwoSections:
-    def test_what_it_is_is_NOT_surfaced(self, store: Path) -> None:
-        """🔴 The brief's hard line: recall, not a dump. `## What it is` is
-        durable boilerplate a resuming session either knows or can open."""
+class TestSurfacesOnlyTheThreeSections:
+    def test_what_it_is_IS_surfaced_in_a_body(self, store: Path) -> None:
+        """🔴 THE DEFECT THIS CLASS WAS RENAMED FOR. It used to assert the
+        opposite — `## What it is` was excluded as "durable boilerplate" — and
+        measured on 2026-08-20 the exclusion meant NO reader on ANY path printed
+        the one section that says what a service IS: not `--ref`, not the digest,
+        not `service_recon`'s `index:` block. An agent briefed only on an entry
+        could not name the thing the entry was about."""
         rep = rc.recall(store, SCOPE)
         text = rc.render_text(rep)
-        assert WHAT_IT_IS not in text
-        assert "## What it is" not in text
+        assert rc.WHAT_HEADING in text
+        assert WHAT_IT_IS in text
         blob = json.dumps(rc.report_json(rep))
-        assert WHAT_IT_IS not in blob
+        assert WHAT_IT_IS in blob
 
-    def test_both_wanted_sections_ARE_surfaced(self, store: Path) -> None:
+    def test_what_it_is_is_rendered_FIRST_in_a_body(self, store: Path) -> None:
+        """It is the orienting sentence; pointers and nuance both assume the
+        reader has already identified the thing."""
         text = rc.render_text(rc.recall(store, SCOPE))
+        assert text.index(rc.WHAT_HEADING) < text.index(rc.POINTERS_HEADING)
+        assert text.index(rc.POINTERS_HEADING) < text.index(rc.NUANCE_HEADING)
+
+    def test_all_three_wanted_sections_ARE_surfaced(self, store: Path) -> None:
+        text = rc.render_text(rc.recall(store, SCOPE))
+        assert rc.WHAT_HEADING in text
         assert rc.POINTERS_HEADING in text
         assert rc.NUANCE_HEADING in text
+        assert WHAT_IT_IS in text
         assert POINTER_LINE in text
         assert NUANCE_LINE in text
 
@@ -460,6 +479,173 @@ class TestSurfacesOnlyTheTwoSections:
         rep = rc.recall(store, SCOPE)
         assert rep.entries[0].is_bare
         assert "has not been filled in" in rc.render_text(rep)
+
+    def test_a_what_it_is_stub_does_NOT_make_an_entry_look_filled_in(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 THE REGRESSION SURFACING CREATED. `is_bare` used to read every
+        value in `sections`, and `sections` now carries `## What it is` — which
+        the writer's own `new_entry_template` PRE-FILLS with a placeholder. Read
+        naively, every freshly created stub would report as filled-in and lose
+        the "has not been filled in" notice in exactly the case it exists for."""
+        store = tmp_path / "s"
+        (store / SCOPE).mkdir(parents=True)
+        (store / SCOPE / "collector.md").write_text(
+            _entry("collector", SCOPE, what="<one line: what this thing IS.>",
+                   pointers=None, nuance=None),
+            encoding="utf-8",
+        )
+        rep = rc.recall(store, SCOPE)
+        assert rep.entries[0].sections[rc.WHAT_HEADING]  # the stub IS there…
+        assert rep.entries[0].is_bare  # …and the entry is still bare.
+        assert "has not been filled in" in rc.render_text(rep)
+
+
+class TestWhatItIsDegradesCleanly:
+    """An entry whose `## What it is` is absent, or present-but-empty, must not
+    crash and must not print a stray heading with nothing under it.
+
+    🔴 ABSENT AND PRESENT-BUT-EMPTY ARE DIFFERENT ON-DISK STATES and the
+    extractor tells them apart (`TestSectionExtraction`), so both are exercised:
+    a renderer keyed on `in sections` rather than on truthiness would print a
+    bare `## What it is` line for the second one.
+    """
+
+    def _one(self, tmp_path: Path, **kw) -> str:
+        # A store per call — the loop below builds two, and reusing one path
+        # would make the second render read the FIRST fixture's file.
+        store = tmp_path / ("absent" if kw.get("what") is None else "empty")
+        (store / SCOPE).mkdir(parents=True)
+        (store / SCOPE / "collector.md").write_text(
+            _entry("collector", SCOPE, **kw), encoding="utf-8"
+        )
+        return rc.render_text(rc.recall(store, SCOPE))
+
+    def test_an_ABSENT_what_it_is_prints_no_stray_heading(self, tmp_path: Path) -> None:
+        text = self._one(tmp_path, what=None)
+        assert f"    {rc.WHAT_HEADING}\n" not in text
+        assert POINTER_LINE in text and NUANCE_LINE in text
+
+    def test_an_EMPTY_what_it_is_prints_no_stray_heading(self, tmp_path: Path) -> None:
+        text = self._one(tmp_path, what="")
+        assert f"    {rc.WHAT_HEADING}\n" not in text
+        assert POINTER_LINE in text and NUANCE_LINE in text
+
+    def test_both_states_are_NAMED_not_silently_dropped(self, tmp_path: Path) -> None:
+        """Said, not left blank — the rule the bare-entry notice already
+        follows. Nothing printed is indistinguishable from an extractor that
+        failed to find the section."""
+        for kw in ({"what": None}, {"what": ""}):
+            text = self._one(tmp_path, **kw)
+            assert "never says what the subsystem IS" in text, kw
+
+    def test_the_notice_does_NOT_reach_the_index_row(self, tmp_path: Path) -> None:
+        """🔴 The body is where the reader is already looking; the index row is
+        printed once PER ENTRY and this decision leaves it at zero bytes. A
+        missing `## What it is` is also NOT a `🔴 NO <heading>` badge, because
+        that badge means "a count on this row is not a measurement" and this
+        section feeds no count."""
+        store = tmp_path / "s"
+        (store / SCOPE).mkdir(parents=True)
+        (store / SCOPE / "collector.md").write_text(
+            _entry("collector", SCOPE, what=None), encoding="utf-8"
+        )
+        rep = rc.recall(store, SCOPE)
+        assert rep.entries[0].missing_sections == ()
+        row = rc.listing_line(rep.listing[0], 20)
+        assert "🔴" not in row and "What it is" not in row
+        # …and a control that the badge machinery is not simply inert here: an
+        # entry missing a COUNTED heading in the same store DOES badge its row.
+        (store / SCOPE / "other.md").write_text(
+            _entry("other", SCOPE, nuance=None), encoding="utf-8"
+        )
+        rows = {e.ref: rc.listing_line(e, 20) for e in rc.recall(store, SCOPE).listing}
+        assert "🔴 NO Nuance / work-history" in rows["other"]
+        assert "🔴" not in rows["collector"]
+
+
+class TestWhatItIsIsBodyOnlyNotPerEntry:
+    """🔴 THE DECISION, MACHINE-CHECKED. Surfacing `## What it is` is unambiguous
+    on the SINGLE-entry paths; the risk was the multi-entry ones, where a scope
+    holding N entries would pay N copies of it.
+
+    The choice: **the full section in every printed BODY, and nothing at all on
+    the index rows.** A body is printed once per `--ref`, once per digest and
+    `--limit N` times in `full` mode — which is already an explicit dump of N
+    whole entries. The index row is printed once per entry on EVERY read, which
+    is where the multiplier actually lives, so it stays byte-identical.
+
+    The tests below pin that as a COUNT THAT DOES NOT SCALE WITH N: grow the
+    scope and the digest's occurrence count must stay at 1. Asserting merely
+    that it "appears" would pass just as well for a renderer that printed it N
+    times, which is the outcome this decision exists to prevent.
+    """
+
+    @staticmethod
+    def _scope_of_size(root: Path, n: int) -> Path:
+        store = root / "index-store"
+        (store / SCOPE).mkdir(parents=True)
+        for i in range(n):
+            (store / SCOPE / f"svc-{i:02d}.md").write_text(
+                _entry(f"svc-{i:02d}", SCOPE), encoding="utf-8"
+            )
+        return store
+
+    def test_the_digest_prints_it_ONCE_however_many_entries_the_scope_holds(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 TWO POINTS ON THE DIMENSION, per `claude/RULES.md` — one
+        measurement of a size-dependent claim is not a general claim. 3 and 24
+        are a boundary and a middle; 24 is deliberately not a multiple of the
+        default entry limit."""
+        counts = {}
+        for n in (3, 24):
+            store = self._scope_of_size(tmp_path / f"n{n}", n)
+            text = rc.render_text(rc.recall(store, SCOPE))
+            assert text.count("### ") == 1, "the digest stopped printing exactly one body"
+            counts[n] = text.count(WHAT_IT_IS)
+        assert counts == {3: 1, 24: 1}, counts
+
+    def test_the_index_rows_carry_NO_what_it_is_at_all(self, tmp_path: Path) -> None:
+        """`--list` prints the whole index and no bodies. It is the pure
+        per-entry surface, so its occurrence count is the one that must be 0."""
+        store = self._scope_of_size(tmp_path, 24)
+        rep = rc.recall(store, SCOPE, mode="list")
+        text = rc.render_text(rep)
+        assert "NO ENTRY BODIES WERE PRINTED" in text
+        assert WHAT_IT_IS not in text
+        assert rc.WHAT_HEADING not in "\n".join(
+            rc.listing_line(e, 12) for e in rep.listing
+        )
+
+    def test_a_ref_lookup_prints_the_FULL_section_not_a_first_line(
+        self, tmp_path: Path
+    ) -> None:
+        """The other half of the decision: `--ref` is the single-entry path
+        `service_recon` uses, and it is not truncated. A first-line-only render
+        would silently drop the p90 entry's other 7 lines."""
+        store = tmp_path / "s"
+        (store / SCOPE).mkdir(parents=True)
+        body = "Line one of the description.\nLine two.\nLine three, the last."
+        (store / SCOPE / "collector.md").write_text(
+            _entry("collector", SCOPE, what=body), encoding="utf-8"
+        )
+        text = rc.render_text(rc.recall(store, SCOPE, ref="collector"))
+        for line in body.splitlines():
+            assert line in text
+
+    def test_full_mode_prints_it_per_BODY_which_is_the_opt_in_dump(
+        self, tmp_path: Path
+    ) -> None:
+        """Stated rather than left implicit: `--mode full --limit N` DOES pay N
+        copies. That mode already prints N whole entries on purpose, and across
+        the live store `## What it is` is the smallest of the three sections
+        (26 KB vs `## Pointers` 49 KB vs `## Nuance` 235 KB, measured
+        2026-08-20)."""
+        store = self._scope_of_size(tmp_path, 5)
+        text = rc.render_text(rc.recall(store, SCOPE, mode="full", limit=5))
+        assert text.count("### ") == 5
+        assert text.count(WHAT_IT_IS) == 5
 
 
 class TestSectionExtraction:
@@ -2174,19 +2360,19 @@ class TestSearchOutputContract:
         assert rep.hunks[0].start == 1
         assert len(rep.hunks[0].lines) == len(raw)
 
-    def test_search_covers_WHAT_IT_IS_which_the_digest_deliberately_hides(
+    def test_search_covers_WHAT_IT_IS_like_every_other_section(
         self, search_store: Path
     ) -> None:
-        """🔴 A DELIBERATE DIVERGENCE, stated so it is not read as a leak of the
-        digest's rule. The digest excludes `## What it is` because printing it for
-        every entry turns recall into a dump; a SEARCH is a targeted question and
-        hiding a section would answer it with a confident zero. The hunk names its
-        section, so the reader always knows which one they got."""
+        """Search has always covered `## What it is` — a targeted question, and
+        hiding a section would answer it with a confident zero. The hunk names
+        its section, so the reader always knows which one they got.
+
+        ⚠ This test used to end by asserting the DIGEST hid the same section. It
+        no longer does: search and the digest now agree, and the divergence this
+        docstring used to justify is gone."""
         rep = rc.search(search_store, SEARCH_SCOPE, "durable")
         assert rep.hunks
         assert any("What it is" in h.section for h in rep.hunks)
-        # …and the digest's rule is untouched.
-        assert WHAT_IT_IS not in rc.render_text(rc.recall(search_store, SEARCH_SCOPE))
 
     def test_the_hunk_truncation_is_LOUD(self, search_store: Path) -> None:
         rep = rc.search(search_store, SEARCH_SCOPE, "the", threshold=0.5, max_hits=2)
@@ -2763,9 +2949,16 @@ class TestCli:
             assert forbidden not in help_text, f"the reader grew {forbidden}"
 
     def test_the_help_states_the_read_only_contract(self) -> None:
-        help_text = rc._build_parser().format_help()
+        # ⚠ WHITESPACE-NORMALIZED, and that is a FIX not a loosening. argparse
+        # re-wraps the description to the terminal width, so whether a phrase
+        # survives as a literal substring depends on `COLUMNS` and on how long
+        # the sentence before it happens to be — this assertion went red on a
+        # description edit that did not touch either phrase. The claim under
+        # test is "the help says these words", never "at this column".
+        help_text = " ".join(rc._build_parser().format_help().split())
         assert "never writes to the store" in help_text
         assert "never touches the network" in help_text
+        assert "## What it is" in help_text
 
     def test_list_prints_the_index_and_no_bodies(self, store: Path, capsys) -> None:
         assert rc.main(["--store", str(store), "--scope", SCOPE, "--list"]) == 0
@@ -3746,22 +3939,37 @@ class TestMutationKillMatrix:
         rep = mod.recall(store, SCOPE, limit=0, mode="full")
         assert rep.entries == (), "limit=0 silently surfaced nothing instead of erroring"
 
-    def test_kills_the_what_it_is_exclusion(self, tmp_path: Path) -> None:
-        """🔴 Without it the recall block becomes a dump of the store — the one
-        thing the brief forbids, and invisible to any test that only checks the
-        two wanted sections ARE present."""
+    def test_kills_the_what_it_is_INCLUSION(self, tmp_path: Path) -> None:
+        """🔴 THE RED HALF OF THE FIX, PERMANENTLY. Drop `WHAT_HEADING` back out
+        of `SURFACED_HEADINGS` — the exact pre-2026-08-20 source — and the recall
+        block silently stops answering "what IS this thing", which is the defect
+        the change exists to close. Invisible to any test that only checks the
+        other two sections are present, which is how it survived for months.
+
+        ⚠ This mutation is the INVERSE of the one that used to live here: the
+        anchor asserts the shipped source really carries the wider tuple, so the
+        test cannot pass by mutating a line that no longer exists."""
         mod = _load_mutant(
             tmp_path,
             "m_sections",
             [
                 (
+                    'SURFACED_HEADINGS: tuple[str, ...] = (WHAT_HEADING, POINTERS_HEADING, NUANCE_HEADING)',
                     'SURFACED_HEADINGS: tuple[str, ...] = (POINTERS_HEADING, NUANCE_HEADING)',
-                    'SURFACED_HEADINGS: tuple[str, ...] = (POINTERS_HEADING, NUANCE_HEADING, "## What it is")',
                 )
             ],
         )
         store = _make_store(tmp_path / "s")
-        assert WHAT_IT_IS in mod.render_text(mod.recall(store, SCOPE))
+        text = mod.render_text(mod.recall(store, SCOPE))
+        # The CONTENT sentinel, not the heading string: the mutant still prints
+        # the "(no `## What it is` content …)" note, so grepping the heading
+        # would score this mutant SURVIVED for a reason that has nothing to do
+        # with the section being surfaced.
+        assert WHAT_IT_IS not in text
+        # …and the kill is distinguishable from a broken harness: the other two
+        # sections still render, so this is a section-SELECTION kill and not
+        # "the renderer produced nothing".
+        assert POINTER_LINE in text and NUANCE_LINE in text
 
     # ⚠ THE FENCE-SKIP AND PRESENT-BUT-EMPTY KILLS MOVED TO
     # test_subsystem_resolver.py, with the parser itself. `extract_sections` is
