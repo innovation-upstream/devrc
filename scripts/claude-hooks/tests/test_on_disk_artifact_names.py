@@ -521,6 +521,13 @@ PINNED_HERE = {
 OWNS_NO_ON_DISK_STATE = {
     "agent-ledger-hook.py",      # delegates every path to lib/agent_ledger.py
     "audit-pr-nudge.py",         # stateless: decides from the payload alone
+    "clawgate-task-interview-guard.py",  # stateless: the verdict is a pure function
+                                 # of the command text plus any --body-file it
+                                 # READS. It writes nothing, keeps no ledger and has
+                                 # no throttle, so there is no name to rename. It is
+                                 # the one hook here that is deliberately memoryless:
+                                 # a per-session "already asked" counter would let a
+                                 # second create in the same turn through unchecked.
     "bash-guard.py",             # thin wrapper over guard_core.py
     "guard_core.py",             # pure predicate library
     "register-nudge-hook.py",    # writes ~/.claude/settings.json; the deployed-path
