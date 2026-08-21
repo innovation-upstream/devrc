@@ -92,7 +92,9 @@ Result payloads land under `.result.data`.
 4. **A JS `.click()` does not open a React/Mantine popover — and the read then
    reports a confident ABSENCE.** Use the trusted **`click`** op, **ONCE** (it is a
    TOGGLE, so a stale earlier click makes the next read lie); prove it with
-   `aria-expanded`. → `reference/css-hit-test.md`
+   `aria-expanded`. **And an OPEN menu can still hide a SECOND VIEW behind a
+   chevron-row drill-in — its items are not in the DOM until you click it, so
+   "not in the dropdown" is NOT "not in the UI".** → `reference/css-hit-test.md`
 
 ## When things look broken — triage
 
@@ -132,4 +134,4 @@ explicitly. Why, and the commands → `reference/spa-wake.md`.
 | `reference/auth-pages.md` | an authenticated request; you were about to read a cookie; a read looks logged-OUT; `extension_connected:false` |
 | `reference/security-ops.md` | 🔴 **you are MODIFYING browser-bridge** (the live-verify-on-real-Brave gate is mandatory); the user asks whether/what it records; first-time setup or a second profile |
 | `reference/x-fallback.md` | CDP `screenshot` is unsatisfactory and you must capture the raw X window (`DISPLAY`/`XAUTHORITY`, xdotool/maim) |
-| `reference/sites/<host>.md` | you are driving a site that has one — the CLI names it in the result envelope |
+| `reference/sites/<host>.md` | 🔴 **READ IT BEFORE the first action on that host, not after something fails** — the CLI names it in every result envelope (`site_notes`). It carries that site's **multi-step FLOWS** (sign-in, account switching, pickers, wizards) plus the reads that lie there. Skipping it is how a one-click flow gets reported to the operator as a blocker |
