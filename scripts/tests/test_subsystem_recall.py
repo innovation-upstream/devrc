@@ -3580,9 +3580,21 @@ class TestSkillDocsArePinned:
 
     def test_the_recall_step_comes_AFTER_the_handoff_is_read(self) -> None:
         """Structural, not a phrase: recall is context for a doc already read,
-        not a substitute for reading it."""
+        not a substitute for reading it.
+
+        🔴 THE ANCHOR IS A PREFIX, AND THE CLOSING `**` IS DELIBERATELY NOT IN
+        IT. This docstring said "structural, not a phrase" while `.index()`
+        pinned the phrase `**Read it fully.**` closed — so `#643` appending a
+        clause inside the same bold span (`**Read it fully — but treat …**`)
+        reddened `main` for a reword that preserved every claim this test makes.
+        The subject here is the ORDERING, not the wording, so the anchor must
+        survive a continuation of that step and still vanish if the step does.
+        Pinning the whole normalised line is the right move when the PROSE is
+        the claim; it is the wrong move here, where it would fail on any edit to
+        an unrelated clause.
+        """
         doc = RESUME_DOC.read_text(encoding="utf-8")
-        read_it = doc.index("**Read it fully.**")
+        read_it = doc.index("**Read it fully")
         # The INVOCATION, not the bare filename: `resume-state.sh` is also named
         # in step 1's prose, so `.index()` on the bare name finds a point BEFORE
         # the handoff is read and the ordering claim inverts.
