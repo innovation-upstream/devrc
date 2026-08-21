@@ -1292,8 +1292,21 @@ class SignalDB:
                 """
                 SELECT m.id, m.message_timestamp, m.body, m.send_state,
                        m.approval_ref, m.source_contact_id, m.dest_contact_id,
+                       -- `signal_uuid` is uuid, `phone_number` is text, and
+                       -- Postgres type-checks the WHOLE CASE regardless of which
+                       -- branch would run — so an uncast COALESCE here raises
+                       -- DatatypeMismatch for EVERY draft, breaking approve(),
+                       -- send() and reconcile() alike (they all reach this).
+                       -- The hermetic suite cannot see it: its substrate is
+                       -- SQLite, which is dynamically typed and accepts the
+                       -- uncast form.
+                       -- 🔴 Use ANSI `CAST(... AS text)`, NOT Postgres's `::`.
+                       -- SQLite cannot parse `::`, so the pg-only spelling
+                       -- turns 53 hermetic tests red — measured, not guessed.
+                       -- The cast must satisfy BOTH engines or one of the two
+                       -- gates goes blind.
                        CASE WHEN d.is_placeholder THEN d.phone_number
-                            ELSE COALESCE(d.signal_uuid, d.phone_number)
+                            ELSE COALESCE(CAST(d.signal_uuid AS text), d.phone_number)
                        END AS recipient
                 FROM signal.messages m
                 LEFT JOIN signal.contacts d ON d.id = m.dest_contact_id
