@@ -190,7 +190,7 @@ def test_a_STALLED_POSTGRES_CANNOT_FREEZE_THE_LIVENESS_FILE(tmp_path, monkeypatc
 
     So completed WRITES are counted at the sink itself. After `first` is read the
     counter is drained to zero, which retires every write that could already have
-    happened; the two acquired after that are therefore writes that completed
+    happened; the three acquired after that are therefore writes that completed
     strictly later than `first`, and the file loop is a single thread, so their
     payloads carry strictly larger stamps. Nothing depends on how long any of it
     takes.
