@@ -245,16 +245,28 @@ loki.process "scrub" {
   //        tail is what required the leaky value class above.
 
   // 2a. Quoted value — JSON, YAML, config dumps, and any secret containing a
-  //     comma, semicolon or space.
+  //     comma, semicolon or space. `(?:[^'"\\]|\\.)*` rather than `[^'"]*` so an
+  //     ESCAPED quote inside the value does not end the match early: with the
+  //     simpler class, {"password": "a\\"b"} redacted to "[REDACTED]"b" and one
+  //     character of the secret survived (measured).
   stage.replace {
-    expression = "(?i)(?:access[_-]?key|secret[_-]?key|api[_-]?key|secret|token|password|passwd|authorization)[\"']?\\s*[=:]\\s*(?:bearer\\s+|basic\\s+)?['\"]([^'\"]*)['\"]"
+    expression = "(?i)(?:access[_-]?key|secret[_-]?key|api[_-]?key|secret|token|password|passwd|authorization)[\"']?\\s*[=:]\\s*(?:bearer\\s+|basic\\s+)?['\"]((?:[^'\"\\\\]|\\\\.)*)['\"]"
     replace    = "[REDACTED]"
   }
 
-  // 2b. Unquoted value — runs to whitespace. Excluding quotes keeps it
-  //     idempotent over 2a's output instead of re-eating `", "user": ...`.
+  // 2b. Unquoted value — runs to whitespace.
+  //
+  //     The leading `['"]?` catches an UNTERMINATED quoted value. Without it,
+  //     2a needs a closing quote and 2b cannot start on one, so
+  //     `password: "abcdef` (a line journald split at LineMax, say) shipped in
+  //     CLEAR — a redaction the single-rule version did perform. Measured.
+  //
+  //     The class excludes `"` but ALLOWS `'`: excluding `"` is what keeps this
+  //     idempotent over 2a's output (`"[REDACTED]", "user": ...`), while
+  //     allowing `'` stops `password=ab'cd` truncating to `[REDACTED]'cd` —
+  //     the same partial-leak class as everything else here.
   stage.replace {
-    expression = "(?i)(?:access[_-]?key|secret[_-]?key|api[_-]?key|secret|token|password|passwd|authorization)[\"']?\\s*[=:]\\s*(?:bearer\\s+|basic\\s+)?([^\\s\"']+)"
+    expression = "(?i)(?:access[_-]?key|secret[_-]?key|api[_-]?key|secret|token|password|passwd|authorization)[\"']?\\s*[=:]\\s*(?:bearer\\s+|basic\\s+)?['\"]?([^\\s\"]+)"
     replace    = "[REDACTED]"
   }
 
@@ -264,7 +276,8 @@ loki.process "scrub" {
   //    OVER-REDACTS ENGLISH PROSE containing "basic ". Quantified against this
   //    host's real journal (100,609 lines over 7 days): 8 lines altered, 7 of
   //    them `Reached target Basic System.` -> `Reached target Basic [REDACTED]`.
-  //    0.008%, and nothing under scripts/ parses `Reached target`. Kept because
+  //    0.008%, all `Reached`/`Stopped target Basic System.`, and nothing under
+  //    scripts/ parses those. Kept because
   //    `Authorization: Basic` with no separator is a real credential shape and
   //    missing it is the costlier error. Asserted in the tests.
   stage.replace {

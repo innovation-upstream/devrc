@@ -108,14 +108,17 @@ def _replace_stages(text: str):
     """[(expression, replace)] for each stage.replace block, in file order."""
     import re
 
-    return [
-        (m.group(1).encode().decode("unicode_escape"), m.group(2))
-        for m in re.finditer(
-            r'stage\.replace\s*\{\s*expression\s*=\s*"((?:[^"\\]|\\.)*)"\s*'
-            r'replace\s*=\s*"((?:[^"\\]|\\.)*)"',
-            text,
-        )
-    ]
+    # BOTH attribute orders. Requiring expression-then-replace meant a block
+    # written the other way was skipped SILENTLY — alloy accepts it and the rule
+    # fires, so it was a live, unasserted redaction rule.
+    out = []
+    for block in re.finditer(r"stage\.replace\s*\{(.*?)\n\s*\}", text, re.S):
+        body = block.group(1)
+        expr = re.search(r'expression\s*=\s*"((?:[^"\\]|\\.)*)"', body)
+        repl = re.search(r'replace\s*=\s*"((?:[^"\\]|\\.)*)"', body)
+        if expr and repl:
+            out.append((expr.group(1).encode().decode("unicode_escape"), repl.group(1)))
+    return out
 
 
 def _apply(stages, line: str) -> str:
@@ -141,12 +144,12 @@ def _apply(stages, line: str) -> str:
 def test_every_replace_stage_in_the_config_is_parsed():
     """POSITIVE CONTROL, pinned TWO-WAY.
 
-    `>= 3` was not enough: the parser requires `expression` to be immediately
-    followed by `replace`, so a rule written with the attributes in the other
-    order is skipped silently. Measured — appending a valid 4th stage with
-    `replace` first left the parser returning 3 and the whole suite green, with
-    the new rule entirely unasserted. Counting the literal blocks makes an
-    unparsed rule fail here instead of passing invisibly.
+    A bare `>= N` floor is not enough: a rule this file's parser cannot read is
+    asserted by NOTHING while the suite stays green, and alloy runs it happily.
+    Measured three separate ways in: attributes in the reverse order, an opening
+    brace written `stage.replace{`, and a same-line comment prefix. Comparing
+    the parsed count against the count of live blocks makes an unreadable rule
+    fail HERE rather than pass invisibly.
     """
     import re
 
@@ -157,13 +160,13 @@ def test_every_replace_stage_in_the_config_is_parsed():
     live = "\n".join(
         ln for ln in text.splitlines() if not ln.strip().startswith("//")
     )
-    # 🔴 A REGEX, not `live.count("stage.replace {")`. The literal missed
-    # `stage.replace{` (no space) — measured: alloy accepts it, the rule FIRES
-    # in a real run, and the pin still reported 3-of-3 PASS with that rule
-    # asserted by nothing. One absent space reopened the exact hole this closes.
-    # It was also brittle the other way: `stage.replace  {` failed with a
-    # message describing the opposite problem.
-    declared = len(re.findall(r"^\s*stage\.replace\s*\{", live, re.M))
+    # 🔴 A REGEX, and deliberately UNANCHORED. Two bypasses were measured, each
+    # a live rule that alloy accepted and that FIRED, while this pin still
+    # passed: `stage.replace{` (no space) defeated a literal `count()`, and a
+    # same-line prefix such as `/* x */ stage.replace {` defeated a `^\s*`
+    # anchor. `_replace_stages` now also accepts either attribute order, so both
+    # halves of that hole are closed rather than one.
+    declared = len(re.findall(r"stage\.replace\s*\{", live))
     stages = _replace_stages(text)
     assert declared >= 4, f"expected the redaction rules, found {declared} live blocks"
     assert len(stages) == declared, (
@@ -198,12 +201,29 @@ MEASURED_REDACTIONS = [
      "app: password=[REDACTED] done"),
     ("app: password=a&b&c done",
      "app: password=[REDACTED] done"),
+    # The trailing quote is consumed: 2b allows `'` in the value class (so that
+    # `password=ab'cd` cannot truncate), and therefore eats 2a's closing quote.
+    # Cosmetic, and the right side of the trade — measured, not assumed.
     ("app: password='sq;uote' done",
-     "app: password='[REDACTED]' done"),
+     "app: password='[REDACTED] done"),
     ("env: SECRET_KEY='django-insecure-ab,cd' done",
-     "env: SECRET_KEY='[REDACTED]' done"),
+     "env: SECRET_KEY='[REDACTED] done"),
     ("app: password: \"two words here\" done",
      "app: password: \"[REDACTED]\" done"),
+    # --- quote edge cases, each a leak that shipped at some point ---------
+    # UNTERMINATED quoted value (journald splits long lines at LineMax). 2a
+    # needs a closing quote and 2b could not start on one, so this shipped in
+    # CLEAR for one round — a redaction the earlier single-rule version did do.
+    ('app: password: "abcdef',
+     'app: password: "[REDACTED]'),
+    ("app: password: 'abcdef",
+     "app: password: '[REDACTED]"),
+    # A quote INSIDE an unquoted value truncated to `[REDACTED]'cd`.
+    ("app: password=ab'cd done",
+     "app: password=[REDACTED] done"),
+    # An ESCAPED quote ended 2a's match early, leaving one character behind.
+    ('app: {"password": "a\\"b", "user": "bob"}',
+     'app: {"password": "[REDACTED]", "user": "bob"}'),
     # --- schemes ----------------------------------------------------------
     ("req: Authorization: Bearer JWTaaa.bbb.ccc done",
      "req: Authorization: Bearer [REDACTED] done"),
