@@ -52,6 +52,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 from testlib.mockbin import write_exec  # noqa: E402
+from testlib.afunix import bind_socket_at  # noqa: E402
+
+# See the same list in test_reclaim_managed_paths.py: the socket inode outlives
+# its fd, so this only keeps the objects from being collected mid-test.
+_sockets = []
 
 DRIFT = REPO_ROOT / "scripts" / "drift-check.sh"
 RECLAIM = REPO_ROOT / "scripts" / "reclaim-managed-paths.sh"
@@ -5055,10 +5060,11 @@ def test_a_non_regular_file_at_a_managed_path_is_blocking_not_self_healing(
         t.parent.mkdir(parents=True, exist_ok=True)
         os.mkfifo(t)
     else:
-        import socket
+        # NOT a bare `s.bind(str(t))`. bind(2)'s `sun_path` is 108 bytes and
+        # this path under `nix-shell`'s TMPDIR is 115 — which is the env the
+        # pre-push gate runs in. See scripts/testlib/afunix.py.
         t.parent.mkdir(parents=True, exist_ok=True)
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.bind(str(t))
+        _sockets.append(bind_socket_at(t))
 
     rc, out = bounded_check(fleet, "--no-remote",
                             DRIFT_HOME_FILES=str(manifest),

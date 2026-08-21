@@ -42,6 +42,8 @@ has the bug.
 import os
 import re
 import signal
+import socket
+import stat
 import subprocess
 import shutil
 import sys
@@ -51,6 +53,14 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
+
+from testlib.afunix import SUN_PATH_MAX, bind_socket_at  # noqa: E402
+
+# Sockets returned by `bind_socket_at` are parked here for the life of the
+# process. The inode survives the fd being closed, so this is belt-and-braces
+# against a GC'd socket object doing anything surprising mid-test; it is not a
+# leak the suite has to manage (a few dozen fds at most).
+_sockets = []
 
 RECLAIM = REPO_ROOT / "scripts" / "reclaim-managed-paths.sh"
 HOME_NIX = REPO_ROOT / "nix" / "home.nix"
@@ -434,12 +444,56 @@ def occupy(home, rel, kind):
     elif kind == "fifo":
         os.mkfifo(p)
     elif kind == "socket":
-        import socket
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.bind(str(p))
+        # NOT a bare `s.bind(str(p))`. bind(2)'s `sun_path` is 108 bytes and
+        # `tmp_path` under `nix-shell`'s TMPDIR is 115 — which is the env the
+        # pre-push gate runs in. See scripts/testlib/afunix.py.
+        _sockets.append(bind_socket_at(p))
     else:                                       # pragma: no cover - typo guard
         raise AssertionError("unknown kind %r" % kind)
     return p
+
+
+def test_the_socket_fixture_works_at_a_path_LONGER_than_sun_path(tmp_path):
+    """🔴 THE FIXTURE ITSELF, pinned at the length that broke it.
+
+    `socket.bind()` is limited by `sun_path` — 108 bytes on Linux, path
+    INCLUDED — and the two socket fixtures in this repo bound directly at
+    `tmp_path/…`. Under a bare `pytest` that is 62 chars and green; under
+    `nix-shell -p …`, which sets `TMPDIR=/tmp/nix-shell-<pid>-<n>`, it is 115
+    and raises `OSError: AF_UNIX path too long`. `githooks/tests-on-push.sh`
+    runs the whole suite inside exactly that nix-shell, so both files went RED
+    on every push while being green for whoever wrote them.
+
+    This test does not depend on the ambient `TMPDIR` to reproduce that: it
+    builds a path deliberately past the limit and asserts the helper still
+    produces a real socket there. It is the negative control for the harness —
+    revert `bind_socket_at` to a direct bind and it raises OSError here on every
+    host, not only under nix-shell.
+    """
+    deep = tmp_path
+    while len(str(deep)) < SUN_PATH_MAX + 40:
+        deep = deep / "padpadpadpadpadpad"
+    target = deep / "occupied"
+    assert len(str(target).encode()) > SUN_PATH_MAX, (
+        "the fixture path is only %d bytes — under the %d-byte limit, so this "
+        "test would pass against the very bug it exists for"
+        % (len(str(target).encode()), SUN_PATH_MAX))
+
+    _sockets.append(bind_socket_at(target))
+    assert stat.S_ISSOCK(os.lstat(target).st_mode), (
+        "bind_socket_at produced %o at a %d-byte path, not a socket"
+        % (os.lstat(target).st_mode, len(str(target).encode())))
+
+    # The positive control for the LIMIT itself: a direct bind at this same path
+    # MUST still fail. Without it, a kernel or libc that had quietly raised the
+    # limit would make the assertion above true for a reason that has nothing to
+    # do with the helper, and the whole guard would be vacuous.
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        with pytest.raises(OSError):
+            s.bind(str(deep / "direct"))
+    finally:
+        s.close()
 
 
 @pytest.mark.parametrize("kind", ["directory", "fifo", "socket"])

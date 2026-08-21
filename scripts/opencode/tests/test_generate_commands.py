@@ -52,6 +52,14 @@ def run(src, out, *, home=None, store_prefix=None, extra_env=None):
     if home is not None:
         env["HOME"] = str(home)
         env.pop("XDG_STATE_HOME", None)
+    # 🔴 POP BEFORE THE CONDITIONAL SET, unconditionally. This env is a COPY of
+    # the caller's, and `GENERATE_COMMANDS_STORE_PREFIX` is a real override the
+    # generator honours (`_default_prefix()` pops it for exactly this reason).
+    # Without this line the tests that deliberately pass no `store_prefix` — the
+    # ones whose whole claim is "with NO prefix override, the DEFAULT prefix is
+    # what applies" — would silently measure whatever the ambient shell exported,
+    # and would still be green. An AMBIENT value is not a default.
+    env.pop("GENERATE_COMMANDS_STORE_PREFIX", None)
     if store_prefix is not None:
         env["GENERATE_COMMANDS_STORE_PREFIX"] = str(store_prefix)
     if extra_env:
@@ -359,4 +367,52 @@ def test_the_default_prefix_refuses_a_store_link_and_allows_a_foreign_one(tmp_pa
     )
     assert (allowed / "alpha.md").exists(), (
         "the run was allowed but produced nothing\n" + log
+    )
+
+
+def test_the_harness_does_not_leak_an_AMBIENT_prefix_into_a_no_override_run(
+        tmp_path, monkeypatch):
+    """🔴 VALIDATE THE HARNESS, not the code under test.
+
+    `run()` builds the child env from `dict(os.environ)`. Every test above that
+    passes no `store_prefix` claims to measure the PRODUCTION DEFAULT — and until
+    `run()` popped the variable, an operator (or a sibling test, or a systemd
+    unit) that had `GENERATE_COMMANDS_STORE_PREFIX` exported would have had that
+    value silently substituted for the default, with every one of those tests
+    still green. An ambient value is not a default.
+
+    The control is mechanical and cannot be satisfied by the constant's own
+    value: the ambient prefix planted here is `/definitely-not-the-store/`, which
+    `/nix/store/deadbeef-…` cannot match. If it leaked, the store link below
+    would NOT be refused and this test goes red on its own assertion.
+    """
+    monkeypatch.setenv("GENERATE_COMMANDS_STORE_PREFIX", "/definitely-not-the-store/")
+    src = skills_tree(tmp_path)
+    home = tmp_path / "empty-home"
+    home.mkdir()
+    out = tmp_path / "looks-managed"
+    out.mkdir()
+    (out / "activity.md").symlink_to("/nix/store/deadbeef-hm_activity.md")
+
+    rc, log = run(src, out, home=home)            # no store_prefix= on purpose
+    assert rc == EXIT_MANAGED_OUTPUT, (
+        "with GENERATE_COMMANDS_STORE_PREFIX exported in the AMBIENT env, a "
+        "no-override run behaved as if the prefix were %r (exit %d). run() is "
+        "leaking os.environ, so every 'run with NO prefix override' test in this "
+        "file measures the shell rather than the default.\n%s"
+        % ("/definitely-not-the-store/", rc, log)
+    )
+
+    # And the same env DOES reach the child when the test asks for it — otherwise
+    # the assertion above would pass for a `run()` that scrubbed the whole
+    # environment, which would prove nothing about the pop.
+    allowed = tmp_path / "ordinary"
+    allowed.mkdir()
+    (allowed / "activity.md").symlink_to("/definitely-not-the-store/x.md")
+    rc, log = run(src, allowed, home=home,
+                  store_prefix="/definitely-not-the-store/")
+    assert rc == EXIT_MANAGED_OUTPUT, (
+        "an EXPLICIT store_prefix= no longer reaches the child — run() is now "
+        "scrubbing rather than overriding, and the pop above proves nothing "
+        "(exit %d)\n%s" % (rc, log)
     )
