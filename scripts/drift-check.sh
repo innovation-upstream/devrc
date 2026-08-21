@@ -113,6 +113,15 @@
 #       reserved to ship.sh meanings this script does not take; its SEVERITY is
 #       set by the table, not by the digit, and it ranks between 8 and 14 — see
 #       severity() for why.
+#   19  DRIFT — a MANAGED PATH IS NOT THE LINK NIX INTENDED: the active
+#       generation's manifest declares $HOME/<path>, and what is there is a real
+#       file somebody else wrote. 🔴 THE MIRROR IMAGE OF 14, which only ever
+#       inspects symlinks and is therefore structurally blind to a symlink that
+#       has been REPLACED. ship.sh's verify_managed_artifacts documents the same
+#       hole; a content check cannot see it either, because the content usually
+#       MATCHES. Measured 2026-08-20: 19 of 488 manifest leaves on the workbench,
+#       in two unrelated subsystems, the older one 16 days undetected. See "THE
+#       WRONG-WRITER SCAN" in the parity payload.
 #   18  DRIFT — a BUILT-SOURCE SCOPE has been UNMEASURABLE for N CONSECUTIVE runs
 #       on that host, so its currency has never been evaluated and rc 17 cannot
 #       fire for it. 🔴 The gap rc 17 left: "we could not look" correctly set no
@@ -355,7 +364,7 @@
 # is reading a timer's output, so the single number it hands to systemd must be
 # the worst thing found, or an un-pushed workbench could hide behind a merely
 # behind laptop. Severity order (worst first):
-#     8 > 17 > 14 > 13 > 18 > 6 > 4 > 3 > 12 > 15 > 10 > 16
+#     8 > 17 > 14 > 19 > 13 > 18 > 6 > 4 > 3 > 12 > 15 > 10 > 16
 # 🔴 THAT ORDER IS THE severity() TABLE, NOT THE DIGITS — it never was monotonic
 # (14 outranks 13 outranks 18 outranks 6 outranks 4), and 17 is not "less severe
 # than 16" because it is larger. Every code below 16 that is still free (5, 7, 9, 11) is
@@ -389,6 +398,12 @@
 #                        "/nix/store/"). Exists so the test suite can build a
 #                        fixture tree; the default is the only correct value on
 #                        a real host, and is NOT forwarded over ssh.
+#   DRIFT_HOME_FILES     the home-manager generation manifest walked by the
+#                        WRONG-WRITER scan (rc 19). Default
+#                        "$HOME/.local/state/nix/profiles/home-manager/home-files".
+#                        Same contract as DRIFT_MANAGED_PREFIX: a test-fixture
+#                        hook, not forwarded over ssh — the remote host always
+#                        walks its own real manifest.
 #   DRIFT_SRC_FETCH_TIMEOUT  seconds each SOURCE REPO's `git fetch` may take
 #                        (default 30, integer). These are private repos over ssh
 #                        and a user unit has no agent, so the failure mode to
@@ -540,6 +555,19 @@ severity() {
     # switch with nothing to lose. It is ABOVE 13 because it is a host we DID
     # observe, saying something is wrong — 13 only says we could not look.
     14) echo 65 ;;
+    # 19 (a managed path is not the link nix intended) sits between 14 and 13.
+    #   BELOW 14, because a dangling link is broken RIGHT NOW — the file the
+    #   operator believes is deployed resolves to nothing — whereas a managed
+    #   path owned by the wrong writer still resolves and, in every instance
+    #   measured so far, still holds the right bytes. What is wrong is the
+    #   OWNERSHIP: the next change to that file will not arrive, silently.
+    #   ABOVE 13, for the same reason 14 is: this is a host we DID observe,
+    #   reporting something concrete, while 13 only says we could not look.
+    # 🔴 It is deliberately NOT a SuccessExitStatus like 16. The permanently-red
+    # hazard 16 exists to dodge does not apply, because this one is not waiting
+    # on a human to remember a one-off `rm`: home.activation.reclaimManagedPaths
+    # repairs it during any ordinary switch, so a run of ship.sh clears it.
+    19) echo 62 ;;
     13) echo 60 ;;
     # 18 (a built-source scope has been UNMEASURABLE for N consecutive runs) sits
     # between 13 and 6, and the digit says nothing about that either.
@@ -713,6 +741,14 @@ exit 0
 #   1. DANGLING MANAGED SYMLINKS. home-manager deploys by symlinking into
 #      /nix/store. A link whose target no longer exists is a file the operator
 #      believes is deployed and which is not there. rc 14.
+#   1b. THE WRONG-WRITER SCAN. A managed path the generation's manifest declares,
+#      where what is on disk is a REAL FILE somebody else wrote instead of the
+#      symlink. rc 19. This is the mirror image of (1): that check only ever
+#      inspects symlinks, so a symlink REPLACED by a file is invisible to it —
+#      and a content check cannot see it either, because the content matches.
+#      Full working in the block itself; it is the one hole three separate
+#      checks (this one, ship.sh's verify_managed_artifacts, and the currency
+#      check) each left open from a different side.
 #   2. settings.json TOP-LEVEL KEY SET. Compared across hosts by the driver.
 #   3. enabledPlugins, and any plugin ENABLED BUT NOT INSTALLED. rc 15.
 #
@@ -833,6 +869,104 @@ if [ "$P_DANGLED" -gt 0 ]; then
   fi
   psay "  fix (on that host): home-manager switch --flake ~/workspace/devrc --impure"
   p_rc=14
+fi
+
+# --- WRONG WRITER: a managed path that is NOT the link nix intended -----------
+# 🔴 THE BLIND SPOT DIRECTLY BESIDE rc 14, and the mirror image of it. rc 14 asks
+# "does this managed SYMLINK still resolve?" — it only ever looks at symlinks, so
+# a managed path where the symlink has been REPLACED by a real file is invisible
+# to it. ship.sh documents the same hole in verify_managed_artifacts ("a managed
+# path REPLACED by a real file of the same name resolves fine and is not
+# reported"), and rc 13-era currency checks compare CONTENT, which matches
+# exactly in the case that matters. Three checks, one uncovered class.
+#
+# The class is not hypothetical and it is not one subsystem: measured on the
+# workbench 2026-08-20, 19 of 488 manifest leaves — 18 opencode command files an
+# agent overwrote on 08-19 by running generate-commands.py with its output
+# directory pointed at the live deploy path, and one i3status-rust bar script
+# from 08-04 that nobody had ever noticed.
+#
+# 🔴 WHY IT DOES NOT FIX ITSELF, which is the whole reason it needs a detector:
+# `force = true` suppresses only the COLLISION CHECK — it removes nothing — and
+# the link step deliberately SKIPS a non-symlink target whose content is
+# identical to the source ("Skipping '"'"'$targetPath'"'"' as it is identical").
+# So the identical ones survive arbitrarily many switches. The ones that DIFFER
+# are relinked by the very next switch; they are counted and labelled
+# self-healing rather than folded in, because "wrong writer, will fix itself" and
+# "wrong writer, permanent" are different claims.
+#
+# 🔴 THE MANIFEST IS THE AUTHORITY, not a heuristic walk of $HOME. Every leaf
+# under the active generation'"'"'s home-files is BY DEFINITION a path
+# home-manager intends to own, so this cannot produce the false positives a
+# "$HOME looks wrong" rule would (~/.claude/settings.json, a nested checkout, an
+# editor backup — none of them are manifest leaves). It also covers every
+# managed path, not just the two roots the dangling scan walks.
+hfiles="${DRIFT_HOME_FILES:-$HOME/.local/state/nix/profiles/home-manager/home-files}"
+W_EXAMINED=0
+W_WRONG=0
+W_DIFFER=0
+w_list=""
+
+w_walk() { # w_walk <manifest-dir> <relative-prefix>
+  local E BASE REL TGT
+  for E in "$1"/* "$1"/.*; do
+    BASE="${E##*/}"
+    [ "$BASE" = "." ] && continue
+    [ "$BASE" = ".." ] && continue
+    [ -e "$E" ] || [ -L "$E" ] || continue
+    REL="$2$BASE"
+    # A LEAF is anything that is not a REAL directory. -L is tested FIRST on
+    # purpose: in a home-files tree a leaf is a symlink, and one pointing at a
+    # store DIRECTORY would make `[ -d ]` true and send this walk down into
+    # /nix/store, counting store contents as managed paths.
+    if [ -L "$E" ] || [ ! -d "$E" ]; then
+      W_EXAMINED=$(( W_EXAMINED + 1 ))
+      TGT="$HOME/$REL"
+      if [ -L "$TGT" ]; then
+        :
+      elif [ -e "$TGT" ]; then
+        W_WRONG=$(( W_WRONG + 1 ))
+        if cmp -s "$E" "$TGT"; then
+          w_list="$w_list$REL (PERMANENT: identical, no switch will take it back)
+"
+        else
+          W_DIFFER=$(( W_DIFFER + 1 ))
+          w_list="$w_list$REL (self-healing: differs, the next switch relinks it)
+"
+        fi
+      fi
+      continue
+    fi
+    w_walk "$E" "$REL/"
+  done
+}
+
+# 🔴 SAME PAIR RULE AS THE DANGLING SCAN. wrong-writer=0 out of 0 examined is a
+# scanner wired to nothing, not a healthy host, so the examined count is printed
+# beside it always — and an absent manifest is NOT EVALUATED, never a zero.
+if [ -d "$hfiles" ]; then
+  w_walk "$hfiles" ""
+  psay "managed paths: examined=$W_EXAMINED wrong-writer=$W_WRONG self-healing=$W_DIFFER (manifest: $hfiles)"
+  if [ "$W_WRONG" -gt 0 ]; then
+    psay "🔴 DRIFT — $W_WRONG of $W_EXAMINED managed path(s) are NOT the link nix intended."
+    psay "  home-manager declares each of these. Something else owns them now."
+    printf "%s" "$w_list" | head -n "$maxd" | sed "s|^|[$label]     x |"
+    if [ "$W_WRONG" -gt "$maxd" ]; then
+      psay "    ... and $(( W_WRONG - maxd )) more"
+    fi
+    psay "  fix (on that host): home-manager switch --flake ~/workspace/devrc --impure"
+    psay "  home.activation.reclaimManagedPaths reclaims the identical ones on the way"
+    psay "  through, so this clears on the next switch. Preview it first, read-only:"
+    psay "    scripts/reclaim-managed-paths.sh"
+    [ "$p_rc" = 0 ] && p_rc=19
+  fi
+else
+  psay "managed paths: NOT EVALUATED — no home-files manifest at $hfiles"
+  # 🔴 The words "wrong" and "writer" are deliberately NOT adjacent here, and
+  # not because prose is precious: a test asserts the zero-valued count string
+  # never appears on an unevaluated run, and a message that spells it — even to
+  # deny it — walks that guard.
+  psay "  a walk of nothing is not a clean walk. Nothing was counted, so no count is claimed."
 fi
 
 # --- settings.json: KEY NAMES ONLY --------------------------------------------
@@ -1973,6 +2107,10 @@ if [ "$rc" != 0 ]; then
   echo "  rc13=remote unreachable for >=$DRIFT_UNREACHABLE_ESCALATE consecutive runs"
   echo "  rc14=managed symlinks resolve to nothing (needs a home-manager switch on that host)"
   echo "  rc15=host parity: settings.json key sets / enabledPlugins differ, or enabled-but-not-installed"
+  echo "  rc19=a managed path is NOT the link nix intended — a real file where the manifest"
+  echo "       declares a symlink. rc14's mirror image; it only ever inspects symlinks."
+  echo "       Clears on a home-manager switch (home.activation.reclaimManagedPaths);"
+  echo "       preview read-only with scripts/reclaim-managed-paths.sh"
   echo "  rc16=NOT drift: the fuzzyclaw phase-2 gate OPENED (0 rows depend on fuzzyclaw for an age)"
   echo "  rc17=the srcDir SUBTREE a nix/pkgs package is BUILT FROM is behind/ahead its own upstream"
   echo "       on that host. A repo that is behind OUTSIDE every srcDir is reported, never rc 17."

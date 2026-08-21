@@ -53,6 +53,7 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 from testlib.mockbin import write_exec  # noqa: E402
 
 DRIFT = REPO_ROOT / "scripts" / "drift-check.sh"
+RECLAIM = REPO_ROOT / "scripts" / "reclaim-managed-paths.sh"
 SHIP = REPO_ROOT / "scripts" / "ship.sh"
 HOST_ROLE_LIB = REPO_ROOT / "scripts" / "lib" / "host-role.sh"
 
@@ -1522,6 +1523,13 @@ UNIT_PATH_REQUIREMENTS = {
     # pipeline into a single `sed` segment, `sort` is never seen, and the guard
     # goes green having accounted for nothing. Measured both ways.
     "sort": "pkgs.coreutils",
+    # The WRONG-WRITER scan (rc 19). `cmp` is what separates a managed path
+    # PERMANENTLY owned by the wrong writer (content identical to the store, so
+    # every future switch skips it) from one the next switch relinks anyway.
+    # 🔴 NOT in coreutils — diffutils — so this is the first entry in this table
+    # whose absence from the unit PATH would be a REAL breakage, not a
+    # bookkeeping one: `cmp` missing makes every wrong-writer look self-healing.
+    "cmp": "pkgs.diffutils",
     # Found only by the REVERSE guard below, never by review: `dirname` builds
     # the path to lib/host-role.sh, and `bash` is what the local leg and the
     # remote payload are both handed to.
@@ -1981,6 +1989,283 @@ def test_node_modules_is_pruned_even_without_a_git_dir(fleet):
     (nm / "x.md").symlink_to(store / ("cafe" + DEAD_STORE) / "x.md")
     _, out = _parity(fleet, "--no-remote", store=store)
     assert _examined(out) == (1, 0), out
+
+
+# --------------------------------------------------------------------------- #
+# 10b. THE WRONG WRITER (rc 19) — a managed path that is not the link nix meant
+#
+# 🔴 WHY THIS IS A SEPARATE FAMILY FROM rc 14. rc 14 walks $HOME and inspects
+# SYMLINKS: `if [ -L "$E" ]` … `case "$T" in "$mprefix"*)`. A managed path whose
+# symlink has been REPLACED by a real file is not a symlink, so it is not
+# examined, and rc 14 reports a perfectly clean scan over the ones that survive.
+# ship.sh's verify_managed_artifacts documents the identical hole in its own
+# words ("a managed path REPLACED by a real file of the same name resolves fine
+# and is not reported"), and the currency check that compares CONTENT cannot see
+# it either — in every instance measured the content MATCHED, which is precisely
+# what makes home-manager leave the file alone forever.
+#
+# Measured 2026-08-20 on the workbench: 19 of 488 manifest leaves. 18 were
+# opencode command files an agent overwrote on 08-19 by running
+# scripts/opencode/generate-commands.py with its output directory pointed at
+# ~/.config/opencode/commands instead of /tmp/test-commands; the 19th was an
+# i3status-rust bar script from 08-04, in a subsystem with no connection to the
+# first, undetected for 16 days by three checks that each looked past it.
+# --------------------------------------------------------------------------- #
+
+def _mkmanifest(root, home, *, linked=0, wrong_identical=0, wrong_differing=0,
+                absent=0, nested=0):
+    """Build a home-manager `home-files` manifest plus the $HOME it describes.
+
+    Reproduces the REAL deployment shape: each manifest leaf is a symlink into a
+    (fixture) store, and the corresponding $HOME entry is either the store
+    symlink home-manager made, a regular file somebody else wrote, or missing.
+
+    `nested` adds leaves one directory deeper, so a walk that fails to recurse
+    cannot pass by accident.
+    """
+    manifest = root / "home-files"
+    store = root / "fakestore"
+    store.mkdir(parents=True, exist_ok=True)
+
+    def leaf(rel, body):
+        src = store / rel.replace("/", "_")
+        src.write_text(body)
+        m = manifest / rel
+        m.parent.mkdir(parents=True, exist_ok=True)
+        m.symlink_to(src)
+        t = Path(home) / rel
+        t.parent.mkdir(parents=True, exist_ok=True)
+        return src, t
+
+    for i in range(linked):
+        src, t = leaf(".config/app/linked-%d.md" % i, "deployed-%d\n" % i)
+        t.symlink_to(src)
+    for i in range(wrong_identical):
+        src, t = leaf(".config/app/same-%d.md" % i, "identical-%d\n" % i)
+        # 🔴 The population home-manager LEAKS: a regular file whose bytes equal
+        # the store copy. `cmp -s` matches, so the link step's slow path takes
+        # its "Skipping … as it is identical" branch on every future switch.
+        t.write_text("identical-%d\n" % i)
+    for i in range(wrong_differing):
+        src, t = leaf(".config/app/diff-%d.md" % i, "store-side-%d\n" % i)
+        t.write_text("SOMETHING ELSE ENTIRELY %d\n" % i)
+    for i in range(absent):
+        leaf(".config/app/gone-%d.md" % i, "never-deployed-%d\n" % i)
+    for i in range(nested):
+        # HEALTHY, like `linked` — these exist only to prove the walk RECURSES.
+        # Made wrong-writers by mistake they would inflate the finding counts of
+        # every test that asks for depth, and the positive control would then be
+        # asserting a number it did not intend.
+        src, t = leaf(".config/app/deep/deeper/nest-%d.md" % i, "nested-%d\n" % i)
+        t.symlink_to(src)
+    return manifest
+
+
+def _wrong(out):
+    """The examined / wrong-writer / self-healing TRIPLE. The pair rule again: a
+    wrong-writer count with no examined count beside it is the reassuring zero
+    this whole subsystem exists to refuse, so the reader insists on both."""
+    m = re.search(
+        r"managed paths: examined=(\d+) wrong-writer=(\d+) self-healing=(\d+)", out)
+    assert m, ("no examined/wrong-writer PAIR in the output — the pair IS the "
+               "claim:\n" + out)
+    return int(m.group(1)), int(m.group(2)), int(m.group(3))
+
+
+def test_a_managed_path_overwritten_by_a_regular_file_is_rc19(fleet, tmp_path):
+    """🔴 NEGATIVE CONTROL, built to the shape that actually happened: the
+    manifest declares the path, $HOME holds a regular file with the SAME BYTES,
+    and every other check reports clean."""
+    fleet.catch_up()
+    manifest = _mkmanifest(tmp_path / "gen1", fleet.home, linked=4,
+                           wrong_identical=3)
+    rc, out = _parity(fleet, "--no-remote", DRIFT_HOME_FILES=str(manifest))
+    assert rc == 19, f"a managed path owned by the wrong writer must be rc 19, got {rc}\n{out}"
+    assert _wrong(out) == (7, 3, 0), out
+    assert "3 of 7 managed path(s) are NOT the link nix intended" in out, out
+    assert "PERMANENT" in out, (
+        "the permanence of an identical-content overwrite is not stated, and it "
+        "is the whole reason a switch does not fix it\n" + out
+    )
+    assert "reclaim-managed-paths.sh" in out, "no remediation is offered\n" + out
+    assert "✅ clean — on branch main" in out, (
+        "the git check must be UNCHANGED and must still run\n" + out
+    )
+
+
+def test_the_examined_count_is_reported_beside_a_zero_wrong_writer_count(fleet, tmp_path):
+    """🔴 POSITIVE CONTROL FOR THIS SCANNER. `wrong-writer=0` out of 0 examined
+    is indistinguishable from a healthy host — it is what a scan wired to
+    nothing prints. So the scanner must be SHOWN to produce a non-zero examined
+    count on a tree where the answer is genuinely zero, and the pair must be
+    printed together."""
+    fleet.catch_up()
+    manifest = _mkmanifest(tmp_path / "gen1", fleet.home, linked=6, nested=2)
+    rc, out = _parity(fleet, "--no-remote", DRIFT_HOME_FILES=str(manifest))
+    examined, wrong, healing = _wrong(out)
+    assert examined == 8, (
+        "the scanner did not see the 8 manifest leaves it was given (6 flat + 2 "
+        "nested): %d — a walk that does not recurse reports a clean subtree it "
+        "never entered\n%s" % (examined, out)
+    )
+    assert (wrong, healing) == (0, 0), out
+    assert rc == 0, out
+
+
+def test_a_scan_with_no_manifest_says_so_instead_of_reporting_zero(fleet):
+    """The other half of the same trap. With no generation to walk the answer is
+    NOT EVALUATED — never `wrong-writer=0`, which reads as an all-clear."""
+    fleet.catch_up()
+    rc, out = _parity(fleet, "--no-remote",
+                      DRIFT_HOME_FILES=str(fleet.home / "no" / "such" / "gen"))
+    assert "managed paths: NOT EVALUATED" in out, out
+    assert "wrong-writer=0" not in out, (
+        "a scan that walked nothing reported a clean count\n" + out
+    )
+    assert rc == 0, "an unevaluated scan must not invent a failure either\n" + out
+
+
+def test_a_differing_file_is_counted_but_labelled_self_healing(fleet, tmp_path):
+    """🔴 TWO DIFFERENT CLAIMS, NOT ONE. A managed path holding a regular file
+    that DIFFERS from the store copy is still the wrong writer — but the link
+    step's else branch (`ln -Tsf`) relinks it on the very next switch, so it is
+    not the permanent case. Reporting them as one number would tell the operator
+    that a switch fixes something it does not, or that it fixes nothing when it
+    fixes most of it."""
+    fleet.catch_up()
+    manifest = _mkmanifest(tmp_path / "gen1", fleet.home, linked=2,
+                           wrong_identical=1, wrong_differing=2)
+    rc, out = _parity(fleet, "--no-remote", DRIFT_HOME_FILES=str(manifest))
+    assert _wrong(out) == (5, 3, 2), out
+    assert rc == 19, out
+    assert "self-healing" in out, out
+    # And the two populations must be distinguishable per FILE, not only in the
+    # totals — otherwise nobody can tell which of the listed paths needs the
+    # reclaim and which needs nothing.
+    assert re.search(r"same-0\.md \(PERMANENT", out), out
+    assert re.search(r"diff-\d\.md \(self-healing", out), out
+
+
+def test_a_managed_path_that_is_simply_absent_is_not_a_wrong_writer(fleet, tmp_path):
+    """A manifest leaf with NOTHING at the target is a different condition (the
+    link has not been made yet, mid-activation, or was deleted). Counting it as
+    a wrong writer would make rc 19 fire during an ordinary first deploy, which
+    is how a gate earns being clicked through."""
+    fleet.catch_up()
+    manifest = _mkmanifest(tmp_path / "gen1", fleet.home, linked=3, absent=4)
+    rc, out = _parity(fleet, "--no-remote", DRIFT_HOME_FILES=str(manifest))
+    assert _wrong(out) == (7, 0, 0), out
+    assert rc == 0, out
+
+
+def test_the_walk_does_not_follow_a_leaf_that_points_at_a_directory(fleet, tmp_path):
+    """🔴 A LEAF IS TESTED FOR -L BEFORE -d, and this is why. `home.file` with a
+    directory source deploys ONE symlink at a directory target; `[ -d ]` follows
+    it, so a walk that asks -d first descends into the store and counts store
+    contents as managed paths — inflating `examined` with entries that have no
+    $HOME counterpart at all."""
+    fleet.catch_up()
+    manifest = _mkmanifest(tmp_path / "gen1", fleet.home, linked=1)
+    storedir = tmp_path / "gen1" / "fakestore" / "a-whole-dir"
+    storedir.mkdir(parents=True)
+    for i in range(5):
+        (storedir / ("inside-%d.md" % i)).write_text("in the store\n")
+    (manifest / ".config" / "app" / "wholedir").symlink_to(storedir)
+    (fleet.home / ".config" / "app" / "wholedir").symlink_to(storedir)
+    rc, out = _parity(fleet, "--no-remote", DRIFT_HOME_FILES=str(manifest))
+    examined, wrong, _ = _wrong(out)
+    assert examined == 2, (
+        "the walk descended through a directory-valued leaf and counted %d store "
+        "entries as managed paths\n%s" % (examined, out)
+    )
+    assert (wrong, rc) == (0, 0), out
+
+
+def test_within_one_host_a_dangling_link_is_reported_over_a_wrong_writer(fleet, tmp_path):
+    """The payload's OWN precedence, which is a separate mechanism from
+    severity(): `p_rc` is set to 14 first and the wrong-writer block only fires
+    `[ "$p_rc" = 0 ] && p_rc=19`. A host with both must hand back 14.
+
+    🔴 THIS TEST CANNOT SEE THE SEVERITY TABLE, and saying so is the point. A
+    mutant reranking 19 ABOVE 14 in severity() survived this assertion, because
+    p_rc never becomes 19 here at all — the guard was unreachable. The table is
+    exercised across HOSTS instead, in the test below.
+    """
+    fleet.catch_up()
+    store = _mkhome(fleet.home, healthy=1, dangling=1)
+    manifest = _mkmanifest(tmp_path / "gen1", fleet.home, linked=1,
+                           wrong_identical=1)
+    rc, out = _parity(fleet, "--no-remote", store=store,
+                      DRIFT_HOME_FILES=str(manifest))
+    assert rc == 14, f"rc 19 pre-empted rc 14 within one host, got {rc}\n{out}"
+    # BOTH findings must still be PRINTED — the exit code is one number, the
+    # report is not, and a finding suppressed because a worse one exists is a
+    # finding nobody ever acts on.
+    assert "point at a path that does not exist" in out, out
+    assert "are NOT the link nix intended" in out, out
+
+
+def test_rc19_ranks_below_rc14_and_above_rc10_across_hosts(fleet, tmp_path):
+    """🔴 THE SEVERITY TABLE, EXERCISED — and reachable only across two hosts.
+
+    The digits are not the ranking (19 > 14 numerically, 62 < 65 by rank), so
+    this must be behavioural. Both directions are driven, because a single
+    comparison pins only one side of the entry: against a remote rc 14 the
+    answer must be 14, and against a remote rc 10 it must be 19. A one-sided
+    test is satisfied by any rank between the two neighbours.
+    """
+    fleet.catch_up()
+    manifest = _mkmanifest(tmp_path / "gen1", fleet.home, linked=1,
+                           wrong_identical=1)
+
+    fleet.stub_ssh(14, stdout="[laptop] 3 of 5 managed symlink(s) point at a "
+                              "path that does not exist.")
+    rc, out = fleet.check(REMOTE_SSH="stub@example.invalid",
+                          DRIFT_HOME_FILES=str(manifest))
+    assert "are NOT the link nix intended" in out, (
+        "the local leg produced no rc 19 at all, so the comparison below would "
+        "be vacuous\n" + out
+    )
+    assert rc == 14, f"rc 19 outranked a remote rc 14, got {rc}\n{out}"
+
+    fleet.stub_ssh(10, stdout="[laptop] BEHIND origin/main by 1 commit.")
+    rc, out = fleet.check(REMOTE_SSH="stub@example.invalid",
+                          DRIFT_HOME_FILES=str(manifest))
+    assert rc == 19, f"a remote rc 10 outranked a local rc 19, got {rc}\n{out}"
+
+
+def test_the_wrong_writer_scan_and_the_reclaim_script_name_the_same_paths(fleet, tmp_path):
+    """🔴 THE SEAM. Two implementations of "which managed paths are owned by the
+    wrong writer" exist on purpose — drift-check's copy is inside a payload that
+    is PIPED OVER SSH and cannot source a file, and the reclaim script is what
+    home-manager activation runs. Verified in isolation they can each be right
+    and disagree, and the disagreement is invisible: drift-check would report a
+    path the switch does not repair, or stay silent about one it deletes.
+
+    So this pins the RELATIONSHIP over one fixture: the same tree, both readers,
+    the same set of PERMANENT paths."""
+    fleet.catch_up()
+    manifest = _mkmanifest(tmp_path / "gen1", fleet.home, linked=3,
+                           wrong_identical=2, wrong_differing=2, nested=1)
+    _, out = _parity(fleet, "--no-remote", DRIFT_HOME_FILES=str(manifest))
+    drift_permanent = set(re.findall(r"x (\S+) \(PERMANENT", out))
+
+    proc = subprocess.run(
+        ["bash", str(RECLAIM), "--home", str(fleet.home), str(manifest)],
+        capture_output=True, text=True, env=fleet.env(),
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    script_reclaimable = set(re.findall(r"x (\S+)", proc.stdout))
+
+    assert drift_permanent, (
+        "the fixture produced no PERMANENT finding at all, so the comparison "
+        "below would hold between two empty sets\n" + out
+    )
+    assert drift_permanent == script_reclaimable, (
+        "the detector and the repair disagree about which managed paths are "
+        "owned by the wrong writer.\n  drift-check: %r\n  reclaim script: %r\n%s"
+        % (sorted(drift_permanent), sorted(script_reclaimable), out + proc.stdout)
+    )
 
 
 # --- settings.json key-set divergence (needs a fact set from EACH host) ----- #

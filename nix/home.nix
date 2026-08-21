@@ -1559,6 +1559,41 @@ in
   # works. Guarded on `! -L` so a legitimately-managed store symlink is never
   # touched — this only ever removes a hand-placed regular file, whose content
   # is in git anyway.
+  # 🔴 THE GENERIC FORM OF THE THREE ENUMERATED `dropStale*` ENTRIES BELOW.
+  # Each of those names the paths that bit us once; this one covers the CLASS,
+  # derived from the NEW generation's own manifest, so a managed path nobody has
+  # enumerated is covered the day something overwrites it.
+  #
+  # It removes a managed target only when it is a REGULAR FILE whose content is
+  # BYTE-IDENTICAL to the store source — which is provably lossless (the bytes
+  # are already in the store) and is exactly the population home-manager leaks:
+  # `force = true` suppresses only the collision CHECK, and the link step
+  # deliberately skips an identical non-symlink target ("Skipping '$targetPath'
+  # as it is identical"), so that file stays owned by the wrong writer across
+  # arbitrarily many switches. A target whose content DIFFERS is relinked by the
+  # very next switch anyway and is deliberately left alone — see the script.
+  #
+  # Measured on the workbench 2026-08-20: 488 manifest leaves, 19 reclaimable —
+  # 18 command files an agent wrote over on 2026-08-19 by running
+  # scripts/opencode/generate-commands.py with its output directory pointed at
+  # the live ~/.config/opencode/commands, and one bar script from 2026-08-04 in
+  # a completely unrelated subsystem. Two independent instances is why this is a
+  # class and not a fourth enumerated list.
+  #
+  # BEFORE checkLinkTargets for the same reason the entries below are: the
+  # collision check runs first, and a path this reclaims must already be gone by
+  # the time linkGeneration decides what to do with it.
+  home.activation.reclaimManagedPaths = lib.hm.dag.entryBefore ["checkLinkTargets"] ''
+    reclaimFiles="$(readlink -e "$newGenPath/home-files" 2>/dev/null || true)"
+    if [ -n "$reclaimFiles" ]; then
+      $DRY_RUN_CMD ${pkgs.bash}/bin/bash ${../scripts/reclaim-managed-paths.sh} \
+        --apply "$reclaimFiles" \
+        || echo "reclaim-managed-paths: FAILED — continuing the switch, but a managed path may still be owned by the wrong writer"
+    else
+      echo "reclaim-managed-paths: SKIPPED — $newGenPath/home-files did not resolve"
+    fi
+  '';
+
   home.activation.dropStaleClaudeHooks = lib.hm.dag.entryBefore ["checkLinkTargets"] ''
     for f in "$HOME/.claude/hooks/claude-notify.py" \
              "$HOME/.claude/hooks/test_claude_notify.py" \
@@ -2511,7 +2546,12 @@ in
         # forever — from a unit that looks correct, which is the exact shape the
         # iproute2 note above records. Pinned by
         # `test_the_phase2_child_binaries_are_on_the_unit_path`.
-        "PATH=${lib.makeBinPath [ pkgs.git pkgs.openssh pkgs.iproute2 pkgs.bash pkgs.coreutils pkgs.gawk pkgs.gnused pkgs.gnugrep pkgs.python3 pkgs.tmux ]}"
+        # diffutils is for `cmp`, which the WRONG-WRITER scan (rc 19) uses to
+        # separate a managed path that is PERMANENTLY owned by the wrong writer
+        # (content identical, so every future switch skips it) from one the next
+        # switch relinks on its own. Without it the scan cannot make that
+        # distinction and would report both as the same finding.
+        "PATH=${lib.makeBinPath [ pkgs.git pkgs.openssh pkgs.iproute2 pkgs.bash pkgs.coreutils pkgs.diffutils pkgs.gawk pkgs.gnused pkgs.gnugrep pkgs.python3 pkgs.tmux ]}"
         "HOME=%h"
       ];
       ExecStart = "${pkgs.bash}/bin/bash %h/workspace/devrc/scripts/drift-check.sh";

@@ -84,6 +84,25 @@ there. Only what's specific to this repo, where a working tree is also a **deplo
   **own** upstream (never a hardcoded `main`/`trunk`), the repo-wide numbers are
   printed beside it as information, and the cross-host comparison diffs **subtree
   tree OIDs** rather than repo HEADs.
+  🔴 **A managed path can be owned by the WRONG WRITER — rc 19.** rc 14 asks
+  whether a managed SYMLINK still resolves, so it only ever inspects symlinks and
+  is structurally blind to one that has been REPLACED by a real file; `ship.sh`'s
+  `verify_managed_artifacts` documents the same hole, and a content check misses
+  it too because the content usually MATCHES. 🔴 **`force = true` does NOT clobber
+  — it only suppresses the collision CHECK**, and home-manager's link step
+  deliberately skips a non-symlink target whose content is identical to the
+  source, so such a file survives arbitrarily many switches. Measured 2026-08-20:
+  19 of 488 manifest leaves on the workbench — 18 opencode command files an agent
+  wrote over on 08-19 (it ran `generate-commands.py` with the OUTPUT DIRECTORY
+  pointed at `~/.config/opencode/commands`; its three previous runs used
+  `/tmp/test-commands`) and one i3status-rust bar script from 08-04, undetected
+  for 16 days. Both halves are closed: the generator now **refuses a
+  home-manager-managed output directory** (its own exit code 3), and
+  `home.activation.reclaimManagedPaths` removes such a file during any switch
+  **only when its content is byte-identical to the store copy** — provably
+  lossless, and exactly the population that never self-heals. So rc 19 clears on
+  the next `ship.sh` and is deliberately NOT a `SuccessExitStatus`. Preview it
+  read-only with `scripts/reclaim-managed-paths.sh`.
   🔴 **rc 16 is NOT drift** — it is the fuzzyclaw phase-2 gate reporting that zero rows
   still take their age from fuzzyclaw alone, i.e. the readers can now be deleted; the
   final line says `ACTIONABLE (not drift)` and it is the least severe code, so it can

@@ -148,8 +148,8 @@ ACKNOWLEDGED_UNSTUBBED = {
         "justification cannot rot into a claim about a file that has changed"),
     "home-manager": (
         {"bar-status-poll", "drift-check.sh", "keylog-spin-capture.sh",
-         "notify-failure.sh", "playwright-nixos", "session-manager",
-         "session-resolve", "ship.sh", "tmux-post-save.sh",
+         "notify-failure.sh", "playwright-nixos", "reclaim-managed-paths.sh",
+         "session-manager", "session-resolve", "ship.sh", "tmux-post-save.sh",
          "tmux-scratch-slots.sh"},
         "MEASURED unreachable: a whole-tier run under a recording interceptor "
         "logged ZERO calls. TWO of these are executed by scripts/tests and "
@@ -190,7 +190,24 @@ ACKNOWLEDGED_UNSTUBBED = {
         "sentence was added to correct a comment which had documented the "
         "hotkey as a `$mod+Shift+<key>` i3 chord bound to nothing; the "
         "correction is what put the file in this scanner's sights, and it is "
-        "re-justified here rather than reworded to dodge the scanner"),
+        "re-justified here rather than reworded to dodge the scanner. "
+        "reclaim-managed-paths.sh (added 2026-08-20) is the FIFTH of this "
+        "shape, and the one with the most `home-manager` occurrences — ten, "
+        "all of them prose. It is the repair half of the wrong-writer class: "
+        "it walks a home-manager generation MANIFEST and removes a managed "
+        "target only when that target is a regular file byte-identical to the "
+        "store copy. Every occurrence is either header prose explaining why "
+        "home-manager itself will not take such a file back, an operator "
+        "message naming the switch as the remedy, or the default manifest "
+        "path `$state/nix/profiles/home-manager/home-files` — a PATH literal, "
+        "not a command word. Measured with "
+        "`grep -n 'home-manager' scripts/reclaim-managed-paths.sh`: ten hits, "
+        "zero in command position. The complete set of external commands the "
+        "script can spawn is `cmp`, `rm`, `sed`, `echo` and `printf`; it never "
+        "runs a switch, and it must not — a repair helper that deploys is a "
+        "deployer with no supervision. It IS invoked BY home-manager "
+        "(`home.activation.reclaimManagedPaths`, --apply), which is the "
+        "opposite direction and not something this scanner is about"),
     "nixos-rebuild": (
         {"airvpn-sudo", "ship.sh"},
         "MEASURED unreachable in the same whole-tier run; both call sites are "
