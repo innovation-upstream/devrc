@@ -5450,7 +5450,10 @@ def render_validation(report: ValidationReport) -> str:
         "line, or the parser reads an unterminated bare string.)"
     )
     return "\n".join(
-        out + _render_validation_shape(report) + _render_validation_open_actions(report)
+        out
+        + _render_validation_shape(report)
+        + _render_validation_open_actions(report)
+        + _render_validation_unreachable(report)
     )
 
 

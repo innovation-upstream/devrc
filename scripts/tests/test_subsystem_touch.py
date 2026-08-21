@@ -10715,6 +10715,28 @@ class TestValidateReportsUnreachableMarkers:
         assert blob["unreachable_markers"][0]["offset"] == 3
         assert blob["unreachable_markers"][0]["openness"] == "open"
 
+    def test_it_prints_on_the_MALFORMED_path_too(self, tmp_path: Path) -> None:
+        """🔴 THE SEAM `render_validation` HAS TWO OF. `--validate` returns from
+        two places — the `OK` branch and the malformed one — and the block's own
+        docstring claims it prints "on every path that CHECKED something".
+
+        This was FALSE when first written: the two returns differ by four spaces
+        of indentation, so the edit that wired the clean path silently missed the
+        other, and a scope holding one broken entry beside a good one with an
+        out-of-reach marker would have reported the marker nowhere. A guard's
+        description claims coverage; only reading the code against it says whether
+        the implementation is as wide as the sentence.
+        """
+        store = _nuance_store(tmp_path, UNREACHABLE_NUANCE)
+        (store / SCOPE / "broken.md").write_text(
+            "---\nservice: broken\naliases: [\n  wrapped\n]\n---\n", encoding="utf-8"
+        )
+        rep = _validated(store)
+        assert rep.clean is False, "premise gone: this is not the malformed branch"
+        out = st.render_validation(rep)
+        assert "🔴 MALFORMED" in out
+        assert "MARKER(S) OUT OF REACH" in out
+
     def test_the_scan_is_READ_ONLY(self, tmp_path: Path) -> None:
         store = _nuance_store(tmp_path, UNREACHABLE_NUANCE)
         before = _tree_hash(store)
@@ -10799,6 +10821,54 @@ class TestUnreachableMarkerMutationKills:
         out = self._out(mod, tmp_path)
         assert "marker reachability" not in out
         assert "open actions" in out, "the neighbouring block must be untouched"
+
+    def test_kills_the_RENDERER_call_site_on_the_MALFORMED_path(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 THE SECOND HALF OF A SEAM THAT WAS REALLY BROKEN. `render_validation`
+        returns from two places and this call was missing from one of them — the
+        indentation differs by four spaces, so the edit that wired the clean path
+        matched nothing on the other and said so to nobody. Mutated separately
+        from its twin, because mutating both at once cannot say which one was
+        load-bearing."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_um_render_bad",
+            [
+                (
+                    "    return \"\\n\".join(\n"
+                    "        out\n"
+                    "        + _render_validation_shape(report)\n"
+                    "        + _render_validation_open_actions(report)\n"
+                    "        + _render_validation_unreachable(report)\n"
+                    "    )",
+                    "    return \"\\n\".join(\n"
+                    "        out\n"
+                    "        + _render_validation_shape(report)\n"
+                    "        + _render_validation_open_actions(report)\n"
+                    "    )",
+                )
+            ],
+        )
+        store = _nuance_store(tmp_path, UNREACHABLE_NUANCE)
+        (store / SCOPE / "broken.md").write_text(
+            "---\nservice: broken\naliases: [\n  wrapped\n]\n---\n", encoding="utf-8"
+        )
+        checked, malformed = mod.validate_scope(store, SCOPE)
+        scanned = [store / SCOPE / n for n in checked]
+        out = mod.render_validation(
+            mod.ValidationReport(
+                store_root=str(store),
+                target=f"`{SCOPE}/`",
+                scope=SCOPE,
+                checked=tuple(checked),
+                malformed=tuple(malformed),
+                unreachable=mod.scan_unreachable_markers(scanned),
+            )
+        )
+        assert "🔴 MALFORMED" in out, "the mutation must not change the branch taken"
+        assert "marker reachability" not in out
+        assert "MARKER(S) OUT OF REACH" in st.render_validation(_validated(store))
 
     def test_kills_the_NOT_FOLDED_INTO_NEAR_MISS_invariant(self, tmp_path: Path) -> None:
         """🔴 The fold this shape exists to prevent, done on purpose. The mutant's
