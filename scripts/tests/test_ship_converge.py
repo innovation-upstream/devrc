@@ -47,6 +47,55 @@ pytestmark = pytest.mark.skipif(
     reason="needs git + bash on PATH",
 )
 
+# --------------------------------------------------------------------------- #
+# 🔴 THE SANDBOX — why this suite may not be allowed to run `ssh` at all
+# --------------------------------------------------------------------------- #
+# `remote_ssh_of workbench` with REMOTE_SSH and LAPTOP_SSH unset returns
+# LAPTOP_SSH_DEFAULT, which is the OPERATOR'S REAL LAPTOP. Nothing in a fixture
+# sets those variables, so for every test in this file the only thing standing
+# between the suite and a live host is the `--no-remote` in Repo.ship's argv —
+# one word, in a script that now re-execs itself and has to carry that word
+# across the exec for it to keep holding. A dropped "$@" is a one-character
+# mutation whose blast radius is a fast-forward + `home-manager switch` on a
+# machine nobody is watching.
+#
+# So argv is NOT the guard. Every fixture puts a REFUSING `ssh` — and a refusing
+# `home-manager`, for the same reason in the switch direction — at the front of
+# PATH via Repo.env(), and Repo.env() REFUSES a raw PATH= override so a future
+# call site cannot quietly drop it. A test that legitimately needs a stub passes
+# it as shims=[dir]; those land AHEAD of the refusing pair, which is the only
+# way to reach a shell command from here at all.
+#
+# test_the_sandbox_refuses_a_run_that_reaches_ssh is the reachability proof, and
+# it reads the real target out of lib/host-role.sh rather than hardcoding it, so
+# it keeps naming whatever the fallback actually is.
+SANDBOX_REFUSAL = "ship-test-sandbox: REFUSED"
+
+
+def _host_role_constant(name):
+    """Read a `NAME="value"` constant straight out of lib/host-role.sh."""
+    m = re.search(rf'^{name}="([^"]*)"', HOST_ROLE_LIB.read_text(), re.M)
+    assert m, f"{name} is no longer defined in {HOST_ROLE_LIB}"
+    return m.group(1)
+
+
+def _write_sandbox_bin(d):
+    """The refusing stubs. Loud, identifiable, and non-zero on every path."""
+    d.mkdir(parents=True, exist_ok=True)
+    for tool, why in (
+        ("ssh", "it would reach a REAL host (the default target is the operator's laptop)"),
+        ("home-manager", "it would run a REAL home-manager switch"),
+    ):
+        write_exec(
+            d / tool,
+            f'echo "{SANDBOX_REFUSAL}: {tool} $*" >&2\n'
+            f'echo "  {why}." >&2\n'
+            'echo "  The test suite must never invoke it. If a test needs a stub,'
+            ' pass shims=[dir]." >&2\n'
+            "exit 97\n",
+        )
+    return d
+
 
 # --------------------------------------------------------------------------- #
 # helpers
@@ -146,7 +195,7 @@ class Repo:
 
     def __init__(self, tmp_path, gitconfig_extra="", stale_managed=(), phantom_managed=False,
                  second_host=False, ship_in_repo=False, ship_changes=True,
-                 ship_pad_lines=0):
+                 ship_pad_lines=0, ship_broken=False):
         """`stale_managed` seeds those entries from the BASE commit's bytes.
 
         That is the real staleness shape, not a synthetic one: the deployed
@@ -166,12 +215,18 @@ class Repo:
         the rc 20 / self-supersession shape. `ship_pad_lines` inflates BOTH
         committed copies with inert header comments, so a test can overwrite the
         running script with a much SHORTER one and see whether the run survives.
+        `ship_broken` makes the INCOMING copy fail to parse, which is the shape
+        where `exec bash <new>` would hand back bash's own exit 2 from a run that
+        has already converged and switched the local host.
         """
         self.root = tmp_path
         self.origin = tmp_path / "origin.git"
         self.work = tmp_path / "work"
         self.home = tmp_path / "home"
         self.home.mkdir()
+        # 🔴 Built FIRST: every env() below (including the ones in this
+        # constructor) prepends it, so it must exist before the first git call.
+        self.denybin = _write_sandbox_bin(tmp_path / "sandbox-bin")
         self.stale_managed = set(stale_managed)
         self.phantom_managed = phantom_managed
         unknown = self.stale_managed - set(self.MANAGED_SOURCES)
@@ -238,7 +293,8 @@ class Repo:
             # leaves scripts/ship.sh alone. That isolates a test that wants some
             # OTHER writer to be the only thing superseding the script.
             self._write_ship_into(
-                builder, 2 if ship_changes else 1, pad_lines=ship_pad_lines
+                builder, 2 if ship_changes else 1, pad_lines=ship_pad_lines,
+                broken=ship_broken,
             )
         self._git(builder, "add", "f", "added-upstream.txt", *self.SOURCE_PATHS, *extra)
         self._git(builder, "commit", "-q", "-m", "ahead")
@@ -292,7 +348,12 @@ class Repo:
             src = src.replace(marker, pad + marker)
         return src
 
-    def _write_ship_into(self, tree, version, pad_lines=0):
+    # A stray `fi` with no `if`: `bash -n` rejects it and `bash <file>` exits 2.
+    # Appended AFTER the closing brace, so it is a pure parse failure and not a
+    # runtime one — bash must read the whole file before running any of it.
+    SHIP_SYNTAX_ERROR = "\nfi\n"
+
+    def _write_ship_into(self, tree, version, pad_lines=0, broken=False):
         """Commit the real ship.sh + its lib into the throwaway repo.
 
         Returns the pathspec list to `git add`. The lib is copied verbatim: it is
@@ -301,7 +362,10 @@ class Repo:
         """
         s = tree / "scripts" / "ship.sh"
         s.parent.mkdir(parents=True, exist_ok=True)
-        s.write_text(self.ship_source(version, pad_lines=pad_lines))
+        text = self.ship_source(version, pad_lines=pad_lines)
+        if broken:
+            text += self.SHIP_SYNTAX_ERROR
+        s.write_text(text)
         s.chmod(0o755)
         lib = tree / "scripts" / "lib" / "host-role.sh"
         lib.parent.mkdir(parents=True, exist_ok=True)
@@ -409,7 +473,22 @@ class Repo:
         profiles.mkdir(parents=True, exist_ok=True)
         (profiles / "home-manager").symlink_to(self.gen)
 
-    def env(self, **extra):
+    def env(self, *, shims=(), **extra):
+        """The environment every subprocess in this file runs under.
+
+        🔴 THE SINGLE CHOKE POINT FOR THE SSH SANDBOX. PATH is composed here and
+        only here: caller stubs first, then the refusing `ssh`/`home-manager`,
+        then the real one. A raw `PATH=` in `extra` is REFUSED rather than
+        honoured — that spelling is what silently drops the refusing pair, and it
+        was the shape every call site used before 2026-08-21.
+        """
+        if "PATH" in extra:
+            raise AssertionError(
+                "do not pass PATH= to Repo.env/ship — it would place your stub "
+                "AHEAD of the refusing ssh/home-manager shims and re-open the "
+                "path to the operator's real laptop. Pass shims=[dir] instead; "
+                "it is prepended in front of them."
+            )
         e = dict(os.environ)
         e.update(
             HOME=str(self.home),
@@ -423,6 +502,9 @@ class Repo:
         # inherited one would point the check outside the throwaway $HOME.
         e.pop("XDG_STATE_HOME", None)
         e.update(extra)
+        e["PATH"] = os.pathsep.join(
+            [*(str(s) for s in shims), str(self.denybin), os.environ["PATH"]]
+        )
         return e
 
     def _git(self, repo, *args):
@@ -462,13 +544,18 @@ class Repo:
     def stash_list(self):
         return self._git(self.work, "stash", "list")
 
-    def ship(self, *args, script=None, **env_extra):
+    def ship(self, *args, script=None, shims=(), no_remote=True, **env_extra):
         """Run ship.sh against this repo: local only, no home-manager switch.
 
         `script` overrides which copy of ship.sh is executed. The default is the
         repo's own scripts/ship.sh; the self-supersession tests pass the copy
         that lives INSIDE the throwaway repo, because the whole question there is
         what happens when the running file is the one being fast-forwarded.
+
+        `shims` are directories prepended to PATH ahead of the refusing
+        ssh/home-manager stubs — see Repo.env. `no_remote=False` drops the
+        `--no-remote` flag, which is ONLY useful for proving the sandbox refuses:
+        with it gone the run resolves the operator's real laptop as its target.
         """
         defaults = dict(
             SHIP_ROLE="workbench",     # bypass IP detection (no `ip` in sandbox)
@@ -476,9 +563,12 @@ class Repo:
             SHIP_NO_SWITCH="1",        # never run a real home-manager switch
         )
         defaults.update(env_extra)     # a caller may override any of them
-        env = self.env(**defaults)
+        env = self.env(shims=shims, **defaults)
+        argv = ["bash", str(script or SHIP)]
+        if no_remote:
+            argv.append("--no-remote")
         proc = subprocess.run(
-            ["bash", str(script or SHIP), "--no-remote", *args],
+            [*argv, *args],
             capture_output=True, text=True, env=env,
             timeout=120,               # a re-exec loop must fail as a TIMEOUT, not hang the suite
         )
@@ -556,17 +646,23 @@ class Repo:
         )
         return d
 
-    def ship_both_hosts(self, shim_dir, *args, script=None, **env_extra):
-        """Converge BOTH fabricated hosts — local via bash, remote via the shim."""
+    def ship_both_hosts(self, shim_dir, *args, script=None, shims=(), **env_extra):
+        """Converge BOTH fabricated hosts — local via bash, remote via the shim.
+
+        `shim_dir` (the fake `ssh`) is prepended AHEAD of the refusing sandbox
+        stubs, so this is the one path on which an `ssh` call resolves to
+        anything at all — and it resolves to the second fabricated host, never a
+        real one. REMOTE_SSH is set explicitly for the same reason: unset, the
+        target would default to the operator's laptop.
+        """
         defaults = dict(
             SHIP_ROLE="workbench",
             SHIP_REPO=str(self.work),
             SHIP_NO_SWITCH="1",
             REMOTE_SSH="fixture@second-host",
-            PATH=f"{shim_dir}:{os.environ['PATH']}",
         )
         defaults.update(env_extra)
-        env = self.env(**defaults)
+        env = self.env(shims=[shim_dir, *shims], **defaults)
         proc = subprocess.run(
             ["bash", str(script or SHIP), *args],
             capture_output=True, text=True, env=env, timeout=120,
@@ -1227,7 +1323,7 @@ def test_managed_artifact_check_refuses_unparseable_find_output(repo, tmp_path):
         why="the shim never reshaped find's output, so this test proves nothing",
     )
 
-    rc, out = repo.ship(PATH=f"{shim_dir}:{os.environ['PATH']}")
+    rc, out = repo.ship(shims=[shim_dir])
 
     assert rc == 12, f"unparseable manifest output reported success: rc={rc}\n{out}"
     assert "could not derive home-relative paths" in out, f"wrong guard fired\n{out}"
@@ -1301,7 +1397,7 @@ def test_managed_artifact_check_works_without_gnu_find_extensions(repo, tmp_path
         why="the shim never rejected -printf, so this test proves nothing",
     )
 
-    rc, out = repo.ship(PATH=f"{shim_dir}:{os.environ['PATH']}")
+    rc, out = repo.ship(shims=[shim_dir])
 
     assert rc == 0, f"the manifest walk needs GNU find extensions\n{out}"
     checked, _ = _managed_counts(out)
@@ -1550,7 +1646,7 @@ def test_currency_check_refuses_when_the_digest_count_does_not_match(repo, tmp_p
         f"the shim broke unrelated git subcommands: {passthrough.stderr!r}"
     )
 
-    rc, out = repo.ship(PATH=f"{shim}:{os.environ['PATH']}")
+    rc, out = repo.ship(shims=[shim])
 
     assert rc == 13, f"a slipped digest list reported success: rc={rc}\n{out}"
     assert "CURRENCY NOT CHECKED" in out and "digests for" in out, (
@@ -1582,7 +1678,7 @@ def test_currency_check_refuses_an_empty_repo_reference_set(repo, tmp_path):
     )
     assert real_probe.stdout.strip(), "positive control: the real repo lists files"
 
-    rc, out = repo.ship(PATH=f"{shim}:{os.environ['PATH']}")
+    rc, out = repo.ship(shims=[shim])
 
     assert rc == 13, f"an empty reference set reported a verdict: rc={rc}\n{out}"
     assert "CURRENCY NOT CHECKED" in out and "read NO source files" in out, (
@@ -1623,7 +1719,7 @@ def test_currency_check_works_without_gnu_find_extensions(repo_stale, tmp_path):
         why="the shim never rejected -printf, so this test proves nothing",
     )
 
-    rc, out = repo_stale.ship(PATH=f"{shim_dir}:{os.environ['PATH']}")
+    rc, out = repo_stale.ship(shims=[shim_dir])
 
     assert rc == 13, f"the currency walk needs GNU find extensions\n{out}"
     examined, stale = _currency_counts(out)
@@ -2047,8 +2143,7 @@ def test_an_in_place_overwrite_of_the_running_script_does_not_truncate_the_run(t
         "exit 0\n",
     )
 
-    rc, out = r.ship(script=ship, SHIP_NO_SWITCH="0",
-                     PATH=f"{stub}:{os.environ['PATH']}")
+    rc, out = r.ship(script=ship, SHIP_NO_SWITCH="0", shims=[stub])
 
     assert once.exists(), (
         f"the stub never ran, so nothing overwrote the script and this test "
@@ -2067,7 +2162,31 @@ def test_an_in_place_overwrite_of_the_running_script_does_not_truncate_the_run(t
     assert _shipver_sequence(out)[-1] == 2, out
 
 
-def test_the_self_check_reports_how_many_files_it_compared(repo):
+def _frozen_ship(tmp_path):
+    """A private copy of scripts/ship.sh + its lib, outside the working tree.
+
+    🔴 HERMETICITY, not tidiness. The self-check FINGERPRINTS the script it is
+    running — twice, once before the local leg and once after — so a test that
+    runs the repo's own scripts/ship.sh asserts "0 superseded" about a file
+    another session in this shared checkout may be editing at that moment. The
+    flake would read as a supersession bug in ship.sh, which is the most
+    expensive possible misdiagnosis for this particular test. The copy is frozen
+    for the duration of the run and nothing else can write it.
+
+    The lib goes to scripts/lib/ beside it because ship.sh resolves its source
+    path relative to the RESOLVED script, and the two-file watch list is exactly
+    what this test measures.
+    """
+    d = tmp_path / "frozen-ship" / "scripts"
+    (d / "lib").mkdir(parents=True)
+    ship = d / "ship.sh"
+    ship.write_text(SHIP.read_text())
+    ship.chmod(0o755)
+    (d / "lib" / "host-role.sh").write_text(HOST_ROLE_LIB.read_text())
+    return ship
+
+
+def test_the_self_check_reports_how_many_files_it_compared(repo, tmp_path):
     """🔴 POSITIVE CONTROL — "0 superseded" must carry its examined count.
 
     Identical in shape to "0 dangling out of 0 checked": a self-check wired to
@@ -2075,7 +2194,7 @@ def test_the_self_check_reports_how_many_files_it_compared(repo):
     the two apart. Both watched files (ship.sh and the lib it sources) must be in
     it, so a watch list that silently shrank to one is visible.
     """
-    rc, out = repo.ship()
+    rc, out = repo.ship(script=_frozen_ship(tmp_path))
 
     assert rc == 0, out
     m = re.search(r"ship: self-check — (\d+) files compared \(([^)]*)\), (\d+) superseded", out)
@@ -2105,7 +2224,7 @@ def test_the_self_check_refuses_when_it_cannot_digest_its_own_source(repo, tmp_p
         "would fire on every run and be a permanently-red gate"
     )
 
-    rc, out = repo.ship(PATH=f"{shim_dir}:{os.environ['PATH']}")
+    rc, out = repo.ship(shims=[shim_dir])
 
     assert rc == 20, f"an unmeasurable self-check reported a verdict: rc={rc}\n{out}"
     assert "SELF-CHECK NOT MEASURED" in out, f"wrong guard fired\n{out}"
@@ -2145,8 +2264,7 @@ def test_a_script_that_keeps_changing_stops_after_exactly_one_re_exec(tmp_path):
     )
     before = ship.read_text()
 
-    rc, out = r.ship(script=ship, SHIP_NO_SWITCH="0",
-                     PATH=f"{stub}:{os.environ['PATH']}")
+    rc, out = r.ship(script=ship, SHIP_NO_SWITCH="0", shims=[stub])
 
     switches = len(counter.read_text().split())
     assert switches >= 1, (
@@ -2234,4 +2352,267 @@ def test_the_body_is_one_brace_group_that_ends_in_exit():
     assert code[0].strip() == "{", (
         f"the body group must open before the first executable line, or the "
         f"statements ahead of it are still re-readable; got {code[0]!r}"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# THE SANDBOX + argv SURVIVAL
+#
+# 🔴 These two are one guard read from both ends. `Repo.ship` keeps this suite
+# off the operator's real laptop with the word `--no-remote` in argv — and #632
+# made argv something that has to survive an `exec`, twice over (the call site
+# passes "$@" into a function, the function passes "$@" into the exec). A dropped
+# "$@" makes pass 2 argv-less: `remote_ssh_of workbench` then resolves
+# LAPTOP_SSH_DEFAULT and the run ssh's a live machine.
+#
+# The argv test pins the behaviour. The sandbox makes the failure survivable, so
+# the mutation that proves the argv test works can be RUN rather than reasoned
+# about. Both are needed: an argv assertion alone is prose about a hazard whose
+# blast radius is somebody else's machine, and a sandbox alone leaves the actual
+# regression (pass 2 silently switching without --no-switch) undetected.
+# --------------------------------------------------------------------------- #
+def test_the_sandbox_refuses_a_run_that_reaches_ssh(repo):
+    """🔴 REACHABILITY for the refusing `ssh` shim — the suite's last defence.
+
+    A shim that never runs is the reassuring zero one layer down: every other
+    test would pass identically with it deleted. This drives a run that really
+    does reach the remote leg (`no_remote=False`) and asserts three things —
+    that the shim fired, that the target it was handed is the REAL default read
+    out of lib/host-role.sh, and that the run died rather than continuing.
+
+    The middle assertion is the point. It is not decoration: it is the
+    measurement that the fallback target is a live host, which is the whole
+    reason the shim exists.
+    """
+    real_target = _host_role_constant("LAPTOP_SSH_DEFAULT")
+    # 🔴 POSITIVE CONTROL for the refusal itself: a real ssh IS on this host, so
+    # "ssh failed" below is the shim refusing, not `command not found`.
+    assert shutil.which("ssh"), (
+        "no ssh on this host at all, so the refusal this test reads could be an "
+        "ENOENT and the shim would be unproven"
+    )
+
+    rc, out = repo.ship(no_remote=False)
+
+    assert SANDBOX_REFUSAL in out, (
+        f"the run reached the remote leg and the refusing ssh shim did NOT fire "
+        f"— this suite is one dropped flag away from converging a real host\n{out}"
+    )
+    assert real_target in out, (
+        f"the shim fired but was not handed {real_target!r}; the fallback target "
+        f"this sandbox exists to intercept has moved\n{out}"
+    )
+    assert rc != 0, f"a refused ssh produced a green run: rc={rc}\n{out}"
+    assert "converged + verified — 2 hosts" not in out, out
+
+
+def test_the_re_exec_carries_the_scripts_own_argv(self_shipping):
+    """🔴 argv must survive the exec, or the flags stop applying on pass 2.
+
+    Two independent sites can drop it: `ship_self_check "$@"` (inside a function
+    "$@" is the FUNCTION's arguments, so omitting it is silent) and
+    `exec bash "$_ship_self" "$@"`. Either way pass 2 runs with no flags:
+    --no-switch stops applying and a REAL `home-manager switch` is attempted,
+    --no-remote stops applying and the remote target falls back to a live host.
+
+    🔴 The env deliberately sets SHIP_NO_SWITCH=0. Everywhere else in this file
+    it is 1, which would let pass 2 skip the switch for a reason that has nothing
+    to do with argv — the mutant would survive against an unchanged output. With
+    it at 0, the `(SHIP_NO_SWITCH) skipping` line is emitted once per pass IF AND
+    ONLY IF argv carried `--no-switch` through, so the count is the assertion.
+    """
+    ship = _repo_ship(self_shipping)
+
+    rc, out = self_shipping.ship("--no-switch", script=ship, SHIP_NO_SWITCH="0")
+
+    assert "re-executing the NEW copy" in out, (
+        f"no re-exec happened, so this test says nothing about argv\n{out}"
+    )
+    assert _shipver_sequence(out)[-1] == 2, out
+    skips = out.count("(SHIP_NO_SWITCH) skipping home-manager switch")
+    assert skips == 2, (
+        f"expected the no-switch flag to apply on BOTH passes, saw it on {skips}. "
+        f"argv did not survive the re-exec: pass 2 ran with no flags at all, "
+        f"which on a real host means an unasked-for home-manager switch and a "
+        f"remote leg pointed at {_host_role_constant('LAPTOP_SSH_DEFAULT')}\n{out}"
+    )
+    assert SANDBOX_REFUSAL not in out, (
+        f"pass 2 tried to run a sandboxed tool, so a flag was lost across the "
+        f"exec\n{out}"
+    )
+    assert rc == 0, out
+
+
+def test_a_syntactically_broken_new_copy_is_rc20_not_bash_2(tmp_path):
+    """🔴 bash's own exit 2 must not be handed back as ship's rc 2.
+
+    The fast-forward installs a ship.sh that does not parse. `exec bash <it>`
+    then exits 2 — bash's syntax-error status — from a run that has ALREADY
+    fast-forwarded and switched the local host. rc 2 in this script means "usage
+    error ... raised before any host is touched", so that path publishes a ledger
+    entry which is false, under a code the operator reads as a typo in their own
+    command line.
+
+    🔴 The suite's rc ledger is structurally blind to it: `_ship_exit_codes`
+    scans the FILE for `exit N` / `rc=N`, and 2 arrives here from the
+    interpreter, not from any line of this script. So the class is closed in the
+    code (`bash -n` before the exec) and this is the test that watches it hold.
+    """
+    r = Repo(tmp_path, ship_in_repo=True, ship_broken=True)
+    ship = _repo_ship(r)
+    # 🔴 INSTRUMENT VALIDATION, both directions. The copy about to run must
+    # parse (or the run dies before reaching the guard) and the copy about to
+    # replace it must NOT (or the fixture is inert and this passes vacuously).
+    assert subprocess.run(["bash", "-n", str(ship)]).returncode == 0, (
+        "the RUNNING copy does not parse; this test would fail before the guard"
+    )
+    incoming = tmp_path / "incoming-ship.sh"
+    incoming.write_text(Repo.ship_source(2) + Repo.SHIP_SYNTAX_ERROR)
+    assert subprocess.run(["bash", "-n", str(incoming)]).returncode != 0, (
+        "the fixture's 'broken' copy parses fine, so nothing under test is "
+        "exercised and the guard is unreached"
+    )
+
+    rc, out = r.ship(script=ship)
+
+    assert rc == 20, (
+        f"a superseding copy that does not parse handed back rc={rc}. bash's own "
+        f"2 is indistinguishable from ship's usage error, whose documented "
+        f"meaning ('raised before any host is touched') is false here\n{out}"
+    )
+    assert "does not PARSE" in out, f"wrong guard fired\n{out}"
+    assert "converged + verified" not in out, out
+    # ...and it says what state the fleet is in, not just that it refused.
+    assert "fleet state: local (workbench) WAS converged" in out, out
+    # The file on disk really is the broken one, so this is not a mislabel.
+    assert subprocess.run(["bash", "-n", str(ship)]).returncode != 0
+
+
+def test_a_garbage_self_gen_is_normalised_not_trusted(self_shipping):
+    """🔴 REACHABILITY for the SHIP_SELF_GEN sanitiser.
+
+    The counter comes from the environment and is fed to `[ "$x" -ge "$max" ]`.
+    Non-numeric junk makes that test ERROR ("integer expression expected"), and
+    without `set -e` an errored test is simply FALSE — i.e. the budget check
+    passes and the loop guard silently stops guarding.
+
+    Reached with a SUPERSEDING run, deliberately: on a run where nothing changed
+    the self-check returns before the comparison and the sanitiser's deletion
+    mutant survives untouched. Here the comparison really executes.
+    """
+    ship = _repo_ship(self_shipping)
+
+    rc, out = self_shipping.ship(script=ship, SHIP_SELF_GEN="not-a-number")
+
+    assert "integer expression expected" not in out, (
+        f"a non-numeric SHIP_SELF_GEN reached the arithmetic comparison, which "
+        f"then evaluated FALSE — the budget check passed by erroring\n{out}"
+    )
+    assert "generation 1 of 1" in out, (
+        f"garbage was not normalised to a fresh run's 0\n{out}"
+    )
+    assert _shipver_sequence(out)[-1] == 2, out
+    assert rc == 0, out
+
+
+def test_an_exit_20_names_the_host_it_left_unconverged(tmp_path):
+    """🔴 A refusal between the two legs leaves the FLEET in two states.
+
+    Every exit-20 site sits after the local leg and before the remote one, so
+    "re-run ship by hand" on its own reads like a retry of nothing — while one
+    machine has been fast-forwarded and switched and the other has not been
+    contacted at all. The message has to carry that, and the ONE-host runs
+    elsewhere in this file cannot see it: with --no-remote there is no remote
+    host to leave behind. This is a two-host-scope run.
+    """
+    r = Repo(tmp_path, second_host=True, ship_in_repo=True, ship_changes=False)
+    shim = r.ssh_shim(tmp_path)
+    ship = _repo_ship(r)
+    counter = tmp_path / "switch-count"
+    counter.write_text("")
+    stub = tmp_path / "hm-forever"
+    stub.mkdir()
+    write_exec(
+        stub / "home-manager",
+        f'echo switch >> "{counter}"\n'
+        f'echo "# rewritten $(wc -l < "{counter}")" >> "{ship}"\n'
+        "exit 0\n",
+    )
+
+    rc, out = r.ship_both_hosts(shim, script=ship, SHIP_NO_SWITCH="0", shims=[stub])
+
+    assert len(counter.read_text().split()) == 2, (
+        f"the stub did not drive two local passes, so no exit-20 site was "
+        f"reached and this test proves nothing\n{out}"
+    )
+    assert rc == 20, f"expected rc20, got {rc}\n{out}"
+    assert "remote (laptop) was NOT converged" in out, (
+        f"the refusal does not say the remote host was never visited, so the "
+        f"operator cannot tell a two-state fleet from a no-op\n{out}"
+    )
+    assert "fleet state: local (workbench) WAS converged" in out, out
+    # ...and it is TRUE: the remote leg really never ran.
+    assert "=== remote (" not in out, (
+        f"the remote host WAS visited, so the message above is a false claim\n{out}"
+    )
+
+
+def test_a_re_exec_says_the_local_legs_status_is_discarded(tmp_path):
+    """🔴 The exec throws away the local leg's rc — silently, before the verdict.
+
+    `lrc` is captured, folded into `rc`, and then the process is REPLACED, so a
+    local leg that failed is re-attempted on pass 2 with nobody told that pass 1
+    failed at all. Driven with a stale managed artifact (rc 13) on a run whose
+    fast-forward also supersedes ship.sh: pass 1 fails, the re-exec happens, and
+    the announcement has to name the status it is dropping.
+    """
+    r = Repo(tmp_path, ship_in_repo=True, stale_managed=[".claude/RULES.md"])
+    ship = _repo_ship(r)
+
+    rc, out = r.ship(script=ship)
+
+    assert "re-executing the NEW copy" in out, f"no re-exec happened\n{out}"
+    assert "the local leg exited 13; that status is DISCARDED" in out, (
+        f"the re-exec dropped a failing local status without saying so\n{out}"
+    )
+    # The failure is real and pass 2 reproduces it, so the run still ends red.
+    assert rc == 13, f"expected the stale-artifact code to survive, got {rc}\n{out}"
+
+
+def test_the_switch_log_lives_under_tmpdir_and_is_removed(tmp_path):
+    """🔴 The home-manager log was hardcoded to /tmp and never deleted.
+
+    A self-superseding run executes the switch block TWICE, so the pre-existing
+    leak became two files per run. Both halves are asserted here, and the pair is
+    a positive/negative control: the stub counts the log while it exists (proving
+    it was created under $TMPDIR at all — otherwise "nothing left behind" is
+    satisfied by a check wired to the wrong directory), and the directory is
+    asserted empty afterwards.
+    """
+    r = Repo(tmp_path, ship_in_repo=True)
+    ship = _repo_ship(r)
+    tmp = tmp_path / "sandbox-tmp"
+    tmp.mkdir()
+    seen = tmp_path / "logs-seen"
+    stub = tmp_path / "hm-logwatch"
+    stub.mkdir()
+    write_exec(
+        stub / "home-manager",
+        f'ls "$TMPDIR"/ship-hm.*.log >> "{seen}" 2>/dev/null\n'
+        "exit 0\n",
+    )
+
+    rc, out = r.ship(script=ship, SHIP_NO_SWITCH="0", shims=[stub], TMPDIR=str(tmp))
+
+    assert rc == 0, out
+    observed = seen.read_text().split() if seen.exists() else []
+    assert len(observed) == 2, (
+        f"expected the switch log under $TMPDIR on both passes of a superseding "
+        f"run, saw {observed!r}. A zero here means the log went somewhere else "
+        f"and the leak assertion below is looking at the wrong directory\n{out}"
+    )
+    leftovers = sorted(p.name for p in tmp.glob("ship-*"))
+    assert leftovers == [], (
+        f"ship left temp files behind: {leftovers} — twice over, because a "
+        f"superseding run runs the local leg twice\n{out}"
     )

@@ -162,10 +162,51 @@
 # converged.
 #
 # Exit codes:
+#
+# 🔴 THE LADDER IS SHARED WITH scripts/drift-check.sh, RECIPROCALLY. That script
+# is the passive deadman for the same fleet and deliberately uses the same
+# vocabulary, so a number must not mean two things across the pair. It owns
+# 10, 14, 15, 16, 17 and 18 — DRIFT meanings this script does not take — and
+# reserves them here; this script owns 5, 7, 9, 11, 19 and 20 and they are
+# reserved there. Its header says "a new DRIFT code has nowhere to go but
+# upward", which points the next one at 19 unless the reservation is written
+# down on both sides: so the next free code for THIS script is 21, and so is the
+# next free code for that one.
+#
+# RESERVED-TO-DRIFT-CHECK: 10 14 15 16 17 18
+#
+# That line is a LEDGER, machine-read, not a comment: it must equal exactly the
+# set of codes drift-check.sh can return and this script cannot, so it fails when
+# the set grows (a new DRIFT code appears) or shrinks. Pinned by
+# test_the_two_rc_ladders_reserve_each_others_codes in
+# scripts/tests/test_drift_check.py — until 2026-08-21 the alignment existed only
+# in a PR description and neither file mentioned the other's numbers.
+#
 #   2  usage error: an unknown argument, or a run asked to check NO host at all
 #      (`--no-local --no-remote`). Raised before any host is touched, so the rc
 #      legend printed on failure is never reached on this path — it is in both
 #      ledgers anyway, because a ledger with a known hole is not a ledger.
+#
+#      🔴 BASH ITSELF ALSO EXITS 2, on a syntax error, and this script hands
+#      control to another copy of itself (the re-exec below). A superseded copy
+#      with a syntax error would have exited 2 AFTER the local host was already
+#      fast-forwarded and switched — an rc whose only documented meaning says
+#      "raised before any host is touched", i.e. a ledger entry that is FALSE on
+#      the one path that can produce it. A failed `exec` (the file unlinked
+#      between the readability check and the exec) is the same class one code
+#      further out: 126/127, in no ledger at all.
+#
+#      Both are closed at the source rather than documented as extra codes: the
+#      new copy is `bash -n`-checked before the exec, and `shopt -s execfail`
+#      makes a failed exec RETURN instead of killing the shell — each becomes
+#      rc 20, which already means "this script was replaced and the new copy
+#      could not be run". That choice is deliberate, because the test suite's
+#      ledger (`_ship_exit_codes` in scripts/tests/test_ship_converge.py) reads
+#      this FILE for `exit N` / `rc=N` and is structurally blind to statuses BASH
+#      produces. It cannot see this class at all, so teaching it 2/126/127 would
+#      pin prose no assertion can keep honest; making the statuses unreachable is
+#      the guard, and test_a_syntactically_broken_new_copy_is_rc20_not_bash_2 is
+#      the one that watches it hold.
 #   3  repo missing on that host
 #   4  git fetch failed, or origin/main is missing / HEAD unborn
 #   5  SKIPPED — an unresolved merge/cherry-pick is in progress (conflicted
@@ -196,10 +237,28 @@
 #      hosts: an agreement that was not compared is not an agreement.
 #   20 THIS SCRIPT was replaced by its own run and the new copy could not be run:
 #      the re-exec budget was exhausted (ship.sh kept changing under the run),
-#      the new copy is unreadable, or the self-check could not be measured at
-#      all. Three spellings, one code, because they are one operator action —
+#      the new copy is unreadable, the new copy does not PARSE (`bash -n`), the
+#      `exec` of it failed outright, or the self-check could not be measured at
+#      all. Five spellings, one code, because they are one operator action —
 #      re-run ship by hand — and because a run that cannot tell whether its own
 #      source changed must not print a verdict either way.
+#
+#      🔴 Every exit-20 site sits between the local leg and the remote one, so
+#      the FLEET IS PROVABLY IN TWO STATES when it fires: the local host was
+#      converged (and, unless --no-switch, switched) and the remote host was NOT
+#      visited at all. "re-run ship by hand" alone reads like a retry of nothing;
+#      each site therefore prints which host got what. The local leg's own
+#      non-zero rc is also DISCARDED by the re-exec — the exec replaces the
+#      process before the verdict block can report it — so a re-exec announces
+#      that too rather than letting pass 2 silently re-attempt a failed switch.
+#
+#      🔴 Like rc 2, the `rc20=` line in the legend below is UNREACHABLE: every
+#      exit-20 site returns before the verdict block that prints the legend. It
+#      stays in both ledgers for the same reason rc 2 does — a ledger with a
+#      known hole is not a ledger, and the two prose copies are pinned to the
+#      code by test_every_exit_code_ship_can_return_is_documented_in_the_header_
+#      and_the_legend, which cannot tell a printed line from an unprinted one.
+#      Saying so here is the honest version of "the test enforces dead prose".
 #
 # Usage:
 #   scripts/ship.sh              # converge local host + the other (remote) host
@@ -355,6 +414,13 @@ fi
 # under us and no copy of ship.sh can vouch for the result.
 SHIP_SELF_MAX_GEN=1
 SHIP_SELF_GEN="${SHIP_SELF_GEN:-0}"
+# 🔴 The counter arrives from the ENVIRONMENT, so it is attacker-shaped input to
+# an arithmetic comparison. Non-numeric junk makes `[ "$x" -ge 1 ]` error out
+# ("integer expression expected"), and because this script runs without `set -e`
+# that error is not fatal — the test simply takes its FALSE branch, i.e. the
+# budget check passes and the loop guard is off. Anything that is not a run of
+# digits is therefore normalised to 0 (a fresh run) rather than trusted.
+# Reachability is pinned by test_a_garbage_self_gen_is_normalised_not_trusted.
 case "$SHIP_SELF_GEN" in ''|*[!0-9]*) SHIP_SELF_GEN=0 ;; esac
 SHIP_SELF_WATCH=("$_ship_self")
 [ -r "$_ship_lib" ] && SHIP_SELF_WATCH+=("$_ship_lib")
@@ -384,12 +450,44 @@ ship_self_fingerprint() {
 }
 SHIP_SELF_BEFORE="$(ship_self_fingerprint)"
 
+# ship_self_fleet_state — what the two hosts got, printed by every exit-20 site.
+# 🔴 A refusal that only says "re-run ship" hides that the run already converged
+# ONE machine and never touched the other. The fleet is in two states at every
+# one of these exits; saying which is the difference between an operator who
+# re-runs and one who first wonders why the laptop is behind.
+ship_self_fleet_state() {
+  if [ "$DO_LOCAL" = 1 ]; then
+    if [ "${lrc:-0}" = 0 ]; then
+      echo "  fleet state: local ($SHIP_ROLE) WAS converged by this run." >&2
+    else
+      echo "  fleet state: local ($SHIP_ROLE) leg exited ${lrc} — see its lines above." >&2
+    fi
+  else
+    echo "  fleet state: local ($SHIP_ROLE) was out of scope (--no-local)." >&2
+  fi
+  if [ "$DO_REMOTE" = 1 ]; then
+    echo "  remote ($REMOTE_ROLE) was NOT converged — this refusal happens BEFORE the remote leg." >&2
+  else
+    echo "  remote was out of scope (--no-remote), so only the local host is affected." >&2
+  fi
+}
+
 # ship_self_check "$@" — re-take the fingerprint and act on the difference.
 # 🔴 Pass the SCRIPT's arguments: inside a function "$@" is the FUNCTION's, and
 # the re-exec must carry --no-remote/--no-switch/... through unchanged.
+#
+# 🔴 THAT ARGV IS ALSO THE TEST SUITE'S ONLY GUARD AGAINST A REAL HOST. With
+# REMOTE_SSH unset, remote_ssh_of falls back to the laptop's real LAN address, so
+# `--no-remote` in argv is what keeps a fixture off the operator's actual laptop.
+# Dropping "$@" at either site (here, or the exec below) makes pass 2 argv-less
+# and remote-enabled. test_the_re_exec_carries_the_scripts_own_argv pins it, and
+# the suite additionally puts a REFUSING `ssh` on PATH so the failure can never
+# be a live host — belt and braces, because the argv assertion is prose about a
+# hazard whose blast radius is somebody else's machine.
+#
 # Either returns (nothing was superseded), execs the new copy, or exits 20.
 ship_self_check() {
-  local i n f b a
+  local i n f b a _ship_parse_err
   local unmeasured=0 changed=0 detail="" names=""
   local -a after_lines=() before_lines=()
   n=${#SHIP_SELF_WATCH[@]}
@@ -417,6 +515,7 @@ ship_self_check() {
     echo "  cksum(1) is what answers 'did my own source change under me'. With no answer this run" >&2
     echo "  cannot tell a verdict IT computed from one the superseded copy computed, and a" >&2
     echo "  comparison that was never made must not read as 'unchanged'." >&2
+    ship_self_fleet_state
     echo "  re-run ship by hand." >&2
     exit 20
   fi
@@ -436,19 +535,56 @@ ship_self_check() {
   if [ "$SHIP_SELF_GEN" -ge "$SHIP_SELF_MAX_GEN" ]; then
     echo "ship: ❌ SUPERSEDED AGAIN at generation $SHIP_SELF_GEN (budget $SHIP_SELF_MAX_GEN) — refusing to re-exec." >&2
     echo "  ship.sh keeps changing under this run, so no copy of it can vouch for the result." >&2
+    ship_self_fleet_state
     echo "  re-run ship by hand once the tree has stopped moving." >&2
     exit 20
   fi
   if [ ! -r "$_ship_self" ]; then
     echo "ship: ❌ SUPERSEDED but the new copy at $_ship_self is not readable — refusing to guess." >&2
+    ship_self_fleet_state
+    echo "  re-run ship by hand." >&2
+    exit 20
+  fi
+  # 🔴 PARSE THE NEW COPY BEFORE HANDING IT THE PROCESS. `exec bash <broken>`
+  # exits 2 — bash's own syntax-error status — from a run that has ALREADY
+  # converged and switched the local host. rc 2 documents itself as "raised
+  # before any host is touched", so that path publishes a false ledger entry
+  # under a code the operator reads as a typo in their own command line.
+  # `bash -n` costs a parse and turns it into rc 20, which is what actually
+  # happened: this script was replaced and the new copy could not be run.
+  if ! _ship_parse_err=$(bash -n "$_ship_self" 2>&1); then
+    echo "ship: ❌ SUPERSEDED but the new copy at $_ship_self does not PARSE — refusing to exec it." >&2
+    printf '  %s\n' "$_ship_parse_err" >&2
+    echo "  exec'ing it would exit 2 (bash's syntax-error status), which this script documents as" >&2
+    echo "  a usage error raised before any host is touched — false here, and the wrong diagnosis." >&2
+    ship_self_fleet_state
+    echo "  fix the syntax (or roll back the commit that landed it) and re-run ship by hand." >&2
     exit 20
   fi
   SHIP_SELF_GEN=$((SHIP_SELF_GEN + 1))
   export SHIP_SELF_GEN
   echo "ship: re-executing the NEW copy (generation $SHIP_SELF_GEN of $SHIP_SELF_MAX_GEN)."
   echo "  the remote leg has NOT run yet, so it will be sent the new CONVERGE payload."
+  # 🔴 The local leg's status does not survive the exec — the process is replaced
+  # before the verdict block can report it. Say so, or pass 2 silently re-attempts
+  # a failed switch and the operator never learns pass 1 failed at all.
+  if [ "${lrc:-0}" != 0 ]; then
+    echo "  NOTE: the local leg exited ${lrc}; that status is DISCARDED by this re-exec."
+    echo "        pass 2 re-runs the local converge with the new logic and reports its own."
+  fi
   echo
+  # 🔴 execfail: without it a failed `exec` kills the shell with 126/127 — a
+  # status in neither ledger, from a run that has already converged one host.
+  # With it the exec RETURNS and we own the outcome. The window is real: the
+  # readability check above is a TOCTOU probe, and the writer that superseded
+  # this file is by definition still active.
+  shopt -s execfail
   exec bash "$_ship_self" "$@"
+  echo "ship: ❌ SUPERSEDED but exec of the new copy at $_ship_self FAILED — refusing to continue." >&2
+  echo "  the file was readable and parsed a moment ago, so it was replaced or removed again mid-exec." >&2
+  ship_self_fleet_state
+  echo "  re-run ship by hand once the tree has stopped moving." >&2
+  exit 20
 }
 
 # Self-contained converge routine, run identically on each host (local via
@@ -927,10 +1063,15 @@ fi
 if [ "$no_switch" = 1 ]; then
   echo "[$host] (SHIP_NO_SWITCH) skipping home-manager switch"
 else
-  log=$(mktemp /tmp/ship-hm.XXXXXX.log)
+  # 🔴 $TMPDIR, not a hardcoded /tmp: a hardcoded path ignores an operator or
+  # harness that redirected temp elsewhere, and there is no reason for this one
+  # file to be the exception. Removed on BOTH paths — a self-superseding run
+  # executes this block twice (once per pass), so a leak here leaks twice.
+  log=$(mktemp "${TMPDIR:-/tmp}/ship-hm.XXXXXX.log")
   if ! home-manager switch --flake "$repo" --impure >"$log" 2>&1; then
-    echo "[$host] home-manager switch FAILED:"; tail -4 "$log"; exit 9
+    echo "[$host] home-manager switch FAILED:"; tail -4 "$log"; rm -f "$log"; exit 9
   fi
+  rm -f "$log"
 fi
 
 # 4) Verify the GIT state: must be ON branch main AND HEAD == origin/main.
@@ -977,6 +1118,15 @@ fi
 rc=0
 LOCAL_SHA=""
 REMOTE_SHA=""
+lrc=0
+
+# Capture files for the two legs. 🔴 $TMPDIR-aware and trap-cleaned: a hardcoded
+# /tmp ignores a redirected temp dir, and an exit that skips the explicit `rm`
+# (every rc-20 site sits between the two legs) would leave the file behind — on a
+# self-superseding run, twice.
+cap_local=""
+cap_remote=""
+trap 'rm -f "$cap_local" "$cap_remote"' EXIT
 
 # ship_landed_sha <capture-file> — the sha that leg reported landing on, or "".
 # 🔴 Anchored on the WHOLE line. A 40-hex string turns up in this output in prose
@@ -997,7 +1147,7 @@ if [ "$DO_LOCAL" = 1 ]; then
   # command's status and `tee` always succeeds, so `$?` here would be a hardcoded
   # 0 over any per-host skip. Same lesson as scripts/run-tests.sh GUARD 6, from
   # the other side of the pipe.
-  cap_local=$(mktemp /tmp/ship-local.XXXXXX)
+  cap_local=$(mktemp "${TMPDIR:-/tmp}/ship-local.XXXXXX")
   SHIP_REPO="$SHIP_REPO" SHIP_NO_SWITCH="$SHIP_NO_SWITCH" bash -c "$CONVERGE" | tee "$cap_local"
   lrc=${PIPESTATUS[0]}
   [ "$lrc" = 0 ] || rc=$lrc
@@ -1016,7 +1166,7 @@ echo
 if [ "$DO_REMOTE" = 1 ]; then
   echo "=== remote ($REMOTE_ROLE — $REMOTE_SSH) ==="
   # Pass the switch toggle remotely; SHIP_REPO stays host-default ($HOME/workspace/devrc).
-  cap_remote=$(mktemp /tmp/ship-remote.XXXXXX)
+  cap_remote=$(mktemp "${TMPDIR:-/tmp}/ship-remote.XXXXXX")
   ssh -o ConnectTimeout=10 "$REMOTE_SSH" "SHIP_NO_SWITCH=$SHIP_NO_SWITCH; $CONVERGE" | tee "$cap_remote"
   remrc=${PIPESTATUS[0]}
   REMOTE_SHA=$(ship_landed_sha "$cap_remote")
