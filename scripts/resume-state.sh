@@ -27,6 +27,22 @@ NOISE_RE='TargetDown|KubeHpaMaxedOut'
 
 have(){ command -v "$1" >/dev/null 2>&1; }
 
+# The clawgate<->handoff seam: the front-matter parser and the drift rules,
+# SHARED with /handoff's writer so the two cannot disagree about what a
+# `clawgate-task:` field is. Sourced (not re-implemented) — see that file's
+# header. Its pure functions are asserted on fixture text by
+# scripts/tests/test_resume_state_clawgate.py exactly as `extract_prs` is.
+# 🔴 A FAILED SOURCE IS RECORDED, NOT SWALLOWED. This script runs without
+# `set -e`, so a missing lib would leave every `clawgate_*` call reporting
+# "command not found" (127) — and the block below reads a non-zero from the
+# parser as "this doc names no task", i.e. the absent tool would render as a
+# clean, reassuring absence. Exactly the false green the digest exists to stop.
+# shellcheck source=lib/clawgate_handoff.sh
+CLAWGATE_LIB="$(dirname "${BASH_SOURCE[0]}")/lib/clawgate_handoff.sh"
+CLAWGATE_LIB_OK=1
+# shellcheck source=/dev/null
+. "$CLAWGATE_LIB" 2>/dev/null || CLAWGATE_LIB_OK=0
+
 # ---------------------------------------------------------------------------
 # Extraction heuristics — kept as pure, side-effect-free functions so the test
 # harness can source this file and assert them on fixture text.  Each reads its
@@ -181,14 +197,32 @@ extract_tokens(){
 # other. Only if no qualified line exists do we fall back to the repo-blind
 # match — which is exactly right for a bare ref, whose whole nature is that the
 # doc never qualified it.
-handoff_says_inflight(){ # $1=pr number  $2=handoff path  $3=owner/repo (optional)
-  [ -f "$2" ] || return 1
+# 🔴 $2 IS THE TEXT, NOT A PATH, AND THAT SIGNATURE IS THE FIX. It took a path
+# and grepped the FILE, so `git_pr_block` extracted the PR refs from
+# `$HANDOFF_TEXT` — the copy `handoff_freshness` chose — and then asked a
+# DIFFERENT copy of the document whether the doc framed them as in-flight. Both
+# directions were measured on a stale clone against a bare origin:
+#
+#   false clean   origin copy says `acme/widget#999 is OPEN and awaiting merge`,
+#                 stale local says nothing -> `PR … MERGED` and NO drift line,
+#                 under a header announcing it had read the origin copy;
+#   fabrication   stale local says OPEN, origin says `LANDED; the follow-on is
+#                 already done` -> the drift line fires anyway. The comment at
+#                 the top of extract_branches calls this the worse direction.
+#
+# Taking TEXT removes the class from this helper permanently: there is no path
+# left for a caller to hand it, so no caller can hand it the wrong one. The
+# guard that failed to see this (it only looked for content reads written
+# INLINE) now also ledgers every helper that RECEIVES $HANDOFF and reads it —
+# see test_only_handoff_freshness_READS_the_working_tree_copy.
+handoff_says_inflight(){ # $1=pr number  $2=handoff TEXT  $3=owner/repo (optional)
+  [ -n "$2" ] || return 1
   local lines="" q
   if [ -n "${3:-}" ]; then
     q=$(printf '%s' "$3" | sed -E 's/[][\\.^$*+?(){}|]/\\&/g')
-    lines=$(grep -iE "$q#$1([^0-9]|$)" "$2" 2>/dev/null)
+    lines=$(printf '%s\n' "$2" | grep -iE "$q#$1([^0-9]|$)" 2>/dev/null)
   fi
-  [ -z "$lines" ] && lines=$(grep -iE "#$1([^0-9]|$)" "$2" 2>/dev/null)
+  [ -z "$lines" ] && lines=$(printf '%s\n' "$2" | grep -iE "#$1([^0-9]|$)" 2>/dev/null)
   printf '%s\n' "$lines" \
     | grep -qiE 'open|in.?flight|awaiting|pending|not yet merged|to merge|mergeable|review|wip|draft|blocked'
 }
@@ -264,13 +298,19 @@ UNRECONCILED=()  # sources that did NOT answer — an empty DRIFT means less whe
 #   HANDOFF_TEXT    the authoritative text every later block extracts from
 #   HANDOFF_NOTE    the freshness clause printed on the `handoff:` line
 #   HANDOFF_ALT     a /tmp path holding the OTHER copy, when they differ
+#   HANDOFF_REF     the ref the authoritative text came FROM, or "" for the
+#   HANDOFF_REL     working tree — with its repo-relative path. Set ONLY on the
+#                   stale-branch path, i.e. only when the text did not come from
+#                   the file on disk. Anything that needs to DATE the text it
+#                   read has to know this: the local branch's `git log` is the
+#                   history of a copy nobody reconciled. See clawgate_block.
 #
 # Which copy wins is decided by a fact, not a heuristic: if the working-tree
 # file is UNMODIFIED relative to HEAD, then any difference from origin is the
 # branch being behind, and origin is authoritative. If it carries uncommitted
 # edits, it is this session's work-in-progress and stays authoritative — but
 # loudly, because reconciling against unpushed text is its own trap.
-HANDOFF_TEXT="" HANDOFF_NOTE="" HANDOFF_ALT=""
+HANDOFF_TEXT="" HANDOFF_NOTE="" HANDOFF_ALT="" HANDOFF_REF="" HANDOFF_REL=""
 handoff_freshness(){
   [ -n "$HANDOFF" ] || return 0
   HANDOFF_TEXT=$(cat "$HANDOFF")
@@ -336,6 +376,10 @@ handoff_freshness(){
   if git -C "$d" diff --quiet -- "$rel" 2>/dev/null; then
     # unmodified vs HEAD => the difference is the BRANCH being behind origin
     HANDOFF_TEXT="$rtext"
+    # …and record WHERE that text came from, because a consumer that dates the
+    # doc must date the copy it actually read: the local branch's log describes
+    # the stale file this line just replaced.
+    HANDOFF_REF="$ref" HANDOFF_REL="$rel"
     HANDOFF_NOTE="${HANDOFF_NOTE}🔴 $ref copy (the working-tree copy is STALE: ${ln_local} lines local vs ${ln_remote} on $ref)"
     DRIFT+=("handoff doc in the working tree is STALE vs $ref (${ln_local} vs ${ln_remote} lines) — this digest reconciled the $ref copy, readable at $alt; READ THAT ONE, the local file is not what the last session wrote")
   else
@@ -453,7 +497,10 @@ git_pr_block(){
       if [ "$state" = OPEN ]; then printf '  PR %s %-6s ci=%s\n' "$label" "$state" "$ci"
       else printf '  PR %s %s\n' "$label" "$state"; fi
       # DRIFT: the handoff frames this PR as open/in-flight but it already landed...
-      if [ "$state" = MERGED ] && handoff_says_inflight "$num" "$HANDOFF" "$([ "$slug" = "-" ] || printf '%s' "$slug")"; then
+      # `$text` — the SAME copy the refs above were extracted from. It used to
+      # pass "$HANDOFF", so the refs came from the authoritative text and their
+      # framing from whatever happened to be on disk.
+      if [ "$state" = MERGED ] && handoff_says_inflight "$num" "$text" "$([ "$slug" = "-" ] || printf '%s' "$slug")"; then
         DRIFT+=("PR $label MERGED but handoff frames it as open/in-flight (do the follow-on)")
       fi
       # ...or a referenced PR was CLOSED without merging (abandoned — always notable)
@@ -623,6 +670,177 @@ alerts_block(){
 }
 
 # ---------------------------------------------------------------------------
+# CLAWGATE — reconcile the handoff's recorded task against the LIVE board.
+#
+# /handoff records `clawgate-task: <id>` as YAML front matter at the top of the
+# doc (see claude/skills/handoff/SKILL.md and scripts/lib/clawgate_handoff.sh).
+# This reads it back and asks the board two questions: what STATUS does the task
+# carry now, and how many comments POSTDATE the doc?
+#
+# 🔴 EVERY WAY THIS CAN FAIL PRINTS A `!` GAP, because the alternative is the
+# false green this whole script exists to avoid. `clawgatectl` missing, a 401, a
+# task that does not exist and a server that dropped the field all produce the
+# same observable — nothing to reconcile — and reporting that as "no drift"
+# states a fact about the board that was never measured.
+#
+# ⚠ THE ONE CASE THAT IS **NOT** A GAP: a handoff with no `clawgate-task:` field
+# at all. Nothing asked clawgate anything, so its silence costs no coverage —
+# exactly the rule git_pr_block applies when a handoff references no PRs. It
+# still gets an explicit line, because "this doc names no task" and "the task is
+# fine" are different statements and the digest must not let one read as the other.
+#
+# clawgatectl rather than a hand-rolled curl: it reads the token from
+# ~/.claude/clawgate.env itself, never puts it in argv, and returns exit codes
+# that distinguish unreachable (6) from auth (3) from not-found (4) — which is
+# the difference between "the board is down" and "that task is gone".
+clawgate_block(){
+  echo "CLAWGATE"
+  if [ "$CLAWGATE_LIB_OK" -ne 1 ]; then
+    echo "  (the shared parser $CLAWGATE_LIB could not be sourced — NOTHING was reconciled)"
+    UNRECONCILED+=("scripts/lib/clawgate_handoff.sh could not be sourced — the handoff's clawgate task, if any, was never read")
+    return
+  fi
+  if [ -z "$HANDOFF" ]; then echo "  (no handoff — nothing to reconcile)"; return; fi
+  # 🔴 `$HANDOFF_TEXT`, NOT `cat "$HANDOFF"` — the copy handoff_freshness CHOSE.
+  # Every other block reads it; this one read the working tree, and the two
+  # differ exactly when it matters. MEASURED on a fixture whose branch is behind
+  # origin: the digest printed `handoff-read: 🔴 origin/base copy (the
+  # working-tree copy is STALE …)` and then
+  # `(no clawgate-task: field in this handoff …)` with ZERO gaps — because the
+  # STALE local copy carried no field while the copy it announced it had
+  # reconciled carried `clawgate-task: 193`, and "no field" is the one case
+  # deliberately exempt from gapping. So the block declined to ask the board and
+  # nothing said so: the false-clean this block exists to prevent, reached
+  # through the block itself.
+  local text id
+  text="$HANDOFF_TEXT"
+  if ! id=$(clawgate_task_field "$text"); then
+    if clawgate_field_present "$text"; then
+      echo "  (the handoff's clawgate-task: field is UNREADABLE — no task was fetched)"
+      UNRECONCILED+=("the handoff carries an unreadable clawgate-task: field — clawgate was never asked, so the task's state is UNKNOWN")
+    else
+      echo "  (no clawgate-task: field in this handoff — nothing to reconcile; this says NOTHING about the board)"
+    fi
+    return
+  fi
+
+  if ! have clawgatectl; then
+    echo "  (clawgatectl not on PATH — task #$id NOT checked)"
+    UNRECONCILED+=("clawgate task #$id was NOT checked (clawgatectl not on PATH) — its status is UNKNOWN, not fine")
+    return
+  fi
+  local json rc
+  json=$(clawgatectl task get "$id" 2>/dev/null); rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$json" ]; then
+    echo "  (clawgatectl exit $rc — task #$id NOT checked)"
+    UNRECONCILED+=("clawgate did not answer for task #$id (clawgatectl exit $rc: 3=auth 4=no such task 6=unreachable 8=non-JSON) — its status is UNKNOWN, not fine")
+    return
+  fi
+  local status
+  status=$(printf '%s' "$json" | jq -r '.status // empty' 2>/dev/null)
+  if [ -z "$status" ]; then
+    echo "  (clawgate answered for #$id with no readable status)"
+    UNRECONCILED+=("clawgate's answer for task #$id carried no readable status — UNKNOWN, not fine")
+    return
+  fi
+  # 🔴 A STATUS OUTSIDE THE VOCABULARY IS A GAP, NOT A QUIET PASS. clawgate_drift_lines
+  # decides on `complete`/`ready_for_review` and is silent otherwise, so a FIFTH
+  # status would render exactly like a healthy one — and clawgate's own
+  # taskstatus.go records an incident where adding a constant left a suite green.
+  # The reading continues (the comment count is still worth having) but the
+  # digest must never call an unknown state "no drift".
+  if ! clawgate_known_status "$status"; then
+    UNRECONCILED+=("clawgate task #$id has status '$status', which this reconciler does not know (it knows: $CLAWGATE_TASK_STATUSES) — whether that means drift is UNKNOWN")
+  fi
+
+  # 🔴 WHICH CLOCK "WHEN THE DOC WAS WRITTEN" MEANS, and mtime is the wrong
+  # answer in this repo's own standard workflow. `git worktree add` / `git clone`
+  # stamp every checked-out file at checkout time, so in a FRESH worktree — which
+  # CLAUDE.md mandates for commit-bound work — every comment predates the doc and
+  # the count is a silent zero. The doc's last COMMIT date is content-derived and
+  # survives a checkout, so it is preferred; mtime is the fallback and says so
+  # with a `!` gap naming the clock it used.
+  #
+  # ⚠ A tracked doc edited but not yet committed reads OLDER than reality on the
+  # git clock, so comments between the commit and the edit are counted as new.
+  # That over-reports, which is the direction this module errs in everywhere
+  # else: a spurious "read these comments" costs a glance, a missed one costs the
+  # thing the reconciler exists to catch.
+  #
+  # 🔴 NO `-d "$REPO/.git"` PRECONDITION — in a WORKTREE `.git` is a FILE, so
+  # that test is false in exactly the checkout this fix exists for, and the
+  # clock would fall straight back to the mtime a checkout just reset. Ask git
+  # instead and read the answer: an empty result means "no commit for this
+  # path", whatever the reason.
+  #
+  # 🔴 AND IT DATES THE COPY THAT WAS READ, WHICH IS NOT ALWAYS THE LOCAL ONE.
+  # When handoff_freshness took the text from `origin/<default>` because this
+  # branch is behind, the local `git log -1 -- <path>` describes the STALE file
+  # that was discarded — an older date, so the count over-reports rather than
+  # silences, but it is a date for a document nobody reconciled. `HANDOFF_REF`
+  # is set exactly when that happened, so the log is asked on that ref and the
+  # printed clock names it. Leaving this implicit was the second half of the
+  # same bug as the `text=` line above.
+  local mt clock counts newer unreadable total
+  clock=""
+  if [ -n "$HANDOFF_REF" ] && [ -n "$HANDOFF_REL" ]; then
+    mt=$(git -C "$REPO" log -1 --format=%ct "$HANDOFF_REF" -- "$HANDOFF_REL" 2>/dev/null)
+    [ -n "$mt" ] && clock="last commit on $HANDOFF_REF"
+  else
+    mt=$(git -C "$REPO" log -1 --format=%ct -- "$HANDOFF" 2>/dev/null)
+    [ -n "$mt" ] && clock="last commit"
+  fi
+  # 🔴 THE MTIME FALLBACK IS NOT AVAILABLE WHEN THE TEXT CAME FROM A REF. It is
+  # the mtime of the file on disk — the copy that was DISCARDED — and it is
+  # typically NEWER than the ref's commit, so using it here would SILENCE
+  # comments rather than over-report them: the unsafe direction, in the one case
+  # where the reconciler already knows it is reading someone else's copy.
+  # Reachable when the ref carries no commit for that path (a shallow or grafted
+  # clone). So: no date at all, cutoff 0, every comment counted as newer, and a
+  # gap that says why. Loud and over-reporting beats quiet and wrong.
+  if [ -z "$clock" ] && [ -n "$HANDOFF_REF" ]; then
+    mt=0
+    clock="UNDATED ($HANDOFF_REF carries no commit for this path)"
+    UNRECONCILED+=("the handoff text came from $HANDOFF_REF but that ref carries no commit date for it (shallow or grafted clone?) — every comment is counted as newer rather than dating the DISCARDED local copy, which would silence them")
+  fi
+  if [ -z "$clock" ]; then
+    mt=$(stat -c %Y "$HANDOFF" 2>/dev/null)
+    clock="file mtime"
+    if [ -n "$mt" ]; then
+      UNRECONCILED+=("the handoff doc has no commit date, so comments were counted against its FILE MTIME — a checkout, copy or rsync resets that, and would make every comment read as older than the doc")
+    fi
+  fi
+  if [ -z "$mt" ]; then
+    printf '  task #%s  status=%s\n' "$id" "$status"
+    UNRECONCILED+=("could not read any date for the handoff doc — comments newer than it were NOT counted for clawgate task #$id")
+  else
+    counts=$(clawgate_new_comments "$json" "$mt")
+    read -r newer unreadable total <<<"$counts"
+    # ⚠ `total` is -1 only for a comments field that is present and NOT an
+    # array. An ABSENT one is a real zero — the field is `omitempty` on the
+    # server, so most tasks have no key at all. See clawgate_new_comments.
+    if [ "${total:-0}" -lt 0 ]; then
+      printf '  task #%s  status=%s  comments=(unreadable)\n' "$id" "$status"
+      UNRECONCILED+=("clawgate's answer for task #$id carried no comments array — comments newer than the doc were NOT counted")
+      newer=0
+    else
+      # The clock is NAMED in the line, not just in a gap: "0 newer" means
+      # something different depending on which date it was measured against.
+      printf '  task #%s  status=%s  comments=%s (%s newer than the doc, by %s)\n' \
+        "$id" "$status" "$total" "$newer" "$clock"
+      if [ "${unreadable:-0}" -gt 0 ]; then
+        UNRECONCILED+=("$unreadable comment(s) on clawgate task #$id carry an unparseable timestamp — the '$newer newer than the doc' count is a FLOOR")
+      fi
+    fi
+  fi
+
+  local line
+  while IFS= read -r line; do
+    [ -n "$line" ] && DRIFT+=("$line")
+  done < <(clawgate_drift_lines "$id" "$status" "${newer:-0}")
+}
+
+# ---------------------------------------------------------------------------
 
 # Gaps are the thing a reader skips. They used to print as bare `  ! …` lines
 # directly beneath a wall of `  - …` findings, and 2026-08-20 they were duly
@@ -647,6 +865,7 @@ main(){
   git_pr_block
   workload_block
   alerts_block
+  clawgate_block
   echo "DRIFT"
   if [ "${#DRIFT[@]}" -gt 0 ]; then
     printf '  - %s\n' "${DRIFT[@]}"

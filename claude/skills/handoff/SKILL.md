@@ -17,11 +17,41 @@ Topic argument (optional): `$ARGUMENTS`. If empty, infer a short kebab-case topi
    - `git -C <repo> status -sb` and `git -C <repo> log --oneline -8`
    - Uncommitted diff summary (`git diff --stat`), current branch, any open PR (`gh pr view` if relevant)
    - Any in-flight deploy/build/job state relevant to this work
+   - **Resolve which clawgate task this session belongs to** — one read-only command, no network reasoning of your own:
+
+     ```bash
+     bash ~/workspace/devrc/scripts/lib/clawgate_handoff.sh resolve
+     ```
+
+     It reads `GET /api/sessions/{id}/tasks` for the session named by **`CLAUDE_CODE_SESSION_ID`** and prints one verdict. 🔴 **That is the variable's exact name, and there is no `CLAUDE_SESSION_ID`.** Reading a name that does not exist ships an INERT feature that cannot be told from a working one, because an unset variable and a session that touched nothing produce the same empty result. The tool refuses rather than guessing: `NO SESSION ID` (exit 3) is its own outcome and is never folded into "no task".
+
+     Act on the exit code — and on nothing else:
+     - **0, one task** → record it in step 2's front matter.
+     - **6, several tasks** → **ASK the user which one.** Do not guess, and do not record more than one.
+     - **5, nothing resolved** → 🔴 **write no field, and say so plainly in your report.** An unknown session id answers `200` with an EMPTY ARRAY rather than a 404, so an empty result cannot distinguish "this session touched no task" from "the id is wrong". It is not a clean bill of health.
+     - **3 or 4, the board did not answer** → same: no field, and say the board was not reached. Never treat silence as "no task".
+
+     🔴 **NEVER create a task here.** `/handoff` records what already exists; a task minted to fill a blank field is a fact nobody asserted, and it will be reconciled against for the life of the doc. Authoring a task is its own interviewed flow (`claude/skills/clawgate/flows/task-authoring.md`, enforced by a PreToolUse hook), not a side effect of writing a handoff.
+
+     ⚠ **A resolved task is a CANDIDATE, not proof this session did that work.** The link is recorded by the session touching the task at all — task #306 on the live board reports that even a **400-rejected** PATCH permanently records the session as having worked it. So read the title before recording one, and prefer asking over recording a task you do not recognise.
    - **For every UNRESOLVED bug/investigation, capture the live diagnosis state** (the next section). This is the single highest-value part of the handoff: without it, the next session re-runs every probe you already ran. Record observed *values* and *eliminations*, not narrative — paste the actual error string, the actual header/response, the exact failing request, the command whose output you read. "We looked into the CSP issue" is worthless; "`frame-ancestors` on app.example.test = `https://example.test https://*.example.test` — does NOT include `gen-matrix.embed.example.test`, confirmed via response header on GET /apps/run/dogfood-manual" is the whole point.
 
 2. **Write the handoff doc** to `claudedocs/handoff-<topic>.md` in the active repo (create `claudedocs/` if absent). 🔴 **If that file ALREADY EXISTS this is an UPDATE, not a rewrite — do not touch it here.** Draft your new/changed sections into a scratch file instead (`## ` headings, a *delta* — omit a section and it is left alone) and land it in **step 5**, which owns the merge and the gate. Use this structure — be concrete, link exact file paths and commands, no vague prose:
 
+   🔴 **The `clawgate-task:` field from step 1 goes in YAML front matter, at the VERY TOP of the file — before the `# Handoff:` line, nothing above it.** That position is load-bearing: `/resume` only parses a block whose `---` is line 1, because a `---` further down a markdown doc is a horizontal rule and letting one open a front-matter block would let body prose mint a task id. Omit the whole block when step 1 resolved nothing.
+
+   🔴 **On an UPDATE, check before you add:** `bash ~/workspace/devrc/scripts/lib/clawgate_handoff.sh field <doc>` exits **0** and prints the id when a readable field is already there (leave it alone), **1** when there is none (add it), **2** when the field is there and unreadable — either a value that is not a task id or a front-matter block that is **never closed**; the stderr line says which, and the repair is to *that* block, never a second field. A doc with two `clawgate-task:` fields reconciles against whichever the parser reaches first, which is not a choice anybody made.
+
+   ⚠ **`64` and `66` are about your COMMAND, not about the doc**: 64 = no path or an unknown verb, 66 = that path could not be read. Neither says anything about a field — fix the invocation. Any other code means the tool did not run at all.
+
+   🔴 **If step 5's merge reports `This update DROPS the doc's recorded clawgate task`, restore it at LINE 1 — do NOT follow rule (f)'s usual "move it under an APPEND heading" advice for that line.** The field is read only from a closed `---` block at the top of the file; anywhere else it is invisible to every reader, so "moving" it silently disables the thread. The tool prints that remedy itself for this class; the two remedies are opposites and the block header says which one you are looking at.
+
+   🔴 **The closing `---` is load-bearing.** Both readers require it: an unterminated block is not front matter to `handoff_doc.py` either, so it is ordinary preamble and step 5's merge will drop it the next time an update brings its own preamble. That drop is now *reported* rather than silent — but the cheap fix is to close the block.
+
    ````markdown
+   ---
+   clawgate-task: 193
+   ---
    # Handoff: <topic> — <YYYY-MM-DD>
 
    ## Run this first — the index, one read-only command
@@ -193,6 +223,8 @@ Topic argument (optional): `$ARGUMENTS`. If empty, infer a short kebab-case topi
    ```
    python3 /home/zach/workspace/devrc/scripts/lib/handoff_doc.py --repo <repo> --topic <topic> --update <scratch-file> --advanced '<what changed since the doc was written>'
    ```
+
+   **The doc's YAML front matter survives this merge** — `split_front_matter` carries the base's block through, so a delta that starts with prose rather than a `## ` heading can no longer silently drop the `clawgate-task:` field. Put a front-matter block in your delta ONLY when you mean to change the recorded task; an explicit one wins.
 
    🔴 **Status header REPLACED, findings APPENDED — which is why the tool merges rather than you rewriting the file.** `State now`/`Next steps`/`How to verify` are current state and are overwritten; `Open investigations`/`Findings`/`Gotchas` append and the earlier text survives **verbatim**, even when your block supersedes an old one — the value is seeing a prior reading was *corrected*, not finding it gone. A section your delta omits is left untouched. The append allowlist is **three prefixes wide** and everything else replaces, so the run prints a **`buckets:`** line naming which of the two each section you touched landed in — read it, because it is the fact the next paragraph is a consequence of.
 

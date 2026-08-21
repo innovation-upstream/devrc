@@ -931,6 +931,24 @@ PINNED_PATH_CLOBBERS = {
         "SC_FAIL_ALL/SC_FAIL_SHOW modes of the stub, with systemctl very much "
         "on PATH. No launcher in HAZARD_VOCABULARY is reachable "
         "from it: no systemctl, kubectl, gh, ssh, home-manager or pkill"),
+    "test_resume_state_clawgate.py": (
+        'env["PATH"]' + ' = f"{nocg}',
+        "justified by ENUMERATION, like test_standup_local_health.py above. The "
+        "replacement is two directories the test CONSTRUCTS: `nocg`, holding "
+        "copies of this suite's gh/kubectl/curl tripwire stubs and nothing "
+        "else, and `_sandbox_bin`, holding symlinks to exactly its "
+        "_SANDBOX_TOOLS list (coreutils + bash/git/jq) — which the helper "
+        "ASSERTS is a superset of the directory's real contents, so this is a "
+        "live invariant rather than prose that can rot. No HAZARD_VOCABULARY "
+        "name is reachable from either: no systemd-run, systemctl, "
+        "notify-send, rofi, yad, xdotool, i3-msg, openrgb, espanso, "
+        "home-manager or nixos-rebuild. 🔴 REPLACING is the point: the case "
+        "under test is `clawgatectl` NOT INSTALLED — resume-state.sh must emit "
+        "a `!` gap rather than a clean reconcile — and clawgatectl IS "
+        "installed on the dev host, so no amount of PREPENDING can make it "
+        "unfindable. A prepending version measured a live call to the real "
+        "board on this host while the nix sandbox (which has no clawgatectl) "
+        "measured the intended case: two tiers, opposite blind spots"),
     "test_devshell_satisfies_required_tools.py": (
         '{"PATH"' + ': str(stub)',
         "the SECOND clobber justified by ENUMERATION rather than emptiness, and "
