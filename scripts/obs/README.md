@@ -23,8 +23,8 @@ because TLP disables the NMI hard-lockup detector — is
 
 ## One-time setup per host
 
-Endpoints and credentials are **not in this repo** (it is public) and **not in
-the nix store** (world-readable). Create, on each host:
+Endpoints and credentials live **outside the repo entirely** (it is public) and
+**outside the nix store** (world-readable). Create, on each host:
 
 ```bash
 mkdir -p ~/.config/obs-ship
@@ -52,7 +52,7 @@ credential must not break a deploy.
 ```bash
 systemctl --user status alloy node-exporter
 curl -s localhost:9101/metrics | grep -c '^node_'        # exporter is up
-curl -s localhost:9101/metrics | grep '^host_boot'       # boot-outcome metrics
+curl -s localhost:9101/metrics | grep '^host_'           # boot-outcome metrics
 journalctl --user -u alloy -n 20                         # shipping errors, if any
 ```
 

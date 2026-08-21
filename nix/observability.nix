@@ -91,10 +91,14 @@ in
         "${pkgs.prometheus-node-exporter}/bin/node_exporter"
         "--web.listen-address=127.0.0.1:${toString nodeExporterPort}"
         "--collector.textfile.directory=${textfileDir}"
-        # thermal_zone and drm are NOT on by default. Both matter here: the
-        # freeze hypotheses that remain open are thermal and GPU-adjacent.
+        # thermal_zone is NOT on by default and does work here (7 series).
         "--collector.thermal_zone"
-        "--collector.drm"
+        # NOTE: --collector.drm is deliberately ABSENT. It was tried and is
+        # INERT on this hardware: node_exporter's drm collector only supports
+        # amdgpu, and both hosts are Intel (this laptop reports DRIVER=i915,
+        # PCI_ID=8086:9A49). Measured `grep -c '^node_drm' == 0`. It would have
+        # read as coverage for the GPU-adjacent freeze hypothesis while
+        # providing none — worse than not claiming it.
         # Off by default and genuinely useful on a roaming laptop.
         "--collector.systemd"
         # Noise on a workstation: every docker veth churns netdev/arp series.
@@ -166,7 +170,9 @@ in
       # 2min: let journald settle and the previous boot's tail be readable.
       OnBootSec = "2min";
       OnUnitActiveSec = "1d";
-      Persistent = true;
+      # NOTE: no `Persistent = true` — it applies only to OnCalendar= timers and
+      # would be an inert line that reads as catch-up coverage. OnBootSec already
+      # guarantees a run after every boot, which is the case that matters.
     };
     Install.WantedBy = [ "timers.target" ];
   };

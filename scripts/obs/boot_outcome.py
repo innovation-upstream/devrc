@@ -158,9 +158,19 @@ def render(out: Outcome) -> str:
 
 
 def write_atomically(path: str, text: str) -> None:
-    """node_exporter's textfile collector reads whole files; a partial write is
-    a parse error that poisons the whole scrape. Write-then-rename is required,
-    not a nicety."""
+    """Write-then-rename, because node_exporter parses each textfile whole.
+
+    A partial or newline-less write is a parse error. MEASURED against
+    node_exporter 1.12.1: the scrape logs `text format parsing error in line 3:
+    unexpected end of input stream`, sets `node_textfile_scrape_error 1`, and
+    EVERY `host_*` metric from this file is ABSENT.
+
+    Scoped honestly: it kills THIS FILE's metrics, not the whole scrape — the
+    other ~1,700 series still serve and
+    `node_scrape_collector_success{collector="textfile"}` stays 1. That is worse
+    than it sounds for this particular file: the metrics vanish silently, and
+    absent freeze metrics look identical to a host that has not frozen.
+    """
     directory = os.path.dirname(path) or "."
     os.makedirs(directory, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=directory, prefix=".boot_outcome.", suffix=".tmp")
@@ -178,19 +188,26 @@ def write_atomically(path: str, text: str) -> None:
 
 
 class SystemdJournal:
-    """Real journalctl-backed facts."""
+    """Real journalctl-backed facts.
 
-    def __init__(self, journalctl: str = "journalctl"):
+    `runner` is injectable so the suite can assert the ARGV this builds. Without
+    that seam every test monkeypatched this class away entirely, and the field
+    name `index`, the `-n <TAIL_LINES>` argument and the `-o short-unix`
+    timestamp parse had no coverage at all — mutating any of them left the suite
+    fully green while the real adapter was broken.
+    """
+
+    def __init__(self, journalctl: str = "journalctl", runner=None):
         self.journalctl = journalctl
+        self._runner = runner or self._subprocess_runner
+
+    def _subprocess_runner(self, argv: list[str]) -> str:
+        return subprocess.run(
+            argv, capture_output=True, text=True, check=True, timeout=60
+        ).stdout
 
     def _run(self, args: list[str]) -> str:
-        return subprocess.run(
-            [self.journalctl, *args],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=60,
-        ).stdout
+        return self._runner([self.journalctl, *args])
 
     def boot_offsets(self) -> list[int]:
         raw = self._run(["--list-boots", "-o", "json"])

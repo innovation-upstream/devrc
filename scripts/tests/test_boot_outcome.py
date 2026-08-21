@@ -32,11 +32,15 @@ CLEAN_TAIL = [
     "Aug 07 17:29:05.062497 nixos systemd-journald[758]: Journal stopped",
 ]
 
-# Taken from the shape of the real Aug 20 freeze: ordinary activity, then nothing.
+# SYNTHETIC, matching the SHAPE of a real freeze tail: ordinary application
+# chatter, then silence — no shutdown sequence. Regenerated rather than pasted
+# from this host's journal: CLAUDE.md forbids committing captured text to this
+# public repo, and the gates that enforce it cover .json/.html but not .py, so
+# the rule has to be honoured by hand here.
 ABRUPT_TAIL = [
-    "Aug 20 17:02:27.363269 nixos xsession[3412331]: [312B blob data]",
-    "Aug 20 17:02:27.367734 nixos xsession[3412332]: jq: error (at <stdin>:0)",
-    "Aug 20 17:02:29.153604 nixos xsession[393625]: DidStartWorkerFail: 15",
+    "Jan 01 00:00:01.000000 host app[1000]: fetched 3 items",
+    "Jan 01 00:00:02.000000 host app[1000]: cache warm, 12 entries",
+    "Jan 01 00:00:03.000000 host app[1001]: worker heartbeat ok",
 ]
 
 
@@ -183,4 +187,91 @@ def test_main_writes_the_textfile(tmp_path, monkeypatch):
 @pytest.mark.parametrize("marker", boot_outcome.CLEAN_MARKERS)
 def test_each_declared_clean_marker_actually_classifies_clean(marker):
     """A marker in the tuple that never matches is dead config that reads as coverage."""
-    assert boot_outcome.ended_cleanly([f"Aug 07 17:29:05 nixos systemd[1]: {marker}"]) is True
+    assert boot_outcome.ended_cleanly([f"Jan 01 00:00:00 host systemd[1]: {marker}"]) is True
+
+
+def test_render_output_ends_with_a_newline():
+    """node_exporter's textfile parser rejects a file with no trailing newline
+    ('unexpected end of input stream') and then drops EVERY metric in it — the
+    freeze metrics vanish silently, which looks just like a host that has not
+    frozen. Measured against node_exporter 1.12.1."""
+    out = boot_outcome.collect(FakeJournal([-1, 0], {-1: ABRUPT_TAIL}))
+    assert boot_outcome.render(out).endswith("\n")
+
+
+def test_a_previous_boot_read_failure_is_reported_as_unmeasured():
+    """If the previous boot cannot be read we know nothing about the event we
+    most care about, so scrape_ok must drop — silently omitting the metric while
+    still claiming success would read as 'no freeze'."""
+
+    class OnlyPreviousFails(FakeJournal):
+        def tail(self, offset, n=12):
+            if offset == -1:
+                raise RuntimeError("boom")
+            return CLEAN_TAIL
+
+    out = boot_outcome.collect(OnlyPreviousFails([-2, -1, 0]))
+    assert out.scrape_ok == 0
+    assert out.previous_clean is None
+    assert "host_boot_previous_clean" not in parse(boot_outcome.render(out))
+
+
+# ---- the real journalctl adapter ----------------------------------------- #
+# Previously monkeypatched away in every test, so none of the argv or parsing
+# below was covered: mutating the `index` field name, or `-n <n>` to `-n 1`,
+# left the suite green while the deployed adapter was broken.
+
+
+def _recording_journal(responses):
+    calls = []
+
+    def runner(argv):
+        calls.append(argv)
+        for needle, out in responses.items():
+            if needle in argv:
+                return out
+        return ""
+
+    return boot_outcome.SystemdJournal(runner=runner), calls
+
+
+def test_boot_offsets_parses_the_index_field_from_json():
+    journal, calls = _recording_journal({"--list-boots": '[{"index":-1},{"index":0}]'})
+    assert journal.boot_offsets() == [-1, 0]
+    assert ["journalctl", "--list-boots", "-o", "json"] == calls[0]
+
+
+def test_tail_requests_the_configured_number_of_lines_for_that_boot():
+    journal, calls = _recording_journal({"-b": "line1\nline2\n"})
+    journal.tail(-3, 12)
+    argv = calls[0]
+    assert argv[argv.index("-b") + 1] == "-3"
+    assert argv[argv.index("-n") + 1] == "12", "must request N lines, not a fixed 1"
+
+
+def test_tail_defaults_to_a_dozen_lines():
+    """LITERAL, not `str(boot_outcome.TAIL_LINES)`.
+
+    Asserting against the constant makes both sides of the comparison move
+    together, so it cannot fail — measured: shrinking TAIL_LINES to 1 SURVIVED a
+    fully green run. Reading one line is a real defect: systemd's shutdown
+    markers are not reliably the FINAL journal entry (udev and journald
+    teardown lines routinely follow 'Journal stopped'), so a one-line tail
+    misclassifies clean shutdowns as freezes.
+    """
+    journal, calls = _recording_journal({"-b": ""})
+    journal.tail(-1)
+    argv = calls[0]
+    assert argv[argv.index("-n") + 1] == "12"
+    assert boot_outcome.TAIL_LINES >= 10, "too few lines to span a shutdown sequence"
+
+
+def test_last_timestamp_parses_the_short_unix_format():
+    journal, calls = _recording_journal({"-b": "1787263349.153604 host app[1]: msg\n"})
+    assert journal.last_timestamp(-1) == pytest.approx(1787263349.153604)
+    assert "short-unix" in calls[0]
+
+
+def test_last_timestamp_returns_none_rather_than_raising_on_junk():
+    journal, _ = _recording_journal({"-b": "not-a-timestamp\n"})
+    assert journal.last_timestamp(-1) is None

@@ -14,6 +14,8 @@ controls below pin that distinction so nobody "simplifies" this to fmt.
 
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parents[2]
 CONFIG = REPO / "scripts" / "obs" / "alloy.alloy"
 
@@ -79,11 +81,130 @@ def test_notification_bodies_are_dropped():
     assert "^dunst$" in text
 
 
-def test_credential_shaped_values_are_redacted():
-    text = CONFIG.read_text()
-    assert "stage.replace" in text
-    for keyword in ("password", "token", "secret", "authorization"):
-        assert keyword in text.lower(), f"no redaction rule mentions {keyword}"
+# --- redaction, BEHAVIOURALLY ---------------------------------------------- #
+# This replaced a guard that merely asserted the words "password"/"token"/
+# "secret"/"authorization" appeared somewhere in the file. That guard passed
+# while the redaction was broken in THREE independent ways, and it survived a
+# mutant that turned the replacement into a total no-op.
+#
+# The emulator below reproduces alloy 1.17.1's `stage.replace` semantics, each
+# clause MEASURED end-to-end (loki.source.file -> loki.process -> loki.echo):
+#
+#   * The `replace` value is a LITERAL. `${1}` is not expanded — it ships as the
+#     characters "${1}".
+#   * It substitutes that literal for EVERY CAPTURE GROUP individually, not for
+#     the whole match. Two groups => the literal appears twice.
+#   * With ZERO capture groups it replaces NOTHING. (This is why a
+#     `(?:AKIA|ASIA)...` non-capturing rule silently leaked the entire key.)
+#
+# Python `re` and Go RE2 agree on these patterns: no backreferences, no
+# lookaround, no possessive quantifiers. If a rule ever needs those, this
+# emulation stops being valid and the check must move to a real alloy run.
+
+
+def _replace_stages(text: str):
+    """[(expression, replace)] for each stage.replace block, in file order."""
+    import re
+
+    return [
+        (m.group(1).encode().decode("unicode_escape"), m.group(2))
+        for m in re.finditer(
+            r'stage\.replace\s*\{\s*expression\s*=\s*"((?:[^"\\]|\\.)*)"\s*'
+            r'replace\s*=\s*"((?:[^"\\]|\\.)*)"',
+            text,
+        )
+    ]
+
+
+def _apply(stages, line: str) -> str:
+    import re
+
+    for expression, replacement in stages:
+        pattern = re.compile(expression)
+        out, last = [], 0
+        for m in pattern.finditer(line):
+            if not m.groups():
+                continue  # zero capture groups: alloy replaces nothing
+            for gi in range(1, len(m.groups()) + 1):
+                if m.start(gi) < 0:
+                    continue
+                out.append(line[last:m.start(gi)])
+                out.append(replacement)
+                last = m.end(gi)
+        out.append(line[last:])
+        line = "".join(out)
+    return line
+
+
+def test_the_emulator_finds_the_configs_replace_stages():
+    """POSITIVE CONTROL. If the parser matched nothing, every redaction
+    assertion below would pass vacuously against an empty rule list."""
+    stages = _replace_stages(CONFIG.read_text())
+    assert len(stages) >= 3, f"expected the redaction rules, parsed {len(stages)}"
+    assert all(expr and repl for expr, repl in stages)
+
+
+# 🔴 The WHOLE output is pinned, not "the secret is absent".
+#
+# `secret not in output` is walkable by a PARTIAL redaction, which is the exact
+# bug this config shipped with: a rule capturing only the 4-char prefix turned
+# AKIAIOSFODNN7EXAMPLE into "[REDACTED-KEYID]IOSFODNN7EXAMPLE", leaking 16 of 20
+# characters — and that output does not contain the full key, so an absence
+# check passes it.
+#
+# Every expected value below was MEASURED by feeding these lines through real
+# alloy 1.17.1 using the stage.replace blocks extracted from this very config
+# (loki.source.file -> loki.process -> loki.echo). The trade is that a cosmetic
+# reword of a rule fails these tests; that is the price of a machine-checkable
+# claim about redaction.
+MEASURED_REDACTIONS = [
+    ("app: password: hunter2xyz done",
+     "app: password: [REDACTED] done"),
+    ("app: PASSWORD=hunter2xyz done",
+     "app: PASSWORD=[REDACTED] done"),
+    ("req: Authorization: Bearer HEADERJWTaaa.bbb.ccc done",
+     "req: Authorization: Bearer [REDACTED] done"),
+    ("req: authorization header bearer BAREJWTxxx.yyy.zzz done",
+     "req: authorization header bearer [REDACTED] done"),
+    ("mc: The Access Key Id you provided: access_key=KEYVALUE99",
+     "mc: The Access Key Id you provided: access_key=[REDACTED]"),
+    ("mc: api_key: APIKEYVALUE123 rejected",
+     "mc: api_key: [REDACTED] rejected"),
+    ("mc: error key AKIAIOSFODNN7EXAMPLE not found",
+     "mc: error key [REDACTED-KEYID] not found"),
+    # NEGATIVE CONTROL: no secret, so the line must be returned untouched.
+    ("app: ordinary line about a password policy with no value",
+     "app: ordinary line about a password policy with no value"),
+]
+
+
+@pytest.mark.parametrize("line,expected", MEASURED_REDACTIONS)
+def test_redaction_matches_measured_alloy_output(line, expected):
+    stages = _replace_stages(CONFIG.read_text())
+    assert _apply(stages, line) == expected
+
+
+def test_redaction_leaves_readable_context_behind():
+    """Redacting the whole line would defeat the point of shipping the journal.
+    The keyword must survive so the entry is still debuggable."""
+    stages = _replace_stages(CONFIG.read_text())
+    assert "password" in _apply(stages, "app: password: hunter2xyz done").lower()
+
+
+def test_redaction_emits_no_literal_template_placeholder():
+    """`${1}` is not expanded by stage.replace — a rule written that way ships
+    the characters ${1} and destroys the key name."""
+    stages = _replace_stages(CONFIG.read_text())
+    out = _apply(stages, "app: password: hunter2xyz done")
+    assert "${" not in out and "$1" not in out, out
+
+
+def test_an_ordinary_line_is_not_over_redacted():
+    """NEGATIVE CONTROL: a rule broad enough to eat normal log lines would make
+    the journal useless, and would pass every assertion above."""
+    stages = _replace_stages(CONFIG.read_text())
+    line = "app: ordinary line about a password policy with no value"
+    assert _apply(stages, line) == line
 
 
 def test_scrubbing_runs_BEFORE_the_write_not_after():

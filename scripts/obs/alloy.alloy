@@ -12,10 +12,15 @@
 //     ~/.config/obs-ship/env      (gitignored, per-host, 0600)
 // Required: OBS_PROM_URL, OBS_LOKI_URL, OBS_USERNAME, OBS_PASSWORD, OBS_HOST
 //
-// Validated in CI by scripts/tests/test_obs_alloy_config.py, which parses this
-// file with `alloy fmt` — a config that does not parse takes the whole agent
-// down at start, and "the unit is running" is not evidence that it shipped
-// anything.
+// Validated AT BUILD TIME by nix/observability.nix, which runs `alloy validate`
+// in a derivation — so an invalid config fails `home-manager switch` and cannot
+// deploy. `alloy fmt` is NOT sufficient and is forbidden there: it checks syntax
+// only. scripts/tests/test_obs_alloy_config.py runs no binary; it guards that
+// wiring plus the contracts checkable without one.
+//
+// 🔴 `alloy validate` accepts every redaction bug this file has already had.
+// Regex semantics are not a syntax property — they must be measured by running
+// lines through the pipeline. See the block above stage.replace below.
 
 logging {
   level  = "warn"
@@ -78,6 +83,19 @@ loki.write "homelab" {
     }
   }
 
+  // 🔴 Without this, journal lines are DROPPED for the entire duration of any
+  // disconnection while the source's position cursor advances anyway — so they
+  // are gone, not delayed. Measured: after a run where every write failed, the
+  // positions file had moved on and no Loki WAL directory existed.
+  //
+  // A roaming laptop disconnects constantly (sleep, WiFi drop, travel), and the
+  // journal is the highest-value stream here. `queue_config` on the metrics
+  // remote_write does NOT cover this: that buffering is per-pipeline.
+  wal {
+    enabled           = true
+    max_segment_age   = "1h"
+  }
+
   external_labels = {
     host = sys.env("OBS_HOST"),
   }
@@ -114,6 +132,18 @@ loki.relabel "journal" {
     target_label  = "unit"
   }
 
+  // 🔴 Collapse per-session scope units to a constant. Measured on one boot: 71
+  // distinct unit values, of which 39 were `session-<N>.scope` — and N
+  // increments forever, so this label would churn a new Loki stream per login,
+  // per boot, indefinitely. That is unbounded cardinality, which is exactly what
+  // the "deliberately small label set" above is meant to avoid.
+  rule {
+    source_labels = ["unit"]
+    regex         = "session-\\d+\\.scope"
+    target_label  = "unit"
+    replacement   = "session.scope"
+  }
+
   rule {
     source_labels = ["__journal_syslog_identifier"]
     target_label  = "identifier"
@@ -145,18 +175,46 @@ loki.process "scrub" {
     drop_counter_reason = "notification-body"
   }
 
-  // 2. Redact credential-shaped assignments anywhere in the line. Case
-  //    insensitive, and deliberately greedy on the value side: a partially
-  //    redacted secret is a leaked secret.
+  // 🔴 EXACTLY ONE CAPTURE GROUP PER RULE, WRAPPING PRECISELY WHAT MUST DIE.
+  //
+  // stage.replace does NOT do `$1` template expansion, and it does NOT operate
+  // on the whole match. It substitutes the `replace` string for EVERY capture
+  // group individually. All three consequences were measured against alloy
+  // 1.17.1 end-to-end (loki.source.file -> loki.process -> loki.echo), because
+  // all three are invisible to `alloy validate`, which accepts every variant:
+  //
+  //   two groups + replace="${1}[REDACTED]"
+  //     "password: hunter2"           -> "${1}[REDACTED]${1}[REDACTED]"
+  //     ...the literal characters ${1}, and the key name destroyed.
+  //   ZERO groups (non-capturing) + replace="[REDACTED-KEYID]"
+  //     "key AKIAIOSFODNN7EXAMPLE"    -> UNCHANGED. Nothing is replaced at all.
+  //   one group around the 4-char prefix only
+  //     "AKIAIOSFODNN7EXAMPLE"        -> "[REDACTED-KEYID]IOSFODNN7EXAMPLE"
+  //     ...16 of 20 characters leak. A partially redacted secret is leaked.
+  //
+  // So: one group, around the SECRET ITSELF, and `replace` is a literal.
+  // Keeping the keyword outside the group is what preserves "password: " as
+  // readable context — the point of shipping the journal is to debug with it.
+
+  // 2. Credential-shaped assignments. The optional non-capturing `bearer` keeps
+  //    `Authorization: Bearer <jwt>` from leaking the token: without it `(\S+)`
+  //    captures the word "Bearer" and the JWT survives in clear (measured).
   stage.replace {
-    expression = "(?i)((?:access[_-]?key|secret[_-]?key|api[_-]?key|token|password|passwd|authorization|bearer)\\s*[=:]\\s*)(\\S+)"
-    replace    = "${1}[REDACTED]"
+    expression = "(?i)(?:access[_-]?key|secret[_-]?key|api[_-]?key|secret|token|password|passwd|authorization)\\s*[=:]\\s*(?:bearer\\s+)?(\\S+)"
+    replace    = "[REDACTED]"
   }
 
-  // 3. Redact bare AWS-style access key ids, which appear in MinIO errors
-  //    without an adjacent keyword.
+  // 3. A bare `Bearer <token>` with no `:` or `=` separator, which rule 2
+  //    cannot match because it requires one.
   stage.replace {
-    expression = "\\b(AKIA|ASIA)[0-9A-Z]{16}\\b"
+    expression = "(?i)\\bbearer\\s+(\\S+)"
+    replace    = "[REDACTED]"
+  }
+
+  // 4. AWS-style access key ids, which appear in MinIO errors with no adjacent
+  //    keyword. The group wraps the WHOLE id, per the measurements above.
+  stage.replace {
+    expression = "\\b((?:AKIA|ASIA)[0-9A-Z]{16})\\b"
     replace    = "[REDACTED-KEYID]"
   }
 }
