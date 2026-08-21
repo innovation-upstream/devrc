@@ -11099,6 +11099,38 @@ class TestWindowEscalationRuns:
         assert "nominated BY THE SESSION WINDOW: (nothing)" in out
         assert "REPORTED SIDE BY SIDE, NEVER MERGED" in out
 
+    def test_the_LABELS_are_load_bearing_when_the_two_bases_DISAGREE(
+        self, tmp_path: Path, capsys, tailer_cache
+    ) -> None:
+        """🔴 THE CASE THE LABELS EXIST FOR, and the one that makes them more than
+        decoration: a dominated session whose few visible paths still resolve to
+        ONE entry, while the commit window resolves to a DIFFERENT one. Both sides
+        non-empty, and different — so a reader who cannot tell them apart would
+        attribute a bullet to the wrong basis.
+
+        The two entries are distinct store entries and the two path sets are
+        disjoint, so neither label can be right by coincidence.
+        """
+        repo = _init_repo(tmp_path, SCOPE)
+        _base_ref(repo, tmp_path)
+        _commit(repo, "src/status-bar/x.py", "src/status-bar/y.py", tmp_home=tmp_path)
+        cwd = str(repo)
+        t = _write_transcript(
+            tmp_path / "both.jsonl",
+            cwd,
+            [f"{cwd}/src/collector/a.py", f"{cwd}/src/collector/b.py"]
+            + [f"{tmp_path}/elsewhere/{p}" for p in self.FIVE_OUTSIDE],
+        )
+        store = _make_store(tmp_path / "s")
+        st.main(
+            ["--repo", str(repo), "--store", str(store), "--scope", SCOPE,
+             "--transcript", str(t), "--today", TODAY]
+        )
+        out = capsys.readouterr().out
+        assert "🔴 WRONG WINDOW?" in out, "premise gone: the run is not dominated"
+        assert "nominated BY THE COMMIT WINDOW: status-bar (2 paths)" in out
+        assert "nominated BY THE SESSION WINDOW: collector (2 paths)" in out
+
     def test_it_does_NOT_REMOVE_the_existing_counters(
         self, tmp_path: Path, capsys, tailer_cache
     ) -> None:
