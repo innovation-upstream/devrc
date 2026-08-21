@@ -1048,18 +1048,26 @@ scope_label="local=$SHIP_ROLE remote=$REMOTE_ROLE"
 [ "$DO_REMOTE" = 0 ] && scope_label="local=$SHIP_ROLE"
 [ "$DO_LOCAL" = 0 ]  && scope_label="remote=$REMOTE_ROLE"
 
-if [ "$hosts_in_scope" -lt 2 ]; then
+if [ "$rc" = 0 ] && [ "$hosts_reporting" -lt "$hosts_in_scope" ]; then
+  # 🔴 A leg that exits 0 has passed every per-host check, so it MUST have
+  # emitted its landed sha. Missing one while the run claims success means the
+  # marker or the parser is wired to nothing — and a verdict computed from a
+  # short list is the reassuring zero in its cross-host spelling. Red whatever
+  # the scope: this is a broken probe, not a narrow one.
+  echo "ship: ❌ CROSS-HOST AGREEMENT NOT COMPARED — $hosts_reporting of $hosts_in_scope hosts reported a landed sha."
+  echo "  local($SHIP_ROLE)=${LOCAL_SHA:-<none>}  remote($REMOTE_ROLE)=${REMOTE_SHA:-<none>}"
+  echo "  every leg that exits 0 emits one, so a missing sha next to a clean run means the"
+  echo "  marker or its parser stopped working. 'Both at origin/main' is UNPROVEN, not true."
+  rc=19
+elif [ "$hosts_reporting" -lt "$hosts_in_scope" ]; then
+  # A host was SKIPPED. Its own code is the actionable diagnosis and stands;
+  # this line only records that the comparison consequently did not happen.
+  echo "ship: cross-host agreement NOT COMPARED — $hosts_reporting of $hosts_in_scope hosts reported a landed sha (see the per-host code above)."
+elif [ "$hosts_in_scope" -lt 2 ]; then
   # Scoped by the operator (--no-remote / --no-local). Not red — but the claim
   # the verdict is allowed to make shrinks with the scope, and it says so rather
   # than letting a one-host run read like a two-host one.
   echo "ship: cross-host agreement NOT COMPARED — $hosts_in_scope host in scope, $hosts_reporting reported a landed sha."
-elif [ "$hosts_reporting" -lt 2 ]; then
-  echo "ship: ❌ CROSS-HOST AGREEMENT NOT COMPARED — $hosts_reporting of 2 hosts reported a landed sha."
-  echo "  local($SHIP_ROLE)=${LOCAL_SHA:-<none>}  remote($REMOTE_ROLE)=${REMOTE_SHA:-<none>}"
-  echo "  a host that reported none did not finish converging, so 'both at origin/main' is"
-  echo "  UNPROVEN, not true. A comparison over fewer than two shas is the reassuring zero"
-  echo "  this line exists to refuse."
-  [ "$rc" = 0 ] && rc=19
 elif [ "$LOCAL_SHA" != "$REMOTE_SHA" ]; then
   echo "ship: ❌ HOSTS DISAGREE — 2 hosts compared, 2 distinct commits:"
   echo "  local  ($SHIP_ROLE) landed on $LOCAL_SHA"
