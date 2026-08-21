@@ -114,6 +114,57 @@ printf '%s' "$$" > "$OUT/shellpid"
 """
 
 
+# 🔴 THE LIVE PROBE RUNS INSIDE A SESSION LEADER WE OWN.
+#
+# The two `_live` tests below used to read `/proc/{os.getsid(0)}/stat` — the
+# AMBIENT session leader, a process this suite does not own and cannot keep
+# alive. Under the gate that leader is a transient shell (nix-shell -> bash
+# script -> pytest, often backgrounded), and it exits when its work is done.
+# Measured 2026-08-21: a full gate run died with
+# `FileNotFoundError: '/proc/1760394/stat'`, and the same suite passed 753/753
+# on the very next run — a real timing dependency, not load. `claude/RULES.md`:
+# a flaky test is FIXABLE; remove the timing dependency rather than re-running.
+#
+# `start_new_session=True` makes this bash its OWN session leader, so `$$` IS
+# the session id and the process is alive for every read taken inside it. Both
+# reads — awk's and the implementation's — now happen within one live process,
+# so there is no window for the leader to vanish.
+#
+# `set -m` (job control) then puts the backgrounded CLI in its own process
+# GROUP while leaving it in this session, which is what an interactive shell
+# does to a foreground command. That is what keeps pgid != sid, so a `$3`
+# (process-group) read stays distinguishable from a `$4` (session) read.
+LIVE_PROBE = r"""
+set -u
+CLI="$1"; OUT="$2"
+printf '%s' "$$" > "$OUT/leader"
+awk '{print $22}' "/proc/$$/stat" > "$OUT/awk22"
+sed -n 's/^[0-9]* (\(.*\)) .*/\1/p' "/proc/$$/stat" > "$OUT/comm"
+set -m
+bash "$CLI" --print-session-id > "$OUT/direct" 2> "$OUT/err" &
+child=$!
+printf '%s' "$child" > "$OUT/childpid"
+wait "$child"
+"""
+
+
+def _live_probe(tmp_path, env=None):
+    """Run the CLI inside a session leader THIS test owns. No ambient /proc."""
+    out = tmp_path / "liveprobe"
+    out.mkdir(exist_ok=True)
+    cp = subprocess.run(["bash", "-c", LIVE_PROBE, "probe", str(CLI), str(out)],
+                        env=env or _env(tmp_path), capture_output=True,
+                        text=True, timeout=60, start_new_session=True)
+    assert cp.returncode == 0, cp.stderr
+    r = {n: (out / n).read_text().strip()
+         for n in ("leader", "awk22", "comm", "direct", "childpid", "err")}
+    # Harness guards: a probe that silently produced nothing would make every
+    # assertion below vacuous.
+    assert r["leader"].isdigit() and r["awk22"].isdigit(), r
+    assert r["direct"], f"probe produced no session id: {r!r}"
+    return r
+
+
 def _probe(tmp_path, env, new_session=False):
     out = tmp_path / f"probe-{'ns' if new_session else 'inh'}"
     out.mkdir(exist_ok=True)
@@ -247,22 +298,22 @@ def test_session_field_is_used_not_the_process_group_synthetic(tmp_path):
 def test_session_field_is_used_not_the_process_group_live(tmp_path):
     """The same pin against the REAL kernel, in the shape that actually bit.
 
-    `process_group=0` gives the child its own process group while leaving it in
-    our session — exactly what an interactive shell does to a foreground command
-    (and what a forking `$( … )` does NOT). So pgid ≠ sid here, and a `$3` read
-    would return the child's own pid.
+    `set -m` gives the CLI its own process group while leaving it in the
+    probe's session — exactly what an interactive shell does to a foreground
+    command (and what a forking `$( … )` does NOT). So pgid != sid here, and a
+    `$3` read would return the child's own pid.
+
+    Runs inside a session leader this test owns; see LIVE_PROBE for why.
     """
-    sess = os.getsid(0)
-    p = subprocess.Popen(["bash", str(CLI), "--print-session-id"],
-                         env=_env(tmp_path), stdout=subprocess.PIPE,
-                         stderr=subprocess.PIPE, text=True, process_group=0)
-    out, err = p.communicate(timeout=60)
-    assert p.returncode == 0, err
+    r = _live_probe(tmp_path)
     # The discriminator must actually discriminate, or this test is vacuous.
-    assert p.pid != sess, "child pid == session id — no pgrp/sid discrimination"
-    assert out.strip().startswith(f"sid:{sess}:"), (out, p.pid, sess)
-    assert not out.strip().startswith(f"sid:{p.pid}:"), (
-        f"read the process GROUP ({p.pid}), not the session ({sess}): {out!r}")
+    assert r["childpid"] != r["leader"], (
+        f"child pid == session id ({r['leader']}) — no pgrp/sid discrimination; "
+        "job control did not give the child its own process group")
+    assert r["direct"].startswith(f"sid:{r['leader']}:"), r
+    assert not r["direct"].startswith(f"sid:{r['childpid']}:"), (
+        f"read the process GROUP ({r['childpid']}), not the session "
+        f"({r['leader']}): {r['direct']!r}")
 
 
 def test_leader_starttime_is_stat_field_22_synthetic(tmp_path):
@@ -280,15 +331,20 @@ def test_leader_starttime_is_stat_field_22_synthetic(tmp_path):
 @pytest.mark.skipif(shutil.which("awk") is None, reason="cross-check uses awk")
 def test_leader_starttime_matches_awk_field_22_live(tmp_path):
     """Cross-check the real value with a DIFFERENT tool (awk whitespace split),
-    so the expectation is not derived from the implementation's own parse."""
-    sess = os.getsid(0)
-    raw = Path(f"/proc/{sess}/stat").read_text()
-    if " " in raw[raw.index("(") + 1:raw.rindex(")")]:
-        pytest.skip("session leader's comm contains a space; awk $22 would shift")
-    expect = subprocess.run(["awk", "{print $22}", f"/proc/{sess}/stat"],
-                            capture_output=True, text=True).stdout.strip()
-    assert expect.isdigit(), expect
-    assert _print_id(_env(tmp_path)) == f"sid:{sess}:{expect}"
+    so the expectation is not derived from the implementation's own parse.
+
+    Both reads happen INSIDE one live session leader this test owns, so the
+    process cannot exit between them — see LIVE_PROBE.
+    """
+    r = _live_probe(tmp_path)
+    # The comm-space caveat the ambient version had to guard against cannot
+    # arise here: the probe is always `bash`, so awk's $22 never shifts. Pinned
+    # rather than assumed, because a shell change would silently break the
+    # field index and read as a starttime mismatch.
+    assert " " not in r["comm"], (
+        f"probe comm {r['comm']!r} contains a space — awk $22 would shift; "
+        "the probe must stay a single-word command")
+    assert r["direct"] == f"sid:{r['leader']}:{r['awk22']}", r
 
 
 @pytest.mark.parametrize("label,self_stat", [
