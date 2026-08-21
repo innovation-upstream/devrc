@@ -46,9 +46,12 @@ somewhere else.
   `bar-status-poll` has not happened yet). `stuck_count` is `null` in that case.
 - Four states: `ok` / `stale` (cache older than 300s — the poller writes every 45s) /
   `absent` / `unparseable`. The last three publish **`count: null`, never `0`**.
-- ⚠ **Nothing enumerates the queue with TASK TITLES any more.** `agent-ops` did — the tmux
-  popup on `$mod+i` / `prefix+A` / the ▦ bar button — and it is **RETIRED**; do not send a
-  reader there. The bar's clawgate pill carries the live count (`22!2` = 22 needing you, 2
-  stuck) and the **clawgate API** is where the titles are. The one part of agent-ops worth
-  keeping, its `/proc` walk that finds a `claude` buried under a wrapper shell, now lives in
+- ⚠ **`agent-ops` used to be the titled enumeration and it is RETIRED** — the tmux popup on
+  `$mod+i` / `prefix+A` / the ▦ bar button. Do not send a reader there. **This tool replaced
+  it**: `clawgate_queue.open[]` / `.ready_for_review[]` / `.stuck[]` each carry `{id, title}`
+  (`stuck` also `reasons` + `agent_idle_secs`), read out of the poller's cache — so the titles
+  are here, no API call needed. Measured 2026-08-21: 63 / 19 / 5 rows, every one titled. The
+  bar's clawgate pill carries only the live count (`22!2` = 22 needing you, 2 stuck), which is
+  why the pill alone is not an answer. The one part of agent-ops worth keeping, its `/proc`
+  walk that finds a `claude` buried under a wrapper shell, now lives in
   `scripts/lib/claude_sessions.py` and feeds the bar's Claude-runs pill.

@@ -102,7 +102,7 @@ _Moved verbatim out of `SKILL.md` on 2026-08-21, when the body was cut from 23,2
 | `4` | **no** host could be reached — the zero is unmeasured, not measured |
 | `5` | **`tail` only**: the host answered and there is **no tmux server** on it |
 
-Rationale, and why 5 had to be split out of 3: `~/.claude/skills/session-manager/reference/exit-codes.md`.
+Rationale, and why 5 had to be split out of 3: this file, below.
 
 Same discipline inside the payload: `hosts.<n>.reachable`/`.error` describe the
 **`list-panes`** call, `.windows_measured`/`.windows_error` the **`list-windows`** call, and

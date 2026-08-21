@@ -115,5 +115,4 @@ rows, zero contribution, from a source `CLAUDE.md` marks UNTRUSTED. Opt in with
 The intersection guard is unchanged and still runs when you opt in — a task file survives
 only when its `window_id` is live **and** that live window's real `(session, index)` equals
 the one the file recorded. Why that relationship (not mere existence) is the guard, what the
-slot-conflict drop does and does not still catch, and the field ledger:
-`~/.claude/skills/session-manager/reference/fuzzyclaw-guard.md` — i.e. this file, above.
+slot-conflict drop does and does not still catch, and the field ledger: this file, above.

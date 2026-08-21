@@ -34,7 +34,8 @@ column — **how it is counted**) are different, and `caveats.kind_scope` carrie
 | `--no-ledger` | skip the ledger read → **no age, no session id** on any row |
 | `--fuzzyclaw` | the task-file join, **OFF by default** (see below) |
 
-`--json`, `--no-ch`, `--plain`, `--stale-threshold`, `--lines`, and what each drops:
+`--json`, `--no-ch`, `--no-fuzzyclaw`, `--plain`, `--stale-threshold`, `--lines`, and what
+each drops:
 `~/.claude/skills/session-manager/reference/payload-contract.md`.
 
 ## 🔴 Which output to ask for — you are the only consumer
@@ -143,8 +144,8 @@ is `summary.waiting.probable` — a different population, never summed with this
 is kept and a test bans the old key at any depth.
 
 🔴 With the `agent-ops` TUI RETIRED this is the ONLY place the queue surfaces outside the bar
-pill: never answer "is anything waiting for my approval" by pointing somewhere else. Read from
-the bar poller's cache, not the API.
+pill: never answer "is anything waiting for my approval" by pointing somewhere else. Source:
+the bar poller's cache, not a live API call.
 
 - **`count` = pending + STUCK.** `pending_count` is the `{open, ready_for_review}` half;
   `stuck_count` is `in_progress` tasks whose agent looks dead — excluding those is what hid a
@@ -172,8 +173,8 @@ So read them from the run, not from here. `report["caveats"]` is structured and 
 prints one footer line each **unconditionally**, so an agent that runs the script cold gets
 them anyway. The vocabulary is the keys of `CAVEATS` in `scripts/session-manager` —
 `claude_detection`, `fuzzyclaw_scope`, `kind_scope`, `ledger_scope`, `waiting_signal`,
-`unsent_prompt` — which `measured_caveats` fills in per scan. The script is the authority; a
-prose copy here could only rot, and this section was one for three of them.
+`unsent_prompt` — which `measured_caveats` fills in per scan. That list is gated against the
+script's own `CAVEATS`; the prose this section used to hold was not, and had rotted to five.
 
 ## 🔴 Read the exit code — the two zeroes are different facts
 

@@ -287,7 +287,7 @@ scraped (one batched `capture-pane` per host) for three signals, and every row c
 "this window needs nothing."** Recall is partial by construction: measured on 40 live panes
 2026-08-12, a window parked on `Press Enter to continue…` matches none of them, and text
 typed at the `❯` prompt is deliberately **excluded** (a window one Enter away reads `no` —
-see `~/.claude/skills/session-manager/reference/waiting-signal.md` for the evidence and what would justify turning it on).
+the evidence, and what would justify turning it on, is in this file, below).
 
 🔴 **`waiting_probable: null` is not `false`.** Read `waiting_status`: `ok` (scraped),
 `not_claude` (never scraped — the signals are Claude-TUI shapes and a shell's last line
@@ -331,7 +331,7 @@ the operator typed**, and devrc is a **PUBLIC** repo — as is every `claudedocs
 message, PR body, comment or test fixture an agent writes into it. Report a draft as a
 **count, a length or a shape**, never verbatim. Quoting one back to Zach in chat is fine;
 writing one to a file that gets committed is not. (Four real drafts were quoted verbatim in
-`~/.claude/skills/session-manager/reference/waiting-signal.md` and re-used as fixtures before this rule existed —
+this file and re-used as fixtures before this rule existed —
 `test_no_FIXTURE_DRAFT_string_appears_in_a_shipped_doc` now fails on that shape.)
 
 🔴 **A row can carry BOTH, and that is correct** — the agent asked a question and you

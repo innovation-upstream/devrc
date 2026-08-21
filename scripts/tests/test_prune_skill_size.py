@@ -250,23 +250,48 @@ def _resolve_routing_path(token: str) -> Path:
     return _under_repo(SKILL_DIR, token)
 
 
-def _dangling_routes(body: str) -> list[str]:
+def dangling_routes_in(body: str, resolve) -> list[str]:
     """Direction 1 of the gate: routing paths in `body` that resolve to no file.
 
     Factored out so the probes at the bottom of this module grade THE GATE
     rather than a re-implementation of it. A probe that rebuilt this pipeline
     out of `_routing_paths` and `_resolve_routing_path` by hand would stay green
     against a mutation of the wiring between them.
+
+    🔴 AND PARAMETERISED BY `resolve`, NOT BOUND TO THIS SKILL. A second
+    size-gate module (`test_session_manager_skill_size.py`) gates a different
+    skill through the same tokenizer with its own resolver base, and it started
+    life with the pipeline open-coded inside each assertion AND again inside
+    each probe. Measured on that module before this refactor: forcing the
+    verdict to a constant (`dangling = sorted(set())`, `unrouted = []`) left all
+    nine of its routing tests GREEN -- the probes graded a copy, so the gate
+    could be deleted without a red. One rule, one place: both modules now bind
+    their own `resolve` to this body.
     """
-    return sorted(
-        {t for t in _routing_paths(body) if not _resolve_routing_path(t).is_file()}
-    )
+    return sorted({t for t in _routing_paths(body) if not resolve(t).is_file()})
+
+
+def unrouted_topics_in(registry: str, topics, reference_dir: Path, resolve) -> list[str]:
+    """Direction 2 of the gate: topics on disk the registry does not route to.
+
+    Takes the ALREADY-EXTRACTED registry block rather than the whole body: each
+    skill locates its own registry (different marker, different terminator), and
+    that extraction is the one part of the pipeline that is genuinely per-skill.
+    """
+    routed = {resolve(t) for t in _routing_paths(registry)}
+    return [t for t in topics if reference_dir / t not in routed]
+
+
+def _dangling_routes(body: str) -> list[str]:
+    """This skill's binding of `dangling_routes_in`."""
+    return dangling_routes_in(body, _resolve_routing_path)
 
 
 def _unrouted_topics(body: str) -> list[str]:
-    """Direction 2 of the gate: topics on disk the registry does not route to."""
-    routed = {_resolve_routing_path(t) for t in _routing_paths(_registry_block(body))}
-    return [t for t in _existing_topics() if REFERENCE_DIR / t not in routed]
+    """This skill's binding of `unrouted_topics_in`."""
+    return unrouted_topics_in(
+        _registry_block(body), _existing_topics(), REFERENCE_DIR, _resolve_routing_path
+    )
 
 
 def _existing_topics() -> list[str]:
