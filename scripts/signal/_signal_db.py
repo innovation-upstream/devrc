@@ -387,6 +387,53 @@ def spend_authorization(auth: object) -> None:
 TYPE_DELETED = "deleted"
 
 
+def _normalize_send_response(result) -> list:
+    """The `/v2/send` reply as a list of per-recipient dicts.
+
+    🔴 MEASURED, not assumed. Against signal-cli-rest-api in **json-rpc** mode
+    the success reply is a LIST, one entry per recipient::
+
+        201  [{"timestamp":"1787331796630"}]
+
+    A bare dict is also accepted, because upstream documents
+    `ds.SendMessageResponse` as an object and other modes/versions return that
+    shape. Anything else raises, deliberately: the caller has already COMMITTED
+    `send_state=sending` before the POST, so a surprise here leaves a draft a
+    human reconciles — never a silent duplicate send.
+
+    Exactly one entry is required. Every caller sends to a single recipient
+    (`recipients: [recipient]`), so a longer list means the wire contract
+    changed and picking an entry would be a guess about which message the stored
+    timestamp belongs to — which is precisely what breaks sync-echo dedupe.
+    """
+    if isinstance(result, dict):
+        entries = [result]
+    elif isinstance(result, list):
+        entries = result
+    else:
+        raise ValueError(
+            f"unrecognised /v2/send response shape {type(result).__name__}: "
+            f"{result!r}; expected a list of per-recipient objects (json-rpc "
+            f"mode) or a single object"
+        )
+    if not entries:
+        raise ValueError(
+            "the Signal API returned an EMPTY /v2/send response; without a "
+            "per-recipient entry there is no timestamp to dedupe the sync echo"
+        )
+    if len(entries) != 1:
+        raise ValueError(
+            f"the Signal API returned {len(entries)} /v2/send entries for a "
+            f"single recipient: {entries!r}; refusing to guess which timestamp "
+            f"to store"
+        )
+    if not all(isinstance(e, dict) for e in entries):
+        raise ValueError(
+            f"the Signal API returned non-object entries in /v2/send: {entries!r}"
+        )
+    return entries
+
+
 def _server_timestamp(result) -> int:
     """The server-assigned send timestamp, coerced and sanity-checked (🔧 #4).
 
@@ -1365,17 +1412,33 @@ class SignalDB:
 
         result = transmit(auth, recipient=draft["recipient"], body=draft["body"],
                           number=number)
+        # 🔴 The live server returns a LIST, one entry per recipient — measured
+        # 2026-08-21 against signal-cli-rest-api in json-rpc mode:
+        #     201  [{"timestamp":"1787331796630"}]
+        # The previous `(result or {}).get("errors")` assumed a dict and raised
+        # `AttributeError: 'list' object has no attribute 'get'` AFTER a
+        # SUCCESSFUL send — the worst shape available, because a delivered
+        # message reports as a failure and invites a duplicate resend. Normalise
+        # first; refuse an unrecognised shape loudly rather than guessing.
+        entries = _normalize_send_response(result)
         # The per-recipient errors are read BEFORE the timestamp: a response that
         # carries both an error and an unusable timestamp must report the ERROR,
         # which says what went wrong, not a timestamp complaint that hides it.
-        errors = (result or {}).get("errors")
+        # 🔴 Collect the errors payload WHOLE, never flattened. Upstream shapes it
+        # as an object (`{"recipients": [{"message": "rate limited"}]}`) as well
+        # as a list, and iterating an object yields its KEYS — which would report
+        # `['recipients']` and silently discard the reason the operator needs to
+        # reconcile. Pinned by
+        # test_approval_gate::test_an_error_response_reports_the_ERROR_not_a_timestamp_complaint.
+        errors = [entry["errors"] for entry in entries if entry.get("errors")]
+        errors += [entry["error"] for entry in entries if entry.get("error")]
         if errors:
             raise RuntimeError(
                 f"the Signal API reported per-recipient errors for draft "
                 f"{draft_id!r}: {errors!r}; the draft stays in {STATE_SENDING!r} "
                 f"for manual reconciliation — see `reconcile`"
             )
-        server_ts = _server_timestamp(result)
+        server_ts = _server_timestamp(entries[0])
         # The terminal update carries the SAME state predicate as the claim. This
         # sender owns the row only while it is still `sending`; if an operator
         # reconciled it in the meantime, stamping over their decision silently is
