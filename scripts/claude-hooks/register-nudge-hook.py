@@ -5,21 +5,30 @@ settings.json is per-host and unmanaged (holds permissions/allowlists/secrets), 
 hook *scripts* are symlinked by home-manager but their *registration* is applied by
 running this once per host.
 
-🔴 THIS SCRIPT HAS **TWO** SURFACES, AND THEY ARE DELIBERATELY DIFFERENT WIDTHS.
+🔴 THIS SCRIPT HAS **THREE** SURFACES, AND THEY ARE DELIBERATELY DIFFERENT WIDTHS.
 Until 2026-08-20 there was only the first, and its docstring said "strictly
-APPEND-ONLY / never rewrites". That is no longer true — read both before editing:
+APPEND-ONLY / never rewrites". That is no longer true — read all three before editing:
 
-  * APPEND surface (NARROW, unchanged): the command tables below. An entry is added
-    only when its exact command string is absent from that event's existing entries.
-    Nothing else is ever appended. In particular bash-guard is NOT in these tables and
-    must never be: this script does not own its registration, only its interpreter, so
-    if a host has no bash-guard entry it must come back with no bash-guard entry.
-  * REWRITE surface (WIDE, new): every hook entry on every event whose command invokes
+  * APPEND surface (NARROW, oldest): the command tables below. An entry is added
+    only when that event does not already invoke the script. Nothing else is ever
+    appended. In particular bash-guard is NOT in these tables and must never be:
+    this script does not own its registration, only its interpreter, so if a host
+    has no bash-guard entry it must come back with no bash-guard entry.
+  * REWRITE surface (WIDE): every hook entry on every event whose command invokes
     a devrc-managed hook script gets its INTERPRETER TOKEN normalised to an absolute
     /nix/store python — bash-guard INCLUDED. Only that token changes. The entry keeps
     its position in its array, its `matcher`, its `type` and every other key verbatim,
     and a command that does not resolve to a managed hook script comes back
     byte-identical.
+  * DE-DUP surface (NARROWEST, newest): a second registration of the SAME managed
+    script on the SAME event under the SAME matcher is deleted, keeping the FIRST
+    occurrence with its position and every key it arrived with. It is narrower
+    than the append surface in one direction and equal in the other: it removes
+    only an entry of EXACTLY the shape this script writes (no foreign key, one
+    hook, no arguments after the script path) AND only for a script this script
+    registers — so a doubled bash-guard, whose registration belongs to the host,
+    is reported rather than removed. Anything still doubled after the pass is
+    named on stderr. See "WHY THE DE-DUP EXISTS" below.
 
 WHY THE REWRITE EXISTS — the 127 window.
 `home-manager switch` updates ~/.nix-profile as remove-then-install, so every switch
@@ -34,6 +43,18 @@ non-blocking, so during that window the guard FAILS OPEN and `git add -A` /
 `git reset --hard` pass unchecked. A /nix/store path is immutable and GC-rooted by the
 current home-manager generation, so an absolute one closes the window completely.
 
+WHY THE DE-DUP EXISTS — a home-manager ROLLBACK re-runs an OLDER registrar.
+`home-manager rollback` / `--switch-generation` (and a hand-run from an older
+checkout) runs the PREVIOUS registrar against a settings.json this one has already
+pinned. That older code keyed "is it already registered?" on the exact string
+`python3 ~/…`, does not find it, and appends a SECOND copy of every hook it owns —
+13 measured. Re-running THIS registrar then normalises both copies to identical
+strings, and because the append pass only asks "is this script registered on this
+event", it sees the hook as present and BOTH copies survive: every managed hook fires
+twice, forever. Duplicate ledger rows, double notifications, and the write-back guard
+— the only one that can BLOCK — running twice per event. So the file must HEAL, not
+merely fail to get worse.
+
 The interpreter is `os.path.realpath(sys.executable)` (override: $DEVRC_HOOK_PYTHON,
 which exists so tests can inject a deterministic path). Both invocation routes converge
 on the same immutable path, VERIFIED on this host rather than assumed:
@@ -43,6 +64,13 @@ on the same immutable path, VERIFIED on this host rather than assumed:
     ~/.nix-profile/bin/python3 — the blinking symlink — and realpath resolves it to the
     same /nix/store/…-python3-3.12.14/bin/python3.12.
 So no plumbing change to home.nix or to register-hooks-activation.sh was needed.
+
+🔴 $DEVRC_HOOK_PYTHON IS A TEST SEAM WITH PRODUCTION REACH, so it is VALIDATED.
+Activation inherits the operator's environment, so an exported override is a value
+this script would otherwise write verbatim into all 14 hook commands. An override
+that is relative, missing, non-executable, or not a single `python*` token is
+REJECTED with a warning and the resolved fallback is used instead — see
+`hook_python`, which also explains why it falls back rather than hard-failing.
 
 Registers (APPEND surface):
   * PostToolUse(Bash): audit-pr-nudge.py, shell-env-nudge.py, search-tool-nudge.py
@@ -83,16 +111,17 @@ call. That ordering is now reversed and pinned by a test.
 must never disturb: the fuzzyclaw tmux writer (~/.config/tmux/task-hook.sh), the
 clawgate stop hook (drives remote approval) and claude-notify.py (drives turn-finished
 notifications). Clobbering any of them is a serious regression, so the APPEND surface
-never reorders or removes anything, and the REWRITE surface never touches a command it
-cannot prove is a managed hook invocation — the tmux and clawgate hooks are `.sh`
-scripts and are left byte-identical. tests/test_register_nudge_hook.py asserts every
+never reorders or removes anything, the REWRITE surface never touches a command it
+cannot prove is a managed hook invocation (the tmux and clawgate hooks are `.sh`
+scripts and are left byte-identical), and the DE-DUP surface deletes only an entry
+whose every key it can account for. tests/test_register_nudge_hook.py asserts every
 owner coexists afterwards, as a SET EQUALITY so the assertion fails when the set grows
 as well as when it shrinks.
 
 🔴 THE FIRST POST-MIGRATION RUN MUST NOT DOUBLE-REGISTER EVERY HOOK — the readiest way
 to ship this fix broken. Two things prevent it, and only the second is sufficient:
-  * the rewrite pass runs FIRST, so by the time the append pass reads the file the
-    commands already carry the new interpreter;
+  * the rewrite pass runs before the append pass, so by the time the append pass reads
+    the file the commands already carry the new interpreter;
   * and the append pass keys on the SCRIPT (`managed_script_of`), not on the exact
     command string. Exact-string keying was already fragile before this change — a
     host spelling the hooks dir `$HOME/…` got the hook registered twice — and the
@@ -101,6 +130,14 @@ to ship this fix broken. Two things prevent it, and only the second is sufficien
     for both surfaces, so they cannot disagree.
 tests/test_register_nudge_hook.py drives a fully pre-migration settings.json and
 asserts SET EQUALITY over each event afterwards, which fails on a duplicate.
+
+🔴 CONSERVATIVE MATCHING IS NOT SILENT MATCHING. `python3 -u ~/…`, a leading
+`PYTHONPATH=…`, `${HOME}/…`, a quoted path and a `…; …` compound all come back
+byte-identical from the rewrite pass — correctly, since this script cannot prove it
+owns them — and each one stays in the 127 window. This whole change exists because a
+silent failure ran for months, so every command that NAMES a managed hook script and
+is not in the pinnable form is reported on stderr, which the activation wrapper
+relays into the switch log.
 
 next-step-nudge is registered on Stop ONLY, not SubagentStop: a subagent's turn ends
 without ever reaching the operator, so it owes them no next step. The hook refuses that
@@ -116,25 +153,14 @@ SETTINGS = os.path.expanduser("~/.claude/settings.json")
 HOME = os.path.expanduser("~")
 
 
-def hook_python():
-    """The absolute interpreter to write into every managed hook command.
+def warn(msg):
+    """Every diagnostic goes to stderr under one greppable token.
 
-    $DEVRC_HOOK_PYTHON is the test seam — without it a test would have to assert
-    against whatever interpreter pytest happened to run under. The fallback to a
-    bare name only fires when sys.executable is empty (an embedded interpreter),
-    which is not a configuration this ever runs in.
+    register-hooks-activation.sh captures the registrar with `2>&1` and relays the
+    block line by line into the switch log, so a warning here is something the
+    operator actually sees on the next `home-manager switch`.
     """
-    override = os.environ.get("DEVRC_HOOK_PYTHON")
-    if override:
-        return override
-    return os.path.realpath(sys.executable) if sys.executable else "python3"
-
-
-PYTHON = hook_python()
-
-
-def with_python(path):
-    return PYTHON + " " + path
+    print("WARNING " + msg, file=sys.stderr)
 
 
 # --------------------------------------------------------------------------- #
@@ -189,9 +215,9 @@ _MANAGED_CMD_RE = re.compile(
 def managed_script_of(cmd):
     """The devrc-managed hook script this command invokes, or None.
 
-    THE single recogniser — both surfaces key on it, so "what counts as a
+    THE single recogniser — all three surfaces key on it, so "what counts as a
     managed hook command" is answered in one place and cannot disagree between
-    the rewrite pass and the append pass.
+    the rewrite pass, the de-dup pass and the append pass.
 
     Conservative on purpose — three independent conditions must all hold:
       1. the command is `<one-token> <hooks-dir-path>[ args]`;
@@ -213,6 +239,18 @@ def managed_script_of(cmd):
     return m.group("base")
 
 
+def bare_managed_command(cmd):
+    """A managed hook invocation with NOTHING after the script path.
+
+    The de-dup surface removes only these. `<interp> <path> --flag` names the same
+    script but is a DIFFERENT configuration — somebody typed those arguments — and
+    deleting it would be this script overwriting a decision it did not make.
+    """
+    if managed_script_of(cmd) is None:
+        return False
+    return _MANAGED_CMD_RE.match(cmd).end() == len(cmd)
+
+
 def normalized_command(cmd):
     """Rewrite ONLY the interpreter token of a devrc-managed hook invocation.
 
@@ -222,6 +260,112 @@ def normalized_command(cmd):
     if managed_script_of(cmd) is None:
         return cmd
     return PYTHON + cmd[_MANAGED_CMD_RE.match(cmd).end("interp"):]
+
+
+# The probe the interpreter self-checks below are built from: the first managed
+# script under the first accepted hooks-dir prefix. COMPUTED, never spelled out —
+# tests/test_registrar_activation.py parses this file for a hooks-dir path literal
+# and reads every hit as a registration this script performs, so a literal here
+# would read as one.
+_PROBE_SCRIPT = sorted(MANAGED_HOOK_SCRIPTS)[0]
+
+
+def unusable_interpreter(interp):
+    """Why `interp` may not be written into a hook command — or None if it may.
+
+    🔴 THE SELF-CHECK, and the first condition is the important one: a command
+    built from this interpreter must be one `managed_script_of` RECOGNISES. Without
+    it, an interpreter carrying an argument (`python3 -X utf8`) or a non-python
+    basename makes the registrar's own output invisible to its own recogniser, so
+    the append pass re-appends every hook on every run — MEASURED against the
+    pre-fix code at 14 -> 27 -> 40 commands over three runs, +13 every time,
+    unbounded and silent. Deriving the check from the recogniser
+    rather than restating its rules is what stops the two from drifting apart.
+
+    The remaining three are about the value being a usable interpreter at all:
+    relative would reopen the very PATH window this pinning closes, and a missing
+    or non-executable path would turn every hook into a permanent 127.
+    """
+    if managed_script_of(
+            interp + " " + HOOK_DIR_PREFIXES[0] + _PROBE_SCRIPT) != _PROBE_SCRIPT:
+        return ("commands built from it are not recognised by this script's own "
+                "recogniser — it must be ONE token whose basename starts with "
+                "`python` (no arguments, no wrapper, no spaces)")
+    if not os.path.isabs(interp):
+        return ("it is not an absolute path, and a PATH-resolved interpreter is "
+                "the exact failure this pinning exists to close")
+    if not os.path.isfile(interp):
+        return "no such file"
+    if not os.access(interp, os.X_OK):
+        return "not executable"
+    return None
+
+
+def hook_python():
+    """The absolute interpreter to write into every managed hook command.
+
+    $DEVRC_HOOK_PYTHON is the test seam — without it a test would have to assert
+    against whatever interpreter pytest happened to run under. It is validated
+    because activation inherits the operator's environment, so an exported value
+    reaches production and would otherwise be written verbatim into every hook.
+
+    🔴 A REJECTED OVERRIDE FALLS BACK; IT DOES NOT HARD-FAIL. Deliberate: the
+    fallback (`realpath(sys.executable)`) is what activation wants anyway, since
+    home.nix invokes this under ${pkgs.python312}/bin/python3 — so falling back
+    produces a CORRECTLY pinned settings.json, while hard-failing would leave the
+    hooks on whatever they carried before, i.e. it would keep the 127 window open
+    on the strength of a stray environment variable. It also cannot endanger the
+    wrapper's exit-0 contract, because there is nothing to contain: no non-zero
+    status is produced. The warning is the loud part.
+
+    The fallback to a bare name only fires when sys.executable is empty (an
+    embedded interpreter), which is not a configuration this ever runs in.
+    """
+    fallback = os.path.realpath(sys.executable) if sys.executable else "python3"
+    override = os.environ.get("DEVRC_HOOK_PYTHON")
+    if not override:
+        return fallback
+    reason = unusable_interpreter(override)
+    if reason is None:
+        return override
+    warn("$DEVRC_HOOK_PYTHON=%r IGNORED: %s. Using %s instead. Unset it, or point "
+         "it at an absolute python binary." % (override, reason, fallback))
+    return fallback
+
+
+PYTHON = hook_python()
+
+# 🔴 INVARIANT GUARD, labelled honestly: it covers the case where the RESOLVED
+# interpreter — not an override, which hook_python already rejected — is one this
+# script's recogniser cannot read back. Reaching it requires running the registrar
+# under a CPython whose realpath basename is not `python*`, which no test here can
+# construct hermetically; it is mutation-checked reachable instead (drop the
+# validation from hook_python and run with DEVRC_HOOK_PYTHON=/bin/sh, and this
+# fires with this message). Refusing to write is the right failure: the wrapper
+# turns a non-zero status into a WARNING and exits 0, and settings.json — which
+# has not been opened yet — keeps whatever registrations it already had.
+_UNUSABLE = unusable_interpreter(PYTHON)
+if _UNUSABLE is not None:
+    warn("refusing to touch %s: the interpreter this script resolved (%r) cannot be "
+         "written into a hook command — %s. The file is left exactly as it was."
+         % (SETTINGS, PYTHON, _UNUSABLE))
+    sys.exit(2)
+
+
+def with_python(path):
+    """Build a command for the append tables — and prove this script can read it back.
+
+    Second half of the self-check above, applied to the strings actually written
+    rather than to a probe. Same invariant-guard caveat: with PYTHON validated it
+    cannot fire, and it exists so that "my own output is unrecognisable to me"
+    cannot come back through some future refactor of the tables.
+    """
+    cmd = PYTHON + " " + path
+    if managed_script_of(cmd) is None:
+        raise AssertionError(
+            "register-nudge-hook.py would write a command its own recogniser does "
+            "not recognise, so every run would re-append it: %r" % cmd)
+    return cmd
 
 
 # --------------------------------------------------------------------------- #
@@ -264,12 +408,25 @@ SINGLE_EVENT_CMDS = {
     "Stop": [with_python("~/.claude/hooks/next-step-nudge.py")],
 }
 
+# 🔴 THE OWNERSHIP BOUNDARY OF THE DE-DUP SURFACE, derived from the tables above
+# so it cannot drift from them. This script may delete a duplicate registration
+# only of a script it REGISTERS. bash-guard is the case that makes the
+# distinction real: its interpreter is managed here, its registration is not, so
+# a doubled bash-guard entry came from something else and is not this script's to
+# remove. It is reported instead — see the end of the de-dup pass.
+REGISTERED_SCRIPTS = frozenset(
+    managed_script_of(c)
+    for c in POST_BASH_CMDS + [NOTIFY_CMD, LEDGER_CMD, WRITEBACK_CMD]
+    + [c for cmds in SINGLE_EVENT_CMDS.values() for c in cmds]
+)
+
 with open(SETTINGS) as f:
     data = json.load(f)
 
 hooks = data.setdefault("hooks", {})
 added = []
 rewritten = []
+deduped = []
 
 
 def registered_scripts(event_arrays):
@@ -295,7 +452,112 @@ def registered_scripts(event_arrays):
     return found
 
 
-# --- PASS 1: normalise the interpreter of every managed hook, on every event --
+def _entry_hook_dicts(entry):
+    """The hook dicts inside one settings.json entry, skipping anything malformed."""
+    if not isinstance(entry, dict):
+        return []
+    hs = entry.get("hooks")
+    if not isinstance(hs, list):
+        return []
+    return [h for h in hs if isinstance(h, dict)]
+
+
+def entry_identities(entry):
+    """The (matcher, script) pairs this entry registers.
+
+    🔴 THE IDENTITY KEY FOR THE DE-DUP SURFACE, and the choice is load-bearing in
+    both directions:
+
+      * the SCRIPT, not the command string — the same identity `registered_scripts`
+        uses for the append surface, so the two cannot disagree about what "already
+        registered" means. It also catches the cross-spelling duplicate (`~/…` and
+        `$HOME/…` naming the same hook) that a string key would miss.
+      * the MATCHER, so two entries for one script under DIFFERENT matchers are not
+        duplicates. A hand-scoped narrow entry is a real configuration this script
+        deliberately leaves in place (see `registered_scripts`); collapsing it into
+        the unmatchered one would silently widen a scope the operator narrowed.
+
+    A missing `matcher` and an explicit null are the same identity: both mean
+    "every tool", so two such entries really are the same registration twice.
+    """
+    matcher = entry.get("matcher") if isinstance(entry, dict) else None
+    if matcher is not None and not isinstance(matcher, str):
+        # Not a shape this script writes. Keep it hashable and keep it distinct
+        # from both "absent" and every string, so it can never collapse into
+        # another entry's identity and license a deletion.
+        matcher = ("<non-str matcher>", repr(matcher))
+    ids = {(matcher, managed_script_of(h.get("command")))
+           for h in _entry_hook_dicts(entry)}
+    return {i for i in ids if i[1] is not None}
+
+
+def removable_duplicate(entry):
+    """Is this entry one THIS script wrote, and therefore one it may delete?
+
+    Exactly the shape the append pass emits and nothing else: `{"hooks": [h]}` or
+    `{"matcher": M, "hooks": [h]}` with h exactly `{"type": "command", "command": …}`
+    and the command carrying no arguments. Any extra key — an entry-level
+    `description`, a hook-level `timeout`, a second hook in the list, an argument
+    after the script path — means somebody configured something this script never
+    wrote, so it is kept even when it duplicates. A duplicate is an annoyance; a
+    deleted foreign entry is a broken host.
+    """
+    if not isinstance(entry, dict) or set(entry) - {"matcher", "hooks"}:
+        return False
+    hs = entry.get("hooks")
+    if not isinstance(hs, list) or len(hs) != 1 or not isinstance(hs[0], dict):
+        return False
+    h = hs[0]
+    if set(h) != {"type", "command"} or h.get("type") != "command":
+        return False
+    if not bare_managed_command(h.get("command")):
+        return False
+    return managed_script_of(h.get("command")) in REGISTERED_SCRIPTS
+
+
+# --- PASS 1: heal a file an OLDER registrar double-registered ----------------
+# 🔴 Runs FIRST, before the rewrite, so the report cannot claim to have re-pinned
+# an entry it is about to delete.
+#
+# Keeping the FIRST occurrence is what preserves position, matcher and every
+# foreign key: the survivor is untouched and only later copies go. `seen` is fed
+# by EVERY entry, including ones this script may not delete, so a foreign-shaped
+# first copy still suppresses a plain second one rather than the other way round.
+# See the module docstring for how a file gets into this state (a home-manager
+# rollback runs the previous registrar, which cannot see the new spelling).
+for _event in list(hooks):
+    _arr = hooks.get(_event)
+    if not isinstance(_arr, list):
+        continue
+    _seen = set()
+    _kept = []
+    for _entry in _arr:
+        _ids = entry_identities(_entry)
+        if _ids and _ids <= _seen and removable_duplicate(_entry):
+            deduped.append("%s: %s" % (_event, _entry["hooks"][0]["command"]))
+            continue
+        _seen |= _ids
+        _kept.append(_entry)
+    if len(_kept) != len(_arr):
+        hooks[_event] = _kept
+    # 🔴 AND SAY WHAT IT DECLINED TO REMOVE. Anything still registered twice under
+    # one matcher after this pass is a real double-fire that this script would not
+    # touch — a foreign key, an argument after the script path, or a script whose
+    # registration it does not own. Leaving that silent is the same failure mode as
+    # the unpinnable commands reported below.
+    _counts = {}
+    for _entry in _kept:
+        for _id in entry_identities(_entry):
+            _counts[_id] = _counts.get(_id, 0) + 1
+    for _id in sorted(_counts, key=lambda i: (i[1], repr(i[0]))):
+        if _counts[_id] > 1:
+            warn("%s: %s is registered %d times under matcher %r. This script "
+                 "removed only the duplicates it wrote itself; the rest carry keys, "
+                 "arguments or a registration it does not own, so they were left in "
+                 "place and the hook fires %d times per event. Remove the extras by "
+                 "hand." % (_event, _id[1], _counts[_id], _id[0], _counts[_id]))
+
+# --- PASS 2: normalise the interpreter of every managed hook, on every event --
 # 🔴 THE WIDE SURFACE, and the only place this script writes to an entry it does
 # not own. bash-guard is deliberately in scope here and deliberately absent from
 # the append tables above: its registration belongs to the host, its interpreter
@@ -325,8 +587,44 @@ for _event in list(hooks):
             _old = _h.get("command")
             _new = normalized_command(_old)
             if _new != _old:
+                if managed_script_of(_new) is None:
+                    # Same invariant guard as `with_python`, on the other write
+                    # path: a rewrite whose product this script cannot read back
+                    # would be re-appended on every subsequent run.
+                    raise AssertionError(
+                        "the interpreter rewrite produced a command this script's "
+                        "own recogniser does not recognise: %r" % _new)
                 _h["command"] = _new
                 rewritten.append("%s: %s" % (_event, _new))
+
+# --- PASS 2b: SAY SO about the managed hooks this script declined to pin ------
+# 🔴 Conservative matching is correct; conservative SILENCE is what let the 127
+# window run for months. A command naming a managed hook in any shape the
+# recogniser refuses (`python3 -u …`, a leading `PYTHONPATH=…`, `${HOME}/…`, a
+# quoted path, a `…; …` compound) is left byte-identical AND still resolves its
+# interpreter from PATH, so it keeps dying mid-switch. Warn, never rewrite: this
+# script cannot prove it owns those, and guessing is how a foreign hook gets
+# mangled. Emitted whether or not anything else changed, so the "no change" run
+# reports it too.
+for _event in sorted(hooks):
+    _arr = hooks.get(_event)
+    if not isinstance(_arr, list):
+        continue
+    for _entry in _arr:
+        for _h in _entry_hook_dicts(_entry):
+            _cmd = _h.get("command")
+            if not isinstance(_cmd, str) or managed_script_of(_cmd) is not None:
+                continue
+            _named = sorted(s for s in MANAGED_HOOK_SCRIPTS if s in _cmd)
+            if not _named:
+                continue
+            warn("%s: this command names the managed hook %s but is not in the form "
+                 "this script can pin (<absolute-python> <hooks-dir>%s), so its "
+                 "interpreter is still resolved from PATH and it dies with `command "
+                 "not found` during the ~1s of every home-manager switch in which the "
+                 "intermediate profile generation has no python3 on it. Left "
+                 "byte-identical; rewrite it to that form by hand. The command: %r"
+                 % (_event, ", ".join(_named), _named[0], _cmd))
 
 # --- PostToolUse(Bash) nudge hooks (append-only, matcher=Bash) ---------------
 post = hooks.setdefault("PostToolUse", [])
@@ -386,7 +684,7 @@ for event, cmds in SINGLE_EVENT_CMDS.items():
 # 🔴 Only write when something actually moved. The rewrite pass now re-runs on
 # every switch, so an unconditional write would re-dump (indent=2) the operator's
 # per-host settings.json — permissions and all — every time, for nothing.
-if not added and not rewritten:
+if not added and not rewritten and not deduped:
     print("all devrc-managed hooks already registered — no change")
     sys.exit(0)
 
@@ -407,6 +705,10 @@ except Exception:
     except OSError:
         pass
     raise
+if deduped:
+    print("removed duplicate hook registrations:")
+    for c in deduped:
+        print("  -", c)
 if rewritten:
     print("pinned hook interpreters to %s:" % PYTHON)
     for c in rewritten:

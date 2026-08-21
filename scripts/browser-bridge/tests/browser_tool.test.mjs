@@ -1142,6 +1142,41 @@ function opsFromReadme() {
   return [...m[1].matchAll(/`([a-z]+)`/g)].map((x) => x[1]);
 }
 
+test("OP-SET PARITY: the PROSE op COUNT matches the parsed list", () => {
+  // The four sources above are parsed as LISTS, so the parity test never read
+  // the sentences beside them -- and those sentences drifted. `emulate` landed
+  // in #321 and every list was updated; three prose counts were not, and said
+  // "11 ops" for months. One of them sits 75 lines below the constant that
+  // lists 13, so a single file asserted both numbers. A doc gate that reads the
+  // machine-readable half and ignores the human-readable half beside it is
+  // exactly how a reader ends up confidently wrong.
+  //
+  // Anything of the form "<N>-op" or "<N> ops" in an agent-facing source must
+  // therefore equal the real count. Deliberately spelling-tolerant on the
+  // hyphen only -- a NEW phrasing is caught by being absent, not by matching.
+  const n = ALLOWED_OPS_DEFAULT.length;
+  const sources = [
+    ["README.md", readBB("README.md")],
+    ["opencode/tools/browser_tool_impl.mjs", readBB("opencode/tools/browser_tool_impl.mjs")],
+    ["opencode/browser-agent.md", readBB("opencode/browser-agent.md")],
+    ["reference/agent.md", readBB("reference/agent.md")],
+  ];
+  const wrong = [];
+  for (const [label, src] of sources) {
+    for (const m of src.matchAll(/\b(\d+)[- ]ops?\b/g)) {
+      if (Number(m[1]) !== n) {
+        const line = src.slice(0, m.index).split("\n").length;
+        wrong.push(`${label}:${line} says "${m[0]}" but ALLOWED_OPS_DEFAULT has ${n}`);
+      }
+    }
+  }
+  assert.deepEqual(wrong, [],
+    "an agent-facing source states an op COUNT that disagrees with " +
+    `ALLOWED_OPS_DEFAULT (${n} ops):\n  ` + wrong.join("\n  ") +
+    "\nThe lists are gated; these sentences were not. Fix the prose, or if the " +
+    "number is genuinely about something else, reword so it is not '<N> ops'.");
+});
+
 test("OP-SET PARITY: browser.js enum == ALLOWED_OPS_DEFAULT == agent-md == README", () => {
   const sorted = (a) => [...a].sort();
   const impl = sorted(ALLOWED_OPS_DEFAULT);
