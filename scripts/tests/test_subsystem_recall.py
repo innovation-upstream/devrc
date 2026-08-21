@@ -43,6 +43,7 @@ import collections
 import hashlib
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -3582,14 +3583,47 @@ class TestSkillDocsArePinned:
         """Structural, not a phrase: recall is context for a doc already read,
         not a substitute for reading it."""
         doc = RESUME_DOC.read_text(encoding="utf-8")
-        read_it = doc.index("**Read it fully.**")
+
+        def _at(anchor: str, what: str, *, regex: bool = False) -> int:
+            """Offset of `anchor`, or a failure that says the doc was reworded.
+
+            🔴 `str.index` raises a bare `ValueError: substring not found` with
+            no mention of which anchor, which file, or what to do — #643
+            reworded step 2 and left exactly that, so `main` sat RED with a
+            traceback that named nothing. Every anchor goes through here.
+            """
+            if regex:
+                m = re.search(anchor, doc, re.MULTILINE)
+                found = m.start() if m else -1
+            else:
+                found = doc.find(anchor)
+            assert found != -1, (
+                f"claude/skills/resume/SKILL.md no longer contains the {what} "
+                f"anchor ({anchor!r}). The doc was almost certainly REWORDED, "
+                f"not broken — re-read the step order and update this anchor. "
+                f"Do NOT delete the assertion: it pins that recall is context "
+                f"for a doc already read, not a substitute for reading it."
+            )
+            return found
+
+        # 🔴 The read-step anchor is a PREFIX on the numbered-list marker, not
+        # the whole bolded sentence. The old pin was the exact string
+        # `**Read it fully.**`; #643 appended a clause inside the bold, moving
+        # the closing `**`, and a guard whose docstring says "structural, not a
+        # phrase" broke on a pure reword. Anchoring on `<n>. **Read it fully`
+        # survives any continuation of that sentence.
+        read_it = _at(r"^\d+\.\s+\*\*Read it fully", "handoff-read step", regex=True)
         # The INVOCATION, not the bare filename: `resume-state.sh` is also named
         # in step 1's prose, so `.index()` on the bare name finds a point BEFORE
         # the handoff is read and the ordering claim inverts.
-        reconcile = doc.index("bash ~/workspace/devrc/scripts/resume-state.sh")
-        step = doc.index("subsystem_recall.py")
-        report = doc.index("**Report**")
-        assert read_it < reconcile < step < report
+        reconcile = _at("bash ~/workspace/devrc/scripts/resume-state.sh", "reconciler invocation")
+        step = _at("subsystem_recall.py", "recall invocation")
+        report = _at("**Report**", "report step")
+        assert read_it < reconcile < step < report, (
+            "claude/skills/resume/SKILL.md steps are out of order — recall must "
+            f"come AFTER the handoff is read. Offsets: read={read_it} "
+            f"reconcile={reconcile} recall={step} report={report}"
+        )
 
     def test_the_pin_can_report_absence(self) -> None:
         """Negative control on the pin: a check against a doc that happens to
