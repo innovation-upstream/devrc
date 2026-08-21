@@ -27,6 +27,22 @@ NOISE_RE='TargetDown|KubeHpaMaxedOut'
 
 have(){ command -v "$1" >/dev/null 2>&1; }
 
+# The clawgate<->handoff seam: the front-matter parser and the drift rules,
+# SHARED with /handoff's writer so the two cannot disagree about what a
+# `clawgate-task:` field is. Sourced (not re-implemented) — see that file's
+# header. Its pure functions are asserted on fixture text by
+# scripts/tests/test_resume_state_clawgate.py exactly as `extract_prs` is.
+# 🔴 A FAILED SOURCE IS RECORDED, NOT SWALLOWED. This script runs without
+# `set -e`, so a missing lib would leave every `clawgate_*` call reporting
+# "command not found" (127) — and the block below reads a non-zero from the
+# parser as "this doc names no task", i.e. the absent tool would render as a
+# clean, reassuring absence. Exactly the false green the digest exists to stop.
+# shellcheck source=lib/clawgate_handoff.sh
+CLAWGATE_LIB="$(dirname "${BASH_SOURCE[0]}")/lib/clawgate_handoff.sh"
+CLAWGATE_LIB_OK=1
+# shellcheck source=/dev/null
+. "$CLAWGATE_LIB" 2>/dev/null || CLAWGATE_LIB_OK=0
+
 # ---------------------------------------------------------------------------
 # Extraction heuristics — kept as pure, side-effect-free functions so the test
 # harness can source this file and assert them on fixture text.  Each reads its
@@ -405,6 +421,99 @@ alerts_block(){
 }
 
 # ---------------------------------------------------------------------------
+# CLAWGATE — reconcile the handoff's recorded task against the LIVE board.
+#
+# /handoff records `clawgate-task: <id>` as YAML front matter at the top of the
+# doc (see claude/skills/handoff/SKILL.md and scripts/lib/clawgate_handoff.sh).
+# This reads it back and asks the board two questions: what STATUS does the task
+# carry now, and how many comments POSTDATE the doc?
+#
+# 🔴 EVERY WAY THIS CAN FAIL PRINTS A `!` GAP, because the alternative is the
+# false green this whole script exists to avoid. `clawgatectl` missing, a 401, a
+# task that does not exist and a server that dropped the field all produce the
+# same observable — nothing to reconcile — and reporting that as "no drift"
+# states a fact about the board that was never measured.
+#
+# ⚠ THE ONE CASE THAT IS **NOT** A GAP: a handoff with no `clawgate-task:` field
+# at all. Nothing asked clawgate anything, so its silence costs no coverage —
+# exactly the rule git_pr_block applies when a handoff references no PRs. It
+# still gets an explicit line, because "this doc names no task" and "the task is
+# fine" are different statements and the digest must not let one read as the other.
+#
+# clawgatectl rather than a hand-rolled curl: it reads the token from
+# ~/.claude/clawgate.env itself, never puts it in argv, and returns exit codes
+# that distinguish unreachable (6) from auth (3) from not-found (4) — which is
+# the difference between "the board is down" and "that task is gone".
+clawgate_block(){
+  echo "CLAWGATE"
+  if [ "$CLAWGATE_LIB_OK" -ne 1 ]; then
+    echo "  (the shared parser $CLAWGATE_LIB could not be sourced — NOTHING was reconciled)"
+    UNRECONCILED+=("scripts/lib/clawgate_handoff.sh could not be sourced — the handoff's clawgate task, if any, was never read")
+    return
+  fi
+  if [ -z "$HANDOFF" ]; then echo "  (no handoff — nothing to reconcile)"; return; fi
+  local text id
+  text=$(cat "$HANDOFF")
+  if ! id=$(clawgate_task_field "$text"); then
+    if clawgate_field_present "$text"; then
+      echo "  (the handoff's clawgate-task: field is UNREADABLE — no task was fetched)"
+      UNRECONCILED+=("the handoff carries an unreadable clawgate-task: field — clawgate was never asked, so the task's state is UNKNOWN")
+    else
+      echo "  (no clawgate-task: field in this handoff — nothing to reconcile; this says NOTHING about the board)"
+    fi
+    return
+  fi
+
+  if ! have clawgatectl; then
+    echo "  (clawgatectl not on PATH — task #$id NOT checked)"
+    UNRECONCILED+=("clawgate task #$id was NOT checked (clawgatectl not on PATH) — its status is UNKNOWN, not fine")
+    return
+  fi
+  local json rc
+  json=$(clawgatectl task get "$id" 2>/dev/null); rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$json" ]; then
+    echo "  (clawgatectl exit $rc — task #$id NOT checked)"
+    UNRECONCILED+=("clawgate did not answer for task #$id (clawgatectl exit $rc: 3=auth 4=no such task 6=unreachable 8=non-JSON) — its status is UNKNOWN, not fine")
+    return
+  fi
+  local status
+  status=$(printf '%s' "$json" | jq -r '.status // empty' 2>/dev/null)
+  if [ -z "$status" ]; then
+    echo "  (clawgate answered for #$id with no readable status)"
+    UNRECONCILED+=("clawgate's answer for task #$id carried no readable status — UNKNOWN, not fine")
+    return
+  fi
+
+  # The doc's mtime is the "when this was written" clock. It is the doc's own
+  # last write, so a doc UPDATED after a comment correctly stops counting it.
+  local mt counts newer unreadable total
+  mt=$(stat -c %Y "$HANDOFF" 2>/dev/null)
+  if [ -z "$mt" ]; then
+    printf '  task #%s  status=%s\n' "$id" "$status"
+    UNRECONCILED+=("could not read the handoff doc's mtime — comments newer than it were NOT counted for clawgate task #$id")
+  else
+    counts=$(clawgate_new_comments "$json" "$mt")
+    read -r newer unreadable total <<<"$counts"
+    if [ "${total:-0}" -lt 0 ]; then
+      printf '  task #%s  status=%s  comments=(absent)\n' "$id" "$status"
+      UNRECONCILED+=("clawgate's answer for task #$id carried no comments array — comments newer than the doc were NOT counted")
+      newer=0
+    else
+      printf '  task #%s  status=%s  comments=%s (%s newer than the doc)\n' \
+        "$id" "$status" "$total" "$newer"
+      if [ "${unreadable:-0}" -gt 0 ]; then
+        UNRECONCILED+=("$unreadable comment(s) on clawgate task #$id carry an unparseable timestamp — the '$newer newer than the doc' count is a FLOOR")
+      fi
+    fi
+  fi
+
+  local line
+  while IFS= read -r line; do
+    [ -n "$line" ] && DRIFT+=("$line")
+  done < <(clawgate_drift_lines "$id" "$status" "${newer:-0}")
+}
+
+# ---------------------------------------------------------------------------
 main(){
   resolve "${1:-}"
   echo "## resume-state $(date -u +%FT%TZ)"
@@ -412,6 +521,7 @@ main(){
   git_pr_block
   workload_block
   alerts_block
+  clawgate_block
   echo "DRIFT"
   if [ "${#DRIFT[@]}" -gt 0 ]; then
     printf '  - %s\n' "${DRIFT[@]}"

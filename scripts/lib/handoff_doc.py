@@ -149,6 +149,29 @@ NO_ADVANCE_SENTINELS: frozenset[str] = frozenset(
 _H2 = re.compile(r"^##\s+\S")
 _FENCE = re.compile(r"^(`{3,}|~{3,})")
 
+# YAML front matter, and ONLY at the very start of the file: `---` on line 1,
+# then everything through the next `---` line. Same strictness as
+# `clawgate_task_field` in scripts/lib/clawgate_handoff.sh — a `---` later in a
+# markdown doc is a horizontal rule, not a front-matter opener.
+_FRONT_MATTER = re.compile(r"\A---\r?\n.*?^---\r?\n", re.DOTALL | re.MULTILINE)
+
+
+def split_front_matter(text: str) -> tuple[str, str]:
+    """(front_matter, rest) — and `front_matter + rest == text` exactly.
+
+    🔴 WHY THE MERGE HAS TO KNOW ABOUT THIS. Front matter is not a section, so
+    it lands in `split_sections`'s PREAMBLE, and `merge` takes the update's
+    preamble whenever it has one. That means a delta file whose first line is
+    prose rather than a `## ` heading SILENTLY DELETED the doc's front matter —
+    including the `clawgate-task:` field /resume reconciles against, which then
+    reads as "this doc names no task" rather than as data loss.
+
+    The field is meant to be DURABLE, so it survives a merge structurally
+    rather than by everyone remembering to write their delta heading-first.
+    """
+    m = _FRONT_MATTER.match(text)
+    return (m.group(0), text[m.end():]) if m else ("", text)
+
 
 def _fence_token(line: str) -> str | None:
     """The fence run opening/closing a code block on this line, if any."""
@@ -217,7 +240,14 @@ def merge(base_text: str, update_text: str) -> str:
     A section present in the base and absent from the update is left ALONE —
     an update is a delta, not a replacement document, so omitting a section
     never deletes it. A section present only in the update is added at the end.
+
+    FRONT MATTER IS CARRIED, not merged: the base's block survives unless the
+    update supplies one of its own (an explicit re-statement wins, so a session
+    that genuinely needs to change the recorded task can). See
+    `split_front_matter` for why this cannot be left to the preamble rule.
     """
+    base_fm, base_text = split_front_matter(base_text)
+    upd_fm, update_text = split_front_matter(update_text)
     base_pre, base_secs = split_sections(base_text)
     upd_pre, upd_secs = split_sections(update_text)
 
@@ -245,7 +275,7 @@ def merge(base_text: str, update_text: str) -> str:
         else:
             tail.append([h, b])
 
-    rendered = out_pre + "".join(h + b for h, b in out + tail)
+    rendered = (upd_fm or base_fm) + out_pre + "".join(h + b for h, b in out + tail)
     return rendered.rstrip("\n") + "\n"
 
 
