@@ -776,29 +776,68 @@ def declared_terms(ts, trig):
 #
 # Getting that backwards is the whole 2026-08-19 incident in one sentence.
 GATE_OK = 0
-GATE_ROWS_LOST = 1
+GATE_FAIL = 1
+GATE_ROWS_LOST = GATE_FAIL  # back-compat alias
 
 
 def _probe_universe(ts) -> set:
-    """Every prefix of every word the config can be searched by.
+    """Every query the search bar can be driven with, as far as we model it.
 
-    Prefixes, because the search bar matches as he types: 'nebu' must be
-    checked, not just 'nebula'. Words come from the trigger, the LABEL and the
-    search_terms — the exact three sources `_token_matches` reads.
+    Single-token PREFIXES, because he matches as he types ('nebu', not just
+    'nebula'), from the trigger, the LABEL and the search_terms — the exact
+    three sources `_token_matches` reads.
+
+    Plus TWO-TOKEN probes built from each snippet's OWN vocabulary. Multi-word
+    queries are how the bar is really driven — `espanso_detect` records that
+    19+ of 46 unattributed keylog rows were multi-word ('ssh work', 'civit
+    prod') — and a single-token universe is structurally blind to a regression
+    that only shows up for them. Pairs are drawn WITHIN a snippet rather than
+    across the whole vocabulary: the cross product is quadratic and mostly
+    nonsense, while the within-snippet pairs are exactly the queries a user
+    forms when naming one thing two ways.
     """
-    words = set()
+    probes, per_snippet = set(), []
     for trig in ts.triggers:
-        words.add(trig.lstrip(":").lower())
+        words = {trig.lstrip(":").lower()}
         meta = ts.meta.get(trig) or {}
         words |= set(LABEL_WORD_RE.findall((meta.get("label") or "").lower()))
         for st in meta.get("search_terms") or []:
             if isinstance(st, str):
                 words |= set(LABEL_WORD_RE.findall(st.lower()))
-    return {w[:i] for w in words if w for i in range(1, len(w) + 1)}
+        words = {w for w in words if w}
+        per_snippet.append(words)
+        probes |= {w[:i] for w in words for i in range(1, len(w) + 1)}
+    for words in per_snippet:
+        ordered = sorted(words)
+        for i, a in enumerate(ordered):
+            for b in ordered[i + 1:]:
+                probes.add(f"{a} {b}")
+    return probes
+
+
+def _reaching(det, probes) -> dict:
+    """trigger -> the probes that reach it WITHOUT typing its trigger.
+
+    The trigger is a different modality (type it verbatim and it fires); what
+    this gate is about is whether a snippet can still be FOUND by describing
+    it. Passing an empty trigger to the detector's own `_token_matches` turns
+    off the trigger arm and leaves the label+search_terms arms untouched — the
+    authoritative matcher, not a re-spelling of it.
+    """
+    out = {}
+    for trig in det.ts.triggers:
+        meta = det.ts.meta.get(trig) or {}
+        hit = set()
+        for probe in probes:
+            toks = probe.split()
+            if toks and all(det._token_matches(tok, "", meta) for tok in toks):
+                hit.add(probe)
+        out[trig] = hit
+    return out
 
 
 def diff_configs(ts_before, ts_after) -> dict:
-    """Resolve the whole prefix universe against both configs.
+    """Resolve the whole probe universe against both configs.
 
     Uses the detector's OWN matcher rather than re-spelling the rules — a
     re-spelt copy of its label tokenizer once invented findings for every
@@ -806,10 +845,27 @@ def diff_configs(ts_before, ts_after) -> dict:
     """
     d_before, d_after = EspansoDetector(ts_before), EspansoDetector(ts_after)
     probes = sorted(_probe_universe(ts_before) | _probe_universe(ts_after))
-    rows_lost, attr_lost, attr_gained, attr_moved = [], [], [], []
+    reach_b, reach_a = _reaching(d_before, probes), _reaching(d_after, probes)
+
+    # THE FATAL AXIS: a snippet that SURVIVES the edit but can no longer be
+    # found by describing it. Deliberately per-SNIPPET, not per-probe:
+    #   * pruning a snippet drops its words too, and that is the skill's own
+    #     primary action — a per-probe rule made every prune a FAILURE, i.e.
+    #     the permanently-red gate this design exists to avoid;
+    #   * fixing a typo in a label loses the misspelt probe while the snippet
+    #     stays perfectly reachable — also not a regression;
+    #   * moving one snippet's vocabulary onto another leaves the first
+    #     unreachable while SOME row still answers the query, so a
+    #     "last row disappeared" rule misses it entirely.
+    blinded = sorted(
+        trig for trig in reach_b
+        if trig in reach_a and reach_b[trig] and not reach_a[trig]
+    )
+
+    rows_lost, attr_lost, attr_gained, attr_moved, moved_expansion = [], [], [], [], []
     for probe in probes:
-        rows_b = [t for t in d_before.ts.triggers if d_before._term_matches(probe, t)]
-        rows_a = [t for t in d_after.ts.triggers if d_after._term_matches(probe, t)]
+        rows_b = [x for x in d_before.ts.triggers if d_before._term_matches(probe, x)]
+        rows_a = [x for x in d_after.ts.triggers if d_after._term_matches(probe, x)]
         if rows_b and not rows_a:
             rows_lost.append((probe, sorted(rows_b)))
         att_b, att_a = d_before._attribute(probe), d_after._attribute(probe)
@@ -819,46 +875,67 @@ def diff_configs(ts_before, ts_after) -> dict:
             attr_gained.append((probe, att_a))
         elif att_b and att_a and att_b != att_a:
             attr_moved.append((probe, att_b, att_a))
+            # A MOVE only reaches the user if the EXPANSION changed. A plain
+            # trigger rename lands in attr_moved too and is harmless; pressing
+            # Enter still types the same text. Compare what gets typed.
+            exp_b = (ts_before.meta.get(att_b) or {}).get("replace")
+            exp_a = (ts_after.meta.get(att_a) or {}).get("replace")
+            if exp_b != exp_a:
+                moved_expansion.append((probe, att_b, att_a))
     return {
         "probes": len(probes),
+        "blinded": blinded,
         "rows_lost": rows_lost,
         "attr_lost": attr_lost,
         "attr_gained": attr_gained,
         "attr_moved": attr_moved,
+        "moved_expansion": moved_expansion,
     }
 
 
 def render_diff(d, before_label, after_label) -> list:
+    def _listing(rows, fmt, cap=20):
+        out = [f"       {fmt(r)}" for r in rows[:cap]]
+        if len(rows) > cap:
+            out.append(f"       ... and {len(rows) - cap} more (not shown)")
+        return out
+
     out = [f"## CONFIG DIFF — {before_label} -> {after_label}", "",
-           f"   {d['probes']} prefix probes. PICKER ROWS are what the user can",
-           "   reach; ATTRIBUTION is only whether telemetry can name the snippet.",
-           "   Losing a row FAILS. Losing attribution is reported, never fatal —",
-           "   adding any snippet costs some, and a permanently-red gate is worse",
-           "   than no gate.", ""]
-    if d["rows_lost"]:
-        out.append(f"  🔴 PICKER ROWS LOST — {len(d['rows_lost'])} "
-                   "quer(y/ies) now reach NOTHING:")
-        for probe, was in d["rows_lost"]:
-            out.append(f"       {probe!r} listed {len(was)} row(s) ({' '.join(was)}) -> 0")
+           f"   {d['probes']} probes (single-token prefixes + within-snippet",
+           "   two-token queries). FATAL = a snippet that SURVIVES the edit but",
+           "   can no longer be found by describing it, or a query that now types",
+           "   DIFFERENT text. Everything else is reported, not graded: espanso",
+           "   lists every match as a row, so ambiguity costs telemetry, not",
+           "   reach — and a gate red on every prune teaches people to ignore it.",
+           ""]
+    if d["blinded"]:
+        out.append(f"  🔴 SNIPPETS BLINDED — {len(d['blinded'])} still exist but no "
+                   "query reaches them (trigger aside):")
+        out.extend(_listing(d["blinded"], lambda x: x))
         out.append("")
     else:
-        out.append("  ✅ no picker rows lost")
+        out.append("  ✅ no surviving snippet lost its findability")
+    if d["moved_expansion"]:
+        out.append(f"  🔴 EXPANSION CHANGED — {len(d['moved_expansion'])} quer(y/ies) "
+                   "now type DIFFERENT text:")
+        out.extend(_listing(d["moved_expansion"],
+                            lambda r: f"{r[0]!r}: {r[1]} -> {r[2]}"))
         out.append("")
-    out.append(f"  attribution gained : {len(d['attr_gained'])}")
-    for probe, trig in d["attr_gained"][:20]:
-        out.append(f"       {probe!r} -> {trig}")
-    if len(d["attr_gained"]) > 20:
-        out.append(f"       ... and {len(d['attr_gained']) - 20} more")
-    out.append(f"  attribution lost   : {len(d['attr_lost'])}  (telemetry only, not a failure)")
-    for probe, was, now_rows in d["attr_lost"][:20]:
-        out.append(f"       {probe!r} was {was}, now {now_rows} rows")
-    if len(d["attr_lost"]) > 20:
-        out.append(f"       ... and {len(d['attr_lost']) - 20} more")
+    out.append("")
+    out.append(f"  queries reaching nothing : {len(d['rows_lost'])}  "
+               "(expected when a snippet is pruned; see BLINDED above for the "
+               "cases that matter)")
+    out.extend(_listing(d["rows_lost"], lambda r: f"{r[0]!r} was {' '.join(r[1])} -> 0"))
+    out.append(f"  attribution gained       : {len(d['attr_gained'])}")
+    out.extend(_listing(d["attr_gained"], lambda r: f"{r[0]!r} -> {r[1]}"))
+    out.append(f"  attribution lost         : {len(d['attr_lost'])}  "
+               "(telemetry only — the fire still happens, logged trigger=None)")
+    out.extend(_listing(d["attr_lost"], lambda r: f"{r[0]!r} was {r[1]}, now {r[2]} rows"))
     if d["attr_moved"]:
-        out.append(f"  🔴 attribution MOVED : {len(d['attr_moved'])} "
-                   "(a query now resolves to a DIFFERENT snippet)")
-        for probe, was, now in d["attr_moved"]:
-            out.append(f"       {probe!r} {was} -> {now}")
+        out.append(f"  attribution moved        : {len(d['attr_moved'])}  "
+                   f"({len(d['moved_expansion'])} of them change the EXPANSION — "
+                   "those are graded above)")
+        out.extend(_listing(d["attr_moved"], lambda r: f"{r[0]!r} {r[1]} -> {r[2]}"))
     out.append("")
     return out
 
@@ -1197,9 +1274,9 @@ def main(argv=None) -> int:
             out.extend(render_lint(lint(ts_after), candidate))
         d = diff_configs(ts_before, ts_after)
         out.extend(render_diff(d, before_path, candidate))
-        rc = GATE_ROWS_LOST if d["rows_lost"] else GATE_OK
-        out.append("GATE: FAIL — a query lost its last picker row (see above)"
-                   if rc else "GATE: PASS — no picker rows lost")
+        rc = GATE_FAIL if (d["blinded"] or d["moved_expansion"]) else GATE_OK
+        out.append("GATE: FAIL — see the 🔴 sections above"
+                   if rc else "GATE: PASS — nothing lost its findability")
         print("\n".join(out))
         return rc
 

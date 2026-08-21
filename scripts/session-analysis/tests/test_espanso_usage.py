@@ -726,127 +726,151 @@ def test_bad_source_is_rejected():
 
 
 # --------------------------------------------------------------------------- #
-# --diff-config / --gate : the two-axis check
+# --diff-config / --gate
 # --------------------------------------------------------------------------- #
-# 🔴 These pin the 2026-08-19 incident. `--lint` and `--replay` both called a
-# change clean while it took 'nebula'/'mesh'/'remote' from TWO picker rows to
-# ZERO. The axes are graded differently ON PURPOSE: a lost ROW is a user-facing
-# regression and FAILS; lost ATTRIBUTION costs only telemetry and is REPORTED,
-# because adding any snippet loses some and a permanently-red gate is worse than
-# no gate at all.
-_SSH_BEFORE = [
-    {"trigger": ":sshwn", "replace": "ssh a", "label": "SSH rig via nebula mesh",
-     "search_terms": ["nebula", "mesh", "remote"]},
-    {"trigger": ":sshwl", "replace": "ssh b", "label": "SSH workbench (LAN)",
-     "search_terms": ["ssh", "workbench", "lan"]},
-]
-_SSH_STRIPPED = [
-    {"trigger": ":sshwn", "replace": "ssh a"},          # label+terms removed
-    {"trigger": ":sshwl", "replace": "ssh b", "label": "SSH workbench (LAN)",
-     "search_terms": ["ssh", "workbench", "lan"]},
-]
+# 🔴 What is FATAL and what is merely reported is the whole design, and an audit
+# showed the first cut got it wrong in BOTH directions: pruning a snippet (the
+# skill's only prune verdict) FAILED, while a snippet quietly losing all of its
+# own vocabulary PASSED. The axis is therefore per-SNIPPET findability, not
+# per-probe row loss. These tests pin the six scenarios that pinned it down.
+_A = {"trigger": ":aa", "replace": "alpha text", "label": "Alpha thing",
+      "search_terms": ["alpha", "firstword"]}
+_B = {"trigger": ":bb", "replace": "bravo text", "label": "Bravo thing",
+      "search_terms": ["bravo"]}
+
+
+def _mut(base, trig, **changes):
+    out = []
+    for m in base:
+        m = dict(m)
+        if m["trigger"] == trig:
+            for k, v in changes.items():
+                if v is None:
+                    m.pop(k, None)
+                else:
+                    m[k] = v
+        out.append(m)
+    return out
 
 
 def test_diff_identical_configs_reports_nothing():
-    """POSITIVE CONTROL for the whole diff: a config against itself is clean.
-
-    Without this, a probe universe that came out EMPTY would make every
-    assertion below pass vacuously — the reassuring zero this file is built to
-    refuse. The probe count is asserted non-trivial for the same reason.
-    """
-    ts = _ts(_SSH_BEFORE)
+    """POSITIVE CONTROL: a config against itself is clean, and the universe is
+    non-trivial — otherwise every assertion below passes vacuously."""
+    ts = _ts([_A, _B])
     d = M.diff_configs(ts, ts)
-    assert d["probes"] > 20, (
-        f"only {d['probes']} probes — the universe is near-empty, so the "
-        "buckets below would be vacuously clean"
+    assert d["probes"] > 20, f"only {d['probes']} probes — buckets would be vacuous"
+    for bucket in ("blinded", "rows_lost", "attr_lost", "attr_gained",
+                   "attr_moved", "moved_expansion"):
+        assert d[bucket] == [], f"{bucket} should be empty for an identical diff"
+
+
+def test_stripping_a_label_blinds_the_snippet():
+    """The 2026-08-19 regression: label+terms removed, snippet survives."""
+    after = _mut([_A, _B], ":aa", label=None, search_terms=[])
+    d = M.diff_configs(_ts([_A, _B]), _ts(after))
+    assert d["blinded"] == [":aa"], f"expected :aa blinded, got {d['blinded']}"
+
+
+def test_pruning_a_snippet_is_NOT_a_failure():
+    """`DEAD` is the skill's only prune verdict. A per-probe rule failed here,
+    which would have made this a permanently-red gate."""
+    d = M.diff_configs(_ts([_A, _B]), _ts([_B]))
+    assert d["blinded"] == [], "a pruned snippet cannot be 'blinded' — it is gone"
+    assert d["rows_lost"], "its words DO stop reaching anything; that is reported"
+
+
+def test_fixing_a_typo_in_a_label_is_NOT_a_failure():
+    typo = _mut([_A, _B], ":aa", label="Alpah thing")
+    d = M.diff_configs(_ts(typo), _ts([_A, _B]))
+    assert d["blinded"] == [], f"a typo fix blinded something: {d['blinded']}"
+
+
+def test_renaming_a_trigger_keeping_the_expansion_is_NOT_a_failure():
+    renamed = _mut([_A, _B], ":aa", trigger=":zz")
+    d = M.diff_configs(_ts([_A, _B]), _ts(renamed))
+    assert d["moved_expansion"] == [], (
+        "a rename types the SAME text, so it must not be graded: "
+        f"{d['moved_expansion']}"
     )
-    assert d["rows_lost"] == []
-    assert d["attr_lost"] == []
-    assert d["attr_gained"] == []
-    assert d["attr_moved"] == []
 
 
-def test_diff_catches_the_2026_08_19_picker_blanking():
-    """Stripping a label takes every word describing it from 2 rows to 0."""
-    d = M.diff_configs(_ts(_SSH_BEFORE), _ts(_SSH_STRIPPED))
-    lost = {probe for probe, _ in d["rows_lost"]}
-    for probe in ("nebula", "mesh", "remote", "nebu"):
-        assert probe in lost, (
-            f"{probe!r} reached :sshwn before and reaches nothing after, but the "
-            f"diff did not flag it. rows_lost={sorted(lost)}"
-        )
+def test_a_query_that_now_types_DIFFERENT_text_is_fatal():
+    """`attr_moved` alone is ambiguous (a rename lands there). What reaches the
+    user is the EXPANSION changing."""
+    after = _mut([_A, _B], ":bb", label="Alpha thing", search_terms=["alpha", "firstword"])
+    after = _mut(after, ":aa", label="Unrelated wording", search_terms=["zzz"])
+    d = M.diff_configs(_ts([_A, _B]), _ts(after))
+    assert d["moved_expansion"], "'firstword' now types bravo text, not alpha text"
+    probes = {r[0] for r in d["moved_expansion"]}
+    assert "firstword" in probes, probes
 
 
 def test_lost_attribution_is_reported_but_is_NOT_a_failure():
-    """Adding a snippet costs attribution; grading that as failure would make
-    this a permanently-red gate, which trains everyone to click through."""
-    before = [{"trigger": ":aa", "replace": "x", "label": "Alpha thing",
-               "search_terms": ["alpha"]}]
-    after = before + [{"trigger": ":bb", "replace": "y", "label": "Alpha other",
-                       "search_terms": ["alphaother"]}]
-    d = M.diff_configs(_ts(before), _ts(after))
+    after = [_A, dict(_B, label="Alpha other", search_terms=["alpha"])]
+    d = M.diff_configs(_ts([_A, _B]), _ts(after))
     assert d["attr_lost"], "'alpha' should have become ambiguous"
-    assert d["rows_lost"] == [], (
-        "no query lost its last row — an ambiguous query still LISTS both, so "
-        "this must not be graded as a regression"
+    assert d["blinded"] == [] and d["moved_expansion"] == [], (
+        "an ambiguous query still LISTS both rows — not a regression"
     )
 
 
-def test_diff_reports_gained_and_moved_attribution():
-    before = [{"trigger": ":aa", "replace": "x", "label": "Zulu", "search_terms": ["zulu"]}]
-    after = [{"trigger": ":aa", "replace": "x", "label": "Zulu", "search_terms": ["zulu"]},
-             {"trigger": ":cc", "replace": "z", "label": "Quebec", "search_terms": ["quebec"]}]
-    d = M.diff_configs(_ts(before), _ts(after))
-    assert any(p == "quebec" and t == ":cc" for p, t in d["attr_gained"])
-    # and a MOVE: the same word changes owner
-    moved_after = [{"trigger": ":dd", "replace": "x", "label": "Zulu", "search_terms": ["zulu"]}]
-    dm = M.diff_configs(_ts(before), _ts(moved_after))
-    assert any(p == "zulu" and a == ":aa" and b == ":dd" for p, a, b in dm["attr_moved"])
+def test_probe_universe_covers_prefixes_AND_multiword_queries():
+    """Multi-word queries are how the bar is really driven; a single-token
+    universe is structurally blind to regressions that only show up there."""
+    u = M._probe_universe(_ts([_A]))
+    for probe in ("a", "alph", "alpha", "firstword", "aa"):
+        assert probe in u, f"{probe!r} missing"
+    multi = [p for p in u if " " in p]
+    assert multi, "no multi-token probes at all — 'ssh workbench' is invisible"
+    assert "alpha thing" in u or "alpha firstword" in u, sorted(multi)[:10]
 
 
-def test_probe_universe_covers_prefixes_of_all_three_sources():
-    """The search bar matches as he TYPES, so 'nebu' must be probed, not just
-    'nebula'. Words come from trigger + label + search_terms."""
-    u = M._probe_universe(_ts([
-        {"trigger": ":xyz", "replace": "x", "label": "Alpha bravo",
-         "search_terms": ["charlie"]}]))
-    for probe in ("x", "xy", "xyz", "a", "alph", "alpha", "b", "bravo", "c", "charlie"):
-        assert probe in u, f"{probe!r} missing from the probe universe"
+def test_render_diff_names_the_blinded_snippet_and_says_what_it_hid():
+    after = _mut([_A, _B], ":aa", label=None, search_terms=[])
+    text = "\n".join(M.render_diff(M.diff_configs(_ts([_A, _B]), _ts(after)), "a", "b"))
+    assert "SNIPPETS BLINDED" in text and ":aa" in text
+    clean = "\n".join(M.render_diff(M.diff_configs(_ts([_A, _B]), _ts([_A, _B])), "a", "b"))
+    assert "SNIPPETS BLINDED" not in clean
+    assert "no surviving snippet lost its findability" in clean
+    # Truncation must SAY it truncated — a silently cut report hides findings.
+    many = [dict(_A, trigger=f":t{i}", label=f"Label{i} word{i}",
+                 search_terms=[f"term{i}"]) for i in range(40)]
+    blindall = [dict(m, label=None, search_terms=[]) for m in many]
+    big = "\n".join(M.render_diff(M.diff_configs(_ts(many), _ts(blindall)), "a", "b"))
+    assert "more (not shown)" in big, "truncated silently"
 
 
-def test_render_diff_names_the_lost_rows():
-    """A gate whose output does not say WHICH query broke costs a round trip."""
-    d = M.diff_configs(_ts(_SSH_BEFORE), _ts(_SSH_STRIPPED))
-    text = "\n".join(M.render_diff(d, "before.yml", "after.yml"))
-    assert "PICKER ROWS LOST" in text
-    assert "nebula" in text and ":sshwn" in text
-    clean = "\n".join(M.render_diff(M.diff_configs(_ts(_SSH_BEFORE), _ts(_SSH_BEFORE)),
-                                    "a", "b"))
-    assert "no picker rows lost" in clean
-    assert "PICKER ROWS LOST" not in clean
+def test_gate_exit_codes_and_that_it_actually_lints(tmp_path, capsys):
+    """Exit codes are pinned to LITERALS.
 
-
-def test_gate_exit_codes(tmp_path, capsys):
-    """CLI-level: red on a lost row, green on a benign add, UNMEASURED on empty."""
-    import yaml
-    pytest.importorskip("yaml")
+    The first version asserted `== M.GATE_ROWS_LOST`, i.e. it read the answer
+    out of the module under test — so setting that constant to 0 kept the suite
+    fully green while the gate printed its 🔴 findings and exited 0. The exit
+    code IS the product here.
+    """
+    yaml = pytest.importorskip("yaml")
     before = tmp_path / "before.yml"
-    before.write_text(yaml.safe_dump({"matches": _SSH_BEFORE}))
-    stripped = tmp_path / "stripped.yml"
-    stripped.write_text(yaml.safe_dump({"matches": _SSH_STRIPPED}))
-    benign = tmp_path / "benign.yml"
-    benign.write_text(yaml.safe_dump({"matches": _SSH_BEFORE + [
-        {"trigger": ":zz", "replace": "q", "label": "Totally new",
-         "search_terms": ["totallynew"]}]}))
+    before.write_text(yaml.safe_dump({"matches": [_A, _B]}))
+    blinded = tmp_path / "blinded.yml"
+    blinded.write_text(yaml.safe_dump(
+        {"matches": _mut([_A, _B], ":aa", label=None, search_terms=[])}))
+    pruned = tmp_path / "pruned.yml"
+    pruned.write_text(yaml.safe_dump({"matches": [_B]}))
     empty = tmp_path / "empty.yml"
     empty.write_text("matches: []\n")
 
-    assert M.main(["--config", str(before), "--gate", str(stripped)]) == M.GATE_ROWS_LOST
-    assert "PICKER ROWS LOST" in capsys.readouterr().out
+    assert M.main(["--config", str(before), "--gate", str(blinded)]) == 1
+    out = capsys.readouterr().out
+    assert "SNIPPETS BLINDED" in out
+    # --gate promises lint + diff in ONE verdict; prove the lint really ran.
+    assert "LINT" in out, "--gate claims to lint the candidate but did not"
 
-    assert M.main(["--config", str(before), "--gate", str(benign)]) == M.GATE_OK
+    assert M.main(["--config", str(before), "--gate", str(pruned)]) == 0
     assert "GATE: PASS" in capsys.readouterr().out
 
-    # A candidate that parses to nothing is UNMEASURED, never "everything broke".
     assert M.main(["--config", str(before), "--gate", str(empty)]) == 3
     assert "UNMEASURED" in capsys.readouterr().out
+
+    # --diff-config shares the engine but has its own CLI path.
+    assert M.main(["--config", str(before), "--diff-config", str(blinded)]) == 1
+    assert "LINT" not in capsys.readouterr().out, "--diff-config must not lint"

@@ -41,17 +41,24 @@ nix-shell -p python3Packages.pyyaml --run \
    to: `_attribute` returns None on ambiguity, so it can never fire from the
    search UI.
 4. Propose changes, then run **`--gate <candidate base.yml>`** — the one
-   pre-ship command. Offline, no creds. It lints the candidate AND resolves the
-   whole prefix universe against the deployed config, reporting two axes that
-   are graded differently:
-   - **picker rows lost** — a query that listed snippets now reaches NOTHING.
-     A user-facing regression: **exit 1**, do not ship.
-   - **attribution lost/gained/moved** — telemetry only. An ambiguous query
-     still LISTS every match; only `_attribute` cannot name one. Adding any
-     snippet costs some, so this is reported and never fatal.
-   `--diff-config <candidate>` is the diff alone. `--replay --config <candidate>`
-   still cross-checks against terms he really typed — useful, but NOT sufficient:
-   it only replays observed terms, so a term he never searched is invisible to it.
+   pre-ship command. Offline, no creds. It lints the candidate AND resolves a
+   probe universe (single-token prefixes + within-snippet two-token queries)
+   against the deployed config. **Two things FAIL it, both user-facing:**
+   - **snippets blinded** — a snippet that SURVIVES the edit but no query
+     reaches any more (its trigger aside). This is the 2026-08-19 regression.
+   - **expansion changed** — a query that resolved to one snippet now resolves
+     to another that types DIFFERENT text.
+   Everything else is **reported, never graded**: ambiguity costs telemetry,
+   not reach (espanso lists every match as a row), and pruning or renaming
+   drops words by design. Grading those would make it red on the skill's own
+   primary actions, and a permanently-red gate teaches you to ignore it.
+   🔴 **It models the picker with the KEYLOG matcher (`_term_matches`), not
+   espanso itself** — nothing in this repo checks that proxy against espanso, so
+   a `PASS` is "no regression under our model", not a guarantee. Multi-word
+   queries beyond within-snippet pairs, and non-prefix substrings, are outside
+   the universe. `--diff-config` is the diff without the lint;
+   `--replay --config <candidate>` still cross-checks against terms he really
+   typed — narrower, but real data rather than a model.
 5. Edit `services.espanso` in `nix/home.nix` on a branch → PR → merge →
    `scripts/ship.sh`.
 6. `--verify-deploy` → both hosts: deployed trigger set, `espanso` active, and
@@ -121,18 +128,9 @@ prune anything from a run that printed one.
   `_EXISTING_RESOLUTIONS` — and add the new snippet's own terms to it.
   **Pin a term the snippet's LABEL does not spell**, or the guard passes with
   every `search_terms` entry deleted (three such pins shipped on 2026-08-19).
-  🔴 **Neither gate sweeps the whole input space — diff the WHOLE PREFIX
-  UNIVERSE.** Enumerate every prefix of every word in both configs' triggers,
-  labels and terms, resolve each against both, and report four buckets: picker
-  rows lost, attribution lost, attribution gained, resolution moved. That is
-  what surfaced the 8 blanked nebula prefixes AND 17 newly-ambiguous ones that
-  both the replay diff and the pinned list called clean.
-  🔴 That file's `test_live_scraper_observes_the_real_config` is a POSITIVE
-  CONTROL pinned to a LONG `search_terms` list, so a scraper regex matching
-  nothing cannot make the other guards vacuously true. If your edit strips the
-  pinned snippet's terms, **MOVE the pin to another long list — never relax it
-  to `== []`**, which exercises no list-splitting and silently disarms the
-  control.
+  🔴 **Neither sweeps the whole input space on its own — that is what
+  `--gate` is for** (step 4). It replaced the hand-rolled prefix-universe
+  diff this rule used to describe; do not re-derive it by hand.
 - DEMAND reads the LOCAL transcripts only; re-run on the other host if you need
   its demand. Retune-vs-prune is a judgement call, so the tool never edits
   `nix/home.nix`. The keystroke expansion itself can only be checked by the user
