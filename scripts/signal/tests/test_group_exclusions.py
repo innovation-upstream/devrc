@@ -18,9 +18,11 @@ argument, and a behavioural check alone cannot see a NEW method that skipped it.
 """
 from __future__ import annotations
 
+import ast
 import base64
 import inspect
 import re
+import textwrap
 
 import pytest
 
@@ -282,101 +284,400 @@ def test_the_predicate_is_composable_with_AND():
 
 
 # --------------------------------------------------------------------------- #
-# 🔴 THE LEDGER — fails when the set of message-reading surfaces GROWS or SHRINKS
+# 🔴 THE LEDGER — two sets that must PARTITION every read of signal.messages
 # --------------------------------------------------------------------------- #
-# Every method here reads `signal.messages` and returns rows to a caller. Each
-# must either apply `not_excluded()` or be listed as EXEMPT with a reason. This
-# is the seam guard: the behavioural cases above can only see the surfaces that
-# existed when they were written, and a new read method that skipped the filter
-# is exactly the failure this pipeline has already shipped once (the sync
-# reaction branch, added without the guards its inbound twin already had).
+# Every method that reads `signal.messages` must either apply `not_excluded()`
+# or be listed as EXEMPT with a reason — in EXACTLY ONE of the two sets below,
+# never both, never neither. This is the seam guard: the behavioural cases above
+# can only see the surfaces that existed when they were written, and a new read
+# method that skipped the filter is exactly the failure this pipeline has already
+# shipped once (the sync reaction branch, added without the guards its inbound
+# twin already had).
+#
+# 🔴 WHY A PARTITION AND NOT A UNION. The earlier version asserted only
+# `found == FILTERED_READS | EXEMPT_READS`. That is HALF A GUARD: a method MOVED
+# from one set to the other leaves the union identical, so re-classifying
+# `get_message` as exempt — turning the mute off for it — was a green change.
+# The partition below is checked against what the CODE does (an AST scan for a
+# real call to `not_excluded`), so the ledger cannot disagree with the
+# implementation in either direction.
 FILTERED_READS = {"list_conversations", "search", "get_message"}
 
+# 🔴 THE REASON LIVES HERE, AT THE POINT OF DECISION — not in a comment
+# elsewhere that can rot on its own. This ledger's justification has ALREADY gone
+# stale once: it read "drafts have no group_id", which was true until
+# `draft_message()` learned to address a group, and had to be re-derived after
+# the fact. Everything a reviewer needs to re-litigate an exemption is in the
+# string beside it.
 EXEMPT_READS = {
-    # Counts what a mute is hiding — it must see muted rows, that is its job.
     "list_excluded_groups":
-        "reports the hidden count; filtering it would always print 0",
+        "Counts what a mute is HIDING — it must see muted rows, that is its "
+        "entire job. Filtering it would make every mute report 0 hidden "
+        "messages, which is the number `consumer.py mute` refuses to print.",
     # --- WRITES that name signal.messages in a subquery, not read surfaces.
     "upsert_reaction":
-        "write: resolves a reaction's target message id",
+        "WRITE, not a read surface: the SELECT resolves a reaction's target "
+        "message id. It returns no body to any caller.",
     "apply_remote_delete":
-        "write: blanks a deleted message's body",
-    # --- The DRAFT surface (D3). 🔴 THAT DAY CAME. The note here used to read
-    # "drafts are addressed to a RECIPIENT, never a group, so `group_id` is NULL
-    # on every one of them", and said that if drafting to a group were ever added
-    # these move into FILTERED_READS. Drafting to a group IS now supported
-    # (`draft_message()` calls `upsert_group()` and sets `messages.group_id`), so
-    # that reason is dead and the exemption was RE-DERIVED rather than inherited:
-    #
-    #   * These three return ONLY rows with `send_state IS NOT NULL` — bodies the
-    #     OPERATOR composed. Muting is about what you READ; a draft is what you
-    #     WROTE. No third party's conversation can reach a caller through them.
-    #     (`test_get_draft_refuses_a_device_sync_ECHO_not_just_a_draft` is what
-    #     keeps that population claim true, and it is the reason this is not just
-    #     an assertion in prose.)
-    #   * Filtering them would be a live BUG, not merely conservative:
-    #     `approve_draft`, `send_approved` and `reconcile_send` all reach
-    #     `get_draft` through `_draft_or_raise`, so muting a group mid-flight
-    #     would strand its draft in `sending` and report "does not exist" — an
-    #     accidental extra refusal path through the D3 gate.
-    #
-    # The claim that DOES need measuring is that every FILTERED read hides a
-    # muted group's draft now that drafts can carry a group_id — see
-    # `test_a_muted_group_draft_is_hidden_from_every_filtered_read`.
-    "get_draft": "outbound surface: returns only bodies the operator composed",
-    "list_drafts": "outbound surface: returns only bodies the operator composed",
-    "account_number": "draft surface: reads the sending account off a draft",
+        "WRITE, not a read surface: the SELECT scopes which rows to tombstone. "
+        "It returns a rowcount, never content.",
+    # --- The DRAFT / outbound surface (D3).
+    "get_draft":
+        "OUTBOUND surface (D3). Two independent reasons, both re-derived after "
+        "the previous reason ('drafts have no group_id') was falsified by group "
+        "drafting. (1) POPULATION: `send_state IS NOT NULL` restricts it to rows "
+        "the OPERATOR composed — muting is about what you READ, a draft is what "
+        "you WROTE, and no third party's words can reach a caller through it. "
+        "That predicate is load-bearing, not incidental: without it `is_outbound` "
+        "alone also matched every device-sync ECHO, which DOES carry another "
+        "person's body — pinned by "
+        "test_get_draft_refuses_a_device_sync_ECHO_not_just_a_draft and by "
+        "test_the_draft_exemptions_PREMISE_is_still_in_the_code. (2) FILTERING "
+        "IT WOULD BE A LIVE BUG: approve_draft, send_approved and reconcile_send "
+        "all reach it through _draft_or_raise, so a mute landing mid-flight "
+        "would strand that draft in 'sending' with no route out and report it as "
+        "'does not exist' — an undesigned extra refusal path through the D3 "
+        "approval gate.",
+    "list_drafts":
+        "OUTBOUND surface (D3), same two reasons as get_draft: `send_state IS "
+        "NOT NULL` restricts it to the operator's own composed rows, and "
+        "filtering the compose/approve/send path would hide a draft the operator "
+        "still has to resolve.",
+    "account_number":
+        "Returns the SENDING account's phone number for a draft — no message "
+        "content at all, so there is nothing for a mute to hide. Pinned by "
+        "test_the_draft_exemptions_PREMISE_is_still_in_the_code, which fails if "
+        "this ever starts selecting a body.",
 }
 
+# The subset of EXEMPT_READS whose exemption rests on the `send_state IS NOT
+# NULL` population claim. Named here so the premise can be pinned structurally
+# rather than trusted from the prose above.
+_POPULATION_CLAIM_READS = {"get_draft", "list_drafts"}
 
-def _read_methods_touching_messages() -> set[str]:
-    """Methods whose body SELECTs from `signal.messages`.
 
-    🔴 SCOPE, stated because this guard is SPELLED rather than structural and
-    the difference matters. It greps the method's own source text, so it detects
-    exactly one shape: SQL written inline, naming `signal.messages`, in a method
-    defined directly on `SignalDB`. Measured evasions — all four confirmed to
-    slip past it: SQL held in a module-level constant; `SET search_path` plus an
+# --------------------------------------------------------------------------- #
+# Discovery — over the AST, never over raw source text
+# --------------------------------------------------------------------------- #
+def _method_tree(fn):
+    """The parsed `FunctionDef` for a method, or None if it has no source."""
+    try:
+        src = inspect.getsource(fn)
+    except (OSError, TypeError):            # pragma: no cover - defensive
+        return None
+    try:
+        return ast.parse(textwrap.dedent(src)).body[0]
+    except (SyntaxError, IndexError):       # pragma: no cover - defensive
+        return None
+
+
+def _docstring_node(node):
+    """The method's docstring Constant NODE, or None."""
+    first = node.body[0] if node.body else None
+    if (isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant)
+            and isinstance(first.value.value, str)):
+        return first.value
+    return None
+
+
+def _sql_strings(node) -> list:
+    """Every string literal in a method EXCEPT its docstring.
+
+    🔴 The docstring is excluded on purpose. These methods' docstrings DISCUSS
+    the schema and the mute predicate at length — that is prose, not SQL, and
+    reading it as either is how a guard certifies the opposite of the truth.
+
+    🔴 EXCLUDED BY NODE IDENTITY, not by comparing the string. The first version
+    of this function did `n.value != ast.get_docstring(node)` — and
+    `ast.get_docstring()` CLEANS (dedents) what it returns, so the comparison
+    only ever matched a SINGLE-LINE docstring. Every multi-line docstring in the
+    module was therefore still being read as SQL, which is the exact confusion
+    this helper exists to prevent. Measured: a mutant that deleted
+    `send_state IS NOT NULL` from `get_draft`'s SQL left
+    `test_the_draft_exemptions_PREMISE_is_still_in_the_code` GREEN, because the
+    docstring above that SQL also contains the phrase.
+    """
+    doc = _docstring_node(node)
+    return [n.value for n in ast.walk(node)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)
+            and n is not doc]
+
+
+def _reads_messages(fn) -> bool:
+    node = _method_tree(fn)
+    if node is None:
+        return False
+    strings = _sql_strings(node)
+    return (any("signal.messages" in s for s in strings)
+            and any(re.search(r"\bSELECT\b", s, re.IGNORECASE) for s in strings))
+
+
+def _calls_the_mute_predicate(fn) -> bool:
+    """True iff the method REALLY CALLS `not_excluded(...)`.
+
+    🔴 AST, not a substring search, and this is not fastidiousness — the
+    substring version was WRONG on the shipped code. `SignalDB.get_draft` does
+    not filter, and must not, but its docstring explains the mute predicate and
+    contains the characters `not_excluded(`. The old guard therefore reported
+    get_draft as filtered; had anyone moved it into FILTERED_READS the suite
+    would have stayed green while the method filtered nothing. A guard SPELLED
+    over source text is satisfiable by PROSE. A call node is not.
+
+    (f-strings are covered: `f"... {not_excluded('m')}"` parses to a
+    `FormattedValue` wrapping a real `Call`, which `ast.walk` reaches.)
+    """
+    node = _method_tree(fn)
+    if node is None:
+        return False
+    return any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+               and n.func.id == "not_excluded" for n in ast.walk(node))
+
+
+def _read_methods_touching_messages(cls=None) -> set[str]:
+    """Methods on `cls` whose SQL SELECTs from `signal.messages`.
+
+    🔴 SCOPE, stated because this discovery is still SHAPE-BASED and the
+    difference matters. It parses the method's own source, so it detects exactly
+    one shape: SQL written as a literal naming `signal.messages`, in a method
+    defined directly on the class. Measured evasions — all confirmed to slip
+    past it: SQL held in a module-level constant; `SET search_path` plus an
     unqualified `FROM messages`; delegation to a module-level helper; a method
-    inherited from a mixin (absent from `vars(SignalDB)`). It also FALSE-positives
-    on a method whose comment merely names both tokens.
+    inherited from a mixin (absent from `vars(cls)`).
+
+    What it no longer does is FALSE-POSITIVE on prose: the docstring is excluded,
+    so a method that merely discusses the schema is not counted as reading it.
 
     So this catches the copy-paste shape — which is how every read method here
     was actually written, and how the next one will be — and it is not a proof
     of completeness. Claim it as the former.
     """
-    found = set()
-    for name, fn in vars(SignalDB).items():
-        if not callable(fn) or name.startswith("__"):
-            continue
-        try:
-            src = inspect.getsource(fn)
-        except (OSError, TypeError):        # pragma: no cover - defensive
-            continue
-        if re.search(r"\bSELECT\b", src, re.IGNORECASE) and "signal.messages" in src:
-            found.add(name)
-    return found
+    cls = cls or SignalDB
+    return {name for name, fn in vars(cls).items()
+            if callable(fn) and not name.startswith("__") and _reads_messages(fn)}
 
 
-def test_the_ledger_of_message_reads_is_pinned_both_ways():
+def _filtered_by_the_code(cls=None) -> set[str]:
+    cls = cls or SignalDB
+    return {n for n in _read_methods_touching_messages(cls)
+            if _calls_the_mute_predicate(getattr(cls, n))}
+
+
+# --------------------------------------------------------------------------- #
+# Controls for the discovery itself — synthetic surfaces, never called
+# --------------------------------------------------------------------------- #
+class _LedgerProbeSubject:      # pragma: no cover - parsed, never executed
+    """Read surfaces built to order, so the scanners can be watched to work.
+
+    Nothing here is ever CALLED — only `inspect.getsource`d and parsed. That is
+    why the bodies reference a `self._c` that does not exist.
+    """
+
+    def unfiltered_read(self):
+        with self._c.cursor() as cur:
+            cur.execute("SELECT m.id FROM signal.messages m WHERE m.id = %s", (1,))
+
+    def filtered_read(self):
+        with self._c.cursor() as cur:
+            cur.execute(f"SELECT m.id FROM signal.messages m "
+                        f"WHERE {not_excluded('m')}")
+
+    def docstring_CLAIMS_the_predicate(self):
+        """Applies not_excluded() to every row it returns.
+
+        🔴 It does not. This is the exact shape found in the shipped code:
+        `get_draft`'s docstring explains the mute predicate, and a substring
+        guard read that explanation as a call.
+        """
+        with self._c.cursor() as cur:
+            cur.execute("SELECT m.id FROM signal.messages m")
+
+    def prose_only_mentions_the_schema(self):
+        """Talks about a SELECT over signal.messages without issuing one."""
+        return None
+
+    def MULTILINE_prose_only_mentions_the_schema(self):
+        """Talks about the schema across several lines, and issues nothing.
+
+        🔴 THE MULTI-LINE CASE IS A SEPARATE CONTROL, not a duplicate of the
+        one above. `ast.get_docstring()` CLEANS what it returns, so excluding
+        the docstring by comparing its VALUE silently worked for a single-line
+        docstring and silently failed for every multi-line one. With only the
+        one-line control present, that bug was invisible and shipped.
+
+        This method issues no SQL: it must NOT be seen as a read, and it names
+        SELECT and signal.messages purely as prose.
+        """
+        return None
+
+    def not_a_read_at_all(self):
+        return "nothing to do with the schema"
+
+
+def test_the_scan_and_the_predicate_detector_can_BOTH_go_red():
+    """🔴 Validate the instrument before reading its verdict.
+
+    Negative control (can it go red?) and positive control (can it ever observe
+    the thing?) for both scanners, on surfaces built to order. Without this, the
+    partition test passing proves only that two sets match each other — it would
+    look identical if the scan were wired to nothing.
+    """
+    found = _read_methods_touching_messages(_LedgerProbeSubject)
+    assert found == {"unfiltered_read", "filtered_read",
+                     "docstring_CLAIMS_the_predicate"}, sorted(found)
+    # POSITIVE: it detects a real read.  NEGATIVE: prose alone is not a read —
+    # asserted for BOTH docstring shapes, because they fail differently.
+    for prose in ("prose_only_mentions_the_schema",
+                  "MULTILINE_prose_only_mentions_the_schema"):
+        assert prose not in found, (
+            f"the scan counted {prose}, a method that only DISCUSSES the "
+            f"schema — it is matching prose and would read a docstring as SQL")
+    assert "not_a_read_at_all" not in found
+
+    filtered = _filtered_by_the_code(_LedgerProbeSubject)
+    assert filtered == {"filtered_read"}, sorted(filtered)
+
+
+def test_the_predicate_detector_is_NOT_walked_by_a_DOCSTRING_mention():
+    """🔴 The regression this rebuild exists for, pinned on the REAL method.
+
+    Measured on the shipped code: `SignalDB.get_draft`'s docstring contains the
+    characters `not_excluded(` while the method deliberately does not filter. A
+    substring guard therefore certified it as filtered — so moving it into
+    FILTERED_READS would have been a GREEN change that turned mute off for it.
+    """
+    src = inspect.getsource(SignalDB.get_draft)
+    assert "not_excluded(" in src, (
+        "POSITIVE CONTROL FAILED: get_draft's source no longer contains the "
+        "characters this test is about, so it can no longer detect the "
+        "confusion. Point it at whichever method now discusses the predicate.")
+    assert not _calls_the_mute_predicate(SignalDB.get_draft), (
+        "the detector reported get_draft as filtering. It does not — the match "
+        "is its DOCSTRING. A guard spelled over source text is satisfiable by "
+        "prose; use the AST.")
+
+
+# --------------------------------------------------------------------------- #
+# THE PARTITION
+# --------------------------------------------------------------------------- #
+def test_the_two_ledgers_PARTITION_every_read_of_signal_messages():
+    """Every read of `signal.messages` is in EXACTLY ONE ledger — and the
+    ledger it is in must agree with what the METHOD ACTUALLY DOES.
+
+    Four independent failure directions, each with its own message so the
+    diagnosis arrives with the failure:
+
+      * a new read method in NEITHER set,
+      * a method listed in BOTH,
+      * a name in a ledger that is no longer a read method (renamed/deleted),
+      * a method MISCLASSIFIED — listed as filtered while it does not call the
+        predicate, or listed as exempt while it does. This is the direction a
+        union check cannot see, and it is the one that turns mute off.
+    """
     found = _read_methods_touching_messages()
     assert found, (
         "HARNESS BROKEN: the scan found no message-reading methods at all, so "
         "every assertion below would pass vacuously")
-    declared = FILTERED_READS | set(EXEMPT_READS)
-    assert found == declared, (
-        f"the set of methods that SELECT from signal.messages changed.\n"
-        f"  new (add to FILTERED_READS and apply not_excluded(), or to "
-        f"EXEMPT_READS with a reason): {sorted(found - declared)}\n"
-        f"  gone (drop from the ledger): {sorted(declared - found)}")
+
+    both = FILTERED_READS & set(EXEMPT_READS)
+    assert not both, (
+        f"these methods are in BOTH ledgers, so the partition is meaningless "
+        f"and a union check would not notice: {sorted(both)}")
+
+    unclassified = found - (FILTERED_READS | set(EXEMPT_READS))
+    assert not unclassified, (
+        f"these methods SELECT from signal.messages and are in NEITHER ledger: "
+        f"{sorted(unclassified)}. Add each to FILTERED_READS and apply "
+        f"not_excluded(), or to EXEMPT_READS with a reason that says why a "
+        f"muted group's content cannot reach a caller through it.")
+
+    stale = (FILTERED_READS | set(EXEMPT_READS)) - found
+    assert not stale, (
+        f"these names are in a ledger but no longer read signal.messages "
+        f"(renamed, deleted, or the SQL moved out of the method): "
+        f"{sorted(stale)}. Drop them from the ledger.")
+
+    # 🔴 THE DIRECTION A UNION CHECK IS BLIND TO.
+    by_code = _filtered_by_the_code()
+    assert by_code == FILTERED_READS, (
+        f"the ledger disagrees with the CODE about who filters.\n"
+        f"  listed as filtered but does NOT call not_excluded(): "
+        f"{sorted(FILTERED_READS - by_code)}\n"
+        f"  calls not_excluded() but is listed EXEMPT: "
+        f"{sorted(by_code - FILTERED_READS)}\n"
+        f"Moving a method between the ledgers leaves their UNION identical, so "
+        f"this assertion is the only one that can see it.")
+    assert set(EXEMPT_READS) == found - by_code, (
+        f"EXEMPT_READS is not the complement of the filtered set: "
+        f"{sorted(set(EXEMPT_READS) ^ (found - by_code))}")
 
 
 @pytest.mark.parametrize("name", sorted(FILTERED_READS))
 def test_every_filtered_read_actually_calls_the_predicate(name):
-    src = inspect.getsource(getattr(SignalDB, name))
-    assert "not_excluded(" in src, (
-        f"SignalDB.{name} SELECTs from signal.messages without the mute "
+    assert _calls_the_mute_predicate(getattr(SignalDB, name)), (
+        f"SignalDB.{name} SELECTs from signal.messages without calling the mute "
         f"predicate — muted rows leak through it")
+
+
+@pytest.mark.parametrize("name", sorted(EXEMPT_READS))
+def test_every_exempt_read_really_does_NOT_call_the_predicate(name):
+    """The mirror. Without it, "exempt" is an unchecked assertion.
+
+    A method that both filters AND is listed exempt is not a leak, but it means
+    the ledger is describing something other than the code — and the ledger is
+    what the next person reads before deciding whether a new method is safe.
+    """
+    assert not _calls_the_mute_predicate(getattr(SignalDB, name)), (
+        f"SignalDB.{name} is listed in EXEMPT_READS but DOES call "
+        f"not_excluded(). Move it to FILTERED_READS: the ledger is now lying "
+        f"about which surfaces the mute covers.")
+
+
+@pytest.mark.parametrize("name", sorted(EXEMPT_READS))
+def test_every_exemption_carries_a_REASON_at_the_point_of_decision(name):
+    """An exemption with no argument beside it is the stale-prose failure again.
+
+    🔴 SCOPE: this is a FLOOR, not a check that the reason is TRUE. It stops
+    `"name": ""` and one-word placeholders; it cannot tell a correct reason from
+    a confident wrong one. The reasons that are load-bearing are pinned
+    STRUCTURALLY instead — see
+    `test_the_draft_exemptions_PREMISE_is_still_in_the_code`.
+    """
+    reason = EXEMPT_READS[name]
+    assert isinstance(reason, str) and len(reason.split()) >= 12, (
+        f"EXEMPT_READS[{name!r}] does not carry an argument a reviewer could "
+        f"disagree with: {reason!r}")
+
+
+def test_the_draft_exemptions_PREMISE_is_still_in_the_code():
+    """🔴 The load-bearing half of the draft exemption, pinned STRUCTURALLY.
+
+    The reason strings claim `get_draft`/`list_drafts` return only rows the
+    OPERATOR composed, and that `account_number` returns no content. Those are
+    claims about SQL, so they are checked against the SQL — a prose reason that
+    is merely re-read each time is exactly how the previous justification
+    survived being false.
+
+    If `send_state IS NOT NULL` is ever dropped, the population widens to every
+    device-sync ECHO — which carries OTHER PEOPLE's bodies, in groups — and the
+    exemption becomes a real leak. This goes red on that edit.
+    """
+    assert _POPULATION_CLAIM_READS <= set(EXEMPT_READS), (
+        f"a method whose exemption rests on the population claim is no longer "
+        f"exempt: {sorted(_POPULATION_CLAIM_READS - set(EXEMPT_READS))}")
+    for name in sorted(_POPULATION_CLAIM_READS):
+        sql = " ".join(_sql_strings(_method_tree(getattr(SignalDB, name))))
+        assert re.search(r"send_state\s+IS\s+NOT\s+NULL", sql, re.IGNORECASE), (
+            f"SignalDB.{name} no longer restricts itself to drafts with "
+            f"`send_state IS NOT NULL`. Its EXEMPT_READS reason depends on that "
+            f"predicate: without it the method also returns device-sync ECHOES, "
+            f"which carry other people's bodies from muted groups.")
+
+    account_sql = " ".join(_sql_strings(_method_tree(SignalDB.account_number)))
+    assert "signal.messages" in account_sql, (
+        "POSITIVE CONTROL FAILED: no SQL extracted for account_number")
+    assert not re.search(r"\bbody\b", account_sql, re.IGNORECASE), (
+        "SignalDB.account_number now selects a message body. Its exemption is "
+        "'returns no message content at all' — that is no longer true.")
 
 
 def test_get_draft_refuses_a_device_sync_ECHO_not_just_a_draft(db):
@@ -609,6 +910,21 @@ def test_send_and_reconcile_work_END_TO_END_on_a_group_draft(db, monkeypatch):
     assert done["recipient"] == address
 
 
+# One behavioural probe per FILTERED read, keyed by the method's own name so the
+# set can be compared against the ledger instead of trusted. Each returns the
+# rows that read surfaces FOR THIS DRAFT — so an empty list means "hidden", and a
+# non-empty one before the mute is the positive control.
+_MUTE_PROBES = {
+    "list_conversations": lambda db, draft, body: [
+        r for r in db.list_conversations()
+        if r["last_message_timestamp"] == draft["message_timestamp"]],
+    "search": lambda db, draft, body: [
+        r for r in db.search(body) if r["id"] == draft["id"]],
+    "get_message": lambda db, draft, body: [
+        r for r in [db.get_message(draft["id"])] if r],
+}
+
+
 def test_a_muted_group_draft_is_hidden_from_every_filtered_read(db):
     """🔴 CRITERION 4 — the sharp one. Mute must not be bypassable by drafting.
 
@@ -617,18 +933,27 @@ def test_a_muted_group_draft_is_hidden_from_every_filtered_read(db):
     from every read that believed it was filtering. Mute is the privacy control
     here.
 
-    This walks the FILTERED_READS ledger rather than naming three methods, so a
-    read surface added to that set later is covered the day it is added — a
-    hand-written list here would silently stop being the whole set.
+    🔴 STRUCTURE ALONE IS NOT ENOUGH, WHICH IS WHY THIS EXISTS. The partition
+    test checks that every method in FILTERED_READS really CALLS the predicate.
+    A call is not an effect: the predicate could be ANDed onto a subquery that
+    is later discarded, or parenthesised so it never binds. Only running the
+    reads against a muted row settles it. Together the two mean "listed as
+    filtered" implies "measurably filters".
+
+    `_MUTE_PROBES` is keyed by method name and asserted equal to FILTERED_READS
+    below, so a read surface added to that ledger without a behavioural probe
+    fails HERE rather than being quietly uncovered.
 
     Each read gets a POSITIVE CONTROL first: it must SEE the draft before the
     mute. Without that, "hidden" is indistinguishable from a query wired to
     nothing, and this whole test would pass against a `draft_message` that
     stored no row at all.
     """
-    assert FILTERED_READS == {"list_conversations", "search", "get_message"}, (
-        "the filtered-read set moved; extend the probes below to match rather "
-        f"than letting this test cover less than it claims: {FILTERED_READS}")
+    assert set(_MUTE_PROBES) == FILTERED_READS, (
+        f"every method in FILTERED_READS needs a behavioural probe here, or "
+        f"this test covers less than its name claims.\n"
+        f"  filtered but unprobed: {sorted(FILTERED_READS - set(_MUTE_PROBES))}\n"
+        f"  probed but not filtered: {sorted(set(_MUTE_PROBES) - FILTERED_READS)}")
 
     db.upsert_group(group_id=GROUP_MUTE, name="")
     body = "quarterly kestrel rendezvous"          # distinct from every _seed body
@@ -657,13 +982,7 @@ def test_a_muted_group_draft_is_hidden_from_every_filtered_read(db):
         "draft's is NEGATIVE — another message in this group would mask it")
 
     def probe() -> dict:
-        ts = draft["message_timestamp"]
-        return {
-            "list_conversations": [r for r in db.list_conversations()
-                                   if r["last_message_timestamp"] == ts],
-            "search": [r for r in db.search(body) if r["id"] == draft["id"]],
-            "get_message": [r for r in [db.get_message(draft["id"])] if r],
-        }
+        return {name: fn(db, draft, body) for name, fn in _MUTE_PROBES.items()}
 
     before = probe()
     for name, rows in before.items():
