@@ -189,24 +189,34 @@
 #
 #      🔴 BASH ITSELF ALSO EXITS 2, on a syntax error, and this script hands
 #      control to another copy of itself (the re-exec below). A superseded copy
-#      with a syntax error would have exited 2 AFTER the local host was already
+#      that does not parse exits 2 AFTER the local host has already been
 #      fast-forwarded and switched — an rc whose only documented meaning says
 #      "raised before any host is touched", i.e. a ledger entry that is FALSE on
-#      the one path that can produce it. A failed `exec` (the file unlinked
-#      between the readability check and the exec) is the same class one code
-#      further out: 126/127, in no ledger at all.
+#      the one path that can produce it.
 #
-#      Both are closed at the source rather than documented as extra codes: the
-#      new copy is `bash -n`-checked before the exec, and `shopt -s execfail`
-#      makes a failed exec RETURN instead of killing the shell — each becomes
-#      rc 20, which already means "this script was replaced and the new copy
-#      could not be run". That choice is deliberate, because the test suite's
-#      ledger (`_ship_exit_codes` in scripts/tests/test_ship_converge.py) reads
-#      this FILE for `exit N` / `rc=N` and is structurally blind to statuses BASH
-#      produces. It cannot see this class at all, so teaching it 2/126/127 would
-#      pin prose no assertion can keep honest; making the statuses unreachable is
-#      the guard, and test_a_syntactically_broken_new_copy_is_rc20_not_bash_2 is
-#      the one that watches it hold.
+#      That one IS closed at the source rather than documented as an extra code:
+#      the new copy is `bash -n`-checked before the exec and becomes rc 20, which
+#      already means "this script was replaced and the new copy could not be
+#      run". The choice is deliberate, because the test suite's ledger
+#      (`_ship_exit_codes` in scripts/tests/test_ship_converge.py) reads this
+#      FILE for `exit N` / `rc=N` and is structurally blind to statuses BASH
+#      produces. It cannot see this class at all, so teaching it 2 would pin
+#      prose no assertion can keep honest; making the status unreachable is the
+#      guard, and test_a_syntactically_broken_new_copy_is_rc20_not_bash_2 is the
+#      one that watches it hold.
+#
+#      🔴 THE SIBLING HAZARD — the new copy REMOVED between the parse check and
+#      the exec — IS NOT CLOSED, and the shape of it is not what it looks like.
+#      Measured 2026-08-21: `exec bash "$file"` execs BASH, not `$file`, so the
+#      exec syscall SUCCEEDS whatever state `$file` is in; the freshly-exec'd
+#      bash then fails to open it and exits 127 on its own. By then this process
+#      no longer exists, so nothing here can catch, relabel or diagnose it — an
+#      operator sees a bare 127 in no ledger. `shopt -s execfail` below does NOT
+#      cover this (it fires only when BASH ITSELF cannot be exec'd); `bash -n`
+#      immediately beforehand is what shrinks the window to the gap between two
+#      adjacent statements. Stated rather than silently mis-covered: an earlier
+#      revision of this comment claimed execfail closed it, which the same
+#      measurement refutes.
 #   3  repo missing on that host
 #   4  git fetch failed, or origin/main is missing / HEAD unborn
 #   5  SKIPPED — an unresolved merge/cherry-pick is in progress (conflicted
@@ -237,9 +247,9 @@
 #      hosts: an agreement that was not compared is not an agreement.
 #   20 THIS SCRIPT was replaced by its own run and the new copy could not be run:
 #      the re-exec budget was exhausted (ship.sh kept changing under the run),
-#      the new copy is unreadable, the new copy does not PARSE (`bash -n`), the
-#      `exec` of it failed outright, or the self-check could not be measured at
-#      all. Five spellings, one code, because they are one operator action —
+#      the new copy is unreadable, the new copy does not PARSE (`bash -n`),
+#      `bash` itself could not be exec'd, or the self-check could not be measured
+#      at all. Five spellings, one code, because they are one operator action —
 #      re-run ship by hand — and because a run that cannot tell whether its own
 #      source changed must not print a verdict either way.
 #
@@ -573,15 +583,31 @@ ship_self_check() {
     echo "        pass 2 re-runs the local converge with the new logic and reports its own."
   fi
   echo
-  # 🔴 execfail: without it a failed `exec` kills the shell with 126/127 — a
-  # status in neither ledger, from a run that has already converged one host.
-  # With it the exec RETURNS and we own the outcome. The window is real: the
-  # readability check above is a TOCTOU probe, and the writer that superseded
-  # this file is by definition still active.
+  # 🔴 execfail — and READ WHAT IT ACTUALLY COVERS, because the obvious reading
+  # is wrong. The exec target is `bash`, NOT "$_ship_self": the script is an
+  # ARGUMENT. So the exec syscall's success has nothing to do with the script's
+  # state, and this net catches exactly one thing — `bash` itself being
+  # unexecutable at this instant (stripped from PATH, a noexec mount, EAGAIN or
+  # ENOMEM under a fork storm). Without execfail that kills the shell with
+  # 126/127 from a run that has already converged one host; with it the exec
+  # RETURNS and we own the outcome.
+  #
+  # 🔴 It does NOT cover the case the header used to claim for it: the script
+  # removed after the `bash -n` above. Measured 2026-08-21 — `exec bash <missing
+  # file>` execs bash fine, and the NEW bash exits 127 with this process already
+  # gone, so the block below never runs. That hazard is named in the header as
+  # open, not silently mis-covered here.
+  #
+  # 🔴 The block below is therefore UNREACHABLE FROM THE TEST SUITE and is
+  # labelled as such rather than counted as coverage: reaching it needs a PATH
+  # with no usable `bash`, and every step before it (`bash -c "$CONVERGE"`,
+  # `bash -n`) resolves `bash` from that same PATH, with no external command in
+  # between to remove it. Kept because it is five lines and turns a bare 126/127
+  # into a diagnosis on a run that has already touched a host.
   shopt -s execfail
   exec bash "$_ship_self" "$@"
   echo "ship: ❌ SUPERSEDED but exec of the new copy at $_ship_self FAILED — refusing to continue." >&2
-  echo "  the file was readable and parsed a moment ago, so it was replaced or removed again mid-exec." >&2
+  echo "  \`bash\` itself could not be executed (PATH, a noexec mount, or a resource limit)." >&2
   ship_self_fleet_state
   echo "  re-run ship by hand once the tree has stopped moving." >&2
   exit 20

@@ -348,10 +348,39 @@ class Repo:
             src = src.replace(marker, pad + marker)
         return src
 
-    # A stray `fi` with no `if`: `bash -n` rejects it and `bash <file>` exits 2.
-    # Appended AFTER the closing brace, so it is a pure parse failure and not a
-    # runtime one — bash must read the whole file before running any of it.
-    SHIP_SYNTAX_ERROR = "\nfi\n"
+    # 🔴 THE SYNTAX ERROR GOES *INSIDE* THE BODY GROUP, and the reason is the
+    # whole point of the test that uses it.
+    #
+    # bash does not read a script up front; it parses and runs one command at a
+    # time. ship.sh's body is a single `{ ... }` group ending in `exit`
+    # (test_the_body_is_one_brace_group_that_ends_in_exit), so bash parses the
+    # ENTIRE group before running any of it — a stray `fi` in there is a parse
+    # error that kills the run at exit 2 with nothing executed, which is exactly
+    # the hazard: bash's 2, indistinguishable from ship's own usage-error 2.
+    #
+    # The first version of this fixture appended the `fi` AFTER the closing
+    # brace. Measured 2026-08-21: `bash -n` rejects that file (rc 2) but RUNNING
+    # it is completely clean — the group ends in `exit`, so bash exits before it
+    # ever parses the trailing line, and the copy exits 0. The fixture would have
+    # proven the guard fires while the thing the guard exists to prevent could
+    # not happen with those bytes at all: a `bash -n` deletion mutant would still
+    # have died, but on rc 0-vs-20, i.e. for a reason unrelated to the finding.
+    SHIP_SYNTAX_ERROR = "fi"
+    # The body group's opening brace, unique in the file (asserted below).
+    SHIP_BODY_OPEN = "\n{\n"
+
+    @classmethod
+    def break_ship_source(cls, text):
+        """Make `text` a copy of ship.sh that bash refuses to PARSE."""
+        n = text.count(cls.SHIP_BODY_OPEN)
+        assert n == 1, (
+            f"expected exactly one body-group opener in ship.sh, found {n}. The "
+            f"injection site moved; a syntax error placed outside the group is "
+            f"never reached at runtime and this fixture would go inert."
+        )
+        return text.replace(
+            cls.SHIP_BODY_OPEN, f"{cls.SHIP_BODY_OPEN}{cls.SHIP_SYNTAX_ERROR}\n", 1
+        )
 
     def _write_ship_into(self, tree, version, pad_lines=0, broken=False):
         """Commit the real ship.sh + its lib into the throwaway repo.
@@ -364,7 +393,7 @@ class Repo:
         s.parent.mkdir(parents=True, exist_ok=True)
         text = self.ship_source(version, pad_lines=pad_lines)
         if broken:
-            text += self.SHIP_SYNTAX_ERROR
+            text = self.break_ship_source(text)
         s.write_text(text)
         s.chmod(0o755)
         lib = tree / "scripts" / "lib" / "host-role.sh"
@@ -2467,10 +2496,24 @@ def test_a_syntactically_broken_new_copy_is_rc20_not_bash_2(tmp_path):
         "the RUNNING copy does not parse; this test would fail before the guard"
     )
     incoming = tmp_path / "incoming-ship.sh"
-    incoming.write_text(Repo.ship_source(2) + Repo.SHIP_SYNTAX_ERROR)
+    incoming.write_text(Repo.break_ship_source(Repo.ship_source(2)))
     assert subprocess.run(["bash", "-n", str(incoming)]).returncode != 0, (
         "the fixture's 'broken' copy parses fine, so nothing under test is "
         "exercised and the guard is unreached"
+    )
+    # 🔴 AND THE HAZARD ITSELF IS MEASURED, not assumed. `bash -n` rejecting the
+    # file does not mean RUNNING it exits 2 — bash parses one command at a time,
+    # so a syntax error the run never reaches is invisible at runtime and the
+    # collision this test is named for could not occur. Run the broken copy and
+    # require bash's own 2 before believing the guard prevents anything.
+    # Run it through the normal sandbox (refusing ssh/home-manager, throwaway
+    # repo), so that if the fixture ever goes inert this line converges nothing.
+    direct_rc, direct_out = r.ship(script=incoming)
+    assert direct_rc == 2, (
+        f"running the 'broken' copy exits {direct_rc}, not bash's syntax-error "
+        f"2 — the bytes this fixture installs cannot produce the collision the "
+        f"guard exists to prevent, so a green below would be about nothing."
+        f"\n{direct_out}"
     )
 
     rc, out = r.ship(script=ship)
