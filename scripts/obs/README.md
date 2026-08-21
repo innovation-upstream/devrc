@@ -31,8 +31,6 @@ mkdir -p ~/.config/obs-ship
 cat > ~/.config/obs-ship/env <<'EOF'
 OBS_PROM_URL=http://<prometheus-host>:<port>/api/v1/write
 OBS_LOKI_URL=http://<loki-host>:<port>/loki/api/v1/push
-OBS_USERNAME=<user>
-OBS_PASSWORD=<pass>
 OBS_HOST=workbench          # or: laptop
 EOF
 chmod 600 ~/.config/obs-ship/env
@@ -40,8 +38,25 @@ systemctl --user restart alloy
 ```
 
 The homelab Prometheus already has `enableRemoteWriteReceiver: true`, so it
-accepts `remote_write` directly — no scrape target or ingress needed. Reach it
-over the Nebula mesh.
+accepts `remote_write` directly — no scrape target or ingress needed. Both
+receivers are exposed as NodePorts and reachable over the LAN.
+
+### Authentication
+
+There is deliberately **no `basic_auth` block** — the receivers are
+unauthenticated, and Alloy has no conditionals, so a block sourcing empty
+environment values does not mean "no auth". Measured against alloy 1.17.1:
+
+| config | header sent |
+|---|---|
+| `basic_auth` with `username="" password=""` | `Authorization: Basic Og==` (i.e. `":"`) |
+| no `basic_auth` block | none |
+
+If an endpoint later requires credentials, add the block back explicitly in
+`alloy.alloy` and update `test_no_basic_auth_block_until_an_endpoint_actually_requires_one`
+in the same commit. **Do not** put credentials in the URL
+(`http://user:pass@host/...`): it produces the right header, but alloy logs
+`url=` in remote_write errors, so they land in the journal.
 
 `EnvironmentFile` is optional (`-` prefixed): a host without this file still
 switches cleanly, it just does not ship. That is deliberate — a missing
