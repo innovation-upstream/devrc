@@ -1,1 +1,1 @@
-synthetic
+seed
