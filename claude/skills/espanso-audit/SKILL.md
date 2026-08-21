@@ -44,10 +44,12 @@ nix-shell -p python3Packages.pyyaml --run \
    pre-ship command. Offline, no creds. It lints the candidate AND resolves a
    probe universe (single-token prefixes + within-snippet two-token queries)
    against the deployed config. **Two things FAIL it, both user-facing:**
-   - **snippets narrowed** — a snippet that SURVIVES the edit and strictly
-     loses ways of being found: reaching words go away and none arrive. This is
-     the 2026-08-19 shape, and it stays fatal even when the snippet keeps one
-     word — an earlier all-or-nothing rule passed exactly that case.
+   - **queries that stop working** — a WHOLE WORD that used to find a snippet
+     finds nothing now, and that snippet still exists. Four earlier rules each
+     tried to infer whether the loss was DELIBERATE and each was walked by a
+     one-line edit; intent is not in the config, so state it: acknowledge
+     deliberate losses with **`--accept word,word`**. A PRUNE needs no
+     acknowledgement — the word went with the snippet.
    - **expansion changed** — a query that resolved to one snippet now resolves
      to another that types DIFFERENT text. A plain trigger rename is not this.
    Everything else is **reported, never graded**: ambiguity costs telemetry, not

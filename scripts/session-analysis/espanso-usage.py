@@ -786,6 +786,23 @@ GATE_OK = 0
 GATE_FAIL = 1
 
 
+def _vocab(ts) -> dict:
+    """trigger -> the WHOLE words it can be found by (label + search_terms).
+
+    The trigger itself is excluded: typing it verbatim is a different modality
+    from finding a snippet by describing it.
+    """
+    out = {}
+    for trig in ts.triggers:
+        meta = ts.meta.get(trig) or {}
+        words = set(LABEL_WORD_RE.findall((meta.get("label") or "").lower()))
+        for st in meta.get("search_terms") or []:
+            if isinstance(st, str):
+                words |= set(LABEL_WORD_RE.findall(st.lower()))
+        out[trig] = {w for w in words if w}
+    return out
+
+
 def _probe_universe(ts) -> set:
     """Every query the search bar can be driven with, as far as we model it.
 
@@ -853,32 +870,33 @@ def diff_configs(ts_before, ts_after) -> dict:
     probes = sorted(_probe_universe(ts_before) | _probe_universe(ts_after))
     reach_b, reach_a = _reaching(d_before, probes), _reaching(d_after, probes)
 
-    # THE FATAL AXIS: a snippet that SURVIVES the edit and STRICTLY LOSES ways
-    # of being found — words go away and none arrive to replace them.
+    # THE FATAL AXIS: a WHOLE WORD that used to find a snippet, finds nothing
+    # now, and at least one snippet it used to find still exists.
     #
-    # Three earlier shapes of this rule were each wrong, and each was caught by
-    # measurement rather than reasoning:
-    #   * per-probe "a query reaches nothing" made every PRUNE fail, and pruning
-    #     is the skill's own primary action — a permanently-red gate;
-    #   * per-snippet "reaches NOTHING at all" (all-or-nothing) let the actual
-    #     2026-08-19 incident through: relabelling the two nebula snippets to
-    #     `SSH rig` / `SSH portable` — which is exactly what SKILL.md advises,
-    #     "change which WORDS it spells" — took 'nebula'/'mesh'/'remote' from
-    #     two picker rows to ZERO while each snippet kept one word, so nothing
-    #     was "blinded" and the gate passed the very case it was built for;
-    #   * grading any shrinkage would fail an honest reword.
-    # LOST-WITH-NO-GAIN separates them: the incident loses four words and gains
-    # none; a typo fix trades 'alpah' for 'alpha'; a reword exchanges words; a
-    # prune leaves no surviving snippet to judge.
-    narrowed = []
-    for trig in reach_b:
-        if trig not in reach_a:
-            continue                      # pruned or renamed away — not judged
-        lost = reach_b[trig] - reach_a[trig]
-        gained = reach_a[trig] - reach_b[trig]
-        if lost and not gained:
-            narrowed.append((trig, sorted(lost)[:8], len(lost)))
-    narrowed.sort()
+    # 🔴 FOUR earlier rules were each walked by a one-line edit, because each
+    # tried to INFER INTENT from the config and intent is not in the config:
+    #   * "a query reaches nothing"        -> red on every prune;
+    #   * "snippet reaches nothing at all" -> walked by keeping ONE word;
+    #   * "lost with no gain"              -> walked by ADDING one junk word;
+    #   * any magnitude threshold          -> walked by staying under it.
+    # Removing 'nebula' from a label is byte-identical whether you retired the
+    # word deliberately or destroyed the only way you find that snippet. So
+    # this stops guessing: every such loss is reported and FATAL, and the
+    # operator acknowledges the deliberate ones with --accept. A prune needs no
+    # acknowledgement, because the snippet the word described is gone too.
+    vocab_b, vocab_a = _vocab(ts_before), _vocab(ts_after)
+    graded_words = sorted(set().union(*vocab_b.values()) if vocab_b else set())
+    lost_queries = []
+    for word in graded_words:
+        owners_b = [x for x in d_before.ts.triggers if d_before._term_matches(word, x)]
+        owners_a = [x for x in d_after.ts.triggers if d_after._term_matches(word, x)]
+        if not owners_b or owners_a:
+            continue
+        # Excused automatically when every snippet the word reached is GONE:
+        # the vocabulary went with the snippet, which is what a prune is.
+        survivors = [x for x in owners_b if x in vocab_a]
+        if survivors:
+            lost_queries.append((word, sorted(owners_b), sorted(survivors)))
 
     rows_lost, attr_lost, attr_gained, attr_moved, moved_expansion = [], [], [], [], []
     for probe in probes:
@@ -902,7 +920,7 @@ def diff_configs(ts_before, ts_after) -> dict:
                 moved_expansion.append((probe, att_b, att_a))
     return {
         "probes": len(probes),
-        "narrowed": narrowed,
+        "lost_queries": lost_queries,
         "rows_lost": rows_lost,
         "attr_lost": attr_lost,
         "attr_gained": attr_gained,
@@ -911,7 +929,7 @@ def diff_configs(ts_before, ts_after) -> dict:
     }
 
 
-def render_diff(d, before_label, after_label) -> list:
+def render_diff(d, before_label, after_label, accepted=frozenset()) -> list:
     def _listing(rows, fmt, cap=20):
         out = [f"       {fmt(r)}" for r in rows[:cap]]
         if len(rows) > cap:
@@ -919,33 +937,42 @@ def render_diff(d, before_label, after_label) -> list:
         return out
 
     out = [f"## CONFIG DIFF — {before_label} -> {after_label}", "",
-           f"   {d['probes']} probes (single-token prefixes + within-snippet",
-           "   two-token queries). FATAL = a snippet that SURVIVES the edit but",
-           "   can no longer be found by describing it, or a query that now types",
-           "   DIFFERENT text. Everything else is reported, not graded: espanso",
-           "   lists every match as a row, so ambiguity costs telemetry, not",
-           "   reach — and a gate red on every prune teaches people to ignore it.",
+           f"   {d['probes']} probes. FATAL = a WHOLE WORD that used to find a",
+           "   snippet finds nothing now while that snippet still exists, or a",
+           "   query that now types DIFFERENT text. Deliberate losses are",
+           "   acknowledged with --accept; a PRUNE needs none, because the word",
+           "   went with the snippet. Everything else is reported, not graded:",
+           "   espanso lists every match as a row, so ambiguity costs telemetry,",
+           "   not reach.",
            ""]
-    if d["narrowed"]:
-        out.append(f"  🔴 SNIPPETS NARROWED — {len(d['narrowed'])} survive the edit "
-                   "but strictly LOSE ways of being found (words gone, none added):")
+    unack = [r for r in d["lost_queries"] if r[0] not in accepted]
+    ack = [r for r in d["lost_queries"] if r[0] in accepted]
+    if unack:
+        out.append(f"  🔴 QUERIES THAT STOP WORKING — {len(unack)} word(s) find "
+                   "nothing now, and the snippet they found still exists:")
         out.extend(_listing(
-            d["narrowed"],
-            lambda r: f"{r[0]}: lost {r[2]} quer(y/ies) — {' '.join(r[1])}"
-                      + (" ..." if r[2] > len(r[1]) else "")))
+            unack, lambda r: f"{r[0]!r} reached {' '.join(r[1])} -> nothing"))
+        out.append("")
+        out.append("     If these losses are DELIBERATE, acknowledge them:")
+        out.append("       --accept " + ",".join(r[0] for r in unack[:12])
+                   + (" ..." if len(unack) > 12 else ""))
         out.append("")
     else:
-        out.append("  ✅ no surviving snippet lost findability without replacing it")
+        out.append("  ✅ every word that found a surviving snippet still does")
     if d["moved_expansion"]:
         out.append(f"  🔴 EXPANSION CHANGED — {len(d['moved_expansion'])} quer(y/ies) "
                    "now type DIFFERENT text:")
         out.extend(_listing(d["moved_expansion"],
                             lambda r: f"{r[0]!r}: {r[1]} -> {r[2]}"))
         out.append("")
+    if ack:
+        out.append(f"  ({len(ack)} loss(es) acknowledged via --accept: "
+                   + ", ".join(r[0] for r in ack[:12])
+                   + (" ..." if len(ack) > 12 else "") + ")")
     out.append("")
     out.append(f"  queries reaching nothing : {len(d['rows_lost'])}  "
-               "(normal when a snippet is PRUNED; if a snippet survived, the "
-               "NARROWED section above is where it is graded)")
+               "(includes prefixes and pairs; only WHOLE WORDS with a "
+               "surviving owner are graded, above)")
     out.extend(_listing(d["rows_lost"], lambda r: f"{r[0]!r} was {' '.join(r[1])} -> 0"))
     out.append(f"  attribution gained       : {len(d['attr_gained'])}")
     out.extend(_listing(d["attr_gained"], lambda r: f"{r[0]!r} -> {r[1]}"))
@@ -1223,10 +1250,15 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "SURVIVING snippet strictly loses ways of being found, "
                         "or if a query now types DIFFERENT text; everything "
                         "else is reported, not graded.")
+    p.add_argument("--accept", default="", metavar="W,W",
+                   help="comma-separated words whose loss is DELIBERATE. Each "
+                        "one stops failing the gate; the report still lists it. "
+                        "Intent is not in the config, so it is stated here "
+                        "rather than guessed.")
     p.add_argument("--gate", default=None, metavar="PATH",
                    help="PRE-SHIP GATE, offline: --lint the candidate then diff "
                         "it against the deployed config, in one command with one "
-                        "verdict. Exits 1 on a narrowed snippet or a changed "
+                        "verdict. Exits 1 on a lost query or a changed "
                         "expansion.")
     p.add_argument("--lint", action="store_true",
                    help="offline discoverability/ambiguity check (no creds needed)")
@@ -1295,9 +1327,11 @@ def main(argv=None) -> int:
         # there looking like protection. test_gate_exit_codes pins the rc 3.
         if a.gate:
             out.extend(render_lint(lint(ts_after), candidate))
+        accepted = {w.strip().lower() for w in (a.accept or "").split(",") if w.strip()}
         d = diff_configs(ts_before, ts_after)
-        out.extend(render_diff(d, before_path, candidate))
-        rc = GATE_FAIL if (d["narrowed"] or d["moved_expansion"]) else GATE_OK
+        out.extend(render_diff(d, before_path, candidate, accepted))
+        unack = [r for r in d["lost_queries"] if r[0] not in accepted]
+        rc = GATE_FAIL if (unack or d["moved_expansion"]) else GATE_OK
         out.append("GATE: FAIL — see the 🔴 sections above"
                    if rc else "GATE: PASS — nothing lost its findability")
         print("\n".join(out))
