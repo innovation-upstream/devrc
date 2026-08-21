@@ -1433,10 +1433,20 @@ class SignalDB:
         errors = [entry["errors"] for entry in entries if entry.get("errors")]
         errors += [entry["error"] for entry in entries if entry.get("error")]
         if errors:
+            # 🔴 Carry the server timestamp into the error. A partly-failed GROUP
+            # send DID go out to the members that succeeded, and the reply
+            # carried the timestamp `reconcile --sent --timestamp` needs. Without
+            # it here the value is discarded and the operator has to hunt it in
+            # the Signal thread — which is exactly the position draft 51 left
+            # its operator in.
+            ts_hint = entries[0].get("timestamp")
             raise RuntimeError(
                 f"the Signal API reported per-recipient errors for draft "
                 f"{draft_id!r}: {errors!r}; the draft stays in {STATE_SENDING!r} "
                 f"for manual reconciliation — see `reconcile`"
+                + (f". The response carried timestamp {ts_hint!r}; if the message "
+                   f"DID reach the thread, reconcile with "
+                   f"`--sent --timestamp {ts_hint}`" if ts_hint else "")
             )
         server_ts = _server_timestamp(entries[0])
         # The terminal update carries the SAME state predicate as the claim. This

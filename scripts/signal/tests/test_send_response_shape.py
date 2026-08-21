@@ -28,10 +28,6 @@ sys.path.insert(0, str(HERE.parent))
 import _signal_db as db  # noqa: E402
 
 
-class _Auth:
-    """Stand-in capability; `send_approved` is not under test here."""
-
-
 def test_the_live_list_shape_is_accepted():
     """The exact bytes the live server returned. Red at base: AttributeError."""
     entries = db._normalize_send_response([{"timestamp": "1787331796630"}])
