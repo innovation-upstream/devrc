@@ -206,9 +206,31 @@
 #   browser [--frame <f>] click <selector>
 #                             — click the element's center (TRUSTED CDP on the top
 #                               frame; SYNTHETIC in a cross-origin --frame)
-#   browser [--frame <f>] type <text> [--selector <sel>]
+#   browser [--frame <f>] type <text> [--selector <sel>] [--expect <value>|--verify]
 #                             — text input (TRUSTED CDP top frame; SYNTHETIC in-frame);
-#                               focus --selector first if given
+#                               focus --selector first if given.
+#                               ⚠ WITHOUT --expect/--verify the result is NOT a claim
+#                               that the text landed: `typed` is the length of the
+#                               string SENT. A type can silently fail to apply while
+#                               the page keeps rendering its previous state.
+#                               --expect <value>  re-read the target after a settle and
+#                                                 require it to EQUAL <value>; retries
+#                                                 the whole type up to 3× (BB_TYPE_ATTEMPTS),
+#                                                 then fails with `input_not_applied`
+#                                                 reporting wanted vs got.
+#                               --verify          same, but only requires the read-back
+#                                                 to CONTAIN the typed text — and reports
+#                                                 a LENGTH, never the value. Use it on a
+#                                                 secret field: --expect echoes the
+#                                                 PAGE's content on a miss.
+#                               Either adds `result.data.applied` (true/false/null — null
+#                               is "not verified", NOT "fine") and `result.data.verify`.
+#                               Each verified type READS THE FIELD FIRST, so it is 3 wire
+#                               ops on the happy path and up to 9 across 3 attempts;
+#                               a 429 on a read is rc 3, never `applied:false`.
+#                               Tuning: BB_TYPE_ATTEMPTS (default 3, max 10),
+#                               BB_TYPE_SETTLE_S (default 0.35, max 30 — the settle
+#                               between the type and the read-back IS the detector).
 #   browser [--frame <f>] key <Enter|Tab|Escape|...> [--selector <sel>]
 #                             — dispatch one bounded key (TRUSTED CDP top frame;
 #                               SYNTHETIC in-frame)
@@ -253,8 +275,18 @@
 #
 # EXIT CODES
 #   0  success
-#   1  the command failed — nothing was applied, or the primary op itself failed
-#   3  ONLY from `nav --wake` / `open --wake`: the nav/open SUCCEEDED and only the
+#   1  the command failed — nothing was applied, or the primary op itself failed.
+#      `type --expect/--verify` uses it for BOTH a confirmed miss and a
+#      `bad_target` (the --selector names nothing, or names something that
+#      cannot hold text — a wrapper <div>). Both mean "the text is not in what
+#      you named", which is what rc 3 explicitly does NOT mean.
+#   3  THE PRIMARY OP SUCCEEDED AND ONLY ITS FOLLOW-UP FAILED — never "nothing
+#      happened". Two sources:
+#      * `type --expect/--verify`: the text was typed, but the read-back could
+#        not be EVALUATED (strict page CSP, a chrome:// tab, a rate-limited
+#        follow-up), so `result.data.applied` is null — "not verified", NOT
+#        "fine". A confirmed miss and a bad target are rc 1, not 3.
+#      * `nav --wake` / `open --wake`: the nav/open SUCCEEDED and only the
 #      wake follow-up failed. The tab HAS navigated and its JSON is still on
 #      stdout, with `result.data.wake = {"ok":false,"error":"<real cause>"}`.
 #      Branch on 3 rather than treating it as a plain failure — and read that
@@ -1218,6 +1250,575 @@ cmd_op() {
 json_str() { python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1"; }
 
 # --------------------------------------------------------------------------- #
+# `type` verification — CONFIRM the text actually landed.
+#
+# 🔴 WHY THIS EXISTS (measured live, 2026-08-20). `type <text> --selector <sel>`
+# replaces an input's value correctly MOST of the time and, intermittently, does
+# not apply AT ALL while the page keeps rendering its previous state. The op
+# returns `{typed:<N>,trusted:true}` either way — `typed` is the length of the
+# string the CLI SENT, never a claim about the DOM — so nothing in the envelope
+# distinguishes the two, and an agent reads the success envelope as evidence the
+# field now holds the text. That produced three confident, wrong conclusions
+# about a live site in one session.
+#
+# 🔴 THE SETTLE DELAY IS THE DETECTOR, NOT POLITENESS. CDP `Input.insertText`
+# mutates the DOM value SYNCHRONOUSLY, so a read-back inside the same op would
+# report success even in the failing case — the value is there for a moment and
+# a subsequent framework re-render from stale state overwrites it. Reading back
+# in a SEPARATE round-trip, after a settle, is what observes the state the USER
+# is left looking at. This is also why verification lives in the CLI rather than
+# in the extension's `type` handler: the extension can only see the instant
+# after the insert, which is exactly the instant that lies.
+#
+# 🔴 THE PRE-READ IS LOAD-BEARING, NOT AN OPTIMISATION TARGET. Every verified
+# type begins by READING THE FIELD, before typing anything. The first version of
+# this feature skipped it and inferred the field's prior content by stripping a
+# trailing copy of the typed text off the read-back. That inference is sound only
+# when the insert LANDED — and the case this whole feature exists to detect is
+# the one where it did NOT, where the read-back IS the pre-existing content. A
+# field holding `"my password"`, typed into with `"password"` and not applied,
+# read back as `"my password"`, ends with the typed text, so the "undo" amputated
+# it to `"my "` and then reported that value as what the page held. The CLI
+# created the damage and then misdescribed the page. A read costs one op; a
+# guess costs the user's data. Everything below derives from the MEASURED
+# pre-state or refuses to act:
+#   * the restore target is the pre-state, never a substring computed from the
+#     post-state;
+#   * with no pre-state (a CSP page, a rate-limited pre-read) there is NO retry,
+#     because a retry it cannot undo is a retry it must not make; and
+#   * `--verify` can finally tell "the text landed" from "the text was already
+#     there" — `contains` against the post-state alone cannot, and scored a
+#     complete no-op as `applied:true`.
+#
+# NOT ON BY DEFAULT, and that is a deliberate limit, not an oversight: a verified
+# type costs THREE wire ops instead of one (pre-read, type, read-back), which
+# spends the per-instance rate-limit budget, and the reads return `null` on a
+# strict-CSP page. Making it unconditional would change the wire behaviour of
+# every existing `type` caller. `--expect` / `--verify` are the opt-in.
+#
+# OP BUDGET (the numbers SKILL.md quotes):
+#   happy path                 3 ops  — pre-read, type, read-back
+#   3 attempts, insert lands   9 ops  — + 2 restores + 2 more type/read-back pairs
+#   3 attempts, nothing lands  7 ops  — the restore is SKIPPED when the read-back
+#                                       already equals the pre-state
+# A 429 on any of the reads is `unverifiable` (rc 3), never `applied:false`.
+# --------------------------------------------------------------------------- #
+
+# How many times the whole type→settle→read-back cycle may run before giving up,
+# and how long to wait after the type op before reading the value back. The
+# settle must be long enough for a framework re-render to land (that re-render is
+# the event being detected) and short enough that a verified type stays
+# interactive.
+#
+# Env-overridable because 0.35s is a DEFAULT, not a measurement that holds
+# everywhere: a heavy SPA may need longer.
+#
+# 🔴 BOTH ARE VALIDATED STRICTLY, AND THE SETTLE'S VALIDATION IS SAFETY-CRITICAL.
+# The first version accepted anything made of digits and dots — `0.3.5`, `1.2.3`,
+# a bare `.` — and then ran `sleep "$v" 2>/dev/null || true`, so `sleep` rejected
+# the value, the error was swallowed, and the command ran with NO SETTLE AT ALL,
+# rc 0, no warning. Per the header above, a read-back with no settle reports
+# success in exactly the failing case: a typo in an env var silently turned the
+# detector into a rubber stamp. So the pattern is anchored and exact, the bound
+# is real, and the `sleep` no longer has its failure discarded.
+#
+# The values are VALIDATED at the top of type_verified rather than here, so a
+# malformed BB_TYPE_* cannot break `health`/`text`/every other subcommand that
+# never reads them. type_verified is deliberately not run inside a subshell or a
+# pipeline, so a `die` there really does exit the CLI.
+TYPE_VERIFY_ATTEMPTS="${BB_TYPE_ATTEMPTS:-3}"
+TYPE_VERIFY_SETTLE_S="${BB_TYPE_SETTLE_S:-0.35}"
+# Upper bounds. The comment on the attempt count used to claim it "prevents an
+# unbounded op storm" while imposing no ceiling at all — and a huge value did not
+# even reach the intended message: bash's `[ "$n" -ge 1 ]` on a value past
+# LLONG_MAX prints `[: integer expected` first. Each attempt is up to 3 wire ops
+# against the operator's live browser, so 10 is already 30.
+TYPE_VERIFY_MAX_ATTEMPTS=10
+TYPE_VERIFY_MAX_SETTLE_S=30
+
+# _type_readback_expr SEL — the ONE-EXPRESSION JS that reads the target element's
+# current value back. One expression on purpose: `js`/`eval` evaluates an
+# expression, and a multi-statement body returns null with no error (SKILL.md
+# trap 1), which would look exactly like a CSP block.
+#
+# It returns a TAGGED object so the three outcomes stay distinguishable:
+#   {"v":"<current value>"}       — read it
+#   {"e":"element_not_found"}     — the selector matched nothing
+#   {"e":"no_editable_target"}    — matched, but it is not an input/contenteditable
+# A bare `null` therefore means only one thing: the eval itself did not run
+# (strict page CSP, a chrome:// tab). Returning a plain string instead would
+# collapse "not found" into "CSP blocked" — an EMPTY RESULT that cannot tell two
+# mechanisms apart.
+#
+# The active-element branch REQUIRES editability. `document.activeElement`
+# defaults to <body>, which has no `.value`, so falling back to textContent there
+# would hand back the WHOLE PAGE's text — and a `--verify` substring check
+# against the whole page passes whenever the typed word appears anywhere on it.
+_type_readback_expr() {
+  local sel="$1" pick
+  if [ -n "$sel" ]; then pick="document.querySelector($(json_str "$sel"))"
+  else pick="document.activeElement"; fi
+  printf '(function(){var e=%s;if(!e)return {e:"element_not_found"};var ed=("value" in e)||e.isContentEditable===true;if(!ed)return {e:"no_editable_target"};var v=("value" in e)?e.value:e.innerText;return {v:(v==null?"":String(v))};})()' "$pick"
+}
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE RETRY MUST UNDO ITS OWN INSERT — MEASURED 2026-08-21, LIVE.
+#
+# CDP `Input.insertText` inserts AT THE CARET; it does not select-all first. So a
+# retry that just re-sends the type CONCATENATES: three attempts against a real
+# SPA input left `got: "DreamDreamDreamDreamDreamDreamDreamDreamDreamDream"`
+# against `want: "Dream"`, and a later run left 13 copies. Two consequences, and
+# the second is the serious one:
+#   - attempts 2..N are GUARANTEED to fail whenever attempt 1 landed even
+#     partially — the field can only move further from `want`, so the retry is
+#     not merely useless, it is arithmetic against itself; and
+#   - the caller is handed back a field in a MUCH worse state than before the
+#     call. A verification feature that corrupts the thing it verifies is worse
+#     than no verification.
+#
+# So each retry RESTORES the field to the PRE-STATE measured before the first
+# type, using the native value setter + an `input` event (the technique the
+# civitai site-notes doc prescribes, and the only one a React-controlled input
+# honours — a plain `e.value = x` is invisible to React's synthetic-event layer).
+#
+# 🔴 AND IT IS VERIFIED, NOT ASSUMED: the restore expression returns the field's
+# resulting value, and a retry proceeds ONLY if that equals the pre-state. If the
+# page owns the value and puts its own content straight back, we stop with
+# `verify.retryStopped = "restore_failed"` rather than typing into it again.
+# --------------------------------------------------------------------------- #
+
+# _type_restore_expr SEL TARGET_JSON — the ONE-EXPRESSION JS that puts the field
+# back to TARGET_JSON (a JSON string literal, which is also a JS string literal)
+# and reports the value it ends up holding.
+#
+# The `/*bb-restore*/` and `/*bb-end*/` markers are load-bearing for a reader of
+# a wire trace (this eval is otherwise indistinguishable from the read-back) and
+# are what lets the offline stub in tests/test_browser_type_verify.py SIMULATE a
+# real field rather than only pattern-match the payload.
+_type_restore_expr() {
+  local sel="$1" tgt="$2" pick
+  if [ -n "$sel" ]; then pick="document.querySelector($(json_str "$sel"))"
+  else pick="document.activeElement"; fi
+  printf '/*bb-restore*/(function(){var e=%s;if(!e)return {e:"element_not_found"};var ed=("value" in e)||e.isContentEditable===true;if(!ed)return {e:"no_editable_target"};var v=%s/*bb-end*/;if("value" in e){var d=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(e),"value");if(d&&d.set){d.set.call(e,v);}else{e.value=v;}}else{e.innerText=v;}e.dispatchEvent(new Event("input",{bubbles:true}));e.dispatchEvent(new Event("change",{bubbles:true}));return {v:(("value" in e)?e.value:e.innerText)};})()' "$pick" "$tgt"
+}
+
+# _type_classify RESP HAS_SELECTOR — what did a read (pre-read OR read-back)
+# actually tell us?
+#
+# Prints TWO lines: a KIND on line 1 and a JSON payload on line 2.
+#   value        — line 2 is the field's content, JSON-encoded
+#   bad_target   — line 2 is {"tag": "...", "reason": "..."}; the selector names
+#                  nothing, or names something that cannot hold text
+#   unverifiable — line 2 is {"reason": "..."}; the read could not be performed
+#
+# 🔴 `bad_target` IS SPLIT OUT OF `unverifiable` DELIBERATELY (it used to be
+# folded in, and that made both of them exit 3). Exit 3's documented contract is
+# "the primary op succeeded and only its follow-up failed — never 'nothing
+# happened'", and `element_not_found` / `no_editable_target` mean EXACTLY
+# "nothing happened to the thing you named". They are also the ordinary mistake,
+# not an exotic one: the extension's focusExpression only checks that the element
+# EXISTS and calls .focus(), so pointing --selector at a wrapper <div> — what you
+# get by lifting a selector out of `--annotated` output — makes the type op
+# report success while the insert goes to whatever was really focused. Reporting
+# that as "3, probably fine" is the worst available answer, so it is rc 1.
+#
+# 🔴 BUT ONLY WHEN A --selector WAS ACTUALLY GIVEN. With no selector the read
+# targets `document.activeElement`, and CDP types into whatever the RENDERER has
+# focused — which is NOT always document.activeElement: focus inside a shadow
+# root reports the shadow HOST, a custom element with no `.value` and no
+# contenteditable. Refusing there would be an error naming a flag that appears
+# nowhere in the caller's command line (the same defect the BB_TAB message had),
+# for a type that may well have landed. So the no-selector case is
+# `unverifiable` — "could not confirm", which is what it is — and says how to
+# get a definite answer.
+_type_classify() {
+  printf '%s' "$1" | python3 -c '
+import json, sys
+
+has_sel = sys.argv[1] == "1"
+
+def out(kind, payload):
+    sys.stdout.write(kind + "\n" + json.dumps(payload))
+    raise SystemExit(0)
+
+raw = sys.stdin.read()
+if not raw.strip():
+    out("unverifiable", {"reason": "the read op returned no response - its own "
+                                   "error is on stderr above. A rate-limited "
+                                   "(429) follow-up looks exactly like this."})
+try:
+    d = json.loads(raw)
+except Exception:
+    out("unverifiable", {"reason": "the read op returned unparseable JSON"})
+
+res = d.get("result") if isinstance(d, dict) else None
+if isinstance(res, dict) and res.get("ok") is False:
+    out("unverifiable", {"reason": "the read op itself failed: %s"
+                                   % res.get("error")})
+data = res.get("data") if isinstance(res, dict) else None
+val = data.get("value") if isinstance(data, dict) else None
+
+if val is None:
+    out("unverifiable", {"reason": "the read eval returned null - a strict page "
+                                   "CSP blocks the injected script (GitHub does "
+                                   "this), or the tab is a chrome:// page."})
+if isinstance(val, dict) and isinstance(val.get("e"), str):
+    tag = val["e"]
+    if not has_sel:
+        out("unverifiable", {"reason":
+            "no --selector was given, so the read targeted "
+            "document.activeElement and it is not editable (%s). CDP types into "
+            "whatever the RENDERER has focused, which is not always "
+            "document.activeElement - focus inside a shadow root reports its "
+            "HOST - so this is COULD NOT CONFIRM, not THE TYPE FAILED. Pass "
+            "--selector <sel> for a definite answer." % tag})
+    reason = {
+        "element_not_found":
+            "the --selector matched NO element, so nothing was typed into the "
+            "target you named.",
+        "no_editable_target":
+            "the --selector matched an element that cannot hold text (a wrapper "
+            "<div>, a <span>, a <label>). The extension focuses whatever the "
+            "selector finds without checking it is editable, so a type sent "
+            "there lands wherever focus actually is.",
+    }.get(tag, "the target could not be used: %s" % tag)
+    out("bad_target", {"tag": tag, "reason": reason})
+if not isinstance(val, dict) or not isinstance(val.get("v"), str):
+    out("unverifiable", {"reason": "the read eval returned an unexpected shape"})
+out("value", val["v"])
+' "$2"
+}
+
+# _type_verdict GOT_JSON BEFORE_JSON HAVE_PRE MODE WANT TYPED — did the text land?
+#
+# Prints TWO lines: the state on line 1 (`ok` / `miss`), then a one-line JSON
+# detail object. Two lines rather than one JSON blob so the caller can branch in
+# bash without a second python round-trip.
+#
+# 🔴 PRIVACY, AND WHY THE OLD JUSTIFICATION WAS WRONG. `--expect` used to echo
+# the field's content as `got` on EVERY outcome, justified by "the caller already
+# holds the value it passed as --expect". That is false precisely when it
+# matters: on a MISS the field holds something the caller never supplied — that
+# is the definition of a miss — so `got` is page content, not an echo. And on a
+# HIT the echo is pure leak: `--expect hunter2` wrote `"got": "hunter2"` into
+# stdout and every agent transcript that captured it, saying nothing the exit
+# code had not. So:
+#   * on `ok`, no field content and no `want` is emitted, in either mode;
+#   * on `miss`, `--expect` DOES report `got` — that is the diagnostic the flag
+#     exists for, and it is page content by construction. Use `--verify` on a
+#     secret field, which never emits content in any outcome.
+#
+# 🔴 CONTAINS MODE NEEDS THE PRE-STATE TO MEAN ANYTHING. `typed in got` alone
+# scores a field that ALREADY held the text as `applied: true` after a type that
+# did nothing whatsoever, and it also cannot see compounding (`"DreamDream"`
+# contains `"Dream"`). Both are decided against the measured pre-state here.
+_type_verdict() {
+  python3 -c '
+import json, sys
+
+got = json.loads(sys.argv[1])
+have_pre = sys.argv[3] == "1"
+before = json.loads(sys.argv[2]) if have_pre else None
+mode, want, typed = sys.argv[4], sys.argv[5], sys.argv[6]
+
+def out(state, detail):
+    sys.stdout.write(state + "\n" + json.dumps(detail))
+    raise SystemExit(0)
+
+unchanged = have_pre and got == before
+
+if mode == "expect":
+    if got == want:
+        # No content, no `want`: a passing assertion says everything the caller
+        # needs, and echoing either only puts a value in a transcript.
+        d = {"len": len(got)}
+        if unchanged:
+            # Informational, and a COUNT-free boolean: the assertion holds, but
+            # this type changed nothing - the field already read this way.
+            d["unchanged"] = True
+        out("ok", d)
+    out("miss", {"got": got, "len": len(got), "want": want})
+
+# contains mode - never emits the field content, in any branch.
+if typed not in got:
+    out("miss", {"len": len(got),
+                 "reason": "the field does not contain the typed text"})
+if unchanged:
+    out("miss", {"len": len(got), "unchanged": True,
+                 "reason": "the field is byte-identical to what it held BEFORE "
+                           "this type, so nothing landed - it already contained "
+                           "the text. Without the pre-read this scored as "
+                           "applied:true."})
+if have_pre:
+    added = got.count(typed) - before.count(typed)
+    if added > 1:
+        out("miss", {"len": len(got), "copiesAdded": added,
+                     "reason": "the field gained %d copies of the typed text, "
+                               "not one - it is compounding." % added})
+out("ok", {"len": len(got)})
+' "$1" "$2" "$3" "$4" "$5" "$6"
+}
+
+# _type_restore_ok RESTORE_RESP TARGET_JSON — rc 0 iff the field now holds the
+# target. A restore that did not stick must NOT be treated as one that did:
+# that is the whole difference between a bounded retry and 13 copies.
+_type_restore_ok() {
+  printf '%s' "$1" | python3 -c '
+import json, sys
+try:
+    val = json.loads(sys.stdin.read())["result"]["data"]["value"]
+except Exception:
+    raise SystemExit(1)
+if not isinstance(val, dict) or not isinstance(val.get("v"), str):
+    raise SystemExit(1)
+raise SystemExit(0 if val["v"] == json.loads(sys.argv[1]) else 1)
+' "$2"
+}
+
+# _type_merge TYPE_RESP DETAIL_JSON STATE ATTEMPTS MODE RETRY_STOP — fold the
+# verdict into the type envelope's result.data as `applied` + `verify`, print it.
+#
+# RETRY_STOP is empty on the ordinary paths and names the reason the retry loop
+# refused to go round again (`no_pre_state` / `restore_failed`) otherwise. It is
+# surfaced as `verify.retryStopped` so the distinction is MACHINE-readable, not
+# only a stderr sentence.
+#
+# ADDITIVE ONLY: every field the extension sent is preserved, so a consumer
+# reading `.result.data.typed` is untouched. `applied` is TRI-STATE — true /
+# false / null — and null means "not verified", never "fine". Only
+# `unverifiable` maps to null; `bad_target` is false, because the text is
+# demonstrably not in the target the caller named.
+#
+# On any parse failure it passes the ORIGINAL envelope through unchanged. Losing
+# the caller's result because the annotation step tripped would be a strictly
+# worse outcome than an un-annotated result.
+_type_merge() {
+  printf '%s\v%s' "$1" "$2" | python3 -c '
+import json, sys
+
+state, attempts, mode = sys.argv[1], sys.argv[2], sys.argv[3]
+retry_stop = sys.argv[4] if len(sys.argv) > 4 else ""
+env_raw, _, det_raw = sys.stdin.read().partition("\v")
+
+try:
+    d = json.loads(env_raw)
+    det = json.loads(det_raw)
+except Exception:
+    sys.stdout.write(env_raw)
+    raise SystemExit(0)
+
+res = d.get("result") if isinstance(d, dict) else None
+if not isinstance(res, dict):
+    sys.stdout.write(env_raw)
+    raise SystemExit(0)
+data = res.get("data")
+if not isinstance(data, dict):
+    data = {}
+    res["data"] = data
+
+data["applied"] = {"ok": True, "miss": False, "bad_target": False}.get(state)
+verify = {"mode": mode, "state": state, "attempts": int(attempts)}
+verify.update(det if isinstance(det, dict) else {})
+if retry_stop:
+    verify["retryStopped"] = retry_stop
+data["verify"] = verify
+json.dump(d, sys.stdout)
+' "$3" "$4" "$5" "$6"
+}
+
+# _type_bad_target_die DETAIL_JSON WHERE — refuse, loudly, on rc 1.
+#
+# WHERE is `pre` (caught by the pre-read, so NOTHING was typed) or `post` (the
+# target went away after the type). Both are rc 1: see the contract note on
+# _type_classify.
+_type_bad_target_die() {
+  local where="$2"
+  echo "browser: bad_target: the --selector does not name something this type could land in." >&2
+  printf '%s' "$1" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+sys.stderr.write("browser:   %s (%s)\n" % (d.get("reason", ""), d.get("tag", "")))
+' || true
+  if [ "$where" = "pre" ]; then
+    echo "browser:   Caught by the PRE-READ, so NOTHING was typed — no text went anywhere." >&2
+  else
+    echo "browser:   The target was usable before the type and is not now, so the page" >&2
+    echo "browser:   replaced or removed it. The text WAS sent; where it landed is unknown." >&2
+  fi
+  echo "browser:   Re-read the page with 'browser text --annotated' and pick a selector that" >&2
+  echo "browser:   names the <input>/<textarea>/[contenteditable] ITSELF, not its wrapper." >&2
+  echo "browser:   This is rc 1, not rc 3: rc 3 means the type applied and only the check" >&2
+  echo "browser:   failed, which is the opposite of what happened here." >&2
+}
+
+# type_verified EXTRA SEL MODE WANT TYPED — read the field, send `type`, confirm
+# it landed, retry the WHOLE cycle up to TYPE_VERIFY_ATTEMPTS times, print the
+# annotated envelope, and return the exit code. MODE is `expect` (exact equality
+# with WANT) or `contains` (the read-back must contain the typed text). TYPED is
+# the text actually sent, which `--expect` lets differ from WANT.
+#
+# 🔴 IT PRINTS AND RETURNS RATHER THAN `die`-ing, and the caller must NOT pipe it
+# into `pretty`: a `die`/`exit` inside a pipeline component exits only that
+# component's subshell, so the message would be printed and the failure then
+# swallowed as rc 0 — the precise shape of bug this whole flag exists to remove.
+type_verified() {
+  local extra="$1" sel="$2" mode="$3" want="$4" typed="$5"
+  local rexpr rb resp verdict state detail attempt=1
+  local kind pre_resp before="" have_pre=0 rr retry_stop="" sint got_json=""
+  # 1/0 for "a --selector was given", passed to _type_classify: it decides
+  # whether an un-editable target is the caller's selector (rc 1) or an
+  # unreadable activeElement (rc 3). See the note above _type_classify.
+  local has_sel=0; [ -n "$sel" ] && has_sel=1
+
+  # An unbounded/garbage attempt count would turn a typo into an op storm against
+  # the user's LIVE browser, so refuse before the first op goes on the wire.
+  case "$TYPE_VERIFY_ATTEMPTS" in
+    ""|*[!0-9]*) die "BB_TYPE_ATTEMPTS must be an integer 1..${TYPE_VERIFY_MAX_ATTEMPTS} (got: $TYPE_VERIFY_ATTEMPTS)" ;;
+  esac
+  # 🔴 Bound the STRING before ANY arithmetic. `[ "$n" -ge 1 ]` on a value past
+  # LLONG_MAX prints `browser: line NNN: [: integer expected` and the message
+  # below never runs — the caller is handed a bash internal instead of the rule
+  # they broke. Two digits cannot overflow, and the ceiling is 10.
+  if [ "${#TYPE_VERIFY_ATTEMPTS}" -gt 2 ] \
+     || [ "$TYPE_VERIFY_ATTEMPTS" -lt 1 ] \
+     || [ "$TYPE_VERIFY_ATTEMPTS" -gt "$TYPE_VERIFY_MAX_ATTEMPTS" ]; then
+    die "BB_TYPE_ATTEMPTS must be an integer 1..${TYPE_VERIFY_MAX_ATTEMPTS} (got: $TYPE_VERIFY_ATTEMPTS)"
+  fi
+  # 🔴 ANCHORED AND EXACT, not "digits and dots". The old test accepted `0.3.5`,
+  # `1.2.3` and a bare `.`; `sleep` then rejected them and the error was thrown
+  # away, so the command ran with NO SETTLE, rc 0, silently — and a read-back
+  # with no settle reports success in the exact case this feature detects.
+  if ! [[ "$TYPE_VERIFY_SETTLE_S" =~ ^([0-9]+(\.[0-9]+)?|\.[0-9]+)$ ]]; then
+    die "BB_TYPE_SETTLE_S must be a number of seconds like 0, 0.35 or .5 (got: $TYPE_VERIFY_SETTLE_S)"
+  fi
+  sint="${TYPE_VERIFY_SETTLE_S%%.*}"; sint="${sint:-0}"
+  if [ "${#sint}" -gt 2 ] || [ "$sint" -gt "$TYPE_VERIFY_MAX_SETTLE_S" ]; then
+    die "BB_TYPE_SETTLE_S must be <= ${TYPE_VERIFY_MAX_SETTLE_S} seconds (got: $TYPE_VERIFY_SETTLE_S)"
+  fi
+
+  rexpr="$(_type_readback_expr "$sel")"
+
+  # --- PRE-READ: measure the field BEFORE typing into it. --------------------
+  # This is the ground truth every later decision rests on (see the header). A
+  # failed pre-read is not fatal — the type still happens — but it forbids the
+  # retry, because a retry whose undo cannot be verified is a retry that can
+  # only make the field worse.
+  pre_resp="$(cmd_op eval "\"js\":$(json_str "$rexpr")")" || pre_resp=""
+  verdict="$(_type_classify "$pre_resp" "$has_sel")"
+  kind="${verdict%%$'\n'*}"
+  detail="${verdict#*$'\n'}"
+  case "$kind" in
+    bad_target)
+      # 🔴 Refuse BEFORE typing. The selector names nothing typeable, so sending
+      # the text would put it wherever focus happens to be — silently, in the
+      # user's live browser.
+      _type_bad_target_die "$detail" pre
+      return 1 ;;
+    value)
+      before="$detail"; have_pre=1 ;;
+  esac
+
+  while : ; do
+    # cmd_op runs in a command substitution, so its `die` can only kill that
+    # subshell — `|| exit 1` is what propagates a real type failure.
+    resp="$(cmd_op type "$extra")" || exit 1
+    # 🔴 NOT `2>/dev/null || true`. Swallowing this is how a malformed settle
+    # became "no settle, rc 0, no warning" — and with no settle the read-back is
+    # taken in the same tick as the insert, which reports success in the failing
+    # case. Validated above, so a failure here is a broken environment, not a
+    # typo, and must be loud.
+    sleep "$TYPE_VERIFY_SETTLE_S" || die "the ${TYPE_VERIFY_SETTLE_S}s settle failed to run; refusing to read back without it (an unsettled read-back reports success even when the type did not apply)"
+    # A failed read-back is NOT a failed type: keep the empty string and let
+    # _type_classify call it `unverifiable`.
+    rb="$(cmd_op eval "\"js\":$(json_str "$rexpr")")" || rb=""
+    verdict="$(_type_classify "$rb" "$has_sel")"
+    kind="${verdict%%$'\n'*}"
+    detail="${verdict#*$'\n'}"
+    case "$kind" in
+      unverifiable) state=unverifiable; break ;;
+      bad_target)   state=bad_target;   break ;;
+    esac
+    # Keep the read VALUE before `detail` is rebound to the verdict's detail:
+    # the restore decision below compares it against the pre-state, and both are
+    # JSON-encoded by the same encoder, so a byte comparison is an exact string
+    # comparison.
+    got_json="$detail"
+    verdict="$(_type_verdict "$got_json" "$before" "$have_pre" "$mode" "$want" "$typed")"
+    state="${verdict%%$'\n'*}"
+    detail="${verdict#*$'\n'}"
+    [ "$state" = "miss" ] || break
+    [ "$attempt" -lt "$TYPE_VERIFY_ATTEMPTS" ] || break
+    # 🔴 NO PRE-STATE, NO RETRY. `Input.insertText` appends at the caret, so a
+    # bare re-type CONCATENATES; undoing it requires knowing what was there
+    # before, and guessing that from the post-state is what amputated a user's
+    # field. Without the measurement we stop.
+    if [ "$have_pre" -eq 0 ]; then retry_stop="no_pre_state"; break; fi
+    # The restore is SKIPPED when the field already reads exactly as it did
+    # before this attempt — the insert did not apply, which is the commonest
+    # failure here, and there is nothing to undo. Saves an op AND cannot fail.
+    if [ "$got_json" != "$before" ]; then
+      rr="$(cmd_op eval "\"js\":$(json_str "$(_type_restore_expr "$sel" "$before")")")" || rr=""
+      if ! _type_restore_ok "$rr" "$before"; then retry_stop="restore_failed"; break; fi
+    fi
+    attempt=$((attempt + 1))
+  done
+
+  _type_merge "$resp" "$detail" "$state" "$attempt" "$mode" "$retry_stop" | pretty
+
+  case "$state" in
+    ok) return 0 ;;
+    bad_target)
+      _type_bad_target_die "$detail" post
+      return 1 ;;
+    unverifiable)
+      echo "browser: input_not_verified: the type op succeeded but its result could NOT be confirmed." >&2
+      # 🔴 NO `2>/dev/null` HERE. The diagnostic these lines exist to print IS on
+      # stderr, so redirecting it silences the message instead of the failure —
+      # written that way once and caught by the tests below, which is the only
+      # reason it is not in the shipped CLI.
+      printf '%s' "$detail" | python3 -c 'import json,sys; sys.stderr.write("browser:   " + str(json.load(sys.stdin).get("reason","")) + "\n")' || true
+      echo "browser:   result.data.applied is null — 'not verified', NOT 'fine'. Exit 3 = the" >&2
+      echo "browser:   type was applied and only the check failed (rc 1 would mean the type failed)." >&2
+      return 3 ;;
+  esac
+
+  echo "browser: input_not_applied: the field does NOT hold the typed text after ${attempt} attempt(s)." >&2
+  if [ "$mode" = "expect" ]; then
+    printf '%s' "$detail" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+sys.stderr.write("browser:   wanted: %s\n" % json.dumps(d.get("want")))
+sys.stderr.write("browser:   got:    %s\n" % json.dumps(d.get("got")))
+sys.stderr.write("browser:   (that `got` is the PAGE’s content, not an echo of what you passed.\n")
+sys.stderr.write("browser:    Use --verify on a secret field - it never reports a value.)\n")
+' || true
+  else
+    printf '%s' "$detail" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+sys.stderr.write("browser:   %s (field length: %s)\n"
+                 % (d.get("reason", "the field does not contain the typed text"),
+                    d.get("len")))
+sys.stderr.write("browser:   re-run with --expect <value> to see the value it actually holds.\n")
+' || true
+  fi
+  case "$retry_stop" in
+    restore_failed)
+      echo "browser:   retry STOPPED early: putting the field back to what it held BEFORE this" >&2
+      echo "browser:   call did NOT stick — the page owns this value. Re-typing would CONCATENATE" >&2
+      echo "browser:   (insertText appends at the caret), so the loop refused;" >&2
+      echo "browser:   result.data.verify.retryStopped='restore_failed'." >&2 ;;
+    no_pre_state)
+      echo "browser:   retry STOPPED early: the field could not be read BEFORE the type, so there" >&2
+      echo "browser:   is no measured value to put back and re-typing would CONCATENATE;" >&2
+      echo "browser:   result.data.verify.retryStopped='no_pre_state'." >&2 ;;
+  esac
+  echo "browser:   The page most likely re-rendered from stale state over the insert. Try" >&2
+  echo "browser:   'browser wake' first (a throttled tab drops input), or click the field then re-type." >&2
+  return 1
+}
+
+# --------------------------------------------------------------------------- #
 # `emulate --reset --recreate` — REPLACE a tab instead of repairing it (#319).
 #
 # Since 0.8.1 plain `--reset` DOES repair the stuck viewport (arm-then-clear; see
@@ -2092,21 +2693,48 @@ else:
     # browser [--frame <f>] type <text> [--selector <sel>] — text input into the
     # focused element (or --selector first). Top frame: TRUSTED CDP. Cross-origin
     # --frame: SYNTHETIC input (set value + input/change) via chrome.scripting.
-    POS=""; POS_SEEN=0; tsel=""
+    #
+    # --expect <value> / --verify — CONFIRM the text landed (see type_verified).
+    # Both read the field FIRST, type, re-read after a settle, and retry the whole
+    # cycle up to 3×; --expect requires exact equality with <value>, --verify only
+    # that the read-back CONTAINS the typed text (and never reports a value).
+    POS=""; POS_SEEN=0; tsel=""; texpect=""; texpect_set=0; tverify=0
     while [ $# -gt 0 ]; do
       case "$1" in
         --selector) shift; [ $# -ge 1 ] || die "usage: browser type <text> [--selector <sel>]"; tsel="$1"; shift ;;
         --selector=*) tsel="${1#--selector=}"; shift ;;
+        # `--expect ''` is a legitimate assertion (the field ends up EMPTY), so
+        # "was it given?" is tracked separately from "is it non-empty".
+        --expect) shift; [ $# -ge 1 ] || die "usage: browser type <text> [--selector <sel>] [--expect <value>]"; texpect="$1"; texpect_set=1; shift ;;
+        --expect=*) texpect="${1#--expect=}"; texpect_set=1; shift ;;
+        --verify) tverify=1; shift ;;
         --) shift; pos_rest "type takes one text arg" "$@"; break ;;
-        -*) die "browser type: unknown flag: $1 (try: --selector <sel>; use '--' before text starting with '-')" ;;
+        -*) die "browser type: unknown flag: $1 (try: --selector <sel>, --expect <value>, --verify; use '--' before text starting with '-')" ;;
         *) pos_add "type takes one text arg" "$1"; shift ;;
       esac
     done
     txt="$POS"
-    [ -n "$txt" ] || die "usage: browser [--frame <f>] type <text> [--selector <sel>]"
+    [ -n "$txt" ] || die "usage: browser [--frame <f>] type <text> [--selector <sel>] [--expect <value>|--verify]"
     extra="\"text\":$(json_str "$txt")"
     if [ -n "$tsel" ]; then extra="${extra},\"selector\":$(json_str "$tsel")"; fi
-    cmd_op type "$extra" | pretty
+    if [ "$texpect_set" -eq 0 ] && [ "$tverify" -eq 0 ]; then
+      # Unverified (default): byte-identical wire behaviour to before.
+      cmd_op type "$extra" | pretty
+    else
+      # 🔴 NOT piped: type_verified must own the exit code (a `die` inside a
+      # pipeline component exits only that subshell — the failure would print
+      # and then be swallowed as rc 0). --expect wins over --verify: it is the
+      # strictly stronger assertion, so honouring the weaker one would silently
+      # downgrade what the caller asked for.
+      if [ "$texpect_set" -eq 1 ]; then
+        # TXT (what goes on the wire), not TEXPECT, is what `contains` counts and
+        # what a compounding check measures; the two may legitimately differ.
+        type_verified "$extra" "$tsel" expect "$texpect" "$txt"
+      else
+        type_verified "$extra" "$tsel" contains "$txt" "$txt"
+      fi
+      exit $?
+    fi
     ;;
   key)
     # browser [--frame <f>] key <Enter|Tab|Escape|Backspace|Delete|Arrow*|Home|End|Page*>
