@@ -2071,7 +2071,7 @@ field** (the CDP ops are bounded typed ops only; see the CDP security model abov
   what it is NOT". (Deliberately a stronger stance than `upload`'s opt-in:
   `upload` is a risk an operator can knowingly accept for one run, whereas a model
   stealing the screen has no legitimate autonomous use at all.)
-- **`upload` is NOT in the agent's op set** (11 ops, above — no `upload`). The
+- **`upload` is NOT in the agent's op set** (13 ops, above — no `upload`). The
   `browser` CLI keeps it: an operator choosing a path by hand is a legitimate,
   audit-logged action. The autonomous model is different — it is by design pointed
   at untrusted, prompt-injecting pages, and `upload` takes a caller-chosen
@@ -2239,7 +2239,7 @@ set none of them; it only ever supplies typed tool args):
 
 | var | default | what it does |
 |---|---|---|
-| `BROWSER_AGENT_ALLOWED_OPS` | *(unset → the 11-op `ALLOWED_OPS_DEFAULT`)* | space/comma list that REPLACES the agent's op allowlist wholesale. Narrows it (`"text,html"`) or deliberately re-enables an off-by-default op — this is the ONLY supported way to give the autonomous agent `upload` |
+| `BROWSER_AGENT_ALLOWED_OPS` | *(unset → the 13-op `ALLOWED_OPS_DEFAULT`)* | space/comma list that REPLACES the agent's op allowlist wholesale. Narrows it (`"text,html"`) or deliberately re-enables an off-by-default op — this is the ONLY supported way to give the autonomous agent `upload` |
 | `BROWSER_AGENT_OPENCODE` | `opencode` | the opencode binary (test seam) |
 | `BROWSER_AGENT_BROWSER_BIN` | `./browser` | the `browser` CLI used for open/close/probe (test seam) |
 | `BROWSER_AGENT_MODEL` | `openrouter/deepseek/deepseek-v4-flash` | model baked into the per-run agent def |

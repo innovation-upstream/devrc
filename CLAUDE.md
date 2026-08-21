@@ -142,7 +142,43 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
 - **Two always-on docs have enforced byte ceilings**, because both load on every session: `scripts/browser-bridge/SKILL.md` (gated by `scripts/browser-bridge/tests/test_skill_size.py`) and `claude/RULES.md` (gated by `scripts/tests/test_rules_size.py`). Each test OWNS its constants and prints an eviction playbook on failure — **read the numbers there, never restate them.** Any addition needs an eviction in the SAME commit.
 - **Run the gate with `scripts/gate.sh`** (`--tier pytest|node|both`, `--set hermetic|all`). It sends the full output to a LOG FILE and prints only a bounded summary, so there is no reason to pipe it — and **its exit status is authoritative**. It also cross-checks that status against the runners' own `RESULT:` line and exits **90 = could-not-vouch** when they disagree, when a run printed no verdict, or when `panic: test timed out` appears. 90 is not "the tests failed"; it means read the log.
 - **The runners' verdict line carries their exit code** (`RESULT: FAIL (exit=1)`), emitted from one writer behind an EXIT trap, so it survives a pipe and a killed run still says so. Historically the status was destroyed by `… | tail; echo "rc=$?"` — four agents reported `exit 0` over `RESULT: FAIL` on 2026-08-11 — which is why counting `PASSED`/`FAILED` lines used to be mandatory. Still a fine cross-check; no longer the only thing you can trust.
-- **CI gates both suites**: `nix build .#checks.x86_64-linux.pytests` and `.#checks.x86_64-linux.nodetests`. Both assert collected-test FLOORS and parse structured output rather than reading an exit code — `node --test <dir>` silently yields a bogus `# tests 1`, and a pytest suite can collect 0 with a zero exit.
+- 🔴 **NO AUTOMATED GATE IS RUNNING — the gate is YOU, by hand.** <!-- merge-gate: none -->
+  Nothing blocks a devrc merge today: there is no `.github/workflows`, `main` has no branch
+  protection or rulesets, no Tekton trigger names devrc, and `gh pr view <n> --json
+  statusCheckRollup` returns **0 checks** on every PR, merged ones included. This line used to
+  read `CI gates both suites`, which was false — the exact kind of claim nobody re-checks: an
+  agent reads it, believes the merge is protected, and skips the run.
+  🔴 **But a gate SHIPS IN THIS REPO, uninstalled** — `githooks/` (`install.sh`, `pre-push`,
+  `tests-on-push.sh`) is a real blocking pre-push test gate, and `scripts/run-tests.sh` treats
+  it as a first-class consumer. It is simply not installed: `git config --get core.hooksPath`
+  is what answers that, **never** `ls .git/hooks` — githooks installs by pointing
+  `core.hooksPath` elsewhere, so `.git/hooks` stays sample-only whether or not the gate is
+  live. ⚠ **Check for a REPO-LOCAL `core.hooksPath` before installing**: `install.sh` sets the
+  key `--global`, and a local one wins. Measured 2026-08-20: the workbench's `devrc` *and*
+  `homelab-talos` clones both carry `core.hooksPath` pointing back at their own `.git/hooks`
+  while the laptop's `devrc` carries none — so it is per-clone environmental (it correlates
+  with agent-worktree creation), NOT a devrc setting, and it is not safe to assume either way.
+  `git config --local --get core.hooksPath` per clone is the only answer.
+  **Until then: run the gate yourself before you merge, and say which command you ran.**
+  `nix build .#checks.x86_64-linux.pytests` / `.#checks.x86_64-linux.nodetests` (or
+  `scripts/gate.sh`) are authoritative — they assert collected-test FLOORS and parse structured
+  output rather than reading an exit code, because `node --test <dir>` silently yields a bogus
+  `# tests 1` and a pytest suite can collect 0 with a zero exit. Gate on the MERGED tree, not
+  the PR branch.
+  🔴 **The `<!-- merge-gate: … -->` marker above is LOAD-BEARING, not decoration.**
+  `scripts/tests/test_ci_claim_matches_reality.py` parses it and fails when it disagrees with
+  the repo. **Reword this prose freely — but keep a sentence on the marker's line and do not
+  add a second marker anywhere** (the test requires exactly one, and that its line still says
+  something to a human: an HTML comment renders as nothing, so a lone marker would leave you
+  reading no warning at all). Change the marker only when a workflow triggering on
+  **`pull_request`, `pull_request_target` or `merge_group`** appears or disappears — a `push`,
+  tag, `schedule` or `workflow_dispatch` workflow runs after or outside the merge, gates
+  nothing, and must leave it at `none`. Values: `none`, `github-actions`, or **`other`** if
+  something this test cannot see starts gating (Tekton, an installed `githooks/` pre-push
+  gate) — `other` exists so the test can never force you to write a false `none`. It pins that
+  one thing: whether such a run actually BLOCKS a merge is branch protection, which — along
+  with Tekton and git hooks — is named above but NOT machine-checked from here. Re-verify
+  those by hand rather than trusting this paragraph's age.
 - 🔴 **There is no hand-written test TOTAL any more.** `run-tests.sh` carries a **per-target** floor table (`TARGET_FLOORS`, pinned two-way against the target list) and derives the global floor as their sum. The old single `MIN_TESTS` literal was base-dependent and took **eleven values across eight PRs in one day**; `rerere` replayed a resolution from a different merge and silently wrote a four-way total onto a two-way tree. A floor is now a function of the current measurement — `m - min(50, max(1, m/20))` — and the gate PRINTS the exact replacement number when one drifts. Resolve a conflict here by re-running the gate and copying what it says, never by arithmetic on the two sides.
 - 🔴 **This repo is PUBLIC.** Never commit a real media-library path, directory name, filename, route log, or a real third-party hostname used as an example. **Nor CAPTURED TEXT — anyone's message bodies, prompts, transcripts or chat content, or a model's summaries of them — however it arrives** (an eval capture, a fixture, a debug dump). A test needs the SHAPE; regenerate it synthetic. Gated for JSON/JSONL/JSONC by `scripts/tests/test_no_captured_text.py` and for `.html`/`.txt` by `scripts/tests/test_no_captured_markup.py`; each owns its ledgers, thresholds, pinned allowlist and blind spots — read them there, never restate them. 🔴 All four content gates (these two plus the IP and hostname ones) read `git ls-files` and are **blind to git history** — see `SECRETS.md` → "Dead credentials in reachable history" before treating a green run as "the repo is clean".
 

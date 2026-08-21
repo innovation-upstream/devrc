@@ -1261,9 +1261,20 @@ def dismiss_cmd(task_id, session_id):
     cannot see its own hook payload, so a command it has to fill in a session id for
     is a command it cannot run — which is how the previous escape ("say so and stop")
     ended up being no escape at all.
+
+    🔴 The interpreter is `sys.executable`, not a bare `python3` — this was the last
+    bare-`python3` spelling of a managed hook left in the tree after #609 pinned the
+    registrations in ~/.claude/settings.json. It is free and exact: this hook is
+    already RUNNING under the pinned absolute interpreter, so `sys.executable` is
+    that path. A bare name would be resolved from PATH, and PATH has no python3 for
+    the ~1s of every `home-manager switch` in which the intermediate profile
+    generation is a partial closure — the model would get `command not found` for
+    the one command that clears the block. The fallback covers an embedded
+    interpreter, where sys.executable is empty; nothing here runs that way.
     """
-    return ("python3 ~/.claude/hooks/clawgate-writeback-guard.py --dismiss %d "
-            "--session %s" % (int(task_id), _sanitize(session_id)))
+    return ("%s ~/.claude/hooks/clawgate-writeback-guard.py --dismiss %d "
+            "--session %s" % (sys.executable or "python3", int(task_id),
+                              _sanitize(session_id)))
 
 
 def missing_text(task_id, first_read_ts, session_id=""):

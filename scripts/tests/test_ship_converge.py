@@ -78,21 +78,56 @@ class Repo:
     check from one wired to nothing.
     """
 
-    # Home-relative paths the fabricated generation "manages". Deliberately
-    # spans five different `home.file` families — a top-level file, a recursive
-    # skill dir, a hook, a top-level opencode mirror, and the recursive opencode
-    # skill mirror — so the check is exercised structurally rather than against
-    # one spelling. (These are fabricated under tmp_path, so nothing here has to
-    # exist in the repo; they are chosen to mirror the real families in
-    # nix/home.nix. `.claude/commands/` used to stand in for the recursive-dir
-    # shape and was dropped when that family was retired — see CLAUDE.md.)
-    MANAGED = (
-        ".claude/RULES.md",
-        ".claude/skills/bar/SKILL.md",
-        ".claude/hooks/bash-guard.py",
-        ".config/opencode/AGENTS.md",
-        ".config/opencode/skills/bar/SKILL.md",
+    # Home-relative paths the fabricated generation "manages", mapped to the
+    # repo file each one is deployed FROM — `None` meaning home-manager RENDERS
+    # it (the real ~/.config/opencode/AGENTS.md is `home.file….text`), so its
+    # bytes are not any repo file's and the currency check must exclude it
+    # rather than call it stale forever.
+    #
+    # Deliberately spans five different `home.file` families — a top-level file,
+    # a recursive skill dir, a hook, a rendered top-level opencode mirror, and
+    # the recursive opencode skill mirror — so both checks are exercised
+    # structurally rather than against one spelling. Two entries share ONE repo
+    # source, which is real (`.config/opencode/skills` mirrors `claude/skills`)
+    # and keeps a content-keyed check honest about many-to-one. (Fabricated
+    # under tmp_path; chosen to mirror the real families in nix/home.nix.
+    # `.claude/commands/` used to stand in for the recursive-dir shape and was
+    # dropped when that family was retired — see CLAUDE.md.)
+    MANAGED_SOURCES = {
+        ".claude/RULES.md": "claude/RULES.md",
+        ".claude/skills/bar/SKILL.md": "claude/skills/bar/SKILL.md",
+        ".claude/hooks/bash-guard.py": "scripts/claude-hooks/bash-guard.py",
+        ".config/opencode/AGENTS.md": None,
+        ".config/opencode/skills/bar/SKILL.md": "claude/skills/bar/SKILL.md",
+    }
+
+    # `mkOutOfStoreSymlink` targets: the deployed link resolves BACK INTO the
+    # repo working tree (really: the browser + dl-router skills and the
+    # close-the-loop ledger). Comparing one of these against the repo source is
+    # vacuously true — it is the SAME FILE — so the currency check must exclude
+    # them from its evidence count instead of padding it with checks that cannot
+    # fail. They still count for the RESOLUTION check, which they can fail.
+    OUT_OF_STORE = {
+        ".claude/skills/browser/SKILL.md": "scripts/browser-bridge/SKILL.md",
+    }
+
+    MANAGED = tuple(MANAGED_SOURCES) + tuple(OUT_OF_STORE)
+
+    # How many managed entries the currency check can actually judge: store
+    # copies whose bytes came from a repo file. Not len(MANAGED) — that is the
+    # point of the two exclusions above.
+    REPO_SOURCED = sum(1 for s in MANAGED_SOURCES.values() if s is not None)
+
+    # Every repo path some managed entry is deployed from, plus the version the
+    # base commit and the ahead commit give it. `_src_text` is the ONLY writer,
+    # so the fabricated generation and the git history cannot drift apart.
+    SOURCE_PATHS = sorted(
+        {s for s in MANAGED_SOURCES.values() if s} | set(OUT_OF_STORE.values())
     )
+
+    @staticmethod
+    def _src_text(src, version):
+        return f"{src}\nversion {version}\n"
 
     # The store path a cross-host copy leaves behind: a well-formed link into
     # ANOTHER host's home-manager closure, absent on the host doing the check.
@@ -108,13 +143,26 @@ class Repo:
     # kill, so _assert_foreign_store_is_absent() pins it.
     FOREIGN_STORE = "/nix/store/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz-home-manager-files"
 
-    def __init__(self, tmp_path, gitconfig_extra=""):
+    def __init__(self, tmp_path, gitconfig_extra="", stale_managed=(), phantom_managed=False):
+        """`stale_managed` seeds those entries from the BASE commit's bytes.
+
+        That is the real staleness shape, not a synthetic one: the deployed
+        content is a genuine former version of the repo file, still reachable in
+        the working clone's object store (it was cloned at that commit), while
+        the working tree has been fast-forwarded past it. `phantom_managed`
+        instead seeds EVERY entry with bytes that were never committed at all —
+        the shape in which nothing is repo-sourced and the check must refuse to
+        report a green.
+        """
         self.root = tmp_path
         self.origin = tmp_path / "origin.git"
         self.work = tmp_path / "work"
         self.home = tmp_path / "home"
         self.home.mkdir()
-        self._seed_home_manager_generation()
+        self.stale_managed = set(stale_managed)
+        self.phantom_managed = phantom_managed
+        unknown = self.stale_managed - set(self.MANAGED_SOURCES)
+        assert not unknown, f"stale_managed names non-managed paths: {unknown}"
 
         # Isolated global git config — the host's real one must not leak in.
         self.gitconfig = tmp_path / "gitconfig"
@@ -135,8 +183,9 @@ class Repo:
         )
         (builder / "f").write_text("base\n")
         (builder / "stable.txt").write_text("stable\n")
+        self._write_sources(builder, 1)
         self._git(builder, "checkout", "-q", "-B", "main")
-        self._git(builder, "add", "f", "stable.txt")
+        self._git(builder, "add", "f", "stable.txt", *self.SOURCE_PATHS)
         self._git(builder, "commit", "-q", "-m", "base")
         self._git(builder, "push", "-q", "-u", "origin", "main")
 
@@ -147,12 +196,23 @@ class Repo:
         )
         self._git(self.work, "checkout", "-q", "main")
 
-        # ...then origin/main advances (work is now exactly 1 behind).
+        # ...then origin/main advances (work is now exactly 1 behind). The
+        # ahead commit REWRITES every managed source, so version 1 becomes a
+        # historical blob and version 2 is what a converged host must serve.
         (builder / "f").write_text("base\nupstream\n")
         (builder / "added-upstream.txt").write_text("from upstream\n")
-        self._git(builder, "add", "f", "added-upstream.txt")
+        self._write_sources(builder, 2)
+        self._git(builder, "add", "f", "added-upstream.txt", *self.SOURCE_PATHS)
         self._git(builder, "commit", "-q", "-m", "ahead")
         self._git(builder, "push", "-q", "origin", "main")
+
+        self._seed_home_manager_generation()
+
+    def _write_sources(self, tree, version):
+        for src in self.SOURCE_PATHS:
+            p = tree / src
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(self._src_text(src, version))
 
     # -- fabricated home-manager generation --------------------------------- #
     def _seed_home_manager_generation(self):
@@ -179,12 +239,27 @@ class Repo:
         content.mkdir(parents=True)
         self.gen.mkdir(parents=True)
 
-        for rel in self.MANAGED:
+        for rel, src in self.MANAGED_SOURCES.items():
             blob = content / rel.replace("/", "_")
-            blob.write_text(f"managed content for {rel}\n")
+            if src is None or self.phantom_managed:
+                # Rendered by home-manager itself (or, under phantom_managed,
+                # deliberately unknown to git): these bytes are no repo file's.
+                blob.write_text(f"rendered content for {rel}\n")
+            else:
+                blob.write_text(self._src_text(src, 1 if rel in self.stale_managed else 2))
             for base in (self.hmfiles, self.home):
                 (base / rel).parent.mkdir(parents=True, exist_ok=True)
             (self.hmfiles / rel).symlink_to(blob)
+            (self.home / rel).symlink_to(self.hmfiles / rel)
+
+        # mkOutOfStoreSymlink: the manifest entry points OUT of the store, at the
+        # repo working tree, so the deployed path and the repo source are one
+        # file. It resolves (rc 12 can judge it) and can never be stale (rc 13
+        # must not count it).
+        for rel, src in self.OUT_OF_STORE.items():
+            for base in (self.hmfiles, self.home):
+                (base / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.hmfiles / rel).symlink_to(self.work / src)
             (self.home / rel).symlink_to(self.hmfiles / rel)
 
         (self.gen / "home-files").symlink_to(self.hmfiles)
@@ -300,6 +375,16 @@ class Repo:
 @pytest.fixture
 def repo(tmp_path):
     return Repo(tmp_path)
+
+
+@pytest.fixture
+def repo_stale(tmp_path):
+    """A host that RESOLVES perfectly while serving one file's OLD bytes.
+
+    The 2026-08-19 workbench, reduced: nothing is dangling, nothing is absent,
+    the git state converges — and ~/.claude/RULES.md is the previous version.
+    """
+    return Repo(tmp_path, stale_managed=[".claude/RULES.md"])
 
 
 def assert_converged(r, out):
@@ -750,10 +835,16 @@ def test_ship_never_rsyncs_a_home_manager_managed_path():
 # keeps unmanaged content (the clickup checkout's pnpm symlinks) out of scope
 # without needing an exclusion list that would rot.
 #
-# What it structurally CANNOT see, stated so nobody reads more into a green
-# than is there: a managed path REPLACED by a real file of the same name
-# resolves fine and is not reported. This check answers "does every managed
-# path resolve", not "is every managed path the store link nix intended".
+# What it structurally CANNOT see, stated so nobody reads more into a green than
+# is there — and it is NOT the single blind spot this comment used to name:
+#   * a managed path REPLACED by a real file of the same name resolves fine and
+#     is not reported;
+#   * STALENESS. Every input — the manifest AND the links in it — is read out of
+#     the host's own CURRENTLY-ACTIVE generation, so the reference point moves
+#     with the host and an old generation is perfectly self-consistent. That is
+#     rc13's job, tested in the next section.
+# This check answers "does every managed path resolve", not "is every managed
+# path the store link nix intended" and not "is it the CURRENT one".
 # --------------------------------------------------------------------------- #
 def _assert_shim_is_live(shim_dir, args, must_fail, why, expect_prefix=None):
     """🔴 Validate the INSTRUMENT before reading its verdict.
@@ -1036,3 +1127,349 @@ def test_managed_artifact_check_runs_on_the_remote_leg_too(repo):
     assert re.search(r'ssh .*"\$REMOTE_SSH".*\$CONVERGE', src), (
         "CONVERGE is no longer the body executed over ssh"
     )
+
+
+# --------------------------------------------------------------------------- #
+# The post-switch CURRENCY check (rc13)
+#
+# MEASURED 2026-08-19: the workbench served the pre-#611 ~/.claude/RULES.md
+# while ship.sh printed "488 checked, 0 dangling, 0 absent" and
+# "✅ VERIFIED … + switched". Nothing was broken — the host was simply on an OLD
+# generation, and rc12 reads its manifest out of that same old generation, so
+# its reference point moves with the host and it cannot see the condition at
+# all. Re-measured against real generations on 2026-08-20: pointing a synthetic
+# $HOME at home-manager generation 495 (2026-08-19 01:06) and the repo at
+# origin/main, rc12 reported "441 checked, 0 dangling, 0 absent" while the new
+# check reported 337 repo-sourced examined, 57 stale — .claude/RULES.md among
+# them. The two questions get two exit codes because they are two operator
+# actions: rc12 is a repair, rc13 is a re-switch.
+#
+# The comparison is by CONTENT with git as the oracle, so it needs no
+# manifest-path -> repo-path table (every such table is a spelling that rots):
+# a verbatim `home.file` deploy has the same git blob id as its repo source, a
+# blob that is in the object store but NOT in the working tree is a HISTORICAL
+# version, and a blob git has never seen was RENDERED rather than copied and is
+# excluded as carrying no evidence.
+# --------------------------------------------------------------------------- #
+def _currency_counts(out):
+    """(repo-sourced examined, stale) parsed out of the currency line."""
+    m = re.search(r"(\d+) repo-sourced examined, (\d+) stale", out)
+    assert m, f"no currency line with counts in output:\n{out}"
+    return int(m.group(1)), int(m.group(2))
+
+
+def _currency_buckets(out):
+    """(not-repo-sourced, out-of-store, dirs) from the same line."""
+    m = re.search(r"\((\d+) not repo-sourced, (\d+) out-of-store, (\d+) dirs\)", out)
+    assert m, f"no currency bucket accounting in output:\n{out}"
+    return int(m.group(1)), int(m.group(2)), int(m.group(3))
+
+
+def test_currency_check_reports_how_many_it_examined(repo):
+    """🔴 POSITIVE CONTROL — a current host must report a NON-ZERO examined count.
+
+    "0 stale" out of 0 examined is the same reassuring zero rc12 exists to
+    prevent, one question later, so the pair is the assertion: this host is
+    current AND something comparable was actually looked at. The count is
+    REPO_SOURCED, not len(MANAGED) — the rendered entry and the out-of-store
+    entry are excluded on purpose and are asserted separately below.
+    """
+    rc, out = repo.ship()
+
+    assert rc == 0, out
+    assert "managed artifacts CURRENT" in out, f"no currency verdict\n{out}"
+    examined, stale = _currency_counts(out)
+    assert (examined, stale) == (Repo.REPO_SOURCED, 0), (
+        f"expected all {Repo.REPO_SOURCED} repo-sourced managed paths to be "
+        f"examined and none stale\n{out}"
+    )
+
+
+def test_currency_check_catches_an_artifact_that_resolves_but_is_stale(repo_stale):
+    """🔴 THE REGRESSION TEST — the 2026-08-19 condition, end to end.
+
+    Every managed path resolves, so rc12 passes with a perfect green; one of
+    them serves the BASE commit's bytes while the tree has been fast-forwarded
+    past it. Before this check existed the run exited 0 and printed VERIFIED.
+    """
+    rc, out = repo_stale.ship()
+
+    assert rc == 13, f"expected rc13 (consumer stale), got {rc}\n{out}"
+    assert "MANAGED ARTIFACTS STALE" in out, f"wrong failure reported\n{out}"
+    assert ".claude/RULES.md" in out, f"the stale path is not named\n{out}"
+    # 🔴 The load-bearing half: the OLD check is green on this very run. If it
+    # were red too, rc13 would be redundant rather than a distinct question.
+    assert "✅ managed artifacts resolve" in out, (
+        f"rc12 did not pass here, so this fixture is not the staleness case\n{out}"
+    )
+    assert "✅ VERIFIED" not in out, f"reported VERIFIED with a stale consumer\n{out}"
+    examined, stale = _currency_counts(out)
+    assert (examined, stale) == (Repo.REPO_SOURCED, 1), out
+    # Actionable: it must say re-switch, not repair, and identify the generation.
+    assert "home-manager switch --flake" in out
+    assert "generation being served" in out, f"no generation fingerprint\n{out}"
+
+
+def test_currency_check_catches_every_managed_family_not_just_rules_md(tmp_path):
+    """Structural, not spelled: staleness in ANY family is caught.
+
+    A check that only knew about `.claude/RULES.md` would pass three of these.
+    All four repo-sourced entries are stale at once, and all four must be named.
+    """
+    r = Repo(tmp_path, stale_managed=[k for k, v in Repo.MANAGED_SOURCES.items() if v])
+
+    rc, out = r.ship()
+
+    assert rc == 13, f"expected rc13, got {rc}\n{out}"
+    examined, stale = _currency_counts(out)
+    assert (examined, stale) == (Repo.REPO_SOURCED, Repo.REPO_SOURCED), out
+    for rel, src in Repo.MANAGED_SOURCES.items():
+        if src:
+            assert rel in out, f"{rel} stale but not named\n{out}"
+
+
+def test_currency_check_excludes_out_of_store_symlinks_from_the_evidence(repo_stale):
+    """🔴 The vacuous-check exclusion, asserted as a NUMBER, not as prose.
+
+    A `mkOutOfStoreSymlink` target resolves back into the repo working tree, so
+    comparing it against the repo source compares a file with itself: it can
+    never be stale, and every one of them counted as evidence would inflate the
+    examined number with checks incapable of detecting anything. The fixture has
+    one, and it must land in the out-of-store bucket while the store-copy in the
+    SAME run is still caught — which is what makes this an exclusion rather than
+    a blanket skip.
+    """
+    rc, out = repo_stale.ship()
+
+    assert rc == 13, out
+    examined, stale = _currency_counts(out)
+    rendered, out_of_store, _dirs = _currency_buckets(out)
+    assert out_of_store == len(Repo.OUT_OF_STORE), (
+        f"the mkOutOfStoreSymlink entry is not being separated out\n{out}"
+    )
+    assert rendered == sum(1 for v in Repo.MANAGED_SOURCES.values() if v is None), (
+        f"the rendered (non-repo-sourced) entry is not being separated out\n{out}"
+    )
+    # The exclusion is not a skip: the buckets and the evidence add up to every
+    # manifest entry, and the stale store copy in the same run was still caught.
+    assert examined + rendered + out_of_store == len(Repo.MANAGED), (
+        f"manifest entries went missing between the buckets\n{out}"
+    )
+    assert stale == 1, out
+    # ...and the excluded path is NOT among the things reported stale.
+    for rel in Repo.OUT_OF_STORE:
+        assert rel not in out, f"an out-of-store link was reported\n{out}"
+
+
+def test_currency_check_refuses_when_nothing_is_repo_sourced(tmp_path):
+    """🔴 REACHABILITY for the zero-examined guard — the vacuous green, again.
+
+    Every managed entry carries bytes git has never seen, so nothing is
+    comparable. A check that reported "0 stale" here would be reporting on an
+    empty set, which is exactly the shape that let the original bug run for
+    months. Reached with a case no earlier branch rejects: the manifest is
+    locatable, non-empty, and every path resolves.
+    """
+    r = Repo(tmp_path, phantom_managed=True)
+
+    rc, out = r.ship()
+
+    assert rc == 13, f"a comparison over nothing reported success: rc={rc}\n{out}"
+    assert "0 repo-sourced artifacts examined" in out, f"wrong guard fired\n{out}"
+    assert "broken probe, not a current host" in out, out
+    assert "✅ VERIFIED" not in out, out
+    # rc12 is still green — the host resolves fine, we simply cannot judge it.
+    assert "✅ managed artifacts resolve" in out, out
+
+
+def _git_shim(shim_dir, mode):
+    """A `git` that is real for every subcommand except one, sabotaged per mode.
+
+    ship.sh runs a dozen git commands; the shim must pass all of them through or
+    the run fails somewhere unrelated and the test proves nothing about the
+    guard it names.
+    """
+    real = shutil.which("git")
+    assert real, "no git on PATH"
+    shim_dir.mkdir(exist_ok=True)
+    if mode == "truncate-hash-object":
+        body = (
+            "for a in \"$@\"; do\n"
+            "  if [ \"$a\" = hash-object ]; then\n"
+            f"    {real} \"$@\" | sed '$d'\n"
+            "    exit 0\n"
+            "  fi\n"
+            "done\n"
+            f"exec {real} \"$@\"\n"
+        )
+    elif mode == "empty-ls-files":
+        body = (
+            "for a in \"$@\"; do\n"
+            "  if [ \"$a\" = ls-files ]; then exit 0; fi\n"
+            "done\n"
+            f"exec {real} \"$@\"\n"
+        )
+    else:  # pragma: no cover - programming error
+        raise AssertionError(f"unknown shim mode {mode}")
+    write_exec(shim_dir / "git", body)
+    return shim_dir
+
+
+def test_currency_check_refuses_when_the_digest_count_does_not_match(repo, tmp_path):
+    """🔴 REACHABILITY + INSTRUMENT VALIDATION for the digest-count guard.
+
+    `git hash-object --stdin-paths` emits one line per path. If it emits fewer —
+    it aborts on the first unreadable path — the parallel rel/blob lists slip by
+    one and every subsequent verdict is attached to the WRONG file. Silently
+    dropping the tail would also shrink the examined count toward the vacuous
+    zero. The guard compares the two line counts; this reaches it.
+    """
+    shim = _git_shim(tmp_path / "trunc-git-shim", "truncate-hash-object")
+    # The shim is the whole experiment — prove it is live and that it still
+    # passes normal subcommands through.
+    env = {**os.environ, "PATH": f"{shim}:{os.environ['PATH']}"}
+    probe = subprocess.run(
+        [str(shim / "git"), "-C", str(repo.work), "hash-object", "--stdin-paths"],
+        input=f"{repo.work}/f\n{repo.work}/stable.txt\n",
+        capture_output=True, text=True, env=env,
+    )
+    assert probe.returncode == 0 and len(probe.stdout.split()) == 1, (
+        f"the shim did not truncate hash-object, so this test proves nothing: "
+        f"{probe.stdout!r} {probe.stderr!r}"
+    )
+    passthrough = subprocess.run(
+        [str(shim / "git"), "-C", str(repo.work), "rev-parse", "--short", "HEAD"],
+        capture_output=True, text=True, env=env,
+    )
+    assert passthrough.returncode == 0 and passthrough.stdout.strip(), (
+        f"the shim broke unrelated git subcommands: {passthrough.stderr!r}"
+    )
+
+    rc, out = repo.ship(PATH=f"{shim}:{os.environ['PATH']}")
+
+    assert rc == 13, f"a slipped digest list reported success: rc={rc}\n{out}"
+    assert "CURRENCY NOT CHECKED" in out and "digests for" in out, (
+        f"wrong guard fired\n{out}"
+    )
+    assert "✅ VERIFIED" not in out, out
+
+
+def test_currency_check_refuses_an_empty_repo_reference_set(repo, tmp_path):
+    """🔴 REACHABILITY for the reference-set guard — a comparison wired to nothing.
+
+    The repo side of the comparison is `git ls-files` -> hash-object. If that
+    comes back empty, NOTHING deployed can match the working tree, so every
+    repo-sourced artifact would be reported stale — a confident, total false
+    positive, and a permanently-red gate is worse than no gate. The guard
+    refuses instead; this reaches it with a `git` whose ls-files says nothing.
+    """
+    shim = _git_shim(tmp_path / "nolsfiles-git-shim", "empty-ls-files")
+    env = {**os.environ, "PATH": f"{shim}:{os.environ['PATH']}"}
+    probe = subprocess.run(
+        [str(shim / "git"), "-C", str(repo.work), "ls-files"],
+        capture_output=True, text=True, env=env,
+    )
+    assert probe.returncode == 0 and probe.stdout == "", (
+        f"the shim did not empty ls-files: {probe.stdout!r}"
+    )
+    real_probe = subprocess.run(
+        ["git", "-C", str(repo.work), "ls-files"], capture_output=True, text=True,
+    )
+    assert real_probe.stdout.strip(), "positive control: the real repo lists files"
+
+    rc, out = repo.ship(PATH=f"{shim}:{os.environ['PATH']}")
+
+    assert rc == 13, f"an empty reference set reported a verdict: rc={rc}\n{out}"
+    assert "CURRENCY NOT CHECKED" in out and "read NO source files" in out, (
+        f"wrong guard fired\n{out}"
+    )
+    assert "MANAGED ARTIFACTS STALE" not in out, (
+        f"an empty reference set was turned into a stale verdict\n{out}"
+    )
+    assert "✅ VERIFIED" not in out, out
+
+
+def test_currency_check_works_without_gnu_find_extensions(repo_stale, tmp_path):
+    """🔴 The currency walk must not depend on GNU `find` either.
+
+    Same measured hazard as the resolution walk: over `ssh <laptop>` `find` is a
+    BusyBox applet with no -printf, and this routine runs over ssh on the remote
+    host. Asserted on the STALE fixture so a shim that silently zeroed the walk
+    would show up as a missed detection rather than as an unchanged green.
+    """
+    real_find = shutil.which("find")
+    assert real_find, "no find on PATH"
+    shim_dir = tmp_path / "busybox-shim-currency"
+    shim_dir.mkdir()
+    write_exec(
+        shim_dir / "find",
+        'for a in "$@"; do\n'
+        "  case $a in\n"
+        "    -printf|-regextype|-quit)\n"
+        '      echo "find: unrecognized: $a" >&2; exit 1 ;;\n'
+        "  esac\n"
+        "done\n"
+        f'exec {real_find} "$@"\n',
+    )
+    _assert_shim_is_live(
+        shim_dir,
+        args=["-printf", "%p"],
+        must_fail=True,
+        why="the shim never rejected -printf, so this test proves nothing",
+    )
+
+    rc, out = repo_stale.ship(PATH=f"{shim_dir}:{os.environ['PATH']}")
+
+    assert rc == 13, f"the currency walk needs GNU find extensions\n{out}"
+    examined, stale = _currency_counts(out)
+    assert (examined, stale) == (Repo.REPO_SOURCED, 1), (
+        f"BusyBox-compatible find examined {examined} of {Repo.REPO_SOURCED} "
+        f"repo-sourced paths — the walk under-counts on the remote leg\n{out}"
+    )
+
+
+def test_currency_check_runs_on_the_remote_leg_too():
+    """The currency check must live in CONVERGE, the body shipped over ssh.
+
+    The laptop is the host most likely to sit on an old generation — it is
+    routinely shut, so it misses ships — which makes a local-only currency check
+    worthless for exactly the machine that needs it.
+    """
+    src = SHIP.read_text()
+    converge = src.split("CONVERGE='", 1)[1].split("\n'\n", 1)[0]
+    assert "verify_managed_currency" in converge, (
+        "the currency check is not inside CONVERGE, so it cannot run on the "
+        "remote host — the one most likely to be on a stale generation"
+    )
+    assert "exit 13" in converge, "rc13 is not raised from inside CONVERGE"
+
+
+def test_every_converge_exit_code_is_documented_in_the_header_and_the_legend():
+    """🔴 The rc ladder is published TWICE and both copies must be complete.
+
+    ship.sh documents its exit codes in the header comment and prints a legend
+    on failure. An undocumented rc is an operator staring at a bare number, and
+    a legend that lags the code is worse than none — so this pins the code as
+    the source of truth and both prose copies to it.
+    """
+    src = SHIP.read_text()
+    converge = src.split("CONVERGE='", 1)[1].split("\n'\n", 1)[0]
+    codes = {int(m) for m in re.findall(r"\bexit (\d+)", converge)}
+    codes.discard(0)
+    assert len(codes) >= 8, (
+        f"the exit-code parser found only {sorted(codes)} — CONVERGE raises "
+        f"nine distinct codes, so the ledger is reading almost nothing"
+    )
+    assert 13 in codes, f"rc13 is not raised in CONVERGE: {sorted(codes)}"
+
+    header = src.split("set -uo pipefail", 1)[0]
+    legend = src.split('echo "ship: incomplete', 1)[1]
+    for rc in sorted(codes):
+        assert re.search(rf"^#\s+{rc}\s", header, re.M), (
+            f"exit {rc} is raised in CONVERGE but not documented in the "
+            f"'Exit codes:' header block"
+        )
+        assert f"rc{rc}=" in legend, (
+            f"exit {rc} is raised in CONVERGE but missing from the rc legend "
+            f"printed on failure"
+        )

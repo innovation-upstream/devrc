@@ -37,12 +37,15 @@ WHAT THIS FILE IS FOR
 
 Fixtures are synthetic. This repo is public: no real paths, hostnames or task titles.
 """
+import ast
+import atexit
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -52,10 +55,42 @@ HOME_NIX = ROOT / "nix" / "home.nix"
 
 BASH = shutil.which("bash") or "/bin/bash"
 
-NEXT_STEP = "python3 ~/.claude/hooks/next-step-nudge.py"
-NOTIFY = "python3 ~/.claude/hooks/claude-notify.py"
-LEDGER = "python3 ~/.claude/hooks/agent-ledger-hook.py"
-WRITEBACK = "python3 ~/.claude/hooks/clawgate-writeback-guard.py"
+# The interpreter the registrant writes into every managed hook command. Pinned
+# to a synthetic path via $DEVRC_HOOK_PYTHON so the expectations below do not
+# depend on whichever interpreter happens to run pytest; the UNPINNED resolution
+# is covered behaviourally by its own test at the bottom of section 1.
+#
+# 🔴 It must be a REAL, executable file. $DEVRC_HOOK_PYTHON is a test seam with
+# PRODUCTION REACH — activation inherits the operator's environment — so the
+# registrant validates it (absolute / exists / executable / one `python*` token)
+# and falls back to its own sys.executable with a warning when it is not. The
+# file is created under a private temp dir, never at a path that exists on this
+# host, so nothing here can pass by accident of the environment.
+_FAKE_STORE = tempfile.mkdtemp(prefix="devrc-fake-store-")
+atexit.register(shutil.rmtree, _FAKE_STORE, True)
+
+
+def fake_python(store_name):
+    """A stand-in for a /nix/store python: real file, executable, `python*` name.
+
+    The registrant only stat()s it (`isfile` + `access(X_OK)`); nothing execs it,
+    so it deliberately carries NO shebang — a runtime-written executable stub is
+    what `scripts/tests/test_runtime_shebangs.py` gates repo-wide.
+    """
+    p = Path(_FAKE_STORE) / store_name / "bin" / "python3.12"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("stand-in for an interpreter binary: stat()ed, never executed\n")
+    p.chmod(0o755)
+    return str(p)
+
+
+HOOK_PY = fake_python("0000000000000000000000000000000-python3-3.12.14")
+
+NEXT_STEP = HOOK_PY + " ~/.claude/hooks/next-step-nudge.py"
+NOTIFY = HOOK_PY + " ~/.claude/hooks/claude-notify.py"
+LEDGER = HOOK_PY + " ~/.claude/hooks/agent-ledger-hook.py"
+WRITEBACK = HOOK_PY + " ~/.claude/hooks/clawgate-writeback-guard.py"
+BASH_GUARD = HOOK_PY + " ~/.claude/hooks/bash-guard.py"
 CLAWGATE_STOP = "/home/zach/.claude/clawgate-stop-hook.sh"
 TMUX_STOP = "~/.config/tmux/task-hook.sh"
 
@@ -103,10 +138,18 @@ def make_home(tmp_path, settings, name="home"):
     return home
 
 
-def run_activation(home, registrar=REGISTRAR, python=None, args=None):
-    """Drive the SHIPPED wrapper exactly as home.nix drives it."""
+def run_activation(home, registrar=REGISTRAR, python=None, args=None,
+                   hook_python=HOOK_PY):
+    """Drive the SHIPPED wrapper exactly as home.nix drives it.
+
+    `hook_python=None` drops the $DEVRC_HOOK_PYTHON override so the registrant
+    resolves the interpreter the way it does in production.
+    """
     env = dict(os.environ)
     env["HOME"] = str(home)
+    env.pop("DEVRC_HOOK_PYTHON", None)
+    if hook_python is not None:
+        env["DEVRC_HOOK_PYTHON"] = hook_python
     if args is None:
         args = [str(registrar), python or sys.executable]
     return subprocess.run(
@@ -199,7 +242,12 @@ def test_unrelated_settings_content_is_untouched(tmp_path):
         for e in data["hooks"]["PreToolUse"]
         for h in e.get("hooks", [])
     ]
-    assert pre == ["python3 ~/.claude/hooks/bash-guard.py"], pre
+    # 🔴 bash-guard's INTERPRETER is normalised (a bare `python3` here dies with
+    # 127 mid-switch, and a PreToolUse hook exiting 127 fails OPEN) while its
+    # REGISTRATION is left exactly as it was: still one entry, still the only
+    # one on this event. Two surfaces, two widths — see the registrant's
+    # docstring. Asserted as a whole-list equality so an extra entry fails it.
+    assert pre == [BASH_GUARD], pre
 
 
 def test_a_settings_file_that_already_has_the_nudge_is_left_byte_identical(tmp_path):
@@ -227,6 +275,80 @@ def test_no_temp_files_are_left_beside_settings_json(tmp_path):
     assert p.returncode == 0 and NEXT_STEP in stop_commands(home), p.stderr
     leftovers = [n for n in os.listdir(home / ".claude") if n != "settings.json"]
     assert leftovers == [], leftovers
+
+
+def test_a_pre_migration_settings_file_has_every_interpreter_pinned(tmp_path):
+    """🔴 THE 127 WINDOW, at the seam that actually runs on every switch.
+
+    `home-manager switch` updates ~/.nix-profile as remove-then-install, so for
+    ~1s the live generation is a partial closure with NO python3 on it (measured
+    on this host: 337 binaries against 625 in the final one). A hook registered
+    as a bare `python3 …` firing in that window dies with
+    `python3: command not found` — and bash-guard is a PreToolUse hook whose 127
+    is classified NON-BLOCKING, so the guard fails OPEN exactly there.
+
+    The fixture is the shape both hosts were in before this change.
+    """
+    home = make_home(
+        tmp_path,
+        settings_with([TMUX_STOP, "python3 ~/.claude/hooks/claude-notify.py"]),
+    )
+
+    p = run_activation(home)
+
+    assert p.returncode == 0, p.stderr
+    data = json.loads(settings_bytes(home))
+    commands = [
+        h.get("command")
+        for arr in data["hooks"].values()
+        for e in arr
+        for h in e.get("hooks", [])
+    ]
+    unpinned = [c for c in commands if c.startswith("python3 ")]
+    assert unpinned == [], (
+        "these hook commands still start with a bare `python3`, so they die with "
+        "127 during the switch's profile window: " + repr(unpinned)
+    )
+    # Anti-vacuity: the file really does still carry hooks, and one of them is
+    # the guard whose 127 fails open.
+    assert BASH_GUARD in commands, commands
+    assert HOOK_PY in p.stdout, p.stdout
+
+
+def test_the_interpreter_is_resolved_through_the_blinking_symlink(tmp_path):
+    """🔴 THE RESOLUTION ITSELF, with $DEVRC_HOOK_PYTHON deliberately UNSET.
+
+    Every other test here pins the interpreter to a literal, which would leave
+    `os.path.realpath(sys.executable)` — the whole mechanism — untested. Run by
+    hand, the registrant's sys.executable is `~/.nix-profile/bin/python3`: a
+    symlink that BLINKS during a switch, which is the bug. Writing that path
+    would close nothing.
+
+    Launching through a symlink reproduces it hermetically: CPython leaves
+    sys.executable as the path it was invoked by, so a registrant that skipped
+    the realpath would write the symlink and this goes red.
+    """
+    blink = tmp_path / "blinking-profile" / "bin"
+    blink.mkdir(parents=True)
+    link = blink / "python3"
+    link.symlink_to(sys.executable)
+    resolved = os.path.realpath(link)
+    assert resolved != str(link), "fixture must not resolve to itself"
+
+    home = make_home(tmp_path, settings_with([TMUX_STOP]))
+    p = run_activation(home, python=str(link), hook_python=None)
+
+    assert p.returncode == 0, p.stderr
+    written = stop_commands(home)
+    nudges = [c for c in written if c.endswith("/next-step-nudge.py")]
+    assert len(nudges) == 1, written
+    interpreter = nudges[0].split(" ", 1)[0]
+    assert interpreter == resolved, (
+        "the registrant wrote %r; it must write the REALPATH %r, never the "
+        "symlink it was invoked through" % (interpreter, resolved)
+    )
+    assert os.path.isabs(interpreter), interpreter
+    assert str(link) not in nudges[0], nudges[0]
 
 
 # --------------------------------------------------------------------------- #
@@ -364,6 +486,88 @@ def test_home_nix_deploys_the_registrar_itself():
         "comments for weeks, which is why nothing ever registered the hooks"
     )
     assert REGISTRAR.exists()
+
+
+# --- the REWRITE surface's managed set, DERIVED and pinned two-way ----------- #
+def registrar_literal(name):
+    """A module-level literal out of the registrar, read with `ast` — never by
+    importing it, because importing runs it against the operator's real
+    ~/.claude/settings.json. `frozenset({...})` is unwrapped to its set literal."""
+    tree = ast.parse(REGISTRAR.read_text(), filename=str(REGISTRAR))
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
+            continue
+        value = node.value
+        if isinstance(value, ast.Call) and getattr(value.func, "id", "") == "frozenset":
+            value = value.args[0]
+        return ast.literal_eval(value)
+    raise AssertionError("%s is not a module-level literal in %s" % (name, REGISTRAR))
+
+
+def test_the_managed_hook_set_is_pinned_two_way_against_home_nix():
+    """🔴 THE REWRITE SURFACE'S LEDGER — the set of scripts whose interpreter the
+    registrant will rewrite, pinned against the `home.file.".claude/hooks/*.py"`
+    entries it is derived from. Same idiom as drift-check.sh's nix/pkgs scan:
+    a literal a human reviewed, checked against the tree it claims to describe.
+
+    Fails when the set GROWS — a new hook lands in home.nix and nobody decides
+    whether its interpreter is managed, which is how the 127 window reopens for
+    exactly one hook — and when it SHRINKS.
+
+    It is a literal in the registrant rather than a scan because the DEPLOYED
+    registrant is a /nix/store copy with no repo checkout to read; the price of
+    that is one line per new hook, and this test is what charges it.
+    """
+    deployed = {n for n in home_nix_deploys() if n.endswith(".py")}
+    managed = set(registrar_literal("MANAGED_HOOK_SCRIPTS"))
+    libraries = set(registrar_literal("HOOK_LIBRARY_MODULES"))
+    registrar = registrar_literal("REGISTRAR_SCRIPT")
+
+    # Positive control: a parser that found nothing would make this vacuous.
+    assert len(deployed) >= 8, deployed
+    assert "bash-guard.py" in deployed, deployed
+
+    assert deployed == managed | libraries | {registrar}, (
+        "nix/home.nix's .claude/hooks/*.py set no longer matches the registrant's "
+        "ledger. Unaccounted (deployed, but neither managed nor explicitly "
+        "excluded): %r. Stale (claimed, but not deployed): %r. A new hook must be "
+        "added to MANAGED_HOOK_SCRIPTS — or, if it is a library module that is "
+        "never invoked as a hook, to HOOK_LIBRARY_MODULES."
+        % (sorted(deployed - (managed | libraries | {registrar})),
+           sorted((managed | libraries | {registrar}) - deployed))
+    )
+
+
+def test_the_two_exclusions_are_explicit_and_justified():
+    """🔴 The exclusions must be a DECISION, not an accident of omission.
+
+    A hook missing from MANAGED_HOOK_SCRIPTS and from every exclusion list would
+    fail the pin above; these assertions add the other half — that the things
+    excluded really are excluded for the reason claimed, and that no script is
+    both managed and excluded.
+    """
+    managed = set(registrar_literal("MANAGED_HOOK_SCRIPTS"))
+    libraries = set(registrar_literal("HOOK_LIBRARY_MODULES"))
+    registrar = registrar_literal("REGISTRAR_SCRIPT")
+
+    assert managed & libraries == set(), managed & libraries
+    assert registrar not in managed, registrar
+    assert registrar == REGISTRAR.name, registrar
+    # A library module is one that nothing ever registers AS a hook — so none of
+    # them may appear in the registrant's own command tables.
+    assert libraries & registrar_registers() == set(), (
+        "a module excluded as a never-invoked library IS in the command tables: "
+        + repr(sorted(libraries & registrar_registers()))
+    )
+    # ...and every hook the registrant registers must be one it will also keep
+    # pinned, or the append surface would write a command the rewrite surface
+    # refuses to maintain.
+    assert registrar_registers() <= managed, (
+        "registered but not in the managed set, so its interpreter would never "
+        "be re-pinned: " + repr(sorted(registrar_registers() - managed))
+    )
 
 
 def activation_block():

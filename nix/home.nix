@@ -157,10 +157,47 @@ in
           { trigger = ":hlt"; replace = "${workspace}/homelab-talos "; label = "homelab-talos path"; search_terms = ["infra"]; }
           { trigger = ":kuc"; replace = "${workspace}/kubeclaw "; label = "kubeclaw path"; search_terms = ["kubeclaw"]; }
 
-          # SSH connect
-          { trigger = ":sshwn"; replace = "ssh zach@10.42.0.30"; label = "SSH workbench (nebula)"; search_terms = ["ssh" "workbench" "wb" "nebula" "mesh" "remote"]; }
+          # SSH connect — 2026-08-19 /espanso-audit, CORRECTED after review.
+          # 🔴 READ THIS BEFORE TRUSTING `--lint`: an AMBIGUOUS search is NOT a
+          # failed one. espanso's search UI lists EVERY match and the user picks
+          # a row; two matches means two rows, not a dead query. What breaks on
+          # ambiguity is only `espanso_detect._attribute`, which returns None
+          # when a term hits >=2 snippets and so records the fire as
+          # UNATTRIBUTED. `--lint`'s wording ("can never fire from the search
+          # UI") describes the TELEMETRY, not espanso, and overclaims.
+          # The first pass here read that literally, concluded 'lap'/'ssh wor'
+          # "fired nothing", and STRIPPED the nebula pair's label+search_terms.
+          # That traded the user's discoverability for tidier telemetry and was
+          # strictly worse: 'nebula', 'mesh' and 'remote' went from 2 picker
+          # rows to ZERO, and with no label espanso falls back to showing the
+          # raw `ssh zach@10.42.0.30` as the row's description.
+          # So: labels stay. The nebula pair simply stops SPELLING the host
+          # word, which is what made the bare host query ambiguous — `rig` and
+          # `portable` carry the host sense instead. Net effect:
+          #   'lap' / 'ssh lap' -> :sshll, 'ssh wor' -> :sshwl   (now unique)
+          #   'nebula'/'mesh'/'remote'   -> both nebula rows     (picker, kept)
+          # All four endpoints are in live use — real `ssh` invocations in
+          # activity.events over the window were laptop-LAN 4, workbench-LAN 3,
+          # workbench-nebula 1, laptop-nebula 0 — so do NOT "simplify" by
+          # deleting either pair. An earlier pass proposed collapsing to
+          # nebula-only by reasoning from the search stream; that would have
+          # deleted the two most-used endpoints. Query the USAGE signal.
+          # Gate: build both configs and diff resolutions across the whole
+          # prefix universe, checking BOTH picker rows and attribution — a
+          # change that improves attribution while blanking picker rows is a
+          # regression, and only the two-sided diff shows it.
+          # 'rig' / 'portable' are deliberately NOT repeated in search_terms —
+          # they are already label words, and _token_matches reads labels, so a
+          # duplicate entry is dead config that only looks like a guard.
+          # They are COINED disambiguators, not measured queries: the repo says
+          # "rig" for the workbench (scripts/rig-control.sh, the rig-control bar
+          # button) but has no existing word for the laptop other than "laptop",
+          # which is the one word this snippet may not spell. Both nebula rows
+          # are found in practice via 'nebula'/'mesh'/'remote' + the picker;
+          # these words only stop the two rows reading identically.
+          { trigger = ":sshwn"; replace = "ssh zach@10.42.0.30"; label = "SSH rig via nebula mesh"; search_terms = ["nebula" "mesh" "remote"]; }
           { trigger = ":sshwl"; replace = "ssh zach@192.168.50.250"; label = "SSH workbench (LAN)"; search_terms = ["ssh" "workbench" "wb" "lan" "local"]; }
-          { trigger = ":sshln"; replace = "ssh zach@10.42.0.100"; label = "SSH laptop (nebula)"; search_terms = ["ssh" "laptop" "nebula" "mesh" "remote"]; }
+          { trigger = ":sshln"; replace = "ssh zach@10.42.0.100"; label = "SSH portable via nebula mesh"; search_terms = ["nebula" "mesh" "remote"]; }
           { trigger = ":sshll"; replace = "ssh zach@192.168.50.155"; label = "SSH laptop (LAN)"; search_terms = ["ssh" "laptop" "lan" "local"]; }
 
           # hot singles
@@ -195,8 +232,8 @@ in
           # interface — and the old search_terms (ask/clarify/questions/elicit/…)
           # contained none of the words he actually types: feedback, dispatch,
           # process. Lead the label with "feedback" and add those three terms.
-          { trigger = ":acq"; replace = "dispatch subagent to process feedback\nask clarifying questions and recommend anything useful to include before dispatching (include complete test coverage)"; label = "Process feedback: dispatch subagent + ask clarifying questions"; search_terms = ["feedback" "dispatch" "process" "ask" "clarify" "clarifying" "questions" "elicit" "scope" "include"]; }
-          { trigger = ":alo"; replace = "anything left outstanding from this thread?"; label = "Anything left outstanding?"; search_terms = ["anything" "left" "outstanding" "ask" "clarify" "clarifying" "questions" "elicit" "scope" "include"]; }
+          { trigger = ":acq"; replace = "dispatch subagent to process feedback\nask clarifying questions and recommend improvements and anything useful to include before dispatching (include complete test coverage)"; label = "Process feedback: dispatch subagent + ask clarifying questions"; search_terms = ["feedback" "dispatch" "process" "ask" "clarify" "clarifying" "questions" "elicit" "scope" "include"]; }
+          { trigger = ":alo"; replace = "anything left outstanding from this thread?"; label = "Anything left outstanding?"; search_terms = ["anything" "left" "outstanding" "loose" ]; }
           { trigger = ":kickoff"; replace = "give me the kickoff message to copy paste to next session"; label = "Kickoff message for next session"; search_terms = ["kickoff" "kick off" "next session" "copy paste" "handoff" "message"]; }
           # Added 2026-08-05 via /espanso-audit — both are WHOLE-STANDALONE-MESSAGE
           # shaped, the one shape that has stuck (:eos 72 fires, :kickoff 38); every
@@ -226,6 +263,22 @@ in
           # queries ("in the meantime", "what can we do") tokenize onto this
           # snippet (see espanso_detect._term_matches).
           { trigger = ":mt"; replace = "tee up what we can do in the meantime: identify work that is INDEPENDENT of what is currently running — nothing touching the same files — then dispatch it in parallel with complete test coverage. if we are actually blocked until that finishes, say so plainly instead of inventing filler work."; label = "Meantime: tee up independent parallel work while that runs"; search_terms = ["meantime" "in the meantime" "while" "while that runs" "parallel" "queue" "queue up" "tee" "tee up" "wait" "blocked" "idle" "what can we do"]; }
+          # Added 2026-08-19 via /espanso-audit — all three WHOLE-STANDALONE-MESSAGE
+          # shaped, the only shape that has ever stuck here. Transcript demand over
+          # the 13-day window: "anything left open from this thread/session?" 13,
+          # "proceed, dispatch(, include complete test coverage)" 29+3, "create a
+          # /clawgate task to pick up the issues" 3.
+          # 🔴 The search_terms below are NOT free-form — `_token_matches` is a
+          # SUBSTRING test over trigger + label words + search_terms, so a new
+          # label can silently STEAL an existing snippet's searches. The obvious
+          # term for :cgt was "task", and 'ask' ⊂ 'task' would have hijacked all
+          # 58 of :acq's 'ask' fires — caught by replaying the real search stream,
+          # not by reading the list. Hence "ticket" here, and "coverage"/"proceed"
+          # rather than "dispatch" on :pdt. Re-run
+          # `espanso-usage.py --replay --config <candidate>` after ANY edit here
+          # and diff it against the deployed config: 0 regressions is the gate.
+          { trigger = ":pdt"; replace = "proceed, dispatch, include complete test coverage"; label = "Proceed with complete test coverage"; search_terms = ["proceed" "coverage" "test coverage" "complete" "tests"]; }
+          { trigger = ":cgt"; replace = "create a /clawgate task to pick up the issues"; label = "Create a clawgate ticket for the issues"; search_terms = ["clawgate" "ticket" "issues" "pick up"]; }
           # Removed 2026-07-25 via /espanso-audit — all keylog-evidence-backed:
           #  ZERO-FIRE set — 0 keylog fires + short-form hand-typing; steering already in
           #   RULES.md / slash-commands: :rnx, :pst ("proceed, dispatch" typed 40+×),
@@ -942,8 +995,13 @@ in
   # to displace a hand-placed regular file at this path — the switch returns
   # rc=0 and silently leaves it unmanaged. `dropStaleClaudeHooks` below is what
   # actually removes it; see the measurement in that comment. Registration in
-  # ~/.claude/settings.json stays per-host and needs no change — it already
-  # invokes `python3 ~/.claude/hooks/bash-guard.py`, which this symlink backs.
+  # ~/.claude/settings.json stays per-host — register-nudge-hook.py deliberately
+  # does NOT own it and will never create a bash-guard entry. What it DOES own is
+  # that entry's INTERPRETER: a bare `python3` there dies with `command not found`
+  # during the ~1s window where the switch's intermediate profile generation has
+  # no python3, and a PreToolUse hook exiting 127 is non-blocking — i.e. the guard
+  # FAILS OPEN mid-switch. The registrar rewrites the token to an absolute
+  # /nix/store python; see its module docstring.
   home.file.".claude/hooks/bash-guard.py" = {
     source = ../scripts/claude-hooks/bash-guard.py;
     force = true;
@@ -1005,7 +1063,9 @@ in
   # is likewise managed now). audit-pr-nudge fires
   # PostToolUse on `gh pr create` and injects context so Claude reflexively offers
   # `/audit-pr` (transcript audit: that request was hand-typed ≥14x while the skill
-  # sat unused). Registered as `python3 ~/.claude/hooks/audit-pr-nudge.py`.
+  # sat unused). Registered by register-nudge-hook.py, which writes an ABSOLUTE
+  # /nix/store interpreter into the command — never a bare `python3`, which is
+  # missing from the profile for ~1s of every switch.
   home.file.".claude/hooks/audit-pr-nudge.py" = {
     source = ../scripts/claude-hooks/audit-pr-nudge.py;
   };
@@ -1064,8 +1124,8 @@ in
   # 🔴 THE AGENT ACTIVITY LEDGER — writer 1 (Claude Code), plus the shared module
   # it and `scripts/session-manager` BOTH read the record shape from.
   #
-  # Why the module ships here and not only in the repo: the hook runs as
-  # `python3 ~/.claude/hooks/agent-ledger-hook.py`, and Python puts the SCRIPT's
+  # Why the module ships here and not only in the repo: the hook is invoked with
+  # the .claude/hooks/ copy as its script argument, and Python puts the SCRIPT's
   # directory on sys.path — so `agent_ledger.py` must sit beside it, exactly the
   # arrangement bash-guard.py already has with guard_core.py. Same source file as
   # `scripts/lib/agent_ledger.py`, which session-manager loads by explicit path,
@@ -1160,6 +1220,12 @@ in
   # The wrapper never returns non-zero, so this cannot abort a switch under
   # activation's `set -eu -o pipefail`; see the contract in its header.
   # $DRY_RUN_CMD keeps `home-manager build`/dry-run read-only.
+  #
+  # 🔴 ${pkgs.python312}/bin/python3 is not merely "an interpreter that works" —
+  # the registrar writes `os.path.realpath(sys.executable)` into every managed
+  # hook command, so THIS path is what lands in settings.json and pins the hooks
+  # to an immutable, GC-rooted store closure. Swapping it for a profile path
+  # would silently reopen the mid-switch `python3: command not found` window.
   home.activation.registerClaudeHooks =
     lib.hm.dag.entryAfter [ "writeBoundary" "linkGeneration" ] ''
       $DRY_RUN_CMD ${pkgs.bash}/bin/bash ${../scripts/claude-hooks/register-hooks-activation.sh} \
