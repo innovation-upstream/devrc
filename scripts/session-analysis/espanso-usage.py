@@ -753,6 +753,116 @@ def declared_terms(ts, trig):
     return terms
 
 
+# --------------------------------------------------------------------------- #
+# CONFIG DIFF — the two-axis check neither --lint nor --replay performs
+# --------------------------------------------------------------------------- #
+# 🔴 WHY THIS EXISTS, and why the two axes are graded DIFFERENTLY.
+#
+# --lint sees one config. --replay sees only terms he ACTUALLY TYPED in the
+# window, so a term he never happened to search is invisible to it. On
+# 2026-08-19 both called a change clean while it took 'nebula', 'mesh' and
+# 'remote' from TWO picker rows to ZERO — a real loss of discoverability,
+# introduced while chasing tidier telemetry.
+#
+# The two axes are not the same kind of fact:
+#   * PICKER ROWS — what the user can reach. espanso lists EVERY match as a row
+#     and the user arrows to one. Losing the last row for a query means that
+#     query now finds nothing. This is a REGRESSION and fails the gate.
+#   * ATTRIBUTION — whether `_attribute` can NAME one snippet. Ambiguity costs
+#     only telemetry: the fire still happens, it is logged with trigger=None.
+#     Adding any snippet adds vocabulary and so loses some attribution; grading
+#     that as failure would make this a permanently-red gate, which trains
+#     everyone to click through. It is REPORTED, never fatal.
+#
+# Getting that backwards is the whole 2026-08-19 incident in one sentence.
+GATE_OK = 0
+GATE_ROWS_LOST = 1
+
+
+def _probe_universe(ts) -> set:
+    """Every prefix of every word the config can be searched by.
+
+    Prefixes, because the search bar matches as he types: 'nebu' must be
+    checked, not just 'nebula'. Words come from the trigger, the LABEL and the
+    search_terms — the exact three sources `_token_matches` reads.
+    """
+    words = set()
+    for trig in ts.triggers:
+        words.add(trig.lstrip(":").lower())
+        meta = ts.meta.get(trig) or {}
+        words |= set(LABEL_WORD_RE.findall((meta.get("label") or "").lower()))
+        for st in meta.get("search_terms") or []:
+            if isinstance(st, str):
+                words |= set(LABEL_WORD_RE.findall(st.lower()))
+    return {w[:i] for w in words if w for i in range(1, len(w) + 1)}
+
+
+def diff_configs(ts_before, ts_after) -> dict:
+    """Resolve the whole prefix universe against both configs.
+
+    Uses the detector's OWN matcher rather than re-spelling the rules — a
+    re-spelt copy of its label tokenizer once invented findings for every
+    hyphenated label word (see LABEL_WORD_RE above).
+    """
+    d_before, d_after = EspansoDetector(ts_before), EspansoDetector(ts_after)
+    probes = sorted(_probe_universe(ts_before) | _probe_universe(ts_after))
+    rows_lost, attr_lost, attr_gained, attr_moved = [], [], [], []
+    for probe in probes:
+        rows_b = [t for t in d_before.ts.triggers if d_before._term_matches(probe, t)]
+        rows_a = [t for t in d_after.ts.triggers if d_after._term_matches(probe, t)]
+        if rows_b and not rows_a:
+            rows_lost.append((probe, sorted(rows_b)))
+        att_b, att_a = d_before._attribute(probe), d_after._attribute(probe)
+        if att_b and not att_a:
+            attr_lost.append((probe, att_b, len(rows_a)))
+        elif att_a and not att_b:
+            attr_gained.append((probe, att_a))
+        elif att_b and att_a and att_b != att_a:
+            attr_moved.append((probe, att_b, att_a))
+    return {
+        "probes": len(probes),
+        "rows_lost": rows_lost,
+        "attr_lost": attr_lost,
+        "attr_gained": attr_gained,
+        "attr_moved": attr_moved,
+    }
+
+
+def render_diff(d, before_label, after_label) -> list:
+    out = [f"## CONFIG DIFF — {before_label} -> {after_label}", "",
+           f"   {d['probes']} prefix probes. PICKER ROWS are what the user can",
+           "   reach; ATTRIBUTION is only whether telemetry can name the snippet.",
+           "   Losing a row FAILS. Losing attribution is reported, never fatal —",
+           "   adding any snippet costs some, and a permanently-red gate is worse",
+           "   than no gate.", ""]
+    if d["rows_lost"]:
+        out.append(f"  🔴 PICKER ROWS LOST — {len(d['rows_lost'])} "
+                   "quer(y/ies) now reach NOTHING:")
+        for probe, was in d["rows_lost"]:
+            out.append(f"       {probe!r} listed {len(was)} row(s) ({' '.join(was)}) -> 0")
+        out.append("")
+    else:
+        out.append("  ✅ no picker rows lost")
+        out.append("")
+    out.append(f"  attribution gained : {len(d['attr_gained'])}")
+    for probe, trig in d["attr_gained"][:20]:
+        out.append(f"       {probe!r} -> {trig}")
+    if len(d["attr_gained"]) > 20:
+        out.append(f"       ... and {len(d['attr_gained']) - 20} more")
+    out.append(f"  attribution lost   : {len(d['attr_lost'])}  (telemetry only, not a failure)")
+    for probe, was, now_rows in d["attr_lost"][:20]:
+        out.append(f"       {probe!r} was {was}, now {now_rows} rows")
+    if len(d["attr_lost"]) > 20:
+        out.append(f"       ... and {len(d['attr_lost']) - 20} more")
+    if d["attr_moved"]:
+        out.append(f"  🔴 attribution MOVED : {len(d['attr_moved'])} "
+                   "(a query now resolves to a DIFFERENT snippet)")
+        for probe, was, now in d["attr_moved"]:
+            out.append(f"       {probe!r} {was} -> {now}")
+    out.append("")
+    return out
+
+
 def lint(ts):
     """Offline findings, worst first.
 
@@ -1009,6 +1119,15 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="raw search-term breakdown instead of the report")
     p.add_argument("--replay", action="store_true",
                    help="resolve observed search terms through the real detector")
+    p.add_argument("--diff-config", default=None, metavar="PATH",
+                   help="resolve the whole prefix universe against the deployed "
+                        "config (or --config) AND this candidate; report picker "
+                        "rows lost / attribution lost, gained, moved. Exits 1 "
+                        "if any query loses its last picker row.")
+    p.add_argument("--gate", default=None, metavar="PATH",
+                   help="PRE-SHIP GATE, offline: --lint the candidate then diff "
+                        "it against the deployed config, in one command with one "
+                        "verdict. Exits 1 on a lost picker row.")
     p.add_argument("--lint", action="store_true",
                    help="offline discoverability/ambiguity check (no creds needed)")
     p.add_argument("--config", default=None, metavar="PATH",
@@ -1052,6 +1171,35 @@ def main(argv=None) -> int:
     # ---- modes that need no ClickHouse ----
     if a.verify_deploy:
         rc = _run_verify(a, out)
+        print("\n".join(out))
+        return rc
+
+    if a.diff_config or a.gate:
+        candidate = a.gate or a.diff_config
+        before_path = a.config or default_config_path()
+        try:
+            ts_before = load_config(a.config)
+        except ConfigUnavailable as e:
+            print("\n".join(unmeasured_banner(e, what="CONFIG (deployed side)")))
+            return 3
+        try:
+            ts_after = load_config(candidate)
+        except ConfigUnavailable as e:
+            print("\n".join(unmeasured_banner(e, what="CONFIG (candidate)")))
+            return 3
+        # NOTE: a candidate that parses to ZERO snippets is already refused by
+        # load_config (it raises ConfigUnavailable), so the empty side can never
+        # reach the diff and produce a confident wall of "rows lost". A guard
+        # here as well was UNREACHABLE — a mutation sweep showed disabling it
+        # changed nothing — so it is deliberately absent rather than sitting
+        # there looking like protection. test_gate_exit_codes pins the rc 3.
+        if a.gate:
+            out.extend(render_lint(lint(ts_after), candidate))
+        d = diff_configs(ts_before, ts_after)
+        out.extend(render_diff(d, before_path, candidate))
+        rc = GATE_ROWS_LOST if d["rows_lost"] else GATE_OK
+        out.append("GATE: FAIL — a query lost its last picker row (see above)"
+                   if rc else "GATE: PASS — no picker rows lost")
         print("\n".join(out))
         return rc
 

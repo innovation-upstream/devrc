@@ -723,3 +723,130 @@ def test_parse_args_keeps_every_legacy_flag():
 def test_bad_source_is_rejected():
     with pytest.raises(SystemExit):
         M.parse_args(["--source", "nope"])
+
+
+# --------------------------------------------------------------------------- #
+# --diff-config / --gate : the two-axis check
+# --------------------------------------------------------------------------- #
+# 🔴 These pin the 2026-08-19 incident. `--lint` and `--replay` both called a
+# change clean while it took 'nebula'/'mesh'/'remote' from TWO picker rows to
+# ZERO. The axes are graded differently ON PURPOSE: a lost ROW is a user-facing
+# regression and FAILS; lost ATTRIBUTION costs only telemetry and is REPORTED,
+# because adding any snippet loses some and a permanently-red gate is worse than
+# no gate at all.
+_SSH_BEFORE = [
+    {"trigger": ":sshwn", "replace": "ssh a", "label": "SSH rig via nebula mesh",
+     "search_terms": ["nebula", "mesh", "remote"]},
+    {"trigger": ":sshwl", "replace": "ssh b", "label": "SSH workbench (LAN)",
+     "search_terms": ["ssh", "workbench", "lan"]},
+]
+_SSH_STRIPPED = [
+    {"trigger": ":sshwn", "replace": "ssh a"},          # label+terms removed
+    {"trigger": ":sshwl", "replace": "ssh b", "label": "SSH workbench (LAN)",
+     "search_terms": ["ssh", "workbench", "lan"]},
+]
+
+
+def test_diff_identical_configs_reports_nothing():
+    """POSITIVE CONTROL for the whole diff: a config against itself is clean.
+
+    Without this, a probe universe that came out EMPTY would make every
+    assertion below pass vacuously — the reassuring zero this file is built to
+    refuse. The probe count is asserted non-trivial for the same reason.
+    """
+    ts = _ts(_SSH_BEFORE)
+    d = M.diff_configs(ts, ts)
+    assert d["probes"] > 20, (
+        f"only {d['probes']} probes — the universe is near-empty, so the "
+        "buckets below would be vacuously clean"
+    )
+    assert d["rows_lost"] == []
+    assert d["attr_lost"] == []
+    assert d["attr_gained"] == []
+    assert d["attr_moved"] == []
+
+
+def test_diff_catches_the_2026_08_19_picker_blanking():
+    """Stripping a label takes every word describing it from 2 rows to 0."""
+    d = M.diff_configs(_ts(_SSH_BEFORE), _ts(_SSH_STRIPPED))
+    lost = {probe for probe, _ in d["rows_lost"]}
+    for probe in ("nebula", "mesh", "remote", "nebu"):
+        assert probe in lost, (
+            f"{probe!r} reached :sshwn before and reaches nothing after, but the "
+            f"diff did not flag it. rows_lost={sorted(lost)}"
+        )
+
+
+def test_lost_attribution_is_reported_but_is_NOT_a_failure():
+    """Adding a snippet costs attribution; grading that as failure would make
+    this a permanently-red gate, which trains everyone to click through."""
+    before = [{"trigger": ":aa", "replace": "x", "label": "Alpha thing",
+               "search_terms": ["alpha"]}]
+    after = before + [{"trigger": ":bb", "replace": "y", "label": "Alpha other",
+                       "search_terms": ["alphaother"]}]
+    d = M.diff_configs(_ts(before), _ts(after))
+    assert d["attr_lost"], "'alpha' should have become ambiguous"
+    assert d["rows_lost"] == [], (
+        "no query lost its last row — an ambiguous query still LISTS both, so "
+        "this must not be graded as a regression"
+    )
+
+
+def test_diff_reports_gained_and_moved_attribution():
+    before = [{"trigger": ":aa", "replace": "x", "label": "Zulu", "search_terms": ["zulu"]}]
+    after = [{"trigger": ":aa", "replace": "x", "label": "Zulu", "search_terms": ["zulu"]},
+             {"trigger": ":cc", "replace": "z", "label": "Quebec", "search_terms": ["quebec"]}]
+    d = M.diff_configs(_ts(before), _ts(after))
+    assert any(p == "quebec" and t == ":cc" for p, t in d["attr_gained"])
+    # and a MOVE: the same word changes owner
+    moved_after = [{"trigger": ":dd", "replace": "x", "label": "Zulu", "search_terms": ["zulu"]}]
+    dm = M.diff_configs(_ts(before), _ts(moved_after))
+    assert any(p == "zulu" and a == ":aa" and b == ":dd" for p, a, b in dm["attr_moved"])
+
+
+def test_probe_universe_covers_prefixes_of_all_three_sources():
+    """The search bar matches as he TYPES, so 'nebu' must be probed, not just
+    'nebula'. Words come from trigger + label + search_terms."""
+    u = M._probe_universe(_ts([
+        {"trigger": ":xyz", "replace": "x", "label": "Alpha bravo",
+         "search_terms": ["charlie"]}]))
+    for probe in ("x", "xy", "xyz", "a", "alph", "alpha", "b", "bravo", "c", "charlie"):
+        assert probe in u, f"{probe!r} missing from the probe universe"
+
+
+def test_render_diff_names_the_lost_rows():
+    """A gate whose output does not say WHICH query broke costs a round trip."""
+    d = M.diff_configs(_ts(_SSH_BEFORE), _ts(_SSH_STRIPPED))
+    text = "\n".join(M.render_diff(d, "before.yml", "after.yml"))
+    assert "PICKER ROWS LOST" in text
+    assert "nebula" in text and ":sshwn" in text
+    clean = "\n".join(M.render_diff(M.diff_configs(_ts(_SSH_BEFORE), _ts(_SSH_BEFORE)),
+                                    "a", "b"))
+    assert "no picker rows lost" in clean
+    assert "PICKER ROWS LOST" not in clean
+
+
+def test_gate_exit_codes(tmp_path, capsys):
+    """CLI-level: red on a lost row, green on a benign add, UNMEASURED on empty."""
+    import yaml
+    pytest.importorskip("yaml")
+    before = tmp_path / "before.yml"
+    before.write_text(yaml.safe_dump({"matches": _SSH_BEFORE}))
+    stripped = tmp_path / "stripped.yml"
+    stripped.write_text(yaml.safe_dump({"matches": _SSH_STRIPPED}))
+    benign = tmp_path / "benign.yml"
+    benign.write_text(yaml.safe_dump({"matches": _SSH_BEFORE + [
+        {"trigger": ":zz", "replace": "q", "label": "Totally new",
+         "search_terms": ["totallynew"]}]}))
+    empty = tmp_path / "empty.yml"
+    empty.write_text("matches: []\n")
+
+    assert M.main(["--config", str(before), "--gate", str(stripped)]) == M.GATE_ROWS_LOST
+    assert "PICKER ROWS LOST" in capsys.readouterr().out
+
+    assert M.main(["--config", str(before), "--gate", str(benign)]) == M.GATE_OK
+    assert "GATE: PASS" in capsys.readouterr().out
+
+    # A candidate that parses to nothing is UNMEASURED, never "everything broke".
+    assert M.main(["--config", str(before), "--gate", str(empty)]) == 3
+    assert "UNMEASURED" in capsys.readouterr().out

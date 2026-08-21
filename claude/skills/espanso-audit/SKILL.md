@@ -40,8 +40,18 @@ nix-shell -p python3Packages.pyyaml --run \
 3. `--lint` → offline, no creds. Flags a snippet that NO term resolves uniquely
    to: `_attribute` returns None on ambiguity, so it can never fire from the
    search UI.
-4. Propose changes, then run **`--replay --config <candidate base.yml>` as a
-   PRE-SHIP gate** — prove the new `search_terms` resolve BEFORE shipping.
+4. Propose changes, then run **`--gate <candidate base.yml>`** — the one
+   pre-ship command. Offline, no creds. It lints the candidate AND resolves the
+   whole prefix universe against the deployed config, reporting two axes that
+   are graded differently:
+   - **picker rows lost** — a query that listed snippets now reaches NOTHING.
+     A user-facing regression: **exit 1**, do not ship.
+   - **attribution lost/gained/moved** — telemetry only. An ambiguous query
+     still LISTS every match; only `_attribute` cannot name one. Adding any
+     snippet costs some, so this is reported and never fatal.
+   `--diff-config <candidate>` is the diff alone. `--replay --config <candidate>`
+   still cross-checks against terms he really typed — useful, but NOT sufficient:
+   it only replays observed terms, so a term he never searched is invisible to it.
 5. Edit `services.espanso` in `nix/home.nix` on a branch → PR → merge →
    `scripts/ship.sh`.
 6. `--verify-deploy` → both hosts: deployed trigger set, `espanso` active, and
