@@ -98,7 +98,7 @@
       gateTools = [
         gatePyEnv pkgs.bash pkgs.ripgrep pkgs.git pkgs.util-linux pkgs.jq
         pkgs.gnugrep pkgs.curl pkgs.nodejs pkgs.nix pkgs.opencode pkgs.logrotate
-        pkgs.rsync
+        pkgs.rsync pkgs.zsh
       ];
     in
     {
@@ -292,6 +292,20 @@
             # nix-shell-stripped-PATH method as the `nix` entry above reproduced
             # it. Present on the workbench (`~/.nix-profile/bin/rsync`), so the
             # pre-push tier is unaffected.
+            #
+            # zsh: scripts/tests/test_run3.py. The rule `scripts/run3` enforces
+            # is a zsh-vs-bash DIFFERENCE — MULTIOS duplicates stdout onto a
+            # pipe, so `cmd 2>&1 >/dev/null | c` hands the consumer stdout where
+            # bash hands it nothing — so a tier without zsh is structurally
+            # blind to the entire class: both zsh tests would skip and the gate
+            # would go green having exercised only the shell in which the defect
+            # cannot occur. Hermetic enough to gate: `zsh -c` on a literal
+            # string, no network, no writes. ⚠ It DOES source `~/.zshenv` — in
+            # the sandbox HOME holds none, and on the workbench devrc's does not
+            # touch MULTIOS, which is exactly why the trap is live there. That
+            # is a property the control test ASSERTS rather than assumes.
+            # Present on both hosts as the login shell, so the pre-push tier is
+            # unaffected.
             # `gateTools` is defined in the outer `let` and is SHARED verbatim
             # with devShells.default — see the block that defines it. Adding a
             # tool there is what makes `nix develop` able to run this same
