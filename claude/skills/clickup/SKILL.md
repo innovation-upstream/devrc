@@ -61,6 +61,11 @@ node query.mjs edit-page <doc_id> <page_id> --file /tmp/page.md
   `--all-spaces` (includes archived) and `--all-time` have **no server-side filter** —
   they pull full history and are slow. `--me` / `--assignee` narrows server-side and
   stays near-instant at any window.
+- **`awaiting` measures ONE thing: the newest comment on a task is not the token
+  owner's.** Comment-level `resolved` is not readable through the API and ClickUp has
+  no bot identity, so "unresolved" is not computable and *anything* this token posts
+  reads as the owner answering. It fans out one request per task — hence `--max`, and
+  hence the examined/matched/truncated counts it always prints.
 - **`claim <task>`** links the current session to a task via the Session ID custom
   field, so work is resumable later. Non-obvious and easy to forget.
 - **`--account <name>`** targets a non-default identity on any command
