@@ -136,6 +136,34 @@ loki.source.journal "system" {
 loki.relabel "journal" {
   forward_to = []
 
+  // 🔴 DEFAULT-DENY TRANSPORT ALLOWLIST. This is the primary privacy control;
+  // the redaction stages further down are defence-in-depth, not the guarantee.
+  //
+  // Why structural rather than pattern-matching: FIVE successive audit rounds
+  // each found a defect in the redaction regexes, and the last three were
+  // introduced by the preceding fix. A denylist has to enumerate every shape a
+  // secret can take, which is unbounded. Dropping the transport that carries
+  // application output removes the hazard class instead of chasing it.
+  //
+  // Measured on this host (7 days, ~98k lines):
+  //     stdout  69.9%   application output — docker, MinIO, Postgres, agent
+  //                     tooling. Every content class the scrubbing existed for.
+  //     journal 24.1%   systemd's own messages
+  //     syslog   4.2%   sudo, ssh, cron
+  //     kernel   1.9%   THE FREEZE EVIDENCE
+  //
+  // So the dropped 70% is almost exactly the risky part, and the freeze
+  // forensics this pipeline exists for live in the kept 30%.
+  //
+  // `keep` is an ALLOWLIST on purpose: a transport that does not exist yet is
+  // dropped by default rather than shipped by default. Adding one is a
+  // deliberate edit here, not an accident of some other change.
+  rule {
+    source_labels = ["__journal__transport"]
+    regex         = "kernel|journal|syslog"
+    action        = "keep"
+  }
+
   rule {
     source_labels = ["__journal__systemd_unit"]
     target_label  = "unit"
@@ -245,12 +273,24 @@ loki.process "scrub" {
   //        tail is what required the leaky value class above.
 
   // 2a. Quoted value — JSON, YAML, config dumps, and any secret containing a
-  //     comma, semicolon or space. `(?:[^'"\\]|\\.)*` rather than `[^'"]*` so an
-  //     ESCAPED quote inside the value does not end the match early: with the
-  //     simpler class, {"password": "a\\"b"} redacted to "[REDACTED]"b" and one
-  //     character of the secret survived (measured).
+  //     comma, semicolon or space.
+  //
+  //     🔴 The value class is `[^'"]*`, NOT an escape-aware `(?:[^'"\\]|\\.)*`.
+  //     The escape-aware form was tried, to stop `{"password": "a\\"b"}` leaving
+  //     one character behind — and it introduced a WORSE leak: it treats a lone
+  //     trailing backslash as an escape, so
+  //         token="abc\\" password="hunter2zz"
+  //     matched through the real closing quote to the NEXT quote, yielding
+  //         token="[REDACTED]"hunter2zz"     <- the second secret in CLEAR.
+  //     Both measured against alloy 1.17.1. A one-character residue is a
+  //     bounded cosmetic leak; a whole following credential is not. Reverted.
+  //
+  //     Residual, accepted and asserted: an ESCAPED quote inside a value leaves
+  //     the tail of that value behind. JSON is the main producer of that shape,
+  //     and JSON arrives on `stdout`, which the transport allowlist above now
+  //     drops entirely.
   stage.replace {
-    expression = "(?i)(?:access[_-]?key|secret[_-]?key|api[_-]?key|secret|token|password|passwd|authorization)[\"']?\\s*[=:]\\s*(?:bearer\\s+|basic\\s+)?['\"]((?:[^'\"\\\\]|\\\\.)*)['\"]"
+    expression = "(?i)(?:access[_-]?key|secret[_-]?key|api[_-]?key|secret|token|password|passwd|authorization)[\"']?\\s*[=:]\\s*(?:bearer\\s+|basic\\s+)?['\"]([^'\"]*)['\"]"
     replace    = "[REDACTED]"
   }
 
@@ -261,10 +301,20 @@ loki.process "scrub" {
   //     `password: "abcdef` (a line journald split at LineMax, say) shipped in
   //     CLEAR — a redaction the single-rule version did perform. Measured.
   //
-  //     The class excludes `"` but ALLOWS `'`: excluding `"` is what keeps this
-  //     idempotent over 2a's output (`"[REDACTED]", "user": ...`), while
-  //     allowing `'` stops `password=ab'cd` truncating to `[REDACTED]'cd` —
-  //     the same partial-leak class as everything else here.
+  //     The class excludes `"` but ALLOWS `'`. Excluding `"` keeps this
+  //     idempotent over 2a's DOUBLE-quoted output; allowing `'` stops
+  //     `password=ab'cd` truncating to `[REDACTED]'cd`.
+  //
+  //     🔴 BE PRECISE ABOUT THE COST — an earlier comment here called it
+  //     "consuming the closing quote", which understated it. For a SINGLE-quoted
+  //     value the match runs on to the next WHITESPACE, so following
+  //     comma/semicolon-joined fields are eaten too (measured):
+  //         password='abc',user=bob,host=h   ->  password='[REDACTED]
+  //         {'password': 'abc', 'user': 'bob'} -> {'password': '[REDACTED] 'user': 'bob'}
+  //     That is over-redaction (the acceptable direction) and no secret leaks,
+  //     but Python/Ruby dict reprs are a real shape. Idempotency likewise holds
+  //     for double-quoted and unquoted output but NOT for single-quoted: each
+  //     re-pass eats further. Production is single-pass.
   stage.replace {
     expression = "(?i)(?:access[_-]?key|secret[_-]?key|api[_-]?key|secret|token|password|passwd|authorization)[\"']?\\s*[=:]\\s*(?:bearer\\s+|basic\\s+)?['\"]?([^\\s\"]+)"
     replace    = "[REDACTED]"

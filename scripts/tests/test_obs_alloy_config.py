@@ -74,6 +74,64 @@ def test_the_only_urls_present_are_env_lookups_or_loopback():
     assert offenders == [], f"hardcoded URL(s) in a public repo: {offenders}"
 
 
+# --- the transport allowlist: the PRIMARY privacy control ------------------ #
+# Five audit rounds each found a defect in the redaction regexes, three of them
+# introduced by the preceding fix. So the guarantee is no longer "we can pattern
+# -match every secret" — it is "the transport carrying application output is
+# never shipped". These pin that, because a `keep` rule silently turning into a
+# no-op would restore the whole hazard class with every test still green.
+
+
+def _relabel_rules(text: str):
+    """The rule blocks of loki.relabel "journal", as raw strings."""
+    import re
+
+    block = re.search(r'loki\.relabel "journal" \{(.*?)\n\}', text, re.S)
+    assert block, "loki.relabel \"journal\" not found"
+    live = "\n".join(
+        ln for ln in block.group(1).splitlines() if not ln.strip().startswith("//")
+    )
+    return re.findall(r"rule \{(.*?)\n  \}", live, re.S)
+
+
+def test_a_transport_allowlist_exists_and_is_a_keep_not_a_drop():
+    """`keep` is default-DENY: a transport that does not exist yet is dropped
+    rather than shipped. A `drop` rule listing bad transports would be
+    default-allow, and would ship anything new by accident."""
+    rules = _relabel_rules(CONFIG.read_text())
+    keeps = [r for r in rules if 'action' in r and '"keep"' in r]
+    assert len(keeps) == 1, f"expected exactly one keep rule, found {len(keeps)}"
+    assert "__journal__transport" in keeps[0], "the allowlist must key on transport"
+
+
+def test_stdout_is_not_in_the_allowlist():
+    """`stdout` is 69.9% of this host's journal and carries every content class
+    the scrubbing existed for: container output, DB errors echoing values,
+    object-store credential errors, agent tooling."""
+    import re
+
+    rules = _relabel_rules(CONFIG.read_text())
+    keep = next(r for r in rules if '"keep"' in r)
+    regex = re.search(r'regex\s*=\s*"([^"]*)"', keep).group(1)
+    allowed = regex.split("|")
+    assert "stdout" not in allowed, f"stdout would be shipped: {allowed}"
+    # And the transports the freeze investigation actually reads must survive.
+    for needed in ("kernel", "journal"):
+        assert needed in allowed, f"{needed} must be shipped — it is the evidence"
+
+
+def test_the_allowlist_regex_is_fully_anchored_by_alternation_not_a_substring():
+    """A regex like `kern` would match `kernel` but relabel anchors the whole
+    value, so assert the entries are exact transport names rather than prefixes."""
+    import re
+
+    keep = next(r for r in _relabel_rules(CONFIG.read_text()) if '"keep"' in r)
+    regex = re.search(r'regex\s*=\s*"([^"]*)"', keep).group(1)
+    known = {"kernel", "journal", "syslog", "stdout", "audit", "driver"}
+    for entry in regex.split("|"):
+        assert entry in known, f"{entry!r} is not a systemd transport name"
+
+
 # --- the scrubbing contract ----------------------------------------------- #
 
 def test_notification_bodies_are_dropped():
@@ -167,7 +225,12 @@ def test_every_replace_stage_in_the_config_is_parsed():
     # anchor. `_replace_stages` now also accepts either attribute order, so both
     # halves of that hole are closed rather than one.
     declared = len(re.findall(r"stage\.replace\s*\{", live))
-    stages = _replace_stages(text)
+    # 🔴 Parse `live`, not `text`. Parsing the full file let a COMMENTED-OUT
+    # block be read in place of a real one: the block regex spanned the dead
+    # block into the next rule's closing brace, so the parsed expression came
+    # from the comment while the counts still matched and this pin stayed green
+    # — with a live rule modelled by nothing. Measured.
+    stages = _replace_stages(live)
     assert declared >= 4, f"expected the redaction rules, found {declared} live blocks"
     assert len(stages) == declared, (
         f"parsed {len(stages)} of {declared} live stage.replace blocks — "
@@ -221,9 +284,19 @@ MEASURED_REDACTIONS = [
     # A quote INSIDE an unquoted value truncated to `[REDACTED]'cd`.
     ("app: password=ab'cd done",
      "app: password=[REDACTED] done"),
-    # An ESCAPED quote ended 2a's match early, leaving one character behind.
+    # ACCEPTED RESIDUAL: an escaped quote ends 2a's match early, leaving the
+    # tail of the value behind. The escape-aware class that fixed this caused a
+    # strictly worse leak (see the next case), so it was reverted. JSON is the
+    # main producer of this shape and arrives on `stdout`, which the transport
+    # allowlist drops entirely.
     ('app: {"password": "a\\"b", "user": "bob"}',
-     'app: {"password": "[REDACTED]", "user": "bob"}'),
+     'app: {"password": "[REDACTED]"b", "user": "bob"}'),
+    # 🔴 THE REASON that residual is accepted: with an escape-aware value class,
+    # a lone trailing backslash consumed the real closing quote and the match
+    # ran to the NEXT quote, shipping the following credential in CLEAR
+    # (`token="[REDACTED]"hunter2zz"`). Both are now redacted.
+    ('app: token="abc\\" password="hunter2zz"',
+     'app: token="[REDACTED]" password="[REDACTED]"'),
     # --- schemes ----------------------------------------------------------
     ("req: Authorization: Bearer JWTaaa.bbb.ccc done",
      "req: Authorization: Bearer [REDACTED] done"),

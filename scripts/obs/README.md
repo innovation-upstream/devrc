@@ -76,13 +76,34 @@ emitting `0` when it cannot measure.
 "Unclean" is a **symptom count, not a diagnosis**: it covers a hard lockup, but
 also a flat battery, a held power button, and a panic.
 
-## Privacy
+## Privacy — a transport allowlist, not pattern-matching
 
-The journal here is not neutral telemetry — it carries desktop-notification
-bodies, database errors echoing query values, and object-store credential
-errors. `alloy.alloy` drops `dunst` lines entirely and redacts credential-shaped
-assignments before anything is written. Scrubbing runs **before** the Loki
-write, and `test_obs_alloy_config.py` pins that ordering.
+**Only `kernel`, `journal` and `syslog` are shipped. `stdout` is dropped.**
+
+That is the guarantee. It is a `keep` rule, so it is default-DENY: a transport
+that does not exist yet is dropped rather than shipped.
+
+Measured on this host (7 days, ~98k lines): `stdout` is **69.9%** of the journal
+and carries every content class that made shipping logs risky — container
+output, database errors echoing query values, object-store credential errors,
+agent tooling. The freeze evidence lives in `kernel` (1.9%) and `journal`
+(24.1%), which are kept.
+
+Why not redaction alone: five successive audit rounds each found a defect in the
+credential-redaction regexes, and three of those were introduced by the
+preceding fix. A denylist has to enumerate every shape a secret can take. The
+regex stages are still there as **defence-in-depth** for the retained 30%, and
+still run before the Loki write — but they are no longer the guarantee.
+
+Verified with a positive control, not just by reading the config: in a live run
+the source window held 57 `stdout` entries and the pipeline shipped **0** of
+them, while keeping all 30 `journal`, 1 `syslog` and 1 `kernel`.
+
+**Cost:** no application-level context around a freeze. Workload state is
+covered by metrics instead (PSI, thermals, memory, the boot-outcome counter).
+
+`dunst` notification bodies are dropped separately by identifier, since they
+arrive on a retained transport.
 
 ## Not covered here (needs root)
 
