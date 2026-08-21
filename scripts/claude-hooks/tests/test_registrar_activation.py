@@ -90,6 +90,7 @@ NEXT_STEP = HOOK_PY + " ~/.claude/hooks/next-step-nudge.py"
 NOTIFY = HOOK_PY + " ~/.claude/hooks/claude-notify.py"
 LEDGER = HOOK_PY + " ~/.claude/hooks/agent-ledger-hook.py"
 WRITEBACK = HOOK_PY + " ~/.claude/hooks/clawgate-writeback-guard.py"
+INTERVIEW = HOOK_PY + " ~/.claude/hooks/clawgate-task-interview-guard.py"
 BASH_GUARD = HOOK_PY + " ~/.claude/hooks/bash-guard.py"
 CLAWGATE_STOP = "/home/zach/.claude/clawgate-stop-hook.sh"
 TMUX_STOP = "~/.config/tmux/task-hook.sh"
@@ -244,10 +245,12 @@ def test_unrelated_settings_content_is_untouched(tmp_path):
     ]
     # 🔴 bash-guard's INTERPRETER is normalised (a bare `python3` here dies with
     # 127 mid-switch, and a PreToolUse hook exiting 127 fails OPEN) while its
-    # REGISTRATION is left exactly as it was: still one entry, still the only
-    # one on this event. Two surfaces, two widths — see the registrant's
-    # docstring. Asserted as a whole-list equality so an extra entry fails it.
-    assert pre == [BASH_GUARD], pre
+    # REGISTRATION is left exactly as it was — still ONE entry, still first, never
+    # created and never duplicated. Two surfaces, two widths; see the registrant's
+    # docstring. The only other entry is the clawgate task interview guard, which
+    # the registrant DOES own. Asserted as a whole-list equality so a third entry,
+    # or a doubled bash-guard, fails it.
+    assert pre == [BASH_GUARD, INTERVIEW], pre
 
 
 def test_a_settings_file_that_already_has_the_nudge_is_left_byte_identical(tmp_path):

@@ -1174,6 +1174,40 @@ in
   home.file.".claude/hooks/clawgate-writeback-guard.py" = {
     source = ../scripts/claude-hooks/clawgate-writeback-guard.py;
   };
+  # 🔴 THE CLAWGATE TASK INTERVIEW GATE — the write-back guard's counterpart at the
+  # OTHER end of a task's life. That one makes a pickup report back; this one makes
+  # a CREATE say what "done" means.
+  #
+  # PreToolUse(Bash): denies `clawgatectl task create` / a curl POST to /api/tasks
+  # whose body carries no `## Acceptance criteria` heading. That heading is not a
+  # style nit — SKILL.md's status gate means a body without one forces EVERY pickup
+  # to end at `ready_for_review`, because the agent derived the criteria and may not
+  # grade an exam it wrote. The block message names
+  # `claude/skills/clawgate/flows/task-authoring.md`, because a file under a skill's
+  # flows/ dir does not auto-fire the way a skill DESCRIPTION does: the hook is the
+  # router as well as the enforcer.
+  #
+  # 🔴 It also denies a create whose body it CANNOT SEE (piped from a generator,
+  # `--body "$(…)"`). Failing open there would make the gate walkable by changing
+  # the SHAPE of the call rather than its content — a spelled guard, not a
+  # structural one. Escape hatches, both deliberate and both tested: a body that
+  # already has the heading passes SILENTLY (the operator's one-liner), and
+  # `CLAWGATE_NO_INTERVIEW=1` skips it for one call in ONE greppable spelling.
+  #
+  # Interactive sessions ONLY, for free: a PreToolUse hook sees Claude Code's Bash
+  # tool and nothing else, so repo-cos, the task-spec drafter, clickup-mirror and
+  # the browser extension — systemd/cron/extension processes — are untouched. No
+  # producer allowlist exists here, because there is no producer to allow.
+  #
+  # 🔴 A NEW file, so it must be `git add`ed or the flake silently omits it and the
+  # switch succeeds with the hook absent — this repo's standing trap. Registered on
+  # PreToolUse(Bash) per-host by register-nudge-hook.py, which is also what pins its
+  # interpreter to an absolute /nix/store path (a bare `python3` there is `command
+  # not found` for ~1s of every switch, and a PreToolUse hook exiting 127 FAILS
+  # OPEN — PR #609).
+  home.file.".claude/hooks/clawgate-task-interview-guard.py" = {
+    source = ../scripts/claude-hooks/clawgate-task-interview-guard.py;
+  };
 
   # 🔴 THE REGISTRAR ITSELF — the hook that makes the hooks above DO anything.
   # settings.json is per-host and unmanaged (permissions/allowlists), so a hook

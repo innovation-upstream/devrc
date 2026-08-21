@@ -96,6 +96,7 @@ NEXT_STEP = PY + " ~/.claude/hooks/next-step-nudge.py"
 TMUX_STOP = "~/.config/tmux/task-hook.sh"
 LEDGER = PY + " ~/.claude/hooks/agent-ledger-hook.py"
 WRITEBACK = PY + " ~/.claude/hooks/clawgate-writeback-guard.py"
+INTERVIEW = PY + " ~/.claude/hooks/clawgate-task-interview-guard.py"
 BASH_GUARD = PY + " ~/.claude/hooks/bash-guard.py"
 
 # The pre-migration spellings, i.e. what is on both hosts right now.
@@ -250,8 +251,18 @@ with tempfile.TemporaryDirectory() as tmp:
           guard_entry["hooks"][0].get("timeout") == 12)
     check("6: the rewritten entry kept its type",
           guard_entry["hooks"][0].get("type") == "command")
-    check("6: PreToolUse gained no entries — the rewrite never appends",
-          len(pre_entries) == 3)
+    # 🔴 The REWRITE pass still never appends: the fixture's three entries come
+    # back as three, and the ONE extra is the interview guard the APPEND table
+    # owns — asserted by identity, not by a count, so "gained an entry" cannot be
+    # confused with "gained the right entry". Before PRE_BASH_CMDS existed this
+    # read `len(pre_entries) == 3`; PreToolUse was rewrite-only then.
+    check("6: PreToolUse gained exactly ONE entry, and it is the appended interview guard",
+          len(pre_entries) == 4
+          and pre_entries[3]["hooks"][0]["command"] == INTERVIEW
+          and pre_entries[3].get("matcher") == "Bash")
+    check("6: the three pre-existing PreToolUse entries kept their positions",
+          [e["hooks"][0]["command"] for e in pre_entries[:3]]
+          == [FOREIGN_ELSEWHERE, BASH_GUARD, FOREIGN_UNMANAGED_HOOK])
 
     # --- 7. FOREIGN COMMANDS COME BACK BYTE-IDENTICAL -------------------------
     check("7: a python command outside the hooks dir is untouched",
@@ -264,8 +275,10 @@ with tempfile.TemporaryDirectory() as tmp:
           d["hooks"]["PermissionRequest"][0]["hooks"][0].get("timeout") == 180)
     check("7: the two foreign .sh Stop hooks are untouched",
           TMUX_STOP in stop and CLAWGATE_STOP in stop)
-    check("7: PreToolUse is EXACTLY the three commands it started with, one rewritten",
-          pre == [FOREIGN_ELSEWHERE, BASH_GUARD, FOREIGN_UNMANAGED_HOOK])
+    check("7: PreToolUse is the three commands it started with (one rewritten) plus the interview guard",
+          pre == [FOREIGN_ELSEWHERE, BASH_GUARD, FOREIGN_UNMANAGED_HOOK, INTERVIEW])
+    check("7: the interview guard is registered exactly once",
+          pre.count(INTERVIEW) == 1)
 
     check("2: both PostToolUse nudges preserved",
           any(c.endswith("/audit-pr-nudge.py") for c in cmds(d, "PostToolUse"))
@@ -374,6 +387,8 @@ with tempfile.TemporaryDirectory() as tmp:
           cmds(d2, "PostToolUse").count(LEDGER) == 1)
     check("3: bash-guard still single after the second run",
           cmds(d2, "PreToolUse").count(BASH_GUARD) == 1)
+    check("3: no duplicate interview guard on PreToolUse",
+          cmds(d2, "PreToolUse").count(INTERVIEW) == 1)
 
     # Atomicity: no temp litter left in the dir, and the source uses os.replace.
     leftovers = [n for n in os.listdir(os.path.dirname(settings)) if n.startswith(".settings.")]
@@ -434,10 +449,13 @@ with tempfile.TemporaryDirectory() as tmp:
 # --- 10. THE RECOGNISER IS CONSERVATIVE -------------------------------------
 # 🔴 Each command below names a MANAGED hook script under the hooks dir and must
 # STILL come back byte-identical, because one of the recogniser's three
-# conditions fails. They live on PreToolUse, the one event the append surface
-# never writes to, so "unchanged" is a clean claim about the rewrite pass alone.
-# Without these, dropping either the python-interpreter check or the start
-# anchor is a mutation no test can see.
+# conditions fails. Without these, dropping either the python-interpreter check
+# or the start anchor is a mutation no test can see.
+#
+# ⚠ The assertion below is a PREFIX equality, not a whole-list equality: since the
+# interview guard joined the append surface, PreToolUse also gains that one entry.
+# The claim being made is about the four UNRECOGNISED commands coming back
+# byte-identical AND in place, which the prefix pins exactly.
 NOT_A_PYTHON_INTERP = "bash ~/.claude/hooks/bash-guard.py"
 NOT_AT_THE_START = "CLAUDE_HOST=wb python3 ~/.claude/hooks/bash-guard.py"
 QUOTED_PATH = "python3 '~/.claude/hooks/bash-guard.py'"
@@ -463,8 +481,10 @@ with tempfile.TemporaryDirectory() as tmp:
     check("10: run exits 0", p4.returncode == 0)
     with open(settings) as f:
         d4 = json.load(f)
-    check("10: every unrecognised command came back BYTE-IDENTICAL",
-          cmds(d4, "PreToolUse") == UNRECOGNISED)
+    check("10: every unrecognised command came back BYTE-IDENTICAL, in place",
+          cmds(d4, "PreToolUse")[:len(UNRECOGNISED)] == UNRECOGNISED)
+    check("10: ...and the ONLY thing added to PreToolUse is the interview guard",
+          cmds(d4, "PreToolUse") == UNRECOGNISED + [INTERVIEW])
     # Anti-vacuity: this run DID rewrite/append elsewhere in the same file, so
     # the check above is about the recogniser and not about a run that no-oped.
     check("10: ...while the run did its normal work on the same file",
@@ -576,6 +596,13 @@ DUPLICATED = {"hooks": {
         one(BASH_GUARD, "Bash", {"description": "the RULES.md enforcement guard"},
             {"timeout": 12}),
         one(OLD + "bash-guard.py", "Bash"),
+        # 🔴 …and the interview guard, doubled. This one IS this script's to
+        # de-dup — it is in the append tables — so the pair must heal to ONE,
+        # right beside a bash-guard pair that must NOT. Two duplicates on one
+        # event, opposite verdicts, is what makes the ownership filter's
+        # behaviour observable instead of asserted.
+        one(INTERVIEW, "Bash"),
+        one(OLD + "clawgate-task-interview-guard.py", "Bash"),
     ],
     "PostToolUse": [
         one(AUDIT, "Bash"), one(SHELL, "Bash"), one(SEARCH_NUDGE, "Bash"),
@@ -651,7 +678,8 @@ with tempfile.TemporaryDirectory() as tmp:
     # 🔴 THE OWNERSHIP BOUNDARY: bash-guard's second entry is rewritten, never
     # removed. Its registration belongs to the host.
     check("12: the doubled bash-guard entry is PINNED but NOT deleted",
-          entries(d12, "PreToolUse") == [("Bash", BASH_GUARD), ("Bash", BASH_GUARD)])
+          entries(d12, "PreToolUse") == [("Bash", BASH_GUARD), ("Bash", BASH_GUARD),
+                                         ("Bash", INTERVIEW)])
     # The first bash-guard entry keeps both keys this script knows nothing about.
     check("12: the surviving bash-guard entry kept its foreign keys",
           d12["hooks"]["PreToolUse"][0].get("description")
@@ -666,8 +694,8 @@ with tempfile.TemporaryDirectory() as tmp:
     # It says what it removed, and how many.
     check("12: it reports the removals", "removed duplicate hook registrations:"
           in p12.stdout)
-    check("12: exactly 13 duplicate registrations were removed",
-          len([ln for ln in p12.stdout.splitlines() if ln.startswith("  - ")]) == 13)
+    check("12: exactly 14 duplicate registrations were removed",
+          len([ln for ln in p12.stdout.splitlines() if ln.startswith("  - ")]) == 14)
     # ...and it is LOUD about the three double-fires it declined to touch.
     check("12: it warns about the duplicates it declined to remove",
           p12.stderr.count("is registered 2 times under matcher") == 4)
@@ -686,10 +714,10 @@ with tempfile.TemporaryDirectory() as tmp:
 # --- 13. A HOSTILE $DEVRC_HOOK_PYTHON CANNOT GROW THE FILE WITHOUT BOUND ------
 # 🔴 The override is a test seam with PRODUCTION REACH: home-manager activation
 # inherits the operator's environment, so an exported value is written verbatim
-# into all 14 hook commands. An interpreter carrying an argument, or one whose
+# into every hook command. An interpreter carrying an argument, or one whose
 # basename is not `python*`, makes `managed_script_of` fail to recognise the
 # registrant's OWN output — so the append pass re-appends everything on EVERY run:
-# 15 -> 30 -> 45 entries, unbounded and silent. The other two are not growth bugs
+# 16 -> 32 -> 48 entries, unbounded and silent. The other two are not growth bugs
 # but are just as wrong to write: a relative name reopens the exact PATH window
 # this pinning closes, and a missing path turns every hook into a permanent 127.
 #
@@ -746,8 +774,8 @@ for hostile, why, hostile_cwd in HOSTILE_OVERRIDES:
               all("DEVRC_HOOK_PYTHON" in r.stderr for r in runs))
         # THE UNBOUNDED-GROWTH LOOP, CLOSED: a literal, not a comparison against
         # run 1 — a run that appended nothing at all would satisfy `a == b == c`.
-        check(tag + ": three consecutive runs hold exactly 15 hook commands",
-              counts == [15, 15, 15])
+        check(tag + ": three consecutive runs hold exactly 16 hook commands",
+              counts == [16, 16, 16])
         with open(settings) as f:
             d13 = json.load(f)
         written = [c for ev in d13.get("hooks", {}) for c in cmds(d13, ev)
@@ -795,7 +823,7 @@ with tempfile.TemporaryDirectory() as tmp:
     with open(settings) as f:
         d14 = json.load(f)
     check("14: every unpinnable command came back BYTE-IDENTICAL",
-          cmds(d14, "PreToolUse") == UNPINNABLE + SILENT)
+          cmds(d14, "PreToolUse") == UNPINNABLE + SILENT + [INTERVIEW])
     check("14: exactly one warning per unpinnable command, and no more",
           p14.stderr.count("is not in the form this script can pin") == 5)
     for c in UNPINNABLE:
