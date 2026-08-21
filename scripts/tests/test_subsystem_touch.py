@@ -5826,12 +5826,17 @@ class TestPrMutationKillMatrix:
 
     def test_kills_the_FULL_ARGV_renderer(self, tmp_path: Path) -> None:
         """🔴 The regression the PR source exposed: with `git` hardcoded back into
-        the renderer, a `gh` invocation renders as `ran: git gh pr view 421`."""
+        the renderer, a `gh` invocation renders as `ran: git gh pr view 421`.
+
+        ⚠ Anchored on `_ran_lines`, not on the call site. The line moved into a
+        shared writer when the escalation block acquired a provenance line of its
+        own — two open-coded copies would have made this anchor ambiguous, which
+        `_load_mutant`'s uniqueness assert reports rather than scoring."""
         mod = _load_mutant(
             tmp_path,
             "mp_argv",
-            [('        out.append(f"  ran: {\' \'.join(cmd)}")',
-              '        out.append(f"  ran: git {\' \'.join(cmd)}")')],
+            [('    return [f"{indent}ran: {\' \'.join(cmd)}" for cmd in commands]',
+              '    return [f"{indent}ran: git {\' \'.join(cmd)}" for cmd in commands]')],
         )
         store = _make_store(tmp_path / "s")
         src = st.PathSource(
@@ -10443,12 +10448,16 @@ class TestShapeMutationKills:
             tmp_path,
             "m_shape_render",
             [("        return \"\\n\".join(\n"
-              "            out + _render_validation_shape(report) "
-              "+ _render_validation_open_actions(report)\n"
+              "            out\n"
+              "            + _render_validation_shape(report)\n"
+              "            + _render_validation_open_actions(report)\n"
+              "            + _render_validation_unreachable(report)\n"
               "        )\n"
               "    n = len(report.malformed)",
               "        return \"\\n\".join(\n"
-              "            out + _render_validation_open_actions(report)\n"
+              "            out\n"
+              "            + _render_validation_open_actions(report)\n"
+              "            + _render_validation_unreachable(report)\n"
               "        )\n"
               "    n = len(report.malformed)")],
         )
@@ -10535,3 +10544,869 @@ class TestStep4IsTOLDToReadTheShapeBlock:
         doc = " ".join(HANDOFF_DOC.read_text(encoding="utf-8").split())
         assert "advisory and deliberately does **not** move the verdict" in doc
         assert "still exits 0" in doc
+
+
+# =============================================================================
+# 🔴 MARKER REACHABILITY, at the `--validate` surface.
+#
+# REGRESSION COVERAGE, watched RED AT BASE `3c54918`, where `--validate` has no
+# such block and `ValidationReport` has no such field. The resolver-level half
+# of the same defect is in `test_subsystem_resolver.py`.
+# =============================================================================
+
+
+UNREACHABLE_NUANCE = "\n".join(
+    [
+        "- 2026-03-04: a bullet whose head declares nothing at all,",
+        "  with wrapped prose under it that runs to a second line,",
+        "  - 2026-03-02: OPEN: the sibling repo still points at the old bucket.",
+        "- 2026-02-11: an ordinary bullet with no marker anywhere in it.",
+    ]
+)
+"""The FIELD SHAPE: a correctly-spelled marker several lines into a bullet body.
+Values chosen pairwise distinct from every literal the assertions name."""
+
+REACHABLE_NUANCE = "\n".join(
+    [
+        "- 2026-03-04: OPEN: an ordinary, perfectly reachable declaration.",
+        "  with a continuation line that only mentions the open question again.",
+        "- 2026-02-11: an ordinary bullet with no marker anywhere in it.",
+    ]
+)
+
+NEAR_MISS_NUANCE = "- 2026-03-04: RESOLVED abc1234 (some-repo): closed.\n  prose under it."
+
+
+def _entry_with_nuance(service: str, scope: str, nuance: str) -> str:
+    """`_entry`, with its `## Nuance / work-history` body replaced wholesale."""
+    head = _entry(service, scope).split("## Nuance / work-history")[0]
+    return f"{head}## Nuance / work-history\n{nuance}\n"
+
+
+def _nuance_store(root: Path, nuance: str, service: str = "collector") -> Path:
+    store = root / "reach-store"
+    d = store / SCOPE
+    d.mkdir(parents=True)
+    (d / f"{service}.md").write_text(
+        _entry_with_nuance(service, SCOPE, nuance), encoding="utf-8"
+    )
+    return store
+
+
+def _validated(store: Path) -> st.ValidationReport:
+    checked, malformed = st.validate_scope(store, SCOPE)
+    scanned = [store / SCOPE / name for name in checked]
+    return st.ValidationReport(
+        store_root=str(store),
+        target=f"`{SCOPE}/`",
+        scope=SCOPE,
+        checked=tuple(checked),
+        malformed=tuple(malformed),
+        open_actions=st.scan_open_actions(scanned),
+        shape=st.scan_entry_shape(scanned),
+        unreachable=st.scan_unreachable_markers(scanned),
+    )
+
+
+class TestValidateReportsUnreachableMarkers:
+    """🔴 A MARKER SPELLED CORRECTLY WHERE THE PARSER NEVER LOOKS, reported.
+
+    Every arm is a PAIR. The block is asserted PRESENT on the field shape and
+    ABSENT on a store whose markers are all reachable — a block that also printed
+    there would be boilerplate, and boilerplate is what the measured failure
+    walked past.
+    """
+
+    def test_THE_FIELD_SHAPE_is_reported(self, tmp_path: Path) -> None:
+        rep = _validated(_nuance_store(tmp_path, UNREACHABLE_NUANCE))
+        (found,) = rep.unreachable
+        assert found.filename == "collector.md"
+        assert found.offset == 3
+        assert found.openness == "open"
+        assert "OPEN: the sibling repo" in found.line
+        assert found.bullet_first_line.startswith("- 2026-03-04: a bullet whose head")
+
+    def test_THE_NEGATIVE_CONTROL_all_reachable_markers_report_NOTHING(
+        self, tmp_path: Path
+    ) -> None:
+        rep = _validated(_nuance_store(tmp_path, REACHABLE_NUANCE))
+        assert rep.unreachable == ()
+        assert [a.declared for a in rep.open_actions] == [True], (
+            "premise gone: the reachable store must still declare its open action"
+        )
+
+    def test_the_block_PRINTS_ITS_DENOMINATOR_at_zero(self, tmp_path: Path) -> None:
+        """🔴 A bare absence is indistinguishable from a scanner wired to nothing.
+        The zero has to carry the size of what it is a zero over."""
+        out = st.render_validation(_validated(_nuance_store(tmp_path, REACHABLE_NUANCE)))
+        assert "marker reachability: 0 out-of-reach marker(s) across 1 entry file(s)" in out
+        assert st.UNREACHABLE_MARKER in out
+        assert "MARKER(S) OUT OF REACH" not in out
+
+    def test_the_firing_block_names_the_bullet_the_line_and_the_remedy(
+        self, tmp_path: Path
+    ) -> None:
+        out = st.render_validation(_validated(_nuance_store(tmp_path, UNREACHABLE_NUANCE)))
+        assert f"🔴 1 MARKER(S) OUT OF REACH across 1 entry file(s) [{st.UNREACHABLE_MARKER}]" in out
+        assert "PROMOTING the line to a top-level bullet of its own" in out
+        assert "collector.md: line 3 of the bullet opening" in out
+        # …and the counterweight that stops the reader tidying it away silently.
+        assert "SILENCED a still-open action" in out
+
+    # --- the population boundary, which is the whole point of a separate shape --
+
+    def test_it_is_NOT_a_near_miss_and_is_NOT_counted_as_one(self, tmp_path: Path) -> None:
+        """🔴 THE DISTINCTION THE BRIEF EXISTS FOR. A near-miss is mis-spelled
+        WHERE THE PARSER LOOKS; this is spelled correctly where it never does. One
+        count covering both would send half the readers to the wrong remedy."""
+        rep = _validated(_nuance_store(tmp_path, UNREACHABLE_NUANCE))
+        blob = rep.to_json()
+        assert blob["unreachable_marker_count"] == 1
+        assert blob["near_miss_marker_count"] == 0
+        assert blob["declared_open_count"] == 0
+        assert blob["unmarked_action_count"] == 0
+        assert blob["unreachable_marker_reason"] == st.UNREACHABLE_MARKER
+
+    def test_the_two_shapes_are_counted_SEPARATELY_when_BOTH_are_present(
+        self, tmp_path: Path
+    ) -> None:
+        """The discriminating case: one store, one of each. Either count reading
+        2, or either reading 0, is the fold this design refuses."""
+        rep = _validated(
+            _nuance_store(tmp_path, f"{NEAR_MISS_NUANCE}\n{UNREACHABLE_NUANCE}")
+        )
+        blob = rep.to_json()
+        assert (blob["near_miss_marker_count"], blob["unreachable_marker_count"]) == (1, 1)
+
+    def test_it_does_NOT_MOVE_THE_VERDICT(self, tmp_path: Path) -> None:
+        """🔴 A gate an author cannot turn green by fixing the file is worse than
+        no gate. An entry with an out-of-reach marker is still well-formed."""
+        rep = _validated(_nuance_store(tmp_path, UNREACHABLE_NUANCE))
+        assert rep.unreachable != (), "premise gone: nothing to be advisory about"
+        assert rep.clean is True
+
+    # --- the CLI, which is the only surface `/handoff` touches -----------------
+
+    def test_the_CLI_prints_it_and_still_EXITS_0(self, tmp_path: Path, capsys) -> None:
+        store = _nuance_store(tmp_path, UNREACHABLE_NUANCE)
+        rc = st.main(["--store", str(store), "--scope", SCOPE, "--validate"])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "MARKER(S) OUT OF REACH" in out
+
+    def test_the_SINGLE_FILE_form_reports_it_too(self, tmp_path: Path, capsys) -> None:
+        """The two `--validate` forms build the report at different call sites; a
+        block wired into one of them only is half a fix."""
+        store = _nuance_store(tmp_path, UNREACHABLE_NUANCE)
+        rc = st.main(
+            ["--store", str(store), "--validate", str(store / SCOPE / "collector.md")]
+        )
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "MARKER(S) OUT OF REACH" in out
+
+    def test_the_CLI_json_carries_the_count_and_the_token(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        store = _nuance_store(tmp_path, UNREACHABLE_NUANCE)
+        st.main(["--store", str(store), "--scope", SCOPE, "--validate", "--json"])
+        blob = json.loads(capsys.readouterr().out)
+        assert blob["unreachable_marker_count"] == 1
+        assert blob["unreachable_markers"][0]["offset"] == 3
+        assert blob["unreachable_markers"][0]["openness"] == "open"
+
+    def test_it_prints_on_the_MALFORMED_path_too(self, tmp_path: Path) -> None:
+        """🔴 THE SEAM `render_validation` HAS TWO OF. `--validate` returns from
+        two places — the `OK` branch and the malformed one — and the block's own
+        docstring claims it prints "on every path that CHECKED something".
+
+        This was FALSE when first written: the two returns differ by four spaces
+        of indentation, so the edit that wired the clean path silently missed the
+        other, and a scope holding one broken entry beside a good one with an
+        out-of-reach marker would have reported the marker nowhere. A guard's
+        description claims coverage; only reading the code against it says whether
+        the implementation is as wide as the sentence.
+        """
+        store = _nuance_store(tmp_path, UNREACHABLE_NUANCE)
+        (store / SCOPE / "broken.md").write_text(
+            "---\nservice: broken\naliases: [\n  wrapped\n]\n---\n", encoding="utf-8"
+        )
+        rep = _validated(store)
+        assert rep.clean is False, "premise gone: this is not the malformed branch"
+        out = st.render_validation(rep)
+        assert "🔴 MALFORMED" in out
+        assert "MARKER(S) OUT OF REACH" in out
+
+    def test_the_scan_is_READ_ONLY(self, tmp_path: Path) -> None:
+        store = _nuance_store(tmp_path, UNREACHABLE_NUANCE)
+        before = _tree_hash(store)
+        assert _validated(store).unreachable != (), "the path under test never ran"
+        assert _tree_hash(store) == before
+
+
+class TestUnreachableMarkerMutationKills:
+    """One kill per guard, each with THIS guard's own symptom.
+
+    🔴 POSITIVE CONTROL FOR THE BATCH: `test_kills_the_SCANNER_wiring`.
+    🔴 NEGATIVE CONTROL: `test_the_NO_OP_mutant_changes_nothing`.
+    """
+
+    def _out(self, mod, tmp_path: Path, nuance: str = UNREACHABLE_NUANCE) -> str:
+        store = _nuance_store(tmp_path, nuance)
+        checked, malformed = mod.validate_scope(store, SCOPE)
+        scanned = [store / SCOPE / n for n in checked]
+        return mod.render_validation(
+            mod.ValidationReport(
+                store_root=str(store),
+                target=f"`{SCOPE}/`",
+                scope=SCOPE,
+                checked=tuple(checked),
+                malformed=tuple(malformed),
+                open_actions=mod.scan_open_actions(scanned),
+                shape=mod.scan_entry_shape(scanned),
+                unreachable=mod.scan_unreachable_markers(scanned),
+            )
+        )
+
+    def test_the_NO_OP_mutant_changes_nothing(self, tmp_path: Path) -> None:
+        """🔴 NEGATIVE CONTROL FOR THE BATCH — without it, a loader quietly
+        returning the real module would score every kill below."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_um_noop",
+            [('    n = len(report.unreachable)', '    n = len(tuple(report.unreachable))')],
+        )
+        assert "1 MARKER(S) OUT OF REACH" in self._out(mod, tmp_path)
+
+    def test_kills_the_SCANNER_wiring(self, tmp_path: Path, capsys) -> None:
+        """POSITIVE CONTROL. The scanner exists, the renderer exists, and the CLI
+        simply never connects them — the exact shape of the measured failure,
+        where the fact was computable and reached no surface."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_um_wiring",
+            [
+                (
+                    "                unreachable=scan_unreachable_markers(scanned),",
+                    "                unreachable=(),",
+                )
+            ],
+        )
+        store = _nuance_store(tmp_path, UNREACHABLE_NUANCE)
+        assert mod.main(["--store", str(store), "--scope", SCOPE, "--validate"]) == 0
+        out = capsys.readouterr().out
+        assert "MARKER(S) OUT OF REACH" not in out
+        assert "marker reachability: 0" in out, "the block itself must still print"
+        assert st.main(["--store", str(store), "--scope", SCOPE, "--validate"]) == 0
+        assert "MARKER(S) OUT OF REACH" in capsys.readouterr().out
+
+    def test_kills_the_RENDERER_call_site_on_the_clean_path(self, tmp_path: Path) -> None:
+        """The other half of the seam: the scan runs and the block still never
+        prints. Anchored on the `OK` branch, which has its own return."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_um_render",
+            [
+                (
+                    "            + _render_validation_open_actions(report)\n"
+                    "            + _render_validation_unreachable(report)\n"
+                    "        )\n"
+                    "    n = len(report.malformed)",
+                    "            + _render_validation_open_actions(report)\n"
+                    "        )\n"
+                    "    n = len(report.malformed)",
+                )
+            ],
+        )
+        out = self._out(mod, tmp_path)
+        assert "marker reachability" not in out
+        assert "open actions" in out, "the neighbouring block must be untouched"
+
+    def test_kills_the_RENDERER_call_site_on_the_MALFORMED_path(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 THE SECOND HALF OF A SEAM THAT WAS REALLY BROKEN. `render_validation`
+        returns from two places and this call was missing from one of them — the
+        indentation differs by four spaces, so the edit that wired the clean path
+        matched nothing on the other and said so to nobody. Mutated separately
+        from its twin, because mutating both at once cannot say which one was
+        load-bearing."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_um_render_bad",
+            [
+                (
+                    "    return \"\\n\".join(\n"
+                    "        out\n"
+                    "        + _render_validation_shape(report)\n"
+                    "        + _render_validation_open_actions(report)\n"
+                    "        + _render_validation_unreachable(report)\n"
+                    "    )",
+                    "    return \"\\n\".join(\n"
+                    "        out\n"
+                    "        + _render_validation_shape(report)\n"
+                    "        + _render_validation_open_actions(report)\n"
+                    "    )",
+                )
+            ],
+        )
+        store = _nuance_store(tmp_path, UNREACHABLE_NUANCE)
+        (store / SCOPE / "broken.md").write_text(
+            "---\nservice: broken\naliases: [\n  wrapped\n]\n---\n", encoding="utf-8"
+        )
+        checked, malformed = mod.validate_scope(store, SCOPE)
+        scanned = [store / SCOPE / n for n in checked]
+        out = mod.render_validation(
+            mod.ValidationReport(
+                store_root=str(store),
+                target=f"`{SCOPE}/`",
+                scope=SCOPE,
+                checked=tuple(checked),
+                malformed=tuple(malformed),
+                unreachable=mod.scan_unreachable_markers(scanned),
+            )
+        )
+        assert "🔴 MALFORMED" in out, "the mutation must not change the branch taken"
+        assert "marker reachability" not in out
+        assert "MARKER(S) OUT OF REACH" in st.render_validation(_validated(store))
+
+    def test_kills_the_NOT_FOLDED_INTO_NEAR_MISS_invariant(self, tmp_path: Path) -> None:
+        """🔴 The fold this shape exists to prevent, done on purpose. The mutant's
+        near-miss count absorbs the out-of-reach one, and the reader is sent to
+        "fix the LINE" for a line that is spelled correctly."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_um_fold",
+            [
+                (
+                    '            "near_miss_marker_count": sum(1 for a in self.open_actions if a.near_miss),',
+                    '            "near_miss_marker_count": sum(1 for a in self.open_actions if a.near_miss) + len(self.unreachable),',
+                )
+            ],
+        )
+        store = _nuance_store(tmp_path, UNREACHABLE_NUANCE)
+        checked, _ = mod.validate_scope(store, SCOPE)
+        scanned = [store / SCOPE / n for n in checked]
+        blob = mod.ValidationReport(
+            store_root=str(store),
+            target=f"`{SCOPE}/`",
+            scope=SCOPE,
+            checked=tuple(checked),
+            unreachable=mod.scan_unreachable_markers(scanned),
+        ).to_json()
+        assert blob["near_miss_marker_count"] == 1, "the mutation did not land"
+        assert _validated(store).to_json()["near_miss_marker_count"] == 0
+
+
+# =============================================================================
+# 🔴 THE WRONG-WINDOW ESCALATION — reading the second window, not naming it.
+#
+# REGRESSION COVERAGE, watched RED AT BASE `3c54918`, where `render_wrong_window`
+# is the end of the story: it returns advice and nothing runs it.
+# =============================================================================
+
+
+def _base_ref(repo: Path, tmp_home: Path) -> None:
+    """Give the repo an `origin/main` the base-ref candidate loop can find.
+
+    A LOCAL branch of that name, deliberately — no remote, no network, and
+    `rev-parse --verify origin/main^{commit}` resolves it exactly as it resolves
+    a real remote-tracking ref. The escalation's whole claim is that it needs
+    git and nothing else.
+    """
+    _run_git(repo, "branch", "-f", "origin/main", "HEAD", home=tmp_home)
+
+
+class TestCommitWindowRange:
+    """The range, and EVERY way it can fail to produce one — each NAMED.
+
+    🔴 `claude/RULES.md`: an empty result cannot distinguish two mechanisms. "0
+    paths, nothing nominated" is the observable that a broken repo, a missing base
+    ref and a branch that has landed nothing all share.
+    """
+
+    def test_THE_POSITIVE_CONTROL_a_branch_with_commits_measures(
+        self, tmp_path: Path
+    ) -> None:
+        repo = _init_repo(tmp_path)
+        _base_ref(repo, tmp_path)
+        first = _commit(repo, "src/collector/a.py", tmp_home=tmp_path)
+        second = _commit(repo, "src/collector/b.py", tmp_home=tmp_path)
+        rng = st.commit_window_range(repo)
+        assert rng.reason is None
+        assert set(rng.shas) == {first, second}
+        assert rng.base_ref == "origin/main" and rng.branch == "main"
+        assert rng.detail and "2 non-merge commit(s)" in rng.detail
+
+    def test_NO_BASE_REF_is_named_not_silently_empty(self, tmp_path: Path) -> None:
+        """⚠ The branch is `topic` on purpose: `BASE_REF_CANDIDATES` includes the
+        bare `main`, so a repo whose only branch IS `main` has a base ref and
+        would exercise a different reason entirely."""
+        repo = _init_repo(tmp_path, branch="topic")
+        _commit(repo, "src/collector/a.py", tmp_home=tmp_path)
+        rng = st.commit_window_range(repo)
+        assert rng.reason == st.ESCALATION_NO_BASE_REF
+        assert rng.shas == () and "origin/main" in rng.detail
+
+    def test_NO_COMMITS_IN_RANGE_is_its_OWN_token(self, tmp_path: Path) -> None:
+        """Distinct from every other zero: the window WAS read and is empty."""
+        repo = _init_repo(tmp_path)
+        _base_ref(repo, tmp_path)
+        rng = st.commit_window_range(repo)
+        assert rng.reason == st.ESCALATION_NO_COMMITS
+        assert rng.merge_base is not None, "it got far enough to compute a merge-base"
+
+    def test_NO_SHARED_HISTORY_is_named(self, tmp_path: Path) -> None:
+        repo = _init_repo(tmp_path)
+        _run_git(repo, "checkout", "--orphan", "unrelated", home=tmp_path)
+        _commit(repo, "src/collector/orphan.py", tmp_home=tmp_path)
+        _run_git(repo, "branch", "-f", "origin/main", "main", home=tmp_path)
+        rng = st.commit_window_range(repo)
+        assert rng.reason == st.ESCALATION_NO_SHARED_HISTORY
+
+    def test_AN_UNBORN_HEAD_is_named(self, tmp_path: Path) -> None:
+        repo = tmp_path / "unborn"
+        repo.mkdir()
+        _run_git(repo, "init", "-b", "main", home=tmp_path)
+        rng = st.commit_window_range(repo)
+        assert rng.reason == st.ESCALATION_HEAD_UNRESOLVABLE
+
+    def test_A_NON_REPO_is_named_not_raised(self, tmp_path: Path) -> None:
+        plain = tmp_path / "not-a-repo"
+        plain.mkdir()
+        rng = st.commit_window_range(plain)
+        assert rng.reason == st.ESCALATION_GIT_FAILED
+
+    def test_A_DETACHED_HEAD_MEASURES_and_says_so(self, tmp_path: Path) -> None:
+        """🔴 DELIBERATE DIVERGENCE FROM THE SPEC, PINNED. A detached HEAD was
+        specified as a failure and is NOT one: `merge-base(<base>, HEAD)..HEAD`
+        means exactly what it means on a branch. Refusing here would blind the
+        escalation inside an agent worktree, which is the case it exists for. The
+        detachment is REPORTED — `branch is None` — never invented into an error."""
+        repo = _init_repo(tmp_path)
+        _base_ref(repo, tmp_path)
+        sha = _commit(repo, "src/collector/a.py", tmp_home=tmp_path)
+        _run_git(repo, "checkout", "--detach", sha, home=tmp_path)
+        rng = st.commit_window_range(repo)
+        assert rng.reason is None and rng.shas == (sha,)
+        assert rng.branch is None, "the detachment must be reported"
+        assert "DETACHED HEAD" in "\n".join(
+            st.render_window_escalation(
+                st.WindowEscalation(
+                    basis=st.ESCALATION_BASIS_COMMIT,
+                    reason=st.ESCALATION_GIT_FAILED,
+                    detail="x",
+                    commit_range=rng,
+                )
+            )
+        )
+
+    def test_EVERY_reason_the_range_can_emit_is_in_the_LEDGER(self) -> None:
+        """🔴 A ledger that can go stale is not a ledger. Pinned two-way against
+        the module's own `ESCALATION_*` constants, so a new reason added without
+        being enumerated fails here rather than arriving unnamed."""
+        emitted = {
+            v
+            for k, v in vars(st).items()
+            if k.startswith("ESCALATION_")
+            and isinstance(v, str)
+            and k != "ESCALATION_BASIS_COMMIT"
+        }
+        assert emitted == set(st.ESCALATION_REASONS)
+
+
+class TestWindowEscalationRuns:
+    """🔴 THE ESCALATION IS AUTOMATIC, ON EXACTLY THE EXISTING CONDITION.
+
+    Measured motivation: the advisory fired identically on two consecutive
+    sessions and nobody ran the window it named — 3 paths under cwd against 24 in
+    the PR window on one, 0 under 19 on the other.
+
+    Every arm is a PAIR: it must run when dominated and must NOT run otherwise.
+    """
+
+    ONE_UNDER = ["src/collector/a.py"]
+    FIVE_OUTSIDE = ["w/x.py", "w/y.py", "w/z.py", "w/p.py", "w/q.py"]
+
+    def _repo_with_commits(self, tmp_path: Path) -> Path:
+        repo = _init_repo(tmp_path, SCOPE)
+        _base_ref(repo, tmp_path)
+        _commit(
+            repo, "src/collector/one.py", "src/collector/two.py", tmp_home=tmp_path
+        )
+        _commit(repo, "src/collector/three.py", tmp_home=tmp_path)
+        return repo
+
+    def _transcript(self, tmp_path: Path, repo: Path, dominated: bool) -> Path:
+        cwd = str(repo)
+        under = self.ONE_UNDER if dominated else self.FIVE_OUTSIDE
+        outside = self.FIVE_OUTSIDE if dominated else self.ONE_UNDER
+        return _write_transcript(
+            tmp_path / f"{'dom' if dominated else 'vis'}.jsonl",
+            cwd,
+            [f"{cwd}/{p}" for p in under] + [f"{tmp_path}/elsewhere/{p}" for p in outside],
+        )
+
+    def _run(self, tmp_path: Path, dominated: bool, capsys, extra=()):
+        repo = self._repo_with_commits(tmp_path)
+        t = self._transcript(tmp_path, repo, dominated)
+        store = _make_store(tmp_path / "s")
+        rc = st.main(
+            ["--repo", str(repo), "--store", str(store), "--scope", SCOPE,
+             "--transcript", str(t), "--today", TODAY, *extra]
+        )
+        return rc, capsys.readouterr().out
+
+    def test_THE_POSITIVE_CONTROL_a_dominated_run_reads_the_commit_window(
+        self, tmp_path: Path, capsys, tailer_cache
+    ) -> None:
+        rc, out = self._run(tmp_path, True, capsys)
+        assert rc == 0
+        assert "🔴 WRONG WINDOW?" in out, "premise gone: the run is not dominated"
+        assert "SECOND WINDOW, RUN AUTOMATICALLY — basis `--commit`" in out
+        assert "2 non-merge commit(s)" in out
+        assert "ran: git rev-list --no-merges" in out
+
+    def test_THE_NEGATIVE_CONTROL_a_mostly_visible_run_reads_NOTHING_extra(
+        self, tmp_path: Path, capsys, tailer_cache
+    ) -> None:
+        """🔴 The half that makes the positive control mean something. An
+        escalation that also ran here would be the unconditional second window
+        this design exists not to be — and it would cost a git walk every run.
+
+        ⚠ INVARIANT GUARD, NOT REGRESSION COVERAGE — measured green at base
+        `3c54918`, where nothing escalates at all so silence here is free. It
+        pins the silence against a future widening; it does not demonstrate the
+        defect. `test_kills_the_CONDITION_itself` is what proves it can go red.
+        """
+        rc, out = self._run(tmp_path, False, capsys)
+        assert rc == 0
+        assert "WRONG WINDOW?" not in out
+        # ⚠ NOT a bare `"SECOND WINDOW" not in out`: the advisory block's own
+        # text says "READ A SECOND WINDOW", so that substring is ambiguous and
+        # would pass here for the wrong reason on a run where it DID fire.
+        assert "SECOND WINDOW, RUN AUTOMATICALLY" not in out
+        assert "SECOND WINDOW COULD NOT BE READ" not in out
+
+    def test_it_LABELS_which_basis_produced_the_nominations(
+        self, tmp_path: Path, capsys, tailer_cache
+    ) -> None:
+        """🔴 Two path sets reported SIDE BY SIDE and never merged. A reader has
+        to be able to say which basis produced which proposal without counting
+        back up the page."""
+        _, out = self._run(tmp_path, True, capsys)
+        assert "nominated BY THE COMMIT WINDOW: collector (3 paths)" in out
+        assert "nominated BY THE SESSION WINDOW: (nothing)" in out
+        assert "REPORTED SIDE BY SIDE, NEVER MERGED" in out
+
+    def test_the_LABELS_are_load_bearing_when_the_two_bases_DISAGREE(
+        self, tmp_path: Path, capsys, tailer_cache
+    ) -> None:
+        """🔴 THE CASE THE LABELS EXIST FOR, and the one that makes them more than
+        decoration: a dominated session whose few visible paths still resolve to
+        ONE entry, while the commit window resolves to a DIFFERENT one. Both sides
+        non-empty, and different — so a reader who cannot tell them apart would
+        attribute a bullet to the wrong basis.
+
+        The two entries are distinct store entries and the two path sets are
+        disjoint, so neither label can be right by coincidence.
+        """
+        repo = _init_repo(tmp_path, SCOPE)
+        _base_ref(repo, tmp_path)
+        _commit(repo, "src/status-bar/x.py", "src/status-bar/y.py", tmp_home=tmp_path)
+        cwd = str(repo)
+        t = _write_transcript(
+            tmp_path / "both.jsonl",
+            cwd,
+            [f"{cwd}/src/collector/a.py", f"{cwd}/src/collector/b.py"]
+            + [f"{tmp_path}/elsewhere/{p}" for p in self.FIVE_OUTSIDE],
+        )
+        store = _make_store(tmp_path / "s")
+        st.main(
+            ["--repo", str(repo), "--store", str(store), "--scope", SCOPE,
+             "--transcript", str(t), "--today", TODAY]
+        )
+        out = capsys.readouterr().out
+        assert "🔴 WRONG WINDOW?" in out, "premise gone: the run is not dominated"
+        assert "nominated BY THE COMMIT WINDOW: status-bar (2 paths)" in out
+        assert "nominated BY THE SESSION WINDOW: collector (2 paths)" in out
+
+    def test_it_does_NOT_REMOVE_the_existing_counters(
+        self, tmp_path: Path, capsys, tailer_cache
+    ) -> None:
+        """The unconditional `note:` line is load-bearing — the escalation adds a
+        second basis, it does not replace the first.
+
+        ⚠ INVARIANT GUARD, NOT REGRESSION COVERAGE — measured green at base
+        `3c54918`, where those counters were already printed. It exists so a
+        later "the second window supersedes the first" tidy-up fails here.
+        """
+        _, out = self._run(tmp_path, True, capsys)
+        assert "5 of the 6 path(s) this session named (83%)" in out
+        assert "NOT among the 1 this window reports" in out
+
+    def test_it_DEGRADES_LOUDLY_with_a_NAMED_reason(
+        self, tmp_path: Path, capsys, tailer_cache
+    ) -> None:
+        """🔴 Not an empty result that reads as "nothing to nominate"."""
+        # Branch `topic`, deliberately: `main` is itself a base-ref candidate, so
+        # a repo on `main` has one and would take a different branch entirely.
+        repo = _init_repo(tmp_path, SCOPE, branch="topic")
+        t = self._transcript(tmp_path, repo, True)
+        store = _make_store(tmp_path / "s")
+        rc = st.main(
+            ["--repo", str(repo), "--store", str(store), "--scope", SCOPE,
+             "--transcript", str(t), "--today", TODAY]
+        )
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert f"SECOND WINDOW COULD NOT BE READ — basis `--commit`, reason `{st.ESCALATION_NO_BASE_REF}`" in out
+        assert 'THIS IS NOT "NOTHING TO NOMINATE"' in out
+        assert "SECOND WINDOW, RUN AUTOMATICALLY" not in out
+
+    def test_AN_EMPTY_RANGE_gets_a_DIFFERENT_headline_from_a_BROKEN_one(
+        self, tmp_path: Path
+    ) -> None:
+        """🔴 TWO MECHANISMS, TWO HEADLINES. `no-commits-in-range` is the one
+        token where the range genuinely WAS computed and came back empty; every
+        other means the instrument never ran. A single "could not be read" header
+        would be a false statement on whichever case it was not written for."""
+        empty = _init_repo(tmp_path, "empty-range")
+        _base_ref(empty, tmp_path)
+        broken = _init_repo(tmp_path, "no-base", branch="topic")
+        store = _make_store(tmp_path / "s")
+        a = st.escalate_to_commit_window(empty, store, SCOPE, today=TODAY)
+        b = st.escalate_to_commit_window(broken, store, SCOPE, today=TODAY)
+        assert (a.reason, b.reason) == (
+            st.ESCALATION_NO_COMMITS,
+            st.ESCALATION_NO_BASE_REF,
+        )
+        first = "\n".join(st.render_window_escalation(a))
+        second = "\n".join(st.render_window_escalation(b))
+        assert "SECOND WINDOW READ, AND IT IS EMPTY" in first
+        assert "COULD NOT BE READ" not in first
+        assert "SECOND WINDOW COULD NOT BE READ" in second
+        assert "READ, AND IT IS EMPTY" not in second
+
+    def test_it_TAKES_NO_NETWORK(self, tmp_path: Path, capsys, monkeypatch, tailer_cache) -> None:
+        """🔴 `--commit`, NOT `--pr`. The PR window needs `gh`, which is a network
+        call, an auth dependency and a rate limit; nothing on the automatic path
+        may acquire those. A fetcher wired to explode is the only way to prove the
+        automatic path never reaches it."""
+        def _boom(*a, **k):  # pragma: no cover - it must never be called
+            raise AssertionError("the escalation reached the network")
+
+        monkeypatch.setattr(st, "_gh_fetch_pr", _boom)
+        _, out = self._run(tmp_path, True, capsys)
+        assert "SECOND WINDOW, RUN AUTOMATICALLY" in out
+        for line in out.splitlines():
+            if line.strip().startswith("ran: "):
+                assert line.split("ran: ", 1)[1].startswith("git "), line
+
+    def test_the_JSON_carries_the_escalation_and_its_provenance(
+        self, tmp_path: Path, capsys, tailer_cache
+    ) -> None:
+        _, out = self._run(tmp_path, True, capsys, extra=("--json",))
+        esc = json.loads(out)["escalation"]
+        assert esc["basis"] == "commit" and esc["measured"] is True
+        assert esc["reason"] is None
+        assert esc["commit_count"] == 2 and esc["detached_head"] is False
+        assert esc["base_ref"] == "origin/main"
+        assert [n["ref"] for n in esc["known"]] == ["collector"]
+
+    def test_the_JSON_is_NONE_when_the_escalation_DID_NOT_RUN(
+        self, tmp_path: Path, capsys, tailer_cache
+    ) -> None:
+        """🔴 `None` must mean "not attempted" and nothing else — a run that
+        attempted and could not measure carries a dict with a `reason`."""
+        _, out = self._run(tmp_path, False, capsys, extra=("--json",))
+        assert json.loads(out)["escalation"] is None
+
+    def test_the_escalation_WRITES_NOTHING(
+        self, tmp_path: Path, capsys, tailer_cache
+    ) -> None:
+        repo = self._repo_with_commits(tmp_path)
+        t = self._transcript(tmp_path, repo, True)
+        store = _make_store(tmp_path / "s")
+        before = _tree_hash(store)
+        st.main(
+            ["--repo", str(repo), "--store", str(store), "--scope", SCOPE,
+             "--transcript", str(t), "--today", TODAY]
+        )
+        assert "SECOND WINDOW, RUN AUTOMATICALLY" in capsys.readouterr().out
+        assert _tree_hash(store) == before
+
+    def test_the_RENDERERS_STAY_PURE(self, tmp_path: Path) -> None:
+        """🔴 `render_text` promises same-report-in, same-bytes-out. The git work
+        happens once at the CLI's impure boundary and travels on the report — a
+        renderer that shelled out would break that and make every existing test of
+        it depend on a repo."""
+        store = _make_store(tmp_path / "s")
+        rep = _report(["src/collector/a.py"], store)
+        assert rep.escalation is None
+        assert st.render_text(rep) == st.render_text(rep)
+
+
+class TestWindowEscalationMutationKills:
+    """Break the NARROWEST expression that can be wrong, one at a time.
+
+    🔴 POSITIVE CONTROL FOR THE BATCH: `test_kills_the_ESCALATION_call_site`.
+    🔴 NEGATIVE CONTROL: `test_the_NO_OP_mutant_changes_nothing`.
+    """
+
+    def _repo(self, tmp_path: Path) -> Path:
+        repo = _init_repo(tmp_path, SCOPE)
+        _base_ref(repo, tmp_path)
+        _commit(repo, "src/collector/one.py", tmp_home=tmp_path)
+        return repo
+
+    def _dominated(self, tmp_path: Path, repo: Path) -> Path:
+        cwd = str(repo)
+        return _write_transcript(
+            tmp_path / "dom.jsonl",
+            cwd,
+            [f"{cwd}/src/collector/a.py"]
+            + [f"{tmp_path}/elsewhere/{p}" for p in TestWindowEscalationRuns.FIVE_OUTSIDE],
+        )
+
+    def _visible(self, tmp_path: Path, repo: Path) -> Path:
+        cwd = str(repo)
+        return _write_transcript(
+            tmp_path / "vis.jsonl",
+            cwd,
+            [f"{cwd}/src/collector/{n}.py" for n in ("a", "b", "c", "d", "e")]
+            + [f"{tmp_path}/elsewhere/q.py"],
+        )
+
+    def _run(self, mod, repo: Path, transcript: Path, store: Path, capsys) -> str:
+        mod.main(
+            ["--repo", str(repo), "--store", str(store), "--scope", SCOPE,
+             "--transcript", str(transcript), "--today", TODAY]
+        )
+        return capsys.readouterr().out
+
+    def test_the_NO_OP_mutant_changes_nothing(
+        self, tmp_path: Path, capsys, tailer_cache
+    ) -> None:
+        """🔴 NEGATIVE CONTROL FOR THE BATCH."""
+        mod = _session_mutant(
+            tmp_path,
+            "m_esc_noop",
+            [('ESCALATION_BASIS_COMMIT = "commit"', 'ESCALATION_BASIS_COMMIT = "com" "mit"')],
+            st._session_tailer(),
+        )
+        repo = self._repo(tmp_path)
+        out = self._run(mod, repo, self._dominated(tmp_path, repo), _make_store(tmp_path / "s"), capsys)
+        assert "SECOND WINDOW, RUN AUTOMATICALLY — basis `--commit`" in out
+
+    def test_kills_the_ESCALATION_call_site(
+        self, tmp_path: Path, capsys, tailer_cache
+    ) -> None:
+        """POSITIVE CONTROL. The escalation is computable and simply never runs —
+        the pre-change behaviour, and the exact failure this fix is for."""
+        mod = _session_mutant(
+            tmp_path,
+            "m_esc_callsite",
+            [("        if wrong_window_dominance(source) is not None:",
+              "        if False:")],
+            st._session_tailer(),
+        )
+        repo = self._repo(tmp_path)
+        t = self._dominated(tmp_path, repo)
+        store = _make_store(tmp_path / "s")
+        out = self._run(mod, repo, t, store, capsys)
+        assert "WRONG WINDOW?" in out, "the advisory half must be untouched"
+        assert "SECOND WINDOW, RUN AUTOMATICALLY" not in out
+        assert "SECOND WINDOW COULD NOT BE READ" not in out
+        assert "SECOND WINDOW, RUN AUTOMATICALLY" in self._run(st, repo, t, store, capsys)
+
+    def test_kills_the_CONDITION_itself(
+        self, tmp_path: Path, capsys, tailer_cache
+    ) -> None:
+        """`if True`: a git walk on EVERY run, and a second window reported for a
+        session the first one saw fine. Only the negative control can see it."""
+        mod = _session_mutant(
+            tmp_path,
+            "m_esc_always",
+            [("        if wrong_window_dominance(source) is not None:", "        if True:")],
+            st._session_tailer(),
+        )
+        repo = self._repo(tmp_path)
+        out = self._run(mod, repo, self._visible(tmp_path, repo), _make_store(tmp_path / "s"), capsys)
+        assert "WRONG WINDOW?" not in out, "the mutation must be the condition, not the rule"
+        assert "SECOND WINDOW, RUN AUTOMATICALLY" in out
+
+    def test_kills_the_RENDERER_call_site(
+        self, tmp_path: Path, capsys, tailer_cache
+    ) -> None:
+        """The other half of the seam: the window is read and never surfaces —
+        the numbers exist and no reader sees them."""
+        mod = _session_mutant(
+            tmp_path,
+            "m_esc_render",
+            [("    out.extend(render_window_escalation(report.escalation, report))",
+              "    pass")],
+            st._session_tailer(),
+        )
+        repo = self._repo(tmp_path)
+        out = self._run(mod, repo, self._dominated(tmp_path, repo), _make_store(tmp_path / "s"), capsys)
+        assert "WRONG WINDOW?" in out
+        assert "SECOND WINDOW, RUN AUTOMATICALLY" not in out
+        assert "SECOND WINDOW COULD NOT BE READ" not in out
+
+    def test_kills_the_EMPTY_RANGE_reason(self, tmp_path: Path) -> None:
+        """🔴 THIS guard's own symptom, not a neighbour's. Without the named
+        `no-commits-in-range`, an empty range falls through to
+        `collect_commit_paths`, which raises — and the run reports
+        `commit-window-failed`: a real token for the WRONG mechanism, which is
+        the diagnosis-by-coin-flip `claude/RULES.md` forbids."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_esc_empty",
+            [("    if not shas:", "    if False:")],
+        )
+        repo = _init_repo(tmp_path, SCOPE)
+        _base_ref(repo, tmp_path)  # base ref present, but HEAD is AT the merge-base
+        store = _make_store(tmp_path / "s")
+        got = mod.escalate_to_commit_window(repo, store, SCOPE, today=TODAY)
+        assert got.reason == mod.ESCALATION_READ_FAILED
+        real = st.escalate_to_commit_window(repo, store, SCOPE, today=TODAY)
+        assert real.reason == st.ESCALATION_NO_COMMITS
+
+    def test_kills_the_NO_MERGES_filter(self, tmp_path: Path) -> None:
+        """Without it a merge commit lands in the range, `_resolve_commit` refuses
+        it, and the whole escalation degrades to `commit-window-failed` — a window
+        that stops working on any branch that ever merged."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_esc_merges",
+            [('    args = ["rev-list", "--no-merges", f"{merge_base}..HEAD"]',
+              '    args = ["rev-list", f"{merge_base}..HEAD"]')],
+        )
+        repo = _init_repo(tmp_path, SCOPE)
+        _base_ref(repo, tmp_path)
+        _run_git(repo, "checkout", "-b", "side", home=tmp_path)
+        _commit(repo, "src/collector/side.py", tmp_home=tmp_path)
+        _run_git(repo, "checkout", "main", home=tmp_path)
+        _commit(repo, "src/collector/main.py", tmp_home=tmp_path)
+        _run_git(repo, "merge", "--no-ff", "-m", "m", "side", home=tmp_path)
+        store = _make_store(tmp_path / "s")
+        assert mod.escalate_to_commit_window(
+            repo, store, SCOPE, today=TODAY
+        ).reason == mod.ESCALATION_READ_FAILED
+        assert st.escalate_to_commit_window(repo, store, SCOPE, today=TODAY).reason is None
+
+    def test_kills_the_DID_NOT_RUN_guard(self, tmp_path: Path) -> None:
+        """`escalation is None` means NOT ATTEMPTED. Without the guard the
+        renderer reads attributes off `None` — this guard's own symptom, an
+        AttributeError on a report that simply has no second window, not a
+        quietly wrong block."""
+        mod = _load_mutant(
+            tmp_path,
+            "m_esc_none",
+            [("    if escalation is None:\n        return []",
+              "    if False:\n        return []")],
+        )
+        with pytest.raises(AttributeError):
+            mod.render_window_escalation(None)
+        assert st.render_window_escalation(None) == []
