@@ -185,13 +185,15 @@
 #                               un-throttles the (background → throttled) tab in
 #                               the SAME invocation, so the next read is not a
 #                               shell — it replaces the `nav` then `wake` pair.
-#   browser screenshot [path] [--fullpage] [--data-url]
+#   browser screenshot [path] [--fullpage] [--data-url] [--json]
 #                             — screenshot the owned/active tab via CDP
 #                               (Page.captureScreenshot) — WORKS on a background/
 #                               occluded tab and on each profile's own tab; a
 #                               foreground tab uses the cheap captureVisibleTab fast
 #                               path. --fullpage grabs the whole scrollable document.
-#                               Writes a .png: to <path> if given (prints the path),
+#                               Writes a .png: to <path> if given (prints the path
+#                               plus a `#` Read hint — the ONE non-JSON stdout in
+#                               this CLI; pass --json for the envelope instead),
 #                               else to a MODE-0600 temp file (honours TMPDIR) and
 #                               prints compact JSON {path,bytes,url,via}. The base64
 #                               data URL is NEVER printed — Read the .png instead.
@@ -242,6 +244,21 @@
 #
 # Global flags (before the subcommand): --instance <key>, --tab <id>,
 #   --frame <frameId|url-substring> (route a read/click INTO a cross-origin frame).
+#
+#   ENV DEFAULTS: BB_INSTANCE / BB_TAB / BB_FRAME seed those three, so a caller
+#   driving one profile+tab for a whole run sets them ONCE instead of repeating
+#   the flags on every call. An explicit flag always wins (and `--instance ''`
+#   deliberately clears an inherited BB_INSTANCE).
+#     export BB_INSTANCE=work BB_TAB=1234
+#     browser text ; browser click '#go'          # both routed, no flags
+#   🔴 Prefer these to hoisting the flags into a shell variable. Under zsh an
+#   unquoted `$F` is NOT word-split, so `F="--instance work --tab 12"; browser $F
+#   text` passes ONE argument — the whole string — and the error names a
+#   subcommand you never typed. An env var cannot be split wrong.
+#   🔴 An exported BB_* OUTLIVES the command that set it and is inherited by every
+#   descendant, so a later destructive op can be routed with nothing in its argv
+#   saying so. Any op whose target came from the ENVIRONMENT therefore prints ONE
+#   line on stderr naming the variable; `BB_NO_ROUTE_NOTE=1` silences it.
 # Frame enumeration + --frame reads/input use chrome.webNavigation + chrome.scripting,
 # which reach CROSS-ORIGIN out-of-process iframes (OOPIFs) that CDP getFrameTree could
 # NOT see. `screenshot` still uses chrome.debugger (CDP), attaching ONLY to the owned/
@@ -250,6 +267,12 @@
 #
 # Output is JSON on stdout (pretty-printed if `jq` is present). Exit non-zero on
 # transport/HTTP error so a caller can branch.
+#
+# STDOUT IS JSON, STDERR IS FOR HUMANS. Every advisory — the hidden-tab warning,
+# a disconnected instance, routing help — goes to STDERR, so
+# `json.loads(<stdout>)` is safe. The ONE exception is `screenshot <path>`, which
+# prints the bare path plus a `#` Read hint for back-compat: pass `--json` there
+# to get the same envelope the no-path form prints.
 #
 # EXIT CODES
 #   0  success
@@ -267,9 +290,43 @@ HOST="${BROWSER_BRIDGE_HOST:-127.0.0.1}"
 PORT="${BROWSER_BRIDGE_PORT:-8788}"
 TOKEN_FILE="${BROWSER_BRIDGE_TOKEN_FILE:-$HOME/.config/browser-bridge/token}"
 BASE="http://${HOST}:${PORT}"
-INSTANCE=""   # routing key set via --instance <key> (empty → single-instance)
-TAB=""        # explicit tab id set via --tab <id> (overrides owned/active routing)
-FRAME=""      # --frame <frameId|url-substring>: route a read/click INTO that frame (CDP)
+# Targeting: --instance / --tab / --frame, each with an ENVIRONMENT DEFAULT.
+#
+# WHY THE ENV DEFAULTS EXIST (measured, 2026-08-20). Every op has to carry the
+# same three flags, so callers hoisted them into a shell variable and splatted it:
+#
+#     F="--instance work --tab 1234"; browser $F text        # ← WRONG under zsh
+#
+# zsh does NOT field-split an unquoted `$var` (bash does), so `$F` arrives as ONE
+# argument — the literal string `--instance work --tab 1234` — and the CLI reports
+# an unknown-subcommand error naming something the caller never typed. The failure
+# is silent in the sense that matters: nothing about it points at word splitting.
+# An env var cannot be word-split wrong because it is never split at all.
+#
+# PRECEDENCE: an explicit flag always wins, because the flag loop below ASSIGNS
+# over whatever the environment seeded here. `--instance ""` therefore genuinely
+# clears an inherited BB_INSTANCE (it is an explicit empty, not an absent flag).
+INSTANCE="${BB_INSTANCE:-}"   # routing key; --instance <key> (empty → single-instance)
+TAB="${BB_TAB:-}"             # explicit tab id; --tab <id> (overrides owned/active routing)
+FRAME="${BB_FRAME:-}"         # --frame <frameId|url-substring>: route INTO that frame (CDP)
+# Which SOURCE supplied TAB, so the numeric-validation error in cmd_op can name it.
+# A malformed `BB_TAB` reported as "--tab must be a numeric tab id" sends the reader
+# hunting a flag that appears nowhere in their command line.
+#
+# 🔴 AN ENV DEFAULT OUTLIVES THE COMMAND THAT SET IT, so each of the three also
+# records WHERE its value came from. Precedence is the easy half and it is
+# correct above; LIFETIME is the risk. `export BB_FRAME=evil.example` is inherited
+# by every descendant for the rest of that shell's life, so a later
+# `browser type '<secret>' --selector '#x'` is routed into that frame — or at
+# another profile's tab — with NOTHING in its command line saying so, and the
+# envelope it prints looks exactly like the un-routed one. Silence there makes an
+# inherited destructive route indistinguishable from a deliberate one, so cmd_op
+# says so ONCE on stderr (stdout stays pure JSON). The flag branches reset these
+# to the flag name, which is what keeps the note honest when a flag has won.
+INSTANCE_SRC="--instance"; [ -n "${BB_INSTANCE:-}" ] && INSTANCE_SRC="\$BB_INSTANCE"
+TAB_SRC="--tab";           [ -n "${BB_TAB:-}" ]      && TAB_SRC="\$BB_TAB"
+FRAME_SRC="--frame";       [ -n "${BB_FRAME:-}" ]    && FRAME_SRC="\$BB_FRAME"
+ENV_ROUTE_NOTED=0
 
 die() { echo "browser: $*" >&2; exit 1; }
 
@@ -419,12 +476,12 @@ derive_session_id() {
 # subcommand. --print-session-id short-circuits (no server/token needed).
 while [ $# -gt 0 ]; do
   case "$1" in
-    --instance) shift; [ $# -ge 1 ] || die "usage: browser --instance <key> <subcommand>"; INSTANCE="$1"; shift ;;
-    --instance=*) INSTANCE="${1#--instance=}"; shift ;;
-    --tab) shift; [ $# -ge 1 ] || die "usage: browser --tab <id> <subcommand>"; TAB="$1"; shift ;;
-    --tab=*) TAB="${1#--tab=}"; shift ;;
-    --frame) shift; [ $# -ge 1 ] || die "usage: browser --frame <frameId|url-substring> <subcommand>"; FRAME="$1"; shift ;;
-    --frame=*) FRAME="${1#--frame=}"; shift ;;
+    --instance) shift; [ $# -ge 1 ] || die "usage: browser --instance <key> <subcommand>"; INSTANCE="$1"; INSTANCE_SRC="--instance"; shift ;;
+    --instance=*) INSTANCE="${1#--instance=}"; INSTANCE_SRC="--instance"; shift ;;
+    --tab) shift; [ $# -ge 1 ] || die "usage: browser --tab <id> <subcommand>"; TAB="$1"; TAB_SRC="--tab"; shift ;;
+    --tab=*) TAB="${1#--tab=}"; TAB_SRC="--tab"; shift ;;
+    --frame) shift; [ $# -ge 1 ] || die "usage: browser --frame <frameId|url-substring> <subcommand>"; FRAME="$1"; FRAME_SRC="--frame"; shift ;;
+    --frame=*) FRAME="${1#--frame=}"; FRAME_SRC="--frame"; shift ;;
     --print-session-id) derive_session_id; echo; exit 0 ;;
     *) break ;;
   esac
@@ -1062,6 +1119,37 @@ json.dump(d, sys.stdout)
 '
 }
 
+# _note_env_routing — say ONCE, on stderr, that this op's target came from the
+# ENVIRONMENT and not from anything in the command line.
+#
+# 🔴 The hazard the env defaults introduce is LIFETIME, not precedence. An
+# exported BB_TAB/BB_FRAME/BB_INSTANCE silently steers every later `browser` call
+# in that shell AND in every descendant process — including a destructive
+# `type`/`click`/`upload` whose argv mentions no routing at all, and whose result
+# envelope is identical either way. One line naming the variable is the only thing
+# that makes an inherited route visible at the moment it is used.
+#
+# Called ONCE, from the subcommand dispatch below, NOT from cmd_op: several
+# subcommands invoke cmd_op inside a command substitution, and a subshell's
+# assignment to ENV_ROUTE_NOTED cannot reach this shell — so calling it there
+# printed the advisory once per op. STDERR only — `json.loads` on stdout must
+# stay safe, which is the contract the whole file is built around.
+# `BB_NO_ROUTE_NOTE=1` silences it for a caller that has deliberately exported the
+# variables for a long run and does not want the line on every op.
+_note_env_routing() {
+  [ "$ENV_ROUTE_NOTED" -eq 0 ] || return 0
+  ENV_ROUTE_NOTED=1
+  [ -z "${BB_NO_ROUTE_NOTE:-}" ] || return 0
+  local from=""
+  [ "$INSTANCE_SRC" = "\$BB_INSTANCE" ] && [ -n "$INSTANCE" ] && from="${from} \$BB_INSTANCE=${INSTANCE}"
+  [ "$TAB_SRC" = "\$BB_TAB" ] && [ -n "$TAB" ] && from="${from} \$BB_TAB=${TAB}"
+  [ "$FRAME_SRC" = "\$BB_FRAME" ] && [ -n "$FRAME" ] && from="${from} \$BB_FRAME=${FRAME}"
+  [ -n "$from" ] || return 0
+  echo "browser: routed from the ENVIRONMENT, not this command line:${from}" >&2
+  echo "browser:   (an exported BB_* is inherited by every later call — pass the flag" >&2
+  echo "browser:   explicitly, or unset it; BB_NO_ROUTE_NOTE=1 silences this line.)" >&2
+}
+
 # cmd_op OP [EXTRA_JSON_FIELDS] — POST /cmd, print the result JSON on a genuine
 # success; exit non-zero with a readable message on a transport, HTTP, OR
 # op-level (result.ok:false) error. Honours the global --instance (INSTANCE) by
@@ -1073,7 +1161,7 @@ cmd_op() {
   # --tab injects an explicit numeric tab override (validated as an integer).
   local tabf=""
   if [ -n "$TAB" ]; then
-    case "$TAB" in (*[!0-9]*|"") die "--tab must be a numeric tab id (got: $TAB)";; esac
+    case "$TAB" in (*[!0-9]*|"") die "${TAB_SRC} must be a numeric tab id (got: $TAB)";; esac
     tabf=",\"tab\":${TAB}"
   fi
   # --frame routes a read/click INTO a specific (cross-origin OOPIF) frame; the
@@ -1456,6 +1544,13 @@ pos_rest() {
 }
 
 sub="${1:-}"; shift || true
+# ONCE, here, and NOT inside cmd_op: several subcommands run cmd_op in a command
+# substitution (`resp="$(cmd_op nav …)"`), and a subshell cannot write the
+# "already noted" flag back to this shell — so a nav --wake printed the advisory
+# TWICE. Measured, not reasoned: the once-per-invocation test caught it.
+# The flag loop above exits for --help/--print-session-id before reaching this
+# line, so a command that never touches the wire never emits it.
+_note_env_routing
 case "$sub" in
   health)
     raw="$(_curl GET /health)" || die "curl failed talking to ${BASE}/health"
@@ -1947,13 +2042,27 @@ sys.stdout.write(json.dumps(fields)[1:-1])
     # DEFAULT (no path) now writes the PNG to a temp file and prints a compact
     # JSON result carrying the PATH + metadata. `--data-url` is the explicit
     # escape hatch that restores the old raw-data-URL output.
-    full=""; POS=""; POS_SEEN=0; dataurl=0
+    #
+    # 🔴 `--json` — THE ONE OP WHOSE STDOUT IS NOT JSON, MADE PARSEABLE ON REQUEST.
+    # Every other subcommand puts a JSON envelope and nothing else on stdout (the
+    # advisories — hidden tab, disconnected instance, routing help — all go to
+    # STDERR, and `tests/test_browser_cli_args.py` now pins that). `screenshot
+    # <path>` is the exception: for back-compat it prints the bare path on line 1
+    # and a `#`-prefixed Read hint on line 2, so a caller doing
+    # `json.loads(subprocess.run(...).stdout)` gets "Expecting value: line 1
+    # column 1" — measured 2026-08-20, and the reason three consumers broke.
+    #
+    # ADDITIVE, never a behaviour change: the default output is byte-identical to
+    # before. `--json` opts in to the SAME compact envelope the no-path branch has
+    # always printed ({ok,path,bytes,url,via,note}), so one parser handles both.
+    full=""; POS=""; POS_SEEN=0; dataurl=0; asjson=0
     while [ $# -gt 0 ]; do
       case "$1" in
         --fullpage) full="\"fullpage\":true"; shift ;;
         --data-url) dataurl=1; shift ;;
+        --json) asjson=1; shift ;;
         --) shift; pos_rest "screenshot takes at most one path" "$@"; break ;;
-        -*) die "browser screenshot: unknown flag: $1 (try: --fullpage, --data-url; use '--' before a path starting with '-')" ;;
+        -*) die "browser screenshot: unknown flag: $1 (try: --fullpage, --data-url, --json; use '--' before a path starting with '-')" ;;
         *) pos_add "screenshot takes at most one path" "$1"; shift ;;
       esac
     done
@@ -1966,6 +2075,15 @@ sys.stdout.write(json.dumps(fields)[1:-1])
     out="$POS"
     if [ "$dataurl" -eq 1 ] && [ -n "$out" ]; then
       die "browser screenshot: --data-url and an explicit path are mutually exclusive"
+    fi
+    # `--data-url` prints the RAW response envelope and never builds the compact
+    # {ok,path,bytes,…} shape, so `--json` has nothing to opt into there. Accepting
+    # the pair and ignoring one of them is the worst outcome: the caller asked for a
+    # parseable envelope, got a DIFFERENT parseable envelope with none of the keys
+    # they were about to read, and nothing said so. Refuse instead — the same rule
+    # the mutually-exclusive check above already applies to --data-url + a path.
+    if [ "$dataurl" -eq 1 ] && [ "$asjson" -eq 1 ]; then
+      die "browser screenshot: --data-url and --json are mutually exclusive (--data-url prints the raw response envelope, which has no path/bytes to report)"
     fi
     # cmd_op runs in a command substitution, so its `die`/exit can't propagate
     # on its own — `|| exit 1` forwards an op/transport error to the caller.
@@ -2039,37 +2157,76 @@ if not png.startswith(PNG_MAGIC):
     sys.exit(1)
 
 out=sys.argv[1]
+asjson=sys.argv[2]=="1"
 explicit=bool(out)
 tmpdir=tempfile.gettempdir()
 prune(tmpdir)
+
+def emit(payload):
+    """The ONE way this helper puts a result in front of the caller: FD 1.
+
+    Explicit rather than `print` because the whole point of `--json` is that
+    `json.loads(<stdout>)` works — every diagnostic in this script goes to
+    sys.stderr, and the two must never be confused. Flushed because the payload
+    is the last thing written and stdout is block-buffered when it is a pipe."""
+    sys.stdout.write(payload + "\n")
+    sys.stdout.flush()
+
+def envelope(path, note):
+    """The ONE compact result shape, shared by every JSON-printing branch.
+
+    It used to be built inline in the temp-file branch only, so `--json` had a
+    choice between duplicating it (two shapes that drift) and reusing it. One
+    rule, one place: the temp-file branch and `--json` now emit the SAME keys,
+    which is the whole point of --json — a caller writes one parser."""
+    data=d.get("result",{}).get("data",{}) or {}
+    res={"ok":True,"path":path,"bytes":len(png)}
+    for k in ("url","via"):
+        if data.get(k) is not None:
+            res[k]=data[k]
+    res["note"]=note
+    return json.dumps(res)
+
 if explicit:
-    with open(out,"wb") as fh:
-        fh.write(png)
-    print(out)
-    # A capture nobody Reads is pure waste: the 2026-08-02 usage audit measured
-    # 7 of 63 explicit-path captures never Read back. Exit 0 and a path on stdout
-    # look like success, so the one thing still required is easy to forget. ONE
-    # short line, and deliberately `#`-prefixed so line 1 stays the bare path for
-    # anything parsing it (and so the hint cannot be mistaken FOR a path).
-    # NOT printed for --data-url (no file exists) or the temp-file branch (whose
-    # JSON already carries an equivalent `note`) — printing it there would be
-    # wrong, and those two are the negative controls for the test.
-    print("# Read %s to view it." % out)
+    # A caller-supplied path can be a directory, a read-only dir, a dangling
+    # symlink. An uncaught OSError here prints a TRACEBACK on stderr and NOTHING
+    # on stdout — which reads exactly like "the --json payload went to stderr".
+    # One clean line instead, so a failed write can never be mistaken for a
+    # routing bug in the branch below.
+    try:
+        with open(out,"wb") as fh:
+            fh.write(png)
+    except OSError as exc:
+        sys.stderr.write("browser: screenshot: could not write %s (%s)\n" % (out, exc))
+        sys.exit(1)
+    if asjson:
+        # --json: the SAME envelope, so `json.loads(stdout)` works. The Read hint
+        # moves INTO `note` rather than being dropped — a caller that parses JSON
+        # still gets told the file has to be Read, and gets it in a field instead
+        # of a comment line their parser would choke on.
+        emit(envelope(out, "PNG written to %s — Read the file to view it "
+                           "(the base64 data URL is not printed; use --data-url "
+                           "to get it)" % out))
+    else:
+        print(out)
+        # A capture nobody Reads is pure waste: the 2026-08-02 usage audit measured
+        # 7 of 63 explicit-path captures never Read back. Exit 0 and a path on stdout
+        # look like success, so the one thing still required is easy to forget. ONE
+        # short line, and deliberately `#`-prefixed so line 1 stays the bare path for
+        # anything parsing it (and so the hint cannot be mistaken FOR a path).
+        # NOT printed for --data-url (no file exists) or the temp-file branch (whose
+        # JSON already carries an equivalent `note`) — printing it there would be
+        # wrong, and those two are the negative controls for the test.
+        print("# Read %s to view it." % out)
 else:
     # mkstemp: O_CREAT|O_EXCL at 0600 — not world-readable, not symlink-followable.
     fd,out=tempfile.mkstemp(prefix=PREFIX, suffix=SUFFIX, dir=tmpdir)
     with os.fdopen(fd,"wb") as fh:
         fh.write(png)
-    data=d.get("result",{}).get("data",{}) or {}
-    res={"ok":True,"path":out,"bytes":len(png)}
-    for k in ("url","via"):
-        if data.get(k) is not None:
-            res[k]=data[k]
-    res["note"]=("PNG written to disk (mode 0600, auto-pruned after 24h) — Read the "
-                 "file to view it (the base64 data URL is not printed; use --data-url "
-                 "to get it)")
-    print(json.dumps(res))
-' "$out"
+    emit(envelope(out, "PNG written to disk (mode 0600, auto-pruned after 24h) "
+                       "— Read the file to view it (the base64 data URL is not "
+                       "printed; use --data-url to get it)"))
+' "$out" "$asjson"
     fi
     ;;
   frames)
