@@ -753,6 +753,92 @@ class TestClawgateBlock:
         assert any("no comments array" in g for g in gaps(out)), drift_lines(out)
         assert "comments=(unreadable)" in " ".join(block(out, "CLAWGATE"))
 
+    # --------------------------------- WHICH COPY of the doc gets read -------
+    def _stale_clone(self, tmp_path: Path, local_fm: str | None, origin_fm: str | None):
+        """A clone whose checked-out handoff differs from origin's.
+
+        🔴 NEITHER SIDE'S SUITE MADE THE TWO COPIES DIFFER — which is why a block
+        reading the wrong one survived a full audit round. Built the way it
+        actually happens: clone A commits v1 and pushes, clone B pushes v2, A is
+        never updated. A's `origin/main` ref is stale too until the script
+        fetches, so the fetch path is exercised for real against a local bare
+        repo (no network).
+        """
+        env = _git_env(tmp_path)
+        origin = tmp_path / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)],
+                       check=True, env=env)
+        a, b = tmp_path / "cloneA", tmp_path / "cloneB"
+        for dest in (a, b):
+            subprocess.run(["git", "clone", "-q", str(origin), str(dest)], check=True, env=env)
+        doc = "claudedocs/handoff-stale.md"
+        (a / "claudedocs").mkdir(parents=True)
+        (a / doc).write_text(fm(local_fm), encoding="utf-8")
+        for args in (["add", doc], ["commit", "-qm", "v1"], ["push", "-q", "origin", "main"]):
+            subprocess.run(["git", "-C", str(a), *args], check=True, env=_git_env(a))
+        subprocess.run(["git", "-C", str(b), "pull", "-q", "origin", "main"],
+                       check=True, env=_git_env(b))
+        (b / doc).write_text(fm(origin_fm) + "\n## Extra\n- the last session's real work\n",
+                             encoding="utf-8")
+        for args in (["add", doc], ["commit", "-qm", "v2"], ["push", "-q", "origin", "main"]):
+            subprocess.run(["git", "-C", str(b), *args], check=True, env=_git_env(b))
+        return a
+
+    def _run_in(self, repo: Path, stubs, task: dict) -> str:
+        d, log = stubs
+        env = _git_env(repo)
+        env["PATH"] = f"{d}{os.pathsep}{env['PATH']}"
+        env["STUB_LOG"] = str(log)
+        env["STUB_CG_RC"] = "0"
+        env["RESUME_STATE_SKIP_FETCH"] = ""      # let the real fetch run
+        tf = repo.parent / "task.json"
+        tf.write_text(json.dumps(task))
+        env["STUB_CG_JSON"] = str(tf)
+        out = subprocess.run(["bash", str(RESUME)], cwd=str(repo), capture_output=True,
+                             text=True, timeout=90, env=env)
+        assert out.returncode == 0, out.stderr
+        return out.stdout
+
+    def test_the_field_is_read_from_the_copy_handoff_freshness_CHOSE(self, tmp_path, stubs):
+        """🔴 THE REGRESSION. Every other block reads `$HANDOFF_TEXT` — the copy
+        the freshness check selected — and this one read the working tree.
+
+        The two differ exactly when it matters: here the STALE local copy carries
+        NO field while the origin copy (the one the digest announces it read)
+        carries `clawgate-task: 193`, and the board has that task `complete`. The
+        pre-fix digest printed `handoff-read: 🔴 origin/main copy (…STALE…)` and
+        then `(no clawgate-task: field …)` with ZERO gaps — because "no field" is
+        the one case deliberately exempt from gapping. A false clean, reached
+        through the block built to prevent false cleans."""
+        repo = self._stale_clone(tmp_path, local_fm=None, origin_fm="193")
+        out = self._run_in(repo, stubs, {"id": 193, "status": "complete", "comments": []})
+        assert "STALE" in " ".join(
+            ln for ln in out.splitlines() if "handoff-read:" in ln), out
+        body = " ".join(block(out, "CLAWGATE"))
+        assert "task #193" in body, f"the block read the stale local copy:\n{out}"
+        assert any("COMPLETE" in f for f in findings(out)), drift_lines(out)
+
+    def test_the_two_copies_naming_DIFFERENT_tasks_reconciles_the_chosen_one(
+        self, tmp_path, stubs
+    ):
+        """NEGATIVE CONTROL on the test above: "no field locally" could be
+        satisfied by a block that ignores the doc entirely and always fetches.
+        Here BOTH copies name a task and they name DIFFERENT ones, so only
+        reading the right copy produces the right id."""
+        repo = self._stale_clone(tmp_path, local_fm="777", origin_fm="193")
+        out = self._run_in(repo, stubs, {"id": 193, "status": "open", "comments": []})
+        body = " ".join(block(out, "CLAWGATE"))
+        assert "task #193" in body, out
+        assert "777" not in body, f"the block reconciled the stale copy's task:\n{out}"
+
+    def test_the_clock_dates_the_REF_copy_when_that_is_the_one_read(self, tmp_path, stubs):
+        """…and the date must come from the same copy as the text. The local
+        branch's `git log -1 -- <path>` describes the file that was discarded, so
+        the printed clock names the ref instead."""
+        repo = self._stale_clone(tmp_path, local_fm=None, origin_fm="193")
+        out = self._run_in(repo, stubs, {"id": 193, "status": "open", "comments": []})
+        assert "by last commit on origin/main" in " ".join(block(out, "CLAWGATE")), out
+
     # ------------------------------------------------- which CLOCK counts ----
     def test_a_FRESH_CHECKOUT_does_not_silence_the_comment_count(self, tmp_path, stubs):
         """🔴 THE REGRESSION, and it lands on this repo's own standard workflow.
@@ -940,6 +1026,7 @@ def resolver(tmp_path):
     binp.mkdir()
     argv_log = tmp_path / "curl-argv.log"
     cfg_copy = tmp_path / "curl-config.copy"
+    cfg_paths = tmp_path / "curl-config.paths"
     tmpdir = tmp_path / "tmpdir"
     tmpdir.mkdir()
     # 🔴 The stub COPIES the --config file aside. Without that, the only thing
@@ -951,7 +1038,12 @@ def resolver(tmp_path):
         'while [ $# -gt 0 ]; do\n'
         '  case "$1" in\n'
         '    -o) out="$2"; shift 2 ;;\n'
-        '    --config) cp "$2" "$STUB_CFG_COPY"; shift 2 ;;\n'
+        # 🔴 The PATH is logged as well as the contents. Copying the file proves
+        # a config carried the token; only the path proves WHERE it lived — and
+        # without that join a compound mutant (write to /tmp, drop the `rm`,
+        # drop it from the trap) left the suite green with a real token file
+        # persisting while the fixture's TMPDIR sat empty.
+        '    --config) printf "%s\\n" "$2" >> "$STUB_CFG_PATHS"; cp "$2" "$STUB_CFG_COPY"; shift 2 ;;\n'
         '    *) printf "%s\\n" "$1" >> "$STUB_ARGV"; shift ;;\n'
         '  esac\n'
         'done\n'
@@ -967,6 +1059,7 @@ def resolver(tmp_path):
         env["PATH"] = f"{binp}{os.pathsep}{env['PATH']}"
         env["STUB_ARGV"] = str(argv_log)
         env["STUB_CFG_COPY"] = str(cfg_copy)
+        env["STUB_CFG_PATHS"] = str(cfg_paths)
         # 🔴 LOAD-BEARING, AND IT WAS MISSING. `mktemp` honours TMPDIR, so
         # without this the subject wrote its token file into the ambient /tmp
         # and the cleanup test compared an empty directory against itself —
@@ -987,6 +1080,7 @@ def resolver(tmp_path):
 
     go.argv_log = argv_log  # type: ignore[attr-defined]
     go.cfg_copy = cfg_copy  # type: ignore[attr-defined]
+    go.cfg_paths = cfg_paths  # type: ignore[attr-defined]
     go.tmpdir = tmpdir  # type: ignore[attr-defined]
     return go
 
@@ -1105,6 +1199,26 @@ class TestResolve:
         assert cfg.exists(), "curl was never handed a --config file"
         assert SENTINEL_TOKEN in cfg.read_text()
 
+    def test_the_token_file_LIVES_where_the_deletion_test_looks(self, resolver):
+        """🔴 THE JOIN, and its absence made the pair below walkable. The control
+        above proves *a* config carried the token — but it reads the stub's COPY,
+        so it says nothing about where the original lived; the deletion test
+        inspects a directory the subject may never have used. A compound mutant
+        (`cfg=$(TMPDIR=/tmp mktemp)`, no `rm`, not in the trap) therefore left
+        328/328 green with a real `-rw------- … Authorization: Bearer …`
+        persisting outside the fixture. Asserting the PATH is what ties the two
+        halves to the same file."""
+        r = resolver(ONE)
+        assert r.returncode == 0
+        paths = resolver.cfg_paths.read_text().split()  # type: ignore[attr-defined]
+        assert len(paths) == 1, f"expected exactly one --config, got {paths}"
+        tmpdir = resolver.tmpdir  # type: ignore[attr-defined]
+        assert Path(paths[0]).parent == tmpdir, (
+            f"the token file was written to {paths[0]}, outside the TMPDIR the "
+            f"deletion test inspects ({tmpdir}) — the two halves are measuring "
+            f"different files"
+        )
+
     def test_the_config_file_is_deleted_afterwards(self, resolver):
         """🔴 THE GUARD ON A LIVE BEARER TOKEN, and it was VACUOUS until now.
 
@@ -1173,6 +1287,49 @@ class TestResolve:
         r = resolver({"tasks": [{"id": bad_id, "status": "open", "title": "t"}]})
         assert r.returncode == 4, r.stdout
         assert "record nothing" in r.stdout
+
+    # The tools `resolve` preflights. Spelled here so the ledger below fails
+    # when the list in the lib grows or shrinks without this test moving.
+    PREFLIGHTED = ("curl", "jq", "mktemp")
+
+    def test_the_preflight_list_is_exactly_what_this_test_drives(self):
+        """🔴 LEDGER. Removing `mktemp` from the lib's list survived the whole
+        suite, because only `jq`'s absence was ever exercised — one driven
+        member reads as a driven list. Both directions: a tool added to the
+        preflight and not driven here fails, and one dropped from the lib fails
+        too."""
+        src = LIB.read_text(encoding="utf-8")
+        m = re.search(r"^\s*for need in ([a-z ]+); do", src, re.M)
+        assert m, "the preflight loop is no longer a plain `for need in …`"
+        assert tuple(m.group(1).split()) == self.PREFLIGHTED, m.group(1)
+
+    @pytest.mark.parametrize("missing", PREFLIGHTED)
+    def test_every_preflighted_tool_is_individually_driven(self, tmp_path, missing):
+        """Each tool removed IN TURN, with the other two present — the shape a
+        ledger alone cannot check."""
+        home = tmp_path / "home"
+        (home / ".claude").mkdir(parents=True)
+        (home / ".claude" / "clawgate.env").write_text(
+            f"CLAWGATE_API_URL=http://clawgate.invalid:1\n"
+            f"CLAWGATE_HOOK_TOKEN={SENTINEL_TOKEN}\n", encoding="utf-8")
+        binp = tmp_path / f"bin-no-{missing}"
+        binp.mkdir()
+        for name in ("bash", "sh", "cat", "sed", "chmod", "rm", "cp", "curl", "jq", "mktemp"):
+            if name == missing:
+                continue
+            p = shutil.which(name)
+            if p:
+                (binp / name).symlink_to(p)
+        assert not shutil.which(missing, path=str(binp)), f"{missing} leaked into the bin"
+        env = _base_env()
+        env["HOME"] = str(home)
+        env["PATH"] = str(binp)
+        env[SESSION_VAR] = "sess-abc-123"
+        out = subprocess.run(["bash", str(LIB), "resolve"], capture_output=True,
+                             text=True, timeout=30, env=env)
+        assert out.returncode == 4, out.stdout + out.stderr
+        assert f"`{missing}` is not on PATH" in out.stdout, out.stdout
+        assert "UNKNOWN, not empty" in out.stdout
 
     def test_a_missing_TOOL_is_a_gap_naming_the_tool(self, resolver, tmp_path):
         """🔴 Finding 9's class. The preflight checked `curl` and `jq` while the
@@ -1276,6 +1433,70 @@ class TestSkillsAndCodeAgree:
                              capture_output=True, text=True, env=_base_env())
         assert out.stdout.strip() == rel, f"{rel} is untracked; the flake will omit it"
 
+    def test_only_handoff_freshness_READS_the_working_tree_copy(self):
+        """🔴 THE CLASS, NOT THE INSTANCE — and this exists because the class was
+        identified, one instance was fixed, and a second sat three functions away
+        in the same file for a whole review round.
+
+        `handoff_freshness` decides WHICH copy of the doc is authoritative (the
+        working tree, or `origin/<default>` when the branch is behind) and
+        publishes it as `$HANDOFF_TEXT`. Any other function that opens
+        `$HANDOFF` for its CONTENT silently opts out of that decision — and the
+        two copies differ exactly when it matters.
+
+        Structural, not spelled: it walks every use of `$HANDOFF` in the script,
+        attributes it to its enclosing function, and classifies it as a CONTENT
+        read or a PATH use. Content reads outside `handoff_freshness` fail. Path
+        uses are LEDGERED, so a new one has to be classified here rather than
+        appearing unreviewed — the ledger fails when it grows *or* shrinks."""
+        src = RESUME.read_text(encoding="utf-8").splitlines()
+        # commands that open a file for its CONTENT (vs. ones that take a path)
+        content_re = re.compile(
+            r'(?:^|[;&|(]|\$\()\s*(?:cat|grep|head|tail|sed|awk|wc|jq)\b[^\n]*"\$HANDOFF"'
+            r'|<\s*"\$HANDOFF"'
+        )
+        # `[ -n "$HANDOFF" ]` asks whether a doc resolved AT ALL. It opens
+        # nothing, so it is neither a content read nor a file access, and every
+        # block legitimately does it.
+        presence_re = re.compile(r'\[\s*-[nz]\s+"\$HANDOFF"\s*\]')
+        fn_re = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*\(\)\s*\{")
+        fn = "(top level)"
+        content_hits, path_hits = [], []
+        for i, line in enumerate(src, 1):
+            m = fn_re.match(line)
+            if m:
+                fn = m.group(1)
+            if line.lstrip().startswith("#") or '"$HANDOFF"' not in line:
+                continue
+            if content_re.search(line):
+                content_hits.append((fn, i, line.strip()))
+            elif not presence_re.search(line):
+                path_hits.append((fn, i, line.strip()))
+
+        offenders = [h for h in content_hits if h[0] != "handoff_freshness"]
+        assert not offenders, (
+            "a block reads the working-tree copy directly instead of "
+            "$HANDOFF_TEXT — the copy handoff_freshness chose:\n"
+            + "\n".join(f"  {f}:{n}: {ln}" for f, n, ln in offenders)
+        )
+        assert content_hits, (
+            "POSITIVE CONTROL: the scanner found NO content read at all, so it "
+            "cannot have been looking — handoff_freshness itself does one."
+        )
+        # The ledger: every PATH use, by function. Each is a use of the NAME,
+        # not of the bytes, so it is compatible with the rule above — but a new
+        # one must be added here deliberately.
+        assert sorted({f for f, _n, _l in path_hits}) == [
+            # dates the doc (`git log … -- "$HANDOFF"`, `stat -c %Y`)
+            "clawgate_block",
+            # prints `handoff: $(basename …)`
+            "git_pr_block",
+            # resolves `rel` and compares against the ref
+            "handoff_freshness",
+            # derives $REPO from the path when an explicit doc is passed
+            "resolve",
+        ], sorted(path_hits)
+
     def test_resume_state_sources_the_shared_parser_rather_than_copying_it(self):
         """🔴 ONE RULE, ONE PLACE. The writer's "is a field already there?" and
         the reader's "what does it say?" must agree by construction; a second
@@ -1341,6 +1562,36 @@ class TestFrontMatterSurvivesTheMerge:
         merged = hd.merge(BASE_DOC, "---\nclawgate-task: 200\n---\n## State now\n- x\n")
         assert merged.startswith("---\nclawgate-task: 200\n---\n"), merged
         assert merged.count("clawgate-task:") == 1
+
+    def test_an_explicit_front_matter_that_DROPS_the_field_is_reported(self):
+        """🔴 THE SIBLING HOLE. `(upd_fm or base_fm)` discards the base's block
+        wholesale, so an update bringing its own front matter deletes the
+        recorded task with `dropped == ()` — while the *preamble* sibling had
+        been given a warning. "An explicit one wins" stays the rule; it is prose
+        in a skill, and prose is not a guard.
+
+        REACHABLE BY ACCIDENT, which is why it matters: a delta whose first line
+        is `---` used as a horizontal rule, with another `---` further down, is a
+        well-formed front-matter block to `split_front_matter`."""
+        report = hd.merge_report(BASE_DOC, "---\ntitle: something else\n---\n## State now\n- x\n")
+        assert "clawgate-task" not in report.text, report.text
+        hits = [d for d in report.dropped if "clawgate-task" in d.line]
+        assert len(hits) == 1, report.dropped
+        assert hits[0].line_no == 2, hits[0]
+        assert BASE_DOC.splitlines()[hits[0].line_no - 1] == hits[0].line
+
+    def test_replacing_the_field_with_ANOTHER_task_is_still_reported(self):
+        """Changing which task a doc names is a legitimate act — and still a
+        deletion of the old one, which the author should see named."""
+        report = hd.merge_report(BASE_DOC, "---\nclawgate-task: 200\n---\n## State now\n- x\n")
+        assert [d.line for d in report.dropped] == ["---\nclawgate-task: 193\n---".splitlines()[1]]
+
+    def test_an_IDENTICAL_front_matter_in_the_delta_reports_nothing(self):
+        """NEGATIVE CONTROL: a warning that fires when the field SURVIVES is
+        noise, and rule (f) is a warn-on-loss rule."""
+        report = hd.merge_report(BASE_DOC, "---\nclawgate-task: 193\n---\n## State now\n- x\n")
+        assert report.dropped == (), report.dropped
+        assert "clawgate-task: 193" in report.text
 
     def test_a_doc_with_no_front_matter_merges_exactly_as_before(self):
         """GUARD against a regression in the untouched majority: no front

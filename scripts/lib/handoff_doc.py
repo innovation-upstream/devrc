@@ -200,6 +200,13 @@ _FENCE = re.compile(r"^(`{3,}|~{3,})")
 # then everything through the next `---` line. Same strictness as
 # `clawgate_task_field` in scripts/lib/clawgate_handoff.sh — a `---` later in a
 # markdown doc is a horizontal rule, not a front-matter opener.
+#
+# ⚠ ONE KNOWN DIVERGENCE from that shell reader, recorded rather than fixed:
+# the `\r?\n` after the closing `---` means a document that ENDS at the closing
+# delimiter with no trailing newline is front matter to the shell and preamble
+# here. That document has no body at all, so the only consumer that can tell —
+# the merge — reports it through the preamble-drop warning either way. Fix it if
+# a document like that ever turns up; do not "tidy" it without one.
 _FRONT_MATTER = re.compile(r"\A---\r?\n.*?^---\r?\n", re.DOTALL | re.MULTILINE)
 
 
@@ -232,7 +239,11 @@ DURABLE_CLAWGATE = "clawgate task"
 def _dropped_preamble_task(
     base_pre: str, out_pre: str, line_offset: int
 ) -> list[DroppedDurable]:
-    """`clawgate-task:` lines the preamble replacement is about to delete.
+    """`clawgate-task:` lines a wholesale block replacement is about to delete.
+
+    Called for BOTH replaceable blocks — the front matter and the preamble — so
+    the two cannot drift apart: whichever one carried the field, losing it is
+    reported the same way, with an address the author can open.
 
     🔴 THE HOLE THE FRONT-MATTER FIX DOES NOT COVER, found by a test written for
     the seam rather than for either component. `split_front_matter` only sees a
@@ -542,8 +553,21 @@ def merge_report(base_text: str, update_text: str) -> MergeReport:
     # line number on any doc that records a clawgate task.
     body_starts = _body_start_lines(base_pre, base_secs, base_fm)
     dropped: list[DroppedDurable] = []
-    # The preamble is replaced wholesale when the update brings its own, and an
-    # UNTERMINATED front-matter block lives there. See _dropped_preamble_task.
+    # TWO WAYS THE FIELD LEAVES A DOCUMENT WITHOUT ANY SECTION BEING TOUCHED,
+    # and the same function reports both — the asymmetry between them was a real
+    # gap, not a design:
+    #
+    #  (a) the update brings its own FRONT MATTER, so `(upd_fm or base_fm)`
+    #      discards the base's. "An explicit one wins" is the intended rule and
+    #      stays — but a rule whose only statement is prose in a skill is not a
+    #      guard, and a delta can claim front matter by ACCIDENT: a `---` used as
+    #      a horizontal rule on line 1 with another `---` further down is a
+    #      well-formed block to `split_front_matter`. Offset 0 because front
+    #      matter starts at line 1 of the file.
+    #  (b) the update brings its own PREAMBLE, which is where an UNTERMINATED
+    #      block lives. Offset = the height of the real front matter above it.
+    if upd_fm and upd_fm != base_fm:
+        dropped.extend(_dropped_preamble_task(base_fm, upd_fm, 0))
     if out_pre != base_pre:
         dropped.extend(
             _dropped_preamble_task(base_pre, out_pre, base_fm.count("\n"))

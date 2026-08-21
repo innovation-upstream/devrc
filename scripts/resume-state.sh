@@ -280,13 +280,19 @@ UNRECONCILED=()  # sources that did NOT answer — an empty DRIFT means less whe
 #   HANDOFF_TEXT    the authoritative text every later block extracts from
 #   HANDOFF_NOTE    the freshness clause printed on the `handoff:` line
 #   HANDOFF_ALT     a /tmp path holding the OTHER copy, when they differ
+#   HANDOFF_REF     the ref the authoritative text came FROM, or "" for the
+#   HANDOFF_REL     working tree — with its repo-relative path. Set ONLY on the
+#                   stale-branch path, i.e. only when the text did not come from
+#                   the file on disk. Anything that needs to DATE the text it
+#                   read has to know this: the local branch's `git log` is the
+#                   history of a copy nobody reconciled. See clawgate_block.
 #
 # Which copy wins is decided by a fact, not a heuristic: if the working-tree
 # file is UNMODIFIED relative to HEAD, then any difference from origin is the
 # branch being behind, and origin is authoritative. If it carries uncommitted
 # edits, it is this session's work-in-progress and stays authoritative — but
 # loudly, because reconciling against unpushed text is its own trap.
-HANDOFF_TEXT="" HANDOFF_NOTE="" HANDOFF_ALT=""
+HANDOFF_TEXT="" HANDOFF_NOTE="" HANDOFF_ALT="" HANDOFF_REF="" HANDOFF_REL=""
 handoff_freshness(){
   [ -n "$HANDOFF" ] || return 0
   HANDOFF_TEXT=$(cat "$HANDOFF")
@@ -352,6 +358,10 @@ handoff_freshness(){
   if git -C "$d" diff --quiet -- "$rel" 2>/dev/null; then
     # unmodified vs HEAD => the difference is the BRANCH being behind origin
     HANDOFF_TEXT="$rtext"
+    # …and record WHERE that text came from, because a consumer that dates the
+    # doc must date the copy it actually read: the local branch's log describes
+    # the stale file this line just replaced.
+    HANDOFF_REF="$ref" HANDOFF_REL="$rel"
     HANDOFF_NOTE="${HANDOFF_NOTE}🔴 $ref copy (the working-tree copy is STALE: ${ln_local} lines local vs ${ln_remote} on $ref)"
     DRIFT+=("handoff doc in the working tree is STALE vs $ref (${ln_local} vs ${ln_remote} lines) — this digest reconciled the $ref copy, readable at $alt; READ THAT ONE, the local file is not what the last session wrote")
   else
@@ -670,8 +680,19 @@ clawgate_block(){
     return
   fi
   if [ -z "$HANDOFF" ]; then echo "  (no handoff — nothing to reconcile)"; return; fi
+  # 🔴 `$HANDOFF_TEXT`, NOT `cat "$HANDOFF"` — the copy handoff_freshness CHOSE.
+  # Every other block reads it; this one read the working tree, and the two
+  # differ exactly when it matters. MEASURED on a fixture whose branch is behind
+  # origin: the digest printed `handoff-read: 🔴 origin/base copy (the
+  # working-tree copy is STALE …)` and then
+  # `(no clawgate-task: field in this handoff …)` with ZERO gaps — because the
+  # STALE local copy carried no field while the copy it announced it had
+  # reconciled carried `clawgate-task: 193`, and "no field" is the one case
+  # deliberately exempt from gapping. So the block declined to ask the board and
+  # nothing said so: the false-clean this block exists to prevent, reached
+  # through the block itself.
   local text id
-  text=$(cat "$HANDOFF")
+  text="$HANDOFF_TEXT"
   if ! id=$(clawgate_task_field "$text"); then
     if clawgate_field_present "$text"; then
       echo "  (the handoff's clawgate-task: field is UNREADABLE — no task was fetched)"
@@ -730,10 +751,24 @@ clawgate_block(){
   # clock would fall straight back to the mtime a checkout just reset. Ask git
   # instead and read the answer: an empty result means "no commit for this
   # path", whatever the reason.
+  #
+  # 🔴 AND IT DATES THE COPY THAT WAS READ, WHICH IS NOT ALWAYS THE LOCAL ONE.
+  # When handoff_freshness took the text from `origin/<default>` because this
+  # branch is behind, the local `git log -1 -- <path>` describes the STALE file
+  # that was discarded — an older date, so the count over-reports rather than
+  # silences, but it is a date for a document nobody reconciled. `HANDOFF_REF`
+  # is set exactly when that happened, so the log is asked on that ref and the
+  # printed clock names it. Leaving this implicit was the second half of the
+  # same bug as the `text=` line above.
   local mt clock counts newer unreadable total
   clock=""
-  mt=$(git -C "$REPO" log -1 --format=%ct -- "$HANDOFF" 2>/dev/null)
-  [ -n "$mt" ] && clock="last commit"
+  if [ -n "$HANDOFF_REF" ] && [ -n "$HANDOFF_REL" ]; then
+    mt=$(git -C "$REPO" log -1 --format=%ct "$HANDOFF_REF" -- "$HANDOFF_REL" 2>/dev/null)
+    [ -n "$mt" ] && clock="last commit on $HANDOFF_REF"
+  else
+    mt=$(git -C "$REPO" log -1 --format=%ct -- "$HANDOFF" 2>/dev/null)
+    [ -n "$mt" ] && clock="last commit"
+  fi
   if [ -z "$clock" ]; then
     mt=$(stat -c %Y "$HANDOFF" 2>/dev/null)
     clock="file mtime"

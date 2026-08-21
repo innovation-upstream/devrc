@@ -71,6 +71,22 @@ CLAWGATE_ENV_REL=".claude/clawgate.env"
 #: The front-matter key. One spelling, used by the reader and the writer.
 CLAWGATE_FIELD_KEY="clawgate-task"
 
+#: 🔴 A CROSS-REPO SEAM WITH NOTHING HOLDING IT TOGETHER, so it is named here.
+#: The authority for these four is clawgate's own
+#: `<homelab-talos>/containers/clawgate/internal/taskstatus/taskstatus.go`
+#: (`Open` / `InProgress` / `ReadyForReview` / `Complete`), which lives in a
+#: DIFFERENT REPOSITORY — no test in devrc can see it, and no test there knows
+#: this file exists. Verified equal by hand 2026-08-21; the devrc-side pin
+#: (`test_the_shell_vocabulary_covers_everything_PYTHON_knows_about`) can only
+#: keep this list and `scripts/lib/clawgate_tasks.py` agreeing with EACH OTHER.
+#: A fifth constant added upstream is therefore caught at RUNTIME, by the gap
+#: below, not by any gate — which is why the gap has to exist.
+#:
+#: ⚠ It is NOT a permanently-red gate: it fires per task, only for a task
+#: actually sitting in a state this list does not carry, so a healthy board
+#: produces none of it. (An earlier review worried it would fire constantly;
+#: measured, it does not.)
+#:
 #: 🔴 THE CLOSED STATUS VOCABULARY, and it is closed on purpose. `clawgate_drift_lines`
 #: below decides on `complete` / `ready_for_review` and stays silent otherwise —
 #: which means a status NOBODY HERE HAS HEARD OF renders exactly like a healthy
@@ -339,6 +355,13 @@ clawgate_resolve(){
   # grep turned a real resolution into "NOTHING RESOLVED" (exit 5) — a tool
   # absence rendering as a fact about the board. The count is jq's now, and the
   # list is the whole set rather than the two anybody remembered.
+  #
+  # 🔴 THE LIST IS PINNED AND EACH ENTRY IS DRIVEN. Removing `mktemp` from it
+  # once survived the whole suite, because only `jq`'s absence was ever
+  # exercised — a preflight is exactly the kind of code where one tested member
+  # is read as a tested list. `test_every_preflighted_tool_is_individually_driven`
+  # runs `resolve` with each of these missing in turn, and a ledger assertion
+  # fails when the list grows or shrinks without that test moving.
   local need
   for need in curl jq mktemp; do
     if ! command -v "$need" >/dev/null 2>&1; then
@@ -355,6 +378,16 @@ clawgate_resolve(){
   # TMPDIR indefinitely. Every `return` below still unlinks explicitly and then
   # CLEARS the trap — this function is sourced as well as run as a CLI, and a
   # sourced caller must not inherit an EXIT trap naming two locals.
+  #
+  # ⚠ TWO LATENT COSTS, recorded rather than fixed because no caller reaches
+  # them today (`resume-state.sh` sources this file but never calls `resolve`):
+  #   * the INT/TERM handler does not re-raise, so a `^C` here exits 0-ish
+  #     rather than 130 — invisible to the CLI, wrong for a future caller that
+  #     branches on the signal;
+  #   * `trap - EXIT` below clears the trap unconditionally, which would also
+  #     discard an EXIT trap a SOURCING caller had installed for itself.
+  # Both become real the moment something both sources this file and calls this
+  # function; fix them then, with a test that has a caller to write.
   trap 'rm -f "$cfg" "$body"' EXIT INT TERM
   chmod 600 "$cfg" 2>/dev/null
   # 🔴 The ONLY place the token is written. Not `-H "Authorization: …"`: that
