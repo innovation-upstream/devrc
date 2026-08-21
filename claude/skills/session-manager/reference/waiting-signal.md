@@ -266,3 +266,74 @@ the LOCAL host with the read-only scan (`--host workbench --no-ch --no-ledger`):
 🔴 **Scope of that run, stated:** local host only, one point in time. `no_input_box` did NOT
 occur on it, so that status is exercised by fixtures rather than by this observation — an
 unmeasured status here, not a measured zero.
+
+## The consumer-facing text, moved out of the SKILL body
+
+_Moved verbatim out of `SKILL.md` on 2026-08-21, when the body was cut from 23,233 B. The core keeps every load-bearing claim below in compressed form; this is the wording it was cut from, and the evidence behind it._
+
+## 🔴 `waiting_probable` — is anything waiting on a HUMAN
+
+`status: idle` merges four states that need four different actions. Each Claude pane is
+scraped (one batched `capture-pane` per host) for three signals, and every row carries the
+**matched line** so you can disagree with it:
+
+| signal | means | do |
+|---|---|---|
+| `trailing_question` | the agent's last sentence ends in `?` | answer it |
+| `selection_menu` | `❯ 1./2./3.` modal is up | press a key |
+| `context_exhausted` | `ctx: 0%` | `/clear` it |
+
+🔴 **`waiting_probable: false` means "these three were looked for and none matched" — NOT
+"this window needs nothing."** Recall is partial by construction: measured on 40 live panes
+2026-08-12, a window parked on `Press Enter to continue…` matches none of them, and text
+typed at the `❯` prompt is deliberately **excluded** (a window one Enter away reads `no` —
+see `~/.claude/skills/session-manager/reference/waiting-signal.md` for the evidence and what would justify turning it on).
+
+🔴 **`waiting_probable: null` is not `false`.** Read `waiting_status`: `ok` (scraped),
+`not_claude` (never scraped — the signals are Claude-TUI shapes and a shell's last line
+ending in `?` would be a false positive), `uncaptured` (the batch ran, this pane was not in
+it), `skipped` / `error`. `summary.waiting.probable` is likewise **`null`, never `0`**, when
+nothing was scraped — the one sentence this tool must never emit is "nothing is waiting on
+you" off a look that never happened.
+
+## 🔴 `unsent_prompt` — work PARKED one Enter away (a DIFFERENT question)
+
+Measured 2026-08-15 across all 79 panes on both hosts: **five** held text typed at the prompt
+and never sent — real work, some of it hours old — and the one-call answer reported none of
+them. So it is now measured, on the row as `unsent_prompt` (**the text**, so you can triage
+without opening the pane) plus `unsent_prompt_status`, and rolled up as
+`summary.unsent_prompt`.
+
+🔴 **It is NOT part of `waiting_probable` and is never summed into it.** The same sweep
+measured `waiting_probable` at **11 flagged, 11 true positives, ZERO false positives**. That
+precision is this tool's most valuable property and a noisier signal folded into it would
+destroy exactly that. Read both — they answer different questions:
+
+| | means | |
+|---|---|---|
+| `waiting_probable` | this window is **BLOCKED** and cannot proceed without you | go unblock it |
+| `unsent_prompt` | this window has **WORK PARKED** in its input box | send it, or clear it |
+
+🔴 **Scoped to the pane's OWN input line, not "any matching line in the capture."** Only the
+lines *between the two box-drawing rules* are read, so scrollback, an echoed prompt, and a
+pane **displaying another session's transcript** cannot trip it — a live false positive of
+exactly that class already bit the `waiting` scrape.
+
+🔴 **`unsent_prompt: null` is an empty box ONLY when `unsent_prompt_status == "ok"`.** The
+statuses are `ok`, `no_input_box`, `uncaptured`, `not_claude`, `skipped`, `error`;
+`summary.unsent_prompt.count` is **`null`, never `0`**, when no box was read. `no_input_box`
+is a modal (which replaces the box) or a draft taller than the box — **unmeasured**, never
+"nothing typed". Shell panes are **never** scraped (`not_claude`): a half-typed shell command
+is a different and noisier thing.
+
+🔴 **NEVER PASTE A CAPTURED DRAFT INTO A COMMITTED FILE.** `unsent_prompt` hands you **text
+the operator typed**, and devrc is a **PUBLIC** repo — as is every `claudedocs/` note, commit
+message, PR body, comment or test fixture an agent writes into it. Report a draft as a
+**count, a length or a shape**, never verbatim. Quoting one back to Zach in chat is fine;
+writing one to a file that gets committed is not. (Four real drafts were quoted verbatim in
+`~/.claude/skills/session-manager/reference/waiting-signal.md` and re-used as fixtures before this rule existed —
+`test_no_FIXTURE_DRAFT_string_appears_in_a_shipped_doc` now fails on that shape.)
+
+🔴 **A row can carry BOTH, and that is correct** — the agent asked a question and you
+half-typed a reply. Separation does **not** mean the two never co-occur; it means neither
+signal can raise or be summed into the other. Read both columns.
