@@ -5,17 +5,17 @@ description: "Operate clawgate — the self-hosted Claude Code approval UI (plus
 
 # clawgate operations
 
-Self-hosted Go + htmx PWA routing Claude Code permission prompts to Zach's phone for approve /
-approve-with-comment / deny. It has since grown into the **agent dispatch loop**: Tasks/Repos/Agents
-on Postgres, agent self-service + privilege profiles + an Operator, runbooks with approval gates,
-and a machine Task API producers post work into for one-tap Dispatch.
+Self-hosted Go + htmx PWA routing Claude Code permission prompts to Zach's phone (approve /
+approve-with-comment / deny), grown into the **agent dispatch loop**: Tasks/Repos/Agents on Postgres,
+agent self-service + privilege profiles + an Operator, runbooks with approval gates, and a machine
+Task API producers post work into for one-tap Dispatch.
 
 🔴 **Point-in-time state: `~/workspace/homelab-talos/containers/clawgate/HANDOFF.md` —
 GREP it for the section you need, never read it whole (~190 KB, lower half superseded).**
 
-⚠ **This skill drifts from the code in BOTH directions** — once documented weeks EARLY, and six
-releases BEHIND on 2026-08-12. Never treat a doc claim as evidence: `clawgatectl health` for the
-live pin, `git grep` for the feature.
+⚠ **This skill drifts from the code in BOTH directions** — weeks EARLY once, six releases BEHIND
+once. Never treat a doc claim as evidence: `clawgatectl health` for the live pin, `git grep` for
+the feature.
 
 ## Reference files
 `devrc/claude/skills/clawgate/reference/` (→ `~/.claude/skills/clawgate/` after a switch).
@@ -35,6 +35,14 @@ live pin, `git grep` for the feature.
 | `agent-hardening.md` | locking down a **homelab** kubeclaw devpod (netpol needs Cilium) |
 | `element-references.md` | a task body carries extension-picked element refs |
 
+## Flow files
+`flows/` = PROCEDURES you execute (`reference/` = FACTS you verify against). A flow does not
+auto-fire — something must name it.
+
+| file | run it when |
+|---|---|
+| `task-authoring.md` | **CREATING a task** — pre-verify → interview → recommend → tags → confirm → create. 🔴 A PreToolUse hook DENIES a create with no `## Acceptance criteria`, or an unreadable body. Override `CLAWGATE_NO_INTERVIEW=1`. |
+
 Memories: `clawgate-phase2` · `clawgate-phase3` · `clawgate-runbooks` ·
 `clawgate-loop-validation` · `authelia-passkey-sso`.
 
@@ -50,12 +58,12 @@ Memories: `clawgate-phase2` · `clawgate-phase3` · `clawgate-runbooks` ·
 | LAN URL (hook + UI) | `http://192.168.50.250:30302` (NodePort) — **OPEN, no auth**; machine endpoints still need the token |
 | Public / nebula URL | `https://clawgate.zacx.dev` behind **Authelia passkey** (portal `login.zacx.dev`); laptop `http://10.42.0.10:8109` (homelab gateway) |
 | Hook events | `PermissionRequest` (`CLAWGATE_REMOTE_APPROVAL=off`) + `Stop` (async, `CLAWGATE_SUGGEST=off`), both in `~/.claude/settings.json`, ON by default. 🔴 The `Stop` array also carries **two** unrelated hooks (`tmux/task-hook.sh`, `claude-notify.py`) — **preserve both** |
-| 🔴 Machine client | **`clawgatectl`** (devrc `nix/pkgs/tools/clawgatectl.nix`; on PATH after a switch. 🔴 **It is built from a LOCAL working tree of homelab-talos, so it can be present but STALE** — on 2026-08-14 the laptop's 24-commits-behind checkout shipped a binary with no `task status`/`task comment` that printed help and **exited 0**, wearing the label `0.7.95`. Both halves are closed (devrc #536): the version now derives from the compiled source, and `drift-check.sh` **rc 17** reports a stale source subtree per host. A checkout lacking `cmd/clawgatectl` gets no binary at all). **Exactly eight commands**: `health` · `agent ls` · `agent resolve <name> [--id]` · `task ls/get/create` · **`task status <id> <status>`** · **`task comment <id> --body …`** (both added 2026-08-14; they hit routes that already existed, so they need NO server release). Reads `clawgate.env` itself (no token in argv); JSON on stdout only; rc 0–8. **Every other route is still curl.** `task-api.md` |
+| 🔴 Machine client | **`clawgatectl`** (devrc `nix/pkgs/tools/clawgatectl.nix`; on PATH after a switch). 🔴 **Built from a LOCAL working tree of homelab-talos, so it can be present but STALE** — a behind checkout ships a binary MISSING verbs that prints help and **exits 0** under a plausible version label. Closed both ways (devrc #536): the version derives from the compiled source, and `drift-check.sh` **rc 17** reports a stale source subtree per host; a checkout lacking `cmd/clawgatectl` gets no binary at all. **Exactly eight commands**: `health` · `agent ls` · `agent resolve <name> [--id]` · `task ls/get/create` · **`task status <id> <status>`** · **`task comment <id> --body …`** (the last two hit pre-existing routes — NO server release needed). Reads `clawgate.env` itself (no token in argv); JSON on stdout only; rc 0–8. **Every other route is still curl.** `task-api.md` |
 
 🔴 **clawgate has NO human auth of its own** (since 0.7.37): `requireSession` is a pass-through no-op,
 so **the LAN NodePort is fully unauthenticated** — including `DELETE /tasks/{id}` and 🔴 **`POST
-/api/auto-approve-all`** (arms a global window auto-approving **every** future request in **every**
-project *and* sweeps the pending queue; checkpoints excepted). `requireHookToken` is
+/api/auto-approve-all`** (arms a global auto-approve window over **every** future request in
+**every** project + sweeps the pending queue; checkpoints excepted). `requireHookToken` is
 **enforce-when-set**: an empty token opens the machine endpoints too. All four wrappers across all
 120 routes: `task-api.md`.
 
@@ -69,9 +77,9 @@ clawgatectl health   # live version + uptime; rc 6 = unreachable, rc 8 = you hit
 ```
 
 ## send a test
-⚠ **No `clawgatectl` verb for `/api/send`** — stays curl, preamble included. Creates a real
-pending request (card + Web Push) via the hook token on the open LAN NodePort; for delivery tail
-logs for `push: delivered ... to N device(s)`.
+⚠ **No `clawgatectl` verb for `/api/send`** — stays curl. Creates a real pending request (card + Web
+Push) via the hook token on the open LAN NodePort; for delivery, tail logs for
+`push: delivered ... to N device(s)`.
 ```bash
 HOOK=$(grep '^CLAWGATE_HOOK_TOKEN=' ~/.claude/clawgate.env | cut -d= -f2)
 curl -sf -X POST http://192.168.50.250:30302/api/send -H 'Content-Type: application/json' \
@@ -95,18 +103,16 @@ version-from-the-live-pin, the ONE commit path (worktree off `origin/trunk`; nev
 test gate, build/push, pin bump, the CSS-cwd trap that fakes ~25 e2e failures, chart sync.
 
 ## task pickup — "read and evaluate clawgate task N", then "local dispatch"
-🔴 **The comment/status ritual is NOT optional and NOT a thing to be asked for.** It was skipped for
-months because reading a task was one command while writing to it was a curl preamble; that
-asymmetry is gone (`task status` / `task comment` since 2026-08-14). Run it unprompted.
+🔴 **The comment/status ritual is NOT optional and NOT a thing to be asked for.** Run it unprompted.
 
-🔴 **A hook ENFORCES this now** (`~/.claude/hooks/clawgate-writeback-guard.py`): armed by the
+🔴 **A hook ENFORCES this** (`~/.claude/hooks/clawgate-writeback-guard.py`): armed by the
 step-1 **read**, it **blocks Stop** when work followed (edit/commit/push/PR) and a **live** re-read
 shows no `claude-code` comment since. Read-and-evaluate-only never fires; commenting silences it.
 
 🔴 **A COMMENT is the only write that notifies a watcher.** A status flip pushes **only** on
 *entering* `ready_for_review` (`notifyTaskDone`), so going `in_progress` notifies **nobody**. That is
-*why* the pre-start comment exists — it is Zach's only chance to object **before** the work happens,
-not after. Route-level cites: `task-api.md` → "Notifications".
+*why* the pre-start comment exists: Zach's only chance to object **before** the work, not after.
+Route-level cites: `task-api.md` → "Notifications".
 
 ```bash
 clawgatectl task get <id>            # 1. READ — body + comments are BOTH already here
@@ -129,17 +135,17 @@ clawgatectl task comment <id> --body "…"          # 5. ONE completion comment 
 clawgatectl task status <id> ready_for_review     # 6. …or `complete` — see the gate
 ```
 
-**Acceptance-criteria detector — deterministic, not a judgement call.** The body contains a heading
-matching `## Acceptance criteria` (case-insensitive) → **AUTHOR-SPECIFIED**. Anything else — including
-a body that merely *reads* like criteria — means you **DERIVE** them, and you must label them
+**Acceptance-criteria detector — deterministic, not a judgement call.** A heading matching
+`## Acceptance criteria` (case-insensitive) → **AUTHOR-SPECIFIED**. Anything else — including a body
+that merely *reads* like criteria — means you **DERIVE** them and must label them
 `DERIVED — not author-specified` in the comment.
 
 🔴 **The verdict is frozen at your FIRST read (step 1).** Body edits are legal before the
-`in_progress` flip, so without this an agent could PATCH the heading in, re-read it as
-AUTHOR-SPECIFIED and self-complete — the exact self-grading the gate exists to stop. **Writing the
-criteria and grading them is one act, in either order.** Touch or reword the author's criteria and
-they become yours: DERIVED. **Quote them VERBATIM in the pre-start comment** (author-specified ones
-too) — that timestamped copy is what makes this auditable rather than honour-system.
+`in_progress` flip, so otherwise an agent could PATCH the heading in, re-read it as AUTHOR-SPECIFIED
+and self-complete — the exact self-grading the gate exists to stop. **Writing the criteria and
+grading them is one act, in either order**: touch or reword the author's and they become yours,
+DERIVED. **Quote them VERBATIM in the pre-start comment** (author-specified ones too) — that
+timestamped copy is what makes this auditable rather than honour-system.
 
 **The completion comment (5)** carries evidence **per criterion** — one line each, naming what proves
 it — plus an explicit **NOT verified** list. "All green" with no per-criterion mapping is not a
@@ -160,7 +166,7 @@ this ritual uses can set `complete` at all — the gate governs that permission,
 
 📌 **For the task AUTHOR (Zach): a `## Acceptance criteria` section in the body is what unlocks agent
 self-completion.** Without one, every pickup comes back `ready_for_review` for a human read. That is
-the one lever you have.
+the one lever you have; `flows/task-authoring.md` is the interview that produces it.
 
 - 🔴 **Ordering trap — flip to `in_progress` LAST, after any edit to the task ITSELF.** The
   `in_progress` 409 is refined but real: once in progress, a `PATCH /api/tasks/{id}` carrying any
@@ -171,15 +177,14 @@ the one lever you have.
 - **Exactly TWO comments per pickup — start and finish, never per turn.** Per-turn self-reporting was
   measured as noise and removed once already (memory `clawgate-loop-validation`); do not reintroduce
   it in a new costume.
-- **Comments author as `claude-code`** by default via `X-Clawgate-Source`. There is no `--author`
-  flag: the header IS the impersonation guard, and `user`/`operator` are unreachable by design. An
-  unknown `--source` is silently downgraded to `api`, so the CLI warns on stderr when the author it
-  gets back differs from the one it asked for.
-- ⚠ **A comment/status write also refreshes the task's idle clock** — the daily reaper TAGS anything
-  untouched for 7d `stale` (+ a system comment). **Non-destructive since 0.7.96**: it no longer
-  dismisses the task or tears the agent pod down.
+- **Comments author as `claude-code`** via `X-Clawgate-Source`; no `--author` flag — the header IS
+  the impersonation guard, and `user`/`operator` are unreachable by design. An unknown `--source`
+  silently downgrades to `api`, so the CLI warns on stderr when the author it gets back differs.
+- ⚠ **A comment/status write also refreshes the task's idle clock** — the 7d idle reaper, which is
+  non-destructive since 0.7.96 (one copy of that fact: "machine Task API" below).
 
 ## machine (hook-token) Task API
+🔴 **Authoring one? `flows/task-authoring.md` FIRST** — a hook denies a criteria-less create.
 Read/create with `clawgatectl task ls --summary [--status open --tag t --limit n]` · `task get <id>`
 · `task create --body …`; **`--summary`/`--status`/`--limit` filter SERVER-side** — NOT true at
 0.7.85, re-measured live 0.7.87 on 2026-08-13. Write status + comments with `clawgatectl task
@@ -201,12 +206,12 @@ create** — a load-bearing wire contract producers key their retry on.
 (`element-references.md`).
 
 **Writing/debugging a producer? Load `task-api.md`** — per-op semantics + status codes,
-409/immutability, the author allowlist, provenance, tag grammar, the full route×auth inventory.
+409/immutability, the author allowlist, provenance, tag grammar, the route×auth inventory.
 
 ## agent dispatch
-🔴 **Current STATUS of the loop lives in `HANDOFF.md`, not here** — status claims here have been
-superseded within two days, twice. `agent-dispatch.md` has the sandbox fixture, the agent
-image's absent toolchain and the dispatch `curl`. Durable facts only:
+🔴 **Current STATUS of the loop lives in `HANDOFF.md`, not here** — claims here have been superseded
+within two days, twice. `agent-dispatch.md` has the sandbox fixture, the agent image's absent
+toolchain and the dispatch `curl`. Durable facts only:
 - **The loop DOES close unattended** (two real runs). "The 5-minute kickoff deadline is why it never
   worked" is DEAD — don't reopen it.
 - **`POST /agents` is FORM-ENCODED, not JSON** (hence no `clawgatectl` verb), behind the no-op
@@ -227,8 +232,8 @@ image's absent toolchain and the dispatch `curl`. Durable facts only:
 - `hooks.md`: the full gate list, the exact JSON, why an approver comment is **record-only**.
 
 ## 🔴 gotchas
-- 🔴 **Public routing rule**: clawgate runs on WORKBENCH but is fronted by the homelab + production
-  nebula gateways, whose nginx must `proxy_pass` to the **NodePort IP `http://192.168.50.250:30302`**
+- 🔴 **Public routing rule**: clawgate runs on WORKBENCH, fronted by the homelab + production nebula
+  gateways whose nginx must `proxy_pass` to the **NodePort IP `http://192.168.50.250:30302`**
   — NOT a `.svc.cluster.local` name, which doesn't resolve there and **crashes nginx, taking down ALL
   nebula-routed services**. Edit additively; a reload restarts `nebula-gateway` on **both** clusters
   (`architecture.md`).
@@ -242,14 +247,12 @@ image's absent toolchain and the dispatch `curl`. Durable facts only:
 - **Alloy has no auto-reloader** — if clawgate metrics vanish from homelab Prometheus, restart Alloy
   first (`telemetry.md`).
 - **Red GitHub Actions checks on `homelab-infra` are NOISE** (billing-blocked); the real gate is
-  Tekton `clawgate-ci` (see the `tekton` skill). 🔴 **But `clawgate-ci` does NOT run Playwright —
+  Tekton `clawgate-ci` (`tekton` skill). 🔴 **But `clawgate-ci` does NOT run Playwright —
   browser-layer changes are UNGATED.** Run `make e2e` locally and **count**: without Docker,
-  `test.skip` on `!dockerAvailable()` leaves **11 of 18 spec files / 77 of 113 tests** — barely a
-  third of the suite, reported green.
+  `test.skip` on `!dockerAvailable()` leaves **11 of 18 spec files / 77 of 113 tests**, green.
 - 🔴 **The browser extension does NOT ship via Flux — merging to `trunk` deploys NOTHING.** Brave
   loads it unpacked from `~/workspace/clawgate-extension/containers/clawgate/extension` (branch
   `clawgate-ext-local`, same path on **BOTH hosts**); deploy = `merge --ff-only origin/trunk` on both
   + reload Brave. 🔴 **Brave profiles load extensions from DIFFERENT paths, so the profile in front of
-  you proves nothing** — and agents can't read `brave://`. Never call a version or hotkey live
-  without the `Preferences` sweep in `extension.md` (which also carries the 🔴 `git restore
-  --worktree` trap).
+  you proves nothing** — and agents can't read `brave://`: never call a version or hotkey live
+  without `extension.md`'s `Preferences` sweep (+ its 🔴 `git restore --worktree` trap).

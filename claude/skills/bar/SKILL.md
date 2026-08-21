@@ -146,6 +146,22 @@ degrade to a missing glyph, it renders the whole pill as a red `Failed to render
   is authoritative. A threshold/format edit inside an existing script needs no restart — the
   block re-runs the same path on its next interval.
   *Applies to this PR:* `i3status-agent-ops` → `i3status-claude-runs`.
+- 🔴 **ADDING a block is in that same restart class — and "did it restart?" needs a real
+  check, not an assumption.** The bar holds the block LIST it parsed at startup, so a new
+  block is simply absent until `i3-msg restart`, on a host reporting a fully successful
+  deploy. Measured 2026-08-20 (the load pill): the live bar predated its own config by
+  **26 hours**. The check is the bar's start time against the config's mtime — but 🔴
+  **`pgrep -x i3status-rs` finds NOTHING while it is running**: `comm` is
+  `.i3status-rs-wr`, a nix wrapper. Match on `/bin/i3status-rs`, and take the process whose
+  **PARENT is `i3bar`** — orphaned copies from old sessions linger with `ppid 1` and are not
+  the bar. (`pgrep -f` additionally matches the checking shell itself.)
+  ```bash
+  ps -eo pid,ppid,lstart,comm,args | grep i3status-rs | grep -v grep
+  stat -c '%y' ~/.config/i3status-rust/config-top.toml   # the bar must start AFTER this
+  ```
+  🔴 **A hide-at-zero block cannot be confirmed by LOOKING at the bar** — its correct state
+  is invisible. Run the block's own `command =` line from the config, then force the visible
+  states with explicit thresholds; that is the only honest render check.
 - **Syntax check first:** `nix-instantiate --parse nix/graphical.nix >/dev/null`.
 - **Flake gotcha:** a NEW *block script* referenced from `graphical.nix` — and any new file in
   this skill dir — must be `git add`ed before switch (flakes only see tracked files). This skill

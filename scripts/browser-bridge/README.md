@@ -1151,7 +1151,7 @@ debugging this browser" banner window tiny and prevents a leaked attachment.
 Cancel). All decision logic (attach-scope validation, the always-detach
 orchestration `withCdpSession`, frame enumeration/resolution, the key/coordinate
 math, the frame read-expression builders) is **pure + unit-tested** in
-`extension/protocol.js` (`../tests/cdp_protocol.test.mjs`); `service_worker.js` is
+`extension/protocol.js` (`scripts/browser-bridge/tests/cdp_protocol.test.mjs`); `service_worker.js` is
 only the thin `chrome.debugger` side-effect glue.
 
 **Security model — the `debugger` permission is the biggest blast radius, so:**
