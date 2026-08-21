@@ -86,9 +86,13 @@ DELTA +17            (reproduced twice; notcivitai.com +1)
    `civitai.com`, `example.com`, `""`, `notcivitai.com`, `model-benchmarking.example.test`,
    `x.test`. `notcivitai.com` exists in exactly ONE file in the repo
    (`tests/test_site_notes.py`, a negative control for suffix matching); `.test` is the
-   reserved testing TLD. Real `claude`-attributed traffic has a long tail —
-   `radio.civitai.com`, `auth-staging.civitaic.com`, `pr-4154.civitaic.com` — **none of which
-   ever appears in the unknown set.**
+   reserved testing TLD. Real `claude`-attributed traffic has a long tail of client
+   subdomains — a media host, a staging auth host, a per-PR preview host, of the shape
+   `radio.example.test`, `auth-staging.example.test`, `pr-4154.example.test` — **none of which
+   ever appears in the unknown set.** (The real hosts are redacted: this repo is PUBLIC and a
+   client's subdomains are internal topology. `scripts/tests/test_no_client_hostnames.py`
+   caught them here, which is the gate doing its job — the argument needs the SHAPE of a long
+   tail, never the names.)
 2. **The journal disproves the unit.** 18 unknown rows landed in a 5-minute window in which
    `browser-bridge.service` logged **0** `dispatch` lines. The unit *does* log `op=text` (636
    over 3 days), so this is not a logging blind spot — those rows never traversed the systemd
