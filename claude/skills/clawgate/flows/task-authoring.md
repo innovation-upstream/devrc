@@ -174,7 +174,7 @@ readable).
 
 ## What this flow is NOT
 
-- Not the **pickup** ritual — that is `SKILL.md` → "task pickup", enforced by a
+- Not the **pickup** ritual — that is `flows/task-pickup.md`, enforced by a
   different hook (`clawgate-writeback-guard.py`).
 - Not the **drafter** — `scripts/task-spec-drafter/` owns the unattended
   ticket→queue path and its safety-escalation gate. Do not reimplement it here.

@@ -3034,3 +3034,182 @@ def test_the_WHOLE_LOOP_THROUGH_THE_REAL_PROCESS(home, tmp_path):
     assert again.returncode == 0
     assert again.stdout == ""
     assert again.stderr == ""
+
+
+# =========================================================================== #
+# THE FLOW SEAM — three surfaces, ONE path
+#
+# 🔴 THE DEFECT THIS SECTION EXISTS FOR IS A SEAM DEFECT, NOT A COMPONENT ONE.
+# The pickup ritual used to sit inline in `claude/skills/clawgate/SKILL.md`; it
+# now lives in `claude/skills/clawgate/flows/task-pickup.md`. A file under a
+# skill's `flows/` dir does NOT auto-fire the way a skill DESCRIPTION does
+# (devrc CLAUDE.md -> "reference/ vs flows/"), so THREE surfaces have to name the
+# SAME file or the ritual is unreachable from wherever the reader entered:
+#
+#   * this hook's BLOCK TEXT       — for the reader who is already being gated;
+#   * SKILL.md's `## Flow files`   — for the reader who loaded the skill and is not;
+#   * the file itself, git-TRACKED — or the nix flake silently omits it and the
+#     deployed path both of the above print resolves to nothing (CLAUDE.md's
+#     standing trap: a new file must be `git add`ed or the switch succeeds with
+#     the file absent).
+#
+# Each of the three is individually reviewable and individually green while the
+# other two disagree — RULES.md -> "Verified in isolation is the new vacuous
+# green". So the assertions below pin a RELATIONSHIP (one path string, shared)
+# rather than each component, and where the artifact is PROSE they pin the whole
+# normalised claim rather than a word, because a guard on words is walkable by
+# rewording.
+# =========================================================================== #
+SKILL = ROOT / "claude" / "skills" / "clawgate" / "SKILL.md"
+DEPLOYED_SKILLS_PREFIX = "~/.claude/skills/"
+
+#: 🔴 The status gate, pinned as the WHOLE NORMALISED TABLE. It is the one part of
+#: the ritual that deliberately did NOT move — burying it costs more than it saves,
+#: and both `flows/task-authoring.md` and clawgate-task-interview-guard.py cite it
+#: as `SKILL.md -> "Status gate"`. Pinning the word "complete" would pass while the
+#: table said the opposite; pinning the rows means a cosmetic reword fails this test
+#: and gets paid for deliberately, which is the trade RULES.md asks for.
+STATUS_GATE_ROWS = (
+    "| criteria | every criterion validated with evidence? | final status |",
+    "| AUTHOR-SPECIFIED | yes | **`complete`** |",
+    "| DERIVED | yes | **`ready_for_review`** — you must not grade an exam you wrote |",
+    "| either | **no** | **`ready_for_review`**, naming WHICH criterion and WHY it "
+    "was not validatable |",
+)
+
+#: Claims that MOVED, pinned whole so the move cannot silently drop one. Each is a
+#: normalised sentence from the pre-move SKILL.md, not a keyword.
+MOVED_CLAIMS = (
+    "**Acceptance-criteria detector — deterministic, not a judgement call.** A heading "
+    "matching `## Acceptance criteria` (case-insensitive) → **AUTHOR-SPECIFIED**.",
+    "🔴 **The verdict is frozen at your FIRST read (step 1).**",
+    "🔴 **Ordering trap — flip to `in_progress` LAST, after any edit to the task ITSELF.**",
+    "**Exactly TWO comments per pickup — start and finish, never per turn.**",
+    "**Comments author as `claude-code`** via `X-Clawgate-Source`; no `--author` flag",
+    "⚠ **A comment/status write also refreshes the task's idle clock**",
+    "clawgatectl task status <id> in_progress          # 3c. THEN flip, and work",
+)
+
+
+def _repo_path_for(deployed):
+    """The in-tree file a `~/.claude/skills/...` token names.
+
+    `nix/home.nix` populates `~/.claude/skills` from `claude/skills` wholesale
+    (`cp -R`, so `flows/` ships with no nix change), which makes the mapping one
+    prefix swap. Derived rather than hardcoded on purpose: MOVING the flow means
+    editing FLOW_DEPLOYED, and the check must then land on a file that has to
+    exist, not on a second literal somebody would edit to match.
+    """
+    assert deployed.startswith(DEPLOYED_SKILLS_PREFIX), deployed
+    return ROOT / "claude" / "skills" / deployed[len(DEPLOYED_SKILLS_PREFIX):]
+
+
+def test_the_block_text_names_the_pickup_flow_by_its_DEPLOYED_path():
+    """🔴 The hook is the ROUTER as well as the enforcer. Same idiom as
+    clawgate-task-interview-guard.py: the deployed spelling is what the model can
+    open right now, the repo spelling is what it edits, and both are printed."""
+    text = guard.missing_text(207, READ_TS, SESSION)
+    assert guard.FLOW_DEPLOYED in text, (
+        "the write-back block text no longer names the pickup flow (%s). A model "
+        "that is being blocked for skipping the ritual is handed no way to read "
+        "it, and a `flows/` file has no other router." % guard.FLOW_DEPLOYED)
+    assert guard.FLOW_REPO in text, guard.FLOW_REPO
+    # Anti-vacuity: `in` against an empty or truncated constant is satisfied by
+    # anything, so pin what the constants must END in.
+    assert guard.FLOW_DEPLOYED.endswith("/flows/task-pickup.md"), guard.FLOW_DEPLOYED
+    assert guard.FLOW_REPO.endswith("/flows/task-pickup.md"), guard.FLOW_REPO
+
+
+def test_the_flow_the_block_text_names_EXISTS_and_is_git_tracked():
+    """🔴 Both halves, because neither covers both tiers. EXISTENCE is what means
+    something inside the nix sandbox (the store copy is built from tracked files
+    only, so an untracked flow would simply not be here). TRACKEDNESS is what means
+    something on a dev host, where the file exists whether or not git knows about
+    it — and an untracked file is exactly the CLAUDE.md trap: the switch succeeds
+    and the deployed path this hook prints is not there."""
+    target = _repo_path_for(guard.FLOW_DEPLOYED)
+    assert target.is_file(), (
+        "the hook's FLOW_DEPLOYED (%s) maps to %s, which does not exist in this "
+        "tree." % (guard.FLOW_DEPLOYED, target))
+    rel = target.relative_to(ROOT).as_posix()
+    # The repo spelling the block text also prints must name the same file.
+    assert guard.FLOW_REPO.endswith(rel), (
+        "FLOW_DEPLOYED and FLOW_REPO name different files: %s vs %s"
+        % (rel, guard.FLOW_REPO))
+    if not (ROOT / ".git").exists():
+        return
+    out = subprocess.run(["git", "-C", str(ROOT), "ls-files", "--error-unmatch", rel],
+                         capture_output=True, text=True)
+    assert out.returncode == 0, (
+        "%s is not git-tracked, so the flake omits it from the deploy and the "
+        "switch succeeds with the flow absent." % rel)
+
+
+def test_the_skill_routes_to_the_pickup_flow_from_its_flow_table():
+    """The flow must be reachable from the ALWAYS-LOADED surface too, not only from
+    a block — a reader who never trips the hook still has to find it."""
+    text = SKILL.read_text(encoding="utf-8")
+    parts = text.split("## Flow files", 1)
+    assert len(parts) == 2, "SKILL.md no longer has a `## Flow files` section"
+    table = parts[1].split("\n## ", 1)[0]
+    assert "`task-pickup.md`" in table, (
+        "SKILL.md's Flow files table does not name task-pickup.md. A flows/ file "
+        "does not auto-fire the way a skill description does; without a router row "
+        "it is dead weight.")
+    # Anti-vacuity: the split really did isolate the table, not the whole file.
+    assert "`task-authoring.md`" in table and "machine (hook-token)" not in table
+
+
+def test_the_skill_names_the_same_DEPLOYED_path_the_hook_prints():
+    """🔴 THE SEAM ITSELF. Three surfaces, one string. The failure this catches is
+    a MOVE that updates two of them: the hook keeps blocking with a path nobody
+    maintains, or SKILL.md points somewhere the enforcer never mentions."""
+    text = SKILL.read_text(encoding="utf-8")
+    assert guard.FLOW_DEPLOYED in text, (
+        "SKILL.md does not carry the deployed flow path the hook's block text "
+        "prints (%s). Both surfaces must name the SAME file." % guard.FLOW_DEPLOYED)
+
+
+def test_the_status_gate_table_did_NOT_leave_the_skill():
+    """🔴 AN INVARIANT GUARD, NOT REGRESSION COVERAGE — it is green at the commit
+    before this one too, and is labelled so nobody counts it as proof the move was
+    tested. What it pins is the half of the ritual that must NOT move: the gate is
+    cited as `SKILL.md -> "Status gate"` by flows/task-authoring.md AND by
+    clawgate-task-interview-guard.py's `_WHY`, so demoting it into the flow would
+    break two live pointers and hide the one table a reader must not miss."""
+    text = _norm(SKILL.read_text(encoding="utf-8"))
+    missing = [r for r in STATUS_GATE_ROWS if _norm(r) not in text]
+    assert not missing, (
+        "the status gate table changed or left claude/skills/clawgate/SKILL.md:\n  "
+        + "\n  ".join(missing)
+        + "\n\nIt is pinned WHOLE on purpose — a guard on the word `complete` "
+        "would pass while the table said the opposite. If the reword is "
+        "deliberate, update STATUS_GATE_ROWS in the SAME commit, and re-check "
+        "flows/task-authoring.md and clawgate-task-interview-guard.py, which both "
+        "cite this table by name.")
+
+
+def test_every_claim_that_MOVED_landed_in_the_flow():
+    """The other direction of the same seam: a move that drops a claim is silent.
+    Pinned as whole normalised sentences rather than keywords."""
+    text = _norm(_repo_path_for(guard.FLOW_DEPLOYED).read_text(encoding="utf-8"))
+    missing = [c for c in MOVED_CLAIMS if _norm(c) not in text]
+    assert not missing, (
+        "these claims were moved out of SKILL.md but are not in the flow:\n  "
+        + "\n  ".join(missing))
+
+
+def test_positive_control_the_seam_assertions_can_actually_fail():
+    """🔴 A guard that reports clean is indistinguishable from a guard wired to
+    nothing until it has been watched to go red. Each helper is fed a case it MUST
+    reject, so a zero above is a measurement rather than an empty glob."""
+    # the prose pin: a rewording of one row is caught, not waved through
+    broken = _norm("| DERIVED | yes | **`complete`** |")
+    assert _norm(STATUS_GATE_ROWS[2]) != broken
+    assert broken not in _norm(SKILL.read_text(encoding="utf-8"))
+    # the path mapping: a deployed spelling outside the skills tree is refused
+    with pytest.raises(AssertionError):
+        _repo_path_for("~/.claude/hooks/clawgate-writeback-guard.py")
+    # ...and one INSIDE it that names no file resolves to a path that is not there
+    assert not _repo_path_for(
+        DEPLOYED_SKILLS_PREFIX + "clawgate/flows/no-such-flow.md").is_file()

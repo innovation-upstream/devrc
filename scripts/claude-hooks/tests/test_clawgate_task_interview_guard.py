@@ -1121,13 +1121,15 @@ def test_the_skill_did_not_grow():
     """🔴 SKILL.md loads in FULL on every invocation of this skill. The addition was
     paid for by an eviction in the same commit; this pins that it stays paid.
 
-    The ceiling is the size measured at the commit that added the flow pointer,
-    which is BELOW the size it had before — so this fails on a regrowth rather than
-    merely on a doubling."""
-    assert SKILL.stat().st_size <= 18868, (
-        "claude/skills/clawgate/SKILL.md is %d bytes; it was 18868 before the "
-        "task-authoring flow landed and 18858 after. Any addition needs an "
-        "eviction in the SAME commit." % SKILL.stat().st_size)
+    The ceiling is the size measured at the commit that last SHRANK the file, not
+    a round number above it — so this fails on a regrowth rather than merely on a
+    doubling. 🔴 RE-PIN IT WHENEVER THE FILE SHRINKS: a ceiling left at an old,
+    larger size silently licenses the regrowth it was installed to catch."""
+    assert SKILL.stat().st_size <= 15088, (
+        "claude/skills/clawgate/SKILL.md is %d bytes. History: 18868 before the "
+        "task-authoring flow, 18858 after, 15088 after the task-pickup ritual "
+        "moved out to flows/task-pickup.md. Any addition needs an eviction in the "
+        "SAME commit." % SKILL.stat().st_size)
 
 
 def test_the_flow_carries_the_body_template_with_the_required_heading():

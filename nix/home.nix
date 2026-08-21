@@ -1171,6 +1171,11 @@ in
   # notice, silence per task per session, and NEVER blocks when the board could not
   # be reached (it says so instead). Every error path exits 0.
   #
+  # Its block message names `claude/skills/clawgate/flows/task-pickup.md`, the flow
+  # the ritual moved into — same reason as the interview gate below: a file under a
+  # skill's flows/ dir does not auto-fire the way a skill DESCRIPTION does, so the
+  # hook is the router as well as the enforcer.
+  #
   # 🔴 A NEW file, so it must be `git add`ed or the flake silently omits it and the
   # switch still succeeds with the hook absent — this repo's standing trap.
   # Registered on PostToolUse (NO matcher — half of what it watches for is an Edit)
