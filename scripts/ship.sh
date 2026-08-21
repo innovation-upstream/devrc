@@ -195,9 +195,13 @@
 #      the one path that can produce it.
 #
 #      That one IS closed at the source rather than documented as an extra code:
-#      the new copy is `bash -n`-checked before the exec and becomes rc 20, which
-#      already means "this script was replaced and the new copy could not be
-#      run". The choice is deliberate, because the test suite's ledger
+#      EVERY file in `SHIP_SELF_WATCH` — this script AND the sourced
+#      `lib/host-role.sh`, not merely the one that gets exec'd — is
+#      `bash -n`-checked before the exec and becomes rc 20, which already means
+#      "this script was replaced and the new copy could not be run". Checking
+#      only the exec'd half would leave the WORSE half open: a syntax error in
+#      a SOURCED file does not abort anything, so it surfaces as a green
+#      verdict over a broken deploy rather than as a failure. The choice is deliberate, because the test suite's ledger
 #      (`_ship_exit_codes` in scripts/tests/test_ship_converge.py) reads this
 #      FILE for `exit N` / `rc=N` and is structurally blind to statuses BASH
 #      produces. It cannot see this class at all, so teaching it 2 would pin
@@ -247,7 +251,7 @@
 #      hosts: an agreement that was not compared is not an agreement.
 #   20 THIS SCRIPT was replaced by its own run and the new copy could not be run:
 #      the re-exec budget was exhausted (ship.sh kept changing under the run),
-#      the new copy is unreadable, the new copy does not PARSE (`bash -n`),
+#      the new copy is unreadable, ANY watched file does not PARSE (`bash -n`),
 #      `bash` itself could not be exec'd, or the self-check could not be measured
 #      at all. Five spellings, one code, because they are one operator action —
 #      re-run ship by hand — and because a run that cannot tell whether its own
@@ -562,15 +566,35 @@ ship_self_check() {
   # under a code the operator reads as a typo in their own command line.
   # `bash -n` costs a parse and turns it into rc 20, which is what actually
   # happened: this script was replaced and the new copy could not be run.
-  if ! _ship_parse_err=$(bash -n "$_ship_self" 2>&1); then
-    echo "ship: ❌ SUPERSEDED but the new copy at $_ship_self does not PARSE — refusing to exec it." >&2
-    printf '  %s\n' "$_ship_parse_err" >&2
-    echo "  exec'ing it would exit 2 (bash's syntax-error status), which this script documents as" >&2
-    echo "  a usage error raised before any host is touched — false here, and the wrong diagnosis." >&2
-    ship_self_fleet_state
-    echo "  fix the syntax (or roll back the commit that landed it) and re-run ship by hand." >&2
-    exit 20
-  fi
+  # 🔴 PARSE EVERY WATCHED FILE, NOT JUST THE EXECUTED ONE. `SHIP_SELF_WATCH`
+  # holds this script AND `lib/host-role.sh`, and only one of them is exec'd —
+  # so a `bash -n "$_ship_self"` alone leaves the LIB half open, and a lib is
+  # the worse half: a syntax error in a SOURCED file does not kill bash.
+  # `source` returns 2 and execution continues with every function defined
+  # after the error MISSING. Measured on a superseded lib: an error near the
+  # END yields rc 0 and `ship: converged + verified` — a GREEN VERDICT OVER A
+  # BROKEN DEPLOY, with the diagnosis only on stderr after the verdict; an
+  # error near the TOP yields rc 6 ("could not identify this host"), returned
+  # after the local host was already fast-forwarded and switched. That is the
+  # same false-ledger-entry shape rc 20 exists to close, one code over.
+  for _ship_w in "${SHIP_SELF_WATCH[@]}"; do
+    [ -r "$_ship_w" ] || continue
+    if ! _ship_parse_err=$(bash -n "$_ship_w" 2>&1); then
+      echo "ship: ❌ SUPERSEDED but the new copy at $_ship_w does not PARSE — refusing to exec it." >&2
+      printf '  %s\n' "$_ship_parse_err" >&2
+      if [ "$_ship_w" = "$_ship_self" ]; then
+        echo "  exec'ing it would exit 2 (bash's syntax-error status), which this script documents as" >&2
+        echo "  a usage error raised before any host is touched — false here, and the wrong diagnosis." >&2
+      else
+        echo "  this file is SOURCED, not exec'd: a syntax error would NOT abort the run. \`source\`" >&2
+        echo "  returns 2 and execution continues with the functions after the error undefined," >&2
+        echo "  which reads as a converged run (or as rc 6) over a deploy that is actually broken." >&2
+      fi
+      ship_self_fleet_state
+      echo "  fix the syntax (or roll back the commit that landed it) and re-run ship by hand." >&2
+      exit 20
+    fi
+  done
   SHIP_SELF_GEN=$((SHIP_SELF_GEN + 1))
   export SHIP_SELF_GEN
   echo "ship: re-executing the NEW copy (generation $SHIP_SELF_GEN of $SHIP_SELF_MAX_GEN)."
