@@ -47,8 +47,8 @@ could be examined — it is **not** "the service does not exist".
 Pass the script's output through, tightened, in this order. Do NOT re-run its
 steps by hand; if something is missing, raise the matching limit and re-run.
 
-- **Service** + one-line "what it is".
-- **Pointers / nuance** (`from index`) — surfaced by the script's `index:` block. Omit if it missed, and when the line carries a `[scope via …]` marker say WHICH scope answered: that scope was not confirmed to own the service.
+- **Service** + one-line "what it is". 🔴 **When the `index:` block hit, its `## What it is` IS that line — use it, do not re-invent one.** Until 2026-08-21 no reader printed that section, so this bullet was asking for something the tool never handed over and the brief was reconstructed from paths; if the block shows the `(no ## What it is content …)` notice instead, say so and derive it live.
+- **What it is / pointers / nuance** (`from index`) — the three sections the script's `index:` block surfaces, in that order. Omit if it missed, and when the line carries a `[scope via …]` marker say WHICH scope answered: that scope was not confirmed to own the service.
 - **Lives at** — repo + paths, namespace, owning kustomization.
 - **Config** — the load-bearing knobs (version, scale, resources, key values, routes, deps).
 - **Live** — only if `--live` ran and returned `ran`; otherwise say `unverified (static recon)`.

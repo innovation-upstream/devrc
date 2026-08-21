@@ -92,6 +92,7 @@ from subsystem_recall import (  # noqa: E402
     NUANCE_HEADING,
     POINTERS_HEADING,
     STATUS_PRECEDENCE,
+    WHAT_HEADING,
     RecallReport,
     StoreMissingError,
     recall,
@@ -411,6 +412,16 @@ class IndexResult:
     """recall's own status, or `not-attempted` / `store-missing`."""
     scope: str | None = None
     ref: str | None = None
+    what: str = ""
+    """`## What it is` — the entry's own answer to "what IS this thing".
+
+    🔴 FIRST IN THE BLOCK, AND IT IS THE FIELD THE BRIEF WAS MISSING. Until
+    2026-08-20 no reader on any path printed this section: a controlled A/B found
+    an agent briefed only on an `index:` block could not say what the service was,
+    where it lived or what it owned, because `pointers` and `nuance` both assume
+    the reader has already identified the thing. The content was on disk in 73 of
+    73 entries the whole time.
+    """
     pointers: str = ""
     nuance: str = ""
     candidates: tuple[str, ...] = ()
@@ -926,6 +937,7 @@ def _read_index_one(
         "hit",
         scope=scope,
         ref=hit.ref,
+        what=(sections.get(WHAT_HEADING) or "").strip(),
         pointers=(sections.get(POINTERS_HEADING) or "").strip(),
         nuance=(sections.get(NUANCE_HEADING) or "").strip(),
         sensitivity=hit.sensitivity,
@@ -1352,6 +1364,12 @@ def render_brief(b: Brief, *, file_limit: int = DEFAULT_FILE_LIMIT) -> str:
     if i.status == "hit":
         sens = f" sensitivity={i.sensitivity}" if i.sensitivity else ""
         L.append(f"index: {i.scope}/{i.ref} — HIT (from index){sens}{via}")
+        # 🔴 `## What it is` FIRST — it is the orienting sentence, and the two
+        # sections after it assume the reader already has it.
+        if i.what:
+            L.append(f"  {WHAT_HEADING}")
+            for ln in i.what.splitlines():
+                L.append(f"  {ln}")
         if i.pointers:
             L.append(f"  {POINTERS_HEADING}")
             for ln in i.pointers.splitlines():
@@ -1360,8 +1378,15 @@ def render_brief(b: Brief, *, file_limit: int = DEFAULT_FILE_LIMIT) -> str:
             L.append(f"  {NUANCE_HEADING}")
             for ln in i.nuance.splitlines():
                 L.append(f"  {ln}")
+        if not i.what:
+            # Said, not left blank — the same rule `subsystem_recall.render_text`
+            # applies to its own bodies. Absent and present-but-empty fold
+            # together: both render as nothing above, and either way the block
+            # does not answer what the thing IS.
+            L.append(f"  (no `{WHAT_HEADING}` content — re-derive what it is live)")
         if not i.pointers and not i.nuance:
-            L.append("  (entry exists but carries neither section)")
+            L.append(f"  (entry exists but carries neither `{POINTERS_HEADING}` "
+                     f"nor `{NUANCE_HEADING}`)")
     elif i.status == "ref-ambiguous":
         L.append(f"index: AMBIGUOUS in {i.scope} — {' | '.join(i.candidates) or '(candidates unlisted)'}"
                  f" — pick one, never guess{via}")
