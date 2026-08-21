@@ -369,6 +369,15 @@ HERMETIC_TARGETS=(
   # contract and its exit-0-on-anything backstop are all gated here rather than left
   # to the ungated hand-rolled scripts beside it.
   scripts/claude-hooks/tests/test_clawgate_writeback_guard.py
+  # Same reason again — a FILE, not the directory. The write-back guard's
+  # counterpart at the OTHER end of a task's life: this one denies a `task create`
+  # whose body carries no `## Acceptance criteria`, and — deliberately — one whose
+  # body it cannot read at all. It is the second hook in this repo that can BLOCK,
+  # it fires PreToolUse on EVERY Bash call, and its non-matches (`task ls`,
+  # `task get`, `task comment`, a curl to `/api/tags`, a producer launcher) are the
+  # load-bearing half, so they are gated here rather than left to the ungated
+  # hand-rolled scripts beside it.
+  scripts/claude-hooks/tests/test_clawgate_task_interview_guard.py
   # Same reason again — a FILE, not the directory. This one gates a CROSS-MODULE
   # class rather than any single hook: the on-disk names every hook's cache is made
   # of. Fifteen of them could be renamed with zero test movement, because writer and
@@ -1262,6 +1271,21 @@ TARGET_FLOORS=(
   #   PASS  scripts/claude-hooks/tests/test_clawgate_writeback_guard.py  (collected=296 passed=296 skipped=0 floor=266)
   #   _suggested_floor 296 = 296 - min(50, max(1, 296/20 = 14)) = 296 - 14 = 282.
   "scripts/claude-hooks/tests/test_clawgate_writeback_guard.py|282"
+  # 2026-08-20, the clawgate task INTERVIEW gate arrives as a NEW target: 300
+  # collected. Large because the non-matches are the load-bearing half of a hook
+  # that DENIES — 30 commands that must not trigger, 5 producer launchers, 15
+  # detector accepts against 18 rejects, 8 fenced-heading rejects — plus every body
+  # source (`--body`, `--body-file`, heredoc, curl payload) driven in BOTH
+  # directions and the piped case that must BLOCK. A 34-mutant sweep run under
+  # PYTHONDONTWRITEBYTECODE=1 killed 34/34; the two that survived the FIRST sweep
+  # (the first-unseeable-reason ordering, and a flow-path rename that survived
+  # because the assertion read the constant out of the module under test) are the
+  # reason three of these tests exist. The positive control — `deny()` emitting
+  # "allow" — is killed by 86 of them.
+  #   _suggested_floor 300 = 300 - min(50, max(1, 300/20 = 15)) = 300 - 15 = 285.
+  # ZERO new skips, so EXPECTED_SKIPS is untouched. If this line conflicts with a
+  # sibling branch, re-run the gate on the MERGED tree and copy what it prints.
+  "scripts/claude-hooks/tests/test_clawgate_task_interview_guard.py|285"
   # 2026-08-18, the on-disk artifact-name registry arrives as a NEW target: 13
   # collected. Deliberately small — one test per module whose names it pins, plus the
   # two-sided classification guard that fails when a hook module appears or vanishes.

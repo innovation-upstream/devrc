@@ -186,6 +186,7 @@ MANAGED_HOOK_SCRIPTS = frozenset({
     "audit-pr-nudge.py",
     "bash-guard.py",
     "claude-notify.py",
+    "clawgate-task-interview-guard.py",
     "clawgate-writeback-guard.py",
     "next-step-nudge.py",
     "search-tool-nudge.py",
@@ -403,6 +404,21 @@ LEDGER_EVENTS = ["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop"]
 WRITEBACK_CMD = with_python("~/.claude/hooks/clawgate-writeback-guard.py")
 WRITEBACK_EVENTS = ["PostToolUse", "Stop"]
 
+# 🔴 THE FIRST PreToolUse HOOK THIS SCRIPT REGISTERS, and that is a widening of
+# the append surface, not a rewording of it. Until now PreToolUse was
+# rewrite-only: bash-guard's INTERPRETER was this script's, its REGISTRATION was
+# the host's. That asymmetry exists because bash-guard was hand-placed on both
+# hosts before the registrar existed and this script cannot prove it owns the
+# entry. The interview guard has no such history — it has never been registered
+# anywhere — so leaving it to a hand edit would reproduce #452 exactly: a hook
+# that ships to both hosts, reports a successful switch, and sits INERT.
+#
+# bash-guard is still never CREATED (test 9 in tests/test_register_nudge_hook.py
+# pins that): the append surface adds only what is in this table.
+PRE_BASH_CMDS = [
+    with_python("~/.claude/hooks/clawgate-task-interview-guard.py"),
+]
+
 # Hooks registered on exactly one event each: {event: [command, ...]}.
 SINGLE_EVENT_CMDS = {
     "Stop": [with_python("~/.claude/hooks/next-step-nudge.py")],
@@ -416,7 +432,7 @@ SINGLE_EVENT_CMDS = {
 # remove. It is reported instead — see the end of the de-dup pass.
 REGISTERED_SCRIPTS = frozenset(
     managed_script_of(c)
-    for c in POST_BASH_CMDS + [NOTIFY_CMD, LEDGER_CMD, WRITEBACK_CMD]
+    for c in POST_BASH_CMDS + PRE_BASH_CMDS + [NOTIFY_CMD, LEDGER_CMD, WRITEBACK_CMD]
     + [c for cmds in SINGLE_EVENT_CMDS.values() for c in cmds]
 )
 
@@ -625,6 +641,20 @@ for _event in sorted(hooks):
                  "intermediate profile generation has no python3 on it. Left "
                  "byte-identical; rewrite it to that form by hand. The command: %r"
                  % (_event, ", ".join(_named), _named[0], _cmd))
+
+# --- PreToolUse(Bash) gates (append-only, matcher=Bash) ----------------------
+# 🔴 APPENDED, so it runs AFTER whatever the host already had on PreToolUse —
+# bash-guard included. Both can deny; ordering only decides which reason the
+# operator reads first, and bash-guard guards irreversible actions while this one
+# guards a task's specification. The irreversible verdict should be the one that
+# lands, so it goes first, which is what appending gives us for free.
+pre = hooks.setdefault("PreToolUse", [])
+pre_registered = registered_scripts(pre)
+for cmd in PRE_BASH_CMDS:
+    if managed_script_of(cmd) in pre_registered:
+        continue
+    pre.append({"matcher": "Bash", "hooks": [{"type": "command", "command": cmd}]})
+    added.append("PreToolUse(Bash): " + cmd)
 
 # --- PostToolUse(Bash) nudge hooks (append-only, matcher=Bash) ---------------
 post = hooks.setdefault("PostToolUse", [])
