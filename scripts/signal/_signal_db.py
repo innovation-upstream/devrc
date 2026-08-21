@@ -36,6 +36,7 @@ import os
 import re
 import socket
 import subprocess
+import sys
 import time
 import uuid
 from urllib.parse import urlparse
@@ -234,9 +235,19 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     --
     -- 🔴 KEYED ON THE SIGNAL BINARY GROUP ID, not on `signal.groups.id` and NOT
     -- on the name. Two measured reasons, either one fatal on its own:
-    --   * `signal.groups.name` is EMPTY ('') for every group this consumer has
-    --     stored — it never captured names — so a name predicate matches nothing
-    --     and would read as a working filter that silently hides zero rows.
+    --   * a NAME IS NOT AN IDENTITY. It is operator-visible text: a group can be
+    --     renamed at any time by any member, two groups can share a name, and
+    --     the stored value is only as good as the last envelope that carried
+    --     one. The binary id never changes.
+    --     (🔴 RETRACTED, 2026-08-21: this bullet used to read "`signal.groups.name`
+    --     is EMPTY ('') for every group this consumer has stored — it never
+    --     captured names". That is FALSE. `upsert_group()` below persists the
+    --     envelope's `groupName`, `test_a_stored_group_keeps_the_name_the_envelope_carried`
+    --     pins it, and the live store has populated names. The advice was right
+    --     for the wrong reason — which is worse than no reason, because a
+    --     maintainer who checks the claim, finds names present, and concludes
+    --     the whole warning is stale is one step from keying a filter on a
+    --     column anyone can edit.)
     --   * the exclusion must be settable BEFORE the group has ever been seen;
     --     a FK to `signal.groups(id)` cannot express "mute this from now on"
     --     for a group with no row yet.
@@ -791,6 +802,19 @@ class SignalDB:
             )
             return cur.rowcount
 
+    def group_exists(self, group_id: bytes) -> bool:
+        """Has this binary group id EVER been stored?
+
+        Read-only, and separate from `upsert_group` on purpose: the upsert
+        cannot answer it, because `ON CONFLICT … DO UPDATE` returns a row id
+        identically whether it inserted or updated. `draft_message()` needs the
+        distinction to warn that it is minting a group nobody has seen.
+        """
+        with self._c.cursor() as cur:
+            cur.execute("SELECT 1 FROM signal.groups WHERE group_id = %s",
+                        (group_id,))
+            return cur.fetchone() is not None
+
     def upsert_group(self, *, group_id: bytes, name: str | None = None,
                      revision: int = 0) -> int:
         with self._c.cursor() as cur:
@@ -1258,13 +1282,40 @@ class SignalDB:
         )
         dest_id = None
         group_row_id = None
+        group_created = False
         if _looks_like_group_address(recipient):
             # `upsert_group`, not a lookup that refuses an unknown group: the
             # inbound path creates the row the same way, and refusing here would
             # make a group drafted to before its first message ever arrived
             # undraftable. A BAD address is still refused — `_group_address_to_id`
             # raises rather than inventing 32 bytes.
-            group_row_id = self.upsert_group(group_id=_group_address_to_id(recipient))
+            gid = _group_address_to_id(recipient)
+            # 🔴 SAY SO WHEN THIS MINTS A GROUP. The strict decoder rejects a
+            # MALFORMED address; it cannot reject a canonically-encoded but WRONG
+            # 32 bytes, which decodes perfectly, creates a group that never
+            # existed, and sends into the void while reporting success. That is
+            # the silent-zero shape `mute` was deliberately hardened against
+            # (it EXITS 4 rather than report a mute that hides nothing).
+            #
+            # A warning, NOT a refusal: forward-only creation is deliberate and
+            # correct — a group can legitimately be drafted to before its first
+            # message has been ingested, and refusing would make that group
+            # undraftable. Only the SILENCE was wrong. The row is written either
+            # way; this just refuses to let it happen without saying so.
+            group_created = not self.group_exists(gid)
+            group_row_id = self.upsert_group(group_id=gid)
+            if group_created:
+                print(
+                    f"WARNING: {recipient} matched NO stored group, so a new one "
+                    f"was created (row {group_row_id}). If you expected an "
+                    f"existing conversation, this address is wrong — a "
+                    f"canonically-encoded but incorrect id decodes perfectly and "
+                    f"cannot be caught by validation. The draft will send into a "
+                    f"group nobody is in. Check `internal_id` against "
+                    f"GET /v1/groups/<account> before approving. (If this group "
+                    f"genuinely has not been seen yet, this is expected — the "
+                    f"pipeline is forward-only.)",
+                    file=sys.stderr)
         elif _looks_like_uuid(recipient):
             dest_id = self.upsert_contact(signal_uuid=recipient)
         else:
@@ -1295,7 +1346,8 @@ class SignalDB:
             "id": draft_id, "recipient": recipient, "body": body,
             "send_state": STATE_PENDING, "message_timestamp": ts,
             "source_contact_id": source_id, "dest_contact_id": dest_id,
-            "group_id": group_row_id, "approval_ref": approval_ref,
+            "group_id": group_row_id, "group_created": group_created,
+            "approval_ref": approval_ref,
         }
 
     def approve_draft(self, draft_id: int, *, approval_ref: str) -> dict:
@@ -1744,9 +1796,19 @@ def _group_address_to_id(recipient: str) -> bytes:
     the same strict reader the `mute` CLI uses, NOT a second base64 reader living
     here. It round-trips the encoding and demands 16 or 32 bytes, so a truncated
     paste or a display name is refused rather than resolved to some other 32
-    bytes — a draft addressed to a group that does not exist is worse than a
-    refusal, because `upsert_group` would happily CREATE it and the message would
-    go nowhere while reporting success.
+    bytes.
+
+    🔴 WHAT THIS DOES **NOT** CATCH — stated because an earlier version of this
+    docstring claimed it did. Validation rejects a MALFORMED address. It cannot
+    reject a WRONG one: any canonically-encoded 32 bytes decodes perfectly, and
+    there is no way from here to tell a real group id from a plausible one. Such
+    an address reaches `upsert_group`, which CREATES the group, and the draft
+    then sends into a conversation nobody is in — while reporting success.
+    `draft_message()` therefore WARNS on stderr whenever it mints a
+    previously-unseen group; that warning, not this function, is what covers the
+    wrong-but-well-formed case. It is a warning rather than a refusal because
+    drafting to a not-yet-ingested group is legitimate (the pipeline is
+    forward-only), so refusing would make that group undraftable.
 
     Raises `ValueError` on anything that is not a canonical group address.
     """

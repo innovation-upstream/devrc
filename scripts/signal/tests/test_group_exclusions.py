@@ -22,7 +22,9 @@ import ast
 import base64
 import inspect
 import re
+import sys
 import textwrap
+import types
 
 import pytest
 
@@ -792,6 +794,60 @@ def test_a_group_draft_is_LINKED_to_the_group_row_not_a_contact(db):
     assert draft["group_id"] == group_row, "the returned dict must say so too"
 
 
+def test_drafting_to_an_UNSEEN_group_WARNS_loudly_on_stderr(db, capsys):
+    """🔴 A canonically-encoded but WRONG id cannot be validated — so SAY SO.
+
+    The strict decoder rejects a MALFORMED address. It cannot reject a wrong
+    one: any well-formed 32 bytes decodes perfectly, `upsert_group` mints a
+    group nobody is in, and the send goes nowhere while reporting success. That
+    is the silent-zero shape `mute` was hardened against (it EXITS 4 rather than
+    report a mute that hides nothing).
+
+    A WARNING, not a refusal: drafting to a not-yet-ingested group is legitimate
+    on a forward-only pipeline, and refusing would make that group undraftable.
+    """
+    capsys.readouterr()                       # discard anything already buffered
+    draft = db.draft_message(recipient=_group_address(GROUP_UNSEEN),
+                             body="into the void?", self_number=SELF_NUMBER)
+    err = capsys.readouterr().err
+    assert "WARNING" in err and "matched NO stored group" in err, (
+        f"drafting to an unseen group said nothing on stderr: {err!r}")
+    assert _group_address(GROUP_UNSEEN) in err, (
+        "the warning must name the offending address, or the operator cannot "
+        "tell WHICH draft it is about")
+    assert draft["group_created"] is True, (
+        "the returned dict must also report it, so a programmatic caller that "
+        "never reads stderr can still branch on it")
+
+
+def test_drafting_to_a_KNOWN_group_is_SILENT(db, capsys):
+    """The other half — without this, a warning printed unconditionally passes.
+
+    🔴 This is the control that makes the warning INFORMATIVE rather than
+    decorative: a warning on every draft is one an operator learns to ignore,
+    which is indistinguishable from no warning at all.
+    """
+    db.upsert_group(group_id=GROUP_KEEP, name="")
+    capsys.readouterr()
+    draft = db.draft_message(recipient=_group_address(GROUP_KEEP),
+                             body="into a real conversation",
+                             self_number=SELF_NUMBER)
+    err = capsys.readouterr().err
+    assert err == "", (
+        f"drafting to a group that IS stored warned anyway: {err!r}. A warning "
+        f"that fires every time carries no information.")
+    assert draft["group_created"] is False
+
+
+def test_a_DM_draft_never_reports_group_created(db, capsys):
+    """A person is not a group — the flag must not leak into the DM path."""
+    capsys.readouterr()
+    draft = db.draft_message(recipient="+15550111", body="hello",
+                             self_number=SELF_NUMBER)
+    assert draft["group_created"] is False
+    assert capsys.readouterr().err == ""
+
+
 def test_drafting_to_an_UNSEEN_group_creates_it_rather_than_refusing(db):
     """Criterion 1's second half: `upsert_group`, not a lookup that refuses.
 
@@ -836,6 +892,54 @@ def test_a_MALFORMED_group_address_is_refused_and_stores_nothing(db, bad):
     assert db.conn.rows(
         "SELECT count(*) AS n FROM signal.contacts "
         "WHERE phone_number LIKE 'group.%'")[0]["n"] == 0
+
+
+def _cli(monkeypatch, db, argv):
+    """Run `consumer.main(argv)` against the hermetic db. Returns the exit code."""
+    class _Ctx:
+        def __enter__(self_inner):
+            return db
+
+        def __exit__(self_inner, *exc):
+            return False
+
+    monkeypatch.setattr(consumer, "SignalDB", lambda *a, **kw: _Ctx())
+    monkeypatch.setattr(db, "ensure_schema", lambda *a, **kw: None, raising=False)
+    return consumer.main(argv)
+
+
+def test_draft_REFUSES_a_bad_recipient_with_exit_3_like_its_siblings(
+        db, monkeypatch, capsys):
+    """🟢 Consistency: a refused `draft` must exit like a refused `mute`/`send`.
+
+    `mute` catches ValueError and `send`/`reconcile` catch SendGateError, both
+    printing `refused: …` and exiting 3. The `draft` branch alone let a bad
+    `--to` escape as an uncaught traceback and exit 1 — indistinguishable, to a
+    caller, from the interpreter dying for an unrelated reason.
+    """
+    rc = _cli(monkeypatch, db,
+              ["draft", "--to", "group.not!base64", "--body", "x",
+               "--from-number", SELF_NUMBER])
+    err = capsys.readouterr().err
+    assert rc == 3, f"expected exit 3 like `mute`/`send`, got {rc}"
+    assert err.startswith("refused: "), err
+    assert "group.not!base64" in err, (
+        "the refusal must name the offending address")
+    # …and nothing was written on the way out.
+    assert db.conn.rows("SELECT count(*) AS n FROM signal.messages")[0]["n"] == 0
+
+
+def test_draft_does_NOT_exit_3_on_a_GOOD_recipient(db, monkeypatch, capsys):
+    """Positive control — without it, `return 3` unconditionally would pass."""
+    stub = types.ModuleType("clawgate")
+    stub.emit_draft_task = lambda **kw: None
+    monkeypatch.setitem(sys.modules, "clawgate", stub)
+
+    rc = _cli(monkeypatch, db,
+              ["draft", "--to", _group_address(GROUP_KEEP), "--body", "hi",
+               "--from-number", SELF_NUMBER])
+    assert rc != 3, capsys.readouterr()
+    assert db.conn.rows("SELECT count(*) AS n FROM signal.messages")[0]["n"] == 1
 
 
 def test_the_SEND_recipient_is_derived_from_the_group_row_not_a_contact(db):
@@ -914,6 +1018,17 @@ def test_send_and_reconcile_work_END_TO_END_on_a_group_draft(db, monkeypatch):
 # set can be compared against the ledger instead of trusted. Each returns the
 # rows that read surfaces FOR THIS DRAFT — so an empty list means "hidden", and a
 # non-empty one before the mute is the positive control.
+#
+# 🔴 THE KEY IS NOT THE PROBE. `set(_MUTE_PROBES) == FILTERED_READS` is invariant
+# under SWAPPING TWO BODIES — an audit did exactly that (gave `get_message` the
+# `search` probe's body and vice versa) and the whole suite stayed green, 650
+# passed, while `get_message` had no behavioural coverage of a group draft at
+# all. It is the same set-invariant-under-a-swap shape already fixed once for the
+# two ledgers, and deleting a KEY (the half the old mutant covered) was never the
+# dangerous direction. `test_each_MUTE_PROBE_actually_calls_the_method_it_is_keyed_under`
+# closes it by RUNNING each probe against a recording proxy and asserting which
+# read it actually reached — a source-text check would be walked by a probe that
+# names the method in a comment.
 _MUTE_PROBES = {
     "list_conversations": lambda db, draft, body: [
         r for r in db.list_conversations()
@@ -923,6 +1038,74 @@ _MUTE_PROBES = {
     "get_message": lambda db, draft, body: [
         r for r in [db.get_message(draft["id"])] if r],
 }
+
+
+class _RecordingReads:
+    """Proxy over a real `SignalDB` that records WHICH filtered read was called.
+
+    Everything is delegated, so the probe runs for real and its return value is
+    genuine — this records, it does not stub. Only the names in
+    `FILTERED_READS` are recorded, because those are the ones a probe is
+    supposed to be pinned to.
+    """
+
+    def __init__(self, db):
+        self._db = db
+        self.called: list = []
+
+    def __getattr__(self, name):
+        attr = getattr(self._db, name)
+        if name in FILTERED_READS and callable(attr):
+            def recording(*a, **kw):
+                self.called.append(name)
+                return attr(*a, **kw)
+            return recording
+        return attr
+
+
+def test_each_MUTE_PROBE_actually_calls_the_method_it_is_keyed_under(db):
+    """🔴 The probe must EXERCISE the read it is filed under, not just be filed.
+
+    An audit swapped the `get_message` and `search` probe bodies and the suite
+    stayed fully green (650 passed, 0 failed): `set(_MUTE_PROBES) ==
+    FILTERED_READS` cannot see a swap, and the mute test's own assertions pass
+    as long as SOMETHING hides. `get_message` silently lost all behavioural
+    coverage of a group draft.
+
+    So each probe is RUN against a recording proxy and must reach exactly the
+    method its key names — measured, not read off the source text (a probe that
+    merely mentions `db.get_message` in a comment would satisfy a grep).
+    """
+    db.upsert_group(group_id=GROUP_KEEP, name="")
+    draft = db.draft_message(recipient=_group_address(GROUP_KEEP),
+                             body="probe pinning fixture", self_number=SELF_NUMBER)
+
+    for name, probe in sorted(_MUTE_PROBES.items()):
+        spy = _RecordingReads(db)
+        probe(spy, draft, "probe pinning fixture")
+        assert spy.called == [name], (
+            f"_MUTE_PROBES[{name!r}] exercised {spy.called or 'NO filtered read'} "
+            f"instead of exactly [{name!r}]. The dict key claims coverage of "
+            f"SignalDB.{name}; swapping two probe bodies leaves the key set "
+            f"identical, so that method would silently have no behavioural "
+            f"coverage at all.")
+
+
+def test_the_probe_pinning_guard_can_go_red():
+    """Negative control: the guard must reject a MIS-keyed probe.
+
+    Without this, the test above passing proves only that the current dict is
+    self-consistent — it would look identical if the proxy recorded nothing.
+    """
+    class _Fake:
+        called: list = []
+
+    spy = _RecordingReads.__new__(_RecordingReads)
+    spy._db = _Fake()
+    spy.called = ["search"]
+    assert spy.called != ["get_message"], (
+        "HARNESS BROKEN: a probe recorded as calling `search` compared equal to "
+        "the `get_message` expectation, so the pinning assertion cannot fail")
 
 
 def test_a_muted_group_draft_is_hidden_from_every_filtered_read(db):
@@ -942,7 +1125,12 @@ def test_a_muted_group_draft_is_hidden_from_every_filtered_read(db):
 
     `_MUTE_PROBES` is keyed by method name and asserted equal to FILTERED_READS
     below, so a read surface added to that ledger without a behavioural probe
-    fails HERE rather than being quietly uncovered.
+    fails HERE rather than being quietly uncovered. 🔴 That assertion covers the
+    KEY SET only — it is invariant under swapping two probe BODIES, which an
+    audit demonstrated with a fully green suite.
+    `test_each_MUTE_PROBE_actually_calls_the_method_it_is_keyed_under` is the
+    other half, and the implication in the paragraph above holds only because
+    BOTH exist.
 
     Each read gets a POSITIVE CONTROL first: it must SEE the draft before the
     mute. Without that, "hidden" is indistinguishable from a query wired to
@@ -1247,10 +1435,20 @@ def test_the_mute_table_is_in_the_schema_and_survives_translation():
 
 
 def test_the_mute_table_is_keyed_on_the_binary_id_not_the_name():
-    """`signal.groups.name` is EMPTY for every group this consumer has stored.
+    """The mute list keys on the binary group id, never on a NAME.
 
-    A name-keyed mute would match nothing while looking like a working filter,
-    which is the exact shape of a silent zero.
+    🔴 RETRACTED REASON (2026-08-21). This docstring used to open with
+    "`signal.groups.name` is EMPTY for every group this consumer has stored",
+    and rest the whole argument on it. That is FALSE: `upsert_group()` persists
+    the envelope's `groupName`, `test_a_stored_group_keeps_the_name_the_envelope_carried`
+    two functions below pins exactly that, and the live store has populated
+    names. The claim was already disproved by its own file.
+
+    The advice survives on a reason that does not decay: a NAME IS NOT AN
+    IDENTITY. Any member can rename a group at any time, two groups can share a
+    name, and the stored value is only as fresh as the last envelope that
+    carried one — so a name-keyed mute silently stops hiding the moment someone
+    renames the conversation. The binary id never changes.
     """
     ddl = next(s for s in _signal_db.SCHEMA_STATEMENTS
                if "excluded_groups" in s and "CREATE TABLE" in s)

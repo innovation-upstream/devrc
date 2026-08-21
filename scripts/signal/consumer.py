@@ -1167,7 +1167,12 @@ def build_parser() -> argparse.ArgumentParser:
     um.add_argument("internal_id")
 
     d = sub.add_parser("draft", help="compose an outbound draft (transmits NOTHING)")
-    d.add_argument("--to", required=True)
+    d.add_argument("--to", required=True,
+                   help="a PERSON (+15550100 or a uuid), or a GROUP as "
+                        "`group.<double-base64>` — the `id` field from "
+                        "GET /v1/groups/<account>, NOT the `internal_id` that "
+                        "`mute` takes. The two commands want opposite halves of "
+                        "the same value; see `internal_id vs id` in SKILL.md")
     d.add_argument("--body", required=True)
     d.add_argument("--from-number", default=ACCOUNT,
                    help="the sending account (default $SIGNAL_ACCOUNT)")
@@ -1328,8 +1333,18 @@ def main(argv=None) -> int:  # pragma: no cover - thin CLI shell over tested uni
                       else "that group was not muted — nothing changed")
         elif args.cmd == "draft":
             import clawgate
-            draft = db.draft_message(
-                recipient=args.to, body=args.body, self_number=args.from_number)
+            try:
+                draft = db.draft_message(
+                    recipient=args.to, body=args.body,
+                    self_number=args.from_number)
+            except ValueError as exc:
+                # 🔴 EXIT 3, like every sibling. `mute` catches ValueError and
+                # `send`/`reconcile` catch SendGateError, both exiting 3; this
+                # branch alone let a bad `--to` escape as an uncaught traceback
+                # and exit 1 — which a caller cannot distinguish from the
+                # interpreter dying for an unrelated reason.
+                print(f"refused: {exc}", file=sys.stderr)
+                return 3
             clawgate.emit_draft_task(
                 draft_id=draft["id"], recipient=args.to, body=args.body)
             print(json.dumps(draft))
