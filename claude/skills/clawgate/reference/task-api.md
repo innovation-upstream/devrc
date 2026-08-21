@@ -275,12 +275,16 @@ and **no login QR to manage**.
   Runbook **checkpoints** (`store.TypeCheckpoint`) are skipped in the sweep — an approval gate stays
   a human decision. Disable with `enabled=false`, which clears the window and falls back to the
   per-project rules. e2e coverage: `e2e/tests/auto-approve-all.spec.ts` (2 tests, **not** Docker-gated).
-- 🔴 **The idle-task reaper is a second unattended destroyer.** `defaultTaskReapAfter = 7d`
-  (`internal/api/server.go:1229`); the daily retention sweep calls `reapIdleTasks` (`:1303`) which
-  calls the **same `dismissTask`** as `DELETE /api/tasks/{id}` (`:1318`) — so an idle task's linked
-  agent pod is torn down too. `CLAWGATE_TASK_TTL` is **unset in the live deployment** (verified
-  2026-08-12), so the 7d default is what is running; `off` or `0` disables the reaper. Measured live 0.7.85, 2026-08-11: `GET /api/requests` → **200
-  with no credential**, `GET /api/tasks` → **401**. Never infer exposure from the path prefix.
+- ⚠ **The idle-task reaper is NOT a second unattended destroyer — not since 0.7.96.** It used to
+  call the **same `dismissTask`** as `DELETE /api/tasks/{id}`, tearing down the linked agent pod on a
+  timer; `cf529d41` replaced that with `AddTags`+`AddComment`, so a task untouched past the window is
+  **tagged `stale` and left intact** (`reapIdleTasks`, `internal/api/server.go:1398`). Re-read the
+  function before re-deriving the old claim — the 60 lines of comment ABOVE it still describe the
+  destructive version. `defaultTaskReapAfter = 7d` (`:1284`) and `CLAWGATE_TASK_TTL` is **unset in
+  the live deployment** (re-verified 2026-08-20, live 0.7.97), so the 7d default is what runs;
+  `off`/`0` disables it.
+- 🔴 **Never infer exposure from the path prefix.** Measured live 0.7.85, 2026-08-11:
+  `GET /api/requests` → **200 with no credential**, `GET /api/tasks` → **401**.
 - 🔴 **`/operator/*` is a THIRD credential** — `requireOperatorToken` demands the reserved Operator
   *agent's* hooks token, not the hook token, which gets `401 {"error":"not the operator"}`. It
   covers **11 of the 13** `/operator*` routes; `GET /operator` and `POST /operator/provision` are
@@ -294,17 +298,25 @@ and **no login QR to manage**.
 
 ---
 
-## The complete machine surface — all 22 `/api/*` routes, with auth
+## The complete machine surface — all 23 `/api/*` routes, with auth
 
 🔴 **Read this before concluding a capability does not exist.** The core SKILL.md used to name
-three clawgate routes (`/health`, `/api/send`, `POST /agents`) out of **118 registered**. That gap
+three clawgate routes (`/health`, `/api/send`, `POST /agents`) out of **120 registered**. That gap
 is not cosmetic: it is why `GET /api/agents` went unnoticed and someone reached into Postgres with
 `SELECT id FROM agents WHERE name=…` for a lookup one authenticated GET already answered.
 
-**Source of truth: `containers/clawgate/internal/api/testdata/routes.golden`** — 118 routes, checked
-in, diffed by `TestRoutesMatchGolden` against what `registerRoutes` actually registers, so a route
+**Source of truth: `containers/clawgate/internal/api/testdata/routes.golden`** — checked in, diffed
+by `TestRoutesMatchGolden` against what `registerRoutes` actually registers, so a route
 added/removed/re-verbed cannot land without a human eyeballing the diff. Regenerate with
 `UPDATE_ROUTES_GOLDEN=1 go test ./internal/api -run TestRoutesMatchGolden`.
+
+⚠ **The golden lives on `trunk`; the surface you can CALL is the deployed pin — they are different
+numbers and the counts here are the DEPLOYED ones.** Re-derived 2026-08-20 against live `0.7.97`:
+**120 routes / 23 `/api/*` deployed**, vs **121 / 24 on trunk**. The single difference is
+`GET /api/sessions/{id}/tasks` (`requireHookToken`, PR #357 — task↔session threads), committed
+without a pin bump, so it is **not callable yet**. Count the golden with
+`grep -vc '^#' routes.golden` (the file's first three lines are comments) and subtract anything
+committed after the live pin.
 
 🔴 **The golden records PATTERNS ONLY — it is BLIND to auth.** By the time a handler reaches the
 mux it is already wrapped, so `requireHookToken(h)` and `requireSession(h)` are the same type and
@@ -325,7 +337,11 @@ two until it was corrected):
 ### `requireHookToken` — 16 routes (what clawgatectl and every producer use)
 <!-- COUNT RE-DERIVED from source on trunk 2026-08-15: 14 registrations in server.go
      + `GET /api/agents` (agents.go:50) + `POST /api/suggest` (suggest.go:30) = 16.
-     Was 15 before the comment-delete route (0.7.90). -->
+     Was 15 before the comment-delete route (0.7.90).
+     RE-CONFIRMED 2026-08-20 (live 0.7.97): still 16 deployed. Trunk carries a 17th,
+     `GET /api/sessions/{id}/tasks` (#357), NOT yet pinned — see the note above.
+     Re-derive with: grep -hoE 'HandleFunc\("(GET|POST|PATCH|DELETE) /api/[^"]*",\s*s\.require[A-Za-z]+' \
+       internal/api/*.go | sort | uniq -c -->
 
 | route | clawgatectl | note |
 |---|---|---|
@@ -351,7 +367,7 @@ two until it was corrected):
 `POST /api/push/subscribe` · `POST /api/push/unsubscribe` · `POST /api/auto-approve` ·
 🔴🔴 `POST /api/auto-approve-all` (the firehose — see above).
 
-### The other 96 routes
+### The other 97 routes
 Not `/api/*` and mostly not machine-facing: `/ui/*` htmx fragments, the page routes, `/agents*`
 (dispatch, **form-encoded**, `requireSession`), `/tasks/*` session routes (incl. `POST /tasks/merge`,
 which has **no `/api` counterpart** — deliberately, since its audit comments are authored `user`),

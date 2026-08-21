@@ -23,7 +23,7 @@ live pin, `git grep` for the feature.
 | file | read it when |
 |---|---|
 | `deploy.md` | **building + shipping a version**: manifest-vs-code + CSS-cwd traps; chart sync |
-| `task-api.md` | **writing/debugging a producer**; `clawgatectl` + exit codes; **the 22-route `/api/*` inventory with its auth**; tag grammar |
+| `task-api.md` | **writing/debugging a producer**; `clawgatectl` + exit codes; **the 23-route `/api/*` inventory with its auth**; tag grammar |
 | `agent-dispatch.md` | debugging the agent loop; `POST /agents`; the sandbox fixture; a silent non-start |
 | `extension.md` | you changed the extension, or need to know which build is loaded |
 | `changelog.md` | *when* a feature landed / why an old decision stands |
@@ -57,7 +57,7 @@ so **the LAN NodePort is fully unauthenticated** — including `DELETE /tasks/{i
 /api/auto-approve-all`** (arms a global window auto-approving **every** future request in **every**
 project *and* sweeps the pending queue; checkpoints excepted). `requireHookToken` is
 **enforce-when-set**: an empty token opens the machine endpoints too. All four wrappers across all
-118 routes: `task-api.md`.
+120 routes: `task-api.md`.
 
 ---
 
@@ -175,8 +175,9 @@ the one lever you have.
   flag: the header IS the impersonation guard, and `user`/`operator` are unreachable by design. An
   unknown `--source` is silently downgraded to `api`, so the CLI warns on stderr when the author it
   gets back differs from the one it asked for.
-- ⚠ **A comment/status write also refreshes the task's idle clock**, which matters: the reaper
-  dismisses anything untouched for 7d, and dismissing **tears down the linked agent pod**.
+- ⚠ **A comment/status write also refreshes the task's idle clock** — the daily reaper TAGS anything
+  untouched for 7d `stale` (+ a system comment). **Non-destructive since 0.7.96**: it no longer
+  dismisses the task or tears the agent pod down.
 
 ## machine (hook-token) Task API
 Read/create with `clawgatectl task ls --summary [--status open --tag t --limit n]` · `task get <id>`
@@ -187,11 +188,12 @@ DELETE, `/api/tags`, `/api/projects`, `/api/notify`) is still curl with `Authori
 $CLAWGATE_HOOK_TOKEN` or `X-Clawgate-Token`. Statuses are exactly `open` / `in_progress` /
 `ready_for_review` / `complete` — no `dismissed`; dismissing deletes.
 
-🔴 **Two paths delete a task, both TEARING DOWN its live dispatched agent pod** (shared
-`dismissTask`; **no in-progress guard, deliberately**): `DELETE
-/api/tasks/{id}`, unauthenticated on the LAN (above), and 🔴 **its automated twin the idle-task
-reaper** — the daily sweep dismisses any task untouched for **7d**, and `CLAWGATE_TASK_TTL` is
-**unset in the deployment** so that default is LIVE (`off`/`0` disables).
+🔴 **ONE path deletes a task and TEARS DOWN its live dispatched agent pod**: `DELETE /api/tasks/{id}`
+(`dismissTask`; **no in-progress guard, deliberately**), unauthenticated on the LAN (above).
+⚠ **Its automated twin is RETIRED — do not re-derive it.** Since **0.7.96** (`cf529d41`, live) the
+daily idle-task reaper **tags `stale` + posts a system comment** instead of calling `dismissTask`, so
+**nothing destroys a task or an agent pod on a timer**. `CLAWGATE_TASK_TTL` is still **unset in the
+deployment**, so the 7d default is LIVE — it now costs a tag, not the task (`off`/`0` disables).
 
 ⚠ **Tags are hard-validated: one invalid tag or unknown `runbook:` is a hard 400 that fails the whole
 create** — a load-bearing wire contract producers key their retry on.
