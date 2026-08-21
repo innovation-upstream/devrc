@@ -47,7 +47,7 @@ cheap model).
 | `KUBECONFIG` | DB access (all stages) | `~/workspace/homelab-talos/homelab-kubeconfig` |
 | `OPENROUTER_API_KEY` | Stage 2 (LLM) | not needed for `--dry-run` or tests |
 | `MAIL_ACTIONS_MODEL` | optional | default `deepseek/deepseek-v4-flash` |
-| `CLAWGATE_HOOK_TOKEN` | optional Stage 4 | if unset, `--emit-clawgate` is a graceful no-op |
+| `CLAWGATE_HOOK_TOKEN` | optional Stage 4 | resolved by `scripts/lib/clawgate_env.py` — `~/.claude/clawgate.env` FIRST, then this variable (which overrides it), matching `clawgatectl`. Unresolvable → `--emit-clawgate` is a graceful no-op **that warns on stderr**; the action item is stored either way |
 
 No secrets are hardcoded — keys are read from env only.
 
