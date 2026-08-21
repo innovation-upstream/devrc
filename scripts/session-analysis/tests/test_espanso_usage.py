@@ -723,3 +723,215 @@ def test_parse_args_keeps_every_legacy_flag():
 def test_bad_source_is_rejected():
     with pytest.raises(SystemExit):
         M.parse_args(["--source", "nope"])
+
+
+# --------------------------------------------------------------------------- #
+# --diff-config / --gate
+# --------------------------------------------------------------------------- #
+# 🔴 FOUR earlier fatal rules were each walked by a one-line edit, because each
+# tried to infer INTENT from the config. These pin the rule that stopped
+# guessing: a WHOLE WORD that used to find a surviving snippet and now finds
+# nothing is FATAL, and deliberate losses are stated with --accept.
+_A = {"trigger": ":aa", "replace": "alpha text", "label": "Alpha thing",
+      "search_terms": ["alpha", "firstword"]}
+_B = {"trigger": ":bb", "replace": "bravo text", "label": "Bravo thing",
+      "search_terms": ["bravo"]}
+
+
+def _mut(base, trig, **changes):
+    out = []
+    for m in base:
+        m = dict(m)
+        if m["trigger"] == trig:
+            for k, v in changes.items():
+                m.pop(k, None) if v is None else m.__setitem__(k, v)
+        out.append(m)
+    return out
+
+
+def test_diff_identical_configs_reports_nothing():
+    """POSITIVE CONTROL — and the probe count is asserted non-trivial, or every
+    bucket below would be vacuously empty."""
+    ts = _ts([_A, _B])
+    d = M.diff_configs(ts, ts)
+    assert d["probes"] > 20, f"only {d['probes']} probes"
+    for b in ("lost_queries", "rows_lost", "attr_lost", "attr_gained",
+              "attr_moved", "moved_expansion"):
+        assert d[b] == [], f"{b} non-empty on an identical diff"
+
+
+def test_losing_a_word_from_a_SURVIVING_snippet_is_fatal():
+    after = _mut([_A, _B], ":aa", label="Alpha", search_terms=["alpha"])
+    d = M.diff_configs(_ts([_A, _B]), _ts(after))
+    lost = {r[0] for r in d["lost_queries"]}
+    assert "firstword" in lost, d["lost_queries"]
+    # 'thing' is in :bb's label too, so it keeps an owner and is NOT graded —
+    # the rule is per-WORD across the whole config, not per-snippet.
+    assert "thing" not in lost, d["lost_queries"]
+
+
+def test_the_rule_cannot_be_walked_by_keeping_or_adding_a_word():
+    """🔴 The four walks that defeated the four earlier rules, as one test.
+
+    Each variant does the SAME modelled damage — 'nebula'/'mesh'/'remote' stop
+    finding anything — and each defeated a previous rule: keeping one word
+    (defeated all-or-nothing), and adding a brand-new word (defeated
+    lost-with-no-gain). The expectation must not depend on WHICH word replaces
+    them; an earlier regression test passed only because its fixture reused a
+    word that was already present.
+    """
+    before = [
+        {"trigger": ":wn", "replace": "ssh a", "label": "SSH rig via nebula mesh",
+         "search_terms": ["nebula", "mesh", "remote"]},
+        {"trigger": ":ln", "replace": "ssh b", "label": "SSH portable via nebula mesh",
+         "search_terms": ["nebula", "mesh", "remote"]},
+    ]
+    variants = {
+        "keeps a word already present": ("SSH rig", "SSH portable"),
+        "introduces brand-new words": ("SSH box", "SSH lap2"),
+        "adds a junk token": ("SSH rig zzq", "SSH portable zzq2"),
+    }
+    for name, (lw, ll) in variants.items():
+        after = [dict(before[0], label=lw, search_terms=[lw.split()[-1]]),
+                 dict(before[1], label=ll, search_terms=[ll.split()[-1]])]
+        d = M.diff_configs(_ts(before), _ts(after))
+        lost = {r[0] for r in d["lost_queries"]}
+        assert {"nebula", "mesh", "remote"} <= lost, (
+            f"variant that {name} was not graded: lost={sorted(lost)}"
+        )
+
+
+def test_pruning_a_snippet_needs_no_acknowledgement():
+    """The word went with the snippet — that is what a prune IS."""
+    d = M.diff_configs(_ts([_A, _B]), _ts([_B]))
+    assert d["lost_queries"] == [], f"a prune must be excused: {d['lost_queries']}"
+    assert d["rows_lost"], "its words DO stop reaching anything; that is reported"
+
+
+def test_renaming_a_trigger_keeping_the_expansion_is_NOT_a_failure():
+    renamed = _mut([_A, _B], ":aa", trigger=":zz")
+    d = M.diff_configs(_ts([_A, _B]), _ts(renamed))
+    assert d["moved_expansion"] == [], d["moved_expansion"]
+    assert d["lost_queries"] == [], "the vocabulary is untouched"
+
+
+def test_a_query_that_now_types_DIFFERENT_text_is_fatal():
+    # 'firstword' moves from :aa to :bb: both survive, the word keeps an owner
+    # (so nothing is LOST), but pressing Enter now types bravo text.
+    after = _mut([_A, _B], ":aa", search_terms=["alpha"])
+    after = _mut(after, ":bb", search_terms=["bravo", "firstword"])
+    d = M.diff_configs(_ts([_A, _B]), _ts(after))
+    assert d["lost_queries"] == [], f"isolate the expansion axis: {d['lost_queries']}"
+    assert any(pr == "firstword" for pr, _, _ in d["moved_expansion"]), d["moved_expansion"]
+
+
+def test_a_vocabulary_less_snippet_never_makes_the_gate_red():
+    """`dashbaord` has no label and no search_terms by design."""
+    cfg = [_A, {"trigger": "typotypo", "replace": "typo"}]
+    assert M.diff_configs(_ts(cfg), _ts(cfg))["lost_queries"] == []
+    assert M.diff_configs(_ts(cfg), _ts([_A]))["lost_queries"] == []
+
+
+def test_reaching_requires_ALL_tokens_and_ignores_the_trigger():
+    ts = _ts([_A])
+    det = M.EspansoDetector(ts)
+    reach = M._reaching(det, {"alpha", "alpha bravo", "alpha thing"})
+    assert "alpha thing" in reach[":aa"] and "alpha bravo" not in reach[":aa"]
+    r2 = M._reaching(det, {"aa", "alpha"})
+    assert "aa" not in r2[":aa"], "the trigger is not a way of FINDING a snippet"
+    assert "alpha" in r2[":aa"]
+
+
+def test_attribution_gained_and_moved_have_positive_controls():
+    d = M.diff_configs(_ts([_A]), _ts([_A, {"trigger": ":cc", "replace": "z",
+                                            "label": "Quebec", "search_terms": ["quebec"]}]))
+    assert any(pr == "quebec" and tr == ":cc" for pr, tr in d["attr_gained"]), d["attr_gained"]
+    dm = M.diff_configs(_ts([_A]), _ts(_mut([_A], ":aa", trigger=":dd")))
+    assert any(pr == "alpha" and a == ":aa" and b == ":dd"
+               for pr, a, b in dm["attr_moved"]), dm["attr_moved"]
+
+
+def test_render_diff_names_the_lost_words_and_offers_the_accept_line():
+    after = _mut([_A, _B], ":aa", label="Alpha", search_terms=["alpha"])
+    d = M.diff_configs(_ts([_A, _B]), _ts(after))
+    text = "\n".join(M.render_diff(d, "a", "b"))
+    assert "QUERIES THAT STOP WORKING" in text
+    assert "firstword" in text and "--accept" in text
+    ack = "\n".join(M.render_diff(d, "a", "b", accepted={"firstword", "thing"}))
+    assert "QUERIES THAT STOP WORKING" not in ack
+    assert "acknowledged via --accept" in ack
+    clean = "\n".join(M.render_diff(M.diff_configs(_ts([_A]), _ts([_A])), "a", "b"))
+    assert "every word that found a surviving snippet still does" in clean
+
+
+def test_gate_exit_codes_accept_semantics_and_that_it_lints(tmp_path, capsys):
+    """Exit codes pinned to LITERALS — an earlier version read the expected
+    value out of the module under test, so flipping that constant kept the
+    suite green while the gate printed 🔴 findings and exited 0."""
+    yaml = pytest.importorskip("yaml")
+    b = tmp_path / "b.yml"; b.write_text(yaml.safe_dump({"matches": [_A, _B]}))
+    lossy = _mut([_A, _B], ":aa", label="Alpha", search_terms=["alpha"])
+    a = tmp_path / "a.yml"; a.write_text(yaml.safe_dump({"matches": lossy}))
+    pruned = tmp_path / "p.yml"; pruned.write_text(yaml.safe_dump({"matches": [_B]}))
+    empty = tmp_path / "e.yml"; empty.write_text("matches: []\n")
+
+    assert M.main(["--config", str(b), "--gate", str(a)]) == 1
+    out = capsys.readouterr().out
+    assert "QUERIES THAT STOP WORKING" in out
+    assert "LINT" in out, "--gate claims to lint the candidate but did not"
+
+    # PARTIAL acknowledgement must still fail — otherwise --accept is a bypass.
+    assert M.main(["--config", str(b), "--gate", str(a), "--accept", "thing"]) == 1
+    capsys.readouterr()
+    assert M.main(["--config", str(b), "--gate", str(a),
+                   "--accept", "thing,firstword"]) == 0
+    assert "GATE: PASS" in capsys.readouterr().out
+
+    assert M.main(["--config", str(b), "--gate", str(pruned)]) == 0
+    capsys.readouterr()
+    assert M.main(["--config", str(b), "--gate", str(empty)]) == 3
+    assert "UNMEASURED" in capsys.readouterr().out
+
+
+def test_vocab_excludes_the_trigger_and_reads_both_sources():
+    """The graded word set must be what DESCRIBES a snippet, not its trigger —
+    otherwise stripping a label leaves the trigger words 'covering' the loss."""
+    v = M._vocab(_ts([_A]))[":aa"]
+    assert {"alpha", "thing", "firstword"} <= v
+    assert "aa" not in v, "the trigger must not be a graded way of finding it"
+
+
+def test_probe_universe_has_prefixes_AND_multiword_pairs():
+    u = M._probe_universe(_ts([_A]))
+    assert {"a", "alph", "alpha", "firstword"} <= u, "prefixes missing"
+    pairs = [p for p in u if " " in p]
+    assert pairs, "no multi-token probes — 'ssh workbench' would be invisible"
+    assert any(p.startswith("alpha ") for p in pairs), sorted(pairs)[:8]
+
+
+def test_render_diff_signals_truncation():
+    many = [dict(_A, trigger=f":t{i}", label=f"Label{i} word{i}",
+                 search_terms=[f"term{i}"]) for i in range(40)]
+    stripped = [dict(m, label=f"Label{i}", search_terms=[])
+                for i, m in enumerate(many)]
+    text = "\n".join(M.render_diff(M.diff_configs(_ts(many), _ts(stripped)), "a", "b"))
+    assert "more (not shown)" in text, "a silently truncated report hides findings"
+
+
+def test_a_changed_expansion_alone_drives_the_exit_code(tmp_path, capsys):
+    """Pinned at the CLI: a mutant grading only lost_queries kept the suite
+    green while the report printed 🔴 EXPANSION CHANGED and exited 0."""
+    yaml = pytest.importorskip("yaml")
+    before = [_A, _B]
+    after = _mut(before, ":aa", search_terms=["alpha"])
+    after = _mut(after, ":bb", search_terms=["bravo", "firstword"])
+    b = tmp_path / "b.yml"
+    b.write_text(yaml.safe_dump({"matches": before}))
+    a = tmp_path / "a.yml"
+    a.write_text(yaml.safe_dump({"matches": after}))
+    d = M.diff_configs(_ts(before), _ts(after))
+    assert d["lost_queries"] == [] and d["moved_expansion"], (
+        "fixture must isolate the expansion axis"
+    )
+    assert M.main(["--config", str(b), "--gate", str(a)]) == 1
+    assert "EXPANSION CHANGED" in capsys.readouterr().out
