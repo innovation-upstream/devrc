@@ -1,7 +1,7 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: paging
+  name: roster
   namespace: front-desk
 spec:
   replicas: 4
@@ -9,7 +9,7 @@ spec:
     spec:
       containers:
         - name: api
-          image: registry.invalid/paging:9.3.1
+          image: registry.invalid/roster:9.3.1
           ports:
             - containerPort: 8123
           resources:
