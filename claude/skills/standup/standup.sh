@@ -298,7 +298,12 @@ scan_local(){
     echo "  (systemctl unavailable — skipped)"; LOCAL_DEGRADED=1; return; }
   local up raw rc failed nfailed spec unit label show load active sub result
   local runflag mono age mark
-  up=$(awk '{print int($1)}' /proc/uptime 2>/dev/null)
+  # STANDUP_UPTIME_SECONDS is a TEST SEAM. Unit ages are derived from monotonic
+  # stamps relative to boot, so without it every age assertion is capped by the
+  # HOST'S REAL UPTIME: a fixture claiming "started 25h ago" silently clamps to 0
+  # on a host up 5h and renders "never run" — which reads as a standup bug and is
+  # not one. Measured 2026-08-20 on the laptop (up ~5h, and it reboots often).
+  up=${STANDUP_UPTIME_SECONDS:-$(awk '{print int($1)}' /proc/uptime 2>/dev/null)}
 
   # 1. failed user units. Only tokens ending in a real unit suffix are kept, so
   #    a stray header or legend line can never leak in as a "failed unit".
