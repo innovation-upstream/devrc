@@ -1027,7 +1027,7 @@ TARGET_FLOORS=(
   # is to re-pin when the gate FIRES and to copy the number it prints, not to
   # tighten a band that is holding. (For reference only, not applied:
   # _suggested_floor 680 = 646.)
-  "scripts/browser-bridge/tests|622"
+  "scripts/browser-bridge/tests|716"
   "scripts/validation/tests|97"
   # 2026-08-12, initiative-scan's `gh_available` honesty flag: 381 -> 386
   # collected, +5 for the flag's probe/report/render cases in
