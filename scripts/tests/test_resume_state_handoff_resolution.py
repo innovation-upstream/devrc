@@ -211,6 +211,13 @@ def run_resume(repo, stub_bin, *args, cwd=None, extra_env=None):
     env = _git_env(repo)
     env["PATH"] = f"{d}{os.pathsep}{env['PATH']}"
     env["STUB_LOG"] = str(log)
+    # The freshness check fetches origin. Most fixtures here carry either NO
+    # remote or a fake `git@github.com:` URL, and a real fetch against those
+    # means an SSH attempt to github.com — network, seconds, and a hole in this
+    # module's hermeticity promise. Skipped by default; the freshness tests
+    # below opt back IN, against a real bare repo on disk, so the fetch path is
+    # exercised for real rather than mocked away.
+    env["RESUME_STATE_SKIP_FETCH"] = "1"
     env.update(extra_env or {})
     out = subprocess.run(
         ["bash", str(SCRIPT), *args],
@@ -548,16 +555,25 @@ def test_a_handoff_naming_no_prs_is_not_downgraded_by_gh_being_absent(tmp_path, 
 
 
 def test_no_remote_with_referenced_prs_is_reported_as_unreconciled(tmp_path, stub_bin):
-    """The OTHER unreconciled path: gh never runs at all because there is no
-    remote (or gh is not installed). The handoff still names three PRs that
-    nobody checked, so the verdict must degrade exactly as it does when gh runs
-    and fails. Untested until the mutation battery pointed at this branch."""
+    """The OTHER unreconciled path: nothing can be resolved because there is no
+    remote, so no repo can claim the two bare refs. The handoff still names PRs
+    that nobody checked, so the verdict must degrade exactly as it does when gh
+    runs and fails. Untested until the mutation battery pointed at this branch.
+
+    ⚠ The WORDING here changed with the cross-repo fix and the change is the
+    point. `acme/widget/pull/1141`-style qualified refs are now resolvable with
+    no local remote at all, so "no remote" is no longer a blanket reason to
+    check nothing — only the BARE refs become unattributable, and the digest
+    now says which of the two happened instead of merging them.
+    """
     repo = make_repo(tmp_path, docs=("SESSION-HANDOFF.md",), doc_body=PR_HANDOFF)
     out = run_resume(repo, stub_bin)
     joined = " ".join(drift_lines(out))
     assert "matches the handoff's claims" not in joined, joined
     assert "did not answer" in joined, joined
-    assert "3 referenced PR(s) were never checked" in joined, joined
+    # the two bare refs (#4101/#4102) cannot be attributed to any repo here
+    assert "PR #4101 UNATTRIBUTED" in out and "PR #4102 UNATTRIBUTED" in out, out
+    assert "2 bare #N ref(s) could not be attributed" in joined, joined
 
 
 def test_a_partial_gh_answer_is_reported_as_partial(tmp_path, stub_bin):
@@ -615,6 +631,410 @@ def test_drift_is_clean_when_gh_actually_answers(tmp_path, stub_bin):
     joined = " ".join(drift_lines(out))
     assert "did not answer" not in joined, joined
     assert "matches the handoff's claims" in joined, joined
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 CROSS-REPO PR REFS — a `#N` carrying an `owner/repo` qualifier must be
+# resolved against THAT repo, never against whatever repo happens to be cwd
+# --------------------------------------------------------------------------- #
+# The real doc's shape, measured 2026-08-20 in datapacket-talos: four qualified
+# refs into three other repos, one qualified ref into this one, one bare ref,
+# and two decoys (a 1-digit prose ref and a markdown line anchor) that are not
+# PRs at all. Every ref is framed as in-flight, so any ref the script resolves
+# and finds MERGED becomes a DRIFT line — which is what makes a misattribution
+# visible rather than silent.
+CROSS_REPO_HANDOFF = (
+    "## Handoff\n"
+    "- `civitai/cli#423` is OPEN and awaiting review.\n"
+    "- `civitai/civitai#4158` is OPEN, mergeable, blocked on the schema bump.\n"
+    "- `civitai/civitai-app-starters#247` is still in draft, pending a decision.\n"
+    "- `civitai/civitai-orchestration#311` is in flight, CI pending.\n"
+    "Landed here: https://github.com/acme/widget/pull/1141 — already deployed.\n"
+    "Also still open: #4114 awaits the next cut.\n"
+    "A stray prose ref like #5, and the anchor `claudedocs/notes.md#12`.\n"
+)
+
+MERGED_JSON = '{"state":"MERGED","mergeable":"MERGEABLE","statusCheckRollup":[]}'
+
+
+def gh_targets(log):
+    """Every `-R <slug>` the script actually handed to gh, in order.
+
+    🔴 THE ASSERTION THAT MATTERS. Checking only the printed label would pass a
+    change that pretty-prints `civitai/cli#423` while still querying the local
+    repo — the label and the lookup are independent, and it is the LOOKUP that
+    produced the false findings. This reads the lookup.
+    """
+    out = []
+    if not log.exists():
+        return out
+    for ln in log.read_text().splitlines():
+        parts = ln.split()
+        if "-R" in parts:
+            out.append(parts[parts.index("-R") + 1])
+    return out
+
+
+def test_a_qualified_ref_is_resolved_against_its_own_repo(tmp_path, stub_bin):
+    """THE REGRESSION.
+
+    RED before the fix: `extract_prs` stripped the qualifier, so all four
+    foreign refs were looked up in acme/widget and — because the stub answers
+    MERGED for everything, exactly as the real gh did for talos-infra's own
+    unrelated PRs of those numbers — DRIFT emitted a fabricated
+    "MERGED but handoff frames it as open/in-flight (do the follow-on)" for
+    each. A confident instruction to act on a premise that does not exist.
+    """
+    _, log = stub_bin
+    repo = make_repo(
+        tmp_path,
+        docs=("SESSION-HANDOFF.md",),
+        doc_body=CROSS_REPO_HANDOFF,
+        remote="git@github.com:acme/widget.git",
+    )
+    out = run_resume(repo, stub_bin, extra_env={"STUB_GH_JSON": MERGED_JSON})
+
+    assert sorted(gh_targets(log)) == [
+        "acme/widget",
+        "civitai/civitai",
+        "civitai/civitai-app-starters",
+        "civitai/civitai-orchestration",
+        "civitai/cli",
+    ], gh_targets(log)
+
+    # and the findings name the repo, so a reader can act on them
+    joined = " ".join(drift_lines(out))
+    for ref in (
+        "civitai/cli#423",
+        "civitai/civitai#4158",
+        "civitai/civitai-app-starters#247",
+        "civitai/civitai-orchestration#311",
+    ):
+        assert ref in joined, f"{ref} missing from DRIFT: {joined}"
+
+
+@pytest.mark.parametrize("num", ["423", "4158", "247", "311"])
+def test_a_foreign_ref_is_never_looked_up_in_the_local_repo(tmp_path, stub_bin, num):
+    """The precise defect, one ref at a time: no foreign PR number may ever be
+    paired with the LOCAL slug in a gh call. Reads the invocation log, so it
+    fails on the lookup rather than on the cosmetics of the printed line."""
+    _, log = stub_bin
+    repo = make_repo(
+        tmp_path,
+        docs=("SESSION-HANDOFF.md",),
+        doc_body=CROSS_REPO_HANDOFF,
+        remote="git@github.com:acme/widget.git",
+    )
+    run_resume(repo, stub_bin, extra_env={"STUB_GH_JSON": MERGED_JSON})
+    calls = [ln for ln in log.read_text().splitlines() if f" {num} " in ln]
+    assert calls, f"#{num} was never looked up at all"
+    for ln in calls:
+        assert "-R acme/widget" not in ln, f"#{num} was resolved against the LOCAL repo: {ln}"
+
+
+def test_a_bare_ref_is_unattributed_when_the_doc_names_other_repos(tmp_path, stub_bin):
+    """`#4114` is bare in a doc that cites four other repos, so nothing in the
+    text says which repo owns it. It must be REPORTED as unattributed and never
+    resolved — a silent skip would rebuild the same false green one layer down.
+    """
+    _, log = stub_bin
+    repo = make_repo(
+        tmp_path,
+        docs=("SESSION-HANDOFF.md",),
+        doc_body=CROSS_REPO_HANDOFF,
+        remote="git@github.com:acme/widget.git",
+    )
+    out = run_resume(repo, stub_bin, extra_env={"STUB_GH_JSON": MERGED_JSON})
+    assert "PR #4114 UNATTRIBUTED" in out, out
+    assert "4114" not in " ".join(gh_targets(log)), gh_targets(log)
+    for ln in log.read_text().splitlines():
+        assert " 4114 " not in ln, f"an unattributable ref was resolved anyway: {ln}"
+    # reported, not swallowed: it degrades the verdict and prints as a gap
+    joined = " ".join(drift_lines(out))
+    assert "could not be attributed" in joined, joined
+    assert "matches the handoff's claims" not in joined, joined
+
+
+def test_a_bare_ref_IS_claimed_when_the_doc_names_only_this_repo(tmp_path, stub_bin):
+    """POSITIVE CONTROL for the test above — and the guard against overshooting.
+
+    Refusing to attribute is only correct when the doc is genuinely ambiguous.
+    The overwhelmingly common handoff cites its OWN repo and nothing else, and
+    there a bare `#N` is unambiguous; a fix that made every bare ref
+    unattributed would gut the tool while passing every test above.
+    """
+    _, log = stub_bin
+    repo = make_repo(
+        tmp_path,
+        docs=("SESSION-HANDOFF.md",),
+        doc_body=PR_HANDOFF,          # bare #4101/#4102 + an acme/widget pull URL
+        remote="git@github.com:acme/widget.git",
+    )
+    out = run_resume(repo, stub_bin, extra_env={"STUB_GH_JSON": MERGED_JSON})
+    assert "UNATTRIBUTED" not in out, out
+    assert sorted(set(gh_targets(log))) == ["acme/widget"], gh_targets(log)
+    assert "PR #4101" in out and "PR #4102" in out, out
+
+
+def test_a_qualified_ref_to_THIS_repo_does_not_make_bare_refs_ambiguous(
+    tmp_path, stub_bin
+):
+    """A doc may spell its own repo out — `acme/widget#7` — without that making
+    its bare refs ambiguous. Only a FOREIGN repo does. Mutating the awk filter
+    to flag any qualified ref (dropping the `tolower($1)!=tolower(me)` test)
+    passes every other test in this file and fails here."""
+    repo = make_repo(
+        tmp_path,
+        docs=("SESSION-HANDOFF.md",),
+        doc_body="## Handoff\nacme/widget#77 is OPEN. So is #4101.\n",
+        remote="git@github.com:acme/widget.git",
+    )
+    out = run_resume(repo, stub_bin, extra_env={"STUB_GH_JSON": MERGED_JSON})
+    assert "UNATTRIBUTED" not in out, out
+
+
+def test_a_markdown_line_anchor_is_not_a_pr(tmp_path, stub_bin):
+    """`claudedocs/notes.md#12` is a line anchor. The old code took the `#12`
+    as a bare PR and looked it up; it appeared in the real run's output."""
+    _, log = stub_bin
+    repo = make_repo(
+        tmp_path,
+        docs=("SESSION-HANDOFF.md",),
+        doc_body=CROSS_REPO_HANDOFF,
+        remote="git@github.com:acme/widget.git",
+    )
+    out = run_resume(repo, stub_bin, extra_env={"STUB_GH_JSON": MERGED_JSON})
+    assert "#12 " not in out and "PR #12" not in out, out
+    assert "claudedocs/notes.md" not in " ".join(gh_targets(log)), gh_targets(log)
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 GAP PROMINENCE — a `!` line beneath a wall of `-` findings gets missed
+# --------------------------------------------------------------------------- #
+def test_gaps_print_under_a_shouted_banner_beside_real_findings(tmp_path, stub_bin):
+    """Measured 2026-08-20: the `!` gap lines were formatted exactly like the
+    `-` finding lines and were duly read straight past. They now carry a rule
+    and a header naming the count, while KEEPING the `!` prefix the /resume
+    skill keys on."""
+    repo = make_repo(
+        tmp_path,
+        docs=("SESSION-HANDOFF.md",),
+        doc_body=CROSS_REPO_HANDOFF,
+        remote="git@github.com:acme/widget.git",
+    )
+    lines = drift_lines(run_resume(repo, stub_bin, extra_env={"STUB_GH_JSON": MERGED_JSON}))
+    assert any(ln.startswith("- ") for ln in lines), lines      # real findings present
+    assert any(ln.startswith("! ") for ln in lines), lines      # prefix preserved
+    banner = [ln for ln in lines if ln.startswith("!!")]
+    assert banner, f"no gap banner beside the findings: {lines}"
+    assert "GAPS (1)" in banner[0], banner
+    assert any("═" in ln for ln in lines), lines
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 A HANDOFF READ OUT OF A STALE WORKING TREE
+#
+# These fixtures use a REAL bare repo on disk as `origin`, so the script's
+# `git fetch` runs for real with no network — RESUME_STATE_SKIP_FETCH is
+# cleared. That is deliberate: mocking the fetch away would leave the whole
+# freshness path unexercised, which is how it got shipped broken elsewhere.
+# --------------------------------------------------------------------------- #
+def make_stale_clone(tmp_path, local_lines=8, origin_extra=276, dirty=False):
+    """A clone whose checked-out handoff is `origin_extra` lines behind origin.
+
+    Built the way the real thing happens: clone A commits v1 and pushes, clone
+    B pushes a much longer v2, and clone A is simply never updated. A's
+    `origin/main` ref is stale too until the script fetches — which is the
+    point, and what a comparison against a local ref alone would miss.
+    """
+    origin = tmp_path / "origin.git"
+    subprocess.run(
+        ["git", "init", "-q", "--bare", "-b", "main", str(origin)],
+        check=True, env=_git_env(tmp_path),
+    )
+    env = _git_env(tmp_path)
+    a = tmp_path / "cloneA"
+    b = tmp_path / "cloneB"
+    for dest in (a, b):
+        subprocess.run(["git", "clone", "-q", str(origin), str(dest)], check=True, env=env)
+
+    doc = "claudedocs/handoff-stale.md"
+    v1 = "# Handoff\n" + "".join(f"old line {i}\n" for i in range(local_lines))
+    (a / "claudedocs").mkdir(parents=True)
+    (a / doc).write_text(v1)
+    ga = ["git", "-C", str(a)]
+    subprocess.run([*ga, "add", doc], check=True, env=_git_env(a))
+    subprocess.run([*ga, "commit", "-qm", "handoff v1"], check=True, env=_git_env(a))
+    subprocess.run([*ga, "push", "-q", "origin", "main"], check=True, env=_git_env(a))
+
+    gb = ["git", "-C", str(b)]
+    subprocess.run([*gb, "pull", "-q", "origin", "main"], check=True, env=_git_env(b))
+    v2 = v1 + "".join(
+        f"NEW finding {i} — written by the last session\n" for i in range(origin_extra)
+    )
+    # origin_extra=0 is the UP-TO-DATE control, so there is deliberately nothing
+    # to commit here — `git commit` would exit 1 on an empty tree.
+    if origin_extra:
+        (b / doc).write_text(v2)
+        subprocess.run([*gb, "add", doc], check=True, env=_git_env(b))
+        subprocess.run([*gb, "commit", "-qm", "handoff v2"], check=True, env=_git_env(b))
+        subprocess.run([*gb, "push", "-q", "origin", "main"], check=True, env=_git_env(b))
+
+    if dirty:
+        (a / doc).write_text(v1 + "an uncommitted note from THIS session\n")
+    return a, v1, v2
+
+
+def read_line(stdout):
+    hits = [ln.strip() for ln in stdout.splitlines() if ln.strip().startswith("handoff-read:")]
+    assert len(hits) == 1, f"expected one handoff-read: line, got {hits}\n{stdout}"
+    return hits[0]
+
+
+def test_a_stale_working_tree_handoff_is_detected_and_the_origin_copy_is_read(
+    tmp_path, stub_bin
+):
+    """THE REGRESSION for defect 2.
+
+    Measured 2026-08-20: the primary clone served a handoff 276 lines behind
+    `origin/trunk` and the session was framed on it, caught only by luck. The
+    digest must now name which copy it read, and read the authoritative one.
+    """
+    repo, _, v2 = make_stale_clone(tmp_path)
+    out = run_resume(repo, stub_bin, extra_env={"RESUME_STATE_SKIP_FETCH": ""})
+    line = read_line(out)
+    assert "origin/main copy" in line, line
+    assert "STALE" in line, line
+    assert "9 lines local vs 285 on origin/main" in line, line
+    # it is real drift, not a footnote
+    joined = " ".join(drift_lines(out))
+    assert "STALE" in joined, joined
+    assert "matches the handoff's claims" not in joined, joined
+    # 🔴 and the handed-over file must hold the ORIGIN text, not the stale one.
+    # A first cut of this fix wrote the LOCAL copy there, so the digest said
+    # "read this" while pointing at the very copy it had just called stale —
+    # which would have re-created the bug through the instructions meant to fix
+    # it. Asserting only that the path EXISTS passes that version.
+    alt = [ln.strip() for ln in out.splitlines() if ln.strip().startswith("handoff-other-copy:")]
+    assert alt, out
+    handed = Path(alt[0].split(":", 1)[1].strip())
+    assert handed.exists(), out
+    assert handed.read_text().rstrip("\n") == v2.rstrip("\n"), (
+        "the file handed to the reader is not the origin text:\n"
+        f"{handed.read_text()[:200]}"
+    )
+
+
+def test_the_origin_copy_is_what_later_blocks_actually_reconcile(tmp_path, stub_bin):
+    """Not just reported — USED.
+
+    Naming the stale copy while still extracting from it would be a comment,
+    not a fix. The origin-only text carries a PR ref the working-tree copy does
+    not, so the ONLY way that ref can be reconciled is if the origin copy is
+    what got parsed.
+    """
+    _, log = stub_bin
+    origin = tmp_path / "origin.git"
+    repo, _, _ = make_stale_clone(tmp_path, origin_extra=3)
+    # append a PR ref that exists ONLY on origin
+    b = tmp_path / "cloneB"
+    doc = "claudedocs/handoff-stale.md"
+    (b / doc).write_text((b / doc).read_text() + "PR #9091 is OPEN and awaiting review.\n")
+    for args in (["add", doc], ["commit", "-qm", "add pr ref"], ["push", "-q", "origin", "main"]):
+        subprocess.run(["git", "-C", str(b), *args], check=True, env=_git_env(b))
+    assert "9091" not in (repo / doc).read_text(), "fixture: ref must be origin-only"
+    assert origin.exists()
+
+    run_resume(
+        repo,
+        stub_bin,
+        extra_env={"RESUME_STATE_SKIP_FETCH": "", "STUB_GH_JSON": MERGED_JSON},
+    )
+    # read defensively: at base the stale copy names NO PRs, so gh is never
+    # invoked and the log does not exist at all — that must surface as this
+    # assertion's message, not as a FileNotFoundError from the reader.
+    calls = log.read_text() if log.exists() else ""
+    assert any(" 9091 " in ln for ln in calls.splitlines()), (
+        "the origin-only PR ref was never reconciled — the stale local copy was "
+        f"parsed after all. gh calls seen:\n{calls or '(none — gh never ran)'}"
+    )
+
+
+def test_an_up_to_date_handoff_says_so_and_stays_clean(tmp_path, stub_bin):
+    """POSITIVE CONTROL. The warning must be driven by an actual difference —
+    a hardcoded 'STALE' would pass the test above."""
+    repo, _, _ = make_stale_clone(tmp_path, origin_extra=0)
+    out = run_resume(repo, stub_bin, extra_env={"RESUME_STATE_SKIP_FETCH": ""})
+    line = read_line(out)
+    assert "identical to origin/main" in line, line
+    assert "STALE" not in line, line
+    assert "matches the handoff's claims" in " ".join(drift_lines(out))
+
+
+def test_uncommitted_local_edits_keep_the_local_copy_but_are_flagged(tmp_path, stub_bin):
+    """The other direction, and it must NOT be called stale: a doc with
+    uncommitted edits is this session's work-in-progress, so the local copy
+    stays authoritative — but reconciling unpushed text is its own trap, so it
+    is reported as a gap rather than passed over."""
+    repo, _, _ = make_stale_clone(tmp_path, dirty=True)
+    out = run_resume(repo, stub_bin, extra_env={"RESUME_STATE_SKIP_FETCH": ""})
+    line = read_line(out)
+    assert "working-tree copy" in line, line
+    assert "UNCOMMITTED" in line, line
+    assert "STALE" not in line, line
+    joined = " ".join(drift_lines(out))
+    assert "uncommitted local edits" in joined, joined
+    assert "matches the handoff's claims" not in joined, joined
+
+
+def test_freshness_is_reported_as_unchecked_rather_than_assumed(tmp_path, stub_bin):
+    """No remote => the comparison could not be made. It must say UNCHECKED, not
+    imply the working-tree copy was verified."""
+    repo = make_repo(tmp_path, docs=("SESSION-HANDOFF.md",))
+    line = read_line(run_resume(repo, stub_bin))
+    assert "UNCHECKED" in line, line
+    assert "no origin remote" in line, line
+
+
+def test_a_doc_absent_from_origin_is_not_reported_as_matching(tmp_path, stub_bin):
+    """🔴 `git diff --quiet <ref> -- <path>` exits 0 when the path exists on
+    NEITHER side, so a freshness check built on it alone reports a reassuring
+    "matches origin/main" for a doc that has never been on that branch. This
+    pins the cat-file existence probe that makes the comparison mean anything.
+    """
+    repo, _, _ = make_stale_clone(tmp_path, origin_extra=0)
+    (repo / "claudedocs" / "handoff-brand-new.md").write_text(
+        "# Handoff\nwritten this session, never pushed\n"
+    )
+    os.utime(repo / "claudedocs" / "handoff-brand-new.md", (1_800_000_000, 1_800_000_000))
+    out = run_resume(repo, stub_bin, extra_env={"RESUME_STATE_SKIP_FETCH": ""})
+    assert handoff_line(out) == "handoff: handoff-brand-new.md", out
+    line = read_line(out)
+    assert "identical to origin/main" not in line, line
+    assert "untracked" in line or "not on origin/main" in line, line
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 A PATH OUTSIDE ANY GIT REPO — the digest checked nothing and said so was
+# fine
+# --------------------------------------------------------------------------- #
+def test_a_handoff_outside_any_git_repo_is_not_a_clean_bill_of_health(
+    tmp_path, stub_bin
+):
+    """Hit live 2026-08-20 by passing an explicit handoff path outside a repo:
+    the GIT/PR block returned at its not-a-git-repo guard, so no branch, PR or
+    ahead/behind check ever ran — and DRIFT still printed
+    "(none detected — live state matches the handoff's claims)".
+    """
+    loose = tmp_path / "loose"
+    loose.mkdir()
+    doc = loose / "handoff-orphan.md"
+    doc.write_text("## Handoff\nPR #4101 is OPEN and awaiting review.\n")
+    out = run_resume(tmp_path, stub_bin, str(doc), cwd=loose)
+    assert "not a git repo" in out, out
+    joined = " ".join(drift_lines(out))
+    assert "matches the handoff's claims" not in joined, joined
+    assert "no branch, ahead/behind or PR reconciliation ran" in joined, joined
 
 
 # --------------------------------------------------------------------------- #
