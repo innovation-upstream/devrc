@@ -311,10 +311,17 @@ added/removed/re-verbed cannot land without a human eyeballing the diff. Regener
 `UPDATE_ROUTES_GOLDEN=1 go test ./internal/api -run TestRoutesMatchGolden`.
 
 ⚠ **The golden lives on `trunk`; the surface you can CALL is the deployed pin — they are different
-numbers and the counts here are the DEPLOYED ones.** Re-derived 2026-08-20 against live `0.7.97`:
-**120 routes / 23 `/api/*` deployed**, vs **121 / 24 on trunk**. The single difference is
-`GET /api/sessions/{id}/tasks` (`requireHookToken`, PR #357 — task↔session threads), committed
-without a pin bump, so it is **not callable yet**. Count the golden with
+numbers and the counts here are the DEPLOYED ones.** Re-derived 2026-08-21 against live **`0.7.98`**:
+**121 routes / 24 `/api/*` deployed**, and trunk agrees — the gap is closed.
+
+🔴 **`GET /api/sessions/{id}/tasks` IS CALLABLE.** This note previously said it was "committed
+without a pin bump, so **not callable yet**" — true when derived against `0.7.97`, and **false since
+0.7.98 shipped** (2026-08-20). Measured, not inferred: `GET /api/sessions/<uuid>/tasks` with the hook
+token returns `200 {"sessionId":"…","tasks":[…]}`. ⚠ **An unknown session is `200` with an EMPTY
+array, not a 404** — so an empty result cannot distinguish "this session touched nothing" from "wrong
+id", and must never be reported as a clean bill of health. This is the worked example of the warning
+directly above: a count re-derived against a live pin decays the moment the next version ships, so
+**re-derive it rather than quoting it**. Count the golden with
 `grep -vc '^#' routes.golden` (the file's first three lines are comments) and subtract anything
 committed after the live pin.
 
@@ -334,12 +341,23 @@ two until it was corrected):
 | `requireOperatorToken` | `operator.go:58` | bearer must be the reserved agent named `Operator` |
 | `requireAgentToken` | `agent.go:30` | bearer resolves to *any* agent; that agent is injected into the request ctx |
 
-### `requireHookToken` — 16 routes (what clawgatectl and every producer use)
-<!-- COUNT RE-DERIVED from source on trunk 2026-08-15: 14 registrations in server.go
-     + `GET /api/agents` (agents.go:50) + `POST /api/suggest` (suggest.go:30) = 16.
-     Was 15 before the comment-delete route (0.7.90).
-     RE-CONFIRMED 2026-08-20 (live 0.7.97): still 16 deployed. Trunk carries a 17th,
-     `GET /api/sessions/{id}/tasks` (#357), NOT yet pinned — see the note above.
+### `requireHookToken` — 17 routes (what clawgatectl and every producer use)
+<!-- RE-DERIVED 2026-08-21 against live 0.7.98: 17, up from 16, the new one being
+     `GET /api/sessions/{id}/tasks` (#357) — which IS now pinned and callable, so
+     the trunk/deployed gap this file used to warn about is CLOSED.
+     Was 15 before the comment-delete route (0.7.90), 16 before #357.
+
+     🔴 THE RE-DERIVE COMMAND WAS OVER-BROAD AND IS FIXED BELOW. It matched
+     `s.require[A-Za-z]+` — i.e. EVERY wrapper — and so returned 24 while the
+     heading claimed 16. Anyone checking the figure with the command printed
+     beside it got a mismatch and no way to tell which half was wrong. The
+     heading's arithmetic was right; the command was measuring a different set.
+     Pin the wrapper you are actually counting.
+
+     Re-derive with:
+       grep -hoE 'HandleFunc\("(GET|POST|PATCH|DELETE) /api/[^"]*",\s*s\.requireHookToken' \
+         internal/api/*.go | wc -l
+     Separately, `grep -vc '^#' routes.golden` = 121 total routes, 24 under /api/. -->
      Re-derive with: grep -hoE 'HandleFunc\("(GET|POST|PATCH|DELETE) /api/[^"]*",\s*s\.require[A-Za-z]+' \
        internal/api/*.go | sort | uniq -c -->
 
