@@ -58,6 +58,7 @@ RUNNER_CODE = "\n".join(ln for ln in RUNNER_SRC.splitlines()
 # `test_the_plugin_is_loaded_by_flag_not_by_environment`.
 _PLUGIN_ENV_VAR = "PYTEST" + "_PLUGINS"
 _PLUGIN_FLAG = "-p testlib.nolaunch" + "_plugin"
+_NOGIT_FLAG = "-p testlib.nogit" + "_plugin"
 
 # A probe test that reaches a REAL host launcher by name. This is what a future
 # test in any target might innocently do; the point of the guard is that it
@@ -121,6 +122,11 @@ def test_the_single_pytest_invocation_loads_the_plugin():
     assert _PLUGIN_FLAG in invocations[0], (
         "the single pytest invocation no longer loads the no-real-launcher "
         f"plugin, so every target runs unprotected:\n  {invocations[0].strip()}")
+    assert _NOGIT_FLAG in invocations[0], (
+        "the git-isolation plugin (GUARD 9) was dropped from the same line — "
+        "GUARD 7's edit must not cost it; the complete plugin set is pinned "
+        "both ways in test_nogit_isolation.py:\n  "
+        f"{invocations[0].strip()}")
 
 
 def test_the_plugin_is_loaded_by_flag_not_by_environment():
