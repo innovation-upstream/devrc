@@ -70,6 +70,10 @@ pytestmark = pytest.mark.skipif(
 # it reads the real target out of lib/host-role.sh rather than hardcoding it, so
 # it keeps naming whatever the fallback actually is.
 SANDBOX_REFUSAL = "ship-test-sandbox: REFUSED"
+# 🔴 The refusal's own exit status, asserted end-to-end rather than folded into a
+# bare `rc != 0` — see test_the_sandbox_refuses_a_run_that_reaches_ssh. Picked to
+# collide with nothing in either rc ladder (ship.sh tops out at 20).
+SANDBOX_REFUSAL_RC = 97
 
 
 def _host_role_constant(name):
@@ -92,7 +96,7 @@ def _write_sandbox_bin(d):
             f'echo "  {why}." >&2\n'
             'echo "  The test suite must never invoke it. If a test needs a stub,'
             ' pass shims=[dir]." >&2\n'
-            "exit 97\n",
+            f"exit {SANDBOX_REFUSAL_RC}\n",
         )
     return d
 
@@ -2432,6 +2436,17 @@ def test_the_sandbox_refuses_a_run_that_reaches_ssh(repo):
         f"this sandbox exists to intercept has moved\n{out}"
     )
     assert rc != 0, f"a refused ssh produced a green run: rc={rc}\n{out}"
+    # 🔴 ...and the non-zero must be ATTRIBUTABLE TO THE REFUSAL. `rc != 0` alone
+    # is green for the wrong reason: measured 2026-08-21, a shim mutated to
+    # `exit 0` still left this test passing, because a silent-but-successful ssh
+    # produces no landed sha and ship exits 19 (agreement not compared) instead.
+    # Every assertion above held while the shim had stopped refusing. Pinning the
+    # shim's OWN status end-to-end is what makes it load-bearing.
+    assert f"converge exited {SANDBOX_REFUSAL_RC}" in out, (
+        f"the run did not fail with the refusing shim's own exit status "
+        f"({SANDBOX_REFUSAL_RC}); it died somewhere downstream, so this test "
+        f"would stay green with the refusal removed\n{out}"
+    )
     assert "converged + verified — 2 hosts" not in out, out
 
 
