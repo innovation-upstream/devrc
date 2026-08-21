@@ -47,7 +47,7 @@ could be examined — it is **not** "the service does not exist".
 Pass the script's output through, tightened, in this order. Do NOT re-run its
 steps by hand; if something is missing, raise the matching limit and re-run.
 
-- **Service** + one-line "what it is". 🔴 **When the `index:` block hit, its `## What it is` IS that line — use it, do not re-invent one.** Until 2026-08-21 no reader printed that section, so this bullet was asking for something the tool never handed over and the brief was reconstructed from paths; if the block shows the `(no ## What it is content …)` notice instead, say so and derive it live.
+- **Service** + one-line "what it is". 🔴 **When the `index:` block hit, its `## What it is` IS that line — use it, do not re-invent one.** Until 2026-08-21 no briefing path printed that section (not this block, not `--ref`, not the digest — only `--search`, which briefs nobody), so this bullet was asking for something the tool never handed over and the brief was reconstructed from paths. If the block shows the `(no parsable ## What it is — absent, empty, or the heading was renamed …)` notice instead, relay it **as written**: it says the PARSE found nothing, not that the entry is silent, and a renamed heading is a real cause — the answer may be on disk one rename away, so grep the entry before deriving it live.
 - **What it is / pointers / nuance** (`from index`) — the three sections the script's `index:` block surfaces, in that order. Omit if it missed, and when the line carries a `[scope via …]` marker say WHICH scope answered: that scope was not confirmed to own the service.
 - **Lives at** — repo + paths, namespace, owning kustomization.
 - **Config** — the load-bearing knobs (version, scale, resources, key values, routes, deps).

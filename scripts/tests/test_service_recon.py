@@ -105,6 +105,22 @@ def repo(tmp_path: Path) -> Path:
     return r
 
 
+#: 🔴 THREE PAIRWISE-DISTINCT LINES, AND THE LINE COUNT IS THE POINT. Until
+#: 2026-08-21 this fixture's `## What it is` was the single line
+#: "A synthetic entry.", and against a ONE-LINE body a first-line truncation is
+#: invisible: mutating `service_recon.render_brief` to
+#: `for ln in i.what.splitlines()[:1]` left the entire suite GREEN. No line is a
+#: prefix or a repeat of another, and none equals any constant these tests assert
+#: against (`SCOPE`, `SERVICE`, `OTHER`, `NAMESPACE`), so a render that drops or
+#: reorders lines cannot pass by coincidence.
+WHAT_LINES = (
+    "A synthetic ledger the fixture stands in for.",
+    "Fans work out to two downstream queues.",
+    "Retries stop after the fourth attempt.",
+)
+WHAT_BODY = "\n".join(WHAT_LINES)
+
+
 @pytest.fixture
 def store(tmp_path: Path) -> Path:
     """A synthetic index store with ONE entry, in the scope the repo derives to."""
@@ -118,7 +134,7 @@ sensitivity: public
 ---
 
 ## What it is
-A synthetic entry.
+{WHAT_BODY}
 
 ## Pointers
 - manage-* skill: manage-{SERVICE}
@@ -725,7 +741,13 @@ def _repo_carrying(tmp_path: Path, name: str, token: str, n: int) -> Path:
     return r
 
 
-WHAT_LINE = "the synthetic thing this fixture stands in for"
+#: Two distinct lines for the same reason `WHAT_LINES` has three: a ONE-line body
+#: cannot distinguish a full render from a first-line one. The `({service})` suffix
+#: lands on the LAST line, so a truncating render loses the service name too.
+WHAT_LINE = (
+    "the synthetic thing this fixture stands in for\n"
+    "and a second line no truncating render would reach"
+)
 
 
 def _entry(store: Path, scope: str, service: str, *, what: str | None = WHAT_LINE) -> None:
@@ -766,16 +788,43 @@ class TestTheIndexBlockSaysWhatTheThingIS:
     already identified the subsystem. A controlled A/B on 2026-08-20 found an
     agent briefed only on an `index:` block could not say what the service was,
     where it lived or what it owned — while `## What it is` sat on disk in 73 of
-    73 live entries, parsed by no reader on any path.
+    73 live entries, printed by no BRIEFING path (this block, `--ref`, the
+    digest). `subsystem_recall.search` always surfaced it, but only for an entry a
+    query matched, so it is not a path anyone gets briefed on.
     """
 
     def test_the_block_carries_what_it_is(self, store: Path, repo: Path) -> None:
         b = sr.recon(SERVICE, repos=[str(repo)], store_root=store)
         assert b.index.status == "hit"
-        assert b.index.what == "A synthetic entry."
+        assert b.index.what == WHAT_BODY
         text = sr.render_brief(b)
         assert "## What it is" in text
-        assert "A synthetic entry." in text
+        # The render indents each body line by two — assert the rendered shape,
+        # not the raw body, so this cannot pass on a coincidence of whitespace.
+        assert "\n".join(f"  {ln}" for ln in WHAT_LINES) in text
+
+    def test_the_block_prints_EVERY_line_not_just_the_first(
+        self, store: Path, repo: Path
+    ) -> None:
+        """🔴 A MUTATION SURVIVOR UNTIL THIS EXISTED. `subsystem_recall`'s side of
+        the same render is pinned by
+        `test_a_ref_lookup_prints_the_FULL_section_not_a_first_line`; this
+        renderer — the one `/analyze-service` actually briefs from — was not, and
+        `for ln in i.what.splitlines()[:1]` passed the whole suite because the
+        fixture body was one line long.
+
+        Live entries are not: median 3 lines, p90 8, max 12 across the store
+        measured 2026-08-20, so a first-line render silently drops most of the
+        answer. Each line is asserted individually AND the joined body is asserted
+        contiguous, so a mutant that keeps the lines but reorders or interleaves
+        them dies too.
+        """
+        text = sr.render_brief(sr.recon(SERVICE, repos=[str(repo)], store_root=store))
+        block = text[text.index("index: "):]
+        assert len(WHAT_LINES) >= 2, "a one-line body cannot see a first-line truncation"
+        for line in WHAT_LINES:
+            assert f"  {line}\n" in block, f"the render dropped: {line!r}"
+        assert "\n".join(f"  {ln}" for ln in WHAT_LINES) in block
 
     def test_what_it_is_is_rendered_FIRST_of_the_three(
         self, store: Path, repo: Path
@@ -803,6 +852,47 @@ class TestTheIndexBlockSaysWhatTheThingIS:
         # …and the rest of the block is unaffected — this is a section-level
         # degrade, not a failed read.
         assert f"manage-{SERVICE}" in text
+
+    @pytest.mark.parametrize(
+        "heading",
+        ["## What It Is", "## What it is:", "### What it is", "  ## What it is"],
+        ids=["case", "colon", "depth", "indent"],
+    )
+    def test_a_RENAMED_heading_gets_a_notice_about_the_PARSE_not_the_ENTRY(
+        self, tmp_path: Path, heading: str
+    ) -> None:
+        """🔴 THE NOTICE MAY ONLY CLAIM WHAT THE PARSER KNOWS.
+
+        A renamed heading parses to nothing, so this branch fires with the answer
+        sitting on disk one rename away — and `subsystem_touch.SHAPE_HEADINGS`
+        excludes `## What it is`, so `--validate` reports nothing either. The old
+        notice said "no `## What it is` content", which a reader takes as a fact
+        about the ENTRY. It is a fact about the PARSE, and the notice now names
+        the rename as a cause. Pinned as the WHOLE normalised sentence: a guard on
+        one word is walkable by rewording.
+        """
+        store = _empty_store(tmp_path)
+        (store / SCOPE).mkdir(parents=True)
+        _entry(store, SCOPE, SERVICE, what=None)
+        # The sentence IS on disk — under a heading the extractor does not match.
+        p = store / SCOPE / f"{SERVICE}.md"
+        marooned = "This entry does say what it is, under a renamed heading."
+        p.write_text(
+            p.read_text(encoding="utf-8").replace(
+                "## Pointers", f"{heading}\n{marooned}\n\n## Pointers", 1
+            ),
+            encoding="utf-8",
+        )
+        repo = _repo_carrying(tmp_path, SCOPE, SERVICE, 2)
+        text = sr.render_brief(sr.recon(SERVICE, repos=[str(repo)], store_root=store))
+        assert marooned not in text, "fixture is inert — the extractor matched the rename"
+        assert (
+            "  (no parsable `## What it is` — absent, empty, or the heading "
+            "was renamed; re-derive what it is live)"
+        ) in text
+        # 🔴 …and it does NOT assert a fact about the entry it cannot know.
+        assert "never says what" not in text
+        assert "no `## What it is` content" not in text
 
 
 class TestEveryScopeIsAsked:

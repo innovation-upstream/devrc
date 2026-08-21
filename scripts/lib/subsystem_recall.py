@@ -372,10 +372,12 @@ RECALL_LABEL = "from index"
 #
 #   * it is not one line — 73 of 73 entries carry it, median 3 lines / 297 chars,
 #     p90 8 lines, max 12;
-#   * NOTHING printed it. Not `--ref`, not the digest, not `service_recon`'s
-#     `index:` block. An agent briefed only on an entry could not say what the
-#     service WAS, where it lived or what it owned, because the one section that
-#     answers that was parsed by no reader on any path.
+#   * NO BRIEFING PATH printed it. Not `--ref`, not the digest, not
+#     `service_recon`'s `index:` block. An agent briefed only on an entry could
+#     not say what the service WAS, where it lived or what it owned, because the
+#     one section that answers that was parsed by none of the three. `--search`
+#     is the exception and always was — it surfaces every section — but it only
+#     reaches an entry a query MATCHED, so nobody is briefed through it.
 #
 # The dump worry was real but aimed at the wrong surface: the multiplier lives on
 # the INDEX ROWS (one per entry, 37 in the largest scope), and those are untouched
@@ -1938,9 +1940,20 @@ def render_text(report: RecallReport) -> str:
             # `missing_sections` because that field drives the index-row badge
             # and the caveat clause explaining it, which are per-entry costs
             # this decision deliberately leaves at zero.
+            #
+            # 🔴 IT CLAIMS A PARSE, NEVER A FACT ABOUT THE ENTRY. The notice used
+            # to read "this entry never says what the subsystem IS" — which the
+            # extractor cannot know. A RENAMED heading (`## What It Is`,
+            # `## What it is:`, `### What it is`, an indented one) parses to
+            # nothing and produced that same sentence while the answer sat on
+            # disk one rename away, and `subsystem_touch.SHAPE_HEADINGS`
+            # deliberately excludes this heading so `--validate` says nothing
+            # either. The sibling `🔴 NO <heading>` badge draws exactly this line
+            # ("0 BY PARSE FAILURE and not by measurement"); this notice now
+            # draws it too, and names the rename as a cause the reader can act on.
             out.append(
-                f"    (no `{WHAT_HEADING}` content — this entry never says what the "
-                f"subsystem IS; re-derive it live)"
+                f"    (no parsable `{WHAT_HEADING}` — absent, empty, or the heading was "
+                f"renamed, so this read cannot say what the subsystem IS; re-derive it live)"
             )
         if e.is_bare:
             # 🔴 Said, not left blank. An entry that exists with nothing under

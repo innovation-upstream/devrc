@@ -416,8 +416,11 @@ class IndexResult:
     """`## What it is` — the entry's own answer to "what IS this thing".
 
     🔴 FIRST IN THE BLOCK, AND IT IS THE FIELD THE BRIEF WAS MISSING. Until
-    2026-08-20 no reader on any path printed this section: a controlled A/B found
-    an agent briefed only on an `index:` block could not say what the service was,
+    2026-08-21 no BRIEFING path printed this section — not `subsystem_recall
+    --ref`, not its digest, not this `index:` block. (`subsystem_recall.search`
+    always surfaced it, but only for an entry a query happened to match, so it is
+    not a path anyone gets briefed on.) A controlled A/B on 2026-08-20 found an
+    agent briefed only on an `index:` block could not say what the service was,
     where it lived or what it owned, because `pointers` and `nuance` both assume
     the reader has already identified the thing. The content was on disk in 73 of
     73 entries the whole time.
@@ -1383,7 +1386,18 @@ def render_brief(b: Brief, *, file_limit: int = DEFAULT_FILE_LIMIT) -> str:
             # applies to its own bodies. Absent and present-but-empty fold
             # together: both render as nothing above, and either way the block
             # does not answer what the thing IS.
-            L.append(f"  (no `{WHAT_HEADING}` content — re-derive what it is live)")
+            #
+            # 🔴 AND IT CLAIMS A PARSE, NEVER A FACT ABOUT THE ENTRY — the same
+            # correction, in the same words, as the notice in
+            # `subsystem_recall.render_text`. "no `## What it is` content" reads
+            # as "the entry has none"; what this branch actually knows is that
+            # the extractor found none, and a RENAMED heading (`## What It Is`,
+            # `## What it is:`, `### What it is`, an indented one) reaches here
+            # with the answer sitting on disk. `subsystem_touch.SHAPE_HEADINGS`
+            # excludes this heading, so `--validate` will not flag the rename
+            # either — naming it here is the only signal the reader gets.
+            L.append(f"  (no parsable `{WHAT_HEADING}` — absent, empty, or the heading "
+                     f"was renamed; re-derive what it is live)")
         if not i.pointers and not i.nuance:
             L.append(f"  (entry exists but carries neither `{POINTERS_HEADING}` "
                      f"nor `{NUANCE_HEADING}`)")
