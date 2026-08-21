@@ -1173,3 +1173,75 @@ def test_the_hook_and_guard_core_agree_on_what_a_command_is():
     assert callable(getattr(guard_core, "commands", None))
     assert guard_core.commands("clawgatectl task create --body x")[0][:3] == [
         "clawgatectl", "task", "create"]
+
+
+# =========================================================================== #
+# 15. THE HELP EXEMPTION — a create-shaped argv that CANNOT create
+# =========================================================================== #
+# Found by live use, not by review: `clawgatectl task create --help` was DENIED
+# for naming no readable body. It creates nothing — cobra prints usage and exits
+# without calling the command — so the deny was a false positive, and the kind
+# that trains an operator to reach for the override reflexively. The exemption is
+# structural: these argvs cannot reach `POST /api/tasks` at all.
+def test_help_flag_on_a_create_is_allowed():
+    assert allowed("clawgatectl task create --help")
+
+
+def test_help_shorthand_on_a_create_is_allowed():
+    assert allowed("clawgatectl task create -h")
+
+
+def test_help_subcommand_form_is_allowed():
+    """`clawgatectl help task create` puts `task`+`create` adjacent in the operand
+    list, so the create detector matches it. It still creates nothing."""
+    assert allowed("clawgatectl help task create")
+
+
+def test_help_wins_even_next_to_a_body_with_no_criteria():
+    """cobra prints usage and exits regardless of the other flags, so a `--body`
+    riding along cannot be created either."""
+    assert allowed('clawgatectl task create --body "%s" --help' % NO_AC)
+
+
+def test_help_as_a_VALUE_does_not_exempt():
+    """🔴 The anti-walk case. `--token --help` makes `--help` the token's VALUE,
+    not a flag — if the scan missed that, the exemption would be reachable by any
+    create willing to spell one of its flag values `--help`."""
+    assert denied_missing('clawgatectl --token --help task create --body "%s"' % NO_AC)
+
+
+def test_help_in_the_BODY_does_not_exempt():
+    """The word inside the body text is not a flag."""
+    assert denied_missing('clawgatectl task create --body "please --help me"')
+
+
+def test_help_on_ONE_create_does_not_exempt_a_SECOND_create_on_the_line():
+    """🔴 The exemption is per-argv. A compound line must still be judged on the
+    create that really runs — this is the multi-create rule from section 10,
+    re-asserted against the new escape."""
+    assert denied_missing(
+        'clawgatectl task create --help; clawgatectl task create --body "%s"' % NO_AC)
+
+
+def test_help_does_not_exempt_a_curl_create():
+    """`--help` is not a curl flag that suppresses the request, so a curl create
+    carrying it still posts. The exemption must not generalise to curl."""
+    assert denied_missing(
+        "curl -X POST http://192.168.50.250:30302/api/tasks --help "
+        "-d '{\"body\":\"%s\"}'" % NO_AC)
+
+
+def test_help_exemption_unit_level():
+    """Driven directly, so the predicate is pinned independently of `evaluate`."""
+    assert guard.is_help_invocation(["clawgatectl", "task", "create", "--help"]) is True
+    assert guard.is_help_invocation(["clawgatectl", "task", "create", "-h"]) is True
+    assert guard.is_help_invocation(["clawgatectl", "help", "task", "create"]) is True
+    assert guard.is_help_invocation(["clawgatectl", "task", "create"]) is False
+    assert guard.is_help_invocation(
+        ["clawgatectl", "--token", "--help", "task", "create"]) is False
+    assert guard.is_help_invocation([]) is False
+
+
+def test_help_is_not_a_blanket_allow_for_the_word_anywhere():
+    """`help` as a NON-leading operand is a task title, not the subcommand."""
+    assert denied_missing('clawgatectl task create --title help --body "%s"' % NO_AC)

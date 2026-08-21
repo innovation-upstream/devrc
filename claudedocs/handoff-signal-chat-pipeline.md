@@ -39,51 +39,59 @@ device; messages land in Postgres `signal` schema + attachments in MinIO.
 
 ## State now
 
-- **Branches:** devrc `main`, homelab-infra `trunk`. Nothing of mine in flight; every PR
-  below is merged. The dirty files in either checkout belong to other sessions — do not
-  touch. Both repos moved a lot overnight from other work; my changes were re-verified
-  present **by content** (not ancestry — a squash merge never makes the branch head an
-  ancestor).
-- **Shipped and merged:** devrc #537 (outbound-reaction fix), #540 + #546 (liveness
-  heartbeat + the build-control pairing), #544 (the `main` gate flake), #528/#538/#548
-  (handoffs). homelab-infra `f4454452` (consumer 0.1.2 + emptyDir + heartbeat path +
-  probe, all in one commit). Both hosts converged via `ship.sh`.
-- **Deployed:** consumer **0.1.2**, digest `7ada2254…`. Image built from a PRISTINE
-  worktree at `origin/main` and verified by running the pushed digest, because
-  `build-push.sh` uses the repo root as its Docker context and the base clone carries
-  other sessions' WIP.
+🟢 **THE EFFORT IS CLOSED. Every claim in this doc is now verified, not merely deployed** —
+including the one that stayed open for five days.
 
-### 🔴 The 16-hour soak — the strongest evidence in this doc
+- **Branch/PR:** devrc `main`. Merged this session: **#573** (group mute list + the
+  `groupName` bug), **#606** (the mutation battery, kept in-repo), **#610** (this doc's
+  contamination warning). homelab-infra trunk **`abd062e9`** (consumer 0.1.3 digest bump).
+  Nothing in flight. The dirty files in either checkout belong to other sessions.
+- **Deployed:** consumer **0.1.3**, digest `d882a55f…`, built from a PRISTINE worktree at
+  `origin/main` (`build-push.sh` uses the repo root as its Docker context and the base
+  clone carries other sessions' WIP). Pod 11h, **0 restarts**, probes green,
+  `connected=True`.
+- **Both hosts converged** via `ship.sh` — workbench 488 managed links / laptop 449, 0
+  dangling on each.
 
-Measured 2026-08-19, ~16h after the 0.1.2 rollout:
+### 🔴 THE OUTBOUND-REACTION FIX IS VERIFIED LIVE — 2026-08-20
+
+The claim that survived six PRs, four audit rounds and 387 green tests is closed. Zach
+reacted from his phone and the frame went the whole way: phone →
+`syncMessage.sentMessage.reaction` → websocket → the sync branch #537 added →
+`signal.reactions`.
 
 | | |
 |---|---|
-| pod | 1/1 Running, **0 restarts**, 16h |
-| probe (`consumer.py health`) | `HEALTHY`, heartbeat 16.5s old, exit 0 |
-| heartbeat counters | `connected=True`, `stored=27` — advancing, not frozen |
-| messages / contacts / groups | 47 / 12 / 2 (were 25 / 5 / 1) |
-| attachments | **19**, across 9 messages (was 1) |
-| reactions | 7 (was 2) |
+| own reactions | **1 LIVE** (`id 17`) + 1 backfilled (`id 16`) |
+| ghost rows | **0** — the other half of the bug, and it did not recur |
+| heartbeat `stored` | **1** on the 0.1.3 pod — exactly the one frame |
 
-**Zero restarts over 16h is the finding.** The round-1 audit's sharpest question was
-whether the probe would report unhealthy for a consumer that is fine — a full disk, a
-clock step, scheduling jitter, an idle account — because a false restart loop is worse
-than the silence it replaced. Sixteen hours of real traffic with no restart is the answer
-that no unit test could give.
+**Three independent signals agreeing, none of them a bare count.** Row 17 has
+`message_id=NULL` and that is CORRECT, not a defect: the target message is from
+2026-08-14 20:58, the oldest stored message is 2026-08-18 18:04, so it predates the
+pipeline by 93 hours and there is nothing to resolve against. An unresolvable reaction is
+RETAINED, not dropped (🔧 #3) — the old code would not have retained it at all.
 
-- ✅ **The attachment / MinIO leg is verified AT SCALE, not by one sample.** All **19/19**
-  objects are present in MinIO with **byte sizes matching the Postgres rows**; 0 missing,
-  0 mismatched. Spread over 9 messages, so multi-attachment messages work too.
-- ✅ **Inbound reactions work** — 2 → 7 with no intervention.
-- 🔴 **The outbound-reaction fix (#537) is STILL UNVERIFIED on the live path.** As of
-  2026-08-20 no reaction has been sent *from the phone* since it shipped, so the fixed
-  branch has still never executed in production. The one own-reaction row in the table is
-  a hand-replayed BACKFILL (see the warning at the top). Deployed is not verified, and
-  days of unrelated green do not touch this claim.
-- **Ghost rows: 0** as of 2026-08-20 — the pre-fix row 3 was deleted after its reaction
-  was recovered from `raw_envelope`. No NEW ghost has appeared, which is supportive but
-  NOT proof, since no outbound reaction has occurred to exercise the path.
+### Live figures, 2026-08-21
+
+messages 49 · contacts 12 · groups 2 (**both now NAMED**) · reactions 17 · attachments 21
+· excluded_groups 1 · unresolved reactions 1 · ghost rows 0
+
+### Carried forward — evidence that predates this update and still stands
+
+Kept because it is MEASUREMENT, not status, and nothing since supersedes it:
+
+- **The 16-hour soak of the liveness probe (2026-08-19, on 0.1.2): 0 restarts.** The
+  round-1 audit's sharpest question was whether the probe would report unhealthy for a
+  consumer that is *fine* — a full disk, a clock step, scheduling jitter, an idle account
+  — because a false restart loop is worse than the silence it replaced. Sixteen hours of
+  real traffic with no restart is the answer no unit test could give. The 0.1.3 pod has
+  since run 11h at 0 restarts, which is consistent but is NOT a second soak.
+- **The attachment / MinIO leg is verified AT SCALE, not by one sample.** All **19/19**
+  objects present with **byte sizes matching the Postgres rows** — 0 missing, 0
+  mismatched — spread over 9 messages, so multi-attachment messages work too. Re-measured
+  at 21/21 on 2026-08-19 after further traffic.
+- **Inbound reactions work** — 2 → 7 with no intervention, and 17 as of today.
 
 ## Open investigations — live diagnosis state
 
@@ -149,6 +157,9 @@ that no unit test could give.
   every failure. Keep the bump on its own merits (two releases of protocol fixes) — do not
   record it as the fix.
 
+Nothing is mid-diagnosis. Every block previously in this section is resolved; what remains
+is enumerated work, not investigation, and lives under "Next steps".
+
 ## What changed on 2026-08-20
 
 - **Consumer 0.1.3 deployed** — digest `d882a55f…`, `homelab-infra` trunk `abd062e9`.
@@ -171,21 +182,20 @@ that no unit test could give.
 
 ## Next steps (ranked)
 
-1. 🔴 **React to any message from your phone.** Still the only unverified claim in this
-   whole effort, and now four days old. Use the CORRECTED check (`id > 16`) — see the
-   warning at the top of this doc.
-2. **The outbound-`editMessage` ghost — the SAME bug, still open.** Any unmodelled
+1. **The outbound-`editMessage` ghost — the SAME bug class, still open.** Any unmodelled
    `syncMessage.sentMessage` variant with `message: None` (nested `editMessage`,
    `sticker`, `payment`, `groupCallUpdate`) still falls through to `_base_message()` and
-   leaves a bodyless ghost row. This is the proof that this pipeline's own lesson —
-   *enumerate the other shapes in that wrapper* — is unfinished. **Add each new shape to
-   `mutation_battery.py` as you close it**, which is now a place that survives the session.
-3. **Close `approve_draft`'s read-then-write TOCTOU** — last of the family whose three
+   leaves a bodyless ghost row. The reaction case is now closed by live traffic, which is
+   the proof the *class* is real — and the proof this pipeline's own lesson
+   (*enumerate the other shapes in that wrapper*) is unfinished. 🔴 **Add each shape to
+   `scripts/signal/tests/mutation_battery.py` as you close it** — that file now survives
+   the session, which is the whole point of #606.
+2. **Close `approve_draft`'s read-then-write TOCTOU** — last of the family whose three
    siblings were fixed in #514 round 4.
-4. **Bump cadence for the signal-cli image.** Stable lags; tracking it ALONE re-breaks
-   linking, and re-linking means fighting the 120s window again.
-5. **A revert of #573 leaves `signal.excluded_groups` rows behind** and silently
-   un-filters every read, with no detector. Low, but nothing watches for it.
+3. **Bump cadence for the signal-cli image.** Stable lags; tracking it ALONE re-breaks
+   linking, and re-linking means fighting the 120-second window again.
+4. **A revert of #573 leaves `signal.excluded_groups` rows behind**, silently un-filtering
+   every read, with no detector. Low, but nothing watches for it.
 
 ## What #537 established, beyond the fix itself
 
@@ -333,6 +343,71 @@ fails forever while the FILE probe stays green — nothing restarts, nothing ale
 `bigint`). Recovery elsewhere: `DROP TABLE signal.consumer_health;` — it is a single
 disposable status row.
 
+- 🔴 **MERGING IS NOT DEPLOYING for anything on the INGEST path, and the two halves of one
+  PR can differ.** #573 shipped a read-side mute filter and a parse-side `groupName` fix.
+  The mute half went live **on merge**, because reads run from the operator's checkout.
+  The parse half changed **nothing** until the 0.1.3 rollout, because `parse_envelope`
+  runs only inside the pod — so a merged, tested, reviewed bug fix sat inert in
+  production. Ask which side of the pod boundary a change lands on before calling it
+  deployed.
+- 🔴 **`groupInfo.groupName`, never `groupInfo.name`.** `parse_envelope` read `name`;
+  real envelopes carry `groupName` — **34 of 34** stored group envelopes measured. Every
+  group had been stored with an empty name since day one, invisibly, because nothing ever
+  asserted on a group name and `conversations` just printed `?`. Found only because a
+  comment claimed "names are empty" and checking *why* was cheap. Both names have since
+  been backfilled from already-stored envelopes.
+- 🔴 **A COUNT could not distinguish stored from lost; it now cannot distinguish LIVE from
+  BACKFILLED.** Recovering the dropped reaction wrote a row whose reactor is the account —
+  exactly what the verification check counts — so a bare count returns 1 and prints
+  `FIX VERIFIED LIVE` for work done by hand. The discriminator is **`id > 16`**, and the
+  check prints `N live (+M backfilled)`. Same trap, one layer up: only identity
+  discriminates, never the count. Generalise it — **after any backfill, ask what your own
+  repair just made indistinguishable.**
+- 🔴 **The mute list is a QUERY-TIME filter that HIDES, never deletes** — chosen because
+  the pipeline is forward-only, so a message the consumer declines can never be
+  re-fetched. `unmute` restores a conversation exactly. It also does **not** stop ingest:
+  muted messages, reactions and attachment bytes are still stored. Raw `psql` bypasses the
+  filter entirely, which is why `SKILL.md`'s one-liners now **carry the predicate inline**
+  as `$MUTED` rather than warning about it one scroll above the query you copy.
+- 🔴 **Keyed on the BINARY group id, never the name** — `signal.groups.name` was empty for
+  every stored group, so a name-keyed filter would have matched nothing while looking like
+  it worked. And a mute must be settable before a group has ever been seen.
+- 🔴 **A guard can be SPELLED rather than STRUCTURAL, and the fix round reproduces it.**
+  #606's audit walked three of the runner's own safety guards — each was a substring check
+  over `inspect.getsource`, and each passed against a runner whose behaviour had been
+  removed while the words stayed (`if dirty:` → `if False:`, `="1"` → `="0"`,
+  `elif m.killer in failures or True:`). Then **my first replacement did it again**: a
+  SIGTERM guard asserting `"SIGTERM" in getsource(main)` passed with the handler deleted,
+  because the word survived in the *comment explaining it*. Caught only by running the
+  battery against the battery. Guards there now read behaviour: a throwaway git repo, an
+  injected `subprocess.run`, a pure `_verdict()`, and the process's real signal
+  disposition.
+- 🔴 **A guard that FIRES on an unrelated spelling is the same defect mirrored.**
+  `test_no_stale_event_stream_WORDING` banned `SSE` by substring — and **`PASSED` contains
+  SSE**, so an ordinary sentence about a test passing was reported as stale transport
+  wording. Now `\bSSE\b` with a negative control (PASSED, ASSESS, GLASSES). The pressure a
+  false positive creates is to reword the innocent line, which leaves the guard wrong and
+  teaches everyone to route around it.
+- 🔴 **A PUBLIC repo has no gate on `.py`.** A real Signal group id, copied out of the
+  live API while checking what the field looked like, was committed as a test fixture. All
+  four content gates (`test_no_captured_text`, `test_no_captured_markup`, the IP and
+  hostname ones) read JSON/JSONL/HTML/TXT and **not** `.py` — nothing would ever have
+  caught it. Caught by the audit; branch history was rewritten so the literal is in no
+  reachable commit. **Generate fixtures; never paste a response.**
+- 🔴 **`git status` read for its STDOUT and not its exit code fails OPEN.** Both checks in
+  the battery runner did this, so any git failure produced `""` — indistinguishable from a
+  clean tree. Measured with git broken: it did not refuse, mutated a module in a tree
+  holding uncommitted work, and printed `tree restored: clean`. Real triggers:
+  `safe.directory`, a concurrent `index.lock`, a `cp -a` of a worktree.
+- **`finally` does not cover SIGTERM.** Measured: `timeout -s TERM` left a mutated module
+  behind; `timeout -s INT` restored cleanly. In a shared checkout that hands the next
+  session a modified production file.
+- **The drift ceiling is `floor + max(60, floor/4)`,** and 66 new tests tripped it. The
+  gate PRINTS the replacement (`"scripts/signal/tests|553"`) — copy it, never compute it.
+- **`gh pr merge` can print nothing and still succeed.** Verify a squash **by content**
+  (`git cat-file -e origin/main:<path>` plus a grep of the change), never by ancestry — a
+  squash never makes the branch head an ancestor.
+
 ## How to verify
 
 ```bash
@@ -341,33 +416,29 @@ CP=$(kubectl -n signal get pod -l app=signal-consumer -o jsonpath='{.items[0].me
 
 # 1. Liveness — the probe exactly as k8s runs it. Exit 0 = healthy.
 kubectl -n signal exec $CP -- python3 /app/scripts/signal/consumer.py health
-kubectl -n signal exec $CP -- python3 /app/scripts/signal/consumer.py health --from-db
 kubectl -n signal get pods -l app=signal-consumer     # RESTARTS must stay 0
 
-# 2. 🔴 THE OUTSTANDING CHECK — react to a message FROM THE PHONE first, then:
-#    A COUNT CANNOT ANSWER THIS. Other people's reactions on the same target are
-#    already in the table; only the REACTOR IDENTITY separates stored from lost.
+# 2. The closed claim, and the two counts that must never be conflated.
+#    id>16 is LIVE; id<=16 is the 2026-08-20 backfill. Ghost rows are the OTHER
+#    half of the same bug — storing the reaction is not enough on its own.
 kubectl -n signal exec $CP -- python3 -c "
-import os,json,psycopg2
+import os,psycopg2
 c=psycopg2.connect(os.environ['SIGNAL_PG_DSN']); cur=c.cursor()
-cur.execute('select raw_envelope from signal.messages where is_outbound order by id desc limit 1')
-own=json.loads(cur.fetchone()[0]).get('sourceUuid') if 0 else None
-cur.execute('select raw_envelope from signal.messages where is_outbound order by id desc limit 1')
-r=cur.fetchone()[0]; d=json.loads(r) if isinstance(r,str) else r
-cur.execute('select id from signal.contacts where signal_uuid=%s',(d.get('sourceUuid'),))
-o=cur.fetchone()
-# 🔴 `id > 16` EXCLUDES THE BACKFILL. Row 16 was replayed by hand out of the
-#    ghost row's raw_envelope on 2026-08-20; a bare count returns 1 for it and
-#    would report a fix that has still never executed on the live path.
-cur.execute('select count(*) from signal.reactions where contact_id=%s and id>16',
-            (o[0] if o else -1,))
-n=cur.fetchone()[0]
-cur.execute('select count(*) from signal.reactions where contact_id=%s',(o[0] if o else -1,))
-total=cur.fetchone()[0]
-print('OWN reactions: %d live (+%d backfilled) -> %s'
-      % (n, total-n, 'FIX VERIFIED LIVE' if n else 'NOT YET'))"
+def q(s):
+    cur.execute(s); return cur.fetchone()[0]
+print('OWN reactions: %d LIVE (+%d backfilled)'
+      % (q('select count(*) from signal.reactions where contact_id=5 and id>16'),
+         q('select count(*) from signal.reactions where contact_id=5 and id<=16')))
+print('ghost rows (must be 0):', q('''select count(*) from signal.messages m
+  where m.is_outbound and m.body is null
+  and not exists (select 1 from signal.attachments a where a.message_id=m.id)'''))
+print('groups carrying a name:', q(\"select count(*) from signal.groups where name <> ''\"))"
 
-# 3. Attachment integrity — every row's object must exist AND match its size.
+# 3. The mute list, and that it hides without deleting.
+kubectl -n signal exec $CP -- python3 /app/scripts/signal/consumer.py muted
+python3 $DEVRC/scripts/signal/consumer.py conversations --limit 10   # muted group absent
+
+# 4. Attachment integrity — every row's object present AND size-matching.
 kubectl -n signal exec $CP -- python3 -c "
 import os,sys,psycopg2; sys.path.insert(0,'/app/scripts/signal')
 import _minio
@@ -379,19 +450,15 @@ with _minio.MinioSignal() as m:
         try: ok += 1 if m.client.stat_object(b,k).size==sz else 0
         except Exception: pass
 print('objects present AND size-matching:', ok, '/', len(rows))"
-
-# 4. Ghost rows — bodyless outbound with no attachment. Expect 1 (the pre-fix row).
-#    Any INCREASE means the reaction fix regressed.
-kubectl -n signal exec $CP -- python3 -c "
-import os,psycopg2
-c=psycopg2.connect(os.environ['SIGNAL_PG_DSN']); cur=c.cursor()
-cur.execute('''select count(*) from signal.messages m where m.is_outbound and m.body is null
- and not exists (select 1 from signal.attachments a where a.message_id=m.id)''')
-print('ghost rows:', cur.fetchone()[0])"
 ```
 
 ```bash
-# devrc gate — AUTHORITATIVE, and read the CONTENT not the exit code.
-cd ~/workspace/devrc && nix build .#checks.x86_64-linux.pytests --no-link; echo "EXIT: $?"
-nix log /nix/store/<drv> | grep -E "^  FAIL|TOTAL|^RESULT"
+# The mutation battery — it REFUSES a dirty tree, so run it in a clean worktree.
+# 20/20 KILLED BY THEIR NAMED TEST is the pass; anything else is a finding.
+python3 $DEVRC/scripts/signal/tests/mutation_battery.py --list     # the ledger
+python3 $DEVRC/scripts/signal/tests/mutation_battery.py            # run it
+
+# devrc gate — AUTHORITATIVE. Read the CONTENT, never the exit code alone.
+nix build .#checks.x86_64-linux.pytests --no-link; echo "EXIT: $?"
+nix log /nix/store/<drv> | grep -E "^  (PASS|FAIL)  scripts/signal|TOTAL|^RESULT"
 ```

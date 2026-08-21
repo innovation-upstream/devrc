@@ -210,7 +210,15 @@ UNRECONCILED=()  # sources that did NOT answer — an empty DRIFT means less whe
 git_pr_block(){
   echo "GIT/PR"
   local d="$REPO"
-  if [ ! -d "$d/.git" ]; then echo "  (not a git repo: $d)"; return; fi
+  # 🔴 `-e`, NOT `-d`. IN A GIT WORKTREE `.git` IS A FILE holding `gitdir: …`,
+  # so the `-d` test this replaces was false in every worktree — and this whole
+  # block returned "(not a git repo)" having reconciled NO PR and NO branch.
+  # MEASURED 2026-08-21 by running this script inside
+  # /home/zach/workspace/devrc-clawgate-task (a worktree of devrc): the digest
+  # printed exactly that line. Pre-existing, and pointed the wrong way: CLAUDE.md
+  # mandates a worktree for commit-bound work, so the ONE workflow the repo tells
+  # everyone to use was the one where /resume silently checked nothing.
+  if [ ! -e "$d/.git" ]; then echo "  (not a git repo: $d)"; return; fi
 
   # working state (same shape as standup.sh _repo_state)
   local br ab behind ahead dirty cl age subj
@@ -483,14 +491,49 @@ clawgate_block(){
     UNRECONCILED+=("clawgate's answer for task #$id carried no readable status — UNKNOWN, not fine")
     return
   fi
+  # 🔴 A STATUS OUTSIDE THE VOCABULARY IS A GAP, NOT A QUIET PASS. clawgate_drift_lines
+  # decides on `complete`/`ready_for_review` and is silent otherwise, so a FIFTH
+  # status would render exactly like a healthy one — and clawgate's own
+  # taskstatus.go records an incident where adding a constant left a suite green.
+  # The reading continues (the comment count is still worth having) but the
+  # digest must never call an unknown state "no drift".
+  if ! clawgate_known_status "$status"; then
+    UNRECONCILED+=("clawgate task #$id has status '$status', which this reconciler does not know (it knows: $CLAWGATE_TASK_STATUSES) — whether that means drift is UNKNOWN")
+  fi
 
-  # The doc's mtime is the "when this was written" clock. It is the doc's own
-  # last write, so a doc UPDATED after a comment correctly stops counting it.
-  local mt counts newer unreadable total
-  mt=$(stat -c %Y "$HANDOFF" 2>/dev/null)
+  # 🔴 WHICH CLOCK "WHEN THE DOC WAS WRITTEN" MEANS, and mtime is the wrong
+  # answer in this repo's own standard workflow. `git worktree add` / `git clone`
+  # stamp every checked-out file at checkout time, so in a FRESH worktree — which
+  # CLAUDE.md mandates for commit-bound work — every comment predates the doc and
+  # the count is a silent zero. The doc's last COMMIT date is content-derived and
+  # survives a checkout, so it is preferred; mtime is the fallback and says so
+  # with a `!` gap naming the clock it used.
+  #
+  # ⚠ A tracked doc edited but not yet committed reads OLDER than reality on the
+  # git clock, so comments between the commit and the edit are counted as new.
+  # That over-reports, which is the direction this module errs in everywhere
+  # else: a spurious "read these comments" costs a glance, a missed one costs the
+  # thing the reconciler exists to catch.
+  #
+  # 🔴 NO `-d "$REPO/.git"` PRECONDITION — in a WORKTREE `.git` is a FILE, so
+  # that test is false in exactly the checkout this fix exists for, and the
+  # clock would fall straight back to the mtime a checkout just reset. Ask git
+  # instead and read the answer: an empty result means "no commit for this
+  # path", whatever the reason.
+  local mt clock counts newer unreadable total
+  clock=""
+  mt=$(git -C "$REPO" log -1 --format=%ct -- "$HANDOFF" 2>/dev/null)
+  [ -n "$mt" ] && clock="last commit"
+  if [ -z "$clock" ]; then
+    mt=$(stat -c %Y "$HANDOFF" 2>/dev/null)
+    clock="file mtime"
+    if [ -n "$mt" ]; then
+      UNRECONCILED+=("the handoff doc has no commit date, so comments were counted against its FILE MTIME — a checkout, copy or rsync resets that, and would make every comment read as older than the doc")
+    fi
+  fi
   if [ -z "$mt" ]; then
     printf '  task #%s  status=%s\n' "$id" "$status"
-    UNRECONCILED+=("could not read the handoff doc's mtime — comments newer than it were NOT counted for clawgate task #$id")
+    UNRECONCILED+=("could not read any date for the handoff doc — comments newer than it were NOT counted for clawgate task #$id")
   else
     counts=$(clawgate_new_comments "$json" "$mt")
     read -r newer unreadable total <<<"$counts"
@@ -502,8 +545,10 @@ clawgate_block(){
       UNRECONCILED+=("clawgate's answer for task #$id carried no comments array — comments newer than the doc were NOT counted")
       newer=0
     else
-      printf '  task #%s  status=%s  comments=%s (%s newer than the doc)\n' \
-        "$id" "$status" "$total" "$newer"
+      # The clock is NAMED in the line, not just in a gap: "0 newer" means
+      # something different depending on which date it was measured against.
+      printf '  task #%s  status=%s  comments=%s (%s newer than the doc, by %s)\n' \
+        "$id" "$status" "$total" "$newer" "$clock"
       if [ "${unreadable:-0}" -gt 0 ]; then
         UNRECONCILED+=("$unreadable comment(s) on clawgate task #$id carry an unparseable timestamp — the '$newer newer than the doc' count is a FLOOR")
       fi

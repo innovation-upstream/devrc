@@ -725,8 +725,16 @@ def _repo_carrying(tmp_path: Path, name: str, token: str, n: int) -> Path:
     return r
 
 
-def _entry(store: Path, scope: str, service: str) -> None:
-    """One synthetic, PUBLIC-marked entry. Nothing here comes from a real store."""
+WHAT_LINE = "the synthetic thing this fixture stands in for"
+
+
+def _entry(store: Path, scope: str, service: str, *, what: str | None = WHAT_LINE) -> None:
+    """One synthetic, PUBLIC-marked entry. Nothing here comes from a real store.
+
+    `what=None` omits `## What it is` entirely — the degrade case the `index:`
+    block has to render without a stray heading.
+    """
+    what_block = f"## What it is\n{what} ({service})\n\n" if what is not None else ""
     _write(store / scope / f"{service}.md", f"""\
 ---
 service: {service}
@@ -734,7 +742,7 @@ scope: {scope}
 sensitivity: public
 ---
 
-## Pointers
+{what_block}## Pointers
 - manage-* skill: manage-{service}
 
 ## Nuance / work-history
@@ -750,6 +758,51 @@ def _empty_store(tmp_path: Path, name: str = "two-scope-store") -> Path:
 
 def _index_line(text: str) -> str:
     return next(ln for ln in text.splitlines() if ln.startswith("index: "))
+
+
+class TestTheIndexBlockSaysWhatTheThingIS:
+    """🔴 THE MEASURED DEFECT. `service_recon` rendered `## Pointers` and
+    `## Nuance / work-history` and NOTHING else, and both assume the reader has
+    already identified the subsystem. A controlled A/B on 2026-08-20 found an
+    agent briefed only on an `index:` block could not say what the service was,
+    where it lived or what it owned — while `## What it is` sat on disk in 73 of
+    73 live entries, parsed by no reader on any path.
+    """
+
+    def test_the_block_carries_what_it_is(self, store: Path, repo: Path) -> None:
+        b = sr.recon(SERVICE, repos=[str(repo)], store_root=store)
+        assert b.index.status == "hit"
+        assert b.index.what == "A synthetic entry."
+        text = sr.render_brief(b)
+        assert "## What it is" in text
+        assert "A synthetic entry." in text
+
+    def test_what_it_is_is_rendered_FIRST_of_the_three(
+        self, store: Path, repo: Path
+    ) -> None:
+        """It is the orienting sentence — the other two assume it."""
+        text = sr.render_brief(sr.recon(SERVICE, repos=[str(repo)], store_root=store))
+        block = text[text.index("index: "):]
+        assert block.index("## What it is") < block.index("## Pointers")
+        assert block.index("## Pointers") < block.index("## Nuance / work-history")
+
+    def test_an_entry_with_NO_what_it_is_degrades_cleanly_and_SAYS_so(
+        self, tmp_path: Path
+    ) -> None:
+        """No crash, no stray heading, and not silent either."""
+        store = _empty_store(tmp_path)
+        (store / SCOPE).mkdir(parents=True)
+        _entry(store, SCOPE, SERVICE, what=None)
+        repo = _repo_carrying(tmp_path, SCOPE, SERVICE, 2)
+        b = sr.recon(SERVICE, repos=[str(repo)], store_root=store)
+        assert b.index.status == "hit"
+        assert b.index.what == ""
+        text = sr.render_brief(b)
+        assert "  ## What it is\n" not in text
+        assert "re-derive what it is live" in text
+        # …and the rest of the block is unaffected — this is a section-level
+        # degrade, not a failed read.
+        assert f"manage-{SERVICE}" in text
 
 
 class TestEveryScopeIsAsked:

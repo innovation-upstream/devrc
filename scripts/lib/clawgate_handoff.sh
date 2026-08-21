@@ -30,8 +30,10 @@
 #
 # 🔴 THE TOKEN IS NEVER PUT IN ARGV. `/proc/<pid>/cmdline` is world-readable,
 #    which is why clawgatectl refuses a token positional too; `resolve` writes
-#    it into a 0600 curl config file and deletes it. It is never echoed, never
-#    interpolated into a URL, and never named in an error message.
+#    it into a 0600 curl config file and unlinks it under a trap. THIS CODE
+#    never echoes it, never interpolates it into a URL and never names it in an
+#    error message — a claim about this file, NOT about the process: `bash -x`,
+#    a `set -x` inherited from a caller, or a core dump would still show it.
 #
 # Usage (as a CLI):
 #   clawgate_handoff.sh resolve            — which task(s) does THIS session own?
@@ -40,13 +42,23 @@
 # Exit codes for `resolve`:
 #   0  exactly one task resolved (the id is on stdout, ready to record)
 #   3  no session id — nothing was asked
-#   4  clawgate did NOT answer (no token, unreachable, non-200, unparseable)
+#   4  clawgate did NOT answer (no token, a missing tool, unreachable, non-200,
+#      no `tasks` array, or a row carrying no usable id)
 #   5  the board answered and resolved NOTHING — see the caveat printed with it
 #   6  several tasks resolved — ASK; this command will not pick one
 # For `field`:
 #   0  a readable id is on stdout
 #   1  no clawgate-task: field at all
-#   2  the field is there and UNREADABLE (a value that is not a task id)
+#   2  the field is there and UNREADABLE — a value that is not a task id, or a
+#      front-matter block that is never closed
+#  64  usage error (no verb, unknown verb, no path) — about the COMMAND
+#  66  the doc could not be read — also about the command, NOT about any field
+# Any other code means this tool did not run.
+#
+# ⚠ SOURCING THIS FILE SETS `-u` AND `-o pipefail` IN THE CALLER. Both consumers
+# already set exactly that (`resume-state.sh` line 1 of its body, and this file's
+# own CLI), so nothing changes for them — but a future sourcer inherits it
+# silently, which is worth knowing before adding a third.
 set -uo pipefail
 
 #: Fallback base URL, matching scripts/lib/clawgate_tasks.py's DEFAULT_API_URL.
@@ -59,13 +71,35 @@ CLAWGATE_ENV_REL=".claude/clawgate.env"
 #: The front-matter key. One spelling, used by the reader and the writer.
 CLAWGATE_FIELD_KEY="clawgate-task"
 
+#: 🔴 THE CLOSED STATUS VOCABULARY, and it is closed on purpose. `clawgate_drift_lines`
+#: below decides on `complete` / `ready_for_review` and stays silent otherwise —
+#: which means a status NOBODY HERE HAS HEARD OF renders exactly like a healthy
+#: one. clawgate's own `taskstatus.go` header records an incident where adding a
+#: constant left a whole suite green, so the caller checks membership HERE and
+#: emits a `!` gap for anything outside it rather than letting an unknown state
+#: read as "no drift". Space-separated for `case` matching in `clawgate_known_status`.
+CLAWGATE_TASK_STATUSES="open in_progress ready_for_review complete"
+
+# `clawgate_known_status <status>` — is this one of the four we can reason about?
+clawgate_known_status(){
+  local s
+  for s in $CLAWGATE_TASK_STATUSES; do
+    [ "$s" = "${1:-}" ] && return 0
+  done
+  return 1
+}
+
 
 # --------------------------------------------------------------------------- #
 # PURE: the front-matter field
 # --------------------------------------------------------------------------- #
 
 # `clawgate_task_field_raw <text>` — print the RAW value recorded under the
-# front-matter key; exit 0 if the KEY is present, 1 if it is not.
+# front-matter key. THREE outcomes, not two:
+#
+#   0  the key is present in a properly CLOSED front-matter block (value on stdout)
+#   1  no front-matter key at all
+#   2  the key is there but the BLOCK IS MALFORMED — never closed
 #
 # 🔴 The key/value distinction is the whole point of this function existing.
 # "is a field already there?" (the writer's question, so it does not double-add)
@@ -73,17 +107,28 @@ CLAWGATE_FIELD_KEY="clawgate-task"
 # `clawgate-task: TBD`, and collapsing them means /handoff appends a second
 # field beside an unreadable one.
 #
-# STRICT in three ways, each for a reason:
+# 🔴 EXIT 2 EXISTS BECAUSE THIS READER AND `handoff_doc.py`'s MERGER MUST AGREE
+# ON WHAT A BLOCK *IS*, and an earlier revision did not. The python side's
+# `_FRONT_MATTER` requires a closing `---`; this side used to return the value
+# the moment it saw the key. So an unterminated block — an ordinary LLM writing
+# slip — made the shell print `193` while `merge` treated those lines as body
+# and DROPPED them: the exact silent data loss this whole change exists to fix,
+# reintroduced at the seam. Termination is now required on BOTH sides (relaxing
+# python instead would let a stray `---` on line 1 swallow an entire document as
+# front matter). Exit 2 keeps the failure LOUD: the caller reports an unreadable
+# field, i.e. a `!` gap, rather than "this doc names no task".
+#
+# STRICT in three more ways, each for a reason:
 #   * The front matter must START THE FILE — line 1 is exactly `---`. A `---`
 #     later in a markdown doc is a horizontal rule or a setext underline, and
 #     letting one open a front-matter block means arbitrary body prose can mint
 #     a task id.
 #   * The block ends at the first closing `---`; nothing after it is read.
-#   * The FIRST occurrence of the key wins and the scan stops. A duplicated key
-#     is malformed YAML, and picking the last one silently would make which
-#     task you reconcile depend on append order.
+#   * The FIRST occurrence of the key wins. A duplicated key is malformed YAML,
+#     and picking the last one silently would make which task you reconcile
+#     depend on append order.
 clawgate_task_field_raw(){
-  local line n=0 v
+  local line n=0 v found=0
   while IFS= read -r line; do
     n=$((n+1))
     line=${line%$'\r'}                       # tolerate CRLF
@@ -91,7 +136,12 @@ clawgate_task_field_raw(){
       [ "$line" = "---" ] || return 1
       continue
     fi
-    [ "$line" = "---" ] && return 1          # closing delimiter: key absent
+    if [ "$line" = "---" ]; then             # the block CLOSES here
+      [ "$found" -eq 1 ] || return 1         # …and carried no key
+      printf '%s\n' "$v"
+      return 0
+    fi
+    [ "$found" -eq 1 ] && continue           # first key wins; keep scanning for `---`
     case "$line" in
       "$CLAWGATE_FIELD_KEY":*) ;;
       *) continue ;;
@@ -101,9 +151,10 @@ clawgate_task_field_raw(){
     v="${v%"${v##*[![:space:]]}"}"           # rtrim
     v=${v#\"}; v=${v%\"}                     # one layer of quotes, either kind
     v=${v#\'}; v=${v%\'}
-    printf '%s\n' "$v"
-    return 0
+    found=1
   done <<<"$1"
+  # EOF with no closing delimiter.
+  [ "$found" -eq 1 ] && return 2
   return 1
 }
 
@@ -115,7 +166,7 @@ clawgate_task_field_raw(){
 # "no field" from "unreadable field" with `clawgate_field_present`.
 clawgate_task_field(){
   local v
-  v=$(clawgate_task_field_raw "$1") || return 1
+  v=$(clawgate_task_field_raw "$1") || return 1   # 1 = absent, 2 = unterminated
   case "$v" in
     ''|*[!0-9]*) return 1 ;;
     *) printf '%s\n' "$v"; return 0 ;;
@@ -123,7 +174,13 @@ clawgate_task_field(){
 }
 
 # `clawgate_field_present <text>` — is the KEY there at all, readable or not?
-clawgate_field_present(){ clawgate_task_field_raw "$1" >/dev/null; }
+# TRUE for an unterminated block too (exit 2 above): the doc tried to name a
+# task, so the honest report is "unreadable field", never "no field".
+clawgate_field_present(){
+  local rc
+  clawgate_task_field_raw "$1" >/dev/null; rc=$?
+  [ "$rc" -eq 0 ] || [ "$rc" -eq 2 ]
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -182,8 +239,16 @@ clawgate_new_comments(){
 # resume-state.sh). A handoff does not routinely name a completed task.
 #
 # `open` and `in_progress` produce nothing: they agree with the doc's premise.
-# An UNKNOWN status produces nothing either — it is the caller's gap to report,
-# never a finding.
+#
+# 🔴 AN UNKNOWN STATUS ALSO PRODUCES NOTHING HERE, AND THAT SILENCE IS ONLY SAFE
+# BECAUSE THE CALLER GAPS ON IT FIRST. Inventing a finding from a state we
+# cannot reason about would be fabrication; reporting nothing at all would let a
+# fifth status render as a clean bill of health. So membership is checked with
+# `clawgate_known_status` BEFORE this is called (see resume-state.sh's
+# clawgate_block), and this function is never the thing standing between an
+# unknown state and a reassuring digest. An earlier revision claimed the caller
+# did that while it only gapped on an EMPTY status — the comment was right and
+# the code was not.
 clawgate_drift_lines(){
   local id="$1" status="${2:-}" newer="${3:-0}"
   case "$status" in
@@ -269,49 +334,91 @@ clawgate_resolve(){
     return 4
   fi
 
-  if ! command -v curl >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
-    echo "clawgate: DID NOT ANSWER — curl or jq is not on PATH, so the board was never asked. UNKNOWN, not empty."
-    return 4
-  fi
+  # EVERY external command this function runs, checked up front. `grep` used to
+  # be missing from this list while the count below used it, so a host without
+  # grep turned a real resolution into "NOTHING RESOLVED" (exit 5) — a tool
+  # absence rendering as a fact about the board. The count is jq's now, and the
+  # list is the whole set rather than the two anybody remembered.
+  local need
+  for need in curl jq mktemp; do
+    if ! command -v "$need" >/dev/null 2>&1; then
+      echo "clawgate: DID NOT ANSWER — \`$need\` is not on PATH, so the board was never asked. UNKNOWN, not empty."
+      return 4
+    fi
+  done
 
   local cfg body code rc
   cfg=$(mktemp) || { echo "clawgate: DID NOT ANSWER — could not create a temp file."; return 4; }
   body=$(mktemp) || { rm -f "$cfg"; echo "clawgate: DID NOT ANSWER — could not create a temp file."; return 4; }
+  # 🔴 A TRAP, not just straight-line cleanup: the file about to be written holds
+  # a live bearer token, and `^C` between `mktemp` and the `rm` would leave it in
+  # TMPDIR indefinitely. Every `return` below still unlinks explicitly and then
+  # CLEARS the trap — this function is sourced as well as run as a CLI, and a
+  # sourced caller must not inherit an EXIT trap naming two locals.
+  trap 'rm -f "$cfg" "$body"' EXIT INT TERM
   chmod 600 "$cfg" 2>/dev/null
-  # 🔴 The ONLY place the token is written, and it is unlinked below on every
-  # path. Not `-H "Authorization: …"`: that puts it in argv.
-  printf 'header = "Authorization: Bearer %s"\n' "$tok" > "$cfg"
+  # 🔴 The ONLY place the token is written. Not `-H "Authorization: …"`: that
+  # puts it in argv, which /proc makes world-readable.
+  #
+  # 🔴 ESCAPED, because curl's config parser processes backslash escapes inside a
+  # DOUBLE-QUOTED value: a token containing `"` or `\` would otherwise be sent
+  # mangled (or truncate the header), and the failure would arrive as a 401 that
+  # reads like a wrong token rather than a quoting bug.
+  local esc="${tok//\\/\\\\}"
+  esc="${esc//\"/\\\"}"
+  printf 'header = "Authorization: Bearer %s"\n' "$esc" > "$cfg"
   code=$(curl -sS --max-time 10 --config "$cfg" -o "$body" -w '%{http_code}' \
          "$base/api/sessions/$sid/tasks" 2>/dev/null)
   rc=$?
   rm -f "$cfg"
 
   if [ "$rc" -ne 0 ]; then
-    rm -f "$body"
+    rm -f "$body"; trap - EXIT INT TERM
     echo "clawgate: DID NOT ANSWER (curl exit $rc — unreachable, TLS, or timed out). UNKNOWN, not empty."
     return 4
   fi
   if [ "$code" != "200" ]; then
-    rm -f "$body"
+    rm -f "$body"; trap - EXIT INT TERM
     echo "clawgate: DID NOT ANSWER (HTTP $code). UNKNOWN, not empty."
     return 4
   fi
 
-  local rows
-  rows=$(jq -r 'if (.tasks | type) != "array" then empty
-                else .tasks[]? | "#\(.id) status=\(.status // "?") \(.title // "")" end' \
-         < "$body" 2>/dev/null)
-  local shape
+  # 🔴 COUNTED BY jq, NOT BY LINES. A task TITLE may contain a newline — the
+  # server trims and rune-caps titles but does not strip interior newlines — so
+  # counting rendered lines reported "2 tasks resolved — ASK which one" for a
+  # single task. Fails safe, but the verdict was wrong and the writer would have
+  # gone and asked about a task that does not exist.
+  #
+  # `n_id` counts rows carrying a USABLE id. A row without one used to reach the
+  # last line's `sed`, which matched zero digits and told the writer to record
+  # `clawgate-task:` with NO VALUE — which the reader then classifies as
+  # present-and-unreadable, i.e. a permanent `!` gap on every future /resume of
+  # that doc. Unreachable from today's server; free to refuse.
+  local shape n n_id rows ids
   shape=$(jq -r '(.tasks | type)' < "$body" 2>/dev/null)
-  rm -f "$body"
   if [ "$shape" != "array" ]; then
+    rm -f "$body"; trap - EXIT INT TERM
     echo "clawgate: DID NOT ANSWER USABLY — the 200 carried no \`tasks\` array. UNKNOWN, not empty."
     return 4
   fi
+  n=$(jq -r '.tasks | length' < "$body" 2>/dev/null)
+  # jq counts the usable ids too — `grep -c` would be a fourth external command
+  # deciding a verdict about the board, which is the class of bug finding 9 was.
+  n_id=$(jq -r '[ .tasks[] | .id
+                  | select((type == "number" and . == floor and . >= 0)
+                           or (type == "string" and test("^[0-9]+$"))) ]
+                | length' < "$body" 2>/dev/null)
+  ids=$(jq -r '[ .tasks[] | .id
+                 | select((type == "number" and . == floor and . >= 0)
+                          or (type == "string" and test("^[0-9]+$"))) ]
+               | map(tostring) | .[]' < "$body" 2>/dev/null)
+  rows=$(jq -r '.tasks[] | "#\(.id // "?") status=\(.status // "?") \((.title // "") | gsub("\\s+"; " "))"' \
+         < "$body" 2>/dev/null)
+  rm -f "$body"; trap - EXIT INT TERM
 
-  local n
-  n=$(printf '%s' "$rows" | grep -c . )
-  if [ "${n:-0}" -eq 0 ]; then
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  case "$n_id" in ''|*[!0-9]*) n_id=0 ;; esac
+  if [ "$n" -eq 0 ]; then
     echo "clawgate: NOTHING RESOLVED — 0 tasks for this session."
     echo "  An unknown session id answers 200 with an EMPTY ARRAY, so this cannot"
     echo "  distinguish 'this session touched no task' from 'the id is wrong'."
@@ -319,11 +426,15 @@ clawgate_resolve(){
     return 5
   fi
   printf '%s\n' "$rows" | sed 's/^/  /'
+  if [ "$n_id" -ne "$n" ]; then
+    echo "clawgate: DID NOT ANSWER USABLY — $n task(s) came back but only $n_id carry a usable id. UNKNOWN, not empty; record nothing."
+    return 4
+  fi
   if [ "$n" -gt 1 ]; then
     echo "clawgate: $n tasks resolved — ASK which one this handoff belongs to. Do not guess, and never create a task."
     return 6
   fi
-  echo "clawgate: 1 task resolved — record it as front matter: $CLAWGATE_FIELD_KEY: $(printf '%s' "$rows" | sed 's/^#\([0-9]*\).*/\1/')"
+  echo "clawgate: 1 task resolved — record it as front matter: $CLAWGATE_FIELD_KEY: $ids"
   return 0
 }
 
@@ -331,22 +442,41 @@ clawgate_handoff_usage(){
   echo "usage: clawgate_handoff.sh resolve | field <handoff-doc>" >&2
 }
 
+# 🔴 A BAD INVOCATION AND A BAD DOCUMENT GET DIFFERENT CODES. `field` used to
+# answer 2 for a missing verb, a mistyped path AND a present-but-unreadable
+# field, while the skill documented only the last — so a typo in the path read
+# to the executor as "there is a broken clawgate-task: field in this doc", and
+# the repair it would then attempt is to a file that does not exist. 64/66 are
+# the sysexits spellings (EX_USAGE / EX_NOINPUT); anything this file does not
+# define (127, say) means the TOOL did not run at all.
+CLAWGATE_EX_USAGE=64
+CLAWGATE_EX_NOINPUT=66
+
 clawgate_handoff_main(){
-  local doc text
+  local doc text rc
   case "${1:-}" in
     resolve) clawgate_resolve ;;
     field)
       doc="${2:-}"
-      if [ -z "$doc" ] || [ ! -f "$doc" ]; then clawgate_handoff_usage; return 2; fi
+      if [ -z "$doc" ]; then clawgate_handoff_usage; return "$CLAWGATE_EX_USAGE"; fi
+      if [ ! -f "$doc" ] || [ ! -r "$doc" ]; then
+        echo "clawgate_handoff.sh: cannot read '$doc' — this says NOTHING about any field" >&2
+        return "$CLAWGATE_EX_NOINPUT"
+      fi
       text=$(cat "$doc")
       if clawgate_task_field "$text"; then return 0; fi
-      if clawgate_field_present "$text"; then
-        echo "clawgate-task: field present but UNREADABLE (not a task id)" >&2
+      clawgate_task_field_raw "$text" >/dev/null; rc=$?
+      if [ "$rc" -eq 2 ]; then
+        echo "clawgate-task: field present but the front-matter block is NEVER CLOSED — fix that block, do not append a second field" >&2
+        return 2
+      fi
+      if [ "$rc" -eq 0 ]; then
+        echo "clawgate-task: field present but UNREADABLE (not a task id) — fix that one, do not append a second" >&2
         return 2
       fi
       return 1
       ;;
-    *) clawgate_handoff_usage; return 2 ;;
+    *) clawgate_handoff_usage; return "$CLAWGATE_EX_USAGE" ;;
   esac
 }
 

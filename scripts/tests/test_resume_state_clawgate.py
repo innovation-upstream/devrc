@@ -41,6 +41,7 @@ no-launcher policy is unaffected — nothing here launches a real binary.
 
 from __future__ import annotations
 
+import datetime
 import importlib.util
 import json
 import os
@@ -69,6 +70,26 @@ HANDOFF_DOC_TOOL = REPO_ROOT / "scripts" / "lib" / "handoff_doc.py"
 # inert. `WRONG_SESSION_VAR` is a real, plausible spelling that does not exist.
 SESSION_VAR = "CLAUDE_CODE_SESSION_ID"
 WRONG_SESSION_VAR = "CLAUDE_SESSION_ID"
+
+# The four task states, taken from THIS REPO'S SINGLE DEFINITION rather than
+# spelled again here — `test_clawgate_predicate_single_source.py` walks every
+# python file's AST and fails on any second copy of the state set, and it caught
+# the literal this replaces. `complete` is the one member that module has no
+# name for (it owns the OPERATOR-PENDING predicate, and a complete task is not
+# pending), so it is named once, here, and nowhere else.
+def _clawgate_tasks_module():
+    spec = importlib.util.spec_from_file_location(
+        "clawgate_tasks_for_status",
+        Path(__file__).resolve().parents[2] / "scripts" / "lib" / "clawgate_tasks.py",
+    )
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_ct = _clawgate_tasks_module()
+BOARD_STATUSES = tuple(sorted(set(_ct.PENDING_TASK_STATES) | {_ct.IN_PROGRESS, "complete"}))
 
 # A token value that appears nowhere else, so a leak into argv or into output is
 # unambiguous rather than a substring coincidence.
@@ -210,6 +231,32 @@ class TestFrontMatterParsing:
     def test_an_unclosed_front_matter_block_yields_nothing_when_the_key_is_absent(self):
         assert call_fn("clawgate_task_field", "---\ntitle: x\nno closing delimiter\n").returncode == 1
 
+    def test_an_unclosed_block_CARRYING_the_key_yields_no_id(self):
+        """🔴 THE SEAM BUG. This side used to return the value the moment it saw
+        the key, while `handoff_doc._FRONT_MATTER` requires a closing `---` — so
+        an unterminated block (an ordinary LLM slip) made the shell print `193`
+        while `merge` treated those lines as BODY and dropped them: the silent
+        data loss this whole change exists to fix, reintroduced at the seam."""
+        r = call_fn("clawgate_task_field", "---\nclawgate-task: 193\n# Handoff\n")
+        assert r.stdout.strip() == ""
+        assert r.returncode == 1
+
+    def test_an_unclosed_block_CARRYING_the_key_is_still_PRESENT(self):
+        """…and it must not read as "no field": the doc tried to name a task, so
+        the caller owes a `!` gap, not silence."""
+        assert call_fn("clawgate_field_present",
+                       "---\nclawgate-task: 193\n# Handoff\n").returncode == 0
+
+    def test_the_raw_reader_reports_the_unterminated_case_as_its_OWN_code(self):
+        """rc 2 is what lets `field` name the right repair — putting the `---`
+        back, not editing the value."""
+        assert call_fn("clawgate_task_field_raw",
+                       "---\nclawgate-task: 193\n# Handoff\n").returncode == 2
+        assert call_fn("clawgate_task_field_raw",
+                       "---\ntitle: x\n# Handoff\n").returncode == 1
+        assert call_fn("clawgate_task_field_raw",
+                       "---\nclawgate-task: 193\n---\n").returncode == 0
+
     def test_a_similarly_named_key_is_not_the_field(self):
         """NEGATIVE CONTROL on the key match: `clawgate-task-notes` is not
         `clawgate-task`."""
@@ -251,12 +298,48 @@ class TestFieldVerb:
         assert r.returncode == 2
         assert "UNREADABLE" in r.stderr
 
-    def test_a_missing_doc_is_a_usage_error_not_an_absent_field(self, tmp_path):
+    def test_an_unterminated_block_exits_2_and_names_THAT_cause(self, tmp_path):
+        """Two different repairs, so they must not share a message: a bad VALUE
+        is edited in place, an unclosed BLOCK needs its `---` back."""
+        r = self._run(tmp_path, "---\nclawgate-task: 193\n# Handoff\n")
+        assert r.returncode == 2
+        assert "NEVER CLOSED" in r.stderr
+
+    def test_a_NONEXISTENT_doc_is_its_own_code_not_a_broken_field(self, tmp_path):
+        """🔴 Finding 8. Exit 2 used to mean "missing verb" OR "mistyped path" OR
+        "present-but-unreadable field", while the skill documented only the last
+        — so a typo in the path read to the executor as "this doc has a broken
+        clawgate-task: field", and the repair it would attempt is to a file that
+        does not exist."""
         r = subprocess.run(
             ["bash", str(LIB), "field", str(tmp_path / "nope.md")],
             capture_output=True, text=True, timeout=30, env=_base_env(),
         )
-        assert r.returncode == 2
+        assert r.returncode == 66, r.stderr
+        assert "cannot read" in r.stderr
+        assert "says NOTHING about any field" in r.stderr
+
+    def test_a_missing_path_is_a_USAGE_error(self, tmp_path):
+        r = subprocess.run(["bash", str(LIB), "field"], capture_output=True,
+                           text=True, timeout=30, env=_base_env())
+        assert r.returncode == 64
+        assert "usage:" in r.stderr
+
+    def test_an_unknown_verb_is_a_USAGE_error(self):
+        r = subprocess.run(["bash", str(LIB), "frobnicate"], capture_output=True,
+                           text=True, timeout=30, env=_base_env())
+        assert r.returncode == 64
+
+    def test_the_four_field_codes_are_pairwise_DISTINCT(self, tmp_path):
+        """A guard on the RELATIONSHIP rather than on any one code: the whole
+        point is that the executor can tell these four cases apart."""
+        doc_ok = self._run(tmp_path, fm("193")).returncode
+        doc_none = self._run(tmp_path, fm(None)).returncode
+        doc_bad = self._run(tmp_path, fm("TBD")).returncode
+        no_file = subprocess.run(["bash", str(LIB), "field", str(tmp_path / "x.md")],
+                                 capture_output=True, text=True, env=_base_env()).returncode
+        codes = [doc_ok, doc_none, doc_bad, no_file]
+        assert len(set(codes)) == 4, codes
 
 
 # --------------------------------------------------------------------------- #
@@ -348,12 +431,41 @@ class TestDriftComputation:
     def test_a_task_still_in_flight_is_NOT_drift(self, status):
         assert drift(status) == []
 
-    def test_an_unknown_status_produces_no_drift_line(self):
-        """GUARD. A status the parser could not read is the CALLER's gap to
-        report — inventing a finding from it would be fabrication, which the
-        digest treats as worse than silence."""
+    def test_an_unknown_status_produces_no_drift_line_AND_is_not_known(self):
+        """🔴 INVERTED FROM ITS FIRST VERSION, which pinned the silence alone and
+        so pinned the bug: `drift_lines` staying quiet is only safe if something
+        else refuses to call an unknown state healthy. Inventing a finding here
+        would be fabrication, so the silence stays — but the vocabulary check
+        that the caller gates on is asserted in the SAME test, and the e2e gap is
+        `test_a_status_outside_the_vocabulary_is_a_gap`."""
         assert drift("") == []
         assert drift("some-future-status") == []
+        assert call_fn("clawgate_known_status", "some-future-status").returncode == 1
+        assert call_fn("clawgate_known_status", "").returncode == 1
+
+    @pytest.mark.parametrize("status", BOARD_STATUSES)
+    def test_every_status_the_board_can_return_is_KNOWN(self, status):
+        """POSITIVE CONTROL on the vocabulary: a membership check that says NO to
+        everything would satisfy the test above for free.
+
+        🔴 THE STATUSES ARE NOT SPELLED HERE. They come from
+        `scripts/lib/clawgate_tasks.py`, this repo's single definition of the
+        clawgate task states — enforced by
+        `test_clawgate_predicate_single_source.py`, which failed on the literal
+        this replaces. That makes the test a CROSS-SOURCE pin (does the shell
+        vocabulary cover what python already knows?) instead of a second copy of
+        the set that would drift with neither."""
+        assert call_fn("clawgate_known_status", status).returncode == 0
+
+    def test_the_shell_vocabulary_covers_everything_PYTHON_knows_about(self):
+        """🔴 A SEAM PIN, and it fails when either side GROWS. A status added to
+        `clawgate_tasks.py` (the bar/session-manager surfaces) and not here means
+        /resume calls it unknown; the reverse means this file invented one."""
+        src = LIB.read_text(encoding="utf-8")
+        m = re.search(r'^CLAWGATE_TASK_STATUSES="([^"]+)"', src, re.M)
+        assert m, "CLAWGATE_TASK_STATUSES is no longer a plain assignment"
+        shell = set(m.group(1).split())
+        assert shell == set(BOARD_STATUSES), (shell, BOARD_STATUSES)
 
     def test_comments_newer_than_the_doc_are_drift(self):
         lines = drift("open", "3")
@@ -394,7 +506,20 @@ def stubs(tmp_path_factory):
     return d, log
 
 
-def make_repo(tmp_path: Path, doc_text: str | None, *, mtime: int = 1_700_000_000) -> Path:
+def make_repo(
+    tmp_path: Path,
+    doc_text: str | None,
+    *,
+    mtime: int = 1_700_000_000,
+    commit_date: str | None = None,
+) -> Path:
+    """A throwaway repo whose claudedocs/ holds one handoff.
+
+    `commit_date` COMMITS the doc at that timestamp — which is what makes the
+    two clocks disagree. A fresh `git worktree add` / `clone` stamps every file
+    at checkout, so `mtime` and the commit date are independent in reality and
+    must be independent in the fixture.
+    """
     repo = tmp_path / "fixture-repo"
     (repo / "claudedocs").mkdir(parents=True)
     env = _git_env(repo)
@@ -406,6 +531,11 @@ def make_repo(tmp_path: Path, doc_text: str | None, *, mtime: int = 1_700_000_00
     if doc_text is not None:
         p = repo / "claudedocs" / "handoff-sample.md"
         p.write_text(doc_text, encoding="utf-8")
+        if commit_date is not None:
+            cenv = dict(env, GIT_AUTHOR_DATE=commit_date, GIT_COMMITTER_DATE=commit_date)
+            subprocess.run([*git, "add", "claudedocs/handoff-sample.md"],
+                           check=True, env=cenv)
+            subprocess.run([*git, "commit", "-qm", "handoff"], check=True, env=cenv)
         os.utime(p, (mtime, mtime))
     return repo
 
@@ -533,7 +663,7 @@ class TestClawgateBlock:
                          {"createdAt": "2015-01-01T00:00:00Z"}],
         })
         body = block(out, "CLAWGATE")
-        assert body == ["task #193  status=in_progress  comments=2 (1 newer than the doc)"], body
+        assert body == ["task #193  status=in_progress  comments=2 (1 newer than the doc, by file mtime)"], body
 
     def test_complete_on_the_board_reaches_DRIFT(self, tmp_path, stubs):
         out = run_resume(make_repo(tmp_path, fm("193")), stubs,
@@ -554,9 +684,10 @@ class TestClawgateBlock:
         block RAN — a digest with no CLAUDE block at all reports the same clean
         bill (measured: this assertion alone passed against the pre-change
         tree). So the reconciliation is asserted first, the silence second."""
-        out = run_resume(make_repo(tmp_path, fm("193")), stubs, task=IN_FLIGHT)
+        repo = make_repo(tmp_path, fm("193"), commit_date="2026-08-01T00:00:00 +0000")
+        out = run_resume(repo, stubs, task=IN_FLIGHT)
         assert block(out, "CLAWGATE") == [
-            "task #193  status=in_progress  comments=1 (0 newer than the doc)"
+            "task #193  status=in_progress  comments=1 (0 newer than the doc, by last commit)"
         ], block(out, "CLAWGATE")
         assert drift_lines(out) == [CLEAN_BILL], drift_lines(out)
 
@@ -587,6 +718,19 @@ class TestClawgateBlock:
         assert any("not on PATH" in g for g in gaps(out)), drift_lines(out)
         assert CLEAN_BILL not in "\n".join(drift_lines(out))
 
+    def test_a_status_outside_the_vocabulary_is_a_gap(self, tmp_path, stubs):
+        """🔴 FIXTURE-DERIVED. No other fixture supplies a status outside the four
+        the board defines, and `clawgate_drift_lines` is silent on anything it
+        does not recognise — so a FIFTH status rendered exactly like a healthy
+        one: `DRIFT (none detected — live state matches the handoff's claims)`.
+        Unreachable from today's server, and clawgate's own `taskstatus.go`
+        header records an incident where adding a constant left a suite green."""
+        out = run_resume(make_repo(tmp_path, fm("193")), stubs,
+                         task={"id": 193, "status": "blocked", "comments": []})
+        assert any("does not know" in g for g in gaps(out)), drift_lines(out)
+        assert any("blocked" in g for g in gaps(out)), gaps(out)
+        assert CLEAN_BILL not in "\n".join(drift_lines(out))
+
     def test_an_answer_with_no_readable_status_is_a_gap(self, tmp_path, stubs):
         out = run_resume(make_repo(tmp_path, fm("193")), stubs, task={"id": 193})
         assert any("no readable status" in g for g in gaps(out)), drift_lines(out)
@@ -596,9 +740,9 @@ class TestClawgateBlock:
         no key at all (measured on live 0.7.98, task #306). This must read as a
         real zero — the version that gapped on it fired the alarm on a healthy
         task the first time it met the real board."""
-        out = run_resume(make_repo(tmp_path, fm("193")), stubs,
-                         task={"id": 193, "status": "open"})
-        assert "comments=0 (0 newer than the doc)" in " ".join(block(out, "CLAWGATE"))
+        repo = make_repo(tmp_path, fm("193"), commit_date="2026-08-01T00:00:00 +0000")
+        out = run_resume(repo, stubs, task={"id": 193, "status": "open"})
+        assert "comments=0 (0 newer than the doc, by " in " ".join(block(out, "CLAWGATE"))
         assert gaps(out) == [], drift_lines(out)
 
     def test_a_comments_field_of_the_WRONG_TYPE_is_still_a_gap(self, tmp_path, stubs):
@@ -608,6 +752,97 @@ class TestClawgateBlock:
                          task={"id": 193, "status": "open", "comments": {"oops": 1}})
         assert any("no comments array" in g for g in gaps(out)), drift_lines(out)
         assert "comments=(unreadable)" in " ".join(block(out, "CLAWGATE"))
+
+    # ------------------------------------------------- which CLOCK counts ----
+    def test_a_FRESH_CHECKOUT_does_not_silence_the_comment_count(self, tmp_path, stubs):
+        """🔴 THE REGRESSION, and it lands on this repo's own standard workflow.
+        `git worktree add` / `git clone` stamp every checked-out file at CHECKOUT
+        time, so on the mtime clock every comment predates the doc and the count
+        is a silent zero — in the fresh worktree CLAUDE.md mandates for
+        commit-bound work.
+
+        Fixture: the doc is COMMITTED at 2026-08-01 and its mtime is then set to
+        2026-08-20, exactly what a checkout produces. The comment sits between
+        the two, so the two clocks give different answers and the test can tell
+        them apart."""
+        repo = make_repo(
+            tmp_path, fm("193"),
+            commit_date="2026-08-01T00:00:00 +0000",
+            mtime=int(datetime.datetime(2026, 8, 20, tzinfo=datetime.timezone.utc).timestamp()),
+        )
+        out = run_resume(repo, stubs, task={
+            "id": 193, "status": "open",
+            "comments": [{"createdAt": "2026-08-10T00:00:00Z"}],
+        })
+        body = " ".join(block(out, "CLAWGATE"))
+        assert "1 newer than the doc, by last commit" in body, body
+        assert any("POSTDATING" in f for f in findings(out)), drift_lines(out)
+        assert gaps(out) == [], drift_lines(out)
+
+    def test_the_git_clock_is_not_used_when_it_disagrees_with_nothing(self, tmp_path, stubs):
+        """NEGATIVE CONTROL on the clock above: a comment OLDER than the commit
+        must still read as old, or "prefer the commit date" would just be a way
+        of always saying "newer"."""
+        repo = make_repo(
+            tmp_path, fm("193"),
+            commit_date="2026-08-01T00:00:00 +0000",
+            mtime=int(datetime.datetime(2026, 8, 20, tzinfo=datetime.timezone.utc).timestamp()),
+        )
+        out = run_resume(repo, stubs, task={
+            "id": 193, "status": "open",
+            "comments": [{"createdAt": "2026-07-01T00:00:00Z"}],
+        })
+        assert "0 newer than the doc, by last commit" in " ".join(block(out, "CLAWGATE"))
+        assert findings(out) == []
+
+    def test_it_works_in_a_real_git_WORKTREE(self, tmp_path, stubs):
+        """🔴 FOUND BY WRITING THE FIXTURE, NOT BY RUNNING THE CODE. In a git
+        WORKTREE `.git` is a FILE holding `gitdir: …`, not a directory — so a
+        `[ -d "$REPO/.git" ]` precondition is false in exactly the checkout the
+        commit-date clock exists for, and it would fall straight back to the
+        mtime a checkout just reset.
+
+        MEASURED on the real thing: running the pre-fix script inside
+        /home/zach/workspace/devrc-clawgate-task (a worktree) printed
+        `GIT/PR (not a git repo: …)` and reconciled NOTHING — that `-d` was
+        pre-existing in git_pr_block and is fixed in the same pass.
+
+        This fixture builds a REAL worktree with `git worktree add`, so it is
+        the file-vs-directory `.git` that is under test, not a simulation."""
+        repo = make_repo(tmp_path, fm("193"), commit_date="2026-08-01T00:00:00 +0000")
+        env = _git_env(repo)
+        wt = tmp_path / "wt"
+        subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "--detach",
+                        str(wt)], check=True, env=env)
+        assert (wt / ".git").is_file(), "the fixture did not produce a real worktree"
+        doc = wt / "claudedocs" / "handoff-sample.md"
+        # what a checkout does: every file stamped NOW
+        now = int(datetime.datetime(2026, 8, 20, tzinfo=datetime.timezone.utc).timestamp())
+        os.utime(doc, (now, now))
+        d, log = stubs
+        env["PATH"] = f"{d}{os.pathsep}{env['PATH']}"
+        env["STUB_LOG"] = str(log)
+        env["STUB_CG_RC"] = "0"
+        tf = tmp_path / "task.json"
+        tf.write_text(json.dumps({"id": 193, "status": "open",
+                                  "comments": [{"createdAt": "2026-08-10T00:00:00Z"}]}))
+        env["STUB_CG_JSON"] = str(tf)
+        out = subprocess.run(["bash", str(RESUME)], cwd=str(wt), capture_output=True,
+                             text=True, timeout=60, env=env)
+        assert out.returncode == 0, out.stderr
+        assert "not a git repo" not in out.stdout, out.stdout
+        assert "1 newer than the doc, by last commit" in " ".join(
+            block(out.stdout, "CLAWGATE")), out.stdout
+
+    def test_an_UNCOMMITTED_doc_falls_back_to_mtime_AND_says_so(self, tmp_path, stubs):
+        """The fallback is honest rather than silent: an untracked doc has no
+        commit date, mtime is all there is, and a `!` gap names the clock —
+        because that clock is the one a checkout, copy or rsync resets."""
+        out = run_resume(make_repo(tmp_path, fm("193")), stubs, task={
+            "id": 193, "status": "open", "comments": [],
+        })
+        assert "by file mtime" in " ".join(block(out, "CLAWGATE"))
+        assert any("FILE MTIME" in g for g in gaps(out)), drift_lines(out)
 
     def test_unparseable_comment_timestamps_make_the_count_a_declared_FLOOR(self, tmp_path, stubs):
         out = run_resume(make_repo(tmp_path, fm("193")), stubs, task={
@@ -704,11 +939,19 @@ def resolver(tmp_path):
     binp = tmp_path / "bin"
     binp.mkdir()
     argv_log = tmp_path / "curl-argv.log"
+    cfg_copy = tmp_path / "curl-config.copy"
+    tmpdir = tmp_path / "tmpdir"
+    tmpdir.mkdir()
+    # 🔴 The stub COPIES the --config file aside. Without that, the only thing
+    # the suite could say about the token is that it is not in argv — and the
+    # file it IS in, its escaping, and whether it is unlinked afterwards were
+    # all unmeasured.
     write_exec(binp / "curl", (
         'out=""\n'
         'while [ $# -gt 0 ]; do\n'
         '  case "$1" in\n'
         '    -o) out="$2"; shift 2 ;;\n'
+        '    --config) cp "$2" "$STUB_CFG_COPY"; shift 2 ;;\n'
         '    *) printf "%s\\n" "$1" >> "$STUB_ARGV"; shift ;;\n'
         '  esac\n'
         'done\n'
@@ -723,6 +966,12 @@ def resolver(tmp_path):
         env["HOME"] = str(home)
         env["PATH"] = f"{binp}{os.pathsep}{env['PATH']}"
         env["STUB_ARGV"] = str(argv_log)
+        env["STUB_CFG_COPY"] = str(cfg_copy)
+        # 🔴 LOAD-BEARING, AND IT WAS MISSING. `mktemp` honours TMPDIR, so
+        # without this the subject wrote its token file into the ambient /tmp
+        # and the cleanup test compared an empty directory against itself —
+        # green with `rm -f` deleted. See test_the_config_file_is_deleted.
+        env["TMPDIR"] = str(tmpdir)
         env["STUB_CODE"] = code
         env["STUB_RC"] = rc
         if payload is not None:
@@ -737,6 +986,8 @@ def resolver(tmp_path):
                               text=True, timeout=30, env=env)
 
     go.argv_log = argv_log  # type: ignore[attr-defined]
+    go.cfg_copy = cfg_copy  # type: ignore[attr-defined]
+    go.tmpdir = tmpdir  # type: ignore[attr-defined]
     return go
 
 
@@ -841,16 +1092,115 @@ class TestResolve:
         assert argv, "the argv log is empty — the control cannot see a leak"
         assert SENTINEL_TOKEN not in argv, argv
 
-    def test_the_config_file_is_deleted_afterwards(self, resolver, tmp_path):
-        """The token file must not outlive the call. Measured by counting the
-        files the run leaves in TMPDIR."""
-        env_tmp = tmp_path / "tmpdir"
-        env_tmp.mkdir()
-        before = set(env_tmp.iterdir())
-        env = _base_env()
+    def test_the_config_file_carries_the_token_at_all(self, resolver):
+        """🔴 POSITIVE CONTROL FOR THE TEST BELOW, and it is the half that was
+        missing. "TMPDIR is empty afterwards" is satisfied by a run that never
+        wrote a token file at all — including a run pointed at the wrong TMPDIR,
+        which is exactly what the previous version did. This proves the file
+        exists, is the one curl was handed, and contains the credential; the
+        next test then proves it is gone."""
         r = resolver(ONE)
         assert r.returncode == 0
-        assert set(env_tmp.iterdir()) == before
+        cfg = resolver.cfg_copy  # type: ignore[attr-defined]
+        assert cfg.exists(), "curl was never handed a --config file"
+        assert SENTINEL_TOKEN in cfg.read_text()
+
+    def test_the_config_file_is_deleted_afterwards(self, resolver):
+        """🔴 THE GUARD ON A LIVE BEARER TOKEN, and it was VACUOUS until now.
+
+        The first version created its own `env_tmp`, never put it in the
+        subprocess environment, and compared that empty directory against
+        itself — so `mktemp` wrote into the ambient /tmp and the assertion could
+        not see it. An auditor deleted `rm -f "$cfg"` and 95/95 stayed green,
+        then found a real `tmp.XXXX` holding `Authorization: Bearer …`.
+
+        The fixture now exports TMPDIR, so `mktemp` writes HERE, and the control
+        above proves a file really does appear. Watched to fail with the `rm`
+        removed and to pass with it restored."""
+        tmpdir = resolver.tmpdir  # type: ignore[attr-defined]
+        assert not list(tmpdir.iterdir()), "the fixture TMPDIR did not start empty"
+        r = resolver(ONE)
+        assert r.returncode == 0
+        left = list(tmpdir.iterdir())
+        assert left == [], (
+            "resolve left a file in TMPDIR — the curl config holds a live bearer "
+            f"token: {[p.name for p in left]}"
+        )
+
+    def test_the_token_is_ESCAPED_for_curls_config_parser(self, resolver):
+        """curl processes backslash escapes inside a double-quoted config value,
+        so a token containing `"` or `\\` is sent mangled — and arrives as a 401
+        that reads like a wrong token rather than a quoting bug. The fixture's
+        token carries BOTH characters; the written file must carry them escaped
+        and must not terminate the quoted value early."""
+        weird = 'tok-"quote"-and\\slash'
+        r = resolver(ONE, env_file=(
+            "CLAWGATE_API_URL=http://clawgate.invalid:1\n"
+            f"CLAWGATE_HOOK_TOKEN={weird}\n"
+        ))
+        assert r.returncode == 0
+        written = resolver.cfg_copy.read_text()  # type: ignore[attr-defined]
+        assert written == (
+            'header = "Authorization: Bearer tok-\\"quote\\"-and\\\\slash"\n'
+        ), repr(written)
+
+    def test_a_title_carrying_a_NEWLINE_is_still_one_task(self, resolver):
+        """🔴 FIXTURE-DERIVED, not subject-derived: no other fixture supplies a
+        title with an interior newline, and the count used to be `grep -c .` over
+        the RENDERED rows — so one task reported "2 tasks resolved — ASK which
+        one". The server trims and rune-caps titles; it does not strip interior
+        newlines."""
+        r = resolver({"tasks": [{"id": 193, "status": "open",
+                                 "title": "line one\nline two"}]})
+        assert r.returncode == 0, r.stdout
+        assert "clawgate-task: 193" in r.stdout
+        assert "tasks resolved" not in r.stdout
+
+    def test_a_row_with_NO_id_is_a_gap_not_an_empty_field(self, resolver):
+        """🔴 FIXTURE-DERIVED. Every other fixture always carries an id, so the
+        `sed` that extracted it could match ZERO digits and nothing noticed: the
+        writer was told to record `clawgate-task:` with no value, which the
+        reader classifies as present-and-unreadable — a permanent `!` gap on
+        every future /resume of that doc."""
+        r = resolver({"tasks": [{"status": "open", "title": "no id here"}]})
+        assert r.returncode == 4, r.stdout
+        assert "only 0 carry a usable id" in r.stdout
+        assert "record nothing" in r.stdout
+        assert not re.search(r"clawgate-task:\s*$", r.stdout, re.M), r.stdout
+
+    @pytest.mark.parametrize("bad_id", [None, "abc", -1, 1.5, {"n": 1}])
+    def test_no_shape_of_unusable_id_ever_reaches_the_writer(self, resolver, bad_id):
+        r = resolver({"tasks": [{"id": bad_id, "status": "open", "title": "t"}]})
+        assert r.returncode == 4, r.stdout
+        assert "record nothing" in r.stdout
+
+    def test_a_missing_TOOL_is_a_gap_naming_the_tool(self, resolver, tmp_path):
+        """🔴 Finding 9's class. The preflight checked `curl` and `jq` while the
+        count used `grep`, so a host without grep turned a real resolution into
+        "NOTHING RESOLVED" (exit 5) — a tool absence rendering as a fact about
+        the board. Every external command is now named up front; this drives the
+        one that is easiest to remove."""
+        r = resolver(ONE, env_file=(
+            "CLAWGATE_API_URL=http://clawgate.invalid:1\n"
+            f"CLAWGATE_HOOK_TOKEN={SENTINEL_TOKEN}\n"
+        ), )
+        assert r.returncode == 0, "control: it resolves with every tool present"
+        # now the same call with a PATH holding only the curl stub (no jq)
+        env = _base_env()
+        env["HOME"] = str(tmp_path / "home")
+        onlycurl = tmp_path / "only-curl"
+        onlycurl.mkdir()
+        for name in ("bash", "sh", "cat", "sed", "mktemp", "chmod", "rm", "cp"):
+            p = shutil.which(name)
+            if p:
+                (onlycurl / name).symlink_to(p)
+        env["PATH"] = str(onlycurl)
+        env[SESSION_VAR] = "sess-abc-123"
+        out = subprocess.run(["bash", str(LIB), "resolve"], capture_output=True,
+                             text=True, timeout=30, env=env)
+        assert out.returncode == 4, out.stdout + out.stderr
+        assert "is not on PATH" in out.stdout
+        assert "UNKNOWN, not empty" in out.stdout
 
 
 # --------------------------------------------------------------------------- #
@@ -1000,6 +1350,50 @@ class TestFrontMatterSurvivesTheMerge:
         assert merged.startswith("# Handoff: x\n")
         assert "feat/y" in merged and "feat/x" not in merged
 
+    def test_rule_f_line_numbers_COUNT_the_front_matter(self):
+        """🔴 THE SEMANTIC MERGE CONFLICT, and a clean textual resolution hides it.
+
+        `main` added rule (f), whose warning names a BASE LINE NUMBER computed by
+        `_body_start_lines` from the preamble's newline count. This branch strips
+        front matter off `base_text` BEFORE `split_sections` ever sees it — so on
+        the merged tree every line number for a doc carrying `clawgate-task:` was
+        short by the height of that block, and a line number is the entire value
+        of that warning. Neither side's tests could see it: main's fixture has no
+        front matter, and this branch's had no rule (f).
+
+        Asserted the way main's own CLI test does — by OPENING the base doc at
+        every number printed and checking the line found there is the one that
+        was flagged."""
+        base = (
+            "---\nclawgate-task: 193\n---\n"
+            "# Handoff: sample — 2026-08-19\n\n"
+            "## State now\n"
+            "- MEASURED 2026-08-18: the widget queue drains at 3/s, not 30/s\n"
+            "- Branch: feat/x\n"
+        )
+        report = hd.merge_report(base, "## State now\n- Branch: feat/y\n")
+        assert report.dropped, "the fixture produced no durable-drop warning"
+        base_lines = base.splitlines()
+        for d in report.dropped:
+            assert base_lines[d.line_no - 1].rstrip() == d.line, (
+                f"line {d.line_no} of the base doc is "
+                f"{base_lines[d.line_no - 1]!r}, but the warning quoted {d.line!r}"
+            )
+        assert [d.line_no for d in report.dropped] == [7], report.dropped
+
+    def test_rule_f_line_numbers_are_right_WITHOUT_front_matter_too(self):
+        """NEGATIVE CONTROL on the test above — the same doc minus the block must
+        report a number 3 lower. A fixture that could not move cannot detect an
+        offset."""
+        base = (
+            "# Handoff: sample — 2026-08-19\n\n"
+            "## State now\n"
+            "- MEASURED 2026-08-18: the widget queue drains at 3/s, not 30/s\n"
+            "- Branch: feat/x\n"
+        )
+        report = hd.merge_report(base, "## State now\n- Branch: feat/y\n")
+        assert [d.line_no for d in report.dropped] == [4], report.dropped
+
     def test_the_parser_and_the_merge_agree_on_what_front_matter_IS(self):
         """🔴 A SEAM TEST, not a component one. The bash reader and the python
         merger each decide independently where front matter starts and stops; if
@@ -1012,3 +1406,68 @@ class TestFrontMatterSurvivesTheMerge:
         early = BASE_DOC
         assert hd.split_front_matter(early)[0] == "---\nclawgate-task: 193\n---\n"
         assert call_fn("clawgate_task_field", early).stdout.strip() == "193"
+
+    def test_the_two_sides_agree_that_an_UNTERMINATED_block_is_not_front_matter(self):
+        """🔴 THE OTHER DIRECTION, which the seam test above never exercised —
+        and where the two sides genuinely DISAGREED. The late-block case is the
+        one where they happened to agree already, so pinning only that proved
+        nothing about the seam.
+
+        python requires a closing `---`; the shell used to hand back the id on
+        sight of the key. Result: the reader reconciled task 193 while `merge`
+        treated the block as body and DROPPED it on the next update — the data
+        loss this change exists to prevent, at the seam between its two halves.
+        BOTH must now refuse."""
+        unterminated = "---\nclawgate-task: 193\n# Handoff: sample\n\n## State now\n- x\n"
+        assert hd.split_front_matter(unterminated)[0] == ""
+        assert call_fn("clawgate_task_field", unterminated).returncode == 1
+        # …and it is not silently reclassified as "this doc names no task"
+        assert call_fn("clawgate_field_present", unterminated).returncode == 0
+
+    def test_an_unterminated_block_dropped_by_a_merge_is_REPORTED(self):
+        """🔴 FOUND BY THIS TEST, NOT BY THE AUDIT — the front-matter fix left a
+        hole one line below itself. An unterminated block is preamble, and the
+        preamble is replaced wholesale whenever the update brings its own, so a
+        writer who forgets the closing `---` still loses the field on the next
+        update.
+
+        It cannot be "kept" without inventing a semantic the reader does not
+        share (both sides refuse to call it front matter, deliberately). So it
+        is REPORTED, under rule (f)'s existing warn-never-refuse contract, with
+        an address the author can open."""
+        base = "---\nclawgate-task: 193\n# Handoff\n\n## State now\n- Branch: feat/x\n"
+        report = hd.merge_report(base, "prose first\n\n## State now\n- Branch: feat/y\n")
+        assert "clawgate-task: 193" not in report.text, report.text
+        hits = [d for d in report.dropped if "clawgate-task" in d.line]
+        assert len(hits) == 1, report.dropped
+        assert hits[0].line_no == 2, hits[0]
+        assert base.splitlines()[hits[0].line_no - 1] == hits[0].line
+
+    def test_the_report_is_SILENT_when_the_preamble_keeps_the_line(self):
+        """NEGATIVE CONTROL: a warning that fires whether or not the line
+        survives is noise, and rule (f) is explicitly a warn-on-loss rule."""
+        base = "---\nclawgate-task: 193\n# Handoff\n\n## State now\n- x\n"
+        report = hd.merge_report(base, "## State now\n- y\n")     # no new preamble
+        assert [d for d in report.dropped if "clawgate-task" in d.line] == []
+        assert "clawgate-task: 193" in report.text
+
+    def test_an_ORDINARY_preamble_replacement_warns_about_nothing(self):
+        """🔴 The reason this is narrow to the KEY rather than `durable_reason`.
+        A handoff preamble is normally `# Handoff: <topic> — <date>`, which
+        carries a date; running the general predicate here would fire rule (f)
+        on every preamble-replacing update in the corpus — a warning on the
+        ordinary case, which is the failure rule (f)'s own header forbids."""
+        base = "# Handoff: sample — 2026-08-19\n\n## State now\n- x\n"
+        report = hd.merge_report(base, "# Handoff: sample — 2026-08-21\n\n## State now\n- y\n")
+        assert report.dropped == (), report.dropped
+
+    def test_the_two_languages_spell_the_key_identically(self):
+        """🔴 A SEAM PIN ACROSS LANGUAGES. The python merger and the bash reader
+        each carry the key as their own constant; a rename on one side is
+        invisible to the other and silently turns the durable field into an
+        ordinary body line. Read from the SHELL SOURCE, not from a literal in
+        this file, so the two constants are compared to each other."""
+        src = LIB.read_text(encoding="utf-8")
+        m = re.search(r'^CLAWGATE_FIELD_KEY="([^"]+)"', src, re.M)
+        assert m, "CLAWGATE_FIELD_KEY is no longer a plain assignment in the lib"
+        assert m.group(1) == hd.CLAWGATE_TASK_KEY == "clawgate-task"

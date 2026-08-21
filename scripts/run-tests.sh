@@ -1503,6 +1503,126 @@ export PATH="$NOLAUNCH_DIR:$PATH"
 export DEVRC_TEST_LAUNCH_STUB_DIR="$NOLAUNCH_DIR"
 export PYTHONPATH="$ROOT/scripts${PYTHONPATH:+:$PYTHONPATH}"
 
+# --- GUARD 8: NO TEST MAY WRITE TO THE REAL ACTIVITY SPOOL, IN ANY TARGET ------
+# 🔴 THE SECOND ENFORCEMENT POINT, attached to the same line for the same reason.
+#
+# `scripts/collector/invocation.py` emits one `source=tool kind=invocation` row
+# per tool run into `<ACTIVITY_SPOOL_DIR>/current.log`, and the activity
+# collector daemon ships that spool to the PRODUCTION ClickHouse
+# `activity.events`. Several suites drive tools that emit. Measured before this
+# guard existed, a full `scripts/gate.sh --tier pytest` run wrote real rows into
+# the operator's own dataset, where they are indistinguishable from real
+# activity.
+#
+# #614 fixed ONE directory with a conftest. Thirteen test directories under
+# `scripts/` have `.py` tests and no conftest, and the non-pytest targets
+# (HOOK_TESTS, SHELL_TESTS) can never have one — so the fix is attached HERE,
+# beside GUARD 7, and it is two exports:
+#
+#   * ACTIVITY_SPOOL_DIR -> a temp dir. The direct lever.
+#   * XDG_STATE_HOME     -> a temp dir. The FALLBACK lever, and the reason this
+#     guard can MEASURE itself: `spool_emit.default_spool_dir()` reads
+#     ACTIVITY_SPOOL_DIR at call time and otherwise resolves
+#     `${XDG_STATE_HOME:-~/.local/state}/activity/spool`. A test that takes the
+#     variable away (monkeypatch.delenv, a hand-built subprocess env, a fixture
+#     teardown restoring an unset ambient) drops through to the fallback — which
+#     now lands in a TRAP under this run's dir instead of in production, where
+#     the accounting at the bottom of this file counts it PER TARGET.
+#
+# 🔴 BOTH OVERRIDES ARE UNCONDITIONAL, INCLUDING OVER AN AMBIENT VALUE. A test
+# runner must never write to a real spool, and an inherited ACTIVITY_SPOOL_DIR
+# is far likelier to be a shell with the collector's env sourced than a
+# deliberate intent. The consequence is stated rather than hidden: exporting
+# ACTIVITY_SPOOL_DIR before calling this script no longer measures leakage into
+# YOUR directory — it is overridden. That workflow still works, because the
+# chosen paths are PRINTED below and the GUARD 8 table at the end reports the
+# per-target row counts and the per-target fallback leaks directly.
+SPOOL_DIR="$(mktemp -d)"
+SPOOL_ISOLATED="$SPOOL_DIR/isolated"
+SPOOL_TRAP="$SPOOL_DIR/xdg"
+if ! mkdir -p "$SPOOL_ISOLATED" "$SPOOL_TRAP"; then
+  echo "run-tests: FATAL — could not create the activity-spool isolation dirs" >&2
+  echo "  under $SPOOL_DIR. Refusing to run: without them the suites append" >&2
+  echo "  real rows to ~/.local/state/activity/spool, which the collector ships" >&2
+  echo "  to the production ClickHouse activity.events." >&2
+  exit 2
+fi
+export ACTIVITY_SPOOL_DIR="$SPOOL_ISOLATED"
+export XDG_STATE_HOME="$SPOOL_TRAP"
+export DEVRC_TEST_SPOOL_GUARD_DIR="$SPOOL_DIR"
+# A fresh RUN is the ROOT of the session-nesting chain (see spool_plugin's
+# NESTED_ENV). Without this, a runner copy driven FROM a pytest test — which is
+# how ten of this file's own regression tests work — would inherit the flag, and
+# every target inside it would be scored as a nested session with no marker.
+unset DEVRC_TEST_SPOOL_IN_SESSION
+SPOOL_SESSIONS_LOG="$SPOOL_DIR/sessions.log"
+SPOOL_ISOLATED_LOG="$SPOOL_ISOLATED/current.log"
+
+# The three tokens shared with `scripts/testlib/spool_plugin.py`. They are
+# spelled on both sides of a process boundary, so they are PINNED both ways by
+# `scripts/tests/test_activity_spool_isolation.py` — a rename on one side alone
+# would leave this accounting matching nothing and reporting a clean run.
+SPOOL_SESSION_MARKER="spool(session)"
+SPOOL_CONTROL_SOURCE="devrc-spool-guard"
+SPOOL_CONTROL_OK="emitted"
+
+# Where the fallback lands, asked of `spool_emit` ITSELF with the variable
+# removed — never restated here. A second copy of the "…/activity/spool" layout
+# would agree with the first until the day the rule changed, and the trap would
+# then watch a directory nothing writes to while still printing a reassuring
+# zero. This also VERIFIES the trap up front: a fallback that did not land
+# inside this run's dir means the two exports above do not actually govern it,
+# and the run must stop rather than proceed with an unarmed detector.
+SPOOL_TRAP_LOG="$(env -u ACTIVITY_SPOOL_DIR XDG_STATE_HOME="$SPOOL_TRAP" \
+  python -c 'import importlib.util,sys
+p=sys.argv[1]
+s=importlib.util.spec_from_file_location("_se",p)
+m=importlib.util.module_from_spec(s); s.loader.exec_module(m)
+print(m.default_spool_dir()/m.CURRENT_NAME)' \
+  "$ROOT/scripts/collector/keylog/spool_emit.py" 2>/dev/null)"
+case "$SPOOL_TRAP_LOG" in
+  "$SPOOL_DIR"/*) : ;;
+  *)
+    echo "run-tests: FATAL — the activity-spool FALLBACK does not resolve inside" >&2
+    echo "  this run's guard dir. Resolved: '${SPOOL_TRAP_LOG:-<could not resolve>}'" >&2
+    echo "  Expected something under $SPOOL_DIR. XDG_STATE_HOME no longer governs" >&2
+    echo "  spool_emit.default_spool_dir(), so a test that drops ACTIVITY_SPOOL_DIR" >&2
+    echo "  would write to the operator's REAL spool and this guard would not see it." >&2
+    exit 2
+    ;;
+esac
+
+echo "run-tests: activity telemetry isolated for this run (GUARD 8)"
+echo "  ACTIVITY_SPOOL_DIR=$ACTIVITY_SPOOL_DIR"
+echo "  fallback trap      =$SPOOL_TRAP_LOG"
+
+# "<target>|<sess-from>|<sess-to>|<trap-from>|<trap-to>|<iso-from>|<iso-to>" —
+# three line ranges per target, so every count below is attributed to the target
+# that produced it rather than to the run as a whole.
+SPOOL_SEEN=()
+SPOOL_B_S=0
+SPOOL_B_T=0
+SPOOL_B_I=0
+
+_spool_lines() { # total lines in $1 (0 when absent)
+  if [ -f "$1" ]; then wc -l < "$1" | tr -d ' '; else echo 0; fi
+}
+_spool_slice() { # $1 = file, $2 = first line (1-based), $3 = last line
+  [ -f "$1" ] || return 0
+  [ "$3" -ge "$2" ] || return 0
+  sed -n "$2,$3p" "$1"
+}
+_spool_mark_before() {
+  SPOOL_B_S="$(_spool_lines "$SPOOL_SESSIONS_LOG")"
+  SPOOL_B_T="$(_spool_lines "$SPOOL_TRAP_LOG")"
+  SPOOL_B_I="$(_spool_lines "$SPOOL_ISOLATED_LOG")"
+}
+# $1 = target name. Every call MUST be preceded by the before-mark above, or the
+# range it records belongs to whatever ran previously.
+_spool_account() {
+  SPOOL_SEEN+=("$1|$(( SPOOL_B_S + 1 ))|$(_spool_lines "$SPOOL_SESSIONS_LOG")|$(( SPOOL_B_T + 1 ))|$(_spool_lines "$SPOOL_TRAP_LOG")|$(( SPOOL_B_I + 1 ))|$(_spool_lines "$SPOOL_ISOLATED_LOG")")
+}
+
 # 🔴 THE ACKNOWLEDGEMENT LEDGER — "<target>|<reason>". A target listed here is
 # EXPECTED to drive launchers into the stub, and is REQUIRED to: an entry whose
 # target records zero intercepts fails the run. That direction is the point.
@@ -1649,13 +1769,16 @@ run_pytest() {
   local log rc nl_before nl_after
   log="$(mktemp)"
   nl_before="$(_nolaunch_lines)"
-  # 🔴 `-p testlib.nolaunch_plugin` is GUARD 7 (see its header). It is on THIS
-  # line — the one place every target is invoked — and not in 17 conftests.
-  python -m pytest "$d" -q -p no:cacheprovider -p testlib.nolaunch_plugin \
+  _spool_mark_before
+  # 🔴 `-p testlib.nolaunch_plugin` is GUARD 7 and `-p testlib.spool_plugin` is
+  # GUARD 8 (see each header). Both are on THIS line — the one place every
+  # target is invoked — and not in two dozen conftests.
+  python -m pytest "$d" -q -p no:cacheprovider -p testlib.nolaunch_plugin -p testlib.spool_plugin \
     --no-header -rs >"$log" 2>&1
   rc=$?
   nl_after="$(_nolaunch_lines)"
   NOLAUNCH_SEEN+=("$d|$(( nl_before + 1 ))|$nl_after")
+  _spool_account "$d"
   cat "$log"
 
   # GUARD 4: parse pytest's summary line. `-q` emits it undecorated, e.g.
@@ -1775,6 +1898,7 @@ for HOOK_TEST in "${HOOK_TESTS[@]}"; do
   fi
   echo "=== script $HOOK_TEST ==="
   nl_before="$(_nolaunch_lines)"
+  _spool_mark_before
   if python "$HOOK_TEST"; then
     RESULTS+=("PASS  $HOOK_TEST (script)")
   else
@@ -1785,6 +1909,10 @@ for HOOK_TEST in "${HOOK_TESTS[@]}"; do
   # stub dir this script put first on PATH. They are accounted the same way, and
   # get no session marker — GUARD 7 requires a marker only from pytest targets.
   NOLAUNCH_SEEN+=("$HOOK_TEST|$(( nl_before + 1 ))|$(_nolaunch_lines)")
+  # GUARD 8 accounts them too. They load no plugin, so they get no session
+  # marker and no fallback control — their protection is the two env exports,
+  # and what is checked is that they leaked nothing into the trap.
+  _spool_account "$HOOK_TEST"
   echo
 done
 
@@ -1809,6 +1937,7 @@ for SHELL_TEST in "${SHELL_TESTS[@]}"; do
   fi
   echo "=== script $SHELL_TEST ==="
   nl_before="$(_nolaunch_lines)"
+  _spool_mark_before
   if bash "$SHELL_TEST"; then
     RESULTS+=("PASS  $SHELL_TEST (script)")
   else
@@ -1816,6 +1945,7 @@ for SHELL_TEST in "${SHELL_TESTS[@]}"; do
     fail=1
   fi
   NOLAUNCH_SEEN+=("$SHELL_TEST|$(( nl_before + 1 ))|$(_nolaunch_lines)")
+  _spool_account "$SHELL_TEST"
   echo
 done
 
@@ -1938,6 +2068,88 @@ if [ "${#nolaunch_problems[@]}" -gt 0 ]; then
   fail=1
 fi
 rm -rf "$NOLAUNCH_DIR"
+
+# --- GUARD 8 (evaluation): per-target activity-spool accounting ----------------
+# One line per target, ALWAYS printed — including the zeros, and never the zero
+# ALONE. `leaked=0` on its own is exactly what a guard wired to nothing prints,
+# so every line carries `control=` beside it: the row this run DELIBERATELY sent
+# down the real fallback path and watched land in the trap. The pair is the
+# claim — "1 on the positive control, 0 under test" — and `control=0` on a
+# pytest target fails the run.
+echo "  ---- activity-spool isolation (GUARD 8) ----"
+echo "    isolated=$SPOOL_ISOLATED"
+echo "    fallback-trap=$SPOOL_TRAP_LOG"
+spool_problems=()
+for t in "${TARGETS[@]}"; do
+  seen=0
+  for entry in "${SPOOL_SEEN[@]}"; do
+    [ "${entry%%|*}" = "$t" ] && seen=1 && break
+  done
+  [ "$seen" -eq 1 ] || spool_problems+=("$t  — never accounted: run_pytest returned before GUARD 8 could measure it")
+done
+
+for entry in "${SPOOL_SEEN[@]}"; do
+  IFS='|' read -r st sfrom sto tfrom tto ifrom ito <<<"$entry"
+
+  sess_slice="$(_spool_slice "$SPOOL_SESSIONS_LOG" "$sfrom" "$sto")"
+  markers=$(printf '%s\n' "$sess_slice" | grep -c "^$SPOOL_SESSION_MARKER" || true)
+  marker_iso="$(printf '%s\n' "$sess_slice" | grep "^$SPOOL_SESSION_MARKER" | head -1 \
+    | awk -F'\t' '{for(i=1;i<=NF;i++) if($i ~ /^isolated=/) print substr($i,10)}')"
+  marker_ctl="$(printf '%s\n' "$sess_slice" | grep "^$SPOOL_SESSION_MARKER" | head -1 \
+    | awk -F'\t' '{for(i=1;i<=NF;i++) if($i ~ /^control=/) print substr($i,9)}')"
+  marker_fb="$(printf '%s\n' "$sess_slice" | grep "^$SPOOL_SESSION_MARKER" | head -1 \
+    | awk -F'\t' '{for(i=1;i<=NF;i++) if($i ~ /^fallback=/) print substr($i,10)}')"
+
+  trap_slice="$(_spool_slice "$SPOOL_TRAP_LOG" "$tfrom" "$tto")"
+  controls=$(printf '%s\n' "$trap_slice" | grep -cF "source=$SPOOL_CONTROL_SOURCE" || true)
+  leak_rows="$(printf '%s\n' "$trap_slice" | grep -vF "source=$SPOOL_CONTROL_SOURCE" | grep -c . || true)"
+  rows=$(_spool_slice "$SPOOL_ISOLATED_LOG" "$ifrom" "$ito" | grep -c . || true)
+
+  is_pytest=0
+  for t in "${TARGETS[@]}"; do [ "$t" = "$st" ] && is_pytest=1 && break; done
+
+  echo "    $st  spool-rows=$rows  fallback-leaked=$leak_rows  control=$controls  plugin=$markers"
+
+  # 🔴 THE LEAK ITSELF. Any row in the trap that is not this guard's own control
+  # reached the FALLBACK — i.e. it would have gone to ~/.local/state/activity/
+  # spool and been shipped to the production activity.events.
+  if [ "$leak_rows" -gt 0 ]; then
+    # Only the plain scalar fields are echoed. The rest of a v1 line is
+    # base64 free text, and this log is read by humans and pasted into PRs.
+    kinds="$(printf '%s\n' "$trap_slice" | grep -vF "source=$SPOOL_CONTROL_SOURCE" \
+      | tr '\t' '\n' | grep -E '^(source|kind)=' | sort | uniq -c \
+      | sed 's/^/             /' || true)"
+    spool_problems+=("$st  — wrote $leak_rows row(s) down the REAL spool fallback. They were trapped and did NOT reach the operator's dataset; a test in this target emits activity telemetry without isolating it:"$'\n'"$kinds")
+  fi
+
+  if [ "$is_pytest" -eq 1 ]; then
+    if [ "$markers" -ne 1 ]; then
+      spool_problems+=("$st  — the spool plugin emitted $markers session marker(s), expected exactly 1. This target ran WITHOUT the guard, so its fallback-leaked=$leak_rows means nothing (see GUARD 8's header: -p testlib.spool_plugin on the pytest line).")
+    elif [ "$marker_iso" != "$SPOOL_ISOLATED" ]; then
+      spool_problems+=("$st  — ran with ACTIVITY_SPOOL_DIR='$marker_iso', not this run's '$SPOOL_ISOLATED'. Something between this script and pytest is re-pointing the spool.")
+    elif [ "$marker_ctl" != "$SPOOL_CONTROL_OK" ]; then
+      spool_problems+=("$st  — the plugin WITHHELD its fallback control (control=$marker_ctl): it resolved the fallback to '$marker_fb', which is not inside $SPOOL_DIR. The leak detector for this target is UNARMED, so its zero is not evidence.")
+    elif [ "$controls" -ne 1 ]; then
+      # The control was emitted and did not arrive. The trap is not where the
+      # fallback goes, so `fallback-leaked=0` is the reassuring zero of a
+      # counter wired to nothing.
+      spool_problems+=("$st  — the fallback trap recorded $controls control row(s), expected exactly 1. The detector is wired to nothing and its fallback-leaked=$leak_rows is unreadable.")
+    fi
+  else
+    # Non-pytest targets load no plugin, so a marker or a control from one means
+    # the accounting slices are misaligned, not that they are better protected.
+    if [ "$markers" -ne 0 ] || [ "$controls" -ne 0 ]; then
+      spool_problems+=("$st  — a NON-pytest target recorded $markers session marker(s) and $controls control row(s); it can have neither, so the per-target slices are misattributed.")
+    fi
+  fi
+done
+
+if [ "${#spool_problems[@]}" -gt 0 ]; then
+  echo "  ERROR: ${#spool_problems[@]} GUARD 8 problem(s):" >&2
+  for p in "${spool_problems[@]}"; do echo "         $p" >&2; done
+  fail=1
+fi
+rm -rf "$SPOOL_DIR"
 
 # GUARD 6. One writer, fed the same value `exit` is about to take, so the
 # printed verdict and the process status cannot disagree — including through a
