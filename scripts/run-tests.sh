@@ -227,10 +227,19 @@ cd "$ROOT" || { echo "run-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 # scope fence). Those tests FAIL rather than skip when it is absent — a skipped
 # rotation test reports safety it never measured — so it belongs here.
 #
+# zsh:      scripts/tests/test_run3.py (2 tests). This is the sharpest case in
+#           the list, because the RULE under test is a zsh-vs-bash difference:
+#           zsh's MULTIOS makes `cmd 2>&1 >/dev/null | c` hand the consumer
+#           STDOUT where bash hands it nothing. A tier with no zsh is
+#           STRUCTURALLY blind to that whole class — the tests would skip and
+#           the gate would go green having measured the one shell the defect
+#           cannot occur in. Both hosts run zsh as the login shell, and
+#           flake.nix's `gateTools` carries it for the sandbox.
+#
 # 🔴 `python` is listed as well as `python3` because THIS SCRIPT invokes
 # `python -m pytest`, not `python3`. Asserting only `python3` checked a binary
 # the runner never calls.
-REQUIRED_TOOLS=(bash curl node rg git awk jq grep setsid python python3 nix-instantiate opencode logrotate rsync)
+REQUIRED_TOOLS=(bash curl node rg git awk jq grep setsid python python3 nix-instantiate opencode logrotate rsync zsh)
 missing_tools=()
 for t in "${REQUIRED_TOOLS[@]}"; do
   command -v "$t" >/dev/null 2>&1 || missing_tools+=("$t")
@@ -983,7 +992,29 @@ TARGET_FLOORS=(
   #   _suggested_floor 6219 = 6219 - min(50, max(1, 310)) = 6219 - 50 = 6169
   #
   # ⚠ ZERO new skips from any contribution.
-  "scripts/tests|6169"
+  #
+  # 2026-08-21, `scripts/run3` + scripts/tests/test_run3.py (the stream-capture
+  # helper): 6483 -> 6509 collected, +26. BOTH numbers MEASURED with
+  # `--collect-only` — 6483 in a clean detached worktree of origin/main, 6509 on
+  # this branch, re-measured AFTER a rebase onto 6070161e — not inferred from
+  # the pin, and not from the pre-rebase base (main moved by 3 commits mid-work
+  # and #653 alone added 3 tests, so the pre-rebase pair would have been wrong
+  # by exactly that).
+  #
+  # 🔴 The pin this REPLACES was 6169 against a real 6483 on main alone: 314 of
+  # drift, none of it from here, exactly as the paragraph above predicted it
+  # would keep happening. Re-measure; do not trust this number either.
+  #
+  #   _suggested_floor 6509 = 6509 - min(50, max(1, 325)) = 6509 - 50 = 6459
+  #
+  # ⚠ ZERO new skips. No HERMETIC_TARGETS entry needed — scripts/tests is
+  # already a directory target, so movement on THIS line is the evidence the
+  # gate runs the new file at all. test_run3.py's two zsh tests carry a
+  # `skipif` for a bare `pytest scripts/tests`, but under THIS runner they can
+  # never fire: `zsh` is in REQUIRED_TOOLS, so a host without it aborts on
+  # GUARD 1 naming the binary rather than running two tests thinner. That is
+  # why they are not pinned in EXPECTED_SKIPS.
+  "scripts/tests|6459"
   # 2026-08-11, the session-summary changed-paths work: 230 -> 273 collected,
   # +43 for scripts/collector/tests/test_changed_paths.py (the shared
   # `changed_paths*` module). The gate printed this replacement itself —
