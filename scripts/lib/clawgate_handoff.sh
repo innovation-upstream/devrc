@@ -139,10 +139,19 @@ clawgate_field_present(){ clawgate_task_field_raw "$1" >/dev/null; }
 # `newer` is honestly a FLOOR rather than a measurement — the caller reports
 # that as a gap instead of quietly rounding it into the count.
 #
-# 🔴 `total` is -1 when the answer carries no `comments` ARRAY at all. That is
-# not zero comments: a server that stopped embedding them, or an error object
-# that happens to parse as JSON, would otherwise render as "0 new comments",
-# which is the reassuring shape of a source that never answered.
+# 🔴 `total` is -1 when `comments` is present and is NOT an array — a schema
+# break, or an error object that happens to parse as JSON, which must not
+# render as "0 new comments": that is the reassuring shape of a source that
+# never answered.
+#
+# ⚠ AN ABSENT/NULL `comments` KEY IS A REAL ZERO, and this was measured rather
+# than assumed. The first cut treated absent as -1 too, and the live board then
+# emitted the gap on a perfectly healthy task: the field is `omitempty`, so it
+# is simply MISSING when a task has no comments. Measured against live 0.7.98
+# on 2026-08-21 — task #306 `has("comments") == false` with zero comments, task
+# #299 an array of 5 — i.e. alarming on absence would fire on the majority of
+# tasks, which is the permanently-red gate `claude/RULES.md` calls worse than
+# no gate. The distinguishable case (a non-array value) keeps its alarm.
 #
 # Timestamps: Go emits RFC3339 with a fractional part (`…:18.640843Z`) that
 # jq's fromdateiso8601 rejects, so the fraction is stripped first. A non-`Z`
@@ -150,7 +159,8 @@ clawgate_field_present(){ clawgate_task_field_raw "$1" >/dev/null; }
 # a timezone would move every verdict by hours.
 clawgate_new_comments(){
   printf '%s' "$1" | jq -r --argjson cut "${2:-0}" '
-    if (.comments | type) != "array" then "0 0 -1"
+    if (.comments | type) == "null" and (type == "object") then "0 0 0"
+    elif (.comments | type) != "array" then "0 0 -1"
     else
       [ .comments[]? | (.createdAt // .created_at // null) ] as $raw
       | [ $raw[] | select(type == "string")

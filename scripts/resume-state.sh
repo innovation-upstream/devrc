@@ -494,8 +494,11 @@ clawgate_block(){
   else
     counts=$(clawgate_new_comments "$json" "$mt")
     read -r newer unreadable total <<<"$counts"
+    # ⚠ `total` is -1 only for a comments field that is present and NOT an
+    # array. An ABSENT one is a real zero — the field is `omitempty` on the
+    # server, so most tasks have no key at all. See clawgate_new_comments.
     if [ "${total:-0}" -lt 0 ]; then
-      printf '  task #%s  status=%s  comments=(absent)\n' "$id" "$status"
+      printf '  task #%s  status=%s  comments=(unreadable)\n' "$id" "$status"
       UNRECONCILED+=("clawgate's answer for task #$id carried no comments array — comments newer than the doc were NOT counted")
       newer=0
     else

@@ -296,15 +296,28 @@ class TestCommentCounting:
             {"createdAt": "2026-08-19T23:34:18+00:00"},
         ]}) == "1 2 3"
 
-    def test_a_missing_comments_array_is_MINUS_ONE_not_zero(self):
-        """🔴 THE SILENT-ZERO CASE. A server that stopped embedding comments, or
-        an error object that happens to be JSON, must not render as "0 new
-        comments" — that is the reassuring shape of a source that never
-        answered."""
-        assert counts({"status": "open"}) == "0 0 -1"
+    def test_an_ABSENT_comments_key_is_a_real_zero(self):
+        """⚠ MEASURED, NOT ASSUMED — and the first cut had it the other way.
+        clawgate's `comments` field is `omitempty`, so a task with no comments
+        simply has no key. Measured live 0.7.98 on 2026-08-21: task #306
+        `has("comments") == false` with zero comments, #299 an array of 5. The
+        first implementation called absence a gap, and the live board promptly
+        emitted that gap for a perfectly healthy task — an alarm that fires on
+        the majority of tasks is the permanently-red gate, not sensitivity."""
+        assert counts({"status": "open"}) == "0 0 0"
+        assert counts({"comments": None}) == "0 0 0"
 
-    def test_a_comments_value_that_is_not_an_array_is_also_MINUS_ONE(self):
-        assert counts({"comments": {"oops": 1}}) == "0 0 -1"
+    @pytest.mark.parametrize("bad", [{"oops": 1}, "x", 3])
+    def test_a_comments_value_that_is_present_and_NOT_an_array_is_MINUS_ONE(self, bad):
+        """🔴 THE SILENT-ZERO CASE, kept for the shape that absence cannot be
+        confused with: a schema change, or an error object that happens to be
+        JSON, must not render as "0 new comments"."""
+        assert counts({"comments": bad}) == "0 0 -1"
+
+    def test_a_payload_that_is_not_an_object_at_all_is_MINUS_ONE(self):
+        """NEGATIVE CONTROL on the zero above: the absent-key rule must not
+        extend to a response that is not a task object."""
+        assert counts([1, 2]) == "0 0 -1"
 
     def test_junk_input_does_not_crash_the_counter(self):
         r = call_fn("clawgate_new_comments", "not json at all", str(CUT))
@@ -568,11 +581,23 @@ class TestClawgateBlock:
         out = run_resume(make_repo(tmp_path, fm("193")), stubs, task={"id": 193})
         assert any("no readable status" in g for g in gaps(out)), drift_lines(out)
 
-    def test_an_answer_with_no_comments_array_is_a_gap_not_zero_comments(self, tmp_path, stubs):
+    def test_a_task_with_no_comments_reports_zero_and_is_NOT_a_gap(self, tmp_path, stubs):
+        """⚠ THE LIVE SHAPE. `comments` is `omitempty`, so a task with none has
+        no key at all (measured on live 0.7.98, task #306). This must read as a
+        real zero — the version that gapped on it fired the alarm on a healthy
+        task the first time it met the real board."""
         out = run_resume(make_repo(tmp_path, fm("193")), stubs,
                          task={"id": 193, "status": "open"})
+        assert "comments=0 (0 newer than the doc)" in " ".join(block(out, "CLAWGATE"))
+        assert gaps(out) == [], drift_lines(out)
+
+    def test_a_comments_field_of_the_WRONG_TYPE_is_still_a_gap(self, tmp_path, stubs):
+        """The distinguishable half of the case above: a schema break cannot be
+        mistaken for `omitempty`, so it keeps its alarm."""
+        out = run_resume(make_repo(tmp_path, fm("193")), stubs,
+                         task={"id": 193, "status": "open", "comments": {"oops": 1}})
         assert any("no comments array" in g for g in gaps(out)), drift_lines(out)
-        assert "comments=(absent)" in " ".join(block(out, "CLAWGATE"))
+        assert "comments=(unreadable)" in " ".join(block(out, "CLAWGATE"))
 
     def test_unparseable_comment_timestamps_make_the_count_a_declared_FLOOR(self, tmp_path, stubs):
         out = run_resume(make_repo(tmp_path, fm("193")), stubs, task={
