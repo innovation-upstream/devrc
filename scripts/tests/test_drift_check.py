@@ -4996,26 +4996,50 @@ def _mpblind(out):
     return tuple(int(g) for g in m.groups())
 
 
+# 🔴 THE THREE BLINDNESSES ARE THREE FIXTURES, NOT ONE. `empty-manifest` and
+# `no-manifest` differ by a single `mkdir` and produce DIFFERENT status tokens
+# from DIFFERENT branches, so a suite that only ever builds the empty directory
+# is structurally blind to the missing one. MEASURED by the round-2 battery:
+# with only the empty-dir fixture, the mutant relabelling `W_STATUS=NOMANIFEST`
+# to `MEASURED` — which makes a host with no home-manager generation at all read
+# as a clean scan for ever — SURVIVED a fully green 295-test run. `no-cmp` is the
+# third and has its own test below, because it needs a clobbered PATH rather than
+# a fixture path.
+_BLIND_SHAPES = [("empty", "EMPTYMANIFEST"), ("missing", "NOMANIFEST")]
+
+
+def _blind_manifest(tmp_path, shape):
+    """A manifest path that makes the wrong-writer scan take `shape`'s branch."""
+    d = tmp_path / ("%s-generation" % shape)
+    if shape == "empty":
+        d.mkdir()                       # exists, holds no leaves
+    # "missing": deliberately NOT created — the `[ -d ]` branch
+    return d
+
+
+@pytest.mark.parametrize("shape,token", _BLIND_SHAPES)
 def test_an_unmeasured_managed_path_scan_BELOW_the_threshold_does_not_fail_the_unit(
-        fleet, tmp_path):
+        fleet, tmp_path, shape, token):
     """The softening half. A host can genuinely be mid-deploy for one run, and a
     code that fired immediately would be the permanently-red gate this file
     refuses everywhere else. Reported loudly, escalated only after N."""
     fleet.catch_up()
-    empty = tmp_path / "empty-generation"
-    empty.mkdir()
-    rc, out = fleet.check("--no-remote", DRIFT_HOME_FILES=str(empty),
+    blind = _blind_manifest(tmp_path, shape)
+    rc, out = fleet.check("--no-remote", DRIFT_HOME_FILES=str(blind),
                           DRIFT_UNMEASURED_ESCALATE="3")
     assert rc == 0, ("one unmeasured managed-path scan failed the unit "
                      "immediately: %d\n%s" % (rc, out))
-    assert "1/3 consecutive; NOT escalated" in out, out
+    assert ("UNMEASURED (%s) — 1/3 consecutive; NOT escalated" % token) in out, (
+        "the %s shape did not reach the ladder as %s — the status token is the "
+        "only thing separating these branches\n%s" % (shape, token, out))
     assert "Still not a pass" in out, (
         "an unmeasured scan below the threshold read as a pass\n" + out)
     assert _mpblind(out) == (1, 1, 0), out
 
 
+@pytest.mark.parametrize("shape,token", _BLIND_SHAPES)
 def test_a_managed_path_scan_UNMEASURED_for_N_CONSECUTIVE_runs_is_rc18(
-        fleet, tmp_path):
+        fleet, tmp_path, shape, token):
     """🔴 THE DEADMAN. Measured at PR head: a host whose scan could not measure
     reported `rc 0` on every run, for ever, while rc 19 could not fire for it.
 
@@ -5023,18 +5047,17 @@ def test_a_managed_path_scan_UNMEASURED_for_N_CONSECUTIVE_runs_is_rc18(
     and the escalation is asserted on the whole one-line claim (host, scope,
     reason, streak, threshold), not on a word another branch could spell."""
     fleet.catch_up()
-    empty = tmp_path / "empty-generation"
-    empty.mkdir()
+    blind = _blind_manifest(tmp_path, shape)
     for i in range(3):
-        rc, out = fleet.check("--no-remote", DRIFT_HOME_FILES=str(empty),
+        rc, out = fleet.check("--no-remote", DRIFT_HOME_FILES=str(blind),
                               DRIFT_UNMEASURED_ESCALATE="4")
         assert rc == 0, "escalated on run %d of 4: %d\n%s" % (i + 1, rc, out)
-    rc, out = fleet.check("--no-remote", DRIFT_HOME_FILES=str(empty),
+    rc, out = fleet.check("--no-remote", DRIFT_HOME_FILES=str(blind),
                           DRIFT_UNMEASURED_ESCALATE="4")
     assert rc == 18, ("four consecutive unmeasured scans did not escalate: "
                       "%d\n%s" % (rc, out))
-    assert ("🔴 DRIFT — workbench @managed-paths: UNMEASURED (EMPTYMANIFEST) "
-            "for 4 CONSECUTIVE runs (threshold 4).") in out, out
+    assert ("🔴 DRIFT — workbench @managed-paths: UNMEASURED (%s) "
+            "for 4 CONSECUTIVE runs (threshold 4)." % token) in out, out
     assert _mpblind(out) == (1, 1, 1), out
 
 
@@ -5125,6 +5148,69 @@ def test_the_managed_path_streak_is_kept_PER_HOST(fleet, tmp_path):
                 DRIFT_UNMEASURED_ESCALATE="4")
     names = sorted(p.name for p in fleet.state.glob("unmeasured-*"))
     assert names == ["unmeasured-workbench-@managed-paths"], names
+
+
+def test_a_managed_path_ladder_that_cannot_PERSIST_its_streak_escalates_at_once(
+        fleet, tmp_path):
+    """🔴 FAIL CLOSED WHEN 'FOR HOW LONG' IS UNKNOWABLE — the same limb the
+    built-source ladder already has, which the round-2 battery found this one
+    lacked: mutating `[ "$MSTK" -lt 0 ]` to `-lt -99` SURVIVED a green 295-test
+    run, i.e. a host with an unwritable state dir would report an unmeasured
+    scan as `-1/4 consecutive; NOT escalated` for ever.
+
+    Both conditions are needed to reach the limb and only together: the scan
+    must be UNMEASURED (a measured one resets and returns early) AND the state
+    dir must be unusable. The fixture supplies both — that is why the mutant was
+    invisible to every existing test, each of which supplies one.
+    """
+    fleet.catch_up()
+    empty = tmp_path / "empty-generation"
+    empty.mkdir()
+    blocked = fleet.root / "blocked-mp-state"
+    blocked.write_text("not a directory\n")
+
+    rc, out = fleet.check("--no-remote", DRIFT_HOME_FILES=str(empty),
+                          DRIFT_STATE_DIR=str(blocked),
+                          DRIFT_UNMEASURED_ESCALATE="4")
+    assert rc == 18, ("an unmeasured scan whose streak cannot be persisted did "
+                      "not escalate immediately: %d\n%s" % (rc, out))
+    assert "[mpblind] 🔴 workbench: UNMEASURED (EMPTYMANIFEST), and the streak under" in out, (
+        "the escalation did not come from the managed-path ladder's "
+        "cannot-persist limb — check it is not a DIFFERENT guard going red\n" + out)
+    assert "could not be persisted" in out, out
+    assert _mpblind(out) == (1, 1, 1), out
+
+
+def test_a_fact_line_with_NO_status_field_is_MALFORMED_not_measured(fleet):
+    """🔴 THE WHOLE-STRING FALLBACK, driven rather than argued.
+
+    `${M_LINE##*status=}` returns the line UNCHANGED when `status=` is absent,
+    so an older drift-check.sh on the far side — one that emits the counts but
+    not the token — would hand the ladder a garbage 'reason' or, with the guard
+    removed, be read as MEASURED. The battery confirmed the latter: relabelling
+    the fallback to MEASURED SURVIVED a green 295-test run, because nothing here
+    had ever produced a status-less fact line.
+
+    The remote leg is the only place such a line can come from, and `stub_ssh`
+    can emit exactly one. The laptop must land on the STRUCTURAL ladder as
+    MALFORMED — reported, not silently counted as a host that measured.
+    """
+    fleet.catch_up()
+    fleet.stub_ssh(0, stdout="[laptop] FACT wrongwriter examined=3")
+
+    rc, out = fleet.check(REMOTE_SSH="stub@example.invalid",
+                          DRIFT_UNMEASURED_ESCALATE="1")
+    assert "[mpblind] 🔴 DRIFT — laptop @managed-paths: UNMEASURED (MALFORMED)" in out, (
+        "a fact line with no status= field was not read as MALFORMED. Either it "
+        "was taken for a measured host, or the whole-string fallback invented a "
+        "reason token out of the entire line.\n" + out
+    )
+    assert rc == 18, ("a MALFORMED managed-path fact did not escalate at "
+                      "threshold 1: %d\n%s" % (rc, out))
+    # The local host answered properly in the SAME run, so this is not "the
+    # ladder reports everything": one measured, one malformed.
+    assert "[mpblind] workbench: the managed-path scan MEASURED this run" in out, out
+    assert _mpblind(out) == (2, 1, 1), out
 
 
 @pytest.mark.parametrize("var", ["DRIFT_UNMEASURED_ESCALATE",
