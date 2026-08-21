@@ -197,14 +197,32 @@ extract_tokens(){
 # other. Only if no qualified line exists do we fall back to the repo-blind
 # match — which is exactly right for a bare ref, whose whole nature is that the
 # doc never qualified it.
-handoff_says_inflight(){ # $1=pr number  $2=handoff path  $3=owner/repo (optional)
-  [ -f "$2" ] || return 1
+# 🔴 $2 IS THE TEXT, NOT A PATH, AND THAT SIGNATURE IS THE FIX. It took a path
+# and grepped the FILE, so `git_pr_block` extracted the PR refs from
+# `$HANDOFF_TEXT` — the copy `handoff_freshness` chose — and then asked a
+# DIFFERENT copy of the document whether the doc framed them as in-flight. Both
+# directions were measured on a stale clone against a bare origin:
+#
+#   false clean   origin copy says `acme/widget#999 is OPEN and awaiting merge`,
+#                 stale local says nothing -> `PR … MERGED` and NO drift line,
+#                 under a header announcing it had read the origin copy;
+#   fabrication   stale local says OPEN, origin says `LANDED; the follow-on is
+#                 already done` -> the drift line fires anyway. The comment at
+#                 the top of extract_branches calls this the worse direction.
+#
+# Taking TEXT removes the class from this helper permanently: there is no path
+# left for a caller to hand it, so no caller can hand it the wrong one. The
+# guard that failed to see this (it only looked for content reads written
+# INLINE) now also ledgers every helper that RECEIVES $HANDOFF and reads it —
+# see test_only_handoff_freshness_READS_the_working_tree_copy.
+handoff_says_inflight(){ # $1=pr number  $2=handoff TEXT  $3=owner/repo (optional)
+  [ -n "$2" ] || return 1
   local lines="" q
   if [ -n "${3:-}" ]; then
     q=$(printf '%s' "$3" | sed -E 's/[][\\.^$*+?(){}|]/\\&/g')
-    lines=$(grep -iE "$q#$1([^0-9]|$)" "$2" 2>/dev/null)
+    lines=$(printf '%s\n' "$2" | grep -iE "$q#$1([^0-9]|$)" 2>/dev/null)
   fi
-  [ -z "$lines" ] && lines=$(grep -iE "#$1([^0-9]|$)" "$2" 2>/dev/null)
+  [ -z "$lines" ] && lines=$(printf '%s\n' "$2" | grep -iE "#$1([^0-9]|$)" 2>/dev/null)
   printf '%s\n' "$lines" \
     | grep -qiE 'open|in.?flight|awaiting|pending|not yet merged|to merge|mergeable|review|wip|draft|blocked'
 }
@@ -479,7 +497,10 @@ git_pr_block(){
       if [ "$state" = OPEN ]; then printf '  PR %s %-6s ci=%s\n' "$label" "$state" "$ci"
       else printf '  PR %s %s\n' "$label" "$state"; fi
       # DRIFT: the handoff frames this PR as open/in-flight but it already landed...
-      if [ "$state" = MERGED ] && handoff_says_inflight "$num" "$HANDOFF" "$([ "$slug" = "-" ] || printf '%s' "$slug")"; then
+      # `$text` — the SAME copy the refs above were extracted from. It used to
+      # pass "$HANDOFF", so the refs came from the authoritative text and their
+      # framing from whatever happened to be on disk.
+      if [ "$state" = MERGED ] && handoff_says_inflight "$num" "$text" "$([ "$slug" = "-" ] || printf '%s' "$slug")"; then
         DRIFT+=("PR $label MERGED but handoff frames it as open/in-flight (do the follow-on)")
       fi
       # ...or a referenced PR was CLOSED without merging (abandoned — always notable)
@@ -768,6 +789,19 @@ clawgate_block(){
   else
     mt=$(git -C "$REPO" log -1 --format=%ct -- "$HANDOFF" 2>/dev/null)
     [ -n "$mt" ] && clock="last commit"
+  fi
+  # 🔴 THE MTIME FALLBACK IS NOT AVAILABLE WHEN THE TEXT CAME FROM A REF. It is
+  # the mtime of the file on disk — the copy that was DISCARDED — and it is
+  # typically NEWER than the ref's commit, so using it here would SILENCE
+  # comments rather than over-report them: the unsafe direction, in the one case
+  # where the reconciler already knows it is reading someone else's copy.
+  # Reachable when the ref carries no commit for that path (a shallow or grafted
+  # clone). So: no date at all, cutoff 0, every comment counted as newer, and a
+  # gap that says why. Loud and over-reporting beats quiet and wrong.
+  if [ -z "$clock" ] && [ -n "$HANDOFF_REF" ]; then
+    mt=0
+    clock="UNDATED ($HANDOFF_REF carries no commit for this path)"
+    UNRECONCILED+=("the handoff text came from $HANDOFF_REF but that ref carries no commit date for it (shallow or grafted clone?) — every comment is counted as newer rather than dating the DISCARDED local copy, which would silence them")
   fi
   if [ -z "$clock" ]; then
     mt=$(stat -c %Y "$HANDOFF" 2>/dev/null)

@@ -237,7 +237,7 @@ DURABLE_CLAWGATE = "clawgate task"
 
 
 def _dropped_preamble_task(
-    base_pre: str, out_pre: str, line_offset: int
+    base_pre: str, out_pre: str, line_offset: int, label: str = "(preamble)"
 ) -> list[DroppedDurable]:
     """`clawgate-task:` lines a wholesale block replacement is about to delete.
 
@@ -269,7 +269,7 @@ def _dropped_preamble_task(
         if " ".join(line.split()) in kept:
             continue
         out.append(
-            DroppedDurable("(preamble)", line_offset + idx + 1, line.rstrip(),
+            DroppedDurable(label, line_offset + idx + 1, line.rstrip(),
                            DURABLE_CLAWGATE)
         )
     return out
@@ -567,7 +567,7 @@ def merge_report(base_text: str, update_text: str) -> MergeReport:
     #  (b) the update brings its own PREAMBLE, which is where an UNTERMINATED
     #      block lives. Offset = the height of the real front matter above it.
     if upd_fm and upd_fm != base_fm:
-        dropped.extend(_dropped_preamble_task(base_fm, upd_fm, 0))
+        dropped.extend(_dropped_preamble_task(base_fm, upd_fm, 0, "(front matter)"))
     if out_pre != base_pre:
         dropped.extend(
             _dropped_preamble_task(base_pre, out_pre, base_fm.count("\n"))
@@ -745,6 +745,20 @@ def unified(base_text: str, merged_text: str, relpath: str) -> str:
 DROPPED_SHOWN_MAX = 6
 DROPPED_LINE_MAX = 140
 
+#: 🔴 The remedy for a dropped `clawgate-task:` — and it is the OPPOSITE of the
+#: standing one. That field is read ONLY from a block whose `---` is line 1, so
+#: "move it under an APPEND heading" would put it where nothing parses it and
+#: /resume would report the doc as naming no task at all.
+CLAWGATE_DROP_REMEDY = (
+    "  RESTORE IT AT LINE 1, in a closed `---` block — that is the only place\n"
+    "  /resume reads it from. Do NOT move it under a heading: a `clawgate-task:`\n"
+    "  line anywhere else is invisible to every reader, so the doc would report\n"
+    "  as naming no task at all.\n"
+    "  This is a WARNING, not a refusal. Dropping it on purpose (the work moved "
+    "to another task, or none) is a legitimate update — this only makes it a "
+    "decision rather than an accident."
+)
+
 DROPPED_REMEDY = (
     "  Move them under an APPEND heading (open investigations / findings / "
     "gotchas) or carry them forward in this update.\n"
@@ -772,19 +786,41 @@ def dropped_durable_report(dropped: typing.Sequence[DroppedDurable]) -> str:
     """
     if not dropped:
         return ""
-    head = (
-        f"🔴 This replace DROPS {len(dropped)} line(s) that look DURABLE "
-        f"(they sit under a REPLACE heading):"
-    )
-    rows = [
-        f"  {_clip(d.heading, 44)}:{d.line_no}: "
-        f"{_clip(d.line.strip(), DROPPED_LINE_MAX)}  [{d.reason}]"
-        for d in dropped[:DROPPED_SHOWN_MAX]
-    ]
-    elided = len(dropped) - len(rows)
-    if elided:
-        rows.append(f"  … and {elided} more not shown (read the diff below).")
-    return "\n".join([head, *rows, DROPPED_REMEDY])
+    # 🔴 THE FRONT-MATTER CLASS GETS ITS OWN HEADING AND ITS OWN REMEDY, because
+    # the standing one SILENTLY DISABLES THE FEATURE. `clawgate-task:` is only
+    # read out of a block whose `---` is line 1; an author who follows "move
+    # them under an APPEND heading" moves the field somewhere no reader parses,
+    # and /resume then prints `(no clawgate-task: field …)` — the exact silent
+    # disable this whole change exists to prevent, arrived at by obeying the
+    # tool. The ADDRESS was right either way; the label and the advice were not.
+    fm_rows = [d for d in dropped if d.reason == DURABLE_CLAWGATE]
+    other = [d for d in dropped if d.reason != DURABLE_CLAWGATE]
+    blocks: list[str] = []
+    if fm_rows:
+        blocks.append("\n".join([
+            f"🔴 This update DROPS the doc's recorded clawgate task "
+            f"({len(fm_rows)} line(s), from the front matter or preamble):",
+            *[f"  {_clip(d.heading, 44)}:{d.line_no}: "
+              f"{_clip(d.line.strip(), DROPPED_LINE_MAX)}  [{d.reason}]"
+              for d in fm_rows[:DROPPED_SHOWN_MAX]],
+            CLAWGATE_DROP_REMEDY,
+        ]))
+    if other:
+        rows = [
+            f"  {_clip(d.heading, 44)}:{d.line_no}: "
+            f"{_clip(d.line.strip(), DROPPED_LINE_MAX)}  [{d.reason}]"
+            for d in other[:DROPPED_SHOWN_MAX]
+        ]
+        elided = len(other) - len(rows)
+        if elided:
+            rows.append(f"  … and {elided} more not shown (read the diff below).")
+        blocks.append("\n".join([
+            f"🔴 This replace DROPS {len(other)} line(s) that look DURABLE "
+            f"(they sit under a REPLACE heading):",
+            *rows,
+            DROPPED_REMEDY,
+        ]))
+    return "\n".join(blocks)
 
 
 def _clip(text: str, limit: int) -> str:

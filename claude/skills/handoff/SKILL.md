@@ -44,6 +44,8 @@ Topic argument (optional): `$ARGUMENTS`. If empty, infer a short kebab-case topi
 
    ⚠ **`64` and `66` are about your COMMAND, not about the doc**: 64 = no path or an unknown verb, 66 = that path could not be read. Neither says anything about a field — fix the invocation. Any other code means the tool did not run at all.
 
+   🔴 **If step 5's merge reports `This update DROPS the doc's recorded clawgate task`, restore it at LINE 1 — do NOT follow rule (f)'s usual "move it under an APPEND heading" advice for that line.** The field is read only from a closed `---` block at the top of the file; anywhere else it is invisible to every reader, so "moving" it silently disables the thread. The tool prints that remedy itself for this class; the two remedies are opposites and the block header says which one you are looking at.
+
    🔴 **The closing `---` is load-bearing.** Both readers require it: an unterminated block is not front matter to `handoff_doc.py` either, so it is ordinary preamble and step 5's merge will drop it the next time an update brings its own preamble. That drop is now *reported* rather than silent — but the cheap fix is to close the block.
 
    ````markdown

@@ -95,6 +95,51 @@ BOARD_STATUSES = tuple(sorted(set(_ct.PENDING_TASK_STATES) | {_ct.IN_PROGRESS, "
 # unambiguous rather than a substring coincidence.
 SENTINEL_TOKEN = "tok-SENTINEL-9f2b41"
 
+#: A bash function definition, used by the structural guards below.
+fn_re_top = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*\(\)\s*\{")
+
+#: A command that opens a positional ARGUMENT for its content.
+_ARG_CONTENT_READ = re.compile(
+    r'(?:^|[;&|(]|\$\()\s*(?:cat|grep|head|tail|sed|awk|wc|jq)\b[^\n]*"\$[0-9]"'
+    r'|<\s*"\$[0-9]"'
+)
+
+
+def laundered_readers(src: list[str]) -> list[tuple[str, list[str]]]:
+    """Helpers handed `"$HANDOFF"` that read their argument's CONTENT.
+
+    Factored out of the guard so it can be run on a DECOY as a positive control:
+    a scan wired to nothing returns the same empty list as a clean file, and
+    this scan has already been wrong once in exactly that way (see the comment
+    on the per-defined-function loop).
+    """
+    defined = {m.group(1) for ln in src if (m := fn_re_top.match(ln))}
+    called_with_handoff = set()
+    for line in src:
+        if line.lstrip().startswith("#") or '"$HANDOFF"' not in line:
+            continue
+        for name in defined:
+            if re.search(r"\b" + re.escape(name) + r"\b\s", line):
+                called_with_handoff.add(name)
+    out: list[tuple[str, list[str]]] = []
+    for name in sorted(called_with_handoff):
+        body, inside = [], False
+        for ln in src:
+            m = fn_re_top.match(ln)
+            if m:
+                inside = m.group(1) == name
+                continue
+            if inside:
+                if ln.startswith("}"):
+                    inside = False
+                else:
+                    body.append(ln)
+        hits = [ln.strip() for ln in body
+                if not ln.lstrip().startswith("#") and _ARG_CONTENT_READ.search(ln)]
+        if hits:
+            out.append((name, hits))
+    return out
+
 pytestmark = pytest.mark.skipif(
     shutil.which("bash") is None
     or shutil.which("git") is None
@@ -495,8 +540,16 @@ def stubs(tmp_path_factory):
     """`clawgatectl` (answerable) plus `gh`/`kubectl`/`curl` tripwires."""
     d = tmp_path_factory.mktemp("clawgate-stubbin")
     log = d / "invocations.log"
-    for name in ("gh", "kubectl", "curl"):
+    for name in ("kubectl", "curl"):
         write_exec(d / name, f'printf "{name} %s\\n" "$*" >> "$STUB_LOG"\nexit 1\n')
+    # gh answers with $STUB_GH_JSON when set (the convention
+    # test_resume_state_handoff_resolution.py already uses), so the PR-framing
+    # path can be driven without a network. Unset it stays a pure tripwire.
+    write_exec(d / "gh", (
+        'printf "gh %s\\n" "$*" >> "$STUB_LOG"\n'
+        'if [ -n "${STUB_GH_JSON:-}" ]; then printf "%s\\n" "$STUB_GH_JSON"; exit 0; fi\n'
+        'exit 1\n'
+    ))
     write_exec(
         d / "clawgatectl",
         'printf "clawgatectl %s\\n" "$*" >> "$STUB_LOG"\n'
@@ -754,7 +807,16 @@ class TestClawgateBlock:
         assert "comments=(unreadable)" in " ".join(block(out, "CLAWGATE"))
 
     # --------------------------------- WHICH COPY of the doc gets read -------
-    def _stale_clone(self, tmp_path: Path, local_fm: str | None, origin_fm: str | None):
+    def _stale_clone(
+        self,
+        tmp_path: Path,
+        local_fm: str | None,
+        origin_fm: str | None,
+        local_body: str = "",
+        origin_body: str = "\n## Extra\n- the last session's real work\n",
+        v1_date: str = "2026-08-05T00:00:00 +0000",
+        v2_date: str = "2026-08-15T00:00:00 +0000",
+    ):
         """A clone whose checked-out handoff differs from origin's.
 
         🔴 NEITHER SIDE'S SUITE MADE THE TWO COPIES DIFFER — which is why a block
@@ -772,25 +834,35 @@ class TestClawgateBlock:
         for dest in (a, b):
             subprocess.run(["git", "clone", "-q", str(origin), str(dest)], check=True, env=env)
         doc = "claudedocs/handoff-stale.md"
+        # 🔴 THE TWO COMMITS CARRY DIFFERENT DATES, and that is load-bearing, not
+        # tidiness. Without `GIT_AUTHOR_DATE` both land in the same SECOND, so
+        # the fixture cannot express the difference the clock assertion is
+        # supposed to detect — and a mutant that kept the `on origin/main` LABEL
+        # while taking the VALUE from the discarded local copy was green
+        # 141/141. A fixture that cannot produce two different dates makes every
+        # date assertion over it vacuous.
         (a / "claudedocs").mkdir(parents=True)
-        (a / doc).write_text(fm(local_fm), encoding="utf-8")
+        (a / doc).write_text(fm(local_fm) + local_body, encoding="utf-8")
+        env_a = dict(_git_env(a), GIT_AUTHOR_DATE=v1_date, GIT_COMMITTER_DATE=v1_date)
         for args in (["add", doc], ["commit", "-qm", "v1"], ["push", "-q", "origin", "main"]):
-            subprocess.run(["git", "-C", str(a), *args], check=True, env=_git_env(a))
+            subprocess.run(["git", "-C", str(a), *args], check=True, env=env_a)
         subprocess.run(["git", "-C", str(b), "pull", "-q", "origin", "main"],
                        check=True, env=_git_env(b))
-        (b / doc).write_text(fm(origin_fm) + "\n## Extra\n- the last session's real work\n",
-                             encoding="utf-8")
+        (b / doc).write_text(fm(origin_fm) + origin_body, encoding="utf-8")
+        env_b = dict(_git_env(b), GIT_AUTHOR_DATE=v2_date, GIT_COMMITTER_DATE=v2_date)
         for args in (["add", doc], ["commit", "-qm", "v2"], ["push", "-q", "origin", "main"]):
-            subprocess.run(["git", "-C", str(b), *args], check=True, env=_git_env(b))
+            subprocess.run(["git", "-C", str(b), *args], check=True, env=env_b)
         return a
 
-    def _run_in(self, repo: Path, stubs, task: dict) -> str:
+    def _run_in(self, repo: Path, stubs, task: dict, gh_json: str | None = None) -> str:
         d, log = stubs
         env = _git_env(repo)
         env["PATH"] = f"{d}{os.pathsep}{env['PATH']}"
         env["STUB_LOG"] = str(log)
         env["STUB_CG_RC"] = "0"
         env["RESUME_STATE_SKIP_FETCH"] = ""      # let the real fetch run
+        if gh_json is not None:
+            env["STUB_GH_JSON"] = gh_json
         tf = repo.parent / "task.json"
         tf.write_text(json.dumps(task))
         env["STUB_CG_JSON"] = str(tf)
@@ -834,10 +906,75 @@ class TestClawgateBlock:
     def test_the_clock_dates_the_REF_copy_when_that_is_the_one_read(self, tmp_path, stubs):
         """…and the date must come from the same copy as the text. The local
         branch's `git log -1 -- <path>` describes the file that was discarded, so
-        the printed clock names the ref instead."""
-        repo = self._stale_clone(tmp_path, local_fm=None, origin_fm="193")
-        out = self._run_in(repo, stubs, {"id": 193, "status": "open", "comments": []})
-        assert "by last commit on origin/main" in " ".join(block(out, "CLAWGATE")), out
+        the printed clock names the ref instead.
+
+        🔴 THE VALUE, NOT ONLY THE LABEL — the label alone is a SPELLED guard and
+        was walkable: keeping `clock="last commit on $HANDOFF_REF"` while taking
+        `mt` from the local copy stayed green. The two commits are 10 days apart
+        (v1 2026-08-05 local, v2 2026-08-15 origin) and the comment sits BETWEEN
+        them, so the two clocks give different ANSWERS: on the ref's date the
+        comment is older (0 newer), on the discarded copy's it is newer (1)."""
+        repo = self._stale_clone(tmp_path, local_fm="193", origin_fm="193")
+        out = self._run_in(repo, stubs, {
+            "id": 193, "status": "open",
+            "comments": [{"createdAt": "2026-08-10T00:00:00Z"}],
+        })
+        body = " ".join(block(out, "CLAWGATE"))
+        assert "by last commit on origin/main" in body, out
+        assert "comments=1 (0 newer than the doc" in body, (
+            f"the count was measured against the DISCARDED local copy:\n{out}"
+        )
+
+    def test_that_clock_fixture_really_produces_two_different_dates(self, tmp_path, stubs):
+        """POSITIVE CONTROL on the fixture, because the previous one could not
+        express the difference at all (both commits landed in the same second).
+        Same repo, a comment AFTER both dates: now the answer must move."""
+        repo = self._stale_clone(tmp_path, local_fm="193", origin_fm="193")
+        out = self._run_in(repo, stubs, {
+            "id": 193, "status": "open",
+            "comments": [{"createdAt": "2026-08-20T00:00:00Z"}],
+        })
+        assert "comments=1 (1 newer than the doc" in " ".join(block(out, "CLAWGATE")), out
+
+    # ------------------------------------ the LAUNDERED read (PR framing) ----
+    GH_MERGED = json.dumps({"state": "MERGED", "mergeable": "MERGEABLE",
+                            "mergedAt": "2026-08-19T00:00:00Z", "statusCheckRollup": []})
+
+    def test_PR_framing_is_read_from_the_chosen_copy_too(self, tmp_path, stubs):
+        """🔴 THE THIRD INSTANCE, laundered through a path-taking helper.
+
+        `git_pr_block` extracts the PR refs from `$HANDOFF_TEXT` and then asked
+        `handoff_says_inflight` — which took a PATH and grepped the FILE —
+        whether the doc frames them as in-flight. Different copies.
+
+        FALSE-CLEAN DIRECTION: the origin copy (the one the digest says it read)
+        frames #999 as open; the stale local copy never mentions it. gh says
+        MERGED. The drift line must fire; before the fix it did not."""
+        repo = self._stale_clone(
+            tmp_path, local_fm="193", origin_fm="193",
+            local_body="\n## State now\n- nothing about that PR here\n",
+            origin_body="\n## State now\n- #999 is OPEN and awaiting merge\n",
+        )
+        out = self._run_in(repo, stubs, {"id": 193, "status": "open", "comments": []},
+                           gh_json=self.GH_MERGED)
+        assert any("#999 MERGED but handoff frames it as open" in f for f in findings(out)), (
+            f"the framing was read from the stale local copy:\n{out}"
+        )
+
+    def test_PR_framing_does_not_FABRICATE_from_the_discarded_copy(self, tmp_path, stubs):
+        """The other direction, and the file's own comment calls it the worse
+        one: the STALE copy frames #999 as open while the copy actually read
+        says the follow-on is already done. No drift line may fire."""
+        repo = self._stale_clone(
+            tmp_path, local_fm="193", origin_fm="193",
+            local_body="\n## State now\n- #999 is OPEN and awaiting merge\n",
+            origin_body="\n## State now\n- #999 LANDED; the follow-on is already done\n",
+        )
+        out = self._run_in(repo, stubs, {"id": 193, "status": "open", "comments": []},
+                           gh_json=self.GH_MERGED)
+        assert not any("#999 MERGED but handoff frames it" in f for f in findings(out)), (
+            f"a drift line was fabricated from the discarded copy:\n{out}"
+        )
 
     # ------------------------------------------------- which CLOCK counts ----
     def test_a_FRESH_CHECKOUT_does_not_silence_the_comment_count(self, tmp_path, stubs):
@@ -919,6 +1056,75 @@ class TestClawgateBlock:
         assert "not a git repo" not in out.stdout, out.stdout
         assert "1 newer than the doc, by last commit" in " ".join(
             block(out.stdout, "CLAWGATE")), out.stdout
+
+    def test_an_UNDATABLE_ref_copy_counts_every_comment_rather_than_dating_the_discarded_one(
+        self, tmp_path, stubs
+    ):
+        """🔴 NEW-5. When the text came from a ref but that ref carries no commit
+        for the path (a shallow or grafted clone), the mtime on disk belongs to
+        the DISCARDED copy and is typically NEWER than the ref's commit — so
+        falling back to it SILENCES comments, in the one case where the code
+        already knows it is reading someone else's copy. Cutoff 0 instead: every
+        comment counted as newer, with a gap saying why.
+
+        Driven at the FUNCTION level — the globals `handoff_freshness` publishes
+        are set directly and `clawgate_block` is called — because the branch
+        needs a ref that carries no commit for the path, and a fixture that
+        merely *looks* shallow is not guaranteed to produce that (measured: a
+        `.git/shallow` marker did not; the test would then SKIP, and a skip in
+        this suite fails the gate's pinned skip set, which is the correct
+        pressure to build the deterministic drive instead)."""
+        repo = make_repo(tmp_path, fm("193"), commit_date="2026-08-01T00:00:00 +0000")
+        doc = repo / "claudedocs" / "handoff-sample.md"
+        # the mtime that WOULD silence the comment if the fallback used it
+        now = int(datetime.datetime(2026, 8, 20, tzinfo=datetime.timezone.utc).timestamp())
+        os.utime(doc, (now, now))
+        d, log = stubs
+        env = _git_env(repo)
+        env["PATH"] = f"{d}{os.pathsep}{env['PATH']}"
+        env["STUB_LOG"] = str(log)
+        env["STUB_CG_RC"] = "0"
+        tf = tmp_path / "task.json"
+        tf.write_text(json.dumps({"id": 193, "status": "open",
+                                  "comments": [{"createdAt": "2026-08-10T00:00:00Z"}]}))
+        env["STUB_CG_JSON"] = str(tf)
+        script = (
+            'source "$1"\n'
+            'REPO="$2"; HANDOFF="$3"; HANDOFF_TEXT=$(cat "$3")\n'
+            # a ref that exists nowhere: `git log` on it answers nothing at all
+            'HANDOFF_REF="origin/no-such-ref"; HANDOFF_REL="claudedocs/handoff-sample.md"\n'
+            'DRIFT=(); UNRECONCILED=()\n'
+            'clawgate_block\n'
+            'printf "GAP %s\\n" "${UNRECONCILED[@]}"\n'
+        )
+        r = subprocess.run(
+            ["bash", "-c", script, "harness", str(RESUME), str(repo), str(doc)],
+            capture_output=True, text=True, timeout=60, env=env, cwd=str(repo),
+        )
+        assert r.returncode == 0, r.stderr
+        assert "UNDATED" in r.stdout, r.stdout
+        assert "1 newer than the doc" in r.stdout, (
+            f"the count was dated off the DISCARDED local copy, silencing it:\n{r.stdout}"
+        )
+        assert "carries no commit date" in r.stdout, r.stdout
+
+    def test_that_undated_drive_would_SILENCE_the_comment_on_the_mtime_clock(
+        self, tmp_path, stubs
+    ):
+        """POSITIVE CONTROL on the fixture above: prove the mtime really is the
+        newer date, so "1 newer" is a fact about the FIX and not about a comment
+        that would have counted either way. Same doc, same comment, but with no
+        ref set — the mtime path — and the answer must flip to 0."""
+        repo = make_repo(tmp_path, fm("193"))          # untracked: mtime clock
+        doc = repo / "claudedocs" / "handoff-sample.md"
+        now = int(datetime.datetime(2026, 8, 20, tzinfo=datetime.timezone.utc).timestamp())
+        os.utime(doc, (now, now))
+        out = run_resume(repo, stubs, task={
+            "id": 193, "status": "open",
+            "comments": [{"createdAt": "2026-08-10T00:00:00Z"}],
+        })
+        assert "comments=1 (0 newer than the doc, by file mtime)" in " ".join(
+            block(out, "CLAWGATE")), out
 
     def test_an_UNCOMMITTED_doc_falls_back_to_mtime_AND_says_so(self, tmp_path, stubs):
         """The fallback is honest rather than silent: an untracked doc has no
@@ -1414,6 +1620,28 @@ class TestSkillsAndCodeAgree:
             "cannot have been looking — the skill is supposed to warn about it."
         )
 
+    def test_every_CLOCK_the_script_can_print_is_documented(self):
+        """🔴 DERIVED FROM THE SCRIPT, not restated. The skill enumerated two
+        clock names; the branch that added `on <ref>` did not update it, and the
+        one that added `UNDATED` would not have either — a reader told there are
+        two, shown a third, has to guess what it means. Same shape as
+        test_handoff_doc.py's exit-code sweep: scrape what the code can emit and
+        require the doc to mention each."""
+        src = RESUME.read_text(encoding="utf-8")
+        # Every `clock="…"` assignment ANYWHERE on a line (they are not all at
+        # the start of one), truncated at the first interpolation — the STATIC
+        # prefix is what a skill can carry.
+        emitted = {re.split(r"\$", m)[0].strip().rstrip("(").strip()
+                   for m in re.findall(r'clock="([^"]*)"', src)}
+        emitted.discard("")
+        assert len(emitted) >= 3, f"the scraper found too few clocks: {emitted}"
+        doc = RESUME_SKILL.read_text(encoding="utf-8")
+        for clock in sorted(emitted):
+            assert clock in doc, (
+                f"resume-state.sh can print the clock {clock!r} and "
+                f"claude/skills/resume/SKILL.md never mentions it."
+            )
+
     def test_the_pin_can_report_absence(self):
         """NEGATIVE CONTROL on the instrument itself."""
         doc = HANDOFF_SKILL.read_text(encoding="utf-8")
@@ -1455,11 +1683,26 @@ class TestSkillsAndCodeAgree:
             r'(?:^|[;&|(]|\$\()\s*(?:cat|grep|head|tail|sed|awk|wc|jq)\b[^\n]*"\$HANDOFF"'
             r'|<\s*"\$HANDOFF"'
         )
+        # 🔴 …AND THE LAUNDERED FORM, which is how the THIRD instance hid from
+        # the first version of this guard: `handoff_says_inflight "$num"
+        # "$HANDOFF"` reads the file inside a helper that merely *takes a path*,
+        # so no content-reading command appears on the line at all — and it sat
+        # inside `git_pr_block`, a function already in the path ledger, whose
+        # comment described only its OTHER `$HANDOFF` use. Green 141/141.
+        launderers = laundered_readers(src)
+        assert not launderers, (
+            "a helper is handed $HANDOFF (a PATH) and reads its CONTENT — so the "
+            "caller's text and this helper's text can be different copies of the "
+            "document:\n"
+            + "\n".join(f"  {n}: {h}" for n, hs in launderers for h in hs)
+            + "\n  Give the helper the TEXT instead; that removes the class from "
+              "it permanently."
+        )
         # `[ -n "$HANDOFF" ]` asks whether a doc resolved AT ALL. It opens
         # nothing, so it is neither a content read nor a file access, and every
         # block legitimately does it.
         presence_re = re.compile(r'\[\s*-[nz]\s+"\$HANDOFF"\s*\]')
-        fn_re = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*\(\)\s*\{")
+        fn_re = fn_re_top
         fn = "(top level)"
         content_hits, path_hits = [], []
         for i, line in enumerate(src, 1):
@@ -1486,16 +1729,58 @@ class TestSkillsAndCodeAgree:
         # The ledger: every PATH use, by function. Each is a use of the NAME,
         # not of the bytes, so it is compatible with the rule above — but a new
         # one must be added here deliberately.
-        assert sorted({f for f, _n, _l in path_hits}) == [
-            # dates the doc (`git log … -- "$HANDOFF"`, `stat -c %Y`)
-            "clawgate_block",
+        #
+        # 🔴 COUNTED PER FUNCTION, NOT JUST NAMED. A set of function names let a
+        # SECOND use appear inside a function already on the list — which is
+        # exactly how the laundered read hid: `git_pr_block` was ledgered for its
+        # `basename` use, and its other `$HANDOFF` use (the one handed to a
+        # helper) inherited that approval. A count makes every new use its own
+        # review.
+        counts: dict[str, int] = {}
+        for f, _n, _l in path_hits:
+            counts[f] = counts.get(f, 0) + 1
+        assert counts == {
+            # dates the doc: `git log … -- "$HANDOFF"` (local branch, only when
+            # the working-tree copy IS the chosen one) and the `stat -c %Y`
+            # fallback beneath it
+            "clawgate_block": 2,
             # prints `handoff: $(basename …)`
-            "git_pr_block",
-            # resolves `rel` and compares against the ref
-            "handoff_freshness",
-            # derives $REPO from the path when an explicit doc is passed
-            "resolve",
-        ], sorted(path_hits)
+            "git_pr_block": 1,
+            # resolves `rel` for the ref comparison
+            "handoff_freshness": 1,
+            # derives $REPO from the path when an explicit doc is passed (twice:
+            # `git -C $(dirname …)` and the plain-dirname fallback)
+            "resolve": 2,
+        }, sorted(path_hits)
+
+    def test_the_laundered_read_scan_can_actually_find_one(self):
+        """🔴 POSITIVE CONTROL, and it is not decoration: the FIRST version of
+        this scan returned an empty list for the very shape it was written for
+        (`re.finditer` returns non-overlapping matches, so on
+        `if [ … ] && helper "$num" "$HANDOFF"` the only match it found began at
+        `if`, which the keyword filter then discarded). It passed the mutant.
+        A scan wired to nothing is indistinguishable from a clean file, so it is
+        run here against a DECOY that must trip it, and against one that must
+        not."""
+        decoy = [
+            'reader(){',
+            '  grep -q "x" "$1" || return 1',
+            '}',
+            'caller(){',
+            '  if [ "$state" = MERGED ] && reader "$HANDOFF" "$n"; then :; fi',
+            '}',
+        ]
+        assert [n for n, _ in laundered_readers(decoy)] == ["reader"], decoy
+        # …and a helper handed the TEXT is not a launderer, however it reads it
+        clean = [
+            'reader(){',
+            '  printf %s "$2" | grep -q x || return 1',
+            '}',
+            'caller(){',
+            '  reader "$n" "$text"  # $HANDOFF is not passed at all',
+            '}',
+        ]
+        assert laundered_readers(clean) == []
 
     def test_resume_state_sources_the_shared_parser_rather_than_copying_it(self):
         """🔴 ONE RULE, ONE PLACE. The writer's "is a field already there?" and
@@ -1711,6 +1996,47 @@ class TestFrontMatterSurvivesTheMerge:
         base = "# Handoff: sample — 2026-08-19\n\n## State now\n- x\n"
         report = hd.merge_report(base, "# Handoff: sample — 2026-08-21\n\n## State now\n- y\n")
         assert report.dropped == (), report.dropped
+
+    def test_the_drop_report_does_not_tell_the_author_to_DISABLE_the_field(self):
+        """🔴 NEW-3. The standing rule (f) remedy is "move them under an APPEND
+        heading" — and `clawgate_task_field` only parses a block whose `---` is
+        LINE 1. An author who obeys it moves the field somewhere no reader
+        parses, and /resume then reports the doc as naming no task: the silent
+        disable this whole change exists to prevent, arrived at by following the
+        tool's own advice. The address was right; the label and the advice were
+        not, so this class gets its own heading and its own remedy."""
+        report = hd.dropped_durable_report(
+            hd.merge_report(BASE_DOC, "---\ntitle: other\n---\n## State now\n- x\n").dropped
+        )
+        assert "RESTORE IT AT LINE 1" in report, report
+        assert "Move them under an APPEND heading" not in report, report
+        assert "recorded clawgate task" in report, report
+        assert "(front matter):2:" in report, report
+
+    def test_BOTH_report_blocks_render_when_both_classes_are_dropped(self):
+        """…and splitting them must not lose either. An ordinary durable line
+        and the field, dropped in the same update, produce both blocks with
+        their own remedies."""
+        base = (
+            "---\nclawgate-task: 193\n---\n# H\n\n"
+            "## State now\n- MEASURED 2026-08-18: the queue drains at 3/s\n- x\n"
+        )
+        report = hd.dropped_durable_report(
+            hd.merge_report(base, "---\ntitle: other\n---\n## State now\n- y\n").dropped
+        )
+        assert "RESTORE IT AT LINE 1" in report
+        assert "Move them under an APPEND heading" in report
+        assert "MEASURED 2026-08-18" in report
+        assert report.count("🔴") == 2, report
+
+    def test_an_ordinary_durable_drop_keeps_the_ORIGINAL_remedy(self):
+        """NEGATIVE CONTROL: the new heading must not swallow the old class."""
+        base = "# H\n\n## State now\n- MEASURED 2026-08-18: the queue drains at 3/s\n"
+        report = hd.dropped_durable_report(
+            hd.merge_report(base, "## State now\n- y\n").dropped
+        )
+        assert "Move them under an APPEND heading" in report
+        assert "RESTORE IT AT LINE 1" not in report
 
     def test_the_two_languages_spell_the_key_identically(self):
         """🔴 A SEAM PIN ACROSS LANGUAGES. The python merger and the bash reader
