@@ -1,7 +1,5 @@
 """The activation ORDER, measured from the evaluated DAG rather than from prose.
 
-🔴 WHY THIS DIRECTORY EXISTS AT ALL, and why this file is not in scripts/tests.
-
 `home.activation.reclaimManagedPaths` DELETES files and relies on the very next
 step relinking them. Between its `rm` and linkGeneration's `ln` the reclaimed
 files exist NOWHERE on disk, so every activation step inside that window can
@@ -32,15 +30,39 @@ This file closes both by asking NIX. It evaluates the flake's real
 — the same function that orders the activation script — and asserts the
 property on the RESULT.
 
-🔴 IT CANNOT BE HERMETIC, and pretending otherwise is the failure mode this repo
-has already removed twice (see run-tests.sh's EXPECTED_SKIPS block). Evaluating
-the flake needs nixpkgs and home-manager out of the store plus `nix-command`;
-the nix BUILD SANDBOX has a `nix` binary with `nix-command` disabled and none of
-those inputs, so the eval errors there. A guard that means one thing on a dev
-host and NOTHING in the tier that gates merges is worse than no guard. So this
-is a DEV-HOST target: `run-tests.sh --set all` runs it, which is what
-`githooks/tests-on-push.sh` runs on every push, and it FAILS rather than skips
-when it cannot measure.
+🔴 THIS FILE USED TO SAY "IT CANNOT BE HERMETIC", AND THAT CLAIM WAS WRONG —
+recorded because it was believed for long enough to matter. The true half:
+`nix eval` genuinely cannot RUN in the nix build sandbox, whose `nix` binary has
+`nix-command` disabled and which has none of the flake's inputs. The step that
+does not follow: the SANDBOX does not have to evaluate anything. The DAG is a
+pure value (names and two lists of names), so `flake.nix` evaluates it at
+flake-eval time through home-manager's own `lib.dag.topoSort` and hands
+`checks.pytests` the result as JSON in `$DEVRC_ACTIVATION_DAG_JSON`.
+
+The cost of the wrong conclusion was measurable, and it is the reason this note
+is this long. As a DEV-HOST-ONLY target this file ran in exactly one tier:
+`run-tests.sh --set all`, i.e. the pre-push hook. `flake.nix` runs
+`--set hermetic`, which never collects a dev-host target. And on 2026-08-21 the
+hook was measured NOT INSTALLED on the workbench (`core.hooksPath` ->
+`.git/hooks`, 14 files, all `*.sample`), so the delete/relink window was pinned
+by nothing at all while four separate comments described this suite as running
+"on every push".
+
+MEASURED 2026-08-21, since the standing worry was that evaluating the
+home-manager DAG needs `--impure`: it does not.
+`nix eval .#homeConfigurations.zach --apply '<topoSort>'` succeeds in PURE mode.
+The `--impure` in the fallback below belongs to `builtins.getFlake` on an
+unlocked local path, not to this configuration.
+
+TWO SOURCES, ONE EVALUATION, AND NEITHER IS A SKIP:
+  * `$DEVRC_ACTIVATION_DAG_JSON` — set by flake.nix. The only thing that can
+    work in the build sandbox.
+  * `nix eval --impure` on the working tree — the dev-host fallback, and
+    strictly MORE informative there because it sees uncommitted edits to
+    nix/home.nix.
+If the variable is set and unreadable, or `nix` is missing when it is not, this
+FAILS. A guard that means one thing on a dev host and nothing in the tier that
+gates merges is worse than no guard — that part of the old note stands.
 """
 from __future__ import annotations
 
@@ -65,6 +87,12 @@ UPPER = "linkGeneration"
 # every "nothing is in the window" assertion below by having no window at all.
 MIN_PLAUSIBLE_ENTRIES = 8
 
+# The seam between this file and flake.nix. Named once, here, and asserted
+# against flake.nix's own text by `test_the_hermetic_tier_INJECTS_the_dag` —
+# each side is invisible to the other and a typo on either would silently
+# reinstate the dev-host-only behaviour this file was moved out of.
+DAG_JSON_ENV = "DEVRC_ACTIVATION_DAG_JSON"
+
 _EXPR = """
 let
   f = builtins.getFlake ("path:" + %s);
@@ -77,20 +105,58 @@ in {
 """
 
 
+def _dag_from_json(text, source):
+    """Validate and unpack one DAG document, whichever source produced it.
+
+    ONE validator for BOTH sources on purpose: an injected file and a live eval
+    are two ways to obtain the same value, and a check that ran on only one of
+    them would leave the other able to hand this file `{}` unnoticed.
+    """
+    data = json.loads(text)
+    order, edges = data["order"], data["edges"]
+    assert len(order) >= MIN_PLAUSIBLE_ENTRIES, (
+        "the activation DAG from %s has only %d step(s): %s. A real "
+        "configuration has many more, so this is a broken reader, and a broken "
+        "reader makes every window assertion below vacuously true."
+        % (source, len(order), order)
+    )
+    assert sorted(order) == sorted(edges), (
+        "topoSort dropped or invented steps (%s): sorted order %s vs sorted "
+        "DAG %s" % (source, sorted(order), sorted(edges))
+    )
+    return order, edges
+
+
 def _nix_dag():
     """The evaluated activation DAG plus home-manager's own topological order.
 
     Uses `c.lib.dag.topoSort`, the function home-manager itself calls to order
     the activation script — not a reimplementation here, which would pin this
     test's idea of the sort instead of the one that ships.
+
+    Source 1 is `$DEVRC_ACTIVATION_DAG_JSON`, written by flake.nix at
+    flake-eval time. It is what makes this suite hermetic; see the module
+    docstring. Source 2 is a live `nix eval` of the working tree.
     """
+    injected = os.environ.get(DAG_JSON_ENV)
+    if injected:
+        p = Path(injected)
+        assert p.is_file(), (
+            "%s is set to %r, which is not a readable file. That is a WIRING "
+            "failure and NOT a reason to fall back: inside the nix build "
+            "sandbox the fallback cannot work either (that `nix` has "
+            "nix-command disabled), so a silent fallback would turn a broken "
+            "injection into a confusing eval error instead of this message."
+            % (DAG_JSON_ENV, injected)
+        )
+        return _dag_from_json(p.read_text(), "%s=%s" % (DAG_JSON_ENV, injected))
+
     exe = shutil.which("nix")
     assert exe, (
-        "`nix` is not on PATH. This test measures the ACTIVATION ORDER by "
-        "evaluating the flake; without nix it cannot measure anything, and a "
-        "SKIP here would leave the delete/relink window pinned by nothing at "
-        "all — which is the state this file was written to end. It is a "
-        "dev-host target for exactly this reason (run-tests.sh DEVHOST_TARGETS)."
+        "`nix` is not on PATH and %s is unset, so this test has NO source for "
+        "the activation DAG. That is not a pass and must never become a skip: "
+        "it would leave the delete/relink window pinned by nothing at all, "
+        "which is the state this file was written to end." % DAG_JSON_ENV
     )
     env = dict(os.environ)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -104,19 +170,7 @@ def _nix_dag():
         "not a pass: nothing measured the delete/relink window this run.\n"
         "--- stderr ---\n%s" % (p.returncode, p.stderr[-4000:])
     )
-    data = json.loads(p.stdout)
-    order, edges = data["order"], data["edges"]
-    assert len(order) >= MIN_PLAUSIBLE_ENTRIES, (
-        "the evaluated activation DAG has only %d step(s): %s. A real "
-        "configuration has many more, so this is a broken reader, and a broken "
-        "reader makes every window assertion below vacuously true."
-        % (len(order), order)
-    )
-    assert sorted(order) == sorted(edges), (
-        "topoSort dropped or invented steps: sorted order %s vs sorted DAG %s"
-        % (sorted(order), sorted(edges))
-    )
-    return order, edges
+    return _dag_from_json(p.stdout, "nix eval --impure %s" % REPO_ROOT)
 
 
 def window(order, lower, upper):
@@ -273,3 +327,72 @@ def test_the_vanished_bound_reader_reports_a_name_the_dag_lacks():
     assert missing_bounds(edges, (UPPER, ENTRY)) == [], (
         "the reader reports a name that IS present — it would fail on every "
         "healthy tree, which is a permanently-red gate rather than a guard")
+
+
+# --- the SEAM: this reader and flake.nix's writer ---------------------------- #
+
+def test_the_hermetic_tier_INJECTS_the_dag():
+    """🔴 A SEAM NEITHER SIDE CAN SEE. This file can read an injected DAG;
+    flake.nix has to be the thing that injects it. Each half is hermetically
+    testable on its own and the pair can still be broken: rename the variable on
+    one side and every test here still passes — on a DEV HOST, by silently
+    falling back to `nix eval`. The tier that would notice is the nix sandbox,
+    where the fallback cannot work, and that is exactly the tier nobody runs by
+    hand.
+
+    Asserted as a LEDGER of the two facts that must agree — the variable name
+    and the derivation that produces its value — because a `"DEVRC" in flake`
+    style check is walkable by any unrelated mention. The behavioural half is
+    the derivation build itself: `nix build .#checks.x86_64-linux.pytests`
+    executes this suite with the variable set and no usable `nix eval`, so a
+    broken injection is a RED BUILD rather than a quiet fallback.
+    """
+    flake = (REPO_ROOT / "flake.nix").read_text()
+    assert "export %s=${activationDagJson}" % DAG_JSON_ENV in flake, (
+        "flake.nix does not export %s from the `activationDagJson` binding. "
+        "Without it checks.pytests runs this suite with no DAG source, and in "
+        "the sandbox that is a hard failure — but on a dev host it would "
+        "silently fall back to `nix eval` and look fine." % DAG_JSON_ENV)
+    assert "activationDagJson = pkgs.writeText" in flake, (
+        "the `activationDagJson` derivation is gone from flake.nix, so the "
+        "variable above is exported from nothing")
+    assert "lib.dag.topoSort" in flake, (
+        "flake.nix no longer sorts the DAG with home-manager's own topoSort — "
+        "the injected order would then be this repo's idea of the order rather "
+        "than the one the switch executes")
+
+
+def test_the_injected_json_path_is_the_one_actually_read(tmp_path, monkeypatch):
+    """The behavioural half of the seam, on THIS side of it: prove the reader
+    honours the variable rather than always shelling out.
+
+    Driven with a synthetic DAG whose step names appear in no real
+    configuration, so a reader that ignored the variable and evaluated the real
+    flake would return the real names and fail here. That is the positive
+    control — without it, a `_nix_dag` that dropped the injected branch entirely
+    would still pass every other test in this file on a dev host.
+    """
+    synthetic = {
+        "order": ["s%d" % i for i in range(MIN_PLAUSIBLE_ENTRIES)],
+        "edges": {"s%d" % i: {"before": [], "after": []}
+                  for i in range(MIN_PLAUSIBLE_ENTRIES)},
+    }
+    p = tmp_path / "dag.json"
+    p.write_text(json.dumps(synthetic))
+    monkeypatch.setenv(DAG_JSON_ENV, str(p))
+    order, edges = _nix_dag()
+    assert order == synthetic["order"], (
+        "the reader did not use %s — it returned %s, which is not the "
+        "synthetic DAG this test wrote" % (DAG_JSON_ENV, order))
+    assert set(edges) == set(synthetic["edges"])
+
+
+def test_an_unreadable_injected_path_FAILS_rather_than_falling_back(tmp_path, monkeypatch):
+    """🔴 THE FALLBACK MUST NOT RESCUE A BROKEN INJECTION. If the variable is set
+    but names nothing, this is a wiring bug in flake.nix; quietly evaluating the
+    working tree instead would make the hermetic tier untestable from the dev
+    host, which is the "green in the tier I ran, red in the tier that gates
+    merges" shape claude/RULES.md names."""
+    monkeypatch.setenv(DAG_JSON_ENV, str(tmp_path / "does-not-exist.json"))
+    with pytest.raises(AssertionError, match="not a readable file"):
+        _nix_dag()

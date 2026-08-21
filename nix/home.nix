@@ -1654,13 +1654,25 @@ in
   #   * scripts/tests/test_reclaim_managed_paths.py::test_the_activation_entry_
   #     _DECLARES_entryBetween_installPackages_and_linkGeneration reads THIS FILE
   #     AS TEXT. It pins the SPELLING, in both tiers, and nothing more.
-  #   * scripts/tests-devhost/test_activation_order.py evaluates the real DAG and
-  #     runs it through home-manager's own lib.dag.topoSort, asserting that ZERO
+  #   * scripts/tests/test_activation_order.py evaluates the real DAG and runs it
+  #     through home-manager's own lib.dag.topoSort, asserting that ZERO
   #     activation steps sort between installPackages and linkGeneration — and
   #     that both bound NAMES still exist, because topoSort silently IGNORES an
   #     unknown name in `before`/`after` (modules/lib/dag.nix) rather than
-  #     erroring. It cannot run in the nix build sandbox, so it is a dev-host
-  #     target (`run-tests.sh --set all`, i.e. every push).
+  #     erroring. `nix eval` cannot RUN in the build sandbox, so flake.nix
+  #     evaluates the DAG at flake-eval time and injects it
+  #     (`DEVRC_ACTIVATION_DAG_JSON`); the suite is HERMETIC and runs in every
+  #     tier that runs the one above.
+  #
+  # 🔴 UNTIL 2026-08-21 THE LINE ABOVE SAID "dev-host target … i.e. every push",
+  # and that was false twice over: `nix build .#checks…pytests` runs
+  # `--set hermetic`, which never collected a dev-host target, and the pre-push
+  # hook that runs `--set all` was measured NOT INSTALLED on the workbench
+  # (core.hooksPath -> .git/hooks, 14 files, all *.sample). Scope as it stands
+  # now, stated rather than implied: both guards run in `run-tests.sh` (either
+  # set) and in `nix build .#checks.x86_64-linux.pytests`. This repo has NO CI —
+  # there is no .github/ — so nothing runs either automatically except
+  # githooks/tests-on-push.sh, which is installed by hand per checkout.
   home.activation.reclaimManagedPaths =
     lib.hm.dag.entryBetween ["linkGeneration"] ["installPackages"] ''
     reclaimFiles="$(readlink -e "$newGenPath/home-files" 2>/dev/null || true)"

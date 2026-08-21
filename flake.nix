@@ -100,6 +100,61 @@
         pkgs.gnugrep pkgs.curl pkgs.nodejs pkgs.nix pkgs.opencode pkgs.logrotate
         pkgs.rsync pkgs.zsh
       ];
+
+      # ---------------------------------------------------------------------
+      # THE HOME-MANAGER CONFIGURATION, bound here rather than written inline
+      # under `homeConfigurations` — because the ACTIVATION GATE below needs the
+      # same value and a flake output cannot be read from a sibling output
+      # without going through `self`.
+      # ---------------------------------------------------------------------
+      zachHome = home-manager.lib.homeManagerConfiguration {
+        inherit pkgs;
+        extraSpecialArgs = { isNixOS = true; };
+        modules = [
+          ./nix/home.nix
+          {
+            home.username = "zach";
+            home.homeDirectory = "/home/zach";
+          }
+        ];
+      };
+
+      # ---------------------------------------------------------------------
+      # 🔴 THE ACTIVATION DAG, EVALUATED HERE SO THE GATE CAN BE HERMETIC.
+      #
+      # scripts/tests/test_activation_order.py asserts that ZERO activation
+      # steps sort between `installPackages` and `linkGeneration` — the window in
+      # which reclaimManagedPaths' deleted files exist nowhere on disk. It used
+      # to be a DEV-HOST-ONLY target, on the argument that the property "CANNOT
+      # be hermetic". That argument was true about one mechanism and false as a
+      # conclusion, and the difference had a measurable cost: `checks.pytests`
+      # runs `run-tests.sh --set hermetic`, which never collects a dev-host
+      # target, so the only tier that ran it was a pre-push hook that (measured
+      # 2026-08-21) was not installed on either host.
+      #
+      # What is true: `nix eval` cannot RUN in the build sandbox — the `nix`
+      # binary there has `nix-command` disabled and none of the flake's inputs.
+      # What does not follow: the sandbox does not have to evaluate anything.
+      # The DAG is a PURE VALUE — names, `before` lists and `after` lists — so it
+      # is evaluated HERE, at flake-eval time, by home-manager's own
+      # `lib.dag.topoSort`, and handed to the derivation as JSON.
+      #
+      # MEASURED 2026-08-21 before this was written, because the stated worry was
+      # that the eval needs `--impure`: it does not. `nix eval
+      # .#homeConfigurations.zach --apply '…topoSort…'` succeeds in PURE mode.
+      # The `--impure` in the test's dev-host fallback is a property of
+      # `builtins.getFlake` on an unlocked local path, not of this configuration.
+      #
+      # This pulls NO store paths into the derivation's closure — every value in
+      # the JSON is a string.
+      # ---------------------------------------------------------------------
+      activationDagJson = pkgs.writeText "devrc-activation-dag.json"
+        (builtins.toJSON (
+          let c = zachHome.config; in {
+            order = map (e: e.name) (c.lib.dag.topoSort c.home.activation).result;
+            edges = builtins.mapAttrs (n: v: { before = v.before; after = v.after; })
+                                      c.home.activation;
+          }));
     in
     {
       # ---------------------------------------------------------------------
@@ -134,17 +189,9 @@
         playwright-driver-1_57 = pkgs157.playwright-driver;      # 1.57.0 → chromium-1200
       };
 
-      homeConfigurations."zach" = home-manager.lib.homeManagerConfiguration {
-        inherit pkgs;
-        extraSpecialArgs = { isNixOS = true; };
-        modules = [
-          ./nix/home.nix
-          {
-            home.username = "zach";
-            home.homeDirectory = "/home/zach";
-          }
-        ];
-      };
+      # Defined in the outer `let` as `zachHome` so `activationDagJson` can read
+      # the SAME evaluation the switch uses — see that binding.
+      homeConfigurations."zach" = zachHome;
 
       # ---------------------------------------------------------------------
       # Test gate. `nix flake check` (and any future CI / `ship.sh --check`)
@@ -323,6 +370,13 @@
             patchShebangs src/scripts
             export HOME="$TMPDIR/home"
             mkdir -p "$HOME"
+            # 🔴 THE ACTIVATION DAG, INJECTED. scripts/tests/test_activation_order.py
+            # reads this file instead of shelling out to `nix eval`, which is
+            # what lets the delete/relink-window guard run in the tier that
+            # gates merges. Unset it and that test FAILS (it does not skip): the
+            # sandbox's `nix` has `nix-command` disabled, so its fallback path
+            # errors. See the `activationDagJson` binding in the outer `let`.
+            export DEVRC_ACTIVATION_DAG_JSON=${activationDagJson}
             cd src
             # The runner asserts a tool precondition, a pinned expected-skip set,
             # per-target collected-test floors (and a global floor derived as

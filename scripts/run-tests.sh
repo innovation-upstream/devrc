@@ -406,36 +406,38 @@ HERMETIC_TARGETS=(
 )
 
 # --- DEV-HOST-ONLY set ---------------------------------------------------------
-# Targets deferred to the pre-push tier. `--set all` runs them, which is what
-# githooks/tests-on-push.sh runs on every push; the hermetic flake gate does not.
+# Targets deferred to the pre-push tier: `--set all` runs them, the hermetic
+# flake gate does not.
+#
+# 🔴 IT IS EMPTY, AND THAT IS THE CONCLUSION OF A MEASUREMENT, not an oversight.
+# Its one occupant was `scripts/tests-devhost` (the activation-DAG guard), placed
+# here on the argument that it "CANNOT be hermetic". That argument was true about
+# a MECHANISM — `nix eval` cannot run in the build sandbox, whose `nix` has
+# `nix-command` disabled and which has none of the flake's inputs — and false as
+# a conclusion, because the sandbox does not have to evaluate anything. The DAG
+# is a pure value, so flake.nix now evaluates it and injects the JSON
+# (`DEVRC_ACTIVATION_DAG_JSON`); the suite lives in `scripts/tests` and runs in
+# BOTH tiers.
+#
+# 🔴 WHY THAT MATTERED ENOUGH TO REDO. A dev-host target runs in exactly ONE
+# place: `--set all`, i.e. githooks/tests-on-push.sh. Measured 2026-08-21 on the
+# workbench, that hook was NOT INSTALLED (`core.hooksPath` -> `.git/hooks`, 14
+# files, all `*.sample`) and its file filter would have skipped a
+# `nix/home.nix`-only push anyway. So the tier was a single point of failure
+# with no second reader, and the guard it carried had never executed on a push.
+#
+# Keep the mechanism: `test_a_devhost_target_is_selected_by_set_all_and_NOT_by_
+# set_hermetic` drives a PATCHED runner with throwaway targets, so both halves
+# stay pinned while this list is empty. Before adding an entry here, ask the
+# question that was skipped last time: can the value it needs be COMPUTED
+# outside the sandbox and handed in? If yes, it belongs in HERMETIC_TARGETS.
+#
+# 🔴 THE CLOSING `)` IS ON ITS OWN LINE AND MUST STAY THERE. `scripts/testlib/
+# runner_patch.py` rewrites this array with `^DEVHOST_TARGETS=\(.*?^\)`, and a
+# one-line `DEVHOST_TARGETS=()` gives that pattern no `)` in column 0 to stop
+# at — it runs on and eats the next array (TARGET_FLOORS) instead. Measured
+# 2026-08-21: `failed to replace TARGET_FLOORS in the copied runner`.
 DEVHOST_TARGETS=(
-  # 🔴 THE FIRST OCCUPANT, and it is here because it CANNOT be hermetic — not
-  # because that is convenient. It evaluates the flake's real activation DAG
-  # (`nix eval --impure`) and runs it through that module set's own
-  # `lib.dag.topoSort`, to assert that ZERO activation steps run between
-  # `installPackages` and `linkGeneration` — the window in which
-  # reclaimManagedPaths' deleted files exist nowhere on disk. The suite's own
-  # header carries the full argument; it is not repeated here, and the HM
-  # binary's NAME is deliberately not spelled anywhere in this file (the
-  # hazard-vocabulary scan in test_no_real_launchers.py reads top-level scripts
-  # as TEXT and cannot tell a comment from a command).
-  #
-  # The nix BUILD SANDBOX has a `nix` binary with `nix-command` DISABLED and
-  # none of the flake's inputs, so the eval errors there. Putting it in
-  # HERMETIC_TARGETS would either red the merge gate or — worse — teach someone
-  # to guard it on an environment check, which is the "means one thing on a dev
-  # host and nothing in the tier that gates merges" shape this file's
-  # EXPECTED_SKIPS block records REMOVING twice. So it is declared dev-host
-  # rather than silently skipped, and it FAILS rather than skips when it cannot
-  # measure.
-  #
-  # What it replaces: a guard whose comment, docstring and commit message all
-  # claimed it read the BUILT activation script. It read nix/home.nix as TEXT,
-  # so the property survived both a new entry landing in the window and
-  # `topoSort` silently ignoring a bound name that upstream had renamed. The
-  # text pin stays — it is cheap and it runs in both tiers — but it no longer
-  # claims to be this.
-  scripts/tests-devhost
 )
 
 TARGETS=("${HERMETIC_TARGETS[@]}")
@@ -1368,13 +1370,15 @@ TARGET_FLOORS=(
   #   is only 14. Raise the TARGET_FLOORS entry to "scripts/opencode/tests|86"
   # (which is `_suggested_floor 90` = 90 - min(50, max(1, 90/20 = 4)) = 86.)
   "scripts/opencode/tests|86"
-  # 2026-08-21, the DEV-HOST target (see DEVHOST_TARGETS above): 5 collected —
-  # the evaluated-DAG pair plus the two reader validations (`window()` seeing an
-  # inserted step, `missing_bounds()` seeing a vanished bound name). Floored at
-  # `_suggested_floor 5` = 5 - min(50, max(1, 0)) = 4. It is NOT in the hermetic
-  # sum, so `--set hermetic` derives the same global floor it did before this
-  # branch, and only `--set all` (the pre-push tier) adds it.
-  "scripts/tests-devhost|4"
+  # 🔴 THERE IS NO `scripts/tests-devhost` ENTRY, and the number that used to be
+  # here is a worked example of why a floor must be MEASURED and not counted by
+  # hand. It read "5 collected … `_suggested_floor 5` = 4", written from an
+  # enumeration in prose; `pytest --collect-only` reported FOUR, and the prose's
+  # own list added to four. A floor of 4 against 4 collected is zero slack — one
+  # `-k`, one rename, one import error away from a red gate that says nothing
+  # about the code. The suite is now hermetic and lives inside the `scripts/tests`
+  # directory target, so its count is carried by that entry's floor and its slack
+  # (measured 2026-08-21: 6831 collected against floor 6459).
 )
 
 # The allowance rule, in one place, used by BOTH the drift message and anyone

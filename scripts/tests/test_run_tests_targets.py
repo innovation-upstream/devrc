@@ -326,21 +326,39 @@ def test_a_devhost_target_is_selected_by_set_all_and_NOT_by_set_hermetic(tmp_pat
     )
 
 
-def test_the_activation_order_suite_is_declared_DEV_HOST_and_not_hermetic():
-    """🔴 THE ONE ENTRY, and where it must NOT be.
+def test_the_activation_order_suite_is_gated_by_the_HERMETIC_tier():
+    """🔴 THIS TEST USED TO ASSERT THE OPPOSITE, and the inversion is the finding.
 
-    scripts/tests-devhost evaluates the flake with `nix eval --impure`. The nix
-    build sandbox has a `nix` binary with `nix-command` disabled and none of the
-    flake's inputs, so moving this into HERMETIC_TARGETS reds the merge gate —
-    and "fixing" that with an environment-conditional skip is the shape
-    run-tests.sh's EXPECTED_SKIPS block records REMOVING twice.
+    It pinned `scripts/tests-devhost` INTO the dev-host list, on the argument
+    that the activation-DAG guard "cannot be hermetic" because `nix eval` cannot
+    run in the build sandbox. The mechanism was real; the conclusion was not —
+    the DAG is a pure value, so flake.nix evaluates it and injects the JSON, and
+    the suite is now `scripts/tests/test_activation_order.py`.
+
+    What the old arrangement cost, measured 2026-08-21: a dev-host target runs
+    in ONE tier (`--set all`, the pre-push hook), that hook was not installed on
+    the workbench, and its file filter excluded `nix/` — the very directory the
+    guard watches. A test pinned into a tier that does not run is not a weaker
+    guard than a hermetic one; it is not a guard.
+
+    So the assertion is now that the file exists in the hermetic tier's reach
+    and NOT in the dev-host list. `scripts/tests` is a directory target, so
+    membership is checked by the file being under it — a name check against the
+    list alone would pass for a file that had been deleted.
     """
-    assert "scripts/tests-devhost" in _devhost_targets(), (
-        "the activation-order suite is no longer a dev-host target. If it moved "
-        "to HERMETIC_TARGETS it cannot evaluate the flake in the sandbox; if it "
-        "was dropped entirely, ZERO steps in the delete/relink window is once "
-        "again pinned only by a text match on nix/home.nix. Dev-host list: %s"
-        % _devhost_targets())
-    assert "scripts/tests-devhost" not in _hermetic_targets(), (
-        "scripts/tests-devhost is in the HERMETIC list too — it will red the "
-        "nix-sandbox gate that CI runs")
+    suite = REPO_ROOT / "scripts" / "tests" / "test_activation_order.py"
+    assert suite.is_file(), (
+        "the activation-order suite is gone. ZERO steps in the delete/relink "
+        "window would then be pinned only by a text match on nix/home.nix, "
+        "which is the state PR #630 exists to end.")
+    assert "scripts/tests" in _hermetic_targets(), (
+        "scripts/tests is no longer a hermetic target, so the activation-order "
+        "suite is collected by no tier: %s" % _hermetic_targets())
+    assert "scripts/tests-devhost" not in _devhost_targets(), (
+        "scripts/tests-devhost is back in the dev-host list. That tier runs "
+        "only under `--set all` — the pre-push hook — which is exactly the "
+        "single point of failure this was moved out of: %s" % _devhost_targets())
+    assert "DEVRC_ACTIVATION_DAG_JSON" in (REPO_ROOT / "flake.nix").read_text(), (
+        "flake.nix no longer injects the evaluated DAG, so the suite above "
+        "cannot measure anything in the sandbox — it would fall back to a "
+        "`nix eval` that cannot work there.")

@@ -358,12 +358,19 @@ def test_the_activation_entry_DECLARES_entryBetween_installPackages_and_linkGene
         the name that no longer exists, and this test stays green.
 
     The property itself is measured in
-    `scripts/tests-devhost/test_activation_order.py`, which evaluates the real
-    DAG through home-manager's own `lib.dag.topoSort`. It cannot run in the nix
-    build sandbox (no `nix-command`, no flake inputs), so it is a DEV-HOST target
-    — `run-tests.sh --set all`, which is every push. This one stays because it is
-    free, runs in both tiers, and names the exact expression a reader must edit;
-    it just no longer claims to be the other one.
+    `scripts/tests/test_activation_order.py`, which evaluates the real DAG
+    through home-manager's own `lib.dag.topoSort`. `nix eval` cannot RUN in the
+    build sandbox (no `nix-command`, no flake inputs), so flake.nix evaluates
+    the DAG at flake-eval time and injects it as
+    `$DEVRC_ACTIVATION_DAG_JSON` — that suite is HERMETIC and runs wherever this
+    one does. It was a DEV-HOST-ONLY target until 2026-08-21, and the earlier
+    version of this sentence said that tier "is every push", which was false in
+    two ways at once: `nix build .#checks…pytests` runs `--set hermetic` and
+    never collected it, and the pre-push hook that runs `--set all` was not
+    installed on the workbench at all.
+
+    This text pin stays because it is free and names the exact expression a
+    reader must edit; it just no longer claims to be the other one.
 
     🔴 A SEAM, AND THE ONLY THING THAT MAKES rc 19 SELF-CLEARING. drift-check
     rc 19 is not wired to systemd's SuccessExitStatus, which is only defensible
@@ -403,7 +410,7 @@ def test_the_activation_entry_DECLARES_entryBetween_installPackages_and_linkGene
         records failing outright on an imperative-profile conflict.
       * new ordering — installPackages 472, reclaimManagedPaths 502,
         linkGeneration 513, with ZERO activation steps in between.
-    The re-taking is scripts/tests-devhost/test_activation_order.py's job.
+    The re-taking is scripts/tests/test_activation_order.py's job.
 
     🔴 entryBetween PINS BOTH ENDS, and that is not belt-and-braces.
     `entryBefore ["linkGeneration"]` alone gives the entry no lower bound, and

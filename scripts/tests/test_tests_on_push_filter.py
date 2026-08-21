@@ -8,7 +8,8 @@ WHY THIS FILE EXISTS
 
   1. `flake.nix` runs `run-tests.sh --set hermetic`, and `DEVHOST_TARGETS` is
      appended only in the `all` branch — so `nix build .#checks…pytests` never
-     collects `scripts/tests-devhost`.
+     collects a dev-host target. (Fixed in this PR by making that suite
+     hermetic; the tier split itself is unchanged.)
   2. The only automated `--set all` is this hook, and no pre-push hook was
      installed: `core.hooksPath` pointed at `.git/hooks`, which held 14 files,
      all `*.sample`. (Root cause: `githooks/install.sh` could only write the
@@ -17,7 +18,8 @@ WHY THIS FILE EXISTS
   3. Even once installed, the changed-files filter was
      `^(scripts/|flake\\.nix$|flake\\.lock$)`. `nix/` was absent, so a push
      touching only `nix/home.nix` — the file that DECLARES the activation entry
-     `scripts/tests-devhost/test_activation_order.py` measures — printed
+     `scripts/tests/test_activation_order.py` measures
+     (then `scripts/tests-devhost/`) — printed
      "no Python/test/flake changes … skipping the test gate" and exited 0.
 
 Fact 3 is what this file pins, and it pins the SHAPE of the fix rather than the
@@ -135,7 +137,7 @@ def _push_line(repo: Path, base: str) -> str:
 
 def test_a_push_touching_only_nix_home_nix_RUNS_the_gate(pushrepo, tmp_path):
     """🔴 THE REGRESSION. `nix/home.nix` declares every `home.activation` entry,
-    including the one `scripts/tests-devhost/test_activation_order.py` was
+    including the one `test_activation_order.py` was
     written to measure — and it was outside the filter that decides whether
     `--set all` (the only tier that collects that target) runs at all.
 
