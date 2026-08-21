@@ -1627,6 +1627,38 @@ echo "run-tests: activity telemetry isolated for this run (GUARD 8)"
 echo "  ACTIVITY_SPOOL_DIR=$ACTIVITY_SPOOL_DIR"
 echo "  fallback trap      =$SPOOL_TRAP_LOG"
 
+# --- GUARD 9: NO TEST MAY OPERATE ON THE REPO THE SUITE RUNS FROM -------------
+# 🔴 THE THIRD ENFORCEMENT POINT, beside GUARDS 7 and 8 and for the same reason.
+#
+# MEASURED 2026-08-21, on the operator's real clone and on the production
+# remote: a gate run rewrote `refs/heads/main` with fixture commits, DELETED the
+# branch, repointed HEAD at a fixture `trunk`, wrote `core.bare=true`,
+# `user.name=T`, a `core.hooksPath` under `pytest-0/test_install_does_not_
+# depend_o0/` and a `remote.origin.url` under `pytest-0/test_fetch_failure_is_
+# rc40/` — then pushed fixture refs to GitHub.
+#
+# 🔴 THE FIXTURES WERE NOT SLOPPY. Every git fixture in this repo passes
+# `-C <tmp_path>/…`, and `GIT_DIR` OVERRIDES `-C`. One inherited environment
+# variable defeats all of them at once, which is why the fix is an `unset` here
+# and not a patch in fourteen test files. Reproduced exactly on a throwaway
+# clone: with `GIT_DIR` exported, `git -C <tmp>/work branch -D main` deletes the
+# CLONE's main.
+#
+# The names live in `scripts/testlib/gitenv.py::REPO_POINTER_VARS`; this line is
+# the second spelling, needed because the non-pytest targets (HOOK_TESTS,
+# SHELL_TESTS) never load a plugin. `scripts/tests/test_git_repo_isolation.py`
+# pins the two lists against each other in BOTH directions, so they cannot
+# drift apart into a guard that protects twelve targets and not five.
+#
+# UNCONDITIONAL, including over a deliberate ambient value — same argument as
+# GUARD 8's overrides. There is no workflow in which the test suite should be
+# pointed at a repository by inherited environment.
+unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE \
+      GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
+      GIT_NAMESPACE GIT_PREFIX GIT_GRAFT_FILE GIT_SHALLOW_FILE GIT_CONFIG
+echo "run-tests: git repo pointers cleared for this run (GUARD 9)"
+echo "  detector    =-p testlib.gitenv_plugin (per pytest target)"
+
 # "<target>|<sess-from>|<sess-to>|<trap-from>|<trap-to>|<iso-from>|<iso-to>" —
 # three line ranges per target, so every count below is attributed to the target
 # that produced it rather than to the run as a whole.
@@ -1801,10 +1833,11 @@ run_pytest() {
   log="$(mktemp)"
   nl_before="$(_nolaunch_lines)"
   _spool_mark_before
-  # 🔴 `-p testlib.nolaunch_plugin` is GUARD 7 and `-p testlib.spool_plugin` is
-  # GUARD 8 (see each header). Both are on THIS line — the one place every
-  # target is invoked — and not in two dozen conftests.
-  python -m pytest "$d" -q -p no:cacheprovider -p testlib.nolaunch_plugin -p testlib.spool_plugin \
+  # 🔴 `-p testlib.nolaunch_plugin` is GUARD 7, `-p testlib.spool_plugin` is
+  # GUARD 8 and `-p testlib.gitenv_plugin` is GUARD 9 (see each header). All
+  # three are on THIS line — the one place every target is invoked — and not in
+  # two dozen conftests.
+  python -m pytest "$d" -q -p no:cacheprovider -p testlib.nolaunch_plugin -p testlib.spool_plugin -p testlib.gitenv_plugin \
     --no-header -rs >"$log" 2>&1
   rc=$?
   nl_after="$(_nolaunch_lines)"
