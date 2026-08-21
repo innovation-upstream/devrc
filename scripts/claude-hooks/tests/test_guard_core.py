@@ -813,12 +813,27 @@ STASH_CLEAN_ALLOW = [
 
 
 @pytest.mark.parametrize("command", STASH_CLEAN_ALLOW)
-def test_stash_and_clean_neighbours_stay_allowed_under_claude_code(command):
+def test_stash_and_clean_neighbours_stay_allowed_under_claude_code(
+        command, cwd_on_a_feature_branch):
     """INVARIANT GUARD. `git stash list` is the diagnostic RULES tells you to
     run, `git clean -nd` is the one the deny message points at, and the argv
-    parser means quoting the command as an ARGUMENT is not a command."""
-    assert gc.evaluate(command, "claude-code") is None
-    assert gc.evaluate(command, "opencode") is None
+    parser means quoting the command as an ARGUMENT is not a command.
+
+    🔴 THE cwd IS PINNED, and that is not decoration. One row here is a real
+    `git commit`, and check_git_commit_to_main answers a question about the
+    WORLD (what branch is this repo on?) — with no cwd it falls back to the
+    guard PROCESS's own directory, i.e. whatever checkout happens to be running
+    the suite. Measured 2026-08-20: identical commit, `1442 passed` from a
+    worktree on a feature branch and `3 failed, 1439 passed` from a checkout
+    sitting on `main`. Pinning the cwd is the fix rather than dropping the row,
+    because the expectation here is about the STASH/CLEAN parsers, not about
+    branch state — the same reasoning, and the same fix, that
+    test_bash_guard.py's NEUTRAL_CWD already applies to the adapter tier.
+    The mirror assertion (these rows DENY when the cwd is on main) is
+    test_the_allow_fence_commit_rows_are_denied_when_the_cwd_is_on_main.
+    """
+    assert gc.evaluate(command, "claude-code", cwd_on_a_feature_branch) is None
+    assert gc.evaluate(command, "opencode", cwd_on_a_feature_branch) is None
 
 
 # --- the escape hatch ------------------------------------------------------ #
@@ -835,18 +850,30 @@ def test_new_deny_messages_carry_the_quoting_escape_hatch():
         assert "Write tool" in reason, reason
 
 
-def test_the_one_real_quoting_false_positive_is_a_heredoc_body():
+# Hoisted to a module constant so the on-main mirror test can DERIVE its cases
+# from the very rows asserted allowed, rather than restating the string — a
+# second copy is a second thing to forget to update.
+HEREDOC_FALSE_POSITIVE_COMMIT = "git commit -m 'git stash push -m wip'"
+
+
+def test_the_one_real_quoting_false_positive_is_a_heredoc_body(
+        cwd_on_a_feature_branch):
     """The accepted false positive, MEASURED rather than assumed.
 
     The argv parser splits on newlines, so a heredoc body LINE that begins with
     the command is parsed as a command. That is the case the escape hatch is
     for. The same text passed as a single quoted ARGUMENT is one token and is
     correctly allowed — asserted here so the docstring above cannot drift.
+
+    The cwd is pinned for the same reason as the fence above: the closing
+    assertion is a real `git commit`, whose verdict is a fact about the repo the
+    guard is standing in, not about the quoting this test is named for.
     """
     heredoc = "cat > /tmp/doc.md <<'EOF'\ngit stash push -m wip\nEOF"
     reason = _assert_denied_as(heredoc, STASH_REASON_MARK, "claude-code")
     assert "commit -F" in reason
-    assert gc.evaluate("git commit -m 'git stash push -m wip'", "claude-code") is None
+    assert gc.evaluate(HEREDOC_FALSE_POSITIVE_COMMIT, "claude-code",
+                       cwd_on_a_feature_branch) is None
 
 
 # --------------------------------------------------------------------------- #
@@ -1027,13 +1054,18 @@ DEVICE_ALLOW = [
 
 
 @pytest.mark.parametrize("command", DEVICE_ALLOW)
-def test_device_check_neighbours_stay_allowed_under_claude_code(command):
+def test_device_check_neighbours_stay_allowed_under_claude_code(
+        command, cwd_on_a_feature_branch):
     """INVARIANT GUARD. Reads and inspections are how an operator diagnoses the
     thing the deny message tells them to do by hand; blocking those would push
     them toward guessing. `dd if=/dev/sdz of=/tmp/backup.img` is the asymmetry
-    that matters — reading a device is not writing one."""
-    assert gc.evaluate(command, "claude-code") is None
-    assert gc.evaluate(command, "opencode") is None
+    that matters — reading a device is not writing one.
+
+    cwd pinned for the `git commit` row, for the reason spelled out on
+    test_stash_and_clean_neighbours_stay_allowed_under_claude_code.
+    """
+    assert gc.evaluate(command, "claude-code", cwd_on_a_feature_branch) is None
+    assert gc.evaluate(command, "opencode", cwd_on_a_feature_branch) is None
 
 
 # --- the escape hatch ------------------------------------------------------ #
@@ -1595,6 +1627,85 @@ def _mkrepo(path, branch="main", remote="git@github.com:someone/some-repo.git",
         run("add", "f.txt")
         run("commit", "-m", "init")
     return path
+
+
+# --- 8z. THE cwd THE REST OF THIS FILE STANDS IN ---------------------------- #
+# 🔴 An unpinned cwd is an unpinned BRANCH, and a test whose verdict depends on
+# which branch the checkout happens to be on is a test that passes by accident of
+# the environment. Sections 3b and 3c assert whole lists of commands are ALLOWED
+# — and each list carries a real `git commit` row (deliberately: a commit whose
+# MESSAGE names a banned command is the quoting false-positive those sections
+# exist to fence). `gc.evaluate` with no cwd hands check_git_commit_to_main the
+# guard PROCESS's own directory, so those rows silently inherited the suite
+# runner's branch.
+#
+# Measured on 2026-08-20, same commit, only the cwd differing:
+#     cwd on a feature branch   ->  1442 passed
+#     cwd on `main`             ->  3 failed, 1439 passed
+# The guard was right in both runs; the tests were the thing that was unpinned.
+#
+# These are REAL repos rather than a monkeypatched `_git_read`, for the reason
+# argued at the top of this section: stubbing the world would leave the ALLOW
+# assertions green with the check stubbed to a no-op. Module-scoped because the
+# two fences below parametrize ~35 cases between them and each `git init` is a
+# subprocess.
+# Sibling precedent: test_bash_guard.py::NEUTRAL_CWD does the same job for the
+# adapter tier, which is how that tier survived this defect.
+
+@pytest.fixture(scope="module")
+def cwd_on_a_feature_branch(tmp_path_factory):
+    """A real repo, with a remote, on a branch that is NOT main/master/trunk."""
+    return str(_mkrepo(tmp_path_factory.mktemp("cwd-feat") / "repo",
+                       branch="feat/guard-core-fence"))
+
+
+@pytest.fixture(scope="module")
+def cwd_on_main(tmp_path_factory):
+    """The mirror of the above: a real repo, with a remote, on `main`."""
+    return str(_mkrepo(tmp_path_factory.mktemp("cwd-main") / "repo",
+                       branch="main"))
+
+
+COMMIT_TO_MAIN_REASON_MARK = "blocked by your RULES — feature branches only"
+
+# DERIVED from the fences themselves, never restated: a `git commit` row added to
+# either list is covered here automatically, and cannot be pinned to a branch in
+# one direction only.
+ALLOW_FENCE_COMMIT_ROWS = sorted(
+    {c for c in STASH_CLEAN_ALLOW + DEVICE_ALLOW + [HEREDOC_FALSE_POSITIVE_COMMIT]
+     if c.startswith("git commit ")})
+
+
+def test_the_allow_fences_really_carry_a_commit_row():
+    """🔴 POSITIVE CONTROL on the derivation above. An empty parametrize list is
+    a test that covers nothing while reporting green — and this list is built by
+    a string predicate over two lists this test does not own, so it can silently
+    empty out. Three rows exist today: one in each fence, plus the heredoc
+    test's closing assertion."""
+    assert len(ALLOW_FENCE_COMMIT_ROWS) == 3, ALLOW_FENCE_COMMIT_ROWS
+
+
+@pytest.mark.parametrize("policy", ["claude-code", "opencode"])
+@pytest.mark.parametrize("command", ALLOW_FENCE_COMMIT_ROWS)
+def test_the_allow_fence_commit_rows_are_denied_when_the_cwd_is_on_main(
+        command, policy, cwd_on_main):
+    """🔴 THE OTHER HALF, and the control that makes the fences non-vacuous.
+
+    The fences assert these exact commands are ALLOWED from a feature branch. If
+    the pinned cwd were not reaching check_git_commit_to_main at all — a wrong
+    fixture, a dropped argument, the check quietly removed from a policy — those
+    assertions would still be green, for the wrong reason. This asserts the same
+    strings DENY with THIS check's own reason when the only thing that changed is
+    the branch of the repo the guard is standing in.
+
+    Asserted by REASON, not by `is not None`: every row here also contains the
+    text of a banned command inside its commit message (`git stash`, `mkfs`), so
+    a bare truthiness assertion would pass on a neighbouring check's deny.
+    """
+    reason = gc.evaluate(command, policy, cwd_on_main)
+    assert reason is not None, f"{command!r} must be denied from a cwd on main"
+    assert COMMIT_TO_MAIN_REASON_MARK in reason, reason
+    assert "`main`" in reason, reason
 
 
 # --- 8a. harness self-validation (negative + positive control on the FIXTURE) - #
