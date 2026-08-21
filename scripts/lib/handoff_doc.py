@@ -88,7 +88,7 @@ f. A REPLACE THAT DROPS A DURABLE LINE SAYS SO — AND STILL DOES IT. Rule (c)'s
    could stop the write would become a permanently-red gate everyone learns to
    click through. For the same reason it must be SILENT on ordinary churn:
    measured over the 44 real handoff docs in this repo, the predicate flags
-   58 of the 2,626 lines sitting under REPLACE headings (2.2%), so a typical
+   63 of the 2,626 lines sitting under REPLACE headings (2.4%), so a typical
    status replace prints nothing at all.
 
    The "looks durable" question is answered in ONE place, `durable_reason`, and
@@ -214,9 +214,9 @@ _FENCE = re.compile(r"^(`{3,}|~{3,})")
 #
 #     openness (imported)      6 lines   0.23%
 #     dated claim             46 lines   1.75%
-#     evidence verb            6 lines   0.23%
+#     evidence verb           11 lines   0.42%
 #     ---------------------------------------
-#     flagged                 58 lines   2.21%
+#     flagged                 63 lines   2.40%
 #
 # 🔴 SO THE IMPORTED SCHEMA FIRES ON 6 LINES IN 44 DOCUMENTS, and never once
 # through its own `OPEN:` / `RESOLVED <sha>:` markers — all six come from its
@@ -228,9 +228,10 @@ _FENCE = re.compile(r"^(`{3,}|~{3,})")
 #
 # Sensitivity is the design constraint, not an afterthought: at ~2% of lines a
 # typical "State now" replace of a dozen lines prints nothing. Per SECTION the
-# worst case is 38 of 230 (17%) — worst because that assumes a replace carrying
+# worst case is 40 of 230 (17%) — worst because that assumes a replace carrying
 # NOTHING forward; a real update that keeps a flagged line verbatim clears it.
-# Widening is not free — see the rejected signals below.
+# Widening is not free — see the rejected signals below, each measured on its
+# INCREMENTAL half (a match on a line already flagged buys nothing).
 
 # (i) A DATE THE LINE ASSERTS, not one that happens to sit inside a filename.
 # Handoff docs cite each other constantly (`handoff-browser-bridge-2026-08-01.md`,
@@ -265,21 +266,49 @@ _BARE_ISO_DATE = re.compile(r"(?<![\w/.-])\d{4}-\d{2}-\d{2}")
 # All-caps is load-bearing, not decoration. `decided`, `measured` and `ruled
 # out` are ordinary English that turns up in ordinary status prose: over the
 # same 2,626 lines this list matched CASE-INSENSITIVELY hits 58 (2.2%) against
-# 6 (0.23%) shouted — a 10x widening of the single noisiest axis, on top of the
-# dated-claim signal it would mostly duplicate. Two more REJECTED, each measured
-# there too:
+# 7 (0.27%) shouted — a 8x widening of the single noisiest axis, on top of the
+# dated-claim signal it would mostly duplicate.
 #
-#   VERIFIED / CLOSED / CONFIRMED   15 lines (0.6%) — ordinary status vocabulary
-#       ("Deploy/verify status: …"), and the genuinely durable ones carry a date
-#       anyway, so they cost precision and buy no recall.
-#   negative-result phrasing        99 lines (3.8%) — `does not`, `did not`,
-#       `never`, `no evidence`, `turned out`. Alone it is larger than the whole
-#       shipped predicate: a block on nearly every run, which is the failure
-#       mode rule (f) exists to avoid rather than a wider net.
+# 🔴 THE LEADING CLASS EXCLUDES `-`, which is the SAME reasoning the date's
+# leading boundary uses: a shouted word welded to its neighbour is a compound
+# MODIFIER, not a declaration. Measured — `the loop-CLOSED reframing of the #1
+# soak item` is an inventory line about a doc edit, and it was the only thing
+# the guard removed: the existing verbs matched 7 lines with it and 7 without,
+# so it costs no recall at all.
+#
+# REJECTED, each measured over the same 2,626 lines, and the split matters —
+# a match on a line the OTHER signals already flag adds nothing but noise, so
+# what is counted below is the INCREMENTAL half:
+#
+#   VERIFIED    7 matches, 3 already flagged, 4 incremental — and 3 of those 4
+#       are ordinary status: `Both VERIFIED + switched`, a "what shipped" list
+#       entry, and 🔴 `- **Deploy/verify status: DEPLOYED AND VERIFIED.**`. That
+#       last one is decisive: `Deploy/verify status:` is a field the handoff
+#       skill's own step-2 TEMPLATE prescribes, so on any session that deployed
+#       successfully this net fires on the template's own status line. That is
+#       the definition of the churn rule (f) must stay silent on.
+#   CONFIRMED   0 matches. No corpus evidence, so it buys recall that cannot be
+#       demonstrated and precision that cannot be defended — the same argument
+#       `subsystem_resolver._UNMARKED_ACTION` makes for its own rejections.
+#   negative-result phrasing   99 lines (3.8%) — `does not`, `did not`, `never`,
+#       `no evidence`, `turned out`. Alone it is larger than the whole shipped
+#       predicate: a block on nearly every run, which is the failure mode rule
+#       (f) exists to avoid rather than a wider net.
+#
+# CLOSED was rejected with them in the first draft and that was WRONG, on a
+# number that was never broken down. Measured properly: 8 matches, 2 already
+# flagged, **6 incremental of which 4 are genuine durable closures** — `is
+# **CLOSED and refuted**`, `the fail-open is CLOSED, deployed, and verified`,
+# `**CLOSED by PR #185**`, `the close-the-loop thread is now **CLOSED**`. The
+# two misses are attributive (`a CLOSED PR`, and the hyphen case above, which
+# the leading class now takes). It is also the ONLY candidate that catches a
+# closure-shaped finding, which is one of the three field cases this rule exists
+# for and the one every other signal is silent on. Cost: 58 -> 63 lines
+# (2.21% -> 2.40%), 38 -> 40 of 230 sections.
 _EVIDENCE_VERB = re.compile(
-    r"(?:^|[^A-Za-z])"
+    r"(?:^|[^A-Za-z-])"
     r"(MEASURED|RETRACTED|SUPERSEDED|SUPERSEDES|DISPROVED|RULED OUT|WONTFIX"
-    r"|CORRECTION|DECIDED)"
+    r"|CORRECTION|DECIDED|CLOSED)"
     r"(?![a-z])"
 )
 

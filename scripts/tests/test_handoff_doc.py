@@ -632,6 +632,15 @@ DURABLE_VERB_LINE = (
 DURABLE_OPEN_LINE = (
     "- OPEN: the coverage sweep still exempts generated files."
 )
+# 🔴 THE CLOSURE-SHAPED CASE, and it needs its own fixture for the same reason
+# the others do — one line per WORD, not merely one per branch. `RETRACTED` and
+# `CLOSED` are both the evidence-verb branch, so a single line carrying either
+# would let a mutant that deletes one word from the list hide behind the other,
+# and the mutant would be scored SURVIVED with that word genuinely dead.
+DURABLE_CLOSED_LINE = (
+    "- The brand-coverage question is CLOSED: every surface now reads from one "
+    "token set."
+)
 
 # The base doc's "State now" carries all three, exactly as the field case did.
 DURABLE_BASE_DOC = f"""# Handoff: drop-topic — 2026-08-14
@@ -643,6 +652,7 @@ Stop the coverage sweep from exempting generated files.
 - Branch / PR: `feat/coverage-sweep` / none
 {DURABLE_DATED_LINE}
 {DURABLE_VERB_LINE}
+{DURABLE_CLOSED_LINE}
 {DURABLE_OPEN_LINE}
 - Deploy/verify status: NOT deployed
 
@@ -712,8 +722,8 @@ def warning_block(stdout: str) -> str:
 # 🔴 THE RED-AT-BASE MATRIX, and the honest split inside it. This whole file was
 # run against `d12f84c8` — the commit before rules (f) and (g) existed — by
 # extracting that revision's `handoff_doc.py` and `SKILL.md` into a scratch tree
-# and pointing this exact test file at them. Result: **28 failed, 97 passed at
-# d12f84c8; 126 passed at HEAD.**
+# and pointing this exact test file at them. Result: **32 failed, 97 passed at
+# d12f84c8; 129 passed at HEAD.**
 #
 # ⚠ EIGHT OF THE NEW TESTS PASS AT BASE, and they are NOT regression coverage —
 # they pin an invariant the bug never violated, and saying so is the difference
@@ -731,12 +741,18 @@ def warning_block(stdout: str) -> str:
 #    grammar_of_its_own`                   It guards the FUTURE, not the past.
 #
 # MUTATION BATTERY (run under `PYTHONDONTWRITEBYTECODE=1`, the module restored
-# from a byte-copy and re-hashed after every mutant): **17 mutants, 17 killed by
+# from a byte-copy and re-hashed after every mutant): **20 mutants, 20 killed by
 # the specifically expected test**, one no-op mutant kept as a negative control
-# and SURVIVED. Two rounds were needed — the first scored `POSITIVE-CONTROL-
-# bucket-label` and `code-span-strip-removed` as SURVIVED, and both were real
-# holes in these assertions rather than in the code (a substring `in` that a
-# longer label walks past, and a fixture both suppression nets could catch).
+# and SURVIVED. Three rounds were needed, and every round found a hole in THESE
+# ASSERTIONS rather than in the code:
+#   1. `POSITIVE-CONTROL-bucket-label` SURVIVED — `BUCKET_REPLACE` renamed to
+#      `REPLACED` still satisfied a substring `in`. Now whole normalised lines.
+#   2. `code-span-strip-removed` SURVIVED — the fixture's date was suppressed by
+#      the OTHER net too, so the assertion could not tell a live net from a dead
+#      one. Now each suppression case is chosen so only ONE net can catch it.
+#   3. `verb-list-widened-with-DONE` came back SKIPPED (its anchor had moved when
+#      `CLOSED` was added) — a skipped mutant is a coverage claim nobody holds,
+#      so the harness prints ANCHOR NOT UNIQUE loudly rather than scoring it.
 
 
 class TestAReplaceThatDropsDurableContentSaysSo:
@@ -755,12 +771,13 @@ class TestAReplaceThatDropsDurableContentSaysSo:
         # 🔴 The whole normalised headline, not a keyword — a reworded headline
         # is an output change a `in` assertion walks straight past.
         assert block.splitlines()[0] == (
-            "🔴 This replace DROPS 3 line(s) that look DURABLE "
+            "🔴 This replace DROPS 4 line(s) that look DURABLE "
             "(they sit under a REPLACE heading):"
         ), block
         for fragment in (
             "the coverage sweep's ledger exempts generated files",
             "the capture survey came back empty",
+            "The brand-coverage question is CLOSED",
             "the coverage sweep still exempts generated files",
         ):
             assert fragment in block, f"{fragment!r} was not named:\n{block}"
@@ -777,7 +794,7 @@ class TestAReplaceThatDropsDurableContentSaysSo:
         base_lines = DURABLE_BASE_DOC.splitlines()
         found = re.findall(r"^  (.+?):(\d+): (.*?)  \[", warning_block(res.stdout),
                            re.M)
-        assert len(found) == 3, res.stdout
+        assert len(found) == 4, res.stdout
         for heading, line_no, quoted in found:
             assert heading == "State now", heading
             assert base_lines[int(line_no) - 1].strip().startswith(quoted[:40])
@@ -850,6 +867,7 @@ class TestAReplaceThatDropsDurableContentSaysSo:
             "- Branch / PR: `feat/coverage-sweep` / #412\n"
             f"{DURABLE_DATED_LINE}\n"
             f"{DURABLE_VERB_LINE}\n"
+            f"{DURABLE_CLOSED_LINE}\n"
             f"{DURABLE_OPEN_LINE}\n"
             "- Deploy/verify status: deployed\n",
         )
@@ -862,12 +880,13 @@ class TestAReplaceThatDropsDurableContentSaysSo:
         self, durable_repo: Path, tmp_path: Path
     ) -> None:
         """NEGATIVE CONTROL on the test above: carrying forward is not a blanket
-        mute. Two of three kept, one dropped, one named."""
+        mute. Three of four kept, one dropped, one named."""
         upd = write_update(
             tmp_path,
             "## State now\n"
             f"{DURABLE_DATED_LINE}\n"
             f"{DURABLE_VERB_LINE}\n"
+            f"{DURABLE_CLOSED_LINE}\n"
             "- Deploy/verify status: deployed\n",
         )
         block = warning_block(run_tool(durable_repo, update=upd).stdout)
@@ -978,9 +997,10 @@ class TestTheDurableSignalsAreEachReachable:
         [
             (DURABLE_DATED_LINE, "dated claim"),
             (DURABLE_VERB_LINE, "evidence verb"),
+            (DURABLE_CLOSED_LINE, "evidence verb"),
             (DURABLE_OPEN_LINE, "openness/open"),
         ],
-        ids=["dated", "verb", "openness"],
+        ids=["dated", "verb-RETRACTED", "verb-CLOSED", "openness"],
     )
     def test_each_fixture_line_is_flagged_by_exactly_its_own_signal(
         self, line: str, expected: str
@@ -998,16 +1018,66 @@ class TestTheDurableSignalsAreEachReachable:
         assert hd.DURABLE_DATED == "dated claim"
         assert hd.DURABLE_EVIDENCE == "evidence verb"
 
-    def test_the_three_fixture_lines_do_not_overlap(self) -> None:
+    def test_the_fixture_lines_do_not_overlap_across_BRANCHES(self) -> None:
         """🔴 THE ISOLATION PIN. If the dated line ever also carries an evidence
         verb, breaking the date regex still leaves it flagged and the mutant is
         scored SURVIVED while the guard is dead. Assert the orthogonality
         directly rather than trusting the wording to stay put."""
+        verb_lines = (DURABLE_VERB_LINE, DURABLE_CLOSED_LINE)
         assert hd._BARE_ISO_DATE.search(DURABLE_DATED_LINE)
         assert not hd._EVIDENCE_VERB.search(DURABLE_DATED_LINE)
         assert not hd._EVIDENCE_VERB.search(DURABLE_OPEN_LINE)
-        assert not hd._BARE_ISO_DATE.search(DURABLE_VERB_LINE)
         assert not hd._BARE_ISO_DATE.search(DURABLE_OPEN_LINE)
+        for line in verb_lines:
+            assert hd._EVIDENCE_VERB.search(line), line
+            assert not hd._BARE_ISO_DATE.search(line), line
+
+    def test_the_two_verb_fixtures_do_not_overlap_on_the_WORD(self) -> None:
+        """🔴 ONE LINE PER WORD, not merely one per branch — and this is the pin
+        that makes `verb-RETRACTED-dropped` and `verb-CLOSED-dropped` isolate.
+        If one fixture matched both words, deleting either from the list would
+        leave it flagged by the other and the mutant would be scored SURVIVED
+        with that word genuinely dead."""
+        matched = {
+            "RETRACTED": DURABLE_VERB_LINE,
+            "CLOSED": DURABLE_CLOSED_LINE,
+        }
+        for word, own in matched.items():
+            for other_word, other in matched.items():
+                found = hd._EVIDENCE_VERB.search(other)
+                assert found is not None, other
+                if word == other_word:
+                    assert found.group(1) == word, (word, found.group(1))
+                else:
+                    assert found.group(1) != word, (
+                        f"{other!r} also matches {word!r} — the two verb "
+                        f"fixtures overlap and neither word can be isolated"
+                    )
+
+    def test_a_hyphen_compounded_verb_is_a_MODIFIER_not_a_declaration(self) -> None:
+        """Measured: `the loop-CLOSED reframing of the #1 soak item` is an
+        inventory line about a doc edit. Same reasoning as the date's leading
+        boundary — a shouted word welded to its neighbour modifies it."""
+        assert hd.durable_reason(
+            "- The loop-CLOSED reframing of the soak item landed in the header."
+        ) is None
+        # NEGATIVE CONTROL: the same word, free-standing, is still a claim.
+        assert hd.durable_reason(
+            "- The soak item is CLOSED and the header says so."
+        ) == "evidence verb"
+
+    def test_VERIFIED_is_NOT_in_the_vocabulary(self) -> None:
+        """🔴 REJECTED ON MEASUREMENT, and this is the line that decided it.
+        `Deploy/verify status:` is a field the handoff skill's own step-2
+        TEMPLATE prescribes, so on any session that deployed successfully a
+        `VERIFIED` net fires on the template's own status line — the definition
+        of the churn rule (f) must stay silent on. Pinned so a later widening
+        has to delete an assertion that says why."""
+        assert hd.durable_reason(
+            "- **Deploy/verify status: DEPLOYED AND VERIFIED.**"
+        ) is None
+        assert hd.durable_reason("- Both VERIFIED + switched, no skips.") is None
+        assert hd.durable_reason("- CONFIRMED on the second run.") is None
 
     def test_the_evidence_verb_is_case_sensitive(self) -> None:
         """All-caps is the precision half — measured, the case-insensitive form
@@ -1174,6 +1244,7 @@ class TestRuleFDidNotMoveTheExitCodes:
             "- Branch / PR: `feat/coverage-sweep` / none\n"
             f"{DURABLE_DATED_LINE}\n"
             f"{DURABLE_VERB_LINE}\n"
+            f"{DURABLE_CLOSED_LINE}\n"
             f"{DURABLE_OPEN_LINE}\n"
             "- Deploy/verify status: NOT deployed\n",
             "noop.md",
