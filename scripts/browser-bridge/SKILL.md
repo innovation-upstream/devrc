@@ -98,16 +98,14 @@ Result payloads land under `.result.data`.
 
 ## When things look broken — triage
 
-1. **A call that WORKED now fails or returns nothing** → `browser health` FIRST,
-   before debugging the page or the CLI: the extension drops mid-session with no
-   error. Fix: ↻ **in the profile you are driving**. A STALE BUILD is a DIFFERENT
-   failure — Remove + Load unpacked, not a restart. → `reference/errors.md`
-2. **Empty / half-built / `data.hidden:true` read** → throttled: `wake`, re-read.
-3. **`null` from `js`/`eval`** → traps 1 then 2; fall back to `text`/`html` before
-   concluding the bridge is down. **`unknown_op`** → stale extension (1). Any other
-   error string → `reference/errors.md`.
-4. **Never diagnose a site OUTAGE from a browser read** — "broken for real users?"
-   needs server-side evidence (RUM, metrics, pod health, an anonymous `curl`).
+`health` FIRST (the extension drops mid-session with no error), then `wake` a
+throttled/empty read, then fall back to `text`/`html` before concluding the
+bridge is down. Full flow — including stale-build vs restart, and what `null` /
+`unknown_op` each mean — →
+`~/workspace/devrc/scripts/browser-bridge/reference/errors.md`.
+
+🔴 **Never diagnose a site OUTAGE from a browser read** — "broken for real
+users?" needs server-side evidence (RUM, metrics, pod health, anonymous `curl`).
 
 ## This is the user's LIVE session
 
