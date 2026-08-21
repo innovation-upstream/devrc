@@ -55,8 +55,6 @@ let
       # is world-readable.
       export OBS_PROM_URL="http://127.0.0.1:9090/api/v1/write"
       export OBS_LOKI_URL="http://127.0.0.1:3100/loki/api/v1/push"
-      export OBS_USERNAME="validate"
-      export OBS_PASSWORD="validate"
       export OBS_HOST="validate"
 
       alloy validate ${../scripts/obs/alloy.alloy}

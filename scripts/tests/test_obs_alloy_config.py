@@ -54,8 +54,42 @@ def test_no_endpoint_or_credential_is_hardcoded():
     """devrc is PUBLIC. Every site-specific value must come from the
     environment, supplied by a gitignored per-host EnvironmentFile."""
     text = CONFIG.read_text()
-    for name in ("OBS_PROM_URL", "OBS_LOKI_URL", "OBS_USERNAME", "OBS_PASSWORD", "OBS_HOST"):
+    for name in ("OBS_PROM_URL", "OBS_LOKI_URL", "OBS_HOST"):
         assert f'sys.env("{name}")' in text, f"{name} must be read from the environment"
+
+
+def test_no_basic_auth_block_until_an_endpoint_actually_requires_one():
+    """The receivers are unauthenticated, and Alloy has no conditionals — so a
+    `basic_auth` block sourcing empty env values does NOT mean "no auth".
+
+    MEASURED against alloy 1.17.1 with a header-echoing listener:
+        basic_auth, username="" password=""  ->  Authorization: Basic Og==
+        no basic_auth block                  ->  no Authorization header
+    and `Og==` decodes to ":". So the block always asserts credentials. Omitting
+    it is the only honest encoding of "these endpoints need no auth".
+
+    Asserts LIVE code only — the config discusses basic_auth at length in its
+    comments, including the snippet to paste back if an endpoint ever needs it.
+    """
+    live = "\n".join(
+        ln for ln in CONFIG.read_text().splitlines() if not ln.strip().startswith("//")
+    )
+    assert "basic_auth" not in live, (
+        "a basic_auth block is present: it will send an Authorization header on "
+        "every request. If an endpoint genuinely requires auth, update this test "
+        "deliberately alongside the config.")
+
+
+def test_credentials_are_never_embedded_in_a_url():
+    """URL userinfo (`http://user:pass@host/...`) does produce a correct auth
+    header — measured — but alloy logs `url=` in remote_write error messages, so
+    the credentials land in the journal. Never encode them that way."""
+    import re
+
+    live = "\n".join(
+        ln for ln in CONFIG.read_text().splitlines() if not ln.strip().startswith("//")
+    )
+    assert not re.search(r'"https?://[^"/]*@', live), "credentials embedded in a URL"
 
 
 def test_the_only_urls_present_are_env_lookups_or_loopback():
