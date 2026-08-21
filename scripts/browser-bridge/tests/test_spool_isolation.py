@@ -4,16 +4,24 @@ WHY THIS IS ITS OWN FILE
 ------------------------
 The bug was not a missing fixture — the fixture existed, was `autouse`, and its
 docstring said it covered "EVERY test". It was declared inside `test_server.py`,
-so pytest scoped it to that module and the five sibling files went on appending
-real rows to `<ACTIVITY_SPOOL_DIR>/current.log`, which the activity collector
-ships to the production ClickHouse `activity.events` (`test_site_notes.py`
-alone: +17 production rows per run, reproduced twice).
+so pytest scoped it to that module while the other EIGHT modules in this
+directory ran unisolated, appending to `<ACTIVITY_SPOOL_DIR>/current.log`, which
+the activity collector ships to the production ClickHouse `activity.events`.
+
+🔴 MEASURED, because the count that first circulated was wrong and inflated.
+Running each module alone at `origin/main`: `test_site_notes.py` wrote **17**
+rows per run, `test_server.py` 0-1 (the teardown race), and the other seven **0**
+— unisolated but LATENT, since they never reach an emit. Exactly one sibling was
+leaking, not five. The five came from grepping for files that touch `server`,
+and a grep counts declarations, never instances.
 
 A guard for that living in `test_server.py` would be worthless: it would pass
-for exactly the reason the bug existed. Its VALUE IS ITS LOCATION — this file
-imports no fixture, declares no isolation of its own, and can only pass if
-`conftest.py`'s `_isolate_activity_spool` reaches a module other than
-`test_server.py`. Do not move these tests into another file.
+for exactly the reason the bug existed. THE VALUE OF THE FIRST TWO TESTS IS
+THEIR LOCATION — they can only pass if `conftest.py`'s `_isolate_activity_spool`
+reaches a module other than `test_server.py`. Do not move them into another
+file. (The third test targets `_session_spool_backstop` instead and carries no
+such argument; this file does declare one fixture of its own, `session_backstop_
+value`, purely to read that backstop's value — it isolates nothing.)
 
 WHAT IS ASSERTED, AND WHY IT IS THE RELATIONSHIP AND NOT THE SPELLING
 --------------------------------------------------------------------
@@ -27,10 +35,13 @@ tmp tree. So the structural test asserts the EFFECTIVE dir — what
 And a structural check type-checks past a wrong argument, so the second test is
 behavioural: drive the real `server.emit_cmd_event()` writer, prove the row
 landed in the temp spool, and prove the same row is NOT in the production spool.
-The two halves share one search helper on purpose — the assertion that the
-marker IS in tmp is the positive control for the search that must find nothing
-in production, so a broken decoder reds the test instead of passing it
-vacuously.
+🔴 Both halves call `_decoded_lines` with the SAME `only_source` filter, and that
+is load-bearing rather than tidy. With the filter applied on the production side
+only, a change to `emit_cmd_event`'s `rec["source"]` (server.py:1309) would make
+the production match set permanently empty — the leak assertion would pass
+vacuously while the tmp assertion, unfiltered, stayed green. Filtering both makes
+the tmp assertion a positive control for the exact predicate the production
+assertion depends on: get the source token wrong and the tmp half reds first.
 
 🔴 WHAT THESE TWO TESTS STRUCTURALLY CANNOT SEE, so nobody reads them as wider
 than they are: the LATE EMIT. `emit_cmd_event()` runs after the HTTP response is
@@ -38,8 +49,10 @@ sent, so a lingering handler thread can write its row after the test body — an
 therefore after every assertion here — has finished. That row escapes through
 the per-test fixture's TEARDOWN, not through anything either test inspects. It
 is closed by `conftest.py`'s session-scoped `_session_spool_backstop`, which
-makes the value teardown restores to safe; the evidence for it is a repeat-run
-leak count, not an assertion in this file.
+makes the value teardown restores to safe. The evidence for THAT is a
+deterministic probe recorded in the conftest docstring — explicitly not a
+repeat-run leak count, which proved unable to tell a fix from a race that simply
+did not fire (0/20 leaks on known-broken code), and not an assertion here.
 """
 from __future__ import annotations
 
@@ -140,7 +153,6 @@ def test_the_value_a_per_test_teardown_restores_to_is_not_production(
     restored = Path(session_backstop_value).resolve()
     assert restored != _production_spool_dir().resolve(), (
         f"the session backstop points AT the production spool ({restored}).")
-    assert not restored.exists() or restored.is_dir()
 
 
 def test_the_effective_spool_dir_is_under_this_test_s_own_tmp_path(tmp_path):
@@ -171,14 +183,25 @@ def test_a_real_emit_lands_in_tmp_and_never_in_the_production_spool(
     monkeypatch.setattr(S, "_spool_emit_tried", False)
     S.emit_cmd_event("read", marker, "ok", 1, domain="")
 
+    # 🔴 THIS IS THE ASSERTION THAT CARRIES THE TEST. Same `only_source` filter
+    # as the production check below — see the module docstring: it makes this
+    # line the positive control for that predicate.
     tmp_log = tmp_path / "activity-spool" / "current.log"
-    written = _decoded_lines(tmp_log)
+    written = _decoded_lines(tmp_log, only_source="browser-bridge")
     assert any(marker in ln for ln in written), (
         f"emit_cmd_event() did not write into the per-test spool {tmp_log} "
-        f"({len(written)} line(s) found there). Either the isolation fixture "
-        "did not run for this file, or the emit path is broken — in the first "
+        f"({len(written)} browser-bridge line(s) found there). Either the "
+        "isolation fixture did not run for this file, the emit path is broken, "
+        "or the event's `source` is no longer 'browser-bridge' — in the first "
         "case the row went to the PRODUCTION spool instead.")
 
+    # 🔴 BELT-AND-BRACES, NOT COVERAGE. Both checks below are effectively
+    # unreachable: every failure mode that would put the row in the production
+    # spool leaves the per-test spool empty, so the assertion above fires first
+    # and this code never runs. They are kept because they name the actual
+    # hazard at the place a reader looks for it, and because "unreachable today"
+    # is a property of the current failure ordering, not a guarantee. Do not
+    # count either one as regression coverage.
     production_log = production / _spool_emit_module().CURRENT_NAME
     leaked = _decoded_lines(production_log, only_source="browser-bridge")
     # Marker only — the failure message must never quote a production row.

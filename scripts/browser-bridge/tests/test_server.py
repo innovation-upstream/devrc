@@ -127,9 +127,11 @@ def _wait_events(spool_dir, n=1, timeout=3.0) -> list:
 # NOTE: `_isolate_activity_spool` — the autouse fixture that points
 # ACTIVITY_SPOOL_DIR at a per-test tmp dir — now lives in `conftest.py`, one
 # directory-wide definition instead of this module-scoped copy. It was scoped to
-# this file only, while its docstring claimed it covered EVERY test; the five
-# sibling modules were writing real rows into the production activity pipeline.
-# Every fixture below (`telemetry` especially) still depends on it having run.
+# this file only while its docstring claimed it covered EVERY test, so the other
+# eight modules in this directory ran unisolated (one of them, test_site_notes,
+# genuinely writing rows into the production activity pipeline).
+# `telemetry` below depends on it having run — it returns the very path that
+# fixture pointed ACTIVITY_SPOOL_DIR at. `_disable_i3` does not; it is unrelated.
 
 
 @pytest.fixture(autouse=True)

@@ -7,20 +7,36 @@ the row lands in `<ACTIVITY_SPOOL_DIR>/current.log`, and the activity collector
 then ships that spool to the production ClickHouse `activity.events`. An
 identical `autouse` fixture used to sit inside `test_server.py` carrying a
 docstring that claimed it protected "EVERY test's" telemetry writes — but
-**pytest scopes a module-declared fixture to that module**, so it protected one
-file out of six and the five siblings appended real rows to production
-(`test_site_notes.py` alone: +17 production rows per run, reproduced twice). A
-docstring claiming a scope its declaration site cannot deliver is worse than
-none — it stops anyone looking.
+**pytest scopes a module-declared fixture to that module**, so it covered one of
+the NINE test modules here. A docstring claiming a scope its declaration site
+cannot deliver is worse than none: it stops anyone looking.
+
+🔴 WHAT THAT ACTUALLY COST, MEASURED — because the honest number is smaller than
+the scary one, and the difference is the whole lesson. Running every module
+alone at `origin/main` with a fresh spool and counting `source=browser-bridge`
+rows:
+
+    test_site_notes.py            17     <- the only sibling that ever emitted
+    test_server.py                 0-1   <- the file that HAD the fixture
+    the other seven                 0
+
+So exactly ONE sibling was leaking, not five. The other seven were **LATENT, not
+leaking** — unisolated, but they never reach an emit. Do not restate this as
+"five files wrote real rows to production": that number came from a grep for
+files touching `server`, and a grep counts DECLARATIONS, never INSTANCES.
+
+The `test_server.py` row is the interesting one: the file that already had the
+fixture still leaked, intermittently (1 row in one observer's run, 0 in mine).
+That is the teardown race `_session_spool_backstop` closes — independent
+evidence that BOTH fixtures below are load-bearing, and that per-test isolation
+alone was never sufficient.
 
 THE LEVER IS THE ENV VAR, NOT THE CACHE RESET. `spool_emit.default_spool_dir()`
 reads `ACTIVITY_SPOOL_DIR` **at call time**, so pointing it at a temp dir
-redirects the write no matter which emitter module object got loaded, when it
-was loaded, or whether the emitting code runs in this process at all — a
-subprocess (`browser` CLI, `browser-agent`) inherits the environment too. The
-`_spool_emit_mod`/`_spool_emit_tried` reset is the secondary half: it makes each
-test load the emitter fresh under the current env, which is what lets a test
-re-point `_SPOOL_EMIT_PATH` at the in-repo emitter.
+redirects the write no matter which emitter module object got loaded or when it
+was loaded — and any subprocess inherits the variable, so a future test that
+shells out is covered too. (No test does today: nothing here spawns `server.py`,
+and neither the `browser` CLI nor `browser-agent` touches the spool at all.)
 
 TWO FIXTURES, TWO DIFFERENT HAZARDS — see each one's own docstring. The
 per-test one gives each test its own spool so tests cannot read each other's
@@ -28,8 +44,10 @@ rows; the session-scoped backstop exists because the per-test one's TEARDOWN is
 itself a hole.
 
 `scripts/browser-bridge/tests/test_spool_isolation.py` is the regression guard,
-and it is a SEPARATE FILE on purpose — it is only meaningful as evidence that
-this conftest reaches modules other than `test_server.py`.
+and it is a SEPARATE FILE on purpose: its first two tests are only meaningful as
+evidence that `_isolate_activity_spool` reaches a module other than
+`test_server.py`. (Its third test targets the session backstop instead, and so
+does not carry that argument — see its own docstring.)
 """
 from __future__ import annotations
 
@@ -100,13 +118,28 @@ def _isolate_activity_spool(tmp_path, monkeypatch):
     rows. Teardown restores to the session backstop above, never to ambient."""
     monkeypatch.setenv("ACTIVITY_SPOOL_DIR", str(tmp_path / "activity-spool"))
     # Only reset the lazy emitter cache on an ALREADY-imported `server`. Several
-    # files in this directory (test_skill_size, test_browser_agent_parse, …)
-    # never import it, and forcing the import on their behalf would be a side
-    # effect the fixture has no business causing. A module imported LATER starts
-    # with the cache already clear, so nothing is missed — and the env var above
-    # covers the write either way.
+    # modules here (test_skill_size, test_browser_agent_parse, …) never import
+    # it, and forcing the import on their behalf would be a side effect this
+    # fixture has no business causing. A module imported LATER starts with the
+    # cache already clear, so nothing is missed.
     server = sys.modules.get("server")
     if server is None:
         return
-    monkeypatch.setattr(server, "_spool_emit_mod", None, raising=False)
-    monkeypatch.setattr(server, "_spool_emit_tried", False, raising=False)
+    # 🔴 WHAT THESE TWO LINES ARE AND ARE NOT. They are DEFENSIVE, not required:
+    # deleting them leaves the suite green (753 passed, 0 rows leaked), because
+    # both sites that re-point `_SPOOL_EMIT_PATH` — test_server.py's `telemetry`
+    # fixture and test_spool_isolation.py's behavioural case — reset the cache
+    # themselves. An earlier version of this comment claimed the reset "is what
+    # lets a test re-point `_SPOOL_EMIT_PATH`"; that was simply false, and a
+    # false rationale is worse than none because it makes the line look load-
+    # bearing to anyone auditing it.
+    #
+    # 🔴 `raising` is left at its DEFAULT (True) on purpose — that is what gives
+    # these lines a real job. With `raising=False` a renamed or misspelled
+    # attribute is silently CREATED (verified against pytest 9.1.1) and the
+    # fixture degrades to a no-op that still reads as protection. At the default
+    # a rename of either cache attribute in server.py fails this fixture loudly,
+    # so the reset doubles as a rename detector for the day a test does depend
+    # on it.
+    monkeypatch.setattr(server, "_spool_emit_mod", None)
+    monkeypatch.setattr(server, "_spool_emit_tried", False)
