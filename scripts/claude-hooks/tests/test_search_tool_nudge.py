@@ -16,11 +16,42 @@ reassuring answer here is a ZERO (no false positives):
 
 Run: python3 scripts/claude-hooks/tests/test_search_tool_nudge.py
 """
-import os, sys, glob, json, time, shutil, subprocess, tempfile, threading, importlib.util
+import os, sys, glob, json, time, atexit, shutil, subprocess, tempfile, threading, importlib.util
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 HOOK = os.path.join(HERE, "..", "search-tool-nudge.py")
+
+# --------------------------------------------------------------------------- #
+# 🔴 PRIVATE HOME — this must happen BEFORE the hook module is imported.
+#
+# The hook derives its state root from $HOME (`~/.cache/claude-search-tool-nudge/s`),
+# and every session id below is a fixed literal. That made the state directory a
+# HOST-GLOBAL resource keyed by a constant, so two copies of this file running at the
+# same time silently decided each other's outcomes — one copy's `session()` rmtree or
+# `clear_test_state()` wiping the other's markers, or one copy's marker suppressing the
+# other's nudge.
+#
+# Two copies at once is the NORMAL case on this host, not an exotic one: run-tests.sh
+# runs this file, `scripts/tests/test_run_tests_floors.py` nests a SECOND run-tests.sh
+# that runs it again, and several checkouts (worktrees, agents, the pre-push hook) run
+# their own gates concurrently. MEASURED on the pre-fix file, two concurrent copies:
+# 10/10 copies red, including "concurrency: exactly one nudge across 12 parallel
+# invocations: got 0 want 1" — the exact interleaving being (A wipes) (B wipes)
+# (B's 12 racers create `content`) (A's 12 racers all find `content` already there and
+# stay silent). One copy at a time on an otherwise-busy host: 1/30, and that one was a
+# collision with a foreign gate run, not load.
+#
+# The fix is to remove the shared resource, not to widen a window: each RUN gets its own
+# HOME, so the state root is per-run and nothing is shared. Same convention the sibling
+# hook tests already use (test_claude_notify.py, test_registrar_activation.py).
+# Subprocesses inherit it because they inherit os.environ; the in-process import below
+# picks it up because expanduser("~") reads $HOME.
+# --------------------------------------------------------------------------- #
+SANDBOX_HOME = tempfile.mkdtemp(prefix="search-tool-nudge-home-")
+os.environ["HOME"] = SANDBOX_HOME
+atexit.register(shutil.rmtree, SANDBOX_HOME, True)
 HOME = os.path.expanduser("~")
+assert HOME == SANDBOX_HOME, "the sandbox HOME did not take effect"
 
 spec = importlib.util.spec_from_file_location("search_tool_nudge", HOOK)
 assert spec and spec.loader
@@ -162,11 +193,21 @@ def run(payload):
 
 
 STATE_ROOT = os.path.join(HOME, ".cache", "claude-search-tool-nudge", "s")
+# 🔴 ISOLATION, asserted rather than assumed. The sandbox HOME at the top of this file is
+# what makes every fixed session id below safe, and it is one careless `expanduser` away
+# from silently reverting to the real cache — at which point concurrent copies of this
+# file start deciding each other's outcomes again and the failures land on whichever
+# assertion happens to lose the race. Pinned as STATE, not as a spelling: both the hook's
+# own root and this file's mirror of it must live under the sandbox.
+check("the hook's state root is inside the sandbox HOME",
+      mod.STATE_ROOT.startswith(SANDBOX_HOME + os.sep), True)
+check("this file's mirror of the state root agrees with the hook's",
+      STATE_ROOT, mod.STATE_ROOT)
 # Every test session id starts with one of these, and the suite wipes their state dirs
-# both before and after. 🔴 This suite MUST be idempotent: state that survives a run
-# makes the NEXT run fail, which during a mutation sweep reads as "mutant killed" for
-# every mutant — a broken harness reporting a perfect score. Guarded below by
-# re-running the whole file and asserting the second run is identical.
+# both before and after. The cross-RUN half of that hazard is now structural — a private
+# HOME per run — so what these prefixes still buy is the WITHIN-run cleanup the io block
+# depends on, and the end-of-file check that the ledger has not drifted from the ids
+# `session()` actually creates.
 TEST_SID_PREFIXES = ("test-session-search-nudge-", "test-search-nudge-", "test-search-nudge-collide")
 
 
@@ -801,14 +842,28 @@ for i, bad_agent in enumerate((123, [], "../../etc", "a/b", "")):
     rc, out = run(payload)
     check("bad agent_id %r -> nudge unchanged" % (bad_agent,), (rc, bool(out)), (0, True))
 
+# 🔴 CLEANUP-LEDGER GUARD, with its own positive control.
+#
+# It used to read "no test state leaks into the next run", and the cross-run hazard it
+# named is now closed STRUCTURALLY by the per-run sandbox HOME — which would have left
+# this assertion passing forever no matter what `clear_test_state` did, i.e. reading as
+# coverage while providing none. So it is re-pointed at the claim that is still live and
+# can still go red: TEST_SID_PREFIXES must cover every session id this file actually
+# creates. Let that ledger drift — a `session()` id that starts with something else — and
+# the within-run `clear_test_state()` the io block depends on silently becomes a no-op.
+#
+# The zero below is only meaningful next to a non-zero: a glob wired to the wrong root
+# also reports "nothing left", so the same expression is first asserted to SEE the state
+# that provably exists at this point.
+def _state_entries():
+    return sorted(os.path.basename(p) for pref in TEST_SID_PREFIXES
+                  for p in glob.glob(os.path.join(STATE_ROOT, pref + "*")))
+
+
+check("state exists before the final cleanup (positive control for the zero below)",
+      len(_state_entries()) >= len(SESSIONS), True)
 clear_test_state()
-leaked = sorted(os.path.basename(p) for pref in TEST_SID_PREFIXES
-                for p in glob.glob(os.path.join(STATE_ROOT, pref + "*")))
-# 🔴 IDEMPOTENCE GUARD. State left behind by one run makes the NEXT run fail — and during
-# a mutation sweep that reads as "every mutant killed", including mutants that change
-# nothing. That is exactly what happened while writing this file: a 31/31 perfect score
-# from a harness that was simply dirty. Cheap to assert, so assert it.
-check("no test state leaks into the next run", leaked, [])
+check("TEST_SID_PREFIXES covers every session id this file creates", _state_entries(), [])
 shutil.rmtree(TMP, ignore_errors=True)
 
 MIN_CHECKS = 160  # floor: a suite that silently shrinks is a vacuous green

@@ -1,11 +1,25 @@
 #!/usr/bin/env python3
 """Unit tests for shell-env-nudge.analyze() + the hook's IO contract.
 Run: python3 scripts/claude-hooks/tests/test_shell_env_nudge.py"""
-import os, sys, json, subprocess, importlib.util
+import os, sys, json, atexit, shutil, tempfile, subprocess, importlib.util
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 HOOK = os.path.join(HERE, "..", "shell-env-nudge.py")
+
+# 🔴 PRIVATE HOME, set BEFORE the hook is imported — same defect and same fix as
+# test_search_tool_nudge.py. The hook's dedupe cache is `~/.cache/claude-shell-env-nudge/
+# <session id>` and the session id below is a fixed literal, so the cache file was a
+# host-global resource keyed by a constant: a second copy of this file removing it
+# between this copy's two calls makes "io dedupe silent" fire, and a second copy WRITING
+# it before this copy's first call makes "io first-fire emits" silent. That is not
+# hypothetical — run-tests.sh runs this file, scripts/tests/test_run_tests_floors.py
+# nests a second run-tests.sh that runs it again, and concurrent checkouts run their own
+# gates. MEASURED pre-fix, two concurrent copies: 40/80 copies red.
+SANDBOX_HOME = tempfile.mkdtemp(prefix="shell-env-nudge-home-")
+os.environ["HOME"] = SANDBOX_HOME
+atexit.register(shutil.rmtree, SANDBOX_HOME, True)
 HOME = os.path.expanduser("~")
+assert HOME == SANDBOX_HOME, "the sandbox HOME did not take effect"
 
 spec = importlib.util.spec_from_file_location("shell_env_nudge", HOOK)
 assert spec and spec.loader
