@@ -201,7 +201,11 @@
 #      "this script was replaced and the new copy could not be run". Checking
 #      only the exec'd half would leave the WORSE half open: a syntax error in
 #      a SOURCED file does not abort anything, so it surfaces as a green
-#      verdict over a broken deploy rather than as a failure. The choice is deliberate, because the test suite's ledger
+#      verdict over a broken deploy rather than as a failure — the shape
+#      test_a_superseding_lib_that_does_not_parse_is_rc20_not_a_green_verdict
+#      measures at both error positions before asserting the guard.
+#
+#      The choice is deliberate, because the test suite's ledger
 #      (`_ship_exit_codes` in scripts/tests/test_ship_converge.py) reads this
 #      FILE for `exit N` / `rc=N` and is structurally blind to statuses BASH
 #      produces. It cannot see this class at all, so teaching it 2 would pin
@@ -501,7 +505,7 @@ ship_self_fleet_state() {
 #
 # Either returns (nothing was superseded), execs the new copy, or exits 20.
 ship_self_check() {
-  local i n f b a _ship_parse_err
+  local i n f b a _ship_parse_err _ship_w
   local unmeasured=0 changed=0 detail="" names=""
   local -a after_lines=() before_lines=()
   n=${#SHIP_SELF_WATCH[@]}
