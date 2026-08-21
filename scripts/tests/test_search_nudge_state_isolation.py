@@ -104,9 +104,12 @@ RUN_TESTS = SCRIPTS / "run-tests.sh"
 RUNNER_CODE = "\n".join(ln for ln in RUN_TESTS.read_text(encoding="utf-8").splitlines()
                         if not ln.lstrip().startswith("#"))
 
-# The default cache directory name, assembled rather than spelled so this file's own
-# text cannot satisfy a grep-shaped pin somewhere else.
-DEFAULT_LEAF = "claude-search-tool" + "-nudge"
+# The default cache directory name. Spelled here ON PURPOSE and not read from the
+# module: this is the one place the production path is asserted rather than derived,
+# so a change to `CACHE_DIR`'s default has to come here and be looked at. Its
+# whole-path sibling in `claude-hooks/tests/test_on_disk_artifact_names.py` pins the
+# same name from the other direction, behaviourally.
+DEFAULT_LEAF = "claude-search-tool-nudge"
 
 
 def _load_hook(env_overrides: dict | None = None):
@@ -151,6 +154,7 @@ def test_the_hook_exposes_its_cache_root_variable_name():
         "search-tool-nudge.py no longer names its cache-root variable in a "
         "constant this seam can read; the pins below are comparing a literal "
         "against itself")
+
 
 _PAYLOAD = json.dumps({"tool_name": "Bash", "session_id": "seam-shared-session",
                        "tool_input": {"command": "grep -r TODO src/"}})
