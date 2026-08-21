@@ -408,10 +408,12 @@ class TestSurfacesOnlyTheThreeSections:
     def test_what_it_is_IS_surfaced_in_a_body(self, store: Path) -> None:
         """🔴 THE DEFECT THIS CLASS WAS RENAMED FOR. It used to assert the
         opposite — `## What it is` was excluded as "durable boilerplate" — and
-        measured on 2026-08-20 the exclusion meant NO reader on ANY path printed
-        the one section that says what a service IS: not `--ref`, not the digest,
-        not `service_recon`'s `index:` block. An agent briefed only on an entry
-        could not name the thing the entry was about."""
+        measured on 2026-08-20 the exclusion meant no BRIEFING path printed the
+        one section that says what a service IS: not `--ref`, not the digest, not
+        `service_recon`'s `index:` block. (`search` did, and still does — see
+        `test_search_covers_WHAT_IT_IS_like_every_other_section` — but only for an
+        entry a query matched, so it briefs nobody.) An agent briefed only on an
+        entry could not name the thing the entry was about."""
         rep = rc.recall(store, SCOPE)
         text = rc.render_text(rep)
         assert rc.WHAT_HEADING in text
@@ -531,13 +533,86 @@ class TestWhatItIsDegradesCleanly:
         assert f"    {rc.WHAT_HEADING}\n" not in text
         assert POINTER_LINE in text and NUANCE_LINE in text
 
+    #: The notice, pinned as ONE normalised sentence rather than by a keyword.
+    #: A guard on a word is walkable by rewording, and this sentence is the whole
+    #: claim — see `test_the_notice_claims_the_PARSE_not_the_ENTRY`.
+    NOTICE = (
+        "(no parsable `## What it is` — absent, empty, or not parsed as a heading "
+        "[renamed, indented, fenced, among others], so this read cannot say what "
+        "the subsystem IS; re-derive it live)"
+    )
+
     def test_both_states_are_NAMED_not_silently_dropped(self, tmp_path: Path) -> None:
         """Said, not left blank — the rule the bare-entry notice already
         follows. Nothing printed is indistinguishable from an extractor that
         failed to find the section."""
         for kw in ({"what": None}, {"what": ""}):
             text = self._one(tmp_path, **kw)
-            assert "never says what the subsystem IS" in text, kw
+            assert self.NOTICE in text, kw
+
+    @pytest.mark.parametrize(
+        "heading",
+        ["## What It Is", "## What it is:", "### What it is", "  ## What it is"],
+        ids=["case", "colon", "depth", "indent"],
+    )
+    def test_the_notice_claims_the_PARSE_not_the_ENTRY(
+        self, tmp_path: Path, heading: str
+    ) -> None:
+        """🔴 A THIRD ON-DISK STATE, and the one the old wording lied about.
+
+        `_heading_blocks` matches a heading EXACTLY, at column 0 — so every
+        rename here parses to nothing and lands in this same branch while the
+        sentence sits on disk. The notice used to read "this entry never says
+        what the subsystem IS", which is a claim about the ENTRY that the
+        extractor is in no position to make; and `subsystem_touch.SHAPE_HEADINGS`
+        deliberately excludes `## What it is`, so `--validate` reports the rename
+        nowhere either. The sibling `🔴 NO <heading>` badge already draws this
+        line ("0 BY PARSE FAILURE and not by measurement"); this notice now does
+        too, and names the rename so the reader knows where to look.
+        """
+        store = tmp_path / "renamed"
+        (store / SCOPE).mkdir(parents=True)
+        marooned = "This entry DOES say what it is, under a renamed heading."
+        (store / SCOPE / "collector.md").write_text(
+            _entry("collector", SCOPE, what=None).replace(
+                "## Pointers", f"{heading}\n{marooned}\n\n## Pointers", 1
+            ),
+            encoding="utf-8",
+        )
+        text = rc.render_text(rc.recall(store, SCOPE))
+        assert marooned not in text, "fixture is inert — the extractor matched the rename"
+        assert self.NOTICE in text
+        # 🔴 …and it makes no claim about the entry that the parse cannot support.
+        assert "never says what the subsystem IS" not in text
+        assert "no `## What it is` content" not in text
+
+    def test_a_FENCED_heading_reaches_the_SAME_notice(self, tmp_path: Path) -> None:
+        """🔴 THE CAUSE THE OLD ENUMERATION LEFT UNNAMED, and why the list now
+        ends "among others".
+
+        `_heading_blocks` skips fenced regions wholesale, so a `## What it is`
+        inside a ``` fence is not a heading at all: it reaches this branch while
+        being neither absent, nor empty, nor RENAMED — the three words the notice
+        used to offer. An indented heading is not literally a rename either. The
+        headline (`no parsable`) was always right; only the tail enumeration was
+        narrower than its own branch, which reads as a closed list and sends the
+        reader looking for the two states it names.
+        """
+        store = tmp_path / "fenced"
+        (store / SCOPE).mkdir(parents=True)
+        marooned = "This entry DOES say what it is, inside a code fence."
+        fenced = f"```\n{rc.WHAT_HEADING}\n{marooned}\n```"
+        (store / SCOPE / "collector.md").write_text(
+            _entry("collector", SCOPE, what=None).replace(
+                "## Pointers", f"{fenced}\n\n## Pointers", 1
+            ),
+            encoding="utf-8",
+        )
+        text = rc.render_text(rc.recall(store, SCOPE))
+        assert marooned not in text, "fixture is inert — the extractor read into the fence"
+        assert self.NOTICE in text
+        # The rest of the entry is untouched: this is a section-level degrade.
+        assert POINTER_LINE in text and NUANCE_LINE in text
 
     def test_the_notice_does_NOT_reach_the_index_row(self, tmp_path: Path) -> None:
         """🔴 The body is where the reader is already looking; the index row is
@@ -2967,6 +3042,18 @@ class TestCli:
         assert POINTER_LINE not in out
         for ref in ("collector", "status-bar", "weekly-digest.process"):
             assert ref in out
+        # 🔴 THE FOOTER'S POINTER SENTENCE, PINNED WHOLE — a MUTATION SURVIVOR
+        # until this line existed. `--list` was measured to cost a flat +18 B when
+        # `## What it is` joined the surfaced set, and this sentence IS that +18 B:
+        # dropping `{WHAT_HEADING}` from it left the entire suite green, so the
+        # only thing `--list` pays for was pinned nowhere. It is asserted as ONE
+        # normalised string and not by keyword, because a guard on a word is
+        # walkable by rewording — and the three headings are asserted through the
+        # module's own constants, so renaming a heading moves the guard with it.
+        assert (
+            f"Run `--ref <name>` for one entry's `{rc.WHAT_HEADING}` + "
+            f"`{rc.POINTERS_HEADING}` + `{rc.NUANCE_HEADING}`."
+        ) in out
 
     def test_the_bare_default_is_the_DIGEST(self, store: Path, capsys) -> None:
         """🔴 RED AT origin/main: the bare default printed every entry's body."""
@@ -3580,16 +3667,49 @@ class TestSkillDocsArePinned:
 
     def test_the_recall_step_comes_AFTER_the_handoff_is_read(self) -> None:
         """Structural, not a phrase: recall is context for a doc already read,
-        not a substitute for reading it."""
+        not a substitute for reading it.
+
+<<<<<<< HEAD
+        ⚠ RED ON `main` FROM #643 UNTIL THIS COMMIT, and nothing caught it — the
+        repo has no automated merge gate. #643 extended step 2's imperative from
+        `**Read it fully.**` to `**Read it fully — but treat its "Open
+        investigations" section as RECALL, not live state.**`, a legitimate
+        reword, and this pin was anchored on the sentence INCLUDING its full
+        stop. That is the wrong anchor for this test: what it asserts is an
+        ORDERING of four steps, so it should hold the imperative that opens the
+        step and let the rest of the sentence evolve. The sentence's WORDING is
+        somebody else's pin (`_assert_rationale_pin` above); this one is about
+        position. Asserted unique below so the index cannot silently move.
+        ⚠ THE RECONCILE STEP MOVED, DELIBERATELY, AND THIS TEST ASSERTED THE OLD
+        ORDER. It used to require `read_it < reconcile`. `resume-state.sh` now
+        compares the handoff against `origin/<default-branch>` and decides which
+        copy is authoritative, so it has to run BEFORE the doc is read —
+        otherwise the agent reads the working-tree copy first, which is the
+        stale-handoff defect (a clone served one 276 lines behind origin/trunk,
+        and the whole session was framed on it).
+
+        So the order is now reconcile < read_it, pinned here so the swap cannot
+        be silently undone. The invariant this test is named for is untouched:
+        recall still comes after the doc is read.
+        """
         doc = RESUME_DOC.read_text(encoding="utf-8")
-        read_it = doc.index("**Read it fully.**")
+        # Anchor on the imperative that OPENS the step, never the full sentence:
+        # this test asserts an ORDERING, so the rest of the sentence must be free
+        # to evolve (a reword inside the bold span turned `main` RED once).
+        # Uniqueness is asserted because `.index()` would otherwise return
+        # whichever occurrence came first and the ordering claim could invert.
+        assert doc.count("**Read the handoff in full") == 1, (
+            "the ordering anchor is no longer unique — `.index()` would return "
+            "whichever came first and the ordering claim could invert"
+        )
+        read_it = doc.index("**Read the handoff in full")
         # The INVOCATION, not the bare filename: `resume-state.sh` is also named
         # in step 1's prose, so `.index()` on the bare name finds a point BEFORE
         # the handoff is read and the ordering claim inverts.
         reconcile = doc.index("bash ~/workspace/devrc/scripts/resume-state.sh")
         step = doc.index("subsystem_recall.py")
         report = doc.index("**Report**")
-        assert read_it < reconcile < step < report
+        assert reconcile < read_it < step < report
 
     def test_the_pin_can_report_absence(self) -> None:
         """Negative control on the pin: a check against a doc that happens to
@@ -3962,7 +4082,7 @@ class TestMutationKillMatrix:
         store = _make_store(tmp_path / "s")
         text = mod.render_text(mod.recall(store, SCOPE))
         # The CONTENT sentinel, not the heading string: the mutant still prints
-        # the "(no `## What it is` content …)" note, so grepping the heading
+        # the "(no parsable `## What it is` …)" note, so grepping the heading
         # would score this mutant SURVIVED for a reason that has nothing to do
         # with the section being surfaced.
         assert WHAT_IT_IS not in text

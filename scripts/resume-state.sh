@@ -49,13 +49,56 @@ CLAWGATE_LIB_OK=1
 # subject text as $1 and prints one result per line (deduped, sorted).
 # ---------------------------------------------------------------------------
 
-# PR numbers: bare `#<digits>` requires >=2 digits (drops stray `#5` prose refs);
-# a github .../pull/<digits> URL is always taken (its intent is unambiguous).
-extract_prs(){
-  { printf '%s\n' "$1" | grep -oE '#[0-9]{2,}' | tr -d '#'
-    printf '%s\n' "$1" | grep -oE 'pull/[0-9]+'  | grep -oE '[0-9]+'
-  } 2>/dev/null | sort -un
+# PR references, ATTRIBUTED TO A REPO. Emits one `<slug>\t<number>` line per
+# reference; `-` in the slug field means the reference names no repo.
+#
+# 🔴 THIS USED TO EMIT BARE NUMBERS AND THE CALLER RESOLVED THEM ALL AGAINST THE
+# LOCAL REPO. `grep -oE '#[0-9]{2,}'` cannot see a qualifier, so the `#247` in
+# `civitai/civitai-app-starters#247` arrived indistinguishable from a bare
+# `#247` and was looked up in whatever repo happened to be cwd. Measured
+# 2026-08-20 resuming a datapacket-talos handoff that references
+# `civitai/cli#423`, `civitai/civitai#4158`, `civitai/civitai-app-starters#247`
+# and `civitai/civitai-orchestration#311`: the DRIFT block emitted **18 lines**
+# of `PR #NNN MERGED but handoff frames it as open/in-flight (do the follow-on)`,
+# every one of them talos-infra's own unrelated PR of that number.
+#
+# That is not noise, it is FABRICATION — a confident instruction to go do a
+# follow-on that does not exist, which is strictly worse than the silence it
+# replaced. Same disease as the phantom-branch case documented on
+# extract_branches, one surface over.
+#
+# Three shapes, in precedence order:
+#   (a) `owner/repo#N`  -> owner/repo. Any digit count: a qualifier IS the
+#       statement of intent, so the >=2-digit prose filter has nothing to do.
+#   (b) a github `.../pull/N` URL -> the owner/repo in the URL.
+#   (c) a bare `#N` (>=2 digits) -> `-`, i.e. UNATTRIBUTED. The caller decides
+#       whether this repo can claim it; this function must not guess.
+#
+# (c) runs over text with every (a)/(b) form DELETED, so a qualified ref's
+# number can never re-enter as a bare one — that deletion is the actual fix.
+#
+# A slug whose repo half carries a file extension is dropped: `claudedocs/x.md#12`
+# is a line anchor, not a PR. Same asymmetry extract_branches trades on — the
+# omission costs one unchecked ref, the alternative asserts a fact about a repo
+# that does not exist. Cost: a real repo named `owner/thing.com` is unreachable.
+extract_pr_refs(){
+  { printf '%s\n' "$1" \
+      | grep -oE '(^|[^A-Za-z0-9._/#-])[A-Za-z0-9._-]+/[A-Za-z0-9._-]+#[0-9]+' \
+      | sed -E 's/^[^A-Za-z0-9]+//; s/#/\t/'
+    printf '%s\n' "$1" \
+      | grep -oE 'github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/pull/[0-9]+' \
+      | sed -E 's%^github\.com/%%; s%/pull/%\t%'
+    printf '%s\n' "$1" \
+      | sed -E 's%https?://[^[:space:]]*%%g; s%[A-Za-z0-9._-]+/[A-Za-z0-9._-]+#[0-9]+%%g' \
+      | grep -oE '#[0-9]{2,}' | tr -d '#' | sed -E 's/^/-\t/'
+  } 2>/dev/null \
+    | grep -vE '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]*\.[A-Za-z]{1,6}	' \
+    | sort -u
 }
+
+# Every referenced PR NUMBER, repo-blind. Kept because two call sites only need
+# the count, and delegating keeps ONE extraction to reason about (and to break).
+extract_prs(){ extract_pr_refs "$1" | cut -f2 | sort -un; }
 
 # branch tokens: the conventional prefixes only (zach/ feat/ fix/ docs/ chore/),
 # starting at a word boundary so "notafix/x" doesn't match; trailing sentence
@@ -147,9 +190,22 @@ extract_tokens(){
 # require an explicit in-flight marker near the ref rather than flagging EVERY
 # referenced-and-now-merged PR — real handoffs routinely list already-merged PRs
 # (see this repo's rightsizing handoff), so a blanket "merged => drift" is pure noise.
-handoff_says_inflight(){ # $1=pr number  $2=handoff path
+#
+# $3 (optional) is the ref's owner/repo. When given we look FIRST at lines
+# spelling `owner/repo#N`, because a doc that cites several repos can easily
+# carry two different `#423`s and the framing of one says nothing about the
+# other. Only if no qualified line exists do we fall back to the repo-blind
+# match — which is exactly right for a bare ref, whose whole nature is that the
+# doc never qualified it.
+handoff_says_inflight(){ # $1=pr number  $2=handoff path  $3=owner/repo (optional)
   [ -f "$2" ] || return 1
-  grep -iE "#$1([^0-9]|$)" "$2" 2>/dev/null \
+  local lines="" q
+  if [ -n "${3:-}" ]; then
+    q=$(printf '%s' "$3" | sed -E 's/[][\\.^$*+?(){}|]/\\&/g')
+    lines=$(grep -iE "$q#$1([^0-9]|$)" "$2" 2>/dev/null)
+  fi
+  [ -z "$lines" ] && lines=$(grep -iE "#$1([^0-9]|$)" "$2" 2>/dev/null)
+  printf '%s\n' "$lines" \
     | grep -qiE 'open|in.?flight|awaiting|pending|not yet merged|to merge|mergeable|review|wip|draft|blocked'
 }
 
@@ -207,18 +263,120 @@ DRIFT=()         # lines where live state contradicts the handoff
 UNRECONCILED=()  # sources that did NOT answer — an empty DRIFT means less when
                  # this is non-empty, and the digest has to say so
 
+# ---------------------------------------------------------------------------
+# HANDOFF FRESHNESS — is the working-tree copy the copy we should be reading?
+#
+# 🔴 A HANDOFF READ OUT OF A SHARED WORKING TREE IS A GUESS ABOUT WHAT IT SAYS.
+# Measured 2026-08-20: the datapacket-talos primary clone served a handoff **276
+# lines behind `origin/trunk`**, and the whole resume was framed on it. It was
+# caught by luck. That repo's own CLAUDE.md records the same class twice more —
+# a clone once served a SKILL.md 692 commits stale — because the clone's checked
+# out branch is unpredictable and its local refs are routinely far behind.
+#
+# Prose in the skill cannot fix this: a step that must be remembered is a step
+# that gets skipped. So the reconciler does it, every run, and REPORTS WHICH
+# COPY IT READ. Sets three globals:
+#
+#   HANDOFF_TEXT    the authoritative text every later block extracts from
+#   HANDOFF_NOTE    the freshness clause printed on the `handoff:` line
+#   HANDOFF_ALT     a /tmp path holding the OTHER copy, when they differ
+#
+# Which copy wins is decided by a fact, not a heuristic: if the working-tree
+# file is UNMODIFIED relative to HEAD, then any difference from origin is the
+# branch being behind, and origin is authoritative. If it carries uncommitted
+# edits, it is this session's work-in-progress and stays authoritative — but
+# loudly, because reconciling against unpushed text is its own trap.
+HANDOFF_TEXT="" HANDOFF_NOTE="" HANDOFF_ALT=""
+handoff_freshness(){
+  [ -n "$HANDOFF" ] || return 0
+  HANDOFF_TEXT=$(cat "$HANDOFF")
+  local d="$REPO"
+  git -C "$d" rev-parse --git-dir >/dev/null 2>&1 || {
+    HANDOFF_NOTE="working-tree copy — origin freshness UNCHECKED (not a git repo)"; return 0; }
+  git -C "$d" remote get-url origin >/dev/null 2>&1 || {
+    HANDOFF_NOTE="working-tree copy — origin freshness UNCHECKED (no origin remote)"; return 0; }
+
+  # Bounded, non-interactive, and never a prompt. A fetch that cannot complete
+  # must cost seconds, not a hung resume.
+  if [ -z "${RESUME_STATE_SKIP_FETCH:-}" ]; then
+    GIT_TERMINAL_PROMPT=0 \
+    GIT_SSH_COMMAND='ssh -oBatchMode=yes -oConnectTimeout=5 -oStrictHostKeyChecking=accept-new' \
+      timeout 25 git -C "$d" fetch --quiet origin >/dev/null 2>&1 \
+      || HANDOFF_NOTE="[fetch failed; compared against refs already on disk] "
+  else
+    HANDOFF_NOTE="[fetch skipped; compared against refs already on disk] "
+  fi
+
+  local db c
+  db=$(git -C "$d" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null)
+  db=${db#origin/}
+  if [ -z "$db" ]; then
+    for c in trunk main master; do
+      git -C "$d" rev-parse --verify -q "origin/$c" >/dev/null 2>&1 && { db="$c"; break; }
+    done
+  fi
+  [ -n "$db" ] || { HANDOFF_NOTE="${HANDOFF_NOTE}working-tree copy — origin freshness UNCHECKED (no origin/<default-branch> ref)"; return 0; }
+
+  local rel
+  rel=$(git -C "$d" ls-files --full-name --error-unmatch -- "$HANDOFF" 2>/dev/null)
+  if [ -z "$rel" ]; then
+    HANDOFF_NOTE="${HANDOFF_NOTE}working-tree copy — untracked here, nothing on origin/$db to compare"; return 0
+  fi
+
+  # 🔴 PROVE THE PATH EXISTS AT THE REF FIRST. `git diff --quiet <ref> -- <p>`
+  # exits 0 when <p> exists on NEITHER side, so used alone it reports a
+  # reassuring "matches origin/$db" for a file that has never been on that
+  # branch at all. cat-file -e is what makes the comparison mean anything.
+  local ref="origin/$db"
+  if ! git -C "$d" cat-file -e "$(printf '%s:%s' "$ref" "$rel")" 2>/dev/null; then
+    HANDOFF_NOTE="${HANDOFF_NOTE}working-tree copy — not on $ref (local-only/uncommitted doc)"; return 0
+  fi
+
+  local rtext ln_local ln_remote
+  rtext=$(git -C "$d" show "$(printf '%s:%s' "$ref" "$rel")" 2>/dev/null)
+  if [ "$rtext" = "$HANDOFF_TEXT" ]; then
+    HANDOFF_NOTE="${HANDOFF_NOTE}working-tree copy (identical to $ref)"; return 0
+  fi
+  ln_local=$(printf '%s\n' "$HANDOFF_TEXT" | grep -c '')
+  ln_remote=$(printf '%s\n' "$rtext" | grep -c '')
+
+  # 🔴 THE FILE WE HAND OVER IS ALWAYS THE $ref TEXT, in BOTH branches,
+  # because $ref is the copy the reader cannot otherwise open — the working-tree
+  # copy is a path they already have. An earlier revision wrote the LOCAL text
+  # here on the stale branch, so the digest said "read this" while pointing at
+  # the very stale copy it had just warned about. The label states which text it
+  # is; the branches differ only in whether it is the authoritative one.
+  local alt; alt=$(mktemp "/tmp/resume-handoff-XXXXXX.md")
+  printf '%s\n' "$rtext" > "$alt"
+  HANDOFF_ALT="$alt"
+  if git -C "$d" diff --quiet -- "$rel" 2>/dev/null; then
+    # unmodified vs HEAD => the difference is the BRANCH being behind origin
+    HANDOFF_TEXT="$rtext"
+    HANDOFF_NOTE="${HANDOFF_NOTE}🔴 $ref copy (the working-tree copy is STALE: ${ln_local} lines local vs ${ln_remote} on $ref)"
+    DRIFT+=("handoff doc in the working tree is STALE vs $ref (${ln_local} vs ${ln_remote} lines) — this digest reconciled the $ref copy, readable at $alt; READ THAT ONE, the local file is not what the last session wrote")
+  else
+    HANDOFF_NOTE="${HANDOFF_NOTE}⚠ working-tree copy, which has UNCOMMITTED edits and differs from $ref (${ln_local} lines local vs ${ln_remote} on $ref)"
+    UNRECONCILED+=("handoff doc has uncommitted local edits and differs from $ref (${ln_local} vs ${ln_remote} lines) — reconciled the LOCAL copy; the $ref text is at $alt")
+  fi
+}
+
 git_pr_block(){
   echo "GIT/PR"
   local d="$REPO"
-  # 🔴 `-e`, NOT `-d`. IN A GIT WORKTREE `.git` IS A FILE holding `gitdir: …`,
-  # so the `-d` test this replaces was false in every worktree — and this whole
-  # block returned "(not a git repo)" having reconciled NO PR and NO branch.
-  # MEASURED 2026-08-21 by running this script inside
-  # /home/zach/workspace/devrc-clawgate-task (a worktree of devrc): the digest
-  # printed exactly that line. Pre-existing, and pointed the wrong way: CLAUDE.md
-  # mandates a worktree for commit-bound work, so the ONE workflow the repo tells
-  # everyone to use was the one where /resume silently checked nothing.
-  if [ ! -e "$d/.git" ]; then echo "  (not a git repo: $d)"; return; fi
+  # `rev-parse --git-dir`, not `-d "$d/.git"`: in a WORKTREE `.git` is a FILE
+  # holding a gitdir: pointer, so the directory test called a perfectly good
+  # checkout "not a git repo" and skipped every git/PR/branch check in it.
+  if ! git -C "$d" rev-parse --git-dir >/dev/null 2>&1; then
+    echo "  (not a git repo: $d)"
+    # 🔴 AND SAY SO IN THE VERDICT. Returning here skips PR reconciliation,
+    # branch existence, ahead/behind — everything this block contributes. Left
+    # unrecorded, DRIFT went on to print "(none detected — live state matches
+    # the handoff's claims)" for a run that checked NOTHING: a clean bill of
+    # health issued by a doctor who never came. Hit live 2026-08-20 by passing
+    # an explicit handoff path outside any repo.
+    UNRECONCILED+=("$d is not a git repo — no branch, ahead/behind or PR reconciliation ran at all")
+    return
+  fi
 
   # working state (same shape as standup.sh _repo_state)
   local br ab behind ahead dirty cl age subj
@@ -235,9 +393,19 @@ git_pr_block(){
     "$([ "${dirty:-0}" -gt 0 ] && echo "${dirty} dirty" || echo clean)" \
     "${age:-?}" "${subj:0:60}"
 
-  [ -n "$HANDOFF" ] && echo "  handoff: $(basename "$HANDOFF")" || echo "  handoff: (none found — git-only)"
+  if [ -n "$HANDOFF" ]; then
+    # The `handoff:` line names the FILE and nothing else — several callers and
+    # the /resume skill match it exactly. Which COPY of that file was read is a
+    # separate claim, so it gets its own line rather than being smuggled onto
+    # the end of this one.
+    echo "  handoff: $(basename "$HANDOFF")"
+    echo "  handoff-read: ${HANDOFF_NOTE:-working-tree copy}"
+    [ -n "$HANDOFF_ALT" ] && echo "  handoff-other-copy: $HANDOFF_ALT"
+  else
+    echo "  handoff: (none found — git-only)"
+  fi
   [ -n "$HANDOFF" ] || return
-  local text; text=$(cat "$HANDOFF")
+  local text="$HANDOFF_TEXT"
 
   # --- PRs: reconcile every referenced PR against gh; drop 404s (false positives) ---
   #
@@ -254,41 +422,83 @@ git_pr_block(){
   # would be guessing; the honest report is the RATIO plus the list of causes it
   # could be. A partial answer is reported too — otherwise one unreachable PR
   # hides behind four that worked.
-  local prs; prs=$(extract_prs "$text")
-  if have gh && [ -n "$SLUG" ]; then
-    local pr j state merged ci n_try=0 n_ok=0
-    for pr in $prs; do
+  local refs; refs=$(extract_pr_refs "$text")
+
+  # 🔴 CAN A BARE `#N` BE CLAIMED BY THIS REPO? Only when the doc gives no
+  # reason to think otherwise. A handoff that cites a FOREIGN repo anywhere has
+  # demonstrated it talks about more than one, and a bare number in such a doc
+  # is genuinely ambiguous — the author knew which repo they meant and did not
+  # write it down. Resolving it locally is a coin flip recorded as a finding.
+  #
+  # So: foreign qualified ref present (or no local slug at all) => every bare
+  # ref is UNATTRIBUTED and is REPORTED as such, never looked up. Reporting is
+  # the point — a silent skip would rebuild the same false green one layer down.
+  local foreign
+  foreign=$(printf '%s\n' "$refs" \
+    | awk -F'\t' -v me="${SLUG:-}" 'NF==2 && $1!="-" && tolower($1)!=tolower(me){print $1}' \
+    | sort -u | grep -c . )
+  local bare_ok=1
+  { [ -z "${SLUG:-}" ] || [ "$foreign" -gt 0 ]; } && bare_ok=0
+
+  if have gh; then
+    local slug num target label j state ci n_try=0 n_ok=0 n_unattr=0 unattr_nums=""
+    while IFS=$'\t' read -r slug num; do
+      [ -z "${num:-}" ] && continue
+      if [ "$slug" = "-" ]; then
+        if [ "$bare_ok" -eq 0 ]; then
+          # COLLECTED, not printed one-per-line. A real handoff carries dozens
+          # of bare refs (34 on the doc this fix was measured against), and 34
+          # near-identical lines is its own wall of noise — the thing the gap
+          # banner exists to cut through. One line, every number on it.
+          n_unattr=$((n_unattr+1))
+          unattr_nums="${unattr_nums}#${num} "
+          continue
+        fi
+        target="$SLUG"; label="#$num"
+      else
+        target="$slug"; label="$slug#$num"
+      fi
       n_try=$((n_try+1))
-      j=$(gh pr view "$pr" -R "$SLUG" --json state,mergeable,mergedAt,statusCheckRollup 2>/dev/null) || continue
+      j=$(gh pr view "$num" -R "$target" --json state,mergeable,mergedAt,statusCheckRollup 2>/dev/null) || continue
       [ -z "$j" ] && continue                         # 404 / not a real PR -> silently drop
       n_ok=$((n_ok+1))
       state=$(printf '%s' "$j" | jq -r '.state')
       ci=$(printf '%s' "$j" | jq -r '[.statusCheckRollup[]?.conclusion]
              | if any(.=="FAILURE" or .=="ERROR") then "red"
                elif length>0 and all(.=="SUCCESS") then "green" else "pending" end')
-      if [ "$state" = OPEN ]; then printf '  PR #%s %-6s ci=%s\n' "$pr" "$state" "$ci"
-      else printf '  PR #%s %s\n' "$pr" "$state"; fi
+      if [ "$state" = OPEN ]; then printf '  PR %s %-6s ci=%s\n' "$label" "$state" "$ci"
+      else printf '  PR %s %s\n' "$label" "$state"; fi
       # DRIFT: the handoff frames this PR as open/in-flight but it already landed...
-      if [ "$state" = MERGED ] && handoff_says_inflight "$pr" "$HANDOFF"; then
-        DRIFT+=("PR #$pr MERGED but handoff frames it as open/in-flight (do the follow-on)")
+      if [ "$state" = MERGED ] && handoff_says_inflight "$num" "$HANDOFF" "$([ "$slug" = "-" ] || printf '%s' "$slug")"; then
+        DRIFT+=("PR $label MERGED but handoff frames it as open/in-flight (do the follow-on)")
       fi
       # ...or a referenced PR was CLOSED without merging (abandoned — always notable)
-      [ "$state" = CLOSED ] && DRIFT+=("PR #$pr CLOSED without merge (was the handoff plan abandoned?)")
-      [ "$state" = OPEN ] && [ "$ci" = red ] && DRIFT+=("PR #$pr OPEN with RED ci")
-    done
+      [ "$state" = CLOSED ] && DRIFT+=("PR $label CLOSED without merge (was the handoff plan abandoned?)")
+      [ "$state" = OPEN ] && [ "$ci" = red ] && DRIFT+=("PR $label OPEN with RED ci")
+    done <<<"$refs"
     if [ "$n_try" -gt 0 ] && [ "$n_ok" -eq 0 ]; then
       echo "  (gh answered for 0 of $n_try referenced PR(s))"
       UNRECONCILED+=("gh answered for 0 of $n_try referenced PR(s) — offline, unauthenticated, no access, or none is a real PR")
     elif [ "$n_ok" -lt "$n_try" ]; then
       UNRECONCILED+=("gh answered for $n_ok of $n_try referenced PR(s) — the rest were not reconciled")
     fi
+    if [ "$n_unattr" -gt 0 ]; then
+      if [ -z "${SLUG:-}" ]; then
+        printf '  PR UNATTRIBUTED (%s bare ref(s); this checkout has no origin remote) — not resolved: %s\n' \
+          "$n_unattr" "${unattr_nums% }"
+      else
+        printf '  PR UNATTRIBUTED (%s bare ref(s); the doc also names %s other repo(s)) — not resolved against %s: %s\n' \
+          "$n_unattr" "$foreign" "$SLUG" "${unattr_nums% }"
+      fi
+      UNRECONCILED+=("$n_unattr bare #N ref(s) could not be attributed to a repo — the doc names other repos, so resolving them against ${SLUG:-this checkout} would invent findings; qualify them as owner/repo#N to reconcile")
+    fi
   else
-    echo "  (gh unavailable or no remote — PR reconciliation skipped)"
+    echo "  (gh unavailable — PR reconciliation skipped)"
     # Only a GAP if the handoff actually referenced PRs. A handoff naming none
     # has nothing for gh to answer, so the absence of gh costs no coverage and
     # must not downgrade an otherwise honest clean result.
-    if [ -n "$prs" ]; then
-      UNRECONCILED+=("gh unavailable or no remote — $(printf '%s\n' "$prs" | grep -c .) referenced PR(s) were never checked")
+    if [ -n "$refs" ]; then
+      UNRECONCILED+=("gh unavailable — $(printf '%s\n' "$refs" | grep -c .) referenced PR(s) were never checked")
     fi
   fi
 
@@ -339,7 +549,7 @@ workload_block(){
   [ -n "$HANDOFF" ] || { echo "  (no handoff — nothing to scope to)"; return; }
 
   local text tokens dep_json can_raw
-  text=$(cat "$HANDOFF")
+  text="$HANDOFF_TEXT"                 # the copy handoff_freshness chose, not blindly the working tree
   tokens=$(extract_tokens "$text")
   dep_json=$(kubectl $KT get deploy -A -o json 2>/dev/null)
   [ -z "$dep_json" ] && { echo "  (no deployments listed — skipped)"; return; }
@@ -562,10 +772,27 @@ clawgate_block(){
 }
 
 # ---------------------------------------------------------------------------
+
+# Gaps are the thing a reader skips. They used to print as bare `  ! …` lines
+# directly beneath a wall of `  - …` findings, and 2026-08-20 they were duly
+# missed — the skill's own text warns that a findings list is complete "only if
+# no ! line sits beside it", which is a lot to ask of prose formatted to look
+# identical to the findings. Give them a rule and a shouted header so the eye
+# cannot slide past, and keep the `!` prefix the docs key on.
+print_gaps(){
+  [ "${#UNRECONCILED[@]}" -gt 0 ] || return 0
+  echo "  ═══════════════════════════════════════════════════════════════"
+  echo "  !! GAPS (${#UNRECONCILED[@]}) — SOURCES THAT DID NOT ANSWER."
+  echo "  !! Anything above is therefore INCOMPLETE, not a clean bill of health."
+  printf '  ! %s\n' "${UNRECONCILED[@]}"
+  echo "  ═══════════════════════════════════════════════════════════════"
+}
+
 main(){
   resolve "${1:-}"
   echo "## resume-state $(date -u +%FT%TZ)"
   echo "# repo: ${REPO:-?}  slug: ${SLUG:-?}"
+  handoff_freshness
   git_pr_block
   workload_block
   alerts_block
@@ -581,21 +808,20 @@ main(){
     # the branch, so a false test would make `main` — and the script — exit 1
     # on every run that found drift and had nothing unreconciled. Caught by
     # test_a_genuinely_missing_branch_is_still_reported, which asserts rc 0.
-    if [ "${#UNRECONCILED[@]}" -gt 0 ]; then
-      printf '  ! %s\n' "${UNRECONCILED[@]}"
-    fi
+    print_gaps
   elif [ -z "$HANDOFF" ]; then
     # No handoff resolved => nothing was reconciled. Saying "live state matches
     # the handoff's claims" here is a LIE, and the reassuring shape of it is the
     # actual harm: a caller reads it as a clean bill of health for an initiative
     # whose doc was never loaded. Name the absence instead.
     echo "  (no handoff loaded — nothing to reconcile; this is NOT a clean bill of health)"
+    print_gaps
   elif [ "${#UNRECONCILED[@]}" -gt 0 ]; then
     # A handoff loaded and nothing contradicted it — but a source went
     # unanswered, so "no drift" is not a finding about live state, it is a
     # finding about the part of live state we managed to see.
     echo "  (nothing detected, but a source did not answer — NOT a clean bill of health)"
-    printf '  ! %s\n' "${UNRECONCILED[@]}"
+    print_gaps
   else
     echo "  (none detected — live state matches the handoff's claims)"
   fi
