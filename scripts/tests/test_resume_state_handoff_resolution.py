@@ -572,7 +572,7 @@ def test_no_remote_with_referenced_prs_is_reported_as_unreconciled(tmp_path, stu
     assert "matches the handoff's claims" not in joined, joined
     assert "did not answer" in joined, joined
     # the two bare refs (#4101/#4102) cannot be attributed to any repo here
-    assert "PR #4101 UNATTRIBUTED" in out and "PR #4102 UNATTRIBUTED" in out, out
+    assert "PR UNATTRIBUTED" in out and "#4101" in out and "#4102" in out, out
     assert "2 bare #N ref(s) could not be attributed" in joined, joined
 
 
@@ -745,7 +745,10 @@ def test_a_bare_ref_is_unattributed_when_the_doc_names_other_repos(tmp_path, stu
         remote="git@github.com:acme/widget.git",
     )
     out = run_resume(repo, stub_bin, extra_env={"STUB_GH_JSON": MERGED_JSON})
-    assert "PR #4114 UNATTRIBUTED" in out, out
+    assert "PR UNATTRIBUTED" in out and "#4114" in out, out
+    # collapsed onto ONE line: a real doc carries dozens of bare refs and a
+    # line each is its own wall of noise
+    assert len([l for l in out.splitlines() if "UNATTRIBUTED" in l]) == 1, out
     assert "4114" not in " ".join(gh_targets(log)), gh_targets(log)
     for ln in log.read_text().splitlines():
         assert " 4114 " not in ln, f"an unattributable ref was resolved anyway: {ln}"

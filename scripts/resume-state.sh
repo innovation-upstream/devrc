@@ -425,18 +425,17 @@ git_pr_block(){
   { [ -z "${SLUG:-}" ] || [ "$foreign" -gt 0 ]; } && bare_ok=0
 
   if have gh; then
-    local slug num target label j state ci n_try=0 n_ok=0 n_unattr=0
+    local slug num target label j state ci n_try=0 n_ok=0 n_unattr=0 unattr_nums=""
     while IFS=$'\t' read -r slug num; do
       [ -z "${num:-}" ] && continue
       if [ "$slug" = "-" ]; then
         if [ "$bare_ok" -eq 0 ]; then
+          # COLLECTED, not printed one-per-line. A real handoff carries dozens
+          # of bare refs (34 on the doc this fix was measured against), and 34
+          # near-identical lines is its own wall of noise — the thing the gap
+          # banner exists to cut through. One line, every number on it.
           n_unattr=$((n_unattr+1))
-          if [ -z "${SLUG:-}" ]; then
-            printf '  PR #%s UNATTRIBUTED (bare ref, and this checkout has no origin remote) — not resolved\n' "$num"
-          else
-            printf '  PR #%s UNATTRIBUTED (bare ref in a doc that also names %s other repo(s)) — not resolved against %s\n' \
-              "$num" "$foreign" "$SLUG"
-          fi
+          unattr_nums="${unattr_nums}#${num} "
           continue
         fi
         target="$SLUG"; label="#$num"
@@ -468,6 +467,13 @@ git_pr_block(){
       UNRECONCILED+=("gh answered for $n_ok of $n_try referenced PR(s) — the rest were not reconciled")
     fi
     if [ "$n_unattr" -gt 0 ]; then
+      if [ -z "${SLUG:-}" ]; then
+        printf '  PR UNATTRIBUTED (%s bare ref(s); this checkout has no origin remote) — not resolved: %s\n' \
+          "$n_unattr" "${unattr_nums% }"
+      else
+        printf '  PR UNATTRIBUTED (%s bare ref(s); the doc also names %s other repo(s)) — not resolved against %s: %s\n' \
+          "$n_unattr" "$foreign" "$SLUG" "${unattr_nums% }"
+      fi
       UNRECONCILED+=("$n_unattr bare #N ref(s) could not be attributed to a repo — the doc names other repos, so resolving them against ${SLUG:-this checkout} would invent findings; qualify them as owner/repo#N to reconcile")
     fi
   else
