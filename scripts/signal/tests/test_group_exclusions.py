@@ -301,16 +301,30 @@ EXEMPT_READS = {
         "write: resolves a reaction's target message id",
     "apply_remote_delete":
         "write: blanks a deleted message's body",
-    # --- The DRAFT surface (D3). Drafts live in signal.messages with a NEGATIVE
-    # provisional timestamp and are addressed to a RECIPIENT, never a group, so
-    # `group_id` is NULL on every one of them and the predicate could only ever
-    # be a no-op. Filtering the compose/approve/send path by a mute list would
-    # also be wrong in principle: muting is about what you READ, and a draft is
-    # something you WROTE. 🔴 If drafting to a group is ever added, these move
-    # into FILTERED_READS — this test fails when that day comes only because the
-    # method set is pinned, so re-read this note then rather than trusting it.
-    "get_draft": "draft surface: drafts have no group_id",
-    "list_drafts": "draft surface: drafts have no group_id",
+    # --- The DRAFT surface (D3). 🔴 THAT DAY CAME. The note here used to read
+    # "drafts are addressed to a RECIPIENT, never a group, so `group_id` is NULL
+    # on every one of them", and said that if drafting to a group were ever added
+    # these move into FILTERED_READS. Drafting to a group IS now supported
+    # (`draft_message()` calls `upsert_group()` and sets `messages.group_id`), so
+    # that reason is dead and the exemption was RE-DERIVED rather than inherited:
+    #
+    #   * These three return ONLY rows with `send_state IS NOT NULL` — bodies the
+    #     OPERATOR composed. Muting is about what you READ; a draft is what you
+    #     WROTE. No third party's conversation can reach a caller through them.
+    #     (`test_get_draft_refuses_a_device_sync_ECHO_not_just_a_draft` is what
+    #     keeps that population claim true, and it is the reason this is not just
+    #     an assertion in prose.)
+    #   * Filtering them would be a live BUG, not merely conservative:
+    #     `approve_draft`, `send_approved` and `reconcile_send` all reach
+    #     `get_draft` through `_draft_or_raise`, so muting a group mid-flight
+    #     would strand its draft in `sending` and report "does not exist" — an
+    #     accidental extra refusal path through the D3 gate.
+    #
+    # The claim that DOES need measuring is that every FILTERED read hides a
+    # muted group's draft now that drafts can carry a group_id — see
+    # `test_a_muted_group_draft_is_hidden_from_every_filtered_read`.
+    "get_draft": "outbound surface: returns only bodies the operator composed",
+    "list_drafts": "outbound surface: returns only bodies the operator composed",
     "account_number": "draft surface: reads the sending account off a draft",
 }
 
@@ -393,19 +407,308 @@ def test_get_draft_refuses_a_device_sync_ECHO_not_just_a_draft(db):
     assert ids["mute"] is not None
 
 
-def test_a_draft_really_has_no_group_id(db):
-    """The draft surface's EXEMPTION, measured instead of asserted in prose.
+def test_a_DM_draft_still_has_no_group_id(db):
+    """A draft to a PERSON carries no group — the group linkage is not global.
 
-    `EXEMPT_READS` claims drafts carry no `group_id`, so the mute predicate on
-    them could only ever be a no-op. A comment is a claim like any other; this
-    reads the column. If drafting to a group is ever added, this goes red and
-    the exemption has to be revisited rather than inherited.
+    This used to be `test_a_draft_really_has_no_group_id` and carried the
+    exemption's whole reason. Group drafting has since been added, so the claim
+    it can honestly make is narrower: a DM draft is still ungrouped, which is
+    what stops `draft_message()`'s new branch from stamping a group onto every
+    outbound row. The mute-side claim moved to
+    `test_a_muted_group_draft_is_hidden_from_every_filtered_read`, where it is
+    measured against the reads rather than inferred from a NULL.
     """
     draft = db.draft_message(recipient="+15550009", body="drafted, never sent",
                              self_number="+15550000")
     rows = db.conn.rows("SELECT group_id FROM signal.messages WHERE id = ?",
                         (draft["id"],))
     assert rows and rows[0]["group_id"] is None
+
+
+# --------------------------------------------------------------------------- #
+# Drafting TO a group — the outbound path doing what the inbound path already did
+# --------------------------------------------------------------------------- #
+SELF_NUMBER = "+15550000"
+
+
+def _group_address(raw: bytes) -> str:
+    """The API's `id` field for a raw group id, built by the SAME rule as prod.
+
+    Built from `_signal_db._group_id_to_address` deliberately: a hand-rolled
+    double-b64 here would be a second encoder, and a test that carries its own
+    copy of the rule cannot fail when the shipped rule regresses. The ROUND-TRIP
+    against a literal is pinned separately, below, so this is not circular.
+    """
+    return _signal_db._group_id_to_address(raw)
+
+
+def test_the_group_address_encoding_round_trips_against_a_LITERAL():
+    """Non-circular anchor: the double encoding, spelled out once.
+
+    Every other group-draft test builds its address through
+    `_group_id_to_address`. If that function were wrong, those tests would all
+    agree with each other and with nothing else. This one pins the shape against
+    a literal computed the way the API documents it — `group.` + b64(b64(raw)) —
+    and pins the decode as its exact inverse.
+    """
+    raw = b"\x55" * 32
+    literal = "group." + base64.b64encode(base64.b64encode(raw)).decode()
+    assert _signal_db._group_id_to_address(raw) == literal
+    assert _signal_db._group_address_to_id(literal) == raw
+    # The shape the API actually emits, generated at module scope, decodes too.
+    assert _signal_db._group_address_to_id(GROUP_ID_FIELD_SHAPE) == b"\x44" * 32
+
+
+def test_a_group_draft_is_LINKED_to_the_group_row_not_a_contact(db):
+    """Criterion 1 + 2: `group_id` set, `dest_contact_id` NULL, no phantom contact.
+
+    The defect: `draft_message` never named `group_id` and resolved ANY recipient
+    through `upsert_contact`, so a group draft stored `group_id = NULL` AND
+    minted a fake person whose `phone_number` was the group address.
+    """
+    group_row = db.upsert_group(group_id=GROUP_KEEP, name="")
+    before = db.conn.rows(
+        "SELECT count(*) AS n FROM signal.contacts "
+        "WHERE phone_number LIKE 'group.%'")[0]["n"]
+
+    draft = db.draft_message(recipient=_group_address(GROUP_KEEP),
+                             body="pool car is booked", self_number=SELF_NUMBER)
+
+    row = db.conn.rows(
+        "SELECT group_id, dest_contact_id FROM signal.messages WHERE id = ?",
+        (draft["id"],))[0]
+    assert row["group_id"] == group_row, (
+        "the draft is not linked to the group row the inbound path uses — "
+        "`_muted_predicate` keys on m.group_id and cannot see it")
+    assert row["dest_contact_id"] is None, (
+        "a group draft addressed a CONTACT; the phantom-contact defect is back")
+    after = db.conn.rows(
+        "SELECT count(*) AS n FROM signal.contacts "
+        "WHERE phone_number LIKE 'group.%'")[0]["n"]
+    assert after == before, (
+        f"drafting to a group created {after - before} phantom contact(s) — a "
+        f"fake person whose phone_number is a group address")
+    assert draft["group_id"] == group_row, "the returned dict must say so too"
+
+
+def test_drafting_to_an_UNSEEN_group_creates_it_rather_than_refusing(db):
+    """Criterion 1's second half: `upsert_group`, not a lookup that refuses.
+
+    A group can be drafted to before its first message has been ingested (the
+    pipeline is forward-only). Refusing would make that group undraftable; the
+    inbound path creates the row the same way.
+    """
+    assert db.conn.rows("SELECT count(*) AS n FROM signal.groups")[0]["n"] == 0
+
+    draft = db.draft_message(recipient=_group_address(GROUP_UNSEEN),
+                             body="first thing ever said here",
+                             self_number=SELF_NUMBER)
+
+    groups = db.conn.rows("SELECT id, group_id FROM signal.groups")
+    assert len(groups) == 1, groups
+    assert bytes(groups[0]["group_id"]) == GROUP_UNSEEN
+    assert draft["group_id"] == groups[0]["id"]
+
+
+@pytest.mark.parametrize("bad", [
+    "group.",                       # prefix and nothing else
+    "group.not!base64",             # not base64 at all
+    "group." + base64.b64encode(b"Team").decode(),          # a DISPLAY NAME
+    "group." + base64.b64encode(
+        base64.b64encode(b"\x77" * 7)).decode(),            # 7 bytes: not 16/32
+])
+def test_a_MALFORMED_group_address_is_refused_and_stores_nothing(db, bad):
+    """A bad address must not become a group, a contact, or a draft.
+
+    🔴 The failure mode this forbids is the one the old code had in a new shape:
+    `upsert_contact(phone_number=<garbage>)` succeeded for ANYTHING, so a typo
+    produced a draft that reported success and could never be delivered. The
+    strict decoder refuses instead — and the assertions below check the STORE,
+    not just the exception, because a refusal that has already written a row is
+    not a refusal.
+    """
+    with pytest.raises(ValueError):
+        db.draft_message(recipient=bad, body="should never be stored",
+                         self_number=SELF_NUMBER)
+    assert db.conn.rows("SELECT count(*) AS n FROM signal.groups")[0]["n"] == 0
+    assert db.conn.rows("SELECT count(*) AS n FROM signal.messages")[0]["n"] == 0
+    assert db.conn.rows(
+        "SELECT count(*) AS n FROM signal.contacts "
+        "WHERE phone_number LIKE 'group.%'")[0]["n"] == 0
+
+
+def test_the_SEND_recipient_is_derived_from_the_group_row_not_a_contact(db):
+    """Criterion 3: what `send_approved()` hands `/v2/send` for a group draft.
+
+    The phantom contact was LOAD-BEARING — `get_draft`'s `CASE … END AS
+    recipient` read the address back out of it. This is the rewiring that let it
+    be deleted, so it is asserted on the value the send path actually uses, and
+    with the contacts table proven empty of any group-addressed row so the
+    string cannot have come from one.
+    """
+    address = _group_address(GROUP_KEEP)
+    draft = db.draft_message(recipient=address, body="see you at 6",
+                             self_number=SELF_NUMBER)
+
+    read_back = db.get_draft(draft["id"])
+    assert read_back["recipient"] == address, (
+        f"the send path would address {read_back['recipient']!r}, not the group")
+    assert db.conn.rows(
+        "SELECT count(*) AS n FROM signal.contacts "
+        "WHERE phone_number LIKE 'group.%'")[0]["n"] == 0, (
+        "the recipient could have come from a phantom contact — this test would "
+        "then prove nothing about the derivation")
+    # The raw BYTEA id must NOT escape: the CLI json.dumps()es this dict.
+    assert "group_signal_id" not in read_back
+    import json
+    json.dumps(read_back, default=str)
+
+
+def test_send_and_reconcile_work_END_TO_END_on_a_group_draft(db, monkeypatch):
+    """Criterion 3: the whole D3 path, on a group draft, with the wire captured.
+
+    Not "get_draft returns the right string" — the actual approve → send →
+    (strand) → reconcile sequence, asserting the recipient that reached the
+    transport.
+    """
+    address = _group_address(GROUP_MUTE)      # distinct from every other case
+    draft = db.draft_message(recipient=address, body="ride at seven",
+                             self_number=SELF_NUMBER)
+    db.approve_draft(draft["id"], approval_ref="clawgate/1")
+
+    seen = {}
+
+    def fake_transmit(auth, *, recipient, body, number):
+        seen.update(recipient=recipient, body=body, number=number,
+                    draft_id=auth.draft_id)
+        return [{"timestamp": "1787331796630"}]
+
+    out = db.send_approved(draft["id"], transmit=fake_transmit)
+    assert seen["recipient"] == address, seen
+    assert seen["number"] == SELF_NUMBER, (
+        "account_number() must still read the SENDING contact, which a group "
+        "draft still has")
+    assert out["send_state"] == "sent"
+    assert out["message_timestamp"] == 1787331796630
+    assert out["recipient"] == address
+
+    # …and reconcile, on a SECOND group draft stranded in `sending`.
+    other = db.draft_message(recipient=address, body="actually eight",
+                             self_number=SELF_NUMBER)
+    db.approve_draft(other["id"], approval_ref="clawgate/2")
+
+    def explode(auth, *, recipient, body, number):
+        raise RuntimeError("pod killed after the POST")
+
+    with pytest.raises(RuntimeError):
+        db.send_approved(other["id"], transmit=explode)
+    assert db.get_draft(other["id"])["send_state"] == "sending"
+    done = db.reconcile_send(other["id"], outcome="sent",
+                             server_timestamp=1787331799999)
+    assert done["send_state"] == "sent"
+    assert done["recipient"] == address
+
+
+def test_a_muted_group_draft_is_hidden_from_every_filtered_read(db):
+    """🔴 CRITERION 4 — the sharp one. Mute must not be bypassable by drafting.
+
+    `_muted_predicate` keys on `m.group_id`. With `group_id` NULL on every draft
+    the predicate matched nothing, so a draft to a MUTED group came back in full
+    from every read that believed it was filtering. Mute is the privacy control
+    here.
+
+    This walks the FILTERED_READS ledger rather than naming three methods, so a
+    read surface added to that set later is covered the day it is added — a
+    hand-written list here would silently stop being the whole set.
+
+    Each read gets a POSITIVE CONTROL first: it must SEE the draft before the
+    mute. Without that, "hidden" is indistinguishable from a query wired to
+    nothing, and this whole test would pass against a `draft_message` that
+    stored no row at all.
+    """
+    assert FILTERED_READS == {"list_conversations", "search", "get_message"}, (
+        "the filtered-read set moved; extend the probes below to match rather "
+        f"than letting this test cover less than it claims: {FILTERED_READS}")
+
+    db.upsert_group(group_id=GROUP_MUTE, name="")
+    body = "quarterly kestrel rendezvous"          # distinct from every _seed body
+    draft = db.draft_message(recipient=_group_address(GROUP_MUTE), body=body,
+                             self_number=SELF_NUMBER)
+
+    # 🔴 EVERY probe identifies the DRAFT, never the group row. Keying
+    # `list_conversations` on `group_row_id` looked equivalent and was not: on
+    # the BROKEN code the draft lands in the phantom contact's DM thread, so
+    # that probe returned [] before the mute and this test failed on its own
+    # positive control — reporting "the harness is blind" where the real finding
+    # is "the mute was bypassed". The provisional timestamp is negative and
+    # unique to this draft, so it names whichever conversation the row landed
+    # in, in both worlds.
+    #
+    # 🔴 Its ONE precondition, asserted rather than assumed: this draft must be
+    # the newest message in whatever conversation it lands in, because
+    # `list_conversations` reports `max(message_timestamp)` per conversation and
+    # a draft's provisional timestamp is NEGATIVE — so any real (positive) server
+    # timestamp in the same group would win the max and the probe would go blind.
+    # Measured on real Postgres while writing this: a second, already-sent draft
+    # in the same group made this probe report 0 before the mute.
+    assert db.conn.rows(
+        "SELECT count(*) AS n FROM signal.messages")[0]["n"] == 1, (
+        "the probe below reads max(message_timestamp) per conversation and this "
+        "draft's is NEGATIVE — another message in this group would mask it")
+
+    def probe() -> dict:
+        ts = draft["message_timestamp"]
+        return {
+            "list_conversations": [r for r in db.list_conversations()
+                                   if r["last_message_timestamp"] == ts],
+            "search": [r for r in db.search(body) if r["id"] == draft["id"]],
+            "get_message": [r for r in [db.get_message(draft["id"])] if r],
+        }
+
+    before = probe()
+    for name, rows in before.items():
+        assert rows, (
+            f"POSITIVE CONTROL FAILED: {name} cannot see the group draft even "
+            f"BEFORE the mute, so its 'hidden' assertion below would be vacuous")
+
+    db.exclude_group(GROUP_MUTE, note="muted by the operator")
+
+    after = probe()
+    for name, rows in after.items():
+        assert rows == [], (
+            f"MUTE BYPASSED: {name} returned a draft to a MUTED group "
+            f"({len(rows)} row(s)). `not_excluded()` keys on m.group_id, so a "
+            f"draft stored with group_id NULL walks straight through it.")
+
+    # Muting HIDES; it must not have deleted the operator's own draft, and the
+    # outbound surface (exempt, deliberately) must still reach it.
+    assert db.conn.rows("SELECT count(*) AS n FROM signal.messages "
+                        "WHERE id = ?", (draft["id"],))[0]["n"] == 1
+    assert db.get_draft(draft["id"])["body"] == body
+
+
+def test_group_drafts_appear_in_the_GROUP_conversation_not_a_phantom_DM(db):
+    """Criterion 2's other consequence: the conversation reads two-sided.
+
+    With `group_id` NULL the draft grouped by `dest_contact_id` — the phantom —
+    so the group thread showed inbound messages only and a fake one-person DM
+    appeared beside it.
+    """
+    ids = _seed(db)
+    keep_row = ids["_rows"]["keep"]
+    before = {r["group_row_id"]: r["message_count"]
+              for r in db.list_conversations()}
+
+    db.draft_message(recipient=_group_address(GROUP_KEEP), body="on my way",
+                     self_number=SELF_NUMBER)
+
+    after = {r["group_row_id"]: r["message_count"]
+             for r in db.list_conversations()}
+    assert after[keep_row] == before[keep_row] + 1, (
+        "the group conversation did not count our own outbound message")
+    assert set(after) == set(before), (
+        f"a NEW conversation appeared for a group draft — that is the phantom "
+        f"contact's DM thread: {set(after) - set(before)}")
 
 
 def test_the_ledger_would_notice_an_unfiltered_read():

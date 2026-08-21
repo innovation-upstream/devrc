@@ -76,9 +76,13 @@ holds the mute list; **the rows are still there** — muting hides, it never del
 `unmute` restores a conversation exactly. That is why it is the default: this pipeline is
 forward-only, so a deleted message can never be re-fetched.
 
-🔴 **It is keyed on the group's BINARY id, never the name** — `signal.groups.name` is
-empty (`''`) for every group this consumer has stored, so a name-based filter would match
-nothing while looking like it worked.
+🔴 **It is keyed on the group's BINARY id, never the name.** `signal.excluded_groups` has
+one column to match on and it is `group_id BYTEA`, so a name-based filter matches nothing
+while looking like it worked. (An earlier version of this line justified that with "`name`
+is `''` for every group this consumer has stored" — **that is wrong**: `upsert_group()`
+persists the `groupName` an envelope carries, `Vetr app group` and `Family Winnipeg` are
+both populated in the live store, and `test_a_stored_group_keeps_the_name_the_envelope_carried`
+pins it. The advice is unchanged; only its reason was false.)
 
 ```bash
 python3 consumer.py muted
@@ -86,8 +90,9 @@ python3 consumer.py mute <internal_id> --note "why"     # base64, from the API b
 python3 consumer.py unmute <internal_id>
 ```
 
-Get `internal_id` (base64) — the pipeline does not store group names, so this is the only
-way to go from a name you recognise to the id the mute list wants:
+Get `internal_id` (base64). `signal.groups.name` may already hold the name (see above), but
+it is only as good as the envelope that last carried one, so the API is the reliable way to
+go from a name you recognise to the id the mute list wants:
 ```bash
 kubectl -n signal exec deploy/signal-consumer -- python3 -c "
 import os,json,urllib.request

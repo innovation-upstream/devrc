@@ -30,6 +30,7 @@ the gate is a missing edge in the call graph, not a documented convention.
 """
 from __future__ import annotations
 
+import base64
 import contextlib
 import os
 import re
@@ -1229,14 +1230,45 @@ class SignalDB:
         server timestamp is positive epoch-ms, so the provisional value can never
         be mistaken for one, and `send_approved()` overwrites it with the SERVER's
         (🔧 #4).
+
+        🔴 A GROUP recipient resolves to a GROUP, exactly as the inbound path
+        already does. `upsert_message()` calls `upsert_group()` and sets
+        `messages.group_id`; this used to send EVERY recipient through
+        `upsert_contact()` instead, which produced two silent faults at once:
+
+          * `group_id` stayed NULL, so `_muted_predicate` — which keys on
+            `m.group_id` — could not see the row. A draft to a MUTED group was
+            returned in full by every read that believed it was filtering, and
+            mute is the privacy control here. `idx_msg_group` and every
+            group-scoped read missed our own sent messages too, so a group
+            conversation read as inbound-only.
+          * a PHANTOM CONTACT was created — a fake person whose `phone_number`
+            was the group address — one per group ever drafted to.
+
+        The phantom was load-bearing, which is why removing it needed
+        `get_draft()` to derive the recipient from the group row FIRST (see the
+        LEFT JOIN there): `send_approved()` reads the recipient string back out
+        of the draft, so dropping the contact without rewiring that derivation
+        would have left every group send addressed to `None`.
         """
         if not (self_uuid or self_number):
             raise ValueError("draft_message needs the sending account's uuid or number")
         source_id = self.upsert_contact(
             signal_uuid=self_uuid, phone_number=self_number, display_name="me",
         )
-        dest_id = self.upsert_contact(phone_number=recipient) \
-            if not _looks_like_uuid(recipient) else self.upsert_contact(signal_uuid=recipient)
+        dest_id = None
+        group_row_id = None
+        if _looks_like_group_address(recipient):
+            # `upsert_group`, not a lookup that refuses an unknown group: the
+            # inbound path creates the row the same way, and refusing here would
+            # make a group drafted to before its first message ever arrived
+            # undraftable. A BAD address is still refused — `_group_address_to_id`
+            # raises rather than inventing 32 bytes.
+            group_row_id = self.upsert_group(group_id=_group_address_to_id(recipient))
+        elif _looks_like_uuid(recipient):
+            dest_id = self.upsert_contact(signal_uuid=recipient)
+        else:
+            dest_id = self.upsert_contact(phone_number=recipient)
         ts = provisional_timestamp if provisional_timestamp is not None \
             else -int(time.time() * 1000)
         if ts >= 0:
@@ -1249,11 +1281,13 @@ class SignalDB:
                 """
                 INSERT INTO signal.messages
                     (message_timestamp, source_contact_id, dest_contact_id,
-                     message_type, body, is_outbound, send_state, approval_ref)
-                VALUES (%s, %s, %s, 'draft', %s, true, %s, %s)
+                     group_id, message_type, body, is_outbound, send_state,
+                     approval_ref)
+                VALUES (%s, %s, %s, %s, 'draft', %s, true, %s, %s)
                 RETURNING id
                 """,
-                (ts, source_id, dest_id, body, STATE_PENDING, approval_ref),
+                (ts, source_id, dest_id, group_row_id, body, STATE_PENDING,
+                 approval_ref),
             )
             draft_id = _returned_id(cur, "draft_message")
         self._c.commit()
@@ -1261,7 +1295,7 @@ class SignalDB:
             "id": draft_id, "recipient": recipient, "body": body,
             "send_state": STATE_PENDING, "message_timestamp": ts,
             "source_contact_id": source_id, "dest_contact_id": dest_id,
-            "approval_ref": approval_ref,
+            "group_id": group_row_id, "approval_ref": approval_ref,
         }
 
     def approve_draft(self, draft_id: int, *, approval_ref: str) -> dict:
@@ -1329,10 +1363,26 @@ class SignalDB:
         `group_id`, so this method returned a muted group's body in full while
         `get_message` correctly returned None for the same row. Nothing exploited
         it (every caller goes through `_draft_or_raise`, and the D3 gate rejects
-        `send_state=None` before printing), but the mute ledger EXEMPTS this
-        method on the stated grounds that drafts carry no group — and that reason
-        was false until this line existed. A guard whose justification the code
+        `send_state=None` before printing). A guard whose justification the code
         contradicts is one refactor away from being a real leak.
+
+        🔴 THE EXEMPTION'S REASON CHANGED — read it, do not inherit it. The mute
+        ledger used to exempt this method because "drafts have no group_id".
+        Since `draft_message()` links a group draft to its group row that is NO
+        LONGER TRUE, and the exemption now rests on a different, narrower claim:
+        this is the OUTBOUND surface, and the only rows it can return are ones
+        `send_state IS NOT NULL` — i.e. bodies the OPERATOR composed, never a
+        third party's. Muting is about what you READ; a draft is what you WROTE.
+        Filtering here would also be actively harmful: `approve_draft()`,
+        `send_approved()` and `reconcile_send()` all reach this through
+        `_draft_or_raise()`, so a mute landing mid-flight would strand a draft in
+        `sending` with no route out and report it as "does not exist" — an
+        accidental seventh refusal path through the D3 gate.
+
+        What DOES have to hold, and is pinned by
+        `test_group_exclusions.py::test_a_muted_group_draft_is_hidden_from_every_filtered_read`:
+        every read that carries `not_excluded()` must hide a muted group's draft.
+        Those are the surfaces that can surface someone else's conversation.
         """
         with self._c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
@@ -1354,15 +1404,33 @@ class SignalDB:
                        -- gates goes blind.
                        CASE WHEN d.is_placeholder THEN d.phone_number
                             ELSE COALESCE(CAST(d.signal_uuid AS text), d.phone_number)
-                       END AS recipient
+                       END AS recipient,
+                       -- A GROUP draft has NO dest contact, so the CASE above is
+                       -- NULL for it and the recipient is rebuilt in Python from
+                       -- the group's binary id. It is not built in SQL because
+                       -- the address is a DOUBLE base64 encoding, which neither
+                       -- engine spells the same way — and doing it here would be
+                       -- a second encoder alongside `_group_id_to_address`.
+                       m.group_id AS group_id,
+                       g.group_id AS group_signal_id
                 FROM signal.messages m
                 LEFT JOIN signal.contacts d ON d.id = m.dest_contact_id
+                LEFT JOIN signal.groups g ON g.id = m.group_id
                 WHERE m.id = %s AND m.is_outbound AND m.send_state IS NOT NULL
                 """,
                 (draft_id,),
             )
             row = cur.fetchone()
-            return dict(row) if row else None
+            if row is None:
+                return None
+            out = dict(row)
+            # 🔴 The GROUP wins over the contact join, and the raw id never
+            # escapes: a `memoryview`/`bytes` in the returned dict would reach
+            # `json.dumps` in the CLI and the send payload alike.
+            group_signal_id = out.pop("group_signal_id", None)
+            if group_signal_id is not None:
+                out["recipient"] = _group_id_to_address(group_signal_id)
+            return out
 
     def list_drafts(self, state: str | None = None) -> list:
         sql = ("SELECT id, message_timestamp, body, send_state, approval_ref "
@@ -1643,3 +1711,67 @@ def _looks_like_uuid(value: str) -> bool:
         return True
     except (ValueError, AttributeError, TypeError):
         return False
+
+
+# --------------------------------------------------------------------------- #
+# GROUP ADDRESSES — the `group.` recipient the send endpoint takes
+# --------------------------------------------------------------------------- #
+# `/v2/send` addresses a group with the API's own `id` field, which is
+# `group.` + base64(base64(raw 16- or 32-byte group id)) — a DOUBLE encoding, so
+# the text after the prefix is base64 of the group's base64 `internal_id`. The
+# inner value is exactly what `signal.groups.group_id` stores as BYTEA and what
+# the mute list is keyed on, which is what lets an outbound draft join to the
+# same group row the inbound path writes.
+GROUP_ADDRESS_PREFIX = "group."
+
+
+def _looks_like_group_address(recipient) -> bool:
+    """True for a `group.`-prefixed recipient — a GROUP, not a person.
+
+    Deliberately a prefix test and nothing more: whether the rest DECODES is
+    `_group_address_to_id`'s job, and conflating the two would turn a malformed
+    group address into a silently-created contact — the exact defect this
+    replaces. A phone number or a uuid can never carry this prefix (`+` and hex
+    digits only), so there is no ambiguity to resolve.
+    """
+    return isinstance(recipient, str) and recipient.startswith(GROUP_ADDRESS_PREFIX)
+
+
+def _group_address_to_id(recipient: str) -> bytes:
+    """`group.<base64(base64(raw))>` → the raw BYTEA group id.
+
+    🔴 ONE RULE, ONE PLACE: the inner decode is `consumer._decode_internal_id`,
+    the same strict reader the `mute` CLI uses, NOT a second base64 reader living
+    here. It round-trips the encoding and demands 16 or 32 bytes, so a truncated
+    paste or a display name is refused rather than resolved to some other 32
+    bytes — a draft addressed to a group that does not exist is worse than a
+    refusal, because `upsert_group` would happily CREATE it and the message would
+    go nowhere while reporting success.
+
+    Raises `ValueError` on anything that is not a canonical group address.
+    """
+    from consumer import _decode_internal_id  # local import: no cycle
+
+    outer = recipient[len(GROUP_ADDRESS_PREFIX):]
+    try:
+        internal = base64.b64decode(outer, validate=True).decode("ascii")
+    except Exception as exc:
+        raise ValueError(
+            f"{recipient!r} is not a group address: the text after "
+            f"{GROUP_ADDRESS_PREFIX!r} must be base64 of the group's base64 "
+            f"`internal_id` (the API's `id` field is double-encoded) — {exc}"
+        ) from exc
+    return _decode_internal_id(internal)
+
+
+def _group_id_to_address(raw) -> str:
+    """A raw BYTEA group id back to the `group.` recipient `/v2/send` takes.
+
+    The inverse of `_group_address_to_id`, and the reason the phantom contact can
+    be retired: the recipient string is DERIVED from `signal.groups.group_id`
+    rather than read back out of a fake person whose `phone_number` was the
+    address. `bytes()` because psycopg2 hands BYTEA back as a `memoryview` and
+    the sqlite substrate as `bytes`.
+    """
+    return GROUP_ADDRESS_PREFIX + base64.b64encode(
+        base64.b64encode(bytes(raw))).decode()
