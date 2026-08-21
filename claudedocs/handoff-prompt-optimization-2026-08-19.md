@@ -1,7 +1,9 @@
-# Handoff: prompt-optimization — CLOSED 2026-08-20 (PR #586 merged)
+# Handoff: prompt-optimization — CLOSED 2026-08-21 (#586 #605 #617 #621 #644)
 
-**Status: DONE and merged** (`56de7b2`, squash). Deployed to the **laptop**;
-the **workbench is not deployed** — see "Left open" below.
+**Status: DONE, merged, deployed to BOTH hosts, and VERIFIED BY REAL USE.**
+Landed across five PRs — #586 (the contract + the clickup slim), #605 (this
+doc), #617, #621 and #644 — each shipped with `scripts/ship.sh` and confirmed on
+workbench and laptop.
 
 This doc originally carried the design for two tasks. **Two of its premises were
 false**, and they are recorded here so nobody re-derives them.
@@ -61,21 +63,59 @@ has 13.** `emulate` landed in #321 without updating that prose, and
 `browser_tool.test.mjs` had pinned 13 all along. Corrected, and the test now
 parses `ALLOWED_OPS_DEFAULT` from the code rather than prose about it.
 
+## Verified by real use (2026-08-21, PR #644)
+
+The contract has now been RUN, twice, against a public read-only target. Ground
+truth read from `tool-audit.jsonl`, not the returned envelope — because the
+contract itself says `steps_used` is untrustworthy:
+
+    run 1   whoami -> nav -> wake -> text x4                        9 ops, ok
+    run 2   whoami -> nav -> text x2 -> wake -> text x2 -> eval x2   9 ops, ok
+
+- **ZERO `open`/`close`/`activate`/`upload`/`tabs` attempts** in either run, so
+  the round-2 fix (rails 2 and 8 no longer instructing ops `browser agent` does
+  not have) holds against a live model and not merely against a pinned string.
+- **The first call was `whoami` both times**, and run 2's evidence quotes
+  "whoami: personal - other instance, no extension_stale" — rail 1 steered
+  behaviour including its second half. The rails are not decoration.
+- **Rail 7 fired for real**: run 1's read came back `hidden`, the deterministic
+  auto-wake ran (`auto_wake_ok woke:true settleMs:1500`), and the re-read had
+  content.
+- 0 leftover tabs in the operator's profile either time.
+- `steps_used` claimed **5 against 9** real op calls BOTH times — a fresh
+  reproduction of `reference/agent.md` guardrail 3.
+
+**What first use found that 47 document-guards could not:** the template's
+`INSTANCE:` line read as optional prose, I left it out, and the run died at
+`browser-agent: failed to open a tab` before a single model token was spent.
+Two profiles are connected, so `--instance` is required — and the wrapper forces
+the tab via env BEFORE the model runs, so a profile named in the goal text can
+never satisfy it. Fixed in #644 and re-verified live afterwards.
+
 ## Left open
 
-- 🔴 **The workbench is NOT deployed.** `ship.sh` correctly SKIPPED it (rc=7):
-  `claude/skills/resume/SKILL.md` has ~9 lines of uncommitted work that collides
-  with incoming commit `92e06db`. That work is intact and untouched; a safety
-  copy is in this session's scratchpad. To finish: commit or set aside that
-  file on the workbench, then re-run `scripts/ship.sh`. **Do not stash** — the
-  stash is repo-global.
-- **Never exercised on a real browser validation run.** The contract is tested
-  as a document, not as a prompt. First real use is the verification.
-- Repo-wide gap (not this PR's): the content-leak gates cover JSON/JSONL/JSONC
-  and `.html`/`.txt`, but **not `.md`**, so the two new markdown files landed
-  under no automated leak gate. Both were read manually and are clean.
+- **The `.md` leak-gate gap is NARROWER than this doc first claimed.** The
+  hostname and public-IP gates enumerate `git ls-files` with **no extension
+  filter**, which is why #619's client subdomain was caught inside a `.md`.
+  Only `test_no_captured_text.py` (JSON/JSONL/JSONC) and
+  `test_no_captured_markup.py` (`.html`/`.txt`) are extension-limited. So the
+  real gap is CAPTURED TEXT — message bodies, prompts, transcripts, or a model's
+  summaries of them — in `.md`. `claudedocs/` is exactly where handoffs quoting
+  real conversations land. Extending it is a design call, not a one-liner:
+  `.md` is mostly legitimate prose, so the false-positive rate is the whole
+  question.
+- **Path-rot coverage for the two mkOutOfStoreSymlink skills.** `browser` and
+  `dl-router` deploy from `scripts/`, so they sit outside
+  `test_doc_path_rot.py`'s `CORPUS_DIRS = ("claude", "CLAUDE.md")` — 6,337 lines
+  ungated. Extending it found exactly one real rot (fixed in #621); the
+  remaining 47 hits are rule 1c firing on the bare `reference/<file>.md`
+  spelling that subtree uses deliberately, 28 of them in a byte-ceilinged
+  SKILL.md. Three options are laid out in #621; it needs a rule decision, and
+  the gate explicitly refuses the baseline shortcut.
 
-## This file is UNTRACKED
+## Shipped
 
-It was never committed. Commit it or delete it — do not leave it for a
-`git clean` to decide.
+Both hosts converged and verified at each merge. The workbench skip recorded in
+an earlier draft of this doc is RESOLVED — it was another session's uncommitted
+`claude/skills/resume/SKILL.md`, which landed on its own; `ship.sh` then
+fast-forwarded and switched both hosts.
