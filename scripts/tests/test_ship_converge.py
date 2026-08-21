@@ -31,6 +31,7 @@ import pytest
 
 SCRIPTS = Path(__file__).resolve().parents[1]
 SHIP = SCRIPTS / "ship.sh"
+HOST_ROLE_LIB = SCRIPTS / "lib" / "host-role.sh"
 
 sys.path.insert(0, str(SCRIPTS))
 
@@ -143,7 +144,9 @@ class Repo:
     # kill, so _assert_foreign_store_is_absent() pins it.
     FOREIGN_STORE = "/nix/store/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz-home-manager-files"
 
-    def __init__(self, tmp_path, gitconfig_extra="", stale_managed=(), phantom_managed=False):
+    def __init__(self, tmp_path, gitconfig_extra="", stale_managed=(), phantom_managed=False,
+                 second_host=False, ship_in_repo=False, ship_changes=True,
+                 ship_pad_lines=0):
         """`stale_managed` seeds those entries from the BASE commit's bytes.
 
         That is the real staleness shape, not a synthetic one: the deployed
@@ -153,6 +156,16 @@ class Repo:
         instead seeds EVERY entry with bytes that were never committed at all —
         the shape in which nothing is repo-sourced and the check must refuse to
         report a green.
+
+        `second_host` adds a SECOND clone of the SAME origin with its own $HOME
+        and its own fabricated generation, so a run can converge two hosts (the
+        remote one through ssh_shim) and the cross-host agreement check (rc 19)
+        has two machines to compare. `ship_in_repo` commits the REAL ship.sh (and
+        its lib) INTO the throwaway repo, with the ahead commit rewriting it, so
+        a run's own fast-forward replaces the script executing it —
+        the rc 20 / self-supersession shape. `ship_pad_lines` inflates BOTH
+        committed copies with inert header comments, so a test can overwrite the
+        running script with a much SHORTER one and see whether the run survives.
         """
         self.root = tmp_path
         self.origin = tmp_path / "origin.git"
@@ -184,8 +197,11 @@ class Repo:
         (builder / "f").write_text("base\n")
         (builder / "stable.txt").write_text("stable\n")
         self._write_sources(builder, 1)
+        extra = []
+        if ship_in_repo:
+            extra = self._write_ship_into(builder, 1, pad_lines=ship_pad_lines)
         self._git(builder, "checkout", "-q", "-B", "main")
-        self._git(builder, "add", "f", "stable.txt", *self.SOURCE_PATHS)
+        self._git(builder, "add", "f", "stable.txt", *self.SOURCE_PATHS, *extra)
         self._git(builder, "commit", "-q", "-m", "base")
         self._git(builder, "push", "-q", "-u", "origin", "main")
 
@@ -196,17 +212,44 @@ class Repo:
         )
         self._git(self.work, "checkout", "-q", "main")
 
+        # ...and, when a second host is wanted, ANOTHER clone pinned at the same
+        # commit. Cloned here rather than after the ahead commit so both hosts
+        # start exactly 1 behind, which is what makes a mid-run merge visible.
+        self.remote_work = None
+        self.remote_home = None
+        if second_host:
+            self.remote_work = tmp_path / "remote-work"
+            subprocess.run(
+                ["git", "clone", "-q", str(self.origin), str(self.remote_work)],
+                check=True, env=self.env(),
+            )
+            self._git(self.remote_work, "checkout", "-q", "main")
+            self.remote_home = tmp_path / "remote-home"
+            self.remote_home.mkdir()
+
         # ...then origin/main advances (work is now exactly 1 behind). The
         # ahead commit REWRITES every managed source, so version 1 becomes a
         # historical blob and version 2 is what a converged host must serve.
         (builder / "f").write_text("base\nupstream\n")
         (builder / "added-upstream.txt").write_text("from upstream\n")
         self._write_sources(builder, 2)
-        self._git(builder, "add", "f", "added-upstream.txt", *self.SOURCE_PATHS)
+        if ship_in_repo:
+            # ship_changes=False writes the SAME bytes again, so the fast-forward
+            # leaves scripts/ship.sh alone. That isolates a test that wants some
+            # OTHER writer to be the only thing superseding the script.
+            self._write_ship_into(
+                builder, 2 if ship_changes else 1, pad_lines=ship_pad_lines
+            )
+        self._git(builder, "add", "f", "added-upstream.txt", *self.SOURCE_PATHS, *extra)
         self._git(builder, "commit", "-q", "-m", "ahead")
         self._git(builder, "push", "-q", "origin", "main")
+        self.ahead_sha = self._git(builder, "rev-parse", "HEAD")
 
         self._seed_home_manager_generation()
+        if second_host:
+            self._seed_home_manager_generation(
+                home=self.remote_home, work=self.remote_work, tag="r"
+            )
 
     def _write_sources(self, tree, version):
         for src in self.SOURCE_PATHS:
@@ -214,8 +257,59 @@ class Repo:
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(self._src_text(src, version))
 
+    # -- the script under test, committed INTO the repo it converges --------- #
+    #
+    # 🔴 THE MARKER GOES INSIDE THE CONVERGE PAYLOAD, and that placement is the
+    # whole experiment. CONVERGE is expanded into a shell variable near the top
+    # of ship.sh, so its bytes are fixed the moment that assignment executes —
+    # long before the fast-forward, and long before bash could re-read any later
+    # part of the file. A marker in the FINAL VERDICT line would be read from
+    # whichever copy bash happened to have buffered, so it could report either
+    # version for reasons that have nothing to do with the fix. A marker in
+    # CONVERGE reports exactly one thing: which copy of ship.sh produced the
+    # payload that ran. That is the defect, verbatim.
+    SHIP_MARK_FROM = "✅ VERIFIED — on branch main"
+    SHIP_MARK_TO = "✅ VERIFIED [SHIPVER={v}] — on branch main"
+
+    @classmethod
+    def ship_source(cls, version, pad_lines=0):
+        """The real ship.sh, version-marked inside its CONVERGE payload."""
+        src = SHIP.read_text()
+        n = src.count(cls.SHIP_MARK_FROM)
+        assert n == 2, (
+            f"expected exactly 2 VERIFIED lines to mark in ship.sh, found {n}. "
+            f"The patch site moved; this fixture would silently stop marking "
+            f"anything and every test built on it would pass vacuously."
+        )
+        src = src.replace(cls.SHIP_MARK_FROM, cls.SHIP_MARK_TO.format(v=version))
+        if pad_lines:
+            # Padding goes in the HEADER comment block, so it changes the file's
+            # LENGTH (and every byte offset after it) without changing what the
+            # script does. `--help` prints the header, so it is also inert.
+            pad = "".join(f"# pad {i} {'x' * 90}\n" for i in range(pad_lines))
+            marker = "# Exit codes:\n"
+            assert src.count(marker) == 1, "the pad insertion point is not unique"
+            src = src.replace(marker, pad + marker)
+        return src
+
+    def _write_ship_into(self, tree, version, pad_lines=0):
+        """Commit the real ship.sh + its lib into the throwaway repo.
+
+        Returns the pathspec list to `git add`. The lib is copied verbatim: it is
+        sourced by path relative to the *resolved* ship.sh, so it has to sit
+        beside the copy that actually runs.
+        """
+        s = tree / "scripts" / "ship.sh"
+        s.parent.mkdir(parents=True, exist_ok=True)
+        s.write_text(self.ship_source(version, pad_lines=pad_lines))
+        s.chmod(0o755)
+        lib = tree / "scripts" / "lib" / "host-role.sh"
+        lib.parent.mkdir(parents=True, exist_ok=True)
+        lib.write_text(HOST_ROLE_LIB.read_text())
+        return ["scripts/ship.sh", "scripts/lib/host-role.sh"]
+
     # -- fabricated home-manager generation --------------------------------- #
-    def _seed_home_manager_generation(self):
+    def _seed_home_manager_generation(self, home=None, work=None, tag="a"):
         """Reproduce a real host's home-manager layout inside the fake $HOME.
 
         Faithful to what `home-manager switch` actually leaves on disk, because
@@ -231,13 +325,24 @@ class Repo:
         `find <gen>/home-files` (no trailing slash, no -L) does not descend a
         symlinked start point and yields ZERO entries — a vacuous green from an
         otherwise-correct check.
+
+        `home`/`work`/`tag` default to THIS Repo's own pair. Passing another set
+        seeds a SECOND host's generation under the same store root — each host
+        needs its own, because "resolves" and "is current" are both questions
+        about one machine's own generation and the cross-host tests need two
+        machines that can answer them independently.
         """
+        primary = home is None
+        home = self.home if home is None else home
+        work = self.work if work is None else work
         store = self.root / "nixstore"
-        self.hmfiles = store / "aaaaaaaa-home-manager-files"
-        self.gen = store / "bbbbbbbb-home-manager-generation"
-        content = store / "content"
+        hmfiles = store / f"{tag}aaaaaaa-home-manager-files"
+        gen = store / f"{tag}bbbbbbb-home-manager-generation"
+        content = store / f"content-{tag}"
         content.mkdir(parents=True)
-        self.gen.mkdir(parents=True)
+        gen.mkdir(parents=True)
+        if primary:
+            self.hmfiles, self.gen = hmfiles, gen
 
         for rel, src in self.MANAGED_SOURCES.items():
             blob = content / rel.replace("/", "_")
@@ -247,37 +352,37 @@ class Repo:
                 blob.write_text(f"rendered content for {rel}\n")
             else:
                 blob.write_text(self._src_text(src, 1 if rel in self.stale_managed else 2))
-            for base in (self.hmfiles, self.home):
+            for base in (hmfiles, home):
                 (base / rel).parent.mkdir(parents=True, exist_ok=True)
-            (self.hmfiles / rel).symlink_to(blob)
-            (self.home / rel).symlink_to(self.hmfiles / rel)
+            (hmfiles / rel).symlink_to(blob)
+            (home / rel).symlink_to(hmfiles / rel)
 
         # mkOutOfStoreSymlink: the manifest entry points OUT of the store, at the
         # repo working tree, so the deployed path and the repo source are one
         # file. It resolves (rc 12 can judge it) and can never be stale (rc 13
         # must not count it).
         for rel, src in self.OUT_OF_STORE.items():
-            for base in (self.hmfiles, self.home):
+            for base in (hmfiles, home):
                 (base / rel).parent.mkdir(parents=True, exist_ok=True)
-            (self.hmfiles / rel).symlink_to(self.work / src)
-            (self.home / rel).symlink_to(self.hmfiles / rel)
+            (hmfiles / rel).symlink_to(work / src)
+            (home / rel).symlink_to(hmfiles / rel)
 
-        (self.gen / "home-files").symlink_to(self.hmfiles)
-        gcroots = self.home / ".local" / "state" / "home-manager" / "gcroots"
+        (gen / "home-files").symlink_to(hmfiles)
+        gcroots = home / ".local" / "state" / "home-manager" / "gcroots"
         gcroots.mkdir(parents=True)
-        (gcroots / "current-home").symlink_to(self.gen)
+        (gcroots / "current-home").symlink_to(gen)
 
         # --- UNMANAGED content that must NOT be flagged --------------------- #
         # `~/.claude/skills/clickup/` is a standalone git checkout living INSIDE
         # a home-manager-managed directory, and its node_modules is full of pnpm
         # symlinks. Any check that walks $HOME instead of the manifest trips on
         # these; the manifest never mentions them, so a correct check cannot.
-        pnpm = self.home / ".claude" / "skills" / "clickup" / "node_modules" / ".pnpm"
+        pnpm = home / ".claude" / "skills" / "clickup" / "node_modules" / ".pnpm"
         pnpm.mkdir(parents=True)
         (pnpm / "dangles").symlink_to("../../nowhere/pkg")          # broken, on purpose
-        (self.home / ".claude" / "skills" / "clickup" / "SKILL.md").write_text("unmanaged\n")
+        (home / ".claude" / "skills" / "clickup" / "SKILL.md").write_text("unmanaged\n")
         # ...and a plain broken symlink sitting directly among managed files.
-        (self.home / ".claude" / "settings.local.json.bak").symlink_to("/nonexistent/nope")
+        (home / ".claude" / "settings.local.json.bak").symlink_to("/nonexistent/nope")
 
     def break_managed_symlink(self, rel):
         """Repoint a managed path at ANOTHER host's store — the real failure."""
@@ -357,19 +462,119 @@ class Repo:
     def stash_list(self):
         return self._git(self.work, "stash", "list")
 
-    def ship(self, *args, **env_extra):
-        """Run ship.sh against this repo: local only, no home-manager switch."""
-        env = self.env(
+    def ship(self, *args, script=None, **env_extra):
+        """Run ship.sh against this repo: local only, no home-manager switch.
+
+        `script` overrides which copy of ship.sh is executed. The default is the
+        repo's own scripts/ship.sh; the self-supersession tests pass the copy
+        that lives INSIDE the throwaway repo, because the whole question there is
+        what happens when the running file is the one being fast-forwarded.
+        """
+        defaults = dict(
             SHIP_ROLE="workbench",     # bypass IP detection (no `ip` in sandbox)
             SHIP_REPO=str(self.work),
             SHIP_NO_SWITCH="1",        # never run a real home-manager switch
-            **env_extra,
         )
+        defaults.update(env_extra)     # a caller may override any of them
+        env = self.env(**defaults)
         proc = subprocess.run(
-            ["bash", str(SHIP), "--no-remote", *args],
+            ["bash", str(script or SHIP), "--no-remote", *args],
             capture_output=True, text=True, env=env,
+            timeout=120,               # a re-exec loop must fail as a TIMEOUT, not hang the suite
         )
         return proc.returncode, proc.stdout + proc.stderr
+
+    # -- the SECOND host, reached through a fake `ssh` ----------------------- #
+    def prepare_mid_run_merge(self):
+        """Stage a further origin/main commit WITHOUT publishing it yet.
+
+        Returns its sha. `ssh_shim(advance_origin=...)` moves origin/main onto it
+        at the moment the remote leg starts, which is the 2026-08-19 shape: #619
+        merged BETWEEN the workbench's fetch and the laptop's.
+
+        🔴 It deliberately touches NO managed source. If it did, the remote host
+        would land on a commit whose sources its generation no longer matches and
+        the run would go red on rc 13 — a real failure, but not the one under
+        test, and the rc 19 assertion would then be passing for the wrong reason.
+        """
+        builder = self.root / "builder"
+        # Built on a side branch so the builder's own `main` never moves — no
+        # reset, no rewind, nothing this fixture has to undo.
+        self._git(builder, "checkout", "-q", "-b", "staged-next")
+        (builder / "unrelated-later.txt").write_text("landed mid-run\n")
+        self._git(builder, "add", "unrelated-later.txt")
+        self._git(builder, "commit", "-q", "-m", "a PR merging mid-run")
+        sha = self._git(builder, "rev-parse", "HEAD")
+        self._git(builder, "push", "-q", "origin", "HEAD:refs/heads/staged-next")
+        self._git(builder, "checkout", "-q", "main")
+        return sha
+
+    def ssh_shim(self, tmp_path, advance_to=None, strip_sha=False):
+        """A fake `ssh` that runs ship.sh's payload against the SECOND host.
+
+        ship.sh invokes `ssh -o ConnectTimeout=10 <target> "<payload>"`, so the
+        shim takes the LAST argument and runs it with the second host's $HOME and
+        $SHIP_REPO. The payload is byte-for-byte the string ship.sh would have put
+        on the wire — that is what makes this a test of the remote leg rather than
+        of a second local run.
+
+        `advance_to` fast-forwards origin/main onto a staged commit FIRST, so the
+        remote leg's own `git fetch` sees a newer origin/main than the local leg
+        did. `strip_sha` instead deletes the `ship-landed-sha` line from an
+        otherwise successful remote run — the shape where a leg exits 0 and the
+        agreement still cannot be compared.
+        """
+        d = tmp_path / "ssh-shim"
+        d.mkdir(exist_ok=True)
+        advance = ""
+        if advance_to:
+            advance = (
+                f'git --git-dir={self.origin} update-ref refs/heads/main {advance_to} '
+                f'|| exit 97\n'
+            )
+        # 🔴 POSIX sh only (mockbin owns the shebang and it is /bin/sh), so no
+        # PIPESTATUS here — the strip variant captures, then filters, then exits
+        # with the payload's OWN status.
+        run = 'exec bash -c "$payload"\n'
+        if strip_sha:
+            run = (
+                'out=$(bash -c "$payload"); rc=$?\n'
+                'printf "%s\\n" "$out" | grep -v " ship-landed-sha "\n'
+                "exit $rc\n"
+            )
+        write_exec(
+            d / "ssh",
+            "payload=\n"
+            'for a in "$@"; do payload="$a"; done\n'
+            + advance +
+            f'export HOME="{self.remote_home}"\n'
+            f'export SHIP_REPO="{self.remote_work}"\n'
+            f'export GIT_CONFIG_GLOBAL="{self.gitconfig}"\n'
+            "export GIT_CONFIG_SYSTEM=/dev/null\n"
+            "unset XDG_STATE_HOME\n"
+            + run,
+        )
+        return d
+
+    def ship_both_hosts(self, shim_dir, *args, script=None, **env_extra):
+        """Converge BOTH fabricated hosts — local via bash, remote via the shim."""
+        defaults = dict(
+            SHIP_ROLE="workbench",
+            SHIP_REPO=str(self.work),
+            SHIP_NO_SWITCH="1",
+            REMOTE_SSH="fixture@second-host",
+            PATH=f"{shim_dir}:{os.environ['PATH']}",
+        )
+        defaults.update(env_extra)
+        env = self.env(**defaults)
+        proc = subprocess.run(
+            ["bash", str(script or SHIP), *args],
+            capture_output=True, text=True, env=env, timeout=120,
+        )
+        return proc.returncode, proc.stdout + proc.stderr
+
+    def remote_head(self):
+        return self._git(self.remote_work, "rev-parse", "HEAD")
 
 
 @pytest.fixture
@@ -1444,32 +1649,589 @@ def test_currency_check_runs_on_the_remote_leg_too():
     assert "exit 13" in converge, "rc13 is not raised from inside CONVERGE"
 
 
-def test_every_converge_exit_code_is_documented_in_the_header_and_the_legend():
+def _ship_sections():
+    """(header, converge-payload, driver-code) of ship.sh.
+
+    `driver` is everything OUTSIDE the CONVERGE string — the part that runs only
+    on the machine you typed the command on. Comment lines are dropped from the
+    scanned code because the header legitimately *discusses* exit codes ("would
+    look for lib/ next to the SYMLINK and exit 6"), and a ledger that counted its
+    own prose would be pinning the documentation to itself.
+    """
+    src = SHIP.read_text()
+    head, rest = src.split("CONVERGE='", 1)
+    converge, tail = rest.split("\n'\n", 1)
+
+    def code_only(text):
+        return "\n".join(
+            ln for ln in text.splitlines() if not ln.strip().startswith("#")
+        )
+
+    header = src.split("set -uo pipefail", 1)[0]
+    return header, code_only(converge), code_only(head) + "\n" + code_only(tail)
+
+
+def _ship_exit_codes(text):
+    """Non-zero statuses `text` can hand back.
+
+    Two spellings, because ship.sh uses both: a literal `exit N`, and `rc=N`
+    followed by the single `exit "$rc"` at the bottom. Counting only the first
+    would have missed rc 19 entirely — it is never written as `exit 19`.
+    """
+    codes = {int(m) for m in re.findall(r"\bexit (\d+)", text)}
+    codes |= {int(m) for m in re.findall(r"\brc=(\d+)", text)}
+    codes.discard(0)
+    return codes
+
+
+def test_the_exit_code_parser_sees_both_spellings():
+    """🔴 POSITIVE CONTROL for the ledger test below.
+
+    That test's real work is a `for` loop over whatever the parser returned, so
+    a parser wired to nothing passes it in silence — the classic reassuring
+    zero. These are the two spellings that must never stop being visible: an
+    `exit N` inside CONVERGE, and an `rc=N` assignment in the driver.
+    """
+    _header, converge, driver = _ship_sections()
+    assert _ship_exit_codes("exit 7\n") == {7}
+    assert _ship_exit_codes('[ "$rc" = 0 ] && rc=19\n') == {19}
+    assert 13 in _ship_exit_codes(converge), "the CONVERGE half reads nothing"
+    assert 19 in _ship_exit_codes(driver), "the driver half reads nothing"
+
+
+def test_every_exit_code_ship_can_return_is_documented_in_the_header_and_the_legend():
     """🔴 The rc ladder is published TWICE and both copies must be complete.
 
     ship.sh documents its exit codes in the header comment and prints a legend
     on failure. An undocumented rc is an operator staring at a bare number, and
     a legend that lags the code is worse than none — so this pins the code as
     the source of truth and both prose copies to it.
-    """
-    src = SHIP.read_text()
-    converge = src.split("CONVERGE='", 1)[1].split("\n'\n", 1)[0]
-    codes = {int(m) for m in re.findall(r"\bexit (\d+)", converge)}
-    codes.discard(0)
-    assert len(codes) >= 8, (
-        f"the exit-code parser found only {sorted(codes)} — CONVERGE raises "
-        f"nine distinct codes, so the ledger is reading almost nothing"
-    )
-    assert 13 in codes, f"rc13 is not raised in CONVERGE: {sorted(codes)}"
 
-    header = src.split("set -uo pipefail", 1)[0]
-    legend = src.split('echo "ship: incomplete', 1)[1]
-    for rc in sorted(codes):
+    🔴 It scans the DRIVER as well as CONVERGE. It used to read CONVERGE only,
+    which made the whole outer script a blind spot: rc 2 had been undocumented
+    in both ledgers since the file was written, and rc 19 (cross-host
+    disagreement) is set in the driver and would have gone the same way.
+    """
+    header, converge, driver = _ship_sections()
+    conv_codes = _ship_exit_codes(converge)
+    drv_codes = _ship_exit_codes(driver)
+    assert len(conv_codes) >= 8, (
+        f"the exit-code parser found only {sorted(conv_codes)} in CONVERGE, "
+        f"which raises nine distinct codes — the ledger is reading almost nothing"
+    )
+    assert {2, 6, 19, 20} <= drv_codes, (
+        f"the driver half of the ledger is not seeing its own codes: {sorted(drv_codes)}"
+    )
+
+    legend = SHIP.read_text().split('echo "ship: incomplete', 1)[1]
+    for rc in sorted(conv_codes | drv_codes):
         assert re.search(rf"^#\s+{rc}\s", header, re.M), (
-            f"exit {rc} is raised in CONVERGE but not documented in the "
+            f"exit {rc} is reachable but not documented in the "
             f"'Exit codes:' header block"
         )
         assert f"rc{rc}=" in legend, (
-            f"exit {rc} is raised in CONVERGE but missing from the rc legend "
+            f"exit {rc} is reachable but missing from the rc legend "
             f"printed on failure"
         )
+
+
+# --------------------------------------------------------------------------- #
+# CROSS-HOST AGREEMENT (rc 19)
+#
+# 🔴 MEASURED 2026-08-19. Both hosts converged and both were verified, and the
+# two machines held DIFFERENT commits:
+#
+#     [nixos] fast-forwarded main 4548e6b -> c7eb5c3      (workbench)
+#     [nixos] fast-forwarded main 4548e6b -> e7ceb1f      (laptop)
+#     ship: converged + verified at origin/main (local=workbench remote=laptop)
+#
+# #619 merged between the two legs' `git fetch`es, so each host landed on
+# origin/main AS IT SAW IT. Every per-host check is a claim about ONE machine and
+# every one of them was TRUE; rc 11 cannot see it either, because it compares
+# HEAD against the `target` THAT LEG captured. Nothing compared the hosts to each
+# other, and the verdict line asserted a fleet state nobody had checked.
+#
+# The fixture reproduces it exactly: two clones of one origin, each with its own
+# fabricated home-manager generation, and a fake `ssh` that fast-forwards
+# origin/main onto a staged commit at the instant the remote leg begins.
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def two_hosts(tmp_path):
+    return Repo(tmp_path, second_host=True)
+
+
+def _landed_shas(out):
+    return re.findall(r"^\[[^\]]*\] ship-landed-sha ([0-9a-f]+)$", out, re.M)
+
+
+def test_two_hosts_landing_on_one_commit_are_reported_as_agreeing(two_hosts, tmp_path):
+    """🔴 POSITIVE CONTROL — the check must be able to say YES, with the sha.
+
+    Everything below is a `!=` or a "not compared", so all of it passes just as
+    happily against a comparison wired to nothing. This is the case that proves
+    the two shas are really being read and really can match: the verdict has to
+    name the count of hosts compared AND the commit they agreed on.
+    """
+    shim = two_hosts.ssh_shim(tmp_path)
+
+    rc, out = two_hosts.ship_both_hosts(shim)
+
+    assert rc == 0, out
+    target = two_hosts.origin_main()
+    assert _landed_shas(out) == [target, target], (
+        f"expected one landed-sha line per host, both at {target}\n{out}"
+    )
+    assert "2 hosts compared" in out, f"the compared count is not printed\n{out}"
+    assert target in out.split("ship: converged")[1], (
+        f"the verdict does not name the commit the hosts agreed on\n{out}"
+    )
+    assert two_hosts.head() == two_hosts.remote_head() == target, out
+
+
+def test_a_merge_landing_between_the_two_fetches_is_not_convergence(two_hosts, tmp_path):
+    """🔴 THE REGRESSION TEST — the 2026-08-19 run, reproduced end to end.
+
+    origin/main moves after the local leg has fetched and before the remote leg
+    does. Each host is internally perfect; the fleet is in two states. Before
+    this check the run exited 0 and printed "converged + verified at origin/main".
+    """
+    staged = two_hosts.prepare_mid_run_merge()
+    local_target = two_hosts.origin_main()
+    assert staged != local_target, "fixture staged no new commit"
+    shim = two_hosts.ssh_shim(tmp_path, advance_to=staged)
+
+    rc, out = two_hosts.ship_both_hosts(shim)
+
+    assert rc == 19, f"expected rc19 (hosts disagree), got {rc}\n{out}"
+    assert "HOSTS DISAGREE" in out, f"wrong failure reported\n{out}"
+    # 🔴 The load-bearing half: EVERY per-host check is green in this very run.
+    # If any of them were red, rc 19 would be redundant rather than the only
+    # thing that can see this condition.
+    assert out.count("✅ VERIFIED") == 2, (
+        f"a per-host check failed, so this fixture is not the mid-run-merge "
+        f"case — rc19 must be the ONLY thing that goes red here\n{out}"
+    )
+    assert _landed_shas(out) == [local_target, staged], out
+    assert local_target in out and staged in out, f"the two shas are not named\n{out}"
+    # ...and the old, wrong verdict must be gone.
+    assert "converged + verified at origin/main (local=" not in out, (
+        f"still claiming convergence over two different commits\n{out}"
+    )
+    # The hosts really did diverge — this is a reporting fix, so the state it
+    # reports has to be the state on disk.
+    assert two_hosts.head() == local_target
+    assert two_hosts.remote_head() == staged
+
+
+def test_agreement_is_not_compared_when_a_converged_host_reports_no_sha(two_hosts, tmp_path):
+    """🔴 REACHABILITY for the "fewer than two shas" guard — the vacuous zero.
+
+    A remote leg that exits 0 while emitting no landed sha leaves ONE sha to
+    compare. Reporting agreement on that would be a comparison over an empty
+    set, which is the shape every check in this file exists to refuse; reported
+    as agreement it would be indistinguishable from a real one. Reached with an
+    ssh that filters the line out of an otherwise successful run — no earlier
+    branch rejects it, because the leg's own status is 0.
+    """
+    shim = two_hosts.ssh_shim(tmp_path, strip_sha=True)
+
+    rc, out = two_hosts.ship_both_hosts(shim)
+
+    assert rc == 19, f"a one-sided comparison reported success: rc={rc}\n{out}"
+    assert "CROSS-HOST AGREEMENT NOT COMPARED" in out, f"wrong guard fired\n{out}"
+    assert "1 of 2 hosts reported a landed sha" in out, f"no examined count\n{out}"
+    assert "converged + verified" not in out, out
+
+
+def test_a_skipped_remote_host_keeps_its_own_diagnosis_not_rc19(two_hosts, tmp_path):
+    """rc 19 must not MASK a per-host code — the distinct codes are the signal.
+
+    With the remote repo gone the remote leg exits 3, and only one host reports a
+    sha. The agreement is genuinely not compared and is said out loud, but the
+    run's exit code stays 3: "no repo on that host" is the actionable diagnosis
+    and "the hosts were not compared" is its consequence, not a competing cause.
+    """
+    shutil.rmtree(two_hosts.remote_work)
+    shim = two_hosts.ssh_shim(tmp_path)
+
+    rc, out = two_hosts.ship_both_hosts(shim)
+
+    assert rc == 3, f"the per-host diagnosis was masked: rc={rc}\n{out}"
+    assert "NOT COMPARED" in out, f"the missing comparison is not disclosed\n{out}"
+    assert "converged + verified" not in out, out
+
+
+def test_a_single_host_run_says_the_agreement_was_not_compared(repo):
+    """--no-remote can only ever be a claim about one machine, and says so."""
+    rc, out = repo.ship()
+
+    assert rc == 0, out
+    assert "cross-host agreement NOT COMPARED" in out, (
+        f"a one-host run reads like a two-host one\n{out}"
+    )
+    assert "1 host in scope" in out, f"the scope count is not printed\n{out}"
+    assert "1 host (local=workbench)" in out, f"the verdict overclaims\n{out}"
+    assert "2 hosts compared" not in out, out
+
+
+def test_a_run_with_no_host_in_scope_is_a_usage_error(repo):
+    """🔴 A run that checked NOTHING must never exit 0.
+
+    `--no-local --no-remote` used to reach the verdict line and print
+    "converged + verified" having touched neither machine — the vacuous green in
+    its purest form. drift-check.sh already spells this refusal as its own rc 2
+    ("a RUN THAT CHECKED NO HOST AT ALL"), and the two ladders are deliberately
+    aligned.
+    """
+    rc, out = repo.ship("--no-local")     # Repo.ship already passes --no-remote
+
+    assert rc == 2, f"a run over zero hosts reported {rc}\n{out}"
+    assert "NO host to converge" in out, f"the refusal is not explained\n{out}"
+    assert "converged" not in out, out
+
+
+def test_a_host_that_did_not_converge_emits_no_landed_sha(repo_stale):
+    """🔴 NEGATIVE CONTROL for where the marker is EMITTED.
+
+    The stale-consumer host is the sharpest case available: it fast-forwards
+    successfully, so its output carries FULL 40-hex shas ("fast-forwarded main
+    <sha> -> <sha>"), and then fails rc 13. The marker is emitted only AFTER
+    every per-host check has passed, so this host must contribute nothing — a
+    marker moved even one step earlier would let two hosts that never converged
+    be assembled into "two hosts agree".
+
+    ⚠ SCOPE: this pins the EMITTER. ship.sh's own anchored `sed` — the half that
+    refuses to scrape a sha out of prose — is pinned by
+    test_agreement_is_not_compared_when_a_converged_host_reports_no_sha, which is
+    what goes red when the pattern is un-anchored. (Measured: an un-anchored
+    parser mutant survives this test, because the regex here is Python's.)
+    """
+    rc, out = repo_stale.ship()
+
+    assert rc == 13, out
+    assert re.search(r"\b[0-9a-f]{40}\b", out), (
+        "this fixture prints no full sha at all, so it cannot show the parser "
+        f"rejecting one\n{out}"
+    )
+    assert _landed_shas(out) == [], f"a host that failed rc13 claimed a landed sha\n{out}"
+
+
+def test_both_hosts_run_the_same_agreement_marker_from_inside_converge():
+    """The marker must live in CONVERGE, the body that is shipped over ssh.
+
+    A landed-sha emitted only by the local driver could never disagree with
+    itself, and the remote host — the one that fetched second on 2026-08-19 — is
+    the half the comparison exists for.
+    """
+    _header, converge, driver = _ship_sections()
+    assert "ship-landed-sha" in converge, (
+        "the landed-sha marker is not inside CONVERGE, so the remote host never "
+        "emits one and the comparison can only ever be one-sided"
+    )
+    assert "ship_landed_sha" in driver, "nothing in the driver reads the marker"
+
+
+# --------------------------------------------------------------------------- #
+# SELF-SUPERSESSION (rc 20)
+#
+# 🔴 ship.sh's own source is one of the things ship.sh deploys, and the first
+# thing a run does is fast-forward the tree that source lives in.
+#
+# MEASURED 2026-08-19: the run that DELIVERED #620 — the commit that added
+# verify_managed_currency — printed no currency line at all and exited 0. An
+# immediate second run printed "347 repo-sourced examined, 0 stale". The CONVERGE
+# payload is expanded into a variable near the top of the file, long before the
+# fast-forward, so the run that ships a change to ship.sh verifies with the copy
+# it just replaced.
+#
+# MEASURED 2026-08-20, the second half: bash re-reads a script FROM A BYTE
+# OFFSET. A 46 KB script that overwrites itself as its first act, replaced by a
+# SHORTER file, simply STOPS at the offset and exits 0 — every later step
+# skipped, silently. Replaced by a same-length file it resumes inside the NEW
+# bytes and runs a splice of the two versions. Wrapping the body in a brace group
+# made the same experiment run the original script to completion.
+#
+# The fixture commits the REAL ship.sh into the throwaway repo and has the ahead
+# commit rewrite it, so the run's own fast-forward replaces the file executing
+# it. The version marker is planted INSIDE the CONVERGE payload — see
+# Repo.ship_source for why no other placement can answer the question.
+# --------------------------------------------------------------------------- #
+def _shipver_sequence(out):
+    return [int(m) for m in re.findall(r"SHIPVER=(\d+)", out)]
+
+
+@pytest.fixture
+def self_shipping(tmp_path):
+    return Repo(tmp_path, ship_in_repo=True)
+
+
+def _repo_ship(r):
+    return r.work / "scripts" / "ship.sh"
+
+
+def test_a_run_that_ships_a_change_to_ship_sh_verifies_with_the_new_copy(self_shipping):
+    """🔴 THE REGRESSION TEST — #620's own delivery run, reproduced.
+
+    The fast-forward replaces the running script. Before the fix the whole run —
+    both legs and the final verdict — was computed by the superseded copy, and
+    the operator got a green from code they had just replaced.
+
+    The assertion is on the LAST marker, not on the absence of the first: the
+    superseded copy's own per-host line is still printed (it had already run),
+    and it is immediately disclaimed. What must never happen is the run ENDING on
+    it.
+    """
+    ship = _repo_ship(self_shipping)
+    assert "SHIPVER=1" in ship.read_text(), "fixture is not version-marked"
+
+    rc, out = self_shipping.ship(script=ship)
+
+    assert rc == 0, out
+    seq = _shipver_sequence(out)
+    assert seq, f"no version marker in the output at all — fixture is inert\n{out}"
+    assert seq[-1] == 2, (
+        f"the run ENDED on the superseded copy's payload (markers seen: {seq}). "
+        f"Everything the operator was shown was computed by the code this very "
+        f"run replaced.\n{out}"
+    )
+    assert "SUPERSEDED" in out, f"the supersession is not announced\n{out}"
+    assert "re-executing the NEW copy" in out, f"no re-exec happened\n{out}"
+    # ...and the file on disk really is the new one, so this is not a mislabel.
+    assert "SHIPVER=2" in ship.read_text()
+
+
+def test_an_in_place_overwrite_of_the_running_script_does_not_truncate_the_run(tmp_path):
+    """🔴 The CORRUPTION half — a different bug from the staleness half above.
+
+    🔴 IT IS NOT REACHED BY `git`, AND THE OBVIOUS INSTRUMENT SAYS OTHERWISE.
+    Measured 2026-08-20: comparing st_ino across `git merge --ff-only` reports
+    the SAME inode and reads as an in-place overwrite. Holding an OPEN FD across
+    the same merge shows it is not — the fd still yields the OLD bytes with
+    st_nlink=0, i.e. git UNLINKS AND RECREATES, and a freed inode NUMBER is just
+    immediately reused. So a fast-forward cannot corrupt a running ship.sh; three
+    end-to-end runs of the PRE-FIX script (incoming copy +27 KB, -30 KB, same
+    size) all completed cleanly.
+
+    What CAN corrupt it is a writer that truncates in place — `cp` without
+    --remove-destination, `install`, a `>` redirect, an editor that rewrites
+    rather than renames. Measured: bash then loses everything past that point and
+    exits 0, at 45 of 45 swept offsets. This drives exactly that, from inside the
+    local converge where a real writer would sit, using a `home-manager` stub
+    that `cp`s a ~27 KB SHORTER copy over the running file exactly once.
+
+    ⚠ SCOPE: for the git path this is an INVARIANT GUARD, not regression
+    coverage — the brace group closes a latent class, and no measured run ever
+    reached it through a fast-forward. For the in-place path it is a real
+    regression test and it IS red without the wrapper.
+    """
+    r = Repo(tmp_path, ship_in_repo=True, ship_changes=False, ship_pad_lines=300)
+    ship = _repo_ship(r)
+    padded = len(ship.read_text())
+    replacement = tmp_path / "shorter-ship.sh"
+    replacement.write_text(Repo.ship_source(2, pad_lines=0))
+    assert len(replacement.read_text()) < padded - 20000, (
+        "the replacement is not meaningfully shorter, so bash's resume offset "
+        "would still land inside the file and no truncation could occur"
+    )
+
+    once = tmp_path / "overwritten-once"
+    stub = tmp_path / "hm-inplace"
+    stub.mkdir()
+    write_exec(
+        stub / "home-manager",
+        f'[ -e "{once}" ] && exit 0\n'
+        f': > "{once}"\n'
+        # 🔴 plain `cp` on purpose: --remove-destination would unlink first and
+        # reproduce git's (safe) behaviour instead of the hazard under test.
+        f'cp "{replacement}" "{ship}"\n'
+        "exit 0\n",
+    )
+
+    rc, out = r.ship(script=ship, SHIP_NO_SWITCH="0",
+                     PATH=f"{stub}:{os.environ['PATH']}")
+
+    assert once.exists(), (
+        f"the stub never ran, so nothing overwrote the script and this test "
+        f"proves nothing\n{out}"
+    )
+    assert len(ship.read_text()) < padded - 20000, "the stub did not shrink the file"
+    assert "command not found" not in out, f"bash executed spliced garbage\n{out}"
+    assert "syntax error" not in out, f"bash parsed spliced garbage\n{out}"
+    # 🔴 The status is NOT the assertion: a byte-offset truncation exits 0 with
+    # every later step simply never run. Reaching the verdict is the assertion.
+    assert out.rstrip().splitlines()[-1].startswith("ship: converged + verified"), (
+        f"the run never reached its verdict — truncated mid-flight and exited "
+        f"{rc} with the remaining verification steps silently skipped\n{out}"
+    )
+    assert rc == 0, out
+    assert _shipver_sequence(out)[-1] == 2, out
+
+
+def test_the_self_check_reports_how_many_files_it_compared(repo):
+    """🔴 POSITIVE CONTROL — "0 superseded" must carry its examined count.
+
+    Identical in shape to "0 dangling out of 0 checked": a self-check wired to
+    nothing also reports nothing superseded, and only the compared count tells
+    the two apart. Both watched files (ship.sh and the lib it sources) must be in
+    it, so a watch list that silently shrank to one is visible.
+    """
+    rc, out = repo.ship()
+
+    assert rc == 0, out
+    m = re.search(r"ship: self-check — (\d+) files compared \(([^)]*)\), (\d+) superseded", out)
+    assert m, f"no self-check line with counts in output:\n{out}"
+    assert int(m.group(1)) == 2, f"the watch list shrank: {m.group(2)}\n{out}"
+    assert "ship.sh" in m.group(2) and "host-role.sh" in m.group(2), m.group(2)
+    assert int(m.group(3)) == 0, out
+
+
+def test_the_self_check_refuses_when_it_cannot_digest_its_own_source(repo, tmp_path):
+    """🔴 REACHABILITY for the UNMEASURED guard.
+
+    With no digest there is no answer, and "I could not look" must not print the
+    same as "nothing changed" — that is the whole vacuous-zero failure, one
+    question inward. Reached with a `cksum` that always fails; nothing else in
+    ship.sh uses cksum, so no earlier branch can win.
+    """
+    shim_dir = tmp_path / "nocksum-shim"
+    shim_dir.mkdir()
+    write_exec(shim_dir / "cksum", "exit 1\n")
+    # 🔴 Validate the instrument in BOTH directions before reading its verdict.
+    broken = subprocess.run([str(shim_dir / "cksum")], input="x", capture_output=True, text=True)
+    assert broken.returncode != 0, "the shim did not break cksum; this test proves nothing"
+    real = subprocess.run(["cksum"], input="x", capture_output=True, text=True)
+    assert real.returncode == 0 and real.stdout.strip(), (
+        "positive control: the real cksum must produce a digest, or the guard "
+        "would fire on every run and be a permanently-red gate"
+    )
+
+    rc, out = repo.ship(PATH=f"{shim_dir}:{os.environ['PATH']}")
+
+    assert rc == 20, f"an unmeasurable self-check reported a verdict: rc={rc}\n{out}"
+    assert "SELF-CHECK NOT MEASURED" in out, f"wrong guard fired\n{out}"
+    assert "2 of 2 watched files" in out, f"no examined count on the refusal\n{out}"
+    assert "converged + verified" not in out, out
+
+
+def test_a_script_that_keeps_changing_stops_after_exactly_one_re_exec(tmp_path):
+    """🔴 THE LOOP GUARD, driven by a writer that never stops.
+
+    A re-exec on "my source changed" is an unbounded loop the moment something
+    keeps changing that source. The driver here is a `home-manager` stub that
+    appends a line to the running script on every switch — chosen because it
+    runs INSIDE the local converge, i.e. at exactly the point a real
+    fast-forward would write. (It is a driver for the guard, not a claim that
+    home-manager rewrites repos.)
+
+    Without the counter this never terminates; the subprocess timeout in
+    Repo.ship is what turns that into a failure instead of a hung suite. The
+    switch-count assertion is the other half: "it stopped" is not enough, it has
+    to stop after the ONE re-exec the budget allows.
+
+    ship_changes=False so the fast-forward leaves ship.sh alone — the stub is
+    then the only writer, and a failure here cannot be blamed on the other one.
+    """
+    r = Repo(tmp_path, ship_in_repo=True, ship_changes=False)
+    ship = _repo_ship(r)
+    counter = tmp_path / "switch-count"
+    counter.write_text("")
+    stub = tmp_path / "hm-stub"
+    stub.mkdir()
+    write_exec(
+        stub / "home-manager",
+        f'echo switch >> "{counter}"\n'
+        f'echo "# rewritten $(wc -l < "{counter}")" >> "{ship}"\n'
+        "exit 0\n",
+    )
+    before = ship.read_text()
+
+    rc, out = r.ship(script=ship, SHIP_NO_SWITCH="0",
+                     PATH=f"{stub}:{os.environ['PATH']}")
+
+    switches = len(counter.read_text().split())
+    assert switches >= 1, (
+        f"the home-manager stub never ran, so nothing ever superseded the "
+        f"script and this test proves nothing about the guard\n{out}"
+    )
+    assert ship.read_text() != before, "the stub did not actually rewrite the script"
+    assert rc == 20, f"expected rc20 (refusing to loop), got {rc}\n{out}"
+    assert "refusing to re-exec" in out, f"wrong guard fired\n{out}"
+    assert out.count("re-executing the NEW copy") == 1, (
+        f"expected exactly one re-exec before the refusal\n{out}"
+    )
+    assert switches == 2, (
+        f"expected 2 converge passes (the original and one re-exec), got "
+        f"{switches} — the budget is not being counted\n{out}"
+    )
+    assert "converged + verified" not in out, out
+
+
+def test_the_remote_leg_is_sent_the_new_payload_after_a_re_exec(tmp_path):
+    """🔴 The re-exec must happen BEFORE the remote leg, not after it.
+
+    The remote host never runs ship.sh — it runs the CONVERGE string this host
+    puts on the wire. A re-exec placed after the remote leg would leave the
+    laptop running the superseded payload forever while the workbench looked
+    fixed, which is the same shape as the 2026-08-10 laptop-only breakage.
+    """
+    r = Repo(tmp_path, second_host=True, ship_in_repo=True)
+    shim = r.ssh_shim(tmp_path)
+    ship = _repo_ship(r)
+
+    rc, out = r.ship_both_hosts(shim, script=ship)
+
+    assert rc == 0, out
+    # Two hosts converged after the re-exec, so the NEW marker must appear twice
+    # and be the last thing seen.
+    assert _shipver_sequence(out).count(2) == 2, (
+        f"one of the two hosts still ran the superseded payload "
+        f"(markers: {_shipver_sequence(out)})\n{out}"
+    )
+    assert _shipver_sequence(out)[-1] == 2, out
+    # 🔴 ORDER, not just outcome. A self-check placed AFTER the remote leg still
+    # ends with both hosts on the new payload — the re-exec simply redoes
+    # everything — so the marker counts above cannot tell the two placements
+    # apart. What can: the remote host must be visited ONCE, after the re-exec,
+    # never once with each payload. (Measured: this mutant SURVIVED the marker
+    # assertions alone.) On the real fleet the difference is a whole extra
+    # `home-manager switch` on the laptop, run from superseded logic.
+    assert out.count("=== remote (") == 1, (
+        f"the remote host was converged {out.count('=== remote (')} times — the "
+        f"re-exec is happening AFTER the remote leg, so the laptop is switched "
+        f"once with the superseded payload before being redone\n{out}"
+    )
+    assert out.index("re-executing the NEW copy") < out.index("=== remote ("), (
+        f"the re-exec does not precede the remote leg\n{out}"
+    )
+    assert "the remote leg has NOT run yet" in out, (
+        f"the re-exec did not announce that it precedes the remote leg\n{out}"
+    )
+    assert "2 hosts compared" in out, out
+
+
+def test_the_body_is_one_brace_group_that_ends_in_exit():
+    """🔴 STRUCTURAL pin for the anti-splice wrapper.
+
+    The behavioural coverage is
+    test_an_in_place_overwrite_of_the_running_script_does_not_truncate_the_run;
+    this is here because the wrapper is two easily-deleted characters whose
+    absence changes nothing on any run that does NOT have its script overwritten
+    in place, so a regression would sit invisible indefinitely.
+
+    Anything after the closing brace is read from the file AFTER the run has
+    mutated it, so the brace must be last and the `exit` must be inside it.
+    """
+    lines = [ln for ln in SHIP.read_text().splitlines() if ln.strip()]
+    assert lines[-1].strip() == "}", (
+        f"ship.sh must END with the closing brace of its body group; last line "
+        f"is {lines[-1]!r}"
+    )
+    assert lines[-2].strip() == 'exit "$rc"', (
+        f"the body group must end in an exit, or bash resumes reading the "
+        f"(possibly replaced) file past the brace; got {lines[-2]!r}"
+    )
+    code = [ln for ln in lines if not ln.strip().startswith("#")]
+    assert code[0].strip() == "{", (
+        f"the body group must open before the first executable line, or the "
+        f"statements ahead of it are still re-readable; got {code[0]!r}"
+    )
