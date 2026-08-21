@@ -91,6 +91,7 @@ from typing import Iterable, Mapping, Sequence
 __all__ = [
     "KINDS",
     "DEFAULT_MIN_PATHS",
+    "WHAT_HEADING",
     "POINTERS_HEADING",
     "NUANCE_HEADING",
     "ResolverError",
@@ -993,6 +994,7 @@ def associate_paths(
 # loader with the rest of the pure functions.
 
 
+WHAT_HEADING = "## What it is"
 POINTERS_HEADING = "## Pointers"
 NUANCE_HEADING = "## Nuance / work-history"
 

@@ -84,7 +84,8 @@ and does not belong in your prompt.
 ```text
 TASK: <one sentence — what to find out, and why it matters>
 SITE: <url>
-INSTANCE: <profile key, or: pick the one logged in as Zach>
+INSTANCE: <profile key — on the INLINE path this is the `--instance <key>`
+          CLI flag, not this line>
 BUDGET: <N> pages / <N> ops — a live account, so do not paginate deeply.
 
 Follow the standing browser-validation contract at
@@ -161,6 +162,12 @@ a task needs an exception, name it in the prompt.
 
 - **INSTANCE** — the profile matters more than it looks: access differs per
   profile, and the wrong one returns a plausible 404 rather than an error.
+  🔴 **On the INLINE path it is a CLI FLAG, not a prompt slot.** `browser
+  agent` forces the tab via env BEFORE the model is invoked, so a profile
+  named in the goal text does nothing. With two profiles connected and no
+  `--instance`, the run dies at `failed to open a tab` before a single
+  model token is spent — measured on this contract's first real use, where
+  the slot read as optional prose and was simply left out.
 - **BUDGET** — a live logged-in account throttles on unusual activity. Bound the
   run in the prompt; `browser agent`'s own `--steps` is a separate, later bound,
   and its `steps_used` is not trustworthy.

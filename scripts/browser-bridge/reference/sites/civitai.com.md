@@ -185,3 +185,80 @@ done
 ⚠ That loop reads whatever page each instance's tab is on — a session fetch is
 same-origin, so point each instance at a civitai.com tab first, or it reports the
 session of some other site (i.e. nothing).
+
+---
+
+## 🔴 The resource picker: NEVER read results without asserting the input first
+
+**Load this before driving any civitai search box** — the generation resource
+picker ("Choose a checkpoint", opened by an App Block's `pick-checkpoint`, and the
+same component elsewhere).
+
+`browser type` **replaces** the input's value correctly — but it **intermittently
+does not apply at all**, and the modal keeps rendering the PREVIOUS query's
+results. So a read taken right after `type` can be the *last* query's answer
+wearing the new query's name. This is silent: no error, a well-formed result list,
+plausible model names.
+
+Measured 2026-08-21, driving `custom-generators`: probing `Realistic Vision` then
+`ReV Animated` returned **byte-identical hits**, and probing `Pixel Art` returned
+`DreamShaper|Babes` — the results of a `Dream` control run two calls earlier. The
+input read back `"Realistic Vision"` while the transcript claimed `ReV Animated`.
+
+🔴 **Three false conclusions came out of this before it was caught**, each of which
+reads like a platform bug and none of which was one:
+
+1. *"the picker's search is broken"* — the positive control `Qwen` "failed" while
+   `Qwen-Image` sat visibly in the list. It was a stale read, not a broken search.
+2. *"model X is not generation-covered"* — derived from a search that never ran.
+3. *"`#4137` has a second face that returns an empty set"* — nearly filed upstream
+   against a real issue. **It does not.** Retracted.
+
+### The flow — clear, type, ASSERT, only then read
+
+```bash
+BB=~/workspace/devrc/scripts/browser-bridge/browser
+SEL='.mantine-Modal-content input[placeholder="Search models"]'
+# 1. clear via the native setter + input event (React-visible)
+$BB --instance work --tab "$TAB" js '(function(){var i=document.querySelector('"'"'.mantine-Modal-content input[placeholder="Search models"]'"'"');var s=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,"value").set;s.call(i,"");i.dispatchEvent(new Event("input",{bubbles:true}));return "cleared"})()'
+# 2. type, then 3. READ THE VALUE BACK and retry until it equals the query
+# 4. only now wait for debounce (~3s) and read results
+```
+
+**Bind the assertion to the result read itself** — return `input.value` alongside
+the hits in the SAME `js` expression and assert they match, so a drift between the
+two calls cannot slip through. Retry the type up to ~5×; report
+`INPUT-NEVER-TOOK` rather than reporting an absence.
+
+### An absence needs an ADJACENT passing control
+
+The corpus read is *also* flaky on its own (see below), so `No models found` is
+only a reading when a control query that MUST return hits passes immediately
+before **and** after it. Interleave `Dream` → `DreamShaper|Babes` between targets;
+report the pair, never the bare absence.
+
+### Two failures here are REAL and are not the above
+
+- **`Couldn't load models` on the ALL tab with no search at all** — observed
+  directly (error string rendered), and the modal's own **Retry** button clears it.
+  Transient, recoverable; not search-specific.
+- **The list is VIRTUALISED.** Only ~16–18 rows are in the DOM at any scroll
+  position, so `innerText` enumeration silently caps there and reads as "the corpus
+  is 18 models". The real scroller is `.mantine-Modal-content .scroll-area`
+  (`scrollHeight` 12k–51k px, infinite-loading) — a scroll targeting anything else
+  leaves `scrollTop: 0` while appearing to work. **Never quote a corpus size from
+  an innerText count; search with the asserted flow instead.**
+
+### What the corpus actually contains (2026-08-21)
+
+Base/API models (Qwen-Image, FLUX.1 Kontext, Imagen 4, Krea 2, Z Image Turbo, …)
+plus popular general-purpose community checkpoints (DreamShaper, PerfectDeliberate,
+Pony Diffusion V6 XL, Illustrious merges). **It holds NO style-specific
+checkpoints** — `coloring`, `pixel`, `line art`, `product`, `storybook` and
+`sticker` all return ABSENT against a passing control. Consequence for App Blocks:
+a "style" generator must be a general checkpoint **plus a style prompt template**;
+pinning a style checkpoint is not achievable on this platform.
+
+`Filters → Base model` is a working, non-search way to narrow (SD 1.5, SDXL 1.0,
+SDXL Lightning, Pony, Illustrious, … are all offered) — useful when search is in
+one of its flaky windows.

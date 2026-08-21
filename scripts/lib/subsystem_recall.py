@@ -262,6 +262,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from subsystem_resolver import (  # noqa: E402
     NUANCE_HEADING,
     POINTERS_HEADING,
+    WHAT_HEADING,
     AmbiguousRefError,
     ON_MALFORMED_COLLECT,
     EntryUnreadableError,
@@ -288,9 +289,11 @@ from subsystem_touch import (  # noqa: E402
 
 __all__ = [
     "RECALL_LABEL",
+    "WHAT_HEADING",
     "POINTERS_HEADING",
     "NUANCE_HEADING",
     "SURFACED_HEADINGS",
+    "COUNTED_HEADINGS",
     "DEFAULT_ENTRY_LIMIT",
     "DEFAULT_MODE",
     "RECALL_MODES",
@@ -353,18 +356,56 @@ __all__ = [
 # agent, in the same session, for the same store.
 RECALL_LABEL = "from index"
 
-# The two sections the recon step front-loads, RE-EXPORTED from the resolver —
-# they are schema headings, so they belong with the rest of the on-disk shape and
-# not in one of the two modules that read it. `## What it is` is deliberately NOT
-# in `SURFACED_HEADINGS`: it is one line of durable boilerplate that a resuming
-# session either already knows or can read in the file, and including it turns a
-# recall block into a dump of the store. The point is recall, not a dump.
+# The sections a printed BODY renders, RE-EXPORTED from the resolver — they are
+# schema headings, so they belong with the rest of the on-disk shape and not in
+# one of the modules that read it.
 #
 # The tuple itself stays HERE because it is this reader's DISPLAY CHOICE, not a
 # fact about the store: `subsystem_touch` reads the same entries and wants only
 # `NUANCE_HEADING`. A shared constant would have made one module's display
 # decision binding on the other.
-SURFACED_HEADINGS: tuple[str, ...] = (POINTERS_HEADING, NUANCE_HEADING)
+#
+# 🔴 `## What it is` USED TO BE EXCLUDED, AND THE EXCLUSION WAS WRONG. The stated
+# reason was "one line of durable boilerplate a resuming session either already
+# knows or can read in the file, and including it turns a recall block into a
+# dump". Measured 2026-08-20 against the live store, both halves fail:
+#
+#   * it is not one line — 73 of 73 entries carry it, median 3 lines / 297 chars,
+#     p90 8 lines, max 12;
+#   * NO BRIEFING PATH printed it. Not `--ref`, not the digest, not
+#     `service_recon`'s `index:` block. An agent briefed only on an entry could
+#     not say what the service WAS, where it lived or what it owned, because the
+#     one section that answers that was parsed by none of the three. `--search`
+#     is the exception and always was — it surfaces every section — but it only
+#     reaches an entry a query MATCHED, so nobody is briefed through it.
+#
+# The dump worry was real but aimed at the wrong surface: the multiplier lives on
+# the INDEX ROWS (one per entry, 37 in the largest scope), and those are untouched
+# — see `listing_line`, which still renders `COUNTED_HEADINGS` only. A BODY is
+# printed once per `--ref`, once per digest, and `--limit N` times in `full` mode,
+# which is already an opt-in dump of N whole entries; across the live store
+# `## What it is` is 26 KB against `## Pointers`' 49 KB and `## Nuance`' 235 KB,
+# i.e. the SMALLEST of the three, ~8.6% of what a full dump already prints.
+#
+# It is rendered FIRST because it is the orienting sentence: pointers and nuance
+# are both about a thing the reader is assumed to have already identified.
+SURFACED_HEADINGS: tuple[str, ...] = (WHAT_HEADING, POINTERS_HEADING, NUANCE_HEADING)
+
+# 🔴 THE SET WHOSE ABSENCE MAKES A NUMBER WRONG — a strictly different question
+# from "what does a body print", and the two are kept apart rather than merged.
+#
+# `missing_sections`, `is_bare`, the index row's `🔴 NO <heading>` badge and the
+# caveat clause that explains that badge all key off THIS tuple. Their shared
+# meaning is "the parser never reached the bullets, so `0 nuance` and a missing
+# `OPEN` badge on that row are a PARSE FAILURE and not an empty entry" — a claim
+# about counts. `## What it is` feeds no count and no badge, so widening this
+# would put a heading with no numeric consequence beside two whose consequence is
+# measured, and grow the one line printed for EVERY entry. An entry that lacks it
+# is instead named under its own body, where the reader is already looking.
+#
+# ⚠ This is the tuple `subsystem_touch.SHAPE_HEADINGS` is pinned against by
+# `test_subsystem_touch.py` — the validator checks what the counts depend on.
+COUNTED_HEADINGS: tuple[str, ...] = (POINTERS_HEADING, NUANCE_HEADING)
 
 # A cap, not a filter — see the module docstring on selection. Truncation is
 # always PRINTED. 12 is chosen as "more than any scope currently holds per repo
@@ -911,8 +952,15 @@ class RecalledEntry:
 
     @property
     def is_bare(self) -> bool:
-        """True when neither surfaced section had any content."""
-        return not any(self.sections.values())
+        """True when neither COUNTED section had any content.
+
+        🔴 DELIBERATELY NOT `any(self.sections.values())`. `sections` now also
+        carries `## What it is`, which the writer's own template pre-fills with a
+        placeholder — so reading every value would make a freshly created stub
+        report as filled-in and delete the "exists but has not been filled in"
+        notice in exactly the case it was written for.
+        """
+        return not any(self.sections.get(h) for h in COUNTED_HEADINGS)
 
 
 def read_entry(store_root: str | Path, entry: SubsystemEntry) -> RecalledEntry:
@@ -956,7 +1004,7 @@ def read_entry(store_root: str | Path, entry: SubsystemEntry) -> RecalledEntry:
         near_miss_count=populations["near-miss"],
         unverifiable_count=populations["unverifiable"],
         mtime=mtime,
-        missing_sections=tuple(h for h in SURFACED_HEADINGS if h not in sections),
+        missing_sections=tuple(h for h in COUNTED_HEADINGS if h not in sections),
     )
 
 
@@ -1286,7 +1334,7 @@ def recall(
     focus_paths: Sequence[str] = (),
     focus_source: str | None = None,
 ) -> RecallReport:
-    """Surface the index's `## Pointers` + `## Nuance / work-history` for a scope.
+    """Surface an entry's `## What it is` + `## Pointers` + `## Nuance / work-history`.
 
     READ-ONLY. No clock, no network, no git, no prompt — `/resume`'s job is to
     re-enter work, and a recall step that interrogated the network or blocked on
@@ -1852,7 +1900,8 @@ def render_text(report: RecallReport) -> str:
         out.append("")
         out.append(
             f"NO ENTRY BODIES WERE PRINTED (--list). {what} — this is not an empty scope. "
-            f"Run `--ref <name>` for one entry's `{POINTERS_HEADING}` + `{NUANCE_HEADING}`."
+            f"Run `--ref <name>` for one entry's `{WHAT_HEADING}` + `{POINTERS_HEADING}` "
+            f"+ `{NUANCE_HEADING}`."
         )
         return "\n".join(out)
 
@@ -1883,9 +1932,48 @@ def render_text(report: RecallReport) -> str:
                 out.append(f"    {heading}")
                 for line in body.splitlines():
                     out.append(f"      {line}")
+        if not e.sections.get(WHAT_HEADING):
+            # 🔴 SAID, NOT LEFT BLANK — and BODY-ONLY, never on the index row.
+            # Absent and present-but-empty are folded together on purpose: both
+            # render as nothing above, and the reader's question ("what IS this
+            # thing?") is unanswered either way. It is not routed through
+            # `missing_sections` because that field drives the index-row badge
+            # and the caveat clause explaining it, which are per-entry costs
+            # this decision deliberately leaves at zero.
+            #
+            # 🔴 IT CLAIMS A PARSE, NEVER A FACT ABOUT THE ENTRY. The notice used
+            # to read "this entry never says what the subsystem IS" — which the
+            # extractor cannot know. A heading the parser does not match parses to
+            # nothing and produced that same sentence while the answer sat on
+            # disk, and `subsystem_touch.SHAPE_HEADINGS` deliberately excludes
+            # this heading so `--validate` says nothing either. The sibling
+            # `🔴 NO <heading>` badge draws exactly this line ("0 BY PARSE FAILURE
+            # and not by measurement"); this notice now draws it too, and names
+            # causes the reader can act on.
+            #
+            # 🔴 THE CAUSE LIST IS EXPLICITLY NON-EXHAUSTIVE ("among others"), and
+            # it has to be: `_heading_blocks` matches at column 0 and skips fenced
+            # regions, so a RENAME (`## What It Is`, `## What it is:`,
+            # `### What it is`), an INDENTED heading and one inside a ``` FENCE all
+            # reach this same branch — and only the first is literally a "rename".
+            # An enumeration that reads as closed is a narrower claim than the
+            # branch, which is how the previous wording ("absent, empty, or the
+            # heading was renamed") left two real causes unnamed.
+            #
+            # 🔴 THE PREFIX THIS SHARES WITH `service_recon`'s TWIN NOTICE IS
+            # QUOTED IN `claude/skills/analyze-service/SKILL.md` step 2, which
+            # tells the agent to relay it AS WRITTEN. Pinned to this string by
+            # `test_service_recon.py::TestTheSkillQuotesTheDegradeNotice`, which
+            # DERIVES the expected text from both renderers — so rewording either
+            # notice goes red naming the doc.
+            out.append(
+                f"    (no parsable `{WHAT_HEADING}` — absent, empty, or not parsed as a "
+                f"heading [renamed, indented, fenced, among others], so this read cannot "
+                f"say what the subsystem IS; re-derive it live)"
+            )
         if e.is_bare:
             # 🔴 Said, not left blank. An entry that exists with nothing under
-            # either surfaced heading is a real state (the writer's own template
+            # either COUNTED heading is a real state (the writer's own template
             # ships a stub), and printing nothing for it is indistinguishable
             # from an extractor that failed to find the sections.
             out.append(
@@ -2675,7 +2763,8 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="subsystem-recall",
         description=(
             "Surface what the /analyze-service index already records for this repo's "
-            "scope: `## Pointers` + `## Nuance / work-history`, and nothing else. "
+            "scope: `## What it is` + `## Pointers` + `## Nuance / work-history`, and "
+            "nothing else. "
             "READ-ONLY: it never writes to the store, and it never touches the network."
         ),
     )
