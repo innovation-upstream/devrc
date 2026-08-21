@@ -13,9 +13,9 @@ Version-controlled, global git hooks. Two features, in order on every push:
 | File | Role |
 |---|---|
 | `pre-push` | Global dispatcher. Chains to any repo-local pre-push first (never clobbers it), runs the **blocking test gate**, then fires the audit **backgrounded** so the push is never delayed. |
-| `tests-on-push.sh` | SYNCHRONOUS worker: self-detects devrc, filters on changed files, runs `scripts/run-tests.sh --set all` in a **pinned nix-shell**, and (mode `on`) **blocks the push on a genuine test failure**. Infra-can't-prepare-env → warn + allow. No-op for non-devrc repos. |
+| `tests-on-push.sh` | SYNCHRONOUS worker: self-detects devrc, skips only ref deletes, runs `scripts/run-tests.sh --set all` in a **pinned nix-shell**, and (mode `on`) **blocks the push on a genuine test failure**. Infra-can't-prepare-env → warn + allow. No-op for non-devrc repos. |
 | `audit-on-push.sh` | The backgrounded worker: branch + diff-size + flag gates, then headless `claude -p "/audit-pr current"`, then routes 🔴/🟡 to clawgate. |
-| `install.sh` | Sets `git config --global core.hooksPath` to this dir. `--uninstall` reverts. |
+| `install.sh` | Points `core.hooksPath` at this dir: **global** if the global git config is writable, otherwise **repo-local** on the repo containing this directory. `--uninstall` clears whichever it set. |
 | `audit-on-push.env.example` | Config template → copy to `~/.claude/audit-on-push.env`. |
 
 ## Test gate (`tests-on-push.sh`)
@@ -39,11 +39,16 @@ Behaviour, all failing in the **safe direction**:
 
 - **devrc only** — the worker exits 0 immediately for any repo that isn't the
   devrc flake, so the global hook never starts running pytest on unrelated repos.
-- **Changed-files filter** — the gate only runs when the pushed commits touch
-  `scripts/`, `flake.nix`, or `flake.lock`; docs-only / nix-non-flake pushes skip
-  it. Any ambiguity (new branch whose base can't be resolved, unparseable stdin,
-  a `git diff` error) **fails toward RUNNING** — it never silently skips a code
-  push.
+- **Push filter** — 🔴 there is **no changed-files allowlist** any more. It used
+  to run the gate only for `scripts/`, `flake.nix` and `flake.lock`; `nix/` was
+  absent, so a push touching only `nix/home.nix` — the file declaring every
+  activation entry — printed *"no Python/test/flake changes"* and exited 0
+  (measured 2026-08-21). Adding `nix/` would not have fixed it: four gates here
+  enumerate `git ls-files` and scan **every tracked file**, `.md` included, so a
+  docs-only push can genuinely red the suite. The only thing still filtered is a
+  **ref delete**, which carries no tree. Every ambiguity still **runs**.
+  `DEVRC_TESTS_ON_PUSH_DECIDE_ONLY=1 githooks/tests-on-push.sh <repo> </dev/null`
+  prints the decision without running anything.
 - **Infra flakiness degrades, never blocks** — the env is a **pinned nix-shell**
   (never a trusted ambient pytest — the modules import requests/psycopg2/minio/
   yaml at collection). Env preparation is a **separate step** from the pytest
@@ -63,7 +68,30 @@ Behaviour, all failing in the **safe direction**:
 ~/workspace/devrc/githooks/install.sh
 ```
 
-This sets the **global** `core.hooksPath` and seeds `~/.claude/audit-on-push.env`.
+This points `core.hooksPath` at this directory and seeds
+`~/.claude/audit-on-push.env`.
+
+🔴 **On a home-manager host the GLOBAL write cannot succeed.**
+`~/.config/git/config` is a read-only `/nix/store` symlink (`programs.git` in
+`nix/home.nix`), so `git config --global` fails with *could not lock config
+file … Read-only file system*. Until 2026-08-21 that aborted the script under
+`set -euo pipefail` and **nothing was installed** — the workbench had
+`core.hooksPath` -> `.git/hooks`, 14 files, all `*.sample`. The script now
+falls back to the **repo-local** config of the repo containing this directory
+and says so. That is narrower: the devrc test gate is unaffected (it is a
+no-op elsewhere anyway), but the push AUDIT will not fire for your other
+repos. To get global coverage on such a host, declare it instead of running
+this script:
+
+```nix
+programs.git.extraConfig.core.hooksPath = "${config.home.homeDirectory}/workspace/devrc/githooks";
+```
+
+🔴 A repo-local `core.hooksPath` lives in the **common** git dir, so every
+worktree of that repo inherits it — but as an **absolute path into the base
+clone**, which means a worktree push runs the base clone's *checked-out* copy
+of these scripts, not its own. Fixing a hook on a branch does not take effect
+for worktree pushes until that branch is what the base clone has checked out.
 Two independent knobs, seeded from the example:
 
 - **Audit** (`AUDIT_ON_PUSH=shadow`) — logs what it *would* send, sends nothing;

@@ -5005,7 +5005,17 @@ def _mpblind(out):
 # as a clean scan for ever — SURVIVED a fully green 295-test run. `no-cmp` is the
 # third and has its own test below, because it needs a clobbered PATH rather than
 # a fixture path.
-_BLIND_SHAPES = [("empty", "EMPTYMANIFEST"), ("missing", "NOMANIFEST")]
+# 🔴 THREE SHAPES, AND THE THIRD IS WHAT MAKES THE `-d` TEST A `-d` TEST.
+# Round-3 measured that mutating `elif [ ! -d "$hfiles/" ]` to
+# `[ ! -e "$hfiles" ]` SURVIVED a green 299-test run: with only "empty" and
+# "missing" in this table, the mutant merely swaps NOMANIFEST for EMPTYMANIFEST
+# on a path that does not exist, and both are non-MEASURED so the ladder
+# assertions could not tell them apart. A REGULAR FILE at the manifest path
+# separates them — `-d` says NOMANIFEST, `-e` says "it exists" and falls through
+# to a walk of a file, which examines nothing and reports EMPTYMANIFEST.
+_BLIND_SHAPES = [("empty", "EMPTYMANIFEST"),
+                 ("missing", "NOMANIFEST"),
+                 ("regular-file", "NOMANIFEST")]
 
 
 def _blind_manifest(tmp_path, shape):
@@ -5013,6 +5023,8 @@ def _blind_manifest(tmp_path, shape):
     d = tmp_path / ("%s-generation" % shape)
     if shape == "empty":
         d.mkdir()                       # exists, holds no leaves
+    elif shape == "regular-file":
+        d.write_text("not a manifest, and not a directory either\n")
     # "missing": deliberately NOT created — the `[ -d ]` branch
     return d
 
@@ -5210,6 +5222,142 @@ def test_a_fact_line_with_NO_status_field_is_MALFORMED_not_measured(fleet):
     # The local host answered properly in the SAME run, so this is not "the
     # ladder reports everything": one measured, one malformed.
     assert "[mpblind] workbench: the managed-path scan MEASURED this run" in out, out
+    assert _mpblind(out) == (2, 1, 1), out
+
+
+# --- the wrong-writer scan's STATUS TOKENS, as a ledger --------------------- #
+
+_W_STATUS_ASSIGN = re.compile(r"^\s*W_STATUS=([A-Za-z]+)\s*$", re.M)
+
+
+def _w_status_tokens():
+    """Every `W_STATUS=<TOKEN>` assignment in drift-check.sh, in source order."""
+    toks = _W_STATUS_ASSIGN.findall(DRIFT.read_text())
+    assert len(toks) >= 4, (
+        "found only %d W_STATUS assignments (%s). The wrong-writer scan has an "
+        "initialiser plus one per branch; a count this low means the regex no "
+        "longer matches the source and every assertion below is vacuous."
+        % (len(toks), toks))
+    return toks
+
+
+def test_the_wrong_writer_status_ledger_keeps_the_default_on_the_UNMEASURED_side():
+    """🔴 THE FAIL-CLOSED DEFAULT, PINNED BY SOMETHING OTHER THAN ITS OWN COMMENT.
+
+    `W_STATUS=UNSET` is the value the scan holds if a future branch forgets to
+    set a token, and the 🔴 comment above it claims such a branch "must NOT read
+    as a clean scan". Round-3 measured that claim and it was prose only:
+    mutating the initialiser to `MEASURED` SURVIVED a green 299-test run,
+    because every existing branch assigns before the value is ever read.
+
+    The initialiser is UNREACHABLE by construction, so it cannot be driven —
+    what can be asserted is the RELATIONSHIP the comment states, as a ledger:
+    the first assignment (the initialiser) is not the MEASURED token, exactly
+    one token in the file IS `MEASURED`, and the initialiser's token is not one
+    any branch also emits. A mutant that makes the default `MEASURED` fails the
+    first; one that makes it alias a real reason (`NOCMP`, `EMPTYMANIFEST`)
+    fails the third — and would otherwise silently attribute a forgotten branch
+    to a diagnosis that was never made.
+
+    The behavioural half is `test_an_UNSET_status_token_lands_on_the_structural
+    _ladder` below: the ledger says the default is not MEASURED, that test says
+    the consumer treats it as blindness rather than ignoring it.
+    """
+    toks = _w_status_tokens()
+    default, branches = toks[0], toks[1:]
+    assert default != "MEASURED", (
+        "the wrong-writer scan's INITIALISER is `W_STATUS=%s`. A branch added "
+        "later without a token would then report a clean scan it never made — "
+        "which is the exact inversion the comment above that line forbids."
+        % default)
+    assert branches.count("MEASURED") == 1, (
+        "expected exactly one branch to emit MEASURED, found %d in %s. More "
+        "than one means a second path can claim the scan classified something; "
+        "none means nothing can ever reset the ladder."
+        % (branches.count("MEASURED"), branches))
+    assert default not in branches, (
+        "the initialiser token %r is also emitted by a real branch, so a "
+        "forgotten future branch would be reported under a diagnosis nobody "
+        "made: %s" % (default, branches))
+
+
+def test_an_UNSET_status_token_lands_on_the_structural_ladder(fleet):
+    """The consumer half of the ledger above. `u_threshold` exempts only ABSENT
+    and gives FETCHFAILED the long rung; the default token must take the
+    structural one — reported and escalated, never silently skipped.
+
+    Driven through the remote leg, the only place an arbitrary token can enter,
+    and with the LOCAL host measuring in the same run so this cannot pass by the
+    whole block going red."""
+    default = _w_status_tokens()[0]
+    fleet.catch_up()
+    fleet.stub_ssh(0, stdout="[laptop] FACT wrongwriter examined=0 status=%s" % default)
+
+    rc, out = fleet.check(REMOTE_SSH="stub@example.invalid",
+                          DRIFT_UNMEASURED_ESCALATE="1")
+    assert ("[mpblind] 🔴 DRIFT — laptop @managed-paths: UNMEASURED (%s)" % default) in out, (
+        "the %s token did not reach the structural ladder — either it was read "
+        "as a measured host or it was exempted\n%s" % (default, out))
+    assert rc == 18, ("an %s managed-path fact did not escalate at threshold 1: "
+                      "%d\n%s" % (default, rc, out))
+    assert "[mpblind] workbench: the managed-path scan MEASURED this run" in out, out
+    assert _mpblind(out) == (2, 1, 1), out
+
+
+def test_a_status_token_that_is_not_ALL_CAPS_is_MALFORMED(fleet):
+    """🔴 THE OTHER HALF OF THE SANITISER, which round-3 measured as unpinned:
+    narrowing `case "$M_STATUS" in ''|*[!A-Z]*)` to just `''` SURVIVED a green
+    299-test run.
+
+    The case that matters is the NEAR MISS — a far side emitting `status=measured`
+    rather than `status=MEASURED`. Without the non-uppercase half the token is
+    carried through verbatim; it is not equal to `MEASURED`, so it still lands on
+    the ladder, but under a reason token that spells a lowercase word an operator
+    would read as "it measured". The comparison is exact-match and case-sensitive
+    on purpose, so anything that is not the one spelling is MALFORMED."""
+    fleet.catch_up()
+    fleet.stub_ssh(0, stdout="[laptop] FACT wrongwriter examined=3 status=measured")
+
+    rc, out = fleet.check(REMOTE_SSH="stub@example.invalid",
+                          DRIFT_UNMEASURED_ESCALATE="1")
+    assert "[mpblind] 🔴 DRIFT — laptop @managed-paths: UNMEASURED (MALFORMED)" in out, (
+        "a lowercase status token was not sanitised to MALFORMED — it reached "
+        "the ladder spelling itself\n" + out)
+    assert "UNMEASURED (measured)" not in out, (
+        "the raw lowercase token was printed as the reason; an operator reading "
+        "this line is told the scan measured\n" + out)
+    assert rc == 18, out
+    assert _mpblind(out) == (2, 1, 1), out
+
+
+def test_a_fact_line_that_is_ITSELF_a_bare_token_is_MALFORMED(fleet):
+    """🔴 THE TWO MALFORMED GUARDS ARE NOT REDUNDANT, and round-3 measured that
+    the existing tests could not tell: replacing the whole
+    `case "$M_LINE" in *status=*) … *) MALFORMED` block with the bare
+    `M_STATUS="${M_LINE##*status=}"` fallback it exists to close SURVIVED a green
+    299-test run, because the `''|*[!A-Z]*` sanitiser next door caught every
+    status-less line the suite produced.
+
+    The input that separates them is a status-less fact line whose remainder is
+    ALREADY all-caps — `fact_of` returns everything after `FACT wrongwriter `, so
+    a far side emitting the bare word is enough. With the marker check present it
+    is MALFORMED; with only the sanitiser it passes through as `MEASURED` and the
+    host is counted as having classified its managed paths. That is the most
+    dangerous single value this parser can be handed, and nothing produced it.
+    """
+    fleet.catch_up()
+    fleet.stub_ssh(0, stdout="[laptop] FACT wrongwriter MEASURED")
+
+    rc, out = fleet.check(REMOTE_SSH="stub@example.invalid",
+                          DRIFT_UNMEASURED_ESCALATE="1")
+    assert "[mpblind] 🔴 DRIFT — laptop @managed-paths: UNMEASURED (MALFORMED)" in out, (
+        "a fact line with no `status=` marker whose whole remainder is "
+        "ALL-CAPS was not read as MALFORMED — the `*status=*` guard is doing "
+        "nothing and the whole-string fallback is live again\n" + out)
+    assert "[mpblind] laptop: the managed-path scan MEASURED this run" not in out, (
+        "the far side was counted as a host that MEASURED, on a line that "
+        "carries no status field at all\n" + out)
+    assert rc == 18, out
     assert _mpblind(out) == (2, 1, 1), out
 
 

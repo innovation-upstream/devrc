@@ -62,6 +62,14 @@ SUN_PATH_MAX = 108
 _STAGING_MARGIN = 60
 
 
+def staging_prefix():
+    """The `mkdtemp` prefix this process uses, exported so a test can glob for
+    ITS OWN staging directories and nobody else's. One writer, one reader —
+    a test that spelled the prefix itself would silently stop matching the day
+    this changed."""
+    return "afu%d-" % os.getpid()
+
+
 def _staging_root():
     """The shortest directory we can stage the symlink in, checked, never assumed.
 
@@ -102,7 +110,18 @@ def bind_socket_at(path):
     os.makedirs(parent, exist_ok=True)
 
     root = _staging_root()
-    d = tempfile.mkdtemp(prefix="afu", dir=root)
+    # 🔴 THE PID IS IN THE PREFIX SO A CONCURRENT RUN CANNOT BE MISTAKEN FOR A
+    # LEAK. `test_the_socket_fixture_does_not_MOVE_the_inode_across_filesystems`
+    # asserts that no staging directory survives the call, by diffing
+    # `/tmp/afu*` before and after. That diff anticipates a STALE directory from
+    # a crashed earlier run — it is a before/after diff precisely for that — but
+    # not a SIBLING creating one inside the window, which is routine on this box
+    # (three suites of this repo were running concurrently on 2026-08-21, load
+    # average 28). Without the pid the assertion would fail naming another
+    # agent's directory, i.e. a flake that reads exactly like a leak in the code
+    # under test. `mkdtemp` still appends its own random suffix, so this narrows
+    # the namespace without making it collidable.
+    d = tempfile.mkdtemp(prefix=staging_prefix(), dir=root)
     link = os.path.join(d, "d")
     os.symlink(parent, link)
     short = os.path.join(link, name)

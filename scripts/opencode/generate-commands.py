@@ -28,6 +28,20 @@ EXIT_MANAGED_OUTPUT = 3
 STORE_PREFIX = os.environ.get("GENERATE_COMMANDS_STORE_PREFIX", "/nix/store/")
 
 
+# 🔴 THE TWO PLACES home-manager KEEPS `home-files`, gcroots FIRST — written as
+# slash-joined POSIX strings, VERBATIM the way ship.sh, reclaim-managed-paths.sh
+# and drift-check.sh spell them. That is deliberate rather than idiomatic: the
+# four readers cannot share code (two are shell, one is piped to `bash -s` over
+# ssh and can source nothing), so the only thing that can hold them together is
+# a ledger test — and a ledger test over source TEXT can only see a spelling
+# both sides share. `Path(a) / "home-manager" / "gcroots" / …` is the same
+# path and invisible to it.
+MANIFEST_RELS = (
+    "home-manager/gcroots/current-home/home-files",
+    "nix/profiles/home-manager/home-files",
+)
+
+
 def home_manager_manifest() -> Path | None:
     """The current home-manager generation's `home-files` tree, if there is one.
 
@@ -35,13 +49,32 @@ def home_manager_manifest() -> Path | None:
     path": every leaf under it is a path the active generation links into $HOME.
     Absent in the nix build sandbox (no profile, HOME=/homeless-shelter), which
     is exactly why the guard below is inert there and live on a real host.
+
+    🔴 TWO LOCATIONS, PROBED gcroots-FIRST — the same order as the other three
+    readers of this question (ship.sh's `ma_manifest`, reclaim-managed-paths.sh,
+    drift-check.sh's rc-19 payload), which
+    test_reclaim_managed_paths.py::test_all_four_manifest_probes_agree now
+    enumerates INCLUDING this one. home-manager has used both paths.
+
+    Until 2026-08-21 this reader knew only the profile path, and the failure was
+    silent in the worst possible place: on a host carrying only the gcroots
+    manifest, the MANIFEST signal in `managed_output_reason` — the one written
+    specifically for the founding 2026-08-19 case, where the directory had
+    already been fully overwritten and NO symlink was left on disk to notice —
+    could not fire at all. What remained was the DISK signal, which by
+    construction cannot see that case. Latent rather than live on this host
+    (both locations exist and agree), which is exactly why it needed a test
+    rather than an inspection.
     """
     home = os.environ.get("HOME")
     if not home:
         return None
     state = os.environ.get("XDG_STATE_HOME") or os.path.join(home, ".local", "state")
-    p = Path(state) / "nix" / "profiles" / "home-manager" / "home-files"
-    return p if p.is_dir() else None
+    for rel in MANIFEST_RELS:
+        p = Path(state).joinpath(*rel.split("/"))
+        if p.is_dir():
+            return p
+    return None
 
 
 def managed_output_reason(out_dir: Path) -> str | None:

@@ -98,23 +98,40 @@ def test_the_nix_build_shape_is_not_refused(tmp_path):
 
 
 # --- signal 1: the generation manifest declares the path -------------------- #
-def _manifest_home(tmp_path, rel):
+# 🔴 BOTH LOCATIONS home-manager HAS USED, and the fixture is parametrised over
+# them rather than pinned to one. Round-3 measured that this reader probed ONLY
+# the profile path while ship.sh, reclaim-managed-paths.sh and drift-check.sh all
+# probe gcroots FIRST — so on a host carrying only the gcroots manifest the
+# manifest signal was silently inert, leaving the disk signal, which by
+# construction cannot see the case the manifest signal exists for.
+_MANIFEST_LOCATIONS = [
+    ("gcroots", ("home-manager", "gcroots", "current-home", "home-files")),
+    ("profile", ("nix", "profiles", "home-manager", "home-files")),
+]
+
+
+def _manifest_home(tmp_path, rel, where="profile"):
     """A $HOME whose active home-manager generation declares $HOME/<rel>."""
+    parts = dict(_MANIFEST_LOCATIONS)[where]
     home = tmp_path / "home"
-    manifest = (home / ".local" / "state" / "nix" / "profiles"
-                / "home-manager" / "home-files")
+    manifest = home.joinpath(".local", "state", *parts)
     (manifest / rel).mkdir(parents=True)
     (manifest / rel / "already.md").symlink_to(tmp_path / "store" / "already.md")
     return home, manifest
 
 
-def test_a_directory_the_manifest_declares_is_refused(tmp_path):
+@pytest.mark.parametrize("where", [w for w, _ in _MANIFEST_LOCATIONS])
+def test_a_directory_the_manifest_declares_is_refused(tmp_path, where):
     """🔴 THE MANIFEST IS THE AUTHORITATIVE SIGNAL, and the one that survives the
     worst case: a directory ALREADY fully overwritten, where no symlink is left
     on disk to notice. That is the state the workbench was in for the 18 files —
-    a second run pointed at it would have found nothing to warn from."""
+    a second run pointed at it would have found nothing to warn from.
+
+    Driven at BOTH manifest locations: the `gcroots` case FAILED before
+    2026-08-21, because this file's probe knew only the profile path.
+    """
     src = skills_tree(tmp_path)
-    home, _ = _manifest_home(tmp_path, ".config/opencode/commands")
+    home, _ = _manifest_home(tmp_path, ".config/opencode/commands", where)
     out = home / ".config" / "opencode" / "commands"
     out.mkdir(parents=True)
     (out / "stale.md").write_text("a regular file someone already wrote\n")

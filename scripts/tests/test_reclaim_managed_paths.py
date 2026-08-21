@@ -54,6 +54,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
+from testlib import afunix  # noqa: E402
 from testlib.afunix import SUN_PATH_MAX, bind_socket_at  # noqa: E402
 
 # Sockets returned by `bind_socket_at` are parked here for the life of the
@@ -552,13 +553,18 @@ def test_the_socket_fixture_does_not_MOVE_the_inode_across_filesystems(tmp_path)
     implementation could not satisfy while also leaving the socket in place.
     """
     target = tmp_path / "sub" / "dir" / "sock"
-    # A BEFORE/AFTER DIFF, not an absolute "no afu* dirs exist". /tmp is shared:
-    # a stale directory from a crashed earlier run — or a sibling agent running
-    # this same suite — would make an absolute assertion permanently red, which
-    # is the gate nobody can keep green.
-    before = {p.name for p in Path("/tmp").glob("afu*")}
+    # A BEFORE/AFTER DIFF **SCOPED TO THIS PROCESS**, not an absolute "no afu*
+    # dirs exist". /tmp is shared and both hazards are real: a stale directory
+    # from a crashed earlier run (which the diff handles) and a SIBLING creating
+    # one inside the window (which it does not — that one lands in `after` and
+    # reads as a leak in the code under test). Three suites of this repo were
+    # running concurrently on 2026-08-21 at load average 28, so this is the
+    # normal case here, not a corner. The prefix is taken from the helper rather
+    # than spelled here: one writer, one reader.
+    pat = afunix.staging_prefix() + "*"
+    before = {p.name for p in Path("/tmp").glob(pat)}
     _sockets.append(bind_socket_at(target))
-    after = {p.name for p in Path("/tmp").glob("afu*")}
+    after = {p.name for p in Path("/tmp").glob(pat)}
 
     st = os.lstat(target)
     assert stat.S_ISSOCK(st.st_mode), oct(st.st_mode)
@@ -572,6 +578,43 @@ def test_the_socket_fixture_does_not_MOVE_the_inode_across_filesystems(tmp_path)
         "implementation cannot clean up after a cross-device failure — the "
         "socket is still in the staging dir, so the rmdir fails too."
         % sorted(after - before))
+
+
+def test_the_leak_check_glob_cannot_match_ANOTHER_processs_staging_dir():
+    """🔴 THE FLAKE THE TEST ABOVE HAD, pinned so the fix cannot be reverted.
+
+    Its leak assertion is a before/after diff of the staging root. That handles
+    a STALE directory from a crashed run — the case it was written for — but not
+    a SIBLING creating one inside the window, which on this box is routine: three
+    suites of this repo were running concurrently on 2026-08-21 at load average
+    28. The failure mode is the bad one: an unrelated agent's directory appears
+    in `after - before` and the message says the code under test leaked.
+
+    Fixed by putting the PID in the `mkdtemp` prefix. Asserted here with both
+    controls, because "the glob is narrower now" is exactly the kind of claim
+    that is easy to state and easy to get backwards:
+      * NEGATIVE — a directory named for a different pid must NOT match;
+      * POSITIVE — one named for ours MUST, or the leak check is wired to
+        nothing and the test above can never fail.
+    """
+    root = Path("/tmp")
+    pat = afunix.staging_prefix() + "*"
+    mine = root / (afunix.staging_prefix() + "selftest")
+    theirs = root / ("afu%d-selftest" % (os.getpid() + 1))
+    mine.mkdir()
+    theirs.mkdir()
+    try:
+        names = {p.name for p in root.glob(pat)}
+        assert mine.name in names, (
+            "the leak check's own glob %r does not match a directory this "
+            "process created — the assertion above can never fire" % pat)
+        assert theirs.name not in names, (
+            "the leak check's glob %r matched %s, which belongs to another "
+            "pid. A sibling agent's staging directory would be reported as a "
+            "leak in the code under test." % (pat, theirs.name))
+    finally:
+        mine.rmdir()
+        theirs.rmdir()
 
 
 @pytest.mark.parametrize("kind", ["directory", "fifo", "socket"])
@@ -1027,17 +1070,31 @@ def test_the_delete_loops_existence_recheck_is_documented_as_unreachable():
 
 SHIP = REPO_ROOT / "scripts" / "ship.sh"
 DRIFT = REPO_ROOT / "scripts" / "drift-check.sh"
+GENERATE_COMMANDS = REPO_ROOT / "scripts" / "opencode" / "generate-commands.py"
 
 
-def test_all_three_manifest_probes_agree():
-    """🔴 ONE RULE, ONE PLACE — and here it is deliberately THREE places, so the
+def test_all_four_manifest_probes_agree():
+    """🔴 ONE RULE, ONE PLACE — and here it is deliberately FOUR places, so the
     agreement has to be asserted instead of assumed.
 
-    ship.sh's `ma_manifest`, this script and drift-check's rc-19 payload each
-    answer "where is this host's home-files tree", and they render three verdicts
-    about ONE tree: the payload reports a finding, this script repairs it,
-    ship.sh verifies the result. They cannot share a function — the drift payload
-    is piped to `bash -s` over ssh and can source nothing.
+    🔴 IT SAID THREE UNTIL 2026-08-21, AND THE FOURTH READER DISAGREED. This
+    enumeration named ship.sh, this script and drift-check's payload, and a test
+    that enumerates is only as good as its enumeration: `scripts/opencode/
+    generate-commands.py` asks the same question and probed ONLY
+    `$state/nix/profiles/home-manager/home-files`. On a host carrying just the
+    gcroots manifest its MANIFEST signal — the one written for the founding
+    2026-08-19 case, where the directory was already fully overwritten and no
+    symlink remained to notice — was silently inert, leaving only the DISK
+    signal, which by construction cannot see that case. Latent on this host
+    (both locations exist and agree), which is why nothing observed it.
+
+    ship.sh's `ma_manifest`, this script, drift-check's rc-19 payload and the
+    opencode command generator each answer "where is this host's home-files
+    tree", and they render four verdicts about ONE tree: the payload reports a
+    finding, this script repairs it, ship.sh verifies the result, the generator
+    refuses to write over it. They cannot share a function — the drift payload
+    is piped to `bash -s` over ssh and can source nothing, and the generator is
+    Python.
 
     They did NOT agree at PR head: drift-check hardcoded
     `$HOME/.local/state/nix/profiles/…`, honouring neither XDG_STATE_HOME nor the
@@ -1050,11 +1107,22 @@ def test_all_three_manifest_probes_agree():
     XDG expansion) rather than by re-running them: the payload's copy cannot be
     invoked in isolation from here without duplicating the extraction the
     drift-check suite already owns.
+
+    🔴 SCOPE, STATED RATHER THAN IMPLIED: this pins that each reader KNOWS both
+    locations, not which one it PREFERS. Measured 2026-08-21 — a mutant that
+    swaps the generator's two probes into the other order SURVIVED this suite.
+    That is deliberate and not a hole to plug here: on a host where both exist
+    they name the same generation, and on one where they disagree the right
+    preference is home-manager's, which a test in this repo cannot assert. The
+    behavioural half is
+    test_generate_commands.py::test_a_directory_the_manifest_declares_is_refused,
+    parametrised over BOTH locations, which fails if either is unreachable.
     """
     readers = {
         "ship.sh": SHIP.read_text(),
         "reclaim-managed-paths.sh": RECLAIM.read_text(),
         "drift-check.sh": DRIFT.read_text(),
+        "opencode/generate-commands.py": GENERATE_COMMANDS.read_text(),
     }
     for name, text in readers.items():
         assert "home-manager/gcroots/current-home/home-files" in text, (
