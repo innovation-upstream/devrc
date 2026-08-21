@@ -10,6 +10,7 @@ The tests that matter here are the ones that pin the heartbeat firing when
 NOTHING ELSE IS HAPPENING. A heartbeat that only beats under traffic re-creates
 the exact blind spot it was built to close.
 """
+import itertools
 import json
 import threading
 import time
@@ -162,7 +163,7 @@ def test_a_POSTGRES_OUTAGE_DOES_NOT_BREAK_LIVENESS(tmp_path):
     assert beat.row_writes == 0
 
 
-def test_a_STALLED_POSTGRES_CANNOT_FREEZE_THE_LIVENESS_FILE(tmp_path):
+def test_a_STALLED_POSTGRES_CANNOT_FREEZE_THE_LIVENESS_FILE(tmp_path, monkeypatch):
     """🔴 THE REGRESSION, and the one the first version got wrong.
 
     The original code wrote the file and then the row ON ONE THREAD, reasoning
@@ -176,10 +177,37 @@ def test_a_STALLED_POSTGRES_CANNOT_FREEZE_THE_LIVENESS_FILE(tmp_path):
     the one outage shape that was already safe.
 
     Here the DB hangs and the file MUST keep advancing.
+
+    🔴 AND THE SYNCHRONISATION IS AN EVENT, NOT A CLOCK. The version before this
+    one read `n0 = beat.ticks` and then `first = read_heartbeat_file(path)` as
+    two separate statements and claimed that ordering had closed the race. It had
+    only narrowed it: a deschedule between those two lines leaves `first` already
+    holding the content of a tick well past `n0`, the `while beat.ticks < n0 + 2`
+    loop then exits without waiting for anything, and `second` re-reads the very
+    same file — `second["written_at"] > first["written_at"]` failing on an
+    identical timestamp, which is precisely the failure the docstring above says
+    was fixed. Reproduced 100% by slowing the first read.
+
+    So completed WRITES are counted at the sink itself. After `first` is read the
+    counter is drained to zero, which retires every write that could already have
+    happened; the two acquired after that are therefore writes that completed
+    strictly later than `first`, and the file loop is a single thread, so their
+    payloads carry strictly larger stamps. Nothing depends on how long any of it
+    takes.
     """
     path = _hb_path(tmp_path)
     release = threading.Event()
     entered = threading.Event()
+    written = threading.Semaphore(0)
+    stamps = itertools.count(1)
+
+    real_write = consumer.write_heartbeat_file
+
+    def counting_write(hb, target):
+        real_write(hb, target)
+        written.release()          # released only AFTER the file is on disk
+
+    monkeypatch.setattr(consumer, "write_heartbeat_file", counting_write)
 
     class StalledDB:
         def __enter__(self):
@@ -190,30 +218,28 @@ def test_a_STALLED_POSTGRES_CANNOT_FREEZE_THE_LIVENESS_FILE(tmp_path):
         def record_heartbeat(self, hb): pass
         def commit(self): pass
 
-    beat = consumer.Heartbeat(FakeConsumer(), db_factory=StalledDB,
-                              path=path, interval=0.01)
+    beat = consumer.Heartbeat(FakeConsumer(), db_factory=StalledDB, path=path,
+                              interval=0.01, clock=lambda: float(next(stamps)))
     try:
         beat.start()
+        assert entered.wait(10), "the row thread never reached the database"
 
-        # 🔴 SNAPSHOT BEFORE WAITING, and snapshot the file and the tick count
-        # TOGETHER. The first version read `first` AFTER `entered.wait()`
-        # returned, by which time the 10ms file thread could already be past
-        # tick 3 — so `while beat.ticks < 3` never ran, `second` re-read the
-        # very same file, and `second > first` failed on an identical
-        # timestamp. Measured at 5/60 red on an IDLE machine (8%), so it was a
-        # genuine race and not a load artifact. A ~1-in-15 flake on the test
-        # that gates a deploy-blocker is how a red gate becomes something people
-        # click through.
-        n0 = beat.ticks
         first = consumer.read_heartbeat_file(path)
-        assert entered.wait(2), "the row thread never reached the database"
+        assert first is not None, "start() wrote no file — nothing to compare"
+        while written.acquire(blocking=False):   # retire every earlier write
+            pass
 
-        deadline = time.time() + 5
-        while beat.ticks < n0 + 2 and time.time() < deadline:
-            time.sleep(0.01)
+        # 🔴 The file kept beating WHILE the database was wedged. Three writes
+        # that provably completed after `first` was read; the timeout is a
+        # deadlock guard, not a race the test can lose.
+        for _ in range(3):
+            assert written.acquire(timeout=10), "the stalled DB froze the liveness file"
 
-        # 🔴 The file kept beating WHILE the database was wedged.
-        assert beat.ticks >= n0 + 2, "the stalled DB froze the liveness file"
+        # `release()` fires INSIDE the write, one statement before `ticks += 1`,
+        # so the LAST acquired write's increment may still be pending — the third
+        # release is what makes the first two increments certain. Counting 2 here
+        # would be the same off-by-one race in miniature.
+        assert beat.ticks >= 3, "the tick counter did not follow the writes"
         assert beat.row_writes == 0, "the DB was supposed to be stuck"
         second = consumer.read_heartbeat_file(path)
         assert second["written_at"] > first["written_at"]
@@ -324,37 +350,106 @@ def test_start_BEATS_ONCE_BEFORE_WAITING(tmp_path):
         beat.stop()
 
 
+def test_a_FAILED_write_counts_an_ATTEMPT_but_NOT_a_TICK(tmp_path):
+    """🔴 THE INVARIANT, pinned with NO thread and NO clock at all.
+
+    `attempts` increments BEFORE the I/O and `ticks` only AFTER it returns, and
+    that ordering is the entire reason the pair can tell "the thread is wedged"
+    apart from "the thread is trying and the disk is refusing". Hoisting
+    `ticks += 1` above the write — or counting it in the loop's `except` — makes
+    a consumer that writes nowhere report a healthy, climbing tick count while
+    the file it is judged on never changes.
+
+    The threaded test below drives the same invariant through the real loop; this
+    one holds it where nothing can race, so a break is a one-line diagnosis
+    rather than a thread post-mortem.
+    """
+    path = str(tmp_path / "hb.json")
+    stamps = iter([1000.0, 2000.0])
+    beat = consumer.Heartbeat(FakeConsumer(), path=path,
+                              clock=lambda: next(stamps))
+    beat.tick()
+    assert (beat.attempts, beat.ticks) == (1, 1)
+
+    beat._path = "/nonexistent-dir/hb.json"
+    with pytest.raises(OSError):
+        beat.tick()
+
+    assert beat.attempts == 2, "a failed beat was not counted as an ATTEMPT"
+    assert beat.ticks == 1, "a write to an unwritable path 'succeeded'"
+    assert consumer.read_heartbeat_file(path, now=1000.0)["written_at"] == 1000.0, (
+        "the failed beat overwrote the last good reading — a probe must keep "
+        "seeing the real measurement age out, not lose it")
+
+
 def test_the_thread_SURVIVES_a_beat_that_fails_AFTER_it_started(tmp_path):
     """A thread that dies on the first transient is a liveness signal that
     reports death for exactly the fault it was supposed to ride out.
 
     The first beat succeeds; the sink is then pointed somewhere unwritable, so
-    every LATER beat raises. Deterministic on purpose — an earlier version of
-    this test deleted the directory out from under a 10ms thread and raced it,
-    which made the TEST flaky and said nothing about the code.
+    every LATER beat raises.
+
+    🔴 NO WALL CLOCK ANYWHERE, because the previous version's did not hold. It
+    swapped `_path` and then slept 0.1s to "let any beat already in flight
+    finish", which is a guess, not a synchronisation: `tick()` reads `self._path`
+    and only THEN does the I/O, so a loop beat that had already read the good
+    path could complete its write after the sleep and after the snapshot, taking
+    `ticks` from 1 to 2. Measured 1 red in 3 full-suite runs; reproduced 100% by
+    slowing `write_heartbeat_file`, which yields the identical `assert 2 == 1`.
+    Widening the sleep would only have made it rarer.
+
+    Closed STRUCTURALLY instead. The injected clock is called inside `payload()`,
+    which runs BEFORE the write, so parking the loop thread there holds every
+    beat upstream of its own I/O until the sink has already been made
+    unwritable. No beat can straddle the swap, so `ticks == 1` is not a value
+    that has to survive a race — after the first beat it cannot change at all,
+    at any instant, for the rest of the test. Progress is then observed by
+    waiting on a REAL event (a beat happened) rather than on elapsed time; the
+    timeouts below are deadlock guards and no assertion depends on their size.
+
+    `start()`'s own contract — beat once, then spawn a daemon thread — is pinned
+    by `test_start_BEATS_ONCE_BEFORE_WAITING` and `test_BOTH_threads_are_daemons`.
     """
     path = str(tmp_path / "hb.json")
-    beat = consumer.Heartbeat(FakeConsumer(), path=path, interval=0.01)
+    swapped = threading.Event()
+    beats = threading.Semaphore(0)
+    calls = itertools.count()
+
+    def clock():
+        # Call 0 is `start()`'s own synchronous beat, on THIS thread, before any
+        # loop thread exists — so it is never gated. Every later call is the loop
+        # thread, and it waits here, inside payload() and upstream of the write.
+        if next(calls):
+            swapped.wait(10)                          # deadlock guard only
+        beats.release()
+        return 1000.0
+
+    beat = consumer.Heartbeat(FakeConsumer(), path=path, interval=0.005,
+                              clock=clock)
     try:
         beat.start()
         assert consumer.read_heartbeat_file(path) is not None
-        beat._path = "/nonexistent-dir/hb.json"      # every later write fails
-        # Let any beat already IN FLIGHT finish against the old path before
-        # snapshotting. Without this settle the counters race the swap — which is
-        # how the first two versions of this test were green for the wrong reason.
-        time.sleep(0.1)                               # >= several intervals
+        # Only `ticks` is pinned here, and deliberately: the loop thread's first
+        # beat has already run `attempts += 1` before parking in the clock, so
+        # `attempts` is legitimately 1 or 2 at this instant. That asymmetry is
+        # the whole reason the loop is asserted on GROWTH below and the invariant
+        # on EQUALITY — measured, not assumed: pinning `attempts == 1` here fails.
+        assert beat.ticks == 1
+        assert beats.acquire(blocking=False), "start() did not beat"
+
+        beat._path = "/nonexistent-dir/hb.json"       # every later write fails
+        swapped.set()                                 # ...and only NOW may one run
+
         # 🔴 Assert on ATTEMPTS, not ticks. `ticks` counts SUCCESSFUL writes, so
         # once the sink is broken it can never grow; asserting the loop still
         # runs therefore has to read the counter that increments BEFORE the I/O.
-        attempts_before = beat.attempts
-        ticks_before = beat.ticks
-        deadline = time.time() + 2
-        while beat.attempts <= attempts_before + 1 and time.time() < deadline:
-            time.sleep(0.01)
-        assert beat.attempts > attempts_before + 1, "the loop stopped trying"
-        assert beat.ticks == ticks_before, "a write to an unwritable path 'succeeded'"
+        for _ in range(3):
+            assert beats.acquire(timeout=10), "the loop stopped trying"
+        assert beat.attempts >= 4, "the loop stopped trying"
+        assert beat.ticks == 1, "a write to an unwritable path 'succeeded'"
         assert beat._thread is not None and beat._thread.is_alive()
     finally:
+        swapped.set()                                 # never strand the thread
         beat.stop()
 
 
@@ -784,19 +879,29 @@ def test_a_later_beat_WITHOUT_a_frame_time_PRESERVES_the_stored_one(db):
 def test_stop_HALTS_both_loops(tmp_path):
     """🟢 The shutdown path was essentially untested — `stop()` not setting the
     event, `stop()` joining nothing, and `_row_loop` ignoring the stop event all
-    survived. A row loop that ignores it keeps beating after shutdown."""
+    survived. A row loop that ignores it keeps beating after shutdown.
+
+    The wait for the row loop to get going is on the DB's own `commit`, not on a
+    wall-clock deadline — the last `deadline = time.time() + N` in this file was
+    the flake that took the suite red, and a progress poll with a "generous"
+    bound is the same instrument with a bigger number in it.
+    """
+    commits = threading.Semaphore(0)
+
     class QuietDB:
         def __enter__(self): return self
         def __exit__(self, *a): return False
         def record_heartbeat(self, hb): pass
-        def commit(self): pass
+        def commit(self): commits.release()
 
     beat = consumer.Heartbeat(FakeConsumer(), db_factory=QuietDB,
                               path=_hb_path(tmp_path), interval=0.01)
     beat.start()
-    deadline = time.time() + 2
-    while beat.row_writes < 2 and time.time() < deadline:
-        time.sleep(0.01)
+    # `row_writes += 1` runs after the `with` block, so the THIRD commit is what
+    # makes the first two increments certain — same off-by-one as the stalled-DB
+    # test above.
+    for _ in range(3):
+        assert commits.acquire(timeout=10), "the row loop never ran"
     assert beat.row_writes >= 2, "the row loop never ran"
 
     beat.stop()

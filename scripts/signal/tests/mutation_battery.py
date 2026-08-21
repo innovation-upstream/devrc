@@ -62,6 +62,7 @@ BP = "scripts/signal/build-push.sh"
 
 SUITE_EXCL = "scripts/signal/tests/test_group_exclusions.py"
 SUITE_IMAGE = "scripts/signal/tests/test_image_deps.py"
+SUITE_LIVE = "scripts/signal/tests/test_liveness.py"
 
 
 class Mutant:
@@ -214,6 +215,46 @@ MUTANTS: list[Mutant] = [
            '"group_name": group.get("groupName") or group.get("name"),',
            '"group_name": group.get("name") or group.get("groupName"),',
            "test_groupName_WINS_over_the_legacy_spelling", SUITE_EXCL),
+
+    # ------------------------------------------------------------------ #
+    # The heartbeat counters (#618). `test_the_thread_SURVIVES_a_beat_that_
+    # fails_AFTER_it_started` used a wall-clock settle-and-poll and lost its
+    # race 1 run in 3; it was rewritten to synchronise on the beat itself. A
+    # rewrite that makes a test deterministic by no longer exercising the
+    # failure path is worse than the flake it removed, so these three pin that
+    # the REWRITTEN test still notices all three ways its subject can break.
+    # Every one of them is also caught by the thread-free sibling
+    # `test_a_FAILED_write_counts_an_ATTEMPT_but_NOT_a_TICK`.
+    # ------------------------------------------------------------------ #
+    Mutant("H1", "a FAILED write counts as a successful beat — `ticks += 1` hoisted "
+                 "above the I/O. `ticks` is what says the file on disk actually "
+                 "moved; incremented before the write, a consumer writing nowhere "
+                 "reports a healthy climbing tick count forever.",
+           CON,
+           "        write_heartbeat_file(hb, self._path)\n        self.ticks += 1",
+           "        self.ticks += 1\n        write_heartbeat_file(hb, self._path)",
+           "test_the_thread_SURVIVES_a_beat_that_fails_AFTER_it_started", SUITE_LIVE),
+
+    Mutant("H2", "`attempts` counted AFTER the I/O, so a failing sink increments "
+                 "nothing. attempts-vs-ticks is the only thing that separates "
+                 "'the thread is wedged' from 'the thread is trying and the disk "
+                 "is refusing'; counted after the write, both read identically.",
+           CON,
+           "        self.attempts += 1\n        hb = self.payload()\n"
+           "        write_heartbeat_file(hb, self._path)",
+           "        hb = self.payload()\n        write_heartbeat_file(hb, self._path)\n"
+           "        self.attempts += 1",
+           "test_the_thread_SURVIVES_a_beat_that_fails_AFTER_it_started", SUITE_LIVE),
+
+    Mutant("H3", "the file loop loses the except that lets it outlive a bad beat — "
+                 "the thread then dies on the first transient, i.e. the liveness "
+                 "signal reports death for exactly the fault it exists to ride out",
+           CON,
+           "            try:\n                self.tick()\n"
+           "            except Exception as exc:  # noqa: BLE001 — the thread must outlive a bad beat\n"
+           '                print(f"signal-consumer: heartbeat failed ({exc})", file=sys.stderr)\n',
+           "            self.tick()\n",
+           "test_the_thread_SURVIVES_a_beat_that_fails_AFTER_it_started", SUITE_LIVE),
 
     # ------------------------------------------------------------------ #
     # The build gate
