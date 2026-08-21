@@ -397,10 +397,33 @@ HERMETIC_TARGETS=(
 )
 
 # --- DEV-HOST-ONLY set ---------------------------------------------------------
-# Targets deferred to the pre-push tier (empty today — nothing here currently
-# needs a live DB/network at runtime; kept so a future DB-bound suite has a home
-# that does NOT block the hermetic flake gate).
-DEVHOST_TARGETS=()
+# Targets deferred to the pre-push tier. `--set all` runs them, which is what
+# githooks/tests-on-push.sh runs on every push; the hermetic flake gate does not.
+DEVHOST_TARGETS=(
+  # 🔴 THE FIRST OCCUPANT, and it is here because it CANNOT be hermetic — not
+  # because that is convenient. It evaluates the flake's real home-manager
+  # activation DAG (`nix eval --impure`) and runs it through home-manager's own
+  # `lib.dag.topoSort`, to assert that ZERO activation steps run between
+  # `installPackages` and `linkGeneration` — the window in which
+  # reclaimManagedPaths' deleted files exist nowhere on disk.
+  #
+  # The nix BUILD SANDBOX has a `nix` binary with `nix-command` DISABLED and
+  # none of the flake's inputs, so the eval errors there. Putting it in
+  # HERMETIC_TARGETS would either red the merge gate or — worse — teach someone
+  # to guard it on an environment check, which is the "means one thing on a dev
+  # host and nothing in the tier that gates merges" shape this file's
+  # EXPECTED_SKIPS block records REMOVING twice. So it is declared dev-host
+  # rather than silently skipped, and it FAILS rather than skips when it cannot
+  # measure.
+  #
+  # What it replaces: a guard whose comment, docstring and commit message all
+  # claimed it read the BUILT activation script. It read nix/home.nix as TEXT,
+  # so the property survived both a new entry landing in the window and
+  # `topoSort` silently ignoring a bound name that upstream had renamed. The
+  # text pin stays — it is cheap and it runs in both tiers — but it no longer
+  # claims to be this.
+  scripts/tests-devhost
+)
 
 TARGETS=("${HERMETIC_TARGETS[@]}")
 if [ "$SET" = "all" ]; then
@@ -1310,6 +1333,13 @@ TARGET_FLOORS=(
   #   is only 14. Raise the TARGET_FLOORS entry to "scripts/opencode/tests|86"
   # (which is `_suggested_floor 90` = 90 - min(50, max(1, 90/20 = 4)) = 86.)
   "scripts/opencode/tests|86"
+  # 2026-08-21, the DEV-HOST target (see DEVHOST_TARGETS above): 5 collected —
+  # the evaluated-DAG pair plus the two reader validations (`window()` seeing an
+  # inserted step, `missing_bounds()` seeing a vanished bound name). Floored at
+  # `_suggested_floor 5` = 5 - min(50, max(1, 0)) = 4. It is NOT in the hermetic
+  # sum, so `--set hermetic` derives the same global floor it did before this
+  # branch, and only `--set all` (the pre-push tier) adds it.
+  "scripts/tests-devhost|4"
 )
 
 # The allowance rule, in one place, used by BOTH the drift message and anyone

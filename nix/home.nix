@@ -1641,9 +1641,22 @@ in
   # that aborted there left the reclaimed files deleted and unlinked: strictly
   # worse than the bug. entryBetween pins BOTH ends; `entryBefore ["linkGeneration"]`
   # alone leaves the entry with no lower bound and the topological sort free to
-  # emit it early again. The resulting gap is pinned by
-  # test_reclaim_managed_paths.py::test_the_activation_entry_runs_immediately_
-  # before_linkGeneration, which reads the BUILT script, not this expression.
+  # emit it early again.
+  #
+  # 🔴 TWO GUARDS, AND THEY MEASURE DIFFERENT THINGS. Say which is which — an
+  # earlier revision of this comment claimed the text pin "reads the BUILT
+  # script", which it never has, and that one false sentence left the property
+  # below pinned by nothing:
+  #   * scripts/tests/test_reclaim_managed_paths.py::test_the_activation_entry_
+  #     _DECLARES_entryBetween_installPackages_and_linkGeneration reads THIS FILE
+  #     AS TEXT. It pins the SPELLING, in both tiers, and nothing more.
+  #   * scripts/tests-devhost/test_activation_order.py evaluates the real DAG and
+  #     runs it through home-manager's own lib.dag.topoSort, asserting that ZERO
+  #     activation steps sort between installPackages and linkGeneration — and
+  #     that both bound NAMES still exist, because topoSort silently IGNORES an
+  #     unknown name in `before`/`after` (modules/lib/dag.nix) rather than
+  #     erroring. It cannot run in the nix build sandbox, so it is a dev-host
+  #     target (`run-tests.sh --set all`, i.e. every push).
   home.activation.reclaimManagedPaths =
     lib.hm.dag.entryBetween ["linkGeneration"] ["installPackages"] ''
     reclaimFiles="$(readlink -e "$newGenPath/home-files" 2>/dev/null || true)"

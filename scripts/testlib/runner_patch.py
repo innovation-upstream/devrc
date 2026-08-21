@@ -44,6 +44,7 @@ def _replace_array(src: str, name: str, entries: list[str]) -> str:
 
 
 def patch_runner_source(src: str, targets: list[str], floors: dict[str, int], *,
+                        devhost: list[str] | None = None,
                         ack: list[str] | None = None,
                         hook_tests: list[str] | None = None,
                         shell_tests: list[str] | None = None) -> str:
@@ -64,6 +65,21 @@ def patch_runner_source(src: str, targets: list[str], floors: dict[str, int], *,
     )
     assert n == 1, "failed to replace HERMETIC_TARGETS in the copied runner"
     assert "HERMETIC_TARGETS=(\n  " in patched, "replacement produced an empty target list"
+
+    # 🔴 THE THIRD TABLE IN THE SAME PIN, and leaving it alone reproduced this
+    # module's own founding bug. GUARD 3a checks TARGET_FLOORS against
+    # ALL_KNOWN_TARGETS = HERMETIC_TARGETS + DEVHOST_TARGETS. While DEVHOST_TARGETS
+    # was empty, replacing two tables happened to be enough; the moment it gained
+    # an entry (scripts/tests-devhost), every patched copy died at
+    # "a target with NO entry in TARGET_FLOORS" — exit 2, before reaching the
+    # guard under test. Six tests in test_no_real_launchers_all_targets.py and
+    # test_run_tests_preconditions.py went red for a reason unrelated to their
+    # subject, which is exactly the unreachable-guard shape described above.
+    #
+    # Emptied by default, like EXPECTED_SKIPS: a copy driving one throwaway
+    # target has no dev-host tier to run. A caller that IS testing the dev-host
+    # split names it.
+    patched = _replace_array(patched, "DEVHOST_TARGETS", devhost or [])
 
     fbody = "\n".join(f'  "{t}|{v}"' for t, v in floors.items())
     patched, n = re.subn(
@@ -115,10 +131,13 @@ def runner_with_targets(
     """
     if floors is None:
         floors = {t: 1 for t in targets}
-    assert set(floors) == set(targets), (
+    expected = set(targets) | set(kwargs.get("devhost") or [])
+    assert set(floors) == expected, (
         "the floor table and the target list must match EXACTLY both ways -- "
-        "that is the pin these copies exist to satisfy, not to bypass.\n"
-        f"targets={sorted(targets)}\nfloors={sorted(floors)}"
+        "that is the pin these copies exist to satisfy, not to bypass. The "
+        "dev-host list counts too: GUARD 3a reads HERMETIC_TARGETS + "
+        "DEVHOST_TARGETS.\n"
+        f"targets={sorted(expected)}\nfloors={sorted(floors)}"
     )
     dst = tmp_path / "run-tests.sh"
     dst.write_text(patch_runner_source(RUN_TESTS.read_text(), targets, floors,

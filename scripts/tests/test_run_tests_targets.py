@@ -262,3 +262,85 @@ def test_check_targets_is_cheap_and_runs_no_tests(tmp_path):
         "--check-targets ran a suite; it is supposed to validate the list only.\n"
         f"{proc.stdout}"
     )
+
+
+# --------------------------------------------------------------------------
+# The DEV-HOST split, which had no behavioural coverage while it was empty.
+# --------------------------------------------------------------------------
+
+def _devhost_targets() -> list[str]:
+    """Parse DEVHOST_TARGETS out of the runner, same contract as its sibling."""
+    src = RUN_TESTS.read_text()
+    m = re.search(r"^DEVHOST_TARGETS=\((.*?)^\)", src, re.S | re.M)
+    assert m, ("could not find a DEVHOST_TARGETS=( ... ) block in run-tests.sh. "
+               "If the array was renamed, update this parser — do NOT delete "
+               "the test, or the dev-host tier goes back to being unguarded.")
+    return [ln.strip() for ln in m.group(1).splitlines()
+            if ln.strip() and not ln.strip().startswith("#")]
+
+
+def test_a_devhost_target_is_selected_by_set_all_and_NOT_by_set_hermetic(tmp_path):
+    """🔴 THE MECHANISM, not the list. `DEVHOST_TARGETS` sat EMPTY from the day
+    it was written until 2026-08-21, so nothing had ever shown that a target
+    placed in it (a) runs under `--set all` and (b) does NOT run under
+    `--set hermetic`. Both halves matter and they fail in opposite directions:
+    lose (a) and a suite is declared dev-host and then never runs anywhere;
+    lose (b) and it reds the hermetic flake gate it was moved out of.
+
+    Driven against a patched runner with two THROWAWAY targets of different,
+    known sizes, so the claim is read off the collected counts rather than off
+    the presence of a name in a log.
+    """
+    from testlib.runner_patch import runner_with_targets, write_pytest_suite
+
+    herm = tmp_path / "herm_suite"
+    dev = tmp_path / "dev_suite"
+    write_pytest_suite(herm, 3, prefix="test_h")
+    write_pytest_suite(dev, 7, prefix="test_d")
+
+    runner = runner_with_targets(
+        tmp_path,
+        [str(herm)],
+        floors={str(herm): 1, str(dev): 1},
+        devhost=[str(dev)],
+    )
+
+    only = _run([str(runner), "--set", "hermetic", str(REPO_ROOT)])
+    both = _run([str(runner), "--set", "all", str(REPO_ROOT)])
+
+    def collected(proc):
+        m = re.search(r"TOTAL collected=(\d+)", proc.stdout + proc.stderr)
+        assert m, ("no TOTAL collected= line — the patched runner did not "
+                   f"complete:\n{proc.stdout}\n{proc.stderr}")
+        return int(m.group(1))
+
+    assert collected(only) == 3, (
+        "the hermetic set ran %d tests, not the 3-test hermetic target alone — "
+        "a dev-host target is leaking into the tier that gates merges\n%s"
+        % (collected(only), only.stdout)
+    )
+    assert collected(both) == 10, (
+        "`--set all` ran %d tests, not 3 + 7 — the dev-host target was declared "
+        "and then never executed by any tier, which is worse than not declaring "
+        "it\n%s" % (collected(both), both.stdout)
+    )
+
+
+def test_the_activation_order_suite_is_declared_DEV_HOST_and_not_hermetic():
+    """🔴 THE ONE ENTRY, and where it must NOT be.
+
+    scripts/tests-devhost evaluates the flake with `nix eval --impure`. The nix
+    build sandbox has a `nix` binary with `nix-command` disabled and none of the
+    flake's inputs, so moving this into HERMETIC_TARGETS reds the merge gate —
+    and "fixing" that with an environment-conditional skip is the shape
+    run-tests.sh's EXPECTED_SKIPS block records REMOVING twice.
+    """
+    assert "scripts/tests-devhost" in _devhost_targets(), (
+        "the activation-order suite is no longer a dev-host target. If it moved "
+        "to HERMETIC_TARGETS it cannot evaluate the flake in the sandbox; if it "
+        "was dropped entirely, ZERO steps in the delete/relink window is once "
+        "again pinned only by a text match on nix/home.nix. Dev-host list: %s"
+        % _devhost_targets())
+    assert "scripts/tests-devhost" not in _hermetic_targets(), (
+        "scripts/tests-devhost is in the HERMETIC list too — it will red the "
+        "nix-sandbox gate that CI runs")

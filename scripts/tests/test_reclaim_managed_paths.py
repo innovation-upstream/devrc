@@ -341,13 +341,39 @@ def test_an_unknown_flag_is_a_usage_error_not_a_silent_full_run(tmp_path):
 
 
 # --- the seam with home-manager activation ---------------------------------- #
-def test_the_activation_entry_runs_immediately_before_linkGeneration():
-    """🔴 A SEAM, AND THE ONLY THING THAT MAKES rc 19 SELF-CLEARING. drift-check
+def test_the_activation_entry_DECLARES_entryBetween_installPackages_and_linkGeneration():
+    """🔴 THIS TEST READS `nix/home.nix` AS TEXT. It pins the SPELLING.
+
+    Say so first, because the sentence that used to be here — repeated in
+    nix/home.nix's comment and in the commit message — claimed it "reads the
+    BUILT script, not this expression". It never has: the body below is
+    `HOME_NIX.read_text()` and a regex. That one false claim is what left the
+    zero-steps-in-the-window property pinned by NOTHING, because a text match
+    survives both of the ways the property actually breaks:
+      * a NEW devrc activation entry sorting into the window — this entry's
+        spelling is untouched, so this test stays green;
+      * home-manager RENAMING `installPackages` or `linkGeneration` — topoSort
+        silently IGNORES an unknown name in `before`/`after` (modules/lib/dag.nix)
+        instead of erroring, so the bound is dropped while this file still spells
+        the name that no longer exists, and this test stays green.
+
+    The property itself is measured in
+    `scripts/tests-devhost/test_activation_order.py`, which evaluates the real
+    DAG through home-manager's own `lib.dag.topoSort`. It cannot run in the nix
+    build sandbox (no `nix-command`, no flake inputs), so it is a DEV-HOST target
+    — `run-tests.sh --set all`, which is every push. This one stays because it is
+    free, runs in both tiers, and names the exact expression a reader must edit;
+    it just no longer claims to be the other one.
+
+    🔴 A SEAM, AND THE ONLY THING THAT MAKES rc 19 SELF-CLEARING. drift-check
     rc 19 is not wired to systemd's SuccessExitStatus, which is only defensible
-    because an ordinary `home-manager switch` repairs the finding. That claim is
-    false the moment the activation entry stops calling this script, stops
-    passing --apply, or moves away from linkGeneration — none of which any test
-    of either file alone would notice.
+    because an ordinary `home-manager switch` repairs the finding — and, since
+    the reorder, only when that switch gets PAST `installPackages`, which is
+    `nix-env --set` and which this repo's memory records failing outright on an
+    imperative-profile conflict. The claim is also false the moment the
+    activation entry stops calling this script, stops passing --apply, or moves
+    away from linkGeneration — none of which any test of either file alone would
+    notice.
 
     🔴 AND THE PLACEMENT IS ITSELF THE SAFETY PROPERTY. Between this script's
     `rm` and linkGeneration's `ln`, the reclaimed files exist NOWHERE. Every
@@ -368,7 +394,8 @@ def test_the_activation_entry_runs_immediately_before_linkGeneration():
     the sentence is true of them and false of this one.
 
     Measured on the BUILT activation script (`nix build
-    .#homeConfigurations.zach.activationPackage`, then read `activate`):
+    .#homeConfigurations.zach.activationPackage`, then read `activate`) — a
+    HAND measurement, recorded here as history; nothing in this test re-takes it:
       * old ordering — reclaimManagedPaths 268, checkLinkTargets 279,
         linkGeneration 513, with `checkNewGenCollision || exit 1`, writeBoundary,
         browserBridgeExtension, checkFilesChanged and installPackages inside the
@@ -376,6 +403,7 @@ def test_the_activation_entry_runs_immediately_before_linkGeneration():
         records failing outright on an imperative-profile conflict.
       * new ordering — installPackages 472, reclaimManagedPaths 502,
         linkGeneration 513, with ZERO activation steps in between.
+    The re-taking is scripts/tests-devhost/test_activation_order.py's job.
 
     🔴 entryBetween PINS BOTH ENDS, and that is not belt-and-braces.
     `entryBefore ["linkGeneration"]` alone gives the entry no lower bound, and
