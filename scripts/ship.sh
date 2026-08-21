@@ -220,9 +220,11 @@
 #                     it has already spent its budget, so a superseded script
 #                     will refuse (rc 20) instead of picking up the new logic.
 #
-# 🔴 EVERYTHING BELOW IS ONE BRACE GROUP, closed on the final line. See
-# SELF-SUPERSESSION above: this file rewrites itself mid-run, and bash re-reads a
-# script from a byte offset, so an unwrapped body gets spliced or truncated.
+# 🔴 EVERYTHING BELOW IS ONE BRACE GROUP, closed on the final line, so bash
+# parses this file to EOF before running any of it. See SELF-SUPERSESSION above
+# for what it does and does NOT defend against: an IN-PLACE writer splices or
+# truncates a running script (measured, 45 of 45 offsets); `git` does not,
+# because it unlinks and recreates. Latent class, closed cheaply.
 {
 set -uo pipefail
 
