@@ -72,6 +72,15 @@
 #   first for months while its entire ~/.claude/skills/ dangled. Reported per
 #   host with the count of what was EXAMINED, never a bare "0 dangling".
 #
+#   CURRENCY — and every path that resolves must serve the content the REPO is
+#   at (verify_managed_currency, rc 13). The resolution half reads the manifest
+#   out of the host's own active generation, so its reference point moves with
+#   the host: a machine on a three-week-old generation has a three-week-old
+#   manifest whose links all resolve, and it passes green. Measured 2026-08-19 —
+#   the workbench served the pre-#611 ~/.claude/RULES.md while ship printed
+#   "488 checked, 0 dangling, 0 absent" and "✅ VERIFIED … + switched". Three
+#   questions, three exit codes, none of them a substitute for another.
+#
 # Skips are per-host and non-fatal to the run: if one host cannot fast-forward,
 # it is reported with the blocking files named and the OTHER host is still
 # converged.
@@ -94,6 +103,11 @@
 #      host do not resolve there (dangling/absent), or the manifest listing them
 #      could not be read, in which case NOTHING was examined and the run proves
 #      nothing about that host. Both spellings are RED on purpose.
+#   13 post-switch CURRENCY check failed — the managed paths RESOLVE (12 passed)
+#      but their content is an OLDER version of the repo source: this host is
+#      serving a stale home-manager generation. Deliberately distinct from 12,
+#      because the operator action is different — 12 is a repair, 13 is a
+#      re-switch. Also RED when nothing comparable was examined.
 #
 # Usage:
 #   scripts/ship.sh              # converge local host + the other (remote) host
@@ -327,10 +341,21 @@ ma_manifest() {
 # checkout whose node_modules is full of pnpm symlinks; the manifest simply
 # never mentions it).
 #
-# WHAT IT CANNOT SEE, so nobody reads more into a green than is there: a managed
-# path REPLACED by a real file of the same name resolves fine and is not
-# reported. This answers "does every managed path resolve", not "is every
-# managed path the store link nix intended".
+# WHAT IT CANNOT SEE, so nobody reads more into a green than is there. This
+# answers ONE question — "does every managed path resolve" — and the blind spots
+# are NOT limited to the first one, which is how this paragraph used to read:
+#   * a managed path REPLACED by a real file of the same name resolves fine and
+#     is not reported. (Live on the workbench 2026-08-20: 19 of the 20 entries
+#     under ~/.config/opencode/commands/ were regular files, not store links.)
+#   * 🔴 STALENESS is structurally invisible. Every path here — the manifest AND
+#     the links it lists — comes from THIS host'"'"'s CURRENTLY-ACTIVE generation, so
+#     the reference point MOVES WITH THE HOST. A machine sitting on a three-week
+#     -old generation has a three-week-old manifest whose links all resolve, and
+#     passes with a perfect green. Measured 2026-08-19: the workbench served the
+#     pre-#611 ~/.claude/RULES.md while this printed "488 checked, 0 dangling, 0
+#     absent". It asks "is this host consistent WITH ITSELF", never "is this host
+#     running what origin/main says it should" — that is verify_managed_currency
+#     (rc 13) below, which is why both run and neither replaces the other.
 #
 # 🔴 EVERY exit from here that did not examine files is RED, never a quiet pass.
 # "0 dangling" out of 0 examined is precisely the reassuring zero that let this
@@ -409,6 +434,200 @@ verify_managed_artifacts() {
   echo "[$host]   a link into ANOTHER host store path means something copied this path"
   echo "[$host]   between hosts AFTER the switch — home-manager must be the only writer."
   echo "[$host]   repair on that host:  home-manager switch --flake $repo --impure"
+  return 1
+}
+
+# verify_managed_currency — assert that what this host is SERVING is what the
+# repo currently SAYS, not merely that it is internally consistent. Returns 0/1;
+# prints its own line. This is the second, independent half of the consumer
+# check and it exists because the first one CANNOT see the following:
+#
+# MEASURED 2026-08-19. The workbench served the pre-#611 ~/.claude/RULES.md
+# (store path k1001c6...) while the repo working tree sat at origin/main with the
+# new content, and verify_managed_artifacts printed "488 checked, 0 dangling, 0
+# absent" — a perfect green — because every path it consults, manifest included,
+# is read out of the hosts OWN currently-active generation. An old generation is
+# perfectly self-consistent. "Resolves" and "is current" are different questions
+# and they get different exit codes (12 vs 13) because they are different
+# operator actions: one is a repair, the other is a re-switch.
+#
+# HOW, without a name mapping. Comparing a deployed path to "its" repo source
+# would need a manifest-path -> repo-path table, and every such table is a
+# hardcoded spelling that rots. Instead the comparison is by CONTENT, using git
+# as the oracle, which needs no table at all:
+#   * a home.file deployed verbatim from a repo file has BYTE-IDENTICAL content,
+#     so its git blob id equals that of some file in the working tree -> CURRENT;
+#   * if the blob is not in the working tree but IS in this repos object store,
+#     the host is serving a HISTORICAL version of a repo file -> STALE. After the
+#     `git fetch` above, everything that has ever been on main is reachable here;
+#   * if the blob is unknown to the repo entirely, the artifact was GENERATED, not
+#     copied (the nvim/zsh/systemd/i3 files home-manager renders itself, the
+#     opencode AGENTS.md and generated commands) -> NOT REPO-SOURCED, excluded,
+#     because it carries no evidence either way. Measured on the workbench:
+#     347 repo-sourced, 122 generated, 16 out-of-store, 3 dirs, of 488.
+# Structural, exactly like the resolution check above: nothing is spelled, so the
+# same routine covers skills/, hooks/, the opencode mirrors and any home.file
+# target added tomorrow.
+#
+# 🔴 mkOutOfStoreSymlink TARGETS ARE EXCLUDED, and counted separately. Those
+# resolve BACK INTO the repo working tree (the browser + dl-router skills, the
+# close-the-loop ledger), so comparing them against the repo source is vacuously
+# true — they can NEVER be stale. Counting them would inflate the examined number
+# with checks incapable of detecting anything, which is the same lie as a bare
+# "0 stale". The arbiter is where `readlink -f` terminates: inside the repo ->
+# vacuous, anywhere else -> real evidence. (claude/RULES.md, "readlink is the
+# arbiter".) The EXAMINED number printed is repo-sourced only, and 0 of those is
+# RED, never a quiet pass.
+#
+# 🔴 GNU-only flags are banned here for the same measured reason as above: this
+# routine runs over ssh on the laptop, where `find` is a BusyBox applet. Only
+# git, find, grep, sort, cut, wc and readlink -f are used, no -printf, no stat
+# format, no sha256sum (git hash-object is the digest on BOTH sides, so the two
+# can never disagree about how bytes are hashed).
+verify_managed_currency() {
+  # 🔴 A PRECONDITION, not a verification guard, and deliberately labelled as
+  # such: it is UNREACHABLE while verify_managed_artifacts runs first and exits
+  # 12 on the same condition, so it is NOT tested and must not be counted as
+  # coverage. It stays because an empty $mc_hf would make the walk below read
+  # `find "/" -mindepth 1` and traverse the entire filesystem.
+  mc_hf=$(ma_manifest)
+  if [ -z "$mc_hf" ]; then
+    echo "[$host] ❌ CURRENCY NOT CHECKED — cannot locate the home-manager file manifest."
+    echo "[$host]   0 artifacts were examined, so this run proves NOTHING about currency."
+    return 1
+  fi
+  mc_repo=$(readlink -f "$repo" 2>/dev/null || echo "$repo")
+
+  mc_list=$(mktemp); mc_rels=$(mktemp); mc_paths=$(mktemp)
+  mc_vacuous=0; mc_dirs=0
+  find "$mc_hf/" -mindepth 1 ! -type d > "$mc_list" 2>/dev/null
+  while IFS= read -r mc_p; do
+    mc_rel="${mc_p#"$mc_hf/"}"
+    [ -n "$mc_rel" ] || continue
+    # A leading slash means find(1) changed its output shape. rc 12 OWNS that
+    # diagnosis and has already exited on it, so this is a skip, not a second
+    # guard — an unreachable duplicate would be untested code claiming coverage.
+    # If it ever did run, dropping the entries lands on the zero-examined guard
+    # below, which is red.
+    case "$mc_rel" in
+      /*) continue ;;
+    esac
+    mc_t="$HOME/$mc_rel"
+    # Non-resolving paths are rc 12s job, not ours; it runs first and is fatal.
+    [ -e "$mc_t" ] || continue
+    if [ -d "$mc_t/" ]; then mc_dirs=$((mc_dirs + 1)); continue; fi
+    mc_r=$(readlink -f "$mc_t" 2>/dev/null || echo "")
+    case "$mc_r" in
+      "$mc_repo"/*) mc_vacuous=$((mc_vacuous + 1)); continue ;;
+    esac
+    printf "%s\n" "$mc_rel" >> "$mc_rels"
+    printf "%s\n" "$mc_t"   >> "$mc_paths"
+  done < "$mc_list"
+  rm -f "$mc_list"
+
+  # --- digest both sides with the SAME function ------------------------------
+  mc_blobs=$(mktemp)
+  if [ -s "$mc_paths" ]; then
+    git -C "$repo" hash-object --stdin-paths < "$mc_paths" > "$mc_blobs" 2>/dev/null
+  fi
+  mc_np=$(wc -l < "$mc_paths"); mc_nb=$(wc -l < "$mc_blobs")
+  if [ "$mc_np" -ne "$mc_nb" ]; then
+    echo "[$host] ❌ CURRENCY NOT CHECKED — git hash-object returned $mc_nb digests for $mc_np paths."
+    echo "[$host]   the walk is unreliable, not clean; nothing about currency is proven."
+    rm -f "$mc_rels" "$mc_paths" "$mc_blobs"
+    return 1
+  fi
+
+  mc_tracked=$(mktemp); mc_srcpaths=$(mktemp); mc_srcblobs=$(mktemp)
+  git -C "$repo" ls-files > "$mc_tracked" 2>/dev/null
+  while IFS= read -r mc_f; do
+    [ -f "$repo/$mc_f" ] && printf "%s\n" "$repo/$mc_f"
+  done < "$mc_tracked" > "$mc_srcpaths"
+  if [ -s "$mc_srcpaths" ]; then
+    git -C "$repo" hash-object --stdin-paths < "$mc_srcpaths" 2>/dev/null | sort -u > "$mc_srcblobs"
+  fi
+  if [ ! -s "$mc_srcblobs" ]; then
+    echo "[$host] ❌ CURRENCY NOT CHECKED — read NO source files out of $repo."
+    echo "[$host]   with an empty reference set every artifact would look stale (or none would);"
+    echo "[$host]   either way the comparison is wired to nothing. Check git ls-files there."
+    rm -f "$mc_rels" "$mc_paths" "$mc_blobs" "$mc_tracked" "$mc_srcpaths" "$mc_srcblobs"
+    return 1
+  fi
+
+  # --- classify --------------------------------------------------------------
+  mc_pairs=$(mktemp); mc_uniq=$(mktemp); mc_cur=$(mktemp); mc_unk=$(mktemp)
+  mc_staleblobs=$(mktemp); mc_pat=$(mktemp); mc_rows=$(mktemp)
+  exec 9< "$mc_rels"
+  while IFS= read -r mc_b; do
+    IFS= read -r mc_one <&9 || mc_one=""
+    printf "%s %s\n" "$mc_b" "$mc_one"
+  done < "$mc_blobs" > "$mc_pairs"
+  exec 9<&-
+
+  sort -u "$mc_blobs" > "$mc_uniq"
+  : > "$mc_cur"
+  [ -s "$mc_uniq" ] && grep -Fxf "$mc_srcblobs" "$mc_uniq" > "$mc_cur"
+  if [ -s "$mc_cur" ]; then
+    grep -Fxvf "$mc_cur" "$mc_uniq" > "$mc_unk"
+  else
+    cat "$mc_uniq" > "$mc_unk"
+  fi
+  : > "$mc_staleblobs"
+  if [ -s "$mc_unk" ]; then
+    # "<sha> blob <size>" for a known object, "<sha> missing" otherwise.
+    git -C "$repo" cat-file --batch-check < "$mc_unk" 2>/dev/null \
+      | grep " blob " | cut -d" " -f1 > "$mc_staleblobs"
+  fi
+
+  # Anchored patterns (a blob id is pure hex, so it carries no regex metachars)
+  # so a 40-hex string inside a PATH can never be mistaken for a digest column.
+  mc_current=0
+  while IFS= read -r mc_b; do printf "^%s \n" "$mc_b"; done < "$mc_cur" > "$mc_pat"
+  [ -s "$mc_pat" ] && mc_current=$(grep -c -E -f "$mc_pat" "$mc_pairs")
+  mc_stale=0
+  while IFS= read -r mc_b; do printf "^%s \n" "$mc_b"; done < "$mc_staleblobs" > "$mc_pat"
+  : > "$mc_rows"
+  if [ -s "$mc_pat" ]; then
+    grep -E -f "$mc_pat" "$mc_pairs" > "$mc_rows"
+    mc_stale=$(wc -l < "$mc_rows")
+  fi
+  mc_sourced=$((mc_current + mc_stale))
+  mc_generated=$((mc_np - mc_sourced))
+  mc_gen=$(readlink -f "$mc_hf" 2>/dev/null || echo "$mc_hf")
+  rm -f "$mc_rels" "$mc_paths" "$mc_blobs" "$mc_tracked" "$mc_srcpaths" \
+        "$mc_srcblobs" "$mc_pairs" "$mc_uniq" "$mc_cur" "$mc_unk" \
+        "$mc_staleblobs" "$mc_pat"
+
+  # 🔴 The vacuous zero, in its currency spelling: no repo-sourced artifact means
+  # nothing comparable was looked at, whatever the other counters say.
+  if [ "$mc_sourced" = 0 ]; then
+    echo "[$host] ❌ CURRENCY NOT CHECKED — 0 repo-sourced artifacts examined"
+    echo "[$host]   ($mc_np resolved, $mc_generated not repo-sourced, $mc_vacuous out-of-store, $mc_dirs dirs)."
+    echo "[$host]   Nothing deployed here has content matching ANY file in $repo, so the"
+    echo "[$host]   comparison examined nothing. That is a broken probe, not a current host."
+    rm -f "$mc_rows"
+    return 1
+  fi
+
+  if [ "$mc_stale" = 0 ]; then
+    echo "[$host] ✅ managed artifacts CURRENT — $mc_sourced repo-sourced examined, 0 stale ($mc_generated not repo-sourced, $mc_vacuous out-of-store, $mc_dirs dirs)"
+    rm -f "$mc_rows"
+    return 0
+  fi
+
+  # Same counter shape on the failure line as on the success line, so one parser
+  # reads either and the examined count is never dropped from the bad case.
+  echo "[$host] ❌ MANAGED ARTIFACTS STALE — $mc_sourced repo-sourced examined, $mc_stale stale ($mc_generated not repo-sourced, $mc_vacuous out-of-store, $mc_dirs dirs)"
+  echo "[$host]   these resolve fine, but their CONTENT is an older version of a file in $repo:"
+  cut -d" " -f2- "$mc_rows" | head -12 | sed "s|^|[$host]     - |"
+  mc_more=$((mc_stale - 12))
+  [ "$mc_more" -gt 0 ] && echo "[$host]     ... and $mc_more more"
+  echo "[$host]   generation being served: $mc_gen"
+  echo "[$host]   repo HEAD: $(git -C "$repo" rev-parse --short HEAD 2>/dev/null)"
+  echo "[$host]   this host is running an OLD home-manager generation, or its switch did"
+  echo "[$host]   not take. It is NOT a broken link — rc 12 passed. Re-switch on that host:"
+  echo "[$host]     home-manager switch --flake $repo --impure"
+  rm -f "$mc_rows"
   return 1
 }
 
@@ -504,6 +723,12 @@ fi
 #    This is the step that looks at what the host actually has.
 verify_managed_artifacts || exit 12
 
+# 5b) Verify the CONSUMER is CURRENT. Step 5 answers "does every managed path
+#     resolve" against a manifest read out of THIS HOST S OWN generation, so an
+#     old generation is self-consistent and passes it. This is the only step
+#     whose reference point is the REPO rather than the host.
+verify_managed_currency || exit 13
+
 # 6) Verdict. Name the dirty state explicitly: converging a dirty tree is the
 #    NORMAL supported path, and home-manager builds from the WORKING TREE — so
 #    what got deployed is origin/main PLUS that WIP, not origin/main. Saying so
@@ -550,5 +775,6 @@ else
   echo "  rc6=host-unidentified"
   echo "  rc7=skipped:cannot-fast-forward(local changes in the way)  rc8=skipped:diverged(needs rebase)"
   echo "  rc9=switch-failed  rc11=verify-failed(git-state)  rc12=consumer-broken(managed artifacts do not resolve)"
+  echo "  rc13=consumer-stale(managed artifacts resolve but serve OLD content — re-switch that host)"
 fi
 exit "$rc"
