@@ -1,6 +1,6 @@
 ---
 name: clickup
-description: Interact with ClickUp tasks and documents - get task details, view comments, create and manage tasks, create and edit docs. Use when working with ClickUp task/doc URLs or IDs.
+description: "Read and act on ClickUp tickets and docs from the CLI: a task by URL or bare id, its comments and threads, status / assignee / due date / priority, my-tasks, workspace search, create tasks and subtasks, read and edit doc pages, attachments. Use for: a pasted app.clickup.com/t/ link or a bare ClickUp id, my ClickUp tickets, what ClickUp has assigned to me, comment on / update / close a ticket, mark it in progress, set a due date, a ClickUp doc or page. This is the EXTERNAL ClickUp workspace — the self-hosted approval UI and ITS Tasks are `clawgate`, the durable cross-repo board is `initiatives`, and the email action-items queue is `mailbox`."
 ---
 
 # ClickUp
