@@ -988,7 +988,7 @@ def conversation_key(msg: dict) -> str:
 # --------------------------------------------------------------------------- #
 def transmit_approved(auth, *, recipient: str, body: str, number: str,
                       poster=None, api_url: str | None = None,
-                      timeout: float = 20.0) -> dict:
+                      timeout: float = 20.0) -> dict | list:
     """POST an approved draft to the Signal API. Requires a `SendAuthorization`.
 
     🔴 `spend_authorization()` runs BEFORE anything touches the network, and it
