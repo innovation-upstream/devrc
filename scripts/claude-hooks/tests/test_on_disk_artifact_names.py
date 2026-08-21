@@ -131,6 +131,18 @@ def home(tmp_path, monkeypatch):
     h = tmp_path / "home"
     (h / ".claude").mkdir(parents=True)
     monkeypatch.setenv("HOME", str(h))
+    # 🔴 $HOME must be the ONLY thing deciding these paths, or the walk below finds
+    # nothing and every whole-path pin in this file passes on an empty set == an
+    # empty set. `search-tool-nudge.py` takes an env override for its cache root
+    # (`SEARCH_TOOL_NUDGE_CACHE_DIR`) and `scripts/run-tests.sh` GUARD 9 exports one
+    # for every target, so under the gate that override — not this fixture — would
+    # decide where the state landed.
+    #
+    # Removing it is also the PRODUCTION-DEFAULT proof: the assertions below are the
+    # only place that exercises the unset-variable path, which is the path both hosts
+    # actually run. `test_the_search_tool_nudge_joins_session_and_agent_with_an_AT_SIGN`
+    # is red if that default ever stops resolving to `$HOME/.cache/…`.
+    monkeypatch.delenv("SEARCH_TOOL_NUDGE_CACHE_DIR", raising=False)
     return h
 
 

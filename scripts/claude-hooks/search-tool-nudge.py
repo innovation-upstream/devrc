@@ -39,7 +39,46 @@ Fail-open: any error -> exit 0 silently; it must never break the Bash tool.
 import sys, json, os, re, shlex, glob
 
 HOME = os.path.expanduser("~")
-CACHE_DIR = f"{HOME}/.cache/claude-search-tool-nudge"
+
+# 🔴 THE CACHE ROOT IS OVERRIDABLE, AND THAT IS A TEST-ISOLATION GUARD, NOT A
+# CONVENIENCE. A fixed path under $HOME is SHARED BY EVERY CONCURRENT PROCESS ON THE
+# BOX, and this hook's own suite asserts things that are only true of a root nobody
+# else is writing: "exactly one nudge across 12 parallel invocations" and "no test
+# state leaks into the next run". Measured 2026-08-20, with three to four gate runs
+# in flight at once, both went red inside the gate runner's OWN positive controls —
+#   concurrency: exactly one nudge across 12 parallel invocations: got 0 want 1
+#   no test state leaks into the next run: got ['test-search-nudge-nul-byte-…'] want []
+# — because a sibling run had already claimed the same session id, or created its
+# state dir between this run's cleanup and its leak check. Neither failure was about
+# the tree under test; both were reported as a red gate against whatever PR happened
+# to be in flight, twice.
+#
+# So: `scripts/run-tests.sh` (GUARD 9) points this at a per-run temp dir, exactly as
+# GUARD 8 does for ACTIVITY_SPOOL_DIR, and the hook must READ that variable or the
+# export governs nothing. The seam — runner exports it, hook honours it, and both
+# spell it the same — is pinned by `scripts/tests/test_search_nudge_state_isolation.py`.
+#
+# 🔴 Parsed DEFENSIVELY, at import time, outside main()'s try — the same constraint
+# `_scan_cap` below carries: an exception here escapes as a non-zero exit with a
+# traceback on EVERY Bash call in the session, which the module docstring promises
+# never happens. A RELATIVE value is rejected rather than honoured: a hook process
+# inherits whatever cwd the Bash call ran in, so a relative root would scatter state
+# across directories and silently break the dedupe this hook is built on.
+CACHE_DIR_ENV = "SEARCH_TOOL_NUDGE_CACHE_DIR"
+
+
+def _cache_dir(default):
+    try:
+        raw = os.environ.get(CACHE_DIR_ENV)
+        return raw if raw and os.path.isabs(raw) else default
+    except Exception:
+        return default
+
+
+# With the variable unset this is byte-identical to what it has always been — the
+# production path on both hosts, and the one the on-disk artifact-name registry
+# (`tests/test_on_disk_artifact_names.py`) pins against a throwaway $HOME.
+CACHE_DIR = _cache_dir(f"{HOME}/.cache/claude-search-tool-nudge")
 
 # Content-search binaries: they read file *contents*, so the native answer is Grep.
 GREP_BINS = {"grep", "egrep", "fgrep", "rgrep", "ggrep"}

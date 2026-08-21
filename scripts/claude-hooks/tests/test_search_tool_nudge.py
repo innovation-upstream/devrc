@@ -22,6 +22,34 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 HOOK = os.path.join(HERE, "..", "search-tool-nudge.py")
 HOME = os.path.expanduser("~")
 
+# --------------------------------------------------------------------------- #
+# 🔴 STATE ISOLATION — BEFORE the hook is imported, because it resolves its cache
+# root at IMPORT time into a module constant.
+#
+# This file is a CONCURRENCY suite. It asserts "exactly one nudge across 12
+# parallel invocations" for a session id it owns and "no test state leaks into the
+# next run" for a prefix it cleans — and neither is true of a directory another
+# process is writing. Against the old hardcoded `$HOME/.cache/…` root that is
+# exactly what happened: measured 2026-08-20 with three to four gate runs in
+# flight, this file went red twice on those two checks, inside the gate runner's
+# own positive controls, and the FALSE RED was attributed to an unrelated PR.
+#
+# `scripts/run-tests.sh` (GUARD 9) exports a per-run root, and that value is what
+# is honoured when present. The mkdtemp below is for the OTHER way this file runs —
+# by hand, per the docstring — so a hand run is isolated too rather than isolated
+# only under the gate. os.environ is set (not just a local) because every check
+# here fires the hook as a SUBPROCESS, which inherits it.
+#
+# Deliberately NOT the seam pin: with this fallback in place, a runner that stopped
+# exporting the variable would leave this file green. That claim belongs to
+# `scripts/tests/test_search_nudge_state_isolation.py`, which pins the runner's
+# export, the hook's read, and that the two spell the same name.
+# --------------------------------------------------------------------------- #
+_OWN_STATE_ROOT = None
+if not os.environ.get("SEARCH_TOOL_NUDGE_CACHE_DIR"):
+    _OWN_STATE_ROOT = tempfile.mkdtemp(prefix="search-tool-nudge-state-")
+    os.environ["SEARCH_TOOL_NUDGE_CACHE_DIR"] = _OWN_STATE_ROOT
+
 spec = importlib.util.spec_from_file_location("search_tool_nudge", HOOK)
 assert spec and spec.loader
 mod = importlib.util.module_from_spec(spec)
@@ -161,7 +189,17 @@ def run(payload):
     return p.returncode, p.stdout.strip()
 
 
-STATE_ROOT = os.path.join(HOME, ".cache", "claude-search-tool-nudge", "s")
+# 🔴 Taken from the HOOK, never recomputed. A second copy of the layout agrees with
+# the first until the day one side moves, and the glob below would then clean and
+# inspect a directory the hook does not use — every "no state leaked" check reading
+# a reassuring zero from a counter wired to nothing.
+STATE_ROOT = mod.STATE_ROOT
+# ...and the isolation the header set up must actually be in force. If this suite is
+# reading a root shared with the whole box, its concurrency and leak checks are not
+# measuring the hook.
+check("this suite's state root is the isolated one, not $HOME's",
+      STATE_ROOT.startswith(os.environ["SEARCH_TOOL_NUDGE_CACHE_DIR"] + os.sep)
+      and not STATE_ROOT.startswith(os.path.join(HOME, ".cache")), True)
 # Every test session id starts with one of these, and the suite wipes their state dirs
 # both before and after. 🔴 This suite MUST be idempotent: state that survives a run
 # makes the NEXT run fail, which during a mutation sweep reads as "mutant killed" for
@@ -810,6 +848,10 @@ leaked = sorted(os.path.basename(p) for pref in TEST_SID_PREFIXES
 # from a harness that was simply dirty. Cheap to assert, so assert it.
 check("no test state leaks into the next run", leaked, [])
 shutil.rmtree(TMP, ignore_errors=True)
+# Only the root THIS file created — never the one the runner handed down, which is
+# the runner's to remove and may be shared with the other hook tests in the run.
+if _OWN_STATE_ROOT:
+    shutil.rmtree(_OWN_STATE_ROOT, ignore_errors=True)
 
 MIN_CHECKS = 160  # floor: a suite that silently shrinks is a vacuous green
 if fails:

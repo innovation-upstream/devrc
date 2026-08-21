@@ -1596,6 +1596,77 @@ echo "run-tests: activity telemetry isolated for this run (GUARD 8)"
 echo "  ACTIVITY_SPOOL_DIR=$ACTIVITY_SPOOL_DIR"
 echo "  fallback trap      =$SPOOL_TRAP_LOG"
 
+# --- GUARD 9: NO RUN MAY SHARE THE SEARCH-NUDGE STATE ROOT WITH ANOTHER RUN ----
+# 🔴 THE THIRD ENFORCEMENT POINT, attached to the same line for the same reason.
+#
+# `scripts/claude-hooks/search-tool-nudge.py` keeps its once-per-kind-per-session
+# markers under a cache root that used to be hardcoded to
+# `$HOME/.cache/claude-search-tool-nudge` — a FIXED path, shared by every process
+# on the box. Its suite is a concurrency suite: it asserts "exactly one nudge
+# across 12 parallel invocations" for a session id it owns, and "no test state
+# leaks into the next run" for a prefix it cleans. Neither claim can be true of a
+# directory a SIBLING GATE RUN is writing at the same time.
+#
+# Measured 2026-08-20 with three to four full gates in flight (load 9-13), twice
+# in one day, same file, two different symptoms:
+#     concurrency: exactly one nudge across 12 parallel invocations: got 0 want 1
+#     no test state leaks into the next run: got ['test-search-nudge-nul-byte-…'] want []
+# Both surfaced NESTED inside this runner's own meta-tests, so the gate's positive
+# controls inherited the contamination and the whole run reported FAIL — attributed
+# to an unrelated PR. That is the specific cost: not a flaky test, a FALSE RED with
+# someone else's name on it.
+#
+# So the root is a per-run temp dir, exported here rather than set in a conftest —
+# the suite that needs it is a HOOK_TEST, which no conftest can ever reach.
+#
+# 🔴 THE OVERRIDE IS UNCONDITIONAL, INCLUDING OVER AN AMBIENT VALUE, for GUARD 8's
+# reason: a test runner must never write into the operator's live nudge state, and
+# an inherited value is likelier to be an outer gate run's than a deliberate intent.
+#
+# HONEST SCOPE. This closes the shared-root hazard. It does NOT trap a test that
+# takes the variable AWAY (`env -u`, a hand-built subprocess env) — that drops to
+# the `$HOME` default, and moving HOME for the whole run is a far bigger blast
+# radius than the hazard. What IS armed below is the seam: the hook is asked where
+# its state root resolves to, and a value outside this run's dir stops the run,
+# because an export the hook does not read governs nothing while looking like it
+# does. The name is spelled on both sides of a process boundary, so it is pinned
+# both ways by `scripts/tests/test_search_nudge_state_isolation.py`.
+NUDGE_DIR="$(mktemp -d)"
+NUDGE_STATE="$NUDGE_DIR/search-tool-nudge"
+if ! mkdir -p "$NUDGE_STATE"; then
+  echo "run-tests: FATAL — could not create the search-nudge state dir under" >&2
+  echo "  $NUDGE_DIR. Refusing to run: without it the hook's concurrency suite" >&2
+  echo "  shares ~/.cache/claude-search-tool-nudge with every other run on this" >&2
+  echo "  box and reports a FALSE RED against whatever PR is in flight." >&2
+  exit 2
+fi
+export SEARCH_TOOL_NUDGE_CACHE_DIR="$NUDGE_STATE"
+
+# Where the state root actually lands, asked of the HOOK ITSELF — never restated
+# here. A second copy of the `<root>/s` layout would agree with this one until the
+# day the hook stopped reading the variable, and the export would then isolate
+# nothing while this line still printed a reassuring path.
+NUDGE_ROOT_RESOLVED="$(python -c 'import importlib.util,sys
+p=sys.argv[1]
+s=importlib.util.spec_from_file_location("_stn",p)
+m=importlib.util.module_from_spec(s); s.loader.exec_module(m)
+print(m.STATE_ROOT)' "$ROOT/scripts/claude-hooks/search-tool-nudge.py" 2>/dev/null)"
+case "$NUDGE_ROOT_RESOLVED" in
+  "$NUDGE_STATE"/*) : ;;
+  *)
+    echo "run-tests: FATAL — search-tool-nudge does not resolve its state root inside" >&2
+    echo "  this run's dir. Resolved: '${NUDGE_ROOT_RESOLVED:-<could not resolve>}'" >&2
+    echo "  Expected something under $NUDGE_STATE. SEARCH_TOOL_NUDGE_CACHE_DIR no" >&2
+    echo "  longer governs that hook, so its concurrency suite would share the real" >&2
+    echo "  ~/.cache/claude-search-tool-nudge with every concurrent run on this box." >&2
+    exit 2
+    ;;
+esac
+
+echo "run-tests: search-tool-nudge state isolated for this run (GUARD 9)"
+echo "  SEARCH_TOOL_NUDGE_CACHE_DIR=$SEARCH_TOOL_NUDGE_CACHE_DIR"
+echo "  hook state root    =$NUDGE_ROOT_RESOLVED"
+
 # "<target>|<sess-from>|<sess-to>|<trap-from>|<trap-to>|<iso-from>|<iso-to>" —
 # three line ranges per target, so every count below is attributed to the target
 # that produced it rather than to the run as a whole.
@@ -2150,6 +2221,10 @@ if [ "${#spool_problems[@]}" -gt 0 ]; then
   fail=1
 fi
 rm -rf "$SPOOL_DIR"
+# GUARD 9's per-run state root. Nothing accounts it per target — its whole job is
+# to be a root NO OTHER RUN can see, which the FATAL arming check above proved
+# before any target ran.
+rm -rf "$NUDGE_DIR"
 
 # GUARD 6. One writer, fed the same value `exit` is about to take, so the
 # printed verdict and the process status cannot disagree — including through a
