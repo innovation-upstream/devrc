@@ -273,6 +273,31 @@ Ground case (2026-08-01): four consecutive "0 submits" results were treated as e
 held; they only became evidence once one clean run submitted **exactly 1** through the same
 counter.
 
+### The control that shared the untrusted step (2026-08-21)
+
+Probing a web UI's search through a browser tool, the step that TYPED the query intermittently
+no-opped. The page kept rendering the PREVIOUS query's results, so every read came back
+well-formed and plausible — there is no error state for "your keystrokes never landed".
+
+A positive control query was run to settle it, and it went through **the same untyped step**.
+When it too came back with the wrong results that was read as *"the site's search is broken"*
+rather than *"my input never landed"*. Three confident false conclusions followed, one of which
+was nearly filed upstream against a real issue.
+
+The control was not a control: it sampled the same unknown a second time. A RED result from it
+is consistent with both hypotheses, so it discriminates nothing — which is a different defect
+from the negative/positive controls above, where the question is whether the instrument can go
+red or observe the thing AT ALL.
+
+The cure is to make the control independent of the suspect step, or to verify that step in the
+same read as the result: read the input element's `value` back and assert it equals the query,
+in the same DOM read that harvests the results. Then a mismatch is attributed to the input, not
+to the system under test.
+
+Generalises past browsers: any control assembled out of the instrument under suspicion — the
+same wrapper, the same fixture loader, the same deploy step, the same shell — inherits its
+failure modes wholesale.
+
 ## parsing-tool-output
 *Supports: 🔴 "Validate the INSTRUMENT before you read its verdict." (parsing an output format you did not pin).*
 
@@ -453,7 +478,8 @@ but identity was simply the consequence of their being **one file**, and acting 
 either an unnecessary rebuild or, worse, treating a live edit as inert.
 
 ## zsh-unbraced-var
-*Supports: 🔴 "zsh's unbraced `$var` is NOT bash's — two traps." (Shell & Tooling).*
+*Supports: 🔴 "zsh is NOT bash — four traps, all returning a confident WRONG value with no
+error." (Shell & Tooling).*
 
 **(a) No word-splitting.** `for x in $SPACE_SEPARATED` loops **once** with the whole string as
 `$x`; a following `${x%%:*}`/`${x##*:}` then silently grabs the wrong field. Bit prod: a
@@ -492,6 +518,39 @@ line, so `some` and `phrase` become **filename filters**. Playwright matched no 
 `No tests found` and **exited 0** — zero tests run, reported as success. The generalisable half:
 a wrapper that answers "nothing to do" instead of erroring is how a green gets believed; make a
 zero-selection case a non-zero exit.
+
+**(d) Redirection: `MULTIOS` clones stdout onto the pipe (2026-08-20).** The canonical
+"stderr only, discard stdout" idiom does the OPPOSITE of its intent in zsh. Measured on the
+workbench:
+
+```
+zsh  -c 'printf "PAYLOAD\n" 2>&1 >/dev/null | cat'                    ->  PAYLOAD
+bash -c 'printf "PAYLOAD\n" 2>&1 >/dev/null | cat'                    ->  (nothing)
+zsh  -c 'unsetopt multios; printf "PAYLOAD\n" 2>&1 >/dev/null | cat'  ->  (nothing)
+```
+
+zsh's `MULTIOS` option duplicates stdout to *every* destination it has, the pipe included, so
+the consumer receives **stdout** — the exact stream the idiom exists to suppress. Nothing
+errors, and the payload that arrives looks entirely plausible.
+
+**What it cost, three times in one session.** A `--json` payload correctly on **stdout** was
+read through this idiom, reported as being on **stderr**, and a subagent was dispatched to fix
+a bug that did not exist. Twice more in the same session the two streams were merged with a
+plain `2>&1` and the advisory text that surfaced was reported as "polluting stdout" — it had
+been on stderr the whole time. So the failure class is not the idiom; it is **attributing
+output to the wrong stream**, and its output is a confident, wrong bug report about correct
+code.
+
+Reasoning about redirection order cannot settle it: `2>&1 >/dev/null` is genuinely
+"dup stderr to the current stdout, then move stdout" in both shells, and `MULTIOS` changes the
+answer without changing the text. Only separate destinations settle it.
+
+**The mechanical fix** is `scripts/run3`: it runs the command with
+`"$@" >"$outf" 2>"$errf"` — two destinations, never `2>&1` — prints the exit code and each
+stream's byte count and path, and exits with the command's own status.
+`scripts/tests/test_run3.py` pins it, including a mutation control (merge the streams inside
+run3, watch 9 tests go red) and a positive control that asserts the MULTIOS behaviour above is
+still live in this environment.
 
 ## config-blind-suite
 *Supports: 🔴 "A test that skips itself, or passes by accident of the environment, is worse than

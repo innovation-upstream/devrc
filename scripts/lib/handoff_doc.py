@@ -196,6 +196,85 @@ NO_ADVANCE_SENTINELS: frozenset[str] = frozenset(
 _H2 = re.compile(r"^##\s+\S")
 _FENCE = re.compile(r"^(`{3,}|~{3,})")
 
+# YAML front matter, and ONLY at the very start of the file: `---` on line 1,
+# then everything through the next `---` line. Same strictness as
+# `clawgate_task_field` in scripts/lib/clawgate_handoff.sh — a `---` later in a
+# markdown doc is a horizontal rule, not a front-matter opener.
+#
+# ⚠ ONE KNOWN DIVERGENCE from that shell reader, recorded rather than fixed:
+# the `\r?\n` after the closing `---` means a document that ENDS at the closing
+# delimiter with no trailing newline is front matter to the shell and preamble
+# here. That document has no body at all, so the only consumer that can tell —
+# the merge — reports it through the preamble-drop warning either way. Fix it if
+# a document like that ever turns up; do not "tidy" it without one.
+_FRONT_MATTER = re.compile(r"\A---\r?\n.*?^---\r?\n", re.DOTALL | re.MULTILINE)
+
+
+def split_front_matter(text: str) -> tuple[str, str]:
+    """(front_matter, rest) — and `front_matter + rest == text` exactly.
+
+    🔴 WHY THE MERGE HAS TO KNOW ABOUT THIS. Front matter is not a section, so
+    it lands in `split_sections`'s PREAMBLE, and `merge` takes the update's
+    preamble whenever it has one. That means a delta file whose first line is
+    prose rather than a `## ` heading SILENTLY DELETED the doc's front matter —
+    including the `clawgate-task:` field /resume reconciles against, which then
+    reads as "this doc names no task" rather than as data loss.
+
+    The field is meant to be DURABLE, so it survives a merge structurally
+    rather than by everyone remembering to write their delta heading-first.
+    """
+    m = _FRONT_MATTER.match(text)
+    return (m.group(0), text[m.end():]) if m else ("", text)
+
+
+#: 🔴 THE SAME SPELLING `CLAWGATE_FIELD_KEY` CARRIES IN
+#: `scripts/lib/clawgate_handoff.sh`. Two languages, one key — pinned by
+#: `test_the_two_languages_spell_the_key_identically`, because a rename on one
+#: side is silent on the other and turns the durable field into a body line.
+CLAWGATE_TASK_KEY = "clawgate-task"
+#: The reason string a dropped preamble `clawgate-task:` line is reported with.
+DURABLE_CLAWGATE = "clawgate task"
+
+
+def _dropped_preamble_task(
+    base_pre: str, out_pre: str, line_offset: int, label: str = "(preamble)"
+) -> list[DroppedDurable]:
+    """`clawgate-task:` lines a wholesale block replacement is about to delete.
+
+    Called for BOTH replaceable blocks — the front matter and the preamble — so
+    the two cannot drift apart: whichever one carried the field, losing it is
+    reported the same way, with an address the author can open.
+
+    🔴 THE HOLE THE FRONT-MATTER FIX DOES NOT COVER, found by a test written for
+    the seam rather than for either component. `split_front_matter` only sees a
+    block that is properly CLOSED; an unterminated one is preamble, and
+    `merge_report` replaces the whole preamble whenever the update brings its
+    own. So a writer who forgets the closing `---` gets the field deleted on the
+    next update — the exact silent loss this change exists to stop, one line
+    below where it was stopped.
+
+    Deliberately NARROW: only lines carrying this key, not `durable_reason` over
+    the whole preamble. A handoff preamble is normally `# Handoff: <topic> —
+    <date>`, which carries a DATE, so the general predicate would fire rule (f)
+    on every preamble-replacing update in the corpus — a warning on the ordinary
+    case, which rule (f)'s own header calls the failure mode to avoid.
+
+    WARNS, never refuses — same contract as the rest of rule (f).
+    """
+    kept = {" ".join(ln.split()) for ln in out_pre.splitlines() if ln.strip()}
+    out: list[DroppedDurable] = []
+    for idx, line in enumerate(base_pre.splitlines()):
+        if not line.strip().startswith(CLAWGATE_TASK_KEY + ":"):
+            continue
+        if " ".join(line.split()) in kept:
+            continue
+        out.append(
+            DroppedDurable(label, line_offset + idx + 1, line.rstrip(),
+                           DURABLE_CLAWGATE)
+        )
+    return out
+
+
 # --- rule (f): does this line look DURABLE? -----------------------------------
 #
 # 🔴 A FLOOR, NOT A CLASSIFIER, and every renderer of it says "look(s) DURABLE"
@@ -447,7 +526,14 @@ def merge_report(base_text: str, update_text: str) -> MergeReport:
     A section present in the base and absent from the update is left ALONE —
     an update is a delta, not a replacement document, so omitting a section
     never deletes it. A section present only in the update is added at the end.
+
+    FRONT MATTER IS CARRIED, not merged: the base's block survives unless the
+    update supplies one of its own (an explicit re-statement wins, so a session
+    that genuinely needs to change the recorded task can). See
+    `split_front_matter` for why this cannot be left to the preamble rule.
     """
+    base_fm, base_text = split_front_matter(base_text)
+    upd_fm, update_text = split_front_matter(update_text)
     base_pre, base_secs = split_sections(base_text)
     upd_pre, upd_secs = split_sections(update_text)
 
@@ -462,8 +548,30 @@ def merge_report(base_text: str, update_text: str) -> MergeReport:
             by_bucket.setdefault(bucket, i)
         by_heading.setdefault(_norm_heading(h), i)
 
-    body_starts = _body_start_lines(base_pre, base_secs)
+    # base_fm was stripped above and is still part of the file a reader opens —
+    # see _body_start_lines. Dropping it here silently shifts every rule (f)
+    # line number on any doc that records a clawgate task.
+    body_starts = _body_start_lines(base_pre, base_secs, base_fm)
     dropped: list[DroppedDurable] = []
+    # TWO WAYS THE FIELD LEAVES A DOCUMENT WITHOUT ANY SECTION BEING TOUCHED,
+    # and the same function reports both — the asymmetry between them was a real
+    # gap, not a design:
+    #
+    #  (a) the update brings its own FRONT MATTER, so `(upd_fm or base_fm)`
+    #      discards the base's. "An explicit one wins" is the intended rule and
+    #      stays — but a rule whose only statement is prose in a skill is not a
+    #      guard, and a delta can claim front matter by ACCIDENT: a `---` used as
+    #      a horizontal rule on line 1 with another `---` further down is a
+    #      well-formed block to `split_front_matter`. Offset 0 because front
+    #      matter starts at line 1 of the file.
+    #  (b) the update brings its own PREAMBLE, which is where an UNTERMINATED
+    #      block lives. Offset = the height of the real front matter above it.
+    if upd_fm and upd_fm != base_fm:
+        dropped.extend(_dropped_preamble_task(base_fm, upd_fm, 0, "(front matter)"))
+    if out_pre != base_pre:
+        dropped.extend(
+            _dropped_preamble_task(base_pre, out_pre, base_fm.count("\n"))
+        )
     buckets: list[tuple[str, str]] = []
 
     tail: list[list[str]] = []
@@ -489,7 +597,7 @@ def merge_report(base_text: str, update_text: str) -> MergeReport:
             tail.append([h, b])
             buckets.append((heading_text(h), BUCKET_NEW))
 
-    rendered = out_pre + "".join(h + b for h, b in out + tail)
+    rendered = (upd_fm or base_fm) + out_pre + "".join(h + b for h, b in out + tail)
     return MergeReport(
         text=rendered.rstrip("\n") + "\n",
         dropped=tuple(dropped),
@@ -497,16 +605,27 @@ def merge_report(base_text: str, update_text: str) -> MergeReport:
     )
 
 
-def _body_start_lines(pre: str, sections: list[list[str]]) -> list[int]:
+def _body_start_lines(
+    pre: str, sections: list[list[str]], front_matter: str = ""
+) -> list[int]:
     """1-based line number of each section BODY's first line in the base doc.
 
     Derived from the same lossless split the merge walks, so a line number can
     never name a line from a different section: `split_sections` guarantees
     `pre + "".join(h + b)` reproduces the document byte-for-byte, which makes
     counting newlines an exact address rather than an estimate.
+
+    🔴 `front_matter` IS PART OF THE FILE THE READER OPENS, so it counts, and it
+    is a SEPARATE argument because `merge_report` strips it off `base_text`
+    BEFORE `split_sections` ever sees it. Without it every rule (f) warning on a
+    doc carrying `clawgate-task:` names a line short by the height of that block
+    — and a line number is the whole value of that warning. Losslessness is a
+    property of `pre + "".join(h + b)` against the STRIPPED text, so nothing
+    else in the walk can notice the missing lines.
     """
     starts: list[int] = []
-    cur = pre.count("\n") + 1  # the first heading's own line number
+    # the first heading's own line number, in the WHOLE file
+    cur = front_matter.count("\n") + pre.count("\n") + 1
     for _h, b in sections:
         starts.append(cur + 1)
         cur = cur + 1 + b.count("\n")
@@ -626,6 +745,20 @@ def unified(base_text: str, merged_text: str, relpath: str) -> str:
 DROPPED_SHOWN_MAX = 6
 DROPPED_LINE_MAX = 140
 
+#: 🔴 The remedy for a dropped `clawgate-task:` — and it is the OPPOSITE of the
+#: standing one. That field is read ONLY from a block whose `---` is line 1, so
+#: "move it under an APPEND heading" would put it where nothing parses it and
+#: /resume would report the doc as naming no task at all.
+CLAWGATE_DROP_REMEDY = (
+    "  RESTORE IT AT LINE 1, in a closed `---` block — that is the only place\n"
+    "  /resume reads it from. Do NOT move it under a heading: a `clawgate-task:`\n"
+    "  line anywhere else is invisible to every reader, so the doc would report\n"
+    "  as naming no task at all.\n"
+    "  This is a WARNING, not a refusal. Dropping it on purpose (the work moved "
+    "to another task, or none) is a legitimate update — this only makes it a "
+    "decision rather than an accident."
+)
+
 DROPPED_REMEDY = (
     "  Move them under an APPEND heading (open investigations / findings / "
     "gotchas) or carry them forward in this update.\n"
@@ -653,19 +786,41 @@ def dropped_durable_report(dropped: typing.Sequence[DroppedDurable]) -> str:
     """
     if not dropped:
         return ""
-    head = (
-        f"🔴 This replace DROPS {len(dropped)} line(s) that look DURABLE "
-        f"(they sit under a REPLACE heading):"
-    )
-    rows = [
-        f"  {_clip(d.heading, 44)}:{d.line_no}: "
-        f"{_clip(d.line.strip(), DROPPED_LINE_MAX)}  [{d.reason}]"
-        for d in dropped[:DROPPED_SHOWN_MAX]
-    ]
-    elided = len(dropped) - len(rows)
-    if elided:
-        rows.append(f"  … and {elided} more not shown (read the diff below).")
-    return "\n".join([head, *rows, DROPPED_REMEDY])
+    # 🔴 THE FRONT-MATTER CLASS GETS ITS OWN HEADING AND ITS OWN REMEDY, because
+    # the standing one SILENTLY DISABLES THE FEATURE. `clawgate-task:` is only
+    # read out of a block whose `---` is line 1; an author who follows "move
+    # them under an APPEND heading" moves the field somewhere no reader parses,
+    # and /resume then prints `(no clawgate-task: field …)` — the exact silent
+    # disable this whole change exists to prevent, arrived at by obeying the
+    # tool. The ADDRESS was right either way; the label and the advice were not.
+    fm_rows = [d for d in dropped if d.reason == DURABLE_CLAWGATE]
+    other = [d for d in dropped if d.reason != DURABLE_CLAWGATE]
+    blocks: list[str] = []
+    if fm_rows:
+        blocks.append("\n".join([
+            f"🔴 This update DROPS the doc's recorded clawgate task "
+            f"({len(fm_rows)} line(s), from the front matter or preamble):",
+            *[f"  {_clip(d.heading, 44)}:{d.line_no}: "
+              f"{_clip(d.line.strip(), DROPPED_LINE_MAX)}  [{d.reason}]"
+              for d in fm_rows[:DROPPED_SHOWN_MAX]],
+            CLAWGATE_DROP_REMEDY,
+        ]))
+    if other:
+        rows = [
+            f"  {_clip(d.heading, 44)}:{d.line_no}: "
+            f"{_clip(d.line.strip(), DROPPED_LINE_MAX)}  [{d.reason}]"
+            for d in other[:DROPPED_SHOWN_MAX]
+        ]
+        elided = len(other) - len(rows)
+        if elided:
+            rows.append(f"  … and {elided} more not shown (read the diff below).")
+        blocks.append("\n".join([
+            f"🔴 This replace DROPS {len(other)} line(s) that look DURABLE "
+            f"(they sit under a REPLACE heading):",
+            *rows,
+            DROPPED_REMEDY,
+        ]))
+    return "\n".join(blocks)
 
 
 def _clip(text: str, limit: int) -> str:

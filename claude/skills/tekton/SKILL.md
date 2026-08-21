@@ -48,6 +48,27 @@ debugging, changing or copying a specific pipeline.
    operator CRs (force-remove finalizers — no controller left to run them), admission
    webhooks, CRDs, namespaces, and cluster RBAC.
 
+6. 🔴 **These pipelines are DETECTORS, not GATES — nothing can block a merge on them.**
+   `homelab-infra` is private on a plan where **branch protection AND rulesets both return
+   403** (`"Upgrade to GitHub Pro or make this repository public"`, on
+   `/branches/trunk/protection` and `/rulesets`), so a **required status check cannot be
+   configured at all**. Measured 2026-08-21 on four PRs: three were **merged BEFORE** their
+   `tekton/gitops-validate` status settled (#338 by 109 s, #339 by 110 s, #341 by 66 s).
+   So "it has a green check" and "it was validated before it landed" are different claims —
+   never write a comment asserting the second. Consequence worth acting on: the **trunk-push**
+   leg is the one that reliably observes anything, which makes the CEL path list in
+   `eventlistener.yaml` load-bearing rather than cosmetic — **when you add a leg reading a path
+   outside `clusters/**`, add that path to the filter in the SAME commit** (two legs were
+   missing from it as of #369).
+7. 🔴 **A PipelineRun executes the DEPLOYED Task, not the PR's version — so a PR that adds a
+   leg cannot exercise that leg.** The `Task` is a Flux-reconciled cluster object; only the
+   *scripts it runs* come from the PR checkout. Measured on #369: the PR's own green
+   `gitops-validate` ran an **11-step** Task with no `clickup-mirror` step, and the merge's own
+   trunk-push run did too (it fired before Flux reconciled). Verify a new leg by reading the
+   live object — `kubectl -n tekton-ci get task gitops-validate -o jsonpath='{range
+   .spec.steps[*]}{.name}{"\n"}{end}'` — and then watch the **first run after** the reconcile.
+   A green check on the PR that adds a leg is not evidence about the leg.
+
 ## What / where
 
 - **Tekton Operator v0.80.0** → Pipelines **1.12.2** / Triggers **0.36.0** / Dashboard

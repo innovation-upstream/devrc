@@ -16,11 +16,42 @@ reassuring answer here is a ZERO (no false positives):
 
 Run: python3 scripts/claude-hooks/tests/test_search_tool_nudge.py
 """
-import os, sys, glob, json, time, shutil, subprocess, tempfile, threading, importlib.util
+import os, sys, glob, json, time, shutil, subprocess, tempfile, threading, atexit, importlib.util
+
+# --------------------------------------------------------------------------- #
+# 🔴 HOME ISOLATION — must run BEFORE anything reads `~`, including the import
+# of the hook below.
+#
+# This suite GLOBS AND DELETES state directories, and it drives the hook as a
+# real subprocess a hundred-odd times. The hook resolves its CACHE_DIR from
+# `os.path.expanduser("~")`, which on POSIX is `os.environ["HOME"]` (verified:
+# posixpath.expanduser returns $HOME when set, and only falls back to the passwd
+# entry when it is absent). Pointed at the operator's real home that means:
+#
+#   * the suite deletes real `~/.cache/claude-search-tool-nudge/` entries, and
+#   * the LIVE search-tool-nudge hook — which fires on every Bash call of any
+#     Claude Code session running on this box, including the one running the
+#     gate — writes into the very state directory the suite is asserting on.
+#     Measured: the suite fails spuriously that way, and anyone running
+#     scripts/gate.sh from inside an active session hits it.
+#
+# So: one throwaway HOME, set before line-one of the constants below, exported
+# into `os.environ` so EVERY subprocess spawned from here inherits it. Every
+# spawn in this file either passes no `env=` (inherits `os.environ`) or builds
+# it as `dict(os.environ, …)`, so all of them carry it —
+# `scripts/tests/test_hook_suites_do_not_touch_the_inherited_home.py` pins that
+# structurally so a hand-built `env=` cannot quietly reintroduce the leak.
+# --------------------------------------------------------------------------- #
+TEST_HOME = tempfile.mkdtemp(prefix="search-tool-nudge-HOME-")
+os.environ["HOME"] = TEST_HOME
+atexit.register(shutil.rmtree, TEST_HOME, ignore_errors=True)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 HOOK = os.path.join(HERE, "..", "search-tool-nudge.py")
-HOME = os.path.expanduser("~")
+HOME = os.path.expanduser("~")  # == TEST_HOME; the hook resolves the same value
+assert HOME == TEST_HOME, (
+    "HOME redirection did not take effect (%r != %r) — every path below would "
+    "resolve into the operator's real home." % (HOME, TEST_HOME))
 
 spec = importlib.util.spec_from_file_location("search_tool_nudge", HOOK)
 assert spec and spec.loader
@@ -801,6 +832,20 @@ for i, bad_agent in enumerate((123, [], "../../etc", "a/b", "")):
     rc, out = run(payload)
     check("bad agent_id %r -> nudge unchanged" % (bad_agent,), (rc, bool(out)), (0, True))
 
+# --------------------------------------------------------------------------- #
+# 🔴 ISOLATION POSITIVE CONTROL — counted BEFORE the cleanup below wipes it.
+#
+# "the real home was untouched" is the same reassuring ZERO a suite that stopped
+# exercising the hook entirely would produce. So the pair is reported: N files
+# written under the throwaway HOME, 0 changes to the inherited one. The external
+# half lives in scripts/tests/test_hook_suites_do_not_touch_the_inherited_home.py
+# and PARSES the number printed at the bottom of this file, so a suite that
+# silently stopped writing state cannot pass it either.
+# --------------------------------------------------------------------------- #
+TEMP_HOME_FILES = sum(len(fs) for _, _, fs in os.walk(TEST_HOME))
+check("isolation positive control: the suite wrote state under the temp HOME",
+      TEMP_HOME_FILES > 0, True)
+
 clear_test_state()
 leaked = sorted(os.path.basename(p) for pref in TEST_SID_PREFIXES
                 for p in glob.glob(os.path.join(STATE_ROOT, pref + "*")))
@@ -824,3 +869,8 @@ print(f"all search-tool-nudge tests passed ({len(ran)} checks: "
       f"{len(MUST_FIRE)} must-fire, {len(BENIGN)} benign, "
       f"1 harness negative control, 1 benign-counter positive control, "
       f"{len(SESSIONS)} availability-suppression scenarios)")
+# Machine-readable, and PARSED by the external isolation guard — keep the wording.
+# This half is only the number this file measured itself; the other half of the
+# pair (writes to the INHERITED home, which must be 0) is measured from outside,
+# because a suite cannot be its own witness for a home it no longer looks at.
+print(f"isolation: {TEMP_HOME_FILES} files under the temp HOME")
