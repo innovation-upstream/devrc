@@ -24,6 +24,22 @@ nudges), and asserts BOTH of the registrant's surfaces:
   9. bash-guard is rewritten but never CREATED: a settings.json with no
      bash-guard entry comes back with no bash-guard entry.
 
+  DE-DUP (narrowest, added 2026-08-20 as the follow-up to the rewrite)
+ 12. A settings.json an OLDER registrant double-registered — the state a
+     `home-manager rollback` produces — HEALS to one entry per (matcher, script),
+     keeping the FIRST occurrence with its position and its foreign keys, while a
+     same-script entry under a DIFFERENT matcher, one carrying ARGUMENTS, one
+     carrying a foreign key and one whose registration this script does not own
+     (bash-guard) all SURVIVE.
+
+  THE VALIDATED SEAM AND THE WARNINGS (same follow-up)
+ 13. A hostile $DEVRC_HOOK_PYTHON — an argument-carrying, relative, non-python or
+     missing interpreter — is rejected with a warning and the resolved fallback is
+     used, so three consecutive runs hold the same number of entries instead of
+     growing without bound.
+ 14. Every command that NAMES a managed hook but is not in the pinnable form is
+     reported on stderr, and nothing else is.
+
 🔴 THE 127 WINDOW, which surface 6 exists to close: `home-manager switch`
 updates ~/.nix-profile as remove-then-install, so there is a ~1s window in which
 the live profile generation is a partial closure with NO python3 on it. A hook
@@ -38,14 +54,40 @@ behaviourally, in test_registrar_activation.py.
 
 Run: python3 test_register_nudge_hook.py
 """
-import os, sys, json, tempfile, subprocess
+import os, sys, json, shutil, tempfile, subprocess, atexit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(HERE, "..", "register-nudge-hook.py")
 
 # A synthetic store path — shaped like the real one, deliberately not any path
 # that exists on this host, so nothing can pass by accident of the environment.
-PY = "/nix/store/0000000000000000000000000000000-python3-3.12.14/bin/python3.12"
+#
+# 🔴 It is a REAL, executable file. $DEVRC_HOOK_PYTHON is a test seam with
+# PRODUCTION REACH (activation inherits the operator's environment), so the
+# registrant validates it — absolute, exists, executable, one `python*` token —
+# and falls back to its own sys.executable with a warning when it is not. Scenario
+# 13 below drives that validation with four hostile values.
+_FAKE_STORE = tempfile.mkdtemp(prefix="devrc-fake-store-")
+atexit.register(shutil.rmtree, _FAKE_STORE, True)
+
+
+def fake_python(store_name, basename="python3.12"):
+    """A stand-in interpreter path: real file, executable bit set, never RUN.
+
+    The registrant only stat()s it (`isfile` + `access(X_OK)`) — nothing here
+    ever execs it — so it deliberately carries NO shebang. Adding one would
+    make it a runtime-written executable stub, which `scripts/tests/
+    test_runtime_shebangs.py` gates repo-wide.
+    """
+    p = os.path.join(_FAKE_STORE, store_name, "bin", basename)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w") as f:
+        f.write("stand-in for an interpreter binary: stat()ed, never executed\n")
+    os.chmod(p, 0o755)
+    return p
+
+
+PY = fake_python("0000000000000000000000000000000-python3-3.12.14")
 
 NOTIFY = PY + " ~/.claude/hooks/claude-notify.py"
 CLAWGATE_STOP = "/home/zach/.claude/clawgate-stop-hook.sh"
@@ -121,8 +163,11 @@ def base_settings(home):
     }
 
 
-def run(env):
-    return subprocess.run([sys.executable, SCRIPT], env=env, capture_output=True, text=True)
+def run(env, cwd=None):
+    """`cwd` matters for exactly one case: a RELATIVE $DEVRC_HOOK_PYTHON that
+    resolves to a real executable from the directory the registrant is run in."""
+    return subprocess.run([sys.executable, SCRIPT], env=env, cwd=cwd,
+                          capture_output=True, text=True)
 
 
 def cmds(data, event):
@@ -434,7 +479,7 @@ with tempfile.TemporaryDirectory() as tmp:
 # forever. Under that mutant the run prints "no change" and the stale store path
 # stays in settings.json, which is the 127 window reopening the day that path is
 # garbage-collected.
-PY2 = "/nix/store/1111111111111111111111111111111-python3-3.12.15/bin/python3.12"
+PY2 = fake_python("1111111111111111111111111111111-python3-3.12.15")
 
 with tempfile.TemporaryDirectory() as tmp:
     home = os.path.join(tmp, "home")
@@ -475,6 +520,294 @@ with tempfile.TemporaryDirectory() as tmp:
     # number — a rewrite that emptied the file would satisfy an `all()` too.
     check("11: bash-guard is still registered exactly once",
           cmds(d5, "PreToolUse").count(PY2 + " ~/.claude/hooks/bash-guard.py") == 1)
+
+# --- 12. A HOME-MANAGER ROLLBACK DOUBLE-REGISTERED EVERYTHING — IT MUST HEAL --
+# 🔴 `home-manager rollback` / `--switch-generation` (and a hand-run from an older
+# checkout) runs the PREVIOUS registrant against a settings.json this one already
+# pinned. That code keyed "already registered?" on the exact string `python3 ~/…`,
+# does not find it, and appends a SECOND copy of every hook it owns — 13 of them,
+# which is exactly what this fixture holds. Re-running the CURRENT registrant then
+# normalises both copies to identical strings and the append pass, which keys on
+# the SCRIPT, sees the hook as present — so WITHOUT a de-dup pass both survive and
+# every managed hook fires twice forever: duplicate ledger rows, double
+# notifications, and the write-back guard (the only one that can BLOCK) running
+# twice per event.
+#
+# Both directions are asserted: the duplicates go, and a genuinely DISTINCT
+# registration — same script, different `matcher` — SURVIVES. A hand-scoped narrow
+# entry is a real configuration (see `registered_scripts` in the registrant), and
+# collapsing it into the broad one would silently widen a scope somebody narrowed.
+OLD = "python3 ~/.claude/hooks/"
+AUDIT = PY + " ~/.claude/hooks/audit-pr-nudge.py"
+SHELL = PY + " ~/.claude/hooks/shell-env-nudge.py"
+NOTIFY_ARGS = NOTIFY + " --verbose"
+
+
+def one(cmd, matcher=None, entry_extra=None, hook_extra=None):
+    """One settings.json entry holding one hook — the shape the registrant writes."""
+    h = {"type": "command", "command": cmd}
+    if hook_extra:
+        h.update(hook_extra)
+    e = {"hooks": [h]}
+    if matcher is not None:
+        e["matcher"] = matcher
+    if entry_extra:
+        e.update(entry_extra)
+    return e
+
+
+def entries(data, event):
+    """(matcher, command) per hook, in file order.
+
+    The de-dup identity is the PAIR, and a command string on its own cannot show
+    which matcher its entry was filed under — which is the whole distinction
+    between a duplicate and a deliberately narrowed registration.
+    """
+    return [(e.get("matcher"), h.get("command"))
+            for e in data.get("hooks", {}).get(event, [])
+            for h in e.get("hooks", [])]
+
+
+DUPLICATED = {"hooks": {
+    # 🔴 bash-guard, doubled. This script owns bash-guard's INTERPRETER and not its
+    # REGISTRATION, so the second copy is NOT its to delete — it is rewritten and
+    # left, and reported on stderr instead. The first copy carries two foreign keys.
+    "PreToolUse": [
+        one(BASH_GUARD, "Bash", {"description": "the RULES.md enforcement guard"},
+            {"timeout": 12}),
+        one(OLD + "bash-guard.py", "Bash"),
+    ],
+    "PostToolUse": [
+        one(AUDIT, "Bash"), one(SHELL, "Bash"), one(SEARCH_NUDGE, "Bash"),
+        one(LEDGER), one(WRITEBACK),
+        one(OLD + "audit-pr-nudge.py", "Bash"),
+        one(OLD + "shell-env-nudge.py", "Bash"),
+        one(OLD + "search-tool-nudge.py", "Bash"),
+        one(OLD + "agent-ledger-hook.py"),
+        one(OLD + "clawgate-writeback-guard.py"),
+    ],
+    "Stop": [
+        one(TMUX_STOP), one(CLAWGATE_STOP),
+        one(NOTIFY), one(NEXT_STEP),
+        # SURVIVOR A: same script, DIFFERENT matcher — a real configuration.
+        one(NEXT_STEP, "Bash"),
+        one(LEDGER), one(WRITEBACK),
+        # SURVIVOR B: same script and matcher, but ARGUMENTS after the script path.
+        one(NOTIFY_ARGS),
+        # SURVIVOR C: same script and matcher, but a foreign hook-level key.
+        one(LEDGER, None, None, {"timeout": 7}),
+        # SURVIVOR D: same script and matcher, but a foreign ENTRY-level key — and
+        # for a script this registrant DOES own, so the entry-shape check is the
+        # only thing that can save it. Without this line, dropping that check is a
+        # mutant the suite cannot see: the only other foreign-entry-keyed duplicate
+        # in this fixture is bash-guard's, which the ownership filter already
+        # protects, so it would die for the wrong guard's reason.
+        one(WRITEBACK, None, {"description": "the write-back guard, annotated"}),
+        one(OLD + "claude-notify.py"),
+        one(OLD + "agent-ledger-hook.py"),
+        one(OLD + "clawgate-writeback-guard.py"),
+        one(OLD + "next-step-nudge.py"),
+    ],
+    "SessionStart": [one(LEDGER), one(OLD + "agent-ledger-hook.py")],
+    "UserPromptSubmit": [
+        one(NOTIFY), one(LEDGER),
+        one(OLD + "claude-notify.py"), one(OLD + "agent-ledger-hook.py"),
+    ],
+    "SubagentStop": [one(NOTIFY), one(OLD + "claude-notify.py")],
+}}
+
+with tempfile.TemporaryDirectory() as tmp:
+    home = os.path.join(tmp, "home")
+    os.makedirs(os.path.join(home, ".claude"))
+    settings = os.path.join(home, ".claude", "settings.json")
+    with open(settings, "w") as f:
+        json.dump(DUPLICATED, f, indent=2)
+
+    env = dict(os.environ)
+    env["HOME"] = home
+    env["DEVRC_HOOK_PYTHON"] = PY
+
+    p12 = run(env)
+    check("12: the healing run exits 0", p12.returncode == 0)
+    with open(settings) as f:
+        d12 = json.load(f)
+
+    # Literal expected end state per event — not derived from the fixture, so a
+    # de-dup that removed the WRONG copy (or reordered) fails here.
+    check("12: PostToolUse healed to one entry per (matcher, script)",
+          entries(d12, "PostToolUse") == [
+              ("Bash", AUDIT), ("Bash", SHELL), ("Bash", SEARCH_NUDGE),
+              (None, LEDGER), (None, WRITEBACK)])
+    check("12: Stop healed, keeping the first copy of each and all three survivors",
+          entries(d12, "Stop") == [
+              (None, TMUX_STOP), (None, CLAWGATE_STOP),
+              (None, NOTIFY), (None, NEXT_STEP), ("Bash", NEXT_STEP),
+              (None, LEDGER), (None, WRITEBACK),
+              (None, NOTIFY_ARGS), (None, LEDGER), (None, WRITEBACK)])
+    check("12: SessionStart healed", entries(d12, "SessionStart") == [(None, LEDGER)])
+    check("12: UserPromptSubmit healed",
+          entries(d12, "UserPromptSubmit") == [(None, NOTIFY), (None, LEDGER)])
+    check("12: SubagentStop healed", entries(d12, "SubagentStop") == [(None, NOTIFY)])
+    # 🔴 THE OWNERSHIP BOUNDARY: bash-guard's second entry is rewritten, never
+    # removed. Its registration belongs to the host.
+    check("12: the doubled bash-guard entry is PINNED but NOT deleted",
+          entries(d12, "PreToolUse") == [("Bash", BASH_GUARD), ("Bash", BASH_GUARD)])
+    # The first bash-guard entry keeps both keys this script knows nothing about.
+    check("12: the surviving bash-guard entry kept its foreign keys",
+          d12["hooks"]["PreToolUse"][0].get("description")
+          == "the RULES.md enforcement guard"
+          and d12["hooks"]["PreToolUse"][0]["hooks"][0].get("timeout") == 12)
+    check("12: the survivor with a foreign hook-level key kept it",
+          [e for e in d12["hooks"]["Stop"]
+           if e["hooks"][0].get("timeout") == 7] != [])
+    check("12: the survivor with a foreign ENTRY-level key kept it",
+          [e for e in d12["hooks"]["Stop"]
+           if e.get("description") == "the write-back guard, annotated"] != [])
+    # It says what it removed, and how many.
+    check("12: it reports the removals", "removed duplicate hook registrations:"
+          in p12.stdout)
+    check("12: exactly 13 duplicate registrations were removed",
+          len([ln for ln in p12.stdout.splitlines() if ln.startswith("  - ")]) == 13)
+    # ...and it is LOUD about the three double-fires it declined to touch.
+    check("12: it warns about the duplicates it declined to remove",
+          p12.stderr.count("is registered 2 times under matcher") == 4)
+    check("12: the declined warnings name all four scripts",
+          all(s in p12.stderr for s in ("bash-guard.py", "claude-notify.py",
+                                        "agent-ledger-hook.py",
+                                        "clawgate-writeback-guard.py")))
+    # 🔴 AND THE HEALED FILE IS A FIXED POINT. A de-dup that re-ran forever, or one
+    # that healed into a state the append pass then re-populated, would fail here.
+    healed = open(settings, "rb").read()
+    p12b = run(env)
+    check("12: the second run reports no change", "no change" in p12b.stdout)
+    check("12: the healed file is BYTE-IDENTICAL after a second run",
+          open(settings, "rb").read() == healed)
+
+# --- 13. A HOSTILE $DEVRC_HOOK_PYTHON CANNOT GROW THE FILE WITHOUT BOUND ------
+# 🔴 The override is a test seam with PRODUCTION REACH: home-manager activation
+# inherits the operator's environment, so an exported value is written verbatim
+# into all 14 hook commands. An interpreter carrying an argument, or one whose
+# basename is not `python*`, makes `managed_script_of` fail to recognise the
+# registrant's OWN output — so the append pass re-appends everything on EVERY run:
+# 15 -> 30 -> 45 entries, unbounded and silent. The other two are not growth bugs
+# but are just as wrong to write: a relative name reopens the exact PATH window
+# this pinning closes, and a missing path turns every hook into a permanent 127.
+#
+# 🔴 EACH CONDITION IS ISOLATED BY ITS OWN CASE, because these checks MASK one
+# another and a mutant that dies for the neighbour's reason proves nothing about
+# the guard it removed. `os.access(X_OK)` is False for a path that does not
+# exist, so it hides the exists check unless the value is a real EXECUTABLE
+# DIRECTORY; and a bare relative name is not a file in any plausible cwd, so the
+# exists check hides the absolute check unless the value really does resolve from
+# the directory the registrant runs in. Both of those cases are here for exactly
+# that reason — without them, dropping either check is a surviving mutant.
+NOT_A_PYTHON = fake_python("not-a-python", basename="sh")
+_REL_BIN = os.path.dirname(fake_python("relative-store"))
+EXEC_DIR = os.path.join(_FAKE_STORE, "a-directory", "bin", "python3.12")
+os.makedirs(EXEC_DIR, exist_ok=True)
+
+HOSTILE_OVERRIDES = [
+    (PY + " -X utf8", "carries an argument", None),
+    ("python3", "relative", None),
+    ("python3.12", "relative but resolvable from the cwd", _REL_BIN),
+    (NOT_A_PYTHON, "absolute and executable but not a python", None),
+    (PY + "-gone", "absolute python path that does not exist", None),
+    (EXEC_DIR, "an executable DIRECTORY with a python name", None),
+]
+RESOLVED = os.path.realpath(sys.executable)
+
+for hostile, why, hostile_cwd in HOSTILE_OVERRIDES:
+    with tempfile.TemporaryDirectory() as tmp:
+        home = os.path.join(tmp, "home")
+        os.makedirs(os.path.join(home, ".claude"))
+        settings = os.path.join(home, ".claude", "settings.json")
+        with open(settings, "w") as f:
+            json.dump({"hooks": {
+                "PreToolUse": [one(OLD + "bash-guard.py", "Bash")],
+                "Stop": [one(TMUX_STOP)],
+            }}, f, indent=2)
+
+        env = dict(os.environ)
+        env["HOME"] = home
+        env["DEVRC_HOOK_PYTHON"] = hostile
+
+        runs, counts = [], []
+        for _ in range(3):
+            runs.append(run(env, cwd=hostile_cwd))
+            with open(settings) as f:
+                dd = json.load(f)
+            counts.append(len([c for ev in dd.get("hooks", {})
+                               for c in cmds(dd, ev)]))
+
+        tag = "13 (%s)" % why
+        check(tag + ": all three runs exit 0",
+              all(r.returncode == 0 for r in runs))
+        check(tag + ": the override is rejected OUT LOUD",
+              all("DEVRC_HOOK_PYTHON" in r.stderr for r in runs))
+        # THE UNBOUNDED-GROWTH LOOP, CLOSED: a literal, not a comparison against
+        # run 1 — a run that appended nothing at all would satisfy `a == b == c`.
+        check(tag + ": three consecutive runs hold exactly 15 hook commands",
+              counts == [15, 15, 15])
+        with open(settings) as f:
+            d13 = json.load(f)
+        written = [c for ev in d13.get("hooks", {}) for c in cmds(d13, ev)
+                   if c != TMUX_STOP]
+        check(tag + ": every hook command names the resolved fallback instead",
+              written and all(c.startswith(RESOLVED + " ") for c in written))
+        # By PREFIX, not substring: the resolved fallback is itself a path ending
+        # in `python3`, so a substring test would report the relative override as
+        # "reached" purely because the honest answer contains its spelling.
+        check(tag + ": the hostile value is not the interpreter of any command",
+              not any(c.startswith(hostile + " ") for c in written))
+
+# --- 14. IT SAYS WHICH MANAGED HOOKS IT DECLINED TO PIN ----------------------
+# 🔴 Conservative matching is right; conservative SILENCE is what let the 127
+# window run for months. Each of these names a managed hook, comes back
+# byte-identical, and stays on a PATH-resolved interpreter — so each one keeps
+# dying mid-switch with nothing in the switch log to say so.
+UNPINNABLE = [
+    "python3 -u ~/.claude/hooks/bash-guard.py",
+    "PYTHONPATH=/x python3 ~/.claude/hooks/bash-guard.py",
+    "python3 ${HOME}/.claude/hooks/bash-guard.py",
+    "python3 '~/.claude/hooks/bash-guard.py'",
+    "cd /tmp && python3 ~/.claude/hooks/bash-guard.py",
+]
+# The other half of the claim: it must NOT warn about a command that names no
+# managed hook. Without these the warning could be "print something for every
+# unrecognised command" and still pass.
+SILENT = ["python3 ~/.claude/hooks/not-a-devrc-hook.py", TMUX_STOP]
+
+with tempfile.TemporaryDirectory() as tmp:
+    home = os.path.join(tmp, "home")
+    os.makedirs(os.path.join(home, ".claude"))
+    settings = os.path.join(home, ".claude", "settings.json")
+    with open(settings, "w") as f:
+        json.dump({"hooks": {"PreToolUse": [one(c, "Bash")
+                                            for c in UNPINNABLE + SILENT]}},
+                  f, indent=2)
+
+    env = dict(os.environ)
+    env["HOME"] = home
+    env["DEVRC_HOOK_PYTHON"] = PY
+
+    p14 = run(env)
+    check("14: run exits 0", p14.returncode == 0)
+    with open(settings) as f:
+        d14 = json.load(f)
+    check("14: every unpinnable command came back BYTE-IDENTICAL",
+          cmds(d14, "PreToolUse") == UNPINNABLE + SILENT)
+    check("14: exactly one warning per unpinnable command, and no more",
+          p14.stderr.count("is not in the form this script can pin") == 5)
+    for c in UNPINNABLE:
+        check("14: it names the command it declined to pin: " + c,
+              repr(c) in p14.stderr)
+    for c in SILENT:
+        check("14: it stays quiet about a command naming no managed hook: " + c,
+              repr(c) not in p14.stderr)
+    # Anti-vacuity: the run did its normal work on the same file, so the checks
+    # above are about the warning and not about a run that died early.
+    check("14: ...while the run did its normal work on the same file",
+          NEXT_STEP in cmds(d14, "Stop"))
 
 with open(SCRIPT) as f:
     src = f.read()
