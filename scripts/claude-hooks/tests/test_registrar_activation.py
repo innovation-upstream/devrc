@@ -673,18 +673,100 @@ def test_every_event_the_registrar_writes_to_is_classified():
         "default: " + ", ".join(sorted(unclassified)))
 
 
-def test_the_documented_classification_of_the_events_that_drive_the_behaviour():
-    """The ledger's CONTENT, not just its shape — these six are what the de-dup
-    identity actually turns on, and a silent edit to either set would change how
-    real entries are deleted with no other test moving.
+# 🔴 THE LEDGER'S CONTENT, PINNED LITERALLY — re-read from the Claude Code hooks
+# documentation (code.claude.com/docs/en/hooks) on 2026-08-20, NOT derived from the
+# registrar. The registrar's copy is the implementation under test; deriving the
+# expectation from it would make this assert `x == x`.
+#
+# 🔴 EXACT EQUALITY, DELIBERATELY, AND THIS IS THE POINT OF THE TEST. These sets
+# have DELETION POWER: `event_has_matchers` drops `matcher` from the de-dup
+# identity for every event in NO_MATCHER_EVENTS, so moving one event across is a
+# one-token, deletion-free edit that makes the registrar delete registrations it
+# must keep. The predecessor of this test asserted `<=` over six events, so every
+# event outside those six could be moved into the destructive direction with the
+# whole suite — and the full gate — green. Measured on `PreCompact`: adding it to
+# NO_MATCHER_EVENTS made a manual/auto pair for one script collapse to one entry
+# plus a false "has no matcher support" warning, and nothing went red.
+#
+# The cost is real and is the intended trade: adding a hook event to the registrar
+# requires editing this literal in the same commit. That is a decision somebody
+# makes, which is exactly what the old subset let people skip.
+#
+# The docs' wording for the first group is "no matcher support" / "always fires on
+# every occurrence". The second group is narrowed by `matcher`, though not always
+# by a TOOL name — SessionStart's selects the source (startup/resume/clear/compact/
+# fork), PreCompact's the trigger (manual/auto), DirectoryAdded's how the directory
+# was added (slash_command/register_repo_root). A real scope either way, which is
+# all the de-dup identity needs.
+DOCUMENTED_NO_MATCHER_EVENTS = {
+    "UserPromptSubmit", "PostToolBatch", "Stop", "TeammateIdle", "TaskCreated",
+    "TaskCompleted", "WorktreeCreate", "WorktreeRemove", "CwdChanged",
+    "MessageDisplay",
+}
 
-    Values are from the Claude Code hooks documentation: the NO_MATCHER events
-    "always fire on every occurrence"; the others are narrowed by `matcher`
-    (SessionStart's selects the SOURCE — startup/resume/clear/compact/fork —
-    rather than a tool name, but it is a real scope either way).
+DOCUMENTED_MATCHER_EVENTS = {
+    "PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionRequest",
+    "PermissionDenied", "SessionStart", "SessionEnd", "Setup", "SubagentStart",
+    "SubagentStop", "Notification", "PreCompact", "PostCompact", "ConfigChange",
+    "DirectoryAdded", "FileChanged", "StopFailure", "InstructionsLoaded",
+    "UserPromptExpansion", "Elicitation", "ElicitationResult",
+}
+
+
+def test_the_documented_classification_of_the_events_that_drive_the_behaviour():
+    """Both ledgers, pinned by EXACT EQUALITY against the documented lists.
+
+    A silent edit to either set changes how real entries are deleted, and until
+    this pinned the whole set rather than a six-event subset, most such edits
+    moved nothing else. See the block comment above for the measurement.
     """
     no_matcher = set(registrar_literal("NO_MATCHER_EVENTS"))
     with_matcher = set(registrar_literal("MATCHER_EVENTS"))
-    assert {"Stop", "UserPromptSubmit"} <= no_matcher, sorted(no_matcher)
-    assert {"PreToolUse", "PostToolUse", "SessionStart",
-            "SubagentStop"} <= with_matcher, sorted(with_matcher)
+
+    # Positive control: a parser that returned nothing would make both equalities
+    # fail loudly rather than pass — but say so, so a future reader does not have
+    # to re-derive that this cannot go vacuous.
+    assert len(no_matcher) >= 5 and len(with_matcher) >= 5, (no_matcher, with_matcher)
+
+    assert no_matcher == DOCUMENTED_NO_MATCHER_EVENTS, (
+        "NO_MATCHER_EVENTS no longer matches the documented list. This set has "
+        "DELETION POWER — an event here loses its `matcher` from the de-dup "
+        "identity, so two entries for one script collapse to one. Extra: %r. "
+        "Missing: %r" % (sorted(no_matcher - DOCUMENTED_NO_MATCHER_EVENTS),
+                         sorted(DOCUMENTED_NO_MATCHER_EVENTS - no_matcher)))
+    assert with_matcher == DOCUMENTED_MATCHER_EVENTS, (
+        "MATCHER_EVENTS no longer matches the documented list. Extra: %r. "
+        "Missing: %r" % (sorted(with_matcher - DOCUMENTED_MATCHER_EVENTS),
+                         sorted(DOCUMENTED_MATCHER_EVENTS - with_matcher)))
+
+
+def test_the_dedup_warning_docstring_is_no_wider_than_the_warning_it_describes():
+    """🔴 A DOCSTRING IS A CLAIM ABOUT COVERAGE, and this one was MEASURED FALSE.
+
+    It read "Any MANAGED hook script left registered more than once on one event
+    is named on stderr". It is not: the double-fire ledger counts by the de-dup
+    IDENTITY, whose scope is the entry's `matcher` on a matcher-supporting event.
+    So agent-ledger-hook.py registered twice on PostToolUse — once unmatchered,
+    once under `Bash` — produces ZERO warnings while both entries fire on every
+    Bash call. Scenario 17 of test_register_nudge_hook.py drives that case.
+
+    Pinned as a WHOLE NORMALISED STRING rather than by keyword: the previous
+    sentence and the corrected one share almost every word, so any keyword guard
+    passes on both. A cosmetic reword fails this test — pay it, and re-check that
+    the new wording is still true of `_counts` before updating the literal.
+    """
+    doc = ast.get_docstring(ast.parse(REGISTRAR.read_text())) or ""
+    normalised = " ".join(doc.split())
+    expected = (
+        "Any MANAGED hook script left registered more than once UNDER ONE SCOPE "
+        "is named on stderr — the same scope the identity above uses, i.e. the "
+        "entry's `matcher` on an event that has matchers and the whole event on "
+        "one that does not, so two entries for one script under DIFFERENT "
+        "matchers on a matcher-supporting event are not counted and not reported."
+    )
+    assert expected in normalised, (
+        "the de-dup docstring no longer carries the sentence this test pins. It "
+        "described the stderr ledger as covering a whole EVENT when the code "
+        "scopes it by matcher; if you reworded it, verify the new sentence "
+        "against the `_counts` loop and update the literal here.\nExpected:\n%s"
+        % expected)

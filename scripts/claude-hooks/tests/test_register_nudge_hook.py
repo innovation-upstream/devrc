@@ -50,6 +50,16 @@ nudges), and asserts BOTH of the registrant's surfaces:
      heal; and a `matcher` key that SURVIVES on such an event is named on stderr as
      the configuration error it is.
 
+  THE UNKNOWN-EVENT DEFAULT AND THE REPORT LINES (2026-08-20, this round)
+ 17. An event in NEITHER ledger is treated as matcher-supporting, so two entries
+     for one script under different matchers there BOTH survive and draw no
+     warning — the 🔴 claim the registrant's own comment makes, which nothing
+     measured. Same run: the double-fire ledger is scoped by matcher (so a
+     cross-matcher pair on a matcher-supporting event is silent, which is what
+     the de-dup docstring now says), two removals differing ONLY by matcher print
+     distinguishable lines, and the removal header stops promising a pinning
+     block when nothing was pinned.
+
 🔴 THE 127 WINDOW, which surface 6 exists to close: `home-manager switch`
 updates ~/.nix-profile as remove-then-install, so there is a ~1s window in which
 the live profile generation is a partial closure with NO python3 on it. A hook
@@ -1069,6 +1079,132 @@ with tempfile.TemporaryDirectory() as tmp:
           open(settings, "rb").read() == healed16)
     check("16: ...and the second run still names the stray matcher",
           "an entry carries matcher 'Bash'" in p16b.stderr)
+
+# --- 17. THE UNKNOWN-EVENT DEFAULT, AND WHAT THE REPORT SAYS -----------------
+# 🔴 THE CONSERVATIVE DEFAULT HAD DELETION POWER AND NO COVERAGE. The registrant
+# claims, in a 🔴 comment, that an event in NEITHER ledger is treated as
+# matcher-supporting and that this "can only ever make this script DECLINE to
+# delete something". Nothing measured it. Two deletion-free one-token mutants
+# survived BOTH suites and the full gate:
+#
+#   M2  `event not in NO_MATCHER_EVENTS`  ->  `event in MATCHER_EVENTS`
+#   M8  add one event name to NO_MATCHER_EVENTS
+#
+# Both flip the default from conservative to DESTRUCTIVE for every event the
+# ledgers do not name: the matcher leaves the identity, two genuinely distinct
+# registrations collapse to one, and the survivor draws a false "has no matcher
+# support" warning. M8 is now caught by the exact-equality pin in
+# test_registrar_activation.py; M2 leaves both ledgers untouched and is caught
+# HERE, behaviourally.
+#
+# The event name is deliberately one the hooks documentation has not shipped —
+# every documented event is now in a ledger, so nothing real would exercise the
+# default. This is the case the comment's claim is actually ABOUT.
+UNKNOWN_EVENT = "AnEventTheHooksDocsHaveNotShippedYet"
+
+# 🔴 Every command in this fixture is ALREADY pinned to PY, so the run rewrites
+# NOTHING. That is load-bearing twice over: it is the state both real hosts are in
+# after one switch, and it is what makes the "nothing needed pinning" report
+# header reachable at all.
+DEFAULTED = {"hooks": {
+    # (a) THE SUBJECT: two entries, one script, DIFFERENT matchers, on an event
+    #     nobody classified. Both are exactly the shape this script writes, so
+    #     the entry-shape check cannot be what saves them — only the scope in the
+    #     identity can. Under M2/M8 the second is deleted.
+    UNKNOWN_EVENT: [one(LEDGER, "manual"), one(LEDGER, "auto")],
+    # (b) THE SENTENCE THE DOCSTRING NOW MAKES: the same shape on a
+    #     matcher-supporting event is not a duplicate AND draws no double-fire
+    #     warning — even though both entries really do fire on every Bash call.
+    #     The docstring used to promise a warning for "more than once on one
+    #     event", which this state falsifies.
+    "PostToolUse": [one(LEDGER), one(LEDGER, "Bash")],
+    # (c) POSITIVE CONTROL for the whole scenario plus the report lines: three
+    #     copies of one script on a NO_MATCHER event, two of them differing ONLY
+    #     by `matcher`. A run that removed nothing would pass (a) and (b)
+    #     vacuously; this makes the removal count non-zero, and the two NOTIFY
+    #     removals print the same command, so their report lines can only differ
+    #     if the line names the scope.
+    "Stop": [one(NOTIFY), one(NOTIFY, "Bash"), one(NOTIFY, "Edit"),
+             one(WRITEBACK), one(WRITEBACK)],
+}}
+
+with tempfile.TemporaryDirectory() as tmp:
+    home = os.path.join(tmp, "home")
+    os.makedirs(os.path.join(home, ".claude"))
+    settings = os.path.join(home, ".claude", "settings.json")
+    with open(settings, "w") as f:
+        json.dump(DEFAULTED, f, indent=2)
+
+    env = dict(os.environ)
+    env["HOME"] = home
+    env["DEVRC_HOOK_PYTHON"] = PY
+
+    p17 = run(env)
+    check("17: run exits 0", p17.returncode == 0)
+    with open(settings) as f:
+        d17 = json.load(f)
+
+    # (a) THE CONSERVATIVE DEFAULT, MEASURED. Literal end state, in order.
+    check("17: an UNCLASSIFIED event keeps BOTH same-script entries under their "
+          "different matchers",
+          entries(d17, UNKNOWN_EVENT) == [("manual", LEDGER), ("auto", LEDGER)])
+    check("17: ...and says nothing about them being doubled",
+          not any(ln.startswith("WARNING " + UNKNOWN_EVENT) and "is registered" in ln
+                  for ln in p17.stderr.splitlines()))
+    check("17: ...and does not call their matchers stray",
+          UNKNOWN_EVENT + ": an entry carries matcher" not in p17.stderr)
+
+    # (c) POSITIVE CONTROL: the harness CAN observe a removal in this same run.
+    removed17 = [ln for ln in p17.stdout.splitlines() if ln.startswith("  - ")]
+    check("17: POSITIVE CONTROL — three Stop duplicates were removed in the very "
+          "run that removed neither unclassified entry", len(removed17) == 3)
+    check("17: Stop healed to the FIRST copy of each script",
+          [i for i in entries(d17, "Stop") if i[1] in (NOTIFY, WRITEBACK)]
+          == [(None, NOTIFY), (None, WRITEBACK)])
+
+    # (b) THE DOCSTRING'S SCOPE: no warning, and both entries survive.
+    check("17: a cross-matcher pair on a MATCHER-supporting event survives",
+          [i for i in entries(d17, "PostToolUse") if i[1] == LEDGER]
+          == [(None, LEDGER), ("Bash", LEDGER)])
+    check("17: ...and the double-fire ledger is scoped by matcher, so it says "
+          "NOTHING about that pair — which is why the docstring says 'under one "
+          "scope' and not 'on one event'",
+          not any(ln.startswith("WARNING PostToolUse:") and "is registered" in ln
+                  for ln in p17.stderr.splitlines()))
+
+    # 🟢 THE REPORT LINES. Two removals name the SAME command and differ only in
+    # the matcher their entry carried; without the scope note they are byte-
+    # identical and the operator cannot tell that two things went.
+    check("17: every removal line is distinct", len(set(removed17)) == 3)
+    notify_lines = sorted(ln for ln in removed17 if NOTIFY in ln)
+    check("17: the two removals that differ ONLY by matcher print differently, "
+          "each naming the matcher it was found under",
+          len(notify_lines) == 2
+          and "(matcher 'Bash'; Stop has none to narrow)" in notify_lines[0]
+          and "(matcher 'Edit'; Stop has none to narrow)" in notify_lines[1])
+    check("17: an absent matcher is reported as absent, not as a value",
+          [ln for ln in removed17 if WRITEBACK in ln
+           and ln.endswith("  (no matcher; Stop has none to narrow)")] != [])
+
+    # 🟢 THE REPORT HEADER. Nothing was pinned in this run — the state a host is
+    # in after one switch — so the header must not send the reader looking for a
+    # pinning block below it.
+    pinned17 = [ln for ln in p17.stdout.splitlines() if ln.startswith("  ~ ")]
+    check("17: POSITIVE CONTROL — this run genuinely pinned nothing",
+          pinned17 == [] and not any(ln.startswith("pinned hook interpreters")
+                                     for ln in p17.stdout.splitlines()))
+    check("17: so the removal header does not promise a pinning block below it",
+          "removed duplicate hook registrations (shown as they were FOUND — "
+          "de-dup runs before the interpreter pinning, and nothing needed "
+          "pinning this run):" in p17.stdout.splitlines())
+
+    # A FIXED POINT, including the unclassified event: the default must not
+    # oscillate, and the second run must not re-append anything.
+    healed17 = open(settings, "rb").read()
+    p17b = run(env)
+    check("17: the second run reports no change", "no change" in p17b.stdout)
+    check("17: the healed file is BYTE-IDENTICAL after a second run",
+          open(settings, "rb").read() == healed17)
 
 with open(SCRIPT) as f:
     src = f.read()

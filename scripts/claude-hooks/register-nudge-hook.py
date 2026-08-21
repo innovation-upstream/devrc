@@ -34,8 +34,12 @@ APPEND-ONLY / never rewrites". That is no longer true — read all three before 
     hook, no arguments after the script path) AND only for a script this script
     registers — so a doubled bash-guard, whose registration belongs to the host,
     is reported rather than removed. Any MANAGED hook script left registered
-    more than once on one event is named on stderr, and so is a `matcher` key
-    sitting on an event that has no matchers. A doubled FOREIGN command is NOT:
+    more than once UNDER ONE SCOPE is named on stderr — the same scope the
+    identity above uses, i.e. the entry's `matcher` on an event that has
+    matchers and the whole event on one that does not, so two entries for one
+    script under DIFFERENT matchers on a matcher-supporting event are not
+    counted and not reported. A `matcher` key sitting on an event that has no
+    matchers is named too. A doubled FOREIGN command is NOT:
     the recogniser cannot read it, so this script can neither count it reliably
     nor tell a deliberate double from an accident in config it does not own.
     See "WHY THE DE-DUP EXISTS" below.
@@ -522,7 +526,23 @@ def _entry_hook_dicts(entry):
 # 🔴 An ENUMERATION, deliberately not a heuristic on the event name. An event in
 # NEITHER set is treated as matcher-supporting: that is the conservative default,
 # because keeping the matcher in the identity can only ever make this script
-# DECLINE to delete something.
+# DECLINE to delete something. That default is not merely asserted here — it is
+# driven behaviourally by scenario 17 of tests/test_register_nudge_hook.py, on an
+# event name the docs have not shipped, and both sets are pinned by EXACT EQUALITY
+# (not a subset) in tests/test_registrar_activation.py. Between them, flipping the
+# default's direction or moving one event across is red. Before that, moving an
+# event into NO_MATCHER_EVENTS was a one-token, deletion-free change that turned
+# the default destructive with the whole suite green.
+#
+# 🔴 BOTH SETS ARE COMPLETE AGAINST THE DOCUMENTED EVENT LIST as of 2026-08-20,
+# re-read from code.claude.com/docs/en/hooks rather than remembered. The 14 events
+# added to MATCHER_EVENTS in that pass were ALL already handled correctly by the
+# unknown-event default, so completing the ledger changed NO behaviour — it moved
+# them from an untested default to a decision somebody made. DirectoryAdded is the
+# one worth naming: it looks like a fire-and-forget event and it is NOT — the docs
+# give it a matcher over how the directory was added (slash_command /
+# register_repo_root), so filing it under NO_MATCHER_EVENTS would license deleting
+# a genuinely distinct registration.
 #
 # 🔴 AND THE HONEST LIMIT OF THE CLAIM: the docs do not say what Claude Code does
 # with a `matcher` key that is present on a non-matcher event, so nothing here
@@ -543,8 +563,12 @@ NO_MATCHER_EVENTS = frozenset({
 })
 
 MATCHER_EVENTS = frozenset({
-    "PreToolUse", "PostToolUse", "PermissionRequest", "SessionStart",
-    "SubagentStop", "SessionEnd", "Notification",
+    "PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionRequest",
+    "PermissionDenied", "SessionStart", "SessionEnd", "Setup",
+    "SubagentStart", "SubagentStop", "Notification", "PreCompact",
+    "PostCompact", "ConfigChange", "DirectoryAdded", "FileChanged",
+    "StopFailure", "InstructionsLoaded", "UserPromptExpansion", "Elicitation",
+    "ElicitationResult",
 })
 
 
@@ -597,8 +621,20 @@ def entry_identity_list(entry, event):
         scope = entry.get("matcher") if isinstance(entry, dict) else None
         if scope is not None and not isinstance(scope, str):
             # Not a shape this script writes. Keep it hashable and keep it
-            # distinct from both "absent" and every string, so it can never
-            # collapse into another entry's identity and license a deletion.
+            # distinct from both "absent" and every string, so ON THIS BRANCH it
+            # cannot collapse into another entry's identity and license a
+            # deletion.
+            #
+            # 🔴 THAT PROTECTION IS BRANCH-LOCAL, NOT UNCONDITIONAL — this whole
+            # arm is inside `if event_has_matchers(event)`. On a NO_MATCHER event
+            # the `else` below drops the scope to None for EVERY entry, so a
+            # list-valued matcher DOES collapse into an unmatchered copy of the
+            # same script and the later one is deleted. Measured, and correct:
+            # such an event fires on every occurrence, so the two entries really
+            # are one registration twice however the key is spelled. The claim
+            # this branch makes is only "a matcher this script cannot read is
+            # never mistaken for a matcher it can" — read as blanket protection
+            # it would be false, which is why it says where it applies.
             scope = ("<non-str matcher>", repr(scope))
     else:
         scope = None
@@ -610,6 +646,28 @@ def entry_identity_list(entry, event):
 def entry_identities(entry, event):
     """`entry_identity_list` as a set — membership, for the de-dup decision."""
     return set(entry_identity_list(entry, event))
+
+
+def removal_scope_note(entry, event):
+    """How a REMOVED entry was scoped, for the report line.
+
+    🔴 The command alone does not identify which entry went. Two entries for one
+    script differing ONLY by `matcher` both print the same command, so a report
+    keyed on the command emits byte-identical lines and the operator cannot tell
+    which of their registrations this script deleted — nor that it deleted two.
+
+    The note states the matcher AS FOUND (absent and `null` are distinguished
+    from `""`, which is a different thing somebody typed), and on a NO_MATCHER
+    event it also says the key had nothing to narrow — the reason the entry was
+    a duplicate at all rather than a scope.
+    """
+    if isinstance(entry, dict) and "matcher" in entry:
+        found = "matcher %r" % (entry["matcher"],)
+    else:
+        found = "no matcher"
+    if event_has_matchers(event):
+        return "  (%s)" % found
+    return "  (%s; %s has none to narrow)" % (found, event)
 
 
 def removable_duplicate(entry):
@@ -663,7 +721,8 @@ for _event in list(hooks):
     for _entry in _arr:
         _ids = entry_identities(_entry, _event)
         if _ids and _ids <= _seen and removable_duplicate(_entry):
-            deduped.append("%s: %s" % (_event, _entry["hooks"][0]["command"]))
+            deduped.append("%s: %s%s" % (_event, _entry["hooks"][0]["command"],
+                                         removal_scope_note(_entry, _event)))
             continue
         _seen |= _ids
         _kept.append(_entry)
@@ -879,8 +938,15 @@ if deduped:
     # typically the bare `python3 …` an older registrar wrote. Printed above a
     # "pinned hook interpreters to /nix/store/…" block, that reads as if the pinning
     # had missed one. Say which it is instead of leaving the reader to guess.
-    print("removed duplicate hook registrations "
-          "(shown as they were FOUND — de-dup runs before the pinning below):")
+    # 🔴 ...and the clause only says "below" when a pinning block actually
+    # follows. `rewritten` is what builds that block, so pointing at it
+    # unconditionally sends the reader looking for a section that is not there
+    # whenever every command was already pinned — the commonest healing run once
+    # both hosts have been through one switch.
+    print("removed duplicate hook registrations (shown as they were FOUND — %s):"
+          % ("de-dup runs before the pinning below" if rewritten else
+             "de-dup runs before the interpreter pinning, and nothing needed "
+             "pinning this run"))
     for c in deduped:
         print("  -", c)
 if rewritten:
