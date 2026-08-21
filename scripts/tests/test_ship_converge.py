@@ -410,9 +410,11 @@ class Repo:
     #           the local host. Measured 2026-08-21.
     #
     #           🔴 NOT placed above the constants, deliberately: ship.sh's own
-    #           rc-6 message interpolates $WORKBENCH_IP_PRIMARY, and under `set
-    #           -u` an unset one kills the shell with a DIFFERENT status. The
-    #           test would then be green about a hazard it never produced.
+    #           rc-6 message interpolates $WORKBENCH_IP_PRIMARY, and under
+    #           `set -u` an unset one kills the shell. Measured 2026-08-21 with
+    #           the error above the constants: rc 1 on `WORKBENCH_IP_PRIMARY:
+    #           unbound variable`, NOT rc 6 — the test would then be green about
+    #           a hazard it never produced.
     #
     #   "end" — after every function definition, before the standalone-probe
     #           block. The lib is fully usable, so the run completes and prints
