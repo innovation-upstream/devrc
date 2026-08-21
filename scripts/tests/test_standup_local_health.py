@@ -46,6 +46,12 @@ from testlib.mockbin import write_exec  # noqa: E402
 STANDUP = Path(os.environ.get(
     "STANDUP_SH", REPO_ROOT / "claude" / "skills" / "standup" / "standup.sh"))
 
+#: Fake host uptime shared by the harness and standup.sh, so unit ages are a
+#: function of the fixture alone. Comfortably larger than the largest `*_ago`
+#: any test uses (90000s = 25h), because an age exceeding uptime is physically
+#: unrepresentable and clamps to "never run".
+SYNTHETIC_UPTIME = 604800  # 7 days
+
 pytestmark = pytest.mark.skipif(
     not shutil.which("bash"), reason="needs bash on PATH")
 
@@ -111,8 +117,14 @@ class Harness:
         self.bin.mkdir(parents=True, exist_ok=True)
         self.fix.mkdir(parents=True, exist_ok=True)
         write_exec(self.bin / "systemctl", SYSTEMCTL_STUB)
-        with open("/proc/uptime") as fh:
-            self.uptime = int(float(fh.read().split()[0]))
+        # SYNTHETIC, not /proc/uptime. Reading the real uptime made every age
+        # assertion depend on how long the host happened to have been up: an
+        # `*_ago` larger than the real uptime clamps to 0 in `mono()` below and
+        # renders "never run", so `test_a_running_daemon_shows_its_START_age`
+        # (start_ago=90000, i.e. 25h) passed only on a host up more than a day.
+        # It failed on the laptop, which is up ~5h and reboots often. standup.sh
+        # honours STANDUP_UPTIME_SECONDS so both sides share this clock.
+        self.uptime = SYNTHETIC_UPTIME
 
     def failed(self, *units):
         (self.fix / "failed.txt").write_text(
@@ -171,6 +183,7 @@ class Harness:
             env["PATH"] = str(self._restricted_bin())
         env["SC_FIX"] = str(self.fix)
         env["STANDUP_LOCAL_UNITS"] = units
+        env["STANDUP_UPTIME_SECONDS"] = str(self.uptime)
         env.pop("SC_FAIL_ALL", None)
         env.pop("SC_FAIL_SHOW", None)
         env.pop("SC_FAIL_FAILED", None)
