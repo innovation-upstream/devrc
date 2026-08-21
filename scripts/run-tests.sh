@@ -401,11 +401,15 @@ HERMETIC_TARGETS=(
 # githooks/tests-on-push.sh runs on every push; the hermetic flake gate does not.
 DEVHOST_TARGETS=(
   # 🔴 THE FIRST OCCUPANT, and it is here because it CANNOT be hermetic — not
-  # because that is convenient. It evaluates the flake's real home-manager
-  # activation DAG (`nix eval --impure`) and runs it through home-manager's own
+  # because that is convenient. It evaluates the flake's real activation DAG
+  # (`nix eval --impure`) and runs it through that module set's own
   # `lib.dag.topoSort`, to assert that ZERO activation steps run between
   # `installPackages` and `linkGeneration` — the window in which
-  # reclaimManagedPaths' deleted files exist nowhere on disk.
+  # reclaimManagedPaths' deleted files exist nowhere on disk. The suite's own
+  # header carries the full argument; it is not repeated here, and the HM
+  # binary's NAME is deliberately not spelled anywhere in this file (the
+  # hazard-vocabulary scan in test_no_real_launchers.py reads top-level scripts
+  # as TEXT and cannot tell a comment from a command).
   #
   # The nix BUILD SANDBOX has a `nix` binary with `nix-command` DISABLED and
   # none of the flake's inputs, so the eval errors there. Putting it in

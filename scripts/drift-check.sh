@@ -122,11 +122,17 @@
 #       MATCHES. Measured 2026-08-20: 19 of 488 manifest leaves on the workbench,
 #       in two unrelated subsystems, the older one 16 days undetected. See "THE
 #       WRONG-WRITER SCAN" in the parity payload.
-#   18  DRIFT — a BUILT-SOURCE SCOPE has been UNMEASURABLE for N CONSECUTIVE runs
-#       on that host, so its currency has never been evaluated and rc 17 cannot
-#       fire for it. 🔴 The gap rc 17 left: "we could not look" correctly set no
-#       code, and therefore escalated NEVER. See "UNMEASURED IS NOT FOREVER"
-#       below. Same ladder as rc 13, and it ranks just under it — see severity().
+#   18  DRIFT — a SCOPE has been UNMEASURABLE for N CONSECUTIVE runs on that
+#       host, so the check that owns it CANNOT fire. 🔴 The gap rc 17 left: "we
+#       could not look" correctly set no code, and therefore escalated NEVER.
+#       TWO KINDS of scope, one code, because it is one finding:
+#         * a BUILT-SOURCE scope (`[srcblind]`) — its currency was never
+#           evaluated, so rc 17 cannot fire for it.
+#         * a host's MANAGED-PATH scan (`[mpblind]`) — `no-cmp` / `no-manifest`
+#           / `empty-manifest` classified nothing, so rc 19 cannot fire for it,
+#           and such a host is otherwise git-CLEAN.
+#       See "UNMEASURED IS NOT FOREVER" below. Same ladder as rc 13, and it ranks
+#       just under it — see severity().
 #   16  ACTIONABLE, not drift — the fuzzyclaw PHASE-2 GATE has OPENED: zero rows
 #       still take their `age_secs` from fuzzyclaw alone, so the readers can be
 #       removed. See "THE FUZZYCLAW PHASE-2 GATE" below. It is the LEAST severe
@@ -281,6 +287,29 @@
 # is walked only when it returned a `FACT src-unmeasured examined=N …` line of
 # its own, so an unreachable laptop bumps nothing — rc 13 already owns that
 # finding, and a host nobody looked at must not accumulate a streak.
+#
+# 🔴 THE SAME LADDER NOW CARRIES THE MANAGED-PATH SCAN — the second scope kind,
+# and it was left off. The wrong-writer walk has three ways to fail to measure
+# (`no-cmp`, `no-manifest`, `empty-manifest`), each of which prints COULD NOT
+# MEASURE and sets no code, so rc 19 could be structurally unable to fire while
+# every run reported rc 0. That is verbatim the argument above, one subsystem
+# over, and the tokens land on the STRUCTURAL rung through the same fail-closed
+# enumeration.
+#
+#   * NOCMP is the REACHABLE one and the reason this is a ladder rather than a
+#     documented exemption. The unit's PATH is declared in nix/home.nix and `cmp`
+#     ships in diffutils, not coreutils, so a host that has PULLED but not
+#     SWITCHED runs a script whose dependency the PATH predates. Such a host is
+#     git-CLEAN — nothing else in this file has anything to say about it — and on
+#     any host ship.sh skips, the window never closes on its own.
+#   * NOMANIFEST / EMPTYMANIFEST are structural in the same sense: `$hfiles`
+#     names no generation, and it will name none next run either.
+#   * The scope is the literal `@managed-paths`, one per host. `@` cannot appear
+#     in a built-source scope (those are `${workspace}/`-derived, alphabet
+#     [A-Za-z0-9._/-]), so the two kinds cannot collide in the state dir.
+#   * The block prints `hosts-reporting= unmeasured= escalated=` and withholds it
+#     entirely at zero hosts. There is no scope COUNT to withhold — one host, one
+#     scope — so the host count is the whole refusal.
 #
 # The state file is per (host, scope): $DRIFT_STATE_DIR/unmeasured-<role>-<scope>
 # with `/` escaped to `_` and a literal `_` doubled — injective over the whole
@@ -569,8 +598,13 @@ severity() {
     # repairs it during any ordinary switch, so a run of ship.sh clears it.
     19) echo 62 ;;
     13) echo 60 ;;
-    # 18 (a built-source scope has been UNMEASURABLE for N consecutive runs) sits
-    # between 13 and 6, and the digit says nothing about that either.
+    # 18 (a SCOPE has been UNMEASURABLE for N consecutive runs — a built-source
+    # scope, or a host's whole managed-path scan) sits between 13 and 6, and the
+    # digit says nothing about that either. Both kinds share the rank because
+    # they share the argument below verbatim: substitute "rc 19 (rank 62)" and
+    # "a wrong-writer path" for the built-source words and every clause still
+    # holds. A second code would be a second severity to reason about for no
+    # gain.
     #   BELOW 13, because they are the same KIND of finding — a persistent
     #   inability to look, escalated only after a run of consecutive misses — and
     #   13 is that inability about an ENTIRE HOST (every check on it, including
@@ -940,6 +974,12 @@ W_WRONG=0
 W_DIFFER=0
 W_BLOCK=0
 w_list=""
+# 🔴 THE STATUS IS A TOKEN, AND IT DEFAULTS TO THE UNMEASURED SIDE. Every branch
+# below sets it; UNSET is the value it can only hold if a future edit adds a
+# fourth branch and forgets, and that branch must NOT read as a clean scan. The
+# driver'"'"'s ladder puts anything that is not MEASURED on the structural rung, so
+# forgetting fails closed rather than silently exempting the new case.
+W_STATUS=UNSET
 
 w_walk() { # w_walk <manifest-dir> <relative-prefix>
   local E BASE REL TGT
@@ -1020,12 +1060,14 @@ if ! command -v cmp >/dev/null 2>&1; then
   # ship.sh skips, that window never closes. Measured 2026-08-21 on a fixture
   # with one genuine permanent case: with cmp, self-healing=1; without it,
   # self-healing=2.
+  W_STATUS=NOCMP
   psay "managed paths: COULD NOT MEASURE — reason=no-cmp (\`cmp\` is not on PATH)"
   psay "  \`cmp\` is the only thing that separates a permanent finding from one the next"
   psay "  switch repairs. Nothing was classified, so no count is claimed and no code is"
   psay "  set. cmp ships in diffutils, not coreutils; if this host has pulled but not"
   psay "  switched, the unit PATH predates the check — run a home-manager switch."
 elif [ ! -d "$hfiles/" ]; then
+  W_STATUS=NOMANIFEST
   psay "managed paths: NOT EVALUATED — no home-files manifest at $hfiles"
   psay "  a walk of nothing is not a clean walk. Nothing was counted, so no count is claimed."
 else
@@ -1037,10 +1079,12 @@ else
     # workbench), so zero means the path is wrong, the tree is half-built, or it
     # is not a manifest. Printed with the same reason-token shape, and it sets no
     # code, because the finding it would otherwise deny is a repair.
+    W_STATUS=EMPTYMANIFEST
     psay "managed paths: COULD NOT MEASURE — reason=empty-manifest (examined=0 at $hfiles)"
     psay "  the directory exists but has no leaves. A walk of nothing is not a clean walk;"
     psay "  a real generation has hundreds, so this is not an all-clear."
   else
+  W_STATUS=MEASURED
   psay "managed paths: examined=$W_EXAMINED wrong-writer=$W_WRONG self-healing=$W_DIFFER blocking=$W_BLOCK (manifest: $hfiles)"
   if [ "$W_WRONG" -gt 0 ]; then
     psay "🔴 DRIFT — $W_WRONG of $W_EXAMINED managed path(s) are NOT the link nix intended."
@@ -1067,12 +1111,34 @@ else
     fi
     psay "  fix (on that host): home-manager switch --flake ~/workspace/devrc --impure"
     psay "  home.activation.reclaimManagedPaths reclaims the identical ones on the way"
-    psay "  through, so this clears on the next switch. Preview it first, read-only:"
+    psay "  through, so this clears on the next switch THAT GETS PAST installPackages"
+    psay "  (the repair runs after it; nix-env --set aborts on an imperative-profile"
+    psay "  conflict, and a host in that state never reaches the repair)."
+    psay "  Preview it first, read-only:"
     psay "    scripts/reclaim-managed-paths.sh"
     [ "$p_rc" = 0 ] && p_rc=19
   fi
   fi
 fi
+
+# 🔴 THE FACT LINE THE rc-18 LADDER READS, and why it is a STATUS TOKEN rather
+# than a count. The three unevaluated branches above deliberately set no code,
+# which was right per run and wrong forever — the identical mistake rc 17 made
+# and rc 18 was written to correct. `no-cmp` in particular is REACHABLE on an
+# ordinary host: the unit'"'"'s PATH is declared in nix/home.nix and `cmp` lives in
+# diffutils, so a host that has PULLED but not SWITCHED runs a script whose
+# dependency the PATH predates — and such a host is git-CLEAN, so nothing else
+# here catches it. Left as-is, drift-check reports rc 0 for as many consecutive
+# runs as you like while the rc-19 detector is wired to nothing.
+#
+# The examined count is printed beside the status for the same pair rule the
+# whole scan obeys, but the ladder branches on the TOKEN: `examined=0` is
+# produced by a healthy-looking run AND by three different blindnesses, so a
+# number cannot distinguish them. This is one line per host per run; the ladder
+# itself lives in the driver, because a streak is persistent state and belongs
+# to the machine keeping the record, not to a payload piped to whichever host is
+# being examined.
+echo "[$label] FACT wrongwriter examined=$W_EXAMINED status=$W_STATUS"
 
 # --- settings.json: KEY NAMES ONLY --------------------------------------------
 # 🔴 Never the values. This file holds tokens, hook command lines and permission
@@ -2062,6 +2128,103 @@ else
 fi
 echo
 
+# ── THE SAME LADDER, FOR THE MANAGED-PATH SCAN (rc 18) ────────────────────────
+# 🔴 THE GAP THAT WAS LEFT BEHIND. The wrong-writer scan has THREE ways to fail
+# to measure — `no-cmp`, `no-manifest`, `empty-manifest` — and all three set NO
+# code, so drift-check could report rc 0 run after run while the rc-19 detector
+# was blind. That is precisely the "UNMEASURED IS NOT FOREVER" argument this file
+# already makes for built-source scopes: right per run, wrong forever.
+#
+# It is not hypothetical. `no-cmp` is reachable on an ordinary host — the unit's
+# PATH comes from nix/home.nix and `cmp` ships in diffutils, so a host that has
+# PULLED but not SWITCHED runs a script whose dependency the PATH predates. Such
+# a host is git-CLEAN, which means no other check here sees anything wrong with
+# it, and on any host ship.sh skips that window never closes on its own.
+#
+# SAME rc, SAME ladder functions, SAME thresholds, deliberately: "a scope has
+# been unmeasurable for N consecutive runs" is one finding, not two, and giving
+# it a second code would mean a second severity to reason about for no gain.
+# One scope per host rather than many, so there is no scope COUNT to withhold —
+# the refusal that matters here is the host one.
+#
+# 🔴 EVERY NON-MEASURED TOKEN LANDS ON A LADDER, including one this file has
+# never seen. `u_threshold` exempts only `ABSENT` and gives `FETCHFAILED` the
+# longer rung; anything else — the three tokens above, the `UNSET` default a
+# forgotten future branch would carry, a `MALFORMED` line from an older
+# drift-check.sh on the far side — takes the structural rung. Fail closed: a new
+# blindness must escalate until someone decides otherwise, not before.
+MP_SCOPE="@managed-paths"
+echo "=== managed-path scans that stay UNMEASURED ($LOCAL_ROLE / $REMOTE_ROLE) ==="
+M_REPORTING=0
+M_UNMEASURED=0
+M_ESCALATED=0
+for HROLE in "$LOCAL_ROLE" "$REMOTE_ROLE"; do
+  if [ "$HROLE" = "$LOCAL_ROLE" ]; then
+    M_LINE="$(fact_of "$LOCAL_OUT" wrongwriter)"
+  else
+    M_LINE="$(fact_of "$REMOTE_OUT" wrongwriter)"
+  fi
+  # A HOST IS WALKED ONLY IF IT ANSWERED — the same rule the block above uses.
+  # No fact line means the payload did not run (unreachable, --no-remote, an
+  # older script on the far side); rc 13 owns that finding, and a streak nobody
+  # was looking at must not accumulate.
+  [ -n "$M_LINE" ] || continue
+  M_REPORTING=$(( M_REPORTING + 1 ))
+
+  # 🔴 THE WHOLE-STRING FALLBACK, AGAIN. `${x##*status=}` returns x UNCHANGED
+  # when `status=` is absent, so a truncated or older fact line would be read as
+  # a status token spelling the whole line — which is not MEASURED, so it lands
+  # on the ladder, but it would land there under a garbage reason. Require the
+  # marker before taking the remainder, and name what is left MALFORMED.
+  case "$M_LINE" in
+    *status=*) M_STATUS="${M_LINE##*status=}" ;;
+    *) M_STATUS=MALFORMED ;;
+  esac
+  case "$M_STATUS" in ''|*[!A-Z]*) M_STATUS=MALFORMED ;; esac
+
+  if [ "$M_STATUS" = MEASURED ]; then
+    u_streak_reset "$HROLE" "$MP_SCOPE"
+    echo "[mpblind] $HROLE: the managed-path scan MEASURED this run; any streak is reset."
+    continue
+  fi
+
+  M_UNMEASURED=$(( M_UNMEASURED + 1 ))
+  MTHR="$(u_threshold "$M_STATUS")"
+  MSTK="$(u_streak_bump "$HROLE" "$MP_SCOPE" "$M_STATUS")"
+  if [ "$MSTK" -lt 0 ]; then
+    echo "[mpblind] 🔴 $HROLE: UNMEASURED ($M_STATUS), and the streak under $DRIFT_STATE_DIR"
+    echo "[mpblind]   could not be persisted, so 'for how long' is unknowable — ESCALATING (rc 18)."
+    M_ESCALATED=$(( M_ESCALATED + 1 ))
+    note_rc 18
+  elif [ "$MSTK" -ge "$MTHR" ]; then
+    # The whole claim on ONE line — host, scope, reason, streak and threshold —
+    # for the reason the srcblind ladder gives: a guard on half a sentence is
+    # walkable by rewording the other half.
+    echo "[mpblind] 🔴 DRIFT — $HROLE $MP_SCOPE: UNMEASURED ($M_STATUS) for $MSTK CONSECUTIVE runs (threshold $MTHR)."
+    echo "[mpblind]   The wrong-writer scan has not classified anything on that host, so rc 19"
+    echo "[mpblind]   CANNOT fire for it: a managed path owned by the wrong writer is invisible"
+    echo "[mpblind]   for as long as this holds, and such a host is otherwise git-CLEAN."
+    echo "[mpblind]   fix: run a home-manager switch on that host (NOCMP — the unit PATH predates"
+    echo "[mpblind]   the check), or find out why \$hfiles names no generation (NOMANIFEST /"
+    echo "[mpblind]   EMPTYMANIFEST), then re-run."
+    M_ESCALATED=$(( M_ESCALATED + 1 ))
+    note_rc 18
+  else
+    echo "[mpblind] $HROLE $MP_SCOPE: UNMEASURED ($M_STATUS) — $MSTK/$MTHR consecutive; NOT escalated."
+    echo "[mpblind]   Still not a pass: nothing has classified a managed path on that host."
+  fi
+done
+
+# 🔴 REPORTING BESIDE ESCALATED, and a refusal at zero. `escalated=0` over a
+# fleet nobody asked is byte-identical to `escalated=0` over a healthy one.
+if [ "$M_REPORTING" = 0 ]; then
+  echo "[mpblind] NOT EVALUATED — no host returned a wrongwriter fact set; obtained from: ${CHECKED:-none}."
+  echo "[mpblind]   this is not 'every host measured'. No host's scan was counted."
+else
+  echo "[mpblind] hosts-reporting=$M_REPORTING unmeasured=$M_UNMEASURED escalated=$M_ESCALATED"
+fi
+echo
+
 # ── FUZZYCLAW PHASE-2 GATE ────────────────────────────────────────────────────
 # See "THE FUZZYCLAW PHASE-2 GATE" in the header for what this measures and why
 # it is local-only. Here: how it refuses to produce a silent zero.
@@ -2223,6 +2386,9 @@ if [ "$rc" != 0 ]; then
   echo "  rc18=a built-source scope has been UNMEASURABLE for N consecutive runs on that host"
   echo "       (no upstream / fetch failing), so rc17 cannot fire for it. repo ABSENT never"
   echo "       escalates. (ranks just under rc13 — same 'could not look' class, smaller scope)"
+  echo "  rc18=also a host whose MANAGED-PATH scan has been UNMEASURABLE for N consecutive runs"
+  echo "       (no-cmp / no-manifest / empty-manifest), so rc19 cannot fire for it — and such a"
+  echo "       host is otherwise git-CLEAN, so nothing else here reports it"
 fi
 [ -n "$UNCHECKED" ] && echo "drift-check: NOT checked: $UNCHECKED"
 exit "$rc"

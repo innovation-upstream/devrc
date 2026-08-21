@@ -69,6 +69,17 @@
 # being a permanently-red gate: the finding clears on the next switch, not on a
 # human remembering a one-off `rm`.
 #
+# 🔴 WITH A PRECONDITION, since the entry moved to run AFTER installPackages:
+# that switch has to REACH this step. `installPackages` is `nix-env --set`, and
+# this repo's MEMORY records it failing outright on an imperative-profile
+# conflict (a package installed with `nix profile install` and also declared in
+# nix/pkgs). On such a host every switch aborts before the repair and rc 19
+# persists across arbitrarily many of them. It is still the right trade — the
+# old ordering put that same `nix-env --set` INSIDE the delete/relink window,
+# where an abort left the files deleted AND unlinked rather than merely
+# unrepaired — but "clears on the next switch" is now "clears on the next switch
+# that gets past installPackages", and where it is stated it says so.
+#
 # 🔴 THE PLACEMENT IS A SAFETY PROPERTY, NOT A DETAIL. Between this script's
 # `rm` and linkGeneration's `ln`, the reclaimed files exist NOWHERE on disk, so
 # every activation step in that window is a chance to strand them deleted and

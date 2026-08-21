@@ -125,6 +125,30 @@ class Fleet:
         self.home.mkdir()
         self.bin.mkdir()
 
+        # 🔴 A DEFAULT HEALTHY home-files MANIFEST, for the same reason
+        # DRIFT_SESSION_MANAGER is defaulted in `check()` below: a fixture host
+        # must take a DEFINED branch of every scan, not an accidental one.
+        # Without it every test here ran the wrong-writer scan against a $HOME
+        # with no manifest at all, i.e. permanently `COULD NOT MEASURE —
+        # reason=no-manifest`. That was invisible while an unmeasured scan set
+        # no code; once it joined the rc-18 ladder, nine tests with no interest
+        # in managed paths escalated to rc 18 after four runs and asserted
+        # `rc == 0` against it — a DIFFERENT guard's finding killing them.
+        #
+        # One leaf, correctly deployed, so the default state is `examined=1
+        # wrong-writer=0` — measured and clean. A test that wants a different
+        # shape passes DRIFT_HOME_FILES, as ~25 of them already do.
+        self.manifest = tmp_path / "default-home-files"
+        store = tmp_path / "default-store"
+        store.mkdir(parents=True)
+        (store / "healthy.md").write_text("deployed by nix\n")
+        (self.manifest / ".config" / "dc-default").mkdir(parents=True)
+        (self.manifest / ".config" / "dc-default" / "healthy.md").symlink_to(
+            store / "healthy.md")
+        (self.home / ".config" / "dc-default").mkdir(parents=True)
+        (self.home / ".config" / "dc-default" / "healthy.md").symlink_to(
+            store / "healthy.md")
+
         self.gitconfig = tmp_path / "gitconfig"
         self.gitconfig.write_text(
             "[user]\n\tname = t\n\temail = t@t\n[init]\n\tdefaultBranch = main\n"
@@ -222,6 +246,9 @@ class Fleet:
             # write to the operator's real state dir and inherit a streak from
             # whatever ran before them.
             DRIFT_STATE_DIR=str(self.state),
+            # See the manifest built in __init__: default to a MEASURED,
+            # clean managed-path scan rather than to `no-manifest`.
+            DRIFT_HOME_FILES=str(self.manifest),
         )
         env.update(envextra)   # per-test overrides win (e.g. a blocked state dir)
         # `script` runs a COPY of the checker whose `lib/` a test controls. The
@@ -4762,7 +4789,13 @@ def test_a_ladder_over_ZERO_SCOPES_says_so_instead_of_printing_a_clean_line(flee
     fleet.catch_up()
     rc, out = fleet.check("--no-remote")
     assert rc == 0, out
-    blk = out.split("=== built-source scopes")[1]
+    # 🔴 BOUNDED AT THE NEXT SECTION HEADER, not "everything after this one".
+    # The unbounded slice swallowed the `[mpblind]` block that follows (the same
+    # rc-18 ladder for the managed-path scan), whose summary legitimately says
+    # `hosts-reporting=` — so the refusal below started reading a DIFFERENT
+    # block's clean line and failed for a reason that has nothing to do with
+    # built-source scopes.
+    blk = out.split("=== built-source scopes")[1].split("\n===")[0]
     assert "workbench: NOT EVALUATED" in blk, blk
     assert "named no ${workspace}/" in blk, blk
     assert "named ZERO" in blk, blk
@@ -4779,7 +4812,9 @@ def test_a_ladder_over_ZERO_HOSTS_says_so_instead_of_printing_a_clean_line(fleet
     fleet.stub_ssh(255)
     rc, out = fleet.check("--no-local", REMOTE_SSH="stub@example.invalid")
     assert rc == 2, out                              # the existing checked-nothing rc
-    blk = out.split("=== built-source scopes")[1]
+    # Bounded at the next section header — see the sibling test above: the
+    # `[mpblind]` block that follows carries its own `hosts-reporting=` line.
+    blk = out.split("=== built-source scopes")[1].split("\n===")[0]
     assert "no host returned a src-unmeasured fact set" in blk, blk
     assert "hosts-reporting=" not in blk, blk
 
@@ -4925,6 +4960,171 @@ def test_the_rc18_legend_is_printed_with_the_verdict(fleet):
     assert "drift-check: DRIFT (rc=18)" in out, out
     assert "rc18=a built-source scope has been UNMEASURABLE" in out, out
     assert "repo ABSENT never" in out, out
+    assert "rc18=also a host whose MANAGED-PATH scan has been UNMEASURABLE" in out, (
+        "rc 18 now covers two kinds of scope and the legend names only one. The "
+        "journal is this unit's only surface; a reader who gets rc 18 for a "
+        "no-cmp host and reads 'built-source scope' will look in the wrong "
+        "place entirely.\n" + out)
+
+
+# --------------------------------------------------------------------------- #
+# 13b. rc 18 — A HOST WHOSE MANAGED-PATH SCAN STAYS UNMEASURED
+#
+# 🔴 THE SAME GAP, ONE SUBSYSTEM OVER, AND IT WAS LEFT OPEN. The wrong-writer
+# scan has THREE ways to fail to measure — `no-cmp`, `no-manifest`,
+# `empty-manifest` — and every one of them printed COULD NOT MEASURE and set NO
+# code. Right per run (a repair must never be read off a bare zero) and wrong
+# forever: drift-check reported rc 0 run after run while the rc-19 detector was
+# wired to nothing, which is verbatim the argument the file already makes for
+# built-source scopes.
+#
+# Not hypothetical. `no-cmp` is reachable on an ordinary host: the unit's PATH
+# comes from nix/home.nix and `cmp` ships in diffutils, so a host that has PULLED
+# but not SWITCHED runs a script whose dependency the PATH predates — and such a
+# host is git-CLEAN, so no other check here says a word about it.
+# --------------------------------------------------------------------------- #
+def _mpblind(out):
+    """(hosts-reporting, unmeasured, escalated) off the managed-path ladder.
+
+    The triple, never `escalated=0` alone — a ladder walked over no hosts prints
+    exactly that zero. Raises when the line is absent, because an absent summary
+    and a clean one are the same value to a comparison."""
+    m = re.search(r"\[mpblind\] hosts-reporting=(\d+) unmeasured=(\d+) "
+                  r"escalated=(\d+)", out)
+    assert m, ("no [mpblind] hosts-reporting/unmeasured/escalated line — the "
+               "triple IS the claim:\n" + out)
+    return tuple(int(g) for g in m.groups())
+
+
+def test_an_unmeasured_managed_path_scan_BELOW_the_threshold_does_not_fail_the_unit(
+        fleet, tmp_path):
+    """The softening half. A host can genuinely be mid-deploy for one run, and a
+    code that fired immediately would be the permanently-red gate this file
+    refuses everywhere else. Reported loudly, escalated only after N."""
+    fleet.catch_up()
+    empty = tmp_path / "empty-generation"
+    empty.mkdir()
+    rc, out = fleet.check("--no-remote", DRIFT_HOME_FILES=str(empty),
+                          DRIFT_UNMEASURED_ESCALATE="3")
+    assert rc == 0, ("one unmeasured managed-path scan failed the unit "
+                     "immediately: %d\n%s" % (rc, out))
+    assert "1/3 consecutive; NOT escalated" in out, out
+    assert "Still not a pass" in out, (
+        "an unmeasured scan below the threshold read as a pass\n" + out)
+    assert _mpblind(out) == (1, 1, 0), out
+
+
+def test_a_managed_path_scan_UNMEASURED_for_N_CONSECUTIVE_runs_is_rc18(
+        fleet, tmp_path):
+    """🔴 THE DEADMAN. Measured at PR head: a host whose scan could not measure
+    reported `rc 0` on every run, for ever, while rc 19 could not fire for it.
+
+    Driven the way the operator would hit it — four runs of the SAME blindness —
+    and the escalation is asserted on the whole one-line claim (host, scope,
+    reason, streak, threshold), not on a word another branch could spell."""
+    fleet.catch_up()
+    empty = tmp_path / "empty-generation"
+    empty.mkdir()
+    for i in range(3):
+        rc, out = fleet.check("--no-remote", DRIFT_HOME_FILES=str(empty),
+                              DRIFT_UNMEASURED_ESCALATE="4")
+        assert rc == 0, "escalated on run %d of 4: %d\n%s" % (i + 1, rc, out)
+    rc, out = fleet.check("--no-remote", DRIFT_HOME_FILES=str(empty),
+                          DRIFT_UNMEASURED_ESCALATE="4")
+    assert rc == 18, ("four consecutive unmeasured scans did not escalate: "
+                      "%d\n%s" % (rc, out))
+    assert ("🔴 DRIFT — workbench @managed-paths: UNMEASURED (EMPTYMANIFEST) "
+            "for 4 CONSECUTIVE runs (threshold 4).") in out, out
+    assert _mpblind(out) == (1, 1, 1), out
+
+
+def test_a_missing_cmp_puts_the_managed_path_scan_ON_the_ladder(fleet, tmp_path):
+    """🔴 THE REACHABLE ONE, and the reason this ladder exists rather than an
+    exemption note. `cmp` lives in diffutils and the unit's PATH is declared in
+    nix/home.nix, so a host that has PULLED but not SWITCHED runs this script
+    with a PATH that predates its dependency. That host is git-CLEAN — every
+    other check here is happy — and on any host ship.sh skips, the window never
+    closes on its own.
+
+    NOCMP must take the STRUCTURAL rung (not FETCHFAILED's longer one, and not
+    ABSENT's exemption), so the threshold printed is DRIFT_UNMEASURED_ESCALATE.
+    """
+    fleet.catch_up()
+    nocmp = _nocmp_bin(tmp_path, "nocmp-mpladder")
+    env = fleet.env(
+        SHIP_ROLE="workbench", DRIFT_REPO=str(fleet.work),
+        DRIFT_SESSION_MANAGER=str(fleet.bin / "session-manager"),
+        DRIFT_STATE_DIR=str(fleet.state),
+        DRIFT_HOME_FILES=str(fleet.manifest),
+        DRIFT_UNMEASURED_ESCALATE="2")
+    env["PATH"] = str(fleet.bin) + os.pathsep + str(nocmp)
+    out = ""
+    for i in range(2):
+        proc = subprocess.run(["bash", str(DRIFT), "--no-remote"],
+                              capture_output=True, text=True, env=env,
+                              timeout=60)
+        rc, out = proc.returncode, proc.stdout + proc.stderr
+        if i == 0:
+            assert rc == 0, "NOCMP escalated on its first run: %d\n%s" % (rc, out)
+            assert "1/2 consecutive; NOT escalated" in out, out
+    assert rc == 18, ("a host that has never been able to classify a managed "
+                      "path reported %d\n%s" % (rc, out))
+    assert ("🔴 DRIFT — workbench @managed-paths: UNMEASURED (NOCMP) for 2 "
+            "CONSECUTIVE runs (threshold 2).") in out, out
+    assert "reason=no-cmp" in out, (
+        "the per-run reason token vanished; the ladder must not replace it\n" + out)
+
+
+def test_the_managed_path_ladder_RESETS_the_moment_the_scan_measures(fleet, tmp_path):
+    """A streak is a run of CONSECUTIVE misses. A host that deploys and starts
+    measuring again must not carry its old count — otherwise the next single
+    blip escalates and the code stops meaning what the legend says."""
+    fleet.catch_up()
+    empty = tmp_path / "empty-generation"
+    empty.mkdir()
+    for _ in range(3):
+        rc, out = fleet.check("--no-remote", DRIFT_HOME_FILES=str(empty),
+                              DRIFT_UNMEASURED_ESCALATE="4")
+        assert rc == 0, out
+
+    rc, out = fleet.check("--no-remote", DRIFT_UNMEASURED_ESCALATE="4")
+    assert rc == 0, out
+    assert "the managed-path scan MEASURED this run; any streak is reset." in out, out
+    assert _mpblind(out) == (1, 0, 0), out
+
+    # …and the count really is zero, not merely un-printed: one more blind run
+    # must report 1/4, not 4/4.
+    rc, out = fleet.check("--no-remote", DRIFT_HOME_FILES=str(empty),
+                          DRIFT_UNMEASURED_ESCALATE="4")
+    assert rc == 0, ("the streak was reported as reset but escalated on the "
+                     "very next miss: %d\n%s" % (rc, out))
+    assert "1/4 consecutive; NOT escalated" in out, out
+
+
+def test_a_managed_path_ladder_over_ZERO_HOSTS_says_so(fleet):
+    """🔴 `escalated=0` over a fleet nobody asked is byte-identical to
+    `escalated=0` over a healthy one. The summary is WITHHELD rather than
+    printed as a clean-looking triple."""
+    fleet.stub_ssh(255)
+    rc, out = fleet.check("--no-local", REMOTE_SSH="stub@example.invalid")
+    assert rc == 2, out                              # the existing checked-nothing rc
+    blk = out.split("=== managed-path scans")[1].split("\n===")[0]
+    assert "NOT EVALUATED — no host returned a wrongwriter fact set" in blk, blk
+    assert "hosts-reporting=" not in blk, (
+        "a ladder over zero hosts printed a clean-looking summary:\n" + blk)
+
+
+def test_the_managed_path_streak_is_kept_PER_HOST(fleet, tmp_path):
+    """One host's blindness is not the other's. The counter file is keyed on
+    (role, scope), and `@managed-paths` cannot collide with a built-source scope
+    — those are `${workspace}/`-derived and their alphabet has no `@`."""
+    fleet.catch_up()
+    empty = tmp_path / "empty-generation"
+    empty.mkdir()
+    fleet.check("--no-remote", DRIFT_HOME_FILES=str(empty),
+                DRIFT_UNMEASURED_ESCALATE="4")
+    names = sorted(p.name for p in fleet.state.glob("unmeasured-*"))
+    assert names == ["unmeasured-workbench-@managed-paths"], names
 
 
 @pytest.mark.parametrize("var", ["DRIFT_UNMEASURED_ESCALATE",
@@ -5108,6 +5308,40 @@ def _normalised(out):
     half; this is the whole-normalised-string form the rules ask for."""
     lines = [re.sub(r"^\[[^\]]*\]\s*", "", ln).strip() for ln in out.splitlines()]
     return re.sub(r"\s+", " ", " ".join(lines))
+
+
+def test_the_rc19_fix_advice_states_the_installPackages_PRECONDITION(fleet, tmp_path):
+    """🔴 THE CLAIM GAINED A PRECONDITION WHEN THE REPAIR MOVED.
+
+    rc 19 is not a SuccessExitStatus, which is only defensible because an
+    ordinary switch repairs the finding. Since the reorder, the repair runs
+    AFTER `installPackages` — `nix-env --set`, which this repo's MEMORY records
+    failing outright on an imperative-profile conflict. On such a host every
+    switch aborts before the repair and rc 19 persists across arbitrarily many
+    of them, so a bare "this clears on the next switch" is false there.
+
+    Still the right trade — the old ordering put that same `nix-env --set`
+    INSIDE the delete/relink window, where an abort left the files deleted AND
+    unlinked rather than merely unrepaired — but the operator-facing sentence
+    has to say so. Pinned as the whole normalised claim, not a keyword, and with
+    the bare form asserted ABSENT so a revert cannot pass by adding a second
+    sentence somewhere else.
+    """
+    fleet.catch_up()
+    manifest = _mkmanifest(tmp_path / "gen1", fleet.home, linked=1,
+                           wrong_identical=1)
+    rc, out = bounded_check(fleet, "--no-remote", DRIFT_HOME_FILES=str(manifest))
+    assert rc == 19, out
+    norm = _normalised(out)
+    assert ("so this clears on the next switch THAT GETS PAST installPackages "
+            "(the repair runs after it; nix-env --set aborts on an "
+            "imperative-profile conflict, and a host in that state never "
+            "reaches the repair).") in norm, (
+        "the rc-19 fix advice no longer states the installPackages "
+        "precondition\n" + out)
+    assert "clears on the next switch. " not in norm, (
+        "the unconditional form is back — on a host whose switch aborts at "
+        "installPackages this promises a repair that never runs\n" + out)
 
 
 def test_the_blocking_SUMMARY_names_its_count_and_is_absent_when_there_is_none(
