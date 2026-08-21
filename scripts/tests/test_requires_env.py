@@ -208,3 +208,41 @@ def test_runner_reports_both_new_outcomes(needle):
     """The collapse error and the widened accounting line both have to exist —
     the mechanism's whole value is the FAILURE it can now express."""
     assert needle in RUNNER.read_text(encoding="utf8")
+
+
+# --------------------------------------------------------------------------
+# GROUPED SKIPS — the defect this suite originally MISSED.
+# --------------------------------------------------------------------------
+
+def test_runner_counts_tests_not_skip_groups():
+    """🔴 `SKIPPED [N] …` is N TESTS sharing one reason, on ONE line.
+
+    `TOT_SKIPPED` is summed from pytest's SUMMARY and counts TESTS. Counting
+    LINES here and comparing the two is only accidentally correct while every N
+    is 1 — and both skips in this repo happen to be `[1]`, so the original
+    both-arms verification could not see it. It breaks on the first class-level
+    or parametrized `requires-env` decorator, which is the normal way to declare
+    an env requirement, and it breaks as a FALSE RED that blocks pushes.
+
+    Pins the extractor AND its use, because a helper that is never called is a
+    guard that does not exist.
+    """
+    runner = RUNNER.read_text(encoding="utf8")
+    assert "_env_skip_count()" in runner, "the group-size extractor is gone"
+    assert "env_pinned + ecount" in runner, \
+        "env_pinned increments by a constant again — grouped skips will false-red"
+    assert "env_pinned + 1 ))" not in runner, \
+        "a per-line increment survives; TOT_SKIPPED counts tests, not lines"
+
+
+@pytest.mark.parametrize("line,expected", [
+    ("SKIPPED [1] scripts/x/tests/t.py:9: requires-env[FOO]: why", "1"),
+    ("SKIPPED [5] scripts/x/tests/t.py:9: requires-env[FOO]: why", "5"),
+    ("SKIPPED [12] scripts/x/tests/t.py:9: requires-env[FOO]: why", "12"),
+])
+def test_group_size_regex_reads_n(line, expected):
+    """The sed the runner uses, pinned here so a rewrite cannot quietly change
+    which number it reads. Anchored at `^SKIPPED [` so a reason that merely
+    CONTAINS a bracketed number cannot be mistaken for the group size."""
+    m = re.match(r"^SKIPPED \[([0-9]+)\]", line)
+    assert m and m.group(1) == expected

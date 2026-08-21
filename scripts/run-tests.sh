@@ -2044,6 +2044,15 @@ fi
 env_pinned=0
 env_collapsed=()
 _env_skip_var() { printf '%s\n' "$1" | sed -nE 's/.*requires-env\[([A-Za-z_][A-Za-z0-9_]*)\].*/\1/p'; }
+# 🔴 A skip LINE is a GROUP, not one test: pytest's `-rs` emits `SKIPPED [N] …`,
+# where N is how many tests shared that reason. `TOT_SKIPPED` is summed from the
+# pytest SUMMARY and therefore counts TESTS. Counting groups here and comparing
+# against a test total is only accidentally right while every N is 1 — and it
+# breaks the instant someone puts the decorator on a CLASS or a parametrized
+# test, which is the normal way to declare an env requirement. The failure is a
+# FALSE RED that blocks pushes, i.e. exactly the "permanently-red gate" that
+# teaches people to pass --no-verify.
+_env_skip_count() { printf '%s\n' "$1" | sed -nE 's/^SKIPPED \[([0-9]+)\].*/\1/p'; }
 
 unexpected=()
 for line in "${SKIP_LINES[@]}"; do
@@ -2053,10 +2062,14 @@ for line in "${SKIP_LINES[@]}"; do
     # `${!evar-}` is the INDIRECT expansion — the value of the variable NAMED by
     # $evar, empty when unset. Never `$evar`, which is the name itself and always
     # non-empty, i.e. would score every declared skip as a collapse.
+    ecount="$(_env_skip_count "$line")"
+    # Default to 1 only if the `[N]` did not parse — never silently to 0, which
+    # would under-count and re-open the same false-red in the other direction.
+    [ -n "$ecount" ] || ecount=1
     if [ -n "${!evar-}" ]; then
       env_collapsed+=("$line")
     else
-      env_pinned=$(( env_pinned + 1 ))
+      env_pinned=$(( env_pinned + ecount ))
     fi
     continue
   fi
