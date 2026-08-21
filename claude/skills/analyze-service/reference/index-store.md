@@ -75,19 +75,25 @@ That last row is the one to read carefully: `not-attempted` and `ref-absent` bot
 show "nothing from the index", and only one of them is a finding.
 
 🔴 **`## What it is` is surfaced on the BODY paths only, never on an index row.**
-Until 2026-08-20 no reader printed it at all — `subsystem_recall` excluded it as
-"durable boilerplate", so an agent briefed on an entry got pointers and nuance,
-both of which assume you already know what the thing IS. It is now rendered
-FIRST, in full, wherever a whole entry body is printed: `--ref` (which is what
-this brief's `index:` block runs), the digest's one featured body, and each body
-`--mode full` prints.
+Until 2026-08-21 no BRIEFING path printed it — `subsystem_recall` left it out of
+`SURFACED_HEADINGS` as "durable boilerplate", so neither `--ref`, nor the digest,
+nor `service_recon`'s `index:` block carried it, and an agent briefed on an entry
+got pointers and nuance, both of which assume you already know what the thing IS.
+**`--search` is the exception and always was**: it splits an entry on *any*
+heading, wholly independent of `SURFACED_HEADINGS`, so it surfaced this section
+then and still does — but it only ever reaches an entry a query matched, so it
+briefs nobody. It is now rendered FIRST, in full, wherever a whole entry body is
+printed: `--ref` (which is what this brief's `index:` block runs), `--search`,
+the digest's one featured body, and each body `--mode full` prints.
 
 The one-line index rows that `--list` and the digest print for **every** entry
 carry nothing new — that surface is where the per-entry multiplier lives and it
-stays byte-identical. An entry whose `## What it is` is absent or empty prints a
-named notice under its own body and gets **no** `🔴 NO <heading>` badge: that
-badge means "a count on this row is not a measurement", and this section feeds no
-count. `subsystem_touch --validate` does not check it, for the same reason.
+stays byte-identical. An entry whose `## What it is` does not PARSE — absent,
+empty, or not matched as a heading (renamed, indented, inside a code fence, among
+others) — prints a named notice under its own body and gets **no**
+`🔴 NO <heading>` badge: that badge means "a count on this row is not a
+measurement", and this section feeds no count. `subsystem_touch --validate` does
+not check it, for the same reason.
 
 🔴 **EVERY searched root's scope is asked — not just the one that "won".** Root
 ranking is a path-name heuristic, so it answers two different questions badly:
