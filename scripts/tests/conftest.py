@@ -42,3 +42,22 @@ from testlib.nolaunch_plugin import STUB_DIR_ENV, no_real_launchers  # noqa: E40
 # calls scattered through this directory stay as defence in depth — they narrow
 # the spool per test, which this session-wide floor deliberately does not.
 from testlib.spool_plugin import no_real_activity_spool  # noqa: E402,F401
+
+# 🔴 The SAME shape again, for GIT. `testlib/nogit_plugin.py` is the
+# implementation and this import is one entry point; the runner loads the same
+# module for every target, so this is not a per-directory copy.
+#
+# It exists because the suite drove `git commit`, `git branch -m`, `git config
+# core.bare true`, `remote set-url` and `git push` against the operator's REAL
+# clone — the local reflog puts the `main → trunk` rename at 19:21:35Z and the
+# ~40-push storm onto `refs/heads/main` at 19:28:14Z, seven minutes later. The
+# offending code RESTORED the URL it clobbered, so every after-the-fact check
+# reported a clean repo; the only way to see it was `git remote -v` in the real
+# clone WHILE the suite ran.
+#
+# The policy is therefore an invariant at the moment of the call, not a
+# cleanup: a shim first on PATH that lets READS through anywhere and refuses
+# WRITES to any repo outside this session's tmp roots. Read
+# `testlib/nogit.py` before changing it — in particular the read-verb ledger,
+# which is an allowlist so an unknown verb fails CLOSED.
+from testlib.nogit_plugin import no_real_git_writes  # noqa: E402,F401
