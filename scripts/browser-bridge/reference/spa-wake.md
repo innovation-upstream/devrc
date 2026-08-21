@@ -271,3 +271,26 @@ browser-agent at all**.
 **Caveat:** in-frame `click`/`type` are SYNTHETIC (`isTrusted:false`, the
 `chrome.scripting` OOPIF path) — but were verified to actually drive the real app
 (the Grid tab got selected). Top-frame input remains TRUSTED CDP.
+
+### The i3 raise is OPT-IN — read the `i3` field before believing the screen moved
+
+`activate` always activates the tab Chrome-side, but the host-side i3 raise is a separate,
+consent-gated step. The result reports it as `i3: applied | skipped | failed | withheld`:
+
+- **`withheld`** — the command did not carry `focus:true`, so the raise was never asked
+  for and the operator's screen was untouched. The CLI's `--focus` / `--no-focus`
+  decides, and the DEFAULT is **on iff stdout is a TTY**: a human typing `browser
+  activate` in a terminal gets the raise; an agent (Claude Code's Bash tool, opencode, any
+  script) runs with stdout on a pipe and gets the tab activated WITHOUT it. That is a
+  structural discriminator — a real property of the process's stdio, not a keyword
+  heuristic — and it is overridable in both directions, so a script that genuinely wants
+  the screen says `--focus` and says it out loud. Measured: over three weeks all 166
+  `activate` calls came from non-interactive callers, and 0 of the 9 interactive
+  `browser` commands in the same telemetry were an activate.
+- **`skipped`** — this host has no i3, so it could not have raised anything regardless of
+  consent. It is reported separately from `withheld` precisely so the `--focus` advice is
+  not offered where it would be a dead end.
+
+Either way, `withheld`/`skipped` mean the window was NOT raised — so anything that
+genuinely needed the real foreground (a browser permission prompt, a native file picker)
+did not happen.

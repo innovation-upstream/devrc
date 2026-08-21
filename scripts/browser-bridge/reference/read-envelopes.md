@@ -94,3 +94,28 @@ the envelope reflect the frame, not the top page.
 
 An element that `--annotated` lists but that will not click is a paint-order /
 hit-test problem, not an extraction problem → `reference/css-hit-test.md`.
+
+## `screenshot` output modes — the ONE op whose stdout is not JSON
+
+`screenshot` **always writes a `.png`**: to `<path>` when you give one, else to a
+mode-0600 temp file (honouring `TMPDIR`, auto-pruned after 24h). The base64 data URL is
+**never** printed — `Read` the `.png`.
+
+| invocation | stdout |
+|---|---|
+| `screenshot` | compact JSON `{ok,path,bytes,url,via,note}` |
+| `screenshot <path>` | ⚠ the **bare path** on line 1 and a `#`-prefixed `Read` hint on line 2 — NOT JSON |
+| `screenshot <path> --json` | the same compact envelope the no-path form prints |
+| `screenshot --data-url` | the RAW response envelope, data URL and all (100s of KB) — the escape hatch |
+
+Every other subcommand puts a JSON envelope and nothing else on stdout; the advisories
+(hidden tab, disconnected instance, routing help) all go to STDERR. `screenshot <path>`
+is the back-compat exception, so a caller doing `json.loads(subprocess.run(...).stdout)`
+gets `Expecting value: line 1 column 1` — measured 2026-08-20, and the reason three
+consumers broke. `--json` is the fix, and it is ADDITIVE: the default output is
+byte-identical to before.
+
+Two pairs are **refused**, not silently reconciled: `--data-url` with an explicit path,
+and `--data-url` with `--json` (the raw envelope has no `path`/`bytes` to report, so
+accepting the pair would hand back a different parseable envelope with none of the keys
+the caller was about to read).

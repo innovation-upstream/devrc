@@ -184,6 +184,11 @@ Several Brave profiles can each run the extension and be driven independently �
 each has its own command queue (routing key = the profile's **label** if set,
 else a stable auto-id; labels must be unique per host).
 
+`health` and `instances` both list the connected ones: each entry carries the routing
+**key**, the profile **label**, its **instanceId**, and that instance's active tab
+**url**/**title** — which is how you tell two same-labelled profiles apart before
+picking a key.
+
 - **One instance connected** → no `--instance` needed (back-compat).
 - **More than one and no `--instance`** → the command **ERRORS** and lists the
   connected instances. Do NOT retry blindly — run `browser instances`, pick the
@@ -203,3 +208,30 @@ else a stable auto-id; labels must be unique per host).
   shows a "superseded — set a unique label" state) instead of re-registering
   instantly, so two profiles sharing a label can't mutual-supersede in a tight
   loop. If you see `superseded` steadily, two profiles share a label → fix it.
+
+### Env defaults `$BB_INSTANCE` / `$BB_TAB` / `$BB_FRAME` — precedence is easy, LIFETIME is the risk
+
+`BB_INSTANCE`, `BB_TAB` and `BB_FRAME` seed `--instance`, `--tab` and `--frame`, so a
+caller driving one profile+tab for a whole run sets them ONCE instead of repeating the
+flags on every call:
+
+```bash
+export BB_INSTANCE=work BB_TAB=1234
+browser text ; browser click '#go'          # both routed, no flags
+```
+
+- **An explicit flag always wins** — the flag loop assigns over whatever the environment
+  seeded. `--instance ''` therefore genuinely CLEARS an inherited `BB_INSTANCE` (it is an
+  explicit empty, not an absent flag).
+- 🔴 **Prefer the env defaults to hoisting the flags into a shell variable.** Under zsh an
+  unquoted `$F` is NOT word-split, so `F="--instance work --tab 12"; browser $F text`
+  passes ONE argument — the whole string — and the error names a flag you did not type.
+- 🔴 **An env default outlives the command that set it.** `export BB_FRAME=evil.example`
+  is inherited by every descendant for the rest of that shell's life, so a later
+  `browser type '<secret>' --selector '#x'` is routed into that frame — or at another
+  profile's tab — with NOTHING in its command line saying so, and the envelope it prints
+  looks exactly like the un-routed one. So the CLI says so **ONCE, on stderr** (stdout
+  stays pure JSON), naming the variable and its value; `BB_NO_ROUTE_NOTE=1` silences it
+  for a long run that meant it. One line is the only thing that makes an inherited
+  destructive route visible at the moment it is used — unset the variable when the
+  multi-step job that wanted it is done.

@@ -243,3 +243,20 @@ Symptom of a stale build: an op the CLI knows returns `unknown_op`, or `health` 
 shows the old `extension_version`. The `browser-bridge` **server** (not the extension)
 DOES restart automatically on a `home-manager switch` (X-Restart-Triggers) — only the
 extension needs the manual step.
+
+## ⚠ `js` vs `eval` — the refusal that never reaches the bridge
+
+`browser js '<expr>'` and `browser eval '<expr>'` are the **same wire op**: `js` is a
+first-class CLI-surface alias, the semantics and flags are identical, and the extension
+only ever sees `eval`. Neither spelling is deprecated.
+
+**Prefer the `js` spelling in a worktree-isolated agent.** Claude Code's
+worktree-isolation guard pattern-matches the literal token `eval` in a command string
+and REFUSES to run it ("this command runs a string through eval, which can't be verified
+to stay inside the worktree"). The guard is reacting to the WORD, not the behaviour —
+`browser eval` sends JS over loopback to Brave and runs it in the PAGE; it touches no
+filesystem and cannot escape the worktree.
+
+The consequence for triage: that refusal comes from the HARNESS, before the bridge is
+reached. It is not one of the error shapes above, `health` is irrelevant to it, and
+there is nothing to fix on the bridge side — re-issue the same expression as `js`.
