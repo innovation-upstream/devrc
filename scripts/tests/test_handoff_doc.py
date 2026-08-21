@@ -2271,11 +2271,14 @@ class TestBlockedCommitLeavesNoTrace:
         # `git()` invokes ["git", "-C", <repo>, *args] — the SUBCOMMAND is $3,
         # not $1. Scan all args instead of indexing, which is what the earlier
         # broken shim got wrong.
+        fired = shim / "intercepted.marker"
         write_exec(
             shim / "git",
             f'for a in "$@"; do [ "$a" = "commit" ] && : > "{marker}"; done\n'
             f'for a in "$@"; do\n'
-            f'  if [ "$a" = "rev-parse" ] && [ -f "{marker}" ]; then exit 7; fi\n'
+            f'  if [ "$a" = "rev-parse" ] && [ -f "{marker}" ]; then\n'
+            f'    : > "{fired}"; exit 7\n'
+            f'  fi\n'
             f'done\n'
             f'exec {real_git} "$@"\n',
         )
@@ -2283,13 +2286,23 @@ class TestBlockedCommitLeavesNoTrace:
         env = dict(os.environ, **GIT_ENV)
         env["PATH"] = f"{shim}:{env['PATH']}"
 
-        subprocess.run(
+        res = subprocess.run(
             [sys.executable, str(TOOL), "--repo", str(repo), "--topic",
              "sample-topic", "--update", str(update_file), "--advanced",
              "a landed commit must survive a later failure", "--confirm"],
             capture_output=True, text=True, env=env,
         )
 
+        # 🔴 POSITIVE CONTROL. Without these two the test passes with an INERT
+        # shim — measured: reverting the shim to its known-broken form left this
+        # green. `doc_of == head_doc` is ALSO true on the plain success path, so
+        # it cannot on its own prove the failure branch ran.
+        assert fired.exists(), (
+            "the git shim never intercepted rev-parse — this test proved nothing"
+        )
+        assert res.returncode == 3, (
+            f"expected EXIT_FAIL (the later step failed), got {res.returncode}"
+        )
         assert commit_shas(repo) != shas_before, (
             "fixture inert: no commit was made, so the guard was never exercised"
         )
@@ -2348,9 +2361,10 @@ class TestBlockedCommitLeavesNoTrace:
         # 🔴 `git()` invokes ["git", "-C", <repo>, *args], so the subcommand is
         # $3 — an earlier version tested $1, never intercepted anything, and the
         # fallback arm was never exercised (the mutant survived). Scan all args.
+        fired = shim / "intercepted.marker"
         write_exec(shim / "git",
                    f'for a in "$@"; do\n'
-                   f'  [ "$a" = "restore" ] && exit 129\n'
+                   f'  if [ "$a" = "restore" ]; then : > "{fired}"; exit 129; fi\n'
                    f'done\n'
                    f'exec {real_git} "$@"\n')
         (repo / "OTHER.md").write_text("someone else's staged work\n", encoding="utf-8")
@@ -2359,14 +2373,114 @@ class TestBlockedCommitLeavesNoTrace:
 
         env = dict(os.environ, **GIT_ENV)
         env["PATH"] = f"{shim}:{env['PATH']}"
-        subprocess.run(
+        res = subprocess.run(
             [sys.executable, str(TOOL), "--repo", str(repo), "--topic",
              "sample-topic", "--update", str(update_file), "--advanced",
              "forcing the reset fallback", "--confirm"],
             capture_output=True, text=True, env=env,
         )
 
+        # 🔴 POSITIVE CONTROL — see the sibling above. An inert shim means the
+        # PRIMARY `restore` arm succeeded and the fallback never ran, so the
+        # path-limit this test exists to prove was never exercised. Measured:
+        # with a broken shim AND a blanket-reset mutant, this stayed green.
+        assert fired.exists(), (
+            "the git shim never intercepted `restore` — the fallback arm did not "
+            "run, so this test proved nothing"
+        )
+        assert res.returncode == 3, (
+            f"expected EXIT_FAIL, got {res.returncode}"
+        )
+
         staged = _sh("git", "diff", "--cached", "--name-only", cwd=repo).split()
         assert staged == ["OTHER.md"], (
             f"the reset fallback must be path-limited too; staged={staged}"
         )
+
+    def test_incomplete_rollback_advises_ONLY_the_half_that_failed(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 A message that contradicts what happened is worse than none.
+
+        The index and worktree halves fail INDEPENDENTLY. Printing advice for
+        both was measured to tell an operator their content "was never committed
+        … restore by hand" while the bytes HAD been restored and the content WAS
+        in HEAD — advice that makes someone hand-rewrite a doc they still have.
+        Here the index half fails and the worktree half succeeds."""
+        real_git = shutil.which("git")
+        assert real_git, "git not on PATH"
+        shim = repo / "gitshim-index"
+        shim.mkdir()
+        fired = shim / "intercepted.marker"
+        write_exec(shim / "git",
+                   f'for a in "$@"; do\n'
+                   f'  case "$a" in restore|reset) : > "{fired}"; exit 129 ;; esac\n'
+                   f'done\n'
+                   f'exec {real_git} "$@"\n')
+        before = doc_of(repo)
+        self._block_commits(repo)
+        env = dict(os.environ, **GIT_ENV)
+        env["PATH"] = f"{shim}:{env['PATH']}"
+
+        res = subprocess.run(
+            [sys.executable, str(TOOL), "--repo", str(repo), "--topic",
+             "sample-topic", "--update", str(update_file), "--advanced",
+             "only the index half fails", "--confirm"],
+            capture_output=True, text=True, env=env,
+        )
+
+        assert fired.exists(), "the shim never intercepted — test proved nothing"
+        assert res.returncode == 3
+        assert "still STAGED" in res.stderr, res.stderr
+        # The worktree half SUCCEEDED, so nothing may claim otherwise.
+        assert "still MODIFIED" not in res.stderr, res.stderr
+        # 🔴 COUNT the advice lines, do not grep for a PHRASE. An earlier
+        # version asserted the absence of the new wording — so reverting the
+        # message to its old, false text satisfied it vacuously (measured: that
+        # mutant SURVIVED). One half failed, so exactly one fix line may appear.
+        block = res.stderr.split("ROLLBACK INCOMPLETE", 1)[1]
+        fix_lines = [ln for ln in block.splitlines() if ln.startswith("    ")]
+        assert len(fix_lines) == 1, (
+            f"expected exactly ONE fix line (only the index half failed), got "
+            f"{len(fix_lines)}:\n" + "\n".join(fix_lines)
+        )
+        assert "restore --staged" in fix_lines[0], fix_lines[0]
+        assert doc_of(repo) == before, "the worktree half did not actually restore"
+
+    def test_a_landed_commit_says_so_instead_of_a_bare_status_failed(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """`status=failed` now contracts to "nothing happened" — so the ONE
+        branch where a commit DOES exist must say so, or the contract lies."""
+        real_git = shutil.which("git")
+        assert real_git, "git not on PATH"
+        shim = repo / "gitshim-note"
+        shim.mkdir()
+        marker = shim / "committed.marker"
+        fired = shim / "intercepted.marker"
+        write_exec(
+            shim / "git",
+            f'for a in "$@"; do [ "$a" = "commit" ] && : > "{marker}"; done\n'
+            f'for a in "$@"; do\n'
+            f'  if [ "$a" = "rev-parse" ] && [ -f "{marker}" ]; then\n'
+            f'    : > "{fired}"; exit 7\n'
+            f'  fi\n'
+            f'done\n'
+            f'exec {real_git} "$@"\n',
+        )
+        env = dict(os.environ, **GIT_ENV)
+        env["PATH"] = f"{shim}:{env['PATH']}"
+
+        res = subprocess.run(
+            [sys.executable, str(TOOL), "--repo", str(repo), "--topic",
+             "sample-topic", "--update", str(update_file), "--advanced",
+             "the commit landed", "--confirm"],
+            capture_output=True, text=True, env=env,
+        )
+
+        assert fired.exists(), "the shim never intercepted — test proved nothing"
+        assert res.returncode == 3
+        assert "THE COMMIT LANDED" in res.stderr, (
+            "a commit exists but status=failed said nothing about it:\n" + res.stderr
+        )
+        assert "un-pushed" in res.stderr, res.stderr

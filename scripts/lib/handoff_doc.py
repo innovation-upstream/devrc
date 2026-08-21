@@ -1013,29 +1013,38 @@ def _undo_write(
     except OSError:
         left.append(f"still MODIFIED: {relpath}")
     if left:
-        # 🔴 DO NOT name `restore --source=HEAD --worktree` here. It is wrong in
-        # BOTH shapes this can print for: if the doc had UNCOMMITTED local edits
-        # — exactly what `original` exists to preserve — it discards them; and if
-        # the doc did not exist at HEAD (a first-ever handoff) it fails outright
-        # (`pathspec … did not match any file(s) known to git`). Advice printed
-        # on an already-degraded path must not be the thing that loses the work.
-        index_fix = f"    git -C {repo} restore --staged -- {relpath}"
-        worktree_fix = (
-            f"    # the doc did not exist before this run — delete it:\n"
-            f"    rm -f -- {doc}"
-            if original is None
-            else
-            "    # its previous CONTENT was never committed, so no git command "
-            "can\n    # recover it — the bytes are only in this process. Restore "
-            "by hand."
-        )
+        # 🔴 EMIT ADVICE ONLY FOR THE HALF THAT ACTUALLY FAILED. The two halves
+        # fail independently, and printing both was measured to produce a message
+        # that CONTRADICTS what happened: with only the index half failing, it
+        # told the operator their content "was never committed … restore by hand"
+        # while the bytes had in fact been restored and the content WAS in HEAD.
+        # An operator who believes that hand-rewrites a doc they still have.
+        #
+        # 🔴 And do not name `restore --source=HEAD --worktree` in the worktree
+        # arm: it discards UNCOMMITTED local edits — exactly what `original`
+        # exists to preserve — and fails outright when the doc did not exist at
+        # HEAD. Advice printed on an already-degraded path must not be the thing
+        # that loses the work.
+        fixes: list[str] = []
+        if any(s.startswith("still STAGED") for s in left):
+            fixes.append(f"    git -C {repo} restore --staged -- {relpath}")
+        if any(s.startswith("still MODIFIED") for s in left):
+            fixes.append(
+                f"    # the doc did not exist before this run — delete it:\n"
+                f"    rm -f -- {doc}"
+                if original is None
+                else
+                "    # its previous content is the bytes this process read, and "
+                "they are\n    # not necessarily in git — check `git status` "
+                "first, and only use\n    # `git restore -- <path>` if the doc "
+                "was clean at HEAD before the run."
+            )
         return (
             "\n🔴 ROLLBACK INCOMPLETE — the commit did not happen, but this tree "
             "was left changed: " + "; ".join(left) + "\n"
             "  Fix it before doing anything else; in a shared checkout a staged "
             "path is one `git commit` away from being swept into someone else's "
-            "commit.\n"
-            f"{index_fix}\n{worktree_fix}"
+            "commit.\n" + "\n".join(fixes)
         )
     # 🔴 Deliberately NOT "byte-identical": two measured exceptions. If the doc
     # was STAGED-modified before the run, `restore --staged` resets its index
