@@ -1474,8 +1474,25 @@ MIN_TESTS="${MIN_TESTS:-$MIN_TESTS_COMPUTED}"
 
 if [ "$CHECK_FLOORS_ONLY" -eq 1 ]; then
   echo "run-tests: all ${#TARGET_FLOORS[@]} floor(s) pin a known target, both ways (${#ALL_KNOWN_TARGETS[@]} known: hermetic + dev-host)."
+  # 🔴 EVERY FLOOR IS LISTED, BUT ONLY THE SELECTED ONES ARE SUMMED — and until
+  # DEVHOST_TARGETS had an entry those two sets were identical, so the listing
+  # did not have to say which was which. It does now: the table prints ALL
+  # known floors (a dev-host floor that stopped pinning anything must still be
+  # visible here) while the GLOBAL floor is the sum over `--set`'s targets
+  # alone, because `--set hermetic` must not demand tests it does not run.
+  # Unmarked lines are the ones in this run's sum; the marker is what makes the
+  # difference machine-readable instead of something a reader has to know.
   for entry in "${TARGET_FLOORS[@]}"; do
-    echo "  floor ${entry##*|}  ${entry%%|*}"
+    ft="${entry%%|*}"
+    fsel=0
+    for t in "${TARGETS[@]}"; do
+      [ "$t" = "$ft" ] && { fsel=1; break; }
+    done
+    if [ "$fsel" -eq 1 ]; then
+      echo "  floor ${entry##*|}  $ft"
+    else
+      echo "  floor ${entry##*|}  $ft  [NOT SUMMED: not in the '$SET' set]"
+    fi
   done
   echo "  ----"
   echo "  GLOBAL floor (sum over the $SET set) = $MIN_TESTS_COMPUTED"

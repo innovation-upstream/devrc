@@ -120,23 +120,90 @@ def test_check_floors_accepts_the_real_table():
     assert "GLOBAL floor" in proc.stdout, out
 
 
-def test_the_global_floor_is_the_sum_of_the_per_target_floors():
+def test_the_global_floor_is_the_sum_of_the_SELECTED_per_target_floors():
     """REGRESSION. The total must be DERIVED, never written.
 
     Red at origin/main: there is no --check-floors, and the total is the
     hand-written literal whose eleven values in one day motivated this change.
+
+    🔴 SELECTED, not all — and this test USED to say "all", which was true only
+    by accident. The floor table pins every KNOWN target (hermetic + dev-host)
+    while the global floor sums the targets `--set` actually runs; those two
+    sets were identical for as long as DEVHOST_TARGETS was empty, so the
+    distinction never showed. The moment it gained an entry this went red with
+    `printed=13034 sum=13038` — a correct global floor failing a test that had
+    quietly assumed a second invariant nobody had stated.
+
+    So the listing now MARKS the unsummed lines and this asserts the real
+    property, in both directions: the sum of the unmarked floors IS the printed
+    global, and the marked ones are genuinely excluded from it. The second half
+    is what stops the marker becoming a way to hide a floor from the sum.
     """
     proc = _run([str(RUN_TESTS), "--check-floors", str(REPO_ROOT)])
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    per_target = [int(m) for m in re.findall(r"^  floor (\d+)  ", proc.stdout, re.M)]
-    assert per_target, f"parsed NO per-target floors -- the parser is broken, not the table.\n{proc.stdout}"
+    summed = [int(m) for m in
+              re.findall(r"^  floor (\d+)  \S+$", proc.stdout, re.M)]
+    excluded = [int(m) for m in
+                re.findall(r"^  floor (\d+)  \S+  \[NOT SUMMED: ", proc.stdout, re.M)]
+    assert summed, ("parsed NO summed per-target floors -- the parser is broken, "
+                    f"not the table.\n{proc.stdout}")
     m = re.search(r"GLOBAL floor \(sum over the \w+ set\) = (\d+)", proc.stdout)
     assert m, proc.stdout
-    assert int(m.group(1)) == sum(per_target), (
-        "the printed global floor is not the sum of the per-target floors, so "
-        "it is a second hand-maintained number after all.\n"
-        f"printed={m.group(1)} sum={sum(per_target)} of {len(per_target)} targets"
+    assert int(m.group(1)) == sum(summed), (
+        "the printed global floor is not the sum of the SELECTED per-target "
+        "floors, so it is a second hand-maintained number after all.\n"
+        f"printed={m.group(1)} sum={sum(summed)} of {len(summed)} selected "
+        f"targets ({len(excluded)} excluded)"
     )
+    # …and the exclusions are real. Without this, marking every line would make
+    # the assertion above pass over an empty sum.
+    all_floors = [int(m) for m in re.findall(r"^  floor (\d+)  ", proc.stdout, re.M)]
+    assert sorted(summed + excluded) == sorted(all_floors), (
+        "some floor line matched neither the summed nor the excluded shape — "
+        f"the parser has drifted from the output.\n{proc.stdout}")
+    assert int(m.group(1)) + sum(excluded) == sum(all_floors), (
+        "an excluded floor leaked into the global sum, or a summed one is "
+        f"missing from it.\n{proc.stdout}")
+
+
+def test_a_devhost_floor_is_listed_but_NOT_in_the_hermetic_global():
+    """🔴 THE ASYMMETRY, asserted rather than left implicit.
+
+    A dev-host floor must be VISIBLE in the table — that is what stops it
+    rotting into an entry describing a suite that is gone — and must NOT be in
+    the hermetic global, because `--set hermetic` does not run those tests and a
+    floor demanding them would be a permanently-red gate.
+
+    Driven against BOTH sets, so the claim carries its own scope: the same floor
+    is excluded under `hermetic` and included under `all`, and the two globals
+    differ by exactly that floor.
+    """
+    herm = _run([str(RUN_TESTS), "--check-floors", str(REPO_ROOT)])
+    allset = _run([str(RUN_TESTS), "--check-floors", "--set", "all",
+                   str(REPO_ROOT)])
+    assert herm.returncode == 0, herm.stdout + herm.stderr
+    assert allset.returncode == 0, allset.stdout + allset.stderr
+
+    dev = re.search(r"^  floor (\d+)  (\S*devhost\S*)  \[NOT SUMMED: ",
+                    herm.stdout, re.M)
+    assert dev, ("no dev-host floor is listed as excluded under --set hermetic. "
+                 "If DEVHOST_TARGETS is empty again this test has nothing to "
+                 f"measure and must be reconsidered, not deleted.\n{herm.stdout}")
+    floor, name = int(dev.group(1)), dev.group(2)
+
+    assert re.search(r"^  floor %d  %s$" % (floor, re.escape(name)),
+                     allset.stdout, re.M), (
+        "%s is still excluded under `--set all`, so the dev-host tier is "
+        "floored by nothing in the tier that runs it\n%s" % (name, allset.stdout))
+
+    gh = int(re.search(r"GLOBAL floor \(sum over the \w+ set\) = (\d+)",
+                       herm.stdout).group(1))
+    ga = int(re.search(r"GLOBAL floor \(sum over the \w+ set\) = (\d+)",
+                       allset.stdout).group(1))
+    assert ga - gh == floor, (
+        "the two globals differ by %d, not by %s's floor of %d — the dev-host "
+        "set is not being added to the sum exactly once"
+        % (ga - gh, name, floor))
 
 
 def test_no_hand_written_global_total_remains():

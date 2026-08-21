@@ -524,6 +524,49 @@ def test_the_socket_fixture_works_at_a_path_LONGER_than_sun_path(tmp_path):
         s.close()
 
 
+def test_the_socket_fixture_does_not_MOVE_the_inode_across_filesystems(tmp_path):
+    """🔴 THE SECOND DEFECT IN THIS FIXTURE, and the tier that caught it.
+
+    The first fix bound in a short staging dir and `os.rename`d the socket into
+    place. rename does not read `sun_path`, so the length problem really was
+    solved — and it was green on the dev host AND under `nix-shell`. It is RED
+    in the nix build sandbox, which puts `TMPDIR` on `/build` while the staging
+    dir is on `/tmp`: two different mounts, so every socket fixture died with
+    `OSError: [Errno 18] Invalid cross-device link`. Green in the two tiers I
+    ran, red in the tier that gates merges.
+
+    `bind_socket_at` now binds THROUGH a short symlink to the destination's
+    directory, so nothing is moved and no same-filesystem assumption exists. The
+    property asserted here is exactly that: after the call, the destination
+    holds a socket whose **device** is the destination tree's, never the staging
+    root's. On a host where `/tmp` happens to be the same filesystem the device
+    comparison is trivially satisfied — so the load-bearing half is the second
+    assertion, that no staging directory survives, which is what a rename-based
+    implementation could not satisfy while also leaving the socket in place.
+    """
+    target = tmp_path / "sub" / "dir" / "sock"
+    # A BEFORE/AFTER DIFF, not an absolute "no afu* dirs exist". /tmp is shared:
+    # a stale directory from a crashed earlier run — or a sibling agent running
+    # this same suite — would make an absolute assertion permanently red, which
+    # is the gate nobody can keep green.
+    before = {p.name for p in Path("/tmp").glob("afu*")}
+    _sockets.append(bind_socket_at(target))
+    after = {p.name for p in Path("/tmp").glob("afu*")}
+
+    st = os.lstat(target)
+    assert stat.S_ISSOCK(st.st_mode), oct(st.st_mode)
+    assert st.st_dev == os.lstat(tmp_path).st_dev, (
+        "the socket's device (%s) is not the destination tree's (%s) — the "
+        "inode was created somewhere else and moved, which is the cross-device "
+        "failure this test exists for"
+        % (st.st_dev, os.lstat(tmp_path).st_dev))
+    assert after - before == set(), (
+        "bind_socket_at left staging directories behind: %s. A rename-based "
+        "implementation cannot clean up after a cross-device failure — the "
+        "socket is still in the staging dir, so the rmdir fails too."
+        % sorted(after - before))
+
+
 @pytest.mark.parametrize("kind", ["directory", "fifo", "socket"])
 def test_a_non_regular_file_at_a_managed_path_is_blocking_never_self_healing(
         tmp_path, kind):

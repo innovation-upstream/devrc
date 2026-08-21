@@ -21,11 +21,22 @@ is a limit on the string handed to bind(2), not on the filesystem, and pytest's
 row is the one that gates every push: both files went red on every push while
 being green under a bare `pytest`. Measured 2026-08-21.
 
-THE FIX, and why it is this one. bind(2) is the only syscall in the chain that
-reads `sun_path`; **rename(2) is not**. So: bind in a directory short enough to
-be safe under any `TMPDIR`, then `os.rename()` the socket inode to wherever the
-test actually wants it. The result is a real socket (`stat.S_ISSOCK` true, `[ -S ]`
-true, `os.path.getsize` 0) at a path of any length.
+THE FIX, and why it is this one. bind(2) reads `sun_path`, but it RESOLVES that
+path through symlinks like any other syscall. So: make a SHORT symlink pointing
+at the destination's directory, and bind through it. The kernel creates the
+socket inode in the real directory; the only string that has to fit in 108 bytes
+is the short one. The result is a real socket (`stat.S_ISSOCK` true, `[ -S ]`
+true) at a path of any length.
+
+🔴 A `rename(2)` INTO PLACE WAS THE FIRST FIX AND IT IS WRONG — recorded because
+it looks correct and passed on the dev host. rename does not read `sun_path`, so
+the length problem really is solved; what it cannot do is cross a FILESYSTEM. The
+nix build sandbox puts `TMPDIR` on `/build` and the staging dir on `/tmp`, which
+are different mounts, so every socket fixture died there with
+`OSError: [Errno 18] Invalid cross-device link` — GREEN on the dev host and in
+`nix-shell`, RED in the tier that gates merges, which is the two-tier blind spot
+`claude/RULES.md` names. Binding through a symlink has no same-filesystem
+constraint at all: nothing moves.
 
 🔴 THE SHORT PATH IS ALWAYS USED, never as a fallback. A "bind directly, and on
 OSError fall back" version leaves the fallback DEAD under a short `TMPDIR` — i.e.
@@ -52,13 +63,16 @@ _STAGING_MARGIN = 60
 
 
 def _staging_root():
-    """The shortest directory we can stage a bind in, checked, never assumed.
+    """The shortest directory we can stage the symlink in, checked, never assumed.
 
     `/tmp` first because it is the shortest thing that exists on every host this
     suite runs on — the dev host, the nix build sandbox and CI alike. The
     ambient `TMPDIR` is the fallback and not the default precisely because it is
     the value that breaks this: `nix-shell` sets it 33 chars deep and pytest
     nests ~80 more underneath.
+
+    It does NOT need to share a filesystem with the destination — only a rename
+    would need that, and this helper does not rename (see the module docstring).
     """
     for cand in ("/tmp", tempfile.gettempdir()):
         try:
@@ -83,37 +97,49 @@ def bind_socket_at(path):
     over the limit, because that is a broken harness rather than a test failure.
     """
     path = str(path)
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    parent = os.path.dirname(path) or "."
+    name = os.path.basename(path)
+    os.makedirs(parent, exist_ok=True)
 
     root = _staging_root()
     d = tempfile.mkdtemp(prefix="afu", dir=root)
-    staged = os.path.join(d, "s")
-    assert len(staged.encode()) < _STAGING_MARGIN, (
-        "the staging socket path is %d bytes (%r), too close to the %d-byte "
-        "sun_path limit to be a safe place to bind. This helper is the fixture, "
-        "not the code under test — fix the staging root rather than the test."
-        % (len(staged.encode()), staged, SUN_PATH_MAX))
+    link = os.path.join(d, "d")
+    os.symlink(parent, link)
+    short = os.path.join(link, name)
+    assert len(short.encode()) < _STAGING_MARGIN, (
+        "the short bind path is %d bytes (%r), too close to the %d-byte "
+        "sun_path limit to be safe. This helper is the fixture, not the code "
+        "under test — shorten the staging root or the leaf NAME (the leaf is "
+        "the only part of the destination that still counts)."
+        % (len(short.encode()), short, SUN_PATH_MAX))
 
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
-        s.bind(staged)
-        # rename(2) does not read sun_path, so the DESTINATION length is
-        # unbounded. This is the entire trick.
-        os.rename(staged, path)
+        # bind(2) resolves `link` to the real parent directory, so the inode is
+        # created AT `path`. Nothing is moved afterwards — which is what makes
+        # this immune to the cross-device failure a rename hits in the nix
+        # sandbox, where TMPDIR is on /build and the staging dir on /tmp.
+        s.bind(short)
     except BaseException:                        # pragma: no cover - defensive
         s.close()
         raise
     finally:
-        try:
-            os.rmdir(d)
-        except OSError:                          # pragma: no cover - defensive
-            pass
+        # Only the symlink and its directory are ours to remove; the socket now
+        # lives in the caller's tree.
+        for cleanup in (lambda: os.unlink(link), lambda: os.rmdir(d)):
+            try:
+                cleanup()
+            except OSError:                      # pragma: no cover - defensive
+                pass
 
-    # 🔴 POSITIVE CONTROL, in the helper itself. A fixture that quietly produced
-    # a regular file would make every "a socket at a managed path is BLOCKING"
-    # test pass for the wrong reason — the reclaim/drift walks classify a regular
-    # file too, just differently. Assert the inode type we claim to have made.
+    # 🔴 POSITIVE CONTROL, in the helper itself, and it is what proves the
+    # symlink resolved to where we meant. A fixture that quietly produced a
+    # regular file — or a socket at the STAGING path rather than the real one —
+    # would make every "a socket at a managed path is BLOCKING" test pass for the
+    # wrong reason, because the walks classify a regular file too, just
+    # differently. `os.lstat(path)` reads the DESTINATION, after the staging
+    # symlink is already gone.
     assert stat.S_ISSOCK(os.lstat(path).st_mode), (
-        "%r is not a socket after the rename (mode %o). The fixture did not "
-        "build the thing under test." % (path, os.lstat(path).st_mode))
+        "%r is not a socket (mode %o). The fixture did not build the thing "
+        "under test." % (path, os.lstat(path).st_mode))
     return s
