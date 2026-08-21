@@ -69,6 +69,32 @@ ISOLATED_SUITES = (
 # the word "isolation" alone is walkable by any other line that spells it.
 ISOLATION_LINE = re.compile(r"^isolation: (\d+) files under the temp HOME$", re.M)
 
+# DECOYS — pre-existing state planted in the stand-in home before the suite runs.
+#
+# 🔴 Without these the guard could only see the suite CREATING things, and the
+# other half of the defect is that both suites DELETE: search-tool-nudge globs
+# `$HOME/.cache/claude-search-tool-nudge/s/<prefix>*` and rmtree's each hit (plus
+# a legacy flat-file layout one directory up), and shell-env-nudge `os.remove`s
+# its cache entry. A destructive run that tidies up after itself leaves an
+# end-state diff of zero, so deletion is invisible to a create-only check. Each
+# decoy is a path the PRE-CHANGE suite provably removes; they must all survive.
+DECOYS = {
+    "test_search_tool_nudge.py": (
+        # matches TEST_SID_PREFIXES -> rmtree'd by the pre-change clear_test_state
+        ".cache/claude-search-tool-nudge/s/test-session-search-nudge-DECOY/content",
+        # the LEGACY flat-file layout, one directory up -> os.remove'd
+        ".cache/claude-search-tool-nudge/test-search-nudge-DECOY-legacy",
+    ),
+    "test_shell_env_nudge.py": (
+        # the exact cache entry the pre-change suite removes, twice
+        ".cache/claude-shell-env-nudge/test-session-io-DO-NOT-COLLIDE",
+    ),
+}
+# Planted for every suite: a bystander no cleanup glob names, so a guard that
+# went red only because a decoy was deliberately collidable still has one path
+# whose survival means "ordinary home content was left alone".
+BYSTANDER = ".cache/an-unrelated-file-the-suite-must-not-touch"
+
 _TIMEOUT = 900
 
 
@@ -104,16 +130,25 @@ def _tree(root: Path):
     return sorted(out)
 
 
+def _plant(home: Path, relpaths):
+    """Create each `relpath` under `home` as a file with known content."""
+    for rel in relpaths:
+        p = home / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("decoy — the suite under test must not touch this\n")
+
+
 @pytest.fixture(scope="module")
 def suite_runs(tmp_path_factory):
-    """Run each suite ONCE, against its own empty stand-in home.
+    """Run each suite ONCE, against its own stand-in home seeded with decoys.
 
-    Module-scoped because the two tests below ask different questions of the
-    same run, and re-running would double the gate's cost for no new evidence.
+    Module-scoped because the tests below ask different questions of the same
+    run, and re-running would double the gate's cost for no new evidence.
     """
     runs = {}
     for suite in ISOLATED_SUITES:
         home = tmp_path_factory.mktemp("stand-in-home-" + suite.replace(".py", ""))
+        _plant(home, DECOYS[suite] + (BYSTANDER,))
         before = _tree(home)
         proc = _run_suite(suite, home)
         runs[suite] = (proc, before, _tree(home))
@@ -128,12 +163,12 @@ def suite_runs(tmp_path_factory):
 def test_the_suite_writes_nothing_into_the_home_it_inherits(suite, suite_runs):
     """RED at 3c54918, GREEN at HEAD.
 
-    Pre-change, `test_search_tool_nudge.py` left 60-odd entries under the
-    inherited home (`.cache/claude-search-tool-nudge/s/<session>/<token>`) and
-    `test_shell_env_nudge.py` left `.cache/claude-shell-env-nudge/`. Both are
-    now zero because each suite makes its own `$HOME` before reading `~`.
+    Asserted in BOTH directions — created AND removed — because the two suites
+    do both, and a create-only check is blind to a destructive run that tidies
+    up after itself. The decoys planted by the fixture are what make the removal
+    half measurable at all.
 
-    Asserted on the FULL tree, not just `.cache`: the hazard is "writes into the
+    Asserted on the FULL tree, not just `.cache`: the hazard is "touches the
     operator's home", and naming one subdirectory would let the next state path
     a hook invents walk straight past this guard.
     """
@@ -143,10 +178,17 @@ def test_the_suite_writes_nothing_into_the_home_it_inherits(suite, suite_runs):
         f"(exit={proc.returncode}).\n--- stdout ---\n{proc.stdout}\n"
         f"--- stderr ---\n{proc.stderr}"
     )
-    assert before == [], f"the stand-in home was not empty to begin with: {before}"
-    assert after == [], (
-        f"{suite} wrote {len(after)} entries into the $HOME it inherited:\n"
-        f"  {json.dumps(after[:20], indent=2)}\n"
+    # The decoys must have been planted, or "unchanged" is a comparison against
+    # an absent operand and reports SAME for a home holding nothing.
+    for rel in DECOYS[suite] + (BYSTANDER,):
+        assert rel in before, f"decoy {rel} was never planted; before={before}"
+
+    created = sorted(set(after) - set(before))
+    removed = sorted(set(before) - set(after))
+    assert (created, removed) == ([], []), (
+        f"{suite} modified the $HOME it inherited:\n"
+        f"  created: {json.dumps(created[:20], indent=2)}\n"
+        f"  REMOVED: {json.dumps(removed[:20], indent=2)}\n"
         "Run against the operator's real home that is their own hook state being "
         "created and deleted — and the LIVE hook writing into the state the suite "
         "asserts on. Redirect `os.environ['HOME']` to a tempfile.mkdtemp BEFORE the "
@@ -168,7 +210,7 @@ def test_the_suite_does_write_state_under_its_own_temp_home(suite, suite_runs):
     numbers are reported together: "N under the temp HOME, 0 in the inherited
     one".
     """
-    proc, _before, after = suite_runs[suite]
+    proc, before, after = suite_runs[suite]
     m = ISOLATION_LINE.search(proc.stdout)
     assert m, (
         f"{suite} printed no `isolation: N files under the temp HOME` line, so "
@@ -181,9 +223,12 @@ def test_the_suite_does_write_state_under_its_own_temp_home(suite, suite_runs):
         "clean is then indistinguishable from a suite wired to nothing — it is not "
         "evidence of isolation."
     )
-    # Report the pair, so the passing message carries its own scope.
+    # Report the pair, so the passing message carries its own scope. The second
+    # number is the CHANGE to the inherited home (created + removed), never the
+    # size of that tree — it holds the fixture's decoys, which must all survive.
+    changed = len(set(after) ^ set(before))
     print(f"{suite}: {written} files under the temp HOME, "
-          f"{len(after)} writes to the inherited HOME")
+          f"{changed} changes to the inherited HOME")
 
 
 # ---------------------------------------------------------------------------
