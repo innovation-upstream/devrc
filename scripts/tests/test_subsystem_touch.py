@@ -10212,8 +10212,10 @@ class TestTheShapeBlockActuallyREACHESValidateOutput:
         assert (
             "entry shape: 1 entry file(s) checked for `## Pointers`, "
             "`## Nuance / work-history` — each present exactly once and non-empty. "
-            "🔴 `## What it is` is NOT checked: no reader parses it, so its absence "
-            "changes nothing this zero is about."
+            "🔴 `## What it is` is NOT checked here: the reader DOES surface it, but "
+            "it feeds no count and no badge, so its absence changes nothing this zero "
+            "is about — `subsystem_recall` names a missing one under that entry's own "
+            "body instead."
         ) in out
 
     def test_the_json_keeps_FOUR_populations_and_never_sums_them(
@@ -10256,30 +10258,47 @@ class TestTheShapeBlockActuallyREACHESValidateOutput:
         assert f"… {12 - st.SHAPE_INVENTORY_SHOWN} more" in line
 
 
-class TestShapeHeadingsIsPinnedToTheDISPLAYChoiceNotMergedWithIt:
+class TestShapeHeadingsIsPinnedToTheCOUNTEDSetNotTheDISPLAYOne:
     """🔴 The claim `SHAPE_HEADINGS`' own docstring makes, enforced.
 
-    The tuple coincides today with `subsystem_recall.SURFACED_HEADINGS` and is
-    deliberately not imported from it — `subsystem_recall` imports THIS module,
-    so the direction is impossible, and the two answer different questions: that
-    one is a DISPLAY choice ("which sections does the reader print"), this one is
-    a CHECK ("which must exist for any reader to find anything"). Pinned rather
-    than merged, so a display decision cannot silently become a validation rule
-    — and so that a change to either is a deliberate, visible edit to both.
+    It is pinned to `subsystem_recall.COUNTED_HEADINGS` and deliberately not
+    imported from it — `subsystem_recall` imports THIS module, so the direction
+    is impossible. Pinned rather than merged, so a display decision cannot
+    silently become a validation rule, and so a change to either is a
+    deliberate, visible edit to both.
+
+    🔴 THE TWO USED TO BE PINNED TO `SURFACED_HEADINGS`, AND THAT WAS THE BUG'S
+    HIDING PLACE. When the display set and the checked set were the same tuple,
+    "does the reader print it" and "does a count depend on it" were one
+    question, and `## What it is` — which is written by every entry and feeds no
+    count — could only be added to BOTH or neither. It was neither, for months,
+    with nothing printing it on any path. The two are now separate tuples that
+    genuinely DIFFER, which is what this class was built to make visible.
     """
 
-    def test_the_two_tuples_agree_TODAY(self) -> None:
+    def test_shape_headings_is_pinned_to_the_COUNTED_set(self) -> None:
         import subsystem_recall as srec  # noqa: PLC0415
 
-        assert tuple(st.SHAPE_HEADINGS) == tuple(srec.SURFACED_HEADINGS)
+        assert tuple(st.SHAPE_HEADINGS) == tuple(srec.COUNTED_HEADINGS)
 
-    def test_the_checked_set_is_exactly_the_two_the_CODE_parses(self) -> None:
-        """🔴 `## What it is` is written by 53/53 entries and read by NOTHING.
-        Flagging it would report a convention with no consequence beside two
-        whose consequence is measured, and a writer cannot tell those apart in a
-        list. It is a documentation gap, not a validator finding."""
+    def test_the_DISPLAY_set_is_WIDER_and_that_is_the_point(self) -> None:
+        """A negative control on the pin above: if the two tuples were still
+        identical, the previous test would pass for the old reason and prove
+        nothing about the split."""
+        import subsystem_recall as srec  # noqa: PLC0415
+
+        assert set(srec.COUNTED_HEADINGS) < set(srec.SURFACED_HEADINGS)
+        assert sr.WHAT_HEADING in srec.SURFACED_HEADINGS
+
+    def test_the_checked_set_is_exactly_the_two_a_COUNT_depends_on(self) -> None:
+        """🔴 `## What it is` IS read now — `subsystem_recall` surfaces it in
+        every printed body — but it feeds no bullet count and no index badge, so
+        its absence cannot make a NUMBER wrong. Flagging it would report a
+        convention with no numeric consequence beside two whose consequence is
+        measured, and a writer cannot tell those apart in a list. The reader
+        names it under the entry's own body instead."""
         assert st.SHAPE_HEADINGS == (sr.POINTERS_HEADING, sr.NUANCE_HEADING)
-        assert "## What it is" not in st.SHAPE_HEADINGS
+        assert sr.WHAT_HEADING not in st.SHAPE_HEADINGS
 
     def test_an_entry_missing_ONLY_what_it_is_produces_NO_finding(
         self, tmp_path
